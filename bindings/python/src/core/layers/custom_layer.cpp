@@ -359,20 +359,17 @@ PhysicalTensorMap selectNamedTensors(const PhysicalTensorMap& tensors, const std
 
 class CustomLayerBuildContext {
    public:
-    CustomLayerBuildContext(
-        PhysicalTensorMap featureInputs, PhysicalTensorMap parameterTensors, PhysicalTensorMap outputs, Stream& stream, bool useFastMath)
+    CustomLayerBuildContext(PhysicalTensorMap featureInputs, PhysicalTensorMap parameterTensors, PhysicalTensorMap outputs, Stream& stream)
         : featureInputs(std::move(featureInputs)),
           parameterTensors(std::move(parameterTensors)),
           outputs(std::move(outputs)),
-          stream(&stream),
-          useFastMath(useFastMath) {}
+          stream(&stream) {}
 
     const PhysicalTensorMap& inputs() const { return featureInputs; }
     const PhysicalTensorMap& parameters() const { return parameterTensors; }
     const PhysicalTensorMap& output_tensors() const { return outputs; }
     Stream& getStream() const { return *stream; }
     int32_t deviceNum() const { return stream->getGpuNum(); }
-    bool getUseFastMath() const { return useFastMath; }
 
     PhysicalTensor inputTensor(const std::string& name) const { return getFrom(featureInputs, name, "feature input"); }
     PhysicalTensor parameterTensor(const std::string& name) const { return getFrom(parameterTensors, name, "parameter"); }
@@ -435,7 +432,6 @@ class CustomLayerBuildContext {
     PhysicalTensorMap parameterTensors;
     PhysicalTensorMap outputs;
     Stream* stream;
-    bool useFastMath;
 };
 
 DynamicExpressionBuild callBuildCallableForContext(nb::callable callable,
@@ -446,9 +442,8 @@ DynamicExpressionBuild callBuildCallableForContext(nb::callable callable,
                                                    const PhysicalTensorMap& parameterTensors,
                                                    const PhysicalTensorMap& outputs,
                                                    Stream& stream,
-                                                   bool useFastMath,
                                                    std::shared_ptr<Activation> activation) {
-    CustomLayerBuildContext context(featureInputs, parameterTensors, outputs, stream, useFastMath);
+    CustomLayerBuildContext context(featureInputs, parameterTensors, outputs, stream);
     nb::object result = callable(nb::cast(context));
 
     if (nb::isinstance<DynamicExpressionBuild>(result)) {
@@ -478,7 +473,7 @@ DynamicExpressionBuild callBuildCallableForContext(nb::callable callable,
     PhysicalTensorMap usedInputs = selectNamedTensors(inputs, actualInputNames, "expression input");
 
     return DynamicExpressionBuild{
-        std::make_shared<FusedEquation>(FusedEquation::compile(expressionOutputs.physicalOutputs(), stream.getGpuNum(), useFastMath)),
+        std::make_shared<FusedEquation>(FusedEquation::compile(expressionOutputs.physicalOutputs(), stream.getGpuNum())),
         usedInputs,
         {},
         outputs,
@@ -490,7 +485,6 @@ DynamicExpression makeDynamicExpressionFromCallable(nb::callable buildCallable,
                                                     std::vector<std::string> featureInputNames,
                                                     std::vector<std::string> outputNames,
                                                     std::vector<std::string> parameterNames,
-                                                    bool useFastMath,
                                                     std::shared_ptr<Activation> activation) {
     std::vector<std::string> expectedInputNames = concatenateInputNames(featureInputNames, parameterNames);
     auto buildCallableRef = std::make_shared<GilSafePythonObject>(buildCallable);
@@ -503,7 +497,6 @@ DynamicExpression makeDynamicExpressionFromCallable(nb::callable buildCallable,
          outputNames = std::move(outputNames),
          featureInputNames = std::move(featureInputNames),
          parameterNames = std::move(parameterNames),
-         useFastMath,
          activation = std::move(activation)](const PhysicalTensorMap& inputs, const PhysicalTensorMap& outputs, Stream& stream) -> DynamicExpressionBuild {
             nb::gil_scoped_acquire gil;
 
@@ -511,7 +504,7 @@ DynamicExpression makeDynamicExpressionFromCallable(nb::callable buildCallable,
             PhysicalTensorMap parameterTensors = selectNamedTensors(inputs, parameterNames, "parameter");
             nb::callable callable = nb::borrow<nb::callable>(buildCallableRef->get());
             return callBuildCallableForContext(
-                callable, expectedInputNames, outputNames, inputs, featureInputs, parameterTensors, outputs, stream, useFastMath, activation);
+                callable, expectedInputNames, outputNames, inputs, featureInputs, parameterTensors, outputs, stream, activation);
         });
 }
 
@@ -519,7 +512,6 @@ DynamicExpression makeDynamicExpressionFromSelf(nb::handle selfHandle,
                                                 std::vector<std::string> featureInputNames,
                                                 std::vector<std::string> outputNames,
                                                 std::vector<std::string> parameterNames,
-                                                bool useFastMath,
                                                 std::shared_ptr<Activation> activation) {
     nb::gil_scoped_acquire gil;
     nb::object weakrefModule = nb::module_::import_("weakref");
@@ -535,7 +527,6 @@ DynamicExpression makeDynamicExpressionFromSelf(nb::handle selfHandle,
          outputNames = std::move(outputNames),
          featureInputNames = std::move(featureInputNames),
          parameterNames = std::move(parameterNames),
-         useFastMath,
          activation = std::move(activation)](const PhysicalTensorMap& inputs, const PhysicalTensorMap& outputs, Stream& stream) -> DynamicExpressionBuild {
             nb::gil_scoped_acquire gil;
 
@@ -559,7 +550,6 @@ DynamicExpression makeDynamicExpressionFromSelf(nb::handle selfHandle,
                                                parameterTensors,
                                                outputs,
                                                stream,
-                                               useFastMath,
                                                activation);
         });
 }
@@ -578,7 +568,6 @@ void bind_custom_layer(nb::module_& layers) {
     context.def_prop_ro("output_tensors", &CustomLayerBuildContext::output_tensors, nb::rv_policy::reference_internal);
     context.def_prop_ro("stream", &CustomLayerBuildContext::getStream, nb::rv_policy::reference_internal);
     context.def_prop_ro("device_num", &CustomLayerBuildContext::deviceNum);
-    context.def_prop_ro("use_fast_math", &CustomLayerBuildContext::getUseFastMath);
     context.def("input_tensor", &CustomLayerBuildContext::inputTensor, "name"_a);
     context.def("parameter_tensor", &CustomLayerBuildContext::parameterTensor, "name"_a);
     context.def("param_tensor", &CustomLayerBuildContext::parameterTensor, "name"_a);
@@ -604,7 +593,6 @@ void bind_custom_layer(nb::module_& layers) {
            nb::object buildObj,
            nb::object parametersObj,
            std::shared_ptr<Optimizer> optimizer,
-           bool useFastMath,
            std::shared_ptr<Activation> activation) {
             OrderedApiTensorMap inputs = normalizeInputs(inputsObj);
             CustomLayer* self = nb::inst_ptr<CustomLayer>(pySelf.ptr());
@@ -635,7 +623,6 @@ void bind_custom_layer(nb::module_& layers) {
                                                          inputs.names,
                                                          outputNames,
                                                          paramNames,
-                                                         useFastMath,
                                                          activation);
                 }
 
@@ -657,7 +644,6 @@ void bind_custom_layer(nb::module_& layers) {
                                                          inputs.names,
                                                          outputNames,
                                                          paramNames,
-                                                         useFastMath,
                                                          activation);
             }();
 
@@ -667,8 +653,7 @@ void bind_custom_layer(nb::module_& layers) {
                 .inputNames(inputs.names)
                 .outputNames(outputNames)
                 .inputInterface(inputs.tensors)
-                .parameters(parameters)
-                .useFastMath(useFastMath);
+                .parameters(parameters);
 
             if (optimizer != nullptr) {
                 builder.optimizer(std::move(optimizer));
@@ -684,7 +669,6 @@ void bind_custom_layer(nb::module_& layers) {
         "build"_a.none() = nb::none(),
         "parameters"_a.none() = nb::none(),
         "optimizer"_a.none() = nb::none(),
-        "use_fast_math"_a = false,
         "activation"_a.none() = nb::none(),
         R"nbdoc(
 Python-facing CustomLayer.

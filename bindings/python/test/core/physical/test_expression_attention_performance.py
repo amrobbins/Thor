@@ -307,7 +307,7 @@ def _build_sdpa_case(
         if metadata:
             case_metadata.update(metadata)
         return ex.compile(
-            out, device_num=GPU_NUM, use_fast_math=False), input_shapes, output_shape, flops, case_metadata
+            out, device_num=GPU_NUM), input_shapes, output_shape, flops, case_metadata
 
     return build
 
@@ -382,7 +382,7 @@ def _build_sdpa_with_rope_case(
         }
         if metadata:
             case_metadata.update(metadata)
-        return ex.compile(out, device_num=GPU_NUM, use_fast_math=False), input_shapes, output_shape, flops, case_metadata
+        return ex.compile(out, device_num=GPU_NUM), input_shapes, output_shape, flops, case_metadata
 
     return build
 
@@ -511,7 +511,7 @@ def _build_packed_qkv_layer_case(
                 "rope_scaling_kind": _rotary_scaling_kind_name(rope_scaling_kind),
                 "rope_in_place": rope_in_place,
             })
-        return ex.compile(out, device_num=GPU_NUM, use_fast_math=False), input_shapes, output_shape, flops, metadata
+        return ex.compile(out, device_num=GPU_NUM), input_shapes, output_shape, flops, metadata
 
     return build
 
@@ -635,7 +635,7 @@ def _build_split_qkv_layer_case(
                 "rope_scaling_kind": _rotary_scaling_kind_name(rope_scaling_kind),
                 "rope_in_place": rope_in_place,
             })
-        return ex.compile(out, device_num=GPU_NUM, use_fast_math=False), input_shapes, output_shape, flops, metadata
+        return ex.compile(out, device_num=GPU_NUM), input_shapes, output_shape, flops, metadata
 
     return build
 
@@ -816,7 +816,7 @@ def _build_packed_qkv_attention_backward_case(
             output_dtype=dtype,
             compute_dtype=thor.DataType.fp32,
         )
-        fwd = ex.compile(out, device_num=GPU_NUM, use_fast_math=False)
+        fwd = ex.compile(out, device_num=GPU_NUM)
         bwd = fwd.compile_backward(["qkv"], error_input_name="__grad_output")
         input_shapes = {
             "qkv": (batch * sequence, qkv_width),

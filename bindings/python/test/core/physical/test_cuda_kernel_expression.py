@@ -42,6 +42,33 @@ def _copy_gpu_to_numpy(tensor: PhysicalTensor, stream: Stream) -> np.ndarray:
     return np.array(host.numpy(), copy=True)
 
 
+def test_cuda_kernel_expression_exposes_declared_names_from_python():
+    kernel = (
+        CudaKernelExpression.builder("py_declared_names")
+        .source(
+            r"""
+extern "C" __global__
+void py_declared_names_kernel(const float* x, const float* scale, float* y, int64_t n) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    y[i] = (*scale) * x[i];
+}
+"""
+        )
+        .entry("py_declared_names_kernel")
+        .input("x", thor.DataType.fp32)
+        .tensor_runtime_scalar_input("scale", thor.DataType.fp32)
+        .output_like("y", thor.DataType.fp32, "x")
+        .scalar("n", thor.DataType.int64, CudaKernelExpression.numel("y"))
+        .launch_grid_1d(CudaKernelExpression.numel("y"), block_size=128)
+        .build()
+    )
+
+    assert kernel.input_names() == ["x", "scale"]
+    assert kernel.tensor_input_names() == ["x"]
+    assert kernel.output_names() == ["y"]
+
+
 @pytest.mark.cuda
 def test_cuda_kernel_expression_single_output_raw_pointer_kernel_runs_from_python():
     kernel = (
@@ -66,7 +93,7 @@ void py_scale_kernel(const float* x, float* y, float alpha, int64_t n) {
     )
 
     outputs = kernel.apply({"x": ex.input("x")})
-    eq = outputs.compile(device_num=0, use_fast_math=False)
+    eq = outputs.compile(device_num=0)
 
     stream = Stream(gpu_num=0)
     x_np = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=np.float32)
@@ -105,7 +132,7 @@ void py_split_math_kernel(const float* x, float* twice, float* plus_one, int64_t
     )
 
     split = kernel({"x": ex.input("x")})
-    eq = split.compile(device_num=0, use_fast_math=False)
+    eq = split.compile(device_num=0)
 
     stream = Stream(gpu_num=0)
     x_np = np.array([1.25, 2.5, 3.75, 5.0, 6.25], dtype=np.float32)
@@ -147,7 +174,7 @@ void py_shape_copy_kernel(const float* x, float* y, int64_t n) {
     )
 
     outputs = kernel.apply({"x": ex.input("x")})
-    eq = outputs.compile(device_num=0, use_fast_math=False)
+    eq = outputs.compile(device_num=0)
 
     stream = Stream(gpu_num=0)
     x_np = np.arange(12, dtype=np.float32).reshape(3, 4)
@@ -183,7 +210,7 @@ void py_dtype_reject_kernel(const float* x, float* y, int64_t n) {
     )
 
     outputs = kernel.apply({"x": ex.input("x")})
-    eq = outputs.compile(device_num=0, use_fast_math=False)
+    eq = outputs.compile(device_num=0)
 
     stream = Stream(gpu_num=0)
     x_gpu = _copy_numpy_to_gpu(np.array([1.0, 2.0, 3.0], dtype=np.float32), thor.DataType.fp16, stream)
@@ -218,7 +245,7 @@ void py_runtime_scalar_scale_kernel(const float* x, const float* alpha, float* y
         "x": ex.input("x"),
         "alpha": ex.tensor_runtime_scalar("alpha", output_dtype=thor.DataType.fp32, compute_dtype=thor.DataType.fp32),
     })
-    eq = outputs.compile(device_num=0, use_fast_math=False)
+    eq = outputs.compile(device_num=0)
 
     stream = Stream(gpu_num=0)
     x_np = np.array([1.0, -2.0, 3.0, 4.5, -5.0, 6.0], dtype=np.float32)
@@ -260,7 +287,7 @@ void py_runtime_scalar_dtype_reject_kernel(const float* x, const float* alpha, f
         "x": ex.input("x"),
         "alpha": ex.tensor_runtime_scalar("alpha", output_dtype=thor.DataType.fp32, compute_dtype=thor.DataType.fp32),
     })
-    eq = outputs.compile(device_num=0, use_fast_math=False)
+    eq = outputs.compile(device_num=0)
 
     stream = Stream(gpu_num=0)
     x_gpu = _copy_numpy_to_gpu(np.array([1.0, 2.0, 3.0], dtype=np.float32), thor.DataType.fp32, stream)
@@ -298,7 +325,7 @@ void py_host_runtime_scalar_scale_kernel(const float* x, float alpha, float* y, 
         "x": ex.input("x"),
         "alpha": ex.runtime_scalar("alpha", output_dtype=thor.DataType.fp32, compute_dtype=thor.DataType.fp32),
     })
-    eq = outputs.compile(device_num=0, use_fast_math=False)
+    eq = outputs.compile(device_num=0)
 
     stream = Stream(gpu_num=0)
     x_np = np.array([1.0, -2.0, 3.0, 4.5, -5.0, 6.0], dtype=np.float32)

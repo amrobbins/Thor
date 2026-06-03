@@ -88,7 +88,7 @@ class MultiInputMultiOutputAffine(thor.layers.CustomLayer):
     tensors and vector-broadcast parameters.
     """
 
-    def __init__(self, network: thor.Network, lhs: thor.Tensor, rhs: thor.Tensor, *, use_fast_math: bool = True):
+    def __init__(self, network: thor.Network, lhs: thor.Tensor, rhs: thor.Tensor):
         assert lhs.get_dimensions() == rhs.get_dimensions()
         assert lhs.get_data_type() == rhs.get_data_type()
 
@@ -103,8 +103,7 @@ class MultiInputMultiOutputAffine(thor.layers.CustomLayer):
                 "rhs": rhs,
             },
             output_names=["sum_output", "affine_output"],
-            use_fast_math=use_fast_math,
-        )
+                    )
 
     def parameters(self) -> list[thor.ParameterSpecification]:
         storage_context_input_names = self.storage_context_input_names
@@ -159,7 +158,6 @@ class MultiInputMultiOutputAffine(thor.layers.CustomLayer):
         assert context.has_param("bias") is True
         assert context.has_output("missing") is False
         assert context.device_num == 0
-        assert context.use_fast_math is True
 
         with pytest.raises(RuntimeError, match="has no feature input named 'missing'"):
             context.input_tensor("missing")
@@ -294,6 +292,46 @@ def _copy_gpu_to_numpy(
     return np.array(cpu.numpy(), copy=True)
 
 
+def test_python_cuda_kernel_layer_wraps_kernel_expression_and_infers_outputs():
+    network = thor.Network("cuda-kernel-layer-logical")
+    x = thor.Tensor([8], thor.DataType.fp32)
+    kernel = (
+        thor.physical.CudaKernelExpression.builder("py_layer_square")
+        .source(
+            r"""
+extern "C" __global__
+void py_layer_square_kernel(const float* x, float* y, int64_t n) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    y[i] = x[i] * x[i];
+}
+"""
+        )
+        .entry("py_layer_square_kernel")
+        .input("x", thor.DataType.fp32)
+        .output_like("y", thor.DataType.fp32, "x")
+        .scalar("n", thor.DataType.int64, thor.physical.CudaKernelExpression.numel("y"))
+        .launch_grid_1d(thor.physical.CudaKernelExpression.numel("y"), block_size=128)
+        .build()
+    )
+
+    layer = thor.layers.CudaKernelLayer(network=network, inputs={"x": x}, kernel=kernel)
+
+    assert isinstance(layer, thor.layers.CustomLayer)
+    assert layer.get_input_names() == ["x"]
+    assert layer.get_output_names() == ["y"]
+    assert layer["y"].get_dimensions() == [8]
+    assert layer["y"].get_data_type() == thor.DataType.fp32
+
+
+def test_python_cuda_kernel_layer_rejects_non_kernel():
+    network = thor.Network("cuda-kernel-layer-rejects-non-kernel")
+    x = thor.Tensor([8], thor.DataType.fp32)
+
+    with pytest.raises(TypeError, match="CudaKernelLayer kernel must be"):
+        thor.layers.CudaKernelLayer(network=network, inputs={"x": x}, kernel=object())
+
+
 def test_python_custom_layer_builds_logical_output_interface_without_bias():
     network = thor.Network("custom-layer-smoke-no-bias")
     x = thor.Tensor([5], thor.DataType.fp16)
@@ -411,7 +449,7 @@ def test_python_custom_layer_mimo_place_exposes_named_physical_contexts_and_para
     lhs = _network_input(network, "lhs", [5], thor.DataType.fp32)
     rhs = _network_input(network, "rhs", [5], thor.DataType.fp32)
 
-    layer = MultiInputMultiOutputAffine(network, lhs, rhs, use_fast_math=True)
+    layer = MultiInputMultiOutputAffine(network, lhs, rhs)
     thor.layers.NetworkOutput(network, "sum", layer["sum_output"], thor.DataType.fp32)
     thor.layers.NetworkOutput(network, "affine", layer["affine_output"], thor.DataType.fp32)
 
@@ -960,8 +998,7 @@ def test_python_custom_layer_direct_construction_places_with_named_inputs_and_pa
         output_names=["sum_output", "affine_output"],
         parameters=[scale, bias],
         build=build,
-        use_fast_math=True,
-    )
+            )
 
     assert layer.get_input_names() == ["lhs", "rhs"]
     assert layer.get_output_names() == ["sum_output", "affine_output"]

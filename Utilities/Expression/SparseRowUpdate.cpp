@@ -1373,8 +1373,7 @@ std::unique_ptr<SparseRowUpdatePlan> SparseRowUpdatePlan::compile(
     const Tensor& numRows,
     const std::unordered_map<std::string, SparseRowUpdateTensorBinding>& inputs,
     const std::unordered_map<std::string, Tensor>& indexedOutputs,
-    int deviceNum,
-    bool useFastMath) {
+    int deviceNum) {
     if (!outputs.expr) {
         throw std::invalid_argument("Sparse row update compile requires expression outputs.");
     }
@@ -1547,7 +1546,7 @@ std::unique_ptr<SparseRowUpdatePlan> SparseRowUpdatePlan::compile(
 
     ScopedGpu scoped(deviceNum);
     CUDA_CHECK(cudaFree(nullptr));
-    EquationSignature sig = FusedEquation::buildSignature(static_cast<uint32_t>(inputSlots.size()), deviceNum, useFastMath);
+    EquationSignature sig = FusedEquation::buildSignature(static_cast<uint32_t>(inputSlots.size()), deviceNum, /*useFastMath=*/true);
     std::vector<char> lto = EquationCompiler::compileToLtoIr(src, kernelName, sig);
     std::vector<char> cubin = EquationCompiler::linkToCubin(lto, sig);
 

@@ -50,18 +50,16 @@ namespace Thor {
 
 CustomLayer::CustomLayer(DynamicExpression expr,
                          const std::vector<TensorMap>& inputInterfaces,
-                         std::vector<std::shared_ptr<ParameterSpecification>> parameters,
-                         bool useFastMath)
-    : CustomLayer(std::move(expr), {}, {}, inputInterfaces, {}, std::move(parameters), useFastMath) {}
+                         std::vector<std::shared_ptr<ParameterSpecification>> parameters)
+    : CustomLayer(std::move(expr), {}, {}, inputInterfaces, {}, std::move(parameters)) {}
 
 CustomLayer::CustomLayer(DynamicExpression expr,
                          std::vector<std::string> inputNames,
                          std::vector<std::string> outputNames,
                          const std::vector<TensorMap>& inputInterfaces,
                          const std::vector<TensorMap>& outputInterfaces,
-                         std::vector<std::shared_ptr<ParameterSpecification>> parameters,
-                         bool useFastMath)
-    : TrainableLayer(std::move(parameters)), expr(std::move(expr)), useFastMath(useFastMath) {
+                         std::vector<std::shared_ptr<ParameterSpecification>> parameters)
+    : TrainableLayer(std::move(parameters)), expr(std::move(expr)) {
     if (inputNames.empty())
         inputNames = this->expr.getExpectedInputNames();
     if (outputNames.empty())
@@ -537,7 +535,7 @@ std::shared_ptr<ThorImplementation::Layer> CustomLayer::stamp(ThorImplementation
     }
 
     auto physicalLayer = std::make_shared<ThorImplementation::CustomLayer>(
-        expr, inputNames, outputNames, placement, physicalParameters, inferenceOnly, Layer::getId(), useFastMath);
+        expr, inputNames, outputNames, placement, physicalParameters, inferenceOnly, Layer::getId());
     physicalLayer->setLayerName(getLayerType());
     return physicalLayer;
 }
@@ -547,7 +545,6 @@ json CustomLayer::architectureJson() const {
     j["factory"] = Layer::Factory::Learning.value();
     j["version"] = "1.0.0";
     j["layer_type"] = "custom_layer";
-    j["use_fast_math"] = useFastMath;
     j["input_names"] = inputNames;
     j["output_names"] = outputNames;
     j["input_interfaces"] = json::array();
@@ -592,7 +589,6 @@ void CustomLayer::deserialize(std::shared_ptr<thor_file::TarReader>& archiveRead
     if (j.at("layer_type").get<std::string>() != "custom_layer")
         throw runtime_error("Layer type mismatch in CustomLayer::deserialize: " + j.at("layer_type").get<std::string>());
 
-    const bool useFastMath = j.value("use_fast_math", false);
     std::vector<std::string> inputNames = j.at("input_names").get<std::vector<std::string>>();
     std::vector<std::string> outputNames = j.at("output_names").get<std::vector<std::string>>();
     ThorImplementation::ExpressionDefinition expressionDefinition = ThorImplementation::ExpressionDefinition::deserialize(
@@ -640,13 +636,12 @@ void CustomLayer::deserialize(std::shared_ptr<thor_file::TarReader>& archiveRead
         }
     }
 
-    CustomLayer customLayer(DynamicExpression::fromExpressionDefinition(expressionDefinition, useFastMath),
+    CustomLayer customLayer(DynamicExpression::fromExpressionDefinition(expressionDefinition),
                             std::move(inputNames),
                             std::move(outputNames),
                             inputInterfaces,
                             outputInterfaces,
-                            std::move(parameters),
-                            useFastMath);
+                            std::move(parameters));
     customLayer.initialized = true;
     customLayer.addToNetwork(network);
 }

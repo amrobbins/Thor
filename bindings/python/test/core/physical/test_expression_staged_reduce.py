@@ -88,7 +88,6 @@ def _run_staged_expr(
     *inputs: np.ndarray,
     dtype: thor.DataType,
     gpu_num: int = 0,
-    use_fast_math: bool = False,
 ) -> np.ndarray:
     assert len(inputs) >= 1
     assert len(inputs) == len(input_names)
@@ -112,8 +111,7 @@ def _run_staged_expr(
     eq = ex.compile(
         expr,
         device_num=gpu_num,
-        use_fast_math=use_fast_math,
-    )
+            )
 
     stamped = eq.stamp(input_tensors_gpu, stream)
     stamped.run()
@@ -488,8 +486,7 @@ def test_run_convenience_rejects_multi_stage_reduction_expression():
     eq = ex.compile(
         expr,
         device_num=gpu_num,
-        use_fast_math=False,
-    )
+            )
 
     with pytest.raises(RuntimeError, match="single-stage fused expressions|staged expressions"):
         eq.run({
@@ -520,7 +517,7 @@ def test_stamp_output_tensor_matches_expected_shape_squeeze_false(dtype: thor.Da
     x_gpu = PhysicalTensor(gpu_placement, host_desc)
     x_gpu.copy_from_async(x_host, stream)
 
-    eq = ex.compile(expr, device_num=0, use_fast_math=False)
+    eq = ex.compile(expr, device_num=0)
     stamped = eq.stamp({
         "x": x_gpu
     }, stream)
@@ -551,7 +548,7 @@ def test_stamp_output_tensor_matches_expected_shape_squeeze_true(dtype: thor.Dat
     x_gpu = PhysicalTensor(gpu_placement, host_desc)
     x_gpu.copy_from_async(x_host, stream)
 
-    eq = ex.compile(expr, device_num=0, use_fast_math=False)
+    eq = ex.compile(expr, device_num=0)
     stamped = eq.stamp({
         "x": x_gpu
     }, stream)
@@ -585,7 +582,7 @@ def test_stamp_output_tensor_matches_expected_shape_squeeze_specific_axis(dtype:
     x_gpu = PhysicalTensor(gpu_placement, host_desc)
     x_gpu.copy_from_async(x_host, stream)
 
-    eq = ex.compile(expr, device_num=0, use_fast_math=False)
+    eq = ex.compile(expr, device_num=0)
     stamped = eq.stamp({
         "x": x_gpu
     }, stream)
@@ -976,7 +973,6 @@ def _run_staged_expr_with_preallocated(
     output_dtype: thor.DataType | None = None,
     output_shape: list[int] | None = None,
     gpu_num: int = 0,
-    use_fast_math: bool = False,
 ):
     assert len(inputs) >= 1
     assert len(inputs) == len(input_names)
@@ -999,8 +995,7 @@ def _run_staged_expr_with_preallocated(
     eq = ex.compile(
         expr,
         device_num=gpu_num,
-        use_fast_math=use_fast_math,
-    )
+            )
 
     output_name = eq.output_names()[0]
 
@@ -1078,7 +1073,7 @@ def test_reduce_sum_preallocated_output_wrong_shape_raises(dtype: thor.DataType)
     x_gpu = PhysicalTensor(gpu_placement, host_desc)
     x_gpu.copy_from_async(x_host, stream)
 
-    eq = ex.compile(expr, device_num=0, use_fast_math=False)
+    eq = ex.compile(expr, device_num=0)
     output_name = eq.output_names()[0]
 
     wrong_out = PhysicalTensor(gpu_placement, PhysicalTensor.Descriptor(dtype, [2, 1, 1]))

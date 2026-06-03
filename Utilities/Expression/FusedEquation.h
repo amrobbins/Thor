@@ -448,9 +448,9 @@ struct BackwardEquationConfig {
 
 class FusedEquation {
    public:
-    static FusedEquation compile(const PhysicalExpression& expr, int device_num, bool use_fast_math = false);
+    static FusedEquation compile(const PhysicalExpression& expr, int device_num);
 
-    static FusedEquation compile(const PhysicalOutputs& outputs, int device_num, bool use_fast_math = false);
+    static FusedEquation compile(const PhysicalOutputs& outputs, int device_num);
 
     [[nodiscard]] FusedEquation compileBackward(const std::vector<std::string>& wrt_names = {},
                                                 const std::optional<std::string>& upstream_input_name = std::nullopt,
@@ -526,6 +526,9 @@ class FusedEquation {
     [[nodiscard]] static EquationSignature buildSignature(uint32_t num_inputs, int device_num, bool use_fast_math);
 
    private:
+    static FusedEquation compileWithOptions(const PhysicalExpression& expr, int device_num, bool use_fast_math);
+    static FusedEquation compileWithOptions(const PhysicalOutputs& outputs, int device_num, bool use_fast_math);
+
     explicit FusedEquation(PhysicalOutputs outputs_template,
                            int device_num,
                            bool use_fast_math,

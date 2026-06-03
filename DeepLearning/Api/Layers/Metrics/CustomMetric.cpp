@@ -46,14 +46,12 @@ CustomMetric::CustomMetric(ThorImplementation::DynamicExpression expr,
                            std::string labelsName,
                            std::string metricName,
                            std::optional<Tensor> metricTensor,
-                           std::string displayName,
-                           bool useFastMath)
+                           std::string displayName)
     : expr(std::move(expr)),
       predictionsName(std::move(predictionsName)),
       labelsName(std::move(labelsName)),
       metricName(std::move(metricName)),
-      displayName(std::move(displayName)),
-      useFastMath(useFastMath) {
+      displayName(std::move(displayName)) {
     validateName(this->predictionsName, "predictions input");
     validateName(this->labelsName, "labels input");
     validateName(this->metricName, "metric output");
@@ -192,7 +190,6 @@ uint64_t CustomMetric::getFirstInstanceMemRequirementInBytes(uint32_t batchSize,
 json CustomMetric::architectureJson() const {
     json j = Metric::architectureJson();
     j["layer_type"] = "custom_metric";
-    j["use_fast_math"] = useFastMath;
     j["predictions_name"] = predictionsName;
     j["labels_name"] = labelsName;
     j["metric_name"] = metricName;
@@ -214,7 +211,6 @@ void CustomMetric::deserialize(const json& j, Network* network) {
     if (j.at("layer_type").get<std::string>() != "custom_metric")
         throw runtime_error("Layer type mismatch in CustomMetric::deserialize: " + j.at("layer_type").get<std::string>());
 
-    const bool useFastMath = j.value("use_fast_math", false);
     const std::string predictionsName = j.value("predictions_name", std::string("predictions"));
     const std::string labelsName = j.value("labels_name", std::string("labels"));
     const std::string metricName = j.value("metric_name", std::string("metric"));
@@ -234,15 +230,14 @@ void CustomMetric::deserialize(const json& j, Network* network) {
         network != nullptr ? network->trustedLoadedCudaKernelPublicKey() : std::string{},
         network != nullptr ? network->trustedLoadedCudaKernelSourceDecryptionKey() : std::string{});
 
-    CustomMetric customMetric(ThorImplementation::DynamicExpression::fromExpressionDefinition(expressionDefinition, useFastMath),
+    CustomMetric customMetric(ThorImplementation::DynamicExpression::fromExpressionDefinition(expressionDefinition),
                               predictions,
                               labels,
                               predictionsName,
                               labelsName,
                               metricName,
                               metricTensor,
-                              displayName,
-                              useFastMath);
+                              displayName);
     customMetric.addToNetwork(network);
 }
 

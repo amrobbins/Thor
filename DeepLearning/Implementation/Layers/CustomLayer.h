@@ -24,8 +24,7 @@ class CustomLayer : public TrainableLayer {
                 const TensorPlacement& placement,
                 const std::vector<std::shared_ptr<PhysicalParameter>>& parameters,
                 bool inferenceOnly,
-                int64_t stampedId = -1,
-                bool useFastMath = false);
+                int64_t stampedId = -1);
 
     // Named-port form. Connection types are encoded as:
     //   input connection:  applicationIndex * inputNames.size() + inputPortIndex
@@ -44,8 +43,7 @@ class CustomLayer : public TrainableLayer {
                 const TensorPlacement& placement,
                 const std::vector<std::shared_ptr<PhysicalParameter>>& parameters,
                 bool inferenceOnly,
-                int64_t stampedId = -1,
-                bool useFastMath = false);
+                int64_t stampedId = -1);
 
     // TrainableLayer
     void forward(std::optional<Tensor> featureInput, bool validationPass, uint32_t batchSize = 0) override;
@@ -167,8 +165,6 @@ class CustomLayer : public TrainableLayer {
     DynamicExpression layerDefinitionExpression;
     std::vector<std::string> inputNames;
     std::vector<std::string> outputNames;
-
-    bool useFastMath = false;
 
     std::string customLayerName = "UnnamedType";
 

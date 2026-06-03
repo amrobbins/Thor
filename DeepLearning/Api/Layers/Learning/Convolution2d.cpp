@@ -132,8 +132,7 @@ std::shared_ptr<ThorImplementation::Layer> Convolution2d::stamp(ThorImplementati
         placement,
         physicalParameters,
         inferenceOnly,
-        getId(),
-        false);
+        getId());
     physicalConvolution2d->setLayerName(getLayerType());
 
     return physicalConvolution2d;

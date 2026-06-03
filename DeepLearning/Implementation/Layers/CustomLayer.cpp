@@ -60,16 +60,14 @@ CustomLayer::CustomLayer(DynamicExpression expr,
                          const TensorPlacement& placement,
                          const std::vector<std::shared_ptr<PhysicalParameter>>& parameters,
                          bool inferenceOnly,
-                         int64_t stampedId,
-                         bool useFastMath)
+                         int64_t stampedId)
     : CustomLayer(std::move(expr),
                   std::vector<std::string>{"feature_input"},
                   std::vector<std::string>{"feature_output"},
                   placement,
                   parameters,
                   inferenceOnly,
-                  stampedId,
-                  useFastMath) {}
+                  stampedId) {}
 
 CustomLayer::CustomLayer(DynamicExpression expr,
                          std::vector<std::string> inputNames,
@@ -77,13 +75,11 @@ CustomLayer::CustomLayer(DynamicExpression expr,
                          const TensorPlacement& placement,
                          const std::vector<std::shared_ptr<PhysicalParameter>>& parameters,
                          bool inferenceOnly,
-                         int64_t stampedId,
-                         bool useFastMath)
+                         int64_t stampedId)
     : TrainableLayer(placement, inferenceOnly, stampedId),
       layerDefinitionExpression(std::move(expr)),
       inputNames(std::move(inputNames)),
-      outputNames(std::move(outputNames)),
-      useFastMath(useFastMath) {
+      outputNames(std::move(outputNames)) {
     validatePortNames(this->inputNames, "input");
     validatePortNames(this->outputNames, "output");
 
@@ -465,7 +461,7 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::buildFusedOptimizerUpdatePlan
     Outputs outputs = Expression::outputs(fusedOutputs);
     PhysicalOutputs physicalOutputs = outputs.physicalOutputs();
     PreparedDynamicExpression::TensorMap filteredStampInputs = filterTensorInputsForPhysicalOutputs(stampInputs, physicalOutputs);
-    FusedEquation fusedUpdateEquation = FusedEquation::compile(physicalOutputs, placement.getDeviceNum(), useFastMath);
+    FusedEquation fusedUpdateEquation = FusedEquation::compile(physicalOutputs, placement.getDeviceNum());
     return std::make_shared<StampedExecutionPlan>(
         fusedUpdateEquation.stamp(filteredStampInputs, gradientUpdateStream.value(), {}, preallocatedOutputs));
 }

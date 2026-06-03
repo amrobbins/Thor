@@ -103,7 +103,7 @@ def test_dynamic_expression_single_output_numerical(dtype: thor.DataType):
         x = ex.input("x")
         y = ex.input("y")
         expr = ex.sqrt((x + 1.5) * (y + 2.0))
-        fused_equation = ex.compile(expr, device_num=gpu_num, use_fast_math=False)
+        fused_equation = ex.compile(expr, device_num=gpu_num)
         return DynamicExpressionBuild(
             equation=fused_equation,
             stamp_inputs=inputs,
@@ -155,7 +155,7 @@ def test_dynamic_expression_runtime_scalar_override_numerical(dtype: thor.DataTy
         y = ex.input("y")
         scale = ex.runtime_scalar("scale")
         expr = x + scale * y
-        fused_equation = ex.compile(expr, device_num=gpu_num, use_fast_math=False)
+        fused_equation = ex.compile(expr, device_num=gpu_num)
         return DynamicExpressionBuild(
             equation=fused_equation,
             stamp_inputs=inputs,
@@ -221,7 +221,7 @@ def test_dynamic_expression_multi_output_numerical(dtype: thor.DataType):
             "sum": x + y,
             "prod": x * y,
         })
-        fused_equation = ex.compile(outs, device_num=gpu_num, use_fast_math=False)
+        fused_equation = ex.compile(outs, device_num=gpu_num)
         return DynamicExpressionBuild(
             equation=fused_equation,
             stamp_inputs=inputs,
@@ -279,7 +279,7 @@ def test_dynamic_expression_builder_receives_validated_inputs(dtype: thor.DataTy
         seen["gpu_num"] = stream.get_gpu_num()
 
         expr = ex.input("x") - ex.input("y")
-        fused_equation = ex.compile(expr, device_num=gpu_num, use_fast_math=False)
+        fused_equation = ex.compile(expr, device_num=gpu_num)
         return DynamicExpressionBuild(
             equation=fused_equation,
             stamp_inputs=inputs,
