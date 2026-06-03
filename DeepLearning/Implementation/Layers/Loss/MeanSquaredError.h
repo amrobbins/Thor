@@ -1,43 +1,21 @@
 #pragma once
 
-#include <optional>
-#include "DeepLearning/Implementation/Layers/Loss.h"
-#include "Utilities/TensorOperations/Loss/CrossEntropyLoss.h"
-#include "Utilities/TensorOperations/Loss/MeanSquaredError.h"
-#include "Utilities/TensorOperations/Misc/BatchReduce.h"
-
-#include <cudnn_ops.h>
-
-#include <chrono>
-#include <thread>
+#include "DeepLearning/Implementation/Layers/Loss/CustomLoss.h"
 
 namespace ThorImplementation {
 
-class MeanSquaredError : public Loss {
+class MeanSquaredError : public CustomLoss {
    public:
-    ~MeanSquaredError() override;
-
-    MeanSquaredError(DataType lossDataType = DataType::FP32);
+    explicit MeanSquaredError(DataType lossDataType = DataType::FP32);
+    ~MeanSquaredError() override = default;
 
     void compileImpl() override;
 
-    void cleanup() override {}
-
-    void infer(std::optional<Tensor> predictions, std::optional<Tensor> loss, Stream stream) override;
-
-    void backProp(std::optional<Tensor> labels, std::optional<Tensor> normalizedPredictions, std::optional<Tensor> lossGradient, Stream stream) override;
+    std::string getType() override { return "MeanSquaredError"; }
 
    private:
-    void launchMeanSquaredErrorWithFP16Predictions();
-    void launchMeanSquaredErrorWithFP16PredictionsAndFP16Loss();
-    void launchMeanSquaredErrorWithFP16PredictionsAndFP32Loss();
-
-    void launchMeanSquaredErrorWithFP32Predictions();
-    void launchMeanSquaredErrorWithFP32PredictionsAndFP16Loss();
-    void launchMeanSquaredErrorWithFP32PredictionsAndFP32Loss();
-
-    unsigned int batchSize;
-    cudnnTensorDescriptor_t errorOutputCudnnTensorDescriptor;
+    static DynamicExpression makeForwardExpression(DataType lossDataType);
+    static DynamicExpression makeGradientExpression();
 };
 
 }  // namespace ThorImplementation

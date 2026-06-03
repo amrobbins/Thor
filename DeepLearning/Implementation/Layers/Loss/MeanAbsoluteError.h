@@ -1,43 +1,21 @@
 #pragma once
 
-#include <optional>
-#include "DeepLearning/Implementation/Layers/Loss.h"
-#include "Utilities/TensorOperations/Loss/CrossEntropyLoss.h"
-#include "Utilities/TensorOperations/Loss/MeanAbsoluteError.h"
-#include "Utilities/TensorOperations/Misc/BatchReduce.h"
-
-#include <cudnn_ops.h>
-
-#include <chrono>
-#include <thread>
+#include "DeepLearning/Implementation/Layers/Loss/CustomLoss.h"
 
 namespace ThorImplementation {
 
-class MeanAbsoluteError : public Loss {
+class MeanAbsoluteError : public CustomLoss {
    public:
-    ~MeanAbsoluteError() override;
-
-    MeanAbsoluteError(DataType lossDataType = DataType::FP32);
+    explicit MeanAbsoluteError(DataType lossDataType = DataType::FP32);
+    ~MeanAbsoluteError() override = default;
 
     void compileImpl() override;
 
-    void cleanup() override {}
-
-    void infer(std::optional<Tensor> predictions, std::optional<Tensor> loss, Stream stream) override;
-
-    void backProp(std::optional<Tensor> labels, std::optional<Tensor> normalizedPredictions, std::optional<Tensor> lossGradient, Stream stream) override;
+    std::string getType() override { return "MeanAbsoluteError"; }
 
    private:
-    void launchMeanAbsoluteErrorWithFP16Predictions();
-    void launchMeanAbsoluteErrorWithFP16PredictionsAndFP16Loss();
-    void launchMeanAbsoluteErrorWithFP16PredictionsAndFP32Loss();
-
-    void launchMeanAbsoluteErrorWithFP32Predictions();
-    void launchMeanAbsoluteErrorWithFP32PredictionsAndFP16Loss();
-    void launchMeanAbsoluteErrorWithFP32PredictionsAndFP32Loss();
-
-    unsigned int batchSize;
-    cudnnTensorDescriptor_t errorOutputCudnnTensorDescriptor;
+    static DynamicExpression makeForwardExpression(DataType lossDataType);
+    static DynamicExpression makeGradientExpression();
 };
 
 }  // namespace ThorImplementation

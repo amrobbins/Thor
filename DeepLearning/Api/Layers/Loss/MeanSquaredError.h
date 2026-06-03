@@ -1,6 +1,7 @@
 #pragma once
 #include "DeepLearning/Implementation/ThorError.h"
 
+#include "DeepLearning/Api/Layers/Loss/CustomLoss.h"
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
 #include "DeepLearning/Api/Layers/Loss/LossShaper.h"
 #include "DeepLearning/Api/Network/Network.h"
@@ -23,11 +24,7 @@ class MeanSquaredError : public Loss {
     static void deserialize(const nlohmann::json &j, Network *network);
 
    protected:
-    virtual bool isMultiLayer() const {
-        if (lossShape == LossShape::RAW)
-            return false;
-        return true;
-    }
+    virtual bool isMultiLayer() const { return true; }
 
     virtual void buildSupportLayersAndAddToNetwork();
 
@@ -75,8 +72,6 @@ class MeanSquaredError::Builder {
             _lossShape = LossShape::BATCH;
         if (!_lossDataType.has_value())
             _lossDataType = _predictions.value().getDataType();
-        uint32_t batchSize = _predictions.value().getDimensions()[0];
-
         MeanSquaredError meanSquaredError;
         meanSquaredError.predictionsTensor = _predictions.value();
         meanSquaredError.labelsTensor = _labels.value();
@@ -85,14 +80,7 @@ class MeanSquaredError::Builder {
         meanSquaredError.network = _network.value();
         meanSquaredError.initialized = true;
 
-        if (meanSquaredError.isMultiLayer()) {
-            meanSquaredError.buildSupportLayersAndAddToNetwork();
-        } else {
-            // lossTensor is the one that comes directly out of MeanSquaredError, that may be replaced by a loss shaper.
-            meanSquaredError.lossTensor = Tensor(_lossDataType.value(), {batchSize});
-            meanSquaredError.lossShaperInput = meanSquaredError.lossTensor;
-            meanSquaredError.addToNetwork(_network.value());
-        }
+        meanSquaredError.buildSupportLayersAndAddToNetwork();
 
         return meanSquaredError;
     }

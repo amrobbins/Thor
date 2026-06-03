@@ -1034,14 +1034,39 @@ set_target_properties(createMasterHeader PROPERTIES
 # ============================================================
 # Generate headerlist.txt
 # ============================================================
-add_custom_command(
-        OUTPUT ${CMAKE_BINARY_DIR}/headerlist.txt
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        COMMAND find . -name "*.h" | grep -v ./googletest/ | grep -v ./googlemock/ | grep -v ./_deps/ | grep -v ./build/ | grep -v ./cmake-build- | grep -v ./out/ | grep -v ./_build/ | grep -v ./generated/ | grep -v ./test/ | grep -v ./.venv/ | grep -v ./bindings > ${CMAKE_BINARY_DIR}/headerlist.txt
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        DEPENDS ${THOR_SOURCES}
-        COMMENT "Collecting all headers into headerlist.txt"
+# The umbrella header depends only on the set of public headers, not on every
+# C++/CUDA source file.  Keeping headerlist.txt as a configure-time file avoids
+# rewriting generated/Thor.h after ordinary .cpp/.cu edits, which otherwise
+# causes broad rebuilds of files that include Thor.h.
+file(GLOB_RECURSE THOR_PUBLIC_HEADERS CONFIGURE_DEPENDS
+        "${CMAKE_SOURCE_DIR}/DeepLearning/*.h"
+        "${CMAKE_SOURCE_DIR}/Utilities/*.h"
 )
+
+set(_thor_headerlist_entries "")
+foreach (_thor_header IN LISTS THOR_PUBLIC_HEADERS)
+    file(RELATIVE_PATH _thor_rel_header "${CMAKE_SOURCE_DIR}" "${_thor_header}")
+    list(APPEND _thor_headerlist_entries "./${_thor_rel_header}")
+endforeach ()
+list(SORT _thor_headerlist_entries)
+
+set(_thor_headerlist_contents "")
+foreach (_thor_header IN LISTS _thor_headerlist_entries)
+    string(APPEND _thor_headerlist_contents "${_thor_header}\n")
+endforeach ()
+
+set(_thor_headerlist_path "${CMAKE_BINARY_DIR}/headerlist.txt")
+set(_thor_write_headerlist TRUE)
+if (EXISTS "${_thor_headerlist_path}")
+    file(READ "${_thor_headerlist_path}" _thor_existing_headerlist)
+    if (_thor_existing_headerlist STREQUAL _thor_headerlist_contents)
+        set(_thor_write_headerlist FALSE)
+    endif ()
+endif ()
+
+if (_thor_write_headerlist)
+    file(WRITE "${_thor_headerlist_path}" "${_thor_headerlist_contents}")
+endif ()
 
 # ============================================================
 # Generate Thor.h from headerlist.txt
