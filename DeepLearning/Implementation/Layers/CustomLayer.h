@@ -3,6 +3,7 @@
 #include <optional>
 #include "DeepLearning/Implementation/Layers/TrainableLayer.h"
 #include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
+#include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/FusedEquation.h"
 #include "Utilities/Expression/StampedEquation.h"
 
@@ -75,12 +76,30 @@ class CustomLayer : public TrainableLayer {
 
     bool isBackPropStub() override;
 
+    bool registerFusedCustomLossGradient(const Tensor& predictions,
+                                         const Tensor& labels,
+                                         DynamicExpression gradientExpression,
+                                         std::string predictionsName,
+                                         std::string labelsName,
+                                         std::string gradientName);
+    uint32_t getNumFusedCustomLossGradients() const;
+
    protected:
     void compileImpl() override;
     PhysicalParameter::StorageContext buildParameterStorageContext() const override;
     void pruneUpstreamErrorOutputsForApplication(uint32_t applicationIndex);
 
    private:
+    struct FusedCustomLossGradient {
+        Tensor predictionsTensor;
+        Tensor labelsTensor;
+        DynamicExpression gradientExpression;
+        std::string predictionsName;
+        std::string labelsName;
+        std::string gradientName;
+        std::string fusedLabelsInputName;
+    };
+
     struct ApplicationState {
         std::set<unsigned long> allForwardInputTensorIds;
         std::set<unsigned long> stillWaitingForForwardInputTensorIds;
@@ -93,6 +112,7 @@ class CustomLayer : public TrainableLayer {
 
         std::set<unsigned long> expectedBackwardErrorInputTensorIds;
         std::unordered_map<std::string, std::string> upstreamInputNamesByOutput;
+        std::unordered_map<std::string, FusedCustomLossGradient> fusedCustomLossGradientsByOutput;
         std::unordered_set<std::string> upstreamOutputNames;
         std::unordered_set<std::string> activeParameterTargetNames;
 
@@ -141,6 +161,16 @@ class CustomLayer : public TrainableLayer {
     bool applicationHasAnyDownstreamBackprop(uint32_t applicationIndex) const;
     void recordEffectiveParameterBatchSizeForApplication(uint32_t applicationIndex, uint32_t batchSize);
     bool canFuseOptimizerUpdatesForApplication(uint32_t applicationIndex) const;
+    bool applicationHasFusedCustomLossGradient(uint32_t applicationIndex) const;
+    PhysicalOutputs buildBackwardOutputsForApplication(uint32_t applicationIndex,
+                                                       const std::vector<std::string>& wrtNames,
+                                                       bool accumulateGradOutputs);
+    std::shared_ptr<StampedExecutionPlan> stampBackwardForApplication(
+        uint32_t applicationIndex,
+        const std::vector<std::string>& wrtNames,
+        bool accumulateGradOutputs,
+        const PreparedDynamicExpression::TensorMap& preallocatedGradOutputs,
+        Stream& runStream);
     std::shared_ptr<StampedExecutionPlan> buildFusedOptimizerUpdatePlan(
         uint32_t applicationIndex,
         const std::vector<std::string>& fusedParameterTargets,
@@ -177,6 +207,8 @@ class CustomLayer : public TrainableLayer {
     std::unordered_map<std::string, uint32_t> outputNameToPort;
 
     std::vector<ApplicationState> applications;
+
+    std::unordered_map<uint32_t, FusedCustomLossGradient> fusedCustomLossGradientByOutputFlatIndex;
 
     std::vector<std::optional<Tensor>> featureInputsConnectedForPorts;
     std::vector<std::optional<Tensor>> featureOutputsConnectedForPorts;

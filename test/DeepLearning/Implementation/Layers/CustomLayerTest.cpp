@@ -1,6 +1,7 @@
 #include <optional>
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 #include "DeepLearning/Implementation/Layers/Loss.h"
+#include "DeepLearning/Implementation/Layers/Loss/CustomLoss.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Implementation/Layers/Utility/TensorFanout.h"
 
@@ -366,6 +367,60 @@ DynamicExpression buildSingleInputScaleExpression(const TensorPlacement& placeme
     });
 }
 
+DynamicExpression buildSquaredErrorLossExpression(const TensorPlacement& placement) {
+    return DynamicExpression([placement](const DynamicExpression::TensorMap& inputs,
+                                         const DynamicExpression::TensorMap& outputs,
+                                         Stream& stream) -> DynamicExpressionBuild {
+        (void)stream;
+        auto predictions = Expression::input("predictions");
+        auto labels = Expression::input("labels");
+        auto diff = predictions - labels;
+        auto expressionOutputs = Expression::outputs({{"loss", diff * diff}});
+        return DynamicExpressionBuild{
+            std::make_shared<FusedEquation>(FusedEquation::compile(expressionOutputs.physicalOutputs(), placement.getDeviceNum())),
+            inputs,
+            {},
+            outputs,
+            {}};
+    });
+}
+
+DynamicExpression buildSquaredErrorGradientExpression(const TensorPlacement& placement) {
+    return DynamicExpression([placement](const DynamicExpression::TensorMap& inputs,
+                                         const DynamicExpression::TensorMap& outputs,
+                                         Stream& stream) -> DynamicExpressionBuild {
+        (void)stream;
+        auto predictions = Expression::input("predictions");
+        auto labels = Expression::input("labels");
+        auto scale = Expression(2.0f * Loss::getLossScalingFactor());
+        auto expressionOutputs = Expression::outputs({{"predictions_grad", (predictions - labels) * scale}});
+        return DynamicExpressionBuild{
+            std::make_shared<FusedEquation>(FusedEquation::compile(expressionOutputs.physicalOutputs(), placement.getDeviceNum())),
+            inputs,
+            {},
+            outputs,
+            {}};
+    });
+}
+
+DynamicExpression buildTwoInputSharedScaleExpression(const TensorPlacement& placement) {
+    return DynamicExpression([placement](const DynamicExpression::TensorMap& inputs,
+                                         const DynamicExpression::TensorMap& outputs,
+                                         Stream& stream) -> DynamicExpressionBuild {
+        (void)stream;
+        auto x = Expression::input("x");
+        auto y = Expression::input("y");
+        auto scale = Expression::input("scale");
+        auto expressionOutputs = Expression::outputs({{"out", (x + y) * scale}});
+        return DynamicExpressionBuild{
+            std::make_shared<FusedEquation>(FusedEquation::compile(expressionOutputs.physicalOutputs(), placement.getDeviceNum())),
+            inputs,
+            {},
+            outputs,
+            {}};
+    });
+}
+
 DynamicExpression buildThreeInputThreeOutputExpression(const TensorPlacement& placement) {
     return DynamicExpression([placement](const DynamicExpression::TensorMap& inputs,
                                          const DynamicExpression::TensorMap& outputs,
@@ -550,6 +605,178 @@ TEST(CustomLayer, SingleInputTrainableParameterFusesGradientIntoAdamUpdateAcross
     EXPECT_FLOAT_EQ(adam->getT(), expected.t);
 
     cleanupLayers({&input, &gradientRivet, &bridge, &custom, &sink});
+}
+
+TEST(CustomLayer, CustomLossGradientFusesIntoDrivingCustomLayerAndMatchesNumericalReference) {
+    const uint64_t batchSize = 2;
+    const uint64_t features = 3;
+
+    TensorDescriptor descriptor(DataType::FP32, {batchSize, features});
+    Tensor x_h(cpuPlacement, descriptor);
+    Tensor y_h(cpuPlacement, descriptor);
+    Tensor labels_h(cpuPlacement, descriptor);
+
+    const std::vector<float> xValues{1.0f, 2.0f, -1.0f, 0.5f, -2.0f, 3.0f};
+    const std::vector<float> yValues{-0.5f, 1.5f, 2.0f, 1.0f, 0.25f, -1.0f};
+    const std::vector<float> labelValues{0.0f, -1.0f, 2.0f, 1.0f, -2.0f, 4.0f};
+    const std::vector<float> initialScale{1.5f, -2.0f, 0.5f};
+
+    writeCpuTensor(x_h, xValues);
+    writeCpuTensor(y_h, yValues);
+    writeCpuTensor(labels_h, labelValues);
+
+    auto scale = std::make_shared<FixedVectorParameter>("scale", initialScale, true);
+    // Two input ports intentionally keep this test on the materialized-gradient path so the
+    // CustomLoss fusion can be validated independently from optimizer-update fusion.
+    scale->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(904, 1.0f, 0.0f, 0.0f, false)));
+
+    NetworkInput xInput(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    NetworkInput yInput(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    NetworkInput labelsInput(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    GradientRivet xRivet;
+    GradientRivet yRivet;
+    CountingPassthrough xBridge;
+    CountingPassthrough yBridge;
+    CustomLayer custom(buildTwoInputSharedScaleExpression(gpuPlacement), {"x", "y"}, {"out"}, gpuPlacement, {scale}, false);
+    CustomLoss loss(buildSquaredErrorLossExpression(gpuPlacement), buildSquaredErrorGradientExpression(gpuPlacement));
+    CountingPassthrough lossSink;
+
+    xInput.connectToNextLayer(&xRivet);
+    xRivet.connectToNextLayer(&xBridge);
+    xBridge.connectToNextLayer(&custom, 0, 0);
+    yInput.connectToNextLayer(&yRivet);
+    yRivet.connectToNextLayer(&yBridge);
+    yBridge.connectToNextLayer(&custom, 0, 1);
+    custom.connectToNextLayer(&loss, 0, static_cast<int>(Loss::ConnectionType::FORWARD_BACKWARD));
+    labelsInput.connectToNextLayer(&loss, 0, static_cast<int>(Loss::ConnectionType::LABELS));
+    loss.connectToNextLayer(&lossSink);
+
+    compileAndInitialize({&xInput, &yInput, &labelsInput, &xRivet, &yRivet, &xBridge, &yBridge, &custom, &loss, &lossSink});
+
+    ASSERT_TRUE(loss.isGradientFusedIntoDrivingLayer());
+    EXPECT_EQ(custom.getNumFusedCustomLossGradients(), 1u);
+    ASSERT_TRUE(scale->getOptimizer()->getWeightsGradient().has_value())
+        << "The two-input layer should not use the optimizer-update fusion path in this test.";
+
+    std::vector<float> expectedLoss(xValues.size());
+    std::vector<float> expectedPredictionGrad(xValues.size());
+    std::vector<float> expectedXGrad(xValues.size());
+    std::vector<float> expectedYGrad(yValues.size());
+    std::vector<float> expectedScaleGrad(features, 0.0f);
+
+    for (uint64_t i = 0; i < xValues.size(); ++i) {
+        const uint64_t f = i % features;
+        const float summedInput = xValues[i] + yValues[i];
+        const float prediction = summedInput * initialScale[f];
+        const float diff = prediction - labelValues[i];
+        expectedLoss[i] = diff * diff;
+        expectedPredictionGrad[i] = 2.0f * Loss::getLossScalingFactor() * diff;
+        expectedXGrad[i] = expectedPredictionGrad[i] * initialScale[f];
+        expectedYGrad[i] = expectedXGrad[i];
+        expectedScaleGrad[f] += summedInput * expectedPredictionGrad[i];
+    }
+
+    xInput.forward(x_h, false, batchSize);
+    yInput.forward(y_h, false, batchSize);
+    labelsInput.forward(labels_h, false, batchSize);
+
+    ASSERT_EQ(lossSink.forwardCalls, 1);
+    ASSERT_EQ(xBridge.backwardCalls, 1);
+    ASSERT_EQ(yBridge.backwardCalls, 1);
+
+    Stream lossStream = loss.getStream();
+    Stream gradientUpdateStream = custom.getGradientUpdateStream().value();
+
+    Tensor loss_h = copyTensorToCpu(lossSink.getFeatureInput().value(), lossStream);
+    Tensor xGrad_h = copyTensorToCpu(custom.getErrorOutputs()[0].value(), custom.getStreams()[0]);
+    Tensor yGrad_h = copyTensorToCpu(custom.getErrorOutputs()[1].value(), custom.getStreams()[0]);
+    Tensor scaleGrad_h = copyTensorToCpu(scale->getOptimizer()->getWeightsGradient().value(), gradientUpdateStream);
+
+    expectAllClose(readCpuTensor(loss_h), expectedLoss, 2e-5f, 2e-5f);
+    expectAllClose(readCpuTensor(xGrad_h), expectedXGrad, 3e-5f, 3e-5f);
+    expectAllClose(readCpuTensor(yGrad_h), expectedYGrad, 3e-5f, 3e-5f);
+    expectAllClose(readCpuTensor(scaleGrad_h), expectedScaleGrad, 4e-5f, 4e-5f);
+
+    cleanupLayers({&xInput, &yInput, &labelsInput, &xRivet, &yRivet, &xBridge, &yBridge, &custom, &loss, &lossSink});
+}
+
+TEST(CustomLayer, CustomLossGradientFusionFeedsFusedSgdOptimizerUpdateNumerically) {
+    const uint64_t batchSize = 2;
+    const uint64_t features = 3;
+    const float learningRate = 0.5f;
+
+    TensorDescriptor descriptor(DataType::FP32, {batchSize, features});
+    Tensor x_h(cpuPlacement, descriptor);
+    Tensor labels_h(cpuPlacement, descriptor);
+
+    const std::vector<float> xValues{1.0f, -2.0f, 0.5f, 3.0f, 1.5f, -1.0f};
+    const std::vector<float> labelValues{0.0f, 1.0f, -1.0f, 2.0f, -0.5f, 0.25f};
+    const std::vector<float> initialScale{1.0f, -1.5f, 2.0f};
+
+    writeCpuTensor(x_h, xValues);
+    writeCpuTensor(labels_h, labelValues);
+
+    auto scale = std::make_shared<FixedVectorParameter>("scale", initialScale, true);
+    scale->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(905, learningRate, 0.0f, 0.0f, false)));
+
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    NetworkInput labelsInput(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    GradientRivet gradientRivet;
+    CountingPassthrough bridge;
+    CustomLayer custom(buildSingleInputScaleExpression(gpuPlacement), {"x"}, {"out"}, gpuPlacement, {scale}, false);
+    CustomLoss loss(buildSquaredErrorLossExpression(gpuPlacement), buildSquaredErrorGradientExpression(gpuPlacement));
+    CountingPassthrough lossSink;
+
+    input.connectToNextLayer(&gradientRivet);
+    gradientRivet.connectToNextLayer(&bridge);
+    bridge.connectToNextLayer(&custom);
+    custom.connectToNextLayer(&loss, 0, static_cast<int>(Loss::ConnectionType::FORWARD_BACKWARD));
+    labelsInput.connectToNextLayer(&loss, 0, static_cast<int>(Loss::ConnectionType::LABELS));
+    loss.connectToNextLayer(&lossSink);
+
+    compileAndInitialize({&input, &labelsInput, &gradientRivet, &bridge, &custom, &loss, &lossSink});
+
+    ASSERT_TRUE(loss.isGradientFusedIntoDrivingLayer());
+    EXPECT_EQ(custom.getNumFusedCustomLossGradients(), 1u);
+    EXPECT_FALSE(scale->getOptimizer()->getWeightsGradient().has_value())
+        << "Single-input dense SGD should consume the fused loss gradient without materializing a parameter gradient tensor.";
+
+    std::vector<float> expectedLoss(xValues.size());
+    std::vector<float> expectedInputGrad(xValues.size());
+    std::vector<float> rawScaleGradient(features, 0.0f);
+    std::vector<float> expectedScale = initialScale;
+
+    for (uint64_t i = 0; i < xValues.size(); ++i) {
+        const uint64_t f = i % features;
+        const float prediction = xValues[i] * initialScale[f];
+        const float diff = prediction - labelValues[i];
+        const float predictionGrad = 2.0f * Loss::getLossScalingFactor() * diff;
+        expectedLoss[i] = diff * diff;
+        expectedInputGrad[i] = predictionGrad * initialScale[f];
+        rawScaleGradient[f] += xValues[i] * predictionGrad;
+    }
+
+    const float optimizerScale = learningRate / (static_cast<float>(batchSize) * Loss::getLossScalingFactor());
+    subtractScaledInPlace(expectedScale, rawScaleGradient, optimizerScale);
+
+    input.forward(x_h, false, batchSize);
+    labelsInput.forward(labels_h, false, batchSize);
+
+    ASSERT_EQ(lossSink.forwardCalls, 1);
+    ASSERT_EQ(bridge.backwardCalls, 1);
+
+    Stream lossStream = loss.getStream();
+    Stream gradientUpdateStream = custom.getGradientUpdateStream().value();
+
+    Tensor loss_h = copyTensorToCpu(lossSink.getFeatureInput().value(), lossStream);
+    Tensor xGrad_h = copyTensorToCpu(custom.getErrorOutputs()[0].value(), custom.getStreams()[0]);
+    Tensor scaleWeights_h = copyTensorToCpu(scale->getStorage().value(), gradientUpdateStream);
+
+    expectAllClose(readCpuTensor(loss_h), expectedLoss, 2e-5f, 2e-5f);
+    expectAllClose(readCpuTensor(xGrad_h), expectedInputGrad, 3e-5f, 3e-5f);
+    expectAllClose(readCpuTensor(scaleWeights_h), expectedScale, 4e-5f, 4e-5f);
+
+    cleanupLayers({&input, &labelsInput, &gradientRivet, &bridge, &custom, &loss, &lossSink});
 }
 
 TEST(CustomLayer, MultipleApplicationsDoNotUseSingleApplicationOptimizerFusion) {
