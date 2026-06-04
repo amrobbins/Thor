@@ -1704,6 +1704,34 @@ std::optional<std::unordered_map<std::string, std::string>> normalizeUpstreamInp
     return upstream_input_names_by_output;
 }
 
+std::optional<std::unordered_map<std::string, uint32_t>> normalizeUpstreamNodeIndicesByOutput(
+    const PhysicalOutputs& forward_outputs, const std::unordered_map<std::string, uint32_t>& upstream_node_indices_by_output) {
+    if (upstream_node_indices_by_output.empty()) {
+        return std::nullopt;
+    }
+    if (!forward_outputs.expr) {
+        throw std::runtime_error("compileBackward upstream-node validation requires non-null forward expr.");
+    }
+
+    const PhysicalExpression& forward_expr = *forward_outputs.expr;
+    std::unordered_set<std::string> valid_output_names;
+    valid_output_names.reserve(forward_outputs.outputs.size());
+    for (const NamedOutput& output : forward_outputs.outputs) {
+        valid_output_names.insert(output.name);
+    }
+
+    for (const auto& [output_name, upstream_node_idx] : upstream_node_indices_by_output) {
+        if (!valid_output_names.contains(output_name)) {
+            throw std::runtime_error("compileBackward explicit upstream node map contains unknown forward output: " + output_name);
+        }
+        if (upstream_node_idx >= forward_expr.nodes.size()) {
+            throw std::runtime_error("compileBackward explicit upstream node index is out of range for output: " + output_name);
+        }
+    }
+
+    return upstream_node_indices_by_output;
+}
+
 bool resolveLayoutFromDims(const std::vector<std::vector<uint64_t>>& inputs, std::vector<uint64_t>& outputDimensions) {
     if (inputs.empty()) {
         throw std::runtime_error("resolveLayoutFromDims requires at least one input shape.");
@@ -2565,6 +2593,7 @@ static std::string dbgDims(const std::vector<uint64_t>& dims) {
 PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                                          const std::vector<std::string>& wrt_names,
                                          const std::optional<std::unordered_map<std::string, std::string>>& upstream_input_names_by_output,
+                                         const std::optional<std::unordered_map<std::string, uint32_t>>& upstream_node_indices_by_output,
                                          const std::optional<std::unordered_map<std::string, std::vector<uint64_t>>>& forward_input_dims,
                                          bool accumulate_grad_outputs) {
     if (!forward_outputs.expr) {
@@ -2583,14 +2612,28 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
     const bool has_forward_dims = !forward_node_dims.empty();
     const std::vector<bool> node_reaches_requested_inputs = computeNodeReachesRequestedInputs(forward_expr, normalized_wrt);
 
-    if (forward_outputs.outputs.size() > 1 && !upstream_input_names_by_output.has_value()) {
+    const bool has_explicit_upstream_seeds = upstream_input_names_by_output.has_value() || upstream_node_indices_by_output.has_value();
+
+    if (forward_outputs.outputs.size() > 1 && !has_explicit_upstream_seeds) {
         throw std::runtime_error(
-            "buildBackwardOutputs for multi-output forward equations requires an explicit upstream input name map. The map may be partial "
+            "buildBackwardOutputs for multi-output forward equations requires an explicit upstream seed map. The map may be partial "
             "when some outputs have no incoming gradient.");
     }
 
-    if (upstream_input_names_by_output.has_value() && upstream_input_names_by_output->empty()) {
-        throw std::runtime_error("buildBackwardOutputs explicit upstream input map must contain at least one forward output.");
+    if (has_explicit_upstream_seeds &&
+        (!upstream_input_names_by_output.has_value() || upstream_input_names_by_output->empty()) &&
+        (!upstream_node_indices_by_output.has_value() || upstream_node_indices_by_output->empty())) {
+        throw std::runtime_error("buildBackwardOutputs explicit upstream seed map must contain at least one forward output.");
+    }
+
+    if (upstream_input_names_by_output.has_value() && upstream_node_indices_by_output.has_value()) {
+        for (const auto& [output_name, upstream_name] : upstream_input_names_by_output.value()) {
+            (void)upstream_name;
+            if (upstream_node_indices_by_output->contains(output_name)) {
+                throw std::runtime_error("buildBackwardOutputs received both an upstream input and an upstream node for output: " +
+                                         output_name);
+            }
+        }
     }
 
     BackwardGraphBuilder builder(forward_expr);
@@ -2598,14 +2641,26 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
 
     for (const NamedOutput& forward_output : forward_outputs.outputs) {
         uint32_t output_seed = UINT32_MAX;
-        if (upstream_input_names_by_output.has_value()) {
-            auto upstream_it = upstream_input_names_by_output->find(forward_output.name);
-            if (upstream_it == upstream_input_names_by_output->end()) {
+        if (has_explicit_upstream_seeds) {
+            if (upstream_node_indices_by_output.has_value()) {
+                auto upstream_node_it = upstream_node_indices_by_output->find(forward_output.name);
+                if (upstream_node_it != upstream_node_indices_by_output->end()) {
+                    output_seed = builder.cloneForward(upstream_node_it->second);
+                }
+            }
+
+            if (output_seed == UINT32_MAX && upstream_input_names_by_output.has_value()) {
+                auto upstream_it = upstream_input_names_by_output->find(forward_output.name);
+                if (upstream_it != upstream_input_names_by_output->end()) {
+                    output_seed = builder.input(upstream_it->second);
+                }
+            }
+
+            if (output_seed == UINT32_MAX) {
                 // A partial explicit upstream map means this forward output did not receive
                 // an incoming gradient, so it contributes nothing to the requested wrt gradients.
                 continue;
             }
-            output_seed = builder.input(upstream_it->second);
         } else {
             output_seed = builder.scalar(1.0);
         }
@@ -3968,6 +4023,7 @@ PhysicalOutputs buildBackwardOutputs(const PhysicalOutputs& forward_outputs,
     return buildBackwardOutputsImpl(forward_outputs,
                                     wrt_names,
                                     normalizeUpstreamInputNamesByOutput(forward_outputs, upstream_input_name),
+                                    std::nullopt,
                                     forward_input_dims,
                                     accumulate_grad_outputs);
 }
@@ -3980,6 +4036,21 @@ PhysicalOutputs buildBackwardOutputs(const PhysicalOutputs& forward_outputs,
     return buildBackwardOutputsImpl(forward_outputs,
                                     wrt_names,
                                     normalizeUpstreamInputNamesByOutput(forward_outputs, upstream_input_names_by_output),
+                                    std::nullopt,
+                                    forward_input_dims,
+                                    accumulate_grad_outputs);
+}
+
+PhysicalOutputs buildBackwardOutputs(const PhysicalOutputs& forward_outputs,
+                                     const std::vector<std::string>& wrt_names,
+                                     const std::unordered_map<std::string, std::string>& upstream_input_names_by_output,
+                                     const std::unordered_map<std::string, uint32_t>& upstream_node_indices_by_output,
+                                     const std::optional<std::unordered_map<std::string, std::vector<uint64_t>>>& forward_input_dims,
+                                     bool accumulate_grad_outputs) {
+    return buildBackwardOutputsImpl(forward_outputs,
+                                    wrt_names,
+                                    normalizeUpstreamInputNamesByOutput(forward_outputs, upstream_input_names_by_output),
+                                    normalizeUpstreamNodeIndicesByOutput(forward_outputs, upstream_node_indices_by_output),
                                     forward_input_dims,
                                     accumulate_grad_outputs);
 }

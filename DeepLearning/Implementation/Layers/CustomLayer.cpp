@@ -54,6 +54,125 @@ PreparedDynamicExpression::TensorMap filterTensorInputsForPhysicalOutputs(
     return filteredInputs;
 }
 
+std::unordered_map<uint32_t, NamedInput> inputBySlot(const PhysicalExpression& expr) {
+    std::unordered_map<uint32_t, NamedInput> bySlot;
+    for (const NamedInput& input : expr.inputs) {
+        bySlot.emplace(input.slot, input);
+    }
+    return bySlot;
+}
+
+uint32_t appendInputNode(PhysicalExpression& expr, const std::string& name, NamedInput::Kind kind) {
+    ExprNode node{};
+    switch (kind) {
+        case NamedInput::Kind::Tensor:
+            node.op = ExprOp::INPUT;
+            break;
+        case NamedInput::Kind::RuntimeScalarFp32:
+            node.op = ExprOp::RUNTIME_SCALAR;
+            break;
+        case NamedInput::Kind::TensorRuntimeScalar:
+            node.op = ExprOp::TENSOR_RUNTIME_SCALAR;
+            break;
+    }
+    node.input_slot = expr.getOrCreateInputSlot(name, kind);
+    const uint32_t nodeIndex = static_cast<uint32_t>(expr.nodes.size());
+    expr.nodes.push_back(std::move(node));
+    return nodeIndex;
+}
+
+uint32_t appendInputNode(PhysicalExpression& expr, const NamedInput& input) {
+    return appendInputNode(expr, input.name, input.kind);
+}
+
+uint32_t appendTensorInputNode(PhysicalExpression& expr, const std::string& name) {
+    return appendInputNode(expr, name, NamedInput::Kind::Tensor);
+}
+
+uint32_t cloneExpressionNodeWithInputReplacements(const PhysicalExpression& src,
+                                                  uint32_t srcNodeIndex,
+                                                  PhysicalExpression& dst,
+                                                  const std::unordered_map<std::string, uint32_t>& inputReplacements,
+                                                  const std::unordered_map<uint32_t, NamedInput>& srcInputBySlot,
+                                                  uint32_t cudaKernelExpressionOffset,
+                                                  std::unordered_map<uint32_t, uint32_t>& clonedNodes) {
+    auto existing = clonedNodes.find(srcNodeIndex);
+    if (existing != clonedNodes.end()) {
+        return existing->second;
+    }
+    if (srcNodeIndex >= src.nodes.size()) {
+        throw runtime_error("CustomLayer fused CustomLoss gradient expression has a node index out of range.");
+    }
+
+    const ExprNode& srcNode = src.nodes[srcNodeIndex];
+    if (srcNode.op == ExprOp::INPUT || srcNode.op == ExprOp::RUNTIME_SCALAR || srcNode.op == ExprOp::TENSOR_RUNTIME_SCALAR) {
+        auto inputIt = srcInputBySlot.find(srcNode.input_slot);
+        if (inputIt == srcInputBySlot.end()) {
+            throw runtime_error("CustomLayer fused CustomLoss gradient expression contains an input node with an unknown slot.");
+        }
+
+        auto replacementIt = inputReplacements.find(inputIt->second.name);
+        if (replacementIt == inputReplacements.end()) {
+            throw runtime_error("CustomLayer fused CustomLoss gradient expression contains unsupported input '" + inputIt->second.name +
+                                "'. Only the predictions and labels inputs are supported for fused CustomLoss gradients.");
+        }
+        clonedNodes[srcNodeIndex] = replacementIt->second;
+        return replacementIt->second;
+    }
+
+    auto cloneRef = [&](uint32_t maybeNodeIndex) -> uint32_t {
+        if (maybeNodeIndex == UINT32_MAX) {
+            return UINT32_MAX;
+        }
+        return cloneExpressionNodeWithInputReplacements(
+            src, maybeNodeIndex, dst, inputReplacements, srcInputBySlot, cudaKernelExpressionOffset, clonedNodes);
+    };
+
+    ExprNode cloned = srcNode;
+    cloned.lhs = cloneRef(srcNode.lhs);
+    cloned.rhs = cloneRef(srcNode.rhs);
+    cloned.aux = cloneRef(srcNode.aux);
+    cloned.alpha_node = cloneRef(srcNode.alpha_node);
+    cloned.beta_node = cloneRef(srcNode.beta_node);
+    cloned.matmul_epilogue_aux = cloneRef(srcNode.matmul_epilogue_aux);
+    cloned.attention_seq_len_q_node = cloneRef(srcNode.attention_seq_len_q_node);
+    cloned.attention_seq_len_kv_node = cloneRef(srcNode.attention_seq_len_kv_node);
+    cloned.attention_ragged_offset_q_node = cloneRef(srcNode.attention_ragged_offset_q_node);
+    cloned.attention_ragged_offset_kv_node = cloneRef(srcNode.attention_ragged_offset_kv_node);
+    cloned.attention_page_table_k_node = cloneRef(srcNode.attention_page_table_k_node);
+    cloned.attention_page_table_v_node = cloneRef(srcNode.attention_page_table_v_node);
+    cloned.attention_dropout_seed_node = cloneRef(srcNode.attention_dropout_seed_node);
+    cloned.attention_dropout_offset_node = cloneRef(srcNode.attention_dropout_offset_node);
+    cloned.attention_descale_q_node = cloneRef(srcNode.attention_descale_q_node);
+    cloned.attention_descale_k_node = cloneRef(srcNode.attention_descale_k_node);
+    cloned.attention_descale_v_node = cloneRef(srcNode.attention_descale_v_node);
+    cloned.attention_descale_s_node = cloneRef(srcNode.attention_descale_s_node);
+    cloned.attention_scale_s_node = cloneRef(srcNode.attention_scale_s_node);
+    cloned.attention_scale_o_node = cloneRef(srcNode.attention_scale_o_node);
+    cloned.attention_amax_s_node = cloneRef(srcNode.attention_amax_s_node);
+    cloned.attention_amax_o_node = cloneRef(srcNode.attention_amax_o_node);
+    for (uint32_t& inputNode : cloned.cuda_kernel_input_nodes) {
+        inputNode = cloneRef(inputNode);
+    }
+    if (cloned.cuda_kernel_spec_index != UINT32_MAX) {
+        cloned.cuda_kernel_spec_index += cudaKernelExpressionOffset;
+    }
+
+    const uint32_t clonedIndex = static_cast<uint32_t>(dst.nodes.size());
+    dst.nodes.push_back(std::move(cloned));
+    clonedNodes[srcNodeIndex] = clonedIndex;
+    return clonedIndex;
+}
+
+std::string customLossFusedLabelsInputName(uint32_t outputFlatIndex) {
+    return "__custom_loss_fused_labels_" + std::to_string(outputFlatIndex);
+}
+
+std::string customLossFusedSeedInputName(const std::string& outputName) {
+    return "__custom_loss_fused_seed_" + outputName;
+}
+
+
 }  // namespace
 
 CustomLayer::CustomLayer(DynamicExpression expr,
@@ -365,6 +484,364 @@ bool CustomLayer::canFuseOptimizerUpdatesForApplication(uint32_t applicationInde
     return applications.size() == 1 && inputNames.size() == 1;
 }
 
+bool CustomLayer::applicationHasFusedCustomLossGradient(uint32_t applicationIndex) const {
+    return applicationIndex < applications.size() && !applications[applicationIndex].fusedCustomLossGradientsByOutput.empty();
+}
+
+uint32_t CustomLayer::getNumFusedCustomLossGradients() const {
+    return static_cast<uint32_t>(fusedCustomLossGradientByOutputFlatIndex.size());
+}
+
+bool CustomLayer::registerFusedCustomLossGradient(const Tensor& predictions,
+                                                 const Tensor& labels,
+                                                 DynamicExpression gradientExpression,
+                                                 std::string predictionsName,
+                                                 std::string labelsName,
+                                                 std::string gradientName) {
+    if (isInferenceOnly()) {
+        return false;
+    }
+
+    ensurePortStorageAllocated();
+
+    std::optional<uint32_t> matchedFlatIndex;
+    for (uint32_t flat = 0; flat < featureOutputs.size(); ++flat) {
+        if (featureOutputs[flat].has_value() && featureOutputs[flat].value() == predictions) {
+            if (matchedFlatIndex.has_value()) {
+                return false;
+            }
+            matchedFlatIndex = flat;
+        }
+    }
+
+    if (!matchedFlatIndex.has_value()) {
+        return false;
+    }
+    if (fusedCustomLossGradientByOutputFlatIndex.contains(matchedFlatIndex.value())) {
+        return false;
+    }
+
+    FusedCustomLossGradient fused{predictions,
+                                  labels,
+                                  std::move(gradientExpression),
+                                  std::move(predictionsName),
+                                  std::move(labelsName),
+                                  std::move(gradientName),
+                                  customLossFusedLabelsInputName(matchedFlatIndex.value())};
+    fusedCustomLossGradientByOutputFlatIndex.emplace(matchedFlatIndex.value(), std::move(fused));
+    return true;
+}
+
+PhysicalOutputs CustomLayer::buildBackwardOutputsForApplication(uint32_t applicationIndex,
+                                                                const std::vector<std::string>& wrtNames,
+                                                                bool accumulateGradOutputs) {
+    ApplicationState& app = applications[applicationIndex];
+
+    PreparedDynamicExpression::ShapeMap forwardInputDims;
+    for (const auto& [name, tensor] : app.forwardPrepared->stampInputs()) {
+        forwardInputDims[name] = tensor.getDimensions();
+    }
+
+    if (app.fusedCustomLossGradientsByOutput.empty()) {
+        return buildBackwardOutputs(app.forwardPrepared->equation().physicalOutputs(),
+                                    wrtNames,
+                                    app.upstreamInputNamesByOutput,
+                                    forwardInputDims,
+                                    accumulateGradOutputs);
+    }
+
+    const PhysicalOutputs& forwardOutputs = app.forwardPrepared->equation().physicalOutputs();
+    if (!forwardOutputs.expr) {
+        throw runtime_error("CustomLayer fused CustomLoss backward requires non-null forward expression.");
+    }
+
+    // Keep AutoDiff focused on the driving layer only.  We first build the normal
+    // layer-backward graph with a synthetic upstream-gradient input for each fused
+    // loss output, then inline the CustomLoss gradient expression into the resulting
+    // backward expression by replacing that synthetic seed input.  This makes the
+    // loss gradient an adjoint seed without adding the loss-gradient graph to the
+    // primal forward graph that AutoDiff differentiates through.
+    std::unordered_map<std::string, std::string> upstreamInputNamesByOutput = app.upstreamInputNamesByOutput;
+    std::unordered_map<std::string, std::string> fusedSeedInputNameByOutput;
+    for (const auto& [outputName, fused] : app.fusedCustomLossGradientsByOutput) {
+        (void)fused;
+        const std::string seedName = customLossFusedSeedInputName(outputName);
+        upstreamInputNamesByOutput.emplace(outputName, seedName);
+        fusedSeedInputNameByOutput.emplace(outputName, seedName);
+    }
+
+    PhysicalOutputs seededBackwardOutputs = buildBackwardOutputs(forwardOutputs,
+                                                                 wrtNames,
+                                                                 upstreamInputNamesByOutput,
+                                                                 forwardInputDims,
+                                                                 accumulateGradOutputs);
+    if (!seededBackwardOutputs.expr) {
+        throw runtime_error("CustomLayer fused CustomLoss backward produced a null backward expression.");
+    }
+
+    PhysicalOutputs fusedBackwardOutputs;
+    fusedBackwardOutputs.expr = std::make_shared<PhysicalExpression>();
+    PhysicalExpression& fusedExpr = *fusedBackwardOutputs.expr;
+
+    std::unordered_map<std::string, uint32_t> fusedExprInputNodeByName;
+    auto ensureInputNode = [&](const NamedInput& input) -> uint32_t {
+        auto existing = fusedExprInputNodeByName.find(input.name);
+        if (existing != fusedExprInputNodeByName.end()) {
+            return existing->second;
+        }
+        uint32_t node = appendInputNode(fusedExpr, input);
+        fusedExprInputNodeByName.emplace(input.name, node);
+        return node;
+    };
+
+    auto isFusedSeedInputName = [&](const std::string& name) -> bool {
+        for (const auto& [_, seedName] : fusedSeedInputNameByOutput) {
+            if (seedName == name) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    // Recreate every real backward input in the final expression.  Synthetic seed
+    // inputs are intentionally omitted because they are replaced by the inlined
+    // CustomLoss gradient expression below.
+    for (const NamedInput& input : seededBackwardOutputs.expr->inputs) {
+        if (!isFusedSeedInputName(input.name)) {
+            ensureInputNode(input);
+        }
+    }
+    // The inlined loss gradient may need forward inputs that the layer-gradient
+    // expression itself did not otherwise need for the requested wrt set.
+    for (const NamedInput& input : forwardOutputs.expr->inputs) {
+        ensureInputNode(input);
+    }
+
+    std::unordered_map<std::string, uint32_t> seedReplacementNodeByName;
+    for (const auto& [outputName, fused] : app.fusedCustomLossGradientsByOutput) {
+        auto seedNameIt = fusedSeedInputNameByOutput.find(outputName);
+        if (seedNameIt == fusedSeedInputNameByOutput.end()) {
+            throw runtime_error("CustomLayer fused CustomLoss gradient lost synthetic seed for output: " + outputName);
+        }
+
+        std::optional<uint32_t> forwardOutputNode;
+        for (const NamedOutput& output : forwardOutputs.outputs) {
+            if (output.name == outputName) {
+                forwardOutputNode = output.node_idx;
+                break;
+            }
+        }
+        if (!forwardOutputNode.has_value()) {
+            throw runtime_error("CustomLayer fused CustomLoss gradient references unknown output: " + outputName);
+        }
+
+        PreparedDynamicExpression::TensorMap gradientInputs;
+        gradientInputs.emplace(fused.predictionsName, fused.predictionsTensor);
+        gradientInputs.emplace(fused.labelsName, fused.labelsTensor);
+
+        DynamicExpressionBuild gradientBuild = fused.gradientExpression.build(gradientInputs, {}, computeStream(applicationIndex));
+        if (!gradientBuild.tensor_scalar_inputs.empty()) {
+            throw runtime_error("CustomLayer fused CustomLoss gradients do not support tensor-scalar runtime inputs.");
+        }
+        if (!gradientBuild.preallocated_outputs.empty()) {
+            throw runtime_error("CustomLayer fused CustomLoss gradients must not require preallocated outputs.");
+        }
+
+        const PhysicalOutputs gradientOutputs = gradientBuild.equation->physicalOutputs();
+        if (!gradientOutputs.expr) {
+            throw runtime_error("CustomLayer fused CustomLoss gradient expression produced a null physical expression.");
+        }
+
+        std::optional<uint32_t> gradientOutputNode;
+        for (const NamedOutput& gradientOutput : gradientOutputs.outputs) {
+            if (gradientOutput.name == fused.gradientName) {
+                gradientOutputNode = gradientOutput.node_idx;
+                break;
+            }
+        }
+        if (!gradientOutputNode.has_value()) {
+            throw runtime_error("CustomLayer fused CustomLoss gradient expression did not produce expected output: " + fused.gradientName);
+        }
+
+        const uint32_t forwardCudaKernelExpressionOffset = static_cast<uint32_t>(fusedExpr.cuda_kernel_expressions.size());
+        fusedExpr.cuda_kernel_expressions.insert(fusedExpr.cuda_kernel_expressions.end(),
+                                                forwardOutputs.expr->cuda_kernel_expressions.begin(),
+                                                forwardOutputs.expr->cuda_kernel_expressions.end());
+
+        std::unordered_map<std::string, uint32_t> forwardInputReplacements;
+        for (const NamedInput& input : forwardOutputs.expr->inputs) {
+            auto inputNodeIt = fusedExprInputNodeByName.find(input.name);
+            if (inputNodeIt == fusedExprInputNodeByName.end()) {
+                throw runtime_error("CustomLayer fused CustomLoss backward missing forward input clone for: " + input.name);
+            }
+            forwardInputReplacements.emplace(input.name, inputNodeIt->second);
+        }
+
+        std::unordered_map<uint32_t, uint32_t> clonedForwardNodes;
+        const uint32_t predictionNode = cloneExpressionNodeWithInputReplacements(*forwardOutputs.expr,
+                                                                                 forwardOutputNode.value(),
+                                                                                 fusedExpr,
+                                                                                 forwardInputReplacements,
+                                                                                 inputBySlot(*forwardOutputs.expr),
+                                                                                 forwardCudaKernelExpressionOffset,
+                                                                                 clonedForwardNodes);
+
+        const uint32_t labelsInputNode = appendTensorInputNode(fusedExpr, fused.fusedLabelsInputName);
+
+        const uint32_t gradientCudaKernelExpressionOffset = static_cast<uint32_t>(fusedExpr.cuda_kernel_expressions.size());
+        fusedExpr.cuda_kernel_expressions.insert(fusedExpr.cuda_kernel_expressions.end(),
+                                                gradientOutputs.expr->cuda_kernel_expressions.begin(),
+                                                gradientOutputs.expr->cuda_kernel_expressions.end());
+
+        std::unordered_map<std::string, uint32_t> gradientInputReplacements{
+            {fused.predictionsName, predictionNode},
+            {fused.labelsName, labelsInputNode},
+        };
+        std::unordered_map<uint32_t, uint32_t> clonedGradientNodes;
+        const uint32_t fusedSeedNode = cloneExpressionNodeWithInputReplacements(*gradientOutputs.expr,
+                                                                                gradientOutputNode.value(),
+                                                                                fusedExpr,
+                                                                                gradientInputReplacements,
+                                                                                inputBySlot(*gradientOutputs.expr),
+                                                                                gradientCudaKernelExpressionOffset,
+                                                                                clonedGradientNodes);
+        seedReplacementNodeByName.emplace(seedNameIt->second, fusedSeedNode);
+    }
+
+    const uint32_t backwardCudaKernelExpressionOffset = static_cast<uint32_t>(fusedExpr.cuda_kernel_expressions.size());
+    fusedExpr.cuda_kernel_expressions.insert(fusedExpr.cuda_kernel_expressions.end(),
+                                            seededBackwardOutputs.expr->cuda_kernel_expressions.begin(),
+                                            seededBackwardOutputs.expr->cuda_kernel_expressions.end());
+
+    std::unordered_map<std::string, uint32_t> backwardInputReplacements;
+    for (const NamedInput& input : seededBackwardOutputs.expr->inputs) {
+        auto seedIt = seedReplacementNodeByName.find(input.name);
+        if (seedIt != seedReplacementNodeByName.end()) {
+            backwardInputReplacements.emplace(input.name, seedIt->second);
+            continue;
+        }
+
+        auto inputNodeIt = fusedExprInputNodeByName.find(input.name);
+        if (inputNodeIt == fusedExprInputNodeByName.end()) {
+            throw runtime_error("CustomLayer fused CustomLoss backward missing real input clone for: " + input.name);
+        }
+        backwardInputReplacements.emplace(input.name, inputNodeIt->second);
+    }
+
+    std::unordered_map<std::string, std::string> inputNameByGradOutputName;
+    for (const std::string& inputName : inputNames) {
+        inputNameByGradOutputName.emplace(inputName + "_grad", inputName);
+    }
+
+    uint32_t numInputGradientOutputs = 0;
+    for (const NamedOutput& output : seededBackwardOutputs.outputs) {
+        if (inputNameByGradOutputName.contains(output.name)) {
+            ++numInputGradientOutputs;
+        }
+    }
+    const bool disambiguateInputGradientOutputs = numInputGradientOutputs > 1;
+
+    auto makeInputSpecificTerminalGradientNode = [&](const std::string& outputName, uint32_t gradNode) -> uint32_t {
+        auto inputNameIt = inputNameByGradOutputName.find(outputName);
+        if (inputNameIt == inputNameByGradOutputName.end() || !disambiguateInputGradientOutputs) {
+            return gradNode;
+        }
+
+        auto inputNodeIt = fusedExprInputNodeByName.find(inputNameIt->second);
+        if (inputNodeIt == fusedExprInputNodeByName.end()) {
+            throw runtime_error("CustomLayer fused CustomLoss backward missing input node for terminal gradient: " + inputNameIt->second);
+        }
+
+        // The expression compiler is allowed to coalesce equivalent final outputs onto one physical output tensor.
+        // That is normally valid, but graph-level input-error outputs are already connected to distinct upstream
+        // ports before this backward equation is stamped.  When one fused-loss backward stamp writes multiple input
+        // gradients, make each terminal input gradient structurally depend on its corresponding input through an
+        // input-specific zero term, so equivalent derivatives such as d((x + y) * scale)/dx and
+        // d((x + y) * scale)/dy still materialize into their own preconnected tensors.
+        ExprNode zeroNode{};
+        zeroNode.op = ExprOp::SUB;
+        zeroNode.lhs = inputNodeIt->second;
+        zeroNode.rhs = inputNodeIt->second;
+        const uint32_t zeroNodeIndex = static_cast<uint32_t>(fusedExpr.nodes.size());
+        fusedExpr.nodes.push_back(std::move(zeroNode));
+
+        ExprNode terminalNode{};
+        terminalNode.op = ExprOp::ADD;
+        terminalNode.lhs = gradNode;
+        terminalNode.rhs = zeroNodeIndex;
+
+        const auto logicalInputIt = app.forwardPrepared->stampInputs().find(inputNameIt->second);
+        if (logicalInputIt != app.forwardPrepared->stampInputs().end()) {
+            const DataType dtype = logicalInputIt->second.getDescriptor().getDataType();
+            terminalNode.output_dtype = dtype;
+            terminalNode.backward_output_dtype = dtype;
+        }
+
+        const uint32_t terminalNodeIndex = static_cast<uint32_t>(fusedExpr.nodes.size());
+        fusedExpr.nodes.push_back(std::move(terminalNode));
+        return terminalNodeIndex;
+    };
+
+    std::unordered_map<uint32_t, uint32_t> clonedBackwardNodes;
+    fusedBackwardOutputs.outputs.reserve(seededBackwardOutputs.outputs.size());
+    for (const NamedOutput& output : seededBackwardOutputs.outputs) {
+        const uint32_t clonedOutputNode = cloneExpressionNodeWithInputReplacements(*seededBackwardOutputs.expr,
+                                                                                   output.node_idx,
+                                                                                   fusedExpr,
+                                                                                   backwardInputReplacements,
+                                                                                   inputBySlot(*seededBackwardOutputs.expr),
+                                                                                   backwardCudaKernelExpressionOffset,
+                                                                                   clonedBackwardNodes);
+        const uint32_t terminalOutputNode = makeInputSpecificTerminalGradientNode(output.name, clonedOutputNode);
+        fusedBackwardOutputs.outputs.push_back(NamedOutput{output.name, terminalOutputNode});
+    }
+
+    return fusedBackwardOutputs;
+}
+
+std::shared_ptr<StampedExecutionPlan> CustomLayer::stampBackwardForApplication(
+    uint32_t applicationIndex,
+    const std::vector<std::string>& wrtNames,
+    bool accumulateGradOutputs,
+    const PreparedDynamicExpression::TensorMap& preallocatedGradOutputs,
+    Stream& runStream) {
+    ApplicationState& app = applications[applicationIndex];
+    if (wrtNames.empty()) {
+        return nullptr;
+    }
+
+    if (!applicationHasFusedCustomLossGradient(applicationIndex)) {
+        return std::make_shared<StampedExecutionPlan>(app.forwardPrepared->stampBackward(wrtNames,
+                                                                                         app.upstreamInputNamesByOutput,
+                                                                                         accumulateGradOutputs,
+                                                                                         app.backwardAdditionalInputsByName,
+                                                                                         {},
+                                                                                         preallocatedGradOutputs));
+    }
+
+    PhysicalOutputs backwardOutputs = buildBackwardOutputsForApplication(applicationIndex, wrtNames, accumulateGradOutputs);
+    FusedEquation backwardEquation = FusedEquation::compile(backwardOutputs, placement.getDeviceNum());
+
+    PreparedDynamicExpression::TensorMap stampInputs = app.forwardInputsByName;
+    for (const auto& [name, tensor] : app.backwardAdditionalInputsByName) {
+        stampInputs[name] = tensor;
+    }
+    if (accumulateGradOutputs) {
+        // The custom fused-loss path builds the backward graph directly instead of going through
+        // PreparedDynamicExpression::stampBackward(), so the FusedEquation does not carry its
+        // usual BackwardEquationConfig metadata.  AutoDiff still represents accumulation as
+        // `wrt_grad = wrt_grad + newly_computed_grad`, which means the existing gradient buffer
+        // is a real tensor input as well as the preallocated output.  Bind those tensors explicitly
+        // for this custom path.
+        for (const auto& [name, tensor] : preallocatedGradOutputs) {
+            stampInputs[name] = tensor;
+        }
+    }
+
+    return std::make_shared<StampedExecutionPlan>(
+        backwardEquation.stamp(stampInputs, runStream, app.forwardPrepared->tensorScalarInputs(), preallocatedGradOutputs));
+}
+
 std::shared_ptr<StampedExecutionPlan> CustomLayer::buildFusedOptimizerUpdatePlan(
     uint32_t applicationIndex,
     const std::vector<std::string>& fusedParameterTargets,
@@ -378,16 +855,7 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::buildFusedOptimizerUpdatePlan
 
     const ApplicationState& app = applications[applicationIndex];
 
-    PreparedDynamicExpression::ShapeMap forwardInputDims;
-    for (const auto& [name, tensor] : app.forwardPrepared->stampInputs()) {
-        forwardInputDims[name] = tensor.getDimensions();
-    }
-
-    PhysicalOutputs backwardOutputs = buildBackwardOutputs(app.forwardPrepared->equation().physicalOutputs(),
-                                                           fusedParameterTargets,
-                                                           app.upstreamInputNamesByOutput,
-                                                           forwardInputDims,
-                                                           false);
+    PhysicalOutputs backwardOutputs = buildBackwardOutputsForApplication(applicationIndex, fusedParameterTargets, false);
 
     std::unordered_map<std::string, Expression> gradientsByParameter;
     for (const NamedOutput& output : backwardOutputs.outputs) {
@@ -601,6 +1069,10 @@ PreparedDynamicExpression::TensorMap CustomLayer::buildBackwardAdditionalInputs(
                                     "', but that error input is no longer connected.");
             }
             backwardAdditionalInputs[upstreamGradientName] = errorInputs[flat].value();
+        }
+        for (const auto& [outputName, fusedLossGradient] : app.fusedCustomLossGradientsByOutput) {
+            (void)outputName;
+            backwardAdditionalInputs[fusedLossGradient.fusedLabelsInputName] = fusedLossGradient.labelsTensor;
         }
         return backwardAdditionalInputs;
     }
@@ -851,6 +1323,7 @@ void CustomLayer::compileImpl() {
         app.backwardInputGradOutputsByName.clear();
         app.expectedBackwardErrorInputTensorIds.clear();
         app.upstreamInputNamesByOutput.clear();
+        app.fusedCustomLossGradientsByOutput.clear();
         app.upstreamOutputNames.clear();
         app.activeParameterTargetNames.clear();
         app.backwardGradientPatternCompiled = false;
@@ -882,7 +1355,12 @@ void CustomLayer::compileImpl() {
             const uint32_t flat = outputFlatIndex(applicationIndex, outputPort);
             if (flat < errorInputs.size() && errorInputs[flat].has_value()) {
                 app.expectedBackwardErrorInputTensorIds.insert(errorInputs[flat].value().getTensorId());
-                app.upstreamInputNamesByOutput[outputNames[outputPort]] = errorInputNameForOutput(outputPort);
+                auto fusedLossIt = fusedCustomLossGradientByOutputFlatIndex.find(flat);
+                if (fusedLossIt != fusedCustomLossGradientByOutputFlatIndex.end()) {
+                    app.fusedCustomLossGradientsByOutput.emplace(outputNames[outputPort], fusedLossIt->second);
+                } else {
+                    app.upstreamInputNamesByOutput[outputNames[outputPort]] = errorInputNameForOutput(outputPort);
+                }
                 app.upstreamOutputNames.insert(outputNames[outputPort]);
             }
         }
@@ -908,13 +1386,21 @@ void CustomLayer::compileImpl() {
         app.backwardInputGradOutputsByName = buildBackwardInputGradOutputs(applicationIndex);
 
         if (!inputTargets.empty() && !app.backwardAdditionalInputsByName.empty()) {
-            app.backwardErrorStamped =
-                std::make_shared<StampedExecutionPlan>(app.forwardPrepared->stampBackward(inputTargets,
-                                                                                          app.upstreamInputNamesByOutput,
-                                                                                          false,
-                                                                                          app.backwardAdditionalInputsByName,
-                                                                                          {},
-                                                                                          app.backwardInputGradOutputsByName));
+            if (applicationHasFusedCustomLossGradient(applicationIndex)) {
+                app.backwardErrorStamped = stampBackwardForApplication(applicationIndex,
+                                                                       inputTargets,
+                                                                       false,
+                                                                       app.backwardInputGradOutputsByName,
+                                                                       computeStream(applicationIndex));
+            } else {
+                app.backwardErrorStamped =
+                    std::make_shared<StampedExecutionPlan>(app.forwardPrepared->stampBackward(inputTargets,
+                                                                                              app.upstreamInputNamesByOutput,
+                                                                                              false,
+                                                                                              app.backwardAdditionalInputsByName,
+                                                                                              {},
+                                                                                              app.backwardInputGradOutputsByName));
+            }
         }
 
         std::vector<std::string> allTrainableParameterTargets;
@@ -983,29 +1469,45 @@ void CustomLayer::compileImpl() {
             }
 
             if (!allMaterializedParameterTargets.empty()) {
-                PreparedDynamicExpression gradientPrepared =
-                    layerDefinitionExpression.prepare(app.forwardInputsByName, app.forwardOutputsByName, gradientUpdateStream.value());
-                validatePreparedExpressionInputs(gradientPrepared);
-
                 // Every application with downstream backprop gets a clear-first stamp that writes every materialized
                 // gradient buffer. Parameters handled by backwardWeightsFusedOptimizerUpdateStamped intentionally
                 // skip this dense gradient write/read round trip.
-                app.backwardWeightsClearStamped =
-                    std::make_shared<StampedExecutionPlan>(gradientPrepared.stampBackward(allMaterializedParameterTargets,
-                                                                                          app.upstreamInputNamesByOutput,
-                                                                                          false,
-                                                                                          app.backwardAdditionalInputsByName,
-                                                                                          {},
-                                                                                          allMaterializedParameterPreallocatedOutputs));
+                if (applicationHasFusedCustomLossGradient(applicationIndex)) {
+                    app.backwardWeightsClearStamped = stampBackwardForApplication(applicationIndex,
+                                                                                  allMaterializedParameterTargets,
+                                                                                  false,
+                                                                                  allMaterializedParameterPreallocatedOutputs,
+                                                                                  gradientUpdateStream.value());
 
-                if (!activeMaterializedParameterTargets.empty()) {
-                    app.backwardWeightsAccumulateStamped =
-                        std::make_shared<StampedExecutionPlan>(gradientPrepared.stampBackward(activeMaterializedParameterTargets,
+                    if (!activeMaterializedParameterTargets.empty()) {
+                        app.backwardWeightsAccumulateStamped = stampBackwardForApplication(applicationIndex,
+                                                                                           activeMaterializedParameterTargets,
+                                                                                           true,
+                                                                                           activeMaterializedParameterPreallocatedOutputs,
+                                                                                           gradientUpdateStream.value());
+                    }
+                } else {
+                    PreparedDynamicExpression gradientPrepared =
+                        layerDefinitionExpression.prepare(app.forwardInputsByName, app.forwardOutputsByName, gradientUpdateStream.value());
+                    validatePreparedExpressionInputs(gradientPrepared);
+
+                    app.backwardWeightsClearStamped =
+                        std::make_shared<StampedExecutionPlan>(gradientPrepared.stampBackward(allMaterializedParameterTargets,
                                                                                               app.upstreamInputNamesByOutput,
-                                                                                              true,
+                                                                                              false,
                                                                                               app.backwardAdditionalInputsByName,
                                                                                               {},
-                                                                                              activeMaterializedParameterPreallocatedOutputs));
+                                                                                              allMaterializedParameterPreallocatedOutputs));
+
+                    if (!activeMaterializedParameterTargets.empty()) {
+                        app.backwardWeightsAccumulateStamped =
+                            std::make_shared<StampedExecutionPlan>(gradientPrepared.stampBackward(activeMaterializedParameterTargets,
+                                                                                                  app.upstreamInputNamesByOutput,
+                                                                                                  true,
+                                                                                                  app.backwardAdditionalInputsByName,
+                                                                                                  {},
+                                                                                                  activeMaterializedParameterPreallocatedOutputs));
+                    }
                 }
             }
         }

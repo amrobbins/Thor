@@ -106,7 +106,7 @@ class NetworkInput : public Layer {
             loadStream.waitEvent(stream.putEvent());
         }
 
-        nextLayer.value()->forward(featureOutput, validationPass);
+        nextLayer.value()->forward(featureOutput, validationPass, batchSize);
     }
 
     void backward(std::optional<Tensor> errorInput, uint32_t batchSize = 0) override {}

@@ -116,6 +116,7 @@ class Loss : public Layer {
         Layer::initialize();
         featureInputReceived = false;
         labelsReceived = false;
+        currentBatchSize = 0;
     }
 
     void forward(std::optional<Tensor> inputTensor, bool validationPass, uint32_t batchSize = 0) override {
@@ -136,6 +137,8 @@ class Loss : public Layer {
         // After all inputs have been received an empty input tensor is sent to indicate
         // that the layer is ready to perform the forward pass.
         if (inputTensor.has_value()) {
+            if (batchSize != 0)
+                currentBatchSize = batchSize;
             if (inputTensor.value() == featureInput.value())
                 forwardFeatures(inputTensor.value(), validationPass);
             else if (inputTensor.value() == labelsInput.value())
@@ -192,8 +195,10 @@ class Loss : public Layer {
         if (!previousLayer.has_value())
             return;
 
+        const uint32_t effectiveBatchSize = batchSize != 0 ? batchSize : currentBatchSize;
+
         // Expecting to get tail-recursion optimization of -O3 so that stack space does not build up here.
-        previousLayer.value()->backward(errorOutput);
+        previousLayer.value()->backward(errorOutput, effectiveBatchSize);
     }
 
     void ensureNoDeviceCrossing() override {
@@ -230,6 +235,7 @@ class Loss : public Layer {
 
     bool featureInputReceived;
     bool labelsReceived;
+    uint32_t currentBatchSize = 0;
 
     virtual void advanceDataIfReady(bool validationPass) {
         if (featureInputReceived && labelsReceived) {
@@ -241,14 +247,14 @@ class Loss : public Layer {
         }
 
         if (nextLayer.has_value())
-            nextLayer.value()->forward(featureOutput, validationPass);
+            nextLayer.value()->forward(featureOutput, validationPass, currentBatchSize);
 
         if (isInferenceOnly() || validationPass)
             return;
 
         // Initiate back propagation
         THOR_THROW_IF_FALSE(previousLayer.has_value());
-        backward(std::nullopt);
+        backward(std::nullopt, currentBatchSize);
     }
 };
 
