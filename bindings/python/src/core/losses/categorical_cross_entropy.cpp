@@ -13,7 +13,44 @@ using namespace Thor;
 
 using DataType = ThorImplementation::DataType;
 using LossShape = Loss::LossShape;
-using LabelType = Loss::LabelType;
+
+namespace {
+void validateReportedLossShape(LossShape reported_loss_shape, const string &loss_name) {
+    if (reported_loss_shape != LossShape::BATCH && reported_loss_shape != LossShape::CLASSWISE &&
+        reported_loss_shape != LossShape::ELEMENTWISE && reported_loss_shape != LossShape::RAW) {
+        string error_message =
+            "Invalid value " + to_string((int)reported_loss_shape) + " passed for enum reported_loss_shape to " + loss_name + ".";
+        throw nb::value_error(error_message.c_str());
+    }
+}
+
+template <typename BuilderT>
+void setReportedLossShape(BuilderT &builder, LossShape reported_loss_shape) {
+    if (reported_loss_shape == LossShape::BATCH) {
+        builder.reportsBatchLoss();
+    } else if (reported_loss_shape == LossShape::CLASSWISE) {
+        builder.reportsClasswiseLoss();
+    } else if (reported_loss_shape == LossShape::ELEMENTWISE) {
+        builder.reportsElementwiseLoss();
+    } else {
+        THOR_THROW_IF_FALSE(reported_loss_shape == LossShape::RAW);
+        builder.reportsRawLoss();
+    }
+}
+
+void validateCategoricalCommon(const string &loss_name, Tensor predictions, DataType loss_data_type, LossShape reported_loss_shape) {
+    if (predictions.getDimensions().size() != 1 || predictions.getDimensions()[0] <= 1) {
+        string error_message = loss_name + ": predictions must be a 1 dimensional tensor with more than one class but predictions is " +
+                               predictions.getDescriptorString();
+        throw nb::value_error(error_message.c_str());
+    }
+    if (loss_data_type != DataType::FP16 && loss_data_type != DataType::FP32) {
+        string error_message = loss_name + ": loss_data_type must be fp16 or fp32";
+        throw nb::value_error(error_message.c_str());
+    }
+    validateReportedLossShape(reported_loss_shape, loss_name);
+}
+}  // namespace
 
 void bind_categorical_cross_entropy(nb::module_ &losses) {
     auto categorical_cross_entropy = nb::class_<CategoricalCrossEntropy, Loss>(losses, "CategoricalCrossEntropy");
@@ -25,84 +62,24 @@ void bind_categorical_cross_entropy(nb::module_ &losses) {
            Network &network,
            Tensor predictions,
            Tensor labels,
-           LabelType label_type,
-           std::optional<int32_t> num_classes,
            DataType loss_data_type,
            LossShape reported_loss_shape) {
+            const string loss_name = "CategoricalCrossEntropy instance";
+            validateCategoricalCommon(loss_name, predictions, loss_data_type, reported_loss_shape);
+            if (labels.getDimensions().size() != 1 || labels.getDimensions()[0] <= 1) {
+                string error_message = loss_name + ": labels must be a 1 dimensional dense class vector but labels is " +
+                                       labels.getDescriptorString();
+                throw nb::value_error(error_message.c_str());
+            }
+            if (predictions.getDimensions()[0] != labels.getDimensions()[0]) {
+                string error_message = loss_name + ": mismatch between predictions size " + to_string(predictions.getDimensions()[0]) +
+                                       " and labels tensor size " + to_string(labels.getDimensions()[0]);
+                throw nb::value_error(error_message.c_str());
+            }
+
             CategoricalCrossEntropy::Builder builder;
-            builder.network(network);
-
-            // Ensure everything matches up.
-            if (label_type == LabelType::ONE_HOT) {
-                if (predictions.getDimensions().size() != 1) {
-                    string error_message =
-                        "CategoricalCrossEntropy instance: one_hot predictions must have 1 dimension but tensor format is " +
-                        predictions.getDescriptorString();
-                    throw nb::value_error(error_message.c_str());
-                }
-                if (labels.getDimensions().size() != 1) {
-                    string error_message = "CategoricalCrossEntropy instance: one_hot labels must have 1 dimension but tensor format is " +
-                                           labels.getDescriptorString();
-                    throw nb::value_error(error_message.c_str());
-                }
-                if (num_classes.has_value() &&
-                    (uint64_t(num_classes.value()) != predictions.getDimensions()[0] || num_classes.value() <= 0)) {
-                    string error_message = "CategoricalCrossEntropy instance: mismatch between num_classes " +
-                                           to_string(num_classes.value()) + " and predictions tensor size " +
-                                           to_string(predictions.getDimensions()[0]) +
-                                           ". Either set num_classes to match, don't pass num_classes, or fix your predictions tensor.";
-                    throw nb::value_error(error_message.c_str());
-                }
-                if (predictions.getDimensions()[0] != labels.getDimensions()[0]) {
-                    string error_message = "CategoricalCrossEntropy instance: mismatch between predictions size " +
-                                           to_string(predictions.getDimensions()[0]) + " and labels tensor size " +
-                                           to_string(labels.getDimensions()[0]);
-                    throw nb::value_error(error_message.c_str());
-                }
-
-                builder.receivesOneHotLabels();
-            } else if (label_type == LabelType::INDEX) {
-                if (!num_classes.has_value()) {
-                    throw nb::value_error(
-                        "CategoricalCrossEntropy instance: label_type set to LabelType.index but num_classes is None. You must pass "
-                        "num_classes in this case.");
-                } else if (num_classes.value() <= 0) {
-                    string error_message =
-                        "CategoricalCrossEntropy instance: num_classes must be a positive integer when using index labels. You passed "
-                        "num_classes == " +
-                        to_string(num_classes.value());
-                    throw nb::value_error(error_message.c_str());
-                }
-
-                if (labels.getDimensions().size() != 1 || labels.getDimensions()[0] != 1) {
-                    string error_message = "CategoricalCrossEntropy instance: labels tensor is not sized right. label tensor is " +
-                                           labels.getDescriptorString() +
-                                           ". labels must be a 1 dimensional tensor of size 1. since label_type == index";
-                    throw nb::value_error(error_message.c_str());
-                }
-
-                builder.receivesClassIndexLabels(num_classes.value());
-            } else {
-                string error_message =
-                    "Invalid value " + to_string((int)label_type) + " passed for enum LabelType to CategoricalCrossEntropy instance.";
-                throw nb::value_error(error_message.c_str());
-            }
-
-            if (reported_loss_shape == LossShape::BATCH) {
-                builder.reportsBatchLoss();
-            } else if (reported_loss_shape == LossShape::CLASSWISE) {
-                builder.reportsClasswiseLoss();
-            } else if (reported_loss_shape == LossShape::ELEMENTWISE) {
-                builder.reportsElementwiseLoss();
-            } else if (reported_loss_shape == LossShape::RAW) {
-                builder.reportsRawLoss();
-            } else {
-                string error_message = "Invalid value " + to_string((int)reported_loss_shape) +
-                                       " passed for enum reported_loss_shape to CategoricalCrossEntropy instance.";
-                throw nb::value_error(error_message.c_str());
-            }
-
-            builder.predictions(predictions).labels(labels).lossDataType(loss_data_type);
+            builder.network(network).predictions(predictions).labels(labels).lossDataType(loss_data_type);
+            setReportedLossShape(builder, reported_loss_shape);
             CategoricalCrossEntropy built = builder.build();
 
             new (self) CategoricalCrossEntropy(std::move(built));
@@ -110,63 +87,115 @@ void bind_categorical_cross_entropy(nb::module_ &losses) {
         "network"_a,
         "predictions"_a,
         "labels"_a,
-        "label_type"_a,
-        "num_classes"_a.none() = nb::none(),
         "loss_data_type"_a = DataType::FP32,
         "reported_loss_shape"_a = LossShape::BATCH,
-        // Looks like nb::sig is not the way to go, let the real stuff dictate the docs, c++ is typed!
-        // nb::sig("def __init__(self, "
-        //         "network: thor.Network, "
-        //         "predictions: thor.Tensor, "
-        //         "labels: thor.Tensor, "
-        //         "label_type: thor.losses.LabelType, "
-        //         "num_classes: int | None = None, "
-        //         "loss_data_type: DataType = DataType.fp32, "
-        //         "reported_loss_shape: thor.losses.LossShape = thor.losses.LossShape.batch "
-        //         ") -> None"),
-        R"nbdoc(Construct a Categorical Cross Entropy loss.)nbdoc");
+        R"nbdoc(Construct a dense/soft-label categorical cross-entropy loss.)nbdoc");
 
     categorical_cross_entropy.attr("__doc__") = R"nbdoc(
-Categorical cross-entropy loss.
+Dense categorical cross-entropy loss.
 
 Parameters
 ----------
 network : thor.Network
 predictions : thor.Tensor
+    One-dimensional logits tensor with one element per class.
 labels : thor.Tensor
+    One-dimensional dense class target tensor. One-hot labels and soft labels are both supported.
 loss_data_type : thor.DataType, default thor.DataType.FP32
-num_classes : Optional[int], default None
-    If True, report a single batch-aggregated loss.
-    When reports_batch_loss and reports_elementwise_loss are None, defaults to batch loss.
-reported_loss_shape : Optional[thor.losses.LossShape], default batch
-    This setting does not affect training, this is for analysis.
-    If you want to see the loss aggregated by class or by batch element or unaggregated,
-    pass thor.losses.LossShape as classwise, elementwise or raw.
-    Note: if you want to see the loss aggregated both classwise and elementwise, send raw
-          here and use two loss shapers on the output loss to get both.
-
+reported_loss_shape : thor.losses.LossShape, default batch
+    This setting does not affect training; it only controls the reported loss tensor shape.
 
 Notes
 -----
-This loss compares predicted logits ``z`` over classes to a target distribution ``y``
 A softmax is applied internally to convert logits into probabilities:
 
     p_c = exp(z_c) / \sum_{j=1}^{C} exp(z_j)
 
-The per-example categorical cross-entropy is then:
+The per-example dense categorical cross-entropy is then:
 
     L = -\sum_{c=1}^{C} y_c \log(p_c)
 
-When labels are one-hot, this reduces to ``L = -\log(p_{true})``.
+Use SparseCategoricalCrossEntropy when labels are integer class ids.
+)nbdoc";
 
-Loss reductions available, meant to aid in hand analysis of a data set:
+    auto sparse_categorical_cross_entropy =
+        nb::class_<SparseCategoricalCrossEntropy, CategoricalCrossEntropy>(losses, "SparseCategoricalCrossEntropy");
+    sparse_categorical_cross_entropy.attr("__module__") = "thor.losses";
 
- * Batch [b][c] -> [1]
- * Classwise [b][c] -> [c]
- * Elementwise [b][c] -> [b]
- * Raw [b][c] -> [b][c]
+    sparse_categorical_cross_entropy.def(
+        "__init__",
+        [](SparseCategoricalCrossEntropy *self,
+           Network &network,
+           Tensor predictions,
+           Tensor labels,
+           int32_t num_classes,
+           DataType loss_data_type,
+           LossShape reported_loss_shape) {
+            const string loss_name = "SparseCategoricalCrossEntropy instance";
+            validateCategoricalCommon(loss_name, predictions, loss_data_type, reported_loss_shape);
+            if (num_classes <= 1) {
+                string error_message = loss_name + ": num_classes must be greater than one. You passed num_classes == " +
+                                       to_string(num_classes);
+                throw nb::value_error(error_message.c_str());
+            }
+            if (predictions.getDimensions()[0] != uint64_t(num_classes)) {
+                string error_message = loss_name + ": mismatch between num_classes " + to_string(num_classes) +
+                                       " and predictions tensor size " + to_string(predictions.getDimensions()[0]) +
+                                       ". Either set num_classes to match or fix your predictions tensor.";
+                throw nb::value_error(error_message.c_str());
+            }
+            if (labels.getDimensions().size() != 1 || labels.getDimensions()[0] != 1) {
+                string error_message = loss_name + ": labels must be a 1 dimensional tensor of size 1 but labels is " +
+                                       labels.getDescriptorString();
+                throw nb::value_error(error_message.c_str());
+            }
+            DataType labelsDataType = labels.getDataType();
+            if (labelsDataType != DataType::UINT8 && labelsDataType != DataType::UINT16 && labelsDataType != DataType::UINT32) {
+                string error_message = loss_name + ": labels must use uint8, uint16, or uint32 dtype for sparse class ids";
+                throw nb::value_error(error_message.c_str());
+            }
 
-So for example you could check the loss per class using Classwise,
-or you could send a single batch and check the loss per example using Elementwise.
+            SparseCategoricalCrossEntropy::Builder builder;
+            builder.network(network)
+                .predictions(predictions)
+                .labels(labels)
+                .numClasses(uint32_t(num_classes))
+                .lossDataType(loss_data_type);
+            setReportedLossShape(builder, reported_loss_shape);
+            SparseCategoricalCrossEntropy built = builder.build();
+
+            new (self) SparseCategoricalCrossEntropy(std::move(built));
+        },
+        "network"_a,
+        "predictions"_a,
+        "labels"_a,
+        "num_classes"_a,
+        "loss_data_type"_a = DataType::FP32,
+        "reported_loss_shape"_a = LossShape::BATCH,
+        R"nbdoc(Construct a sparse categorical cross-entropy loss.)nbdoc");
+
+    sparse_categorical_cross_entropy.attr("__doc__") = R"nbdoc(
+Sparse categorical cross-entropy loss.
+
+Parameters
+----------
+network : thor.Network
+predictions : thor.Tensor
+    One-dimensional logits tensor with one element per class.
+labels : thor.Tensor
+    One-dimensional tensor of size 1 containing the true class id for each batch item.
+num_classes : int
+    Number of classes in predictions.
+loss_data_type : thor.DataType, default thor.DataType.FP32
+reported_loss_shape : thor.losses.LossShape, default batch
+    This setting does not affect training; it only controls the reported loss tensor shape.
+
+Notes
+-----
+Sparse categorical cross-entropy applies softmax internally and computes:
+
+    L = -\log(p_true)
+
+The logits gradient is dense and equivalent to p - one_hot(class_id).
 )nbdoc";
 }

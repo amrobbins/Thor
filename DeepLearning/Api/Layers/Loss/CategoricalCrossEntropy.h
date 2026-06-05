@@ -11,6 +11,8 @@
 
 namespace Thor {
 
+class SparseCategoricalCrossEntropy;
+
 class CategoricalCrossEntropy : public Loss {
    public:
     class Builder;
@@ -28,6 +30,12 @@ class CategoricalCrossEntropy : public Loss {
     static void deserialize(const nlohmann::json &j, Network *network);
 
    protected:
+    static void deserializeInto(const nlohmann::json &j,
+                                Network *network,
+                                CategoricalCrossEntropy &categoricalCrossEntropy,
+                                LabelType labelType,
+                                const std::string &expectedLayerType);
+
     virtual bool isMultiLayer() const {
         if (lossShape != LossShape::RAW || !softmaxAddedToNetwork)
             return true;
@@ -41,93 +49,29 @@ class CategoricalCrossEntropy : public Loss {
                                                      std::shared_ptr<Thor::Layer> drivingApiLayer,
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
-        // FIXME: How to prune backward then.
+        (void)placement;
+        (void)drivingLayer;
+        (void)drivingApiLayer;
+        (void)inferenceOnly;
         THOR_THROW_IF_FALSE(initialized);
         THOR_THROW_IF_FALSE(connectingApiTensor == predictionsTensor || connectingApiTensor == labelsTensor);
 
-        // Softmax and LossShaper are connected during multi-layer flattening
-        std::shared_ptr<ThorImplementation::CrossEntropy> crossEntropy = std::make_shared<ThorImplementation::CrossEntropy>(
-            CrossEntropyLossType::CATEGORICAL, lossDataType, labelType == LabelType::INDEX);
-        return crossEntropy;
+        // Softmax and LossShaper are connected during multi-layer flattening.
+        return std::make_shared<ThorImplementation::CrossEntropy>(
+            CrossEntropyLossType::CATEGORICAL, lossDataType, labelType == LabelType::SPARSE);
     }
 
-    LabelType labelType;
-    uint32_t numClasses;
-    bool softmaxAddedToNetwork;
+    LabelType labelType = LabelType::DENSE;
+    uint32_t numClasses = 0;
+    bool softmaxAddedToNetwork = false;
     Tensor softmaxOutput;
 };
 
 class CategoricalCrossEntropy::Builder {
    public:
-    virtual CategoricalCrossEntropy build() {
-        THOR_THROW_IF_FALSE(_network.has_value());
-        THOR_THROW_IF_FALSE(_predictions.has_value());
-        THOR_THROW_IF_FALSE(_labels.has_value());
-        THOR_THROW_IF_FALSE(_predictions.value() != _labels.value());
-        // API layer does not have a batch dimension:
-        THOR_THROW_IF_FALSE(_predictions.value().getDimensions().size() == 1);
-        THOR_THROW_IF_FALSE(_labelType.has_value());
-        THOR_THROW_IF_FALSE(_labelType.value() == LabelType::INDEX || _labelType.value() == LabelType::ONE_HOT);
-
+    CategoricalCrossEntropy build() {
         CategoricalCrossEntropy categoricalCrossEntropy;
-        if (_labelType.value() == LabelType::ONE_HOT) {
-            std::vector<uint64_t> labelDimensions = _labels.value().getDimensions();
-            THOR_THROW_IF_FALSE(labelDimensions.size() == 1 && labelDimensions[0] > 1);
-            THOR_THROW_IF_FALSE(_predictions.value().getDimensions() == labelDimensions);
-            std::vector<uint64_t> predictionDimensions = _predictions.value().getDimensions();
-            THOR_THROW_IF_FALSE(predictionDimensions.size() == 1);
-            categoricalCrossEntropy.numClasses = predictionDimensions[0];
-        } else {
-            std::vector<uint64_t> labelDimensions = _labels.value().getDimensions();
-            std::vector<uint64_t> predictionDimensions = _predictions.value().getDimensions();
-            THOR_THROW_IF_FALSE(labelDimensions.size() == 1 && labelDimensions[0] == 1);
-            DataType labelsDataType = _labels.value().getDataType();
-            THOR_THROW_IF_FALSE(labelsDataType == DataType::UINT8 || labelsDataType == DataType::UINT16 ||
-                   labelsDataType == DataType::UINT32);
-            THOR_THROW_IF_FALSE(_numClasses.has_value());
-            THOR_THROW_IF_FALSE(predictionDimensions.size() == 1);
-            categoricalCrossEntropy.numClasses = _numClasses.value();
-        }
-
-        if (_softmaxAddedToNetwork.has_value()) {
-            THOR_THROW_IF_FALSE(_softmaxAddedToNetwork.value() == true);
-            categoricalCrossEntropy.softmaxAddedToNetwork = true;
-        } else {
-            categoricalCrossEntropy.softmaxAddedToNetwork = false;
-        }
-        categoricalCrossEntropy.predictionsTensor = _predictions.value();
-        categoricalCrossEntropy.labelsTensor = _labels.value();
-        if (!_lossDataType.has_value())
-            _lossDataType = DataType::FP32;
-        THOR_THROW_IF_FALSE(_lossDataType.value() == DataType::FP16 || _lossDataType.value() == DataType::FP32);
-        categoricalCrossEntropy.lossDataType = _lossDataType.value();
-
-        if (!_lossShape.has_value())
-            _lossShape = LossShape::BATCH;
-        if (_lossShape.value() == LossShape::BATCH) {
-            categoricalCrossEntropy.lossShape = LossShape::BATCH;
-        } else if (_lossShape.value() == LossShape::CLASSWISE) {
-            // This type is batch-reduced by the implemenation layer
-            categoricalCrossEntropy.lossShape = LossShape::CLASSWISE;
-        } else if (_lossShape.value() == LossShape::ELEMENTWISE) {
-            categoricalCrossEntropy.lossShape = LossShape::ELEMENTWISE;
-        } else {
-            // This type is *not* batch-reduced by the implemenation layer
-            THOR_THROW_IF_FALSE(_lossShape.value() == LossShape::RAW);
-            categoricalCrossEntropy.lossShape = LossShape::RAW;
-        }
-        categoricalCrossEntropy.labelType = _labelType.value();
-        categoricalCrossEntropy.initialized = true;
-        categoricalCrossEntropy.network = _network.value();
-
-        if (categoricalCrossEntropy.isMultiLayer()) {
-            categoricalCrossEntropy.buildSupportLayersAndAddToNetwork();
-        } else {
-            THOR_THROW_IF_FALSE(categoricalCrossEntropy.lossShape == LossShape::RAW);
-            categoricalCrossEntropy.lossTensor = Tensor(_lossDataType.value(), {categoricalCrossEntropy.numClasses});
-            categoricalCrossEntropy.addToNetwork(_network.value());
-        }
-
+        populateAndAdd(categoricalCrossEntropy, LabelType::DENSE, std::nullopt);
         return categoricalCrossEntropy;
     }
 
@@ -214,35 +158,69 @@ class CategoricalCrossEntropy::Builder {
         return *this;
     }
 
-    /*
-     * A numerical index is passed as the label. The value of the label is the number of the true class.
-     * One number is passed per item in the batch.
-     * Soft labels are not supported in this case.
-     */
-    virtual CategoricalCrossEntropy::Builder &receivesClassIndexLabels(uint32_t numClasses) {
-        THOR_THROW_IF_FALSE(!_labelType.has_value());
-        THOR_THROW_IF_FALSE(numClasses > 1);
-        _labelType = LabelType::INDEX;
-        this->_numClasses = numClasses;
-        return *this;
-    }
-
-    /**
-     * A vector of labels. One label per class per example in the batch.
-     * The label can be a one-hot vector, but soft labels are also supported,
-     * so for example two classes may both have a label of 0.5.
-     */
-    virtual CategoricalCrossEntropy::Builder &receivesOneHotLabels() {
-        THOR_THROW_IF_FALSE(!_labelType.has_value());
-        _labelType = LabelType::ONE_HOT;
-        return *this;
-    }
-
    protected:
+    void populateAndAdd(CategoricalCrossEntropy &categoricalCrossEntropy,
+                        LabelType labelType,
+                        std::optional<uint32_t> sparseNumClasses) {
+        THOR_THROW_IF_FALSE(_network.has_value());
+        THOR_THROW_IF_FALSE(_predictions.has_value());
+        THOR_THROW_IF_FALSE(_labels.has_value());
+        THOR_THROW_IF_FALSE(_predictions.value() != _labels.value());
+        // API layer does not have a batch dimension.
+        THOR_THROW_IF_FALSE(_predictions.value().getDimensions().size() == 1);
+        THOR_THROW_IF_FALSE(labelType == LabelType::SPARSE || labelType == LabelType::DENSE);
+
+        std::vector<uint64_t> predictionDimensions = _predictions.value().getDimensions();
+        std::vector<uint64_t> labelDimensions = _labels.value().getDimensions();
+        THOR_THROW_IF_FALSE(predictionDimensions.size() == 1 && predictionDimensions[0] > 1);
+
+        if (labelType == LabelType::DENSE) {
+            THOR_THROW_IF_FALSE(labelDimensions.size() == 1 && labelDimensions[0] > 1);
+            THOR_THROW_IF_FALSE(predictionDimensions == labelDimensions);
+            categoricalCrossEntropy.numClasses = predictionDimensions[0];
+        } else {
+            THOR_THROW_IF_FALSE(labelDimensions.size() == 1 && labelDimensions[0] == 1);
+            DataType labelsDataType = _labels.value().getDataType();
+            THOR_THROW_IF_FALSE(labelsDataType == DataType::UINT8 || labelsDataType == DataType::UINT16 ||
+                                labelsDataType == DataType::UINT32);
+            THOR_THROW_IF_FALSE(sparseNumClasses.has_value());
+            THOR_THROW_IF_FALSE(sparseNumClasses.value() > 1);
+            THOR_THROW_IF_FALSE(predictionDimensions[0] == sparseNumClasses.value());
+            categoricalCrossEntropy.numClasses = sparseNumClasses.value();
+        }
+
+        categoricalCrossEntropy.softmaxAddedToNetwork = _softmaxAddedToNetwork.value_or(false);
+        categoricalCrossEntropy.predictionsTensor = _predictions.value();
+        categoricalCrossEntropy.labelsTensor = _labels.value();
+        if (categoricalCrossEntropy.softmaxAddedToNetwork)
+            categoricalCrossEntropy.softmaxOutput = categoricalCrossEntropy.predictionsTensor;
+        if (!_lossDataType.has_value())
+            _lossDataType = DataType::FP32;
+        THOR_THROW_IF_FALSE(_lossDataType.value() == DataType::FP16 || _lossDataType.value() == DataType::FP32);
+        categoricalCrossEntropy.lossDataType = _lossDataType.value();
+
+        if (!_lossShape.has_value())
+            _lossShape = LossShape::BATCH;
+        THOR_THROW_IF_FALSE(_lossShape.value() == LossShape::BATCH || _lossShape.value() == LossShape::CLASSWISE ||
+                            _lossShape.value() == LossShape::ELEMENTWISE || _lossShape.value() == LossShape::RAW);
+        categoricalCrossEntropy.lossShape = _lossShape.value();
+        categoricalCrossEntropy.labelType = labelType;
+        categoricalCrossEntropy.initialized = true;
+        categoricalCrossEntropy.network = _network.value();
+
+        if (categoricalCrossEntropy.isMultiLayer()) {
+            categoricalCrossEntropy.buildSupportLayersAndAddToNetwork();
+        } else {
+            THOR_THROW_IF_FALSE(categoricalCrossEntropy.lossShape == LossShape::RAW);
+            categoricalCrossEntropy.lossTensor = Tensor(_lossDataType.value(), {categoricalCrossEntropy.numClasses});
+            categoricalCrossEntropy.lossShaperInput = categoricalCrossEntropy.lossTensor;
+            categoricalCrossEntropy.addToNetwork(_network.value());
+        }
+    }
+
     /**
      * CategoricalCrossEntropy is a softmax activation followed by a cross entropy loss.
-     * When the layer is stamped, an external softmax will also be stamped and this will be recorded so that next attempt to stamp will
-     * result in a single layer that can be stamped.
+     * During multi-layer flattening this flag marks the internal raw cross-entropy layer whose input is already softmax output.
      */
     virtual CategoricalCrossEntropy::Builder &softmaxAddedToNetwork() {
         THOR_THROW_IF_FALSE(!_softmaxAddedToNetwork.has_value());
@@ -250,23 +228,97 @@ class CategoricalCrossEntropy::Builder {
         return *this;
     }
 
-   private:
     std::optional<Network *> _network;
     std::optional<Tensor> _predictions;
     std::optional<Tensor> _labels;
-    std::optional<LabelType> _labelType;
-    std::optional<uint32_t> _numClasses;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
     std::optional<bool> _softmaxAddedToNetwork;
 
     friend class CategoricalCrossEntropy;
+    friend class SparseCategoricalCrossEntropy;
 };
 
-NLOHMANN_JSON_SERIALIZE_ENUM(CategoricalCrossEntropy::LabelType,
-                             {
-                                 {CategoricalCrossEntropy::LabelType::INDEX, "index"},
-                                 {CategoricalCrossEntropy::LabelType::ONE_HOT, "one_hot"},
-                             })
+class SparseCategoricalCrossEntropy : public CategoricalCrossEntropy {
+   public:
+    class Builder;
+    SparseCategoricalCrossEntropy() {}
+
+    ~SparseCategoricalCrossEntropy() override {}
+
+    std::shared_ptr<Layer> clone() const override { return std::make_shared<SparseCategoricalCrossEntropy>(*this); }
+
+    std::string getLayerType() const override { return "SparseCategoricalCrossEntropy"; }
+
+    static void deserialize(const nlohmann::json &j, Network *network);
+};
+
+class SparseCategoricalCrossEntropy::Builder : public CategoricalCrossEntropy::Builder {
+   public:
+    SparseCategoricalCrossEntropy build() {
+        SparseCategoricalCrossEntropy sparseCategoricalCrossEntropy;
+        populateAndAdd(sparseCategoricalCrossEntropy, LabelType::SPARSE, _numClasses);
+        return sparseCategoricalCrossEntropy;
+    }
+
+    virtual SparseCategoricalCrossEntropy::Builder &network(Network &_network) {
+        CategoricalCrossEntropy::Builder::network(_network);
+        return *this;
+    }
+
+    virtual SparseCategoricalCrossEntropy::Builder &predictions(Tensor _predictions) {
+        CategoricalCrossEntropy::Builder::predictions(_predictions);
+        return *this;
+    }
+
+    virtual SparseCategoricalCrossEntropy::Builder &labels(Tensor _labels) {
+        CategoricalCrossEntropy::Builder::labels(_labels);
+        return *this;
+    }
+
+    virtual SparseCategoricalCrossEntropy::Builder &numClasses(uint32_t _numClasses) {
+        THOR_THROW_IF_FALSE(!this->_numClasses.has_value());
+        THOR_THROW_IF_FALSE(_numClasses > 1);
+        this->_numClasses = _numClasses;
+        return *this;
+    }
+
+    virtual SparseCategoricalCrossEntropy::Builder &reportsBatchLoss() {
+        CategoricalCrossEntropy::Builder::reportsBatchLoss();
+        return *this;
+    }
+
+    virtual SparseCategoricalCrossEntropy::Builder &reportsClasswiseLoss() {
+        CategoricalCrossEntropy::Builder::reportsClasswiseLoss();
+        return *this;
+    }
+
+    virtual SparseCategoricalCrossEntropy::Builder &reportsElementwiseLoss() {
+        CategoricalCrossEntropy::Builder::reportsElementwiseLoss();
+        return *this;
+    }
+
+    virtual SparseCategoricalCrossEntropy::Builder &reportsRawLoss() {
+        CategoricalCrossEntropy::Builder::reportsRawLoss();
+        return *this;
+    }
+
+    virtual SparseCategoricalCrossEntropy::Builder &lossDataType(DataType _lossDataType) {
+        CategoricalCrossEntropy::Builder::lossDataType(_lossDataType);
+        return *this;
+    }
+
+   protected:
+    virtual SparseCategoricalCrossEntropy::Builder &softmaxAddedToNetwork() {
+        CategoricalCrossEntropy::Builder::softmaxAddedToNetwork();
+        return *this;
+    }
+
+   private:
+    std::optional<uint32_t> _numClasses;
+
+    friend class CategoricalCrossEntropy;
+    friend class SparseCategoricalCrossEntropy;
+};
 
 }  // namespace Thor

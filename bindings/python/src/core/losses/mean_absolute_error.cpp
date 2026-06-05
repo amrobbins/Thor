@@ -17,25 +17,25 @@ using LossShape = Loss::LossShape;
 using LabelType = Loss::LabelType;
 
 void bind_mean_absolute_error(nb::module_ &losses) {
-    auto mean_absolute_error = nb::class_<MeanAbsoluteError, Loss>(losses, "MeanAbsoluteError");
+    auto mean_absolute_error = nb::class_<MAE, Loss>(losses, "MAE");
     mean_absolute_error.attr("__module__") = "thor.losses";
 
     mean_absolute_error.def(
         "__init__",
-        [](MeanAbsoluteError *self,
+        [](MAE *self,
            Network &network,
            Tensor predictions,
            Tensor labels,
            std::optional<DataType> loss_data_type,
            bool reportsElementwiseLoss) {
-            MeanAbsoluteError::Builder builder;
+            MAE::Builder builder;
 
             builder.network(network).predictions(predictions).labels(labels);
             if (loss_data_type.has_value())
                 builder.lossDataType(loss_data_type.value());
 
             if (labels.getDimensions().size() != 1 || labels.getDimensions()[0] != 1) {
-                string error_message = "MeanAbsoluteError instance: labels tensor is not sized right. label tensor is " +
+                string error_message = "MAE instance: labels tensor is not sized right. label tensor is " +
                                        labels.getDescriptorString() + ". labels must be a 1 dimensional tensor of size 1.";
                 throw nb::value_error(error_message.c_str());
             }
@@ -43,19 +43,19 @@ void bind_mean_absolute_error(nb::module_ &losses) {
             if (reportsElementwiseLoss)
                 builder.reportsElementwiseLoss();
 
-            MeanAbsoluteError built = builder.build();
+            MAE built = builder.build();
 
-            new (self) MeanAbsoluteError(std::move(built));
+            new (self) MAE(std::move(built));
         },
         "network"_a,
         "predictions"_a,
         "labels"_a,
         "loss_data_type"_a.none() = nb::none(),
         "reportsElementwiseLoss"_a = false,
-        R"nbdoc(Construct a Categorical Cross Entropy loss.)nbdoc");
+        R"nbdoc(Construct a MAE loss.)nbdoc");
 
     mean_absolute_error.attr("__doc__") = R"nbdoc(
-Mean Absolute Error loss.
+MAE loss.
 
 Parameters
 ----------

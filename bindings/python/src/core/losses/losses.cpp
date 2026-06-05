@@ -10,6 +10,12 @@ void bind_categorical_cross_entropy(nb::module_ &losses);
 void bind_mean_absolute_error(nb::module_ &losses);
 void bind_mean_absolute_percentage_error(nb::module_ &losses);
 void bind_mean_squared_error(nb::module_ &losses);
+void bind_smooth_l1_loss(nb::module_ &losses);
+void bind_huber_loss(nb::module_ &losses);
+void bind_soft_target_cross_entropy(nb::module_ &losses);
+void bind_kl_div_loss(nb::module_ &losses);
+void bind_binary_focal_loss(nb::module_ &losses);
+void bind_categorical_focal_loss(nb::module_ &losses);
 
 using namespace Thor;
 
@@ -18,6 +24,9 @@ void bind_losses(nb::module_ &losses) {
 
     auto loss = nb::class_<Loss>(losses, "Loss");
     loss.attr("__module__") = "thor.losses";
+    loss.def("get_predictions", &Loss::getPredictions);
+    loss.def("get_labels", &Loss::getLabels);
+    loss.def("get_loss", &Loss::getLoss);
 
     auto label_type =
         nb::enum_<Loss::LabelType>(losses, "LabelType").value("index", Loss::LabelType::INDEX).value("one_hot", Loss::LabelType::ONE_HOT);
@@ -40,4 +49,10 @@ void bind_losses(nb::module_ &losses) {
     bind_mean_absolute_error(losses);
     bind_mean_absolute_percentage_error(losses);
     bind_mean_squared_error(losses);
+    bind_smooth_l1_loss(losses);
+    bind_huber_loss(losses);
+    bind_soft_target_cross_entropy(losses);
+    bind_kl_div_loss(losses);
+    bind_binary_focal_loss(losses);
+    bind_categorical_focal_loss(losses);
 }

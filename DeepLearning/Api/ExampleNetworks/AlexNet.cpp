@@ -235,7 +235,6 @@ Network buildAlexNet() {
                                             .predictions(latestOutputTensor)
                                             .labels(labelsTensor)
                                             .reportsBatchLoss()
-                                            .receivesOneHotLabels()
                                             .build();
 
     NetworkOutput predictions = NetworkOutput::Builder()

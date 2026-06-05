@@ -5,24 +5,27 @@
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
 #include "DeepLearning/Api/Layers/Loss/LossShaper.h"
 #include "DeepLearning/Api/Network/Network.h"
-#include "DeepLearning/Implementation/Layers/Loss/MeanSquaredError.h"
+
 #include <optional>
+#include <stdexcept>
 
 namespace Thor {
 
-class MSE : public Loss {
+class CategoricalFocalLoss : public Loss {
    public:
     class Builder;
-    MSE() {}
+    CategoricalFocalLoss() {}
 
-    ~MSE() override {}
+    ~CategoricalFocalLoss() override {}
 
-    std::shared_ptr<Layer> clone() const override { return std::make_shared<MSE>(*this); }
+    std::shared_ptr<Layer> clone() const override { return std::make_shared<CategoricalFocalLoss>(*this); }
 
-    std::string getLayerType() const override { return "MSE"; }
+    std::string getLayerType() const override { return "CategoricalFocalLoss"; }
+
+    float getGamma() const { return gamma; }
+    float getAlpha() const { return alpha; }
 
     nlohmann::json architectureJson() const override;
-
     static void deserialize(const nlohmann::json &j, Network *network);
 
    protected:
@@ -35,19 +38,16 @@ class MSE : public Loss {
                                                      std::shared_ptr<Thor::Layer> drivingApiLayer,
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
-        // FIXME: How to prune backward then.
-        THOR_THROW_IF_FALSE(initialized);
-        THOR_THROW_IF_FALSE(connectingApiTensor == predictionsTensor || connectingApiTensor == labelsTensor);
-
-        std::shared_ptr<ThorImplementation::MeanSquaredError> meanSquaredError =
-            std::make_shared<ThorImplementation::MeanSquaredError>(lossDataType);
-
-        return meanSquaredError;
+        (void)placement;
+        (void)drivingLayer;
+        (void)drivingApiLayer;
+        (void)connectingApiTensor;
+        (void)inferenceOnly;
+        throw std::runtime_error("CategoricalFocalLoss is a compound API loss and should not be stamped directly.");
     }
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         uint64_t lossShaperBytes = 0;
-        // Loss will be reported either element-wise or batch-wise, the shaper is only required when loss is batch-wise.
         if (isMultiLayer()) {
             lossShaperBytes = LossShaper::Builder()
                                   .lossInput(lossTensor)
@@ -58,11 +58,16 @@ class MSE : public Loss {
         uint64_t standardLossBytes = Loss::getFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
         return standardLossBytes + lossShaperBytes;
     }
+
+    float gamma = 2.0f;
+    float alpha = 1.0f;
 };
 
-class MSE::Builder {
+class CategoricalFocalLoss::Builder {
    public:
-    virtual MSE build() {
+    virtual ~Builder() = default;
+
+    virtual CategoricalFocalLoss build() {
         THOR_THROW_IF_FALSE(_network.has_value());
         THOR_THROW_IF_FALSE(_predictions.has_value());
         THOR_THROW_IF_FALSE(_labels.has_value());
@@ -74,65 +79,89 @@ class MSE::Builder {
             _lossShape = LossShape::BATCH;
         if (!_lossDataType.has_value())
             _lossDataType = _predictions.value().getDataType();
-        MSE meanSquaredError;
-        meanSquaredError.predictionsTensor = _predictions.value();
-        meanSquaredError.labelsTensor = _labels.value();
-        meanSquaredError.lossDataType = _lossDataType.value();
-        meanSquaredError.lossShape = _lossShape.value();
-        meanSquaredError.network = _network.value();
-        meanSquaredError.initialized = true;
+        THOR_THROW_IF_FALSE(_lossDataType.value() == DataType::FP16 || _lossDataType.value() == DataType::FP32);
 
-        meanSquaredError.buildSupportLayersAndAddToNetwork();
+        float gamma = _gamma.value_or(2.0f);
+        float alpha = _alpha.value_or(1.0f);
+        THOR_THROW_IF_FALSE(gamma >= 0.0f);
+        THOR_THROW_IF_FALSE(alpha >= 0.0f);
 
-        return meanSquaredError;
+        CategoricalFocalLoss categoricalFocalLoss;
+        categoricalFocalLoss.predictionsTensor = _predictions.value();
+        categoricalFocalLoss.labelsTensor = _labels.value();
+        categoricalFocalLoss.lossDataType = _lossDataType.value();
+        categoricalFocalLoss.lossShape = _lossShape.value();
+        categoricalFocalLoss.gamma = gamma;
+        categoricalFocalLoss.alpha = alpha;
+        categoricalFocalLoss.network = _network.value();
+        categoricalFocalLoss.initialized = true;
+
+        categoricalFocalLoss.buildSupportLayersAndAddToNetwork();
+
+        return categoricalFocalLoss;
     }
 
-    virtual MSE::Builder &network(Network &_network) {
+    virtual CategoricalFocalLoss::Builder &network(Network &_network) {
         THOR_THROW_IF_FALSE(!this->_network.has_value());
         this->_network = &_network;
         return *this;
     }
 
-    virtual MSE::Builder &predictions(Tensor _predictions) {
+    virtual CategoricalFocalLoss::Builder &predictions(Tensor _predictions) {
         THOR_THROW_IF_FALSE(!this->_predictions.has_value());
         THOR_THROW_IF_FALSE(!_predictions.getDimensions().empty());
         this->_predictions = _predictions;
         return *this;
     }
 
-    virtual MSE::Builder &labels(Tensor _labels) {
+    virtual CategoricalFocalLoss::Builder &labels(Tensor _labels) {
         THOR_THROW_IF_FALSE(!this->_labels.has_value());
         THOR_THROW_IF_FALSE(!_labels.getDimensions().empty());
         this->_labels = _labels;
         return *this;
     }
 
-    virtual MSE::Builder &reportsBatchLoss() {
+    virtual CategoricalFocalLoss::Builder &focusingParameter(float _gamma) {
+        THOR_THROW_IF_FALSE(!this->_gamma.has_value());
+        THOR_THROW_IF_FALSE(_gamma >= 0.0f);
+        this->_gamma = _gamma;
+        return *this;
+    }
+
+    virtual CategoricalFocalLoss::Builder &alpha(float _alpha) {
+        THOR_THROW_IF_FALSE(!this->_alpha.has_value());
+        THOR_THROW_IF_FALSE(_alpha >= 0.0f);
+        this->_alpha = _alpha;
+        return *this;
+    }
+
+    virtual CategoricalFocalLoss::Builder &reportsBatchLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
         _lossShape = LossShape::BATCH;
         return *this;
     }
 
-    virtual MSE::Builder &reportsElementwiseLoss() {
+    virtual CategoricalFocalLoss::Builder &reportsElementwiseLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
         _lossShape = LossShape::ELEMENTWISE;
         return *this;
     }
 
-    virtual MSE::Builder &reportsPerOutputLoss() {
+    virtual CategoricalFocalLoss::Builder &reportsPerOutputLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
         _lossShape = LossShape::CLASSWISE;
         return *this;
     }
 
-    virtual MSE::Builder &reportsRawLoss() {
+    virtual CategoricalFocalLoss::Builder &reportsRawLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
         _lossShape = LossShape::RAW;
         return *this;
     }
 
-    virtual MSE::Builder &lossDataType(DataType _lossDataType) {
+    virtual CategoricalFocalLoss::Builder &lossDataType(DataType _lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
+        THOR_THROW_IF_FALSE(_lossDataType == DataType::FP16 || _lossDataType == DataType::FP32);
         this->_lossDataType = _lossDataType;
         return *this;
     }
@@ -143,7 +172,8 @@ class MSE::Builder {
     std::optional<Tensor> _labels;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
+    std::optional<float> _gamma;
+    std::optional<float> _alpha;
 };
-
 
 }  // namespace Thor

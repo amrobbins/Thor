@@ -14,7 +14,7 @@ namespace Thor {
 
 class Loss : public Layer {
    public:
-    enum class LabelType { INDEX = 5, ONE_HOT };
+    enum class LabelType { SPARSE = 5, DENSE, INDEX = SPARSE, ONE_HOT = DENSE };
     enum class LossShape { BATCH = 9, ELEMENTWISE, CLASSWISE, RAW };
 
     Loss() { numInputConnectionsMade = 0; }

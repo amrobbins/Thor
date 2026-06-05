@@ -193,12 +193,12 @@ TEST(BinaryCrossEntropyApi, PublicBuilderBacksRawLossWithCustomLoss) {
 }
 
 
-TEST(MeanAbsoluteErrorApi, PublicBuilderBacksRawLossWithCustomLoss) {
+TEST(MAEApi, PublicBuilderBacksRawLossWithCustomLoss) {
     Network network("mae_backed_by_custom_loss");
     Tensor predictions(DataType::FP32, {3});
     Tensor labels(DataType::FP32, {3});
 
-    MeanAbsoluteError mae = MeanAbsoluteError::Builder()
+    MAE mae = MAE::Builder()
                                 .network(network)
                                 .predictions(predictions)
                                 .labels(labels)
@@ -211,22 +211,22 @@ TEST(MeanAbsoluteErrorApi, PublicBuilderBacksRawLossWithCustomLoss) {
     ASSERT_EQ(mae.getLoss().getDimensions(), vector<uint64_t>({3}));
 
     bool foundCustomLoss = false;
-    bool foundRawMeanAbsoluteError = false;
+    bool foundRawMAE = false;
     for (uint32_t i = 0; i < network.getNumLayers(); ++i) {
         shared_ptr<Layer> layer = network.getLayer(i);
         foundCustomLoss = foundCustomLoss || static_cast<bool>(dynamic_pointer_cast<CustomLoss>(layer));
-        foundRawMeanAbsoluteError = foundRawMeanAbsoluteError || static_cast<bool>(dynamic_pointer_cast<MeanAbsoluteError>(layer));
+        foundRawMAE = foundRawMAE || static_cast<bool>(dynamic_pointer_cast<MAE>(layer));
     }
     ASSERT_TRUE(foundCustomLoss);
-    ASSERT_FALSE(foundRawMeanAbsoluteError);
+    ASSERT_FALSE(foundRawMAE);
 }
 
-TEST(MeanSquaredErrorApi, PublicBuilderBacksRawLossWithCustomLoss) {
+TEST(MSEApi, PublicBuilderBacksRawLossWithCustomLoss) {
     Network network("mse_backed_by_custom_loss");
     Tensor predictions(DataType::FP32, {3});
     Tensor labels(DataType::FP32, {3});
 
-    MeanSquaredError mse = MeanSquaredError::Builder()
+    MSE mse = MSE::Builder()
                               .network(network)
                               .predictions(predictions)
                               .labels(labels)
@@ -239,12 +239,12 @@ TEST(MeanSquaredErrorApi, PublicBuilderBacksRawLossWithCustomLoss) {
     ASSERT_EQ(mse.getLoss().getDimensions(), vector<uint64_t>({3}));
 
     bool foundCustomLoss = false;
-    bool foundRawMeanSquaredError = false;
+    bool foundRawMSE = false;
     for (uint32_t i = 0; i < network.getNumLayers(); ++i) {
         shared_ptr<Layer> layer = network.getLayer(i);
         foundCustomLoss = foundCustomLoss || static_cast<bool>(dynamic_pointer_cast<CustomLoss>(layer));
-        foundRawMeanSquaredError = foundRawMeanSquaredError || static_cast<bool>(dynamic_pointer_cast<MeanSquaredError>(layer));
+        foundRawMSE = foundRawMSE || static_cast<bool>(dynamic_pointer_cast<MSE>(layer));
     }
     ASSERT_TRUE(foundCustomLoss);
-    ASSERT_FALSE(foundRawMeanSquaredError);
+    ASSERT_FALSE(foundRawMSE);
 }

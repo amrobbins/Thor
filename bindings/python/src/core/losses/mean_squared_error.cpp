@@ -16,25 +16,25 @@ using LossShape = Loss::LossShape;
 using LabelType = Loss::LabelType;
 
 void bind_mean_squared_error(nb::module_ &losses) {
-    auto mean_squared_error = nb::class_<MeanSquaredError, Loss>(losses, "MeanSquaredError");
+    auto mean_squared_error = nb::class_<MSE, Loss>(losses, "MSE");
     mean_squared_error.attr("__module__") = "thor.losses";
 
     mean_squared_error.def(
         "__init__",
-        [](MeanSquaredError *self,
+        [](MSE *self,
            Network &network,
            Tensor predictions,
            Tensor labels,
            std::optional<DataType> loss_data_type,
            bool reportsElementwiseLoss) {
-            MeanSquaredError::Builder builder;
+            MSE::Builder builder;
 
             builder.network(network).predictions(predictions).labels(labels);
             if (loss_data_type.has_value())
                 builder.lossDataType(loss_data_type.value());
 
             if (labels.getDimensions().size() != 1 || labels.getDimensions()[0] != 1) {
-                string error_message = "MeanSquaredError instance: labels tensor is not sized right. label tensor is " +
+                string error_message = "MSE instance: labels tensor is not sized right. label tensor is " +
                                        labels.getDescriptorString() + ". labels must be a 1 dimensional tensor of size 1.";
                 throw nb::value_error(error_message.c_str());
             }
@@ -42,19 +42,19 @@ void bind_mean_squared_error(nb::module_ &losses) {
             if (reportsElementwiseLoss)
                 builder.reportsElementwiseLoss();
 
-            MeanSquaredError built = builder.build();
+            MSE built = builder.build();
 
-            new (self) MeanSquaredError(std::move(built));
+            new (self) MSE(std::move(built));
         },
         "network"_a,
         "predictions"_a,
         "labels"_a,
         "loss_data_type"_a.none() = nb::none(),
         "reportsElementwiseLoss"_a = false,
-        R"nbdoc(Construct a Categorical Cross Entropy loss.)nbdoc");
+        R"nbdoc(Construct a MSE loss.)nbdoc");
 
     mean_squared_error.attr("__doc__") = R"nbdoc(
-Mean Squared Error loss.
+MSE loss.
 
 Parameters
 ----------

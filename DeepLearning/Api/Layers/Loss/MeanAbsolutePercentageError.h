@@ -9,16 +9,18 @@
 
 namespace Thor {
 
-class MeanAbsolutePercentageError : public Loss {
+class MAPE : public Loss {
    public:
     class Builder;
-    MeanAbsolutePercentageError() {}
+    MAPE() {}
 
-    ~MeanAbsolutePercentageError() override {}
+    ~MAPE() override {}
 
-    std::shared_ptr<Layer> clone() const override { return std::make_shared<MeanAbsolutePercentageError>(*this); }
+    std::shared_ptr<Layer> clone() const override { return std::make_shared<MAPE>(*this); }
 
-    std::string getLayerType() const override { return "MeanAbsolutePercentageError"; }
+    std::string getLayerType() const override { return "MAPE"; }
+
+    nlohmann::json architectureJson() const override;
 
     static void deserialize(const nlohmann::json &j, Network *network);
 
@@ -61,9 +63,9 @@ class MeanAbsolutePercentageError : public Loss {
     }
 };
 
-class MeanAbsolutePercentageError::Builder {
+class MAPE::Builder {
    public:
-    virtual MeanAbsolutePercentageError build() {
+    virtual MAPE build() {
         THOR_THROW_IF_FALSE(_network.has_value());
         THOR_THROW_IF_FALSE(_predictions.has_value());
         THOR_THROW_IF_FALSE(_labels.has_value());
@@ -77,7 +79,7 @@ class MeanAbsolutePercentageError::Builder {
             _lossDataType = _predictions.value().getDataType();
         uint32_t batchSize = _predictions.value().getDimensions()[0];
 
-        MeanAbsolutePercentageError meanAbsolutePercentageError;
+        MAPE meanAbsolutePercentageError;
         meanAbsolutePercentageError.predictionsTensor = _predictions.value();
         meanAbsolutePercentageError.labelsTensor = _labels.value();
         meanAbsolutePercentageError.lossDataType = _lossDataType.value();
@@ -88,7 +90,7 @@ class MeanAbsolutePercentageError::Builder {
         if (meanAbsolutePercentageError.isMultiLayer()) {
             meanAbsolutePercentageError.buildSupportLayersAndAddToNetwork();
         } else {
-            // lossTensor is the one that comes directly out of MeanAbsolutePercentageError, that may be replaced by a loss shaper.
+            // lossTensor is the one that comes directly out of MAPE, that may be replaced by a loss shaper.
             meanAbsolutePercentageError.lossTensor = Tensor(_lossDataType.value(), {batchSize});
             meanAbsolutePercentageError.lossShaperInput = meanAbsolutePercentageError.lossTensor;
             meanAbsolutePercentageError.addToNetwork(_network.value());
@@ -97,51 +99,51 @@ class MeanAbsolutePercentageError::Builder {
         return meanAbsolutePercentageError;
     }
 
-    virtual MeanAbsolutePercentageError::Builder &network(Network &_network) {
+    virtual MAPE::Builder &network(Network &_network) {
         THOR_THROW_IF_FALSE(!this->_network.has_value());
         this->_network = &_network;
         return *this;
     }
 
-    virtual MeanAbsolutePercentageError::Builder &predictions(Tensor _predictions) {
+    virtual MAPE::Builder &predictions(Tensor _predictions) {
         THOR_THROW_IF_FALSE(!this->_predictions.has_value());
         THOR_THROW_IF_FALSE(!_predictions.getDimensions().empty());
         this->_predictions = _predictions;
         return *this;
     }
 
-    virtual MeanAbsolutePercentageError::Builder &labels(Tensor _labels) {
+    virtual MAPE::Builder &labels(Tensor _labels) {
         THOR_THROW_IF_FALSE(!this->_labels.has_value());
         THOR_THROW_IF_FALSE(!_labels.getDimensions().empty());
         this->_labels = _labels;
         return *this;
     }
 
-    virtual MeanAbsolutePercentageError::Builder &reportsBatchLoss() {
+    virtual MAPE::Builder &reportsBatchLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
         _lossShape = LossShape::BATCH;
         return *this;
     }
 
-    virtual MeanAbsolutePercentageError::Builder &reportsElementwiseLoss() {
+    virtual MAPE::Builder &reportsElementwiseLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
         _lossShape = LossShape::ELEMENTWISE;
         return *this;
     }
 
-    virtual MeanAbsolutePercentageError::Builder &reportsPerOutputLoss() {
+    virtual MAPE::Builder &reportsPerOutputLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
         _lossShape = LossShape::CLASSWISE;
         return *this;
     }
 
-    virtual MeanAbsolutePercentageError::Builder &reportsRawLoss() {
+    virtual MAPE::Builder &reportsRawLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
         _lossShape = LossShape::RAW;
         return *this;
     }
 
-    virtual MeanAbsolutePercentageError::Builder &lossDataType(DataType _lossDataType) {
+    virtual MAPE::Builder &lossDataType(DataType _lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
         this->_lossDataType = _lossDataType;
         return *this;
@@ -154,5 +156,6 @@ class MeanAbsolutePercentageError::Builder {
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
 };
+
 
 }  // namespace Thor

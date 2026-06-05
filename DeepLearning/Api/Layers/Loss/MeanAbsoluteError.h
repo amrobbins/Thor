@@ -10,16 +10,18 @@
 
 namespace Thor {
 
-class MeanAbsoluteError : public Loss {
+class MAE : public Loss {
    public:
     class Builder;
-    MeanAbsoluteError() {}
+    MAE() {}
 
-    ~MeanAbsoluteError() override {}
+    ~MAE() override {}
 
-    std::shared_ptr<Layer> clone() const override { return std::make_shared<MeanAbsoluteError>(*this); }
+    std::shared_ptr<Layer> clone() const override { return std::make_shared<MAE>(*this); }
 
-    std::string getLayerType() const override { return "MeanAbsoluteError"; }
+    std::string getLayerType() const override { return "MAE"; }
+
+    nlohmann::json architectureJson() const override;
 
     static void deserialize(const nlohmann::json &j, Network *network);
 
@@ -58,11 +60,11 @@ class MeanAbsoluteError : public Loss {
     }
 };
 
-class MeanAbsoluteError::Builder {
+class MAE::Builder {
    public:
     virtual ~Builder() = default;
 
-    virtual MeanAbsoluteError build() {
+    virtual MAE build() {
         THOR_THROW_IF_FALSE(_network.has_value());
         THOR_THROW_IF_FALSE(_predictions.has_value());
         THOR_THROW_IF_FALSE(_labels.has_value());
@@ -74,7 +76,7 @@ class MeanAbsoluteError::Builder {
             _lossShape = LossShape::BATCH;
         if (!_lossDataType.has_value())
             _lossDataType = _predictions.value().getDataType();
-        MeanAbsoluteError meanAbsoluteError;
+        MAE meanAbsoluteError;
         meanAbsoluteError.predictionsTensor = _predictions.value();
         meanAbsoluteError.labelsTensor = _labels.value();
         meanAbsoluteError.lossDataType = _lossDataType.value();
@@ -87,51 +89,51 @@ class MeanAbsoluteError::Builder {
         return meanAbsoluteError;
     }
 
-    virtual MeanAbsoluteError::Builder &network(Network &_network) {
+    virtual MAE::Builder &network(Network &_network) {
         THOR_THROW_IF_FALSE(!this->_network.has_value());
         this->_network = &_network;
         return *this;
     }
 
-    virtual MeanAbsoluteError::Builder &predictions(Tensor _predictions) {
+    virtual MAE::Builder &predictions(Tensor _predictions) {
         THOR_THROW_IF_FALSE(!this->_predictions.has_value());
         THOR_THROW_IF_FALSE(!_predictions.getDimensions().empty());
         this->_predictions = _predictions;
         return *this;
     }
 
-    virtual MeanAbsoluteError::Builder &labels(Tensor _labels) {
+    virtual MAE::Builder &labels(Tensor _labels) {
         THOR_THROW_IF_FALSE(!this->_labels.has_value());
         THOR_THROW_IF_FALSE(!_labels.getDimensions().empty());
         this->_labels = _labels;
         return *this;
     }
 
-    virtual MeanAbsoluteError::Builder &reportsBatchLoss() {
+    virtual MAE::Builder &reportsBatchLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
         _lossShape = LossShape::BATCH;
         return *this;
     }
 
-    virtual MeanAbsoluteError::Builder &reportsElementwiseLoss() {
+    virtual MAE::Builder &reportsElementwiseLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
         _lossShape = LossShape::ELEMENTWISE;
         return *this;
     }
 
-    virtual MeanAbsoluteError::Builder &reportsPerOutputLoss() {
+    virtual MAE::Builder &reportsPerOutputLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
         _lossShape = LossShape::CLASSWISE;
         return *this;
     }
 
-    virtual MeanAbsoluteError::Builder &reportsRawLoss() {
+    virtual MAE::Builder &reportsRawLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
         _lossShape = LossShape::RAW;
         return *this;
     }
 
-    virtual MeanAbsoluteError::Builder &lossDataType(DataType _lossDataType) {
+    virtual MAE::Builder &lossDataType(DataType _lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
         this->_lossDataType = _lossDataType;
         return *this;
@@ -144,5 +146,6 @@ class MeanAbsoluteError::Builder {
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
 };
+
 
 }  // namespace Thor

@@ -17,13 +17,10 @@ void CategoricalCrossEntropy::buildSupportLayersAndAddToNetwork() {
                                                                           .softmaxAddedToNetwork()
                                                                           .reportsRawLoss()
                                                                           .lossDataType(lossDataType);
-    if (labelType == LabelType::INDEX) {
-        categoricalCrossEntropyBuilder.receivesClassIndexLabels(numClasses);
-    } else {
-        THOR_THROW_IF_FALSE(labelType == LabelType::ONE_HOT);
-        categoricalCrossEntropyBuilder.receivesOneHotLabels();
-    }
-    CategoricalCrossEntropy crossEntropy = categoricalCrossEntropyBuilder.build();
+
+    CategoricalCrossEntropy crossEntropy;
+    categoricalCrossEntropyBuilder.populateAndAdd(
+        crossEntropy, labelType, labelType == LabelType::SPARSE ? std::optional<uint32_t>(numClasses) : std::nullopt);
     lossShaperInput = crossEntropy.getLoss();
 
     if (lossShape == LossShape::BATCH) {
@@ -36,7 +33,7 @@ void CategoricalCrossEntropy::buildSupportLayersAndAddToNetwork() {
         LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(lossShaperInput).reportsElementwiseLoss().build();
         lossTensor = lossShaper.getLossOutput();
     } else {
-        // No loss shaper needed in this case
+        // No loss shaper needed in this case.
         THOR_THROW_IF_FALSE(lossShape == LossShape::RAW);
         lossTensor = lossShaperInput;
     }
@@ -46,10 +43,9 @@ json CategoricalCrossEntropy::architectureJson() const {
     json j;
     j["factory"] = Layer::Factory::Loss.value();
     j["version"] = getLayerVersion();
-    j["layer_type"] = "categorical_cross_entropy";
+    j["layer_type"] = labelType == LabelType::SPARSE ? "sparse_categorical_cross_entropy" : "categorical_cross_entropy";
     string layerName = string("layer") + to_string(getId());
     j["layer_name"] = layerName;
-    j["label_type"] = labelType;
     j["loss_shape"] = LossShape::RAW;
     j["loss_data_type"] = lossDataType;
     j["labels_tensor"] = labelsTensor.architectureJson();
@@ -61,15 +57,18 @@ json CategoricalCrossEntropy::architectureJson() const {
     return j;
 }
 
-void CategoricalCrossEntropy::deserialize(const json &j, Network *network) {
+void CategoricalCrossEntropy::deserializeInto(const json &j,
+                                             Network *network,
+                                             CategoricalCrossEntropy &categoricalCrossEntropy,
+                                             LabelType labelType,
+                                             const string &expectedLayerType) {
     if (j.at("version").get<std::string>() != "1.0.0")
         throw runtime_error("Unsupported version in CategoricalCrossEntropy::deserialize: " + j["version"].get<std::string>());
-    if (j.at("layer_type").get<std::string>() != "categorical_cross_entropy")
+    if (j.at("layer_type").get<std::string>() != expectedLayerType)
         throw runtime_error("Layer type mismatch in CategoricalCrossEntropy::deserialize: " + j.at("layer_type").get<std::string>());
 
-    CategoricalCrossEntropy categoricalCrossEntropy;
-    categoricalCrossEntropy.labelType = j.at("label_type").get<LabelType>();
-    categoricalCrossEntropy.lossShape = j.at("loss_shape").get<LossShape>();
+    categoricalCrossEntropy.labelType = labelType;
+    categoricalCrossEntropy.lossShape = j.at("loss_shape").get<Loss::LossShape>();
     categoricalCrossEntropy.lossDataType = j.at("loss_data_type").get<DataType>();
 
     uint64_t originalTensorId;
@@ -78,10 +77,23 @@ void CategoricalCrossEntropy::deserialize(const json &j, Network *network) {
     originalTensorId = j["labels_tensor"].at("id").get<uint64_t>();
     categoricalCrossEntropy.labelsTensor = network->getApiTensorByOriginalId(originalTensorId);
 
+    categoricalCrossEntropy.softmaxAddedToNetwork = true;
+    categoricalCrossEntropy.softmaxOutput = categoricalCrossEntropy.predictionsTensor;
     categoricalCrossEntropy.lossTensor = Tensor::deserialize(j["loss_shaper_input_tensor"]);
+    categoricalCrossEntropy.lossShaperInput = categoricalCrossEntropy.lossTensor;
 
     categoricalCrossEntropy.initialized = true;
     categoricalCrossEntropy.addToNetwork(network);
+}
+
+void CategoricalCrossEntropy::deserialize(const json &j, Network *network) {
+    CategoricalCrossEntropy categoricalCrossEntropy;
+    deserializeInto(j, network, categoricalCrossEntropy, LabelType::DENSE, "categorical_cross_entropy");
+}
+
+void SparseCategoricalCrossEntropy::deserialize(const json &j, Network *network) {
+    SparseCategoricalCrossEntropy sparseCategoricalCrossEntropy;
+    deserializeInto(j, network, sparseCategoricalCrossEntropy, LabelType::SPARSE, "sparse_categorical_cross_entropy");
 }
 
 }  // namespace Thor
@@ -89,6 +101,7 @@ void CategoricalCrossEntropy::deserialize(const json &j, Network *network) {
 namespace {
 static bool registered = []() {
     Thor::Loss::register_layer("categorical_cross_entropy", &Thor::CategoricalCrossEntropy::deserialize);
+    Thor::Loss::register_layer("sparse_categorical_cross_entropy", &Thor::SparseCategoricalCrossEntropy::deserialize);
     return true;
 }();
 }  // namespace

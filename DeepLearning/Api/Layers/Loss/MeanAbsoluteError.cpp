@@ -26,18 +26,18 @@ void validateLabelsDType(DataType dtype) {
         case DataType::FP32:
             return;
         default:
-            throw runtime_error("Unsupported MeanAbsoluteError label dtype: " + ThorImplementation::TensorDescriptor::getElementTypeName(dtype));
+            throw runtime_error("Unsupported MAE label dtype: " + ThorImplementation::TensorDescriptor::getElementTypeName(dtype));
     }
 }
 
 void validatePredictionsDType(DataType dtype) {
     if (dtype != DataType::FP16 && dtype != DataType::FP32) {
-        throw runtime_error("Unsupported MeanAbsoluteError predictions dtype: " +
+        throw runtime_error("Unsupported MAE predictions dtype: " +
                             ThorImplementation::TensorDescriptor::getElementTypeName(dtype));
     }
 }
 
-ThorImplementation::DynamicExpression makeMeanAbsoluteErrorLossExpression(DataType lossDataType) {
+ThorImplementation::DynamicExpression makeMAELossExpression(DataType lossDataType) {
     ThorImplementation::Expression predictions = ThorImplementation::Expression::input(kPredictionsName, DataType::FP32, DataType::FP32);
     ThorImplementation::Expression labels = ThorImplementation::Expression::input(kLabelsName, DataType::FP32, DataType::FP32);
     ThorImplementation::Expression loss = (predictions - labels).abs().withOutputDType(lossDataType);
@@ -46,7 +46,7 @@ ThorImplementation::DynamicExpression makeMeanAbsoluteErrorLossExpression(DataTy
     return ThorImplementation::DynamicExpression::fromExpressionDefinition(definition);
 }
 
-ThorImplementation::DynamicExpression makeMeanAbsoluteErrorGradientExpression(DataType predictionsDataType) {
+ThorImplementation::DynamicExpression makeMAEGradientExpression(DataType predictionsDataType) {
     validatePredictionsDType(predictionsDataType);
 
     ThorImplementation::Expression predictions = ThorImplementation::Expression::input(kPredictionsName, DataType::FP32, DataType::FP32);
@@ -66,14 +66,14 @@ ThorImplementation::DynamicExpression makeMeanAbsoluteErrorGradientExpression(Da
 
 }  // namespace
 
-void MeanAbsoluteError::buildSupportLayersAndAddToNetwork() {
+void MAE::buildSupportLayersAndAddToNetwork() {
     validatePredictionsDType(predictionsTensor.getDataType());
     validateLabelsDType(labelsTensor.getDataType());
 
-    CustomLoss rawMeanAbsoluteError = CustomLoss::Builder()
+    CustomLoss rawMAE = CustomLoss::Builder()
                                           .network(*network)
-                                          .lossExpression(makeMeanAbsoluteErrorLossExpression(lossDataType))
-                                          .gradientExpression(makeMeanAbsoluteErrorGradientExpression(predictionsTensor.getDataType()))
+                                          .lossExpression(makeMAELossExpression(lossDataType))
+                                          .gradientExpression(makeMAEGradientExpression(predictionsTensor.getDataType()))
                                           .predictions(predictionsTensor)
                                           .labels(labelsTensor)
                                           .predictionsName(kPredictionsName)
@@ -84,7 +84,7 @@ void MeanAbsoluteError::buildSupportLayersAndAddToNetwork() {
                                           .reportsRawLoss()
                                           .build();
 
-    lossShaperInput = rawMeanAbsoluteError.getLoss();
+    lossShaperInput = rawMAE.getLoss();
 
     if (lossShape == LossShape::BATCH) {
         LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(lossShaperInput).reportsBatchLoss().build();
@@ -101,18 +101,24 @@ void MeanAbsoluteError::buildSupportLayersAndAddToNetwork() {
     }
 }
 
-void MeanAbsoluteError::deserialize(const json& j, Network* network) {
+json MAE::architectureJson() const {
+    json j = Loss::architectureJson();
+    j["layer_type"] = "mae";
+    return j;
+}
+
+void MAE::deserialize(const json& j, Network* network) {
     if (j.at("version").get<std::string>() != "1.0.0")
-        throw runtime_error("Unsupported version in MeanAbsoluteError::deserialize: " + j["version"].get<std::string>());
-    if (j.at("layer_type").get<std::string>() != "mean_absolute_error")
-        throw runtime_error("Layer type mismatch in MeanAbsoluteError::deserialize: " + j.at("layer_type").get<std::string>());
+        throw runtime_error("Unsupported version in MAE::deserialize: " + j["version"].get<std::string>());
+    if (j.at("layer_type").get<std::string>() != "mae")
+        throw runtime_error("Layer type mismatch in MAE::deserialize: " + j.at("layer_type").get<std::string>());
 
     uint64_t originalTensorId = j["predictions_tensor"].at("id").get<uint64_t>();
     Tensor predictions = network->getApiTensorByOriginalId(originalTensorId);
     originalTensorId = j["labels_tensor"].at("id").get<uint64_t>();
     Tensor labels = network->getApiTensorByOriginalId(originalTensorId);
 
-    MeanAbsoluteError meanAbsoluteError;
+    MAE meanAbsoluteError;
     meanAbsoluteError.lossShape = j.at("loss_shape").get<LossShape>();
     meanAbsoluteError.lossDataType = j.at("loss_data_type").get<DataType>();
     meanAbsoluteError.predictionsTensor = predictions;
@@ -126,7 +132,7 @@ void MeanAbsoluteError::deserialize(const json& j, Network* network) {
 
 namespace {
 static bool registered = []() {
-    Thor::Loss::register_layer("mean_absolute_error", &Thor::MeanAbsoluteError::deserialize);
+    Thor::Loss::register_layer("mae", &Thor::MAE::deserialize);
     return true;
 }();
 }  // namespace

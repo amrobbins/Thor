@@ -5,24 +5,26 @@
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
 #include "DeepLearning/Api/Layers/Loss/LossShaper.h"
 #include "DeepLearning/Api/Network/Network.h"
-#include "DeepLearning/Implementation/Layers/Loss/MeanSquaredError.h"
+
 #include <optional>
+#include <stdexcept>
 
 namespace Thor {
 
-class MSE : public Loss {
+class HuberLoss : public Loss {
    public:
     class Builder;
-    MSE() {}
+    HuberLoss() {}
 
-    ~MSE() override {}
+    ~HuberLoss() override {}
 
-    std::shared_ptr<Layer> clone() const override { return std::make_shared<MSE>(*this); }
+    std::shared_ptr<Layer> clone() const override { return std::make_shared<HuberLoss>(*this); }
 
-    std::string getLayerType() const override { return "MSE"; }
+    std::string getLayerType() const override { return "HuberLoss"; }
+
+    float getDelta() const { return delta; }
 
     nlohmann::json architectureJson() const override;
-
     static void deserialize(const nlohmann::json &j, Network *network);
 
    protected:
@@ -35,19 +37,16 @@ class MSE : public Loss {
                                                      std::shared_ptr<Thor::Layer> drivingApiLayer,
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
-        // FIXME: How to prune backward then.
-        THOR_THROW_IF_FALSE(initialized);
-        THOR_THROW_IF_FALSE(connectingApiTensor == predictionsTensor || connectingApiTensor == labelsTensor);
-
-        std::shared_ptr<ThorImplementation::MeanSquaredError> meanSquaredError =
-            std::make_shared<ThorImplementation::MeanSquaredError>(lossDataType);
-
-        return meanSquaredError;
+        (void)placement;
+        (void)drivingLayer;
+        (void)drivingApiLayer;
+        (void)connectingApiTensor;
+        (void)inferenceOnly;
+        throw std::runtime_error("HuberLoss is a compound API loss and should not be stamped directly.");
     }
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         uint64_t lossShaperBytes = 0;
-        // Loss will be reported either element-wise or batch-wise, the shaper is only required when loss is batch-wise.
         if (isMultiLayer()) {
             lossShaperBytes = LossShaper::Builder()
                                   .lossInput(lossTensor)
@@ -58,11 +57,15 @@ class MSE : public Loss {
         uint64_t standardLossBytes = Loss::getFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
         return standardLossBytes + lossShaperBytes;
     }
+
+    float delta = 1.0f;
 };
 
-class MSE::Builder {
+class HuberLoss::Builder {
    public:
-    virtual MSE build() {
+    virtual ~Builder() = default;
+
+    virtual HuberLoss build() {
         THOR_THROW_IF_FALSE(_network.has_value());
         THOR_THROW_IF_FALSE(_predictions.has_value());
         THOR_THROW_IF_FALSE(_labels.has_value());
@@ -74,65 +77,79 @@ class MSE::Builder {
             _lossShape = LossShape::BATCH;
         if (!_lossDataType.has_value())
             _lossDataType = _predictions.value().getDataType();
-        MSE meanSquaredError;
-        meanSquaredError.predictionsTensor = _predictions.value();
-        meanSquaredError.labelsTensor = _labels.value();
-        meanSquaredError.lossDataType = _lossDataType.value();
-        meanSquaredError.lossShape = _lossShape.value();
-        meanSquaredError.network = _network.value();
-        meanSquaredError.initialized = true;
+        THOR_THROW_IF_FALSE(_lossDataType.value() == DataType::FP16 || _lossDataType.value() == DataType::FP32);
 
-        meanSquaredError.buildSupportLayersAndAddToNetwork();
+        float delta = _delta.value_or(1.0f);
+        THOR_THROW_IF_FALSE(delta > 0.0f);
 
-        return meanSquaredError;
+        HuberLoss huberLoss;
+        huberLoss.predictionsTensor = _predictions.value();
+        huberLoss.labelsTensor = _labels.value();
+        huberLoss.lossDataType = _lossDataType.value();
+        huberLoss.lossShape = _lossShape.value();
+        huberLoss.delta = delta;
+        huberLoss.network = _network.value();
+        huberLoss.initialized = true;
+
+        huberLoss.buildSupportLayersAndAddToNetwork();
+
+        return huberLoss;
     }
 
-    virtual MSE::Builder &network(Network &_network) {
+    virtual HuberLoss::Builder &network(Network &_network) {
         THOR_THROW_IF_FALSE(!this->_network.has_value());
         this->_network = &_network;
         return *this;
     }
 
-    virtual MSE::Builder &predictions(Tensor _predictions) {
+    virtual HuberLoss::Builder &predictions(Tensor _predictions) {
         THOR_THROW_IF_FALSE(!this->_predictions.has_value());
         THOR_THROW_IF_FALSE(!_predictions.getDimensions().empty());
         this->_predictions = _predictions;
         return *this;
     }
 
-    virtual MSE::Builder &labels(Tensor _labels) {
+    virtual HuberLoss::Builder &labels(Tensor _labels) {
         THOR_THROW_IF_FALSE(!this->_labels.has_value());
         THOR_THROW_IF_FALSE(!_labels.getDimensions().empty());
         this->_labels = _labels;
         return *this;
     }
 
-    virtual MSE::Builder &reportsBatchLoss() {
+    virtual HuberLoss::Builder &delta(float _delta) {
+        THOR_THROW_IF_FALSE(!this->_delta.has_value());
+        THOR_THROW_IF_FALSE(_delta > 0.0f);
+        this->_delta = _delta;
+        return *this;
+    }
+
+    virtual HuberLoss::Builder &reportsBatchLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
         _lossShape = LossShape::BATCH;
         return *this;
     }
 
-    virtual MSE::Builder &reportsElementwiseLoss() {
+    virtual HuberLoss::Builder &reportsElementwiseLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
         _lossShape = LossShape::ELEMENTWISE;
         return *this;
     }
 
-    virtual MSE::Builder &reportsPerOutputLoss() {
+    virtual HuberLoss::Builder &reportsPerOutputLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
         _lossShape = LossShape::CLASSWISE;
         return *this;
     }
 
-    virtual MSE::Builder &reportsRawLoss() {
+    virtual HuberLoss::Builder &reportsRawLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
         _lossShape = LossShape::RAW;
         return *this;
     }
 
-    virtual MSE::Builder &lossDataType(DataType _lossDataType) {
+    virtual HuberLoss::Builder &lossDataType(DataType _lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
+        THOR_THROW_IF_FALSE(_lossDataType == DataType::FP16 || _lossDataType == DataType::FP32);
         this->_lossDataType = _lossDataType;
         return *this;
     }
@@ -143,7 +160,7 @@ class MSE::Builder {
     std::optional<Tensor> _labels;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
+    std::optional<float> _delta;
 };
-
 
 }  // namespace Thor

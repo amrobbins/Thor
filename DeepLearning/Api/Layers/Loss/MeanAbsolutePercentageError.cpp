@@ -5,8 +5,8 @@ using namespace std;
 using json = nlohmann::json;
 
 namespace Thor {
-void MeanAbsolutePercentageError::buildSupportLayersAndAddToNetwork() {
-    MeanAbsolutePercentageError meanAbsolutePercentageError = MeanAbsolutePercentageError::Builder()
+void MAPE::buildSupportLayersAndAddToNetwork() {
+    MAPE meanAbsolutePercentageError = MAPE::Builder()
                                                                   .network(*network)
                                                                   .predictions(predictionsTensor)
                                                                   .labels(labelsTensor)
@@ -35,13 +35,19 @@ void MeanAbsolutePercentageError::buildSupportLayersAndAddToNetwork() {
     }
 }
 
-void MeanAbsolutePercentageError::deserialize(const json &j, Network *network) {
-    if (j.at("version").get<std::string>() != "1.0.0")
-        throw runtime_error("Unsupported version in MeanAbsolutePercentageError::deserialize: " + j["version"].get<std::string>());
-    if (j.at("layer_type").get<std::string>() != "mean_absolute_percentage_error")
-        throw runtime_error("Layer type mismatch in MeanAbsolutePercentageError::deserialize: " + j.at("layer_type").get<std::string>());
+json MAPE::architectureJson() const {
+    json j = Loss::architectureJson();
+    j["layer_type"] = "mape";
+    return j;
+}
 
-    MeanAbsolutePercentageError meanAbsolutePercentageError;
+void MAPE::deserialize(const json &j, Network *network) {
+    if (j.at("version").get<std::string>() != "1.0.0")
+        throw runtime_error("Unsupported version in MAPE::deserialize: " + j["version"].get<std::string>());
+    if (j.at("layer_type").get<std::string>() != "mape")
+        throw runtime_error("Layer type mismatch in MAPE::deserialize: " + j.at("layer_type").get<std::string>());
+
+    MAPE meanAbsolutePercentageError;
     meanAbsolutePercentageError.lossShape = j.at("loss_shape").get<LossShape>();
     meanAbsolutePercentageError.lossDataType = j.at("loss_data_type").get<DataType>();
 
@@ -61,7 +67,7 @@ void MeanAbsolutePercentageError::deserialize(const json &j, Network *network) {
 
 namespace {
 static bool registered = []() {
-    Thor::Loss::register_layer("mean_absolute_percentage_error", &Thor::MeanAbsolutePercentageError::deserialize);
+    Thor::Loss::register_layer("mape", &Thor::MAPE::deserialize);
     return true;
 }();
 }  // namespace
