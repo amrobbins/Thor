@@ -11,156 +11,109 @@ def _tensor_1d(size: int, dtype=thor.DataType.fp32):
     return thor.Tensor([size], dtype)
 
 
-def test_categorical_cross_entropy_one_hot_constructs_defaults():
+def test_categorical_cross_entropy_dense_constructs_defaults():
     n = _net()
     preds = _tensor_1d(5, thor.DataType.fp32)
     labels = _tensor_1d(5, thor.DataType.fp32)
 
-    # defaults: loss_data_type=fp32, reported_loss_shape=batch
-    loss = thor.losses.CategoricalCrossEntropy(
-        n,
-        preds,
-        labels,
-        thor.losses.LabelType.one_hot,
-        None,
-    )
+    loss = thor.losses.CategoricalCrossEntropy(n, preds, labels)
     assert loss is not None
     assert isinstance(loss, thor.losses.CategoricalCrossEntropy)
+    assert not isinstance(loss, thor.losses.SparseCategoricalCrossEntropy)
 
 
-def test_categorical_cross_entropy_one_hot_constructs_with_num_classes():
-    n = _net()
-    preds = _tensor_1d(7)
-    labels = _tensor_1d(7)
-
-    loss = thor.losses.CategoricalCrossEntropy(
-        n,
-        preds,
-        labels,
-        thor.losses.LabelType.one_hot,
-        7,
-    )
-    assert isinstance(loss, thor.losses.CategoricalCrossEntropy)
-
-
-def test_categorical_cross_entropy_one_hot_rejects_predictions_not_1d():
+def test_categorical_cross_entropy_dense_rejects_predictions_not_1d():
     n = _net()
     preds = thor.Tensor([2, 3], thor.DataType.fp32)
     labels = _tensor_1d(6)
 
-    with pytest.raises(ValueError, match=r"one_hot predictions must have 1 dimension"):
-        thor.losses.CategoricalCrossEntropy(n, preds, labels, thor.losses.LabelType.one_hot, None)
+    with pytest.raises(ValueError, match=r"predictions must be a 1 dimensional tensor"):
+        thor.losses.CategoricalCrossEntropy(n, preds, labels)
 
 
-def test_categorical_cross_entropy_one_hot_rejects_labels_not_1d():
+def test_categorical_cross_entropy_dense_rejects_labels_not_1d():
     n = _net()
     preds = _tensor_1d(6)
     labels = thor.Tensor([2, 3], thor.DataType.fp32)
 
-    with pytest.raises(ValueError, match=r"one_hot labels must have 1 dimension"):
-        thor.losses.CategoricalCrossEntropy(n, preds, labels, thor.losses.LabelType.one_hot, None)
+    with pytest.raises(ValueError, match=r"labels must be a 1 dimensional dense class vector"):
+        thor.losses.CategoricalCrossEntropy(n, preds, labels)
 
 
-def test_categorical_cross_entropy_one_hot_rejects_mismatched_sizes():
+def test_categorical_cross_entropy_dense_rejects_mismatched_sizes():
     n = _net()
     preds = _tensor_1d(5)
     labels = _tensor_1d(6)
 
     with pytest.raises(ValueError, match=r"mismatch between predictions size 5 and labels tensor size 6"):
-        thor.losses.CategoricalCrossEntropy(n, preds, labels, thor.losses.LabelType.one_hot, None)
+        thor.losses.CategoricalCrossEntropy(n, preds, labels)
 
 
-def test_categorical_cross_entropy_one_hot_rejects_num_classes_mismatch():
-    n = _net()
-    preds = _tensor_1d(5)
-    labels = _tensor_1d(5)
-
-    with pytest.raises(ValueError, match=r"mismatch between num_classes 6 and predictions tensor size 5"):
-        thor.losses.CategoricalCrossEntropy(n, preds, labels, thor.losses.LabelType.one_hot, 6)
-
-
-def test_categorical_cross_entropy_one_hot_rejects_num_classes_non_positive():
-    n = _net()
-    preds = _tensor_1d(5)
-    labels = _tensor_1d(5)
-
-    # Your ONE_HOT check errors when num_classes is provided and <= 0
-    with pytest.raises(ValueError, match=r"mismatch between num_classes 0 and predictions tensor size 5"):
-        thor.losses.CategoricalCrossEntropy(n, preds, labels, thor.losses.LabelType.one_hot, 0)
-
-
-def test_categorical_cross_entropy_index_constructs_uint16_labels():
+def test_sparse_categorical_cross_entropy_constructs_uint16_labels():
     n = _net()
     preds = _tensor_1d(10, thor.DataType.fp32)
-    labels = _tensor_1d(1, thor.DataType.uint16)  # IMPORTANT: integer dtype for index labels
+    labels = _tensor_1d(1, thor.DataType.uint16)
 
-    loss = thor.losses.CategoricalCrossEntropy(
-        n,
-        preds,
-        labels,
-        thor.losses.LabelType.index,
-        10,
-    )
+    loss = thor.losses.SparseCategoricalCrossEntropy(n, preds, labels, 10)
+    assert isinstance(loss, thor.losses.SparseCategoricalCrossEntropy)
     assert isinstance(loss, thor.losses.CategoricalCrossEntropy)
 
 
-def test_categorical_cross_entropy_index_requires_num_classes():
+def test_sparse_categorical_cross_entropy_rejects_num_classes_non_positive():
     n = _net()
     preds = _tensor_1d(10)
     labels = _tensor_1d(1, thor.DataType.uint16)
 
-    with pytest.raises(ValueError, match=r"label_type set to LabelType\.index but num_classes is None"):
-        thor.losses.CategoricalCrossEntropy(n, preds, labels, thor.losses.LabelType.index, None)
+    with pytest.raises(ValueError, match=r"num_classes must be greater than one"):
+        thor.losses.SparseCategoricalCrossEntropy(n, preds, labels, 0)
 
 
-def test_categorical_cross_entropy_index_rejects_num_classes_non_positive():
+def test_sparse_categorical_cross_entropy_rejects_num_classes_mismatch():
     n = _net()
     preds = _tensor_1d(10)
     labels = _tensor_1d(1, thor.DataType.uint16)
 
-    with pytest.raises(ValueError, match=r"num_classes must be a positive integer"):
-        thor.losses.CategoricalCrossEntropy(n, preds, labels, thor.losses.LabelType.index, 0)
+    with pytest.raises(ValueError, match=r"mismatch between num_classes 11 and predictions tensor size 10"):
+        thor.losses.SparseCategoricalCrossEntropy(n, preds, labels, 11)
 
 
-def test_categorical_cross_entropy_index_rejects_labels_not_size_1():
+def test_sparse_categorical_cross_entropy_rejects_labels_not_size_1():
     n = _net()
     preds = _tensor_1d(10)
 
     labels = _tensor_1d(2, thor.DataType.uint16)
     with pytest.raises(ValueError, match=r"labels must be a 1 dimensional tensor of size 1"):
-        thor.losses.CategoricalCrossEntropy(n, preds, labels, thor.losses.LabelType.index, 10)
+        thor.losses.SparseCategoricalCrossEntropy(n, preds, labels, 10)
 
     labels = thor.Tensor([1, 1], thor.DataType.uint16)
     with pytest.raises(ValueError, match=r"labels must be a 1 dimensional tensor of size 1"):
-        thor.losses.CategoricalCrossEntropy(n, preds, labels, thor.losses.LabelType.index, 10)
+        thor.losses.SparseCategoricalCrossEntropy(n, preds, labels, 10)
+
+
+def test_sparse_categorical_cross_entropy_rejects_float_labels():
+    n = _net()
+    preds = _tensor_1d(10)
+    labels = _tensor_1d(1, thor.DataType.fp32)
+
+    with pytest.raises(ValueError, match=r"labels must use uint8, uint16, or uint32 dtype"):
+        thor.losses.SparseCategoricalCrossEntropy(n, preds, labels, 10)
 
 
 @pytest.mark.parametrize(
-    "shape",
+    "loss_cls,labels,args",
     [
-        "batch",
-        "classwise",
-        "elementwise",
-        "raw",
+        (thor.losses.CategoricalCrossEntropy, _tensor_1d(5, thor.DataType.fp32), ()),
+        (thor.losses.SparseCategoricalCrossEntropy, _tensor_1d(1, thor.DataType.uint16), (5,)),
     ],
 )
-def test_categorical_cross_entropy_reported_loss_shape_variants_construct(shape):
-    n = _net()
-    preds = _tensor_1d(5, thor.DataType.fp32)
-    labels = _tensor_1d(5, thor.DataType.fp32)
+def test_categorical_cross_entropy_reported_loss_shape_variants_construct(loss_cls, labels, args):
+    for shape in ["batch", "classwise", "elementwise", "raw"]:
+        n = _net()
+        preds = _tensor_1d(5, thor.DataType.fp32)
+        loss_shape = getattr(thor.losses.LossShape, shape)
 
-    loss_shape = getattr(thor.losses.LossShape, shape)
-
-    loss = thor.losses.CategoricalCrossEntropy(
-        n,
-        preds,
-        labels,
-        thor.losses.LabelType.one_hot,
-        None,
-        thor.DataType.fp32,
-        loss_shape,
-    )
-    assert isinstance(loss, thor.losses.CategoricalCrossEntropy)
+        loss = loss_cls(n, preds, labels, *args, thor.DataType.fp32, loss_shape)
+        assert isinstance(loss, thor.losses.CategoricalCrossEntropy)
 
 
 def test_categorical_cross_entropy_rejects_invalid_reported_loss_shape():
@@ -168,23 +121,27 @@ def test_categorical_cross_entropy_rejects_invalid_reported_loss_shape():
     preds = _tensor_1d(5)
     labels = _tensor_1d(5)
 
-    # Force an invalid enum value by casting an int into the enum type.
-    # Depending on your binding, this may raise TypeError earlier; if so, that's fine too.
     try:
         bogus = thor.losses.LossShape(123456)
     except Exception:
-        bogus = 123456  # fallback; should TypeError at call site
+        bogus = 123456
 
     with pytest.raises((ValueError, TypeError), match=r"(Invalid value|reported_loss_shape)"):
-        thor.losses.CategoricalCrossEntropy(
-            n,
-            preds,
-            labels,
-            thor.losses.LabelType.one_hot,
-            None,
-            thor.DataType.fp32,
-            bogus,
-        )
+        thor.losses.CategoricalCrossEntropy(n, preds, labels, thor.DataType.fp32, bogus)
+
+
+def test_sparse_categorical_cross_entropy_rejects_invalid_reported_loss_shape():
+    n = _net()
+    preds = _tensor_1d(5)
+    labels = _tensor_1d(1, thor.DataType.uint16)
+
+    try:
+        bogus = thor.losses.LossShape(123456)
+    except Exception:
+        bogus = 123456
+
+    with pytest.raises((ValueError, TypeError), match=r"(Invalid value|reported_loss_shape)"):
+        thor.losses.SparseCategoricalCrossEntropy(n, preds, labels, 5, thor.DataType.fp32, bogus)
 
 
 def test_categorical_cross_entropy_rejects_wrong_types():
@@ -193,13 +150,28 @@ def test_categorical_cross_entropy_rejects_wrong_types():
     labels = _tensor_1d(5)
 
     with pytest.raises(TypeError):
-        thor.losses.CategoricalCrossEntropy("not a network", preds, labels, thor.losses.LabelType.one_hot, None)
+        thor.losses.CategoricalCrossEntropy("not a network", preds, labels)
 
     with pytest.raises(TypeError):
-        thor.losses.CategoricalCrossEntropy(n, "not a tensor", labels, thor.losses.LabelType.one_hot, None)
+        thor.losses.CategoricalCrossEntropy(n, "not a tensor", labels)
 
     with pytest.raises(TypeError):
-        thor.losses.CategoricalCrossEntropy(n, preds, "not a tensor", thor.losses.LabelType.one_hot, None)
+        thor.losses.CategoricalCrossEntropy(n, preds, "not a tensor")
+
+
+def test_sparse_categorical_cross_entropy_rejects_wrong_types():
+    n = _net()
+    preds = _tensor_1d(5)
+    labels = _tensor_1d(1, thor.DataType.uint16)
+
+    with pytest.raises(TypeError):
+        thor.losses.SparseCategoricalCrossEntropy("not a network", preds, labels, 5)
+
+    with pytest.raises(TypeError):
+        thor.losses.SparseCategoricalCrossEntropy(n, "not a tensor", labels, 5)
+
+    with pytest.raises(TypeError):
+        thor.losses.SparseCategoricalCrossEntropy(n, preds, "not a tensor", 5)
 
 
 def test_categorical_cross_entropy_rejects_wrong_arity():
@@ -208,8 +180,11 @@ def test_categorical_cross_entropy_rejects_wrong_arity():
     labels = _tensor_1d(5)
 
     with pytest.raises(TypeError):
-        thor.losses.CategoricalCrossEntropy(n, preds, labels)  # missing required args
+        thor.losses.CategoricalCrossEntropy(n, preds, labels, thor.DataType.fp32, thor.losses.LossShape.batch, 123)
+
+    sparse_labels = _tensor_1d(1, thor.DataType.uint16)
+    with pytest.raises(TypeError):
+        thor.losses.SparseCategoricalCrossEntropy(n, preds, sparse_labels)  # missing num_classes
 
     with pytest.raises(TypeError):
-        thor.losses.CategoricalCrossEntropy(
-            n, preds, labels, thor.losses.LabelType.one_hot, None, thor.DataType.fp32, thor.losses.LossShape.batch, 123)
+        thor.losses.SparseCategoricalCrossEntropy(n, preds, sparse_labels, 5, thor.DataType.fp32, thor.losses.LossShape.batch, 123)

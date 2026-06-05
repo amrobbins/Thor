@@ -85,7 +85,6 @@ Network buildSingleLayerConvolution2d() {
                                             .predictions(latestOutputTensor)
                                             .labels(labelsTensor)
                                             .reportsBatchLoss()
-                                            .receivesOneHotLabels()
                                             .build();
 
     labelsTensor = lossLayer.getLabels();

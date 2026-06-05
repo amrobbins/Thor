@@ -221,12 +221,13 @@ std::shared_ptr<ThorImplementation::Layer> CustomLoss::stamp(ThorImplementation:
     (void)placement;
     (void)drivingLayer;
     (void)drivingApiLayer;
-    (void)inferenceOnly;
     THOR_THROW_IF_FALSE(initialized);
     THOR_THROW_IF_FALSE(connectingApiTensor == predictionsTensor || connectingApiTensor == labelsTensor);
 
-    return std::make_shared<ThorImplementation::CustomLoss>(
+    std::shared_ptr<ThorImplementation::CustomLoss> customLoss = std::make_shared<ThorImplementation::CustomLoss>(
         lossExpression, gradientExpression, predictionsName, labelsName, lossName, gradientName, lossDataType);
+    customLoss->setConstructForInferenceOnly(inferenceOnly);
+    return customLoss;
 }
 
 void CustomLoss::buildSupportLayersAndAddToNetwork() {

@@ -89,7 +89,7 @@ Loss reductions available, meant to aid in hand analysis of a data set:
 
 So you could send a single batch and check the loss per example using Elementwise.
 If you want to see loss per category (categories 1, 0 in this case) it may be more
-convenient to get that using CategoricalCrossEntropy, e.g. use index labels
-with 2 classes and set reported_loss_shape=Loss.LossShape.classwise.
+convenient to get that using SparseCategoricalCrossEntropy with
+2 classes and reported_loss_shape=Loss.LossShape.classwise.
 )nbdoc";
 }

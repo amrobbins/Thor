@@ -1,91 +1,91 @@
-# test/test_losses_mean_absolute_percentage_error.py
+# test/test_losses_mape.py
 import pytest
 import thor
 
 
 def _net():
-    return thor.Network("test_net_mean_absolute_percentage_error")
+    return thor.Network("test_net_mape")
 
 
 def _tensor_1d(size: int, dtype=thor.DataType.fp32):
     return thor.Tensor([size], dtype)
 
 
-def test_mean_absolute_percentage_error_constructs_defaults():
+def test_mape_constructs_defaults():
     n = _net()
     preds = _tensor_1d(1, thor.DataType.fp32)
     labels = _tensor_1d(1, thor.DataType.fp32)
 
-    loss = thor.losses.MeanAbsolutePercentageError(n, preds, labels)
+    loss = thor.losses.MAPE(n, preds, labels)
     assert loss is not None
-    assert isinstance(loss, thor.losses.MeanAbsolutePercentageError)
+    assert isinstance(loss, thor.losses.MAPE)
 
 
-def test_mean_absolute_percentage_error_constructs_with_loss_data_type():
+def test_mape_constructs_with_loss_data_type():
     n = _net()
     preds = _tensor_1d(1, thor.DataType.fp16)
     labels = _tensor_1d(1, thor.DataType.fp16)
 
-    loss = thor.losses.MeanAbsolutePercentageError(
+    loss = thor.losses.MAPE(
         n,
         preds,
         labels,
         thor.DataType.fp32,  # explicitly override builder.lossDataType(...)
         False,
     )
-    assert isinstance(loss, thor.losses.MeanAbsolutePercentageError)
+    assert isinstance(loss, thor.losses.MAPE)
 
 
-def test_mean_absolute_percentage_error_constructs_reports_elementwise():
+def test_mape_constructs_reports_elementwise():
     n = _net()
     preds = _tensor_1d(1, thor.DataType.fp32)
     labels = _tensor_1d(1, thor.DataType.fp32)
 
-    loss = thor.losses.MeanAbsolutePercentageError(
+    loss = thor.losses.MAPE(
         n,
         preds,
         labels,
         None,
         True,
     )
-    assert isinstance(loss, thor.losses.MeanAbsolutePercentageError)
+    assert isinstance(loss, thor.losses.MAPE)
 
 
-def test_mean_absolute_percentage_error_rejects_labels_not_1d_size_1():
+def test_mape_rejects_labels_not_1d_size_1():
     n = _net()
     preds = _tensor_1d(1, thor.DataType.fp32)
 
     labels = _tensor_1d(2, thor.DataType.fp32)
     with pytest.raises(ValueError, match=r"labels must be a 1 dimensional tensor of size 1"):
-        thor.losses.MeanAbsolutePercentageError(n, preds, labels)
+        thor.losses.MAPE(n, preds, labels)
 
     labels = thor.Tensor([1, 1], thor.DataType.fp32)
     with pytest.raises(ValueError, match=r"labels must be a 1 dimensional tensor of size 1"):
-        thor.losses.MeanAbsolutePercentageError(n, preds, labels)
+        thor.losses.MAPE(n, preds, labels)
 
 
-def test_mean_absolute_percentage_error_rejects_wrong_types():
+def test_mape_rejects_wrong_types():
     n = _net()
     preds = _tensor_1d(1, thor.DataType.fp32)
     labels = _tensor_1d(1, thor.DataType.fp32)
 
     with pytest.raises(TypeError):
-        thor.losses.MeanAbsolutePercentageError("not a network", preds, labels)
+        thor.losses.MAPE("not a network", preds, labels)
 
     with pytest.raises(TypeError):
-        thor.losses.MeanAbsolutePercentageError(n, "not a tensor", labels)
+        thor.losses.MAPE(n, "not a tensor", labels)
 
     with pytest.raises(TypeError):
-        thor.losses.MeanAbsolutePercentageError(n, preds, "not a tensor")
+        thor.losses.MAPE(n, preds, "not a tensor")
 
 
-def test_mean_absolute_percentage_error_rejects_wrong_arity():
+def test_mape_rejects_wrong_arity():
     n = _net()
     preds = _tensor_1d(1, thor.DataType.fp32)
     labels = _tensor_1d(1, thor.DataType.fp32)
 
     with pytest.raises(TypeError):
-        thor.losses.MeanAbsolutePercentageError(n, preds)  # missing labels
+        thor.losses.MAPE(n, preds)  # missing labels
 
     with pytest.raises(TypeError):
-        thor.losses.MeanAbsolutePercentageError(n, preds, labels, None, False, 123)  # extra arg
+        thor.losses.MAPE(n, preds, labels, None, False, 123)  # extra arg

@@ -26,18 +26,18 @@ void validateLabelsDType(DataType dtype) {
         case DataType::FP32:
             return;
         default:
-            throw runtime_error("Unsupported MeanSquaredError label dtype: " + ThorImplementation::TensorDescriptor::getElementTypeName(dtype));
+            throw runtime_error("Unsupported MSE label dtype: " + ThorImplementation::TensorDescriptor::getElementTypeName(dtype));
     }
 }
 
 void validatePredictionsDType(DataType dtype) {
     if (dtype != DataType::FP16 && dtype != DataType::FP32) {
-        throw runtime_error("Unsupported MeanSquaredError predictions dtype: " +
+        throw runtime_error("Unsupported MSE predictions dtype: " +
                             ThorImplementation::TensorDescriptor::getElementTypeName(dtype));
     }
 }
 
-ThorImplementation::DynamicExpression makeMeanSquaredErrorLossExpression(DataType lossDataType) {
+ThorImplementation::DynamicExpression makeMSELossExpression(DataType lossDataType) {
     ThorImplementation::Expression predictions = ThorImplementation::Expression::input(kPredictionsName, DataType::FP32, DataType::FP32);
     ThorImplementation::Expression labels = ThorImplementation::Expression::input(kLabelsName, DataType::FP32, DataType::FP32);
     ThorImplementation::Expression diff = labels - predictions;
@@ -47,7 +47,7 @@ ThorImplementation::DynamicExpression makeMeanSquaredErrorLossExpression(DataTyp
     return ThorImplementation::DynamicExpression::fromExpressionDefinition(definition);
 }
 
-ThorImplementation::DynamicExpression makeMeanSquaredErrorGradientExpression(DataType predictionsDataType) {
+ThorImplementation::DynamicExpression makeMSEGradientExpression(DataType predictionsDataType) {
     validatePredictionsDType(predictionsDataType);
 
     ThorImplementation::Expression predictions = ThorImplementation::Expression::input(kPredictionsName, DataType::FP32, DataType::FP32);
@@ -62,14 +62,14 @@ ThorImplementation::DynamicExpression makeMeanSquaredErrorGradientExpression(Dat
 
 }  // namespace
 
-void MeanSquaredError::buildSupportLayersAndAddToNetwork() {
+void MSE::buildSupportLayersAndAddToNetwork() {
     validatePredictionsDType(predictionsTensor.getDataType());
     validateLabelsDType(labelsTensor.getDataType());
 
-    CustomLoss rawMeanSquaredError = CustomLoss::Builder()
+    CustomLoss rawMSE = CustomLoss::Builder()
                                        .network(*network)
-                                       .lossExpression(makeMeanSquaredErrorLossExpression(lossDataType))
-                                       .gradientExpression(makeMeanSquaredErrorGradientExpression(predictionsTensor.getDataType()))
+                                       .lossExpression(makeMSELossExpression(lossDataType))
+                                       .gradientExpression(makeMSEGradientExpression(predictionsTensor.getDataType()))
                                        .predictions(predictionsTensor)
                                        .labels(labelsTensor)
                                        .predictionsName(kPredictionsName)
@@ -80,7 +80,7 @@ void MeanSquaredError::buildSupportLayersAndAddToNetwork() {
                                        .reportsRawLoss()
                                        .build();
 
-    lossShaperInput = rawMeanSquaredError.getLoss();
+    lossShaperInput = rawMSE.getLoss();
 
     if (lossShape == LossShape::BATCH) {
         LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(lossShaperInput).reportsBatchLoss().build();
@@ -97,18 +97,24 @@ void MeanSquaredError::buildSupportLayersAndAddToNetwork() {
     }
 }
 
-void MeanSquaredError::deserialize(const json& j, Network* network) {
+json MSE::architectureJson() const {
+    json j = Loss::architectureJson();
+    j["layer_type"] = "mse";
+    return j;
+}
+
+void MSE::deserialize(const json& j, Network* network) {
     if (j.at("version").get<std::string>() != "1.0.0")
-        throw runtime_error("Unsupported version in MeanSquaredError::deserialize: " + j["version"].get<std::string>());
-    if (j.at("layer_type").get<std::string>() != "mean_squared_error")
-        throw runtime_error("Layer type mismatch in MeanSquaredError::deserialize: " + j.at("layer_type").get<std::string>());
+        throw runtime_error("Unsupported version in MSE::deserialize: " + j["version"].get<std::string>());
+    if (j.at("layer_type").get<std::string>() != "mse")
+        throw runtime_error("Layer type mismatch in MSE::deserialize: " + j.at("layer_type").get<std::string>());
 
     uint64_t originalTensorId = j["predictions_tensor"].at("id").get<uint64_t>();
     Tensor predictions = network->getApiTensorByOriginalId(originalTensorId);
     originalTensorId = j["labels_tensor"].at("id").get<uint64_t>();
     Tensor labels = network->getApiTensorByOriginalId(originalTensorId);
 
-    MeanSquaredError meanSquaredError;
+    MSE meanSquaredError;
     meanSquaredError.lossShape = j.at("loss_shape").get<LossShape>();
     meanSquaredError.lossDataType = j.at("loss_data_type").get<DataType>();
     meanSquaredError.predictionsTensor = predictions;
@@ -122,7 +128,7 @@ void MeanSquaredError::deserialize(const json& j, Network* network) {
 
 namespace {
 static bool registered = []() {
-    Thor::Loss::register_layer("mean_squared_error", &Thor::MeanSquaredError::deserialize);
+    Thor::Loss::register_layer("mse", &Thor::MSE::deserialize);
     return true;
 }();
 }  // namespace
