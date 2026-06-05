@@ -9,6 +9,7 @@
 #include <atomic>
 #include <utility>
 #include <optional>
+#include <vector>
 
 namespace Thor {
 
@@ -28,14 +29,15 @@ class Loss : public Layer {
 
     bool mustConnectAllInputsToDriveOutput() override { return true; }
     void informThatInputConnectionMade(Tensor inputTensor) override {
+        (void)inputTensor;
         numInputConnectionsMade += 1;
-        // Only one type of loss is supported at a time.
-        THOR_THROW_IF_FALSE(numInputConnectionsMade < 3);
+        THOR_THROW_IF_FALSE(numInputConnectionsMade <= getLossInputTensors().size());
     }
 
     virtual Tensor getPredictions() const { return predictionsTensor; }
     virtual Tensor getLabels() const { return labelsTensor; }
     virtual Tensor getLoss() const { return lossTensor; }
+    virtual std::vector<Tensor> getLossInputTensors() const { return {predictionsTensor, labelsTensor}; }
 
     // getPredictions() ia a synonym for getFeatureInput().value() and in losses BY DEFAULT ONLY.
     // If the raw predictions are transformed. i.e. by softmax before becoming predictions
@@ -49,6 +51,8 @@ class Loss : public Layer {
             return (int)ThorImplementation::Loss::ConnectionType::LABELS;
         } else if (connectingTensor == predictionsTensor) {
             return (int)ThorImplementation::Loss::ConnectionType::FORWARD_BACKWARD;
+        } else if (connectingTensor == lossTensor) {
+            return 0;
         } else {
             return 0;
         }
@@ -56,7 +60,8 @@ class Loss : public Layer {
     }
 
     std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override {
-        if (numInputConnectionsMade == 2)
+        (void)inputTensor;
+        if (numInputConnectionsMade == getLossInputTensors().size())
             return {lossTensor};
         else
             return std::vector<Tensor>();

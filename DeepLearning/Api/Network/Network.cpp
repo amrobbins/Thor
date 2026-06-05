@@ -554,19 +554,17 @@ Network::StatusCode Network::evaluateGraph() {
 
         shared_ptr<Loss> loss = dynamic_pointer_cast<Loss>(layer);
         if (loss) {
-            // Predictions and Labels in, Loss out
-            // Note: getPredictions() does not return the featureInput tensor when there is an initial transformation layer, like
-            // sigmoid
-            Tensor rawPredictionsTensor = loss->getFeatureInput().value();
-            Tensor labelsTensor = loss->getLabels();
+            // Loss inputs in, Loss out. Most losses expose predictions + labels, while multi-input losses expose
+            // multiple differentiable operands.
+            vector<Tensor> lossInputTensors = loss->getLossInputTensors();
             Tensor lossTensor = loss->getLoss();
-            allTensors.insert(rawPredictionsTensor);
-            allTensors.insert(labelsTensor);
+            THOR_THROW_IF_FALSE(!lossInputTensors.empty());
+            for (const Tensor& inputTensor : lossInputTensors) {
+                allTensors.insert(inputTensor);
+                apiTensorToApiLoadingLayers[inputTensor].push_back(loss);
+                apiLayerToApiInputTensors[loss].push_back(inputTensor);
+            }
             allTensors.insert(lossTensor);
-            apiTensorToApiLoadingLayers[rawPredictionsTensor].push_back(loss);
-            apiTensorToApiLoadingLayers[labelsTensor].push_back(loss);
-            apiLayerToApiInputTensors[loss].push_back(rawPredictionsTensor);
-            apiLayerToApiInputTensors[loss].push_back(labelsTensor);
             THOR_THROW_IF_FALSE(apiTensorToApiDrivingLayer.count(lossTensor) == 0);
             apiTensorToApiDrivingLayer[lossTensor] = loss;
             apiLayerToApiOutputTensors[loss].push_back(lossTensor);
@@ -916,11 +914,11 @@ void Network::addLayerToNetwork(const Layer *layer) {
         Tensor inputTensor = stub->getFeatureInput().value();
         apiTensorByOriginalId[inputTensor.getOriginalId()] = inputTensor;
     } else if (loss) {
-        Tensor rawPredictionsTensor = loss->getFeatureInput().value();
-        Tensor labelsTensor = loss->getLabels();
+        vector<Tensor> lossInputTensors = loss->getLossInputTensors();
         Tensor lossTensor = loss->getLoss();
-        apiTensorByOriginalId[rawPredictionsTensor.getOriginalId()] = rawPredictionsTensor;
-        apiTensorByOriginalId[labelsTensor.getOriginalId()] = labelsTensor;
+        for (const Tensor& inputTensor : lossInputTensors) {
+            apiTensorByOriginalId[inputTensor.getOriginalId()] = inputTensor;
+        }
         apiTensorByOriginalId[lossTensor.getOriginalId()] = lossTensor;
     } else if (metric) {
         Tensor inputTensor = metric->getFeatureInput().value();
