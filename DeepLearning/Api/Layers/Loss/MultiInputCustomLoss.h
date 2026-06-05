@@ -21,7 +21,9 @@ class MultiInputCustomLoss : public Loss {
     struct InputSpec {
         std::string name;
         Tensor tensor;
-        std::string gradientName;
+        std::optional<std::string> gradientName;
+
+        bool isDifferentiable() const { return gradientName.has_value(); }
     };
 
     class Builder;
@@ -70,6 +72,7 @@ class MultiInputCustomLoss : public Loss {
 
     static void validateName(const std::string& name, const std::string& what);
     static std::set<std::string> toNameSet(const std::vector<std::string>& names);
+    static std::set<std::string> gradientNameSet(const std::vector<InputSpec>& inputs);
     static std::string joinNames(const std::set<std::string>& names);
     static PhysicalTensor makeFakePlacedTensor(const Tensor& apiTensor);
     static Tensor logicalLossTensorFromFakeOutput(const std::vector<uint64_t>& fakeOutputDims, DataType dtype);
@@ -144,6 +147,12 @@ class MultiInputCustomLoss::Builder {
         THOR_THROW_IF_FALSE(tensor.isInitialized());
         std::string effectiveGradientName = gradientName.value_or(name + "_grad");
         _inputs.push_back(InputSpec{std::move(name), std::move(tensor), std::move(effectiveGradientName)});
+        return *this;
+    }
+
+    virtual MultiInputCustomLoss::Builder& auxiliaryInput(std::string name, Tensor tensor) {
+        THOR_THROW_IF_FALSE(tensor.isInitialized());
+        _inputs.push_back(InputSpec{std::move(name), std::move(tensor), std::nullopt});
         return *this;
     }
 
