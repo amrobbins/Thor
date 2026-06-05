@@ -16,6 +16,9 @@ void bind_soft_target_cross_entropy(nb::module_ &losses);
 void bind_kl_div_loss(nb::module_ &losses);
 void bind_binary_focal_loss(nb::module_ &losses);
 void bind_categorical_focal_loss(nb::module_ &losses);
+void bind_dice_loss(nb::module_ &losses);
+void bind_tversky_loss(nb::module_ &losses);
+void bind_focal_tversky_loss(nb::module_ &losses);
 
 using namespace Thor;
 
@@ -55,4 +58,7 @@ void bind_losses(nb::module_ &losses) {
     bind_kl_div_loss(losses);
     bind_binary_focal_loss(losses);
     bind_categorical_focal_loss(losses);
+    bind_dice_loss(losses);
+    bind_tversky_loss(losses);
+    bind_focal_tversky_loss(losses);
 }
