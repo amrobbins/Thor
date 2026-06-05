@@ -30,9 +30,9 @@ MultiInputCustomLoss::MultiInputCustomLoss(ThorImplementation::DynamicExpression
     validateName(this->lossName, "loss output");
     validateInputSpecs();
 
-    set<string> gradientNames;
-    for (const InputSpec& input : this->inputs)
-        gradientNames.insert(input.gradientName);
+    set<string> gradientNames = gradientNameSet(this->inputs);
+    if (gradientNames.empty())
+        throw runtime_error("MultiInputCustomLoss requires at least one differentiable input.");
 
     validateExpressionNames(this->lossExpression, {this->lossName}, "loss");
     validateExpressionNames(this->gradientExpression, gradientNames, "gradient");
@@ -69,6 +69,15 @@ void MultiInputCustomLoss::validateName(const string& name, const string& what) 
 }
 
 set<string> MultiInputCustomLoss::toNameSet(const vector<string>& names) { return set<string>(names.begin(), names.end()); }
+
+set<string> MultiInputCustomLoss::gradientNameSet(const vector<InputSpec>& inputs) {
+    set<string> names;
+    for (const InputSpec& input : inputs) {
+        if (input.gradientName.has_value())
+            names.insert(input.gradientName.value());
+    }
+    return names;
+}
 
 string MultiInputCustomLoss::joinNames(const set<string>& names) {
     if (names.empty())
@@ -144,23 +153,29 @@ DataType MultiInputCustomLoss::findOutputDType(const shared_ptr<CompiledOutputs>
 
 void MultiInputCustomLoss::validateInputSpecs() const {
     if (inputs.empty())
-        throw runtime_error("MultiInputCustomLoss requires at least one differentiable input.");
+        throw runtime_error("MultiInputCustomLoss requires at least one input.");
 
+    bool hasDifferentiableInput = false;
     set<string> names;
     set<string> gradientNames;
     set<Tensor> tensors;
     for (const InputSpec& input : inputs) {
         validateName(input.name, "input");
-        validateName(input.gradientName, "gradient output");
+        if (input.gradientName.has_value()) {
+            hasDifferentiableInput = true;
+            validateName(input.gradientName.value(), "gradient output");
+            if (!gradientNames.insert(input.gradientName.value()).second)
+                throw runtime_error("MultiInputCustomLoss gradient output name '" + input.gradientName.value() + "' is duplicated.");
+        }
         if (!input.tensor.isInitialized())
             throw runtime_error("MultiInputCustomLoss input '" + input.name + "' tensor is not initialized.");
         if (!names.insert(input.name).second)
             throw runtime_error("MultiInputCustomLoss input name '" + input.name + "' is duplicated.");
-        if (!gradientNames.insert(input.gradientName).second)
-            throw runtime_error("MultiInputCustomLoss gradient output name '" + input.gradientName + "' is duplicated.");
         if (!tensors.insert(input.tensor).second)
             throw runtime_error("MultiInputCustomLoss input tensor is used by more than one named input; duplicate tensors are ambiguous.");
     }
+    if (!hasDifferentiableInput)
+        throw runtime_error("MultiInputCustomLoss requires at least one differentiable input.");
 }
 
 void MultiInputCustomLoss::validateExpressionNames(const ThorImplementation::DynamicExpression& expression,
@@ -217,10 +232,12 @@ Tensor MultiInputCustomLoss::inferLossTensor() const { return inferExpressionTen
 
 void MultiInputCustomLoss::validateGradientTensors() const {
     for (const InputSpec& input : inputs) {
-        Tensor inferredGradientTensor = inferExpressionTensor(gradientExpression, input.gradientName, "gradient");
+        if (!input.gradientName.has_value())
+            continue;
+        Tensor inferredGradientTensor = inferExpressionTensor(gradientExpression, input.gradientName.value(), "gradient");
         if (inferredGradientTensor.getDataType() != input.tensor.getDataType() ||
             inferredGradientTensor.getDimensions() != input.tensor.getDimensions()) {
-            throw runtime_error("MultiInputCustomLoss gradient expression output '" + input.gradientName +
+            throw runtime_error("MultiInputCustomLoss gradient expression output '" + input.gradientName.value() +
                                 "' must match input '" + input.name + "'. Expected " + input.tensor.getDescriptorString() + ", got " +
                                 inferredGradientTensor.getDescriptorString() + ".");
         }
@@ -274,7 +291,7 @@ shared_ptr<ThorImplementation::Layer> MultiInputCustomLoss::stamp(ThorImplementa
     THOR_THROW_IF_FALSE(isInputTensor);
 
     vector<string> inputNames;
-    vector<string> gradientNames;
+    vector<optional<string>> gradientNames;
     inputNames.reserve(inputs.size());
     gradientNames.reserve(inputs.size());
     for (const InputSpec& input : inputs) {
@@ -296,8 +313,12 @@ void MultiInputCustomLoss::buildSupportLayersAndAddToNetwork() {
         .lossName(lossName)
         .lossDataType(lossDataType)
         .reportsRawLoss();
-    for (const InputSpec& input : inputs)
-        builder.input(input.name, input.tensor, input.gradientName);
+    for (const InputSpec& input : inputs) {
+        if (input.gradientName.has_value())
+            builder.input(input.name, input.tensor, input.gradientName.value());
+        else
+            builder.auxiliaryInput(input.name, input.tensor);
+    }
 
     MultiInputCustomLoss rawLoss = builder.build();
     lossShaperInput = rawLoss.getLoss();
@@ -323,7 +344,8 @@ uint64_t MultiInputCustomLoss::getFirstInstanceMemRequirementInBytes(uint32_t ba
     uint64_t bytes = 4;
     for (const InputSpec& input : inputs) {
         bytes += batchSize * input.tensor.getTotalSizeInBytes();
-        bytes += batchSize * input.tensor.getTotalSizeInBytes();
+        if (input.gradientName.has_value())
+            bytes += batchSize * input.tensor.getTotalSizeInBytes();
     }
     bytes += batchSize * lossTensor.getTotalSizeInBytes();
     return bytes;
@@ -345,7 +367,9 @@ json MultiInputCustomLoss::architectureJson() const {
     for (const InputSpec& input : inputs) {
         json inputJson;
         inputJson["name"] = input.name;
-        inputJson["gradient_name"] = input.gradientName;
+        inputJson["differentiable"] = input.gradientName.has_value();
+        if (input.gradientName.has_value())
+            inputJson["gradient_name"] = input.gradientName.value();
         inputJson["tensor"] = input.tensor.architectureJson();
         j["inputs"].push_back(inputJson);
     }
@@ -379,7 +403,10 @@ void MultiInputCustomLoss::deserialize(const json& j, Network* network) {
     for (const json& inputJson : j.at("inputs")) {
         uint64_t originalTensorId = inputJson.at("tensor").at("id").get<uint64_t>();
         Tensor tensor = network->getApiTensorByOriginalId(originalTensorId);
-        inputs.push_back(InputSpec{inputJson.at("name").get<string>(), tensor, inputJson.at("gradient_name").get<string>()});
+        optional<string> gradientName = nullopt;
+        if (inputJson.value("differentiable", inputJson.contains("gradient_name")))
+            gradientName = inputJson.at("gradient_name").get<string>();
+        inputs.push_back(InputSpec{inputJson.at("name").get<string>(), tensor, gradientName});
     }
 
     Tensor rawLossTensor = Tensor::deserialize(j["loss_shaper_input_tensor"]);

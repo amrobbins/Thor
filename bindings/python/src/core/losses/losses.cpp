@@ -15,6 +15,7 @@ void bind_huber_loss(nb::module_ &losses);
 void bind_contrastive_loss(nb::module_ &losses);
 void bind_info_nce_loss(nb::module_ &losses);
 void bind_triplet_loss(nb::module_ &losses);
+void bind_cosine_embedding_loss(nb::module_ &losses);
 void bind_soft_target_cross_entropy(nb::module_ &losses);
 void bind_kl_div_loss(nb::module_ &losses);
 void bind_binary_focal_loss(nb::module_ &losses);
@@ -60,6 +61,7 @@ void bind_losses(nb::module_ &losses) {
     bind_contrastive_loss(losses);
     bind_info_nce_loss(losses);
     bind_triplet_loss(losses);
+    bind_cosine_embedding_loss(losses);
     bind_soft_target_cross_entropy(losses);
     bind_kl_div_loss(losses);
     bind_binary_focal_loss(losses);

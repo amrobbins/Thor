@@ -18,7 +18,7 @@ class MultiInputCustomLoss : public Layer {
     MultiInputCustomLoss(DynamicExpression lossExpression,
                          DynamicExpression gradientExpression,
                          std::vector<std::string> inputNames,
-                         std::vector<std::string> gradientNames,
+                         std::vector<std::optional<std::string>> gradientNames,
                          std::string lossName = "loss",
                          DataType lossDataType = DataType::FP32);
 
@@ -58,7 +58,7 @@ class MultiInputCustomLoss : public Layer {
     DynamicExpression lossExpression;
     DynamicExpression gradientExpression;
     std::vector<std::string> inputNames;
-    std::vector<std::string> gradientNames;
+    std::vector<std::optional<std::string>> gradientNames;
     std::string lossName;
     DataType lossDataType;
 
@@ -81,6 +81,7 @@ class MultiInputCustomLoss : public Layer {
 
    private:
     static std::string joinNames(const std::set<std::string>& names);
+    static std::set<std::string> presentNames(const std::vector<std::optional<std::string>>& names);
     static DataType findOutputDType(const std::shared_ptr<CompiledOutputs>& compiledOutputs, const std::string& outputName);
     uint32_t requireInputIndexFromConnectionType(int connectionType) const;
     Stream& computeStream();

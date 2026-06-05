@@ -15,7 +15,7 @@ namespace ThorImplementation {
 MultiInputCustomLoss::MultiInputCustomLoss(DynamicExpression lossExpression,
                                            DynamicExpression gradientExpression,
                                            vector<string> inputNames,
-                                           vector<string> gradientNames,
+                                           vector<optional<string>> gradientNames,
                                            string lossName,
                                            DataType lossDataType)
     : lossExpression(std::move(lossExpression)),
@@ -26,6 +26,7 @@ MultiInputCustomLoss::MultiInputCustomLoss(DynamicExpression lossExpression,
       lossDataType(lossDataType) {
     THOR_THROW_IF_FALSE(!this->inputNames.empty());
     THOR_THROW_IF_FALSE(this->inputNames.size() == this->gradientNames.size());
+    THOR_THROW_IF_FALSE(!presentNames(this->gradientNames).empty());
     THOR_THROW_IF_FALSE(!this->lossName.empty());
     THOR_THROW_IF_FALSE(this->lossDataType == DataType::FP16 || this->lossDataType == DataType::FP32);
 
@@ -33,6 +34,15 @@ MultiInputCustomLoss::MultiInputCustomLoss(DynamicExpression lossExpression,
     errorOutputs.resize(this->inputNames.size(), std::nullopt);
     inputStreams.resize(this->inputNames.size());
     previousLayers.resize(this->inputNames.size(), std::nullopt);
+}
+
+set<string> MultiInputCustomLoss::presentNames(const vector<optional<string>>& names) {
+    set<string> result;
+    for (const optional<string>& name : names) {
+        if (name.has_value())
+            result.insert(name.value());
+    }
+    return result;
 }
 
 string MultiInputCustomLoss::joinNames(const set<string>& names) {
@@ -123,8 +133,10 @@ MultiInputCustomLoss::TensorMap MultiInputCustomLoss::buildLossOutputs() const {
 MultiInputCustomLoss::TensorMap MultiInputCustomLoss::buildGradientOutputs() const {
     TensorMap outputs;
     for (size_t i = 0; i < gradientNames.size(); ++i) {
+        if (!gradientNames[i].has_value())
+            continue;
         THOR_THROW_IF_FALSE(errorOutputs[i].has_value());
-        outputs.emplace(gradientNames[i], errorOutputs[i].value());
+        outputs.emplace(gradientNames[i].value(), errorOutputs[i].value());
     }
     return outputs;
 }
@@ -199,7 +211,7 @@ optional<Tensor> MultiInputCustomLoss::connectToPreviousLayer(
     previousLayers[inputIndex] = previousLayer;
     featureInputs[inputIndex] = featureInput.value();
     inputStreams[inputIndex] = stream;
-    if (backPropagateError && !isInferenceOnly())
+    if (gradientNames[inputIndex].has_value() && backPropagateError && !isInferenceOnly())
         errorOutputs[inputIndex] = featureInput.value().clone();
     else
         errorOutputs[inputIndex] = nullopt;
@@ -247,8 +259,8 @@ void MultiInputCustomLoss::compileImpl() {
 
     set<string> inputNameSet(inputNames.begin(), inputNames.end());
     THOR_THROW_IF_FALSE(inputNameSet.size() == inputNames.size());
-    set<string> gradientNameSet(gradientNames.begin(), gradientNames.end());
-    THOR_THROW_IF_FALSE(gradientNameSet.size() == gradientNames.size());
+    set<string> gradientNameSet = presentNames(gradientNames);
+    THOR_THROW_IF_FALSE(!gradientNameSet.empty());
 
     const vector<string>& lossExpectedInputs = lossExpression.getExpectedInputNames();
     if (!lossExpectedInputs.empty()) {
@@ -275,11 +287,13 @@ void MultiInputCustomLoss::compileImpl() {
         THOR_THROW_IF_FALSE(featureInputs[i].value().isInitialized());
         THOR_THROW_IF_FALSE(featureInputs[i].value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
         THOR_THROW_IF_FALSE(featureInputs[i].value().getPlacement() == featureOutput.value().getPlacement());
-        if (!isInferenceOnly()) {
+        if (!isInferenceOnly() && gradientNames[i].has_value()) {
             THOR_THROW_IF_FALSE(errorOutputs[i].has_value());
             THOR_THROW_IF_FALSE(errorOutputs[i].value().isInitialized());
             THOR_THROW_IF_FALSE(errorOutputs[i].value().getPlacement() == featureInputs[i].value().getPlacement());
             THOR_THROW_IF_FALSE(errorOutputs[i].value().getDescriptor() == featureInputs[i].value().getDescriptor());
+        } else if (!gradientNames[i].has_value()) {
+            THOR_THROW_IF_FALSE(!errorOutputs[i].has_value());
         }
     }
 
@@ -391,7 +405,7 @@ void MultiInputCustomLoss::backward(optional<Tensor> errorInput, uint32_t batchS
 
     THOR_THROW_IF_FALSE(gradientStamped != nullptr);
     for (size_t i = 0; i < previousLayers.size(); ++i) {
-        if (!previousLayers[i].has_value())
+        if (!previousLayers[i].has_value() || !errorOutputs[i].has_value())
             continue;
         previousLayers[i].value()->backward(errorOutputs[i], currentBatchSize);
     }
