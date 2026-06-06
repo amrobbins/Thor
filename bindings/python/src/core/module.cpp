@@ -16,6 +16,7 @@ void bind_network(nb::module_ &thor);
 void bind_placed_network(nb::module_ &thor);
 void bind_tensor(nb::module_ &thor);
 void bind_parameter(nb::module_ &thor);
+void bind_training(nb::module_ &training);
 
 void bind_activations(nb::module_ &activations);
 void bind_initializers(nb::module_ &initializers);
@@ -75,6 +76,9 @@ NB_MODULE(_thor, thor) {
 
     auto optimizers = thor.def_submodule("optimizers");
     bind_optimizers(optimizers);
+
+    auto training = thor.def_submodule("training");
+    bind_training(training);
 
     auto physical = thor.def_submodule("physical");
     bind_physical(physical);

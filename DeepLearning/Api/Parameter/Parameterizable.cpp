@@ -96,6 +96,31 @@ BoundParameter Parameterizable::getBoundParameter(PlacedNetwork* placedNetwork, 
     return BoundParameter(getParameterSpecification(name), placedNetwork, getParameterizableId());
 }
 
+ParameterReference Parameterizable::getParameterReference(const std::string& name) const {
+    getParameterSpecification(name);
+    return ParameterReference(getParameterizableId(), name);
+}
+
+std::vector<ParameterReference> Parameterizable::getParameterReferences(bool trainableOnly, bool trainingEnabledOnly) const {
+    std::vector<ParameterReference> result;
+    result.reserve(parameters.size());
+
+    for (const auto& parameter : getParameters()) {
+        if (parameter == nullptr) {
+            continue;
+        }
+        if (trainableOnly && !parameter->isTrainable()) {
+            continue;
+        }
+        if (trainingEnabledOnly && !parameter->isTrainingInitiallyEnabled()) {
+            continue;
+        }
+        result.emplace_back(getParameterizableId(), parameter->getName());
+    }
+
+    return result;
+}
+
 std::vector<BoundParameter> Parameterizable::getBoundParameters(PlacedNetwork* placedNetwork) const {
     std::vector<BoundParameter> result;
     std::vector<std::shared_ptr<ParameterSpecification>> parameterSpecs = getParameters();

@@ -3,11 +3,14 @@
 
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/StampedNetwork.h"
+#include "DeepLearning/Api/Parameter/BoundParameter.h"
+#include "DeepLearning/Api/Parameter/ParameterReference.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/TarFile/TarWriter.h"
 
 #include <map>
 #include <string>
+#include <vector>
 
 namespace Thor {
 
@@ -40,6 +43,16 @@ class PlacedNetwork {
     }
     virtual std::string getNetworkName() { return networkName; }
     uint32_t getNumTrainableLayers() { return network.getNumTrainableLayers(); }
+
+    BoundParameter resolveParameterReference(const ParameterReference& parameterReference);
+    std::vector<BoundParameter> resolveParameterReferences(const std::vector<ParameterReference>& parameterReferences);
+
+    bool hasApiTensor(const Tensor& tensor);
+    Tensor resolveApiTensor(const Tensor& tensor);
+    std::vector<Tensor> resolveApiTensors(const std::vector<Tensor>& tensors);
+
+    bool hasNetworkInput(const std::string& name);
+    std::vector<std::string> getNetworkInputNames(uint64_t stampIndex = 0);
 
    protected:
     std::string networkName;

@@ -145,6 +145,7 @@ pending marker and overwritten with the final save-time keys when save() runs.
     network.def("get_default_optimizer", &Network::getDefaultOptimizer);
     network.def("freeze_training", &Network::freezeTraining);
     network.def("unfreeze_training", &Network::unfreezeTraining);
+    network.def("get_trainable_parameter_references", &Network::getTrainableParameterReferences, "training_enabled_only"_a = true);
 
     network.def(
         "place",

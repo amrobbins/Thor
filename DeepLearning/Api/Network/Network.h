@@ -9,6 +9,8 @@
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Layers/Utility/Stub.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
+#include "DeepLearning/Api/Parameter/ParameterReference.h"
+#include "DeepLearning/Api/Parameter/BoundParameter.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 #include "Utilities/Expression/CudaKernelSecurity.h"
 
@@ -120,10 +122,15 @@ class Network {
     // FIXME: I will need to support indexing layers by their name.
     uint32_t getNumTrainableLayers() { return allTrainableLayersInNetwork.size(); }
     std::shared_ptr<TrainableLayer> getTrainableLayer(uint32_t i) { return allTrainableLayersInNetwork[i]; }
+    std::vector<ParameterReference> getTrainableParameterReferences(bool trainingEnabledOnly = true) const;
+    BoundParameter resolveParameterReference(PlacedNetwork* placedNetwork, const ParameterReference& parameterReference) const;
+    std::vector<BoundParameter> resolveParameterReferences(PlacedNetwork* placedNetwork, const std::vector<ParameterReference>& parameterReferences) const;
 
     uint32_t getNumLayers() { return allLayersInNetwork.size(); }
     std::shared_ptr<Layer> getLayer(uint32_t i) { return allLayersInNetworkList[i]; }
 
+    [[nodiscard]] bool hasApiTensorByOriginalId(uint64_t originalId) const;
+    Tensor resolveApiTensorByOriginalId(uint64_t originalId) const;
     Tensor getApiTensorByOriginalId(uint64_t originalId);
 
    protected:

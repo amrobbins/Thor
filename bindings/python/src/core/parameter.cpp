@@ -16,6 +16,7 @@
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
 #include "DeepLearning/Api/Parameter/BoundParameter.h"
 #include "DeepLearning/Api/Parameter/ParameterSpecification.h"
+#include "DeepLearning/Api/Parameter/ParameterReference.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
 namespace nb = nanobind;
@@ -57,6 +58,17 @@ class GilSafePythonObject {
 }  // namespace
 
 void bind_parameter(nb::module_& thor) {
+    auto parameter_reference = nb::class_<ParameterReference>(thor, "ParameterReference");
+    parameter_reference.attr("__module__") = "thor";
+    parameter_reference.def("__init__", [](ParameterReference* self, uint64_t parameterizable_id, const std::string& parameter_name) {
+        new (self) ParameterReference(parameterizable_id, parameter_name);
+    }, "parameterizable_id"_a, "parameter_name"_a);
+    parameter_reference.def_prop_ro("parameterizable_id", &ParameterReference::getParameterizableId);
+    parameter_reference.def_prop_ro("parameter_name", &ParameterReference::getParameterName);
+    parameter_reference.def("is_initialized", &ParameterReference::isInitialized);
+    parameter_reference.def("get_architecture_json", [](const ParameterReference& self) { return self.architectureJson().dump(); });
+    parameter_reference.def("__eq__", &ParameterReference::operator==);
+
     auto bound_parameter = nb::class_<BoundParameter>(thor, "BoundParameter");
     bound_parameter.attr("__module__") = "thor";
     bound_parameter.def_prop_ro("name", &BoundParameter::getName);

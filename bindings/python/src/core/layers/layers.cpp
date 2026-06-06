@@ -46,6 +46,7 @@ void bind_layers(nb::module_ &layers) {
 
     auto layer = nb::class_<Layer>(layers, "Layer");
     layer.attr("__module__") = "thor.layers";
+    layer.def("get_id", &Layer::getId);
     auto multi_connection_layer = nb::class_<MultiConnectionLayer, Layer>(layers, "MultiConnectionLayer");
     multi_connection_layer.attr("__module__") = "thor.layers";
     auto trainable_layer = nb::class_<TrainableLayer, MultiConnectionLayer>(layers, "TrainableLayer");
@@ -56,6 +57,8 @@ void bind_layers(nb::module_ &layers) {
     trainable_layer.def("get_parameters", &TrainableLayer::getParameters, nb::rv_policy::reference_internal);
     trainable_layer.def("get_bound_parameter", &TrainableLayer::getBoundParameter, "placed_network"_a, "name"_a);
     trainable_layer.def("get_bound_parameters", &TrainableLayer::getBoundParameters, "placed_network"_a);
+    trainable_layer.def("get_parameter_reference", &TrainableLayer::getParameterReference, "name"_a);
+    trainable_layer.def("get_parameter_references", &TrainableLayer::getParameterReferences, "trainable_only"_a = true, "training_enabled_only"_a = true);
 
     bind_custom_layer(layers);
     bind_adaptive_layer_norm(layers);

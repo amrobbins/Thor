@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "DeepLearning/Api/Parameter/ParameterReference.h"
 #include "Utilities/Common/Stream.h"
 #include "Utilities/TarFile/TarWriter.h"
 
@@ -43,6 +44,8 @@ class Parameterizable {
 
     BoundParameter getBoundParameter(PlacedNetwork* placedNetwork, const std::string& name) const;
     std::vector<BoundParameter> getBoundParameters(PlacedNetwork* placedNetwork) const;
+    ParameterReference getParameterReference(const std::string& name) const;
+    std::vector<ParameterReference> getParameterReferences(bool trainableOnly = true, bool trainingEnabledOnly = true) const;
 
     std::string listParametersString() const;
 

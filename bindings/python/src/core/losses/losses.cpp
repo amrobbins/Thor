@@ -17,6 +17,8 @@ void bind_info_nce_loss(nb::module_ &losses);
 void bind_triplet_loss(nb::module_ &losses);
 void bind_cosine_embedding_loss(nb::module_ &losses);
 void bind_margin_ranking_loss(nb::module_ &losses);
+void bind_hinge_gan_discriminator_loss(nb::module_ &losses);
+void bind_hinge_gan_generator_loss(nb::module_ &losses);
 void bind_soft_target_cross_entropy(nb::module_ &losses);
 void bind_kl_div_loss(nb::module_ &losses);
 void bind_poisson_nll_loss(nb::module_ &losses);
@@ -66,6 +68,8 @@ void bind_losses(nb::module_ &losses) {
     bind_triplet_loss(losses);
     bind_cosine_embedding_loss(losses);
     bind_margin_ranking_loss(losses);
+    bind_hinge_gan_discriminator_loss(losses);
+    bind_hinge_gan_generator_loss(losses);
     bind_soft_target_cross_entropy(losses);
     bind_kl_div_loss(losses);
     bind_poisson_nll_loss(losses);

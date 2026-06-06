@@ -1,6 +1,7 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/map.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/vector.h>
 
 #include <utility>
 
@@ -48,4 +49,11 @@ dict[str, thor.physical.PhysicalTensor]
     placed_network.def("get_network_name", &PlacedNetwork::getNetworkName);
 
     placed_network.def("get_num_trainable_layers", &PlacedNetwork::getNumTrainableLayers);
+    placed_network.def("resolve_parameter_reference", &PlacedNetwork::resolveParameterReference, "parameter_reference"_a);
+    placed_network.def("resolve_parameter_references", &PlacedNetwork::resolveParameterReferences, "parameter_references"_a);
+    placed_network.def("has_api_tensor", &PlacedNetwork::hasApiTensor, "tensor"_a);
+    placed_network.def("resolve_api_tensor", &PlacedNetwork::resolveApiTensor, "tensor"_a);
+    placed_network.def("resolve_api_tensors", &PlacedNetwork::resolveApiTensors, "tensors"_a);
+    placed_network.def("has_network_input", &PlacedNetwork::hasNetworkInput, "name"_a);
+    placed_network.def("get_network_input_names", &PlacedNetwork::getNetworkInputNames, "stamp_index"_a = 0);
 }
