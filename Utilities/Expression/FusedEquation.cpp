@@ -119,10 +119,25 @@ static std::vector<uint64_t> runtimeInputDims(const RuntimeInputValue& value) {
     return {1};
 }
 
+static std::vector<uint64_t> runtimeInputStridesForShapeKey(const RuntimeInputValue& value) {
+    if (std::holds_alternative<Tensor>(value)) {
+        return std::get<Tensor>(value).getStridesElements();
+    }
+    if (std::holds_alternative<TensorScalarBinding>(value)) {
+        return {1};
+    }
+    return {};
+}
+
 static bool runtimeInputIsNonDenseTensorView(const RuntimeInputValue& value) {
     return std::holds_alternative<Tensor>(value) && !std::get<Tensor>(value).isDenseContiguous();
 }
 
+static bool anyRuntimeInputIsNonDenseTensorView(const std::vector<RuntimeInputValue>& values) {
+    return std::any_of(values.begin(), values.end(), [](const RuntimeInputValue& value) {
+        return runtimeInputIsNonDenseTensorView(value);
+    });
+}
 
 struct PackedAttentionBackwardDirectSlice {
     size_t attention_slot = 0;
@@ -541,6 +556,11 @@ static void applyAvailableValueAliases(const std::vector<CompiledValueAlias>& al
             Tensor tensor = runtimeInputTensor(source_it->second);
             validateRuntimeStorageAliasDims(tensor.getDimensions(), alias);
             if (alias.strides.empty()) {
+                if (!tensor.isDenseContiguous()) {
+                    throw std::runtime_error(
+                        "Runtime dense reshape alias cannot be applied to a non-dense tensor view; "
+                        "materialize the view or use an explicit strided/unsqueeze/squeeze alias.");
+                }
                 tensor.reshape(alias.dimensions);
             } else {
                 tensor = tensor.aliasView(alias.dimensions, alias.strides, alias.element_offset);
@@ -2340,6 +2360,7 @@ static RuntimeShapeKey makeRuntimeShapeKey(const std::vector<NamedInput>& root_i
     RuntimeShapeKey key;
     key.dtype_key = makeRuntimeDTypeKey(root_inputs, root_values);
     key.root_input_dims.resize(root_inputs.size());
+    key.root_input_strides.resize(root_inputs.size());
 
     for (const NamedInput& input : root_inputs) {
         auto it = root_values.find(input.slot);
@@ -2347,6 +2368,7 @@ static RuntimeShapeKey makeRuntimeShapeKey(const std::vector<NamedInput>& root_i
             throw std::runtime_error("Missing bound runtime input for root input slot " + std::to_string(input.slot) + ".");
         }
         key.root_input_dims[input.slot] = runtimeInputDims(it->second);
+        key.root_input_strides[input.slot] = runtimeInputStridesForShapeKey(it->second);
     }
 
     return key;
@@ -2650,6 +2672,40 @@ static void collectReferencedLocalInputSlots(const PhysicalExpression& expr, uin
     }
     if (Expression::isTernaryOp(node.op)) {
         collectReferencedLocalInputSlots(expr, node.aux, slots);
+    }
+}
+
+static void collectBroadcastOffsetLocalInputSlots(const PhysicalExpression& expr, uint32_t node_idx, std::unordered_set<uint32_t>& slots) {
+    if (node_idx >= expr.nodes.size()) {
+        throw std::runtime_error("collectBroadcastOffsetLocalInputSlots saw node index out of range.");
+    }
+
+    const ExprNode& node = expr.nodes[node_idx];
+
+    if (node.op == ExprOp::INPUT || node.op == ExprOp::RUNTIME_SCALAR || node.op == ExprOp::TENSOR_RUNTIME_SCALAR) {
+        slots.insert(node.input_slot);
+        return;
+    }
+
+    if (Expression::isLeafOp(node.op)) {
+        return;
+    }
+
+    if (node.op == ExprOp::STRIDED_VIEW_BACKWARD) {
+        // The view-gradient source is evaluated with an explicit view-linear index
+        // inside the strided_view_backward emitter. It does not consume ordinary
+        // output-domain broadcast offsets, and may itself be a non-dense runtime
+        // view alias whose logical rank differs from the source-gradient output.
+        return;
+    }
+
+    collectBroadcastOffsetLocalInputSlots(expr, node.lhs, slots);
+
+    if (Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) {
+        collectBroadcastOffsetLocalInputSlots(expr, node.rhs, slots);
+    }
+    if (Expression::isTernaryOp(node.op)) {
+        collectBroadcastOffsetLocalInputSlots(expr, node.aux, slots);
     }
 }
 
@@ -4311,6 +4367,8 @@ static bool fusedStageRequiresBroadcastLaunch(const CompiledExecutionStage& stag
         return false;
     }
 
+    const bool requires_strided_view_broadcast = anyRuntimeInputIsNonDenseTensorView(stage_inputs);
+
     bool have_common_output_dims = false;
     std::vector<uint64_t> common_output_dims;
     for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
@@ -4370,7 +4428,7 @@ static bool fusedStageRequiresBroadcastLaunch(const CompiledExecutionStage& stag
         resolved_output_dims = common_output_dims;
     }
 
-    return requires_broadcast;
+    return requires_broadcast || requires_strided_view_broadcast;
 }
 
 static std::vector<uint64_t> computeInputPackedStridesForBroadcast(const std::vector<uint64_t>& input_dims,
@@ -4412,6 +4470,66 @@ static std::vector<uint64_t> computeInputPackedStridesForBroadcast(const std::ve
     }
 
     return result;
+}
+
+static std::vector<uint64_t> computeInputStridesForBroadcastFromVisibleLayout(
+    const std::vector<uint64_t>& visible_dims,
+    const std::vector<uint64_t>& visible_strides,
+    const std::vector<uint64_t>& output_dims) {
+    if (visible_dims.size() != visible_strides.size()) {
+        throw std::runtime_error("Visible tensor dimensions and strides must have the same rank.");
+    }
+    if (visible_dims.size() > output_dims.size()) {
+        throw std::runtime_error("Input rank exceeds broadcast output rank.");
+    }
+
+    const size_t rank = output_dims.size();
+
+    std::vector<uint64_t> padded_dims(rank, 1ULL);
+    std::vector<uint64_t> padded_strides(rank, 0ULL);
+    const size_t axis_offset = rank - visible_dims.size();
+    for (size_t i = 0; i < visible_dims.size(); ++i) {
+        padded_dims[axis_offset + i] = visible_dims[i];
+        padded_strides[axis_offset + i] = visible_strides[i];
+    }
+
+    std::vector<uint64_t> result(rank, 0ULL);
+    for (size_t axis = 0; axis < rank; ++axis) {
+        const uint64_t in_dim = padded_dims[axis];
+        const uint64_t out_dim = output_dims[axis];
+
+        if (in_dim == out_dim) {
+            result[axis] = padded_strides[axis];
+        } else if (in_dim == 1ULL) {
+            result[axis] = 0ULL;
+        } else {
+            std::ostringstream oss;
+            oss << "Input dimensions are not broadcast-compatible with output dimensions. "
+                << "axis=" << axis << ", input_dims=" << dimsToString(visible_dims)
+                << ", padded_input_dims=" << dimsToString(padded_dims) << ", output_dims=" << dimsToString(output_dims)
+                << ", conflicting_in_dim=" << in_dim << ", conflicting_out_dim=" << out_dim;
+            throw std::runtime_error(oss.str());
+        }
+    }
+
+    return result;
+}
+
+static std::vector<uint64_t> computeRuntimeInputStridesForBroadcast(const RuntimeInputValue& input,
+                                                                    const std::vector<uint64_t>& effective_dims,
+                                                                    const std::vector<uint64_t>& output_dims) {
+    if (!runtimeInputIsNonDenseTensorView(input)) {
+        return computeInputPackedStridesForBroadcast(effective_dims, output_dims);
+    }
+
+    const Tensor& tensor = runtimeInputTensor(input);
+    const std::vector<uint64_t> visible_dims = tensor.getDimensions();
+    if (effective_dims != visible_dims) {
+        throw std::runtime_error(
+            "Fused kernels cannot consume a non-dense tensor view through an additional shape-changing expression yet.");
+    }
+
+    return computeInputStridesForBroadcastFromVisibleLayout(visible_dims, tensor.getStridesElements(), output_dims);
 }
 
 static std::vector<ResolvedBroadcastGroup> buildResolvedBroadcastGroups(const CompiledExecutionStage& stage,
@@ -4463,6 +4581,7 @@ static std::vector<ResolvedBroadcastGroup> buildResolvedBroadcastGroups(const Co
             std::vector<std::vector<uint64_t>> node_dims;
             std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>> effective_dims_by_slot;
             std::unordered_set<uint32_t> used_slots_set;
+            std::unordered_set<uint32_t> broadcast_offset_slots_set;
         };
 
         std::vector<OutputInfo> infos;
@@ -4477,6 +4596,7 @@ static std::vector<ResolvedBroadcastGroup> buildResolvedBroadcastGroups(const Co
             info.out_idx = out_idx;
             info.node_dims = node_dims;
             collectReferencedLocalInputSlots(stage.expr, stage.outputs[out_idx].local_node_idx, info.used_slots_set);
+            collectBroadcastOffsetLocalInputSlots(stage.expr, stage.outputs[out_idx].local_node_idx, info.broadcast_offset_slots_set);
             info.effective_dims_by_slot = collectEffectiveInputDimsForNode(stage.expr, node_dims, stage.outputs[out_idx].local_node_idx);
 
             infos.push_back(std::move(info));
@@ -4485,6 +4605,7 @@ static std::vector<ResolvedBroadcastGroup> buildResolvedBroadcastGroups(const Co
         std::vector<std::vector<uint32_t>> compatible_subgroups;
         std::vector<std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>>> subgroup_effective_dims;
         std::vector<std::unordered_set<uint32_t>> subgroup_used_slots;
+        std::vector<std::unordered_set<uint32_t>> subgroup_broadcast_offset_slots;
 
         for (const auto& info : infos) {
             bool placed = false;
@@ -4492,6 +4613,7 @@ static std::vector<ResolvedBroadcastGroup> buildResolvedBroadcastGroups(const Co
                 if (effective_dims_maps_equal(subgroup_effective_dims[group_i], info.effective_dims_by_slot)) {
                     compatible_subgroups[group_i].push_back(info.out_idx);
                     subgroup_used_slots[group_i].insert(info.used_slots_set.begin(), info.used_slots_set.end());
+                    subgroup_broadcast_offset_slots[group_i].insert(info.broadcast_offset_slots_set.begin(), info.broadcast_offset_slots_set.end());
                     placed = true;
                     break;
                 }
@@ -4501,6 +4623,7 @@ static std::vector<ResolvedBroadcastGroup> buildResolvedBroadcastGroups(const Co
                 compatible_subgroups.push_back({info.out_idx});
                 subgroup_effective_dims.push_back(info.effective_dims_by_slot);
                 subgroup_used_slots.push_back(info.used_slots_set);
+                subgroup_broadcast_offset_slots.push_back(info.broadcast_offset_slots_set);
             }
         }
 
@@ -4508,6 +4631,7 @@ static std::vector<ResolvedBroadcastGroup> buildResolvedBroadcastGroups(const Co
             const auto& subgroup_output_indices = compatible_subgroups[subgroup_i];
             const auto& effective_dims_by_slot = subgroup_effective_dims[subgroup_i];
             const auto& used_slots_set = subgroup_used_slots[subgroup_i];
+            const auto& broadcast_offset_slots_set = subgroup_broadcast_offset_slots[subgroup_i];
 
             std::vector<uint32_t> used_input_slots(used_slots_set.begin(), used_slots_set.end());
             std::sort(used_input_slots.begin(), used_input_slots.end());
@@ -4538,10 +4662,18 @@ static std::vector<ResolvedBroadcastGroup> buildResolvedBroadcastGroups(const Co
 
             std::vector<std::vector<uint64_t>> input_strides_by_used;
             input_strides_by_used.reserve(used_input_slots.size());
+            specialized.used_input_broadcast_offset_required.reserve(used_input_slots.size());
+            specialized.used_input_visible_dims.reserve(used_input_slots.size());
+            specialized.used_input_visible_strides.reserve(used_input_slots.size());
             for (uint32_t slot : used_input_slots) {
                 if (slot >= stage_inputs.size()) {
                     throw std::runtime_error("Broadcast group input slot out of range.");
                 }
+
+                const bool offset_required = broadcast_offset_slots_set.contains(slot);
+                specialized.used_input_broadcast_offset_required.push_back(offset_required);
+                specialized.used_input_visible_dims.push_back(runtimeInputDims(stage_inputs[slot]));
+                specialized.used_input_visible_strides.push_back(runtimeInputStridesForShapeKey(stage_inputs[slot]));
 
                 std::vector<uint64_t> effective_dims = runtimeInputDims(stage_inputs[slot]);
                 auto dims_it = effective_dims_by_slot.find(slot);
@@ -4564,7 +4696,12 @@ static std::vector<ResolvedBroadcastGroup> buildResolvedBroadcastGroups(const Co
                     }
                 }
 
-                input_strides_by_used.push_back(computeInputPackedStridesForBroadcast(effective_dims, output_dims));
+                if (offset_required) {
+                    input_strides_by_used.push_back(
+                        computeRuntimeInputStridesForBroadcast(stage_inputs[slot], effective_dims, output_dims));
+                } else {
+                    input_strides_by_used.emplace_back(output_dims.size(), 0ULL);
+                }
             }
 
             specialized.used_input_load_kinds.assign(used_input_slots.size(), SpecializedInputLoadKind::ScalarPack);
@@ -5215,6 +5352,9 @@ std::shared_ptr<PreparedConvenienceRunPlan> FusedEquation::prepareConvenienceRun
 
     const std::shared_ptr<CompiledOutputs> compiled_outputs = compileForRootValues(root_values);
 
+    std::unordered_map<uint32_t, RuntimeInputValue> available_values = root_values;
+    applyAvailableValueAliases(compiled_outputs->value_aliases, available_values);
+
     auto plan = std::make_shared<PreparedConvenienceRunPlan>();
     plan->compiled_outputs = compiled_outputs;
     plan->stages.reserve(compiled_outputs->stages.size());
@@ -5229,11 +5369,13 @@ std::shared_ptr<PreparedConvenienceRunPlan> FusedEquation::prepareConvenienceRun
                                      stage.kindToString(stage.kind) + ". Use stamp(...).run() for staged expressions.");
         }
 
+        applyAvailableValueAliases(compiled_outputs->value_aliases, available_values);
+
         std::vector<RuntimeInputValue> ordered_inputs;
         ordered_inputs.reserve(stage.input_value_ids.size());
         for (uint32_t value_id : stage.input_value_ids) {
-            auto it = root_values.find(value_id);
-            if (it == root_values.end()) {
+            auto it = available_values.find(value_id);
+            if (it == available_values.end()) {
                 throw std::runtime_error(
                     "FusedEquation::run encountered a stage that depends on a non-root intermediate tensor. "
                     "Use stamp(...).run() for expressions requiring staged intermediates.");
@@ -7138,14 +7280,6 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 if (stage.outputs.empty()) {
                     throw std::runtime_error("Fused stage requires at least one output.");
                 }
-                for (const RuntimeInputValue& input : stageInputs) {
-                    if (runtimeInputIsNonDenseTensorView(input)) {
-                        throw std::runtime_error(
-                            "Fused kernels cannot consume non-dense strided tensor views yet; materialize the view or route it to a "
-                            "layout-aware stage such as attention.");
-                    }
-                }
-
                 std::vector<std::vector<uint64_t>> expected_output_dims(stage.outputs.size());
                 std::shared_ptr<CompiledEquation> compiledEq;
 
@@ -8131,6 +8265,8 @@ void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs,
     const std::unordered_map<uint32_t, RuntimeInputValue> root_values = bindRootInputs(inputs, scalar_inputs, {}, &outputs);
     const std::shared_ptr<PreparedConvenienceRunPlan> prepared_plan = prepareConvenienceRunPlan(root_values);
     const std::shared_ptr<CompiledOutputs>& compiled_outputs = prepared_plan->compiled_outputs;
+    std::unordered_map<uint32_t, RuntimeInputValue> available_values = root_values;
+    applyAvailableValueAliases(compiled_outputs->value_aliases, available_values);
 
     if (compiled_outputs->stages.empty()) {
         throw std::runtime_error("Expression has no execution stages.");
@@ -8193,6 +8329,9 @@ void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs,
         if (tensor.getPlacement().getDeviceNum() != gpu_num) {
             throw std::runtime_error("FusedEquation::run requires all outputs to be on the same GPU.");
         }
+        if (!tensor.isDenseContiguous()) {
+            throw std::runtime_error("FusedEquation::run convenience outputs must be dense contiguous tensors.");
+        }
     }
 
     auto runStageOnStream = [&](const CompiledExecutionStage& stage,
@@ -8225,12 +8364,14 @@ void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs,
         const CompiledExecutionStage& stage = compiled_outputs->stages[stage_num];
         const PreparedConvenienceRunStage& prepared_stage = prepared_plan->stages[stage_num];
 
+        applyAvailableValueAliases(compiled_outputs->value_aliases, available_values);
+
         std::vector<RuntimeInputValue> orderedInputs;
         orderedInputs.reserve(stage.input_value_ids.size());
 
         for (uint32_t value_id : stage.input_value_ids) {
-            auto it = root_values.find(value_id);
-            if (it == root_values.end()) {
+            auto it = available_values.find(value_id);
+            if (it == available_values.end()) {
                 throw std::runtime_error("Missing input value for fused equation run.");
             }
             orderedInputs.push_back(it->second);

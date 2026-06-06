@@ -5,6 +5,8 @@
 
 #include <utility>
 
+#include <nlohmann/json.hpp>
+
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
 #include "DeepLearning/Api/Parameter/ParameterReference.h"
@@ -39,6 +41,10 @@ void bind_training(nb::module_& training) {
     training_input_binding.def_prop_ro("batch_input_name", &TrainingInputBinding::getBatchInputName);
     training_input_binding.def("is_initialized", &TrainingInputBinding::isInitialized);
     training_input_binding.def("get_architecture_json", &TrainingInputBinding::architectureJsonString);
+    training_input_binding.def_static(
+        "deserialize",
+        [](const std::string& payload) { return TrainingInputBinding::deserialize(nlohmann::json::parse(payload)); },
+        "architecture_json"_a);
     training_input_binding.def("__eq__", &TrainingInputBinding::operator==);
 
     auto training_step = nb::class_<TrainingStep>(training, "TrainingStep");
@@ -78,6 +84,13 @@ void bind_training(nb::module_& training) {
     training_step.def("get_input_bindings", &TrainingStep::getInputBindings, nb::rv_policy::reference_internal);
     training_step.def("updates_parameter", &TrainingStep::updatesParameter, "parameter"_a);
     training_step.def("get_architecture_json", &TrainingStep::architectureJsonString);
+    training_step.def_static(
+        "deserialize",
+        [](const std::string& payload) {
+            std::shared_ptr<thor_file::TarReader> archiveReader = nullptr;
+            return TrainingStep::deserialize(nlohmann::json::parse(payload), archiveReader, nullptr);
+        },
+        "architecture_json"_a);
 
     auto step_executable = nb::class_<StepExecutable>(training, "StepExecutable");
     step_executable.attr("__module__") = "thor.training";
@@ -86,11 +99,14 @@ void bind_training(nb::module_& training) {
     step_executable.def_prop_ro("repeat_count", &StepExecutable::getRepeatCount);
     step_executable.def_prop_ro("gradient_clear_policy", &StepExecutable::getGradientClearPolicy);
     step_executable.def("get_loss_roots", &StepExecutable::getLossRoots, nb::rv_policy::reference_internal);
+    step_executable.def("get_resolved_loss_roots", &StepExecutable::getResolvedLossRoots, nb::rv_policy::reference_internal);
     step_executable.def("get_optimizer", &StepExecutable::getOptimizer);
     step_executable.def(
         "get_update_parameter_references", &StepExecutable::getUpdateParameterReferences, nb::rv_policy::reference_internal);
     step_executable.def("get_resolved_update_parameters", &StepExecutable::getResolvedUpdateParameters, nb::rv_policy::reference_internal);
     step_executable.def("get_input_bindings", &StepExecutable::getInputBindings, nb::rv_policy::reference_internal);
+    step_executable.def("get_resolved_input_bindings", &StepExecutable::getResolvedInputBindings, nb::rv_policy::reference_internal);
+    step_executable.def("get_required_batch_input_names", &StepExecutable::getRequiredBatchInputNames, nb::rv_policy::reference_internal);
     step_executable.def("get_architecture_json", &StepExecutable::architectureJsonString);
 
     auto training_program = nb::class_<TrainingProgram>(training, "TrainingProgram");
@@ -103,5 +119,12 @@ void bind_training(nb::module_& training) {
     training_program.def("get_steps", &TrainingProgram::getSteps, nb::rv_policy::reference_internal);
     training_program.def("is_initialized", &TrainingProgram::isInitialized);
     training_program.def("get_architecture_json", &TrainingProgram::architectureJsonString);
+    training_program.def_static(
+        "deserialize",
+        [](const std::string& payload) {
+            std::shared_ptr<thor_file::TarReader> archiveReader = nullptr;
+            return TrainingProgram::deserialize(nlohmann::json::parse(payload), archiveReader, nullptr);
+        },
+        "architecture_json"_a);
     training_program.def("compile", &TrainingProgram::compile, "placed_network"_a);
 }
