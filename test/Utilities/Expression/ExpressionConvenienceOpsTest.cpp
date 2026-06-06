@@ -2034,6 +2034,228 @@ std::vector<float> toFloatValues(const std::vector<double>& values) {
 
 }  // namespace
 
+
+TEST(ExpressionConvenienceOps, FusedKernelConsumesNonDenseStridedInputView) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor boxes = makeGpuTensor({2, 4},
+                                 {0.10f, 0.20f, 1.40f, 1.80f,
+                                  2.00f, 0.50f, 3.50f, 1.90f},
+                                 stream);
+    Tensor x1 = boxes.aliasView({2}, {4}, 0);
+    ASSERT_FALSE(x1.isDenseContiguous());
+
+    auto x = Expression::input("x");
+    auto expressionOutputs = Expression::outputs({{"y", x * Expression::constantScalar(2.0) + Expression::constantScalar(1.0)}});
+    Tensor y = runExpressionOutput(expressionOutputs, {{"x", x1}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{2}));
+    expectNear(copyToCpuValues(y, stream), {1.20f, 5.00f});
+}
+
+
+TEST(ExpressionConvenienceOps, ConvenienceRunPlanCacheKeysNonDenseInputStrides) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor storage = makeGpuTensor({3, 4},
+                                   {0.0f, 1.0f, 2.0f, 3.0f,
+                                    4.0f, 5.0f, 6.0f, 7.0f,
+                                    8.0f, 9.0f, 10.0f, 11.0f},
+                                   stream);
+    Tensor stride4 = storage.aliasView({3}, {4}, 0);
+    Tensor stride2 = storage.aliasView({3}, {2}, 0);
+    ASSERT_FALSE(stride4.isDenseContiguous());
+    ASSERT_FALSE(stride2.isDenseContiguous());
+    ASSERT_NE(stride4.getStridesElements(), stride2.getStridesElements());
+
+    auto x = Expression::input("x");
+    auto expressionOutputs = Expression::outputs({{"y", x * Expression::constantScalar(3.0)}});
+    FusedEquation eq = FusedEquation::compile(expressionOutputs.physicalOutputs(), 0);
+
+    auto stride4Plan = eq.prepareConvenienceRunPlanForInputs({{"x", stride4}});
+    auto stride4PlanAgain = eq.prepareConvenienceRunPlanForInputs({{"x", stride4}});
+    EXPECT_EQ(stride4Plan.get(), stride4PlanAgain.get());
+
+    auto stride2Plan = eq.prepareConvenienceRunPlanForInputs({{"x", stride2}});
+    EXPECT_NE(stride4Plan.get(), stride2Plan.get());
+
+    Tensor yStride4(gpuPlacement, TensorDescriptor(DataType::FP32, {3}));
+    eq.run({{"x", stride4}}, yStride4, stream);
+    expectNear(copyToCpuValues(yStride4, stream), {0.0f, 12.0f, 24.0f});
+
+    Tensor yStride2(gpuPlacement, TensorDescriptor(DataType::FP32, {3}));
+    eq.run({{"x", stride2}}, yStride2, stream);
+    expectNear(copyToCpuValues(yStride2, stream), {0.0f, 6.0f, 12.0f});
+}
+
+
+TEST(ExpressionConvenienceOps, InternalStridedViewAliasExecutesInStampedAndConvenienceRuns) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor storage = makeGpuTensor({3, 4},
+                                   {0.0f, 1.0f, 2.0f, 3.0f,
+                                    4.0f, 5.0f, 6.0f, 7.0f,
+                                    8.0f, 9.0f, 10.0f, 11.0f},
+                                   stream);
+
+    auto x = Expression::input("x");
+    auto view = x.stridedView({3}, {4}, 2);
+    auto expressionOutputs = Expression::outputs({{"y", view * Expression::constantScalar(2.0) + Expression::constantScalar(1.0)}});
+
+    Tensor stamped = runExpressionOutput(expressionOutputs, {{"x", storage}}, "y", stream);
+    EXPECT_EQ(stamped.getDimensions(), (std::vector<uint64_t>{3}));
+    expectNear(copyToCpuValues(stamped, stream), {5.0f, 13.0f, 21.0f});
+
+    FusedEquation eq = FusedEquation::compile(expressionOutputs.physicalOutputs(), 0);
+    auto plan = eq.prepareConvenienceRunPlanForInputs({{"x", storage}});
+    ASSERT_EQ(plan->stages.size(), 1);
+    Tensor convenience(gpuPlacement, TensorDescriptor(DataType::FP32, {3}));
+    eq.run({{"x", storage}}, convenience, stream);
+    expectNear(copyToCpuValues(convenience, stream), {5.0f, 13.0f, 21.0f});
+}
+
+TEST(ExpressionConvenienceOps, InternalRankTwoStridedViewUsesBothRuntimeStrides) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor storage = makeGpuTensor({3, 5},
+                                   {0.0f, 1.0f, 2.0f, 3.0f, 4.0f,
+                                    5.0f, 6.0f, 7.0f, 8.0f, 9.0f,
+                                    10.0f, 11.0f, 12.0f, 13.0f, 14.0f},
+                                   stream);
+
+    auto x = Expression::input("x");
+    auto view = x.stridedView({3, 2}, {5, 2}, 1);
+    auto expressionOutputs = Expression::outputs({{"y", view + Expression::constantScalar(0.5)}});
+    FusedEquation eq = FusedEquation::compile(expressionOutputs.physicalOutputs(), 0);
+
+    Tensor y(gpuPlacement, TensorDescriptor(DataType::FP32, {3, 2}));
+    eq.run({{"x", storage}}, y, stream);
+
+    expectNear(copyToCpuValues(y, stream), {1.5f, 3.5f, 6.5f, 8.5f, 11.5f, 13.5f});
+}
+
+
+TEST(ExpressionConvenienceOps, InternalStridedViewCanAliasFromNonDenseRootViewBase) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor storage = makeGpuTensor({3, 5},
+                                   {0.0f, 1.0f, 2.0f, 3.0f, 4.0f,
+                                    5.0f, 6.0f, 7.0f, 8.0f, 9.0f,
+                                    10.0f, 11.0f, 12.0f, 13.0f, 14.0f},
+                                   stream);
+    Tensor paddedRows = storage.aliasView({3, 4}, {5, 1}, 0);
+    ASSERT_FALSE(paddedRows.isDenseContiguous());
+
+    auto x = Expression::input("x");
+    auto column = x.stridedView({3}, {5}, 2);
+    auto expressionOutputs = Expression::outputs({{"y", column - Expression::constantScalar(1.0)}});
+    FusedEquation eq = FusedEquation::compile(expressionOutputs.physicalOutputs(), 0);
+
+    Tensor y(gpuPlacement, TensorDescriptor(DataType::FP32, {3}));
+    eq.run({{"x", paddedRows}}, y, stream);
+
+    expectNear(copyToCpuValues(y, stream), {1.0f, 6.0f, 11.0f});
+}
+
+TEST(ExpressionConvenienceOps, NonDenseRootViewBroadcastsWithDenseInput) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor storage = makeGpuTensor({3, 4},
+                                   {0.0f, 1.0f, 2.0f, 3.0f,
+                                    4.0f, 5.0f, 6.0f, 7.0f,
+                                    8.0f, 9.0f, 10.0f, 11.0f},
+                                   stream);
+    Tensor column = storage.aliasView({3, 1}, {4, 1}, 0);
+    Tensor bias = makeGpuTensor({1, 2}, {1.0f, 2.0f}, stream);
+    ASSERT_FALSE(column.isDenseContiguous());
+
+    auto a = Expression::input("a");
+    auto b = Expression::input("b");
+    auto expressionOutputs = Expression::outputs({{"y", a + b}});
+    FusedEquation eq = FusedEquation::compile(expressionOutputs.physicalOutputs(), 0);
+
+    Tensor y(gpuPlacement, TensorDescriptor(DataType::FP32, {3, 2}));
+    eq.run({{"a", column}, {"b", bias}}, y, stream);
+
+    expectNear(copyToCpuValues(y, stream), {1.0f, 2.0f, 5.0f, 6.0f, 9.0f, 10.0f});
+}
+
+TEST(ExpressionConvenienceOps, MultipleInternalStridedViewsExecuteCorrectlyThroughConvenienceRun) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor storage = makeGpuTensor({2, 4},
+                                   {0.0f, 1.0f, 2.0f, 3.0f,
+                                    4.0f, 5.0f, 6.0f, 7.0f},
+                                   stream);
+
+    auto x = Expression::input("x");
+    auto first = x.stridedView({2}, {4}, 0);
+    auto third = x.stridedView({2}, {4}, 2);
+    auto expressionOutputs = Expression::outputs({
+        {"first", first + Expression::constantScalar(10.0)},
+        {"third", third * Expression::constantScalar(3.0)},
+    });
+    FusedEquation eq = FusedEquation::compile(expressionOutputs.physicalOutputs(), 0);
+    auto plan = eq.prepareConvenienceRunPlanForInputs({{"x", storage}});
+    ASSERT_FALSE(plan->stages.empty());
+
+    Tensor firstOut(gpuPlacement, TensorDescriptor(DataType::FP32, {2}));
+    Tensor thirdOut(gpuPlacement, TensorDescriptor(DataType::FP32, {2}));
+    std::unordered_map<std::string, Tensor> outputs{{"first", firstOut}, {"third", thirdOut}};
+    eq.run({{"x", storage}}, outputs, stream);
+
+    expectNear(copyToCpuValues(outputs.at("first"), stream), {10.0f, 14.0f});
+    expectNear(copyToCpuValues(outputs.at("third"), stream), {6.0f, 18.0f});
+}
+
+TEST(ExpressionConvenienceOps, StridedViewBackwardScattersToDenseSourceGradient) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor storage = makeGpuTensor({3, 4},
+                                   {0.0f, 1.0f, 2.0f, 3.0f,
+                                    4.0f, 5.0f, 6.0f, 7.0f,
+                                    8.0f, 9.0f, 10.0f, 11.0f},
+                                   stream);
+    Tensor upstream = makeGpuTensor({3}, {1.0f, 0.5f, -2.0f}, stream);
+
+    auto x = Expression::input("x");
+    auto column = x.stridedView({3}, {4}, 1);
+    auto forwardOutputs = Expression::outputs({{"y", column * column}});
+    auto gradients = runBackwardValues(forwardOutputs, {{"x", storage}, {"dy", upstream}}, {"x"}, "dy", stream);
+
+    expectNear(gradients.at("x_grad"),
+               {0.0f, 2.0f, 0.0f, 0.0f,
+                0.0f, 5.0f, 0.0f, 0.0f,
+                0.0f, -36.0f, 0.0f, 0.0f});
+}
+
+TEST(ExpressionConvenienceOps, DenseReshapeAliasRejectsNonDenseStridedSourceView) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor storage = makeGpuTensor({2, 4},
+                                   {0.0f, 1.0f, 2.0f, 3.0f,
+                                    4.0f, 5.0f, 6.0f, 7.0f},
+                                   stream);
+
+    auto x = Expression::input("x");
+    auto view = x.stridedView({2}, {4}, 0).reshape({1, 2});
+    auto expressionOutputs = Expression::outputs({{"y", view + Expression::constantScalar(1.0)}});
+    FusedEquation eq = FusedEquation::compile(expressionOutputs.physicalOutputs(), 0);
+
+    EXPECT_THROW((void)eq.stamp({{"x", storage}}, stream), std::runtime_error);
+    Tensor y(gpuPlacement, TensorDescriptor(DataType::FP32, {1, 2}));
+    EXPECT_THROW(eq.run({{"x", storage}}, y, stream), std::runtime_error);
+}
+
 TEST(NewtonSchulzOrthogonalization, RejectsInvalidOptions) {
     auto x = Expression::input("x");
     EXPECT_THROW((void)newtonSchulzOrthogonalize(x, 0, 4), std::logic_error);

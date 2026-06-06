@@ -1,5 +1,5 @@
-#include <optional>
 #include "Utilities/Expression/CudaSourceEmitter.h"
+#include <optional>
 #include "Utilities/Expression/EquationCompiler.h"
 #include "Utilities/Expression/ExpressionDTypeResolution.h"
 
@@ -230,6 +230,27 @@ static void collectRequiredNodes(const PhysicalExpression& expr, uint32_t node_i
     }
     if (Expression::isTernaryOp(node.op)) {
         collectRequiredNodes(expr, node.aux, required);
+    }
+}
+
+static void collectRequiredNodesExcludingIndexAwareChildren(const PhysicalExpression& expr,
+                                                            uint32_t node_idx,
+                                                            std::unordered_set<uint32_t>& required) {
+    if (!required.insert(node_idx).second) {
+        return;
+    }
+
+    const ExprNode& node = expr.nodes[node_idx];
+    if (Expression::isLeafOp(node.op) || node.op == ExprOp::STRIDED_VIEW_BACKWARD) {
+        return;
+    }
+
+    collectRequiredNodesExcludingIndexAwareChildren(expr, node.lhs, required);
+    if (Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) {
+        collectRequiredNodesExcludingIndexAwareChildren(expr, node.rhs, required);
+    }
+    if (Expression::isTernaryOp(node.op)) {
+        collectRequiredNodesExcludingIndexAwareChildren(expr, node.aux, required);
     }
 }
 
@@ -558,7 +579,6 @@ static void emitSharedTransposeTileDeclaration(std::ostringstream& ss, const std
     ss << "  __shared__ unsigned int tile[TILE_DIM][" << columns_expr << "];\n";
 }
 
-
 static std::string transposePackType(DataType dtype) {
     switch (dtype) {
         case DataType::FP16:
@@ -736,8 +756,8 @@ static void emitRequiredHeaders(const PhysicalExpression& expr, std::ostringstre
     if (need_fp8) {
         ss << "#include <cuda_fp8.h>\n";
     }
-    const bool needs_gamma_math_header = expressionUsesOp(expr, ExprOp::TGAMMA) || expressionUsesOp(expr, ExprOp::LGAMMA) ||
-                                          expressionUsesOp(expr, ExprOp::DIGAMMA);
+    const bool needs_gamma_math_header =
+        expressionUsesOp(expr, ExprOp::TGAMMA) || expressionUsesOp(expr, ExprOp::LGAMMA) || expressionUsesOp(expr, ExprOp::DIGAMMA);
     if (needs_gamma_math_header) {
         ss << "#include <math_functions.h>\n";
     }
@@ -867,8 +887,8 @@ static bool expressionHasIndexAwareOps(const PhysicalExpression& expr) {
 }
 
 static std::optional<DataType> getVectorizedStageStorageDTypeImpl(const PhysicalExpression& expr,
-                                                             const std::vector<DataType>& input_dtypes,
-                                                             const std::vector<DataType>& output_dtypes) {
+                                                                  const std::vector<DataType>& input_dtypes,
+                                                                  const std::vector<DataType>& output_dtypes) {
     if (input_dtypes.empty() || output_dtypes.empty()) {
         return std::nullopt;
     }
@@ -1655,7 +1675,6 @@ static bool tryGetEmitterAliasSource(const PhysicalExpression& expr, uint32_t no
     const ExprNode& n = expr.nodes[node_idx];
     switch (n.op) {
         case ExprOp::RESHAPE:
-        case ExprOp::STRIDED_VIEW:
         case ExprOp::UNSQUEEZE:
         case ExprOp::SQUEEZE:
             source_idx = n.lhs;
@@ -1774,76 +1793,42 @@ static void emitScalarAliasNode(
        << emitResolvedScalarValueExpr(expr, source_node_idx, emitted_dtype) << ";\n";
 }
 
-
 static std::unordered_set<uint32_t> collectIndexAwareInputNodesToSkipForFlatOutput(const PhysicalExpression& expr,
-                                                                                     const std::vector<CompiledStageOutput>& outputs) {
+                                                                                   const std::vector<CompiledStageOutput>& outputs) {
     std::unordered_set<uint32_t> reachable;
+    std::unordered_set<uint32_t> ordinary_required;
     for (const CompiledStageOutput& output : outputs) {
         if (output.local_node_idx >= expr.nodes.size()) {
             throw runtime_error("Fused output local_node_idx out of range while collecting index-aware input skips.");
         }
         collectRequiredNodes(expr, output.local_node_idx, reachable);
+        collectRequiredNodesExcludingIndexAwareChildren(expr, output.local_node_idx, ordinary_required);
     }
 
-    std::unordered_set<uint32_t> index_aware_input_sources;
-    std::unordered_map<uint32_t, uint32_t> ordinary_input_uses;
-
-    auto resolve_emitter_alias_source = [&](uint32_t node_idx) {
-        uint32_t source_idx = node_idx;
-        uint32_t alias_source_idx = UINT32_MAX;
-        while (tryGetEmitterAliasSource(expr, source_idx, alias_source_idx)) {
-            source_idx = alias_source_idx;
-            alias_source_idx = UINT32_MAX;
-        }
-        return source_idx;
-    };
-
-    auto note_child_input_use = [&](uint32_t parent_idx, uint32_t child_idx, bool index_aware_load) {
-        if (child_idx >= expr.nodes.size() || !reachable.contains(parent_idx) || !reachable.contains(child_idx)) {
-            return;
-        }
-
-        const uint32_t source_idx = resolve_emitter_alias_source(child_idx);
-        if (source_idx >= expr.nodes.size() || expr.nodes[source_idx].op != ExprOp::INPUT) {
-            return;
-        }
-
-        if (index_aware_load) {
-            index_aware_input_sources.insert(source_idx);
-        } else {
-            ++ordinary_input_uses[source_idx];
-        }
-    };
-
+    std::unordered_set<uint32_t> index_aware_required;
     for (uint32_t node_idx : reachable) {
         const ExprNode& node = expr.nodes.at(node_idx);
-        if (Expression::isLeafOp(node.op)) {
+        if (node.op != ExprOp::STRIDED_VIEW_BACKWARD) {
             continue;
         }
-
-        // STRIDED_VIEW_BACKWARD is an index-aware consumer: it derives a
-        // source-gradient input index from the output coordinate, rather than
-        // using the fused output's flat idx directly.
-        note_child_input_use(node_idx, node.lhs, node.op == ExprOp::STRIDED_VIEW_BACKWARD);
-        if (Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) {
-            note_child_input_use(node_idx, node.rhs, false);
+        if (node.lhs >= expr.nodes.size()) {
+            throw runtime_error("strided_view_backward node has invalid lhs while collecting index-aware input skips.");
         }
-        if (Expression::isTernaryOp(node.op)) {
-            note_child_input_use(node_idx, node.aux, false);
-        }
+        collectRequiredNodes(expr, node.lhs, index_aware_required);
     }
 
     std::unordered_set<uint32_t> skip;
-    for (uint32_t source_idx : index_aware_input_sources) {
-        if (!ordinary_input_uses.contains(source_idx)) {
-            // The index-aware node emits the only valid load for this input.
-            // Emitting the ordinary scalar INPUT definition would read at the
-            // packed output idx, which is wrong for narrower dQ/dK/dV tensors
-            // and can be out of bounds after the first packed row.
-            skip.insert(source_idx);
+    for (uint32_t node_idx : index_aware_required) {
+        if (!ordinary_required.contains(node_idx)) {
+            // STRIDED_VIEW_BACKWARD derives a view-gradient index from the dense
+            // source-gradient output idx and evaluates its gradient source in
+            // that view domain. Nodes that are only reachable through that
+            // index-aware child must be emitted by the strided-view-backward
+            // emitter with the derived index, not by the ordinary flat emitter
+            // with the output idx.
+            skip.insert(node_idx);
         }
     }
-
     return skip;
 }
 
@@ -2043,12 +2028,48 @@ static std::string emitIndexMappedScalarValue(std::ostringstream& ss,
     if (n.op == ExprOp::TRANSPOSE) {
         const std::string source_idx = "idx" + suffix;
         emitTransposeSourceIndexForDomain(ss, domain_dims, idx_expr, source_idx, indent, use_uint32_index_math);
+        const std::string value =
+            emitIndexMappedScalarValue(ss, expr, group, n.lhs, source_idx, group.node_dims[n.lhs], indent, use_uint32_index_math, counter);
+        return castScalarExpr(value, emittedScalarNodeValueDType(expr.nodes[n.lhs]), emitted_dtype);
+    }
+
+    if (n.op == ExprOp::STRIDED_VIEW) {
+        if (n.view_dims.empty() || n.view_dims.size() != n.view_strides.size()) {
+            throw runtime_error("Index-mapped strided_view emission requires dimensions and strides with the same non-zero rank.");
+        }
+
+        const std::string source_idx = "sv_source_idx" + suffix;
+        const std::string residual_var = "sv_residual" + suffix;
+        ss << indent << emittedIndexType(use_uint32_index_math) << " " << residual_var << " = static_cast<"
+           << emittedIndexType(use_uint32_index_math) << ">(" << idx_expr << ");\n";
+        ss << indent << emittedIndexType(use_uint32_index_math) << " " << source_idx << " = "
+           << emitUnsignedLiteral(n.view_element_offset, use_uint32_index_math) << ";\n";
+        for (int64_t axis = static_cast<int64_t>(n.view_dims.size()) - 1; axis >= 0; --axis) {
+            const uint64_t dim = n.view_dims.at(static_cast<size_t>(axis));
+            const uint64_t stride = n.view_strides.at(static_cast<size_t>(axis));
+            if (dim == 0 || stride == 0) {
+                throw runtime_error("Index-mapped strided_view dimensions and strides must be non-zero.");
+            }
+            const std::string coord_var = "sv_coord" + suffix + "_" + std::to_string(axis);
+            ss << indent << "const " << emittedIndexType(use_uint32_index_math) << " " << coord_var << " = " << residual_var
+               << " % " << emitUnsignedLiteral(dim, use_uint32_index_math) << ";\n";
+            ss << indent << residual_var << " /= " << emitUnsignedLiteral(dim, use_uint32_index_math) << ";\n";
+            if (stride == 1ULL) {
+                ss << indent << source_idx << " += " << coord_var << ";\n";
+            } else if (isPowerOfTwo(stride)) {
+                ss << indent << source_idx << " += (" << coord_var << " << " << std::to_string(log2Exact(stride)) << ");\n";
+            } else {
+                ss << indent << source_idx << " += " << coord_var << " * " << emitUnsignedLiteral(stride, use_uint32_index_math)
+                   << ";\n";
+            }
+        }
+
         const std::string value = emitIndexMappedScalarValue(
             ss, expr, group, n.lhs, source_idx, group.node_dims[n.lhs], indent, use_uint32_index_math, counter);
         return castScalarExpr(value, emittedScalarNodeValueDType(expr.nodes[n.lhs]), emitted_dtype);
     }
 
-    if (n.op == ExprOp::RESHAPE || n.op == ExprOp::STRIDED_VIEW || n.op == ExprOp::UNSQUEEZE || n.op == ExprOp::SQUEEZE) {
+    if (n.op == ExprOp::RESHAPE || n.op == ExprOp::UNSQUEEZE || n.op == ExprOp::SQUEEZE) {
         const std::string value =
             emitIndexMappedScalarValue(ss, expr, group, n.lhs, idx_expr, group.node_dims[n.lhs], indent, use_uint32_index_math, counter);
         return castScalarExpr(value, emittedScalarNodeValueDType(expr.nodes[n.lhs]), emitted_dtype);
@@ -2233,13 +2254,13 @@ static uint32_t tiledLogicalTransposeConsumerSlotBytes(const CompiledExecutionSt
     return max_slot_bytes;
 }
 
-uint32_t CudaSourceEmitter::tiledLogicalTransposeConsumerSlotBytes(
-    const CompiledExecutionStage& stage, const std::vector<SpecializedBroadcastGroup>& groups) {
+uint32_t CudaSourceEmitter::tiledLogicalTransposeConsumerSlotBytes(const CompiledExecutionStage& stage,
+                                                                   const std::vector<SpecializedBroadcastGroup>& groups) {
     return ::ThorImplementation::tiledLogicalTransposeConsumerSlotBytes(stage, groups);
 }
 
-uint32_t CudaSourceEmitter::tiledLogicalTransposeConsumerPackScalars(
-    const CompiledExecutionStage& stage, const std::vector<SpecializedBroadcastGroup>& groups) {
+uint32_t CudaSourceEmitter::tiledLogicalTransposeConsumerPackScalars(const CompiledExecutionStage& stage,
+                                                                     const std::vector<SpecializedBroadcastGroup>& groups) {
     const uint32_t slot_bytes = CudaSourceEmitter::tiledLogicalTransposeConsumerSlotBytes(stage, groups);
     return std::max<uint32_t>(1U, static_cast<uint32_t>(sizeof(unsigned int)) / slot_bytes);
 }
@@ -2259,9 +2280,7 @@ struct TiledLogicalTransposeDenseInputLoad {
     DataType input_dtype = DataType::FP32;
 };
 
-static bool isLogicalTransposeVectorComputeDType(DataType dtype) {
-    return dtype == DataType::FP16 || dtype == DataType::BF16;
-}
+static bool isLogicalTransposeVectorComputeDType(DataType dtype) { return dtype == DataType::FP16 || dtype == DataType::BF16; }
 
 static std::string logicalTransposeVectorComputeType(DataType dtype) {
     switch (dtype) {
@@ -2313,9 +2332,7 @@ static std::optional<uint64_t> productDimsNoOverflow(const std::vector<uint64_t>
     return product;
 }
 
-static bool isContiguousMetadataAliasOp(ExprOp op) {
-    return op == ExprOp::RESHAPE || op == ExprOp::UNSQUEEZE || op == ExprOp::SQUEEZE;
-}
+static bool isContiguousMetadataAliasOp(ExprOp op) { return op == ExprOp::RESHAPE || op == ExprOp::UNSQUEEZE || op == ExprOp::SQUEEZE; }
 
 static std::optional<TiledLogicalTransposeDenseInputLoad> tryResolveTiledLogicalTransposeDenseInputLoad(
     const PhysicalExpression& expr,
@@ -2373,8 +2390,8 @@ static std::optional<TiledLogicalTransposeDenseInputLoad> tryResolveTiledLogical
     }
 }
 
-uint32_t CudaSourceEmitter::tiledLogicalTransposeConsumerDensePackedInputLoadCount(
-    const CompiledExecutionStage& stage, const std::vector<SpecializedBroadcastGroup>& groups) {
+uint32_t CudaSourceEmitter::tiledLogicalTransposeConsumerDensePackedInputLoadCount(const CompiledExecutionStage& stage,
+                                                                                   const std::vector<SpecializedBroadcastGroup>& groups) {
     const std::optional<std::vector<uint32_t>> maybe_frontiers = tryFindTiledLogicalTransposeConsumerFrontiers(stage, groups);
     if (!maybe_frontiers.has_value() || maybe_frontiers->empty()) {
         return 0U;
@@ -2398,11 +2415,7 @@ uint32_t CudaSourceEmitter::tiledLogicalTransposeConsumerDensePackedInputLoadCou
         }
         const DataType frontier_dtype = requireNodeOutputDType(frontier);
         const std::optional<TiledLogicalTransposeDenseInputLoad> dense_input_load =
-            tryResolveTiledLogicalTransposeDenseInputLoad(stage.expr,
-                                                          group,
-                                                          frontier.lhs,
-                                                          group.node_dims[frontier.lhs],
-                                                          frontier_dtype);
+            tryResolveTiledLogicalTransposeDenseInputLoad(stage.expr, group, frontier.lhs, group.node_dims[frontier.lhs], frontier_dtype);
         if (dense_input_load.has_value() && scalarStorageTypeSizeBytes(dense_input_load->input_dtype) <= logical_transpose_slot_bytes) {
             ++count;
         }
@@ -2410,16 +2423,17 @@ uint32_t CudaSourceEmitter::tiledLogicalTransposeConsumerDensePackedInputLoadCou
     return count;
 }
 
-static std::string emitTiledLogicalTransposeConsumerScalarValue(std::ostringstream& ss,
-                                                                const PhysicalExpression& expr,
-                                                                const SpecializedBroadcastGroup& group,
-                                                                uint32_t node_idx,
-                                                                const std::string& idx_expr,
-                                                                const std::vector<uint64_t>& domain_dims,
-                                                                const std::unordered_map<uint32_t, TiledLogicalTransposeFrontierValue>& frontier_values,
-                                                                const std::string& indent,
-                                                                bool use_uint32_index_math,
-                                                                uint32_t& counter) {
+static std::string emitTiledLogicalTransposeConsumerScalarValue(
+    std::ostringstream& ss,
+    const PhysicalExpression& expr,
+    const SpecializedBroadcastGroup& group,
+    uint32_t node_idx,
+    const std::string& idx_expr,
+    const std::vector<uint64_t>& domain_dims,
+    const std::unordered_map<uint32_t, TiledLogicalTransposeFrontierValue>& frontier_values,
+    const std::string& indent,
+    bool use_uint32_index_math,
+    uint32_t& counter) {
     if (node_idx >= expr.nodes.size() || node_idx >= group.node_dims.size()) {
         throw runtime_error("Tiled logical-transpose consumer emitter node index out of range.");
     }
@@ -2449,8 +2463,7 @@ static std::string emitTiledLogicalTransposeConsumerScalarValue(std::ostringstre
             const std::string offset_var = "offset" + suffix;
             emitBroadcastOffsetForDomain(ss, group.node_dims[node_idx], domain_dims, idx_expr, offset_var, indent, use_uint32_index_math);
             ss << indent << "const " << output_type << " " << var << " = "
-               << castScalarExpr("in" + std::to_string(n.input_slot) + "[" + offset_var + "]", input_tensor_dtype, emitted_dtype)
-               << ";\n";
+               << castScalarExpr("in" + std::to_string(n.input_slot) + "[" + offset_var + "]", input_tensor_dtype, emitted_dtype) << ";\n";
             return var;
         }
         case ExprOp::RUNTIME_SCALAR: {
@@ -2487,47 +2500,23 @@ static std::string emitTiledLogicalTransposeConsumerScalarValue(std::ostringstre
     }
 
     if (n.op == ExprOp::RESHAPE || n.op == ExprOp::STRIDED_VIEW || n.op == ExprOp::UNSQUEEZE || n.op == ExprOp::SQUEEZE) {
-        const std::string value = emitTiledLogicalTransposeConsumerScalarValue(ss,
-                                                                               expr,
-                                                                               group,
-                                                                               n.lhs,
-                                                                               idx_expr,
-                                                                               group.node_dims[n.lhs],
-                                                                               frontier_values,
-                                                                               indent,
-                                                                               use_uint32_index_math,
-                                                                               counter);
+        const std::string value = emitTiledLogicalTransposeConsumerScalarValue(
+            ss, expr, group, n.lhs, idx_expr, group.node_dims[n.lhs], frontier_values, indent, use_uint32_index_math, counter);
         return castScalarExpr(value, emittedScalarNodeValueDType(expr.nodes[n.lhs]), emitted_dtype);
     }
 
     const DataType compute_dtype = requireNodeComputeDType(n);
     auto emit_child = [&](uint32_t child_idx, const std::vector<uint64_t>& child_domain_dims) -> std::string {
-        const std::string value = emitTiledLogicalTransposeConsumerScalarValue(ss,
-                                                                               expr,
-                                                                               group,
-                                                                               child_idx,
-                                                                               idx_expr,
-                                                                               child_domain_dims,
-                                                                               frontier_values,
-                                                                               indent,
-                                                                               use_uint32_index_math,
-                                                                               counter);
+        const std::string value = emitTiledLogicalTransposeConsumerScalarValue(
+            ss, expr, group, child_idx, idx_expr, child_domain_dims, frontier_values, indent, use_uint32_index_math, counter);
         return castScalarExpr(value, emittedScalarNodeValueDType(expr.nodes[child_idx]), compute_dtype);
     };
 
     std::string compute_expr;
     if (n.op == ExprOp::WHERE) {
         auto emit_child_as = [&](uint32_t child_idx, const std::vector<uint64_t>& child_domain_dims, DataType target_dtype) -> std::string {
-            const std::string value = emitTiledLogicalTransposeConsumerScalarValue(ss,
-                                                                                   expr,
-                                                                                   group,
-                                                                                   child_idx,
-                                                                                   idx_expr,
-                                                                                   child_domain_dims,
-                                                                                   frontier_values,
-                                                                                   indent,
-                                                                                   use_uint32_index_math,
-                                                                                   counter);
+            const std::string value = emitTiledLogicalTransposeConsumerScalarValue(
+                ss, expr, group, child_idx, idx_expr, child_domain_dims, frontier_values, indent, use_uint32_index_math, counter);
             return castScalarExpr(value, emittedScalarNodeValueDType(expr.nodes[child_idx]), target_dtype);
         };
         compute_expr = emitWhereComputeExpr(emit_child_as(n.lhs, domain_dims, DataType::BOOLEAN),
@@ -2545,28 +2534,234 @@ static std::string emitTiledLogicalTransposeConsumerScalarValue(std::ostringstre
     return var;
 }
 
+static std::string stridedViewForwardSourceIndexVar(uint32_t node_idx, const std::string& suffix) {
+    return "sv_source_idx_" + std::to_string(node_idx) + suffix;
+}
+
+static std::string refWithSuffix(uint32_t idx, const std::string& suffix) { return "t" + to_string(idx) + suffix; }
+
+static std::string stridedViewBackwardSafeSuffix(uint32_t node_idx) { return "_svbw" + std::to_string(node_idx); }
+
+static std::optional<size_t> findUsedInputSlotIndex(const SpecializedBroadcastGroup* group, uint32_t input_slot) {
+    if (group == nullptr) {
+        return std::nullopt;
+    }
+    for (size_t i = 0; i < group->used_input_slots.size(); ++i) {
+        if (group->used_input_slots[i] == input_slot) {
+            return i;
+        }
+    }
+    return std::nullopt;
+}
+
+static std::string emitInputStorageIndexForLogicalIndex(std::ostringstream& ss,
+                                                        const SpecializedBroadcastGroup* group,
+                                                        uint32_t input_slot,
+                                                        const std::string& idx_expr,
+                                                        const std::string& suffix,
+                                                        const std::string& indent) {
+    const std::optional<size_t> maybe_used_i = findUsedInputSlotIndex(group, input_slot);
+    if (!maybe_used_i.has_value()) {
+        return idx_expr;
+    }
+
+    const size_t used_i = maybe_used_i.value();
+    if (used_i >= group->used_input_visible_dims.size() || used_i >= group->used_input_visible_strides.size()) {
+        throw runtime_error("Index-aware input storage mapping is missing visible input layout metadata.");
+    }
+
+    const std::vector<uint64_t>& dims = group->used_input_visible_dims[used_i];
+    const std::vector<uint64_t>& strides = group->used_input_visible_strides[used_i];
+    if (dims.size() != strides.size()) {
+        throw runtime_error("Index-aware input storage mapping requires visible dimensions and strides with the same rank.");
+    }
+    if (dims.empty()) {
+        return "0ULL";
+    }
+
+    const std::string residual_var = "input_residual_" + std::to_string(input_slot) + suffix;
+    const std::string storage_idx = "input_storage_idx_" + std::to_string(input_slot) + suffix;
+    ss << indent << "unsigned long long " << residual_var << " = static_cast<unsigned long long>(" << idx_expr << ");\n";
+    ss << indent << "unsigned long long " << storage_idx << " = 0ULL;\n";
+    for (int64_t axis = static_cast<int64_t>(dims.size()) - 1; axis >= 0; --axis) {
+        const uint64_t dim = dims.at(static_cast<size_t>(axis));
+        const uint64_t stride = strides.at(static_cast<size_t>(axis));
+        if (dim == 0) {
+            throw runtime_error("Index-aware input storage mapping does not support zero-sized dimensions.");
+        }
+        const std::string coord_var = "input_coord_" + std::to_string(input_slot) + "_" + std::to_string(axis) + suffix;
+        ss << indent << "const unsigned long long " << coord_var << " = " << residual_var << " % " << dim << "ULL;\n";
+        ss << indent << residual_var << " /= " << dim << "ULL;\n";
+        if (stride == 0ULL) {
+            continue;
+        }
+        if (stride == 1ULL) {
+            ss << indent << storage_idx << " += " << coord_var << ";\n";
+        } else if (isPowerOfTwo(stride)) {
+            ss << indent << storage_idx << " += (" << coord_var << " << " << std::to_string(log2Exact(stride)) << ");\n";
+        } else {
+            ss << indent << storage_idx << " += " << coord_var << " * " << stride << "ULL;\n";
+        }
+    }
+    return storage_idx;
+}
+
+static std::string emitScalarValueAtIndex(std::ostringstream& ss,
+                                          const PhysicalExpression& expr,
+                                          uint32_t node_idx,
+                                          const std::string& idx_expr,
+                                          const std::string& suffix,
+                                          const std::string& indent,
+                                          std::unordered_set<std::string>& emitted,
+                                          const SpecializedBroadcastGroup* group = nullptr) {
+    if (node_idx >= expr.nodes.size()) {
+        throw runtime_error("Node index out of range while emitting index-aware scalar value.");
+    }
+
+    const ExprNode& n = expr.nodes[node_idx];
+    const DataType emitted_dtype = emittedScalarNodeValueDType(n);
+    const std::string output_type = scalarStorageType(emitted_dtype);
+
+    double folded_constant = 0.0;
+    if (n.op != ExprOp::INPUT && n.op != ExprOp::RUNTIME_SCALAR && n.op != ExprOp::TENSOR_RUNTIME_SCALAR &&
+        tryGetEmitterConstantValue(expr, node_idx, folded_constant)) {
+        return castScalarExpr(emitScalarFpLiteral(folded_constant), DataType::FP32, emitted_dtype);
+    }
+
+    const std::string key = std::to_string(node_idx) + suffix;
+    const std::string var = refWithSuffix(node_idx, suffix);
+    if (emitted.contains(key)) {
+        return var;
+    }
+
+    auto mark_emitted = [&]() { emitted.insert(key); };
+
+    switch (n.op) {
+        case ExprOp::INPUT: {
+            const DataType input_tensor_dtype = requireNodeInputTensorDType(n);
+            const std::string storage_idx = emitInputStorageIndexForLogicalIndex(ss, group, n.input_slot, idx_expr, suffix, indent);
+            ss << indent << "const " << output_type << " " << var << " = "
+               << castScalarExpr("in" + std::to_string(n.input_slot) + "[" + storage_idx + "]", input_tensor_dtype, emitted_dtype)
+               << ";\n";
+            mark_emitted();
+            return var;
+        }
+        case ExprOp::RUNTIME_SCALAR: {
+            const DataType input_tensor_dtype = requireNodeInputTensorDType(n);
+            ss << indent << "const " << output_type << " " << var << " = "
+               << castScalarExpr("in" + std::to_string(n.input_slot), input_tensor_dtype, emitted_dtype) << ";\n";
+            mark_emitted();
+            return var;
+        }
+        case ExprOp::TENSOR_RUNTIME_SCALAR: {
+            const DataType input_tensor_dtype = requireNodeInputTensorDType(n);
+            const std::string input_storage_type = scalarStorageType(input_tensor_dtype);
+            const std::string input_expr = "reinterpret_cast<const " + input_storage_type + "*>(in" + std::to_string(n.input_slot) + ")[0]";
+            ss << indent << "const " << output_type << " " << var << " = " << castScalarExpr(input_expr, input_tensor_dtype, emitted_dtype)
+               << ";\n";
+            mark_emitted();
+            return var;
+        }
+        case ExprOp::SCALAR_FP: {
+            return castScalarExpr(emitScalarFpLiteral(n.scalar_fp), DataType::FP32, emitted_dtype);
+        }
+        case ExprOp::FILL: {
+            return castScalarExpr(emitScalarFpLiteral(n.scalar_fp), DataType::FP32, emitted_dtype);
+        }
+        default:
+            break;
+    }
+
+    if (n.op == ExprOp::STRIDED_VIEW_BACKWARD) {
+        throw runtime_error("Nested strided_view_backward inside an index-aware scalar source is not supported.");
+    }
+    if (n.op == ExprOp::ROPE) {
+        throw runtime_error("Nested RoPE inside an index-aware scalar source is not supported; materialize the inner RoPE first.");
+    }
+    if (n.op == ExprOp::TRANSPOSE) {
+        throw runtime_error(
+            "Nested transpose inside an index-aware scalar source is not supported; materialize the inner transpose first.");
+    }
+
+    auto child_value_as = [&](uint32_t child_idx, DataType target_dtype) -> std::string {
+        const std::string child_value = emitScalarValueAtIndex(ss, expr, child_idx, idx_expr, suffix, indent, emitted, group);
+        const DataType child_dtype = emittedScalarNodeValueDType(expr.nodes.at(child_idx));
+        return castScalarExpr(child_value, child_dtype, target_dtype);
+    };
+
+    if (n.op == ExprOp::STRIDED_VIEW) {
+        if (n.view_dims.empty() || n.view_dims.size() != n.view_strides.size()) {
+            throw runtime_error("Index-aware strided_view emission requires dimensions and strides with the same non-zero rank.");
+        }
+
+        const std::string source_idx = stridedViewForwardSourceIndexVar(node_idx, suffix);
+        const std::string residual_var = "sv_residual_" + std::to_string(node_idx) + suffix;
+        ss << indent << "unsigned long long " << residual_var << " = static_cast<unsigned long long>(" << idx_expr << ");\n";
+        ss << indent << "unsigned long long " << source_idx << " = " << n.view_element_offset << "ULL;\n";
+        for (int64_t axis = static_cast<int64_t>(n.view_dims.size()) - 1; axis >= 0; --axis) {
+            const uint64_t dim = n.view_dims.at(static_cast<size_t>(axis));
+            const uint64_t stride = n.view_strides.at(static_cast<size_t>(axis));
+            if (dim == 0 || stride == 0) {
+                throw runtime_error("Index-aware strided_view dimensions and strides must be non-zero.");
+            }
+            const std::string coord_var = "sv_coord_" + std::to_string(node_idx) + "_" + std::to_string(axis) + suffix;
+            ss << indent << "const unsigned long long " << coord_var << " = " << residual_var << " % " << dim << "ULL;\n";
+            ss << indent << residual_var << " /= " << dim << "ULL;\n";
+            ss << indent << source_idx << " += " << coord_var << " * " << stride << "ULL;\n";
+        }
+
+        const std::string nested_suffix = suffix + "_sv" + std::to_string(node_idx);
+        const std::string source_value = emitScalarValueAtIndex(ss, expr, n.lhs, source_idx, nested_suffix, indent, emitted, group);
+        const DataType source_dtype = emittedScalarNodeValueDType(expr.nodes.at(n.lhs));
+        ss << indent << "const " << output_type << " " << var << " = " << castScalarExpr(source_value, source_dtype, emitted_dtype)
+           << ";\n";
+        mark_emitted();
+        return var;
+    }
+
+    if (n.op == ExprOp::RESHAPE || n.op == ExprOp::UNSQUEEZE || n.op == ExprOp::SQUEEZE) {
+        const std::string source_value = emitScalarValueAtIndex(ss, expr, n.lhs, idx_expr, suffix, indent, emitted, group);
+        const DataType source_dtype = emittedScalarNodeValueDType(expr.nodes.at(n.lhs));
+        ss << indent << "const " << output_type << " " << var << " = " << castScalarExpr(source_value, source_dtype, emitted_dtype)
+           << ";\n";
+        mark_emitted();
+        return var;
+    }
+
+    const DataType compute_dtype = requireNodeComputeDType(n);
+    std::string compute_expr;
+    if (n.op == ExprOp::WHERE) {
+        const std::string lhs = child_value_as(n.lhs, DataType::BOOLEAN);
+        const std::string rhs = child_value_as(n.rhs, compute_dtype);
+        const std::string aux = child_value_as(n.aux, compute_dtype);
+        compute_expr = emitWhereComputeExpr(lhs, rhs, aux);
+    } else if (Expression::isBinaryOp(n.op)) {
+        compute_expr =
+            emitBinaryComputeExpr(n.op, child_value_as(n.lhs, compute_dtype), child_value_as(n.rhs, compute_dtype), compute_dtype);
+    } else if (Expression::isUnaryOp(n.op)) {
+        compute_expr = emitUnaryComputeExpr(n.op, child_value_as(n.lhs, compute_dtype), compute_dtype);
+    } else {
+        throw runtime_error("Unsupported op in index-aware scalar value emitter: " + to_string(static_cast<int>(n.op)));
+    }
+
+    ss << indent << "const " << output_type << " " << var << " = " << castScalarExpr(compute_expr, compute_dtype, emitted_dtype) << ";\n";
+    mark_emitted();
+    return var;
+}
 
 static void emitScalarStridedViewBackwardNode(std::ostringstream& ss,
                                               const PhysicalExpression& expr,
                                               uint32_t node_idx,
-                                              const std::string& indent) {
+                                              const std::string& indent,
+                                              const SpecializedBroadcastGroup* group = nullptr) {
     const ExprNode& n = expr.nodes.at(node_idx);
     if (n.lhs >= expr.nodes.size()) {
         throw runtime_error("strided_view_backward node has invalid lhs.");
     }
 
-    uint32_t grad_source_idx = n.lhs;
-    uint32_t alias_source_idx = UINT32_MAX;
-    while (tryGetEmitterAliasSource(expr, grad_source_idx, alias_source_idx)) {
-        grad_source_idx = alias_source_idx;
-        alias_source_idx = UINT32_MAX;
-    }
+    const uint32_t grad_source_idx = n.lhs;
 
     const ExprNode& grad_source = expr.nodes.at(grad_source_idx);
-    if (grad_source.op != ExprOp::INPUT) {
-        throw runtime_error(
-            "strided_view_backward fused emission currently requires the view-gradient input to be a materialized stage input.");
-    }
     if (n.view_dims.empty() || n.view_dims.size() != n.view_strides.size()) {
         throw runtime_error("strided_view_backward requires view dimensions and strides with the same non-zero rank.");
     }
@@ -2575,9 +2770,7 @@ static void emitScalarStridedViewBackwardNode(std::ostringstream& ss,
     }
 
     const DataType emitted_dtype = emittedScalarNodeValueDType(n);
-    const DataType input_dtype = requireNodeInputTensorDType(grad_source);
     const std::string output_type = scalarStorageType(emitted_dtype);
-    const std::string input_ref = "in" + std::to_string(grad_source.input_slot);
 
     ss << indent << "bool view_bw_in_view_" << node_idx << " = true;\n";
     ss << indent << "unsigned long long view_bw_residual_" << node_idx << " = static_cast<unsigned long long>(idx);\n";
@@ -2596,28 +2789,36 @@ static void emitScalarStridedViewBackwardNode(std::ostringstream& ss,
             throw runtime_error("strided_view_backward dimensions and strides must be non-zero.");
         }
         ss << indent << "if (view_bw_in_view_" << node_idx << ") {\n";
-        ss << indent << "  const unsigned long long coord_" << node_idx << "_" << axis << " = view_bw_residual_" << node_idx
-           << " / " << stride << "ULL;\n";
+        ss << indent << "  const unsigned long long coord_" << node_idx << "_" << axis << " = view_bw_residual_" << node_idx << " / "
+           << stride << "ULL;\n";
         ss << indent << "  if (coord_" << node_idx << "_" << axis << " >= " << dim << "ULL) {\n";
         ss << indent << "    view_bw_in_view_" << node_idx << " = false;\n";
         ss << indent << "  } else {\n";
-        ss << indent << "    view_bw_residual_" << node_idx << " -= coord_" << node_idx << "_" << axis << " * " << stride
-           << "ULL;\n";
-        ss << indent << "    view_bw_linear_" << node_idx << " = view_bw_linear_" << node_idx << " * " << dim << "ULL + coord_"
-           << node_idx << "_" << axis << ";\n";
+        ss << indent << "    view_bw_residual_" << node_idx << " -= coord_" << node_idx << "_" << axis << " * " << stride << "ULL;\n";
+        ss << indent << "    view_bw_linear_" << node_idx << " = view_bw_linear_" << node_idx << " * " << dim << "ULL + coord_" << node_idx
+           << "_" << axis << ";\n";
         ss << indent << "  }\n";
         ss << indent << "}\n";
     }
     ss << indent << "if (view_bw_residual_" << node_idx << " != 0ULL) view_bw_in_view_" << node_idx << " = false;\n";
-    const std::string load_expr = input_ref + "[view_bw_linear_" + std::to_string(node_idx) + "]";
-    const std::string cast_load = castScalarExpr(load_expr, input_dtype, emitted_dtype);
+    std::unordered_set<std::string> emitted;
+    const std::string suffix = stridedViewBackwardSafeSuffix(node_idx);
+    const std::string grad_value = emitScalarValueAtIndex(
+        ss, expr, grad_source_idx, "view_bw_linear_" + std::to_string(node_idx), suffix, indent, emitted, group);
+    const DataType grad_value_dtype = emittedScalarNodeValueDType(grad_source);
+
+    const std::string cast_load = castScalarExpr(grad_value, grad_value_dtype, emitted_dtype);
     const std::string zero = castScalarExpr("0.0f", DataType::FP32, emitted_dtype);
-    ss << indent << "const " << output_type << " t" << node_idx << " = view_bw_in_view_" << node_idx << " ? " << cast_load
-       << " : " << zero << ";\n";
+    ss << indent << "const " << output_type << " t" << node_idx << " = view_bw_in_view_" << node_idx << " ? " << cast_load << " : " << zero
+       << ";\n";
 }
 
-static void emitScalarNode(
-    std::ostringstream& ss, const PhysicalExpression& expr, uint32_t node_idx, bool broadcast_support, const std::string& indent) {
+static void emitScalarNode(std::ostringstream& ss,
+                           const PhysicalExpression& expr,
+                           uint32_t node_idx,
+                           bool broadcast_support,
+                           const std::string& indent,
+                           const SpecializedBroadcastGroup* group = nullptr) {
     const ExprNode& n = expr.nodes[node_idx];
     const DataType emitted_dtype = emittedScalarNodeValueDType(n);
     const std::string output_type = scalarStorageType(emitted_dtype);
@@ -2633,7 +2834,7 @@ static void emitScalarNode(
 
     switch (n.op) {
         case ExprOp::STRIDED_VIEW_BACKWARD:
-            emitScalarStridedViewBackwardNode(ss, expr, node_idx, indent);
+            emitScalarStridedViewBackwardNode(ss, expr, node_idx, indent, group);
             return;
 
         case ExprOp::INPUT: {
@@ -2703,10 +2904,15 @@ static void emitScalarNode(
         ss << indent << "  } else {\n";
         ss << indent << "    const bool rope_interleaved = " << (n.rope_interleaved ? "true" : "false") << ";\n";
         ss << indent << "    const unsigned long long rope_half_dim = rope_rotary_dim / 2ULL;\n";
-        ss << indent << "    const bool rope_first_lane = rope_interleaved ? ((rope_dim_coord & 1ULL) == 0ULL) : (rope_dim_coord < rope_half_dim);\n";
-        ss << indent << "    const unsigned long long rope_pair_index = rope_interleaved ? (rope_dim_coord >> 1ULL) : (rope_dim_coord < rope_half_dim ? rope_dim_coord : rope_dim_coord - rope_half_dim);\n";
+        ss << indent
+           << "    const bool rope_first_lane = rope_interleaved ? ((rope_dim_coord & 1ULL) == 0ULL) : (rope_dim_coord < rope_half_dim);\n";
+        ss << indent
+           << "    const unsigned long long rope_pair_index = rope_interleaved ? (rope_dim_coord >> 1ULL) : (rope_dim_coord < "
+              "rope_half_dim ? rope_dim_coord : rope_dim_coord - rope_half_dim);\n";
         ss << indent << "    const unsigned long long rope_peer_abs_delta = rope_interleaved ? 1ULL : rope_half_dim;\n";
-        ss << indent << "    const unsigned long long rope_peer_idx = rope_first_lane ? (static_cast<unsigned long long>(idx) + rope_peer_abs_delta) : (static_cast<unsigned long long>(idx) - rope_peer_abs_delta);\n";
+        ss << indent
+           << "    const unsigned long long rope_peer_idx = rope_first_lane ? (static_cast<unsigned long long>(idx) + rope_peer_abs_delta) "
+              ": (static_cast<unsigned long long>(idx) - rope_peer_abs_delta);\n";
 
         std::unordered_set<uint32_t> rope_required;
         collectRequiredNodes(expr, n.lhs, rope_required);
@@ -2717,7 +2923,8 @@ static void emitScalarNode(
             emitScalarNodeSuffixed(ss, expr, dep_idx, "rope_peer_idx", suffix, indent + "    ", "", 0, {});
         }
 
-        ss << indent << "    float rope_position = static_cast<float>(" << seq_coord << ") + " << emitScalarFpLiteral(static_cast<double>(n.rope_position_offset)) << ";\n";
+        ss << indent << "    float rope_position = static_cast<float>(" << seq_coord << ") + "
+           << emitScalarFpLiteral(static_cast<double>(n.rope_position_offset)) << ";\n";
         if (n.rope_scaling_kind == RotaryScalingKind::Linear) {
             ss << indent << "    rope_position = rope_position / " << emitScalarFpLiteral(n.rope_scaling_factor) << ";\n";
         }
@@ -2726,24 +2933,37 @@ static void emitScalarNode(
         if (n.rope_scaling_kind == RotaryScalingKind::DynamicNTK) {
             ss << indent << "    const float rope_seq_len = fmaxf(static_cast<float>(" << seq_extent << ") + "
                << emitScalarFpLiteral(static_cast<double>(std::max<int64_t>(0, n.rope_position_offset))) << ", 1.0f);\n";
-            ss << indent << "    const float rope_original_max = " << emitScalarFpLiteral(static_cast<double>(n.rope_original_max_position_embeddings)) << ";\n";
+            ss << indent << "    const float rope_original_max = "
+               << emitScalarFpLiteral(static_cast<double>(n.rope_original_max_position_embeddings)) << ";\n";
             ss << indent << "    if (rope_seq_len > rope_original_max && rope_rotary_dim > 2ULL) {\n";
-            ss << indent << "      const float rope_ntk_ratio = (" << emitScalarFpLiteral(n.rope_scaling_factor) << " * rope_seq_len / rope_original_max) - (" << emitScalarFpLiteral(n.rope_scaling_factor) << " - 1.0f);\n";
-            ss << indent << "      rope_base = rope_base * powf(rope_ntk_ratio, static_cast<float>(rope_rotary_dim) / static_cast<float>(rope_rotary_dim - 2ULL));\n";
+            ss << indent << "      const float rope_ntk_ratio = (" << emitScalarFpLiteral(n.rope_scaling_factor)
+               << " * rope_seq_len / rope_original_max) - (" << emitScalarFpLiteral(n.rope_scaling_factor) << " - 1.0f);\n";
+            ss << indent
+               << "      rope_base = rope_base * powf(rope_ntk_ratio, static_cast<float>(rope_rotary_dim) / "
+                  "static_cast<float>(rope_rotary_dim - 2ULL));\n";
             ss << indent << "    }\n";
-            ss << indent << "    rope_freq = powf(rope_base, -2.0f * static_cast<float>(rope_pair_index) / static_cast<float>(rope_rotary_dim));\n";
+            ss << indent
+               << "    rope_freq = powf(rope_base, -2.0f * static_cast<float>(rope_pair_index) / static_cast<float>(rope_rotary_dim));\n";
         } else if (n.rope_scaling_kind == RotaryScalingKind::Yarn) {
-            ss << indent << "    const float rope_pos_freq = powf(rope_base, 2.0f * static_cast<float>(rope_pair_index) / static_cast<float>(rope_rotary_dim));\n";
+            ss << indent
+               << "    const float rope_pos_freq = powf(rope_base, 2.0f * static_cast<float>(rope_pair_index) / "
+                  "static_cast<float>(rope_rotary_dim));\n";
             ss << indent << "    const float rope_inv_freq_extrap = 1.0f / rope_pos_freq;\n";
-            ss << indent << "    const float rope_inv_freq_interp = 1.0f / (" << emitScalarFpLiteral(n.rope_scaling_factor) << " * rope_pos_freq);\n";
-            ss << indent << "    const float rope_original_max = " << emitScalarFpLiteral(static_cast<double>(n.rope_original_max_position_embeddings)) << ";\n";
+            ss << indent << "    const float rope_inv_freq_interp = 1.0f / (" << emitScalarFpLiteral(n.rope_scaling_factor)
+               << " * rope_pos_freq);\n";
+            ss << indent << "    const float rope_original_max = "
+               << emitScalarFpLiteral(static_cast<double>(n.rope_original_max_position_embeddings)) << ";\n";
             ss << indent << "    const float rope_log_base = logf(rope_base);\n";
-            ss << indent << "    float rope_yarn_low = (static_cast<float>(rope_rotary_dim) * logf(rope_original_max / (" << emitScalarFpLiteral(n.rope_yarn_beta_fast) << " * 6.2831853071795864769f))) / (2.0f * rope_log_base);\n";
-            ss << indent << "    float rope_yarn_high = (static_cast<float>(rope_rotary_dim) * logf(rope_original_max / (" << emitScalarFpLiteral(n.rope_yarn_beta_slow) << " * 6.2831853071795864769f))) / (2.0f * rope_log_base);\n";
+            ss << indent << "    float rope_yarn_low = (static_cast<float>(rope_rotary_dim) * logf(rope_original_max / ("
+               << emitScalarFpLiteral(n.rope_yarn_beta_fast) << " * 6.2831853071795864769f))) / (2.0f * rope_log_base);\n";
+            ss << indent << "    float rope_yarn_high = (static_cast<float>(rope_rotary_dim) * logf(rope_original_max / ("
+               << emitScalarFpLiteral(n.rope_yarn_beta_slow) << " * 6.2831853071795864769f))) / (2.0f * rope_log_base);\n";
             ss << indent << "    rope_yarn_low = fmaxf(floorf(rope_yarn_low), 0.0f);\n";
             ss << indent << "    rope_yarn_high = fminf(ceilf(rope_yarn_high), static_cast<float>(rope_rotary_dim - 1ULL));\n";
             ss << indent << "    if (rope_yarn_low == rope_yarn_high) { rope_yarn_high += 0.001f; }\n";
-            ss << indent << "    const float rope_yarn_ramp = fminf(fmaxf((static_cast<float>(rope_pair_index) - rope_yarn_low) / (rope_yarn_high - rope_yarn_low), 0.0f), 1.0f);\n";
+            ss << indent
+               << "    const float rope_yarn_ramp = fminf(fmaxf((static_cast<float>(rope_pair_index) - rope_yarn_low) / (rope_yarn_high - "
+                  "rope_yarn_low), 0.0f), 1.0f);\n";
             ss << indent << "    rope_freq = rope_inv_freq_interp * rope_yarn_ramp + rope_inv_freq_extrap * (1.0f - rope_yarn_ramp);\n";
         } else if (n.rope_scaling_kind == RotaryScalingKind::LongRope) {
             if (n.rope_long_rope_short_factors.empty() || n.rope_long_rope_long_factors.empty()) {
@@ -2751,27 +2971,41 @@ static void emitScalarNode(
             }
             ss << indent << "    const float rope_seq_len = fmaxf(static_cast<float>(" << seq_extent << ") + "
                << emitScalarFpLiteral(static_cast<double>(std::max<int64_t>(0, n.rope_position_offset))) << ", 1.0f);\n";
-            ss << indent << "    const float rope_original_max = " << emitScalarFpLiteral(static_cast<double>(n.rope_original_max_position_embeddings)) << ";\n";
+            ss << indent << "    const float rope_original_max = "
+               << emitScalarFpLiteral(static_cast<double>(n.rope_original_max_position_embeddings)) << ";\n";
             ss << indent << "    const float rope_short_factors[] = " << emitFloatArrayLiteral(n.rope_long_rope_short_factors) << ";\n";
             ss << indent << "    const float rope_long_factors[] = " << emitFloatArrayLiteral(n.rope_long_rope_long_factors) << ";\n";
-            ss << indent << "    const float rope_ext_factor = rope_seq_len > rope_original_max ? rope_long_factors[rope_pair_index] : rope_short_factors[rope_pair_index];\n";
-            ss << indent << "    rope_freq = 1.0f / (rope_ext_factor * powf(rope_base, 2.0f * static_cast<float>(rope_pair_index) / static_cast<float>(rope_rotary_dim)));\n";
+            ss << indent
+               << "    const float rope_ext_factor = rope_seq_len > rope_original_max ? rope_long_factors[rope_pair_index] : "
+                  "rope_short_factors[rope_pair_index];\n";
+            ss << indent
+               << "    rope_freq = 1.0f / (rope_ext_factor * powf(rope_base, 2.0f * static_cast<float>(rope_pair_index) / "
+                  "static_cast<float>(rope_rotary_dim)));\n";
         } else if (n.rope_scaling_kind == RotaryScalingKind::Llama3) {
-            ss << indent << "    const float rope_inv_freq = powf(rope_base, -2.0f * static_cast<float>(rope_pair_index) / static_cast<float>(rope_rotary_dim));\n";
+            ss << indent
+               << "    const float rope_inv_freq = powf(rope_base, -2.0f * static_cast<float>(rope_pair_index) / "
+                  "static_cast<float>(rope_rotary_dim));\n";
             ss << indent << "    const float rope_wavelen = 6.2831853071795864769f / rope_inv_freq;\n";
-            ss << indent << "    const float rope_original_max = " << emitScalarFpLiteral(static_cast<double>(n.rope_original_max_position_embeddings)) << ";\n";
-            ss << indent << "    const float rope_low_freq_wavelen = rope_original_max / " << emitScalarFpLiteral(n.rope_llama3_low_freq_factor) << ";\n";
-            ss << indent << "    const float rope_high_freq_wavelen = rope_original_max / " << emitScalarFpLiteral(n.rope_llama3_high_freq_factor) << ";\n";
+            ss << indent << "    const float rope_original_max = "
+               << emitScalarFpLiteral(static_cast<double>(n.rope_original_max_position_embeddings)) << ";\n";
+            ss << indent << "    const float rope_low_freq_wavelen = rope_original_max / "
+               << emitScalarFpLiteral(n.rope_llama3_low_freq_factor) << ";\n";
+            ss << indent << "    const float rope_high_freq_wavelen = rope_original_max / "
+               << emitScalarFpLiteral(n.rope_llama3_high_freq_factor) << ";\n";
             ss << indent << "    if (rope_wavelen > rope_low_freq_wavelen) {\n";
             ss << indent << "      rope_freq = rope_inv_freq / " << emitScalarFpLiteral(n.rope_scaling_factor) << ";\n";
             ss << indent << "    } else if (rope_wavelen < rope_high_freq_wavelen) {\n";
             ss << indent << "      rope_freq = rope_inv_freq;\n";
             ss << indent << "    } else {\n";
-            ss << indent << "      const float rope_smooth = (rope_original_max / rope_wavelen - " << emitScalarFpLiteral(n.rope_llama3_low_freq_factor) << ") / (" << emitScalarFpLiteral(n.rope_llama3_high_freq_factor) << " - " << emitScalarFpLiteral(n.rope_llama3_low_freq_factor) << ");\n";
-            ss << indent << "      rope_freq = (1.0f - rope_smooth) * (rope_inv_freq / " << emitScalarFpLiteral(n.rope_scaling_factor) << ") + rope_smooth * rope_inv_freq;\n";
+            ss << indent << "      const float rope_smooth = (rope_original_max / rope_wavelen - "
+               << emitScalarFpLiteral(n.rope_llama3_low_freq_factor) << ") / (" << emitScalarFpLiteral(n.rope_llama3_high_freq_factor)
+               << " - " << emitScalarFpLiteral(n.rope_llama3_low_freq_factor) << ");\n";
+            ss << indent << "      rope_freq = (1.0f - rope_smooth) * (rope_inv_freq / " << emitScalarFpLiteral(n.rope_scaling_factor)
+               << ") + rope_smooth * rope_inv_freq;\n";
             ss << indent << "    }\n";
         } else {
-            ss << indent << "    rope_freq = powf(rope_base, -2.0f * static_cast<float>(rope_pair_index) / static_cast<float>(rope_rotary_dim));\n";
+            ss << indent
+               << "    rope_freq = powf(rope_base, -2.0f * static_cast<float>(rope_pair_index) / static_cast<float>(rope_rotary_dim));\n";
         }
         ss << indent << "    const float rope_theta = rope_position * rope_freq;\n";
         ss << indent << "    float rope_s = sinf(rope_theta);\n";
@@ -2786,7 +3020,9 @@ static void emitScalarNode(
         const std::string peer_value = emitResolvedScalarValueExprSuffixed(expr, n.lhs, DataType::FP32, suffix);
         ss << indent << "    const float rope_current = " << current_value << ";\n";
         ss << indent << "    const float rope_peer = " << peer_value << ";\n";
-        ss << indent << "    const float rope_out = rope_first_lane ? (rope_current * rope_c - rope_peer * rope_s) : (rope_peer * rope_s + rope_current * rope_c);\n";
+        ss << indent
+           << "    const float rope_out = rope_first_lane ? (rope_current * rope_c - rope_peer * rope_s) : (rope_peer * rope_s + "
+              "rope_current * rope_c);\n";
         ss << indent << "    t" << node_idx << " = " << castScalarExpr("rope_out", DataType::FP32, emitted_dtype) << ";\n";
         ss << indent << "  }\n";
         ss << indent << "}\n";
@@ -2802,7 +3038,16 @@ static void emitScalarNode(
         return emitResolvedScalarValueExpr(expr, child_idx, compute_dtype);
     };
 
-    if (n.op == ExprOp::RESHAPE || n.op == ExprOp::STRIDED_VIEW || n.op == ExprOp::UNSQUEEZE || n.op == ExprOp::SQUEEZE) {
+    if (n.op == ExprOp::STRIDED_VIEW) {
+        std::unordered_set<std::string> emitted;
+        const std::string suffix = "_svnode" + std::to_string(node_idx);
+        const std::string value = emitScalarValueAtIndex(ss, expr, node_idx, "idx", suffix, indent, emitted, group);
+        ss << indent << "const " << output_type << " t" << node_idx << " = "
+           << castScalarExpr(value, emittedScalarNodeValueDType(n), emitted_dtype) << ";\n";
+        return;
+    }
+
+    if (n.op == ExprOp::RESHAPE || n.op == ExprOp::UNSQUEEZE || n.op == ExprOp::SQUEEZE) {
         emitScalarAliasNode(ss, expr, node_idx, n.lhs, indent);
         return;
     }
@@ -2814,9 +3059,8 @@ static void emitScalarNode(
             }
             return emitResolvedScalarValueExpr(expr, child_idx, target_dtype);
         };
-        const std::string compute_expr = emitWhereComputeExpr(child_value_as(n.lhs, DataType::BOOLEAN),
-                                                              child_value_as(n.rhs, compute_dtype),
-                                                              child_value_as(n.aux, compute_dtype));
+        const std::string compute_expr = emitWhereComputeExpr(
+            child_value_as(n.lhs, DataType::BOOLEAN), child_value_as(n.rhs, compute_dtype), child_value_as(n.aux, compute_dtype));
         ss << indent << "const " << output_type << " t" << node_idx << " = " << castScalarExpr(compute_expr, compute_dtype, emitted_dtype)
            << ";\n";
         return;
@@ -2873,8 +3117,6 @@ static void emitScalarNode(
     ss << indent << "const " << output_type << " t" << node_idx << " = " << castScalarExpr(compute_expr, compute_dtype, emitted_dtype)
        << ";\n";
 }
-
-static std::string refWithSuffix(uint32_t idx, const std::string& suffix) { return "t" + to_string(idx) + suffix; }
 
 static std::string emitResolvedScalarValueExprSuffixed(const PhysicalExpression& expr,
                                                        uint32_t node_idx,
@@ -3003,7 +3245,16 @@ static void emitScalarNodeSuffixed(std::ostringstream& ss,
         return emitResolvedScalarValueExprSuffixed(expr, child_idx, compute_dtype, suffix);
     };
 
-    if (n.op == ExprOp::RESHAPE || n.op == ExprOp::STRIDED_VIEW || n.op == ExprOp::UNSQUEEZE || n.op == ExprOp::SQUEEZE) {
+    if (n.op == ExprOp::STRIDED_VIEW) {
+        std::unordered_set<std::string> emitted;
+        const std::string nested_suffix = suffix + "_svnode" + std::to_string(node_idx);
+        const std::string value = emitScalarValueAtIndex(ss, expr, node_idx, idx_expr, nested_suffix, indent, emitted);
+        ss << indent << "const " << output_type << " " << refWithSuffix(node_idx, suffix) << " = "
+           << castScalarExpr(value, emittedScalarNodeValueDType(n), emitted_dtype) << ";\n";
+        return;
+    }
+
+    if (n.op == ExprOp::RESHAPE || n.op == ExprOp::UNSQUEEZE || n.op == ExprOp::SQUEEZE) {
         emitScalarAliasNodeSuffixed(ss, expr, node_idx, n.lhs, suffix, indent);
         return;
     }
@@ -3015,9 +3266,8 @@ static void emitScalarNodeSuffixed(std::ostringstream& ss,
             }
             return emitResolvedScalarValueExprSuffixed(expr, child_idx, target_dtype, suffix);
         };
-        const std::string compute_expr = emitWhereComputeExpr(child_value_as(n.lhs, DataType::BOOLEAN),
-                                                              child_value_as(n.rhs, compute_dtype),
-                                                              child_value_as(n.aux, compute_dtype));
+        const std::string compute_expr = emitWhereComputeExpr(
+            child_value_as(n.lhs, DataType::BOOLEAN), child_value_as(n.rhs, compute_dtype), child_value_as(n.aux, compute_dtype));
         ss << indent << "const " << output_type << " " << refWithSuffix(node_idx, suffix) << " = "
            << castScalarExpr(compute_expr, compute_dtype, emitted_dtype) << ";\n";
         return;
@@ -3324,7 +3574,8 @@ static void emitFloatScalarNodeDefinitions(std::ostringstream& ss,
                 ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = lgammaf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
                 break;
             case ExprOp::DIGAMMA:
-                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = thor_digammaf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = thor_digammaf(" << CudaSourceEmitter::ref(n.lhs)
+                   << ");\n";
                 break;
             case ExprOp::EXP:
                 ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = expf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
@@ -3841,12 +4092,11 @@ static bool isSupportedLogicalTransposeVectorElementwiseOp(ExprOp op) {
     }
 }
 
-static bool canVectorizeTiledLogicalTransposeConsumerNode(
-    const PhysicalExpression& expr,
-    uint32_t node_idx,
-    const std::unordered_set<uint32_t>& frontier_indices,
-    DataType vector_compute_dtype,
-    std::unordered_map<uint32_t, bool>& memo) {
+static bool canVectorizeTiledLogicalTransposeConsumerNode(const PhysicalExpression& expr,
+                                                          uint32_t node_idx,
+                                                          const std::unordered_set<uint32_t>& frontier_indices,
+                                                          DataType vector_compute_dtype,
+                                                          std::unordered_map<uint32_t, bool>& memo) {
     if (node_idx >= expr.nodes.size()) {
         throw runtime_error("Tiled logical-transpose vector eligibility node index out of range.");
     }
@@ -3909,10 +4159,9 @@ static bool canVectorizeTiledLogicalTransposeConsumerNode(
     return result;
 }
 
-static std::optional<DataType> preferredTiledLogicalTransposeVectorComputeDType(
-    const PhysicalExpression& expr,
-    uint32_t node_idx,
-    const std::unordered_set<uint32_t>& frontier_indices) {
+static std::optional<DataType> preferredTiledLogicalTransposeVectorComputeDType(const PhysicalExpression& expr,
+                                                                                uint32_t node_idx,
+                                                                                const std::unordered_set<uint32_t>& frontier_indices) {
     if (node_idx >= expr.nodes.size()) {
         throw runtime_error("Tiled logical-transpose vector dtype node index out of range.");
     }
@@ -3947,11 +4196,10 @@ static std::optional<DataType> preferredTiledLogicalTransposeVectorComputeDType(
     return std::nullopt;
 }
 
-static std::optional<DataType> tiledLogicalTransposeConsumerVectorComputeDType(
-    const PhysicalExpression& expr,
-    uint32_t output_node_idx,
-    const std::vector<uint32_t>& frontier_indices,
-    uint32_t logical_transpose_pack_scalars) {
+static std::optional<DataType> tiledLogicalTransposeConsumerVectorComputeDType(const PhysicalExpression& expr,
+                                                                               uint32_t output_node_idx,
+                                                                               const std::vector<uint32_t>& frontier_indices,
+                                                                               uint32_t logical_transpose_pack_scalars) {
     if (logical_transpose_pack_scalars < 2U) {
         return std::nullopt;
     }
@@ -3964,19 +4212,15 @@ static std::optional<DataType> tiledLogicalTransposeConsumerVectorComputeDType(
     }
 
     std::unordered_map<uint32_t, bool> memo;
-    if (!canVectorizeTiledLogicalTransposeConsumerNode(expr,
-                                                       output_node_idx,
-                                                       frontier_set,
-                                                       maybe_vector_compute_dtype.value(),
-                                                       memo)) {
+    if (!canVectorizeTiledLogicalTransposeConsumerNode(expr, output_node_idx, frontier_set, maybe_vector_compute_dtype.value(), memo)) {
         return std::nullopt;
     }
 
     return maybe_vector_compute_dtype.value();
 }
 
-uint32_t CudaSourceEmitter::tiledLogicalTransposeConsumerVectorizedOutputCount(
-    const CompiledExecutionStage& stage, const std::vector<SpecializedBroadcastGroup>& groups) {
+uint32_t CudaSourceEmitter::tiledLogicalTransposeConsumerVectorizedOutputCount(const CompiledExecutionStage& stage,
+                                                                               const std::vector<SpecializedBroadcastGroup>& groups) {
     const std::optional<std::vector<uint32_t>> maybe_frontiers = tryFindTiledLogicalTransposeConsumerFrontiers(stage, groups);
     if (!maybe_frontiers.has_value() || maybe_frontiers->empty()) {
         return 0U;
@@ -3997,10 +4241,8 @@ uint32_t CudaSourceEmitter::tiledLogicalTransposeConsumerVectorizedOutputCount(
         if (output.local_node_idx >= stage.expr.nodes.size()) {
             throw runtime_error("Tiled logical-transpose vector debug output node index out of range.");
         }
-        if (tiledLogicalTransposeConsumerVectorComputeDType(stage.expr,
-                                                            output.local_node_idx,
-                                                            maybe_frontiers.value(),
-                                                            logical_transpose_pack_scalars)
+        if (tiledLogicalTransposeConsumerVectorComputeDType(
+                stage.expr, output.local_node_idx, maybe_frontiers.value(), logical_transpose_pack_scalars)
                 .has_value()) {
             ++count;
         }
@@ -4029,12 +4271,10 @@ static std::string emitTiledLogicalTransposeConsumerVectorValue(
 
         const std::string var = "tv_cast" + std::to_string(node_idx) + nextIndexMappedSuffix(node_idx, counter);
         const std::string vector_type = logicalTransposeVectorComputeType(vector_compute_dtype);
-        const std::string lane0 = castScalarExpr(emitLogicalTransposeVector2Lane(frontier_it->second.value_expr, 0U),
-                                                 frontier_it->second.scalar_dtype,
-                                                 vector_compute_dtype);
-        const std::string lane1 = castScalarExpr(emitLogicalTransposeVector2Lane(frontier_it->second.value_expr, 1U),
-                                                 frontier_it->second.scalar_dtype,
-                                                 vector_compute_dtype);
+        const std::string lane0 = castScalarExpr(
+            emitLogicalTransposeVector2Lane(frontier_it->second.value_expr, 0U), frontier_it->second.scalar_dtype, vector_compute_dtype);
+        const std::string lane1 = castScalarExpr(
+            emitLogicalTransposeVector2Lane(frontier_it->second.value_expr, 1U), frontier_it->second.scalar_dtype, vector_compute_dtype);
         ss << indent << "const " << vector_type << " " << var << " = ";
         if (vector_compute_dtype == DataType::FP16) {
             ss << "__halves2half2(" << lane0 << ", " << lane1 << ");\n";
@@ -4053,34 +4293,28 @@ static std::string emitTiledLogicalTransposeConsumerVectorValue(
     double folded_constant = 0.0;
     if (n.op != ExprOp::INPUT && n.op != ExprOp::RUNTIME_SCALAR && n.op != ExprOp::TENSOR_RUNTIME_SCALAR &&
         tryGetEmitterConstantValue(expr, node_idx, folded_constant)) {
-        ss << indent << "const " << vector_type << " " << var << " = "
-           << emitVector2ScalarLiteral(folded_constant, vector_compute_dtype) << ";\n";
+        ss << indent << "const " << vector_type << " " << var << " = " << emitVector2ScalarLiteral(folded_constant, vector_compute_dtype)
+           << ";\n";
         return var;
     }
 
     switch (n.op) {
         case ExprOp::RUNTIME_SCALAR:
         case ExprOp::TENSOR_RUNTIME_SCALAR:
-            ss << indent << "const " << vector_type << " " << var << " = "
-               << emitVector2RuntimeScalarValue(expr, n, vector_compute_dtype) << ";\n";
+            ss << indent << "const " << vector_type << " " << var << " = " << emitVector2RuntimeScalarValue(expr, n, vector_compute_dtype)
+               << ";\n";
             return var;
 
         case ExprOp::SCALAR_FP:
         case ExprOp::FILL:
-            ss << indent << "const " << vector_type << " " << var << " = "
-               << emitVector2ScalarLiteral(n.scalar_fp, vector_compute_dtype) << ";\n";
+            ss << indent << "const " << vector_type << " " << var << " = " << emitVector2ScalarLiteral(n.scalar_fp, vector_compute_dtype)
+               << ";\n";
             return var;
 
         case ExprOp::RESHAPE:
         case ExprOp::UNSQUEEZE:
         case ExprOp::SQUEEZE:
-            return emitTiledLogicalTransposeConsumerVectorValue(ss,
-                                                                expr,
-                                                                n.lhs,
-                                                                frontier_values,
-                                                                indent,
-                                                                vector_compute_dtype,
-                                                                counter);
+            return emitTiledLogicalTransposeConsumerVectorValue(ss, expr, n.lhs, frontier_values, indent, vector_compute_dtype, counter);
 
         case ExprOp::INPUT:
         case ExprOp::TRANSPOSE:
@@ -4094,13 +4328,7 @@ static std::string emitTiledLogicalTransposeConsumerVectorValue(
     }
 
     auto emit_child = [&](uint32_t child_idx) -> std::string {
-        return emitTiledLogicalTransposeConsumerVectorValue(ss,
-                                                            expr,
-                                                            child_idx,
-                                                            frontier_values,
-                                                            indent,
-                                                            vector_compute_dtype,
-                                                            counter);
+        return emitTiledLogicalTransposeConsumerVectorValue(ss, expr, child_idx, frontier_values, indent, vector_compute_dtype, counter);
     };
 
     std::string compute_expr;
@@ -5311,8 +5539,9 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
     const bool emit_cross_width_float2_path =
         maybe_tensor_input_dtype.has_value() &&
         supportsFloat2TransposedVectorization(stage.expr, maybe_tensor_input_dtype.value(), output_dtype);
-    const bool emit_cross_width_half2_path = maybe_tensor_input_dtype.has_value() &&
-                                             supportsHalf2TransposedVectorization(stage.expr, maybe_tensor_input_dtype.value(), output_dtype);
+    const bool emit_cross_width_half2_path =
+        maybe_tensor_input_dtype.has_value() &&
+        supportsHalf2TransposedVectorization(stage.expr, maybe_tensor_input_dtype.value(), output_dtype);
     const bool emit_fp8_to_bf16_float2_path =
         maybe_tensor_input_dtype.has_value() &&
         supportsFp8ToBf16Float2TransposedVectorization(stage.expr, maybe_tensor_input_dtype.value(), output_dtype);
@@ -5345,9 +5574,10 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
     if (!first_arg) {
         ss << ", ";
     }
-    ss << output_type << "* __restrict__ out0, " << index_type << " numRows, " << index_type << " numCols, " << index_type << " batchCount) {\n";
-    ss << "  const " << index_type << " rowTiles = (numRows + static_cast<" << index_type << ">(TILE_DIM) - 1) / static_cast<"
-       << index_type << ">(TILE_DIM);\n";
+    ss << output_type << "* __restrict__ out0, " << index_type << " numRows, " << index_type << " numCols, " << index_type
+       << " batchCount) {\n";
+    ss << "  const " << index_type << " rowTiles = (numRows + static_cast<" << index_type << ">(TILE_DIM) - 1) / static_cast<" << index_type
+       << ">(TILE_DIM);\n";
     ss << "  const " << index_type << " batchIdx = static_cast<" << index_type << ">(blockIdx.y) / rowTiles;\n";
     ss << "  if (batchIdx >= batchCount) return;\n";
     ss << "  const " << index_type << " rowTile = static_cast<" << index_type << ">(blockIdx.y) - batchIdx * rowTiles;\n";
@@ -5541,8 +5771,9 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
         const bool needs_input_vector_type = emit_homogeneous_packed_vectorized_path || emit_mixed_two_byte_float2_path ||
                                              emit_mixed_fp8_vectorized_path || emit_cross_width_float2_path ||
                                              emit_cross_width_half2_path || emit_fp8_to_bf16_float2_path;
-        const DataType vector_input_dtype =
-            needs_input_vector_type ? (maybe_tensor_input_dtype.has_value() ? maybe_tensor_input_dtype.value() : output_dtype) : output_dtype;
+        const DataType vector_input_dtype = needs_input_vector_type
+                                                ? (maybe_tensor_input_dtype.has_value() ? maybe_tensor_input_dtype.value() : output_dtype)
+                                                : output_dtype;
         const uint32_t pack_scalars = transposePackScalars(dtype);
         const uint32_t pairs_per_pack = pack_scalars / 2;
         const std::string pack_type = transposePackType(dtype);
@@ -5906,9 +6137,10 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
     if (!first_arg) {
         ss << ", ";
     }
-    ss << output_type << "* __restrict__ out0, " << index_type << " numRows, " << index_type << " numCols, " << index_type << " batchCount) {\n";
-    ss << "  const " << index_type << " rowTiles = (numRows + static_cast<" << index_type << ">(TILE_DIM) - 1) / static_cast<"
-       << index_type << ">(TILE_DIM);\n";
+    ss << output_type << "* __restrict__ out0, " << index_type << " numRows, " << index_type << " numCols, " << index_type
+       << " batchCount) {\n";
+    ss << "  const " << index_type << " rowTiles = (numRows + static_cast<" << index_type << ">(TILE_DIM) - 1) / static_cast<" << index_type
+       << ">(TILE_DIM);\n";
     ss << "  const " << index_type << " batchIdx = static_cast<" << index_type << ">(blockIdx.y) / rowTiles;\n";
     ss << "  if (batchIdx >= batchCount) return;\n";
     ss << "  const " << index_type << " rowTile = static_cast<" << index_type << ">(blockIdx.y) - batchIdx * rowTiles;\n";
@@ -5942,8 +6174,8 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
         ss << "    const " << index_type << " logicalRow = rowStart + static_cast<" << index_type << ">(localRow);\n";
         ss << "    const " << index_type << " logicalColBase = colStart + static_cast<" << index_type
            << ">(localReadPackCol) * READ_PACK_SCALARS;\n";
-        ss << "    const " << index_type << " logical_idx_base = matrixOffset + static_cast<" << index_type << ">(logicalRow) * static_cast<" << index_type
-           << ">(numCols) + static_cast<" << index_type << ">(logicalColBase);\n";
+        ss << "    const " << index_type << " logical_idx_base = matrixOffset + static_cast<" << index_type
+           << ">(logicalRow) * static_cast<" << index_type << ">(numCols) + static_cast<" << index_type << ">(logicalColBase);\n";
 
         auto emit_broadcast_offsets = [&](const std::vector<size_t>& used_indices,
                                           const std::string& logical_idx_expr,
@@ -6052,8 +6284,8 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
         ss << "        const unsigned int LOCAL_COL = localReadPackCol * READ_PACK_SCALARS + LANE;\n";
         ss << "        const " << index_type << " logicalCol = logicalColBase + static_cast<" << index_type << ">(LANE);\n";
         ss << "        if (logicalCol < numCols) {\n";
-        ss << "          const " << index_type << " logical_idx = matrixOffset + static_cast<" << index_type << ">(logicalRow) * static_cast<"
-           << index_type << ">(numCols) + static_cast<" << index_type << ">(logicalCol);\n";
+        ss << "          const " << index_type << " logical_idx = matrixOffset + static_cast<" << index_type
+           << ">(logicalRow) * static_cast<" << index_type << ">(numCols) + static_cast<" << index_type << ">(logicalCol);\n";
         emit_broadcast_offsets(all_used_indices, "logical_idx", "", "          ");
         auto input_value = [&](uint32_t input_slot) -> std::string {
             return "in" + std::to_string(input_slot) + "[in" + std::to_string(input_slot) + "_offset]";
@@ -6224,8 +6456,8 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
         }
         ss << "        const " << index_type << " logicalCol = logicalColBase + lane;\n";
         ss << "        if (logicalCol < numCols) {\n";
-        ss << "          const " << index_type << " logical_idx = matrixOffset + static_cast<" << index_type << ">(logicalRow) * static_cast<"
-           << index_type << ">(numCols) + static_cast<" << index_type << ">(logicalCol);\n";
+        ss << "          const " << index_type << " logical_idx = matrixOffset + static_cast<" << index_type
+           << ">(logicalRow) * static_cast<" << index_type << ">(numCols) + static_cast<" << index_type << ">(logicalCol);\n";
         for (uint32_t input_slot : group.used_input_slots) {
             ss << "          " << index_type << " in" << input_slot << "_offset = " << emitUnsignedLiteral(0, use_uint32_index_math)
                << ";\n";
@@ -6240,7 +6472,7 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
             if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
                 continue;
             }
-            emitScalarNode(ss, stage.expr, node_idx, /*broadcast_support=*/true, "            ");
+            emitScalarNode(ss, stage.expr, node_idx, /*broadcast_support=*/true, "            ", &group);
         }
         ss << "            output_scalar[lane] = " << emitResolvedScalarValueExpr(stage.expr, output.local_node_idx, output_dtype) << ";\n";
         ss << "          }\n";
@@ -6273,8 +6505,8 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
         ss << "      const " << output_type << "* input_scalar = reinterpret_cast<const " << output_type << "*>(&input_raw.pack);\n";
         ss << "      output_scalar[lane] = input_scalar[inputColLane];\n";
         ss << "    }\n";
-        ss << "    const " << index_type << " out_base_idx = matrixOffset + static_cast<" << index_type << ">(outputRow) * static_cast<" << index_type
-           << ">(numRows) +\n";
+        ss << "    const " << index_type << " out_base_idx = matrixOffset + static_cast<" << index_type << ">(outputRow) * static_cast<"
+           << index_type << ">(numRows) +\n";
         ss << "                                     static_cast<" << index_type << ">(outputColBase);\n";
         ss << "    const bool outputPackedStoreOk = (outputRow < numCols) && (outputColBase + PACK_SCALARS <= numRows) &&\n";
         ss << "                                     ((out_base_idx % PACK_SCALARS) == " << emitUnsignedLiteral(0, use_uint32_index_math)
@@ -6302,8 +6534,8 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
     ss << "    const " << index_type << " logical_row = y + j;\n";
     ss << "    const " << index_type << " logical_col = x;\n";
     ss << "    if (logical_col < numCols && logical_row < numRows) {\n";
-    ss << "      const " << index_type << " logical_idx = matrixOffset + static_cast<" << index_type << ">(logical_row) * static_cast<" << index_type
-       << ">(numCols) + static_cast<" << index_type << ">(logical_col);\n";
+    ss << "      const " << index_type << " logical_idx = matrixOffset + static_cast<" << index_type << ">(logical_row) * static_cast<"
+       << index_type << ">(numCols) + static_cast<" << index_type << ">(logical_col);\n";
     for (uint32_t input_slot : group.used_input_slots) {
         ss << "      " << index_type << " in" << input_slot << "_offset = " << emitUnsignedLiteral(0, use_uint32_index_math) << ";\n";
     }
@@ -6316,7 +6548,7 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
         if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
             continue;
         }
-        emitScalarNode(ss, stage.expr, node_idx, /*broadcast_support=*/true, "      ");
+        emitScalarNode(ss, stage.expr, node_idx, /*broadcast_support=*/true, "      ", &group);
     }
     ss << "      tile[threadIdx.y + j][threadIdx.x] = thor_pack_transpose_word<" << output_type << ">("
        << emitResolvedScalarValueExpr(stage.expr, output.local_node_idx, output_dtype) << ");\n";
@@ -6336,7 +6568,6 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
     ss << "}\n";
     return ss.str();
 }
-
 
 static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const CompiledExecutionStage& stage,
                                                                          const std::vector<SpecializedBroadcastGroup>& groups,
@@ -6395,8 +6626,8 @@ static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const C
     ss << "  static constexpr unsigned int LOGICAL_TRANSPOSE_SLOT_BYTES = " << logical_transpose_slot_bytes << "U;\n";
     ss << "  static constexpr unsigned int LOGICAL_TRANSPOSE_PACK_SCALARS = " << logical_transpose_pack_scalars << "U;\n";
     ss << "  static constexpr unsigned int LOGICAL_TRANSPOSE_TILE_COL_SCALARS = TILE_DIM * LOGICAL_TRANSPOSE_PACK_SCALARS;\n";
-    ss << "  const " << index_type << " rowTiles = (numRows + static_cast<" << index_type << ">(TILE_DIM) - 1) / static_cast<"
-       << index_type << ">(TILE_DIM);\n";
+    ss << "  const " << index_type << " rowTiles = (numRows + static_cast<" << index_type << ">(TILE_DIM) - 1) / static_cast<" << index_type
+       << ">(TILE_DIM);\n";
     ss << "  const " << index_type << " batchIdx = static_cast<" << index_type << ">(blockIdx.y) / rowTiles;\n";
     ss << "  if (batchIdx >= batchCount) return;\n";
     ss << "  const " << index_type << " rowTile = static_cast<" << index_type << ">(blockIdx.y) - batchIdx * rowTiles;\n";
@@ -6422,8 +6653,8 @@ static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const C
     ss << "\n";
 
     ss << "  const " << index_type << " rowStart = rowTile * TILE_DIM;\n";
-    ss << "  const " << index_type << " colStart = static_cast<" << index_type
-       << ">(blockIdx.x) * static_cast<" << index_type << ">(LOGICAL_TRANSPOSE_TILE_COL_SCALARS);\n";
+    ss << "  const " << index_type << " colStart = static_cast<" << index_type << ">(blockIdx.x) * static_cast<" << index_type
+       << ">(LOGICAL_TRANSPOSE_TILE_COL_SCALARS);\n";
     ss << "  const " << index_type << " y = rowStart + threadIdx.y;\n";
     ss << "  const " << index_type << " tx = rowStart + threadIdx.x;\n\n";
 
@@ -6434,20 +6665,15 @@ static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const C
         const DataType frontier_dtype = requireNodeOutputDType(frontier);
         const std::string frontier_type = scalarStorageType(frontier_dtype);
 
-        const std::optional<TiledLogicalTransposeDenseInputLoad> dense_input_load =
-            tryResolveTiledLogicalTransposeDenseInputLoad(stage.expr,
-                                                          group,
-                                                          frontier_source_idx,
-                                                          group.node_dims[frontier_source_idx],
-                                                          frontier_dtype);
+        const std::optional<TiledLogicalTransposeDenseInputLoad> dense_input_load = tryResolveTiledLogicalTransposeDenseInputLoad(
+            stage.expr, group, frontier_source_idx, group.node_dims[frontier_source_idx], frontier_dtype);
         const bool can_emit_dense_packed_input_load =
             dense_input_load.has_value() && logical_transpose_pack_scalars > 1U &&
             scalarStorageTypeSizeBytes(dense_input_load->input_dtype) <= logical_transpose_slot_bytes;
 
         auto emit_scalar_lane_loads = [&](const std::string& indent) {
             ss << indent << "for (unsigned int lane = 0; lane < LOGICAL_TRANSPOSE_PACK_SCALARS; ++lane) {\n";
-            ss << indent << "  const " << index_type << " logical_col = logical_col_base + static_cast<" << index_type
-               << ">(lane);\n";
+            ss << indent << "  const " << index_type << " logical_col = logical_col_base + static_cast<" << index_type << ">(lane);\n";
             ss << indent << "  if (logical_col < numCols) {\n";
             ss << indent << "    const " << index_type << " source_idx = matrixOffset + logical_row * numCols + logical_col;\n";
             uint32_t counter = 0;
@@ -6462,7 +6688,8 @@ static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const C
                                                                         counter);
             ss << indent << "    packed_word = thor_set_transpose_pack_lane<LOGICAL_TRANSPOSE_SLOT_BYTES, " << frontier_type << ">"
                << "(packed_word, lane, "
-               << castScalarExpr(source_value, emittedScalarNodeValueDType(stage.expr.nodes[frontier_source_idx]), frontier_dtype) << ");\n";
+               << castScalarExpr(source_value, emittedScalarNodeValueDType(stage.expr.nodes[frontier_source_idx]), frontier_dtype)
+               << ");\n";
             ss << indent << "  }\n";
             ss << indent << "}\n";
         };
@@ -6547,11 +6774,8 @@ static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const C
             throw runtime_error("Tiled logical-transpose consumer output local node out of range while emitting stores.");
         }
         const DataType output_dtype = requireNodeOutputDType(stage.expr.nodes[output.local_node_idx]);
-        const std::optional<DataType> logical_transpose_vector_compute_dtype =
-            tiledLogicalTransposeConsumerVectorComputeDType(stage.expr,
-                                                            output.local_node_idx,
-                                                            frontier_indices,
-                                                            logical_transpose_pack_scalars);
+        const std::optional<DataType> logical_transpose_vector_compute_dtype = tiledLogicalTransposeConsumerVectorComputeDType(
+            stage.expr, output.local_node_idx, frontier_indices, logical_transpose_pack_scalars);
 
         ss << "      {\n";
         ss << "        // Stage output " << stage_output_idx << ": evaluate from the shared logical-transpose frontiers.\n";
@@ -6559,7 +6783,7 @@ static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const C
             const DataType vector_compute_dtype = logical_transpose_vector_compute_dtype.value();
             ss << "        // Vectorized downstream lane math: each owner thread evaluates two logical lanes\n";
             ss << "        // with half2/bfloat162 once the packed transpose frontier has been unloaded.\n";
-                ss << "        for (unsigned int lane_pair = 0; lane_pair < LOGICAL_TRANSPOSE_PACK_SCALARS; lane_pair += 2U) {\n";
+            ss << "        for (unsigned int lane_pair = 0; lane_pair < LOGICAL_TRANSPOSE_PACK_SCALARS; lane_pair += 2U) {\n";
             ss << "          const " << index_type << " output_row0 = output_row_base + static_cast<" << index_type << ">(lane_pair);\n";
             ss << "          if (output_row0 + static_cast<" << index_type << ">(1) < numCols) {\n";
             ss << "            const " << index_type << " out_idx0 = matrixOffset + output_row0 * numRows + tx;\n";
@@ -6568,25 +6792,17 @@ static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const C
             std::unordered_map<uint32_t, TiledLogicalTransposeFrontierVectorValue> frontier_vector_values;
             for (uint32_t frontier_idx : frontier_indices) {
                 const DataType frontier_dtype = tiledLogicalTransposeFrontierStorageDType(stage.expr, frontier_idx);
-                const std::string value0 =
-                    "transposed_value_" + std::to_string(frontier_idx) + "[j / BLOCK_ROWS][lane_pair]";
-                const std::string value1 =
-                    "transposed_value_" + std::to_string(frontier_idx) + "[j / BLOCK_ROWS][lane_pair + 1U]";
+                const std::string value0 = "transposed_value_" + std::to_string(frontier_idx) + "[j / BLOCK_ROWS][lane_pair]";
+                const std::string value1 = "transposed_value_" + std::to_string(frontier_idx) + "[j / BLOCK_ROWS][lane_pair + 1U]";
                 const std::string vector_value =
                     emitLogicalTransposeVector2PackScalarsAsCompute(value0, value1, frontier_dtype, vector_compute_dtype);
-                frontier_vector_values.emplace(
-                    frontier_idx, TiledLogicalTransposeFrontierVectorValue{vector_value, vector_compute_dtype});
+                frontier_vector_values.emplace(frontier_idx, TiledLogicalTransposeFrontierVectorValue{vector_value, vector_compute_dtype});
             }
 
             {
                 uint32_t counter = 0;
-                const std::string vector_value = emitTiledLogicalTransposeConsumerVectorValue(ss,
-                                                                                              stage.expr,
-                                                                                              output.local_node_idx,
-                                                                                              frontier_vector_values,
-                                                                                              "            ",
-                                                                                              vector_compute_dtype,
-                                                                                              counter);
+                const std::string vector_value = emitTiledLogicalTransposeConsumerVectorValue(
+                    ss, stage.expr, output.local_node_idx, frontier_vector_values, "            ", vector_compute_dtype, counter);
                 ss << "            out" << stage_output_idx << "[out_idx0] = "
                    << castScalarExpr(emitLogicalTransposeVector2Lane(vector_value, 0U), vector_compute_dtype, output_dtype) << ";\n";
                 ss << "            out" << stage_output_idx << "[out_idx1] = "
@@ -6599,8 +6815,7 @@ static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const C
             std::unordered_map<uint32_t, TiledLogicalTransposeFrontierValue> scalar_tail_frontier_values;
             for (uint32_t frontier_idx : frontier_indices) {
                 const DataType frontier_dtype = tiledLogicalTransposeFrontierStorageDType(stage.expr, frontier_idx);
-                const std::string value_name =
-                    "transposed_value_" + std::to_string(frontier_idx) + "[j / BLOCK_ROWS][lane]";
+                const std::string value_name = "transposed_value_" + std::to_string(frontier_idx) + "[j / BLOCK_ROWS][lane]";
                 scalar_tail_frontier_values.emplace(frontier_idx, TiledLogicalTransposeFrontierValue{value_name, frontier_dtype});
             }
 
@@ -6622,7 +6837,7 @@ static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const C
             ss << "          }\n";
             ss << "        }\n";
         } else {
-                ss << "        for (unsigned int lane = 0; lane < LOGICAL_TRANSPOSE_PACK_SCALARS; ++lane) {\n";
+            ss << "        for (unsigned int lane = 0; lane < LOGICAL_TRANSPOSE_PACK_SCALARS; ++lane) {\n";
             ss << "          const " << index_type << " output_row = output_row_base + static_cast<" << index_type << ">(lane);\n";
             ss << "          if (output_row < numCols) {\n";
             ss << "            const " << index_type << " out_idx = matrixOffset + output_row * numRows + tx;\n";
@@ -6630,8 +6845,7 @@ static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const C
             std::unordered_map<uint32_t, TiledLogicalTransposeFrontierValue> frontier_values;
             for (uint32_t frontier_idx : frontier_indices) {
                 const DataType frontier_dtype = tiledLogicalTransposeFrontierStorageDType(stage.expr, frontier_idx);
-                const std::string value_name =
-                    "transposed_value_" + std::to_string(frontier_idx) + "[j / BLOCK_ROWS][lane]";
+                const std::string value_name = "transposed_value_" + std::to_string(frontier_idx) + "[j / BLOCK_ROWS][lane]";
                 frontier_values.emplace(frontier_idx, TiledLogicalTransposeFrontierValue{value_name, frontier_dtype});
             }
 
@@ -6663,8 +6877,8 @@ static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const C
 }
 
 [[maybe_unused]] static std::string emitIndexMappedSpecializedBroadcast(const CompiledExecutionStage& stage,
-                                                       const std::vector<SpecializedBroadcastGroup>& groups,
-                                                       const std::string& kernel_name) {
+                                                                        const std::vector<SpecializedBroadcastGroup>& groups,
+                                                                        const std::string& kernel_name) {
     if (stage.kind != CompiledExecutionStage::Kind::FusedKernel) {
         throw runtime_error("emitIndexMappedSpecializedBroadcast called on non-fused stage.");
     }
@@ -6726,7 +6940,8 @@ static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const C
             uint32_t counter = 0;
             const std::string value = emitIndexMappedScalarValue(
                 ss, stage.expr, group, output.local_node_idx, "idx", group.output_dims, "    ", use_uint32_index_math, counter);
-            ss << "    out" << out_idx << "[idx] = " << castScalarExpr(value, emittedScalarNodeValueDType(stage.expr.nodes[output.local_node_idx]), output_dtype)
+            ss << "    out" << out_idx
+               << "[idx] = " << castScalarExpr(value, emittedScalarNodeValueDType(stage.expr.nodes[output.local_node_idx]), output_dtype)
                << ";\n";
         }
         ss << "  }\n\n";
@@ -6736,8 +6951,8 @@ static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const C
     return ss.str();
 }
 
-bool CudaSourceEmitter::specializedBroadcastUsesTiledLogicalTransposeConsumerLaunch(
-    const CompiledExecutionStage& stage, const std::vector<SpecializedBroadcastGroup>& groups) {
+bool CudaSourceEmitter::specializedBroadcastUsesTiledLogicalTransposeConsumerLaunch(const CompiledExecutionStage& stage,
+                                                                                    const std::vector<SpecializedBroadcastGroup>& groups) {
     return tryFindTiledLogicalTransposeConsumerFrontiers(stage, groups).has_value();
 }
 
@@ -6834,7 +7049,7 @@ std::string CudaSourceEmitter::emitSpecializedBroadcast(const CompiledExecutionS
             if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
                 continue;
             }
-            emitScalarNode(ss, stage.expr, node_idx, /*broadcast_support=*/true, "    ");
+            emitScalarNode(ss, stage.expr, node_idx, /*broadcast_support=*/true, "    ", &group);
         }
 
         ss << "\n";

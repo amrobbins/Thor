@@ -28,6 +28,7 @@ void bind_categorical_focal_loss(nb::module_ &losses);
 void bind_dice_loss(nb::module_ &losses);
 void bind_tversky_loss(nb::module_ &losses);
 void bind_focal_tversky_loss(nb::module_ &losses);
+void bind_box_iou_losses(nb::module_ &losses);
 
 using namespace Thor;
 
@@ -79,4 +80,5 @@ void bind_losses(nb::module_ &losses) {
     bind_dice_loss(losses);
     bind_tversky_loss(losses);
     bind_focal_tversky_loss(losses);
+    bind_box_iou_losses(losses);
 }

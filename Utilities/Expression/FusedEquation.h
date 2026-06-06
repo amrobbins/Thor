@@ -406,6 +406,9 @@ struct RuntimeDTypeKeyHash {
 struct RuntimeShapeKey {
     RuntimeDTypeKey dtype_key;
     std::vector<std::vector<uint64_t>> root_input_dims;
+    // Convenience-run broadcast kernels bake input element strides into specialized launch code,
+    // so same-shape non-dense views with different strides must not share a runtime-shape cache entry.
+    std::vector<std::vector<uint64_t>> root_input_strides;
 
     bool operator==(const RuntimeShapeKey& other) const = default;
 };
@@ -421,6 +424,14 @@ struct RuntimeShapeKeyHash {
             combine(std::hash<size_t>{}(dims.size()));
             for (uint64_t d : dims) {
                 combine(std::hash<uint64_t>{}(d));
+            }
+        }
+
+        combine(std::hash<size_t>{}(k.root_input_strides.size()));
+        for (const std::vector<uint64_t>& strides : k.root_input_strides) {
+            combine(std::hash<size_t>{}(strides.size()));
+            for (uint64_t stride : strides) {
+                combine(std::hash<uint64_t>{}(stride));
             }
         }
 
@@ -732,6 +743,16 @@ struct SpecializedBroadcastGroup {
     std::vector<std::vector<uint64_t>> node_dims;
     std::vector<uint32_t> output_indices;
     std::vector<uint32_t> used_input_slots;  // sorted, local stage input slots
+    // Same order as used_input_slots. False means this input is only consumed by
+    // index-aware nodes that compute their own logical-source index, such as
+    // strided_view_backward evaluating its view-gradient source. Such inputs do
+    // not need the ordinary output-domain broadcast offset variables.
+    std::vector<bool> used_input_broadcast_offset_required;
+    // Runtime-visible input layouts, same order as used_input_slots. These let
+    // index-aware emitters map an arbitrary logical linear index back through a
+    // non-dense tensor view without materializing that view first.
+    std::vector<std::vector<uint64_t>> used_input_visible_dims;
+    std::vector<std::vector<uint64_t>> used_input_visible_strides;
     std::vector<SpecializedInputLoadKind> used_input_load_kinds;
     std::vector<SpecializedBroadcastAxis> active_axes;
 };

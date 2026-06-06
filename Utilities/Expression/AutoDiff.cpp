@@ -2510,7 +2510,7 @@ uint64_t reductionElementCount(const std::vector<uint64_t>& input_dims, const st
 static std::optional<std::vector<uint64_t>> inferPackedDenseSourceDimsForStridedViewBackward(const ExprNode& node) {
     const std::vector<uint64_t>& dims = node.view_dims;
     const std::vector<uint64_t>& strides = node.view_strides;
-    if (dims.size() < 2 || dims.size() != strides.size()) {
+    if (dims.empty() || dims.size() != strides.size()) {
         return std::nullopt;
     }
     for (uint64_t dim : dims) {
@@ -2522,6 +2522,20 @@ static std::optional<std::vector<uint64_t>> inferPackedDenseSourceDimsForStrided
         if (stride == 0) {
             return std::nullopt;
         }
+    }
+
+    // Common column views over a dense 2-D parent are expressed as a 1-D view
+    // with a row stride and an in-row offset, for example source [N, 4] and
+    // view x[:, 1]: dims=[N], strides=[4], offset=1. Without runtime forward
+    // shape information, infer the minimal dense 2-D parent that can represent
+    // this alias. This keeps ordinary column-slice backward graphs shape-safe
+    // while still rejecting ambiguous/non-packed aliases below.
+    if (dims.size() == 1) {
+        const uint64_t row_width = strides[0];
+        if (node.view_element_offset >= row_width) {
+            return std::nullopt;
+        }
+        return std::vector<uint64_t>{dims[0], row_width};
     }
 
     // Packed-QKV views are commonly expressed as a higher-rank logical view over a
