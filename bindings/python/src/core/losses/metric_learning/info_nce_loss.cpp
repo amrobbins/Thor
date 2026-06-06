@@ -2,7 +2,7 @@
 #include <nanobind/stl/optional.h>
 #include <optional>
 
-#include "DeepLearning/Api/Layers/Loss/CategoricalFocalLoss.h"
+#include "DeepLearning/Api/Layers/Loss/InfoNCELoss.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 
@@ -25,7 +25,7 @@ void validateReportedLossShape(LossShape reported_loss_shape, const string &loss
     }
 }
 
-void setReportedLossShape(CategoricalFocalLoss::Builder &builder, LossShape reported_loss_shape) {
+void setReportedLossShape(InfoNCELoss::Builder &builder, LossShape reported_loss_shape) {
     if (reported_loss_shape == LossShape::BATCH) {
         builder.reportsBatchLoss();
     } else if (reported_loss_shape == LossShape::CLASSWISE) {
@@ -38,15 +38,14 @@ void setReportedLossShape(CategoricalFocalLoss::Builder &builder, LossShape repo
     }
 }
 
-void validateCategoricalFocalLossArguments(const string &loss_name,
-                                           Tensor predictions,
-                                           Tensor labels,
-                                           float gamma,
-                                           float alpha,
-                                           optional<DataType> loss_data_type,
-                                           LossShape reported_loss_shape) {
-    if (predictions.getDimensions().size() != 1) {
-        string error_message = loss_name + ": predictions must be a 1 dimensional logits tensor but predictions is " +
+void validateInfoNCELossArguments(const string &loss_name,
+                                  Tensor predictions,
+                                  Tensor labels,
+                                  float temperature,
+                                  optional<DataType> loss_data_type,
+                                  LossShape reported_loss_shape) {
+    if (predictions.getDimensions().size() != 1 || predictions.getDimensions()[0] <= 1) {
+        string error_message = loss_name + ": predictions must be a 1 dimensional logits tensor with more than one candidate but predictions is " +
                                predictions.getDescriptorString();
         throw nb::value_error(error_message.c_str());
     }
@@ -63,12 +62,8 @@ void validateCategoricalFocalLossArguments(const string &loss_name,
         string error_message = loss_name + ": labels must use fp16 or fp32 dtype";
         throw nb::value_error(error_message.c_str());
     }
-    if (gamma < 0.0f) {
-        string error_message = loss_name + ": gamma must be non-negative";
-        throw nb::value_error(error_message.c_str());
-    }
-    if (alpha < 0.0f) {
-        string error_message = loss_name + ": alpha must be non-negative";
+    if (temperature <= 0.0f) {
+        string error_message = loss_name + ": temperature must be greater than zero";
         throw nb::value_error(error_message.c_str());
     }
     DataType effectiveLossDataType = loss_data_type.value_or(predictions.getDataType());
@@ -80,56 +75,54 @@ void validateCategoricalFocalLossArguments(const string &loss_name,
 }
 }  // namespace
 
-void bind_categorical_focal_loss(nb::module_ &losses) {
-    auto categorical_focal_loss = nb::class_<CategoricalFocalLoss, Loss>(losses, "CategoricalFocalLoss");
-    categorical_focal_loss.attr("__module__") = "thor.losses";
+void bind_info_nce_loss(nb::module_ &losses) {
+    auto info_nce_loss = nb::class_<InfoNCELoss, Loss>(losses, "InfoNCELoss");
+    info_nce_loss.attr("__module__") = "thor.losses.metric_learning";
 
-    categorical_focal_loss.def(
+    info_nce_loss.def(
         "__init__",
-        [](CategoricalFocalLoss *self,
+        [](InfoNCELoss *self,
            Network &network,
            Tensor predictions,
            Tensor labels,
-           float gamma,
-           float alpha,
+           float temperature,
            std::optional<DataType> loss_data_type,
            LossShape reported_loss_shape) {
-            const string loss_name = "CategoricalFocalLoss instance";
-            validateCategoricalFocalLossArguments(loss_name, predictions, labels, gamma, alpha, loss_data_type, reported_loss_shape);
+            const string loss_name = "InfoNCELoss instance";
+            validateInfoNCELossArguments(loss_name, predictions, labels, temperature, loss_data_type, reported_loss_shape);
 
             DataType effectiveLossDataType = loss_data_type.value_or(predictions.getDataType());
-            CategoricalFocalLoss::Builder builder;
+            InfoNCELoss::Builder builder;
             builder.network(network)
                 .predictions(predictions)
                 .labels(labels)
-                .focusingParameter(gamma)
-                .alpha(alpha)
+                .temperature(temperature)
                 .lossDataType(effectiveLossDataType);
             setReportedLossShape(builder, reported_loss_shape);
-            CategoricalFocalLoss built = builder.build();
+            InfoNCELoss built = builder.build();
 
-            new (self) CategoricalFocalLoss(std::move(built));
+            new (self) InfoNCELoss(std::move(built));
         },
         "network"_a,
         "predictions"_a,
         "labels"_a,
-        "gamma"_a = 2.0f,
-        "alpha"_a = 1.0f,
+        "temperature"_a = 1.0f,
         "loss_data_type"_a.none() = nb::none(),
         "reported_loss_shape"_a = LossShape::BATCH,
-        R"nbdoc(Construct a categorical focal loss from logits and dense targets.)nbdoc");
+        R"nbdoc(Construct an InfoNCE loss from similarity logits and dense targets.)nbdoc");
 
-    categorical_focal_loss.def_prop_ro("gamma", &CategoricalFocalLoss::getGamma);
-    categorical_focal_loss.def_prop_ro("alpha", &CategoricalFocalLoss::getAlpha);
+    info_nce_loss.def_prop_ro("temperature", &InfoNCELoss::getTemperature);
 
-    categorical_focal_loss.attr("__doc__") = R"nbdoc(
-Categorical focal loss from logits and dense target distributions.
+    info_nce_loss.attr("__doc__") = R"nbdoc(
+InfoNCE loss from similarity logits and dense target distributions.
 
-The predictions tensor contains unnormalized logits and the labels tensor contains a dense
-one-hot or soft target distribution with the same class dimension. The raw loss is:
+The predictions tensor contains unnormalized similarity logits over the candidate set and
+the labels tensor contains a dense one-hot, multi-hot, or soft target distribution with
+the same candidate dimension. The raw loss is:
 
-    -alpha * target * (1 - softmax(logits)) ** gamma * log_softmax(logits)
+    -target * log_softmax(logits / temperature)
 
-For sparse class-index targets, use a sparse focal wrapper later rather than this dense-target loss.
+For the standard one-positive in-batch contrastive case, pass one-hot labels whose positive
+entry selects the matching candidate for each batch item.
 )nbdoc";
 }

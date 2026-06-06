@@ -76,7 +76,7 @@ void validateHingeGANDiscriminatorLossArguments(const string& loss_name,
 
 void bind_hinge_gan_discriminator_loss(nb::module_& losses) {
     auto hinge_gan_discriminator_loss = nb::class_<HingeGANDiscriminatorLoss, Loss>(losses, "HingeGANDiscriminatorLoss");
-    hinge_gan_discriminator_loss.attr("__module__") = "thor.losses";
+    hinge_gan_discriminator_loss.attr("__module__") = "thor.losses.gan";
 
     hinge_gan_discriminator_loss.def(
         "__init__",

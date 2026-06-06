@@ -2,7 +2,7 @@
 #include <nanobind/stl/optional.h>
 #include <optional>
 
-#include "DeepLearning/Api/Layers/Loss/ContrastiveLoss.h"
+#include "DeepLearning/Api/Layers/Loss/PoissonNLLLoss.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 
@@ -25,7 +25,7 @@ void validateReportedLossShape(LossShape reported_loss_shape, const string &loss
     }
 }
 
-void setReportedLossShape(ContrastiveLoss::Builder &builder, LossShape reported_loss_shape) {
+void setReportedLossShape(PoissonNLLLoss::Builder &builder, LossShape reported_loss_shape) {
     if (reported_loss_shape == LossShape::BATCH) {
         builder.reportsBatchLoss();
     } else if (reported_loss_shape == LossShape::CLASSWISE) {
@@ -38,19 +38,21 @@ void setReportedLossShape(ContrastiveLoss::Builder &builder, LossShape reported_
     }
 }
 
-bool isBinaryLabelDType(DataType dtype) {
+bool isFloatingDType(DataType dtype) { return dtype == DataType::FP16 || dtype == DataType::FP32; }
+
+bool isPoissonTargetDType(DataType dtype) {
     return dtype == DataType::BOOLEAN || dtype == DataType::UINT8 || dtype == DataType::UINT16 || dtype == DataType::UINT32 ||
-           dtype == DataType::FP16 || dtype == DataType::FP32;
+           isFloatingDType(dtype);
 }
 
-void validateContrastiveLossArguments(const string &loss_name,
-                                      Tensor predictions,
-                                      Tensor labels,
-                                      float margin,
-                                      optional<DataType> loss_data_type,
-                                      LossShape reported_loss_shape) {
+void validatePoissonNLLLossArguments(const string &loss_name,
+                                     Tensor predictions,
+                                     Tensor labels,
+                                     std::optional<DataType> loss_data_type,
+                                     LossShape reported_loss_shape,
+                                     float eps) {
     if (predictions.getDimensions().size() != 1) {
-        string error_message = loss_name + ": predictions must be a 1 dimensional distance tensor but predictions is " +
+        string error_message = loss_name + ": predictions must be a 1 dimensional tensor but predictions is " +
                                predictions.getDescriptorString();
         throw nb::value_error(error_message.c_str());
     }
@@ -59,70 +61,84 @@ void validateContrastiveLossArguments(const string &loss_name,
                                " must match predictions dimensions " + predictions.getDescriptorString();
         throw nb::value_error(error_message.c_str());
     }
-    if (predictions.getDataType() != DataType::FP16 && predictions.getDataType() != DataType::FP32) {
+    if (!isFloatingDType(predictions.getDataType())) {
         string error_message = loss_name + ": predictions must use fp16 or fp32 dtype";
         throw nb::value_error(error_message.c_str());
     }
-    if (!isBinaryLabelDType(labels.getDataType())) {
-        string error_message = loss_name + ": labels must use bool, uint8, uint16, uint32, fp16, or fp32 dtype";
-        throw nb::value_error(error_message.c_str());
-    }
-    if (margin <= 0.0f) {
-        string error_message = loss_name + ": margin must be greater than zero";
+    if (!isPoissonTargetDType(labels.getDataType())) {
+        string error_message = loss_name + ": labels must use boolean, unsigned integer, fp16, or fp32 dtype";
         throw nb::value_error(error_message.c_str());
     }
     DataType effectiveLossDataType = loss_data_type.value_or(predictions.getDataType());
-    if (effectiveLossDataType != DataType::FP16 && effectiveLossDataType != DataType::FP32) {
+    if (!isFloatingDType(effectiveLossDataType)) {
         string error_message = loss_name + ": loss_data_type must be fp16 or fp32";
+        throw nb::value_error(error_message.c_str());
+    }
+    if (eps <= 0.0f) {
+        string error_message = loss_name + ": eps must be greater than zero";
         throw nb::value_error(error_message.c_str());
     }
     validateReportedLossShape(reported_loss_shape, loss_name);
 }
 }  // namespace
 
-void bind_contrastive_loss(nb::module_ &losses) {
-    auto contrastive_loss = nb::class_<ContrastiveLoss, Loss>(losses, "ContrastiveLoss");
-    contrastive_loss.attr("__module__") = "thor.losses";
+void bind_poisson_nll_loss(nb::module_ &losses) {
+    auto poisson_nll_loss = nb::class_<PoissonNLLLoss, Loss>(losses, "PoissonNLLLoss");
+    poisson_nll_loss.attr("__module__") = "thor.losses.distribution";
 
-    contrastive_loss.def(
+    poisson_nll_loss.def(
         "__init__",
-        [](ContrastiveLoss *self,
+        [](PoissonNLLLoss *self,
            Network &network,
            Tensor predictions,
            Tensor labels,
-           float margin,
+           bool log_input,
+           bool full,
+           float eps,
            std::optional<DataType> loss_data_type,
            LossShape reported_loss_shape) {
-            const string loss_name = "ContrastiveLoss instance";
-            validateContrastiveLossArguments(loss_name, predictions, labels, margin, loss_data_type, reported_loss_shape);
+            const string loss_name = "PoissonNLLLoss instance";
+            validatePoissonNLLLossArguments(loss_name, predictions, labels, loss_data_type, reported_loss_shape, eps);
 
             DataType effectiveLossDataType = loss_data_type.value_or(predictions.getDataType());
-            ContrastiveLoss::Builder builder;
-            builder.network(network).predictions(predictions).labels(labels).margin(margin).lossDataType(effectiveLossDataType);
+            PoissonNLLLoss::Builder builder;
+            builder.network(network)
+                .predictions(predictions)
+                .labels(labels)
+                .logInput(log_input)
+                .full(full)
+                .eps(eps)
+                .lossDataType(effectiveLossDataType);
             setReportedLossShape(builder, reported_loss_shape);
-            ContrastiveLoss built = builder.build();
+            PoissonNLLLoss built = builder.build();
 
-            new (self) ContrastiveLoss(std::move(built));
+            new (self) PoissonNLLLoss(std::move(built));
         },
         "network"_a,
         "predictions"_a,
         "labels"_a,
-        "margin"_a = 1.0f,
+        "log_input"_a = true,
+        "full"_a = false,
+        "eps"_a = 1.0e-8f,
         "loss_data_type"_a.none() = nb::none(),
         "reported_loss_shape"_a = LossShape::BATCH,
-        R"nbdoc(Construct a distance-based contrastive loss.)nbdoc");
+        R"nbdoc(Construct a Poisson negative log-likelihood loss.)nbdoc");
 
-    contrastive_loss.def_prop_ro("margin", &ContrastiveLoss::getMargin);
+    poisson_nll_loss.def_prop_ro("log_input", &PoissonNLLLoss::getLogInput);
+    poisson_nll_loss.def_prop_ro("full", &PoissonNLLLoss::getFull);
+    poisson_nll_loss.def_prop_ro("eps", &PoissonNLLLoss::getEps);
 
-    contrastive_loss.attr("__doc__") = R"nbdoc(
-Distance-based contrastive loss.
+    poisson_nll_loss.attr("__doc__") = R"nbdoc(
+Poisson negative log-likelihood loss.
 
-The predictions tensor contains pair distances and the labels tensor contains binary pair labels.
-Labels greater than 0.5 are treated as positive/similar pairs. The raw loss is:
+When log_input is True, predictions are log-rates and the raw loss is:
 
-    distance ** 2                         if label > 0.5
-    max(margin - distance, 0) ** 2        otherwise
+    exp(predictions) - labels * predictions
 
-The predictions tensor is expected to contain non-negative distances; Thor does not clamp it.
+When log_input is False, predictions are rates and the raw loss is:
+
+    predictions - labels * log(predictions + eps)
+
+If full is True, the Stirling approximation term for labels > 1 is included.
 )nbdoc";
 }

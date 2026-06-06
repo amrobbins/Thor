@@ -63,7 +63,7 @@ def _run_poisson_nll_loss_network(
     feature_dims = list(predictions.shape[1:])
     predictions_input = thor.layers.NetworkInput(n, "predictions", feature_dims, dtype)
     labels_input = thor.layers.NetworkInput(n, "labels", feature_dims, dtype)
-    loss = thor.losses.PoissonNLLLoss(
+    loss = thor.losses.distribution.PoissonNLLLoss(
         n,
         predictions_input.get_feature_output(),
         labels_input.get_feature_output(),
@@ -91,8 +91,8 @@ def test_poisson_nll_loss_constructs_defaults():
     preds = _tensor_1d(5)
     labels = _tensor_1d(5)
 
-    loss = thor.losses.PoissonNLLLoss(n, preds, labels)
-    assert isinstance(loss, thor.losses.PoissonNLLLoss)
+    loss = thor.losses.distribution.PoissonNLLLoss(n, preds, labels)
+    assert isinstance(loss, thor.losses.distribution.PoissonNLLLoss)
     assert loss.log_input is True
     assert loss.full is False
     assert loss.eps == pytest.approx(1.0e-8)
@@ -103,7 +103,7 @@ def test_poisson_nll_loss_constructs_with_options_loss_dtype_and_shape():
     preds = _tensor_1d(4, thor.DataType.fp16)
     labels = _tensor_1d(4, thor.DataType.uint16)
 
-    loss = thor.losses.PoissonNLLLoss(
+    loss = thor.losses.distribution.PoissonNLLLoss(
         n,
         preds,
         labels,
@@ -113,7 +113,7 @@ def test_poisson_nll_loss_constructs_with_options_loss_dtype_and_shape():
         thor.DataType.fp32,
         thor.losses.LossShape.elementwise,
     )
-    assert isinstance(loss, thor.losses.PoissonNLLLoss)
+    assert isinstance(loss, thor.losses.distribution.PoissonNLLLoss)
     assert loss.log_input is False
     assert loss.full is True
     assert loss.eps == pytest.approx(1.0e-5)
@@ -125,8 +125,8 @@ def test_poisson_nll_loss_reported_loss_shape_variants_construct(shape):
     preds = _tensor_1d(3)
     labels = _tensor_1d(3)
 
-    loss = thor.losses.PoissonNLLLoss(n, preds, labels, True, False, 1.0e-8, None, getattr(thor.losses.LossShape, shape))
-    assert isinstance(loss, thor.losses.PoissonNLLLoss)
+    loss = thor.losses.distribution.PoissonNLLLoss(n, preds, labels, True, False, 1.0e-8, None, getattr(thor.losses.LossShape, shape))
+    assert isinstance(loss, thor.losses.distribution.PoissonNLLLoss)
 
 
 def test_poisson_nll_loss_rejects_mismatched_labels():
@@ -135,7 +135,7 @@ def test_poisson_nll_loss_rejects_mismatched_labels():
     labels = _tensor_1d(3)
 
     with pytest.raises(ValueError, match=r"labels dimensions [\s\S]* must match predictions dimensions"):
-        thor.losses.PoissonNLLLoss(n, preds, labels)
+        thor.losses.distribution.PoissonNLLLoss(n, preds, labels)
 
 
 def test_poisson_nll_loss_rejects_predictions_not_1d():
@@ -144,7 +144,7 @@ def test_poisson_nll_loss_rejects_predictions_not_1d():
     labels = thor.Tensor([1, 1], thor.DataType.fp32)
 
     with pytest.raises(ValueError, match=r"predictions must be a 1 dimensional tensor"):
-        thor.losses.PoissonNLLLoss(n, preds, labels)
+        thor.losses.distribution.PoissonNLLLoss(n, preds, labels)
 
 
 def test_poisson_nll_loss_rejects_integer_predictions():
@@ -153,7 +153,7 @@ def test_poisson_nll_loss_rejects_integer_predictions():
     labels = _tensor_1d(3)
 
     with pytest.raises(ValueError, match=r"predictions must use fp16 or fp32 dtype"):
-        thor.losses.PoissonNLLLoss(n, preds, labels)
+        thor.losses.distribution.PoissonNLLLoss(n, preds, labels)
 
 
 def test_poisson_nll_loss_rejects_invalid_loss_data_type():
@@ -162,7 +162,7 @@ def test_poisson_nll_loss_rejects_invalid_loss_data_type():
     labels = _tensor_1d(1)
 
     with pytest.raises(ValueError, match=r"loss_data_type must be fp16 or fp32"):
-        thor.losses.PoissonNLLLoss(n, preds, labels, True, False, 1.0e-8, thor.DataType.int32)
+        thor.losses.distribution.PoissonNLLLoss(n, preds, labels, True, False, 1.0e-8, thor.DataType.int32)
 
 
 def test_poisson_nll_loss_rejects_non_positive_eps():
@@ -171,7 +171,7 @@ def test_poisson_nll_loss_rejects_non_positive_eps():
     labels = _tensor_1d(1)
 
     with pytest.raises(ValueError, match=r"eps must be greater than zero"):
-        thor.losses.PoissonNLLLoss(n, preds, labels, False, False, 0.0)
+        thor.losses.distribution.PoissonNLLLoss(n, preds, labels, False, False, 0.0)
 
 
 @pytest.mark.cuda
@@ -224,7 +224,7 @@ def test_poisson_nll_loss_save_load_round_trip_serializes_support_layers(tmp_pat
     dtype = thor.DataType.fp32
     predictions_input = thor.layers.NetworkInput(n, "predictions", [4], dtype)
     labels_input = thor.layers.NetworkInput(n, "labels", [4], dtype)
-    loss = thor.losses.PoissonNLLLoss(
+    loss = thor.losses.distribution.PoissonNLLLoss(
         n,
         predictions_input.get_feature_output(),
         labels_input.get_feature_output(),

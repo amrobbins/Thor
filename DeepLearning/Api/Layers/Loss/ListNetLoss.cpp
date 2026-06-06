@@ -1,6 +1,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "DeepLearning/Api/Layers/Loss/ListNetLoss.h"
+#include "DeepLearning/Api/Layers/Loss/MultiInputCustomLoss.h"
 
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/Expression.h"
@@ -13,6 +14,7 @@ namespace {
 
 constexpr const char* kPredictionsName = "predictions";
 constexpr const char* kLabelsName = "labels";
+constexpr const char* kMaskName = "mask";
 constexpr const char* kLossName = "loss";
 constexpr const char* kGradientName = "predictions_grad";
 
@@ -29,18 +31,41 @@ void validatePredictionsDType(DataType dtype) {
     }
 }
 
+void validateMaskDType(DataType dtype) {
+    switch (dtype) {
+        case DataType::BOOLEAN:
+        case DataType::UINT8:
+        case DataType::FP16:
+        case DataType::FP32:
+            return;
+        default:
+            throw runtime_error("Unsupported ListNetLoss mask dtype: " + ThorImplementation::TensorDescriptor::getElementTypeName(dtype));
+    }
+}
+
 ThorImplementation::DynamicExpression makeListNetLossExpression(DataType lossDataType,
                                                                 float scoreTemperature,
-                                                                float labelTemperature) {
+                                                                float labelTemperature,
+                                                                bool useMask) {
     validatePredictionsDType(lossDataType);
 
     ThorImplementation::Expression scores = ThorImplementation::Expression::input(kPredictionsName, DataType::FP32, DataType::FP32);
     ThorImplementation::Expression labels = ThorImplementation::Expression::input(kLabelsName, DataType::FP32, DataType::FP32);
     ThorImplementation::Expression scaledScores = scores / ThorImplementation::Expression(scoreTemperature);
     ThorImplementation::Expression scaledLabels = labels / ThorImplementation::Expression(labelTemperature);
+    ThorImplementation::Expression validMask(1.0);
+    if (useMask) {
+        ThorImplementation::Expression mask = ThorImplementation::Expression::input(kMaskName, DataType::FP32, DataType::FP32);
+        validMask = mask > ThorImplementation::Expression(0.5);
+        ThorImplementation::Expression maskedOutValue(-1.0e20);
+        scaledScores = ThorImplementation::Expression::where(validMask, scaledScores, maskedOutValue);
+        scaledLabels = ThorImplementation::Expression::where(validMask, scaledLabels, maskedOutValue);
+    }
     ThorImplementation::Expression targetProbabilities = scaledLabels.softmax();
     ThorImplementation::Expression logProbabilities = scaledScores.logSoftmax();
     ThorImplementation::Expression perDocumentLoss = -(targetProbabilities * logProbabilities);
+    if (useMask)
+        perDocumentLoss = ThorImplementation::Expression::where(validMask, perDocumentLoss, ThorImplementation::Expression(0.0));
     ThorImplementation::Expression perListLoss = perDocumentLoss.reduce_sum({1}, {}, DataType::FP32).withOutputDType(lossDataType);
 
     ThorImplementation::ExpressionDefinition definition =
@@ -50,19 +75,30 @@ ThorImplementation::DynamicExpression makeListNetLossExpression(DataType lossDat
 
 ThorImplementation::DynamicExpression makeListNetGradientExpression(DataType predictionsDataType,
                                                                     float scoreTemperature,
-                                                                    float labelTemperature) {
+                                                                    float labelTemperature,
+                                                                    bool useMask) {
     validatePredictionsDType(predictionsDataType);
 
     ThorImplementation::Expression scores = ThorImplementation::Expression::input(kPredictionsName, DataType::FP32, DataType::FP32);
     ThorImplementation::Expression labels = ThorImplementation::Expression::input(kLabelsName, DataType::FP32, DataType::FP32);
     ThorImplementation::Expression scaledScores = scores / ThorImplementation::Expression(scoreTemperature);
     ThorImplementation::Expression scaledLabels = labels / ThorImplementation::Expression(labelTemperature);
+    ThorImplementation::Expression validMask(1.0);
+    if (useMask) {
+        ThorImplementation::Expression mask = ThorImplementation::Expression::input(kMaskName, DataType::FP32, DataType::FP32);
+        validMask = mask > ThorImplementation::Expression(0.5);
+        ThorImplementation::Expression maskedOutValue(-1.0e20);
+        scaledScores = ThorImplementation::Expression::where(validMask, scaledScores, maskedOutValue);
+        scaledLabels = ThorImplementation::Expression::where(validMask, scaledLabels, maskedOutValue);
+    }
     ThorImplementation::Expression scoreProbabilities = scaledScores.softmax();
     ThorImplementation::Expression targetProbabilities = scaledLabels.softmax();
     ThorImplementation::Expression gradient = ((scoreProbabilities - targetProbabilities) /
                                                ThorImplementation::Expression(scoreTemperature) *
-                                               ThorImplementation::Expression(ThorImplementation::Loss::getLossScalingFactor()))
-                                                  .withOutputDType(predictionsDataType);
+                                               ThorImplementation::Expression(ThorImplementation::Loss::getLossScalingFactor()));
+    if (useMask)
+        gradient = ThorImplementation::Expression::where(validMask, gradient, ThorImplementation::Expression(0.0));
+    gradient = gradient.withOutputDType(predictionsDataType);
 
     ThorImplementation::ExpressionDefinition definition = ThorImplementation::ExpressionDefinition::fromOutputs(
         ThorImplementation::Expression::outputs({{kGradientName, gradient}}));
@@ -80,23 +116,46 @@ void ListNetLoss::buildSupportLayersAndAddToNetwork() {
     THOR_THROW_IF_FALSE(scoreTemperature > 0.0f);
     THOR_THROW_IF_FALSE(labelTemperature > 0.0f);
 
-    CustomLoss rawListNetLoss = CustomLoss::Builder()
-                                    .network(*network)
-                                    .lossExpression(makeListNetLossExpression(lossDataType, scoreTemperature, labelTemperature))
-                                    .gradientExpression(makeListNetGradientExpression(predictionsTensor.getDataType(),
-                                                                                     scoreTemperature,
-                                                                                     labelTemperature))
-                                    .predictions(predictionsTensor)
-                                    .labels(labelsTensor)
-                                    .predictionsName(kPredictionsName)
-                                    .labelsName(kLabelsName)
-                                    .lossName(kLossName)
-                                    .gradientName(kGradientName)
-                                    .lossDataType(lossDataType)
-                                    .reportsRawLoss()
-                                    .build();
-
-    lossShaperInput = rawListNetLoss.getLoss();
+    if (maskTensor.has_value()) {
+        validateMaskDType(maskTensor.value().getDataType());
+        THOR_THROW_IF_FALSE(maskTensor.value().getDimensions() == predictionsTensor.getDimensions());
+        MultiInputCustomLoss rawListNetLoss = MultiInputCustomLoss::Builder()
+                                                  .network(*network)
+                                                  .lossExpression(makeListNetLossExpression(lossDataType,
+                                                                                          scoreTemperature,
+                                                                                          labelTemperature,
+                                                                                          true))
+                                                  .gradientExpression(makeListNetGradientExpression(predictionsTensor.getDataType(),
+                                                                                                   scoreTemperature,
+                                                                                                   labelTemperature,
+                                                                                                   true))
+                                                  .input(kPredictionsName, predictionsTensor, kGradientName)
+                                                  .auxiliaryInput(kLabelsName, labelsTensor)
+                                                  .auxiliaryInput(kMaskName, maskTensor.value())
+                                                  .lossName(kLossName)
+                                                  .lossDataType(lossDataType)
+                                                  .reportsRawLoss()
+                                                  .build();
+        lossShaperInput = rawListNetLoss.getLoss();
+    } else {
+        CustomLoss rawListNetLoss = CustomLoss::Builder()
+                                        .network(*network)
+                                        .lossExpression(makeListNetLossExpression(lossDataType, scoreTemperature, labelTemperature, false))
+                                        .gradientExpression(makeListNetGradientExpression(predictionsTensor.getDataType(),
+                                                                                         scoreTemperature,
+                                                                                         labelTemperature,
+                                                                                         false))
+                                        .predictions(predictionsTensor)
+                                        .labels(labelsTensor)
+                                        .predictionsName(kPredictionsName)
+                                        .labelsName(kLabelsName)
+                                        .lossName(kLossName)
+                                        .gradientName(kGradientName)
+                                        .lossDataType(lossDataType)
+                                        .reportsRawLoss()
+                                        .build();
+        lossShaperInput = rawListNetLoss.getLoss();
+    }
 
     if (lossShape == LossShape::BATCH) {
         LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(lossShaperInput).reportsBatchLoss().build();
@@ -119,6 +178,9 @@ json ListNetLoss::architectureJson() const {
     j["loss_shape"] = lossShape;
     j["score_temperature"] = scoreTemperature;
     j["label_temperature"] = labelTemperature;
+    j["has_mask"] = maskTensor.has_value();
+    if (maskTensor.has_value())
+        j["mask_tensor"] = maskTensor.value().architectureJson();
     return j;
 }
 
@@ -133,6 +195,12 @@ void ListNetLoss::deserialize(const json& j, Network* network) {
     originalTensorId = j["labels_tensor"].at("id").get<uint64_t>();
     Tensor labels = network->getApiTensorByOriginalId(originalTensorId);
 
+    std::optional<Tensor> mask = std::nullopt;
+    if (j.value("has_mask", false) || j.contains("mask_tensor")) {
+        originalTensorId = j.at("mask_tensor").at("id").get<uint64_t>();
+        mask = network->getApiTensorByOriginalId(originalTensorId);
+    }
+
     ListNetLoss listNetLoss;
     listNetLoss.lossShape = j.at("loss_shape").get<LossShape>();
     listNetLoss.lossDataType = j.at("loss_data_type").get<DataType>();
@@ -140,6 +208,7 @@ void ListNetLoss::deserialize(const json& j, Network* network) {
     listNetLoss.labelTemperature = j.value("label_temperature", 1.0f);
     listNetLoss.predictionsTensor = predictions;
     listNetLoss.labelsTensor = labels;
+    listNetLoss.maskTensor = mask;
     listNetLoss.network = network;
     listNetLoss.initialized = true;
     listNetLoss.buildSupportLayersAndAddToNetwork();

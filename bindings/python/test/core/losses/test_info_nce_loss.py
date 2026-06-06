@@ -60,7 +60,7 @@ def _run_info_nce_loss_network(
     feature_dims = list(predictions.shape[1:])
     predictions_input = thor.layers.NetworkInput(n, "predictions", feature_dims, dtype)
     labels_input = thor.layers.NetworkInput(n, "labels", feature_dims, dtype)
-    loss = thor.losses.InfoNCELoss(
+    loss = thor.losses.metric_learning.InfoNCELoss(
         n,
         predictions_input.get_feature_output(),
         labels_input.get_feature_output(),
@@ -86,8 +86,8 @@ def test_info_nce_loss_constructs_defaults():
     preds = _tensor_1d(4)
     labels = _tensor_1d(4)
 
-    loss = thor.losses.InfoNCELoss(n, preds, labels)
-    assert isinstance(loss, thor.losses.InfoNCELoss)
+    loss = thor.losses.metric_learning.InfoNCELoss(n, preds, labels)
+    assert isinstance(loss, thor.losses.metric_learning.InfoNCELoss)
     assert loss.temperature == pytest.approx(1.0)
 
 
@@ -96,7 +96,7 @@ def test_info_nce_loss_constructs_with_temperature_loss_dtype_and_shape():
     preds = _tensor_1d(4, thor.DataType.fp16)
     labels = _tensor_1d(4, thor.DataType.fp16)
 
-    loss = thor.losses.InfoNCELoss(
+    loss = thor.losses.metric_learning.InfoNCELoss(
         n,
         preds,
         labels,
@@ -104,7 +104,7 @@ def test_info_nce_loss_constructs_with_temperature_loss_dtype_and_shape():
         thor.DataType.fp32,
         thor.losses.LossShape.elementwise,
     )
-    assert isinstance(loss, thor.losses.InfoNCELoss)
+    assert isinstance(loss, thor.losses.metric_learning.InfoNCELoss)
     assert loss.temperature == pytest.approx(0.25)
 
 
@@ -114,8 +114,8 @@ def test_info_nce_loss_reported_loss_shape_variants_construct(shape):
     preds = _tensor_1d(3)
     labels = _tensor_1d(3)
 
-    loss = thor.losses.InfoNCELoss(n, preds, labels, 1.0, None, getattr(thor.losses.LossShape, shape))
-    assert isinstance(loss, thor.losses.InfoNCELoss)
+    loss = thor.losses.metric_learning.InfoNCELoss(n, preds, labels, 1.0, None, getattr(thor.losses.LossShape, shape))
+    assert isinstance(loss, thor.losses.metric_learning.InfoNCELoss)
 
 
 def test_info_nce_loss_rejects_non_positive_temperature():
@@ -124,7 +124,7 @@ def test_info_nce_loss_rejects_non_positive_temperature():
     labels = _tensor_1d(4)
 
     with pytest.raises(ValueError, match=r"temperature must be greater than zero"):
-        thor.losses.InfoNCELoss(n, preds, labels, 0.0)
+        thor.losses.metric_learning.InfoNCELoss(n, preds, labels, 0.0)
 
 
 def test_info_nce_loss_rejects_mismatched_labels():
@@ -133,7 +133,7 @@ def test_info_nce_loss_rejects_mismatched_labels():
     labels = _tensor_1d(3)
 
     with pytest.raises(ValueError, match=r"labels dimensions [\s\S]* must match predictions dimensions"):
-        thor.losses.InfoNCELoss(n, preds, labels)
+        thor.losses.metric_learning.InfoNCELoss(n, preds, labels)
 
 
 def test_info_nce_loss_rejects_predictions_not_1d():
@@ -142,7 +142,7 @@ def test_info_nce_loss_rejects_predictions_not_1d():
     labels = thor.Tensor([2, 2], thor.DataType.fp32)
 
     with pytest.raises(ValueError, match=r"predictions must be a 1 dimensional logits tensor"):
-        thor.losses.InfoNCELoss(n, preds, labels)
+        thor.losses.metric_learning.InfoNCELoss(n, preds, labels)
 
 
 def test_info_nce_loss_rejects_single_candidate_predictions():
@@ -151,7 +151,7 @@ def test_info_nce_loss_rejects_single_candidate_predictions():
     labels = _tensor_1d(1)
 
     with pytest.raises(ValueError, match=r"more than one candidate"):
-        thor.losses.InfoNCELoss(n, preds, labels)
+        thor.losses.metric_learning.InfoNCELoss(n, preds, labels)
 
 
 def test_info_nce_loss_rejects_invalid_dtypes():
@@ -160,11 +160,11 @@ def test_info_nce_loss_rejects_invalid_dtypes():
     labels = _tensor_1d(4)
 
     with pytest.raises(ValueError, match=r"loss_data_type must be fp16 or fp32"):
-        thor.losses.InfoNCELoss(n, preds, labels, 1.0, thor.DataType.int32)
+        thor.losses.metric_learning.InfoNCELoss(n, preds, labels, 1.0, thor.DataType.int32)
     with pytest.raises(ValueError, match=r"predictions must use fp16 or fp32 dtype"):
-        thor.losses.InfoNCELoss(n, _tensor_1d(4, thor.DataType.uint8), labels)
+        thor.losses.metric_learning.InfoNCELoss(n, _tensor_1d(4, thor.DataType.uint8), labels)
     with pytest.raises(ValueError, match=r"labels must use fp16 or fp32 dtype"):
-        thor.losses.InfoNCELoss(n, preds, _tensor_1d(4, thor.DataType.uint8))
+        thor.losses.metric_learning.InfoNCELoss(n, preds, _tensor_1d(4, thor.DataType.uint8))
 
 
 @pytest.mark.cuda

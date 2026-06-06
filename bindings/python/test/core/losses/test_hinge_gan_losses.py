@@ -58,7 +58,7 @@ def _run_discriminator_loss_network(
     feature_dims = list(real_scores.shape[1:])
     real_input = thor.layers.NetworkInput(n, "real_scores", feature_dims, dtype)
     fake_input = thor.layers.NetworkInput(n, "fake_scores", feature_dims, dtype)
-    loss = thor.losses.HingeGANDiscriminatorLoss(
+    loss = thor.losses.gan.HingeGANDiscriminatorLoss(
         n,
         real_input.get_feature_output(),
         fake_input.get_feature_output(),
@@ -92,7 +92,7 @@ def _run_generator_loss_network(
     dtype = thor.DataType.fp32
     feature_dims = list(fake_scores.shape[1:])
     fake_input = thor.layers.NetworkInput(n, "fake_scores", feature_dims, dtype)
-    loss = thor.losses.HingeGANGeneratorLoss(
+    loss = thor.losses.gan.HingeGANGeneratorLoss(
         n,
         fake_input.get_feature_output(),
         dtype,
@@ -116,8 +116,8 @@ def test_hinge_gan_discriminator_loss_constructs_defaults():
     real_scores = _tensor_1d(4)
     fake_scores = _tensor_1d(4)
 
-    loss = thor.losses.HingeGANDiscriminatorLoss(n, real_scores, fake_scores)
-    assert isinstance(loss, thor.losses.HingeGANDiscriminatorLoss)
+    loss = thor.losses.gan.HingeGANDiscriminatorLoss(n, real_scores, fake_scores)
+    assert isinstance(loss, thor.losses.gan.HingeGANDiscriminatorLoss)
     assert loss.get_real_scores() == real_scores
     assert loss.get_fake_scores() == fake_scores
 
@@ -126,8 +126,8 @@ def test_hinge_gan_generator_loss_constructs_defaults():
     n = _net()
     fake_scores = _tensor_1d(4)
 
-    loss = thor.losses.HingeGANGeneratorLoss(n, fake_scores)
-    assert isinstance(loss, thor.losses.HingeGANGeneratorLoss)
+    loss = thor.losses.gan.HingeGANGeneratorLoss(n, fake_scores)
+    assert isinstance(loss, thor.losses.gan.HingeGANGeneratorLoss)
     assert loss.get_fake_scores() == fake_scores
 
 
@@ -136,21 +136,21 @@ def test_hinge_gan_losses_construct_with_loss_dtype_and_shape():
     real_scores = _tensor_1d(4, thor.DataType.fp16)
     fake_scores = _tensor_1d(4, thor.DataType.fp16)
 
-    d_loss = thor.losses.HingeGANDiscriminatorLoss(
+    d_loss = thor.losses.gan.HingeGANDiscriminatorLoss(
         n,
         real_scores,
         fake_scores,
         thor.DataType.fp32,
         thor.losses.LossShape.elementwise,
     )
-    g_loss = thor.losses.HingeGANGeneratorLoss(
+    g_loss = thor.losses.gan.HingeGANGeneratorLoss(
         n,
         fake_scores,
         thor.DataType.fp32,
         thor.losses.LossShape.raw,
     )
-    assert isinstance(d_loss, thor.losses.HingeGANDiscriminatorLoss)
-    assert isinstance(g_loss, thor.losses.HingeGANGeneratorLoss)
+    assert isinstance(d_loss, thor.losses.gan.HingeGANDiscriminatorLoss)
+    assert isinstance(g_loss, thor.losses.gan.HingeGANGeneratorLoss)
 
 
 @pytest.mark.parametrize("shape", ["batch", "classwise", "elementwise", "raw"])
@@ -159,21 +159,21 @@ def test_hinge_gan_loss_reported_loss_shape_variants_construct(shape):
     real_scores = _tensor_1d(3)
     fake_scores = _tensor_1d(3)
 
-    d_loss = thor.losses.HingeGANDiscriminatorLoss(
+    d_loss = thor.losses.gan.HingeGANDiscriminatorLoss(
         n,
         real_scores,
         fake_scores,
         None,
         getattr(thor.losses.LossShape, shape),
     )
-    g_loss = thor.losses.HingeGANGeneratorLoss(
+    g_loss = thor.losses.gan.HingeGANGeneratorLoss(
         n,
         fake_scores,
         None,
         getattr(thor.losses.LossShape, shape),
     )
-    assert isinstance(d_loss, thor.losses.HingeGANDiscriminatorLoss)
-    assert isinstance(g_loss, thor.losses.HingeGANGeneratorLoss)
+    assert isinstance(d_loss, thor.losses.gan.HingeGANDiscriminatorLoss)
+    assert isinstance(g_loss, thor.losses.gan.HingeGANGeneratorLoss)
 
 
 def test_hinge_gan_discriminator_loss_rejects_mismatched_shapes_dtypes_and_duplicate_tensors():
@@ -182,26 +182,26 @@ def test_hinge_gan_discriminator_loss_rejects_mismatched_shapes_dtypes_and_dupli
     fake_scores = _tensor_1d(4)
 
     with pytest.raises(ValueError, match=r"fake_scores dimensions [\s\S]* must match real_scores dimensions"):
-        thor.losses.HingeGANDiscriminatorLoss(n, real_scores, _tensor_1d(3))
+        thor.losses.gan.HingeGANDiscriminatorLoss(n, real_scores, _tensor_1d(3))
     with pytest.raises(ValueError, match=r"loss_data_type must be fp16 or fp32"):
-        thor.losses.HingeGANDiscriminatorLoss(n, real_scores, fake_scores, thor.DataType.int32)
+        thor.losses.gan.HingeGANDiscriminatorLoss(n, real_scores, fake_scores, thor.DataType.int32)
     with pytest.raises(ValueError, match=r"real_scores must use fp16 or fp32 dtype"):
-        thor.losses.HingeGANDiscriminatorLoss(n, _tensor_1d(4, thor.DataType.uint8), fake_scores)
+        thor.losses.gan.HingeGANDiscriminatorLoss(n, _tensor_1d(4, thor.DataType.uint8), fake_scores)
     with pytest.raises(ValueError, match=r"same fp16 or fp32 dtype"):
-        thor.losses.HingeGANDiscriminatorLoss(n, real_scores, _tensor_1d(4, thor.DataType.fp16))
+        thor.losses.gan.HingeGANDiscriminatorLoss(n, real_scores, _tensor_1d(4, thor.DataType.fp16))
     with pytest.raises(ValueError, match=r"real_scores and fake_scores must be distinct tensors"):
-        thor.losses.HingeGANDiscriminatorLoss(n, real_scores, real_scores)
+        thor.losses.gan.HingeGANDiscriminatorLoss(n, real_scores, real_scores)
 
 
 def test_hinge_gan_generator_loss_rejects_invalid_shape_and_dtype():
     n = _net()
 
     with pytest.raises(ValueError, match=r"fake_scores must be a non-empty 1D score tensor"):
-        thor.losses.HingeGANGeneratorLoss(n, thor.Tensor([2, 2], thor.DataType.fp32))
+        thor.losses.gan.HingeGANGeneratorLoss(n, thor.Tensor([2, 2], thor.DataType.fp32))
     with pytest.raises(ValueError, match=r"loss_data_type must be fp16 or fp32"):
-        thor.losses.HingeGANGeneratorLoss(n, _tensor_1d(4), thor.DataType.int32)
+        thor.losses.gan.HingeGANGeneratorLoss(n, _tensor_1d(4), thor.DataType.int32)
     with pytest.raises(ValueError, match=r"fake_scores must use fp16 or fp32 dtype"):
-        thor.losses.HingeGANGeneratorLoss(n, _tensor_1d(4, thor.DataType.uint8))
+        thor.losses.gan.HingeGANGeneratorLoss(n, _tensor_1d(4, thor.DataType.uint8))
 
 
 @pytest.mark.cuda

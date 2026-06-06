@@ -66,7 +66,7 @@ def _run_discriminator_loss_network(
     feature_dims = list(real_scores.shape[1:])
     real_input = thor.layers.NetworkInput(n, "real_scores", feature_dims, dtype)
     fake_input = thor.layers.NetworkInput(n, "fake_scores", feature_dims, dtype)
-    loss = thor.losses.LSGANDiscriminatorLoss(
+    loss = thor.losses.gan.LSGANDiscriminatorLoss(
         n,
         real_input.get_feature_output(),
         fake_input.get_feature_output(),
@@ -103,7 +103,7 @@ def _run_generator_loss_network(
     dtype = thor.DataType.fp32
     feature_dims = list(fake_scores.shape[1:])
     fake_input = thor.layers.NetworkInput(n, "fake_scores", feature_dims, dtype)
-    loss = thor.losses.LSGANGeneratorLoss(
+    loss = thor.losses.gan.LSGANGeneratorLoss(
         n,
         fake_input.get_feature_output(),
         dtype,
@@ -128,8 +128,8 @@ def test_lsgan_discriminator_loss_constructs_defaults():
     real_scores = _tensor_1d(4)
     fake_scores = _tensor_1d(4)
 
-    loss = thor.losses.LSGANDiscriminatorLoss(n, real_scores, fake_scores)
-    assert isinstance(loss, thor.losses.LSGANDiscriminatorLoss)
+    loss = thor.losses.gan.LSGANDiscriminatorLoss(n, real_scores, fake_scores)
+    assert isinstance(loss, thor.losses.gan.LSGANDiscriminatorLoss)
     assert loss.get_real_scores() == real_scores
     assert loss.get_fake_scores() == fake_scores
     assert loss.real_target == pytest.approx(1.0)
@@ -140,8 +140,8 @@ def test_lsgan_generator_loss_constructs_defaults():
     n = _net()
     fake_scores = _tensor_1d(4)
 
-    loss = thor.losses.LSGANGeneratorLoss(n, fake_scores)
-    assert isinstance(loss, thor.losses.LSGANGeneratorLoss)
+    loss = thor.losses.gan.LSGANGeneratorLoss(n, fake_scores)
+    assert isinstance(loss, thor.losses.gan.LSGANGeneratorLoss)
     assert loss.get_fake_scores() == fake_scores
     assert loss.target == pytest.approx(1.0)
 
@@ -151,7 +151,7 @@ def test_lsgan_losses_construct_with_loss_dtype_shape_and_targets():
     real_scores = _tensor_1d(4, thor.DataType.fp16)
     fake_scores = _tensor_1d(4, thor.DataType.fp16)
 
-    d_loss = thor.losses.LSGANDiscriminatorLoss(
+    d_loss = thor.losses.gan.LSGANDiscriminatorLoss(
         n,
         real_scores,
         fake_scores,
@@ -160,15 +160,15 @@ def test_lsgan_losses_construct_with_loss_dtype_shape_and_targets():
         0.9,
         -0.1,
     )
-    g_loss = thor.losses.LSGANGeneratorLoss(
+    g_loss = thor.losses.gan.LSGANGeneratorLoss(
         n,
         fake_scores,
         thor.DataType.fp32,
         thor.losses.LossShape.raw,
         0.8,
     )
-    assert isinstance(d_loss, thor.losses.LSGANDiscriminatorLoss)
-    assert isinstance(g_loss, thor.losses.LSGANGeneratorLoss)
+    assert isinstance(d_loss, thor.losses.gan.LSGANDiscriminatorLoss)
+    assert isinstance(g_loss, thor.losses.gan.LSGANGeneratorLoss)
     assert d_loss.real_target == pytest.approx(0.9)
     assert d_loss.fake_target == pytest.approx(-0.1)
     assert g_loss.target == pytest.approx(0.8)
@@ -180,21 +180,21 @@ def test_lsgan_loss_reported_loss_shape_variants_construct(shape):
     real_scores = _tensor_1d(3)
     fake_scores = _tensor_1d(3)
 
-    d_loss = thor.losses.LSGANDiscriminatorLoss(
+    d_loss = thor.losses.gan.LSGANDiscriminatorLoss(
         n,
         real_scores,
         fake_scores,
         None,
         getattr(thor.losses.LossShape, shape),
     )
-    g_loss = thor.losses.LSGANGeneratorLoss(
+    g_loss = thor.losses.gan.LSGANGeneratorLoss(
         n,
         fake_scores,
         None,
         getattr(thor.losses.LossShape, shape),
     )
-    assert isinstance(d_loss, thor.losses.LSGANDiscriminatorLoss)
-    assert isinstance(g_loss, thor.losses.LSGANGeneratorLoss)
+    assert isinstance(d_loss, thor.losses.gan.LSGANDiscriminatorLoss)
+    assert isinstance(g_loss, thor.losses.gan.LSGANGeneratorLoss)
 
 
 def test_lsgan_discriminator_loss_rejects_mismatched_shapes_dtypes_and_duplicate_tensors():
@@ -203,26 +203,26 @@ def test_lsgan_discriminator_loss_rejects_mismatched_shapes_dtypes_and_duplicate
     fake_scores = _tensor_1d(4)
 
     with pytest.raises(ValueError, match=r"fake_scores dimensions [\s\S]* must match real_scores dimensions"):
-        thor.losses.LSGANDiscriminatorLoss(n, real_scores, _tensor_1d(3))
+        thor.losses.gan.LSGANDiscriminatorLoss(n, real_scores, _tensor_1d(3))
     with pytest.raises(ValueError, match=r"loss_data_type must be fp16 or fp32"):
-        thor.losses.LSGANDiscriminatorLoss(n, real_scores, fake_scores, thor.DataType.int32)
+        thor.losses.gan.LSGANDiscriminatorLoss(n, real_scores, fake_scores, thor.DataType.int32)
     with pytest.raises(ValueError, match=r"real_scores must use fp16 or fp32 dtype"):
-        thor.losses.LSGANDiscriminatorLoss(n, _tensor_1d(4, thor.DataType.uint8), fake_scores)
+        thor.losses.gan.LSGANDiscriminatorLoss(n, _tensor_1d(4, thor.DataType.uint8), fake_scores)
     with pytest.raises(ValueError, match=r"same fp16 or fp32 dtype"):
-        thor.losses.LSGANDiscriminatorLoss(n, real_scores, _tensor_1d(4, thor.DataType.fp16))
+        thor.losses.gan.LSGANDiscriminatorLoss(n, real_scores, _tensor_1d(4, thor.DataType.fp16))
     with pytest.raises(ValueError, match=r"real_scores and fake_scores must be distinct tensors"):
-        thor.losses.LSGANDiscriminatorLoss(n, real_scores, real_scores)
+        thor.losses.gan.LSGANDiscriminatorLoss(n, real_scores, real_scores)
 
 
 def test_lsgan_generator_loss_rejects_invalid_shape_and_dtype():
     n = _net()
 
     with pytest.raises(ValueError, match=r"fake_scores must be a non-empty 1D score tensor"):
-        thor.losses.LSGANGeneratorLoss(n, thor.Tensor([2, 2], thor.DataType.fp32))
+        thor.losses.gan.LSGANGeneratorLoss(n, thor.Tensor([2, 2], thor.DataType.fp32))
     with pytest.raises(ValueError, match=r"loss_data_type must be fp16 or fp32"):
-        thor.losses.LSGANGeneratorLoss(n, _tensor_1d(4), thor.DataType.int32)
+        thor.losses.gan.LSGANGeneratorLoss(n, _tensor_1d(4), thor.DataType.int32)
     with pytest.raises(ValueError, match=r"fake_scores must use fp16 or fp32 dtype"):
-        thor.losses.LSGANGeneratorLoss(n, _tensor_1d(4, thor.DataType.uint8))
+        thor.losses.gan.LSGANGeneratorLoss(n, _tensor_1d(4, thor.DataType.uint8))
 
 
 @pytest.mark.cuda

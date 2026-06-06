@@ -58,7 +58,7 @@ def _run_triplet_loss_network(
     anchor_input = thor.layers.NetworkInput(n, "anchor", feature_dims, dtype)
     positive_input = thor.layers.NetworkInput(n, "positive", feature_dims, dtype)
     negative_input = thor.layers.NetworkInput(n, "negative", feature_dims, dtype)
-    loss = thor.losses.TripletLoss(
+    loss = thor.losses.metric_learning.TripletLoss(
         n,
         anchor_input.get_feature_output(),
         positive_input.get_feature_output(),
@@ -93,8 +93,8 @@ def test_triplet_loss_constructs_defaults():
     positive = _tensor_1d(4)
     negative = _tensor_1d(4)
 
-    loss = thor.losses.TripletLoss(n, anchor, positive, negative)
-    assert isinstance(loss, thor.losses.TripletLoss)
+    loss = thor.losses.metric_learning.TripletLoss(n, anchor, positive, negative)
+    assert isinstance(loss, thor.losses.metric_learning.TripletLoss)
     assert loss.margin == pytest.approx(1.0)
     assert loss.eps == pytest.approx(1.0e-6)
 
@@ -105,7 +105,7 @@ def test_triplet_loss_constructs_with_margin_eps_loss_dtype_and_shape():
     positive = _tensor_1d(4, thor.DataType.fp16)
     negative = _tensor_1d(4, thor.DataType.fp16)
 
-    loss = thor.losses.TripletLoss(
+    loss = thor.losses.metric_learning.TripletLoss(
         n,
         anchor,
         positive,
@@ -115,7 +115,7 @@ def test_triplet_loss_constructs_with_margin_eps_loss_dtype_and_shape():
         thor.DataType.fp32,
         thor.losses.LossShape.elementwise,
     )
-    assert isinstance(loss, thor.losses.TripletLoss)
+    assert isinstance(loss, thor.losses.metric_learning.TripletLoss)
     assert loss.margin == pytest.approx(0.25)
     assert loss.eps == pytest.approx(1.0e-4)
 
@@ -127,8 +127,8 @@ def test_triplet_loss_reported_loss_shape_variants_construct(shape):
     positive = _tensor_1d(3)
     negative = _tensor_1d(3)
 
-    loss = thor.losses.TripletLoss(n, anchor, positive, negative, 1.0, 1.0e-6, None, getattr(thor.losses.LossShape, shape))
-    assert isinstance(loss, thor.losses.TripletLoss)
+    loss = thor.losses.metric_learning.TripletLoss(n, anchor, positive, negative, 1.0, 1.0e-6, None, getattr(thor.losses.LossShape, shape))
+    assert isinstance(loss, thor.losses.metric_learning.TripletLoss)
 
 
 def test_triplet_loss_rejects_non_positive_margin_or_eps():
@@ -138,9 +138,9 @@ def test_triplet_loss_rejects_non_positive_margin_or_eps():
     negative = _tensor_1d(4)
 
     with pytest.raises(ValueError, match=r"margin must be greater than zero"):
-        thor.losses.TripletLoss(n, anchor, positive, negative, 0.0)
+        thor.losses.metric_learning.TripletLoss(n, anchor, positive, negative, 0.0)
     with pytest.raises(ValueError, match=r"eps must be greater than zero"):
-        thor.losses.TripletLoss(n, anchor, positive, negative, 1.0, 0.0)
+        thor.losses.metric_learning.TripletLoss(n, anchor, positive, negative, 1.0, 0.0)
 
 
 def test_triplet_loss_rejects_mismatched_shapes_and_rank():
@@ -150,10 +150,10 @@ def test_triplet_loss_rejects_mismatched_shapes_and_rank():
     negative = _tensor_1d(4)
 
     with pytest.raises(ValueError, match=r"positive dimensions [\s\S]* must match anchor dimensions"):
-        thor.losses.TripletLoss(n, anchor, positive, negative)
+        thor.losses.metric_learning.TripletLoss(n, anchor, positive, negative)
 
     with pytest.raises(ValueError, match=r"anchor must be a 1 dimensional embedding tensor"):
-        thor.losses.TripletLoss(n, thor.Tensor([2, 2], thor.DataType.fp32), thor.Tensor([2, 2], thor.DataType.fp32), thor.Tensor([2, 2], thor.DataType.fp32))
+        thor.losses.metric_learning.TripletLoss(n, thor.Tensor([2, 2], thor.DataType.fp32), thor.Tensor([2, 2], thor.DataType.fp32), thor.Tensor([2, 2], thor.DataType.fp32))
 
 
 def test_triplet_loss_rejects_invalid_dtypes_and_duplicate_tensors():
@@ -163,13 +163,13 @@ def test_triplet_loss_rejects_invalid_dtypes_and_duplicate_tensors():
     negative = _tensor_1d(4)
 
     with pytest.raises(ValueError, match=r"loss_data_type must be fp16 or fp32"):
-        thor.losses.TripletLoss(n, anchor, positive, negative, 1.0, 1.0e-6, thor.DataType.int32)
+        thor.losses.metric_learning.TripletLoss(n, anchor, positive, negative, 1.0, 1.0e-6, thor.DataType.int32)
     with pytest.raises(ValueError, match=r"anchor must use fp16 or fp32 dtype"):
-        thor.losses.TripletLoss(n, _tensor_1d(4, thor.DataType.uint8), positive, negative)
+        thor.losses.metric_learning.TripletLoss(n, _tensor_1d(4, thor.DataType.uint8), positive, negative)
     with pytest.raises(ValueError, match=r"must use the same fp16 or fp32 dtype"):
-        thor.losses.TripletLoss(n, anchor, _tensor_1d(4, thor.DataType.fp16), negative)
+        thor.losses.metric_learning.TripletLoss(n, anchor, _tensor_1d(4, thor.DataType.fp16), negative)
     with pytest.raises(ValueError, match=r"must be distinct tensors"):
-        thor.losses.TripletLoss(n, anchor, anchor, negative)
+        thor.losses.metric_learning.TripletLoss(n, anchor, anchor, negative)
 
 
 @pytest.mark.cuda

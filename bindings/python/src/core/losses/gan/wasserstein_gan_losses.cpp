@@ -175,7 +175,7 @@ void validateWassersteinGANCriticGradientPenaltyLossArguments(const string& loss
 
 void bind_wasserstein_gan_losses(nb::module_& losses) {
     auto critic_loss = nb::class_<WassersteinGANCriticLoss, Loss>(losses, "WassersteinGANCriticLoss");
-    critic_loss.attr("__module__") = "thor.losses";
+    critic_loss.attr("__module__") = "thor.losses.gan";
 
     critic_loss.def(
         "__init__",
@@ -218,7 +218,7 @@ loss intentionally only models the differentiable score objective.
 )nbdoc";
 
     auto generator_loss = nb::class_<WassersteinGANGeneratorLoss, Loss>(losses, "WassersteinGANGeneratorLoss");
-    generator_loss.attr("__module__") = "thor.losses";
+    generator_loss.attr("__module__") = "thor.losses.gan";
 
     generator_loss.def(
         "__init__",
@@ -254,7 +254,7 @@ The raw elementwise loss is:
 )nbdoc";
 
     auto gp_loss = nb::class_<WassersteinGANCriticGradientPenaltyLoss, Loss>(losses, "WassersteinGANCriticGradientPenaltyLoss");
-    gp_loss.attr("__module__") = "thor.losses";
+    gp_loss.attr("__module__") = "thor.losses.gan";
 
     gp_loss.def(
         "__init__",

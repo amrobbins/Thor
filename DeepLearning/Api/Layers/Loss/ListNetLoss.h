@@ -8,6 +8,7 @@
 
 #include <optional>
 #include <stdexcept>
+#include <vector>
 
 namespace Thor {
 
@@ -24,6 +25,14 @@ class ListNetLoss : public Loss {
 
     float getScoreTemperature() const { return scoreTemperature; }
     float getLabelTemperature() const { return labelTemperature; }
+    std::optional<Tensor> getMask() const { return maskTensor; }
+
+    std::vector<Tensor> getLossInputTensors() const override {
+        std::vector<Tensor> tensors = {predictionsTensor, labelsTensor};
+        if (maskTensor.has_value())
+            tensors.push_back(maskTensor.value());
+        return tensors;
+    }
 
     nlohmann::json architectureJson() const override;
     static void deserialize(const nlohmann::json &j, Network *network);
@@ -56,11 +65,13 @@ class ListNetLoss : public Loss {
         }
 
         uint64_t standardLossBytes = Loss::getFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
-        return standardLossBytes + lossShaperBytes;
+        uint64_t maskBytes = maskTensor.has_value() ? batchSize * maskTensor.value().getTotalSizeInBytes() : 0;
+        return standardLossBytes + maskBytes + lossShaperBytes;
     }
 
     float scoreTemperature = 1.0f;
     float labelTemperature = 1.0f;
+    std::optional<Tensor> maskTensor = std::nullopt;
 };
 
 class ListNetLoss::Builder {
@@ -75,6 +86,11 @@ class ListNetLoss::Builder {
         THOR_THROW_IF_FALSE(_predictions.value().getDimensions().size() == 1);
         THOR_THROW_IF_FALSE(_predictions.value().getDimensions()[0] > 1);
         THOR_THROW_IF_FALSE(_predictions.value().getDimensions() == _labels.value().getDimensions());
+        if (_mask.has_value()) {
+            THOR_THROW_IF_FALSE(_mask.value() != _predictions.value());
+            THOR_THROW_IF_FALSE(_mask.value() != _labels.value());
+            THOR_THROW_IF_FALSE(_mask.value().getDimensions() == _predictions.value().getDimensions());
+        }
 
         if (!_lossShape.has_value())
             _lossShape = LossShape::BATCH;
@@ -94,6 +110,7 @@ class ListNetLoss::Builder {
         listNetLoss.lossShape = _lossShape.value();
         listNetLoss.scoreTemperature = scoreTemperature;
         listNetLoss.labelTemperature = labelTemperature;
+        listNetLoss.maskTensor = _mask;
         listNetLoss.network = _network.value();
         listNetLoss.initialized = true;
 
@@ -136,6 +153,13 @@ class ListNetLoss::Builder {
         return *this;
     }
 
+    virtual ListNetLoss::Builder &mask(Tensor _mask) {
+        THOR_THROW_IF_FALSE(!this->_mask.has_value());
+        THOR_THROW_IF_FALSE(!_mask.getDimensions().empty());
+        this->_mask = _mask;
+        return *this;
+    }
+
     virtual ListNetLoss::Builder &reportsBatchLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
         _lossShape = LossShape::BATCH;
@@ -175,6 +199,7 @@ class ListNetLoss::Builder {
     std::optional<DataType> _lossDataType;
     std::optional<float> _scoreTemperature;
     std::optional<float> _labelTemperature;
+    std::optional<Tensor> _mask;
 };
 
 }  // namespace Thor

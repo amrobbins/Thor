@@ -89,7 +89,7 @@ void validateGaussianNLLLossArguments(const string &loss_name,
 
 void bind_gaussian_nll_loss(nb::module_ &losses) {
     auto gaussian_nll_loss = nb::class_<GaussianNLLLoss, Loss>(losses, "GaussianNLLLoss");
-    gaussian_nll_loss.attr("__module__") = "thor.losses";
+    gaussian_nll_loss.attr("__module__") = "thor.losses.distribution";
 
     gaussian_nll_loss.def(
         "__init__",

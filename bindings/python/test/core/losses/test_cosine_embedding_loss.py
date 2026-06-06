@@ -62,7 +62,7 @@ def _run_cosine_embedding_loss_network(
     input1_layer = thor.layers.NetworkInput(n, "input1", feature_dims, dtype)
     input2_layer = thor.layers.NetworkInput(n, "input2", feature_dims, dtype)
     target_layer = thor.layers.NetworkInput(n, "target", [1], dtype)
-    loss = thor.losses.CosineEmbeddingLoss(
+    loss = thor.losses.metric_learning.CosineEmbeddingLoss(
         n,
         input1_layer.get_feature_output(),
         input2_layer.get_feature_output(),
@@ -97,8 +97,8 @@ def test_cosine_embedding_loss_constructs_defaults():
     input2 = _tensor_1d(4)
     target = _tensor_1d(1)
 
-    loss = thor.losses.CosineEmbeddingLoss(n, input1, input2, target)
-    assert isinstance(loss, thor.losses.CosineEmbeddingLoss)
+    loss = thor.losses.metric_learning.CosineEmbeddingLoss(n, input1, input2, target)
+    assert isinstance(loss, thor.losses.metric_learning.CosineEmbeddingLoss)
     assert loss.margin == pytest.approx(0.0)
     assert loss.eps == pytest.approx(1.0e-8)
 
@@ -109,7 +109,7 @@ def test_cosine_embedding_loss_constructs_with_margin_eps_loss_dtype_and_shape()
     input2 = _tensor_1d(4, thor.DataType.fp16)
     target = _tensor_1d(1, thor.DataType.int32)
 
-    loss = thor.losses.CosineEmbeddingLoss(
+    loss = thor.losses.metric_learning.CosineEmbeddingLoss(
         n,
         input1,
         input2,
@@ -119,7 +119,7 @@ def test_cosine_embedding_loss_constructs_with_margin_eps_loss_dtype_and_shape()
         thor.DataType.fp32,
         thor.losses.LossShape.elementwise,
     )
-    assert isinstance(loss, thor.losses.CosineEmbeddingLoss)
+    assert isinstance(loss, thor.losses.metric_learning.CosineEmbeddingLoss)
     assert loss.margin == pytest.approx(0.25)
     assert loss.eps == pytest.approx(1.0e-6)
 
@@ -131,8 +131,8 @@ def test_cosine_embedding_loss_reported_loss_shape_variants_construct(shape):
     input2 = _tensor_1d(3)
     target = _tensor_1d(1)
 
-    loss = thor.losses.CosineEmbeddingLoss(n, input1, input2, target, 0.0, 1.0e-8, None, getattr(thor.losses.LossShape, shape))
-    assert isinstance(loss, thor.losses.CosineEmbeddingLoss)
+    loss = thor.losses.metric_learning.CosineEmbeddingLoss(n, input1, input2, target, 0.0, 1.0e-8, None, getattr(thor.losses.LossShape, shape))
+    assert isinstance(loss, thor.losses.metric_learning.CosineEmbeddingLoss)
 
 
 def test_cosine_embedding_loss_rejects_invalid_margin_or_eps():
@@ -142,11 +142,11 @@ def test_cosine_embedding_loss_rejects_invalid_margin_or_eps():
     target = _tensor_1d(1)
 
     with pytest.raises(ValueError, match=r"margin must be between -1 and 1"):
-        thor.losses.CosineEmbeddingLoss(n, input1, input2, target, -1.25)
+        thor.losses.metric_learning.CosineEmbeddingLoss(n, input1, input2, target, -1.25)
     with pytest.raises(ValueError, match=r"margin must be between -1 and 1"):
-        thor.losses.CosineEmbeddingLoss(n, input1, input2, target, 1.25)
+        thor.losses.metric_learning.CosineEmbeddingLoss(n, input1, input2, target, 1.25)
     with pytest.raises(ValueError, match=r"eps must be greater than zero"):
-        thor.losses.CosineEmbeddingLoss(n, input1, input2, target, 0.0, 0.0)
+        thor.losses.metric_learning.CosineEmbeddingLoss(n, input1, input2, target, 0.0, 0.0)
 
 
 def test_cosine_embedding_loss_rejects_mismatched_shapes_and_rank():
@@ -156,13 +156,13 @@ def test_cosine_embedding_loss_rejects_mismatched_shapes_and_rank():
     target = _tensor_1d(1)
 
     with pytest.raises(ValueError, match=r"input2 dimensions [\s\S]* must match input1 dimensions"):
-        thor.losses.CosineEmbeddingLoss(n, input1, input2, target)
+        thor.losses.metric_learning.CosineEmbeddingLoss(n, input1, input2, target)
 
     with pytest.raises(ValueError, match=r"input1 must be a 1 dimensional embedding tensor"):
-        thor.losses.CosineEmbeddingLoss(n, thor.Tensor([2, 2], thor.DataType.fp32), thor.Tensor([2, 2], thor.DataType.fp32), target)
+        thor.losses.metric_learning.CosineEmbeddingLoss(n, thor.Tensor([2, 2], thor.DataType.fp32), thor.Tensor([2, 2], thor.DataType.fp32), target)
 
     with pytest.raises(ValueError, match=r"target must be a 1 dimensional tensor with exactly one label per example"):
-        thor.losses.CosineEmbeddingLoss(n, input1, _tensor_1d(4), _tensor_1d(2))
+        thor.losses.metric_learning.CosineEmbeddingLoss(n, input1, _tensor_1d(4), _tensor_1d(2))
 
 
 def test_cosine_embedding_loss_rejects_invalid_dtypes_and_duplicate_tensors():
@@ -172,15 +172,15 @@ def test_cosine_embedding_loss_rejects_invalid_dtypes_and_duplicate_tensors():
     target = _tensor_1d(1)
 
     with pytest.raises(ValueError, match=r"loss_data_type must be fp16 or fp32"):
-        thor.losses.CosineEmbeddingLoss(n, input1, input2, target, 0.0, 1.0e-8, thor.DataType.int32)
+        thor.losses.metric_learning.CosineEmbeddingLoss(n, input1, input2, target, 0.0, 1.0e-8, thor.DataType.int32)
     with pytest.raises(ValueError, match=r"input1 must use fp16 or fp32 dtype"):
-        thor.losses.CosineEmbeddingLoss(n, _tensor_1d(4, thor.DataType.uint8), input2, target)
+        thor.losses.metric_learning.CosineEmbeddingLoss(n, _tensor_1d(4, thor.DataType.uint8), input2, target)
     with pytest.raises(ValueError, match=r"same fp16 or fp32 dtype"):
-        thor.losses.CosineEmbeddingLoss(n, input1, _tensor_1d(4, thor.DataType.fp16), target)
+        thor.losses.metric_learning.CosineEmbeddingLoss(n, input1, _tensor_1d(4, thor.DataType.fp16), target)
     with pytest.raises(ValueError, match=r"target must use int8, int16, int32, int64, fp16, or fp32 dtype"):
-        thor.losses.CosineEmbeddingLoss(n, input1, input2, _tensor_1d(1, thor.DataType.uint8))
+        thor.losses.metric_learning.CosineEmbeddingLoss(n, input1, input2, _tensor_1d(1, thor.DataType.uint8))
     with pytest.raises(ValueError, match=r"must be distinct tensors"):
-        thor.losses.CosineEmbeddingLoss(n, input1, input1, target)
+        thor.losses.metric_learning.CosineEmbeddingLoss(n, input1, input1, target)
 
 
 @pytest.mark.cuda

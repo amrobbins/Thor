@@ -2,7 +2,7 @@
 #include <nanobind/stl/optional.h>
 #include <optional>
 
-#include "DeepLearning/Api/Layers/Loss/CosineEmbeddingLoss.h"
+#include "DeepLearning/Api/Layers/Loss/MarginRankingLoss.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 
@@ -25,7 +25,7 @@ void validateReportedLossShape(LossShape reported_loss_shape, const string& loss
     }
 }
 
-void setReportedLossShape(CosineEmbeddingLoss::Builder& builder, LossShape reported_loss_shape) {
+void setReportedLossShape(MarginRankingLoss::Builder& builder, LossShape reported_loss_shape) {
     if (reported_loss_shape == LossShape::BATCH) {
         builder.reportsBatchLoss();
     } else if (reported_loss_shape == LossShape::CLASSWISE) {
@@ -43,16 +43,15 @@ bool isTargetDType(DataType dtype) {
            dtype == DataType::FP16 || dtype == DataType::FP32;
 }
 
-void validateCosineEmbeddingLossArguments(const string& loss_name,
-                                          Tensor input1,
-                                          Tensor input2,
-                                          Tensor target,
-                                          float margin,
-                                          float eps,
-                                          optional<DataType> loss_data_type,
-                                          LossShape reported_loss_shape) {
-    if (input1.getDimensions().size() != 1 || input1.getDimensions()[0] == 0) {
-        string error_message = loss_name + ": input1 must be a 1 dimensional embedding tensor but input1 is " + input1.getDescriptorString();
+void validateMarginRankingLossArguments(const string& loss_name,
+                                        Tensor input1,
+                                        Tensor input2,
+                                        Tensor target,
+                                        float margin,
+                                        optional<DataType> loss_data_type,
+                                        LossShape reported_loss_shape) {
+    if (input1.getDimensions().empty()) {
+        string error_message = loss_name + ": input1 must have at least one dimension but input1 is " + input1.getDescriptorString();
         throw nb::value_error(error_message.c_str());
     }
     if (input2.getDimensions() != input1.getDimensions()) {
@@ -60,9 +59,9 @@ void validateCosineEmbeddingLossArguments(const string& loss_name,
                                " must match input1 dimensions " + input1.getDescriptorString();
         throw nb::value_error(error_message.c_str());
     }
-    if (target.getDimensions().size() != 1 || target.getDimensions()[0] != 1) {
-        string error_message = loss_name + ": target must be a 1 dimensional tensor with exactly one label per example but target is " +
-                               target.getDescriptorString();
+    if (target.getDimensions() != input1.getDimensions()) {
+        string error_message = loss_name + ": target dimensions " + target.getDescriptorString() +
+                               " must match input1 dimensions " + input1.getDescriptorString();
         throw nb::value_error(error_message.c_str());
     }
     if (input1 == input2 || input1 == target || input2 == target) {
@@ -81,12 +80,8 @@ void validateCosineEmbeddingLossArguments(const string& loss_name,
         string error_message = loss_name + ": target must use int8, int16, int32, int64, fp16, or fp32 dtype";
         throw nb::value_error(error_message.c_str());
     }
-    if (margin < -1.0f || margin > 1.0f) {
-        string error_message = loss_name + ": margin must be between -1 and 1";
-        throw nb::value_error(error_message.c_str());
-    }
-    if (eps <= 0.0f) {
-        string error_message = loss_name + ": eps must be greater than zero";
+    if (margin < 0.0f) {
+        string error_message = loss_name + ": margin must be non-negative";
         throw nb::value_error(error_message.c_str());
     }
     DataType effectiveLossDataType = loss_data_type.value_or(input1.getDataType());
@@ -98,64 +93,54 @@ void validateCosineEmbeddingLossArguments(const string& loss_name,
 }
 }  // namespace
 
-void bind_cosine_embedding_loss(nb::module_& losses) {
-    auto cosine_embedding_loss = nb::class_<CosineEmbeddingLoss, Loss>(losses, "CosineEmbeddingLoss");
-    cosine_embedding_loss.attr("__module__") = "thor.losses";
+void bind_margin_ranking_loss(nb::module_& losses) {
+    auto margin_ranking_loss = nb::class_<MarginRankingLoss, Loss>(losses, "MarginRankingLoss");
+    margin_ranking_loss.attr("__module__") = "thor.losses.ranking";
 
-    cosine_embedding_loss.def(
+    margin_ranking_loss.def(
         "__init__",
-        [](CosineEmbeddingLoss* self,
+        [](MarginRankingLoss* self,
            Network& network,
            Tensor input1,
            Tensor input2,
            Tensor target,
            float margin,
-           float eps,
            std::optional<DataType> loss_data_type,
            LossShape reported_loss_shape) {
-            const string loss_name = "CosineEmbeddingLoss instance";
-            validateCosineEmbeddingLossArguments(loss_name, input1, input2, target, margin, eps, loss_data_type, reported_loss_shape);
+            const string loss_name = "MarginRankingLoss instance";
+            validateMarginRankingLossArguments(loss_name, input1, input2, target, margin, loss_data_type, reported_loss_shape);
 
             DataType effectiveLossDataType = loss_data_type.value_or(input1.getDataType());
-            CosineEmbeddingLoss::Builder builder;
-            builder.network(network)
-                .input1(input1)
-                .input2(input2)
-                .target(target)
-                .margin(margin)
-                .eps(eps)
-                .lossDataType(effectiveLossDataType);
+            MarginRankingLoss::Builder builder;
+            builder.network(network).input1(input1).input2(input2).target(target).margin(margin).lossDataType(effectiveLossDataType);
             setReportedLossShape(builder, reported_loss_shape);
-            CosineEmbeddingLoss built = builder.build();
+            MarginRankingLoss built = builder.build();
 
-            new (self) CosineEmbeddingLoss(std::move(built));
+            new (self) MarginRankingLoss(std::move(built));
         },
         "network"_a,
         "input1"_a,
         "input2"_a,
         "target"_a,
         "margin"_a = 0.0f,
-        "eps"_a = 1.0e-8f,
         "loss_data_type"_a.none() = nb::none(),
         "reported_loss_shape"_a = LossShape::BATCH,
-        R"nbdoc(Construct a CosineEmbeddingLoss over two embedding tensors and a target label tensor.)nbdoc");
+        R"nbdoc(Construct a MarginRankingLoss over two score tensors and a target tensor.)nbdoc");
 
-    cosine_embedding_loss.def_prop_ro("margin", &CosineEmbeddingLoss::getMargin);
-    cosine_embedding_loss.def_prop_ro("eps", &CosineEmbeddingLoss::getEps);
-    cosine_embedding_loss.def("get_input1", &CosineEmbeddingLoss::getInput1);
-    cosine_embedding_loss.def("get_input2", &CosineEmbeddingLoss::getInput2);
-    cosine_embedding_loss.def("get_target", &CosineEmbeddingLoss::getTarget);
+    margin_ranking_loss.def_prop_ro("margin", &MarginRankingLoss::getMargin);
+    margin_ranking_loss.def("get_input1", &MarginRankingLoss::getInput1);
+    margin_ranking_loss.def("get_input2", &MarginRankingLoss::getInput2);
+    margin_ranking_loss.def("get_target", &MarginRankingLoss::getTarget);
 
-    cosine_embedding_loss.attr("__doc__") = R"nbdoc(
-Cosine embedding loss over two embedding tensors and one target label per example.
+    margin_ranking_loss.attr("__doc__") = R"nbdoc(
+Margin ranking loss over two score tensors and one target tensor.
 
-For target > 0, the raw loss is:
+The raw elementwise loss is:
 
-    1 - cosine(input1, input2)
+    max(margin - target * (input1 - input2), 0)
 
-For target <= 0, the raw loss is:
-
-    max(cosine(input1, input2) - margin, 0)
+For target = 1, this encourages input1 to rank above input2 by at least margin.
+For target = -1, this encourages input2 to rank above input1 by at least margin.
 
 Gradients are produced for input1 and input2. The target tensor is an auxiliary,
 non-differentiable input.

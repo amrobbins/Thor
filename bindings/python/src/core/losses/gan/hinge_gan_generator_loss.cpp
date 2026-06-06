@@ -62,7 +62,7 @@ void validateHingeGANGeneratorLossArguments(const string& loss_name,
 
 void bind_hinge_gan_generator_loss(nb::module_& losses) {
     auto hinge_gan_generator_loss = nb::class_<HingeGANGeneratorLoss, Loss>(losses, "HingeGANGeneratorLoss");
-    hinge_gan_generator_loss.attr("__module__") = "thor.losses";
+    hinge_gan_generator_loss.attr("__module__") = "thor.losses.gan";
 
     hinge_gan_generator_loss.def(
         "__init__",

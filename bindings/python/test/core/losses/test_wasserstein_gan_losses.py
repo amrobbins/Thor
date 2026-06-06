@@ -67,7 +67,7 @@ def _run_critic_loss_network(
     feature_dims = list(real_scores.shape[1:])
     real_input = thor.layers.NetworkInput(n, "real_scores", feature_dims, dtype)
     fake_input = thor.layers.NetworkInput(n, "fake_scores", feature_dims, dtype)
-    loss = thor.losses.WassersteinGANCriticLoss(
+    loss = thor.losses.gan.WassersteinGANCriticLoss(
         n,
         real_input.get_feature_output(),
         fake_input.get_feature_output(),
@@ -101,7 +101,7 @@ def _run_generator_loss_network(
     dtype = thor.DataType.fp32
     feature_dims = list(fake_scores.shape[1:])
     fake_input = thor.layers.NetworkInput(n, "fake_scores", feature_dims, dtype)
-    loss = thor.losses.WassersteinGANGeneratorLoss(
+    loss = thor.losses.gan.WassersteinGANGeneratorLoss(
         n,
         fake_input.get_feature_output(),
         dtype,
@@ -134,7 +134,7 @@ def _run_gp_loss_network(
     real_input = thor.layers.NetworkInput(n, "real_scores", list(real_scores.shape[1:]), dtype)
     fake_input = thor.layers.NetworkInput(n, "fake_scores", list(fake_scores.shape[1:]), dtype)
     gradient_input = thor.layers.NetworkInput(n, "sample_gradients", list(sample_gradients.shape[1:]), dtype)
-    loss = thor.losses.WassersteinGANCriticGradientPenaltyLoss(
+    loss = thor.losses.gan.WassersteinGANCriticGradientPenaltyLoss(
         n,
         real_input.get_feature_output(),
         fake_input.get_feature_output(),
@@ -169,11 +169,11 @@ def test_wasserstein_gan_losses_construct_defaults():
     real_scores = _tensor_1d(4)
     fake_scores = _tensor_1d(4)
 
-    critic_loss = thor.losses.WassersteinGANCriticLoss(n, real_scores, fake_scores)
-    generator_loss = thor.losses.WassersteinGANGeneratorLoss(n, fake_scores)
+    critic_loss = thor.losses.gan.WassersteinGANCriticLoss(n, real_scores, fake_scores)
+    generator_loss = thor.losses.gan.WassersteinGANGeneratorLoss(n, fake_scores)
 
-    assert isinstance(critic_loss, thor.losses.WassersteinGANCriticLoss)
-    assert isinstance(generator_loss, thor.losses.WassersteinGANGeneratorLoss)
+    assert isinstance(critic_loss, thor.losses.gan.WassersteinGANCriticLoss)
+    assert isinstance(generator_loss, thor.losses.gan.WassersteinGANGeneratorLoss)
     assert critic_loss.get_real_scores() == real_scores
     assert critic_loss.get_fake_scores() == fake_scores
     assert generator_loss.get_fake_scores() == fake_scores
@@ -185,9 +185,9 @@ def test_wasserstein_gan_gradient_penalty_loss_constructs_defaults():
     fake_scores = _tensor_1d(1)
     sample_gradients = thor.Tensor([3, 4], thor.DataType.fp32)
 
-    loss = thor.losses.WassersteinGANCriticGradientPenaltyLoss(n, real_scores, fake_scores, sample_gradients)
+    loss = thor.losses.gan.WassersteinGANCriticGradientPenaltyLoss(n, real_scores, fake_scores, sample_gradients)
 
-    assert isinstance(loss, thor.losses.WassersteinGANCriticGradientPenaltyLoss)
+    assert isinstance(loss, thor.losses.gan.WassersteinGANCriticGradientPenaltyLoss)
     assert loss.get_real_scores() == real_scores
     assert loss.get_fake_scores() == fake_scores
     assert loss.get_sample_gradients() == sample_gradients
@@ -202,21 +202,21 @@ def test_wasserstein_gan_loss_reported_loss_shape_variants_construct(shape):
     real_scores = _tensor_1d(3)
     fake_scores = _tensor_1d(3)
 
-    critic_loss = thor.losses.WassersteinGANCriticLoss(
+    critic_loss = thor.losses.gan.WassersteinGANCriticLoss(
         n,
         real_scores,
         fake_scores,
         None,
         getattr(thor.losses.LossShape, shape),
     )
-    generator_loss = thor.losses.WassersteinGANGeneratorLoss(
+    generator_loss = thor.losses.gan.WassersteinGANGeneratorLoss(
         n,
         fake_scores,
         None,
         getattr(thor.losses.LossShape, shape),
     )
-    assert isinstance(critic_loss, thor.losses.WassersteinGANCriticLoss)
-    assert isinstance(generator_loss, thor.losses.WassersteinGANGeneratorLoss)
+    assert isinstance(critic_loss, thor.losses.gan.WassersteinGANCriticLoss)
+    assert isinstance(generator_loss, thor.losses.gan.WassersteinGANGeneratorLoss)
 
 
 @pytest.mark.parametrize("shape", ["batch", "classwise", "elementwise", "raw"])
@@ -226,7 +226,7 @@ def test_wasserstein_gan_gradient_penalty_loss_reported_loss_shape_variants_cons
     fake_scores = _tensor_1d(1)
     sample_gradients = thor.Tensor([2, 2], thor.DataType.fp32)
 
-    loss = thor.losses.WassersteinGANCriticGradientPenaltyLoss(
+    loss = thor.losses.gan.WassersteinGANCriticGradientPenaltyLoss(
         n,
         real_scores,
         fake_scores,
@@ -237,7 +237,7 @@ def test_wasserstein_gan_gradient_penalty_loss_reported_loss_shape_variants_cons
         None,
         getattr(thor.losses.LossShape, shape),
     )
-    assert isinstance(loss, thor.losses.WassersteinGANCriticGradientPenaltyLoss)
+    assert isinstance(loss, thor.losses.gan.WassersteinGANCriticGradientPenaltyLoss)
 
 
 def test_wasserstein_gan_critic_loss_rejects_mismatched_shapes_dtypes_and_duplicate_tensors():
@@ -246,26 +246,26 @@ def test_wasserstein_gan_critic_loss_rejects_mismatched_shapes_dtypes_and_duplic
     fake_scores = _tensor_1d(4)
 
     with pytest.raises(ValueError, match=r"fake_scores dimensions [\s\S]* must match real_scores dimensions"):
-        thor.losses.WassersteinGANCriticLoss(n, real_scores, _tensor_1d(3))
+        thor.losses.gan.WassersteinGANCriticLoss(n, real_scores, _tensor_1d(3))
     with pytest.raises(ValueError, match=r"loss_data_type must be fp16 or fp32"):
-        thor.losses.WassersteinGANCriticLoss(n, real_scores, fake_scores, thor.DataType.int32)
+        thor.losses.gan.WassersteinGANCriticLoss(n, real_scores, fake_scores, thor.DataType.int32)
     with pytest.raises(ValueError, match=r"real_scores must use fp16 or fp32 dtype"):
-        thor.losses.WassersteinGANCriticLoss(n, _tensor_1d(4, thor.DataType.uint8), fake_scores)
+        thor.losses.gan.WassersteinGANCriticLoss(n, _tensor_1d(4, thor.DataType.uint8), fake_scores)
     with pytest.raises(ValueError, match=r"same fp16 or fp32 dtype"):
-        thor.losses.WassersteinGANCriticLoss(n, real_scores, _tensor_1d(4, thor.DataType.fp16))
+        thor.losses.gan.WassersteinGANCriticLoss(n, real_scores, _tensor_1d(4, thor.DataType.fp16))
     with pytest.raises(ValueError, match=r"real_scores and fake_scores must be distinct tensors"):
-        thor.losses.WassersteinGANCriticLoss(n, real_scores, real_scores)
+        thor.losses.gan.WassersteinGANCriticLoss(n, real_scores, real_scores)
 
 
 def test_wasserstein_gan_generator_loss_rejects_invalid_shape_and_dtype():
     n = _net()
 
     with pytest.raises(ValueError, match=r"fake_scores must be a non-empty 1D score tensor"):
-        thor.losses.WassersteinGANGeneratorLoss(n, thor.Tensor([2, 2], thor.DataType.fp32))
+        thor.losses.gan.WassersteinGANGeneratorLoss(n, thor.Tensor([2, 2], thor.DataType.fp32))
     with pytest.raises(ValueError, match=r"loss_data_type must be fp16 or fp32"):
-        thor.losses.WassersteinGANGeneratorLoss(n, _tensor_1d(4), thor.DataType.int32)
+        thor.losses.gan.WassersteinGANGeneratorLoss(n, _tensor_1d(4), thor.DataType.int32)
     with pytest.raises(ValueError, match=r"fake_scores must use fp16 or fp32 dtype"):
-        thor.losses.WassersteinGANGeneratorLoss(n, _tensor_1d(4, thor.DataType.uint8))
+        thor.losses.gan.WassersteinGANGeneratorLoss(n, _tensor_1d(4, thor.DataType.uint8))
 
 
 def test_wasserstein_gan_gradient_penalty_loss_rejects_invalid_arguments():
@@ -275,19 +275,19 @@ def test_wasserstein_gan_gradient_penalty_loss_rejects_invalid_arguments():
     sample_gradients = thor.Tensor([3], thor.DataType.fp32)
 
     with pytest.raises(ValueError, match=r"real_scores must be a scalar 1D score tensor"):
-        thor.losses.WassersteinGANCriticGradientPenaltyLoss(n, _tensor_1d(2), _tensor_1d(2), sample_gradients)
+        thor.losses.gan.WassersteinGANCriticGradientPenaltyLoss(n, _tensor_1d(2), _tensor_1d(2), sample_gradients)
     with pytest.raises(ValueError, match=r"fake_scores dimensions"):
-        thor.losses.WassersteinGANCriticGradientPenaltyLoss(n, real_scores, _tensor_1d(2), sample_gradients)
+        thor.losses.gan.WassersteinGANCriticGradientPenaltyLoss(n, real_scores, _tensor_1d(2), sample_gradients)
     with pytest.raises(ValueError, match=r"sample_gradients must use fp16 or fp32 dtype"):
-        thor.losses.WassersteinGANCriticGradientPenaltyLoss(n, real_scores, fake_scores, thor.Tensor([3], thor.DataType.uint8))
+        thor.losses.gan.WassersteinGANCriticGradientPenaltyLoss(n, real_scores, fake_scores, thor.Tensor([3], thor.DataType.uint8))
     with pytest.raises(ValueError, match=r"gradient_penalty_weight must be non-negative"):
-        thor.losses.WassersteinGANCriticGradientPenaltyLoss(n, real_scores, fake_scores, sample_gradients, -1.0)
+        thor.losses.gan.WassersteinGANCriticGradientPenaltyLoss(n, real_scores, fake_scores, sample_gradients, -1.0)
     with pytest.raises(ValueError, match=r"target_gradient_norm must be greater than zero"):
-        thor.losses.WassersteinGANCriticGradientPenaltyLoss(n, real_scores, fake_scores, sample_gradients, 10.0, 0.0)
+        thor.losses.gan.WassersteinGANCriticGradientPenaltyLoss(n, real_scores, fake_scores, sample_gradients, 10.0, 0.0)
     with pytest.raises(ValueError, match=r"eps must be greater than zero"):
-        thor.losses.WassersteinGANCriticGradientPenaltyLoss(n, real_scores, fake_scores, sample_gradients, 10.0, 1.0, 0.0)
+        thor.losses.gan.WassersteinGANCriticGradientPenaltyLoss(n, real_scores, fake_scores, sample_gradients, 10.0, 1.0, 0.0)
     with pytest.raises(ValueError, match=r"must be distinct tensors"):
-        thor.losses.WassersteinGANCriticGradientPenaltyLoss(n, real_scores, fake_scores, real_scores)
+        thor.losses.gan.WassersteinGANCriticGradientPenaltyLoss(n, real_scores, fake_scores, real_scores)
 
 
 @pytest.mark.cuda

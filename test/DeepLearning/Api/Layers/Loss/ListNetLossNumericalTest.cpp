@@ -1,10 +1,12 @@
 #include "DeepLearning/Api/Layers/Loss/CustomLoss.h"
+#include "DeepLearning/Api/Layers/Loss/MultiInputCustomLoss.h"
 #include "DeepLearning/Api/Layers/Loss/ListNetLoss.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "test/DeepLearning/Api/Helpers/GradientRivet.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Implementation/Layers/Loss/CustomLoss.h"
+#include "DeepLearning/Implementation/Layers/Loss/MultiInputCustomLoss.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Implementation/ThorError.h"
@@ -226,6 +228,251 @@ ListNetRunResult runRawListNetLossNetwork(const vector<float>& predictions,
     return ListNetRunResult{outputLoss, outputGradient};
 }
 
+
+
+vector<float> maskedSoftmaxRow(const vector<float>& values,
+                               const vector<float>& mask,
+                               size_t rowOffset,
+                               uint32_t listSize,
+                               float temperature) {
+    vector<float> probabilities(listSize, 0.0f);
+    float maxScaledValue = -std::numeric_limits<float>::infinity();
+    bool anyValid = false;
+    for (uint32_t i = 0; i < listSize; ++i) {
+        if (mask[rowOffset + i] <= 0.5f)
+            continue;
+        maxScaledValue = std::max(maxScaledValue, values[rowOffset + i] / temperature);
+        anyValid = true;
+    }
+    THOR_THROW_IF_FALSE(anyValid);
+
+    float denominator = 0.0f;
+    for (uint32_t i = 0; i < listSize; ++i) {
+        if (mask[rowOffset + i] <= 0.5f)
+            continue;
+        probabilities[i] = std::exp((values[rowOffset + i] / temperature) - maxScaledValue);
+        denominator += probabilities[i];
+    }
+    for (float& probability : probabilities)
+        probability /= denominator;
+    return probabilities;
+}
+
+vector<float> maskedLogSoftmaxRow(const vector<float>& values,
+                                  const vector<float>& mask,
+                                  size_t rowOffset,
+                                  uint32_t listSize,
+                                  float temperature) {
+    vector<float> logProbabilities(listSize, 0.0f);
+    float maxScaledValue = -std::numeric_limits<float>::infinity();
+    bool anyValid = false;
+    for (uint32_t i = 0; i < listSize; ++i) {
+        if (mask[rowOffset + i] <= 0.5f)
+            continue;
+        maxScaledValue = std::max(maxScaledValue, values[rowOffset + i] / temperature);
+        anyValid = true;
+    }
+    THOR_THROW_IF_FALSE(anyValid);
+
+    float denominator = 0.0f;
+    for (uint32_t i = 0; i < listSize; ++i) {
+        if (mask[rowOffset + i] <= 0.5f)
+            continue;
+        denominator += std::exp((values[rowOffset + i] / temperature) - maxScaledValue);
+    }
+    const float logDenominator = std::log(denominator);
+
+    for (uint32_t i = 0; i < listSize; ++i) {
+        if (mask[rowOffset + i] > 0.5f)
+            logProbabilities[i] = (values[rowOffset + i] / temperature) - maxScaledValue - logDenominator;
+    }
+    return logProbabilities;
+}
+
+vector<float> referenceMaskedListNetRawLoss(const vector<float>& predictions,
+                                            const vector<float>& labels,
+                                            const vector<float>& mask,
+                                            uint32_t batchSize,
+                                            uint32_t listSize,
+                                            float scoreTemperature,
+                                            float labelTemperature) {
+    THOR_THROW_IF_FALSE(predictions.size() == static_cast<size_t>(batchSize * listSize));
+    THOR_THROW_IF_FALSE(labels.size() == predictions.size());
+    THOR_THROW_IF_FALSE(mask.size() == predictions.size());
+    vector<float> loss(batchSize, 0.0f);
+    for (uint32_t b = 0; b < batchSize; ++b) {
+        const size_t rowOffset = static_cast<size_t>(b) * listSize;
+        vector<float> targetProbabilities = maskedSoftmaxRow(labels, mask, rowOffset, listSize, labelTemperature);
+        vector<float> logProbabilities = maskedLogSoftmaxRow(predictions, mask, rowOffset, listSize, scoreTemperature);
+        for (uint32_t i = 0; i < listSize; ++i) {
+            if (mask[rowOffset + i] > 0.5f)
+                loss[b] -= targetProbabilities[i] * logProbabilities[i];
+        }
+    }
+    return loss;
+}
+
+float totalMaskedListNetLoss(const vector<float>& predictions,
+                             const vector<float>& labels,
+                             const vector<float>& mask,
+                             uint32_t batchSize,
+                             uint32_t listSize,
+                             float scoreTemperature,
+                             float labelTemperature) {
+    vector<float> rawLoss = referenceMaskedListNetRawLoss(predictions, labels, mask, batchSize, listSize, scoreTemperature, labelTemperature);
+    float total = 0.0f;
+    for (float value : rawLoss)
+        total += value;
+    return total;
+}
+
+vector<float> numericalMaskedListNetGradient(const vector<float>& predictions,
+                                             const vector<float>& labels,
+                                             const vector<float>& mask,
+                                             uint32_t batchSize,
+                                             uint32_t listSize,
+                                             float scoreTemperature,
+                                             float labelTemperature) {
+    constexpr float epsilon = 1.0e-3f;
+    vector<float> gradient(predictions.size(), 0.0f);
+    vector<float> perturbed = predictions;
+    for (size_t i = 0; i < predictions.size(); ++i) {
+        perturbed[i] = predictions[i] + epsilon;
+        const float lossPlus = totalMaskedListNetLoss(perturbed, labels, mask, batchSize, listSize, scoreTemperature, labelTemperature);
+        perturbed[i] = predictions[i] - epsilon;
+        const float lossMinus = totalMaskedListNetLoss(perturbed, labels, mask, batchSize, listSize, scoreTemperature, labelTemperature);
+        perturbed[i] = predictions[i];
+        gradient[i] = (lossPlus - lossMinus) / (2.0f * epsilon);
+    }
+    return gradient;
+}
+
+shared_ptr<Api::MultiInputCustomLoss> findRawMultiInputCustomLoss(Api::Network& network) {
+    for (uint32_t i = 0; i < network.getNumLayers(); ++i) {
+        shared_ptr<Api::Layer> layer = network.getLayer(i);
+        shared_ptr<Api::MultiInputCustomLoss> customLoss = dynamic_pointer_cast<Api::MultiInputCustomLoss>(layer);
+        if (customLoss != nullptr)
+            return customLoss;
+    }
+    return nullptr;
+}
+
+ListNetRunResult runRawMaskedListNetLossNetwork(const vector<float>& predictions,
+                                                const vector<float>& labels,
+                                                const vector<float>& mask,
+                                                float scoreTemperature,
+                                                float labelTemperature) {
+    constexpr uint32_t batchSize = 3;
+    constexpr uint32_t listSize = 5;
+    THOR_THROW_IF_FALSE(predictions.size() == static_cast<size_t>(batchSize * listSize));
+    THOR_THROW_IF_FALSE(labels.size() == predictions.size());
+    THOR_THROW_IF_FALSE(mask.size() == predictions.size());
+
+    Api::Network network("masked_list_net_numerical");
+    Api::NetworkInput predictionsInput = Api::NetworkInput::Builder()
+                                             .network(network)
+                                             .name("predictions")
+                                             .dimensions({listSize})
+                                             .dataType(Api::DataType::FP32)
+                                             .build();
+    Api::NetworkInput labelsInput = Api::NetworkInput::Builder()
+                                        .network(network)
+                                        .name("labels")
+                                        .dimensions({listSize})
+                                        .dataType(Api::DataType::FP32)
+                                        .build();
+    Api::NetworkInput maskInput = Api::NetworkInput::Builder()
+                                      .network(network)
+                                      .name("mask")
+                                      .dimensions({listSize})
+                                      .dataType(Api::DataType::FP32)
+                                      .build();
+
+    Api::GradientRivet predictionsRivet = Api::GradientRivet::Builder()
+                                             .network(network)
+                                             .tensor(predictionsInput.getFeatureOutput().value())
+                                             .build();
+
+    Api::ListNetLoss loss = Api::ListNetLoss::Builder()
+                                .network(network)
+                                .predictions(predictionsRivet.getFeatureOutput().value())
+                                .labels(labelsInput.getFeatureOutput().value())
+                                .mask(maskInput.getFeatureOutput().value())
+                                .scoreTemperature(scoreTemperature)
+                                .labelTemperature(labelTemperature)
+                                .lossDataType(Api::DataType::FP32)
+                                .reportsRawLoss()
+                                .build();
+    shared_ptr<Api::MultiInputCustomLoss> rawCustomLoss = findRawMultiInputCustomLoss(network);
+    THOR_THROW_IF_FALSE(rawCustomLoss != nullptr);
+
+    Api::NetworkOutput lossOutput = Api::NetworkOutput::Builder()
+                                        .network(network)
+                                        .name("loss")
+                                        .inputTensor(loss.getLoss())
+                                        .dataType(Api::DataType::FP32)
+                                        .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<Api::PlacedNetwork> placedNetwork = network.place(batchSize, initDoneEvents, false, {0}, 1);
+    THOR_THROW_IF_FALSE(placedNetwork != nullptr);
+    Stream stream(0);
+    for (Event& event : initDoneEvents)
+        stream.waitEvent(event);
+    stream.synchronize();
+    initDoneEvents.clear();
+
+    Impl::StampedNetwork& stampedNetwork = placedNetwork->getStampedNetwork(0);
+    shared_ptr<Impl::NetworkInput> physicalPredictionsInput =
+        dynamic_pointer_cast<Impl::NetworkInput>(stampedNetwork.getPhysicalLayerFromApiLayer(predictionsInput.getId()));
+    shared_ptr<Impl::NetworkInput> physicalLabelsInput =
+        dynamic_pointer_cast<Impl::NetworkInput>(stampedNetwork.getPhysicalLayerFromApiLayer(labelsInput.getId()));
+    shared_ptr<Impl::NetworkInput> physicalMaskInput =
+        dynamic_pointer_cast<Impl::NetworkInput>(stampedNetwork.getPhysicalLayerFromApiLayer(maskInput.getId()));
+    shared_ptr<Impl::NetworkOutput> physicalLossOutput =
+        dynamic_pointer_cast<Impl::NetworkOutput>(stampedNetwork.getPhysicalLayerFromApiLayer(lossOutput.getId()));
+    shared_ptr<Impl::MultiInputCustomLoss> physicalRawLoss =
+        dynamic_pointer_cast<Impl::MultiInputCustomLoss>(stampedNetwork.getPhysicalLayerFromApiLayer(rawCustomLoss->getId()));
+    THOR_THROW_IF_FALSE(physicalPredictionsInput != nullptr);
+    THOR_THROW_IF_FALSE(physicalLabelsInput != nullptr);
+    THOR_THROW_IF_FALSE(physicalMaskInput != nullptr);
+    THOR_THROW_IF_FALSE(physicalLossOutput != nullptr);
+    THOR_THROW_IF_FALSE(physicalRawLoss != nullptr);
+
+    Impl::TensorPlacement cpuPlacement(Impl::TensorPlacement::MemDevices::CPU);
+    Impl::TensorDescriptor inputDescriptor(Api::DataType::FP32,
+                                           {static_cast<unsigned long>(batchSize), static_cast<unsigned long>(listSize)});
+    Impl::Tensor predictionsCpu(cpuPlacement, inputDescriptor);
+    Impl::Tensor labelsCpu(cpuPlacement, inputDescriptor);
+    Impl::Tensor maskCpu(cpuPlacement, inputDescriptor);
+    std::copy(predictions.begin(), predictions.end(), static_cast<float*>(predictionsCpu.getMemPtr()));
+    std::copy(labels.begin(), labels.end(), static_cast<float*>(labelsCpu.getMemPtr()));
+    std::copy(mask.begin(), mask.end(), static_cast<float*>(maskCpu.getMemPtr()));
+
+    physicalPredictionsInput->forward(predictionsCpu, false, batchSize);
+    physicalLabelsInput->forward(labelsCpu, false, batchSize);
+    physicalMaskInput->forward(maskCpu, false, batchSize);
+
+    Stream maskStream = physicalMaskInput->getStream();
+    maskStream.waitEvent(physicalLossOutput->getOutputReadyEvent());
+    maskStream.synchronize();
+
+    Impl::Tensor outputLossCpu = physicalLossOutput->getFeatureOutput().value();
+    THOR_THROW_IF_FALSE(outputLossCpu.getPlacement().getMemDevice() == Impl::TensorPlacement::MemDevices::CPU);
+    vector<float> outputLoss(static_cast<float*>(outputLossCpu.getMemPtr()),
+                             static_cast<float*>(outputLossCpu.getMemPtr()) + batchSize);
+
+    Impl::Tensor errorOutputGpu = physicalRawLoss->getErrorOutput(0).value();
+    Impl::Tensor errorOutputCpu(cpuPlacement, errorOutputGpu.getDescriptor());
+    Stream rawLossStream = physicalRawLoss->getStream();
+    errorOutputCpu.copyFromAsync(errorOutputGpu, rawLossStream);
+    rawLossStream.synchronize();
+    vector<float> outputGradient(static_cast<float*>(errorOutputCpu.getMemPtr()),
+                                 static_cast<float*>(errorOutputCpu.getMemPtr()) + predictions.size());
+
+    return ListNetRunResult{outputLoss, outputGradient};
+}
+
 void expectClose(const vector<float>& actual, const vector<float>& expected, float tolerance) {
     ASSERT_EQ(actual.size(), expected.size());
     for (size_t i = 0; i < actual.size(); ++i) {
@@ -254,6 +501,35 @@ TEST(ListNetLossApi, NumericalRawLossAndBackwardGradientMatchReference) {
         value *= Impl::Loss::getLossScalingFactor();
 
     ListNetRunResult actual = runRawListNetLossNetwork(predictions, labels, scoreTemperature, labelTemperature);
+
+    expectClose(actual.loss, referenceLoss, 2.0e-5f);
+    expectClose(actual.gradient, referenceGradient, 3.0e-3f);
+}
+
+
+TEST(ListNetLossApi, MaskedNumericalRawLossAndBackwardGradientMatchReference) {
+    constexpr uint32_t batchSize = 3;
+    constexpr uint32_t listSize = 5;
+    const float scoreTemperature = 0.8f;
+    const float labelTemperature = 0.65f;
+    const vector<float> predictions = {0.25f, 1.5f, -0.5f, 0.75f, -1.25f,
+                                       1.25f, -0.25f, 0.5f, -1.0f, 0.125f,
+                                       -0.75f, 0.125f, 1.75f, 0.375f, -0.5f};
+    const vector<float> labels = {0.0f, 3.0f, 1.0f, 2.0f, -0.5f,
+                                  2.5f, 0.25f, 1.5f, -1.0f, 0.75f,
+                                  -0.25f, 1.0f, 4.0f, 1.5f, 0.5f};
+    const vector<float> mask = {1.0f, 1.0f, 1.0f, 0.0f, 0.0f,
+                                1.0f, 0.0f, 1.0f, 1.0f, 0.0f,
+                                0.0f, 1.0f, 1.0f, 1.0f, 0.0f};
+
+    vector<float> referenceLoss =
+        referenceMaskedListNetRawLoss(predictions, labels, mask, batchSize, listSize, scoreTemperature, labelTemperature);
+    vector<float> referenceGradient =
+        numericalMaskedListNetGradient(predictions, labels, mask, batchSize, listSize, scoreTemperature, labelTemperature);
+    for (float& value : referenceGradient)
+        value *= Impl::Loss::getLossScalingFactor();
+
+    ListNetRunResult actual = runRawMaskedListNetLossNetwork(predictions, labels, mask, scoreTemperature, labelTemperature);
 
     expectClose(actual.loss, referenceLoss, 2.0e-5f);
     expectClose(actual.gradient, referenceGradient, 3.0e-3f);

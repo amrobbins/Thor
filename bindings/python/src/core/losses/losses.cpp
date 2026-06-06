@@ -12,28 +12,16 @@ void bind_mean_absolute_percentage_error(nb::module_ &losses);
 void bind_mean_squared_error(nb::module_ &losses);
 void bind_smooth_l1_loss(nb::module_ &losses);
 void bind_huber_loss(nb::module_ &losses);
-void bind_contrastive_loss(nb::module_ &losses);
-void bind_info_nce_loss(nb::module_ &losses);
-void bind_list_net_loss(nb::module_ &losses);
-void bind_listwise_softmax_cross_entropy_loss(nb::module_ &losses);
-void bind_triplet_loss(nb::module_ &losses);
-void bind_cosine_embedding_loss(nb::module_ &losses);
-void bind_margin_ranking_loss(nb::module_ &losses);
-void bind_hinge_gan_discriminator_loss(nb::module_ &losses);
-void bind_hinge_gan_generator_loss(nb::module_ &losses);
-void bind_wasserstein_gan_losses(nb::module_ &losses);
-void bind_lsgan_losses(nb::module_ &losses);
 void bind_soft_target_cross_entropy(nb::module_ &losses);
 void bind_kl_div_loss(nb::module_ &losses);
-void bind_poisson_nll_loss(nb::module_ &losses);
-void bind_gaussian_nll_loss(nb::module_ &losses);
-void bind_gamma_tweedie_losses(nb::module_ &losses);
-void bind_binary_focal_loss(nb::module_ &losses);
-void bind_categorical_focal_loss(nb::module_ &losses);
-void bind_dice_loss(nb::module_ &losses);
-void bind_tversky_loss(nb::module_ &losses);
-void bind_focal_tversky_loss(nb::module_ &losses);
-void bind_box_iou_losses(nb::module_ &losses);
+
+void bind_classification_losses(nb::module_ &classification);
+void bind_detection_losses(nb::module_ &detection);
+void bind_distribution_losses(nb::module_ &distribution);
+void bind_gan_losses(nb::module_ &gan);
+void bind_metric_learning_losses(nb::module_ &metric_learning);
+void bind_ranking_losses(nb::module_ &ranking);
+void bind_segmentation_losses(nb::module_ &segmentation);
 
 using namespace Thor;
 
@@ -69,26 +57,27 @@ void bind_losses(nb::module_ &losses) {
     bind_mean_squared_error(losses);
     bind_smooth_l1_loss(losses);
     bind_huber_loss(losses);
-    bind_contrastive_loss(losses);
-    bind_info_nce_loss(losses);
-    bind_list_net_loss(losses);
-    bind_listwise_softmax_cross_entropy_loss(losses);
-    bind_triplet_loss(losses);
-    bind_cosine_embedding_loss(losses);
-    bind_margin_ranking_loss(losses);
-    bind_hinge_gan_discriminator_loss(losses);
-    bind_hinge_gan_generator_loss(losses);
-    bind_wasserstein_gan_losses(losses);
-    bind_lsgan_losses(losses);
     bind_soft_target_cross_entropy(losses);
     bind_kl_div_loss(losses);
-    bind_poisson_nll_loss(losses);
-    bind_gaussian_nll_loss(losses);
-    bind_gamma_tweedie_losses(losses);
-    bind_binary_focal_loss(losses);
-    bind_categorical_focal_loss(losses);
-    bind_dice_loss(losses);
-    bind_tversky_loss(losses);
-    bind_focal_tversky_loss(losses);
-    bind_box_iou_losses(losses);
+
+    auto classification = losses.def_submodule("classification");
+    bind_classification_losses(classification);
+
+    auto detection = losses.def_submodule("detection");
+    bind_detection_losses(detection);
+
+    auto distribution = losses.def_submodule("distribution");
+    bind_distribution_losses(distribution);
+
+    auto gan = losses.def_submodule("gan");
+    bind_gan_losses(gan);
+
+    auto metric_learning = losses.def_submodule("metric_learning");
+    bind_metric_learning_losses(metric_learning);
+
+    auto ranking = losses.def_submodule("ranking");
+    bind_ranking_losses(ranking);
+
+    auto segmentation = losses.def_submodule("segmentation");
+    bind_segmentation_losses(segmentation);
 }

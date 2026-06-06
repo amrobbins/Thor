@@ -93,7 +93,7 @@ void setReportedLossShape(BuilderT& builder, LossShape reportedLossShape) {
 template <typename LossT>
 void bindBoxIouLoss(nb::module_& losses, const char* className, const char* docLine) {
     auto cls = nb::class_<LossT, Loss>(losses, className);
-    cls.attr("__module__") = "thor.losses";
+    cls.attr("__module__") = "thor.losses.detection";
 
     cls.def(
         "__init__",

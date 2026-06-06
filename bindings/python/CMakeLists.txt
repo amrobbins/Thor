@@ -186,6 +186,15 @@ if (THOR_PYTHON_STUBS)
 
     # Generate stubs for the public wrapper modules so IDEs see thor.layers.*, etc.
     set(THOR_PY_PUBLIC_SUBMODULES activations initializers layers losses metrics optimizers)
+    set(THOR_PY_PUBLIC_NESTED_SUBMODULES
+            losses.classification
+            losses.detection
+            losses.distribution
+            losses.gan
+            losses.metric_learning
+            losses.ranking
+            losses.segmentation
+    )
 
     set(_thor_public_stub_targets "")
     foreach (_sm IN LISTS THOR_PY_PUBLIC_SUBMODULES)
@@ -200,10 +209,25 @@ if (THOR_PYTHON_STUBS)
         list(APPEND _thor_public_stub_targets thor_py_stub_${_sm})
     endforeach ()
 
+    set(_thor_public_nested_stub_targets "")
+    foreach (_sm IN LISTS THOR_PY_PUBLIC_NESTED_SUBMODULES)
+        string(REPLACE "." "_" _sm_target "${_sm}")
+        string(REPLACE "." "/" _sm_path "${_sm}")
+        nanobind_add_stub(
+                thor_py_stub_${_sm_target}
+                MODULE thor.${_sm}
+                OUTPUT "${THOR_PY_PKG_BUILD_DIR}/${_sm_path}/__init__.pyi"
+                PYTHON_PATH "${CMAKE_CURRENT_BINARY_DIR}"
+                DEPENDS _thor
+        )
+        add_dependencies(thor_py_stub_${_sm_target} thor_py_pkg_sync)
+        list(APPEND _thor_public_nested_stub_targets thor_py_stub_${_sm_target})
+    endforeach ()
+
     # Install those wrapper stubs into the venv
     add_custom_target(thor_py_public_stub_install
             COMMAND ${CMAKE_COMMAND} -E echo "Thor: installing public submodule stubs into venv"
-            DEPENDS ${_thor_public_stub_targets}
+            DEPENDS ${_thor_public_stub_targets} ${_thor_public_nested_stub_targets}
     )
 
     foreach (_sm IN LISTS THOR_PY_PUBLIC_SUBMODULES)
@@ -212,6 +236,16 @@ if (THOR_PYTHON_STUBS)
                 COMMAND ${CMAKE_COMMAND} -E copy
                 "${THOR_PY_PKG_BUILD_DIR}/${_sm}/__init__.pyi"
                 "${THOR_PY_VENV_DIR}/${_sm}/__init__.pyi"
+        )
+    endforeach ()
+
+    foreach (_sm IN LISTS THOR_PY_PUBLIC_NESTED_SUBMODULES)
+        string(REPLACE "." "/" _sm_path "${_sm}")
+        add_custom_command(TARGET thor_py_public_stub_install POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E make_directory "${THOR_PY_VENV_DIR}/${_sm_path}"
+                COMMAND ${CMAKE_COMMAND} -E copy
+                "${THOR_PY_PKG_BUILD_DIR}/${_sm_path}/__init__.pyi"
+                "${THOR_PY_VENV_DIR}/${_sm_path}/__init__.pyi"
         )
     endforeach ()
 
@@ -235,6 +269,7 @@ if (THOR_PYTHON_STUBS)
             thor_py_stub
             thor_py_stub_thor
             ${_thor_public_stub_targets}
+            ${_thor_public_nested_stub_targets}
     )
 
     # IMPORTANT: for wheel builds, ensure stubs are generated as part of the default build
@@ -295,6 +330,14 @@ if (THOR_PYTHON_STUBS)
         install(FILES
                 "${THOR_PY_PKG_BUILD_DIR}/${_sm}/__init__.pyi"
                 DESTINATION "${_thor_install_pkg_dir}/${_sm}"
+        )
+    endforeach ()
+
+    foreach (_sm IN LISTS THOR_PY_PUBLIC_NESTED_SUBMODULES)
+        string(REPLACE "." "/" _sm_path "${_sm}")
+        install(FILES
+                "${THOR_PY_PKG_BUILD_DIR}/${_sm_path}/__init__.pyi"
+                DESTINATION "${_thor_install_pkg_dir}/${_sm_path}"
         )
     endforeach ()
 endif ()

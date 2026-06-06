@@ -62,7 +62,7 @@ def _run_dice_loss_network(
     feature_dims = list(predictions.shape[1:])
     predictions_input = thor.layers.NetworkInput(n, "predictions", feature_dims, dtype)
     labels_input = thor.layers.NetworkInput(n, "labels", feature_dims, dtype)
-    loss = thor.losses.DiceLoss(
+    loss = thor.losses.segmentation.DiceLoss(
         n,
         predictions_input.get_feature_output(),
         labels_input.get_feature_output(),
@@ -88,8 +88,8 @@ def test_dice_loss_constructs_defaults():
     preds = _tensor_1d(4)
     labels = _tensor_1d(4)
 
-    loss = thor.losses.DiceLoss(n, preds, labels)
-    assert isinstance(loss, thor.losses.DiceLoss)
+    loss = thor.losses.segmentation.DiceLoss(n, preds, labels)
+    assert isinstance(loss, thor.losses.segmentation.DiceLoss)
     assert loss.smooth == pytest.approx(1.0)
 
 
@@ -98,8 +98,8 @@ def test_dice_loss_constructs_multidimensional_probabilities():
     preds = _tensor([2, 3, 4], thor.DataType.fp16)
     labels = _tensor([2, 3, 4], thor.DataType.uint8)
 
-    loss = thor.losses.DiceLoss(n, preds, labels, 0.25, thor.DataType.fp32, thor.losses.LossShape.raw)
-    assert isinstance(loss, thor.losses.DiceLoss)
+    loss = thor.losses.segmentation.DiceLoss(n, preds, labels, 0.25, thor.DataType.fp32, thor.losses.LossShape.raw)
+    assert isinstance(loss, thor.losses.segmentation.DiceLoss)
     assert loss.smooth == pytest.approx(0.25)
 
 
@@ -109,8 +109,8 @@ def test_dice_loss_reported_loss_shape_variants_construct(shape):
     preds = _tensor([2, 3, 4])
     labels = _tensor([2, 3, 4])
 
-    loss = thor.losses.DiceLoss(n, preds, labels, 1.0, None, getattr(thor.losses.LossShape, shape))
-    assert isinstance(loss, thor.losses.DiceLoss)
+    loss = thor.losses.segmentation.DiceLoss(n, preds, labels, 1.0, None, getattr(thor.losses.LossShape, shape))
+    assert isinstance(loss, thor.losses.segmentation.DiceLoss)
 
 
 def test_dice_loss_rejects_mismatched_labels():
@@ -119,16 +119,16 @@ def test_dice_loss_rejects_mismatched_labels():
     labels = _tensor_1d(3)
 
     with pytest.raises(ValueError, match=r"labels dimensions [\s\S]* must match predictions dimensions"):
-        thor.losses.DiceLoss(n, preds, labels)
+        thor.losses.segmentation.DiceLoss(n, preds, labels)
 
 
 def test_dice_loss_rejects_bad_params():
     n = _net()
 
     with pytest.raises(ValueError, match=r"smooth must be non-negative"):
-        thor.losses.DiceLoss(n, _tensor_1d(3), _tensor_1d(3), -0.1)
+        thor.losses.segmentation.DiceLoss(n, _tensor_1d(3), _tensor_1d(3), -0.1)
     with pytest.raises(ValueError, match=r"loss_data_type must be fp16 or fp32"):
-        thor.losses.DiceLoss(n, _tensor_1d(3), _tensor_1d(3), 1.0, thor.DataType.int32)
+        thor.losses.segmentation.DiceLoss(n, _tensor_1d(3), _tensor_1d(3), 1.0, thor.DataType.int32)
 
 
 @pytest.mark.cuda

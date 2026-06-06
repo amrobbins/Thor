@@ -1,6 +1,7 @@
 #include "DeepLearning/Api/Layers/Loss/CustomLoss.h"
 #include "DeepLearning/Api/Layers/Loss/ListNetLoss.h"
 #include "DeepLearning/Api/Layers/Loss/ListwiseSoftmaxCrossEntropyLoss.h"
+#include "DeepLearning/Api/Layers/Loss/MultiInputCustomLoss.h"
 #include "DeepLearning/Api/Layers/Loss/LossShaper.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
@@ -55,6 +56,8 @@ void expectTensorJsonMatches(const json& tensorJson, const Tensor& tensor) {
 struct ListwiseRankingLossNetworkParts {
     ListNetLoss listNetLoss;
     ListwiseSoftmaxCrossEntropyLoss listwiseSoftmaxCrossEntropyLoss;
+    ListNetLoss maskedListNetLoss;
+    ListwiseSoftmaxCrossEntropyLoss maskedListwiseSoftmaxCrossEntropyLoss;
 };
 
 ListwiseRankingLossNetworkParts addListwiseRankingLosses(Network& network) {
@@ -83,7 +86,40 @@ ListwiseRankingLossNetworkParts addListwiseRankingLosses(Network& network) {
                                                                          .build();
     consumeLoss(network, "listwise_softmax_cross_entropy_loss", listwiseSoftmaxCrossEntropyLoss.getLoss());
 
-    return ListwiseRankingLossNetworkParts{listNetLoss, listwiseSoftmaxCrossEntropyLoss};
+    NetworkInput maskedListNetPredictions = fp32Input(network, "masked_list_net_predictions", {5});
+    NetworkInput maskedListNetLabels = fp32Input(network, "masked_list_net_labels", {5});
+    NetworkInput maskedListNetMask = fp32Input(network, "masked_list_net_mask", {5});
+    ListNetLoss maskedListNetLoss = ListNetLoss::Builder()
+                                        .network(network)
+                                        .predictions(maskedListNetPredictions.getFeatureOutput().value())
+                                        .labels(maskedListNetLabels.getFeatureOutput().value())
+                                        .mask(maskedListNetMask.getFeatureOutput().value())
+                                        .scoreTemperature(0.9f)
+                                        .labelTemperature(0.7f)
+                                        .reportsRawLoss()
+                                        .lossDataType(DataType::FP32)
+                                        .build();
+    consumeLoss(network, "masked_list_net_loss", maskedListNetLoss.getLoss());
+
+    NetworkInput maskedSoftmaxPredictions = fp32Input(network, "masked_listwise_softmax_predictions", {5});
+    NetworkInput maskedSoftmaxLabels = fp32Input(network, "masked_listwise_softmax_labels", {5});
+    NetworkInput maskedSoftmaxMask = fp32Input(network, "masked_listwise_softmax_mask", {5});
+    ListwiseSoftmaxCrossEntropyLoss maskedListwiseSoftmaxCrossEntropyLoss =
+        ListwiseSoftmaxCrossEntropyLoss::Builder()
+            .network(network)
+            .predictions(maskedSoftmaxPredictions.getFeatureOutput().value())
+            .labels(maskedSoftmaxLabels.getFeatureOutput().value())
+            .mask(maskedSoftmaxMask.getFeatureOutput().value())
+            .temperature(0.8f)
+            .reportsRawLoss()
+            .lossDataType(DataType::FP32)
+            .build();
+    consumeLoss(network, "masked_listwise_softmax_cross_entropy_loss", maskedListwiseSoftmaxCrossEntropyLoss.getLoss());
+
+    return ListwiseRankingLossNetworkParts{listNetLoss,
+                                           listwiseSoftmaxCrossEntropyLoss,
+                                           maskedListNetLoss,
+                                           maskedListwiseSoftmaxCrossEntropyLoss};
 }
 
 }  // namespace
@@ -102,6 +138,15 @@ TEST(ListwiseRankingLossSerialization, PublicArchitectureJsonIncludesRoundTripFi
     expectTensorJsonMatches(listNetJson.at("predictions_tensor"), losses.listNetLoss.getPredictions());
     expectTensorJsonMatches(listNetJson.at("labels_tensor"), losses.listNetLoss.getLabels());
     expectTensorJsonMatches(listNetJson.at("loss_tensor"), losses.listNetLoss.getLoss());
+    EXPECT_FALSE(listNetJson.at("has_mask").get<bool>());
+
+    const json maskedListNetJson = losses.maskedListNetLoss.architectureJson();
+    EXPECT_EQ(maskedListNetJson.at("layer_type").get<string>(), "list_net_loss");
+    EXPECT_TRUE(maskedListNetJson.at("has_mask").get<bool>());
+    EXPECT_FLOAT_EQ(maskedListNetJson.at("score_temperature").get<float>(), 0.9f);
+    EXPECT_FLOAT_EQ(maskedListNetJson.at("label_temperature").get<float>(), 0.7f);
+    ASSERT_TRUE(losses.maskedListNetLoss.getMask().has_value());
+    expectTensorJsonMatches(maskedListNetJson.at("mask_tensor"), losses.maskedListNetLoss.getMask().value());
 
     const json listwiseSoftmaxJson = losses.listwiseSoftmaxCrossEntropyLoss.architectureJson();
     EXPECT_EQ(listwiseSoftmaxJson.at("factory").get<string>(), Layer::Factory::Loss.value());
@@ -112,6 +157,15 @@ TEST(ListwiseRankingLossSerialization, PublicArchitectureJsonIncludesRoundTripFi
     expectTensorJsonMatches(listwiseSoftmaxJson.at("predictions_tensor"), losses.listwiseSoftmaxCrossEntropyLoss.getPredictions());
     expectTensorJsonMatches(listwiseSoftmaxJson.at("labels_tensor"), losses.listwiseSoftmaxCrossEntropyLoss.getLabels());
     expectTensorJsonMatches(listwiseSoftmaxJson.at("loss_tensor"), losses.listwiseSoftmaxCrossEntropyLoss.getLoss());
+    EXPECT_FALSE(listwiseSoftmaxJson.at("has_mask").get<bool>());
+
+    const json maskedListwiseSoftmaxJson = losses.maskedListwiseSoftmaxCrossEntropyLoss.architectureJson();
+    EXPECT_EQ(maskedListwiseSoftmaxJson.at("layer_type").get<string>(), "listwise_softmax_cross_entropy_loss");
+    EXPECT_TRUE(maskedListwiseSoftmaxJson.at("has_mask").get<bool>());
+    EXPECT_FLOAT_EQ(maskedListwiseSoftmaxJson.at("temperature").get<float>(), 0.8f);
+    ASSERT_TRUE(losses.maskedListwiseSoftmaxCrossEntropyLoss.getMask().has_value());
+    expectTensorJsonMatches(maskedListwiseSoftmaxJson.at("mask_tensor"),
+                            losses.maskedListwiseSoftmaxCrossEntropyLoss.getMask().value());
 }
 
 TEST(ListwiseRankingLossSerialization, PublicLossJsonDeserializerRebuildsSupportLayers) {
@@ -127,9 +181,13 @@ TEST(ListwiseRankingLossSerialization, PublicLossJsonDeserializerRebuildsSupport
 
     Loss::deserialize(losses.listNetLoss.architectureJson(), &restoredNetwork);
     Loss::deserialize(losses.listwiseSoftmaxCrossEntropyLoss.architectureJson(), &restoredNetwork);
+    Loss::deserialize(losses.maskedListNetLoss.architectureJson(), &restoredNetwork);
+    Loss::deserialize(losses.maskedListwiseSoftmaxCrossEntropyLoss.architectureJson(), &restoredNetwork);
 
     EXPECT_EQ(countLayersOfType<CustomLoss>(restoredNetwork), 2u);
+    EXPECT_EQ(countLayersOfType<MultiInputCustomLoss>(restoredNetwork), 2u);
     EXPECT_EQ(countLayersOfType<LossShaper>(restoredNetwork), 1u);
     EXPECT_EQ(countLayerTypesInArchitecture(restoredNetwork.architectureJson(), "custom_loss"), 2u);
+    EXPECT_EQ(countLayerTypesInArchitecture(restoredNetwork.architectureJson(), "multi_input_custom_loss"), 2u);
     EXPECT_EQ(countLayerTypesInArchitecture(restoredNetwork.architectureJson(), "loss_shaper"), 1u);
 }
