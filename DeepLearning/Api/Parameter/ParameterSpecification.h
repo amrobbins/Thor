@@ -49,6 +49,7 @@ class ParameterSpecification {
 
     bool isTrainable() const;
     bool isTrainingInitiallyEnabled() const;
+    void setTrainingInitiallyEnabled(bool enabled);
 
     bool hasOptimizer() const;
     std::shared_ptr<Optimizer> getOptimizer();

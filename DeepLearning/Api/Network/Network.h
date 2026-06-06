@@ -114,6 +114,8 @@ class Network {
     virtual std::string architectureJsonString() const;
 
     std::shared_ptr<Optimizer> getDefaultOptimizer();
+    void freezeTraining();
+    void unfreezeTraining();
 
     // FIXME: I will need to support indexing layers by their name.
     uint32_t getNumTrainableLayers() { return allTrainableLayersInNetwork.size(); }

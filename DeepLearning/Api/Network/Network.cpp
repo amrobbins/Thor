@@ -975,6 +975,22 @@ void Network::addToNetwork(Optimizer *optimizer) {
 
 shared_ptr<Optimizer> Network::getDefaultOptimizer() { return defaultOptimizer; }
 
+void Network::freezeTraining() {
+    for (auto& trainableLayer : allTrainableLayersInNetwork) {
+        if (trainableLayer != nullptr) {
+            trainableLayer->freezeTraining();
+        }
+    }
+}
+
+void Network::unfreezeTraining() {
+    for (auto& trainableLayer : allTrainableLayersInNetwork) {
+        if (trainableLayer != nullptr) {
+            trainableLayer->unfreezeTraining();
+        }
+    }
+}
+
 // For future multi-gpu support, optimizers for the same layer on different GPU's will need to accumulate into a single weights memory
 // and then broadcast the updated weights to the optimizers on the other gpus.
 // FIXME: What is the right place for network/optimizer interaction code? Is it here? Is it in Optimizer?

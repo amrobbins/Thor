@@ -44,26 +44,30 @@ void TrainableLayer::deserialize(shared_ptr<thor_file::TarReader> &archiveReader
     deserializer(archiveReader, j, network);
 }
 
+void TrainableLayer::freezeTraining() { Parameterizable::freezeTraining(); }
+
+void TrainableLayer::unfreezeTraining() { Parameterizable::unfreezeTraining(); }
+
+bool TrainableLayer::isTrainingFrozen() const { return Parameterizable::isTrainingFrozen(); }
+
 void TrainableLayer::attachDefaultOptimizer(std::shared_ptr<Optimizer> optimizer) {
     for (const auto &parameter : getParameters()) {
-        if (parameter != nullptr && parameter->isTrainable()) {
+        if (parameter != nullptr && parameter->isTrainable() && parameter->isTrainingInitiallyEnabled()) {
             parameter->setOptimizer(optimizer, /*override=*/false);
         }
     }
 }
 
 bool TrainableLayer::hasOptimizer() const {
-    bool foundTrainable = false;
     for (const auto &parameter : parameters) {
-        if (parameter == nullptr || !parameter->isTrainable()) {
+        if (parameter == nullptr || !parameter->isTrainable() || !parameter->isTrainingInitiallyEnabled()) {
             continue;
         }
-        foundTrainable = true;
         if (!parameter->hasOptimizer()) {
             return false;
         }
     }
-    return foundTrainable;
+    return true;
 }
 
 // void TrainableLayer::stampOptimizer(const std::shared_ptr<ThorImplementation::TrainableLayer> &physicalTrainableLayer) const {

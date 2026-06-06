@@ -37,6 +37,10 @@ class Parameterizable {
     std::shared_ptr<ParameterSpecification> getParameterSpecification(const std::string& name) const;
     virtual std::vector<std::shared_ptr<ParameterSpecification>> getParameters() const;
 
+    void freezeTraining();
+    void unfreezeTraining();
+    bool isTrainingFrozen() const;
+
     BoundParameter getBoundParameter(PlacedNetwork* placedNetwork, const std::string& name) const;
     std::vector<BoundParameter> getBoundParameters(PlacedNetwork* placedNetwork) const;
 
