@@ -3,6 +3,7 @@
 #include <optional>
 #include "DeepLearning/Api/Layers/Learning/CustomLayer.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
+#include "DeepLearning/Api/Parameter/ParameterSpecification.h"
 #include "DeepLearning/Implementation/ThorError.h"
 #include <fstream>
 #include <iostream>
@@ -975,6 +976,61 @@ void Network::addToNetwork(Optimizer *optimizer) {
 
 shared_ptr<Optimizer> Network::getDefaultOptimizer() { return defaultOptimizer; }
 
+
+std::vector<ParameterReference> Network::getTrainableParameterReferences(bool trainingEnabledOnly) const {
+    std::vector<ParameterReference> result;
+
+    for (const std::shared_ptr<TrainableLayer>& trainableLayer : allTrainableLayersInNetwork) {
+        if (trainableLayer == nullptr) {
+            continue;
+        }
+        std::vector<ParameterReference> layerParameters = trainableLayer->getParameterReferences(/*trainableOnly=*/true, trainingEnabledOnly);
+        result.insert(result.end(), layerParameters.begin(), layerParameters.end());
+    }
+
+    return result;
+}
+
+
+BoundParameter Network::resolveParameterReference(PlacedNetwork* placedNetwork, const ParameterReference& parameterReference) const {
+    if (placedNetwork == nullptr) {
+        throw runtime_error("Cannot resolve a ParameterReference without a placed network.");
+    }
+    if (!parameterReference.isInitialized()) {
+        throw runtime_error("Cannot resolve an uninitialized ParameterReference.");
+    }
+
+    const uint64_t parameterizableId = parameterReference.getParameterizableId();
+    const string& parameterName = parameterReference.getParameterName();
+    for (const shared_ptr<TrainableLayer>& trainableLayer : allTrainableLayersInNetwork) {
+        if (trainableLayer == nullptr || trainableLayer->getParameterizableId() != parameterizableId) {
+            continue;
+        }
+        if (!trainableLayer->hasParameter(parameterName)) {
+            throw runtime_error("ParameterReference points to layer id " + to_string(parameterizableId) +
+                                " but parameter '" + parameterName + "' is not present on that layer.");
+        }
+        if (!trainableLayer->getParameterSpecification(parameterName)->isTrainable()) {
+            throw runtime_error("ParameterReference points to layer id " + to_string(parameterizableId) +
+                                " parameter '" + parameterName + "', but that parameter is not trainable.");
+        }
+        return trainableLayer->getBoundParameter(placedNetwork, parameterName);
+    }
+
+    throw runtime_error("ParameterReference points to unknown trainable layer id " + to_string(parameterizableId) +
+                        " parameter '" + parameterName + "'.");
+}
+
+std::vector<BoundParameter> Network::resolveParameterReferences(PlacedNetwork* placedNetwork,
+                                                                const std::vector<ParameterReference>& parameterReferences) const {
+    std::vector<BoundParameter> result;
+    result.reserve(parameterReferences.size());
+    for (const ParameterReference& parameterReference : parameterReferences) {
+        result.push_back(resolveParameterReference(placedNetwork, parameterReference));
+    }
+    return result;
+}
+
 void Network::freezeTraining() {
     for (auto& trainableLayer : allTrainableLayersInNetwork) {
         if (trainableLayer != nullptr) {
@@ -1164,6 +1220,18 @@ void Network::stampNetworkOutput(Tensor inputTensor,
     stampedNetwork.physicalLayerToApiLayer[implementationNetworkOutput.get()] = networkOutput->getId();
 
     // stampedNetwork.recordIfParameterizable(networkOutput, implementationNetworkOutput);
+}
+
+bool Network::hasApiTensorByOriginalId(uint64_t originalId) const {
+    return apiTensorByOriginalId.count(originalId) != 0;
+}
+
+Tensor Network::resolveApiTensorByOriginalId(uint64_t originalId) const {
+    auto it = apiTensorByOriginalId.find(originalId);
+    if (it == apiTensorByOriginalId.end()) {
+        throw runtime_error("Tensor with original id " + to_string(originalId) + " does not belong to network '" + networkName + "'.");
+    }
+    return it->second;
 }
 
 Tensor Network::getApiTensorByOriginalId(uint64_t originalId) {
