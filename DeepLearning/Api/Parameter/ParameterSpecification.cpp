@@ -230,6 +230,13 @@ std::shared_ptr<Initializer> ParameterSpecification::getInitializer() const { re
 bool ParameterSpecification::isTrainable() const { return trainable; }
 bool ParameterSpecification::isTrainingInitiallyEnabled() const { return isTrainable() && trainingInitiallyEnabled; }
 
+void ParameterSpecification::setTrainingInitiallyEnabled(bool enabled) {
+    if (!isTrainable()) {
+        throw runtime_error("Only trainable parameters may toggle training enabled. Parameter '" + name + "' is not trainable.");
+    }
+    trainingInitiallyEnabled = enabled;
+}
+
 bool ParameterSpecification::hasOptimizer() const { return optimizer != nullptr; }
 std::shared_ptr<Optimizer> ParameterSpecification::getOptimizer() { return optimizer; }
 

@@ -41,6 +41,37 @@ std::vector<std::string> Parameterizable::listParameters() const {
     return names;
 }
 
+
+void Parameterizable::freezeTraining() {
+    for (const auto& parameter : parameters) {
+        if (parameter != nullptr && parameter->isTrainable()) {
+            parameter->setTrainingInitiallyEnabled(false);
+        }
+    }
+}
+
+void Parameterizable::unfreezeTraining() {
+    for (const auto& parameter : parameters) {
+        if (parameter != nullptr && parameter->isTrainable()) {
+            parameter->setTrainingInitiallyEnabled(true);
+        }
+    }
+}
+
+bool Parameterizable::isTrainingFrozen() const {
+    bool foundTrainable = false;
+    for (const auto& parameter : parameters) {
+        if (parameter == nullptr || !parameter->isTrainable()) {
+            continue;
+        }
+        foundTrainable = true;
+        if (parameter->isTrainingInitiallyEnabled()) {
+            return false;
+        }
+    }
+    return foundTrainable;
+}
+
 std::vector<std::shared_ptr<ParameterSpecification>> Parameterizable::getParameters() const {
     std::vector<std::shared_ptr<ParameterSpecification>> result;
     std::vector<std::string> names = listParameters();

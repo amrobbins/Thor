@@ -61,6 +61,9 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
         return batchSizeDependentMem;
     }
     bool hasOptimizer() const;
+    void freezeTraining();
+    void unfreezeTraining();
+    bool isTrainingFrozen() const;
 
    protected:
     void compile(std::shared_ptr<ThorImplementation::Layer> physicalLayer) override;

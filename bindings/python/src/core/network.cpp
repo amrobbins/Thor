@@ -143,6 +143,8 @@ pending marker and overwritten with the final save-time keys when save() runs.
     network.def("cuda_kernel_out_of_band_keys", [](const Network& self) { return cudaKernelOutOfBandKeysToPython(self.cudaKernelOutOfBandKeys()); });
 
     network.def("get_default_optimizer", &Network::getDefaultOptimizer);
+    network.def("freeze_training", &Network::freezeTraining);
+    network.def("unfreeze_training", &Network::unfreezeTraining);
 
     network.def(
         "place",
