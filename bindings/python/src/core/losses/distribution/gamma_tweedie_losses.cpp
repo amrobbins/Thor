@@ -108,7 +108,7 @@ void validateTweedieArguments(const string &loss_name,
 
 void bind_gamma_tweedie_losses(nb::module_ &losses) {
     auto gamma_nll_loss = nb::class_<GammaNLLLoss, Loss>(losses, "GammaNLLLoss");
-    gamma_nll_loss.attr("__module__") = "thor.losses";
+    gamma_nll_loss.attr("__module__") = "thor.losses.distribution";
 
     gamma_nll_loss.def(
         "__init__",
@@ -150,7 +150,7 @@ are omitted. The raw loss is:
 )nbdoc";
 
     auto tweedie_loss = nb::class_<TweedieLoss, Loss>(losses, "TweedieLoss");
-    tweedie_loss.attr("__module__") = "thor.losses";
+    tweedie_loss.attr("__module__") = "thor.losses.distribution";
 
     tweedie_loss.def(
         "__init__",

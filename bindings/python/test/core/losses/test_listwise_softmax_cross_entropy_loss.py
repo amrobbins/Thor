@@ -27,9 +27,16 @@ def _log_softmax(values: np.ndarray, axis: int = -1) -> np.ndarray:
     return (shifted - log_denominator).astype(np.float32)
 
 
-def _listwise_softmax_cross_entropy_reference(scores: np.ndarray, labels: np.ndarray, temperature: float) -> np.ndarray:
+def _listwise_softmax_cross_entropy_reference(
+    scores: np.ndarray, labels: np.ndarray, temperature: float, mask: np.ndarray | None = None
+) -> np.ndarray:
     scaled_scores = scores.astype(np.float32) / np.float32(temperature)
-    return -np.sum(labels.astype(np.float32) * _log_softmax(scaled_scores, axis=1), axis=1).astype(np.float32)
+    effective_labels = labels.astype(np.float32)
+    if mask is not None:
+        valid = mask.astype(np.float32) > 0.5
+        scaled_scores = np.where(valid, scaled_scores, -1.0e20).astype(np.float32)
+        effective_labels = np.where(valid, effective_labels, 0.0).astype(np.float32)
+    return -np.sum(effective_labels * _log_softmax(scaled_scores, axis=1), axis=1).astype(np.float32)
 
 
 def _reduce_loss(raw: np.ndarray, reported_loss_shape: thor.losses.LossShape) -> np.ndarray:
@@ -52,6 +59,7 @@ def _run_listwise_softmax_cross_entropy_loss_network(
     labels: np.ndarray,
     temperature: float,
     reported_loss_shape: thor.losses.LossShape,
+    mask: np.ndarray | None = None,
 ) -> np.ndarray:
     shape_name = str(reported_loss_shape).split(".")[-1]
     n = thor.Network(f"test_net_listwise_softmax_cross_entropy_loss_numerical_{shape_name}")
@@ -59,13 +67,18 @@ def _run_listwise_softmax_cross_entropy_loss_network(
     feature_dims = list(predictions.shape[1:])
     predictions_input = thor.layers.NetworkInput(n, "predictions", feature_dims, dtype)
     labels_input = thor.layers.NetworkInput(n, "labels", feature_dims, dtype)
-    loss = thor.losses.ListwiseSoftmaxCrossEntropyLoss(
+    mask_tensor = None
+    if mask is not None:
+        mask_input = thor.layers.NetworkInput(n, "mask", feature_dims, dtype)
+        mask_tensor = mask_input.get_feature_output()
+    loss = thor.losses.ranking.ListwiseSoftmaxCrossEntropyLoss(
         n,
         predictions_input.get_feature_output(),
         labels_input.get_feature_output(),
         temperature,
         dtype,
         reported_loss_shape,
+        mask=mask_tensor,
     )
     thor.layers.NetworkOutput(n, "loss", loss.get_loss(), dtype)
 
@@ -75,7 +88,10 @@ def _run_listwise_softmax_cross_entropy_loss_network(
         forced_devices=[0],
         forced_num_stamps_per_gpu=1,
     )
-    outputs = placed.infer({"predictions": _cpu_tensor(predictions, dtype), "labels": _cpu_tensor(labels, dtype)})
+    feed = {"predictions": _cpu_tensor(predictions, dtype), "labels": _cpu_tensor(labels, dtype)}
+    if mask is not None:
+        feed["mask"] = _cpu_tensor(mask, dtype)
+    outputs = placed.infer(feed)
     assert set(outputs.keys()) == {"loss"}
     return np.array(outputs["loss"].numpy(), copy=True)
 
@@ -85,8 +101,8 @@ def test_listwise_softmax_cross_entropy_loss_constructs_defaults():
     preds = _tensor_1d(4)
     labels = _tensor_1d(4)
 
-    loss = thor.losses.ListwiseSoftmaxCrossEntropyLoss(n, preds, labels)
-    assert isinstance(loss, thor.losses.ListwiseSoftmaxCrossEntropyLoss)
+    loss = thor.losses.ranking.ListwiseSoftmaxCrossEntropyLoss(n, preds, labels)
+    assert isinstance(loss, thor.losses.ranking.ListwiseSoftmaxCrossEntropyLoss)
     assert loss.temperature == pytest.approx(1.0)
 
 
@@ -95,7 +111,7 @@ def test_listwise_softmax_cross_entropy_loss_constructs_with_temperature_loss_dt
     preds = _tensor_1d(4, thor.DataType.fp16)
     labels = _tensor_1d(4, thor.DataType.fp16)
 
-    loss = thor.losses.ListwiseSoftmaxCrossEntropyLoss(
+    loss = thor.losses.ranking.ListwiseSoftmaxCrossEntropyLoss(
         n,
         preds,
         labels,
@@ -103,7 +119,7 @@ def test_listwise_softmax_cross_entropy_loss_constructs_with_temperature_loss_dt
         thor.DataType.fp32,
         thor.losses.LossShape.elementwise,
     )
-    assert isinstance(loss, thor.losses.ListwiseSoftmaxCrossEntropyLoss)
+    assert isinstance(loss, thor.losses.ranking.ListwiseSoftmaxCrossEntropyLoss)
     assert loss.temperature == pytest.approx(0.25)
 
 
@@ -113,8 +129,8 @@ def test_listwise_softmax_cross_entropy_loss_reported_loss_shape_variants_constr
     preds = _tensor_1d(3)
     labels = _tensor_1d(3)
 
-    loss = thor.losses.ListwiseSoftmaxCrossEntropyLoss(n, preds, labels, 1.0, None, getattr(thor.losses.LossShape, shape))
-    assert isinstance(loss, thor.losses.ListwiseSoftmaxCrossEntropyLoss)
+    loss = thor.losses.ranking.ListwiseSoftmaxCrossEntropyLoss(n, preds, labels, 1.0, None, getattr(thor.losses.LossShape, shape))
+    assert isinstance(loss, thor.losses.ranking.ListwiseSoftmaxCrossEntropyLoss)
 
 
 def test_listwise_softmax_cross_entropy_loss_rejects_non_positive_temperature():
@@ -123,7 +139,7 @@ def test_listwise_softmax_cross_entropy_loss_rejects_non_positive_temperature():
     labels = _tensor_1d(4)
 
     with pytest.raises(ValueError, match=r"temperature must be greater than zero"):
-        thor.losses.ListwiseSoftmaxCrossEntropyLoss(n, preds, labels, 0.0)
+        thor.losses.ranking.ListwiseSoftmaxCrossEntropyLoss(n, preds, labels, 0.0)
 
 
 def test_listwise_softmax_cross_entropy_loss_rejects_mismatched_labels():
@@ -132,7 +148,17 @@ def test_listwise_softmax_cross_entropy_loss_rejects_mismatched_labels():
     labels = _tensor_1d(3)
 
     with pytest.raises(ValueError, match=r"labels dimensions [\s\S]* must match predictions dimensions"):
-        thor.losses.ListwiseSoftmaxCrossEntropyLoss(n, preds, labels)
+        thor.losses.ranking.ListwiseSoftmaxCrossEntropyLoss(n, preds, labels)
+
+
+def test_listwise_softmax_cross_entropy_loss_rejects_mismatched_mask():
+    n = _net()
+    preds = _tensor_1d(4)
+    labels = _tensor_1d(4)
+    mask = _tensor_1d(3)
+
+    with pytest.raises(ValueError, match=r"mask dimensions [\s\S]* must match predictions dimensions"):
+        thor.losses.ranking.ListwiseSoftmaxCrossEntropyLoss(n, preds, labels, mask=mask)
 
 
 def test_listwise_softmax_cross_entropy_loss_rejects_predictions_not_1d():
@@ -141,7 +167,7 @@ def test_listwise_softmax_cross_entropy_loss_rejects_predictions_not_1d():
     labels = thor.Tensor([2, 2], thor.DataType.fp32)
 
     with pytest.raises(ValueError, match=r"predictions must be a 1 dimensional fixed-size list score tensor"):
-        thor.losses.ListwiseSoftmaxCrossEntropyLoss(n, preds, labels)
+        thor.losses.ranking.ListwiseSoftmaxCrossEntropyLoss(n, preds, labels)
 
 
 def test_listwise_softmax_cross_entropy_loss_rejects_single_document_predictions():
@@ -150,7 +176,7 @@ def test_listwise_softmax_cross_entropy_loss_rejects_single_document_predictions
     labels = _tensor_1d(1)
 
     with pytest.raises(ValueError, match=r"more than one document"):
-        thor.losses.ListwiseSoftmaxCrossEntropyLoss(n, preds, labels)
+        thor.losses.ranking.ListwiseSoftmaxCrossEntropyLoss(n, preds, labels)
 
 
 def test_listwise_softmax_cross_entropy_loss_rejects_invalid_dtypes():
@@ -159,11 +185,11 @@ def test_listwise_softmax_cross_entropy_loss_rejects_invalid_dtypes():
     labels = _tensor_1d(4)
 
     with pytest.raises(ValueError, match=r"loss_data_type must be fp16 or fp32"):
-        thor.losses.ListwiseSoftmaxCrossEntropyLoss(n, preds, labels, 1.0, thor.DataType.int32)
+        thor.losses.ranking.ListwiseSoftmaxCrossEntropyLoss(n, preds, labels, 1.0, thor.DataType.int32)
     with pytest.raises(ValueError, match=r"predictions must use fp16 or fp32 dtype"):
-        thor.losses.ListwiseSoftmaxCrossEntropyLoss(n, _tensor_1d(4, thor.DataType.uint8), labels)
+        thor.losses.ranking.ListwiseSoftmaxCrossEntropyLoss(n, _tensor_1d(4, thor.DataType.uint8), labels)
     with pytest.raises(ValueError, match=r"labels must use fp16 or fp32 dtype"):
-        thor.losses.ListwiseSoftmaxCrossEntropyLoss(n, preds, _tensor_1d(4, thor.DataType.uint8))
+        thor.losses.ranking.ListwiseSoftmaxCrossEntropyLoss(n, preds, _tensor_1d(4, thor.DataType.uint8))
 
 
 @pytest.mark.cuda
@@ -198,5 +224,43 @@ def test_listwise_softmax_cross_entropy_loss_numerical_forward_matches_reference
     raw_expected = _listwise_softmax_cross_entropy_reference(predictions, labels, temperature)
     expected = _reduce_loss(raw_expected, reported_loss_shape)
     actual = _run_listwise_softmax_cross_entropy_loss_network(predictions, labels, temperature, reported_loss_shape)
+
+    np.testing.assert_allclose(actual, expected, rtol=2e-5, atol=2e-6)
+
+
+@pytest.mark.cuda
+def test_listwise_softmax_cross_entropy_loss_masked_numerical_forward_matches_reference():
+    temperature = 0.7
+    reported_loss_shape = thor.losses.LossShape.raw
+    predictions = np.array(
+        [
+            [0.25, 1.5, -0.5, 0.75],
+            [1.25, -0.25, 0.5, -1.0],
+            [-0.75, 0.125, 1.75, 0.375],
+        ],
+        dtype=np.float32,
+    )
+    labels = np.array(
+        [
+            [0.70, 0.10, 0.15, 0.05],
+            [0.05, 0.60, 0.25, 0.10],
+            [0.40, 0.00, 0.35, 0.15],
+        ],
+        dtype=np.float32,
+    )
+    mask = np.array(
+        [
+            [1.0, 1.0, 1.0, 0.0],
+            [1.0, 0.0, 1.0, 0.0],
+            [0.0, 1.0, 1.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+
+    raw_expected = _listwise_softmax_cross_entropy_reference(predictions, labels, temperature, mask)
+    expected = _reduce_loss(raw_expected, reported_loss_shape)
+    actual = _run_listwise_softmax_cross_entropy_loss_network(
+        predictions, labels, temperature, reported_loss_shape, mask=mask
+    )
 
     np.testing.assert_allclose(actual, expected, rtol=2e-5, atol=2e-6)

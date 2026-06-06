@@ -41,7 +41,7 @@ void setReportedLossShape(DiceLoss::Builder &builder, LossShape reported_loss_sh
 
 void bind_dice_loss(nb::module_ &losses) {
     auto dice_loss = nb::class_<DiceLoss, Loss>(losses, "DiceLoss");
-    dice_loss.attr("__module__") = "thor.losses";
+    dice_loss.attr("__module__") = "thor.losses.segmentation";
 
     dice_loss.def(
         "__init__",

@@ -8,6 +8,7 @@
 
 #include <optional>
 #include <stdexcept>
+#include <vector>
 
 namespace Thor {
 
@@ -23,6 +24,14 @@ class ListwiseSoftmaxCrossEntropyLoss : public Loss {
     std::string getLayerType() const override { return "ListwiseSoftmaxCrossEntropyLoss"; }
 
     float getTemperature() const { return temperature; }
+    std::optional<Tensor> getMask() const { return maskTensor; }
+
+    std::vector<Tensor> getLossInputTensors() const override {
+        std::vector<Tensor> tensors = {predictionsTensor, labelsTensor};
+        if (maskTensor.has_value())
+            tensors.push_back(maskTensor.value());
+        return tensors;
+    }
 
     nlohmann::json architectureJson() const override;
     static void deserialize(const nlohmann::json &j, Network *network);
@@ -55,10 +64,12 @@ class ListwiseSoftmaxCrossEntropyLoss : public Loss {
         }
 
         uint64_t standardLossBytes = Loss::getFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
-        return standardLossBytes + lossShaperBytes;
+        uint64_t maskBytes = maskTensor.has_value() ? batchSize * maskTensor.value().getTotalSizeInBytes() : 0;
+        return standardLossBytes + maskBytes + lossShaperBytes;
     }
 
     float temperature = 1.0f;
+    std::optional<Tensor> maskTensor = std::nullopt;
 };
 
 class ListwiseSoftmaxCrossEntropyLoss::Builder {
@@ -73,6 +84,11 @@ class ListwiseSoftmaxCrossEntropyLoss::Builder {
         THOR_THROW_IF_FALSE(_predictions.value().getDimensions().size() == 1);
         THOR_THROW_IF_FALSE(_predictions.value().getDimensions()[0] > 1);
         THOR_THROW_IF_FALSE(_predictions.value().getDimensions() == _labels.value().getDimensions());
+        if (_mask.has_value()) {
+            THOR_THROW_IF_FALSE(_mask.value() != _predictions.value());
+            THOR_THROW_IF_FALSE(_mask.value() != _labels.value());
+            THOR_THROW_IF_FALSE(_mask.value().getDimensions() == _predictions.value().getDimensions());
+        }
 
         if (!_lossShape.has_value())
             _lossShape = LossShape::BATCH;
@@ -89,6 +105,7 @@ class ListwiseSoftmaxCrossEntropyLoss::Builder {
         listwiseSoftmaxCrossEntropyLoss.lossDataType = _lossDataType.value();
         listwiseSoftmaxCrossEntropyLoss.lossShape = _lossShape.value();
         listwiseSoftmaxCrossEntropyLoss.temperature = temperature;
+        listwiseSoftmaxCrossEntropyLoss.maskTensor = _mask;
         listwiseSoftmaxCrossEntropyLoss.network = _network.value();
         listwiseSoftmaxCrossEntropyLoss.initialized = true;
 
@@ -121,6 +138,13 @@ class ListwiseSoftmaxCrossEntropyLoss::Builder {
         THOR_THROW_IF_FALSE(!this->_temperature.has_value());
         THOR_THROW_IF_FALSE(_temperature > 0.0f);
         this->_temperature = _temperature;
+        return *this;
+    }
+
+    virtual ListwiseSoftmaxCrossEntropyLoss::Builder &mask(Tensor _mask) {
+        THOR_THROW_IF_FALSE(!this->_mask.has_value());
+        THOR_THROW_IF_FALSE(!_mask.getDimensions().empty());
+        this->_mask = _mask;
         return *this;
     }
 
@@ -162,6 +186,7 @@ class ListwiseSoftmaxCrossEntropyLoss::Builder {
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
     std::optional<float> _temperature;
+    std::optional<Tensor> _mask;
 };
 
 }  // namespace Thor

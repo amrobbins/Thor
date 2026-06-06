@@ -2,7 +2,7 @@
 #include <nanobind/stl/optional.h>
 #include <optional>
 
-#include "DeepLearning/Api/Layers/Loss/BinaryFocalLoss.h"
+#include "DeepLearning/Api/Layers/Loss/ContrastiveLoss.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 
@@ -17,16 +17,19 @@ using LossShape = Loss::LossShape;
 
 namespace {
 void validateReportedLossShape(LossShape reported_loss_shape, const string &loss_name) {
-    if (reported_loss_shape != LossShape::BATCH && reported_loss_shape != LossShape::ELEMENTWISE && reported_loss_shape != LossShape::RAW) {
+    if (reported_loss_shape != LossShape::BATCH && reported_loss_shape != LossShape::CLASSWISE &&
+        reported_loss_shape != LossShape::ELEMENTWISE && reported_loss_shape != LossShape::RAW) {
         string error_message =
             "Invalid value " + to_string((int)reported_loss_shape) + " passed for enum reported_loss_shape to " + loss_name + ".";
         throw nb::value_error(error_message.c_str());
     }
 }
 
-void setReportedLossShape(BinaryFocalLoss::Builder &builder, LossShape reported_loss_shape) {
+void setReportedLossShape(ContrastiveLoss::Builder &builder, LossShape reported_loss_shape) {
     if (reported_loss_shape == LossShape::BATCH) {
         builder.reportsBatchLoss();
+    } else if (reported_loss_shape == LossShape::CLASSWISE) {
+        builder.reportsPerOutputLoss();
     } else if (reported_loss_shape == LossShape::ELEMENTWISE) {
         builder.reportsElementwiseLoss();
     } else {
@@ -40,21 +43,20 @@ bool isBinaryLabelDType(DataType dtype) {
            dtype == DataType::FP16 || dtype == DataType::FP32;
 }
 
-void validateBinaryFocalLossArguments(const string &loss_name,
+void validateContrastiveLossArguments(const string &loss_name,
                                       Tensor predictions,
                                       Tensor labels,
-                                      float gamma,
-                                      float alpha,
+                                      float margin,
                                       optional<DataType> loss_data_type,
                                       LossShape reported_loss_shape) {
-    if (predictions.getDimensions().size() != 1 || predictions.getDimensions()[0] != 1) {
-        string error_message = loss_name + ": predictions must be a 1 dimensional logits tensor of size one but predictions is " +
+    if (predictions.getDimensions().size() != 1) {
+        string error_message = loss_name + ": predictions must be a 1 dimensional distance tensor but predictions is " +
                                predictions.getDescriptorString();
         throw nb::value_error(error_message.c_str());
     }
-    if (labels.getDimensions().size() != 1 || labels.getDimensions()[0] != 1) {
-        string error_message = loss_name + ": labels must be a 1 dimensional tensor of size one but labels is " +
-                               labels.getDescriptorString();
+    if (labels.getDimensions() != predictions.getDimensions()) {
+        string error_message = loss_name + ": labels dimensions " + labels.getDescriptorString() +
+                               " must match predictions dimensions " + predictions.getDescriptorString();
         throw nb::value_error(error_message.c_str());
     }
     if (predictions.getDataType() != DataType::FP16 && predictions.getDataType() != DataType::FP32) {
@@ -65,12 +67,8 @@ void validateBinaryFocalLossArguments(const string &loss_name,
         string error_message = loss_name + ": labels must use bool, uint8, uint16, uint32, fp16, or fp32 dtype";
         throw nb::value_error(error_message.c_str());
     }
-    if (gamma < 0.0f) {
-        string error_message = loss_name + ": gamma must be non-negative";
-        throw nb::value_error(error_message.c_str());
-    }
-    if (alpha < 0.0f || alpha > 1.0f) {
-        string error_message = loss_name + ": alpha must be in the range [0, 1]";
+    if (margin <= 0.0f) {
+        string error_message = loss_name + ": margin must be greater than zero";
         throw nb::value_error(error_message.c_str());
     }
     DataType effectiveLossDataType = loss_data_type.value_or(predictions.getDataType());
@@ -82,56 +80,49 @@ void validateBinaryFocalLossArguments(const string &loss_name,
 }
 }  // namespace
 
-void bind_binary_focal_loss(nb::module_ &losses) {
-    auto binary_focal_loss = nb::class_<BinaryFocalLoss, Loss>(losses, "BinaryFocalLoss");
-    binary_focal_loss.attr("__module__") = "thor.losses";
+void bind_contrastive_loss(nb::module_ &losses) {
+    auto contrastive_loss = nb::class_<ContrastiveLoss, Loss>(losses, "ContrastiveLoss");
+    contrastive_loss.attr("__module__") = "thor.losses.metric_learning";
 
-    binary_focal_loss.def(
+    contrastive_loss.def(
         "__init__",
-        [](BinaryFocalLoss *self,
+        [](ContrastiveLoss *self,
            Network &network,
            Tensor predictions,
            Tensor labels,
-           float gamma,
-           float alpha,
+           float margin,
            std::optional<DataType> loss_data_type,
            LossShape reported_loss_shape) {
-            const string loss_name = "BinaryFocalLoss instance";
-            validateBinaryFocalLossArguments(loss_name, predictions, labels, gamma, alpha, loss_data_type, reported_loss_shape);
+            const string loss_name = "ContrastiveLoss instance";
+            validateContrastiveLossArguments(loss_name, predictions, labels, margin, loss_data_type, reported_loss_shape);
 
             DataType effectiveLossDataType = loss_data_type.value_or(predictions.getDataType());
-            BinaryFocalLoss::Builder builder;
-            builder.network(network)
-                .predictions(predictions)
-                .labels(labels)
-                .focusingParameter(gamma)
-                .alpha(alpha)
-                .lossDataType(effectiveLossDataType);
+            ContrastiveLoss::Builder builder;
+            builder.network(network).predictions(predictions).labels(labels).margin(margin).lossDataType(effectiveLossDataType);
             setReportedLossShape(builder, reported_loss_shape);
-            BinaryFocalLoss built = builder.build();
+            ContrastiveLoss built = builder.build();
 
-            new (self) BinaryFocalLoss(std::move(built));
+            new (self) ContrastiveLoss(std::move(built));
         },
         "network"_a,
         "predictions"_a,
         "labels"_a,
-        "gamma"_a = 2.0f,
-        "alpha"_a = 0.25f,
+        "margin"_a = 1.0f,
         "loss_data_type"_a.none() = nb::none(),
         "reported_loss_shape"_a = LossShape::BATCH,
-        R"nbdoc(Construct a binary focal loss from logits.)nbdoc");
+        R"nbdoc(Construct a distance-based contrastive loss.)nbdoc");
 
-    binary_focal_loss.def_prop_ro("gamma", &BinaryFocalLoss::getGamma);
-    binary_focal_loss.def_prop_ro("alpha", &BinaryFocalLoss::getAlpha);
+    contrastive_loss.def_prop_ro("margin", &ContrastiveLoss::getMargin);
 
-    binary_focal_loss.attr("__doc__") = R"nbdoc(
-Binary focal loss from logits.
+    contrastive_loss.attr("__doc__") = R"nbdoc(
+Distance-based contrastive loss.
 
-The predictions tensor contains one unnormalized logit per example and the labels tensor contains
-binary targets. The raw loss is:
+The predictions tensor contains pair distances and the labels tensor contains binary pair labels.
+Labels greater than 0.5 are treated as positive/similar pairs. The raw loss is:
 
-    alpha_t * (1 - p_t) ** gamma * BCEWithLogits(logit, target)
+    distance ** 2                         if label > 0.5
+    max(margin - distance, 0) ** 2        otherwise
 
-where alpha_t is alpha for positive targets and 1 - alpha for negative targets.
+The predictions tensor is expected to contain non-negative distances; Thor does not clamp it.
 )nbdoc";
 }

@@ -112,3 +112,7 @@ _preload_cuda_user_space_libs()
 
 from ._thor import *
 from ._thor import __version__, __git_version__
+
+# Keep ``thor.losses`` as a Python package so organized domain namespaces such
+# as ``thor.losses.ranking`` are available after a plain ``import thor``.
+from . import losses as losses

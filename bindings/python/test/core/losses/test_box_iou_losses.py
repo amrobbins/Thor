@@ -4,10 +4,10 @@ import thor
 
 
 _LOSS_CLASSES = [
-    ("iou", thor.losses.IoULoss),
-    ("giou", thor.losses.GIoULoss),
-    ("diou", thor.losses.DIoULoss),
-    ("ciou", thor.losses.CIoULoss),
+    ("iou", thor.losses.detection.IoULoss),
+    ("giou", thor.losses.detection.GIoULoss),
+    ("diou", thor.losses.detection.DIoULoss),
+    ("ciou", thor.losses.detection.CIoULoss),
 ]
 
 

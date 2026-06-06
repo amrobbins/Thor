@@ -62,7 +62,7 @@ def _run_gaussian_nll_loss_network(
     predictions_input = thor.layers.NetworkInput(n, "predictions", feature_dims, dtype)
     labels_input = thor.layers.NetworkInput(n, "labels", feature_dims, dtype)
     variance_input = thor.layers.NetworkInput(n, "variance", feature_dims, dtype)
-    loss = thor.losses.GaussianNLLLoss(
+    loss = thor.losses.distribution.GaussianNLLLoss(
         n,
         predictions_input.get_feature_output(),
         labels_input.get_feature_output(),
@@ -97,8 +97,8 @@ def test_gaussian_nll_loss_constructs_defaults():
     labels = _tensor_1d(5)
     variance = _tensor_1d(5)
 
-    loss = thor.losses.GaussianNLLLoss(n, preds, labels, variance)
-    assert isinstance(loss, thor.losses.GaussianNLLLoss)
+    loss = thor.losses.distribution.GaussianNLLLoss(n, preds, labels, variance)
+    assert isinstance(loss, thor.losses.distribution.GaussianNLLLoss)
     assert loss.full is False
     assert loss.eps == pytest.approx(1.0e-6)
 
@@ -109,7 +109,7 @@ def test_gaussian_nll_loss_constructs_with_options_loss_dtype_and_shape():
     labels = _tensor_1d(4, thor.DataType.fp16)
     variance = _tensor_1d(4, thor.DataType.fp16)
 
-    loss = thor.losses.GaussianNLLLoss(
+    loss = thor.losses.distribution.GaussianNLLLoss(
         n,
         preds,
         labels,
@@ -119,7 +119,7 @@ def test_gaussian_nll_loss_constructs_with_options_loss_dtype_and_shape():
         thor.DataType.fp32,
         thor.losses.LossShape.elementwise,
     )
-    assert isinstance(loss, thor.losses.GaussianNLLLoss)
+    assert isinstance(loss, thor.losses.distribution.GaussianNLLLoss)
     assert loss.full is True
     assert loss.eps == pytest.approx(1.0e-5)
 
@@ -131,8 +131,8 @@ def test_gaussian_nll_loss_reported_loss_shape_variants_construct(shape):
     labels = _tensor_1d(3)
     variance = _tensor_1d(3)
 
-    loss = thor.losses.GaussianNLLLoss(n, preds, labels, variance, False, 1.0e-6, None, getattr(thor.losses.LossShape, shape))
-    assert isinstance(loss, thor.losses.GaussianNLLLoss)
+    loss = thor.losses.distribution.GaussianNLLLoss(n, preds, labels, variance, False, 1.0e-6, None, getattr(thor.losses.LossShape, shape))
+    assert isinstance(loss, thor.losses.distribution.GaussianNLLLoss)
 
 
 def test_gaussian_nll_loss_rejects_mismatched_labels():
@@ -142,7 +142,7 @@ def test_gaussian_nll_loss_rejects_mismatched_labels():
     variance = _tensor_1d(2)
 
     with pytest.raises(ValueError, match=r"labels dimensions [\s\S]* must match predictions dimensions"):
-        thor.losses.GaussianNLLLoss(n, preds, labels, variance)
+        thor.losses.distribution.GaussianNLLLoss(n, preds, labels, variance)
 
 
 def test_gaussian_nll_loss_rejects_mismatched_variance():
@@ -152,7 +152,7 @@ def test_gaussian_nll_loss_rejects_mismatched_variance():
     variance = _tensor_1d(3)
 
     with pytest.raises(ValueError, match=r"variance dimensions [\s\S]* must match predictions dimensions"):
-        thor.losses.GaussianNLLLoss(n, preds, labels, variance)
+        thor.losses.distribution.GaussianNLLLoss(n, preds, labels, variance)
 
 
 def test_gaussian_nll_loss_rejects_predictions_not_1d():
@@ -162,7 +162,7 @@ def test_gaussian_nll_loss_rejects_predictions_not_1d():
     variance = thor.Tensor([1, 1], thor.DataType.fp32)
 
     with pytest.raises(ValueError, match=r"predictions must be a 1 dimensional mean tensor"):
-        thor.losses.GaussianNLLLoss(n, preds, labels, variance)
+        thor.losses.distribution.GaussianNLLLoss(n, preds, labels, variance)
 
 
 def test_gaussian_nll_loss_rejects_integer_variance():
@@ -172,7 +172,7 @@ def test_gaussian_nll_loss_rejects_integer_variance():
     variance = _tensor_1d(3, thor.DataType.uint16)
 
     with pytest.raises(ValueError, match=r"variance must use fp16 or fp32 dtype"):
-        thor.losses.GaussianNLLLoss(n, preds, labels, variance)
+        thor.losses.distribution.GaussianNLLLoss(n, preds, labels, variance)
 
 
 def test_gaussian_nll_loss_rejects_invalid_loss_data_type():
@@ -182,7 +182,7 @@ def test_gaussian_nll_loss_rejects_invalid_loss_data_type():
     variance = _tensor_1d(1)
 
     with pytest.raises(ValueError, match=r"loss_data_type must be fp16 or fp32"):
-        thor.losses.GaussianNLLLoss(n, preds, labels, variance, False, 1.0e-6, thor.DataType.int32)
+        thor.losses.distribution.GaussianNLLLoss(n, preds, labels, variance, False, 1.0e-6, thor.DataType.int32)
 
 
 def test_gaussian_nll_loss_rejects_non_positive_eps():
@@ -192,7 +192,7 @@ def test_gaussian_nll_loss_rejects_non_positive_eps():
     variance = _tensor_1d(1)
 
     with pytest.raises(ValueError, match=r"eps must be greater than zero"):
-        thor.losses.GaussianNLLLoss(n, preds, labels, variance, False, 0.0)
+        thor.losses.distribution.GaussianNLLLoss(n, preds, labels, variance, False, 0.0)
 
 
 @pytest.mark.cuda
@@ -244,7 +244,7 @@ def test_gaussian_nll_loss_save_load_round_trip_serializes_support_layers(tmp_pa
     predictions_input = thor.layers.NetworkInput(n, "predictions", [4], dtype)
     labels_input = thor.layers.NetworkInput(n, "labels", [4], dtype)
     variance_input = thor.layers.NetworkInput(n, "variance", [4], dtype)
-    loss = thor.losses.GaussianNLLLoss(
+    loss = thor.losses.distribution.GaussianNLLLoss(
         n,
         predictions_input.get_feature_output(),
         labels_input.get_feature_output(),

@@ -2,7 +2,7 @@
 #include <nanobind/stl/optional.h>
 #include <optional>
 
-#include "DeepLearning/Api/Layers/Loss/FocalTverskyLoss.h"
+#include "DeepLearning/Api/Layers/Loss/TverskyLoss.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 
@@ -25,7 +25,7 @@ void validateReportedLossShape(LossShape reported_loss_shape, const string &loss
     }
 }
 
-void setReportedLossShape(FocalTverskyLoss::Builder &builder, LossShape reported_loss_shape) {
+void setReportedLossShape(TverskyLoss::Builder &builder, LossShape reported_loss_shape) {
     if (reported_loss_shape == LossShape::BATCH) {
         builder.reportsBatchLoss();
     } else if (reported_loss_shape == LossShape::CLASSWISE) {
@@ -62,23 +62,22 @@ void validateProbabilityLossTensors(const string &loss_name, Tensor predictions,
 }
 }  // namespace
 
-void bind_focal_tversky_loss(nb::module_ &losses) {
-    auto focal_tversky_loss = nb::class_<FocalTverskyLoss, Loss>(losses, "FocalTverskyLoss");
-    focal_tversky_loss.attr("__module__") = "thor.losses";
+void bind_tversky_loss(nb::module_ &losses) {
+    auto tversky_loss = nb::class_<TverskyLoss, Loss>(losses, "TverskyLoss");
+    tversky_loss.attr("__module__") = "thor.losses.segmentation";
 
-    focal_tversky_loss.def(
+    tversky_loss.def(
         "__init__",
-        [](FocalTverskyLoss *self,
+        [](TverskyLoss *self,
            Network &network,
            Tensor predictions,
            Tensor labels,
            float alpha,
            float beta,
-           float gamma,
            float smooth,
            std::optional<DataType> loss_data_type,
            LossShape reported_loss_shape) {
-            const string loss_name = "FocalTverskyLoss instance";
+            const string loss_name = "TverskyLoss instance";
             validateProbabilityLossTensors(loss_name, predictions, labels);
             if (alpha < 0.0f) {
                 string error_message = loss_name + ": alpha must be non-negative";
@@ -86,10 +85,6 @@ void bind_focal_tversky_loss(nb::module_ &losses) {
             }
             if (beta < 0.0f) {
                 string error_message = loss_name + ": beta must be non-negative";
-                throw nb::value_error(error_message.c_str());
-            }
-            if (gamma <= 0.0f) {
-                string error_message = loss_name + ": gamma must be greater than zero";
                 throw nb::value_error(error_message.c_str());
             }
             if (smooth < 0.0f) {
@@ -103,43 +98,40 @@ void bind_focal_tversky_loss(nb::module_ &losses) {
             }
             validateReportedLossShape(reported_loss_shape, loss_name);
 
-            FocalTverskyLoss::Builder builder;
+            TverskyLoss::Builder builder;
             builder.network(network)
                 .predictions(predictions)
                 .labels(labels)
                 .alpha(alpha)
                 .beta(beta)
-                .gamma(gamma)
                 .smooth(smooth)
                 .lossDataType(effectiveLossDataType);
             setReportedLossShape(builder, reported_loss_shape);
-            FocalTverskyLoss built = builder.build();
+            TverskyLoss built = builder.build();
 
-            new (self) FocalTverskyLoss(std::move(built));
+            new (self) TverskyLoss(std::move(built));
         },
         "network"_a,
         "predictions"_a,
         "labels"_a,
-        "alpha"_a = 0.3f,
-        "beta"_a = 0.7f,
-        "gamma"_a = 0.75f,
+        "alpha"_a = 0.5f,
+        "beta"_a = 0.5f,
         "smooth"_a = 1.0f,
         "loss_data_type"_a.none() = nb::none(),
         "reported_loss_shape"_a = LossShape::BATCH,
-        R"nbdoc(Construct a focal Tversky loss.)nbdoc");
+        R"nbdoc(Construct a Tversky loss.)nbdoc");
 
-    focal_tversky_loss.def_prop_ro("alpha", &FocalTverskyLoss::getAlpha);
-    focal_tversky_loss.def_prop_ro("beta", &FocalTverskyLoss::getBeta);
-    focal_tversky_loss.def_prop_ro("gamma", &FocalTverskyLoss::getGamma);
-    focal_tversky_loss.def_prop_ro("smooth", &FocalTverskyLoss::getSmooth);
+    tversky_loss.def_prop_ro("alpha", &TverskyLoss::getAlpha);
+    tversky_loss.def_prop_ro("beta", &TverskyLoss::getBeta);
+    tversky_loss.def_prop_ro("smooth", &TverskyLoss::getSmooth);
 
-    focal_tversky_loss.attr("__doc__") = R"nbdoc(
-Focal Tversky loss over dense probability tensors.
+    tversky_loss.attr("__doc__") = R"nbdoc(
+Tversky loss over dense probability tensors.
 
-Predictions are expected to already be probabilities, not logits. For a one-dimensional feature tensor [N], Focal Tversky is computed globally over N for each sample. For [C, ...spatial], Focal Tversky is computed per class/channel C by reducing only the spatial axes:
+Predictions are expected to already be probabilities, not logits. For a one-dimensional feature tensor [N], Tversky is computed globally over N for each sample. For [C, ...spatial], Tversky is computed per class/channel C by reducing only the spatial axes:
 
-    (1 - TverskyIndex) ** gamma
+    1 - (TP + smooth) / (TP + alpha * FP + beta * FN + smooth)
 
-where TverskyIndex = (TP + smooth) / (TP + alpha * FP + beta * FN + smooth).
+alpha weights false positives and beta weights false negatives.
 )nbdoc";
 }

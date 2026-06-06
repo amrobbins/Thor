@@ -44,7 +44,8 @@ void validateListNetLossArguments(const string &loss_name,
                                   float score_temperature,
                                   float label_temperature,
                                   optional<DataType> loss_data_type,
-                                  LossShape reported_loss_shape) {
+                                  LossShape reported_loss_shape,
+                                  optional<Tensor> mask) {
     if (predictions.getDimensions().size() != 1 || predictions.getDimensions()[0] <= 1) {
         string error_message = loss_name +
                                ": predictions must be a 1 dimensional fixed-size list score tensor with more than one document but predictions is " +
@@ -56,6 +57,11 @@ void validateListNetLossArguments(const string &loss_name,
                                " must match predictions dimensions " + predictions.getDescriptorString();
         throw nb::value_error(error_message.c_str());
     }
+    if (mask.has_value() && mask.value().getDimensions() != predictions.getDimensions()) {
+        string error_message = loss_name + ": mask dimensions " + mask.value().getDescriptorString() +
+                               " must match predictions dimensions " + predictions.getDescriptorString();
+        throw nb::value_error(error_message.c_str());
+    }
     if (predictions.getDataType() != DataType::FP16 && predictions.getDataType() != DataType::FP32) {
         string error_message = loss_name + ": predictions must use fp16 or fp32 dtype";
         throw nb::value_error(error_message.c_str());
@@ -63,6 +69,13 @@ void validateListNetLossArguments(const string &loss_name,
     if (labels.getDataType() != DataType::FP16 && labels.getDataType() != DataType::FP32) {
         string error_message = loss_name + ": labels must use fp16 or fp32 dtype";
         throw nb::value_error(error_message.c_str());
+    }
+    if (mask.has_value()) {
+        DataType maskDType = mask.value().getDataType();
+        if (maskDType != DataType::BOOLEAN && maskDType != DataType::UINT8 && maskDType != DataType::FP16 && maskDType != DataType::FP32) {
+            string error_message = loss_name + ": mask must use bool, uint8, fp16, or fp32 dtype";
+            throw nb::value_error(error_message.c_str());
+        }
     }
     if (score_temperature <= 0.0f) {
         string error_message = loss_name + ": score_temperature must be greater than zero";
@@ -81,9 +94,9 @@ void validateListNetLossArguments(const string &loss_name,
 }
 }  // namespace
 
-void bind_list_net_loss(nb::module_ &losses) {
-    auto list_net_loss = nb::class_<ListNetLoss, Loss>(losses, "ListNetLoss");
-    list_net_loss.attr("__module__") = "thor.losses";
+void bind_list_net_loss(nb::module_ &ranking) {
+    auto list_net_loss = nb::class_<ListNetLoss, Loss>(ranking, "ListNetLoss");
+    list_net_loss.attr("__module__") = "thor.losses.ranking";
 
     list_net_loss.def(
         "__init__",
@@ -94,7 +107,8 @@ void bind_list_net_loss(nb::module_ &losses) {
            float score_temperature,
            float label_temperature,
            std::optional<DataType> loss_data_type,
-           LossShape reported_loss_shape) {
+           LossShape reported_loss_shape,
+           std::optional<Tensor> mask) {
             const string loss_name = "ListNetLoss instance";
             validateListNetLossArguments(loss_name,
                                          predictions,
@@ -102,7 +116,8 @@ void bind_list_net_loss(nb::module_ &losses) {
                                          score_temperature,
                                          label_temperature,
                                          loss_data_type,
-                                         reported_loss_shape);
+                                         reported_loss_shape,
+                                         mask);
 
             DataType effectiveLossDataType = loss_data_type.value_or(predictions.getDataType());
             ListNetLoss::Builder builder;
@@ -112,6 +127,8 @@ void bind_list_net_loss(nb::module_ &losses) {
                 .scoreTemperature(score_temperature)
                 .labelTemperature(label_temperature)
                 .lossDataType(effectiveLossDataType);
+            if (mask.has_value())
+                builder.mask(mask.value());
             setReportedLossShape(builder, reported_loss_shape);
             ListNetLoss built = builder.build();
 
@@ -124,6 +141,7 @@ void bind_list_net_loss(nb::module_ &losses) {
         "label_temperature"_a = 1.0f,
         "loss_data_type"_a.none() = nb::none(),
         "reported_loss_shape"_a = LossShape::BATCH,
+        "mask"_a.none() = nb::none(),
         R"nbdoc(Construct a ListNet loss over fixed-size query/document lists.)nbdoc");
 
     list_net_loss.def_prop_ro("score_temperature", &ListNetLoss::getScoreTemperature);
@@ -140,7 +158,7 @@ scalar per list:
 
     -sum(target * log_softmax(predictions / score_temperature))
 
-The current implementation supports fixed-size lists. Use padding/masking or ragged groups only
-when those ranking scaffolds are added.
+The current implementation supports fixed-size lists. Use the optional mask tensor for padded
+fixed-size lists. True ragged query/document groups require later segment/ragged scaffolding.
 )nbdoc";
 }

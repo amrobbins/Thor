@@ -112,7 +112,7 @@ void validateLSGANGeneratorLossArguments(const string& loss_name,
 
 void bind_lsgan_losses(nb::module_& losses) {
     auto discriminator_loss = nb::class_<LSGANDiscriminatorLoss, Loss>(losses, "LSGANDiscriminatorLoss");
-    discriminator_loss.attr("__module__") = "thor.losses";
+    discriminator_loss.attr("__module__") = "thor.losses.gan";
 
     discriminator_loss.def(
         "__init__",
@@ -167,7 +167,7 @@ backpropagate into the generator.
 )nbdoc";
 
     auto generator_loss = nb::class_<LSGANGeneratorLoss, Loss>(losses, "LSGANGeneratorLoss");
-    generator_loss.attr("__module__") = "thor.losses";
+    generator_loss.attr("__module__") = "thor.losses.gan";
 
     generator_loss.def(
         "__init__",

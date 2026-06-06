@@ -57,7 +57,7 @@ def _run_contrastive_loss_network(
     feature_dims = list(predictions.shape[1:])
     predictions_input = thor.layers.NetworkInput(n, "predictions", feature_dims, dtype)
     labels_input = thor.layers.NetworkInput(n, "labels", feature_dims, dtype)
-    loss = thor.losses.ContrastiveLoss(
+    loss = thor.losses.metric_learning.ContrastiveLoss(
         n,
         predictions_input.get_feature_output(),
         labels_input.get_feature_output(),
@@ -83,8 +83,8 @@ def test_contrastive_loss_constructs_defaults():
     preds = _tensor_1d(1)
     labels = _tensor_1d(1)
 
-    loss = thor.losses.ContrastiveLoss(n, preds, labels)
-    assert isinstance(loss, thor.losses.ContrastiveLoss)
+    loss = thor.losses.metric_learning.ContrastiveLoss(n, preds, labels)
+    assert isinstance(loss, thor.losses.metric_learning.ContrastiveLoss)
     assert loss.margin == pytest.approx(1.0)
 
 
@@ -93,7 +93,7 @@ def test_contrastive_loss_constructs_with_margin_loss_dtype_and_shape():
     preds = _tensor_1d(4, thor.DataType.fp16)
     labels = _tensor_1d(4, thor.DataType.uint8)
 
-    loss = thor.losses.ContrastiveLoss(
+    loss = thor.losses.metric_learning.ContrastiveLoss(
         n,
         preds,
         labels,
@@ -101,7 +101,7 @@ def test_contrastive_loss_constructs_with_margin_loss_dtype_and_shape():
         thor.DataType.fp32,
         thor.losses.LossShape.elementwise,
     )
-    assert isinstance(loss, thor.losses.ContrastiveLoss)
+    assert isinstance(loss, thor.losses.metric_learning.ContrastiveLoss)
     assert loss.margin == pytest.approx(2.0)
 
 
@@ -111,8 +111,8 @@ def test_contrastive_loss_reported_loss_shape_variants_construct(shape):
     preds = _tensor_1d(3)
     labels = _tensor_1d(3)
 
-    loss = thor.losses.ContrastiveLoss(n, preds, labels, 1.0, None, getattr(thor.losses.LossShape, shape))
-    assert isinstance(loss, thor.losses.ContrastiveLoss)
+    loss = thor.losses.metric_learning.ContrastiveLoss(n, preds, labels, 1.0, None, getattr(thor.losses.LossShape, shape))
+    assert isinstance(loss, thor.losses.metric_learning.ContrastiveLoss)
 
 
 def test_contrastive_loss_rejects_non_positive_margin():
@@ -121,7 +121,7 @@ def test_contrastive_loss_rejects_non_positive_margin():
     labels = _tensor_1d(1)
 
     with pytest.raises(ValueError, match=r"margin must be greater than zero"):
-        thor.losses.ContrastiveLoss(n, preds, labels, 0.0)
+        thor.losses.metric_learning.ContrastiveLoss(n, preds, labels, 0.0)
 
 
 def test_contrastive_loss_rejects_mismatched_labels():
@@ -130,7 +130,7 @@ def test_contrastive_loss_rejects_mismatched_labels():
     labels = _tensor_1d(3)
 
     with pytest.raises(ValueError, match=r"labels dimensions [\s\S]* must match predictions dimensions"):
-        thor.losses.ContrastiveLoss(n, preds, labels)
+        thor.losses.metric_learning.ContrastiveLoss(n, preds, labels)
 
 
 def test_contrastive_loss_rejects_predictions_not_1d():
@@ -139,7 +139,7 @@ def test_contrastive_loss_rejects_predictions_not_1d():
     labels = thor.Tensor([1, 1], thor.DataType.fp32)
 
     with pytest.raises(ValueError, match=r"predictions must be a 1 dimensional distance tensor"):
-        thor.losses.ContrastiveLoss(n, preds, labels)
+        thor.losses.metric_learning.ContrastiveLoss(n, preds, labels)
 
 
 def test_contrastive_loss_rejects_invalid_dtypes():
@@ -148,11 +148,11 @@ def test_contrastive_loss_rejects_invalid_dtypes():
     labels = _tensor_1d(1)
 
     with pytest.raises(ValueError, match=r"loss_data_type must be fp16 or fp32"):
-        thor.losses.ContrastiveLoss(n, preds, labels, 1.0, thor.DataType.int32)
+        thor.losses.metric_learning.ContrastiveLoss(n, preds, labels, 1.0, thor.DataType.int32)
     with pytest.raises(ValueError, match=r"predictions must use fp16 or fp32 dtype"):
-        thor.losses.ContrastiveLoss(n, _tensor_1d(1, thor.DataType.uint8), labels)
+        thor.losses.metric_learning.ContrastiveLoss(n, _tensor_1d(1, thor.DataType.uint8), labels)
     with pytest.raises(ValueError, match=r"labels must use bool, uint8, uint16, uint32, fp16, or fp32 dtype"):
-        thor.losses.ContrastiveLoss(n, preds, _tensor_1d(1, thor.DataType.int32))
+        thor.losses.metric_learning.ContrastiveLoss(n, preds, _tensor_1d(1, thor.DataType.int32))
 
 
 @pytest.mark.cuda

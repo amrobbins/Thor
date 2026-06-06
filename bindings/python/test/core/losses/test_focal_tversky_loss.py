@@ -75,7 +75,7 @@ def _run_focal_tversky_loss_network(
     feature_dims = list(predictions.shape[1:])
     predictions_input = thor.layers.NetworkInput(n, "predictions", feature_dims, dtype)
     labels_input = thor.layers.NetworkInput(n, "labels", feature_dims, dtype)
-    loss = thor.losses.FocalTverskyLoss(
+    loss = thor.losses.segmentation.FocalTverskyLoss(
         n,
         predictions_input.get_feature_output(),
         labels_input.get_feature_output(),
@@ -104,8 +104,8 @@ def test_focal_tversky_loss_constructs_defaults():
     preds = _tensor_1d(4)
     labels = _tensor_1d(4)
 
-    loss = thor.losses.FocalTverskyLoss(n, preds, labels)
-    assert isinstance(loss, thor.losses.FocalTverskyLoss)
+    loss = thor.losses.segmentation.FocalTverskyLoss(n, preds, labels)
+    assert isinstance(loss, thor.losses.segmentation.FocalTverskyLoss)
     assert loss.alpha == pytest.approx(0.3)
     assert loss.beta == pytest.approx(0.7)
     assert loss.gamma == pytest.approx(0.75)
@@ -117,7 +117,7 @@ def test_focal_tversky_loss_constructs_multidimensional_probabilities():
     preds = _tensor([2, 3, 4], thor.DataType.fp16)
     labels = _tensor([2, 3, 4], thor.DataType.uint8)
 
-    loss = thor.losses.FocalTverskyLoss(
+    loss = thor.losses.segmentation.FocalTverskyLoss(
         n,
         preds,
         labels,
@@ -128,7 +128,7 @@ def test_focal_tversky_loss_constructs_multidimensional_probabilities():
         thor.DataType.fp32,
         thor.losses.LossShape.raw,
     )
-    assert isinstance(loss, thor.losses.FocalTverskyLoss)
+    assert isinstance(loss, thor.losses.segmentation.FocalTverskyLoss)
     assert loss.alpha == pytest.approx(0.25)
     assert loss.beta == pytest.approx(0.75)
     assert loss.gamma == pytest.approx(1.5)
@@ -141,8 +141,8 @@ def test_focal_tversky_loss_reported_loss_shape_variants_construct(shape):
     preds = _tensor([2, 3, 4])
     labels = _tensor([2, 3, 4])
 
-    loss = thor.losses.FocalTverskyLoss(n, preds, labels, 0.3, 0.7, 0.75, 1.0, None, getattr(thor.losses.LossShape, shape))
-    assert isinstance(loss, thor.losses.FocalTverskyLoss)
+    loss = thor.losses.segmentation.FocalTverskyLoss(n, preds, labels, 0.3, 0.7, 0.75, 1.0, None, getattr(thor.losses.LossShape, shape))
+    assert isinstance(loss, thor.losses.segmentation.FocalTverskyLoss)
 
 
 def test_focal_tversky_loss_rejects_mismatched_labels():
@@ -151,22 +151,22 @@ def test_focal_tversky_loss_rejects_mismatched_labels():
     labels = _tensor_1d(3)
 
     with pytest.raises(ValueError, match=r"labels dimensions [\s\S]* must match predictions dimensions"):
-        thor.losses.FocalTverskyLoss(n, preds, labels)
+        thor.losses.segmentation.FocalTverskyLoss(n, preds, labels)
 
 
 def test_focal_tversky_loss_rejects_bad_params():
     n = _net()
 
     with pytest.raises(ValueError, match=r"alpha must be non-negative"):
-        thor.losses.FocalTverskyLoss(n, _tensor_1d(3), _tensor_1d(3), -0.1)
+        thor.losses.segmentation.FocalTverskyLoss(n, _tensor_1d(3), _tensor_1d(3), -0.1)
     with pytest.raises(ValueError, match=r"beta must be non-negative"):
-        thor.losses.FocalTverskyLoss(n, _tensor_1d(3), _tensor_1d(3), 0.3, -0.1)
+        thor.losses.segmentation.FocalTverskyLoss(n, _tensor_1d(3), _tensor_1d(3), 0.3, -0.1)
     with pytest.raises(ValueError, match=r"gamma must be greater than zero"):
-        thor.losses.FocalTverskyLoss(n, _tensor_1d(3), _tensor_1d(3), 0.3, 0.7, 0.0)
+        thor.losses.segmentation.FocalTverskyLoss(n, _tensor_1d(3), _tensor_1d(3), 0.3, 0.7, 0.0)
     with pytest.raises(ValueError, match=r"smooth must be non-negative"):
-        thor.losses.FocalTverskyLoss(n, _tensor_1d(3), _tensor_1d(3), 0.3, 0.7, 0.75, -0.1)
+        thor.losses.segmentation.FocalTverskyLoss(n, _tensor_1d(3), _tensor_1d(3), 0.3, 0.7, 0.75, -0.1)
     with pytest.raises(ValueError, match=r"loss_data_type must be fp16 or fp32"):
-        thor.losses.FocalTverskyLoss(n, _tensor_1d(3), _tensor_1d(3), 0.3, 0.7, 0.75, 1.0, thor.DataType.int32)
+        thor.losses.segmentation.FocalTverskyLoss(n, _tensor_1d(3), _tensor_1d(3), 0.3, 0.7, 0.75, 1.0, thor.DataType.int32)
 
 
 @pytest.mark.cuda

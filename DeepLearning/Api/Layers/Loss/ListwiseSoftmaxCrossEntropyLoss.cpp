@@ -1,6 +1,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "DeepLearning/Api/Layers/Loss/ListwiseSoftmaxCrossEntropyLoss.h"
+#include "DeepLearning/Api/Layers/Loss/MultiInputCustomLoss.h"
 
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/Expression.h"
@@ -13,6 +14,7 @@ namespace {
 
 constexpr const char* kPredictionsName = "predictions";
 constexpr const char* kLabelsName = "labels";
+constexpr const char* kMaskName = "mask";
 constexpr const char* kLossName = "loss";
 constexpr const char* kGradientName = "predictions_grad";
 
@@ -30,14 +32,39 @@ void validatePredictionsDType(DataType dtype) {
     }
 }
 
-ThorImplementation::DynamicExpression makeListwiseSoftmaxCrossEntropyLossExpression(DataType lossDataType, float temperature) {
+void validateMaskDType(DataType dtype) {
+    switch (dtype) {
+        case DataType::BOOLEAN:
+        case DataType::UINT8:
+        case DataType::FP16:
+        case DataType::FP32:
+            return;
+        default:
+            throw runtime_error("Unsupported ListwiseSoftmaxCrossEntropyLoss mask dtype: " +
+                                ThorImplementation::TensorDescriptor::getElementTypeName(dtype));
+    }
+}
+
+ThorImplementation::DynamicExpression makeListwiseSoftmaxCrossEntropyLossExpression(DataType lossDataType,
+                                                                                    float temperature,
+                                                                                    bool useMask) {
     validatePredictionsDType(lossDataType);
 
     ThorImplementation::Expression scores = ThorImplementation::Expression::input(kPredictionsName, DataType::FP32, DataType::FP32);
     ThorImplementation::Expression labels = ThorImplementation::Expression::input(kLabelsName, DataType::FP32, DataType::FP32);
     ThorImplementation::Expression scaledScores = scores / ThorImplementation::Expression(temperature);
+    ThorImplementation::Expression effectiveLabels = labels;
+    ThorImplementation::Expression validMask(1.0);
+    if (useMask) {
+        ThorImplementation::Expression mask = ThorImplementation::Expression::input(kMaskName, DataType::FP32, DataType::FP32);
+        validMask = mask > ThorImplementation::Expression(0.5);
+        scaledScores = ThorImplementation::Expression::where(validMask, scaledScores, ThorImplementation::Expression(-1.0e20));
+        effectiveLabels = ThorImplementation::Expression::where(validMask, labels, ThorImplementation::Expression(0.0));
+    }
     ThorImplementation::Expression logProbabilities = scaledScores.logSoftmax();
-    ThorImplementation::Expression perDocumentLoss = -(labels * logProbabilities);
+    ThorImplementation::Expression perDocumentLoss = -(effectiveLabels * logProbabilities);
+    if (useMask)
+        perDocumentLoss = ThorImplementation::Expression::where(validMask, perDocumentLoss, ThorImplementation::Expression(0.0));
     ThorImplementation::Expression perListLoss = perDocumentLoss.reduce_sum({1}, {}, DataType::FP32).withOutputDType(lossDataType);
 
     ThorImplementation::ExpressionDefinition definition =
@@ -45,18 +72,30 @@ ThorImplementation::DynamicExpression makeListwiseSoftmaxCrossEntropyLossExpress
     return ThorImplementation::DynamicExpression::fromExpressionDefinition(definition);
 }
 
-ThorImplementation::DynamicExpression makeListwiseSoftmaxCrossEntropyGradientExpression(DataType predictionsDataType, float temperature) {
+ThorImplementation::DynamicExpression makeListwiseSoftmaxCrossEntropyGradientExpression(DataType predictionsDataType,
+                                                                                        float temperature,
+                                                                                        bool useMask) {
     validatePredictionsDType(predictionsDataType);
 
     ThorImplementation::Expression scores = ThorImplementation::Expression::input(kPredictionsName, DataType::FP32, DataType::FP32);
     ThorImplementation::Expression labels = ThorImplementation::Expression::input(kLabelsName, DataType::FP32, DataType::FP32);
     ThorImplementation::Expression scaledScores = scores / ThorImplementation::Expression(temperature);
+    ThorImplementation::Expression effectiveLabels = labels;
+    ThorImplementation::Expression validMask(1.0);
+    if (useMask) {
+        ThorImplementation::Expression mask = ThorImplementation::Expression::input(kMaskName, DataType::FP32, DataType::FP32);
+        validMask = mask > ThorImplementation::Expression(0.5);
+        scaledScores = ThorImplementation::Expression::where(validMask, scaledScores, ThorImplementation::Expression(-1.0e20));
+        effectiveLabels = ThorImplementation::Expression::where(validMask, labels, ThorImplementation::Expression(0.0));
+    }
     ThorImplementation::Expression probabilities = scaledScores.softmax();
-    ThorImplementation::Expression labelMass = labels.reduce_sum({1}, {}, DataType::FP32);
-    ThorImplementation::Expression gradient = (((probabilities * labelMass) - labels) /
+    ThorImplementation::Expression labelMass = effectiveLabels.reduce_sum({1}, {}, DataType::FP32);
+    ThorImplementation::Expression gradient = (((probabilities * labelMass) - effectiveLabels) /
                                                ThorImplementation::Expression(temperature) *
-                                               ThorImplementation::Expression(ThorImplementation::Loss::getLossScalingFactor()))
-                                                  .withOutputDType(predictionsDataType);
+                                               ThorImplementation::Expression(ThorImplementation::Loss::getLossScalingFactor()));
+    if (useMask)
+        gradient = ThorImplementation::Expression::where(validMask, gradient, ThorImplementation::Expression(0.0));
+    gradient = gradient.withOutputDType(predictionsDataType);
 
     ThorImplementation::ExpressionDefinition definition = ThorImplementation::ExpressionDefinition::fromOutputs(
         ThorImplementation::Expression::outputs({{kGradientName, gradient}}));
@@ -73,24 +112,39 @@ void ListwiseSoftmaxCrossEntropyLoss::buildSupportLayersAndAddToNetwork() {
     THOR_THROW_IF_FALSE(predictionsTensor.getDimensions() == labelsTensor.getDimensions());
     THOR_THROW_IF_FALSE(temperature > 0.0f);
 
-    CustomLoss rawListwiseSoftmaxCrossEntropyLoss = CustomLoss::Builder()
-                                                       .network(*network)
-                                                       .lossExpression(makeListwiseSoftmaxCrossEntropyLossExpression(lossDataType,
-                                                                                                                     temperature))
-                                                       .gradientExpression(makeListwiseSoftmaxCrossEntropyGradientExpression(
-                                                           predictionsTensor.getDataType(),
-                                                           temperature))
-                                                       .predictions(predictionsTensor)
-                                                       .labels(labelsTensor)
-                                                       .predictionsName(kPredictionsName)
-                                                       .labelsName(kLabelsName)
-                                                       .lossName(kLossName)
-                                                       .gradientName(kGradientName)
-                                                       .lossDataType(lossDataType)
-                                                       .reportsRawLoss()
-                                                       .build();
-
-    lossShaperInput = rawListwiseSoftmaxCrossEntropyLoss.getLoss();
+    if (maskTensor.has_value()) {
+        validateMaskDType(maskTensor.value().getDataType());
+        THOR_THROW_IF_FALSE(maskTensor.value().getDimensions() == predictionsTensor.getDimensions());
+        MultiInputCustomLoss rawListwiseSoftmaxCrossEntropyLoss =
+            MultiInputCustomLoss::Builder()
+                .network(*network)
+                .lossExpression(makeListwiseSoftmaxCrossEntropyLossExpression(lossDataType, temperature, true))
+                .gradientExpression(makeListwiseSoftmaxCrossEntropyGradientExpression(predictionsTensor.getDataType(), temperature, true))
+                .input(kPredictionsName, predictionsTensor, kGradientName)
+                .auxiliaryInput(kLabelsName, labelsTensor)
+                .auxiliaryInput(kMaskName, maskTensor.value())
+                .lossName(kLossName)
+                .lossDataType(lossDataType)
+                .reportsRawLoss()
+                .build();
+        lossShaperInput = rawListwiseSoftmaxCrossEntropyLoss.getLoss();
+    } else {
+        CustomLoss rawListwiseSoftmaxCrossEntropyLoss =
+            CustomLoss::Builder()
+                .network(*network)
+                .lossExpression(makeListwiseSoftmaxCrossEntropyLossExpression(lossDataType, temperature, false))
+                .gradientExpression(makeListwiseSoftmaxCrossEntropyGradientExpression(predictionsTensor.getDataType(), temperature, false))
+                .predictions(predictionsTensor)
+                .labels(labelsTensor)
+                .predictionsName(kPredictionsName)
+                .labelsName(kLabelsName)
+                .lossName(kLossName)
+                .gradientName(kGradientName)
+                .lossDataType(lossDataType)
+                .reportsRawLoss()
+                .build();
+        lossShaperInput = rawListwiseSoftmaxCrossEntropyLoss.getLoss();
+    }
 
     if (lossShape == LossShape::BATCH) {
         LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(lossShaperInput).reportsBatchLoss().build();
@@ -112,6 +166,9 @@ json ListwiseSoftmaxCrossEntropyLoss::architectureJson() const {
     j["layer_type"] = "listwise_softmax_cross_entropy_loss";
     j["loss_shape"] = lossShape;
     j["temperature"] = temperature;
+    j["has_mask"] = maskTensor.has_value();
+    if (maskTensor.has_value())
+        j["mask_tensor"] = maskTensor.value().architectureJson();
     return j;
 }
 
@@ -127,12 +184,19 @@ void ListwiseSoftmaxCrossEntropyLoss::deserialize(const json& j, Network* networ
     originalTensorId = j["labels_tensor"].at("id").get<uint64_t>();
     Tensor labels = network->getApiTensorByOriginalId(originalTensorId);
 
+    std::optional<Tensor> mask = std::nullopt;
+    if (j.value("has_mask", false) || j.contains("mask_tensor")) {
+        originalTensorId = j.at("mask_tensor").at("id").get<uint64_t>();
+        mask = network->getApiTensorByOriginalId(originalTensorId);
+    }
+
     ListwiseSoftmaxCrossEntropyLoss listwiseSoftmaxCrossEntropyLoss;
     listwiseSoftmaxCrossEntropyLoss.lossShape = j.at("loss_shape").get<LossShape>();
     listwiseSoftmaxCrossEntropyLoss.lossDataType = j.at("loss_data_type").get<DataType>();
     listwiseSoftmaxCrossEntropyLoss.temperature = j.value("temperature", 1.0f);
     listwiseSoftmaxCrossEntropyLoss.predictionsTensor = predictions;
     listwiseSoftmaxCrossEntropyLoss.labelsTensor = labels;
+    listwiseSoftmaxCrossEntropyLoss.maskTensor = mask;
     listwiseSoftmaxCrossEntropyLoss.network = network;
     listwiseSoftmaxCrossEntropyLoss.initialized = true;
     listwiseSoftmaxCrossEntropyLoss.buildSupportLayersAndAddToNetwork();

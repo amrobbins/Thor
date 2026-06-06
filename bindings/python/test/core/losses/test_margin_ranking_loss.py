@@ -55,7 +55,7 @@ def _run_margin_ranking_loss_network(
     input1_layer = thor.layers.NetworkInput(n, "input1", feature_dims, dtype)
     input2_layer = thor.layers.NetworkInput(n, "input2", feature_dims, dtype)
     target_layer = thor.layers.NetworkInput(n, "target", feature_dims, dtype)
-    loss = thor.losses.MarginRankingLoss(
+    loss = thor.losses.ranking.MarginRankingLoss(
         n,
         input1_layer.get_feature_output(),
         input2_layer.get_feature_output(),
@@ -89,8 +89,8 @@ def test_margin_ranking_loss_constructs_defaults():
     input2 = _tensor_1d(4)
     target = _tensor_1d(4)
 
-    loss = thor.losses.MarginRankingLoss(n, input1, input2, target)
-    assert isinstance(loss, thor.losses.MarginRankingLoss)
+    loss = thor.losses.ranking.MarginRankingLoss(n, input1, input2, target)
+    assert isinstance(loss, thor.losses.ranking.MarginRankingLoss)
     assert loss.margin == pytest.approx(0.0)
 
 
@@ -100,7 +100,7 @@ def test_margin_ranking_loss_constructs_with_margin_loss_dtype_and_shape():
     input2 = _tensor_1d(4, thor.DataType.fp16)
     target = _tensor_1d(4, thor.DataType.int32)
 
-    loss = thor.losses.MarginRankingLoss(
+    loss = thor.losses.ranking.MarginRankingLoss(
         n,
         input1,
         input2,
@@ -109,7 +109,7 @@ def test_margin_ranking_loss_constructs_with_margin_loss_dtype_and_shape():
         thor.DataType.fp32,
         thor.losses.LossShape.elementwise,
     )
-    assert isinstance(loss, thor.losses.MarginRankingLoss)
+    assert isinstance(loss, thor.losses.ranking.MarginRankingLoss)
     assert loss.margin == pytest.approx(0.25)
 
 
@@ -120,8 +120,8 @@ def test_margin_ranking_loss_reported_loss_shape_variants_construct(shape):
     input2 = _tensor_1d(3)
     target = _tensor_1d(3)
 
-    loss = thor.losses.MarginRankingLoss(n, input1, input2, target, 0.0, None, getattr(thor.losses.LossShape, shape))
-    assert isinstance(loss, thor.losses.MarginRankingLoss)
+    loss = thor.losses.ranking.MarginRankingLoss(n, input1, input2, target, 0.0, None, getattr(thor.losses.LossShape, shape))
+    assert isinstance(loss, thor.losses.ranking.MarginRankingLoss)
 
 
 def test_margin_ranking_loss_rejects_negative_margin():
@@ -131,7 +131,7 @@ def test_margin_ranking_loss_rejects_negative_margin():
     target = _tensor_1d(4)
 
     with pytest.raises(ValueError, match=r"margin must be non-negative"):
-        thor.losses.MarginRankingLoss(n, input1, input2, target, -0.25)
+        thor.losses.ranking.MarginRankingLoss(n, input1, input2, target, -0.25)
 
 
 def test_margin_ranking_loss_rejects_mismatched_shapes():
@@ -141,10 +141,10 @@ def test_margin_ranking_loss_rejects_mismatched_shapes():
     target = _tensor_1d(4)
 
     with pytest.raises(ValueError, match=r"input2 dimensions [\s\S]* must match input1 dimensions"):
-        thor.losses.MarginRankingLoss(n, input1, input2, target)
+        thor.losses.ranking.MarginRankingLoss(n, input1, input2, target)
 
     with pytest.raises(ValueError, match=r"target dimensions [\s\S]* must match input1 dimensions"):
-        thor.losses.MarginRankingLoss(n, input1, _tensor_1d(4), _tensor_1d(3))
+        thor.losses.ranking.MarginRankingLoss(n, input1, _tensor_1d(4), _tensor_1d(3))
 
 
 def test_margin_ranking_loss_rejects_invalid_dtypes_and_duplicate_tensors():
@@ -154,15 +154,15 @@ def test_margin_ranking_loss_rejects_invalid_dtypes_and_duplicate_tensors():
     target = _tensor_1d(4)
 
     with pytest.raises(ValueError, match=r"loss_data_type must be fp16 or fp32"):
-        thor.losses.MarginRankingLoss(n, input1, input2, target, 0.0, thor.DataType.int32)
+        thor.losses.ranking.MarginRankingLoss(n, input1, input2, target, 0.0, thor.DataType.int32)
     with pytest.raises(ValueError, match=r"input1 must use fp16 or fp32 dtype"):
-        thor.losses.MarginRankingLoss(n, _tensor_1d(4, thor.DataType.uint8), input2, target)
+        thor.losses.ranking.MarginRankingLoss(n, _tensor_1d(4, thor.DataType.uint8), input2, target)
     with pytest.raises(ValueError, match=r"same fp16 or fp32 dtype"):
-        thor.losses.MarginRankingLoss(n, input1, _tensor_1d(4, thor.DataType.fp16), target)
+        thor.losses.ranking.MarginRankingLoss(n, input1, _tensor_1d(4, thor.DataType.fp16), target)
     with pytest.raises(ValueError, match=r"target must use int8, int16, int32, int64, fp16, or fp32 dtype"):
-        thor.losses.MarginRankingLoss(n, input1, input2, _tensor_1d(4, thor.DataType.uint8))
+        thor.losses.ranking.MarginRankingLoss(n, input1, input2, _tensor_1d(4, thor.DataType.uint8))
     with pytest.raises(ValueError, match=r"must be distinct tensors"):
-        thor.losses.MarginRankingLoss(n, input1, input1, target)
+        thor.losses.ranking.MarginRankingLoss(n, input1, input1, target)
 
 
 @pytest.mark.cuda

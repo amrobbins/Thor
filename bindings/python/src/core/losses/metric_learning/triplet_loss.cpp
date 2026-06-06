@@ -91,7 +91,7 @@ void validateTripletLossArguments(const string& loss_name,
 
 void bind_triplet_loss(nb::module_& losses) {
     auto triplet_loss = nb::class_<TripletLoss, Loss>(losses, "TripletLoss");
-    triplet_loss.attr("__module__") = "thor.losses";
+    triplet_loss.attr("__module__") = "thor.losses.metric_learning";
 
     triplet_loss.def(
         "__init__",

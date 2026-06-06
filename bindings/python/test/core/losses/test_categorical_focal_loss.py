@@ -66,7 +66,7 @@ def _run_categorical_focal_loss_network(
     feature_dims = list(predictions.shape[1:])
     predictions_input = thor.layers.NetworkInput(n, "predictions", feature_dims, dtype)
     labels_input = thor.layers.NetworkInput(n, "labels", feature_dims, dtype)
-    loss = thor.losses.CategoricalFocalLoss(
+    loss = thor.losses.classification.CategoricalFocalLoss(
         n,
         predictions_input.get_feature_output(),
         labels_input.get_feature_output(),
@@ -93,8 +93,8 @@ def test_categorical_focal_loss_constructs_defaults():
     preds = _tensor_1d(4)
     labels = _tensor_1d(4)
 
-    loss = thor.losses.CategoricalFocalLoss(n, preds, labels)
-    assert isinstance(loss, thor.losses.CategoricalFocalLoss)
+    loss = thor.losses.classification.CategoricalFocalLoss(n, preds, labels)
+    assert isinstance(loss, thor.losses.classification.CategoricalFocalLoss)
     assert loss.gamma == pytest.approx(2.0)
     assert loss.alpha == pytest.approx(1.0)
 
@@ -104,7 +104,7 @@ def test_categorical_focal_loss_constructs_custom_values():
     preds = _tensor_1d(4, thor.DataType.fp16)
     labels = _tensor_1d(4, thor.DataType.fp16)
 
-    loss = thor.losses.CategoricalFocalLoss(
+    loss = thor.losses.classification.CategoricalFocalLoss(
         n,
         preds,
         labels,
@@ -113,7 +113,7 @@ def test_categorical_focal_loss_constructs_custom_values():
         thor.DataType.fp32,
         thor.losses.LossShape.elementwise,
     )
-    assert isinstance(loss, thor.losses.CategoricalFocalLoss)
+    assert isinstance(loss, thor.losses.classification.CategoricalFocalLoss)
     assert loss.gamma == pytest.approx(1.5)
     assert loss.alpha == pytest.approx(0.75)
 
@@ -124,8 +124,8 @@ def test_categorical_focal_loss_reported_loss_shape_variants_construct(shape):
     preds = _tensor_1d(3)
     labels = _tensor_1d(3)
 
-    loss = thor.losses.CategoricalFocalLoss(n, preds, labels, 2.0, 1.0, None, getattr(thor.losses.LossShape, shape))
-    assert isinstance(loss, thor.losses.CategoricalFocalLoss)
+    loss = thor.losses.classification.CategoricalFocalLoss(n, preds, labels, 2.0, 1.0, None, getattr(thor.losses.LossShape, shape))
+    assert isinstance(loss, thor.losses.classification.CategoricalFocalLoss)
 
 
 def test_categorical_focal_loss_rejects_mismatched_labels():
@@ -134,7 +134,7 @@ def test_categorical_focal_loss_rejects_mismatched_labels():
     labels = _tensor_1d(3)
 
     with pytest.raises(ValueError, match=r"labels dimensions [\s\S]* must match predictions dimensions"):
-        thor.losses.CategoricalFocalLoss(n, preds, labels)
+        thor.losses.classification.CategoricalFocalLoss(n, preds, labels)
 
 
 def test_categorical_focal_loss_rejects_invalid_gamma_alpha_and_dtype():
@@ -143,11 +143,11 @@ def test_categorical_focal_loss_rejects_invalid_gamma_alpha_and_dtype():
     labels = _tensor_1d(3)
 
     with pytest.raises(ValueError, match=r"gamma must be non-negative"):
-        thor.losses.CategoricalFocalLoss(n, preds, labels, -1.0)
+        thor.losses.classification.CategoricalFocalLoss(n, preds, labels, -1.0)
     with pytest.raises(ValueError, match=r"alpha must be non-negative"):
-        thor.losses.CategoricalFocalLoss(n, preds, labels, 2.0, -0.1)
+        thor.losses.classification.CategoricalFocalLoss(n, preds, labels, 2.0, -0.1)
     with pytest.raises(ValueError, match=r"loss_data_type must be fp16 or fp32"):
-        thor.losses.CategoricalFocalLoss(n, preds, labels, 2.0, 1.0, thor.DataType.int32)
+        thor.losses.classification.CategoricalFocalLoss(n, preds, labels, 2.0, 1.0, thor.DataType.int32)
 
 
 def test_categorical_focal_loss_rejects_bad_shapes_and_dtypes():
@@ -156,10 +156,10 @@ def test_categorical_focal_loss_rejects_bad_shapes_and_dtypes():
     labels = thor.Tensor([1, 3], thor.DataType.fp32)
 
     with pytest.raises(ValueError, match=r"predictions must be a 1 dimensional logits tensor"):
-        thor.losses.CategoricalFocalLoss(n, preds, labels)
+        thor.losses.classification.CategoricalFocalLoss(n, preds, labels)
 
     with pytest.raises(ValueError, match=r"labels must use fp16 or fp32 dtype"):
-        thor.losses.CategoricalFocalLoss(n, _tensor_1d(3), _tensor_1d(3, thor.DataType.uint16))
+        thor.losses.classification.CategoricalFocalLoss(n, _tensor_1d(3), _tensor_1d(3, thor.DataType.uint16))
 
 
 @pytest.mark.cuda
