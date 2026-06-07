@@ -932,6 +932,44 @@ static std::vector<uint64_t> inferTransposeOutputDims(const std::vector<uint64_t
     return out_dims;
 }
 
+static uint64_t normalizedTakeAlongAxis(const ExprNode& node, uint64_t rank) {
+    if (rank == 0) {
+        throw std::runtime_error("take_along_axis requires rank >= 1.");
+    }
+    if (node.reduction_axes.empty()) {
+        return rank - 1;
+    }
+    const uint64_t encoded_axis = node.reduction_axes.front();
+    if (encoded_axis == UINT64_MAX) {
+        return rank - 1;
+    }
+    if (encoded_axis >= rank) {
+        throw std::runtime_error("take_along_axis axis is out of range for the input rank.");
+    }
+    return encoded_axis;
+}
+
+static std::vector<uint64_t> inferTakeAlongAxisOutputDims(const ExprNode& node,
+                                                          const std::vector<uint64_t>& input_dims,
+                                                          const std::vector<uint64_t>& indices_dims) {
+    if (input_dims.empty() || indices_dims.empty()) {
+        throw std::runtime_error("take_along_axis requires non-scalar input and indices tensors.");
+    }
+    if (input_dims.size() != indices_dims.size()) {
+        throw std::runtime_error("take_along_axis input and indices must have the same rank.");
+    }
+    const uint64_t axis = normalizedTakeAlongAxis(node, static_cast<uint64_t>(input_dims.size()));
+    for (uint64_t dim = 0; dim < input_dims.size(); ++dim) {
+        if (dim == axis) {
+            continue;
+        }
+        if (input_dims[dim] != indices_dims[dim]) {
+            throw std::runtime_error("take_along_axis input and indices dimensions must match except on the selected axis.");
+        }
+    }
+    return indices_dims;
+}
+
 struct AttentionTensorLogicalDims {
     uint64_t batch = 0;
     uint64_t heads = 0;
@@ -1138,6 +1176,9 @@ static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization
                 break;
             case ExprOp::EMBEDDING_LOOKUP:
                 node_dims[i] = inferEmbeddingLookupOutputDims(node_dims[node.lhs], node_dims[node.rhs]);
+                break;
+            case ExprOp::TAKE_ALONG_AXIS:
+                node_dims[i] = inferTakeAlongAxisOutputDims(node, node_dims[node.lhs], node_dims[node.rhs]);
                 break;
             case ExprOp::TRANSPOSE:
                 node_dims[i] = inferTransposeOutputDims(node_dims[node.lhs]);
@@ -1373,6 +1414,10 @@ static bool sameSubexpressionForMatmulEpilogue(const PhysicalExpression& expr,
                    (a.beta_node == b.beta_node || sameSubexpressionForMatmulEpilogue(expr, a.beta_node, b.beta_node, depth + 1));
         case ExprOp::NORMCDF:
             return sameSubexpressionForMatmulEpilogue(expr, a.lhs, b.lhs, depth + 1);
+        case ExprOp::TAKE_ALONG_AXIS:
+            return a.reduction_axes == b.reduction_axes &&
+                   sameSubexpressionForMatmulEpilogue(expr, a.lhs, b.lhs, depth + 1) &&
+                   sameSubexpressionForMatmulEpilogue(expr, a.rhs, b.rhs, depth + 1);
         case ExprOp::ADD:
         case ExprOp::SUB:
         case ExprOp::MUL:
@@ -2990,6 +3035,9 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDims(const Physical
                 }
                 break;
             }
+            case ExprOp::TAKE_ALONG_AXIS:
+                node_dims[i] = inferTakeAlongAxisOutputDims(node, node_dims[node.lhs], node_dims[node.rhs]);
+                break;
             case ExprOp::TRANSPOSE:
                 node_dims[i] = inferTransposeOutputDims(node_dims[node.lhs]);
                 break;
@@ -3460,6 +3508,9 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDimsForReachable(co
                 node_dims[i] = StampedEquation::computeReductionOutputDims(lhs_dims, reduction_axes, node.squeeze_axes);
                 break;
             }
+            case ExprOp::TAKE_ALONG_AXIS:
+                node_dims[i] = inferTakeAlongAxisOutputDims(node, node_dims[node.lhs], node_dims[node.rhs]);
+                break;
             case ExprOp::TRANSPOSE:
                 node_dims[i] = inferTransposeOutputDims(node_dims[node.lhs]);
                 break;
@@ -3512,6 +3563,7 @@ static uint64_t computeFusedStageFlops(const PhysicalExpression& expr,
             case ExprOp::UNSQUEEZE:
             case ExprOp::SQUEEZE:
             case ExprOp::TRANSPOSE:
+            case ExprOp::TAKE_ALONG_AXIS:
                 break;
 
             case ExprOp::ADD:
@@ -4108,7 +4160,7 @@ struct ResolvedBroadcastGroup {
 
 static bool expressionHasIndexAwareOps(const PhysicalExpression& expr) {
     return std::any_of(expr.nodes.begin(), expr.nodes.end(), [](const ExprNode& node) {
-        return node.op == ExprOp::ROPE || node.op == ExprOp::TRANSPOSE;
+        return node.op == ExprOp::ROPE || node.op == ExprOp::TRANSPOSE || node.op == ExprOp::TAKE_ALONG_AXIS;
     });
 }
 
@@ -4294,6 +4346,25 @@ static std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>> collectEffe
         case ExprOp::REDUCE_NORM1:
         case ExprOp::REDUCE_NORM2:
             return collectEffectiveInputDimsForNode(expr, node_dims, node.lhs);
+        case ExprOp::TAKE_ALONG_AXIS: {
+            auto lhs_map = collectEffectiveInputDimsForNode(expr, node_dims, node.lhs);
+            auto rhs_map = collectEffectiveInputDimsForNode(expr, node_dims, node.rhs);
+            // take_along_axis is an index-aware gather. Both the values tensor
+            // and the indices tensor are consumed in the gathered output domain
+            // rather than in the values input's physical shape; otherwise
+            // broadcast grouping tries to compare the pre-gather values shape
+            // against the output/indices shape and rejects valid gathers.
+            for (auto& [slot, dims_set] : lhs_map) {
+                dims_set.clear();
+                dims_set.insert(node_dims[node_idx]);
+            }
+            for (auto& [slot, dims_set] : rhs_map) {
+                dims_set.clear();
+                dims_set.insert(node_dims[node_idx]);
+            }
+            mergeEffectiveInputDimsMaps(lhs_map, rhs_map);
+            return lhs_map;
+        }
         case ExprOp::ADD:
         case ExprOp::SUB:
         case ExprOp::MUL:

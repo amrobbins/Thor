@@ -292,6 +292,18 @@ static DataType resolveNodeLogicalInputDType(const ExprNode& node,
         return resolved_output_dtypes[node.rhs];
     }
 
+    if (node.op == ExprOp::TAKE_ALONG_AXIS) {
+        if (node.lhs >= resolved_output_dtypes.size() || node.rhs >= resolved_output_dtypes.size()) {
+            throw std::runtime_error("take_along_axis node has parent index out of range in resolveNodeLogicalInputDType.");
+        }
+        const DataType indices_dtype = resolved_output_dtypes[node.rhs];
+        if (indices_dtype != DataType::UINT32 && indices_dtype != DataType::UINT64) {
+            throw std::runtime_error("take_along_axis indices must have UINT32 or UINT64 dtype, received: " +
+                                     TensorDescriptor::getElementTypeName(indices_dtype));
+        }
+        return resolved_output_dtypes[node.lhs];
+    }
+
     std::vector<DataType> tensor_parent_dtypes;
     tensor_parent_dtypes.reserve(4);
 
@@ -415,6 +427,19 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
         }
         const DataType weights_dtype = resolved_output_dtypes[node.rhs];
         return node.output_dtype.has_value() ? node.output_dtype.value() : weights_dtype;
+    }
+
+    if (node.op == ExprOp::TAKE_ALONG_AXIS) {
+        if (node.lhs >= resolved_output_dtypes.size() || node.rhs >= resolved_output_dtypes.size()) {
+            throw std::runtime_error("take_along_axis node has parent index out of range in resolveNodeOutputDType.");
+        }
+        const DataType indices_dtype = resolved_output_dtypes[node.rhs];
+        if (indices_dtype != DataType::UINT32 && indices_dtype != DataType::UINT64) {
+            throw std::runtime_error("take_along_axis indices must have UINT32 or UINT64 dtype, received: " +
+                                     TensorDescriptor::getElementTypeName(indices_dtype));
+        }
+        const DataType input_dtype = resolved_output_dtypes[node.lhs];
+        return node.output_dtype.has_value() ? node.output_dtype.value() : input_dtype;
     }
 
     if (node.op == ExprOp::RMSNORM) {

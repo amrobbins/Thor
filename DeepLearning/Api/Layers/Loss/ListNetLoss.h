@@ -4,6 +4,7 @@
 #include "DeepLearning/Api/Layers/Loss/CustomLoss.h"
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
 #include "DeepLearning/Api/Layers/Loss/LossShaper.h"
+#include "DeepLearning/Api/Layers/Loss/ListwiseLossCommon.h"
 #include "DeepLearning/Api/Network/Network.h"
 
 #include <optional>
@@ -83,25 +84,22 @@ class ListNetLoss::Builder {
         THOR_THROW_IF_FALSE(_predictions.has_value());
         THOR_THROW_IF_FALSE(_labels.has_value());
         THOR_THROW_IF_FALSE(_predictions.value() != _labels.value());
-        THOR_THROW_IF_FALSE(_predictions.value().getDimensions().size() == 1);
-        THOR_THROW_IF_FALSE(_predictions.value().getDimensions()[0] > 1);
-        THOR_THROW_IF_FALSE(_predictions.value().getDimensions() == _labels.value().getDimensions());
         if (_mask.has_value()) {
             THOR_THROW_IF_FALSE(_mask.value() != _predictions.value());
             THOR_THROW_IF_FALSE(_mask.value() != _labels.value());
-            THOR_THROW_IF_FALSE(_mask.value().getDimensions() == _predictions.value().getDimensions());
         }
 
         if (!_lossShape.has_value())
             _lossShape = LossShape::BATCH;
         if (!_lossDataType.has_value())
             _lossDataType = _predictions.value().getDataType();
-        THOR_THROW_IF_FALSE(_lossDataType.value() == DataType::FP16 || _lossDataType.value() == DataType::FP32);
 
         float scoreTemperature = _scoreTemperature.value_or(1.0f);
         float labelTemperature = _labelTemperature.value_or(1.0f);
-        THOR_THROW_IF_FALSE(scoreTemperature > 0.0f);
-        THOR_THROW_IF_FALSE(labelTemperature > 0.0f);
+        ListwiseLossCommon::validateFixedSizeListwiseTensors("ListNetLoss", _predictions.value(), _labels.value(), _mask);
+        ListwiseLossCommon::validateLossDataType("ListNetLoss", _lossDataType.value());
+        ListwiseLossCommon::validatePositiveTemperature("ListNetLoss", "scoreTemperature", scoreTemperature);
+        ListwiseLossCommon::validatePositiveTemperature("ListNetLoss", "labelTemperature", labelTemperature);
 
         ListNetLoss listNetLoss;
         listNetLoss.predictionsTensor = _predictions.value();

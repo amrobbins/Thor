@@ -244,7 +244,8 @@ vector<float> maskedSoftmaxRow(const vector<float>& values,
         maxScaledValue = std::max(maxScaledValue, values[rowOffset + i] / temperature);
         anyValid = true;
     }
-    THOR_THROW_IF_FALSE(anyValid);
+    if (!anyValid)
+        return probabilities;
 
     float denominator = 0.0f;
     for (uint32_t i = 0; i < listSize; ++i) {
@@ -272,7 +273,8 @@ vector<float> maskedLogSoftmaxRow(const vector<float>& values,
         maxScaledValue = std::max(maxScaledValue, values[rowOffset + i] / temperature);
         anyValid = true;
     }
-    THOR_THROW_IF_FALSE(anyValid);
+    if (!anyValid)
+        return logProbabilities;
 
     float denominator = 0.0f;
     for (uint32_t i = 0; i < listSize; ++i) {
@@ -520,7 +522,7 @@ TEST(ListNetLossApi, MaskedNumericalRawLossAndBackwardGradientMatchReference) {
                                   -0.25f, 1.0f, 4.0f, 1.5f, 0.5f};
     const vector<float> mask = {1.0f, 1.0f, 1.0f, 0.0f, 0.0f,
                                 1.0f, 0.0f, 1.0f, 1.0f, 0.0f,
-                                0.0f, 1.0f, 1.0f, 1.0f, 0.0f};
+                                0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
 
     vector<float> referenceLoss =
         referenceMaskedListNetRawLoss(predictions, labels, mask, batchSize, listSize, scoreTemperature, labelTemperature);

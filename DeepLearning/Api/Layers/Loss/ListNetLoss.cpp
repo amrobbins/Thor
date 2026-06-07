@@ -1,7 +1,5 @@
-#include "DeepLearning/Implementation/ThorError.h"
-#include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "DeepLearning/Api/Layers/Loss/ListNetLoss.h"
-#include "DeepLearning/Api/Layers/Loss/MultiInputCustomLoss.h"
+#include "DeepLearning/Api/Layers/Loss/ListwiseLossCommon.h"
 
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/Expression.h"
@@ -12,64 +10,36 @@ using json = nlohmann::json;
 namespace Thor {
 namespace {
 
-constexpr const char* kPredictionsName = "predictions";
-constexpr const char* kLabelsName = "labels";
-constexpr const char* kMaskName = "mask";
-constexpr const char* kLossName = "loss";
-constexpr const char* kGradientName = "predictions_grad";
-
-void validateLabelsDType(DataType dtype) {
-    if (dtype != DataType::FP16 && dtype != DataType::FP32) {
-        throw runtime_error("Unsupported ListNetLoss label dtype: " + ThorImplementation::TensorDescriptor::getElementTypeName(dtype));
-    }
-}
-
-void validatePredictionsDType(DataType dtype) {
-    if (dtype != DataType::FP16 && dtype != DataType::FP32) {
-        throw runtime_error("Unsupported ListNetLoss predictions dtype: " +
-                            ThorImplementation::TensorDescriptor::getElementTypeName(dtype));
-    }
-}
-
-void validateMaskDType(DataType dtype) {
-    switch (dtype) {
-        case DataType::BOOLEAN:
-        case DataType::UINT8:
-        case DataType::FP16:
-        case DataType::FP32:
-            return;
-        default:
-            throw runtime_error("Unsupported ListNetLoss mask dtype: " + ThorImplementation::TensorDescriptor::getElementTypeName(dtype));
-    }
-}
+namespace Common = ListwiseLossCommon;
 
 ThorImplementation::DynamicExpression makeListNetLossExpression(DataType lossDataType,
                                                                 float scoreTemperature,
                                                                 float labelTemperature,
                                                                 bool useMask) {
-    validatePredictionsDType(lossDataType);
+    Common::validateLossDataType("ListNetLoss", lossDataType);
+    Common::validatePositiveTemperature("ListNetLoss", "scoreTemperature", scoreTemperature);
+    Common::validatePositiveTemperature("ListNetLoss", "labelTemperature", labelTemperature);
 
-    ThorImplementation::Expression scores = ThorImplementation::Expression::input(kPredictionsName, DataType::FP32, DataType::FP32);
-    ThorImplementation::Expression labels = ThorImplementation::Expression::input(kLabelsName, DataType::FP32, DataType::FP32);
+    ThorImplementation::Expression scores = Common::predictionsInput();
+    ThorImplementation::Expression labels = Common::labelsInput();
     ThorImplementation::Expression scaledScores = scores / ThorImplementation::Expression(scoreTemperature);
     ThorImplementation::Expression scaledLabels = labels / ThorImplementation::Expression(labelTemperature);
     ThorImplementation::Expression validMask(1.0);
     if (useMask) {
-        ThorImplementation::Expression mask = ThorImplementation::Expression::input(kMaskName, DataType::FP32, DataType::FP32);
-        validMask = mask > ThorImplementation::Expression(0.5);
-        ThorImplementation::Expression maskedOutValue(-1.0e20);
-        scaledScores = ThorImplementation::Expression::where(validMask, scaledScores, maskedOutValue);
-        scaledLabels = ThorImplementation::Expression::where(validMask, scaledLabels, maskedOutValue);
+        validMask = Common::validDocumentMask();
+        scaledScores = Common::maskPaddedDocuments(scaledScores, validMask);
+        scaledLabels = Common::maskPaddedDocuments(scaledLabels, validMask);
     }
+
     ThorImplementation::Expression targetProbabilities = scaledLabels.softmax();
     ThorImplementation::Expression logProbabilities = scaledScores.logSoftmax();
     ThorImplementation::Expression perDocumentLoss = -(targetProbabilities * logProbabilities);
     if (useMask)
-        perDocumentLoss = ThorImplementation::Expression::where(validMask, perDocumentLoss, ThorImplementation::Expression(0.0));
+        perDocumentLoss = Common::zeroPaddedDocuments(perDocumentLoss, validMask);
     ThorImplementation::Expression perListLoss = perDocumentLoss.reduce_sum({1}, {}, DataType::FP32).withOutputDType(lossDataType);
 
     ThorImplementation::ExpressionDefinition definition =
-        ThorImplementation::ExpressionDefinition::fromOutputs(ThorImplementation::Expression::outputs({{kLossName, perListLoss}}));
+        ThorImplementation::ExpressionDefinition::fromOutputs(ThorImplementation::Expression::outputs({{Common::kLossName, perListLoss}}));
     return ThorImplementation::DynamicExpression::fromExpressionDefinition(definition);
 }
 
@@ -77,99 +47,57 @@ ThorImplementation::DynamicExpression makeListNetGradientExpression(DataType pre
                                                                     float scoreTemperature,
                                                                     float labelTemperature,
                                                                     bool useMask) {
-    validatePredictionsDType(predictionsDataType);
+    Common::validatePredictionsDType("ListNetLoss", predictionsDataType);
+    Common::validatePositiveTemperature("ListNetLoss", "scoreTemperature", scoreTemperature);
+    Common::validatePositiveTemperature("ListNetLoss", "labelTemperature", labelTemperature);
 
-    ThorImplementation::Expression scores = ThorImplementation::Expression::input(kPredictionsName, DataType::FP32, DataType::FP32);
-    ThorImplementation::Expression labels = ThorImplementation::Expression::input(kLabelsName, DataType::FP32, DataType::FP32);
+    ThorImplementation::Expression scores = Common::predictionsInput();
+    ThorImplementation::Expression labels = Common::labelsInput();
     ThorImplementation::Expression scaledScores = scores / ThorImplementation::Expression(scoreTemperature);
     ThorImplementation::Expression scaledLabels = labels / ThorImplementation::Expression(labelTemperature);
     ThorImplementation::Expression validMask(1.0);
     if (useMask) {
-        ThorImplementation::Expression mask = ThorImplementation::Expression::input(kMaskName, DataType::FP32, DataType::FP32);
-        validMask = mask > ThorImplementation::Expression(0.5);
-        ThorImplementation::Expression maskedOutValue(-1.0e20);
-        scaledScores = ThorImplementation::Expression::where(validMask, scaledScores, maskedOutValue);
-        scaledLabels = ThorImplementation::Expression::where(validMask, scaledLabels, maskedOutValue);
+        validMask = Common::validDocumentMask();
+        scaledScores = Common::maskPaddedDocuments(scaledScores, validMask);
+        scaledLabels = Common::maskPaddedDocuments(scaledLabels, validMask);
     }
+
     ThorImplementation::Expression scoreProbabilities = scaledScores.softmax();
     ThorImplementation::Expression targetProbabilities = scaledLabels.softmax();
     ThorImplementation::Expression gradient = ((scoreProbabilities - targetProbabilities) /
                                                ThorImplementation::Expression(scoreTemperature) *
                                                ThorImplementation::Expression(ThorImplementation::Loss::getLossScalingFactor()));
     if (useMask)
-        gradient = ThorImplementation::Expression::where(validMask, gradient, ThorImplementation::Expression(0.0));
+        gradient = Common::zeroPaddedDocuments(gradient, validMask);
     gradient = gradient.withOutputDType(predictionsDataType);
 
     ThorImplementation::ExpressionDefinition definition = ThorImplementation::ExpressionDefinition::fromOutputs(
-        ThorImplementation::Expression::outputs({{kGradientName, gradient}}));
+        ThorImplementation::Expression::outputs({{Common::kGradientName, gradient}}));
     return ThorImplementation::DynamicExpression::fromExpressionDefinition(definition);
 }
 
 }  // namespace
 
 void ListNetLoss::buildSupportLayersAndAddToNetwork() {
-    validatePredictionsDType(predictionsTensor.getDataType());
-    validateLabelsDType(labelsTensor.getDataType());
-    THOR_THROW_IF_FALSE(predictionsTensor.getDimensions().size() == 1);
-    THOR_THROW_IF_FALSE(predictionsTensor.getDimensions()[0] > 1);
-    THOR_THROW_IF_FALSE(predictionsTensor.getDimensions() == labelsTensor.getDimensions());
-    THOR_THROW_IF_FALSE(scoreTemperature > 0.0f);
-    THOR_THROW_IF_FALSE(labelTemperature > 0.0f);
+    Common::validateFixedSizeListwiseTensors("ListNetLoss", predictionsTensor, labelsTensor, maskTensor);
+    Common::validateLossDataType("ListNetLoss", lossDataType);
+    Common::validatePositiveTemperature("ListNetLoss", "scoreTemperature", scoreTemperature);
+    Common::validatePositiveTemperature("ListNetLoss", "labelTemperature", labelTemperature);
 
-    if (maskTensor.has_value()) {
-        validateMaskDType(maskTensor.value().getDataType());
-        THOR_THROW_IF_FALSE(maskTensor.value().getDimensions() == predictionsTensor.getDimensions());
-        MultiInputCustomLoss rawListNetLoss = MultiInputCustomLoss::Builder()
-                                                  .network(*network)
-                                                  .lossExpression(makeListNetLossExpression(lossDataType,
-                                                                                          scoreTemperature,
-                                                                                          labelTemperature,
-                                                                                          true))
-                                                  .gradientExpression(makeListNetGradientExpression(predictionsTensor.getDataType(),
-                                                                                                   scoreTemperature,
-                                                                                                   labelTemperature,
-                                                                                                   true))
-                                                  .input(kPredictionsName, predictionsTensor, kGradientName)
-                                                  .auxiliaryInput(kLabelsName, labelsTensor)
-                                                  .auxiliaryInput(kMaskName, maskTensor.value())
-                                                  .lossName(kLossName)
-                                                  .lossDataType(lossDataType)
-                                                  .reportsRawLoss()
-                                                  .build();
-        lossShaperInput = rawListNetLoss.getLoss();
-    } else {
-        CustomLoss rawListNetLoss = CustomLoss::Builder()
-                                        .network(*network)
-                                        .lossExpression(makeListNetLossExpression(lossDataType, scoreTemperature, labelTemperature, false))
-                                        .gradientExpression(makeListNetGradientExpression(predictionsTensor.getDataType(),
-                                                                                         scoreTemperature,
-                                                                                         labelTemperature,
-                                                                                         false))
-                                        .predictions(predictionsTensor)
-                                        .labels(labelsTensor)
-                                        .predictionsName(kPredictionsName)
-                                        .labelsName(kLabelsName)
-                                        .lossName(kLossName)
-                                        .gradientName(kGradientName)
-                                        .lossDataType(lossDataType)
-                                        .reportsRawLoss()
-                                        .build();
-        lossShaperInput = rawListNetLoss.getLoss();
-    }
-
-    if (lossShape == LossShape::BATCH) {
-        LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(lossShaperInput).reportsBatchLoss().build();
-        lossTensor = lossShaper.getLossOutput();
-    } else if (lossShape == LossShape::ELEMENTWISE) {
-        LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(lossShaperInput).reportsElementwiseLoss().build();
-        lossTensor = lossShaper.getLossOutput();
-    } else if (lossShape == LossShape::CLASSWISE) {
-        LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(lossShaperInput).reportsClasswiseLoss().build();
-        lossTensor = lossShaper.getLossOutput();
-    } else {
-        THOR_THROW_IF_FALSE(lossShape == LossShape::RAW);
-        lossTensor = lossShaperInput;
-    }
+    lossShaperInput = Common::buildRawListwiseLoss(*network,
+                                                   predictionsTensor,
+                                                   labelsTensor,
+                                                   maskTensor,
+                                                   makeListNetLossExpression(lossDataType,
+                                                                             scoreTemperature,
+                                                                             labelTemperature,
+                                                                             maskTensor.has_value()),
+                                                   makeListNetGradientExpression(predictionsTensor.getDataType(),
+                                                                                 scoreTemperature,
+                                                                                 labelTemperature,
+                                                                                 maskTensor.has_value()),
+                                                   lossDataType);
+    lossTensor = Common::shapeRawListwiseLoss(*network, lossShaperInput, lossShape);
 }
 
 json ListNetLoss::architectureJson() const {

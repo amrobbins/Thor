@@ -92,6 +92,7 @@ enum class ExprOp : uint16_t {
     UNSQUEEZE,
     SQUEEZE,
     TRANSPOSE,
+    TAKE_ALONG_AXIS,
     MIN,
     MAX,
     MIN_GRAD_LEFT,
@@ -597,6 +598,8 @@ class Expression {
     [[nodiscard]] Expression unsqueeze(const std::vector<uint64_t>& unsqueeze_axes) const;
     [[nodiscard]] Expression squeeze(const std::vector<uint64_t>& squeeze_axes) const;
     [[nodiscard]] Expression transpose() const;
+    [[nodiscard]] Expression takeAlongAxis(const Expression& indices, int64_t axis = -1) const;
+    [[nodiscard]] static Expression takeAlongAxis(const Expression& input, const Expression& indices, int64_t axis = -1);
     [[nodiscard]] Expression pow(const Expression& exponent) const;
 
     // Numerically stable activation-shaped expression helpers. These prefer dedicated CUDA special-function

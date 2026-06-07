@@ -252,7 +252,7 @@ def test_listwise_softmax_cross_entropy_loss_masked_numerical_forward_matches_re
         [
             [1.0, 1.0, 1.0, 0.0],
             [1.0, 0.0, 1.0, 0.0],
-            [0.0, 1.0, 1.0, 1.0],
+            [0.0, 0.0, 0.0, 0.0],
         ],
         dtype=np.float32,
     )

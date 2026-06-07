@@ -882,7 +882,8 @@ static const CompiledStageOutput& requireSingleTransposedMaterializedOutput(cons
 
 static bool expressionHasIndexAwareOps(const PhysicalExpression& expr) {
     return std::any_of(expr.nodes.begin(), expr.nodes.end(), [](const ExprNode& node) {
-        return node.op == ExprOp::ROPE || node.op == ExprOp::STRIDED_VIEW_BACKWARD || node.op == ExprOp::TRANSPOSE;
+        return node.op == ExprOp::ROPE || node.op == ExprOp::STRIDED_VIEW_BACKWARD || node.op == ExprOp::TRANSPOSE ||
+               node.op == ExprOp::TAKE_ALONG_AXIS;
     });
 }
 
@@ -1840,6 +1841,10 @@ static bool expressionHasLogicalTransposeOp(const PhysicalExpression& expr) {
     return std::any_of(expr.nodes.begin(), expr.nodes.end(), [](const ExprNode& node) { return node.op == ExprOp::TRANSPOSE; });
 }
 
+static bool expressionHasTakeAlongAxisOp(const PhysicalExpression& expr) {
+    return std::any_of(expr.nodes.begin(), expr.nodes.end(), [](const ExprNode& node) { return node.op == ExprOp::TAKE_ALONG_AXIS; });
+}
+
 static uint64_t productDims(const std::vector<uint64_t>& dims) {
     uint64_t result = 1;
     for (uint64_t dim : dims) {
@@ -1963,6 +1968,76 @@ static std::string emitTransposeSourceIndexForDomain(std::ostringstream& ss,
     return var_name;
 }
 
+
+static uint64_t normalizedTakeAlongAxisForEmitter(const ExprNode& node, uint64_t rank) {
+    if (rank == 0) {
+        throw runtime_error("take_along_axis requires a non-scalar tensor.");
+    }
+    const uint64_t encoded_axis = node.reduction_axes.empty() ? UINT64_MAX : node.reduction_axes.front();
+    if (encoded_axis == UINT64_MAX) {
+        return rank - 1;
+    }
+    if (encoded_axis >= rank) {
+        throw runtime_error("take_along_axis axis is out of range for the input rank.");
+    }
+    return encoded_axis;
+}
+
+static std::string emitTakeAlongAxisSourceIndexForDomain(std::ostringstream& ss,
+                                                         const ExprNode& node,
+                                                         const std::vector<uint64_t>& input_dims,
+                                                         const std::vector<uint64_t>& indices_dims,
+                                                         const std::string& idx_expr,
+                                                         const std::string& selected_index_expr,
+                                                         const std::string& var_name,
+                                                         const std::string& indent,
+                                                         bool /*use_uint32_index_math*/) {
+    if (input_dims.empty() || indices_dims.empty()) {
+        throw runtime_error("take_along_axis requires non-scalar input and indices tensors.");
+    }
+    if (input_dims.size() != indices_dims.size()) {
+        throw runtime_error("take_along_axis input and indices tensors must have the same rank.");
+    }
+
+    const uint64_t axis = normalizedTakeAlongAxisForEmitter(node, input_dims.size());
+    for (size_t i = 0; i < input_dims.size(); ++i) {
+        if (i != axis && input_dims[i] != indices_dims[i]) {
+            throw runtime_error("take_along_axis input and indices dimensions must match except along the gather axis.");
+        }
+        if (input_dims[i] == 0 || indices_dims[i] == 0) {
+            throw runtime_error("take_along_axis does not support zero-sized dimensions.");
+        }
+    }
+
+    const auto input_strides = packedStrides(input_dims);
+    ss << indent << "unsigned long long " << var_name << "_residual = static_cast<unsigned long long>(" << idx_expr << ");\n";
+    ss << indent << "unsigned long long " << var_name << " = 0ULL;\n";
+
+    for (int64_t i = static_cast<int64_t>(indices_dims.size()) - 1; i >= 0; --i) {
+        const size_t dim_index = static_cast<size_t>(i);
+        const uint64_t dim = indices_dims[dim_index];
+        const uint64_t stride = input_strides[dim_index];
+        const std::string coord_var = var_name + "_coord_" + std::to_string(dim_index);
+        if (dim_index == axis) {
+            ss << indent << "const unsigned long long " << coord_var << " = static_cast<unsigned long long>(" << selected_index_expr << ");\n";
+            ss << indent << var_name << "_residual /= " << dim << "ULL;\n";
+        } else {
+            ss << indent << "const unsigned long long " << coord_var << " = " << var_name << "_residual % " << dim << "ULL;\n";
+            ss << indent << var_name << "_residual /= " << dim << "ULL;\n";
+        }
+
+        if (stride == 1ULL) {
+            ss << indent << var_name << " += " << coord_var << ";\n";
+        } else if (isPowerOfTwo(stride)) {
+            ss << indent << var_name << " += (" << coord_var << " << " << std::to_string(log2Exact(stride)) << ");\n";
+        } else if (stride != 0ULL) {
+            ss << indent << var_name << " += " << coord_var << " * " << stride << "ULL;\n";
+        }
+    }
+
+    return var_name;
+}
+
 static std::string emitIndexMappedScalarValue(std::ostringstream& ss,
                                               const PhysicalExpression& expr,
                                               const SpecializedBroadcastGroup& group,
@@ -2030,6 +2105,19 @@ static std::string emitIndexMappedScalarValue(std::ostringstream& ss,
         emitTransposeSourceIndexForDomain(ss, domain_dims, idx_expr, source_idx, indent, use_uint32_index_math);
         const std::string value =
             emitIndexMappedScalarValue(ss, expr, group, n.lhs, source_idx, group.node_dims[n.lhs], indent, use_uint32_index_math, counter);
+        return castScalarExpr(value, emittedScalarNodeValueDType(expr.nodes[n.lhs]), emitted_dtype);
+    }
+
+    if (n.op == ExprOp::TAKE_ALONG_AXIS) {
+        const std::string take_idx = "take_eval_idx" + suffix;
+        emitBroadcastOffsetForDomain(ss, group.node_dims[node_idx], domain_dims, idx_expr, take_idx, indent, use_uint32_index_math);
+        const std::string selected_value =
+            emitIndexMappedScalarValue(ss, expr, group, n.rhs, take_idx, group.node_dims[n.rhs], indent, use_uint32_index_math, counter);
+        const std::string source_idx = "take_source_idx" + suffix;
+        emitTakeAlongAxisSourceIndexForDomain(
+            ss, n, group.node_dims[n.lhs], group.node_dims[n.rhs], take_idx, selected_value, source_idx, indent, use_uint32_index_math);
+        const std::string value = emitIndexMappedScalarValue(
+            ss, expr, group, n.lhs, source_idx, group.node_dims[n.lhs], indent, use_uint32_index_math, counter);
         return castScalarExpr(value, emittedScalarNodeValueDType(expr.nodes[n.lhs]), emitted_dtype);
     }
 
@@ -2683,6 +2771,26 @@ static std::string emitScalarValueAtIndex(std::ostringstream& ss,
             "Nested transpose inside an index-aware scalar source is not supported; materialize the inner transpose first.");
     }
 
+    if (n.op == ExprOp::TAKE_ALONG_AXIS) {
+        if (group == nullptr) {
+            throw runtime_error("take_along_axis index-aware emission requires specialized broadcast shape metadata.");
+        }
+        if (n.lhs >= group->node_dims.size() || n.rhs >= group->node_dims.size()) {
+            throw runtime_error("take_along_axis child node index out of range for specialized broadcast metadata.");
+        }
+        const std::string selected_suffix = suffix + "_take_idx" + std::to_string(node_idx);
+        const std::string selected_value = emitScalarValueAtIndex(ss, expr, n.rhs, idx_expr, selected_suffix, indent, emitted, group);
+        const std::string source_idx = "take_source_idx_" + std::to_string(node_idx) + suffix;
+        emitTakeAlongAxisSourceIndexForDomain(
+            ss, n, group->node_dims[n.lhs], group->node_dims[n.rhs], idx_expr, selected_value, source_idx, indent, true);
+        const std::string nested_suffix = suffix + "_take" + std::to_string(node_idx);
+        const std::string source_value = emitScalarValueAtIndex(ss, expr, n.lhs, source_idx, nested_suffix, indent, emitted, group);
+        const DataType source_dtype = emittedScalarNodeValueDType(expr.nodes.at(n.lhs));
+        ss << indent << "const " << output_type << " " << var << " = " << castScalarExpr(source_value, source_dtype, emitted_dtype) << ";\n";
+        mark_emitted();
+        return var;
+    }
+
     auto child_value_as = [&](uint32_t child_idx, DataType target_dtype) -> std::string {
         const std::string child_value = emitScalarValueAtIndex(ss, expr, child_idx, idx_expr, suffix, indent, emitted, group);
         const DataType child_dtype = emittedScalarNodeValueDType(expr.nodes.at(child_idx));
@@ -3038,9 +3146,9 @@ static void emitScalarNode(std::ostringstream& ss,
         return emitResolvedScalarValueExpr(expr, child_idx, compute_dtype);
     };
 
-    if (n.op == ExprOp::STRIDED_VIEW) {
+    if (n.op == ExprOp::STRIDED_VIEW || n.op == ExprOp::TAKE_ALONG_AXIS) {
         std::unordered_set<std::string> emitted;
-        const std::string suffix = "_svnode" + std::to_string(node_idx);
+        const std::string suffix = (n.op == ExprOp::TAKE_ALONG_AXIS ? "_takenode" : "_svnode") + std::to_string(node_idx);
         const std::string value = emitScalarValueAtIndex(ss, expr, node_idx, "idx", suffix, indent, emitted, group);
         ss << indent << "const " << output_type << " t" << node_idx << " = "
            << castScalarExpr(value, emittedScalarNodeValueDType(n), emitted_dtype) << ";\n";
@@ -3245,9 +3353,9 @@ static void emitScalarNodeSuffixed(std::ostringstream& ss,
         return emitResolvedScalarValueExprSuffixed(expr, child_idx, compute_dtype, suffix);
     };
 
-    if (n.op == ExprOp::STRIDED_VIEW) {
+    if (n.op == ExprOp::STRIDED_VIEW || n.op == ExprOp::TAKE_ALONG_AXIS) {
         std::unordered_set<std::string> emitted;
-        const std::string nested_suffix = suffix + "_svnode" + std::to_string(node_idx);
+        const std::string nested_suffix = suffix + (n.op == ExprOp::TAKE_ALONG_AXIS ? "_takenode" : "_svnode") + std::to_string(node_idx);
         const std::string value = emitScalarValueAtIndex(ss, expr, node_idx, idx_expr, nested_suffix, indent, emitted);
         ss << indent << "const " << output_type << " " << refWithSuffix(node_idx, suffix) << " = "
            << castScalarExpr(value, emittedScalarNodeValueDType(n), emitted_dtype) << ";\n";
@@ -4134,6 +4242,7 @@ static bool canVectorizeTiledLogicalTransposeConsumerNode(const PhysicalExpressi
             case ExprOp::INPUT:
             case ExprOp::TRANSPOSE:
             case ExprOp::STRIDED_VIEW:
+            case ExprOp::TAKE_ALONG_AXIS:
             case ExprOp::ROPE:
                 result = false;
                 break;
@@ -4175,6 +4284,10 @@ static std::optional<DataType> preferredTiledLogicalTransposeVectorComputeDType(
     double folded_constant = 0.0;
     if (n.op != ExprOp::INPUT && n.op != ExprOp::RUNTIME_SCALAR && n.op != ExprOp::TENSOR_RUNTIME_SCALAR &&
         tryGetEmitterConstantValue(expr, node_idx, folded_constant)) {
+        return std::nullopt;
+    }
+
+    if (n.op == ExprOp::TAKE_ALONG_AXIS) {
         return std::nullopt;
     }
 
@@ -6980,6 +7093,10 @@ std::string CudaSourceEmitter::emitSpecializedBroadcast(const CompiledExecutionS
             "Logical transpose inside a fused broadcast stage would require dense column-strided global access, "
             "but this pattern is not currently supported by the auto-swizzle emitter. Materialize the transpose boundary "
             "or simplify the transpose chain before fusing.");
+    }
+
+    if (expressionHasTakeAlongAxisOp(stage.expr)) {
+        return emitIndexMappedSpecializedBroadcast(stage, groups, kernel_name);
     }
 
     std::optional<DataType> vectorized_dtype = getVectorizedStageStorageDType(stage);
