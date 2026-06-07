@@ -685,6 +685,20 @@ packed-QKV attention views; generic fused kernels should materialize or lower a
 layout-aware kernel before consuming non-dense views.
 )nbdoc");
 
+    expr.def(
+        "take_along_axis",
+        [](const Expression& self, const Expression& indices, int64_t axis) { return self.takeAlongAxis(indices, axis); },
+        "indices"_a,
+        "axis"_a = -1,
+        R"nbdoc(
+Gather values from this expression along one axis using integer indices.
+
+The input and indices tensors must have the same rank. Dimensions must match on
+all axes except the gathered axis, and the output shape is the indices shape.
+Indices must be UINT32 or UINT64. The default axis=-1 gathers along the final
+axis.
+)nbdoc");
+
     expr.def_static(
         "constant_scalar",
         [](double value) { return Expression::constantScalar(value); },

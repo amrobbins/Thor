@@ -223,6 +223,8 @@ std::string exprOpExternalName(ExprOp op) {
             return "squeeze";
         case ExprOp::TRANSPOSE:
             return "transpose";
+        case ExprOp::TAKE_ALONG_AXIS:
+            return "take_along_axis";
         case ExprOp::MIN:
             return "min";
         case ExprOp::MAX:
@@ -377,6 +379,7 @@ ExprOp exprOpFromExternalName(const std::string& op) {
         {"unsqueeze", ExprOp::UNSQUEEZE},
         {"squeeze", ExprOp::SQUEEZE},
         {"transpose", ExprOp::TRANSPOSE},
+        {"take_along_axis", ExprOp::TAKE_ALONG_AXIS},
         {"min", ExprOp::MIN},
         {"max", ExprOp::MAX},
         {"min_grad_left", ExprOp::MIN_GRAD_LEFT},
@@ -856,6 +859,8 @@ std::string opName(ExprOp op) {
             return "SQZ";
         case ExprOp::TRANSPOSE:
             return "TRANSPOSE";
+        case ExprOp::TAKE_ALONG_AXIS:
+            return "TAKE_ALONG_AXIS";
         case ExprOp::EXP2:
             return "EXP2";
         case ExprOp::EXP10:
@@ -1049,6 +1054,11 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
         case ExprOp::LOGICAL_NOT:
         case ExprOp::TRANSPOSE:
             out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) + ")";
+            break;
+        case ExprOp::TAKE_ALONG_AXIS:
+            out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) + "," +
+                  canonicalizeNode(expr, n.rhs, memo, memoReady) + ";axis=" +
+                  (n.reduction_axes.empty() ? std::string("-1") : std::to_string(n.reduction_axes.front())) + ")";
             break;
         case ExprOp::ROPE:
             out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) + ";seqAxis=" + std::to_string(n.rope_sequence_axis) +
@@ -2003,6 +2013,7 @@ bool Expression::isBinaryOp(const ExprOp op) {
         case ExprOp::MATMUL:
         case ExprOp::RMSNORM:
         case ExprOp::EMBEDDING_LOOKUP:
+        case ExprOp::TAKE_ALONG_AXIS:
         case ExprOp::CONV2D:
         case ExprOp::CONV2D_BACKWARD_DATA:
         case ExprOp::CONV2D_BACKWARD_FILTER:
@@ -3200,6 +3211,17 @@ Expression Expression::squeeze(const std::vector<uint64_t>& squeeze_axes) const 
 }
 
 Expression Expression::transpose() const { return unaryOp(*this, ExprOp::TRANSPOSE); }
+
+Expression Expression::takeAlongAxis(const Expression& indices, int64_t axis) const { return takeAlongAxis(*this, indices, axis); }
+
+Expression Expression::takeAlongAxis(const Expression& input, const Expression& indices, int64_t axis) {
+    if (axis < -1) {
+        throw std::invalid_argument("Expression::takeAlongAxis currently supports only axis=-1 or an explicit non-negative axis.");
+    }
+    Expression out = binaryOp(input, indices, ExprOp::TAKE_ALONG_AXIS);
+    out.expr->nodes[out.nodeIndex].reduction_axes = {static_cast<uint64_t>(axis < 0 ? UINT64_MAX : axis)};
+    return out;
+}
 
 Expression Expression::pow(const Expression& exponent) const { return binaryOp(*this, exponent, ExprOp::POW); }
 

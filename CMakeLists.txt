@@ -520,7 +520,7 @@ configure_file(
 # ============================================================
 # Source files
 # ============================================================
-file(GLOB_RECURSE THOR_SOURCES
+file(GLOB_RECURSE THOR_SOURCES CONFIGURE_DEPENDS
         "${CMAKE_SOURCE_DIR}/Utilities/**/*.cpp"
         "${CMAKE_SOURCE_DIR}/Utilities/**/*.cu"
         "${CMAKE_SOURCE_DIR}/DeepLearning/**/*.cpp"

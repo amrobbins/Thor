@@ -4,6 +4,7 @@
 #include "DeepLearning/Api/Layers/Loss/CustomLoss.h"
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
 #include "DeepLearning/Api/Layers/Loss/LossShaper.h"
+#include "DeepLearning/Api/Layers/Loss/ListwiseLossCommon.h"
 #include "DeepLearning/Api/Network/Network.h"
 
 #include <optional>
@@ -81,23 +82,20 @@ class ListwiseSoftmaxCrossEntropyLoss::Builder {
         THOR_THROW_IF_FALSE(_predictions.has_value());
         THOR_THROW_IF_FALSE(_labels.has_value());
         THOR_THROW_IF_FALSE(_predictions.value() != _labels.value());
-        THOR_THROW_IF_FALSE(_predictions.value().getDimensions().size() == 1);
-        THOR_THROW_IF_FALSE(_predictions.value().getDimensions()[0] > 1);
-        THOR_THROW_IF_FALSE(_predictions.value().getDimensions() == _labels.value().getDimensions());
         if (_mask.has_value()) {
             THOR_THROW_IF_FALSE(_mask.value() != _predictions.value());
             THOR_THROW_IF_FALSE(_mask.value() != _labels.value());
-            THOR_THROW_IF_FALSE(_mask.value().getDimensions() == _predictions.value().getDimensions());
         }
 
         if (!_lossShape.has_value())
             _lossShape = LossShape::BATCH;
         if (!_lossDataType.has_value())
             _lossDataType = _predictions.value().getDataType();
-        THOR_THROW_IF_FALSE(_lossDataType.value() == DataType::FP16 || _lossDataType.value() == DataType::FP32);
 
         float temperature = _temperature.value_or(1.0f);
-        THOR_THROW_IF_FALSE(temperature > 0.0f);
+        ListwiseLossCommon::validateFixedSizeListwiseTensors("ListwiseSoftmaxCrossEntropyLoss", _predictions.value(), _labels.value(), _mask);
+        ListwiseLossCommon::validateLossDataType("ListwiseSoftmaxCrossEntropyLoss", _lossDataType.value());
+        ListwiseLossCommon::validatePositiveTemperature("ListwiseSoftmaxCrossEntropyLoss", "temperature", temperature);
 
         ListwiseSoftmaxCrossEntropyLoss listwiseSoftmaxCrossEntropyLoss;
         listwiseSoftmaxCrossEntropyLoss.predictionsTensor = _predictions.value();

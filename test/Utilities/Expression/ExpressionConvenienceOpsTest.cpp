@@ -69,6 +69,23 @@ Tensor makeGpuTensor(const std::vector<uint64_t>& dims, const std::vector<float>
     return gpu;
 }
 
+Tensor makeGpuUint32Tensor(const std::vector<uint64_t>& dims, const std::vector<uint32_t>& values, Stream& stream) {
+    Tensor cpu(cpuPlacement, TensorDescriptor(DataType::UINT32, dims));
+    if (tensorNumel(cpu) != values.size()) {
+        throw std::runtime_error("makeGpuUint32Tensor value count mismatch.");
+    }
+
+    auto* ptr = static_cast<uint32_t*>(cpu.getMemPtr());
+    for (size_t i = 0; i < values.size(); ++i) {
+        ptr[i] = values[i];
+    }
+
+    Tensor gpu(gpuPlacement, TensorDescriptor(DataType::UINT32, dims));
+    gpu.copyFromAsync(cpu, stream);
+    stream.synchronize();
+    return gpu;
+}
+
 std::vector<float> copyToCpuValues(const Tensor& gpu, Stream& stream) {
     Tensor cpu = gpu.clone(cpuPlacement);
     cpu.copyFromAsync(gpu, stream);
@@ -316,6 +333,61 @@ TEST(ExpressionConvenienceOps, ClampWithExpressionBoundsBroadcastsBackwardGradie
     expectNear(gradients.at("x_grad"), {0.0f, 2.0f, 0.0f, 4.0f, 0.0f, 6.0f});
     expectNear(gradients.at("lower_grad"), {1.0f, 0.0f, 0.0f});
     expectNear(gradients.at("upper_grad"), {0.0f, 5.0f, 3.0f});
+}
+
+
+TEST(ExpressionConvenienceOps, TakeAlongAxisLowersAsIndexAwareBinaryOp) {
+    auto values = Expression::input("values");
+    auto indices = Expression::input("indices");
+
+    auto outputs = Expression::outputs({{"y", values.takeAlongAxis(indices, 1)}}).physicalOutputs();
+
+    const ExprNode& takeNode = outputNode(outputs);
+    ASSERT_EQ(takeNode.op, ExprOp::TAKE_ALONG_AXIS);
+    EXPECT_EQ(takeNode.reduction_axes, (std::vector<uint64_t>{1}));
+    ASSERT_NE(takeNode.lhs, UINT32_MAX);
+    ASSERT_NE(takeNode.rhs, UINT32_MAX);
+    EXPECT_EQ(outputs.expr->nodes.at(takeNode.lhs).op, ExprOp::INPUT);
+    EXPECT_EQ(outputs.expr->nodes.at(takeNode.rhs).op, ExprOp::INPUT);
+
+    resolveOutputsDTypesInPlace(outputs, {DataType::FP32, DataType::UINT32});
+    const auto stages = EquationCompiler::splitAtReductionBoundaries(outputs);
+    ASSERT_EQ(stages.size(), 1);
+    EXPECT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::FusedKernel);
+}
+
+TEST(ExpressionConvenienceOps, TakeAlongAxisRejectsNonIntegralIndices) {
+    auto values = Expression::input("values");
+    auto indices = Expression::input("indices");
+    auto outputs = Expression::outputs({{"y", values.takeAlongAxis(indices)}}).physicalOutputs();
+
+    EXPECT_THROW(resolveOutputsDTypesInPlace(outputs, {DataType::FP32, DataType::FP32}), std::runtime_error);
+}
+
+TEST(ExpressionConvenienceOps, TakeAlongAxisGathersAlongLastAxis) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    Tensor values = makeGpuTensor({2, 4}, {10.0f, 11.0f, 12.0f, 13.0f, 20.0f, 21.0f, 22.0f, 23.0f}, stream);
+    Tensor indices = makeGpuUint32Tensor({2, 3}, {3, 0, 2, 1, 1, 0}, stream);
+
+    auto expression_outputs = Expression::outputs({{"y", Expression::input("values").takeAlongAxis(Expression::input("indices"))}});
+    Tensor y = runExpressionOutput(expression_outputs, {{"values", values}, {"indices", indices}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{2, 3}));
+    expectNear(copyToCpuValues(y, stream), {13.0f, 10.0f, 12.0f, 21.0f, 21.0f, 20.0f});
+}
+
+TEST(ExpressionConvenienceOps, TakeAlongAxisGathersAlongLeadingAxis) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    Tensor values = makeGpuTensor({3, 2}, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, stream);
+    Tensor indices = makeGpuUint32Tensor({2, 2}, {2, 0, 0, 1}, stream);
+
+    auto expression_outputs = Expression::outputs({{"y", Expression::input("values").takeAlongAxis(Expression::input("indices"), 0)}});
+    Tensor y = runExpressionOutput(expression_outputs, {{"values", values}, {"indices", indices}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{2, 2}));
+    expectNear(copyToCpuValues(y, stream), {5.0f, 2.0f, 1.0f, 4.0f});
 }
 
 TEST(ExpressionConvenienceOps, DotProductProducesExpectedScalarValue) {

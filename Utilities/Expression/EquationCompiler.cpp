@@ -597,8 +597,9 @@ static bool isAttentionBackwardOp(ExprOp op) {
 }
 
 static bool expressionHasIndexAwareOps(const PhysicalExpression& expr) {
-    return std::any_of(
-        expr.nodes.begin(), expr.nodes.end(), [](const ExprNode& node) { return node.op == ExprOp::ROPE || node.op == ExprOp::TRANSPOSE; });
+    return std::any_of(expr.nodes.begin(), expr.nodes.end(), [](const ExprNode& node) {
+        return node.op == ExprOp::ROPE || node.op == ExprOp::TRANSPOSE || node.op == ExprOp::TAKE_ALONG_AXIS;
+    });
 }
 static bool isTransposeOp(ExprOp op) { return op == ExprOp::TRANSPOSE; }
 
@@ -878,6 +879,8 @@ static const char* fusedOpTag(ExprOp op) {
             return "SQZ";
         case ExprOp::TRANSPOSE:
             return "TRANSPOSE";
+        case ExprOp::TAKE_ALONG_AXIS:
+            return "TAKE";
         case ExprOp::POW:
             return "POW";
         case ExprOp::MIN:
@@ -1240,6 +1243,12 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
     }
 
     std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
+
+    if (node.op == ExprOp::TAKE_ALONG_AXIS) {
+        std::string s = std::string(fusedOpTag(node.op)) + "(" + lhs + "," + rhs + ",axis=" + uintVecSignature(node.reduction_axes) + ")";
+        appendNodeDTypeSignature(s, node);
+        return s;
+    }
 
     if (isCommutativeStageOp(node.op) && rhs < lhs) {
         std::string s = std::string(fusedOpTag(node.op)) + "(" + rhs + "," + lhs + ")";

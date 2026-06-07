@@ -331,6 +331,9 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
             case ExprOp::MAX_GRAD_RIGHT:
                 reaches[i] = reaches.at(node.lhs) || reaches.at(node.rhs);
                 break;
+            case ExprOp::TAKE_ALONG_AXIS:
+                reaches[i] = reaches.at(node.lhs);
+                break;
             case ExprOp::NEG:
             case ExprOp::ABS:
             case ExprOp::CEIL:
