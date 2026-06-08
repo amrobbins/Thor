@@ -113,9 +113,222 @@ void validateSortPairs(const Tensor& keys_in,
     }
 }
 
-void validateSegmentOffsets(const Tensor& keys_in, const Tensor& segment_offsets, uint64_t num_items, uint64_t num_segments) {
+void validateTopKKeys(const Tensor& keys_in, const Tensor& keys_out, uint64_t num_items, uint64_t k) {
+    requireDenseContiguousGpuTensor(keys_in, "keys_in");
+    requireDenseContiguousGpuTensor(keys_out, "keys_out");
+    requireSameGpuPlacement(keys_in, keys_out, "keys_in", "keys_out");
+    requireStorageForNumItems(keys_in, "keys_in", num_items);
+    requireStorageForNumItems(keys_out, "keys_out", std::min(num_items, k));
+    if (keys_in.getDataType() != keys_out.getDataType()) {
+        throw std::invalid_argument("CUB top-k key input/output dtypes must match.");
+    }
+    if (!isCubTopKKeyDTypeSupported(keys_in.getDataType())) {
+        throw std::invalid_argument("Unsupported CUB top-k key dtype " + dtypeName(keys_in.getDataType()) + ".");
+    }
+    static_cast<void>(checkedCubInt64Count(num_items, "num_items"));
+    static_cast<void>(checkedCubInt64Count(k, "k"));
+}
+
+void validateTopKPairs(const Tensor& keys_in,
+                       const Tensor& keys_out,
+                       const Tensor& values_in,
+                       const Tensor& values_out,
+                       uint64_t num_items,
+                       uint64_t k) {
+    validateTopKKeys(keys_in, keys_out, num_items, k);
+    requireDenseContiguousGpuTensor(values_in, "values_in");
+    requireDenseContiguousGpuTensor(values_out, "values_out");
+    requireSameGpuPlacement(keys_in, values_in, "keys_in", "values_in");
+    requireSameGpuPlacement(keys_in, values_out, "keys_in", "values_out");
+    requireStorageForNumItems(values_in, "values_in", num_items);
+    requireStorageForNumItems(values_out, "values_out", std::min(num_items, k));
+    if (values_in.getDataType() != values_out.getDataType()) {
+        throw std::invalid_argument("CUB top-k value input/output dtypes must match.");
+    }
+    if (!isCubTopKValueDTypeSupported(values_in.getDataType())) {
+        throw std::invalid_argument("Unsupported CUB top-k index value dtype " + dtypeName(values_in.getDataType()) + ".");
+    }
+}
+
+void validateSelectFlagged(const Tensor& input,
+                           const Tensor& flags,
+                           const Tensor& output,
+                           const Tensor& num_selected_out,
+                           uint64_t num_items) {
+    requireDenseContiguousGpuTensor(input, "input");
+    requireDenseContiguousGpuTensor(flags, "flags");
+    requireDenseContiguousGpuTensor(output, "output");
+    requireDenseContiguousGpuTensor(num_selected_out, "num_selected_out");
+    requireSameGpuPlacement(input, flags, "input", "flags");
+    requireSameGpuPlacement(input, output, "input", "output");
+    requireSameGpuPlacement(input, num_selected_out, "input", "num_selected_out");
+    requireStorageForNumItems(input, "input", num_items);
+    requireStorageForNumItems(flags, "flags", num_items);
+    requireStorageForNumItems(output, "output", num_items);
+    requireStorageForNumItems(num_selected_out, "num_selected_out", 1);
+    if (input.getDataType() != output.getDataType()) {
+        throw std::invalid_argument("CUB select input/output dtypes must match.");
+    }
+    if (!isCubSelectValueDTypeSupported(input.getDataType())) {
+        throw std::invalid_argument("Unsupported CUB select value dtype " + dtypeName(input.getDataType()) + ".");
+    }
+    if (!isCubSelectFlagDTypeSupported(flags.getDataType())) {
+        throw std::invalid_argument("Unsupported CUB select flag dtype " + dtypeName(flags.getDataType()) + ".");
+    }
+    if (num_selected_out.getDataType() != DataType::UINT32) {
+        throw std::invalid_argument("CUB select num_selected_out must have dtype uint32.");
+    }
+    static_cast<void>(checkedCubNumItems(num_items));
+}
+
+void validateFindBounds(const Tensor& range,
+                        const Tensor& values,
+                        const Tensor& output,
+                        uint64_t range_num_items,
+                        uint64_t values_num_items,
+                        const char* op_name) {
+    requireDenseContiguousGpuTensor(range, "range");
+    requireDenseContiguousGpuTensor(values, "values");
+    requireDenseContiguousGpuTensor(output, "output");
+    requireSameGpuPlacement(range, values, "range", "values");
+    requireSameGpuPlacement(range, output, "range", "output");
+    requireStorageForNumItems(range, "range", range_num_items);
+    requireStorageForNumItems(values, "values", values_num_items);
+    requireStorageForNumItems(output, "output", values_num_items);
+    if (range.getDataType() != values.getDataType()) {
+        throw std::invalid_argument(std::string("CUB device ") + op_name + " range/value dtypes must match.");
+    }
+    if (!isCubFindKeyDTypeSupported(range.getDataType())) {
+        throw std::invalid_argument("Unsupported CUB find key dtype " + dtypeName(range.getDataType()) + ".");
+    }
+    if (output.getDataType() != DataType::UINT32) {
+        throw std::invalid_argument(std::string("CUB device ") + op_name + " output must have dtype uint32.");
+    }
+    static_cast<void>(checkedCubNumItems(range_num_items));
+    static_cast<void>(checkedCubNumItems(values_num_items));
+}
+
+void validateFindIfFlagged(const Tensor& flags, const Tensor& index_out, uint64_t num_items) {
+    requireDenseContiguousGpuTensor(flags, "flags");
+    requireDenseContiguousGpuTensor(index_out, "index_out");
+    requireSameGpuPlacement(flags, index_out, "flags", "index_out");
+    requireStorageForNumItems(flags, "flags", num_items);
+    requireStorageForNumItems(index_out, "index_out", 1);
+    if (!isCubFindFlagDTypeSupported(flags.getDataType())) {
+        throw std::invalid_argument("Unsupported CUB find-if flag dtype " + dtypeName(flags.getDataType()) + ".");
+    }
+    if (index_out.getDataType() != DataType::UINT32) {
+        throw std::invalid_argument("CUB find-if index_out must have dtype uint32.");
+    }
+    static_cast<void>(checkedCubNumItems(num_items));
+}
+
+namespace {
+
+// Keep this in sync with CubTopK.cu. CUB's fixed-size segmented top-k
+// dispatch encodes the maximum segment size as a compile-time parameter and
+// rejects bounds larger than the selected worker tile size.
+constexpr uint64_t kSegmentedTopKMaxSegmentSize = 8192ULL;
+constexpr uint64_t kSegmentedTopKMaxK = 8192ULL;
+
+}  // namespace
+
+uint64_t checkedSegmentedTopKTotalItems(uint64_t num_segments, uint64_t segment_size) {
+    if (segment_size != 0 && num_segments > std::numeric_limits<uint64_t>::max() / segment_size) {
+        throw std::invalid_argument("CUB segmented top-k num_segments * segment_size overflows uint64_t.");
+    }
+    const uint64_t total_items = num_segments * segment_size;
+    if (total_items > static_cast<uint64_t>(std::numeric_limits<int32_t>::max())) {
+        throw std::invalid_argument("CUB segmented top-k total item count exceeds the current CUB fixed-size implementation limit.");
+    }
+    static_cast<void>(checkedCubInt64Count(total_items, "num_segments * segment_size"));
+    return total_items;
+}
+
+uint64_t checkedSegmentedTopKOutputItems(uint64_t num_segments, uint64_t segment_size, uint64_t k) {
+    const uint64_t selected_per_segment = std::min(segment_size, k);
+    if (selected_per_segment != 0 && num_segments > std::numeric_limits<uint64_t>::max() / selected_per_segment) {
+        throw std::invalid_argument("CUB segmented top-k num_segments * k overflows uint64_t.");
+    }
+    const uint64_t output_items = num_segments * selected_per_segment;
+    static_cast<void>(checkedCubInt64Count(output_items, "num_segments * k"));
+    return output_items;
+}
+
+void validateSegmentedTopKKeys(const Tensor& keys_in,
+                               const Tensor& keys_out,
+                               uint64_t num_segments,
+                               uint64_t segment_size,
+                               uint64_t k) {
+    requireDenseContiguousGpuTensor(keys_in, "keys_in");
+    requireDenseContiguousGpuTensor(keys_out, "keys_out");
+    requireSameGpuPlacement(keys_in, keys_out, "keys_in", "keys_out");
+
+    const uint64_t total_items = checkedSegmentedTopKTotalItems(num_segments, segment_size);
+    const uint64_t output_items = checkedSegmentedTopKOutputItems(num_segments, segment_size, k);
+    requireStorageForNumItems(keys_in, "keys_in", total_items);
+    requireStorageForNumItems(keys_out, "keys_out", output_items);
+
+    if (keys_in.getDataType() != keys_out.getDataType()) {
+        throw std::invalid_argument("CUB segmented top-k key input/output dtypes must match.");
+    }
+    if (!isCubTopKKeyDTypeSupported(keys_in.getDataType())) {
+        throw std::invalid_argument("Unsupported CUB segmented top-k key dtype " + dtypeName(keys_in.getDataType()) + ".");
+    }
+
+    static_cast<void>(checkedCubInt64Count(num_segments, "num_segments"));
+    static_cast<void>(checkedCubInt64Count(segment_size, "segment_size"));
+    static_cast<void>(checkedCubInt64Count(k, "k"));
+
+    if (num_segments == 0 || k == 0) {
+        return;
+    }
+    if (segment_size == 0) {
+        throw std::invalid_argument("CUB segmented top-k segment_size must be nonzero when num_segments and k are nonzero.");
+    }
+    if (segment_size > kSegmentedTopKMaxSegmentSize) {
+        throw std::invalid_argument("CUB segmented top-k segment_size exceeds CUB's current fixed-size support limit.");
+    }
+    if (k > kSegmentedTopKMaxK) {
+        throw std::invalid_argument("CUB segmented top-k k exceeds CUB's current fixed-size support limit.");
+    }
+    if (k >= segment_size) {
+        throw std::invalid_argument("CUB segmented top-k currently requires k to be smaller than the fixed segment size.");
+    }
+}
+
+void validateSegmentedTopKPairs(const Tensor& keys_in,
+                                const Tensor& keys_out,
+                                const Tensor& values_in,
+                                const Tensor& values_out,
+                                uint64_t num_segments,
+                                uint64_t segment_size,
+                                uint64_t k) {
+    validateSegmentedTopKKeys(keys_in, keys_out, num_segments, segment_size, k);
+    const uint64_t total_items = checkedSegmentedTopKTotalItems(num_segments, segment_size);
+    const uint64_t output_items = checkedSegmentedTopKOutputItems(num_segments, segment_size, k);
+
+    requireDenseContiguousGpuTensor(values_in, "values_in");
+    requireDenseContiguousGpuTensor(values_out, "values_out");
+    requireSameGpuPlacement(keys_in, values_in, "keys_in", "values_in");
+    requireSameGpuPlacement(keys_in, values_out, "keys_in", "values_out");
+    requireStorageForNumItems(values_in, "values_in", total_items);
+    requireStorageForNumItems(values_out, "values_out", output_items);
+    if (values_in.getDataType() != values_out.getDataType()) {
+        throw std::invalid_argument("CUB segmented top-k value input/output dtypes must match.");
+    }
+    if (!isCubTopKValueDTypeSupported(values_in.getDataType())) {
+        throw std::invalid_argument("Unsupported CUB segmented top-k index value dtype " + dtypeName(values_in.getDataType()) + ".");
+    }
+}
+
+void validateSegmentOffsets(const Tensor& reference,
+                            const Tensor& segment_offsets,
+                            uint64_t num_items,
+                            uint64_t num_segments,
+                            const char* reference_name) {
     requireDenseContiguousGpuTensor(segment_offsets, "segment_offsets");
-    requireSameGpuPlacement(keys_in, segment_offsets, "keys_in", "segment_offsets");
+    requireSameGpuPlacement(reference, segment_offsets, reference_name, "segment_offsets");
     if (num_segments == std::numeric_limits<uint64_t>::max()) {
         throw std::invalid_argument("num_segments is too large for a contiguous segment-offset tensor.");
     }
@@ -125,6 +338,10 @@ void validateSegmentOffsets(const Tensor& keys_in, const Tensor& segment_offsets
     }
     static_cast<void>(checkedCubInt64Count(num_items, "num_items"));
     static_cast<void>(checkedCubInt64Count(num_segments, "num_segments"));
+}
+
+void validateSegmentOffsets(const Tensor& keys_in, const Tensor& segment_offsets, uint64_t num_items, uint64_t num_segments) {
+    validateSegmentOffsets(keys_in, segment_offsets, num_items, num_segments, "keys_in");
 }
 
 void validateSegmentedSortKeys(const Tensor& keys_in,
@@ -174,6 +391,46 @@ void validateRle(const Tensor& input, const Tensor& unique_out, const Tensor& co
     }
 }
 
+namespace {
+
+void validateDeviceReduceCommon(const Tensor& input, const Tensor& output, uint64_t num_items, const char* op_name) {
+    requireDenseContiguousGpuTensor(input, "input");
+    requireDenseContiguousGpuTensor(output, "output");
+    requireSameGpuPlacement(input, output, "input", "output");
+    requireStorageForNumItems(input, "input", num_items);
+    requireStorageForNumItems(output, "output", 1);
+    if (num_items == 0) {
+        throw std::invalid_argument(std::string("CUB device ") + op_name + " requires num_items to be nonzero.");
+    }
+    if (input.getDataType() != output.getDataType()) {
+        throw std::invalid_argument(std::string("CUB device ") + op_name + " input/output dtypes must match.");
+    }
+    static_cast<void>(checkedCubNumItems(num_items));
+}
+
+}  // namespace
+
+void validateDeviceReduceSum(const Tensor& input, const Tensor& output, uint64_t num_items) {
+    validateDeviceReduceCommon(input, output, num_items, "reduce-sum");
+    if (!isCubReduceSumDTypeSupported(input.getDataType())) {
+        throw std::invalid_argument("Unsupported CUB device reduce-sum dtype " + dtypeName(input.getDataType()) + ".");
+    }
+}
+
+void validateDeviceReduceMax(const Tensor& input, const Tensor& output, uint64_t num_items) {
+    validateDeviceReduceCommon(input, output, num_items, "reduce-max");
+    if (!isCubReduceMaxDTypeSupported(input.getDataType())) {
+        throw std::invalid_argument("Unsupported CUB device reduce-max dtype " + dtypeName(input.getDataType()) + ".");
+    }
+}
+
+void validateDeviceReduceMin(const Tensor& input, const Tensor& output, uint64_t num_items) {
+    validateDeviceReduceCommon(input, output, num_items, "reduce-min");
+    if (!isCubReduceMinDTypeSupported(input.getDataType())) {
+        throw std::invalid_argument("Unsupported CUB device reduce-min dtype " + dtypeName(input.getDataType()) + ".");
+    }
+}
+
 void validateExclusiveSum(const Tensor& input, const Tensor& output, uint64_t num_items) {
     requireDenseContiguousGpuTensor(input, "input");
     requireDenseContiguousGpuTensor(output, "output");
@@ -185,6 +442,68 @@ void validateExclusiveSum(const Tensor& input, const Tensor& output, uint64_t nu
     }
     if (!isCubExclusiveSumDTypeSupported(input.getDataType())) {
         throw std::invalid_argument("Unsupported CUB exclusive-sum dtype " + dtypeName(input.getDataType()) + ".");
+    }
+}
+
+void validateSegmentedExclusiveSum(const Tensor& input,
+                                   const Tensor& output,
+                                   const Tensor& segment_offsets,
+                                   uint64_t num_items,
+                                   uint64_t num_segments) {
+    requireDenseContiguousGpuTensor(input, "input");
+    requireDenseContiguousGpuTensor(output, "output");
+    requireSameGpuPlacement(input, output, "input", "output");
+    requireStorageForNumItems(input, "input", num_items);
+    requireStorageForNumItems(output, "output", num_items);
+    if (input.getDataType() != output.getDataType()) {
+        throw std::invalid_argument("CUB segmented exclusive-sum input/output dtypes must match.");
+    }
+    if (!isCubSegmentedExclusiveSumDTypeSupported(input.getDataType())) {
+        throw std::invalid_argument("Unsupported CUB segmented exclusive-sum dtype " + dtypeName(input.getDataType()) + ".");
+    }
+    validateSegmentOffsets(input, segment_offsets, num_items, num_segments, "input");
+}
+
+namespace {
+
+void validateSegmentedReduceCommon(const Tensor& input,
+                                   const Tensor& output,
+                                   const Tensor& segment_offsets,
+                                   uint64_t num_items,
+                                   uint64_t num_segments,
+                                   const char* op_name) {
+    requireDenseContiguousGpuTensor(input, "input");
+    requireDenseContiguousGpuTensor(output, "output");
+    requireSameGpuPlacement(input, output, "input", "output");
+    requireStorageForNumItems(input, "input", num_items);
+    requireStorageForNumItems(output, "output", num_segments);
+    if (input.getDataType() != output.getDataType()) {
+        throw std::invalid_argument(std::string("CUB segmented ") + op_name + " input/output dtypes must match.");
+    }
+    validateSegmentOffsets(input, segment_offsets, num_items, num_segments, "input");
+}
+
+}  // namespace
+
+void validateSegmentedReduceSum(const Tensor& input,
+                                const Tensor& output,
+                                const Tensor& segment_offsets,
+                                uint64_t num_items,
+                                uint64_t num_segments) {
+    validateSegmentedReduceCommon(input, output, segment_offsets, num_items, num_segments, "reduce-sum");
+    if (!isCubSegmentedReduceSumDTypeSupported(input.getDataType())) {
+        throw std::invalid_argument("Unsupported CUB segmented reduce-sum dtype " + dtypeName(input.getDataType()) + ".");
+    }
+}
+
+void validateSegmentedReduceMax(const Tensor& input,
+                                const Tensor& output,
+                                const Tensor& segment_offsets,
+                                uint64_t num_items,
+                                uint64_t num_segments) {
+    validateSegmentedReduceCommon(input, output, segment_offsets, num_items, num_segments, "reduce-max");
+    if (!isCubSegmentedReduceMaxDTypeSupported(input.getDataType())) {
+        throw std::invalid_argument("Unsupported CUB segmented reduce-max dtype " + dtypeName(input.getDataType()) + ".");
     }
 }
 
@@ -237,6 +556,75 @@ bool isCubRadixSortValueDTypeSupported(DataType dtype) {
     return false;
 }
 
+bool isCubTopKKeyDTypeSupported(DataType dtype) {
+    switch (dtype) {
+        case DataType::UINT8:
+        case DataType::INT8:
+        case DataType::UINT16:
+        case DataType::INT16:
+        case DataType::UINT32:
+        case DataType::INT32:
+        case DataType::FP16:
+        case DataType::BF16:
+        case DataType::FP32:
+            return true;
+#if THOR_CUB_ENABLE_64BIT_TYPES
+        case DataType::UINT64:
+        case DataType::INT64:
+        case DataType::FP64:
+            return true;
+#endif
+        default:
+            return false;
+    }
+}
+
+bool isCubTopKValueDTypeSupported(DataType dtype) {
+    return isCubRadixSortValueDTypeSupported(dtype);
+}
+
+bool isCubSelectValueDTypeSupported(DataType dtype) {
+    switch (dtype) {
+        case DataType::UINT8:
+        case DataType::INT8:
+        case DataType::UINT16:
+        case DataType::INT16:
+        case DataType::UINT32:
+        case DataType::INT32:
+        case DataType::FP16:
+        case DataType::BF16:
+        case DataType::FP32:
+            return true;
+#if THOR_CUB_ENABLE_64BIT_TYPES
+        case DataType::UINT64:
+        case DataType::INT64:
+        case DataType::FP64:
+            return true;
+#endif
+#if THOR_CUB_ENABLE_FP8_TYPES
+        case DataType::FP8_E4M3:
+        case DataType::FP8_E5M2:
+            return true;
+#endif
+        default:
+            return false;
+    }
+}
+
+bool isCubSelectFlagDTypeSupported(DataType dtype) {
+    switch (dtype) {
+        case DataType::BOOLEAN:
+        case DataType::UINT8:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool isCubFindKeyDTypeSupported(DataType dtype) { return isCubTopKKeyDTypeSupported(dtype); }
+
+bool isCubFindFlagDTypeSupported(DataType dtype) { return isCubSelectFlagDTypeSupported(dtype); }
+
 bool isCubRunLengthEncodeDTypeSupported(DataType dtype) {
     switch (dtype) {
         case DataType::UINT8:
@@ -281,6 +669,18 @@ bool isCubExclusiveSumDTypeSupported(DataType dtype) {
             return false;
     }
 }
+
+bool isCubReduceSumDTypeSupported(DataType dtype) { return isCubExclusiveSumDTypeSupported(dtype); }
+
+bool isCubReduceMaxDTypeSupported(DataType dtype) { return isCubExclusiveSumDTypeSupported(dtype); }
+
+bool isCubReduceMinDTypeSupported(DataType dtype) { return isCubExclusiveSumDTypeSupported(dtype); }
+
+bool isCubSegmentedExclusiveSumDTypeSupported(DataType dtype) { return isCubExclusiveSumDTypeSupported(dtype); }
+
+bool isCubSegmentedReduceSumDTypeSupported(DataType dtype) { return isCubExclusiveSumDTypeSupported(dtype); }
+
+bool isCubSegmentedReduceMaxDTypeSupported(DataType dtype) { return isCubExclusiveSumDTypeSupported(dtype); }
 
 bool isCubSegmentOffsetDTypeSupported(DataType dtype) {
     switch (dtype) {
