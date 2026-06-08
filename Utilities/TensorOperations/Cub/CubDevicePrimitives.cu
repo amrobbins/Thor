@@ -5,4 +5,5 @@
 //   CubRadixSort.cu
 //   CubRunLengthEncode.cu
 //   CubScan.cu
+//   CubSelect.cu
 // Shared non-CUB validation/workspace helpers live in CubDevicePrimitiveSupport.cpp.
