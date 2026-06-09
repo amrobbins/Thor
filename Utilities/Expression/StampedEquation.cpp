@@ -1065,8 +1065,15 @@ StampedScan::StampedScan(std::shared_ptr<CompiledScan> compiled,
                          const Tensor& input,
                          const Tensor& output,
                          const Stream& stream,
-                         std::optional<Tensor> segment_offsets)
-    : compiled_scan(std::move(compiled)), input(input), output(output), segment_offsets(std::move(segment_offsets)), stream(stream) {
+                         std::optional<Tensor> segment_offsets,
+                         std::optional<Tensor> value_output)
+    : compiled_scan(std::move(compiled)),
+      input(input),
+      output(output),
+      value_output(value_output.value_or(Tensor())),
+      segment_offsets(std::move(segment_offsets)),
+      has_value_output(value_output.has_value()),
+      stream(stream) {
     if (!compiled_scan) {
         throw std::runtime_error("StampedScan requires a compiled scan descriptor.");
     }
@@ -1077,6 +1084,17 @@ StampedScan::StampedScan(std::shared_ptr<CompiledScan> compiled,
     if (arg_scan) {
         if (output.getDataType() != DataType::UINT32) {
             throw std::runtime_error("Expression arg scan output dtype must be UINT32.");
+        }
+        if (has_value_output) {
+            if (value_output.value().getDataType() != input.getDataType()) {
+                throw std::runtime_error("Expression paired arg scan value output dtype must match input dtype.");
+            }
+            if (value_output.value().getPlacement() != input.getPlacement()) {
+                throw std::runtime_error("Expression paired arg scan value output must be on the same GPU placement as input.");
+            }
+            if (value_output.value().getDimensions() != input.getDimensions()) {
+                throw std::runtime_error("Expression paired arg scan value output shape must match input shape.");
+            }
         }
     } else if (input.getDataType() != output.getDataType()) {
         throw std::runtime_error("Expression scan currently requires input and output dtypes to match.");
@@ -1172,6 +1190,14 @@ void StampedScan::runOn(Stream& run_stream) const {
         } else {
             cubDeviceScan(scan_plan, temp_storage, input, output, run_stream);
         }
+    }
+    if (arg_scan && has_value_output) {
+        cubDeviceArgScanValuesFromIndices(input,
+                                          output,
+                                          value_output,
+                                          input.getTotalNumElements(),
+                                          compiled_scan->op == ScanOp::ArgMin ? CubArgScanOp::ArgMin : CubArgScanOp::ArgMax,
+                                          run_stream);
     }
 }
 

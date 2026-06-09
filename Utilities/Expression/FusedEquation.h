@@ -141,11 +141,18 @@ struct CompiledExecutionStage {
                 }
                 return arg_minmax->output_dtype;
 
-            case Kind::Scan:
+            case Kind::Scan: {
                 if (!scan) {
                     throw std::runtime_error("CompiledExecutionStage::outputDType missing scan stage.");
                 }
+                if (outputs[output_idx].local_node_idx < expr.nodes.size()) {
+                    const ExprNode& output_node = expr.nodes[outputs[output_idx].local_node_idx];
+                    if (output_node.output_dtype.has_value()) {
+                        return output_node.output_dtype.value();
+                    }
+                }
                 return scan->output_dtype;
+            }
 
             case Kind::Softmax:
                 if (!softmax) {
@@ -270,11 +277,13 @@ struct CompiledExecutionStage {
           outputs(std::move(outputs)),
           parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
 
-    CompiledExecutionStage(const std::shared_ptr<CompiledScan>& scan,
+    CompiledExecutionStage(const PhysicalExpression& expr,
+                           const std::shared_ptr<CompiledScan>& scan,
                            std::vector<uint32_t> input_value_ids,
                            std::vector<CompiledStageOutput> outputs,
                            std::vector<ParameterFanOverride> parameter_fan_overrides = {})
         : kind(Kind::Scan),
+          expr(expr),
           scan(scan),
           input_value_ids(std::move(input_value_ids)),
           outputs(std::move(outputs)),

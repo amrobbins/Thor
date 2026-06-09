@@ -14,6 +14,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
@@ -637,8 +638,14 @@ class Expression {
                                                   ScanMode mode = ScanMode::Exclusive);
     [[nodiscard]] Expression scanArgMin(int64_t axis = -1) const;
     [[nodiscard]] Expression scanArgMax(int64_t axis = -1) const;
+    [[nodiscard]] std::pair<Expression, Expression> scanMinWithIndices(int64_t axis = -1, ScanMode mode = ScanMode::Inclusive) const;
+    [[nodiscard]] std::pair<Expression, Expression> scanMaxWithIndices(int64_t axis = -1, ScanMode mode = ScanMode::Inclusive) const;
     [[nodiscard]] Expression segmentedScanArgMin(const Expression& offsets) const;
     [[nodiscard]] Expression segmentedScanArgMax(const Expression& offsets) const;
+    [[nodiscard]] std::pair<Expression, Expression> segmentedScanMinWithIndices(const Expression& offsets,
+                                                                                ScanMode mode = ScanMode::Inclusive) const;
+    [[nodiscard]] std::pair<Expression, Expression> segmentedScanMaxWithIndices(const Expression& offsets,
+                                                                                ScanMode mode = ScanMode::Inclusive) const;
     [[nodiscard]] static Expression exclusiveScanSum(const Expression& input, int64_t axis = -1) {
         return scan(input, ScanOp::Sum, ScanMode::Exclusive, axis);
     }

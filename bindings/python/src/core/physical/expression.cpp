@@ -757,6 +757,26 @@ flattened input indices for the winning prefix element.
         R"nbdoc(Inclusive prefix arg-max scan along the final contiguous axis. Returns UINT32 flattened input indices.)nbdoc");
 
     expr.def(
+        "scan_min_with_indices",
+        [](const Expression& self, int64_t axis, ScanMode mode) {
+            auto result = self.scanMinWithIndices(axis, mode);
+            return nb::make_tuple(result.first, result.second);
+        },
+        "axis"_a = -1,
+        "mode"_a = ScanMode::Inclusive,
+        R"nbdoc(Return paired prefix-min values and UINT32 flattened input indices from one coalescible scan stage.)nbdoc");
+
+    expr.def(
+        "scan_max_with_indices",
+        [](const Expression& self, int64_t axis, ScanMode mode) {
+            auto result = self.scanMaxWithIndices(axis, mode);
+            return nb::make_tuple(result.first, result.second);
+        },
+        "axis"_a = -1,
+        "mode"_a = ScanMode::Inclusive,
+        R"nbdoc(Return paired prefix-max values and UINT32 flattened input indices from one coalescible scan stage.)nbdoc");
+
+    expr.def(
         "segmented_scan_arg_min",
         [](const Expression& self, const Expression& offsets) { return self.segmentedScanArgMin(offsets); },
         "offsets"_a,
@@ -767,6 +787,26 @@ flattened input indices for the winning prefix element.
         [](const Expression& self, const Expression& offsets) { return self.segmentedScanArgMax(offsets); },
         "offsets"_a,
         R"nbdoc(Inclusive ragged segmented prefix arg-max scan. Returns UINT32 flattened input indices.)nbdoc");
+
+    expr.def(
+        "segmented_scan_min_with_indices",
+        [](const Expression& self, const Expression& offsets, ScanMode mode) {
+            auto result = self.segmentedScanMinWithIndices(offsets, mode);
+            return nb::make_tuple(result.first, result.second);
+        },
+        "offsets"_a,
+        "mode"_a = ScanMode::Inclusive,
+        R"nbdoc(Return paired ragged segmented prefix-min values and UINT32 flattened input indices from one coalescible scan stage.)nbdoc");
+
+    expr.def(
+        "segmented_scan_max_with_indices",
+        [](const Expression& self, const Expression& offsets, ScanMode mode) {
+            auto result = self.segmentedScanMaxWithIndices(offsets, mode);
+            return nb::make_tuple(result.first, result.second);
+        },
+        "offsets"_a,
+        "mode"_a = ScanMode::Inclusive,
+        R"nbdoc(Return paired ragged segmented prefix-max values and UINT32 flattened input indices from one coalescible scan stage.)nbdoc");
 
     expr.def(
         "exclusive_scan_sum",

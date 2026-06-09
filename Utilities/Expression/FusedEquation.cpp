@@ -5100,10 +5100,12 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
                 throw std::runtime_error("Missing compiled scan stage.");
             }
             const size_t expected_scan_inputs = stage.scan->segmented_by_offsets ? 2 : 1;
-            if (stage.input_value_ids.size() != expected_scan_inputs || stage.outputs.size() != 1) {
-                throw std::runtime_error("Scan stage expected its compiled input count and one output.");
+            if (stage.input_value_ids.size() != expected_scan_inputs || stage.outputs.empty() || stage.outputs.size() > 2) {
+                throw std::runtime_error("Scan stage expected its compiled input count and one or two outputs.");
             }
-            value_dims[stage.outputs[0].value_id] = stage_input_dims[0];
+            for (const CompiledStageOutput& output : stage.outputs) {
+                value_dims[output.value_id] = stage_input_dims[0];
+            }
         } else if (stage.kind == CompiledExecutionStage::Kind::Softmax) {
             if (!stage.softmax) {
                 throw std::runtime_error("Missing compiled softmax stage.");
@@ -7627,37 +7629,65 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 if (stageInputs.size() != expected_scan_inputs) {
                     throw std::runtime_error("Scan stage expects its compiled input count.");
                 }
-                if (stage.outputs.size() != 1) {
-                    throw std::runtime_error("Scan stage expects exactly one output.");
+                if (stage.outputs.empty() || stage.outputs.size() > 2) {
+                    throw std::runtime_error("Scan stage expects one output, or paired value/index outputs.");
                 }
 
                 Tensor inputTensor = runtimeInputTensor(stageInputs[0]);
-                const CompiledStageOutput& stageOutput = stage.outputs[0];
-                std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, 0, stageInputs);
-                auto requested_it = effectiveRequestedOutputShapes.find(stageOutput.name);
-                if (requested_it != effectiveRequestedOutputShapes.end() && !requested_it->second.empty()) {
-                    verifyRequestedOutputLayout(requested_it->second, output_dims);
-                    output_dims = requested_it->second;
+                auto allocateScanOutput = [&](size_t output_idx) -> Tensor {
+                    const CompiledStageOutput& stageOutput = stage.outputs[output_idx];
+                    std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, output_idx, stageInputs);
+                    auto requested_it = effectiveRequestedOutputShapes.find(stageOutput.name);
+                    if (requested_it != effectiveRequestedOutputShapes.end() && !requested_it->second.empty()) {
+                        verifyRequestedOutputLayout(requested_it->second, output_dims);
+                        output_dims = requested_it->second;
+                    }
+
+                    auto preallocated_it = preallocated_final_outputs_by_name.find(stageOutput.name);
+                    if (preallocated_it != preallocated_final_outputs_by_name.end()) {
+                        return preallocated_it->second;
+                    }
+                    TensorDescriptor outputDescriptor(stage.outputDType(output_idx), output_dims);
+                    return Tensor(inputTensor.getPlacement(), outputDescriptor);
+                };
+
+                std::vector<Tensor> outputTensors;
+                outputTensors.reserve(stage.outputs.size());
+                for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
+                    outputTensors.push_back(allocateScanOutput(output_idx));
                 }
 
-                auto preallocated_it = preallocated_final_outputs_by_name.find(stageOutput.name);
-                Tensor outputTensor;
-                if (preallocated_it != preallocated_final_outputs_by_name.end()) {
-                    outputTensor = preallocated_it->second;
-                } else {
-                    TensorDescriptor outputDescriptor(stage.scan->output_dtype, output_dims);
-                    outputTensor = Tensor(inputTensor.getPlacement(), outputDescriptor);
+                size_t index_output_idx = 0;
+                std::optional<size_t> value_output_idx = std::nullopt;
+                if (stage.outputs.size() == 2) {
+                    for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
+                        const ExprNode& outputNode = stage.expr.nodes.at(stage.outputs[output_idx].local_node_idx);
+                        if (outputNode.scan_op == ScanOp::ArgMin || outputNode.scan_op == ScanOp::ArgMax) {
+                            index_output_idx = output_idx;
+                        } else {
+                            value_output_idx = output_idx;
+                        }
+                    }
+                    if (!value_output_idx.has_value()) {
+                        throw std::runtime_error("Paired scan stage is missing its value output.");
+                    }
                 }
 
                 std::optional<Tensor> segmentOffsets = std::nullopt;
                 if (stage.scan->segmented_by_offsets) {
                     segmentOffsets = runtimeInputTensor(stageInputs[1]);
                 }
-                std::shared_ptr<StampedScan> stampedScan =
-                    std::make_shared<StampedScan>(stage.scan, inputTensor, outputTensor, stream, segmentOffsets);
+                std::optional<Tensor> valueOutput =
+                    value_output_idx.has_value() ? std::optional<Tensor>(outputTensors[*value_output_idx]) : std::nullopt;
+                std::shared_ptr<StampedScan> stampedScan = std::make_shared<StampedScan>(
+                    stage.scan, inputTensor, outputTensors[index_output_idx], stream, segmentOffsets, valueOutput);
 
-                values[stageOutput.value_id] = outputTensor;
-                producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
+                const uint32_t producer_stage_idx = static_cast<uint32_t>(stampedStages.size());
+                for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
+                    const CompiledStageOutput& stageOutput = stage.outputs[output_idx];
+                    values[stageOutput.value_id] = outputTensors[output_idx];
+                    producer_stage_by_value_id[stageOutput.value_id] = producer_stage_idx;
+                }
                 stampedStages.emplace_back(stampedScan, std::move(dependency_stage_indices), stage_flops);
                 break;
             }
@@ -8656,10 +8686,12 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
                 throw std::runtime_error("Missing compiled scan stage.");
             }
             const size_t expected_scan_inputs = stage.scan->segmented_by_offsets ? 2 : 1;
-            if (stage.input_value_ids.size() != expected_scan_inputs || stage.outputs.size() != 1) {
-                throw std::runtime_error("Scan stage expected its compiled input count and one output.");
+            if (stage.input_value_ids.size() != expected_scan_inputs || stage.outputs.empty() || stage.outputs.size() > 2) {
+                throw std::runtime_error("Scan stage expected its compiled input count and one or two outputs.");
             }
-            value_dims[stage.outputs[0].value_id] = stage_input_dims[0];
+            for (const CompiledStageOutput& output : stage.outputs) {
+                value_dims[output.value_id] = stage_input_dims[0];
+            }
         } else if (stage.kind == CompiledExecutionStage::Kind::Softmax) {
             if (!stage.softmax) {
                 throw std::runtime_error("Missing compiled softmax stage.");

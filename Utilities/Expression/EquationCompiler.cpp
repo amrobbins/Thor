@@ -3166,15 +3166,64 @@ static PhysicalExecutionStage buildReductionStage(const PhysicalExpression& expr
     };
 }
 
+static bool isArgScanExpressionOp(ScanOp op) { return op == ScanOp::ArgMin || op == ScanOp::ArgMax; }
+
+static bool isValueScanExpressionOp(ScanOp op) { return op == ScanOp::Min || op == ScanOp::Max; }
+
+static bool scanOpsAreValueIndexPair(ScanOp a, ScanOp b) {
+    return (a == ScanOp::Min && b == ScanOp::ArgMin) || (a == ScanOp::ArgMin && b == ScanOp::Min) ||
+           (a == ScanOp::Max && b == ScanOp::ArgMax) || (a == ScanOp::ArgMax && b == ScanOp::Max);
+}
+
+static bool scanNodesCanShareValueIndexStage(const ExprNode& a, const ExprNode& b) {
+    if (!isScanOp(a.op) || !isScanOp(b.op) || a.op != b.op) {
+        return false;
+    }
+    if (!scanOpsAreValueIndexPair(a.scan_op, b.scan_op)) {
+        return false;
+    }
+    return a.lhs == b.lhs && a.rhs == b.rhs && a.scan_mode == b.scan_mode && a.scan_axis == b.scan_axis &&
+           a.scan_reverse == b.scan_reverse;
+}
+
+static uint32_t findPairedScanNode(const PhysicalExpression& expr, uint32_t node_idx) {
+    if (node_idx >= expr.nodes.size()) {
+        return UINT32_MAX;
+    }
+    const ExprNode& root = expr.nodes[node_idx];
+    if (!isScanOp(root.op) || (!isValueScanExpressionOp(root.scan_op) && !isArgScanExpressionOp(root.scan_op))) {
+        return UINT32_MAX;
+    }
+    for (uint32_t candidate_idx = 0; candidate_idx < expr.nodes.size(); ++candidate_idx) {
+        if (candidate_idx == node_idx) {
+            continue;
+        }
+        if (scanNodesCanShareValueIndexStage(root, expr.nodes[candidate_idx])) {
+            return candidate_idx;
+        }
+    }
+    return UINT32_MAX;
+}
+
 static PhysicalExecutionStage buildScanStage(const PhysicalExpression& expr,
-                                            uint32_t node_idx,
-                                            uint32_t output_value_id,
-                                            const std::string& output_name,
+                                            const std::vector<RequestedStageOutput>& requested_outputs,
                                             const std::unordered_map<uint32_t, uint32_t>& node_output_value_id) {
-    const ExprNode& node = expr.nodes[node_idx];
-    if (!isScanOp(node.op)) {
+    if (requested_outputs.empty() || requested_outputs.size() > 2) {
+        throw std::runtime_error("buildScanStage requires one scan output, or a paired value/index scan output.");
+    }
+
+    const ExprNode& first_node = expr.nodes.at(requested_outputs.front().old_root_idx);
+    if (!isScanOp(first_node.op)) {
         throw std::runtime_error("buildScanStage called on non-scan node.");
     }
+    if (requested_outputs.size() == 2) {
+        const ExprNode& second_node = expr.nodes.at(requested_outputs[1].old_root_idx);
+        if (!scanNodesCanShareValueIndexStage(first_node, second_node)) {
+            throw std::runtime_error("buildScanStage paired outputs must be matching min/arg_min or max/arg_max scans.");
+        }
+    }
+
+    const ExprNode& node = first_node;
     if (node.lhs == UINT32_MAX || node.lhs >= expr.nodes.size()) {
         throw std::runtime_error("Scan node missing lhs input.");
     }
@@ -3202,16 +3251,19 @@ static PhysicalExecutionStage buildScanStage(const PhysicalExpression& expr,
 
     const auto [input_value_id, actual_input_dtype] = resolve_stage_parent(node.lhs, "input");
 
-    if (!node.output_dtype.has_value()) {
-        throw std::runtime_error("Scan node is missing resolved output dtype.");
-    }
-    const bool arg_scan = node.scan_op == ScanOp::ArgMin || node.scan_op == ScanOp::ArgMax;
-    if (arg_scan) {
-        if (node.output_dtype.value() != DataType::UINT32) {
-            throw std::runtime_error("Expression arg scan output dtype must be UINT32.");
+    for (const RequestedStageOutput& requested : requested_outputs) {
+        const ExprNode& requested_node = expr.nodes.at(requested.old_root_idx);
+        if (!requested_node.output_dtype.has_value()) {
+            throw std::runtime_error("Scan node is missing resolved output dtype.");
         }
-    } else if (actual_input_dtype != node.output_dtype.value()) {
-        throw std::runtime_error("Expression scan currently requires input and output dtypes to match.");
+        const bool arg_scan = requested_node.scan_op == ScanOp::ArgMin || requested_node.scan_op == ScanOp::ArgMax;
+        if (arg_scan) {
+            if (requested_node.output_dtype.value() != DataType::UINT32) {
+                throw std::runtime_error("Expression arg scan output dtype must be UINT32.");
+            }
+        } else if (actual_input_dtype != requested_node.output_dtype.value()) {
+            throw std::runtime_error("Expression scan currently requires input and output dtypes to match.");
+        }
     }
 
     std::vector<uint32_t> input_value_ids;
@@ -3254,19 +3306,30 @@ static PhysicalExecutionStage buildScanStage(const PhysicalExpression& expr,
         stage_expr.nodes.push_back(std::move(offsets_node));
     }
 
-    ExprNode scan = node;
-    scan.lhs = 0;
-    scan.rhs = node.op == ExprOp::SEGMENTED_SCAN ? 1 : UINT32_MAX;
-    stage_expr.nodes.push_back(std::move(scan));
-    const uint32_t scan_node_idx = static_cast<uint32_t>(stage_expr.nodes.size() - 1);
-    stage_expr.output_node = scan_node_idx;
-
     std::vector<CompiledStageOutput> stage_outputs;
-    stage_outputs.push_back(CompiledStageOutput{
-        .name = output_name,
-        .local_node_idx = scan_node_idx,
-        .value_id = output_value_id,
-    });
+    stage_outputs.reserve(requested_outputs.size());
+    uint32_t arg_local_node_idx = UINT32_MAX;
+
+    for (const RequestedStageOutput& requested : requested_outputs) {
+        ExprNode scan = expr.nodes.at(requested.old_root_idx);
+        scan.lhs = 0;
+        scan.rhs = node.op == ExprOp::SEGMENTED_SCAN ? 1 : UINT32_MAX;
+        const uint32_t local_node_idx = static_cast<uint32_t>(stage_expr.nodes.size());
+        stage_expr.nodes.push_back(std::move(scan));
+        if (isArgScanExpressionOp(stage_expr.nodes.back().scan_op)) {
+            arg_local_node_idx = local_node_idx;
+        }
+        stage_outputs.push_back(CompiledStageOutput{
+            .name = requested.name,
+            .local_node_idx = local_node_idx,
+            .value_id = requested.value_id,
+        });
+    }
+
+    if (requested_outputs.size() == 2 && arg_local_node_idx == UINT32_MAX) {
+        throw std::runtime_error("Paired scan stage is missing its arg scan output.");
+    }
+    stage_expr.output_node = requested_outputs.size() == 2 ? arg_local_node_idx : stage_outputs.front().local_node_idx;
 
     return PhysicalExecutionStage{
         .kind = PhysicalExecutionStage::Kind::Scan,
@@ -3274,6 +3337,20 @@ static PhysicalExecutionStage buildScanStage(const PhysicalExpression& expr,
         .input_value_ids = std::move(input_value_ids),
         .outputs = std::move(stage_outputs),
     };
+}
+
+static PhysicalExecutionStage buildScanStage(const PhysicalExpression& expr,
+                                            uint32_t node_idx,
+                                            uint32_t output_value_id,
+                                            const std::string& output_name,
+                                            const std::unordered_map<uint32_t, uint32_t>& node_output_value_id) {
+    return buildScanStage(expr,
+                          std::vector<RequestedStageOutput>{RequestedStageOutput{
+                              .name = output_name,
+                              .old_root_idx = node_idx,
+                              .value_id = output_value_id,
+                          }},
+                          node_output_value_id);
 }
 
 static PhysicalExecutionStage buildSoftmaxStage(const PhysicalExpression& expr,
@@ -5594,6 +5671,33 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 ensureBoundaryParentEmitted(root.matmul_epilogue_aux, "backward epilogue aux", false);
             }
 
+            if (isScanOp(root.op)) {
+                const uint32_t paired_node_idx = findPairedScanNode(expr, root_idx);
+                if (paired_node_idx != UINT32_MAX && node_output_value_id.find(paired_node_idx) == node_output_value_id.end()) {
+                    const uint32_t first_value_id = next_value_id++;
+                    const uint32_t second_value_id = next_value_id++;
+                    node_output_value_id[root_idx] = first_value_id;
+                    node_output_value_id[paired_node_idx] = second_value_id;
+                    planned.stages.push_back(buildScanStage(expr,
+                                                            std::vector<RequestedStageOutput>{
+                                                                RequestedStageOutput{
+                                                                    .name = "",
+                                                                    .old_root_idx = root_idx,
+                                                                    .value_id = first_value_id,
+                                                                },
+                                                                RequestedStageOutput{
+                                                                    .name = "",
+                                                                    .old_root_idx = paired_node_idx,
+                                                                    .value_id = second_value_id,
+                                                                },
+                                                            },
+                                                            node_output_value_id));
+                    stage_boundary_value_id.emplace(boundary_sig, first_value_id);
+                    stage_boundary_value_id.emplace(fusedRegionSignature(expr, paired_node_idx), second_value_id);
+                    return;
+                }
+            }
+
             uint32_t stage_out_id = next_value_id++;
             node_output_value_id[root_idx] = stage_out_id;
             if (isReduceMinMaxBackwardOp(root.op)) {
@@ -5813,6 +5917,16 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
         }
 
         if (isStageBoundaryOp(root.op)) {
+            auto already_emitted_it = node_output_value_id.find(named_output.node_idx);
+            if (already_emitted_it != node_output_value_id.end()) {
+                planned.final_outputs.push_back(CompiledStageOutput{
+                    .name = named_output.name,
+                    .local_node_idx = UINT32_MAX,
+                    .value_id = already_emitted_it->second,
+                });
+                continue;
+            }
+
             const std::string boundary_sig = fusedRegionSignature(expr, named_output.node_idx);
             auto emitted_boundary_it = stage_boundary_value_id.find(boundary_sig);
             if (emitted_boundary_it != stage_boundary_value_id.end()) {
@@ -5929,6 +6043,39 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             }
             if (isMatmulOp(root.op) && root.matmul_epilogue_aux != UINT32_MAX) {
                 ensureBoundaryParentEmitted(root.matmul_epilogue_aux, "backward epilogue aux", false);
+            }
+
+            if (isScanOp(root.op)) {
+                const uint32_t paired_node_idx = findPairedScanNode(expr, named_output.node_idx);
+                auto paired_final_name_it = paired_node_idx == UINT32_MAX ? final_output_name_by_node.end()
+                                                                          : final_output_name_by_node.find(paired_node_idx);
+                if (paired_final_name_it != final_output_name_by_node.end() &&
+                    node_output_value_id.find(paired_node_idx) == node_output_value_id.end()) {
+                    const uint32_t first_value_id = next_value_id++;
+                    const uint32_t second_value_id = next_value_id++;
+                    node_output_value_id[named_output.node_idx] = first_value_id;
+                    node_output_value_id[paired_node_idx] = second_value_id;
+                    std::vector<RequestedStageOutput> requested_scan_outputs;
+                    requested_scan_outputs.push_back(RequestedStageOutput{
+                        .name = named_output.name,
+                        .old_root_idx = named_output.node_idx,
+                        .value_id = first_value_id,
+                    });
+                    requested_scan_outputs.push_back(RequestedStageOutput{
+                        .name = paired_final_name_it->second,
+                        .old_root_idx = paired_node_idx,
+                        .value_id = second_value_id,
+                    });
+                    planned.stages.push_back(buildScanStage(expr, requested_scan_outputs, node_output_value_id));
+                    stage_boundary_value_id.emplace(boundary_sig, first_value_id);
+                    stage_boundary_value_id.emplace(fusedRegionSignature(expr, paired_node_idx), second_value_id);
+                    planned.final_outputs.push_back(CompiledStageOutput{
+                        .name = named_output.name,
+                        .local_node_idx = UINT32_MAX,
+                        .value_id = first_value_id,
+                    });
+                    continue;
+                }
             }
 
             uint32_t stage_out_id = next_value_id++;
@@ -6136,7 +6283,7 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
             }
             case PhysicalExecutionStage::Kind::Scan: {
                 std::shared_ptr<CompiledScan> scan = compileScan(stage.expr);
-                compiled->stages.emplace_back(scan, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
+                compiled->stages.emplace_back(stage.expr, scan, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
                 break;
             }
             case PhysicalExecutionStage::Kind::Softmax: {
