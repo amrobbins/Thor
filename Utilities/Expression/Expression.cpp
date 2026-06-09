@@ -93,6 +93,56 @@ NamedInput::Kind namedInputKindFromString(const std::string& kind) {
     throw std::runtime_error("Unknown expression input kind '" + kind + "'.");
 }
 
+std::string scanOpToString(ScanOp op) {
+    switch (op) {
+        case ScanOp::Sum:
+            return "sum";
+        case ScanOp::Min:
+            return "min";
+        case ScanOp::Max:
+            return "max";
+        case ScanOp::Product:
+            return "product";
+    }
+    throw std::runtime_error("Unknown ScanOp value.");
+}
+
+ScanOp scanOpFromString(const std::string& op) {
+    if (op == "sum") {
+        return ScanOp::Sum;
+    }
+    if (op == "min") {
+        return ScanOp::Min;
+    }
+    if (op == "max") {
+        return ScanOp::Max;
+    }
+    if (op == "product") {
+        return ScanOp::Product;
+    }
+    throw std::runtime_error("Unknown scan op '" + op + "'.");
+}
+
+std::string scanModeToString(ScanMode mode) {
+    switch (mode) {
+        case ScanMode::Exclusive:
+            return "exclusive";
+        case ScanMode::Inclusive:
+            return "inclusive";
+    }
+    throw std::runtime_error("Unknown ScanMode value.");
+}
+
+ScanMode scanModeFromString(const std::string& mode) {
+    if (mode == "exclusive") {
+        return ScanMode::Exclusive;
+    }
+    if (mode == "inclusive") {
+        return ScanMode::Inclusive;
+    }
+    throw std::runtime_error("Unknown scan mode '" + mode + "'.");
+}
+
 std::string exprOpExternalName(ExprOp op) {
     switch (op) {
         case ExprOp::INPUT:
@@ -275,6 +325,8 @@ std::string exprOpExternalName(ExprOp op) {
             return "reduce_norm1";
         case ExprOp::REDUCE_NORM2:
             return "reduce_norm2";
+        case ExprOp::SCAN:
+            return "scan";
         case ExprOp::RMSNORM:
             return "rmsnorm";
         case ExprOp::ATTENTION:
@@ -405,6 +457,7 @@ ExprOp exprOpFromExternalName(const std::string& op) {
         {"reduce_avg", ExprOp::REDUCE_AVG},
         {"reduce_norm1", ExprOp::REDUCE_NORM1},
         {"reduce_norm2", ExprOp::REDUCE_NORM2},
+        {"scan", ExprOp::SCAN},
         {"rmsnorm", ExprOp::RMSNORM},
         {"attention", ExprOp::ATTENTION},
         {"attention_backward_q", ExprOp::ATTENTION_BACKWARD_Q},
@@ -590,6 +643,9 @@ json exprNodeToJson(const ExprNode& node) {
     j["rms_norm_fused_activation"] = toString(node.rms_norm_fused_activation);
     j["embedding_has_padding_index"] = node.embedding_has_padding_index;
     j["embedding_padding_index"] = node.embedding_padding_index;
+    j["scan_op"] = scanOpToString(node.scan_op);
+    j["scan_mode"] = scanModeToString(node.scan_mode);
+    j["scan_axis"] = node.scan_axis;
     setOptionalDTypeJson(j, "input_tensor_dtype", node.input_tensor_dtype);
     setOptionalDTypeJson(j, "output_dtype", node.output_dtype);
     setOptionalDTypeJson(j, "compute_dtype", node.compute_dtype);
@@ -697,6 +753,9 @@ ExprNode exprNodeFromJson(const json& j) {
                                          : CudnnRmsNormFusedActivation::NONE;
     node.embedding_has_padding_index = j.value("embedding_has_padding_index", false);
     node.embedding_padding_index = j.value("embedding_padding_index", uint64_t{0});
+    node.scan_op = scanOpFromString(j.value("scan_op", std::string("sum")));
+    node.scan_mode = scanModeFromString(j.value("scan_mode", std::string("exclusive")));
+    node.scan_axis = j.value("scan_axis", UINT64_MAX);
     parseOptionalDTypeField(j, "input_tensor_dtype", node.input_tensor_dtype);
     parseOptionalDTypeField(j, "output_dtype", node.output_dtype);
     parseOptionalDTypeField(j, "compute_dtype", node.compute_dtype);
@@ -919,6 +978,8 @@ std::string opName(ExprOp op) {
             return "RNORM1";
         case ExprOp::REDUCE_NORM2:
             return "RNORM2";
+        case ExprOp::SCAN:
+            return "SCAN";
         case ExprOp::RMSNORM:
             return "RMSNORM";
         case ExprOp::ATTENTION:
@@ -1114,6 +1175,13 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
         case ExprOp::REDUCE_NORM2: {
             out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) +
                   ";axes=" + formatUIntVectorCanonical(n.reduction_axes) + ";squeeze=" + formatUIntVectorCanonical(n.squeeze_axes) + ")";
+            break;
+        }
+
+        case ExprOp::SCAN: {
+            out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) +
+                  ";op=" + scanOpToString(n.scan_op) + ";mode=" + scanModeToString(n.scan_mode) +
+                  ";axis=" + std::to_string(n.scan_axis) + ")";
             break;
         }
 
@@ -1348,6 +1416,9 @@ std::string canonicalize(const PhysicalExecutionStage& stage) {
             break;
         case PhysicalExecutionStage::Kind::ArgMinMax:
             ss << "argminmax";
+            break;
+        case PhysicalExecutionStage::Kind::Scan:
+            ss << "scan";
             break;
         case PhysicalExecutionStage::Kind::Softmax:
             ss << "softmax";
@@ -1983,6 +2054,7 @@ bool Expression::isUnaryOp(const ExprOp op) {
         case ExprOp::REDUCE_AVG:
         case ExprOp::REDUCE_NORM1:
         case ExprOp::REDUCE_NORM2:
+        case ExprOp::SCAN:
             return true;
         default:
             return false;
@@ -3220,6 +3292,27 @@ Expression Expression::takeAlongAxis(const Expression& input, const Expression& 
     }
     Expression out = binaryOp(input, indices, ExprOp::TAKE_ALONG_AXIS);
     out.expr->nodes[out.nodeIndex].reduction_axes = {static_cast<uint64_t>(axis < 0 ? UINT64_MAX : axis)};
+    return out;
+}
+
+Expression Expression::scan(ScanOp op, ScanMode mode, int64_t axis) const { return scan(*this, op, mode, axis); }
+
+Expression Expression::scan(const Expression& input, ScanOp op, ScanMode mode, int64_t axis) {
+    if (axis < -1) {
+        throw std::invalid_argument("Expression::scan currently supports only axis=-1 or an explicit non-negative final axis.");
+    }
+    if (op != ScanOp::Sum && op != ScanOp::Min && op != ScanOp::Max && op != ScanOp::Product) {
+        throw std::invalid_argument("Expression::scan received an unsupported ScanOp.");
+    }
+    if (mode != ScanMode::Exclusive && mode != ScanMode::Inclusive) {
+        throw std::invalid_argument("Expression::scan received an unsupported ScanMode.");
+    }
+
+    Expression out = unaryOp(input, ExprOp::SCAN);
+    ExprNode& node = out.expr->nodes[out.nodeIndex];
+    node.scan_op = op;
+    node.scan_mode = mode;
+    node.scan_axis = static_cast<uint64_t>(axis < 0 ? UINT64_MAX : axis);
     return out;
 }
 

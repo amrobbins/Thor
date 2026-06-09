@@ -3646,6 +3646,7 @@ static uint64_t computeFusedStageFlops(const PhysicalExpression& expr,
             }
 
             case ExprOp::CUDA_KERNEL_OUTPUT:
+            case ExprOp::SCAN:
             case ExprOp::EMBEDDING_LOOKUP:
             case ExprOp::SOFTMAX:
             case ExprOp::ATTENTION:
@@ -3880,6 +3881,11 @@ static uint64_t computeStageFlops(const CompiledExecutionStage& stage, const std
                 throw std::runtime_error("ArgMinMax stage missing payload while computing FLOPs.");
             return computeArgMinMaxStageFlops(*stage.arg_minmax, stage_input_dims);
 
+        case CompiledExecutionStage::Kind::Scan:
+            if (stage_input_dims.empty())
+                throw std::runtime_error("Scan stage missing input dims while computing FLOPs.");
+            return numelFromDims(stage_input_dims[0]);
+
         case CompiledExecutionStage::Kind::Softmax:
             if (stage_input_dims.empty())
                 throw std::runtime_error("Softmax stage missing input dims while computing FLOPs.");
@@ -3974,6 +3980,13 @@ static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecu
             const auto reduction_axes = resolveReductionAxesForInputRank(stage.arg_minmax->reduction_axes, stage_input_dims[0].size());
 
             return StampedEquation::computeReductionOutputDims(stage_input_dims[0], reduction_axes, stage.arg_minmax->squeeze_axes);
+        }
+
+        case CompiledExecutionStage::Kind::Scan: {
+            if (stage_input_dims.empty()) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput scan stage expected one input shape.");
+            }
+            return stage_input_dims[0];
         }
 
         case CompiledExecutionStage::Kind::Softmax: {
@@ -5081,6 +5094,14 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
 
             value_dims[stage.outputs[0].value_id] = StampedEquation::computeReductionOutputDims(
                 stage_input_dims[0], stage.arg_minmax->reduction_axes, stage.arg_minmax->squeeze_axes);
+        } else if (stage.kind == CompiledExecutionStage::Kind::Scan) {
+            if (!stage.scan) {
+                throw std::runtime_error("Missing compiled scan stage.");
+            }
+            if (stage.input_value_ids.size() != 1 || stage.outputs.size() != 1) {
+                throw std::runtime_error("Scan stage expected exactly one input and one output.");
+            }
+            value_dims[stage.outputs[0].value_id] = stage_input_dims[0];
         } else if (stage.kind == CompiledExecutionStage::Kind::Softmax) {
             if (!stage.softmax) {
                 throw std::runtime_error("Missing compiled softmax stage.");
@@ -7596,6 +7617,42 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 stampedStages.emplace_back(stampedArgMinMax, std::move(dependency_stage_indices), stage_flops);
                 break;
             }
+            case CompiledExecutionStage::Kind::Scan: {
+                if (!stage.scan) {
+                    throw std::runtime_error("Scan stage missing compiled payload.");
+                }
+                if (stageInputs.size() != 1) {
+                    throw std::runtime_error("Scan stage expects exactly one input.");
+                }
+                if (stage.outputs.size() != 1) {
+                    throw std::runtime_error("Scan stage expects exactly one output.");
+                }
+
+                Tensor inputTensor = runtimeInputTensor(stageInputs[0]);
+                const CompiledStageOutput& stageOutput = stage.outputs[0];
+                std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, 0, stageInputs);
+                auto requested_it = effectiveRequestedOutputShapes.find(stageOutput.name);
+                if (requested_it != effectiveRequestedOutputShapes.end() && !requested_it->second.empty()) {
+                    verifyRequestedOutputLayout(requested_it->second, output_dims);
+                    output_dims = requested_it->second;
+                }
+
+                auto preallocated_it = preallocated_final_outputs_by_name.find(stageOutput.name);
+                Tensor outputTensor;
+                if (preallocated_it != preallocated_final_outputs_by_name.end()) {
+                    outputTensor = preallocated_it->second;
+                } else {
+                    TensorDescriptor outputDescriptor(stage.scan->output_dtype, output_dims);
+                    outputTensor = Tensor(inputTensor.getPlacement(), outputDescriptor);
+                }
+
+                std::shared_ptr<StampedScan> stampedScan = std::make_shared<StampedScan>(stage.scan, inputTensor, outputTensor, stream);
+
+                values[stageOutput.value_id] = outputTensor;
+                producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
+                stampedStages.emplace_back(stampedScan, std::move(dependency_stage_indices), stage_flops);
+                break;
+            }
             case CompiledExecutionStage::Kind::Softmax: {
                 if (!stage.softmax) {
                     throw std::runtime_error("Softmax stage missing compiled payload.");
@@ -8586,6 +8643,14 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
             }
             value_dims[stage.outputs[0].value_id] = StampedEquation::computeReductionOutputDims(
                 stage_input_dims[0], stage.arg_minmax->reduction_axes, stage.arg_minmax->squeeze_axes);
+        } else if (stage.kind == CompiledExecutionStage::Kind::Scan) {
+            if (!stage.scan) {
+                throw std::runtime_error("Missing compiled scan stage.");
+            }
+            if (stage.input_value_ids.size() != 1 || stage.outputs.size() != 1) {
+                throw std::runtime_error("Scan stage expected exactly one input and one output.");
+            }
+            value_dims[stage.outputs[0].value_id] = stage_input_dims[0];
         } else if (stage.kind == CompiledExecutionStage::Kind::Softmax) {
             if (!stage.softmax) {
                 throw std::runtime_error("Missing compiled softmax stage.");

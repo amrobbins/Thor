@@ -38,6 +38,8 @@ using TensorScalarBinding = ThorImplementation::TensorScalarBinding;
 using AttentionTensorLayout = ThorImplementation::AttentionTensorLayout;
 using AttentionMaskKind = ThorImplementation::AttentionMaskKind;
 using AttentionOptions = ThorImplementation::AttentionOptions;
+using ScanOp = ThorImplementation::ScanOp;
+using ScanMode = ThorImplementation::ScanMode;
 using RotaryScalingKind = ThorImplementation::RotaryScalingKind;
 using RotaryPositionEmbeddingOptions = ThorImplementation::RotaryPositionEmbeddingOptions;
 using PreparedDynamicExpression = ThorImplementation::PreparedDynamicExpression;
@@ -503,6 +505,18 @@ Thor expression graph. This direct path is useful for low-level tests and
 standalone custom kernels.
 )nbdoc");
 
+    nb::enum_<ScanOp>(physical, "ScanOp")
+        .value("sum", ScanOp::Sum)
+        .value("min", ScanOp::Min)
+        .value("max", ScanOp::Max)
+        .value("product", ScanOp::Product)
+        .export_values();
+
+    nb::enum_<ScanMode>(physical, "ScanMode")
+        .value("exclusive", ScanMode::Exclusive)
+        .value("inclusive", ScanMode::Inclusive)
+        .export_values();
+
     auto expr = nb::class_<Expression>(physical, "Expression");
     expr.attr("__module__") = "thor.physical";
 
@@ -698,6 +712,33 @@ all axes except the gathered axis, and the output shape is the indices shape.
 Indices must be UINT32 or UINT64. The default axis=-1 gathers along the final
 axis.
 )nbdoc");
+
+    expr.def(
+        "scan",
+        [](const Expression& self, ScanOp op, ScanMode mode, int64_t axis) { return self.scan(op, mode, axis); },
+        "op"_a = ScanOp::Sum,
+        "mode"_a = ScanMode::Exclusive,
+        "axis"_a = -1,
+        R"nbdoc(
+Prefix scan along the final contiguous axis.
+
+Supported ops are ``ScanOp.sum``, ``ScanOp.min``, ``ScanOp.max``, and
+``ScanOp.product``. ``ScanMode.exclusive`` returns each prefix before the current
+element; ``ScanMode.inclusive`` includes the current element. The output shape
+and dtype match the input.
+)nbdoc");
+
+    expr.def(
+        "exclusive_scan_sum",
+        [](const Expression& self, int64_t axis) { return self.exclusiveScanSum(axis); },
+        "axis"_a = -1,
+        R"nbdoc(Exclusive prefix sum scan along the final contiguous axis.)nbdoc");
+
+    expr.def(
+        "inclusive_scan_sum",
+        [](const Expression& self, int64_t axis) { return self.inclusiveScanSum(axis); },
+        "axis"_a = -1,
+        R"nbdoc(Inclusive prefix sum scan along the final contiguous axis.)nbdoc");
 
     expr.def_static(
         "constant_scalar",

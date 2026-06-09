@@ -670,6 +670,8 @@ bool isCubExclusiveSumDTypeSupported(DataType dtype) {
     }
 }
 
+bool isCubScanDTypeSupported(DataType dtype) { return isCubExclusiveSumDTypeSupported(dtype); }
+
 bool isCubReduceSumDTypeSupported(DataType dtype) { return isCubExclusiveSumDTypeSupported(dtype); }
 
 bool isCubReduceMaxDTypeSupported(DataType dtype) { return isCubExclusiveSumDTypeSupported(dtype); }

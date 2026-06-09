@@ -2,6 +2,7 @@
 #include "Utilities/Expression/CudaKernelExpression.h"
 #include "Utilities/Expression/ExpressionDTypeResolution.h"
 #include "Utilities/Expression/FusedEquation.h"
+#include "Utilities/TensorOperations/Cub/CubDevicePrimitives.h"
 
 #include "CudaSourceEmitter.h"
 
@@ -588,6 +589,7 @@ static bool isConvolutionBackwardOp(ExprOp op) {
 static bool isConvolutionOp(ExprOp op) { return isConvolutionForwardOp(op) || isConvolutionBackwardOp(op); }
 static bool isReduceMinMaxBackwardOp(ExprOp op) { return op == ExprOp::REDUCE_MIN_BACKWARD || op == ExprOp::REDUCE_MAX_BACKWARD; }
 static bool isSoftmaxOp(ExprOp op) { return op == ExprOp::SOFTMAX; }
+static bool isScanOp(ExprOp op) { return op == ExprOp::SCAN; }
 static bool isRmsNormOp(ExprOp op) { return op == ExprOp::RMSNORM; }
 static bool isEmbeddingLookupOp(ExprOp op) { return op == ExprOp::EMBEDDING_LOOKUP; }
 static bool isAttentionOp(ExprOp op) { return op == ExprOp::ATTENTION; }
@@ -604,9 +606,9 @@ static bool expressionHasIndexAwareOps(const PhysicalExpression& expr) {
 static bool isTransposeOp(ExprOp op) { return op == ExprOp::TRANSPOSE; }
 
 static bool isStageBoundaryOp(ExprOp op) {
-    return isCudnnReduceOp(op) || isSoftmaxOp(op) || isRmsNormOp(op) || isMatmulOp(op) || isAttentionOp(op) || isAttentionBackwardOp(op) ||
-           isConvolutionOp(op) || isReduceMinMaxBackwardOp(op) || isEmbeddingLookupOp(op) || op == ExprOp::STRIDED_VIEW ||
-           op == ExprOp::CUDA_KERNEL_OUTPUT;
+    return isCudnnReduceOp(op) || isSoftmaxOp(op) || isScanOp(op) || isRmsNormOp(op) || isMatmulOp(op) || isAttentionOp(op) ||
+           isAttentionBackwardOp(op) || isConvolutionOp(op) || isReduceMinMaxBackwardOp(op) || isEmbeddingLookupOp(op) ||
+           op == ExprOp::STRIDED_VIEW || op == ExprOp::CUDA_KERNEL_OUTPUT;
 }
 
 static uint32_t peelExplicitTransposeChain(const PhysicalExpression& expr, uint32_t node_idx, bool& transpose_toggled) {
@@ -1553,6 +1555,44 @@ shared_ptr<CompiledArgMinMax> EquationCompiler::compileArgMinMax(const PhysicalE
 
     return make_shared<CompiledArgMinMax>(
         node.op, node.reduction_axes, node.squeeze_axes, supported_input_dtype, node.output_dtype.value(), node.compute_dtype);
+}
+
+shared_ptr<CompiledScan> EquationCompiler::compileScan(const PhysicalExpression& expr) {
+    if (expr.numInputs() != 1) {
+        throw std::runtime_error("Scan stage must have exactly one input.");
+    }
+
+    if (expr.output_node >= expr.nodes.size()) {
+        throw std::runtime_error("Scan stage output_node is out of range.");
+    }
+
+    const ExprNode& node = expr.nodes[expr.output_node];
+    if (!isScanOp(node.op)) {
+        throw std::runtime_error("Scan stage output node is not SCAN.");
+    }
+    if (node.lhs == UINT32_MAX || node.lhs >= expr.nodes.size()) {
+        throw std::runtime_error("Scan node is missing its input.");
+    }
+
+    const ExprNode& input_node = expr.nodes[node.lhs];
+    if (input_node.op != ExprOp::INPUT) {
+        throw std::runtime_error("Scan stage input must be a local INPUT node.");
+    }
+
+    if (!input_node.input_tensor_dtype.has_value()) {
+        throw std::runtime_error("Scan input node missing resolved input_tensor_dtype.");
+    }
+    if (!node.output_dtype.has_value()) {
+        throw std::runtime_error("Scan node missing resolved output_dtype.");
+    }
+    if (input_node.input_tensor_dtype.value() != node.output_dtype.value()) {
+        throw std::runtime_error("Expression scan currently requires input and output dtypes to match.");
+    }
+    if (!isCubScanDTypeSupported(input_node.input_tensor_dtype.value())) {
+        throw std::runtime_error("Expression scan dtype is not supported by the CUB scan backend.");
+    }
+
+    return make_shared<CompiledScan>(node.scan_op, node.scan_mode, node.scan_axis, input_node.input_tensor_dtype.value(), node.output_dtype.value());
 }
 
 shared_ptr<CompiledSoftmax> EquationCompiler::compileSoftmax(const PhysicalExpression& expr) {
@@ -3075,6 +3115,79 @@ static PhysicalExecutionStage buildReductionStage(const PhysicalExpression& expr
 
     return PhysicalExecutionStage{
         .kind = isArgMinMaxOp(node.op) ? PhysicalExecutionStage::Kind::ArgMinMax : PhysicalExecutionStage::Kind::Reduction,
+        .expr = std::move(stage_expr),
+        .input_value_ids = std::move(input_value_ids),
+        .outputs = std::move(stage_outputs),
+    };
+}
+
+static PhysicalExecutionStage buildScanStage(const PhysicalExpression& expr,
+                                           uint32_t node_idx,
+                                           uint32_t output_value_id,
+                                           const std::string& output_name,
+                                           const std::unordered_map<uint32_t, uint32_t>& node_output_value_id) {
+    const ExprNode& node = expr.nodes[node_idx];
+    if (!isScanOp(node.op)) {
+        throw std::runtime_error("buildScanStage called on non-scan node.");
+    }
+    if (node.lhs == UINT32_MAX || node.lhs >= expr.nodes.size()) {
+        throw std::runtime_error("Scan node missing lhs input.");
+    }
+
+    const ExprNode& parent = expr.nodes[node.lhs];
+    std::vector<uint32_t> input_value_ids;
+    input_value_ids.reserve(1);
+    std::optional<DataType> actual_input_dtype = std::nullopt;
+
+    auto out_it = node_output_value_id.find(node.lhs);
+    if (out_it != node_output_value_id.end()) {
+        input_value_ids.push_back(out_it->second);
+        actual_input_dtype = parent.output_dtype;
+    } else if (parent.op == ExprOp::INPUT) {
+        input_value_ids.push_back(parent.input_slot);
+        actual_input_dtype = parent.input_tensor_dtype;
+    } else {
+        throw std::runtime_error("Missing value id for scan input.");
+    }
+
+    if (!actual_input_dtype.has_value()) {
+        throw std::runtime_error("Scan parent node is missing resolved actual input dtype.");
+    }
+    if (!node.output_dtype.has_value()) {
+        throw std::runtime_error("Scan node is missing resolved output dtype.");
+    }
+    if (actual_input_dtype.value() != node.output_dtype.value()) {
+        throw std::runtime_error("Expression scan currently requires input and output dtypes to match.");
+    }
+
+    PhysicalExpression stage_expr;
+    stage_expr.inputs.push_back(NamedInput{"__arg0", 0});
+
+    ExprNode input_node;
+    input_node.op = ExprOp::INPUT;
+    input_node.input_slot = 0;
+    input_node.input_tensor_dtype = actual_input_dtype.value();
+    input_node.output_dtype = actual_input_dtype.value();
+    input_node.compute_dtype = actual_input_dtype.value();
+    input_node.backward_output_dtype = actual_input_dtype.value();
+    input_node.backward_compute_dtype = actual_input_dtype.value();
+    stage_expr.nodes.push_back(std::move(input_node));
+
+    ExprNode scan = node;
+    scan.lhs = 0;
+    scan.rhs = UINT32_MAX;
+    stage_expr.nodes.push_back(std::move(scan));
+    stage_expr.output_node = 1;
+
+    std::vector<CompiledStageOutput> stage_outputs;
+    stage_outputs.push_back(CompiledStageOutput{
+        .name = output_name,
+        .local_node_idx = 1,
+        .value_id = output_value_id,
+    });
+
+    return PhysicalExecutionStage{
+        .kind = PhysicalExecutionStage::Kind::Scan,
         .expr = std::move(stage_expr),
         .input_value_ids = std::move(input_value_ids),
         .outputs = std::move(stage_outputs),
@@ -5402,6 +5515,8 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             node_output_value_id[root_idx] = stage_out_id;
             if (isReduceMinMaxBackwardOp(root.op)) {
                 planned.stages.push_back(buildReduceMinMaxBackwardStage(expr, root_idx, stage_out_id, "", node_output_value_id));
+            } else if (isScanOp(root.op)) {
+                planned.stages.push_back(buildScanStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             } else if (isSoftmaxOp(root.op)) {
                 planned.stages.push_back(buildSoftmaxStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             } else if (isRmsNormOp(root.op)) {
@@ -5737,6 +5852,9 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             if (isReduceMinMaxBackwardOp(root.op)) {
                 planned.stages.push_back(
                     buildReduceMinMaxBackwardStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
+            } else if (isScanOp(root.op)) {
+                planned.stages.push_back(
+                    buildScanStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
             } else if (isSoftmaxOp(root.op)) {
                 planned.stages.push_back(
                     buildSoftmaxStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
@@ -5930,6 +6048,11 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
             case PhysicalExecutionStage::Kind::ArgMinMax: {
                 std::shared_ptr<CompiledArgMinMax> arg_minmax = compileArgMinMax(stage.expr);
                 compiled->stages.emplace_back(arg_minmax, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
+                break;
+            }
+            case PhysicalExecutionStage::Kind::Scan: {
+                std::shared_ptr<CompiledScan> scan = compileScan(stage.expr);
+                compiled->stages.emplace_back(scan, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
                 break;
             }
             case PhysicalExecutionStage::Kind::Softmax: {

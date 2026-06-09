@@ -37,6 +37,7 @@ struct CompiledExecutionStage {
         CudaKernel,
         Reduction,
         ArgMinMax,
+        Scan,
         Softmax,
         RmsNorm,
         EmbeddingLookup,
@@ -58,6 +59,8 @@ struct CompiledExecutionStage {
                 return "Reduction";
             case Kind::ArgMinMax:
                 return "ArgMinMax";
+            case Kind::Scan:
+                return "Scan";
             case Kind::Softmax:
                 return "Softmax";
             case Kind::RmsNorm:
@@ -92,6 +95,7 @@ struct CompiledExecutionStage {
     const std::vector<DataType> cuda_kernel_output_dtypes = {};
     const std::shared_ptr<CompiledReduction> reduction = nullptr;
     const std::shared_ptr<CompiledArgMinMax> arg_minmax = nullptr;
+    const std::shared_ptr<CompiledScan> scan = nullptr;
     const std::shared_ptr<CompiledSoftmax> softmax = nullptr;
     const std::shared_ptr<CompiledRmsNorm> rms_norm = nullptr;
     const std::shared_ptr<CompiledEmbeddingLookup> embedding_lookup = nullptr;
@@ -136,6 +140,12 @@ struct CompiledExecutionStage {
                     throw std::runtime_error("CompiledExecutionStage::outputDType missing arg-min/max stage.");
                 }
                 return arg_minmax->output_dtype;
+
+            case Kind::Scan:
+                if (!scan) {
+                    throw std::runtime_error("CompiledExecutionStage::outputDType missing scan stage.");
+                }
+                return scan->output_dtype;
 
             case Kind::Softmax:
                 if (!softmax) {
@@ -256,6 +266,16 @@ struct CompiledExecutionStage {
                            std::vector<ParameterFanOverride> parameter_fan_overrides = {})
         : kind(Kind::ArgMinMax),
           arg_minmax(arg_minmax),
+          input_value_ids(std::move(input_value_ids)),
+          outputs(std::move(outputs)),
+          parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
+
+    CompiledExecutionStage(const std::shared_ptr<CompiledScan>& scan,
+                           std::vector<uint32_t> input_value_ids,
+                           std::vector<CompiledStageOutput> outputs,
+                           std::vector<ParameterFanOverride> parameter_fan_overrides = {})
+        : kind(Kind::Scan),
+          scan(scan),
           input_value_ids(std::move(input_value_ids)),
           outputs(std::move(outputs)),
           parameter_fan_overrides(std::move(parameter_fan_overrides)) {}

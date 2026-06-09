@@ -118,6 +118,7 @@ enum class ExprOp : uint16_t {
     REDUCE_AVG,
     REDUCE_NORM1,
     REDUCE_NORM2,
+    SCAN,
     RMSNORM,
     ATTENTION,
     ATTENTION_BACKWARD_Q,
@@ -147,6 +148,18 @@ enum class MatmulBackwardEpilogue : uint8_t {
     Default = 0,
     DRelu = 1,
     DGelu = 2,
+};
+
+enum class ScanOp : uint8_t {
+    Sum = 0,
+    Min = 1,
+    Max = 2,
+    Product = 3,
+};
+
+enum class ScanMode : uint8_t {
+    Exclusive = 0,
+    Inclusive = 1,
 };
 
 struct RotaryPositionEmbeddingOptions {
@@ -290,6 +303,10 @@ struct ExprNode {
 
     bool embedding_has_padding_index = false;
     uint64_t embedding_padding_index = 0;
+
+    ScanOp scan_op = ScanOp::Sum;
+    ScanMode scan_mode = ScanMode::Exclusive;
+    uint64_t scan_axis = UINT64_MAX;  // UINT64_MAX means final axis.
 
     // For INPUT / RUNTIME_SCALAR nodes only: actual dtype of the bound runtime value.
     std::optional<DataType> input_tensor_dtype = std::nullopt;
@@ -600,6 +617,19 @@ class Expression {
     [[nodiscard]] Expression transpose() const;
     [[nodiscard]] Expression takeAlongAxis(const Expression& indices, int64_t axis = -1) const;
     [[nodiscard]] static Expression takeAlongAxis(const Expression& input, const Expression& indices, int64_t axis = -1);
+    [[nodiscard]] Expression scan(ScanOp op = ScanOp::Sum, ScanMode mode = ScanMode::Exclusive, int64_t axis = -1) const;
+    [[nodiscard]] static Expression scan(const Expression& input,
+                                         ScanOp op = ScanOp::Sum,
+                                         ScanMode mode = ScanMode::Exclusive,
+                                         int64_t axis = -1);
+    [[nodiscard]] Expression exclusiveScanSum(int64_t axis = -1) const { return scan(ScanOp::Sum, ScanMode::Exclusive, axis); }
+    [[nodiscard]] Expression inclusiveScanSum(int64_t axis = -1) const { return scan(ScanOp::Sum, ScanMode::Inclusive, axis); }
+    [[nodiscard]] static Expression exclusiveScanSum(const Expression& input, int64_t axis = -1) {
+        return scan(input, ScanOp::Sum, ScanMode::Exclusive, axis);
+    }
+    [[nodiscard]] static Expression inclusiveScanSum(const Expression& input, int64_t axis = -1) {
+        return scan(input, ScanOp::Sum, ScanMode::Inclusive, axis);
+    }
     [[nodiscard]] Expression pow(const Expression& exponent) const;
 
     // Numerically stable activation-shaped expression helpers. These prefer dedicated CUDA special-function

@@ -255,6 +255,7 @@ static bool isStageBoundaryLikeBackwardOutputOp(ExprOp op) {
         case ExprOp::REDUCE_AVG:
         case ExprOp::REDUCE_NORM1:
         case ExprOp::REDUCE_NORM2:
+        case ExprOp::SCAN:
         case ExprOp::REDUCE_MIN:
         case ExprOp::REDUCE_MAX:
         case ExprOp::SOFTMAX:
@@ -388,6 +389,7 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
             case ExprOp::REDUCE_AVG:
             case ExprOp::REDUCE_NORM1:
             case ExprOp::REDUCE_NORM2:
+            case ExprOp::SCAN:
                 reaches[i] = reaches.at(node.lhs);
                 break;
             case ExprOp::MATMUL:
@@ -2298,6 +2300,9 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
             case ExprOp::REDUCE_NORM2:
                 node_dims[i] = StampedEquation::computeReductionOutputDims(node_dims[node.lhs], node.reduction_axes, node.squeeze_axes);
                 break;
+            case ExprOp::SCAN:
+                node_dims[i] = node_dims[node.lhs];
+                break;
             case ExprOp::MATMUL:
                 node_dims[i] = inferMatmulOutputDims(node, node_dims[node.lhs], node_dims[node.rhs]);
                 break;
@@ -3900,6 +3905,7 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
 
             case ExprOp::REDUCE_ARGMIN:
             case ExprOp::REDUCE_ARGMAX:
+            case ExprOp::SCAN:
                 throw std::runtime_error("Thor expressions autodiff does not support backward for op " + opName(node.op) + ".");
 
             default:

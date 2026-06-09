@@ -43,6 +43,8 @@ namespace ThorImplementation {
 
 enum class CubSortOrder : uint8_t { Ascending = 0, Descending = 1 };
 enum class CubTopKOrder : uint8_t { Smallest = 0, Largest = 1 };
+enum class CubScanOp : uint8_t { Sum = 0, Min = 1, Max = 2, Product = 3 };
+enum class CubScanMode : uint8_t { Exclusive = 0, Inclusive = 1 };
 
 struct CubTemporaryStoragePlan {
     TensorPlacement placement;
@@ -157,6 +159,22 @@ struct CubDeviceExclusiveSumPlan {
     size_t temp_storage_bytes = 0;
 };
 
+struct CubDeviceInclusiveSumPlan {
+    TensorPlacement placement;
+    DataType dtype = DataType::UINT32;
+    uint64_t num_items = 0;
+    size_t temp_storage_bytes = 0;
+};
+
+struct CubDeviceScanPlan {
+    TensorPlacement placement;
+    DataType dtype = DataType::UINT32;
+    uint64_t num_items = 0;
+    CubScanOp op = CubScanOp::Sum;
+    CubScanMode mode = CubScanMode::Exclusive;
+    size_t temp_storage_bytes = 0;
+};
+
 struct CubDeviceReduceSumPlan {
     TensorPlacement placement;
     DataType dtype = DataType::UINT32;
@@ -184,6 +202,44 @@ struct CubDeviceSegmentedExclusiveSumPlan {
     DataType offset_dtype = DataType::UINT32;
     uint64_t num_items = 0;
     uint64_t num_segments = 0;
+    size_t temp_storage_bytes = 0;
+};
+
+struct CubDeviceSegmentedInclusiveSumPlan {
+    TensorPlacement placement;
+    DataType dtype = DataType::UINT32;
+    DataType offset_dtype = DataType::UINT32;
+    uint64_t num_items = 0;
+    uint64_t num_segments = 0;
+    size_t temp_storage_bytes = 0;
+};
+
+struct CubDeviceSegmentedUniformExclusiveSumPlan {
+    TensorPlacement placement;
+    DataType dtype = DataType::UINT32;
+    uint64_t num_items = 0;
+    uint64_t num_segments = 0;
+    uint64_t segment_size = 0;
+    size_t temp_storage_bytes = 0;
+};
+
+struct CubDeviceSegmentedUniformInclusiveSumPlan {
+    TensorPlacement placement;
+    DataType dtype = DataType::UINT32;
+    uint64_t num_items = 0;
+    uint64_t num_segments = 0;
+    uint64_t segment_size = 0;
+    size_t temp_storage_bytes = 0;
+};
+
+struct CubDeviceSegmentedUniformScanPlan {
+    TensorPlacement placement;
+    DataType dtype = DataType::UINT32;
+    uint64_t num_items = 0;
+    uint64_t num_segments = 0;
+    uint64_t segment_size = 0;
+    CubScanOp op = CubScanOp::Sum;
+    CubScanMode mode = CubScanMode::Exclusive;
     size_t temp_storage_bytes = 0;
 };
 
@@ -240,6 +296,7 @@ struct CubDeviceSegmentedRadixSortPairsPlan {
 [[nodiscard]] bool isCubFindFlagDTypeSupported(DataType dtype);
 [[nodiscard]] bool isCubRunLengthEncodeDTypeSupported(DataType dtype);
 [[nodiscard]] bool isCubExclusiveSumDTypeSupported(DataType dtype);
+[[nodiscard]] bool isCubScanDTypeSupported(DataType dtype);
 [[nodiscard]] bool isCubReduceSumDTypeSupported(DataType dtype);
 [[nodiscard]] bool isCubReduceMaxDTypeSupported(DataType dtype);
 [[nodiscard]] bool isCubReduceMinDTypeSupported(DataType dtype);
@@ -678,6 +735,95 @@ void cubDeviceSegmentedExclusiveSum(const Tensor& temp_storage,
                                     uint64_t num_segments,
                                     Stream& stream);
 
+[[nodiscard]] CubDeviceSegmentedInclusiveSumPlan prepareCubDeviceSegmentedInclusiveSum(
+    const Tensor& input,
+    const Tensor& output,
+    const Tensor& segment_offsets,
+    uint64_t num_items,
+    uint64_t num_segments);
+
+[[nodiscard]] size_t cubDeviceSegmentedInclusiveSumTempBytes(const Tensor& input,
+                                                             const Tensor& output,
+                                                             const Tensor& segment_offsets,
+                                                             uint64_t num_items,
+                                                             uint64_t num_segments);
+
+void cubDeviceSegmentedInclusiveSum(const CubDeviceSegmentedInclusiveSumPlan& plan,
+                                    const Tensor& temp_storage,
+                                    const Tensor& input,
+                                    Tensor& output,
+                                    const Tensor& segment_offsets,
+                                    Stream& stream);
+
+void cubDeviceSegmentedInclusiveSum(const Tensor& temp_storage,
+                                    size_t temp_storage_bytes,
+                                    const Tensor& input,
+                                    Tensor& output,
+                                    const Tensor& segment_offsets,
+                                    uint64_t num_items,
+                                    uint64_t num_segments,
+                                    Stream& stream);
+
+[[nodiscard]] CubDeviceSegmentedUniformExclusiveSumPlan prepareCubDeviceSegmentedUniformExclusiveSum(
+    const Tensor& input,
+    const Tensor& output,
+    uint64_t num_items,
+    uint64_t num_segments,
+    uint64_t segment_size);
+
+[[nodiscard]] size_t cubDeviceSegmentedUniformExclusiveSumTempBytes(const Tensor& input,
+                                                                    const Tensor& output,
+                                                                    uint64_t num_items,
+                                                                    uint64_t num_segments,
+                                                                    uint64_t segment_size);
+
+void cubDeviceSegmentedUniformExclusiveSum(const CubDeviceSegmentedUniformExclusiveSumPlan& plan,
+                                           const Tensor& temp_storage,
+                                           const Tensor& input,
+                                           Tensor& output,
+                                           Stream& stream);
+
+[[nodiscard]] CubDeviceSegmentedUniformInclusiveSumPlan prepareCubDeviceSegmentedUniformInclusiveSum(
+    const Tensor& input,
+    const Tensor& output,
+    uint64_t num_items,
+    uint64_t num_segments,
+    uint64_t segment_size);
+
+[[nodiscard]] size_t cubDeviceSegmentedUniformInclusiveSumTempBytes(const Tensor& input,
+                                                                    const Tensor& output,
+                                                                    uint64_t num_items,
+                                                                    uint64_t num_segments,
+                                                                    uint64_t segment_size);
+
+void cubDeviceSegmentedUniformInclusiveSum(const CubDeviceSegmentedUniformInclusiveSumPlan& plan,
+                                           const Tensor& temp_storage,
+                                           const Tensor& input,
+                                           Tensor& output,
+                                           Stream& stream);
+
+[[nodiscard]] CubDeviceSegmentedUniformScanPlan prepareCubDeviceSegmentedUniformScan(const Tensor& input,
+                                                                                     const Tensor& output,
+                                                                                     uint64_t num_items,
+                                                                                     uint64_t num_segments,
+                                                                                     uint64_t segment_size,
+                                                                                     CubScanOp op,
+                                                                                     CubScanMode mode);
+
+[[nodiscard]] size_t cubDeviceSegmentedUniformScanTempBytes(const Tensor& input,
+                                                            const Tensor& output,
+                                                            uint64_t num_items,
+                                                            uint64_t num_segments,
+                                                            uint64_t segment_size,
+                                                            CubScanOp op,
+                                                            CubScanMode mode);
+
+void cubDeviceSegmentedUniformScan(const CubDeviceSegmentedUniformScanPlan& plan,
+                                   const Tensor& temp_storage,
+                                   const Tensor& input,
+                                   Tensor& output,
+                                   Stream& stream);
+
 [[nodiscard]] CubDeviceSegmentedReduceSumPlan prepareCubDeviceSegmentedReduceSum(
     const Tensor& input,
     const Tensor& output,
@@ -848,5 +994,53 @@ void cubDeviceExclusiveSum(const Tensor& temp_storage,
                            Tensor& output,
                            uint64_t num_items,
                            Stream& stream);
+
+[[nodiscard]] CubDeviceInclusiveSumPlan prepareCubDeviceInclusiveSum(const Tensor& input,
+                                                                     const Tensor& output,
+                                                                     uint64_t num_items);
+
+[[nodiscard]] size_t cubDeviceInclusiveSumTempBytes(const Tensor& input,
+                                                    const Tensor& output,
+                                                    uint64_t num_items);
+
+void cubDeviceInclusiveSum(const CubDeviceInclusiveSumPlan& plan,
+                           const Tensor& temp_storage,
+                           const Tensor& input,
+                           Tensor& output,
+                           Stream& stream);
+
+void cubDeviceInclusiveSum(const Tensor& temp_storage,
+                           size_t temp_storage_bytes,
+                           const Tensor& input,
+                           Tensor& output,
+                           uint64_t num_items,
+                           Stream& stream);
+
+[[nodiscard]] CubDeviceScanPlan prepareCubDeviceScan(const Tensor& input,
+                                                     const Tensor& output,
+                                                     uint64_t num_items,
+                                                     CubScanOp op,
+                                                     CubScanMode mode);
+
+[[nodiscard]] size_t cubDeviceScanTempBytes(const Tensor& input,
+                                            const Tensor& output,
+                                            uint64_t num_items,
+                                            CubScanOp op,
+                                            CubScanMode mode);
+
+void cubDeviceScan(const CubDeviceScanPlan& plan,
+                   const Tensor& temp_storage,
+                   const Tensor& input,
+                   Tensor& output,
+                   Stream& stream);
+
+void cubDeviceScan(const Tensor& temp_storage,
+                   size_t temp_storage_bytes,
+                   const Tensor& input,
+                   Tensor& output,
+                   uint64_t num_items,
+                   Stream& stream,
+                   CubScanOp op,
+                   CubScanMode mode);
 
 }  // namespace ThorImplementation
