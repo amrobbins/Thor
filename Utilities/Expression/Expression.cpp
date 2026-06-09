@@ -103,6 +103,10 @@ std::string scanOpToString(ScanOp op) {
             return "max";
         case ScanOp::Product:
             return "product";
+        case ScanOp::ArgMin:
+            return "arg_min";
+        case ScanOp::ArgMax:
+            return "arg_max";
     }
     throw std::runtime_error("Unknown ScanOp value.");
 }
@@ -119,6 +123,12 @@ ScanOp scanOpFromString(const std::string& op) {
     }
     if (op == "product") {
         return ScanOp::Product;
+    }
+    if (op == "arg_min") {
+        return ScanOp::ArgMin;
+    }
+    if (op == "arg_max") {
+        return ScanOp::ArgMax;
     }
     throw std::runtime_error("Unknown scan op '" + op + "'.");
 }
@@ -343,6 +353,8 @@ std::string exprOpExternalName(ExprOp op) {
             return "embedding_lookup";
         case ExprOp::CUDA_KERNEL_OUTPUT:
             return "cuda_kernel_output";
+        case ExprOp::SEGMENTED_SCAN:
+            return "segmented_scan";
         default:
             throw std::runtime_error("Unknown ExprOp.");
     }
@@ -466,6 +478,7 @@ ExprOp exprOpFromExternalName(const std::string& op) {
         {"attention_backward_bias", ExprOp::ATTENTION_BACKWARD_BIAS},
         {"embedding_lookup", ExprOp::EMBEDDING_LOOKUP},
         {"cuda_kernel_output", ExprOp::CUDA_KERNEL_OUTPUT},
+        {"segmented_scan", ExprOp::SEGMENTED_SCAN},
     };
 
     auto it = lookup.find(op);
@@ -646,6 +659,7 @@ json exprNodeToJson(const ExprNode& node) {
     j["scan_op"] = scanOpToString(node.scan_op);
     j["scan_mode"] = scanModeToString(node.scan_mode);
     j["scan_axis"] = node.scan_axis;
+    j["scan_reverse"] = node.scan_reverse;
     setOptionalDTypeJson(j, "input_tensor_dtype", node.input_tensor_dtype);
     setOptionalDTypeJson(j, "output_dtype", node.output_dtype);
     setOptionalDTypeJson(j, "compute_dtype", node.compute_dtype);
@@ -756,6 +770,7 @@ ExprNode exprNodeFromJson(const json& j) {
     node.scan_op = scanOpFromString(j.value("scan_op", std::string("sum")));
     node.scan_mode = scanModeFromString(j.value("scan_mode", std::string("exclusive")));
     node.scan_axis = j.value("scan_axis", UINT64_MAX);
+    node.scan_reverse = j.value("scan_reverse", false);
     parseOptionalDTypeField(j, "input_tensor_dtype", node.input_tensor_dtype);
     parseOptionalDTypeField(j, "output_dtype", node.output_dtype);
     parseOptionalDTypeField(j, "compute_dtype", node.compute_dtype);
@@ -980,6 +995,8 @@ std::string opName(ExprOp op) {
             return "RNORM2";
         case ExprOp::SCAN:
             return "SCAN";
+        case ExprOp::SEGMENTED_SCAN:
+            return "SEGMENTED_SCAN";
         case ExprOp::RMSNORM:
             return "RMSNORM";
         case ExprOp::ATTENTION:
@@ -1181,7 +1198,16 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
         case ExprOp::SCAN: {
             out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) +
                   ";op=" + scanOpToString(n.scan_op) + ";mode=" + scanModeToString(n.scan_mode) +
-                  ";axis=" + std::to_string(n.scan_axis) + ")";
+                  ";axis=" + std::to_string(n.scan_axis) + ";reverse=" + (n.scan_reverse ? "1" : "0") + ")";
+            break;
+        }
+
+        case ExprOp::SEGMENTED_SCAN: {
+            std::string a = canonicalizeNode(expr, n.lhs, memo, memoReady);
+            std::string b = canonicalizeNode(expr, n.rhs, memo, memoReady);
+            out = opName(n.op) + "(" + a + "," + b +
+                  ";op=" + scanOpToString(n.scan_op) + ";mode=" + scanModeToString(n.scan_mode) +
+                  ";reverse=" + (n.scan_reverse ? "1" : "0") + ")";
             break;
         }
 
@@ -2086,6 +2112,7 @@ bool Expression::isBinaryOp(const ExprOp op) {
         case ExprOp::RMSNORM:
         case ExprOp::EMBEDDING_LOOKUP:
         case ExprOp::TAKE_ALONG_AXIS:
+        case ExprOp::SEGMENTED_SCAN:
         case ExprOp::CONV2D:
         case ExprOp::CONV2D_BACKWARD_DATA:
         case ExprOp::CONV2D_BACKWARD_FILTER:
@@ -3297,16 +3324,25 @@ Expression Expression::takeAlongAxis(const Expression& input, const Expression& 
 
 Expression Expression::scan(ScanOp op, ScanMode mode, int64_t axis) const { return scan(*this, op, mode, axis); }
 
+namespace {
+
+void validateScanAttributes(ScanOp op, ScanMode mode, const char* api_name) {
+    if (op != ScanOp::Sum && op != ScanOp::Min && op != ScanOp::Max && op != ScanOp::Product &&
+        op != ScanOp::ArgMin && op != ScanOp::ArgMax) {
+        throw std::invalid_argument(std::string(api_name) + " received an unsupported ScanOp.");
+    }
+    if (mode != ScanMode::Exclusive && mode != ScanMode::Inclusive) {
+        throw std::invalid_argument(std::string(api_name) + " received an unsupported ScanMode.");
+    }
+}
+
+}  // namespace
+
 Expression Expression::scan(const Expression& input, ScanOp op, ScanMode mode, int64_t axis) {
     if (axis < -1) {
         throw std::invalid_argument("Expression::scan currently supports only axis=-1 or an explicit non-negative final axis.");
     }
-    if (op != ScanOp::Sum && op != ScanOp::Min && op != ScanOp::Max && op != ScanOp::Product) {
-        throw std::invalid_argument("Expression::scan received an unsupported ScanOp.");
-    }
-    if (mode != ScanMode::Exclusive && mode != ScanMode::Inclusive) {
-        throw std::invalid_argument("Expression::scan received an unsupported ScanMode.");
-    }
+    validateScanAttributes(op, mode, "Expression::scan");
 
     Expression out = unaryOp(input, ExprOp::SCAN);
     ExprNode& node = out.expr->nodes[out.nodeIndex];
@@ -3314,6 +3350,33 @@ Expression Expression::scan(const Expression& input, ScanOp op, ScanMode mode, i
     node.scan_mode = mode;
     node.scan_axis = static_cast<uint64_t>(axis < 0 ? UINT64_MAX : axis);
     return out;
+}
+
+Expression Expression::segmentedScan(const Expression& offsets, ScanOp op, ScanMode mode) const {
+    return segmentedScan(*this, offsets, op, mode);
+}
+
+Expression Expression::segmentedScan(const Expression& input, const Expression& offsets, ScanOp op, ScanMode mode) {
+    validateScanAttributes(op, mode, "Expression::segmentedScan");
+
+    Expression out = binaryOp(input, offsets, ExprOp::SEGMENTED_SCAN);
+    ExprNode& node = out.expr->nodes[out.nodeIndex];
+    node.scan_op = op;
+    node.scan_mode = mode;
+    node.scan_axis = UINT64_MAX;
+    return out;
+}
+
+Expression Expression::scanArgMin(int64_t axis) const { return scan(*this, ScanOp::ArgMin, ScanMode::Inclusive, axis); }
+
+Expression Expression::scanArgMax(int64_t axis) const { return scan(*this, ScanOp::ArgMax, ScanMode::Inclusive, axis); }
+
+Expression Expression::segmentedScanArgMin(const Expression& offsets) const {
+    return segmentedScan(*this, offsets, ScanOp::ArgMin, ScanMode::Inclusive);
+}
+
+Expression Expression::segmentedScanArgMax(const Expression& offsets) const {
+    return segmentedScan(*this, offsets, ScanOp::ArgMax, ScanMode::Inclusive);
 }
 
 Expression Expression::pow(const Expression& exponent) const { return binaryOp(*this, exponent, ExprOp::POW); }

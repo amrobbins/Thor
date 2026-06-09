@@ -137,13 +137,30 @@ struct CompiledScan {
     const ScanOp op;
     const ScanMode mode;
     const uint64_t axis;
+    const bool reverse;
+    const bool segmented_by_offsets;
     const DataType input_dtype;
     const DataType output_dtype;
+    const std::optional<DataType> offset_dtype;
 
     bool operator==(const CompiledScan& other) const = default;
 
-    CompiledScan(ScanOp op, ScanMode mode, uint64_t axis, DataType input_dtype, DataType output_dtype)
-        : op(op), mode(mode), axis(axis), input_dtype(input_dtype), output_dtype(output_dtype) {}
+    CompiledScan(ScanOp op,
+                 ScanMode mode,
+                 uint64_t axis,
+                 bool reverse,
+                 bool segmented_by_offsets,
+                 DataType input_dtype,
+                 DataType output_dtype,
+                 std::optional<DataType> offset_dtype = std::nullopt)
+        : op(op),
+          mode(mode),
+          axis(axis),
+          reverse(reverse),
+          segmented_by_offsets(segmented_by_offsets),
+          input_dtype(input_dtype),
+          output_dtype(output_dtype),
+          offset_dtype(offset_dtype) {}
 };
 
 struct CompiledSoftmax {

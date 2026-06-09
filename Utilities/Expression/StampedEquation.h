@@ -528,17 +528,27 @@ class StampedScan {
 
     Tensor getOutputTensor() const { return output; }
 
-    StampedScan(std::shared_ptr<CompiledScan> compiled, const Tensor& input, const Tensor& output, const Stream& stream);
+    StampedScan(std::shared_ptr<CompiledScan> compiled,
+                const Tensor& input,
+                const Tensor& output,
+                const Stream& stream,
+                std::optional<Tensor> segment_offsets = std::nullopt);
 
    private:
     const std::shared_ptr<CompiledScan> compiled_scan;
     const Tensor input;
     mutable Tensor output;
+    const std::optional<Tensor> segment_offsets;
     Tensor temp_storage;
     Stream stream;
-    bool segmented = false;
+    bool uniform_segmented = false;
+    bool ragged_segmented = false;
     CubDeviceScanPlan scan_plan;
+    CubDeviceArgScanPlan arg_scan_plan;
     CubDeviceSegmentedUniformScanPlan segmented_scan_plan;
+    CubDeviceSegmentedUniformArgScanPlan segmented_arg_scan_plan;
+    CubDeviceSegmentedScanPlan ragged_segmented_scan_plan;
+    CubDeviceSegmentedArgScanPlan ragged_segmented_arg_scan_plan;
 };
 
 class StampedSoftmax {

@@ -127,6 +127,7 @@ enum class ExprOp : uint16_t {
     ATTENTION_BACKWARD_BIAS,
     EMBEDDING_LOOKUP,
     CUDA_KERNEL_OUTPUT,
+    SEGMENTED_SCAN,
 };
 
 enum class RotaryScalingKind : uint8_t {
@@ -155,6 +156,8 @@ enum class ScanOp : uint8_t {
     Min = 1,
     Max = 2,
     Product = 3,
+    ArgMin = 4,
+    ArgMax = 5,
 };
 
 enum class ScanMode : uint8_t {
@@ -307,6 +310,7 @@ struct ExprNode {
     ScanOp scan_op = ScanOp::Sum;
     ScanMode scan_mode = ScanMode::Exclusive;
     uint64_t scan_axis = UINT64_MAX;  // UINT64_MAX means final axis.
+    bool scan_reverse = false;
 
     // For INPUT / RUNTIME_SCALAR nodes only: actual dtype of the bound runtime value.
     std::optional<DataType> input_tensor_dtype = std::nullopt;
@@ -624,6 +628,17 @@ class Expression {
                                          int64_t axis = -1);
     [[nodiscard]] Expression exclusiveScanSum(int64_t axis = -1) const { return scan(ScanOp::Sum, ScanMode::Exclusive, axis); }
     [[nodiscard]] Expression inclusiveScanSum(int64_t axis = -1) const { return scan(ScanOp::Sum, ScanMode::Inclusive, axis); }
+    [[nodiscard]] Expression segmentedScan(const Expression& offsets,
+                                           ScanOp op = ScanOp::Sum,
+                                           ScanMode mode = ScanMode::Exclusive) const;
+    [[nodiscard]] static Expression segmentedScan(const Expression& input,
+                                                  const Expression& offsets,
+                                                  ScanOp op = ScanOp::Sum,
+                                                  ScanMode mode = ScanMode::Exclusive);
+    [[nodiscard]] Expression scanArgMin(int64_t axis = -1) const;
+    [[nodiscard]] Expression scanArgMax(int64_t axis = -1) const;
+    [[nodiscard]] Expression segmentedScanArgMin(const Expression& offsets) const;
+    [[nodiscard]] Expression segmentedScanArgMax(const Expression& offsets) const;
     [[nodiscard]] static Expression exclusiveScanSum(const Expression& input, int64_t axis = -1) {
         return scan(input, ScanOp::Sum, ScanMode::Exclusive, axis);
     }

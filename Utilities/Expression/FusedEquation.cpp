@@ -3647,6 +3647,7 @@ static uint64_t computeFusedStageFlops(const PhysicalExpression& expr,
 
             case ExprOp::CUDA_KERNEL_OUTPUT:
             case ExprOp::SCAN:
+            case ExprOp::SEGMENTED_SCAN:
             case ExprOp::EMBEDDING_LOOKUP:
             case ExprOp::SOFTMAX:
             case ExprOp::ATTENTION:
@@ -5098,8 +5099,9 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
             if (!stage.scan) {
                 throw std::runtime_error("Missing compiled scan stage.");
             }
-            if (stage.input_value_ids.size() != 1 || stage.outputs.size() != 1) {
-                throw std::runtime_error("Scan stage expected exactly one input and one output.");
+            const size_t expected_scan_inputs = stage.scan->segmented_by_offsets ? 2 : 1;
+            if (stage.input_value_ids.size() != expected_scan_inputs || stage.outputs.size() != 1) {
+                throw std::runtime_error("Scan stage expected its compiled input count and one output.");
             }
             value_dims[stage.outputs[0].value_id] = stage_input_dims[0];
         } else if (stage.kind == CompiledExecutionStage::Kind::Softmax) {
@@ -7621,8 +7623,9 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 if (!stage.scan) {
                     throw std::runtime_error("Scan stage missing compiled payload.");
                 }
-                if (stageInputs.size() != 1) {
-                    throw std::runtime_error("Scan stage expects exactly one input.");
+                const size_t expected_scan_inputs = stage.scan->segmented_by_offsets ? 2 : 1;
+                if (stageInputs.size() != expected_scan_inputs) {
+                    throw std::runtime_error("Scan stage expects its compiled input count.");
                 }
                 if (stage.outputs.size() != 1) {
                     throw std::runtime_error("Scan stage expects exactly one output.");
@@ -7646,7 +7649,12 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                     outputTensor = Tensor(inputTensor.getPlacement(), outputDescriptor);
                 }
 
-                std::shared_ptr<StampedScan> stampedScan = std::make_shared<StampedScan>(stage.scan, inputTensor, outputTensor, stream);
+                std::optional<Tensor> segmentOffsets = std::nullopt;
+                if (stage.scan->segmented_by_offsets) {
+                    segmentOffsets = runtimeInputTensor(stageInputs[1]);
+                }
+                std::shared_ptr<StampedScan> stampedScan =
+                    std::make_shared<StampedScan>(stage.scan, inputTensor, outputTensor, stream, segmentOffsets);
 
                 values[stageOutput.value_id] = outputTensor;
                 producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
@@ -8647,8 +8655,9 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
             if (!stage.scan) {
                 throw std::runtime_error("Missing compiled scan stage.");
             }
-            if (stage.input_value_ids.size() != 1 || stage.outputs.size() != 1) {
-                throw std::runtime_error("Scan stage expected exactly one input and one output.");
+            const size_t expected_scan_inputs = stage.scan->segmented_by_offsets ? 2 : 1;
+            if (stage.input_value_ids.size() != expected_scan_inputs || stage.outputs.size() != 1) {
+                throw std::runtime_error("Scan stage expected its compiled input count and one output.");
             }
             value_dims[stage.outputs[0].value_id] = stage_input_dims[0];
         } else if (stage.kind == CompiledExecutionStage::Kind::Softmax) {
