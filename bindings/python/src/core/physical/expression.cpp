@@ -510,6 +510,8 @@ standalone custom kernels.
         .value("min", ScanOp::Min)
         .value("max", ScanOp::Max)
         .value("product", ScanOp::Product)
+        .value("arg_min", ScanOp::ArgMin)
+        .value("arg_max", ScanOp::ArgMax)
         .export_values();
 
     nb::enum_<ScanMode>(physical, "ScanMode")
@@ -722,11 +724,49 @@ axis.
         R"nbdoc(
 Prefix scan along the final contiguous axis.
 
-Supported ops are ``ScanOp.sum``, ``ScanOp.min``, ``ScanOp.max``, and
-``ScanOp.product``. ``ScanMode.exclusive`` returns each prefix before the current
-element; ``ScanMode.inclusive`` includes the current element. The output shape
-and dtype match the input.
+Supported value ops are ``ScanOp.sum``, ``ScanOp.min``, ``ScanOp.max``, and
+``ScanOp.product``. Index ops ``ScanOp.arg_min`` and ``ScanOp.arg_max`` return
+UINT32 flattened input indices for the winning prefix element. ``ScanMode.exclusive``
+returns each prefix before the current element; ``ScanMode.inclusive`` includes
+the current element. Value-scan output shape and dtype match the input.
 )nbdoc");
+
+    expr.def(
+        "segmented_scan",
+        [](const Expression& self, const Expression& offsets, ScanOp op, ScanMode mode) { return self.segmentedScan(offsets, op, mode); },
+        "offsets"_a,
+        "op"_a = ScanOp::Sum,
+        "mode"_a = ScanMode::Exclusive,
+        R"nbdoc(
+Ragged segmented prefix scan over the flattened input using a rank-1 offsets
+tensor of shape [num_segments + 1]. Offsets must be UINT32 or UINT64. The
+output shape and dtype match the input for value scans. Arg scans return UINT32
+flattened input indices for the winning prefix element.
+)nbdoc");
+
+    expr.def(
+        "scan_arg_min",
+        [](const Expression& self, int64_t axis) { return self.scanArgMin(axis); },
+        "axis"_a = -1,
+        R"nbdoc(Inclusive prefix arg-min scan along the final contiguous axis. Returns UINT32 flattened input indices.)nbdoc");
+
+    expr.def(
+        "scan_arg_max",
+        [](const Expression& self, int64_t axis) { return self.scanArgMax(axis); },
+        "axis"_a = -1,
+        R"nbdoc(Inclusive prefix arg-max scan along the final contiguous axis. Returns UINT32 flattened input indices.)nbdoc");
+
+    expr.def(
+        "segmented_scan_arg_min",
+        [](const Expression& self, const Expression& offsets) { return self.segmentedScanArgMin(offsets); },
+        "offsets"_a,
+        R"nbdoc(Inclusive ragged segmented prefix arg-min scan. Returns UINT32 flattened input indices.)nbdoc");
+
+    expr.def(
+        "segmented_scan_arg_max",
+        [](const Expression& self, const Expression& offsets) { return self.segmentedScanArgMax(offsets); },
+        "offsets"_a,
+        R"nbdoc(Inclusive ragged segmented prefix arg-max scan. Returns UINT32 flattened input indices.)nbdoc");
 
     expr.def(
         "exclusive_scan_sum",

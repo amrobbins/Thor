@@ -589,7 +589,7 @@ static bool isConvolutionBackwardOp(ExprOp op) {
 static bool isConvolutionOp(ExprOp op) { return isConvolutionForwardOp(op) || isConvolutionBackwardOp(op); }
 static bool isReduceMinMaxBackwardOp(ExprOp op) { return op == ExprOp::REDUCE_MIN_BACKWARD || op == ExprOp::REDUCE_MAX_BACKWARD; }
 static bool isSoftmaxOp(ExprOp op) { return op == ExprOp::SOFTMAX; }
-static bool isScanOp(ExprOp op) { return op == ExprOp::SCAN; }
+static bool isScanOp(ExprOp op) { return op == ExprOp::SCAN || op == ExprOp::SEGMENTED_SCAN; }
 static bool isRmsNormOp(ExprOp op) { return op == ExprOp::RMSNORM; }
 static bool isEmbeddingLookupOp(ExprOp op) { return op == ExprOp::EMBEDDING_LOOKUP; }
 static bool isAttentionOp(ExprOp op) { return op == ExprOp::ATTENTION; }
@@ -919,6 +919,10 @@ static const char* fusedOpTag(ExprOp op) {
             return "RNORM1";
         case ExprOp::REDUCE_NORM2:
             return "RNORM2";
+        case ExprOp::SCAN:
+            return "SCAN";
+        case ExprOp::SEGMENTED_SCAN:
+            return "SEGMENTED_SCAN";
         case ExprOp::RMSNORM:
             return "RMSNORM";
         case ExprOp::EMBEDDING_LOOKUP:
@@ -1090,6 +1094,16 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
             s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs +
                 ",algorithm=" + std::to_string(static_cast<int>(node.softmax_algorithm)) +
                 ",mode=" + std::to_string(static_cast<int>(node.softmax_mode)) + ")";
+        } else if (isScanOp(node.op)) {
+            s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs;
+            if (node.op == ExprOp::SEGMENTED_SCAN) {
+                const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
+                s += ",offsets=" + rhs;
+            }
+            s += ",op=" + std::to_string(static_cast<int>(node.scan_op)) +
+                 ",mode=" + std::to_string(static_cast<int>(node.scan_mode)) +
+                 ",axis=" + std::to_string(node.scan_axis) +
+                 ",reverse=" + std::to_string(node.scan_reverse ? 1 : 0) + ")";
         } else if (isRmsNormOp(node.op)) {
             const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
             s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",scale=" + rhs +
@@ -1558,20 +1572,24 @@ shared_ptr<CompiledArgMinMax> EquationCompiler::compileArgMinMax(const PhysicalE
 }
 
 shared_ptr<CompiledScan> EquationCompiler::compileScan(const PhysicalExpression& expr) {
-    if (expr.numInputs() != 1) {
-        throw std::runtime_error("Scan stage must have exactly one input.");
-    }
-
     if (expr.output_node >= expr.nodes.size()) {
         throw std::runtime_error("Scan stage output_node is out of range.");
     }
 
     const ExprNode& node = expr.nodes[expr.output_node];
     if (!isScanOp(node.op)) {
-        throw std::runtime_error("Scan stage output node is not SCAN.");
+        throw std::runtime_error("Scan stage output node is not SCAN or SEGMENTED_SCAN.");
+    }
+    const bool segmented_by_offsets = node.op == ExprOp::SEGMENTED_SCAN;
+    const uint64_t expected_inputs = segmented_by_offsets ? 2 : 1;
+    if (expr.numInputs() != expected_inputs) {
+        throw std::runtime_error("Scan stage has an unexpected number of inputs.");
     }
     if (node.lhs == UINT32_MAX || node.lhs >= expr.nodes.size()) {
         throw std::runtime_error("Scan node is missing its input.");
+    }
+    if (segmented_by_offsets && (node.rhs == UINT32_MAX || node.rhs >= expr.nodes.size())) {
+        throw std::runtime_error("segmented_scan node is missing its offsets input.");
     }
 
     const ExprNode& input_node = expr.nodes[node.lhs];
@@ -1585,14 +1603,41 @@ shared_ptr<CompiledScan> EquationCompiler::compileScan(const PhysicalExpression&
     if (!node.output_dtype.has_value()) {
         throw std::runtime_error("Scan node missing resolved output_dtype.");
     }
-    if (input_node.input_tensor_dtype.value() != node.output_dtype.value()) {
+    const bool arg_scan = node.scan_op == ScanOp::ArgMin || node.scan_op == ScanOp::ArgMax;
+    if (arg_scan) {
+        if (node.output_dtype.value() != DataType::UINT32) {
+            throw std::runtime_error("Expression arg scan output dtype must be UINT32.");
+        }
+    } else if (input_node.input_tensor_dtype.value() != node.output_dtype.value()) {
         throw std::runtime_error("Expression scan currently requires input and output dtypes to match.");
     }
     if (!isCubScanDTypeSupported(input_node.input_tensor_dtype.value())) {
         throw std::runtime_error("Expression scan dtype is not supported by the CUB scan backend.");
     }
 
-    return make_shared<CompiledScan>(node.scan_op, node.scan_mode, node.scan_axis, input_node.input_tensor_dtype.value(), node.output_dtype.value());
+    std::optional<DataType> offset_dtype = std::nullopt;
+    if (segmented_by_offsets) {
+        const ExprNode& offsets_node = expr.nodes[node.rhs];
+        if (offsets_node.op != ExprOp::INPUT) {
+            throw std::runtime_error("segmented_scan offsets must be a local INPUT node in the scan stage.");
+        }
+        if (!offsets_node.input_tensor_dtype.has_value()) {
+            throw std::runtime_error("segmented_scan offsets node missing resolved input_tensor_dtype.");
+        }
+        if (!isCubSegmentOffsetDTypeSupported(offsets_node.input_tensor_dtype.value())) {
+            throw std::runtime_error("Expression segmented_scan offsets dtype is not supported by the CUB segmented-scan backend.");
+        }
+        offset_dtype = offsets_node.input_tensor_dtype.value();
+    }
+
+    return make_shared<CompiledScan>(node.scan_op,
+                                     node.scan_mode,
+                                     node.scan_axis,
+                                     node.scan_reverse,
+                                     segmented_by_offsets,
+                                     input_node.input_tensor_dtype.value(),
+                                     node.output_dtype.value(),
+                                     offset_dtype);
 }
 
 shared_ptr<CompiledSoftmax> EquationCompiler::compileSoftmax(const PhysicalExpression& expr) {
@@ -3122,10 +3167,10 @@ static PhysicalExecutionStage buildReductionStage(const PhysicalExpression& expr
 }
 
 static PhysicalExecutionStage buildScanStage(const PhysicalExpression& expr,
-                                           uint32_t node_idx,
-                                           uint32_t output_value_id,
-                                           const std::string& output_name,
-                                           const std::unordered_map<uint32_t, uint32_t>& node_output_value_id) {
+                                            uint32_t node_idx,
+                                            uint32_t output_value_id,
+                                            const std::string& output_name,
+                                            const std::unordered_map<uint32_t, uint32_t>& node_output_value_id) {
     const ExprNode& node = expr.nodes[node_idx];
     if (!isScanOp(node.op)) {
         throw std::runtime_error("buildScanStage called on non-scan node.");
@@ -3133,31 +3178,54 @@ static PhysicalExecutionStage buildScanStage(const PhysicalExpression& expr,
     if (node.lhs == UINT32_MAX || node.lhs >= expr.nodes.size()) {
         throw std::runtime_error("Scan node missing lhs input.");
     }
-
-    const ExprNode& parent = expr.nodes[node.lhs];
-    std::vector<uint32_t> input_value_ids;
-    input_value_ids.reserve(1);
-    std::optional<DataType> actual_input_dtype = std::nullopt;
-
-    auto out_it = node_output_value_id.find(node.lhs);
-    if (out_it != node_output_value_id.end()) {
-        input_value_ids.push_back(out_it->second);
-        actual_input_dtype = parent.output_dtype;
-    } else if (parent.op == ExprOp::INPUT) {
-        input_value_ids.push_back(parent.input_slot);
-        actual_input_dtype = parent.input_tensor_dtype;
-    } else {
-        throw std::runtime_error("Missing value id for scan input.");
+    if (node.op == ExprOp::SEGMENTED_SCAN && (node.rhs == UINT32_MAX || node.rhs >= expr.nodes.size())) {
+        throw std::runtime_error("segmented_scan node missing offsets input.");
     }
 
-    if (!actual_input_dtype.has_value()) {
-        throw std::runtime_error("Scan parent node is missing resolved actual input dtype.");
-    }
+    auto resolve_stage_parent = [&](uint32_t parent_idx, const char* what) -> std::pair<uint32_t, DataType> {
+        const ExprNode& parent = expr.nodes[parent_idx];
+        auto out_it = node_output_value_id.find(parent_idx);
+        if (out_it != node_output_value_id.end()) {
+            if (!parent.output_dtype.has_value()) {
+                throw std::runtime_error(std::string("Scan ") + what + " parent node is missing resolved output dtype.");
+            }
+            return {out_it->second, parent.output_dtype.value()};
+        }
+        if (parent.op == ExprOp::INPUT) {
+            if (!parent.input_tensor_dtype.has_value()) {
+                throw std::runtime_error(std::string("Scan ") + what + " input node is missing resolved input dtype.");
+            }
+            return {parent.input_slot, parent.input_tensor_dtype.value()};
+        }
+        throw std::runtime_error(std::string("Missing value id for scan ") + what + ".");
+    };
+
+    const auto [input_value_id, actual_input_dtype] = resolve_stage_parent(node.lhs, "input");
+
     if (!node.output_dtype.has_value()) {
         throw std::runtime_error("Scan node is missing resolved output dtype.");
     }
-    if (actual_input_dtype.value() != node.output_dtype.value()) {
+    const bool arg_scan = node.scan_op == ScanOp::ArgMin || node.scan_op == ScanOp::ArgMax;
+    if (arg_scan) {
+        if (node.output_dtype.value() != DataType::UINT32) {
+            throw std::runtime_error("Expression arg scan output dtype must be UINT32.");
+        }
+    } else if (actual_input_dtype != node.output_dtype.value()) {
         throw std::runtime_error("Expression scan currently requires input and output dtypes to match.");
+    }
+
+    std::vector<uint32_t> input_value_ids;
+    input_value_ids.reserve(node.op == ExprOp::SEGMENTED_SCAN ? 2 : 1);
+    input_value_ids.push_back(input_value_id);
+
+    std::optional<DataType> offsets_dtype = std::nullopt;
+    if (node.op == ExprOp::SEGMENTED_SCAN) {
+        const auto [offsets_value_id, actual_offsets_dtype] = resolve_stage_parent(node.rhs, "offsets");
+        if (!isCubSegmentOffsetDTypeSupported(actual_offsets_dtype)) {
+            throw std::runtime_error("Expression segmented_scan offsets dtype is not supported by the CUB segmented-scan backend.");
+        }
+        input_value_ids.push_back(offsets_value_id);
+        offsets_dtype = actual_offsets_dtype;
     }
 
     PhysicalExpression stage_expr;
@@ -3166,23 +3234,37 @@ static PhysicalExecutionStage buildScanStage(const PhysicalExpression& expr,
     ExprNode input_node;
     input_node.op = ExprOp::INPUT;
     input_node.input_slot = 0;
-    input_node.input_tensor_dtype = actual_input_dtype.value();
-    input_node.output_dtype = actual_input_dtype.value();
-    input_node.compute_dtype = actual_input_dtype.value();
-    input_node.backward_output_dtype = actual_input_dtype.value();
-    input_node.backward_compute_dtype = actual_input_dtype.value();
+    input_node.input_tensor_dtype = actual_input_dtype;
+    input_node.output_dtype = actual_input_dtype;
+    input_node.compute_dtype = actual_input_dtype;
+    input_node.backward_output_dtype = actual_input_dtype;
+    input_node.backward_compute_dtype = actual_input_dtype;
     stage_expr.nodes.push_back(std::move(input_node));
+
+    if (node.op == ExprOp::SEGMENTED_SCAN) {
+        stage_expr.inputs.push_back(NamedInput{"__arg1", 1});
+        ExprNode offsets_node;
+        offsets_node.op = ExprOp::INPUT;
+        offsets_node.input_slot = 1;
+        offsets_node.input_tensor_dtype = offsets_dtype.value();
+        offsets_node.output_dtype = offsets_dtype.value();
+        offsets_node.compute_dtype = offsets_dtype.value();
+        offsets_node.backward_output_dtype = offsets_dtype.value();
+        offsets_node.backward_compute_dtype = offsets_dtype.value();
+        stage_expr.nodes.push_back(std::move(offsets_node));
+    }
 
     ExprNode scan = node;
     scan.lhs = 0;
-    scan.rhs = UINT32_MAX;
+    scan.rhs = node.op == ExprOp::SEGMENTED_SCAN ? 1 : UINT32_MAX;
     stage_expr.nodes.push_back(std::move(scan));
-    stage_expr.output_node = 1;
+    const uint32_t scan_node_idx = static_cast<uint32_t>(stage_expr.nodes.size() - 1);
+    stage_expr.output_node = scan_node_idx;
 
     std::vector<CompiledStageOutput> stage_outputs;
     stage_outputs.push_back(CompiledStageOutput{
         .name = output_name,
-        .local_node_idx = 1,
+        .local_node_idx = scan_node_idx,
         .value_id = output_value_id,
     });
 
@@ -5450,8 +5532,9 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             if (!grouped_rope_roots.contains(lhs_dependency_idx)) {
                 ensureBoundaryParentEmitted(lhs_dependency_idx, "lhs", isCudnnReduceOp(root.op));
             }
-            if (isReduceMinMaxBackwardOp(root.op) || isMatmulOp(root.op) || isEmbeddingLookupOp(root.op) || isAttentionOp(root.op) ||
-                isAttentionBackwardOp(root.op) || isConvolutionOp(root.op)) {
+            if (isReduceMinMaxBackwardOp(root.op) || isMatmulOp(root.op) || isEmbeddingLookupOp(root.op) ||
+                root.op == ExprOp::SEGMENTED_SCAN || isAttentionOp(root.op) || isAttentionBackwardOp(root.op) ||
+                isConvolutionOp(root.op)) {
                 if (!grouped_rope_roots.contains(rhs_dependency_idx)) {
                     ensureBoundaryParentEmitted(rhs_dependency_idx, "rhs", false);
                 }
@@ -5786,8 +5869,9 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             if (!grouped_rope_roots.contains(lhs_dependency_idx)) {
                 ensureBoundaryParentEmitted(lhs_dependency_idx, "lhs", isCudnnReduceOp(root.op));
             }
-            if (isReduceMinMaxBackwardOp(root.op) || isMatmulOp(root.op) || isEmbeddingLookupOp(root.op) || isAttentionOp(root.op) ||
-                isAttentionBackwardOp(root.op) || isConvolutionOp(root.op)) {
+            if (isReduceMinMaxBackwardOp(root.op) || isMatmulOp(root.op) || isEmbeddingLookupOp(root.op) ||
+                root.op == ExprOp::SEGMENTED_SCAN || isAttentionOp(root.op) || isAttentionBackwardOp(root.op) ||
+                isConvolutionOp(root.op)) {
                 if (!grouped_rope_roots.contains(rhs_dependency_idx)) {
                     ensureBoundaryParentEmitted(rhs_dependency_idx, "rhs", false);
                 }

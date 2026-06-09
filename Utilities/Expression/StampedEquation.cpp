@@ -56,8 +56,25 @@ static CubScanOp toCubScanOp(ScanOp op) {
             return CubScanOp::Max;
         case ScanOp::Product:
             return CubScanOp::Product;
+        case ScanOp::ArgMin:
+        case ScanOp::ArgMax:
+            break;
     }
     throw std::runtime_error("Unsupported Expression scan op.");
+}
+
+static bool isArgScanOp(ScanOp op) { return op == ScanOp::ArgMin || op == ScanOp::ArgMax; }
+
+static CubArgScanOp toCubArgScanOp(ScanOp op) {
+    switch (op) {
+        case ScanOp::ArgMin:
+            return CubArgScanOp::ArgMin;
+        case ScanOp::ArgMax:
+            return CubArgScanOp::ArgMax;
+        default:
+            break;
+    }
+    throw std::runtime_error("Unsupported Expression arg scan op.");
 }
 
 static CubScanMode toCubScanMode(ScanMode mode) {
@@ -68,6 +85,10 @@ static CubScanMode toCubScanMode(ScanMode mode) {
             return CubScanMode::Inclusive;
     }
     throw std::runtime_error("Unsupported Expression scan mode.");
+}
+
+static CubScanDirection toCubScanDirection(bool reverse) {
+    return reverse ? CubScanDirection::Reverse : CubScanDirection::Forward;
 }
 
 static int64_t checkedDim(const std::vector<uint64_t>& dims, size_t idx, const char* tensor_name) {
@@ -1040,15 +1061,24 @@ void StampedArgMinMax::runOn(Stream& run_stream) const {
                                   (void*)reduction_value_output.getMemPtr()));
 }
 
-StampedScan::StampedScan(std::shared_ptr<CompiledScan> compiled, const Tensor& input, const Tensor& output, const Stream& stream)
-    : compiled_scan(std::move(compiled)), input(input), output(output), stream(stream) {
+StampedScan::StampedScan(std::shared_ptr<CompiledScan> compiled,
+                         const Tensor& input,
+                         const Tensor& output,
+                         const Stream& stream,
+                         std::optional<Tensor> segment_offsets)
+    : compiled_scan(std::move(compiled)), input(input), output(output), segment_offsets(std::move(segment_offsets)), stream(stream) {
     if (!compiled_scan) {
         throw std::runtime_error("StampedScan requires a compiled scan descriptor.");
     }
     if (input.getDataType() != compiled_scan->input_dtype || output.getDataType() != compiled_scan->output_dtype) {
         throw std::runtime_error("StampedScan tensor dtypes do not match the compiled scan descriptor.");
     }
-    if (input.getDataType() != output.getDataType()) {
+    const bool arg_scan = isArgScanOp(compiled_scan->op);
+    if (arg_scan) {
+        if (output.getDataType() != DataType::UINT32) {
+            throw std::runtime_error("Expression arg scan output dtype must be UINT32.");
+        }
+    } else if (input.getDataType() != output.getDataType()) {
         throw std::runtime_error("Expression scan currently requires input and output dtypes to match.");
     }
     if (input.getPlacement() != output.getPlacement()) {
@@ -1057,24 +1087,64 @@ StampedScan::StampedScan(std::shared_ptr<CompiledScan> compiled, const Tensor& i
     if (input.getDimensions() != output.getDimensions()) {
         throw std::runtime_error("Expression scan output shape must match input shape.");
     }
+    if (compiled_scan->segmented_by_offsets != this->segment_offsets.has_value()) {
+        throw std::runtime_error("StampedScan segmented-offset input does not match the compiled scan descriptor.");
+    }
 
     const std::vector<uint64_t> dims = input.getDimensions();
     checkedFinalScanAxis(dims, compiled_scan->axis);
     const uint64_t num_items = input.getTotalNumElements();
-    const uint64_t segment_size = dims.empty() ? 0 : dims.back();
-    const uint64_t num_segments = (segment_size == 0) ? 0 : num_items / segment_size;
-    segmented = num_segments > 1;
 
-    const CubScanOp cub_op = toCubScanOp(compiled_scan->op);
     const CubScanMode cub_mode = toCubScanMode(compiled_scan->mode);
+    const CubScanDirection cub_direction = toCubScanDirection(compiled_scan->reverse);
 
     size_t temp_storage_bytes = 1;
-    if (segmented) {
-        segmented_scan_plan = prepareCubDeviceSegmentedUniformScan(input, output, num_items, num_segments, segment_size, cub_op, cub_mode);
-        temp_storage_bytes = segmented_scan_plan.temp_storage_bytes;
+    if (compiled_scan->segmented_by_offsets) {
+        const Tensor& offsets = this->segment_offsets.value();
+        if (!compiled_scan->offset_dtype.has_value() || offsets.getDataType() != compiled_scan->offset_dtype.value()) {
+            throw std::runtime_error("StampedScan segment-offset dtype does not match the compiled scan descriptor.");
+        }
+        if (offsets.getPlacement() != input.getPlacement()) {
+            throw std::runtime_error("Expression segmented_scan input and offsets must be on the same GPU placement.");
+        }
+        const std::vector<uint64_t> offset_dims = offsets.getDimensions();
+        if (offset_dims.size() != 1 || offset_dims[0] == 0) {
+            throw std::runtime_error("Expression segmented_scan offsets must be a non-empty rank-1 tensor of shape [num_segments + 1].");
+        }
+        const uint64_t num_segments = offset_dims[0] - 1;
+        ragged_segmented = true;
+        if (arg_scan) {
+            ragged_segmented_arg_scan_plan = prepareCubDeviceSegmentedArgScan(
+                input, output, offsets, num_items, num_segments, toCubArgScanOp(compiled_scan->op), cub_mode, cub_direction);
+            temp_storage_bytes = ragged_segmented_arg_scan_plan.temp_storage_bytes;
+        } else {
+            ragged_segmented_scan_plan = prepareCubDeviceSegmentedScan(
+                input, output, offsets, num_items, num_segments, toCubScanOp(compiled_scan->op), cub_mode, cub_direction);
+            temp_storage_bytes = ragged_segmented_scan_plan.temp_storage_bytes;
+        }
     } else {
-        scan_plan = prepareCubDeviceScan(input, output, num_items, cub_op, cub_mode);
-        temp_storage_bytes = scan_plan.temp_storage_bytes;
+        const uint64_t segment_size = dims.empty() ? 0 : dims.back();
+        const uint64_t num_segments = (segment_size == 0) ? 0 : num_items / segment_size;
+        uniform_segmented = num_segments > 1;
+        if (uniform_segmented) {
+            if (arg_scan) {
+                segmented_arg_scan_plan = prepareCubDeviceSegmentedUniformArgScan(
+                    input, output, num_items, num_segments, segment_size, toCubArgScanOp(compiled_scan->op), cub_mode, cub_direction);
+                temp_storage_bytes = segmented_arg_scan_plan.temp_storage_bytes;
+            } else {
+                segmented_scan_plan = prepareCubDeviceSegmentedUniformScan(
+                    input, output, num_items, num_segments, segment_size, toCubScanOp(compiled_scan->op), cub_mode, cub_direction);
+                temp_storage_bytes = segmented_scan_plan.temp_storage_bytes;
+            }
+        } else {
+            if (arg_scan) {
+                arg_scan_plan = prepareCubDeviceArgScan(input, output, num_items, toCubArgScanOp(compiled_scan->op), cub_mode, cub_direction);
+                temp_storage_bytes = arg_scan_plan.temp_storage_bytes;
+            } else {
+                scan_plan = prepareCubDeviceScan(input, output, num_items, toCubScanOp(compiled_scan->op), cub_mode, cub_direction);
+                temp_storage_bytes = scan_plan.temp_storage_bytes;
+            }
+        }
     }
 
     temp_storage = Tensor(input.getPlacement(), TensorDescriptor(DataType::UINT8, {std::max<size_t>(temp_storage_bytes, 1)}));
@@ -1083,10 +1153,25 @@ StampedScan::StampedScan(std::shared_ptr<CompiledScan> compiled, const Tensor& i
 void StampedScan::run() { runOn(stream); }
 
 void StampedScan::runOn(Stream& run_stream) const {
-    if (segmented) {
-        cubDeviceSegmentedUniformScan(segmented_scan_plan, temp_storage, input, output, run_stream);
+    const bool arg_scan = isArgScanOp(compiled_scan->op);
+    if (ragged_segmented) {
+        if (arg_scan) {
+            cubDeviceSegmentedArgScan(ragged_segmented_arg_scan_plan, temp_storage, input, output, segment_offsets.value(), run_stream);
+        } else {
+            cubDeviceSegmentedScan(ragged_segmented_scan_plan, temp_storage, input, output, segment_offsets.value(), run_stream);
+        }
+    } else if (uniform_segmented) {
+        if (arg_scan) {
+            cubDeviceSegmentedUniformArgScan(segmented_arg_scan_plan, temp_storage, input, output, run_stream);
+        } else {
+            cubDeviceSegmentedUniformScan(segmented_scan_plan, temp_storage, input, output, run_stream);
+        }
     } else {
-        cubDeviceScan(scan_plan, temp_storage, input, output, run_stream);
+        if (arg_scan) {
+            cubDeviceArgScan(arg_scan_plan, temp_storage, input, output, run_stream);
+        } else {
+            cubDeviceScan(scan_plan, temp_storage, input, output, run_stream);
+        }
     }
 }
 

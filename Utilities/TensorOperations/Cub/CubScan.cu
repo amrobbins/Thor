@@ -3,6 +3,9 @@
 #include "Utilities/Expression/CudaHelpers.h"
 
 #include <cub/cub.cuh>
+#include <thrust/iterator/counting_iterator.h>
+#include <thrust/iterator/reverse_iterator.h>
+#include <thrust/iterator/transform_iterator.h>
 
 #include <algorithm>
 #include <limits>
@@ -142,29 +145,65 @@ T scanIdentity(CubScanOp op) {
     throw std::invalid_argument("Unsupported CUB scan op.");
 }
 
-template <typename T, typename ScanOpT>
-size_t queryDeviceScan(const Tensor& input, const Tensor& output, uint64_t num_items, CubScanMode mode, ScanOpT scan_op, T init) {
-    const int cub_items = checkedCubNumItems(num_items);
+template <typename T, typename ScanOpT, typename InputIt, typename OutputIt>
+size_t queryDeviceScanIterator(InputIt input_begin, OutputIt output_begin, int cub_items, CubScanMode mode, ScanOpT scan_op, T init) {
     size_t queried_bytes = 0;
     if (mode == CubScanMode::Exclusive) {
         CUDA_CHECK(cub::DeviceScan::ExclusiveScan(nullptr,
                                                   queried_bytes,
-                                                  input.getMemPtr<T>(),
-                                                  const_cast<T*>(output.getMemPtr<T>()),
+                                                  input_begin,
+                                                  output_begin,
                                                   scan_op,
                                                   init,
                                                   cub_items));
     } else if (mode == CubScanMode::Inclusive) {
-        CUDA_CHECK(cub::DeviceScan::InclusiveScan(nullptr,
-                                                  queried_bytes,
-                                                  input.getMemPtr<T>(),
-                                                  const_cast<T*>(output.getMemPtr<T>()),
-                                                  scan_op,
-                                                  cub_items));
+        CUDA_CHECK(cub::DeviceScan::InclusiveScan(nullptr, queried_bytes, input_begin, output_begin, scan_op, cub_items));
     } else {
         throw std::invalid_argument("Unsupported CUB scan mode.");
     }
     return queried_bytes;
+}
+
+template <typename T, typename ScanOpT>
+size_t queryDeviceScan(const Tensor& input,
+                       const Tensor& output,
+                       uint64_t num_items,
+                       CubScanMode mode,
+                       CubScanDirection direction,
+                       ScanOpT scan_op,
+                       T init) {
+    const int cub_items = checkedCubNumItems(num_items);
+    if (direction == CubScanDirection::Forward) {
+        return queryDeviceScanIterator<T>(
+            input.getMemPtr<T>(), const_cast<T*>(output.getMemPtr<T>()), cub_items, mode, scan_op, init);
+    }
+    if (direction == CubScanDirection::Reverse) {
+        auto input_begin = thrust::make_reverse_iterator(input.getMemPtr<T>() + cub_items);
+        auto output_begin = thrust::make_reverse_iterator(const_cast<T*>(output.getMemPtr<T>()) + cub_items);
+        return queryDeviceScanIterator<T>(input_begin, output_begin, cub_items, mode, scan_op, init);
+    }
+    throw std::invalid_argument("Unsupported CUB scan direction.");
+}
+
+template <typename T, typename ScanOpT, typename InputIt, typename OutputIt>
+void launchDeviceScanIterator(void* temp_storage_ptr,
+                              size_t temp_storage_bytes,
+                              InputIt input_begin,
+                              OutputIt output_begin,
+                              int cub_items,
+                              cudaStream_t stream,
+                              CubScanMode mode,
+                              ScanOpT scan_op,
+                              T init) {
+    if (mode == CubScanMode::Exclusive) {
+        CUDA_CHECK(cub::DeviceScan::ExclusiveScan(
+            temp_storage_ptr, temp_storage_bytes, input_begin, output_begin, scan_op, init, cub_items, stream));
+    } else if (mode == CubScanMode::Inclusive) {
+        CUDA_CHECK(cub::DeviceScan::InclusiveScan(
+            temp_storage_ptr, temp_storage_bytes, input_begin, output_begin, scan_op, cub_items, stream));
+    } else {
+        throw std::invalid_argument("Unsupported CUB scan mode.");
+    }
 }
 
 template <typename T, typename ScanOpT>
@@ -178,26 +217,26 @@ void launchDeviceScan(const CubDeviceScanPlan& plan,
     void* temp_storage_ptr = mutableCubTempStoragePtr(temp_storage);
     size_t temp_storage_bytes = plan.temp_storage_bytes;
     const int cub_items = checkedCubNumItems(plan.num_items);
-    if (plan.mode == CubScanMode::Exclusive) {
-        CUDA_CHECK(cub::DeviceScan::ExclusiveScan(temp_storage_ptr,
-                                                  temp_storage_bytes,
-                                                  input.getMemPtr<T>(),
-                                                  output.getMemPtr<T>(),
-                                                  scan_op,
-                                                  init,
-                                                  cub_items,
-                                                  stream.getStream()));
-    } else if (plan.mode == CubScanMode::Inclusive) {
-        CUDA_CHECK(cub::DeviceScan::InclusiveScan(temp_storage_ptr,
-                                                  temp_storage_bytes,
-                                                  input.getMemPtr<T>(),
-                                                  output.getMemPtr<T>(),
-                                                  scan_op,
-                                                  cub_items,
-                                                  stream.getStream()));
-    } else {
-        throw std::invalid_argument("Unsupported CUB scan mode.");
+    if (plan.direction == CubScanDirection::Forward) {
+        launchDeviceScanIterator<T>(temp_storage_ptr,
+                                    temp_storage_bytes,
+                                    input.getMemPtr<T>(),
+                                    output.getMemPtr<T>(),
+                                    cub_items,
+                                    stream.getStream(),
+                                    plan.mode,
+                                    scan_op,
+                                    init);
+        return;
     }
+    if (plan.direction == CubScanDirection::Reverse) {
+        auto input_begin = thrust::make_reverse_iterator(input.getMemPtr<T>() + cub_items);
+        auto output_begin = thrust::make_reverse_iterator(output.getMemPtr<T>() + cub_items);
+        launchDeviceScanIterator<T>(
+            temp_storage_ptr, temp_storage_bytes, input_begin, output_begin, cub_items, stream.getStream(), plan.mode, scan_op, init);
+        return;
+    }
+    throw std::invalid_argument("Unsupported CUB scan direction.");
 }
 
 template <typename T, typename Fn>
@@ -221,7 +260,8 @@ CubDeviceScanPlan prepareCubDeviceScan(const Tensor& input,
                                        const Tensor& output,
                                        uint64_t num_items,
                                        CubScanOp op,
-                                       CubScanMode mode) {
+                                       CubScanMode mode,
+                                       CubScanDirection direction) {
     validateExclusiveSum(input, output, num_items);
     if (!isCubScanDTypeSupported(input.getDataType())) {
         throw std::invalid_argument("Unsupported CUB scan dtype " + dtypeName(input.getDataType()) + ".");
@@ -230,7 +270,9 @@ CubDeviceScanPlan prepareCubDeviceScan(const Tensor& input,
     size_t bytes = 1;
     if (num_items != 0) {
         auto query = [&]<typename T>() -> size_t {
-            auto query_op = [&](auto scan_op, T init) -> size_t { return queryDeviceScan<T>(input, output, num_items, mode, scan_op, init); };
+            auto query_op = [&](auto scan_op, T init) -> size_t {
+                return queryDeviceScan<T>(input, output, num_items, mode, direction, scan_op, init);
+            };
             return dispatchScanOperator<T>(op, query_op);
         };
         bytes = dispatchScanDType(input.getDataType(), query);
@@ -242,12 +284,14 @@ CubDeviceScanPlan prepareCubDeviceScan(const Tensor& input,
     plan.num_items = num_items;
     plan.op = op;
     plan.mode = mode;
+    plan.direction = direction;
     plan.temp_storage_bytes = std::max<size_t>(bytes, 1);
     return plan;
 }
 
-size_t cubDeviceScanTempBytes(const Tensor& input, const Tensor& output, uint64_t num_items, CubScanOp op, CubScanMode mode) {
-    return prepareCubDeviceScan(input, output, num_items, op, mode).temp_storage_bytes;
+size_t cubDeviceScanTempBytes(
+    const Tensor& input, const Tensor& output, uint64_t num_items, CubScanOp op, CubScanMode mode, CubScanDirection direction) {
+    return prepareCubDeviceScan(input, output, num_items, op, mode, direction).temp_storage_bytes;
 }
 
 void cubDeviceScan(const CubDeviceScanPlan& plan,
@@ -282,8 +326,9 @@ void cubDeviceScan(const Tensor& temp_storage,
                    uint64_t num_items,
                    Stream& stream,
                    CubScanOp op,
-                   CubScanMode mode) {
-    CubDeviceScanPlan plan = prepareCubDeviceScan(input, output, num_items, op, mode);
+                   CubScanMode mode,
+                   CubScanDirection direction) {
+    CubDeviceScanPlan plan = prepareCubDeviceScan(input, output, num_items, op, mode, direction);
     if (temp_storage_bytes < plan.temp_storage_bytes) {
         throw std::invalid_argument("temp_storage_bytes is smaller than the prepared CUB scan requirement.");
     }
@@ -294,7 +339,8 @@ void cubDeviceScan(const Tensor& temp_storage,
 CubDeviceExclusiveSumPlan prepareCubDeviceExclusiveSum(const Tensor& input,
                                                        const Tensor& output,
                                                        uint64_t num_items) {
-    CubDeviceScanPlan scan_plan = prepareCubDeviceScan(input, output, num_items, CubScanOp::Sum, CubScanMode::Exclusive);
+    CubDeviceScanPlan scan_plan =
+        prepareCubDeviceScan(input, output, num_items, CubScanOp::Sum, CubScanMode::Exclusive, CubScanDirection::Forward);
     CubDeviceExclusiveSumPlan plan;
     plan.placement = scan_plan.placement;
     plan.dtype = scan_plan.dtype;
@@ -328,13 +374,15 @@ void cubDeviceExclusiveSum(const Tensor& temp_storage,
                            Tensor& output,
                            uint64_t num_items,
                            Stream& stream) {
-    cubDeviceScan(temp_storage, temp_storage_bytes, input, output, num_items, stream, CubScanOp::Sum, CubScanMode::Exclusive);
+    cubDeviceScan(
+        temp_storage, temp_storage_bytes, input, output, num_items, stream, CubScanOp::Sum, CubScanMode::Exclusive, CubScanDirection::Forward);
 }
 
 CubDeviceInclusiveSumPlan prepareCubDeviceInclusiveSum(const Tensor& input,
                                                        const Tensor& output,
                                                        uint64_t num_items) {
-    CubDeviceScanPlan scan_plan = prepareCubDeviceScan(input, output, num_items, CubScanOp::Sum, CubScanMode::Inclusive);
+    CubDeviceScanPlan scan_plan =
+        prepareCubDeviceScan(input, output, num_items, CubScanOp::Sum, CubScanMode::Inclusive, CubScanDirection::Forward);
     CubDeviceInclusiveSumPlan plan;
     plan.placement = scan_plan.placement;
     plan.dtype = scan_plan.dtype;
@@ -368,7 +416,220 @@ void cubDeviceInclusiveSum(const Tensor& temp_storage,
                            Tensor& output,
                            uint64_t num_items,
                            Stream& stream) {
-    cubDeviceScan(temp_storage, temp_storage_bytes, input, output, num_items, stream, CubScanOp::Sum, CubScanMode::Inclusive);
+    cubDeviceScan(
+        temp_storage, temp_storage_bytes, input, output, num_items, stream, CubScanOp::Sum, CubScanMode::Inclusive, CubScanDirection::Forward);
+}
+
+namespace {
+
+template <typename T>
+struct CubArgScanPair {
+    T value;
+    uint32_t index;
+};
+
+template <typename T>
+struct CubArgScanInputOp {
+    const T* input;
+    uint32_t num_items;
+    CubScanDirection direction;
+
+    __host__ __device__ CubArgScanPair<T> operator()(uint32_t logical_index) const {
+        const uint32_t physical = direction == CubScanDirection::Reverse ? (num_items - 1U - logical_index) : logical_index;
+        return CubArgScanPair<T>{input[physical], physical};
+    }
+};
+
+template <typename T>
+struct CubArgScanMinOp {
+    __host__ __device__ CubArgScanPair<T> operator()(const CubArgScanPair<T>& a, const CubArgScanPair<T>& b) const {
+        if constexpr (std::is_same_v<T, __half> || std::is_same_v<T, __nv_bfloat16>) {
+            return scanToFloat(b.value) < scanToFloat(a.value) ? b : a;
+        } else {
+            return b.value < a.value ? b : a;
+        }
+    }
+};
+
+template <typename T>
+struct CubArgScanMaxOp {
+    __host__ __device__ CubArgScanPair<T> operator()(const CubArgScanPair<T>& a, const CubArgScanPair<T>& b) const {
+        if constexpr (std::is_same_v<T, __half> || std::is_same_v<T, __nv_bfloat16>) {
+            return scanToFloat(a.value) < scanToFloat(b.value) ? b : a;
+        } else {
+            return a.value < b.value ? b : a;
+        }
+    }
+};
+
+template <typename T>
+CubArgScanPair<T> argScanIdentity(CubArgScanOp op) {
+    switch (op) {
+        case CubArgScanOp::ArgMin:
+            return CubArgScanPair<T>{scanPositiveInfinityOrMax<T>(), UINT32_MAX};
+        case CubArgScanOp::ArgMax:
+            return CubArgScanPair<T>{scanNegativeInfinityOrLowest<T>(), UINT32_MAX};
+    }
+    throw std::invalid_argument("Unsupported CUB arg scan op.");
+}
+
+template <typename T, typename Fn>
+decltype(auto) dispatchArgScanOperator(CubArgScanOp op, Fn&& fn) {
+    switch (op) {
+        case CubArgScanOp::ArgMin:
+            return fn(CubArgScanMinOp<T>{}, argScanIdentity<T>(op));
+        case CubArgScanOp::ArgMax:
+            return fn(CubArgScanMaxOp<T>{}, argScanIdentity<T>(op));
+    }
+    throw std::invalid_argument("Unsupported CUB arg scan op.");
+}
+
+inline size_t alignCubArgScanBytes(size_t bytes) { return (bytes + size_t{255}) & ~size_t{255}; }
+
+template <typename T>
+size_t argScanPairStorageBytes(uint64_t num_items) {
+    if (num_items > std::numeric_limits<size_t>::max() / sizeof(CubArgScanPair<T>)) {
+        throw std::invalid_argument("CUB arg scan pair workspace size overflow.");
+    }
+    return alignCubArgScanBytes(static_cast<size_t>(num_items) * sizeof(CubArgScanPair<T>));
+}
+
+template <typename T, typename ScanOpT>
+size_t queryDeviceArgScan(const Tensor& input, uint64_t num_items, CubScanMode mode, CubScanDirection direction, ScanOpT scan_op, CubArgScanPair<T> init) {
+    const int cub_items = checkedCubNumItems(num_items);
+    auto input_begin = thrust::make_transform_iterator(thrust::counting_iterator<uint32_t>(0),
+                                                       CubArgScanInputOp<T>{input.getMemPtr<T>(), static_cast<uint32_t>(cub_items), direction});
+    CubArgScanPair<T>* output_begin = nullptr;
+    size_t queried_bytes = 0;
+    if (mode == CubScanMode::Exclusive) {
+        CUDA_CHECK(cub::DeviceScan::ExclusiveScan(nullptr, queried_bytes, input_begin, output_begin, scan_op, init, cub_items));
+    } else if (mode == CubScanMode::Inclusive) {
+        CUDA_CHECK(cub::DeviceScan::InclusiveScan(nullptr, queried_bytes, input_begin, output_begin, scan_op, cub_items));
+    } else {
+        throw std::invalid_argument("Unsupported CUB arg scan mode.");
+    }
+    return queried_bytes;
+}
+
+template <typename T>
+__global__ void extractArgScanIndicesKernel(const CubArgScanPair<T>* pairs, uint32_t* output, uint32_t num_items, CubScanDirection direction) {
+    const uint32_t logical = blockIdx.x * blockDim.x + threadIdx.x;
+    if (logical >= num_items) {
+        return;
+    }
+    const uint32_t physical = direction == CubScanDirection::Reverse ? (num_items - 1U - logical) : logical;
+    output[physical] = pairs[logical].index;
+}
+
+template <typename T, typename ScanOpT>
+void launchDeviceArgScan(const CubDeviceArgScanPlan& plan,
+                         const Tensor& temp_storage,
+                         const Tensor& input,
+                         Tensor& output,
+                         Stream& stream,
+                         ScanOpT scan_op,
+                         CubArgScanPair<T> init) {
+    const int cub_items = checkedCubNumItems(plan.num_items);
+    void* temp_storage_ptr = mutableCubTempStoragePtr(temp_storage);
+    const size_t pair_bytes = argScanPairStorageBytes<T>(plan.num_items);
+    auto* pair_output = reinterpret_cast<CubArgScanPair<T>*>(temp_storage_ptr);
+    void* cub_temp = static_cast<void*>(static_cast<unsigned char*>(temp_storage_ptr) + pair_bytes);
+    size_t cub_temp_bytes = plan.temp_storage_bytes - pair_bytes;
+    auto input_begin = thrust::make_transform_iterator(thrust::counting_iterator<uint32_t>(0),
+                                                       CubArgScanInputOp<T>{input.getMemPtr<T>(), static_cast<uint32_t>(cub_items), plan.direction});
+    if (plan.mode == CubScanMode::Exclusive) {
+        CUDA_CHECK(cub::DeviceScan::ExclusiveScan(cub_temp, cub_temp_bytes, input_begin, pair_output, scan_op, init, cub_items, stream.getStream()));
+    } else if (plan.mode == CubScanMode::Inclusive) {
+        CUDA_CHECK(cub::DeviceScan::InclusiveScan(cub_temp, cub_temp_bytes, input_begin, pair_output, scan_op, cub_items, stream.getStream()));
+    } else {
+        throw std::invalid_argument("Unsupported CUB arg scan mode.");
+    }
+    const uint32_t threads = 256;
+    const uint32_t blocks = (static_cast<uint32_t>(cub_items) + threads - 1U) / threads;
+    extractArgScanIndicesKernel<T><<<blocks, threads, 0, stream.getStream()>>>(pair_output, output.getMemPtr<uint32_t>(), static_cast<uint32_t>(cub_items), plan.direction);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void validateArgScan(const Tensor& input, const Tensor& output, uint64_t num_items) {
+    requireDenseContiguousGpuTensor(input, "arg scan input");
+    requireDenseContiguousGpuTensor(output, "arg scan output");
+    requireSameGpuPlacement(input, output, "arg scan input", "arg scan output");
+    requireStorageForNumItems(input, "arg scan input", num_items);
+    requireStorageForNumItems(output, "arg scan output", num_items);
+    if (output.getDataType() != DataType::UINT32) {
+        throw std::invalid_argument("CUB arg scan output dtype must be UINT32.");
+    }
+}
+
+}  // namespace
+
+CubDeviceArgScanPlan prepareCubDeviceArgScan(const Tensor& input,
+                                             const Tensor& output,
+                                             uint64_t num_items,
+                                             CubArgScanOp op,
+                                             CubScanMode mode,
+                                             CubScanDirection direction) {
+    validateArgScan(input, output, num_items);
+    if (!isCubScanDTypeSupported(input.getDataType())) {
+        throw std::invalid_argument("Unsupported CUB arg scan dtype " + dtypeName(input.getDataType()) + ".");
+    }
+
+    size_t bytes = 1;
+    if (num_items != 0) {
+        auto query = [&]<typename T>() -> size_t {
+            auto query_op = [&](auto scan_op, CubArgScanPair<T> init) -> size_t {
+                return argScanPairStorageBytes<T>(num_items) + queryDeviceArgScan<T>(input, num_items, mode, direction, scan_op, init);
+            };
+            return dispatchArgScanOperator<T>(op, query_op);
+        };
+        bytes = dispatchScanDType(input.getDataType(), query);
+    }
+
+    CubDeviceArgScanPlan plan;
+    plan.placement = input.getPlacement();
+    plan.dtype = input.getDataType();
+    plan.num_items = num_items;
+    plan.op = op;
+    plan.mode = mode;
+    plan.direction = direction;
+    plan.temp_storage_bytes = std::max<size_t>(bytes, 1);
+    return plan;
+}
+
+size_t cubDeviceArgScanTempBytes(const Tensor& input,
+                                 const Tensor& output,
+                                 uint64_t num_items,
+                                 CubArgScanOp op,
+                                 CubScanMode mode,
+                                 CubScanDirection direction) {
+    return prepareCubDeviceArgScan(input, output, num_items, op, mode, direction).temp_storage_bytes;
+}
+
+void cubDeviceArgScan(const CubDeviceArgScanPlan& plan,
+                      const Tensor& temp_storage,
+                      const Tensor& input,
+                      Tensor& output,
+                      Stream& stream) {
+    validateArgScan(input, output, plan.num_items);
+    if (input.getPlacement() != plan.placement || input.getDataType() != plan.dtype) {
+        throw std::invalid_argument("CUB arg scan plan is not compatible with the provided tensors.");
+    }
+    if (!isCubScanDTypeSupported(input.getDataType())) {
+        throw std::invalid_argument("Unsupported CUB arg scan dtype " + dtypeName(input.getDataType()) + ".");
+    }
+    requireTempStorage(temp_storage, plan.placement, plan.temp_storage_bytes);
+    if (plan.num_items == 0) {
+        return;
+    }
+
+    auto launch = [&]<typename T>() -> void {
+        auto launch_op = [&](auto scan_op, CubArgScanPair<T> init) -> void {
+            launchDeviceArgScan<T>(plan, temp_storage, input, output, stream, scan_op, init);
+        };
+        dispatchArgScanOperator<T>(plan.op, launch_op);
+    };
+
+    dispatchScanDType(plan.dtype, launch);
 }
 
 }  // namespace ThorImplementation

@@ -60,7 +60,7 @@ static bool isLogicalOp(ExprOp op) { return op == ExprOp::LOGICAL_AND || op == E
 
 static bool isWhereOp(ExprOp op) { return op == ExprOp::WHERE; }
 
-static bool isScanOp(ExprOp op) { return op == ExprOp::SCAN; }
+static bool isScanOp(ExprOp op) { return op == ExprOp::SCAN || op == ExprOp::SEGMENTED_SCAN; }
 
 static bool isBooleanOutputOp(ExprOp op) { return isComparisonOp(op) || isLogicalOp(op); }
 
@@ -320,6 +320,18 @@ static DataType resolveNodeLogicalInputDType(const ExprNode& node,
         return resolved_output_dtypes[node.lhs];
     }
 
+    if (node.op == ExprOp::SEGMENTED_SCAN) {
+        if (node.lhs >= resolved_output_dtypes.size() || node.rhs >= resolved_output_dtypes.size()) {
+            throw std::runtime_error("segmented_scan node has parent index out of range in resolveNodeLogicalInputDType.");
+        }
+        const DataType offsets_dtype = resolved_output_dtypes[node.rhs];
+        if (offsets_dtype != DataType::UINT32 && offsets_dtype != DataType::UINT64) {
+            throw std::runtime_error("segmented_scan offsets must have UINT32 or UINT64 dtype, received: " +
+                                     TensorDescriptor::getElementTypeName(offsets_dtype));
+        }
+        return resolved_output_dtypes[node.lhs];
+    }
+
     std::vector<DataType> tensor_parent_dtypes;
     tensor_parent_dtypes.reserve(4);
 
@@ -466,15 +478,28 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
         return node.output_dtype.has_value() ? node.output_dtype.value() : input_dtype;
     }
 
-    if (node.op == ExprOp::SCAN) {
+    if (node.op == ExprOp::SCAN || node.op == ExprOp::SEGMENTED_SCAN) {
         if (node.lhs >= resolved_output_dtypes.size()) {
             throw std::runtime_error("Scan node has input index out of range in resolveNodeOutputDType.");
         }
-        const DataType input_dtype = resolved_output_dtypes[node.lhs];
-        if (node.output_dtype.has_value() && node.output_dtype.value() != input_dtype) {
-            throw std::runtime_error("Expression scan currently requires output dtype to match input dtype.");
+        if (node.op == ExprOp::SEGMENTED_SCAN) {
+            if (node.rhs >= resolved_output_dtypes.size()) {
+                throw std::runtime_error("segmented_scan offsets node has index out of range in resolveNodeOutputDType.");
+            }
+            const DataType offsets_dtype = resolved_output_dtypes[node.rhs];
+            if (offsets_dtype != DataType::UINT32 && offsets_dtype != DataType::UINT64) {
+                throw std::runtime_error("segmented_scan offsets must have UINT32 or UINT64 dtype, received: " +
+                                         TensorDescriptor::getElementTypeName(offsets_dtype));
+            }
         }
-        return input_dtype;
+        const DataType input_dtype = resolved_output_dtypes[node.lhs];
+        const bool arg_scan = node.scan_op == ScanOp::ArgMin || node.scan_op == ScanOp::ArgMax;
+        const DataType default_output_dtype = arg_scan ? DataType::UINT32 : input_dtype;
+        if (node.output_dtype.has_value() && node.output_dtype.value() != default_output_dtype) {
+            throw std::runtime_error(arg_scan ? "Expression arg scan output dtype must be UINT32."
+                                              : "Expression scan currently requires output dtype to match input dtype.");
+        }
+        return default_output_dtype;
     }
 
     if (isCudnnReduceOp(node.op)) {

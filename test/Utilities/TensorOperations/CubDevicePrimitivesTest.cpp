@@ -1597,6 +1597,178 @@ TEST(CubDevicePrimitives, SegmentedExclusiveScanSupportsFp16AndBf16Values) {
         {1.0f, 2.0f, -0.5f, 3.0f, 4.0f}, {0U, 3U, 5U}, {0.0f, 1.0f, 3.0f, 0.0f, 3.0f}, 0.01f);
 }
 
+TEST(CubDevicePrimitives, DeviceScanSupportsReverseDirection) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor input = makeGpuVector<uint32_t>({1U, 2U, 3U, 4U}, stream);
+    Tensor inclusive_out(gpuPlacement, TensorDescriptor(DataType::UINT32, {4}));
+    Tensor exclusive_out(gpuPlacement, TensorDescriptor(DataType::UINT32, {4}));
+
+    const CubDeviceScanPlan inclusive_plan =
+        prepareCubDeviceScan(input, inclusive_out, 4, CubScanOp::Sum, CubScanMode::Inclusive, CubScanDirection::Reverse);
+    const CubDeviceScanPlan exclusive_plan =
+        prepareCubDeviceScan(input, exclusive_out, 4, CubScanOp::Sum, CubScanMode::Exclusive, CubScanDirection::Reverse);
+    Tensor temp = allocateCubTemporaryStorage(cubMaxTemporaryStoragePlan(
+        {cubTemporaryStoragePlan(gpuPlacement, inclusive_plan.temp_storage_bytes),
+         cubTemporaryStoragePlan(gpuPlacement, exclusive_plan.temp_storage_bytes)}));
+
+    cubDeviceScan(inclusive_plan, temp, input, inclusive_out, stream);
+    cubDeviceScan(exclusive_plan, temp, input, exclusive_out, stream);
+    stream.synchronize();
+
+    EXPECT_EQ(copyGpuVector<uint32_t>(inclusive_out, stream), (std::vector<uint32_t>{10U, 9U, 7U, 4U}));
+    EXPECT_EQ(copyGpuVector<uint32_t>(exclusive_out, stream), (std::vector<uint32_t>{9U, 7U, 4U, 0U}));
+}
+
+TEST(CubDevicePrimitives, SegmentedUniformScanSupportsReverseWithinSegmentDirection) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor input = makeGpuVector<uint32_t>({1U, 2U, 3U, 4U, 5U, 6U, 7U, 8U}, stream);
+    Tensor inclusive_out(gpuPlacement, TensorDescriptor(DataType::UINT32, {8}));
+    Tensor exclusive_out(gpuPlacement, TensorDescriptor(DataType::UINT32, {8}));
+
+    const CubDeviceSegmentedUniformScanPlan inclusive_plan = prepareCubDeviceSegmentedUniformScan(
+        input, inclusive_out, 8, 2, 4, CubScanOp::Sum, CubScanMode::Inclusive, CubScanDirection::Reverse);
+    const CubDeviceSegmentedUniformScanPlan exclusive_plan = prepareCubDeviceSegmentedUniformScan(
+        input, exclusive_out, 8, 2, 4, CubScanOp::Sum, CubScanMode::Exclusive, CubScanDirection::Reverse);
+    Tensor temp = allocateCubTemporaryStorage(cubMaxTemporaryStoragePlan(
+        {cubTemporaryStoragePlan(gpuPlacement, inclusive_plan.temp_storage_bytes),
+         cubTemporaryStoragePlan(gpuPlacement, exclusive_plan.temp_storage_bytes)}));
+
+    cubDeviceSegmentedUniformScan(inclusive_plan, temp, input, inclusive_out, stream);
+    cubDeviceSegmentedUniformScan(exclusive_plan, temp, input, exclusive_out, stream);
+    stream.synchronize();
+
+    EXPECT_EQ(copyGpuVector<uint32_t>(inclusive_out, stream),
+              (std::vector<uint32_t>{10U, 9U, 7U, 4U, 26U, 21U, 15U, 8U}));
+    EXPECT_EQ(copyGpuVector<uint32_t>(exclusive_out, stream),
+              (std::vector<uint32_t>{9U, 7U, 4U, 0U, 21U, 15U, 8U, 0U}));
+}
+
+TEST(CubDevicePrimitives, DeviceArgScanProducesFlattenedPrefixWinnerIndices) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor input = makeGpuVector<uint32_t>({3U, 1U, 4U, 1U}, stream);
+    Tensor min_out(gpuPlacement, TensorDescriptor(DataType::UINT32, {4}));
+    Tensor max_out(gpuPlacement, TensorDescriptor(DataType::UINT32, {4}));
+
+    const CubDeviceArgScanPlan min_plan =
+        prepareCubDeviceArgScan(input, min_out, 4, CubArgScanOp::ArgMin, CubScanMode::Inclusive);
+    const CubDeviceArgScanPlan max_plan =
+        prepareCubDeviceArgScan(input, max_out, 4, CubArgScanOp::ArgMax, CubScanMode::Inclusive);
+    Tensor temp = allocateCubTemporaryStorage(cubMaxTemporaryStoragePlan(
+        {cubTemporaryStoragePlan(gpuPlacement, min_plan.temp_storage_bytes),
+         cubTemporaryStoragePlan(gpuPlacement, max_plan.temp_storage_bytes)}));
+
+    cubDeviceArgScan(min_plan, temp, input, min_out, stream);
+    cubDeviceArgScan(max_plan, temp, input, max_out, stream);
+    stream.synchronize();
+
+    EXPECT_EQ(copyGpuVector<uint32_t>(min_out, stream), (std::vector<uint32_t>{0U, 1U, 1U, 1U}));
+    EXPECT_EQ(copyGpuVector<uint32_t>(max_out, stream), (std::vector<uint32_t>{0U, 0U, 2U, 2U}));
+}
+
+TEST(CubDevicePrimitives, SegmentedUniformArgScanSupportsReverseWithinSegmentDirection) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor input = makeGpuVector<uint32_t>({3U, 1U, 4U, 1U, 2U, 5U, 0U, 0U}, stream);
+    Tensor max_out(gpuPlacement, TensorDescriptor(DataType::UINT32, {8}));
+
+    const CubDeviceSegmentedUniformArgScanPlan max_plan = prepareCubDeviceSegmentedUniformArgScan(
+        input, max_out, 8, 2, 4, CubArgScanOp::ArgMax, CubScanMode::Inclusive, CubScanDirection::Reverse);
+    Tensor temp = allocateCubTemporaryStorage(cubTemporaryStoragePlan(gpuPlacement, max_plan.temp_storage_bytes));
+
+    cubDeviceSegmentedUniformArgScan(max_plan, temp, input, max_out, stream);
+    stream.synchronize();
+
+    EXPECT_EQ(copyGpuVector<uint32_t>(max_out, stream), (std::vector<uint32_t>{2U, 2U, 2U, 3U, 5U, 5U, 7U, 7U}));
+}
+
+TEST(CubDevicePrimitives, SegmentedArgScanUsesContiguousOffsets) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor input = makeGpuVector<uint32_t>({8U, 6U, 7U, 5U, 3U, 2U, 9U}, stream);
+    Tensor offsets = makeGpuVector<uint32_t>({0U, 2U, 5U, 7U}, stream);
+    Tensor min_out(gpuPlacement, TensorDescriptor(DataType::UINT32, {7}));
+    Tensor max_out(gpuPlacement, TensorDescriptor(DataType::UINT32, {7}));
+
+    const CubDeviceSegmentedArgScanPlan min_plan =
+        prepareCubDeviceSegmentedArgScan(input, min_out, offsets, 7, 3, CubArgScanOp::ArgMin, CubScanMode::Inclusive);
+    const CubDeviceSegmentedArgScanPlan max_plan =
+        prepareCubDeviceSegmentedArgScan(input, max_out, offsets, 7, 3, CubArgScanOp::ArgMax, CubScanMode::Inclusive);
+    Tensor temp = allocateCubTemporaryStorage(cubMaxTemporaryStoragePlan(
+        {cubTemporaryStoragePlan(gpuPlacement, min_plan.temp_storage_bytes),
+         cubTemporaryStoragePlan(gpuPlacement, max_plan.temp_storage_bytes)}));
+
+    cubDeviceSegmentedArgScan(min_plan, temp, input, min_out, offsets, stream);
+    cubDeviceSegmentedArgScan(max_plan, temp, input, max_out, offsets, stream);
+    stream.synchronize();
+
+    EXPECT_EQ(copyGpuVector<uint32_t>(min_out, stream), (std::vector<uint32_t>{0U, 1U, 2U, 3U, 4U, 5U, 5U}));
+    EXPECT_EQ(copyGpuVector<uint32_t>(max_out, stream), (std::vector<uint32_t>{0U, 0U, 2U, 2U, 2U, 5U, 6U}));
+}
+
+TEST(CubDevicePrimitives, SegmentedScanSupportsGenericOpsWithContiguousOffsets) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor input = makeGpuVector<uint32_t>({8U, 6U, 7U, 5U, 3U, 2U, 9U}, stream);
+    Tensor offsets = makeGpuVector<uint32_t>({0U, 2U, 5U, 7U}, stream);
+    Tensor min_out(gpuPlacement, TensorDescriptor(DataType::UINT32, {7}));
+    Tensor max_out(gpuPlacement, TensorDescriptor(DataType::UINT32, {7}));
+    Tensor product_out(gpuPlacement, TensorDescriptor(DataType::UINT32, {7}));
+
+    const CubDeviceSegmentedScanPlan min_plan =
+        prepareCubDeviceSegmentedScan(input, min_out, offsets, 7, 3, CubScanOp::Min, CubScanMode::Inclusive);
+    const CubDeviceSegmentedScanPlan max_plan =
+        prepareCubDeviceSegmentedScan(input, max_out, offsets, 7, 3, CubScanOp::Max, CubScanMode::Inclusive);
+    const CubDeviceSegmentedScanPlan product_plan =
+        prepareCubDeviceSegmentedScan(input, product_out, offsets, 7, 3, CubScanOp::Product, CubScanMode::Exclusive);
+    Tensor temp = allocateCubTemporaryStorage(cubMaxTemporaryStoragePlan(
+        {cubTemporaryStoragePlan(gpuPlacement, min_plan.temp_storage_bytes),
+         cubTemporaryStoragePlan(gpuPlacement, max_plan.temp_storage_bytes),
+         cubTemporaryStoragePlan(gpuPlacement, product_plan.temp_storage_bytes)}));
+
+    cubDeviceSegmentedScan(min_plan, temp, input, min_out, offsets, stream);
+    cubDeviceSegmentedScan(max_plan, temp, input, max_out, offsets, stream);
+    cubDeviceSegmentedScan(product_plan, temp, input, product_out, offsets, stream);
+    stream.synchronize();
+
+    EXPECT_EQ(copyGpuVector<uint32_t>(min_out, stream), (std::vector<uint32_t>{8U, 6U, 7U, 5U, 3U, 2U, 2U}));
+    EXPECT_EQ(copyGpuVector<uint32_t>(max_out, stream), (std::vector<uint32_t>{8U, 8U, 7U, 7U, 7U, 2U, 9U}));
+    EXPECT_EQ(copyGpuVector<uint32_t>(product_out, stream), (std::vector<uint32_t>{1U, 8U, 1U, 7U, 35U, 1U, 2U}));
+}
+
+TEST(CubDevicePrimitives, SegmentedScanSupportsRaggedReverseDirection) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor input = makeGpuVector<uint32_t>({1U, 2U, 3U, 4U, 5U, 6U, 7U}, stream);
+    Tensor offsets = makeGpuVector<uint32_t>({0U, 3U, 3U, 7U}, stream);
+    Tensor inclusive_out(gpuPlacement, TensorDescriptor(DataType::UINT32, {7}));
+    Tensor exclusive_out(gpuPlacement, TensorDescriptor(DataType::UINT32, {7}));
+
+    const CubDeviceSegmentedScanPlan inclusive_plan =
+        prepareCubDeviceSegmentedScan(input, inclusive_out, offsets, 7, 3, CubScanOp::Sum, CubScanMode::Inclusive, CubScanDirection::Reverse);
+    const CubDeviceSegmentedScanPlan exclusive_plan =
+        prepareCubDeviceSegmentedScan(input, exclusive_out, offsets, 7, 3, CubScanOp::Sum, CubScanMode::Exclusive, CubScanDirection::Reverse);
+    Tensor temp = allocateCubTemporaryStorage(cubMaxTemporaryStoragePlan(
+        {cubTemporaryStoragePlan(gpuPlacement, inclusive_plan.temp_storage_bytes),
+         cubTemporaryStoragePlan(gpuPlacement, exclusive_plan.temp_storage_bytes)}));
+
+    cubDeviceSegmentedScan(inclusive_plan, temp, input, inclusive_out, offsets, stream);
+    cubDeviceSegmentedScan(exclusive_plan, temp, input, exclusive_out, offsets, stream);
+    stream.synchronize();
+
+    EXPECT_EQ(copyGpuVector<uint32_t>(inclusive_out, stream), (std::vector<uint32_t>{6U, 5U, 3U, 22U, 18U, 13U, 7U}));
+    EXPECT_EQ(copyGpuVector<uint32_t>(exclusive_out, stream), (std::vector<uint32_t>{5U, 3U, 0U, 18U, 13U, 7U, 0U}));
+}
+
 TEST(CubDevicePrimitives, SegmentedReduceSumAndMaxUseContiguousOffsets) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
