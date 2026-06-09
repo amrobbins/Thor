@@ -1193,4 +1193,11 @@ void cubDeviceArgScan(const CubDeviceArgScanPlan& plan,
                       Tensor& output,
                       Stream& stream);
 
+void cubDeviceArgScanValuesFromIndices(const Tensor& input,
+                                       const Tensor& indices,
+                                       Tensor& values,
+                                       uint64_t num_items,
+                                       CubArgScanOp op,
+                                       Stream& stream);
+
 }  // namespace ThorImplementation

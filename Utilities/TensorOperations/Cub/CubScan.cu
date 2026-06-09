@@ -3,6 +3,7 @@
 #include "Utilities/Expression/CudaHelpers.h"
 
 #include <cub/cub.cuh>
+#include <math_constants.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/iterator/reverse_iterator.h>
 #include <thrust/iterator/transform_iterator.h>
@@ -108,25 +109,75 @@ T scanOne() {
     }
 }
 
+__host__ __device__ float scanPositiveInfinityFloat() {
+#if defined(__CUDA_ARCH__)
+    return __int_as_float(0x7f800000);
+#else
+    return std::numeric_limits<float>::infinity();
+#endif
+}
+
+__host__ __device__ float scanNegativeInfinityFloat() {
+#if defined(__CUDA_ARCH__)
+    return __int_as_float(0xff800000);
+#else
+    return -std::numeric_limits<float>::infinity();
+#endif
+}
+
+#if THOR_CUB_ENABLE_64BIT_TYPES
+__host__ __device__ double scanPositiveInfinityDouble() {
+#if defined(__CUDA_ARCH__)
+    return __longlong_as_double(0x7ff0000000000000ULL);
+#else
+    return std::numeric_limits<double>::infinity();
+#endif
+}
+
+__host__ __device__ double scanNegativeInfinityDouble() {
+#if defined(__CUDA_ARCH__)
+    return __longlong_as_double(0xfff0000000000000ULL);
+#else
+    return -std::numeric_limits<double>::infinity();
+#endif
+}
+#endif
+
 template <typename T>
-T scanPositiveInfinityOrMax() {
+__host__ __device__ T scanPositiveInfinityOrMax() {
+    // These helpers are called from device code, and CUDA 13.3 rejects
+    // std::numeric_limits::* from the device side of __host__ __device__
+    // functions unless the build enables --expt-relaxed-constexpr. Use CUDA
+    // intrinsics only in device compilation and keep the host path normal.
     if constexpr (std::is_same_v<T, __half> || std::is_same_v<T, __nv_bfloat16>) {
-        return scanFromFloat<T>(std::numeric_limits<float>::infinity());
-    } else if constexpr (std::is_floating_point_v<T>) {
-        return std::numeric_limits<T>::infinity();
+        return scanFromFloat<T>(scanPositiveInfinityFloat());
+    } else if constexpr (std::is_same_v<T, float>) {
+        return scanPositiveInfinityFloat();
+#if THOR_CUB_ENABLE_64BIT_TYPES
+    } else if constexpr (std::is_same_v<T, double>) {
+        return scanPositiveInfinityDouble();
+#endif
+    } else if constexpr (std::is_unsigned_v<T>) {
+        return ~T{0};
     } else {
-        return std::numeric_limits<T>::max();
+        static_assert(std::is_unsigned_v<T>, "Unsupported scan identity dtype.");
     }
 }
 
 template <typename T>
-T scanNegativeInfinityOrLowest() {
+__host__ __device__ T scanNegativeInfinityOrLowest() {
     if constexpr (std::is_same_v<T, __half> || std::is_same_v<T, __nv_bfloat16>) {
-        return scanFromFloat<T>(-std::numeric_limits<float>::infinity());
-    } else if constexpr (std::is_floating_point_v<T>) {
-        return -std::numeric_limits<T>::infinity();
+        return scanFromFloat<T>(scanNegativeInfinityFloat());
+    } else if constexpr (std::is_same_v<T, float>) {
+        return scanNegativeInfinityFloat();
+#if THOR_CUB_ENABLE_64BIT_TYPES
+    } else if constexpr (std::is_same_v<T, double>) {
+        return scanNegativeInfinityDouble();
+#endif
+    } else if constexpr (std::is_unsigned_v<T>) {
+        return T{0};
     } else {
-        return std::numeric_limits<T>::lowest();
+        static_assert(std::is_unsigned_v<T>, "Unsupported scan identity dtype.");
     }
 }
 
@@ -630,6 +681,62 @@ void cubDeviceArgScan(const CubDeviceArgScanPlan& plan,
     };
 
     dispatchScanDType(plan.dtype, launch);
+}
+
+
+template <typename T>
+__global__ void gatherArgScanValuesFromIndicesKernel(const T* input,
+                                                     const uint32_t* indices,
+                                                     T* values,
+                                                     uint32_t num_items,
+                                                     CubArgScanOp op) {
+    const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= num_items) {
+        return;
+    }
+    const uint32_t source = indices[i];
+    if (source == UINT32_MAX) {
+        values[i] = op == CubArgScanOp::ArgMin ? scanPositiveInfinityOrMax<T>() : scanNegativeInfinityOrLowest<T>();
+    } else {
+        values[i] = input[source];
+    }
+}
+
+void cubDeviceArgScanValuesFromIndices(const Tensor& input,
+                                       const Tensor& indices,
+                                       Tensor& values,
+                                       uint64_t num_items,
+                                       CubArgScanOp op,
+                                       Stream& stream) {
+    requireDenseContiguousGpuTensor(input, "arg scan value input");
+    requireDenseContiguousGpuTensor(indices, "arg scan index output");
+    requireDenseContiguousGpuTensor(values, "arg scan value output");
+    requireSameGpuPlacement(input, indices, "arg scan value input", "arg scan index output");
+    requireSameGpuPlacement(input, values, "arg scan value input", "arg scan value output");
+    requireStorageForNumItems(input, "arg scan value input", num_items);
+    requireStorageForNumItems(indices, "arg scan index output", num_items);
+    requireStorageForNumItems(values, "arg scan value output", num_items);
+    if (indices.getDataType() != DataType::UINT32) {
+        throw std::invalid_argument("CUB arg scan indices must be UINT32.");
+    }
+    if (input.getDataType() != values.getDataType()) {
+        throw std::invalid_argument("CUB arg scan value output dtype must match input dtype.");
+    }
+    if (!isCubScanDTypeSupported(input.getDataType())) {
+        throw std::invalid_argument("Unsupported CUB arg scan value dtype " + dtypeName(input.getDataType()) + ".");
+    }
+    if (num_items == 0) {
+        return;
+    }
+    const uint32_t cub_items = static_cast<uint32_t>(checkedCubNumItems(num_items));
+    const uint32_t threads = 256;
+    const uint32_t blocks = (cub_items + threads - 1U) / threads;
+    auto launch = [&]<typename T>() -> void {
+        gatherArgScanValuesFromIndicesKernel<T><<<blocks, threads, 0, stream.getStream()>>>(
+            input.getMemPtr<T>(), indices.getMemPtr<uint32_t>(), values.getMemPtr<T>(), cub_items, op);
+    };
+    dispatchScanDType(input.getDataType(), launch);
+    CUDA_CHECK(cudaGetLastError());
 }
 
 }  // namespace ThorImplementation

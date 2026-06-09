@@ -527,18 +527,22 @@ class StampedScan {
     uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
 
     Tensor getOutputTensor() const { return output; }
+    Tensor getValueOutputTensor() const { return value_output; }
 
     StampedScan(std::shared_ptr<CompiledScan> compiled,
                 const Tensor& input,
                 const Tensor& output,
                 const Stream& stream,
-                std::optional<Tensor> segment_offsets = std::nullopt);
+                std::optional<Tensor> segment_offsets = std::nullopt,
+                std::optional<Tensor> value_output = std::nullopt);
 
    private:
     const std::shared_ptr<CompiledScan> compiled_scan;
     const Tensor input;
     mutable Tensor output;
+    mutable Tensor value_output;
     const std::optional<Tensor> segment_offsets;
+    bool has_value_output = false;
     Tensor temp_storage;
     Stream stream;
     bool uniform_segmented = false;

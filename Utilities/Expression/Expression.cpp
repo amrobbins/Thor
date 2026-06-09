@@ -3371,12 +3371,160 @@ Expression Expression::scanArgMin(int64_t axis) const { return scan(*this, ScanO
 
 Expression Expression::scanArgMax(int64_t axis) const { return scan(*this, ScanOp::ArgMax, ScanMode::Inclusive, axis); }
 
+std::pair<Expression, Expression> Expression::scanMinWithIndices(int64_t axis, ScanMode mode) const {
+    if (!expr) {
+        throw std::runtime_error("Cannot apply scanMinWithIndices to an empty expression");
+    }
+    if (axis < -1) {
+        throw std::invalid_argument("Expression::scanMinWithIndices currently supports only axis=-1 or an explicit non-negative final axis.");
+    }
+    validateScanAttributes(ScanOp::Min, mode, "Expression::scanMinWithIndices");
+
+    auto out = std::make_shared<PhysicalExpression>();
+    out->inputs = expr->inputs;
+    std::unordered_map<uint32_t, uint32_t> oldToNew;
+    const uint32_t new_input_idx = cloneSubtree(*expr, nodeIndex, *out, oldToNew);
+    const uint64_t normalized_axis = static_cast<uint64_t>(axis < 0 ? UINT64_MAX : axis);
+
+    ExprNode value_node{};
+    value_node.op = ExprOp::SCAN;
+    value_node.lhs = new_input_idx;
+    value_node.scan_op = ScanOp::Min;
+    value_node.scan_mode = mode;
+    value_node.scan_axis = normalized_axis;
+    const uint32_t value_idx = static_cast<uint32_t>(out->nodes.size());
+    out->nodes.push_back(std::move(value_node));
+
+    ExprNode index_node{};
+    index_node.op = ExprOp::SCAN;
+    index_node.lhs = new_input_idx;
+    index_node.scan_op = ScanOp::ArgMin;
+    index_node.scan_mode = mode;
+    index_node.scan_axis = normalized_axis;
+    const uint32_t index_idx = static_cast<uint32_t>(out->nodes.size());
+    out->nodes.push_back(std::move(index_node));
+
+    out->output_node = value_idx;
+    return {Expression(out, value_idx), Expression(out, index_idx)};
+}
+
+std::pair<Expression, Expression> Expression::scanMaxWithIndices(int64_t axis, ScanMode mode) const {
+    if (!expr) {
+        throw std::runtime_error("Cannot apply scanMaxWithIndices to an empty expression");
+    }
+    if (axis < -1) {
+        throw std::invalid_argument("Expression::scanMaxWithIndices currently supports only axis=-1 or an explicit non-negative final axis.");
+    }
+    validateScanAttributes(ScanOp::Max, mode, "Expression::scanMaxWithIndices");
+
+    auto out = std::make_shared<PhysicalExpression>();
+    out->inputs = expr->inputs;
+    std::unordered_map<uint32_t, uint32_t> oldToNew;
+    const uint32_t new_input_idx = cloneSubtree(*expr, nodeIndex, *out, oldToNew);
+    const uint64_t normalized_axis = static_cast<uint64_t>(axis < 0 ? UINT64_MAX : axis);
+
+    ExprNode value_node{};
+    value_node.op = ExprOp::SCAN;
+    value_node.lhs = new_input_idx;
+    value_node.scan_op = ScanOp::Max;
+    value_node.scan_mode = mode;
+    value_node.scan_axis = normalized_axis;
+    const uint32_t value_idx = static_cast<uint32_t>(out->nodes.size());
+    out->nodes.push_back(std::move(value_node));
+
+    ExprNode index_node{};
+    index_node.op = ExprOp::SCAN;
+    index_node.lhs = new_input_idx;
+    index_node.scan_op = ScanOp::ArgMax;
+    index_node.scan_mode = mode;
+    index_node.scan_axis = normalized_axis;
+    const uint32_t index_idx = static_cast<uint32_t>(out->nodes.size());
+    out->nodes.push_back(std::move(index_node));
+
+    out->output_node = value_idx;
+    return {Expression(out, value_idx), Expression(out, index_idx)};
+}
+
 Expression Expression::segmentedScanArgMin(const Expression& offsets) const {
     return segmentedScan(*this, offsets, ScanOp::ArgMin, ScanMode::Inclusive);
 }
 
 Expression Expression::segmentedScanArgMax(const Expression& offsets) const {
     return segmentedScan(*this, offsets, ScanOp::ArgMax, ScanMode::Inclusive);
+}
+
+std::pair<Expression, Expression> Expression::segmentedScanMinWithIndices(const Expression& offsets, ScanMode mode) const {
+    if (!expr || !offsets.expr) {
+        throw std::runtime_error("Cannot apply segmentedScanMinWithIndices to an empty expression");
+    }
+    validateScanAttributes(ScanOp::Min, mode, "Expression::segmentedScanMinWithIndices");
+
+    auto out = std::make_shared<PhysicalExpression>();
+    std::unordered_map<std::string, uint32_t> dst_input_slots_by_name;
+    std::unordered_map<uint32_t, uint32_t> input_old_to_new;
+    std::unordered_map<uint32_t, uint32_t> offsets_old_to_new;
+    const uint32_t new_input_idx = cloneSubtreeWithMergedInputs(*expr, nodeIndex, *out, input_old_to_new, dst_input_slots_by_name);
+    const uint32_t new_offsets_idx = cloneSubtreeWithMergedInputs(*offsets.expr, offsets.nodeIndex, *out, offsets_old_to_new, dst_input_slots_by_name);
+
+    ExprNode value_node{};
+    value_node.op = ExprOp::SEGMENTED_SCAN;
+    value_node.lhs = new_input_idx;
+    value_node.rhs = new_offsets_idx;
+    value_node.scan_op = ScanOp::Min;
+    value_node.scan_mode = mode;
+    value_node.scan_axis = UINT64_MAX;
+    const uint32_t value_idx = static_cast<uint32_t>(out->nodes.size());
+    out->nodes.push_back(std::move(value_node));
+
+    ExprNode index_node{};
+    index_node.op = ExprOp::SEGMENTED_SCAN;
+    index_node.lhs = new_input_idx;
+    index_node.rhs = new_offsets_idx;
+    index_node.scan_op = ScanOp::ArgMin;
+    index_node.scan_mode = mode;
+    index_node.scan_axis = UINT64_MAX;
+    const uint32_t index_idx = static_cast<uint32_t>(out->nodes.size());
+    out->nodes.push_back(std::move(index_node));
+
+    out->output_node = value_idx;
+    return {Expression(out, value_idx), Expression(out, index_idx)};
+}
+
+std::pair<Expression, Expression> Expression::segmentedScanMaxWithIndices(const Expression& offsets, ScanMode mode) const {
+    if (!expr || !offsets.expr) {
+        throw std::runtime_error("Cannot apply segmentedScanMaxWithIndices to an empty expression");
+    }
+    validateScanAttributes(ScanOp::Max, mode, "Expression::segmentedScanMaxWithIndices");
+
+    auto out = std::make_shared<PhysicalExpression>();
+    std::unordered_map<std::string, uint32_t> dst_input_slots_by_name;
+    std::unordered_map<uint32_t, uint32_t> input_old_to_new;
+    std::unordered_map<uint32_t, uint32_t> offsets_old_to_new;
+    const uint32_t new_input_idx = cloneSubtreeWithMergedInputs(*expr, nodeIndex, *out, input_old_to_new, dst_input_slots_by_name);
+    const uint32_t new_offsets_idx = cloneSubtreeWithMergedInputs(*offsets.expr, offsets.nodeIndex, *out, offsets_old_to_new, dst_input_slots_by_name);
+
+    ExprNode value_node{};
+    value_node.op = ExprOp::SEGMENTED_SCAN;
+    value_node.lhs = new_input_idx;
+    value_node.rhs = new_offsets_idx;
+    value_node.scan_op = ScanOp::Max;
+    value_node.scan_mode = mode;
+    value_node.scan_axis = UINT64_MAX;
+    const uint32_t value_idx = static_cast<uint32_t>(out->nodes.size());
+    out->nodes.push_back(std::move(value_node));
+
+    ExprNode index_node{};
+    index_node.op = ExprOp::SEGMENTED_SCAN;
+    index_node.lhs = new_input_idx;
+    index_node.rhs = new_offsets_idx;
+    index_node.scan_op = ScanOp::ArgMax;
+    index_node.scan_mode = mode;
+    index_node.scan_axis = UINT64_MAX;
+    const uint32_t index_idx = static_cast<uint32_t>(out->nodes.size());
+    out->nodes.push_back(std::move(index_node));
+
+    out->output_node = value_idx;
+    return {Expression(out, value_idx), Expression(out, index_idx)};
 }
 
 Expression Expression::pow(const Expression& exponent) const { return binaryOp(*this, exponent, ExprOp::POW); }
@@ -4455,6 +4603,7 @@ Outputs Expression::outputs(const std::vector<std::pair<std::string, Expression>
 
     std::unordered_set<std::string> seen_names;
     std::unordered_map<std::string, uint32_t> mergedInputSlotsByName;
+    std::unordered_map<const PhysicalExpression*, std::unordered_map<uint32_t, uint32_t>> oldToNewBySourceExpression;
 
     for (const auto& [name, expr] : named_exprs) {
         if (name.empty()) {
@@ -4477,7 +4626,7 @@ Outputs Expression::outputs(const std::vector<std::pair<std::string, Expression>
             throw std::runtime_error("Output expression node index is out of range.");
         }
 
-        std::unordered_map<uint32_t, uint32_t> oldToNew;
+        auto& oldToNew = oldToNewBySourceExpression[expr.expr.get()];
         uint32_t mergedRoot = cloneSubtreeWithMergedInputs(*expr.expr, expr.nodeIndex, *merged, oldToNew, mergedInputSlotsByName);
 
         outputs.push_back(NamedOutput{
