@@ -60,6 +60,8 @@ static bool isLogicalOp(ExprOp op) { return op == ExprOp::LOGICAL_AND || op == E
 
 static bool isWhereOp(ExprOp op) { return op == ExprOp::WHERE; }
 
+static bool isScanOp(ExprOp op) { return op == ExprOp::SCAN; }
+
 static bool isBooleanOutputOp(ExprOp op) { return isComparisonOp(op) || isLogicalOp(op); }
 
 static bool isCudnnSingleInputStageOp(ExprOp op) { return isCudnnReduceOp(op) || isCudnnSoftmaxOp(op); }
@@ -83,6 +85,20 @@ DataType toSupportedComputeDType(ExprOp op, DataType requested_compute_dtype) {
             return toSupportedComputeDType(ExprOp::ADD, requested_compute_dtype);
         }
         throw std::runtime_error("Unsupported boolean/comparison/where dtype in toSupportedComputeDType.");
+    }
+
+    if (isScanOp(op)) {
+        switch (requested_compute_dtype) {
+            case DataType::UINT32:
+            case DataType::UINT64:
+            case DataType::FP16:
+            case DataType::BF16:
+            case DataType::FP32:
+            case DataType::FP64:
+                return requested_compute_dtype;
+            default:
+                throw std::runtime_error("Unsupported scan dtype in toSupportedComputeDType.");
+        }
     }
 
     if (!isSupportedFusionFloatingType(requested_compute_dtype)) {
@@ -450,6 +466,17 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
         return node.output_dtype.has_value() ? node.output_dtype.value() : input_dtype;
     }
 
+    if (node.op == ExprOp::SCAN) {
+        if (node.lhs >= resolved_output_dtypes.size()) {
+            throw std::runtime_error("Scan node has input index out of range in resolveNodeOutputDType.");
+        }
+        const DataType input_dtype = resolved_output_dtypes[node.lhs];
+        if (node.output_dtype.has_value() && node.output_dtype.value() != input_dtype) {
+            throw std::runtime_error("Expression scan currently requires output dtype to match input dtype.");
+        }
+        return input_dtype;
+    }
+
     if (isCudnnReduceOp(node.op)) {
         if (node.op == ExprOp::REDUCE_ARGMIN || node.op == ExprOp::REDUCE_ARGMAX)
             return DataType::UINT32;
@@ -723,6 +750,8 @@ static void resolveExpressionDTypesInPlace(PhysicalExpression& expr,
             requested_compute_dtype = node.compute_dtype.has_value() ? node.compute_dtype.value() : logical_input_dtype;
         } else if (isWhereOp(node.op)) {
             requested_compute_dtype = node.compute_dtype.has_value() ? node.compute_dtype.value() : logical_input_dtype;
+        } else if (isScanOp(node.op)) {
+            requested_compute_dtype = node.compute_dtype.has_value() ? node.compute_dtype.value() : output_dtype;
         } else {
             requested_compute_dtype =
                 node.compute_dtype.has_value() ? node.compute_dtype.value() : defaultComputeDType(logical_input_dtype, output_dtype);

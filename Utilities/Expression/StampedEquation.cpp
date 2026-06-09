@@ -31,6 +31,45 @@ constexpr int64_t CUDNN_FRONTEND_CONV_X_UID = 7'100'001;
 constexpr int64_t CUDNN_FRONTEND_CONV_W_UID = 7'100'002;
 constexpr int64_t CUDNN_FRONTEND_CONV_Y_UID = 7'100'003;
 
+static uint64_t checkedFinalScanAxis(const std::vector<uint64_t>& dims, uint64_t encoded_axis) {
+    if (dims.empty()) {
+        throw std::runtime_error("Expression scan requires rank >= 1.");
+    }
+    const uint64_t final_axis = static_cast<uint64_t>(dims.size() - 1);
+    const uint64_t axis = (encoded_axis == UINT64_MAX) ? final_axis : encoded_axis;
+    if (axis >= dims.size()) {
+        throw std::runtime_error("Expression scan axis is out of range for input rank.");
+    }
+    if (axis != final_axis) {
+        throw std::runtime_error("Expression scan currently supports only the final contiguous axis.");
+    }
+    return axis;
+}
+
+static CubScanOp toCubScanOp(ScanOp op) {
+    switch (op) {
+        case ScanOp::Sum:
+            return CubScanOp::Sum;
+        case ScanOp::Min:
+            return CubScanOp::Min;
+        case ScanOp::Max:
+            return CubScanOp::Max;
+        case ScanOp::Product:
+            return CubScanOp::Product;
+    }
+    throw std::runtime_error("Unsupported Expression scan op.");
+}
+
+static CubScanMode toCubScanMode(ScanMode mode) {
+    switch (mode) {
+        case ScanMode::Exclusive:
+            return CubScanMode::Exclusive;
+        case ScanMode::Inclusive:
+            return CubScanMode::Inclusive;
+    }
+    throw std::runtime_error("Unsupported Expression scan mode.");
+}
+
 static int64_t checkedDim(const std::vector<uint64_t>& dims, size_t idx, const char* tensor_name) {
     if (idx >= dims.size()) {
         throw std::runtime_error(std::string("Attention tensor '") + tensor_name + "' must have rank 4.");
@@ -999,6 +1038,56 @@ void StampedArgMinMax::runOn(Stream& run_stream) const {
                                   beta,
                                   built_reduction->c_desc,
                                   (void*)reduction_value_output.getMemPtr()));
+}
+
+StampedScan::StampedScan(std::shared_ptr<CompiledScan> compiled, const Tensor& input, const Tensor& output, const Stream& stream)
+    : compiled_scan(std::move(compiled)), input(input), output(output), stream(stream) {
+    if (!compiled_scan) {
+        throw std::runtime_error("StampedScan requires a compiled scan descriptor.");
+    }
+    if (input.getDataType() != compiled_scan->input_dtype || output.getDataType() != compiled_scan->output_dtype) {
+        throw std::runtime_error("StampedScan tensor dtypes do not match the compiled scan descriptor.");
+    }
+    if (input.getDataType() != output.getDataType()) {
+        throw std::runtime_error("Expression scan currently requires input and output dtypes to match.");
+    }
+    if (input.getPlacement() != output.getPlacement()) {
+        throw std::runtime_error("Expression scan input and output must be on the same GPU placement.");
+    }
+    if (input.getDimensions() != output.getDimensions()) {
+        throw std::runtime_error("Expression scan output shape must match input shape.");
+    }
+
+    const std::vector<uint64_t> dims = input.getDimensions();
+    checkedFinalScanAxis(dims, compiled_scan->axis);
+    const uint64_t num_items = input.getTotalNumElements();
+    const uint64_t segment_size = dims.empty() ? 0 : dims.back();
+    const uint64_t num_segments = (segment_size == 0) ? 0 : num_items / segment_size;
+    segmented = num_segments > 1;
+
+    const CubScanOp cub_op = toCubScanOp(compiled_scan->op);
+    const CubScanMode cub_mode = toCubScanMode(compiled_scan->mode);
+
+    size_t temp_storage_bytes = 1;
+    if (segmented) {
+        segmented_scan_plan = prepareCubDeviceSegmentedUniformScan(input, output, num_items, num_segments, segment_size, cub_op, cub_mode);
+        temp_storage_bytes = segmented_scan_plan.temp_storage_bytes;
+    } else {
+        scan_plan = prepareCubDeviceScan(input, output, num_items, cub_op, cub_mode);
+        temp_storage_bytes = scan_plan.temp_storage_bytes;
+    }
+
+    temp_storage = Tensor(input.getPlacement(), TensorDescriptor(DataType::UINT8, {std::max<size_t>(temp_storage_bytes, 1)}));
+}
+
+void StampedScan::run() { runOn(stream); }
+
+void StampedScan::runOn(Stream& run_stream) const {
+    if (segmented) {
+        cubDeviceSegmentedUniformScan(segmented_scan_plan, temp_storage, input, output, run_stream);
+    } else {
+        cubDeviceScan(scan_plan, temp_storage, input, output, run_stream);
+    }
 }
 
 StampedSoftmax::StampedSoftmax(std::shared_ptr<CompiledSoftmax> compiled,
