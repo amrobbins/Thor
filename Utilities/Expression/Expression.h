@@ -47,6 +47,7 @@ enum class ExprOp : uint16_t {
     LOGICAL_AND,
     LOGICAL_OR,
     LOGICAL_NOT,
+    CAST,
     WHERE,
     NEG,
     ABS,
@@ -116,6 +117,10 @@ enum class ExprOp : uint16_t {
     REDUCE_ARGMAX,
     REDUCE_MIN_BACKWARD,
     REDUCE_MAX_BACKWARD,
+    SCAN_MIN_BACKWARD,
+    SCAN_MAX_BACKWARD,
+    SEGMENTED_SCAN_MIN_BACKWARD,
+    SEGMENTED_SCAN_MAX_BACKWARD,
     REDUCE_AVG,
     REDUCE_NORM1,
     REDUCE_NORM2,
@@ -538,6 +543,7 @@ class Expression {
     [[nodiscard]] Expression logicalAnd(const Expression& other) const;
     [[nodiscard]] Expression logicalOr(const Expression& other) const;
     [[nodiscard]] Expression logicalNot() const;
+    [[nodiscard]] Expression cast(DataType output_dtype) const;
     [[nodiscard]] Expression select(const Expression& true_value, const Expression& false_value) const;
 
     [[nodiscard]] static Expression equal(const Expression& lhs, const Expression& rhs);
@@ -549,6 +555,7 @@ class Expression {
     [[nodiscard]] static Expression logicalAnd(const Expression& lhs, const Expression& rhs);
     [[nodiscard]] static Expression logicalOr(const Expression& lhs, const Expression& rhs);
     [[nodiscard]] static Expression logicalNot(const Expression& input);
+    [[nodiscard]] static Expression cast(const Expression& input, DataType output_dtype) { return input.cast(output_dtype); }
     [[nodiscard]] static Expression where(const Expression& condition, const Expression& true_value, const Expression& false_value);
     [[nodiscard]] static Expression select(const Expression& condition, const Expression& true_value, const Expression& false_value);
 
@@ -622,35 +629,33 @@ class Expression {
     [[nodiscard]] Expression transpose() const;
     [[nodiscard]] Expression takeAlongAxis(const Expression& indices, int64_t axis = -1) const;
     [[nodiscard]] static Expression takeAlongAxis(const Expression& input, const Expression& indices, int64_t axis = -1);
-    [[nodiscard]] Expression scan(ScanOp op = ScanOp::Sum, ScanMode mode = ScanMode::Exclusive, int64_t axis = -1) const;
+    [[nodiscard]] Expression scan(ScanOp op = ScanOp::Sum, int64_t axis = -1, bool inclusive = true) const;
     [[nodiscard]] static Expression scan(const Expression& input,
                                          ScanOp op = ScanOp::Sum,
-                                         ScanMode mode = ScanMode::Exclusive,
-                                         int64_t axis = -1);
-    [[nodiscard]] Expression exclusiveScanSum(int64_t axis = -1) const { return scan(ScanOp::Sum, ScanMode::Exclusive, axis); }
-    [[nodiscard]] Expression inclusiveScanSum(int64_t axis = -1) const { return scan(ScanOp::Sum, ScanMode::Inclusive, axis); }
+                                         int64_t axis = -1,
+                                         bool inclusive = true);
+    [[nodiscard]] Expression exclusiveScanSum(int64_t axis = -1) const { return scan(ScanOp::Sum, axis, false); }
+    [[nodiscard]] Expression inclusiveScanSum(int64_t axis = -1) const { return scan(ScanOp::Sum, axis, true); }
+    [[nodiscard]] Expression prefixCount(bool inclusive = true, int64_t axis = -1) const;
     [[nodiscard]] Expression segmentedScan(const Expression& offsets,
                                            ScanOp op = ScanOp::Sum,
-                                           ScanMode mode = ScanMode::Exclusive) const;
+                                           bool inclusive = true) const;
     [[nodiscard]] static Expression segmentedScan(const Expression& input,
                                                   const Expression& offsets,
                                                   ScanOp op = ScanOp::Sum,
-                                                  ScanMode mode = ScanMode::Exclusive);
-    [[nodiscard]] Expression scanArgMin(int64_t axis = -1) const;
-    [[nodiscard]] Expression scanArgMax(int64_t axis = -1) const;
-    [[nodiscard]] std::pair<Expression, Expression> scanMinWithIndices(int64_t axis = -1, ScanMode mode = ScanMode::Inclusive) const;
-    [[nodiscard]] std::pair<Expression, Expression> scanMaxWithIndices(int64_t axis = -1, ScanMode mode = ScanMode::Inclusive) const;
-    [[nodiscard]] Expression segmentedScanArgMin(const Expression& offsets) const;
-    [[nodiscard]] Expression segmentedScanArgMax(const Expression& offsets) const;
-    [[nodiscard]] std::pair<Expression, Expression> segmentedScanMinWithIndices(const Expression& offsets,
-                                                                                ScanMode mode = ScanMode::Inclusive) const;
-    [[nodiscard]] std::pair<Expression, Expression> segmentedScanMaxWithIndices(const Expression& offsets,
-                                                                                ScanMode mode = ScanMode::Inclusive) const;
+                                                  bool inclusive = true);
+    [[nodiscard]] std::pair<Expression, Expression> scanWithIndices(ScanOp op, int64_t axis = -1, bool inclusive = true) const;
+    [[nodiscard]] std::pair<Expression, Expression> segmentedScanWithIndices(const Expression& offsets,
+                                                                             ScanOp op,
+                                                                             bool inclusive = true) const;
     [[nodiscard]] static Expression exclusiveScanSum(const Expression& input, int64_t axis = -1) {
-        return scan(input, ScanOp::Sum, ScanMode::Exclusive, axis);
+        return scan(input, ScanOp::Sum, axis, false);
     }
     [[nodiscard]] static Expression inclusiveScanSum(const Expression& input, int64_t axis = -1) {
-        return scan(input, ScanOp::Sum, ScanMode::Inclusive, axis);
+        return scan(input, ScanOp::Sum, axis, true);
+    }
+    [[nodiscard]] static Expression prefixCount(const Expression& mask, bool inclusive = true, int64_t axis = -1) {
+        return mask.prefixCount(inclusive, axis);
     }
     [[nodiscard]] Expression pow(const Expression& exponent) const;
 

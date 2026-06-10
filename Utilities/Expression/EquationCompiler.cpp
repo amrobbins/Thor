@@ -588,6 +588,10 @@ static bool isConvolutionBackwardOp(ExprOp op) {
 }
 static bool isConvolutionOp(ExprOp op) { return isConvolutionForwardOp(op) || isConvolutionBackwardOp(op); }
 static bool isReduceMinMaxBackwardOp(ExprOp op) { return op == ExprOp::REDUCE_MIN_BACKWARD || op == ExprOp::REDUCE_MAX_BACKWARD; }
+static bool isScanMinMaxBackwardOp(ExprOp op) {
+    return op == ExprOp::SCAN_MIN_BACKWARD || op == ExprOp::SCAN_MAX_BACKWARD ||
+           op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD || op == ExprOp::SEGMENTED_SCAN_MAX_BACKWARD;
+}
 static bool isSoftmaxOp(ExprOp op) { return op == ExprOp::SOFTMAX; }
 static bool isScanOp(ExprOp op) { return op == ExprOp::SCAN || op == ExprOp::SEGMENTED_SCAN; }
 static bool isRmsNormOp(ExprOp op) { return op == ExprOp::RMSNORM; }
@@ -607,7 +611,7 @@ static bool isTransposeOp(ExprOp op) { return op == ExprOp::TRANSPOSE; }
 
 static bool isStageBoundaryOp(ExprOp op) {
     return isCudnnReduceOp(op) || isSoftmaxOp(op) || isScanOp(op) || isRmsNormOp(op) || isMatmulOp(op) || isAttentionOp(op) ||
-           isAttentionBackwardOp(op) || isConvolutionOp(op) || isReduceMinMaxBackwardOp(op) || isEmbeddingLookupOp(op) ||
+           isAttentionBackwardOp(op) || isConvolutionOp(op) || isReduceMinMaxBackwardOp(op) || isScanMinMaxBackwardOp(op) || isEmbeddingLookupOp(op) ||
            op == ExprOp::STRIDED_VIEW || op == ExprOp::CUDA_KERNEL_OUTPUT;
 }
 
@@ -789,6 +793,8 @@ static const char* fusedOpTag(ExprOp op) {
             return "LOR";
         case ExprOp::LOGICAL_NOT:
             return "LNOT";
+        case ExprOp::CAST:
+            return "CAST";
         case ExprOp::WHERE:
             return "WHERE";
         case ExprOp::NEG:
@@ -913,6 +919,14 @@ static const char* fusedOpTag(ExprOp op) {
             return "RMIN_BW";
         case ExprOp::REDUCE_MAX_BACKWARD:
             return "RMAX_BW";
+        case ExprOp::SCAN_MIN_BACKWARD:
+            return "SCAN_MIN_BW";
+        case ExprOp::SCAN_MAX_BACKWARD:
+            return "SCAN_MAX_BW";
+        case ExprOp::SEGMENTED_SCAN_MIN_BACKWARD:
+            return "SEG_SCAN_MIN_BW";
+        case ExprOp::SEGMENTED_SCAN_MAX_BACKWARD:
+            return "SEG_SCAN_MAX_BW";
         case ExprOp::REDUCE_AVG:
             return "RAVG";
         case ExprOp::REDUCE_NORM1:
@@ -1090,6 +1104,15 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
             const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
             s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",rhs=" + rhs + ",axes=" + uintVecSignature(node.reduction_axes) +
                 ",squeeze=" + uintVecSignature(node.squeeze_axes) + ")";
+        } else if (isScanMinMaxBackwardOp(node.op)) {
+            const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
+            s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",grad=" + rhs;
+            if (node.op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD || node.op == ExprOp::SEGMENTED_SCAN_MAX_BACKWARD) {
+                s += ",offsets=" + fusedRegionSignatureRec(expr, node.aux);
+            }
+            s += ",mode=" + std::to_string(static_cast<int>(node.scan_mode)) +
+                 ",axis=" + std::to_string(node.scan_axis) +
+                 ",reverse=" + std::to_string(node.scan_reverse ? 1 : 0) + ")";
         } else if (isSoftmaxOp(node.op)) {
             s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs +
                 ",algorithm=" + std::to_string(static_cast<int>(node.softmax_algorithm)) +
@@ -2591,6 +2614,76 @@ shared_ptr<CompiledReduceMinMaxBackward> EquationCompiler::compileReduceMinMaxBa
                                                      node.output_dtype.value(),
                                                      node.compute_dtype);
 }
+
+
+shared_ptr<CompiledScanMinMaxBackward> EquationCompiler::compileScanMinMaxBackward(const PhysicalExpression& expr) {
+    if (expr.output_node >= expr.nodes.size()) {
+        throw std::runtime_error("ScanMinMaxBackward stage output_node is out of range.");
+    }
+
+    const ExprNode& node = expr.nodes[expr.output_node];
+    if (!isScanMinMaxBackwardOp(node.op)) {
+        throw std::runtime_error("ScanMinMaxBackward stage output node is not a supported scan min/max backward op.");
+    }
+
+    const bool segmented = node.op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD || node.op == ExprOp::SEGMENTED_SCAN_MAX_BACKWARD;
+    const uint32_t expected_inputs = segmented ? 3 : 2;
+    if (expr.numInputs() != expected_inputs) {
+        throw std::runtime_error("ScanMinMaxBackward stage has an unexpected number of inputs.");
+    }
+    if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || node.lhs >= expr.nodes.size() || node.rhs >= expr.nodes.size()) {
+        throw std::runtime_error("ScanMinMaxBackward node is missing input or grad input.");
+    }
+    if (segmented && (node.aux == UINT32_MAX || node.aux >= expr.nodes.size())) {
+        throw std::runtime_error("Segmented ScanMinMaxBackward node is missing offsets input.");
+    }
+
+    const ExprNode& input_node = expr.nodes[node.lhs];
+    const ExprNode& grad_node = expr.nodes[node.rhs];
+    if (input_node.op != ExprOp::INPUT || grad_node.op != ExprOp::INPUT) {
+        throw std::runtime_error("ScanMinMaxBackward stage input and grad nodes must be local INPUT nodes.");
+    }
+    if (!input_node.input_tensor_dtype.has_value() || !grad_node.input_tensor_dtype.has_value()) {
+        throw std::runtime_error("ScanMinMaxBackward local input nodes missing resolved dtypes.");
+    }
+    if (!node.output_dtype.has_value()) {
+        throw std::runtime_error("ScanMinMaxBackward node missing resolved output_dtype.");
+    }
+
+    const ScanOp value_op = (node.op == ExprOp::SCAN_MIN_BACKWARD || node.op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD) ? ScanOp::Min : ScanOp::Max;
+    if (!isCubScanDTypeSupported(input_node.input_tensor_dtype.value())) {
+        throw std::runtime_error("ScanMinMaxBackward input dtype is not supported by the CUB arg-scan backend.");
+    }
+    if (grad_node.input_tensor_dtype.value() != node.output_dtype.value()) {
+        throw std::runtime_error("ScanMinMaxBackward grad-output dtype must match output dtype.");
+    }
+    if (node.output_dtype.value() != DataType::FP32) {
+        throw std::runtime_error("ScanMinMaxBackward currently supports only FP32 gradients for the no-atomic flat scatter-add backend.");
+    }
+
+    std::optional<DataType> offset_dtype = std::nullopt;
+    if (segmented) {
+        const ExprNode& offsets_node = expr.nodes[node.aux];
+        if (offsets_node.op != ExprOp::INPUT || !offsets_node.input_tensor_dtype.has_value()) {
+            throw std::runtime_error("Segmented ScanMinMaxBackward offsets must be a local INPUT node with a resolved dtype.");
+        }
+        if (!isCubSegmentOffsetDTypeSupported(offsets_node.input_tensor_dtype.value())) {
+            throw std::runtime_error("Segmented ScanMinMaxBackward offsets dtype is not supported by CUB.");
+        }
+        offset_dtype = offsets_node.input_tensor_dtype.value();
+    }
+
+    return make_shared<CompiledScanMinMaxBackward>(value_op,
+                                                   node.scan_mode,
+                                                   node.scan_axis,
+                                                   node.scan_reverse,
+                                                   segmented,
+                                                   input_node.input_tensor_dtype.value(),
+                                                   grad_node.input_tensor_dtype.value(),
+                                                   node.output_dtype.value(),
+                                                   offset_dtype);
+}
+
 
 static bool inputRequiresMaterialization(const ExprNode& node) {
     if (node.op != ExprOp::INPUT) {
@@ -4839,6 +4932,96 @@ static PhysicalExecutionStage buildReduceMinMaxBackwardStage(const PhysicalExpre
     };
 }
 
+
+static PhysicalExecutionStage buildScanMinMaxBackwardStage(const PhysicalExpression& expr,
+                                                           uint32_t node_idx,
+                                                           uint32_t output_value_id,
+                                                           const std::string& output_name,
+                                                           const std::unordered_map<uint32_t, uint32_t>& node_output_value_id) {
+    const ExprNode& node = expr.nodes[node_idx];
+    if (!isScanMinMaxBackwardOp(node.op)) {
+        throw std::runtime_error("buildScanMinMaxBackwardStage called on unsupported node.");
+    }
+    const bool segmented = node.op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD || node.op == ExprOp::SEGMENTED_SCAN_MAX_BACKWARD;
+    if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || (segmented && node.aux == UINT32_MAX)) {
+        throw std::runtime_error("ScanMinMaxBackward node missing input, grad, or offsets input.");
+    }
+
+    PhysicalExpression stage_expr;
+    stage_expr.inputs.push_back(NamedInput{"__arg0", 0});
+    stage_expr.inputs.push_back(NamedInput{"__arg1", 1});
+    if (segmented) {
+        stage_expr.inputs.push_back(NamedInput{"__arg2", 2});
+    }
+
+    std::vector<uint32_t> input_value_ids;
+    input_value_ids.reserve(segmented ? 3 : 2);
+
+    auto bind_parent_to_local_input = [&](uint32_t parent_idx, uint32_t local_slot) {
+        if (parent_idx >= expr.nodes.size()) {
+            throw std::runtime_error("ScanMinMaxBackward input node index out of range.");
+        }
+
+        const ExprNode& parent = expr.nodes[parent_idx];
+        std::optional<DataType> actual_input_dtype = std::nullopt;
+
+        auto out_it = node_output_value_id.find(parent_idx);
+        if (out_it != node_output_value_id.end()) {
+            input_value_ids.push_back(out_it->second);
+            actual_input_dtype = parent.output_dtype;
+        } else if (parent.op == ExprOp::INPUT) {
+            input_value_ids.push_back(parent.input_slot);
+            actual_input_dtype = parent.input_tensor_dtype;
+        } else {
+            throw std::runtime_error("Missing value id for ScanMinMaxBackward input.");
+        }
+
+        if (!parent.output_dtype.has_value()) {
+            throw std::runtime_error("ScanMinMaxBackward parent node missing resolved output_dtype.");
+        }
+        if (!actual_input_dtype.has_value()) {
+            throw std::runtime_error("ScanMinMaxBackward parent node missing resolved actual input dtype.");
+        }
+
+        ExprNode input_node;
+        input_node.op = ExprOp::INPUT;
+        input_node.input_slot = local_slot;
+        input_node.input_tensor_dtype = actual_input_dtype.value();
+        input_node.output_dtype = parent.output_dtype;
+        input_node.compute_dtype = parent.compute_dtype;
+        input_node.backward_output_dtype = parent.backward_output_dtype;
+        input_node.backward_compute_dtype = parent.backward_compute_dtype;
+        stage_expr.nodes.push_back(std::move(input_node));
+    };
+
+    bind_parent_to_local_input(node.lhs, 0);
+    bind_parent_to_local_input(node.rhs, 1);
+    if (segmented) {
+        bind_parent_to_local_input(node.aux, 2);
+    }
+
+    ExprNode route = node;
+    route.lhs = 0;
+    route.rhs = 1;
+    route.aux = segmented ? 2 : UINT32_MAX;
+    stage_expr.nodes.push_back(std::move(route));
+    stage_expr.output_node = segmented ? 3 : 2;
+
+    std::vector<CompiledStageOutput> stage_outputs;
+    stage_outputs.push_back(CompiledStageOutput{
+        .name = output_name,
+        .local_node_idx = stage_expr.output_node,
+        .value_id = output_value_id,
+    });
+
+    return PhysicalExecutionStage{
+        .kind = PhysicalExecutionStage::Kind::ScanMinMaxBackward,
+        .expr = std::move(stage_expr),
+        .input_value_ids = std::move(input_value_ids),
+        .outputs = std::move(stage_outputs),
+    };
+}
+
 struct PlannedExecution {
     std::vector<PhysicalExecutionStage> stages;
     std::vector<CompiledStageOutput> final_outputs;
@@ -5609,7 +5792,7 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             if (!grouped_rope_roots.contains(lhs_dependency_idx)) {
                 ensureBoundaryParentEmitted(lhs_dependency_idx, "lhs", isCudnnReduceOp(root.op));
             }
-            if (isReduceMinMaxBackwardOp(root.op) || isMatmulOp(root.op) || isEmbeddingLookupOp(root.op) ||
+            if (isReduceMinMaxBackwardOp(root.op) || isScanMinMaxBackwardOp(root.op) || isMatmulOp(root.op) || isEmbeddingLookupOp(root.op) ||
                 root.op == ExprOp::SEGMENTED_SCAN || isAttentionOp(root.op) || isAttentionBackwardOp(root.op) ||
                 isConvolutionOp(root.op)) {
                 if (!grouped_rope_roots.contains(rhs_dependency_idx)) {
@@ -5618,6 +5801,9 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             }
             if (isAttentionOp(root.op) || isAttentionBackwardOp(root.op)) {
                 ensureBoundaryParentEmitted(root.aux, "aux", false);
+            }
+            if (root.op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD || root.op == ExprOp::SEGMENTED_SCAN_MAX_BACKWARD) {
+                ensureBoundaryParentEmitted(root.aux, "offsets", false);
             }
             if (root.op == ExprOp::ATTENTION && root.attention_use_bias) {
                 ensureBoundaryParentEmitted(root.alpha_node, "bias", false);
@@ -5702,6 +5888,8 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             node_output_value_id[root_idx] = stage_out_id;
             if (isReduceMinMaxBackwardOp(root.op)) {
                 planned.stages.push_back(buildReduceMinMaxBackwardStage(expr, root_idx, stage_out_id, "", node_output_value_id));
+            } else if (isScanMinMaxBackwardOp(root.op)) {
+                planned.stages.push_back(buildScanMinMaxBackwardStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             } else if (isScanOp(root.op)) {
                 planned.stages.push_back(buildScanStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             } else if (isSoftmaxOp(root.op)) {
@@ -5983,7 +6171,7 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             if (!grouped_rope_roots.contains(lhs_dependency_idx)) {
                 ensureBoundaryParentEmitted(lhs_dependency_idx, "lhs", isCudnnReduceOp(root.op));
             }
-            if (isReduceMinMaxBackwardOp(root.op) || isMatmulOp(root.op) || isEmbeddingLookupOp(root.op) ||
+            if (isReduceMinMaxBackwardOp(root.op) || isScanMinMaxBackwardOp(root.op) || isMatmulOp(root.op) || isEmbeddingLookupOp(root.op) ||
                 root.op == ExprOp::SEGMENTED_SCAN || isAttentionOp(root.op) || isAttentionBackwardOp(root.op) ||
                 isConvolutionOp(root.op)) {
                 if (!grouped_rope_roots.contains(rhs_dependency_idx)) {
@@ -5992,6 +6180,9 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             }
             if (isAttentionOp(root.op) || isAttentionBackwardOp(root.op)) {
                 ensureBoundaryParentEmitted(root.aux, "aux", false);
+            }
+            if (root.op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD || root.op == ExprOp::SEGMENTED_SCAN_MAX_BACKWARD) {
+                ensureBoundaryParentEmitted(root.aux, "offsets", false);
             }
             if (root.op == ExprOp::ATTENTION && root.attention_use_bias) {
                 ensureBoundaryParentEmitted(root.alpha_node, "bias", false);
@@ -6083,6 +6274,9 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             if (isReduceMinMaxBackwardOp(root.op)) {
                 planned.stages.push_back(
                     buildReduceMinMaxBackwardStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
+            } else if (isScanMinMaxBackwardOp(root.op)) {
+                planned.stages.push_back(
+                    buildScanMinMaxBackwardStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
             } else if (isScanOp(root.op)) {
                 planned.stages.push_back(
                     buildScanStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
@@ -6335,6 +6529,11 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
             case PhysicalExecutionStage::Kind::ReduceMinMaxBackward: {
                 std::shared_ptr<CompiledReduceMinMaxBackward> reduce_minmax_backward = compileReduceMinMaxBackward(stage.expr);
                 compiled->stages.emplace_back(reduce_minmax_backward, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
+                break;
+            }
+            case PhysicalExecutionStage::Kind::ScanMinMaxBackward: {
+                std::shared_ptr<CompiledScanMinMaxBackward> scan_minmax_backward = compileScanMinMaxBackward(stage.expr);
+                compiled->stages.emplace_back(scan_minmax_backward, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
                 break;
             }
             default:

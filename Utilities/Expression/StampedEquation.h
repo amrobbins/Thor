@@ -21,6 +21,7 @@
 #include "Utilities/Cache/LruCache.h"
 #include "Utilities/Expression/CompiledEquation.h"
 #include "Utilities/Expression/InPlaceRopeKernel.h"
+#include "Utilities/Expression/FlatScatterAddKernel.h"
 #include "Utilities/TensorOperations/GpuAttention/CudnnAttention.h"
 #include "Utilities/TensorOperations/DeepLearning/CudnnRmsNorm.h"
 #include "Utilities/TensorOperations/Embedding/EmbeddingKernels.h"
@@ -874,6 +875,36 @@ class StampedConvolutionBackward {
     const std::optional<Tensor> workspace;
 };
 
+
+class StampedScanMinMaxBackward {
+   public:
+    void run();
+    void runOn(Stream& run_stream);
+
+    uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
+
+    Tensor getOutputTensor() const { return output; }
+
+    StampedScanMinMaxBackward(std::shared_ptr<CompiledScanMinMaxBackward> compiled,
+                              std::shared_ptr<StampedScan> arg_scan,
+                              std::shared_ptr<BuiltFlatScatterAdd> scatter_add,
+                              const Tensor& input,
+                              const Tensor& grad_output,
+                              const Tensor& output,
+                              const Tensor& indices,
+                              const Stream& stream);
+
+   private:
+    const std::shared_ptr<CompiledScanMinMaxBackward> compiled_scan_minmax_backward;
+    const std::shared_ptr<StampedScan> arg_scan;
+    const std::shared_ptr<BuiltFlatScatterAdd> scatter_add;
+    const Tensor input;
+    const Tensor grad_output;
+    Tensor output;
+    Tensor indices;
+    Stream stream;
+};
+
 class StampedReduceMinMaxBackward {
    public:
     void run();
@@ -977,7 +1008,7 @@ class StampedConditional {
 };
 
 struct StampedExecutionStage {
-    enum class Kind { FusedKernel, CudaKernel, Reduction, ArgMinMax, Scan, Softmax, RmsNorm, EmbeddingLookup, Matmul, InPlaceRope, Attention, AttentionBackward, Convolution, ConvolutionBackward, ReduceMinMaxBackward, Conditional };
+    enum class Kind { FusedKernel, CudaKernel, Reduction, ArgMinMax, Scan, Softmax, RmsNorm, EmbeddingLookup, Matmul, InPlaceRope, Attention, AttentionBackward, Convolution, ConvolutionBackward, ReduceMinMaxBackward, ScanMinMaxBackward, Conditional };
     static std::string kindToString(const Kind kind) {
         switch (kind) {
             case Kind::FusedKernel:
@@ -1010,6 +1041,8 @@ struct StampedExecutionStage {
                 return "ConvolutionBackward";
             case Kind::ReduceMinMaxBackward:
                 return "ReduceMinMaxBackward";
+            case Kind::ScanMinMaxBackward:
+                return "ScanMinMaxBackward";
             case Kind::Conditional:
                 return "Conditional";
         }
@@ -1037,6 +1070,7 @@ struct StampedExecutionStage {
     const std::shared_ptr<StampedConvolution> convolution = nullptr;
     const std::shared_ptr<StampedConvolutionBackward> convolution_backward = nullptr;
     const std::shared_ptr<StampedReduceMinMaxBackward> reduce_minmax_backward = nullptr;
+    const std::shared_ptr<StampedScanMinMaxBackward> scan_minmax_backward = nullptr;
     const std::shared_ptr<StampedConditional> conditional = nullptr;
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedEquation>& fused,
@@ -1175,6 +1209,15 @@ struct StampedExecutionStage {
           flop_count(flop_count),
           reduce_minmax_backward(reduce_minmax_backward) {}
 
+    explicit StampedExecutionStage(const std::shared_ptr<StampedScanMinMaxBackward>& scan_minmax_backward,
+                                   std::vector<uint32_t> dependency_stage_indices = {},
+                                   uint64_t flop_count = 0)
+        : kind(Kind::ScanMinMaxBackward),
+          dependency_stage_indices(std::move(dependency_stage_indices)),
+          gpu_num(scan_minmax_backward->gpuNum()),
+          flop_count(flop_count),
+          scan_minmax_backward(scan_minmax_backward) {}
+
     explicit StampedExecutionStage(const std::shared_ptr<StampedConditional>& conditional,
                                    std::vector<uint32_t> dependency_stage_indices = {},
                                    uint64_t flop_count = 0)
@@ -1243,6 +1286,9 @@ struct StampedExecutionStage {
         } else if (kind == Kind::ReduceMinMaxBackward) {
             THOR_THROW_IF_FALSE(reduce_minmax_backward != nullptr);
             reduce_minmax_backward->runOn(run_stream);
+        } else if (kind == Kind::ScanMinMaxBackward) {
+            THOR_THROW_IF_FALSE(scan_minmax_backward != nullptr);
+            scan_minmax_backward->runOn(run_stream);
         } else if (kind == Kind::Conditional) {
             THOR_THROW_IF_FALSE(conditional != nullptr);
             if (runtime_scalars.empty())

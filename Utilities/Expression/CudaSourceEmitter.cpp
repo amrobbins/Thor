@@ -1266,9 +1266,59 @@ uint32_t CudaSourceEmitter::tiledTransposePackScalars(const CompiledExecutionSta
     return transposePackScalars(output_dtype);
 }
 
+static std::string castScalarExpr(const std::string& expr, DataType src_dtype, DataType dst_dtype);
+
+static bool isIntegralScalarCastDType(DataType dtype) {
+    switch (dtype) {
+        case DataType::UINT8:
+        case DataType::INT8:
+        case DataType::UINT16:
+        case DataType::INT16:
+        case DataType::UINT32:
+        case DataType::INT32:
+        case DataType::UINT64:
+        case DataType::INT64:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static std::string castToIntegralScalarExpr(const std::string& expr, DataType src_dtype, DataType dst_dtype) {
+    const std::string dst_type = scalarStorageType(dst_dtype);
+    if (src_dtype == DataType::BOOLEAN) {
+        return "static_cast<" + dst_type + ">((" + expr + ") ? 1 : 0)";
+    }
+    switch (src_dtype) {
+        case DataType::FP32:
+        case DataType::FP16:
+        case DataType::BF16:
+        case DataType::FP8_E4M3:
+        case DataType::FP8_E5M2:
+            return "static_cast<" + dst_type + ">(" + castScalarExpr(expr, src_dtype, DataType::FP32) + ")";
+        case DataType::UINT8:
+        case DataType::INT8:
+        case DataType::UINT16:
+        case DataType::INT16:
+        case DataType::UINT32:
+        case DataType::INT32:
+        case DataType::UINT64:
+        case DataType::INT64:
+            return "static_cast<" + dst_type + ">(" + expr + ")";
+        default:
+            break;
+    }
+    throw runtime_error("Unsupported scalar integral cast in fused stage emitter from " + TensorDescriptor::getElementTypeName(src_dtype) + " to " +
+                        TensorDescriptor::getElementTypeName(dst_dtype));
+}
+
 static std::string castScalarExpr(const std::string& expr, DataType src_dtype, DataType dst_dtype) {
     if (src_dtype == dst_dtype) {
         return expr;
+    }
+
+    if (isIntegralScalarCastDType(dst_dtype)) {
+        return castToIntegralScalarExpr(expr, src_dtype, dst_dtype);
     }
 
     switch (dst_dtype) {
@@ -1405,6 +1455,9 @@ static std::string emitUnaryComputeExpr(ExprOp op, const std::string& x, DataTyp
     const std::string x_f = toFloatExpr(x, compute_dtype);
 
     switch (op) {
+        case ExprOp::CAST:
+            return x;
+
         case ExprOp::NEG:
             if (compute_dtype == DataType::FP32 || compute_dtype == DataType::FP16 || compute_dtype == DataType::BF16) {
                 return "(-" + x + ")";

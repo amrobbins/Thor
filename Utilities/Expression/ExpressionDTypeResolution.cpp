@@ -62,6 +62,8 @@ static bool isWhereOp(ExprOp op) { return op == ExprOp::WHERE; }
 
 static bool isScanOp(ExprOp op) { return op == ExprOp::SCAN || op == ExprOp::SEGMENTED_SCAN; }
 
+static bool isCastOp(ExprOp op) { return op == ExprOp::CAST; }
+
 static bool isBooleanOutputOp(ExprOp op) { return isComparisonOp(op) || isLogicalOp(op); }
 
 static bool isCudnnSingleInputStageOp(ExprOp op) { return isCudnnReduceOp(op) || isCudnnSoftmaxOp(op); }
@@ -85,6 +87,16 @@ DataType toSupportedComputeDType(ExprOp op, DataType requested_compute_dtype) {
             return toSupportedComputeDType(ExprOp::ADD, requested_compute_dtype);
         }
         throw std::runtime_error("Unsupported boolean/comparison/where dtype in toSupportedComputeDType.");
+    }
+
+    if (isCastOp(op)) {
+        if (requested_compute_dtype == DataType::PACKED_BOOLEAN) {
+            throw std::runtime_error("Packed boolean casts are not supported in toSupportedComputeDType.");
+        }
+        if (isPassthroughInputDType(requested_compute_dtype)) {
+            return requested_compute_dtype;
+        }
+        throw std::runtime_error("Unsupported cast dtype in toSupportedComputeDType.");
     }
 
     if (isScanOp(op)) {
@@ -266,6 +278,10 @@ static DataType promoteWhereBranchDTypes(const std::vector<DataType>& dtypes) {
 }
 
 static DataType promoteRequiredComputeDType(ExprOp op, DataType current_compute_dtype, DataType propagated_dtype) {
+    if (isCastOp(op)) {
+        return toSupportedComputeDType(op, current_compute_dtype);
+    }
+
     if (isComparisonOp(op) || isLogicalOp(op) || isWhereOp(op)) {
         if (isSupportedFusionFloatingType(current_compute_dtype) && isSupportedFusionFloatingType(propagated_dtype)) {
             return toSupportedComputeDType(op, promoteTensorValueDTypes(current_compute_dtype, propagated_dtype));
@@ -308,6 +324,13 @@ static DataType resolveNodeLogicalInputDType(const ExprNode& node,
         return resolved_output_dtypes[node.rhs];
     }
 
+    if (node.op == ExprOp::CAST) {
+        if (node.lhs >= resolved_output_dtypes.size()) {
+            throw std::runtime_error("Cast node has parent index out of range in resolveNodeLogicalInputDType.");
+        }
+        return resolved_output_dtypes[node.lhs];
+    }
+
     if (node.op == ExprOp::TAKE_ALONG_AXIS) {
         if (node.lhs >= resolved_output_dtypes.size() || node.rhs >= resolved_output_dtypes.size()) {
             throw std::runtime_error("take_along_axis node has parent index out of range in resolveNodeLogicalInputDType.");
@@ -330,6 +353,29 @@ static DataType resolveNodeLogicalInputDType(const ExprNode& node,
                                      TensorDescriptor::getElementTypeName(offsets_dtype));
         }
         return resolved_output_dtypes[node.lhs];
+    }
+
+    if (node.op == ExprOp::SCAN_MIN_BACKWARD || node.op == ExprOp::SCAN_MAX_BACKWARD ||
+        node.op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD || node.op == ExprOp::SEGMENTED_SCAN_MAX_BACKWARD) {
+        const bool segmented = node.op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD || node.op == ExprOp::SEGMENTED_SCAN_MAX_BACKWARD;
+        if (node.lhs >= resolved_output_dtypes.size() || node.rhs >= resolved_output_dtypes.size()) {
+            throw std::runtime_error("scan min/max backward node has parent index out of range in resolveNodeLogicalInputDType.");
+        }
+        if (segmented) {
+            if (node.aux >= resolved_output_dtypes.size()) {
+                throw std::runtime_error("segmented scan min/max backward offsets node has index out of range in resolveNodeLogicalInputDType.");
+            }
+            const DataType offsets_dtype = resolved_output_dtypes[node.aux];
+            if (offsets_dtype != DataType::UINT32 && offsets_dtype != DataType::UINT64) {
+                throw std::runtime_error("segmented scan min/max backward offsets must have UINT32 or UINT64 dtype, received: " +
+                                         TensorDescriptor::getElementTypeName(offsets_dtype));
+            }
+        }
+
+        // Offsets are structural metadata for segmented scan backward; they must
+        // not participate in numeric dtype promotion with the input values and
+        // upstream gradients.
+        return promoteTensorValueDTypes(resolved_output_dtypes[node.lhs], resolved_output_dtypes[node.rhs]);
     }
 
     std::vector<DataType> tensor_parent_dtypes;
@@ -457,6 +503,16 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
         return node.output_dtype.has_value() ? node.output_dtype.value() : weights_dtype;
     }
 
+    if (node.op == ExprOp::CAST) {
+        if (!node.output_dtype.has_value()) {
+            throw std::runtime_error("Cast node is missing output dtype in resolveNodeOutputDType.");
+        }
+        if (node.output_dtype.value() == DataType::PACKED_BOOLEAN) {
+            throw std::runtime_error("Cast output dtype cannot be PACKED_BOOLEAN.");
+        }
+        return node.output_dtype.value();
+    }
+
     if (node.op == ExprOp::TAKE_ALONG_AXIS) {
         if (node.lhs >= resolved_output_dtypes.size() || node.rhs >= resolved_output_dtypes.size()) {
             throw std::runtime_error("take_along_axis node has parent index out of range in resolveNodeOutputDType.");
@@ -500,6 +556,30 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
                                               : "Expression scan currently requires output dtype to match input dtype.");
         }
         return default_output_dtype;
+    }
+
+
+    if (node.op == ExprOp::SCAN_MIN_BACKWARD || node.op == ExprOp::SCAN_MAX_BACKWARD ||
+        node.op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD || node.op == ExprOp::SEGMENTED_SCAN_MAX_BACKWARD) {
+        const bool segmented = node.op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD || node.op == ExprOp::SEGMENTED_SCAN_MAX_BACKWARD;
+        if (node.lhs >= resolved_output_dtypes.size() || node.rhs >= resolved_output_dtypes.size()) {
+            throw std::runtime_error("scan min/max backward node has input index out of range in resolveNodeOutputDType.");
+        }
+        if (segmented) {
+            if (node.aux >= resolved_output_dtypes.size()) {
+                throw std::runtime_error("segmented scan min/max backward offsets node has index out of range in resolveNodeOutputDType.");
+            }
+            const DataType offsets_dtype = resolved_output_dtypes[node.aux];
+            if (offsets_dtype != DataType::UINT32 && offsets_dtype != DataType::UINT64) {
+                throw std::runtime_error("segmented scan min/max backward offsets must have UINT32 or UINT64 dtype, received: " +
+                                         TensorDescriptor::getElementTypeName(offsets_dtype));
+            }
+        }
+        const DataType grad_dtype = resolved_output_dtypes[node.rhs];
+        if (node.output_dtype.has_value() && node.output_dtype.value() != grad_dtype) {
+            throw std::runtime_error("scan min/max backward output dtype must match grad-output dtype.");
+        }
+        return grad_dtype;
     }
 
     if (isCudnnReduceOp(node.op)) {
@@ -662,11 +742,21 @@ static void propagateMaterializedOutputComputeDTypes(PhysicalExpression& expr,
             for (uint32_t input_node : node.cuda_kernel_input_nodes) {
                 propagate_to_parent(input_node);
             }
+        } else if (node.op == ExprOp::CAST) {
+            // Cast is an explicit dtype-conversion boundary. Do not force the
+            // source expression to compute in the destination dtype.
         } else if (node.op == ExprOp::WHERE) {
             // Do not propagate the selected value compute dtype into the boolean condition.
             // Only floating-value branches should be widened by a materialized where output.
             propagate_to_floating_parent(node.rhs);
             propagate_to_floating_parent(node.aux);
+        } else if (node.op == ExprOp::SCAN_MIN_BACKWARD || node.op == ExprOp::SCAN_MAX_BACKWARD ||
+                   node.op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD || node.op == ExprOp::SEGMENTED_SCAN_MAX_BACKWARD) {
+            // Segmented-scan offsets are index metadata. Propagate the requested
+            // gradient compute dtype only through the value and upstream-gradient
+            // operands, not through the offsets tensor.
+            propagate_to_parent(node.lhs);
+            propagate_to_parent(node.rhs);
         } else {
             if (!Expression::isLeafOp(node.op)) {
                 propagate_to_parent(node.lhs);
@@ -759,7 +849,7 @@ static void resolveExpressionDTypesInPlace(PhysicalExpression& expr,
         const DataType logical_input_dtype = resolveNodeLogicalInputDType(node, expr.nodes, resolved_output_dtypes, root_input_dtypes);
 
         DataType requested_compute_dtype;
-        if (node.op == ExprOp::EMBEDDING_LOOKUP) {
+        if (node.op == ExprOp::EMBEDDING_LOOKUP || node.op == ExprOp::CAST) {
             requested_compute_dtype = output_dtype;
         } else if (isComparisonOp(node.op)) {
             if (node.compute_dtype.has_value()) {

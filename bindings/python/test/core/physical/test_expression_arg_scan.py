@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 import thor
-from thor.physical import DeviceType, Expression as ex, Outputs, PhysicalTensor, Placement, ScanMode, ScanOp, Stream
+from thor.physical import DeviceType, Expression as ex, Outputs, PhysicalTensor, Placement, ScanOp, Stream
 
 
 def _cpu_tensor(shape: list[int], dtype: thor.DataType) -> thor.physical.PhysicalTensor:
@@ -49,7 +49,7 @@ def _prefix_arg_reference(values: np.ndarray, op: ScanOp) -> np.ndarray:
 @pytest.mark.parametrize("op", [ScanOp.arg_min, ScanOp.arg_max])
 def test_scan_arg_min_max_returns_flattened_prefix_winner_indices(op: ScanOp):
     x = ex.input("x")
-    out = x.scan(op=op, mode=ScanMode.inclusive, axis=-1)
+    out = x.scan(op=op, axis=-1, inclusive=True)
     eq = ex.compile(out, device_num=0)
 
     values_np = np.array([[3.0, 1.0, 4.0, 1.0], [2.0, 5.0, 0.0, 0.0]], dtype=np.float32)
@@ -68,7 +68,7 @@ def test_scan_arg_min_max_returns_flattened_prefix_winner_indices(op: ScanOp):
 def test_segmented_scan_arg_min_max_returns_flattened_prefix_winner_indices(op: ScanOp):
     x = ex.input("x")
     offsets = ex.input("offsets")
-    out = x.segmented_scan(offsets, op=op, mode=ScanMode.inclusive)
+    out = x.segmented_scan(offsets, op=op, inclusive=True)
     eq = ex.compile(out, device_num=0)
 
     values_np = np.array([8, 6, 7, 5, 3, 2, 9], dtype=np.uint32)
@@ -101,7 +101,7 @@ def test_segmented_scan_arg_min_max_returns_flattened_prefix_winner_indices(op: 
 
 def test_arg_scan_serialization_round_trips():
     x = ex.input("x")
-    out = x.scan_arg_max(axis=-1)
+    out = x.scan(op=ScanOp.arg_max, axis=-1, inclusive=True)
     outputs = ex.outputs({"argmax": out})
 
     payload = outputs.to_json()
@@ -133,10 +133,10 @@ def _prefix_value_reference(values: np.ndarray, op: ScanOp) -> np.ndarray:
 def test_scan_with_indices_returns_values_and_indices_from_one_expression_pair(op_name: str):
     x = ex.input("x")
     if op_name == "min":
-        values, indices = x.scan_min_with_indices(axis=-1)
+        values, indices = x.scan_with_indices(op=ScanOp.min, axis=-1, inclusive=True)
         arg_op = ScanOp.arg_min
     else:
-        values, indices = x.scan_max_with_indices(axis=-1)
+        values, indices = x.scan_with_indices(op=ScanOp.max, axis=-1, inclusive=True)
         arg_op = ScanOp.arg_max
     eq = ex.outputs({"values": values, "indices": indices}).compile(device_num=0)
 
@@ -159,10 +159,10 @@ def test_segmented_scan_with_indices_returns_values_and_indices_from_one_express
     x = ex.input("x")
     offsets = ex.input("offsets")
     if op_name == "min":
-        values, indices = x.segmented_scan_min_with_indices(offsets)
+        values, indices = x.segmented_scan_with_indices(offsets, op=ScanOp.min, inclusive=True)
         is_min = True
     else:
-        values, indices = x.segmented_scan_max_with_indices(offsets)
+        values, indices = x.segmented_scan_with_indices(offsets, op=ScanOp.max, inclusive=True)
         is_min = False
     eq = ex.outputs({"values": values, "indices": indices}).compile(device_num=0)
 

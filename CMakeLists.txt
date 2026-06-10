@@ -591,6 +591,7 @@ target_link_libraries(Thor PRIVATE
         CUDA::cublas
         CUDA::cublasLt
         CUDA::cusolver
+        CUDA::cusparse
         CUDA::nvrtc
 )
 
@@ -932,7 +933,7 @@ add_executable(thor_tests ${TEST_SOURCES})
 thor_apply_linker_settings(thor_tests)
 thor_enable_release_host_lto(thor_tests)
 thor_enable_release_no_semantic_interposition(thor_tests)
-target_link_libraries(thor_tests PRIVATE Thor GTest::gtest_main CUDA::cudart CUDA::cudart CUDA::cublas CUDA::cublasLt CUDA::cusolver)
+target_link_libraries(thor_tests PRIVATE Thor GTest::gtest_main CUDA::cudart CUDA::cudart CUDA::cublas CUDA::cublasLt CUDA::cusolver CUDA::cusparse)
 target_link_libraries(thor_tests PRIVATE "${THOR_CUDNN_LIBRARY}")
 find_package(OpenMP REQUIRED)
 target_link_libraries(thor_tests PRIVATE OpenMP::OpenMP_CXX)
@@ -959,7 +960,7 @@ add_executable(thor_embedding_sparse_backward_profile EXCLUDE_FROM_ALL
 thor_apply_linker_settings(thor_embedding_sparse_backward_profile)
 thor_enable_release_host_lto(thor_embedding_sparse_backward_profile)
 thor_enable_release_no_semantic_interposition(thor_embedding_sparse_backward_profile)
-target_link_libraries(thor_embedding_sparse_backward_profile PRIVATE Thor CUDA::cudart CUDA::cublas CUDA::cublasLt CUDA::cusolver)
+target_link_libraries(thor_embedding_sparse_backward_profile PRIVATE Thor CUDA::cudart CUDA::cublas CUDA::cublasLt CUDA::cusolver CUDA::cusparse)
 target_link_libraries(thor_embedding_sparse_backward_profile PRIVATE "${THOR_CUDNN_LIBRARY}")
 target_link_libraries(thor_embedding_sparse_backward_profile PRIVATE OpenMP::OpenMP_CXX)
 target_link_libraries(thor_embedding_sparse_backward_profile PRIVATE Boost::boost)
