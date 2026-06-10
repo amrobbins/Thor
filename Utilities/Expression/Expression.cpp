@@ -191,6 +191,8 @@ std::string exprOpExternalName(ExprOp op) {
             return "logical_or";
         case ExprOp::LOGICAL_NOT:
             return "logical_not";
+        case ExprOp::CAST:
+            return "cast";
         case ExprOp::WHERE:
             return "where";
         case ExprOp::NEG:
@@ -329,6 +331,14 @@ std::string exprOpExternalName(ExprOp op) {
             return "reduce_min_backward";
         case ExprOp::REDUCE_MAX_BACKWARD:
             return "reduce_max_backward";
+        case ExprOp::SCAN_MIN_BACKWARD:
+            return "scan_min_backward";
+        case ExprOp::SCAN_MAX_BACKWARD:
+            return "scan_max_backward";
+        case ExprOp::SEGMENTED_SCAN_MIN_BACKWARD:
+            return "segmented_scan_min_backward";
+        case ExprOp::SEGMENTED_SCAN_MAX_BACKWARD:
+            return "segmented_scan_max_backward";
         case ExprOp::REDUCE_AVG:
             return "reduce_avg";
         case ExprOp::REDUCE_NORM1:
@@ -393,6 +403,7 @@ ExprOp exprOpFromExternalName(const std::string& op) {
         {"or", ExprOp::LOGICAL_OR},
         {"logical_not", ExprOp::LOGICAL_NOT},
         {"not", ExprOp::LOGICAL_NOT},
+        {"cast", ExprOp::CAST},
         {"where", ExprOp::WHERE},
         {"select", ExprOp::WHERE},
         {"neg", ExprOp::NEG},
@@ -466,6 +477,10 @@ ExprOp exprOpFromExternalName(const std::string& op) {
         {"reduce_argmax", ExprOp::REDUCE_ARGMAX},
         {"reduce_min_backward", ExprOp::REDUCE_MIN_BACKWARD},
         {"reduce_max_backward", ExprOp::REDUCE_MAX_BACKWARD},
+        {"scan_min_backward", ExprOp::SCAN_MIN_BACKWARD},
+        {"scan_max_backward", ExprOp::SCAN_MAX_BACKWARD},
+        {"segmented_scan_min_backward", ExprOp::SEGMENTED_SCAN_MIN_BACKWARD},
+        {"segmented_scan_max_backward", ExprOp::SEGMENTED_SCAN_MAX_BACKWARD},
         {"reduce_avg", ExprOp::REDUCE_AVG},
         {"reduce_norm1", ExprOp::REDUCE_NORM1},
         {"reduce_norm2", ExprOp::REDUCE_NORM2},
@@ -849,6 +864,8 @@ std::string opName(ExprOp op) {
             return "LOR";
         case ExprOp::LOGICAL_NOT:
             return "LNOT";
+        case ExprOp::CAST:
+            return "CAST";
         case ExprOp::WHERE:
             return "WHERE";
         case ExprOp::NEG:
@@ -987,6 +1004,14 @@ std::string opName(ExprOp op) {
             return "RMIN_BW";
         case ExprOp::REDUCE_MAX_BACKWARD:
             return "RMAX_BW";
+        case ExprOp::SCAN_MIN_BACKWARD:
+            return "SCAN_MIN_BW";
+        case ExprOp::SCAN_MAX_BACKWARD:
+            return "SCAN_MAX_BW";
+        case ExprOp::SEGMENTED_SCAN_MIN_BACKWARD:
+            return "SEG_SCAN_MIN_BW";
+        case ExprOp::SEGMENTED_SCAN_MAX_BACKWARD:
+            return "SEG_SCAN_MAX_BW";
         case ExprOp::REDUCE_AVG:
             return "RAVG";
         case ExprOp::REDUCE_NORM1:
@@ -1133,6 +1158,10 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
         case ExprOp::TRANSPOSE:
             out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) + ")";
             break;
+        case ExprOp::CAST:
+            out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) + ";dtype=" +
+                  (n.output_dtype.has_value() ? TensorDescriptor::getElementTypeName(n.output_dtype.value()) : std::string("unset")) + ")";
+            break;
         case ExprOp::TAKE_ALONG_AXIS:
             out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) + "," +
                   canonicalizeNode(expr, n.rhs, memo, memoReady) + ";axis=" +
@@ -1217,6 +1246,21 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
             std::string b = canonicalizeNode(expr, n.rhs, memo, memoReady);
             out = opName(n.op) + "(" + a + "," + b + ";axes=" + formatUIntVectorCanonical(n.reduction_axes) +
                   ";squeeze=" + formatUIntVectorCanonical(n.squeeze_axes) + ")";
+            break;
+        }
+
+        case ExprOp::SCAN_MIN_BACKWARD:
+        case ExprOp::SCAN_MAX_BACKWARD:
+        case ExprOp::SEGMENTED_SCAN_MIN_BACKWARD:
+        case ExprOp::SEGMENTED_SCAN_MAX_BACKWARD: {
+            std::string a = canonicalizeNode(expr, n.lhs, memo, memoReady);
+            std::string b = canonicalizeNode(expr, n.rhs, memo, memoReady);
+            out = opName(n.op) + "(" + a + "," + b;
+            if (n.op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD || n.op == ExprOp::SEGMENTED_SCAN_MAX_BACKWARD) {
+                out += "," + canonicalizeNode(expr, n.aux, memo, memoReady);
+            }
+            out += ";mode=" + scanModeToString(n.scan_mode) + ";axis=" + std::to_string(n.scan_axis) +
+                   ";reverse=" + (n.scan_reverse ? "1" : "0") + ")";
             break;
         }
 
@@ -2063,6 +2107,7 @@ bool Expression::isUnaryOp(const ExprOp op) {
         case ExprOp::TANH:
         case ExprOp::NORMCDF:
         case ExprOp::LOGICAL_NOT:
+        case ExprOp::CAST:
         case ExprOp::ROPE:
         case ExprOp::SOFTMAX:
         case ExprOp::TRANSPOSE:
@@ -2121,6 +2166,8 @@ bool Expression::isBinaryOp(const ExprOp op) {
         case ExprOp::CONV3D_BACKWARD_FILTER:
         case ExprOp::REDUCE_MIN_BACKWARD:
         case ExprOp::REDUCE_MAX_BACKWARD:
+        case ExprOp::SCAN_MIN_BACKWARD:
+        case ExprOp::SCAN_MAX_BACKWARD:
             return true;
         default:
             return false;
@@ -2135,6 +2182,8 @@ bool Expression::isTernaryOp(const ExprOp op) {
         case ExprOp::ATTENTION_BACKWARD_K:
         case ExprOp::ATTENTION_BACKWARD_V:
         case ExprOp::ATTENTION_BACKWARD_BIAS:
+        case ExprOp::SEGMENTED_SCAN_MIN_BACKWARD:
+        case ExprOp::SEGMENTED_SCAN_MAX_BACKWARD:
         case ExprOp::WHERE:
             return true;
         default:
@@ -3166,6 +3215,17 @@ Expression Expression::greaterEqual(const Expression& other) const { return bina
 Expression Expression::logicalAnd(const Expression& other) const { return binaryOp(*this, other, ExprOp::LOGICAL_AND); }
 Expression Expression::logicalOr(const Expression& other) const { return binaryOp(*this, other, ExprOp::LOGICAL_OR); }
 Expression Expression::logicalNot() const { return unaryOp(*this, ExprOp::LOGICAL_NOT); }
+
+Expression Expression::cast(DataType output_dtype) const {
+    Expression result = unaryOp(*this, ExprOp::CAST);
+    ExprNode& node = result.expr->nodes[result.nodeIndex];
+    node.output_dtype = output_dtype;
+    node.compute_dtype = output_dtype;
+    node.backward_output_dtype = output_dtype;
+    node.backward_compute_dtype = output_dtype;
+    return result;
+}
+
 Expression Expression::equal(const Expression& lhs, const Expression& rhs) { return lhs.equal(rhs); }
 Expression Expression::notEqual(const Expression& lhs, const Expression& rhs) { return lhs.notEqual(rhs); }
 Expression Expression::lessThan(const Expression& lhs, const Expression& rhs) { return lhs.lessThan(rhs); }
@@ -3322,7 +3382,17 @@ Expression Expression::takeAlongAxis(const Expression& input, const Expression& 
     return out;
 }
 
-Expression Expression::scan(ScanOp op, ScanMode mode, int64_t axis) const { return scan(*this, op, mode, axis); }
+namespace {
+
+ScanMode scanModeFromInclusive(bool inclusive) { return inclusive ? ScanMode::Inclusive : ScanMode::Exclusive; }
+
+}  // namespace
+
+Expression Expression::scan(ScanOp op, int64_t axis, bool inclusive) const { return scan(*this, op, axis, inclusive); }
+
+Expression Expression::prefixCount(bool inclusive, int64_t axis) const {
+    return this->cast(DataType::UINT32).scan(ScanOp::Sum, axis, inclusive);
+}
 
 namespace {
 
@@ -3336,12 +3406,29 @@ void validateScanAttributes(ScanOp op, ScanMode mode, const char* api_name) {
     }
 }
 
+void validateScanWithIndicesOp(ScanOp op, const char* api_name) {
+    if (op != ScanOp::Min && op != ScanOp::Max) {
+        throw std::invalid_argument(std::string(api_name) + " supports only ScanOp::Min and ScanOp::Max.");
+    }
+}
+
+ScanOp indexScanOpForValueScanOp(ScanOp op) {
+    if (op == ScanOp::Min) {
+        return ScanOp::ArgMin;
+    }
+    if (op == ScanOp::Max) {
+        return ScanOp::ArgMax;
+    }
+    throw std::invalid_argument("indexScanOpForValueScanOp supports only ScanOp::Min and ScanOp::Max.");
+}
+
 }  // namespace
 
-Expression Expression::scan(const Expression& input, ScanOp op, ScanMode mode, int64_t axis) {
+Expression Expression::scan(const Expression& input, ScanOp op, int64_t axis, bool inclusive) {
     if (axis < -1) {
         throw std::invalid_argument("Expression::scan currently supports only axis=-1 or an explicit non-negative final axis.");
     }
+    const ScanMode mode = scanModeFromInclusive(inclusive);
     validateScanAttributes(op, mode, "Expression::scan");
 
     Expression out = unaryOp(input, ExprOp::SCAN);
@@ -3352,11 +3439,12 @@ Expression Expression::scan(const Expression& input, ScanOp op, ScanMode mode, i
     return out;
 }
 
-Expression Expression::segmentedScan(const Expression& offsets, ScanOp op, ScanMode mode) const {
-    return segmentedScan(*this, offsets, op, mode);
+Expression Expression::segmentedScan(const Expression& offsets, ScanOp op, bool inclusive) const {
+    return segmentedScan(*this, offsets, op, inclusive);
 }
 
-Expression Expression::segmentedScan(const Expression& input, const Expression& offsets, ScanOp op, ScanMode mode) {
+Expression Expression::segmentedScan(const Expression& input, const Expression& offsets, ScanOp op, bool inclusive) {
+    const ScanMode mode = scanModeFromInclusive(inclusive);
     validateScanAttributes(op, mode, "Expression::segmentedScan");
 
     Expression out = binaryOp(input, offsets, ExprOp::SEGMENTED_SCAN);
@@ -3367,29 +3455,26 @@ Expression Expression::segmentedScan(const Expression& input, const Expression& 
     return out;
 }
 
-Expression Expression::scanArgMin(int64_t axis) const { return scan(*this, ScanOp::ArgMin, ScanMode::Inclusive, axis); }
-
-Expression Expression::scanArgMax(int64_t axis) const { return scan(*this, ScanOp::ArgMax, ScanMode::Inclusive, axis); }
-
-std::pair<Expression, Expression> Expression::scanMinWithIndices(int64_t axis, ScanMode mode) const {
+std::pair<Expression, Expression> Expression::scanWithIndices(ScanOp op, int64_t axis, bool inclusive) const {
     if (!expr) {
-        throw std::runtime_error("Cannot apply scanMinWithIndices to an empty expression");
+        throw std::runtime_error("Cannot apply scanWithIndices to an empty expression");
     }
     if (axis < -1) {
-        throw std::invalid_argument("Expression::scanMinWithIndices currently supports only axis=-1 or an explicit non-negative final axis.");
+        throw std::invalid_argument("Expression::scanWithIndices currently supports only axis=-1 or an explicit non-negative final axis.");
     }
-    validateScanAttributes(ScanOp::Min, mode, "Expression::scanMinWithIndices");
+    validateScanWithIndicesOp(op, "Expression::scanWithIndices");
 
     auto out = std::make_shared<PhysicalExpression>();
     out->inputs = expr->inputs;
     std::unordered_map<uint32_t, uint32_t> oldToNew;
     const uint32_t new_input_idx = cloneSubtree(*expr, nodeIndex, *out, oldToNew);
     const uint64_t normalized_axis = static_cast<uint64_t>(axis < 0 ? UINT64_MAX : axis);
+    const ScanMode mode = scanModeFromInclusive(inclusive);
 
     ExprNode value_node{};
     value_node.op = ExprOp::SCAN;
     value_node.lhs = new_input_idx;
-    value_node.scan_op = ScanOp::Min;
+    value_node.scan_op = op;
     value_node.scan_mode = mode;
     value_node.scan_axis = normalized_axis;
     const uint32_t value_idx = static_cast<uint32_t>(out->nodes.size());
@@ -3398,7 +3483,7 @@ std::pair<Expression, Expression> Expression::scanMinWithIndices(int64_t axis, S
     ExprNode index_node{};
     index_node.op = ExprOp::SCAN;
     index_node.lhs = new_input_idx;
-    index_node.scan_op = ScanOp::ArgMin;
+    index_node.scan_op = indexScanOpForValueScanOp(op);
     index_node.scan_mode = mode;
     index_node.scan_axis = normalized_axis;
     const uint32_t index_idx = static_cast<uint32_t>(out->nodes.size());
@@ -3408,56 +3493,13 @@ std::pair<Expression, Expression> Expression::scanMinWithIndices(int64_t axis, S
     return {Expression(out, value_idx), Expression(out, index_idx)};
 }
 
-std::pair<Expression, Expression> Expression::scanMaxWithIndices(int64_t axis, ScanMode mode) const {
-    if (!expr) {
-        throw std::runtime_error("Cannot apply scanMaxWithIndices to an empty expression");
-    }
-    if (axis < -1) {
-        throw std::invalid_argument("Expression::scanMaxWithIndices currently supports only axis=-1 or an explicit non-negative final axis.");
-    }
-    validateScanAttributes(ScanOp::Max, mode, "Expression::scanMaxWithIndices");
-
-    auto out = std::make_shared<PhysicalExpression>();
-    out->inputs = expr->inputs;
-    std::unordered_map<uint32_t, uint32_t> oldToNew;
-    const uint32_t new_input_idx = cloneSubtree(*expr, nodeIndex, *out, oldToNew);
-    const uint64_t normalized_axis = static_cast<uint64_t>(axis < 0 ? UINT64_MAX : axis);
-
-    ExprNode value_node{};
-    value_node.op = ExprOp::SCAN;
-    value_node.lhs = new_input_idx;
-    value_node.scan_op = ScanOp::Max;
-    value_node.scan_mode = mode;
-    value_node.scan_axis = normalized_axis;
-    const uint32_t value_idx = static_cast<uint32_t>(out->nodes.size());
-    out->nodes.push_back(std::move(value_node));
-
-    ExprNode index_node{};
-    index_node.op = ExprOp::SCAN;
-    index_node.lhs = new_input_idx;
-    index_node.scan_op = ScanOp::ArgMax;
-    index_node.scan_mode = mode;
-    index_node.scan_axis = normalized_axis;
-    const uint32_t index_idx = static_cast<uint32_t>(out->nodes.size());
-    out->nodes.push_back(std::move(index_node));
-
-    out->output_node = value_idx;
-    return {Expression(out, value_idx), Expression(out, index_idx)};
-}
-
-Expression Expression::segmentedScanArgMin(const Expression& offsets) const {
-    return segmentedScan(*this, offsets, ScanOp::ArgMin, ScanMode::Inclusive);
-}
-
-Expression Expression::segmentedScanArgMax(const Expression& offsets) const {
-    return segmentedScan(*this, offsets, ScanOp::ArgMax, ScanMode::Inclusive);
-}
-
-std::pair<Expression, Expression> Expression::segmentedScanMinWithIndices(const Expression& offsets, ScanMode mode) const {
+std::pair<Expression, Expression> Expression::segmentedScanWithIndices(const Expression& offsets,
+                                                                       ScanOp op,
+                                                                       bool inclusive) const {
     if (!expr || !offsets.expr) {
-        throw std::runtime_error("Cannot apply segmentedScanMinWithIndices to an empty expression");
+        throw std::runtime_error("Cannot apply segmentedScanWithIndices to an empty expression");
     }
-    validateScanAttributes(ScanOp::Min, mode, "Expression::segmentedScanMinWithIndices");
+    validateScanWithIndicesOp(op, "Expression::segmentedScanWithIndices");
 
     auto out = std::make_shared<PhysicalExpression>();
     std::unordered_map<std::string, uint32_t> dst_input_slots_by_name;
@@ -3465,12 +3507,13 @@ std::pair<Expression, Expression> Expression::segmentedScanMinWithIndices(const 
     std::unordered_map<uint32_t, uint32_t> offsets_old_to_new;
     const uint32_t new_input_idx = cloneSubtreeWithMergedInputs(*expr, nodeIndex, *out, input_old_to_new, dst_input_slots_by_name);
     const uint32_t new_offsets_idx = cloneSubtreeWithMergedInputs(*offsets.expr, offsets.nodeIndex, *out, offsets_old_to_new, dst_input_slots_by_name);
+    const ScanMode mode = scanModeFromInclusive(inclusive);
 
     ExprNode value_node{};
     value_node.op = ExprOp::SEGMENTED_SCAN;
     value_node.lhs = new_input_idx;
     value_node.rhs = new_offsets_idx;
-    value_node.scan_op = ScanOp::Min;
+    value_node.scan_op = op;
     value_node.scan_mode = mode;
     value_node.scan_axis = UINT64_MAX;
     const uint32_t value_idx = static_cast<uint32_t>(out->nodes.size());
@@ -3480,44 +3523,7 @@ std::pair<Expression, Expression> Expression::segmentedScanMinWithIndices(const 
     index_node.op = ExprOp::SEGMENTED_SCAN;
     index_node.lhs = new_input_idx;
     index_node.rhs = new_offsets_idx;
-    index_node.scan_op = ScanOp::ArgMin;
-    index_node.scan_mode = mode;
-    index_node.scan_axis = UINT64_MAX;
-    const uint32_t index_idx = static_cast<uint32_t>(out->nodes.size());
-    out->nodes.push_back(std::move(index_node));
-
-    out->output_node = value_idx;
-    return {Expression(out, value_idx), Expression(out, index_idx)};
-}
-
-std::pair<Expression, Expression> Expression::segmentedScanMaxWithIndices(const Expression& offsets, ScanMode mode) const {
-    if (!expr || !offsets.expr) {
-        throw std::runtime_error("Cannot apply segmentedScanMaxWithIndices to an empty expression");
-    }
-    validateScanAttributes(ScanOp::Max, mode, "Expression::segmentedScanMaxWithIndices");
-
-    auto out = std::make_shared<PhysicalExpression>();
-    std::unordered_map<std::string, uint32_t> dst_input_slots_by_name;
-    std::unordered_map<uint32_t, uint32_t> input_old_to_new;
-    std::unordered_map<uint32_t, uint32_t> offsets_old_to_new;
-    const uint32_t new_input_idx = cloneSubtreeWithMergedInputs(*expr, nodeIndex, *out, input_old_to_new, dst_input_slots_by_name);
-    const uint32_t new_offsets_idx = cloneSubtreeWithMergedInputs(*offsets.expr, offsets.nodeIndex, *out, offsets_old_to_new, dst_input_slots_by_name);
-
-    ExprNode value_node{};
-    value_node.op = ExprOp::SEGMENTED_SCAN;
-    value_node.lhs = new_input_idx;
-    value_node.rhs = new_offsets_idx;
-    value_node.scan_op = ScanOp::Max;
-    value_node.scan_mode = mode;
-    value_node.scan_axis = UINT64_MAX;
-    const uint32_t value_idx = static_cast<uint32_t>(out->nodes.size());
-    out->nodes.push_back(std::move(value_node));
-
-    ExprNode index_node{};
-    index_node.op = ExprOp::SEGMENTED_SCAN;
-    index_node.lhs = new_input_idx;
-    index_node.rhs = new_offsets_idx;
-    index_node.scan_op = ScanOp::ArgMax;
+    index_node.scan_op = indexScanOpForValueScanOp(op);
     index_node.scan_mode = mode;
     index_node.scan_axis = UINT64_MAX;
     const uint32_t index_idx = static_cast<uint32_t>(out->nodes.size());

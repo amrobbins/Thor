@@ -1142,6 +1142,7 @@ static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization
             case ExprOp::SQRT:
             case ExprOp::TANH:
             case ExprOp::NORMCDF:
+            case ExprOp::CAST:
                 node_dims[i] = node_dims[node.lhs];
                 break;
             case ExprOp::ROPE: {
@@ -1247,6 +1248,10 @@ static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization
                 break;
             case ExprOp::REDUCE_MIN_BACKWARD:
             case ExprOp::REDUCE_MAX_BACKWARD:
+            case ExprOp::SCAN_MIN_BACKWARD:
+            case ExprOp::SCAN_MAX_BACKWARD:
+            case ExprOp::SEGMENTED_SCAN_MIN_BACKWARD:
+            case ExprOp::SEGMENTED_SCAN_MAX_BACKWARD:
                 node_dims[i] = node_dims[node.lhs];
                 break;
             case ExprOp::ATTENTION: {
@@ -3013,6 +3018,7 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDims(const Physical
             case ExprOp::SQRT:
             case ExprOp::TANH:
             case ExprOp::NORMCDF:
+            case ExprOp::CAST:
                 node_dims[i] = node_dims[node.lhs];
                 break;
             case ExprOp::ROPE: {
@@ -3238,6 +3244,7 @@ static uint64_t perElementSemanticFlops(ExprOp op) {
         case ExprOp::LOGICAL_AND:
         case ExprOp::LOGICAL_OR:
         case ExprOp::LOGICAL_NOT:
+        case ExprOp::CAST:
         case ExprOp::WHERE:
             return 1;
 
@@ -3432,6 +3439,7 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDimsForReachable(co
             case ExprOp::SQRT:
             case ExprOp::TANH:
             case ExprOp::NORMCDF:
+            case ExprOp::CAST:
                 node_dims[i] = node_dims[node.lhs];
                 break;
             case ExprOp::ROPE: {
@@ -3617,6 +3625,7 @@ static uint64_t computeFusedStageFlops(const PhysicalExpression& expr,
             case ExprOp::TANH:
             case ExprOp::NORMCDF:
             case ExprOp::LOGICAL_NOT:
+            case ExprOp::CAST:
             case ExprOp::ROPE:
             case ExprOp::MIN:
             case ExprOp::MAX:
@@ -3666,6 +3675,10 @@ static uint64_t computeFusedStageFlops(const PhysicalExpression& expr,
             case ExprOp::RMSNORM:
             case ExprOp::REDUCE_MIN_BACKWARD:
             case ExprOp::REDUCE_MAX_BACKWARD:
+            case ExprOp::SCAN_MIN_BACKWARD:
+            case ExprOp::SCAN_MAX_BACKWARD:
+            case ExprOp::SEGMENTED_SCAN_MIN_BACKWARD:
+            case ExprOp::SEGMENTED_SCAN_MAX_BACKWARD:
                 throw std::runtime_error("Unexpected staged op inside fused kernel while computing FLOPs.");
         }
     }
@@ -3944,6 +3957,12 @@ static uint64_t computeStageFlops(const CompiledExecutionStage& stage, const std
                 throw std::runtime_error("ReduceMinMaxBackward stage missing payload while computing FLOPs.");
             }
             return computeReduceMinMaxBackwardStageFlops(*stage.reduce_minmax_backward, stage_input_dims);
+
+        case CompiledExecutionStage::Kind::ScanMinMaxBackward:
+            if (stage_input_dims.empty()) {
+                throw std::runtime_error("ScanMinMaxBackward stage missing input dims while computing FLOPs.");
+            }
+            return checkedMulU64(numelFromDims(stage_input_dims[0]), 4, "computeScanMinMaxBackwardStageFlops");
     }
 
     throw std::runtime_error("Unknown stage kind while computing FLOPs.");
@@ -4021,6 +4040,14 @@ static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecu
             if (stage_input_dims.empty()) {
                 throw std::runtime_error(
                     "resolveOutputDimsForStageOutput reduce-min/max-backward stage expected at least one input shape.");
+            }
+            return stage_input_dims[0];
+        }
+
+        case CompiledExecutionStage::Kind::ScanMinMaxBackward: {
+            if (stage_input_dims.empty()) {
+                throw std::runtime_error(
+                    "resolveOutputDimsForStageOutput scan-min/max-backward stage expected at least one input shape.");
             }
             return stage_input_dims[0];
         }
@@ -4350,6 +4377,7 @@ static std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>> collectEffe
         case ExprOp::NORMCDF:
         case ExprOp::ROPE:
         case ExprOp::LOGICAL_NOT:
+        case ExprOp::CAST:
         case ExprOp::REDUCE_SUM:
         case ExprOp::REDUCE_PROD:
         case ExprOp::REDUCE_MIN:
@@ -7095,6 +7123,61 @@ std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBac
         std::move(built), adaptedInput, grad_output, output, indices, reductionValueOutput, stream, workspace);
 }
 
+
+std::shared_ptr<StampedScanMinMaxBackward> FusedEquation::stampScanMinMaxBackward(
+    const std::shared_ptr<CompiledScanMinMaxBackward>& compiledStage,
+    Tensor& input,
+    Tensor& grad_output,
+    const std::optional<Tensor>& offsets,
+    Tensor& output,
+    const Stream& stream) const {
+    if (!compiledStage) {
+        throw std::runtime_error("stampScanMinMaxBackward requires non-null compiled stage.");
+    }
+    if (compiledStage->value_op != ScanOp::Min && compiledStage->value_op != ScanOp::Max) {
+        throw std::runtime_error("stampScanMinMaxBackward supports only min/max scans.");
+    }
+    if (input.getDataType() != compiledStage->input_dtype) {
+        throw std::runtime_error("Scan-min/max-backward input dtype does not match compiled dtype.");
+    }
+    if (grad_output.getDataType() != compiledStage->grad_output_dtype || output.getDataType() != compiledStage->output_dtype) {
+        throw std::runtime_error("Scan-min/max-backward grad/output dtype does not match compiled dtype.");
+    }
+    if (grad_output.getDimensions() != input.getDimensions() || output.getDimensions() != input.getDimensions()) {
+        throw std::runtime_error("Scan-min/max-backward grad/output dimensions must match input dimensions.");
+    }
+    if (input.getPlacement() != grad_output.getPlacement() || input.getPlacement() != output.getPlacement()) {
+        throw std::runtime_error("Scan-min/max-backward tensors must be on the same placement.");
+    }
+    if (compiledStage->segmented_by_offsets != offsets.has_value()) {
+        throw std::runtime_error("Scan-min/max-backward segmented-offset presence does not match compiled descriptor.");
+    }
+    if (offsets.has_value()) {
+        if (!compiledStage->offset_dtype.has_value() || offsets->getDataType() != compiledStage->offset_dtype.value()) {
+            throw std::runtime_error("Scan-min/max-backward offsets dtype does not match compiled descriptor.");
+        }
+        if (offsets->getPlacement() != input.getPlacement()) {
+            throw std::runtime_error("Scan-min/max-backward offsets placement must match input placement.");
+        }
+    }
+
+    TensorDescriptor indicesDescriptor(DataType::UINT32, input.getDimensions());
+    Tensor indices(input.getPlacement(), indicesDescriptor);
+
+    const ScanOp arg_op = compiledStage->value_op == ScanOp::Min ? ScanOp::ArgMin : ScanOp::ArgMax;
+    auto arg_compiled = std::make_shared<CompiledScan>(arg_op,
+                                                       compiledStage->mode,
+                                                       compiledStage->axis,
+                                                       compiledStage->reverse,
+                                                       compiledStage->segmented_by_offsets,
+                                                       compiledStage->input_dtype,
+                                                       DataType::UINT32,
+                                                       compiledStage->offset_dtype);
+    auto arg_scan = std::make_shared<StampedScan>(arg_compiled, input, indices, stream, offsets, std::nullopt);
+    auto scatter = prepareFlatScatterAdd(grad_output, indices, output);
+    return std::make_shared<StampedScanMinMaxBackward>(compiledStage, arg_scan, scatter, input, grad_output, output, indices, stream);
+}
+
 StampedExecutionPlan FusedEquation::stampSingleOutput(const std::unordered_map<std::string, Tensor>& inputs,
                                                       const Stream& stream,
                                                       const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs,
@@ -8349,6 +8432,40 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 stampedStages.emplace_back(stampedReduceMinMaxBackward, std::move(dependency_stage_indices), stage_flops);
                 break;
             }
+            case CompiledExecutionStage::Kind::ScanMinMaxBackward: {
+                if (!stage.scan_minmax_backward) {
+                    throw std::runtime_error("Scan-min/max-backward stage missing compiled payload.");
+                }
+                const size_t expected_inputs = stage.scan_minmax_backward->segmented_by_offsets ? 3 : 2;
+                if (stageInputs.size() != expected_inputs) {
+                    throw std::runtime_error("Scan-min/max-backward stage expects input, grad, and optional offsets inputs.");
+                }
+                if (stage.outputs.size() != 1) {
+                    throw std::runtime_error("Scan-min/max-backward stage expects exactly one output.");
+                }
+                Tensor inputTensor = runtimeInputTensor(stageInputs[0]);
+                Tensor gradOutputTensor = runtimeInputTensor(stageInputs[1]);
+                std::optional<Tensor> offsetsTensor = std::nullopt;
+                if (stage.scan_minmax_backward->segmented_by_offsets) {
+                    offsetsTensor = runtimeInputTensor(stageInputs[2]);
+                }
+                const CompiledStageOutput& stageOutput = stage.outputs[0];
+                const std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, 0, stageInputs);
+                auto preallocated_it = preallocated_final_outputs_by_name.find(stageOutput.name);
+                Tensor outputTensor;
+                if (preallocated_it != preallocated_final_outputs_by_name.end()) {
+                    outputTensor = preallocated_it->second;
+                } else {
+                    TensorDescriptor outputDescriptor(stage.scan_minmax_backward->output_dtype, output_dims);
+                    outputTensor = Tensor(inputTensor.getPlacement(), outputDescriptor);
+                }
+                std::shared_ptr<StampedScanMinMaxBackward> stampedScanMinMaxBackward =
+                    stampScanMinMaxBackward(stage.scan_minmax_backward, inputTensor, gradOutputTensor, offsetsTensor, outputTensor, stream);
+                values[stageOutput.value_id] = outputTensor;
+                producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
+                stampedStages.emplace_back(stampedScanMinMaxBackward, std::move(dependency_stage_indices), stage_flops);
+                break;
+            }
         }
         applyAvailableValueAliases(compiled_outputs->value_aliases, values, &producer_stage_by_value_id);
     }
@@ -8714,6 +8831,15 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
             }
             if (stage.input_value_ids.size() != 2 || stage.outputs.size() != 1) {
                 throw std::runtime_error("Reduce-min/max-backward stage expected exactly two inputs and one output.");
+            }
+            value_dims[stage.outputs[0].value_id] = stage_input_dims[0];
+        } else if (stage.kind == CompiledExecutionStage::Kind::ScanMinMaxBackward) {
+            if (!stage.scan_minmax_backward) {
+                throw std::runtime_error("Missing compiled scan-min/max-backward stage.");
+            }
+            const size_t expected_inputs = stage.scan_minmax_backward->segmented_by_offsets ? 3 : 2;
+            if (stage.input_value_ids.size() != expected_inputs || stage.outputs.size() != 1) {
+                throw std::runtime_error("Scan-min/max-backward stage expected input/grad[/offsets] and one output.");
             }
             value_dims[stage.outputs[0].value_id] = stage_input_dims[0];
         } else if (stage.kind == CompiledExecutionStage::Kind::Matmul) {

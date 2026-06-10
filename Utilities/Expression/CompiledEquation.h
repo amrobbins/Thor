@@ -163,6 +163,40 @@ struct CompiledScan {
           offset_dtype(offset_dtype) {}
 };
 
+
+struct CompiledScanMinMaxBackward {
+    const ScanOp value_op;
+    const ScanMode mode;
+    const uint64_t axis;
+    const bool reverse;
+    const bool segmented_by_offsets;
+    const DataType input_dtype;
+    const DataType grad_output_dtype;
+    const DataType output_dtype;
+    const std::optional<DataType> offset_dtype;
+
+    bool operator==(const CompiledScanMinMaxBackward& other) const = default;
+
+    CompiledScanMinMaxBackward(ScanOp value_op,
+                               ScanMode mode,
+                               uint64_t axis,
+                               bool reverse,
+                               bool segmented_by_offsets,
+                               DataType input_dtype,
+                               DataType grad_output_dtype,
+                               DataType output_dtype,
+                               std::optional<DataType> offset_dtype = std::nullopt)
+        : value_op(value_op),
+          mode(mode),
+          axis(axis),
+          reverse(reverse),
+          segmented_by_offsets(segmented_by_offsets),
+          input_dtype(input_dtype),
+          grad_output_dtype(grad_output_dtype),
+          output_dtype(output_dtype),
+          offset_dtype(offset_dtype) {}
+};
+
 struct CompiledSoftmax {
     const cudnnSoftmaxAlgorithm_t algorithm;
     const cudnnSoftmaxMode_t mode;

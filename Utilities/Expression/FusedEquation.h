@@ -11,6 +11,7 @@
 #include "Utilities/Expression/EquationRunner.h"
 #include "Utilities/Expression/Expression.h"
 #include "Utilities/Expression/InPlaceRopeKernel.h"
+#include "Utilities/Expression/FlatScatterAddKernel.h"
 #include "Utilities/Expression/SqueezeAxes.h"
 #include "Utilities/Expression/StampedEquation.h"
 
@@ -47,7 +48,8 @@ struct CompiledExecutionStage {
         AttentionBackward,
         Convolution,
         ConvolutionBackward,
-        ReduceMinMaxBackward
+        ReduceMinMaxBackward,
+        ScanMinMaxBackward
     };
     static std::string kindToString(const Kind kind) {
         switch (kind) {
@@ -81,6 +83,8 @@ struct CompiledExecutionStage {
                 return "ConvolutionBackward";
             case Kind::ReduceMinMaxBackward:
                 return "ReduceMinMaxBackward";
+            case Kind::ScanMinMaxBackward:
+                return "ScanMinMaxBackward";
         }
         return "<unknown>";
     }
@@ -106,6 +110,7 @@ struct CompiledExecutionStage {
     const std::shared_ptr<CompiledConvolution> convolution = nullptr;
     const std::shared_ptr<CompiledConvolutionBackward> convolution_backward = nullptr;
     const std::shared_ptr<CompiledReduceMinMaxBackward> reduce_minmax_backward = nullptr;
+    const std::shared_ptr<CompiledScanMinMaxBackward> scan_minmax_backward = nullptr;
 
     const std::vector<uint32_t> input_value_ids;
     const std::vector<CompiledStageOutput> outputs;
@@ -222,6 +227,11 @@ struct CompiledExecutionStage {
                     throw std::runtime_error("CompiledExecutionStage::outputDType missing reduce-min/max-backward stage.");
                 }
                 return reduce_minmax_backward->output_dtype;
+            case Kind::ScanMinMaxBackward:
+                if (!scan_minmax_backward) {
+                    throw std::runtime_error("CompiledExecutionStage::outputDType missing scan-min/max-backward stage.");
+                }
+                return scan_minmax_backward->output_dtype;
         }
 
         throw std::runtime_error("CompiledExecutionStage::outputDType encountered unknown stage kind.");
@@ -387,6 +397,16 @@ struct CompiledExecutionStage {
                            std::vector<ParameterFanOverride> parameter_fan_overrides = {})
         : kind(Kind::ReduceMinMaxBackward),
           reduce_minmax_backward(reduce_minmax_backward),
+          input_value_ids(std::move(input_value_ids)),
+          outputs(std::move(outputs)),
+          parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
+
+    CompiledExecutionStage(const std::shared_ptr<CompiledScanMinMaxBackward>& scan_minmax_backward,
+                           std::vector<uint32_t> input_value_ids,
+                           std::vector<CompiledStageOutput> outputs,
+                           std::vector<ParameterFanOverride> parameter_fan_overrides = {})
+        : kind(Kind::ScanMinMaxBackward),
+          scan_minmax_backward(scan_minmax_backward),
           input_value_ids(std::move(input_value_ids)),
           outputs(std::move(outputs)),
           parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
@@ -716,6 +736,14 @@ class FusedEquation {
 
     [[nodiscard]] std::shared_ptr<StampedReduceMinMaxBackward> stampReduceMinMaxBackward(
         const std::shared_ptr<CompiledReduceMinMaxBackward>& compiledStage, Tensor& input, Tensor& grad_output, const Stream& stream) const;
+
+    [[nodiscard]] std::shared_ptr<StampedScanMinMaxBackward> stampScanMinMaxBackward(
+        const std::shared_ptr<CompiledScanMinMaxBackward>& compiledStage,
+        Tensor& input,
+        Tensor& grad_output,
+        const std::optional<Tensor>& offsets,
+        Tensor& output,
+        const Stream& stream) const;
 
     [[nodiscard]] std::shared_ptr<CompiledOutputs> compileForRootValues(
         const std::unordered_map<uint32_t, RuntimeInputValue>& root_values) const;

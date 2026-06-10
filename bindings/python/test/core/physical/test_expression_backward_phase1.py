@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 import thor
-from thor.physical import DeviceType, Expression as ex, PhysicalTensor, Placement, ScanMode, ScanOp, Stream, numpy_dtypes
+from thor.physical import DeviceType, Expression as ex, PhysicalTensor, Placement, ScanOp, Stream, numpy_dtypes
 
 FLOAT_DTYPES = [
     thor.DataType.fp16,
@@ -67,12 +67,12 @@ def _host_to_gpu(arr: np.ndarray, dtype: thor.DataType, stream: Stream, gpu_num:
 
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", [thor.DataType.fp16, thor.DataType.bf16, thor.DataType.fp32])
-@pytest.mark.parametrize("mode", [ScanMode.inclusive, ScanMode.exclusive])
-def test_compile_backward_sum_scan_uses_reverse_scan_lowering(dtype: thor.DataType, mode: ScanMode):
+@pytest.mark.parametrize("inclusive", [True, False])
+def test_compile_backward_sum_scan_uses_reverse_scan_lowering(dtype: thor.DataType, inclusive: bool):
     x = ex.input("x")
     upstream_name = "__grad_output"
 
-    out = x.scan(ScanOp.sum, mode, axis=-1)
+    out = x.scan(ScanOp.sum, axis=-1, inclusive=inclusive)
     fwd_eq = ex.compile(out, device_num=0)
     bwd_eq = fwd_eq.compile_backward(["x"], error_input_name=upstream_name)
     assert bwd_eq.output_names() == ["x_grad"]
@@ -82,7 +82,7 @@ def test_compile_backward_sum_scan_uses_reverse_scan_lowering(dtype: thor.DataTy
     grad_np = np.array([[0.5, -1.0, 0.25, 2.0], [1.25, 0.75, -0.5, 1.5]], dtype=np.float32).astype(storage_dtype)
 
     grad_ref = grad_np.astype(np.float32)
-    if mode == ScanMode.inclusive:
+    if inclusive:
         expected = np.flip(np.cumsum(np.flip(grad_ref, axis=-1), axis=-1), axis=-1)
     else:
         reversed_grad = np.flip(grad_ref, axis=-1)
@@ -3271,3 +3271,60 @@ def test_with_compute_dtype_and_output_dtype_on_result_node_numerical():
 
     assert got.shape == expected.shape
     np.testing.assert_array_equal(got, expected)
+
+
+def _prefix_minmax_scan_backward_reference(values: np.ndarray, grad: np.ndarray, op: ScanOp, inclusive: bool) -> np.ndarray:
+    expected = np.zeros_like(values, dtype=np.float32)
+    values32 = values.astype(np.float32)
+    grad32 = grad.astype(np.float32)
+    if values32.ndim != 2:
+        raise AssertionError("reference helper expects a 2D array")
+
+    for row in range(values32.shape[0]):
+        for i in range(values32.shape[1]):
+            begin = 0
+            end = i + 1 if inclusive else i
+            if end <= begin:
+                continue
+            winner = begin
+            winner_value = values32[row, winner]
+            for j in range(begin + 1, end):
+                candidate = values32[row, j]
+                if (op == ScanOp.min and candidate < winner_value) or (op == ScanOp.max and candidate > winner_value):
+                    winner = j
+                    winner_value = candidate
+            expected[row, winner] += grad32[row, i]
+    return expected
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("op", [ScanOp.min, ScanOp.max])
+@pytest.mark.parametrize("inclusive", [True, False])
+def test_compile_backward_minmax_scan_uses_arg_scan_and_flat_scatter_add(op: ScanOp, inclusive: bool):
+    x = ex.input("x")
+    upstream_name = "__grad_output"
+
+    out = x.scan(op=op, axis=-1, inclusive=inclusive)
+    fwd_eq = ex.compile(out, device_num=0)
+    bwd_eq = fwd_eq.compile_backward(["x"], error_input_name=upstream_name)
+    assert bwd_eq.output_names() == ["x_grad"]
+
+    x_np = np.array([[3.0, 1.0, 1.0, 4.0], [2.0, 5.0, 0.0, 0.0]], dtype=np.float32)
+    grad_np = np.array([[0.5, -1.0, 0.25, 2.0], [1.25, 0.75, -0.5, 1.5]], dtype=np.float32)
+    expected = _prefix_minmax_scan_backward_reference(x_np, grad_np, op, inclusive)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, thor.DataType.fp32, stream),
+        upstream_name: _host_to_gpu(grad_np, thor.DataType.fp32, stream),
+    }
+
+    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    stamped.run()
+
+    out_gpu = stamped.output("x_grad")
+    got_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
+    got_host.copy_from_async(out_gpu, stream)
+    stream.synchronize()
+    got = got_host.numpy().copy()
+    np.testing.assert_allclose(got, expected, rtol=1e-5, atol=1e-6)

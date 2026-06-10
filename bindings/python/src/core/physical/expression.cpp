@@ -39,7 +39,6 @@ using AttentionTensorLayout = ThorImplementation::AttentionTensorLayout;
 using AttentionMaskKind = ThorImplementation::AttentionMaskKind;
 using AttentionOptions = ThorImplementation::AttentionOptions;
 using ScanOp = ThorImplementation::ScanOp;
-using ScanMode = ThorImplementation::ScanMode;
 using RotaryScalingKind = ThorImplementation::RotaryScalingKind;
 using RotaryPositionEmbeddingOptions = ThorImplementation::RotaryPositionEmbeddingOptions;
 using PreparedDynamicExpression = ThorImplementation::PreparedDynamicExpression;
@@ -514,11 +513,6 @@ standalone custom kernels.
         .value("arg_max", ScanOp::ArgMax)
         .export_values();
 
-    nb::enum_<ScanMode>(physical, "ScanMode")
-        .value("exclusive", ScanMode::Exclusive)
-        .value("inclusive", ScanMode::Inclusive)
-        .export_values();
-
     auto expr = nb::class_<Expression>(physical, "Expression");
     expr.attr("__module__") = "thor.physical";
 
@@ -673,6 +667,18 @@ Return a new expression whose result node uses the requested compute dtype.
 )nbdoc");
 
     expr.def(
+        "cast",
+        [](const Expression& self, DataType output_dtype) { return self.cast(output_dtype); },
+        "dtype"_a,
+        R"nbdoc(
+Return a value-cast expression with the requested output dtype.
+
+Unlike ``with_output_dtype()``, this inserts an explicit cast node, so boolean
+masks can be converted to integral tensors before integer-only stages such as
+prefix-sum scan.
+)nbdoc");
+
+    expr.def(
         "reshape",
         [](const Expression& self, const std::vector<uint64_t>& new_dims) { return self.reshape(new_dims); },
         "shape"_a,
@@ -717,26 +723,39 @@ axis.
 
     expr.def(
         "scan",
-        [](const Expression& self, ScanOp op, ScanMode mode, int64_t axis) { return self.scan(op, mode, axis); },
+        [](const Expression& self, ScanOp op, int64_t axis, bool inclusive) { return self.scan(op, axis, inclusive); },
         "op"_a = ScanOp::Sum,
-        "mode"_a = ScanMode::Exclusive,
         "axis"_a = -1,
+        "inclusive"_a = true,
         R"nbdoc(
 Prefix scan along the final contiguous axis.
 
 Supported value ops are ``ScanOp.sum``, ``ScanOp.min``, ``ScanOp.max``, and
 ``ScanOp.product``. Index ops ``ScanOp.arg_min`` and ``ScanOp.arg_max`` return
-UINT32 flattened input indices for the winning prefix element. ``ScanMode.exclusive``
-returns each prefix before the current element; ``ScanMode.inclusive`` includes
-the current element. Value-scan output shape and dtype match the input.
+UINT32 flattened input indices for the winning prefix element. ``inclusive=True``
+includes the current element; ``inclusive=False`` returns each prefix before the
+current element. Value-scan output shape and dtype match the input; use
+``cast(thor.DataType.uint32)`` to scan masks as counts.
+)nbdoc");
+
+    expr.def(
+        "prefix_count",
+        [](const Expression& self, bool inclusive, int64_t axis) { return self.prefixCount(inclusive, axis); },
+        "inclusive"_a = true,
+        "axis"_a = -1,
+        R"nbdoc(
+Prefix count of true/nonzero mask elements using UINT32 sum scan.
+
+This is equivalent to ``mask.cast(thor.DataType.uint32).scan(ScanOp.sum, axis, inclusive)`` and is
+intended for nonzero/compaction/ragged-packing index generation.
 )nbdoc");
 
     expr.def(
         "segmented_scan",
-        [](const Expression& self, const Expression& offsets, ScanOp op, ScanMode mode) { return self.segmentedScan(offsets, op, mode); },
+        [](const Expression& self, const Expression& offsets, ScanOp op, bool inclusive) { return self.segmentedScan(offsets, op, inclusive); },
         "offsets"_a,
         "op"_a = ScanOp::Sum,
-        "mode"_a = ScanMode::Exclusive,
+        "inclusive"_a = true,
         R"nbdoc(
 Ragged segmented prefix scan over the flattened input using a rank-1 offsets
 tensor of shape [num_segments + 1]. Offsets must be UINT32 or UINT64. The
@@ -745,68 +764,26 @@ flattened input indices for the winning prefix element.
 )nbdoc");
 
     expr.def(
-        "scan_arg_min",
-        [](const Expression& self, int64_t axis) { return self.scanArgMin(axis); },
-        "axis"_a = -1,
-        R"nbdoc(Inclusive prefix arg-min scan along the final contiguous axis. Returns UINT32 flattened input indices.)nbdoc");
-
-    expr.def(
-        "scan_arg_max",
-        [](const Expression& self, int64_t axis) { return self.scanArgMax(axis); },
-        "axis"_a = -1,
-        R"nbdoc(Inclusive prefix arg-max scan along the final contiguous axis. Returns UINT32 flattened input indices.)nbdoc");
-
-    expr.def(
-        "scan_min_with_indices",
-        [](const Expression& self, int64_t axis, ScanMode mode) {
-            auto result = self.scanMinWithIndices(axis, mode);
+        "scan_with_indices",
+        [](const Expression& self, ScanOp op, int64_t axis, bool inclusive) {
+            auto result = self.scanWithIndices(op, axis, inclusive);
             return nb::make_tuple(result.first, result.second);
         },
+        "op"_a,
         "axis"_a = -1,
-        "mode"_a = ScanMode::Inclusive,
-        R"nbdoc(Return paired prefix-min values and UINT32 flattened input indices from one coalescible scan stage.)nbdoc");
+        "inclusive"_a = true,
+        R"nbdoc(Return paired prefix min/max values and UINT32 flattened input indices from one coalescible scan stage.)nbdoc");
 
     expr.def(
-        "scan_max_with_indices",
-        [](const Expression& self, int64_t axis, ScanMode mode) {
-            auto result = self.scanMaxWithIndices(axis, mode);
-            return nb::make_tuple(result.first, result.second);
-        },
-        "axis"_a = -1,
-        "mode"_a = ScanMode::Inclusive,
-        R"nbdoc(Return paired prefix-max values and UINT32 flattened input indices from one coalescible scan stage.)nbdoc");
-
-    expr.def(
-        "segmented_scan_arg_min",
-        [](const Expression& self, const Expression& offsets) { return self.segmentedScanArgMin(offsets); },
-        "offsets"_a,
-        R"nbdoc(Inclusive ragged segmented prefix arg-min scan. Returns UINT32 flattened input indices.)nbdoc");
-
-    expr.def(
-        "segmented_scan_arg_max",
-        [](const Expression& self, const Expression& offsets) { return self.segmentedScanArgMax(offsets); },
-        "offsets"_a,
-        R"nbdoc(Inclusive ragged segmented prefix arg-max scan. Returns UINT32 flattened input indices.)nbdoc");
-
-    expr.def(
-        "segmented_scan_min_with_indices",
-        [](const Expression& self, const Expression& offsets, ScanMode mode) {
-            auto result = self.segmentedScanMinWithIndices(offsets, mode);
+        "segmented_scan_with_indices",
+        [](const Expression& self, const Expression& offsets, ScanOp op, bool inclusive) {
+            auto result = self.segmentedScanWithIndices(offsets, op, inclusive);
             return nb::make_tuple(result.first, result.second);
         },
         "offsets"_a,
-        "mode"_a = ScanMode::Inclusive,
-        R"nbdoc(Return paired ragged segmented prefix-min values and UINT32 flattened input indices from one coalescible scan stage.)nbdoc");
-
-    expr.def(
-        "segmented_scan_max_with_indices",
-        [](const Expression& self, const Expression& offsets, ScanMode mode) {
-            auto result = self.segmentedScanMaxWithIndices(offsets, mode);
-            return nb::make_tuple(result.first, result.second);
-        },
-        "offsets"_a,
-        "mode"_a = ScanMode::Inclusive,
-        R"nbdoc(Return paired ragged segmented prefix-max values and UINT32 flattened input indices from one coalescible scan stage.)nbdoc");
+        "op"_a,
+        "inclusive"_a = true,
+        R"nbdoc(Return paired ragged segmented prefix min/max values and UINT32 flattened input indices from one coalescible scan stage.)nbdoc");
 
     expr.def(
         "exclusive_scan_sum",

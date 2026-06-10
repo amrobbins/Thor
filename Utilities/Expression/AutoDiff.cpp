@@ -373,6 +373,7 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
             case ExprOp::TANH:
             case ExprOp::NORMCDF:
             case ExprOp::LOGICAL_NOT:
+            case ExprOp::CAST:
             case ExprOp::ROPE:
             case ExprOp::SOFTMAX:
             case ExprOp::TRANSPOSE:
@@ -518,6 +519,7 @@ class BackwardGraphBuilder {
             case ExprOp::STRIDED_VIEW_BACKWARD:
                 return n.fill_dims;
             case ExprOp::NEG:
+            case ExprOp::CAST:
             case ExprOp::SCAN:
             case ExprOp::SEGMENTED_SCAN:
                 return tryInferKnownGradientDims(n.lhs);
@@ -872,6 +874,18 @@ class BackwardGraphBuilder {
     bool isConstantLikeZero(uint32_t node_idx) const {
         double value = 0.0;
         return tryGetConstantLikeValue(node_idx, value) && value == 0.0;
+    }
+
+    uint32_t cast(uint32_t lhs, DataType dtype) {
+        const ExprNode& lhs_node = grad_expr.nodes.at(lhs);
+        if (lhs_node.output_dtype.has_value() && lhs_node.output_dtype.value() == dtype) {
+            return lhs;
+        }
+        ExprNode node{};
+        node.op = ExprOp::CAST;
+        node.lhs = lhs;
+        node.output_dtype = dtype;
+        return push(std::move(node));
     }
 
     uint32_t unary(ExprOp op, uint32_t lhs) {
@@ -1434,6 +1448,33 @@ class BackwardGraphBuilder {
         node.scan_op = op;
         node.scan_mode = mode;
         node.scan_axis = UINT64_MAX;
+        node.scan_reverse = reverse;
+        if (output_dtype.has_value()) {
+            node.output_dtype = output_dtype.value();
+        }
+        return push(std::move(node));
+    }
+
+
+    uint32_t scanMinMaxBackward(ExprOp op,
+                                uint32_t lhs,
+                                uint32_t grad,
+                                uint32_t offsets,
+                                ScanMode mode,
+                                uint64_t axis,
+                                bool reverse,
+                                std::optional<DataType> output_dtype = std::nullopt) {
+        if (op != ExprOp::SCAN_MIN_BACKWARD && op != ExprOp::SCAN_MAX_BACKWARD &&
+            op != ExprOp::SEGMENTED_SCAN_MIN_BACKWARD && op != ExprOp::SEGMENTED_SCAN_MAX_BACKWARD) {
+            throw std::runtime_error("scanMinMaxBackward requires a scan min/max backward op.");
+        }
+        ExprNode node{};
+        node.op = op;
+        node.lhs = lhs;
+        node.rhs = grad;
+        node.aux = offsets;
+        node.scan_mode = mode;
+        node.scan_axis = axis;
         node.scan_reverse = reverse;
         if (output_dtype.has_value()) {
             node.output_dtype = output_dtype.value();
@@ -2290,6 +2331,7 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
             case ExprOp::TANH:
             case ExprOp::NORMCDF:
             case ExprOp::LOGICAL_NOT:
+            case ExprOp::CAST:
             case ExprOp::ROPE:
             case ExprOp::SOFTMAX:
                 node_dims[i] = node_dims[node.lhs];
@@ -2933,6 +2975,7 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
             case ExprOp::LOGICAL_AND:
             case ExprOp::LOGICAL_OR:
             case ExprOp::LOGICAL_NOT:
+            case ExprOp::CAST:
                 throw std::runtime_error("Thor expressions autodiff does not support backward for op " + opName(node.op) + ".");
 
             case ExprOp::SIN: {
@@ -3952,27 +3995,42 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                 if (!node_reaches_requested_inputs.at(node.lhs)) {
                     break;
                 }
-                if (node.scan_op != ScanOp::Sum) {
-                    throw std::runtime_error("Thor expressions autodiff currently supports backward only for sum scan.");
-                }
                 const std::vector<uint64_t> lhs_dims = has_forward_dims ? forward_node_dims.at(node.lhs) : node_dims;
                 const uint32_t grad_like_output = shapeGradLikeNodeOutput(grad, static_cast<uint32_t>(node_idx), node_dims);
                 uint32_t dx;
-                if (node.op == ExprOp::SEGMENTED_SCAN) {
-                    const uint32_t offsets = builder.cloneForward(node.rhs);
-                    dx = builder.segmentedScan(grad_like_output,
-                                               offsets,
-                                               ScanOp::Sum,
-                                               node.scan_mode,
-                                               !node.scan_reverse,
-                                               preferredGradValueDType(forward_expr.nodes.at(node.lhs)));
+                if (node.scan_op == ScanOp::Sum) {
+                    if (node.op == ExprOp::SEGMENTED_SCAN) {
+                        const uint32_t offsets = builder.cloneForward(node.rhs);
+                        dx = builder.segmentedScan(grad_like_output,
+                                                   offsets,
+                                                   ScanOp::Sum,
+                                                   node.scan_mode,
+                                                   !node.scan_reverse,
+                                                   preferredGradValueDType(forward_expr.nodes.at(node.lhs)));
+                    } else {
+                        dx = builder.scan(grad_like_output,
+                                          ScanOp::Sum,
+                                          node.scan_mode,
+                                          node.scan_axis,
+                                          !node.scan_reverse,
+                                          preferredGradValueDType(forward_expr.nodes.at(node.lhs)));
+                    }
+                } else if (node.scan_op == ScanOp::Min || node.scan_op == ScanOp::Max) {
+                    const ExprOp backward_op = node.op == ExprOp::SEGMENTED_SCAN
+                        ? (node.scan_op == ScanOp::Min ? ExprOp::SEGMENTED_SCAN_MIN_BACKWARD : ExprOp::SEGMENTED_SCAN_MAX_BACKWARD)
+                        : (node.scan_op == ScanOp::Min ? ExprOp::SCAN_MIN_BACKWARD : ExprOp::SCAN_MAX_BACKWARD);
+                    const uint32_t offsets = node.op == ExprOp::SEGMENTED_SCAN ? builder.cloneForward(node.rhs) : UINT32_MAX;
+                    const uint32_t grad_for_scatter = builder.cast(grad_like_output, DataType::FP32);
+                    dx = builder.scanMinMaxBackward(backward_op,
+                                                    builder.cloneForward(node.lhs),
+                                                    grad_for_scatter,
+                                                    offsets,
+                                                    node.scan_mode,
+                                                    node.scan_axis,
+                                                    node.scan_reverse,
+                                                    DataType::FP32);
                 } else {
-                    dx = builder.scan(grad_like_output,
-                                      ScanOp::Sum,
-                                      node.scan_mode,
-                                      node.scan_axis,
-                                      !node.scan_reverse,
-                                      preferredGradValueDType(forward_expr.nodes.at(node.lhs)));
+                    throw std::runtime_error("Thor expressions autodiff currently supports backward only for sum/min/max scan.");
                 }
                 addContributionToChild(node.lhs, dx, lhs_dims);
                 break;

@@ -1846,6 +1846,47 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
                                           resolved_scales.pointer_mode);
 }
 
+
+StampedScanMinMaxBackward::StampedScanMinMaxBackward(std::shared_ptr<CompiledScanMinMaxBackward> compiled,
+                                                     std::shared_ptr<StampedScan> arg_scan,
+                                                     std::shared_ptr<BuiltFlatScatterAdd> scatter_add,
+                                                     const Tensor& input,
+                                                     const Tensor& grad_output,
+                                                     const Tensor& output,
+                                                     const Tensor& indices,
+                                                     const Stream& stream)
+    : compiled_scan_minmax_backward(std::move(compiled)),
+      arg_scan(std::move(arg_scan)),
+      scatter_add(std::move(scatter_add)),
+      input(input),
+      grad_output(grad_output),
+      output(output),
+      indices(indices),
+      stream(stream) {
+    if (!compiled_scan_minmax_backward || !this->arg_scan || !this->scatter_add) {
+        throw std::runtime_error("StampedScanMinMaxBackward requires compiled, arg-scan, and scatter-add plans.");
+    }
+    if (input.getDataType() != compiled_scan_minmax_backward->input_dtype ||
+        grad_output.getDataType() != compiled_scan_minmax_backward->grad_output_dtype ||
+        output.getDataType() != compiled_scan_minmax_backward->output_dtype) {
+        throw std::runtime_error("StampedScanMinMaxBackward tensor dtypes do not match the compiled descriptor.");
+    }
+    if (grad_output.getDimensions() != input.getDimensions() || output.getDimensions() != input.getDimensions() ||
+        indices.getDimensions() != input.getDimensions()) {
+        throw std::runtime_error("StampedScanMinMaxBackward expects input, grad, output, and indices with matching shapes.");
+    }
+    if (indices.getDataType() != DataType::UINT32) {
+        throw std::runtime_error("StampedScanMinMaxBackward arg-scan indices must be UINT32.");
+    }
+}
+
+void StampedScanMinMaxBackward::run() { runOn(stream); }
+
+void StampedScanMinMaxBackward::runOn(Stream& run_stream) {
+    arg_scan->runOn(run_stream);
+    runFlatScatterAdd(scatter_add, grad_output, indices, output, run_stream);
+}
+
 StampedReduceMinMaxBackward::StampedReduceMinMaxBackward(std::shared_ptr<BuiltReduction> built,
                                                          const Tensor& input,
                                                          const Tensor& grad_output,
