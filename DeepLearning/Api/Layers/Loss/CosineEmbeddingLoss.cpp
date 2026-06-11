@@ -135,6 +135,7 @@ void CosineEmbeddingLoss::buildSupportLayersAndAddToNetwork() {
                                                       .auxiliaryInput(kTargetName, targetTensor)
                                                       .lossName(kLossName)
                                                       .lossDataType(lossDataType)
+                                       .lossWeight(lossWeight.value_or(1.0f))
                                                       .reportsRawLoss()
                                                       .build();
 
@@ -170,6 +171,7 @@ json CosineEmbeddingLoss::architectureJson() const {
     j["loss_tensor"] = lossTensor.architectureJson();
     j["margin"] = margin;
     j["eps"] = eps;
+    ThorImplementation::addLossWeightToJson(j, lossWeight);
     return j;
 }
 
@@ -189,6 +191,8 @@ void CosineEmbeddingLoss::deserialize(const json& j, Network* network) {
     CosineEmbeddingLoss cosineEmbeddingLoss;
     cosineEmbeddingLoss.lossShape = j.at("loss_shape").get<LossShape>();
     cosineEmbeddingLoss.lossDataType = j.at("loss_data_type").get<DataType>();
+
+    cosineEmbeddingLoss.lossWeight = ThorImplementation::lossWeightFromJson(j);
     cosineEmbeddingLoss.margin = j.value("margin", 0.0f);
     cosineEmbeddingLoss.eps = j.value("eps", 1.0e-8f);
     cosineEmbeddingLoss.input1Tensor = input1;

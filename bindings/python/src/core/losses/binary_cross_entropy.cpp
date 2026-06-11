@@ -24,7 +24,8 @@ void bind_binary_cross_entropy(nb::module_ &losses) {
            Tensor predictions,
            Tensor labels,
            DataType loss_data_type,
-           bool reportsElementwiseLoss) {
+           bool reportsElementwiseLoss,
+           std::optional<float> loss_weight) {
             if (predictions.getDimensions().size() != 1 || predictions.getDimensions()[0] != 1) {
                 string error_message =
                     "BinaryCrossEntropy instance: predictions must be a 1 dimensional tensor of size one but predictions is " +
@@ -42,7 +43,8 @@ void bind_binary_cross_entropy(nb::module_ &losses) {
             }
 
             BinaryCrossEntropy::Builder builder;
-            builder.network(network).predictions(predictions).labels(labels).lossDataType(loss_data_type);
+            builder.network(network).predictions(predictions).labels(labels).lossDataType(loss_data_type)
+                .lossWeight(loss_weight.value_or(1.0f));
 
             if (reportsElementwiseLoss)
                 builder.reportsElementwiseLoss();
@@ -64,6 +66,8 @@ void bind_binary_cross_entropy(nb::module_ &losses) {
         //         "reports_elementwise_loss: bool | None = None, "
         //         "loss_data_type: thor.DataType = thor.DataType.fp32"
         //         ") -> None"),
+        nb::kw_only(),
+        "loss_weight"_a.none() = nb::none(),
         R"nbdoc(Construct a Binary Cross Entropy loss.)nbdoc");
 
     binary_cross_entropy.attr("__doc__") = R"nbdoc(

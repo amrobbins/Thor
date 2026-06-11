@@ -97,6 +97,7 @@ def test_compile_backward_sum_scan_uses_reverse_scan_lowering(dtype: thor.DataTy
         "x": _host_to_gpu(x_np, dtype, stream),
         upstream_name: _host_to_gpu(grad_np, dtype, stream),
     }
+    assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["Scan"]
 
     stamped = bwd_eq.stamp(inputs_gpu, stream)
     stamped.run()
@@ -3300,7 +3301,8 @@ def _prefix_minmax_scan_backward_reference(values: np.ndarray, grad: np.ndarray,
 @pytest.mark.cuda
 @pytest.mark.parametrize("op", [ScanOp.min, ScanOp.max])
 @pytest.mark.parametrize("inclusive", [True, False])
-def test_compile_backward_minmax_scan_uses_arg_scan_and_flat_scatter_add(op: ScanOp, inclusive: bool):
+@pytest.mark.parametrize("dtype", [thor.DataType.fp16, thor.DataType.bf16, thor.DataType.fp32])
+def test_compile_backward_minmax_scan_uses_arg_scan_and_flat_scatter_add(op: ScanOp, inclusive: bool, dtype: thor.DataType):
     x = ex.input("x")
     upstream_name = "__grad_output"
 
@@ -3309,15 +3311,18 @@ def test_compile_backward_minmax_scan_uses_arg_scan_and_flat_scatter_add(op: Sca
     bwd_eq = fwd_eq.compile_backward(["x"], error_input_name=upstream_name)
     assert bwd_eq.output_names() == ["x_grad"]
 
-    x_np = np.array([[3.0, 1.0, 1.0, 4.0], [2.0, 5.0, 0.0, 0.0]], dtype=np.float32)
-    grad_np = np.array([[0.5, -1.0, 0.25, 2.0], [1.25, 0.75, -0.5, 1.5]], dtype=np.float32)
+    storage_dtype = _numpy_storage_dtype(dtype)
+    x_np = np.array([[3.0, 1.0, 1.0, 4.0], [2.0, 5.0, 0.0, 0.0]], dtype=np.float32).astype(storage_dtype)
+    grad_np = np.array([[0.5, -1.0, 0.25, 2.0], [1.25, 0.75, -0.5, 1.5]], dtype=np.float32).astype(storage_dtype)
     expected = _prefix_minmax_scan_backward_reference(x_np, grad_np, op, inclusive)
 
     stream = Stream(gpu_num=0)
     inputs_gpu = {
-        "x": _host_to_gpu(x_np, thor.DataType.fp32, stream),
-        upstream_name: _host_to_gpu(grad_np, thor.DataType.fp32, stream),
+        "x": _host_to_gpu(x_np, dtype, stream),
+        upstream_name: _host_to_gpu(grad_np, dtype, stream),
     }
+    stage_kinds = bwd_eq._debug_stage_kinds(inputs_gpu)
+    assert stage_kinds.count("ScanMinMaxBackward") == 1
 
     stamped = bwd_eq.stamp(inputs_gpu, stream)
     stamped.run()
@@ -3328,3 +3333,65 @@ def test_compile_backward_minmax_scan_uses_arg_scan_and_flat_scatter_add(op: Sca
     stream.synchronize()
     got = got_host.numpy().copy()
     np.testing.assert_allclose(got, expected, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("op", [ScanOp.product, ScanOp.arg_min, ScanOp.arg_max])
+def test_compile_backward_rejects_unsupported_scan_ops(op: ScanOp):
+    x = ex.input("x")
+    out = x.scan(op=op, axis=-1, inclusive=True)
+    fwd_eq = ex.compile(out, device_num=0)
+
+    with pytest.raises(RuntimeError, match="backward only for sum/min/max scan"):
+        fwd_eq.compile_backward(["x"], error_input_name="__grad_output")
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("op", [ScanOp.product, ScanOp.arg_min, ScanOp.arg_max])
+def test_compile_backward_rejects_unsupported_segmented_scan_ops(op: ScanOp):
+    x = ex.input("x")
+    offsets = ex.input("offsets")
+    out = x.segmented_scan(offsets, op=op, inclusive=True)
+    fwd_eq = ex.compile(out, device_num=0)
+
+    with pytest.raises(RuntimeError, match="backward only for sum/min/max scan"):
+        fwd_eq.compile_backward(["x"], error_input_name="__grad_output")
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("op", [ScanOp.min, ScanOp.max])
+def test_compile_backward_rejects_scan_with_indices_indices_only_output_path(op: ScanOp):
+    x = ex.input("x")
+    _, indices = x.scan_with_indices(op=op, axis=-1, inclusive=True)
+    fwd_eq = ex.compile(indices, device_num=0)
+
+    with pytest.raises(RuntimeError, match="backward only for sum/min/max scan"):
+        fwd_eq.compile_backward(["x"], error_input_name="__grad_indices")
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("op", [ScanOp.min, ScanOp.max])
+def test_compile_backward_rejects_segmented_scan_with_indices_indices_only_output_path(op: ScanOp):
+    x = ex.input("x")
+    offsets = ex.input("offsets")
+    _, indices = x.segmented_scan_with_indices(offsets, op=op, inclusive=True)
+    fwd_eq = ex.compile(indices, device_num=0)
+
+    with pytest.raises(RuntimeError, match="backward only for sum/min/max scan"):
+        fwd_eq.compile_backward(["x"], error_input_name="__grad_indices")
+
+
+@pytest.mark.cuda
+def test_compile_backward_rejects_scan_with_indices_mixed_value_and_index_output_path():
+    x = ex.input("x")
+    values, indices = x.scan_with_indices(op=ScanOp.min, axis=-1, inclusive=True)
+    fwd_eq = ex.outputs({"values": values, "indices": indices}).compile(device_num=0)
+
+    with pytest.raises(RuntimeError, match="backward only for sum/min/max scan"):
+        fwd_eq.compile_backward(
+            ["x"],
+            feature_output_name_to_error_input_name={
+                "values": "__grad_values",
+                "indices": "__grad_indices",
+            },
+        )

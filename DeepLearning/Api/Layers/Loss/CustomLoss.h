@@ -30,7 +30,8 @@ class CustomLoss : public Loss {
                std::string lossName = "loss",
                std::string gradientName = "predictions_grad",
                std::optional<Tensor> lossTensor = std::nullopt,
-               std::optional<DataType> lossDataType = std::nullopt);
+               std::optional<DataType> lossDataType = std::nullopt,
+               std::optional<float> lossWeight = std::nullopt);
 
     ~CustomLoss() override = default;
 
@@ -136,8 +137,10 @@ class CustomLoss::Builder {
                               std::move(lossName),
                               std::move(gradientName),
                               _lossTensor,
-                              _lossDataType);
+                              _lossDataType,
+                              ThorImplementation::normalizeLossWeight(_lossWeight));
         customLoss.lossShape = lossShape;
+        customLoss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         customLoss.network = _network.value();
 
         if (customLoss.isMultiLayer()) {
@@ -213,6 +216,13 @@ class CustomLoss::Builder {
         return *this;
     }
 
+    virtual CustomLoss::Builder& lossWeight(float lossWeight) {
+        THOR_THROW_IF_FALSE(!this->_lossWeight.has_value());
+        ThorImplementation::validateLossWeight(lossWeight);
+        this->_lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
+        return *this;
+    }
+
     virtual CustomLoss::Builder& lossDataType(DataType lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
         THOR_THROW_IF_FALSE(lossDataType == DataType::FP32 || lossDataType == DataType::FP16);
@@ -257,6 +267,7 @@ class CustomLoss::Builder {
     std::optional<std::string> _gradientName;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
+    std::optional<float> _lossWeight;
 };
 
 }  // namespace Thor

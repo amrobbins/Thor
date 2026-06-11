@@ -88,4 +88,4 @@ def test_mae_rejects_wrong_arity():
         thor.losses.MAE(n, preds)  # missing labels
 
     with pytest.raises(TypeError):
-        thor.losses.MAE(n, preds, labels, None, False, 123)  # extra arg
+        thor.losses.MAE(n, preds, labels, None, False, 123, 456)  # extra arg

@@ -96,7 +96,8 @@ void bind_poisson_nll_loss(nb::module_ &losses) {
            bool full,
            float eps,
            std::optional<DataType> loss_data_type,
-           LossShape reported_loss_shape) {
+           LossShape reported_loss_shape,
+           std::optional<float> loss_weight) {
             const string loss_name = "PoissonNLLLoss instance";
             validatePoissonNLLLossArguments(loss_name, predictions, labels, loss_data_type, reported_loss_shape, eps);
 
@@ -108,7 +109,8 @@ void bind_poisson_nll_loss(nb::module_ &losses) {
                 .logInput(log_input)
                 .full(full)
                 .eps(eps)
-                .lossDataType(effectiveLossDataType);
+                .lossDataType(effectiveLossDataType)
+                .lossWeight(loss_weight.value_or(1.0f));
             setReportedLossShape(builder, reported_loss_shape);
             PoissonNLLLoss built = builder.build();
 
@@ -122,6 +124,8 @@ void bind_poisson_nll_loss(nb::module_ &losses) {
         "eps"_a = 1.0e-8f,
         "loss_data_type"_a.none() = nb::none(),
         "reported_loss_shape"_a = LossShape::BATCH,
+        nb::kw_only(),
+        "loss_weight"_a.none() = nb::none(),
         R"nbdoc(Construct a Poisson negative log-likelihood loss.)nbdoc");
 
     poisson_nll_loss.def_prop_ro("log_input", &PoissonNLLLoss::getLogInput);

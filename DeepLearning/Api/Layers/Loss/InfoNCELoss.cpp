@@ -79,6 +79,7 @@ void InfoNCELoss::buildSupportLayersAndAddToNetwork() {
                                     .lossName(kLossName)
                                     .gradientName(kGradientName)
                                     .lossDataType(lossDataType)
+                                       .lossWeight(lossWeight.value_or(1.0f))
                                     .reportsRawLoss()
                                     .build();
 
@@ -121,6 +122,8 @@ void InfoNCELoss::deserialize(const json& j, Network* network) {
     InfoNCELoss infoNCELoss;
     infoNCELoss.lossShape = j.at("loss_shape").get<LossShape>();
     infoNCELoss.lossDataType = j.at("loss_data_type").get<DataType>();
+
+    infoNCELoss.lossWeight = ThorImplementation::lossWeightFromJson(j);
     infoNCELoss.temperature = j.value("temperature", 1.0f);
     infoNCELoss.predictionsTensor = predictions;
     infoNCELoss.labelsTensor = labels;

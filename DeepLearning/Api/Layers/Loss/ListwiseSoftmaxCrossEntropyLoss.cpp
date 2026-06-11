@@ -88,7 +88,8 @@ void ListwiseSoftmaxCrossEntropyLoss::buildSupportLayersAndAddToNetwork() {
                                                    makeListwiseSoftmaxCrossEntropyGradientExpression(predictionsTensor.getDataType(),
                                                                                                      temperature,
                                                                                                      maskTensor.has_value()),
-                                                   lossDataType);
+                                                   lossDataType,
+                                                   lossWeight);
     lossTensor = Common::shapeRawListwiseLoss(*network, lossShaperInput, lossShape);
 }
 
@@ -123,6 +124,8 @@ void ListwiseSoftmaxCrossEntropyLoss::deserialize(const json& j, Network* networ
     ListwiseSoftmaxCrossEntropyLoss loss;
     loss.lossShape = j.at("loss_shape").get<LossShape>();
     loss.lossDataType = j.at("loss_data_type").get<DataType>();
+
+    loss.lossWeight = ThorImplementation::lossWeightFromJson(j);
     loss.temperature = j.value("temperature", 1.0f);
     loss.predictionsTensor = predictions;
     loss.labelsTensor = labels;

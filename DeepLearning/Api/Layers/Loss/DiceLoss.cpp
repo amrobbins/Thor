@@ -127,6 +127,7 @@ void DiceLoss::buildSupportLayersAndAddToNetwork() {
                              .lossName(kLossName)
                              .gradientName(kGradientName)
                              .lossDataType(lossDataType)
+                                       .lossWeight(lossWeight.value_or(1.0f))
                              .reportsRawLoss()
                              .build();
 
@@ -168,6 +169,8 @@ void DiceLoss::deserialize(const json& j, Network* network) {
     DiceLoss loss;
     loss.lossShape = j.at("loss_shape").get<LossShape>();
     loss.lossDataType = j.at("loss_data_type").get<DataType>();
+
+    loss.lossWeight = ThorImplementation::lossWeightFromJson(j);
     loss.smooth = j.value("smooth", 1.0f);
     loss.predictionsTensor = predictions;
     loss.labelsTensor = labels;

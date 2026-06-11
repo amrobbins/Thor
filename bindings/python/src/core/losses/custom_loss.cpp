@@ -1,5 +1,6 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/optional.h>
 
 #include <utility>
 
@@ -33,7 +34,8 @@ void bind_custom_loss(nb::module_& losses) {
            const std::string& predictions_name,
            const std::string& labels_name,
            const std::string& loss_name,
-           const std::string& gradient_name) {
+           const std::string& gradient_name,
+           std::optional<float> loss_weight) {
             CustomLoss::Builder builder;
             builder.network(network)
                 .lossExpression(std::move(loss_expression))
@@ -44,7 +46,8 @@ void bind_custom_loss(nb::module_& losses) {
                 .labelsName(labels_name)
                 .lossName(loss_name)
                 .gradientName(gradient_name)
-                .lossDataType(loss_data_type);
+                .lossDataType(loss_data_type)
+                .lossWeight(loss_weight.value_or(1.0f));
 
             switch (reported_loss_shape) {
                 case Loss::LossShape::BATCH:
@@ -77,6 +80,8 @@ void bind_custom_loss(nb::module_& losses) {
         "labels_name"_a = "labels",
         "loss_name"_a = "loss",
         "gradient_name"_a = "predictions_grad",
+        nb::kw_only(),
+        "loss_weight"_a.none() = nb::none(),
         R"nbdoc(Construct an expression-backed CustomLoss.)nbdoc");
 
     custom_loss.def_prop_ro("predictions_name", &CustomLoss::getPredictionsName);

@@ -81,6 +81,7 @@ void MAE::buildSupportLayersAndAddToNetwork() {
                                           .lossName(kLossName)
                                           .gradientName(kGradientName)
                                           .lossDataType(lossDataType)
+                                       .lossWeight(lossWeight.value_or(1.0f))
                                           .reportsRawLoss()
                                           .build();
 
@@ -121,6 +122,8 @@ void MAE::deserialize(const json& j, Network* network) {
     MAE meanAbsoluteError;
     meanAbsoluteError.lossShape = j.at("loss_shape").get<LossShape>();
     meanAbsoluteError.lossDataType = j.at("loss_data_type").get<DataType>();
+
+    meanAbsoluteError.lossWeight = ThorImplementation::lossWeightFromJson(j);
     meanAbsoluteError.predictionsTensor = predictions;
     meanAbsoluteError.labelsTensor = labels;
     meanAbsoluteError.network = network;

@@ -93,6 +93,8 @@ class WassersteinGANCriticLoss::Builder {
         wassersteinGANCriticLoss.realScoresTensor = _realScores.value();
         wassersteinGANCriticLoss.fakeScoresTensor = _fakeScores.value();
         wassersteinGANCriticLoss.lossDataType = _lossDataType.value();
+
+        wassersteinGANCriticLoss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         wassersteinGANCriticLoss.lossShape = _lossShape.value();
         wassersteinGANCriticLoss.network = _network.value();
         wassersteinGANCriticLoss.initialized = true;
@@ -146,6 +148,13 @@ class WassersteinGANCriticLoss::Builder {
         return *this;
     }
 
+    virtual WassersteinGANCriticLoss::Builder & lossWeight(float lossWeight) {
+        THOR_THROW_IF_FALSE(!this->_lossWeight.has_value());
+        ThorImplementation::validateLossWeight(lossWeight);
+        this->_lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
+        return *this;
+    }
+
     virtual WassersteinGANCriticLoss::Builder &lossDataType(DataType _lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
         THOR_THROW_IF_FALSE(_lossDataType == DataType::FP16 || _lossDataType == DataType::FP32);
@@ -159,6 +168,7 @@ class WassersteinGANCriticLoss::Builder {
     std::optional<Tensor> _fakeScores;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
+    std::optional<float> _lossWeight;
 };
 
 }  // namespace Thor

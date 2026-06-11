@@ -1,4 +1,5 @@
 #include "DeepLearning/Implementation/Layers/Loss/CustomLoss.h"
+#include "DeepLearning/Implementation/Layers/Loss/WeightedLossExpression.h"
 
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 #include "DeepLearning/Implementation/ThorError.h"
@@ -82,14 +83,16 @@ CustomLoss::CustomLoss(DynamicExpression lossExpression,
                        std::string labelsName,
                        std::string lossName,
                        std::string gradientName,
-                       DataType lossDataType)
+                       DataType lossDataType,
+                       std::optional<float> lossWeight)
     : Loss(lossDataType),
       lossExpression(std::move(lossExpression)),
       gradientExpression(std::move(gradientExpression)),
       predictionsName(std::move(predictionsName)),
       labelsName(std::move(labelsName)),
       lossName(std::move(lossName)),
-      gradientName(std::move(gradientName)) {
+      gradientName(std::move(gradientName)),
+      lossWeight(normalizeLossWeight(lossWeight)) {
     validateName(this->predictionsName, "predictions input");
     validateName(this->labelsName, "labels input");
     validateName(this->lossName, "loss output");
@@ -168,10 +171,22 @@ std::pair<std::vector<uint64_t>, DataType> CustomLoss::inferExpressionOutputDesc
 }
 
 std::optional<Tensor> CustomLoss::createFeatureOutputTensor() {
-    const auto [outputShape, outputDType] = inferExpressionOutputDescriptor(lossExpression, lossName, "loss");
+    const auto [outputShape, outputDType] = inferExpressionOutputDescriptor(weightedLossExpression(), lossName, "loss");
     THOR_THROW_IF_FALSE(outputDType == lossDataType);
     THOR_THROW_IF_FALSE(featureInput.has_value());
     return Tensor(featureInput.value().getPlacement(), TensorDescriptor(outputDType, outputShape));
+}
+
+DynamicExpression CustomLoss::weightedLossExpression() const {
+    return applyLossWeightToDynamicExpression(lossExpression, {{lossName, lossDataType}}, lossWeight, "CustomLoss loss");
+}
+
+DynamicExpression CustomLoss::weightedGradientExpression() const {
+    THOR_THROW_IF_FALSE(featureInput.has_value());
+    return applyLossWeightToDynamicExpression(gradientExpression,
+                                              {{gradientName, featureInput.value().getDescriptor().getDataType()}},
+                                              lossWeight,
+                                              "CustomLoss gradient");
 }
 
 void CustomLoss::tryFuseGradientIntoDrivingLayer() {
@@ -189,7 +204,7 @@ void CustomLoss::tryFuseGradientIntoDrivingLayer() {
 
     gradientFusedIntoDrivingLayer = customLayer->registerFusedCustomLossGradient(featureInput.value(),
                                                                                  labelsInput.value(),
-                                                                                 gradientExpression,
+                                                                                 weightedGradientExpression(),
                                                                                  predictionsName,
                                                                                  labelsName,
                                                                                  gradientName);
@@ -231,7 +246,7 @@ void CustomLoss::compileImpl() {
 
     TensorMap inputs = buildLossInputs();
     TensorMap lossOutputs = buildLossOutputs();
-    lossPrepared = std::make_shared<PreparedDynamicExpression>(lossExpression.prepare(inputs, lossOutputs, stream));
+    lossPrepared = std::make_shared<PreparedDynamicExpression>(weightedLossExpression().prepare(inputs, lossOutputs, stream));
     lossPreRunHook = lossPrepared->preForwardHook();
     lossStamped = std::make_shared<StampedExecutionPlan>(lossPrepared->stamp(lossOutputs));
     validateExpressionOutputNames(lossExpression, lossName, "loss");
@@ -243,7 +258,7 @@ void CustomLoss::compileImpl() {
         THOR_THROW_IF_FALSE(errorOutput.value().getDescriptor() == featureInput.value().getDescriptor());
 
         TensorMap gradientOutputs = buildGradientOutputs();
-        gradientPrepared = std::make_shared<PreparedDynamicExpression>(gradientExpression.prepare(inputs, gradientOutputs, stream));
+        gradientPrepared = std::make_shared<PreparedDynamicExpression>(weightedGradientExpression().prepare(inputs, gradientOutputs, stream));
         gradientPreRunHook = gradientPrepared->preForwardHook();
         gradientStamped = std::make_shared<StampedExecutionPlan>(gradientPrepared->stamp(gradientOutputs));
     } else {

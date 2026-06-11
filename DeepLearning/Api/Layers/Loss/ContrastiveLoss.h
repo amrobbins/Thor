@@ -86,6 +86,8 @@ class ContrastiveLoss::Builder {
         contrastiveLoss.predictionsTensor = _predictions.value();
         contrastiveLoss.labelsTensor = _labels.value();
         contrastiveLoss.lossDataType = _lossDataType.value();
+
+        contrastiveLoss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         contrastiveLoss.lossShape = _lossShape.value();
         contrastiveLoss.margin = margin;
         contrastiveLoss.network = _network.value();
@@ -147,6 +149,13 @@ class ContrastiveLoss::Builder {
         return *this;
     }
 
+    virtual ContrastiveLoss::Builder & lossWeight(float lossWeight) {
+        THOR_THROW_IF_FALSE(!this->_lossWeight.has_value());
+        ThorImplementation::validateLossWeight(lossWeight);
+        this->_lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
+        return *this;
+    }
+
     virtual ContrastiveLoss::Builder &lossDataType(DataType _lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
         THOR_THROW_IF_FALSE(_lossDataType == DataType::FP16 || _lossDataType == DataType::FP32);
@@ -160,6 +169,7 @@ class ContrastiveLoss::Builder {
     std::optional<Tensor> _labels;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
+    std::optional<float> _lossWeight;
     std::optional<float> _margin;
 };
 

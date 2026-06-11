@@ -48,7 +48,8 @@ Tensor buildRawListwiseLoss(Network& network,
                             const std::optional<Tensor>& mask,
                             ThorImplementation::DynamicExpression lossExpression,
                             ThorImplementation::DynamicExpression gradientExpression,
-                            DataType lossDataType);
+                            DataType lossDataType,
+                            std::optional<float> lossWeight);
 Tensor shapeRawListwiseLoss(Network& network, Tensor rawLoss, Loss::LossShape lossShape);
 
 }  // namespace ListwiseLossCommon

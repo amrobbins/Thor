@@ -92,6 +92,8 @@ class BinaryFocalLoss::Builder {
         binaryFocalLoss.predictionsTensor = _predictions.value();
         binaryFocalLoss.labelsTensor = _labels.value();
         binaryFocalLoss.lossDataType = _lossDataType.value();
+
+        binaryFocalLoss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         binaryFocalLoss.lossShape = _lossShape.value();
         binaryFocalLoss.gamma = gamma;
         binaryFocalLoss.alpha = alpha;
@@ -155,6 +157,13 @@ class BinaryFocalLoss::Builder {
         return *this;
     }
 
+    virtual BinaryFocalLoss::Builder & lossWeight(float lossWeight) {
+        THOR_THROW_IF_FALSE(!this->_lossWeight.has_value());
+        ThorImplementation::validateLossWeight(lossWeight);
+        this->_lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
+        return *this;
+    }
+
     virtual BinaryFocalLoss::Builder &lossDataType(DataType _lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
         THOR_THROW_IF_FALSE(_lossDataType == DataType::FP16 || _lossDataType == DataType::FP32);
@@ -168,6 +177,7 @@ class BinaryFocalLoss::Builder {
     std::optional<Tensor> _labels;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
+    std::optional<float> _lossWeight;
     std::optional<float> _gamma;
     std::optional<float> _alpha;
 };

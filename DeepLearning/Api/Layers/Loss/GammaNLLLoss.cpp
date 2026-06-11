@@ -75,6 +75,7 @@ void GammaNLLLoss::buildSupportLayersAndAddToNetwork() {
                                       .lossName(kLossName)
                                       .gradientName(kGradientName)
                                       .lossDataType(lossDataType)
+                                       .lossWeight(lossWeight.value_or(1.0f))
                                       .reportsRawLoss()
                                       .build();
 
@@ -117,6 +118,8 @@ void GammaNLLLoss::deserialize(const json& j, Network* network) {
     GammaNLLLoss loss;
     loss.lossShape = j.at("loss_shape").get<LossShape>();
     loss.lossDataType = j.at("loss_data_type").get<DataType>();
+
+    loss.lossWeight = ThorImplementation::lossWeightFromJson(j);
     loss.eps = j.value("eps", 1.0e-6f);
     loss.predictionsTensor = predictions;
     loss.labelsTensor = labels;

@@ -99,6 +99,8 @@ class LSGANDiscriminatorLoss::Builder {
         loss.realTarget = _realTarget;
         loss.fakeTarget = _fakeTarget;
         loss.lossDataType = _lossDataType.value();
+
+        loss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         loss.lossShape = _lossShape.value();
         loss.network = _network.value();
         loss.initialized = true;
@@ -162,6 +164,13 @@ class LSGANDiscriminatorLoss::Builder {
         return *this;
     }
 
+    virtual LSGANDiscriminatorLoss::Builder & lossWeight(float lossWeight) {
+        THOR_THROW_IF_FALSE(!this->_lossWeight.has_value());
+        ThorImplementation::validateLossWeight(lossWeight);
+        this->_lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
+        return *this;
+    }
+
     virtual LSGANDiscriminatorLoss::Builder &lossDataType(DataType _lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
         THOR_THROW_IF_FALSE(_lossDataType == DataType::FP16 || _lossDataType == DataType::FP32);
@@ -177,6 +186,7 @@ class LSGANDiscriminatorLoss::Builder {
     float _fakeTarget = 0.0f;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
+    std::optional<float> _lossWeight;
 };
 
 }  // namespace Thor

@@ -1,3 +1,5 @@
+import json
+
 import numpy as np
 import pytest
 import thor
@@ -291,3 +293,45 @@ def test_lsgan_generator_loss_numerical_forward_matches_reference(reported_loss_
     actual = _run_generator_loss_network(fake_scores, reported_loss_shape, target)
 
     np.testing.assert_allclose(actual, expected, rtol=2e-5, atol=2e-6)
+
+
+def _loss_weight_fields(network: thor.Network):
+    arch = json.loads(network.get_architecture_json())
+    return [layer["loss_weight"] for layer in arch["layers"] if "loss_weight" in layer]
+
+
+def test_lsgan_generator_loss_weight_none_and_one_are_noop_in_python_api_and_json():
+    for loss_weight in (None, 1.0):
+        n = thor.Network(f"test_net_lsgan_generator_loss_weight_noop_{loss_weight}")
+        dtype = thor.DataType.fp32
+        fake_scores = thor.layers.NetworkInput(n, "fake_scores", [3], dtype)
+
+        loss = thor.losses.gan.LSGANGeneratorLoss(
+            n,
+            fake_scores.get_feature_output(),
+            dtype,
+            thor.losses.LossShape.raw,
+            1.0,
+            loss_weight=loss_weight,
+        )
+
+        assert loss.loss_weight is None
+        assert _loss_weight_fields(n) == []
+
+
+def test_lsgan_generator_loss_weight_non_noop_reaches_public_and_support_layer_json():
+    n = thor.Network("test_net_lsgan_generator_loss_weight_non_noop")
+    dtype = thor.DataType.fp32
+    fake_scores = thor.layers.NetworkInput(n, "fake_scores", [3], dtype)
+
+    loss = thor.losses.gan.LSGANGeneratorLoss(
+        n,
+        fake_scores.get_feature_output(),
+        dtype,
+        thor.losses.LossShape.raw,
+        1.0,
+        loss_weight=2.5,
+    )
+
+    assert loss.loss_weight == pytest.approx(2.5)
+    assert _loss_weight_fields(n) == pytest.approx([2.5])

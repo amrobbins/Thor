@@ -22,11 +22,13 @@ MultiInputCustomLoss::MultiInputCustomLoss(ThorImplementation::DynamicExpression
                                            vector<InputSpec> inputs,
                                            string lossName,
                                            optional<Tensor> lossTensor,
-                                           optional<DataType> requestedLossDataType)
+                                           optional<DataType> requestedLossDataType,
+                                           std::optional<float> lossWeight)
     : lossExpression(std::move(lossExpression)),
       gradientExpression(std::move(gradientExpression)),
       inputs(std::move(inputs)),
       lossName(std::move(lossName)) {
+    this->lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
     validateName(this->lossName, "loss output");
     validateInputSpecs();
 
@@ -300,7 +302,7 @@ shared_ptr<ThorImplementation::Layer> MultiInputCustomLoss::stamp(ThorImplementa
     }
 
     shared_ptr<ThorImplementation::MultiInputCustomLoss> customLoss = make_shared<ThorImplementation::MultiInputCustomLoss>(
-        lossExpression, gradientExpression, inputNames, gradientNames, lossName, lossDataType);
+        lossExpression, gradientExpression, inputNames, gradientNames, lossName, lossDataType, lossWeight);
     customLoss->setConstructForInferenceOnly(inferenceOnly);
     return customLoss;
 }
@@ -312,6 +314,7 @@ void MultiInputCustomLoss::buildSupportLayersAndAddToNetwork() {
         .gradientExpression(gradientExpression)
         .lossName(lossName)
         .lossDataType(lossDataType)
+        .lossWeight(lossWeight.value_or(1.0f))
         .reportsRawLoss();
     for (const InputSpec& input : inputs) {
         if (input.gradientName.has_value())
@@ -360,6 +363,7 @@ json MultiInputCustomLoss::architectureJson() const {
     j["loss_shape"] = lossShape;
     j["loss_data_type"] = lossDataType;
     j["loss_name"] = lossName;
+    ThorImplementation::addLossWeightToJson(j, lossWeight);
     j["loss_shaper_input_tensor"] = lossShaperInput.architectureJson();
     j["loss_tensor"] = lossTensor.architectureJson();
 
@@ -427,7 +431,8 @@ void MultiInputCustomLoss::deserialize(const json& j, Network* network) {
                                     inputs,
                                     j.value("loss_name", string("loss")),
                                     rawLossTensor,
-                                    j.at("loss_data_type").get<DataType>());
+                                    j.at("loss_data_type").get<DataType>(),
+                                    ThorImplementation::lossWeightFromJson(j));
     customLoss.lossShape = LossShape::RAW;
     customLoss.addToNetwork(network);
 }

@@ -114,4 +114,4 @@ def test_binary_cross_entropy_rejects_wrong_arity():
         thor.losses.BinaryCrossEntropy(n, preds)  # missing labels
 
     with pytest.raises(TypeError):
-        thor.losses.BinaryCrossEntropy(n, preds, labels, thor.DataType.fp32, False, 123)  # extra arg
+        thor.losses.BinaryCrossEntropy(n, preds, labels, thor.DataType.fp32, False, 123, 456)  # extra arg

@@ -103,6 +103,7 @@ void ContrastiveLoss::buildSupportLayersAndAddToNetwork() {
                                         .lossName(kLossName)
                                         .gradientName(kGradientName)
                                         .lossDataType(lossDataType)
+                                       .lossWeight(lossWeight.value_or(1.0f))
                                         .reportsRawLoss()
                                         .build();
 
@@ -144,6 +145,8 @@ void ContrastiveLoss::deserialize(const json& j, Network* network) {
     ContrastiveLoss contrastiveLoss;
     contrastiveLoss.lossShape = j.at("loss_shape").get<LossShape>();
     contrastiveLoss.lossDataType = j.at("loss_data_type").get<DataType>();
+
+    contrastiveLoss.lossWeight = ThorImplementation::lossWeightFromJson(j);
     contrastiveLoss.margin = j.value("margin", 1.0f);
     contrastiveLoss.predictionsTensor = predictions;
     contrastiveLoss.labelsTensor = labels;

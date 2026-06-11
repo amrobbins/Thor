@@ -74,6 +74,7 @@ void WassersteinGANCriticLoss::buildSupportLayersAndAddToNetwork() {
                                                            .input(kFakeScoresName, fakeScoresTensor, kFakeScoresGradientName)
                                                            .lossName(kLossName)
                                                            .lossDataType(lossDataType)
+                                       .lossWeight(lossWeight.value_or(1.0f))
                                                            .reportsRawLoss()
                                                            .build();
 
@@ -106,6 +107,7 @@ json WassersteinGANCriticLoss::architectureJson() const {
     j["fake_scores_tensor"] = fakeScoresTensor.architectureJson();
     j["loss_shaper_input_tensor"] = lossShaperInput.architectureJson();
     j["loss_tensor"] = lossTensor.architectureJson();
+    ThorImplementation::addLossWeightToJson(j, lossWeight);
     return j;
 }
 
@@ -123,6 +125,8 @@ void WassersteinGANCriticLoss::deserialize(const json& j, Network* network) {
     WassersteinGANCriticLoss loss;
     loss.lossShape = j.at("loss_shape").get<LossShape>();
     loss.lossDataType = j.at("loss_data_type").get<DataType>();
+
+    loss.lossWeight = ThorImplementation::lossWeightFromJson(j);
     loss.realScoresTensor = realScores;
     loss.fakeScoresTensor = fakeScores;
     loss.network = network;

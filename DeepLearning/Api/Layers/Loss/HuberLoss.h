@@ -86,6 +86,8 @@ class HuberLoss::Builder {
         huberLoss.predictionsTensor = _predictions.value();
         huberLoss.labelsTensor = _labels.value();
         huberLoss.lossDataType = _lossDataType.value();
+
+        huberLoss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         huberLoss.lossShape = _lossShape.value();
         huberLoss.delta = delta;
         huberLoss.network = _network.value();
@@ -147,6 +149,13 @@ class HuberLoss::Builder {
         return *this;
     }
 
+    virtual HuberLoss::Builder & lossWeight(float lossWeight) {
+        THOR_THROW_IF_FALSE(!this->_lossWeight.has_value());
+        ThorImplementation::validateLossWeight(lossWeight);
+        this->_lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
+        return *this;
+    }
+
     virtual HuberLoss::Builder &lossDataType(DataType _lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
         THOR_THROW_IF_FALSE(_lossDataType == DataType::FP16 || _lossDataType == DataType::FP32);
@@ -160,6 +169,7 @@ class HuberLoss::Builder {
     std::optional<Tensor> _labels;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
+    std::optional<float> _lossWeight;
     std::optional<float> _delta;
 };
 

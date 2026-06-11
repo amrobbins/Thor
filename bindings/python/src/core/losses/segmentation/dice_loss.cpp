@@ -51,7 +51,8 @@ void bind_dice_loss(nb::module_ &losses) {
            Tensor labels,
            float smooth,
            std::optional<DataType> loss_data_type,
-           LossShape reported_loss_shape) {
+           LossShape reported_loss_shape,
+           std::optional<float> loss_weight) {
             const string loss_name = "DiceLoss instance";
             if (predictions.getDimensions().empty()) {
                 string error_message = loss_name + ": predictions must have at least one feature dimension but predictions is " +
@@ -85,7 +86,8 @@ void bind_dice_loss(nb::module_ &losses) {
             validateReportedLossShape(reported_loss_shape, loss_name);
 
             DiceLoss::Builder builder;
-            builder.network(network).predictions(predictions).labels(labels).smooth(smooth).lossDataType(effectiveLossDataType);
+            builder.network(network).predictions(predictions).labels(labels).smooth(smooth).lossDataType(effectiveLossDataType)
+                .lossWeight(loss_weight.value_or(1.0f));
             setReportedLossShape(builder, reported_loss_shape);
             DiceLoss built = builder.build();
 
@@ -97,6 +99,8 @@ void bind_dice_loss(nb::module_ &losses) {
         "smooth"_a = 1.0f,
         "loss_data_type"_a.none() = nb::none(),
         "reported_loss_shape"_a = LossShape::BATCH,
+        nb::kw_only(),
+        "loss_weight"_a.none() = nb::none(),
         R"nbdoc(Construct a Dice loss.)nbdoc");
 
     dice_loss.def_prop_ro("smooth", &DiceLoss::getSmooth);

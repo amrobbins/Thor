@@ -106,13 +106,15 @@ void bind_margin_ranking_loss(nb::module_& losses) {
            Tensor target,
            float margin,
            std::optional<DataType> loss_data_type,
-           LossShape reported_loss_shape) {
+           LossShape reported_loss_shape,
+           std::optional<float> loss_weight) {
             const string loss_name = "MarginRankingLoss instance";
             validateMarginRankingLossArguments(loss_name, input1, input2, target, margin, loss_data_type, reported_loss_shape);
 
             DataType effectiveLossDataType = loss_data_type.value_or(input1.getDataType());
             MarginRankingLoss::Builder builder;
-            builder.network(network).input1(input1).input2(input2).target(target).margin(margin).lossDataType(effectiveLossDataType);
+            builder.network(network).input1(input1).input2(input2).target(target).margin(margin).lossDataType(effectiveLossDataType)
+                .lossWeight(loss_weight.value_or(1.0f));
             setReportedLossShape(builder, reported_loss_shape);
             MarginRankingLoss built = builder.build();
 
@@ -125,6 +127,8 @@ void bind_margin_ranking_loss(nb::module_& losses) {
         "margin"_a = 0.0f,
         "loss_data_type"_a.none() = nb::none(),
         "reported_loss_shape"_a = LossShape::BATCH,
+        nb::kw_only(),
+        "loss_weight"_a.none() = nb::none(),
         R"nbdoc(Construct a MarginRankingLoss over two score tensors and a target tensor.)nbdoc");
 
     margin_ranking_loss.def_prop_ro("margin", &MarginRankingLoss::getMargin);

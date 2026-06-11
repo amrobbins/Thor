@@ -30,7 +30,8 @@ void bind_listwise_softmax_cross_entropy_loss(nb::module_ &ranking) {
            float temperature,
            std::optional<DataType> loss_data_type,
            LossShape reported_loss_shape,
-           std::optional<Tensor> mask) {
+           std::optional<Tensor> mask,
+           std::optional<float> loss_weight) {
             const string loss_name = "ListwiseSoftmaxCrossEntropyLoss instance";
             ThorPython::Ranking::ListwiseCommon::validateFixedSizeListwiseTensorArguments(loss_name,
                                                                                          predictions,
@@ -42,7 +43,8 @@ void bind_listwise_softmax_cross_entropy_loss(nb::module_ &ranking) {
 
             DataType effectiveLossDataType = loss_data_type.value_or(predictions.getDataType());
             ListwiseSoftmaxCrossEntropyLoss::Builder builder;
-            builder.network(network).predictions(predictions).labels(labels).temperature(temperature).lossDataType(effectiveLossDataType);
+            builder.network(network).predictions(predictions).labels(labels).temperature(temperature).lossDataType(effectiveLossDataType)
+                .lossWeight(loss_weight.value_or(1.0f));
             if (mask.has_value())
                 builder.mask(mask.value());
             ThorPython::Ranking::ListwiseCommon::setReportedLossShape(builder, reported_loss_shape);
@@ -57,6 +59,8 @@ void bind_listwise_softmax_cross_entropy_loss(nb::module_ &ranking) {
         "loss_data_type"_a.none() = nb::none(),
         "reported_loss_shape"_a = LossShape::BATCH,
         "mask"_a.none() = nb::none(),
+        nb::kw_only(),
+        "loss_weight"_a.none() = nb::none(),
         R"nbdoc(Construct a listwise softmax cross entropy loss over fixed-size query/document lists.)nbdoc");
 
     listwise_softmax_cross_entropy_loss.def_prop_ro("temperature", &ListwiseSoftmaxCrossEntropyLoss::getTemperature);

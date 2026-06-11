@@ -96,7 +96,8 @@ void ListNetLoss::buildSupportLayersAndAddToNetwork() {
                                                                                  scoreTemperature,
                                                                                  labelTemperature,
                                                                                  maskTensor.has_value()),
-                                                   lossDataType);
+                                                   lossDataType,
+                                                   lossWeight);
     lossTensor = Common::shapeRawListwiseLoss(*network, lossShaperInput, lossShape);
 }
 
@@ -132,6 +133,8 @@ void ListNetLoss::deserialize(const json& j, Network* network) {
     ListNetLoss listNetLoss;
     listNetLoss.lossShape = j.at("loss_shape").get<LossShape>();
     listNetLoss.lossDataType = j.at("loss_data_type").get<DataType>();
+
+    listNetLoss.lossWeight = ThorImplementation::lossWeightFromJson(j);
     listNetLoss.scoreTemperature = j.value("score_temperature", 1.0f);
     listNetLoss.labelTemperature = j.value("label_temperature", 1.0f);
     listNetLoss.predictionsTensor = predictions;

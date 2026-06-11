@@ -101,6 +101,8 @@ class ListwiseSoftmaxCrossEntropyLoss::Builder {
         listwiseSoftmaxCrossEntropyLoss.predictionsTensor = _predictions.value();
         listwiseSoftmaxCrossEntropyLoss.labelsTensor = _labels.value();
         listwiseSoftmaxCrossEntropyLoss.lossDataType = _lossDataType.value();
+
+        listwiseSoftmaxCrossEntropyLoss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         listwiseSoftmaxCrossEntropyLoss.lossShape = _lossShape.value();
         listwiseSoftmaxCrossEntropyLoss.temperature = temperature;
         listwiseSoftmaxCrossEntropyLoss.maskTensor = _mask;
@@ -170,6 +172,13 @@ class ListwiseSoftmaxCrossEntropyLoss::Builder {
         return *this;
     }
 
+    virtual ListwiseSoftmaxCrossEntropyLoss::Builder & lossWeight(float lossWeight) {
+        THOR_THROW_IF_FALSE(!this->_lossWeight.has_value());
+        ThorImplementation::validateLossWeight(lossWeight);
+        this->_lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
+        return *this;
+    }
+
     virtual ListwiseSoftmaxCrossEntropyLoss::Builder &lossDataType(DataType _lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
         THOR_THROW_IF_FALSE(_lossDataType == DataType::FP16 || _lossDataType == DataType::FP32);
@@ -183,6 +192,7 @@ class ListwiseSoftmaxCrossEntropyLoss::Builder {
     std::optional<Tensor> _labels;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
+    std::optional<float> _lossWeight;
     std::optional<float> _temperature;
     std::optional<Tensor> _mask;
 };

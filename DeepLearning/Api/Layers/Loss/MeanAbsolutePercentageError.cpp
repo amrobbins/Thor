@@ -12,6 +12,7 @@ void MAPE::buildSupportLayersAndAddToNetwork() {
                                                                   .labels(labelsTensor)
                                                                   .reportsRawLoss()
                                                                   .lossDataType(lossDataType)
+                                       .lossWeight(lossWeight.value_or(1.0f))
                                                                   .build();
 
     lossShaperInput = meanAbsolutePercentageError.getLoss();
@@ -50,6 +51,8 @@ void MAPE::deserialize(const json &j, Network *network) {
     MAPE meanAbsolutePercentageError;
     meanAbsolutePercentageError.lossShape = j.at("loss_shape").get<LossShape>();
     meanAbsolutePercentageError.lossDataType = j.at("loss_data_type").get<DataType>();
+
+    meanAbsolutePercentageError.lossWeight = ThorImplementation::lossWeightFromJson(j);
 
     uint64_t originalTensorId;
     originalTensorId = j["predictions_tensor"].at("id").get<uint64_t>();

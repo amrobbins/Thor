@@ -88,4 +88,4 @@ def test_mape_rejects_wrong_arity():
         thor.losses.MAPE(n, preds)  # missing labels
 
     with pytest.raises(TypeError):
-        thor.losses.MAPE(n, preds, labels, None, False, 123)  # extra arg
+        thor.losses.MAPE(n, preds, labels, None, False, 123, 456)  # extra arg

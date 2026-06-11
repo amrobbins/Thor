@@ -33,7 +33,8 @@ class MultiInputCustomLoss : public Loss {
                          std::vector<InputSpec> inputs,
                          std::string lossName = "loss",
                          std::optional<Tensor> lossTensor = std::nullopt,
-                         std::optional<DataType> lossDataType = std::nullopt);
+                         std::optional<DataType> lossDataType = std::nullopt,
+                         std::optional<float> lossWeight = std::nullopt);
 
     ~MultiInputCustomLoss() override = default;
 
@@ -111,8 +112,10 @@ class MultiInputCustomLoss::Builder {
                                         _inputs,
                                         _lossName.value_or("loss"),
                                         _lossTensor,
-                                        _lossDataType);
+                                        _lossDataType,
+                                        ThorImplementation::normalizeLossWeight(_lossWeight));
         customLoss.lossShape = lossShape;
+        customLoss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         customLoss.network = _network.value();
 
         if (customLoss.isMultiLayer()) {
@@ -169,6 +172,13 @@ class MultiInputCustomLoss::Builder {
         return *this;
     }
 
+    virtual MultiInputCustomLoss::Builder& lossWeight(float lossWeight) {
+        THOR_THROW_IF_FALSE(!this->_lossWeight.has_value());
+        ThorImplementation::validateLossWeight(lossWeight);
+        this->_lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
+        return *this;
+    }
+
     virtual MultiInputCustomLoss::Builder& lossDataType(DataType lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
         THOR_THROW_IF_FALSE(lossDataType == DataType::FP32 || lossDataType == DataType::FP16);
@@ -208,6 +218,7 @@ class MultiInputCustomLoss::Builder {
     std::optional<std::string> _lossName;
     std::optional<Tensor> _lossTensor;
     std::optional<DataType> _lossDataType;
+    std::optional<float> _lossWeight;
     std::optional<LossShape> _lossShape;
 };
 

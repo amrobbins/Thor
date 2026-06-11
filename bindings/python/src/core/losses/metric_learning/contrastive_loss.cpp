@@ -92,13 +92,15 @@ void bind_contrastive_loss(nb::module_ &losses) {
            Tensor labels,
            float margin,
            std::optional<DataType> loss_data_type,
-           LossShape reported_loss_shape) {
+           LossShape reported_loss_shape,
+           std::optional<float> loss_weight) {
             const string loss_name = "ContrastiveLoss instance";
             validateContrastiveLossArguments(loss_name, predictions, labels, margin, loss_data_type, reported_loss_shape);
 
             DataType effectiveLossDataType = loss_data_type.value_or(predictions.getDataType());
             ContrastiveLoss::Builder builder;
-            builder.network(network).predictions(predictions).labels(labels).margin(margin).lossDataType(effectiveLossDataType);
+            builder.network(network).predictions(predictions).labels(labels).margin(margin).lossDataType(effectiveLossDataType)
+                .lossWeight(loss_weight.value_or(1.0f));
             setReportedLossShape(builder, reported_loss_shape);
             ContrastiveLoss built = builder.build();
 
@@ -110,6 +112,8 @@ void bind_contrastive_loss(nb::module_ &losses) {
         "margin"_a = 1.0f,
         "loss_data_type"_a.none() = nb::none(),
         "reported_loss_shape"_a = LossShape::BATCH,
+        nb::kw_only(),
+        "loss_weight"_a.none() = nb::none(),
         R"nbdoc(Construct a distance-based contrastive loss.)nbdoc");
 
     contrastive_loss.def_prop_ro("margin", &ContrastiveLoss::getMargin);

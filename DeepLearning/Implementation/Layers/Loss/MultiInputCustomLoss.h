@@ -20,7 +20,8 @@ class MultiInputCustomLoss : public Layer {
                          std::vector<std::string> inputNames,
                          std::vector<std::optional<std::string>> gradientNames,
                          std::string lossName = "loss",
-                         DataType lossDataType = DataType::FP32);
+                         DataType lossDataType = DataType::FP32,
+                         std::optional<float> lossWeight = std::nullopt);
 
     ~MultiInputCustomLoss() override = default;
 
@@ -51,6 +52,9 @@ class MultiInputCustomLoss : public Layer {
     void validateExpressionOutputNames(const DynamicExpression& expression,
                                        const std::set<std::string>& expectedOutputNames,
                                        const std::string& what) const;
+    DynamicExpression weightedLossExpression() const;
+    DynamicExpression weightedGradientExpression() const;
+
     std::pair<std::vector<uint64_t>, DataType> inferExpressionOutputDescriptor(const DynamicExpression& expression,
                                                                                 const std::string& outputName,
                                                                                 const std::string& what) const;
@@ -61,6 +65,7 @@ class MultiInputCustomLoss : public Layer {
     std::vector<std::optional<std::string>> gradientNames;
     std::string lossName;
     DataType lossDataType;
+    std::optional<float> lossWeight;
 
     std::vector<std::optional<Tensor>> featureInputs;
     std::vector<std::optional<Tensor>> errorOutputs;

@@ -123,7 +123,8 @@ void bind_lsgan_losses(nb::module_& losses) {
            std::optional<DataType> loss_data_type,
            LossShape reported_loss_shape,
            float real_target,
-           float fake_target) {
+           float fake_target,
+           std::optional<float> loss_weight) {
             const string loss_name = "LSGANDiscriminatorLoss instance";
             validateLSGANDiscriminatorLossArguments(loss_name, real_scores, fake_scores, loss_data_type, reported_loss_shape);
 
@@ -134,7 +135,8 @@ void bind_lsgan_losses(nb::module_& losses) {
                 .fakeScores(fake_scores)
                 .realTarget(real_target)
                 .fakeTarget(fake_target)
-                .lossDataType(effectiveLossDataType);
+                .lossDataType(effectiveLossDataType)
+                .lossWeight(loss_weight.value_or(1.0f));
             setReportedLossShape(builder, reported_loss_shape);
             LSGANDiscriminatorLoss built = builder.build();
 
@@ -147,6 +149,8 @@ void bind_lsgan_losses(nb::module_& losses) {
         "reported_loss_shape"_a = LossShape::BATCH,
         "real_target"_a = 1.0f,
         "fake_target"_a = 0.0f,
+        nb::kw_only(),
+        "loss_weight"_a.none() = nb::none(),
         R"nbdoc(Construct the discriminator-side least-squares GAN loss over real and fake discriminator scores.)nbdoc");
 
     discriminator_loss.def("get_real_scores", &LSGANDiscriminatorLoss::getRealScores);
@@ -176,13 +180,15 @@ backpropagate into the generator.
            Tensor fake_scores,
            std::optional<DataType> loss_data_type,
            LossShape reported_loss_shape,
-           float target) {
+           float target,
+           std::optional<float> loss_weight) {
             const string loss_name = "LSGANGeneratorLoss instance";
             validateLSGANGeneratorLossArguments(loss_name, fake_scores, loss_data_type, reported_loss_shape);
 
             DataType effectiveLossDataType = loss_data_type.value_or(fake_scores.getDataType());
             LSGANGeneratorLoss::Builder builder;
-            builder.network(network).fakeScores(fake_scores).target(target).lossDataType(effectiveLossDataType);
+            builder.network(network).fakeScores(fake_scores).target(target).lossDataType(effectiveLossDataType)
+                .lossWeight(loss_weight.value_or(1.0f));
             setReportedLossShape(builder, reported_loss_shape);
             LSGANGeneratorLoss built = builder.build();
 
@@ -193,6 +199,8 @@ backpropagate into the generator.
         "loss_data_type"_a.none() = nb::none(),
         "reported_loss_shape"_a = LossShape::BATCH,
         "target"_a = 1.0f,
+        nb::kw_only(),
+        "loss_weight"_a.none() = nb::none(),
         R"nbdoc(Construct the generator-side least-squares GAN loss over fake discriminator scores.)nbdoc");
 
     generator_loss.def("get_fake_scores", &LSGANGeneratorLoss::getFakeScores);

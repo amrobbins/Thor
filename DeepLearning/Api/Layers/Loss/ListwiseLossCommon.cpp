@@ -99,8 +99,10 @@ Tensor buildRawListwiseLoss(Network& network,
                             const optional<Tensor>& mask,
                             ThorImplementation::DynamicExpression lossExpression,
                             ThorImplementation::DynamicExpression gradientExpression,
-                            DataType lossDataType) {
+                            DataType lossDataType,
+                            std::optional<float> lossWeight) {
     validateLossDataType("listwise loss", lossDataType);
+    lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
     if (mask.has_value()) {
         MultiInputCustomLoss rawLoss = MultiInputCustomLoss::Builder()
                                            .network(network)
@@ -111,6 +113,7 @@ Tensor buildRawListwiseLoss(Network& network,
                                            .auxiliaryInput(kMaskName, mask.value())
                                            .lossName(kLossName)
                                            .lossDataType(lossDataType)
+                                           .lossWeight(lossWeight.value_or(1.0f))
                                            .reportsRawLoss()
                                            .build();
         return rawLoss.getLoss();
@@ -127,6 +130,7 @@ Tensor buildRawListwiseLoss(Network& network,
                              .lossName(kLossName)
                              .gradientName(kGradientName)
                              .lossDataType(lossDataType)
+                             .lossWeight(lossWeight.value_or(1.0f))
                              .reportsRawLoss()
                              .build();
     return rawLoss.getLoss();

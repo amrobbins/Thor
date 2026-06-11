@@ -15,6 +15,7 @@ json Loss::architectureJson() const {
     j["layer_name"] = layerName;
     j["loss_shape"] = LossShape::RAW;
     j["loss_data_type"] = lossDataType;
+    ThorImplementation::addLossWeightToJson(j, lossWeight);
     j["labels_tensor"] = labelsTensor.architectureJson();
     j["predictions_tensor"] = predictionsTensor.architectureJson();
     j["loss_shaper_input_tensor"] = lossShaperInput.architectureJson();

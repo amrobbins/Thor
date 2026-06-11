@@ -98,6 +98,7 @@ void SmoothL1Loss::buildSupportLayersAndAddToNetwork() {
                                       .lossName(kLossName)
                                       .gradientName(kGradientName)
                                       .lossDataType(lossDataType)
+                                       .lossWeight(lossWeight.value_or(1.0f))
                                       .reportsRawLoss()
                                       .build();
 
@@ -139,6 +140,8 @@ void SmoothL1Loss::deserialize(const json& j, Network* network) {
     SmoothL1Loss smoothL1Loss;
     smoothL1Loss.lossShape = j.at("loss_shape").get<LossShape>();
     smoothL1Loss.lossDataType = j.at("loss_data_type").get<DataType>();
+
+    smoothL1Loss.lossWeight = ThorImplementation::lossWeightFromJson(j);
     smoothL1Loss.beta = j.value("beta", 1.0f);
     smoothL1Loss.predictionsTensor = predictions;
     smoothL1Loss.labelsTensor = labels;

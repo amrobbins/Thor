@@ -59,6 +59,7 @@ void BinaryCrossEntropy::buildSupportLayersAndAddToNetwork() {
                                            .gradientName(kGradientName)
                                            .reportsRawLoss()
                                            .lossDataType(lossDataType)
+                                       .lossWeight(lossWeight.value_or(1.0f))
                                            .build();
     lossShaperInput = rawBinaryCrossEntropy.getLoss();
 
@@ -89,6 +90,7 @@ json BinaryCrossEntropy::architectureJson() const {
     j["loss_shaper_input_tensor"] = lossShaperInput.architectureJson();
     j["loss_tensor"] = lossTensor.architectureJson();
 
+    ThorImplementation::addLossWeightToJson(j, lossWeight);
     return j;
 }
 
@@ -104,6 +106,8 @@ void BinaryCrossEntropy::deserialize(const json &j, Network *network) {
     THOR_THROW_IF_FALSE(j.at("loss_shape").get<LossShape>() == LossShape::RAW);
     binaryCrossEntropy.lossShape = LossShape::RAW;
     binaryCrossEntropy.lossDataType = j.at("loss_data_type").get<DataType>();
+
+    binaryCrossEntropy.lossWeight = ThorImplementation::lossWeightFromJson(j);
 
     uint64_t originalTensorId;
     originalTensorId = j["predictions_tensor"].at("id").get<uint64_t>();

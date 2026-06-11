@@ -97,6 +97,7 @@ void HuberLoss::buildSupportLayersAndAddToNetwork() {
                                   .lossName(kLossName)
                                   .gradientName(kGradientName)
                                   .lossDataType(lossDataType)
+                                       .lossWeight(lossWeight.value_or(1.0f))
                                   .reportsRawLoss()
                                   .build();
 
@@ -138,6 +139,8 @@ void HuberLoss::deserialize(const json& j, Network* network) {
     HuberLoss huberLoss;
     huberLoss.lossShape = j.at("loss_shape").get<LossShape>();
     huberLoss.lossDataType = j.at("loss_data_type").get<DataType>();
+
+    huberLoss.lossWeight = ThorImplementation::lossWeightFromJson(j);
     huberLoss.delta = j.value("delta", 1.0f);
     huberLoss.predictionsTensor = predictions;
     huberLoss.labelsTensor = labels;

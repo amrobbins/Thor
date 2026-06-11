@@ -70,6 +70,7 @@ void SoftTargetCrossEntropy::buildSupportLayersAndAddToNetwork() {
                                                .lossName(kLossName)
                                                .gradientName(kGradientName)
                                                .lossDataType(lossDataType)
+                                       .lossWeight(lossWeight.value_or(1.0f))
                                                .reportsRawLoss()
                                                .build();
 
@@ -110,6 +111,8 @@ void SoftTargetCrossEntropy::deserialize(const json& j, Network* network) {
     SoftTargetCrossEntropy softTargetCrossEntropy;
     softTargetCrossEntropy.lossShape = j.at("loss_shape").get<LossShape>();
     softTargetCrossEntropy.lossDataType = j.at("loss_data_type").get<DataType>();
+
+    softTargetCrossEntropy.lossWeight = ThorImplementation::lossWeightFromJson(j);
     softTargetCrossEntropy.predictionsTensor = predictions;
     softTargetCrossEntropy.labelsTensor = labels;
     softTargetCrossEntropy.network = network;

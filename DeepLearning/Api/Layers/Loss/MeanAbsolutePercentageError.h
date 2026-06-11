@@ -83,6 +83,8 @@ class MAPE::Builder {
         meanAbsolutePercentageError.predictionsTensor = _predictions.value();
         meanAbsolutePercentageError.labelsTensor = _labels.value();
         meanAbsolutePercentageError.lossDataType = _lossDataType.value();
+
+        meanAbsolutePercentageError.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         meanAbsolutePercentageError.lossShape = _lossShape.value();
         meanAbsolutePercentageError.network = _network.value();
         meanAbsolutePercentageError.initialized = true;
@@ -143,6 +145,13 @@ class MAPE::Builder {
         return *this;
     }
 
+    virtual MAPE::Builder & lossWeight(float lossWeight) {
+        THOR_THROW_IF_FALSE(!this->_lossWeight.has_value());
+        ThorImplementation::validateLossWeight(lossWeight);
+        this->_lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
+        return *this;
+    }
+
     virtual MAPE::Builder &lossDataType(DataType _lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
         this->_lossDataType = _lossDataType;
@@ -155,6 +164,7 @@ class MAPE::Builder {
     std::optional<Tensor> _labels;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
+    std::optional<float> _lossWeight;
 };
 
 

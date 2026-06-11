@@ -90,6 +90,8 @@ class CategoricalFocalLoss::Builder {
         categoricalFocalLoss.predictionsTensor = _predictions.value();
         categoricalFocalLoss.labelsTensor = _labels.value();
         categoricalFocalLoss.lossDataType = _lossDataType.value();
+
+        categoricalFocalLoss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         categoricalFocalLoss.lossShape = _lossShape.value();
         categoricalFocalLoss.gamma = gamma;
         categoricalFocalLoss.alpha = alpha;
@@ -159,6 +161,13 @@ class CategoricalFocalLoss::Builder {
         return *this;
     }
 
+    virtual CategoricalFocalLoss::Builder & lossWeight(float lossWeight) {
+        THOR_THROW_IF_FALSE(!this->_lossWeight.has_value());
+        ThorImplementation::validateLossWeight(lossWeight);
+        this->_lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
+        return *this;
+    }
+
     virtual CategoricalFocalLoss::Builder &lossDataType(DataType _lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
         THOR_THROW_IF_FALSE(_lossDataType == DataType::FP16 || _lossDataType == DataType::FP32);
@@ -172,6 +181,7 @@ class CategoricalFocalLoss::Builder {
     std::optional<Tensor> _labels;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
+    std::optional<float> _lossWeight;
     std::optional<float> _gamma;
     std::optional<float> _alpha;
 };

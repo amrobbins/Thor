@@ -86,6 +86,8 @@ class HingeGANGeneratorLoss::Builder {
         HingeGANGeneratorLoss hingeGANGeneratorLoss;
         hingeGANGeneratorLoss.fakeScoresTensor = _fakeScores.value();
         hingeGANGeneratorLoss.lossDataType = _lossDataType.value();
+
+        hingeGANGeneratorLoss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         hingeGANGeneratorLoss.lossShape = _lossShape.value();
         hingeGANGeneratorLoss.network = _network.value();
         hingeGANGeneratorLoss.initialized = true;
@@ -132,6 +134,13 @@ class HingeGANGeneratorLoss::Builder {
         return *this;
     }
 
+    virtual HingeGANGeneratorLoss::Builder & lossWeight(float lossWeight) {
+        THOR_THROW_IF_FALSE(!this->_lossWeight.has_value());
+        ThorImplementation::validateLossWeight(lossWeight);
+        this->_lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
+        return *this;
+    }
+
     virtual HingeGANGeneratorLoss::Builder &lossDataType(DataType _lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
         THOR_THROW_IF_FALSE(_lossDataType == DataType::FP16 || _lossDataType == DataType::FP32);
@@ -144,6 +153,7 @@ class HingeGANGeneratorLoss::Builder {
     std::optional<Tensor> _fakeScores;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
+    std::optional<float> _lossWeight;
 };
 
 }  // namespace Thor

@@ -51,7 +51,8 @@ void bind_smooth_l1_loss(nb::module_ &losses) {
            Tensor labels,
            float beta,
            std::optional<DataType> loss_data_type,
-           LossShape reported_loss_shape) {
+           LossShape reported_loss_shape,
+           std::optional<float> loss_weight) {
             const string loss_name = "SmoothL1Loss instance";
             if (predictions.getDimensions().size() != 1) {
                 string error_message = loss_name + ": predictions must be a 1 dimensional tensor but predictions is " +
@@ -75,7 +76,8 @@ void bind_smooth_l1_loss(nb::module_ &losses) {
             validateReportedLossShape(reported_loss_shape, loss_name);
 
             SmoothL1Loss::Builder builder;
-            builder.network(network).predictions(predictions).labels(labels).beta(beta).lossDataType(effectiveLossDataType);
+            builder.network(network).predictions(predictions).labels(labels).beta(beta).lossDataType(effectiveLossDataType)
+                .lossWeight(loss_weight.value_or(1.0f));
             setReportedLossShape(builder, reported_loss_shape);
             SmoothL1Loss built = builder.build();
 
@@ -87,6 +89,8 @@ void bind_smooth_l1_loss(nb::module_ &losses) {
         "beta"_a = 1.0f,
         "loss_data_type"_a.none() = nb::none(),
         "reported_loss_shape"_a = LossShape::BATCH,
+        nb::kw_only(),
+        "loss_weight"_a.none() = nb::none(),
         R"nbdoc(Construct a Smooth L1 loss.)nbdoc");
 
     smooth_l1_loss.def_prop_ro("beta", &SmoothL1Loss::getBeta);

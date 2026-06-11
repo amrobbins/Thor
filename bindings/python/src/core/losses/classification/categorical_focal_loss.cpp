@@ -93,7 +93,8 @@ void bind_categorical_focal_loss(nb::module_ &losses) {
            float gamma,
            float alpha,
            std::optional<DataType> loss_data_type,
-           LossShape reported_loss_shape) {
+           LossShape reported_loss_shape,
+           std::optional<float> loss_weight) {
             const string loss_name = "CategoricalFocalLoss instance";
             validateCategoricalFocalLossArguments(loss_name, predictions, labels, gamma, alpha, loss_data_type, reported_loss_shape);
 
@@ -104,7 +105,8 @@ void bind_categorical_focal_loss(nb::module_ &losses) {
                 .labels(labels)
                 .focusingParameter(gamma)
                 .alpha(alpha)
-                .lossDataType(effectiveLossDataType);
+                .lossDataType(effectiveLossDataType)
+                .lossWeight(loss_weight.value_or(1.0f));
             setReportedLossShape(builder, reported_loss_shape);
             CategoricalFocalLoss built = builder.build();
 
@@ -117,6 +119,8 @@ void bind_categorical_focal_loss(nb::module_ &losses) {
         "alpha"_a = 1.0f,
         "loss_data_type"_a.none() = nb::none(),
         "reported_loss_shape"_a = LossShape::BATCH,
+        nb::kw_only(),
+        "loss_weight"_a.none() = nb::none(),
         R"nbdoc(Construct a categorical focal loss from logits and dense targets.)nbdoc");
 
     categorical_focal_loss.def_prop_ro("gamma", &CategoricalFocalLoss::getGamma);

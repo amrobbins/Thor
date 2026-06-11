@@ -184,13 +184,15 @@ void bind_wasserstein_gan_losses(nb::module_& losses) {
            Tensor real_scores,
            Tensor fake_scores,
            std::optional<DataType> loss_data_type,
-           LossShape reported_loss_shape) {
+           LossShape reported_loss_shape,
+           std::optional<float> loss_weight) {
             const string loss_name = "WassersteinGANCriticLoss instance";
             validateWassersteinGANCriticLossArguments(loss_name, real_scores, fake_scores, loss_data_type, reported_loss_shape);
 
             DataType effectiveLossDataType = loss_data_type.value_or(real_scores.getDataType());
             WassersteinGANCriticLoss::Builder builder;
-            builder.network(network).realScores(real_scores).fakeScores(fake_scores).lossDataType(effectiveLossDataType);
+            builder.network(network).realScores(real_scores).fakeScores(fake_scores).lossDataType(effectiveLossDataType)
+                .lossWeight(loss_weight.value_or(1.0f));
             setReportedLossShape(builder, reported_loss_shape);
             WassersteinGANCriticLoss built = builder.build();
 
@@ -201,6 +203,8 @@ void bind_wasserstein_gan_losses(nb::module_& losses) {
         "fake_scores"_a,
         "loss_data_type"_a.none() = nb::none(),
         "reported_loss_shape"_a = LossShape::BATCH,
+        nb::kw_only(),
+        "loss_weight"_a.none() = nb::none(),
         R"nbdoc(Construct the critic-side Wasserstein GAN loss over real and fake critic scores.)nbdoc");
 
     critic_loss.def("get_real_scores", &WassersteinGANCriticLoss::getRealScores);
@@ -226,13 +230,15 @@ loss intentionally only models the differentiable score objective.
            Network& network,
            Tensor fake_scores,
            std::optional<DataType> loss_data_type,
-           LossShape reported_loss_shape) {
+           LossShape reported_loss_shape,
+           std::optional<float> loss_weight) {
             const string loss_name = "WassersteinGANGeneratorLoss instance";
             validateWassersteinGANGeneratorLossArguments(loss_name, fake_scores, loss_data_type, reported_loss_shape);
 
             DataType effectiveLossDataType = loss_data_type.value_or(fake_scores.getDataType());
             WassersteinGANGeneratorLoss::Builder builder;
-            builder.network(network).fakeScores(fake_scores).lossDataType(effectiveLossDataType);
+            builder.network(network).fakeScores(fake_scores).lossDataType(effectiveLossDataType)
+                .lossWeight(loss_weight.value_or(1.0f));
             setReportedLossShape(builder, reported_loss_shape);
             WassersteinGANGeneratorLoss built = builder.build();
 
@@ -242,6 +248,8 @@ loss intentionally only models the differentiable score objective.
         "fake_scores"_a,
         "loss_data_type"_a.none() = nb::none(),
         "reported_loss_shape"_a = LossShape::BATCH,
+        nb::kw_only(),
+        "loss_weight"_a.none() = nb::none(),
         R"nbdoc(Construct the generator-side Wasserstein GAN loss over fake critic scores.)nbdoc");
 
     generator_loss.def("get_fake_scores", &WassersteinGANGeneratorLoss::getFakeScores);
@@ -267,7 +275,8 @@ The raw elementwise loss is:
            float target_gradient_norm,
            float eps,
            std::optional<DataType> loss_data_type,
-           LossShape reported_loss_shape) {
+           LossShape reported_loss_shape,
+           std::optional<float> loss_weight) {
             const string loss_name = "WassersteinGANCriticGradientPenaltyLoss instance";
             validateWassersteinGANCriticGradientPenaltyLossArguments(loss_name,
                                                                      real_scores,
@@ -288,7 +297,8 @@ The raw elementwise loss is:
                 .gradientPenaltyWeight(gradient_penalty_weight)
                 .targetGradientNorm(target_gradient_norm)
                 .epsilon(eps)
-                .lossDataType(effectiveLossDataType);
+                .lossDataType(effectiveLossDataType)
+                .lossWeight(loss_weight.value_or(1.0f));
             setReportedLossShape(builder, reported_loss_shape);
             WassersteinGANCriticGradientPenaltyLoss built = builder.build();
 
@@ -303,6 +313,8 @@ The raw elementwise loss is:
         "eps"_a = 1.0e-12f,
         "loss_data_type"_a.none() = nb::none(),
         "reported_loss_shape"_a = LossShape::BATCH,
+        nb::kw_only(),
+        "loss_weight"_a.none() = nb::none(),
         R"nbdoc(Construct the WGAN-GP critic loss over scalar scores and a materialized per-sample input-gradient tensor.)nbdoc");
 
     gp_loss.def("get_real_scores", &WassersteinGANCriticGradientPenaltyLoss::getRealScores);

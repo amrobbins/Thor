@@ -77,6 +77,7 @@ void MSE::buildSupportLayersAndAddToNetwork() {
                                        .lossName(kLossName)
                                        .gradientName(kGradientName)
                                        .lossDataType(lossDataType)
+                                       .lossWeight(lossWeight.value_or(1.0f))
                                        .reportsRawLoss()
                                        .build();
 
@@ -117,6 +118,8 @@ void MSE::deserialize(const json& j, Network* network) {
     MSE meanSquaredError;
     meanSquaredError.lossShape = j.at("loss_shape").get<LossShape>();
     meanSquaredError.lossDataType = j.at("loss_data_type").get<DataType>();
+
+    meanSquaredError.lossWeight = ThorImplementation::lossWeightFromJson(j);
     meanSquaredError.predictionsTensor = predictions;
     meanSquaredError.labelsTensor = labels;
     meanSquaredError.network = network;

@@ -1,4 +1,5 @@
 #include "DeepLearning/Implementation/Layers/Loss/MultiInputCustomLoss.h"
+#include "DeepLearning/Implementation/Layers/Loss/WeightedLossExpression.h"
 #include "DeepLearning/Implementation/Layers/Loss.h"
 #include "DeepLearning/Implementation/ThorError.h"
 
@@ -17,19 +18,20 @@ MultiInputCustomLoss::MultiInputCustomLoss(DynamicExpression lossExpression,
                                            vector<string> inputNames,
                                            vector<optional<string>> gradientNames,
                                            string lossName,
-                                           DataType lossDataType)
+                                           DataType lossDataType,
+                                           std::optional<float> lossWeight)
     : lossExpression(std::move(lossExpression)),
       gradientExpression(std::move(gradientExpression)),
       inputNames(std::move(inputNames)),
       gradientNames(std::move(gradientNames)),
       lossName(std::move(lossName)),
-      lossDataType(lossDataType) {
+      lossDataType(lossDataType),
+      lossWeight(normalizeLossWeight(lossWeight)) {
     THOR_THROW_IF_FALSE(!this->inputNames.empty());
     THOR_THROW_IF_FALSE(this->inputNames.size() == this->gradientNames.size());
     THOR_THROW_IF_FALSE(!presentNames(this->gradientNames).empty());
     THOR_THROW_IF_FALSE(!this->lossName.empty());
     THOR_THROW_IF_FALSE(this->lossDataType == DataType::FP16 || this->lossDataType == DataType::FP32);
-
     featureInputs.resize(this->inputNames.size(), std::nullopt);
     errorOutputs.resize(this->inputNames.size(), std::nullopt);
     inputStreams.resize(this->inputNames.size());
@@ -179,8 +181,24 @@ pair<vector<uint64_t>, DataType> MultiInputCustomLoss::inferExpressionOutputDesc
     return {shapeIt->second, findOutputDType(compiledOutputs, outputName)};
 }
 
+DynamicExpression MultiInputCustomLoss::weightedLossExpression() const {
+    return applyLossWeightToDynamicExpression(lossExpression, {{lossName, lossDataType}}, lossWeight, "MultiInputCustomLoss loss");
+}
+
+DynamicExpression MultiInputCustomLoss::weightedGradientExpression() const {
+    std::unordered_map<std::string, DataType> outputDTypes;
+    for (size_t i = 0; i < gradientNames.size(); ++i) {
+        if (!gradientNames[i].has_value())
+            continue;
+        THOR_THROW_IF_FALSE(i < featureInputs.size());
+        THOR_THROW_IF_FALSE(featureInputs[i].has_value());
+        outputDTypes.emplace(gradientNames[i].value(), featureInputs[i].value().getDescriptor().getDataType());
+    }
+    return applyLossWeightToDynamicExpression(gradientExpression, std::move(outputDTypes), lossWeight, "MultiInputCustomLoss gradient");
+}
+
 optional<Tensor> MultiInputCustomLoss::createFeatureOutputTensor() {
-    const auto [outputShape, outputDType] = inferExpressionOutputDescriptor(lossExpression, lossName, "loss");
+    const auto [outputShape, outputDType] = inferExpressionOutputDescriptor(weightedLossExpression(), lossName, "loss");
     THOR_THROW_IF_FALSE(outputDType == lossDataType);
     THOR_THROW_IF_FALSE(!featureInputs.empty() && featureInputs.front().has_value());
     return Tensor(featureInputs.front().value().getPlacement(), TensorDescriptor(outputDType, outputShape));
@@ -299,13 +317,13 @@ void MultiInputCustomLoss::compileImpl() {
 
     TensorMap inputs = buildLossInputs();
     TensorMap lossOutputs = buildLossOutputs();
-    lossPrepared = make_shared<PreparedDynamicExpression>(lossExpression.prepare(inputs, lossOutputs, computeStream()));
+    lossPrepared = make_shared<PreparedDynamicExpression>(weightedLossExpression().prepare(inputs, lossOutputs, computeStream()));
     lossPreRunHook = lossPrepared->preForwardHook();
     lossStamped = make_shared<StampedExecutionPlan>(lossPrepared->stamp(lossOutputs));
 
     if (!isInferenceOnly()) {
         TensorMap gradientOutputs = buildGradientOutputs();
-        gradientPrepared = make_shared<PreparedDynamicExpression>(gradientExpression.prepare(inputs, gradientOutputs, computeStream()));
+        gradientPrepared = make_shared<PreparedDynamicExpression>(weightedGradientExpression().prepare(inputs, gradientOutputs, computeStream()));
         gradientPreRunHook = gradientPrepared->preForwardHook();
         gradientStamped = make_shared<StampedExecutionPlan>(gradientPrepared->stamp(gradientOutputs));
     } else {

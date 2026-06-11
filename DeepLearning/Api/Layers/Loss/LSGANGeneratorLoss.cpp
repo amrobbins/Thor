@@ -62,6 +62,7 @@ void LSGANGeneratorLoss::buildSupportLayersAndAddToNetwork() {
                                                      .input(kFakeScoresName, fakeScoresTensor, kFakeScoresGradientName)
                                                      .lossName(kLossName)
                                                      .lossDataType(lossDataType)
+                                       .lossWeight(lossWeight.value_or(1.0f))
                                                      .reportsRawLoss()
                                                      .build();
 
@@ -94,6 +95,7 @@ json LSGANGeneratorLoss::architectureJson() const {
     j["fake_scores_tensor"] = fakeScoresTensor.architectureJson();
     j["loss_shaper_input_tensor"] = lossShaperInput.architectureJson();
     j["loss_tensor"] = lossTensor.architectureJson();
+    ThorImplementation::addLossWeightToJson(j, lossWeight);
     return j;
 }
 
@@ -109,6 +111,8 @@ void LSGANGeneratorLoss::deserialize(const json& j, Network* network) {
     LSGANGeneratorLoss loss;
     loss.lossShape = j.at("loss_shape").get<LossShape>();
     loss.lossDataType = j.at("loss_data_type").get<DataType>();
+
+    loss.lossWeight = ThorImplementation::lossWeightFromJson(j);
     loss.target = j.value("target", 1.0f);
     loss.fakeScoresTensor = fakeScores;
     loss.network = network;

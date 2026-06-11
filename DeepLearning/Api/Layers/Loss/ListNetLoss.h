@@ -105,6 +105,8 @@ class ListNetLoss::Builder {
         listNetLoss.predictionsTensor = _predictions.value();
         listNetLoss.labelsTensor = _labels.value();
         listNetLoss.lossDataType = _lossDataType.value();
+
+        listNetLoss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         listNetLoss.lossShape = _lossShape.value();
         listNetLoss.scoreTemperature = scoreTemperature;
         listNetLoss.labelTemperature = labelTemperature;
@@ -182,6 +184,13 @@ class ListNetLoss::Builder {
         return *this;
     }
 
+    virtual ListNetLoss::Builder & lossWeight(float lossWeight) {
+        THOR_THROW_IF_FALSE(!this->_lossWeight.has_value());
+        ThorImplementation::validateLossWeight(lossWeight);
+        this->_lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
+        return *this;
+    }
+
     virtual ListNetLoss::Builder &lossDataType(DataType _lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
         THOR_THROW_IF_FALSE(_lossDataType == DataType::FP16 || _lossDataType == DataType::FP32);
@@ -195,6 +204,7 @@ class ListNetLoss::Builder {
     std::optional<Tensor> _labels;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
+    std::optional<float> _lossWeight;
     std::optional<float> _scoreTemperature;
     std::optional<float> _labelTemperature;
     std::optional<Tensor> _mask;

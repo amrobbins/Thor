@@ -112,7 +112,8 @@ void bind_cosine_embedding_loss(nb::module_& losses) {
            float margin,
            float eps,
            std::optional<DataType> loss_data_type,
-           LossShape reported_loss_shape) {
+           LossShape reported_loss_shape,
+           std::optional<float> loss_weight) {
             const string loss_name = "CosineEmbeddingLoss instance";
             validateCosineEmbeddingLossArguments(loss_name, input1, input2, target, margin, eps, loss_data_type, reported_loss_shape);
 
@@ -124,7 +125,8 @@ void bind_cosine_embedding_loss(nb::module_& losses) {
                 .target(target)
                 .margin(margin)
                 .eps(eps)
-                .lossDataType(effectiveLossDataType);
+                .lossDataType(effectiveLossDataType)
+                .lossWeight(loss_weight.value_or(1.0f));
             setReportedLossShape(builder, reported_loss_shape);
             CosineEmbeddingLoss built = builder.build();
 
@@ -138,6 +140,8 @@ void bind_cosine_embedding_loss(nb::module_& losses) {
         "eps"_a = 1.0e-8f,
         "loss_data_type"_a.none() = nb::none(),
         "reported_loss_shape"_a = LossShape::BATCH,
+        nb::kw_only(),
+        "loss_weight"_a.none() = nb::none(),
         R"nbdoc(Construct a CosineEmbeddingLoss over two embedding tensors and a target label tensor.)nbdoc");
 
     cosine_embedding_loss.def_prop_ro("margin", &CosineEmbeddingLoss::getMargin);

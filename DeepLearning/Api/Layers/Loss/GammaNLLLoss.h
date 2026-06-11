@@ -86,6 +86,8 @@ class GammaNLLLoss::Builder {
         loss.predictionsTensor = _predictions.value();
         loss.labelsTensor = _labels.value();
         loss.lossDataType = _lossDataType.value();
+
+        loss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         loss.lossShape = _lossShape.value();
         loss.eps = eps;
         loss.network = _network.value();
@@ -151,6 +153,13 @@ class GammaNLLLoss::Builder {
         return *this;
     }
 
+    virtual GammaNLLLoss::Builder & lossWeight(float lossWeight) {
+        THOR_THROW_IF_FALSE(!this->_lossWeight.has_value());
+        ThorImplementation::validateLossWeight(lossWeight);
+        this->_lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
+        return *this;
+    }
+
     virtual GammaNLLLoss::Builder &lossDataType(DataType _lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
         THOR_THROW_IF_FALSE(_lossDataType == DataType::FP16 || _lossDataType == DataType::FP32);
@@ -164,6 +173,7 @@ class GammaNLLLoss::Builder {
     std::optional<Tensor> _labels;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
+    std::optional<float> _lossWeight;
     std::optional<float> _eps;
 };
 

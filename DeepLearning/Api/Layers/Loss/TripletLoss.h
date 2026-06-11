@@ -111,6 +111,8 @@ class TripletLoss::Builder {
         tripletLoss.positiveTensor = _positive.value();
         tripletLoss.negativeTensor = _negative.value();
         tripletLoss.lossDataType = _lossDataType.value();
+
+        tripletLoss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         tripletLoss.lossShape = _lossShape.value();
         tripletLoss.margin = margin;
         tripletLoss.eps = eps;
@@ -187,6 +189,13 @@ class TripletLoss::Builder {
         return *this;
     }
 
+    virtual TripletLoss::Builder & lossWeight(float lossWeight) {
+        THOR_THROW_IF_FALSE(!this->_lossWeight.has_value());
+        ThorImplementation::validateLossWeight(lossWeight);
+        this->_lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
+        return *this;
+    }
+
     virtual TripletLoss::Builder &lossDataType(DataType _lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
         THOR_THROW_IF_FALSE(_lossDataType == DataType::FP16 || _lossDataType == DataType::FP32);
@@ -201,6 +210,7 @@ class TripletLoss::Builder {
     std::optional<Tensor> _negative;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
+    std::optional<float> _lossWeight;
     std::optional<float> _margin;
     std::optional<float> _eps;
 };

@@ -102,6 +102,7 @@ void MarginRankingLoss::buildSupportLayersAndAddToNetwork() {
                                                     .auxiliaryInput(kTargetName, targetTensor)
                                                     .lossName(kLossName)
                                                     .lossDataType(lossDataType)
+                                       .lossWeight(lossWeight.value_or(1.0f))
                                                     .reportsRawLoss()
                                                     .build();
 
@@ -136,6 +137,7 @@ json MarginRankingLoss::architectureJson() const {
     j["loss_shaper_input_tensor"] = lossShaperInput.architectureJson();
     j["loss_tensor"] = lossTensor.architectureJson();
     j["margin"] = margin;
+    ThorImplementation::addLossWeightToJson(j, lossWeight);
     return j;
 }
 
@@ -155,6 +157,8 @@ void MarginRankingLoss::deserialize(const json& j, Network* network) {
     MarginRankingLoss marginRankingLoss;
     marginRankingLoss.lossShape = j.at("loss_shape").get<LossShape>();
     marginRankingLoss.lossDataType = j.at("loss_data_type").get<DataType>();
+
+    marginRankingLoss.lossWeight = ThorImplementation::lossWeightFromJson(j);
     marginRankingLoss.margin = j.value("margin", 0.0f);
     marginRankingLoss.input1Tensor = input1;
     marginRankingLoss.input2Tensor = input2;
