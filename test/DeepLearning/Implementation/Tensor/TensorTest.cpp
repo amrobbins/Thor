@@ -34,11 +34,7 @@ static vector<DataType> allWholeElementTensorDataTypes() {
             DataType::BOOLEAN};
 }
 
-static vector<DataType> allTensorDataTypes() {
-    vector<DataType> dataTypes = allWholeElementTensorDataTypes();
-    dataTypes.push_back(DataType::PACKED_BOOLEAN);
-    return dataTypes;
-}
+static vector<DataType> allTensorDataTypes() { return allWholeElementTensorDataTypes(); }
 
 static Tensor copyToCpuFp32ForVerification(Tensor source, Stream stream) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
@@ -366,7 +362,7 @@ TEST(Tensor, identityMatrixGpu) {
     Tensor::identityMatrix(300, cpuPlacement, DataType::FP32, stream);
 }
 
-TEST(Tensor, identityMatrixSupportsAllNonPackedDataTypesCpuAndGpu) {
+TEST(Tensor, identityMatrixSupportsAllDataTypesCpuAndGpu) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU);
     Stream stream(0);
@@ -396,7 +392,7 @@ TEST(Tensor, zerosCpu) {
 
     for (uint32_t t = 0; t < 20; ++t) {
         DataType dataType;
-        uint32_t dt = rand() % 10;
+        uint32_t dt = rand() % 9;
         if (dt == 0)
             dataType = DataType::FP16;
         else if (dt == 1)
@@ -415,8 +411,6 @@ TEST(Tensor, zerosCpu) {
             dataType = DataType::UINT32;
         else if (dt == 8)
             dataType = DataType::BOOLEAN;
-        else if (dt == 9)
-            dataType = DataType::PACKED_BOOLEAN;
 
         uint32_t numDimensions = 1 + (rand() % 5);
         uint32_t maxDimension = pow(100000.0, 1.0 / numDimensions);
@@ -446,7 +440,7 @@ TEST(Tensor, zerosGpu) {
 
     for (uint32_t t = 0; t < 20; ++t) {
         DataType dataType;
-        uint32_t dt = rand() % 10;
+        uint32_t dt = rand() % 9;
         if (dt == 0)
             dataType = DataType::FP16;
         else if (dt == 1)
@@ -465,8 +459,6 @@ TEST(Tensor, zerosGpu) {
             dataType = DataType::UINT32;
         else if (dt == 8)
             dataType = DataType::BOOLEAN;
-        else if (dt == 9)
-            dataType = DataType::PACKED_BOOLEAN;
 
         uint32_t numDimensions = 1 + (rand() % 5);
         uint32_t maxDimension = pow(100000.0, 1.0 / numDimensions);
@@ -495,7 +487,7 @@ TEST(Tensor, randomsCpu) {
 
     for (uint32_t t = 0; t < 20; ++t) {
         DataType dataType;
-        uint32_t dt = rand() % 10;
+        uint32_t dt = rand() % 9;
         if (dt == 0)
             dataType = DataType::FP16;
         else if (dt == 1)
@@ -514,8 +506,6 @@ TEST(Tensor, randomsCpu) {
             dataType = DataType::UINT32;
         else if (dt == 8)
             dataType = DataType::BOOLEAN;
-        else if (dt == 9)
-            dataType = DataType::PACKED_BOOLEAN;
 
         uint32_t numDimensions = 1 + (rand() % 5);
         uint32_t maxDimension = pow(100000.0, 1.0 / numDimensions);
@@ -552,13 +542,7 @@ TEST(Tensor, randomsCpu) {
         Tensor tensor = Tensor::randoms(cpuPlacement, TensorDescriptor(dataType, dimensions), stream, minValue, maxValue);
         stream.synchronize();
 
-        if (dt == 9) {
-            uint8_t *mem = tensor.getMemPtr<uint8_t>();
-            uint32_t numElements = (tensor.getTotalNumElements() + 7) / 8;
-            for (uint32_t i = 0; i < numElements; ++i) {
-                ASSERT_TRUE(mem[i] <= maxValue && mem[i] >= minValue);
-            }
-        } else {
+        {
             Tensor tensorFp32_h = tensor.clone(DataType::FP32);
             tensorFp32_h.copyFromAsync(tensor, stream);
             stream.synchronize();
@@ -578,7 +562,7 @@ TEST(Tensor, randomsGpu) {
 
     for (uint32_t t = 0; t < 20; ++t) {
         DataType dataType;
-        uint32_t dt = rand() % 10;
+        uint32_t dt = rand() % 9;
         if (dt == 0)
             dataType = DataType::FP16;
         else if (dt == 1)
@@ -597,8 +581,6 @@ TEST(Tensor, randomsGpu) {
             dataType = DataType::UINT32;
         else if (dt == 8)
             dataType = DataType::BOOLEAN;
-        else if (dt == 9)
-            dataType = DataType::PACKED_BOOLEAN;
 
         uint32_t numDimensions = 1 + (rand() % 5);
         uint32_t maxDimension = pow(100000.0, 1.0 / numDimensions);
@@ -635,16 +617,7 @@ TEST(Tensor, randomsGpu) {
         Tensor tensor = Tensor::randoms(gpuPlacement, TensorDescriptor(dataType, dimensions), stream, minValue, maxValue);
         stream.synchronize();
 
-        if (dt == 9) {
-            Tensor tensor_h = tensor.clone(cpuPlacement);
-            tensor_h.copyFromAsync(tensor, stream);
-            stream.synchronize();
-            uint8_t *mem = tensor_h.getMemPtr<uint8_t>();
-            uint32_t numElements = (tensor.getTotalNumElements() + 7) / 8;
-            for (uint32_t i = 0; i < numElements; ++i) {
-                ASSERT_TRUE(mem[i] <= maxValue && mem[i] >= minValue);
-            }
-        } else {
+        {
             Tensor tensorFp32_h = tensor.clone(cpuPlacement, DataType::FP32);
             tensorFp32_h.copyFromAsync(tensor, stream);
             stream.synchronize();
@@ -663,7 +636,7 @@ TEST(Tensor, valuesCpu) {
 
     for (uint32_t t = 0; t < 20; ++t) {
         DataType dataType;
-        uint32_t dt = rand() % 10;
+        uint32_t dt = rand() % 9;
         if (dt == 0)
             dataType = DataType::FP16;
         else if (dt == 1)
@@ -682,8 +655,6 @@ TEST(Tensor, valuesCpu) {
             dataType = DataType::UINT32;
         else if (dt == 8)
             dataType = DataType::BOOLEAN;
-        else
-            dataType = DataType::PACKED_BOOLEAN;
 
         uint32_t numDimensions = 1 + (rand() % 5);
         uint32_t maxDimension = pow(100000.0, 1.0 / numDimensions);
@@ -704,17 +675,7 @@ TEST(Tensor, valuesCpu) {
         Tensor tensor = Tensor::values(cpuPlacement, TensorDescriptor(dataType, dimensions), stream, value);
         stream.synchronize();
 
-        if (dt == 9) {
-            if (value)
-                value = 0b11111111;
-            uint8_t *mem = tensor.getMemPtr<uint8_t>();
-            uint32_t numElements = (tensor.getTotalNumElements() + 7) / 8;
-            for (uint32_t i = 0; i < numElements; ++i) {
-                if (mem[i] != value)
-                    printf("dt %d i %d actual %d vs expected %d\n", dt, i, (uint32_t)mem[i], value);
-                ASSERT_TRUE(mem[i] == value);
-            }
-        } else {
+        {
             Tensor tensorFp32 = tensor.clone(DataType::FP32);
             tensorFp32.copyFromAsync(tensor, stream);
             stream.synchronize();
@@ -736,7 +697,7 @@ TEST(Tensor, valuesGpu) {
 
     for (uint32_t t = 0; t < 20; ++t) {
         DataType dataType;
-        uint32_t dt = rand() % 10;
+        uint32_t dt = rand() % 9;
         if (dt == 0)
             dataType = DataType::FP16;
         else if (dt == 1)
@@ -755,8 +716,6 @@ TEST(Tensor, valuesGpu) {
             dataType = DataType::UINT32;
         else if (dt == 8)
             dataType = DataType::BOOLEAN;
-        else
-            dataType = DataType::PACKED_BOOLEAN;
 
         uint32_t numDimensions = 1 + (rand() % 5);
         uint32_t maxDimension = pow(100000.0, 1.0 / numDimensions);
@@ -777,20 +736,7 @@ TEST(Tensor, valuesGpu) {
         Tensor tensor = Tensor::values(gpuPlacement, TensorDescriptor(dataType, dimensions), stream, value);
         stream.synchronize();
 
-        if (dt == 9) {
-            if (value)
-                value = 0b11111111;
-            Tensor tensor_h = tensor.clone(cpuPlacement);
-            tensor_h.copyFromAsync(tensor, stream);
-            stream.synchronize();
-            uint8_t *mem = tensor_h.getMemPtr<uint8_t>();
-            uint32_t numElements = (tensor.getTotalNumElements() + 7) / 8;
-            for (uint32_t i = 0; i < numElements; ++i) {
-                if (mem[i] != value)
-                    printf("dt %d i %d actual %d vs expected %d\n", dt, i, (uint32_t)mem[i], value);
-                ASSERT_TRUE(mem[i] == value);
-            }
-        } else {
+        {
             Tensor tensorFp32 = copyToCpuFp32ForVerification(tensor, stream);
             stream.synchronize();
             float *mem = tensorFp32.getMemPtr<float>();
@@ -830,7 +776,7 @@ TEST(Tensor, fillRandomCpu) {
 
     for (uint32_t t = 0; t < 20; ++t) {
         DataType dataType;
-        uint32_t dt = rand() % 10;
+        uint32_t dt = rand() % 9;
         if (dt == 0)
             dataType = DataType::FP16;
         else if (dt == 1)
@@ -849,8 +795,6 @@ TEST(Tensor, fillRandomCpu) {
             dataType = DataType::UINT32;
         else if (dt == 8)
             dataType = DataType::BOOLEAN;
-        else if (dt == 9)
-            dataType = DataType::PACKED_BOOLEAN;
 
         uint32_t numDimensions = 1 + (rand() % 5);
         uint32_t maxDimension = pow(100000.0, 1.0 / numDimensions);
@@ -888,13 +832,7 @@ TEST(Tensor, fillRandomCpu) {
         tensor.fillRandom(minValue, maxValue, stream);
         stream.synchronize();
 
-        if (dt == 9) {
-            uint8_t *mem = tensor.getMemPtr<uint8_t>();
-            uint32_t numElements = (tensor.getTotalNumElements() + 7) / 8;
-            for (uint32_t i = 0; i < numElements; ++i) {
-                ASSERT_TRUE(mem[i] <= maxValue && mem[i] >= minValue);
-            }
-        } else {
+        {
             Tensor tensorFp32_h = tensor.clone(DataType::FP32);
             tensorFp32_h.copyFromAsync(tensor, stream);
             stream.synchronize();
@@ -916,7 +854,7 @@ TEST(Tensor, fillRandomGpu) {
 
     for (uint32_t t = 0; t < 20; ++t) {
         DataType dataType;
-        uint32_t dt = rand() % 10;
+        uint32_t dt = rand() % 9;
         if (dt == 0)
             dataType = DataType::FP16;
         else if (dt == 1)
@@ -935,8 +873,6 @@ TEST(Tensor, fillRandomGpu) {
             dataType = DataType::UINT32;
         else if (dt == 8)
             dataType = DataType::BOOLEAN;
-        else if (dt == 9)
-            dataType = DataType::PACKED_BOOLEAN;
 
         uint32_t numDimensions = 1 + (rand() % 5);
         uint32_t maxDimension = pow(100000.0, 1.0 / numDimensions);
@@ -974,16 +910,7 @@ TEST(Tensor, fillRandomGpu) {
         tensor.fillRandom(minValue, maxValue, stream);
         stream.synchronize();
 
-        if (dt == 9) {
-            Tensor tensor_h = tensor.clone(cpuPlacement);
-            tensor_h.copyFromAsync(tensor, stream);
-            stream.synchronize();
-            uint8_t *mem = tensor_h.getMemPtr<uint8_t>();
-            uint32_t numElements = (tensor.getTotalNumElements() + 7) / 8;
-            for (uint32_t i = 0; i < numElements; ++i) {
-                ASSERT_TRUE(mem[i] <= maxValue && mem[i] >= minValue);
-            }
-        } else {
+        {
             Tensor tensorFp32_h = tensor.clone(cpuPlacement, DataType::FP32);
             tensorFp32_h.copyFromAsync(tensor, stream);
             stream.synchronize();
@@ -1007,9 +934,9 @@ TEST(Tensor, fillRandomSupportsAllDataTypesCpuAndGpu) {
         double minValue = -1.0;
         double maxValue = 1.0;
         if (dataType == DataType::UINT8 || dataType == DataType::UINT16 || dataType == DataType::UINT32 || dataType == DataType::UINT64 ||
-            dataType == DataType::BOOLEAN || dataType == DataType::PACKED_BOOLEAN) {
+            dataType == DataType::BOOLEAN) {
             minValue = 0.0;
-            maxValue = dataType == DataType::BOOLEAN || dataType == DataType::PACKED_BOOLEAN ? 1.0 : 5.0;
+            maxValue = dataType == DataType::BOOLEAN ? 1.0 : 5.0;
         }
 
         for (TensorPlacement placement : {cpuPlacement, gpuPlacement}) {
@@ -1046,7 +973,7 @@ TEST(Tensor, FillCpu) {
         }
 
         DataType dataType;
-        uint32_t dt = rand() % 10;
+        uint32_t dt = rand() % 9;
         if (dt == 0)
             dataType = DataType::FP16;
         else if (dt == 1)
@@ -1065,8 +992,6 @@ TEST(Tensor, FillCpu) {
             dataType = DataType::INT32;
         else if (dt == 8)
             dataType = DataType::BOOLEAN;
-        else
-            dataType = DataType::PACKED_BOOLEAN;
 
         TensorDescriptor descriptor(dataType, dimensions);
 
@@ -1155,13 +1080,6 @@ TEST(Tensor, FillCpu) {
                 bool value = mem[i];
                 ASSERT_EQ((bool)fillValue, value);
             }
-        } else {
-            uint8_t expected = fillValue ? 0b11111111 : 0b00000000;
-            uint8_t *mem = (uint8_t *)t_h.getMemPtr();
-            for (uint32_t i = 0; i < (totalNumElements + 7) / 8; ++i) {
-                uint8_t value = mem[i];
-                ASSERT_EQ(expected, value);
-            }
         }
     }
 }
@@ -1184,7 +1102,7 @@ TEST(Tensor, FillGpu) {
         }
 
         DataType dataType;
-        uint32_t dt = rand() % 10;
+        uint32_t dt = rand() % 9;
         if (dt == 0)
             dataType = DataType::FP16;
         else if (dt == 1)
@@ -1203,8 +1121,6 @@ TEST(Tensor, FillGpu) {
             dataType = DataType::INT32;
         else if (dt == 8)
             dataType = DataType::BOOLEAN;
-        else
-            dataType = DataType::PACKED_BOOLEAN;
 
         TensorDescriptor descriptor(dataType, dimensions);
 
@@ -1294,15 +1210,6 @@ TEST(Tensor, FillGpu) {
             for (uint32_t i = 0; i < totalNumElements; ++i) {
                 bool value = mem[i];
                 ASSERT_EQ((bool)fillValue, value);
-            }
-        } else {
-            // Note that this is actually wrong for a packed boolean whose flags are segregated to the proper dimension
-            // packed boolean needs to be fixed overall and this condition will change then.
-            uint8_t expected = fillValue ? 0b11111111 : 0b00000000;
-            uint8_t *mem = (uint8_t *)t_h.getMemPtr();
-            for (uint32_t i = 0; i < (totalNumElements + 7) / 8; ++i) {
-                uint8_t value = mem[i];
-                ASSERT_EQ(expected, value);
             }
         }
     }
@@ -1726,7 +1633,7 @@ TEST(Tensor, loadFromFileCpu) {
 
     for (uint32_t t = 0; t < 10; ++t) {
         DataType dataType;
-        uint32_t dt = rand() % 10;
+        uint32_t dt = rand() % 9;
         if (dt == 0)
             dataType = DataType::FP16;
         else if (dt == 1)
@@ -1838,7 +1745,7 @@ TEST(Tensor, loadFromFileGpu) {
 
     for (uint32_t t = 0; t < 10; ++t) {
         DataType dataType;
-        uint32_t dt = rand() % 10;
+        uint32_t dt = rand() % 9;
         if (dt == 0)
             dataType = DataType::FP16;
         else if (dt == 1)
@@ -1978,7 +1885,7 @@ TEST(Tensor, writeToFileCpu) {
 
     for (uint32_t t = 0; t < 10; ++t) {
         DataType dataType;
-        uint32_t dt = rand() % 10;
+        uint32_t dt = rand() % 9;
         if (dt == 0)
             dataType = DataType::FP16;
         else if (dt == 1)
@@ -2079,7 +1986,7 @@ TEST(Tensor, writeToFileGpu) {
 
     for (uint32_t t = 0; t < 10; ++t) {
         DataType dataType;
-        uint32_t dt = rand() % 10;
+        uint32_t dt = rand() % 9;
         if (dt == 0)
             dataType = DataType::FP16;
         else if (dt == 1)

@@ -373,7 +373,7 @@ void *Tensor::getBaseMemPtr() const {
 static uint64_t checkedWholeByteElementSizeBytes(DataType dataType, const char *context) {
     const float size = TensorDescriptor::getElementSizeInBytes(dataType);
     if (size < 1.0f || size != std::floor(size)) {
-        throw std::runtime_error(std::string(context) + " does not support packed sub-byte element types.");
+        throw std::runtime_error(std::string(context) + " does not support sub-byte element types.");
     }
     return static_cast<uint64_t>(size);
 }
@@ -467,8 +467,6 @@ ElementDataType *Tensor::getMemPtr() {
             THOR_THROW_IF_FALSE((is_same<BaseT, uint64_t>::value));
         else if (descriptor.getDataType() == DataType::BOOLEAN)
             THOR_THROW_IF_FALSE((is_same<BaseT, bool>::value));
-        else if (descriptor.getDataType() == DataType::PACKED_BOOLEAN)
-            THOR_THROW_IF_FALSE((is_same<BaseT, uint8_t>::value));
         else if (descriptor.getDataType() == DataType::BF16)
             THOR_THROW_IF_FALSE((is_same<BaseT, __nv_bfloat16>::value));
         else if (descriptor.getDataType() == DataType::FP8_E4M3)
@@ -518,8 +516,6 @@ const ElementDataType *Tensor::getMemPtr() const {
             THOR_THROW_IF_FALSE((is_same<BaseT, uint64_t>::value));
         else if (descriptor.getDataType() == DataType::BOOLEAN)
             THOR_THROW_IF_FALSE((is_same<BaseT, bool>::value));
-        else if (descriptor.getDataType() == DataType::PACKED_BOOLEAN)
-            THOR_THROW_IF_FALSE((is_same<BaseT, uint8_t>::value));
         else if (descriptor.getDataType() == DataType::BF16)
             THOR_THROW_IF_FALSE((is_same<BaseT, __nv_bfloat16>::value));
         else if (descriptor.getDataType() == DataType::FP8_E4M3)
@@ -564,8 +560,6 @@ ElementDataType Tensor::getElement(vector<unsigned long> dimensionIndex) {
         THOR_THROW_IF_FALSE((is_same<ElementDataType, uint64_t>::value));
     else if (descriptor.getDataType() == DataType::BOOLEAN)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, bool>::value));
-    else if (descriptor.getDataType() == DataType::PACKED_BOOLEAN)
-        THOR_THROW_IF_FALSE((is_same<ElementDataType, uint8_t>::value));
     else if (descriptor.getDataType() == DataType::BF16)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, __nv_bfloat16>::value));
     else if (descriptor.getDataType() == DataType::FP8_E4M3)
@@ -576,7 +570,6 @@ ElementDataType Tensor::getElement(vector<unsigned long> dimensionIndex) {
         THOR_UNREACHABLE();
 #endif
 
-    THOR_THROW_IF_FALSE(getDescriptor().getDataType() != DataType::PACKED_BOOLEAN);
     return *getElementPointer<ElementDataType>(dimensionIndex);
 }
 
@@ -610,8 +603,6 @@ void Tensor::setElement(std::vector<unsigned long> dimensionIndex, const Element
         THOR_THROW_IF_FALSE((is_same<ElementDataType, uint64_t>::value));
     else if (descriptor.getDataType() == DataType::BOOLEAN)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, bool>::value));
-    else if (descriptor.getDataType() == DataType::PACKED_BOOLEAN)
-        THOR_THROW_IF_FALSE((is_same<ElementDataType, uint8_t>::value));
     else if (descriptor.getDataType() == DataType::BF16)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, __nv_bfloat16>::value));
     else if (descriptor.getDataType() == DataType::FP8_E4M3)
@@ -622,7 +613,6 @@ void Tensor::setElement(std::vector<unsigned long> dimensionIndex, const Element
         THOR_UNREACHABLE();
 #endif
 
-    THOR_THROW_IF_FALSE(getDescriptor().getDataType() != DataType::PACKED_BOOLEAN);
     *getElementPointer<ElementDataType>(dimensionIndex) = value;
 }
 
@@ -656,8 +646,6 @@ ElementDataType *Tensor::getElementPointer(std::vector<unsigned long> dimensionI
         THOR_THROW_IF_FALSE((is_same<ElementDataType, uint64_t>::value));
     else if (descriptor.getDataType() == DataType::BOOLEAN)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, bool>::value));
-    else if (descriptor.getDataType() == DataType::PACKED_BOOLEAN)
-        THOR_THROW_IF_FALSE((is_same<ElementDataType, uint8_t>::value));
     else if (descriptor.getDataType() == DataType::BF16)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, __nv_bfloat16>::value));
     else if (descriptor.getDataType() == DataType::FP8_E4M3)
@@ -668,7 +656,6 @@ ElementDataType *Tensor::getElementPointer(std::vector<unsigned long> dimensionI
         THOR_UNREACHABLE();
 #endif
 
-    THOR_THROW_IF_FALSE(getDescriptor().getDataType() != DataType::PACKED_BOOLEAN);
     const std::vector<uint64_t> dims = getDimensions();
     const std::vector<uint64_t> strides = getStridesElements();
     THOR_THROW_IF_FALSE(dimensionIndex.size() <= dims.size());
@@ -1210,12 +1197,7 @@ void Tensor::memset(int8_t value, uint64_t numElements) {
     if (numElements == 0) {
         numBytes = getArraySizeInBytes();
     } else {
-        if (getDataType() == DataType::PACKED_BOOLEAN) {
-            THOR_THROW_IF_FALSE(numElements % 8 == 0);
-            numBytes = numElements / 8;
-        } else {
-            numBytes = numElements * (getArraySizeInBytes() / getTotalNumElements());
-        }
+        numBytes = numElements * (getArraySizeInBytes() / getTotalNumElements());
     }
 
     // invoke global memset instead of member function memset
@@ -1269,7 +1251,6 @@ void fillCpuIdentityMatrixOnes(void *data) {
 
     THOR_THROW_IF_FALSE(args->tensor.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
     DataType dataType = args->tensor.getDataType();
-    THOR_THROW_IF_FALSE(dataType != DataType::PACKED_BOOLEAN);
 
     if (dataType == DataType::FP16)
         fillCpuIdentityMatrixOnesTyped<half>(args->tensor);
@@ -1306,7 +1287,6 @@ void fillCpuIdentityMatrixOnes(void *data) {
 }
 
 Tensor Tensor::identityMatrix(uint32_t N, TensorPlacement placement, DataType dataType, Stream stream) {
-    THOR_THROW_IF_FALSE(dataType != DataType::PACKED_BOOLEAN);
     Tensor tensor(placement, TensorDescriptor(dataType, {N, N}));
 
     if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
@@ -1360,13 +1340,7 @@ void Tensor::memsetAsync(Stream stream, int8_t value, uint64_t numElements) {
         if (numElements == 0) {
             numBytes = getArraySizeInBytes();
         } else {
-            // If you need to set part of the last packed boolean to 0, you will need 2 calls to memset, one for zeros one for last value.
-            if (getDataType() == DataType::PACKED_BOOLEAN) {
-                THOR_THROW_IF_FALSE(numElements % 8 == 0);
-                numBytes = numElements / 8;
-            } else {
-                numBytes = numElements * (getArraySizeInBytes() / getTotalNumElements());
-            }
+            numBytes = numElements * (getArraySizeInBytes() / getTotalNumElements());
         }
 
         ScopedGpu scopedGpu(placement.getDeviceNum());
@@ -1457,36 +1431,6 @@ static void fillCpuRandomIntegral(
     }
 }
 
-static void fillCpuRandomPackedBoolean(Tensor tensor) {
-    uint64_t numElements = (tensor.getTotalNumElements() + 7) / 8;
-    const uint32_t numProcs = max(min((uint64_t)omp_get_num_procs(), numElements / 500000), uint64_t(1));
-    const uint64_t elementsPerThread = (numElements + (numProcs - 1)) / numProcs;
-
-    uint8_t *mem = tensor.getMemPtr<uint8_t>();
-    if (numProcs > 1) {
-#pragma omp parallel num_threads(numProcs)
-        {
-            random_device rd;
-            uint32_t seed = Tensor::getThreadIdHash(rd());
-            mt19937 gen(seed);
-            uniform_int_distribution<uint16_t> dis(0, 255);
-
-#pragma omp for schedule(static, elementsPerThread)
-            for (uint64_t i = 0; i < numElements; ++i) {
-                mem[i] = static_cast<uint8_t>(dis(gen));
-            }
-        }
-    } else {
-        random_device rd;
-        uint32_t seed = Tensor::getThreadIdHash(rd());
-        mt19937 gen(seed);
-        uniform_int_distribution<uint16_t> dis(0, 255);
-
-        for (uint64_t i = 0; i < numElements; ++i) {
-            mem[i] = static_cast<uint8_t>(dis(gen));
-        }
-    }
-}
 
 void fillCpuRandom(void *data) {
     HostFunctionArgsBase *baseArgs = static_cast<HostFunctionArgsBase *>(data);
@@ -1536,8 +1480,6 @@ void fillCpuRandom(void *data) {
         fillCpuRandomIntegral<uint64_t, uint64_t>(tensor, minValue, maxValue, numProcs, elementsPerThread);
     else if (dataType == DataType::BOOLEAN)
         fillCpuRandomIntegral<bool, uint16_t>(tensor, 0, 1, numProcs, elementsPerThread);
-    else if (dataType == DataType::PACKED_BOOLEAN)
-        fillCpuRandomPackedBoolean(tensor);
     else
         THOR_UNREACHABLE();
 }
@@ -1610,8 +1552,6 @@ void Tensor::fillRandom(double minValue, double maxValue, Stream stream) {
             launchGpuFillRandom<uint64_t>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
         } else if (dataType == DataType::BOOLEAN) {
             launchGpuFillRandom<bool>(getMemPtr(), getTotalNumElements(), 0, 1.999999, stream);
-        } else if (dataType == DataType::PACKED_BOOLEAN) {
-            launchGpuFillRandom<uint8_t>(getMemPtr(), (getTotalNumElements() + 7) / 8, 0, 255.999999, stream);
         } else {
             THOR_UNREACHABLE();
         }
@@ -1686,23 +1626,7 @@ void fillValue(void *params) {
         fillValueTyped<uint64_t>(cpuFillParams->tensor, cpuFillParams->value, numProcs, elementsPerThread);
     else if (dataType == DataType::BOOLEAN)
         fillValueTyped<bool>(cpuFillParams->tensor, cpuFillParams->value, numProcs, elementsPerThread);
-    else if (dataType == DataType::PACKED_BOOLEAN) {
-        uint8_t *mem = cpuFillParams->tensor.getMemPtr<uint8_t>();
-        uint8_t value = cpuFillParams->value ? 0b11111111 : 0;
-        numElements = (numElements + 7) / 8;
-        const uint32_t packedNumProcs = max(min((uint64_t)omp_get_num_procs(), numElements / 500000), uint64_t(1));
-        const uint64_t packedElementsPerThread = (numElements + (packedNumProcs - 1)) / packedNumProcs;
-        if (packedNumProcs > 1) {
-#pragma omp parallel for schedule(static, packedElementsPerThread) shared(mem, value, packedElementsPerThread, numElements) default(none)
-            for (uint64_t i = 0; i < numElements; ++i) {
-                mem[i] = value;
-            }
-        } else {
-            for (uint64_t i = 0; i < numElements; ++i) {
-                mem[i] = value;
-            }
-        }
-    } else {
+    else {
         THOR_UNREACHABLE();
     }
 }
@@ -1760,12 +1684,6 @@ void Tensor::fill(double value, Stream stream) {
             launchFillValueGpuKernel<int64_t>(value, (int64_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
         } else if (dataType == DataType::BOOLEAN) {
             launchFillValueGpuKernel<bool>(value, (bool *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
-        } else if (dataType == DataType::PACKED_BOOLEAN) {
-            uint8_t packedValue = 0;
-            if (value)
-                packedValue = 0b11111111;
-            uint64_t numPackedBytes = (getTotalNumElements() + 7) / 8;
-            launchFillValueGpuKernel<uint8_t>(packedValue, (uint8_t *)getMemPtr(), numPackedBytes, getPlacement().getDeviceNum(), stream);
         } else {
             THOR_UNREACHABLE();
         }

@@ -3,8 +3,6 @@
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Implementation/Tensor/DataType.h"
-#include "DeepLearning/Implementation/Tensor/PackedBoolean.h"
-
 #include "cuda.h"
 #include "cuda_fp16.h"
 #include "cuda_runtime.h"
@@ -53,14 +51,8 @@ class TensorDescriptor {
     bool operator==(const TensorDescriptor &rhs) const { return dataType == rhs.dataType && dimensions == rhs.dimensions; }
     bool operator!=(const TensorDescriptor &rhs) const { return !(*this == rhs); }
 
-    // Gives the number of bytes to store an array of numElements of this dataType, this exists because it can give the number of bytes of
-    // packed boolean, whereas bytes per element doesn't work since it is not an integer number of bytes per packed boolean.
     static uint64_t getArraySizeInBytes(uint64_t numElements, DataType dataType) {
-        if (dataType == DataType::PACKED_BOOLEAN) {
-            return (numElements + 7) / 8;
-        } else {
-            return numElements * uint32_t(getElementSizeInBytes(dataType));
-        }
+        return numElements * uint32_t(getElementSizeInBytes(dataType));
     }
     uint64_t getArraySizeInBytes() const { return getArraySizeInBytes(totalNumElements, dataType); }
     uint64_t getArraySizeInBytes(uint64_t numElements) const { return getArraySizeInBytes(numElements, dataType); }
@@ -93,8 +85,6 @@ class TensorDescriptor {
                 return "uint64";
             case DataType::BOOLEAN:
                 return "bool";
-            case DataType::PACKED_BOOLEAN:
-                return "packed_boolean";
             case DataType::BF16:
                 return "bf16";
             case DataType::FP8_E4M3:
@@ -137,8 +127,6 @@ class TensorDescriptor {
                 return std::to_string(*((double *)basePointer + elementIndex));
             case DataType::BOOLEAN:
                 return *((bool *)basePointer + elementIndex) ? "1" : "0";
-            case DataType::PACKED_BOOLEAN:
-                return PackedBoolean::getElement(elementIndex % 8, (uint8_t *)basePointer + elementIndex / 8) ? "1" : "0";
             case DataType::BF16:
                 return std::to_string(static_cast<float>(*(((const __nv_bfloat16 *)basePointer) + elementIndex)));
             case DataType::FP8_E4M3:
@@ -164,7 +152,6 @@ class TensorDescriptor {
             case DataType::UINT32:
             case DataType::UINT64:
             case DataType::BOOLEAN:
-            case DataType::PACKED_BOOLEAN:
                 return true;
             case DataType::FP16:
             case DataType::FP32:
@@ -182,7 +169,7 @@ class TensorDescriptor {
 
     bool isBooleanType() const { return isBooleanType(dataType); }
 
-    static bool isBooleanType(DataType dataType) { return dataType == DataType::BOOLEAN || dataType == DataType::PACKED_BOOLEAN; }
+    static bool isBooleanType(DataType dataType) { return dataType == DataType::BOOLEAN; }
 
     bool isSignedType() const { return isSignedType(dataType); }
 
@@ -205,7 +192,6 @@ class TensorDescriptor {
             case DataType::UINT32:
             case DataType::UINT64:
             case DataType::BOOLEAN:
-            case DataType::PACKED_BOOLEAN:
                 return false;
             default:
                 THOR_UNREACHABLE();
@@ -301,9 +287,6 @@ class TensorDescriptor {
             case DataType::INT64:
             case DataType::UINT64:
                 return 8;
-            // The PACKED_BOOLEAN case needs to be caught and handled specially
-            case DataType::PACKED_BOOLEAN:
-                return 0.125f;
             default:
                 THOR_UNREACHABLE();
         }

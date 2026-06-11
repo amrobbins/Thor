@@ -142,9 +142,6 @@ TEST(RandomTestConversions, CpuAllConversionsOutOfPlace) {
             } else if (sourceDataType == DataType::BOOLEAN) {
                 for (int i = 0; i < NUM_ELEMENTS; ++i)
                     ((bool *)source)[i] = rand() % 2 ? true : false;
-            } else if (sourceDataType == DataType::PACKED_BOOLEAN) {
-                for (int i = 0; i < NUM_ELEMENTS; ++i)
-                    PackedBoolean::setElement(rand() % 2 ? true : false, i, source);
             } else {
                 assert(false);
             }
@@ -316,9 +313,6 @@ TEST(RandomTestConversions, CpuAllConversionsInPlace) {
             } else if (sourceDataType == DataType::BOOLEAN) {
                 for (int i = 0; i < NUM_ELEMENTS; ++i)
                     ((bool *)source)[i] = rand() % 2 ? true : false;
-            } else if (sourceDataType == DataType::PACKED_BOOLEAN) {
-                for (int i = 0; i < NUM_ELEMENTS; ++i)
-                    PackedBoolean::setElement(rand() % 2 ? true : false, i, source);
             } else {
                 assert(false);
             }
@@ -496,9 +490,6 @@ TEST(RandomTestConversions, GpuAllConversionsOutOfPlace) {
             } else if (sourceDataType == DataType::BOOLEAN) {
                 for (int i = 0; i < NUM_ELEMENTS; ++i)
                     ((bool *)source)[i] = rand() % 2 ? true : false;
-            } else if (sourceDataType == DataType::PACKED_BOOLEAN) {
-                for (int i = 0; i < NUM_ELEMENTS; ++i)
-                    PackedBoolean::setElement(rand() % 2 ? true : false, i, source);
             } else {
                 assert(false);
             }
@@ -543,7 +534,6 @@ TEST(RandomTestConversions, GpuAllConversionsOutOfPlace) {
                 if (TensorDescriptor::isBooleanType(destDataType))
                     sourceVal = (bool)sourceVal;
 
-                // if(sourceDataType == DataType::PACKED_BOOLEAN && destDataType == DataType::FP16)
                 //    printf("[%5d] s:%lf d:%lf\n", i, sourceVal, destVal);
 
                 if (TensorDescriptor::isIntegralType(sourceDataType)) {
@@ -709,9 +699,6 @@ TEST(RandomTestConversions, GpuAllConversionsInPlace) {
             } else if (sourceDataType == DataType::BOOLEAN) {
                 for (int i = 0; i < NUM_ELEMENTS; ++i)
                     ((bool *)source)[i] = rand() % 2 ? true : false;
-            } else if (sourceDataType == DataType::PACKED_BOOLEAN) {
-                for (int i = 0; i < NUM_ELEMENTS; ++i)
-                    PackedBoolean::setElement(rand() % 2 ? true : false, i, source);
             } else {
                 assert(false);
             }
