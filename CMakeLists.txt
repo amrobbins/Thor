@@ -647,10 +647,6 @@ target_compile_definitions(Thor PRIVATE
         THOR_CUDA_CCCL_INCLUDE_DIR=\"${THOR_CUDA_CCCL_INCLUDE_DIR}\"
 )
 
-find_package(Curses REQUIRED)
-target_include_directories(Thor PUBLIC ${CURSES_INCLUDE_DIRS})
-target_link_libraries(Thor PUBLIC ${CURSES_LIBRARIES})
-
 # ============================================================
 # Boost
 # ============================================================

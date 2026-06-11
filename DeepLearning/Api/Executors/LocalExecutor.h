@@ -1,14 +1,12 @@
 #pragma once
 #include "DeepLearning/Implementation/ThorError.h"
 
-#include "DeepLearning/Api/Executors/ExecutionState.h"
 #include "DeepLearning/Api/Executors/Executor.h"
 #include "DeepLearning/Api/Loaders/Loader.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
-#include "DeepLearning/Api/Visualizers/ConsoleVisualizer.h"
-#include "DeepLearning/Api/Visualizers/Visualizer.h"
+#include "DeepLearning/Api/Training/Observers/LineStatsReporter.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
 #include <cuda_profiler_api.h>
@@ -16,11 +14,16 @@
 #include <fstream>
 
 #include <condition_variable>
+#include <deque>
 #include <map>
+#include <optional>
+#include <set>
 #include <memory>
 #include <string>
 #include <thread>
-#include <optional>
+#include <unordered_map>
+#include <vector>
+#include <utility>
 
 namespace Thor {
 
@@ -68,8 +71,9 @@ class LocalExecutor : public Executor {
     std::shared_ptr<PlacedNetwork> placedNetwork;
     std::shared_ptr<Loader> loader;
     std::shared_ptr<Optimizer> optimizer;
-    // FIXME: shared_ptr, however how do I deal with singletons then?
-    std::vector<Visualizer*> visualizers;
+    std::vector<std::shared_ptr<TrainingObserver>> observers;
+    bool statsEnabled = true;
+    double statsIntervalSeconds = 10.0;
 
     //    std::vector<ThorImplementation::StampedNetwork> stampedNetworks;
 
@@ -82,8 +86,6 @@ class LocalExecutor : public Executor {
     std::shared_ptr<std::map<uint64_t, bool>> batchDataReady;
     std::shared_ptr<std::unordered_map<uint64_t, std::unordered_map<std::string, std::vector<uint8_t>>>> batchData;
 
-    std::vector<std::shared_ptr<AsyncQueue<ExecutionState>>> visualizerExecutionState;
-
     std::string outputDirectory;
 
     // stampNumber -> [ (start0, finish0), (start1, finish1), ... ]
@@ -93,6 +95,7 @@ class LocalExecutor : public Executor {
     void waitForBatchDataUnlocked(std::unique_lock<std::mutex>& lck);
 
     void trainBatches(uint64_t initialEpochBatchNum, uint64_t batches, ExampleType exampleType, std::set<std::string> tensorsToReturn);
+    void emitTrainingEvent(const TrainingEvent& event);
 
     static void CUDART_CB bufferStampTensors(void* data);
 };
@@ -120,10 +123,23 @@ class LocalExecutor::Builder {
         return *this;
     }
 
-    LocalExecutor::Builder visualizer(Visualizer* _visualizer) {
-        if (!_visualizers.has_value())
-            _visualizers = std::vector<Visualizer*>();
-        _visualizers.value().push_back(_visualizer);
+    LocalExecutor::Builder observer(std::shared_ptr<TrainingObserver> observer) {
+        THOR_THROW_IF_FALSE(observer);
+        if (!observers_.has_value()) {
+            observers_ = std::vector<std::shared_ptr<TrainingObserver>>();
+        }
+        observers_.value().push_back(std::move(observer));
+        return *this;
+    }
+
+    LocalExecutor::Builder statsEnabled(bool statsEnabled) {
+        statsEnabled_ = statsEnabled;
+        return *this;
+    }
+
+    LocalExecutor::Builder statsIntervalSeconds(double statsIntervalSeconds) {
+        THOR_THROW_IF_FALSE(statsIntervalSeconds >= 0.0);
+        statsIntervalSeconds_ = statsIntervalSeconds;
         return *this;
     }
 
@@ -140,7 +156,9 @@ class LocalExecutor::Builder {
     Network* _network;
     std::shared_ptr<Loader> _loader;
     std::shared_ptr<Optimizer> _optimizer;
-    std::optional<std::vector<Visualizer*>> _visualizers;
+    std::optional<std::vector<std::shared_ptr<TrainingObserver>>> observers_;
+    bool statsEnabled_ = true;
+    double statsIntervalSeconds_ = 10.0;
     std::optional<std::string> _outputDirectory;
 };
 
