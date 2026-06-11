@@ -33,7 +33,6 @@ NB_MODULE(_thor, thor) {
     bind_version(thor);
 
     auto dt = nb::enum_<DataType>(thor, "DataType")
-                  .value("packed_bool", DataType::PACKED_BOOLEAN)
                   .value("bool", DataType::BOOLEAN)
                   .value("int8", DataType::INT8)
                   .value("uint8", DataType::UINT8)

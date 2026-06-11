@@ -110,9 +110,6 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
                 case DataType::BOOLEAN:
                     cpuConvertTypeImpl<__nv_fp8_e4m3, bool>((__nv_fp8_e4m3 *)args->source, (bool *)args->dest, numElements);
                     break;
-                case DataType::PACKED_BOOLEAN:
-                    cpuConvertTypeToPackedBooleanImpl<__nv_fp8_e4m3>((__nv_fp8_e4m3 *)args->source, args->dest, numElements);
-                    break;
                 default:
                     THOR_UNREACHABLE();
             }
@@ -166,9 +163,6 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
                     break;
                 case DataType::BOOLEAN:
                     cpuConvertTypeImpl<__nv_fp8_e5m2, bool>((__nv_fp8_e5m2 *)args->source, (bool *)args->dest, numElements);
-                    break;
-                case DataType::PACKED_BOOLEAN:
-                    cpuConvertTypeToPackedBooleanImpl<__nv_fp8_e5m2>((__nv_fp8_e5m2 *)args->source, args->dest, numElements);
                     break;
                 default:
                     THOR_UNREACHABLE();
@@ -224,9 +218,6 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
                 case DataType::BOOLEAN:
                     cpuConvertTypeImpl<__nv_bfloat16, bool>((__nv_bfloat16 *)args->source, (bool *)args->dest, numElements);
                     break;
-                case DataType::PACKED_BOOLEAN:
-                    cpuConvertTypeToPackedBooleanImpl<__nv_bfloat16>((__nv_bfloat16 *)args->source, args->dest, numElements);
-                    break;
                 default:
                     THOR_UNREACHABLE();
             }
@@ -277,9 +268,6 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
                     break;
                 case DataType::BOOLEAN:
                     cpuConvertTypeImpl<half, bool>((half *)args->source, (bool *)args->dest, numElements);
-                    break;
-                case DataType::PACKED_BOOLEAN:
-                    cpuConvertTypeToPackedBooleanImpl<half>((half *)args->source, args->dest, numElements);
                     break;
                 default:
                     THOR_UNREACHABLE();
@@ -332,9 +320,6 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
                 case DataType::BOOLEAN:
                     cpuConvertTypeImpl<float, bool>((float *)args->source, (bool *)args->dest, numElements);
                     break;
-                case DataType::PACKED_BOOLEAN:
-                    cpuConvertTypeToPackedBooleanImpl<float>((float *)args->source, args->dest, numElements);
-                    break;
                 default:
                     THOR_UNREACHABLE();
             }
@@ -385,9 +370,6 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
                     break;
                 case DataType::BOOLEAN:
                     cpuConvertTypeImpl<double, bool>((double *)args->source, (bool *)args->dest, numElements);
-                    break;
-                case DataType::PACKED_BOOLEAN:
-                    cpuConvertTypeToPackedBooleanImpl<double>((double *)args->source, args->dest, numElements);
                     break;
                 default:
                     THOR_UNREACHABLE();
@@ -440,9 +422,6 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
                 case DataType::BOOLEAN:
                     cpuConvertTypeImpl<int8_t, bool>((int8_t *)args->source, (bool *)args->dest, numElements);
                     break;
-                case DataType::PACKED_BOOLEAN:
-                    cpuConvertTypeToPackedBooleanImpl<int8_t>((int8_t *)args->source, args->dest, numElements);
-                    break;
                 default:
                     THOR_UNREACHABLE();
             }
@@ -493,9 +472,6 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
                     break;
                 case DataType::BOOLEAN:
                     cpuConvertTypeImpl<int16_t, bool>((int16_t *)args->source, (bool *)args->dest, numElements);
-                    break;
-                case DataType::PACKED_BOOLEAN:
-                    cpuConvertTypeToPackedBooleanImpl<int16_t>((int16_t *)args->source, args->dest, numElements);
                     break;
                 default:
                     THOR_UNREACHABLE();
@@ -548,9 +524,6 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
                 case DataType::BOOLEAN:
                     cpuConvertTypeImpl<int32_t, bool>((int32_t *)args->source, (bool *)args->dest, numElements);
                     break;
-                case DataType::PACKED_BOOLEAN:
-                    cpuConvertTypeToPackedBooleanImpl<int32_t>((int32_t *)args->source, args->dest, numElements);
-                    break;
                 default:
                     THOR_UNREACHABLE();
             }
@@ -601,9 +574,6 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
                     break;
                 case DataType::BOOLEAN:
                     cpuConvertTypeImpl<int64_t, bool>((int64_t *)args->source, (bool *)args->dest, numElements);
-                    break;
-                case DataType::PACKED_BOOLEAN:
-                    cpuConvertTypeToPackedBooleanImpl<int64_t>((int64_t *)args->source, args->dest, numElements);
                     break;
                 default:
                     THOR_UNREACHABLE();
@@ -656,9 +626,6 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
                 case DataType::BOOLEAN:
                     cpuConvertTypeImpl<uint8_t, bool>((uint8_t *)args->source, (bool *)args->dest, numElements);
                     break;
-                case DataType::PACKED_BOOLEAN:
-                    cpuConvertTypeToPackedBooleanImpl<uint8_t>((uint8_t *)args->source, args->dest, numElements);
-                    break;
                 default:
                     THOR_UNREACHABLE();
             }
@@ -709,9 +676,6 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
                     break;
                 case DataType::BOOLEAN:
                     cpuConvertTypeImpl<uint16_t, bool>((uint16_t *)args->source, (bool *)args->dest, numElements);
-                    break;
-                case DataType::PACKED_BOOLEAN:
-                    cpuConvertTypeToPackedBooleanImpl<uint16_t>((uint16_t *)args->source, args->dest, numElements);
                     break;
                 default:
                     THOR_UNREACHABLE();
@@ -764,9 +728,6 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
                 case DataType::BOOLEAN:
                     cpuConvertTypeImpl<uint32_t, bool>((uint32_t *)args->source, (bool *)args->dest, numElements);
                     break;
-                case DataType::PACKED_BOOLEAN:
-                    cpuConvertTypeToPackedBooleanImpl<uint32_t>((uint32_t *)args->source, args->dest, numElements);
-                    break;
                 default:
                     THOR_UNREACHABLE();
             }
@@ -817,9 +778,6 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
                     break;
                 case DataType::BOOLEAN:
                     cpuConvertTypeImpl<uint64_t, bool>((uint64_t *)args->source, (bool *)args->dest, numElements);
-                    break;
-                case DataType::PACKED_BOOLEAN:
-                    cpuConvertTypeToPackedBooleanImpl<uint64_t>((uint64_t *)args->source, args->dest, numElements);
                     break;
                 default:
                     THOR_UNREACHABLE();
@@ -872,62 +830,6 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
                 case DataType::BOOLEAN:
                     cpuConvertTypeImpl<bool, bool>((bool *)args->source, (bool *)args->dest, numElements);
                     break;
-                case DataType::PACKED_BOOLEAN:
-                    cpuConvertTypeToPackedBooleanImpl<bool>((bool *)args->source, args->dest, numElements);
-                    break;
-                default:
-                    THOR_UNREACHABLE();
-            }
-            break;
-        case DataType::PACKED_BOOLEAN:
-            switch (destDataType) {
-                case DataType::FP8_E4M3:
-                    cpuConvertTypeFromPackedBooleanImpl<__nv_fp8_e4m3>(args->source, (__nv_fp8_e4m3 *)args->dest, numElements);
-                    break;
-                case DataType::FP8_E5M2:
-                    cpuConvertTypeFromPackedBooleanImpl<__nv_fp8_e5m2>(args->source, (__nv_fp8_e5m2 *)args->dest, numElements);
-                    break;
-                case DataType::BF16:
-                    cpuConvertTypeFromPackedBooleanImpl<__nv_bfloat16>(args->source, (__nv_bfloat16 *)args->dest, numElements);
-                    break;
-                case DataType::FP16:
-                    cpuConvertTypeFromPackedBooleanImpl<half>(args->source, (half *)args->dest, numElements);
-                    break;
-                case DataType::FP32:
-                    cpuConvertTypeFromPackedBooleanImpl<float>(args->source, (float *)args->dest, numElements);
-                    break;
-                case DataType::FP64:
-                    cpuConvertTypeFromPackedBooleanImpl<double>(args->source, (double *)args->dest, numElements);
-                    break;
-                case DataType::INT8:
-                    cpuConvertTypeFromPackedBooleanImpl<int8_t>(args->source, (int8_t *)args->dest, numElements);
-                    break;
-                case DataType::INT16:
-                    cpuConvertTypeFromPackedBooleanImpl<int16_t>(args->source, (int16_t *)args->dest, numElements);
-                    break;
-                case DataType::INT32:
-                    cpuConvertTypeFromPackedBooleanImpl<int32_t>(args->source, (int32_t *)args->dest, numElements);
-                    break;
-                case DataType::INT64:
-                    cpuConvertTypeFromPackedBooleanImpl<int64_t>(args->source, (int64_t *)args->dest, numElements);
-                    break;
-                case DataType::UINT8:
-                    cpuConvertTypeFromPackedBooleanImpl<uint8_t>(args->source, (uint8_t *)args->dest, numElements);
-                    break;
-                case DataType::UINT16:
-                    cpuConvertTypeFromPackedBooleanImpl<uint16_t>(args->source, (uint16_t *)args->dest, numElements);
-                    break;
-                case DataType::UINT32:
-                    cpuConvertTypeFromPackedBooleanImpl<uint32_t>(args->source, (uint32_t *)args->dest, numElements);
-                    break;
-                case DataType::UINT64:
-                    cpuConvertTypeFromPackedBooleanImpl<uint64_t>(args->source, (uint64_t *)args->dest, numElements);
-                    break;
-                case DataType::BOOLEAN:
-                    cpuConvertTypeFromPackedBooleanImpl<bool>(args->source, (bool *)args->dest, numElements);
-                    break;
-                case DataType::PACKED_BOOLEAN:
-                    THOR_UNREACHABLE();
                 default:
                     THOR_UNREACHABLE();
             }
@@ -980,82 +882,6 @@ void TypeConverter::cpuConvertTypeImpl(FROM_TYPE *source, TO_TYPE *dest, long nu
         // In place and converting to a larger type
         for (long i = numElements - 1; i >= 0; --i) {
             dest[i] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)source)[i]);
-        }
-    }
-}
-
-template <typename TO_TYPE>
-void TypeConverter::cpuConvertTypeFromPackedBooleanImpl(void *source, TO_TYPE *dest, long numElements) {
-    if (numElements == 0)
-        return;
-
-    bool inPlaceConversion = ((void *)source == (void *)dest);
-
-    // When not doing an inplace operation, the memory regions must not overlap
-    if (!inPlaceConversion) {
-        void *sourceStart = source;
-        void *sourceEnd = (void *)&(((uint8_t *)source)[((numElements - 1) + 7) / 8]);
-        void *destStart = dest;
-        void *destEnd = (void *)&(dest[numElements - 1]);
-        THOR_THROW_IF_FALSE(sourceEnd < destStart || sourceStart > destEnd);
-    }
-
-    if (!inPlaceConversion) {
-        // Out of place
-        const uint32_t numProcs = max(min((long)omp_get_num_procs(), numElements / 500000), 1L);
-        if (numProcs > 1) {
-            const uint64_t elementsPerThread = (numElements + (numProcs - 1)) / numProcs;
-#pragma omp parallel for schedule(static, elementsPerThread) shared(dest, source, elementsPerThread, numElements) default(none)
-            for (long i = 0; i < numElements; ++i) {
-                dest[i] = (TO_TYPE)PackedBoolean::getElement(i, source);
-            }
-        } else {
-            for (long i = 0; i < numElements; ++i) {
-                dest[i] = (TO_TYPE)PackedBoolean::getElement(i, source);
-            }
-        }
-    } else {
-        // In place and to a larger type
-        for (long i = numElements - 1; i >= 0; --i) {
-            dest[i] = (TO_TYPE)PackedBoolean::getElement(i, source);
-        }
-    }
-}
-
-template <typename FROM_TYPE>
-void TypeConverter::cpuConvertTypeToPackedBooleanImpl(FROM_TYPE *source, void *dest, long numElements) {
-    if (numElements == 0)
-        return;
-
-    bool inPlaceConversion = ((void *)source == (void *)dest);
-
-    // When not doing an inplace operation, the memory regions must not overlap
-    if (!inPlaceConversion) {
-        void *sourceStart = source;
-        void *sourceEnd = (void *)&(source[numElements - 1]);
-        void *destStart = dest;
-        void *destEnd = (void *)&(((uint8_t *)dest)[((numElements - 1) + 7) / 8]);
-        THOR_THROW_IF_FALSE(sourceEnd < destStart || sourceStart > destEnd);
-    }
-
-    if (!inPlaceConversion) {
-        // Out of place
-        const uint32_t numProcs = max(min((long)omp_get_num_procs(), numElements / 500000), 1L);
-        if (numProcs > 1) {
-            const uint64_t elementsPerThread = (numElements + (numProcs - 1)) / numProcs;
-#pragma omp parallel for schedule(static, elementsPerThread) shared(dest, source, elementsPerThread, numElements) default(none)
-            for (long i = 0; i < numElements; ++i) {
-                PackedBoolean::setElement((bool)source[i], i, dest);
-            }
-        } else {
-            for (long i = 0; i < numElements; ++i) {
-                PackedBoolean::setElement((bool)source[i], i, dest);
-            }
-        }
-    } else {
-        // In place and to a smaller type
-        for (long i = 0; i < numElements; ++i) {
-            PackedBoolean::setElement((bool)source[i], i, dest);
         }
     }
 }

@@ -652,70 +652,6 @@ target_include_directories(Thor PUBLIC ${CURSES_INCLUDE_DIRS})
 target_link_libraries(Thor PUBLIC ${CURSES_LIBRARIES})
 
 # ============================================================
-# GraphicsMagick++ (Magick++)
-# ============================================================
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(GMAGICK REQUIRED GraphicsMagick++)
-
-execute_process(
-        COMMAND GraphicsMagick++-config --cppflags
-        OUTPUT_VARIABLE GM_CPPFLAGS
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-)
-execute_process(
-        COMMAND GraphicsMagick++-config --cxxflags
-        OUTPUT_VARIABLE GM_CXXFLAGS
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-)
-execute_process(
-        COMMAND GraphicsMagick++-config --ldflags --libs
-        OUTPUT_VARIABLE GM_LDFLAGS
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-)
-
-# Add include dirs from cppflags
-separate_arguments(GM_CPPFLAGS_LIST NATIVE_COMMAND "${GM_CPPFLAGS}")
-separate_arguments(GM_CXXFLAGS_LIST NATIVE_COMMAND "${GM_CXXFLAGS}")
-separate_arguments(GM_LDFLAGS_LIST NATIVE_COMMAND "${GM_LDFLAGS}")
-
-# GraphicsMagick++-config can leak distro package build flags into consumers.
-# In Debug builds only, strip LTO-related flags because they slow compiles/relinks
-# and are not useful for normal debugging. Non-Debug builds keep the original flags.
-set(GM_CXXFLAGS_DEBUG_LIST "${GM_CXXFLAGS_LIST}")
-set(GM_LDFLAGS_DEBUG_LIST "${GM_LDFLAGS_LIST}")
-foreach (_gm_flags_var IN ITEMS GM_CXXFLAGS_DEBUG_LIST GM_LDFLAGS_DEBUG_LIST)
-    list(FILTER ${_gm_flags_var} EXCLUDE REGEX "^-flto(=.*)?$")
-    list(FILTER ${_gm_flags_var} EXCLUDE REGEX "^-ffat-lto-objects$")
-endforeach ()
-
-# Build per-flag generator expressions. This avoids putting semicolon-separated
-# CMake lists inside one generator expression, which can mis-handle multi-flag lists.
-set(_thor_gm_cxxflags_genex "")
-foreach (_gm_flag IN LISTS GM_CXXFLAGS_DEBUG_LIST)
-    list(APPEND _thor_gm_cxxflags_genex
-            "$<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CXX>>:${_gm_flag}>")
-endforeach ()
-foreach (_gm_flag IN LISTS GM_CXXFLAGS_LIST)
-    list(APPEND _thor_gm_cxxflags_genex
-            "$<$<AND:$<NOT:$<CONFIG:Debug>>,$<COMPILE_LANGUAGE:CXX>>:${_gm_flag}>")
-endforeach ()
-
-set(_thor_gm_ldflags_genex "")
-foreach (_gm_flag IN LISTS GM_LDFLAGS_DEBUG_LIST)
-    list(APPEND _thor_gm_ldflags_genex "$<$<CONFIG:Debug>:${_gm_flag}>")
-endforeach ()
-foreach (_gm_flag IN LISTS GM_LDFLAGS_LIST)
-    list(APPEND _thor_gm_ldflags_genex "$<$<NOT:$<CONFIG:Debug>>:${_gm_flag}>")
-endforeach ()
-
-target_include_directories(Thor PUBLIC ${GMAGICK_INCLUDE_DIRS})
-target_compile_options(Thor PRIVATE
-        $<$<COMPILE_LANGUAGE:CXX>:${GM_CPPFLAGS_LIST}>
-        ${_thor_gm_cxxflags_genex}
-)
-target_link_libraries(Thor PRIVATE ${_thor_gm_ldflags_genex})
-
-# ============================================================
 # Boost
 # ============================================================
 set(Boost_USE_STATIC_LIBS OFF)
@@ -782,6 +718,7 @@ endif ()
 find_package(LibArchive REQUIRED)
 target_link_libraries(Thor PRIVATE LibArchive::LibArchive)
 
+find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBURING REQUIRED IMPORTED_TARGET liburing)
 target_link_libraries(Thor PRIVATE PkgConfig::LIBURING)
 

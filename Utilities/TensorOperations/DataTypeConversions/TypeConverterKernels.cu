@@ -14,18 +14,10 @@ using namespace std;
 // Launch out-of-place kernels:
 template <typename FROM_TYPE, typename TO_TYPE>
 void launchOutOfPlaceConvertKernel(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements, Stream stream);
-template <typename FROM_TYPE>
-void launchOutOfPlaceConvertKernel_toPackedBoolean(FROM_TYPE *source_d, uint8_t *dest_d, long numElements, Stream stream);
-template <typename TO_TYPE>
-void launchOutOfPlaceConvertKernel_fromPackedBoolean(uint8_t *source_d, TO_TYPE *dest_d, long numElements, Stream stream);
 
 // Launch in-place kernels:
 template <typename FROM_TYPE, typename TO_TYPE>
 void launchReadConvertSyncWriteKernel(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements, Stream stream);
-template <typename FROM_TYPE>
-void launchReadConvertSyncWriteKernel_toPackedBoolean(FROM_TYPE *source_d, uint8_t *dest_d, long numElements, Stream stream);
-template <typename TO_TYPE>
-void launchReadConvertSyncWriteKernel_fromPackedBoolean(uint8_t *source_d, TO_TYPE *dest_d, long numElements, Stream stream);
 
 template <typename FROM_TYPE, typename TO_TYPE>
 struct Converter {
@@ -98,9 +90,6 @@ void TypeConverter::gpuConvertType(void *source_d,
                 case DataType::BOOLEAN:
                     gpuConvertTypeImpl<__nv_fp8_e4m3, bool>((__nv_fp8_e4m3 *)source_d, (bool *)dest_d, numElements, stream);
                     break;
-                case DataType::PACKED_BOOLEAN:
-                    gpuConvertTypeToPackedBooleanImpl<__nv_fp8_e4m3>((__nv_fp8_e4m3 *)source_d, (uint8_t *)dest_d, numElements, stream);
-                    break;
                 default:
                     THOR_UNREACHABLE();
             }
@@ -154,9 +143,6 @@ void TypeConverter::gpuConvertType(void *source_d,
                     break;
                 case DataType::BOOLEAN:
                     gpuConvertTypeImpl<__nv_fp8_e5m2, bool>((__nv_fp8_e5m2 *)source_d, (bool *)dest_d, numElements, stream);
-                    break;
-                case DataType::PACKED_BOOLEAN:
-                    gpuConvertTypeToPackedBooleanImpl<__nv_fp8_e5m2>((__nv_fp8_e5m2 *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 default:
                     THOR_UNREACHABLE();
@@ -212,9 +198,6 @@ void TypeConverter::gpuConvertType(void *source_d,
                 case DataType::BOOLEAN:
                     gpuConvertTypeImpl<__nv_bfloat16, bool>((__nv_bfloat16 *)source_d, (bool *)dest_d, numElements, stream);
                     break;
-                case DataType::PACKED_BOOLEAN:
-                    gpuConvertTypeToPackedBooleanImpl<__nv_bfloat16>((__nv_bfloat16 *)source_d, (uint8_t *)dest_d, numElements, stream);
-                    break;
                 default:
                     THOR_UNREACHABLE();
             }
@@ -265,9 +248,6 @@ void TypeConverter::gpuConvertType(void *source_d,
                     break;
                 case DataType::BOOLEAN:
                     gpuConvertTypeImpl<half, bool>((half *)source_d, (bool *)dest_d, numElements, stream);
-                    break;
-                case DataType::PACKED_BOOLEAN:
-                    gpuConvertTypeToPackedBooleanImpl<half>((half *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 default:
                     THOR_UNREACHABLE();
@@ -320,9 +300,6 @@ void TypeConverter::gpuConvertType(void *source_d,
                 case DataType::BOOLEAN:
                     gpuConvertTypeImpl<float, bool>((float *)source_d, (bool *)dest_d, numElements, stream);
                     break;
-                case DataType::PACKED_BOOLEAN:
-                    gpuConvertTypeToPackedBooleanImpl<float>((float *)source_d, (uint8_t *)dest_d, numElements, stream);
-                    break;
                 default:
                     THOR_UNREACHABLE();
             }
@@ -373,9 +350,6 @@ void TypeConverter::gpuConvertType(void *source_d,
                     break;
                 case DataType::BOOLEAN:
                     gpuConvertTypeImpl<double, bool>((double *)source_d, (bool *)dest_d, numElements, stream);
-                    break;
-                case DataType::PACKED_BOOLEAN:
-                    gpuConvertTypeToPackedBooleanImpl<double>((double *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 default:
                     THOR_UNREACHABLE();
@@ -428,9 +402,6 @@ void TypeConverter::gpuConvertType(void *source_d,
                 case DataType::BOOLEAN:
                     gpuConvertTypeImpl<int8_t, bool>((int8_t *)source_d, (bool *)dest_d, numElements, stream);
                     break;
-                case DataType::PACKED_BOOLEAN:
-                    gpuConvertTypeToPackedBooleanImpl<int8_t>((int8_t *)source_d, (uint8_t *)dest_d, numElements, stream);
-                    break;
                 default:
                     THOR_UNREACHABLE();
             }
@@ -481,9 +452,6 @@ void TypeConverter::gpuConvertType(void *source_d,
                     break;
                 case DataType::BOOLEAN:
                     gpuConvertTypeImpl<int16_t, bool>((int16_t *)source_d, (bool *)dest_d, numElements, stream);
-                    break;
-                case DataType::PACKED_BOOLEAN:
-                    gpuConvertTypeToPackedBooleanImpl<int16_t>((int16_t *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 default:
                     THOR_UNREACHABLE();
@@ -536,9 +504,6 @@ void TypeConverter::gpuConvertType(void *source_d,
                 case DataType::BOOLEAN:
                     gpuConvertTypeImpl<int32_t, bool>((int32_t *)source_d, (bool *)dest_d, numElements, stream);
                     break;
-                case DataType::PACKED_BOOLEAN:
-                    gpuConvertTypeToPackedBooleanImpl<int32_t>((int32_t *)source_d, (uint8_t *)dest_d, numElements, stream);
-                    break;
                 default:
                     THOR_UNREACHABLE();
             }
@@ -589,9 +554,6 @@ void TypeConverter::gpuConvertType(void *source_d,
                     break;
                 case DataType::BOOLEAN:
                     gpuConvertTypeImpl<int64_t, bool>((int64_t *)source_d, (bool *)dest_d, numElements, stream);
-                    break;
-                case DataType::PACKED_BOOLEAN:
-                    gpuConvertTypeToPackedBooleanImpl<int64_t>((int64_t *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 default:
                     THOR_UNREACHABLE();
@@ -644,9 +606,6 @@ void TypeConverter::gpuConvertType(void *source_d,
                 case DataType::BOOLEAN:
                     gpuConvertTypeImpl<uint8_t, bool>((uint8_t *)source_d, (bool *)dest_d, numElements, stream);
                     break;
-                case DataType::PACKED_BOOLEAN:
-                    gpuConvertTypeToPackedBooleanImpl<uint8_t>((uint8_t *)source_d, (uint8_t *)dest_d, numElements, stream);
-                    break;
                 default:
                     THOR_UNREACHABLE();
             }
@@ -697,9 +656,6 @@ void TypeConverter::gpuConvertType(void *source_d,
                     break;
                 case DataType::BOOLEAN:
                     gpuConvertTypeImpl<uint16_t, bool>((uint16_t *)source_d, (bool *)dest_d, numElements, stream);
-                    break;
-                case DataType::PACKED_BOOLEAN:
-                    gpuConvertTypeToPackedBooleanImpl<uint16_t>((uint16_t *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 default:
                     THOR_UNREACHABLE();
@@ -752,9 +708,6 @@ void TypeConverter::gpuConvertType(void *source_d,
                 case DataType::BOOLEAN:
                     gpuConvertTypeImpl<uint32_t, bool>((uint32_t *)source_d, (bool *)dest_d, numElements, stream);
                     break;
-                case DataType::PACKED_BOOLEAN:
-                    gpuConvertTypeToPackedBooleanImpl<uint32_t>((uint32_t *)source_d, (uint8_t *)dest_d, numElements, stream);
-                    break;
                 default:
                     THOR_UNREACHABLE();
             }
@@ -805,9 +758,6 @@ void TypeConverter::gpuConvertType(void *source_d,
                     break;
                 case DataType::BOOLEAN:
                     gpuConvertTypeImpl<uint64_t, bool>((uint64_t *)source_d, (bool *)dest_d, numElements, stream);
-                    break;
-                case DataType::PACKED_BOOLEAN:
-                    gpuConvertTypeToPackedBooleanImpl<uint64_t>((uint64_t *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 default:
                     THOR_UNREACHABLE();
@@ -860,62 +810,6 @@ void TypeConverter::gpuConvertType(void *source_d,
                 case DataType::BOOLEAN:
                     gpuConvertTypeImpl<bool, bool>((bool *)source_d, (bool *)dest_d, numElements, stream);
                     break;
-                case DataType::PACKED_BOOLEAN:
-                    gpuConvertTypeToPackedBooleanImpl<bool>((bool *)source_d, (uint8_t *)dest_d, numElements, stream);
-                    break;
-                default:
-                    THOR_UNREACHABLE();
-            }
-            break;
-        case DataType::PACKED_BOOLEAN:
-            switch (destDataType) {
-                case DataType::FP8_E4M3:
-                    gpuConvertTypeFromPackedBooleanImpl((uint8_t *)source_d, (__nv_fp8_e4m3 *)dest_d, numElements, stream);
-                    break;
-                case DataType::FP8_E5M2:
-                    gpuConvertTypeFromPackedBooleanImpl((uint8_t *)source_d, (__nv_fp8_e5m2 *)dest_d, numElements, stream);
-                    break;
-                case DataType::BF16:
-                    gpuConvertTypeFromPackedBooleanImpl((uint8_t *)source_d, (__nv_bfloat16 *)dest_d, numElements, stream);
-                    break;
-                case DataType::FP16:
-                    gpuConvertTypeFromPackedBooleanImpl((uint8_t *)source_d, (half *)dest_d, numElements, stream);
-                    break;
-                case DataType::FP32:
-                    gpuConvertTypeFromPackedBooleanImpl<float>((uint8_t *)source_d, (float *)dest_d, numElements, stream);
-                    break;
-                case DataType::FP64:
-                    gpuConvertTypeFromPackedBooleanImpl<double>((uint8_t *)source_d, (double *)dest_d, numElements, stream);
-                    break;
-                case DataType::INT8:
-                    gpuConvertTypeFromPackedBooleanImpl<int8_t>((uint8_t *)source_d, (int8_t *)dest_d, numElements, stream);
-                    break;
-                case DataType::INT16:
-                    gpuConvertTypeFromPackedBooleanImpl<int16_t>((uint8_t *)source_d, (int16_t *)dest_d, numElements, stream);
-                    break;
-                case DataType::INT32:
-                    gpuConvertTypeFromPackedBooleanImpl<int32_t>((uint8_t *)source_d, (int32_t *)dest_d, numElements, stream);
-                    break;
-                case DataType::INT64:
-                    gpuConvertTypeFromPackedBooleanImpl<int64_t>((uint8_t *)source_d, (int64_t *)dest_d, numElements, stream);
-                    break;
-                case DataType::UINT8:
-                    gpuConvertTypeFromPackedBooleanImpl<uint8_t>((uint8_t *)source_d, (uint8_t *)dest_d, numElements, stream);
-                    break;
-                case DataType::UINT16:
-                    gpuConvertTypeFromPackedBooleanImpl<uint16_t>((uint8_t *)source_d, (uint16_t *)dest_d, numElements, stream);
-                    break;
-                case DataType::UINT32:
-                    gpuConvertTypeFromPackedBooleanImpl<uint32_t>((uint8_t *)source_d, (uint32_t *)dest_d, numElements, stream);
-                    break;
-                case DataType::UINT64:
-                    gpuConvertTypeFromPackedBooleanImpl<uint64_t>((uint8_t *)source_d, (uint64_t *)dest_d, numElements, stream);
-                    break;
-                case DataType::BOOLEAN:
-                    gpuConvertTypeFromPackedBooleanImpl<bool>((uint8_t *)source_d, (bool *)dest_d, numElements, stream);
-                    break;
-                case DataType::PACKED_BOOLEAN:
-                    THOR_UNREACHABLE();
                 default:
                     THOR_UNREACHABLE();
             }
@@ -975,43 +869,6 @@ void TypeConverter::convertToSmallerElementsInPlaceOnGpu(FROM_TYPE *source_d, TO
     }
 }
 
-template <typename FROM_TYPE>
-void TypeConverter::convertToSmallerElementsInPlaceOnGpu_toPackedBoolean(FROM_TYPE *source_d,
-                                                                         uint8_t *dest_d,
-                                                                         long numElements,
-                                                                         Stream stream) {
-    THOR_THROW_IF_FALSE(numElements > 0);
-    if (numElements == 0)
-        return;
-
-    // First, make some empty space in the front by converting some number of the front-most elements to smaller elements
-    long availableBytes = 0;
-    long chunkSize = 8 * 256;
-
-    launchReadConvertSyncWriteKernel_toPackedBoolean<FROM_TYPE>(
-        source_d, dest_d, numElements < chunkSize ? numElements : chunkSize, stream);
-
-    long numElementsLeft = numElements - chunkSize;
-    long startingElement = chunkSize;
-    availableBytes =
-        (sizeof(FROM_TYPE) * chunkSize) - TensorDescriptor::getArraySizeInBytes(chunkSize, DataType::PACKED_BOOLEAN);
-
-    // Then convert elements into the empty space, thereby freeing up more empty space, and repeat until all elements are converted.
-    while (numElementsLeft > 0) {
-        chunkSize = availableBytes * 8;
-        if (chunkSize > numElementsLeft)
-            chunkSize = numElementsLeft;
-
-        launchOutOfPlaceConvertKernel_toPackedBoolean<FROM_TYPE>(
-            source_d + startingElement, dest_d + startingElement / 8, chunkSize, stream);
-
-        numElementsLeft -= chunkSize;
-        startingElement += chunkSize;
-        availableBytes +=
-            (sizeof(FROM_TYPE) * chunkSize) - TensorDescriptor::getArraySizeInBytes(chunkSize, DataType::PACKED_BOOLEAN);
-    }
-}
-
 // To Bigger
 template <typename FROM_TYPE, typename TO_TYPE>
 void TypeConverter::convertToBiggerElementsInPlaceOnGpu(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements, Stream stream) {
@@ -1043,43 +900,6 @@ void TypeConverter::convertToBiggerElementsInPlaceOnGpu(FROM_TYPE *source_d, TO_
     }
 }
 
-template <typename TO_TYPE>
-void TypeConverter::convertToBiggerElementsInPlaceOnGpu_fromPackedBoolean(uint8_t *source_d,
-                                                                          TO_TYPE *dest_d,
-                                                                          long numElements,
-                                                                          Stream stream) {
-    THOR_THROW_IF_FALSE(numElements >= 0);
-    if (numElements == 0)
-        return;
-
-    // I have empty space in the allocated memory since I have the smaller element occupying enough memory to hold the bigger elements
-    // So convert some number of the trailing elements and put them in the back of the memory space, the trick here is that my writes cannot
-    // overlap my reads, so I choose a number of elements such that there is enough empty space existing that I can write all converted
-    // elements to it, after this the elements I just read and converted become empty space, so repeat until all elements are converted
-
-    long numElementsLeft = numElements;
-    long numEmptyBytes =
-        (sizeof(TO_TYPE) * numElements) - TensorDescriptor::getArraySizeInBytes(numElements, DataType::PACKED_BOOLEAN);
-
-    while (numElementsLeft > 8 * 256) {
-        long chunkSize = numEmptyBytes / sizeof(TO_TYPE);
-        long startingElement = numElementsLeft - chunkSize;
-        startingElement = 8 * ((startingElement + 7) / 8);
-        chunkSize = numElementsLeft - startingElement;
-
-        launchOutOfPlaceConvertKernel_fromPackedBoolean<TO_TYPE>(
-            source_d + startingElement / 8, dest_d + startingElement, chunkSize, stream);
-
-        numEmptyBytes +=
-            TensorDescriptor::getArraySizeInBytes(chunkSize, DataType::PACKED_BOOLEAN) - (sizeof(TO_TYPE) * chunkSize);
-        numElementsLeft = startingElement;
-    }
-
-    if (numElementsLeft > 0) {
-        launchReadConvertSyncWriteKernel_fromPackedBoolean<TO_TYPE>(source_d, dest_d, numElementsLeft, stream);
-    }
-}
-
 template <typename FROM_TYPE, typename TO_TYPE>
 void TypeConverter::gpuConvertTypeImpl(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements, Stream stream) {
     THOR_THROW_IF_FALSE(!(is_same<FROM_TYPE, TO_TYPE>::value));
@@ -1101,7 +921,6 @@ void TypeConverter::gpuConvertTypeImpl(FROM_TYPE *source_d, TO_TYPE *dest_d, lon
     }
 
     // All conversions to and from all element sizes of 1, 2, 4, and 8 bytes are supported.
-    // Also, PACKED_BOOLEAN is supported
     // InPlace and out of place conversions are supported in all cases
     if (!inPlaceConversion || sizeof(FROM_TYPE) == sizeof(TO_TYPE)) {
         launchOutOfPlaceConvertKernel<FROM_TYPE, TO_TYPE>(source_d, dest_d, numElements, stream);
@@ -1110,64 +929,6 @@ void TypeConverter::gpuConvertTypeImpl(FROM_TYPE *source_d, TO_TYPE *dest_d, lon
             convertToSmallerElementsInPlaceOnGpu<FROM_TYPE, TO_TYPE>(source_d, dest_d, numElements, stream);
         else
             convertToBiggerElementsInPlaceOnGpu<FROM_TYPE, TO_TYPE>(source_d, dest_d, numElements, stream);
-    }
-}
-
-template <typename FROM_TYPE>
-void TypeConverter::gpuConvertTypeToPackedBooleanImpl(FROM_TYPE *source_d, uint8_t *dest_d, long numElements, Stream stream) {
-    THOR_THROW_IF_FALSE(numElements >= 0);
-    if (numElements == 0)
-        return;
-
-    ScopedGpu scopedGpu(stream.getGpuNum());
-
-    bool inPlaceConversion = ((void *)source_d == (void *)dest_d);
-
-    // When not doing an inplace operation, the memory regions must not overlap
-    if (!inPlaceConversion) {
-        void *sourceStart = source_d;
-        void *sourceEnd = (void *)&(source_d[numElements - 1]);
-        void *destStart = dest_d;
-        void *destEnd = (void *)&(dest_d[((numElements + 7) / 8) - 1]);
-        THOR_THROW_IF_FALSE(sourceEnd < destStart || sourceStart > destEnd);
-    }
-
-    // All conversions to and from all element sizes of 1, 2, 4, and 8 bytes are supported.
-    // Also, PACKED_BOOLEAN is supported
-    // InPlace and out of place conversions are supported in all cases
-    if (!inPlaceConversion) {
-        launchOutOfPlaceConvertKernel_toPackedBoolean<FROM_TYPE>(source_d, dest_d, numElements, stream);
-    } else {
-        convertToSmallerElementsInPlaceOnGpu_toPackedBoolean<FROM_TYPE>(source_d, dest_d, numElements, stream);
-    }
-}
-
-template <typename TO_TYPE>
-void TypeConverter::gpuConvertTypeFromPackedBooleanImpl(uint8_t *source_d, TO_TYPE *dest_d, long numElements, Stream stream) {
-    THOR_THROW_IF_FALSE(numElements >= 0);
-    if (numElements == 0)
-        return;
-
-    ScopedGpu scopedGpu(stream.getGpuNum());
-
-    bool inPlaceConversion = ((void *)source_d == (void *)dest_d);
-
-    // When not doing an inplace operation, the memory regions must not overlap
-    if (!inPlaceConversion) {
-        void *sourceStart = source_d;
-        void *sourceEnd = (void *)&(source_d[((numElements + 7) / 8) - 1]);
-        void *destStart = dest_d;
-        void *destEnd = (void *)&(dest_d[numElements - 1]);
-        THOR_THROW_IF_FALSE(sourceEnd < destStart || sourceStart > destEnd);
-    }
-
-    // All conversions to and from all element sizes of 1, 2, 4, and 8 bytes are supported.
-    // Also, PACKED_BOOLEAN is supported
-    // InPlace and out of place conversions are supported in all cases
-    if (!inPlaceConversion) {
-        launchOutOfPlaceConvertKernel_fromPackedBoolean<TO_TYPE>(source_d, dest_d, numElements, stream);
-    } else {
-        convertToBiggerElementsInPlaceOnGpu_fromPackedBoolean<TO_TYPE>(source_d, dest_d, numElements, stream);
     }
 }
 
@@ -1194,110 +955,8 @@ __global__ void convertReadWholeChunkThenWriteWholeChunkKernel(FROM_TYPE *source
 }
 
 // Reads 8 writes 1
-template <typename FROM_TYPE>
-__global__ void convertReadWholeChunkThenWriteWholeChunkKernel_toPackedBoolean(FROM_TYPE *source_d, uint8_t *dest_d, long numElements) {
-    __shared__ FROM_TYPE buffer_shared[8 * 256];
-
-    long blockElementChunkStart = blockIdx.x * 256 * 8;
-    long threadInputElementIndex = threadIdx.x + blockElementChunkStart;
-    long threadOutputElementChunkStart = blockElementChunkStart + threadIdx.x * 8;
-
-    // So this thread has at least one element of an 8 element packed boolean uint8_t
-#pragma unroll 8
-    for (int i = 0; i < 8; ++i) {
-        if (threadInputElementIndex < numElements)
-            buffer_shared[threadIdx.x + i * 256] = source_d[threadInputElementIndex + i * 256];
-    }
-
-    __syncthreads();
-
-    uint8_t toBuff = 0;
-    for (int j = 0; j < 8; ++j) {
-        if (threadOutputElementChunkStart + j < numElements) {
-            FROM_TYPE fromBuff = buffer_shared[threadIdx.x * 8 + j];
-            bool toBuffRaw = (bool)fromBuff;
-            toBuff |= (toBuffRaw) << j;
-        }
-    }
-    if (threadOutputElementChunkStart < numElements) {
-        long destMemIndex = threadOutputElementChunkStart / 8;
-        dest_d[destMemIndex] = toBuff;
-    }
-}
-
 // Reads 8 writes 1
-__global__ void convertReadWholeChunkThenWriteWholeChunkKernel_halfToPackedBoolean(half *source_d, uint8_t *dest_d, long numElements) {
-    __shared__ half buffer_shared[8 * 256];
-
-    long blockElementChunkStart = blockIdx.x * 256 * 8;
-    long threadInputElementIndex = threadIdx.x + blockElementChunkStart;
-    long threadOutputElementChunkStart = blockElementChunkStart + threadIdx.x * 8;
-
-    // So this thread has at least one element of an 8 element packed boolean uint8_t
-#pragma unroll 8
-    for (int i = 0; i < 8; ++i) {
-        if (threadInputElementIndex < numElements)
-            buffer_shared[threadIdx.x + i * 256] = source_d[threadInputElementIndex + i * 256];
-    }
-
-    __syncthreads();
-
-    uint8_t toBuff = 0;
-    for (int j = 0; j < 8; ++j) {
-        if (threadOutputElementChunkStart + j < numElements) {
-            half fromBuff = buffer_shared[threadIdx.x * 8 + j];
-            bool toBuffRaw = (bool)(float)fromBuff;
-            toBuff |= (toBuffRaw) << j;
-        }
-    }
-    if (threadOutputElementChunkStart < numElements) {
-        long destMemIndex = threadOutputElementChunkStart / 8;
-        dest_d[destMemIndex] = toBuff;
-    }
-}
-
 // Reads 1 writes 8
-template <typename TO_TYPE>
-__global__ void convertReadWholeChunkThenWriteWholeChunkKernel_fromPackedBoolean(uint8_t *source_d, TO_TYPE *dest_d, long numElements) {
-    __shared__ uint8_t buffer_shared[256];
-
-    long blockElementChunkStart = blockIdx.x * 256 * 8;
-    long threadInputElementIndex = blockElementChunkStart + threadIdx.x * 8;
-    long threadOutputElementIndex = blockElementChunkStart + threadIdx.x;
-
-    if (threadInputElementIndex < numElements)
-        buffer_shared[threadIdx.x] = source_d[threadInputElementIndex / 8];
-    __syncthreads();
-
-#pragma unroll 8
-    for (int i = 0; i < 8; ++i) {
-        uint8_t buffRaw = buffer_shared[(threadIdx.x + i * (256)) / 8];
-        TO_TYPE buff = (TO_TYPE)((buffRaw >> (threadIdx.x % 8)) & 0x1);
-        if (threadOutputElementIndex + i * 256 < numElements)
-            dest_d[threadOutputElementIndex + i * 256] = buff;
-    }
-}
-
-__global__ void convertReadWholeChunkThenWriteWholeChunkKernel_packedBooleanToHalf(uint8_t *source_d, half *dest_d, long numElements) {
-    __shared__ uint8_t buffer_shared[256];
-
-    long blockElementChunkStart = blockIdx.x * 256 * 8;
-    long threadInputElementIndex = blockElementChunkStart + threadIdx.x * 8;
-    long threadOutputElementIndex = blockElementChunkStart + threadIdx.x;
-
-    if (threadInputElementIndex < numElements)
-        buffer_shared[threadIdx.x] = source_d[threadInputElementIndex / 8];
-    __syncthreads();
-
-#pragma unroll 8
-    for (int i = 0; i < 8; ++i) {
-        uint8_t buffRaw = buffer_shared[(threadIdx.x + i * (256)) / 8];
-        half buff = (half)(float)((buffRaw >> (threadIdx.x % 8)) & 0x1);
-        if (threadOutputElementIndex + i * 256 < numElements)
-            dest_d[threadOutputElementIndex + i * 256] = buff;
-    }
-}
-
 // Reads 16 writes 16
 template <typename FROM_TYPE, typename TO_TYPE>
 __global__ void convertOutOfPlaceKernelS1D1(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements) {
@@ -1675,42 +1334,6 @@ __global__ void convertOutOfPlaceKernelS8D8(FROM_TYPE *source_d, TO_TYPE *dest_d
 }
 
 // Reads 8 writes 1
-__global__ void convertOutOfPlaceKernel_halfToPackedBoolean(half *source_d, uint8_t *dest_d, long numElements) {
-    __shared__ half buffer_shared[256];
-
-    long blockElementChunkStart = blockIdx.x * 256 * 8;
-    long threadInputElementIndex = threadIdx.x + blockElementChunkStart;
-    long threadOutputElementChunkStart = blockElementChunkStart + threadIdx.x * 8;
-
-    // So this thread has at least one element of an 8 element packed boolean uint8_t
-    uint8_t toBuff = 0;
-#pragma unroll 8
-    for (int i = 0; i < 8; ++i) {
-        __syncthreads();
-        if (threadInputElementIndex < numElements)
-            buffer_shared[threadIdx.x] = source_d[threadInputElementIndex];
-        __syncthreads();
-
-        // Now all of these elements belong to 1/8 of the threads.
-        // Each of those threads will read its elements out of shared and shift them into the toBuff;
-        if (threadIdx.x / (256 / 8) == i) {
-#pragma unroll 8
-            for (int j = 0; j < 8; ++j) {
-                if (threadOutputElementChunkStart + j < numElements) {
-                    half fromBuff = buffer_shared[((threadIdx.x * 8) % 256) + j];
-                    bool toBuffRaw = (bool)(float)fromBuff;
-                    toBuff |= (toBuffRaw) << j;
-                }
-            }
-        }
-        threadInputElementIndex += 256;
-    }
-    if (threadOutputElementChunkStart < numElements) {
-        long destMemIndex = threadOutputElementChunkStart / 8;
-        dest_d[destMemIndex] = toBuff;
-    }
-}
-
 template <typename FROM_TYPE, typename TO_TYPE>
 void launchOutOfPlaceConvertKernel(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements, Stream stream) {
     if (sizeof(FROM_TYPE) == 1) {
@@ -1806,62 +1429,10 @@ void launchOutOfPlaceConvertKernel(FROM_TYPE *source_d, TO_TYPE *dest_d, long nu
     }
 }
 
-template <typename FROM_TYPE>
-void launchOutOfPlaceConvertKernel_toPackedBoolean(FROM_TYPE *source_d, uint8_t *dest_d, long numElements, Stream stream) {
-    dim3 blockSize(256);
-    constexpr int elementsPerBlock = 256 * 8;
-    dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-
-    if (is_same<FROM_TYPE, half>::value)
-        convertReadWholeChunkThenWriteWholeChunkKernel_halfToPackedBoolean<<<gridSize, blockSize, 0, stream.getStream()>>>(
-            (half *)source_d, dest_d, numElements);
-    else
-        convertReadWholeChunkThenWriteWholeChunkKernel_toPackedBoolean<FROM_TYPE>
-            <<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-}
-
-template <typename TO_TYPE>
-void launchOutOfPlaceConvertKernel_fromPackedBoolean(uint8_t *source_d, TO_TYPE *dest_d, long numElements, Stream stream) {
-    dim3 blockSize(256);
-    constexpr int elementsPerBlock = 256 * 8;
-    dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-
-    if (is_same<TO_TYPE, half>::value)
-        convertReadWholeChunkThenWriteWholeChunkKernel_packedBooleanToHalf<<<gridSize, blockSize, 0, stream.getStream()>>>(
-            source_d, (half *)dest_d, numElements);
-    else
-        convertReadWholeChunkThenWriteWholeChunkKernel_fromPackedBoolean<TO_TYPE>
-            <<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-}
-
 template <typename FROM_TYPE, typename TO_TYPE>
 void launchReadConvertSyncWriteKernel(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements, Stream stream) {
     dim3 blockSize(256);
     dim3 gridSize(1);
     convertReadWholeChunkThenWriteWholeChunkKernel<FROM_TYPE, TO_TYPE>
         <<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-}
-
-template <typename FROM_TYPE>
-void launchReadConvertSyncWriteKernel_toPackedBoolean(FROM_TYPE *source_d, uint8_t *dest_d, long numElements, Stream stream) {
-    dim3 blockSize(256);
-    dim3 gridSize(1);
-    if (is_same<FROM_TYPE, half>::value)
-        convertReadWholeChunkThenWriteWholeChunkKernel_halfToPackedBoolean<<<gridSize, blockSize, 0, stream.getStream()>>>(
-            (half *)source_d, dest_d, numElements);
-    else
-        convertReadWholeChunkThenWriteWholeChunkKernel_toPackedBoolean<FROM_TYPE>
-            <<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-}
-
-template <typename TO_TYPE>
-void launchReadConvertSyncWriteKernel_fromPackedBoolean(uint8_t *source_d, TO_TYPE *dest_d, long numElements, Stream stream) {
-    dim3 blockSize(256);
-    dim3 gridSize(1);
-    if (is_same<TO_TYPE, half>::value)
-        convertReadWholeChunkThenWriteWholeChunkKernel_packedBooleanToHalf<<<gridSize, blockSize, 0, stream.getStream()>>>(
-            source_d, (half *)dest_d, numElements);
-    else
-        convertReadWholeChunkThenWriteWholeChunkKernel_fromPackedBoolean<TO_TYPE>
-            <<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
 }

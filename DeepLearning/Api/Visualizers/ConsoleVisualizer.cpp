@@ -1,8 +1,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Visualizers/ConsoleVisualizer.h"
 
-// curses.h creates macros that clash with GraphicsMagick, so the two cannot be used together
-// so curses.h is included in the source file rather than the header file.
+// Keep curses.h out of the public header because it defines broad preprocessor macros.
 #include <curses.h>
 
 using namespace Thor;

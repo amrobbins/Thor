@@ -24,7 +24,6 @@ bool isFp8Type(DataType dtype) { return dtype == DataType::FP8_E4M3 || dtype == 
 static bool isPassthroughInputDType(DataType dtype) {
     switch (dtype) {
         case DataType::BOOLEAN:
-        case DataType::PACKED_BOOLEAN:
         case DataType::UINT8:
         case DataType::INT8:
         case DataType::UINT16:
@@ -90,9 +89,6 @@ DataType toSupportedComputeDType(ExprOp op, DataType requested_compute_dtype) {
     }
 
     if (isCastOp(op)) {
-        if (requested_compute_dtype == DataType::PACKED_BOOLEAN) {
-            throw std::runtime_error("Packed boolean casts are not supported in toSupportedComputeDType.");
-        }
         if (isPassthroughInputDType(requested_compute_dtype)) {
             return requested_compute_dtype;
         }
@@ -506,9 +502,6 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
     if (node.op == ExprOp::CAST) {
         if (!node.output_dtype.has_value()) {
             throw std::runtime_error("Cast node is missing output dtype in resolveNodeOutputDType.");
-        }
-        if (node.output_dtype.value() == DataType::PACKED_BOOLEAN) {
-            throw std::runtime_error("Cast output dtype cannot be PACKED_BOOLEAN.");
         }
         return node.output_dtype.value();
     }

@@ -55,7 +55,6 @@ def test_tensor_total_num_elements(dims, expected_elems):
         ([2, 3], thor.DataType.fp32),
         ([2, 3], thor.DataType.int32),
         ([2, 3], thor.DataType.int8),
-        ([4, 6], thor.DataType.packed_bool),
     ],
 )
 def test_tensor_bytes_per_element_and_total_size_in_bytes(dims, dtype):

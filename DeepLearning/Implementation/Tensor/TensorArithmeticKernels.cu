@@ -269,7 +269,6 @@ void Tensor::fillGpuIdentityMatrixOnes(Stream stream) {
     ScopedGpu scopedGpu(gpuNum);
 
     DataType dataType = getDataType();
-    THOR_THROW_IF_FALSE(dataType != DataType::PACKED_BOOLEAN);
     uint32_t N = getDimensions()[0];
 
     dim3 blockSize(256);

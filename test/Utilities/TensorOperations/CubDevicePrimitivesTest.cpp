@@ -516,7 +516,6 @@ TEST(CubDevicePrimitives, DTypeSupportPolicyMatchesFeatureDefines) {
     EXPECT_TRUE(isCubSelectFlagDTypeSupported(DataType::BOOLEAN));
     EXPECT_TRUE(isCubSelectFlagDTypeSupported(DataType::UINT8));
     EXPECT_FALSE(isCubSelectFlagDTypeSupported(DataType::INT32));
-    EXPECT_FALSE(isCubSelectFlagDTypeSupported(DataType::PACKED_BOOLEAN));
 
     EXPECT_TRUE(isCubRunLengthEncodeDTypeSupported(DataType::UINT8));
     EXPECT_TRUE(isCubRunLengthEncodeDTypeSupported(DataType::INT8));

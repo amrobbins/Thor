@@ -78,7 +78,6 @@ class Tensor {
             case DataType::INT64:
             case DataType::UINT64:
             case DataType::BOOLEAN:
-            case DataType::PACKED_BOOLEAN:
                 return true;
             default:
                 return false;

@@ -28,9 +28,6 @@ fp8_e5m2 = ml_dtypes.float8_e5m2
 def from_thor(dtype: thor.DataType):
     if dtype == thor.DataType.bool:
         return bool_
-    if dtype == thor.DataType.packed_bool:
-        return uint8
-
     if dtype == thor.DataType.int8:
         return int8
     if dtype == thor.DataType.uint8:

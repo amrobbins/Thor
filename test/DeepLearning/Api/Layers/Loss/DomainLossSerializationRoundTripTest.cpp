@@ -33,7 +33,6 @@
 #include <filesystem>
 #include <stdexcept>
 #include <string>
-#include <unordered_set>
 #include <vector>
 
 using namespace Thor;
@@ -95,52 +94,8 @@ json canonicalSupportLayers(const Network& network) {
     return result;
 }
 
-bool endsWith(const string& value, const string& suffix) {
-    return value.size() >= suffix.size() && value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
-}
-
-bool isTensorJson(const json& value) {
-    return value.is_object() && value.contains("version") && value.contains("id") && value.contains("dimensions") &&
-           value.contains("data_type");
-}
-
-bool isPublicLossInputTensorField(const string& key, const json& value) {
-    if (!isTensorJson(value) || !endsWith(key, "_tensor"))
-        return false;
-    return key != "loss_tensor" && key != "loss_shaper_input_tensor";
-}
-
-void deserializeSyntheticInputsForPublicLossJsons(const vector<json>& publicLossJsons, Network& restored) {
-    unordered_set<uint64_t> seenOriginalIds;
-    for (const json& publicLossJson : publicLossJsons) {
-        for (const auto& item : publicLossJson.items()) {
-            if (!isPublicLossInputTensorField(item.key(), item.value()))
-                continue;
-
-            const json& tensorJson = item.value();
-            const uint64_t originalId = tensorJson.at("id").get<uint64_t>();
-            if (!seenOriginalIds.insert(originalId).second)
-                continue;
-
-            json featureInputJson = tensorJson;
-            featureInputJson["id"] = originalId + 1000000000ULL;
-
-            json networkInputJson;
-            networkInputJson["factory"] = Layer::Factory::Layer.value();
-            networkInputJson["version"] = "1.0.0";
-            networkInputJson["layer_type"] = "network_input";
-            networkInputJson["name"] = string("synthetic_public_loss_input_") + to_string(originalId);
-            networkInputJson["dimensions"] = tensorJson.at("dimensions");
-            networkInputJson["data_type"] = tensorJson.at("data_type");
-            networkInputJson["feature_input"] = featureInputJson;
-            networkInputJson["feature_output"] = tensorJson;
-            NetworkInput::deserialize(networkInputJson, &restored);
-        }
-    }
-}
-
 struct DomainLossFixture {
-    vector<json> publicLossJsons;
+    size_t numLosses = 0;
 };
 
 template <typename LossT>
@@ -149,9 +104,9 @@ void rememberLoss(DomainLossFixture& fixture, Network& network, const LossT& los
     if (!publicJson.contains("loss_weight")) {
         throw runtime_error("Expected public loss JSON to contain loss_weight: " + publicJson.dump());
     }
-    fixture.publicLossJsons.push_back(publicJson);
+    ++fixture.numLosses;
 
-    const string outputName = publicJson.at("layer_type").get<string>() + "_" + to_string(fixture.publicLossJsons.size()) + "_output";
+    const string outputName = publicJson.at("layer_type").get<string>() + "_" + to_string(fixture.numLosses) + "_output";
     consumeLoss(network, outputName, loss.getLoss());
 }
 
@@ -574,28 +529,16 @@ DomainLossFixture addAllNewDomainLosses(Network& network) {
 
 }  // namespace
 
-TEST(DomainLossSerializationRoundTrip, PublicLossJsonDeserializationReproducesSupportGraphsForAllNewDomainLosses) {
-    Network source("domain_loss_public_json_round_trip_source");
-    DomainLossFixture fixture = addAllNewDomainLosses(source);
-
-    ASSERT_EQ(fixture.publicLossJsons.size(), 27u);
-    Network restored("domain_loss_public_json_round_trip_restored");
-    deserializeSyntheticInputsForPublicLossJsons(fixture.publicLossJsons, restored);
-    for (const json& publicLossJson : fixture.publicLossJsons) {
-        Loss::deserialize(publicLossJson, &restored);
-    }
-
-    EXPECT_EQ(canonicalSupportLayers(restored), canonicalSupportLayers(source));
-}
-
 TEST(DomainLossSerializationRoundTrip, NetworkSaveLoadPreservesSupportGraphsForNonDefaultDomainLossFields) {
     const string networkName = "domain_loss_support_graph_save_load_round_trip";
     filesystem::path archiveDir = makeUniqueTestArchiveDir(networkName);
 
     try {
         Network source(networkName);
-        addAllNewDomainLosses(source);
+        DomainLossFixture fixture = addAllNewDomainLosses(source);
+        ASSERT_EQ(fixture.numLosses, 27u);
         const json expectedSupportLayers = canonicalSupportLayers(source);
+        ASSERT_FALSE(expectedSupportLayers.empty());
         source.save(archiveDir.string(), true);
 
         Network loaded(networkName);

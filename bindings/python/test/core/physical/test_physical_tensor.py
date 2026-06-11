@@ -59,7 +59,6 @@ def test_descriptor_basic_properties_and_helpers():
 
     # element size
     assert D.element_size_in_bytes(thor.DataType.fp16) == 2
-    assert D.element_size_in_bytes(thor.DataType.packed_bool) == 0.125
     assert D.element_size_in_bytes(thor.DataType.uint64) == 8
 
     # size math
