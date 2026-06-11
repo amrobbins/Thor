@@ -1,6 +1,10 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Executors/LocalExecutor.h"
 
+#include <chrono>
+#include <cstring>
+#include <optional>
+
 using std::condition_variable;
 using std::map;
 using std::string;
@@ -18,29 +22,28 @@ shared_ptr<LocalExecutor> LocalExecutor::Builder::build() {
     // FIXME: add hyperparameter controller
     // THOR_THROW_IF_FALSE(_hyperparameterController.has_value());
 
-    if (!_visualizers.has_value()) {
-        _visualizers = vector<Visualizer *>();
-        _visualizers.value().push_back(&ConsoleVisualizer::instance());
+    if (!observers_.has_value()) {
+        observers_ = vector<shared_ptr<TrainingObserver>>();
+        if (statsEnabled_) {
+            observers_.value().push_back(make_shared<LineStatsReporter>(statsIntervalSeconds_, true));
+        } else {
+            observers_.value().push_back(make_shared<NullTrainingObserver>());
+        }
     }
 
     shared_ptr<LocalExecutor> localExecutor = make_shared<LocalExecutor>();
     localExecutor->loader = _loader;
     localExecutor->optimizer = _optimizer;
     // localExecutor->hyperparameterController = _hyperparameterController;
-    localExecutor->visualizers = _visualizers.value();
+    localExecutor->observers = observers_.value();
+    localExecutor->statsEnabled = statsEnabled_;
+    localExecutor->statsIntervalSeconds = statsIntervalSeconds_;
 
     if (!_outputDirectory.has_value()) {
         std::filesystem::path outputPath = std::filesystem::absolute(std::filesystem::path("./")).string();
         localExecutor->outputDirectory = std::filesystem::canonical(outputPath).string();
     } else {
         localExecutor->outputDirectory = _outputDirectory.value();
-    }
-
-    for (uint64_t i = 0; i < localExecutor->visualizers.size(); ++i) {
-        localExecutor->visualizerExecutionState.push_back(std::make_shared<AsyncQueue<ExecutionState>>(1024));
-        localExecutor->visualizerExecutionState.back()->open();
-        localExecutor->visualizers[i]->connectStateUpdateQueue(localExecutor->visualizerExecutionState.back());
-        localExecutor->visualizers[i]->startUI();
     }
 
     uint64_t batchSize = localExecutor->loader->getBatchSize();
@@ -70,11 +73,14 @@ shared_ptr<LocalExecutor> LocalExecutor::Builder::build() {
     return localExecutor;
 }
 
-LocalExecutor::~LocalExecutor() {
-    for (uint64_t i = 0; i < visualizerExecutionState.size(); ++i) {
-        visualizerExecutionState[i]->close();
+LocalExecutor::~LocalExecutor() = default;
+
+void LocalExecutor::emitTrainingEvent(const TrainingEvent &event) {
+    for (const shared_ptr<TrainingObserver> &observer : observers) {
+        if (observer) {
+            observer->onTrainingEvent(event);
+        }
     }
-    visualizerExecutionState.clear();
 }
 
 void CUDART_CB LocalExecutor::bufferStampTensors(void *data) {
@@ -250,10 +256,46 @@ void LocalExecutor::trainBatches(uint64_t initialEpochBatchNum, uint64_t batches
 }
 
 void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn) {
+    THOR_THROW_IF_FALSE(numEpochs > 0);
+
     double averageTrainingBatchTime = -1;
     double averageValidationBatchTime = -1;
+    const auto runStart = std::chrono::high_resolution_clock::now();
 
-    for (uint32_t i = 0; i < numEpochs; ++i) {
+    auto elapsedSinceRunStart = [&]() {
+        const auto now = std::chrono::high_resolution_clock::now();
+        const std::chrono::duration<double> elapsed = std::chrono::duration_cast<std::chrono::duration<double>>(now - runStart);
+        return elapsed.count();
+    };
+
+    auto optionalFloatFromBatch = [](const unordered_map<string, vector<uint8_t>>& batchData, const string& tensorName) -> optional<double> {
+        auto it = batchData.find(tensorName);
+        if (it == batchData.end() || it->second.size() < sizeof(float)) {
+            return nullopt;
+        }
+        float value = 0.0f;
+        memcpy(&value, it->second.data(), sizeof(float));
+        return static_cast<double>(value);
+    };
+
+    auto makeBaseSnapshot = [&](TrainingPhase phase, uint64_t epoch, uint64_t batchSize, uint64_t batchesPerEpoch) {
+        TrainingStatsSnapshot snapshot;
+        snapshot.networkName = placedNetwork->getNetworkName();
+        snapshot.datasetName = loader->getDatasetName();
+        snapshot.phase = phase;
+        snapshot.epoch = epoch;
+        snapshot.epochs = numEpochs;
+        snapshot.batchSize = batchSize;
+        snapshot.stepsPerEpoch = batchesPerEpoch;
+        snapshot.elapsedSeconds = elapsedSinceRunStart();
+        return snapshot;
+    };
+
+    emitTrainingEvent(TrainingEvent::runStarted(makeBaseSnapshot(TrainingPhase::UNKNOWN, 0, loader->getBatchSize(), 0)));
+
+    for (uint32_t epochOffset = 0; epochOffset < numEpochs; ++epochOffset) {
+        const uint64_t humanEpoch = *currentEpoch + 1;
+
         // Training phase
         uint64_t batchNum = loader->getNextBatchNum(ExampleType::TRAIN);
         uint64_t batchesPerEpoch = loader->getNumBatchesPerEpoch(ExampleType::TRAIN);
@@ -263,25 +305,10 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
         *numBatchesDoneInEpoch = batchNum;
         *numBatchesInEpoch = batchesPerEpoch;
 
+        emitTrainingEvent(TrainingEvent::epochStarted(makeBaseSnapshot(TrainingPhase::TRAIN, humanEpoch, batchSize, batchesPerEpoch)));
+
         thread trainingThread(&LocalExecutor::trainBatches, this, batchNum, batchesToTrain, ExampleType::TRAIN, tensorsToReturn);
-        unordered_map<string, std::vector<uint8_t>> batchData;
-
-        ExecutionState executionState;
-        executionState.outputDirectory = outputDirectory;
-        executionState.epochsToTrain = numEpochs;
-        executionState.networkName = placedNetwork->getNetworkName();
-        executionState.datasetName = loader->getDatasetName();
-        executionState.executionMode = ExampleType::TRAIN;
-        executionState.epochNum = *currentEpoch;
-        executionState.batchSize = batchSize;
-        executionState.batchesPerEpoch = batchesPerEpoch;
-        executionState.numTrainingExamples = loader->getNumExamples(ExampleType::TRAIN);
-        executionState.numValidationExamples = loader->getNumExamples(ExampleType::VALIDATE);
-        executionState.numTestExamples = loader->getNumExamples(ExampleType::TEST);
-        executionState.batchesPerEpoch = batchesPerEpoch;
-
-        executionState.flopsPerExample = placedNetwork->getStampedNetwork(0).floatingPointOperationsPerExampleForward +
-                                         placedNetwork->getStampedNetwork(0).floatingPointOperationsPerExampleBackward;
+        unordered_map<string, vector<uint8_t>> batchData;
 
         std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
 
@@ -297,25 +324,34 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
                     averageTrainingBatchTime = 0.05 * elapsed.count() + 0.95 * averageTrainingBatchTime;
 
                 unordered_map<string, float> optimizerParameters = optimizer->getAllHyperParameters(placedNetwork.get());
-                executionState.learningRate = optimizerParameters["currentLearningRate"];
-                executionState.momentum = optimizerParameters["momentum"];
 
                 batchData = popBatchData();
-                executionState.batchNum = batchNum + 1;
-                executionState.runningAverageTimePerTrainingBatch = averageTrainingBatchTime;
-                float *batchLoss = (float *)(batchData["loss"].data());
-                executionState.batchLoss = *batchLoss;
-                float *batchAccuracy = (float *)(batchData["accuracy"].data());
-                executionState.batchAccuracy = *batchAccuracy;
-                for (uint32_t i = 0; i < visualizers.size(); ++i) {
-                    visualizerExecutionState[i]->push(executionState);
+
+                TrainingStatsSnapshot snapshot = makeBaseSnapshot(TrainingPhase::TRAIN, humanEpoch, batchSize, batchesPerEpoch);
+                snapshot.stepInEpoch = batchNum + 1;
+                snapshot.step = (*currentEpoch * batchesPerEpoch) + snapshot.stepInEpoch;
+                snapshot.samplesProcessed = snapshot.step * batchSize;
+                if (averageTrainingBatchTime > 0.0) {
+                    snapshot.samplesPerSecond = static_cast<double>(batchSize) / averageTrainingBatchTime;
+                    snapshot.batchesPerSecond = 1.0 / averageTrainingBatchTime;
                 }
+                if (optimizerParameters.count("currentLearningRate") > 0) {
+                    snapshot.learningRate = optimizerParameters["currentLearningRate"];
+                }
+                if (optimizerParameters.count("momentum") > 0) {
+                    snapshot.momentum = optimizerParameters["momentum"];
+                }
+                snapshot.loss = optionalFloatFromBatch(batchData, "loss");
+                snapshot.accuracy = optionalFloatFromBatch(batchData, "accuracy");
+                emitTrainingEvent(TrainingEvent::statsUpdated(std::move(snapshot)));
+
                 batchNum += 1;
             } else {
                 break;
             }
         }
         trainingThread.join();
+        emitTrainingEvent(TrainingEvent::epochFinished(makeBaseSnapshot(TrainingPhase::TRAIN, humanEpoch, batchSize, batchesPerEpoch)));
 
         // Validation phase
         batchNum = loader->getNextBatchNum(ExampleType::VALIDATE);
@@ -326,22 +362,10 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
         *numBatchesDoneInEpoch = batchNum;
         *numBatchesInEpoch = batchesPerEpoch;
 
+        emitTrainingEvent(TrainingEvent::epochStarted(makeBaseSnapshot(TrainingPhase::VALIDATE, humanEpoch, batchSize, batchesPerEpoch)));
+
         // FIXME: I am currently training using the validation data. A validation step needs to be built.
         thread validationThread(&LocalExecutor::trainBatches, this, batchNum, batchesToValidate, ExampleType::VALIDATE, tensorsToReturn);
-
-        executionState.outputDirectory = outputDirectory;
-        executionState.epochsToTrain = numEpochs;
-        executionState.networkName = placedNetwork->getNetworkName();
-        executionState.datasetName = loader->getDatasetName();
-        executionState.executionMode = ExampleType::VALIDATE;
-        executionState.epochNum = *currentEpoch;
-        executionState.batchSize = batchSize;
-        executionState.batchesPerEpoch = batchesPerEpoch;
-        executionState.numTrainingExamples = loader->getNumExamples(ExampleType::TRAIN);
-        executionState.numValidationExamples = loader->getNumExamples(ExampleType::VALIDATE);
-        executionState.numTestExamples = loader->getNumExamples(ExampleType::TEST);
-        executionState.batchesPerEpoch = batchesPerEpoch;
-        executionState.flopsPerExample = placedNetwork->getStampedNetwork(0).floatingPointOperationsPerExampleForward;
 
         start = std::chrono::high_resolution_clock::now();
 
@@ -357,28 +381,39 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
                     averageValidationBatchTime = 0.05 * elapsed.count() + 0.95 * averageValidationBatchTime;
 
                 unordered_map<string, float> optimizerParameters = optimizer->getAllHyperParameters(placedNetwork.get());
-                executionState.learningRate = optimizerParameters["currentLearningRate"];
-                executionState.momentum = optimizerParameters["momentum"];
 
                 batchData = popBatchData();
-                executionState.batchNum = batchNum + 1;
-                executionState.runningAverageTimePerValidationBatch = averageValidationBatchTime;
-                float *batchLoss = (float *)(batchData["loss"].data());
-                executionState.batchLoss = *batchLoss;
-                float *batchAccuracy = (float *)(batchData["accuracy"].data());
-                executionState.batchAccuracy = *batchAccuracy;
-                for (uint32_t i = 0; i < visualizers.size(); ++i) {
-                    visualizerExecutionState[i]->push(executionState);
+
+                TrainingStatsSnapshot snapshot = makeBaseSnapshot(TrainingPhase::VALIDATE, humanEpoch, batchSize, batchesPerEpoch);
+                snapshot.stepInEpoch = batchNum + 1;
+                snapshot.step = (*currentEpoch * batchesPerEpoch) + snapshot.stepInEpoch;
+                snapshot.samplesProcessed = snapshot.step * batchSize;
+                if (averageValidationBatchTime > 0.0) {
+                    snapshot.samplesPerSecond = static_cast<double>(batchSize) / averageValidationBatchTime;
+                    snapshot.batchesPerSecond = 1.0 / averageValidationBatchTime;
                 }
+                if (optimizerParameters.count("currentLearningRate") > 0) {
+                    snapshot.learningRate = optimizerParameters["currentLearningRate"];
+                }
+                if (optimizerParameters.count("momentum") > 0) {
+                    snapshot.momentum = optimizerParameters["momentum"];
+                }
+                snapshot.loss = optionalFloatFromBatch(batchData, "loss");
+                snapshot.accuracy = optionalFloatFromBatch(batchData, "accuracy");
+                emitTrainingEvent(TrainingEvent::statsUpdated(std::move(snapshot)));
+
                 batchNum += 1;
             } else {
                 break;
             }
         }
         validationThread.join();
+        emitTrainingEvent(TrainingEvent::epochFinished(makeBaseSnapshot(TrainingPhase::VALIDATE, humanEpoch, batchSize, batchesPerEpoch)));
 
         (*currentEpoch) += 1;
     }
+
+    emitTrainingEvent(TrainingEvent::runFinished(makeBaseSnapshot(TrainingPhase::UNKNOWN, *currentEpoch, loader->getBatchSize(), 0)));
 }
 
 bool LocalExecutor::isBatchDataReady() {
