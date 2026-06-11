@@ -96,6 +96,7 @@ void PoissonNLLLoss::buildSupportLayersAndAddToNetwork() {
                                        .lossName(kLossName)
                                        .gradientName(kGradientName)
                                        .lossDataType(lossDataType)
+                                       .lossWeight(lossWeight.value_or(1.0f))
                                        .reportsRawLoss()
                                        .build();
 
@@ -140,6 +141,8 @@ void PoissonNLLLoss::deserialize(const json& j, Network* network) {
     PoissonNLLLoss loss;
     loss.lossShape = j.at("loss_shape").get<LossShape>();
     loss.lossDataType = j.at("loss_data_type").get<DataType>();
+
+    loss.lossWeight = ThorImplementation::lossWeightFromJson(j);
     loss.logInput = j.value("log_input", true);
     loss.full = j.value("full", false);
     loss.eps = j.value("eps", 1.0e-8f);

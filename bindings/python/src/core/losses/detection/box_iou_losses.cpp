@@ -104,13 +104,15 @@ void bindBoxIouLoss(nb::module_& losses, const char* className, const char* docL
                     const string& boxFormat,
                     float eps,
                     optional<DataType> lossDataType,
-                    LossShape reportedLossShape) {
+                    LossShape reportedLossShape,
+                    std::optional<float> loss_weight) {
             const string lossName = string(className) + " instance";
             validateBoxIouLossArguments(lossName, predictions, labels, boxFormat, eps, lossDataType, reportedLossShape);
 
             DataType effectiveLossDataType = lossDataType.value_or(predictions.getDataType());
             typename LossT::Builder builder;
-            builder.network(network).predictions(predictions).labels(labels).eps(eps).lossDataType(effectiveLossDataType);
+            builder.network(network).predictions(predictions).labels(labels).eps(eps).lossDataType(effectiveLossDataType)
+                .lossWeight(loss_weight.value_or(1.0f));
             setReportedLossShape(builder, reportedLossShape);
             LossT built = builder.build();
 
@@ -123,6 +125,8 @@ void bindBoxIouLoss(nb::module_& losses, const char* className, const char* docL
         "eps"_a = 1.0e-7f,
         "loss_data_type"_a.none() = nb::none(),
         "reported_loss_shape"_a = LossShape::BATCH,
+        nb::kw_only(),
+        "loss_weight"_a.none() = nb::none(),
         docLine);
 
     cls.def_prop_ro("eps", &LossT::getEps);

@@ -80,6 +80,8 @@ class MAE::Builder {
         meanAbsoluteError.predictionsTensor = _predictions.value();
         meanAbsoluteError.labelsTensor = _labels.value();
         meanAbsoluteError.lossDataType = _lossDataType.value();
+
+        meanAbsoluteError.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         meanAbsoluteError.lossShape = _lossShape.value();
         meanAbsoluteError.network = _network.value();
         meanAbsoluteError.initialized = true;
@@ -133,6 +135,13 @@ class MAE::Builder {
         return *this;
     }
 
+    virtual MAE::Builder & lossWeight(float lossWeight) {
+        THOR_THROW_IF_FALSE(!this->_lossWeight.has_value());
+        ThorImplementation::validateLossWeight(lossWeight);
+        this->_lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
+        return *this;
+    }
+
     virtual MAE::Builder &lossDataType(DataType _lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
         this->_lossDataType = _lossDataType;
@@ -145,6 +154,7 @@ class MAE::Builder {
     std::optional<Tensor> _labels;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
+    std::optional<float> _lossWeight;
 };
 
 

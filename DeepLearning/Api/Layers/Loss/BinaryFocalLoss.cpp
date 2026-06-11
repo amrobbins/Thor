@@ -122,6 +122,7 @@ void BinaryFocalLoss::buildSupportLayersAndAddToNetwork() {
                                         .lossName(kLossName)
                                         .gradientName(kGradientName)
                                         .lossDataType(lossDataType)
+                                       .lossWeight(lossWeight.value_or(1.0f))
                                         .reportsRawLoss()
                                         .build();
 
@@ -161,6 +162,8 @@ void BinaryFocalLoss::deserialize(const json& j, Network* network) {
     BinaryFocalLoss binaryFocalLoss;
     binaryFocalLoss.lossShape = j.at("loss_shape").get<LossShape>();
     binaryFocalLoss.lossDataType = j.at("loss_data_type").get<DataType>();
+
+    binaryFocalLoss.lossWeight = ThorImplementation::lossWeightFromJson(j);
     binaryFocalLoss.gamma = j.value("gamma", 2.0f);
     binaryFocalLoss.alpha = j.value("alpha", 0.25f);
     binaryFocalLoss.predictionsTensor = predictions;

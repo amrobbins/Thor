@@ -282,7 +282,7 @@ __device__ D4 boxIouLossValue(BoxIouLossKind kind, const Box4f& predictionBox, c
     return loss;
 }
 
-template <typename LABEL_TYPE, typename PREDICTION_TYPE, typename LOSS_TYPE>
+template <typename LABEL_TYPE, typename PREDICTION_TYPE, typename LOSS_TYPE, bool HasLossWeight>
 __global__ void boxIouLossKernel(const LABEL_TYPE* __restrict__ labels,
                                  const PREDICTION_TYPE* __restrict__ predictions,
                                  LOSS_TYPE* __restrict__ loss,
@@ -291,7 +291,8 @@ __global__ void boxIouLossKernel(const LABEL_TYPE* __restrict__ labels,
                                  BoxIouLossKind kind,
                                  float eps,
                                  bool computeGradient,
-                                 float lossScalingFactor) {
+                                 float lossScalingFactor,
+                                 float lossWeight) {
     const uint32_t boxIndex = blockIdx.x * blockDim.x + threadIdx.x;
     if (boxIndex >= numBoxes)
         return;
@@ -300,17 +301,27 @@ __global__ void boxIouLossKernel(const LABEL_TYPE* __restrict__ labels,
     const Box4f labelBox = loadBox4(labels, boxIndex);
 
     if (!computeGradient) {
-        loss[boxIndex] = fromFloat<LOSS_TYPE>(boxIouLossValueScalar(kind, predictionBox, labelBox, eps));
+        float rawLoss = boxIouLossValueScalar(kind, predictionBox, labelBox, eps);
+        if constexpr (HasLossWeight) {
+            rawLoss *= lossWeight;
+        }
+        loss[boxIndex] = fromFloat<LOSS_TYPE>(rawLoss);
         return;
     }
 
     const D4 value = boxIouLossValue(kind, predictionBox, labelBox, eps);
-    loss[boxIndex] = fromFloat<LOSS_TYPE>(value.v);
+    float rawLoss = value.v;
+    float gradientScale = lossScalingFactor;
+    if constexpr (HasLossWeight) {
+        rawLoss *= lossWeight;
+        gradientScale *= lossWeight;
+    }
+    loss[boxIndex] = fromFloat<LOSS_TYPE>(rawLoss);
 
     float scaledGradient[4];
 #pragma unroll
     for (int i = 0; i < 4; ++i)
-        scaledGradient[i] = value.g[i] * lossScalingFactor;
+        scaledGradient[i] = value.g[i] * gradientScale;
     storeBox4(gradient, boxIndex, scaledGradient);
 }
 
@@ -326,29 +337,45 @@ void launchBoxIouLoss(void* labels_d,
                       float eps,
                       bool computeGradient,
                       float lossScalingFactor,
+                      std::optional<float> lossWeight,
                       Stream stream) {
     constexpr uint32_t threadsPerBlock = 256;
     const uint32_t blocks = (numBoxes + threadsPerBlock - 1u) / threadsPerBlock;
     if (blocks == 0)
         return;
 
-    boxIouLossKernel<LABEL_TYPE, PREDICTION_TYPE, LOSS_TYPE><<<blocks, threadsPerBlock, 0, stream.getStream()>>>(
-        static_cast<const LABEL_TYPE*>(labels_d),
-        static_cast<const PREDICTION_TYPE*>(predictions_d),
-        static_cast<LOSS_TYPE*>(loss_d),
-        static_cast<PREDICTION_TYPE*>(gradient_d),
-        numBoxes,
-        kind,
-        eps,
-        computeGradient,
-        lossScalingFactor);
+    if (lossWeight.has_value()) {
+        boxIouLossKernel<LABEL_TYPE, PREDICTION_TYPE, LOSS_TYPE, true><<<blocks, threadsPerBlock, 0, stream.getStream()>>>(
+            static_cast<const LABEL_TYPE*>(labels_d),
+            static_cast<const PREDICTION_TYPE*>(predictions_d),
+            static_cast<LOSS_TYPE*>(loss_d),
+            static_cast<PREDICTION_TYPE*>(gradient_d),
+            numBoxes,
+            kind,
+            eps,
+            computeGradient,
+            lossScalingFactor,
+            lossWeight.value());
+    } else {
+        boxIouLossKernel<LABEL_TYPE, PREDICTION_TYPE, LOSS_TYPE, false><<<blocks, threadsPerBlock, 0, stream.getStream()>>>(
+            static_cast<const LABEL_TYPE*>(labels_d),
+            static_cast<const PREDICTION_TYPE*>(predictions_d),
+            static_cast<LOSS_TYPE*>(loss_d),
+            static_cast<PREDICTION_TYPE*>(gradient_d),
+            numBoxes,
+            kind,
+            eps,
+            computeGradient,
+            lossScalingFactor,
+            1.0f);
+    }
 }
 
-template void launchBoxIouLoss<half, half, half>(void*, void*, void*, void*, uint32_t, BoxIouLossKind, float, bool, float, Stream);
-template void launchBoxIouLoss<half, half, float>(void*, void*, void*, void*, uint32_t, BoxIouLossKind, float, bool, float, Stream);
-template void launchBoxIouLoss<float, half, half>(void*, void*, void*, void*, uint32_t, BoxIouLossKind, float, bool, float, Stream);
-template void launchBoxIouLoss<float, half, float>(void*, void*, void*, void*, uint32_t, BoxIouLossKind, float, bool, float, Stream);
-template void launchBoxIouLoss<half, float, half>(void*, void*, void*, void*, uint32_t, BoxIouLossKind, float, bool, float, Stream);
-template void launchBoxIouLoss<half, float, float>(void*, void*, void*, void*, uint32_t, BoxIouLossKind, float, bool, float, Stream);
-template void launchBoxIouLoss<float, float, half>(void*, void*, void*, void*, uint32_t, BoxIouLossKind, float, bool, float, Stream);
-template void launchBoxIouLoss<float, float, float>(void*, void*, void*, void*, uint32_t, BoxIouLossKind, float, bool, float, Stream);
+template void launchBoxIouLoss<half, half, half>(void*, void*, void*, void*, uint32_t, BoxIouLossKind, float, bool, float, std::optional<float>, Stream);
+template void launchBoxIouLoss<half, half, float>(void*, void*, void*, void*, uint32_t, BoxIouLossKind, float, bool, float, std::optional<float>, Stream);
+template void launchBoxIouLoss<float, half, half>(void*, void*, void*, void*, uint32_t, BoxIouLossKind, float, bool, float, std::optional<float>, Stream);
+template void launchBoxIouLoss<float, half, float>(void*, void*, void*, void*, uint32_t, BoxIouLossKind, float, bool, float, std::optional<float>, Stream);
+template void launchBoxIouLoss<half, float, half>(void*, void*, void*, void*, uint32_t, BoxIouLossKind, float, bool, float, std::optional<float>, Stream);
+template void launchBoxIouLoss<half, float, float>(void*, void*, void*, void*, uint32_t, BoxIouLossKind, float, bool, float, std::optional<float>, Stream);
+template void launchBoxIouLoss<float, float, half>(void*, void*, void*, void*, uint32_t, BoxIouLossKind, float, bool, float, std::optional<float>, Stream);
+template void launchBoxIouLoss<float, float, float>(void*, void*, void*, void*, uint32_t, BoxIouLossKind, float, bool, float, std::optional<float>, Stream);

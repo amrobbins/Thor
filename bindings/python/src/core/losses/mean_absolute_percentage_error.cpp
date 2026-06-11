@@ -26,12 +26,14 @@ void bind_mean_absolute_percentage_error(nb::module_ &losses) {
            Tensor predictions,
            Tensor labels,
            std::optional<DataType> loss_data_type,
-           bool reportsElementwiseLoss) {
+           bool reportsElementwiseLoss,
+           std::optional<float> loss_weight) {
             MAPE::Builder builder;
 
             builder.network(network).predictions(predictions).labels(labels);
             if (loss_data_type.has_value())
                 builder.lossDataType(loss_data_type.value());
+            builder.lossWeight(loss_weight.value_or(1.0f));
 
             if (labels.getDimensions().size() != 1 || labels.getDimensions()[0] != 1) {
                 string error_message = "MAPE instance: labels tensor is not sized right. label tensor is " +
@@ -51,6 +53,8 @@ void bind_mean_absolute_percentage_error(nb::module_ &losses) {
         "labels"_a,
         "loss_data_type"_a.none() = nb::none(),
         "reportsElementwiseLoss"_a = false,
+        nb::kw_only(),
+        "loss_weight"_a.none() = nb::none(),
         R"nbdoc(Construct a MAPE loss.)nbdoc");
 
     mean_absolute_percentage_error.attr("__doc__") = R"nbdoc(

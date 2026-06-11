@@ -70,13 +70,15 @@ void bind_hinge_gan_generator_loss(nb::module_& losses) {
            Network& network,
            Tensor fake_scores,
            std::optional<DataType> loss_data_type,
-           LossShape reported_loss_shape) {
+           LossShape reported_loss_shape,
+           std::optional<float> loss_weight) {
             const string loss_name = "HingeGANGeneratorLoss instance";
             validateHingeGANGeneratorLossArguments(loss_name, fake_scores, loss_data_type, reported_loss_shape);
 
             DataType effectiveLossDataType = loss_data_type.value_or(fake_scores.getDataType());
             HingeGANGeneratorLoss::Builder builder;
-            builder.network(network).fakeScores(fake_scores).lossDataType(effectiveLossDataType);
+            builder.network(network).fakeScores(fake_scores).lossDataType(effectiveLossDataType)
+                .lossWeight(loss_weight.value_or(1.0f));
             setReportedLossShape(builder, reported_loss_shape);
             HingeGANGeneratorLoss built = builder.build();
 
@@ -86,6 +88,8 @@ void bind_hinge_gan_generator_loss(nb::module_& losses) {
         "fake_scores"_a,
         "loss_data_type"_a.none() = nb::none(),
         "reported_loss_shape"_a = LossShape::BATCH,
+        nb::kw_only(),
+        "loss_weight"_a.none() = nb::none(),
         R"nbdoc(Construct the generator-side hinge GAN loss over fake discriminator scores.)nbdoc");
 
     hinge_gan_generator_loss.def("get_fake_scores", &HingeGANGeneratorLoss::getFakeScores);

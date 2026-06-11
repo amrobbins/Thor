@@ -79,6 +79,8 @@ class KLDivLoss::Builder {
         klDivLoss.predictionsTensor = _predictions.value();
         klDivLoss.labelsTensor = _labels.value();
         klDivLoss.lossDataType = _lossDataType.value();
+
+        klDivLoss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         klDivLoss.lossShape = _lossShape.value();
         klDivLoss.network = _network.value();
         klDivLoss.initialized = true;
@@ -132,6 +134,13 @@ class KLDivLoss::Builder {
         return *this;
     }
 
+    virtual KLDivLoss::Builder & lossWeight(float lossWeight) {
+        THOR_THROW_IF_FALSE(!this->_lossWeight.has_value());
+        ThorImplementation::validateLossWeight(lossWeight);
+        this->_lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
+        return *this;
+    }
+
     virtual KLDivLoss::Builder &lossDataType(DataType _lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
         THOR_THROW_IF_FALSE(_lossDataType == DataType::FP16 || _lossDataType == DataType::FP32);
@@ -145,6 +154,7 @@ class KLDivLoss::Builder {
     std::optional<Tensor> _labels;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
+    std::optional<float> _lossWeight;
 };
 
 }  // namespace Thor

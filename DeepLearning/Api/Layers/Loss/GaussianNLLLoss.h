@@ -103,6 +103,8 @@ class GaussianNLLLoss::Builder {
         loss.labelsTensor = _labels.value();
         loss.varianceTensor = _variance.value();
         loss.lossDataType = _lossDataType.value();
+
+        loss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         loss.lossShape = _lossShape.value();
         loss.full = _full.value_or(false);
         loss.eps = eps;
@@ -182,6 +184,13 @@ class GaussianNLLLoss::Builder {
         return *this;
     }
 
+    virtual GaussianNLLLoss::Builder & lossWeight(float lossWeight) {
+        THOR_THROW_IF_FALSE(!this->_lossWeight.has_value());
+        ThorImplementation::validateLossWeight(lossWeight);
+        this->_lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
+        return *this;
+    }
+
     virtual GaussianNLLLoss::Builder &lossDataType(DataType _lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
         THOR_THROW_IF_FALSE(_lossDataType == DataType::FP16 || _lossDataType == DataType::FP32);
@@ -196,6 +205,7 @@ class GaussianNLLLoss::Builder {
     std::optional<Tensor> _variance;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
+    std::optional<float> _lossWeight;
     std::optional<bool> _full;
     std::optional<float> _eps;
 };

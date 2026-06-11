@@ -103,7 +103,8 @@ void bind_triplet_loss(nb::module_& losses) {
            float margin,
            float eps,
            std::optional<DataType> loss_data_type,
-           LossShape reported_loss_shape) {
+           LossShape reported_loss_shape,
+           std::optional<float> loss_weight) {
             const string loss_name = "TripletLoss instance";
             validateTripletLossArguments(loss_name, anchor, positive, negative, margin, eps, loss_data_type, reported_loss_shape);
 
@@ -115,7 +116,8 @@ void bind_triplet_loss(nb::module_& losses) {
                 .negative(negative)
                 .margin(margin)
                 .eps(eps)
-                .lossDataType(effectiveLossDataType);
+                .lossDataType(effectiveLossDataType)
+                .lossWeight(loss_weight.value_or(1.0f));
             setReportedLossShape(builder, reported_loss_shape);
             TripletLoss built = builder.build();
 
@@ -129,6 +131,8 @@ void bind_triplet_loss(nb::module_& losses) {
         "eps"_a = 1.0e-6f,
         "loss_data_type"_a.none() = nb::none(),
         "reported_loss_shape"_a = LossShape::BATCH,
+        nb::kw_only(),
+        "loss_weight"_a.none() = nb::none(),
         R"nbdoc(Construct a Triplet margin loss over anchor, positive, and negative embeddings.)nbdoc");
 
     triplet_loss.def_prop_ro("margin", &TripletLoss::getMargin);

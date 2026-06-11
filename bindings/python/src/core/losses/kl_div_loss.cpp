@@ -81,13 +81,15 @@ void bind_kl_div_loss(nb::module_ &losses) {
            Tensor predictions,
            Tensor labels,
            std::optional<DataType> loss_data_type,
-           LossShape reported_loss_shape) {
+           LossShape reported_loss_shape,
+           std::optional<float> loss_weight) {
             const string loss_name = "KLDivLoss instance";
             validateDistributionLossArguments(loss_name, predictions, labels, loss_data_type, reported_loss_shape);
 
             DataType effectiveLossDataType = loss_data_type.value_or(predictions.getDataType());
             KLDivLoss::Builder builder;
-            builder.network(network).predictions(predictions).labels(labels).lossDataType(effectiveLossDataType);
+            builder.network(network).predictions(predictions).labels(labels).lossDataType(effectiveLossDataType)
+                .lossWeight(loss_weight.value_or(1.0f));
             setReportedLossShape(builder, reported_loss_shape);
             KLDivLoss built = builder.build();
 
@@ -98,6 +100,8 @@ void bind_kl_div_loss(nb::module_ &losses) {
         "labels"_a,
         "loss_data_type"_a.none() = nb::none(),
         "reported_loss_shape"_a = LossShape::BATCH,
+        nb::kw_only(),
+        "loss_weight"_a.none() = nb::none(),
         R"nbdoc(Construct a KL divergence loss.)nbdoc");
 
     kl_div_loss.attr("__doc__") = R"nbdoc(

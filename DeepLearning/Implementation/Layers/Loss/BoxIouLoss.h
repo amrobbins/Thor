@@ -2,13 +2,15 @@
 
 #include "DeepLearning/Implementation/Layers/Loss.h"
 
+#include <optional>
+
 namespace ThorImplementation {
 
 class BoxIouLoss : public Loss {
    public:
     enum class Kind { IOU = 0, GIOU = 1, DIOU = 2, CIOU = 3 };
 
-    BoxIouLoss(Kind kind, DataType lossDataType = DataType::FP32, float eps = 1.0e-7f);
+    BoxIouLoss(Kind kind, DataType lossDataType = DataType::FP32, float eps = 1.0e-7f, std::optional<float> lossWeight = std::nullopt);
     ~BoxIouLoss() override = default;
 
     std::optional<Tensor> createFeatureOutputTensor() override;
@@ -25,6 +27,7 @@ class BoxIouLoss : public Loss {
 
     Kind kind;
     float eps;
+    std::optional<float> lossWeight;
     uint32_t batchSize = 0;
     uint32_t boxesPerBatchElement = 0;
     uint32_t totalBoxes = 0;

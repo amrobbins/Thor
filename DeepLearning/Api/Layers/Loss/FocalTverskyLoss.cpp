@@ -159,6 +159,7 @@ void FocalTverskyLoss::buildSupportLayersAndAddToNetwork() {
                              .lossName(kLossName)
                              .gradientName(kGradientName)
                              .lossDataType(lossDataType)
+                                       .lossWeight(lossWeight.value_or(1.0f))
                              .reportsRawLoss()
                              .build();
 
@@ -203,6 +204,8 @@ void FocalTverskyLoss::deserialize(const json& j, Network* network) {
     FocalTverskyLoss loss;
     loss.lossShape = j.at("loss_shape").get<LossShape>();
     loss.lossDataType = j.at("loss_data_type").get<DataType>();
+
+    loss.lossWeight = ThorImplementation::lossWeightFromJson(j);
     loss.alpha = j.value("alpha", 0.3f);
     loss.beta = j.value("beta", 0.7f);
     loss.gamma = j.value("gamma", 0.75f);

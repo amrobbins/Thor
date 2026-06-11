@@ -1,4 +1,5 @@
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/optional.h>
 
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
 
@@ -33,6 +34,7 @@ void bind_losses(nb::module_ &losses) {
     loss.def("get_predictions", &Loss::getPredictions);
     loss.def("get_labels", &Loss::getLabels);
     loss.def("get_loss", &Loss::getLoss);
+    loss.def_prop_ro("loss_weight", &Loss::getLossWeight);
 
     auto label_type =
         nb::enum_<Loss::LabelType>(losses, "LabelType").value("index", Loss::LabelType::INDEX).value("one_hot", Loss::LabelType::ONE_HOT);

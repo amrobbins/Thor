@@ -151,6 +151,13 @@ class CategoricalCrossEntropy::Builder {
         return *this;
     }
 
+    virtual CategoricalCrossEntropy::Builder & lossWeight(float lossWeight) {
+        THOR_THROW_IF_FALSE(!this->_lossWeight.has_value());
+        ThorImplementation::validateLossWeight(lossWeight);
+        this->_lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
+        return *this;
+    }
+
     virtual CategoricalCrossEntropy::Builder &lossDataType(DataType _lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
         THOR_THROW_IF_FALSE(_lossDataType == DataType::FP32 || _lossDataType == DataType::FP16);
@@ -199,6 +206,8 @@ class CategoricalCrossEntropy::Builder {
         THOR_THROW_IF_FALSE(_lossDataType.value() == DataType::FP16 || _lossDataType.value() == DataType::FP32);
         categoricalCrossEntropy.lossDataType = _lossDataType.value();
 
+        categoricalCrossEntropy.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
+
         if (!_lossShape.has_value())
             _lossShape = LossShape::BATCH;
         THOR_THROW_IF_FALSE(_lossShape.value() == LossShape::BATCH || _lossShape.value() == LossShape::CLASSWISE ||
@@ -233,6 +242,7 @@ class CategoricalCrossEntropy::Builder {
     std::optional<Tensor> _labels;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
+    std::optional<float> _lossWeight;
     std::optional<bool> _softmaxAddedToNetwork;
 
     friend class CategoricalCrossEntropy;

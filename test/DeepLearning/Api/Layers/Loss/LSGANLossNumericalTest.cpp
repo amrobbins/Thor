@@ -162,7 +162,11 @@ struct DiscriminatorRunResult {
     vector<float> fakeGradient;
 };
 
-DiscriminatorRunResult runRawDiscriminatorLossNetwork(const vector<float>& realScores, const vector<float>& fakeScores, float realTarget, float fakeTarget) {
+DiscriminatorRunResult runRawDiscriminatorLossNetwork(const vector<float>& realScores,
+                                                  const vector<float>& fakeScores,
+                                                  float realTarget,
+                                                  float fakeTarget,
+                                                  optional<float> lossWeight = nullopt) {
     THOR_THROW_IF_FALSE(realScores.size() == static_cast<size_t>(kBatchSize * kScoreCount));
     THOR_THROW_IF_FALSE(fakeScores.size() == realScores.size());
 
@@ -189,15 +193,17 @@ DiscriminatorRunResult runRawDiscriminatorLossNetwork(const vector<float>& realS
                                              .tensor(fakeScoresInput.getFeatureOutput().value())
                                              .build();
 
-    Api::LSGANDiscriminatorLoss loss = Api::LSGANDiscriminatorLoss::Builder()
-                                              .network(network)
-                                              .realScores(realScoresRivet.getFeatureOutput().value())
-                                              .fakeScores(fakeScoresRivet.getFeatureOutput().value())
-                                              .lossDataType(Api::DataType::FP32)
-                                              .realTarget(realTarget)
-                                              .fakeTarget(fakeTarget)
-                                              .reportsRawLoss()
-                                              .build();
+    Api::LSGANDiscriminatorLoss::Builder lossBuilder = Api::LSGANDiscriminatorLoss::Builder()
+                                                         .network(network)
+                                                         .realScores(realScoresRivet.getFeatureOutput().value())
+                                                         .fakeScores(fakeScoresRivet.getFeatureOutput().value())
+                                                         .lossDataType(Api::DataType::FP32)
+                                                         .realTarget(realTarget)
+                                                         .fakeTarget(fakeTarget)
+                                                         .reportsRawLoss();
+    if (lossWeight.has_value())
+        lossBuilder.lossWeight(lossWeight.value());
+    Api::LSGANDiscriminatorLoss loss = lossBuilder.build();
     shared_ptr<Api::MultiInputCustomLoss> rawCustomLoss = findRawMultiInputCustomLoss(network);
     THOR_THROW_IF_FALSE(rawCustomLoss != nullptr);
 
@@ -252,7 +258,7 @@ struct GeneratorRunResult {
     vector<float> fakeGradient;
 };
 
-GeneratorRunResult runRawGeneratorLossNetwork(const vector<float>& fakeScores, float target) {
+GeneratorRunResult runRawGeneratorLossNetwork(const vector<float>& fakeScores, float target, optional<float> lossWeight = nullopt) {
     THOR_THROW_IF_FALSE(fakeScores.size() == static_cast<size_t>(kBatchSize * kScoreCount));
 
     Api::Network network("lsgan_generator_numerical");
@@ -267,13 +273,15 @@ GeneratorRunResult runRawGeneratorLossNetwork(const vector<float>& fakeScores, f
                                              .tensor(fakeScoresInput.getFeatureOutput().value())
                                              .build();
 
-    Api::LSGANGeneratorLoss loss = Api::LSGANGeneratorLoss::Builder()
-                                          .network(network)
-                                          .fakeScores(fakeScoresRivet.getFeatureOutput().value())
-                                          .lossDataType(Api::DataType::FP32)
-                                          .target(target)
-                                          .reportsRawLoss()
-                                          .build();
+    Api::LSGANGeneratorLoss::Builder lossBuilder = Api::LSGANGeneratorLoss::Builder()
+                                                    .network(network)
+                                                    .fakeScores(fakeScoresRivet.getFeatureOutput().value())
+                                                    .lossDataType(Api::DataType::FP32)
+                                                    .target(target)
+                                                    .reportsRawLoss();
+    if (lossWeight.has_value())
+        lossBuilder.lossWeight(lossWeight.value());
+    Api::LSGANGeneratorLoss loss = lossBuilder.build();
     shared_ptr<Api::MultiInputCustomLoss> rawCustomLoss = findRawMultiInputCustomLoss(network);
     THOR_THROW_IF_FALSE(rawCustomLoss != nullptr);
 
@@ -318,10 +326,12 @@ GeneratorRunResult runRawGeneratorLossNetwork(const vector<float>& fakeScores, f
     return GeneratorRunResult{outputLoss, copyErrorOutputToCpu(physicalRawLoss, 0)};
 }
 
-void scaleByLossScalingFactor(vector<float>& values) {
+void scaleValues(vector<float>& values, float scale) {
     for (float& value : values)
-        value *= Impl::Loss::getLossScalingFactor();
+        value *= scale;
 }
+
+void scaleByLossScalingFactor(vector<float>& values) { scaleValues(values, Impl::Loss::getLossScalingFactor()); }
 
 void expectClose(const vector<float>& actual, const vector<float>& expected, float tolerance) {
     ASSERT_EQ(actual.size(), expected.size());
@@ -357,6 +367,33 @@ TEST(LSGANLossApi, DiscriminatorNumericalRawLossAndBackwardGradientsMatchReferen
     expectClose(actual.fakeGradient, referenceFakeGradient, 2.5e-3f);
 }
 
+
+TEST(LSGANLossApi, DiscriminatorLossWeightScalesReportedLossAndAllPredictionGradients) {
+    const vector<float> realScores = {1.5f, 0.2f, -0.5f,
+                                      0.9f, 1.2f, 2.0f,
+                                      -1.2f, 0.4f, 1.1f};
+    const vector<float> fakeScores = {-1.5f, -0.2f, 0.5f,
+                                      -0.9f, -1.2f, -2.0f,
+                                      1.2f, -0.4f, -1.1f};
+
+    const float realTarget = 0.9f;
+    const float fakeTarget = -0.2f;
+    const float lossWeight = 2.75f;
+
+    vector<float> referenceLoss = referenceDiscriminatorRawLoss(realScores, fakeScores, realTarget, fakeTarget);
+    vector<float> referenceRealGradient = numericalDiscriminatorRealGradient(realScores, fakeScores, realTarget, fakeTarget);
+    vector<float> referenceFakeGradient = numericalDiscriminatorFakeGradient(realScores, fakeScores, realTarget, fakeTarget);
+    scaleValues(referenceLoss, lossWeight);
+    scaleValues(referenceRealGradient, Impl::Loss::getLossScalingFactor() * lossWeight);
+    scaleValues(referenceFakeGradient, Impl::Loss::getLossScalingFactor() * lossWeight);
+
+    DiscriminatorRunResult actual = runRawDiscriminatorLossNetwork(realScores, fakeScores, realTarget, fakeTarget, lossWeight);
+
+    expectClose(actual.loss, referenceLoss, 3.0e-5f);
+    expectClose(actual.realGradient, referenceRealGradient, 5.0e-3f);
+    expectClose(actual.fakeGradient, referenceFakeGradient, 5.0e-3f);
+}
+
 TEST(LSGANLossApi, GeneratorNumericalRawLossAndBackwardGradientMatchReference) {
     const vector<float> fakeScores = {-1.5f, -0.2f, 0.5f,
                                       -0.9f, -1.2f, -2.0f,
@@ -369,6 +406,25 @@ TEST(LSGANLossApi, GeneratorNumericalRawLossAndBackwardGradientMatchReference) {
     scaleByLossScalingFactor(referenceGradient);
 
     GeneratorRunResult actual = runRawGeneratorLossNetwork(fakeScores, target);
+
+    expectClose(actual.loss, referenceLoss, 2.0e-5f);
+    expectClose(actual.fakeGradient, referenceGradient, 2.5e-3f);
+}
+
+TEST(LSGANLossApi, GeneratorLossWeightScalesReportedLossAndPredictionGradient) {
+    const vector<float> fakeScores = {-1.5f, -0.2f, 0.5f,
+                                      -0.9f, -1.2f, -2.0f,
+                                      1.2f, -0.4f, -1.1f};
+
+    const float target = 0.8f;
+    const float lossWeight = 0.375f;
+
+    vector<float> referenceLoss = referenceGeneratorRawLoss(fakeScores, target);
+    vector<float> referenceGradient = numericalGeneratorGradient(fakeScores, target);
+    scaleValues(referenceLoss, lossWeight);
+    scaleValues(referenceGradient, Impl::Loss::getLossScalingFactor() * lossWeight);
+
+    GeneratorRunResult actual = runRawGeneratorLossNetwork(fakeScores, target, lossWeight);
 
     expectClose(actual.loss, referenceLoss, 2.0e-5f);
     expectClose(actual.fakeGradient, referenceGradient, 2.5e-3f);

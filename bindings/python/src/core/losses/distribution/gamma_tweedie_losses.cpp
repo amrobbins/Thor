@@ -118,13 +118,15 @@ void bind_gamma_tweedie_losses(nb::module_ &losses) {
            Tensor labels,
            float eps,
            optional<DataType> loss_data_type,
-           LossShape reported_loss_shape) {
+           LossShape reported_loss_shape,
+           std::optional<float> loss_weight) {
             const string loss_name = "GammaNLLLoss instance";
             validateMeanTargetLossArguments(loss_name, predictions, labels, loss_data_type, reported_loss_shape, eps);
 
             DataType effectiveLossDataType = loss_data_type.value_or(predictions.getDataType());
             GammaNLLLoss::Builder builder;
-            builder.network(network).predictions(predictions).labels(labels).eps(eps).lossDataType(effectiveLossDataType);
+            builder.network(network).predictions(predictions).labels(labels).eps(eps).lossDataType(effectiveLossDataType)
+                .lossWeight(loss_weight.value_or(1.0f));
             setReportedLossShape(builder, reported_loss_shape);
             GammaNLLLoss built = builder.build();
 
@@ -136,6 +138,8 @@ void bind_gamma_tweedie_losses(nb::module_ &losses) {
         "eps"_a = 1.0e-6f,
         "loss_data_type"_a.none() = nb::none(),
         "reported_loss_shape"_a = LossShape::BATCH,
+        nb::kw_only(),
+        "loss_weight"_a.none() = nb::none(),
         R"nbdoc(Construct a Gamma negative log-likelihood loss.)nbdoc");
 
     gamma_nll_loss.def_prop_ro("eps", &GammaNLLLoss::getEps);
@@ -161,7 +165,8 @@ are omitted. The raw loss is:
            float power,
            float eps,
            optional<DataType> loss_data_type,
-           LossShape reported_loss_shape) {
+           LossShape reported_loss_shape,
+           std::optional<float> loss_weight) {
             const string loss_name = "TweedieLoss instance";
             validateTweedieArguments(loss_name, predictions, labels, power, loss_data_type, reported_loss_shape, eps);
 
@@ -172,7 +177,8 @@ are omitted. The raw loss is:
                 .labels(labels)
                 .power(power)
                 .eps(eps)
-                .lossDataType(effectiveLossDataType);
+                .lossDataType(effectiveLossDataType)
+                .lossWeight(loss_weight.value_or(1.0f));
             setReportedLossShape(builder, reported_loss_shape);
             TweedieLoss built = builder.build();
 
@@ -185,6 +191,8 @@ are omitted. The raw loss is:
         "eps"_a = 1.0e-6f,
         "loss_data_type"_a.none() = nb::none(),
         "reported_loss_shape"_a = LossShape::BATCH,
+        nb::kw_only(),
+        "loss_weight"_a.none() = nb::none(),
         R"nbdoc(Construct a Tweedie deviance loss.)nbdoc");
 
     tweedie_loss.def_prop_ro("power", &TweedieLoss::getPower);

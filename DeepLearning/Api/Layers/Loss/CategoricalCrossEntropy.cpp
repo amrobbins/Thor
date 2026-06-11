@@ -54,6 +54,7 @@ json CategoricalCrossEntropy::architectureJson() const {
     j["loss_shaper_input_tensor"] = lossShaperInput.architectureJson();
     j["loss_tensor"] = lossTensor.architectureJson();
 
+    ThorImplementation::addLossWeightToJson(j, lossWeight);
     return j;
 }
 
@@ -70,6 +71,8 @@ void CategoricalCrossEntropy::deserializeInto(const json &j,
     categoricalCrossEntropy.labelType = labelType;
     categoricalCrossEntropy.lossShape = j.at("loss_shape").get<Loss::LossShape>();
     categoricalCrossEntropy.lossDataType = j.at("loss_data_type").get<DataType>();
+
+    categoricalCrossEntropy.lossWeight = ThorImplementation::lossWeightFromJson(j);
 
     uint64_t originalTensorId;
     originalTensorId = j["softmax_output_tensor"].at("id").get<uint64_t>();

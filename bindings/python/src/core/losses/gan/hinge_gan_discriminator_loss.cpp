@@ -85,13 +85,15 @@ void bind_hinge_gan_discriminator_loss(nb::module_& losses) {
            Tensor real_scores,
            Tensor fake_scores,
            std::optional<DataType> loss_data_type,
-           LossShape reported_loss_shape) {
+           LossShape reported_loss_shape,
+           std::optional<float> loss_weight) {
             const string loss_name = "HingeGANDiscriminatorLoss instance";
             validateHingeGANDiscriminatorLossArguments(loss_name, real_scores, fake_scores, loss_data_type, reported_loss_shape);
 
             DataType effectiveLossDataType = loss_data_type.value_or(real_scores.getDataType());
             HingeGANDiscriminatorLoss::Builder builder;
-            builder.network(network).realScores(real_scores).fakeScores(fake_scores).lossDataType(effectiveLossDataType);
+            builder.network(network).realScores(real_scores).fakeScores(fake_scores).lossDataType(effectiveLossDataType)
+                .lossWeight(loss_weight.value_or(1.0f));
             setReportedLossShape(builder, reported_loss_shape);
             HingeGANDiscriminatorLoss built = builder.build();
 
@@ -102,6 +104,8 @@ void bind_hinge_gan_discriminator_loss(nb::module_& losses) {
         "fake_scores"_a,
         "loss_data_type"_a.none() = nb::none(),
         "reported_loss_shape"_a = LossShape::BATCH,
+        nb::kw_only(),
+        "loss_weight"_a.none() = nb::none(),
         R"nbdoc(Construct the discriminator-side hinge GAN loss over real and fake discriminator scores.)nbdoc");
 
     hinge_gan_discriminator_loss.def("get_real_scores", &HingeGANDiscriminatorLoss::getRealScores);

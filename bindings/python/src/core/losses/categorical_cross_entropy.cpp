@@ -63,7 +63,8 @@ void bind_categorical_cross_entropy(nb::module_ &losses) {
            Tensor predictions,
            Tensor labels,
            DataType loss_data_type,
-           LossShape reported_loss_shape) {
+           LossShape reported_loss_shape,
+           std::optional<float> loss_weight) {
             const string loss_name = "CategoricalCrossEntropy instance";
             validateCategoricalCommon(loss_name, predictions, loss_data_type, reported_loss_shape);
             if (labels.getDimensions().size() != 1 || labels.getDimensions()[0] <= 1) {
@@ -78,7 +79,8 @@ void bind_categorical_cross_entropy(nb::module_ &losses) {
             }
 
             CategoricalCrossEntropy::Builder builder;
-            builder.network(network).predictions(predictions).labels(labels).lossDataType(loss_data_type);
+            builder.network(network).predictions(predictions).labels(labels).lossDataType(loss_data_type)
+                .lossWeight(loss_weight.value_or(1.0f));
             setReportedLossShape(builder, reported_loss_shape);
             CategoricalCrossEntropy built = builder.build();
 
@@ -89,6 +91,8 @@ void bind_categorical_cross_entropy(nb::module_ &losses) {
         "labels"_a,
         "loss_data_type"_a = DataType::FP32,
         "reported_loss_shape"_a = LossShape::BATCH,
+        nb::kw_only(),
+        "loss_weight"_a.none() = nb::none(),
         R"nbdoc(Construct a dense/soft-label categorical cross-entropy loss.)nbdoc");
 
     categorical_cross_entropy.attr("__doc__") = R"nbdoc(
@@ -130,7 +134,8 @@ Use SparseCategoricalCrossEntropy when labels are integer class ids.
            Tensor labels,
            int32_t num_classes,
            DataType loss_data_type,
-           LossShape reported_loss_shape) {
+           LossShape reported_loss_shape,
+           std::optional<float> loss_weight) {
             const string loss_name = "SparseCategoricalCrossEntropy instance";
             validateCategoricalCommon(loss_name, predictions, loss_data_type, reported_loss_shape);
             if (num_classes <= 1) {
@@ -160,7 +165,8 @@ Use SparseCategoricalCrossEntropy when labels are integer class ids.
                 .predictions(predictions)
                 .labels(labels)
                 .numClasses(uint32_t(num_classes))
-                .lossDataType(loss_data_type);
+                .lossDataType(loss_data_type)
+                .lossWeight(loss_weight.value_or(1.0f));
             setReportedLossShape(builder, reported_loss_shape);
             SparseCategoricalCrossEntropy built = builder.build();
 
@@ -172,6 +178,8 @@ Use SparseCategoricalCrossEntropy when labels are integer class ids.
         "num_classes"_a,
         "loss_data_type"_a = DataType::FP32,
         "reported_loss_shape"_a = LossShape::BATCH,
+        nb::kw_only(),
+        "loss_weight"_a.none() = nb::none(),
         R"nbdoc(Construct a sparse categorical cross-entropy loss.)nbdoc");
 
     sparse_categorical_cross_entropy.attr("__doc__") = R"nbdoc(

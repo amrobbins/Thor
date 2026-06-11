@@ -87,6 +87,8 @@ class InfoNCELoss::Builder {
         infoNCELoss.predictionsTensor = _predictions.value();
         infoNCELoss.labelsTensor = _labels.value();
         infoNCELoss.lossDataType = _lossDataType.value();
+
+        infoNCELoss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         infoNCELoss.lossShape = _lossShape.value();
         infoNCELoss.temperature = temperature;
         infoNCELoss.network = _network.value();
@@ -148,6 +150,13 @@ class InfoNCELoss::Builder {
         return *this;
     }
 
+    virtual InfoNCELoss::Builder & lossWeight(float lossWeight) {
+        THOR_THROW_IF_FALSE(!this->_lossWeight.has_value());
+        ThorImplementation::validateLossWeight(lossWeight);
+        this->_lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
+        return *this;
+    }
+
     virtual InfoNCELoss::Builder &lossDataType(DataType _lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
         THOR_THROW_IF_FALSE(_lossDataType == DataType::FP16 || _lossDataType == DataType::FP32);
@@ -161,6 +170,7 @@ class InfoNCELoss::Builder {
     std::optional<Tensor> _labels;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
+    std::optional<float> _lossWeight;
     std::optional<float> _temperature;
 };
 

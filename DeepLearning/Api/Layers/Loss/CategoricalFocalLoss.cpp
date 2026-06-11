@@ -94,6 +94,7 @@ void CategoricalFocalLoss::buildSupportLayersAndAddToNetwork() {
                                              .lossName(kLossName)
                                              .gradientName(kGradientName)
                                              .lossDataType(lossDataType)
+                                       .lossWeight(lossWeight.value_or(1.0f))
                                              .reportsRawLoss()
                                              .build();
 
@@ -136,6 +137,8 @@ void CategoricalFocalLoss::deserialize(const json& j, Network* network) {
     CategoricalFocalLoss categoricalFocalLoss;
     categoricalFocalLoss.lossShape = j.at("loss_shape").get<LossShape>();
     categoricalFocalLoss.lossDataType = j.at("loss_data_type").get<DataType>();
+
+    categoricalFocalLoss.lossWeight = ThorImplementation::lossWeightFromJson(j);
     categoricalFocalLoss.gamma = j.value("gamma", 2.0f);
     categoricalFocalLoss.alpha = j.value("alpha", 1.0f);
     categoricalFocalLoss.predictionsTensor = predictions;

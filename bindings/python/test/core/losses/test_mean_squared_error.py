@@ -21,6 +21,23 @@ def test_mse_constructs_defaults():
     assert isinstance(loss, thor.losses.MSE)
 
 
+
+
+def test_mse_exposes_default_and_custom_loss_weight():
+    n = _net()
+    preds = _tensor_1d(1, thor.DataType.fp32)
+    labels = _tensor_1d(1, thor.DataType.fp32)
+
+    default_loss = thor.losses.MSE(n, preds, labels)
+    assert default_loss.loss_weight is None
+
+    explicit_one_loss = thor.losses.MSE(n, preds, labels, loss_weight=1.0)
+    assert explicit_one_loss.loss_weight is None
+
+    weighted_loss = thor.losses.MSE(n, preds, labels, loss_weight=2.5)
+    assert weighted_loss.loss_weight == pytest.approx(2.5)
+
+
 def test_mse_constructs_with_loss_data_type():
     n = _net()
     preds = _tensor_1d(1, thor.DataType.fp16)
@@ -88,4 +105,4 @@ def test_mse_rejects_wrong_arity():
         thor.losses.MSE(n, preds)  # missing labels
 
     with pytest.raises(TypeError):
-        thor.losses.MSE(n, preds, labels, None, False, 123)  # extra arg
+        thor.losses.MSE(n, preds, labels, None, False, 123, 456)  # extra arg

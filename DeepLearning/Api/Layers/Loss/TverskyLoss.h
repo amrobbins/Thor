@@ -94,6 +94,8 @@ class TverskyLoss::Builder {
         tverskyLoss.predictionsTensor = _predictions.value();
         tverskyLoss.labelsTensor = _labels.value();
         tverskyLoss.lossDataType = _lossDataType.value();
+
+        tverskyLoss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         tverskyLoss.lossShape = _lossShape.value();
         tverskyLoss.alpha = alpha;
         tverskyLoss.beta = beta;
@@ -171,6 +173,13 @@ class TverskyLoss::Builder {
         return *this;
     }
 
+    virtual TverskyLoss::Builder & lossWeight(float lossWeight) {
+        THOR_THROW_IF_FALSE(!this->_lossWeight.has_value());
+        ThorImplementation::validateLossWeight(lossWeight);
+        this->_lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
+        return *this;
+    }
+
     virtual TverskyLoss::Builder &lossDataType(DataType _lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
         THOR_THROW_IF_FALSE(_lossDataType == DataType::FP16 || _lossDataType == DataType::FP32);
@@ -184,6 +193,7 @@ class TverskyLoss::Builder {
     std::optional<Tensor> _labels;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
+    std::optional<float> _lossWeight;
     std::optional<float> _alpha;
     std::optional<float> _beta;
     std::optional<float> _smooth;

@@ -90,6 +90,8 @@ class PoissonNLLLoss::Builder {
         loss.predictionsTensor = _predictions.value();
         loss.labelsTensor = _labels.value();
         loss.lossDataType = _lossDataType.value();
+
+        loss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         loss.lossShape = _lossShape.value();
         loss.logInput = _logInput.value_or(true);
         loss.full = _full.value_or(false);
@@ -165,6 +167,13 @@ class PoissonNLLLoss::Builder {
         return *this;
     }
 
+    virtual PoissonNLLLoss::Builder & lossWeight(float lossWeight) {
+        THOR_THROW_IF_FALSE(!this->_lossWeight.has_value());
+        ThorImplementation::validateLossWeight(lossWeight);
+        this->_lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
+        return *this;
+    }
+
     virtual PoissonNLLLoss::Builder &lossDataType(DataType _lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
         THOR_THROW_IF_FALSE(_lossDataType == DataType::FP16 || _lossDataType == DataType::FP32);
@@ -178,6 +187,7 @@ class PoissonNLLLoss::Builder {
     std::optional<Tensor> _labels;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
+    std::optional<float> _lossWeight;
     std::optional<bool> _logInput;
     std::optional<bool> _full;
     std::optional<float> _eps;

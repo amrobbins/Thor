@@ -51,7 +51,8 @@ void bind_huber_loss(nb::module_ &losses) {
            Tensor labels,
            float delta,
            std::optional<DataType> loss_data_type,
-           LossShape reported_loss_shape) {
+           LossShape reported_loss_shape,
+           std::optional<float> loss_weight) {
             const string loss_name = "HuberLoss instance";
             if (predictions.getDimensions().size() != 1) {
                 string error_message = loss_name + ": predictions must be a 1 dimensional tensor but predictions is " +
@@ -75,7 +76,8 @@ void bind_huber_loss(nb::module_ &losses) {
             validateReportedLossShape(reported_loss_shape, loss_name);
 
             HuberLoss::Builder builder;
-            builder.network(network).predictions(predictions).labels(labels).delta(delta).lossDataType(effectiveLossDataType);
+            builder.network(network).predictions(predictions).labels(labels).delta(delta).lossDataType(effectiveLossDataType)
+                .lossWeight(loss_weight.value_or(1.0f));
             setReportedLossShape(builder, reported_loss_shape);
             HuberLoss built = builder.build();
 
@@ -87,6 +89,8 @@ void bind_huber_loss(nb::module_ &losses) {
         "delta"_a = 1.0f,
         "loss_data_type"_a.none() = nb::none(),
         "reported_loss_shape"_a = LossShape::BATCH,
+        nb::kw_only(),
+        "loss_weight"_a.none() = nb::none(),
         R"nbdoc(Construct a Huber loss.)nbdoc");
 
     huber_loss.def_prop_ro("delta", &HuberLoss::getDelta);

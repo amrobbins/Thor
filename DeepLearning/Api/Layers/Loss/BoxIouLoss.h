@@ -68,7 +68,7 @@ class BoxIouLoss : public Loss {
         THOR_THROW_IF_FALSE(initialized);
         THOR_THROW_IF_FALSE(connectingApiTensor == predictionsTensor || connectingApiTensor == labelsTensor);
         std::shared_ptr<ThorImplementation::BoxIouLoss> boxIouLoss =
-            std::make_shared<ThorImplementation::BoxIouLoss>(getKind(), lossDataType, eps);
+            std::make_shared<ThorImplementation::BoxIouLoss>(getKind(), lossDataType, eps, lossWeight);
         boxIouLoss->setConstructForInferenceOnly(inferenceOnly);
         return boxIouLoss;
     }
@@ -98,7 +98,8 @@ class BoxIouLoss : public Loss {
                                Tensor labels,
                                LossShape lossShape,
                                DataType lossDataType,
-                               float eps);
+                               float eps,
+                               std::optional<float> lossWeight);
     static void deserializeInto(const nlohmann::json& j, Network* network, BoxIouLoss& loss, const std::string& expectedLayerType);
     static std::vector<uint64_t> rawLossDimensionsForBoxes(const std::vector<uint64_t>& boxDims);
 
@@ -161,6 +162,13 @@ class BoxIouLossBuilderCommon {
         return static_cast<DerivedBuilder&>(*this);
     }
 
+    DerivedBuilder& lossWeight(float lossWeight) {
+        THOR_THROW_IF_FALSE(!this->_lossWeight.has_value());
+        ThorImplementation::validateLossWeight(lossWeight);
+        this->_lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
+        return static_cast<DerivedBuilder&>(*this);
+    }
+
     DerivedBuilder& lossDataType(DataType lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
         THOR_THROW_IF_FALSE(lossDataType == DataType::FP16 || lossDataType == DataType::FP32);
@@ -178,13 +186,15 @@ class BoxIouLossBuilderCommon {
         Loss::LossShape effectiveLossShape = _lossShape.value_or(Loss::LossShape::BATCH);
         DataType effectiveLossDataType = _lossDataType.value_or(_predictions.value().getDataType());
         float effectiveEps = _eps.value_or(1.0e-7f);
+        std::optional<float> effectiveLossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         BoxIouLoss::populateAndAdd(loss,
                                    _network.value(),
                                    _predictions.value(),
                                    _labels.value(),
                                    effectiveLossShape,
                                    effectiveLossDataType,
-                                   effectiveEps);
+                                   effectiveEps,
+                                   effectiveLossWeight);
     }
 
     std::optional<Network*> _network;
@@ -192,6 +202,7 @@ class BoxIouLossBuilderCommon {
     std::optional<Tensor> _labels;
     std::optional<Loss::LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
+    std::optional<float> _lossWeight;
     std::optional<float> _eps;
 };
 

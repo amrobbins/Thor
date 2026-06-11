@@ -3,6 +3,7 @@
 
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Implementation/Layers/Loss.h"
+#include "DeepLearning/Implementation/Layers/Loss/LossWeight.h"
 
 #include <nlohmann/json.hpp>
 
@@ -37,6 +38,7 @@ class Loss : public Layer {
     virtual Tensor getPredictions() const { return predictionsTensor; }
     virtual Tensor getLabels() const { return labelsTensor; }
     virtual Tensor getLoss() const { return lossTensor; }
+    std::optional<float> getLossWeight() const { return lossWeight; }
     virtual std::vector<Tensor> getLossInputTensors() const { return {predictionsTensor, labelsTensor}; }
 
     // getPredictions() ia a synonym for getFeatureInput().value() and in losses BY DEFAULT ONLY.
@@ -75,6 +77,7 @@ class Loss : public Layer {
     Tensor lossTensor;
 
     DataType lossDataType;
+    std::optional<float> lossWeight;
 
     Network *network;
 

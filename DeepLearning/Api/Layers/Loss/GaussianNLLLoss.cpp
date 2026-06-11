@@ -93,6 +93,7 @@ void GaussianNLLLoss::buildSupportLayersAndAddToNetwork() {
                                                   .input(kVarianceName, varianceTensor, kVarianceGradientName)
                                                   .lossName(kLossName)
                                                   .lossDataType(lossDataType)
+                                       .lossWeight(lossWeight.value_or(1.0f))
                                                   .reportsRawLoss()
                                                   .build();
 
@@ -139,6 +140,8 @@ void GaussianNLLLoss::deserialize(const json& j, Network* network) {
     GaussianNLLLoss loss;
     loss.lossShape = j.at("loss_shape").get<LossShape>();
     loss.lossDataType = j.at("loss_data_type").get<DataType>();
+
+    loss.lossWeight = ThorImplementation::lossWeightFromJson(j);
     loss.full = j.value("full", false);
     loss.eps = j.value("eps", 1.0e-6f);
     loss.predictionsTensor = predictions;

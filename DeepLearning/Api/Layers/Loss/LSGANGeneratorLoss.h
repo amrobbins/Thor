@@ -89,6 +89,8 @@ class LSGANGeneratorLoss::Builder {
         loss.fakeScoresTensor = _fakeScores.value();
         loss.target = _target;
         loss.lossDataType = _lossDataType.value();
+
+        loss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         loss.lossShape = _lossShape.value();
         loss.network = _network.value();
         loss.initialized = true;
@@ -140,6 +142,13 @@ class LSGANGeneratorLoss::Builder {
         return *this;
     }
 
+    virtual LSGANGeneratorLoss::Builder & lossWeight(float lossWeight) {
+        THOR_THROW_IF_FALSE(!this->_lossWeight.has_value());
+        ThorImplementation::validateLossWeight(lossWeight);
+        this->_lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
+        return *this;
+    }
+
     virtual LSGANGeneratorLoss::Builder &lossDataType(DataType _lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
         THOR_THROW_IF_FALSE(_lossDataType == DataType::FP16 || _lossDataType == DataType::FP32);
@@ -153,6 +162,7 @@ class LSGANGeneratorLoss::Builder {
     float _target = 1.0f;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
+    std::optional<float> _lossWeight;
 };
 
 }  // namespace Thor

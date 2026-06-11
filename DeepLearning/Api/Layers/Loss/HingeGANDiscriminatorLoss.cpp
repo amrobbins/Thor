@@ -84,6 +84,7 @@ void HingeGANDiscriminatorLoss::buildSupportLayersAndAddToNetwork() {
                                                             .input(kFakeScoresName, fakeScoresTensor, kFakeScoresGradientName)
                                                             .lossName(kLossName)
                                                             .lossDataType(lossDataType)
+                                       .lossWeight(lossWeight.value_or(1.0f))
                                                             .reportsRawLoss()
                                                             .build();
 
@@ -116,6 +117,7 @@ json HingeGANDiscriminatorLoss::architectureJson() const {
     j["fake_scores_tensor"] = fakeScoresTensor.architectureJson();
     j["loss_shaper_input_tensor"] = lossShaperInput.architectureJson();
     j["loss_tensor"] = lossTensor.architectureJson();
+    ThorImplementation::addLossWeightToJson(j, lossWeight);
     return j;
 }
 
@@ -133,6 +135,8 @@ void HingeGANDiscriminatorLoss::deserialize(const json& j, Network* network) {
     HingeGANDiscriminatorLoss hingeGANDiscriminatorLoss;
     hingeGANDiscriminatorLoss.lossShape = j.at("loss_shape").get<LossShape>();
     hingeGANDiscriminatorLoss.lossDataType = j.at("loss_data_type").get<DataType>();
+
+    hingeGANDiscriminatorLoss.lossWeight = ThorImplementation::lossWeightFromJson(j);
     hingeGANDiscriminatorLoss.realScoresTensor = realScores;
     hingeGANDiscriminatorLoss.fakeScoresTensor = fakeScores;
     hingeGANDiscriminatorLoss.network = network;

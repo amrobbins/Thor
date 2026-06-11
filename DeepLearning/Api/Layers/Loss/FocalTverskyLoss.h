@@ -98,6 +98,8 @@ class FocalTverskyLoss::Builder {
         focalTverskyLoss.predictionsTensor = _predictions.value();
         focalTverskyLoss.labelsTensor = _labels.value();
         focalTverskyLoss.lossDataType = _lossDataType.value();
+
+        focalTverskyLoss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         focalTverskyLoss.lossShape = _lossShape.value();
         focalTverskyLoss.alpha = alpha;
         focalTverskyLoss.beta = beta;
@@ -183,6 +185,13 @@ class FocalTverskyLoss::Builder {
         return *this;
     }
 
+    virtual FocalTverskyLoss::Builder & lossWeight(float lossWeight) {
+        THOR_THROW_IF_FALSE(!this->_lossWeight.has_value());
+        ThorImplementation::validateLossWeight(lossWeight);
+        this->_lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
+        return *this;
+    }
+
     virtual FocalTverskyLoss::Builder &lossDataType(DataType _lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
         THOR_THROW_IF_FALSE(_lossDataType == DataType::FP16 || _lossDataType == DataType::FP32);
@@ -196,6 +205,7 @@ class FocalTverskyLoss::Builder {
     std::optional<Tensor> _labels;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
+    std::optional<float> _lossWeight;
     std::optional<float> _alpha;
     std::optional<float> _beta;
     std::optional<float> _gamma;

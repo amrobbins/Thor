@@ -26,13 +26,15 @@ CustomLoss::CustomLoss(ThorImplementation::DynamicExpression lossExpression,
                        std::string lossName,
                        std::string gradientName,
                        std::optional<Tensor> lossTensor,
-                       std::optional<DataType> requestedLossDataType)
+                       std::optional<DataType> requestedLossDataType,
+                       std::optional<float> lossWeight)
     : lossExpression(std::move(lossExpression)),
       gradientExpression(std::move(gradientExpression)),
       predictionsName(std::move(predictionsName)),
       labelsName(std::move(labelsName)),
       lossName(std::move(lossName)),
       gradientName(std::move(gradientName)) {
+    this->lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
     validateName(this->predictionsName, "predictions input");
     validateName(this->labelsName, "labels input");
     validateName(this->lossName, "loss output");
@@ -225,7 +227,7 @@ std::shared_ptr<ThorImplementation::Layer> CustomLoss::stamp(ThorImplementation:
     THOR_THROW_IF_FALSE(connectingApiTensor == predictionsTensor || connectingApiTensor == labelsTensor);
 
     std::shared_ptr<ThorImplementation::CustomLoss> customLoss = std::make_shared<ThorImplementation::CustomLoss>(
-        lossExpression, gradientExpression, predictionsName, labelsName, lossName, gradientName, lossDataType);
+        lossExpression, gradientExpression, predictionsName, labelsName, lossName, gradientName, lossDataType, lossWeight);
     customLoss->setConstructForInferenceOnly(inferenceOnly);
     return customLoss;
 }
@@ -242,6 +244,7 @@ void CustomLoss::buildSupportLayersAndAddToNetwork() {
                              .lossName(lossName)
                              .gradientName(gradientName)
                              .lossDataType(lossDataType)
+                             .lossWeight(lossWeight.value_or(1.0f))
                              .reportsRawLoss()
                              .build();
 
@@ -283,6 +286,7 @@ json CustomLoss::architectureJson() const {
     j["labels_name"] = labelsName;
     j["loss_name"] = lossName;
     j["gradient_name"] = gradientName;
+    ThorImplementation::addLossWeightToJson(j, lossWeight);
 
     auto serializedLossDefinition = lossExpression.getSerializedDefinition();
     if (serializedLossDefinition == nullptr) {
@@ -341,7 +345,8 @@ void CustomLoss::deserialize(const json& j, Network* network) {
                           lossName,
                           gradientName,
                           rawLossTensor,
-                          j.at("loss_data_type").get<DataType>());
+                          j.at("loss_data_type").get<DataType>(),
+                          ThorImplementation::lossWeightFromJson(j));
     customLoss.lossShape = LossShape::RAW;
     customLoss.addToNetwork(network);
 }

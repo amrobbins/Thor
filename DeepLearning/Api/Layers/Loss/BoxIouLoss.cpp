@@ -39,7 +39,8 @@ void BoxIouLoss::populateAndAdd(BoxIouLoss& loss,
                                 Tensor labels,
                                 LossShape lossShape,
                                 DataType lossDataType,
-                                float eps) {
+                                float eps,
+                                std::optional<float> lossWeight) {
     THOR_THROW_IF_FALSE(network != nullptr);
     THOR_THROW_IF_FALSE(predictions != labels);
     validateBoxDimensions(predictions.getDimensions(), "predictions");
@@ -51,11 +52,13 @@ void BoxIouLoss::populateAndAdd(BoxIouLoss& loss,
     THOR_THROW_IF_FALSE(lossShape == LossShape::BATCH || lossShape == LossShape::CLASSWISE ||
                         lossShape == LossShape::ELEMENTWISE || lossShape == LossShape::RAW);
     THOR_THROW_IF_FALSE(eps > 0.0f);
+    lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
 
     loss.predictionsTensor = predictions;
     loss.labelsTensor = labels;
     loss.lossShape = lossShape;
     loss.lossDataType = lossDataType;
+    loss.lossWeight = lossWeight;
     loss.eps = eps;
     loss.network = network;
     loss.initialized = true;
@@ -75,6 +78,7 @@ void BoxIouLoss::buildSupportLayersAndAddToNetwork() {
     rawLoss->labelsTensor = labelsTensor;
     rawLoss->lossShape = LossShape::RAW;
     rawLoss->lossDataType = lossDataType;
+    rawLoss->lossWeight = lossWeight;
     rawLoss->eps = eps;
     rawLoss->network = network;
     rawLoss->initialized = true;
@@ -113,6 +117,7 @@ json BoxIouLoss::architectureJson() const {
     j["loss_tensor"] = lossTensor.architectureJson();
     j["box_format"] = "xyxy";
     j["eps"] = eps;
+    ThorImplementation::addLossWeightToJson(j, lossWeight);
     return j;
 }
 
@@ -131,6 +136,8 @@ void BoxIouLoss::deserializeInto(const json& j, Network* network, BoxIouLoss& lo
 
     loss.lossShape = j.at("loss_shape").get<LossShape>();
     loss.lossDataType = j.at("loss_data_type").get<DataType>();
+
+    loss.lossWeight = ThorImplementation::lossWeightFromJson(j);
     loss.eps = j.value("eps", 1.0e-7f);
     loss.predictionsTensor = predictions;
     loss.labelsTensor = labels;

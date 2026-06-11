@@ -70,6 +70,7 @@ void KLDivLoss::buildSupportLayersAndAddToNetwork() {
                                   .lossName(kLossName)
                                   .gradientName(kGradientName)
                                   .lossDataType(lossDataType)
+                                       .lossWeight(lossWeight.value_or(1.0f))
                                   .reportsRawLoss()
                                   .build();
 
@@ -111,6 +112,8 @@ void KLDivLoss::deserialize(const json& j, Network* network) {
     KLDivLoss klDivLoss;
     klDivLoss.lossShape = j.at("loss_shape").get<LossShape>();
     klDivLoss.lossDataType = j.at("loss_data_type").get<DataType>();
+
+    klDivLoss.lossWeight = ThorImplementation::lossWeightFromJson(j);
     klDivLoss.predictionsTensor = predictions;
     klDivLoss.labelsTensor = labels;
     klDivLoss.network = network;

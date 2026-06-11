@@ -106,6 +106,8 @@ class MarginRankingLoss::Builder {
         marginRankingLoss.input2Tensor = _input2.value();
         marginRankingLoss.targetTensor = _target.value();
         marginRankingLoss.lossDataType = _lossDataType.value();
+
+        marginRankingLoss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         marginRankingLoss.lossShape = _lossShape.value();
         marginRankingLoss.margin = margin;
         marginRankingLoss.network = _network.value();
@@ -174,6 +176,13 @@ class MarginRankingLoss::Builder {
         return *this;
     }
 
+    virtual MarginRankingLoss::Builder & lossWeight(float lossWeight) {
+        THOR_THROW_IF_FALSE(!this->_lossWeight.has_value());
+        ThorImplementation::validateLossWeight(lossWeight);
+        this->_lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
+        return *this;
+    }
+
     virtual MarginRankingLoss::Builder &lossDataType(DataType _lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
         THOR_THROW_IF_FALSE(_lossDataType == DataType::FP16 || _lossDataType == DataType::FP32);
@@ -188,6 +197,7 @@ class MarginRankingLoss::Builder {
     std::optional<Tensor> _target;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
+    std::optional<float> _lossWeight;
     std::optional<float> _margin;
 };
 

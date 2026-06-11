@@ -76,7 +76,8 @@ void bind_tversky_loss(nb::module_ &losses) {
            float beta,
            float smooth,
            std::optional<DataType> loss_data_type,
-           LossShape reported_loss_shape) {
+           LossShape reported_loss_shape,
+           std::optional<float> loss_weight) {
             const string loss_name = "TverskyLoss instance";
             validateProbabilityLossTensors(loss_name, predictions, labels);
             if (alpha < 0.0f) {
@@ -105,7 +106,8 @@ void bind_tversky_loss(nb::module_ &losses) {
                 .alpha(alpha)
                 .beta(beta)
                 .smooth(smooth)
-                .lossDataType(effectiveLossDataType);
+                .lossDataType(effectiveLossDataType)
+                .lossWeight(loss_weight.value_or(1.0f));
             setReportedLossShape(builder, reported_loss_shape);
             TverskyLoss built = builder.build();
 
@@ -119,6 +121,8 @@ void bind_tversky_loss(nb::module_ &losses) {
         "smooth"_a = 1.0f,
         "loss_data_type"_a.none() = nb::none(),
         "reported_loss_shape"_a = LossShape::BATCH,
+        nb::kw_only(),
+        "loss_weight"_a.none() = nb::none(),
         R"nbdoc(Construct a Tversky loss.)nbdoc");
 
     tversky_loss.def_prop_ro("alpha", &TverskyLoss::getAlpha);

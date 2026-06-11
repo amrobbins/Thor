@@ -5,6 +5,7 @@
 #include <cuda.h>
 #include <cuda_fp16.h>
 #include <cstdint>
+#include <optional>
 
 // Kind values intentionally mirror ThorImplementation::BoxIouLoss::Kind.
 // Keeping the kernel ABI integer-based avoids including implementation-layer
@@ -21,4 +22,5 @@ void launchBoxIouLoss(void* labels_d,
                       float eps,
                       bool computeGradient,
                       float lossScalingFactor,
+                      std::optional<float> lossWeight,
                       Stream stream);

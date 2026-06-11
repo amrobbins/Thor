@@ -20,7 +20,8 @@ class CustomLoss : public Loss {
                std::string labelsName = "labels",
                std::string lossName = "loss",
                std::string gradientName = "predictions_grad",
-               DataType lossDataType = DataType::FP32);
+               DataType lossDataType = DataType::FP32,
+               std::optional<float> lossWeight = std::nullopt);
 
     ~CustomLoss() override = default;
 
@@ -59,8 +60,11 @@ class CustomLoss : public Loss {
     std::string labelsName;
     std::string lossName;
     std::string gradientName;
+    std::optional<float> lossWeight;
     bool gradientFusedIntoDrivingLayer = false;
 
+    ThorImplementation::DynamicExpression weightedLossExpression() const;
+    ThorImplementation::DynamicExpression weightedGradientExpression() const;
     void tryFuseGradientIntoDrivingLayer();
 
     std::shared_ptr<PreparedDynamicExpression> lossPrepared;

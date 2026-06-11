@@ -30,7 +30,8 @@ void bind_list_net_loss(nb::module_ &ranking) {
            float label_temperature,
            std::optional<DataType> loss_data_type,
            LossShape reported_loss_shape,
-           std::optional<Tensor> mask) {
+           std::optional<Tensor> mask,
+           std::optional<float> loss_weight) {
             const string loss_name = "ListNetLoss instance";
             ThorPython::Ranking::ListwiseCommon::validateFixedSizeListwiseTensorArguments(loss_name,
                                                                                          predictions,
@@ -48,7 +49,8 @@ void bind_list_net_loss(nb::module_ &ranking) {
                 .labels(labels)
                 .scoreTemperature(score_temperature)
                 .labelTemperature(label_temperature)
-                .lossDataType(effectiveLossDataType);
+                .lossDataType(effectiveLossDataType)
+                .lossWeight(loss_weight.value_or(1.0f));
             if (mask.has_value())
                 builder.mask(mask.value());
             ThorPython::Ranking::ListwiseCommon::setReportedLossShape(builder, reported_loss_shape);
@@ -64,6 +66,8 @@ void bind_list_net_loss(nb::module_ &ranking) {
         "loss_data_type"_a.none() = nb::none(),
         "reported_loss_shape"_a = LossShape::BATCH,
         "mask"_a.none() = nb::none(),
+        nb::kw_only(),
+        "loss_weight"_a.none() = nb::none(),
         R"nbdoc(Construct a ListNet loss over fixed-size query/document lists.)nbdoc");
 
     list_net_loss.def_prop_ro("score_temperature", &ListNetLoss::getScoreTemperature);

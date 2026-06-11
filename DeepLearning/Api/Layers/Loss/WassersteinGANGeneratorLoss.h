@@ -86,6 +86,8 @@ class WassersteinGANGeneratorLoss::Builder {
         WassersteinGANGeneratorLoss wassersteinGANGeneratorLoss;
         wassersteinGANGeneratorLoss.fakeScoresTensor = _fakeScores.value();
         wassersteinGANGeneratorLoss.lossDataType = _lossDataType.value();
+
+        wassersteinGANGeneratorLoss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         wassersteinGANGeneratorLoss.lossShape = _lossShape.value();
         wassersteinGANGeneratorLoss.network = _network.value();
         wassersteinGANGeneratorLoss.initialized = true;
@@ -132,6 +134,13 @@ class WassersteinGANGeneratorLoss::Builder {
         return *this;
     }
 
+    virtual WassersteinGANGeneratorLoss::Builder & lossWeight(float lossWeight) {
+        THOR_THROW_IF_FALSE(!this->_lossWeight.has_value());
+        ThorImplementation::validateLossWeight(lossWeight);
+        this->_lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
+        return *this;
+    }
+
     virtual WassersteinGANGeneratorLoss::Builder &lossDataType(DataType _lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
         THOR_THROW_IF_FALSE(_lossDataType == DataType::FP16 || _lossDataType == DataType::FP32);
@@ -144,6 +153,7 @@ class WassersteinGANGeneratorLoss::Builder {
     std::optional<Tensor> _fakeScores;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
+    std::optional<float> _lossWeight;
 };
 
 }  // namespace Thor

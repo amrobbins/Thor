@@ -79,6 +79,8 @@ class SoftTargetCrossEntropy::Builder {
         softTargetCrossEntropy.predictionsTensor = _predictions.value();
         softTargetCrossEntropy.labelsTensor = _labels.value();
         softTargetCrossEntropy.lossDataType = _lossDataType.value();
+
+        softTargetCrossEntropy.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         softTargetCrossEntropy.lossShape = _lossShape.value();
         softTargetCrossEntropy.network = _network.value();
         softTargetCrossEntropy.initialized = true;
@@ -132,6 +134,13 @@ class SoftTargetCrossEntropy::Builder {
         return *this;
     }
 
+    virtual SoftTargetCrossEntropy::Builder & lossWeight(float lossWeight) {
+        THOR_THROW_IF_FALSE(!this->_lossWeight.has_value());
+        ThorImplementation::validateLossWeight(lossWeight);
+        this->_lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
+        return *this;
+    }
+
     virtual SoftTargetCrossEntropy::Builder &lossDataType(DataType _lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
         THOR_THROW_IF_FALSE(_lossDataType == DataType::FP16 || _lossDataType == DataType::FP32);
@@ -145,6 +154,7 @@ class SoftTargetCrossEntropy::Builder {
     std::optional<Tensor> _labels;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
+    std::optional<float> _lossWeight;
 };
 
 }  // namespace Thor

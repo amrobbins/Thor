@@ -112,6 +112,8 @@ class CosineEmbeddingLoss::Builder {
         cosineEmbeddingLoss.input2Tensor = _input2.value();
         cosineEmbeddingLoss.targetTensor = _target.value();
         cosineEmbeddingLoss.lossDataType = _lossDataType.value();
+
+        cosineEmbeddingLoss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         cosineEmbeddingLoss.lossShape = _lossShape.value();
         cosineEmbeddingLoss.margin = margin;
         cosineEmbeddingLoss.eps = eps;
@@ -188,6 +190,13 @@ class CosineEmbeddingLoss::Builder {
         return *this;
     }
 
+    virtual CosineEmbeddingLoss::Builder & lossWeight(float lossWeight) {
+        THOR_THROW_IF_FALSE(!this->_lossWeight.has_value());
+        ThorImplementation::validateLossWeight(lossWeight);
+        this->_lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
+        return *this;
+    }
+
     virtual CosineEmbeddingLoss::Builder &lossDataType(DataType _lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
         THOR_THROW_IF_FALSE(_lossDataType == DataType::FP16 || _lossDataType == DataType::FP32);
@@ -202,6 +211,7 @@ class CosineEmbeddingLoss::Builder {
     std::optional<Tensor> _target;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
+    std::optional<float> _lossWeight;
     std::optional<float> _margin;
     std::optional<float> _eps;
 };

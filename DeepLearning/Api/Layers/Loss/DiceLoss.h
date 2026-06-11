@@ -86,6 +86,8 @@ class DiceLoss::Builder {
         diceLoss.predictionsTensor = _predictions.value();
         diceLoss.labelsTensor = _labels.value();
         diceLoss.lossDataType = _lossDataType.value();
+
+        diceLoss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         diceLoss.lossShape = _lossShape.value();
         diceLoss.smooth = smooth;
         diceLoss.network = _network.value();
@@ -147,6 +149,13 @@ class DiceLoss::Builder {
         return *this;
     }
 
+    virtual DiceLoss::Builder & lossWeight(float lossWeight) {
+        THOR_THROW_IF_FALSE(!this->_lossWeight.has_value());
+        ThorImplementation::validateLossWeight(lossWeight);
+        this->_lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
+        return *this;
+    }
+
     virtual DiceLoss::Builder &lossDataType(DataType _lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
         THOR_THROW_IF_FALSE(_lossDataType == DataType::FP16 || _lossDataType == DataType::FP32);
@@ -160,6 +169,7 @@ class DiceLoss::Builder {
     std::optional<Tensor> _labels;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
+    std::optional<float> _lossWeight;
     std::optional<float> _smooth;
 };
 

@@ -1,4 +1,5 @@
 #include "DeepLearning/Implementation/Layers/Loss/BoxIouLoss.h"
+#include "DeepLearning/Implementation/Layers/Loss/LossWeight.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
@@ -45,14 +46,16 @@ void dispatchBoxIouLoss(void* labels,
                         float eps,
                         bool computeGradient,
                         float lossScalingFactor,
+                        std::optional<float> lossWeight,
                         Stream stream) {
     launchBoxIouLoss<LabelT, PredictionT, LossT>(
-        labels, predictions, loss, gradient, numBoxes, toKernelKind(kind), eps, computeGradient, lossScalingFactor, stream);
+        labels, predictions, loss, gradient, numBoxes, toKernelKind(kind), eps, computeGradient, lossScalingFactor, lossWeight, stream);
 }
 
 }  // namespace
 
-BoxIouLoss::BoxIouLoss(Kind kind, DataType lossDataType, float eps) : Loss(lossDataType), kind(kind), eps(eps) {}
+BoxIouLoss::BoxIouLoss(Kind kind, DataType lossDataType, float eps, std::optional<float> lossWeight)
+    : Loss(lossDataType), kind(kind), eps(eps), lossWeight(normalizeLossWeight(lossWeight)) {}
 
 optional<Tensor> BoxIouLoss::createFeatureOutputTensor() {
     THOR_THROW_IF_FALSE(featureInput.has_value());
@@ -92,7 +95,6 @@ void BoxIouLoss::compileImpl() {
     THOR_THROW_IF_FALSE(lossDataType == DataType::FP16 || lossDataType == DataType::FP32);
     THOR_THROW_IF_FALSE(featureOutput.value().getDescriptor().getDataType() == lossDataType);
     THOR_THROW_IF_FALSE(eps > 0.0f);
-
     batchSize = static_cast<uint32_t>(predictionsDescriptor.getDimensions()[0]);
     boxesPerBatchElement = boxesPerBatchElementFromDims(predictionsDescriptor.getDimensions());
     totalBoxes = batchSize * boxesPerBatchElement;
@@ -149,21 +151,21 @@ void BoxIouLoss::launchKernel(bool computeGradient, Stream stream) {
     const DataType outputDType = featureOutput.value().getDescriptor().getDataType();
 
     if (predictionsDType == DataType::FP16 && labelsDType == DataType::FP16 && outputDType == DataType::FP16) {
-        dispatchBoxIouLoss<half, half, half>(labels, predictions, loss, gradient, totalBoxes, kind, eps, computeGradient, getLossScalingFactor(), stream);
+        dispatchBoxIouLoss<half, half, half>(labels, predictions, loss, gradient, totalBoxes, kind, eps, computeGradient, getLossScalingFactor(), lossWeight, stream);
     } else if (predictionsDType == DataType::FP16 && labelsDType == DataType::FP16 && outputDType == DataType::FP32) {
-        dispatchBoxIouLoss<half, half, float>(labels, predictions, loss, gradient, totalBoxes, kind, eps, computeGradient, getLossScalingFactor(), stream);
+        dispatchBoxIouLoss<half, half, float>(labels, predictions, loss, gradient, totalBoxes, kind, eps, computeGradient, getLossScalingFactor(), lossWeight, stream);
     } else if (predictionsDType == DataType::FP16 && labelsDType == DataType::FP32 && outputDType == DataType::FP16) {
-        dispatchBoxIouLoss<float, half, half>(labels, predictions, loss, gradient, totalBoxes, kind, eps, computeGradient, getLossScalingFactor(), stream);
+        dispatchBoxIouLoss<float, half, half>(labels, predictions, loss, gradient, totalBoxes, kind, eps, computeGradient, getLossScalingFactor(), lossWeight, stream);
     } else if (predictionsDType == DataType::FP16 && labelsDType == DataType::FP32 && outputDType == DataType::FP32) {
-        dispatchBoxIouLoss<float, half, float>(labels, predictions, loss, gradient, totalBoxes, kind, eps, computeGradient, getLossScalingFactor(), stream);
+        dispatchBoxIouLoss<float, half, float>(labels, predictions, loss, gradient, totalBoxes, kind, eps, computeGradient, getLossScalingFactor(), lossWeight, stream);
     } else if (predictionsDType == DataType::FP32 && labelsDType == DataType::FP16 && outputDType == DataType::FP16) {
-        dispatchBoxIouLoss<half, float, half>(labels, predictions, loss, gradient, totalBoxes, kind, eps, computeGradient, getLossScalingFactor(), stream);
+        dispatchBoxIouLoss<half, float, half>(labels, predictions, loss, gradient, totalBoxes, kind, eps, computeGradient, getLossScalingFactor(), lossWeight, stream);
     } else if (predictionsDType == DataType::FP32 && labelsDType == DataType::FP16 && outputDType == DataType::FP32) {
-        dispatchBoxIouLoss<half, float, float>(labels, predictions, loss, gradient, totalBoxes, kind, eps, computeGradient, getLossScalingFactor(), stream);
+        dispatchBoxIouLoss<half, float, float>(labels, predictions, loss, gradient, totalBoxes, kind, eps, computeGradient, getLossScalingFactor(), lossWeight, stream);
     } else if (predictionsDType == DataType::FP32 && labelsDType == DataType::FP32 && outputDType == DataType::FP16) {
-        dispatchBoxIouLoss<float, float, half>(labels, predictions, loss, gradient, totalBoxes, kind, eps, computeGradient, getLossScalingFactor(), stream);
+        dispatchBoxIouLoss<float, float, half>(labels, predictions, loss, gradient, totalBoxes, kind, eps, computeGradient, getLossScalingFactor(), lossWeight, stream);
     } else if (predictionsDType == DataType::FP32 && labelsDType == DataType::FP32 && outputDType == DataType::FP32) {
-        dispatchBoxIouLoss<float, float, float>(labels, predictions, loss, gradient, totalBoxes, kind, eps, computeGradient, getLossScalingFactor(), stream);
+        dispatchBoxIouLoss<float, float, float>(labels, predictions, loss, gradient, totalBoxes, kind, eps, computeGradient, getLossScalingFactor(), lossWeight, stream);
     } else {
         THOR_UNREACHABLE();
     }

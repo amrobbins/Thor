@@ -105,6 +105,7 @@ void TripletLoss::buildSupportLayersAndAddToNetwork() {
                                               .input(kNegativeName, negativeTensor, kNegativeGradientName)
                                               .lossName(kLossName)
                                               .lossDataType(lossDataType)
+                                       .lossWeight(lossWeight.value_or(1.0f))
                                               .reportsRawLoss()
                                               .build();
 
@@ -140,6 +141,7 @@ json TripletLoss::architectureJson() const {
     j["loss_tensor"] = lossTensor.architectureJson();
     j["margin"] = margin;
     j["eps"] = eps;
+    ThorImplementation::addLossWeightToJson(j, lossWeight);
     return j;
 }
 
@@ -159,6 +161,8 @@ void TripletLoss::deserialize(const json& j, Network* network) {
     TripletLoss tripletLoss;
     tripletLoss.lossShape = j.at("loss_shape").get<LossShape>();
     tripletLoss.lossDataType = j.at("loss_data_type").get<DataType>();
+
+    tripletLoss.lossWeight = ThorImplementation::lossWeightFromJson(j);
     tripletLoss.margin = j.value("margin", 1.0f);
     tripletLoss.eps = j.value("eps", 1.0e-6f);
     tripletLoss.anchorTensor = anchor;
