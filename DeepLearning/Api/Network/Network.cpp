@@ -7,6 +7,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include <fstream>
 #include <iostream>
+#include <unordered_set>
 
 using namespace std;
 using json = nlohmann::json;
@@ -237,7 +238,29 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
             stampLayer(inputTensor.value(), layer, gpuNum, batchSize, stampedNetwork, inferenceOnly);
         }
 
-        // 3. Now that all layers have been constructed and connected, compile all layers
+        // 3. Now that all layers have been constructed and connected, compile all layers.
+        //
+        // Some physical layers are inserted by stamping and do not have a corresponding API layer.
+        // TensorFanout is the important case: it can fuse or prune a single live backward edge during
+        // compile by calling replaceErrorInput() on the previous physical layer.  That must happen
+        // before API-layer compile, otherwise a trainable layer can compile its backward application
+        // against the unfused fanout scratch tensor and never receive the downstream loss gradient.
+        std::unordered_set<ThorImplementation::Layer *> apiImplementationLayers;
+        for (const auto &apiPhysicalLayer : stampedNetwork.apiLayerToPhysicalLayerShared) {
+            if (apiPhysicalLayer.second != nullptr)
+                apiImplementationLayers.insert(apiPhysicalLayer.second.get());
+        }
+
+        for (const shared_ptr<ThorImplementation::Layer> &implementationLayer : stampedNetwork.otherLayersShared) {
+            if (implementationLayer == nullptr)
+                continue;
+            if (apiImplementationLayers.find(implementationLayer.get()) != apiImplementationLayers.end())
+                continue;
+            implementationLayer->compile();
+            stampedNetwork.floatingPointOperationsPerExampleForward += implementationLayer->floatingPointOperationsPerExampleForward();
+            stampedNetwork.floatingPointOperationsPerExampleBackward += implementationLayer->floatingPointOperationsPerExampleBackward();
+        }
+
         for (const shared_ptr<Layer> &apiLayer : allLayersInNetworkList) {
             // It is possible for an implementation layer to have no physical layer, for example a stub layer
             if (stampedNetwork.apiLayerToPhysicalLayerShared.count(apiLayer->getId()) == 0)
@@ -268,6 +291,14 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
                 vector<Event> layerEvents = layer->initialize(implementationLayer);
                 initDoneEvents.insert(initDoneEvents.end(), make_move_iterator(layerEvents.begin()), make_move_iterator(layerEvents.end()));
             }
+        }
+
+        for (const shared_ptr<ThorImplementation::Layer> &implementationLayer : stampedNetwork.otherLayersShared) {
+            if (implementationLayer == nullptr)
+                continue;
+            if (apiImplementationLayers.find(implementationLayer.get()) != apiImplementationLayers.end())
+                continue;
+            implementationLayer->initialize();
         }
 
     } catch (GpuOutOfMemoryError ex) {

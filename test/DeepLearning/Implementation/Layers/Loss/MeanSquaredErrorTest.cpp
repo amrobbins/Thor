@@ -49,7 +49,7 @@ TEST(MeanSquaredError, ComputesCorrectResult_BatchLoss) {
         for (uint32_t i = 0; i < elementLossCpu.getTotalNumElements(); i++) {
             predictions[i] = ((rand() % 1500) / 999.0f);
             labels[i] = ((rand() % 1500) / 999.0f);
-            half val = labels[i] - predictions[i];
+            half val = predictions[i] - labels[i];
             elementLoss[i] = val * val;
             elementLossGradient[i] = (half)2.0f * val * (half)Loss::getLossScalingFactor();
         }
@@ -167,7 +167,7 @@ TEST(MeanSquaredError, ComputesCorrectResult_BatchLoss_FP16_FP32Labels) {
         for (uint32_t i = 0; i < elementLossCpu.getTotalNumElements(); i++) {
             predictions[i] = ((rand() % 1500) / 999.0f);
             labels[i] = ((rand() % 1500) / 999.0f);
-            half val = (half)labels[i] - predictions[i];
+            half val = predictions[i] - (half)labels[i];
             elementLoss[i] = val * val;
             elementLossGradient[i] = (half)2.0f * val * (half)Loss::getLossScalingFactor();
         }
@@ -294,7 +294,7 @@ TEST(MeanSquaredError, ComputesCorrectResult_BatchLoss_FP16PredictionsGradient_F
         for (uint32_t i = 0; i < elementLossCpu.getTotalNumElements(); i++) {
             predictions[i] = ((rand() % 1500) / 999.0f);
             labels[i] = ((rand() % 1500) / 999.0f);
-            half val = (half)labels[i] - predictions[i];
+            half val = predictions[i] - (half)labels[i];
             elementLoss[i] = val * val;
             elementLossGradient[i] = (half)2.0f * val * (half)Loss::getLossScalingFactor();
         }
@@ -422,7 +422,7 @@ TEST(MeanSquaredError, ComputesCorrectResult_BatchLoss_FP32) {
         for (uint32_t i = 0; i < elementLossCpu.getTotalNumElements(); i++) {
             predictions[i] = ((rand() % 1500) / 999.0f);
             labels[i] = ((rand() % 1500) / 999.0f);
-            float val = labels[i] - predictions[i];
+            float val = predictions[i] - labels[i];
             elementLoss[i] = val * val;
             elementLossGradient[i] = 2.0f * val * Loss::getLossScalingFactor();
         }
@@ -548,7 +548,7 @@ TEST(MeanSquaredError, ComputesCorrectResult_BatchLoss_FP32_FP16Labels) {
         for (uint32_t i = 0; i < elementLossCpu.getTotalNumElements(); i++) {
             predictions[i] = ((rand() % 1500) / 999.0f);
             labels[i] = ((rand() % 1500) / 999.0f);
-            float val = (float)labels[i] - (float)predictions[i];
+            float val = (float)predictions[i] - (float)labels[i];
             elementLoss[i] = val * val;
             elementLossGradient[i] = 2.0f * val * Loss::getLossScalingFactor();
         }

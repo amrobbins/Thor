@@ -161,6 +161,8 @@ class CustomLayer : public TrainableLayer {
     void clearBackwardArrivalBookkeeping(uint32_t applicationIndex);
     void clearBackwardArrivalBookkeeping();
     bool applicationHasAnyDownstreamBackprop(uint32_t applicationIndex) const;
+    bool hasTrainableParameterRequiringDownstreamError();
+    bool hasConnectedUpstreamErrorOutput() const;
     void recordEffectiveParameterBatchSizeForApplication(uint32_t applicationIndex, uint32_t batchSize);
     bool canFuseOptimizerUpdatesForApplication(uint32_t applicationIndex) const;
     bool applicationHasFusedCustomLossGradient(uint32_t applicationIndex) const;

@@ -79,6 +79,15 @@ def _phase_epoch_mean_losses(stats, phase: str):
     return [float(np.mean(grouped[epoch])) for epoch in sorted(grouped)]
 
 
+def _assert_zero_initialized_two_class_batch_loss(loss: float, *, batch_size: int, name: str):
+    expected = float(batch_size * np.log(2.0))
+    assert loss == pytest.approx(expected, rel=2e-3, abs=2e-3), f"{name}: expected zero-logit two-class CE batch loss {expected}, got {loss}"
+
+
+def _assert_zero_initialized_regression_mean_loss(loss: float, *, expected: float, name: str):
+    assert loss == pytest.approx(expected, rel=2e-3, abs=2e-3), f"{name}: expected zero-init mean MSE loss {expected}, got {loss}"
+
+
 def _assert_loss_decreased(losses, *, name: str, tail_window: int = 5, required_fraction: float = 0.85):
     assert len(losses) >= tail_window * 2, f"expected enough {name} loss samples, got {losses}"
     first = float(np.mean(losses[:tail_window]))
@@ -156,6 +165,71 @@ def _linearly_separable_one_batch_loader(*, batch_size: int = 16, dtype=np.float
     )
 
 
+def _axis_separable_one_batch_loader(*, batch_size: int = 4, dtype=np.float32):
+    # Small enough to hand-check and intentionally symmetric so zero-initialized
+    # logits produce exactly batch_size * log(2) loss before the first update.
+    x = np.array(
+        [
+            [-2.0, 0.0],
+            [-1.0, 0.0],
+            [1.0, 0.0],
+            [2.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    y_index = (x[:, 0] > 0.0).astype(np.int64)
+    y = np.zeros((x.shape[0], 2), dtype=np.float32)
+    y[np.arange(x.shape[0]), y_index] = 1.0
+
+    assert x.shape[0] == batch_size
+    x = np.ascontiguousarray(x, dtype=dtype)
+    y = np.ascontiguousarray(y, dtype=dtype)
+
+    loader_cls = thor.training.NumpyFloat16BatchLoader if dtype == np.float16 else thor.training.NumpyFloat32BatchLoader
+    return loader_cls(
+        x,
+        y,
+        x,
+        y,
+        batch_size=batch_size,
+        example_input_name="examples",
+        label_input_name="labels",
+        dataset_name="axis_separable_one_batch",
+    )
+
+
+def _regression_one_batch_loader(*, batch_size: int = 4, dtype=np.float32):
+    # Smallest useful training target: a single affine output trained with MSE.
+    # With zero weights and zero bias, predictions are all 0 and Thor reports
+    # mean(y ** 2) == 1.0, which makes the first loss hand-checkable.
+    x = np.array(
+        [
+            [-1.0, 0.0],
+            [0.0, 1.0],
+            [1.0, 0.0],
+            [0.0, -1.0],
+        ],
+        dtype=np.float32,
+    )
+    y = np.array([[-1.0], [1.0], [1.0], [-1.0]], dtype=np.float32)
+
+    assert x.shape[0] == batch_size
+    x = np.ascontiguousarray(x, dtype=dtype)
+    y = np.ascontiguousarray(y, dtype=dtype)
+
+    loader_cls = thor.training.NumpyFloat16BatchLoader if dtype == np.float16 else thor.training.NumpyFloat32BatchLoader
+    return loader_cls(
+        x,
+        y,
+        x,
+        y,
+        batch_size=batch_size,
+        example_input_name="examples",
+        label_input_name="labels",
+        dataset_name="regression_one_batch",
+    )
+
+
 def _linearly_separable_multi_batch_loader(*, batch_size: int = 4, dtype=np.float32):
     # Four deliberately different batches.  The first epoch's per-batch losses should
     # not contain exact adjacent repeats; exact repeats are a strong stale-stat signal
@@ -200,7 +274,13 @@ def _linearly_separable_multi_batch_loader(*, batch_size: int = 4, dtype=np.floa
     )
 
 
-def _build_linear_classifier(name: str, *, dtype=thor.DataType.fp32):
+def _build_linear_classifier(
+    name: str,
+    *,
+    dtype=thor.DataType.fp32,
+    weights_initializer=None,
+    biases_initializer=None,
+):
     network = thor.Network(name)
     examples = thor.layers.NetworkInput(network, "examples", [2], dtype)
     labels = thor.layers.NetworkInput(network, "labels", [2], dtype)
@@ -211,6 +291,8 @@ def _build_linear_classifier(name: str, *, dtype=thor.DataType.fp32):
         2,
         True,
         activation=None,
+        weights_initializer=weights_initializer,
+        biases_initializer=biases_initializer,
     )
     loss = thor.losses.CategoricalCrossEntropy(
         network,
@@ -221,6 +303,59 @@ def _build_linear_classifier(name: str, *, dtype=thor.DataType.fp32):
 
     thor.layers.NetworkOutput(network, "loss", loss.get_loss(), thor.DataType.fp32)
     return network
+
+
+def _build_zero_initialized_linear_classifier(name: str, *, dtype=thor.DataType.fp32):
+    zero = thor.initializers.UniformRandom(0.0, 0.0)
+    return _build_linear_classifier(
+        name,
+        dtype=dtype,
+        weights_initializer=zero,
+        biases_initializer=zero,
+    )
+
+
+def _build_linear_regressor(
+    name: str,
+    *,
+    dtype=thor.DataType.fp32,
+    weights_initializer=None,
+    biases_initializer=None,
+):
+    network = thor.Network(name)
+    examples = thor.layers.NetworkInput(network, "examples", [2], dtype)
+    labels = thor.layers.NetworkInput(network, "labels", [1], dtype)
+
+    predictions = thor.layers.FullyConnected(
+        network,
+        examples.get_feature_output(),
+        1,
+        True,
+        activation=None,
+        weights_initializer=weights_initializer,
+        biases_initializer=biases_initializer,
+    )
+    loss = thor.losses.MSE(
+        network,
+        predictions.get_feature_output(),
+        labels.get_feature_output(),
+        thor.DataType.fp32,
+    )
+
+    thor.layers.NetworkOutput(network, "loss", loss.get_loss(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "predictions", predictions.get_feature_output(), dtype)
+    return network
+
+
+def _build_zero_initialized_linear_regressor(name: str, *, dtype=thor.DataType.fp32):
+    zero = thor.initializers.UniformRandom(0.0, 0.0)
+    return _build_linear_regressor(
+        name,
+        dtype=dtype,
+        weights_initializer=zero,
+        biases_initializer=zero,
+    )
+
 
 def _download_if_missing(url: str, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -322,6 +457,362 @@ def _build_iris_mlp(name: str, *, dtype=thor.DataType.fp32, per_layer_optimizers
     thor.layers.NetworkOutput(network, "loss", loss.get_loss(), thor.DataType.fp32)
     thor.layers.NetworkOutput(network, "scores", logits.get_feature_output(), dtype)
     return network
+
+
+# Diagnostic ladder, from deterministic single-batch checks to real Iris training.
+
+def test_debug_synchronous_trainer_reports_deterministic_zero_init_mse_one_batch_loss(capfd):
+    batch_size = 4
+    network = _build_zero_initialized_linear_regressor(
+        "python_integration_debug_zero_init_mse_one_batch_loss",
+        dtype=thor.DataType.fp32,
+    )
+    loader = _regression_one_batch_loader(batch_size=batch_size, dtype=np.float32)
+    optimizer = thor.optimizers.Sgd(initial_learning_rate=1.0e-12, momentum=0.0)
+
+    trainer = thor.training.Trainer(
+        network,
+        loader,
+        optimizer=optimizer,
+        debug_synchronous=True,
+        stats=True,
+        stats_interval_s=0.0,
+        max_in_flight_batches=1,
+        scalar_tensors_to_report=["loss"],
+        stats_color="never",
+    )
+
+    stats = _fit_and_capture_stats(trainer, capfd, epochs=1)
+    train_losses = _phase_losses(stats, "train")
+    validate_losses = _phase_losses(stats, "validate")
+
+    assert len(train_losses) == 1, train_losses
+    assert len(validate_losses) == 1, validate_losses
+    _assert_zero_initialized_regression_mean_loss(
+        train_losses[0],
+        expected=1.0,
+        name="debug synchronous zero-init MSE first train batch",
+    )
+    _assert_zero_initialized_regression_mean_loss(
+        validate_losses[0],
+        expected=1.0,
+        name="debug synchronous near-zero-update MSE validate batch",
+    )
+
+
+def test_debug_synchronous_trainer_applies_deterministic_one_batch_mse_sgd_update(capfd):
+    batch_size = 4
+    network = _build_zero_initialized_linear_regressor(
+        "python_integration_debug_one_batch_mse_sgd_update",
+        dtype=thor.DataType.fp32,
+    )
+    loader = _regression_one_batch_loader(batch_size=batch_size, dtype=np.float32)
+    optimizer = thor.optimizers.Sgd(initial_learning_rate=0.1, momentum=0.0)
+
+    trainer = thor.training.Trainer(
+        network,
+        loader,
+        optimizer=optimizer,
+        debug_synchronous=True,
+        stats=True,
+        stats_interval_s=0.0,
+        max_in_flight_batches=1,
+        scalar_tensors_to_report=["loss"],
+        stats_color="never",
+    )
+
+    stats = _fit_and_capture_stats(trainer, capfd, epochs=2)
+    train_losses = _phase_losses(stats, "train")
+    validate_losses = _phase_losses(stats, "validate")
+
+    assert len(train_losses) == 2, train_losses
+    assert len(validate_losses) == 2, validate_losses
+    _assert_zero_initialized_regression_mean_loss(
+        train_losses[0],
+        expected=1.0,
+        name="debug synchronous MSE pre-update train batch",
+    )
+
+    # Same deterministic batch is used for validation.  If the first train batch
+    # actually updated parameters, either the immediately following validation
+    # loss or the next epoch's train loss must move below the zero-init baseline.
+    post_first_update_loss = min(validate_losses[0], train_losses[1])
+    assert post_first_update_loss < train_losses[0] * 0.90, (
+        "one-batch MSE SGD update did not materially change the next loss: "
+        f"train_losses={train_losses}, validate_losses={validate_losses}"
+    )
+
+
+@requires_trainer_learning
+def test_debug_synchronous_trainer_reduces_deterministic_repeated_batch_mse_loss_with_sgd(capfd):
+    batch_size = 4
+    network = _build_zero_initialized_linear_regressor(
+        "python_integration_debug_repeated_batch_mse_sgd",
+        dtype=thor.DataType.fp32,
+    )
+    loader = _regression_one_batch_loader(batch_size=batch_size, dtype=np.float32)
+    optimizer = thor.optimizers.Sgd(initial_learning_rate=0.05, momentum=0.0)
+
+    trainer = thor.training.Trainer(
+        network,
+        loader,
+        optimizer=optimizer,
+        debug_synchronous=True,
+        stats=True,
+        stats_interval_s=0.0,
+        max_in_flight_batches=1,
+        scalar_tensors_to_report=["loss"],
+        stats_color="never",
+    )
+
+    stats = _fit_and_capture_stats(trainer, capfd, epochs=12)
+    train_epoch_losses = _phase_epoch_mean_losses(stats, "train")
+    validate_epoch_losses = _phase_epoch_mean_losses(stats, "validate")
+
+    assert len(train_epoch_losses) == 12, train_epoch_losses
+    assert len(validate_epoch_losses) == 12, validate_epoch_losses
+    _assert_zero_initialized_regression_mean_loss(
+        train_epoch_losses[0],
+        expected=1.0,
+        name="debug synchronous repeated-batch MSE initial train epoch",
+    )
+    _assert_loss_decreased(
+        train_epoch_losses,
+        name="debug synchronous deterministic repeated-batch MSE train",
+        tail_window=3,
+        required_fraction=0.50,
+    )
+    _assert_loss_decreased(
+        validate_epoch_losses,
+        name="debug synchronous deterministic repeated-batch MSE validate",
+        tail_window=3,
+        required_fraction=0.50,
+    )
+
+
+@requires_trainer_learning
+def test_queued_trainer_reduces_deterministic_repeated_batch_mse_loss_with_sgd(capfd):
+    batch_size = 4
+    network = _build_zero_initialized_linear_regressor(
+        "python_integration_queued_repeated_batch_mse_sgd",
+        dtype=thor.DataType.fp32,
+    )
+    loader = _regression_one_batch_loader(batch_size=batch_size, dtype=np.float32)
+    optimizer = thor.optimizers.Sgd(initial_learning_rate=0.05, momentum=0.0)
+
+    trainer = thor.training.Trainer(
+        network,
+        loader,
+        optimizer=optimizer,
+        debug_synchronous=False,
+        stats=True,
+        stats_interval_s=0.0,
+        max_in_flight_batches=4,
+        scalar_tensors_to_report=["loss"],
+        stats_color="never",
+    )
+
+    stats = _fit_and_capture_stats(trainer, capfd, epochs=12)
+    train_epoch_losses = _phase_epoch_mean_losses(stats, "train")
+    validate_epoch_losses = _phase_epoch_mean_losses(stats, "validate")
+
+    assert len(train_epoch_losses) == 12, train_epoch_losses
+    assert len(validate_epoch_losses) == 12, validate_epoch_losses
+    _assert_zero_initialized_regression_mean_loss(
+        train_epoch_losses[0],
+        expected=1.0,
+        name="queued repeated-batch MSE initial train epoch",
+    )
+    _assert_loss_decreased(
+        train_epoch_losses,
+        name="queued deterministic repeated-batch MSE train",
+        tail_window=3,
+        required_fraction=0.50,
+    )
+    _assert_loss_decreased(
+        validate_epoch_losses,
+        name="queued deterministic repeated-batch MSE validate",
+        tail_window=3,
+        required_fraction=0.50,
+    )
+
+
+@requires_trainer_learning
+def test_debug_synchronous_trainer_reports_deterministic_zero_init_categorical_ce_one_batch_loss(capfd):
+    batch_size = 4
+    network = _build_zero_initialized_linear_classifier(
+        "python_integration_debug_zero_init_categorical_ce_one_batch_loss",
+        dtype=thor.DataType.fp32,
+    )
+    loader = _axis_separable_one_batch_loader(batch_size=batch_size, dtype=np.float32)
+    optimizer = thor.optimizers.Sgd(initial_learning_rate=1.0e-12, momentum=0.0)
+
+    trainer = thor.training.Trainer(
+        network,
+        loader,
+        optimizer=optimizer,
+        debug_synchronous=True,
+        stats=True,
+        stats_interval_s=0.0,
+        max_in_flight_batches=1,
+        scalar_tensors_to_report=["loss"],
+        stats_color="never",
+    )
+
+    stats = _fit_and_capture_stats(trainer, capfd, epochs=1)
+    train_losses = _phase_losses(stats, "train")
+    validate_losses = _phase_losses(stats, "validate")
+
+    assert len(train_losses) == 1, train_losses
+    assert len(validate_losses) == 1, validate_losses
+    _assert_zero_initialized_two_class_batch_loss(
+        train_losses[0],
+        batch_size=batch_size,
+        name="debug synchronous zero-init first train batch",
+    )
+    _assert_zero_initialized_two_class_batch_loss(
+        validate_losses[0],
+        batch_size=batch_size,
+        name="debug synchronous near-zero-update validate batch",
+    )
+
+
+@requires_trainer_learning
+def test_debug_synchronous_trainer_applies_deterministic_one_batch_sgd_update(capfd):
+    batch_size = 4
+    network = _build_zero_initialized_linear_classifier(
+        "python_integration_debug_one_batch_sgd_update",
+        dtype=thor.DataType.fp32,
+    )
+    loader = _axis_separable_one_batch_loader(batch_size=batch_size, dtype=np.float32)
+    optimizer = thor.optimizers.Sgd(initial_learning_rate=0.1, momentum=0.0)
+
+    trainer = thor.training.Trainer(
+        network,
+        loader,
+        optimizer=optimizer,
+        debug_synchronous=True,
+        stats=True,
+        stats_interval_s=0.0,
+        max_in_flight_batches=1,
+        scalar_tensors_to_report=["loss"],
+        stats_color="never",
+    )
+
+    stats = _fit_and_capture_stats(trainer, capfd, epochs=2)
+    train_losses = _phase_losses(stats, "train")
+    validate_losses = _phase_losses(stats, "validate")
+
+    assert len(train_losses) == 2, train_losses
+    assert len(validate_losses) == 2, validate_losses
+    _assert_zero_initialized_two_class_batch_loss(
+        train_losses[0],
+        batch_size=batch_size,
+        name="debug synchronous pre-update train batch",
+    )
+
+    # Same deterministic batch is used for validation.  If the first train batch
+    # actually updated parameters, either the immediately following validation
+    # loss or the next epoch's train loss must move below the zero-init baseline.
+    post_first_update_loss = min(validate_losses[0], train_losses[1])
+    assert post_first_update_loss < train_losses[0] * 0.90, (
+        "one-batch SGD update did not materially change the next loss: "
+        f"train_losses={train_losses}, validate_losses={validate_losses}"
+    )
+
+
+@requires_trainer_learning
+def test_debug_synchronous_trainer_reduces_deterministic_repeated_batch_loss_with_sgd(capfd):
+    batch_size = 4
+    network = _build_zero_initialized_linear_classifier(
+        "python_integration_debug_repeated_batch_sgd",
+        dtype=thor.DataType.fp32,
+    )
+    loader = _axis_separable_one_batch_loader(batch_size=batch_size, dtype=np.float32)
+    optimizer = thor.optimizers.Sgd(initial_learning_rate=0.05, momentum=0.0)
+
+    trainer = thor.training.Trainer(
+        network,
+        loader,
+        optimizer=optimizer,
+        debug_synchronous=True,
+        stats=True,
+        stats_interval_s=0.0,
+        max_in_flight_batches=1,
+        scalar_tensors_to_report=["loss"],
+        stats_color="never",
+    )
+
+    stats = _fit_and_capture_stats(trainer, capfd, epochs=12)
+    train_epoch_losses = _phase_epoch_mean_losses(stats, "train")
+    validate_epoch_losses = _phase_epoch_mean_losses(stats, "validate")
+
+    assert len(train_epoch_losses) == 12, train_epoch_losses
+    assert len(validate_epoch_losses) == 12, validate_epoch_losses
+    _assert_zero_initialized_two_class_batch_loss(
+        train_epoch_losses[0],
+        batch_size=batch_size,
+        name="debug synchronous repeated-batch initial train epoch",
+    )
+    _assert_loss_decreased(
+        train_epoch_losses,
+        name="debug synchronous deterministic repeated-batch train",
+        tail_window=3,
+        required_fraction=0.50,
+    )
+    _assert_loss_decreased(
+        validate_epoch_losses,
+        name="debug synchronous deterministic repeated-batch validate",
+        tail_window=3,
+        required_fraction=0.50,
+    )
+
+
+@requires_trainer_learning
+def test_queued_trainer_reduces_deterministic_repeated_batch_loss_with_sgd(capfd):
+    batch_size = 4
+    network = _build_zero_initialized_linear_classifier(
+        "python_integration_queued_repeated_batch_sgd",
+        dtype=thor.DataType.fp32,
+    )
+    loader = _axis_separable_one_batch_loader(batch_size=batch_size, dtype=np.float32)
+    optimizer = thor.optimizers.Sgd(initial_learning_rate=0.05, momentum=0.0)
+
+    trainer = thor.training.Trainer(
+        network,
+        loader,
+        optimizer=optimizer,
+        debug_synchronous=False,
+        stats=True,
+        stats_interval_s=0.0,
+        max_in_flight_batches=4,
+        scalar_tensors_to_report=["loss"],
+        stats_color="never",
+    )
+
+    stats = _fit_and_capture_stats(trainer, capfd, epochs=12)
+    train_epoch_losses = _phase_epoch_mean_losses(stats, "train")
+    validate_epoch_losses = _phase_epoch_mean_losses(stats, "validate")
+
+    assert len(train_epoch_losses) == 12, train_epoch_losses
+    assert len(validate_epoch_losses) == 12, validate_epoch_losses
+    _assert_zero_initialized_two_class_batch_loss(
+        train_epoch_losses[0],
+        batch_size=batch_size,
+        name="queued repeated-batch initial train epoch",
+    )
+    _assert_loss_decreased(
+        train_epoch_losses,
+        name="queued deterministic repeated-batch train",
+        tail_window=3,
+        required_fraction=0.50,
+    )
+    _assert_loss_decreased(
+        validate_epoch_losses,
+        name="queued deterministic repeated-batch validate",
+        tail_window=3,
+        required_fraction=0.50,
+    )
 
 
 def test_debug_synchronous_trainer_fits_iris_fp32_mlp_with_global_optimizer(capfd):
