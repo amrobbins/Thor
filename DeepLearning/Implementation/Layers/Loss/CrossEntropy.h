@@ -30,6 +30,8 @@ class CrossEntropy : public Loss {
 
     void backProp(std::optional<Tensor> labels, std::optional<Tensor> normalizedPredictions, std::optional<Tensor> lossGradient, Stream stream) override;
 
+    std::optional<Tensor> createErrorOutputTensor(bool backPropagateError) override;
+
     std::string getType() override;
 
    private:

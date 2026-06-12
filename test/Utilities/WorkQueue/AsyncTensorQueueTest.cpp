@@ -154,3 +154,37 @@ TEST(AsyncTensorQueue, nonblockingApiWorks) {
         ASSERT_EQ(queue.capacity(), 100);
     }
 }
+
+TEST(AsyncTensorQueue, bufferIsNotReusedUntilConsumerMarksUnloadComplete) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorDescriptor tensorDescriptor(DataType::FP32, {1});
+    AsyncTensorQueue queue(1, tensorDescriptor, cpuPlacement);
+
+    queue.open();
+
+    Tensor producerBuffer;
+    ASSERT_TRUE(queue.getBufferToLoad(producerBuffer));
+    float *producerMem = producerBuffer.getMemPtr<float>();
+    producerMem[0] = 123.0f;
+    ASSERT_TRUE(queue.bufferLoaded(producerBuffer));
+
+    Tensor consumerBuffer;
+    ASSERT_TRUE(queue.getBufferToUnload(consumerBuffer));
+    float *consumerMem = consumerBuffer.getMemPtr<float>();
+    ASSERT_EQ(consumerMem[0], 123.0f);
+
+    Tensor shouldNotBeReused;
+    ASSERT_FALSE(queue.tryGetBufferToLoad(shouldNotBeReused))
+        << "A one-slot queue must not recycle a tensor while a consumer/host callback still owns it.";
+
+    consumerMem[0] = 456.0f;
+    ASSERT_TRUE(queue.bufferUnloaded(consumerBuffer));
+
+    Tensor recycledBuffer;
+    ASSERT_TRUE(queue.getBufferToLoad(recycledBuffer));
+    float *recycledMem = recycledBuffer.getMemPtr<float>();
+    ASSERT_EQ(recycledMem[0], 456.0f);
+    ASSERT_EQ(recycledMem, consumerMem);
+
+    queue.close();
+}

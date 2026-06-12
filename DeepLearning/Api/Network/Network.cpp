@@ -187,6 +187,8 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
                                           const bool inferenceOnly) {
     ThorImplementation::StampedNetwork stampedNetwork;
     stampedNetwork.gpuNum = gpuNum;
+    stampedNetwork.floatingPointOperationsPerExampleForward = 0;
+    stampedNetwork.floatingPointOperationsPerExampleBackward = 0;
 
     // FIXME: check for non-first instance to use shared weights
     // FIXME: support other gpus
@@ -244,7 +246,7 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
             shared_ptr<ThorImplementation::Layer> implementationLayer = stampedNetwork.apiLayerToPhysicalLayerShared[apiLayer->getId()];
             apiLayer->compile(implementationLayer);
             stampedNetwork.floatingPointOperationsPerExampleForward += implementationLayer->floatingPointOperationsPerExampleForward();
-            stampedNetwork.floatingPointOperationsPerExampleBackward += implementationLayer->floatingPointOperationsPerExampleForward();
+            stampedNetwork.floatingPointOperationsPerExampleBackward += implementationLayer->floatingPointOperationsPerExampleBackward();
         }
 
         // Now that all layers are constructed, connected and compiled, initialize all layers

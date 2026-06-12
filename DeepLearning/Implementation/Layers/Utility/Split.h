@@ -231,7 +231,7 @@ class Split : public MultiConnectionLayer {
                           streams[0]);
 
         // Expecting to get tail-recursion optimization of -O3 so that stack space does not build up here.
-        previousLayers[0].value()->backward(errorOutputs[0]);
+        previousLayers[0].value()->backward(errorOutputs[0], batchSize);
     }
 
     void cleanup() override {

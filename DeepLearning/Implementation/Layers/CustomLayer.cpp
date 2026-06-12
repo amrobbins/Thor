@@ -474,14 +474,12 @@ void CustomLayer::recordEffectiveParameterBatchSizeForApplication(uint32_t appli
 }
 
 bool CustomLayer::canFuseOptimizerUpdatesForApplication(uint32_t applicationIndex) const {
-    if (applicationIndex >= applications.size()) {
-        return false;
-    }
-
-    // A fused optimizer update consumes the parameter gradient immediately instead of materializing it.
-    // That is only valid when there is one application input connection into the CustomLayer, because
-    // multiple connections/applications need an accumulation boundary before the shared parameter update.
-    return applications.size() == 1 && inputNames.size() == 1;
+    // Dense optimizer-update fusion is only correct for the simple single-application,
+    // single-input CustomLayer surface.  Multi-application and multi-input layers share
+    // materialized gradient buffers across applications/ports and need the explicit
+    // overwrite-then-accumulate path below so effective batch-size accounting and shared
+    // parameter accumulation stay well-defined.
+    return applicationIndex == 0 && applications.size() == 1 && inputNames.size() == 1;
 }
 
 bool CustomLayer::applicationHasFusedCustomLossGradient(uint32_t applicationIndex) const {
@@ -1873,17 +1871,22 @@ void CustomLayer::accumulateWeightsGradientForApplication(uint32_t applicationIn
     }
     ApplicationState& app = applications[applicationIndex];
 
-    if (clearGradientFirst) {
-        if (app.backwardWeightsClearStamped != nullptr) {
-            app.backwardWeightsClearStamped->run();
-        }
-        if (app.backwardWeightsFusedOptimizerUpdateStamped != nullptr) {
-            app.backwardWeightsFusedOptimizerUpdateStamped->run(buildFusedOptimizerRuntimeScalars(applicationIndex, batchSize));
-        }
-        return;
+    // backwardWeightsClearStamped is an overwrite-mode backward-gradient stamp, not a zero-only
+    // memset.  It computes this application's materialized parameter gradient and writes it into
+    // the dense gradient buffer.  Therefore the first materialized application in a backward pass
+    // must run the clear stamp instead of the accumulate stamp; running both for the same
+    // application double-counts the gradient.  Later applications use the accumulate stamp to add
+    // their contribution to the buffer established by the first application.
+    const bool ranMaterializedOverwrite = clearGradientFirst && app.backwardWeightsClearStamped != nullptr;
+    if (ranMaterializedOverwrite) {
+        app.backwardWeightsClearStamped->run();
     }
 
-    if (app.backwardWeightsAccumulateStamped != nullptr) {
+    if (app.backwardWeightsFusedOptimizerUpdateStamped != nullptr) {
+        app.backwardWeightsFusedOptimizerUpdateStamped->run(buildFusedOptimizerRuntimeScalars(applicationIndex, batchSize));
+    }
+
+    if (!ranMaterializedOverwrite && app.backwardWeightsAccumulateStamped != nullptr) {
         app.backwardWeightsAccumulateStamped->run();
     }
 }
@@ -1917,6 +1920,42 @@ uint64_t CustomLayer::flopCountBackward() {
         }
     }
     return flops;
+}
+
+uint64_t CustomLayer::batchSizeForFlopEstimate() const {
+    auto batchFromTensor = [](const Tensor& tensor) -> uint64_t {
+        std::vector<uint64_t> dimensions = tensor.getDescriptor().getDimensions();
+        if (!dimensions.empty() && dimensions[0] > 0) {
+            return dimensions[0];
+        }
+        return 0;
+    };
+
+    for (const ApplicationState& app : applications) {
+        for (const auto& nameAndTensor : app.forwardOutputsByName) {
+            const uint64_t batchSize = batchFromTensor(nameAndTensor.second);
+            if (batchSize > 0) {
+                return batchSize;
+            }
+        }
+        for (const auto& nameAndTensor : app.forwardInputsByName) {
+            const uint64_t batchSize = batchFromTensor(nameAndTensor.second);
+            if (batchSize > 0) {
+                return batchSize;
+            }
+        }
+    }
+    return 1;
+}
+
+uint64_t CustomLayer::floatingPointOperationsPerExampleForward() {
+    const uint64_t batchSize = batchSizeForFlopEstimate();
+    return batchSize == 0 ? 0 : flopCountForward() / batchSize;
+}
+
+uint64_t CustomLayer::floatingPointOperationsPerExampleBackward() {
+    const uint64_t batchSize = batchSizeForFlopEstimate();
+    return batchSize == 0 ? 0 : flopCountBackward() / batchSize;
 }
 
 bool CustomLayer::isBackPropStub() {

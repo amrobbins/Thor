@@ -20,11 +20,26 @@ CrossEntropy::CrossEntropy(CrossEntropyLossType crossEntropyLossType, DataType l
 
 CrossEntropy::~CrossEntropy() {}
 
+std::optional<Tensor> CrossEntropy::createErrorOutputTensor(bool backPropagateError) {
+    // CrossEntropy computes dLoss/dPredictions, so the error tensor must match the prediction
+    // tensor descriptor.  This keeps the normal Layer connection invariant intact and lets the
+    // same loss implementation train FP16 and FP32 prediction graphs.
+    if (backPropagateError && !isInferenceOnly()) {
+        THOR_THROW_IF_FALSE(featureInput.has_value());
+        return featureInput.value().clone();
+    }
+    return std::nullopt;
+}
+
 void CrossEntropy::compileImpl() {
     Layer::compileImpl();
     THOR_THROW_IF_FALSE(featureInput.has_value());
     THOR_THROW_IF_FALSE(featureOutput.has_value());
     THOR_THROW_IF_FALSE(featureInput.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDataType() == DataType::FP16 ||
+                        featureInput.value().getDescriptor().getDataType() == DataType::FP32);
+    THOR_THROW_IF_FALSE(featureOutput.value().getDescriptor().getDataType() == DataType::FP16 ||
+                        featureOutput.value().getDescriptor().getDataType() == DataType::FP32);
     if (crossEntropyLossType == CrossEntropyLossType::BINARY) {
         bool oneDimension = (featureInput.value().getDimensions().size() == 1);
         bool twoDimensionsSecondIsSingleton =
@@ -40,7 +55,7 @@ void CrossEntropy::compileImpl() {
         THOR_THROW_IF_FALSE(errorOutput.value().isInitialized());
         THOR_THROW_IF_FALSE(errorOutput.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
         THOR_THROW_IF_FALSE(errorOutput.value().getPlacement().getDeviceNum() == featureInput.value().getPlacement().getDeviceNum());
-        THOR_THROW_IF_FALSE(errorOutput.value().getDescriptor().getDataType() == DataType::FP16);
+        THOR_THROW_IF_FALSE(errorOutput.value().getDescriptor() == featureInput.value().getDescriptor());
 
         THOR_THROW_IF_FALSE(labelsInput.has_value());
         THOR_THROW_IF_FALSE(labelsInput.value().isInitialized());
@@ -80,7 +95,8 @@ void CrossEntropy::infer(std::optional<Tensor> predictions, std::optional<Tensor
     ScopedGpu scopedGpu(predictions.value().getPlacement().getDeviceNum());
 
     THOR_THROW_IF_FALSE(compiled);
-    THOR_THROW_IF_FALSE(predictions.value().getDescriptor().getDataType() == DataType::FP16);
+    THOR_THROW_IF_FALSE(predictions.value().getDescriptor().getDataType() == DataType::FP16 ||
+                        predictions.value().getDescriptor().getDataType() == DataType::FP32);
 
     stream.waitEvent(labelsStream.putEvent());
 
@@ -292,7 +308,7 @@ void CrossEntropy::launchCrossEntropyWithFP32PredictionsAndFP16Loss() {
         launchElementWiseCrossEntropyLoss<uint8_t, float, half>(labelsInput.value().getMemPtr(),
                                                                 featureInput.value().getMemPtr(),
                                                                 featureOutput.value().getMemPtr(),
-                                                                isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
+                                                                isInferenceOnly() ? nullptr : (float *)errorOutput.value().getMemPtr(),
                                                                 numClasses,
                                                                 batchSize,
                                                                 !isInferenceOnly(),
@@ -304,7 +320,7 @@ void CrossEntropy::launchCrossEntropyWithFP32PredictionsAndFP16Loss() {
         launchElementWiseCrossEntropyLoss<uint16_t, float, half>(labelsInput.value().getMemPtr(),
                                                                  featureInput.value().getMemPtr(),
                                                                  featureOutput.value().getMemPtr(),
-                                                                 isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
+                                                                 isInferenceOnly() ? nullptr : (float *)errorOutput.value().getMemPtr(),
                                                                  numClasses,
                                                                  batchSize,
                                                                  !isInferenceOnly(),
@@ -316,7 +332,7 @@ void CrossEntropy::launchCrossEntropyWithFP32PredictionsAndFP16Loss() {
         launchElementWiseCrossEntropyLoss<uint32_t, float, half>(labelsInput.value().getMemPtr(),
                                                                  featureInput.value().getMemPtr(),
                                                                  featureOutput.value().getMemPtr(),
-                                                                 isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
+                                                                 isInferenceOnly() ? nullptr : (float *)errorOutput.value().getMemPtr(),
                                                                  numClasses,
                                                                  batchSize,
                                                                  !isInferenceOnly(),
@@ -328,7 +344,7 @@ void CrossEntropy::launchCrossEntropyWithFP32PredictionsAndFP16Loss() {
         launchElementWiseCrossEntropyLoss<half, float, half>(labelsInput.value().getMemPtr(),
                                                              featureInput.value().getMemPtr(),
                                                              featureOutput.value().getMemPtr(),
-                                                             isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
+                                                             isInferenceOnly() ? nullptr : (float *)errorOutput.value().getMemPtr(),
                                                              numClasses,
                                                              batchSize,
                                                              !isInferenceOnly(),
@@ -340,7 +356,7 @@ void CrossEntropy::launchCrossEntropyWithFP32PredictionsAndFP16Loss() {
         launchElementWiseCrossEntropyLoss<float, float, half>(labelsInput.value().getMemPtr(),
                                                               featureInput.value().getMemPtr(),
                                                               featureOutput.value().getMemPtr(),
-                                                              isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
+                                                              isInferenceOnly() ? nullptr : (float *)errorOutput.value().getMemPtr(),
                                                               numClasses,
                                                               batchSize,
                                                               !isInferenceOnly(),
@@ -352,7 +368,7 @@ void CrossEntropy::launchCrossEntropyWithFP32PredictionsAndFP16Loss() {
         launchElementWiseCrossEntropyLoss<bool, float, half>(labelsInput.value().getMemPtr(),
                                                              featureInput.value().getMemPtr(),
                                                              featureOutput.value().getMemPtr(),
-                                                             isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
+                                                             isInferenceOnly() ? nullptr : (float *)errorOutput.value().getMemPtr(),
                                                              numClasses,
                                                              batchSize,
                                                              !isInferenceOnly(),
@@ -373,7 +389,7 @@ void CrossEntropy::launchCrossEntropyWithFP32PredictionsAndFP32Loss() {
         launchElementWiseCrossEntropyLoss<uint8_t, float, float>(labelsInput.value().getMemPtr(),
                                                                  featureInput.value().getMemPtr(),
                                                                  featureOutput.value().getMemPtr(),
-                                                                 isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
+                                                                 isInferenceOnly() ? nullptr : (float *)errorOutput.value().getMemPtr(),
                                                                  numClasses,
                                                                  batchSize,
                                                                  !isInferenceOnly(),
@@ -385,7 +401,7 @@ void CrossEntropy::launchCrossEntropyWithFP32PredictionsAndFP32Loss() {
         launchElementWiseCrossEntropyLoss<uint16_t, float, float>(labelsInput.value().getMemPtr(),
                                                                   featureInput.value().getMemPtr(),
                                                                   featureOutput.value().getMemPtr(),
-                                                                  isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
+                                                                  isInferenceOnly() ? nullptr : (float *)errorOutput.value().getMemPtr(),
                                                                   numClasses,
                                                                   batchSize,
                                                                   !isInferenceOnly(),
@@ -397,7 +413,7 @@ void CrossEntropy::launchCrossEntropyWithFP32PredictionsAndFP32Loss() {
         launchElementWiseCrossEntropyLoss<uint32_t, float, float>(labelsInput.value().getMemPtr(),
                                                                   featureInput.value().getMemPtr(),
                                                                   featureOutput.value().getMemPtr(),
-                                                                  isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
+                                                                  isInferenceOnly() ? nullptr : (float *)errorOutput.value().getMemPtr(),
                                                                   numClasses,
                                                                   batchSize,
                                                                   !isInferenceOnly(),
@@ -409,7 +425,7 @@ void CrossEntropy::launchCrossEntropyWithFP32PredictionsAndFP32Loss() {
         launchElementWiseCrossEntropyLoss<half, float, float>(labelsInput.value().getMemPtr(),
                                                               featureInput.value().getMemPtr(),
                                                               featureOutput.value().getMemPtr(),
-                                                              isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
+                                                              isInferenceOnly() ? nullptr : (float *)errorOutput.value().getMemPtr(),
                                                               numClasses,
                                                               batchSize,
                                                               !isInferenceOnly(),
@@ -421,7 +437,7 @@ void CrossEntropy::launchCrossEntropyWithFP32PredictionsAndFP32Loss() {
         launchElementWiseCrossEntropyLoss<float, float, float>(labelsInput.value().getMemPtr(),
                                                                featureInput.value().getMemPtr(),
                                                                featureOutput.value().getMemPtr(),
-                                                               isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
+                                                               isInferenceOnly() ? nullptr : (float *)errorOutput.value().getMemPtr(),
                                                                numClasses,
                                                                batchSize,
                                                                !isInferenceOnly(),
@@ -433,7 +449,7 @@ void CrossEntropy::launchCrossEntropyWithFP32PredictionsAndFP32Loss() {
         launchElementWiseCrossEntropyLoss<bool, float, float>(labelsInput.value().getMemPtr(),
                                                               featureInput.value().getMemPtr(),
                                                               featureOutput.value().getMemPtr(),
-                                                              isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
+                                                              isInferenceOnly() ? nullptr : (float *)errorOutput.value().getMemPtr(),
                                                               numClasses,
                                                               batchSize,
                                                               !isInferenceOnly(),

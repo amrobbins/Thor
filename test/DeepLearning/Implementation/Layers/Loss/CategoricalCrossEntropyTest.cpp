@@ -25,6 +25,83 @@ using namespace std;
 
 using namespace ThorImplementation;
 
+
+TEST(CategoricalCrossEntropy, ErrorOutputMatchesPredictionDtypeAndValues) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+
+    for (DataType predictionDataType : {DataType::FP16, DataType::FP32}) {
+        for (DataType lossDataType : {DataType::FP16, DataType::FP32}) {
+            TensorDescriptor predictionsDescriptor(predictionDataType, {2, 3});
+            TensorDescriptor labelsDescriptor(DataType::FP32, {2, 3});
+            Tensor predictionsCpu(cpuPlacement, predictionsDescriptor);
+            Tensor labelsCpu(cpuPlacement, labelsDescriptor);
+            Tensor predictionsGpu(gpuPlacement, predictionsDescriptor);
+            Tensor labelsGpu(gpuPlacement, labelsDescriptor);
+            Tensor errorCpu(cpuPlacement, predictionsDescriptor);
+
+            const float predictions[] = {0.70f, 0.20f, 0.10f, 0.10f, 0.30f, 0.60f};
+            const float labels[] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+            if (predictionDataType == DataType::FP16) {
+                half *predictionMem = (half *)predictionsCpu.getMemPtr();
+                for (uint32_t i = 0; i < 6; ++i)
+                    predictionMem[i] = static_cast<half>(predictions[i]);
+            } else {
+                float *predictionMem = (float *)predictionsCpu.getMemPtr();
+                for (uint32_t i = 0; i < 6; ++i)
+                    predictionMem[i] = predictions[i];
+            }
+            float *labelMem = (float *)labelsCpu.getMemPtr();
+            for (uint32_t i = 0; i < 6; ++i)
+                labelMem[i] = labels[i];
+
+            vector<shared_ptr<Layer>> layers;
+            shared_ptr<NetworkInput> predictionsInput = make_shared<NetworkInput>(predictionsGpu);
+            layers.push_back(predictionsInput);
+            shared_ptr<NoOpLayer> noOpLayer = make_shared<NoOpLayer>();
+            layers.push_back(noOpLayer);
+            shared_ptr<NetworkInput> labelsInput = make_shared<NetworkInput>(labelsGpu);
+            layers.push_back(labelsInput);
+            shared_ptr<CrossEntropy> crossEntropy =
+                make_shared<CrossEntropy>(CrossEntropyLossType::CATEGORICAL, lossDataType, false);
+            layers.push_back(crossEntropy);
+            shared_ptr<NetworkOutput> lossOutput = make_shared<NetworkOutput>(gpuPlacement);
+            layers.push_back(lossOutput);
+
+            Stream stream = predictionsInput->getStream();
+            Stream labelsStream = labelsInput->getStream();
+
+            LayerTestHelper::connectTwoLayers(predictionsInput, noOpLayer);
+            LayerTestHelper::connectTwoLayers(noOpLayer, crossEntropy, 0, (int)Loss::ConnectionType::FORWARD_BACKWARD);
+            LayerTestHelper::connectTwoLayers(labelsInput, crossEntropy, 0, (int)Loss::ConnectionType::LABELS);
+            LayerTestHelper::connectTwoLayers(crossEntropy, lossOutput, 0, 0);
+            LayerTestHelper::initializeNetwork(layers);
+
+            ASSERT_TRUE(crossEntropy->getErrorOutput().has_value());
+            EXPECT_EQ(crossEntropy->getErrorOutput().value().getDescriptor(), predictionsDescriptor);
+            ASSERT_TRUE(noOpLayer->getErrorInput().has_value());
+            EXPECT_EQ(noOpLayer->getErrorInput().value().getDescriptor(), predictionsDescriptor);
+
+            predictionsInput->forward(predictionsCpu, false);
+            labelsInput->forward(labelsCpu, false);
+            labelsStream.waitEvent(lossOutput->getOutputReadyEvent());
+            errorCpu.copyFromAsync(crossEntropy->getErrorOutput().value(), labelsStream);
+            labelsStream.synchronize();
+            stream.synchronize();
+
+            for (uint32_t i = 0; i < 6; ++i) {
+                const float expected = Loss::getLossScalingFactor() * (predictions[i] - labels[i]);
+                const float actual = predictionDataType == DataType::FP16 ?
+                                         static_cast<float>(((half *)errorCpu.getMemPtr())[i]) :
+                                         ((float *)errorCpu.getMemPtr())[i];
+                EXPECT_NEAR(actual, expected, predictionDataType == DataType::FP16 ? 0.1f : 1.0e-5f);
+            }
+
+            LayerTestHelper::tearDownNetwork(layers);
+        }
+    }
+}
+
 TEST(CategoricalCrossEntropy, ComputesCorrectElementWiseResult_oneHotLabels) {
     srand(time(NULL));
 

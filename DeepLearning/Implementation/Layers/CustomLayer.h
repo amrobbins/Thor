@@ -70,6 +70,8 @@ class CustomLayer : public TrainableLayer {
 
     uint64_t flopCountForward() override;
     uint64_t flopCountBackward() override;
+    uint64_t floatingPointOperationsPerExampleForward() override;
+    uint64_t floatingPointOperationsPerExampleBackward() override;
 
     void setLayerName(const std::string& name) { customLayerName = name; }
     std::string getLayerType() override { return "CustomLayer<" + customLayerName + ">"; }
@@ -177,6 +179,7 @@ class CustomLayer : public TrainableLayer {
         const std::unordered_map<std::string, Tensor>& optimizerUpdateInputs);
     std::unordered_map<std::string, float> buildFusedOptimizerRuntimeScalars(uint32_t applicationIndex, uint32_t batchSize);
     void accumulateWeightsGradientForApplication(uint32_t applicationIndex, bool clearGradientFirst, uint32_t batchSize);
+    uint64_t batchSizeForFlopEstimate() const;
 
     PreparedDynamicExpression::TensorMap buildForwardInputs(uint32_t applicationIndex);
     PreparedDynamicExpression::TensorMap buildForwardOutputs(uint32_t applicationIndex) const;
