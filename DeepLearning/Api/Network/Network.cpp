@@ -976,6 +976,30 @@ void Network::addToNetwork(Optimizer *optimizer) {
 
 shared_ptr<Optimizer> Network::getDefaultOptimizer() { return defaultOptimizer; }
 
+void Network::setDefaultOptimizer(std::shared_ptr<Optimizer> optimizer) {
+    THOR_THROW_IF_FALSE(optimizer != nullptr);
+    addToNetwork(optimizer.get());
+}
+
+bool Network::allTrainingEnabledParametersHaveOptimizers() const {
+    for (const auto& trainableLayer : allTrainableLayersInNetwork) {
+        if (trainableLayer != nullptr && !trainableLayer->hasOptimizer()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::vector<Tensor> Network::getLossRootTensors() const {
+    std::vector<Tensor> result;
+    for (const std::shared_ptr<Layer>& layer : allLayersInNetwork) {
+        std::shared_ptr<Loss> loss = std::dynamic_pointer_cast<Loss>(layer);
+        if (loss != nullptr) {
+            result.push_back(loss->getLoss());
+        }
+    }
+    return result;
+}
 
 std::vector<ParameterReference> Network::getTrainableParameterReferences(bool trainingEnabledOnly) const {
     std::vector<ParameterReference> result;

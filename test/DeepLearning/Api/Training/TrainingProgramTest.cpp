@@ -7,6 +7,7 @@
 #include "DeepLearning/Api/Optimizers/Sgd.h"
 #include "DeepLearning/Api/Parameter/ParameterReference.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
+#include "DeepLearning/Api/Training/ExecutableTrainingPlan.h"
 #include "DeepLearning/Api/Training/StepExecutable.h"
 #include "DeepLearning/Api/Training/TrainingInputBinding.h"
 #include "DeepLearning/Api/Training/TrainingProgram.h"
@@ -123,11 +124,21 @@ TEST(TrainingProgramApi, TrainingStepRejectsDuplicateUpdateParameters) {
     EXPECT_THROW(TrainingStep("bad", {loss}, sgd, {weights, weights}), std::runtime_error);
 }
 
-TEST(TrainingProgramApi, TrainingStepRejectsUpdatesWithoutOptimizer) {
+TEST(TrainingProgramApi, TrainingStepAllowsUpdatesWithoutStepOptimizerForPerParameterOptimizers) {
     Tensor loss(DataType::FP32, {1});
     ParameterReference weights(123, "weights");
 
-    EXPECT_THROW(TrainingStep("bad", {loss}, nullptr, {weights}), std::runtime_error);
+    TrainingStep step("per_parameter", {loss}, nullptr, {weights});
+    EXPECT_TRUE(step.isInitialized());
+    EXPECT_EQ(step.getOptimizer(), nullptr);
+
+    nlohmann::json j = step.architectureJson();
+    EXPECT_FALSE(j.contains("optimizer"));
+
+    TrainingStep restored = TrainingStep::deserialize(j);
+    EXPECT_TRUE(restored.isInitialized());
+    EXPECT_EQ(restored.getOptimizer(), nullptr);
+    EXPECT_EQ(restored.getUpdateParameters(), step.getUpdateParameters());
 }
 
 TEST(TrainingProgramApi, TrainingProgramKeepsOrderedUniqueSteps) {
@@ -295,6 +306,42 @@ TEST(TrainingProgramApi, PlacedNetworkResolvesParameterReferencesAndStepExecutab
     std::vector<StepExecutable> executables = program.compile(*placed);
     ASSERT_EQ(executables.size(), 1u);
     EXPECT_EQ(executables[0].getName(), "generator");
+
+    ExecutableTrainingPlan plan = ExecutableTrainingPlan::compile(program, *placed);
+    EXPECT_TRUE(plan.isInitialized());
+    EXPECT_EQ(plan.getNumSteps(), 1u);
+    EXPECT_EQ(plan.getTotalStepRepeatsPerIteration(), 3u);
+    EXPECT_EQ(plan.getRequiredBatchInputNames(), (std::vector<std::string>{"labels", "z_generator"}));
+    EXPECT_EQ(plan.getStep(0).getName(), "generator");
+    EXPECT_THROW(plan.assertLegacyLocalExecutorCompatible(), std::runtime_error);
+    EXPECT_THROW(plan.validateNativeQueuedExecutorCompatible(network.getTrainableParameterReferences()), std::runtime_error);
+
+    ParameterReference biases = fc.getParameterReference("biases");
+    TrainingStep nativeStep("native",
+                            {lossRoot},
+                            sgd,
+                            {weights, biases},
+                            1,
+                            TrainingStep::GradientClearPolicy::CLEAR_BEFORE_STEP,
+                            {TrainingInputBinding("input", "z_generator")});
+    ExecutableTrainingPlan nativePlan = ExecutableTrainingPlan::compile(TrainingProgram({nativeStep}), *placed);
+    EXPECT_NO_THROW(nativePlan.validateNativeQueuedExecutorCompatible(network.getTrainableParameterReferences()));
+    EXPECT_THROW(nativePlan.assertLegacyLocalExecutorCompatible(), std::runtime_error);
+
+    TrainingStep perParameterOptimizerStep("per_parameter", {lossRoot}, nullptr, {weights, biases});
+    ExecutableTrainingPlan perParameterOptimizerPlan = ExecutableTrainingPlan::compile(TrainingProgram({perParameterOptimizerStep}), *placed);
+    EXPECT_EQ(perParameterOptimizerPlan.getStep(0).getOptimizer(), nullptr);
+    EXPECT_NO_THROW(perParameterOptimizerPlan.assertLegacyLocalExecutorCompatible());
+    EXPECT_NO_THROW(perParameterOptimizerPlan.validateNativeQueuedExecutorCompatible(network.getTrainableParameterReferences()));
+
+    TrainingStep legacyStep("legacy", {lossRoot}, sgd, {weights, biases});
+    ExecutableTrainingPlan legacyPlan = ExecutableTrainingPlan::compile(TrainingProgram({legacyStep}), *placed);
+    EXPECT_NO_THROW(legacyPlan.assertLegacyLocalExecutorCompatible());
+    EXPECT_NO_THROW(legacyPlan.validateNativeQueuedExecutorCompatible(network.getTrainableParameterReferences()));
+    nlohmann::json planJson = legacyPlan.architectureJson();
+    EXPECT_EQ(planJson.at("version").get<std::string>(), "1.0.0");
+    EXPECT_EQ(planJson.at("step_count").get<uint64_t>(), 1u);
+    EXPECT_EQ(planJson.at("total_step_repeats_per_iteration").get<uint64_t>(), 1u);
 
     EXPECT_THROW(placed->resolveParameterReference(ParameterReference(fc.getId(), "missing")), std::runtime_error);
     EXPECT_THROW(StepExecutable(TrainingStep("bad", {lossRoot}, sgd, {ParameterReference(999999, "weights")}), *placed), std::runtime_error);

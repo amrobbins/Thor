@@ -6,6 +6,8 @@
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
+#include "DeepLearning/Api/Training/ExecutableTrainingPlan.h"
+#include "DeepLearning/Api/Training/TrainingProgram.h"
 #include "DeepLearning/Api/Training/Observers/LineStatsReporter.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
@@ -71,9 +73,12 @@ class LocalExecutor : public Executor {
     std::shared_ptr<PlacedNetwork> placedNetwork;
     std::shared_ptr<Loader> loader;
     std::shared_ptr<Optimizer> optimizer;
+    std::optional<ExecutableTrainingPlan> executableTrainingPlan{};
     std::vector<std::shared_ptr<TrainingObserver>> observers;
     bool statsEnabled = true;
     double statsIntervalSeconds = 10.0;
+    uint64_t maxInFlightBatches = 32;
+    bool synchronizeAfterEveryBatch = false;
 
     //    std::vector<ThorImplementation::StampedNetwork> stampedNetworks;
 
@@ -95,6 +100,7 @@ class LocalExecutor : public Executor {
     void waitForBatchDataUnlocked(std::unique_lock<std::mutex>& lck);
 
     void trainBatches(uint64_t initialEpochBatchNum, uint64_t batches, ExampleType exampleType, std::set<std::string> tensorsToReturn);
+    uint64_t getOutstandingBatchCount() const;
     void emitTrainingEvent(const TrainingEvent& event);
 
     static void CUDART_CB bufferStampTensors(void* data);
@@ -123,6 +129,12 @@ class LocalExecutor::Builder {
         return *this;
     }
 
+    LocalExecutor::Builder trainingProgram(std::optional<TrainingProgram> trainingProgram) {
+        THOR_THROW_IF_FALSE(!this->trainingProgram_.has_value());
+        this->trainingProgram_ = std::move(trainingProgram);
+        return *this;
+    }
+
     LocalExecutor::Builder observer(std::shared_ptr<TrainingObserver> observer) {
         THOR_THROW_IF_FALSE(observer);
         if (!observers_.has_value()) {
@@ -143,6 +155,17 @@ class LocalExecutor::Builder {
         return *this;
     }
 
+    LocalExecutor::Builder maxInFlightBatches(uint64_t maxInFlightBatches) {
+        THOR_THROW_IF_FALSE(maxInFlightBatches >= 1);
+        maxInFlightBatches_ = maxInFlightBatches;
+        return *this;
+    }
+
+    LocalExecutor::Builder synchronizeAfterEveryBatch(bool synchronizeAfterEveryBatch) {
+        synchronizeAfterEveryBatch_ = synchronizeAfterEveryBatch;
+        return *this;
+    }
+
     LocalExecutor::Builder outputDirectory(std::string _outputDirectory) {
         THOR_THROW_IF_FALSE(!this->_outputDirectory.has_value());
         if (_outputDirectory.empty())
@@ -156,9 +179,12 @@ class LocalExecutor::Builder {
     Network* _network;
     std::shared_ptr<Loader> _loader;
     std::shared_ptr<Optimizer> _optimizer;
+    std::optional<TrainingProgram> trainingProgram_;
     std::optional<std::vector<std::shared_ptr<TrainingObserver>>> observers_;
     bool statsEnabled_ = true;
     double statsIntervalSeconds_ = 10.0;
+    uint64_t maxInFlightBatches_ = 32;
+    bool synchronizeAfterEveryBatch_ = false;
     std::optional<std::string> _outputDirectory;
 };
 

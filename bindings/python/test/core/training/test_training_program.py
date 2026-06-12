@@ -80,11 +80,20 @@ def test_training_program_rejects_duplicate_step_names():
         program.add_step(step)
 
 
-def test_training_step_rejects_updates_without_optimizer():
+def test_training_step_allows_updates_without_step_optimizer_for_parameter_overrides():
     loss = thor.Tensor([1], thor.DataType.fp32)
+    weights = thor.ParameterReference(1, "weights")
 
-    with pytest.raises(RuntimeError, match="requires an optimizer"):
-        thor.training.TrainingStep("bad", [loss], update_parameters=[thor.ParameterReference(1, "weights")])
+    step = thor.training.TrainingStep("per_parameter", [loss], update_parameters=[weights])
+
+    assert step.get_optimizer() is None
+    assert step.get_update_parameters() == [weights]
+    arch = json.loads(step.get_architecture_json())
+    assert "optimizer" not in arch
+
+    restored = thor.training.TrainingStep.deserialize(step.get_architecture_json())
+    assert restored.get_optimizer() is None
+    assert restored.get_update_parameters() == [weights]
 
 
 def test_training_program_rejects_empty_programs():

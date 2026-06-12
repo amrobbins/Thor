@@ -55,10 +55,6 @@ void TrainingStep::validate() const {
                                      std::to_string(parameter.getParameterizableId()) + " parameter '" + parameter.getParameterName() + "'.");
         }
     }
-    if (!updateParameters.empty() && optimizer == nullptr) {
-        throw std::runtime_error("TrainingStep with update parameters requires an optimizer.");
-    }
-
     std::set<std::string> seenNetworkInputNames;
     for (const TrainingInputBinding& inputBinding : inputBindings) {
         if (!inputBinding.isInitialized()) {

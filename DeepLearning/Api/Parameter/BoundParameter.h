@@ -14,6 +14,7 @@ class StampedNetwork;
 }
 
 namespace Thor {
+class Optimizer;
 class ParameterSpecification;
 class PlacedNetwork;
 
@@ -26,6 +27,7 @@ class BoundParameter {
     [[nodiscard]] bool isTrainingEnabled() const;
     void setTrainingEnabled(bool enabled);
     [[nodiscard]] bool hasOptimizer() const;
+    [[nodiscard]] std::shared_ptr<Optimizer> getOptimizer() const;
 
     static nlohmann::json serialize(nlohmann::json parameterJson,
                                     std::shared_ptr<ParameterSpecification> parameterSpecification,
