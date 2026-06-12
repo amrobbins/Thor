@@ -2,6 +2,8 @@
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <set>
 #include <stdexcept>
@@ -30,6 +32,41 @@ std::string optimizerFusionNamePrefix(const std::string& parameterName) { return
 
 std::string optimizerFusionOutputName(const std::string& parameterName, const std::string& outputName) {
     return optimizerFusionNamePrefix(parameterName) + outputName;
+}
+
+bool trainingUpdateDiagnosticsEnabled() {
+    const char* value = std::getenv("THOR_TRAINING_UPDATE_DIAGNOSTICS");
+    return value != nullptr && value[0] != '\0' && std::string(value) != "0";
+}
+
+std::string joinNames(const std::vector<std::string>& names) {
+    std::string result;
+    for (const auto& name : names) {
+        if (!result.empty()) {
+            result += ",";
+        }
+        result += name;
+    }
+    if (result.empty()) {
+        return "<none>";
+    }
+    return result;
+}
+
+std::string joinNames(const std::unordered_set<std::string>& names) {
+    std::vector<std::string> sorted(names.begin(), names.end());
+    std::sort(sorted.begin(), sorted.end());
+    return joinNames(sorted);
+}
+
+std::string joinNames(const std::unordered_map<std::string, uint64_t>& batchSizes) {
+    std::vector<std::string> items;
+    items.reserve(batchSizes.size());
+    for (const auto& [name, batchSize] : batchSizes) {
+        items.push_back(name + "=" + std::to_string(batchSize));
+    }
+    std::sort(items.begin(), items.end());
+    return joinNames(items);
 }
 
 PreparedDynamicExpression::TensorMap filterTensorInputsForPhysicalOutputs(
@@ -465,11 +502,28 @@ void CustomLayer::recordEffectiveParameterBatchSizeForApplication(uint32_t appli
     }
 
     const ApplicationState& app = applications[applicationIndex];
+    if (trainingUpdateDiagnosticsEnabled()) {
+        std::fprintf(stderr,
+                     "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u record_effective_batch batch=%u active_parameters=%s fused_parameters=%s before=%s\n",
+                     getName().c_str(),
+                     applicationIndex,
+                     batchSize,
+                     joinNames(app.activeParameterTargetNames).c_str(),
+                     joinNames(app.optimizerUpdateFusedParameterNames).c_str(),
+                     joinNames(effectiveBatchSizeByParameterName).c_str());
+    }
     for (const std::string& parameterName : app.activeParameterTargetNames) {
         if (app.optimizerUpdateFusedParameterNames.contains(parameterName)) {
             continue;
         }
         effectiveBatchSizeByParameterName[parameterName] += batchSize;
+    }
+    if (trainingUpdateDiagnosticsEnabled()) {
+        std::fprintf(stderr,
+                     "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u record_effective_batch after=%s\n",
+                     getName().c_str(),
+                     applicationIndex,
+                     joinNames(effectiveBatchSizeByParameterName).c_str());
     }
 }
 
@@ -1410,7 +1464,31 @@ void CustomLayer::compileImpl() {
 
         std::vector<std::string> activeParameterTargets = app.forwardPrepared->equation().filterTensorInputNamesReachableFromOutputs(
             allTrainableParameterTargets, app.upstreamOutputNames);
+        if (activeParameterTargets.empty() && !allTrainableParameterTargets.empty() && !app.upstreamOutputNames.empty()) {
+            // The reachability filter is an optimization for reducing the set of
+            // parameter-gradient targets. It must not be allowed to turn a live
+            // backward path into a silent no-op optimizer update. Some expression
+            // lowerings can hide parameter reachability behind internal nodes that
+            // are not visible to the generic filter; in that case, conservatively
+            // stamp all trainable parameter gradients and let autodiff produce zeros
+            // for any truly-unreachable parameter.
+            activeParameterTargets = allTrainableParameterTargets;
+        }
         app.activeParameterTargetNames = std::unordered_set<std::string>(activeParameterTargets.begin(), activeParameterTargets.end());
+
+        if (trainingUpdateDiagnosticsEnabled()) {
+            std::fprintf(stderr,
+                         "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u compile_backward downstream=%d fused_loss=%d backward_additional_inputs=%zu upstream_outputs=%s all_trainable=%s active_trainable=%s gradient_update_stream=%d\n",
+                         getName().c_str(),
+                         applicationIndex,
+                         applicationHasAnyDownstreamBackprop(applicationIndex) ? 1 : 0,
+                         applicationHasFusedCustomLossGradient(applicationIndex) ? 1 : 0,
+                         app.backwardAdditionalInputsByName.size(),
+                         joinNames(app.upstreamOutputNames).c_str(),
+                         joinNames(allTrainableParameterTargets).c_str(),
+                         joinNames(app.activeParameterTargetNames).c_str(),
+                         gradientUpdateStream.has_value() ? 1 : 0);
+        }
 
         std::vector<std::string> fusedParameterTargets;
         if (canFuseOptimizerUpdatesForApplication(applicationIndex)) {
@@ -1456,6 +1534,18 @@ void CustomLayer::compileImpl() {
                 activeMaterializedParameterTargets.push_back(parameter->getName());
                 activeMaterializedParameterPreallocatedOutputs[gradName] = gradientTensor;
             }
+        }
+
+        if (trainingUpdateDiagnosticsEnabled()) {
+            std::fprintf(stderr,
+                         "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u compile_parameter_targets fused=%s all_materialized=%s active_materialized=%s materialized_preallocated_outputs=%zu active_preallocated_outputs=%zu\n",
+                         getName().c_str(),
+                         applicationIndex,
+                         joinNames(fusedParameterTargets).c_str(),
+                         joinNames(allMaterializedParameterTargets).c_str(),
+                         joinNames(activeMaterializedParameterTargets).c_str(),
+                         allMaterializedParameterPreallocatedOutputs.size(),
+                         activeMaterializedParameterPreallocatedOutputs.size());
         }
 
         if (!allTrainableParameterTargets.empty() && !app.backwardAdditionalInputsByName.empty()) {
@@ -1508,6 +1598,22 @@ void CustomLayer::compileImpl() {
                     }
                 }
             }
+        }
+    }
+
+    if (trainingUpdateDiagnosticsEnabled()) {
+        for (uint32_t applicationIndex = 0; applicationIndex < applications.size(); ++applicationIndex) {
+            const ApplicationState& app = applications[applicationIndex];
+            std::fprintf(stderr,
+                         "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u compiled_stamps backward_error=%d weights_clear=%d weights_accumulate=%d fused_update=%d expected_backward_errors=%zu num_backward_applications=%u\n",
+                         getName().c_str(),
+                         applicationIndex,
+                         app.backwardErrorStamped != nullptr ? 1 : 0,
+                         app.backwardWeightsClearStamped != nullptr ? 1 : 0,
+                         app.backwardWeightsAccumulateStamped != nullptr ? 1 : 0,
+                         app.backwardWeightsFusedOptimizerUpdateStamped != nullptr ? 1 : 0,
+                         app.expectedBackwardErrorInputTensorIds.size(),
+                         numBackwardApplications);
         }
     }
 
@@ -1576,6 +1682,7 @@ void CustomLayer::connectToNextLayer(Layer* nextLayer, int driverConnectionType,
     }
 
     nextLayers[flat] = nextLayer;
+
     errorInputs[flat] = nextLayer->connectToPreviousLayer(this,
                                                           featureOutputs[flat],
                                                           computeStream(decoded.applicationIndex),
@@ -1717,7 +1824,13 @@ void CustomLayer::forward(std::optional<Tensor> featureInput, bool validationPas
         // cycle. Reset this application as soon as its forward has been emitted so the next call can wait for a
         // fresh set of input arrivals and re-run the stamped expression. Training applications keep the existing
         // forward/backward cycle reset so gradients and parameter updates stay pass-scoped.
-        if (!applicationHasAnyDownstreamBackprop(applicationIndex)) {
+        // Validation/inference runs do not invoke backward(), even when the topology has
+        // downstream backprop connections for training.  A validation pass therefore
+        // must reset this application's forward-arrival state here; otherwise the next
+        // train/validation batch sees app.forwardRanThisPass from the validation pass,
+        // skips the forward computation, and downstream multi-input layers can receive
+        // a second labels tensor for a stale feature tensor.
+        if (validationPass || !applicationHasAnyDownstreamBackprop(applicationIndex)) {
             clearForwardArrivalBookkeeping(applicationIndex);
         }
     }
@@ -1737,6 +1850,17 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
     }
     THOR_THROW_IF_FALSE(!candidateApplications.empty());
 
+    if (trainingUpdateDiagnosticsEnabled()) {
+        std::fprintf(stderr,
+                     "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s backward_entry batch=%u candidate_applications=%zu is_start_of_backward=%d num_backward_applications=%u completed_this_pass=%u\n",
+                     getName().c_str(),
+                     batchSize,
+                     candidateApplications.size(),
+                     isStartOfBackward ? 1 : 0,
+                     numBackwardApplications,
+                     numBackwardApplicationsCompletedThisPass);
+    }
+
     if (isStartOfBackward) {
         clearBackwardArrivalBookkeeping();
         isStartOfBackward = false;
@@ -1755,7 +1879,27 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
         app.stillWaitingForBackwardErrorInputTensorIds.erase(tensorId);
 
         if (!app.stillWaitingForBackwardErrorInputTensorIds.empty()) {
+            if (trainingUpdateDiagnosticsEnabled()) {
+                std::fprintf(stderr,
+                             "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u backward_waiting remaining_errors=%zu\n",
+                             getName().c_str(),
+                             applicationIndex,
+                             app.stillWaitingForBackwardErrorInputTensorIds.size());
+            }
             continue;
+        }
+
+        if (trainingUpdateDiagnosticsEnabled()) {
+            std::fprintf(stderr,
+                         "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u backward_ready batch=%u active_parameters=%s backward_error_stamp=%d weights_clear_stamp=%d weights_accumulate_stamp=%d fused_update_stamp=%d\n",
+                         getName().c_str(),
+                         applicationIndex,
+                         batchSize,
+                         joinNames(app.activeParameterTargetNames).c_str(),
+                         app.backwardErrorStamped != nullptr ? 1 : 0,
+                         app.backwardWeightsClearStamped != nullptr ? 1 : 0,
+                         app.backwardWeightsAccumulateStamped != nullptr ? 1 : 0,
+                         app.backwardWeightsFusedOptimizerUpdateStamped != nullptr ? 1 : 0);
         }
 
         app.backwardRanThisPass = true;
@@ -1800,6 +1944,13 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
     }
 
     if (numBackwardApplications > 0 && numBackwardApplicationsCompletedThisPass == numBackwardApplications) {
+        if (trainingUpdateDiagnosticsEnabled()) {
+            std::fprintf(stderr,
+                         "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s backward_pass_complete effective_batches=%s gradient_update_stream=%d\n",
+                         getName().c_str(),
+                         joinNames(effectiveBatchSizeByParameterName).c_str(),
+                         gradientUpdateStream.has_value() ? 1 : 0);
+        }
         numBackwardApplicationsCompletedThisPass = 0;
         weightsAreUpToDateEvent.reset();
 
@@ -1817,11 +1968,24 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
             }
             for (const auto& parameter : parameters) {
                 if (!parameter->isTrainingEnabled()) {
+                    if (trainingUpdateDiagnosticsEnabled()) {
+                        std::fprintf(stderr,
+                                     "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s parameter=%s apply_skip reason=training_disabled\n",
+                                     getName().c_str(),
+                                     parameter->getName().c_str());
+                    }
                     continue;
                 }
 
                 const auto effectiveBatchSizeIt = effectiveBatchSizeByParameterName.find(parameter->getName());
                 if (effectiveBatchSizeIt == effectiveBatchSizeByParameterName.end() || effectiveBatchSizeIt->second == 0) {
+                    if (trainingUpdateDiagnosticsEnabled()) {
+                        std::fprintf(stderr,
+                                     "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s parameter=%s apply_skip reason=no_effective_batch effective_batches=%s\n",
+                                     getName().c_str(),
+                                     parameter->getName().c_str(),
+                                     joinNames(effectiveBatchSizeByParameterName).c_str());
+                    }
                     continue;
                 }
 
@@ -1830,9 +1994,22 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
                                         parameter->getName() + ".");
                 }
 
+                if (trainingUpdateDiagnosticsEnabled()) {
+                    std::fprintf(stderr,
+                                 "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s parameter=%s apply_gradient batch=%llu\n",
+                                 getName().c_str(),
+                                 parameter->getName().c_str(),
+                                 static_cast<unsigned long long>(effectiveBatchSizeIt->second));
+                }
                 anyWeightsUpdated |= parameter->applyGradient(static_cast<uint32_t>(effectiveBatchSizeIt->second));
             }
             effectiveBatchSizeByParameterName.clear();
+            if (trainingUpdateDiagnosticsEnabled()) {
+                std::fprintf(stderr,
+                             "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s update_result any_weights_updated=%d\n",
+                             getName().c_str(),
+                             anyWeightsUpdated ? 1 : 0);
+            }
             if (anyWeightsUpdated) {
                 weightsAreUpToDateEvent = gradientUpdateStream.value().putEvent();
             }
@@ -1878,6 +2055,18 @@ void CustomLayer::accumulateWeightsGradientForApplication(uint32_t applicationIn
     // application double-counts the gradient.  Later applications use the accumulate stamp to add
     // their contribution to the buffer established by the first application.
     const bool ranMaterializedOverwrite = clearGradientFirst && app.backwardWeightsClearStamped != nullptr;
+    if (trainingUpdateDiagnosticsEnabled()) {
+        std::fprintf(stderr,
+                     "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u accumulate batch=%u clear_first=%d run_clear=%d run_accumulate=%d run_fused_update=%d active_parameters=%s\n",
+                     getName().c_str(),
+                     applicationIndex,
+                     batchSize,
+                     clearGradientFirst ? 1 : 0,
+                     ranMaterializedOverwrite ? 1 : 0,
+                     (!ranMaterializedOverwrite && app.backwardWeightsAccumulateStamped != nullptr) ? 1 : 0,
+                     app.backwardWeightsFusedOptimizerUpdateStamped != nullptr ? 1 : 0,
+                     joinNames(app.activeParameterTargetNames).c_str());
+    }
     if (ranMaterializedOverwrite) {
         app.backwardWeightsClearStamped->run();
     }
@@ -1958,13 +2147,38 @@ uint64_t CustomLayer::floatingPointOperationsPerExampleBackward() {
     return batchSize == 0 ? 0 : flopCountBackward() / batchSize;
 }
 
-bool CustomLayer::isBackPropStub() {
-    for (const auto& errorOutput : errorOutputs) {
-        if (errorOutput.has_value()) {
-            return false;
+bool CustomLayer::hasTrainableParameterRequiringDownstreamError() {
+    if (isInferenceOnly()) {
+        return false;
+    }
+
+    for (const auto& parameter : parameters) {
+        if (parameter != nullptr && parameter->isTrainingEnabled()) {
+            return true;
         }
     }
-    return true;
+    return false;
+}
+
+bool CustomLayer::hasConnectedUpstreamErrorOutput() const {
+    for (const auto& errorOutput : errorOutputs) {
+        if (errorOutput.has_value()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool CustomLayer::isBackPropStub() {
+    // isBackPropStub() answers the connection-level question: should the next
+    // layer send this layer a downstream error tensor?  A first trainable layer
+    // may not send an input-gradient tensor farther upstream, but it still needs
+    // the downstream error tensor to compute parameter gradients.
+    if (hasTrainableParameterRequiringDownstreamError()) {
+        return false;
+    }
+
+    return !hasConnectedUpstreamErrorOutput();
 }
 
 }  // namespace ThorImplementation

@@ -40,7 +40,7 @@ void validatePredictionsDType(DataType dtype) {
 ThorImplementation::DynamicExpression makeMSELossExpression(DataType lossDataType) {
     ThorImplementation::Expression predictions = ThorImplementation::Expression::input(kPredictionsName, DataType::FP32, DataType::FP32);
     ThorImplementation::Expression labels = ThorImplementation::Expression::input(kLabelsName, DataType::FP32, DataType::FP32);
-    ThorImplementation::Expression diff = labels - predictions;
+    ThorImplementation::Expression diff = predictions - labels;
     ThorImplementation::Expression loss = (diff * diff).withOutputDType(lossDataType);
     ThorImplementation::ExpressionDefinition definition =
         ThorImplementation::ExpressionDefinition::fromOutputs(ThorImplementation::Expression::outputs({{kLossName, loss}}));
@@ -52,7 +52,7 @@ ThorImplementation::DynamicExpression makeMSEGradientExpression(DataType predict
 
     ThorImplementation::Expression predictions = ThorImplementation::Expression::input(kPredictionsName, DataType::FP32, DataType::FP32);
     ThorImplementation::Expression labels = ThorImplementation::Expression::input(kLabelsName, DataType::FP32, DataType::FP32);
-    ThorImplementation::Expression diff = labels - predictions;
+    ThorImplementation::Expression diff = predictions - labels;
     ThorImplementation::Expression gradient =
         (diff * ThorImplementation::Expression(2.0f * ThorImplementation::Loss::getLossScalingFactor())).withOutputDType(predictionsDataType);
     ThorImplementation::ExpressionDefinition definition = ThorImplementation::ExpressionDefinition::fromOutputs(

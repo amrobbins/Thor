@@ -41,13 +41,13 @@ __global__ void meanSquaredError(
 
     half2 buffer0, buffer1;
 
-    // (label - prediction)^2
-    buffer0 = __hsub2(((half2 *)labelsBuffer)[0], ((half2 *)predictionsBuffer)[0]);
+    // (prediction - label)^2
+    buffer0 = __hsub2(((half2 *)predictionsBuffer)[0], ((half2 *)labelsBuffer)[0]);
     ((half2 *)elementLossBuffer)[0] = __hmul2(buffer0, buffer0);
-    buffer1 = __hsub2(((half2 *)labelsBuffer)[1], ((half2 *)predictionsBuffer)[1]);
+    buffer1 = __hsub2(((half2 *)predictionsBuffer)[1], ((half2 *)labelsBuffer)[1]);
     ((half2 *)elementLossBuffer)[1] = __hmul2(buffer1, buffer1);
     if (computeGradient) {
-        // d/dx (y - x)^2 = 2(y - x)
+        // d/dx (x - y)^2 = 2(x - y)
         ((half2 *)gradientBuffer)[0] = __hmul2(((half2 *)two)[0], buffer0);
         ((half2 *)gradientBuffer)[1] = __hmul2(((half2 *)two)[0], buffer1);
         double *gradientBuffer_half4 = (double *)gradientBuffer;
@@ -92,9 +92,9 @@ __global__ void meanSquaredError(
 
     half2 buffer0, buffer1;
 
-    buffer0 = __hsub2(((half2 *)labelsBuffer)[0], ((half2 *)predictionsBuffer)[0]);
+    buffer0 = __hsub2(((half2 *)predictionsBuffer)[0], ((half2 *)labelsBuffer)[0]);
     ((half2 *)elementLossBuffer)[0] = __hmul2(buffer0, buffer0);
-    buffer1 = __hsub2(((half2 *)labelsBuffer)[1], ((half2 *)predictionsBuffer)[1]);
+    buffer1 = __hsub2(((half2 *)predictionsBuffer)[1], ((half2 *)labelsBuffer)[1]);
     ((half2 *)elementLossBuffer)[1] = __hmul2(buffer1, buffer1);
     if (computeGradient) {
         ((half2 *)gradientBuffer)[0] = __hmul2(((half2 *)two)[0], buffer0);
@@ -133,9 +133,9 @@ __global__ void meanSquaredError(
     labelsBuffer = labels_float2[element / 2];
     predictionsBuffer = predictions_float2[element / 2];
 
-    buffer0 = labelsBuffer.x - predictionsBuffer.x;
+    buffer0 = predictionsBuffer.x - labelsBuffer.x;
     elementLossBuffer.x = buffer0 * buffer0;
-    buffer1 = labelsBuffer.y - predictionsBuffer.y;
+    buffer1 = predictionsBuffer.y - labelsBuffer.y;
     elementLossBuffer.y = buffer1 * buffer1;
 
     if (computeGradient) {
@@ -155,9 +155,9 @@ __global__ void meanSquaredError(
     labelsBuffer = labels_float2[element / 2];
     predictionsBuffer = predictions_float2[element / 2];
 
-    buffer0 = labelsBuffer.x - predictionsBuffer.x;
+    buffer0 = predictionsBuffer.x - labelsBuffer.x;
     elementLossBuffer.x = buffer0 * buffer0;
-    buffer1 = labelsBuffer.y - predictionsBuffer.y;
+    buffer1 = predictionsBuffer.y - labelsBuffer.y;
     elementLossBuffer.y = buffer1 * buffer1;
 
     if (computeGradient) {
@@ -199,11 +199,11 @@ __global__ void meanSquaredError(
     predictionsBuffer_half2 = predictions_half2[element / 2];
     predictionsBuffer = __half22float2(predictionsBuffer_half2);
 
-    buffer.x = labelsBuffer.x - predictionsBuffer.x;
+    buffer.x = predictionsBuffer.x - labelsBuffer.x;
     elementLossBuffer.x = buffer.x * buffer.x;
 
     if (element + 1 < numElements) {
-        buffer.y = labelsBuffer.y - predictionsBuffer.y;
+        buffer.y = predictionsBuffer.y - labelsBuffer.y;
         elementLossBuffer.y = buffer.y * buffer.y;
     }
 
@@ -224,11 +224,11 @@ __global__ void meanSquaredError(
     predictionsBuffer_half2 = predictions_half2[element / 2];
     predictionsBuffer = __half22float2(predictionsBuffer_half2);
 
-    buffer.x = labelsBuffer.x - predictionsBuffer.x;
+    buffer.x = predictionsBuffer.x - labelsBuffer.x;
     elementLossBuffer.x = buffer.x * buffer.x;
 
     if (element + 1 < numElements) {
-        buffer.y = labelsBuffer.y - predictionsBuffer.y;
+        buffer.y = predictionsBuffer.y - labelsBuffer.y;
         elementLossBuffer.y = buffer.y * buffer.y;
     }
 
@@ -255,7 +255,7 @@ __global__ void meanSquaredError(LABEL_TYPE *labels,
 
     if (element >= numElements)
         return;
-    buffer = (LOSS_TYPE)(float)labels[element] - (LOSS_TYPE)(float)predictions[element];
+    buffer = (LOSS_TYPE)(float)predictions[element] - (LOSS_TYPE)(float)labels[element];
     elementLoss[element] = buffer * buffer;
     if (computeGradient)
         gradient[element] = (LOSS_TYPE)2 * buffer;
@@ -263,7 +263,7 @@ __global__ void meanSquaredError(LABEL_TYPE *labels,
     element += 256;
     if (element >= numElements)
         return;
-    buffer = (LOSS_TYPE)(float)labels[element] - (LOSS_TYPE)(float)predictions[element];
+    buffer = (LOSS_TYPE)(float)predictions[element] - (LOSS_TYPE)(float)labels[element];
     elementLoss[element] = buffer * buffer;
     if (computeGradient)
         gradient[element] = (LOSS_TYPE)2 * buffer;
@@ -271,7 +271,7 @@ __global__ void meanSquaredError(LABEL_TYPE *labels,
     element += 256;
     if (element >= numElements)
         return;
-    buffer = (LOSS_TYPE)(float)labels[element] - (LOSS_TYPE)(float)predictions[element];
+    buffer = (LOSS_TYPE)(float)predictions[element] - (LOSS_TYPE)(float)labels[element];
     elementLoss[element] = buffer * buffer;
     if (computeGradient)
         gradient[element] = (LOSS_TYPE)2 * buffer;
@@ -279,7 +279,7 @@ __global__ void meanSquaredError(LABEL_TYPE *labels,
     element += 256;
     if (element >= numElements)
         return;
-    buffer = (LOSS_TYPE)(float)labels[element] - (LOSS_TYPE)(float)predictions[element];
+    buffer = (LOSS_TYPE)(float)predictions[element] - (LOSS_TYPE)(float)labels[element];
     elementLoss[element] = buffer * buffer;
     if (computeGradient)
         gradient[element] = (LOSS_TYPE)2 * buffer;

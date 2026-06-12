@@ -14,7 +14,7 @@ enum class AsyncBufferedPrinterDestination { STDOUT, STDOUT_AND_STDERR };
 
 class AsyncBufferedPrinter {
    public:
-    static constexpr std::chrono::milliseconds DEFAULT_FLUSH_INTERVAL{100};
+    static constexpr std::chrono::milliseconds DEFAULT_FLUSH_INTERVAL{25};
     static constexpr std::size_t DEFAULT_FLUSH_BYTES = 64 * 1024;
     static constexpr std::size_t DEFAULT_MAX_QUEUED_BYTES = 1024 * 1024;
 

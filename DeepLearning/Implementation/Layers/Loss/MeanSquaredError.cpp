@@ -98,7 +98,7 @@ DynamicExpression MeanSquaredError::makeForwardExpression(DataType lossDataType)
                                  const DataType predictionDType = inputs.at(kPredictionsName).getDescriptor().getDataType();
                                  Expression predictions = Expression::input(kPredictionsName, predictionDType, predictionDType);
                                  Expression labels = Expression::input(kLabelsName, predictionDType, predictionDType);
-                                 Expression diff = (labels - predictions).withDTypes(predictionDType, predictionDType);
+                                 Expression diff = (predictions - labels).withDTypes(predictionDType, predictionDType);
                                  Expression loss = (diff * diff).withDTypes(predictionDType, lossDataType);
                                  return compileOutputs(Expression::outputs({{kLossName, loss}}), inputs, outputs, stream);
                              });
@@ -115,7 +115,7 @@ DynamicExpression MeanSquaredError::makeGradientExpression() {
                                  const DataType predictionDType = inputs.at(kPredictionsName).getDescriptor().getDataType();
                                  Expression predictions = Expression::input(kPredictionsName, predictionDType, predictionDType);
                                  Expression labels = Expression::input(kLabelsName, predictionDType, predictionDType);
-                                 Expression diff = (labels - predictions).withDTypes(predictionDType, predictionDType);
+                                 Expression diff = (predictions - labels).withDTypes(predictionDType, predictionDType);
                                  Expression scale = Expression(2.0f * Loss::getLossScalingFactor()).withDTypes(predictionDType, predictionDType);
                                  Expression grad = (diff * scale).withDTypes(predictionDType, predictionDType);
                                  return compileOutputs(Expression::outputs({{kGradientName, grad}}), inputs, outputs, stream);

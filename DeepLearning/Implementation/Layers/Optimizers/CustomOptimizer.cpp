@@ -7,6 +7,8 @@
 #include "Utilities/Expression/FusedEquation.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <set>
 #include <stdexcept>
 
@@ -45,6 +47,31 @@ std::string CustomOptimizerUpdateContext::stateInputName(const std::string& name
 std::string CustomOptimizerUpdateContext::runtimeScalarName(const std::string& name) const { return namePrefix_ + name; }
 
 namespace {
+
+bool trainingUpdateDiagnosticsEnabled() {
+    const char* value = std::getenv("THOR_TRAINING_UPDATE_DIAGNOSTICS");
+    return value != nullptr && value[0] != '\0' && std::string(value) != "0";
+}
+
+std::string joinRuntimeScalars(const std::unordered_map<std::string, float>& scalars) {
+    std::vector<std::string> items;
+    items.reserve(scalars.size());
+    for (const auto& [name, value] : scalars) {
+        items.push_back(name + "=" + std::to_string(value));
+    }
+    std::sort(items.begin(), items.end());
+    std::string result;
+    for (const std::string& item : items) {
+        if (!result.empty()) {
+            result += ",";
+        }
+        result += item;
+    }
+    if (result.empty()) {
+        return "<none>";
+    }
+    return result;
+}
 
 void validateName(const std::string& name, const std::string& what) {
     if (name.empty()) {
@@ -382,7 +409,15 @@ void CustomOptimizer::updateWeights(uint32_t batchSize) {
     THOR_THROW_IF_FALSE(weightsGradient.value().getPlacement() == weights.getPlacement());
     THOR_THROW_IF_FALSE(updateEquationStamped != nullptr);
 
-    updateEquationStamped->run(denseUpdateRuntimeScalars(batchSize, ""));
+    std::unordered_map<std::string, float> runtimeScalars = denseUpdateRuntimeScalars(batchSize, "");
+    if (trainingUpdateDiagnosticsEnabled()) {
+        std::fprintf(stderr,
+                     "THOR_TRAINING_UPDATE_DIAGNOSTIC optimizer=CustomOptimizer update_weights batch=%u runtime_scalars=%s gradient_initialized=%d\n",
+                     batchSize,
+                     joinRuntimeScalars(runtimeScalars).c_str(),
+                     weightsGradient.value().isInitialized() ? 1 : 0);
+    }
+    updateEquationStamped->run(runtimeScalars);
 }
 
 void CustomOptimizer::updateSparseRows(uint32_t batchSize) {
