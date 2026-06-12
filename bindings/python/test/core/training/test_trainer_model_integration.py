@@ -10,7 +10,6 @@ import pytest
 import thor
 
 RUN_TRAINING_INTEGRATION = os.environ.get("THOR_RUN_TRAINING_INTEGRATION") == "1"
-ASSERT_TRAINER_LEARNING = os.environ.get("THOR_ASSERT_TRAINER_LEARNING") == "1"
 DATA_DIR = Path(os.environ.get("THOR_TRAINING_DATA_DIR", "/tmp/thor_training_data"))
 IRIS_URL = "https://archive.ics.uci.edu/ml/machine-learning-databases/iris/iris.data"
 IRIS_PATH = DATA_DIR / "iris.data"
@@ -22,6 +21,7 @@ def _flush_native_stdio_for_capture():
     # native printf/fprintf output before pytest prints its summary.
     ctypes.CDLL(None).fflush(None)
 
+
 pytestmark = [
     pytest.mark.cuda,
     pytest.mark.training_integration,
@@ -30,25 +30,14 @@ pytestmark = [
         reason="set THOR_RUN_TRAINING_INTEGRATION=1 to run opt-in model training integration tests",
     ),
 ]
-requires_trainer_learning = pytest.mark.skipif(
-    not ASSERT_TRAINER_LEARNING,
-    reason=(
-        "set THOR_ASSERT_TRAINER_LEARNING=1 to run trainer convergence diagnostics "
-        "while the native trainer update path is under repair"
-    ),
-)
-
-
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
-
 
 _TRAINER_STATS_RE = re.compile(
     r"INFO trainer: phase=(?P<phase>train|validate|test) "
     r"epoch=(?P<epoch>\d+)/(?:\d+) "
     r"step=(?P<step>\d+) "
     r"batch=(?P<batch>\d+)/(?:\d+) "
-    r"loss=(?P<loss>[-+0-9.eE]+)"
-)
+    r"loss=(?P<loss>[-+0-9.eE]+)")
 
 
 def _captured_trainer_stats(captured_text: str):
@@ -62,8 +51,7 @@ def _captured_trainer_stats(captured_text: str):
                 "step": int(match.group("step")),
                 "batch": int(match.group("batch")),
                 "loss": float(match.group("loss")),
-            }
-        )
+            })
     return stats
 
 
@@ -80,12 +68,15 @@ def _phase_epoch_mean_losses(stats, phase: str):
 
 
 def _assert_zero_initialized_two_class_batch_loss(loss: float, *, batch_size: int, name: str):
-    expected = float(batch_size * np.log(2.0))
-    assert loss == pytest.approx(expected, rel=2e-3, abs=2e-3), f"{name}: expected zero-logit two-class CE batch loss {expected}, got {loss}"
+    del batch_size
+    expected = float(np.log(2.0))
+    message = f"{name}: expected zero-logit two-class CE mean loss {expected}, got {loss}"
+    assert loss == pytest.approx(expected, rel=2e-3, abs=2e-3), message
 
 
 def _assert_zero_initialized_regression_mean_loss(loss: float, *, expected: float, name: str):
-    assert loss == pytest.approx(expected, rel=2e-3, abs=2e-3), f"{name}: expected zero-init mean MSE loss {expected}, got {loss}"
+    assert loss == pytest.approx(
+        expected, rel=2e-3, abs=2e-3), f"{name}: expected zero-init mean MSE loss {expected}, got {loss}"
 
 
 def _assert_loss_decreased(losses, *, name: str, tail_window: int = 5, required_fraction: float = 0.85):
@@ -414,9 +405,29 @@ def _iris_loader(batch_size: int = 16, dtype=np.float32):
 
 
 def _build_iris_mlp(name: str, *, dtype=thor.DataType.fp32, per_layer_optimizers: bool = False):
+    return _build_iris_two_layer_classifier(
+        name,
+        dtype=dtype,
+        hidden_activation=thor.activations.Relu(),
+        per_layer_optimizers=per_layer_optimizers,
+    )
+
+
+def _build_iris_two_layer_classifier(
+    name: str,
+    *,
+    dtype=thor.DataType.fp32,
+    hidden_activation=None,
+    per_layer_optimizers: bool = False,
+):
     network = thor.Network(name)
     examples = thor.layers.NetworkInput(network, "examples", [4], dtype)
     labels = thor.layers.NetworkInput(network, "labels", [3], dtype)
+
+    hidden_weights_initializer = None
+    hidden_biases_initializer = None
+    output_weights_initializer = None
+    output_biases_initializer = None
 
     if per_layer_optimizers:
         hidden_weights_optimizer = thor.optimizers.AdamW(alpha=0.003, weight_decay=0.0)
@@ -434,7 +445,9 @@ def _build_iris_mlp(name: str, *, dtype=thor.DataType.fp32, per_layer_optimizers
         examples.get_feature_output(),
         16,
         True,
-        activation=thor.activations.Relu(),
+        activation=hidden_activation,
+        weights_initializer=hidden_weights_initializer,
+        biases_initializer=hidden_biases_initializer,
         weights_optimizer=hidden_weights_optimizer,
         biases_optimizer=hidden_biases_optimizer,
     )
@@ -444,6 +457,8 @@ def _build_iris_mlp(name: str, *, dtype=thor.DataType.fp32, per_layer_optimizers
         3,
         True,
         activation=None,
+        weights_initializer=output_weights_initializer,
+        biases_initializer=output_biases_initializer,
         weights_optimizer=output_weights_optimizer,
         biases_optimizer=output_biases_optimizer,
     )
@@ -460,6 +475,7 @@ def _build_iris_mlp(name: str, *, dtype=thor.DataType.fp32, per_layer_optimizers
 
 
 # Diagnostic ladder, from deterministic single-batch checks to real Iris training.
+
 
 def test_debug_synchronous_trainer_reports_deterministic_zero_init_mse_one_batch_loss(capfd):
     batch_size = 4
@@ -539,11 +555,9 @@ def test_debug_synchronous_trainer_applies_deterministic_one_batch_mse_sgd_updat
     post_first_update_loss = min(validate_losses[0], train_losses[1])
     assert post_first_update_loss < train_losses[0] * 0.90, (
         "one-batch MSE SGD update did not materially change the next loss: "
-        f"train_losses={train_losses}, validate_losses={validate_losses}"
-    )
+        f"train_losses={train_losses}, validate_losses={validate_losses}")
 
 
-@requires_trainer_learning
 def test_debug_synchronous_trainer_reduces_deterministic_repeated_batch_mse_loss_with_sgd(capfd):
     batch_size = 4
     network = _build_zero_initialized_linear_regressor(
@@ -590,7 +604,6 @@ def test_debug_synchronous_trainer_reduces_deterministic_repeated_batch_mse_loss
     )
 
 
-@requires_trainer_learning
 def test_queued_trainer_reduces_deterministic_repeated_batch_mse_loss_with_sgd(capfd):
     batch_size = 4
     network = _build_zero_initialized_linear_regressor(
@@ -637,7 +650,6 @@ def test_queued_trainer_reduces_deterministic_repeated_batch_mse_loss_with_sgd(c
     )
 
 
-@requires_trainer_learning
 def test_debug_synchronous_trainer_reports_deterministic_zero_init_categorical_ce_one_batch_loss(capfd):
     batch_size = 4
     network = _build_zero_initialized_linear_classifier(
@@ -677,7 +689,6 @@ def test_debug_synchronous_trainer_reports_deterministic_zero_init_categorical_c
     )
 
 
-@requires_trainer_learning
 def test_debug_synchronous_trainer_applies_deterministic_one_batch_sgd_update(capfd):
     batch_size = 4
     network = _build_zero_initialized_linear_classifier(
@@ -717,11 +728,9 @@ def test_debug_synchronous_trainer_applies_deterministic_one_batch_sgd_update(ca
     post_first_update_loss = min(validate_losses[0], train_losses[1])
     assert post_first_update_loss < train_losses[0] * 0.90, (
         "one-batch SGD update did not materially change the next loss: "
-        f"train_losses={train_losses}, validate_losses={validate_losses}"
-    )
+        f"train_losses={train_losses}, validate_losses={validate_losses}")
 
 
-@requires_trainer_learning
 def test_debug_synchronous_trainer_reduces_deterministic_repeated_batch_loss_with_sgd(capfd):
     batch_size = 4
     network = _build_zero_initialized_linear_classifier(
@@ -758,17 +767,16 @@ def test_debug_synchronous_trainer_reduces_deterministic_repeated_batch_loss_wit
         train_epoch_losses,
         name="debug synchronous deterministic repeated-batch train",
         tail_window=3,
-        required_fraction=0.50,
+        required_fraction=0.60,
     )
     _assert_loss_decreased(
         validate_epoch_losses,
         name="debug synchronous deterministic repeated-batch validate",
         tail_window=3,
-        required_fraction=0.50,
+        required_fraction=0.60,
     )
 
 
-@requires_trainer_learning
 def test_queued_trainer_reduces_deterministic_repeated_batch_loss_with_sgd(capfd):
     batch_size = 4
     network = _build_zero_initialized_linear_classifier(
@@ -805,13 +813,13 @@ def test_queued_trainer_reduces_deterministic_repeated_batch_loss_with_sgd(capfd
         train_epoch_losses,
         name="queued deterministic repeated-batch train",
         tail_window=3,
-        required_fraction=0.50,
+        required_fraction=0.60,
     )
     _assert_loss_decreased(
         validate_epoch_losses,
         name="queued deterministic repeated-batch validate",
         tail_window=3,
-        required_fraction=0.50,
+        required_fraction=0.60,
     )
 
 
@@ -831,12 +839,11 @@ def test_debug_synchronous_trainer_fits_iris_fp32_mlp_with_global_optimizer(capf
         scalar_tensors_to_report=["loss"],
     )
     stats = _fit_and_capture_stats(trainer, capfd, epochs=30)
-    if ASSERT_TRAINER_LEARNING:
-        _assert_loss_decreased(
-            _phase_epoch_mean_losses(stats, "validate"),
-            name="debug synchronous Iris FP32 validate epoch mean",
-            required_fraction=0.90,
-        )
+    _assert_loss_decreased(
+        _phase_epoch_mean_losses(stats, "validate"),
+        name="debug synchronous Iris FP32 validate epoch mean",
+        required_fraction=0.90,
+    )
 
 
 def test_queued_trainer_fits_iris_fp16_mlp_with_global_optimizer(capfd):
@@ -855,12 +862,11 @@ def test_queued_trainer_fits_iris_fp16_mlp_with_global_optimizer(capfd):
         scalar_tensors_to_report=["loss"],
     )
     stats = _fit_and_capture_stats(trainer, capfd, epochs=30)
-    if ASSERT_TRAINER_LEARNING:
-        _assert_loss_decreased(
-            _phase_epoch_mean_losses(stats, "validate"),
-            name="queued Iris FP16 validate epoch mean",
-            required_fraction=0.90,
-        )
+    _assert_loss_decreased(
+        _phase_epoch_mean_losses(stats, "validate"),
+        name="queued Iris FP16 validate epoch mean",
+        required_fraction=0.90,
+    )
 
 
 def test_debug_synchronous_trainer_fits_iris_fp16_with_per_layer_optimizer_overrides(capfd):
@@ -881,15 +887,13 @@ def test_debug_synchronous_trainer_fits_iris_fp16_with_per_layer_optimizer_overr
         scalar_tensors_to_report=["loss"],
     )
     stats = _fit_and_capture_stats(trainer, capfd, epochs=30)
-    if ASSERT_TRAINER_LEARNING:
-        _assert_loss_decreased(
-            _phase_epoch_mean_losses(stats, "validate"),
-            name="debug synchronous Iris FP16 per-layer validate epoch mean",
-            required_fraction=0.90,
-        )
+    _assert_loss_decreased(
+        _phase_epoch_mean_losses(stats, "validate"),
+        name="debug synchronous Iris FP16 per-layer validate epoch mean",
+        required_fraction=0.90,
+    )
 
 
-@requires_trainer_learning
 def test_debug_synchronous_trainer_reduces_loss_on_repeated_single_batch(capfd):
     network = _build_linear_classifier("python_integration_debug_repeated_batch", dtype=thor.DataType.fp32)
     loader = _linearly_separable_one_batch_loader(batch_size=16, dtype=np.float32)
@@ -916,7 +920,6 @@ def test_debug_synchronous_trainer_reduces_loss_on_repeated_single_batch(capfd):
     _assert_loss_decreased(validate_epoch_losses, name="debug synchronous validate", required_fraction=0.70)
 
 
-@requires_trainer_learning
 def test_queued_trainer_reduces_loss_on_repeated_single_batch(capfd):
     network = _build_linear_classifier("python_integration_queued_repeated_batch", dtype=thor.DataType.fp32)
     loader = _linearly_separable_one_batch_loader(batch_size=16, dtype=np.float32)
@@ -943,7 +946,6 @@ def test_queued_trainer_reduces_loss_on_repeated_single_batch(capfd):
     _assert_loss_decreased(validate_epoch_losses, name="queued validate", required_fraction=0.70)
 
 
-@requires_trainer_learning
 def test_queued_trainer_reports_fresh_loss_for_each_batch(capfd):
     network = _build_linear_classifier("python_integration_queued_fresh_stats", dtype=thor.DataType.fp32)
     loader = _linearly_separable_multi_batch_loader(batch_size=4, dtype=np.float32)
@@ -967,12 +969,16 @@ def test_queued_trainer_reports_fresh_loss_for_each_batch(capfd):
     first_epoch = [entry["loss"] for entry in train_stats if entry["epoch"] == 1]
     assert len(first_epoch) == loader.get_num_train_batches(), first_epoch
 
-    adjacent_repeats = [(i, first_epoch[i - 1], first_epoch[i]) for i in range(1, len(first_epoch)) if first_epoch[i] == first_epoch[i - 1]]
+    adjacent_repeats = [
+        (i, first_epoch[i - 1], first_epoch[i])
+        for i in range(1, len(first_epoch))
+        if first_epoch[i] == first_epoch[i - 1]
+    ]
     assert not adjacent_repeats, f"queued stats appear stale; adjacent first-epoch train losses repeated exactly: {adjacent_repeats}"
 
-    if ASSERT_TRAINER_LEARNING:
-        _assert_loss_decreased(
-            _phase_epoch_mean_losses(stats, "train"),
-            name="queued multi-batch train epoch mean",
-            required_fraction=0.85,
-        )
+    _assert_loss_decreased(
+        _phase_epoch_mean_losses(stats, "train"),
+        name="queued multi-batch train epoch mean",
+        tail_window=3,
+        required_fraction=0.85,
+    )

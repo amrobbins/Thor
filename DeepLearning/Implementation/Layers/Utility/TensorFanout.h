@@ -104,12 +104,47 @@ class TensorFanout : public MultiConnectionLayer {
                 continue;
             replacementHappend = true;
 
-            // During compile, tensorFanout will replace the errorInput of the previous layer when:
-            // 1. There is just one populated errorInput to tensorFanout, in this case it can be fused.
-            // 2. There are no populated errorInputs to tensorFanout, in this case the path can be pruned.
+            // TensorFanout::compileImpl() may fuse the only live downstream error input directly into the
+            // upstream layer by replacing errorOutputs[0] with that downstream tensor.  A later layer
+            // compile can still legally replace its own error input; the loss-owned Softmax does this when
+            // its backward is computed externally by CategoricalCrossEntropy.  Keep the fused upstream
+            // edge in sync, otherwise the upstream trainable layer keeps listening to the stale pre-replace
+            // tensor and receives no loss gradient when the fanout also feeds a NetworkOutput.
+            if (errorOutputs[0].has_value() && errorOutputs[0].value() == oldErrorInput.value()) {
+                if (previousLayers[0].has_value())
+                    previousLayers[0].value()->replaceErrorInput(errorOutputs[0], newErrorInput);
+                errorOutputs[0] = newErrorInput;
+            }
+
+            allErrorInputTensorIds.erase(oldErrorInput.value().getTensorId());
+            stillWaitingForErrorInputTensors.erase(oldErrorInput.value().getTensorId());
             errorInputs[i] = newErrorInput;
+            if (newErrorInput.has_value()) {
+                allErrorInputTensorIds.insert(newErrorInput.value().getTensorId());
+                if (running)
+                    stillWaitingForErrorInputTensors.insert(newErrorInput.value().getTensorId());
+            }
         }
         THOR_THROW_IF_FALSE(replacementHappend);
+
+        if (compiled && errorInputArray_d != nullptr && numPresentTensors(errorInputs) > 0) {
+            THOR_THROW_IF_FALSE(featureInputs.size() == 1);
+            THOR_THROW_IF_FALSE(featureInputs[0].has_value());
+            ScopedGpu scopedGpu(featureInputs[0].value().getPlacement().getDeviceNum());
+
+            half **errorInputArray = new half *[numPresentTensors(errorInputs)];
+            uint32_t j = 0;
+            for (unsigned int i = 0; i < errorInputs.size(); ++i) {
+                if (errorInputs[i].has_value()) {
+                    errorInputArray[j] = (half *)errorInputs[i].value().getMemPtr();
+                    ++j;
+                }
+            }
+            cudaError_t cudaStatus =
+                cudaMemcpy(errorInputArray_d, errorInputArray, numPresentTensors(errorInputs) * sizeof(half *), cudaMemcpyHostToDevice);
+            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+            delete[] errorInputArray;
+        }
     }
 
     // release any resources that are used for execution and need to be released
