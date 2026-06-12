@@ -39,7 +39,8 @@ class PlacedNetwork {
                       std::map<std::string, ThorImplementation::Tensor> batchInputs,
                       std::map<std::string, ThorImplementation::Tensor>& batchOutputs,
                       std::map<std::string, Event>& outputReadyEvents,
-                      bool isInferenceOnly);
+                      bool isInferenceOnly,
+                      Event* reusableProcessingFinishedEvent = nullptr);
 
     uint64_t getNumStamps() { return stampedNetworks.size(); }
     ThorImplementation::StampedNetwork& getStampedNetwork(uint64_t i) {

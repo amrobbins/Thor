@@ -16,6 +16,8 @@ class BorrowedTrainingObserver : public TrainingObserver {
    public:
     explicit BorrowedTrainingObserver(TrainingObserver& observer) : observer(observer) {}
     void onTrainingEvent(const TrainingEvent& event) override { observer.onTrainingEvent(event); }
+    void flush() override { observer.flush(); }
+    void close() override { observer.flush(); }
 
    private:
     TrainingObserver& observer;

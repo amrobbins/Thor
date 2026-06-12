@@ -194,7 +194,7 @@ class NumpyBatchLoader : public Loader {
         return {{exampleInputName, examples}, {labelInputName, labels}};
     }
 
-    void returnBatchBuffers(ExampleType exampleType, std::map<std::string, ThorImplementation::Tensor> tensorMap) override {
+    void returnBatchBuffers(ExampleType exampleType, std::map<std::string, ThorImplementation::Tensor>&& tensorMap) override {
         InMemoryNumpySplit<ScalarT>& split = mutableSplit(exampleType);
         auto exampleIt = tensorMap.find(exampleInputName);
         auto labelIt = tensorMap.find(labelInputName);
@@ -282,6 +282,19 @@ using NumpyFloat16BatchLoader = NumpyBatchLoader<half, ThorImplementation::DataT
 
 std::set<std::string> stringSetFromVector(std::vector<std::string> values) {
     return std::set<std::string>(values.begin(), values.end());
+}
+
+LineStatsColorMode lineStatsColorModeFromString(const std::string& value) {
+    if (value == "always") {
+        return LineStatsColorMode::ALWAYS;
+    }
+    if (value == "auto") {
+        return LineStatsColorMode::AUTO;
+    }
+    if (value == "never") {
+        return LineStatsColorMode::NEVER;
+    }
+    throw nb::value_error("stats_color must be one of: 'always', 'auto', 'never'");
 }
 
 }  // namespace
@@ -428,12 +441,16 @@ void bind_training(nb::module_& training) {
            bool stats,
            double stats_interval_s,
            uint64_t max_in_flight_batches,
-           std::vector<std::string> scalar_tensors_to_report) {
+           std::vector<std::string> scalar_tensors_to_report,
+           bool stats_stderr_also,
+           std::string stats_color) {
             Trainer::Builder builder;
             builder.network(network)
                 .loader(std::move(loader))
                 .statsEnabled(stats)
                 .statsIntervalSeconds(stats_interval_s)
+                .statsStderrAlso(stats_stderr_also)
+                .statsColorMode(lineStatsColorModeFromString(stats_color))
                 .maxInFlightBatches(max_in_flight_batches)
                 .scalarTensorsToReport(stringSetFromVector(std::move(scalar_tensors_to_report)));
             if (optimizer != nullptr) {
@@ -456,9 +473,8 @@ void bind_training(nb::module_& training) {
         "stats_interval_s"_a = 10.0,
         "max_in_flight_batches"_a = 32,
         "scalar_tensors_to_report"_a = std::vector<std::string>{"loss"},
-        nb::keep_alive<1, 2>(),
-        nb::keep_alive<1, 3>(),
-        nb::keep_alive<1, 4>());
+        "stats_stderr_also"_a = false,
+        "stats_color"_a = "always");
     trainer.def("fit", nb::overload_cast<uint32_t>(&Trainer::fit), "epochs"_a);
 
     auto gradient_clear_policy = nb::enum_<TrainingStep::GradientClearPolicy>(training, "GradientClearPolicy")

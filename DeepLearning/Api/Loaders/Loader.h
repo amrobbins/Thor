@@ -12,7 +12,7 @@ class Loader {
     virtual ~Loader() {}
 
     virtual std::map<std::string, ThorImplementation::Tensor> getBatch(ExampleType exampleType, uint64_t &batchNum) = 0;
-    virtual void returnBatchBuffers(ExampleType exampleType, std::map<std::string, ThorImplementation::Tensor> tensorMap) = 0;
+    virtual void returnBatchBuffers(ExampleType exampleType, std::map<std::string, ThorImplementation::Tensor>&& tensorMap) = 0;
 
     virtual uint64_t getBatchSize() { return batchSize; }
     virtual uint64_t getNumBatchesPerEpoch(ExampleType exampleType) = 0;

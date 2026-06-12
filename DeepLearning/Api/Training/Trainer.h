@@ -93,6 +93,16 @@ class Trainer::Builder {
         return *this;
     }
 
+    Builder& statsStderrAlso(bool statsStderrAlso) {
+        runtimeConfig_.statsStderrAlso = statsStderrAlso;
+        return *this;
+    }
+
+    Builder& statsColorMode(LineStatsColorMode colorMode) {
+        this->statsColorMode_ = colorMode;
+        return *this;
+    }
+
     Builder& maxInFlightBatches(uint64_t maxInFlightBatches) {
         runtimeConfig_.maxInFlightBatches = maxInFlightBatches;
         return *this;
@@ -111,6 +121,7 @@ class Trainer::Builder {
     std::shared_ptr<Optimizer> optimizer_ = nullptr;
     std::optional<TrainingProgram> trainingProgram_{};
     TrainingRuntimeConfig runtimeConfig_{};
+    LineStatsColorMode statsColorMode_ = LineStatsColorMode::ALWAYS;
     std::shared_ptr<TrainingExecutor> executor_ = nullptr;
     std::shared_ptr<TrainingObserver> observer_ = nullptr;
 };

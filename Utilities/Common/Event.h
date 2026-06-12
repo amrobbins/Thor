@@ -35,6 +35,8 @@ class Event : private ReferenceCounted {
 
     int32_t getGpuNum() const;
 
+    bool isInitialized() const;
+
     void synchronize();
 
     float synchronizeAndReportElapsedTimeInMilliseconds(Event startEvent);

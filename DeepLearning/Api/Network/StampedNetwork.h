@@ -6,6 +6,7 @@
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
+#include "Utilities/Common/Event.h"
 
 #include <vector>
 
@@ -91,7 +92,8 @@ class StampedNetwork {
     Event sendBatch(std::map<std::string, Tensor> batchInputs,
                     std::map<std::string, Tensor> &batchOutputs,
                     std::map<std::string, Event> &outputReadyEvents,
-                    bool isInferenceOnly);
+                    bool isInferenceOnly,
+                    Event* reusableProcessingFinishedEvent = nullptr);
 
     void clear();
 

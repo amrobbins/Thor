@@ -11,11 +11,15 @@ class TrainingObserver {
    public:
     virtual ~TrainingObserver() = default;
     virtual void onTrainingEvent(const TrainingEvent& event) = 0;
+    virtual void flush() {}
+    virtual void close() { flush(); }
 };
 
 class NullTrainingObserver : public TrainingObserver {
    public:
     void onTrainingEvent(const TrainingEvent& event) override { (void)event; }
+    void flush() override {}
+    void close() override {}
 };
 
 class CompositeTrainingObserver : public TrainingObserver {
@@ -31,6 +35,22 @@ class CompositeTrainingObserver : public TrainingObserver {
     void onTrainingEvent(const TrainingEvent& event) override {
         for (const std::shared_ptr<TrainingObserver>& observer : observers) {
             observer->onTrainingEvent(event);
+        }
+    }
+
+    void flush() override {
+        for (const std::shared_ptr<TrainingObserver>& observer : observers) {
+            if (observer) {
+                observer->flush();
+            }
+        }
+    }
+
+    void close() override {
+        for (const std::shared_ptr<TrainingObserver>& observer : observers) {
+            if (observer) {
+                observer->close();
+            }
         }
     }
 
