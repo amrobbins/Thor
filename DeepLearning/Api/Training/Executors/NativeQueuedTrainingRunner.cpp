@@ -22,7 +22,6 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -32,15 +31,20 @@ namespace {
 
 struct QueuedTrainingState;
 
+struct ScalarStatSlot {
+    bool present = false;
+    float value = 0.0f;
+};
+
 struct NativeBatchCompletionParams {
     std::shared_ptr<QueuedTrainingState> state;
     std::shared_ptr<Loader> loader;
     ExampleType exampleType = ExampleType::TRAIN;
     uint64_t epochBatchNum = 0;
     uint64_t slotIndex = 0;
-    const std::set<std::string>* tensorsToReturn = nullptr;
     std::map<std::string, ThorImplementation::Tensor> batchInput;
     std::map<std::string, ThorImplementation::Tensor> batchOutput;
+    std::vector<ScalarStatSlot> scalarStats;
 };
 
 struct QueuedBatchSlot {
@@ -48,22 +52,28 @@ struct QueuedBatchSlot {
     bool ready = false;
     uint64_t epochBatchNum = 0;
     uint64_t paramsIndex = 0;
-    std::unordered_map<std::string, std::vector<uint8_t>> data;
+    std::vector<ScalarStatSlot> scalarStats;
 };
 
 struct QueuedTrainingState {
-    explicit QueuedTrainingState(uint64_t maxInFlightBatches)
-        : slots(maxInFlightBatches), completionParams(maxInFlightBatches) {
+    QueuedTrainingState(uint64_t maxInFlightBatches, std::vector<std::string> scalarTensorNames)
+        : scalarTensorNames(std::move(scalarTensorNames)), slots(maxInFlightBatches), completionParams(maxInFlightBatches) {
         THOR_THROW_IF_FALSE(maxInFlightBatches >= 1);
+        for (QueuedBatchSlot& slot : slots) {
+            slot.scalarStats.resize(this->scalarTensorNames.size());
+        }
+        for (NativeBatchCompletionParams& params : completionParams) {
+            params.scalarStats.resize(this->scalarTensorNames.size());
+        }
     }
 
     std::mutex mutex;
     std::condition_variable batchFinished;
     std::condition_variable batchPopped;
 
+    std::vector<std::string> scalarTensorNames;
     std::vector<QueuedBatchSlot> slots;
     std::vector<NativeBatchCompletionParams> completionParams;
-    std::set<std::string> tensorsToReturn;
     uint64_t headSlot = 0;
     uint64_t tailSlot = 0;
     uint64_t inFlightBatches = 0;
@@ -75,15 +85,26 @@ struct QueuedTrainingState {
     uint64_t numBatchesInEpoch = 0;
 };
 
-std::optional<double> optionalFloatFromBatch(const std::unordered_map<std::string, std::vector<uint8_t>>& batchData,
-                                             const std::string& tensorName) {
-    auto it = batchData.find(tensorName);
-    if (it == batchData.end() || it->second.size() < sizeof(float)) {
-        return std::nullopt;
+float copyScalarStatTensor(const std::map<std::string, ThorImplementation::Tensor>& batchInput,
+                           const std::map<std::string, ThorImplementation::Tensor>& batchOutput,
+                           const std::string& tensorName) {
+    ThorImplementation::Tensor copyFromTensor;
+    auto inputIt = batchInput.find(tensorName);
+    auto outputIt = batchOutput.find(tensorName);
+    if (inputIt != batchInput.end()) {
+        copyFromTensor = inputIt->second;
+    } else if (outputIt != batchOutput.end()) {
+        copyFromTensor = outputIt->second;
+    } else {
+        throw std::runtime_error("Requested training stat tensor '" + tensorName + "' was not present in batch inputs or outputs.");
     }
+
+    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    THOR_THROW_IF_FALSE(copyFromTensor.getPlacement() == cpuPlacement);
+    THOR_THROW_IF_FALSE(copyFromTensor.getDescriptor().getArraySizeInBytes() >= sizeof(float));
     float value = 0.0f;
-    std::memcpy(&value, it->second.data(), sizeof(float));
-    return static_cast<double>(value);
+    std::memcpy(&value, copyFromTensor.getMemPtr(), sizeof(float));
+    return value;
 }
 
 std::string phaseName(TrainingPhase phase) {
@@ -176,35 +197,20 @@ void CUDART_CB completeNativeQueuedBatch(void* data) {
     const uint64_t slotIndex = params->slotIndex;
 
     try {
-        ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+        THOR_THROW_IF_FALSE(params->scalarStats.size() == state->scalarTensorNames.size());
+        for (size_t i = 0; i < state->scalarTensorNames.size(); ++i) {
+            params->scalarStats[i].value = copyScalarStatTensor(params->batchInput, params->batchOutput, state->scalarTensorNames[i]);
+            params->scalarStats[i].present = true;
+        }
+
         {
             std::lock_guard<std::mutex> lock(state->mutex);
             THOR_THROW_IF_FALSE(slotIndex < state->slots.size());
             QueuedBatchSlot& slot = state->slots[slotIndex];
             THOR_THROW_IF_FALSE(slot.occupied);
             THOR_THROW_IF_FALSE(slot.epochBatchNum == epochBatchNum);
-
-            if (params->tensorsToReturn != nullptr) {
-                for (const std::string& tensorName : *params->tensorsToReturn) {
-                    ThorImplementation::Tensor copyFromTensor;
-                    auto inputIt = params->batchInput.find(tensorName);
-                    auto outputIt = params->batchOutput.find(tensorName);
-                    if (inputIt != params->batchInput.end()) {
-                        copyFromTensor = inputIt->second;
-                    } else if (outputIt != params->batchOutput.end()) {
-                        copyFromTensor = outputIt->second;
-                    } else {
-                        throw std::runtime_error("Requested training stat tensor '" + tensorName + "' was not present in batch inputs or outputs.");
-                    }
-
-                    THOR_THROW_IF_FALSE(copyFromTensor.getPlacement() == cpuPlacement);
-                    const uint64_t numTensorBytes = copyFromTensor.getDescriptor().getArraySizeInBytes();
-                    std::vector<uint8_t>& buffer = slot.data[tensorName];
-                    buffer.resize(numTensorBytes);
-                    std::memcpy(buffer.data(), copyFromTensor.getMemPtr(), numTensorBytes);
-                }
-            }
-
+            THOR_THROW_IF_FALSE(slot.scalarStats.size() == params->scalarStats.size());
+            slot.scalarStats = params->scalarStats;
             slot.ready = true;
             state->numBatchesDoneInEpoch += 1;
         }
@@ -246,8 +252,7 @@ struct BatchPopResult {
     std::shared_ptr<Loader> loader;
     ExampleType exampleType = ExampleType::TRAIN;
     std::map<std::string, ThorImplementation::Tensor> batchInput;
-    std::optional<double> loss;
-    std::optional<double> accuracy;
+    std::vector<ScalarStatSlot> scalarStats;
 };
 
 BatchPopResult popBatchData(const std::shared_ptr<QueuedTrainingState>& state) {
@@ -269,14 +274,19 @@ BatchPopResult popBatchData(const std::shared_ptr<QueuedTrainingState>& state) {
     result.loader = params.loader;
     result.exampleType = params.exampleType;
     result.batchInput = std::move(params.batchInput);
-    result.loss = optionalFloatFromBatch(slot.data, "loss");
-    result.accuracy = optionalFloatFromBatch(slot.data, "accuracy");
+    result.scalarStats = slot.scalarStats;
 
     params.batchOutput.clear();
-    params.tensorsToReturn = nullptr;
     params.loader.reset();
     params.state.reset();
-    slot.data.clear();
+    for (ScalarStatSlot& scalarStat : slot.scalarStats) {
+        scalarStat.present = false;
+        scalarStat.value = 0.0f;
+    }
+    for (ScalarStatSlot& scalarStat : params.scalarStats) {
+        scalarStat.present = false;
+        scalarStat.value = 0.0f;
+    }
     slot.ready = false;
     slot.occupied = false;
     state->headSlot = (state->headSlot + 1) % state->slots.size();
@@ -316,13 +326,37 @@ void emitTrainingEvent(TrainingObserver& observer, bool statsEnabled, const Trai
     observer.onTrainingEvent(event);
 }
 
+void assignScalarStatsToSnapshot(TrainingStatsSnapshot& snapshot,
+                                 const std::vector<std::string>& scalarTensorNames,
+                                 const std::vector<ScalarStatSlot>& scalarStats) {
+    THOR_THROW_IF_FALSE(scalarTensorNames.size() == scalarStats.size());
+    for (size_t i = 0; i < scalarTensorNames.size(); ++i) {
+        if (!scalarStats[i].present) {
+            continue;
+        }
+
+        const double value = static_cast<double>(scalarStats[i].value);
+        const std::string& name = scalarTensorNames[i];
+        if (name == "loss") {
+            snapshot.loss = value;
+        } else if (name == "accuracy") {
+            snapshot.accuracy = value;
+        } else if (name == "learning_rate" || name == "learningRate" || name == "lr") {
+            snapshot.learningRate = value;
+        } else if (name == "momentum") {
+            snapshot.momentum = value;
+        } else {
+            snapshot.metrics[name] = value;
+        }
+    }
+}
+
 class NativeQueuedEpochScheduler {
    public:
     NativeQueuedEpochScheduler(std::shared_ptr<PlacedNetwork> placedNetwork,
                                std::shared_ptr<Loader> loader,
                                const ExecutableTrainingPlan& plan,
                                const NativeQueuedTrainingOptions& options,
-                               std::set<std::string> tensorsToReturn,
                                std::shared_ptr<QueuedTrainingState> state,
                                uint64_t currentEpoch,
                                uint64_t batchesPerEpoch,
@@ -331,13 +365,10 @@ class NativeQueuedEpochScheduler {
           loader(std::move(loader)),
           plan(plan),
           options(options),
-          tensorsToReturn(std::move(tensorsToReturn)),
           state(std::move(state)),
           currentEpoch(currentEpoch),
           batchesPerEpoch(batchesPerEpoch),
-          exampleType(exampleType) {
-        this->state->tensorsToReturn = this->tensorsToReturn;
-    }
+          exampleType(exampleType) {}
 
     void operator()(uint64_t initialEpochBatchNum, uint64_t batches) {
         if (batches == 0) {
@@ -347,7 +378,16 @@ class NativeQueuedEpochScheduler {
         uint64_t nextStampToProcess = 0;
         std::vector<std::map<std::string, Event>> outputReadyEvents(placedNetwork->getNumStamps());
         std::vector<Event> processingFinishedEvents(options.maxInFlightBatches);
+        std::vector<Stream> completionStreams;
+        completionStreams.reserve(placedNetwork->getNumStamps());
+        for (uint64_t stamp = 0; stamp < placedNetwork->getNumStamps(); ++stamp) {
+            ThorImplementation::StampedNetwork& stampedNetwork = placedNetwork->getStampedNetwork(stamp);
+            std::vector<std::shared_ptr<ThorImplementation::NetworkInput>> inputs = stampedNetwork.getInputs();
+            THOR_THROW_IF_FALSE(!inputs.empty());
+            completionStreams.push_back(inputs[0]->getStream());
+        }
         const bool validationPass = exampleType != ExampleType::TRAIN;
+        const std::vector<StepExecutable>& steps = plan.getSteps();
 
         for (uint64_t batch = 0; batch < batches; ++batch) {
             uint64_t epochBatchNum = initialEpochBatchNum + batch;
@@ -370,7 +410,10 @@ class NativeQueuedEpochScheduler {
                 slot.ready = false;
                 slot.epochBatchNum = epochBatchNum;
                 slot.paramsIndex = slotIndex;
-                slot.data.clear();
+                for (ScalarStatSlot& scalarStat : slot.scalarStats) {
+                    scalarStat.present = false;
+                    scalarStat.value = 0.0f;
+                }
                 state->tailSlot = (state->tailSlot + 1) % state->slots.size();
                 state->inFlightBatches += 1;
             }
@@ -381,18 +424,16 @@ class NativeQueuedEpochScheduler {
             params->exampleType = exampleType;
             params->epochBatchNum = epochBatchNum;
             params->slotIndex = slotIndex;
-            params->tensorsToReturn = &state->tensorsToReturn;
             params->batchInput.clear();
             params->batchOutput.clear();
+            for (ScalarStatSlot& scalarStat : params->scalarStats) {
+                scalarStat.present = false;
+                scalarStat.value = 0.0f;
+            }
 
             params->batchInput = loader->getBatch(exampleType, epochBatchNum);
 
-            ThorImplementation::StampedNetwork& stampedNetwork = placedNetwork->getStampedNetwork(nextStampToProcess);
-            std::vector<std::shared_ptr<ThorImplementation::NetworkInput>> inputs = stampedNetwork.getInputs();
-            THOR_THROW_IF_FALSE(!inputs.empty());
-            Stream completionStream = inputs[0]->getStream();
-
-            for (const StepExecutable& step : plan.getSteps()) {
+            for (const StepExecutable& step : steps) {
                 for (uint32_t repeat = 0; repeat < step.getRepeatCount(); ++repeat) {
                     std::map<std::string, ThorImplementation::Tensor> boundBatchInput = bindBatchInputs(step, params->batchInput);
                     params->batchOutput.clear();
@@ -405,6 +446,7 @@ class NativeQueuedEpochScheduler {
                 }
             }
 
+            Stream completionStream = completionStreams[nextStampToProcess];
             cudaError_t cudaStatus = cudaLaunchHostFunc(completionStream, completeNativeQueuedBatch, params);
             THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
 
@@ -422,7 +464,6 @@ class NativeQueuedEpochScheduler {
     std::shared_ptr<Loader> loader;
     const ExecutableTrainingPlan& plan;
     NativeQueuedTrainingOptions options;
-    std::set<std::string> tensorsToReturn;
     std::shared_ptr<QueuedTrainingState> state;
     uint64_t currentEpoch;
     uint64_t batchesPerEpoch;
@@ -502,7 +543,11 @@ void runNativeQueuedTraining(const TrainingRunRequest& request,
             }
             const uint64_t batchesToRun = batchesPerEpoch - batchNum;
 
-            auto state = std::make_shared<QueuedTrainingState>(options.maxInFlightBatches);
+            std::vector<std::string> scalarTensorNames;
+            if (request.runtime.statsEnabled) {
+                scalarTensorNames.assign(request.runtime.scalarTensorsToReport.begin(), request.runtime.scalarTensorsToReport.end());
+            }
+            auto state = std::make_shared<QueuedTrainingState>(options.maxInFlightBatches, std::move(scalarTensorNames));
             state->numBatchesDoneInEpoch = batchNum;
             state->numBatchesInEpoch = batchesPerEpoch;
 
@@ -515,7 +560,6 @@ void runNativeQueuedTraining(const TrainingRunRequest& request,
                                                  request.loader,
                                                  plan,
                                                  options,
-                                                 request.runtime.statsEnabled ? request.runtime.scalarTensorsToReport : std::set<std::string>{},
                                                  state,
                                                  currentEpoch,
                                                  batchesPerEpoch,
@@ -603,8 +647,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request,
                                 static_cast<double>(snapshot.floatingPointOperationsPerBatch) / averageBatchTime;
                         }
 
-                        snapshot.loss = completedBatch.loss;
-                        snapshot.accuracy = completedBatch.accuracy;
+                        assignScalarStatsToSnapshot(snapshot, state->scalarTensorNames, completedBatch.scalarStats);
                         emitTrainingEvent(observer, request.runtime.statsEnabled, TrainingEvent::statsUpdated(std::move(snapshot)));
                     }
 
