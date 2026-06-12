@@ -238,6 +238,12 @@ void appendPlainStatsLine(LineBuffer& out, const TrainingStatsSnapshot& stats) {
         out.append(" lr=");
         appendScientific(out, stats.learningRate.value(), 3);
     }
+    for (const auto& metric : stats.metrics) {
+        out.append(" ");
+        out.append(metric.first.c_str());
+        out.append("=");
+        appendFixed(out, metric.second, 6);
+    }
 
     if (stats.samplesPerSecond > 0.0) {
         out.append(" samples/s=");
@@ -319,6 +325,12 @@ void appendColorStatsLine(LineBuffer& out, const TrainingStatsSnapshot& stats) {
         appendDimKey(out, "lr");
         out.append(Ansi::magenta);
         appendScientific(out, stats.learningRate.value(), 3);
+        out.append(Ansi::reset);
+    }
+    for (const auto& metric : stats.metrics) {
+        appendDimKey(out, metric.first.c_str());
+        out.append(Ansi::yellow);
+        appendFixed(out, metric.second, 6);
         out.append(Ansi::reset);
     }
 
