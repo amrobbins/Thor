@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstring>
 #include <optional>
+#include <utility>
 
 using std::condition_variable;
 using std::map;
@@ -159,11 +160,11 @@ void CUDART_CB LocalExecutor::bufferStampTensors(void *data) {
         params->batchFinished->notify_all();
         params->epochMutex->unlock();
 
-        params->loader->returnBatchBuffers(params->exampleType, params->batchletInput);
+        params->loader->returnBatchBuffers(params->exampleType, std::move(params->batchletInput));
         params->batchMutex->unlock();
         delete params;
     } else {
-        params->loader->returnBatchBuffers(params->exampleType, params->batchletInput);
+        params->loader->returnBatchBuffers(params->exampleType, std::move(params->batchletInput));
         params->batchMutex->unlock();
     }
 }

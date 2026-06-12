@@ -39,6 +39,9 @@ requires_trainer_learning = pytest.mark.skipif(
 )
 
 
+_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
 _TRAINER_STATS_RE = re.compile(
     r"INFO trainer: phase=(?P<phase>train|validate|test) "
     r"epoch=(?P<epoch>\d+)/(?:\d+) "
@@ -49,8 +52,9 @@ _TRAINER_STATS_RE = re.compile(
 
 
 def _captured_trainer_stats(captured_text: str):
+    plain_text = _ANSI_RE.sub("", captured_text)
     stats = []
-    for match in _TRAINER_STATS_RE.finditer(captured_text):
+    for match in _TRAINER_STATS_RE.finditer(plain_text):
         stats.append(
             {
                 "phase": match.group("phase"),

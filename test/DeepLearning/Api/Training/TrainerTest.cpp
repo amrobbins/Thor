@@ -25,7 +25,7 @@ class FakeLoader : public Loader {
         return {};
     }
 
-    void returnBatchBuffers(ExampleType exampleType, std::map<std::string, ThorImplementation::Tensor> tensorMap) override {
+    void returnBatchBuffers(ExampleType exampleType, std::map<std::string, ThorImplementation::Tensor>&& tensorMap) override {
         (void)exampleType;
         (void)tensorMap;
     }

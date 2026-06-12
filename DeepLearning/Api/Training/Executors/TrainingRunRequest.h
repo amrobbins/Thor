@@ -20,6 +20,7 @@ struct TrainingRuntimeConfig {
     uint64_t maxInFlightBatches = 32;
     bool statsEnabled = true;
     double statsIntervalSeconds = 10.0;
+    bool statsStderrAlso = false;
     std::set<std::string> scalarTensorsToReport = {"loss", "accuracy"};
 };
 

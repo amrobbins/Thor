@@ -33,7 +33,10 @@ Trainer Trainer::Builder::build() const {
     trainer.observer = observer_;
     if (trainer.observer == nullptr) {
         if (trainer.runtimeConfig.statsEnabled) {
-            trainer.observer = std::make_shared<LineStatsReporter>(trainer.runtimeConfig.statsIntervalSeconds, true);
+            const LineStatsOutputMode outputMode =
+                trainer.runtimeConfig.statsStderrAlso ? LineStatsOutputMode::STDOUT_AND_STDERR : LineStatsOutputMode::STDOUT;
+            trainer.observer =
+                std::make_shared<LineStatsReporter>(trainer.runtimeConfig.statsIntervalSeconds, true, statsColorMode_, outputMode);
         } else {
             trainer.observer = std::make_shared<NullTrainingObserver>();
         }
@@ -55,7 +58,14 @@ void Trainer::fit(const TrainerFitOptions& options) {
     request.runtime = runtimeConfig;
     request.epochs = options.epochs;
 
-    executor->fit(request, effectiveObserver());
+    TrainingObserver& observer = effectiveObserver();
+    try {
+        executor->fit(request, observer);
+    } catch (...) {
+        observer.flush();
+        throw;
+    }
+    observer.flush();
 }
 
 void Trainer::validateFitOptions(const TrainerFitOptions& options) const {

@@ -35,9 +35,11 @@ Event PlacedNetwork::submitBatch(uint64_t stampIndex,
                                  std::map<std::string, ThorImplementation::Tensor> batchInputs,
                                  std::map<std::string, ThorImplementation::Tensor>& batchOutputs,
                                  std::map<std::string, Event>& outputReadyEvents,
-                                 bool isInferenceOnly) {
+                                 bool isInferenceOnly,
+                                 Event* reusableProcessingFinishedEvent) {
     THOR_THROW_IF_FALSE(stampIndex < stampedNetworks.size());
-    return stampedNetworks[stampIndex].sendBatch(std::move(batchInputs), batchOutputs, outputReadyEvents, isInferenceOnly);
+    return stampedNetworks[stampIndex].sendBatch(
+        std::move(batchInputs), batchOutputs, outputReadyEvents, isInferenceOnly, reusableProcessingFinishedEvent);
 }
 
 BoundParameter PlacedNetwork::resolveParameterReference(const ParameterReference& parameterReference) {

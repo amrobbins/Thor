@@ -82,6 +82,19 @@ class Stream : private ReferenceCounted {
         return event;
     }
 
+    void putEvent(Event& event, bool enableTiming = false, bool expectingHostToWaitOnThisOne = false) const {
+        THOR_THROW_IF_FALSE(!uninitialized());
+
+        ScopedGpu scopedGpu(gpuNum);
+
+        if (!event.isInitialized()) {
+            event = Event(gpuNum, enableTiming, expectingHostToWaitOnThisOne);
+        } else {
+            THOR_THROW_IF_FALSE(event.getGpuNum() == gpuNum);
+        }
+        event.record(*this);
+    }
+
     void waitEvent(Event event) const;
 
     void synchronize() const;

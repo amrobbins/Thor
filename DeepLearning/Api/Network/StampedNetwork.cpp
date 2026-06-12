@@ -106,7 +106,8 @@ void StampedNetwork::initialize(bool initializeWeights, bool copyWeightsFromOthe
 Event StampedNetwork::sendBatch(std::map<std::string, Tensor> batchInputs,
                                 std::map<std::string, Tensor> &batchOutputs,
                                 std::map<std::string, Event> &outputReadyEvents,
-                                bool isInferenceOnly) {
+                                bool isInferenceOnly,
+                                Event* reusableProcessingFinishedEvent) {
     THOR_THROW_IF_FALSE(batchInputs.size() == inputs.size());
 
     std::optional<uint32_t> batchSize;
@@ -147,8 +148,16 @@ Event StampedNetwork::sendBatch(std::map<std::string, Tensor> batchInputs,
         inputs[0]->getStream().waitEvent(outputReadyEvent);
     }
 
-    // Processing is finished when the stream from input 0 is ready
-    Event processingFinishedEvent = inputs[0]->getStream().putEvent(true, true);
+    // Processing is finished when the stream from input 0 is ready.
+    // The native queued trainer passes a per-in-flight reusable event here so the
+    // hot training path does not allocate/destroy a CUDA event for every batch.
+    Event processingFinishedEvent;
+    if (reusableProcessingFinishedEvent != nullptr) {
+        inputs[0]->getStream().putEvent(*reusableProcessingFinishedEvent, true, true);
+        processingFinishedEvent = *reusableProcessingFinishedEvent;
+    } else {
+        processingFinishedEvent = inputs[0]->getStream().putEvent(true, true);
+    }
 
     // The streams from all other inputs wait for the stream from input 0 to be ready
     for (uint i = 1; i < inputs.size(); ++i) {

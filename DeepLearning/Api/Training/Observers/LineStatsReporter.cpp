@@ -1,11 +1,11 @@
 #include "DeepLearning/Api/Training/Observers/LineStatsReporter.h"
 
 #include <algorithm>
-#include <cstdio>
+#include <array>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
-#include <iomanip>
-#include <sstream>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 
@@ -32,23 +32,66 @@ constexpr const char* dimBlue = "\x1b[2;34m";
 constexpr const char* dimMagenta = "\x1b[2;35m";
 }  // namespace Ansi
 
-void appendFixed(std::ostringstream& out, double value, int precision) {
-    const std::ios::fmtflags oldFlags = out.flags();
-    const std::streamsize oldPrecision = out.precision();
-    out << std::fixed << std::setprecision(precision) << value;
-    out.flags(oldFlags);
-    out.precision(oldPrecision);
+class LineBuffer {
+   public:
+    const char* c_str() const { return buffer.data(); }
+
+    void append(const char* text) {
+        if (text == nullptr) {
+            return;
+        }
+        appendBytes(text, std::strlen(text));
+    }
+
+    void append(char value) {
+        if (length + 1 < buffer.size()) {
+            buffer[length++] = value;
+            buffer[length] = '\0';
+        }
+    }
+
+    template <typename... Args>
+    void appendFormat(const char* fmt, Args... args) {
+        if (length >= buffer.size()) {
+            return;
+        }
+        const int written = std::snprintf(buffer.data() + length, buffer.size() - length, fmt, args...);
+        if (written <= 0) {
+            return;
+        }
+        const size_t available = buffer.size() - length;
+        const size_t advanced = std::min(static_cast<size_t>(written), available - 1);
+        length += advanced;
+        buffer[length] = '\0';
+    }
+
+   private:
+    void appendBytes(const char* bytes, size_t count) {
+        if (length >= buffer.size()) {
+            return;
+        }
+        const size_t available = buffer.size() - length;
+        const size_t copied = std::min(count, available - 1);
+        if (copied > 0) {
+            std::memcpy(buffer.data() + length, bytes, copied);
+            length += copied;
+            buffer[length] = '\0';
+        }
+    }
+
+    std::array<char, 1024> buffer{};
+    size_t length = 0;
+};
+
+void appendFixed(LineBuffer& out, double value, int precision) {
+    out.appendFormat("%.*f", precision, value);
 }
 
-void appendScientific(std::ostringstream& out, double value, int precision) {
-    const std::ios::fmtflags oldFlags = out.flags();
-    const std::streamsize oldPrecision = out.precision();
-    out << std::scientific << std::setprecision(precision) << value;
-    out.flags(oldFlags);
-    out.precision(oldPrecision);
+void appendScientific(LineBuffer& out, double value, int precision) {
+    out.appendFormat("%.*e", precision, value);
 }
 
-void appendCompactRate(std::ostringstream& out, double value) {
+void appendCompactRate(LineBuffer& out, double value) {
     const double absValue = std::abs(value);
     const char* suffix = "";
     double scaled = value;
@@ -69,7 +112,18 @@ void appendCompactRate(std::ostringstream& out, double value) {
     const double absScaled = std::abs(scaled);
     const int precision = absScaled >= 100.0 ? 0 : (absScaled >= 10.0 ? 1 : 2);
     appendFixed(out, scaled, precision);
-    out << suffix;
+    out.append(suffix);
+}
+
+void appendElapsed(LineBuffer& out, double elapsedSeconds) {
+    const uint64_t roundedSeconds = static_cast<uint64_t>(std::max(0.0, elapsedSeconds));
+    const uint64_t hours = roundedSeconds / 3600;
+    const uint64_t minutes = (roundedSeconds / 60) % 60;
+    const uint64_t seconds = roundedSeconds % 60;
+    out.appendFormat("%02llu:%02llu:%02llu",
+                     static_cast<unsigned long long>(hours),
+                     static_cast<unsigned long long>(minutes),
+                     static_cast<unsigned long long>(seconds));
 }
 
 bool envFlagIsSet(const char* name) {
@@ -95,7 +149,7 @@ bool terminalEnvForcesColor() {
 
 bool terminalKindAllowsColor() {
     const char* term = std::getenv("TERM");
-    return term == nullptr || std::string(term) != "dumb";
+    return term == nullptr || std::strcmp(term, "dumb") != 0;
 }
 
 bool fileIsTerminal(std::FILE* output) {
@@ -120,27 +174,183 @@ bool fileSupportsAnsiColor(std::FILE* output) {
     return fileIsTerminal(output);
 }
 
-void appendPhaseValue(std::ostringstream& out, TrainingPhase phase) {
+void appendPhaseValue(LineBuffer& out, TrainingPhase phase) {
     switch (phase) {
         case TrainingPhase::TRAIN:
-            out << Ansi::dimGreen;
+            out.append(Ansi::dimGreen);
             break;
         case TrainingPhase::VALIDATE:
-            out << Ansi::dimBlue;
+            out.append(Ansi::dimBlue);
             break;
         case TrainingPhase::TEST:
-            out << Ansi::dimMagenta;
+            out.append(Ansi::dimMagenta);
             break;
         case TrainingPhase::UNKNOWN:
         default:
-            out << Ansi::brightBlack;
+            out.append(Ansi::brightBlack);
             break;
     }
-    out << trainingPhaseName(phase) << Ansi::reset;
+    out.append(trainingPhaseName(phase));
+    out.append(Ansi::reset);
 }
 
-void appendDimKey(std::ostringstream& out, const char* key) {
-    out << ' ' << Ansi::dim << key << '=' << Ansi::reset;
+void appendDimKey(LineBuffer& out, const char* key) {
+    out.append(' ');
+    out.append(Ansi::dim);
+    out.append(key);
+    out.append('=');
+    out.append(Ansi::reset);
+}
+
+void appendPlainStatsLine(LineBuffer& out, const TrainingStatsSnapshot& stats) {
+    out.append("INFO trainer: phase=");
+    out.append(trainingPhaseName(stats.phase));
+
+    if (stats.epochs > 0) {
+        out.appendFormat(" epoch=%llu/%llu",
+                         static_cast<unsigned long long>(stats.epoch),
+                         static_cast<unsigned long long>(stats.epochs));
+    } else if (stats.epoch > 0) {
+        out.appendFormat(" epoch=%llu", static_cast<unsigned long long>(stats.epoch));
+    }
+
+    if (stats.step > 0) {
+        out.appendFormat(" step=%llu", static_cast<unsigned long long>(stats.step));
+    }
+
+    if (stats.stepsPerEpoch > 0) {
+        out.appendFormat(" batch=%llu/%llu",
+                         static_cast<unsigned long long>(stats.stepInEpoch),
+                         static_cast<unsigned long long>(stats.stepsPerEpoch));
+    } else if (stats.stepInEpoch > 0) {
+        out.appendFormat(" batch=%llu", static_cast<unsigned long long>(stats.stepInEpoch));
+    }
+
+    if (stats.loss.has_value()) {
+        out.append(" loss=");
+        appendFixed(out, stats.loss.value(), 6);
+    }
+    if (stats.accuracy.has_value()) {
+        out.append(" accuracy=");
+        appendFixed(out, stats.accuracy.value(), 4);
+    }
+    if (stats.learningRate.has_value()) {
+        out.append(" lr=");
+        appendScientific(out, stats.learningRate.value(), 3);
+    }
+
+    if (stats.samplesPerSecond > 0.0) {
+        out.append(" samples/s=");
+        appendFixed(out, stats.samplesPerSecond, 1);
+    }
+    if (stats.batchesPerSecond > 0.0) {
+        out.append(" batches/s=");
+        appendFixed(out, stats.batchesPerSecond, 2);
+    }
+    if (stats.floatingPointOperationsPerSecond > 0.0) {
+        out.append(" flops/s=");
+        appendCompactRate(out, stats.floatingPointOperationsPerSecond);
+    }
+    if (stats.inFlightBatches > 0) {
+        out.appendFormat(" in_flight=%llu", static_cast<unsigned long long>(stats.inFlightBatches));
+    }
+
+    out.append(" elapsed=");
+    appendElapsed(out, stats.elapsedSeconds);
+}
+
+void appendColorStatsLine(LineBuffer& out, const TrainingStatsSnapshot& stats) {
+    out.append(Ansi::dim);
+    out.append("INFO ");
+    out.append(Ansi::reset);
+    out.append(Ansi::bold);
+    out.append("trainer:");
+    out.append(Ansi::reset);
+
+    appendDimKey(out, "phase");
+    appendPhaseValue(out, stats.phase);
+
+    if (stats.epochs > 0) {
+        appendDimKey(out, "epoch");
+        out.append(Ansi::blue);
+        out.appendFormat("%llu/%llu", static_cast<unsigned long long>(stats.epoch), static_cast<unsigned long long>(stats.epochs));
+        out.append(Ansi::reset);
+    } else if (stats.epoch > 0) {
+        appendDimKey(out, "epoch");
+        out.append(Ansi::blue);
+        out.appendFormat("%llu", static_cast<unsigned long long>(stats.epoch));
+        out.append(Ansi::reset);
+    }
+
+    if (stats.step > 0) {
+        appendDimKey(out, "step");
+        out.append(Ansi::blue);
+        out.appendFormat("%llu", static_cast<unsigned long long>(stats.step));
+        out.append(Ansi::reset);
+    }
+
+    if (stats.stepsPerEpoch > 0) {
+        appendDimKey(out, "batch");
+        out.append(Ansi::blue);
+        out.appendFormat("%llu/%llu",
+                         static_cast<unsigned long long>(stats.stepInEpoch),
+                         static_cast<unsigned long long>(stats.stepsPerEpoch));
+        out.append(Ansi::reset);
+    } else if (stats.stepInEpoch > 0) {
+        appendDimKey(out, "batch");
+        out.append(Ansi::blue);
+        out.appendFormat("%llu", static_cast<unsigned long long>(stats.stepInEpoch));
+        out.append(Ansi::reset);
+    }
+
+    if (stats.loss.has_value()) {
+        appendDimKey(out, "loss");
+        out.append(Ansi::yellow);
+        appendFixed(out, stats.loss.value(), 6);
+        out.append(Ansi::reset);
+    }
+    if (stats.accuracy.has_value()) {
+        appendDimKey(out, "accuracy");
+        out.append(Ansi::green);
+        appendFixed(out, stats.accuracy.value(), 4);
+        out.append(Ansi::reset);
+    }
+    if (stats.learningRate.has_value()) {
+        appendDimKey(out, "lr");
+        out.append(Ansi::magenta);
+        appendScientific(out, stats.learningRate.value(), 3);
+        out.append(Ansi::reset);
+    }
+
+    if (stats.samplesPerSecond > 0.0) {
+        appendDimKey(out, "samples/s");
+        out.append(Ansi::cyan);
+        appendFixed(out, stats.samplesPerSecond, 1);
+        out.append(Ansi::reset);
+    }
+    if (stats.batchesPerSecond > 0.0) {
+        appendDimKey(out, "batches/s");
+        out.append(Ansi::cyan);
+        appendFixed(out, stats.batchesPerSecond, 2);
+        out.append(Ansi::reset);
+    }
+    if (stats.floatingPointOperationsPerSecond > 0.0) {
+        appendDimKey(out, "flops/s");
+        out.append(Ansi::boldBrightBlack);
+        appendCompactRate(out, stats.floatingPointOperationsPerSecond);
+        out.append(Ansi::reset);
+    }
+    if (stats.inFlightBatches > 0) {
+        appendDimKey(out, "in_flight");
+        out.append(Ansi::blue);
+        out.appendFormat("%llu", static_cast<unsigned long long>(stats.inFlightBatches));
+        out.append(Ansi::reset);
+    }
+
+    appendDimKey(out, "elapsed");
+    out.append(Ansi::blue);
+    appendElapsed(out, stats.elapsedSeconds);
+    out.append(Ansi::reset);
 }
 
 }  // namespace
@@ -153,8 +363,19 @@ LineStatsReporter::LineStatsReporter(std::FILE* output,
     setIntervalSeconds(intervalSeconds);
 }
 
-LineStatsReporter::LineStatsReporter(double intervalSeconds, bool enabled, LineStatsColorMode colorMode)
-    : LineStatsReporter(stdout, intervalSeconds, enabled, colorMode) {}
+LineStatsReporter::LineStatsReporter(double intervalSeconds,
+                                     bool enabled,
+                                     LineStatsColorMode colorMode,
+                                     LineStatsOutputMode outputMode)
+    : printer(std::make_shared<AsyncBufferedPrinter>()),
+      intervalSeconds(intervalSeconds),
+      enabled(enabled),
+      colorMode(colorMode),
+      outputMode(outputMode) {
+    setIntervalSeconds(intervalSeconds);
+}
+
+LineStatsReporter::~LineStatsReporter() { close(); }
 
 void LineStatsReporter::setIntervalSeconds(double intervalSeconds) {
     if (!std::isfinite(intervalSeconds) || intervalSeconds < 0.0) {
@@ -164,7 +385,7 @@ void LineStatsReporter::setIntervalSeconds(double intervalSeconds) {
 }
 
 void LineStatsReporter::onTrainingEvent(const TrainingEvent& event) {
-    if (!enabled || outputFile == nullptr) {
+    if (!enabled || (outputFile == nullptr && printer == nullptr)) {
         return;
     }
 
@@ -210,161 +431,62 @@ bool LineStatsReporter::shouldUseColor() const {
     if (colorMode == LineStatsColorMode::ALWAYS) {
         return true;
     }
-    return fileSupportsAnsiColor(outputFile);
+    return fileSupportsAnsiColor(outputFile != nullptr ? outputFile : stdout);
 }
-
-namespace {
-
-std::string formatColorStatsLine(const TrainingStatsSnapshot& stats) {
-    std::ostringstream out;
-    out << Ansi::dim << "INFO " << Ansi::reset << Ansi::bold << "trainer:" << Ansi::reset;
-
-    appendDimKey(out, "phase");
-    appendPhaseValue(out, stats.phase);
-
-    if (stats.epochs > 0) {
-        appendDimKey(out, "epoch");
-        out << Ansi::blue << stats.epoch << '/' << stats.epochs << Ansi::reset;
-    } else if (stats.epoch > 0) {
-        appendDimKey(out, "epoch");
-        out << Ansi::blue << stats.epoch << Ansi::reset;
-    }
-
-    if (stats.step > 0) {
-        appendDimKey(out, "step");
-        out << Ansi::blue << stats.step << Ansi::reset;
-    }
-
-    if (stats.stepsPerEpoch > 0) {
-        appendDimKey(out, "batch");
-        out << Ansi::blue << stats.stepInEpoch << '/' << stats.stepsPerEpoch << Ansi::reset;
-    } else if (stats.stepInEpoch > 0) {
-        appendDimKey(out, "batch");
-        out << Ansi::blue << stats.stepInEpoch << Ansi::reset;
-    }
-
-    if (stats.loss.has_value()) {
-        appendDimKey(out, "loss");
-        out << Ansi::yellow;
-        appendFixed(out, stats.loss.value(), 6);
-        out << Ansi::reset;
-    }
-    if (stats.accuracy.has_value()) {
-        appendDimKey(out, "accuracy");
-        out << Ansi::green;
-        appendFixed(out, stats.accuracy.value(), 4);
-        out << Ansi::reset;
-    }
-    if (stats.learningRate.has_value()) {
-        appendDimKey(out, "lr");
-        out << Ansi::magenta;
-        appendScientific(out, stats.learningRate.value(), 3);
-        out << Ansi::reset;
-    }
-
-    if (stats.samplesPerSecond > 0.0) {
-        appendDimKey(out, "samples/s");
-        out << Ansi::cyan;
-        appendFixed(out, stats.samplesPerSecond, 1);
-        out << Ansi::reset;
-    }
-    if (stats.batchesPerSecond > 0.0) {
-        appendDimKey(out, "batches/s");
-        out << Ansi::cyan;
-        appendFixed(out, stats.batchesPerSecond, 2);
-        out << Ansi::reset;
-    }
-    if (stats.floatingPointOperationsPerSecond > 0.0) {
-        appendDimKey(out, "flops/s");
-        out << Ansi::boldBrightBlack;
-        appendCompactRate(out, stats.floatingPointOperationsPerSecond);
-        out << Ansi::reset;
-    }
-    if (stats.inFlightBatches > 0) {
-        appendDimKey(out, "in_flight");
-        out << Ansi::blue << stats.inFlightBatches << Ansi::reset;
-    }
-
-    appendDimKey(out, "elapsed");
-    out << Ansi::blue << LineStatsReporter::formatElapsedSeconds(stats.elapsedSeconds) << Ansi::reset;
-    return out.str();
-}
-
-}  // namespace
 
 void LineStatsReporter::writeStatsLine(const TrainingStatsSnapshot& stats) {
-    emitLine(shouldUseColor() ? formatColorStatsLine(stats) : formatStatsLine(stats));
+    LineBuffer line;
+    if (shouldUseColor()) {
+        appendColorStatsLine(line, stats);
+    } else {
+        appendPlainStatsLine(line, stats);
+    }
+    emitLine(line.c_str());
 }
 
-void LineStatsReporter::emitLine(const std::string& line) {
+void LineStatsReporter::emitLine(const char* line) {
+    if (line == nullptr) {
+        return;
+    }
+    if (printer != nullptr) {
+        const AsyncBufferedPrinterDestination destination =
+            (outputMode == LineStatsOutputMode::STDOUT_AND_STDERR) ? AsyncBufferedPrinterDestination::STDOUT_AND_STDERR
+                                                                    : AsyncBufferedPrinterDestination::STDOUT;
+        printer->writeLine(line, destination);
+        return;
+    }
     if (outputFile != nullptr) {
-        std::fprintf(outputFile, "%s\n", line.c_str());
+        std::fprintf(outputFile, "%s\n", line);
+    }
+}
+
+void LineStatsReporter::flush() {
+    if (printer != nullptr) {
+        printer->flush();
+    } else if (outputFile != nullptr) {
+        std::fflush(outputFile);
+    }
+}
+
+void LineStatsReporter::close() {
+    if (printer != nullptr) {
+        printer->close();
+        printer.reset();
+    } else if (outputFile != nullptr) {
+        std::fflush(outputFile);
     }
 }
 
 std::string LineStatsReporter::formatStatsLine(const TrainingStatsSnapshot& stats) {
-    std::ostringstream out;
-    out << "INFO trainer: phase=" << trainingPhaseName(stats.phase);
-
-    if (stats.epochs > 0) {
-        out << " epoch=" << stats.epoch << '/' << stats.epochs;
-    } else if (stats.epoch > 0) {
-        out << " epoch=" << stats.epoch;
-    }
-
-    if (stats.step > 0) {
-        out << " step=" << stats.step;
-    }
-
-    if (stats.stepsPerEpoch > 0) {
-        out << " batch=" << stats.stepInEpoch << '/' << stats.stepsPerEpoch;
-    } else if (stats.stepInEpoch > 0) {
-        out << " batch=" << stats.stepInEpoch;
-    }
-
-    if (stats.loss.has_value()) {
-        out << " loss=";
-        appendFixed(out, stats.loss.value(), 6);
-    }
-    if (stats.accuracy.has_value()) {
-        out << " accuracy=";
-        appendFixed(out, stats.accuracy.value(), 4);
-    }
-    if (stats.learningRate.has_value()) {
-        out << " lr=";
-        appendScientific(out, stats.learningRate.value(), 3);
-    }
-
-    if (stats.samplesPerSecond > 0.0) {
-        out << " samples/s=";
-        appendFixed(out, stats.samplesPerSecond, 1);
-    }
-    if (stats.batchesPerSecond > 0.0) {
-        out << " batches/s=";
-        appendFixed(out, stats.batchesPerSecond, 2);
-    }
-    if (stats.floatingPointOperationsPerSecond > 0.0) {
-        out << " flops/s=";
-        appendCompactRate(out, stats.floatingPointOperationsPerSecond);
-    }
-    if (stats.inFlightBatches > 0) {
-        out << " in_flight=" << stats.inFlightBatches;
-    }
-
-    out << " elapsed=" << formatElapsedSeconds(stats.elapsedSeconds);
-
-    return out.str();
+    LineBuffer line;
+    appendPlainStatsLine(line, stats);
+    return std::string(line.c_str());
 }
 
 std::string LineStatsReporter::formatElapsedSeconds(double elapsedSeconds) {
-    const uint64_t roundedSeconds = static_cast<uint64_t>(std::max(0.0, elapsedSeconds));
-    const uint64_t hours = roundedSeconds / 3600;
-    const uint64_t minutes = (roundedSeconds / 60) % 60;
-    const uint64_t seconds = roundedSeconds % 60;
-
-    std::ostringstream out;
-    out << std::setfill('0') << std::setw(2) << hours << ':' << std::setw(2) << minutes << ':' << std::setw(2) << seconds;
-    return out.str();
+    LineBuffer line;
+    appendElapsed(line, elapsedSeconds);
+    return std::string(line.c_str());
 }
 
 }  // namespace Thor

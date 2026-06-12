@@ -90,7 +90,7 @@ map<string, Tensor> LocalBatchLoader::getBatch(ExampleType exampleType, uint64_t
     return tensorMap;
 }
 
-void LocalBatchLoader::returnBatchBuffers(ExampleType exampleType, map<std::string, Tensor> tensorMap) {
+void LocalBatchLoader::returnBatchBuffers(ExampleType exampleType, map<std::string, Tensor>&& tensorMap) {
     THOR_THROW_IF_FALSE(tensorMap.count("examples") == 1);
     THOR_THROW_IF_FALSE(tensorMap.count("labels") == 1);
 

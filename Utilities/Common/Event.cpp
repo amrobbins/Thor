@@ -42,6 +42,8 @@ int32_t Event::getGpuNum() const {
     return gpuNum;
 }
 
+bool Event::isInitialized() const { return initialized(); }
+
 void Event::synchronize() {
     THOR_THROW_IF_FALSE(!uninitialized());
 
