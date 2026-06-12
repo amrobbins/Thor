@@ -196,10 +196,10 @@ class Concatenate : public MultiConnectionLayer {
         }
 
         Event readyEvent = streams[0].putEvent();
-        previousLayers[0].value()->backward(errorOutputs[0]);
+        previousLayers[0].value()->backward(errorOutputs[0], batchSize);
         for (unsigned int i = 1; i < errorOutputs.size(); ++i) {
             streams[i].waitEvent(readyEvent);
-            previousLayers[i].value()->backward(errorOutputs[i]);
+            previousLayers[i].value()->backward(errorOutputs[i], batchSize);
         }
     }
 

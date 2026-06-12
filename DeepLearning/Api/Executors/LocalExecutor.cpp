@@ -291,6 +291,10 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
 
     double averageTrainingBatchTime = -1;
     double averageValidationBatchTime = -1;
+    ThorImplementation::StampedNetwork& statsStampedNetwork = placedNetwork->getStampedNetwork(0);
+    const uint64_t batchSizeForFlops = loader->getBatchSize();
+    const uint64_t forwardFlopsPerBatch = statsStampedNetwork.getFloatingPointOperationsPerExampleForward() * batchSizeForFlops;
+    const uint64_t trainingFlopsPerBatch = statsStampedNetwork.getFloatingPointOperationsPerExampleTraining() * batchSizeForFlops;
     const auto runStart = std::chrono::high_resolution_clock::now();
 
     auto elapsedSinceRunStart = [&]() {
@@ -369,6 +373,8 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
                 if (averageTrainingBatchTime > 0.0) {
                     snapshot.samplesPerSecond = static_cast<double>(batchSize) / averageTrainingBatchTime;
                     snapshot.batchesPerSecond = 1.0 / averageTrainingBatchTime;
+                    snapshot.floatingPointOperationsPerBatch = trainingFlopsPerBatch;
+                    snapshot.floatingPointOperationsPerSecond = static_cast<double>(trainingFlopsPerBatch) / averageTrainingBatchTime;
                 }
                 if (optimizerParameters.count("currentLearningRate") > 0) {
                     snapshot.learningRate = optimizerParameters["currentLearningRate"];
@@ -429,6 +435,8 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
                 if (averageValidationBatchTime > 0.0) {
                     snapshot.samplesPerSecond = static_cast<double>(batchSize) / averageValidationBatchTime;
                     snapshot.batchesPerSecond = 1.0 / averageValidationBatchTime;
+                    snapshot.floatingPointOperationsPerBatch = forwardFlopsPerBatch;
+                    snapshot.floatingPointOperationsPerSecond = static_cast<double>(forwardFlopsPerBatch) / averageValidationBatchTime;
                 }
                 if (optimizerParameters.count("currentLearningRate") > 0) {
                     snapshot.learningRate = optimizerParameters["currentLearningRate"];

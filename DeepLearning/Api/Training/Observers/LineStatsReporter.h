@@ -2,7 +2,7 @@
 
 #include "DeepLearning/Api/Training/Observers/TrainingObserver.h"
 
-#include <iosfwd>
+#include <cstdio>
 #include <optional>
 #include <string>
 
@@ -12,7 +12,7 @@ enum class LineStatsColorMode { AUTO, NEVER, ALWAYS };
 
 class LineStatsReporter : public TrainingObserver {
    public:
-    explicit LineStatsReporter(std::ostream& output,
+    explicit LineStatsReporter(std::FILE* output,
                                double intervalSeconds = 10.0,
                                bool enabled = true,
                                LineStatsColorMode colorMode = LineStatsColorMode::AUTO);
@@ -31,7 +31,7 @@ class LineStatsReporter : public TrainingObserver {
     void setColorMode(LineStatsColorMode colorMode) { this->colorMode = colorMode; }
     [[nodiscard]] LineStatsColorMode getColorMode() const { return colorMode; }
 
-    [[nodiscard]] static bool isAnsiColorSupported(std::ostream& output);
+    [[nodiscard]] static bool isAnsiColorSupported(std::FILE* output);
     [[nodiscard]] static std::string formatStatsLine(const TrainingStatsSnapshot& stats);
     [[nodiscard]] static std::string formatElapsedSeconds(double elapsedSeconds);
 
@@ -39,9 +39,9 @@ class LineStatsReporter : public TrainingObserver {
     bool shouldPrintStats(const TrainingStatsSnapshot& stats);
     [[nodiscard]] bool shouldUseColor() const;
     void writeStatsLine(const TrainingStatsSnapshot& stats);
-    void writeColorStatsLine(const TrainingStatsSnapshot& stats);
+    void emitLine(const std::string& line);
 
-    std::ostream* output;
+    std::FILE* outputFile;
     double intervalSeconds;
     bool enabled;
     LineStatsColorMode colorMode;

@@ -40,6 +40,11 @@ class StampedNetwork {
 
    public:
     uint32_t getGpuNum() const { return gpuNum; }
+    uint64_t getFloatingPointOperationsPerExampleForward() const { return floatingPointOperationsPerExampleForward; }
+    uint64_t getFloatingPointOperationsPerExampleBackward() const { return floatingPointOperationsPerExampleBackward; }
+    uint64_t getFloatingPointOperationsPerExampleTraining() const {
+        return floatingPointOperationsPerExampleForward + floatingPointOperationsPerExampleBackward;
+    }
     std::vector<std::shared_ptr<ThorImplementation::NetworkInput>> getInputs() { return inputsShared; }
     std::vector<std::shared_ptr<ThorImplementation::NetworkOutput>> getOutputs() { return outputsShared; }
 

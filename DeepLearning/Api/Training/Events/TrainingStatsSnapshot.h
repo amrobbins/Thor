@@ -28,6 +28,8 @@ struct TrainingStatsSnapshot {
     double elapsedSeconds = 0.0;
     double samplesPerSecond = 0.0;
     double batchesPerSecond = 0.0;
+    uint64_t floatingPointOperationsPerBatch = 0;
+    double floatingPointOperationsPerSecond = 0.0;
 
     std::optional<double> loss{};
     std::optional<double> accuracy{};

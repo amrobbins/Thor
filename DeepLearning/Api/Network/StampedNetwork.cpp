@@ -1,6 +1,8 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Network/StampedNetwork.h"
 #include "DeepLearning/Implementation/Layers/TrainableLayer.h"
+
+#include <limits>
 #include <optional>
 
 namespace ThorImplementation {
@@ -107,17 +109,40 @@ Event StampedNetwork::sendBatch(std::map<std::string, Tensor> batchInputs,
                                 bool isInferenceOnly) {
     THOR_THROW_IF_FALSE(batchInputs.size() == inputs.size());
 
+    std::optional<uint32_t> batchSize;
+    for (const auto &[inputName, inputTensor] : batchInputs) {
+        (void)inputName;
+        const std::vector<uint64_t> dimensions = inputTensor.getDescriptor().getDimensions();
+        THOR_THROW_IF_FALSE(!dimensions.empty());
+        THOR_THROW_IF_FALSE(dimensions[0] <= std::numeric_limits<uint32_t>::max());
+        if (!batchSize.has_value()) {
+            batchSize = static_cast<uint32_t>(dimensions[0]);
+        } else {
+            THOR_THROW_IF_FALSE(batchSize.value() == dimensions[0]);
+        }
+    }
+    THOR_THROW_IF_FALSE(batchSize.has_value());
+
     for (uint32_t i = 0; i < inputs.size(); ++i) {
         auto it = batchInputs.find(inputs[i]->getName());
         THOR_THROW_IF_FALSE(it != batchInputs.end());
         Tensor inputTensor = it->second;
-        inputs[i]->forward(inputTensor, isInferenceOnly);
+        inputs[i]->forward(inputTensor, isInferenceOnly, batchSize.value());
     }
 
-    // The stream from input 0 waits for all outputs to be ready
+    // The stream from input 0 waits for all outputs to be ready.
+    //
+    // NetworkOutput may offload its value through a dedicated download stream when
+    // the requested output placement differs from the producing layer placement
+    // (for example GPU loss -> CPU stats tensor).  In that case getStream() is the
+    // producing/compute stream, not the stream that owns the final D2H copy.  Waiting
+    // on a fresh event from getStream() can therefore release host callbacks before
+    // the CPU output buffer contains the current batch.  The NetworkOutput-owned
+    // outputReadyEvent is recorded after the final copy to the public output tensor,
+    // so downstream consumers must wait on that event instead.
     for (uint32_t i = 0; i < outputs.size(); ++i) {
         batchOutputs[outputs[i]->getName()] = outputs[i]->getFeatureOutput().value();
-        Event outputReadyEvent = outputs[i]->getStream().putEvent();
+        Event outputReadyEvent = outputs[i]->getOutputReadyEvent();
         outputReadyEvents[outputs[i]->getName()] = outputReadyEvent;
         inputs[0]->getStream().waitEvent(outputReadyEvent);
     }

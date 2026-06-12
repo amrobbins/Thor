@@ -87,8 +87,14 @@ class Loss : public Layer {
             THOR_THROW_IF_FALSE(featureInput.value().getPlacement() == labelsInput.value().getPlacement());
         }
 
-        // Allocates this->featureInput and this->errorOutput
-        Layer::connectToPreviousLayer(predictionsInputLayer, featureInput, stream, backPropagateError);
+        // Losses are gradient origins during training.  The upstream layer may currently appear to be a
+        // back-prop stub when another non-training consumer, such as a NetworkOutput used for stats/debug
+        // reporting, was connected first.  Still allocate the loss error output for training so later
+        // prediction-side connections can receive the gradient that the loss computes internally.
+        const bool createTrainingErrorOutput = backPropagateError || !isInferenceOnly();
+
+        // Allocates this->featureInput and this->errorOutput.
+        Layer::connectToPreviousLayer(predictionsInputLayer, featureInput, stream, createTrainingErrorOutput);
 
         return errorOutput;
     }
