@@ -70,7 +70,13 @@ void StepExecutable::validate() const {
         throw std::runtime_error("StepExecutable resolved update parameter count does not match logical reference count.");
     }
     if (!updateParameterReferences.empty() && optimizer == nullptr) {
-        throw std::runtime_error("StepExecutable with update parameters requires an optimizer.");
+        for (const BoundParameter& parameter : resolvedUpdateParameters) {
+            if (!parameter.hasOptimizer()) {
+                throw std::runtime_error(
+                    "StepExecutable update parameter '" + parameter.getName() +
+                    "' does not have an optimizer. Provide a step optimizer, a network default optimizer, or a layer/parameter optimizer override.");
+            }
+        }
     }
 
     std::set<std::string> seenNetworkInputNames;

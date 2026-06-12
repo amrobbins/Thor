@@ -99,6 +99,8 @@ void BoundParameter::setTrainingEnabled(bool enabled) {
 
 bool BoundParameter::hasOptimizer() const { return parameter->hasOptimizer(); }
 
+std::shared_ptr<Optimizer> BoundParameter::getOptimizer() const { return parameter->getOptimizer(); }
+
 json BoundParameter::serialize(json parameterJson,
                                std::shared_ptr<ParameterSpecification> parameterSpecification,
                                thor_file::TarWriter& archiveWriter,

@@ -24,13 +24,20 @@ void PlacedNetwork::save(const std::string &directory, bool overwrite, bool save
 
 std::map<std::string, ThorImplementation::Tensor> PlacedNetwork::infer(std::map<std::string, ThorImplementation::Tensor> batchInputs,
                                                                        uint64_t stampIndex) {
-    THOR_THROW_IF_FALSE(stampIndex < stampedNetworks.size());
-
     std::map<std::string, ThorImplementation::Tensor> batchOutputs;
     std::map<std::string, Event> outputReadyEvents;
-    Event done = stampedNetworks[stampIndex].sendBatch(std::move(batchInputs), batchOutputs, outputReadyEvents, true);
+    Event done = submitBatch(stampIndex, std::move(batchInputs), batchOutputs, outputReadyEvents, true);
     done.synchronize();
     return batchOutputs;
+}
+
+Event PlacedNetwork::submitBatch(uint64_t stampIndex,
+                                 std::map<std::string, ThorImplementation::Tensor> batchInputs,
+                                 std::map<std::string, ThorImplementation::Tensor>& batchOutputs,
+                                 std::map<std::string, Event>& outputReadyEvents,
+                                 bool isInferenceOnly) {
+    THOR_THROW_IF_FALSE(stampIndex < stampedNetworks.size());
+    return stampedNetworks[stampIndex].sendBatch(std::move(batchInputs), batchOutputs, outputReadyEvents, isInferenceOnly);
 }
 
 BoundParameter PlacedNetwork::resolveParameterReference(const ParameterReference& parameterReference) {

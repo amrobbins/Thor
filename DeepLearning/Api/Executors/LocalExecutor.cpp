@@ -18,7 +18,6 @@ using namespace std;
 
 shared_ptr<LocalExecutor> LocalExecutor::Builder::build() {
     THOR_THROW_IF_FALSE(_loader);
-    THOR_THROW_IF_FALSE(_optimizer);
     // FIXME: add hyperparameter controller
     // THOR_THROW_IF_FALSE(_hyperparameterController.has_value());
 
@@ -38,6 +37,8 @@ shared_ptr<LocalExecutor> LocalExecutor::Builder::build() {
     localExecutor->observers = observers_.value();
     localExecutor->statsEnabled = statsEnabled_;
     localExecutor->statsIntervalSeconds = statsIntervalSeconds_;
+    localExecutor->maxInFlightBatches = maxInFlightBatches_;
+    localExecutor->synchronizeAfterEveryBatch = synchronizeAfterEveryBatch_;
 
     if (!_outputDirectory.has_value()) {
         std::filesystem::path outputPath = std::filesystem::absolute(std::filesystem::path("./")).string();
@@ -48,12 +49,31 @@ shared_ptr<LocalExecutor> LocalExecutor::Builder::build() {
 
     uint64_t batchSize = localExecutor->loader->getBatchSize();
 
+    if (_network->getDefaultOptimizer() == nullptr && !_network->allTrainingEnabledParametersHaveOptimizers()) {
+        std::shared_ptr<Optimizer> fallbackOptimizer = _optimizer;
+        if (fallbackOptimizer == nullptr && trainingProgram_.has_value() && trainingProgram_->getNumSteps() == 1) {
+            fallbackOptimizer = trainingProgram_->getStep(0).getOptimizer();
+        }
+        if (fallbackOptimizer != nullptr) {
+            _network->setDefaultOptimizer(fallbackOptimizer);
+        }
+    }
+
     // Place the network
     // FIXME: stamp N networks per GPU, currently just stamping 1 network on gpu 0.
     vector<Event> initDoneEvents;
     localExecutor->placedNetwork = _network->place(batchSize, initDoneEvents);
 
     THOR_THROW_IF_FALSE(localExecutor->placedNetwork->getNumStamps() >= 1);
+
+    if (trainingProgram_.has_value()) {
+        localExecutor->executableTrainingPlan = ExecutableTrainingPlan::compile(trainingProgram_.value(), *localExecutor->placedNetwork);
+        localExecutor->executableTrainingPlan->assertLegacyLocalExecutorCompatible();
+        std::shared_ptr<Optimizer> stepOptimizer = localExecutor->executableTrainingPlan->getStep(0).getOptimizer();
+        if (stepOptimizer != nullptr) {
+            localExecutor->optimizer = stepOptimizer;
+        }
+    }
 
     localExecutor->batchDataReady = make_shared<map<uint64_t, bool>>();
     localExecutor->batchData = make_shared<unordered_map<uint64_t, unordered_map<string, vector<uint8_t>>>>();
@@ -76,6 +96,9 @@ shared_ptr<LocalExecutor> LocalExecutor::Builder::build() {
 LocalExecutor::~LocalExecutor() = default;
 
 void LocalExecutor::emitTrainingEvent(const TrainingEvent &event) {
+    if (!statsEnabled && event.type == TrainingEventType::STATS) {
+        return;
+    }
     for (const shared_ptr<TrainingObserver> &observer : observers) {
         if (observer) {
             observer->onTrainingEvent(event);
@@ -189,10 +212,10 @@ void LocalExecutor::trainBatches(uint64_t initialEpochBatchNum, uint64_t batches
 
         {
             unique_lock<mutex> lck(*epochMutex);
-            (*(batchDataReady))[epochBatchNum] = false;
-            while (batchDataReady->size() > 32) {
+            while (batchDataReady->size() >= maxInFlightBatches) {
                 batchDataPopped.wait(lck);
             }
+            (*(batchDataReady))[epochBatchNum] = false;
         }
 
         for (uint64_t batchlet = 0; batchlet < batchletsPerBatch; ++batchlet) {
@@ -234,6 +257,9 @@ void LocalExecutor::trainBatches(uint64_t initialEpochBatchNum, uint64_t batches
             cudaStatus = cudaLaunchHostFunc(stream, bufferStampTensors, bufferStampTensorsParams);
             THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
             processingFinishedEvents[nextStampToProcess] = stream.putEvent();
+            if (synchronizeAfterEveryBatch) {
+                processingFinishedEvents[nextStampToProcess].synchronize();
+            }
 
             nextStampToProcess += 1;
             nextStampToProcess %= placedNetwork->getNumStamps();
@@ -253,6 +279,11 @@ void LocalExecutor::trainBatches(uint64_t initialEpochBatchNum, uint64_t batches
         processingFinishedEvent.synchronize();  // FIXME: temp
     }
     */
+}
+
+uint64_t LocalExecutor::getOutstandingBatchCount() const {
+    unique_lock<mutex> lck(*epochMutex);
+    return batchDataReady->size();
 }
 
 void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn) {
@@ -288,6 +319,7 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
         snapshot.batchSize = batchSize;
         snapshot.stepsPerEpoch = batchesPerEpoch;
         snapshot.elapsedSeconds = elapsedSinceRunStart();
+        snapshot.inFlightBatches = getOutstandingBatchCount();
         return snapshot;
     };
 
@@ -323,7 +355,10 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
                 else
                     averageTrainingBatchTime = 0.05 * elapsed.count() + 0.95 * averageTrainingBatchTime;
 
-                unordered_map<string, float> optimizerParameters = optimizer->getAllHyperParameters(placedNetwork.get());
+                unordered_map<string, float> optimizerParameters;
+                if (optimizer != nullptr) {
+                    optimizerParameters = optimizer->getAllHyperParameters(placedNetwork.get());
+                }
 
                 batchData = popBatchData();
 
@@ -380,7 +415,10 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
                 else
                     averageValidationBatchTime = 0.05 * elapsed.count() + 0.95 * averageValidationBatchTime;
 
-                unordered_map<string, float> optimizerParameters = optimizer->getAllHyperParameters(placedNetwork.get());
+                unordered_map<string, float> optimizerParameters;
+                if (optimizer != nullptr) {
+                    optimizerParameters = optimizer->getAllHyperParameters(placedNetwork.get());
+                }
 
                 batchData = popBatchData();
 

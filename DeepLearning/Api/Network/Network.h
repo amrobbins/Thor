@@ -116,6 +116,9 @@ class Network {
     virtual std::string architectureJsonString() const;
 
     std::shared_ptr<Optimizer> getDefaultOptimizer();
+    void setDefaultOptimizer(std::shared_ptr<Optimizer> optimizer);
+    bool allTrainingEnabledParametersHaveOptimizers() const;
+    std::vector<Tensor> getLossRootTensors() const;
     void freezeTraining();
     void unfreezeTraining();
 
