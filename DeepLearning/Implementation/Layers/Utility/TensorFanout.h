@@ -4,6 +4,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
+#include "DeepLearning/Implementation/Layers/CustomLayer.h"
 
 #include <unordered_set>
 
@@ -50,6 +51,34 @@ class TensorFanout : public MultiConnectionLayer {
 
     std::optional<Tensor> createFeatureOutputTensor() override { return std::nullopt; }
 
+    bool registerFusedCustomLossGradientWithDrivingLayer(const Tensor& predictions,
+                                                         const Tensor& labels,
+                                                         DynamicExpression gradientExpression,
+                                                         std::string predictionsName,
+                                                         std::string labelsName,
+                                                         std::string gradientName) {
+        if (isInferenceOnly())
+            return false;
+        if (featureInputs.size() != 1 || !featureInputs[0].has_value() || featureInputs[0].value() != predictions)
+            return false;
+        if (previousLayers.size() != 1 || !previousLayers[0].has_value())
+            return false;
+
+        auto* customLayer = dynamic_cast<CustomLayer*>(previousLayers[0].value());
+        if (customLayer == nullptr)
+            return false;
+
+        fusedCustomLossGradientRegisteredWithDrivingLayer = customLayer->registerFusedCustomLossGradient(predictions,
+                                                                                                           labels,
+                                                                                                           std::move(gradientExpression),
+                                                                                                           std::move(predictionsName),
+                                                                                                           std::move(labelsName),
+                                                                                                           std::move(gradientName));
+        if (fusedCustomLossGradientRegisteredWithDrivingLayer)
+            fusedCustomLossGradientPredictions = predictions;
+        return fusedCustomLossGradientRegisteredWithDrivingLayer;
+    }
+
     // allocate anything needed for execution, choose optimal kernels, etc.
     void compileImpl() override {
         MultiConnectionLayer::compileImpl();
@@ -76,6 +105,15 @@ class TensorFanout : public MultiConnectionLayer {
                 cudaMemcpy(errorInputArray_d, errorInputArray, numPresentTensors(errorInputs) * sizeof(half *), cudaMemcpyHostToDevice);
             THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
             delete[] errorInputArray;
+        }
+
+        if (fusedCustomLossGradientRegisteredWithDrivingLayer &&
+            !(numPresentTensors(errorInputs) == 1 && numPresentTensors(errorOutputs) == 1)) {
+            THOR_THROW_IF_FALSE(previousLayers.size() == 1 && previousLayers[0].has_value());
+            auto* customLayer = dynamic_cast<CustomLayer*>(previousLayers[0].value());
+            THOR_THROW_IF_FALSE(customLayer != nullptr);
+            THOR_THROW_IF_FALSE(customLayer->unregisterFusedCustomLossGradient(fusedCustomLossGradientPredictions));
+            fusedCustomLossGradientRegisteredWithDrivingLayer = false;
         }
 
         // When there is only one layer that back propagates (for example if the fanout is just to connect the tensor to a network output),
@@ -241,6 +279,10 @@ class TensorFanout : public MultiConnectionLayer {
         }
         return multiplier;
     }
+
+   private:
+    bool fusedCustomLossGradientRegisteredWithDrivingLayer = false;
+    Tensor fusedCustomLossGradientPredictions;
 
    protected:
     half **errorInputArray_d = nullptr;

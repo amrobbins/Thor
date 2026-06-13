@@ -34,6 +34,8 @@ class NetworkOutput : public Layer {
 
     virtual Event getOutputReadyEvent() { return outputReadyEvent; }
 
+    virtual void extendOutputWritableEvent(Event event) { outputWritableEvent = event; }
+
     std::optional<Tensor> createFeatureOutputTensor() override {
         THOR_THROW_IF_FALSE(!featureInput.has_value() == !outputPlacement.has_value());
 
@@ -45,6 +47,7 @@ class NetworkOutput : public Layer {
             outputBuffer = featureInput.value().clone();
             outputStream = Stream::getNextDownloadStream(featureInput.value().getPlacement().getDeviceNum());
             outputReadyEvent = outputStream.value().putEvent(false, true);
+            outputWritableEvent = outputReadyEvent;
             return featureInput.value().clone(outputPlacement.value());
         } else {
             return featureInput.value().clone(outputPlacement.value());
@@ -56,8 +59,12 @@ class NetworkOutput : public Layer {
 
         if (inputTensor.has_value()) {
             if (outputPlacement.value() == featureInput.value().getPlacement()) {
+                if (outputWritableEvent.isInitialized()) {
+                    stream.waitEvent(outputWritableEvent);
+                }
                 outputTensor.value().copyFromAsync(inputTensor.value(), stream);
-                outputReadyEvent = stream.putEvent(false, true);
+                stream.putEvent(outputReadyEvent, false, true);
+                outputWritableEvent = outputReadyEvent;
             } else {
                 THOR_THROW_IF_FALSE(outputBuffer.has_value());
                 THOR_THROW_IF_FALSE(outputStream.has_value());
@@ -68,12 +75,18 @@ class NetworkOutput : public Layer {
                 // Copy to the on device buffer, then stream is unblocked
                 outputBuffer.value().copyFromAsync(inputTensor.value(), stream);
 
-                // output stream waits for copy to buffer to complete
-                // output buffer is offloaded to the other device
-                // an event is placed on the output stream to indicate when the offload copy is complete
-                outputStream.value().waitEvent(stream.putEvent());
+                // output stream waits for copy to buffer to complete.  The public output tensor
+                // may still be owned by a queued host stats callback, so only the offload stream
+                // waits for the output-writable event.  The main input/compute stream only waits
+                // for outputReadyEvent above, which means the GPU scratch outputBuffer is reusable.
+                stream.putEvent(outputBufferReadyEvent);
+                outputStream.value().waitEvent(outputBufferReadyEvent);
+                if (outputWritableEvent.isInitialized()) {
+                    outputStream.value().waitEvent(outputWritableEvent);
+                }
                 outputTensor.value().copyFromAsync(outputBuffer.value(), outputStream.value());
-                outputReadyEvent = outputStream.value().putEvent(false, true);
+                outputStream.value().putEvent(outputReadyEvent, false, true);
+                outputWritableEvent = outputReadyEvent;
             }
         }
     }
@@ -84,6 +97,8 @@ class NetworkOutput : public Layer {
 
    protected:
     Event outputReadyEvent;
+    Event outputWritableEvent;
+    Event outputBufferReadyEvent;
 
     std::optional<TensorPlacement> outputPlacement;
 

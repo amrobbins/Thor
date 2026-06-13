@@ -584,6 +584,29 @@ bool CustomLayer::registerFusedCustomLossGradient(const Tensor& predictions,
     return true;
 }
 
+bool CustomLayer::unregisterFusedCustomLossGradient(const Tensor& predictions) {
+    if (isInferenceOnly() || isCompiled()) {
+        return false;
+    }
+
+    ensurePortStorageAllocated();
+
+    std::optional<uint32_t> matchedFlatIndex;
+    for (uint32_t flat = 0; flat < featureOutputs.size(); ++flat) {
+        if (featureOutputs[flat].has_value() && featureOutputs[flat].value() == predictions) {
+            if (matchedFlatIndex.has_value()) {
+                return false;
+            }
+            matchedFlatIndex = flat;
+        }
+    }
+
+    if (!matchedFlatIndex.has_value()) {
+        return false;
+    }
+    return fusedCustomLossGradientByOutputFlatIndex.erase(matchedFlatIndex.value()) != 0;
+}
+
 PhysicalOutputs CustomLayer::buildBackwardOutputsForApplication(uint32_t applicationIndex,
                                                                 const std::vector<std::string>& wrtNames,
                                                                 bool accumulateGradOutputs) {

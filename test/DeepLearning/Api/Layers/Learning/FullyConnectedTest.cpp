@@ -11,6 +11,7 @@
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
 #include "test/DeepLearning/Api/Helpers/GradientRivet.h"
 
+#include <regex>
 #include "cuda_fp16.h"
 #include "gtest/gtest.h"
 
@@ -361,9 +362,7 @@ std::shared_ptr<LayerT> findOnlyLayerOfType(Api::Network& network) {
     return found;
 }
 
-float geluReference(float x) {
-    return 0.5f * x * (1.0f + std::erf(x / std::sqrt(2.0f)));
-}
+float geluReference(float x) { return 0.5f * x * (1.0f + std::erf(x / std::sqrt(2.0f))); }
 
 float cublasLtGeluReference(float x) {
     constexpr float kSqrtTwoOverPi = 0.7978845608028654f;
@@ -455,7 +454,7 @@ TEST(FullyConnectedApi, StampsAsPhysicalCustomLayerAndAllocatesParameters) {
     PlacedFullyConnectedFixture fixture = placeSingleFullyConnectedNetwork(network, input, output, fc, batchSize, true);
 
     ASSERT_EQ(fixture.stampedNetwork->getNumTrainableLayers(), 1u);
-    EXPECT_EQ(fixture.physicalFc->getLayerType(), "CustomLayer<FullyConnected>");
+    EXPECT_TRUE(std::regex_match(fixture.physicalFc->getLayerType(), std::regex(R"(CustomLayer<FullyConnected#[0-9]+>)")));
     EXPECT_EQ(fixture.physicalFc->listParameters(), (vector<string>{"weights", "biases"}));
 
     Impl::Tensor weights = fixture.physicalFc->getParameter("weights")->getStorage().value();

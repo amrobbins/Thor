@@ -107,7 +107,8 @@ Event StampedNetwork::sendBatch(std::map<std::string, Tensor> batchInputs,
                                 std::map<std::string, Tensor> &batchOutputs,
                                 std::map<std::string, Event> &outputReadyEvents,
                                 bool isInferenceOnly,
-                                Event* reusableProcessingFinishedEvent) {
+                                Event* reusableProcessingFinishedEvent,
+                                bool waitForOutputsOnProcessingStream) {
     THOR_THROW_IF_FALSE(batchInputs.size() == inputs.size());
 
     std::optional<uint32_t> batchSize;
@@ -131,24 +132,25 @@ Event StampedNetwork::sendBatch(std::map<std::string, Tensor> batchInputs,
         inputs[i]->forward(inputTensor, isInferenceOnly, batchSize.value());
     }
 
-    // The stream from input 0 waits for all outputs to be ready.
-    //
-    // NetworkOutput may offload its value through a dedicated download stream when
-    // the requested output placement differs from the producing layer placement
-    // (for example GPU loss -> CPU stats tensor).  In that case getStream() is the
-    // producing/compute stream, not the stream that owns the final D2H copy.  Waiting
-    // on a fresh event from getStream() can therefore release host callbacks before
-    // the CPU output buffer contains the current batch.  The NetworkOutput-owned
-    // outputReadyEvent is recorded after the final copy to the public output tensor,
-    // so downstream consumers must wait on that event instead.
+    // Capture each NetworkOutput-owned ready event.  NetworkOutput may offload its
+    // value through a dedicated download stream when the requested output placement
+    // differs from the producing layer placement (for example GPU loss -> CPU stats
+    // tensor).  In that case getStream() is the producing/compute stream, not the
+    // stream that owns the final D2H copy.  Consumers that need materialized outputs
+    // must wait on the NetworkOutput ready event, not on the producer stream.
     for (uint32_t i = 0; i < outputs.size(); ++i) {
         batchOutputs[outputs[i]->getName()] = outputs[i]->getFeatureOutput().value();
         Event outputReadyEvent = outputs[i]->getOutputReadyEvent();
         outputReadyEvents[outputs[i]->getName()] = outputReadyEvent;
-        inputs[0]->getStream().waitEvent(outputReadyEvent);
+        if (waitForOutputsOnProcessingStream) {
+            inputs[0]->getStream().waitEvent(outputReadyEvent);
+        }
     }
 
-    // Processing is finished when the stream from input 0 is ready.
+    // Processing is finished when the stream from input 0 is ready.  The native queued
+    // trainer deliberately does not fold CPU output/stat readiness back into this stream;
+    // it waits for outputReadyEvents on a side stream so the single stamp can queue
+    // future input work while host stat extraction catches up.
     // The native queued trainer passes a per-in-flight reusable event here so the
     // hot training path does not allocate/destroy a CUDA event for every batch.
     Event processingFinishedEvent;
@@ -205,6 +207,12 @@ void StampedNetwork::clear() {
     apiTensorToApiDrivingLayerShared.clear();
     inputNamedShared.clear();
     outputNamedShared.clear();
+}
+
+void StampedNetwork::extendOutputWritableEvents(Event event) {
+    for (NetworkOutput* output : outputs) {
+        output->extendOutputWritableEvent(event);
+    }
 }
 
 }  // namespace ThorImplementation

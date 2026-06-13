@@ -93,7 +93,10 @@ class StampedNetwork {
                     std::map<std::string, Tensor> &batchOutputs,
                     std::map<std::string, Event> &outputReadyEvents,
                     bool isInferenceOnly,
-                    Event* reusableProcessingFinishedEvent = nullptr);
+                    Event* reusableProcessingFinishedEvent = nullptr,
+                    bool waitForOutputsOnProcessingStream = true);
+
+    void extendOutputWritableEvents(Event event);
 
     void clear();
 
