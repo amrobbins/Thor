@@ -2,6 +2,7 @@
 #include "DeepLearning/Implementation/Layers/Loss/WeightedLossExpression.h"
 
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
+#include "DeepLearning/Implementation/Layers/Utility/TensorFanout.h"
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Expression/FusedEquation.h"
 
@@ -198,16 +199,29 @@ void CustomLoss::tryFuseGradientIntoDrivingLayer() {
     }
 
     auto* customLayer = dynamic_cast<CustomLayer*>(previousLayer.value());
-    if (customLayer == nullptr) {
+    if (customLayer != nullptr) {
+        gradientFusedIntoDrivingLayer = customLayer->registerFusedCustomLossGradient(featureInput.value(),
+                                                                                     labelsInput.value(),
+                                                                                     weightedGradientExpression(),
+                                                                                     predictionsName,
+                                                                                     labelsName,
+                                                                                     gradientName);
         return;
     }
 
-    gradientFusedIntoDrivingLayer = customLayer->registerFusedCustomLossGradient(featureInput.value(),
-                                                                                 labelsInput.value(),
-                                                                                 weightedGradientExpression(),
-                                                                                 predictionsName,
-                                                                                 labelsName,
-                                                                                 gradientName);
+    // A reporting/debug output connected to the predictions tensor inserts a TensorFanout
+    // between the driving CustomLayer and the loss.  The fanout still forwards the same
+    // predictions tensor, so let it register the fused loss gradient on its single upstream
+    // CustomLayer while the loss forward path below continues to materialize into featureOutput.
+    auto* tensorFanout = dynamic_cast<TensorFanout*>(previousLayer.value());
+    if (tensorFanout != nullptr) {
+        gradientFusedIntoDrivingLayer = tensorFanout->registerFusedCustomLossGradientWithDrivingLayer(featureInput.value(),
+                                                                                                      labelsInput.value(),
+                                                                                                      weightedGradientExpression(),
+                                                                                                      predictionsName,
+                                                                                                      labelsName,
+                                                                                                      gradientName);
+    }
 }
 
 std::optional<Tensor> CustomLoss::connectToPredictionsInputLayer(Layer* predictionsInputLayer,
@@ -245,6 +259,9 @@ void CustomLoss::compileImpl() {
     validateExpressionOutputNames(gradientExpression, gradientName, "gradient");
 
     TensorMap inputs = buildLossInputs();
+    // Always stamp the loss forward expression into featureOutput.  Fusing the loss gradient
+    // only changes the backward seed path; it must not redirect or duplicate the materialized
+    // loss tensor used by NetworkOutput/LossShaper/stat reporting.
     TensorMap lossOutputs = buildLossOutputs();
     lossPrepared = std::make_shared<PreparedDynamicExpression>(weightedLossExpression().prepare(inputs, lossOutputs, stream));
     lossPreRunHook = lossPrepared->preForwardHook();

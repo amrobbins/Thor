@@ -378,13 +378,15 @@ class NativeQueuedEpochScheduler {
         uint64_t nextStampToProcess = 0;
         std::vector<std::map<std::string, Event>> outputReadyEvents(placedNetwork->getNumStamps());
         std::vector<Event> processingFinishedEvents(options.maxInFlightBatches);
+        std::vector<Event> completionFinishedEvents(options.maxInFlightBatches);
         std::vector<Stream> completionStreams;
         completionStreams.reserve(placedNetwork->getNumStamps());
         for (uint64_t stamp = 0; stamp < placedNetwork->getNumStamps(); ++stamp) {
             ThorImplementation::StampedNetwork& stampedNetwork = placedNetwork->getStampedNetwork(stamp);
             std::vector<std::shared_ptr<ThorImplementation::NetworkInput>> inputs = stampedNetwork.getInputs();
             THOR_THROW_IF_FALSE(!inputs.empty());
-            completionStreams.push_back(inputs[0]->getStream());
+            const int gpuNum = inputs[0]->getStream().getGpuNum();
+            completionStreams.push_back(Stream::getNextDownloadStream(gpuNum));
         }
         const bool validationPass = exampleType != ExampleType::TRAIN;
         const std::vector<StepExecutable>& steps = plan.getSteps();
@@ -442,13 +444,28 @@ class NativeQueuedEpochScheduler {
                                                params->batchOutput,
                                                outputReadyEvents[nextStampToProcess],
                                                validationPass,
-                                               &processingFinishedEvents[slotIndex]);
+                                               &processingFinishedEvents[slotIndex],
+                                               /*waitForOutputsOnProcessingStream=*/false);
                 }
             }
 
+            // Keep CPU stats/output completion off the stamp's input stream.  The input stream
+            // event is the point where the GPU training work is done enough for the next batch
+            // to be queued on this single stamp.  Output tensors that are copied through
+            // NetworkOutput-owned download streams are waited on here, and the host callback
+            // snapshots the shared CPU output tensors into per-slot scalarStats before those
+            // public output tensors may be reused by a later batch.
             Stream completionStream = completionStreams[nextStampToProcess];
+            completionStream.waitEvent(processingFinishedEvents[slotIndex]);
+            for (const auto& [outputName, outputReadyEvent] : outputReadyEvents[nextStampToProcess]) {
+                (void)outputName;
+                completionStream.waitEvent(outputReadyEvent);
+            }
+
             cudaError_t cudaStatus = cudaLaunchHostFunc(completionStream, completeNativeQueuedBatch, params);
             THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+            completionStream.putEvent(completionFinishedEvents[slotIndex], false, true);
+            placedNetwork->extendOutputWritableEvents(nextStampToProcess, completionFinishedEvents[slotIndex]);
 
             if (options.synchronizeAfterEveryBatch) {
                 completionStream.synchronize();

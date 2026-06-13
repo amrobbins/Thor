@@ -84,6 +84,7 @@ class CustomLayer : public TrainableLayer {
                                          std::string predictionsName,
                                          std::string labelsName,
                                          std::string gradientName);
+    bool unregisterFusedCustomLossGradient(const Tensor& predictions);
     uint32_t getNumFusedCustomLossGradients() const;
 
    protected:
