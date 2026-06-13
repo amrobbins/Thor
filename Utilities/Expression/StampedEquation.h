@@ -336,6 +336,9 @@ struct CompiledAttentionBackward {
 struct BuiltConvolution {
     bool use_cudnn_frontend = false;
     std::shared_ptr<cudnn_frontend::graph::Graph> frontend_graph;
+    // Placement-time autotuning saves the measured execution plan and exact workspace size here.
+    // Runtime execution must use this saved plan directly rather than re-running cuDNN heuristics.
+    int64_t selected_plan_index = -1;
     size_t workspace_bytes = 0;
 
     BuiltConvolution() = default;
