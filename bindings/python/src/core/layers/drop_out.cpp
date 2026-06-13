@@ -1,5 +1,7 @@
 #include <nanobind/nanobind.h>
 
+#include <optional>
+
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Layers/Utility/DropOut.h"
 #include "DeepLearning/Api/Network/Network.h"
@@ -46,6 +48,15 @@ void bind_drop_out(nb::module_ &m) {
                 Input feature tensor for this layer.
             drop_proportion : float
                 Fraction of units to drop (0.0 <= p <= 1.0).
+            )nbdoc")
+        .def(
+            "get_feature_output",
+            [](DropOut &self) -> Tensor {
+                std::optional<Tensor> maybeFeatureOutput = self.getFeatureOutput();
+                return maybeFeatureOutput.value();
+            },
+            R"nbdoc(
+            Return the output tensor produced by this layer.
             )nbdoc")
         .def("get_drop_proportion", &DropOut::getDropProportion);
 }

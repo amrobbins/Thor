@@ -11,12 +11,15 @@
 #include <cstring>
 #include <memory>
 #include <optional>
+#include <set>
 #include <stdexcept>
+#include <unordered_set>
 #include <utility>
 
 #include <nlohmann/json.hpp>
 
 #include "DeepLearning/Api/Loaders/Loader.h"
+#include "DeepLearning/Api/Loaders/LocalBatchLoader.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
 #include "DeepLearning/Api/Parameter/ParameterReference.h"
@@ -29,6 +32,8 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "DeepLearning/Implementation/Tensor/TensorPlacement.h"
+#include "Utilities/Loaders/NoOpDataProcessor.h"
+#include "Utilities/Loaders/ShardedRawDatasetCreator.h"
 #include "Utilities/WorkQueue/AsyncTensorQueue.h"
 #include "bindings/python/src/core/physical/NanobindDTypes.h"
 
@@ -284,6 +289,10 @@ std::set<std::string> stringSetFromVector(std::vector<std::string> values) {
     return std::set<std::string>(values.begin(), values.end());
 }
 
+std::unordered_set<std::string> unorderedStringSetFromVector(const std::vector<std::string>& values) {
+    return std::unordered_set<std::string>(values.begin(), values.end());
+}
+
 LineStatsColorMode lineStatsColorModeFromString(const std::string& value) {
     if (value == "always") {
         return LineStatsColorMode::ALWAYS;
@@ -423,6 +432,105 @@ void bind_training(nb::module_& training) {
     numpy_float16_batch_loader.def("get_num_validate_examples", [](NumpyFloat16BatchLoader& self) { return self.getNumExamples(ExampleType::VALIDATE); });
     numpy_float16_batch_loader.def("get_num_train_batches", [](NumpyFloat16BatchLoader& self) { return self.getNumBatchesPerEpoch(ExampleType::TRAIN); });
     numpy_float16_batch_loader.def("get_num_validate_batches", [](NumpyFloat16BatchLoader& self) { return self.getNumBatchesPerEpoch(ExampleType::VALIDATE); });
+
+    training.def(
+        "create_sharded_raw_dataset",
+        [](const std::vector<std::string>& source_directories,
+           const std::vector<std::string>& dest_directories,
+           const std::string& base_dataset_file_name,
+           uint64_t example_size_in_bytes,
+           ThorImplementation::DataType data_type,
+           uint32_t max_classes) {
+            if (example_size_in_bytes == 0) {
+                throw nb::value_error("example_size_in_bytes must be > 0");
+            }
+            std::vector<std::shared_ptr<Shard>> shards;
+            ShardedRawDatasetCreator creator(unorderedStringSetFromVector(source_directories),
+                                             unorderedStringSetFromVector(dest_directories),
+                                             base_dataset_file_name,
+                                             max_classes);
+            creator.createDataset(std::make_unique<NoOpDataProcessor>(example_size_in_bytes, data_type), shards);
+            std::vector<std::string> shard_paths;
+            shard_paths.reserve(shards.size());
+            for (const auto& shard : shards) {
+                shard_paths.push_back(shard->getFilename());
+            }
+            return shard_paths;
+        },
+        "source_directories"_a,
+        "dest_directories"_a,
+        "base_dataset_file_name"_a,
+        "example_size_in_bytes"_a,
+        "data_type"_a,
+        "max_classes"_a = 0,
+        R"nbdoc(
+Create Thor shard files from an already preprocessed raw dataset directory.
+
+The source directories must contain train/, validate/, and test/ subdirectories,
+each with one subdirectory per class. Every example file is expected to already
+contain exactly example_size_in_bytes bytes in the target tensor layout and dtype.
+NoOpDataProcessor is used, so image decoding/normalization should happen before
+calling this helper.
+        )nbdoc");
+
+    auto local_batch_loader = nb::class_<LocalBatchLoader, Loader>(training, "LocalBatchLoader");
+    local_batch_loader.attr("__module__") = "thor.training";
+    local_batch_loader.def_static(
+        "__new__",
+        [](nb::handle cls,
+           std::vector<std::string> shard_paths,
+           std::vector<uint64_t> example_shape,
+           ThorImplementation::DataType example_data_type,
+           std::vector<uint64_t> label_shape,
+           ThorImplementation::DataType label_data_type,
+           uint64_t batch_size,
+           const std::string& dataset_name) -> std::shared_ptr<LocalBatchLoader> {
+            (void)cls;
+            if (shard_paths.empty()) {
+                throw nb::value_error("LocalBatchLoader requires at least one shard path");
+            }
+            if (example_shape.empty() || label_shape.empty()) {
+                throw nb::value_error("LocalBatchLoader example_shape and label_shape must be non-empty");
+            }
+            if (batch_size == 0) {
+                throw nb::value_error("LocalBatchLoader batch_size must be >= 1");
+            }
+            auto loader = std::make_shared<LocalBatchLoader>(stringSetFromVector(std::move(shard_paths)),
+                                                             ThorImplementation::TensorDescriptor(example_data_type, std::move(example_shape)),
+                                                             ThorImplementation::TensorDescriptor(label_data_type, std::move(label_shape)),
+                                                             batch_size);
+            loader->setDatasetName(dataset_name);
+            return loader;
+        },
+        "cls"_a,
+        "shard_paths"_a,
+        "example_shape"_a,
+        "example_data_type"_a,
+        "label_shape"_a,
+        "label_data_type"_a,
+        "batch_size"_a,
+        "dataset_name"_a = "local_shards");
+    local_batch_loader.def(
+        "__init__",
+        [](LocalBatchLoader*,
+           std::vector<std::string>,
+           std::vector<uint64_t>,
+           ThorImplementation::DataType,
+           std::vector<uint64_t>,
+           ThorImplementation::DataType,
+           uint64_t,
+           const std::string&) {},
+        "shard_paths"_a,
+        "example_shape"_a,
+        "example_data_type"_a,
+        "label_shape"_a,
+        "label_data_type"_a,
+        "batch_size"_a,
+        "dataset_name"_a = "local_shards");
+    local_batch_loader.def("get_num_train_examples", [](LocalBatchLoader& self) { return self.getNumExamples(ExampleType::TRAIN); });
+    local_batch_loader.def("get_num_validate_examples", [](LocalBatchLoader& self) { return self.getNumExamples(ExampleType::VALIDATE); });
+    local_batch_loader.def("get_num_train_batches", [](LocalBatchLoader& self) { return self.getNumBatchesPerEpoch(ExampleType::TRAIN); });
+    local_batch_loader.def("get_num_validate_batches", [](LocalBatchLoader& self) { return self.getNumBatchesPerEpoch(ExampleType::VALIDATE); });
 
     auto trainer_fit_options = nb::class_<TrainerFitOptions>(training, "TrainerFitOptions");
     trainer_fit_options.attr("__module__") = "thor.training";

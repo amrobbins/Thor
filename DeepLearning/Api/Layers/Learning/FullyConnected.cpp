@@ -10,6 +10,7 @@
 #include <limits>
 #include <stdexcept>
 #include <optional>
+#include <set>
 
 using namespace std;
 using json = nlohmann::json;
@@ -119,14 +120,17 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias
                                                                     DataType computeDataType,
                                                                     DataType outputDataType,
                                                                     std::shared_ptr<Thor::Activation> activation,
-                                                                    std::optional<ThorImplementation::Expression> epilogue) {
+                                                                    std::optional<ThorImplementation::Expression> epilogue,
+                                                                    std::vector<std::string> epilogueAuxInputNames) {
     using ThorImplementation::DynamicExpression;
     using ThorImplementation::DynamicExpressionBuild;
     using ThorImplementation::Expression;
     using ThorImplementation::FusedEquation;
     using ThorImplementation::Tensor;
 
-    std::vector<std::string> expectedInputNames = {"feature_input", "weights"};
+    std::vector<std::string> expectedInputNames = {"feature_input"};
+    expectedInputNames.insert(expectedInputNames.end(), epilogueAuxInputNames.begin(), epilogueAuxInputNames.end());
+    expectedInputNames.push_back("weights");
     if (hasBias) {
         expectedInputNames.push_back("biases");
     }
@@ -142,7 +146,14 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias
     return DynamicExpression(
         std::move(expectedInputNames),
         {"feature_output"},
-        [hasBias, placement, weightsDataType, computeDataType, outputDataType, activation = std::move(activationClone), epilogue](
+        [hasBias,
+         placement,
+         weightsDataType,
+         computeDataType,
+         outputDataType,
+         activation = std::move(activationClone),
+         epilogue,
+         epilogueAuxInputNames = std::move(epilogueAuxInputNames)](
             const DynamicExpression::TensorMap& inputs,
             const DynamicExpression::TensorMap& outputs,
             Stream& stream) -> DynamicExpressionBuild {
@@ -244,6 +255,21 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias
             if (activation != nullptr) {
                 fout = activation->toExpression(fout);
             }
+            for (const std::string& auxInputName : epilogueAuxInputNames) {
+                const Tensor& auxTensor = inputs.at(auxInputName);
+                const std::vector<uint64_t> expectedAuxShape = {featureInputDimensions[0], wTensor.getDimensions()[1]};
+                if (auxTensor.getDimensions() != expectedAuxShape) {
+                    throw std::runtime_error("FullyConnected epilogue auxiliary input '" + auxInputName +
+                                             "' shape must match the fully connected feature output shape.");
+                }
+                if (auxTensor.getDataType() != outputDataType) {
+                    throw std::runtime_error("FullyConnected epilogue auxiliary input '" + auxInputName +
+                                             "' dtype must match the fully connected feature output dtype.");
+                }
+                if (auxTensor.getPlacement() != placement) {
+                    throw std::runtime_error("FullyConnected epilogue auxiliary input placement does not match the layer placement.");
+                }
+            }
             if (epilogue.has_value()) {
                 fout = FullyConnected::applyEpilogue(fout, epilogue.value());
             }
@@ -314,6 +340,115 @@ void FullyConnected::verifyFullyConnectedComputeDataType(DataType dataType) {
     }
 }
 
+void FullyConnected::validateEpilogueAuxInputName(const std::string& inputName) {
+    if (inputName.empty()) {
+        throw std::invalid_argument("FullyConnected epilogue auxiliary input name cannot be empty.");
+    }
+    if (inputName.rfind("__", 0) == 0) {
+        throw std::invalid_argument("FullyConnected epilogue auxiliary input names cannot start with __: " + inputName + ".");
+    }
+    static const std::set<std::string> reservedNames = {
+        "feature_input",
+        "feature_output",
+        "weights",
+        "biases",
+        epilogueInputName(),
+        epilogueOutputName(),
+    };
+    if (reservedNames.contains(inputName)) {
+        throw std::invalid_argument("FullyConnected epilogue auxiliary input name is reserved: " + inputName + ".");
+    }
+}
+
+std::vector<std::string> FullyConnected::epilogueAuxInputNames() const {
+    std::vector<std::string> names;
+    names.reserve(epilogueInputBindings.size());
+    for (const auto& [name, tensor] : epilogueInputBindings) {
+        (void)tensor;
+        names.push_back(name);
+    }
+    return names;
+}
+
+std::vector<Tensor> FullyConnected::getFeatureInputs() const {
+    std::vector<Tensor> inputs = featureInputs;
+    inputs.reserve(inputs.size() + epilogueInputBindings.size());
+    for (const auto& [name, tensor] : epilogueInputBindings) {
+        (void)name;
+        inputs.push_back(tensor);
+    }
+    return inputs;
+}
+
+std::vector<uint32_t> FullyConnected::inputPortIndicesForTensor(Tensor tensor) const {
+    std::vector<uint32_t> ports;
+    if (!featureInputs.empty() && tensor.getOriginalId() == featureInputs[0].getOriginalId()) {
+        ports.push_back(0);
+    }
+    for (uint32_t i = 0; i < epilogueInputBindings.size(); ++i) {
+        if (tensor.getOriginalId() == epilogueInputBindings[i].second.getOriginalId()) {
+            ports.push_back(i + 1);
+        }
+    }
+    return ports;
+}
+
+std::vector<Tensor> FullyConnected::getOutputsFromInput(Tensor inputTensor) {
+    if (epilogueInputBindings.empty()) {
+        return {getFeatureOutput(inputTensor)};
+    }
+
+    (void)getFeatureOutput(inputTensor);
+
+    if (emittedFeatureOutputAfterAllInputsConnected) {
+        return {};
+    }
+    const uint32_t requiredInputPorts = static_cast<uint32_t>(1 + epilogueInputBindings.size());
+    if (connectedInputPortIndices.size() != requiredInputPorts) {
+        return {};
+    }
+
+    emittedFeatureOutputAfterAllInputsConnected = true;
+    return {featureOutputs[0]};
+}
+
+void FullyConnected::informThatInputConnectionMade(Tensor inputTensor) {
+    if (epilogueInputBindings.empty()) {
+        return;
+    }
+    std::vector<uint32_t> ports = inputPortIndicesForTensor(inputTensor);
+    if (ports.empty()) {
+        throw std::runtime_error("FullyConnected informed of connection for unknown input tensor.");
+    }
+    for (uint32_t port : ports) {
+        connectedInputPortIndices.insert(port);
+    }
+}
+
+int FullyConnected::getConnectionType(Tensor connectingTensor) const {
+    if (!epilogueInputBindings.empty()) {
+        std::vector<uint32_t> inputPorts = inputPortIndicesForTensor(connectingTensor);
+        if (!inputPorts.empty()) {
+            uint32_t& cursor = nextInputConnectionCursorByTensorOriginalId[connectingTensor.getOriginalId()];
+            const uint32_t port = inputPorts[cursor % inputPorts.size()];
+            ++cursor;
+            return static_cast<int>(port);
+        }
+    } else {
+        for (uint32_t i = 0; i < featureInputs.size(); ++i) {
+            if (connectingTensor == featureInputs[i])
+                return static_cast<int>(i);
+        }
+    }
+
+    for (uint32_t i = 0; i < featureOutputs.size(); ++i) {
+        if (connectingTensor == featureOutputs[i])
+            return static_cast<int>(i);
+    }
+
+    throw std::runtime_error("Tensor is not connected to this FullyConnected layer.");
+}
+
 FullyConnected FullyConnected::Builder::build() {
     THOR_THROW_IF_FALSE(_network.has_value());
     THOR_THROW_IF_FALSE(!_featureInputs.empty());
@@ -339,9 +474,13 @@ FullyConnected FullyConnected::Builder::build() {
     if (!_outputDataType.has_value())
         _outputDataType = _featureInputs[0].getDataType();
 
+    if (!_epilogueInputBindings.empty() && _featureInputs.size() != 1) {
+        throw std::invalid_argument("FullyConnected epilogue auxiliary inputs currently require exactly one feature input.");
+    }
+
     verifyConfig();
 
-    FullyConnected fullyConnected(_epilogue);
+    FullyConnected fullyConnected(_epilogue, _epilogueInputBindings);
 
     fullyConnected.featureInputs = _featureInputs;
     fullyConnected.numOutputFeatures = _numOutputFeatures.value();
@@ -390,6 +529,12 @@ FullyConnected FullyConnected::Builder::build() {
         fullyConnected.outputTensorFromInputTensor[fullyConnected.featureInputs[i]] = out;
         fullyConnected.inputTensorFromOutputTensor[out] = fullyConnected.featureInputs[i];
     }
+    for (const auto& [name, tensor] : fullyConnected.epilogueInputBindings) {
+        (void)name;
+        THOR_THROW_IF_FALSE(tensor.getDataType() == fullyConnected.outputDataType);
+        THOR_THROW_IF_FALSE(tensor.getDimensions() == fullyConnected.featureOutputs[0].getDimensions());
+        fullyConnected.outputTensorFromInputTensor[tensor] = fullyConnected.featureOutputs[0];
+    }
 
     fullyConnected.addToNetwork(_network.value());
 
@@ -422,7 +567,9 @@ void FullyConnected::Builder::verifyConfig() const {
         throw std::invalid_argument("FullyConnected activation must be non-null unless noActivation() was requested.");
     }
     if (_epilogue.has_value()) {
-        FullyConnected::validateEpilogueExpression(_epilogue.value());
+        FullyConnected::validateEpilogueExpression(_epilogue.value(), epilogueAuxInputNames());
+    } else if (!_epilogueInputBindings.empty()) {
+        throw std::invalid_argument("FullyConnected epilogue_inputs were provided without an epilogue expression.");
     }
 
     const DataType inputDataType = _featureInputs.front().getDataType();
@@ -449,6 +596,19 @@ void FullyConnected::Builder::verifyConfig() const {
         }
         FullyConnected::checkedFeatureCount(featureInput.getDimensions(), "feature input " + std::to_string(i));
     }
+    const std::vector<uint64_t> expectedEpilogueInputDims = {_numOutputFeatures.value()};
+    for (const auto& [name, tensor] : _epilogueInputBindings) {
+        FullyConnected::validateEpilogueAuxInputName(name);
+        if (!tensor.isInitialized()) {
+            throw std::invalid_argument("FullyConnected epilogue input '" + name + "' is not initialized.");
+        }
+        if (tensor.getDataType() != _outputDataType.value()) {
+            throw std::invalid_argument("FullyConnected epilogue input '" + name + "' dtype must match outputDataType.");
+        }
+        if (tensor.getDimensions() != expectedEpilogueInputDims) {
+            throw std::invalid_argument("FullyConnected epilogue input '" + name + "' shape must match feature output shape.");
+        }
+    }
 }
 
 std::shared_ptr<ThorImplementation::Layer> FullyConnected::stamp(ThorImplementation::TensorPlacement placement,
@@ -470,7 +630,15 @@ std::shared_ptr<ThorImplementation::Layer> FullyConnected::stamp(ThorImplementat
 
     // Note: Network notices when a layer has already been stamped and only adds a connection; it does not re-stamp the layer.
     std::shared_ptr<ThorImplementation::CustomLayer> physicalFullyConnected = std::make_shared<ThorImplementation::CustomLayer>(
-        buildFullyConnectedExpression(hasBias, placement, weightsDataType, computeDataType, outputDataType, activation, epilogue),
+        buildFullyConnectedExpression(
+            hasBias, placement, weightsDataType, computeDataType, outputDataType, activation, epilogue, epilogueAuxInputNames()),
+        [&]() {
+            std::vector<std::string> inputNames = {"feature_input"};
+            std::vector<std::string> auxNames = epilogueAuxInputNames();
+            inputNames.insert(inputNames.end(), auxNames.begin(), auxNames.end());
+            return inputNames;
+        }(),
+        std::vector<std::string>{"feature_output"},
         placement,
         physicalParameters,
         inferenceOnly,
@@ -503,7 +671,7 @@ json FullyConnected::architectureJson() const {
     }
     if (epilogue.has_value()) {
         if (!serializableEpilogue.has_value())
-            serializableEpilogue = makeEpilogueDefinition(epilogue.value());
+            serializableEpilogue = makeEpilogueDefinition(epilogue.value(), epilogueAuxInputNames());
         j["epilogue"] = serializableEpilogue.value().architectureJson();
     } else {
         j["epilogue"] = nullptr;
@@ -515,6 +683,12 @@ json FullyConnected::architectureJson() const {
         inputs.push_back(featureInputs[i].architectureJson());
     }
     j["inputs"] = inputs;
+
+    json epilogueInputs = json::array();
+    for (const auto& [name, tensor] : epilogueInputBindings) {
+        epilogueInputs.push_back(json{{"name", name}, {"tensor", tensor.architectureJson()}});
+    }
+    j["epilogue_inputs"] = epilogueInputs;
 
     // Output connections
     json outputs = json::array();
@@ -543,14 +717,32 @@ void FullyConnected::deserialize(shared_ptr<thor_file::TarReader>& archiveReader
     if (j.at("layer_type").get<std::string>() != "fully_connected")
         throw runtime_error("Layer type mismatch in FullyConnected::deserialize: " + j.at("layer_type").get<std::string>());
 
+    std::vector<std::pair<std::string, Tensor>> epilogueInputBindings;
+    if (j.contains("epilogue_inputs")) {
+        for (const json& epilogueInputJson : j.at("epilogue_inputs")) {
+            std::string inputName = epilogueInputJson.at("name").get<std::string>();
+            validateEpilogueAuxInputName(inputName);
+            uint64_t originalTensorId = epilogueInputJson.at("tensor").at("id").get<uint64_t>();
+            epilogueInputBindings.emplace_back(inputName, network->getApiTensorByOriginalId(originalTensorId));
+        }
+    }
+    std::vector<std::string> auxInputNames;
+    auxInputNames.reserve(epilogueInputBindings.size());
+    for (const auto& [name, tensor] : epilogueInputBindings) {
+        (void)tensor;
+        auxInputNames.push_back(name);
+    }
+
     std::optional<ThorImplementation::Expression> epilogue = std::nullopt;
     if (j.contains("epilogue") && !j.at("epilogue").is_null()) {
         ThorImplementation::ExpressionDefinition epilogueDefinition =
             ThorImplementation::ExpressionDefinition::deserialize(j.at("epilogue"));
-        epilogue = epilogueExpressionFromDefinition(epilogueDefinition);
+        epilogue = epilogueExpressionFromDefinition(epilogueDefinition, auxInputNames);
+    } else if (!epilogueInputBindings.empty()) {
+        throw runtime_error("FullyConnected serialized epilogue_inputs require a non-null epilogue expression.");
     }
 
-    FullyConnected fullyConnected(epilogue);
+    FullyConnected fullyConnected(epilogue, epilogueInputBindings);
     fullyConnected.numOutputFeatures = j.at("num_output_features").get<uint32_t>();
     fullyConnected.hasBias = j.at("has_bias").get<bool>();
     fullyConnected.weightsDataType = j.at("weights_data_type").get<DataType>();
@@ -574,6 +766,21 @@ void FullyConnected::deserialize(shared_ptr<thor_file::TarReader>& archiveReader
     for (uint32_t i = 0; i < fullyConnected.featureInputs.size(); ++i) {
         fullyConnected.outputTensorFromInputTensor[fullyConnected.featureInputs[i]] = fullyConnected.featureOutputs[i];
         fullyConnected.inputTensorFromOutputTensor[fullyConnected.featureOutputs[i]] = fullyConnected.featureInputs[i];
+    }
+    if (!fullyConnected.epilogueInputBindings.empty()) {
+        if (fullyConnected.featureOutputs.size() != 1) {
+            throw runtime_error("FullyConnected serialized epilogue_inputs require exactly one primary feature output.");
+        }
+        for (const auto& [name, tensor] : fullyConnected.epilogueInputBindings) {
+            (void)name;
+            if (tensor.getDataType() != fullyConnected.featureOutputs[0].getDataType()) {
+                throw runtime_error("FullyConnected serialized epilogue input dtype does not match the feature output dtype.");
+            }
+            if (tensor.getDimensions() != fullyConnected.featureOutputs[0].getDimensions()) {
+                throw runtime_error("FullyConnected serialized epilogue input shape does not match the feature output shape.");
+            }
+            fullyConnected.outputTensorFromInputTensor[tensor] = fullyConnected.featureOutputs[0];
+        }
     }
 
     if (j.contains("parameters")) {

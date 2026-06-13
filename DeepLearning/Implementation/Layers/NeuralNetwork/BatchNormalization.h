@@ -1,6 +1,7 @@
 #pragma once
 
 #include <optional>
+#include <vector>
 #include "DeepLearning/Implementation/Initializers/Initializer.h"
 #include "DeepLearning/Implementation/Layers/TrainableLayer.h"
 #include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
@@ -34,6 +35,7 @@ class BatchNormalization : public TrainableLayer {
                        std::optional<double> exponentialRunningAverageFactor = std::nullopt,
                        std::optional<double> epsilon = std::nullopt,
                        std::optional<DataType> storageDataType = std::nullopt,
+                       std::vector<std::shared_ptr<PhysicalParameter>> physicalParameters = {},
                        int64_t stampedId = -1);
 
     double getExponentialRunningAverageFactor() const { return exponentialRunningAverageFactor; }

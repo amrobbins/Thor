@@ -47,6 +47,10 @@ class LineStatsReporter : public TrainingObserver {
 
    private:
     bool shouldPrintStats(const TrainingStatsSnapshot& stats);
+    void beginPhase(const TrainingStatsSnapshot& stats);
+    void finishPhase(const TrainingStatsSnapshot& stats);
+    [[nodiscard]] bool samePhaseOccurrence(const TrainingStatsSnapshot& stats) const;
+    [[nodiscard]] bool sameStatsIdentity(const TrainingStatsSnapshot& lhs, const TrainingStatsSnapshot& rhs) const;
     [[nodiscard]] bool shouldUseColor() const;
     void writeStatsLine(const TrainingStatsSnapshot& stats);
     void emitLine(const char* line);
@@ -59,6 +63,12 @@ class LineStatsReporter : public TrainingObserver {
     LineStatsOutputMode outputMode = LineStatsOutputMode::STDOUT;
     bool printedAnyStats = false;
     std::optional<double> lastPrintedElapsedSeconds{};
+    bool hasActivePhase = false;
+    TrainingPhase activePhase = TrainingPhase::UNKNOWN;
+    uint64_t activeEpoch = 0;
+    bool printedStatsForActivePhase = false;
+    std::optional<TrainingStatsSnapshot> lastSeenStats{};
+    std::optional<TrainingStatsSnapshot> lastPrintedStats{};
 };
 
 }  // namespace Thor

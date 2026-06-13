@@ -119,4 +119,9 @@ void bind_concatenate(nb::module_ &m) {
             Note that all dimensions must match to perform Contcatenate, except for the concatenation_axis dimension.
 
             )nbdoc");
+
+    concatenate.def(
+        "get_feature_output",
+        [](Concatenate &self) { return self.getFeatureOutput().value(); },
+        R"nbdoc(Return the concatenated feature output tensor.)nbdoc");
 }

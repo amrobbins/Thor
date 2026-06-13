@@ -44,7 +44,7 @@ class Layer {
         return {getFeatureOutput().value()};
     }
 
-    virtual bool mustConnectAllInputsToDriveOutput() { return false; }
+    virtual bool mustConnectAllInputsToDriveOutput() const { return false; }
     virtual void informThatInputConnectionMade(Tensor inputTensor) {}
 
     bool isInitialized() { return initialized; }

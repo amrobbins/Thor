@@ -1,5 +1,6 @@
 #include "DeepLearning/Api/Layers/Learning/Convolution2d.h"
 #include <optional>
+#include <set>
 #include "DeepLearning/Implementation/ThorError.h"
 
 using namespace std;
@@ -16,7 +17,8 @@ ThorImplementation::DynamicExpression buildConvolution2dExpression(bool hasBias,
                                                                    uint32_t padW,
                                                                    ThorImplementation::TensorPlacement placement,
                                                                    std::shared_ptr<Thor::Activation> activation,
-                                                                   std::optional<ThorImplementation::Expression> epilogue) {
+                                                                   std::optional<ThorImplementation::Expression> epilogue,
+                                                                   std::vector<std::string> epilogueAuxInputNames) {
     using ImplDataType = ThorImplementation::DataType;
     using ThorImplementation::DynamicExpression;
     using ThorImplementation::DynamicExpressionBuild;
@@ -24,7 +26,23 @@ ThorImplementation::DynamicExpression buildConvolution2dExpression(bool hasBias,
     using ThorImplementation::FusedEquation;
     using ThorImplementation::Tensor;
 
-    return DynamicExpression([hasBias, strideH, strideW, padH, padW, placement, activation = std::move(activation), epilogue](
+    std::vector<std::string> expectedInputNames = {"feature_input"};
+    expectedInputNames.insert(expectedInputNames.end(), epilogueAuxInputNames.begin(), epilogueAuxInputNames.end());
+    expectedInputNames.push_back("weights");
+    if (hasBias) {
+        expectedInputNames.push_back("biases");
+    }
+
+    return DynamicExpression(std::move(expectedInputNames), {"feature_output"},
+                             [hasBias,
+                              strideH,
+                              strideW,
+                              padH,
+                              padW,
+                              placement,
+                              activation = std::move(activation),
+                              epilogue,
+                              epilogueAuxInputNames = std::move(epilogueAuxInputNames)](
                                  const DynamicExpression::TensorMap& inputs,
                                  const DynamicExpression::TensorMap& outputs,
                                  Stream& stream) -> DynamicExpressionBuild {
@@ -88,6 +106,20 @@ ThorImplementation::DynamicExpression buildConvolution2dExpression(bool hasBias,
         if (activation != nullptr) {
             fout = activation->toExpression(fout);
         }
+        for (const std::string& auxInputName : epilogueAuxInputNames) {
+            const Tensor& auxTensor = inputs.at(auxInputName);
+            const std::vector<uint64_t> expectedAuxShape = {
+                featureInputTensor.getDimensions()[0], wTensor.getDimensions()[0], expectedOutputRows, expectedOutputCols};
+            if (auxTensor.getDimensions() != expectedAuxShape) {
+                throw std::runtime_error("Convolution2d epilogue auxiliary input '" + auxInputName +
+                                         "' shape must match the convolution feature output shape.");
+            }
+            if (featureOutputDType.has_value() && auxTensor.getDescriptor().getDataType() != featureOutputDType.value()) {
+                throw std::runtime_error("Convolution2d epilogue auxiliary input '" + auxInputName +
+                                         "' dtype must match the convolution feature output dtype.");
+            }
+            THOR_THROW_IF_FALSE(auxTensor.getPlacement() == placement);
+        }
         if (epilogue.has_value()) {
             fout = Convolution2d::applyEpilogue(fout, epilogue.value());
         }
@@ -101,13 +133,121 @@ ThorImplementation::DynamicExpression buildConvolution2dExpression(bool hasBias,
             std::make_shared<FusedEquation>(FusedEquation::compile(expressionOutputs.physicalOutputs(), placement.getDeviceNum())),
             inputs,
             {},
-            {outputs},
+            outputs,
             {},
         };
     });
 }
 
 }  // namespace
+
+void Convolution2d::validateEpilogueAuxInputName(const std::string& inputName) {
+    if (inputName.empty()) {
+        throw std::invalid_argument("Convolution2d epilogue auxiliary input name cannot be empty.");
+    }
+    if (inputName.rfind("__", 0) == 0) {
+        throw std::invalid_argument("Convolution2d epilogue auxiliary input names cannot start with __: " + inputName + ".");
+    }
+    static const std::set<std::string> reservedNames = {
+        "feature_input",
+        "feature_output",
+        "weights",
+        "biases",
+        epilogueInputName(),
+        epilogueOutputName(),
+    };
+    if (reservedNames.contains(inputName)) {
+        throw std::invalid_argument("Convolution2d epilogue auxiliary input name is reserved: " + inputName + ".");
+    }
+}
+
+std::vector<std::string> Convolution2d::epilogueAuxInputNames() const {
+    std::vector<std::string> names;
+    names.reserve(epilogueInputBindings.size());
+    for (const auto& [name, tensor] : epilogueInputBindings) {
+        (void)tensor;
+        names.push_back(name);
+    }
+    return names;
+}
+
+std::vector<Tensor> Convolution2d::getFeatureInputs() const {
+    std::vector<Tensor> inputs = featureInputs;
+    inputs.reserve(inputs.size() + epilogueInputBindings.size());
+    for (const auto& [name, tensor] : epilogueInputBindings) {
+        (void)name;
+        inputs.push_back(tensor);
+    }
+    return inputs;
+}
+
+std::vector<uint32_t> Convolution2d::inputPortIndicesForTensor(Tensor tensor) const {
+    std::vector<uint32_t> ports;
+    if (!featureInputs.empty() && tensor.getOriginalId() == featureInputs[0].getOriginalId()) {
+        ports.push_back(0);
+    }
+    for (uint32_t i = 0; i < epilogueInputBindings.size(); ++i) {
+        if (tensor.getOriginalId() == epilogueInputBindings[i].second.getOriginalId()) {
+            ports.push_back(i + 1);
+        }
+    }
+    return ports;
+}
+
+Tensor Convolution2d::getFeatureOutput(Tensor inputTensor) const {
+    std::map<Tensor, Tensor>::const_iterator it = outputTensorFromInputTensor.find(inputTensor);
+    if (it == outputTensorFromInputTensor.end()) {
+        throw std::runtime_error("Tensor is not connected to this Convolution2d layer.");
+    }
+    return it->second;
+}
+
+std::vector<Tensor> Convolution2d::getOutputsFromInput(Tensor inputTensor) {
+    if (epilogueInputBindings.empty()) {
+        return {getFeatureOutput(inputTensor)};
+    }
+
+    (void)getFeatureOutput(inputTensor);
+    if (emittedFeatureOutputAfterAllInputsConnected) {
+        return {};
+    }
+    const uint32_t requiredInputPorts = static_cast<uint32_t>(1 + epilogueInputBindings.size());
+    if (connectedInputPortIndices.size() != requiredInputPorts) {
+        return {};
+    }
+
+    emittedFeatureOutputAfterAllInputsConnected = true;
+    return {featureOutputs[0]};
+}
+
+void Convolution2d::informThatInputConnectionMade(Tensor inputTensor) {
+    if (epilogueInputBindings.empty()) {
+        return;
+    }
+    std::vector<uint32_t> ports = inputPortIndicesForTensor(inputTensor);
+    if (ports.empty()) {
+        throw std::runtime_error("Convolution2d informed of connection for unknown input tensor.");
+    }
+    for (uint32_t port : ports) {
+        connectedInputPortIndices.insert(port);
+    }
+}
+
+int Convolution2d::getConnectionType(Tensor connectingTensor) const {
+    std::vector<uint32_t> inputPorts = inputPortIndicesForTensor(connectingTensor);
+    if (!inputPorts.empty()) {
+        uint32_t& cursor = nextInputConnectionCursorByTensorOriginalId[connectingTensor.getOriginalId()];
+        const uint32_t port = inputPorts[cursor % inputPorts.size()];
+        ++cursor;
+        return static_cast<int>(port);
+    }
+    for (uint32_t i = 0; i < featureOutputs.size(); ++i) {
+        if (connectingTensor == featureOutputs[i]) {
+            return static_cast<int>(i);
+        }
+    }
+    throw std::runtime_error("Tensor is not connected to this Convolution2d layer.");
+}
 
 std::shared_ptr<ThorImplementation::Layer> Convolution2d::stamp(ThorImplementation::TensorPlacement placement,
                                                                 std::shared_ptr<ThorImplementation::Layer> drivingLayer,
@@ -128,7 +268,14 @@ std::shared_ptr<ThorImplementation::Layer> Convolution2d::stamp(ThorImplementati
 
     std::shared_ptr<ThorImplementation::CustomLayer> physicalConvolution2d = std::make_shared<ThorImplementation::CustomLayer>(
         buildConvolution2dExpression(
-            hasBias, verticalStride, horizontalStride, verticalPadding, horizontalPadding, placement, activation, epilogue),
+            hasBias, verticalStride, horizontalStride, verticalPadding, horizontalPadding, placement, activation, epilogue, epilogueAuxInputNames()),
+        [&]() {
+            std::vector<std::string> inputNames = {"feature_input"};
+            std::vector<std::string> auxNames = epilogueAuxInputNames();
+            inputNames.insert(inputNames.end(), auxNames.begin(), auxNames.end());
+            return inputNames;
+        }(),
+        std::vector<std::string>{"feature_output"},
         placement,
         physicalParameters,
         inferenceOnly,
@@ -157,6 +304,9 @@ void Convolution2d::buildSupportLayersAndAddToNetwork(Network* network) {
         convolution2dBuilder.activation(std::dynamic_pointer_cast<Activation>(activation->clone()));
     } else {
         convolution2dBuilder.noActivation();
+    }
+    for (const auto& [name, tensor] : epilogueInputBindings) {
+        convolution2dBuilder.epilogueInput(name, tensor);
     }
     if (epilogue.has_value()) {
         convolution2dBuilder.epilogue(epilogue.value());
@@ -193,7 +343,7 @@ void Convolution2d::buildSupportLayersAndAddToNetwork(Network* network) {
     Convolution2d convolution2d = convolution2dBuilder.build();
     this->id = convolution2d.getId();
 
-    standaloneLayerFeatureInputs = convolution2d.getFeatureInputs();
+    standaloneLayerFeatureInputs = convolution2d.featureInputs;
     standaloneLayerFeatureOutputs = convolution2d.getFeatureOutputs();
 
     for (uint32_t i = 0; i < featureInputs.size(); ++i)
@@ -235,7 +385,7 @@ json Convolution2d::architectureJson() const {
     }
     if (epilogue.has_value()) {
         if (!serializableEpilogue.has_value())
-            serializableEpilogue = makeEpilogueDefinition(epilogue.value());
+            serializableEpilogue = makeEpilogueDefinition(epilogue.value(), epilogueAuxInputNames());
         j["epilogue"] = serializableEpilogue.value().architectureJson();
     } else {
         j["epilogue"] = nullptr;
@@ -247,6 +397,12 @@ json Convolution2d::architectureJson() const {
         inputs.push_back(standaloneLayerFeatureInputs[i].architectureJson());
     }
     j["inputs"] = inputs;
+
+    json epilogueInputs = json::array();
+    for (const auto& [name, tensor] : epilogueInputBindings) {
+        epilogueInputs.push_back(json{{"name", name}, {"tensor", tensor.architectureJson()}});
+    }
+    j["epilogue_inputs"] = epilogueInputs;
 
     // Output connections
     json outputs = json::array();
@@ -277,14 +433,32 @@ void Convolution2d::deserialize(shared_ptr<thor_file::TarReader>& archiveReader,
     if (j.at("data_layout").get<string>() != "NCHW")
         throw runtime_error("Convolution2d only supports serialized NCHW data_layout, got " + j.at("data_layout").get<string>());
 
+    std::vector<std::pair<std::string, Tensor>> epilogueInputBindings;
+    if (j.contains("epilogue_inputs")) {
+        for (const json& epilogueInputJson : j.at("epilogue_inputs")) {
+            std::string inputName = epilogueInputJson.at("name").get<std::string>();
+            validateEpilogueAuxInputName(inputName);
+            uint64_t originalTensorId = epilogueInputJson.at("tensor").at("id").get<uint64_t>();
+            epilogueInputBindings.emplace_back(inputName, network->getApiTensorByOriginalId(originalTensorId));
+        }
+    }
+    std::vector<std::string> auxInputNames;
+    auxInputNames.reserve(epilogueInputBindings.size());
+    for (const auto& [name, tensor] : epilogueInputBindings) {
+        (void)tensor;
+        auxInputNames.push_back(name);
+    }
+
     std::optional<ThorImplementation::Expression> epilogue = std::nullopt;
     if (j.contains("epilogue") && !j.at("epilogue").is_null()) {
         ThorImplementation::ExpressionDefinition epilogueDefinition =
             ThorImplementation::ExpressionDefinition::deserialize(j.at("epilogue"));
-        epilogue = epilogueExpressionFromDefinition(epilogueDefinition);
+        epilogue = epilogueExpressionFromDefinition(epilogueDefinition, auxInputNames);
+    } else if (!epilogueInputBindings.empty()) {
+        throw runtime_error("Convolution2d serialized epilogue_inputs require a non-null epilogue expression.");
     }
 
-    Convolution2d convolution2d(epilogue);
+    Convolution2d convolution2d(epilogue, epilogueInputBindings);
     convolution2d.filterWidth = j.at("filter_width").get<uint32_t>();
     convolution2d.filterHeight = j.at("filter_height").get<uint32_t>();
     convolution2d.horizontalStride = j.at("horizontal_stride").get<uint32_t>();
@@ -314,6 +488,21 @@ void Convolution2d::deserialize(shared_ptr<thor_file::TarReader>& archiveReader,
     for (uint32_t i = 0; i < convolution2d.featureInputs.size(); ++i) {
         convolution2d.outputTensorFromInputTensor[convolution2d.featureInputs[i]] = convolution2d.featureOutputs[i];
         convolution2d.inputTensorFromOutputTensor[convolution2d.featureOutputs[i]] = convolution2d.featureInputs[i];
+    }
+    if (!convolution2d.epilogueInputBindings.empty()) {
+        if (convolution2d.featureOutputs.size() != 1) {
+            throw runtime_error("Convolution2d serialized epilogue_inputs require exactly one primary convolution output.");
+        }
+        for (const auto& [name, tensor] : convolution2d.epilogueInputBindings) {
+            (void)name;
+            if (tensor.getDataType() != convolution2d.featureOutputs[0].getDataType()) {
+                throw runtime_error("Convolution2d serialized epilogue input dtype does not match the convolution output dtype.");
+            }
+            if (tensor.getDimensions() != convolution2d.featureOutputs[0].getDimensions()) {
+                throw runtime_error("Convolution2d serialized epilogue input shape does not match the convolution output shape.");
+            }
+            convolution2d.outputTensorFromInputTensor[tensor] = convolution2d.featureOutputs[0];
+        }
     }
 
     if (j.contains("parameters")) {

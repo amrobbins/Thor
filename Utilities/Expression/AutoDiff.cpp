@@ -4062,6 +4062,13 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
     std::vector<PendingBackwardOutput> pending_outputs;
     pending_outputs.reserve(normalized_wrt.size());
 
+    // Some expressions legitimately produce identical gradient expressions for
+    // multiple requested inputs.  A residual add under ReLU is the common case:
+    // d ReLU(lhs + rhs) / d lhs and d rhs are the same masked upstream tensor.
+    // Keep those as distinct terminal output nodes so later planning/stamping does
+    // not alias one named gradient output away.
+    std::unordered_set<uint32_t> emittedRawGradientNodes;
+
     for (const std::string& wrt_name : normalized_wrt) {
         uint32_t slot = UINT32_MAX;
         for (const NamedInput& input : forward_expr.inputs) {
@@ -4118,6 +4125,18 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                 // there so same-plan duplicated/merged attention expressions do not promote back to the FP32 bias
                 // tensor dtype and force an unnecessary down-conversion for callers that want cuDNN's native dBias.
                 grad_dtype = dbias_only_dtype.value();
+            }
+
+            const uint32_t raw_grad = total_grad.value();
+            if (!emittedRawGradientNodes.insert(raw_grad).second) {
+                // Force a unique terminal node for this named gradient while preserving
+                // the exact gradient value.  The condition depends on the corresponding
+                // primal input so the node is not a pure duplicate of an earlier output;
+                // both branches return the same gradient, so NaNs in the condition input
+                // do not change the value.
+                const uint32_t input_clone = builder.cloneForward(first_it->second);
+                const uint32_t condition = builder.binary(ExprOp::EQUAL, input_clone, input_clone);
+                total_grad = builder.where(condition, total_grad.value(), total_grad.value());
             }
         }
 

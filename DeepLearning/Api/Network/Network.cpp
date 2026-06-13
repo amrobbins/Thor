@@ -2,9 +2,11 @@
 #include "Utilities/Expression/CudaKernelSecurity.h"
 #include <optional>
 #include "DeepLearning/Api/Layers/Learning/CustomLayer.h"
+#include "DeepLearning/Api/Layers/Activations/Activation.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Parameter/ParameterSpecification.h"
 #include "DeepLearning/Implementation/ThorError.h"
+#include <cstdio>
 #include <fstream>
 #include <iostream>
 #include <unordered_set>
@@ -92,7 +94,10 @@ string Network::statusCodeToString(StatusCode statusCode) {
 }
 
 bool Network::hasCudaKernelExpressions() const {
-    return !ThorImplementation::collectCudaKernelSourceInfo(architectureJson()).empty();
+    json modelJson = architectureJson();
+    std::vector<ThorImplementation::CudaKernelSourceInspection> cudaKernelSources =
+        ThorImplementation::collectCudaKernelSourceInfo(modelJson);
+    return !cudaKernelSources.empty();
 }
 
 void Network::captureCudaKernelSaveKeysToFile(const std::string& path, bool overwrite) {
@@ -210,7 +215,8 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
     try {
         // FIXME: need to throw GPU_OUT_OF_MEMORY when stamping and run out of memory
 
-        for (auto it = orderedNetwork.begin(); it != orderedNetwork.end(); ++it) {
+        uint64_t orderedIndex = 0;
+        for (auto it = orderedNetwork.begin(); it != orderedNetwork.end(); ++it, ++orderedIndex) {
             std::optional<Tensor> inputTensor = it->first;
             shared_ptr<Layer> layer = it->second;
 
@@ -386,7 +392,8 @@ shared_ptr<PlacedNetwork> Network::place(
         }
     }
 
-    return make_shared<PlacedNetwork>(networkName, *this, stampedNetworks);
+    auto placedNetwork = make_shared<PlacedNetwork>(networkName, *this, stampedNetworks);
+    return placedNetwork;
 }
 
 // Save the architecture only, does not use a stamped network so no state
@@ -463,11 +470,14 @@ void Network::save(vector<ThorImplementation::StampedNetwork> &stampedNetworks,
 json Network::architectureJson() const {
     json modelJson;
     modelJson["layers"] = json::array();
+    uint32_t layerIndex = 0;
     for (const shared_ptr<Layer> &layer : allLayersInNetworkList) {
         modelJson["layers"].push_back(layer->architectureJson());
+        ++layerIndex;
     }
-    if (defaultOptimizer != nullptr)
+    if (defaultOptimizer != nullptr) {
         modelJson["default_optimizer"] = defaultOptimizer->architectureJson();
+    }
     return modelJson;
 }
 
@@ -643,6 +653,26 @@ Network::StatusCode Network::evaluateGraph() {
                 THOR_THROW_IF_FALSE(apiTensorToApiDrivingLayer.count(outputTensors[i]) == 0);
                 apiTensorToApiDrivingLayer[outputTensors[i]] = customLayer;
                 apiLayerToApiOutputTensors[customLayer].push_back(outputTensors[i]);
+            }
+            continue;
+        }
+
+        shared_ptr<Activation> activationLayer = dynamic_pointer_cast<Activation>(layer);
+        if (activationLayer && activationLayer->mustConnectAllInputsToDriveOutput()) {
+            vector<Tensor> inputTensors = activationLayer->getFeatureInputs();
+            vector<Tensor> outputTensors = activationLayer->getFeatureOutputs();
+            THOR_THROW_IF_FALSE(!inputTensors.empty());
+            THOR_THROW_IF_FALSE(!outputTensors.empty());
+            for (uint32_t i = 0; i < inputTensors.size(); ++i) {
+                allTensors.insert(inputTensors[i]);
+                apiTensorToApiLoadingLayers[inputTensors[i]].push_back(activationLayer);
+                apiLayerToApiInputTensors[activationLayer].push_back(inputTensors[i]);
+            }
+            for (uint32_t i = 0; i < outputTensors.size(); ++i) {
+                allTensors.insert(outputTensors[i]);
+                THOR_THROW_IF_FALSE(apiTensorToApiDrivingLayer.count(outputTensors[i]) == 0);
+                apiTensorToApiDrivingLayer[outputTensors[i]] = activationLayer;
+                apiLayerToApiOutputTensors[activationLayer].push_back(outputTensors[i]);
             }
             continue;
         }
@@ -937,6 +967,7 @@ void Network::addLayerToNetwork(const Layer *layer) {
     auto loss = dynamic_cast<const Loss *>(layer);
     auto metric = dynamic_cast<const Metric *>(layer);
     auto customLayer = dynamic_cast<const CustomLayer *>(layer);
+    auto activationLayer = dynamic_cast<const Activation *>(layer);
     auto multiConnectionLayer = dynamic_cast<const MultiConnectionLayer *>(layer);
     if (networkInput) {
         Tensor outputTensor = networkInput->getFeatureOutput().value();
@@ -966,6 +997,17 @@ void Network::addLayerToNetwork(const Layer *layer) {
     } else if (customLayer) {
         vector<Tensor> inputTensors = customLayer->getFeatureInputs();
         vector<Tensor> outputTensors = customLayer->getFeatureOutputs();
+        THOR_THROW_IF_FALSE(!inputTensors.empty());
+        THOR_THROW_IF_FALSE(!outputTensors.empty());
+        for (uint32_t i = 0; i < inputTensors.size(); ++i) {
+            apiTensorByOriginalId[inputTensors[i].getOriginalId()] = inputTensors[i];
+        }
+        for (uint32_t i = 0; i < outputTensors.size(); ++i) {
+            apiTensorByOriginalId[outputTensors[i].getOriginalId()] = outputTensors[i];
+        }
+    } else if (activationLayer && activationLayer->mustConnectAllInputsToDriveOutput()) {
+        vector<Tensor> inputTensors = activationLayer->getFeatureInputs();
+        vector<Tensor> outputTensors = activationLayer->getFeatureOutputs();
         THOR_THROW_IF_FALSE(!inputTensors.empty());
         THOR_THROW_IF_FALSE(!outputTensors.empty());
         for (uint32_t i = 0; i < inputTensors.size(); ++i) {
@@ -1217,6 +1259,7 @@ void Network::stampLayer(Tensor inputTensor,
             stampedNetwork.otherLayers.push_back(implementationLayer.get());
         }
     }
+
 
     // eturn initializationReadyEvents;
 }

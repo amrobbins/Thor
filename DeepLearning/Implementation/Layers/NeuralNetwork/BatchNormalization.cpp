@@ -187,14 +187,24 @@ BatchNormalization::BatchNormalization(const TensorPlacement& placement,
                                        std::optional<double> exponentialRunningAverageFactor,
                                        std::optional<double> epsilon,
                                        std::optional<DataType> storageDataType,
+                                       vector<shared_ptr<PhysicalParameter>> physicalParameters,
                                        int64_t stampedId)
     : TrainableLayer(placement, inferenceOnly, stampedId),
       exponentialRunningAverageFactor(exponentialRunningAverageFactor.has_value() ? exponentialRunningAverageFactor.value() : 0.05),
       epsilon(epsilon.has_value() ? epsilon.value() : 0.0001) {
-    addParameter(make_shared<BNParameter>("weights", DataType::FP32, true));
-    addParameter(make_shared<BNParameter>("biases", DataType::FP32, true));
-    addParameter(make_shared<BNParameter>("running_mean", DataType::FP32, false));
-    addParameter(make_shared<BNParameter>("running_variance", DataType::FP32, false));
+    for (const auto& parameter : physicalParameters) {
+        THOR_THROW_IF_FALSE(parameter != nullptr);
+        addParameter(parameter);
+    }
+
+    if (!hasParameter("weights"))
+        addParameter(make_shared<BNParameter>("weights", DataType::FP32, true));
+    if (!hasParameter("biases"))
+        addParameter(make_shared<BNParameter>("biases", DataType::FP32, true));
+    if (!hasParameter("running_mean"))
+        addParameter(make_shared<BNParameter>("running_mean", DataType::FP32, false));
+    if (!hasParameter("running_variance"))
+        addParameter(make_shared<BNParameter>("running_variance", DataType::FP32, false));
 
     itemsObserved = numItemsObserved;
 }

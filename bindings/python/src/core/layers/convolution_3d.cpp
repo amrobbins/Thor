@@ -67,6 +67,29 @@ ThorImplementation::Expression makePythonEpilogueInput(const nb::object &outputD
     return Convolution3d::epilogueInput(computeDType, outputDType);
 }
 
+ThorImplementation::Expression makePythonEpilogueAuxInput(const std::string &inputName,
+                                                          const nb::object &outputDTypeObj,
+                                                          const nb::object &computeDTypeObj) {
+    std::optional<DataType> outputDType = optionalDataTypeFromPython(outputDTypeObj);
+    std::optional<DataType> computeDType = optionalDataTypeFromPython(computeDTypeObj);
+    return Convolution3d::epilogueAuxInput(inputName, computeDType, outputDType);
+}
+
+void applyPythonEpilogueInputs(Convolution3d::Builder &builder, const nb::object &epilogueInputs) {
+    if (epilogueInputs.is_none()) {
+        return;
+    }
+    if (!nb::isinstance<nb::dict>(epilogueInputs)) {
+        throw nb::type_error("epilogue_inputs must be a dict[str, thor.Tensor] or None");
+    }
+    nb::dict inputsDict = nb::cast<nb::dict>(epilogueInputs);
+    for (auto item : inputsDict) {
+        std::string name = nb::cast<std::string>(item.first);
+        Tensor tensor = nb::cast<Tensor>(item.second);
+        builder.epilogueInput(name, tensor);
+    }
+}
+
 void applyPythonEpilogue(Convolution3d::Builder &builder, const nb::object &epilogue) {
     if (epilogue.is_none()) {
         return;
@@ -101,7 +124,8 @@ void bind_convolution_3d(nb::module_ &m) {
            nb::object activation,
            shared_ptr<Initializer> weights_initializer,
            shared_ptr<Initializer> biases_initializer,
-           nb::object epilogue) {
+           nb::object epilogue,
+           nb::object epilogue_inputs) {
             const auto &dims = featureInput.getDimensions();
             if (dims.size() != 4) {
                 string msg = "Convolution3d instance: feature_input must be a 4D CDHW tensor (no batch) but tensor format is " +
@@ -154,6 +178,7 @@ void bind_convolution_3d(nb::module_ &m) {
                 .hasBias(hasBias);
 
             applyPythonActivation(builder, activation);
+            applyPythonEpilogueInputs(builder, epilogue_inputs);
             applyPythonEpilogue(builder, epilogue);
 
             if (weights_initializer != nullptr)
@@ -180,7 +205,8 @@ void bind_convolution_3d(nb::module_ &m) {
         "activation"_a.none() = nb::str(DEFAULT_ACTIVATION_SENTINEL),
         "weights_initializer"_a = nb::none(),
         "biases_initializer"_a = nb::none(),
-        "epilogue"_a.none() = nb::none());
+        "epilogue"_a.none() = nb::none(),
+        "epilogue_inputs"_a.none() = nb::none());
 
     convolution_3d.def_static(
         "epilogue_input",
@@ -189,6 +215,17 @@ void bind_convolution_3d(nb::module_ &m) {
         "compute_dtype"_a.none() = nb::none(),
         R"nbdoc(
             Return the single tensor input expression expected by a Convolution3d epilogue.
+            )nbdoc");
+
+    convolution_3d.def_static(
+        "epilogue_aux_input",
+        &makePythonEpilogueAuxInput,
+        "name"_a,
+        "output_dtype"_a.none() = nb::none(),
+        "compute_dtype"_a.none() = nb::none(),
+        R"nbdoc(
+            Return a named auxiliary tensor input expression for a Convolution3d epilogue.
+            Bind the same name to a tensor with the ``epilogue_inputs`` constructor argument.
             )nbdoc");
 
     convolution_3d.def(

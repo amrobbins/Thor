@@ -6,6 +6,7 @@
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
 #include "DeepLearning/Api/Layers/Utility/TypeConverter.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Parameter/ParameterSpecification.h"
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.h"
 
 namespace Thor {
@@ -39,9 +40,21 @@ class BatchNormalization : public TrainableLayer {
                                                      const bool inferenceOnly) const override {
         THOR_THROW_IF_FALSE(initialized);
 
+        std::vector<std::shared_ptr<ThorImplementation::PhysicalParameter>> physicalParameters;
+        for (const auto& parameter : getParameters()) {
+            THOR_THROW_IF_FALSE(parameter != nullptr);
+            physicalParameters.push_back(parameter->stamp());
+        }
+
         std::shared_ptr<ThorImplementation::BatchNormalization> physicalBatchNormalization =
-            std::make_shared<ThorImplementation::BatchNormalization>(
-                placement, inferenceOnly, numItemsObserved, exponentialRunningAverageFactor, epsilon, DataType::FP32, getId());
+            std::make_shared<ThorImplementation::BatchNormalization>(placement,
+                                                                     inferenceOnly,
+                                                                     numItemsObserved,
+                                                                     exponentialRunningAverageFactor,
+                                                                     epsilon,
+                                                                     DataType::FP32,
+                                                                     physicalParameters,
+                                                                     getId());
 
         return physicalBatchNormalization;
     }
@@ -78,8 +91,27 @@ class BatchNormalization::Builder {
         if (_epsilon.has_value())
             batchNormalization.epsilon = _epsilon.value();
 
-        // When this layer gets a specific optimizer, set it now, otherwise network will attach the network default optimizer to it.
-        batchNormalization.optimizer = _layerOptimizer;
+        // BatchNorm owns trainable scale and bias parameters. Register them as API parameters so network default optimizers,
+        // freeze/unfreeze, TrainingProgram parameter discovery, and serialization all see the same trainable surface as the
+        // physical cuDNN batchnorm layer. Running mean/variance are non-trainable implementation state and remain serialized
+        // explicitly by BatchNormalization::serialize().
+        const std::vector<uint64_t>& inputDims = batchNormalization.featureInputs.front().getDimensions();
+        THOR_THROW_IF_FALSE(!inputDims.empty());
+        const uint64_t channelCount = inputDims.front();
+
+        std::shared_ptr<Initializer> weightsInitializer = UniformRandom::Builder().minValue(1.0f).maxValue(1.0f).build();
+        ParameterSpecification::Builder weightsBuilder;
+        weightsBuilder.name("weights").shape({channelCount}).dtype(DataType::FP32).initializer(weightsInitializer).trainable(true);
+        if (_layerOptimizer != nullptr)
+            weightsBuilder.optimizer(_layerOptimizer);
+        batchNormalization.addParameter(std::make_shared<ParameterSpecification>(weightsBuilder.build()));
+
+        std::shared_ptr<Initializer> biasesInitializer = UniformRandom::Builder().minValue(0.0f).maxValue(0.0f).build();
+        ParameterSpecification::Builder biasesBuilder;
+        biasesBuilder.name("biases").shape({channelCount}).dtype(DataType::FP32).initializer(biasesInitializer).trainable(true);
+        if (_layerOptimizer != nullptr)
+            biasesBuilder.optimizer(_layerOptimizer);
+        batchNormalization.addParameter(std::make_shared<ParameterSpecification>(biasesBuilder.build()));
 
         batchNormalization.initialized = true;
 

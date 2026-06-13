@@ -885,15 +885,6 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::stampBackwardForApplication(
         return nullptr;
     }
 
-    if (!applicationHasFusedCustomLossGradient(applicationIndex)) {
-        return std::make_shared<StampedExecutionPlan>(app.forwardPrepared->stampBackward(wrtNames,
-                                                                                         app.upstreamInputNamesByOutput,
-                                                                                         accumulateGradOutputs,
-                                                                                         app.backwardAdditionalInputsByName,
-                                                                                         {},
-                                                                                         preallocatedGradOutputs));
-    }
-
     PhysicalOutputs backwardOutputs = buildBackwardOutputsForApplication(applicationIndex, wrtNames, accumulateGradOutputs);
     FusedEquation backwardEquation = FusedEquation::compile(backwardOutputs, placement.getDeviceNum());
 
@@ -902,12 +893,11 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::stampBackwardForApplication(
         stampInputs[name] = tensor;
     }
     if (accumulateGradOutputs) {
-        // The custom fused-loss path builds the backward graph directly instead of going through
-        // PreparedDynamicExpression::stampBackward(), so the FusedEquation does not carry its
-        // usual BackwardEquationConfig metadata.  AutoDiff still represents accumulation as
-        // `wrt_grad = wrt_grad + newly_computed_grad`, which means the existing gradient buffer
-        // is a real tensor input as well as the preallocated output.  Bind those tensors explicitly
-        // for this custom path.
+        // CustomLayer builds the backward graph directly so layer-specific shape-specialized
+        // autodiff rules (for example RMSNorm) can see the concrete forward input dimensions.
+        // AutoDiff still represents accumulation as `wrt_grad = wrt_grad + newly_computed_grad`,
+        // which means the existing gradient buffer is a real tensor input as well as the
+        // preallocated output. Bind those tensors explicitly.
         for (const auto& [name, tensor] : preallocatedGradOutputs) {
             stampInputs[name] = tensor;
         }
@@ -1461,21 +1451,11 @@ void CustomLayer::compileImpl() {
         app.backwardInputGradOutputsByName = buildBackwardInputGradOutputs(applicationIndex);
 
         if (!inputTargets.empty() && !app.backwardAdditionalInputsByName.empty()) {
-            if (applicationHasFusedCustomLossGradient(applicationIndex)) {
-                app.backwardErrorStamped = stampBackwardForApplication(applicationIndex,
-                                                                       inputTargets,
-                                                                       false,
-                                                                       app.backwardInputGradOutputsByName,
-                                                                       computeStream(applicationIndex));
-            } else {
-                app.backwardErrorStamped =
-                    std::make_shared<StampedExecutionPlan>(app.forwardPrepared->stampBackward(inputTargets,
-                                                                                              app.upstreamInputNamesByOutput,
-                                                                                              false,
-                                                                                              app.backwardAdditionalInputsByName,
-                                                                                              {},
-                                                                                              app.backwardInputGradOutputsByName));
-            }
+            app.backwardErrorStamped = stampBackwardForApplication(applicationIndex,
+                                                                   inputTargets,
+                                                                   false,
+                                                                   app.backwardInputGradOutputsByName,
+                                                                   computeStream(applicationIndex));
         }
 
         std::vector<std::string> allTrainableParameterTargets;
@@ -1598,26 +1578,24 @@ void CustomLayer::compileImpl() {
                                                                                            gradientUpdateStream.value());
                     }
                 } else {
-                    PreparedDynamicExpression gradientPrepared =
-                        layerDefinitionExpression.prepare(app.forwardInputsByName, app.forwardOutputsByName, gradientUpdateStream.value());
-                    validatePreparedExpressionInputs(gradientPrepared);
-
-                    app.backwardWeightsClearStamped =
-                        std::make_shared<StampedExecutionPlan>(gradientPrepared.stampBackward(allMaterializedParameterTargets,
-                                                                                              app.upstreamInputNamesByOutput,
-                                                                                              false,
-                                                                                              app.backwardAdditionalInputsByName,
-                                                                                              {},
-                                                                                              allMaterializedParameterPreallocatedOutputs));
+                    // Build the parameter-gradient stamps through the same per-application
+                    // path used by input gradients and fused CustomLoss gradients.  Some
+                    // layer-specific autodiff rules, notably RMSNorm, require concrete
+                    // forward input dimensions.  PreparedDynamicExpression::stampBackward()
+                    // rebuilds the backward equation without those shape facts, so it cannot
+                    // safely stamp parameter gradients for shape-specialized ops.
+                    app.backwardWeightsClearStamped = stampBackwardForApplication(applicationIndex,
+                                                                                  allMaterializedParameterTargets,
+                                                                                  false,
+                                                                                  allMaterializedParameterPreallocatedOutputs,
+                                                                                  gradientUpdateStream.value());
 
                     if (!activeMaterializedParameterTargets.empty()) {
-                        app.backwardWeightsAccumulateStamped =
-                            std::make_shared<StampedExecutionPlan>(gradientPrepared.stampBackward(activeMaterializedParameterTargets,
-                                                                                                  app.upstreamInputNamesByOutput,
-                                                                                                  true,
-                                                                                                  app.backwardAdditionalInputsByName,
-                                                                                                  {},
-                                                                                                  activeMaterializedParameterPreallocatedOutputs));
+                        app.backwardWeightsAccumulateStamped = stampBackwardForApplication(applicationIndex,
+                                                                                           activeMaterializedParameterTargets,
+                                                                                           true,
+                                                                                           activeMaterializedParameterPreallocatedOutputs,
+                                                                                           gradientUpdateStream.value());
                     }
                 }
             }

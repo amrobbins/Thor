@@ -17,6 +17,8 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <set>
+#include <unordered_map>
 
 namespace Thor {
 
@@ -25,7 +27,9 @@ class RMSNorm : public TrainableLayer {
     class Builder;
 
     RMSNorm() = default;
-    explicit RMSNorm(std::optional<ThorImplementation::Expression> epilogue) : epilogue(std::move(epilogue)) {}
+    explicit RMSNorm(std::optional<ThorImplementation::Expression> epilogue,
+                     std::vector<std::pair<std::string, Tensor>> epilogueInputBindings = {})
+        : epilogue(std::move(epilogue)), epilogueInputBindings(std::move(epilogueInputBindings)) {}
     ~RMSNorm() override = default;
 
     std::shared_ptr<Layer> clone() const override { return std::make_shared<RMSNorm>(*this); }
@@ -44,27 +48,54 @@ class RMSNorm : public TrainableLayer {
         return LayerEpilogue::input(epilogueInputName(), computeDType, outputDType);
     }
 
-    [[nodiscard]] static ThorImplementation::ExpressionDefinition makeEpilogueDefinition(const ThorImplementation::Expression& expression) {
-        return LayerEpilogue::makeDefinition(expression, epilogueInputName(), epilogueOutputName(), "RMSNorm");
+    [[nodiscard]] static ThorImplementation::Expression epilogueAuxInput(
+        const std::string& inputName,
+        std::optional<ThorImplementation::DataType> computeDType = std::nullopt,
+        std::optional<ThorImplementation::DataType> outputDType = std::nullopt) {
+        validateEpilogueAuxInputName(inputName);
+        return LayerEpilogue::input(inputName, computeDType, outputDType);
     }
 
-    static void validateEpilogueExpression(const ThorImplementation::Expression& expression) {
-        LayerEpilogue::validateExpression(expression, epilogueInputName(), epilogueOutputName(), "RMSNorm");
+    [[nodiscard]] static ThorImplementation::ExpressionDefinition makeEpilogueDefinition(
+        const ThorImplementation::Expression& expression,
+        const std::vector<std::string>& auxiliaryInputNames = {}) {
+        return LayerEpilogue::makeDefinition(expression, epilogueInputName(), auxiliaryInputNames, epilogueOutputName(), "RMSNorm");
     }
 
-    static void validateEpilogueDefinition(const ThorImplementation::ExpressionDefinition& definition) {
-        LayerEpilogue::validateDefinition(definition, epilogueInputName(), epilogueOutputName(), "RMSNorm");
+    static void validateEpilogueExpression(const ThorImplementation::Expression& expression,
+                                           const std::vector<std::string>& auxiliaryInputNames = {}) {
+        LayerEpilogue::validateExpression(expression, epilogueInputName(), auxiliaryInputNames, epilogueOutputName(), "RMSNorm");
+    }
+
+    static void validateEpilogueDefinition(const ThorImplementation::ExpressionDefinition& definition,
+                                           const std::vector<std::string>& auxiliaryInputNames = {}) {
+        LayerEpilogue::validateDefinition(definition, epilogueInputName(), auxiliaryInputNames, epilogueOutputName(), "RMSNorm");
     }
 
     [[nodiscard]] static ThorImplementation::Expression epilogueExpressionFromDefinition(
-        const ThorImplementation::ExpressionDefinition& definition) {
-        return LayerEpilogue::expressionFromDefinition(definition, epilogueInputName(), epilogueOutputName(), "RMSNorm");
+        const ThorImplementation::ExpressionDefinition& definition,
+        const std::vector<std::string>& auxiliaryInputNames = {}) {
+        return LayerEpilogue::expressionFromDefinition(definition,
+                                                       epilogueInputName(),
+                                                       auxiliaryInputNames,
+                                                       epilogueOutputName(),
+                                                       "RMSNorm");
     }
 
     [[nodiscard]] static ThorImplementation::Expression applyEpilogue(const ThorImplementation::Expression& input,
                                                                       const ThorImplementation::Expression& epilogue) {
         return LayerEpilogue::apply(input, epilogue, epilogueInputName());
     }
+
+    static void validateEpilogueAuxInputName(const std::string& inputName);
+
+    using MultiConnectionLayer::getFeatureOutput;
+    int getConnectionType(Tensor connectingTensor) const override;
+    std::vector<Tensor> getFeatureInputs() const override;
+    Tensor getFeatureOutput(Tensor inputTensor) const override;
+    std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override;
+    void informThatInputConnectionMade(Tensor inputTensor) override;
+    bool mustConnectAllInputsToDriveOutput() const override { return !epilogueInputBindings.empty(); }
 
     nlohmann::json serialize(thor_file::TarWriter& archiveWriter,
                              Stream stream,
@@ -89,7 +120,15 @@ class RMSNorm : public TrainableLayer {
     double epsilon = 1.0e-5;
     DataType parameterDataType = DataType::FP32;
     std::optional<ThorImplementation::Expression> epilogue;
+    std::vector<std::pair<std::string, Tensor>> epilogueInputBindings;
     mutable std::optional<ThorImplementation::ExpressionDefinition> serializableEpilogue;
+
+    std::vector<std::string> epilogueAuxInputNames() const;
+    std::vector<uint32_t> inputPortIndicesForTensor(Tensor tensor) const;
+
+    std::set<uint32_t> connectedInputPortIndices;
+    bool emittedFeatureOutputAfterAllInputsConnected = false;
+    mutable std::unordered_map<uint64_t, uint32_t> nextInputConnectionCursorByTensorOriginalId;
 
     friend class Network;
     friend class Builder;
@@ -152,8 +191,24 @@ class RMSNorm::Builder {
 
     virtual RMSNorm::Builder& epilogue(const ThorImplementation::Expression& expression) {
         THOR_THROW_IF_FALSE(!this->_epilogue.has_value());
-        RMSNorm::validateEpilogueExpression(expression);
+        RMSNorm::validateEpilogueExpression(expression, epilogueAuxInputNames());
         this->_epilogue = expression;
+        return *this;
+    }
+
+    virtual RMSNorm::Builder& epilogueInput(const std::string& inputName, Tensor tensor) {
+        RMSNorm::validateEpilogueAuxInputName(inputName);
+        THOR_THROW_IF_FALSE(tensor.isInitialized());
+        for (const auto& [existingName, existingTensor] : _epilogueInputBindings) {
+            (void)existingTensor;
+            if (existingName == inputName) {
+                throw std::invalid_argument("RMSNorm epilogue input name is duplicated: " + inputName + ".");
+            }
+        }
+        _epilogueInputBindings.emplace_back(inputName, tensor);
+        if (_epilogue.has_value()) {
+            RMSNorm::validateEpilogueExpression(_epilogue.value(), epilogueAuxInputNames());
+        }
         return *this;
     }
 
@@ -177,6 +232,17 @@ class RMSNorm::Builder {
     std::shared_ptr<Initializer> _weightsInitializer = nullptr;
     std::shared_ptr<Optimizer> _weightsOptimizer = nullptr;
     std::optional<ThorImplementation::Expression> _epilogue;
+    std::vector<std::pair<std::string, Tensor>> _epilogueInputBindings;
+
+    std::vector<std::string> epilogueAuxInputNames() const {
+        std::vector<std::string> names;
+        names.reserve(_epilogueInputBindings.size());
+        for (const auto& [name, tensor] : _epilogueInputBindings) {
+            (void)tensor;
+            names.push_back(name);
+        }
+        return names;
+    }
 };
 
 }  // namespace Thor

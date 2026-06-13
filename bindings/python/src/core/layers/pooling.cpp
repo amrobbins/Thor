@@ -1,6 +1,8 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/vector.h>
 
+#include <optional>
+
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Layers/Utility/Pooling.h"
 #include "DeepLearning/Api/Network/Network.h"
@@ -163,6 +165,15 @@ Notes
 -----
 The supported tensor layout is NCHW.
 )nbdoc")
+        .def(
+            "get_feature_output",
+            [](Pooling &self) -> Tensor {
+                std::optional<Tensor> maybeFeatureOutput = self.getFeatureOutput();
+                return maybeFeatureOutput.value();
+            },
+            R"nbdoc(
+            Return the output tensor produced by this layer.
+            )nbdoc")
         .def("get_output_dimensions", &Pooling::getOutputDimensions)
         .def("get_pooling_type", &Pooling::getPoolingType)
         .def("get_window_height", &Pooling::getWindowHeight)

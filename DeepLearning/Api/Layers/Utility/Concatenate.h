@@ -42,7 +42,7 @@ class Concatenate : public MultiConnectionLayer {
         }
     }
 
-    bool mustConnectAllInputsToDriveOutput() override { return true; }
+    bool mustConnectAllInputsToDriveOutput() const override { return true; }
     void informThatInputConnectionMade(Tensor inputTensor) override {
         numInputConnectionsMade += 1;
         THOR_THROW_IF_FALSE(numInputConnectionsMade <= featureInputs.size());

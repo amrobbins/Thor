@@ -16,9 +16,11 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -375,6 +377,311 @@ TEST(Convolution2dApi, DefaultsToSamePaddingGeluActivationAndCanDisableActivatio
     ASSERT_TRUE(explicitJson.contains("activation"));
     EXPECT_TRUE(explicitJson.at("activation").is_null());
     EXPECT_TRUE(explicitJson.at("has_bias").get<bool>());
+}
+
+TEST(Convolution2dApi, MultiInputEpilogueSerializesAuxiliaryBindings) {
+    Api::Network network("conv2dMultiInputEpilogue");
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("input").dimensions({3, 8, 8}).dataType(DataType::FP16).build();
+    Api::NetworkInput residual =
+        Api::NetworkInput::Builder().network(network).name("residual").dimensions({4, 8, 8}).dataType(DataType::FP16).build();
+
+    Impl::Expression convOutput = Api::Convolution2d::epilogueInput(DataType::FP32, DataType::FP16);
+    Impl::Expression residualInput = Api::Convolution2d::epilogueAuxInput("residual", DataType::FP32, DataType::FP16);
+    Api::Convolution2d conv = Api::Convolution2d::Builder()
+                                  .network(network)
+                                  .featureInput(input.getFeatureOutput().value())
+                                  .numOutputChannels(4)
+                                  .filterHeight(3)
+                                  .filterWidth(3)
+                                  .verticalPadding(1)
+                                  .horizontalPadding(1)
+                                  .hasBias(false)
+                                  .noActivation()
+                                  .epilogueInput("residual", residual.getFeatureOutput().value())
+                                  .epilogue(convOutput + residualInput)
+                                  .build();
+
+    ASSERT_TRUE(conv.isInitialized());
+    EXPECT_EQ(conv.getFeatureOutput().value().getDimensions(), (vector<uint64_t>{4, 8, 8}));
+
+    const json j = conv.architectureJson();
+    ASSERT_TRUE(j.contains("epilogue"));
+    ASSERT_FALSE(j.at("epilogue").is_null());
+    ASSERT_TRUE(j.at("epilogue").contains("expected_input_names"));
+    const vector<string> expectedInputNames = j.at("epilogue").at("expected_input_names").get<vector<string>>();
+    EXPECT_EQ(set<string>(expectedInputNames.begin(), expectedInputNames.end()),
+              (set<string>{Api::Convolution2d::epilogueInputName(), "residual"}));
+    ASSERT_TRUE(j.contains("epilogue_inputs"));
+    ASSERT_EQ(j.at("epilogue_inputs").size(), 1u);
+    EXPECT_EQ(j.at("epilogue_inputs").at(0).at("name").get<string>(), "residual");
+    EXPECT_EQ(j.at("epilogue_inputs").at(0).at("tensor").at("id").get<uint64_t>(),
+              residual.getFeatureOutput().value().getOriginalId());
+    ASSERT_EQ(j.at("inputs").size(), 1u) << "primary convolution inputs stay in inputs; aux bindings serialize separately.";
+}
+
+
+TEST(Convolution2dApi, MultiInputEpilogueRunsForwardResidualAdd) {
+    constexpr uint32_t batchSize = 1;
+    const DataType dataType = DataType::FP16;
+
+    Api::Network network("conv2dMultiInputEpilogueForward");
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("input").dimensions({1, 3, 3}).dataType(dataType).build();
+    Api::NetworkInput residual =
+        Api::NetworkInput::Builder().network(network).name("residual").dimensions({1, 3, 3}).dataType(dataType).build();
+
+    Impl::Expression convOutput = Api::Convolution2d::epilogueInput(DataType::FP32, dataType);
+    Impl::Expression residualInput = Api::Convolution2d::epilogueAuxInput("residual", DataType::FP32, dataType);
+    Api::Convolution2d conv = Api::Convolution2d::Builder()
+                                  .network(network)
+                                  .featureInput(input.getFeatureOutput().value())
+                                  .numOutputChannels(1)
+                                  .filterHeight(1)
+                                  .filterWidth(1)
+                                  .verticalPadding(0)
+                                  .horizontalPadding(0)
+                                  .hasBias(false)
+                                  .noActivation()
+                                  .epilogueInput("residual", residual.getFeatureOutput().value())
+                                  .epilogue(convOutput + residualInput)
+                                  .build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(conv.getFeatureOutput().value())
+                                    .dataType(dataType)
+                                    .build();
+
+    vector<Event> initDoneEvents;
+    // This test only drives forward inference after manually setting the
+    // convolution weights.  Placing for training requires every trainable
+    // layer to have an optimizer, which is intentionally irrelevant here.
+    shared_ptr<Api::PlacedNetwork> placedNetwork = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/true);
+    synchronizeEvents(initDoneEvents);
+    Impl::StampedNetwork& stampedNetwork = placedNetwork->getStampedNetwork(0);
+    auto physicalInput = dynamic_pointer_cast<Impl::NetworkInput>(stampedNetwork.getPhysicalLayerFromApiLayer(input.getId()));
+    auto physicalResidual = dynamic_pointer_cast<Impl::NetworkInput>(stampedNetwork.getPhysicalLayerFromApiLayer(residual.getId()));
+    auto physicalOutput = dynamic_pointer_cast<Impl::NetworkOutput>(stampedNetwork.getPhysicalLayerFromApiLayer(output.getId()));
+    auto physicalConv = dynamic_pointer_cast<Impl::CustomLayer>(stampedNetwork.getPhysicalLayerFromApiLayer(conv.getId()));
+    ASSERT_NE(physicalInput, nullptr);
+    ASSERT_NE(physicalResidual, nullptr);
+    ASSERT_NE(physicalOutput, nullptr);
+    ASSERT_NE(physicalConv, nullptr);
+
+    Stream stream = physicalConv->getStreams()[0];
+    setParameterTensor(physicalConv->getParameter("weights"), {2.0f}, stream);
+    stream.synchronize();
+
+    Impl::Tensor inputHost(cpuPlacement, Impl::TensorDescriptor(dataType, {batchSize, 1, 3, 3}));
+    Impl::Tensor residualHost(cpuPlacement, Impl::TensorDescriptor(dataType, {batchSize, 1, 3, 3}));
+    const vector<float> inputValues = {1.0f, 2.0f, 3.0f, -1.0f, -2.0f, -3.0f, 0.5f, 1.5f, 2.5f};
+    const vector<float> residualValues = {0.25f, 0.50f, 0.75f, 1.0f, 1.25f, 1.50f, -0.25f, -0.50f, -0.75f};
+    writeCpuTensor(inputHost, inputValues);
+    writeCpuTensor(residualHost, residualValues);
+
+    physicalInput->forward(inputHost, false, batchSize);
+    physicalResidual->forward(residualHost, false, batchSize);
+    Event outputReady = physicalOutput->getOutputReadyEvent();
+    outputReady.synchronize();
+
+    vector<float> expected(inputValues.size());
+    for (uint32_t i = 0; i < inputValues.size(); ++i) {
+        expected[i] = inputValues[i] * 2.0f + residualValues[i];
+    }
+    expectAllClose(readCpuTensor(physicalOutput->getFeatureOutput().value()), expected, 7e-2f, 7e-2f, "conv2d residual epilogue");
+}
+
+
+TEST(Convolution2dApi, MultiInputEpilogueRunsForwardBackwardResidualAddAndUpdatesWeights) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint32_t C = 1;
+    constexpr uint32_t H = 3;
+    constexpr uint32_t W = 3;
+    constexpr uint32_t K = 1;
+    constexpr uint32_t R = 1;
+    constexpr uint32_t S = 1;
+    constexpr uint32_t strideH = 1;
+    constexpr uint32_t strideW = 1;
+    constexpr uint32_t padH = 0;
+    constexpr uint32_t padW = 0;
+    constexpr float learningRate = 0.1f;
+    const DataType dataType = DataType::FP16;
+
+    const vector<float> inputValues = {
+        1.0f, 2.0f, -1.0f,
+        0.5f, -0.5f, 1.5f,
+        2.5f, -2.0f, 0.25f,
+        -1.5f, 0.75f, 1.25f,
+        0.0f, -0.25f, 2.0f,
+        1.0f, -1.0f, 0.5f,
+    };
+    const vector<float> residualValues = {
+        0.25f, -0.50f, 0.75f,
+        1.0f, -1.25f, 1.50f,
+        -0.25f, 0.50f, -0.75f,
+        1.25f, -1.50f, 0.25f,
+        -0.50f, 0.75f, -1.0f,
+        0.5f, -0.25f, 1.0f,
+    };
+    const vector<float> upstreamErrors = {
+        0.5f, -1.0f, 1.5f,
+        -0.25f, 0.75f, -1.25f,
+        1.0f, 0.25f, -0.5f,
+        -1.5f, 0.5f, 0.25f,
+        1.25f, -0.75f, 1.0f,
+        0.5f, 1.5f, -1.0f,
+    };
+    const vector<float> initialWeights = {2.0f};
+
+    shared_ptr<Api::Sgd> weightsSgd = Api::Sgd::Builder().initialLearningRate(learningRate).decay(0.0f).momentum(0.0f).build();
+
+    Api::Network network("conv2dMultiInputEpilogueForwardBackward");
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("input").dimensions({C, H, W}).dataType(dataType).build();
+    Api::NetworkInput residual =
+        Api::NetworkInput::Builder().network(network).name("residual").dimensions({K, H, W}).dataType(dataType).build();
+    Api::GradientRivet inputRivet = Api::GradientRivet::Builder().network(network).tensor(input.getFeatureOutput().value()).build();
+    Api::GradientRivet residualRivet =
+        Api::GradientRivet::Builder().network(network).tensor(residual.getFeatureOutput().value()).build();
+
+    Impl::Expression convOutput = Api::Convolution2d::epilogueInput(DataType::FP32, dataType);
+    Impl::Expression residualInput = Api::Convolution2d::epilogueAuxInput("residual", DataType::FP32, dataType);
+    Api::Convolution2d conv = Api::Convolution2d::Builder()
+                                  .network(network)
+                                  .featureInput(inputRivet.getFeatureOutput().value())
+                                  .numOutputChannels(K)
+                                  .filterHeight(R)
+                                  .filterWidth(S)
+                                  .verticalStride(strideH)
+                                  .horizontalStride(strideW)
+                                  .verticalPadding(padH)
+                                  .horizontalPadding(padW)
+                                  .hasBias(false)
+                                  .weightsOptimizer(weightsSgd)
+                                  .noActivation()
+                                  .epilogueInput("residual", residualRivet.getFeatureOutput().value())
+                                  .epilogue(convOutput + residualInput)
+                                  .build();
+    Api::GradientRivet outputRivet = Api::GradientRivet::Builder().network(network).tensor(conv.getFeatureOutput().value()).build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(outputRivet.getFeatureOutput().value())
+                                    .dataType(dataType)
+                                    .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<Api::PlacedNetwork> placedNetwork = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/false);
+    synchronizeEvents(initDoneEvents);
+    ASSERT_NE(placedNetwork, nullptr);
+    Impl::StampedNetwork& stampedNetwork = placedNetwork->getStampedNetwork(0);
+    auto physicalInput = dynamic_pointer_cast<Impl::NetworkInput>(stampedNetwork.getPhysicalLayerFromApiLayer(input.getId()));
+    auto physicalResidual = dynamic_pointer_cast<Impl::NetworkInput>(stampedNetwork.getPhysicalLayerFromApiLayer(residual.getId()));
+    auto physicalOutput = dynamic_pointer_cast<Impl::NetworkOutput>(stampedNetwork.getPhysicalLayerFromApiLayer(output.getId()));
+    auto physicalConv = dynamic_pointer_cast<Impl::CustomLayer>(stampedNetwork.getPhysicalLayerFromApiLayer(conv.getId()));
+    ASSERT_NE(physicalInput, nullptr);
+    ASSERT_NE(physicalResidual, nullptr);
+    ASSERT_NE(physicalOutput, nullptr);
+    ASSERT_NE(physicalConv, nullptr);
+    ASSERT_TRUE(physicalConv->getGradientUpdateStream().has_value());
+
+    Stream stream = physicalConv->getStreams()[0];
+    Stream gradientStream = physicalConv->getGradientUpdateStream().value();
+    setParameterTensor(physicalConv->getParameter("weights"), initialWeights, stream);
+    stream.synchronize();
+
+    Impl::Tensor inputHost(cpuPlacement, Impl::TensorDescriptor(dataType, {batchSize, C, H, W}));
+    Impl::Tensor residualHost(cpuPlacement, Impl::TensorDescriptor(dataType, {batchSize, K, H, W}));
+    writeCpuTensor(inputHost, inputValues);
+    writeCpuTensor(residualHost, residualValues);
+
+    physicalInput->forward(inputHost, false, batchSize);
+    physicalResidual->forward(residualHost, false, batchSize);
+    Event outputReady = physicalOutput->getOutputReadyEvent();
+    outputReady.synchronize();
+
+    vector<float> expectedForward(inputValues.size());
+    for (uint64_t i = 0; i < inputValues.size(); ++i) {
+        expectedForward[i] = inputValues[i] * initialWeights[0] + residualValues[i];
+    }
+    expectAllClose(readCpuTensor(physicalOutput->getFeatureOutput().value()), expectedForward, 7e-2f, 7e-2f,
+                   "conv2d residual epilogue forward/backward feature out");
+
+    ASSERT_EQ(physicalConv->getErrorInputs().size(), 1u);
+    ASSERT_TRUE(physicalConv->getErrorInputs()[0].has_value());
+    ASSERT_EQ(physicalConv->getErrorOutputs().size(), 2u)
+        << "Multi-input epilogue backward must produce gradients for the primary convolution input and auxiliary residual input.";
+    ASSERT_TRUE(physicalConv->getErrorOutputs()[0].has_value());
+    ASSERT_TRUE(physicalConv->getErrorOutputs()[1].has_value());
+
+    Impl::Tensor errorInput = physicalConv->getErrorInputs()[0].value();
+    Impl::Tensor errorInputHost = errorInput.clone(cpuPlacement);
+    writeCpuTensor(errorInputHost, upstreamErrors);
+    errorInput.copyFromAsync(errorInputHost, stream);
+    physicalConv->backward(errorInput, batchSize);
+
+    Impl::Tensor primaryErrorOutputHost = copyTensorToCpu(physicalConv->getErrorOutputs()[0].value(), stream);
+    Impl::Tensor residualErrorOutputHost = copyTensorToCpu(physicalConv->getErrorOutputs()[1].value(), stream);
+    Impl::Tensor weightsAfterHost = copyTensorToCpu(physicalConv->getParameter("weights")->getStorage().value(), gradientStream);
+    stream.synchronize();
+    gradientStream.synchronize();
+
+    const vector<float> expectedPrimaryError =
+        conv2dErrorReference(upstreamErrors, initialWeights, batchSize, C, H, W, K, R, S, strideH, strideW, padH, padW);
+    const vector<float> expectedWeightsGrad =
+        conv2dWeightGradReference(inputValues, upstreamErrors, batchSize, C, H, W, K, R, S, strideH, strideW, padH, padW);
+    const vector<float> expectedWeightsAfter = sgdUpdatedReference(initialWeights, expectedWeightsGrad, batchSize, learningRate);
+
+    expectAllClose(readCpuTensor(primaryErrorOutputHost), expectedPrimaryError, 8e-2f, 8e-2f,
+                   "conv2d residual epilogue primary error out");
+    expectAllClose(readCpuTensor(residualErrorOutputHost), upstreamErrors, 8e-2f, 8e-2f,
+                   "conv2d residual epilogue auxiliary residual error out");
+    expectAllClose(readCpuTensor(weightsAfterHost), expectedWeightsAfter, 8e-2f, 8e-2f,
+                   "conv2d residual epilogue weights after");
+}
+
+TEST(Convolution2dApi, MultiInputEpilogueRejectsMissingOrInvalidAuxiliaryBindings) {
+    Api::Network network("conv2dMultiInputEpilogueRejects");
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("input").dimensions({3, 8, 8}).dataType(DataType::FP16).build();
+    Api::NetworkInput wrongResidual =
+        Api::NetworkInput::Builder().network(network).name("wrong_residual").dimensions({5, 8, 8}).dataType(DataType::FP16).build();
+
+    Impl::Expression convOutput = Api::Convolution2d::epilogueInput(DataType::FP32, DataType::FP16);
+    Impl::Expression residualInput = Api::Convolution2d::epilogueAuxInput("residual", DataType::FP32, DataType::FP16);
+
+    EXPECT_THROW(Api::Convolution2d::epilogueAuxInput("__reserved"), invalid_argument);
+    EXPECT_THROW(Api::Convolution2d::epilogueAuxInput("weights"), invalid_argument);
+
+    EXPECT_THROW(Api::Convolution2d::Builder()
+                     .network(network)
+                     .featureInput(input.getFeatureOutput().value())
+                     .numOutputChannels(4)
+                     .filterHeight(3)
+                     .filterWidth(3)
+                     .verticalPadding(1)
+                     .horizontalPadding(1)
+                     .hasBias(false)
+                     .noActivation()
+                     .epilogue(convOutput + residualInput)
+                     .build(),
+                 invalid_argument);
+
+    EXPECT_THROW(Api::Convolution2d::Builder()
+                     .network(network)
+                     .featureInput(input.getFeatureOutput().value())
+                     .numOutputChannels(4)
+                     .filterHeight(3)
+                     .filterWidth(3)
+                     .verticalPadding(1)
+                     .horizontalPadding(1)
+                     .hasBias(false)
+                     .noActivation()
+                     .epilogueInput("residual", wrongResidual.getFeatureOutput().value())
+                     .epilogue(convOutput + residualInput)
+                     .build(),
+                 exception);
 }
 
 TEST(Convolution2dApi, StampsAsPhysicalCustomLayerAllocatesParametersAndSerializesOptimizers) {

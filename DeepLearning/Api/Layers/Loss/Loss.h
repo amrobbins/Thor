@@ -28,7 +28,7 @@ class Loss : public Layer {
     static std::unordered_map<std::string, Deserializer> &get_registry();
     static void register_layer(std::string name, Deserializer fn);
 
-    bool mustConnectAllInputsToDriveOutput() override { return true; }
+    bool mustConnectAllInputsToDriveOutput() const override { return true; }
     void informThatInputConnectionMade(Tensor inputTensor) override {
         (void)inputTensor;
         numInputConnectionsMade += 1;

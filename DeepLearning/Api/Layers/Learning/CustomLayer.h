@@ -56,7 +56,7 @@ class CustomLayer : public TrainableLayer {
     std::shared_ptr<Layer> clone() const override { return std::make_shared<CustomLayer>(*this); }
     int getConnectionType(Tensor connectingTensor) const override;
     std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override;
-    bool mustConnectAllInputsToDriveOutput() override { return true; }
+    bool mustConnectAllInputsToDriveOutput() const override { return true; }
     void informThatInputConnectionMade(Tensor inputTensor) override;
     std::string getLayerType() const override { return "CustomLayer"; }
 
