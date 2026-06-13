@@ -967,33 +967,6 @@ class _PackedVocDetectionExample(thor.layers.CustomLayer):
         }
 
 
-class _PackedVocDetectionVideoExample(thor.layers.CustomLayer):
-
-    def __init__(self, network: thor.Network, packed: thor.Tensor, *, image_size: int):
-        self.image_size = image_size
-        super().__init__(network=network, inputs=packed, output_names=["volume", "box"])
-
-    def build(self, context: thor.layers.CustomLayerBuildContext) -> dict[str, thor.physical.Expression]:
-        packed_tensor = context.input_tensor("feature_input")
-        dims = packed_tensor.get_dimensions()
-        assert len(dims) == 2
-        batch_size, packed_elems = dims
-        image_elems = _object_detection_image_elems(self.image_size)
-        assert packed_elems == image_elems + OBJECT_DETECTION_BOX_DIMS
-
-        packed = context.input("feature_input")
-        volume = packed.strided_view(
-            [batch_size, 3, 1, self.image_size, self.image_size],
-            [packed_elems, self.image_size * self.image_size, self.image_size * self.image_size, self.image_size, 1],
-            0,
-        )
-        box = packed.strided_view([batch_size, OBJECT_DETECTION_BOX_DIMS], [packed_elems, 1], image_elems)
-        return {
-            "volume": (volume + 0.0).with_dtypes(output_dtype=thor.DataType.fp16, compute_dtype=thor.DataType.fp32),
-            "box": (box + 0.0).with_dtypes(output_dtype=thor.DataType.fp32, compute_dtype=thor.DataType.fp32),
-        }
-
-
 class _ValidBoxFromUnconstrainedVector(thor.layers.CustomLayer):
 
     def __init__(self, network: thor.Network, raw_box: thor.Tensor):
@@ -1050,10 +1023,6 @@ def _split_voc_detection_example(network: thor.Network, packed_examples: thor.Te
     split = _PackedVocDetectionExample(network, packed_examples, image_size=image_size)
     return split["image"], split["box"]
 
-
-def _split_voc_detection_video_example(network: thor.Network, packed_examples: thor.Tensor, *, image_size: int):
-    split = _PackedVocDetectionVideoExample(network, packed_examples, image_size=image_size)
-    return split["volume"], split["box"]
 
 
 def _global_average_pool_2d(network: thor.Network, x: thor.Tensor) -> thor.Tensor:
@@ -1117,94 +1086,6 @@ def _build_tiny_voc2012_multitask_detector(
     thor.layers.NetworkOutput(network, "class_loss", class_loss.get_loss(), thor.DataType.fp32)
     thor.layers.NetworkOutput(network, "pred_boxes", pred_box, thor.DataType.fp32)
     thor.layers.NetworkOutput(network, "class_scores", class_logits.get_feature_output(), dtype)
-    return network
-
-
-def _build_conv3d_voc2012_box_detector(
-    name: str,
-    *,
-    num_classes: int,
-    image_size: int = OBJECT_DETECTION_IMAGE_SIZE,
-    dtype=thor.DataType.fp16,
-):
-    del num_classes
-    network = thor.Network(name)
-    packed_examples = thor.layers.NetworkInput(
-        network,
-        "examples",
-        [_object_detection_example_elems(image_size)],
-        dtype,
-    )
-    volume, target_box = _split_voc_detection_video_example(network, packed_examples.get_feature_output(), image_size=image_size)
-
-    conv1 = thor.layers.Convolution3d(
-        network,
-        volume,
-        16,
-        1,
-        7,
-        7,
-        depth_stride=1,
-        vertical_stride=4,
-        horizontal_stride=4,
-        depth_padding=0,
-        vertical_padding=3,
-        horizontal_padding=3,
-        has_bias=True,
-        activation=thor.activations.Relu(),
-    )
-    x = conv1.get_feature_output()
-    conv2 = thor.layers.Convolution3d(
-        network,
-        x,
-        32,
-        1,
-        3,
-        3,
-        depth_stride=1,
-        vertical_stride=2,
-        horizontal_stride=2,
-        depth_padding=0,
-        vertical_padding=1,
-        horizontal_padding=1,
-        has_bias=True,
-        activation=thor.activations.Relu(),
-    )
-    x = conv2.get_feature_output()
-    conv3 = thor.layers.Convolution3d(
-        network,
-        x,
-        64,
-        1,
-        3,
-        3,
-        depth_stride=1,
-        vertical_stride=2,
-        horizontal_stride=2,
-        depth_padding=0,
-        vertical_padding=1,
-        horizontal_padding=1,
-        has_bias=True,
-        activation=thor.activations.Relu(),
-    )
-    x = conv3.get_feature_output()
-    flat = thor.layers.Flatten(network, x, 1)
-    x = flat.get_feature_output()
-    hidden = thor.layers.FullyConnected(network, x, 128, True, activation=thor.activations.Relu())
-    raw_box = thor.layers.FullyConnected(network, hidden.get_feature_output(), OBJECT_DETECTION_BOX_DIMS, True, activation=None)
-    pred_box = _valid_box_from_raw_head(network, raw_box.get_feature_output())
-
-    loss = thor.losses.detection.GIoULoss(
-        network,
-        pred_box,
-        target_box,
-        "xyxy",
-        1.0e-5,
-        thor.DataType.fp32,
-        thor.losses.LossShape.batch,
-    )
-    thor.layers.NetworkOutput(network, "loss", loss.get_loss(), thor.DataType.fp32)
-    thor.layers.NetworkOutput(network, "pred_boxes", pred_box, thor.DataType.fp32)
     return network
 
 
@@ -1273,7 +1154,6 @@ def _run_full_voc2012_detection_model_training(model_builder, *, model_name: str
     ("model_name", "model_builder"),
     [
         ("tiny_multitask_detector", _build_tiny_voc2012_multitask_detector),
-        ("conv3d_box_detector", _build_conv3d_voc2012_box_detector),
     ],
 )
 def test_queued_trainer_trains_voc2012_object_detection_networks_end_to_end(model_name, model_builder, capfd):

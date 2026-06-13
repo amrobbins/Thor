@@ -6,9 +6,12 @@
 #include "Utilities/Expression/ReduceMinMaxBackwardKernel.h"
 #include "Utilities/CudaDriver/CudaGraphConditional.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
+#include "Utilities/ComputeTopology/MachineEvaluator.h"
 
 #include <cudnn_frontend.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <optional>
@@ -2656,26 +2659,239 @@ static std::vector<int64_t> convolutionFrontendDilations(bool is_3d) {
     return {1, 1};
 }
 
-static void buildFrontendConvolutionGraph(BuiltConvolution& built, const Stream& stream, const char* op_name) {
+static void checkFrontendStatus(cudnn_frontend::error_t status, const std::string& message) {
+    if (!status.is_good()) {
+        throw std::runtime_error(message + ": " + status.get_message());
+    }
+}
+
+static int64_t checkedFrontendPlanWorkspaceBytes(const BuiltConvolution& built, int64_t plan_index, const char* op_name) {
+    if (!built.frontend_graph) {
+        throw std::runtime_error(std::string(op_name) + " missing cuDNN Frontend graph.");
+    }
+    const int64_t workspace_bytes = built.frontend_graph->get_workspace_size_plan_at_index(plan_index);
+    if (workspace_bytes < 0) {
+        throw std::runtime_error(std::string("cuDNN Frontend ") + op_name + " plan returned a negative workspace size.");
+    }
+    return workspace_bytes;
+}
+
+static void buildFrontendConvolutionCandidatePlans(BuiltConvolution& built, const Stream& stream, const char* op_name) {
     if (!built.frontend_graph) {
         throw std::runtime_error(std::string(op_name) + " missing cuDNN Frontend graph.");
     }
 
     ScopedGpu scopedGpu(stream.getGpuNum());
-    auto status = built.frontend_graph->build(stream.getCudnnHandle(), {fe::HeurMode_t::A});
-    if (!status.is_good()) {
-        throw std::runtime_error(std::string("Failed to build cuDNN Frontend ") + op_name + " graph: " + status.get_message());
+    checkFrontendStatus(built.frontend_graph->validate(), std::string("Failed to validate cuDNN Frontend ") + op_name + " graph");
+    checkFrontendStatus(built.frontend_graph->build_operation_graph(stream.getCudnnHandle()),
+                        std::string("Failed to build cuDNN Frontend ") + op_name + " operation graph");
+    checkFrontendStatus(built.frontend_graph->create_execution_plans({fe::HeurMode_t::A, fe::HeurMode_t::B, fe::HeurMode_t::FALLBACK}),
+                        std::string("Failed to enumerate cuDNN Frontend ") + op_name + " execution plans");
+    checkFrontendStatus(built.frontend_graph->check_support(stream.getCudnnHandle()),
+                        std::string("Failed to check support for cuDNN Frontend ") + op_name + " execution plans");
+}
+
+namespace {
+constexpr int kConvolutionAutotuneWarmupIterations = 2;
+constexpr int kConvolutionAutotuneTimedIterations = 10;
+constexpr int kConvolutionAutotuneMaxRotationSlots = kConvolutionAutotuneWarmupIterations + kConvolutionAutotuneTimedIterations;
+constexpr int64_t kConvolutionAutotuneMaxCandidatePlans = 16;
+constexpr uint64_t kConvolutionAutotuneTargetRotationBytes = 512ULL * 1024ULL * 1024ULL;
+constexpr uint64_t kConvolutionAutotuneMinFreeMemReserveBytes = 512ULL * 1024ULL * 1024ULL;
+constexpr uint64_t kConvolutionAutotuneMaxFreeMemFractionDivisor = 4;
+
+struct FrontendConvolutionAutotuneBinding {
+    int64_t uid;
+    Tensor reference_tensor;
+    bool rotate_for_timing = true;
+};
+
+struct FrontendConvolutionAutotuneTensorPool {
+    std::vector<std::vector<Tensor>> rotating_tensors_by_binding;
+    std::vector<std::unordered_map<int64_t, void*>> tensor_packs;
+    std::optional<Tensor> workspace;
+};
+
+static uint64_t safeAddAutotuneBytes(uint64_t a, uint64_t b) {
+    if (b > std::numeric_limits<uint64_t>::max() - a) {
+        return std::numeric_limits<uint64_t>::max();
+    }
+    return a + b;
+}
+
+static int chooseFrontendConvolutionAutotuneRotationSlots(const std::vector<FrontendConvolutionAutotuneBinding>& bindings,
+                                                          const TensorPlacement& placement,
+                                                          int64_t workspace_bytes) {
+    uint64_t rotating_slot_bytes = 0;
+    uint64_t fixed_scratch_bytes = workspace_bytes > 0 ? static_cast<uint64_t>(workspace_bytes) : 0;
+    for (const FrontendConvolutionAutotuneBinding& binding : bindings) {
+        const uint64_t tensor_bytes = binding.reference_tensor.getArraySizeInBytes();
+        if (binding.rotate_for_timing) {
+            rotating_slot_bytes = safeAddAutotuneBytes(rotating_slot_bytes, tensor_bytes);
+        }
     }
 
-    int64_t workspace_bytes = 0;
-    status = built.frontend_graph->get_workspace_size(workspace_bytes);
-    if (!status.is_good()) {
-        throw std::runtime_error(std::string("Failed to query cuDNN Frontend ") + op_name + " workspace size: " + status.get_message());
+    if (rotating_slot_bytes == 0) {
+        return 1;
     }
-    if (workspace_bytes < 0) {
-        throw std::runtime_error(std::string("cuDNN Frontend ") + op_name + " returned a negative workspace size.");
+
+    uint64_t available_for_autotune = 0;
+    if (placement.getMemDevice() == TensorPlacement::MemDevices::GPU) {
+        const uint64_t free_bytes = static_cast<uint64_t>(MachineEvaluator::instance().getFreeMemBytes(placement.getDeviceNum()));
+        const uint64_t reserve_bytes = std::min(free_bytes, kConvolutionAutotuneMinFreeMemReserveBytes);
+        const uint64_t after_reserve = free_bytes > reserve_bytes ? free_bytes - reserve_bytes : 0;
+        available_for_autotune = after_reserve / kConvolutionAutotuneMaxFreeMemFractionDivisor;
+    } else {
+        available_for_autotune = std::numeric_limits<uint64_t>::max();
     }
-    built.workspace_bytes = static_cast<size_t>(workspace_bytes);
+
+    if (available_for_autotune <= fixed_scratch_bytes) {
+        return 1;
+    }
+
+    const uint64_t rotating_budget = available_for_autotune - fixed_scratch_bytes;
+    const uint64_t max_affordable_slots = std::max<uint64_t>(1, rotating_budget / rotating_slot_bytes);
+    const uint64_t target_slots = std::max<uint64_t>(1,
+                                                     (kConvolutionAutotuneTargetRotationBytes + rotating_slot_bytes - 1) /
+                                                         rotating_slot_bytes);
+    const uint64_t bounded_slots = std::min<uint64_t>(
+        static_cast<uint64_t>(kConvolutionAutotuneMaxRotationSlots), std::min(target_slots, max_affordable_slots));
+    return static_cast<int>(std::max<uint64_t>(1, bounded_slots));
+}
+
+static FrontendConvolutionAutotuneTensorPool createFrontendConvolutionAutotuneTensorPool(
+    const std::vector<FrontendConvolutionAutotuneBinding>& bindings,
+    const TensorPlacement& workspace_placement,
+    int64_t workspace_bytes) {
+    FrontendConvolutionAutotuneTensorPool pool;
+    const int rotation_slots = chooseFrontendConvolutionAutotuneRotationSlots(bindings, workspace_placement, workspace_bytes);
+
+    pool.rotating_tensors_by_binding.resize(bindings.size());
+    pool.tensor_packs.resize(rotation_slots);
+    for (std::unordered_map<int64_t, void*>& tensor_pack : pool.tensor_packs) {
+        tensor_pack.reserve(bindings.size());
+    }
+
+    for (size_t binding_index = 0; binding_index < bindings.size(); ++binding_index) {
+        const FrontendConvolutionAutotuneBinding& binding = bindings[binding_index];
+        if (binding.rotate_for_timing) {
+            std::vector<Tensor>& rotating_tensors = pool.rotating_tensors_by_binding[binding_index];
+            rotating_tensors.reserve(rotation_slots);
+            for (int slot = 0; slot < rotation_slots; ++slot) {
+                rotating_tensors.emplace_back(binding.reference_tensor.getPlacement(), binding.reference_tensor.getDescriptor());
+                pool.tensor_packs[slot][binding.uid] =
+                    const_cast<void*>(static_cast<const void*>(rotating_tensors.back().getMemPtr<void>()));
+            }
+        } else {
+            void* ptr = const_cast<void*>(static_cast<const void*>(binding.reference_tensor.getMemPtr<void>()));
+            for (std::unordered_map<int64_t, void*>& tensor_pack : pool.tensor_packs) {
+                tensor_pack[binding.uid] = ptr;
+            }
+        }
+    }
+
+    if (workspace_bytes > 0) {
+        pool.workspace = Tensor(workspace_placement, TensorDescriptor(DataType::UINT8, {static_cast<uint64_t>(workspace_bytes)}));
+    }
+
+    return pool;
+}
+
+static float timeFrontendConvolutionPlan(BuiltConvolution& built,
+                                         const Stream& stream,
+                                         FrontendConvolutionAutotuneTensorPool& pool,
+                                         const char* op_name) {
+    if (!built.frontend_graph) {
+        throw std::runtime_error(std::string(op_name) + " missing cuDNN Frontend graph.");
+    }
+    if (pool.tensor_packs.empty()) {
+        throw std::runtime_error(std::string(op_name) + " autotune tensor pack rotation pool is empty.");
+    }
+
+    Stream timing_stream = stream;
+    auto run_once = [&](int iteration) {
+        std::unordered_map<int64_t, void*>& tensor_pack = pool.tensor_packs[static_cast<size_t>(iteration) % pool.tensor_packs.size()];
+        void* workspace_ptr = pool.workspace.has_value()
+                                  ? const_cast<void*>(static_cast<const void*>(pool.workspace.value().getMemPtr<void>()))
+                                  : nullptr;
+        auto status = built.frontend_graph->execute(timing_stream.getCudnnHandle(), tensor_pack, workspace_ptr);
+        if (!status.is_good()) {
+            throw std::runtime_error(std::string("Failed to execute cuDNN Frontend ") + op_name + " plan during autotune: " +
+                                     status.get_message());
+        }
+    };
+
+    for (int iteration = 0; iteration < kConvolutionAutotuneWarmupIterations; ++iteration) {
+        run_once(iteration);
+    }
+    timing_stream.synchronize();
+
+    Event start(stream.getGpuNum(), true, true);
+    Event stop(stream.getGpuNum(), true, true);
+    start.record(timing_stream);
+    for (int iteration = 0; iteration < kConvolutionAutotuneTimedIterations; ++iteration) {
+        run_once(kConvolutionAutotuneWarmupIterations + iteration);
+    }
+    stop.record(timing_stream);
+    return stop.synchronizeAndReportElapsedTimeInMilliseconds(start) / static_cast<float>(kConvolutionAutotuneTimedIterations);
+}
+}  // namespace
+
+static void autotuneFrontendConvolutionGraph(BuiltConvolution& built,
+                                             const Stream& stream,
+                                             const std::vector<FrontendConvolutionAutotuneBinding>& autotune_bindings,
+                                             const TensorPlacement& workspace_placement,
+                                             const char* op_name) {
+    buildFrontendConvolutionCandidatePlans(built, stream, op_name);
+
+    const int64_t plan_count = built.frontend_graph->get_execution_plan_count();
+    if (plan_count <= 0) {
+        throw std::runtime_error(std::string("cuDNN Frontend ") + op_name + " produced no execution plans.");
+    }
+
+    // cuDNN Frontend returns execution plans in heuristic-ranked order for the requested modes.
+    // Autotune only the front of that ordered pool so placement does not devolve into measuring
+    // every possible engine/configuration. If this pool cannot produce a runnable plan, fail loudly.
+    const int64_t candidate_count = std::min(plan_count, kConvolutionAutotuneMaxCandidatePlans);
+
+    int64_t best_plan_index = -1;
+    int64_t best_workspace_bytes = 0;
+    float best_ms = std::numeric_limits<float>::infinity();
+
+    for (int64_t plan_index = 0; plan_index < candidate_count; ++plan_index) {
+        auto status = built.frontend_graph->build_plan_at_index(stream.getCudnnHandle(), plan_index);
+        if (!status.is_good()) {
+            continue;
+        }
+
+        const int64_t workspace_bytes = checkedFrontendPlanWorkspaceBytes(built, plan_index, op_name);
+
+        try {
+            FrontendConvolutionAutotuneTensorPool timing_pool =
+                createFrontendConvolutionAutotuneTensorPool(autotune_bindings, workspace_placement, workspace_bytes);
+            const float milliseconds = timeFrontendConvolutionPlan(built, stream, timing_pool, op_name);
+            if (std::isfinite(milliseconds) && milliseconds < best_ms) {
+                best_ms = milliseconds;
+                best_plan_index = plan_index;
+                best_workspace_bytes = workspace_bytes;
+            }
+        } catch (const std::exception&) {
+            // Some plans can build but still fail under the concrete runtime tensor/workspace configuration.
+            // Do not let one bad candidate become the selected convolution plan.
+            continue;
+        }
+    }
+
+    if (best_plan_index < 0) {
+        throw std::runtime_error(std::string("cuDNN Frontend ") + op_name + " autotune could not build and run any of the top " +
+                                 std::to_string(candidate_count) + " heuristic-ranked execution plans.");
+    }
+
+    checkFrontendStatus(built.frontend_graph->build_plan_at_index(stream.getCudnnHandle(), best_plan_index),
+                        std::string("Failed to rebuild selected cuDNN Frontend ") + op_name + " execution plan");
+
+    built.selected_plan_index = best_plan_index;
+    built.workspace_bytes = static_cast<size_t>(best_workspace_bytes);
 }
 
 static void putFrontendTensorPointer(std::unordered_map<int64_t, void*>& pack, int64_t uid, const Tensor& tensor) {
@@ -2699,9 +2915,13 @@ static void executeFrontendConvolutionGraph(const BuiltConvolution& built,
         workspace_ptr = const_cast<void*>(static_cast<const void*>(workspace.value().getMemPtr<void>()));
     }
 
+    if (built.selected_plan_index < 0) {
+        throw std::runtime_error(std::string(op_name) + " has no autotuned cuDNN Frontend execution plan.");
+    }
+
     auto status = built.frontend_graph->execute(run_stream.getCudnnHandle(), tensor_pack, workspace_ptr);
     if (!status.is_good()) {
-        throw std::runtime_error(std::string("Failed to execute cuDNN Frontend ") + op_name + " graph: " + status.get_message());
+        throw std::runtime_error(std::string("Failed to execute autotuned cuDNN Frontend ") + op_name + " graph: " + status.get_message());
     }
 }
 
@@ -3008,7 +3228,10 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolution(const std::s
     setFrontendConvolutionOutputTensor(
         y, std::string(prefix) + "_y", CUDNN_FRONTEND_CONV_Y_UID, output.getDimensions(), compiled_convolution->output_dtype);
 
-    buildFrontendConvolutionGraph(*built, stream, is_3d ? "CONV3D forward" : "CONV2D forward");
+    std::vector<FrontendConvolutionAutotuneBinding> autotune_bindings = {{CUDNN_FRONTEND_CONV_X_UID, input, true},
+                                                                         {CUDNN_FRONTEND_CONV_W_UID, filter, true},
+                                                                         {CUDNN_FRONTEND_CONV_Y_UID, output, false}};
+    autotuneFrontendConvolutionGraph(*built, stream, autotune_bindings, input.getPlacement(), is_3d ? "CONV3D forward" : "CONV2D forward");
     return built;
 }
 
@@ -3082,7 +3305,11 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolutionBackward(
                                            output.getDimensions(),
                                            compiled_convolution_backward->output_dtype);
 
-        buildFrontendConvolutionGraph(*built, stream, is_3d ? "CONV3D backward-data" : "CONV2D backward-data");
+        std::vector<FrontendConvolutionAutotuneBinding> autotune_bindings = {{CUDNN_FRONTEND_CONV_W_UID, input, true},
+                                                                             {CUDNN_FRONTEND_CONV_Y_UID, grad_output, true},
+                                                                             {CUDNN_FRONTEND_CONV_X_UID, output, false}};
+        autotuneFrontendConvolutionGraph(
+            *built, stream, autotune_bindings, output.getPlacement(), is_3d ? "CONV3D backward-data" : "CONV2D backward-data");
         return built;
     }
 
@@ -3111,7 +3338,11 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolutionBackward(
                                        output.getDimensions(),
                                        compiled_convolution_backward->output_dtype);
 
-    buildFrontendConvolutionGraph(*built, stream, is_3d ? "CONV3D backward-filter" : "CONV2D backward-filter");
+    std::vector<FrontendConvolutionAutotuneBinding> autotune_bindings = {{CUDNN_FRONTEND_CONV_X_UID, input, true},
+                                                                         {CUDNN_FRONTEND_CONV_Y_UID, grad_output, true},
+                                                                         {CUDNN_FRONTEND_CONV_W_UID, output, false}};
+    autotuneFrontendConvolutionGraph(
+        *built, stream, autotune_bindings, output.getPlacement(), is_3d ? "CONV3D backward-filter" : "CONV2D backward-filter");
     return built;
 }
 
