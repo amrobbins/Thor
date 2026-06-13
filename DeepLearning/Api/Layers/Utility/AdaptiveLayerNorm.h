@@ -47,7 +47,7 @@ class AdaptiveLayerNorm : public MultiConnectionLayer {
     DataType getScaleBiasDataType() const { return scaleBiasDataType; }
 
     int getConnectionType(Tensor connectingTensor) const override;
-    bool mustConnectAllInputsToDriveOutput() override { return true; }
+    bool mustConnectAllInputsToDriveOutput() const override { return true; }
     void informThatInputConnectionMade(Tensor inputTensor) override;
     std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override;
 

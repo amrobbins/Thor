@@ -26,7 +26,7 @@ class Metric : public Layer {
     // Note:  Fully connected layers may have multiple independent inputs, each of which is all that
     //        is required to drive an output. This is not the case for layers that require all inputs
     //        to arrive before they can compute the output.
-    bool mustConnectAllInputsToDriveOutput() override { return true; }
+    bool mustConnectAllInputsToDriveOutput() const override { return true; }
 
     void informThatInputConnectionMade(Tensor inputTensor) override {
         (void)inputTensor;

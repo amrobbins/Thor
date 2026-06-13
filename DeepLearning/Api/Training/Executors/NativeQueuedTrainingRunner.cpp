@@ -196,6 +196,7 @@ void CUDART_CB completeNativeQueuedBatch(void* data) {
     const uint64_t epochBatchNum = params->epochBatchNum;
     const uint64_t slotIndex = params->slotIndex;
 
+
     try {
         THOR_THROW_IF_FALSE(params->scalarStats.size() == state->scalarTensorNames.size());
         for (size_t i = 0; i < state->scalarTensorNames.size(); ++i) {
@@ -504,8 +505,8 @@ void runNativeQueuedTraining(const TrainingRunRequest& request,
     std::vector<Event> initDoneEvents;
     std::shared_ptr<PlacedNetwork> placedNetwork = request.network->place(batchSize, initDoneEvents, /*inferenceOnly=*/false);
     THOR_THROW_IF_FALSE(placedNetwork->getNumStamps() == 1);
-    for (Event& event : initDoneEvents) {
-        event.synchronize();
+    for (size_t i = 0; i < initDoneEvents.size(); ++i) {
+        initDoneEvents[i].synchronize();
     }
 
     ExecutableTrainingPlan plan = ExecutableTrainingPlan::compile(trainingProgram, *placedNetwork);

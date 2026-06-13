@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <set>
 
 using namespace std;
 using json = nlohmann::json;
@@ -35,7 +36,7 @@ uint64_t checkedProductForRmsNorm(const std::vector<uint64_t>& dims, const std::
 bool isSwishEpilogueExpression(const ThorImplementation::Expression& epilogue) {
     Swish swish;
     ThorImplementation::Expression reference = swish.toExpression(RMSNorm::epilogueInput());
-    return LayerEpilogue::hasSameCanonicalForm(epilogue, reference, RMSNorm::epilogueInputName(), RMSNorm::epilogueOutputName(), "RMSNorm");
+    return LayerEpilogue::hasSameCanonicalForm(epilogue, reference, RMSNorm::epilogueInputName(), {}, RMSNorm::epilogueOutputName(), "RMSNorm");
 }
 
 ThorImplementation::DynamicExpression buildRmsNormExpression(ThorImplementation::TensorPlacement placement,
@@ -44,6 +45,7 @@ ThorImplementation::DynamicExpression buildRmsNormExpression(ThorImplementation:
                                                              double epsilon,
                                                              DataType parameterDataType,
                                                              std::optional<ThorImplementation::Expression> epilogue,
+                                                             std::vector<std::string> epilogueAuxInputNames,
                                                              bool inferenceOnly) {
     using ThorImplementation::DynamicExpression;
     using ThorImplementation::DynamicExpressionBuild;
@@ -52,10 +54,15 @@ ThorImplementation::DynamicExpression buildRmsNormExpression(ThorImplementation:
     using ThorImplementation::Tensor;
     using ThorImplementation::TensorDescriptor;
 
-    const bool epilogueIsSwish = epilogue.has_value() && isSwishEpilogueExpression(epilogue.value());
+    const bool epilogueIsSwish =
+        epilogue.has_value() && epilogueAuxInputNames.empty() && isSwishEpilogueExpression(epilogue.value());
+
+    std::vector<std::string> expectedInputNames = {"feature_input"};
+    expectedInputNames.insert(expectedInputNames.end(), epilogueAuxInputNames.begin(), epilogueAuxInputNames.end());
+    expectedInputNames.push_back("weights");
 
     return DynamicExpression(
-        {"feature_input", "weights"},
+        std::move(expectedInputNames),
         {"feature_output"},
         [placement,
          normalizedShape = std::move(normalizedShape),
@@ -63,6 +70,7 @@ ThorImplementation::DynamicExpression buildRmsNormExpression(ThorImplementation:
          epsilon,
          parameterDataType,
          epilogue = std::move(epilogue),
+         epilogueAuxInputNames = std::move(epilogueAuxInputNames),
          epilogueIsSwish,
          inferenceOnly](
             const DynamicExpression::TensorMap& inputs,
@@ -100,7 +108,8 @@ ThorImplementation::DynamicExpression buildRmsNormExpression(ThorImplementation:
             const uint64_t outer = checkedProductForRmsNorm(
                 std::vector<uint64_t>(originalInputDims.begin(), originalInputDims.begin() + static_cast<std::ptrdiff_t>(normalizedOffset)),
                 "outer");
-            featureInputTensor.reshape({outer, hidden});
+            const std::vector<uint64_t> flattenedInputDims{outer, hidden};
+            featureInputTensor.reshape(flattenedInputDims);
 
             if (outputs.contains("feature_output")) {
                 const Tensor& featureOutputTensor = outputs.at("feature_output");
@@ -112,6 +121,20 @@ ThorImplementation::DynamicExpression buildRmsNormExpression(ThorImplementation:
                 }
                 if (featureOutputTensor.getDimensions() != originalInputDims) {
                     throw std::runtime_error("RMSNorm feature output tensor dimensions must match the feature input dimensions.");
+                }
+            }
+            for (const std::string& auxInputName : epilogueAuxInputNames) {
+                const Tensor& auxTensor = inputs.at(auxInputName);
+                if (auxTensor.getPlacement() != placement) {
+                    throw std::runtime_error("RMSNorm epilogue auxiliary input placement does not match the layer placement.");
+                }
+                if (auxTensor.getDataType() != inputDataType) {
+                    throw std::runtime_error("RMSNorm epilogue auxiliary input '" + auxInputName +
+                                             "' dtype must match the feature output dtype.");
+                }
+                if (auxTensor.getDimensions() != originalInputDims) {
+                    throw std::runtime_error("RMSNorm epilogue auxiliary input '" + auxInputName +
+                                             "' shape must match the feature output shape.");
                 }
             }
 
@@ -135,7 +158,15 @@ ThorImplementation::DynamicExpression buildRmsNormExpression(ThorImplementation:
                 auto fusedPhysical = std::make_shared<ThorImplementation::PhysicalExpression>(std::move(physical));
                 fout = Expression::fromPhysicalNode(fusedPhysical, fusedPhysical->output_node);
             } else if (epilogue.has_value()) {
-                fout = RMSNorm::applyEpilogue(fout, epilogue.value());
+                ThorImplementation::Expression effectiveEpilogue = epilogue.value();
+                if (originalInputDims != flattenedInputDims) {
+                    for (const std::string& auxInputName : epilogueAuxInputNames) {
+                        ThorImplementation::Expression auxInput =
+                            Expression::input(auxInputName, inputDataType, inputDataType).reshape(flattenedInputDims);
+                        effectiveEpilogue = effectiveEpilogue.substituteInput(auxInputName, auxInput);
+                    }
+                }
+                fout = RMSNorm::applyEpilogue(fout, effectiveEpilogue);
             }
             if (featureInputTensor.getDimensions() != originalInputDims) {
                 fout = fout.reshape(originalInputDims);
@@ -168,6 +199,117 @@ bool RMSNorm::isRMSNormInputDataType(DataType dataType) {
         default:
             return false;
     }
+}
+
+void RMSNorm::validateEpilogueAuxInputName(const std::string& inputName) {
+    if (inputName.empty()) {
+        throw std::invalid_argument("RMSNorm epilogue auxiliary input name cannot be empty.");
+    }
+    if (inputName.rfind("__", 0) == 0) {
+        throw std::invalid_argument("RMSNorm epilogue auxiliary input names cannot start with __: " + inputName + ".");
+    }
+    static const std::set<std::string> reservedNames = {
+        "feature_input",
+        "feature_output",
+        "weights",
+        epilogueInputName(),
+        epilogueOutputName(),
+    };
+    if (reservedNames.contains(inputName)) {
+        throw std::invalid_argument("RMSNorm epilogue auxiliary input name is reserved: " + inputName + ".");
+    }
+}
+
+std::vector<std::string> RMSNorm::epilogueAuxInputNames() const {
+    std::vector<std::string> names;
+    names.reserve(epilogueInputBindings.size());
+    for (const auto& [name, tensor] : epilogueInputBindings) {
+        (void)tensor;
+        names.push_back(name);
+    }
+    return names;
+}
+
+std::vector<Tensor> RMSNorm::getFeatureInputs() const {
+    std::vector<Tensor> inputs = featureInputs;
+    inputs.reserve(inputs.size() + epilogueInputBindings.size());
+    for (const auto& [name, tensor] : epilogueInputBindings) {
+        (void)name;
+        inputs.push_back(tensor);
+    }
+    return inputs;
+}
+
+std::vector<uint32_t> RMSNorm::inputPortIndicesForTensor(Tensor tensor) const {
+    std::vector<uint32_t> ports;
+    if (!featureInputs.empty() && tensor.getOriginalId() == featureInputs[0].getOriginalId()) {
+        ports.push_back(0);
+    }
+    for (uint32_t i = 0; i < epilogueInputBindings.size(); ++i) {
+        if (tensor.getOriginalId() == epilogueInputBindings[i].second.getOriginalId()) {
+            ports.push_back(i + 1);
+        }
+    }
+    return ports;
+}
+
+Tensor RMSNorm::getFeatureOutput(Tensor inputTensor) const {
+    auto it = outputTensorFromInputTensor.find(inputTensor);
+    if (it == outputTensorFromInputTensor.end()) {
+        throw std::runtime_error("Tensor is not connected to this RMSNorm layer.");
+    }
+    return it->second;
+}
+
+std::vector<Tensor> RMSNorm::getOutputsFromInput(Tensor inputTensor) {
+    if (epilogueInputBindings.empty()) {
+        return {getFeatureOutput(inputTensor)};
+    }
+    (void)getFeatureOutput(inputTensor);
+    if (emittedFeatureOutputAfterAllInputsConnected) {
+        return {};
+    }
+    const uint32_t requiredInputPorts = static_cast<uint32_t>(1 + epilogueInputBindings.size());
+    if (connectedInputPortIndices.size() != requiredInputPorts) {
+        return {};
+    }
+    emittedFeatureOutputAfterAllInputsConnected = true;
+    return {featureOutputs[0]};
+}
+
+void RMSNorm::informThatInputConnectionMade(Tensor inputTensor) {
+    if (epilogueInputBindings.empty()) {
+        return;
+    }
+    std::vector<uint32_t> ports = inputPortIndicesForTensor(inputTensor);
+    if (ports.empty()) {
+        throw std::runtime_error("RMSNorm informed of connection for unknown input tensor.");
+    }
+    for (uint32_t port : ports) {
+        connectedInputPortIndices.insert(port);
+    }
+}
+
+int RMSNorm::getConnectionType(Tensor connectingTensor) const {
+    if (!epilogueInputBindings.empty()) {
+        std::vector<uint32_t> inputPorts = inputPortIndicesForTensor(connectingTensor);
+        if (!inputPorts.empty()) {
+            uint32_t& cursor = nextInputConnectionCursorByTensorOriginalId[connectingTensor.getOriginalId()];
+            const uint32_t port = inputPorts[cursor % inputPorts.size()];
+            ++cursor;
+            return static_cast<int>(port);
+        }
+    } else {
+        for (uint32_t i = 0; i < featureInputs.size(); ++i) {
+            if (connectingTensor == featureInputs[i])
+                return static_cast<int>(i);
+        }
+    }
+    for (uint32_t i = 0; i < featureOutputs.size(); ++i) {
+        if (connectingTensor == featureOutputs[i])
+            return static_cast<int>(i);
+    }
+    throw std::runtime_error("Tensor is not connected to this RMSNorm layer.");
 }
 
 uint64_t RMSNorm::checkedFeatureCount(const vector<uint64_t>& shape, const string& what) {
@@ -223,7 +365,11 @@ RMSNorm RMSNorm::Builder::build() {
 
     verifyConfig();
 
-    RMSNorm layer(_epilogue);
+    if (!_epilogueInputBindings.empty() && _featureInputs.size() != 1) {
+        throw invalid_argument("RMSNorm epilogue auxiliary inputs currently require exactly one feature input.");
+    }
+
+    RMSNorm layer(_epilogue, _epilogueInputBindings);
     layer.featureInputs = _featureInputs;
     layer.normalizedShape = _normalizedShape;
     layer.epsilon = _epsilon.value();
@@ -244,6 +390,12 @@ RMSNorm RMSNorm::Builder::build() {
         layer.outputTensorFromInputTensor[layer.featureInputs[i]] = out;
         layer.inputTensorFromOutputTensor[out] = layer.featureInputs[i];
     }
+    for (const auto& [name, tensor] : layer.epilogueInputBindings) {
+        (void)name;
+        THOR_THROW_IF_FALSE(tensor.getDataType() == layer.featureOutputs[0].getDataType());
+        THOR_THROW_IF_FALSE(tensor.getDimensions() == layer.featureOutputs[0].getDimensions());
+        layer.outputTensorFromInputTensor[tensor] = layer.featureOutputs[0];
+    }
 
     layer.addToNetwork(_network.value());
     return layer;
@@ -261,9 +413,11 @@ void RMSNorm::Builder::verifyConfig() const {
         throw invalid_argument("RMSNorm epsilon must be > 0.");
     }
     const DataType inputDataType = _featureInputs.front().getDataType();
-    const bool swishEpilogue = _epilogue.has_value() && isSwishEpilogueExpression(_epilogue.value());
+    const bool swishEpilogue = _epilogue.has_value() && _epilogueInputBindings.empty() && isSwishEpilogueExpression(_epilogue.value());
     if (_epilogue.has_value()) {
-        RMSNorm::validateEpilogueExpression(_epilogue.value());
+        RMSNorm::validateEpilogueExpression(_epilogue.value(), epilogueAuxInputNames());
+    } else if (!_epilogueInputBindings.empty()) {
+        throw invalid_argument("RMSNorm epilogue_inputs were provided without an epilogue expression.");
     }
     if (_parameterDataType.value() == DataType::BF16) {
         if (!swishEpilogue) {
@@ -294,6 +448,18 @@ void RMSNorm::Builder::verifyConfig() const {
             throw invalid_argument("RMSNorm all feature inputs must have the same dimensions.");
         }
     }
+    for (const auto& [name, tensor] : _epilogueInputBindings) {
+        RMSNorm::validateEpilogueAuxInputName(name);
+        if (!tensor.isInitialized()) {
+            throw invalid_argument("RMSNorm epilogue auxiliary input is not initialized.");
+        }
+        if (tensor.getDataType() != inputDataType) {
+            throw invalid_argument("RMSNorm epilogue auxiliary input dtype must match the feature output dtype.");
+        }
+        if (tensor.getDimensions() != inputDims) {
+            throw invalid_argument("RMSNorm epilogue auxiliary input dimensions must match the feature output dimensions.");
+        }
+    }
 }
 
 shared_ptr<ThorImplementation::Layer> RMSNorm::stamp(ThorImplementation::TensorPlacement placement,
@@ -314,7 +480,14 @@ shared_ptr<ThorImplementation::Layer> RMSNorm::stamp(ThorImplementation::TensorP
 
     const uint64_t hidden = RMSNorm::checkedFeatureCount(normalizedShape, "normalizedShape");
     shared_ptr<ThorImplementation::CustomLayer> physicalRmsNorm = make_shared<ThorImplementation::CustomLayer>(
-        buildRmsNormExpression(placement, normalizedShape, hidden, epsilon, parameterDataType, epilogue, inferenceOnly),
+        buildRmsNormExpression(placement, normalizedShape, hidden, epsilon, parameterDataType, epilogue, epilogueAuxInputNames(), inferenceOnly),
+        [&]() {
+            std::vector<std::string> inputNames = {"feature_input"};
+            std::vector<std::string> auxNames = epilogueAuxInputNames();
+            inputNames.insert(inputNames.end(), auxNames.begin(), auxNames.end());
+            return inputNames;
+        }(),
+        std::vector<std::string>{"feature_output"},
         placement,
         physicalParameters,
         inferenceOnly,
@@ -334,7 +507,7 @@ json RMSNorm::architectureJson() const {
     j["parameter_data_type"] = parameterDataType;
     if (epilogue.has_value()) {
         if (!serializableEpilogue.has_value())
-            serializableEpilogue = makeEpilogueDefinition(epilogue.value());
+            serializableEpilogue = makeEpilogueDefinition(epilogue.value(), epilogueAuxInputNames());
         j["epilogue"] = serializableEpilogue.value().architectureJson();
     } else {
         j["epilogue"] = nullptr;
@@ -344,6 +517,12 @@ json RMSNorm::architectureJson() const {
     for (uint32_t i = 0; i < featureInputs.size(); ++i)
         inputs.push_back(featureInputs[i].architectureJson());
     j["inputs"] = inputs;
+
+    json epilogueInputs = json::array();
+    for (const auto& [name, tensor] : epilogueInputBindings) {
+        epilogueInputs.push_back(json{{"name", name}, {"tensor", tensor.architectureJson()}});
+    }
+    j["epilogue_inputs"] = epilogueInputs;
 
     json outputs = json::array();
     for (uint32_t i = 0; i < featureOutputs.size(); ++i)
@@ -369,11 +548,29 @@ void RMSNorm::deserialize(shared_ptr<thor_file::TarReader>& archiveReader, const
     if (j.at("layer_type").get<string>() != "rms_norm")
         throw runtime_error("Layer type mismatch in RMSNorm::deserialize: " + j.at("layer_type").get<string>());
 
+    std::vector<std::pair<std::string, Tensor>> epilogueInputBindings;
+    if (j.contains("epilogue_inputs")) {
+        for (const json& epilogueInputJson : j.at("epilogue_inputs")) {
+            std::string inputName = epilogueInputJson.at("name").get<std::string>();
+            validateEpilogueAuxInputName(inputName);
+            uint64_t originalTensorId = epilogueInputJson.at("tensor").at("id").get<uint64_t>();
+            epilogueInputBindings.emplace_back(inputName, network->getApiTensorByOriginalId(originalTensorId));
+        }
+    }
+    std::vector<std::string> auxInputNames;
+    auxInputNames.reserve(epilogueInputBindings.size());
+    for (const auto& [name, tensor] : epilogueInputBindings) {
+        (void)tensor;
+        auxInputNames.push_back(name);
+    }
+
     std::optional<ThorImplementation::Expression> epilogue = std::nullopt;
     if (j.contains("epilogue") && !j.at("epilogue").is_null()) {
         ThorImplementation::ExpressionDefinition epilogueDefinition =
             ThorImplementation::ExpressionDefinition::deserialize(j.at("epilogue"));
-        epilogue = epilogueExpressionFromDefinition(epilogueDefinition);
+        epilogue = epilogueExpressionFromDefinition(epilogueDefinition, auxInputNames);
+    } else if (!epilogueInputBindings.empty()) {
+        throw runtime_error("RMSNorm serialized epilogue_inputs require a non-null epilogue expression.");
     } else if (j.contains("fused_activation") &&
                ThorImplementation::cudnnRmsNormFusedActivationFromString(j.at("fused_activation").get<string>()) ==
                    ThorImplementation::CudnnRmsNormFusedActivation::SWISH) {
@@ -381,7 +578,7 @@ void RMSNorm::deserialize(shared_ptr<thor_file::TarReader>& archiveReader, const
         epilogue = swish.toExpression(RMSNorm::epilogueInput());
     }
 
-    RMSNorm layer(epilogue);
+    RMSNorm layer(epilogue, epilogueInputBindings);
     layer.normalizedShape = j.at("normalized_shape").get<vector<uint64_t>>();
     layer.epsilon = j.at("epsilon").get<double>();
     layer.parameterDataType = j.at("parameter_data_type").get<DataType>();
@@ -399,6 +596,21 @@ void RMSNorm::deserialize(shared_ptr<thor_file::TarReader>& archiveReader, const
     for (uint32_t i = 0; i < layer.featureInputs.size(); ++i) {
         layer.outputTensorFromInputTensor[layer.featureInputs[i]] = layer.featureOutputs[i];
         layer.inputTensorFromOutputTensor[layer.featureOutputs[i]] = layer.featureInputs[i];
+    }
+    if (!layer.epilogueInputBindings.empty()) {
+        if (layer.featureOutputs.size() != 1) {
+            throw runtime_error("RMSNorm serialized epilogue_inputs require exactly one primary feature output.");
+        }
+        for (const auto& [name, tensor] : layer.epilogueInputBindings) {
+            (void)name;
+            if (tensor.getDataType() != layer.featureOutputs[0].getDataType()) {
+                throw runtime_error("RMSNorm serialized epilogue input dtype does not match the feature output dtype.");
+            }
+            if (tensor.getDimensions() != layer.featureOutputs[0].getDimensions()) {
+                throw runtime_error("RMSNorm serialized epilogue input shape does not match the feature output shape.");
+            }
+            layer.outputTensorFromInputTensor[tensor] = layer.featureOutputs[0];
+        }
     }
 
     if (j.contains("parameters")) {

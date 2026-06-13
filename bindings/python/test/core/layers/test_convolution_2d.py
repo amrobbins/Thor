@@ -263,6 +263,53 @@ def test_conv2d_epilogue_input_accepts_default_and_explicit_dtypes(output_dtype,
     assert epilogue_input is not None
 
 
+def test_conv2d_accepts_multi_input_epilogue_and_serializes_auxiliary_bindings():
+    n = thor.Network("test_net_conv2d_multi_input_epilogue")
+    x = _chw_input(n, 3, 8, 8, thor.DataType.fp16, name="x")
+    residual = _chw_input(n, 4, 8, 8, thor.DataType.fp16, name="residual")
+
+    conv_out = thor.layers.Convolution2d.epilogue_input(
+        output_dtype=thor.DataType.fp16,
+        compute_dtype=thor.DataType.fp32,
+    )
+    skip = thor.layers.Convolution2d.epilogue_aux_input(
+        "residual",
+        output_dtype=thor.DataType.fp16,
+        compute_dtype=thor.DataType.fp32,
+    )
+    epilogue = conv_out + skip
+
+    conv = thor.layers.Convolution2d(
+        n,
+        x,
+        num_output_channels=4,
+        filter_height=3,
+        filter_width=3,
+        vertical_padding=1,
+        horizontal_padding=1,
+        has_bias=False,
+        activation=None,
+        epilogue=epilogue,
+        epilogue_inputs={"residual": residual},
+    )
+
+    assert conv.get_feature_output().get_dimensions() == [4, 8, 8]
+    arch = _only_layer_architecture(n, "convolution_2d")
+    assert arch["activation"] is None
+    assert arch["epilogue"] is not None
+    assert set(arch["epilogue"]["expected_input_names"]) == {"__convolution_2d_epilogue_input", "residual"}
+    assert arch["epilogue"]["expected_output_names"] == ["__convolution_2d_epilogue_output"]
+    assert len(arch["inputs"]) == 1
+    assert arch["epilogue_inputs"][0]["name"] == "residual"
+    assert arch["epilogue_inputs"][0]["tensor"]["id"] == residual.get_id()
+
+
+@pytest.mark.parametrize("bad_name", ["", "__residual", "feature_input", "feature_output", "weights", "biases"])
+def test_conv2d_epilogue_aux_input_rejects_reserved_names(bad_name):
+    with pytest.raises(Exception):
+        thor.layers.Convolution2d.epilogue_aux_input(bad_name)
+
+
 def test_conv2d_rejects_feature_input_wrong_rank():
     n = _net("test_net_conv2d_bad_rank")
     x = thor.Tensor([32, 32], thor.DataType.fp16)

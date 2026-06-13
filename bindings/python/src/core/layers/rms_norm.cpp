@@ -48,6 +48,29 @@ ThorImplementation::Expression makePythonEpilogueInput(const nb::object& outputD
     return RMSNorm::epilogueInput(computeDType, outputDType);
 }
 
+ThorImplementation::Expression makePythonEpilogueAuxInput(const std::string& inputName,
+                                                          const nb::object& outputDTypeObj,
+                                                          const nb::object& computeDTypeObj) {
+    std::optional<DataType> outputDType = optionalDataTypeFromPython(outputDTypeObj);
+    std::optional<DataType> computeDType = optionalDataTypeFromPython(computeDTypeObj);
+    return RMSNorm::epilogueAuxInput(inputName, computeDType, outputDType);
+}
+
+void applyPythonEpilogueInputs(RMSNorm::Builder& builder, const nb::object& epilogueInputs) {
+    if (epilogueInputs.is_none()) {
+        return;
+    }
+    if (!nb::isinstance<nb::dict>(epilogueInputs)) {
+        throw nb::type_error("epilogue_inputs must be a dict[str, thor.Tensor] or None");
+    }
+    nb::dict inputsDict = nb::cast<nb::dict>(epilogueInputs);
+    for (auto item : inputsDict) {
+        std::string name = nb::cast<std::string>(item.first);
+        Tensor tensor = nb::cast<Tensor>(item.second);
+        builder.epilogueInput(name, tensor);
+    }
+}
+
 void applyPythonEpilogue(RMSNorm::Builder& builder, const nb::object& epilogue) {
     if (epilogue.is_none()) {
         return;
@@ -74,7 +97,8 @@ void bind_rms_norm(nb::module_& m) {
            nb::object parameter_data_type,
            shared_ptr<Initializer> weights_initializer,
            shared_ptr<Optimizer> weights_optimizer,
-           nb::object epilogue) {
+           nb::object epilogue,
+           nb::object epilogue_inputs) {
             if (!(epsilon > 0.0)) {
                 throw nb::value_error("RMSNorm instance: epsilon must be > 0.");
             }
@@ -85,6 +109,7 @@ void bind_rms_norm(nb::module_& m) {
             builder.network(network).featureInput(feature_input).normalizedShape(shape).epsilon(epsilon);
             if (!parameter_data_type.is_none())
                 builder.parameterDataType(nb::cast<DataType>(parameter_data_type));
+            applyPythonEpilogueInputs(builder, epilogue_inputs);
             applyPythonEpilogue(builder, epilogue);
             if (weights_initializer != nullptr)
                 builder.weightsInitializer(weights_initializer);
@@ -99,7 +124,8 @@ void bind_rms_norm(nb::module_& m) {
         "parameter_data_type"_a.none() = nb::none(),
         "weights_initializer"_a.none() = nb::none(),
         "weights_optimizer"_a.none() = nb::none(),
-        "epilogue"_a.none() = nb::none());
+        "epilogue"_a.none() = nb::none(),
+        "epilogue_inputs"_a.none() = nb::none());
 
     rms_norm.def_static(
         "epilogue_input",
@@ -108,6 +134,17 @@ void bind_rms_norm(nb::module_& m) {
         "compute_dtype"_a.none() = nb::none(),
         R"nbdoc(
             Return the single tensor input expression expected by an RMSNorm epilogue.
+            )nbdoc");
+
+    rms_norm.def_static(
+        "epilogue_aux_input",
+        &makePythonEpilogueAuxInput,
+        "name"_a,
+        "output_dtype"_a.none() = nb::none(),
+        "compute_dtype"_a.none() = nb::none(),
+        R"nbdoc(
+            Return a named auxiliary tensor input expression for an RMSNorm epilogue.
+            Bind the same name to a tensor with the ``epilogue_inputs`` constructor argument.
             )nbdoc");
 
     rms_norm.def(

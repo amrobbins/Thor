@@ -30,16 +30,8 @@ class Relu : public Activation {
         if (j.at("layer_type").get<std::string>() != "relu")
             throw std::runtime_error("Layer type mismatch in Relu::deserialize: " + j.at("layer_type").get<std::string>());
 
-        nlohmann::json input = j["feature_input"].get<nlohmann::json>();
-        uint64_t originalTensorId = input.at("id").get<uint64_t>();
-        Tensor featureInput = network->getApiTensorByOriginalId(originalTensorId);
-
-        Tensor featureOutput = Tensor::deserialize(j.at("feature_output").get<nlohmann::json>());
-
         Relu relu;
-        relu.featureInput = featureInput;
-        relu.featureOutput = featureOutput;
-        relu.initialized = true;
+        relu.deserializeStandaloneFields(j, network);
         relu.addToNetwork(network);
     }
 
@@ -55,8 +47,8 @@ class Relu : public Activation {
     }
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
-        // feature out and error out
-        return batchSize * (featureOutput.value().getTotalSizeInBytes() + featureInput.value().getTotalSizeInBytes());
+        (void)tensorPlacement;
+        return getExpressionBackedActivationMemRequirementInBytes(batchSize);
     }
 };
 
@@ -67,8 +59,7 @@ class Relu::Builder : public Activation::Builder {
         if (_featureInput.has_value()) {
             // Standalone layer support.
             THOR_THROW_IF_FALSE(_network.has_value());
-            relu->featureInput = _featureInput;
-            relu->featureOutput = _featureInput.value().clone();
+            applyStandaloneConfiguration(*relu);
             relu->initialized = true;
             relu->addToNetwork(_network.value());
         } else {
@@ -86,6 +77,16 @@ class Relu::Builder : public Activation::Builder {
 
     Relu::Builder &featureInput(Tensor _featureInput) override {
         Activation::Builder::featureInput(_featureInput);
+        return *this;
+    }
+
+    Relu::Builder &epilogue(const ThorImplementation::Expression& expression) override {
+        Activation::Builder::epilogue(expression);
+        return *this;
+    }
+
+    Relu::Builder &epilogueInput(const std::string& inputName, Tensor tensor) override {
+        Activation::Builder::epilogueInput(inputName, tensor);
         return *this;
     }
 };

@@ -26,6 +26,7 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "cuda: requires a CUDA-capable GPU")
     config.addinivalue_line("markers", "performance: performance / throughput microbenchmarks")
     config.addinivalue_line("markers", "training_integration: opt-in end-to-end model training tests")
+    config.addinivalue_line("markers", "imagenet100_integration: heavyweight ImageNet-100 training integration tests")
 
 
 def pytest_runtest_setup(item):

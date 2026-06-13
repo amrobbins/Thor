@@ -1,8 +1,12 @@
 #include <optional>
 #include "DeepLearning/Api/Layers/Activations/Relu.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
+#include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
+#include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
+#include "test/DeepLearning/Api/Helpers/GradientRivet.h"
+#include "cuda_fp16.h"
 
 #include "gtest/gtest.h"
 
@@ -10,10 +14,109 @@
 
 #include <stdio.h>
 #include <memory>
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <vector>
 
 using namespace Thor;
 using namespace std;
 using json = nlohmann::json;
+
+namespace {
+
+ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+
+uint64_t tensorNumel(const ThorImplementation::Tensor& tensor) {
+    uint64_t numel = 1;
+    for (uint64_t dim : tensor.getDimensions())
+        numel *= dim;
+    return numel;
+}
+
+void synchronizeEvents(vector<Event>& events) {
+    for (Event& event : events)
+        event.synchronize();
+    events.clear();
+}
+
+void writeCpuTensor(ThorImplementation::Tensor& tensor, const vector<float>& values) {
+    ASSERT_EQ(tensor.getPlacement(), cpuPlacement);
+    ASSERT_EQ(tensorNumel(tensor), values.size());
+
+    switch (tensor.getDataType()) {
+        case ThorImplementation::DataType::FP16: {
+            auto* ptr = static_cast<half*>(tensor.getMemPtr());
+            for (uint64_t i = 0; i < values.size(); ++i)
+                ptr[i] = __float2half(values[i]);
+            break;
+        }
+        case ThorImplementation::DataType::FP32: {
+            auto* ptr = static_cast<float*>(tensor.getMemPtr());
+            for (uint64_t i = 0; i < values.size(); ++i)
+                ptr[i] = values[i];
+            break;
+        }
+        default:
+            FAIL() << "Unsupported tensor dtype in writeCpuTensor.";
+    }
+}
+
+vector<float> readCpuTensor(const ThorImplementation::Tensor& tensor) {
+    EXPECT_EQ(tensor.getPlacement(), cpuPlacement);
+
+    vector<float> values(tensorNumel(tensor));
+    switch (tensor.getDataType()) {
+        case ThorImplementation::DataType::FP16: {
+            const auto* ptr = static_cast<const half*>(tensor.getMemPtr());
+            for (uint64_t i = 0; i < values.size(); ++i)
+                values[i] = __half2float(ptr[i]);
+            break;
+        }
+        case ThorImplementation::DataType::FP32: {
+            const auto* ptr = static_cast<const float*>(tensor.getMemPtr());
+            for (uint64_t i = 0; i < values.size(); ++i)
+                values[i] = ptr[i];
+            break;
+        }
+        default:
+            ADD_FAILURE() << "Unsupported tensor dtype in readCpuTensor.";
+            break;
+    }
+    return values;
+}
+
+ThorImplementation::Tensor copyTensorToCpu(const ThorImplementation::Tensor& tensor, Stream& stream) {
+    ThorImplementation::Tensor cpuTensor = tensor.clone(cpuPlacement);
+    cpuTensor.copyFromAsync(tensor, stream);
+    Event copied = stream.putEvent();
+    copied.synchronize();
+    return cpuTensor;
+}
+
+void expectAllClose(
+    const vector<float>& actual, const vector<float>& expected, float atol = 6e-2f, float rtol = 6e-2f, const string& what = "") {
+    ASSERT_EQ(actual.size(), expected.size());
+    for (uint64_t i = 0; i < actual.size(); ++i) {
+        const float diff = fabs(actual[i] - expected[i]);
+        const float tol = atol + rtol * fabs(expected[i]);
+        EXPECT_LE(diff, tol) << what << " mismatch at index " << i << ": actual=" << actual[i] << ", expected=" << expected[i];
+    }
+}
+
+shared_ptr<ThorImplementation::CustomLayer> findCustomLayerByType(ThorImplementation::StampedNetwork& stampedNetwork,
+                                                                  const string& layerType) {
+    for (uint64_t i = 0; i < stampedNetwork.getNumTrainableLayers(); ++i) {
+        shared_ptr<ThorImplementation::CustomLayer> candidate =
+            dynamic_pointer_cast<ThorImplementation::CustomLayer>(stampedNetwork.getTrainableLayer(i));
+        if (candidate != nullptr && candidate->getLayerType() == layerType) {
+            return candidate;
+        }
+    }
+    return nullptr;
+}
+
+}  // namespace
 
 TEST(Activations, ReluBuilds) {
     srand(time(nullptr));
@@ -203,6 +306,129 @@ TEST(Activations, ReluSerializeDeserialize) {
     ASSERT_EQ(stampedRelu->getFeatureOutput().value(), stampedOutput->getFeatureInput().value());
 
     filesystem::remove("/tmp/testModel.thor.tar");
+}
+
+TEST(Activations, ReluEpilogueRunsForwardBackwardResidualAdd) {
+    constexpr uint32_t batchSize = 2;
+    const DataType dataType = DataType::FP16;
+    const vector<uint64_t> dims = {1, 2, 3};
+
+    Network network("reluEpilogueResidualAdd");
+    NetworkInput mainInput = NetworkInput::Builder().network(network).name("main").dimensions(dims).dataType(dataType).build();
+    NetworkInput shortcutInput = NetworkInput::Builder().network(network).name("shortcut").dimensions(dims).dataType(dataType).build();
+    GradientRivet mainRivet = GradientRivet::Builder().network(network).tensor(mainInput.getFeatureOutput().value()).build();
+    GradientRivet shortcutRivet = GradientRivet::Builder().network(network).tensor(shortcutInput.getFeatureOutput().value()).build();
+
+    ThorImplementation::Expression mainExpr = Activation::epilogueInput(ThorImplementation::DataType::FP32, ThorImplementation::DataType::FP16);
+    ThorImplementation::Expression shortcutExpr =
+        Activation::epilogueAuxInput("shortcut", ThorImplementation::DataType::FP32, ThorImplementation::DataType::FP16);
+    Relu reluTemplate;
+    ThorImplementation::Expression reluResidual = reluTemplate.toExpression(mainExpr + shortcutExpr)
+                                                   .withDTypes(ThorImplementation::DataType::FP32, ThorImplementation::DataType::FP16);
+
+    shared_ptr<Relu> relu = dynamic_pointer_cast<Relu>(Relu::Builder()
+                                                           .network(network)
+                                                           .featureInput(mainRivet.getFeatureOutput().value())
+                                                           .epilogueInput("shortcut", shortcutRivet.getFeatureOutput().value())
+                                                           .epilogue(reluResidual)
+                                                           .build());
+    ASSERT_NE(relu, nullptr);
+    GradientRivet outputRivet = GradientRivet::Builder().network(network).tensor(relu->getFeatureOutput().value()).build();
+    NetworkOutput output = NetworkOutput::Builder()
+                               .network(network)
+                               .name("output")
+                               .inputTensor(outputRivet.getFeatureOutput().value())
+                               .dataType(dataType)
+                               .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<PlacedNetwork> placedNetwork = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/false);
+    synchronizeEvents(initDoneEvents);
+    ASSERT_NE(placedNetwork, nullptr);
+
+    ThorImplementation::StampedNetwork& stampedNetwork = placedNetwork->getStampedNetwork(0);
+    auto physicalMain = dynamic_pointer_cast<ThorImplementation::NetworkInput>(stampedNetwork.getPhysicalLayerFromApiLayer(mainInput.getId()));
+    auto physicalShortcut =
+        dynamic_pointer_cast<ThorImplementation::NetworkInput>(stampedNetwork.getPhysicalLayerFromApiLayer(shortcutInput.getId()));
+    auto physicalOutput =
+        dynamic_pointer_cast<ThorImplementation::NetworkOutput>(stampedNetwork.getPhysicalLayerFromApiLayer(output.getId()));
+    // Standalone activation builders return the user-facing activation object, but
+    // activation clones intentionally receive fresh API ids when inserted into the
+    // network so that a template activation can be reused by many layers.  Find the
+    // stamped ReLU by its physical custom-layer type rather than by the returned
+    // builder object's id.
+    auto physicalRelu = findCustomLayerByType(stampedNetwork, "CustomLayer<Relu>");
+    ASSERT_NE(physicalMain, nullptr);
+    ASSERT_NE(physicalShortcut, nullptr);
+    ASSERT_NE(physicalOutput, nullptr);
+    ASSERT_NE(physicalRelu, nullptr);
+
+    const vector<float> mainValues = {
+        -1.0f, 0.25f, 2.0f,
+        -2.0f, 1.5f, -0.5f,
+        0.5f, -1.25f, 3.0f,
+        -0.75f, -0.25f, 1.0f,
+    };
+    const vector<float> shortcutValues = {
+        0.5f, 0.5f, -1.0f,
+        3.0f, -2.0f, 1.0f,
+        0.25f, 1.5f, -4.0f,
+        1.0f, -0.5f, 0.75f,
+    };
+    const vector<float> upstreamErrors = {
+        0.5f, -1.0f, 1.5f,
+        -0.25f, 0.75f, -1.25f,
+        1.0f, 0.25f, -0.5f,
+        -1.5f, 0.5f, 0.25f,
+    };
+
+    ThorImplementation::Tensor mainHost(cpuPlacement, ThorImplementation::TensorDescriptor(dataType, {batchSize, 1, 2, 3}));
+    ThorImplementation::Tensor shortcutHost(cpuPlacement, ThorImplementation::TensorDescriptor(dataType, {batchSize, 1, 2, 3}));
+    writeCpuTensor(mainHost, mainValues);
+    writeCpuTensor(shortcutHost, shortcutValues);
+
+    physicalMain->forward(mainHost, false, batchSize);
+    physicalShortcut->forward(shortcutHost, false, batchSize);
+    Event outputReady = physicalOutput->getOutputReadyEvent();
+    outputReady.synchronize();
+
+    vector<float> expectedForward(mainValues.size());
+    vector<float> expectedBackward(mainValues.size());
+    for (uint64_t i = 0; i < mainValues.size(); ++i) {
+        const float residualSum = mainValues[i] + shortcutValues[i];
+        expectedForward[i] = std::max(0.0f, residualSum);
+        expectedBackward[i] = residualSum > 0.0f ? upstreamErrors[i] : 0.0f;
+    }
+    expectAllClose(readCpuTensor(physicalOutput->getFeatureOutput().value()), expectedForward, 7e-2f, 7e-2f,
+                   "relu residual epilogue forward");
+
+    ASSERT_EQ(physicalRelu->getErrorInputs().size(), 1u);
+    ASSERT_TRUE(physicalRelu->getErrorInputs()[0].has_value());
+    ASSERT_EQ(physicalRelu->getErrorOutputs().size(), 2u)
+        << "Activation epilogue backward must produce gradients for the primary input and auxiliary shortcut input.";
+    ASSERT_TRUE(physicalRelu->getErrorOutputs()[0].has_value());
+    ASSERT_TRUE(physicalRelu->getErrorOutputs()[1].has_value());
+
+    Stream stream = physicalRelu->getStreams()[0];
+    ThorImplementation::Tensor errorInput = physicalRelu->getErrorInputs()[0].value();
+    ThorImplementation::Tensor errorInputHost = errorInput.clone(cpuPlacement);
+    writeCpuTensor(errorInputHost, upstreamErrors);
+    errorInput.copyFromAsync(errorInputHost, stream);
+    physicalRelu->backward(errorInput, batchSize);
+
+    ThorImplementation::Tensor mainErrorHost = copyTensorToCpu(physicalRelu->getErrorOutputs()[0].value(), stream);
+    ThorImplementation::Tensor shortcutErrorHost = copyTensorToCpu(physicalRelu->getErrorOutputs()[1].value(), stream);
+    stream.synchronize();
+
+    expectAllClose(readCpuTensor(mainErrorHost), expectedBackward, 8e-2f, 8e-2f, "relu residual epilogue primary error out");
+    expectAllClose(readCpuTensor(shortcutErrorHost), expectedBackward, 8e-2f, 8e-2f, "relu residual epilogue shortcut error out");
+
+    const json reluJ = relu->architectureJson();
+    ASSERT_TRUE(reluJ.contains("epilogue"));
+    EXPECT_FALSE(reluJ.at("epilogue").is_null());
+    ASSERT_TRUE(reluJ.contains("epilogue_inputs"));
+    ASSERT_EQ(reluJ.at("epilogue_inputs").size(), 1u);
+    EXPECT_EQ(reluJ.at("epilogue_inputs").at(0).at("name").get<string>(), "shortcut");
 }
 
 TEST(Activations, ReluRegistered) {

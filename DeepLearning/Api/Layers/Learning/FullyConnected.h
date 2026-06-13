@@ -17,6 +17,9 @@
 #include <string>
 #include <vector>
 #include <optional>
+#include <set>
+#include <unordered_map>
+#include <utility>
 
 namespace Thor {
 
@@ -24,7 +27,9 @@ class FullyConnected : public TrainableLayer {
    public:
     class Builder;
 
-    FullyConnected(const std::optional<ThorImplementation::Expression> epilogue) : epilogue(epilogue) {}
+    explicit FullyConnected(const std::optional<ThorImplementation::Expression> epilogue,
+                           std::vector<std::pair<std::string, Tensor>> epilogueInputBindings = {})
+        : epilogue(epilogue), epilogueInputBindings(std::move(epilogueInputBindings)) {}
 
     ~FullyConnected() override = default;
 
@@ -50,21 +55,38 @@ class FullyConnected : public TrainableLayer {
         return LayerEpilogue::input(epilogueInputName(), computeDType, outputDType);
     }
 
-    [[nodiscard]] static ThorImplementation::ExpressionDefinition makeEpilogueDefinition(const ThorImplementation::Expression &expression) {
-        return LayerEpilogue::makeDefinition(expression, epilogueInputName(), epilogueOutputName(), "FullyConnected");
+    [[nodiscard]] static ThorImplementation::Expression epilogueAuxInput(
+        const std::string &inputName,
+        std::optional<ThorImplementation::DataType> computeDType = std::nullopt,
+        std::optional<ThorImplementation::DataType> outputDType = std::nullopt) {
+        validateEpilogueAuxInputName(inputName);
+        return LayerEpilogue::input(inputName, computeDType, outputDType);
     }
 
-    static void validateEpilogueExpression(const ThorImplementation::Expression &expression) {
-        LayerEpilogue::validateExpression(expression, epilogueInputName(), epilogueOutputName(), "FullyConnected");
+    [[nodiscard]] static ThorImplementation::ExpressionDefinition makeEpilogueDefinition(
+        const ThorImplementation::Expression &expression,
+        const std::vector<std::string> &auxiliaryInputNames = {}) {
+        return LayerEpilogue::makeDefinition(expression, epilogueInputName(), auxiliaryInputNames, epilogueOutputName(), "FullyConnected");
     }
 
-    static void validateEpilogueDefinition(const ThorImplementation::ExpressionDefinition &definition) {
-        LayerEpilogue::validateDefinition(definition, epilogueInputName(), epilogueOutputName(), "FullyConnected");
+    static void validateEpilogueExpression(const ThorImplementation::Expression &expression,
+                                           const std::vector<std::string> &auxiliaryInputNames = {}) {
+        LayerEpilogue::validateExpression(expression, epilogueInputName(), auxiliaryInputNames, epilogueOutputName(), "FullyConnected");
+    }
+
+    static void validateEpilogueDefinition(const ThorImplementation::ExpressionDefinition &definition,
+                                           const std::vector<std::string> &auxiliaryInputNames = {}) {
+        LayerEpilogue::validateDefinition(definition, epilogueInputName(), auxiliaryInputNames, epilogueOutputName(), "FullyConnected");
     }
 
     [[nodiscard]] static ThorImplementation::Expression epilogueExpressionFromDefinition(
-        const ThorImplementation::ExpressionDefinition &definition) {
-        return LayerEpilogue::expressionFromDefinition(definition, epilogueInputName(), epilogueOutputName(), "FullyConnected");
+        const ThorImplementation::ExpressionDefinition &definition,
+        const std::vector<std::string> &auxiliaryInputNames = {}) {
+        return LayerEpilogue::expressionFromDefinition(definition,
+                                                       epilogueInputName(),
+                                                       auxiliaryInputNames,
+                                                       epilogueOutputName(),
+                                                       "FullyConnected");
     }
 
     [[nodiscard]] static ThorImplementation::Expression applyEpilogue(const ThorImplementation::Expression &input,
@@ -72,19 +94,13 @@ class FullyConnected : public TrainableLayer {
         return LayerEpilogue::apply(input, epilogue, epilogueInputName());
     }
 
-    int getConnectionType(Tensor connectingTensor) const override {
-        for (uint32_t i = 0; i < featureInputs.size(); ++i) {
-            if (connectingTensor == featureInputs[i])
-                return static_cast<int>(i);
-        }
+    static void validateEpilogueAuxInputName(const std::string &inputName);
 
-        for (uint32_t i = 0; i < featureOutputs.size(); ++i) {
-            if (connectingTensor == featureOutputs[i])
-                return static_cast<int>(i);
-        }
-
-        throw std::runtime_error("Tensor is not connected to this FullyConnected layer.");
-    }
+    int getConnectionType(Tensor connectingTensor) const override;
+    std::vector<Tensor> getFeatureInputs() const override;
+    std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override;
+    void informThatInputConnectionMade(Tensor inputTensor) override;
+    bool mustConnectAllInputsToDriveOutput() const override { return !epilogueInputBindings.empty(); }
 
    protected:
     std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
@@ -105,7 +121,15 @@ class FullyConnected : public TrainableLayer {
     DataType outputDataType;
 
     const std::optional<ThorImplementation::Expression> epilogue;
+    std::vector<std::pair<std::string, Tensor>> epilogueInputBindings;
     mutable std::optional<ThorImplementation::ExpressionDefinition> serializableEpilogue;
+
+    std::vector<std::string> epilogueAuxInputNames() const;
+    std::vector<uint32_t> inputPortIndicesForTensor(Tensor tensor) const;
+
+    std::set<uint32_t> connectedInputPortIndices;
+    bool emittedFeatureOutputAfterAllInputsConnected = false;
+    mutable std::unordered_map<uint64_t, uint32_t> nextInputConnectionCursorByTensorOriginalId;
 
     static bool isFullyConnectedFloatingDataType(DataType dataType);
     static std::string dataTypeName(DataType dataType);
@@ -220,8 +244,24 @@ class FullyConnected::Builder {
 
     virtual FullyConnected::Builder &epilogue(const ThorImplementation::Expression &expression) {
         THOR_THROW_IF_FALSE(!this->_epilogue.has_value());
-        FullyConnected::validateEpilogueExpression(expression);
+        FullyConnected::validateEpilogueExpression(expression, epilogueAuxInputNames());
         _epilogue = expression;
+        return *this;
+    }
+
+    virtual FullyConnected::Builder &epilogueInput(const std::string &inputName, Tensor tensor) {
+        FullyConnected::validateEpilogueAuxInputName(inputName);
+        THOR_THROW_IF_FALSE(tensor.isInitialized());
+        for (const auto &[existingName, existingTensor] : _epilogueInputBindings) {
+            (void)existingTensor;
+            if (existingName == inputName) {
+                throw std::invalid_argument("FullyConnected epilogue input name is duplicated: " + inputName + ".");
+            }
+        }
+        _epilogueInputBindings.emplace_back(inputName, tensor);
+        if (_epilogue.has_value()) {
+            FullyConnected::validateEpilogueExpression(_epilogue.value(), epilogueAuxInputNames());
+        }
         return *this;
     }
 
@@ -258,6 +298,17 @@ class FullyConnected::Builder {
     // FIXME: Future optimization, automatically fuse adjacent expressions from adjacent layers.
     //        For now epilogue gives access to post layer fusion, if that optimization goes in, it can remain as a convenience feature.
     std::optional<ThorImplementation::Expression> _epilogue;
+    std::vector<std::pair<std::string, Tensor>> _epilogueInputBindings;
+
+    std::vector<std::string> epilogueAuxInputNames() const {
+        std::vector<std::string> names;
+        names.reserve(_epilogueInputBindings.size());
+        for (const auto &[name, tensor] : _epilogueInputBindings) {
+            (void)tensor;
+            names.push_back(name);
+        }
+        return names;
+    }
 };
 
 }  // namespace Thor

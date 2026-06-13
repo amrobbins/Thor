@@ -1177,3 +1177,132 @@ void runFullyConnectedAdamThreePasses(bool hasBias) {
 TEST(FullyConnectedApi, AdamThreePassesForwardBackwardAndUpdateWithBias) { runFullyConnectedAdamThreePasses(true); }
 
 TEST(FullyConnectedApi, AdamThreePassesForwardBackwardAndUpdateWithoutBias) { runFullyConnectedAdamThreePasses(false); }
+
+TEST(FullyConnectedApi, MultiInputEpilogueRunsForwardBackwardResidualAddAndUpdatesWeights) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint32_t numInputFeatures = 3;
+    constexpr uint32_t numOutputFeatures = 2;
+    constexpr float learningRate = 0.1f;
+    const DataType dataType = DataType::FP16;
+
+    const vector<float> inputValues = {
+        1.0f, -2.0f, 0.5f,
+        -1.5f, 0.25f, 2.0f,
+    };
+    const vector<float> residualValues = {
+        0.25f, -0.50f,
+        1.25f, 0.75f,
+    };
+    const vector<float> upstreamErrors = {
+        0.5f, -1.0f,
+        1.5f, -0.25f,
+    };
+    const vector<float> initialWeights = {
+        0.25f, -0.50f,
+        0.75f, 1.00f,
+        -0.25f, 0.50f,
+    };
+
+    shared_ptr<Api::Sgd> weightsSgd = Api::Sgd::Builder().initialLearningRate(learningRate).decay(0.0f).momentum(0.0f).build();
+
+    Api::Network network("fullyConnectedMultiInputEpilogueForwardBackward");
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("input").dimensions({numInputFeatures}).dataType(dataType).build();
+    Api::NetworkInput residual =
+        Api::NetworkInput::Builder().network(network).name("residual").dimensions({numOutputFeatures}).dataType(dataType).build();
+    Api::GradientRivet inputRivet = Api::GradientRivet::Builder().network(network).tensor(input.getFeatureOutput().value()).build();
+    Api::GradientRivet residualRivet = Api::GradientRivet::Builder().network(network).tensor(residual.getFeatureOutput().value()).build();
+
+    Impl::Expression fcOutput = Api::FullyConnected::epilogueInput(DataType::FP32, dataType);
+    Impl::Expression residualInput = Api::FullyConnected::epilogueAuxInput("residual", DataType::FP32, dataType);
+    Api::FullyConnected fc = Api::FullyConnected::Builder()
+                                 .network(network)
+                                 .featureInput(inputRivet.getFeatureOutput().value())
+                                 .numOutputFeatures(numOutputFeatures)
+                                 .hasBias(false)
+                                 .weightsDataType(dataType)
+                                 .computeDataType(DataType::FP32)
+                                 .outputDataType(dataType)
+                                 .weightsOptimizer(weightsSgd)
+                                 .noActivation()
+                                 .epilogueInput("residual", residualRivet.getFeatureOutput().value())
+                                 .epilogue(fcOutput + residualInput)
+                                 .build();
+    Api::GradientRivet outputRivet = Api::GradientRivet::Builder().network(network).tensor(fc.getFeatureOutput().value()).build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(outputRivet.getFeatureOutput().value())
+                                    .dataType(dataType)
+                                    .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<Api::PlacedNetwork> placedNetwork = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/false);
+    synchronizeEvents(initDoneEvents);
+    ASSERT_NE(placedNetwork, nullptr);
+    Impl::StampedNetwork& stampedNetwork = placedNetwork->getStampedNetwork(0);
+    auto physicalInput = dynamic_pointer_cast<Impl::NetworkInput>(stampedNetwork.getPhysicalLayerFromApiLayer(input.getId()));
+    auto physicalResidual = dynamic_pointer_cast<Impl::NetworkInput>(stampedNetwork.getPhysicalLayerFromApiLayer(residual.getId()));
+    auto physicalOutput = dynamic_pointer_cast<Impl::NetworkOutput>(stampedNetwork.getPhysicalLayerFromApiLayer(output.getId()));
+    auto physicalFc = dynamic_pointer_cast<Impl::CustomLayer>(stampedNetwork.getPhysicalLayerFromApiLayer(fc.getId()));
+    ASSERT_NE(physicalInput, nullptr);
+    ASSERT_NE(physicalResidual, nullptr);
+    ASSERT_NE(physicalOutput, nullptr);
+    ASSERT_NE(physicalFc, nullptr);
+    ASSERT_TRUE(physicalFc->getGradientUpdateStream().has_value());
+
+    Stream stream = physicalFc->getStreams()[0];
+    Stream gradientStream = physicalFc->getGradientUpdateStream().value();
+    setParameterTensor(physicalFc->getParameter("weights"), initialWeights, stream);
+    stream.synchronize();
+
+    Impl::Tensor inputHost(cpuPlacement, Impl::TensorDescriptor(dataType, {batchSize, numInputFeatures}));
+    Impl::Tensor residualHost(cpuPlacement, Impl::TensorDescriptor(dataType, {batchSize, numOutputFeatures}));
+    writeCpuTensor(inputHost, inputValues);
+    writeCpuTensor(residualHost, residualValues);
+
+    physicalInput->forward(inputHost, false, batchSize);
+    physicalResidual->forward(residualHost, false, batchSize);
+    Event outputReady = physicalOutput->getOutputReadyEvent();
+    outputReady.synchronize();
+
+    vector<float> expectedForward = fullyConnectedReference(
+        inputValues, initialWeights, {}, batchSize, numInputFeatures, numOutputFeatures, false);
+    for (uint64_t i = 0; i < expectedForward.size(); ++i) {
+        expectedForward[i] += residualValues[i];
+    }
+    expectAllClose(readCpuTensor(physicalOutput->getFeatureOutput().value()), expectedForward, 8e-2f, 8e-2f,
+                   "fully connected residual epilogue forward");
+
+    ASSERT_EQ(physicalFc->getErrorInputs().size(), 1u);
+    ASSERT_TRUE(physicalFc->getErrorInputs()[0].has_value());
+    ASSERT_EQ(physicalFc->getErrorOutputs().size(), 2u)
+        << "Multi-input epilogue backward must produce gradients for the primary feature input and auxiliary residual input.";
+    ASSERT_TRUE(physicalFc->getErrorOutputs()[0].has_value());
+    ASSERT_TRUE(physicalFc->getErrorOutputs()[1].has_value());
+
+    Impl::Tensor errorInput = physicalFc->getErrorInputs()[0].value();
+    Impl::Tensor errorInputHost = errorInput.clone(cpuPlacement);
+    writeCpuTensor(errorInputHost, upstreamErrors);
+    errorInput.copyFromAsync(errorInputHost, stream);
+    physicalFc->backward(errorInput, batchSize);
+
+    Impl::Tensor primaryErrorOutputHost = copyTensorToCpu(physicalFc->getErrorOutputs()[0].value(), stream);
+    Impl::Tensor residualErrorOutputHost = copyTensorToCpu(physicalFc->getErrorOutputs()[1].value(), stream);
+    Impl::Tensor weightsAfterHost = copyTensorToCpu(physicalFc->getParameter("weights")->getStorage().value(), gradientStream);
+    stream.synchronize();
+    gradientStream.synchronize();
+
+    const vector<float> expectedPrimaryError = fullyConnectedBackwardErrorReference(
+        upstreamErrors, initialWeights, batchSize, numInputFeatures, numOutputFeatures);
+    const vector<float> expectedWeightsGrad = fullyConnectedWeightGradReference(
+        inputValues, upstreamErrors, batchSize, numInputFeatures, numOutputFeatures);
+    const vector<float> expectedWeightsAfter = sgdUpdatedReference(initialWeights, expectedWeightsGrad, batchSize, learningRate);
+
+    expectAllClose(readCpuTensor(primaryErrorOutputHost), expectedPrimaryError, 8e-2f, 8e-2f,
+                   "fully connected residual epilogue primary error out");
+    expectAllClose(readCpuTensor(residualErrorOutputHost), upstreamErrors, 8e-2f, 8e-2f,
+                   "fully connected residual epilogue auxiliary residual error out");
+    expectAllClose(readCpuTensor(weightsAfterHost), expectedWeightsAfter, 8e-2f, 8e-2f,
+                   "fully connected residual epilogue weights after");
+}

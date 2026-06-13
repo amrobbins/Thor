@@ -401,9 +401,24 @@ void LineStatsReporter::onTrainingEvent(const TrainingEvent& event) {
         return;
     }
 
+    if (event.type == TrainingEventType::EPOCH_STARTED) {
+        beginPhase(event.stats);
+        return;
+    }
+
+    if (event.type == TrainingEventType::EPOCH_FINISHED) {
+        finishPhase(event.stats);
+        return;
+    }
+
     if (event.type != TrainingEventType::STATS) {
         return;
     }
+
+    if (!samePhaseOccurrence(event.stats)) {
+        beginPhase(event.stats);
+    }
+    lastSeenStats = event.stats;
 
     if (!shouldPrintStats(event.stats)) {
         return;
@@ -415,6 +430,13 @@ void LineStatsReporter::onTrainingEvent(const TrainingEvent& event) {
 bool LineStatsReporter::shouldPrintStats(const TrainingStatsSnapshot& stats) {
     if (!printedAnyStats) {
         printedAnyStats = true;
+        printedStatsForActivePhase = true;
+        lastPrintedElapsedSeconds = stats.elapsedSeconds;
+        return true;
+    }
+
+    if (!printedStatsForActivePhase) {
+        printedStatsForActivePhase = true;
         lastPrintedElapsedSeconds = stats.elapsedSeconds;
         return true;
     }
@@ -430,6 +452,40 @@ bool LineStatsReporter::shouldPrintStats(const TrainingStatsSnapshot& stats) {
         return true;
     }
     return false;
+}
+
+void LineStatsReporter::beginPhase(const TrainingStatsSnapshot& stats) {
+    hasActivePhase = true;
+    activePhase = stats.phase;
+    activeEpoch = stats.epoch;
+    printedStatsForActivePhase = false;
+    lastSeenStats.reset();
+}
+
+void LineStatsReporter::finishPhase(const TrainingStatsSnapshot& stats) {
+    if (!lastSeenStats.has_value()) {
+        return;
+    }
+    if (!samePhaseOccurrence(stats) || !samePhaseOccurrence(lastSeenStats.value())) {
+        return;
+    }
+    if (lastPrintedStats.has_value() && sameStatsIdentity(lastSeenStats.value(), lastPrintedStats.value())) {
+        return;
+    }
+
+    printedAnyStats = true;
+    printedStatsForActivePhase = true;
+    lastPrintedElapsedSeconds = lastSeenStats->elapsedSeconds;
+    writeStatsLine(lastSeenStats.value());
+}
+
+bool LineStatsReporter::samePhaseOccurrence(const TrainingStatsSnapshot& stats) const {
+    return hasActivePhase && stats.phase == activePhase && stats.epoch == activeEpoch;
+}
+
+bool LineStatsReporter::sameStatsIdentity(const TrainingStatsSnapshot& lhs, const TrainingStatsSnapshot& rhs) const {
+    return lhs.phase == rhs.phase && lhs.epoch == rhs.epoch && lhs.step == rhs.step &&
+           lhs.stepInEpoch == rhs.stepInEpoch && lhs.stepsPerEpoch == rhs.stepsPerEpoch;
 }
 
 bool LineStatsReporter::isAnsiColorSupported(std::FILE* output) {
@@ -454,6 +510,7 @@ void LineStatsReporter::writeStatsLine(const TrainingStatsSnapshot& stats) {
         appendPlainStatsLine(line, stats);
     }
     emitLine(line.c_str());
+    lastPrintedStats = stats;
 }
 
 void LineStatsReporter::emitLine(const char* line) {

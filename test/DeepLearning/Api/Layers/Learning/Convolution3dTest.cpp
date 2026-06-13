@@ -729,3 +729,199 @@ TEST(Convolution3dApi, ArchitectureSaveLoadRoundTripPreservesConfigurationAndDes
     }
     filesystem::remove_all(archiveDir);
 }
+
+TEST(Convolution3dApi, MultiInputEpilogueRunsForwardBackwardResidualAddAndUpdatesWeights) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint32_t C = 1;
+    constexpr uint32_t D = 2;
+    constexpr uint32_t H = 2;
+    constexpr uint32_t W = 2;
+    constexpr uint32_t K = 1;
+    constexpr uint32_t Z = 1;
+    constexpr uint32_t R = 1;
+    constexpr uint32_t S = 1;
+    constexpr uint32_t strideD = 1;
+    constexpr uint32_t strideH = 1;
+    constexpr uint32_t strideW = 1;
+    constexpr uint32_t padD = 0;
+    constexpr uint32_t padH = 0;
+    constexpr uint32_t padW = 0;
+    constexpr float learningRate = 0.1f;
+    const DataType dataType = DataType::FP16;
+
+    const vector<float> inputValues = {
+        1.0f, 2.0f, -1.0f, 0.5f,
+        -0.5f, 1.5f, 2.5f, -2.0f,
+        0.25f, -1.5f, 0.75f, 1.25f,
+        0.0f, -0.25f, 2.0f, 1.0f,
+    };
+    const vector<float> residualValues = {
+        0.25f, -0.50f, 0.75f, 1.0f,
+        -1.25f, 1.50f, -0.25f, 0.50f,
+        -0.75f, 1.25f, -1.50f, 0.25f,
+        -0.50f, 0.75f, -1.0f, 0.5f,
+    };
+    const vector<float> upstreamErrors = {
+        0.5f, -1.0f, 1.5f, -0.25f,
+        0.75f, -1.25f, 1.0f, 0.25f,
+        -0.5f, -1.5f, 0.5f, 0.25f,
+        1.25f, -0.75f, 1.0f, 0.5f,
+    };
+    const vector<float> initialWeights = {2.0f};
+
+    shared_ptr<Api::Sgd> weightsSgd = Api::Sgd::Builder().initialLearningRate(learningRate).decay(0.0f).momentum(0.0f).build();
+
+    Api::Network network("conv3dMultiInputEpilogueForwardBackward");
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("input").dimensions({C, D, H, W}).dataType(dataType).build();
+    Api::NetworkInput residual =
+        Api::NetworkInput::Builder().network(network).name("residual").dimensions({K, D, H, W}).dataType(dataType).build();
+    Api::GradientRivet inputRivet = Api::GradientRivet::Builder().network(network).tensor(input.getFeatureOutput().value()).build();
+    Api::GradientRivet residualRivet = Api::GradientRivet::Builder().network(network).tensor(residual.getFeatureOutput().value()).build();
+
+    Impl::Expression convOutput = Api::Convolution3d::epilogueInput(DataType::FP32, dataType);
+    Impl::Expression residualInput = Api::Convolution3d::epilogueAuxInput("residual", DataType::FP32, dataType);
+    Api::Convolution3d conv = Api::Convolution3d::Builder()
+                                  .network(network)
+                                  .featureInput(inputRivet.getFeatureOutput().value())
+                                  .numOutputChannels(K)
+                                  .filterDepth(Z)
+                                  .filterHeight(R)
+                                  .filterWidth(S)
+                                  .depthStride(strideD)
+                                  .verticalStride(strideH)
+                                  .horizontalStride(strideW)
+                                  .depthPadding(padD)
+                                  .verticalPadding(padH)
+                                  .horizontalPadding(padW)
+                                  .hasBias(false)
+                                  .weightsOptimizer(weightsSgd)
+                                  .noActivation()
+                                  .epilogueInput("residual", residualRivet.getFeatureOutput().value())
+                                  .epilogue(convOutput + residualInput)
+                                  .build();
+    Api::GradientRivet outputRivet = Api::GradientRivet::Builder().network(network).tensor(conv.getFeatureOutput().value()).build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(outputRivet.getFeatureOutput().value())
+                                    .dataType(dataType)
+                                    .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<Api::PlacedNetwork> placedNetwork = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/false);
+    synchronizeEvents(initDoneEvents);
+    ASSERT_NE(placedNetwork, nullptr);
+    Impl::StampedNetwork& stampedNetwork = placedNetwork->getStampedNetwork(0);
+    auto physicalInput = dynamic_pointer_cast<Impl::NetworkInput>(stampedNetwork.getPhysicalLayerFromApiLayer(input.getId()));
+    auto physicalResidual = dynamic_pointer_cast<Impl::NetworkInput>(stampedNetwork.getPhysicalLayerFromApiLayer(residual.getId()));
+    auto physicalOutput = dynamic_pointer_cast<Impl::NetworkOutput>(stampedNetwork.getPhysicalLayerFromApiLayer(output.getId()));
+    auto physicalConvolution = dynamic_pointer_cast<Impl::CustomLayer>(stampedNetwork.getPhysicalLayerFromApiLayer(conv.getId()));
+    ASSERT_NE(physicalInput, nullptr);
+    ASSERT_NE(physicalResidual, nullptr);
+    ASSERT_NE(physicalOutput, nullptr);
+    ASSERT_NE(physicalConvolution, nullptr);
+    ASSERT_TRUE(physicalConvolution->getGradientUpdateStream().has_value());
+
+    Stream stream = physicalConvolution->getStreams()[0];
+    Stream gradientStream = physicalConvolution->getGradientUpdateStream().value();
+    setParameterTensor(physicalConvolution->getParameter("weights"), initialWeights, stream);
+    stream.synchronize();
+
+    Impl::Tensor inputHost(cpuPlacement, Impl::TensorDescriptor(dataType, {batchSize, C, D, H, W}));
+    Impl::Tensor residualHost(cpuPlacement, Impl::TensorDescriptor(dataType, {batchSize, K, D, H, W}));
+    writeCpuTensor(inputHost, inputValues);
+    writeCpuTensor(residualHost, residualValues);
+
+    physicalInput->forward(inputHost, false, batchSize);
+    physicalResidual->forward(residualHost, false, batchSize);
+    Event outputReady = physicalOutput->getOutputReadyEvent();
+    outputReady.synchronize();
+
+    vector<float> expectedForward = conv3dForwardReference(inputValues,
+                                                           initialWeights,
+                                                           {},
+                                                           batchSize,
+                                                           C,
+                                                           D,
+                                                           H,
+                                                           W,
+                                                           K,
+                                                           Z,
+                                                           R,
+                                                           S,
+                                                           strideD,
+                                                           strideH,
+                                                           strideW,
+                                                           padD,
+                                                           padH,
+                                                           padW,
+                                                           false);
+    for (uint64_t i = 0; i < expectedForward.size(); ++i) {
+        expectedForward[i] += residualValues[i];
+    }
+    expectAllClose(readCpuTensor(physicalOutput->getFeatureOutput().value()), expectedForward, 8e-2f, 8e-2f,
+                   "conv3d residual epilogue forward");
+
+    ASSERT_EQ(physicalConvolution->getErrorInputs().size(), 1u);
+    ASSERT_TRUE(physicalConvolution->getErrorInputs()[0].has_value());
+    ASSERT_EQ(physicalConvolution->getErrorOutputs().size(), 2u)
+        << "Multi-input epilogue backward must produce gradients for the primary convolution input and auxiliary residual input.";
+    ASSERT_TRUE(physicalConvolution->getErrorOutputs()[0].has_value());
+    ASSERT_TRUE(physicalConvolution->getErrorOutputs()[1].has_value());
+
+    Impl::Tensor errorInput = physicalConvolution->getErrorInputs()[0].value();
+    Impl::Tensor errorInputHost = errorInput.clone(cpuPlacement);
+    writeCpuTensor(errorInputHost, upstreamErrors);
+    errorInput.copyFromAsync(errorInputHost, stream);
+    physicalConvolution->backward(errorInput, batchSize);
+
+    Impl::Tensor primaryErrorOutputHost = copyTensorToCpu(physicalConvolution->getErrorOutputs()[0].value(), stream);
+    Impl::Tensor residualErrorOutputHost = copyTensorToCpu(physicalConvolution->getErrorOutputs()[1].value(), stream);
+    Impl::Tensor weightsAfterHost = copyTensorToCpu(physicalConvolution->getParameter("weights")->getStorage().value(), gradientStream);
+    stream.synchronize();
+    gradientStream.synchronize();
+
+    const vector<float> expectedPrimaryError = conv3dErrorReference(upstreamErrors,
+                                                                    initialWeights,
+                                                                    batchSize,
+                                                                    C,
+                                                                    D,
+                                                                    H,
+                                                                    W,
+                                                                    K,
+                                                                    Z,
+                                                                    R,
+                                                                    S,
+                                                                    strideD,
+                                                                    strideH,
+                                                                    strideW,
+                                                                    padD,
+                                                                    padH,
+                                                                    padW);
+    const vector<float> expectedWeightsGrad = conv3dWeightGradReference(inputValues,
+                                                                        upstreamErrors,
+                                                                        batchSize,
+                                                                        C,
+                                                                        D,
+                                                                        H,
+                                                                        W,
+                                                                        K,
+                                                                        Z,
+                                                                        R,
+                                                                        S,
+                                                                        strideD,
+                                                                        strideH,
+                                                                        strideW,
+                                                                        padD,
+                                                                        padH,
+                                                                        padW);
+    const vector<float> expectedWeightsAfter = sgdUpdatedReference(initialWeights, expectedWeightsGrad, batchSize, learningRate);
+
+    expectAllClose(readCpuTensor(primaryErrorOutputHost), expectedPrimaryError, 8e-2f, 8e-2f,
+                   "conv3d residual epilogue primary error out");
+    expectAllClose(readCpuTensor(residualErrorOutputHost), upstreamErrors, 8e-2f, 8e-2f,
+                   "conv3d residual epilogue auxiliary residual error out");
+    expectAllClose(readCpuTensor(weightsAfterHost), expectedWeightsAfter, 8e-2f, 8e-2f,
+                   "conv3d residual epilogue weights after");
+}

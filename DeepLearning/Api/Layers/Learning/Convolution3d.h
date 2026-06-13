@@ -11,6 +11,11 @@
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/Convolution3d.h"
 #include "Utilities/Exceptions.h"
 #include <optional>
+#include <set>
+#include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace Thor {
 
@@ -19,7 +24,9 @@ class Convolution3d : public TrainableLayer {
     class Builder;
 
     Convolution3d() {}
-    explicit Convolution3d(const std::optional<ThorImplementation::Expression> epilogue) : epilogue(epilogue) {}
+    explicit Convolution3d(const std::optional<ThorImplementation::Expression> epilogue,
+                           std::vector<std::pair<std::string, Tensor>> epilogueInputBindings = {})
+        : epilogue(epilogue), epilogueInputBindings(std::move(epilogueInputBindings)) {}
     ~Convolution3d() override = default;
 
     std::shared_ptr<Layer> clone() const override { return std::make_shared<Convolution3d>(*this); }
@@ -54,27 +61,54 @@ class Convolution3d : public TrainableLayer {
         return LayerEpilogue::input(epilogueInputName(), computeDType, outputDType);
     }
 
-    [[nodiscard]] static ThorImplementation::ExpressionDefinition makeEpilogueDefinition(const ThorImplementation::Expression &expression) {
-        return LayerEpilogue::makeDefinition(expression, epilogueInputName(), epilogueOutputName(), "Convolution3d");
+    [[nodiscard]] static ThorImplementation::Expression epilogueAuxInput(
+        const std::string &inputName,
+        std::optional<ThorImplementation::DataType> computeDType = std::nullopt,
+        std::optional<ThorImplementation::DataType> outputDType = std::nullopt) {
+        validateEpilogueAuxInputName(inputName);
+        return LayerEpilogue::input(inputName, computeDType, outputDType);
     }
 
-    static void validateEpilogueExpression(const ThorImplementation::Expression &expression) {
-        LayerEpilogue::validateExpression(expression, epilogueInputName(), epilogueOutputName(), "Convolution3d");
+    [[nodiscard]] static ThorImplementation::ExpressionDefinition makeEpilogueDefinition(
+        const ThorImplementation::Expression &expression,
+        const std::vector<std::string> &auxiliaryInputNames = {}) {
+        return LayerEpilogue::makeDefinition(expression, epilogueInputName(), auxiliaryInputNames, epilogueOutputName(), "Convolution3d");
     }
 
-    static void validateEpilogueDefinition(const ThorImplementation::ExpressionDefinition &definition) {
-        LayerEpilogue::validateDefinition(definition, epilogueInputName(), epilogueOutputName(), "Convolution3d");
+    static void validateEpilogueExpression(const ThorImplementation::Expression &expression,
+                                           const std::vector<std::string> &auxiliaryInputNames = {}) {
+        LayerEpilogue::validateExpression(expression, epilogueInputName(), auxiliaryInputNames, epilogueOutputName(), "Convolution3d");
+    }
+
+    static void validateEpilogueDefinition(const ThorImplementation::ExpressionDefinition &definition,
+                                           const std::vector<std::string> &auxiliaryInputNames = {}) {
+        LayerEpilogue::validateDefinition(definition, epilogueInputName(), auxiliaryInputNames, epilogueOutputName(), "Convolution3d");
     }
 
     [[nodiscard]] static ThorImplementation::Expression epilogueExpressionFromDefinition(
-        const ThorImplementation::ExpressionDefinition &definition) {
-        return LayerEpilogue::expressionFromDefinition(definition, epilogueInputName(), epilogueOutputName(), "Convolution3d");
+        const ThorImplementation::ExpressionDefinition &definition,
+        const std::vector<std::string> &auxiliaryInputNames = {}) {
+        return LayerEpilogue::expressionFromDefinition(definition,
+                                                       epilogueInputName(),
+                                                       auxiliaryInputNames,
+                                                       epilogueOutputName(),
+                                                       "Convolution3d");
     }
 
     [[nodiscard]] static ThorImplementation::Expression applyEpilogue(const ThorImplementation::Expression &input,
                                                                       const ThorImplementation::Expression &epilogue) {
         return LayerEpilogue::apply(input, epilogue, epilogueInputName());
     }
+
+    static void validateEpilogueAuxInputName(const std::string &inputName);
+
+    using MultiConnectionLayer::getFeatureOutput;
+    int getConnectionType(Tensor connectingTensor) const override;
+    std::vector<Tensor> getFeatureInputs() const override;
+    Tensor getFeatureOutput(Tensor inputTensor) const override;
+    std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override;
+    void informThatInputConnectionMade(Tensor inputTensor) override;
+    bool mustConnectAllInputsToDriveOutput() const override { return !epilogueInputBindings.empty(); }
 
    protected:
     virtual bool isMultiLayer() const { return false; }
@@ -115,7 +149,15 @@ class Convolution3d : public TrainableLayer {
     std::shared_ptr<Optimizer> biasesOptimizer;
 
     const std::optional<ThorImplementation::Expression> epilogue;
+    std::vector<std::pair<std::string, Tensor>> epilogueInputBindings;
     mutable std::optional<ThorImplementation::ExpressionDefinition> serializableEpilogue;
+
+    std::vector<std::string> epilogueAuxInputNames() const;
+    std::vector<uint32_t> inputPortIndicesForTensor(Tensor tensor) const;
+
+    std::set<uint32_t> connectedInputPortIndices;
+    bool emittedFeatureOutputAfterAllInputsConnected = false;
+    mutable std::unordered_map<uint64_t, uint32_t> nextInputConnectionCursorByTensorOriginalId;
 };
 
 class Convolution3d::Builder {
@@ -153,11 +195,16 @@ class Convolution3d::Builder {
         if (!_activation && !_activationExplicitlyRemoved)
             _activation = Gelu::Builder().build();
 
+        if (!_epilogueInputBindings.empty() && _featureInputs.size() != 1) {
+            throw std::invalid_argument("Convolution3d epilogue auxiliary inputs currently require exactly one feature input.");
+        }
         if (_epilogue.has_value()) {
-            Convolution3d::validateEpilogueExpression(_epilogue.value());
+            Convolution3d::validateEpilogueExpression(_epilogue.value(), epilogueAuxInputNames());
+        } else if (!_epilogueInputBindings.empty()) {
+            throw std::invalid_argument("Convolution3d epilogue_inputs were provided without an epilogue expression.");
         }
 
-        Convolution3d convolution3d(_epilogue);
+        Convolution3d convolution3d(_epilogue, _epilogueInputBindings);
         convolution3d.featureInputs = _featureInputs;
         convolution3d.numOutputChannels = _numOutputChannels.value();
         convolution3d.filterDepth = _filterDepth.value();
@@ -232,8 +279,14 @@ class Convolution3d::Builder {
                 convolution3d.outputTensorFromInputTensor[convolution3d.featureInputs[i]] = convolution3d.featureOutputs[i];
                 convolution3d.inputTensorFromOutputTensor[convolution3d.featureOutputs[i]] = convolution3d.featureInputs[i];
             }
+            for (const auto& [name, tensor] : convolution3d.epilogueInputBindings) {
+                (void)name;
+                THOR_THROW_IF_FALSE(tensor.getDataType() == convolutionDataType);
+                THOR_THROW_IF_FALSE(tensor.getDimensions() == convolution3d.featureOutputs[0].getDimensions());
+                convolution3d.outputTensorFromInputTensor[tensor] = convolution3d.featureOutputs[0];
+            }
 
-            convolution3d.standaloneLayerFeatureInputs = convolution3d.getFeatureInputs();
+            convolution3d.standaloneLayerFeatureInputs = convolution3d.featureInputs;
             convolution3d.standaloneLayerFeatureOutputs = convolution3d.getFeatureOutputs();
             convolution3d.addToNetwork(_network.value());
         }
@@ -335,8 +388,24 @@ class Convolution3d::Builder {
     }
     virtual Convolution3d::Builder& epilogue(const ThorImplementation::Expression &expression) {
         THOR_THROW_IF_FALSE(!this->_epilogue.has_value());
-        Convolution3d::validateEpilogueExpression(expression);
+        Convolution3d::validateEpilogueExpression(expression, epilogueAuxInputNames());
         _epilogue = expression;
+        return *this;
+    }
+
+    virtual Convolution3d::Builder& epilogueInput(const std::string &inputName, Tensor tensor) {
+        Convolution3d::validateEpilogueAuxInputName(inputName);
+        THOR_THROW_IF_FALSE(tensor.isInitialized());
+        for (const auto &[existingName, existingTensor] : _epilogueInputBindings) {
+            (void)existingTensor;
+            if (existingName == inputName) {
+                throw std::invalid_argument("Convolution3d epilogue input name is duplicated: " + inputName + ".");
+            }
+        }
+        _epilogueInputBindings.emplace_back(inputName, tensor);
+        if (_epilogue.has_value()) {
+            Convolution3d::validateEpilogueExpression(_epilogue.value(), epilogueAuxInputNames());
+        }
         return *this;
     }
 
@@ -378,6 +447,17 @@ class Convolution3d::Builder {
     std::shared_ptr<Optimizer> _weightsOptimizer;
     std::shared_ptr<Optimizer> _biasesOptimizer;
     std::optional<ThorImplementation::Expression> _epilogue;
+    std::vector<std::pair<std::string, Tensor>> _epilogueInputBindings;
+
+    std::vector<std::string> epilogueAuxInputNames() const {
+        std::vector<std::string> names;
+        names.reserve(_epilogueInputBindings.size());
+        for (const auto &[name, tensor] : _epilogueInputBindings) {
+            (void)tensor;
+            names.push_back(name);
+        }
+        return names;
+    }
 };
 
 }  // namespace Thor

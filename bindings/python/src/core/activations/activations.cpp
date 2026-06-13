@@ -1,13 +1,72 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/shared_ptr.h>
+#include <nanobind/stl/string.h>
+#include <nanobind/stl/vector.h>
+
+#include <optional>
+#include <utility>
+#include <vector>
 
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
+#include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Tensor/Tensor.h"
 #include "Utilities/Expression/Expression.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
 using namespace std;
 using namespace Thor;
+
+namespace {
+using DataType = ThorImplementation::DataType;
+
+std::optional<DataType> optionalDataTypeFromPython(const nb::object& obj) {
+    if (obj.is_none()) {
+        return std::nullopt;
+    }
+    return nb::cast<DataType>(obj);
+}
+
+ThorImplementation::Expression makePythonActivationEpilogueInput(const nb::object& outputDTypeObj, const nb::object& computeDTypeObj) {
+    std::optional<DataType> outputDType = optionalDataTypeFromPython(outputDTypeObj);
+    std::optional<DataType> computeDType = optionalDataTypeFromPython(computeDTypeObj);
+    return Activation::epilogueInput(computeDType, outputDType);
+}
+
+ThorImplementation::Expression makePythonActivationEpilogueAuxInput(const std::string& inputName,
+                                                                    const nb::object& outputDTypeObj,
+                                                                    const nb::object& computeDTypeObj) {
+    std::optional<DataType> outputDType = optionalDataTypeFromPython(outputDTypeObj);
+    std::optional<DataType> computeDType = optionalDataTypeFromPython(computeDTypeObj);
+    return Activation::epilogueAuxInput(inputName, computeDType, outputDType);
+}
+
+std::vector<std::pair<std::string, Tensor>> activationEpilogueInputsFromPython(const nb::object& epilogueInputs) {
+    std::vector<std::pair<std::string, Tensor>> bindings;
+    if (epilogueInputs.is_none()) {
+        return bindings;
+    }
+    if (!nb::isinstance<nb::dict>(epilogueInputs)) {
+        throw nb::type_error("epilogue_inputs must be a dict[str, thor.Tensor] or None");
+    }
+    nb::dict inputsDict = nb::cast<nb::dict>(epilogueInputs);
+    bindings.reserve(inputsDict.size());
+    for (auto item : inputsDict) {
+        bindings.emplace_back(nb::cast<std::string>(item.first), nb::cast<Tensor>(item.second));
+    }
+    return bindings;
+}
+
+std::optional<ThorImplementation::Expression> activationEpilogueFromPython(const nb::object& epilogue) {
+    if (epilogue.is_none()) {
+        return std::nullopt;
+    }
+    if (!nb::isinstance<ThorImplementation::Expression>(epilogue)) {
+        throw nb::type_error("epilogue must be a thor.physical.Expression instance or None");
+    }
+    return nb::cast<ThorImplementation::Expression>(epilogue);
+}
+}  // namespace
 
 void bind_glu(nb::module_ &m);
 void bind_reglu(nb::module_ &m);
@@ -42,6 +101,33 @@ void bind_activations(nb::module_ &activations) {
         [](const Activation& self, const ThorImplementation::Expression& input) { return self.toExpression(input); },
         "input"_a,
         R"nbdoc(Return an expression equivalent to applying this activation to the supplied expression.)nbdoc");
+
+    activation.def_static(
+        "epilogue_input",
+        &makePythonActivationEpilogueInput,
+        "output_dtype"_a.none() = nb::none(),
+        "compute_dtype"_a.none() = nb::none(),
+        R"nbdoc(Return the primary tensor input expression expected by an activation epilogue.)nbdoc");
+
+    activation.def_static(
+        "epilogue_aux_input",
+        &makePythonActivationEpilogueAuxInput,
+        "name"_a,
+        "output_dtype"_a.none() = nb::none(),
+        "compute_dtype"_a.none() = nb::none(),
+        R"nbdoc(Return a named auxiliary tensor input expression for an activation epilogue.)nbdoc");
+
+    activation.def(
+        "add_to_network",
+        [](Activation& self, Network& network, Tensor featureInput, const nb::object& epilogue, const nb::object& epilogueInputs) {
+            return self.addToNetwork(
+                featureInput, &network, activationEpilogueFromPython(epilogue), activationEpilogueInputsFromPython(epilogueInputs));
+        },
+        "network"_a,
+        "feature_input"_a,
+        "epilogue"_a.none() = nb::none(),
+        "epilogue_inputs"_a.none() = nb::none(),
+        R"nbdoc(Attach this activation as a standalone expression-backed layer and return its feature output tensor.)nbdoc");
 
     bind_glu(activations);
     bind_reglu(activations);

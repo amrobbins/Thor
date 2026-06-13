@@ -1,5 +1,7 @@
 #include <nanobind/nanobind.h>
 
+#include <optional>
+
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Layers/Utility/Flatten.h"
 #include "DeepLearning/Api/Network/Network.h"
@@ -68,5 +70,14 @@ void bind_flatten(nb::module_ &m) {
 
                 For example if the input Tensor has dimensions [10, 20, 30, 40] and num_output_dimensions == 2,
                 then the ouput Tensor will have dimensions [10, 20, 1200].
+            )nbdoc")
+        .def(
+            "get_feature_output",
+            [](Flatten &self) -> Tensor {
+                std::optional<Tensor> maybeFeatureOutput = self.getFeatureOutput();
+                return maybeFeatureOutput.value();
+            },
+            R"nbdoc(
+            Return the output tensor produced by this layer.
             )nbdoc");
 }

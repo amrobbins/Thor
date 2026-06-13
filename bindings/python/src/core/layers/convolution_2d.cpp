@@ -1,6 +1,7 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/unordered_map.h>
 
 #include <memory>
 #include <exception>
@@ -67,6 +68,29 @@ ThorImplementation::Expression makePythonEpilogueInput(const nb::object &outputD
     return Convolution2d::epilogueInput(computeDType, outputDType);
 }
 
+ThorImplementation::Expression makePythonEpilogueAuxInput(const std::string &inputName,
+                                                          const nb::object &outputDTypeObj,
+                                                          const nb::object &computeDTypeObj) {
+    std::optional<DataType> outputDType = optionalDataTypeFromPython(outputDTypeObj);
+    std::optional<DataType> computeDType = optionalDataTypeFromPython(computeDTypeObj);
+    return Convolution2d::epilogueAuxInput(inputName, computeDType, outputDType);
+}
+
+void applyPythonEpilogueInputs(Convolution2d::Builder &builder, const nb::object &epilogueInputs) {
+    if (epilogueInputs.is_none()) {
+        return;
+    }
+    if (!nb::isinstance<nb::dict>(epilogueInputs)) {
+        throw nb::type_error("epilogue_inputs must be a dict[str, thor.Tensor] or None");
+    }
+    nb::dict inputsDict = nb::cast<nb::dict>(epilogueInputs);
+    for (auto item : inputsDict) {
+        std::string name = nb::cast<std::string>(item.first);
+        Tensor tensor = nb::cast<Tensor>(item.second);
+        builder.epilogueInput(name, tensor);
+    }
+}
+
 void applyPythonEpilogue(Convolution2d::Builder &builder, const nb::object &epilogue) {
     if (epilogue.is_none()) {
         return;
@@ -98,7 +122,8 @@ void bind_convolution_2d(nb::module_ &m) {
            nb::object activation,
            shared_ptr<Initializer> weights_initializer,
            shared_ptr<Initializer> biases_initializer,
-           nb::object epilogue) {
+           nb::object epilogue,
+           nb::object epilogue_inputs) {
             const auto &dims = featureInput.getDimensions();
             if (dims.size() != 3) {
                 string msg = "Convolution2d instance: feature_input must be a 3D CHW tensor (no batch) but tensor format is " +
@@ -162,6 +187,7 @@ void bind_convolution_2d(nb::module_ &m) {
                 .hasBias(hasBias);
 
             applyPythonActivation(builder, activation);
+            applyPythonEpilogueInputs(builder, epilogue_inputs);
             applyPythonEpilogue(builder, epilogue);
 
             if (weights_initializer != nullptr)
@@ -186,7 +212,8 @@ void bind_convolution_2d(nb::module_ &m) {
         "activation"_a.none() = nb::str(DEFAULT_ACTIVATION_SENTINEL),
         "weights_initializer"_a = nb::none(),
         "biases_initializer"_a = nb::none(),
-        "epilogue"_a.none() = nb::none());
+        "epilogue"_a.none() = nb::none(),
+        "epilogue_inputs"_a.none() = nb::none());
 
     convolution_2d.def_static(
         "epilogue_input",
@@ -194,7 +221,18 @@ void bind_convolution_2d(nb::module_ &m) {
         "output_dtype"_a.none() = nb::none(),
         "compute_dtype"_a.none() = nb::none(),
         R"nbdoc(
-            Return the single tensor input expression expected by a Convolution2d epilogue.
+            Return the primary tensor input expression expected by a Convolution2d epilogue.
+            )nbdoc");
+
+    convolution_2d.def_static(
+        "epilogue_aux_input",
+        &makePythonEpilogueAuxInput,
+        "name"_a,
+        "output_dtype"_a.none() = nb::none(),
+        "compute_dtype"_a.none() = nb::none(),
+        R"nbdoc(
+            Return a named auxiliary tensor input expression for a Convolution2d epilogue.
+            Bind the same name to a tensor with the ``epilogue_inputs`` constructor argument.
             )nbdoc");
 
     convolution_2d.def(
@@ -259,6 +297,11 @@ void bind_convolution_2d(nb::module_ &m) {
             Initializer for the bias vector.
         epilogue : thor.physical.Expression or None, default None
             Optional expression applied after convolution, bias, and activation.
-            Build it from ``Convolution2d.epilogue_input()``.
+            Build it from ``Convolution2d.epilogue_input()`` and, when needed,
+            ``Convolution2d.epilogue_aux_input(name)``.
+        epilogue_inputs : dict[str, thor.Tensor] or None, default None
+            Named auxiliary input tensors consumed by the epilogue expression.
+            This is intended for residual-style epilogues such as
+            ``relu(Convolution2d.epilogue_input() + Convolution2d.epilogue_aux_input("residual"))``.
         )nbdoc";
 }

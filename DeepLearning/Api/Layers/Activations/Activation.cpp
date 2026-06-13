@@ -28,6 +28,7 @@
 
 #include <stdexcept>
 #include <optional>
+#include <set>
 
 using namespace std;
 using json = nlohmann::json;
@@ -46,25 +47,213 @@ std::shared_ptr<ThorImplementation::Layer> Activation::stampExpressionBackedActi
                                                                                         Thor::Tensor connectingApiTensor,
                                                                                         bool inferenceOnly) const {
     THOR_THROW_IF_FALSE(initialized);
-    THOR_THROW_IF_FALSE(connectingApiTensor == featureInput.value());
+    THOR_THROW_IF_FALSE(featureInput.has_value());
+    THOR_THROW_IF_FALSE(featureOutput.has_value());
+
+    bool knownInput = connectingApiTensor == featureInput.value();
+    for (const auto& [name, tensor] : epilogueInputBindings) {
+        (void)name;
+        if (connectingApiTensor == tensor) {
+            knownInput = true;
+            break;
+        }
+    }
+    THOR_THROW_IF_FALSE(knownInput);
 
     using ThorImplementation::DynamicExpression;
     using ThorImplementation::Expression;
     using ThorImplementation::ExpressionDefinition;
 
-    Expression featureInputExpr = Expression::input("feature_input");
-    Expression featureOutputExpr = toExpression(featureInputExpr);
+    // Preserve the public activation input dtype on the expression input node.
+    // This makes the primary activation input behave like activation epilogue
+    // auxiliary inputs, which already carry an explicit dtype at the stage
+    // boundary.
+    const DataType featureInputDType = featureInput.value().getDataType();
+    Expression featureInputExpr = Expression::input("feature_input", std::nullopt, featureInputDType);
+    Expression featureOutputExpr = epilogue.has_value() ? applyEpilogue(featureInputExpr, epilogue.value()) : toExpression(featureInputExpr);
     ExpressionDefinition definition = ExpressionDefinition::fromOutputs(Expression::outputs({{"feature_output", featureOutputExpr}}));
+
+    std::vector<std::string> inputNames = {"feature_input"};
+    inputNames.reserve(inputNames.size() + epilogueInputBindings.size());
+    for (const auto& [name, tensor] : epilogueInputBindings) {
+        (void)tensor;
+        inputNames.push_back(name);
+    }
 
     std::shared_ptr<ThorImplementation::CustomLayer> physicalActivation = std::make_shared<ThorImplementation::CustomLayer>(
         DynamicExpression::fromExpressionDefinition(definition),
-        std::vector<std::string>{"feature_input"},
+        inputNames,
         std::vector<std::string>{"feature_output"},
         placement,
         std::vector<std::shared_ptr<ThorImplementation::PhysicalParameter>>{},
         inferenceOnly);
     physicalActivation->setLayerName(getLayerType());
     return physicalActivation;
+}
+
+void Activation::validateEpilogueAuxInputName(const std::string& inputName) {
+    if (inputName.empty()) {
+        throw std::invalid_argument("Activation epilogue auxiliary input name cannot be empty.");
+    }
+    if (inputName.rfind("__", 0) == 0) {
+        throw std::invalid_argument("Activation epilogue auxiliary input names cannot start with __: " + inputName + ".");
+    }
+    static const std::set<std::string> reservedNames = {
+        "feature_input",
+        "feature_output",
+        epilogueInputName(),
+        epilogueOutputName(),
+    };
+    if (reservedNames.contains(inputName)) {
+        throw std::invalid_argument("Activation epilogue auxiliary input name is reserved: " + inputName + ".");
+    }
+}
+
+std::vector<Tensor> Activation::getFeatureInputs() const {
+    std::vector<Tensor> inputs;
+    if (featureInput.has_value()) {
+        inputs.push_back(featureInput.value());
+    }
+    inputs.reserve(inputs.size() + epilogueInputBindings.size());
+    for (const auto& [name, tensor] : epilogueInputBindings) {
+        (void)name;
+        inputs.push_back(tensor);
+    }
+    return inputs;
+}
+
+std::vector<Tensor> Activation::getFeatureOutputs() const {
+    THOR_THROW_IF_FALSE(featureOutput.has_value());
+    return {featureOutput.value()};
+}
+
+std::vector<Tensor> Activation::getAllOutputTensors() const { return getFeatureOutputs(); }
+
+std::vector<Tensor> Activation::getOutputsFromInput(Tensor inputTensor) {
+    (void)getConnectionType(inputTensor);
+    if (epilogueInputBindings.empty()) {
+        return {featureOutput.value()};
+    }
+
+    if (emittedFeatureOutputAfterAllInputsConnected) {
+        return {};
+    }
+    const uint32_t requiredInputPorts = static_cast<uint32_t>(1 + epilogueInputBindings.size());
+    if (connectedInputPortIndices.size() != requiredInputPorts) {
+        return {};
+    }
+
+    emittedFeatureOutputAfterAllInputsConnected = true;
+    return {featureOutput.value()};
+}
+
+void Activation::informThatInputConnectionMade(Tensor inputTensor) {
+    if (epilogueInputBindings.empty()) {
+        return;
+    }
+    const uint32_t port = static_cast<uint32_t>(getConnectionType(inputTensor));
+    connectedInputPortIndices.insert(port);
+}
+
+int Activation::getConnectionType(Tensor connectingTensor) const {
+    THOR_THROW_IF_FALSE(featureInput.has_value());
+    THOR_THROW_IF_FALSE(featureOutput.has_value());
+    if (connectingTensor == featureInput.value()) {
+        return 0;
+    }
+    for (uint32_t i = 0; i < epilogueInputBindings.size(); ++i) {
+        if (connectingTensor == epilogueInputBindings[i].second) {
+            return static_cast<int>(i + 1);
+        }
+    }
+    if (connectingTensor == featureOutput.value()) {
+        return 0;
+    }
+    throw std::runtime_error("Tensor is not connected to this activation layer.");
+}
+
+uint64_t Activation::getExpressionBackedActivationMemRequirementInBytes(uint32_t batchSize) const {
+    THOR_THROW_IF_FALSE(featureInput.has_value());
+    THOR_THROW_IF_FALSE(featureOutput.has_value());
+    uint64_t bytes = featureOutput.value().getTotalSizeInBytes() + featureInput.value().getTotalSizeInBytes();
+    for (const auto& [name, tensor] : epilogueInputBindings) {
+        (void)name;
+        bytes += tensor.getTotalSizeInBytes();
+    }
+    return batchSize * bytes;
+}
+
+void Activation::initializeStandaloneActivation(Tensor inputTensor,
+                                                std::optional<ThorImplementation::Expression> epilogueExpression,
+                                                std::vector<std::pair<std::string, Tensor>> epilogueInputBindingsValue) {
+    THOR_THROW_IF_FALSE(!inputTensor.getDimensions().empty());
+    if (!epilogueExpression.has_value() && !epilogueInputBindingsValue.empty()) {
+        throw std::invalid_argument("Activation epilogue inputs were provided without an epilogue expression.");
+    }
+
+    std::vector<std::string> auxInputNames;
+    auxInputNames.reserve(epilogueInputBindingsValue.size());
+    std::set<std::string> seenNames;
+    for (const auto& [name, tensor] : epilogueInputBindingsValue) {
+        validateEpilogueAuxInputName(name);
+        if (!seenNames.insert(name).second) {
+            throw std::invalid_argument("Activation epilogue input name is duplicated: " + name + ".");
+        }
+        if (tensor.getDataType() != inputTensor.getDataType()) {
+            throw std::invalid_argument("Activation epilogue input '" + name + "' dtype must match feature_input dtype.");
+        }
+        if (tensor.getDimensions() != inputTensor.getDimensions()) {
+            throw std::invalid_argument("Activation epilogue input '" + name + "' shape must match feature_input shape.");
+        }
+        auxInputNames.push_back(name);
+    }
+    if (epilogueExpression.has_value()) {
+        validateEpilogueExpression(epilogueExpression.value(), auxInputNames);
+    }
+
+    featureInput = inputTensor;
+    featureOutput = inputTensor.clone();
+    epilogue = std::move(epilogueExpression);
+    epilogueInputBindings = std::move(epilogueInputBindingsValue);
+    serializableEpilogue.reset();
+    connectedInputPortIndices.clear();
+    emittedFeatureOutputAfterAllInputsConnected = false;
+    nextInputConnectionCursorByTensorOriginalId.clear();
+}
+
+void Activation::deserializeStandaloneFields(const json& j, Network* network) {
+    nlohmann::json input = j.at("feature_input").get<nlohmann::json>();
+    uint64_t originalTensorId = input.at("id").get<uint64_t>();
+    Tensor inputTensor = network->getApiTensorByOriginalId(originalTensorId);
+
+    std::vector<std::pair<std::string, Tensor>> epilogueBindings;
+    if (j.contains("epilogue_inputs")) {
+        for (const json& epilogueInputJson : j.at("epilogue_inputs")) {
+            std::string inputName = epilogueInputJson.at("name").get<std::string>();
+            validateEpilogueAuxInputName(inputName);
+            uint64_t auxOriginalTensorId = epilogueInputJson.at("tensor").at("id").get<uint64_t>();
+            epilogueBindings.emplace_back(inputName, network->getApiTensorByOriginalId(auxOriginalTensorId));
+        }
+    }
+    std::vector<std::string> auxInputNames;
+    auxInputNames.reserve(epilogueBindings.size());
+    for (const auto& [name, tensor] : epilogueBindings) {
+        (void)tensor;
+        auxInputNames.push_back(name);
+    }
+
+    std::optional<ThorImplementation::Expression> epilogueExpression = std::nullopt;
+    if (j.contains("epilogue") && !j.at("epilogue").is_null()) {
+        ThorImplementation::ExpressionDefinition epilogueDefinition =
+            ThorImplementation::ExpressionDefinition::deserialize(j.at("epilogue"));
+        epilogueExpression = epilogueExpressionFromDefinition(epilogueDefinition, auxInputNames);
+    } else if (!epilogueBindings.empty()) {
+        throw std::runtime_error("Activation serialized epilogue_inputs require a non-null epilogue expression.");
+    }
+
+    initializeStandaloneActivation(inputTensor, epilogueExpression, epilogueBindings);
+    featureOutput = Tensor::deserialize(j.at("feature_output").get<nlohmann::json>());
+    initialized = true;
 }
 
 json Activation::architectureJson() const {
@@ -83,6 +272,25 @@ json Activation::architectureJson() const {
     if (featureOutput.has_value()) {
         j["feature_output"] = featureOutput.value().architectureJson();
     }
+    if (epilogue.has_value()) {
+        std::vector<std::string> auxInputNames;
+        auxInputNames.reserve(epilogueInputBindings.size());
+        for (const auto& [name, tensor] : epilogueInputBindings) {
+            (void)tensor;
+            auxInputNames.push_back(name);
+        }
+        if (!serializableEpilogue.has_value()) {
+            serializableEpilogue = makeEpilogueDefinition(epilogue.value(), auxInputNames);
+        }
+        j["epilogue"] = serializableEpilogue.value().architectureJson();
+    } else {
+        j["epilogue"] = nullptr;
+    }
+    json epilogueInputs = json::array();
+    for (const auto& [name, tensor] : epilogueInputBindings) {
+        epilogueInputs.push_back(json{{"name", name}, {"tensor", tensor.architectureJson()}});
+    }
+    j["epilogue_inputs"] = epilogueInputs;
 
     return j;
 }
@@ -166,7 +374,12 @@ std::shared_ptr<Activation> Activation::deserializeTemplate(const json& j) {
     return activation;
 }
 
-Tensor Activation::addToNetwork(Tensor inputTensor, Network* network) {
+Tensor Activation::addToNetwork(Tensor inputTensor, Network* network) { return addToNetwork(inputTensor, network, std::nullopt, {}); }
+
+Tensor Activation::addToNetwork(Tensor inputTensor,
+                                Network* network,
+                                std::optional<ThorImplementation::Expression> epilogueExpression,
+                                std::vector<std::pair<std::string, Tensor>> epilogueInputBindingsValue) {
     // The following is admittedly a little funky.
     //
     // I need activations to serve 2 purposes:
@@ -184,14 +397,22 @@ Tensor Activation::addToNetwork(Tensor inputTensor, Network* network) {
 
     std::optional<Tensor> maybeExistingFeatureInput = featureInput;
     std::optional<Tensor> maybeExistingFeatureOutput = featureOutput;
+    std::optional<ThorImplementation::Expression> maybeExistingEpilogue = epilogue;
+    std::vector<std::pair<std::string, Tensor>> maybeExistingEpilogueInputBindings = epilogueInputBindings;
+    std::optional<ThorImplementation::ExpressionDefinition> maybeExistingSerializableEpilogue = serializableEpilogue;
 
-    featureInput = inputTensor;
-    Tensor activationOutput = featureInput.value().clone();
-    featureOutput = activationOutput;
+    initializeStandaloneActivation(inputTensor, std::move(epilogueExpression), std::move(epilogueInputBindingsValue));
+    Tensor activationOutput = featureOutput.value();
     Layer::addToNetwork(network);
 
     featureInput = maybeExistingFeatureInput;
     featureOutput = maybeExistingFeatureOutput;
+    epilogue = maybeExistingEpilogue;
+    epilogueInputBindings = maybeExistingEpilogueInputBindings;
+    serializableEpilogue = maybeExistingSerializableEpilogue;
+    connectedInputPortIndices.clear();
+    emittedFeatureOutputAfterAllInputsConnected = false;
+    nextInputConnectionCursorByTensorOriginalId.clear();
 
     return activationOutput;
 }

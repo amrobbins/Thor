@@ -404,6 +404,7 @@ def _iris_loader(batch_size: int = 16, dtype=np.float32):
     )
 
 
+
 def _build_iris_mlp(name: str, *, dtype=thor.DataType.fp32, per_layer_optimizers: bool = False):
     return _build_iris_two_layer_classifier(
         name,
@@ -472,6 +473,191 @@ def _build_iris_two_layer_classifier(
     thor.layers.NetworkOutput(network, "loss", loss.get_loss(), thor.DataType.fp32)
     thor.layers.NetworkOutput(network, "scores", logits.get_feature_output(), dtype)
     return network
+
+
+def _make_deep_layer_optimizer_override(layer_index: int):
+    # Fresh optimizer objects per parameter keep optimizer-owned state distinct
+    # while still covering mixed per-layer/per-parameter override plumbing.
+    if layer_index % 2 == 0:
+        return thor.optimizers.AdamW(alpha=0.002, weight_decay=0.0)
+    return thor.optimizers.Sgd(initial_learning_rate=0.015, momentum=0.9)
+
+
+def _build_iris_deep_classifier(
+    name: str,
+    *,
+    dtype=thor.DataType.fp32,
+    hidden_layers,
+    use_layer_norm: bool = False,
+    per_layer_optimizer_overrides: bool = False,
+    emit_extra_outputs: bool = False,
+):
+    network = thor.Network(name)
+    examples = thor.layers.NetworkInput(network, "examples", [4], dtype)
+    labels = thor.layers.NetworkInput(network, "labels", [3], dtype)
+
+    features = examples.get_feature_output()
+    for layer_index, (num_output_features, activation) in enumerate(hidden_layers):
+        if per_layer_optimizer_overrides:
+            weights_optimizer = _make_deep_layer_optimizer_override(layer_index)
+            biases_optimizer = _make_deep_layer_optimizer_override(layer_index)
+        else:
+            weights_optimizer = None
+            biases_optimizer = None
+
+        dense = thor.layers.FullyConnected(
+            network,
+            features,
+            num_output_features,
+            True,
+            activation=activation,
+            weights_optimizer=weights_optimizer,
+            biases_optimizer=biases_optimizer,
+        )
+        features = dense.get_feature_output()
+
+        # Add normalization between hidden layers, not after the final hidden
+        # projection, so the next trainable layer consumes normalized activations.
+        if use_layer_norm and layer_index + 1 < len(hidden_layers):
+            norm = thor.layers.LayerNorm(network, features)
+            features = norm.get_feature_output()
+
+    output_layer_index = len(hidden_layers)
+    if per_layer_optimizer_overrides:
+        output_weights_optimizer = _make_deep_layer_optimizer_override(output_layer_index)
+        output_biases_optimizer = _make_deep_layer_optimizer_override(output_layer_index)
+    else:
+        output_weights_optimizer = None
+        output_biases_optimizer = None
+
+    logits = thor.layers.FullyConnected(
+        network,
+        features,
+        3,
+        True,
+        activation=None,
+        weights_optimizer=output_weights_optimizer,
+        biases_optimizer=output_biases_optimizer,
+    )
+    loss = thor.losses.CategoricalCrossEntropy(
+        network,
+        logits.get_feature_output(),
+        labels.get_feature_output(),
+        thor.DataType.fp32,
+    )
+
+    thor.layers.NetworkOutput(network, "loss", loss.get_loss(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "scores", logits.get_feature_output(), dtype)
+    if emit_extra_outputs:
+        thor.layers.NetworkOutput(network, "features", features, dtype)
+    return network
+
+
+def _build_iris_two_input_multi_output_classifier(name: str, *, dtype=thor.DataType.fp32):
+    network = thor.Network(name)
+    examples_left = thor.layers.NetworkInput(network, "examples_left", [4], dtype)
+    examples_right = thor.layers.NetworkInput(network, "examples_right", [4], dtype)
+    labels = thor.layers.NetworkInput(network, "labels", [3], dtype)
+
+    # Keep this queued-trainer coverage fully serializable.  The native queued
+    # runner serializes its network/program setup, so using a Python CustomLayer
+    # here would correctly fail unless it was built from a serializable
+    # ExpressionDefinition.  Two ordinary branches still exercise explicit
+    # input binding, multiple NetworkInputs, multiple NetworkOutputs, and
+    # multiple loss roots in one TrainingStep.
+    left_hidden = thor.layers.FullyConnected(
+        network,
+        examples_left.get_feature_output(),
+        16,
+        True,
+        activation=thor.activations.Relu(),
+    )
+    left_logits = thor.layers.FullyConnected(
+        network,
+        left_hidden.get_feature_output(),
+        3,
+        True,
+        activation=None,
+    )
+    left_loss = thor.losses.CategoricalCrossEntropy(
+        network,
+        left_logits.get_feature_output(),
+        labels.get_feature_output(),
+        thor.DataType.fp32,
+    )
+
+    right_hidden = thor.layers.FullyConnected(
+        network,
+        examples_right.get_feature_output(),
+        12,
+        True,
+        activation=thor.activations.Tanh(),
+    )
+    right_logits = thor.layers.FullyConnected(
+        network,
+        right_hidden.get_feature_output(),
+        3,
+        True,
+        activation=None,
+    )
+    right_loss = thor.losses.CategoricalCrossEntropy(
+        network,
+        right_logits.get_feature_output(),
+        labels.get_feature_output(),
+        thor.DataType.fp32,
+    )
+
+    thor.layers.NetworkOutput(network, "loss", left_loss.get_loss(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "aux_loss", right_loss.get_loss(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "scores_left", left_logits.get_feature_output(), dtype)
+    thor.layers.NetworkOutput(network, "scores_right", right_logits.get_feature_output(), dtype)
+    return network, [left_loss.get_loss(), right_loss.get_loss()]
+
+
+def _build_iris_frozen_hidden_classifier(name: str, *, dtype=thor.DataType.fp32):
+    network = thor.Network(name)
+    examples = thor.layers.NetworkInput(network, "examples", [4], dtype)
+    labels = thor.layers.NetworkInput(network, "labels", [3], dtype)
+
+    hidden = thor.layers.FullyConnected(
+        network,
+        examples.get_feature_output(),
+        32,
+        True,
+        activation=thor.activations.Relu(),
+    )
+    frozen_hidden = thor.layers.FullyConnected(
+        network,
+        hidden.get_feature_output(),
+        24,
+        True,
+        activation=thor.activations.Relu(),
+    )
+    frozen_hidden.freeze_training()
+    logits = thor.layers.FullyConnected(
+        network,
+        frozen_hidden.get_feature_output(),
+        3,
+        True,
+        activation=None,
+    )
+    loss = thor.losses.CategoricalCrossEntropy(
+        network,
+        logits.get_feature_output(),
+        labels.get_feature_output(),
+        thor.DataType.fp32,
+    )
+
+    thor.layers.NetworkOutput(network, "loss", loss.get_loss(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "scores", logits.get_feature_output(), dtype)
+    thor.layers.NetworkOutput(network, "frozen_features", frozen_hidden.get_feature_output(), dtype)
+    return network
+
+
+def _assert_phase_batch_count(stats, phase: str, *, epochs: int, batches_per_epoch: int):
+    losses = _phase_losses(stats, phase)
+    expected = epochs * batches_per_epoch
+    assert len(losses) == expected, f"expected {expected} {phase} losses, got {len(losses)}: {losses}"
 
 
 # Diagnostic ladder, from deterministic single-batch checks to real Iris training.
@@ -891,6 +1077,279 @@ def test_debug_synchronous_trainer_fits_iris_fp16_with_per_layer_optimizer_overr
         _phase_epoch_mean_losses(stats, "validate"),
         name="debug synchronous Iris FP16 per-layer validate epoch mean",
         required_fraction=0.90,
+    )
+
+
+def test_debug_synchronous_trainer_fits_iris_fp32_deep_mixed_activation_mlp_with_sgd_momentum(capfd):
+    network = _build_iris_deep_classifier(
+        "python_integration_iris_debug_fp32_deep_mixed_activation_sgd",
+        dtype=thor.DataType.fp32,
+        hidden_layers=[
+            (32, thor.activations.Tanh()),
+            (24, thor.activations.Relu()),
+            (16, thor.activations.Gelu()),
+            (12, thor.activations.Swish()),
+        ],
+    )
+    loader = _iris_loader(batch_size=16, dtype=np.float32)
+    optimizer = thor.optimizers.Sgd(initial_learning_rate=0.02, momentum=0.9)
+
+    trainer = thor.training.Trainer(
+        network,
+        loader,
+        optimizer=optimizer,
+        debug_synchronous=True,
+        stats=True,
+        stats_interval_s=0.0,
+        max_in_flight_batches=1,
+        scalar_tensors_to_report=["loss"],
+    )
+    stats = _fit_and_capture_stats(trainer, capfd, epochs=35)
+    _assert_loss_decreased(
+        _phase_epoch_mean_losses(stats, "validate"),
+        name="debug synchronous Iris FP32 deep mixed-activation SGD validate epoch mean",
+        required_fraction=0.95,
+    )
+
+
+def test_queued_trainer_fits_iris_fp32_layer_norm_mlp_with_adamw(capfd):
+    network = _build_iris_deep_classifier(
+        "python_integration_iris_queued_fp32_layer_norm_adamw",
+        dtype=thor.DataType.fp32,
+        hidden_layers=[
+            (32, thor.activations.Gelu()),
+            (32, thor.activations.Swish()),
+            (16, thor.activations.Tanh()),
+        ],
+        use_layer_norm=True,
+    )
+    loader = _iris_loader(batch_size=16, dtype=np.float32)
+    optimizer = thor.optimizers.AdamW(alpha=0.002, weight_decay=0.0)
+
+    trainer = thor.training.Trainer(
+        network,
+        loader,
+        optimizer=optimizer,
+        debug_synchronous=False,
+        stats=True,
+        stats_interval_s=0.0,
+        max_in_flight_batches=8,
+        scalar_tensors_to_report=["loss"],
+    )
+    stats = _fit_and_capture_stats(trainer, capfd, epochs=35)
+    _assert_loss_decreased(
+        _phase_epoch_mean_losses(stats, "validate"),
+        name="queued Iris FP32 layer-norm AdamW validate epoch mean",
+        required_fraction=0.95,
+    )
+
+
+def test_queued_trainer_fits_iris_fp16_deep_mlp_with_nadam(capfd):
+    network = _build_iris_deep_classifier(
+        "python_integration_iris_queued_fp16_deep_nadam",
+        dtype=thor.DataType.fp16,
+        hidden_layers=[
+            (32, thor.activations.Relu()),
+            (24, thor.activations.Gelu()),
+            (16, thor.activations.Swish()),
+        ],
+    )
+    loader = _iris_loader(batch_size=16, dtype=np.float16)
+    optimizer = thor.optimizers.NAdam(alpha=0.002)
+
+    trainer = thor.training.Trainer(
+        network,
+        loader,
+        optimizer=optimizer,
+        debug_synchronous=False,
+        stats=True,
+        stats_interval_s=0.0,
+        max_in_flight_batches=8,
+        scalar_tensors_to_report=["loss"],
+    )
+    stats = _fit_and_capture_stats(trainer, capfd, epochs=35)
+    _assert_loss_decreased(
+        _phase_epoch_mean_losses(stats, "validate"),
+        name="queued Iris FP16 deep NAdam validate epoch mean",
+        required_fraction=0.95,
+    )
+
+
+def test_queued_trainer_fits_iris_fp32_two_input_multi_output_network_with_explicit_bindings(capfd):
+    network, loss_roots = _build_iris_two_input_multi_output_classifier(
+        "python_integration_iris_queued_fp32_two_input_multi_output",
+        dtype=thor.DataType.fp32,
+    )
+    loader = _iris_loader(batch_size=16, dtype=np.float32)
+    optimizer = thor.optimizers.Adam(alpha=0.003)
+    training_program = thor.training.TrainingProgram([
+        thor.training.TrainingStep(
+            "two_input_iris",
+            loss_roots,
+            optimizer=optimizer,
+            update_parameters=network.get_trainable_parameter_references(),
+            input_bindings=[
+                thor.training.TrainingInputBinding("examples_left", "examples"),
+                thor.training.TrainingInputBinding("examples_right", "examples"),
+                thor.training.TrainingInputBinding("labels", "labels"),
+            ],
+        )
+    ])
+
+    trainer = thor.training.Trainer(
+        network,
+        loader,
+        training_program=training_program,
+        debug_synchronous=False,
+        stats=True,
+        stats_interval_s=0.0,
+        max_in_flight_batches=8,
+        scalar_tensors_to_report=["loss"],
+        stats_color="never",
+    )
+    stats = _fit_and_capture_stats(trainer, capfd, epochs=30)
+    _assert_phase_batch_count(stats, "train", epochs=30, batches_per_epoch=loader.get_num_train_batches())
+    _assert_phase_batch_count(stats, "validate", epochs=30, batches_per_epoch=loader.get_num_validate_batches())
+    _assert_loss_decreased(
+        _phase_epoch_mean_losses(stats, "validate"),
+        name="queued Iris FP32 two-input multi-output validate epoch mean",
+        required_fraction=0.95,
+    )
+
+
+def test_queued_trainer_fits_iris_fp32_deep_mlp_with_per_layer_optimizer_overrides(capfd):
+    network = _build_iris_deep_classifier(
+        "python_integration_iris_queued_fp32_deep_per_layer_optimizers",
+        dtype=thor.DataType.fp32,
+        hidden_layers=[
+            (32, thor.activations.Relu()),
+            (24, thor.activations.Gelu()),
+            (16, thor.activations.Tanh()),
+        ],
+        per_layer_optimizer_overrides=True,
+    )
+    loader = _iris_loader(batch_size=16, dtype=np.float32)
+
+    trainer = thor.training.Trainer(
+        network,
+        loader,
+        debug_synchronous=False,
+        stats=True,
+        stats_interval_s=0.0,
+        max_in_flight_batches=8,
+        scalar_tensors_to_report=["loss"],
+        stats_color="never",
+    )
+    stats = _fit_and_capture_stats(trainer, capfd, epochs=30)
+    _assert_loss_decreased(
+        _phase_epoch_mean_losses(stats, "validate"),
+        name="queued Iris FP32 deep per-layer optimizer validate epoch mean",
+        required_fraction=0.95,
+    )
+
+
+def test_debug_synchronous_trainer_fits_iris_fp32_with_frozen_hidden_layer(capfd):
+    network = _build_iris_frozen_hidden_classifier(
+        "python_integration_iris_debug_fp32_frozen_hidden",
+        dtype=thor.DataType.fp32,
+    )
+    all_trainable = network.get_trainable_parameter_references(training_enabled_only=False)
+    enabled_trainable = network.get_trainable_parameter_references(training_enabled_only=True)
+    assert len(enabled_trainable) < len(all_trainable)
+
+    loader = _iris_loader(batch_size=16, dtype=np.float32)
+    optimizer = thor.optimizers.Adam(alpha=0.003)
+
+    trainer = thor.training.Trainer(
+        network,
+        loader,
+        optimizer=optimizer,
+        debug_synchronous=True,
+        stats=True,
+        stats_interval_s=0.0,
+        max_in_flight_batches=1,
+        scalar_tensors_to_report=["loss"],
+        stats_color="never",
+    )
+    stats = _fit_and_capture_stats(trainer, capfd, epochs=35)
+    _assert_loss_decreased(
+        _phase_epoch_mean_losses(stats, "validate"),
+        name="debug synchronous Iris FP32 frozen-hidden validate epoch mean",
+        required_fraction=0.98,
+    )
+
+
+def test_queued_trainer_reports_iris_validation_with_extra_non_scalar_outputs(capfd):
+    epochs = 24
+    network = _build_iris_deep_classifier(
+        "python_integration_iris_queued_validation_extra_outputs",
+        dtype=thor.DataType.fp32,
+        hidden_layers=[
+            (24, thor.activations.Relu()),
+            (12, thor.activations.Tanh()),
+        ],
+        emit_extra_outputs=True,
+    )
+    loader = _iris_loader(batch_size=16, dtype=np.float32)
+    optimizer = thor.optimizers.Adam(alpha=0.003)
+
+    trainer = thor.training.Trainer(
+        network,
+        loader,
+        optimizer=optimizer,
+        debug_synchronous=False,
+        stats=True,
+        stats_interval_s=0.0,
+        max_in_flight_batches=8,
+        scalar_tensors_to_report=["loss"],
+        stats_color="never",
+    )
+    stats = _fit_and_capture_stats(trainer, capfd, epochs=epochs)
+    _assert_phase_batch_count(stats, "train", epochs=epochs, batches_per_epoch=loader.get_num_train_batches())
+    _assert_phase_batch_count(stats, "validate", epochs=epochs, batches_per_epoch=loader.get_num_validate_batches())
+    _assert_loss_decreased(
+        _phase_epoch_mean_losses(stats, "validate"),
+        name="queued Iris FP32 validation with extra non-scalar outputs epoch mean",
+        required_fraction=0.95,
+    )
+
+
+def test_queued_trainer_updates_with_materialized_loss_and_prediction_output(capfd):
+    batch_size = 4
+    network = _build_zero_initialized_linear_regressor(
+        "python_integration_queued_materialized_mse_loss_and_prediction_output",
+        dtype=thor.DataType.fp32,
+    )
+    loader = _regression_one_batch_loader(batch_size=batch_size, dtype=np.float32)
+    optimizer = thor.optimizers.Sgd(initial_learning_rate=0.05, momentum=0.0)
+
+    trainer = thor.training.Trainer(
+        network,
+        loader,
+        optimizer=optimizer,
+        debug_synchronous=False,
+        stats=True,
+        stats_interval_s=0.0,
+        max_in_flight_batches=4,
+        scalar_tensors_to_report=["loss"],
+        stats_color="never",
+    )
+
+    stats = _fit_and_capture_stats(trainer, capfd, epochs=8)
+    train_losses = _phase_epoch_mean_losses(stats, "train")
+    validate_losses = _phase_epoch_mean_losses(stats, "validate")
+    assert len(train_losses) == 8, train_losses
+    assert len(validate_losses) == 8, validate_losses
+    _assert_zero_initialized_regression_mean_loss(
+        train_losses[0],
+        expected=1.0,
+        name="queued materialized MSE loss initial train epoch",
+    )
+    _assert_loss_decreased(
+        validate_losses,
+        name="queued materialized MSE loss with prediction output validate",
+        tail_window=2,
+        required_fraction=0.70,
     )
 
 

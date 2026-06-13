@@ -31,8 +31,11 @@ json BatchNormalization::architectureJson() const {
     }
     j["outputs"] = outputs;
 
-    if (hasOptimizer()) {
-        // Not stamped so there is no physical optimizer, so then what do I do? Maybe I expect it can be null?
+    if (!parameters.empty()) {
+        j.merge_patch(getParametersArchitectureJson());
+    }
+
+    if (optimizer != nullptr) {
         j["optimizer"] = optimizer->architectureJson();
     }
 
@@ -88,7 +91,12 @@ json BatchNormalization::serialize(thor_file::TarWriter &archiveWriter,
         j["num_items_observed"] = batchNorm->getNumItemsObserved();
     }
 
-    if (hasOptimizer()) {
+    if (j.contains("parameters")) {
+        Parameterizable::serializeParameters(
+            j["parameters"], archiveWriter, stream, saveOptimizerState, stampedNetwork, string("layer") + to_string(getId()));
+    }
+
+    if (optimizer != nullptr) {
         j["weights_optimizer"] = optimizer->serialize(archiveWriter,
                                                       stream,
                                                       batchNorm->getParameter("weights")->getOptimizer(),
