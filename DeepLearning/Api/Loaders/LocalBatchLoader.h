@@ -12,7 +12,8 @@ class LocalBatchLoader : public Loader {
     LocalBatchLoader(std::set<std::string> shardPaths,
                      ThorImplementation::TensorDescriptor exampleDescriptor,
                      ThorImplementation::TensorDescriptor labelDescriptor,
-                     uint64_t batchSize);
+                     uint64_t batchSize,
+                     uint64_t batchQueueDepth = 32);
 
     std::map<std::string, ThorImplementation::Tensor> getBatch(ExampleType exampleType, uint64_t &batchNum) override;
     void returnBatchBuffers(ExampleType exampleType, std::map<std::string, ThorImplementation::Tensor>&& tensorMap) override;

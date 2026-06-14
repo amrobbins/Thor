@@ -493,7 +493,8 @@ calling this helper.
            std::vector<uint64_t> label_shape,
            ThorImplementation::DataType label_data_type,
            uint64_t batch_size,
-           const std::string& dataset_name) -> std::shared_ptr<LocalBatchLoader> {
+           const std::string& dataset_name,
+           uint64_t batch_queue_depth) -> std::shared_ptr<LocalBatchLoader> {
             (void)cls;
             if (shard_paths.empty()) {
                 throw nb::value_error("LocalBatchLoader requires at least one shard path");
@@ -504,11 +505,15 @@ calling this helper.
             if (batch_size == 0) {
                 throw nb::value_error("LocalBatchLoader batch_size must be >= 1");
             }
+            if (batch_queue_depth == 0) {
+                throw nb::value_error("LocalBatchLoader batch_queue_depth must be >= 1");
+            }
             auto loader =
                 std::make_shared<LocalBatchLoader>(stringSetFromVector(std::move(shard_paths)),
                                                    ThorImplementation::TensorDescriptor(example_data_type, std::move(example_shape)),
                                                    ThorImplementation::TensorDescriptor(label_data_type, std::move(label_shape)),
-                                                   batch_size);
+                                                   batch_size,
+                                                   batch_queue_depth);
             loader->setDatasetName(dataset_name);
             return loader;
         },
@@ -519,7 +524,8 @@ calling this helper.
         "label_shape"_a,
         "label_data_type"_a,
         "batch_size"_a,
-        "dataset_name"_a = "local_shards");
+        "dataset_name"_a = "local_shards",
+        "batch_queue_depth"_a = 32);
     local_batch_loader.def(
         "__init__",
         [](LocalBatchLoader*,
@@ -529,14 +535,16 @@ calling this helper.
            std::vector<uint64_t>,
            ThorImplementation::DataType,
            uint64_t,
-           const std::string&) {},
+           const std::string&,
+           uint64_t) {},
         "shard_paths"_a,
         "example_shape"_a,
         "example_data_type"_a,
         "label_shape"_a,
         "label_data_type"_a,
         "batch_size"_a,
-        "dataset_name"_a = "local_shards");
+        "dataset_name"_a = "local_shards",
+        "batch_queue_depth"_a = 32);
     local_batch_loader.def("get_num_train_examples", [](LocalBatchLoader& self) { return self.getNumExamples(ExampleType::TRAIN); });
     local_batch_loader.def("get_num_validate_examples", [](LocalBatchLoader& self) { return self.getNumExamples(ExampleType::VALIDATE); });
     local_batch_loader.def("get_num_train_batches", [](LocalBatchLoader& self) { return self.getNumBatchesPerEpoch(ExampleType::TRAIN); });

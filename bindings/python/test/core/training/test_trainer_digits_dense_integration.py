@@ -23,6 +23,8 @@ DIGITS_DENSE_URL_BASE = os.environ.get(
 DIGITS_DENSE_BATCH_SIZE = int(os.environ.get("THOR_DIGITS_DENSE_BATCH_SIZE", "1024"))
 DIGITS_DENSE_EPOCHS = int(os.environ.get("THOR_DIGITS_DENSE_EPOCHS", "1"))
 DIGITS_DENSE_MAX_IN_FLIGHT_BATCHES = int(os.environ.get("THOR_DIGITS_DENSE_MAX_IN_FLIGHT_BATCHES", "8"))
+DIGITS_DENSE_LOADER_QUEUE_DEPTH = int(
+    os.environ.get("THOR_DIGITS_DENSE_LOADER_QUEUE_DEPTH", str(max(32, 2 * DIGITS_DENSE_MAX_IN_FLIGHT_BATCHES))))
 DIGITS_DENSE_STATS_INTERVAL_S = float(os.environ.get("THOR_DIGITS_DENSE_STATS_INTERVAL_S", "0.0"))
 DIGITS_DENSE_REBUILD = os.environ.get("THOR_DIGITS_DENSE_REBUILD") == "1"
 DIGITS_DENSE_NUM_SHARDS = int(os.environ.get("THOR_DIGITS_DENSE_NUM_SHARDS", "1"))
@@ -439,6 +441,7 @@ def _digits_dense_loader(*, batch_size: int):
         thor.DataType.fp16,
         batch_size=batch_size,
         dataset_name="mnist_digits_dense_fp16_flat",
+        batch_queue_depth=DIGITS_DENSE_LOADER_QUEUE_DEPTH,
     )
     return loader, manifest
 

@@ -13,6 +13,14 @@
 #include <thread>
 #include <vector>
 
+struct AsyncTensorQueueSnapshot {
+    int empty = 0;
+    int loading = 0;
+    int loaded = 0;
+    int unloading = 0;
+    int capacity = 0;
+};
+
 class AsyncTensorQueue {
    public:
     AsyncTensorQueue();
@@ -51,6 +59,7 @@ class AsyncTensorQueue {
     bool isEmpty();  // true when tryPop will fail
     int occupancy();
     int capacity();
+    AsyncTensorQueueSnapshot snapshot();
 
    private:
     bool queueOpen;

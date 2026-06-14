@@ -8,7 +8,8 @@ using ThorImplementation::TensorDescriptor;
 LocalBatchLoader::LocalBatchLoader(set<string> shardPaths,
                                    ThorImplementation::TensorDescriptor exampleDescriptor,
                                    ThorImplementation::TensorDescriptor labelDescriptor,
-                                   uint64_t batchSize) {
+                                   uint64_t batchSize,
+                                   uint64_t batchQueueDepth) {
     this->batchSize = batchSize;
 
     uint64_t exampleSizeInBytes = exampleDescriptor.getArraySizeInBytes();
@@ -26,19 +27,22 @@ LocalBatchLoader::LocalBatchLoader(set<string> shardPaths,
         ExampleType::TRAIN,
         ThorImplementation::TensorDescriptor(exampleDescriptor.getDataType(), exampleDescriptor.getDimensions()),
         ThorImplementation::TensorDescriptor(labelDescriptor.getDataType(), labelDescriptor.getDimensions()),
-        batchSize);
+        batchSize,
+        batchQueueDepth);
     batchAssemblerValidate = make_shared<BatchAssembler>(
         shards,
         ExampleType::VALIDATE,
         ThorImplementation::TensorDescriptor(exampleDescriptor.getDataType(), exampleDescriptor.getDimensions()),
         ThorImplementation::TensorDescriptor(labelDescriptor.getDataType(), labelDescriptor.getDimensions()),
-        batchSize);
+        batchSize,
+        batchQueueDepth);
     batchAssemblerTest = make_shared<BatchAssembler>(
         shards,
         ExampleType::TEST,
         ThorImplementation::TensorDescriptor(exampleDescriptor.getDataType(), exampleDescriptor.getDimensions()),
         ThorImplementation::TensorDescriptor(labelDescriptor.getDataType(), labelDescriptor.getDimensions()),
-        batchSize);
+        batchSize,
+        batchQueueDepth);
 }
 
 uint64_t LocalBatchLoader::getNextBatchNum(ExampleType exampleType) {
