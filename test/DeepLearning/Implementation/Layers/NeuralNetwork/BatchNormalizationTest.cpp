@@ -714,6 +714,195 @@ TEST(BatchNormalization, DirectForwardInferenceSpatialNumerical) {
     expectAllClose(actualRunningVariance, runningVariance, 2e-6f, 2e-6f, "runningVariance");
 }
 
+
+TEST(BatchNormalization, DirectForwardTrainingSpatial5DNumerical) {
+    const uint64_t batchSize = 2;
+    const uint64_t numChannels = 3;
+    const uint64_t depth = 2;
+    const uint64_t height = 2;
+    const uint64_t width = 3;
+    const uint64_t collapsedHeight = depth * height;
+    const DataType dataType = DataType::FP32;
+
+    mt19937 rng(9091);
+    const vector<float> inputValues = randomFloatVector(rng, batchSize * numChannels * depth * height * width, -1.25f, 1.25f);
+    const vector<float> weightValues = randomFloatVector(rng, numChannels, 0.5f, 1.5f);
+    const vector<float> biasValues = randomFloatVector(rng, numChannels, -0.4f, 0.4f);
+    const vector<float> runningMeanBefore = randomFloatVector(rng, numChannels, -0.3f, 0.3f);
+    const vector<float> runningVarianceBefore = randomFloatVector(rng, numChannels, 0.8f, 2.0f);
+
+    TensorDescriptor featureInDescriptor(dataType, {batchSize, numChannels, depth, height, width});
+    Tensor featureIn_h(cpuPlacement, featureInDescriptor);
+    writeCpuTensor(featureIn_h, inputValues);
+
+    NetworkInput ni(gpuPlacement, dataType, featureInDescriptor.getDimensions());
+    BatchNormalization bn(gpuPlacement, false, 0);
+    NetworkOutput no(cpuPlacement);
+
+    bn.setOptimizer("weights", make_shared<Adam>(4000, 0.001f, 0.9f, 0.999f, 1e-7f));
+    bn.setOptimizer("biases", make_shared<Adam>(4001, 0.001f, 0.9f, 0.999f, 1e-7f));
+
+    ni.connectToNextLayer(&bn);
+    bn.connectToNextLayer(&no);
+    compileAndInitialize(ni, bn, no);
+
+    ASSERT_EQ(bn.getParameter("weights")->getStorage().value().getDimensions(), (vector<uint64_t>{numChannels}));
+    ASSERT_EQ(bn.getParameter("biases")->getStorage().value().getDimensions(), (vector<uint64_t>{numChannels}));
+
+    Stream stream = bn.getStreams()[0];
+    setParameterTensor(bn.getParameter("weights"), weightValues, stream);
+    setParameterTensor(bn.getParameter("biases"), biasValues, stream);
+    setParameterTensor(bn.getParameter("running_mean"), runningMeanBefore, stream);
+    setParameterTensor(bn.getParameter("running_variance"), runningVarianceBefore, stream);
+
+    ni.forward(featureIn_h, false, batchSize);
+    no.getOutputReadyEvent().synchronize();
+
+    const vector<float> actualFeatureOut = readCpuTensor(no.getFeatureOutput().value());
+    const vector<float> actualRunningMean = readCpuTensor(copyTensorToCpu(bn.getParameter("running_mean")->getStorage().value(), stream));
+    const vector<float> actualRunningVariance =
+        readCpuTensor(copyTensorToCpu(bn.getParameter("running_variance")->getStorage().value(), stream));
+
+    const BatchNormForwardReference reference = batchNormForwardTrainingReference(inputValues,
+                                                                                  weightValues,
+                                                                                  biasValues,
+                                                                                  runningMeanBefore,
+                                                                                  runningVarianceBefore,
+                                                                                  batchSize,
+                                                                                  numChannels,
+                                                                                  collapsedHeight,
+                                                                                  width,
+                                                                                  1.0,
+                                                                                  bn.getEpsilon());
+
+    expectAllClose(actualFeatureOut, reference.featureOut, 3e-4f, 3e-4f, "featureOut5d");
+    expectAllClose(actualRunningMean, reference.runningMeanAfter, 3e-4f, 3e-4f, "runningMean5d");
+    expectAllClose(actualRunningVariance, reference.runningVarianceAfter, 3e-4f, 3e-4f, "runningVariance5d");
+}
+
+TEST(BatchNormalization, DirectBackwardSpatial5DNumerical) {
+    const uint64_t batchSize = 2;
+    const uint64_t numChannels = 2;
+    const uint64_t depth = 2;
+    const uint64_t height = 2;
+    const uint64_t width = 3;
+    const uint64_t collapsedHeight = depth * height;
+    const DataType dataType = DataType::FP32;
+
+    mt19937 rng(9092);
+    const vector<float> inputValues = randomFloatVector(rng, batchSize * numChannels * depth * height * width, -1.0f, 1.0f);
+    const vector<float> weightValues = randomFloatVector(rng, numChannels, -0.6f, 0.6f);
+    const vector<float> biasValues = randomFloatVector(rng, numChannels, -0.4f, 0.4f);
+    const vector<float> runningMeanBefore = randomFloatVector(rng, numChannels, -0.5f, 0.5f);
+    const vector<float> runningVarianceBefore = randomFloatVector(rng, numChannels, 0.5f, 2.0f);
+    const vector<float> errorInputValues = randomFloatVector(rng, batchSize * numChannels * depth * height * width, -0.75f, 0.75f);
+
+    TensorDescriptor featureInDescriptor(dataType, {batchSize, numChannels, depth, height, width});
+    Tensor featureIn_h(cpuPlacement, featureInDescriptor);
+    writeCpuTensor(featureIn_h, inputValues);
+
+    NetworkInput ni(gpuPlacement, dataType, featureInDescriptor.getDimensions());
+    GradientRivet gr1, gr2;
+    BatchNormalization bn(gpuPlacement, false, 0);
+    NetworkOutput no(cpuPlacement);
+
+    shared_ptr<Adam> adamWeights = make_shared<Adam>(5100, 0.001f, 0.9f, 0.999f, 1e-7f);
+    shared_ptr<Adam> adamBiases = make_shared<Adam>(5101, 0.001f, 0.9f, 0.999f, 1e-7f);
+    bn.setOptimizer("weights", adamWeights);
+    bn.setOptimizer("biases", adamBiases);
+
+    ni.connectToNextLayer(&gr1);
+    gr1.connectToNextLayer(&bn);
+    bn.connectToNextLayer(&gr2);
+    gr2.connectToNextLayer(&no);
+
+    ni.compile();
+    gr1.compile();
+    bn.compile();
+    gr2.compile();
+    no.compile();
+    ni.initialize();
+    gr1.initialize();
+    bn.initialize();
+    gr2.initialize();
+    no.initialize();
+
+    Stream stream = bn.getStreams()[0];
+    setParameterTensor(bn.getParameter("weights"), weightValues, stream);
+    setParameterTensor(bn.getParameter("biases"), biasValues, stream);
+    setParameterTensor(bn.getParameter("running_mean"), runningMeanBefore, stream);
+    setParameterTensor(bn.getParameter("running_variance"), runningVarianceBefore, stream);
+
+    ni.forward(featureIn_h, false, batchSize);
+    no.getOutputReadyEvent().synchronize();
+
+    ASSERT_GT(bn.getErrorInputs().size(), 0);
+    ASSERT_TRUE(bn.getErrorInputs()[0].has_value());
+    ASSERT_GT(bn.getErrorOutputs().size(), 0);
+    ASSERT_TRUE(bn.getErrorOutputs()[0].has_value());
+    ASSERT_TRUE(bn.getGradientUpdateStream().has_value());
+
+    Tensor bnErrorInput = bn.getErrorInputs()[0].value();
+    Tensor bnErrorOutput = bn.getErrorOutputs()[0].value();
+    Stream gradientUpdateStream = bn.getGradientUpdateStream().value();
+
+    Tensor bnErrorInput_h = bnErrorInput.clone(cpuPlacement);
+    writeCpuTensor(bnErrorInput_h, errorInputValues);
+    bnErrorInput.copyFromAsync(bnErrorInput_h, stream);
+    bn.backward(bnErrorInput, batchSize);
+
+    Tensor bnErrorOutput_h = copyTensorToCpu(bnErrorOutput, gradientUpdateStream);
+    ASSERT_TRUE(adamWeights->getWeightsGradient().has_value());
+    ASSERT_TRUE(adamBiases->getWeightsGradient().has_value());
+    Tensor weightsGrad_h = copyTensorToCpu(adamWeights->getWeightsGradient().value(), gradientUpdateStream);
+    Tensor biasesGrad_h = copyTensorToCpu(adamBiases->getWeightsGradient().value(), gradientUpdateStream);
+    Tensor weightsAfter_h = copyTensorToCpu(bn.getParameter("weights")->getStorage().value(), gradientUpdateStream);
+    Tensor biasesAfter_h = copyTensorToCpu(bn.getParameter("biases")->getStorage().value(), gradientUpdateStream);
+    Tensor weightsM_h = copyTensorToCpu(adamWeights->getOptimizerParameterTensor("m"), gradientUpdateStream);
+    Tensor weightsV_h = copyTensorToCpu(adamWeights->getOptimizerParameterTensor("v"), gradientUpdateStream);
+    Tensor biasesM_h = copyTensorToCpu(adamBiases->getOptimizerParameterTensor("m"), gradientUpdateStream);
+    Tensor biasesV_h = copyTensorToCpu(adamBiases->getOptimizerParameterTensor("v"), gradientUpdateStream);
+
+    const vector<float> actualErrorOut = readCpuTensor(bnErrorOutput_h);
+    const vector<float> actualWeightsGrad = readCpuTensor(weightsGrad_h);
+    const vector<float> actualBiasesGrad = readCpuTensor(biasesGrad_h);
+    const vector<float> actualWeightsAfter = readCpuTensor(weightsAfter_h);
+    const vector<float> actualBiasesAfter = readCpuTensor(biasesAfter_h);
+    const vector<float> actualWeightsM = readCpuTensor(weightsM_h);
+    const vector<float> actualWeightsV = readCpuTensor(weightsV_h);
+    const vector<float> actualBiasesM = readCpuTensor(biasesM_h);
+    const vector<float> actualBiasesV = readCpuTensor(biasesV_h);
+
+    const float lossScalingFactor = Loss::getLossScalingFactor();
+    const BatchNormDirectBackwardReference reference = computeBatchNormDirectBackwardReference(inputValues,
+                                                                                               weightValues,
+                                                                                               biasValues,
+                                                                                               runningMeanBefore,
+                                                                                               runningVarianceBefore,
+                                                                                               errorInputValues,
+                                                                                               batchSize,
+                                                                                               numChannels,
+                                                                                               collapsedHeight,
+                                                                                               width,
+                                                                                               1.0,
+                                                                                               bn.getEpsilon(),
+                                                                                               lossScalingFactor,
+                                                                                               0.001f,
+                                                                                               0.9f,
+                                                                                               0.999f,
+                                                                                               1e-7f);
+
+    expectAllClose(actualErrorOut, reference.errorOut, 8e-4f, 8e-4f, "errorOut5d");
+    expectAllClose(actualWeightsGrad, reference.weightsGrad, 8e-4f, 8e-4f, "weightsGrad5d");
+    expectAllClose(actualBiasesGrad, reference.biasesGrad, 8e-4f, 8e-4f, "biasesGrad5d");
+    expectAllClose(actualWeightsM, reference.weightsM, 8e-4f, 8e-4f, "weightsM5d");
+    expectAllClose(actualWeightsV, reference.weightsV, 8e-4f, 8e-4f, "weightsV5d");
+    expectAllClose(actualBiasesM, reference.biasesM, 8e-4f, 8e-4f, "biasesM5d");
+    expectAllClose(actualBiasesV, reference.biasesV, 8e-4f, 8e-4f, "biasesV5d");
+    expectAllClose(actualWeightsAfter, reference.weightsAfter, 8e-4f, 8e-4f, "weightsAfter5d");
+    expectAllClose(actualBiasesAfter, reference.biasesAfter, 8e-4f, 8e-4f, "biasesAfter5d");
+}
+
 TEST(BatchNormalization, DirectBackwardSpatialNumerical) {
     const uint64_t batchSize = 3;
     const uint64_t numChannels = 2;

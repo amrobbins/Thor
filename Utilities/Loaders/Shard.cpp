@@ -1,12 +1,21 @@
 #include "Utilities/Loaders/Shard.h"
 #include "Utilities/Expression/CudaHelpers.h"
 #include "DeepLearning/Implementation/ThorError.h"
+#include "Utilities/TarFile/UringDirect.h"
+
+#include <algorithm>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+#include <stdexcept>
 
 using std::mutex;
 using std::string;
 using std::thread;
 
 Shard::Shard() { open = false; }
+
+Shard::~Shard() = default;
 
 void Shard::createShard(string filename,
                         uint64_t numTrainExamples,
@@ -85,6 +94,7 @@ void Shard::createShard(string filename,
 }
 
 void Shard::openShard(string filename) {
+    this->filename = filename;
     mappedFile = boost::interprocess::managed_mapped_file(boost::interprocess::open_only, filename.c_str());
     trainData = mappedFile.find<file_vector_t>("train").first;
     validateData = mappedFile.find<file_vector_t>("validate").first;
@@ -160,35 +170,94 @@ void Shard::writeExample(uint8_t *buffer, const string &label, const string &fil
     }
 }
 
-void Shard::loadExample(uint8_t *buffer, string &label, string &filename, ExampleType exampleType, uint64_t exampleIndex) {
+ShardExampleReadRequest Shard::getExampleReadRequest(ExampleType exampleType, uint64_t exampleIndex) {
     THOR_THROW_IF_FALSE(isOpen());
-    THOR_THROW_IF_FALSE(buffer != nullptr);
 
-    uint8_t *data;
+    file_vector_t *data = nullptr;
+    file_string_vector_t *labels = nullptr;
+    file_string_vector_t *filenames = nullptr;
+
     if (exampleType == ExampleType::TRAIN) {
-        uint64_t numExamples = trainData->size() / exampleSizeInBytes;
-        THOR_THROW_IF_FALSE(exampleIndex < numExamples);
-        data = trainData->data();
-        label = (*trainLabels)[exampleIndex].c_str();
-        filename = (*trainFilenames)[exampleIndex].c_str();
+        data = trainData;
+        labels = trainLabels;
+        filenames = trainFilenames;
     } else if (exampleType == ExampleType::VALIDATE) {
-        uint64_t numExamples = validateData->size() / exampleSizeInBytes;
-        THOR_THROW_IF_FALSE(exampleIndex < numExamples);
-        data = validateData->data();
-        label = (*validateLabels)[exampleIndex].c_str();
-        filename = (*validateFilenames)[exampleIndex].c_str();
+        data = validateData;
+        labels = validateLabels;
+        filenames = validateFilenames;
     } else if (exampleType == ExampleType::TEST) {
-        uint64_t numExamples = testData->size() / exampleSizeInBytes;
-        THOR_THROW_IF_FALSE(exampleIndex < numExamples);
-        data = testData->data();
-        label = (*testLabels)[exampleIndex].c_str();
-        filename = (*testFilenames)[exampleIndex].c_str();
+        data = testData;
+        labels = testLabels;
+        filenames = testFilenames;
     } else {
         THOR_UNREACHABLE();
     }
 
-    uint8_t *exampleStart = data + (exampleIndex * exampleSizeInBytes);
-    memcpy(buffer, exampleStart, exampleSizeInBytes);
+    const uint64_t numExamples = data->size() / exampleSizeInBytes;
+    THOR_THROW_IF_FALSE(exampleIndex < numExamples);
+    THOR_THROW_IF_FALSE(labels->size() == numExamples);
+    THOR_THROW_IF_FALSE(filenames->size() == numExamples);
+
+    const auto baseAddress = reinterpret_cast<uintptr_t>(mappedFile.get_address());
+    const auto dataAddress = reinterpret_cast<uintptr_t>(data->data());
+    THOR_THROW_IF_FALSE(dataAddress >= baseAddress);
+
+    const uint64_t mappedDataOffsetBytes = dataAddress - baseAddress;
+    const uint64_t exampleOffsetBytes = mappedDataOffsetBytes + exampleIndex * exampleSizeInBytes;
+    THOR_THROW_IF_FALSE(exampleOffsetBytes + exampleSizeInBytes <= mappedFile.get_size());
+
+    ShardExampleReadRequest request;
+    // managed_mapped_file::get_address() is Boost's real mapped-region base.
+    // Object pointers returned from the managed segment are therefore already
+    // file-offset-relative to that base. Do not add Boost's internal
+    // ManagedOpenOrCreateUserOffset here; that would double-count the header
+    // gap and shift every cached io_uring payload read forward.
+    request.fileOffsetBytes = exampleOffsetBytes;
+    request.numBytes = exampleSizeInBytes;
+    request.label = (*labels)[exampleIndex].c_str();
+    request.filename = (*filenames)[exampleIndex].c_str();
+    return request;
+}
+
+void Shard::loadExample(uint8_t *buffer, string &label, string &filename, ExampleType exampleType, uint64_t exampleIndex) {
+    THOR_THROW_IF_FALSE(buffer != nullptr);
+
+    ShardExampleReadRequest request = getExampleReadRequest(exampleType, exampleIndex);
+    readExamplePayloadCached(buffer, request.fileOffsetBytes);
+    label = std::move(request.label);
+    filename = std::move(request.filename);
+}
+
+void Shard::readExamplePayloadCached(uint8_t *buffer, uint64_t fileOffsetBytes) {
+    THOR_THROW_IF_FALSE(isOpen());
+    THOR_THROW_IF_FALSE(buffer != nullptr);
+
+    std::unique_lock<std::mutex> lck(cachedReaderMtx);
+    if (!cachedReader) {
+        cachedReader = std::make_unique<UringDirect>(64);
+        cachedReader->registerCachedLoadFile(this->filename);
+    }
+
+    uint64_t bytesDone = 0;
+    while (bytesDone < exampleSizeInBytes) {
+        const uint64_t remaining = exampleSizeInBytes - bytesDone;
+        const uint32_t chunkBytes = static_cast<uint32_t>(
+            std::min<uint64_t>(remaining, static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())));
+
+        while (!cachedReader->submitReadCached(buffer + bytesDone, fileOffsetBytes + bytesDone, chunkBytes)) {
+            cachedReader->submit();
+        }
+
+        cachedReader->submit();
+        UringDirect::Completion completion = cachedReader->waitCompletionInOrder();
+        if (completion.responseCode < 0) {
+            throw std::runtime_error("cached io_uring read failed for shard '" + this->filename + "': " +
+                                     std::strerror(-completion.responseCode));
+        }
+        THOR_THROW_IF_FALSE(completion.responseCode > 0);
+        THOR_THROW_IF_FALSE(static_cast<uint64_t>(completion.responseCode) <= chunkBytes);
+        bytesDone += static_cast<uint64_t>(completion.responseCode);
+    }
 }
 
 void Shard::loadExampleAsync(

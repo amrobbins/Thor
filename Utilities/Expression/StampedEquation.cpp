@@ -12,11 +12,15 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <type_traits>
+#include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -67,6 +71,63 @@ static CubScanOp toCubScanOp(ScanOp op) {
 }
 
 static bool isArgScanOp(ScanOp op) { return op == ScanOp::ArgMin || op == ScanOp::ArgMax; }
+
+
+static bool thorMatmulDiagnosticsEnabled() {
+    const char *value = std::getenv("THOR_MATMUL_DIAGNOSTICS");
+    return value != nullptr && value[0] != '\0' && std::string(value) != "0";
+}
+
+static bool thorMatmulDiagnosticsVerbose() {
+    const char *value = std::getenv("THOR_MATMUL_DIAGNOSTICS");
+    if (value == nullptr) {
+        return false;
+    }
+    const std::string mode(value);
+    return mode == "2" || mode == "verbose" || mode == "VERBOSE" || mode == "full" || mode == "FULL";
+}
+
+static const char *matmulExprOpName(ExprOp op) {
+    switch (op) {
+        case ExprOp::MATMUL:
+            return "MATMUL";
+        case ExprOp::GEMM:
+            return "GEMM";
+        default:
+            return "OTHER";
+    }
+}
+
+static const char *matmulEpilogueName(MatmulEpilogue epilogue) {
+    switch (epilogue) {
+        case MatmulEpilogue::Default:
+            return "Default";
+        case MatmulEpilogue::Relu:
+            return "Relu";
+        case MatmulEpilogue::Gelu:
+            return "Gelu";
+    }
+    return "Unknown";
+}
+
+static const char *matmulBackwardEpilogueName(MatmulBackwardEpilogue epilogue) {
+    switch (epilogue) {
+        case MatmulBackwardEpilogue::Default:
+            return "Default";
+        case MatmulBackwardEpilogue::DRelu:
+            return "DRelu";
+        case MatmulBackwardEpilogue::DGelu:
+            return "DGelu";
+    }
+    return "Unknown";
+}
+
+static bool shouldPrintStampedMatmulDiagnosticOnce(const std::string &key) {
+    static std::mutex mutex;
+    static std::unordered_set<std::string> printed;
+    std::lock_guard<std::mutex> lock(mutex);
+    return printed.insert(key).second;
+}
 
 static CubArgScanOp toCubArgScanOp(ScanOp op) {
     switch (op) {
@@ -3105,6 +3166,8 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
 
     auto built = std::make_shared<BuiltMatmul>(key);
     bool kernelWillRunOnGpu = false;
+    const bool print_verbose_matmul_diagnostics = thorMatmulDiagnosticsVerbose();
+    const char *diagnostic_path = "unknown";
 
     const bool use_cublaslt_epilogue_wrapper =
         use_bias_epilogue || compiled_matmul->epilogue != MatmulEpilogue::Default || use_backward_epilogue;
@@ -3120,7 +3183,9 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
                                                                            ld_d,
                                                                            compiled_matmul->transpose_lhs,
                                                                            compiled_matmul->transpose_rhs,
-                                                                           dataTypes);
+                                                                           dataTypes,
+                                                                           print_verbose_matmul_diagnostics);
+        diagnostic_path = "optimal-matmul-picker";
         built->workspace_bytes = CublasMatrixMultiply::instance().getMatrixMultiplyWorkspaceSizeInBytes(device_num,
                                                                                                         a_rows,
                                                                                                         a_cols,
@@ -3137,6 +3202,7 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
         // Fused cuBLASLt epilogues use the heuristic path directly for now.
         // They have no workspace requirement in this staged wrapper; the stage-kind
         // optimization still removes the separate expression FusedKernel.
+        diagnostic_path = "epilogue-heuristic-wrapper";
         kernelWillRunOnGpu = true;
         built->workspace_bytes = 0;
     } else {
@@ -3152,7 +3218,9 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
                                                                  compiled_matmul->transpose_lhs,
                                                                  compiled_matmul->transpose_rhs,
                                                                  compiled_matmul->transpose_aux,
-                                                                 dataTypes);
+                                                                 dataTypes,
+                                                                 print_verbose_matmul_diagnostics);
+        diagnostic_path = "optimal-gemm-picker";
         built->workspace_bytes = CublasMatrixMultiply::instance().getGemmWorkspaceSizeInBytes(device_num,
                                                                                               a_rows,
                                                                                               a_cols,
@@ -3171,6 +3239,51 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
 
     if (!kernelWillRunOnGpu) {
         throw std::runtime_error("No GPU kernel available for the staged matmul/gemm configuration.");
+    }
+
+    if (thorMatmulDiagnosticsEnabled()) {
+        std::ostringstream diagnostic_key;
+        diagnostic_key << "build:" << diagnostic_path << ':' << device_num << ':' << matmulExprOpName(compiled_matmul->op) << ':'
+                       << a_rows << 'x' << a_cols << ':' << b_rows << 'x' << b_cols << ":ld=" << ld_a << ',' << ld_b << ','
+                       << ld_c << ',' << ld_d << ":trans=" << static_cast<int>(compiled_matmul->transpose_lhs)
+                       << static_cast<int>(compiled_matmul->transpose_rhs) << static_cast<int>(compiled_matmul->transpose_aux)
+                       << ":bias=" << static_cast<int>(use_bias_epilogue) << ":epilogue="
+                       << matmulEpilogueName(compiled_matmul->epilogue) << ":backward_epilogue="
+                       << matmulBackwardEpilogueName(compiled_matmul->backward_epilogue) << ":bgrad="
+                       << static_cast<int>(bgrad_output.has_value()) << ":dtypes=" << TensorDescriptor::getElementTypeName(dataTypes.A)
+                       << ',' << TensorDescriptor::getElementTypeName(dataTypes.B) << ','
+                       << TensorDescriptor::getElementTypeName(dataTypes.C) << ',' << TensorDescriptor::getElementTypeName(dataTypes.D)
+                       << ',' << TensorDescriptor::getElementTypeName(dataTypes.compute);
+        if (shouldPrintStampedMatmulDiagnosticOnce(diagnostic_key.str())) {
+            std::fprintf(stderr,
+                         "THOR_MATMUL_DIAGNOSTIC build path=%s op=%s gpu=%d A=%dx%d B=%dx%d ld=%d,%d,%d,%d "
+                         "transpose=%d,%d,%d bias_epilogue=%d epilogue=%s backward_epilogue=%s bgrad_epilogue=%d "
+                         "workspace_bytes=%zu dtypes=%s,%s,%s,%s compute=%s\n",
+                         diagnostic_path,
+                         matmulExprOpName(compiled_matmul->op),
+                         device_num,
+                         a_rows,
+                         a_cols,
+                         b_rows,
+                         b_cols,
+                         ld_a,
+                         ld_b,
+                         ld_c,
+                         ld_d,
+                         static_cast<int>(compiled_matmul->transpose_lhs),
+                         static_cast<int>(compiled_matmul->transpose_rhs),
+                         static_cast<int>(compiled_matmul->transpose_aux),
+                         static_cast<int>(use_bias_epilogue),
+                         matmulEpilogueName(compiled_matmul->epilogue),
+                         matmulBackwardEpilogueName(compiled_matmul->backward_epilogue),
+                         static_cast<int>(bgrad_output.has_value()),
+                         built->workspace_bytes,
+                         TensorDescriptor::getElementTypeName(dataTypes.A).c_str(),
+                         TensorDescriptor::getElementTypeName(dataTypes.B).c_str(),
+                         TensorDescriptor::getElementTypeName(dataTypes.C).c_str(),
+                         TensorDescriptor::getElementTypeName(dataTypes.D).c_str(),
+                         TensorDescriptor::getElementTypeName(dataTypes.compute).c_str());
+        }
     }
 
     builtMatmulCache.put(key, built);

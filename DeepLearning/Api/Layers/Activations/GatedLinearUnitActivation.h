@@ -17,7 +17,7 @@ class GatedLinearUnitActivation : public Activation {
     explicit GatedLinearUnitActivation(GateKind gateKind) : gateKind(gateKind) {}
 
    public:
-    ~GatedLinearUnitActivation() override = default;
+    ~GatedLinearUnitActivation() override;
 
     using Activation::addToNetwork;
 

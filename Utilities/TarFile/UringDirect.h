@@ -293,53 +293,18 @@ class UringDirect {
 
     // Register a shard file for reading via O_DIRECT.
     // Replaces any previously registered file.
-    void registerLoadFile(const std::string& path) {
-        // Unregister/close previous
-        if (fileRegistered_) {
-            int rc = io_uring_unregister_files(&ring_);
-            if (rc < 0) {
-                throw std::runtime_error(std::string("io_uring_unregister_files failed: ") + std::strerror(-rc));
-            }
-            fileRegistered_ = false;
-        }
-        if (fd_ >= 0) {
-            close(fd_);
-            fd_ = -1;
-        }
+    void registerLoadFile(const std::string& path) { registerLoadFileImpl(path, /*useDirect=*/true); }
 
-        int flags = O_RDONLY | O_CLOEXEC | O_DIRECT;
-        fd_ = open(path.c_str(), flags);
-        if (fd_ < 0) {
-            throw std::runtime_error("open(O_DIRECT, RDONLY) failed for '" + path + "': " + std::strerror(errno));
-        }
+    // Register a file for cached reads. This intentionally does NOT use O_DIRECT: dataset
+    // examples are good page-cache residents, and the batch loader wants the kernel cache
+    // rather than bypassing it. The fd is still registered with io_uring so submissions can
+    // use IOSQE_FIXED_FILE.
+    void registerCachedLoadFile(const std::string& path) { registerLoadFileImpl(path, /*useDirect=*/false); }
 
-        // Optional sanity: regular file
-        struct stat st{};
-        if (::fstat(fd_, &st) != 0) {
-            int e = errno;
-            close(fd_);
-            fd_ = -1;
-            throw std::runtime_error("fstat failed for '" + path + "': " + std::strerror(e));
-        }
-        if (!S_ISREG(st.st_mode)) {
-            close(fd_);
-            fd_ = -1;
-            throw std::runtime_error("registerReadFile: path is not a regular file: '" + path + "'");
-        }
-
-        // Register as fixed file index 0
-        int fdArr[1] = {fd_};
-        int rc = io_uring_register_files(&ring_, fdArr, 1);
-        if (rc < 0) {
-            int e = -rc;
-            close(fd_);
-            fd_ = -1;
-            throw std::runtime_error(std::string("io_uring_register_files failed: ") + std::strerror(e));
-        }
-        fileRegistered_ = true;
-    }
-
-    // Submit an async read into a registered fixed buffer.
+    // Submit an async read into a registered fixed buffer. This is the
+    // direct-I/O style read path and intentionally keeps the same 4k
+    // offset/length constraints as O_DIRECT users. Cached dataset-example
+    // reads with arbitrary byte counts should use submitReadCached().
     //
     // Returns false if SQ ring is full (caller should submit/drain and retry).
     bool submitReadFixed(unsigned bufIndex, std::uint64_t fileOffsetBytes, std::uint32_t lenBytes, std::uint32_t bufOffsetBytes) {
@@ -383,6 +348,37 @@ class UringDirect {
         sqe->user_data = nextSeq();
 
         return true;  // caller batches and calls submit()
+    }
+
+    // Submit an async cached read into ordinary caller-owned memory.
+    //
+    // Unlike submitReadFixed(), this path does not require registered buffers and does not
+    // impose O_DIRECT alignment constraints. The caller must keep `buf` alive until the
+    // completion is delivered.
+    bool submitReadCached(void* buf, std::uint64_t fileOffsetBytes, std::uint32_t lenBytes) {
+        if (!fileRegistered_) {
+            throw std::runtime_error("submitReadCached: no registered file");
+        }
+        if (buf == nullptr) {
+            throw std::runtime_error("submitReadCached: null buffer");
+        }
+        if (lenBytes == 0) {
+            throw std::runtime_error("submitReadCached: lenBytes is 0");
+        }
+
+        io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
+        if (!sqe)
+            return false;
+
+        io_uring_prep_read(sqe,
+                           /*fd=*/0,
+                           /*buf=*/buf,
+                           /*nbytes=*/lenBytes,
+                           /*offset=*/static_cast<off_t>(fileOffsetBytes));
+        sqe->flags |= IOSQE_FIXED_FILE;
+        sqe->user_data = nextSeq();
+
+        return true;
     }
 
     int submit() {
@@ -635,6 +631,56 @@ class UringDirect {
     }
 
    private:
+    void registerLoadFileImpl(const std::string& path, bool useDirect) {
+        // Unregister/close previous
+        if (fileRegistered_) {
+            int rc = io_uring_unregister_files(&ring_);
+            if (rc < 0) {
+                throw std::runtime_error(std::string("io_uring_unregister_files failed: ") + std::strerror(-rc));
+            }
+            fileRegistered_ = false;
+        }
+        if (fd_ >= 0) {
+            close(fd_);
+            fd_ = -1;
+        }
+
+        int flags = O_RDONLY | O_CLOEXEC;
+        if (useDirect)
+            flags |= O_DIRECT;
+
+        fd_ = open(path.c_str(), flags);
+        if (fd_ < 0) {
+            const char* mode = useDirect ? "open(O_DIRECT, RDONLY)" : "open(RDONLY)";
+            throw std::runtime_error(std::string(mode) + " failed for '" + path + "': " + std::strerror(errno));
+        }
+
+        // Optional sanity: regular file
+        struct stat st{};
+        if (::fstat(fd_, &st) != 0) {
+            int e = errno;
+            close(fd_);
+            fd_ = -1;
+            throw std::runtime_error("fstat failed for '" + path + "': " + std::strerror(e));
+        }
+        if (!S_ISREG(st.st_mode)) {
+            close(fd_);
+            fd_ = -1;
+            throw std::runtime_error("registerReadFile: path is not a regular file: '" + path + "'");
+        }
+
+        // Register as fixed file index 0
+        int fdArr[1] = {fd_};
+        int rc = io_uring_register_files(&ring_, fdArr, 1);
+        if (rc < 0) {
+            int e = -rc;
+            close(fd_);
+            fd_ = -1;
+            throw std::runtime_error(std::string("io_uring_register_files failed: ") + std::strerror(e));
+        }
+        fileRegistered_ = true;
+    }
+
     static bool isAligned(const void* p, std::size_t align) {
         auto v = reinterpret_cast<std::uintptr_t>(p);
         return (v % align) == 0;

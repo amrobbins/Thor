@@ -1,5 +1,11 @@
 #include "Utilities/Loaders/BatchAssembler.h"
 #include "DeepLearning/Implementation/ThorError.h"
+#include "Utilities/TarFile/UringDirect.h"
+
+#include <cstring>
+#include <deque>
+#include <limits>
+#include <stdexcept>
 
 using ThorImplementation::DataType;
 using ThorImplementation::Tensor;
@@ -111,17 +117,77 @@ void BatchAssembler::close() {
 }
 
 void BatchAssembler::shardReaderThread(uint64_t shard) {
-    bool queueOpen;
-    LabeledExample labeledExample;
-    labeledExample.data.resize(shards[shard]->getExampleSizeInBytes());
+    struct PendingRead {
+        LabeledExample labeledExample;
+        uint64_t expectedBytes = 0;
+    };
 
-    while (1) {
-        shards[shard]->loadExample(
-            labeledExample.data.data(), labeledExample.label, labeledExample.filename, exampleType, randomizers[shard]->getRandomNumber());
+    constexpr uint64_t MAX_IN_FLIGHT_READS = 32;
 
-        queueOpen = shardQueues[shard]->push(labeledExample);
-        if (!queueOpen)
+    const uint64_t exampleSizeInBytes = shards[shard]->getExampleSizeInBytes();
+    THOR_THROW_IF_FALSE(exampleSizeInBytes <= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()));
+
+    UringDirect cachedReader(64);
+    cachedReader.registerCachedLoadFile(shards[shard]->getFilename());
+
+    std::deque<PendingRead> pendingReads;
+
+    auto submitOneRead = [&]() {
+        pendingReads.emplace_back();
+        PendingRead &pendingRead = pendingReads.back();
+        pendingRead.labeledExample.data.resize(exampleSizeInBytes);
+
+        ShardExampleReadRequest request = shards[shard]->getExampleReadRequest(exampleType, randomizers[shard]->getRandomNumber());
+        THOR_THROW_IF_FALSE(request.numBytes == exampleSizeInBytes);
+        pendingRead.expectedBytes = request.numBytes;
+        pendingRead.labeledExample.label = std::move(request.label);
+        pendingRead.labeledExample.filename = std::move(request.filename);
+
+        while (!cachedReader.submitReadCached(pendingRead.labeledExample.data.data(),
+                                              request.fileOffsetBytes,
+                                              static_cast<uint32_t>(request.numBytes))) {
+            cachedReader.submit();
+        }
+    };
+
+    auto waitOneRead = [&]() {
+        THOR_THROW_IF_FALSE(!pendingReads.empty());
+        UringDirect::Completion completion = cachedReader.waitCompletionInOrder();
+        PendingRead pendingRead = std::move(pendingReads.front());
+        pendingReads.pop_front();
+
+        if (completion.responseCode < 0) {
+            throw std::runtime_error("cached io_uring batch-loader read failed for shard '" + shards[shard]->getFilename() +
+                                     "': " + std::strerror(-completion.responseCode));
+        }
+        THOR_THROW_IF_FALSE(static_cast<uint64_t>(completion.responseCode) == pendingRead.expectedBytes);
+        return pendingRead.labeledExample;
+    };
+
+    auto drainPendingReads = [&]() {
+        cachedReader.submit();
+        while (!pendingReads.empty()) {
+            (void)waitOneRead();
+        }
+    };
+
+    while (true) {
+        while (pendingReads.size() < MAX_IN_FLIGHT_READS) {
+            if (!shardQueues[shard]->isOpen()) {
+                drainPendingReads();
+                return;
+            }
+            submitOneRead();
+        }
+
+        cachedReader.submit();
+        LabeledExample labeledExample = waitOneRead();
+
+        bool queueOpen = shardQueues[shard]->push(labeledExample);
+        if (!queueOpen) {
+            drainPendingReads();
             return;
+        }
     }
 }
 

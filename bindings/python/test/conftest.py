@@ -28,6 +28,8 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "training_integration: opt-in end-to-end model training tests")
     config.addinivalue_line("markers", "imagenet100_integration: heavyweight ImageNet-100 training integration tests")
     config.addinivalue_line("markers", "ucf101_3d_integration: heavyweight training integration")
+    config.addinivalue_line("markers", "digits_dense_integration: heavyweight training integration")
+    config.addinivalue_line("markers", "mri_3d_integration: heavyweight training integration")
 
 
 def pytest_runtest_setup(item):

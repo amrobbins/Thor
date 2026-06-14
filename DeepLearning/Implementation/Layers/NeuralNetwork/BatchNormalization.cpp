@@ -26,7 +26,7 @@ class BNParameter final : public PhysicalParameter {
 
     void createStorage(const StorageContext& context) override {
         const Tensor& inputTensor = context.getFeatureInput();
-        THOR_THROW_IF_FALSE(inputTensor.getDimensions().size() == 2 || inputTensor.getDimensions().size() == 4);
+        THOR_THROW_IF_FALSE(inputTensor.getDimensions().size() == 2 || inputTensor.getDimensions().size() == 4 || inputTensor.getDimensions().size() == 5);
         const uint64_t channels = inputTensor.getDimensions()[1];
         DataType resolvedDataType;
         if (storageDataType.has_value())
@@ -106,11 +106,18 @@ static std::vector<int> packedNchwDimsMin4(const Tensor& tensor) {
                 checkedCudnnDim(dims[2], "H"),
                 checkedCudnnDim(dims[3], "W")};
     }
-    throw std::runtime_error("BatchNormalization requires rank-2 [N,C] or rank-4 [N,C,H,W] input tensors.");
+    if (dims.size() == 5) {
+        return {checkedCudnnDim(dims[0], "N"),
+                checkedCudnnDim(dims[1], "C"),
+                checkedCudnnDim(dims[2], "D"),
+                checkedCudnnDim(dims[3], "H"),
+                checkedCudnnDim(dims[4], "W")};
+    }
+    throw std::runtime_error("BatchNormalization requires rank-2 [N,C], rank-4 [N,C,H,W], or rank-5 [N,C,D,H,W] input tensors.");
 }
 
 static std::vector<int> packedStridesForDims(const std::vector<int>& dims) {
-    THOR_THROW_IF_FALSE(dims.size() == 4);
+    THOR_THROW_IF_FALSE(dims.size() >= 4);
     std::vector<int> strides(dims.size(), 1);
     for (int i = static_cast<int>(dims.size()) - 2; i >= 0; --i) {
         strides[static_cast<size_t>(i)] = strides[static_cast<size_t>(i + 1)] * dims[static_cast<size_t>(i + 1)];
@@ -132,10 +139,12 @@ static ScopedCudnnTensorDescriptor makePackedNchwTensorDescriptor(const Tensor& 
     return descriptor;
 }
 
-static ScopedCudnnTensorDescriptor makeBatchNormStatsDescriptor(uint64_t channels) {
+static ScopedCudnnTensorDescriptor makeBatchNormStatsDescriptor(uint64_t channels, size_t descriptorRank) {
+    THOR_THROW_IF_FALSE(descriptorRank == 4 || descriptorRank == 5);
     const int c = checkedCudnnDim(channels, "C");
-    const std::vector<int> dims = {1, c, 1, 1};
-    const std::vector<int> strides = {c, 1, 1, 1};
+    std::vector<int> dims(descriptorRank, 1);
+    dims[1] = c;
+    const std::vector<int> strides = packedStridesForDims(dims);
     ScopedCudnnTensorDescriptor descriptor;
     CUDNN_CHECK(cudnnSetTensorNdDescriptor(
         descriptor.get(), CUDNN_DATA_FLOAT, static_cast<int>(dims.size()), dims.data(), strides.data()));
@@ -280,15 +289,23 @@ void BatchNormalization::compileImpl() {
     THOR_THROW_IF_FALSE(weights.getDimensions() == resultRunningVariance.getDimensions());
 
     const vector<uint64_t> inputDimensions = input.getDescriptor().getDimensions();
-    THOR_THROW_IF_FALSE(inputDimensions.size() == 2 || inputDimensions.size() == 4);
+    const vector<int> cudnnInputDimensions = packedNchwDimsMin4(input);
+    THOR_THROW_IF_FALSE(inputDimensions.size() == 2 || inputDimensions.size() == 4 || inputDimensions.size() == 5);
     batchSize = inputDimensions[0];
     numChannels = inputDimensions[1];
+    cudnnTensorRank = cudnnInputDimensions.size();
     if (inputDimensions.size() == 2) {
+        depth = 1;
         height = 1;
         width = 1;
-    } else {
+    } else if (inputDimensions.size() == 4) {
+        depth = 1;
         height = inputDimensions[2];
         width = inputDimensions[3];
+    } else {
+        depth = inputDimensions[2];
+        height = inputDimensions[3];
+        width = inputDimensions[4];
     }
 
     if (!isCudnnBatchNormDataType(input.getDataType())) {
@@ -352,7 +369,7 @@ void BatchNormalization::computeFeatureOut(uint32_t connectionNumber) {
 
     const ScopedCudnnTensorDescriptor xDesc = makePackedNchwTensorDescriptor(inputTensor.value());
     const ScopedCudnnTensorDescriptor yDesc = makePackedNchwTensorDescriptor(outputTensor.value());
-    const ScopedCudnnTensorDescriptor bnDesc = makeBatchNormStatsDescriptor(numChannels);
+    const ScopedCudnnTensorDescriptor bnDesc = makeBatchNormStatsDescriptor(numChannels, cudnnTensorRank);
 
     ScopedGpu scopedGpu(stream.getGpuNum());
     if (!isInferenceOnly()) {
@@ -429,7 +446,7 @@ std::optional<Event> BatchNormalization::computeErrorOutAccumulateWeightsGradien
     const ScopedCudnnTensorDescriptor xDesc = makePackedNchwTensorDescriptor(featureInputs[connectionNumber].value());
     const ScopedCudnnTensorDescriptor dyDesc = makePackedNchwTensorDescriptor(errorInputs[connectionNumber].value());
     const ScopedCudnnTensorDescriptor dxDesc = makePackedNchwTensorDescriptor(errorOut.value());
-    const ScopedCudnnTensorDescriptor bnDesc = makeBatchNormStatsDescriptor(numChannels);
+    const ScopedCudnnTensorDescriptor bnDesc = makeBatchNormStatsDescriptor(numChannels, cudnnTensorRank);
 
     const float betaParamDiff = clearWeightsGradientFirstIfFused ? BETA_CLEAR : BETA_ACCUMULATE;
 
