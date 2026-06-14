@@ -121,7 +121,7 @@ class Trainer::Builder {
     std::shared_ptr<Optimizer> optimizer_ = nullptr;
     std::optional<TrainingProgram> trainingProgram_{};
     TrainingRuntimeConfig runtimeConfig_{};
-    LineStatsColorMode statsColorMode_ = LineStatsColorMode::ALWAYS;
+    LineStatsColorMode statsColorMode_ = LineStatsColorMode::AUTO;
     std::shared_ptr<TrainingExecutor> executor_ = nullptr;
     std::shared_ptr<TrainingObserver> observer_ = nullptr;
 };
