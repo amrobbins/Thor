@@ -13,10 +13,10 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
+#include <exception>
 #include <map>
 #include <memory>
 #include <mutex>
-#include <exception>
 #include <optional>
 #include <set>
 #include <stdexcept>
@@ -175,15 +175,14 @@ void attachPlacementFallbackOptimizerIfNeeded(const TrainingRunRequest& request,
     }
 }
 
-std::map<std::string, ThorImplementation::Tensor> bindBatchInputs(
-    const StepExecutable& step,
-    const std::map<std::string, ThorImplementation::Tensor>& batchInput) {
+std::map<std::string, ThorImplementation::Tensor> bindBatchInputs(const StepExecutable& step,
+                                                                  const std::map<std::string, ThorImplementation::Tensor>& batchInput) {
     std::map<std::string, ThorImplementation::Tensor> bound;
     for (const TrainingInputBinding& binding : step.getResolvedInputBindings()) {
         auto it = batchInput.find(binding.getBatchInputName());
         if (it == batchInput.end()) {
-            throw std::runtime_error("Training batch is missing input '" + binding.getBatchInputName() +
-                                     "' required for network input '" + binding.getNetworkInputName() + "'.");
+            throw std::runtime_error("Training batch is missing input '" + binding.getBatchInputName() + "' required for network input '" +
+                                     binding.getNetworkInputName() + "'.");
         }
         bound.emplace(binding.getNetworkInputName(), it->second);
     }
@@ -195,7 +194,6 @@ void CUDART_CB completeNativeQueuedBatch(void* data) {
     std::shared_ptr<QueuedTrainingState> state = params->state;
     const uint64_t epochBatchNum = params->epochBatchNum;
     const uint64_t slotIndex = params->slotIndex;
-
 
     try {
         THOR_THROW_IF_FALSE(params->scalarStats.size() == state->scalarTensorNames.size());
@@ -490,9 +488,7 @@ class NativeQueuedEpochScheduler {
 
 }  // namespace
 
-void runNativeQueuedTraining(const TrainingRunRequest& request,
-                             TrainingObserver& observer,
-                             const NativeQueuedTrainingOptions& options) {
+void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver& observer, const NativeQueuedTrainingOptions& options) {
     THOR_THROW_IF_FALSE(request.network != nullptr);
     THOR_THROW_IF_FALSE(request.loader != nullptr);
     THOR_THROW_IF_FALSE(request.epochs > 0);
@@ -527,7 +523,10 @@ void runNativeQueuedTraining(const TrainingRunRequest& request,
         return elapsed.count();
     };
 
-    auto makeBaseSnapshot = [&](TrainingPhase phase, uint64_t epoch, uint64_t batchSize, uint64_t batchesPerEpoch,
+    auto makeBaseSnapshot = [&](TrainingPhase phase,
+                                uint64_t epoch,
+                                uint64_t batchSize,
+                                uint64_t batchesPerEpoch,
                                 const std::shared_ptr<QueuedTrainingState>& state) {
         TrainingStatsSnapshot snapshot;
         snapshot.networkName = placedNetwork->getNetworkName();
@@ -543,7 +542,8 @@ void runNativeQueuedTraining(const TrainingRunRequest& request,
     };
 
     if (request.runtime.statsEnabled) {
-        emitTrainingEvent(observer, request.runtime.statsEnabled,
+        emitTrainingEvent(observer,
+                          request.runtime.statsEnabled,
                           TrainingEvent::runStarted(makeBaseSnapshot(TrainingPhase::UNKNOWN, 0, batchSize, 0, nullptr)));
     }
 
@@ -570,18 +570,13 @@ void runNativeQueuedTraining(const TrainingRunRequest& request,
             state->numBatchesInEpoch = batchesPerEpoch;
 
             if (request.runtime.statsEnabled) {
-                emitTrainingEvent(observer, request.runtime.statsEnabled,
+                emitTrainingEvent(observer,
+                                  request.runtime.statsEnabled,
                                   TrainingEvent::epochStarted(makeBaseSnapshot(phase, humanEpoch, batchSize, batchesPerEpoch, state)));
             }
 
-            NativeQueuedEpochScheduler scheduler(placedNetwork,
-                                                 request.loader,
-                                                 plan,
-                                                 options,
-                                                 state,
-                                                 currentEpoch,
-                                                 batchesPerEpoch,
-                                                 exampleType);
+            NativeQueuedEpochScheduler scheduler(
+                placedNetwork, request.loader, plan, options, state, currentEpoch, batchesPerEpoch, exampleType);
             std::thread schedulingThread([scheduler = std::move(scheduler), state, batchNum, batchesToRun]() mutable {
                 try {
                     scheduler(batchNum, batchesToRun);
@@ -616,6 +611,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request,
             };
 
             auto previousBatchDone = std::chrono::high_resolution_clock::now();
+            bool haveCompletedBatchTimingInPhase = false;
             try {
                 while (true) {
                     BatchPopResult completedBatch = popBatchData(state);
@@ -646,23 +642,34 @@ void runNativeQueuedTraining(const TrainingRunRequest& request,
                         previousBatchDone = now;
 
                         double& averageBatchTime = (phase == TrainingPhase::TRAIN) ? averageTrainingBatchTime : averageValidationBatchTime;
-                        if (averageBatchTime < 0.0) {
-                            averageBatchTime = elapsed.count();
-                        } else {
-                            averageBatchTime = 0.05 * elapsed.count() + 0.95 * averageBatchTime;
+                        const double completedBatchTime = elapsed.count();
+                        double batchTimeForStats = completedBatchTime;
+                        if (haveCompletedBatchTimingInPhase) {
+                            if (averageBatchTime < 0.0) {
+                                averageBatchTime = completedBatchTime;
+                            } else {
+                                averageBatchTime = 0.25 * completedBatchTime + 0.75 * averageBatchTime;
+                            }
+                            batchTimeForStats = averageBatchTime;
+                        } else if (averageBatchTime > 0.0) {
+                            // The first completion in a phase includes queue fill and any loader/startup
+                            // latency before the pipeline reaches steady state.  Use it for the current
+                            // line only when no prior phase average exists; do not let it poison the EMA.
+                            batchTimeForStats = averageBatchTime;
                         }
+                        haveCompletedBatchTimingInPhase = true;
 
                         TrainingStatsSnapshot snapshot = makeBaseSnapshot(phase, humanEpoch, batchSize, batchesPerEpoch, state);
                         snapshot.stepInEpoch = batchNum + 1;
                         snapshot.step = (currentEpoch * batchesPerEpoch) + snapshot.stepInEpoch;
                         snapshot.samplesProcessed = snapshot.step * batchSize;
-                        if (averageBatchTime > 0.0) {
-                            snapshot.samplesPerSecond = static_cast<double>(batchSize) / averageBatchTime;
-                            snapshot.batchesPerSecond = 1.0 / averageBatchTime;
+                        if (batchTimeForStats > 0.0) {
+                            snapshot.samplesPerSecond = static_cast<double>(batchSize) / batchTimeForStats;
+                            snapshot.batchesPerSecond = 1.0 / batchTimeForStats;
                             snapshot.floatingPointOperationsPerBatch =
                                 (phase == TrainingPhase::TRAIN) ? trainingFlopsPerBatch : forwardFlopsPerBatch;
                             snapshot.floatingPointOperationsPerSecond =
-                                static_cast<double>(snapshot.floatingPointOperationsPerBatch) / averageBatchTime;
+                                static_cast<double>(snapshot.floatingPointOperationsPerBatch) / batchTimeForStats;
                         }
 
                         assignScalarStatsToSnapshot(snapshot, state->scalarTensorNames, completedBatch.scalarStats);
@@ -679,7 +686,8 @@ void runNativeQueuedTraining(const TrainingRunRequest& request,
             schedulingThread.join();
             throwIfQueuedTrainingStateFailed(state);
             if (request.runtime.statsEnabled) {
-                emitTrainingEvent(observer, request.runtime.statsEnabled,
+                emitTrainingEvent(observer,
+                                  request.runtime.statsEnabled,
                                   TrainingEvent::epochFinished(makeBaseSnapshot(phase, humanEpoch, batchSize, batchesPerEpoch, state)));
             }
         }
@@ -688,7 +696,8 @@ void runNativeQueuedTraining(const TrainingRunRequest& request,
     }
 
     if (request.runtime.statsEnabled) {
-        emitTrainingEvent(observer, request.runtime.statsEnabled,
+        emitTrainingEvent(observer,
+                          request.runtime.statsEnabled,
                           TrainingEvent::runFinished(makeBaseSnapshot(TrainingPhase::UNKNOWN, currentEpoch, batchSize, 0, nullptr)));
     }
 }
