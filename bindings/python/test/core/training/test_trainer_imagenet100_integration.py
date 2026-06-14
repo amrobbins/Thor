@@ -38,7 +38,7 @@ OBJECT_DETECTION_DATASET_URL = os.environ.get(
     "http://host.robots.ox.ac.uk/pascal/VOC/voc2012/VOCtrainval_11-May-2012.tar",
 )
 OBJECT_DETECTION_IMAGE_SIZE = int(os.environ.get("THOR_OBJECT_DETECTION_IMAGE_SIZE", "224"))
-OBJECT_DETECTION_BATCH_SIZE = int(os.environ.get("THOR_OBJECT_DETECTION_BATCH_SIZE", str(IMAGENET100_BATCH_SIZE)))
+OBJECT_DETECTION_BATCH_SIZE = int(os.environ.get("THOR_OBJECT_DETECTION_BATCH_SIZE", "16"))
 OBJECT_DETECTION_EPOCHS = int(os.environ.get("THOR_OBJECT_DETECTION_EPOCHS", str(IMAGENET100_EPOCHS)))
 OBJECT_DETECTION_MAX_IN_FLIGHT_BATCHES = int(
     os.environ.get("THOR_OBJECT_DETECTION_MAX_IN_FLIGHT_BATCHES", str(IMAGENET100_MAX_IN_FLIGHT_BATCHES))
@@ -48,7 +48,9 @@ OBJECT_DETECTION_STATS_INTERVAL_S = float(
 )
 OBJECT_DETECTION_REBUILD = os.environ.get("THOR_OBJECT_DETECTION_REBUILD") == "1"
 OBJECT_DETECTION_NUM_SHARDS = int(os.environ.get("THOR_OBJECT_DETECTION_NUM_SHARDS", "1"))
-OBJECT_DETECTION_MANIFEST_VERSION = 1
+OBJECT_DETECTION_MANIFEST_VERSION = 2
+OBJECT_DETECTION_TRAIN_EXAMPLES = int(os.environ.get("THOR_OBJECT_DETECTION_TRAIN_EXAMPLES", "1024"))
+OBJECT_DETECTION_VALIDATE_EXAMPLES = int(os.environ.get("THOR_OBJECT_DETECTION_VALIDATE_EXAMPLES", "256"))
 OBJECT_DETECTION_BOX_DIMS = 4
 OBJECT_DETECTION_VOC_CLASSES = [
     "aeroplane",
@@ -484,18 +486,27 @@ def _object_detection_image_elems(image_size: int) -> int:
 
 
 def _object_detection_example_elems(image_size: int) -> int:
-    return _object_detection_image_elems(image_size) + OBJECT_DETECTION_BOX_DIMS
+    return _object_detection_image_elems(image_size)
 
 
 def _object_detection_manifest_path(cache_root: Path) -> Path:
-    return cache_root / f"voc2012_detection_{OBJECT_DETECTION_IMAGE_SIZE}_packed_fp16_manifest.json"
+    return cache_root / f"voc2012_detection_{OBJECT_DETECTION_IMAGE_SIZE}_numpy_fp16_manifest.json"
 
 
-def _object_detection_shard_root(cache_root: Path) -> Path:
-    return cache_root / f"voc2012_detection_shards_{OBJECT_DETECTION_IMAGE_SIZE}_packed_fp16"
+def _object_detection_arrays_root(cache_root: Path) -> Path:
+    return cache_root / f"voc2012_detection_arrays_{OBJECT_DETECTION_IMAGE_SIZE}_fp16"
 
 
-def _object_detection_base_manifest(*, shard_paths, train_examples: int, validate_examples: int):
+def _object_detection_array_paths(arrays_root: Path) -> dict[str, str]:
+    return {
+        "train_examples": str(arrays_root / "train_examples.npy"),
+        "train_labels": str(arrays_root / "train_boxes.npy"),
+        "validate_examples": str(arrays_root / "validate_examples.npy"),
+        "validate_labels": str(arrays_root / "validate_boxes.npy"),
+    }
+
+
+def _object_detection_base_manifest(*, array_paths: dict[str, str], train_examples: int, validate_examples: int):
     image_size = OBJECT_DETECTION_IMAGE_SIZE
     return {
         "version": OBJECT_DETECTION_MANIFEST_VERSION,
@@ -503,16 +514,19 @@ def _object_detection_base_manifest(*, shard_paths, train_examples: int, validat
         "image_size": image_size,
         "dtype": "fp16",
         "box_format": "xyxy_normalized",
+        "max_train_examples": OBJECT_DETECTION_TRAIN_EXAMPLES,
+        "max_validate_examples": OBJECT_DETECTION_VALIDATE_EXAMPLES,
         "num_classes": len(OBJECT_DETECTION_VOC_CLASSES),
         "train_examples": train_examples,
         "validate_examples": validate_examples,
         "test_examples": validate_examples,
-        "example_shape": [_object_detection_example_elems(image_size)],
+        "example_shape": [3, image_size, image_size],
         "image_shape": [3, image_size, image_size],
         "box_shape": [OBJECT_DETECTION_BOX_DIMS],
-        "label_shape": [len(OBJECT_DETECTION_VOC_CLASSES)],
-        "shard_paths": sorted(str(Path(path)) for path in shard_paths),
-        "label_names": list(OBJECT_DETECTION_VOC_CLASSES),
+        "label_shape": [OBJECT_DETECTION_BOX_DIMS],
+        "array_paths": {name: str(Path(path)) for name, path in sorted(array_paths.items())},
+        "label_names": ["x1", "y1", "x2", "y2"],
+        "class_names": list(OBJECT_DETECTION_VOC_CLASSES),
     }
 
 
@@ -531,14 +545,20 @@ def _read_object_detection_manifest_if_valid(cache_root: Path):
         "image_size": OBJECT_DETECTION_IMAGE_SIZE,
         "dtype": "fp16",
         "box_format": "xyxy_normalized",
-        "label_shape": [len(OBJECT_DETECTION_VOC_CLASSES)],
-        "example_shape": [_object_detection_example_elems(OBJECT_DETECTION_IMAGE_SIZE)],
+        "max_train_examples": OBJECT_DETECTION_TRAIN_EXAMPLES,
+        "max_validate_examples": OBJECT_DETECTION_VALIDATE_EXAMPLES,
+        "label_shape": [OBJECT_DETECTION_BOX_DIMS],
+        "example_shape": [3, OBJECT_DETECTION_IMAGE_SIZE, OBJECT_DETECTION_IMAGE_SIZE],
     }
     for key, value in expected.items():
         if manifest.get(key) != value:
             return None
-    if not manifest.get("shard_paths"):
+    array_paths = manifest.get("array_paths") or {}
+    if sorted(array_paths) != ["train_examples", "train_labels", "validate_examples", "validate_labels"]:
         return None
+    for path in array_paths.values():
+        if not Path(path).exists():
+            return None
     return manifest
 
 
@@ -680,80 +700,87 @@ def _mirror_voc_validate_as_test(raw_root: Path):
                 shutil.copy2(validate_file, test_file)
 
 
-def _ensure_voc_detection_shards():
+def _load_voc_detection_numpy_split(voc_root: Path, *, split_name: str, split_ids: list[str], max_examples: int, image_size: int):
+    Image = _import_object_detection_dependencies()
+    examples: list[np.ndarray] = []
+    boxes: list[np.ndarray] = []
+    class_counts: dict[str, int] = {}
+
+    for image_id in split_ids:
+        primary = _read_voc_primary_object(voc_root / "Annotations" / f"{image_id}.xml")
+        if primary is None:
+            continue
+        class_name, box = primary
+        with Image.open(voc_root / "JPEGImages" / f"{image_id}.jpg") as image:
+            examples.append(_resize_to_chw_fp16(image, image_size=image_size))
+        boxes.append(np.ascontiguousarray(box, dtype=np.float16))
+        class_counts[class_name] = class_counts.get(class_name, 0) + 1
+        if len(examples) >= max_examples:
+            break
+
+    if not examples:
+        raise RuntimeError(f"VOC2012 split {split_name} produced no usable detection examples")
+    return (
+        np.ascontiguousarray(np.stack(examples, axis=0), dtype=np.float16),
+        np.ascontiguousarray(np.stack(boxes, axis=0), dtype=np.float16),
+        class_counts,
+    )
+
+
+def _ensure_voc_detection_arrays():
     OBJECT_DETECTION_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     manifest = _read_object_detection_manifest_if_valid(OBJECT_DETECTION_CACHE_DIR)
     if manifest is not None:
         return manifest
 
     voc_root = _ensure_voc2012_trainval_downloaded(OBJECT_DETECTION_CACHE_DIR)
-    processing_root = OBJECT_DETECTION_CACHE_DIR / "processing_tmp"
-    raw_root = processing_root / "raw_packed_fp16"
-    shard_root = _object_detection_shard_root(OBJECT_DETECTION_CACHE_DIR)
-    base_name = f"voc2012_detection_{OBJECT_DETECTION_IMAGE_SIZE}_packed_fp16"
+    arrays_root = _object_detection_arrays_root(OBJECT_DETECTION_CACHE_DIR)
+    if arrays_root.exists():
+        shutil.rmtree(arrays_root)
+    arrays_root.mkdir(parents=True, exist_ok=True)
 
-    if processing_root.exists():
-        shutil.rmtree(processing_root)
-    if shard_root.exists():
-        shutil.rmtree(shard_root)
-    processing_root.mkdir(parents=True, exist_ok=True)
-    raw_root.mkdir(parents=True, exist_ok=True)
-    shard_root.mkdir(parents=True, exist_ok=True)
-
-    shard_dest_dirs = []
-    for shard_index in range(OBJECT_DETECTION_NUM_SHARDS):
-        dest = shard_root / f"dest_{shard_index:02d}"
-        dest.mkdir(parents=True, exist_ok=True)
-        shard_dest_dirs.append(dest)
-
-    train_count = _write_voc_detection_split(
+    train_examples, train_boxes, train_class_counts = _load_voc_detection_numpy_split(
         voc_root,
         split_name="train",
         split_ids=_voc_split_ids(voc_root, "train"),
-        raw_root=raw_root,
+        max_examples=OBJECT_DETECTION_TRAIN_EXAMPLES,
         image_size=OBJECT_DETECTION_IMAGE_SIZE,
     )
-    validate_count = _write_voc_detection_split(
+    validate_examples, validate_boxes, validate_class_counts = _load_voc_detection_numpy_split(
         voc_root,
         split_name="validate",
         split_ids=_voc_split_ids(voc_root, "val"),
-        raw_root=raw_root,
+        max_examples=OBJECT_DETECTION_VALIDATE_EXAMPLES,
         image_size=OBJECT_DETECTION_IMAGE_SIZE,
     )
-    _mirror_voc_validate_as_test(raw_root)
 
-    example_size_in_bytes = _object_detection_example_elems(OBJECT_DETECTION_IMAGE_SIZE) * np.dtype(np.float16).itemsize
-    shard_paths = thor.training.create_sharded_raw_dataset(
-        [str(raw_root)],
-        [str(path) for path in shard_dest_dirs],
-        base_name,
-        example_size_in_bytes,
-        thor.DataType.fp16,
-    )
-    shard_paths = sorted(str(Path(path)) for path in shard_paths)
-    for path in shard_paths:
-        assert Path(path).exists(), f"expected shard file {path} to exist"
+    array_paths = _object_detection_array_paths(arrays_root)
+    np.save(array_paths["train_examples"], train_examples)
+    np.save(array_paths["train_labels"], train_boxes)
+    np.save(array_paths["validate_examples"], validate_examples)
+    np.save(array_paths["validate_labels"], validate_boxes)
 
     manifest = _object_detection_base_manifest(
-        shard_paths=shard_paths,
-        train_examples=train_count,
-        validate_examples=validate_count,
+        array_paths=array_paths,
+        train_examples=int(train_examples.shape[0]),
+        validate_examples=int(validate_examples.shape[0]),
     )
+    manifest["train_class_counts"] = train_class_counts
+    manifest["validate_class_counts"] = validate_class_counts
     _object_detection_manifest_path(OBJECT_DETECTION_CACHE_DIR).write_text(json.dumps(manifest, indent=2, sort_keys=True))
-    shutil.rmtree(processing_root)
     return manifest
 
 
 def _voc_detection_loader(*, batch_size: int):
-    manifest = _ensure_voc_detection_shards()
-    loader = thor.training.LocalBatchLoader(
-        manifest["shard_paths"],
-        manifest["example_shape"],
-        thor.DataType.fp16,
-        manifest["label_shape"],
-        thor.DataType.fp16,
+    manifest = _ensure_voc_detection_arrays()
+    array_paths = manifest["array_paths"]
+    loader = thor.training.NumpyFloat16BatchLoader(
+        np.ascontiguousarray(np.load(array_paths["train_examples"]), dtype=np.float16),
+        np.ascontiguousarray(np.load(array_paths["train_labels"]), dtype=np.float16),
+        np.ascontiguousarray(np.load(array_paths["validate_examples"]), dtype=np.float16),
+        np.ascontiguousarray(np.load(array_paths["validate_labels"]), dtype=np.float16),
         batch_size=batch_size,
-        dataset_name="pascal_voc2012_detection_packed_fp16_chw_xyxy",
+        dataset_name="pascal_voc2012_detection_numpy_fp16_chw_xyxy",
     )
     return loader, manifest
 
@@ -940,98 +967,13 @@ def _build_resnet18_imagenet100(name: str, *, num_classes: int, dtype=thor.DataT
     return network
 
 
-class _PackedVocDetectionExample(thor.layers.CustomLayer):
-
-    def __init__(self, network: thor.Network, packed: thor.Tensor, *, image_size: int):
-        self.image_size = image_size
-        super().__init__(network=network, inputs=packed, output_names=["image", "box"])
-
-    def build(self, context: thor.layers.CustomLayerBuildContext) -> dict[str, thor.physical.Expression]:
-        packed_tensor = context.input_tensor("feature_input")
-        dims = packed_tensor.get_dimensions()
-        assert len(dims) == 2
-        batch_size, packed_elems = dims
-        image_elems = _object_detection_image_elems(self.image_size)
-        assert packed_elems == image_elems + OBJECT_DETECTION_BOX_DIMS
-
-        packed = context.input("feature_input")
-        image = packed.strided_view(
-            [batch_size, 3, self.image_size, self.image_size],
-            [packed_elems, self.image_size * self.image_size, self.image_size, 1],
-            0,
-        )
-        box = packed.strided_view([batch_size, OBJECT_DETECTION_BOX_DIMS], [packed_elems, 1], image_elems)
-        return {
-            "image": (image + 0.0).with_dtypes(output_dtype=thor.DataType.fp16, compute_dtype=thor.DataType.fp32),
-            "box": (box + 0.0).with_dtypes(output_dtype=thor.DataType.fp32, compute_dtype=thor.DataType.fp32),
-        }
-
-
-class _ValidBoxFromUnconstrainedVector(thor.layers.CustomLayer):
-
-    def __init__(self, network: thor.Network, raw_box: thor.Tensor):
-        assert raw_box.get_dimensions() == [OBJECT_DETECTION_BOX_DIMS]
-        super().__init__(network=network, inputs=raw_box, output_names=["x1", "y1", "x2", "y2"])
-
-    def build(self, context: thor.layers.CustomLayerBuildContext) -> dict[str, thor.physical.Expression]:
-        raw_tensor = context.input_tensor("feature_input")
-        dims = raw_tensor.get_dimensions()
-        assert len(dims) == 2
-        batch_size, box_dims = dims
-        assert box_dims == OBJECT_DETECTION_BOX_DIMS
-
-        raw = context.input("feature_input")
-
-        def coord(index: int) -> thor.physical.Expression:
-            return raw.strided_view([batch_size, 1], [OBJECT_DETECTION_BOX_DIMS, 1], index).with_dtypes(
-                output_dtype=thor.DataType.fp32,
-                compute_dtype=thor.DataType.fp32,
-            )
-
-        sx = thor.physical.Expression.sigmoid(coord(0))
-        sy = thor.physical.Expression.sigmoid(coord(1))
-        sw = thor.physical.Expression.sigmoid(coord(2))
-        sh = thor.physical.Expression.sigmoid(coord(3))
-
-        # Keep the raw head unconstrained for the optimizer, but make the tensor
-        # consumed by CIoU/GIoU a valid normalized xyxy box.  Width/height are
-        # bounded away from zero so the integration test exercises meaningful box
-        # gradients instead of degenerate zero-area boxes.
-        x1 = sx * 0.65
-        y1 = sy * 0.65
-        x2 = x1 + 0.10 + sw * 0.25
-        y2 = y1 + 0.10 + sh * 0.25
-        return {
-            "x1": x1.with_dtypes(output_dtype=thor.DataType.fp32, compute_dtype=thor.DataType.fp32),
-            "y1": y1.with_dtypes(output_dtype=thor.DataType.fp32, compute_dtype=thor.DataType.fp32),
-            "x2": x2.with_dtypes(output_dtype=thor.DataType.fp32, compute_dtype=thor.DataType.fp32),
-            "y2": y2.with_dtypes(output_dtype=thor.DataType.fp32, compute_dtype=thor.DataType.fp32),
-        }
-
-
-def _valid_box_from_raw_head(network: thor.Network, raw_box: thor.Tensor) -> thor.Tensor:
-    parts = _ValidBoxFromUnconstrainedVector(network, raw_box)
-    box = thor.layers.Concatenate(
-        network,
-        [parts["x1"], parts["y1"], parts["x2"], parts["y2"]],
-        0,
-    )
-    return box.get_feature_output()
-
-
-def _split_voc_detection_example(network: thor.Network, packed_examples: thor.Tensor, *, image_size: int):
-    split = _PackedVocDetectionExample(network, packed_examples, image_size=image_size)
-    return split["image"], split["box"]
-
-
-
 def _global_average_pool_2d(network: thor.Network, x: thor.Tensor) -> thor.Tensor:
     _, height, width = x.get_dimensions()
     pool = thor.layers.Pooling(network, x, thor.layers.Pooling.Type.average, height, width, 1, 1)
     return pool.get_feature_output()
 
 
-def _build_tiny_voc2012_multitask_detector(
+def _build_tiny_voc2012_box_detector(
     name: str,
     *,
     num_classes: int,
@@ -1039,14 +981,9 @@ def _build_tiny_voc2012_multitask_detector(
     dtype=thor.DataType.fp16,
 ):
     network = thor.Network(name)
-    packed_examples = thor.layers.NetworkInput(
-        network,
-        "examples",
-        [_object_detection_example_elems(image_size)],
-        dtype,
-    )
-    labels = thor.layers.NetworkInput(network, "labels", [num_classes], dtype)
-    image, target_box = _split_voc_detection_example(network, packed_examples.get_feature_output(), image_size=image_size)
+    examples = thor.layers.NetworkInput(network, "examples", [3, image_size, image_size], dtype)
+    target_box = thor.layers.NetworkInput(network, "labels", [OBJECT_DETECTION_BOX_DIMS], dtype)
+    image = examples.get_feature_output()
 
     x = _conv_bn_relu(network, image, 32, 3, padding=1, dtype=dtype)
     pool1 = thor.layers.Pooling(network, x, thor.layers.Pooling.Type.max, 2, 2, 2, 2)
@@ -1063,29 +1000,20 @@ def _build_tiny_voc2012_multitask_detector(
     drop = thor.layers.DropOut(network, x, 0.10)
     x = drop.get_feature_output()
 
-    class_logits = thor.layers.FullyConnected(network, x, num_classes, True, activation=None)
     raw_box = thor.layers.FullyConnected(network, x, OBJECT_DETECTION_BOX_DIMS, True, activation=None)
-    pred_box = _valid_box_from_raw_head(network, raw_box.get_feature_output())
+    pred_box = thor.activations.Sigmoid().add_to_network(network, raw_box.get_feature_output())
 
-    class_loss = thor.losses.CategoricalCrossEntropy(
-        network,
-        class_logits.get_feature_output(),
-        labels.get_feature_output(),
-        thor.DataType.fp32,
-    )
     box_loss = thor.losses.detection.CIoULoss(
         network,
         pred_box,
-        target_box,
+        target_box.get_feature_output(),
         "xyxy",
         1.0e-5,
         thor.DataType.fp32,
         thor.losses.LossShape.batch,
     )
     thor.layers.NetworkOutput(network, "loss", box_loss.get_loss(), thor.DataType.fp32)
-    thor.layers.NetworkOutput(network, "class_loss", class_loss.get_loss(), thor.DataType.fp32)
     thor.layers.NetworkOutput(network, "pred_boxes", pred_box, thor.DataType.fp32)
-    thor.layers.NetworkOutput(network, "class_scores", class_logits.get_feature_output(), dtype)
     return network
 
 
@@ -1126,7 +1054,7 @@ def _run_full_voc2012_detection_model_training(model_builder, *, model_name: str
         assert manifest["validate_examples"] == loader.get_num_validate_examples()
         assert loader.get_num_train_batches() > 0, "VOC2012 detection train split unexpectedly has zero batches"
         assert loader.get_num_validate_batches() > 0, "VOC2012 detection validation split unexpectedly has zero batches"
-        assert manifest["num_classes"] == manifest["label_shape"][0]
+        assert manifest["label_shape"] == [OBJECT_DETECTION_BOX_DIMS]
         assert manifest["box_shape"] == [OBJECT_DETECTION_BOX_DIMS]
 
         network = model_builder(
@@ -1134,7 +1062,7 @@ def _run_full_voc2012_detection_model_training(model_builder, *, model_name: str
             num_classes=manifest["num_classes"],
             image_size=manifest["image_size"],
         )
-        optimizer = thor.optimizers.AdamW(initial_learning_rate=0.001, weight_decay=0.01)
+        optimizer = thor.optimizers.AdamW(alpha=0.001, weight_decay=0.01)
         trainer = thor.training.Trainer(
             network,
             loader,
@@ -1153,7 +1081,7 @@ def _run_full_voc2012_detection_model_training(model_builder, *, model_name: str
 @pytest.mark.parametrize(
     ("model_name", "model_builder"),
     [
-        ("tiny_multitask_detector", _build_tiny_voc2012_multitask_detector),
+        ("tiny_box_detector", _build_tiny_voc2012_box_detector),
     ],
 )
 def test_queued_trainer_trains_voc2012_object_detection_networks_end_to_end(model_name, model_builder, capfd):

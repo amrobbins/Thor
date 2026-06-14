@@ -20,7 +20,7 @@ namespace ThorImplementation {
  * This layer will serialize processing of each input by synchronizing all streams with stream[0] when multiple connections are present, for
  * compatibility with cuDNN.
  *
- * Batch Normalization supports 2d or 4d input tensor.
+ * Batch Normalization supports rank-2 [N,C], rank-4 [N,C,H,W], or rank-5 [N,C,D,H,W] input tensors.
  *
  * Unlike CustomLayer-based layers, batch-normalization backward stays on the cuDNN batchnorm path, so the error-output gradient and parameter
  * gradients are produced together by cuDNN.
@@ -92,8 +92,10 @@ class BatchNormalization : public TrainableLayer {
 
     unsigned int batchSize = 0;
     unsigned int numChannels = 0;
+    unsigned int depth = 0;
     unsigned int height = 0;
     unsigned int width = 0;
+    size_t cudnnTensorRank = 4;
 
     double exponentialRunningAverageFactor;
     uint64_t itemsObserved = 0;

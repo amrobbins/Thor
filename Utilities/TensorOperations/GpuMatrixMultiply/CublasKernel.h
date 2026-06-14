@@ -296,8 +296,19 @@ class CublasKernel : private ReferenceCounted {
 
         std::string description;
         description += "AlgoId " + std::to_string(cublasKernelOptions->algorithmId);
-        THOR_THROW_IF_FALSE(tileEnumToString.count(cublasKernelOptions->tileSize) == 1);
-        description += " " + tileEnumToString[cublasKernelOptions->tileSize];
+
+        // CUDA/cuBLASLt may add new tile enum values before Thor's debug-name map
+        // is updated.  This string is used for diagnostics and kernel-contest
+        // printing, so it must never turn an otherwise valid kernel into a
+        // runtime failure.  Preserve the friendly name when known and fall back
+        // to the numeric enum value when it is not.
+        const auto tileName = tileEnumToString.find(cublasKernelOptions->tileSize);
+        if (tileName != tileEnumToString.end()) {
+            description += " " + tileName->second;
+        } else {
+            description += " CUBLASLT_MATMUL_TILE_UNKNOWN(" + std::to_string(static_cast<int>(cublasKernelOptions->tileSize)) + ")";
+        }
+
         description += " error: " + std::to_string(cublasKernelOptions->runStats.errorFlag);
         description += " waves: " + std::to_string(getWavesCount(gpuNum));
         description += " splitK: " + std::to_string(cublasKernelOptions->splitK);

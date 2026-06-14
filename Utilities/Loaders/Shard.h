@@ -14,6 +14,8 @@
 #include "Utilities/WorkQueue/AsyncQueue.h"
 #include "Utilities/WorkQueue/WorkQueueUnordered.h"
 
+class UringDirect;
+
 #include "omp.h"
 
 #include <unistd.h>
@@ -48,9 +50,17 @@ struct ShardMetadata {
     ThorImplementation::DataType dataType;
 };
 
+struct ShardExampleReadRequest {
+    uint64_t fileOffsetBytes;
+    uint64_t numBytes;
+    std::string label;
+    std::string filename;
+};
+
 class Shard {
    public:
     Shard();
+    ~Shard();
 
     void createShard(std::string filename,
                      uint64_t numTrainExamples,
@@ -65,6 +75,7 @@ class Shard {
     void openShard(std::string filename);
     bool isOpen();
     void writeExample(uint8_t *buffer, const std::string &label, const std::string &filename, ExampleType exampleType);
+    ShardExampleReadRequest getExampleReadRequest(ExampleType exampleType, uint64_t exampleIndex);
     void loadExample(uint8_t *buffer, std::string &label, std::string &filename, ExampleType exampleType, uint64_t exampleIndex);
     void loadExampleAsync(
         uint8_t *buffer, std::string &label, std::string &filename, ExampleType exampleType, uint64_t exampleIndex, Stream stream);
@@ -95,6 +106,8 @@ class Shard {
     ShardMetadata *shardMetadata;
 
     std::mutex mtx;
+    std::mutex cachedReaderMtx;
+    std::unique_ptr<UringDirect> cachedReader;
 
     std::shared_ptr<file_string_allocator_t> fileStringAllocator;
 
@@ -105,6 +118,8 @@ class Shard {
         file_string_vector_t *filenames;
         std::string *filename;
     };
+
+    void readExamplePayloadCached(uint8_t *buffer, uint64_t fileOffsetBytes);
 
     static void CUDART_CB getLabelCallback(void *data);
 };
