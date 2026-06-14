@@ -8,6 +8,7 @@
 
 #include <cuda_fp16.h>
 
+#include <atomic>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -36,7 +37,8 @@ class BatchAssembler {
                    ExampleType exampleType,
                    ThorImplementation::TensorDescriptor exampleDescriptor,
                    ThorImplementation::TensorDescriptor labelDescriptor,
-                   uint64_t batchSize);
+                   uint64_t batchSize,
+                   uint64_t batchQueueDepth = 32);
     virtual ~BatchAssembler();
 
     uint64_t getNumBatchesPerEpoch();
@@ -58,8 +60,21 @@ class BatchAssembler {
     uint64_t batchSize;
     uint64_t numExamples;
     uint64_t batchesPerEpoch;
+    uint64_t batchQueueDepth;
+    uint64_t shardExampleQueueDepth;
+    uint64_t shardReadQueueDepth;
     uint64_t currentBatchNum;
     uint64_t currentExampleNum;
+
+    std::atomic<uint64_t> diagnosticBatchesAssembled{0};
+    std::atomic<uint64_t> diagnosticBatchesLoaded{0};
+    std::atomic<uint64_t> diagnosticBuffersReturned{0};
+    std::atomic<uint64_t> diagnosticReadsSubmitted{0};
+    std::atomic<uint64_t> diagnosticReadsCompleted{0};
+    std::atomic<uint64_t> diagnosticExamplesPushed{0};
+    std::atomic<uint64_t> diagnosticShardQueuePushWaitMicros{0};
+    std::atomic<uint64_t> diagnosticShardQueuePopWaitMicros{0};
+    std::atomic<uint64_t> diagnosticBatchBufferWaitMicros{0};
 
     std::unordered_map<std::string, uint64_t> classIndexes;
 
@@ -76,6 +91,7 @@ class BatchAssembler {
 
     void shardReaderThread(uint64_t shard);
     void batchAssemblerThread();
+    void emitQueueDiagnostics(const char* event, uint64_t batchNum, uint64_t waitMicros = 0);
 
     bool perClassLabels;
     bool classIndexLabels;

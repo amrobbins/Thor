@@ -2,6 +2,10 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/TarFile/UringDirect.h"
 
+#include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <limits>
@@ -14,19 +18,87 @@ using ThorImplementation::TensorPlacement;
 
 using namespace std;
 
+namespace {
+
+uint64_t clampUint64(uint64_t value, uint64_t low, uint64_t high) {
+    return std::max(low, std::min(value, high));
+}
+
+
+bool queueDiagnosticsEnabled() {
+    const char* enabled = std::getenv("THOR_TRAINING_QUEUE_DIAGNOSTICS");
+    return enabled != nullptr && enabled[0] != '\0' && !(enabled[0] == '0' && enabled[1] == '\0');
+}
+
+uint64_t queueDiagnosticsEvery() {
+    const char* value = std::getenv("THOR_TRAINING_QUEUE_DIAGNOSTICS_EVERY");
+    if (value == nullptr || value[0] == '\0') {
+        return 1;
+    }
+    char* end = nullptr;
+    unsigned long long parsed = std::strtoull(value, &end, 10);
+    if (end == value || parsed == 0) {
+        return 1;
+    }
+    return static_cast<uint64_t>(parsed);
+}
+
+bool shouldEmitQueueDiagnostic(uint64_t index, uint64_t waitMicros = 0) {
+    const uint64_t every = queueDiagnosticsEvery();
+    return waitMicros > 0 || index <= 3 || (every != 0 && (index % every) == 0);
+}
+
+const char* exampleTypeName(ExampleType exampleType) {
+    switch (exampleType) {
+        case ExampleType::TRAIN:
+            return "train";
+        case ExampleType::VALIDATE:
+            return "validate";
+        case ExampleType::TEST:
+            return "test";
+        default:
+            return "unknown";
+    }
+}
+
+uint64_t microsSince(std::chrono::high_resolution_clock::time_point start,
+                     std::chrono::high_resolution_clock::time_point finish) {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(finish - start).count());
+}
+
+uint64_t computeShardReadQueueDepth(uint64_t exampleSizeInBytes) {
+    constexpr uint64_t MIN_READS = 32;
+    constexpr uint64_t MAX_READS = 1024;
+    constexpr uint64_t TARGET_READ_BYTES = 8ull * 1024ull * 1024ull;
+    const uint64_t safeExampleSize = std::max<uint64_t>(exampleSizeInBytes, 1);
+    return clampUint64(TARGET_READ_BYTES / safeExampleSize, MIN_READS, MAX_READS);
+}
+
+uint64_t computeShardExampleQueueDepth(uint64_t batchSize, uint64_t shardReadQueueDepth) {
+    constexpr uint64_t MIN_EXAMPLES = 32;
+    constexpr uint64_t MAX_EXAMPLES = 4096;
+    return clampUint64(std::max(batchSize, shardReadQueueDepth), MIN_EXAMPLES, MAX_EXAMPLES);
+}
+
+}  // namespace
+
 const half BatchAssembler::HALF_ONE = (half)1.0f;
 
 BatchAssembler::BatchAssembler(vector<std::shared_ptr<Shard>> shards,
                                ExampleType exampleType,
                                TensorDescriptor exampleDescriptor,
                                TensorDescriptor labelDescriptor,
-                               uint64_t batchSize) {
+                               uint64_t batchSize,
+                               uint64_t batchQueueDepth) {
     THOR_THROW_IF_FALSE(!shards.empty());
     THOR_THROW_IF_FALSE(batchSize > 0);
+    THOR_THROW_IF_FALSE(batchQueueDepth > 0);
 
     this->shards = shards;
     this->exampleType = exampleType;
     this->batchSize = batchSize;
+    this->batchQueueDepth = batchQueueDepth;
     this->exampleDescriptor = exampleDescriptor;
 
     vector<uint64_t> batchDimensions;
@@ -35,6 +107,9 @@ BatchAssembler::BatchAssembler(vector<std::shared_ptr<Shard>> shards,
         batchDimensions.push_back(exampleDescriptor.getDimensions()[i]);
     batchDataTensorDescriptor = TensorDescriptor(exampleDescriptor.getDataType(), batchDimensions);
     this->exampleDescriptor = exampleDescriptor;
+    const uint64_t exampleSizeInBytes = exampleDescriptor.getArraySizeInBytes();
+    shardReadQueueDepth = computeShardReadQueueDepth(exampleSizeInBytes);
+    shardExampleQueueDepth = computeShardExampleQueueDepth(batchSize, shardReadQueueDepth);
 
     numExamples = 0;
     for (uint64_t i = 0; i < shards.size(); ++i) {
@@ -71,6 +146,21 @@ BatchAssembler::BatchAssembler(vector<std::shared_ptr<Shard>> shards,
 
     batchesPerEpoch = (numExamples + (batchSize - 1)) / batchSize;
 
+    if (queueDiagnosticsEnabled()) {
+        std::fprintf(stderr,
+                     "THOR_TRAINING_QUEUE_DIAGNOSTIC loader_config phase=%s shards=%zu examples=%lu batches_per_epoch=%lu batch_size=%lu batch_queue_depth=%lu example_bytes=%lu shard_example_queue_depth=%lu shard_read_queue_depth=%lu\n",
+                     exampleTypeName(exampleType),
+                     shards.size(),
+                     numExamples,
+                     batchesPerEpoch,
+                     batchSize,
+                     batchQueueDepth,
+                     exampleSizeInBytes,
+                     shardExampleQueueDepth,
+                     shardReadQueueDepth);
+        std::fflush(stderr);
+    }
+
     open();
 }
 
@@ -82,7 +172,7 @@ void BatchAssembler::open() {
     THOR_THROW_IF_FALSE(shardQueues.empty());
 
     for (uint64_t i = 0; i < shards.size(); ++i) {
-        shardQueues.emplace_back(new AsyncQueue<LabeledExample>(32));
+        shardQueues.emplace_back(new AsyncQueue<LabeledExample>(static_cast<uint32_t>(shardExampleQueueDepth)));
         shardQueues.back()->open();
         randomizers[i]->reseed();
 
@@ -92,11 +182,11 @@ void BatchAssembler::open() {
     currentExampleNum = 0;
 
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
-    batchDataQueue.resize(32, batchDataTensorDescriptor, cpuPlacement);
+    batchDataQueue.resize(batchQueueDepth, batchDataTensorDescriptor, cpuPlacement);
     batchDataQueue.open();
-    batchLabelQueue.resize(32, batchLabelTensorDescriptor, cpuPlacement);
+    batchLabelQueue.resize(batchQueueDepth, batchLabelTensorDescriptor, cpuPlacement);
     batchLabelQueue.open();
-    batchNumQueue.resize(32);
+    batchNumQueue.resize(batchQueueDepth);
     batchNumQueue.open();
 
     assemblerThread = thread(&BatchAssembler::batchAssemblerThread, this);
@@ -122,12 +212,12 @@ void BatchAssembler::shardReaderThread(uint64_t shard) {
         uint64_t expectedBytes = 0;
     };
 
-    constexpr uint64_t MAX_IN_FLIGHT_READS = 32;
+    const uint64_t maxInFlightReads = shardReadQueueDepth;
 
     const uint64_t exampleSizeInBytes = shards[shard]->getExampleSizeInBytes();
     THOR_THROW_IF_FALSE(exampleSizeInBytes <= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()));
 
-    UringDirect cachedReader(64);
+    UringDirect cachedReader(static_cast<unsigned>(maxInFlightReads));
     cachedReader.registerCachedLoadFile(shards[shard]->getFilename());
 
     std::deque<PendingRead> pendingReads;
@@ -148,6 +238,7 @@ void BatchAssembler::shardReaderThread(uint64_t shard) {
                                               static_cast<uint32_t>(request.numBytes))) {
             cachedReader.submit();
         }
+        diagnosticReadsSubmitted.fetch_add(1, std::memory_order_relaxed);
     };
 
     auto waitOneRead = [&]() {
@@ -161,6 +252,7 @@ void BatchAssembler::shardReaderThread(uint64_t shard) {
                                      "': " + std::strerror(-completion.responseCode));
         }
         THOR_THROW_IF_FALSE(static_cast<uint64_t>(completion.responseCode) == pendingRead.expectedBytes);
+        diagnosticReadsCompleted.fetch_add(1, std::memory_order_relaxed);
         return pendingRead.labeledExample;
     };
 
@@ -172,7 +264,7 @@ void BatchAssembler::shardReaderThread(uint64_t shard) {
     };
 
     while (true) {
-        while (pendingReads.size() < MAX_IN_FLIGHT_READS) {
+        while (pendingReads.size() < maxInFlightReads) {
             if (!shardQueues[shard]->isOpen()) {
                 drainPendingReads();
                 return;
@@ -183,7 +275,13 @@ void BatchAssembler::shardReaderThread(uint64_t shard) {
         cachedReader.submit();
         LabeledExample labeledExample = waitOneRead();
 
+        const auto pushStart = std::chrono::high_resolution_clock::now();
         bool queueOpen = shardQueues[shard]->push(labeledExample);
+        const auto pushFinish = std::chrono::high_resolution_clock::now();
+        diagnosticShardQueuePushWaitMicros.fetch_add(microsSince(pushStart, pushFinish), std::memory_order_relaxed);
+        if (queueOpen) {
+            diagnosticExamplesPushed.fetch_add(1, std::memory_order_relaxed);
+        }
         if (!queueOpen) {
             drainPendingReads();
             return;
@@ -218,10 +316,13 @@ void BatchAssembler::batchAssemblerThread() {
         }
 
         if (batchSlot == 0) {
+            const auto bufferWaitStart = std::chrono::high_resolution_clock::now();
             queueOpen = batchDataQueue.getBufferToLoad(batchDataBuffer);
             if (!queueOpen)
                 return;
             queueOpen = batchLabelQueue.getBufferToLoad(batchLabelsBuffer);
+            const auto bufferWaitFinish = std::chrono::high_resolution_clock::now();
+            diagnosticBatchBufferWaitMicros.fetch_add(microsSince(bufferWaitStart, bufferWaitFinish), std::memory_order_relaxed);
             if (!queueOpen) {
                 batchDataQueue.bufferLoaded(batchDataBuffer);
                 return;
@@ -248,7 +349,10 @@ void BatchAssembler::batchAssemblerThread() {
         }
         THOR_THROW_IF_FALSE(chosenShard < numExamplesPerShard.size());
 
+        const auto popStart = std::chrono::high_resolution_clock::now();
         queueOpen = shardQueues[chosenShard]->pop(labeledExample);
+        const auto popFinish = std::chrono::high_resolution_clock::now();
+        diagnosticShardQueuePopWaitMicros.fetch_add(microsSince(popStart, popFinish), std::memory_order_relaxed);
         if (!queueOpen) {
             batchDataQueue.bufferLoaded(batchDataBuffer);
             batchLabelQueue.bufferLoaded(batchLabelsBuffer);
@@ -313,6 +417,10 @@ void BatchAssembler::batchAssemblerThread() {
             batchLabelQueue.bufferLoaded(batchLabelsBuffer);
 
             batchNumQueue.push(currentBatchNum);
+            const uint64_t assembled = diagnosticBatchesAssembled.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (queueDiagnosticsEnabled() && shouldEmitQueueDiagnostic(assembled)) {
+                emitQueueDiagnostics("assembled_batch", currentBatchNum);
+            }
             currentBatchNum += 1;
             if (currentBatchNum == batchesPerEpoch) {
                 // An epoch may not be exactly divisible by an integer number of batches, make sure this does not cause drift.
@@ -324,7 +432,73 @@ void BatchAssembler::batchAssemblerThread() {
     }
 }
 
+
+void BatchAssembler::emitQueueDiagnostics(const char* event, uint64_t batchNum, uint64_t waitMicros) {
+    if (!queueDiagnosticsEnabled()) {
+        return;
+    }
+
+    AsyncTensorQueueSnapshot dataState = batchDataQueue.snapshot();
+    AsyncTensorQueueSnapshot labelState = batchLabelQueue.snapshot();
+    const int batchNumOccupancy = batchNumQueue.occupancy();
+    const int batchNumCapacity = batchNumQueue.capacity();
+
+    int shardMin = 0;
+    int shardMax = 0;
+    uint64_t shardSum = 0;
+    int shardCapacity = 0;
+    for (size_t i = 0; i < shardQueues.size(); ++i) {
+        const int occupancy = shardQueues[i]->occupancy();
+        const int capacity = shardQueues[i]->capacity();
+        if (i == 0 || occupancy < shardMin) {
+            shardMin = occupancy;
+        }
+        if (i == 0 || occupancy > shardMax) {
+            shardMax = occupancy;
+        }
+        shardSum += static_cast<uint64_t>(occupancy);
+        shardCapacity += capacity;
+    }
+
+    std::fprintf(stderr,
+                 "THOR_TRAINING_QUEUE_DIAGNOSTIC loader event=%s phase=%s batch=%lu wait_us=%lu assembled=%lu loaded=%lu returned=%lu "
+                 "reads(submitted=%lu completed=%lu pushed=%lu) wait_totals_us(batch_buffer=%lu shard_pop=%lu shard_push=%lu) "
+                 "data(empty=%d loading=%d loaded=%d unloading=%d cap=%d) "
+                 "labels(empty=%d loading=%d loaded=%d unloading=%d cap=%d) batch_nums=%d/%d shard_examples(sum=%lu min=%d max=%d cap=%d)\n",
+                 event,
+                 exampleTypeName(exampleType),
+                 batchNum,
+                 waitMicros,
+                 diagnosticBatchesAssembled.load(std::memory_order_relaxed),
+                 diagnosticBatchesLoaded.load(std::memory_order_relaxed),
+                 diagnosticBuffersReturned.load(std::memory_order_relaxed),
+                 diagnosticReadsSubmitted.load(std::memory_order_relaxed),
+                 diagnosticReadsCompleted.load(std::memory_order_relaxed),
+                 diagnosticExamplesPushed.load(std::memory_order_relaxed),
+                 diagnosticBatchBufferWaitMicros.load(std::memory_order_relaxed),
+                 diagnosticShardQueuePopWaitMicros.load(std::memory_order_relaxed),
+                 diagnosticShardQueuePushWaitMicros.load(std::memory_order_relaxed),
+                 dataState.empty,
+                 dataState.loading,
+                 dataState.loaded,
+                 dataState.unloading,
+                 dataState.capacity,
+                 labelState.empty,
+                 labelState.loading,
+                 labelState.loaded,
+                 labelState.unloading,
+                 labelState.capacity,
+                 batchNumOccupancy,
+                 batchNumCapacity,
+                 shardSum,
+                 shardMin,
+                 shardMax,
+                 shardCapacity);
+    std::fflush(stderr);
+}
+
 void BatchAssembler::getBatch(Tensor &batchTensor, Tensor &labelTensor, uint64_t &batchNum) {
+    const auto start = std::chrono::high_resolution_clock::now();
     bool queueOpen;
     queueOpen = batchDataQueue.getBufferToUnload(batchTensor);
     THOR_THROW_IF_FALSE(queueOpen);
@@ -332,6 +506,13 @@ void BatchAssembler::getBatch(Tensor &batchTensor, Tensor &labelTensor, uint64_t
     THOR_THROW_IF_FALSE(queueOpen);
     queueOpen = batchNumQueue.pop(batchNum);
     THOR_THROW_IF_FALSE(queueOpen);
+    const auto finish = std::chrono::high_resolution_clock::now();
+
+    const uint64_t loaded = diagnosticBatchesLoaded.fetch_add(1, std::memory_order_relaxed) + 1;
+    const uint64_t waitMicros = microsSince(start, finish);
+    if (queueDiagnosticsEnabled() && shouldEmitQueueDiagnostic(loaded, waitMicros)) {
+        emitQueueDiagnostics("get_batch", batchNum, waitMicros);
+    }
 }
 
 uint64_t BatchAssembler::getNextBatchNum() {
@@ -347,6 +528,11 @@ void BatchAssembler::returnBuffer(Tensor &batchTensor, Tensor &labelTensor) {
     THOR_THROW_IF_FALSE(queueOpen);
     queueOpen = batchLabelQueue.bufferUnloaded(labelTensor);
     THOR_THROW_IF_FALSE(queueOpen);
+
+    const uint64_t returned = diagnosticBuffersReturned.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (queueDiagnosticsEnabled() && shouldEmitQueueDiagnostic(returned)) {
+        emitQueueDiagnostics("return_batch", 0);
+    }
 }
 
 uint64_t BatchAssembler::getNumBatchesPerEpoch() { return batchesPerEpoch; }

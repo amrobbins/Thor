@@ -177,6 +177,17 @@ int AsyncTensorQueue::capacity() {
     return queueSize;
 }
 
+AsyncTensorQueueSnapshot AsyncTensorQueue::snapshot() {
+    std::unique_lock<std::mutex> lck(mtx);
+    AsyncTensorQueueSnapshot state;
+    state.empty = static_cast<int>(emptyBuffers.size());
+    state.loading = static_cast<int>(loadingBuffers.size());
+    state.loaded = static_cast<int>(loadedBuffers.size());
+    state.unloading = static_cast<int>(unloadingBuffers.size());
+    state.capacity = static_cast<int>(queueSize);
+    return state;
+}
+
 // called only from locked methods
 void AsyncTensorQueue::allocateBuffers() {
     THOR_THROW_IF_FALSE(queueSize > 0);
