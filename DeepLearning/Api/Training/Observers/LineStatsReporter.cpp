@@ -84,11 +84,11 @@ class LineBuffer {
     size_t length = 0;
 };
 
-void appendFixed(LineBuffer& out, double value, int precision) { out.appendFormat("%.*f", precision, value); }
+[[maybe_unused]] void appendFixed(LineBuffer& out, double value, int precision) { out.appendFormat("%.*f", precision, value); }
 
-void appendScientific(LineBuffer& out, double value, int precision) { out.appendFormat("%.*e", precision, value); }
+[[maybe_unused]] void appendScientific(LineBuffer& out, double value, int precision) { out.appendFormat("%.*e", precision, value); }
 
-void appendCompactRate(LineBuffer& out, double value) {
+[[maybe_unused]] void appendCompactRate(LineBuffer& out, double value) {
     const double absValue = std::abs(value);
     const char* suffix = "";
     double scaled = value;
@@ -166,9 +166,7 @@ std::string formatElapsedString(double elapsedSeconds) {
 
 enum class PadAlignment { LEFT, RIGHT };
 
-void appendStyledPadded(
-    LineBuffer& out, const char* style, const std::string& value, size_t width, PadAlignment alignment = PadAlignment::RIGHT) {
-    out.append(style);
+void appendPadded(LineBuffer& out, const std::string& value, size_t width, PadAlignment alignment = PadAlignment::RIGHT) {
     if (value.size() < width && alignment == PadAlignment::RIGHT) {
         for (size_t i = value.size(); i < width; ++i) {
             out.append(' ');
@@ -180,6 +178,12 @@ void appendStyledPadded(
             out.append(' ');
         }
     }
+}
+
+void appendStyledPadded(
+    LineBuffer& out, const char* style, const std::string& value, size_t width, PadAlignment alignment = PadAlignment::RIGHT) {
+    out.append(style);
+    appendPadded(out, value, width, alignment);
     out.append(Ansi::reset);
 }
 
@@ -199,40 +203,47 @@ bool envFlagIsZero(const char* name) {
     return value != nullptr && value[0] == '0' && value[1] == '\0';
 }
 
-bool terminalEnvDisablesColor() {
-    if (envFlagIsSet("NO_COLOR")) {
-        return true;
-    }
-    return envFlagIsZero("CLICOLOR");
-}
+bool terminalEnvDisablesColor() { return envFlagIsSet("NO_COLOR"); }
 
-bool terminalEnvForcesColor() { return envFlagIsSet("CLICOLOR_FORCE") && !envFlagIsZero("CLICOLOR_FORCE"); }
+bool terminalEnvForcesColor() {
+    return (envFlagIsSet("CLICOLOR_FORCE") && !envFlagIsZero("CLICOLOR_FORCE")) ||
+           (envFlagIsSet("FORCE_COLOR") && !envFlagIsZero("FORCE_COLOR"));
+}
 
 bool terminalKindAllowsColor() {
     const char* term = std::getenv("TERM");
     return term == nullptr || std::strcmp(term, "dumb") != 0;
 }
 
-bool fileIsTerminal(std::FILE* output) {
+bool fileDescriptorIsTerminal(int fd) {
 #if defined(__unix__) || defined(__APPLE__)
-    return output != nullptr && ::isatty(::fileno(output)) != 0;
+    return fd >= 0 && ::isatty(fd) != 0;
 #else
-    (void)output;
+    (void)fd;
     return false;
 #endif
 }
 
-bool fileSupportsAnsiColor(std::FILE* output) {
-    if (envFlagIsSet("NO_COLOR")) {
+bool fileDescriptorSupportsAnsiColor(int fd) {
+    if (terminalEnvDisablesColor()) {
         return false;
     }
     if (terminalEnvForcesColor()) {
         return true;
     }
-    if (terminalEnvDisablesColor() || !terminalKindAllowsColor()) {
+    if (!terminalKindAllowsColor()) {
         return false;
     }
-    return fileIsTerminal(output);
+    return fileDescriptorIsTerminal(fd);
+}
+
+bool fileSupportsAnsiColor(std::FILE* output) {
+#if defined(__unix__) || defined(__APPLE__)
+    return output != nullptr && fileDescriptorSupportsAnsiColor(::fileno(output));
+#else
+    (void)output;
+    return false;
+#endif
 }
 
 const char* phaseStyle(TrainingPhase phase) {
@@ -261,66 +272,77 @@ void appendDimKey(LineBuffer& out, const char* key) {
     out.append(Ansi::reset);
 }
 
+void appendPlainDimKey(LineBuffer& out, const char* key) {
+    out.append(' ');
+    out.append(key);
+    out.append('=');
+}
+
 void appendPlainStatsLine(LineBuffer& out, const TrainingStatsSnapshot& stats) {
-    out.append("INFO trainer: phase=");
-    out.append(trainingPhaseName(stats.phase));
+    out.append("INFO trainer:");
+
+    appendPlainDimKey(out, "phase");
+    appendPadded(out, trainingPhaseName(stats.phase), 8, PadAlignment::LEFT);
 
     if (stats.epochs > 0) {
-        out.appendFormat(" epoch=%llu/%llu", static_cast<unsigned long long>(stats.epoch), static_cast<unsigned long long>(stats.epochs));
+        appendPlainDimKey(out, "epoch");
+        appendPadded(out, formatRatio(stats.epoch, stats.epochs), 7);
     } else if (stats.epoch > 0) {
-        out.appendFormat(" epoch=%llu", static_cast<unsigned long long>(stats.epoch));
+        appendPlainDimKey(out, "epoch");
+        appendPadded(out, formatUnsigned(stats.epoch), 7);
     }
 
     if (stats.step > 0) {
-        out.appendFormat(" step=%llu", static_cast<unsigned long long>(stats.step));
+        appendPlainDimKey(out, "step");
+        appendPadded(out, formatUnsigned(stats.step), 8);
     }
 
     if (stats.stepsPerEpoch > 0) {
-        out.appendFormat(
-            " batch=%llu/%llu", static_cast<unsigned long long>(stats.stepInEpoch), static_cast<unsigned long long>(stats.stepsPerEpoch));
+        appendPlainDimKey(out, "batch");
+        appendPadded(out, formatRatio(stats.stepInEpoch, stats.stepsPerEpoch), 7);
     } else if (stats.stepInEpoch > 0) {
-        out.appendFormat(" batch=%llu", static_cast<unsigned long long>(stats.stepInEpoch));
+        appendPlainDimKey(out, "batch");
+        appendPadded(out, formatUnsigned(stats.stepInEpoch), 7);
     }
 
     if (stats.loss.has_value()) {
-        out.append(" loss=");
-        appendFixed(out, stats.loss.value(), 6);
+        appendPlainDimKey(out, "loss");
+        appendPadded(out, formatFixedString(stats.loss.value(), 6), 9);
     }
     if (stats.accuracy.has_value()) {
-        out.append(" accuracy=");
-        appendFixed(out, stats.accuracy.value(), 4);
+        appendPlainDimKey(out, "accuracy");
+        appendPadded(out, formatFixedString(stats.accuracy.value(), 4), 6);
     }
     if (stats.learningRate.has_value()) {
-        out.append(" lr=");
-        appendScientific(out, stats.learningRate.value(), 3);
+        appendPlainDimKey(out, "lr");
+        appendPadded(out, formatScientificString(stats.learningRate.value(), 3), 9);
     }
     for (const auto& metric : stats.metrics) {
-        out.append(" ");
-        out.append(metric.first.c_str());
-        out.append("=");
-        appendFixed(out, metric.second, 6);
+        appendPlainDimKey(out, metric.first.c_str());
+        appendPadded(out, formatFixedString(metric.second, 6), 9);
     }
 
     if (stats.samplesPerSecond > 0.0) {
-        out.append(" samples/s=");
-        appendFixed(out, stats.samplesPerSecond, 1);
+        appendPlainDimKey(out, "samples/s");
+        appendPadded(out, formatFixedString(stats.samplesPerSecond, 1), 8);
     }
     if (stats.batchesPerSecond > 0.0) {
-        out.append(" batches/s=");
-        appendFixed(out, stats.batchesPerSecond, 2);
+        appendPlainDimKey(out, "batches/s");
+        appendPadded(out, formatFixedString(stats.batchesPerSecond, 2), 7);
     }
     if (stats.floatingPointOperationsPerSecond > 0.0) {
-        out.append(" flops/s=");
-        appendCompactRate(out, stats.floatingPointOperationsPerSecond);
+        appendPlainDimKey(out, "flops/s");
+        appendPadded(out, formatCompactRateString(stats.floatingPointOperationsPerSecond), 7);
     }
     if (stats.inFlightBatches > 0) {
-        out.appendFormat(" in_flight=%llu", static_cast<unsigned long long>(stats.inFlightBatches));
+        appendPlainDimKey(out, "in_flight");
+        appendPadded(out, formatUnsigned(stats.inFlightBatches), 3);
     } else {
         out.appendFormat("%14s", "");
     }
 
-    out.append(" elapsed=");
-    appendElapsed(out, stats.elapsedSeconds);
+    appendPlainDimKey(out, "elapsed");
+    appendPadded(out, formatElapsedString(stats.elapsedSeconds), 8);
 }
 
 void appendColorStatsLine(LineBuffer& out, const TrainingStatsSnapshot& stats) {
@@ -521,7 +543,14 @@ bool LineStatsReporter::shouldUseColor() const {
     if (colorMode == LineStatsColorMode::ALWAYS) {
         return true;
     }
+#if defined(__unix__) || defined(__APPLE__)
+    if (outputFile != nullptr) {
+        return fileSupportsAnsiColor(outputFile);
+    }
+    return fileDescriptorSupportsAnsiColor(STDOUT_FILENO);
+#else
     return fileSupportsAnsiColor(outputFile != nullptr ? outputFile : stdout);
+#endif
 }
 
 void LineStatsReporter::writeStatsLine(const TrainingStatsSnapshot& stats) {

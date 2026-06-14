@@ -39,7 +39,7 @@ UCF101_3D_TRAINING_ASSERTION_WINDOW = int(os.environ.get("THOR_UCF101_3D_TRAININ
 UCF101_3D_MAX_FINAL_TRAIN_LOSS_RATIO = float(os.environ.get("THOR_UCF101_3D_MAX_FINAL_TRAIN_LOSS_RATIO", "0.80"))
 UCF101_3D_LEARNING_RATE = float(os.environ.get("THOR_UCF101_3D_LEARNING_RATE", "0.01"))
 UCF101_3D_MOMENTUM = float(os.environ.get("THOR_UCF101_3D_MOMENTUM", "0.9"))
-UCF101_3D_STATS_COLOR = os.environ.get("THOR_UCF101_3D_STATS_COLOR", "always").lower()
+UCF101_3D_STATS_COLOR = os.environ.get("THOR_UCF101_3D_STATS_COLOR", "auto").lower()
 assert UCF101_3D_STATS_COLOR in {"always", "auto", "never"}
 UCF101_3D_MANIFEST_VERSION = 1
 
@@ -73,9 +73,23 @@ class _NativeOutputTee:
         self._saved_fds = {}
         self._tee_processes = []
         self._capture_paths = []
+        self._saved_force_color = None
+        self._had_force_color = False
+        self._set_force_color_for_tty_tee = False
 
     def __enter__(self):
         _flush_native_stdio_for_capture()
+        self._had_force_color = "FORCE_COLOR" in os.environ
+        self._saved_force_color = os.environ.get("FORCE_COLOR")
+        self._set_force_color_for_tty_tee = False
+        if os.isatty(1) and not os.environ.get("NO_COLOR"):
+            # Native stdout/stderr are about to be redirected to pipes so the
+            # helper tee process can mirror output and capture it for assertions.
+            # Preserve color=auto terminal behavior by forcing color only when
+            # the original stdout was a TTY. Shell redirection still leaves this
+            # unset, so redirected files stay plain.
+            os.environ["FORCE_COLOR"] = "1"
+            self._set_force_color_for_tty_tee = True
         tee_exe = shutil.which("tee")
         assert tee_exe is not None, "the temporary native-output tee requires /usr/bin/tee on PATH"
 
@@ -117,6 +131,12 @@ class _NativeOutputTee:
 
             for saved_fd in self._saved_fds.values():
                 os.close(saved_fd)
+
+            if self._set_force_color_for_tty_tee:
+                if self._had_force_color:
+                    os.environ["FORCE_COLOR"] = self._saved_force_color
+                else:
+                    os.environ.pop("FORCE_COLOR", None)
 
         return False
 

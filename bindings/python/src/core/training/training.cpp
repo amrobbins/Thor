@@ -25,13 +25,13 @@
 #include "DeepLearning/Api/Parameter/ParameterReference.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 #include "DeepLearning/Api/Training/StepExecutable.h"
+#include "DeepLearning/Api/Training/Trainer.h"
 #include "DeepLearning/Api/Training/TrainingInputBinding.h"
 #include "DeepLearning/Api/Training/TrainingProgram.h"
-#include "DeepLearning/Api/Training/Trainer.h"
 #include "DeepLearning/Api/Training/TrainingStep.h"
-#include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "DeepLearning/Implementation/Tensor/TensorPlacement.h"
+#include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Loaders/NoOpDataProcessor.h"
 #include "Utilities/Loaders/ShardedRawDatasetCreator.h"
 #include "Utilities/WorkQueue/AsyncTensorQueue.h"
@@ -125,7 +125,9 @@ class NumpyBatchLoader : public Loader {
                      std::string exampleInputName,
                      std::string labelInputName,
                      std::string loaderClassName)
-        : exampleInputName(std::move(exampleInputName)), labelInputName(std::move(labelInputName)), loaderClassName(std::move(loaderClassName)) {
+        : exampleInputName(std::move(exampleInputName)),
+          labelInputName(std::move(labelInputName)),
+          loaderClassName(std::move(loaderClassName)) {
         if (batchSize == 0) {
             throw nb::value_error((this->loaderClassName + " batch_size must be >= 1").c_str());
         }
@@ -181,7 +183,8 @@ class NumpyBatchLoader : public Loader {
         const uint64_t firstExample = batchNum * batchSize;
         for (uint64_t i = 0; i < batchSize; ++i) {
             const uint64_t exampleIndex = (firstExample + i) % split.numExamples;
-            std::memcpy(exampleDest + (i * exampleElements), exampleSrc + (exampleIndex * exampleElements), exampleElements * sizeof(ScalarT));
+            std::memcpy(
+                exampleDest + (i * exampleElements), exampleSrc + (exampleIndex * exampleElements), exampleElements * sizeof(ScalarT));
             std::memcpy(labelDest + (i * labelElements), labelSrc + (exampleIndex * labelElements), labelElements * sizeof(ScalarT));
         }
 
@@ -285,9 +288,7 @@ class NumpyBatchLoader : public Loader {
 using NumpyFloat32BatchLoader = NumpyBatchLoader<float, ThorImplementation::DataType::FP32, Float32Array>;
 using NumpyFloat16BatchLoader = NumpyBatchLoader<half, ThorImplementation::DataType::FP16, Float16Array>;
 
-std::set<std::string> stringSetFromVector(std::vector<std::string> values) {
-    return std::set<std::string>(values.begin(), values.end());
-}
+std::set<std::string> stringSetFromVector(std::vector<std::string> values) { return std::set<std::string>(values.begin(), values.end()); }
 
 std::unordered_set<std::string> unorderedStringSetFromVector(const std::vector<std::string>& values) {
     return std::unordered_set<std::string>(values.begin(), values.end());
@@ -370,10 +371,14 @@ void bind_training(nb::module_& training) {
         "example_input_name"_a = "examples",
         "label_input_name"_a = "labels",
         "dataset_name"_a = "numpy");
-    numpy_float32_batch_loader.def("get_num_train_examples", [](NumpyFloat32BatchLoader& self) { return self.getNumExamples(ExampleType::TRAIN); });
-    numpy_float32_batch_loader.def("get_num_validate_examples", [](NumpyFloat32BatchLoader& self) { return self.getNumExamples(ExampleType::VALIDATE); });
-    numpy_float32_batch_loader.def("get_num_train_batches", [](NumpyFloat32BatchLoader& self) { return self.getNumBatchesPerEpoch(ExampleType::TRAIN); });
-    numpy_float32_batch_loader.def("get_num_validate_batches", [](NumpyFloat32BatchLoader& self) { return self.getNumBatchesPerEpoch(ExampleType::VALIDATE); });
+    numpy_float32_batch_loader.def("get_num_train_examples",
+                                   [](NumpyFloat32BatchLoader& self) { return self.getNumExamples(ExampleType::TRAIN); });
+    numpy_float32_batch_loader.def("get_num_validate_examples",
+                                   [](NumpyFloat32BatchLoader& self) { return self.getNumExamples(ExampleType::VALIDATE); });
+    numpy_float32_batch_loader.def("get_num_train_batches",
+                                   [](NumpyFloat32BatchLoader& self) { return self.getNumBatchesPerEpoch(ExampleType::TRAIN); });
+    numpy_float32_batch_loader.def("get_num_validate_batches",
+                                   [](NumpyFloat32BatchLoader& self) { return self.getNumBatchesPerEpoch(ExampleType::VALIDATE); });
 
     auto numpy_float16_batch_loader = nb::class_<NumpyFloat16BatchLoader, Loader>(training, "NumpyFloat16BatchLoader");
     numpy_float16_batch_loader.attr("__module__") = "thor.training";
@@ -428,10 +433,14 @@ void bind_training(nb::module_& training) {
         "example_input_name"_a = "examples",
         "label_input_name"_a = "labels",
         "dataset_name"_a = "numpy");
-    numpy_float16_batch_loader.def("get_num_train_examples", [](NumpyFloat16BatchLoader& self) { return self.getNumExamples(ExampleType::TRAIN); });
-    numpy_float16_batch_loader.def("get_num_validate_examples", [](NumpyFloat16BatchLoader& self) { return self.getNumExamples(ExampleType::VALIDATE); });
-    numpy_float16_batch_loader.def("get_num_train_batches", [](NumpyFloat16BatchLoader& self) { return self.getNumBatchesPerEpoch(ExampleType::TRAIN); });
-    numpy_float16_batch_loader.def("get_num_validate_batches", [](NumpyFloat16BatchLoader& self) { return self.getNumBatchesPerEpoch(ExampleType::VALIDATE); });
+    numpy_float16_batch_loader.def("get_num_train_examples",
+                                   [](NumpyFloat16BatchLoader& self) { return self.getNumExamples(ExampleType::TRAIN); });
+    numpy_float16_batch_loader.def("get_num_validate_examples",
+                                   [](NumpyFloat16BatchLoader& self) { return self.getNumExamples(ExampleType::VALIDATE); });
+    numpy_float16_batch_loader.def("get_num_train_batches",
+                                   [](NumpyFloat16BatchLoader& self) { return self.getNumBatchesPerEpoch(ExampleType::TRAIN); });
+    numpy_float16_batch_loader.def("get_num_validate_batches",
+                                   [](NumpyFloat16BatchLoader& self) { return self.getNumBatchesPerEpoch(ExampleType::VALIDATE); });
 
     training.def(
         "create_sharded_raw_dataset",
@@ -495,10 +504,11 @@ calling this helper.
             if (batch_size == 0) {
                 throw nb::value_error("LocalBatchLoader batch_size must be >= 1");
             }
-            auto loader = std::make_shared<LocalBatchLoader>(stringSetFromVector(std::move(shard_paths)),
-                                                             ThorImplementation::TensorDescriptor(example_data_type, std::move(example_shape)),
-                                                             ThorImplementation::TensorDescriptor(label_data_type, std::move(label_shape)),
-                                                             batch_size);
+            auto loader =
+                std::make_shared<LocalBatchLoader>(stringSetFromVector(std::move(shard_paths)),
+                                                   ThorImplementation::TensorDescriptor(example_data_type, std::move(example_shape)),
+                                                   ThorImplementation::TensorDescriptor(label_data_type, std::move(label_shape)),
+                                                   batch_size);
             loader->setDatasetName(dataset_name);
             return loader;
         },
@@ -530,7 +540,8 @@ calling this helper.
     local_batch_loader.def("get_num_train_examples", [](LocalBatchLoader& self) { return self.getNumExamples(ExampleType::TRAIN); });
     local_batch_loader.def("get_num_validate_examples", [](LocalBatchLoader& self) { return self.getNumExamples(ExampleType::VALIDATE); });
     local_batch_loader.def("get_num_train_batches", [](LocalBatchLoader& self) { return self.getNumBatchesPerEpoch(ExampleType::TRAIN); });
-    local_batch_loader.def("get_num_validate_batches", [](LocalBatchLoader& self) { return self.getNumBatchesPerEpoch(ExampleType::VALIDATE); });
+    local_batch_loader.def("get_num_validate_batches",
+                           [](LocalBatchLoader& self) { return self.getNumBatchesPerEpoch(ExampleType::VALIDATE); });
 
     auto trainer_fit_options = nb::class_<TrainerFitOptions>(training, "TrainerFitOptions");
     trainer_fit_options.attr("__module__") = "thor.training";
@@ -582,7 +593,7 @@ calling this helper.
         "max_in_flight_batches"_a = 32,
         "scalar_tensors_to_report"_a = std::vector<std::string>{"loss"},
         "stats_stderr_also"_a = false,
-        "stats_color"_a = "always");
+        "stats_color"_a = "auto");
     trainer.def("fit", nb::overload_cast<uint32_t>(&Trainer::fit), "epochs"_a);
 
     auto gradient_clear_policy = nb::enum_<TrainingStep::GradientClearPolicy>(training, "GradientClearPolicy")
