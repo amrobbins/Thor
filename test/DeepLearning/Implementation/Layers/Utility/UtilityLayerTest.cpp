@@ -44,6 +44,48 @@ inline int randomElement(set<int> &filledSet) {
     return element;
 }
 
+class BackpropDescriptorSinkLayer : public ThorImplementation::Layer {
+   public:
+    std::optional<ThorImplementation::Tensor> connectToPreviousLayer(ThorImplementation::Layer *previousLayer,
+                                                                     std::optional<ThorImplementation::Tensor> featureInput,
+                                                                     Stream stream,
+                                                                     bool backPropagateError,
+                                                                     int loaderConnectionType = 0) override {
+        (void)loaderConnectionType;
+        THOR_THROW_IF_FALSE(!compiled);
+        THOR_THROW_IF_FALSE(!this->previousLayer.has_value());
+        THOR_THROW_IF_FALSE(!this->featureInput.has_value());
+        THOR_THROW_IF_FALSE(featureInput.has_value());
+
+        this->previousLayer = previousLayer;
+        this->stream = stream;
+        this->featureInput = featureInput;
+        if (backPropagateError)
+            this->errorOutput = featureInput.value().clone();
+        else
+            this->errorOutput = std::nullopt;
+        return this->errorOutput;
+    }
+
+    void infer(std::optional<ThorImplementation::Tensor> inputTensor,
+               std::optional<ThorImplementation::Tensor> outputTensor,
+               Stream stream) override {
+        (void)inputTensor;
+        (void)outputTensor;
+        (void)stream;
+    }
+
+    void backProp(std::optional<ThorImplementation::Tensor> dataIn,
+                  std::optional<ThorImplementation::Tensor> errorIn,
+                  std::optional<ThorImplementation::Tensor> errorOut,
+                  Stream stream) override {
+        (void)dataIn;
+        (void)errorIn;
+        (void)errorOut;
+        (void)stream;
+    }
+};
+
 TEST(InOut, NoOpWorks) {
     srand(time(NULL));
 
@@ -293,6 +335,110 @@ TEST(Map, MapsCorrectlyToMoreElements) {
     for (int i = 0; i < numDestElements; ++i) {
         ASSERT_EQ((float)destMem[i], (float)sourceMem[mappingMem[i]]);
     }
+
+    LayerTestHelper::tearDownNetwork(layers);
+}
+
+TEST(Flatten, BackwardAliasPreservesInputDescriptor) {
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    TensorDescriptor sourceDescriptor(DataType::FP16, {2, 3, 4, 5});
+    Tensor sourceGpu(gpuPlacement, sourceDescriptor);
+
+    vector<shared_ptr<Layer>> layers;
+    layers.push_back(make_shared<NetworkInput>(sourceGpu));
+    layers.push_back(make_shared<NoOpLayer>());
+    layers.push_back(make_shared<Flatten>(2));
+    layers.push_back(make_shared<BackpropDescriptorSinkLayer>());
+
+    LayerTestHelper::connectNetwork(layers);
+
+    auto upstream = dynamic_pointer_cast<NoOpLayer>(layers[1]);
+    auto flatten = dynamic_pointer_cast<Flatten>(layers[2]);
+    auto sink = dynamic_pointer_cast<BackpropDescriptorSinkLayer>(layers[3]);
+    ASSERT_NE(upstream, nullptr);
+    ASSERT_NE(flatten, nullptr);
+    ASSERT_NE(sink, nullptr);
+
+    // This must already be true immediately after connection, before compile().
+    // Upstream CustomLayer compileImpl() snapshots expected backward tensor ids,
+    // so a postCompile-only alias rewrite is too late.
+    ASSERT_TRUE(upstream->getErrorInput().has_value());
+    ASSERT_TRUE(sink->getErrorOutput().has_value());
+    EXPECT_EQ(upstream->getErrorInput().value().getDimensions(), (vector<unsigned long>{2, 3, 4, 5}));
+    EXPECT_EQ(upstream->getErrorInput().value().getMemPtr(), sink->getErrorOutput().value().getMemPtr());
+
+    LayerTestHelper::initializeNetwork(layers);
+
+    ASSERT_TRUE(flatten->getFeatureInput().has_value());
+    ASSERT_TRUE(flatten->getFeatureOutput().has_value());
+    ASSERT_TRUE(flatten->getErrorInput().has_value());
+    ASSERT_TRUE(flatten->getErrorOutput().has_value());
+    ASSERT_TRUE(upstream->getErrorInput().has_value());
+    ASSERT_TRUE(sink->getErrorOutput().has_value());
+
+    EXPECT_EQ(flatten->getFeatureInput().value().getDimensions(), (vector<unsigned long>{2, 3, 4, 5}));
+    EXPECT_EQ(flatten->getFeatureOutput().value().getDimensions(), (vector<unsigned long>{2, 60}));
+    EXPECT_EQ(sink->getErrorOutput().value().getDimensions(), (vector<unsigned long>{2, 60}));
+    EXPECT_EQ(flatten->getErrorInput().value().getDimensions(), (vector<unsigned long>{2, 60}));
+    EXPECT_EQ(flatten->getErrorOutput().value().getDimensions(), (vector<unsigned long>{2, 3, 4, 5}));
+    EXPECT_EQ(upstream->getErrorInput().value().getDimensions(), (vector<unsigned long>{2, 3, 4, 5}));
+
+    // Flatten backward is metadata-only: the upstream error tensor must alias the
+    // downstream flattened error storage, but expose the original input descriptor.
+    EXPECT_EQ(flatten->getErrorInput().value().getMemPtr(), sink->getErrorOutput().value().getMemPtr());
+    EXPECT_EQ(flatten->getErrorOutput().value().getMemPtr(), flatten->getErrorInput().value().getMemPtr());
+    EXPECT_EQ(upstream->getErrorInput().value().getMemPtr(), flatten->getErrorInput().value().getMemPtr());
+
+    LayerTestHelper::tearDownNetwork(layers);
+}
+
+TEST(Reshape, BackwardAliasPreservesInputDescriptor) {
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    TensorDescriptor sourceDescriptor(DataType::FP16, {2, 3, 4, 5});
+    Tensor sourceGpu(gpuPlacement, sourceDescriptor);
+
+    vector<shared_ptr<Layer>> layers;
+    layers.push_back(make_shared<NetworkInput>(sourceGpu));
+    layers.push_back(make_shared<NoOpLayer>());
+    layers.push_back(make_shared<Reshape>(vector<unsigned long>{2, 12, 5}));
+    layers.push_back(make_shared<BackpropDescriptorSinkLayer>());
+
+    LayerTestHelper::connectNetwork(layers);
+
+    auto upstream = dynamic_pointer_cast<NoOpLayer>(layers[1]);
+    auto reshape = dynamic_pointer_cast<Reshape>(layers[2]);
+    auto sink = dynamic_pointer_cast<BackpropDescriptorSinkLayer>(layers[3]);
+    ASSERT_NE(upstream, nullptr);
+    ASSERT_NE(reshape, nullptr);
+    ASSERT_NE(sink, nullptr);
+
+    // This must already be true immediately after connection, before compile().
+    // Upstream CustomLayer compileImpl() snapshots expected backward tensor ids,
+    // so a postCompile-only alias rewrite is too late.
+    ASSERT_TRUE(upstream->getErrorInput().has_value());
+    ASSERT_TRUE(sink->getErrorOutput().has_value());
+    EXPECT_EQ(upstream->getErrorInput().value().getDimensions(), (vector<unsigned long>{2, 3, 4, 5}));
+    EXPECT_EQ(upstream->getErrorInput().value().getMemPtr(), sink->getErrorOutput().value().getMemPtr());
+
+    LayerTestHelper::initializeNetwork(layers);
+
+    ASSERT_TRUE(reshape->getFeatureInput().has_value());
+    ASSERT_TRUE(reshape->getFeatureOutput().has_value());
+    ASSERT_TRUE(reshape->getErrorInput().has_value());
+    ASSERT_TRUE(reshape->getErrorOutput().has_value());
+    ASSERT_TRUE(upstream->getErrorInput().has_value());
+    ASSERT_TRUE(sink->getErrorOutput().has_value());
+
+    EXPECT_EQ(reshape->getFeatureInput().value().getDimensions(), (vector<unsigned long>{2, 3, 4, 5}));
+    EXPECT_EQ(reshape->getFeatureOutput().value().getDimensions(), (vector<unsigned long>{2, 12, 5}));
+    EXPECT_EQ(sink->getErrorOutput().value().getDimensions(), (vector<unsigned long>{2, 12, 5}));
+    EXPECT_EQ(reshape->getErrorInput().value().getDimensions(), (vector<unsigned long>{2, 12, 5}));
+    EXPECT_EQ(reshape->getErrorOutput().value().getDimensions(), (vector<unsigned long>{2, 3, 4, 5}));
+    EXPECT_EQ(upstream->getErrorInput().value().getDimensions(), (vector<unsigned long>{2, 3, 4, 5}));
+
+    EXPECT_EQ(reshape->getErrorInput().value().getMemPtr(), sink->getErrorOutput().value().getMemPtr());
+    EXPECT_EQ(reshape->getErrorOutput().value().getMemPtr(), reshape->getErrorInput().value().getMemPtr());
+    EXPECT_EQ(upstream->getErrorInput().value().getMemPtr(), reshape->getErrorInput().value().getMemPtr());
 
     LayerTestHelper::tearDownNetwork(layers);
 }

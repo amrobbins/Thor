@@ -54,12 +54,12 @@ pytestmark = [
 
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _TRAINER_STATS_RE = re.compile(
-    r"INFO trainer: phase=(?P<phase>train|validate|test) "
-    r"epoch=(?P<epoch>\d+)/(?:\d+) "
-    r"step=(?P<step>\d+) "
-    r"batch=(?P<batch>\d+)/(?:\d+) "
-    r"loss=(?P<loss>[-+0-9.eE]+).*?"
-    r"flops/s=(?P<flops>[-+0-9.eE]+[KMGTPE]?)")
+    r"INFO trainer:\s+phase=\s*(?P<phase>train|validate|test)\s+"
+    r"epoch=\s*(?P<epoch>\d+)/(?:\d+)\s+"
+    r"step=\s*(?P<step>\d+)\s+"
+    r"batch=\s*(?P<batch>\d+)/(?:\d+)\s+"
+    r"loss=\s*(?P<loss>[-+0-9.eE]+).*?"
+    r"flops/s=\s*(?P<flops>[-+0-9.eE]+[KMGTPE]?)")
 
 
 def _flush_native_stdio_for_capture():

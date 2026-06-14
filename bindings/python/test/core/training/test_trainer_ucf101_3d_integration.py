@@ -23,15 +23,24 @@ UCF101_3D_DATASET_URL = os.environ.get(
 )
 UCF101_3D_CLIP_FRAMES = int(os.environ.get("THOR_UCF101_3D_CLIP_FRAMES", "16"))
 UCF101_3D_IMAGE_SIZE = int(os.environ.get("THOR_UCF101_3D_IMAGE_SIZE", "112"))
-UCF101_3D_BATCH_SIZE = int(os.environ.get("THOR_UCF101_3D_BATCH_SIZE", "2"))
-UCF101_3D_EPOCHS = int(os.environ.get("THOR_UCF101_3D_EPOCHS", "1"))
-UCF101_3D_MAX_IN_FLIGHT_BATCHES = int(os.environ.get("THOR_UCF101_3D_MAX_IN_FLIGHT_BATCHES", "2"))
+UCF101_3D_BATCH_SIZE = int(os.environ.get("THOR_UCF101_3D_BATCH_SIZE", "16"))
+UCF101_3D_EPOCHS = int(os.environ.get("THOR_UCF101_3D_EPOCHS", "10"))
+UCF101_3D_MAX_IN_FLIGHT_BATCHES = int(os.environ.get("THOR_UCF101_3D_MAX_IN_FLIGHT_BATCHES", "8"))
 UCF101_3D_STATS_INTERVAL_S = float(os.environ.get("THOR_UCF101_3D_STATS_INTERVAL_S", "0.0"))
 UCF101_3D_REBUILD = os.environ.get("THOR_UCF101_3D_REBUILD") == "1"
 UCF101_3D_NUM_SHARDS = int(os.environ.get("THOR_UCF101_3D_NUM_SHARDS", "1"))
 # Default 0 means use the full subset.  Non-zero values are useful while
 # iterating on the test itself without changing the network under test.
 UCF101_3D_MAX_VIDEOS_PER_CLASS = int(os.environ.get("THOR_UCF101_3D_MAX_VIDEOS_PER_CLASS", "0"))
+# These tests are intentionally gated and should prove useful training, not just
+# graph execution.  Compare moving windows so assertions do not depend on any
+# single randomly sampled batch.
+UCF101_3D_TRAINING_ASSERTION_WINDOW = int(os.environ.get("THOR_UCF101_3D_TRAINING_ASSERTION_WINDOW", "4"))
+UCF101_3D_MAX_FINAL_TRAIN_LOSS_RATIO = float(os.environ.get("THOR_UCF101_3D_MAX_FINAL_TRAIN_LOSS_RATIO", "0.80"))
+UCF101_3D_LEARNING_RATE = float(os.environ.get("THOR_UCF101_3D_LEARNING_RATE", "0.01"))
+UCF101_3D_MOMENTUM = float(os.environ.get("THOR_UCF101_3D_MOMENTUM", "0.9"))
+UCF101_3D_STATS_COLOR = os.environ.get("THOR_UCF101_3D_STATS_COLOR", "always").lower()
+assert UCF101_3D_STATS_COLOR in {"always", "auto", "never"}
 UCF101_3D_MANIFEST_VERSION = 1
 
 pytestmark = [
@@ -46,12 +55,11 @@ pytestmark = [
 
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _TRAINER_STATS_RE = re.compile(
-    r"INFO trainer: phase=(?P<phase>train|validate|test) "
-    r"epoch=(?P<epoch>\d+)/(?:\d+) "
-    r"step=(?P<step>\d+) "
-    r"batch=(?P<batch>\d+)/(?:\d+) "
-    r"loss=(?P<loss>[-+0-9.eE]+)"
-)
+    r"INFO trainer:\s+phase=\s*(?P<phase>train|validate|test)\s+"
+    r"epoch=\s*(?P<epoch>\d+)/(?:\d+)\s+"
+    r"step=\s*(?P<step>\d+)\s+"
+    r"batch=\s*(?P<batch>\d+)/(?:\d+)\s+"
+    r"loss=\s*(?P<loss>[-+0-9.eE]+)")
 
 
 def _flush_native_stdio_for_capture():
@@ -74,7 +82,8 @@ class _NativeOutputTee:
         for fd in (1, 2):
             saved_fd = os.dup(fd)
             read_fd, write_fd = os.pipe()
-            capture_file = tempfile.NamedTemporaryFile(prefix=f"thor_ucf101_3d_fit_fd{fd}_", suffix=".log", delete=False)
+            capture_file = tempfile.NamedTemporaryFile(
+                prefix=f"thor_ucf101_3d_fit_fd{fd}_", suffix=".log", delete=False)
             capture_path = capture_file.name
             capture_file.close()
 
@@ -136,8 +145,7 @@ def _captured_trainer_stats(captured_text: str):
                 "step": int(match.group("step")),
                 "batch": int(match.group("batch")),
                 "loss": float(match.group("loss")),
-            }
-        )
+            })
     return stats
 
 
@@ -166,8 +174,36 @@ def _assert_finite_positive_losses(stats, *, model_name: str):
     for loss in losses:
         assert math.isfinite(loss), f"{model_name}: non-finite loss reported: {loss}; phase_counts={phase_counts}"
         assert loss > 0.0, f"{model_name}: non-positive loss reported: {loss}; phase_counts={phase_counts}"
-    assert any(entry["phase"] == "train" for entry in stats), f"{model_name}: no train stats reported; phase_counts={phase_counts}"
-    assert any(entry["phase"] == "validate" for entry in stats), f"{model_name}: no validate stats reported; phase_counts={phase_counts}"
+    assert any(
+        entry["phase"] == "train"
+        for entry in stats), f"{model_name}: no train stats reported; phase_counts={phase_counts}"
+    assert any(
+        entry["phase"] == "validate"
+        for entry in stats), f"{model_name}: no validate stats reported; phase_counts={phase_counts}"
+
+
+def _mean(values):
+    return sum(values) / len(values)
+
+
+def _assert_train_loss_improves(stats, *, model_name: str):
+    train_losses = [entry["loss"] for entry in stats if entry["phase"] == "train"]
+    phase_counts = _stats_phase_counts(stats)
+    window = max(1, UCF101_3D_TRAINING_ASSERTION_WINDOW)
+    assert len(train_losses) >= 2 * window, (
+        f"{model_name}: not enough train loss reports to assert useful training; "
+        f"got={len(train_losses)} required={2 * window} phase_counts={phase_counts}; "
+        "increase epochs or lower THOR_UCF101_3D_STATS_INTERVAL_S")
+
+    initial = _mean(train_losses[:window])
+    final = _mean(train_losses[-window:])
+    max_allowed_final = initial * UCF101_3D_MAX_FINAL_TRAIN_LOSS_RATIO
+    assert final <= max_allowed_final, (
+        f"{model_name}: train loss did not improve enough; "
+        f"initial_window_mean={initial:.6f} final_window_mean={final:.6f} "
+        f"required_final<={max_allowed_final:.6f} "
+        f"max_final_ratio={UCF101_3D_MAX_FINAL_TRAIN_LOSS_RATIO:.3f} "
+        f"window={window} train_losses={train_losses}")
 
 
 def _safe_extract_tar(archive: tarfile.TarFile, dest_dir: Path):
@@ -196,7 +232,8 @@ def _ensure_ucf101_subset_downloaded(cache_root: Path) -> Path:
             _safe_extract_tar(archive, cache_root)
     except tarfile.TarError as exc:
         magic = archive_path.read_bytes()[:32]
-        raise RuntimeError(f"UCF101 subset archive is not a readable tar archive: {archive_path}; first bytes={magic!r}") from exc
+        raise RuntimeError(
+            f"UCF101 subset archive is not a readable tar archive: {archive_path}; first bytes={magic!r}") from exc
 
     if not dataset_root.exists():
         candidates = [path for path in cache_root.iterdir() if path.is_dir() and (path / "train").exists()]
@@ -357,8 +394,7 @@ def _decode_video_rgb_frames(video_path: Path):
     if frames is None:
         raise RuntimeError(
             "Unable to decode UCF101 video. Install opencv-python or imageio[ffmpeg], or make sure the ffmpeg "
-            f"and ffprobe executables are on PATH. Video: {video_path}"
-        )
+            f"and ffprobe executables are on PATH. Video: {video_path}")
     return frames
 
 
@@ -469,8 +505,7 @@ def _write_ucf101_split(
     for class_name in class_names:
         class_dir = dataset_root / source_split_name / class_name
         video_paths = [] if not class_dir.exists() else sorted(
-            path for suffix in ("*.avi", "*.mp4", "*.mov", "*.mkv") for path in class_dir.glob(suffix)
-        )
+            path for suffix in ("*.avi", "*.mp4", "*.mov", "*.mkv") for path in class_dir.glob(suffix))
         if UCF101_3D_MAX_VIDEOS_PER_CLASS > 0:
             video_paths = video_paths[:UCF101_3D_MAX_VIDEOS_PER_CLASS]
         for video_path in video_paths:
@@ -495,8 +530,7 @@ def _ensure_ucf101_3d_shards():
     except ImportError as exc:
         raise RuntimeError(
             "The heavyweight UCF101 3D integration tests require Pillow. "
-            "Install Pillow plus either opencv-python or imageio[ffmpeg] in the test venv."
-        ) from exc
+            "Install Pillow plus either opencv-python or imageio[ffmpeg] in the test venv.") from exc
 
     dataset_root = _ensure_ucf101_subset_downloaded(UCF101_3D_CACHE_DIR)
     class_names = _ucf101_class_names(dataset_root)
@@ -548,8 +582,7 @@ def _ensure_ucf101_3d_shards():
     )
 
     example_size_in_bytes = (
-        3 * UCF101_3D_CLIP_FRAMES * UCF101_3D_IMAGE_SIZE * UCF101_3D_IMAGE_SIZE * np.dtype(np.float16).itemsize
-    )
+        3 * UCF101_3D_CLIP_FRAMES * UCF101_3D_IMAGE_SIZE * UCF101_3D_IMAGE_SIZE * np.dtype(np.float16).itemsize)
     shard_paths = thor.training.create_sharded_raw_dataset(
         [str(raw_root)],
         [str(path) for path in shard_dest_dirs],
@@ -638,12 +671,76 @@ def _build_c3d_ucf101(name: str, *, num_classes: int, clip_frames: int, image_si
     # C3D-style all-3D stem.  Because Thor only exposes 2D Pooling today, the
     # integration test uses strided 3D convolutions for temporal and spatial
     # downsampling while keeping real temporal extent throughout the early blocks.
-    x = _conv3d_bn_relu(network, x, 64, 3, 7, 7, vertical_stride=2, horizontal_stride=2, depth_padding=1, vertical_padding=3, horizontal_padding=3, dtype=dtype)
+    x = _conv3d_bn_relu(
+        network,
+        x,
+        64,
+        3,
+        7,
+        7,
+        vertical_stride=2,
+        horizontal_stride=2,
+        depth_padding=1,
+        vertical_padding=3,
+        horizontal_padding=3,
+        dtype=dtype)
     x = _conv3d_bn_relu(network, x, 64, 3, 3, 3, depth_padding=1, vertical_padding=1, horizontal_padding=1, dtype=dtype)
-    x = _conv3d_bn_relu(network, x, 128, 3, 3, 3, depth_stride=2, vertical_stride=2, horizontal_stride=2, depth_padding=1, vertical_padding=1, horizontal_padding=1, dtype=dtype)
-    x = _conv3d_bn_relu(network, x, 256, 3, 3, 3, depth_stride=2, vertical_stride=2, horizontal_stride=2, depth_padding=1, vertical_padding=1, horizontal_padding=1, dtype=dtype)
-    x = _conv3d_bn_relu(network, x, 512, 3, 3, 3, depth_stride=2, vertical_stride=2, horizontal_stride=2, depth_padding=1, vertical_padding=1, horizontal_padding=1, dtype=dtype)
-    x = _conv3d_bn_relu(network, x, 512, 3, 3, 3, depth_stride=2, vertical_stride=2, horizontal_stride=2, depth_padding=1, vertical_padding=1, horizontal_padding=1, dtype=dtype)
+    x = _conv3d_bn_relu(
+        network,
+        x,
+        128,
+        3,
+        3,
+        3,
+        depth_stride=2,
+        vertical_stride=2,
+        horizontal_stride=2,
+        depth_padding=1,
+        vertical_padding=1,
+        horizontal_padding=1,
+        dtype=dtype)
+    x = _conv3d_bn_relu(
+        network,
+        x,
+        256,
+        3,
+        3,
+        3,
+        depth_stride=2,
+        vertical_stride=2,
+        horizontal_stride=2,
+        depth_padding=1,
+        vertical_padding=1,
+        horizontal_padding=1,
+        dtype=dtype)
+    x = _conv3d_bn_relu(
+        network,
+        x,
+        512,
+        3,
+        3,
+        3,
+        depth_stride=2,
+        vertical_stride=2,
+        horizontal_stride=2,
+        depth_padding=1,
+        vertical_padding=1,
+        horizontal_padding=1,
+        dtype=dtype)
+    x = _conv3d_bn_relu(
+        network,
+        x,
+        512,
+        3,
+        3,
+        3,
+        depth_stride=2,
+        vertical_stride=2,
+        horizontal_stride=2,
+        depth_padding=1,
+        vertical_padding=1,
+        horizontal_padding=1,
+        dtype=dtype)
 
     flat = thor.layers.Flatten(network, x, 1)
     x = flat.get_feature_output()
@@ -656,7 +753,8 @@ def _build_c3d_ucf101(name: str, *, num_classes: int, clip_frames: int, image_si
     drop7 = thor.layers.DropOut(network, x, 0.5)
     logits = thor.layers.FullyConnected(network, drop7.get_feature_output(), num_classes, True, activation=None)
 
-    loss = thor.losses.CategoricalCrossEntropy(network, logits.get_feature_output(), labels.get_feature_output(), thor.DataType.fp32)
+    loss = thor.losses.CategoricalCrossEntropy(
+        network, logits.get_feature_output(), labels.get_feature_output(), thor.DataType.fp32)
     thor.layers.NetworkOutput(network, "loss", loss.get_loss(), thor.DataType.fp32)
     thor.layers.NetworkOutput(network, "scores", logits.get_feature_output(), dtype)
     return network
@@ -712,7 +810,8 @@ def _build_r2plus1d_ucf101(name: str, *, num_classes: int, clip_frames: int, ima
     drop = thor.layers.DropOut(network, fc.get_feature_output(), 0.5)
     logits = thor.layers.FullyConnected(network, drop.get_feature_output(), num_classes, True, activation=None)
 
-    loss = thor.losses.CategoricalCrossEntropy(network, logits.get_feature_output(), labels.get_feature_output(), thor.DataType.fp32)
+    loss = thor.losses.CategoricalCrossEntropy(
+        network, logits.get_feature_output(), labels.get_feature_output(), thor.DataType.fp32)
     thor.layers.NetworkOutput(network, "loss", loss.get_loss(), thor.DataType.fp32)
     thor.layers.NetworkOutput(network, "scores", logits.get_feature_output(), dtype)
     return network
@@ -736,7 +835,7 @@ def _run_full_ucf101_3d_model_training(model_builder, *, model_name: str, capfd)
             clip_frames=manifest["clip_frames"],
             image_size=manifest["image_size"],
         )
-        optimizer = thor.optimizers.Sgd(initial_learning_rate=0.01, momentum=0.9)
+        optimizer = thor.optimizers.Sgd(initial_learning_rate=UCF101_3D_LEARNING_RATE, momentum=UCF101_3D_MOMENTUM)
         trainer = thor.training.Trainer(
             network,
             loader,
@@ -746,10 +845,11 @@ def _run_full_ucf101_3d_model_training(model_builder, *, model_name: str, capfd)
             stats_interval_s=UCF101_3D_STATS_INTERVAL_S,
             max_in_flight_batches=UCF101_3D_MAX_IN_FLIGHT_BATCHES,
             scalar_tensors_to_report=["loss"],
-            stats_color="never",
+            stats_color=UCF101_3D_STATS_COLOR,
         )
         stats = _fit_and_capture_stats(trainer, epochs=UCF101_3D_EPOCHS)
         _assert_finite_positive_losses(stats, model_name=model_name)
+        _assert_train_loss_improves(stats, model_name=model_name)
 
 
 @pytest.mark.parametrize(

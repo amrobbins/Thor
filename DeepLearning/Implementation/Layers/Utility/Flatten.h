@@ -35,13 +35,15 @@ class Flatten : public Layer {
         return outputTensor;
     }
 
+    void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) override {
+        Layer::connectToNextLayer(nextLayer, driverConnectionType, loaderConnectionType);
+        fuseBackwardAliasThroughMetadataOnlyReshape();
+    }
+
     void postCompile() override {
-        // ErrorInput to the previous layer is the errorInput coming to this layer,
-        // then backProp is a no op
-        if (errorInput.has_value() && errorOutput.has_value() && previousLayer.has_value()) {
-            previousLayer.value()->replaceErrorInput(errorOutput, errorInput);
-        }
-        errorOutput = errorInput;
+        // Backward alias fusion must happen during connection, before upstream
+        // CustomLayer compileImpl() snapshots its expected incoming error tensor
+        // ids.  Keep postCompile() intentionally empty except for the base flag.
         Layer::postCompile();
     }
 
@@ -55,6 +57,26 @@ class Flatten : public Layer {
     }
 
    private:
+    void fuseBackwardAliasThroughMetadataOnlyReshape() {
+        // errorInput is the downstream gradient tensor whose descriptor matches
+        // this layer's feature output.  errorOutput is the tensor the upstream
+        // layer will receive.  For metadata-only reshape/flatten, both should
+        // alias the same storage, but upstream must see the original feature
+        // input descriptor.
+        if (!errorInput.has_value() || !errorOutput.has_value()) {
+            return;
+        }
+        THOR_THROW_IF_FALSE(featureInput.has_value());
+
+        Tensor reshapedErrorOutput = errorInput.value();
+        reshapedErrorOutput.reshape(featureInput.value().getDimensions());
+
+        if (previousLayer.has_value()) {
+            previousLayer.value()->replaceErrorInput(errorOutput, reshapedErrorOutput);
+        }
+        errorOutput = reshapedErrorOutput;
+    }
+
     bool uninitialized;
 
     unsigned int toNumDimensions;

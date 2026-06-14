@@ -61,11 +61,11 @@ pytestmark = [
 
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _TRAINER_STATS_RE = re.compile(
-    r"INFO trainer: phase=(?P<phase>train|validate|test) "
-    r"epoch=(?P<epoch>\d+)/(?:\d+) "
-    r"step=(?P<step>\d+) "
-    r"batch=(?P<batch>\d+)/(?:\d+) "
-    r"loss=(?P<loss>[-+0-9.eE]+)"
+    r"INFO trainer:\s+phase=\s*(?P<phase>train|validate|test)\s+"
+    r"epoch=\s*(?P<epoch>\d+)/(?:\d+)\s+"
+    r"step=\s*(?P<step>\d+)\s+"
+    r"batch=\s*(?P<batch>\d+)/(?:\d+)\s+"
+    r"loss=\s*(?P<loss>[-+0-9.eE]+)"
 )
 _MRNET_LABEL_TASKS = ("abnormal", "acl", "meniscus")
 _MSD_NIFTI_DTYPE_MAP = {
@@ -803,9 +803,10 @@ def _build_mrnet_axial_conv3d_classifier(
         horizontal_padding=1,
         dtype=dtype,
     )
+    # Keep the explicit Flatten here as a real 3D integration regression for
+    # Flatten's metadata-only forward alias and shape-restoring backward alias.
     flat = thor.layers.Flatten(network, x, 1)
-    x = flat.get_feature_output()
-    hidden = thor.layers.FullyConnected(network, x, 1024, True, activation=thor.activations.Relu())
+    hidden = thor.layers.FullyConnected(network, flat.get_feature_output(), 1024, True, activation=thor.activations.Relu())
     x = hidden.get_feature_output()
     drop = thor.layers.DropOut(network, x, 0.25)
     predictions = thor.layers.FullyConnected(network, drop.get_feature_output(), len(_MRNET_LABEL_TASKS), True, activation=thor.activations.Sigmoid())

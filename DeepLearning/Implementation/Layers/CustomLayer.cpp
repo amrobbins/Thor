@@ -505,7 +505,7 @@ void CustomLayer::recordEffectiveParameterBatchSizeForApplication(uint32_t appli
     if (trainingUpdateDiagnosticsEnabled()) {
         std::fprintf(stderr,
                      "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u record_effective_batch batch=%u active_parameters=%s fused_parameters=%s before=%s\n",
-                     getName().c_str(),
+                     diagnosticLabel().c_str(),
                      applicationIndex,
                      batchSize,
                      joinNames(app.activeParameterTargetNames).c_str(),
@@ -521,7 +521,7 @@ void CustomLayer::recordEffectiveParameterBatchSizeForApplication(uint32_t appli
     if (trainingUpdateDiagnosticsEnabled()) {
         std::fprintf(stderr,
                      "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u record_effective_batch after=%s\n",
-                     getName().c_str(),
+                     diagnosticLabel().c_str(),
                      applicationIndex,
                      joinNames(effectiveBatchSizeByParameterName).c_str());
     }
@@ -1482,7 +1482,7 @@ void CustomLayer::compileImpl() {
         if (trainingUpdateDiagnosticsEnabled()) {
             std::fprintf(stderr,
                          "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u compile_backward downstream=%d fused_loss=%d backward_additional_inputs=%zu upstream_outputs=%s all_trainable=%s active_trainable=%s gradient_update_stream=%d\n",
-                         getName().c_str(),
+                         diagnosticLabel().c_str(),
                          applicationIndex,
                          applicationHasAnyDownstreamBackprop(applicationIndex) ? 1 : 0,
                          applicationHasFusedCustomLossGradient(applicationIndex) ? 1 : 0,
@@ -1542,7 +1542,7 @@ void CustomLayer::compileImpl() {
         if (trainingUpdateDiagnosticsEnabled()) {
             std::fprintf(stderr,
                          "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u compile_parameter_targets fused=%s all_materialized=%s active_materialized=%s materialized_preallocated_outputs=%zu active_preallocated_outputs=%zu\n",
-                         getName().c_str(),
+                         diagnosticLabel().c_str(),
                          applicationIndex,
                          joinNames(fusedParameterTargets).c_str(),
                          joinNames(allMaterializedParameterTargets).c_str(),
@@ -1607,7 +1607,7 @@ void CustomLayer::compileImpl() {
             const ApplicationState& app = applications[applicationIndex];
             std::fprintf(stderr,
                          "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u compiled_stamps backward_error=%d weights_clear=%d weights_accumulate=%d fused_update=%d expected_backward_errors=%zu num_backward_applications=%u\n",
-                         getName().c_str(),
+                         diagnosticLabel().c_str(),
                          applicationIndex,
                          app.backwardErrorStamped != nullptr ? 1 : 0,
                          app.backwardWeightsClearStamped != nullptr ? 1 : 0,
@@ -1745,6 +1745,16 @@ void CustomLayer::replaceErrorInput(std::optional<Tensor> oldErrorInput, std::op
     }
 }
 
+
+std::string CustomLayer::diagnosticLabel() {
+    std::string label = getLayerType() + "#" + std::to_string(getId());
+    std::string layerName = getName();
+    if (!layerName.empty()) {
+        label += "(" + layerName + ")";
+    }
+    return label;
+}
+
 void CustomLayer::synchronizeComputeStreamForForwardInputs(uint32_t applicationIndex) {
     Stream& runStream = computeStream(applicationIndex);
     const uint32_t runFlat = primaryInputFlatIndex(applicationIndex);
@@ -1799,15 +1809,70 @@ void CustomLayer::forward(std::optional<Tensor> featureInput, bool validationPas
     for (uint32_t applicationIndex : candidateApplications) {
         ApplicationState& app = applications[applicationIndex];
         if (app.forwardRanThisPass) {
+            if (trainingUpdateDiagnosticsEnabled()) {
+                std::fprintf(stderr,
+                             "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u forward_skip reason=already_ran tensor=%lu batch=%u validation=%d is_start_forward=%d is_start_backward=%d downstream_backprop=%d expected_backward_errors=%zu waiting_forward=%zu num_backward_applications=%u completed_backward_applications=%u\n",
+                             diagnosticLabel().c_str(),
+                             applicationIndex,
+                             tensorId,
+                             batchSize,
+                             validationPass ? 1 : 0,
+                             isStartOfForward ? 1 : 0,
+                             isStartOfBackward ? 1 : 0,
+                             applicationHasAnyDownstreamBackprop(applicationIndex) ? 1 : 0,
+                             app.expectedBackwardErrorInputTensorIds.size(),
+                             app.stillWaitingForForwardInputTensorIds.size(),
+                             numBackwardApplications,
+                             numBackwardApplicationsCompletedThisPass);
+            }
             continue;
         }
         if (app.stillWaitingForForwardInputTensorIds.count(tensorId) == 0) {
+            if (trainingUpdateDiagnosticsEnabled()) {
+                std::fprintf(stderr,
+                             "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u forward_skip reason=unexpected_input tensor=%lu batch=%u validation=%d is_start_forward=%d waiting_forward=%zu all_forward=%zu num_backward_applications=%u completed_backward_applications=%u\n",
+                             diagnosticLabel().c_str(),
+                             applicationIndex,
+                             tensorId,
+                             batchSize,
+                             validationPass ? 1 : 0,
+                             isStartOfForward ? 1 : 0,
+                             app.stillWaitingForForwardInputTensorIds.size(),
+                             app.allForwardInputTensorIds.size(),
+                             numBackwardApplications,
+                             numBackwardApplicationsCompletedThisPass);
+            }
             continue;
         }
         app.stillWaitingForForwardInputTensorIds.erase(tensorId);
 
         if (!app.stillWaitingForForwardInputTensorIds.empty()) {
+            if (trainingUpdateDiagnosticsEnabled()) {
+                std::fprintf(stderr,
+                             "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u forward_waiting tensor=%lu batch=%u validation=%d remaining=%zu all_forward=%zu\n",
+                             diagnosticLabel().c_str(),
+                             applicationIndex,
+                             tensorId,
+                             batchSize,
+                             validationPass ? 1 : 0,
+                             app.stillWaitingForForwardInputTensorIds.size(),
+                             app.allForwardInputTensorIds.size());
+            }
             continue;
+        }
+
+        if (trainingUpdateDiagnosticsEnabled()) {
+            std::fprintf(stderr,
+                         "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u forward_run tensor=%lu batch=%u validation=%d downstream_backprop=%d expected_backward_errors=%zu num_backward_applications=%u completed_backward_applications=%u\n",
+                         diagnosticLabel().c_str(),
+                         applicationIndex,
+                         tensorId,
+                         batchSize,
+                         validationPass ? 1 : 0,
+                         applicationHasAnyDownstreamBackprop(applicationIndex) ? 1 : 0,
+                         app.expectedBackwardErrorInputTensorIds.size(),
+                         numBackwardApplications,
+                         numBackwardApplicationsCompletedThisPass);
         }
 
         app.forwardRanThisPass = true;
@@ -1840,8 +1905,19 @@ void CustomLayer::forward(std::optional<Tensor> featureInput, bool validationPas
 void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize) {
     THOR_THROW_IF_FALSE(running);
 
-    if (!errorInput.has_value())
+    if (!errorInput.has_value()) {
+        if (trainingUpdateDiagnosticsEnabled()) {
+            std::fprintf(stderr,
+                         "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s backward_skip reason=no_error_input batch=%u is_start_forward=%d is_start_backward=%d num_backward_applications=%u completed_backward_applications=%u\n",
+                         diagnosticLabel().c_str(),
+                         batchSize,
+                         isStartOfForward ? 1 : 0,
+                         isStartOfBackward ? 1 : 0,
+                         numBackwardApplications,
+                         numBackwardApplicationsCompletedThisPass);
+        }
         return;
+    }
 
     std::set<uint32_t> candidateApplications;
     for (uint32_t flat = 0; flat < errorInputs.size(); ++flat) {
@@ -1854,7 +1930,7 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
     if (trainingUpdateDiagnosticsEnabled()) {
         std::fprintf(stderr,
                      "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s backward_entry batch=%u candidate_applications=%zu is_start_of_backward=%d num_backward_applications=%u completed_this_pass=%u\n",
-                     getName().c_str(),
+                     diagnosticLabel().c_str(),
                      batchSize,
                      candidateApplications.size(),
                      isStartOfBackward ? 1 : 0,
@@ -1883,7 +1959,7 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
             if (trainingUpdateDiagnosticsEnabled()) {
                 std::fprintf(stderr,
                              "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u backward_waiting remaining_errors=%zu\n",
-                             getName().c_str(),
+                             diagnosticLabel().c_str(),
                              applicationIndex,
                              app.stillWaitingForBackwardErrorInputTensorIds.size());
             }
@@ -1893,7 +1969,7 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
         if (trainingUpdateDiagnosticsEnabled()) {
             std::fprintf(stderr,
                          "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u backward_ready batch=%u active_parameters=%s backward_error_stamp=%d weights_clear_stamp=%d weights_accumulate_stamp=%d fused_update_stamp=%d\n",
-                         getName().c_str(),
+                         diagnosticLabel().c_str(),
                          applicationIndex,
                          batchSize,
                          joinNames(app.activeParameterTargetNames).c_str(),
@@ -1948,7 +2024,7 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
         if (trainingUpdateDiagnosticsEnabled()) {
             std::fprintf(stderr,
                          "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s backward_pass_complete effective_batches=%s gradient_update_stream=%d\n",
-                         getName().c_str(),
+                         diagnosticLabel().c_str(),
                          joinNames(effectiveBatchSizeByParameterName).c_str(),
                          gradientUpdateStream.has_value() ? 1 : 0);
         }
@@ -1972,7 +2048,7 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
                     if (trainingUpdateDiagnosticsEnabled()) {
                         std::fprintf(stderr,
                                      "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s parameter=%s apply_skip reason=training_disabled\n",
-                                     getName().c_str(),
+                                     diagnosticLabel().c_str(),
                                      parameter->getName().c_str());
                     }
                     continue;
@@ -1983,7 +2059,7 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
                     if (trainingUpdateDiagnosticsEnabled()) {
                         std::fprintf(stderr,
                                      "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s parameter=%s apply_skip reason=no_effective_batch effective_batches=%s\n",
-                                     getName().c_str(),
+                                     diagnosticLabel().c_str(),
                                      parameter->getName().c_str(),
                                      joinNames(effectiveBatchSizeByParameterName).c_str());
                     }
@@ -1998,7 +2074,7 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
                 if (trainingUpdateDiagnosticsEnabled()) {
                     std::fprintf(stderr,
                                  "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s parameter=%s apply_gradient batch=%llu\n",
-                                 getName().c_str(),
+                                 diagnosticLabel().c_str(),
                                  parameter->getName().c_str(),
                                  static_cast<unsigned long long>(effectiveBatchSizeIt->second));
                 }
@@ -2008,7 +2084,7 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
             if (trainingUpdateDiagnosticsEnabled()) {
                 std::fprintf(stderr,
                              "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s update_result any_weights_updated=%d\n",
-                             getName().c_str(),
+                             diagnosticLabel().c_str(),
                              anyWeightsUpdated ? 1 : 0);
             }
             if (anyWeightsUpdated) {
@@ -2059,7 +2135,7 @@ void CustomLayer::accumulateWeightsGradientForApplication(uint32_t applicationIn
     if (trainingUpdateDiagnosticsEnabled()) {
         std::fprintf(stderr,
                      "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u accumulate batch=%u clear_first=%d run_clear=%d run_accumulate=%d run_fused_update=%d active_parameters=%s\n",
-                     getName().c_str(),
+                     diagnosticLabel().c_str(),
                      applicationIndex,
                      batchSize,
                      clearGradientFirst ? 1 : 0,

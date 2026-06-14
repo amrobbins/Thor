@@ -750,6 +750,85 @@ TEST(FullyConnectedApi, ForwardFlattensHigherRankFeatureInput) {
     expectAllClose(actual, expected);
 }
 
+TEST(FullyConnectedApi, BackwardFlattensHigherRankFeatureInputWithoutMaterializedFlatten) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint32_t flattenedFeatures = 4;
+    constexpr uint32_t numOutputFeatures = 2;
+    constexpr float learningRate = 0.1f;
+    const DataType dataType = DataType::FP32;
+
+    const vector<float> inputValues = {1.0f, 2.0f, -1.0f, 0.5f, -2.0f, 1.5f, 0.25f, 3.0f};
+    const vector<float> weightValues = {0.5f, -1.0f, 2.0f, -0.25f, 0.75f, 1.5f, -1.25f, 0.5f};
+    const vector<float> errorInputValues = {1.0f, -0.5f, 0.25f, 2.0f};
+
+    Api::Network network("testNetwork");
+    Api::NetworkInput input = Api::NetworkInput::Builder().network(network).name("input").dimensions({2, 2}).dataType(dataType).build();
+    Api::GradientRivet inputRivet = Api::GradientRivet::Builder().network(network).tensor(input.getFeatureOutput().value()).build();
+    Api::FullyConnected fc = Api::FullyConnected::Builder()
+                                 .network(network)
+                                 .featureInput(inputRivet.getFeatureOutput().value())
+                                 .numOutputFeatures(numOutputFeatures)
+                                 .hasBias(false)
+                                 .computeDataType(DataType::FP32)
+                                 .outputDataType(DataType::FP32)
+                                 .noActivation()
+                                 .build();
+    Api::GradientRivet outputRivet = Api::GradientRivet::Builder().network(network).tensor(fc.getFeatureOutput().value()).build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(outputRivet.getFeatureOutput().value())
+                                    .dataType(dataType)
+                                    .build();
+    shared_ptr<Api::Sgd> sgd = Api::Sgd::Builder().network(network).initialLearningRate(learningRate).decay(0.0f).momentum(0.0f).build();
+    (void)sgd;
+
+    PlacedFullyConnectedFixture fixture = placeSingleFullyConnectedNetwork(network, input, output, fc, batchSize, false);
+    ASSERT_EQ(fixture.physicalFc->listParameters(), (vector<string>{"weights"}));
+
+    Stream stream = fixture.physicalFc->getStreams()[0];
+    setParameterTensor(fixture.physicalFc->getParameter("weights"), weightValues, stream);
+    stream.synchronize();
+
+    Impl::Tensor featureInHost(cpuPlacement, Impl::TensorDescriptor(dataType, {batchSize, 2, 2}));
+    writeCpuTensor(featureInHost, inputValues);
+    const vector<float> actualForward = runForward(*fixture.physicalInput, *fixture.physicalOutput, featureInHost, batchSize);
+
+    ASSERT_GT(fixture.physicalFc->getErrorInputs().size(), 0u);
+    ASSERT_TRUE(fixture.physicalFc->getErrorInputs()[0].has_value());
+    ASSERT_GT(fixture.physicalFc->getErrorOutputs().size(), 0u);
+    ASSERT_TRUE(fixture.physicalFc->getErrorOutputs()[0].has_value());
+    EXPECT_EQ(fixture.physicalFc->getErrorOutputs()[0].value().getDimensions(), (vector<uint64_t>{batchSize, 2, 2}));
+    ASSERT_TRUE(fixture.physicalFc->getGradientUpdateStream().has_value());
+
+    Impl::Tensor fcErrorInput = fixture.physicalFc->getErrorInputs()[0].value();
+    Impl::Tensor fcErrorInputHost = fcErrorInput.clone(cpuPlacement);
+    writeCpuTensor(fcErrorInputHost, errorInputValues);
+    fcErrorInput.copyFromAsync(fcErrorInputHost, stream);
+    fixture.physicalFc->backward(fcErrorInput, batchSize);
+
+    Stream gradientStream = fixture.physicalFc->getGradientUpdateStream().value();
+    Impl::Tensor errorOutputHost = copyTensorToCpu(fixture.physicalFc->getErrorOutputs()[0].value(), stream);
+    Impl::Tensor weightsAfterHost = copyTensorToCpu(fixture.physicalFc->getParameter("weights")->getStorage().value(), gradientStream);
+    EXPECT_FALSE(fixture.physicalFc->getParameter("weights")->getOptimizer()->getWeightsGradient().has_value())
+        << "Fused FullyConnected CustomLayer update should not allocate a dense weights gradient tensor.";
+
+    stream.synchronize();
+    gradientStream.synchronize();
+
+    const vector<float> expectedForward =
+        fullyConnectedReference(inputValues, weightValues, {}, batchSize, flattenedFeatures, numOutputFeatures, false);
+    const vector<float> expectedErrorOutput =
+        fullyConnectedBackwardErrorReference(errorInputValues, weightValues, batchSize, flattenedFeatures, numOutputFeatures);
+    const vector<float> expectedWeightsGrad =
+        fullyConnectedWeightGradReference(inputValues, errorInputValues, batchSize, flattenedFeatures, numOutputFeatures);
+    const vector<float> expectedWeightsAfter = sgdUpdatedReference(weightValues, expectedWeightsGrad, batchSize, learningRate);
+
+    expectAllClose(actualForward, expectedForward, 1e-5f, 1e-5f, "feature out");
+    expectAllClose(readCpuTensor(errorOutputHost), expectedErrorOutput, 1e-5f, 1e-5f, "error out");
+    expectAllClose(readCpuTensor(weightsAfterHost), expectedWeightsAfter, 1e-5f, 1e-5f, "weights after");
+}
+
 TEST(FullyConnectedApi, ForwardAppliesEpilogueAfterMatmulBiasAndActivation) {
     constexpr uint32_t batchSize = 2;
     constexpr uint32_t numInputFeatures = 2;

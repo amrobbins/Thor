@@ -180,9 +180,13 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias
                 throw std::runtime_error("FullyConnected feature input placement does not match the layer placement.");
             }
 
-            // Treat any rank > 2 input as [batch, flattened_features] for the matrix multiply, without touching the
-            // original Tensor object owned by the surrounding graph. Tensor is a lightweight metadata/storage alias,
-            // so this reshape changes only this DynamicExpression's logical view.
+            // Treat any runtime rank > 2 input as [batch, flattened_features] for the matrix multiply by inserting
+            // a storage-alias reshape in the expression graph. Do not rebind the stamp input tensor metadata: the public
+            // graph still owns a rank-N feature tensor and upstream backprop must receive a rank-N gradient. The reshape
+            // node is metadata-only for dense tensors and AutoDiff reshapes the FC input gradient back to the original
+            // runtime feature shape.
+            const std::vector<uint64_t> originalFeatureInputDimensions = featureInputDimensions;
+            std::vector<uint64_t> logicalFeatureInputDimensions = featureInputDimensions;
             if (featureInputDimensions.size() > 2) {
                 const uint64_t batchSize = featureInputDimensions[0];
                 if (batchSize == 0) {
@@ -198,17 +202,16 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias
                     }
                     flattenedFeatures *= featureInputDimensions[i];
                 }
-                featureInputTensor.reshape({batchSize, flattenedFeatures});
-                featureInputDimensions = featureInputTensor.getDimensions();
+                logicalFeatureInputDimensions = {batchSize, flattenedFeatures};
             }
 
-            if (featureInputDimensions.size() != 2) {
+            if (logicalFeatureInputDimensions.size() != 2) {
                 throw std::runtime_error("FullyConnected logical feature input tensor must be rank 2 after flattening.");
             }
-            if (featureInputDimensions[0] == 0 || featureInputDimensions[1] == 0) {
+            if (logicalFeatureInputDimensions[0] == 0 || logicalFeatureInputDimensions[1] == 0) {
                 throw std::runtime_error("FullyConnected logical feature input tensor dimensions must be non-zero.");
             }
-            if (featureInputDimensions[1] != wTensor.getDimensions()[0]) {
+            if (logicalFeatureInputDimensions[1] != wTensor.getDimensions()[0]) {
                 throw std::runtime_error("FullyConnected input feature count does not match weights rows.");
             }
             if (outputs.contains("feature_output")) {
@@ -216,7 +219,7 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias
                 if (featureOutputTensor.getDimensions().size() != 2) {
                     throw std::runtime_error("FullyConnected feature output tensor must be rank 2.");
                 }
-                if (featureOutputTensor.getDimensions()[0] != featureInputDimensions[0] ||
+                if (featureOutputTensor.getDimensions()[0] != logicalFeatureInputDimensions[0] ||
                     featureOutputTensor.getDimensions()[1] != wTensor.getDimensions()[1]) {
                     throw std::runtime_error("FullyConnected feature output tensor dimensions are incompatible with the matmul output.");
                 }
@@ -229,6 +232,9 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias
             }
 
             auto fin = Expression::input("feature_input", featureInputTensor.getDataType(), featureInputTensor.getDataType());
+            if (originalFeatureInputDimensions.size() > 2) {
+                fin = fin.reshape(logicalFeatureInputDimensions);
+            }
             auto w = Expression::input("weights", weightsDataType, weightsDataType);
 
             // [batch, in_features] @ [in_features, out_features]
@@ -257,7 +263,7 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias
             }
             for (const std::string& auxInputName : epilogueAuxInputNames) {
                 const Tensor& auxTensor = inputs.at(auxInputName);
-                const std::vector<uint64_t> expectedAuxShape = {featureInputDimensions[0], wTensor.getDimensions()[1]};
+                const std::vector<uint64_t> expectedAuxShape = {logicalFeatureInputDimensions[0], wTensor.getDimensions()[1]};
                 if (auxTensor.getDimensions() != expectedAuxShape) {
                     throw std::runtime_error("FullyConnected epilogue auxiliary input '" + auxInputName +
                                              "' shape must match the fully connected feature output shape.");
@@ -279,12 +285,9 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias
 
             auto expressionOutputs = Expression::outputs({{"feature_output", fout}});
 
-            DynamicExpression::TensorMap stampInputs = inputs;
-            stampInputs["feature_input"] = featureInputTensor;
-
             return DynamicExpressionBuild{
                 std::make_shared<FusedEquation>(FusedEquation::compile(expressionOutputs.physicalOutputs(), placement.getDeviceNum())),
-                stampInputs,
+                inputs,
                 {},
                 outputs,
                 {},
