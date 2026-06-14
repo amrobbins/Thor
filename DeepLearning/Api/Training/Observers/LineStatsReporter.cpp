@@ -19,17 +19,18 @@ namespace {
 namespace Ansi {
 constexpr const char* reset = "\x1b[0m";
 constexpr const char* bold = "\x1b[1m";
-constexpr const char* dim = "\x1b[2m";
-constexpr const char* green = "\x1b[32m";
-constexpr const char* yellow = "\x1b[33m";
-constexpr const char* blue = "\x1b[34m";
-constexpr const char* magenta = "\x1b[35m";
-constexpr const char* cyan = "\x1b[36m";
-constexpr const char* brightBlack = "\x1b[90m";
-constexpr const char* boldBrightBlack = "\x1b[1;90m";
-constexpr const char* dimGreen = "\x1b[2;32m";
-constexpr const char* dimBlue = "\x1b[2;34m";
-constexpr const char* dimMagenta = "\x1b[2;35m";
+constexpr const char* key = "\x1b[38;5;235m";
+constexpr const char* label = "\x1b[38;5;235m";
+constexpr const char* phaseTrain = "\x1b[1;38;5;28m";
+constexpr const char* phaseValidate = "\x1b[1;38;5;18m";
+constexpr const char* phaseTest = "\x1b[1;38;5;53m";
+constexpr const char* phaseUnknown = "\x1b[1;38;5;235m";
+constexpr const char* progress = "\x1b[38;5;21m";
+constexpr const char* loss = "\x1b[1;38;5;0m";
+constexpr const char* accuracy = "\x1b[38;5;22m";
+constexpr const char* learningRate = "\x1b[38;5;53m";
+constexpr const char* throughput = "\x1b[1;38;2;140;84;0m";  // "\x1b[38;5;202m";
+constexpr const char* elapsed = "\x1b[38;5;0m";
 }  // namespace Ansi
 
 class LineBuffer {
@@ -83,13 +84,9 @@ class LineBuffer {
     size_t length = 0;
 };
 
-void appendFixed(LineBuffer& out, double value, int precision) {
-    out.appendFormat("%.*f", precision, value);
-}
+void appendFixed(LineBuffer& out, double value, int precision) { out.appendFormat("%.*f", precision, value); }
 
-void appendScientific(LineBuffer& out, double value, int precision) {
-    out.appendFormat("%.*e", precision, value);
-}
+void appendScientific(LineBuffer& out, double value, int precision) { out.appendFormat("%.*e", precision, value); }
 
 void appendCompactRate(LineBuffer& out, double value) {
     const double absValue = std::abs(value);
@@ -115,16 +112,82 @@ void appendCompactRate(LineBuffer& out, double value) {
     out.append(suffix);
 }
 
-void appendElapsed(LineBuffer& out, double elapsedSeconds) {
+std::string formatFixedString(double value, int precision) {
+    char buffer[64];
+    std::snprintf(buffer, sizeof(buffer), "%.*f", precision, value);
+    return std::string(buffer);
+}
+
+std::string formatScientificString(double value, int precision) {
+    char buffer[64];
+    std::snprintf(buffer, sizeof(buffer), "%.*e", precision, value);
+    return std::string(buffer);
+}
+
+std::string formatCompactRateString(double value) {
+    const double absValue = std::abs(value);
+    const char* suffix = "";
+    double scaled = value;
+    if (absValue >= 1.0e12) {
+        scaled = value / 1.0e12;
+        suffix = "T";
+    } else if (absValue >= 1.0e9) {
+        scaled = value / 1.0e9;
+        suffix = "G";
+    } else if (absValue >= 1.0e6) {
+        scaled = value / 1.0e6;
+        suffix = "M";
+    } else if (absValue >= 1.0e3) {
+        scaled = value / 1.0e3;
+        suffix = "K";
+    }
+
+    const double absScaled = std::abs(scaled);
+    const int precision = absScaled >= 100.0 ? 0 : (absScaled >= 10.0 ? 1 : 2);
+    char buffer[64];
+    std::snprintf(buffer, sizeof(buffer), "%.*f%s", precision, scaled, suffix);
+    return std::string(buffer);
+}
+
+std::string formatElapsedString(double elapsedSeconds) {
     const uint64_t roundedSeconds = static_cast<uint64_t>(std::max(0.0, elapsedSeconds));
     const uint64_t hours = roundedSeconds / 3600;
     const uint64_t minutes = (roundedSeconds / 60) % 60;
     const uint64_t seconds = roundedSeconds % 60;
-    out.appendFormat("%02llu:%02llu:%02llu",
-                     static_cast<unsigned long long>(hours),
-                     static_cast<unsigned long long>(minutes),
-                     static_cast<unsigned long long>(seconds));
+    char buffer[32];
+    std::snprintf(buffer,
+                  sizeof(buffer),
+                  "%02llu:%02llu:%02llu",
+                  static_cast<unsigned long long>(hours),
+                  static_cast<unsigned long long>(minutes),
+                  static_cast<unsigned long long>(seconds));
+    return std::string(buffer);
 }
+
+enum class PadAlignment { LEFT, RIGHT };
+
+void appendStyledPadded(
+    LineBuffer& out, const char* style, const std::string& value, size_t width, PadAlignment alignment = PadAlignment::RIGHT) {
+    out.append(style);
+    if (value.size() < width && alignment == PadAlignment::RIGHT) {
+        for (size_t i = value.size(); i < width; ++i) {
+            out.append(' ');
+        }
+    }
+    out.append(value.c_str());
+    if (value.size() < width && alignment == PadAlignment::LEFT) {
+        for (size_t i = value.size(); i < width; ++i) {
+            out.append(' ');
+        }
+    }
+    out.append(Ansi::reset);
+}
+
+std::string formatUnsigned(uint64_t value) { return std::to_string(value); }
+
+std::string formatRatio(uint64_t numerator, uint64_t denominator) { return std::to_string(numerator) + "/" + std::to_string(denominator); }
+
+void appendElapsed(LineBuffer& out, double elapsedSeconds) { out.append(formatElapsedString(elapsedSeconds).c_str()); }
 
 bool envFlagIsSet(const char* name) {
     const char* value = std::getenv(name);
@@ -143,9 +206,7 @@ bool terminalEnvDisablesColor() {
     return envFlagIsZero("CLICOLOR");
 }
 
-bool terminalEnvForcesColor() {
-    return envFlagIsSet("CLICOLOR_FORCE") && !envFlagIsZero("CLICOLOR_FORCE");
-}
+bool terminalEnvForcesColor() { return envFlagIsSet("CLICOLOR_FORCE") && !envFlagIsZero("CLICOLOR_FORCE"); }
 
 bool terminalKindAllowsColor() {
     const char* term = std::getenv("TERM");
@@ -174,29 +235,27 @@ bool fileSupportsAnsiColor(std::FILE* output) {
     return fileIsTerminal(output);
 }
 
-void appendPhaseValue(LineBuffer& out, TrainingPhase phase) {
+const char* phaseStyle(TrainingPhase phase) {
     switch (phase) {
         case TrainingPhase::TRAIN:
-            out.append(Ansi::dimGreen);
-            break;
+            return Ansi::phaseTrain;
         case TrainingPhase::VALIDATE:
-            out.append(Ansi::dimBlue);
-            break;
+            return Ansi::phaseValidate;
         case TrainingPhase::TEST:
-            out.append(Ansi::dimMagenta);
-            break;
+            return Ansi::phaseTest;
         case TrainingPhase::UNKNOWN:
         default:
-            out.append(Ansi::brightBlack);
-            break;
+            return Ansi::phaseUnknown;
     }
-    out.append(trainingPhaseName(phase));
-    out.append(Ansi::reset);
+}
+
+void appendPhaseValue(LineBuffer& out, TrainingPhase phase) {
+    appendStyledPadded(out, phaseStyle(phase), trainingPhaseName(phase), 8, PadAlignment::LEFT);
 }
 
 void appendDimKey(LineBuffer& out, const char* key) {
     out.append(' ');
-    out.append(Ansi::dim);
+    out.append(Ansi::key);
     out.append(key);
     out.append('=');
     out.append(Ansi::reset);
@@ -207,9 +266,7 @@ void appendPlainStatsLine(LineBuffer& out, const TrainingStatsSnapshot& stats) {
     out.append(trainingPhaseName(stats.phase));
 
     if (stats.epochs > 0) {
-        out.appendFormat(" epoch=%llu/%llu",
-                         static_cast<unsigned long long>(stats.epoch),
-                         static_cast<unsigned long long>(stats.epochs));
+        out.appendFormat(" epoch=%llu/%llu", static_cast<unsigned long long>(stats.epoch), static_cast<unsigned long long>(stats.epochs));
     } else if (stats.epoch > 0) {
         out.appendFormat(" epoch=%llu", static_cast<unsigned long long>(stats.epoch));
     }
@@ -219,9 +276,8 @@ void appendPlainStatsLine(LineBuffer& out, const TrainingStatsSnapshot& stats) {
     }
 
     if (stats.stepsPerEpoch > 0) {
-        out.appendFormat(" batch=%llu/%llu",
-                         static_cast<unsigned long long>(stats.stepInEpoch),
-                         static_cast<unsigned long long>(stats.stepsPerEpoch));
+        out.appendFormat(
+            " batch=%llu/%llu", static_cast<unsigned long long>(stats.stepInEpoch), static_cast<unsigned long long>(stats.stepsPerEpoch));
     } else if (stats.stepInEpoch > 0) {
         out.appendFormat(" batch=%llu", static_cast<unsigned long long>(stats.stepInEpoch));
     }
@@ -259,6 +315,8 @@ void appendPlainStatsLine(LineBuffer& out, const TrainingStatsSnapshot& stats) {
     }
     if (stats.inFlightBatches > 0) {
         out.appendFormat(" in_flight=%llu", static_cast<unsigned long long>(stats.inFlightBatches));
+    } else {
+        out.appendFormat("%14s", "");
     }
 
     out.append(" elapsed=");
@@ -266,7 +324,7 @@ void appendPlainStatsLine(LineBuffer& out, const TrainingStatsSnapshot& stats) {
 }
 
 void appendColorStatsLine(LineBuffer& out, const TrainingStatsSnapshot& stats) {
-    out.append(Ansi::dim);
+    out.append(Ansi::label);
     out.append("INFO ");
     out.append(Ansi::reset);
     out.append(Ansi::bold);
@@ -278,107 +336,73 @@ void appendColorStatsLine(LineBuffer& out, const TrainingStatsSnapshot& stats) {
 
     if (stats.epochs > 0) {
         appendDimKey(out, "epoch");
-        out.append(Ansi::blue);
-        out.appendFormat("%llu/%llu", static_cast<unsigned long long>(stats.epoch), static_cast<unsigned long long>(stats.epochs));
-        out.append(Ansi::reset);
+        appendStyledPadded(out, Ansi::progress, formatRatio(stats.epoch, stats.epochs), 7);
     } else if (stats.epoch > 0) {
         appendDimKey(out, "epoch");
-        out.append(Ansi::blue);
-        out.appendFormat("%llu", static_cast<unsigned long long>(stats.epoch));
-        out.append(Ansi::reset);
+        appendStyledPadded(out, Ansi::progress, formatUnsigned(stats.epoch), 7);
     }
 
     if (stats.step > 0) {
         appendDimKey(out, "step");
-        out.append(Ansi::blue);
-        out.appendFormat("%llu", static_cast<unsigned long long>(stats.step));
-        out.append(Ansi::reset);
+        appendStyledPadded(out, Ansi::progress, formatUnsigned(stats.step), 8);
     }
 
     if (stats.stepsPerEpoch > 0) {
         appendDimKey(out, "batch");
-        out.append(Ansi::blue);
-        out.appendFormat("%llu/%llu",
-                         static_cast<unsigned long long>(stats.stepInEpoch),
-                         static_cast<unsigned long long>(stats.stepsPerEpoch));
-        out.append(Ansi::reset);
+        appendStyledPadded(out, Ansi::progress, formatRatio(stats.stepInEpoch, stats.stepsPerEpoch), 7);
     } else if (stats.stepInEpoch > 0) {
         appendDimKey(out, "batch");
-        out.append(Ansi::blue);
-        out.appendFormat("%llu", static_cast<unsigned long long>(stats.stepInEpoch));
-        out.append(Ansi::reset);
+        appendStyledPadded(out, Ansi::progress, formatUnsigned(stats.stepInEpoch), 7);
     }
 
     if (stats.loss.has_value()) {
         appendDimKey(out, "loss");
-        out.append(Ansi::yellow);
-        appendFixed(out, stats.loss.value(), 6);
-        out.append(Ansi::reset);
+        appendStyledPadded(out, Ansi::loss, formatFixedString(stats.loss.value(), 6), 9);
     }
     if (stats.accuracy.has_value()) {
         appendDimKey(out, "accuracy");
-        out.append(Ansi::green);
-        appendFixed(out, stats.accuracy.value(), 4);
-        out.append(Ansi::reset);
+        appendStyledPadded(out, Ansi::accuracy, formatFixedString(stats.accuracy.value(), 4), 6);
     }
     if (stats.learningRate.has_value()) {
         appendDimKey(out, "lr");
-        out.append(Ansi::magenta);
-        appendScientific(out, stats.learningRate.value(), 3);
-        out.append(Ansi::reset);
+        appendStyledPadded(out, Ansi::learningRate, formatScientificString(stats.learningRate.value(), 3), 9);
     }
     for (const auto& metric : stats.metrics) {
         appendDimKey(out, metric.first.c_str());
-        out.append(Ansi::yellow);
-        appendFixed(out, metric.second, 6);
-        out.append(Ansi::reset);
+        appendStyledPadded(out, Ansi::loss, formatFixedString(metric.second, 6), 9);
     }
 
     if (stats.samplesPerSecond > 0.0) {
         appendDimKey(out, "samples/s");
-        out.append(Ansi::cyan);
-        appendFixed(out, stats.samplesPerSecond, 1);
-        out.append(Ansi::reset);
+        appendStyledPadded(out, Ansi::throughput, formatFixedString(stats.samplesPerSecond, 1), 8);
     }
     if (stats.batchesPerSecond > 0.0) {
         appendDimKey(out, "batches/s");
-        out.append(Ansi::cyan);
-        appendFixed(out, stats.batchesPerSecond, 2);
-        out.append(Ansi::reset);
+        appendStyledPadded(out, Ansi::throughput, formatFixedString(stats.batchesPerSecond, 2), 7);
     }
     if (stats.floatingPointOperationsPerSecond > 0.0) {
         appendDimKey(out, "flops/s");
-        out.append(Ansi::boldBrightBlack);
-        appendCompactRate(out, stats.floatingPointOperationsPerSecond);
-        out.append(Ansi::reset);
+        appendStyledPadded(out, Ansi::throughput, formatCompactRateString(stats.floatingPointOperationsPerSecond), 7);
     }
     if (stats.inFlightBatches > 0) {
         appendDimKey(out, "in_flight");
-        out.append(Ansi::blue);
-        out.appendFormat("%llu", static_cast<unsigned long long>(stats.inFlightBatches));
-        out.append(Ansi::reset);
+        appendStyledPadded(out, Ansi::throughput, formatUnsigned(stats.inFlightBatches), 3);
+    } else {
+        out.appendFormat("%14s", "");
     }
 
     appendDimKey(out, "elapsed");
-    out.append(Ansi::blue);
-    appendElapsed(out, stats.elapsedSeconds);
-    out.append(Ansi::reset);
+    appendStyledPadded(out, Ansi::elapsed, formatElapsedString(stats.elapsedSeconds), 8);
 }
 
 }  // namespace
 
-LineStatsReporter::LineStatsReporter(std::FILE* output,
-                                     double intervalSeconds,
-                                     bool enabled,
-                                     LineStatsColorMode colorMode)
+LineStatsReporter::LineStatsReporter(std::FILE* output, double intervalSeconds, bool enabled, LineStatsColorMode colorMode)
     : outputFile(output), intervalSeconds(intervalSeconds), enabled(enabled), colorMode(colorMode) {
     setIntervalSeconds(intervalSeconds);
 }
 
-LineStatsReporter::LineStatsReporter(double intervalSeconds,
-                                     bool enabled,
-                                     LineStatsColorMode colorMode,
-                                     LineStatsOutputMode outputMode)
+LineStatsReporter::LineStatsReporter(double intervalSeconds, bool enabled, LineStatsColorMode colorMode, LineStatsOutputMode outputMode)
     : printer(std::make_shared<AsyncBufferedPrinter>()),
       intervalSeconds(intervalSeconds),
       enabled(enabled),
@@ -484,13 +508,11 @@ bool LineStatsReporter::samePhaseOccurrence(const TrainingStatsSnapshot& stats) 
 }
 
 bool LineStatsReporter::sameStatsIdentity(const TrainingStatsSnapshot& lhs, const TrainingStatsSnapshot& rhs) const {
-    return lhs.phase == rhs.phase && lhs.epoch == rhs.epoch && lhs.step == rhs.step &&
-           lhs.stepInEpoch == rhs.stepInEpoch && lhs.stepsPerEpoch == rhs.stepsPerEpoch;
+    return lhs.phase == rhs.phase && lhs.epoch == rhs.epoch && lhs.step == rhs.step && lhs.stepInEpoch == rhs.stepInEpoch &&
+           lhs.stepsPerEpoch == rhs.stepsPerEpoch;
 }
 
-bool LineStatsReporter::isAnsiColorSupported(std::FILE* output) {
-    return fileSupportsAnsiColor(output);
-}
+bool LineStatsReporter::isAnsiColorSupported(std::FILE* output) { return fileSupportsAnsiColor(output); }
 
 bool LineStatsReporter::shouldUseColor() const {
     if (colorMode == LineStatsColorMode::NEVER) {
@@ -518,9 +540,9 @@ void LineStatsReporter::emitLine(const char* line) {
         return;
     }
     if (printer != nullptr) {
-        const AsyncBufferedPrinterDestination destination =
-            (outputMode == LineStatsOutputMode::STDOUT_AND_STDERR) ? AsyncBufferedPrinterDestination::STDOUT_AND_STDERR
-                                                                    : AsyncBufferedPrinterDestination::STDOUT;
+        const AsyncBufferedPrinterDestination destination = (outputMode == LineStatsOutputMode::STDOUT_AND_STDERR)
+                                                                ? AsyncBufferedPrinterDestination::STDOUT_AND_STDERR
+                                                                : AsyncBufferedPrinterDestination::STDOUT;
         printer->writeLine(line, destination);
         return;
     }

@@ -193,6 +193,7 @@ class CustomLayer : public TrainableLayer {
     void validatePreparedExpressionInputs(const PreparedDynamicExpression& prepared);
     void validateStampedOutputNames(const StampedExecutionPlan& stamped, const std::vector<std::string>& expectedNames, const char* phase);
     void synchronizeComputeStreamForForwardInputs(uint32_t applicationIndex);
+    std::string diagnosticLabel();
 
     std::string errorInputNameForOutput(uint32_t outputPortIndex) const;
     std::string errorOutputNameForInput(uint32_t inputPortIndex) const;
