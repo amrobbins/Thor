@@ -88,8 +88,8 @@ std::string stripAnsiSequences(const std::string& output) {
 }
 
 const char* alignedColorStatsLineWithoutAnsi() {
-    return "INFO trainer: phase=train    epoch=    1/3 step=      17 batch=  7/100 loss= 1.250000 accuracy=0.7500 "
-           "lr=3.000e-04 samples/s=  1024.0 batches/s=   8.00 flops/s=  2.50T in_flight= 32 elapsed=00:01:05";
+    return "INFO trainer: phase=train    epoch=      1/3 step=        17 batch=    7/100 loss= 1.250000 accuracy=0.7500 "
+           "lr=3.000e-04 samples/s=1.02K batches/s= 8.00 flops/s=2.50T in_flight=   32 elapsed= 00:01:05";
 }
 
 bool tokenHasAnsiStyle(const std::string& output, const std::string& token, bool requireBold) {
@@ -127,6 +127,13 @@ TEST(LineStatsReporter, FormatsAlignedStatsLineWithoutAnsi) {
     EXPECT_EQ(line, alignedColorStatsLineWithoutAnsi());
 }
 
+
+TEST(LineStatsReporter, FormatsElapsedWithoutSecondsAtOneHundredHours) {
+    EXPECT_EQ(LineStatsReporter::formatElapsedSeconds(99 * 3600 + 59 * 60 + 59), "99:59:59");
+    EXPECT_EQ(LineStatsReporter::formatElapsedSeconds(100 * 3600), "100:00");
+    EXPECT_EQ(LineStatsReporter::formatElapsedSeconds(123 * 3600 + 45 * 60 + 59), "123:45");
+}
+
 TEST(LineStatsReporter, DisabledReporterEmitsNothing) {
     std::FILE* out = std::tmpfile();
     LineStatsReporter reporter(out, 0.0, false);
@@ -161,8 +168,8 @@ TEST(LineStatsReporter, PrintsFirstStatsForEachPhaseOccurrenceDespiteInterval) {
     reporter.onTrainingEvent(TrainingEvent::statsUpdated(makeStats(2.0, TrainingPhase::VALIDATE, 1, 1, 1, 5)));
 
     const std::string output = readAndCloseFile(out);
-    EXPECT_NE(output.find("phase=train    epoch=    1/3 step=       1 batch=  1/100"), std::string::npos);
-    EXPECT_NE(output.find("phase=validate epoch=    1/3 step=       1 batch=    1/5"), std::string::npos);
+    EXPECT_NE(output.find("phase=train    epoch=      1/3 step=         1 batch=    1/100"), std::string::npos);
+    EXPECT_NE(output.find("phase=validate epoch=      1/3 step=         1 batch=      1/5"), std::string::npos);
 }
 
 TEST(LineStatsReporter, PrintsLastStatsAtPhaseFinishDespiteInterval) {
@@ -176,8 +183,8 @@ TEST(LineStatsReporter, PrintsLastStatsAtPhaseFinishDespiteInterval) {
 
     const std::string output = readAndCloseFile(out);
     EXPECT_EQ(countLines(output), 2u);
-    EXPECT_NE(output.find("phase=train    epoch=    1/3 step=       1 batch=  1/100"), std::string::npos);
-    EXPECT_NE(output.find("phase=train    epoch=    1/3 step=       2 batch=  2/100"), std::string::npos);
+    EXPECT_NE(output.find("phase=train    epoch=      1/3 step=         1 batch=    1/100"), std::string::npos);
+    EXPECT_NE(output.find("phase=train    epoch=      1/3 step=         2 batch=    2/100"), std::string::npos);
 }
 
 TEST(LineStatsReporter, DoesNotDuplicatePhaseFinishWhenLastStatsAlreadyPrinted) {
@@ -190,7 +197,7 @@ TEST(LineStatsReporter, DoesNotDuplicatePhaseFinishWhenLastStatsAlreadyPrinted) 
 
     const std::string output = readAndCloseFile(out);
     EXPECT_EQ(countLines(output), 1u);
-    EXPECT_NE(output.find("phase=train    epoch=    1/3 step=       1 batch=  1/100"), std::string::npos);
+    EXPECT_NE(output.find("phase=train    epoch=      1/3 step=         1 batch=    1/100"), std::string::npos);
 }
 
 TEST(LineStatsReporter, ColorModeNeverEmitsPlainStatsLine) {
@@ -216,7 +223,7 @@ TEST(LineStatsReporter, ColorModeAlwaysAddsAnsi) {
     EXPECT_NE(output.find("flops/s"), std::string::npos);
     EXPECT_NE(output.find("2.50T"), std::string::npos);
     EXPECT_TRUE(tokenHasAnsiStyle(output, "train", true));
-    EXPECT_TRUE(tokenHasAnsiStyle(output, "1024.0", true));
+    EXPECT_TRUE(tokenHasAnsiStyle(output, "1.02K", true));
     EXPECT_TRUE(tokenHasAnsiStyle(output, "8.00", true));
     EXPECT_TRUE(tokenHasAnsiStyle(output, "2.50T", true));
     EXPECT_TRUE(tokenHasAnsiStyle(output, "1.250000", false));

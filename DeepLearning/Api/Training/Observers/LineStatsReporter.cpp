@@ -92,7 +92,19 @@ class LineBuffer {
     const double absValue = std::abs(value);
     const char* suffix = "";
     double scaled = value;
-    if (absValue >= 1.0e12) {
+    if (absValue >= 1.0e24) {
+        scaled = value / 1.0e24;
+        suffix = "Y";
+    } else if (absValue >= 1.0e21) {
+        scaled = value / 1.0e21;
+        suffix = "Z";
+    } else if (absValue >= 1.0e18) {
+        scaled = value / 1.0e18;
+        suffix = "E";
+    } else if (absValue >= 1.0e15) {
+        scaled = value / 1.0e15;
+        suffix = "P";
+    } else if (absValue >= 1.0e12) {
         scaled = value / 1.0e12;
         suffix = "T";
     } else if (absValue >= 1.0e9) {
@@ -124,11 +136,23 @@ std::string formatScientificString(double value, int precision) {
     return std::string(buffer);
 }
 
-std::string formatCompactRateString(double value) {
+std::string formatCompactRateString(double value, bool integral = false) {
     const double absValue = std::abs(value);
     const char* suffix = "";
     double scaled = value;
-    if (absValue >= 1.0e12) {
+    if (absValue >= 1.0e24) {
+        scaled = value / 1.0e24;
+        suffix = "Y";
+    } else if (absValue >= 1.0e21) {
+        scaled = value / 1.0e21;
+        suffix = "Z";
+    } else if (absValue >= 1.0e18) {
+        scaled = value / 1.0e18;
+        suffix = "E";
+    } else if (absValue >= 1.0e15) {
+        scaled = value / 1.0e15;
+        suffix = "P";
+    } else if (absValue >= 1.0e12) {
         scaled = value / 1.0e12;
         suffix = "T";
     } else if (absValue >= 1.0e9) {
@@ -143,7 +167,7 @@ std::string formatCompactRateString(double value) {
     }
 
     const double absScaled = std::abs(scaled);
-    const int precision = absScaled >= 100.0 ? 0 : (absScaled >= 10.0 ? 1 : 2);
+    const int precision = integral ? 0 : (absScaled >= 100.0 ? 0 : (absScaled >= 10.0 ? 1 : 2));
     char buffer[64];
     std::snprintf(buffer, sizeof(buffer), "%.*f%s", precision, scaled, suffix);
     return std::string(buffer);
@@ -155,12 +179,20 @@ std::string formatElapsedString(double elapsedSeconds) {
     const uint64_t minutes = (roundedSeconds / 60) % 60;
     const uint64_t seconds = roundedSeconds % 60;
     char buffer[32];
-    std::snprintf(buffer,
-                  sizeof(buffer),
-                  "%02llu:%02llu:%02llu",
-                  static_cast<unsigned long long>(hours),
-                  static_cast<unsigned long long>(minutes),
-                  static_cast<unsigned long long>(seconds));
+    if (hours >= 100) {
+        std::snprintf(buffer,
+                      sizeof(buffer),
+                      "%llu:%02llu",
+                      static_cast<unsigned long long>(hours),
+                      static_cast<unsigned long long>(minutes));
+    } else {
+        std::snprintf(buffer,
+                      sizeof(buffer),
+                      "%02llu:%02llu:%02llu",
+                      static_cast<unsigned long long>(hours),
+                      static_cast<unsigned long long>(minutes),
+                      static_cast<unsigned long long>(seconds));
+    }
     return std::string(buffer);
 }
 
@@ -278,6 +310,8 @@ void appendPlainDimKey(LineBuffer& out, const char* key) {
     out.append('=');
 }
 
+constexpr size_t RATE_FIELD_WIDTH = 5;
+
 void appendPlainStatsLine(LineBuffer& out, const TrainingStatsSnapshot& stats) {
     out.append("INFO trainer:");
 
@@ -286,23 +320,23 @@ void appendPlainStatsLine(LineBuffer& out, const TrainingStatsSnapshot& stats) {
 
     if (stats.epochs > 0) {
         appendPlainDimKey(out, "epoch");
-        appendPadded(out, formatRatio(stats.epoch, stats.epochs), 7);
+        appendPadded(out, formatRatio(stats.epoch, stats.epochs), 9);
     } else if (stats.epoch > 0) {
         appendPlainDimKey(out, "epoch");
-        appendPadded(out, formatUnsigned(stats.epoch), 7);
+        appendPadded(out, formatUnsigned(stats.epoch), 9);
     }
 
     if (stats.step > 0) {
         appendPlainDimKey(out, "step");
-        appendPadded(out, formatUnsigned(stats.step), 8);
+        appendPadded(out, formatUnsigned(stats.step), 10);
     }
 
     if (stats.stepsPerEpoch > 0) {
         appendPlainDimKey(out, "batch");
-        appendPadded(out, formatRatio(stats.stepInEpoch, stats.stepsPerEpoch), 7);
+        appendPadded(out, formatRatio(stats.stepInEpoch, stats.stepsPerEpoch), 9);
     } else if (stats.stepInEpoch > 0) {
         appendPlainDimKey(out, "batch");
-        appendPadded(out, formatUnsigned(stats.stepInEpoch), 7);
+        appendPadded(out, formatUnsigned(stats.stepInEpoch), 9);
     }
 
     if (stats.loss.has_value()) {
@@ -324,25 +358,25 @@ void appendPlainStatsLine(LineBuffer& out, const TrainingStatsSnapshot& stats) {
 
     if (stats.samplesPerSecond > 0.0) {
         appendPlainDimKey(out, "samples/s");
-        appendPadded(out, formatFixedString(stats.samplesPerSecond, 1), 8);
+        appendPadded(out, formatCompactRateString(stats.samplesPerSecond), RATE_FIELD_WIDTH);
     }
     if (stats.batchesPerSecond > 0.0) {
         appendPlainDimKey(out, "batches/s");
-        appendPadded(out, formatFixedString(stats.batchesPerSecond, 2), 7);
+        appendPadded(out, formatCompactRateString(stats.batchesPerSecond), RATE_FIELD_WIDTH);
     }
     if (stats.floatingPointOperationsPerSecond > 0.0) {
         appendPlainDimKey(out, "flops/s");
-        appendPadded(out, formatCompactRateString(stats.floatingPointOperationsPerSecond), 7);
+        appendPadded(out, formatCompactRateString(stats.floatingPointOperationsPerSecond), RATE_FIELD_WIDTH);
     }
     if (stats.inFlightBatches > 0) {
         appendPlainDimKey(out, "in_flight");
-        appendPadded(out, formatUnsigned(stats.inFlightBatches), 3);
+        appendPadded(out, formatCompactRateString(stats.inFlightBatches, true), RATE_FIELD_WIDTH);
     } else {
-        out.appendFormat("%14s", "");
+        out.appendFormat("%16s", "");
     }
 
     appendPlainDimKey(out, "elapsed");
-    appendPadded(out, formatElapsedString(stats.elapsedSeconds), 8);
+    appendPadded(out, formatElapsedString(stats.elapsedSeconds), 9);
 }
 
 void appendColorStatsLine(LineBuffer& out, const TrainingStatsSnapshot& stats) {
@@ -358,23 +392,23 @@ void appendColorStatsLine(LineBuffer& out, const TrainingStatsSnapshot& stats) {
 
     if (stats.epochs > 0) {
         appendDimKey(out, "epoch");
-        appendStyledPadded(out, Ansi::progress, formatRatio(stats.epoch, stats.epochs), 7);
+        appendStyledPadded(out, Ansi::progress, formatRatio(stats.epoch, stats.epochs), 9);
     } else if (stats.epoch > 0) {
         appendDimKey(out, "epoch");
-        appendStyledPadded(out, Ansi::progress, formatUnsigned(stats.epoch), 7);
+        appendStyledPadded(out, Ansi::progress, formatUnsigned(stats.epoch), 9);
     }
 
     if (stats.step > 0) {
         appendDimKey(out, "step");
-        appendStyledPadded(out, Ansi::progress, formatUnsigned(stats.step), 8);
+        appendStyledPadded(out, Ansi::progress, formatUnsigned(stats.step), 10);
     }
 
     if (stats.stepsPerEpoch > 0) {
         appendDimKey(out, "batch");
-        appendStyledPadded(out, Ansi::progress, formatRatio(stats.stepInEpoch, stats.stepsPerEpoch), 7);
+        appendStyledPadded(out, Ansi::progress, formatRatio(stats.stepInEpoch, stats.stepsPerEpoch), 9);
     } else if (stats.stepInEpoch > 0) {
         appendDimKey(out, "batch");
-        appendStyledPadded(out, Ansi::progress, formatUnsigned(stats.stepInEpoch), 7);
+        appendStyledPadded(out, Ansi::progress, formatUnsigned(stats.stepInEpoch), 9);
     }
 
     if (stats.loss.has_value()) {
@@ -396,25 +430,25 @@ void appendColorStatsLine(LineBuffer& out, const TrainingStatsSnapshot& stats) {
 
     if (stats.samplesPerSecond > 0.0) {
         appendDimKey(out, "samples/s");
-        appendStyledPadded(out, Ansi::throughput, formatFixedString(stats.samplesPerSecond, 1), 8);
+        appendStyledPadded(out, Ansi::throughput, formatCompactRateString(stats.samplesPerSecond), RATE_FIELD_WIDTH);
     }
     if (stats.batchesPerSecond > 0.0) {
         appendDimKey(out, "batches/s");
-        appendStyledPadded(out, Ansi::throughput, formatFixedString(stats.batchesPerSecond, 2), 7);
+        appendStyledPadded(out, Ansi::throughput, formatCompactRateString(stats.batchesPerSecond), RATE_FIELD_WIDTH);
     }
     if (stats.floatingPointOperationsPerSecond > 0.0) {
         appendDimKey(out, "flops/s");
-        appendStyledPadded(out, Ansi::throughput, formatCompactRateString(stats.floatingPointOperationsPerSecond), 7);
+        appendStyledPadded(out, Ansi::throughput, formatCompactRateString(stats.floatingPointOperationsPerSecond), RATE_FIELD_WIDTH);
     }
     if (stats.inFlightBatches > 0) {
         appendDimKey(out, "in_flight");
-        appendStyledPadded(out, Ansi::throughput, formatUnsigned(stats.inFlightBatches), 3);
+        appendStyledPadded(out, Ansi::throughput, formatCompactRateString(stats.inFlightBatches, true), RATE_FIELD_WIDTH);
     } else {
-        out.appendFormat("%14s", "");
+        out.appendFormat("%16s", "");
     }
 
     appendDimKey(out, "elapsed");
-    appendStyledPadded(out, Ansi::elapsed, formatElapsedString(stats.elapsedSeconds), 8);
+    appendStyledPadded(out, Ansi::elapsed, formatElapsedString(stats.elapsedSeconds), 9);
 }
 
 }  // namespace
