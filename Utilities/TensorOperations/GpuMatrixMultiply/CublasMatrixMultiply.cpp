@@ -1639,18 +1639,61 @@ static uint64_t cublasLtBackwardEpilogueOperationBytes(const OperationType& oper
     return bytes;
 }
 
-static uint64_t cublasLtEpilogueWorkspaceInsignificantThresholdBytes(uint64_t operationBytes) {
+static uint64_t cublasLtWorkspaceInsignificantThresholdBytes(uint64_t operationBytes) {
     constexpr uint64_t MIN_SIGNIFICANT_WORKSPACE_BYTES = 16ull * 1024ull * 1024ull;
     constexpr uint64_t OPERATION_BYTES_DIVISOR = 16ull;  // Workspace <= 6.25% of matrix traffic is small enough.
     return std::max(MIN_SIGNIFICANT_WORKSPACE_BYTES, operationBytes / OPERATION_BYTES_DIVISOR);
 }
 
-static bool cublasLtEpilogueWorkspaceIsSignificant(uint64_t workspaceBytes, uint64_t operationBytes) {
-    return workspaceBytes > cublasLtEpilogueWorkspaceInsignificantThresholdBytes(operationBytes);
+static bool cublasLtWorkspaceIsSignificant(uint64_t workspaceBytes, uint64_t operationBytes) {
+    return workspaceBytes > cublasLtWorkspaceInsignificantThresholdBytes(operationBytes);
 }
 
-static bool cublasLtEpilogueWorkspaceIsAtMostHalf(uint64_t candidateWorkspaceBytes, uint64_t preferredWorkspaceBytes) {
+static bool cublasLtWorkspaceIsAtMostHalf(uint64_t candidateWorkspaceBytes, uint64_t preferredWorkspaceBytes) {
     return candidateWorkspaceBytes <= preferredWorkspaceBytes / 2;
+}
+
+static CublasKernel selectMeasuredKernelWithWorkspacePolicy(std::vector<CublasKernel> kernels,
+                                                              int gpuNum,
+                                                              uint64_t operationBytes,
+                                                              CublasMatrixMultiply::Fp8MatmulScales fp8Scales) {
+    THOR_THROW_IF_FALSE(!kernels.empty());
+
+    std::sort(kernels.begin(), kernels.end(), CublasKernel::executionTimeComparison);
+
+    std::optional<CublasKernel> preferred;
+    uint64_t preferredWorkspaceBytes = 0;
+    for (CublasKernel& candidate : kernels) {
+        if (candidate.getErrorFlag()) {
+            continue;
+        }
+
+        if (preferred.has_value() && !cublasLtWorkspaceIsSignificant(preferredWorkspaceBytes, operationBytes)) {
+            break;
+        }
+
+        bool kernelWillRunOnGpu = false;
+        const uint64_t candidateWorkspaceBytes = candidate.getWorkspaceSizeInBytes(gpuNum, kernelWillRunOnGpu, fp8Scales);
+        if (!kernelWillRunOnGpu) {
+            continue;
+        }
+
+        // Keep measured performance order as the primary ranking.  Move to a
+        // lower-ranked kernel only when the currently preferred kernel's
+        // workspace is still significant for this operation and the candidate
+        // cuts that workspace by at least half.
+        if (!preferred.has_value() || cublasLtWorkspaceIsAtMostHalf(candidateWorkspaceBytes, preferredWorkspaceBytes)) {
+            preferred = candidate;
+            preferredWorkspaceBytes = candidateWorkspaceBytes;
+        }
+    }
+
+    if (!preferred.has_value()) {
+        throw std::runtime_error(
+            "CublasMatrixMultiply::chooseOptimalGemmKernel could not select any verified cuBLASLt kernel candidate.");
+    }
+
+    return preferred.value();
 }
 
 static std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> cublasLtSelectHeuristicContestAlgorithm(
@@ -1688,7 +1731,7 @@ static std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> cublasLtS
     std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> preferred;
     for (int i = 0; i < returnedAlgoCount; ++i) {
         if (preferred.has_value() &&
-            !cublasLtEpilogueWorkspaceIsSignificant(preferred->workspace_size_in_bytes, operationBytes)) {
+            !cublasLtWorkspaceIsSignificant(preferred->workspace_size_in_bytes, operationBytes)) {
             break;
         }
 
@@ -1727,7 +1770,7 @@ static std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> cublasLtS
         candidate.algorithm = checked.algo;
         candidate.workspace_size_in_bytes = requiredWorkspaceBytes;
         if (!preferred.has_value() ||
-            cublasLtEpilogueWorkspaceIsAtMostHalf(candidate.workspace_size_in_bytes, preferred->workspace_size_in_bytes)) {
+            cublasLtWorkspaceIsAtMostHalf(candidate.workspace_size_in_bytes, preferred->workspace_size_in_bytes)) {
             preferred = candidate;
         }
     }
@@ -3365,7 +3408,8 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
         printf("\n");
     }
 
-    CublasKernel bestKernel = *std::min_element(kernels.begin(), kernels.end(), CublasKernel::executionTimeComparison);
+    const uint64_t operationBytes = static_cast<uint64_t>(memPerInstance);
+    CublasKernel bestKernel = selectMeasuredKernelWithWorkspacePolicy(kernels, gpuNum, operationBytes, fp8Scales);
     THOR_THROW_IF_FALSE(!bestKernel.getErrorFlag());
     bestKernel.unstashRunStats();
     bool kernelWillRunOnGpu;
