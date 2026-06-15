@@ -1,9 +1,44 @@
 #include <optional>
+#include <limits>
 #include "DeepLearning/Implementation/Layers/Loss/CrossEntropy.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
 using namespace ThorImplementation;
 using namespace std;
+
+namespace {
+
+uint64_t productDimensions(const vector<uint64_t>& dims, size_t begin, size_t end) {
+    uint64_t result = 1;
+    THOR_THROW_IF_FALSE(begin <= end && end <= dims.size());
+    for (size_t i = begin; i < end; ++i) {
+        THOR_THROW_IF_FALSE(dims[i] > 0);
+        result *= dims[i];
+    }
+    return result;
+}
+
+bool sparseLabelDimensionsMatchFeaturePrefix(const vector<uint64_t>& labelDimensions, const vector<uint64_t>& featureInputDimensions) {
+    THOR_THROW_IF_FALSE(featureInputDimensions.size() >= 2);
+    const size_t prefixRank = featureInputDimensions.size() - 1;
+    if (labelDimensions.size() == prefixRank) {
+        for (size_t i = 0; i < prefixRank; ++i) {
+            if (labelDimensions[i] != featureInputDimensions[i])
+                return false;
+        }
+        return true;
+    }
+    if (labelDimensions.size() == prefixRank + 1 && labelDimensions.back() == 1) {
+        for (size_t i = 0; i < prefixRank; ++i) {
+            if (labelDimensions[i] != featureInputDimensions[i])
+                return false;
+        }
+        return true;
+    }
+    return false;
+}
+
+}  // namespace
 
 CrossEntropy::CrossEntropy() : Loss(DataType::FP32) { crossEntropyLossType = CrossEntropyLossType::UNINITIALIZED; }
 
@@ -46,8 +81,14 @@ void CrossEntropy::compileImpl() {
             (featureInput.value().getDimensions().size() == 2 && featureInput.value().getDimensions()[1] == 1);
         THOR_THROW_IF_FALSE(oneDimension || twoDimensionsSecondIsSingleton);
     } else {
-        // CrossEntropyLossType::CATEGORICAL
-        THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDimensions().size() == 2);
+        // CrossEntropyLossType::CATEGORICAL.  The final tensor dimension is the
+        // class dimension; all preceding dimensions are flattened into the
+        // effective item/batch dimension for the CUDA kernel.  This covers both
+        // ordinary [batch, classes] classification and sequence losses such as
+        // [batch, tokens, vocab].
+        const vector<uint64_t> featureInputDimensions = featureInput.value().getDescriptor().getDimensions();
+        THOR_THROW_IF_FALSE(featureInputDimensions.size() >= 2);
+        THOR_THROW_IF_FALSE(featureInputDimensions.back() > 1);
     }
 
     if (!isInferenceOnly()) {
@@ -68,20 +109,25 @@ void CrossEntropy::compileImpl() {
         vector<uint64_t> featureInputDimensions = featureInput.value().getDescriptor().getDimensions();
 
         if (indexLabels) {
-            THOR_THROW_IF_FALSE(labelDimensions[0] == featureInputDimensions[0]);
-            THOR_THROW_IF_FALSE(labelDimensions.size() == 1 || (labelDimensions.size() == 2 && labelDimensions[1] == 1));
+            THOR_THROW_IF_FALSE(sparseLabelDimensionsMatchFeaturePrefix(labelDimensions, featureInputDimensions));
         } else {
             // label per class
             THOR_THROW_IF_FALSE(featureInputDimensions == labelDimensions);
         }
     }
 
-    batchSize = featureInput.value().getDescriptor().getDimensions()[0];
-
-    if (crossEntropyLossType == CrossEntropyLossType::BINARY)
+    const vector<uint64_t> featureInputDimensions = featureInput.value().getDescriptor().getDimensions();
+    if (crossEntropyLossType == CrossEntropyLossType::BINARY) {
+        THOR_THROW_IF_FALSE(featureInputDimensions[0] <= std::numeric_limits<unsigned int>::max());
+        batchSize = static_cast<unsigned int>(featureInputDimensions[0]);
         numClasses = 2;
-    else
-        numClasses = featureOutput.value().getDimensions()[1];
+    } else {
+        const uint64_t effectiveBatchSize = productDimensions(featureInputDimensions, 0, featureInputDimensions.size() - 1);
+        THOR_THROW_IF_FALSE(effectiveBatchSize <= std::numeric_limits<unsigned int>::max());
+        batchSize = static_cast<unsigned int>(effectiveBatchSize);
+        THOR_THROW_IF_FALSE(featureInputDimensions.back() <= std::numeric_limits<uint32_t>::max());
+        numClasses = static_cast<uint32_t>(featureInputDimensions.back());
+    }
 }
 
 void CrossEntropy::infer(std::optional<Tensor> predictions, std::optional<Tensor> elementLoss, Stream stream) {

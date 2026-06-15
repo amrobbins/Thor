@@ -459,45 +459,84 @@ static std::unordered_map<size_t, PackedAttentionBackwardDirectOutput> findPacke
     return direct_by_attention_stage;
 }
 
-static uint64_t dimsNumelForRuntimeAlias(const std::vector<uint64_t>& dims) {
+static constexpr uint64_t EXPRESSION_COPY_DIM = 0;
+static constexpr uint64_t EXPRESSION_INFER_DIM = std::numeric_limits<uint64_t>::max();
+
+static uint64_t dimsNumelForRuntimeAlias(const std::vector<uint64_t>& dims, const std::string& what) {
     uint64_t result = 1;
     for (uint64_t dim : dims) {
-        if (dim == 0) {
-            throw std::runtime_error("Runtime reshape alias dimensions must be non-zero.");
+        if (dim == EXPRESSION_COPY_DIM || dim == EXPRESSION_INFER_DIM) {
+            throw std::runtime_error(what + " contains unresolved dynamic dimensions.");
         }
         if (result > std::numeric_limits<uint64_t>::max() / dim) {
-            throw std::runtime_error("Runtime reshape alias dimensions overflow uint64_t.");
+            throw std::runtime_error(what + " dimensions overflow uint64_t.");
         }
         result *= dim;
     }
     return result;
 }
 
-static void validateRuntimeAliasDims(const std::vector<uint64_t>& source_dims, const std::vector<uint64_t>& alias_dims) {
-    if (alias_dims.empty()) {
-        throw std::runtime_error("Runtime reshape alias requires non-empty dimensions.");
+static std::vector<uint64_t> resolveDynamicAliasDims(const std::vector<uint64_t>& source_dims,
+                                                    const std::vector<uint64_t>& requested_dims,
+                                                    bool must_preserve_numel,
+                                                    const std::string& what) {
+    if (requested_dims.empty()) {
+        throw std::runtime_error(what + " requires non-empty dimensions.");
     }
-    if (dimsNumelForRuntimeAlias(source_dims) != dimsNumelForRuntimeAlias(alias_dims)) {
-        throw std::runtime_error("Runtime reshape alias must preserve the number of elements.");
-    }
-}
 
-static void validateRuntimeStorageAliasDims(const std::vector<uint64_t>& source_dims, const CompiledValueAlias& alias) {
-    if (alias.dimensions.empty()) {
-        throw std::runtime_error("Runtime storage alias requires non-empty dimensions.");
+    std::vector<uint64_t> resolved = requested_dims;
+    std::optional<size_t> infer_index;
+    uint64_t known_product = 1;
+    for (size_t i = 0; i < resolved.size(); ++i) {
+        uint64_t dim = resolved[i];
+        if (dim == EXPRESSION_COPY_DIM) {
+            if (i >= source_dims.size()) {
+                throw std::runtime_error(what + " copy-dimension marker is out of range for source rank.");
+            }
+            dim = source_dims[i];
+            if (dim == 0) {
+                throw std::runtime_error(what + " resolved copy dimension must be non-zero.");
+            }
+            resolved[i] = dim;
+        } else if (dim == EXPRESSION_INFER_DIM) {
+            if (!must_preserve_numel) {
+                throw std::runtime_error(what + " does not support infer-dimension markers.");
+            }
+            if (infer_index.has_value()) {
+                throw std::runtime_error(what + " supports at most one infer-dimension marker.");
+            }
+            infer_index = i;
+            continue;
+        } else if (dim == 0) {
+            throw std::runtime_error(what + " dimensions must be non-zero after dynamic resolution.");
+        }
+
+        if (known_product > std::numeric_limits<uint64_t>::max() / dim) {
+            throw std::runtime_error(what + " resolved dimensions overflow uint64_t.");
+        }
+        known_product *= dim;
     }
-    if (alias.strides.empty()) {
-        validateRuntimeAliasDims(source_dims, alias.dimensions);
-        return;
-    }
-    if (alias.strides.size() != alias.dimensions.size()) {
-        throw std::runtime_error("Runtime strided alias dimensions and strides must have the same rank.");
-    }
-    for (uint64_t dim : alias.dimensions) {
-        if (dim == 0) {
-            throw std::runtime_error("Runtime strided alias dimensions must be non-zero.");
+
+    if (must_preserve_numel) {
+        const uint64_t source_numel = dimsNumelForRuntimeAlias(source_dims, what + " source");
+        if (infer_index.has_value()) {
+            if (known_product == 0 || source_numel % known_product != 0) {
+                throw std::runtime_error(what + " cannot infer a dimension that preserves the number of elements.");
+            }
+            resolved[infer_index.value()] = source_numel / known_product;
+        } else if (source_numel != known_product) {
+            throw std::runtime_error(what + " must preserve the number of elements.");
         }
     }
+
+    return resolved;
+}
+
+static std::vector<uint64_t> resolveRuntimeStorageAliasDims(const std::vector<uint64_t>& source_dims, const CompiledValueAlias& alias) {
+    if (!alias.strides.empty() && alias.strides.size() != alias.dimensions.size()) {
+        throw std::runtime_error("Runtime strided alias dimensions and strides must have the same rank.");
+    }
+    return resolveDynamicAliasDims(source_dims, alias.dimensions, alias.strides.empty(), "Runtime storage alias");
 }
 
 static void applyAvailableValueAliases(const std::vector<CompiledValueAlias>& aliases,
@@ -513,8 +552,8 @@ static void applyAvailableValueAliases(const std::vector<CompiledValueAlias>& al
             if (source_it == value_dims.end()) {
                 continue;
             }
-            validateRuntimeStorageAliasDims(source_it->second, alias);
-            value_dims.emplace(alias.value_id, alias.dimensions);
+            std::vector<uint64_t> resolved_dims = resolveRuntimeStorageAliasDims(source_it->second, alias);
+            value_dims.emplace(alias.value_id, std::move(resolved_dims));
             changed = true;
         }
     }
@@ -554,16 +593,16 @@ static void applyAvailableValueAliases(const std::vector<CompiledValueAlias>& al
                 continue;
             }
             Tensor tensor = runtimeInputTensor(source_it->second);
-            validateRuntimeStorageAliasDims(tensor.getDimensions(), alias);
+            std::vector<uint64_t> resolved_alias_dims = resolveRuntimeStorageAliasDims(tensor.getDimensions(), alias);
             if (alias.strides.empty()) {
                 if (!tensor.isDenseContiguous()) {
                     throw std::runtime_error(
                         "Runtime dense reshape alias cannot be applied to a non-dense tensor view; "
                         "materialize the view or use an explicit strided/unsqueeze/squeeze alias.");
                 }
-                tensor.reshape(alias.dimensions);
+                tensor.reshape(resolved_alias_dims);
             } else {
-                tensor = tensor.aliasView(alias.dimensions, alias.strides, alias.element_offset);
+                tensor = tensor.aliasView(resolved_alias_dims, alias.strides, alias.element_offset);
             }
             values.emplace(alias.value_id, tensor);
             if (producer_stage_by_value_id != nullptr) {
@@ -932,6 +971,18 @@ static std::vector<uint64_t> inferTransposeOutputDims(const std::vector<uint64_t
     return out_dims;
 }
 
+static std::vector<uint64_t> resolveReductionAxesForInputRank(const std::vector<uint64_t>& reduction_axes, size_t input_rank) {
+    if (!reduction_axes.empty()) {
+        return reduction_axes;
+    }
+
+    std::vector<uint64_t> axes(input_rank);
+    for (size_t i = 0; i < input_rank; ++i) {
+        axes[i] = static_cast<uint64_t>(i);
+    }
+    return axes;
+}
+
 static uint64_t normalizedTakeAlongAxis(const ExprNode& node, uint64_t rank) {
     if (rank == 0) {
         throw std::runtime_error("take_along_axis requires rank >= 1.");
@@ -1184,25 +1235,14 @@ static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization
             case ExprOp::TRANSPOSE:
                 node_dims[i] = inferTransposeOutputDims(node_dims[node.lhs]);
                 break;
-            case ExprOp::RESHAPE: {
-                const std::vector<uint64_t>& lhs_dims = node_dims[node.lhs];
-                auto numel = [](const std::vector<uint64_t>& dims) {
-                    uint64_t result = 1;
-                    for (uint64_t d : dims)
-                        result *= d;
-                    return result;
-                };
-                if (node.reshape_dims.empty() || numel(lhs_dims) != numel(node.reshape_dims)) {
-                    throw std::runtime_error("Expression reshape must preserve the number of elements.");
-                }
-                node_dims[i] = node.reshape_dims;
+            case ExprOp::RESHAPE:
+                node_dims[i] = resolveDynamicAliasDims(node_dims[node.lhs], node.reshape_dims, true, "Expression reshape");
                 break;
-            }
             case ExprOp::STRIDED_VIEW:
                 if (node.view_dims.empty() || node.view_strides.size() != node.view_dims.size()) {
                     throw std::runtime_error("Expression strided_view requires dimensions and strides with the same non-zero rank.");
                 }
-                node_dims[i] = node.view_dims;
+                node_dims[i] = resolveDynamicAliasDims(node_dims[node.lhs], node.view_dims, false, "Expression strided_view");
                 break;
             case ExprOp::STRIDED_VIEW_BACKWARD:
                 if (node.fill_dims.empty() || node.view_dims.empty() || node.view_strides.size() != node.view_dims.size()) {
@@ -1225,9 +1265,12 @@ static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization
             case ExprOp::REDUCE_ARGMAX:
             case ExprOp::REDUCE_AVG:
             case ExprOp::REDUCE_NORM1:
-            case ExprOp::REDUCE_NORM2:
-                node_dims[i] = StampedEquation::computeReductionOutputDims(node_dims[node.lhs], node.reduction_axes, node.squeeze_axes);
+            case ExprOp::REDUCE_NORM2: {
+                const std::vector<uint64_t>& lhs_dims = node_dims[node.lhs];
+                const std::vector<uint64_t> reduction_axes = resolveReductionAxesForInputRank(node.reduction_axes, lhs_dims.size());
+                node_dims[i] = StampedEquation::computeReductionOutputDims(lhs_dims, reduction_axes, node.squeeze_axes);
                 break;
+            }
             case ExprOp::MATMUL:
                 node_dims[i] = inferExpressionMatmulOutputDims(node, node_dims[node.lhs], node_dims[node.rhs]);
                 break;
@@ -3047,25 +3090,14 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDims(const Physical
             case ExprOp::TRANSPOSE:
                 node_dims[i] = inferTransposeOutputDims(node_dims[node.lhs]);
                 break;
-            case ExprOp::RESHAPE: {
-                const std::vector<uint64_t>& lhs_dims = node_dims[node.lhs];
-                auto numel = [](const std::vector<uint64_t>& dims) {
-                    uint64_t result = 1;
-                    for (uint64_t d : dims)
-                        result *= d;
-                    return result;
-                };
-                if (node.reshape_dims.empty() || numel(lhs_dims) != numel(node.reshape_dims)) {
-                    throw std::runtime_error("inferFusedStageNodeDims RESHAPE failed: reshape must preserve the number of elements.");
-                }
-                node_dims[i] = node.reshape_dims;
+            case ExprOp::RESHAPE:
+                node_dims[i] = resolveDynamicAliasDims(node_dims[node.lhs], node.reshape_dims, true, "inferFusedStageNodeDims RESHAPE");
                 break;
-            }
             case ExprOp::STRIDED_VIEW:
                 if (node.view_dims.empty() || node.view_strides.size() != node.view_dims.size()) {
                     throw std::runtime_error("Expression strided_view requires dimensions and strides with the same non-zero rank.");
                 }
-                node_dims[i] = node.view_dims;
+                node_dims[i] = resolveDynamicAliasDims(node_dims[node.lhs], node.view_dims, false, "Expression strided_view");
                 break;
             case ExprOp::STRIDED_VIEW_BACKWARD:
                 if (node.fill_dims.empty() || node.view_dims.empty() || node.view_strides.size() != node.view_dims.size()) {
@@ -3134,17 +3166,6 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDims(const Physical
     }
 
     return node_dims;
-}
-
-static std::vector<uint64_t> resolveReductionAxesForInputRank(const std::vector<uint64_t>& reduction_axes, size_t input_rank) {
-    if (reduction_axes.empty()) {
-        std::vector<uint64_t> axes(input_rank);
-        for (size_t i = 0; i < input_rank; ++i) {
-            axes[i] = static_cast<uint64_t>(i);
-        }
-        return axes;
-    }
-    return reduction_axes;
 }
 
 static uint64_t checkedAddU64(uint64_t a, uint64_t b, const char* what) {
@@ -3465,25 +3486,14 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDimsForReachable(co
             case ExprOp::RMSNORM:
                 node_dims[i] = inferRmsNormOutputDims(node, node_dims[node.lhs], node_dims[node.rhs]);
                 break;
-            case ExprOp::RESHAPE: {
-                const std::vector<uint64_t>& lhs_dims = node_dims[node.lhs];
-                auto numel = [](const std::vector<uint64_t>& dims) {
-                    uint64_t result = 1;
-                    for (uint64_t d : dims)
-                        result *= d;
-                    return result;
-                };
-                if (node.reshape_dims.empty() || numel(lhs_dims) != numel(node.reshape_dims)) {
-                    throw std::runtime_error("Fused-stage reshape must preserve the number of elements.");
-                }
-                node_dims[i] = node.reshape_dims;
+            case ExprOp::RESHAPE:
+                node_dims[i] = resolveDynamicAliasDims(node_dims[node.lhs], node.reshape_dims, true, "Fused-stage reshape");
                 break;
-            }
             case ExprOp::STRIDED_VIEW:
                 if (node.view_dims.empty() || node.view_strides.size() != node.view_dims.size()) {
                     throw std::runtime_error("Expression strided_view requires dimensions and strides with the same non-zero rank.");
                 }
-                node_dims[i] = node.view_dims;
+                node_dims[i] = resolveDynamicAliasDims(node_dims[node.lhs], node.view_dims, false, "Expression strided_view");
                 break;
             case ExprOp::STRIDED_VIEW_BACKWARD:
                 if (node.fill_dims.empty() || node.view_dims.empty() || node.view_strides.size() != node.view_dims.size()) {
@@ -7360,8 +7370,9 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
             return std::nullopt;
         }
         Tensor tensor = value_it->second;
-        validateRuntimeAliasDims(tensor.getDimensions(), output_dims);
-        tensor.reshape(output_dims);
+        std::vector<uint64_t> resolved_output_dims =
+            resolveDynamicAliasDims(tensor.getDimensions(), output_dims, true, "Preallocated stage output alias");
+        tensor.reshape(resolved_output_dims);
         return tensor;
     };
 

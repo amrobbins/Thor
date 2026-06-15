@@ -17,6 +17,7 @@
 #include "cuda_runtime.h"
 #include "gtest/gtest.h"
 
+#include <algorithm>
 #include <memory>
 #include <set>
 #include <vector>
@@ -100,6 +101,90 @@ TEST(CategoricalCrossEntropy, ErrorOutputMatchesPredictionDtypeAndValues) {
             LayerTestHelper::tearDownNetwork(layers);
         }
     }
+}
+
+
+TEST(CategoricalCrossEntropy, FlattensPrefixDimensionsForClassIndexLabels) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+
+    const vector<unsigned long> predictionDimensions = {2, 3, 4};
+    const vector<unsigned long> labelDimensions = {2, 3};
+    TensorDescriptor predictionsDescriptor(DataType::FP32, predictionDimensions);
+    TensorDescriptor labelsDescriptor(DataType::UINT32, labelDimensions);
+
+    Tensor predictionsCpu(cpuPlacement, predictionsDescriptor);
+    Tensor labelsCpu(cpuPlacement, labelsDescriptor);
+    Tensor predictionsGpu(gpuPlacement, predictionsDescriptor);
+    Tensor labelsGpu(gpuPlacement, labelsDescriptor);
+
+    const float probabilities[] = {
+        0.70f, 0.10f, 0.10f, 0.10f,
+        0.10f, 0.60f, 0.20f, 0.10f,
+        0.20f, 0.20f, 0.50f, 0.10f,
+        0.25f, 0.25f, 0.25f, 0.25f,
+        0.05f, 0.80f, 0.10f, 0.05f,
+        0.55f, 0.15f, 0.20f, 0.10f,
+    };
+    const uint32_t labels[] = {0, 1, 2, 3, 1, 0};
+
+    float *predictionMem = (float *)predictionsCpu.getMemPtr();
+    for (uint32_t i = 0; i < 24; ++i)
+        predictionMem[i] = probabilities[i];
+    uint32_t *labelMem = (uint32_t *)labelsCpu.getMemPtr();
+    for (uint32_t i = 0; i < 6; ++i)
+        labelMem[i] = labels[i];
+
+    vector<shared_ptr<Layer>> layers;
+    shared_ptr<NetworkInput> predictionsInput = make_shared<NetworkInput>(predictionsGpu);
+    layers.push_back(predictionsInput);
+    shared_ptr<NoOpLayer> noOpLayer = make_shared<NoOpLayer>();
+    layers.push_back(noOpLayer);
+    shared_ptr<NetworkInput> labelsInput = make_shared<NetworkInput>(labelsGpu);
+    layers.push_back(labelsInput);
+    shared_ptr<CrossEntropy> crossEntropy =
+        make_shared<CrossEntropy>(CrossEntropyLossType::CATEGORICAL, DataType::FP32, true);
+    layers.push_back(crossEntropy);
+    shared_ptr<NetworkOutput> lossOutput = make_shared<NetworkOutput>(gpuPlacement);
+    layers.push_back(lossOutput);
+
+    Stream stream = predictionsInput->getStream();
+    Stream labelsStream = labelsInput->getStream();
+
+    LayerTestHelper::connectTwoLayers(predictionsInput, noOpLayer);
+    LayerTestHelper::connectTwoLayers(noOpLayer, crossEntropy, 0, (int)Loss::ConnectionType::FORWARD_BACKWARD);
+    LayerTestHelper::connectTwoLayers(labelsInput, crossEntropy, 0, (int)Loss::ConnectionType::LABELS);
+    LayerTestHelper::connectTwoLayers(crossEntropy, lossOutput, 0, 0);
+    LayerTestHelper::initializeNetwork(layers);
+
+    ASSERT_TRUE(crossEntropy->getErrorOutput().has_value());
+    EXPECT_EQ(crossEntropy->getErrorOutput().value().getDescriptor(), predictionsDescriptor);
+    EXPECT_EQ(lossOutput->getFeatureOutput().value().getDescriptor(), predictionsDescriptor);
+
+    predictionsInput->forward(predictionsCpu, false);
+    labelsInput->forward(labelsCpu, false);
+
+    labelsStream.waitEvent(lossOutput->getOutputReadyEvent());
+    Tensor lossCpu = lossOutput->getFeatureOutput().value().clone(cpuPlacement);
+    Tensor errorCpu = crossEntropy->getErrorOutput().value().clone(cpuPlacement);
+    lossCpu.copyFromAsync(lossOutput->getFeatureOutput().value(), labelsStream);
+    errorCpu.copyFromAsync(crossEntropy->getErrorOutput().value(), labelsStream);
+    labelsStream.synchronize();
+    stream.synchronize();
+
+    const float *lossMem = (const float *)lossCpu.getMemPtr();
+    const float *errorMem = (const float *)errorCpu.getMemPtr();
+    for (uint32_t item = 0; item < 6; ++item) {
+        for (uint32_t c = 0; c < 4; ++c) {
+            const uint32_t e = item * 4 + c;
+            const float expectedLoss = labels[item] == c ? -logf(std::max(probabilities[e], 1.0e-36f)) : 0.0f;
+            const float expectedError = Loss::getLossScalingFactor() * (probabilities[e] - (labels[item] == c ? 1.0f : 0.0f));
+            EXPECT_NEAR(lossMem[e], expectedLoss, 1.0e-5f);
+            EXPECT_NEAR(errorMem[e], expectedError, 1.0e-5f);
+        }
+    }
+
+    LayerTestHelper::tearDownNetwork(layers);
 }
 
 TEST(CategoricalCrossEntropy, ComputesCorrectElementWiseResult_oneHotLabels) {

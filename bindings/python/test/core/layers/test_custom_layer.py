@@ -915,6 +915,31 @@ def test_python_custom_layer_direct_construction_builds_logical_output_interface
     assert build_calls[0]["input_dims"] == [1, 6]
 
 
+def test_python_custom_layer_uint32_strided_view_can_infer_outputs():
+    network = thor.Network("custom-layer-uint32-strided-view")
+    x = thor.layers.NetworkInput(network, "x", [9], thor.DataType.uint32).get_feature_output()
+
+    class Uint32Split(thor.layers.CustomLayer):
+        def __init__(self, network: thor.Network, packed: thor.Tensor):
+            super().__init__(network=network, inputs={"packed": packed}, output_names=["head", "tail"])
+
+        def build(self, context: thor.layers.CustomLayerBuildContext) -> dict[str, thor.physical.Expression]:
+            packed_tensor = context.input_tensor("packed")
+            packed_dims = packed_tensor.get_dimensions()
+            assert packed_dims == [1, 9]
+            packed = context.input("packed", output_dtype=thor.DataType.uint32, compute_dtype=thor.DataType.uint32)
+            return {
+                "head": packed.strided_view([packed_dims[0], 4], [packed_dims[1], 1], 0),
+                "tail": packed.strided_view([packed_dims[0], 4], [packed_dims[1], 1], 5),
+            }
+
+    split = Uint32Split(network, x)
+    assert split["head"].get_dimensions() == [4]
+    assert split["tail"].get_dimensions() == [4]
+    assert split["head"].get_data_type() == thor.DataType.uint32
+    assert split["tail"].get_data_type() == thor.DataType.uint32
+
+
 @pytest.mark.cuda
 def test_python_custom_layer_direct_construction_places_with_named_inputs_and_parameters():
     network = thor.Network("custom-layer-direct-mimo-place")
@@ -1048,3 +1073,45 @@ def test_python_custom_layer_direct_construction_rejects_noncallable_build():
             inputs=x,
             build=123,
         )
+
+
+def test_python_custom_layer_tokenwise_linear_preserves_sequence_axis():
+    class TokenwiseLinearForTest(thor.layers.CustomLayer):
+        def __init__(self, network: thor.Network, x: thor.Tensor, output_features: int):
+            self.input_features = x.get_dimensions()[1]
+            self.output_features = output_features
+            self.parameter_dtype = x.get_data_type()
+            super().__init__(network=network, inputs=x, output_names=["feature_output"])
+
+        def parameters(self) -> list[thor.ParameterSpecification]:
+            return [
+                thor.ParameterSpecification(
+                    name="weights",
+                    shape=[self.input_features, self.output_features],
+                    dtype=self.parameter_dtype,
+                    trainable=True,
+                ),
+                thor.ParameterSpecification(
+                    name="biases",
+                    shape=[self.output_features],
+                    dtype=self.parameter_dtype,
+                    trainable=True,
+                ),
+            ]
+
+        def build(self, context: thor.layers.CustomLayerBuildContext) -> dict[str, thor.physical.Expression]:
+            x_tensor = context.input_tensor("feature_input")
+            batch_dim, sequence_dim, hidden_dim = x_tensor.get_dimensions()
+            x = context.input("feature_input")
+            w = context.param("weights")
+            b = context.param("biases")
+            flat = x.reshape([batch_dim * sequence_dim, hidden_dim])
+            logits = (flat @ w + b).reshape([batch_dim, sequence_dim, self.output_features])
+            return {"feature_output": logits}
+
+    network = thor.Network("python_custom_layer_tokenwise_linear_preserves_sequence_axis")
+    feature_input = thor.layers.NetworkInput(network, "features", [5, 11], thor.DataType.fp16).get_feature_output()
+    layer = TokenwiseLinearForTest(network, feature_input, 7)
+
+    assert layer["feature_output"].get_dimensions() == [5, 7]
+    assert layer["feature_output"].get_data_type() == thor.DataType.fp16

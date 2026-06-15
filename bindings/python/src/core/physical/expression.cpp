@@ -513,6 +513,9 @@ standalone custom kernels.
         .value("arg_max", ScanOp::ArgMax)
         .export_values();
 
+    physical.attr("COPY_DIM") = nb::int_(0);
+    physical.attr("INFER_DIM") = nb::int_(std::numeric_limits<uint64_t>::max());
+
     auto expr = nb::class_<Expression>(physical, "Expression");
     expr.attr("__module__") = "thor.physical";
 

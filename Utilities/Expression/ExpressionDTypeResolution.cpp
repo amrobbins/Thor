@@ -63,6 +63,11 @@ static bool isScanOp(ExprOp op) { return op == ExprOp::SCAN || op == ExprOp::SEG
 
 static bool isCastOp(ExprOp op) { return op == ExprOp::CAST; }
 
+static bool isPassthroughViewOp(ExprOp op) {
+    return op == ExprOp::STRIDED_VIEW || op == ExprOp::RESHAPE || op == ExprOp::TRANSPOSE || op == ExprOp::UNSQUEEZE ||
+           op == ExprOp::SQUEEZE;
+}
+
 static bool isBooleanOutputOp(ExprOp op) { return isComparisonOp(op) || isLogicalOp(op); }
 
 static bool isCudnnSingleInputStageOp(ExprOp op) { return isCudnnReduceOp(op) || isCudnnSoftmaxOp(op); }
@@ -88,11 +93,11 @@ DataType toSupportedComputeDType(ExprOp op, DataType requested_compute_dtype) {
         throw std::runtime_error("Unsupported boolean/comparison/where dtype in toSupportedComputeDType.");
     }
 
-    if (isCastOp(op)) {
+    if (isCastOp(op) || isPassthroughViewOp(op)) {
         if (isPassthroughInputDType(requested_compute_dtype)) {
             return requested_compute_dtype;
         }
-        throw std::runtime_error("Unsupported cast dtype in toSupportedComputeDType.");
+        throw std::runtime_error("Unsupported passthrough dtype in toSupportedComputeDType.");
     }
 
     if (isScanOp(op)) {
@@ -842,7 +847,7 @@ static void resolveExpressionDTypesInPlace(PhysicalExpression& expr,
         const DataType logical_input_dtype = resolveNodeLogicalInputDType(node, expr.nodes, resolved_output_dtypes, root_input_dtypes);
 
         DataType requested_compute_dtype;
-        if (node.op == ExprOp::EMBEDDING_LOOKUP || node.op == ExprOp::CAST) {
+        if (node.op == ExprOp::EMBEDDING_LOOKUP || node.op == ExprOp::CAST || isPassthroughViewOp(node.op)) {
             requested_compute_dtype = output_dtype;
         } else if (isComparisonOp(node.op)) {
             if (node.compute_dtype.has_value()) {

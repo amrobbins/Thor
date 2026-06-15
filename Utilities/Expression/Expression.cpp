@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <functional>
+#include <limits>
 #include <sstream>
 #include <string_view>
 #include "DeepLearning/Implementation/ThorError.h"
@@ -3316,9 +3317,14 @@ Expression Expression::reshape(const std::vector<uint64_t>& new_dims) const {
         throw std::runtime_error("Cannot reshape an empty expression");
     if (new_dims.empty())
         throw std::invalid_argument("Expression::reshape requires at least one dimension.");
+    uint32_t infer_dim_count = 0;
     for (uint64_t d : new_dims) {
-        if (d == 0)
-            throw std::invalid_argument("Expression::reshape dimensions must be non-zero.");
+        if (d == std::numeric_limits<uint64_t>::max()) {
+            ++infer_dim_count;
+        }
+    }
+    if (infer_dim_count > 1) {
+        throw std::invalid_argument("Expression::reshape supports at most one infer-dimension marker.");
     }
     Expression out = unaryOp(*this, ExprOp::RESHAPE);
     out.expr->nodes[out.nodeIndex].reshape_dims = new_dims;
@@ -3334,8 +3340,8 @@ Expression Expression::stridedView(const std::vector<uint64_t>& dims,
         throw std::invalid_argument("Expression::stridedView requires dimensions and strides with the same non-zero rank.");
     }
     for (uint64_t d : dims) {
-        if (d == 0)
-            throw std::invalid_argument("Expression::stridedView dimensions must be non-zero.");
+        if (d == std::numeric_limits<uint64_t>::max())
+            throw std::invalid_argument("Expression::stridedView does not support infer-dimension markers.");
     }
     Expression out = unaryOp(*this, ExprOp::STRIDED_VIEW);
     ExprNode& node = out.expr->nodes[out.nodeIndex];

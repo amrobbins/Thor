@@ -1,10 +1,27 @@
 #include <optional>
+#include <vector>
 #include "DeepLearning/Implementation/Layers/Activation/Softmax.h"
 
 #include <cudnn.h>
 
 #include "DeepLearning/Implementation/ThorError.h"
 using namespace ThorImplementation;
+
+namespace {
+
+std::vector<unsigned long> flattenLastDimensionForSoftmax(const std::vector<unsigned long>& dims) {
+    THOR_THROW_IF_FALSE(dims.size() >= 2);
+    const unsigned long classes = dims.back();
+    THOR_THROW_IF_FALSE(classes > 1);
+    unsigned long effectiveBatch = 1;
+    for (size_t i = 0; i + 1 < dims.size(); ++i) {
+        THOR_THROW_IF_FALSE(dims[i] > 0);
+        effectiveBatch *= dims[i];
+    }
+    return {effectiveBatch, classes};
+}
+
+}  // namespace
 
 const float Softmax::ALPHA_NO_SCALE = 1.0f;
 const float Softmax::BETA_CLEAR = 0.0f;
@@ -15,13 +32,15 @@ Softmax::Softmax(bool backwardComputedExternally) { this->backwardComputedExtern
 
 std::optional<Tensor> Softmax::createFeatureOutputTensor() {
     THOR_THROW_IF_FALSE(featureInput.has_value());
-    THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDimensions().size() == 2);
+    THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDimensions().size() >= 2);
+    THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDimensions().back() > 1);
     return featureInput.value().clone();
 }
 
 void Softmax::postCompile() {
-    cudnnTensorDescriptor =
-        createCudnnTensorDescriptor(featureInput.value().getDescriptor().getDimensions(), featureInput.value().getDescriptor().getDataType());
+    std::vector<unsigned long> softmaxDimensions =
+        flattenLastDimensionForSoftmax(featureInput.value().getDescriptor().getDimensions());
+    cudnnTensorDescriptor = createCudnnTensorDescriptor(softmaxDimensions, featureInput.value().getDescriptor().getDataType());
 
     if (backwardComputedExternally) {
         // ErrorInput to the previous layer is the errorInput coming to this layer,

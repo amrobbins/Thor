@@ -1,5 +1,6 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/optional.h>
+#include <nanobind/stl/vector.h>
 
 #include "DeepLearning/Api/Layers/Loss/CategoricalCrossEntropy.h"
 #include "DeepLearning/Api/Network/Network.h"
@@ -38,9 +39,47 @@ void setReportedLossShape(BuilderT &builder, LossShape reported_loss_shape) {
     }
 }
 
+
+bool sparseLabelsMatchPredictionPrefix(Tensor predictions, Tensor labels) {
+    const std::vector<uint64_t> predictionDims = predictions.getDimensions();
+    const std::vector<uint64_t> labelDims = labels.getDimensions();
+    if (predictionDims.empty())
+        return false;
+    const size_t prefixRank = predictionDims.size() - 1;
+    if (prefixRank == 0) {
+        return labelDims.size() == 1 && labelDims[0] == 1;
+    }
+    if (labelDims.size() == prefixRank) {
+        for (size_t i = 0; i < prefixRank; ++i) {
+            if (labelDims[i] != predictionDims[i])
+                return false;
+        }
+        return true;
+    }
+    if (labelDims.size() == prefixRank + 1 && labelDims.back() == 1) {
+        for (size_t i = 0; i < prefixRank; ++i) {
+            if (labelDims[i] != predictionDims[i])
+                return false;
+        }
+        return true;
+    }
+    return false;
+}
+
+std::string dimsToString(const std::vector<uint64_t>& dims) {
+    std::string result = "[";
+    for (size_t i = 0; i < dims.size(); ++i) {
+        if (i != 0)
+            result += ", ";
+        result += std::to_string(dims[i]);
+    }
+    result += "]";
+    return result;
+}
+
 void validateCategoricalCommon(const string &loss_name, Tensor predictions, DataType loss_data_type, LossShape reported_loss_shape) {
-    if (predictions.getDimensions().size() != 1 || predictions.getDimensions()[0] <= 1) {
-        string error_message = loss_name + ": predictions must be a 1 dimensional tensor with more than one class but predictions is " +
+    if (predictions.getDimensions().empty() || predictions.getDimensions().back() <= 1) {
+        string error_message = loss_name + ": predictions must have at least one dimension and a final class dimension greater than one but predictions is " +
                                predictions.getDescriptorString();
         throw nb::value_error(error_message.c_str());
     }
@@ -67,14 +106,9 @@ void bind_categorical_cross_entropy(nb::module_ &losses) {
            std::optional<float> loss_weight) {
             const string loss_name = "CategoricalCrossEntropy instance";
             validateCategoricalCommon(loss_name, predictions, loss_data_type, reported_loss_shape);
-            if (labels.getDimensions().size() != 1 || labels.getDimensions()[0] <= 1) {
-                string error_message = loss_name + ": labels must be a 1 dimensional dense class vector but labels is " +
-                                       labels.getDescriptorString();
-                throw nb::value_error(error_message.c_str());
-            }
-            if (predictions.getDimensions()[0] != labels.getDimensions()[0]) {
-                string error_message = loss_name + ": mismatch between predictions size " + to_string(predictions.getDimensions()[0]) +
-                                       " and labels tensor size " + to_string(labels.getDimensions()[0]);
+            if (predictions.getDimensions() != labels.getDimensions()) {
+                string error_message = loss_name + ": dense labels dimensions " + dimsToString(labels.getDimensions()) +
+                                       " must match predictions dimensions " + dimsToString(predictions.getDimensions());
                 throw nb::value_error(error_message.c_str());
             }
 
@@ -102,9 +136,9 @@ Parameters
 ----------
 network : thor.Network
 predictions : thor.Tensor
-    One-dimensional logits tensor with one element per class.
+    Logits tensor whose final dimension is the class dimension.
 labels : thor.Tensor
-    One-dimensional dense class target tensor. One-hot labels and soft labels are both supported.
+    Dense class target tensor with the same dimensions as predictions. One-hot labels and soft labels are both supported.
 loss_data_type : thor.DataType, default thor.DataType.FP32
 reported_loss_shape : thor.losses.LossShape, default batch
     This setting does not affect training; it only controls the reported loss tensor shape.
@@ -143,15 +177,18 @@ Use SparseCategoricalCrossEntropy when labels are integer class ids.
                                        to_string(num_classes);
                 throw nb::value_error(error_message.c_str());
             }
-            if (predictions.getDimensions()[0] != uint64_t(num_classes)) {
+            if (predictions.getDimensions().back() != uint64_t(num_classes)) {
                 string error_message = loss_name + ": mismatch between num_classes " + to_string(num_classes) +
-                                       " and predictions tensor size " + to_string(predictions.getDimensions()[0]) +
+                                       " and predictions final class dimension " + to_string(predictions.getDimensions().back()) +
                                        ". Either set num_classes to match or fix your predictions tensor.";
                 throw nb::value_error(error_message.c_str());
             }
-            if (labels.getDimensions().size() != 1 || labels.getDimensions()[0] != 1) {
-                string error_message = loss_name + ": labels must be a 1 dimensional tensor of size 1 but labels is " +
-                                       labels.getDescriptorString();
+            if (!sparseLabelsMatchPredictionPrefix(predictions, labels)) {
+                const std::vector<uint64_t> predictionDims = predictions.getDimensions();
+                const std::vector<uint64_t> predictionPrefix(predictionDims.begin(), predictionDims.end() - 1);
+                string error_message = loss_name + ": sparse labels dimensions " + dimsToString(labels.getDimensions()) +
+                                       " must match predictions prefix dimensions " + dimsToString(predictionPrefix) +
+                                       " or that prefix with a trailing singleton";
                 throw nb::value_error(error_message.c_str());
             }
             DataType labelsDataType = labels.getDataType();
@@ -189,9 +226,9 @@ Parameters
 ----------
 network : thor.Network
 predictions : thor.Tensor
-    One-dimensional logits tensor with one element per class.
+    Logits tensor whose final dimension is the class dimension.
 labels : thor.Tensor
-    One-dimensional tensor of size 1 containing the true class id for each batch item.
+    Sparse integer class ids. Dimensions must match the prediction prefix dimensions, or that prefix with a trailing singleton.
 num_classes : int
     Number of classes in predictions.
 loss_data_type : thor.DataType, default thor.DataType.FP32

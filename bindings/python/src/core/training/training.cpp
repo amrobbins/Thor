@@ -46,6 +46,7 @@ namespace {
 using Float32Array = nb::ndarray<const float, nb::numpy, nb::c_contig>;
 using Float16Array = nb::ndarray<const half, nb::numpy, nb::c_contig>;
 
+
 template <typename ScalarT>
 struct InMemoryNumpySplit {
     std::vector<uint8_t> examples;

@@ -1,5 +1,6 @@
 #include "Utilities/Expression/AutoDiff.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <optional>
@@ -13,6 +14,77 @@
 
 namespace ThorImplementation {
 namespace {
+
+static constexpr uint64_t EXPRESSION_COPY_DIM = 0;
+static constexpr uint64_t EXPRESSION_INFER_DIM = std::numeric_limits<uint64_t>::max();
+
+static uint64_t dynamicDimsNumel(const std::vector<uint64_t>& dims, const std::string& what) {
+    uint64_t result = 1;
+    for (uint64_t dim : dims) {
+        if (dim == EXPRESSION_COPY_DIM || dim == EXPRESSION_INFER_DIM) {
+            throw std::runtime_error(what + " contains unresolved dynamic dimensions.");
+        }
+        if (result > std::numeric_limits<uint64_t>::max() / dim) {
+            throw std::runtime_error(what + " dimensions overflow uint64_t.");
+        }
+        result *= dim;
+    }
+    return result;
+}
+
+static std::vector<uint64_t> resolveDynamicAliasDims(const std::vector<uint64_t>& source_dims,
+                                                    const std::vector<uint64_t>& requested_dims,
+                                                    bool must_preserve_numel,
+                                                    const std::string& what) {
+    if (requested_dims.empty()) {
+        throw std::runtime_error(what + " requires non-empty dimensions.");
+    }
+
+    std::vector<uint64_t> resolved = requested_dims;
+    std::optional<size_t> infer_index;
+    uint64_t known_product = 1;
+    for (size_t i = 0; i < resolved.size(); ++i) {
+        uint64_t dim = resolved[i];
+        if (dim == EXPRESSION_COPY_DIM) {
+            if (i >= source_dims.size()) {
+                throw std::runtime_error(what + " copy-dimension marker is out of range for source rank.");
+            }
+            dim = source_dims[i];
+            if (dim == 0) {
+                throw std::runtime_error(what + " resolved copy dimension must be non-zero.");
+            }
+            resolved[i] = dim;
+        } else if (dim == EXPRESSION_INFER_DIM) {
+            if (!must_preserve_numel) {
+                throw std::runtime_error(what + " does not support infer-dimension markers.");
+            }
+            if (infer_index.has_value()) {
+                throw std::runtime_error(what + " supports at most one infer-dimension marker.");
+            }
+            infer_index = i;
+            continue;
+        }
+
+        if (known_product > std::numeric_limits<uint64_t>::max() / dim) {
+            throw std::runtime_error(what + " resolved dimensions overflow uint64_t.");
+        }
+        known_product *= dim;
+    }
+
+    if (must_preserve_numel) {
+        const uint64_t source_numel = dynamicDimsNumel(source_dims, what + " source");
+        if (infer_index.has_value()) {
+            if (known_product == 0 || source_numel % known_product != 0) {
+                throw std::runtime_error(what + " cannot infer a dimension that preserves the number of elements.");
+            }
+            resolved[infer_index.value()] = source_numel / known_product;
+        } else if (source_numel != known_product) {
+            throw std::runtime_error(what + " must preserve the number of elements.");
+        }
+    }
+
+    return resolved;
+}
 
 double digammaApproxForMl(double x) {
     constexpr double pi = 3.14159265358979323846264338327950288;
@@ -66,6 +138,18 @@ bool experimentalCudnnRaggedBiasBackwardProbeEnabled() {
 }
 
 static std::vector<uint64_t> inferTransposeOutputDims(const std::vector<uint64_t>& input_dims);
+
+static std::vector<uint64_t> resolveReductionAxesForAutodiff(const std::vector<uint64_t>& reduction_axes, size_t input_rank) {
+    if (!reduction_axes.empty()) {
+        return reduction_axes;
+    }
+
+    std::vector<uint64_t> axes(input_rank);
+    for (size_t i = 0; i < input_rank; ++i) {
+        axes[i] = static_cast<uint64_t>(i);
+    }
+    return axes;
+}
 
 uint32_t cloneForwardSubtree(const PhysicalExpression& src,
                              uint32_t src_node_index,
@@ -513,8 +597,15 @@ class BackwardGraphBuilder {
             case ExprOp::FILL:
                 return n.fill_dims;
             case ExprOp::RESHAPE:
+                if (std::find(n.reshape_dims.begin(), n.reshape_dims.end(), EXPRESSION_COPY_DIM) != n.reshape_dims.end() ||
+                    std::find(n.reshape_dims.begin(), n.reshape_dims.end(), EXPRESSION_INFER_DIM) != n.reshape_dims.end()) {
+                    return std::nullopt;
+                }
                 return n.reshape_dims;
             case ExprOp::STRIDED_VIEW:
+                if (std::find(n.view_dims.begin(), n.view_dims.end(), EXPRESSION_COPY_DIM) != n.view_dims.end()) {
+                    return std::nullopt;
+                }
                 return n.view_dims;
             case ExprOp::STRIDED_VIEW_BACKWARD:
                 return n.fill_dims;
@@ -592,7 +683,7 @@ class BackwardGraphBuilder {
                 if (!tryGetConstantLike(node.lhs, value, lhs_dims)) {
                     return false;
                 }
-                dims = node.reshape_dims;
+                dims = resolveDynamicAliasDims(lhs_dims, node.reshape_dims, true, "AutoDiff constant reshape");
                 return true;
             }
             case ExprOp::STRIDED_VIEW: {
@@ -600,7 +691,7 @@ class BackwardGraphBuilder {
                 if (!tryGetConstantLike(node.lhs, value, lhs_dims)) {
                     return false;
                 }
-                dims = node.view_dims;
+                dims = resolveDynamicAliasDims(lhs_dims, node.view_dims, false, "AutoDiff constant strided_view");
                 return true;
             }
             case ExprOp::STRIDED_VIEW_BACKWARD: {
@@ -2340,10 +2431,10 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
                 node_dims[i] = inferTransposeOutputDims(node_dims[node.lhs]);
                 break;
             case ExprOp::RESHAPE:
-                node_dims[i] = node.reshape_dims;
+                node_dims[i] = resolveDynamicAliasDims(node_dims[node.lhs], node.reshape_dims, true, "AutoDiff reshape");
                 break;
             case ExprOp::STRIDED_VIEW:
-                node_dims[i] = node.view_dims;
+                node_dims[i] = resolveDynamicAliasDims(node_dims[node.lhs], node.view_dims, false, "AutoDiff strided_view");
                 break;
             case ExprOp::UNSQUEEZE: {
                 const std::vector<uint64_t>& lhs_dims = node_dims[node.lhs];
@@ -2382,9 +2473,12 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
             case ExprOp::REDUCE_ARGMAX:
             case ExprOp::REDUCE_AVG:
             case ExprOp::REDUCE_NORM1:
-            case ExprOp::REDUCE_NORM2:
-                node_dims[i] = StampedEquation::computeReductionOutputDims(node_dims[node.lhs], node.reduction_axes, node.squeeze_axes);
+            case ExprOp::REDUCE_NORM2: {
+                const std::vector<uint64_t>& lhs_dims = node_dims[node.lhs];
+                const std::vector<uint64_t> reduction_axes = resolveReductionAxesForAutodiff(node.reduction_axes, lhs_dims.size());
+                node_dims[i] = StampedEquation::computeReductionOutputDims(lhs_dims, reduction_axes, node.squeeze_axes);
                 break;
+            }
             case ExprOp::SCAN:
             case ExprOp::SEGMENTED_SCAN:
                 node_dims[i] = node_dims[node.lhs];
@@ -2820,11 +2914,16 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
         double constant_value = 0.0;
         std::vector<uint64_t> constant_dims;
         if (!builder.tryGetConstantLike(grad_value, constant_value, constant_dims)) {
-            // Tensor-valued upstream gradients are already shaped like the forward node output.  Do not
-            // wrap them in fill(0)+grad just to force materialization: doing so creates synthetic fused
-            // stages around matmul backward inputs and prevents later planner rewrites from recognizing
-            // cuBLASLt backward-epilogue and bgrad patterns.
-            return grad_value;
+            // Tensor-valued upstream gradients usually already have the shape of the forward node output.
+            // Only add a metadata reshape when we can prove the gradient's logical shape and it differs.
+            // Blindly wrapping unknown tensor gradients is unsafe: the same runtime input can then appear
+            // both through that reshape's output domain and through its natural broadcast domain in one
+            // fused stage, which gives the broadcast planner incompatible logical shapes for one slot.
+            const auto inferred_grad_dims = builder.tryInferKnownGradientDims(grad_value);
+            if (!inferred_grad_dims.has_value() || inferred_grad_dims.value() == forward_node_output_dims) {
+                return grad_value;
+            }
+            return builder.reshape(grad_value, forward_node_output_dims);
         }
 
         if (constant_dims == forward_node_output_dims) {
@@ -2868,10 +2967,14 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
             continue;
         }
 
-        const uint32_t grad = grad_opt.value();
+        const uint32_t raw_grad = grad_opt.value();
         const ExprNode& node = forward_expr.nodes[static_cast<size_t>(node_idx)];
         const std::vector<uint64_t> node_dims =
             has_forward_dims ? forward_node_dims.at(static_cast<size_t>(node_idx)) : std::vector<uint64_t>{};
+        const bool node_uses_upstream_grad = node.op != ExprOp::INPUT && node.op != ExprOp::RUNTIME_SCALAR &&
+                                             node.op != ExprOp::TENSOR_RUNTIME_SCALAR && node.op != ExprOp::SCALAR_FP;
+        const uint32_t grad = node_uses_upstream_grad ? shapeGradLikeNodeOutput(raw_grad, static_cast<uint32_t>(node_idx), node_dims)
+                                                      : raw_grad;
 
         switch (node.op) {
             case ExprOp::INPUT:

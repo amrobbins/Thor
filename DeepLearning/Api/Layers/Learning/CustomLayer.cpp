@@ -17,7 +17,6 @@ using DynamicExpression = ThorImplementation::DynamicExpression;
 using DataType = ThorImplementation::DataType;
 using PhysicalTensor = ThorImplementation::Tensor;
 using PhysicalTensorMap = std::unordered_map<std::string, PhysicalTensor>;
-using CompiledExecutionStage = ThorImplementation::CompiledExecutionStage;
 using CompiledOutputs = ThorImplementation::CompiledOutputs;
 using CompiledStageOutput = ThorImplementation::CompiledStageOutput;
 
@@ -298,12 +297,13 @@ CustomLayer::TensorMap CustomLayer::inferOutputInterfaceFromInputInterface(const
         build.equation->getOutputShapes(build.stamp_inputs, build.tensor_scalar_inputs);
     std::shared_ptr<CompiledOutputs> compiledOutputs = build.equation->compileForInputs(build.stamp_inputs, {}, build.tensor_scalar_inputs);
 
-    std::unordered_map<uint32_t, DataType> outputDTypeByValueId;
-    for (const CompiledExecutionStage& stage : compiledOutputs->stages) {
-        for (size_t outputIdx = 0; outputIdx < stage.outputs.size(); ++outputIdx) {
-            outputDTypeByValueId.emplace(stage.outputs[outputIdx].value_id, stage.outputDType(outputIdx));
-        }
-    }
+    // Final CustomLayer outputs can be storage aliases such as strided_view/reshape
+    // of an input tensor. Alias-only outputs do not appear in any execution
+    // stage's materialized output list, so inferring dtypes by scanning stages
+    // misses pure metadata/view outputs.  Ask the equation for final output
+    // dtypes instead; that path follows value aliases back to their source
+    // tensors and preserves integral passthrough dtypes such as uint32 token ids.
+    const std::unordered_map<std::string, DataType> fakeOutputDTypes = build.equation->getOutputDataTypes(build.stamp_inputs);
 
     TensorMap inferredOutputs;
     for (const CompiledStageOutput& finalOutput : compiledOutputs->final_outputs) {
@@ -311,8 +311,8 @@ CustomLayer::TensorMap CustomLayer::inferOutputInterfaceFromInputInterface(const
         if (shapeIt == fakeOutputShapes.end()) {
             throw std::runtime_error("CustomLayer failed to infer output shape for '" + finalOutput.name + "'.");
         }
-        auto dtypeIt = outputDTypeByValueId.find(finalOutput.value_id);
-        if (dtypeIt == outputDTypeByValueId.end()) {
+        auto dtypeIt = fakeOutputDTypes.find(finalOutput.name);
+        if (dtypeIt == fakeOutputDTypes.end()) {
             throw std::runtime_error("CustomLayer failed to infer output dtype for '" + finalOutput.name + "'.");
         }
         inferredOutputs.emplace(finalOutput.name, logicalTensorFromFakeOutput(shapeIt->second, dtypeIt->second));

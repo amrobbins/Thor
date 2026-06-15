@@ -42,7 +42,15 @@ std::vector<uint64_t> normalizeSqueezeAxesForInputDims(const std::vector<uint64_
 std::vector<uint64_t> normalizedReductionUnsqueezeAxes(const std::vector<uint64_t>& input_dims,
                                                        const std::vector<uint64_t>& reduction_axes,
                                                        const std::vector<uint64_t>& squeeze_axes) {
-    const std::vector<uint64_t> unsqueezed_output_dims = StampedEquation::computeReductionOutputDims(input_dims, reduction_axes, {});
+    std::vector<uint64_t> resolved_axes = reduction_axes;
+    if (resolved_axes.empty()) {
+        resolved_axes.reserve(input_dims.size());
+        for (uint64_t axis = 0; axis < input_dims.size(); ++axis) {
+            resolved_axes.push_back(axis);
+        }
+    }
+
+    const std::vector<uint64_t> unsqueezed_output_dims = StampedEquation::computeReductionOutputDims(input_dims, resolved_axes, {});
     return normalizeSqueezeAxesForInputDims(unsqueezed_output_dims, squeeze_axes);
 }
 

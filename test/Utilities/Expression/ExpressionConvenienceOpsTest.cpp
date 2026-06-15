@@ -2287,6 +2287,40 @@ TEST(ExpressionConvenienceOps, MultipleInternalStridedViewsExecuteCorrectlyThrou
     expectNear(copyToCpuValues(outputs.at("third"), stream), {6.0f, 18.0f});
 }
 
+TEST(ExpressionConvenienceOps, BackwardReshapesPublicOutputAdjointToInternalMulShape) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor x = makeGpuTensor({6, 4},
+                             {0.0f, 1.0f, 2.0f, 3.0f,
+                              4.0f, 5.0f, 6.0f, 7.0f,
+                              8.0f, 9.0f, 10.0f, 11.0f,
+                              12.0f, 13.0f, 14.0f, 15.0f,
+                              16.0f, 17.0f, 18.0f, 19.0f,
+                              20.0f, 21.0f, 22.0f, 23.0f},
+                             stream);
+    Tensor dy = makeGpuTensor({2, 3, 4},
+                              {1.0f, 0.5f, -1.0f, 2.0f,
+                               1.5f, -0.5f, 0.25f, 3.0f,
+                               -2.0f, 4.0f, 0.75f, -1.5f,
+                               2.5f, -3.0f, 1.25f, 0.0f,
+                               0.5f, 2.0f, -0.25f, 1.0f,
+                               -1.0f, 0.125f, 3.5f, -2.5f},
+                              stream);
+
+    auto xin = Expression::input("x");
+    auto forwardOutputs = Expression::outputs({{"y", (xin * xin).reshape({2, 3, 4})}});
+    auto gradients = runBackwardValues(forwardOutputs, {{"x", x}, {"dy", dy}}, {"x"}, "dy", stream);
+
+    expectNear(gradients.at("x_grad"),
+               {0.0f, 1.0f, -4.0f, 12.0f,
+                12.0f, -5.0f, 3.0f, 42.0f,
+                -32.0f, 72.0f, 15.0f, -33.0f,
+                60.0f, -78.0f, 35.0f, 0.0f,
+                16.0f, 68.0f, -9.0f, 38.0f,
+                -40.0f, 5.25f, 154.0f, -115.0f});
+}
+
 TEST(ExpressionConvenienceOps, StridedViewBackwardScattersToDenseSourceGradient) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);

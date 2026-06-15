@@ -91,7 +91,6 @@ class CategoricalCrossEntropy::Builder {
     virtual CategoricalCrossEntropy::Builder &labels(Tensor _labels) {
         THOR_THROW_IF_FALSE(!this->_labels.has_value());
         THOR_THROW_IF_FALSE(!_labels.getDimensions().empty());
-        THOR_THROW_IF_FALSE(_labels.getDimensions().size() == 1);
         this->_labels = _labels;
         return *this;
     }
@@ -166,6 +165,31 @@ class CategoricalCrossEntropy::Builder {
     }
 
    protected:
+
+    static bool sparseLabelDimensionsMatchPredictionPrefix(const std::vector<uint64_t>& predictionDimensions,
+                                                           const std::vector<uint64_t>& labelDimensions) {
+        THOR_THROW_IF_FALSE(!predictionDimensions.empty());
+        const size_t prefixRank = predictionDimensions.size() - 1;
+        if (prefixRank == 0) {
+            return labelDimensions.size() == 1 && labelDimensions[0] == 1;
+        }
+        if (labelDimensions.size() == prefixRank) {
+            for (size_t i = 0; i < prefixRank; ++i) {
+                if (labelDimensions[i] != predictionDimensions[i])
+                    return false;
+            }
+            return true;
+        }
+        if (labelDimensions.size() == prefixRank + 1 && labelDimensions.back() == 1) {
+            for (size_t i = 0; i < prefixRank; ++i) {
+                if (labelDimensions[i] != predictionDimensions[i])
+                    return false;
+            }
+            return true;
+        }
+        return false;
+    }
+
     void populateAndAdd(CategoricalCrossEntropy &categoricalCrossEntropy,
                         LabelType labelType,
                         std::optional<uint32_t> sparseNumClasses) {
@@ -173,26 +197,26 @@ class CategoricalCrossEntropy::Builder {
         THOR_THROW_IF_FALSE(_predictions.has_value());
         THOR_THROW_IF_FALSE(_labels.has_value());
         THOR_THROW_IF_FALSE(_predictions.value() != _labels.value());
-        // API layer does not have a batch dimension.
-        THOR_THROW_IF_FALSE(_predictions.value().getDimensions().size() == 1);
+        // API layer does not have a batch dimension.  The final prediction
+        // dimension is the class dimension; any preceding dimensions are
+        // per-example positions (for example, LM tokens).
         THOR_THROW_IF_FALSE(labelType == LabelType::SPARSE || labelType == LabelType::DENSE);
 
         std::vector<uint64_t> predictionDimensions = _predictions.value().getDimensions();
         std::vector<uint64_t> labelDimensions = _labels.value().getDimensions();
-        THOR_THROW_IF_FALSE(predictionDimensions.size() == 1 && predictionDimensions[0] > 1);
+        THOR_THROW_IF_FALSE(!predictionDimensions.empty() && predictionDimensions.back() > 1);
 
         if (labelType == LabelType::DENSE) {
-            THOR_THROW_IF_FALSE(labelDimensions.size() == 1 && labelDimensions[0] > 1);
             THOR_THROW_IF_FALSE(predictionDimensions == labelDimensions);
-            categoricalCrossEntropy.numClasses = predictionDimensions[0];
+            categoricalCrossEntropy.numClasses = predictionDimensions.back();
         } else {
-            THOR_THROW_IF_FALSE(labelDimensions.size() == 1 && labelDimensions[0] == 1);
+            THOR_THROW_IF_FALSE(sparseLabelDimensionsMatchPredictionPrefix(predictionDimensions, labelDimensions));
             DataType labelsDataType = _labels.value().getDataType();
             THOR_THROW_IF_FALSE(labelsDataType == DataType::UINT8 || labelsDataType == DataType::UINT16 ||
                                 labelsDataType == DataType::UINT32);
             THOR_THROW_IF_FALSE(sparseNumClasses.has_value());
             THOR_THROW_IF_FALSE(sparseNumClasses.value() > 1);
-            THOR_THROW_IF_FALSE(predictionDimensions[0] == sparseNumClasses.value());
+            THOR_THROW_IF_FALSE(predictionDimensions.back() == sparseNumClasses.value());
             categoricalCrossEntropy.numClasses = sparseNumClasses.value();
         }
 
@@ -221,7 +245,7 @@ class CategoricalCrossEntropy::Builder {
             categoricalCrossEntropy.buildSupportLayersAndAddToNetwork();
         } else {
             THOR_THROW_IF_FALSE(categoricalCrossEntropy.lossShape == LossShape::RAW);
-            categoricalCrossEntropy.lossTensor = Tensor(_lossDataType.value(), {categoricalCrossEntropy.numClasses});
+            categoricalCrossEntropy.lossTensor = Tensor(_lossDataType.value(), predictionDimensions);
             categoricalCrossEntropy.lossShaperInput = categoricalCrossEntropy.lossTensor;
             categoricalCrossEntropy.addToNetwork(_network.value());
         }

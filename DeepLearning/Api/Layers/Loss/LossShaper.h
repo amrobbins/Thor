@@ -7,6 +7,7 @@
 #include "DeepLearning/Implementation/Layers/Utility/Reshape.h"
 #include "Utilities/TensorOperations/Misc/BatchReduce.h"
 #include <optional>
+#include <limits>
 
 namespace Thor {
 
@@ -32,6 +33,16 @@ class LossShaper : public Layer {
     static void deserialize(const nlohmann::json &j, Network *network);
 
    protected:
+    static uint64_t flattenedNonBatchDim(const std::vector<uint64_t>& implementationInputLossDimensions) {
+        THOR_THROW_IF_FALSE(implementationInputLossDimensions.size() >= 2);
+        uint64_t result = 1;
+        for (uint32_t i = 1; i < implementationInputLossDimensions.size(); ++i) {
+            THOR_THROW_IF_FALSE(implementationInputLossDimensions[i] > 0);
+            result *= implementationInputLossDimensions[i];
+        }
+        return result;
+    }
+
     std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
                                                      std::shared_ptr<ThorImplementation::Layer> drivingLayer,
                                                      std::shared_ptr<Thor::Layer> drivingApiLayer,
@@ -64,16 +75,23 @@ class LossShaper : public Layer {
         std::vector<uint64_t> implementationOutputLossDimensions =
             getImplementationOutputDimensions(implementationInputLossDimensions, outputLossType);
         bool reduceBatchDim = implementationInputLossDimensions[0] != 1 && implementationOutputLossDimensions[0] == 1;
-        bool reduceLossDim = implementationInputLossDimensions[1] != 1 && implementationOutputLossDimensions[1] == 1;
+        const uint64_t inputLossDim = flattenedNonBatchDim(implementationInputLossDimensions);
+        const uint64_t outputLossDim = implementationOutputLossDimensions.size() > 1 ? implementationOutputLossDimensions[1] : 1;
+        bool reduceLossDim = inputLossDim != 1 && outputLossDim == 1;
 
         if (implementationInputLossDimensions == implementationOutputLossDimensions)
             return 0;
 
+        THOR_THROW_IF_FALSE(implementationInputLossDimensions[0] <= std::numeric_limits<uint32_t>::max());
+        THOR_THROW_IF_FALSE(inputLossDim <= std::numeric_limits<uint32_t>::max());
+        const uint32_t representativeBatch = static_cast<uint32_t>(implementationInputLossDimensions[0]);
+        const uint32_t flattenedLossDim32 = static_cast<uint32_t>(inputLossDim);
+
         int deviceNum = tensorPlacement.getDeviceNum();
         uint64_t workspaceSizeInBytes;
-        workspaceSizeInBytes = ThorImplementation::BatchReduce(implementationInputLossDimensions[0],
-                                                               implementationInputLossDimensions[0],
-                                                               implementationInputLossDimensions[1],
+        workspaceSizeInBytes = ThorImplementation::BatchReduce(representativeBatch,
+                                                               representativeBatch,
+                                                               flattenedLossDim32,
                                                                reduceBatchDim,
                                                                reduceLossDim,
                                                                lossInput.getDataType(),
@@ -125,7 +143,7 @@ class LossShaper::Builder {
    public:
     virtual LossShaper construct() const {
         THOR_THROW_IF_FALSE(_lossInput.has_value());
-        THOR_THROW_IF_FALSE(_lossInput.value().getDimensions().size() == 1);
+        THOR_THROW_IF_FALSE(!_lossInput.value().getDimensions().empty());
         THOR_THROW_IF_FALSE(_outputLossType.has_value());
         THOR_THROW_IF_FALSE(_outputLossType.value() == ThorImplementation::LossShaper::OutputLossType::BATCH ||
                _outputLossType.value() == ThorImplementation::LossShaper::OutputLossType::CLASSWISE ||
