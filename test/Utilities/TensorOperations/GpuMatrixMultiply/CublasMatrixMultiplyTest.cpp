@@ -3448,6 +3448,31 @@ TEST(CublasMatrixMultiply, GemmWithDGeluBackwardEpilogueMatchesCpuFP32) {
     Aux_d.copyFromAsync(Aux, stream);
     stream.synchronize();
 
+    bool kernelWillRunOnGpu = false;
+    const uint64_t workspaceSizeInBytes = CublasMatrixMultiply::instance().getGemmWithBackwardEpilogueWorkspaceSizeInBytes(
+        0,
+        m,
+        k,
+        k,
+        n,
+        k,
+        n,
+        n,
+        n,
+        false,
+        false,
+        CublasMatrixMultiply::MatmulDataTypes::same(DataType::FP32),
+        CublasMatrixMultiply::BackwardEpilogueFusion::DGelu,
+        false,
+        false,
+        n,
+        kernelWillRunOnGpu);
+    ASSERT_TRUE(kernelWillRunOnGpu);
+    std::optional<Tensor> workspace_d;
+    if (workspaceSizeInBytes > 0) {
+        workspace_d = Tensor(gpuPlacement, TensorDescriptor(DataType::UINT8, {workspaceSizeInBytes}));
+    }
+
     const float alpha = 1.0f;
     const float beta = 0.0f;
     CublasMatrixMultiply::instance().gemmWithDGeluUsingHeuristicKernelChoice(
@@ -3465,7 +3490,9 @@ TEST(CublasMatrixMultiply, GemmWithDGeluBackwardEpilogueMatchesCpuFP32) {
         &alpha,
         &beta,
         CublasMatrixMultiply::MatmulDataTypes::same(DataType::FP32),
-        stream);
+        stream,
+        CublasScalarPointerMode::Host,
+        workspace_d);
 
     D.copyFromAsync(D_d, stream);
     stream.synchronize();
@@ -3522,6 +3549,31 @@ TEST(CublasMatrixMultiply, GemmWithDGeluBgradBackwardEpilogueMatchesCpuFP32) {
     BiasGrad_d.copyFromAsync(BiasGrad, stream);
     stream.synchronize();
 
+    bool kernelWillRunOnGpu = false;
+    const uint64_t workspaceSizeInBytes = CublasMatrixMultiply::instance().getGemmWithBackwardEpilogueWorkspaceSizeInBytes(
+        0,
+        m,
+        k,
+        k,
+        n,
+        k,
+        n,
+        n,
+        n,
+        false,
+        false,
+        CublasMatrixMultiply::MatmulDataTypes::same(DataType::FP32),
+        CublasMatrixMultiply::BackwardEpilogueFusion::DGelu,
+        false,
+        true,
+        n,
+        kernelWillRunOnGpu);
+    ASSERT_TRUE(kernelWillRunOnGpu);
+    std::optional<Tensor> workspace_d;
+    if (workspaceSizeInBytes > 0) {
+        workspace_d = Tensor(gpuPlacement, TensorDescriptor(DataType::UINT8, {workspaceSizeInBytes}));
+    }
+
     const float alpha = 1.0f;
     const float beta = 0.0f;
     CublasMatrixMultiply::instance().gemmWithDGeluBgradUsingHeuristicKernelChoice(
@@ -3540,7 +3592,9 @@ TEST(CublasMatrixMultiply, GemmWithDGeluBgradBackwardEpilogueMatchesCpuFP32) {
         &alpha,
         &beta,
         CublasMatrixMultiply::MatmulDataTypes::same(DataType::FP32),
-        stream);
+        stream,
+        CublasScalarPointerMode::Host,
+        workspace_d);
 
     D.copyFromAsync(D_d, stream);
     BiasGrad.copyFromAsync(BiasGrad_d, stream);

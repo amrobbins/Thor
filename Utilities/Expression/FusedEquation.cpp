@@ -5649,7 +5649,7 @@ FusedEquation FusedEquation::compileBackward(const std::vector<std::string>& wrt
                                              const std::optional<std::string>& upstream_input_name,
                                              bool accumulate_grad_outputs) const {
     PhysicalOutputs backward_outputs =
-        buildBackwardOutputs(outputs_template, wrt_names, upstream_input_name, std::nullopt, accumulate_grad_outputs);
+        buildDeferredShapeBackwardOutputsTemplate(outputs_template, wrt_names, upstream_input_name, accumulate_grad_outputs);
     const EquationSignature backward_signature = buildSignature(backward_outputs.expr->numInputs(), device_num, use_fast_math);
     return FusedEquation(backward_outputs,
                          device_num,
@@ -5672,7 +5672,7 @@ FusedEquation FusedEquation::compileBackward(const std::vector<std::string>& wrt
                                              const std::unordered_map<std::string, std::string>& upstream_input_names_by_output,
                                              bool accumulate_grad_outputs) const {
     PhysicalOutputs backward_outputs =
-        buildBackwardOutputs(outputs_template, wrt_names, upstream_input_names_by_output, std::nullopt, accumulate_grad_outputs);
+        buildDeferredShapeBackwardOutputsTemplate(outputs_template, wrt_names, upstream_input_names_by_output, accumulate_grad_outputs);
     const EquationSignature backward_signature = buildSignature(backward_outputs.expr->numInputs(), device_num, use_fast_math);
     return FusedEquation(backward_outputs,
                          device_num,

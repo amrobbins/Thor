@@ -1744,7 +1744,10 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
                 &betaZero,
                 dataTypes,
                 toCublasBackwardEpilogueFusion(compiled_matmul->backward_epilogue),
-                run_stream);
+                run_stream,
+                CublasScalarPointerMode::Host,
+                workspace,
+                built_matmul->epilogue_algorithm);
             return;
         }
 
@@ -1786,7 +1789,10 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
                                                                                     dataTypes,
                                                                                     toCublasEpilogueFusion(compiled_matmul->epilogue),
                                                                                     false,
-                                                                                    run_stream);
+                                                                                    run_stream,
+                                                                                    CublasScalarPointerMode::Host,
+                                                                                    workspace,
+                                                                                    built_matmul->epilogue_algorithm);
         return;
     }
 
@@ -1850,7 +1856,9 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
             dataTypes,
             toCublasBackwardEpilogueFusion(compiled_matmul->backward_epilogue),
             run_stream,
-            resolved_scales.pointer_mode);
+            resolved_scales.pointer_mode,
+            workspace,
+            built_matmul->epilogue_algorithm);
         return;
     }
 
@@ -1887,7 +1895,9 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
                                                                                     toCublasEpilogueFusion(compiled_matmul->epilogue),
                                                                                     use_bias_epilogue,
                                                                                     run_stream,
-                                                                                    resolved_scales.pointer_mode);
+                                                                                    resolved_scales.pointer_mode,
+                                                                                    workspace,
+                                                                                    built_matmul->epilogue_algorithm);
         return;
     }
 
@@ -3199,12 +3209,51 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
                                                                                                         dataTypes,
                                                                                                         kernelWillRunOnGpu);
     } else if (use_cublaslt_epilogue_wrapper) {
-        // Fused cuBLASLt epilogues use the heuristic path directly for now.
-        // They have no workspace requirement in this staged wrapper; the stage-kind
-        // optimization still removes the separate expression FusedKernel.
-        diagnostic_path = "epilogue-heuristic-wrapper";
-        kernelWillRunOnGpu = true;
-        built->workspace_bytes = 0;
+        diagnostic_path = "epilogue-workspace-wrapper";
+        if (use_backward_epilogue) {
+            if (!epilogue_aux.has_value()) {
+                throw std::runtime_error("buildMatmul backward cuBLASLt epilogue requires epilogue_aux.");
+            }
+            const int64_t epilogue_aux_ld = static_cast<int64_t>(epilogue_aux.value().getDimensions()[1]);
+            built->epilogue_algorithm = CublasMatrixMultiply::instance().selectGemmWithBackwardEpilogueAlgorithm(
+                device_num,
+                a_rows,
+                a_cols,
+                b_rows,
+                b_cols,
+                ld_a,
+                ld_b,
+                ld_c,
+                ld_d,
+                compiled_matmul->transpose_lhs,
+                compiled_matmul->transpose_rhs,
+                dataTypes,
+                toCublasBackwardEpilogueFusion(compiled_matmul->backward_epilogue),
+                addend.has_value(),
+                bgrad_output.has_value(),
+                epilogue_aux_ld);
+            kernelWillRunOnGpu = built->epilogue_algorithm.has_value();
+            built->workspace_bytes = kernelWillRunOnGpu ? built->epilogue_algorithm->workspace_size_in_bytes : 0;
+        } else {
+            built->epilogue_algorithm = CublasMatrixMultiply::instance().selectGemmWithEpilogueAlgorithm(
+                device_num,
+                a_rows,
+                a_cols,
+                b_rows,
+                b_cols,
+                ld_a,
+                ld_b,
+                ld_c,
+                ld_d,
+                compiled_matmul->transpose_lhs,
+                compiled_matmul->transpose_rhs,
+                dataTypes,
+                toCublasEpilogueFusion(compiled_matmul->epilogue),
+                addend.has_value(),
+                use_bias_epilogue);
+            kernelWillRunOnGpu = built->epilogue_algorithm.has_value();
+            built->workspace_bytes = kernelWillRunOnGpu ? built->epilogue_algorithm->workspace_size_in_bytes : 0;
+        }
     } else {
         CublasMatrixMultiply::instance().chooseOptimalGemmKernel(device_num,
                                                                  a_rows,

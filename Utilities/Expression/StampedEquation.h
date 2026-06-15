@@ -26,6 +26,7 @@
 #include "Utilities/TensorOperations/DeepLearning/CudnnRmsNorm.h"
 #include "Utilities/TensorOperations/Embedding/EmbeddingKernels.h"
 #include "Utilities/TensorOperations/Cub/CubDevicePrimitives.h"
+#include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 
 namespace cudnn_frontend {
 namespace graph {
@@ -210,6 +211,7 @@ struct MatmulCacheKey {
 struct BuiltMatmul {
     MatmulCacheKey key;
     size_t workspace_bytes = 0;
+    std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> epilogue_algorithm;
 
     explicit BuiltMatmul(MatmulCacheKey key) : key(std::move(key)) {}
 

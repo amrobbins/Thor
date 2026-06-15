@@ -2797,7 +2797,8 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                                          const std::optional<std::unordered_map<std::string, std::string>>& upstream_input_names_by_output,
                                          const std::optional<std::unordered_map<std::string, uint32_t>>& upstream_node_indices_by_output,
                                          const std::optional<std::unordered_map<std::string, std::vector<uint64_t>>>& forward_input_dims,
-                                         bool accumulate_grad_outputs) {
+                                         bool accumulate_grad_outputs,
+                                         bool allow_shape_deferred_placeholders = false) {
     if (!forward_outputs.expr) {
         throw std::runtime_error("buildBackwardOutputs requires non-null forward_outputs.expr.");
     }
@@ -3261,6 +3262,14 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                 if (node_reaches_requested_inputs.at(node.lhs)) {
                     if (has_forward_dims) {
                         builder.addContribution(node.lhs, builder.reshape(grad, forward_node_dims.at(node.lhs)));
+                    } else if (allow_shape_deferred_placeholders) {
+                        // FusedEquation::compileBackward builds an initial template before runtime
+                        // forward input shapes are known.  The template is only used to expose
+                        // root inputs/output names and is rebuilt with concrete forward dims at
+                        // stamp time, so keep the graph buildable without guessing a reshape
+                        // target here.  Direct buildBackwardOutputs(...) still rejects this
+                        // path unless the caller supplies forward_input_dims.
+                        builder.addContribution(node.lhs, grad);
                     } else {
                         throw std::runtime_error("AutoDiff reshape backward requires forward shape information.");
                     }
@@ -3276,6 +3285,13 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                     } else {
                         const auto inferred_source_dims = inferPackedDenseSourceDimsForStridedViewBackward(node);
                         if (!inferred_source_dims.has_value()) {
+                            if (allow_shape_deferred_placeholders) {
+                                // See RESHAPE above: this placeholder only keeps the initial
+                                // deferred backward template buildable.  The stamped backward
+                                // graph is rebuilt with concrete forward input dims.
+                                builder.addContribution(node.lhs, grad);
+                                break;
+                            }
                             throw std::runtime_error("AutoDiff strided_view backward requires forward shape information.");
                         }
                         source_dims = inferred_source_dims.value();
@@ -4330,6 +4346,33 @@ PhysicalOutputs buildBackwardOutputs(const PhysicalOutputs& forward_outputs,
                                     normalizeUpstreamNodeIndicesByOutput(forward_outputs, upstream_node_indices_by_output),
                                     forward_input_dims,
                                     accumulate_grad_outputs);
+}
+
+PhysicalOutputs buildDeferredShapeBackwardOutputsTemplate(const PhysicalOutputs& forward_outputs,
+                                                         const std::vector<std::string>& wrt_names,
+                                                         const std::optional<std::string>& upstream_input_name,
+                                                         bool accumulate_grad_outputs) {
+    return buildBackwardOutputsImpl(forward_outputs,
+                                    wrt_names,
+                                    normalizeUpstreamInputNamesByOutput(forward_outputs, upstream_input_name),
+                                    std::nullopt,
+                                    std::nullopt,
+                                    accumulate_grad_outputs,
+                                    true);
+}
+
+PhysicalOutputs buildDeferredShapeBackwardOutputsTemplate(
+    const PhysicalOutputs& forward_outputs,
+    const std::vector<std::string>& wrt_names,
+    const std::unordered_map<std::string, std::string>& upstream_input_names_by_output,
+    bool accumulate_grad_outputs) {
+    return buildBackwardOutputsImpl(forward_outputs,
+                                    wrt_names,
+                                    normalizeUpstreamInputNamesByOutput(forward_outputs, upstream_input_names_by_output),
+                                    std::nullopt,
+                                    std::nullopt,
+                                    accumulate_grad_outputs,
+                                    true);
 }
 
 }  // namespace ThorImplementation

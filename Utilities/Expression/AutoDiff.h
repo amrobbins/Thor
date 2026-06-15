@@ -34,4 +34,20 @@ PhysicalOutputs buildBackwardOutputs(
     const std::optional<std::unordered_map<std::string, std::vector<uint64_t>>>& forward_input_dims = std::nullopt,
     bool accumulate_grad_outputs = false);
 
+// Builds the initial backward equation template used by FusedEquation::compileBackward when
+// forward input dimensions are not known yet. Shape-sensitive backward aliases may be
+// placeholders in this template; FusedEquation rebuilds the real backward graph with
+// runtime forward dimensions during stamping/shape-specialization.
+PhysicalOutputs buildDeferredShapeBackwardOutputsTemplate(
+    const PhysicalOutputs& forward_outputs,
+    const std::vector<std::string>& wrt_names = {},
+    const std::optional<std::string>& upstream_input_name = std::nullopt,
+    bool accumulate_grad_outputs = false);
+
+PhysicalOutputs buildDeferredShapeBackwardOutputsTemplate(
+    const PhysicalOutputs& forward_outputs,
+    const std::vector<std::string>& wrt_names,
+    const std::unordered_map<std::string, std::string>& upstream_input_names_by_output,
+    bool accumulate_grad_outputs = false);
+
 }  // namespace ThorImplementation

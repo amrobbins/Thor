@@ -12,7 +12,7 @@ namespace {
 std::vector<unsigned long> flattenLastDimensionForSoftmax(const std::vector<unsigned long>& dims) {
     THOR_THROW_IF_FALSE(dims.size() >= 2);
     const unsigned long classes = dims.back();
-    THOR_THROW_IF_FALSE(classes > 1);
+    THOR_THROW_IF_FALSE(classes > 0);
     unsigned long effectiveBatch = 1;
     for (size_t i = 0; i + 1 < dims.size(); ++i) {
         THOR_THROW_IF_FALSE(dims[i] > 0);
@@ -33,7 +33,7 @@ Softmax::Softmax(bool backwardComputedExternally) { this->backwardComputedExtern
 std::optional<Tensor> Softmax::createFeatureOutputTensor() {
     THOR_THROW_IF_FALSE(featureInput.has_value());
     THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDimensions().size() >= 2);
-    THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDimensions().back() > 1);
+    THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDimensions().back() > 0);
     return featureInput.value().clone();
 }
 

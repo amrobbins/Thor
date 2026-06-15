@@ -92,6 +92,11 @@ class CublasMatrixMultiply {
         DGelu,
     };
 
+    struct LtMatmulAlgorithmSelection {
+        cublasLtMatmulAlgo_t algorithm{};
+        uint64_t workspace_size_in_bytes = 0;
+    };
+
     // fills C as C = A * B, where A, B and C are all matrices whose memory is allocated on the GPU that will be performing the computation.
     //
     // accumulate=true computes C += A * B. accumulate=false computes C = A * B.
@@ -318,11 +323,80 @@ class CublasMatrixMultiply {
                                         Stream stream,
                                         CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host);
 
+    std::optional<LtMatmulAlgorithmSelection> selectGemmWithEpilogueAlgorithm(int gpuNum,
+                                                                                const int32_t A_rows,
+                                                                                const int32_t A_cols,
+                                                                                const int32_t B_rows,
+                                                                                const int32_t B_cols,
+                                                                                const int32_t ld_A,
+                                                                                const int32_t ld_B,
+                                                                                const int32_t ld_C,
+                                                                                const int32_t ld_D,
+                                                                                bool transposeA,
+                                                                                bool transposeB,
+                                                                                const MatmulDataTypes dataTypes,
+                                                                                EpilogueFusion epilogue,
+                                                                                bool hasAddend,
+                                                                                bool addendIsBiasVector);
+
+    uint64_t getGemmWithEpilogueWorkspaceSizeInBytes(int gpuNum,
+                                                      const int32_t A_rows,
+                                                      const int32_t A_cols,
+                                                      const int32_t B_rows,
+                                                      const int32_t B_cols,
+                                                      const int32_t ld_A,
+                                                      const int32_t ld_B,
+                                                      const int32_t ld_C,
+                                                      const int32_t ld_D,
+                                                      bool transposeA,
+                                                      bool transposeB,
+                                                      const MatmulDataTypes dataTypes,
+                                                      EpilogueFusion epilogue,
+                                                      bool hasAddend,
+                                                      bool addendIsBiasVector,
+                                                      bool &kernelWillRunOnGpu);
+
+    std::optional<LtMatmulAlgorithmSelection> selectGemmWithBackwardEpilogueAlgorithm(int gpuNum,
+                                                                                         const int32_t A_rows,
+                                                                                         const int32_t A_cols,
+                                                                                         const int32_t B_rows,
+                                                                                         const int32_t B_cols,
+                                                                                         const int32_t ld_A,
+                                                                                         const int32_t ld_B,
+                                                                                         const int32_t ld_C,
+                                                                                         const int32_t ld_D,
+                                                                                         bool transposeA,
+                                                                                         bool transposeB,
+                                                                                         const MatmulDataTypes dataTypes,
+                                                                                         BackwardEpilogueFusion epilogue,
+                                                                                         bool hasAddend,
+                                                                                         bool hasBiasGradient,
+                                                                                         int64_t epilogueAuxLd);
+
+    uint64_t getGemmWithBackwardEpilogueWorkspaceSizeInBytes(int gpuNum,
+                                                              const int32_t A_rows,
+                                                              const int32_t A_cols,
+                                                              const int32_t B_rows,
+                                                              const int32_t B_cols,
+                                                              const int32_t ld_A,
+                                                              const int32_t ld_B,
+                                                              const int32_t ld_C,
+                                                              const int32_t ld_D,
+                                                              bool transposeA,
+                                                              bool transposeB,
+                                                              const MatmulDataTypes dataTypes,
+                                                              BackwardEpilogueFusion epilogue,
+                                                              bool hasAddend,
+                                                              bool hasBiasGradient,
+                                                              int64_t epilogueAuxLd,
+                                                              bool &kernelWillRunOnGpu);
+
     // D = epilogue(alpha*(A*B) + optional addend). If addendIsBiasVector is true, addend must
     // be a packed rank-1 vector with one element per output column and is applied through
     // the cuBLASLt bias epilogue. Otherwise addend, when present, must be a rank-2 C tensor.
-    // This heuristic-only wrapper is intended for fused cuBLASLt epilogue opportunities where
-    // avoiding a separate expression kernel is more important than preselecting a workspace-backed algorithm.
+    // The optional workspace is normally allocated by the stamped expression plan using
+    // getGemmWithEpilogueWorkspaceSizeInBytes(...), so fused epilogue GEMMs do not allocate
+    // scratch memory in the launch path.
     void gemmWithEpilogueUsingHeuristicKernelChoice(Tensor A,
                                                     Tensor B,
                                                     std::optional<Tensor> addend,
@@ -339,7 +413,9 @@ class CublasMatrixMultiply {
                                                     EpilogueFusion epilogue,
                                                     bool addendIsBiasVector,
                                                     Stream stream,
-                                                    CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host);
+                                                    CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host,
+                                                    std::optional<Tensor> workspace = std::nullopt,
+                                                    std::optional<LtMatmulAlgorithmSelection> selectedAlgorithm = std::nullopt);
 
     // D = alpha*(A*B) + bias, where bias has one element per output column.
     // This uses the cuBLASLt bias epilogue instead of a separate broadcast add kernel.
@@ -356,7 +432,8 @@ class CublasMatrixMultiply {
                                                 const float *alpha,
                                                 const MatmulDataTypes dataTypes,
                                                 Stream stream,
-                                                CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host);
+                                                CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host,
+                                                std::optional<Tensor> workspace = std::nullopt);
 
     // D = dActivation(alpha*(A*B) + optional addend, epilogueAux).
     // epilogueAux is the cuBLASLt auxiliary input: a ReLU bit-mask for DRelu or
@@ -379,7 +456,9 @@ class CublasMatrixMultiply {
                                                             const MatmulDataTypes dataTypes,
                                                             BackwardEpilogueFusion epilogue,
                                                             Stream stream,
-                                                            CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host);
+                                                            CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host,
+                                                            std::optional<Tensor> workspace = std::nullopt,
+                                                            std::optional<LtMatmulAlgorithmSelection> selectedAlgorithm = std::nullopt);
 
     void gemmWithDReluUsingHeuristicKernelChoice(Tensor A,
                                                  Tensor B,
@@ -396,7 +475,8 @@ class CublasMatrixMultiply {
                                                  const float *beta,
                                                  const MatmulDataTypes dataTypes,
                                                  Stream stream,
-                                                 CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host);
+                                                 CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host,
+                                                 std::optional<Tensor> workspace = std::nullopt);
 
     void gemmWithDGeluUsingHeuristicKernelChoice(Tensor A,
                                                  Tensor B,
@@ -413,7 +493,8 @@ class CublasMatrixMultiply {
                                                  const float *beta,
                                                  const MatmulDataTypes dataTypes,
                                                  Stream stream,
-                                                 CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host);
+                                                 CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host,
+                                                 std::optional<Tensor> workspace = std::nullopt);
 
     void gemmWithDReluBgradUsingHeuristicKernelChoice(Tensor A,
                                                       Tensor B,
@@ -431,7 +512,8 @@ class CublasMatrixMultiply {
                                                       const float *beta,
                                                       const MatmulDataTypes dataTypes,
                                                       Stream stream,
-                                                      CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host);
+                                                      CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host,
+                                                      std::optional<Tensor> workspace = std::nullopt);
 
     void gemmWithDGeluBgradUsingHeuristicKernelChoice(Tensor A,
                                                       Tensor B,
@@ -449,7 +531,8 @@ class CublasMatrixMultiply {
                                                       const float *beta,
                                                       const MatmulDataTypes dataTypes,
                                                       Stream stream,
-                                                      CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host);
+                                                      CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host,
+                                                      std::optional<Tensor> workspace = std::nullopt);
 
     // Find any gpu of the specififed type and measure the optimal kernel for the matrix multiply operation
     // Find any gpu of the specififed type and measure the optimal kernel for the matrix multiply operation
