@@ -594,21 +594,18 @@ class NativeQueuedEpochScheduler {
             stampGpuNums.push_back(inputs[0]->getStream().getGpuNum());
         }
 
-        // Use a small private pool of completion streams rather than one stream
-        // per stamp.  A single completion stream serializes host callbacks and
-        // event records enough to cap the native queue well below max_in_flight.
-        // One stream per slot fixes that but is more stream fanout than this path
-        // should need.  Group queued slots onto private completion streams so the
-        // common max_in_flight=32 case uses four streams, while still avoiding the
-        // shared download stream round-robin pool used for normal output copies.
-        constexpr uint64_t COMPLETION_STREAM_SLOTS_PER_STREAM = 8;
-        const uint64_t numCompletionStreams =
-            (options.maxInFlightBatches + COMPLETION_STREAM_SLOTS_PER_STREAM - 1) / COMPLETION_STREAM_SLOTS_PER_STREAM;
+        // Completion must not serialize all queued slots through one stream: the
+        // wait/event/host-callback tail can otherwise cap the native queue below
+        // max_in_flight.  Assign each queue slot a completion stream from the
+        // existing download-stream pool.  getNextDownloadStream already limits
+        // stream fanout and round-robins per device, so slots distribute across
+        // the same streams used for ordinary output-download work instead of
+        // creating private ad-hoc streams here.
         std::vector<Stream> completionStreams;
-        completionStreams.reserve(numCompletionStreams);
-        for (uint64_t streamIndex = 0; streamIndex < numCompletionStreams; ++streamIndex) {
-            const uint64_t stamp = streamIndex % placedNetwork->getNumStamps();
-            completionStreams.emplace_back(stampGpuNums[stamp]);
+        completionStreams.reserve(options.maxInFlightBatches);
+        for (uint64_t slotIndex = 0; slotIndex < options.maxInFlightBatches; ++slotIndex) {
+            const uint64_t stamp = slotIndex % placedNetwork->getNumStamps();
+            completionStreams.push_back(Stream::getNextDownloadStream(stampGpuNums[stamp]));
         }
         const bool validationPass = exampleType != ExampleType::TRAIN;
         const std::vector<StepExecutable>& steps = plan.getSteps();
@@ -712,8 +709,7 @@ class NativeQueuedEpochScheduler {
             // NetworkOutput-owned download streams are waited on here, and the host callback
             // snapshots the shared CPU output tensors into per-slot scalarStats before those
             // public output tensors may be reused by a later batch.
-            const uint64_t completionStreamIndex = slotIndex / COMPLETION_STREAM_SLOTS_PER_STREAM;
-            Stream completionStream = completionStreams[completionStreamIndex];
+            Stream completionStream = completionStreams[slotIndex];
             const auto waitProcessingStart = std::chrono::high_resolution_clock::now();
             completionStream.waitEvent(processingFinishedEvents[slotIndex]);
             const auto waitProcessingFinish = std::chrono::high_resolution_clock::now();
