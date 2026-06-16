@@ -3411,11 +3411,15 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
     // Ensure there are no unreported runtime errors
     stream.synchronize();
 
-    // Allocate a lot of memory, to ensure subsequent calls are not benefiting from cache hits
+    // Allocate a lot of memory, to ensure subsequent calls are not benefiting from cache hits.
+    // Keep enough distinct full matrix instances for this GEMM shape, and at least 2x L2 for small GEMMs.
+    cudaDeviceProp deviceProperties;
+    CUDA_CHECK(cudaGetDeviceProperties(&deviceProperties, gpuNum));
+    long l2CacheBytes = deviceProperties.l2CacheSize;
     long memPerInstance =
         rowsA * ldA * A_ELEMENT_SIZE + rowsB * ldB * B_ELEMENT_SIZE + initialRowsC * ldC * C_ELEMENT_SIZE + rowsD * ldD * D_ELEMENT_SIZE;
-    long totalMatrixMemory = minl(totalGpuMem * 0.4, maxl(ONE_HUNDRED_MEGS, 10 * memPerInstance));
-    long numInstances = minl(totalMatrixMemory / memPerInstance, 5000);
+    long targetMatrixMemory = maxl(10 * memPerInstance, 2.5 * l2CacheBytes);
+    long numInstances = minl(targetMatrixMemory / memPerInstance, 5000);
     THOR_THROW_IF_FALSE(numInstances > 0);
 
     long numWorkspaceInstances;
