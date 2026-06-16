@@ -1656,7 +1656,7 @@ static double cublasLtWorkspaceTradeSlowdownBudgetFraction(uint64_t preferredWor
     // slowdown: a slower kernel may buy memory only when the memory saving is
     // large relative to the matrices involved, and even then it cannot give up
     // more than a small fraction of measured runtime.
-    constexpr double MAX_WORKSPACE_TRADE_SLOWDOWN_FRACTION = 0.6667;  // % max slowdown.
+    constexpr double MAX_WORKSPACE_TRADE_SLOWDOWN_FRACTION = 0.05;  // % max slowdown.
     constexpr double WORKSPACE_SAVINGS_TO_SLOWDOWN_DIVISOR = 4.0;
     const double savedWorkspaceBytes = static_cast<double>(preferredWorkspaceBytes - candidateWorkspaceBytes);
     const double savedVsOperation = savedWorkspaceBytes / static_cast<double>(operationBytes);

@@ -28,6 +28,7 @@ struct DynamicExpressionBuild {
     std::unordered_map<std::string, Tensor> preallocated_outputs;
     std::unordered_map<std::string, std::vector<uint64_t>> requested_output_shapes;
     std::function<void(Stream&)> pre_forward_hook;
+    std::shared_ptr<const ExpressionDefinition> serialized_definition = nullptr;
 
 };
 
@@ -309,6 +310,8 @@ class DynamicExpression {
                     .tensor_scalar_inputs = {},
                     .preallocated_outputs = outputs,
                     .requested_output_shapes = {},
+                    .pre_forward_hook = {},
+                    .serialized_definition = serialized_definition,
                 };
             },
             serialized_definition);
@@ -322,6 +325,7 @@ class DynamicExpression {
 
         DynamicExpressionBuild build = builder_(inputs, outputs, stream);
         validateBuild(build, outputs);
+        rememberSerializedDefinition(build);
         return build;
     }
 
@@ -335,6 +339,7 @@ class DynamicExpression {
 
         DynamicExpressionBuild build = builder_(inputs, outputs, stream);
         validateBuild(build, outputs);
+        rememberSerializedDefinition(build);
         return PreparedDynamicExpression(std::move(build), stream);
     }
 
@@ -394,6 +399,12 @@ class DynamicExpression {
     }
 
    private:
+    void rememberSerializedDefinition(const DynamicExpressionBuild& build) const {
+        if (serialized_definition_ == nullptr && build.serialized_definition != nullptr) {
+            serialized_definition_ = build.serialized_definition;
+        }
+    }
+
     static void validateInputs(const TensorMap& inputs, const Stream& stream) {
         if (inputs.empty()) {
             throw std::invalid_argument("DynamicExpression requires at least one input tensor.");
@@ -574,7 +585,7 @@ class DynamicExpression {
     std::vector<std::string> expected_input_names_;
     std::vector<std::string> expected_output_names_;
     BuilderFn builder_;
-    std::shared_ptr<const ExpressionDefinition> serialized_definition_ = nullptr;
+    mutable std::shared_ptr<const ExpressionDefinition> serialized_definition_ = nullptr;
 };
 
 }  // namespace ThorImplementation

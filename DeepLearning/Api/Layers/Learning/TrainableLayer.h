@@ -1,7 +1,6 @@
 #pragma once
 #include "DeepLearning/Implementation/ThorError.h"
 
-#include <boost/interprocess/offset_ptr.hpp>
 
 #include "DeepLearning/Api/Layers/MultiConnectionLayer.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"

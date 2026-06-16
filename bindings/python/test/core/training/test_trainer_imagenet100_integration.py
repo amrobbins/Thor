@@ -27,7 +27,8 @@ IMAGENET100_MAX_IN_FLIGHT_BATCHES = int(os.environ.get("THOR_IMAGENET100_MAX_IN_
 IMAGENET100_STATS_INTERVAL_S = float(os.environ.get("THOR_IMAGENET100_STATS_INTERVAL_S", "5.0"))
 IMAGENET100_REBUILD = os.environ.get("THOR_IMAGENET100_REBUILD") == "1"
 IMAGENET100_NUM_SHARDS = int(os.environ.get("THOR_IMAGENET100_NUM_SHARDS", "1"))
-IMAGENET100_MANIFEST_VERSION = 1
+# Bump whenever the on-disk raw shard format changes so stale /tmp caches are rebuilt.
+IMAGENET100_MANIFEST_VERSION = 2
 IMAGENET100_NUM_CLASSES = 100
 IMAGENET100_TRAIN_EXAMPLES = 126_689
 IMAGENET100_VALIDATE_EXAMPLES = 5_000
@@ -308,7 +309,7 @@ def _manifest_path(cache_root: Path) -> Path:
 
 
 def _shard_root(cache_root: Path) -> Path:
-    return cache_root / f"shards_{IMAGENET100_IMAGE_SIZE}_fp16"
+    return cache_root / f"shards_raw_v2_{IMAGENET100_IMAGE_SIZE}_fp16"
 
 
 def _base_manifest(*, shard_paths):

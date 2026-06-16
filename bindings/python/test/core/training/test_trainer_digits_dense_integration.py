@@ -32,7 +32,8 @@ DIGITS_DENSE_WIDTH = int(os.environ.get("THOR_DIGITS_DENSE_WIDTH", "8192"))
 DIGITS_DENSE_HIDDEN_LAYERS = int(os.environ.get("THOR_DIGITS_DENSE_HIDDEN_LAYERS", "8"))
 DIGITS_DENSE_STATS_COLOR = os.environ.get("THOR_DIGITS_DENSE_STATS_COLOR", "auto").lower()
 assert DIGITS_DENSE_STATS_COLOR in {"always", "auto", "never"}
-DIGITS_DENSE_MANIFEST_VERSION = 1
+# Bump whenever the on-disk raw shard format changes so stale /tmp caches are rebuilt.
+DIGITS_DENSE_MANIFEST_VERSION = 2
 DIGITS_IMAGE_HEIGHT = 28
 DIGITS_IMAGE_WIDTH = 28
 DIGITS_INPUT_FEATURES = DIGITS_IMAGE_HEIGHT * DIGITS_IMAGE_WIDTH
@@ -233,7 +234,7 @@ def _digits_manifest_path(cache_root: Path) -> Path:
 
 
 def _digits_shard_root(cache_root: Path) -> Path:
-    return cache_root / "shards_fp16_flat"
+    return cache_root / "shards_raw_v2_fp16_flat"
 
 
 def _download_if_missing(url: str, path: Path) -> None:

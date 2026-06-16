@@ -37,6 +37,7 @@ using TensorMap = std::unordered_map<std::string, Tensor>;
 using PhysicalTensorMap = std::unordered_map<std::string, PhysicalTensor>;
 using Expression = ThorImplementation::Expression;
 using Outputs = ThorImplementation::Outputs;
+using ExpressionDefinition = ThorImplementation::ExpressionDefinition;
 using DynamicExpression = ThorImplementation::DynamicExpression;
 using DynamicExpressionBuild = ThorImplementation::DynamicExpressionBuild;
 using FusedEquation = ThorImplementation::FusedEquation;
@@ -465,6 +466,7 @@ DynamicExpressionBuild callBuildCallableForContext(nb::callable callable,
     std::vector<std::pair<std::string, Expression>> namedExpressions = expressionsFromPythonDict(nb::cast<nb::dict>(result));
     applyActivationToNamedExpressions(namedExpressions, activation);
     Outputs expressionOutputs = Expression::outputs(namedExpressions);
+    auto serializedDefinition = std::make_shared<ExpressionDefinition>(ExpressionDefinition::fromOutputs(expressionOutputs));
     std::set<std::string> actualInputNames = expressionOutputs.expression()->getInputNames();
     validateCustomLayerExpressionInputs(expectedInputNames, actualInputNames);
     validateDeclaredParametersReferenced(parameterTensors, actualInputNames, outputNames);
@@ -473,11 +475,13 @@ DynamicExpressionBuild callBuildCallableForContext(nb::callable callable,
     PhysicalTensorMap usedInputs = selectNamedTensors(inputs, actualInputNames, "expression input");
 
     return DynamicExpressionBuild{
-        std::make_shared<FusedEquation>(FusedEquation::compile(expressionOutputs.physicalOutputs(), stream.getGpuNum())),
-        usedInputs,
-        {},
-        outputs,
-        {},
+        .equation = std::make_shared<FusedEquation>(FusedEquation::compile(serializedDefinition->outputs, stream.getGpuNum())),
+        .stamp_inputs = usedInputs,
+        .tensor_scalar_inputs = {},
+        .preallocated_outputs = outputs,
+        .requested_output_shapes = {},
+        .pre_forward_hook = {},
+        .serialized_definition = serializedDefinition,
     };
 }
 

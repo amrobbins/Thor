@@ -77,7 +77,7 @@ bool ShardedRawDatasetCreator::createDataset(unique_ptr<DataProcessor>&& dataPro
         allClassesVector.push_back(*it);
     }
 
-    // Create the output mem-mapped file shards
+    // Create the output raw shard files.
     for (uint32_t i = 0; i < destShardFiles.size(); ++i) {
         shards.push_back(make_shared<Shard>());
         shards.back()->createShard(destShardFiles[i].native(),
@@ -101,7 +101,7 @@ bool ShardedRawDatasetCreator::createDataset(unique_ptr<DataProcessor>&& dataPro
     // loadExamples returns after all examples are loaded. Then we wait for all the buffers to be popped from the work queue.
     // Then we close the queue, which causes the writer threads to terminate.
 
-    // start numDestDisks threads, each pops a processed training example and writes it to the end of the memMappedFile that it is told too
+    // start numDestDisks threads, each pops a processed training example and appends it to the selected shard.
     std::vector<thread> writerThreads;
     for (uint32_t i = 0; i < numOutputShards; ++i) {
         writerThreads.emplace_back(&ShardedRawDatasetCreator::writeDataToShard, this, &workQueue, &shards);

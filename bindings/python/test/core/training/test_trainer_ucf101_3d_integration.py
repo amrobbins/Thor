@@ -41,7 +41,8 @@ UCF101_3D_LEARNING_RATE = float(os.environ.get("THOR_UCF101_3D_LEARNING_RATE", "
 UCF101_3D_MOMENTUM = float(os.environ.get("THOR_UCF101_3D_MOMENTUM", "0.9"))
 UCF101_3D_STATS_COLOR = os.environ.get("THOR_UCF101_3D_STATS_COLOR", "auto").lower()
 assert UCF101_3D_STATS_COLOR in {"always", "auto", "never"}
-UCF101_3D_MANIFEST_VERSION = 1
+# Bump whenever the on-disk raw shard format changes so stale /tmp caches are rebuilt.
+UCF101_3D_MANIFEST_VERSION = 2
 
 pytestmark = [
     pytest.mark.cuda,
@@ -461,7 +462,7 @@ def _ucf101_manifest_path(cache_root: Path) -> Path:
 
 
 def _ucf101_shard_root(cache_root: Path) -> Path:
-    return cache_root / f"ucf101_subset_shards_{UCF101_3D_CLIP_FRAMES}x{UCF101_3D_IMAGE_SIZE}_cthw_fp16"
+    return cache_root / f"ucf101_subset_shards_raw_v2_{UCF101_3D_CLIP_FRAMES}x{UCF101_3D_IMAGE_SIZE}_cthw_fp16"
 
 
 def _ucf101_base_manifest(*, shard_paths, class_names, train_examples: int, validate_examples: int, test_examples: int):

@@ -37,7 +37,8 @@ TEST(ComputeBinaryAccuracy, computesCorrectly21) {
             uint8_t label = (float)(rand() % 2);
             ((half *)predictions_h.getMemPtr())[batch] = prediction;
             ((uint8_t *)labels_h.getMemPtr())[batch] = label;
-            if (label == (prediction >= 0.5f))
+            const float storedPrediction = static_cast<float>(((half *)predictions_h.getMemPtr())[batch]);
+            if (label == (storedPrediction >= 0.5f))
                 numCorrect += 1;
         }
         float expected = numCorrect / (float)batchSize;
@@ -87,7 +88,8 @@ TEST(ComputeBinaryAccuracy, computesCorrectly22) {
             half label = (float)(rand() % 2);
             ((half *)predictions_h.getMemPtr())[batch] = prediction;
             ((half *)labels_h.getMemPtr())[batch] = label;
-            if ((float)label == (prediction >= 0.5f))
+            const float storedPrediction = static_cast<float>(((half *)predictions_h.getMemPtr())[batch]);
+            if ((float)label == (storedPrediction >= 0.5f))
                 numCorrect += 1;
         }
         float expected = numCorrect / (float)batchSize;
@@ -137,7 +139,8 @@ TEST(ComputeBinaryAccuracy, computesCorrectly24) {
             float label = rand() % 2;
             ((half *)predictions_h.getMemPtr())[batch] = prediction;
             ((float *)labels_h.getMemPtr())[batch] = label;
-            if (label == (prediction >= 0.5f))
+            const float storedPrediction = static_cast<float>(((half *)predictions_h.getMemPtr())[batch]);
+            if (label == (storedPrediction >= 0.5f))
                 numCorrect += 1;
         }
         float expected = numCorrect / (float)batchSize;

@@ -72,11 +72,6 @@ if (_thor_cuda_compiler_for_root)
     endif ()
 endif ()
 
-# Prefer Boost's own CMake config instead of the deprecated FindBoost module.
-if (POLICY CMP0167)
-    cmake_policy(SET CMP0167 OLD)
-endif ()
-
 # Read THOR_VERSION from ThorVersion.h.in
 file(READ "${CMAKE_SOURCE_DIR}/ThorVersion.h.in" _thor_version_header)
 
@@ -647,24 +642,6 @@ target_compile_definitions(Thor PRIVATE
         THOR_CUDA_CCCL_INCLUDE_DIR=\"${THOR_CUDA_CCCL_INCLUDE_DIR}\"
 )
 
-# ============================================================
-# Boost
-# ============================================================
-set(Boost_USE_STATIC_LIBS OFF)
-set(Boost_USE_MULTITHREADED ON)
-set(Boost_USE_STATIC_RUNTIME OFF)
-set(Boost_NO_BOOST_CMAKE ON)
-
-set(Boost_MIN_VERSION 1.66)
-
-# Use Boost's config package (BoostConfig.cmake), not the old FindBoost module.
-find_package(Boost ${Boost_MIN_VERSION} REQUIRED COMPONENTS
-        serialization
-        system
-)
-# Header-only: Boost::boost / Boost::headers gives you the include dirs.
-target_link_libraries(Thor PRIVATE Boost::boost)
-
 # Per-configuration flags
 target_compile_options(Thor PRIVATE
         $<$<CONFIG:Release>:-O3>
@@ -870,7 +847,6 @@ target_link_libraries(thor_tests PRIVATE Thor GTest::gtest_main CUDA::cudart CUD
 target_link_libraries(thor_tests PRIVATE "${THOR_CUDNN_LIBRARY}")
 find_package(OpenMP REQUIRED)
 target_link_libraries(thor_tests PRIVATE OpenMP::OpenMP_CXX)
-target_link_libraries(thor_tests PRIVATE Boost::boost)
 target_link_libraries(thor_tests PRIVATE PkgConfig::LIBURING)   # FIXME: I think I can remove this once UringDirect.cpp
 include(GoogleTest)
 gtest_discover_tests(thor_tests)
@@ -896,7 +872,6 @@ thor_enable_release_no_semantic_interposition(thor_embedding_sparse_backward_pro
 target_link_libraries(thor_embedding_sparse_backward_profile PRIVATE Thor CUDA::cudart CUDA::cublas CUDA::cublasLt CUDA::cusolver CUDA::cusparse)
 target_link_libraries(thor_embedding_sparse_backward_profile PRIVATE "${THOR_CUDNN_LIBRARY}")
 target_link_libraries(thor_embedding_sparse_backward_profile PRIVATE OpenMP::OpenMP_CXX)
-target_link_libraries(thor_embedding_sparse_backward_profile PRIVATE Boost::boost)
 target_link_libraries(thor_embedding_sparse_backward_profile PRIVATE PkgConfig::LIBURING)
 target_compile_options(thor_embedding_sparse_backward_profile PRIVATE
         $<$<CONFIG:Release>:-O3>

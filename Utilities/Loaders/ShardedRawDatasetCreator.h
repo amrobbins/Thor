@@ -7,7 +7,6 @@
 
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "Utilities/Common/Stream.h"
-#include "Utilities/Loaders/MemMappedFileTypes.h"
 #include "Utilities/Loaders/Shard.h"
 #include "Utilities/WorkQueue/AsyncQueue.h"
 #include "Utilities/WorkQueue/WorkQueueUnordered.h"

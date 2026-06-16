@@ -121,9 +121,9 @@ BatchAssembler::BatchAssembler(vector<std::shared_ptr<Shard>> shards,
         randomizers.emplace_back(new FullPeriodRandom(numExamplesPerShard[i], false));
     }
 
-    file_string_vector_t *allClasses = shards[0]->getAllClasses();
-    for (uint64_t c = 0; c < allClasses->size(); ++c) {
-        string className = (*allClasses)[c].c_str();
+    const std::vector<std::string> &allClasses = shards[0]->getAllClasses();
+    for (uint64_t c = 0; c < allClasses.size(); ++c) {
+        const string &className = allClasses[c];
         if (classIndexes.count(className) == 0) {
             uint64_t curNumClasses = classIndexes.size();
             classIndexes[className] = curNumClasses;

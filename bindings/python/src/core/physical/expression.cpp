@@ -2812,13 +2812,16 @@ void bind_dynamic_expression(nb::module_& physical) {
            const DynamicTensorMap& stamp_inputs,
            const DynamicTensorScalarMap& tensor_scalar_inputs,
            const DynamicTensorMap& preallocated_outputs,
-           const DynamicShapeMap& requested_output_shapes) {
+           const DynamicShapeMap& requested_output_shapes,
+           std::shared_ptr<const ExpressionDefinition> serialized_definition) {
             new (self) DynamicExpressionBuild{
-                equation,
-                stamp_inputs,
-                tensor_scalar_inputs,
-                preallocated_outputs,
-                requested_output_shapes,
+                .equation = equation,
+                .stamp_inputs = stamp_inputs,
+                .tensor_scalar_inputs = tensor_scalar_inputs,
+                .preallocated_outputs = preallocated_outputs,
+                .requested_output_shapes = requested_output_shapes,
+                .pre_forward_hook = {},
+                .serialized_definition = std::move(serialized_definition),
             };
         },
         "equation"_a,
@@ -2826,6 +2829,7 @@ void bind_dynamic_expression(nb::module_& physical) {
         "tensor_scalar_inputs"_a = DynamicTensorScalarMap{},
         "preallocated_outputs"_a = DynamicTensorMap{},
         "requested_output_shapes"_a = DynamicShapeMap{},
+        "serialized_definition"_a = nullptr,
         R"nbdoc(
 Describe a prepared dynamic-expression build result.
 
@@ -2841,6 +2845,9 @@ preallocated_outputs : dict[str, PhysicalTensor], optional
     Output tensors to bind when stamping.
 requested_output_shapes : dict[str, list[int]], optional
     Per-output requested shapes used when stamping.
+serialized_definition : thor.physical.ExpressionDefinition, optional
+    Serializable expression graph matching ``equation``. Provide this when an
+    arbitrary dynamic builder should also support architecture serialization.
 )nbdoc");
 
     dynamic_expression_build.def_rw("equation", &DynamicExpressionBuild::equation);
@@ -2848,6 +2855,7 @@ requested_output_shapes : dict[str, list[int]], optional
     dynamic_expression_build.def_rw("tensor_scalar_inputs", &DynamicExpressionBuild::tensor_scalar_inputs);
     dynamic_expression_build.def_rw("preallocated_outputs", &DynamicExpressionBuild::preallocated_outputs);
     dynamic_expression_build.def_rw("requested_output_shapes", &DynamicExpressionBuild::requested_output_shapes);
+    dynamic_expression_build.def_rw("serialized_definition", &DynamicExpressionBuild::serialized_definition);
 
     auto prepared_dynamic_expression = nb::class_<PreparedDynamicExpression>(physical, "PreparedDynamicExpression");
     prepared_dynamic_expression.attr("__module__") = "thor.physical";

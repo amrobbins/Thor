@@ -1,11 +1,12 @@
 #include "Utilities/Loaders/Shard.h"
-#include "Utilities/Expression/CudaHelpers.h"
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/TarFile/UringDirect.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <limits>
 #include <stdexcept>
 
@@ -13,9 +14,95 @@ using std::mutex;
 using std::string;
 using std::thread;
 
-Shard::Shard() { open = false; }
+namespace {
 
-Shard::~Shard() = default;
+constexpr std::array<char, 16> SHARD_MAGIC = {'T', 'H', 'O', 'R', '_', 'R', 'A', 'W', '_', 'S', 'H', 'A', 'R', 'D', '\0', '\0'};
+constexpr uint32_t SHARD_FORMAT_VERSION = 2;
+constexpr uint32_t SHARD_HEADER_BYTES = 88;
+
+void writeExact(std::ostream &stream, const void *data, uint64_t numBytes) {
+    stream.write(reinterpret_cast<const char *>(data), static_cast<std::streamsize>(numBytes));
+    THOR_THROW_IF_FALSE(stream.good());
+}
+
+void readExact(std::istream &stream, void *data, uint64_t numBytes) {
+    stream.read(reinterpret_cast<char *>(data), static_cast<std::streamsize>(numBytes));
+    THOR_THROW_IF_FALSE(stream.good());
+}
+
+void writeUint32(std::ostream &stream, uint32_t value) { writeExact(stream, &value, sizeof(value)); }
+
+void writeUint64(std::ostream &stream, uint64_t value) { writeExact(stream, &value, sizeof(value)); }
+
+uint32_t readUint32(std::istream &stream) {
+    uint32_t value = 0;
+    readExact(stream, &value, sizeof(value));
+    return value;
+}
+
+uint64_t readUint64(std::istream &stream) {
+    uint64_t value = 0;
+    readExact(stream, &value, sizeof(value));
+    return value;
+}
+
+void writeString(std::ostream &stream, const std::string &value) {
+    writeUint64(stream, value.size());
+    if (!value.empty()) {
+        writeExact(stream, value.data(), value.size());
+    }
+}
+
+std::string readString(std::istream &stream, uint64_t fileSizeBytes) {
+    uint64_t size = readUint64(stream);
+    THOR_THROW_IF_FALSE(size <= fileSizeBytes);
+    std::string value(size, '\0');
+    if (size != 0) {
+        readExact(stream, value.data(), size);
+    }
+    return value;
+}
+
+void writeRecordVector(std::ostream &stream, const std::vector<ShardExampleRecord> &records) {
+    for (const ShardExampleRecord &record : records) {
+        writeUint64(stream, record.fileOffsetBytes);
+        writeString(stream, record.label);
+        writeString(stream, record.filename);
+    }
+}
+
+void readRecordVector(std::istream &stream,
+                      std::vector<ShardExampleRecord> &records,
+                      uint64_t recordCount,
+                      uint64_t fileSizeBytes,
+                      uint64_t exampleSizeInBytes) {
+    records.clear();
+    records.reserve(recordCount);
+    for (uint64_t i = 0; i < recordCount; ++i) {
+        ShardExampleRecord record;
+        record.fileOffsetBytes = readUint64(stream);
+        THOR_THROW_IF_FALSE(record.fileOffsetBytes <= fileSizeBytes);
+        THOR_THROW_IF_FALSE(exampleSizeInBytes <= fileSizeBytes - record.fileOffsetBytes);
+        record.label = readString(stream, fileSizeBytes);
+        record.filename = readString(stream, fileSizeBytes);
+        records.push_back(std::move(record));
+    }
+}
+
+}  // namespace
+
+Shard::Shard() {
+    exampleSizeInBytes = 0;
+    dataType = ThorImplementation::DataType::UINT8;
+    open = false;
+    metadataFinalized = false;
+}
+
+Shard::~Shard() {
+    if (shardFile.is_open()) {
+        shardFile.close();
+    }
+}
 
 void Shard::createShard(string filename,
                         uint64_t numTrainExamples,
@@ -26,100 +113,88 @@ void Shard::createShard(string filename,
                         uint64_t maxFilenameChars,
                         std::vector<std::string> &allClassesVector,
                         uint64_t maxClassNameChars) {
+    (void)maxFilenameChars;
+    (void)maxClassNameChars;
+
+    if (shardFile.is_open()) {
+        shardFile.close();
+    }
+    cachedReader.reset();
+
+    THOR_THROW_IF_FALSE(exampleSizeInBytes > 0);
+
     this->filename = filename;
     this->exampleSizeInBytes = exampleSizeInBytes;
-    uint64_t numExamples = numTrainExamples + numValidateExamples + numTestExamples;
-    uint64_t rawDataBytes = numExamples * exampleSizeInBytes;
-    uint64_t labelBytes = numExamples * (maxClassNameChars + 32 + sizeof(file_string_t));
-    uint64_t filenameBytes = numExamples * (maxFilenameChars + 32 + sizeof(file_string_t));
-    uint64_t labelIndexBytes = allClassesVector.size() * (maxClassNameChars + 32 + sizeof(file_string_t));
-    uint64_t shardSizeInBytes = rawDataBytes + labelBytes + filenameBytes + labelIndexBytes + 1000000;
-    mappedFile = boost::interprocess::managed_mapped_file(boost::interprocess::create_only, filename.c_str(), shardSizeInBytes);
+    this->dataType = dataType;
+    this->allClasses = allClassesVector;
 
-    shardMetadata = mappedFile.construct<ShardMetadata>("shardMetadata")();
-    shardMetadata->exampleSizeInBytes = exampleSizeInBytes;
-    shardMetadata->dataType = dataType;
+    trainExamples.clear();
+    validateExamples.clear();
+    testExamples.clear();
+    trainExamples.reserve(numTrainExamples);
+    validateExamples.reserve(numValidateExamples);
+    testExamples.reserve(numTestExamples);
 
-    file_vector_allocator_t trainDataAllocator(mappedFile.get_segment_manager());
-    trainData = mappedFile.construct<file_vector_t>("train")(trainDataAllocator);
-    trainData->reserve(numTrainExamples * exampleSizeInBytes);
+    shardFile.open(filename, std::ios::binary | std::ios::in | std::ios::out | std::ios::trunc);
+    THOR_THROW_IF_FALSE(shardFile.is_open());
+    writeHeader(0, 0);
+    shardFile.flush();
+    THOR_THROW_IF_FALSE(shardFile.good());
 
-    file_vector_allocator_t validateDataAllocator(mappedFile.get_segment_manager());
-    validateData = mappedFile.construct<file_vector_t>("validate")(validateDataAllocator);
-    validateData->reserve(numValidateExamples * exampleSizeInBytes);
-
-    file_vector_allocator_t testDataAllocator(mappedFile.get_segment_manager());
-    testData = mappedFile.construct<file_vector_t>("test")(testDataAllocator);
-    testData->reserve(numTestExamples * exampleSizeInBytes);
-
-    file_string_vector_allocator_t trainLabelsAllocator(mappedFile.get_segment_manager());
-    trainLabels = mappedFile.construct<file_string_vector_t>("trainLabels")(trainLabelsAllocator);
-    trainLabels->reserve(numTrainExamples);
-
-    file_string_vector_allocator_t validateLabelsAllocator(mappedFile.get_segment_manager());
-    validateLabels = mappedFile.construct<file_string_vector_t>("validateLabels")(validateLabelsAllocator);
-    validateLabels->reserve(numValidateExamples);
-
-    file_string_vector_allocator_t testLabelsAllocator(mappedFile.get_segment_manager());
-    testLabels = mappedFile.construct<file_string_vector_t>("testLabels")(testLabelsAllocator);
-    testLabels->reserve(numTestExamples);
-
-    file_string_vector_allocator_t trainFilenamesAllocator(mappedFile.get_segment_manager());
-    trainFilenames = mappedFile.construct<file_string_vector_t>("trainFilenames")(trainFilenamesAllocator);
-    trainFilenames->reserve(numTrainExamples);
-
-    file_string_vector_allocator_t validateFilenamesAllocator(mappedFile.get_segment_manager());
-    validateFilenames = mappedFile.construct<file_string_vector_t>("validateFilenames")(validateFilenamesAllocator);
-    validateFilenames->reserve(numValidateExamples);
-
-    file_string_vector_allocator_t testFilenamesAllocator(mappedFile.get_segment_manager());
-    testFilenames = mappedFile.construct<file_string_vector_t>("testFilenames")(testFilenamesAllocator);
-    testFilenames->reserve(numTestExamples);
-
-    fileStringAllocator = std::make_shared<file_string_allocator_t>(mappedFile.get_segment_manager());
-
-    file_string_vector_allocator_t allClassesAllocator(mappedFile.get_segment_manager());
-    allClasses = mappedFile.construct<file_string_vector_t>("allClasses")(allClassesAllocator);
-    allClasses->reserve(allClassesVector.size());
-
-    for (uint64_t i = 0; i < allClassesVector.size(); ++i) {
-        file_string_t diskClassLabel(*fileStringAllocator);
-        diskClassLabel = allClassesVector[i].c_str();
-        diskClassLabel.shrink_to_fit();
-        allClasses->push_back(diskClassLabel);
-    }
-    allClasses->shrink_to_fit();
-
+    metadataFinalized = false;
     open = true;
 }
 
 void Shard::openShard(string filename) {
+    if (shardFile.is_open()) {
+        shardFile.close();
+    }
+    cachedReader.reset();
+    trainExamples.clear();
+    validateExamples.clear();
+    testExamples.clear();
+    allClasses.clear();
+
     this->filename = filename;
-    mappedFile = boost::interprocess::managed_mapped_file(boost::interprocess::open_only, filename.c_str());
-    trainData = mappedFile.find<file_vector_t>("train").first;
-    validateData = mappedFile.find<file_vector_t>("validate").first;
-    testData = mappedFile.find<file_vector_t>("test").first;
-    trainLabels = mappedFile.find<file_string_vector_t>("trainLabels").first;
-    validateLabels = mappedFile.find<file_string_vector_t>("validateLabels").first;
-    testLabels = mappedFile.find<file_string_vector_t>("testLabels").first;
-    trainFilenames = mappedFile.find<file_string_vector_t>("trainFilenames").first;
-    validateFilenames = mappedFile.find<file_string_vector_t>("validateFilenames").first;
-    testFilenames = mappedFile.find<file_string_vector_t>("testFilenames").first;
-    shardMetadata = mappedFile.find<ShardMetadata>("shardMetadata").first;
-    exampleSizeInBytes = shardMetadata->exampleSizeInBytes;
-    dataType = shardMetadata->dataType;
-    allClasses = mappedFile.find<file_string_vector_t>("allClasses").first;
 
-    THOR_THROW_IF_FALSE(trainData->size() % exampleSizeInBytes == 0);
-    THOR_THROW_IF_FALSE(testData->size() % exampleSizeInBytes == 0);
-    THOR_THROW_IF_FALSE(validateData->size() % exampleSizeInBytes == 0);
-    THOR_THROW_IF_FALSE(trainLabels->size() == trainData->size() / exampleSizeInBytes);
-    THOR_THROW_IF_FALSE(validateLabels->size() == validateData->size() / exampleSizeInBytes);
-    THOR_THROW_IF_FALSE(testLabels->size() == testData->size() / exampleSizeInBytes);
-    THOR_THROW_IF_FALSE(trainFilenames->size() == trainData->size() / exampleSizeInBytes);
-    THOR_THROW_IF_FALSE(validateFilenames->size() == validateData->size() / exampleSizeInBytes);
-    THOR_THROW_IF_FALSE(testFilenames->size() == testData->size() / exampleSizeInBytes);
+    std::ifstream input(filename, std::ios::binary);
+    THOR_THROW_IF_FALSE(input.is_open());
 
+    std::array<char, 16> magic{};
+    readExact(input, magic.data(), magic.size());
+    THOR_THROW_IF_FALSE(magic == SHARD_MAGIC);
+
+    const uint32_t version = readUint32(input);
+    const uint32_t headerBytes = readUint32(input);
+    THOR_THROW_IF_FALSE(version == SHARD_FORMAT_VERSION);
+    THOR_THROW_IF_FALSE(headerBytes == SHARD_HEADER_BYTES);
+
+    exampleSizeInBytes = readUint64(input);
+    dataType = static_cast<ThorImplementation::DataType>(readUint32(input));
+    const uint32_t reserved = readUint32(input);
+    THOR_THROW_IF_FALSE(reserved == 0);
+
+    const uint64_t trainCount = readUint64(input);
+    const uint64_t validateCount = readUint64(input);
+    const uint64_t testCount = readUint64(input);
+    const uint64_t classCount = readUint64(input);
+    const uint64_t metadataOffsetBytes = readUint64(input);
+    const uint64_t metadataBytes = readUint64(input);
+
+    const uint64_t fileSizeBytes = std::filesystem::file_size(filename);
+    THOR_THROW_IF_FALSE(exampleSizeInBytes > 0);
+    THOR_THROW_IF_FALSE(metadataOffsetBytes >= SHARD_HEADER_BYTES);
+    THOR_THROW_IF_FALSE(metadataOffsetBytes <= fileSizeBytes);
+    THOR_THROW_IF_FALSE(metadataBytes <= fileSizeBytes - metadataOffsetBytes);
+
+    readMetadata(metadataOffsetBytes, metadataBytes, trainCount, validateCount, testCount, classCount);
+
+    THOR_THROW_IF_FALSE(trainExamples.size() == trainCount);
+    THOR_THROW_IF_FALSE(validateExamples.size() == validateCount);
+    THOR_THROW_IF_FALSE(testExamples.size() == testCount);
+    THOR_THROW_IF_FALSE(allClasses.size() == classCount);
+
+    metadataFinalized = true;
     open = true;
 }
 
@@ -127,95 +202,38 @@ bool Shard::isOpen() { return open; }
 
 void Shard::writeExample(uint8_t *buffer, const string &label, const string &filename, ExampleType exampleType) {
     THOR_THROW_IF_FALSE(buffer != nullptr);
-    std::unique_lock<std::mutex> lck(mtx);
+    THOR_THROW_IF_FALSE(isOpen());
+    THOR_THROW_IF_FALSE(!metadataFinalized);
 
-    if (exampleType == ExampleType::TRAIN) {
-        THOR_THROW_IF_FALSE(trainData->capacity() > trainData->size() + exampleSizeInBytes);
-        trainData->insert(trainData->end(), buffer, buffer + exampleSizeInBytes);
-        THOR_THROW_IF_FALSE(trainLabels->capacity() > trainLabels->size());
-        file_string_t diskLabel(*fileStringAllocator);
-        diskLabel = label.c_str();
-        diskLabel.shrink_to_fit();
-        trainLabels->push_back(diskLabel);
-        file_string_t diskFilename(*fileStringAllocator);
-        diskFilename = filename.c_str();
-        diskFilename.shrink_to_fit();
-        trainFilenames->push_back(diskFilename);
-    } else if (exampleType == ExampleType::VALIDATE) {
-        THOR_THROW_IF_FALSE(validateData->capacity() > validateData->size() + exampleSizeInBytes);
-        validateData->insert(validateData->end(), buffer, buffer + exampleSizeInBytes);
-        THOR_THROW_IF_FALSE(validateLabels->capacity() > validateLabels->size());
-        file_string_t diskLabel(*fileStringAllocator);
-        diskLabel = label.c_str();
-        diskLabel.shrink_to_fit();
-        validateLabels->push_back(diskLabel);
-        file_string_t diskFilename(*fileStringAllocator);
-        diskFilename = filename.c_str();
-        diskFilename.shrink_to_fit();
-        validateFilenames->push_back(diskFilename);
-    } else if (exampleType == ExampleType::TEST) {
-        THOR_THROW_IF_FALSE(testData->capacity() > testData->size() + exampleSizeInBytes);
-        testData->insert(testData->end(), buffer, buffer + exampleSizeInBytes);
-        THOR_THROW_IF_FALSE(testLabels->capacity() > testLabels->size());
-        file_string_t diskLabel(*fileStringAllocator);
-        diskLabel = label.c_str();
-        diskLabel.shrink_to_fit();
-        testLabels->push_back(diskLabel);
-        file_string_t diskFilename(*fileStringAllocator);
-        diskFilename = filename.c_str();
-        diskFilename.shrink_to_fit();
-        testFilenames->push_back(diskFilename);
-    } else {
-        THOR_UNREACHABLE();
-    }
+    std::unique_lock<std::mutex> lck(mtx);
+    THOR_THROW_IF_FALSE(shardFile.is_open());
+
+    shardFile.seekp(0, std::ios::end);
+    THOR_THROW_IF_FALSE(shardFile.good());
+    const std::streamoff payloadOffset = shardFile.tellp();
+    THOR_THROW_IF_FALSE(payloadOffset >= 0);
+
+    writeExact(shardFile, buffer, exampleSizeInBytes);
+
+    ShardExampleRecord record;
+    record.fileOffsetBytes = static_cast<uint64_t>(payloadOffset);
+    record.label = label;
+    record.filename = filename;
+    mutableRecordsFor(exampleType).push_back(std::move(record));
 }
 
 ShardExampleReadRequest Shard::getExampleReadRequest(ExampleType exampleType, uint64_t exampleIndex) {
     THOR_THROW_IF_FALSE(isOpen());
 
-    file_vector_t *data = nullptr;
-    file_string_vector_t *labels = nullptr;
-    file_string_vector_t *filenames = nullptr;
+    const std::vector<ShardExampleRecord> &records = recordsFor(exampleType);
+    THOR_THROW_IF_FALSE(exampleIndex < records.size());
 
-    if (exampleType == ExampleType::TRAIN) {
-        data = trainData;
-        labels = trainLabels;
-        filenames = trainFilenames;
-    } else if (exampleType == ExampleType::VALIDATE) {
-        data = validateData;
-        labels = validateLabels;
-        filenames = validateFilenames;
-    } else if (exampleType == ExampleType::TEST) {
-        data = testData;
-        labels = testLabels;
-        filenames = testFilenames;
-    } else {
-        THOR_UNREACHABLE();
-    }
-
-    const uint64_t numExamples = data->size() / exampleSizeInBytes;
-    THOR_THROW_IF_FALSE(exampleIndex < numExamples);
-    THOR_THROW_IF_FALSE(labels->size() == numExamples);
-    THOR_THROW_IF_FALSE(filenames->size() == numExamples);
-
-    const auto baseAddress = reinterpret_cast<uintptr_t>(mappedFile.get_address());
-    const auto dataAddress = reinterpret_cast<uintptr_t>(data->data());
-    THOR_THROW_IF_FALSE(dataAddress >= baseAddress);
-
-    const uint64_t mappedDataOffsetBytes = dataAddress - baseAddress;
-    const uint64_t exampleOffsetBytes = mappedDataOffsetBytes + exampleIndex * exampleSizeInBytes;
-    THOR_THROW_IF_FALSE(exampleOffsetBytes + exampleSizeInBytes <= mappedFile.get_size());
-
+    const ShardExampleRecord &record = records[exampleIndex];
     ShardExampleReadRequest request;
-    // managed_mapped_file::get_address() is Boost's real mapped-region base.
-    // Object pointers returned from the managed segment are therefore already
-    // file-offset-relative to that base. Do not add Boost's internal
-    // ManagedOpenOrCreateUserOffset here; that would double-count the header
-    // gap and shift every cached io_uring payload read forward.
-    request.fileOffsetBytes = exampleOffsetBytes;
+    request.fileOffsetBytes = record.fileOffsetBytes;
     request.numBytes = exampleSizeInBytes;
-    request.label = (*labels)[exampleIndex].c_str();
-    request.filename = (*filenames)[exampleIndex].c_str();
+    request.label = record.label;
+    request.filename = record.filename;
     return request;
 }
 
@@ -260,55 +278,17 @@ void Shard::readExamplePayloadCached(uint8_t *buffer, uint64_t fileOffsetBytes) 
     }
 }
 
-void Shard::loadExampleAsync(
-    uint8_t *buffer, string &label, string &filename, ExampleType exampleType, uint64_t exampleIndex, Stream stream) {
-    THOR_THROW_IF_FALSE(isOpen());
-    THOR_THROW_IF_FALSE(buffer != nullptr);
-
-    uint8_t *data;
-    LabelCallbackParams *labelCallbackParams = new LabelCallbackParams();
-    if (exampleType == ExampleType::TRAIN) {
-        uint64_t numExamples = trainData->size() / exampleSizeInBytes;
-        THOR_THROW_IF_FALSE(exampleIndex < numExamples);
-        data = trainData->data();
-        labelCallbackParams->labels = trainLabels;
-        labelCallbackParams->filenames = trainFilenames;
-    } else if (exampleType == ExampleType::VALIDATE) {
-        uint64_t numExamples = validateData->size() / exampleSizeInBytes;
-        THOR_THROW_IF_FALSE(exampleIndex < numExamples);
-        data = validateData->data();
-        labelCallbackParams->labels = validateLabels;
-        labelCallbackParams->filenames = validateFilenames;
-    } else if (exampleType == ExampleType::TEST) {
-        uint64_t numExamples = testData->size() / exampleSizeInBytes;
-        THOR_THROW_IF_FALSE(exampleIndex < numExamples);
-        data = testData->data();
-        labelCallbackParams->labels = testLabels;
-        labelCallbackParams->filenames = testFilenames;
-    } else {
-        THOR_UNREACHABLE();
-    }
-
-    uint8_t *exampleStart = data + (exampleIndex * exampleSizeInBytes);
-    CUDA_CHECK(cudaMemcpyAsync(buffer, exampleStart, exampleSizeInBytes, cudaMemcpyHostToHost, stream));
-    labelCallbackParams->index = exampleIndex;
-    labelCallbackParams->label = &label;
-    labelCallbackParams->filename = &filename;
-    CUDA_CHECK(cudaLaunchHostFunc(stream, getLabelCallback, labelCallbackParams));
-}
-
 void Shard::shrinkToFit() {
-    trainData->shrink_to_fit();
-    validateData->shrink_to_fit();
-    testData->shrink_to_fit();
-    trainLabels->shrink_to_fit();
-    validateLabels->shrink_to_fit();
-    testLabels->shrink_to_fit();
-    trainFilenames->shrink_to_fit();
-    validateFilenames->shrink_to_fit();
-    testFilenames->shrink_to_fit();
-    bool status = boost::interprocess::managed_mapped_file::shrink_to_fit(filename.c_str());
-    THOR_THROW_IF_FALSE(status == true);
+    std::unique_lock<std::mutex> lck(mtx);
+    if (metadataFinalized) {
+        return;
+    }
+    THOR_THROW_IF_FALSE(shardFile.is_open());
+    writeMetadata();
+    shardFile.flush();
+    THOR_THROW_IF_FALSE(shardFile.good());
+    shardFile.close();
+    metadataFinalized = true;
 }
 
 string Shard::getFilename() { return filename; }
@@ -317,23 +297,102 @@ uint64_t Shard::getExampleSizeInBytes() { return exampleSizeInBytes; }
 
 ThorImplementation::DataType Shard::getDataType() { return dataType; }
 
-uint64_t Shard::getNumExamples(ExampleType exampleType) {
+uint64_t Shard::getNumExamples(ExampleType exampleType) { return recordsFor(exampleType).size(); }
+
+const std::vector<std::string> &Shard::getAllClasses() { return allClasses; }
+
+void Shard::writeHeader(uint64_t metadataOffsetBytes, uint64_t metadataBytes) {
+    shardFile.seekp(0, std::ios::beg);
+    THOR_THROW_IF_FALSE(shardFile.good());
+
+    writeExact(shardFile, SHARD_MAGIC.data(), SHARD_MAGIC.size());
+    writeUint32(shardFile, SHARD_FORMAT_VERSION);
+    writeUint32(shardFile, SHARD_HEADER_BYTES);
+    writeUint64(shardFile, exampleSizeInBytes);
+    writeUint32(shardFile, static_cast<uint32_t>(dataType));
+    writeUint32(shardFile, 0);
+    writeUint64(shardFile, trainExamples.size());
+    writeUint64(shardFile, validateExamples.size());
+    writeUint64(shardFile, testExamples.size());
+    writeUint64(shardFile, allClasses.size());
+    writeUint64(shardFile, metadataOffsetBytes);
+    writeUint64(shardFile, metadataBytes);
+
+    const std::streamoff headerEnd = shardFile.tellp();
+    THOR_THROW_IF_FALSE(headerEnd == static_cast<std::streamoff>(SHARD_HEADER_BYTES));
+}
+
+void Shard::writeMetadata() {
+    shardFile.seekp(0, std::ios::end);
+    THOR_THROW_IF_FALSE(shardFile.good());
+    const std::streamoff metadataOffset = shardFile.tellp();
+    THOR_THROW_IF_FALSE(metadataOffset >= 0);
+
+    for (const std::string &className : allClasses) {
+        writeString(shardFile, className);
+    }
+    writeRecordVector(shardFile, trainExamples);
+    writeRecordVector(shardFile, validateExamples);
+    writeRecordVector(shardFile, testExamples);
+
+    const std::streamoff metadataEnd = shardFile.tellp();
+    THOR_THROW_IF_FALSE(metadataEnd >= metadataOffset);
+    const uint64_t metadataOffsetBytes = static_cast<uint64_t>(metadataOffset);
+    const uint64_t metadataBytes = static_cast<uint64_t>(metadataEnd - metadataOffset);
+
+    writeHeader(metadataOffsetBytes, metadataBytes);
+}
+
+void Shard::readMetadata(uint64_t metadataOffsetBytes,
+                         uint64_t metadataBytes,
+                         uint64_t trainCount,
+                         uint64_t validateCount,
+                         uint64_t testCount,
+                         uint64_t classCount) {
+    const uint64_t fileSizeBytes = std::filesystem::file_size(filename);
+    THOR_THROW_IF_FALSE(metadataOffsetBytes <= fileSizeBytes);
+    THOR_THROW_IF_FALSE(metadataBytes <= fileSizeBytes - metadataOffsetBytes);
+
+    std::ifstream input(filename, std::ios::binary);
+    THOR_THROW_IF_FALSE(input.is_open());
+    input.seekg(static_cast<std::streamoff>(metadataOffsetBytes), std::ios::beg);
+    THOR_THROW_IF_FALSE(input.good());
+
+    allClasses.clear();
+    allClasses.reserve(classCount);
+    for (uint64_t i = 0; i < classCount; ++i) {
+        allClasses.push_back(readString(input, fileSizeBytes));
+    }
+
+    readRecordVector(input, trainExamples, trainCount, fileSizeBytes, exampleSizeInBytes);
+    readRecordVector(input, validateExamples, validateCount, fileSizeBytes, exampleSizeInBytes);
+    readRecordVector(input, testExamples, testCount, fileSizeBytes, exampleSizeInBytes);
+
+    const std::streamoff metadataEnd = input.tellg();
+    THOR_THROW_IF_FALSE(metadataEnd >= 0);
+    THOR_THROW_IF_FALSE(static_cast<uint64_t>(metadataEnd) == metadataOffsetBytes + metadataBytes);
+}
+
+std::vector<ShardExampleRecord> &Shard::mutableRecordsFor(ExampleType exampleType) {
     if (exampleType == ExampleType::TRAIN) {
-        return trainLabels->size();
+        return trainExamples;
     } else if (exampleType == ExampleType::VALIDATE) {
-        return validateLabels->size();
+        return validateExamples;
     } else if (exampleType == ExampleType::TEST) {
-        return testLabels->size();
+        return testExamples;
     } else {
         THOR_UNREACHABLE();
     }
 }
 
-file_string_vector_t *Shard::getAllClasses() { return allClasses; }
-
-void CUDART_CB Shard::getLabelCallback(void *data) {
-    LabelCallbackParams *params = (LabelCallbackParams *)data;
-    *(params->label) = (*(params->labels))[params->index].c_str();
-    *(params->filename) = (*(params->filenames))[params->index].c_str();
-    delete params;
+const std::vector<ShardExampleRecord> &Shard::recordsFor(ExampleType exampleType) const {
+    if (exampleType == ExampleType::TRAIN) {
+        return trainExamples;
+    } else if (exampleType == ExampleType::VALIDATE) {
+        return validateExamples;
+    } else if (exampleType == ExampleType::TEST) {
+        return testExamples;
+    } else {
+        THOR_UNREACHABLE();
+    }
 }

@@ -1,3 +1,5 @@
+import json
+
 import numpy as np
 import pytest
 
@@ -257,6 +259,13 @@ def _cpu_tensor(shape: list[int], dtype: thor.DataType) -> thor.physical.Physica
     placement = thor.physical.Placement(thor.physical.DeviceType.cpu, 0)
     descriptor = thor.physical.PhysicalTensor.Descriptor(dtype, shape)
     return thor.physical.PhysicalTensor(placement, descriptor)
+
+
+def _cpu_tensor_from_numpy(values: np.ndarray, dtype: thor.DataType) -> thor.physical.PhysicalTensor:
+    values = np.asarray(values, dtype=thor.physical.numpy_dtypes.from_thor(dtype), order="C")
+    tensor = _cpu_tensor(list(values.shape), dtype)
+    tensor.numpy()[...] = values
+    return tensor
 
 
 def _gpu_tensor(shape: list[int], dtype: thor.DataType, gpu_num: int = 0) -> thor.physical.PhysicalTensor:
@@ -913,6 +922,103 @@ def test_python_custom_layer_direct_construction_builds_logical_output_interface
     assert layer.get_parameters() == []
     assert build_calls
     assert build_calls[0]["input_dims"] == [1, 6]
+
+
+def test_python_custom_layer_callable_dict_build_is_serializable(tmp_path):
+    network = thor.Network("custom-layer-direct-dict-serializable")
+    x = thor.layers.NetworkInput(network, "input", [6], thor.DataType.fp32).get_feature_output()
+
+    def build(context: thor.layers.CustomLayerBuildContext) -> dict[str, thor.physical.Expression]:
+        return {
+            "feature_output": context.input("feature_input") * 2.0,
+        }
+
+    layer = thor.layers.CustomLayer(
+        network=network,
+        inputs=x,
+        build=build,
+    )
+    thor.layers.NetworkOutput(network, "output", layer["feature_output"], thor.DataType.fp32)
+
+    architecture = json.loads(network.get_architecture_json())
+    custom_layers = [layer_json for layer_json in architecture["layers"] if layer_json["layer_type"] == "custom_layer"]
+    assert len(custom_layers) == 1
+    assert custom_layers[0]["expression"]["type"] == "thor.expression"
+
+    save_dir = tmp_path / "custom_layer_direct_dict"
+    network.save(str(save_dir), overwrite=False)
+
+    loaded = thor.Network("custom-layer-direct-dict-serializable-loaded")
+    loaded.load(str(save_dir))
+    loaded_architecture = json.loads(loaded.get_architecture_json())
+    loaded_custom_layers = [
+        layer_json for layer_json in loaded_architecture["layers"] if layer_json["layer_type"] == "custom_layer"
+    ]
+    assert len(loaded_custom_layers) == 1
+    assert loaded_custom_layers[0]["expression"]["type"] == "thor.expression"
+
+
+@pytest.mark.cuda
+def test_python_custom_layer_callable_dict_build_runs_numerically_after_save_load(tmp_path):
+    dtype = thor.DataType.fp32
+    batch_size = 3
+    network = thor.Network("custom-layer-direct-dict-numerical-round-trip")
+    x = thor.layers.NetworkInput(network, "input", [6], dtype).get_feature_output()
+
+    def build(context: thor.layers.CustomLayerBuildContext) -> dict[str, thor.physical.Expression]:
+        feature_input = context.input("feature_input")
+        return {
+            "feature_output": feature_input * 2.0 + 1.25,
+        }
+
+    layer = thor.layers.CustomLayer(
+        network=network,
+        inputs=x,
+        build=build,
+    )
+    thor.layers.NetworkOutput(network, "output", layer["feature_output"], dtype)
+
+    values = np.array(
+        [
+            [0.0, 1.0, -2.0, 3.5, -4.5, 8.0],
+            [9.0, -10.0, 11.5, -12.5, 13.0, -14.0],
+            [0.25, -0.75, 1.25, -1.5, 2.5, -3.25],
+        ],
+        dtype=np.float32,
+    )
+    expected = values * np.float32(2.0) + np.float32(1.25)
+
+    placed = _place_for_custom_layer_test(network, batch_size=batch_size, inference_only=True)
+    outputs = placed.infer({"input": _cpu_tensor_from_numpy(values, dtype)})
+    assert set(outputs.keys()) == {"output"}
+    np.testing.assert_allclose(np.array(outputs["output"].numpy(), copy=True), expected, rtol=0.0, atol=0.0)
+
+    architecture = json.loads(network.get_architecture_json())
+    custom_layers = [layer_json for layer_json in architecture["layers"] if layer_json["layer_type"] == "custom_layer"]
+    assert len(custom_layers) == 1
+    expression = custom_layers[0]["expression"]
+    assert expression["type"] == "thor.expression"
+    assert expression["schema_version"] == 1
+    assert expression["expected_input_names"] == ["feature_input"]
+    assert expression["expected_output_names"] == ["feature_output"]
+    assert expression["canonical_hash"].startswith("fnv1a64:")
+
+    save_dir = tmp_path / "custom_layer_direct_dict_numerical"
+    network.save(str(save_dir), overwrite=False)
+
+    loaded = thor.Network("custom-layer-direct-dict-numerical-round-trip-loaded")
+    loaded.load(str(save_dir))
+    loaded_architecture = json.loads(loaded.get_architecture_json())
+    loaded_custom_layers = [
+        layer_json for layer_json in loaded_architecture["layers"] if layer_json["layer_type"] == "custom_layer"
+    ]
+    assert len(loaded_custom_layers) == 1
+    assert loaded_custom_layers[0]["expression"] == expression
+
+    loaded_placed = _place_for_custom_layer_test(loaded, batch_size=batch_size, inference_only=True)
+    loaded_outputs = loaded_placed.infer({"input": _cpu_tensor_from_numpy(values, dtype)})
+    assert set(loaded_outputs.keys()) == {"output"}
+    np.testing.assert_allclose(np.array(loaded_outputs["output"].numpy(), copy=True), expected, rtol=0.0, atol=0.0)
 
 
 def test_python_custom_layer_uint32_strided_view_can_infer_outputs():

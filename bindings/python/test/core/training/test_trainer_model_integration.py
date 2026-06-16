@@ -559,10 +559,10 @@ def _build_iris_two_input_multi_output_classifier(name: str, *, dtype=thor.DataT
     examples_right = thor.layers.NetworkInput(network, "examples_right", [4], dtype)
     labels = thor.layers.NetworkInput(network, "labels", [3], dtype)
 
-    # Keep this queued-trainer coverage fully serializable.  The native queued
-    # runner serializes its network/program setup, so using a Python CustomLayer
-    # here would correctly fail unless it was built from a serializable
-    # ExpressionDefinition.  Two ordinary branches still exercise explicit
+    # Keep this queued-trainer coverage on ordinary branches; Python
+    # CustomLayer callables that return expression dicts are now serialized by
+    # storing the expression graph they build, but this test does not need that
+    # extra surface area.  Two ordinary branches still exercise explicit
     # input binding, multiple NetworkInputs, multiple NetworkOutputs, and
     # multiple loss roots in one TrainingStep.
     left_hidden = thor.layers.FullyConnected(
