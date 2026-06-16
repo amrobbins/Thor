@@ -18,6 +18,8 @@ namespace Thor {
 
 bool Embedding::isSupportedIndexDataType(DataType dataType) {
     switch (dataType) {
+        case DataType::UINT8:
+        case DataType::UINT16:
         case DataType::UINT32:
         case DataType::UINT64:
             return true;
@@ -47,7 +49,7 @@ void Embedding::validateIndexTensor(const Tensor& tensor, const std::string& wha
         throw std::invalid_argument("Embedding " + what + " tensor must have at least one dimension.");
     }
     if (!isSupportedIndexDataType(tensor.getDataType())) {
-        throw std::invalid_argument("Embedding " + what + " dtype must be uint32 or uint64. Got " +
+        throw std::invalid_argument("Embedding " + what + " dtype must be uint8, uint16, uint32, or uint64. Got " +
                                     dataTypeName(tensor.getDataType()) + ".");
     }
 }

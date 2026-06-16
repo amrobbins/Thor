@@ -24,6 +24,7 @@ void launchElementWiseCrossEntropyLoss(void *labelsOrClassOfHotLabels_d,
                                        uint32_t batchSize,
                                        bool computeGradient,
                                        uint32_t lossScalingFactor,
+                                       float lossWeight,
                                        CrossEntropyLossType crossEntropyLossType,
                                        bool indexLabels,
                                        Stream stream);

@@ -109,7 +109,7 @@ ThorImplementation::DynamicExpression buildRmsNormExpression(ThorImplementation:
                 std::vector<uint64_t>(originalInputDims.begin(), originalInputDims.begin() + static_cast<std::ptrdiff_t>(normalizedOffset)),
                 "outer");
             const std::vector<uint64_t> flattenedInputDims{outer, hidden};
-            featureInputTensor.reshape(flattenedInputDims);
+            const bool needsFlattenedExpressionView = originalInputDims != flattenedInputDims;
 
             if (outputs.contains("feature_output")) {
                 const Tensor& featureOutputTensor = outputs.at("feature_output");
@@ -139,6 +139,9 @@ ThorImplementation::DynamicExpression buildRmsNormExpression(ThorImplementation:
             }
 
             Expression fin = Expression::input("feature_input", inputDataType, inputDataType);
+            if (needsFlattenedExpressionView) {
+                fin = fin.reshape(flattenedInputDims);
+            }
             Expression weights = Expression::input("weights", parameterDataType, parameterDataType);
             Expression fout = Expression::rmsNorm(fin, weights, hidden, epsilon, DataType::FP32, inputDataType);
             const bool useCudnnSwishFusion = epilogueIsSwish && parameterDataType == DataType::BF16 &&
@@ -159,7 +162,7 @@ ThorImplementation::DynamicExpression buildRmsNormExpression(ThorImplementation:
                 fout = Expression::fromPhysicalNode(fusedPhysical, fusedPhysical->output_node);
             } else if (epilogue.has_value()) {
                 ThorImplementation::Expression effectiveEpilogue = epilogue.value();
-                if (originalInputDims != flattenedInputDims) {
+                if (needsFlattenedExpressionView) {
                     for (const std::string& auxInputName : epilogueAuxInputNames) {
                         ThorImplementation::Expression auxInput =
                             Expression::input(auxInputName, inputDataType, inputDataType).reshape(flattenedInputDims);
@@ -168,19 +171,16 @@ ThorImplementation::DynamicExpression buildRmsNormExpression(ThorImplementation:
                 }
                 fout = RMSNorm::applyEpilogue(fout, effectiveEpilogue);
             }
-            if (featureInputTensor.getDimensions() != originalInputDims) {
+            if (needsFlattenedExpressionView) {
                 fout = fout.reshape(originalInputDims);
             }
             fout = fout.withOutputDType(inputDataType);
 
             auto expressionOutputs = Expression::outputs({{"feature_output", fout}});
 
-            DynamicExpression::TensorMap stampInputs = inputs;
-            stampInputs["feature_input"] = featureInputTensor;
-
             return DynamicExpressionBuild{
                 std::make_shared<FusedEquation>(FusedEquation::compile(expressionOutputs.physicalOutputs(), placement.getDeviceNum())),
-                stampInputs,
+                inputs,
                 {},
                 outputs,
                 {},

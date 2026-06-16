@@ -363,6 +363,9 @@ int
             case DataType::FP32:
                 return nb::cast(nb::ndarray<float, nb::numpy>(self.getMemPtr<float>(), shape.size(), shape.data(), owner, strides.data()));
 
+            case DataType::FP64:
+                return nb::cast(nb::ndarray<double, nb::numpy>(self.getMemPtr<double>(), shape.size(), shape.data(), owner, strides.data()));
+
             case DataType::FP16:
                 return nb::cast(nb::ndarray<half, nb::numpy>(self.getMemPtr<half>(), shape.size(), shape.data(), owner, strides.data()));
 
@@ -380,6 +383,23 @@ int
                 nb::module_ mld = nb::module_::import_("ml_dtypes");
                 return view_bytes_as_ml_dtype(self.getMemPtr<__nv_fp8_e5m2>(), sizeof(__nv_fp8_e5m2), mld.attr("float8_e5m2"));
             }
+
+            case DataType::BOOLEAN:
+                return nb::cast(nb::ndarray<bool, nb::numpy>(self.getMemPtr<bool>(), shape.size(), shape.data(), owner, strides.data()));
+
+            case DataType::INT8:
+                return nb::cast(nb::ndarray<int8_t, nb::numpy>(self.getMemPtr<int8_t>(), shape.size(), shape.data(), owner, strides.data()));
+
+            case DataType::UINT8:
+                return nb::cast(nb::ndarray<uint8_t, nb::numpy>(self.getMemPtr<uint8_t>(), shape.size(), shape.data(), owner, strides.data()));
+
+            case DataType::INT16:
+                return nb::cast(
+                    nb::ndarray<int16_t, nb::numpy>(self.getMemPtr<int16_t>(), shape.size(), shape.data(), owner, strides.data()));
+
+            case DataType::UINT16:
+                return nb::cast(
+                    nb::ndarray<uint16_t, nb::numpy>(self.getMemPtr<uint16_t>(), shape.size(), shape.data(), owner, strides.data()));
 
             case DataType::INT32:
                 return nb::cast(

@@ -12,13 +12,19 @@ LocalBatchLoader::LocalBatchLoader(set<string> shardPaths,
                                    uint64_t batchQueueDepth) {
     this->batchSize = batchSize;
 
-    uint64_t exampleSizeInBytes = exampleDescriptor.getArraySizeInBytes();
+    const uint64_t exampleSizeInBytes = exampleDescriptor.getArraySizeInBytes();
+    const uint64_t labelSizeInBytes = labelDescriptor.getArraySizeInBytes();
+    const bool canUseInlinePayloadLabels = exampleDescriptor.getDataType() == labelDescriptor.getDataType();
 
     for (auto it = shardPaths.begin(); it != shardPaths.end(); ++it) {
         shards.push_back(make_shared<Shard>());
         string shardPath = *it;
         shards.back()->openShard(shardPath);
-        THOR_THROW_IF_FALSE(shards.back()->getExampleSizeInBytes() == exampleSizeInBytes);
+        const uint64_t shardRecordSizeInBytes = shards.back()->getExampleSizeInBytes();
+        const bool classMetadataLabels = shardRecordSizeInBytes == exampleSizeInBytes;
+        const bool inlinePayloadLabels = canUseInlinePayloadLabels &&
+                                         shardRecordSizeInBytes == exampleSizeInBytes + labelSizeInBytes;
+        THOR_THROW_IF_FALSE(classMetadataLabels || inlinePayloadLabels);
         THOR_THROW_IF_FALSE(shards.back()->getDataType() == exampleDescriptor.getDataType());
     }
 

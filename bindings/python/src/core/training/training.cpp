@@ -571,7 +571,10 @@ calling this helper.
            uint64_t max_in_flight_batches,
            std::vector<std::string> scalar_tensors_to_report,
            bool stats_stderr_also,
-           std::string stats_color) {
+           std::string stats_color,
+           std::optional<std::string> save_model_dir,
+           bool save_model_overwrite,
+           bool save_optimizer_state) {
             Trainer::Builder builder;
             builder.network(network)
                 .loader(std::move(loader))
@@ -580,7 +583,10 @@ calling this helper.
                 .statsStderrAlso(stats_stderr_also)
                 .statsColorMode(lineStatsColorModeFromString(stats_color))
                 .maxInFlightBatches(max_in_flight_batches)
-                .scalarTensorsToReport(stringSetFromVector(std::move(scalar_tensors_to_report)));
+                .scalarTensorsToReport(stringSetFromVector(std::move(scalar_tensors_to_report)))
+                .saveModelDirectory(std::move(save_model_dir))
+                .saveModelOverwrite(save_model_overwrite)
+                .saveOptimizerState(save_optimizer_state);
             if (optimizer != nullptr) {
                 builder.optimizer(std::move(optimizer));
             }
@@ -602,7 +608,10 @@ calling this helper.
         "max_in_flight_batches"_a = 32,
         "scalar_tensors_to_report"_a = std::vector<std::string>{"loss"},
         "stats_stderr_also"_a = false,
-        "stats_color"_a = "auto");
+        "stats_color"_a = "auto",
+        "save_model_dir"_a.none() = nb::none(),
+        "save_model_overwrite"_a = false,
+        "save_optimizer_state"_a = true);
     trainer.def("fit", nb::overload_cast<uint32_t>(&Trainer::fit), "epochs"_a);
 
     auto gradient_clear_policy = nb::enum_<TrainingStep::GradientClearPolicy>(training, "GradientClearPolicy")

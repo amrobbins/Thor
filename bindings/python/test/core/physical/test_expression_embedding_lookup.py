@@ -64,6 +64,28 @@ def test_embedding_lookup_uint32_forward_zeroes_padding_index():
 
 
 @pytest.mark.cuda
+def test_embedding_lookup_uint8_forward_without_padding():
+    indices_np = np.array([[3, 1, 2], [0, 2, 1]], dtype=np.uint8)
+    weights_np = np.arange(20, dtype=np.float32).reshape(5, 4)
+    expected = weights_np[indices_np]
+
+    expr = ex.embedding_lookup(ex.input("indices"), ex.input("weights"))
+    eq = ex.compile(expr, device_num=0)
+
+    stream = Stream(0)
+    indices_gpu = _copy_numpy_to_gpu(indices_np, stream, thor.DataType.uint8)
+    weights_gpu = _copy_numpy_to_gpu(weights_np, stream, thor.DataType.fp32)
+    out_gpu = _gpu_tensor([2, 3, 4], thor.DataType.fp32)
+
+    stamped = eq.stamp({"indices": indices_gpu, "weights": weights_gpu}, stream, preallocated_output=out_gpu)
+    assert stamped._debug_stage_kinds() == ["EmbeddingLookup"]
+    stamped.run()
+    got = _copy_gpu_to_numpy(out_gpu, thor.DataType.fp32, stream)
+
+    np.testing.assert_array_equal(got, expected)
+
+
+@pytest.mark.cuda
 def test_embedding_lookup_uint64_forward_without_padding():
     indices_np = np.array([3, 1, 2], dtype=np.uint64)
     weights_np = np.arange(20, dtype=np.float32).reshape(5, 4)

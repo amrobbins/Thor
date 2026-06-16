@@ -115,6 +115,7 @@ ThorImplementation::CublasMatrixMultiply::MatmulDataTypes cublasLtMatmulDataType
 }
 
 ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias,
+                                                                    bool preserveInputPrefixDimensions,
                                                                     ThorImplementation::TensorPlacement placement,
                                                                     DataType weightsDataType,
                                                                     DataType computeDataType,
@@ -147,6 +148,7 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias
         std::move(expectedInputNames),
         {"feature_output"},
         [hasBias,
+         preserveInputPrefixDimensions,
          placement,
          weightsDataType,
          computeDataType,
@@ -180,14 +182,32 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias
                 throw std::runtime_error("FullyConnected feature input placement does not match the layer placement.");
             }
 
-            // Treat any runtime rank > 2 input as [batch, flattened_features] for the matrix multiply by inserting
-            // a storage-alias reshape in the expression graph. Do not rebind the stamp input tensor metadata: the public
-            // graph still owns a rank-N feature tensor and upstream backprop must receive a rank-N gradient. The reshape
-            // node is metadata-only for dense tensors and AutoDiff reshapes the FC input gradient back to the original
-            // runtime feature shape.
+            // Standard FullyConnected keeps the historical behavior: flatten every non-batch dimension into one
+            // feature vector.  Tokenwise/sequence projections set preserveInputPrefixDimensions, treating only the
+            // last logical dimension as features and folding [batch, ...prefix] into the matmul batch.  The output is
+            // reshaped back to [batch, ...prefix, out_features], so language-model heads do not need a CustomLayer.
             const std::vector<uint64_t> originalFeatureInputDimensions = featureInputDimensions;
-            std::vector<uint64_t> logicalFeatureInputDimensions = featureInputDimensions;
-            if (featureInputDimensions.size() > 2) {
+            std::vector<uint64_t> logicalFeatureInputDimensions;
+            std::vector<uint64_t> runtimeFeatureOutputDimensions;
+            if (preserveInputPrefixDimensions) {
+                uint64_t flattenedItems = 1;
+                for (uint32_t i = 0; i + 1 < featureInputDimensions.size(); ++i) {
+                    if (featureInputDimensions[i] == 0) {
+                        throw std::runtime_error("FullyConnected runtime prefix dimensions must be non-zero.");
+                    }
+                    if (flattenedItems > std::numeric_limits<uint64_t>::max() / featureInputDimensions[i]) {
+                        throw std::runtime_error("FullyConnected flattened token count overflows uint64_t.");
+                    }
+                    flattenedItems *= featureInputDimensions[i];
+                }
+                const uint64_t inputFeatures = featureInputDimensions.back();
+                if (inputFeatures == 0) {
+                    throw std::runtime_error("FullyConnected runtime feature dimension must be non-zero.");
+                }
+                logicalFeatureInputDimensions = {flattenedItems, inputFeatures};
+                runtimeFeatureOutputDimensions = featureInputDimensions;
+                runtimeFeatureOutputDimensions.back() = wTensor.getDimensions()[1];
+            } else {
                 const uint64_t batchSize = featureInputDimensions[0];
                 if (batchSize == 0) {
                     throw std::runtime_error("FullyConnected runtime batch dimension must be non-zero.");
@@ -203,6 +223,7 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias
                     flattenedFeatures *= featureInputDimensions[i];
                 }
                 logicalFeatureInputDimensions = {batchSize, flattenedFeatures};
+                runtimeFeatureOutputDimensions = {batchSize, wTensor.getDimensions()[1]};
             }
 
             if (logicalFeatureInputDimensions.size() != 2) {
@@ -216,11 +237,7 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias
             }
             if (outputs.contains("feature_output")) {
                 const Tensor& featureOutputTensor = outputs.at("feature_output");
-                if (featureOutputTensor.getDimensions().size() != 2) {
-                    throw std::runtime_error("FullyConnected feature output tensor must be rank 2.");
-                }
-                if (featureOutputTensor.getDimensions()[0] != logicalFeatureInputDimensions[0] ||
-                    featureOutputTensor.getDimensions()[1] != wTensor.getDimensions()[1]) {
+                if (featureOutputTensor.getDimensions() != runtimeFeatureOutputDimensions) {
                     throw std::runtime_error("FullyConnected feature output tensor dimensions are incompatible with the matmul output.");
                 }
                 if (featureOutputTensor.getDataType() != outputDataType) {
@@ -232,7 +249,7 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias
             }
 
             auto fin = Expression::input("feature_input", featureInputTensor.getDataType(), featureInputTensor.getDataType());
-            if (originalFeatureInputDimensions.size() > 2) {
+            if (originalFeatureInputDimensions != logicalFeatureInputDimensions) {
                 fin = fin.reshape(logicalFeatureInputDimensions);
             }
             auto w = Expression::input("weights", weightsDataType, weightsDataType);
@@ -261,9 +278,16 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias
             if (activation != nullptr) {
                 fout = activation->toExpression(fout);
             }
+
+            const std::vector<uint64_t> matmulOutputDimensions = {logicalFeatureInputDimensions[0], wTensor.getDimensions()[1]};
+            if (epilogue.has_value() && runtimeFeatureOutputDimensions != matmulOutputDimensions) {
+                // Apply epilogues in the public output shape.  This keeps tokenwise FullyConnected epilogue
+                // inputs/output shaped [batch, ...prefix, out_features] instead of exposing the folded matmul batch.
+                fout = fout.reshape(runtimeFeatureOutputDimensions);
+            }
             for (const std::string& auxInputName : epilogueAuxInputNames) {
                 const Tensor& auxTensor = inputs.at(auxInputName);
-                const std::vector<uint64_t> expectedAuxShape = {logicalFeatureInputDimensions[0], wTensor.getDimensions()[1]};
+                const std::vector<uint64_t>& expectedAuxShape = epilogue.has_value() ? runtimeFeatureOutputDimensions : matmulOutputDimensions;
                 if (auxTensor.getDimensions() != expectedAuxShape) {
                     throw std::runtime_error("FullyConnected epilogue auxiliary input '" + auxInputName +
                                              "' shape must match the fully connected feature output shape.");
@@ -278,6 +302,10 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias
             }
             if (epilogue.has_value()) {
                 fout = FullyConnected::applyEpilogue(fout, epilogue.value());
+            }
+
+            if (!epilogue.has_value() && runtimeFeatureOutputDimensions != matmulOutputDimensions) {
+                fout = fout.reshape(runtimeFeatureOutputDimensions);
             }
 
             // The API layer's declared output tensor dtype is authoritative.
@@ -327,6 +355,41 @@ uint64_t FullyConnected::checkedFeatureCount(const std::vector<uint64_t>& dimens
 
     return featureCount;
 }
+uint64_t FullyConnected::checkedInputFeatureCount(const std::vector<uint64_t>& dimensions,
+                                                   bool preservePrefixDimensions,
+                                                   const std::string& what) {
+    if (!preservePrefixDimensions) {
+        return checkedFeatureCount(dimensions, what);
+    }
+    if (dimensions.empty()) {
+        throw std::invalid_argument("FullyConnected " + what + " must have at least one feature dimension.");
+    }
+    for (uint64_t dim : dimensions) {
+        if (dim == 0) {
+            throw std::invalid_argument("FullyConnected " + what + " dimensions must be non-zero.");
+        }
+    }
+    const uint64_t featureCount = dimensions.back();
+    if (featureCount > static_cast<uint64_t>(std::numeric_limits<int>::max())) {
+        throw std::invalid_argument("FullyConnected " + what + " feature count exceeds the int32 cuBLASLt interface limit.");
+    }
+    return featureCount;
+}
+
+std::vector<uint64_t> FullyConnected::fullyConnectedOutputDimensions(const std::vector<uint64_t>& inputDimensions,
+                                                                     uint32_t numOutputFeatures,
+                                                                     bool preservePrefixDimensions) {
+    if (!preservePrefixDimensions) {
+        return {numOutputFeatures};
+    }
+    if (inputDimensions.empty()) {
+        throw std::invalid_argument("FullyConnected input dimensions must be non-empty.");
+    }
+    std::vector<uint64_t> outputDimensions = inputDimensions;
+    outputDimensions.back() = numOutputFeatures;
+    return outputDimensions;
+}
+
 
 void FullyConnected::verifyFullyConnectedDataType(DataType dataType, const std::string& what) {
     if (!isFullyConnectedFloatingDataType(dataType)) {
@@ -458,6 +521,8 @@ FullyConnected FullyConnected::Builder::build() {
     THOR_THROW_IF_FALSE(_numOutputFeatures.has_value());
     if (!_hasBias.has_value())
         _hasBias = false;
+    if (!_preserveInputPrefixDimensions.has_value())
+        _preserveInputPrefixDimensions = false;
     if (_weightsInitializer == nullptr)
         _weightsInitializer = Glorot::Builder().build();
     if (_biasInitializer == nullptr)
@@ -489,6 +554,7 @@ FullyConnected FullyConnected::Builder::build() {
     fullyConnected.numOutputFeatures = _numOutputFeatures.value();
 
     fullyConnected.hasBias = _hasBias.value();
+    fullyConnected.preserveInputPrefixDimensions = _preserveInputPrefixDimensions.value();
     if (_activation != nullptr)
         fullyConnected.activation = _activation;
     fullyConnected.weightsDataType = _weightsDataType.value();
@@ -499,7 +565,8 @@ FullyConnected FullyConnected::Builder::build() {
     // CustomLayer, so there is no implementation FullyConnected class left to define parameters.
     std::shared_ptr<Initializer> weightsInitializer = _weightsInitializer->clone();
     std::shared_ptr<Initializer> biasInitializer = _hasBias.value() ? _biasInitializer->clone() : nullptr;
-    const uint64_t inputFeatures = FullyConnected::checkedFeatureCount(_featureInputs.front().getDimensions(), "feature input");
+    const uint64_t inputFeatures = FullyConnected::checkedInputFeatureCount(
+        _featureInputs.front().getDimensions(), _preserveInputPrefixDimensions.value(), "feature input");
 
     ParameterSpecification::Builder weightsParameterBuilder;
     weightsParameterBuilder.name("weights")
@@ -526,7 +593,10 @@ FullyConnected FullyConnected::Builder::build() {
     fullyConnected.initialized = true;
 
     for (uint32_t i = 0; i < fullyConnected.featureInputs.size(); ++i) {
-        Tensor out(fullyConnected.outputDataType, {fullyConnected.numOutputFeatures});
+        Tensor out(fullyConnected.outputDataType,
+                   FullyConnected::fullyConnectedOutputDimensions(fullyConnected.featureInputs[i].getDimensions(),
+                                                                  fullyConnected.numOutputFeatures,
+                                                                  fullyConnected.preserveInputPrefixDimensions));
         fullyConnected.featureOutputs.push_back(out);
 
         fullyConnected.outputTensorFromInputTensor[fullyConnected.featureInputs[i]] = out;
@@ -577,7 +647,7 @@ void FullyConnected::Builder::verifyConfig() const {
 
     const DataType inputDataType = _featureInputs.front().getDataType();
     const std::vector<uint64_t> inputDimensions = _featureInputs.front().getDimensions();
-    FullyConnected::checkedFeatureCount(inputDimensions, "feature input");
+    FullyConnected::checkedInputFeatureCount(inputDimensions, _preserveInputPrefixDimensions.value(), "feature input");
     FullyConnected::verifyFullyConnectedDataType(inputDataType, "feature input data type");
     FullyConnected::verifyFullyConnectedDataType(_weightsDataType.value(), "weightsDataType");
     FullyConnected::verifyFullyConnectedComputeDataType(_computeDataType.value());
@@ -597,9 +667,11 @@ void FullyConnected::Builder::verifyConfig() const {
         if (featureInput.getDimensions() != inputDimensions) {
             throw std::invalid_argument("FullyConnected all feature inputs must have the same dimensions.");
         }
-        FullyConnected::checkedFeatureCount(featureInput.getDimensions(), "feature input " + std::to_string(i));
+        FullyConnected::checkedInputFeatureCount(
+            featureInput.getDimensions(), _preserveInputPrefixDimensions.value(), "feature input " + std::to_string(i));
     }
-    const std::vector<uint64_t> expectedEpilogueInputDims = {_numOutputFeatures.value()};
+    const std::vector<uint64_t> expectedEpilogueInputDims =
+        FullyConnected::fullyConnectedOutputDimensions(inputDimensions, _numOutputFeatures.value(), _preserveInputPrefixDimensions.value());
     for (const auto& [name, tensor] : _epilogueInputBindings) {
         FullyConnected::validateEpilogueAuxInputName(name);
         if (!tensor.isInitialized()) {
@@ -634,7 +706,15 @@ std::shared_ptr<ThorImplementation::Layer> FullyConnected::stamp(ThorImplementat
     // Note: Network notices when a layer has already been stamped and only adds a connection; it does not re-stamp the layer.
     std::shared_ptr<ThorImplementation::CustomLayer> physicalFullyConnected = std::make_shared<ThorImplementation::CustomLayer>(
         buildFullyConnectedExpression(
-            hasBias, placement, weightsDataType, computeDataType, outputDataType, activation, epilogue, epilogueAuxInputNames()),
+            hasBias,
+            preserveInputPrefixDimensions,
+            placement,
+            weightsDataType,
+            computeDataType,
+            outputDataType,
+            activation,
+            epilogue,
+            epilogueAuxInputNames()),
         [&]() {
             std::vector<std::string> inputNames = {"feature_input"};
             std::vector<std::string> auxNames = epilogueAuxInputNames();
@@ -663,6 +743,7 @@ json FullyConnected::architectureJson() const {
     j["layer_name"] = layerName;
     j["num_output_features"] = numOutputFeatures;
     j["has_bias"] = hasBias;
+    j["preserve_input_prefix_dimensions"] = preserveInputPrefixDimensions;
     j["weights_data_type"] = weightsDataType;
     j["compute_data_type"] = computeDataType;
     j["output_data_type"] = outputDataType;
@@ -748,6 +829,7 @@ void FullyConnected::deserialize(shared_ptr<thor_file::TarReader>& archiveReader
     FullyConnected fullyConnected(epilogue, epilogueInputBindings);
     fullyConnected.numOutputFeatures = j.at("num_output_features").get<uint32_t>();
     fullyConnected.hasBias = j.at("has_bias").get<bool>();
+    fullyConnected.preserveInputPrefixDimensions = j.value("preserve_input_prefix_dimensions", false);
     fullyConnected.weightsDataType = j.at("weights_data_type").get<DataType>();
     fullyConnected.computeDataType = j.at("compute_data_type").get<DataType>();
     fullyConnected.outputDataType = j.at("output_data_type").get<DataType>();

@@ -185,7 +185,9 @@ EmbeddingSparseGradientRunBucketConfig currentEmbeddingSparseGradientRunBucketCo
 
 std::string dtypeName(DataType dtype) { return TensorDescriptor::getElementTypeName(dtype); }
 
-bool isSupportedIndexType(DataType dtype) { return dtype == DataType::UINT32 || dtype == DataType::UINT64; }
+bool isSupportedIndexType(DataType dtype) {
+    return dtype == DataType::UINT8 || dtype == DataType::UINT16 || dtype == DataType::UINT32 || dtype == DataType::UINT64;
+}
 
 bool isSupportedRowType(DataType dtype) { return dtype == DataType::UINT16 || dtype == DataType::UINT32 || dtype == DataType::UINT64; }
 
@@ -1818,6 +1820,12 @@ void launchMaterializeSortPairsTyped(const Tensor& indices, PreparedEmbeddingSpa
 template <typename RowT>
 void launchMaterializeSortPairsForRowType(const Tensor& indices, PreparedEmbeddingSparseGradient& prepared, Stream stream) {
     switch (prepared.indexDataType) {
+        case DataType::UINT8:
+            launchMaterializeSortPairsTyped<uint8_t, RowT>(indices, prepared, stream);
+            break;
+        case DataType::UINT16:
+            launchMaterializeSortPairsTyped<uint16_t, RowT>(indices, prepared, stream);
+            break;
         case DataType::UINT32:
             launchMaterializeSortPairsTyped<uint32_t, RowT>(indices, prepared, stream);
             break;
@@ -2174,7 +2182,7 @@ std::shared_ptr<PreparedEmbeddingSparseGradient> prepareEmbeddingSparseGradientI
     validateDenseContiguous(upstreamGradient, "upstream gradient");
 
     if (!isSupportedIndexType(indices.getDataType())) {
-        throw std::invalid_argument("Embedding sparse-gradient indices dtype must be uint32 or uint64. Got " +
+        throw std::invalid_argument("Embedding sparse-gradient indices dtype must be uint8, uint16, uint32, or uint64. Got " +
                                     dtypeName(indices.getDataType()) + ".");
     }
     if (!isSupportedGradientType(upstreamGradient.getDataType())) {
@@ -2721,9 +2729,9 @@ void capturePreparedEmbeddingSparseGradientImpl(CudaGraphCaptureBuilder& builder
     // and ultra-high buckets are independent, so capture them as sibling graph branches instead of
     // serializing them on the main capture stream. The captured object owns dedicated helper streams so
     // capture never depends on unrelated work queued on the reusable gradient-update stream pool.
-    Event reducersReady = stream.putEvent(false);
-    captured.highRunCaptureStream.waitEvent(reducersReady);
-    captured.ultraHighRunCaptureStream.waitEvent(reducersReady);
+    captured.reducersReadyEvent = stream.putEvent(false);
+    captured.highRunCaptureStream.waitEvent(captured.reducersReadyEvent);
+    captured.ultraHighRunCaptureStream.waitEvent(captured.reducersReadyEvent);
 
     CUfunction highRunReduceKernel = prepared.highRunReduceKernel != nullptr ? prepared.highRunReduceKernel : prepared.reduceKernel;
     captured.lowReduceNode = captureReduceBucket(prepared.lowRunRows,
@@ -2754,8 +2762,10 @@ void capturePreparedEmbeddingSparseGradientImpl(CudaGraphCaptureBuilder& builder
                                                            captured.ultraHighRunCaptureStream);
     }
 
-    stream.waitEvent(captured.highRunCaptureStream.putEvent(false));
-    stream.waitEvent(captured.ultraHighRunCaptureStream.putEvent(false));
+    captured.highRunCapturedEvent = captured.highRunCaptureStream.putEvent(false);
+    captured.ultraHighRunCapturedEvent = captured.ultraHighRunCaptureStream.putEvent(false);
+    stream.waitEvent(captured.highRunCapturedEvent);
+    stream.waitEvent(captured.ultraHighRunCapturedEvent);
 }
 
 

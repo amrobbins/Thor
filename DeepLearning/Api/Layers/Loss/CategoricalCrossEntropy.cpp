@@ -16,7 +16,8 @@ void CategoricalCrossEntropy::buildSupportLayersAndAddToNetwork() {
                                                                           .labels(labelsTensor)
                                                                           .softmaxAddedToNetwork()
                                                                           .reportsRawLoss()
-                                                                          .lossDataType(lossDataType);
+                                                                          .lossDataType(lossDataType)
+                                                                          .lossWeight(lossWeight.value_or(1.0f));
 
     CategoricalCrossEntropy crossEntropy;
     categoricalCrossEntropyBuilder.populateAndAdd(

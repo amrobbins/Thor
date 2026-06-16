@@ -31,6 +31,9 @@ Trainer Trainer::Builder::build() const {
     trainer.runtimeConfig = runtimeConfig_;
     trainer.executor = executor_ ? executor_ : std::make_shared<LocalTrainingExecutor>();
     trainer.observer = observer_;
+    trainer.saveModelDirectory = saveModelDirectory_;
+    trainer.saveModelOverwrite = saveModelOverwrite_;
+    trainer.saveOptimizerState = saveOptimizerState_;
     if (trainer.observer == nullptr) {
         if (trainer.runtimeConfig.statsEnabled) {
             const LineStatsOutputMode outputMode =
@@ -57,6 +60,9 @@ void Trainer::fit(const TrainerFitOptions& options) {
     request.trainingProgram = trainingProgram;
     request.runtime = runtimeConfig;
     request.epochs = options.epochs;
+    request.saveModelDirectory = saveModelDirectory;
+    request.saveModelOverwrite = saveModelOverwrite;
+    request.saveOptimizerState = saveOptimizerState;
 
     TrainingObserver& observer = effectiveObserver();
     try {

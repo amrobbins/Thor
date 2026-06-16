@@ -75,9 +75,9 @@ class Loss : public Layer {
     }
 
     virtual std::optional<Tensor> connectToPredictionsInputLayer(Layer *predictionsInputLayer,
-                                                            std::optional<Tensor> featureInput,
-                                                            Stream stream,
-                                                            bool backPropagateError) {
+                                                                 std::optional<Tensor> featureInput,
+                                                                 Stream stream,
+                                                                 bool backPropagateError) {
         THOR_THROW_IF_FALSE(featureInput.has_value());
         THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDimensions().size() >= 1);
         THOR_THROW_IF_FALSE(!this->featureInput.has_value());
@@ -236,7 +236,7 @@ class Loss : public Layer {
     DataType lossDataType;
 
     // FIXME: only const for now for convenience
-    static constexpr float lossScalingFactor = 4;  // 32;
+    static constexpr float lossScalingFactor = 1;  // 32;
     Stream labelsStream;
 
     bool featureInputReceived;

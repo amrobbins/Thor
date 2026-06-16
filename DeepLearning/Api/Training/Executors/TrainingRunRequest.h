@@ -31,6 +31,9 @@ struct TrainingRunRequest {
     std::optional<TrainingProgram> trainingProgram{};
     TrainingRuntimeConfig runtime{};
     uint32_t epochs = 1;
+    std::optional<std::string> saveModelDirectory{};
+    bool saveModelOverwrite = false;
+    bool saveOptimizerState = true;
 };
 
 }  // namespace Thor

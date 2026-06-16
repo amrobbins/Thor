@@ -2287,6 +2287,36 @@ TEST(ExpressionConvenienceOps, MultipleInternalStridedViewsExecuteCorrectlyThrou
     expectNear(copyToCpuValues(outputs.at("third"), stream), {6.0f, 18.0f});
 }
 
+
+TEST(ExpressionConvenienceOps, BroadcastStatsSurviveFlattenAndUnflattenReshapeFusion) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor x = makeGpuTensor({2, 3, 4},
+                             {0.0f, 1.0f, 2.0f, 3.0f,
+                              4.0f, 5.0f, 6.0f, 7.0f,
+                              8.0f, 9.0f, 10.0f, 11.0f,
+                              12.0f, 13.0f, 14.0f, 15.0f,
+                              16.0f, 17.0f, 18.0f, 19.0f,
+                              20.0f, 21.0f, 22.0f, 23.0f},
+                             stream);
+    Tensor stats = makeGpuTensor({6, 1}, {100.0f, 200.0f, 300.0f, 400.0f, 500.0f, 600.0f}, stream);
+
+    auto xin = Expression::input("x");
+    auto stats_in = Expression::input("stats");
+    auto expressionOutputs = Expression::outputs({{"y", (xin.reshape({6, 4}) + stats_in).reshape({2, 3, 4})}});
+    Tensor y = runExpressionOutput(expressionOutputs, {{"x", x}, {"stats", stats}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{2, 3, 4}));
+    expectNear(copyToCpuValues(y, stream),
+               {100.0f, 101.0f, 102.0f, 103.0f,
+                204.0f, 205.0f, 206.0f, 207.0f,
+                308.0f, 309.0f, 310.0f, 311.0f,
+                412.0f, 413.0f, 414.0f, 415.0f,
+                516.0f, 517.0f, 518.0f, 519.0f,
+                620.0f, 621.0f, 622.0f, 623.0f});
+}
+
 TEST(ExpressionConvenienceOps, BackwardReshapesPublicOutputAdjointToInternalMulShape) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);

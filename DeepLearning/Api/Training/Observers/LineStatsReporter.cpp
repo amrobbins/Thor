@@ -180,11 +180,8 @@ std::string formatElapsedString(double elapsedSeconds) {
     const uint64_t seconds = roundedSeconds % 60;
     char buffer[32];
     if (hours >= 100) {
-        std::snprintf(buffer,
-                      sizeof(buffer),
-                      "%llu:%02llu",
-                      static_cast<unsigned long long>(hours),
-                      static_cast<unsigned long long>(minutes));
+        std::snprintf(
+            buffer, sizeof(buffer), "%llu:%02llu", static_cast<unsigned long long>(hours), static_cast<unsigned long long>(minutes));
     } else {
         std::snprintf(buffer,
                       sizeof(buffer),
@@ -333,10 +330,10 @@ void appendPlainStatsLine(LineBuffer& out, const TrainingStatsSnapshot& stats) {
 
     if (stats.stepsPerEpoch > 0) {
         appendPlainDimKey(out, "batch");
-        appendPadded(out, formatRatio(stats.stepInEpoch, stats.stepsPerEpoch), 9);
+        appendPadded(out, formatRatio(stats.stepInEpoch, stats.stepsPerEpoch), 13);
     } else if (stats.stepInEpoch > 0) {
         appendPlainDimKey(out, "batch");
-        appendPadded(out, formatUnsigned(stats.stepInEpoch), 9);
+        appendPadded(out, formatUnsigned(stats.stepInEpoch), 13);
     }
 
     if (stats.loss.has_value()) {
@@ -405,10 +402,10 @@ void appendColorStatsLine(LineBuffer& out, const TrainingStatsSnapshot& stats) {
 
     if (stats.stepsPerEpoch > 0) {
         appendDimKey(out, "batch");
-        appendStyledPadded(out, Ansi::progress, formatRatio(stats.stepInEpoch, stats.stepsPerEpoch), 9);
+        appendStyledPadded(out, Ansi::progress, formatRatio(stats.stepInEpoch, stats.stepsPerEpoch), 13);
     } else if (stats.stepInEpoch > 0) {
         appendDimKey(out, "batch");
-        appendStyledPadded(out, Ansi::progress, formatUnsigned(stats.stepInEpoch), 9);
+        appendStyledPadded(out, Ansi::progress, formatUnsigned(stats.stepInEpoch), 13);
     }
 
     if (stats.loss.has_value()) {

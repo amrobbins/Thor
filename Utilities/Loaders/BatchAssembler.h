@@ -56,6 +56,9 @@ class BatchAssembler {
     ThorImplementation::TensorDescriptor exampleDescriptor;
     ThorImplementation::TensorDescriptor batchDataTensorDescriptor;
     ThorImplementation::TensorDescriptor batchLabelTensorDescriptor;
+    uint64_t examplePayloadSizeInBytes;
+    uint64_t labelPayloadSizeInBytes;
+    uint64_t shardRecordSizeInBytes;
     uint64_t batchSize;
     uint64_t numExamples;
     uint64_t batchesPerEpoch;
@@ -92,6 +95,7 @@ class BatchAssembler {
     void batchAssemblerThread();
     void emitQueueDiagnostics(const char* event, uint64_t batchNum, uint64_t waitMicros = 0);
 
+    bool inlinePayloadLabels;
     bool perClassLabels;
     bool classIndexLabels;
 

@@ -1869,8 +1869,9 @@ shared_ptr<CompiledEmbeddingLookup> EquationCompiler::compileEmbeddingLookup(con
     compiled->output_dtype = output_node.output_dtype.value();
     compiled->debug_name = expr.output_node == embedding_node_idx ? "thor_expr_embedding_lookup" : "thor_expr_embedding_lookup_fused";
 
-    if (compiled->index_dtype != DataType::UINT32 && compiled->index_dtype != DataType::UINT64) {
-        throw std::runtime_error("EmbeddingLookup indices dtype must be uint32 or uint64.");
+    if (compiled->index_dtype != DataType::UINT8 && compiled->index_dtype != DataType::UINT16 &&
+        compiled->index_dtype != DataType::UINT32 && compiled->index_dtype != DataType::UINT64) {
+        throw std::runtime_error("EmbeddingLookup indices dtype must be uint8, uint16, uint32, or uint64.");
     }
     if (compiled->weights_dtype != DataType::FP16 && compiled->weights_dtype != DataType::BF16 &&
         compiled->weights_dtype != DataType::FP32) {

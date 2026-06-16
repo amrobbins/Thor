@@ -17,6 +17,7 @@ void launchElementWiseCrossEntropyLoss(void *labelsOrClassOfHotLabels_d,
                                        uint32_t batchSize,
                                        bool computeGradient,
                                        uint32_t lossScalingFactor,
+                                       float lossWeight,
                                        CrossEntropyLossType crossEntropyLossType,
                                        bool indexLabels,
                                        Stream stream) {
@@ -37,6 +38,7 @@ void launchElementWiseCrossEntropyLoss(void *labelsOrClassOfHotLabels_d,
                 batchSize,
                 computeGradient,
                 lossScalingFactor,
+                lossWeight,
                 stream);
         } else {
             launchElementWiseCategoricalCrossEntropyLoss_oneHotLabels<LABEL_OR_INDEX_TYPE, PROBABILITY_TYPE, LOSS_TYPE>(
@@ -48,6 +50,7 @@ void launchElementWiseCrossEntropyLoss(void *labelsOrClassOfHotLabels_d,
                 batchSize,
                 computeGradient,
                 lossScalingFactor,
+                lossWeight,
                 stream);
         }
     }
@@ -61,6 +64,7 @@ template void launchElementWiseCrossEntropyLoss<bool, half, half>(void *labelsOr
                                                                   uint32_t batchSize,
                                                                   bool computeGradient,
                                                                   uint32_t lossScalingFactor,
+                                                                  float lossWeight,
                                                                   CrossEntropyLossType crossEntropyLossType,
                                                                   bool indexLabels,
                                                                   Stream stream);
@@ -73,6 +77,7 @@ template void launchElementWiseCrossEntropyLoss<bool, half, float>(void *labelsO
                                                                    uint32_t batchSize,
                                                                    bool computeGradient,
                                                                    uint32_t lossScalingFactor,
+                                                                   float lossWeight,
                                                                    CrossEntropyLossType crossEntropyLossType,
                                                                    bool indexLabels,
                                                                    Stream stream);
@@ -85,6 +90,7 @@ template void launchElementWiseCrossEntropyLoss<bool, float, half>(void *labelsO
                                                                    uint32_t batchSize,
                                                                    bool computeGradient,
                                                                    uint32_t lossScalingFactor,
+                                                                   float lossWeight,
                                                                    CrossEntropyLossType crossEntropyLossType,
                                                                    bool indexLabels,
                                                                    Stream stream);
@@ -97,6 +103,7 @@ template void launchElementWiseCrossEntropyLoss<bool, float, float>(void *labels
                                                                     uint32_t batchSize,
                                                                     bool computeGradient,
                                                                     uint32_t lossScalingFactor,
+                                                                    float lossWeight,
                                                                     CrossEntropyLossType crossEntropyLossType,
                                                                     bool indexLabels,
                                                                     Stream stream);
@@ -109,6 +116,7 @@ template void launchElementWiseCrossEntropyLoss<uint8_t, half, half>(void *label
                                                                      uint32_t batchSize,
                                                                      bool computeGradient,
                                                                      uint32_t lossScalingFactor,
+                                                                     float lossWeight,
                                                                      CrossEntropyLossType crossEntropyLossType,
                                                                      bool indexLabels,
                                                                      Stream stream);
@@ -121,6 +129,7 @@ template void launchElementWiseCrossEntropyLoss<uint8_t, half, float>(void *labe
                                                                       uint32_t batchSize,
                                                                       bool computeGradient,
                                                                       uint32_t lossScalingFactor,
+                                                                      float lossWeight,
                                                                       CrossEntropyLossType crossEntropyLossType,
                                                                       bool indexLabels,
                                                                       Stream stream);
@@ -133,6 +142,7 @@ template void launchElementWiseCrossEntropyLoss<uint8_t, float, half>(void *labe
                                                                       uint32_t batchSize,
                                                                       bool computeGradient,
                                                                       uint32_t lossScalingFactor,
+                                                                      float lossWeight,
                                                                       CrossEntropyLossType crossEntropyLossType,
                                                                       bool indexLabels,
                                                                       Stream stream);
@@ -145,6 +155,7 @@ template void launchElementWiseCrossEntropyLoss<uint8_t, float, float>(void *lab
                                                                        uint32_t batchSize,
                                                                        bool computeGradient,
                                                                        uint32_t lossScalingFactor,
+                                                                       float lossWeight,
                                                                        CrossEntropyLossType crossEntropyLossType,
                                                                        bool indexLabels,
                                                                        Stream stream);
@@ -157,6 +168,7 @@ template void launchElementWiseCrossEntropyLoss<uint16_t, half, half>(void *labe
                                                                       uint32_t batchSize,
                                                                       bool computeGradient,
                                                                       uint32_t lossScalingFactor,
+                                                                      float lossWeight,
                                                                       CrossEntropyLossType crossEntropyLossType,
                                                                       bool indexLabels,
                                                                       Stream stream);
@@ -169,6 +181,7 @@ template void launchElementWiseCrossEntropyLoss<uint16_t, half, float>(void *lab
                                                                        uint32_t batchSize,
                                                                        bool computeGradient,
                                                                        uint32_t lossScalingFactor,
+                                                                       float lossWeight,
                                                                        CrossEntropyLossType crossEntropyLossType,
                                                                        bool indexLabels,
                                                                        Stream stream);
@@ -181,6 +194,7 @@ template void launchElementWiseCrossEntropyLoss<uint16_t, float, half>(void *lab
                                                                        uint32_t batchSize,
                                                                        bool computeGradient,
                                                                        uint32_t lossScalingFactor,
+                                                                       float lossWeight,
                                                                        CrossEntropyLossType crossEntropyLossType,
                                                                        bool indexLabels,
                                                                        Stream stream);
@@ -193,6 +207,7 @@ template void launchElementWiseCrossEntropyLoss<uint16_t, float, float>(void *la
                                                                         uint32_t batchSize,
                                                                         bool computeGradient,
                                                                         uint32_t lossScalingFactor,
+                                                                        float lossWeight,
                                                                         CrossEntropyLossType crossEntropyLossType,
                                                                         bool indexLabels,
                                                                         Stream stream);
@@ -205,6 +220,7 @@ template void launchElementWiseCrossEntropyLoss<uint32_t, half, half>(void *labe
                                                                       uint32_t batchSize,
                                                                       bool computeGradient,
                                                                       uint32_t lossScalingFactor,
+                                                                      float lossWeight,
                                                                       CrossEntropyLossType crossEntropyLossType,
                                                                       bool indexLabels,
                                                                       Stream stream);
@@ -217,6 +233,7 @@ template void launchElementWiseCrossEntropyLoss<uint32_t, half, float>(void *lab
                                                                        uint32_t batchSize,
                                                                        bool computeGradient,
                                                                        uint32_t lossScalingFactor,
+                                                                       float lossWeight,
                                                                        CrossEntropyLossType crossEntropyLossType,
                                                                        bool indexLabels,
                                                                        Stream stream);
@@ -229,6 +246,7 @@ template void launchElementWiseCrossEntropyLoss<uint32_t, float, half>(void *lab
                                                                        uint32_t batchSize,
                                                                        bool computeGradient,
                                                                        uint32_t lossScalingFactor,
+                                                                       float lossWeight,
                                                                        CrossEntropyLossType crossEntropyLossType,
                                                                        bool indexLabels,
                                                                        Stream stream);
@@ -241,6 +259,7 @@ template void launchElementWiseCrossEntropyLoss<uint32_t, float, float>(void *la
                                                                         uint32_t batchSize,
                                                                         bool computeGradient,
                                                                         uint32_t lossScalingFactor,
+                                                                        float lossWeight,
                                                                         CrossEntropyLossType crossEntropyLossType,
                                                                         bool indexLabels,
                                                                         Stream stream);
@@ -253,6 +272,7 @@ template void launchElementWiseCrossEntropyLoss<half, half, half>(void *labelsOr
                                                                   uint32_t batchSize,
                                                                   bool computeGradient,
                                                                   uint32_t lossScalingFactor,
+                                                                  float lossWeight,
                                                                   CrossEntropyLossType crossEntropyLossType,
                                                                   bool indexLabels,
                                                                   Stream stream);
@@ -265,6 +285,7 @@ template void launchElementWiseCrossEntropyLoss<half, half, float>(void *labelsO
                                                                    uint32_t batchSize,
                                                                    bool computeGradient,
                                                                    uint32_t lossScalingFactor,
+                                                                   float lossWeight,
                                                                    CrossEntropyLossType crossEntropyLossType,
                                                                    bool indexLabels,
                                                                    Stream stream);
@@ -277,6 +298,7 @@ template void launchElementWiseCrossEntropyLoss<half, float, half>(void *labelsO
                                                                    uint32_t batchSize,
                                                                    bool computeGradient,
                                                                    uint32_t lossScalingFactor,
+                                                                   float lossWeight,
                                                                    CrossEntropyLossType crossEntropyLossType,
                                                                    bool indexLabels,
                                                                    Stream stream);
@@ -289,6 +311,7 @@ template void launchElementWiseCrossEntropyLoss<half, float, float>(void *labels
                                                                     uint32_t batchSize,
                                                                     bool computeGradient,
                                                                     uint32_t lossScalingFactor,
+                                                                    float lossWeight,
                                                                     CrossEntropyLossType crossEntropyLossType,
                                                                     bool indexLabels,
                                                                     Stream stream);
@@ -301,6 +324,7 @@ template void launchElementWiseCrossEntropyLoss<float, half, half>(void *labelsO
                                                                    uint32_t batchSize,
                                                                    bool computeGradient,
                                                                    uint32_t lossScalingFactor,
+                                                                   float lossWeight,
                                                                    CrossEntropyLossType crossEntropyLossType,
                                                                    bool indexLabels,
                                                                    Stream stream);
@@ -313,6 +337,7 @@ template void launchElementWiseCrossEntropyLoss<float, half, float>(void *labels
                                                                     uint32_t batchSize,
                                                                     bool computeGradient,
                                                                     uint32_t lossScalingFactor,
+                                                                    float lossWeight,
                                                                     CrossEntropyLossType crossEntropyLossType,
                                                                     bool indexLabels,
                                                                     Stream stream);
@@ -325,6 +350,7 @@ template void launchElementWiseCrossEntropyLoss<float, float, half>(void *labels
                                                                     uint32_t batchSize,
                                                                     bool computeGradient,
                                                                     uint32_t lossScalingFactor,
+                                                                    float lossWeight,
                                                                     CrossEntropyLossType crossEntropyLossType,
                                                                     bool indexLabels,
                                                                     Stream stream);
@@ -337,6 +363,7 @@ template void launchElementWiseCrossEntropyLoss<float, float, float>(void *label
                                                                      uint32_t batchSize,
                                                                      bool computeGradient,
                                                                      uint32_t lossScalingFactor,
+                                                                     float lossWeight,
                                                                      CrossEntropyLossType crossEntropyLossType,
                                                                      bool indexLabels,
                                                                      Stream stream);

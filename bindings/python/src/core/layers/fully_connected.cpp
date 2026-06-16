@@ -118,13 +118,18 @@ void bind_fully_connected(nb::module_ &m) {
            shared_ptr<Optimizer> weights_optimizer,
            shared_ptr<Optimizer> biases_optimizer,
            nb::object epilogue,
-           nb::object epilogue_inputs) {
+           nb::object epilogue_inputs,
+           bool preserve_prefix_dimensions) {
             if (numOutputFeatures == 0) {
                 throw nb::value_error("FullyConnected instance: num_output_features must be > 0.");
             }
 
             FullyConnected::Builder builder;
-            builder.network(network).featureInput(featureInput).numOutputFeatures(numOutputFeatures).hasBias(hasBias);
+            builder.network(network)
+                .featureInput(featureInput)
+                .numOutputFeatures(numOutputFeatures)
+                .hasBias(hasBias)
+                .preserveInputPrefixDimensions(preserve_prefix_dimensions);
 
             applyPythonActivation(builder, activation);
             applyPythonEpilogueInputs(builder, epilogue_inputs);
@@ -151,7 +156,8 @@ void bind_fully_connected(nb::module_ &m) {
         "weights_optimizer"_a.none() = nb::none(),
         "biases_optimizer"_a.none() = nb::none(),
         "epilogue"_a.none() = nb::none(),
-        "epilogue_inputs"_a.none() = nb::none());
+        "epilogue_inputs"_a.none() = nb::none(),
+        "preserve_prefix_dimensions"_a = false);
 
     fully_connected.def_static(
         "epilogue_input",
@@ -212,6 +218,11 @@ void bind_fully_connected(nb::module_ &m) {
             Number of output features (units) produced by this layer.
         has_bias : bool, default True
             Whether to learn an additive bias term.
+        preserve_prefix_dimensions : bool, default False
+            If False, all non-batch input dimensions are flattened into one dense feature vector.
+            If True, only the final input dimension is treated as features and preceding logical
+            dimensions are preserved in the output. This is the high-throughput tokenwise projection
+            mode for tensors shaped like [sequence, hidden].
         activation : thor.Activation or None, default thor.activations.Gelu()
             Activation to apply after the linear transform (and optional
             batch normalization). Pass ``None`` to not use any activation and

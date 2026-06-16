@@ -1034,6 +1034,10 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         currentEpoch += 1;
     }
 
+    if (request.saveModelDirectory.has_value()) {
+        placedNetwork->save(*request.saveModelDirectory, request.saveModelOverwrite, request.saveOptimizerState);
+    }
+
     if (request.runtime.statsEnabled) {
         emitTrainingEvent(observer,
                           request.runtime.statsEnabled,

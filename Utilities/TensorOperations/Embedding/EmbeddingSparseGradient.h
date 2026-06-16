@@ -2,6 +2,7 @@
 
 #include "DeepLearning/Implementation/Layers/Optimizers/SparseRowGradient.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "Utilities/Common/Event.h"
 #include "Utilities/Common/Stream.h"
 #include "Utilities/CudaDriver/CudaGraph.h"
 #include "Utilities/Expression/SparseRowUpdate.h"
@@ -105,6 +106,12 @@ struct CapturedEmbeddingSparseGradient {
     DeviceUpdatableKernelNode ultraHighReduceNode;
     DeviceUpdatableKernelNode twoStageFinalizeClassifyNode;
     DeviceUpdatableKernelNode twoStageFinalizeAccumulateNode;
+    // CUDA events recorded/waited during multi-stream graph capture must not be
+    // destroyed while capture is still active. Keep them with the captured graph
+    // metadata instead of using temporaries inside capturePrepared...().
+    Event reducersReadyEvent;
+    Event highRunCapturedEvent;
+    Event ultraHighRunCapturedEvent;
     bool capturesSparseRowUpdateRuntimeScalarWrite = false;
     cudaGraphNode_t sparseRowUpdateRuntimeScalarWriteNode = nullptr;
     Stream highRunCaptureStream;

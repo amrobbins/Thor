@@ -26,6 +26,7 @@ void launchElementWiseCategoricalCrossEntropyLoss_oneHotLabels(void *labels_d,
                                                                uint32_t batchSize,
                                                                bool computeGradient,
                                                                uint32_t lossScalingFactor,
+                                                               float lossWeight,
                                                                Stream stream);
 
 // This version takes in an integer per item in the batch that specifies the true class of the example.
@@ -38,4 +39,5 @@ void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels(void *classOf
                                                                    uint32_t batchSize,
                                                                    bool computeGradient,
                                                                    uint32_t lossScalingFactor,
+                                                                   float lossWeight,
                                                                    Stream stream);

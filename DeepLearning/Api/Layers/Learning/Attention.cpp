@@ -633,13 +633,12 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
                 keyValueRaggedOffsets = normalizeRaggedOffsets(kAttentionKeyValueRaggedOffsetsInputName);
             }
 
-            featureInput.reshape({batch * querySequenceLength, queryInputFeatures});
-            if (useContextInput) {
-                contextInput.reshape({batch * keyValueSequenceLength, contextInputFeatures});
-            }
-
-            Expression x = Expression::input(kAttentionFeatureInputName, inputDType, inputDType);
-            Expression kvx = useContextInput ? Expression::input(kAttentionContextInputName, inputDType, inputDType) : x;
+            Expression x = Expression::input(kAttentionFeatureInputName, inputDType, inputDType)
+                               .reshape({batch * querySequenceLength, queryInputFeatures});
+            Expression kvx = useContextInput
+                                 ? Expression::input(kAttentionContextInputName, inputDType, inputDType)
+                                       .reshape({batch * keyValueSequenceLength, contextInputFeatures})
+                                 : x;
             std::optional<Expression> scoreBiasExpr;
             if (useScoreBias) {
                 scoreBiasExpr = Expression::input(kAttentionScoreBiasInputName, computeDType, computeDType);
@@ -835,10 +834,6 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
             auto expressionOutputs = Expression::outputs({{"feature_output", out}});
 
             DynamicExpression::TensorMap stampInputs = inputs;
-            stampInputs[kAttentionFeatureInputName] = featureInput;
-            if (useContextInput) {
-                stampInputs[kAttentionContextInputName] = contextInput;
-            }
             if (useScoreBias) {
                 stampInputs[kAttentionScoreBiasInputName] = scoreBiasInput.value();
             }

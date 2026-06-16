@@ -151,6 +151,8 @@ uint32_t gridForTinyEmbedding(uint64_t tokens, uint32_t groupSize) {
 
 bool isSupportedEmbeddingIndexDtype(DataType dtype) {
     switch (dtype) {
+        case DataType::UINT8:
+        case DataType::UINT16:
         case DataType::UINT32:
         case DataType::UINT64:
             return true;
@@ -180,6 +182,10 @@ void validateDenseContiguous(const Tensor& tensor, const std::string& name) {
 
 const char* generatedEmbeddingIndexTypeName(DataType dtype) {
     switch (dtype) {
+        case DataType::UINT8:
+            return "unsigned char";
+        case DataType::UINT16:
+            return "unsigned short";
         case DataType::UINT32:
             return "unsigned int";
         case DataType::UINT64:
@@ -1122,7 +1128,7 @@ void validateEmbeddingForwardInputs(const Tensor& indices, const Tensor& weights
         throw std::invalid_argument("Embedding forward tensors must be on the same GPU placement.");
     }
     if (!isSupportedEmbeddingIndexDtype(indices.getDataType())) {
-        throw std::invalid_argument("Embedding indices dtype must be uint32 or uint64. Got " + dataTypeName(indices.getDataType()) + ".");
+        throw std::invalid_argument("Embedding indices dtype must be uint8, uint16, uint32, or uint64. Got " + dataTypeName(indices.getDataType()) + ".");
     }
     if (!isSupportedEmbeddingValueDtype(weights.getDataType())) {
         throw std::invalid_argument("Embedding weights dtype must be fp16, bf16, or fp32. Got " + dataTypeName(weights.getDataType()) +
@@ -1173,6 +1179,10 @@ std::shared_ptr<PreparedEmbeddingForward> prepareEmbeddingForward(const Tensor& 
     validateEmbeddingForwardEpilogue(epilogue, output);
 
     switch (indices.getDataType()) {
+        case DataType::UINT8:
+            return prepareEmbeddingForwardValueDtype<uint8_t>(indices, weights, output, paddingIndex, epilogue);
+        case DataType::UINT16:
+            return prepareEmbeddingForwardValueDtype<uint16_t>(indices, weights, output, paddingIndex, epilogue);
         case DataType::UINT32:
             return prepareEmbeddingForwardValueDtype<uint32_t>(indices, weights, output, paddingIndex, epilogue);
         case DataType::UINT64:

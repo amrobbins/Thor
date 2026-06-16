@@ -16,6 +16,7 @@
 #include <functional>
 #include <limits>
 #include <stdexcept>
+#include <sstream>
 #include "DeepLearning/Implementation/ThorError.h"
 
 using namespace std;
@@ -4293,6 +4294,141 @@ static std::unordered_map<std::string, std::vector<uint64_t>> defaultBackwardReq
     return effective;
 }
 
+static std::vector<uint64_t> mapEffectiveDimsThroughDenseReshapeAlias(const std::vector<uint64_t>& source_dims,
+                                                                             const std::vector<uint64_t>& target_dims,
+                                                                             const std::vector<uint64_t>& effective_source_dims) {
+    if (effective_source_dims == source_dims) {
+        return target_dims;
+    }
+
+    if (effective_source_dims.size() > source_dims.size()) {
+        std::ostringstream oss;
+        oss << "Cannot map broadcast shape through dense reshape alias: effective rank exceeds source rank. "
+            << "source_dims=" << dimsToString(source_dims) << ", effective_dims=" << dimsToString(effective_source_dims)
+            << ", target_dims=" << dimsToString(target_dims);
+        throw std::runtime_error(oss.str());
+    }
+
+    std::vector<uint64_t> padded_effective_source_dims(source_dims.size(), 1ULL);
+    std::copy(effective_source_dims.begin(),
+              effective_source_dims.end(),
+              padded_effective_source_dims.begin() +
+                  static_cast<std::ptrdiff_t>(source_dims.size() - effective_source_dims.size()));
+    for (size_t axis = 0; axis < source_dims.size(); ++axis) {
+        const uint64_t effective_dim = padded_effective_source_dims[axis];
+        if (effective_dim != 1ULL && effective_dim != source_dims[axis]) {
+            std::ostringstream oss;
+            oss << "Cannot map non-broadcast-compatible effective shape through dense reshape alias. "
+                << "source_dims=" << dimsToString(source_dims) << ", effective_dims=" << dimsToString(effective_source_dims)
+                << ", padded_effective_dims=" << dimsToString(padded_effective_source_dims)
+                << ", target_dims=" << dimsToString(target_dims);
+            throw std::runtime_error(oss.str());
+        }
+    }
+
+    if (computeDimsNumel(source_dims) != computeDimsNumel(target_dims)) {
+        std::ostringstream oss;
+        oss << "Cannot map broadcast shape through dense reshape alias with mismatched element counts. "
+            << "source_dims=" << dimsToString(source_dims) << ", target_dims=" << dimsToString(target_dims);
+        throw std::runtime_error(oss.str());
+    }
+
+    std::vector<uint64_t> mapped;
+    mapped.reserve(target_dims.size());
+
+    size_t src_begin = 0;
+    size_t dst_begin = 0;
+    while (src_begin < source_dims.size() || dst_begin < target_dims.size()) {
+        if (src_begin >= source_dims.size() || dst_begin >= target_dims.size()) {
+            std::ostringstream oss;
+            oss << "Cannot map broadcast shape through dense reshape alias with unmatched axes. "
+                << "source_dims=" << dimsToString(source_dims) << ", effective_dims=" << dimsToString(effective_source_dims)
+                << ", target_dims=" << dimsToString(target_dims);
+            throw std::runtime_error(oss.str());
+        }
+
+        uint64_t src_product = source_dims[src_begin];
+        uint64_t dst_product = target_dims[dst_begin];
+        size_t src_end = src_begin + 1;
+        size_t dst_end = dst_begin + 1;
+
+        while (src_product != dst_product) {
+            if (src_product < dst_product) {
+                if (src_end >= source_dims.size()) {
+                    break;
+                }
+                if (src_product > std::numeric_limits<uint64_t>::max() / source_dims[src_end]) {
+                    throw std::runtime_error("Source reshape partition product overflows uint64_t.");
+                }
+                src_product *= source_dims[src_end++];
+            } else {
+                if (dst_end >= target_dims.size()) {
+                    break;
+                }
+                if (dst_product > std::numeric_limits<uint64_t>::max() / target_dims[dst_end]) {
+                    throw std::runtime_error("Target reshape partition product overflows uint64_t.");
+                }
+                dst_product *= target_dims[dst_end++];
+            }
+        }
+
+        if (src_product != dst_product) {
+            std::ostringstream oss;
+            oss << "Cannot partition dense reshape alias axes. source_dims=" << dimsToString(source_dims)
+                << ", effective_dims=" << dimsToString(effective_source_dims) << ", target_dims=" << dimsToString(target_dims);
+            throw std::runtime_error(oss.str());
+        }
+
+        bool source_chunk_is_full = true;
+        bool source_chunk_is_scalar_broadcast = true;
+        for (size_t axis = src_begin; axis < src_end; ++axis) {
+            if (padded_effective_source_dims[axis] != source_dims[axis]) {
+                source_chunk_is_full = false;
+            }
+            if (padded_effective_source_dims[axis] != 1ULL) {
+                source_chunk_is_scalar_broadcast = false;
+            }
+        }
+
+        if (source_chunk_is_full) {
+            mapped.insert(mapped.end(), target_dims.begin() + static_cast<std::ptrdiff_t>(dst_begin),
+                          target_dims.begin() + static_cast<std::ptrdiff_t>(dst_end));
+        } else if (source_chunk_is_scalar_broadcast) {
+            mapped.insert(mapped.end(), dst_end - dst_begin, 1ULL);
+        } else if ((src_end - src_begin) == (dst_end - dst_begin)) {
+            bool axes_match = true;
+            for (size_t src_axis = src_begin, dst_axis = dst_begin; src_axis < src_end; ++src_axis, ++dst_axis) {
+                if (source_dims[src_axis] != target_dims[dst_axis]) {
+                    axes_match = false;
+                    break;
+                }
+            }
+            if (axes_match) {
+                mapped.insert(mapped.end(), padded_effective_source_dims.begin() + static_cast<std::ptrdiff_t>(src_begin),
+                              padded_effective_source_dims.begin() + static_cast<std::ptrdiff_t>(src_end));
+            } else {
+                std::ostringstream oss;
+                oss << "Cannot represent partial broadcast through dense reshape alias. source_dims=" << dimsToString(source_dims)
+                    << ", effective_dims=" << dimsToString(effective_source_dims) << ", target_dims=" << dimsToString(target_dims);
+                throw std::runtime_error(oss.str());
+            }
+        } else {
+            std::ostringstream oss;
+            oss << "Cannot represent partial broadcast through dense reshape alias. source_dims=" << dimsToString(source_dims)
+                << ", effective_dims=" << dimsToString(effective_source_dims) << ", target_dims=" << dimsToString(target_dims);
+            throw std::runtime_error(oss.str());
+        }
+
+        src_begin = src_end;
+        dst_begin = dst_end;
+    }
+
+    if (mapped.size() != target_dims.size()) {
+        throw std::runtime_error("Dense reshape broadcast mapping produced wrong rank.");
+    }
+    return mapped;
+}
+
 static std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>> collectEffectiveInputDimsForNode(
     const PhysicalExpression& expr, const std::vector<std::vector<uint64_t>>& node_dims, uint32_t node_idx) {
     if (node_idx >= expr.nodes.size() || node_idx >= node_dims.size()) {
@@ -4338,7 +4474,17 @@ static std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>> collectEffe
             }
             return result;
         }
-        case ExprOp::RESHAPE:
+        case ExprOp::RESHAPE: {
+            auto result = collectEffectiveInputDimsForNode(expr, node_dims, node.lhs);
+            for (auto& [slot, dims_set] : result) {
+                std::set<std::vector<uint64_t>> mapped_dims;
+                for (const auto& dims : dims_set) {
+                    mapped_dims.insert(mapEffectiveDimsThroughDenseReshapeAlias(node_dims[node.lhs], node_dims[node_idx], dims));
+                }
+                dims_set = std::move(mapped_dims);
+            }
+            return result;
+        }
         case ExprOp::STRIDED_VIEW:
         case ExprOp::UNSQUEEZE:
         case ExprOp::SQUEEZE: {

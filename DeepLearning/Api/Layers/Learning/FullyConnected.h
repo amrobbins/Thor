@@ -115,6 +115,7 @@ class FullyConnected : public TrainableLayer {
    private:
     uint32_t numOutputFeatures;
     bool hasBias;
+    bool preserveInputPrefixDimensions = false;
     std::shared_ptr<Activation> activation;
     DataType weightsDataType;
     DataType computeDataType;
@@ -134,6 +135,10 @@ class FullyConnected : public TrainableLayer {
     static bool isFullyConnectedFloatingDataType(DataType dataType);
     static std::string dataTypeName(DataType dataType);
     static uint64_t checkedFeatureCount(const std::vector<uint64_t> &dimensions, const std::string &what);
+    static uint64_t checkedInputFeatureCount(const std::vector<uint64_t> &dimensions, bool preservePrefixDimensions, const std::string &what);
+    static std::vector<uint64_t> fullyConnectedOutputDimensions(const std::vector<uint64_t>& inputDimensions,
+                                                                uint32_t numOutputFeatures,
+                                                                bool preservePrefixDimensions);
     static void verifyFullyConnectedDataType(DataType dataType, const std::string &what);
     static void verifyFullyConnectedComputeDataType(DataType dataType);
 
@@ -175,6 +180,12 @@ class FullyConnected::Builder {
     virtual FullyConnected::Builder &hasBias(bool _hasBias) {
         THOR_THROW_IF_FALSE(!this->_hasBias.has_value());
         this->_hasBias = _hasBias;
+        return *this;
+    }
+
+    virtual FullyConnected::Builder &preserveInputPrefixDimensions(bool _preserveInputPrefixDimensions) {
+        THOR_THROW_IF_FALSE(!this->_preserveInputPrefixDimensions.has_value());
+        this->_preserveInputPrefixDimensions = _preserveInputPrefixDimensions;
         return *this;
     }
 
@@ -284,6 +295,7 @@ class FullyConnected::Builder {
     std::vector<Tensor> _featureInputs;
     std::optional<uint32_t> _numOutputFeatures;
     std::optional<bool> _hasBias;
+    std::optional<bool> _preserveInputPrefixDimensions;
     std::shared_ptr<Activation> _activation;
     std::optional<DataType> _weightsDataType;
     std::optional<DataType> _computeDataType;

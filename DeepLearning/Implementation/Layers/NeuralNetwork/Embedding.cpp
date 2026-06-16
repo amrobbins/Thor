@@ -14,6 +14,8 @@ namespace {
 
 bool isSupportedIndexType(DataType dtype) {
     switch (dtype) {
+        case DataType::UINT8:
+        case DataType::UINT16:
         case DataType::UINT32:
         case DataType::UINT64:
             return true;
@@ -87,7 +89,7 @@ void Embedding::compileImpl() {
         throw std::invalid_argument("Embedding requires at least one connected feature input.");
     }
     if (!isSupportedIndexType(aFeatureInput.value().getDataType())) {
-        throw std::invalid_argument("Embedding indices dtype must be uint32 or uint64. Got " +
+        throw std::invalid_argument("Embedding indices dtype must be uint8, uint16, uint32, or uint64. Got " +
                                     dtypeName(aFeatureInput.value().getDataType()) + ".");
     }
 

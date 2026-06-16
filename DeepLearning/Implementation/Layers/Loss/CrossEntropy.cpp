@@ -42,8 +42,8 @@ bool sparseLabelDimensionsMatchFeaturePrefix(const vector<uint64_t>& labelDimens
 
 CrossEntropy::CrossEntropy() : Loss(DataType::FP32) { crossEntropyLossType = CrossEntropyLossType::UNINITIALIZED; }
 
-CrossEntropy::CrossEntropy(CrossEntropyLossType crossEntropyLossType, DataType lossDataType, bool indexLabels)
-    : Loss(lossDataType) {
+CrossEntropy::CrossEntropy(CrossEntropyLossType crossEntropyLossType, DataType lossDataType, bool indexLabels, std::optional<float> lossWeight)
+    : Loss(lossDataType), lossWeight(normalizeLossWeight(lossWeight)) {
     // Just to be clear, index labels is a feature for categorical only:
     THOR_THROW_IF_FALSE(!(crossEntropyLossType == CrossEntropyLossType::BINARY && indexLabels == true));
 
@@ -197,6 +197,7 @@ void CrossEntropy::launchCrossEntropyWithFP16PredictionsAndFP16Loss() {
                                                                batchSize,
                                                                !isInferenceOnly(),
                                                                lossScalingFactor,
+                                                               materializeLossWeight(lossWeight),
                                                                crossEntropyLossType,
                                                                indexLabels,
                                                                stream);
@@ -209,6 +210,7 @@ void CrossEntropy::launchCrossEntropyWithFP16PredictionsAndFP16Loss() {
                                                                 batchSize,
                                                                 !isInferenceOnly(),
                                                                 lossScalingFactor,
+                                                                materializeLossWeight(lossWeight),
                                                                 crossEntropyLossType,
                                                                 indexLabels,
                                                                 stream);
@@ -221,6 +223,7 @@ void CrossEntropy::launchCrossEntropyWithFP16PredictionsAndFP16Loss() {
                                                                 batchSize,
                                                                 !isInferenceOnly(),
                                                                 lossScalingFactor,
+                                                                materializeLossWeight(lossWeight),
                                                                 crossEntropyLossType,
                                                                 indexLabels,
                                                                 stream);
@@ -233,6 +236,7 @@ void CrossEntropy::launchCrossEntropyWithFP16PredictionsAndFP16Loss() {
                                                             batchSize,
                                                             !isInferenceOnly(),
                                                             lossScalingFactor,
+                                                            materializeLossWeight(lossWeight),
                                                             crossEntropyLossType,
                                                             indexLabels,
                                                             stream);
@@ -245,6 +249,7 @@ void CrossEntropy::launchCrossEntropyWithFP16PredictionsAndFP16Loss() {
                                                              batchSize,
                                                              !isInferenceOnly(),
                                                              lossScalingFactor,
+                                                             materializeLossWeight(lossWeight),
                                                              crossEntropyLossType,
                                                              indexLabels,
                                                              stream);
@@ -257,6 +262,7 @@ void CrossEntropy::launchCrossEntropyWithFP16PredictionsAndFP16Loss() {
                                                             batchSize,
                                                             !isInferenceOnly(),
                                                             lossScalingFactor,
+                                                            materializeLossWeight(lossWeight),
                                                             crossEntropyLossType,
                                                             indexLabels,
                                                             stream);
@@ -278,6 +284,7 @@ void CrossEntropy::launchCrossEntropyWithFP16PredictionsAndFP32Loss() {
                                                                 batchSize,
                                                                 !isInferenceOnly(),
                                                                 lossScalingFactor,
+                                                                materializeLossWeight(lossWeight),
                                                                 crossEntropyLossType,
                                                                 indexLabels,
                                                                 stream);
@@ -290,6 +297,7 @@ void CrossEntropy::launchCrossEntropyWithFP16PredictionsAndFP32Loss() {
                                                                  batchSize,
                                                                  !isInferenceOnly(),
                                                                  lossScalingFactor,
+                                                                 materializeLossWeight(lossWeight),
                                                                  crossEntropyLossType,
                                                                  indexLabels,
                                                                  stream);
@@ -302,6 +310,7 @@ void CrossEntropy::launchCrossEntropyWithFP16PredictionsAndFP32Loss() {
                                                                  batchSize,
                                                                  !isInferenceOnly(),
                                                                  lossScalingFactor,
+                                                                 materializeLossWeight(lossWeight),
                                                                  crossEntropyLossType,
                                                                  indexLabels,
                                                                  stream);
@@ -314,6 +323,7 @@ void CrossEntropy::launchCrossEntropyWithFP16PredictionsAndFP32Loss() {
                                                              batchSize,
                                                              !isInferenceOnly(),
                                                              lossScalingFactor,
+                                                             materializeLossWeight(lossWeight),
                                                              crossEntropyLossType,
                                                              indexLabels,
                                                              stream);
@@ -326,6 +336,7 @@ void CrossEntropy::launchCrossEntropyWithFP16PredictionsAndFP32Loss() {
                                                               batchSize,
                                                               !isInferenceOnly(),
                                                               lossScalingFactor,
+                                                              materializeLossWeight(lossWeight),
                                                               crossEntropyLossType,
                                                               indexLabels,
                                                               stream);
@@ -338,6 +349,7 @@ void CrossEntropy::launchCrossEntropyWithFP16PredictionsAndFP32Loss() {
                                                              batchSize,
                                                              !isInferenceOnly(),
                                                              lossScalingFactor,
+                                                             materializeLossWeight(lossWeight),
                                                              crossEntropyLossType,
                                                              indexLabels,
                                                              stream);
@@ -359,6 +371,7 @@ void CrossEntropy::launchCrossEntropyWithFP32PredictionsAndFP16Loss() {
                                                                 batchSize,
                                                                 !isInferenceOnly(),
                                                                 lossScalingFactor,
+                                                                materializeLossWeight(lossWeight),
                                                                 crossEntropyLossType,
                                                                 indexLabels,
                                                                 stream);
@@ -371,6 +384,7 @@ void CrossEntropy::launchCrossEntropyWithFP32PredictionsAndFP16Loss() {
                                                                  batchSize,
                                                                  !isInferenceOnly(),
                                                                  lossScalingFactor,
+                                                                 materializeLossWeight(lossWeight),
                                                                  crossEntropyLossType,
                                                                  indexLabels,
                                                                  stream);
@@ -383,6 +397,7 @@ void CrossEntropy::launchCrossEntropyWithFP32PredictionsAndFP16Loss() {
                                                                  batchSize,
                                                                  !isInferenceOnly(),
                                                                  lossScalingFactor,
+                                                                 materializeLossWeight(lossWeight),
                                                                  crossEntropyLossType,
                                                                  indexLabels,
                                                                  stream);
@@ -395,6 +410,7 @@ void CrossEntropy::launchCrossEntropyWithFP32PredictionsAndFP16Loss() {
                                                              batchSize,
                                                              !isInferenceOnly(),
                                                              lossScalingFactor,
+                                                             materializeLossWeight(lossWeight),
                                                              crossEntropyLossType,
                                                              indexLabels,
                                                              stream);
@@ -407,6 +423,7 @@ void CrossEntropy::launchCrossEntropyWithFP32PredictionsAndFP16Loss() {
                                                               batchSize,
                                                               !isInferenceOnly(),
                                                               lossScalingFactor,
+                                                              materializeLossWeight(lossWeight),
                                                               crossEntropyLossType,
                                                               indexLabels,
                                                               stream);
@@ -419,6 +436,7 @@ void CrossEntropy::launchCrossEntropyWithFP32PredictionsAndFP16Loss() {
                                                              batchSize,
                                                              !isInferenceOnly(),
                                                              lossScalingFactor,
+                                                             materializeLossWeight(lossWeight),
                                                              crossEntropyLossType,
                                                              indexLabels,
                                                              stream);
@@ -440,6 +458,7 @@ void CrossEntropy::launchCrossEntropyWithFP32PredictionsAndFP32Loss() {
                                                                  batchSize,
                                                                  !isInferenceOnly(),
                                                                  lossScalingFactor,
+                                                                 materializeLossWeight(lossWeight),
                                                                  crossEntropyLossType,
                                                                  indexLabels,
                                                                  stream);
@@ -452,6 +471,7 @@ void CrossEntropy::launchCrossEntropyWithFP32PredictionsAndFP32Loss() {
                                                                   batchSize,
                                                                   !isInferenceOnly(),
                                                                   lossScalingFactor,
+                                                                  materializeLossWeight(lossWeight),
                                                                   crossEntropyLossType,
                                                                   indexLabels,
                                                                   stream);
@@ -464,6 +484,7 @@ void CrossEntropy::launchCrossEntropyWithFP32PredictionsAndFP32Loss() {
                                                                   batchSize,
                                                                   !isInferenceOnly(),
                                                                   lossScalingFactor,
+                                                                  materializeLossWeight(lossWeight),
                                                                   crossEntropyLossType,
                                                                   indexLabels,
                                                                   stream);
@@ -476,6 +497,7 @@ void CrossEntropy::launchCrossEntropyWithFP32PredictionsAndFP32Loss() {
                                                               batchSize,
                                                               !isInferenceOnly(),
                                                               lossScalingFactor,
+                                                              materializeLossWeight(lossWeight),
                                                               crossEntropyLossType,
                                                               indexLabels,
                                                               stream);
@@ -488,6 +510,7 @@ void CrossEntropy::launchCrossEntropyWithFP32PredictionsAndFP32Loss() {
                                                                batchSize,
                                                                !isInferenceOnly(),
                                                                lossScalingFactor,
+                                                               materializeLossWeight(lossWeight),
                                                                crossEntropyLossType,
                                                                indexLabels,
                                                                stream);
@@ -500,6 +523,7 @@ void CrossEntropy::launchCrossEntropyWithFP32PredictionsAndFP32Loss() {
                                                               batchSize,
                                                               !isInferenceOnly(),
                                                               lossScalingFactor,
+                                                              materializeLossWeight(lossWeight),
                                                               crossEntropyLossType,
                                                               indexLabels,
                                                               stream);

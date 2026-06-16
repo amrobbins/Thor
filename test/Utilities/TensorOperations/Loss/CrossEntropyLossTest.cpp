@@ -104,6 +104,7 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectAnswer_categoricalOneHotLabels)
                                                                batchSize,
                                                                true,
                                                                lossScalingFactor,
+                                                               1.0f,
                                                                CrossEntropyLossType::CATEGORICAL,
                                                                false,
                                                                stream);
@@ -241,6 +242,7 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectAnswer_categoricalOneHotLabels_
                                                             batchSize,
                                                             true,
                                                             lossScalingFactor,
+                                                            1.0f,
                                                             CrossEntropyLossType::CATEGORICAL,
                                                             false,
                                                             stream);
@@ -383,6 +385,7 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectAnswer_classIndexLabels) {
                                                                   batchSize,
                                                                   true,
                                                                   lossScalingFactor,
+                                                                  1.0f,
                                                                   CrossEntropyLossType::CATEGORICAL,
                                                                   true,
                                                                   stream);
@@ -532,6 +535,7 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectAnswer_classIndexLabels_halfPre
                                                                 batchSize,
                                                                 true,
                                                                 lossScalingFactor,
+                                                                1.0f,
                                                                 CrossEntropyLossType::CATEGORICAL,
                                                                 true,
                                                                 stream);
@@ -666,6 +670,7 @@ TEST(BinaryCrossEntropyLoss, ComputesCorrectAnswer) {
                                                                   batchSize,
                                                                   true,
                                                                   lossScalingFactor,
+                                                                  1.0f,
                                                                   CrossEntropyLossType::BINARY,
                                                                   true,
                                                                   stream);
@@ -787,6 +792,7 @@ TEST(BinaryCrossEntropyLoss, ComputesCorrectAnswer_halfPrecision) {
                                                                 batchSize,
                                                                 true,
                                                                 lossScalingFactor,
+                                                                1.0f,
                                                                 CrossEntropyLossType::BINARY,
                                                                 true,
                                                                 stream);

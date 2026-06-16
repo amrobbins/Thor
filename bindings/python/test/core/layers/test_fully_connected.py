@@ -60,6 +60,46 @@ def test_fully_connected_constructs_no_activation_when_none():
     assert fc_arch["activation"] is None
 
 
+
+
+def test_fully_connected_can_preserve_prefix_dimensions_for_tokenwise_projection():
+    n = thor.Network("test_net_fully_connected_tokenwise")
+    x_in = thor.layers.NetworkInput(n, "tokens", [5, 16], thor.DataType.fp16)
+
+    fc = thor.layers.FullyConnected(
+        n,
+        x_in.get_feature_output(),
+        8,
+        True,
+        activation=None,
+        preserve_prefix_dimensions=True,
+    )
+
+    y = fc.get_feature_output()
+    assert y.get_dimensions() == [5, 8]
+    assert y.get_data_type() == thor.DataType.fp16
+
+    arch = _only_layer_architecture(n, "fully_connected")
+    assert arch["preserve_input_prefix_dimensions"] is True
+    assert arch["outputs"][0]["dimensions"] == [5, 8]
+
+
+def test_fully_connected_default_flattens_prefix_dimensions():
+    n = thor.Network("test_net_fully_connected_flatten_prefix")
+    x_in = thor.layers.NetworkInput(n, "tokens", [5, 16], thor.DataType.fp16)
+
+    fc = thor.layers.FullyConnected(
+        n,
+        x_in.get_feature_output(),
+        8,
+        True,
+        activation=None,
+    )
+
+    assert fc.get_feature_output().get_dimensions() == [8]
+    arch = _only_layer_architecture(n, "fully_connected")
+    assert arch["preserve_input_prefix_dimensions"] is False
+
 def test_fully_connected_constructs_with_activation_and_initializers():
     n = _net()
     x = _input_tensor(n, 16, thor.DataType.fp16)

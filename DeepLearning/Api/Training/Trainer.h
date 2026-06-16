@@ -44,6 +44,9 @@ class Trainer {
     TrainingRuntimeConfig runtimeConfig{};
     std::shared_ptr<TrainingExecutor> executor = nullptr;
     std::shared_ptr<TrainingObserver> observer = nullptr;
+    std::optional<std::string> saveModelDirectory{};
+    bool saveModelOverwrite = false;
+    bool saveOptimizerState = true;
 };
 
 class Trainer::Builder {
@@ -113,6 +116,21 @@ class Trainer::Builder {
         return *this;
     }
 
+    Builder& saveModelDirectory(std::optional<std::string> saveModelDirectory) {
+        this->saveModelDirectory_ = std::move(saveModelDirectory);
+        return *this;
+    }
+
+    Builder& saveModelOverwrite(bool saveModelOverwrite) {
+        this->saveModelOverwrite_ = saveModelOverwrite;
+        return *this;
+    }
+
+    Builder& saveOptimizerState(bool saveOptimizerState) {
+        this->saveOptimizerState_ = saveOptimizerState;
+        return *this;
+    }
+
     [[nodiscard]] Trainer build() const;
 
    private:
@@ -124,6 +142,9 @@ class Trainer::Builder {
     LineStatsColorMode statsColorMode_ = LineStatsColorMode::AUTO;
     std::shared_ptr<TrainingExecutor> executor_ = nullptr;
     std::shared_ptr<TrainingObserver> observer_ = nullptr;
+    std::optional<std::string> saveModelDirectory_{};
+    bool saveModelOverwrite_ = false;
+    bool saveOptimizerState_ = true;
 };
 
 }  // namespace Thor

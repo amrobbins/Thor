@@ -107,14 +107,22 @@ BatchAssembler::BatchAssembler(vector<std::shared_ptr<Shard>> shards,
         batchDimensions.push_back(exampleDescriptor.getDimensions()[i]);
     batchDataTensorDescriptor = TensorDescriptor(exampleDescriptor.getDataType(), batchDimensions);
     this->exampleDescriptor = exampleDescriptor;
-    const uint64_t exampleSizeInBytes = exampleDescriptor.getArraySizeInBytes();
-    shardReadQueueDepth = computeShardReadQueueDepth(exampleSizeInBytes);
+
+    examplePayloadSizeInBytes = exampleDescriptor.getArraySizeInBytes();
+    labelPayloadSizeInBytes = labelDescriptor.getArraySizeInBytes();
+    shardRecordSizeInBytes = shards[0]->getExampleSizeInBytes();
+    inlinePayloadLabels = exampleDescriptor.getDataType() == labelDescriptor.getDataType() &&
+                          shardRecordSizeInBytes == examplePayloadSizeInBytes + labelPayloadSizeInBytes;
+    if (!inlinePayloadLabels) {
+        THOR_THROW_IF_FALSE(shardRecordSizeInBytes == examplePayloadSizeInBytes);
+    }
+    shardReadQueueDepth = computeShardReadQueueDepth(shardRecordSizeInBytes);
     shardExampleQueueDepth = computeShardExampleQueueDepth(batchSize, shardReadQueueDepth);
 
     numExamples = 0;
     for (uint64_t i = 0; i < shards.size(); ++i) {
         THOR_THROW_IF_FALSE(shards[i]->isOpen());
-        THOR_THROW_IF_FALSE(shards[i]->getExampleSizeInBytes() == exampleDescriptor.getArraySizeInBytes());
+        THOR_THROW_IF_FALSE(shards[i]->getExampleSizeInBytes() == shardRecordSizeInBytes);
 
         numExamples += shards[i]->getNumExamples(exampleType);
         numExamplesPerShard.push_back(shards[i]->getNumExamples(exampleType));
@@ -132,17 +140,23 @@ BatchAssembler::BatchAssembler(vector<std::shared_ptr<Shard>> shards,
 
     vector<uint64_t> labelDimensions = labelDescriptor.getDimensions();
     DataType labelsDataType = labelDescriptor.getDataType();
-    vector<uint64_t> exampleDimensions = exampleDescriptor.getDimensions();
-    THOR_THROW_IF_FALSE(labelDimensions.size() == 1);
-    perClassLabels = labelDimensions[0] == classIndexes.size() &&
-                     (labelsDataType == DataType::UINT8 || labelsDataType == DataType::FP16 ||
-                      labelsDataType == DataType::FP32);
-    classIndexLabels = labelDimensions[0] == 1 &&
-                       (labelsDataType == DataType::UINT8 || labelsDataType == DataType::UINT16 ||
-                        labelsDataType == DataType::UINT32);
-    THOR_THROW_IF_FALSE(perClassLabels ^ classIndexLabels);
+    perClassLabels = false;
+    classIndexLabels = false;
+    if (!inlinePayloadLabels) {
+        THOR_THROW_IF_FALSE(labelDimensions.size() == 1);
+        perClassLabels = labelDimensions[0] == classIndexes.size() &&
+                         (labelsDataType == DataType::UINT8 || labelsDataType == DataType::FP16 ||
+                          labelsDataType == DataType::FP32);
+        classIndexLabels = labelDimensions[0] == 1 &&
+                           (labelsDataType == DataType::UINT8 || labelsDataType == DataType::UINT16 ||
+                            labelsDataType == DataType::UINT32);
+        THOR_THROW_IF_FALSE(perClassLabels ^ classIndexLabels);
+    }
 
-    batchLabelTensorDescriptor = ThorImplementation::TensorDescriptor(labelDescriptor.getDataType(), {batchSize, labelDimensions[0]});
+    vector<uint64_t> batchedLabelDimensions;
+    batchedLabelDimensions.push_back(batchSize);
+    batchedLabelDimensions.insert(batchedLabelDimensions.end(), labelDimensions.begin(), labelDimensions.end());
+    batchLabelTensorDescriptor = ThorImplementation::TensorDescriptor(labelDescriptor.getDataType(), batchedLabelDimensions);
 
     batchesPerEpoch = (numExamples + (batchSize - 1)) / batchSize;
 
@@ -155,7 +169,7 @@ BatchAssembler::BatchAssembler(vector<std::shared_ptr<Shard>> shards,
                      batchesPerEpoch,
                      batchSize,
                      batchQueueDepth,
-                     exampleSizeInBytes,
+                     shardRecordSizeInBytes,
                      shardExampleQueueDepth,
                      shardReadQueueDepth);
         std::fflush(stderr);
@@ -291,7 +305,8 @@ void BatchAssembler::shardReaderThread(uint64_t shard) {
 
 // There can be only 1 batchAssemblerThread, it is designed expecting that there is just the one.
 void BatchAssembler::batchAssemblerThread() {
-    uint64_t exampleSizeInBytes = shards[0]->getExampleSizeInBytes();
+    const uint64_t shardExampleSizeInBytes = shards[0]->getExampleSizeInBytes();
+    THOR_THROW_IF_FALSE(shardExampleSizeInBytes == shardRecordSizeInBytes);
 
     uint64_t numExamplesInEpoch = 0;
     for (uint64_t i = 0; i < numExamplesPerShard.size(); ++i)
@@ -359,14 +374,20 @@ void BatchAssembler::batchAssemblerThread() {
             return;
         }
 
-        // Load data to pinned memory buffer
-        batchSlotOffset = exampleSizeInBytes * batchSlot;
-        memcpy((uint8_t *)batchDataBuffer.getMemPtr() + batchSlotOffset, labeledExample.data.data(), exampleSizeInBytes);
+        // Load data to pinned memory buffer.  Shards may either carry only the example payload and use the
+        // directory/class metadata as labels, or carry an inline [example][label] payload.  The inline path is
+        // used by sequence datasets such as byte-level language modeling, where each record has many target ids.
+        batchSlotOffset = examplePayloadSizeInBytes * batchSlot;
+        memcpy((uint8_t *)batchDataBuffer.getMemPtr() + batchSlotOffset, labeledExample.data.data(), examplePayloadSizeInBytes);
 
         // Load labels to pinned memory buffer.
-        // There is support for one-hot or soft labels, and also for single number label
         DataType labelsDataType = batchLabelTensorDescriptor.getDataType();
-        if (perClassLabels) {
+        if (inlinePayloadLabels) {
+            batchSlotOffset = labelPayloadSizeInBytes * batchSlot;
+            memcpy((uint8_t *)batchLabelsBuffer.getMemPtr() + batchSlotOffset,
+                   labeledExample.data.data() + examplePayloadSizeInBytes,
+                   labelPayloadSizeInBytes);
+        } else if (perClassLabels) {
             THOR_THROW_IF_FALSE(labelsDataType == DataType::UINT8 || labelsDataType == DataType::FP16 ||
                    labelsDataType == DataType::FP32);
 
@@ -394,13 +415,13 @@ void BatchAssembler::batchAssemblerThread() {
             THOR_THROW_IF_FALSE(labelsDataType == DataType::UINT8 || labelsDataType == DataType::UINT16 ||
                    labelsDataType == DataType::UINT32);
             if (labelsDataType == DataType::UINT8) {
-                uint8_t *batchLabels = (uint8_t *)batchLabelsBuffer.getMemPtr() + batchSlot;
+                uint8_t *batchLabels = (uint8_t *)batchLabelsBuffer.getMemPtr();
                 batchLabels[batchSlot] = (uint8_t)classIndexes[labeledExample.label];
             } else if (labelsDataType == DataType::UINT16) {
-                uint16_t *batchLabels = (uint16_t *)batchLabelsBuffer.getMemPtr() + batchSlot;
+                uint16_t *batchLabels = (uint16_t *)batchLabelsBuffer.getMemPtr();
                 batchLabels[batchSlot] = (uint16_t)classIndexes[labeledExample.label];
             } else if (labelsDataType == DataType::UINT32) {
-                uint32_t *batchLabels = (uint32_t *)batchLabelsBuffer.getMemPtr() + batchSlot;
+                uint32_t *batchLabels = (uint32_t *)batchLabelsBuffer.getMemPtr();
                 batchLabels[batchSlot] = (uint32_t)classIndexes[labeledExample.label];
             } else {
                 THOR_UNREACHABLE();

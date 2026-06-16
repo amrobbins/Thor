@@ -2,6 +2,7 @@
 
 #include <optional>
 #include "DeepLearning/Implementation/Layers/Loss.h"
+#include "DeepLearning/Implementation/Layers/Loss/LossWeight.h"
 #include "Utilities/TensorOperations/Loss/CrossEntropyLoss.h"
 #include "Utilities/TensorOperations/Misc/BatchReduce.h"
 
@@ -16,7 +17,7 @@ namespace ThorImplementation {
 class CrossEntropy : public Loss {
    public:
     CrossEntropy();
-    CrossEntropy(CrossEntropyLossType crossEntropyLossType, DataType lossDataType, bool indexLabels = false);
+    CrossEntropy(CrossEntropyLossType crossEntropyLossType, DataType lossDataType, bool indexLabels = false, std::optional<float> lossWeight = std::nullopt);
 
     ~CrossEntropy() override;
 
@@ -52,6 +53,8 @@ class CrossEntropy : public Loss {
     CrossEntropyLossType crossEntropyLossType;
 
     uint32_t numClasses;
+
+    std::optional<float> lossWeight;
 };
 
 }  // namespace ThorImplementation

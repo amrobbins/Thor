@@ -1025,7 +1025,7 @@ Shorthand for ``self.transpose()``.
         "padding_index"_a.none() = nb::none(),
         "output_dtype"_a.none() = nb::none(),
         R"nbdoc(
-Embedding lookup expression. The indices tensor must be uint32 or uint64. The weights tensor must have shape
+Embedding lookup expression. The indices tensor must be uint8, uint16, uint32, or uint64. The weights tensor must have shape
 [vocabulary_size, embedding_dim], and the output shape is indices.shape + [embedding_dim]. When padding_index is set,
 matching rows are written as zeros without reading the weight table.
 )nbdoc");
