@@ -141,6 +141,22 @@ void subtractScaledInPlace(std::vector<float>& lhs, const std::vector<float>& rh
     }
 }
 
+float sgdReferenceStep(float learningRate, uint64_t effectiveBatchSize) {
+    const float lossScalingFactor = Loss::getLossScalingFactor();
+    if (effectiveBatchSize == 0 || lossScalingFactor <= 0.0f) {
+        throw std::runtime_error("Invalid SGD reference step inputs.");
+    }
+    return learningRate / (static_cast<float>(effectiveBatchSize) * lossScalingFactor);
+}
+
+std::vector<float> applySgdReferenceUpdate(std::vector<float> weights,
+                                           const std::vector<float>& rawGradient,
+                                           float learningRate,
+                                           uint64_t effectiveBatchSize) {
+    subtractScaledInPlace(weights, rawGradient, sgdReferenceStep(learningRate, effectiveBatchSize));
+    return weights;
+}
+
 
 struct AdamDenseReferenceState {
     std::vector<float> weights;
@@ -488,9 +504,10 @@ TEST(CustomLayer, SingleInputTrainableParameterFusesGradientIntoSgdUpdate) {
     Tensor featureIn_h(cpuPlacement, descriptor);
     writeCpuTensor(featureIn_h, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
 
-    auto scale = std::make_shared<FixedVectorParameter>("scale", std::vector<float>{2.0f, 3.0f, 4.0f}, true);
-    // step = learningRate / (batchSize * Loss::lossScalingFactor) = 8 / (2 * 4) = 1
-    scale->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(901, 8.0f, 0.0f, 0.0f, false)));
+    constexpr float learningRate = 8.0f;
+    const std::vector<float> initialScale{2.0f, 3.0f, 4.0f};
+    auto scale = std::make_shared<FixedVectorParameter>("scale", initialScale, true);
+    scale->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(901, learningRate, 0.0f, 0.0f, false)));
 
     NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
     GradientRivet gradientRivet;
@@ -528,8 +545,11 @@ TEST(CustomLayer, SingleInputTrainableParameterFusesGradientIntoSgdUpdate) {
     Tensor xGrad_h = copyTensorToCpu(custom.getErrorOutputs()[0].value(), custom.getStreams()[0]);
     Tensor scaleWeights_h = copyTensorToCpu(scale->getStorage().value(), gradientUpdateStream);
 
+    const std::vector<float> expectedScaleGrad = featureWiseScaleGradient({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f},
+                                                                         {1.0f, 0.0f, -1.0f, 2.0f, 1.0f, 0.5f},
+                                                                         features);
     expectAllClose(readCpuTensor(xGrad_h), {2.0f, 0.0f, -4.0f, 4.0f, 3.0f, 2.0f});
-    expectAllClose(readCpuTensor(scaleWeights_h), {-7.0f, -2.0f, 4.0f});
+    expectAllClose(readCpuTensor(scaleWeights_h), applySgdReferenceUpdate(initialScale, expectedScaleGrad, learningRate, batchSize));
 
     cleanupLayers({&input, &gradientRivet, &bridge, &custom, &sink});
 }
@@ -976,10 +996,10 @@ TEST(CustomLayer, MultipleApplicationsDoNotUseSingleApplicationOptimizerFusion) 
     writeCpuTensor(featureA_h, {2.0f, 3.0f});
     writeCpuTensor(featureB_h, {-1.0f, 4.0f});
 
-    auto scale = std::make_shared<FixedVectorParameter>("scale", std::vector<float>{1.0f, -2.0f}, true);
-    // Both applications contribute one sample, so the materialized optimizer step is
-    // learningRate / ((1 + 1) * Loss::lossScalingFactor) = 8 / 8 = 1.
-    scale->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(903, 8.0f, 0.0f, 0.0f, false)));
+    constexpr float learningRate = 8.0f;
+    const std::vector<float> initialScale{1.0f, -2.0f};
+    auto scale = std::make_shared<FixedVectorParameter>("scale", initialScale, true);
+    scale->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(903, learningRate, 0.0f, 0.0f, false)));
 
     NetworkInput inputA(gpuPlacement, DataType::FP32, descriptor.getDimensions());
     NetworkInput inputB(gpuPlacement, DataType::FP32, descriptor.getDimensions());
@@ -1035,9 +1055,12 @@ TEST(CustomLayer, MultipleApplicationsDoNotUseSingleApplicationOptimizerFusion) 
     Tensor scaleGrad_h = copyTensorToCpu(scale->getOptimizer()->getWeightsGradient().value(), gradientUpdateStream);
 
     // Combined raw dScale = {2*0.5 + (-1)*1.5, 3*(-2) + 4*0.25} = {-0.5, -5.0}.
-    // With the two-application materialized path the effective batch is 2, so step = 1.
-    expectAllClose(readCpuTensor(scaleGrad_h), {-0.5f, -5.0f}, 3e-5f, 3e-5f);
-    expectAllClose(readCpuTensor(scaleWeights_h), {1.5f, 3.0f}, 3e-5f, 3e-5f);
+    const std::vector<float> expectedScaleGrad{-0.5f, -5.0f};
+    expectAllClose(readCpuTensor(scaleGrad_h), expectedScaleGrad, 3e-5f, 3e-5f);
+    expectAllClose(readCpuTensor(scaleWeights_h),
+                   applySgdReferenceUpdate(initialScale, expectedScaleGrad, learningRate, 2 * batchSize),
+                   3e-5f,
+                   3e-5f);
 
     cleanupLayers({&inputA, &inputB, &gradientRivetA, &gradientRivetB, &bridgeA, &bridgeB, &custom, &sinkA, &sinkB});
 }
@@ -1692,11 +1715,13 @@ TEST(CustomLayer, SharedNamedParameterGradientsAccumulateAcrossMultipleConnectio
     writeCpuTensor(x_h, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
     writeCpuTensor(y_h, {-1.0f, 0.0f, 1.0f, 2.0f, 3.0f, 4.0f});
 
-    auto scale = std::make_shared<FixedVectorParameter>("scale", std::vector<float>{2.0f, 3.0f, 4.0f}, true);
-    auto bias = std::make_shared<FixedVectorParameter>("bias", std::vector<float>{10.0f, 20.0f, 30.0f}, true);
-    // step = learningRate / (batchSize * Loss::lossScalingFactor) = 8 / (2 * 4) = 1
-    scale->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(201, 8.0f, 0.0f, 0.0f, false)));
-    bias->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(202, 8.0f, 0.0f, 0.0f, false)));
+    constexpr float learningRate = 8.0f;
+    const std::vector<float> initialScale{2.0f, 3.0f, 4.0f};
+    const std::vector<float> initialBias{10.0f, 20.0f, 30.0f};
+    auto scale = std::make_shared<FixedVectorParameter>("scale", initialScale, true);
+    auto bias = std::make_shared<FixedVectorParameter>("bias", initialBias, true);
+    scale->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(201, learningRate, 0.0f, 0.0f, false)));
+    bias->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(202, learningRate, 0.0f, 0.0f, false)));
 
     NetworkInput xIn(gpuPlacement, DataType::FP32, descriptor.getDimensions());
     NetworkInput yIn(gpuPlacement, DataType::FP32, descriptor.getDimensions());
@@ -1759,10 +1784,12 @@ TEST(CustomLayer, SharedNamedParameterGradientsAccumulateAcrossMultipleConnectio
 
     expectAllClose(readCpuTensor(xGrad_h), {2.0f, 0.0f, -4.0f, 4.0f, 3.0f, 2.0f});
     expectAllClose(readCpuTensor(yGrad_h), {-4.0f, 9.0f, 4.0f, 0.0f, -3.0f, 8.0f});
-    expectAllClose(readCpuTensor(scaleGrad_h), {11.0f, 2.0f, 9.0f});
-    expectAllClose(readCpuTensor(biasGrad_h), {1.0f, 3.0f, 2.5f});
-    expectAllClose(readCpuTensor(scaleWeights_h), {-9.0f, 1.0f, -5.0f});
-    expectAllClose(readCpuTensor(biasWeights_h), {9.0f, 17.0f, 27.5f});
+    const std::vector<float> expectedScaleGrad{11.0f, 2.0f, 9.0f};
+    const std::vector<float> expectedBiasGrad{1.0f, 3.0f, 2.5f};
+    expectAllClose(readCpuTensor(scaleGrad_h), expectedScaleGrad);
+    expectAllClose(readCpuTensor(biasGrad_h), expectedBiasGrad);
+    expectAllClose(readCpuTensor(scaleWeights_h), applySgdReferenceUpdate(initialScale, expectedScaleGrad, learningRate, batchSize));
+    expectAllClose(readCpuTensor(biasWeights_h), applySgdReferenceUpdate(initialBias, expectedBiasGrad, learningRate, batchSize));
 
     cleanupLayers({&xIn, &yIn, &gradientRivetX, &gradientRivetY, &xBridge, &yBridge, &custom, &outXSink, &outYSink});
 }
@@ -1774,14 +1801,18 @@ TEST(CustomLayer, SharedNamedParameterGradientsAccumulateAcrossMultipleConnectio
     TensorDescriptor descriptor(DataType::FP32, {batchSize, features});
     Tensor x_h(cpuPlacement, descriptor);
     Tensor y_h(cpuPlacement, descriptor);
-    writeCpuTensor(x_h, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
-    writeCpuTensor(y_h, {-1.0f, 0.0f, 1.0f, 2.0f, 3.0f, 4.0f});
+    const std::vector<float> xValues{1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
+    const std::vector<float> yValues{-1.0f, 0.0f, 1.0f, 2.0f, 3.0f, 4.0f};
+    writeCpuTensor(x_h, xValues);
+    writeCpuTensor(y_h, yValues);
 
-    auto scale = std::make_shared<FixedVectorParameter>("scale", std::vector<float>{2.0f, 3.0f, 4.0f}, true);
-    auto bias = std::make_shared<FixedVectorParameter>("bias", std::vector<float>{10.0f, 20.0f, 30.0f}, true);
-    // step = learningRate / (batchSize * Loss::lossScalingFactor) = 8 / (2 * 4) = 1
-    scale->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(301, 8.0f, 0.0f, 0.0f, false)));
-    bias->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(302, 8.0f, 0.0f, 0.0f, false)));
+    constexpr float learningRate = 8.0f;
+    const std::vector<float> initialScale{2.0f, 3.0f, 4.0f};
+    const std::vector<float> initialBias{10.0f, 20.0f, 30.0f};
+    auto scale = std::make_shared<FixedVectorParameter>("scale", initialScale, true);
+    auto bias = std::make_shared<FixedVectorParameter>("bias", initialBias, true);
+    scale->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(301, learningRate, 0.0f, 0.0f, false)));
+    bias->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(302, learningRate, 0.0f, 0.0f, false)));
 
     NetworkInput xIn(gpuPlacement, DataType::FP32, descriptor.getDimensions());
     NetworkInput yIn(gpuPlacement, DataType::FP32, descriptor.getDimensions());
@@ -1815,8 +1846,17 @@ TEST(CustomLayer, SharedNamedParameterGradientsAccumulateAcrossMultipleConnectio
 
     Tensor gradOutX_h(cpuPlacement, descriptor);
     Tensor gradOutY_h(cpuPlacement, descriptor);
-    writeCpuTensor(gradOutX_h, {1.0f, 0.0f, -1.0f, 2.0f, 1.0f, 0.5f});
-    writeCpuTensor(gradOutY_h, {-2.0f, 3.0f, 1.0f, 0.0f, -1.0f, 2.0f});
+    const std::vector<float> gradOutXValues{1.0f, 0.0f, -1.0f, 2.0f, 1.0f, 0.5f};
+    const std::vector<float> gradOutYValues{-2.0f, 3.0f, 1.0f, 0.0f, -1.0f, 2.0f};
+    writeCpuTensor(gradOutX_h, gradOutXValues);
+    writeCpuTensor(gradOutY_h, gradOutYValues);
+
+    const std::vector<float> expectedScaleGrad = featureWiseScaleGradient({xValues, yValues}, {gradOutXValues, gradOutYValues}, features);
+    const std::vector<float> expectedBiasGrad = featureWiseBiasGradient({gradOutXValues, gradOutYValues}, features);
+    const std::vector<float> firstPassScale = applySgdReferenceUpdate(initialScale, expectedScaleGrad, learningRate, batchSize);
+    const std::vector<float> firstPassBias = applySgdReferenceUpdate(initialBias, expectedBiasGrad, learningRate, batchSize);
+    const std::vector<float> secondPassScale = applySgdReferenceUpdate(firstPassScale, expectedScaleGrad, learningRate, batchSize);
+    const std::vector<float> secondPassBias = applySgdReferenceUpdate(firstPassBias, expectedBiasGrad, learningRate, batchSize);
 
     auto runPass = [&](const std::vector<float>& expectedOutX,
                        const std::vector<float>& expectedOutY,
@@ -1870,25 +1910,25 @@ TEST(CustomLayer, SharedNamedParameterGradientsAccumulateAcrossMultipleConnectio
         expectAllClose(readCpuTensor(biasWeights_h), expectedBiasWeights);
     };
 
-    runPass({12.0f, 26.0f, 42.0f, 18.0f, 35.0f, 54.0f},
-            {8.0f, 20.0f, 34.0f, 14.0f, 29.0f, 46.0f},
+    runPass(scaleBiasForward(xValues, initialScale, initialBias),
+            scaleBiasForward(yValues, initialScale, initialBias),
             {2.0f, 0.0f, -4.0f, 4.0f, 3.0f, 2.0f},
             {-4.0f, 9.0f, 4.0f, 0.0f, -3.0f, 8.0f},
-            {11.0f, 2.0f, 9.0f},
-            {1.0f, 3.0f, 2.5f},
-            {-9.0f, 1.0f, -5.0f},
-            {9.0f, 17.0f, 27.5f},
+            expectedScaleGrad,
+            expectedBiasGrad,
+            firstPassScale,
+            firstPassBias,
             1,
             1);
 
-    runPass({0.0f, 19.0f, 12.5f, -27.0f, 22.0f, -2.5f},
-            {18.0f, 17.0f, 22.5f, -9.0f, 20.0f, 7.5f},
-            {-9.0f, 0.0f, 5.0f, -18.0f, 1.0f, -2.5f},
-            {18.0f, 3.0f, -5.0f, 0.0f, -1.0f, -10.0f},
-            {11.0f, 2.0f, 9.0f},
-            {1.0f, 3.0f, 2.5f},
-            {-20.0f, -1.0f, -14.0f},
-            {8.0f, 14.0f, 25.0f},
+    runPass(scaleBiasForward(xValues, firstPassScale, firstPassBias),
+            scaleBiasForward(yValues, firstPassScale, firstPassBias),
+            scaleInputGradient(gradOutXValues, firstPassScale),
+            scaleInputGradient(gradOutYValues, firstPassScale),
+            expectedScaleGrad,
+            expectedBiasGrad,
+            secondPassScale,
+            secondPassBias,
             2,
             2);
 
@@ -2291,11 +2331,9 @@ TEST(CustomLayer, MultiInterfaceSharedParameterForwardBackwardThreePassesResetBo
 
     auto scale = std::make_shared<FixedVectorParameter>("scale", expectedScale, true);
     auto bias = std::make_shared<FixedVectorParameter>("bias", expectedBias, true);
-    // step = learningRate / (effectiveBatchSize * Loss::lossScalingFactor)
-    //      = 8 / ((2 applications * 2 examples) * 4)
-    //      = 0.5
-    scale->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(501, 8.0f, 0.0f, 0.0f, false)));
-    bias->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(502, 8.0f, 0.0f, 0.0f, false)));
+    constexpr float learningRate = 8.0f;
+    scale->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(501, learningRate, 0.0f, 0.0f, false)));
+    bias->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(502, learningRate, 0.0f, 0.0f, false)));
 
     NetworkInput x0In(gpuPlacement, DataType::FP32, descriptor.getDimensions());
     NetworkInput y0In(gpuPlacement, DataType::FP32, descriptor.getDimensions());
@@ -2386,7 +2424,7 @@ TEST(CustomLayer, MultiInterfaceSharedParameterForwardBackwardThreePassesResetBo
         expectAllClose(readCpuTensor(scaleGrad_h), expectedScaleGrad);
         expectAllClose(readCpuTensor(biasGrad_h), expectedBiasGrad);
 
-        const float effectiveStep = 0.5f;
+        const float effectiveStep = sgdReferenceStep(learningRate, 2 * batchSize);
         subtractScaledInPlace(expectedScale, expectedScaleGrad, effectiveStep);
         subtractScaledInPlace(expectedBias, expectedBiasGrad, effectiveStep);
 
@@ -2865,9 +2903,9 @@ TEST(CustomLayer, MultiInterfaceNoBackpropApplicationDoesNotDelaySharedWeightUpd
     const std::vector<float> initialBias{10.0f, 20.0f, 30.0f};
     auto scale = std::make_shared<FixedVectorParameter>("scale", initialScale, true);
     auto bias = std::make_shared<FixedVectorParameter>("bias", initialBias, true);
-    // step = learningRate / (batchSize * Loss::lossScalingFactor) = 8 / (2 * 4) = 1.
-    scale->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(701, 8.0f, 0.0f, 0.0f, false)));
-    bias->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(702, 8.0f, 0.0f, 0.0f, false)));
+    constexpr float learningRate = 8.0f;
+    scale->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(701, learningRate, 0.0f, 0.0f, false)));
+    bias->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(702, learningRate, 0.0f, 0.0f, false)));
 
     NetworkInput x0In(gpuPlacement, DataType::FP32, descriptor.getDimensions());
     NetworkInput y0In(gpuPlacement, DataType::FP32, descriptor.getDimensions());
@@ -2946,10 +2984,8 @@ TEST(CustomLayer, MultiInterfaceNoBackpropApplicationDoesNotDelaySharedWeightUpd
     const std::vector<float> expectedScaleGrad =
         featureWiseScaleGradient({x1Values, y1Values}, {gradOutX1Values, gradOutY1Values}, features);
     const std::vector<float> expectedBiasGrad = featureWiseBiasGradient({gradOutX1Values, gradOutY1Values}, features);
-    std::vector<float> expectedScale = initialScale;
-    std::vector<float> expectedBias = initialBias;
-    subtractInPlace(expectedScale, expectedScaleGrad);
-    subtractInPlace(expectedBias, expectedBiasGrad);
+    const std::vector<float> expectedScale = applySgdReferenceUpdate(initialScale, expectedScaleGrad, learningRate, batchSize);
+    const std::vector<float> expectedBias = applySgdReferenceUpdate(initialBias, expectedBiasGrad, learningRate, batchSize);
 
     Stream gradientUpdateStream = custom.getGradientUpdateStream().value();
     expectAllClose(readCpuTensor(copyTensorToCpu(scale->getOptimizer()->getWeightsGradient().value(), gradientUpdateStream)),
@@ -3008,9 +3044,9 @@ TEST(CustomLayer, TrainingDisabledParameterDoesNotReceiveGradientOrUpdateButStil
     // If your setter has a different name, this is the one line to rename.
     scale->setTrainingEnabled(false);
 
-    // step = learningRate / (batchSize * Loss::lossScalingFactor) = 8 / (2 * 4) = 1.
-    scale->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(801, 8.0f, 0.0f, 0.0f, false)));
-    bias->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(802, 8.0f, 0.0f, 0.0f, false)));
+    constexpr float learningRate = 8.0f;
+    scale->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(801, learningRate, 0.0f, 0.0f, false)));
+    bias->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(802, learningRate, 0.0f, 0.0f, false)));
 
     NetworkInput xIn(gpuPlacement, DataType::FP32, descriptor.getDimensions());
     NetworkInput yIn(gpuPlacement, DataType::FP32, descriptor.getDimensions());
@@ -3066,8 +3102,7 @@ TEST(CustomLayer, TrainingDisabledParameterDoesNotReceiveGradientOrUpdateButStil
                    scaleInputGradient(gradOutYValues, scaleValues));
 
     const std::vector<float> expectedBiasGrad = featureWiseBiasGradient({gradOutXValues, gradOutYValues}, features);
-    std::vector<float> expectedBias = biasValues;
-    subtractInPlace(expectedBias, expectedBiasGrad);
+    const std::vector<float> expectedBias = applySgdReferenceUpdate(biasValues, expectedBiasGrad, learningRate, batchSize);
 
     // bias participates in compiled training.
     ASSERT_TRUE(bias->getOptimizer()->getWeightsGradient().has_value());
@@ -3354,12 +3389,10 @@ TEST(CustomLayer, MultiInterfaceEffectiveBatchSizeIsTrackedPerParameterForSparse
     auto scaleY = std::make_shared<FixedVectorParameter>("scale_y", scaleYValues, true);
     auto bias = std::make_shared<FixedVectorParameter>("bias", biasValues, true);
 
-    // learningRate / Loss::lossScalingFactor = 8 / 4 = 2.
-    // scale_x and scale_y each see one application batch of size 2, so their step is 1.
-    // bias sees two application batches, effective batch size 4, so its step is 0.5.
-    scaleX->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(1001, 8.0f, 0.0f, 0.0f, false)));
-    scaleY->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(1002, 8.0f, 0.0f, 0.0f, false)));
-    bias->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(1003, 8.0f, 0.0f, 0.0f, false)));
+    constexpr float learningRate = 8.0f;
+    scaleX->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(1001, learningRate, 0.0f, 0.0f, false)));
+    scaleY->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(1002, learningRate, 0.0f, 0.0f, false)));
+    bias->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(1003, learningRate, 0.0f, 0.0f, false)));
 
     NetworkInput x0In(gpuPlacement, DataType::FP32, descriptor.getDimensions());
     NetworkInput y0In(gpuPlacement, DataType::FP32, descriptor.getDimensions());
@@ -3454,17 +3487,9 @@ TEST(CustomLayer, MultiInterfaceEffectiveBatchSizeIsTrackedPerParameterForSparse
     const std::vector<float> expectedScaleYGrad = featureWiseScaleGradient({y1Values}, {gradOutY1Values}, features);
     const std::vector<float> expectedBiasGrad = featureWiseBiasGradient({gradOutX0Values, gradOutY1Values}, features);
 
-    auto subtractScaled = [](std::vector<float> lhs, const std::vector<float>& rhs, float scale) {
-        requireSameSize(lhs, rhs, "subtractScaled");
-        for (uint64_t i = 0; i < lhs.size(); ++i) {
-            lhs[i] -= scale * rhs[i];
-        }
-        return lhs;
-    };
-
-    const std::vector<float> expectedScaleX = subtractScaled(scaleXValues, expectedScaleXGrad, 1.0f);
-    const std::vector<float> expectedScaleY = subtractScaled(scaleYValues, expectedScaleYGrad, 1.0f);
-    const std::vector<float> expectedBias = subtractScaled(biasValues, expectedBiasGrad, 0.5f);
+    const std::vector<float> expectedScaleX = applySgdReferenceUpdate(scaleXValues, expectedScaleXGrad, learningRate, batchSize);
+    const std::vector<float> expectedScaleY = applySgdReferenceUpdate(scaleYValues, expectedScaleYGrad, learningRate, batchSize);
+    const std::vector<float> expectedBias = applySgdReferenceUpdate(biasValues, expectedBiasGrad, learningRate, 2 * batchSize);
 
     Stream gradientUpdateStream = custom.getGradientUpdateStream().value();
     expectAllClose(readCpuTensor(copyTensorToCpu(scaleX->getOptimizer()->getWeightsGradient().value(), gradientUpdateStream)),

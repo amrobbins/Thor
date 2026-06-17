@@ -11,6 +11,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Common/Stream.h"
 #include "test/DeepLearning/Api/Helpers/GradientRivet.h"
+#include "test/DeepLearning/Api/Layers/Loss/LossNumericalTestTolerance.h"
 
 #include "gtest/gtest.h"
 
@@ -328,8 +329,8 @@ TEST(HingeGANLossApi, DiscriminatorNumericalRawLossAndBackwardGradientsMatchRefe
     DiscriminatorRunResult actual = runRawDiscriminatorLossNetwork(realScores, fakeScores);
 
     expectClose(actual.loss, referenceLoss, 2.0e-5f);
-    expectClose(actual.realGradient, referenceRealGradient, 2.5e-3f);
-    expectClose(actual.fakeGradient, referenceFakeGradient, 2.5e-3f);
+    expectClose(actual.realGradient, referenceRealGradient, ThorTest::lossScaleAwareGradientTolerance(2.5e-3f));
+    expectClose(actual.fakeGradient, referenceFakeGradient, ThorTest::lossScaleAwareGradientTolerance(2.5e-3f));
 }
 
 TEST(HingeGANLossApi, GeneratorNumericalRawLossAndBackwardGradientMatchReference) {
@@ -344,5 +345,5 @@ TEST(HingeGANLossApi, GeneratorNumericalRawLossAndBackwardGradientMatchReference
     GeneratorRunResult actual = runRawGeneratorLossNetwork(fakeScores);
 
     expectClose(actual.loss, referenceLoss, 2.0e-5f);
-    expectClose(actual.fakeGradient, referenceGradient, 2.5e-3f);
+    expectClose(actual.fakeGradient, referenceGradient, ThorTest::lossScaleAwareGradientTolerance(2.5e-3f));
 }

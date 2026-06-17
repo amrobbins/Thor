@@ -95,7 +95,6 @@ BatchAssembler::BatchAssembler(vector<std::shared_ptr<Shard>> shards,
     THOR_THROW_IF_FALSE(batchSize > 0);
     THOR_THROW_IF_FALSE(batchQueueDepth > 0);
 
-    this->shards = shards;
     this->exampleType = exampleType;
     this->batchSize = batchSize;
     this->batchQueueDepth = batchQueueDepth;
@@ -113,7 +112,11 @@ BatchAssembler::BatchAssembler(vector<std::shared_ptr<Shard>> shards,
     shardRecordSizeInBytes = shards[0]->getExampleSizeInBytes();
     inlinePayloadLabels = exampleDescriptor.getDataType() == labelDescriptor.getDataType() &&
                           shardRecordSizeInBytes == examplePayloadSizeInBytes + labelPayloadSizeInBytes;
-    if (!inlinePayloadLabels) {
+    shiftedInlinePayloadLabels = exampleDescriptor.getDataType() == DataType::UINT8 &&
+                                 labelDescriptor.getDataType() == DataType::UINT8 &&
+                                 examplePayloadSizeInBytes == labelPayloadSizeInBytes &&
+                                 shardRecordSizeInBytes == examplePayloadSizeInBytes + 1;
+    if (!inlinePayloadLabels && !shiftedInlinePayloadLabels) {
         THOR_THROW_IF_FALSE(shardRecordSizeInBytes == examplePayloadSizeInBytes);
     }
     shardReadQueueDepth = computeShardReadQueueDepth(shardRecordSizeInBytes);
@@ -124,10 +127,16 @@ BatchAssembler::BatchAssembler(vector<std::shared_ptr<Shard>> shards,
         THOR_THROW_IF_FALSE(shards[i]->isOpen());
         THOR_THROW_IF_FALSE(shards[i]->getExampleSizeInBytes() == shardRecordSizeInBytes);
 
-        numExamples += shards[i]->getNumExamples(exampleType);
-        numExamplesPerShard.push_back(shards[i]->getNumExamples(exampleType));
-        randomizers.emplace_back(new FullPeriodRandom(numExamplesPerShard[i], false));
+        const uint64_t shardExamples = shards[i]->getNumExamples(exampleType);
+        if (shardExamples == 0) {
+            continue;
+        }
+        this->shards.push_back(shards[i]);
+        numExamples += shardExamples;
+        numExamplesPerShard.push_back(shardExamples);
+        randomizers.emplace_back(new FullPeriodRandom(shardExamples, false));
     }
+    THOR_THROW_IF_FALSE(!this->shards.empty());
 
     const std::vector<std::string> &allClasses = shards[0]->getAllClasses();
     for (uint64_t c = 0; c < allClasses.size(); ++c) {
@@ -142,7 +151,7 @@ BatchAssembler::BatchAssembler(vector<std::shared_ptr<Shard>> shards,
     DataType labelsDataType = labelDescriptor.getDataType();
     perClassLabels = false;
     classIndexLabels = false;
-    if (!inlinePayloadLabels) {
+    if (!inlinePayloadLabels && !shiftedInlinePayloadLabels) {
         THOR_THROW_IF_FALSE(labelDimensions.size() == 1);
         perClassLabels = labelDimensions[0] == classIndexes.size() &&
                          (labelsDataType == DataType::UINT8 || labelsDataType == DataType::FP16 ||
@@ -386,6 +395,11 @@ void BatchAssembler::batchAssemblerThread() {
             batchSlotOffset = labelPayloadSizeInBytes * batchSlot;
             memcpy((uint8_t *)batchLabelsBuffer.getMemPtr() + batchSlotOffset,
                    labeledExample.data.data() + examplePayloadSizeInBytes,
+                   labelPayloadSizeInBytes);
+        } else if (shiftedInlinePayloadLabels) {
+            batchSlotOffset = labelPayloadSizeInBytes * batchSlot;
+            memcpy((uint8_t *)batchLabelsBuffer.getMemPtr() + batchSlotOffset,
+                   labeledExample.data.data() + 1,
                    labelPayloadSizeInBytes);
         } else if (perClassLabels) {
             THOR_THROW_IF_FALSE(labelsDataType == DataType::UINT8 || labelsDataType == DataType::FP16 ||

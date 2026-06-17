@@ -2109,6 +2109,10 @@ static bool isCudnnAttentionTensorDType(DataType dtype) {
     return dtype == DataType::FP16 || dtype == DataType::BF16 || dtype == DataType::FP8_E4M3 || dtype == DataType::FP8_E5M2;
 }
 
+static bool isFp8AttentionTensorDType(DataType dtype) { return dtype == DataType::FP8_E4M3 || dtype == DataType::FP8_E5M2; }
+
+static bool isFp16OrBf16AttentionTensorDType(DataType dtype) { return dtype == DataType::FP16 || dtype == DataType::BF16; }
+
 shared_ptr<CompiledAttention> EquationCompiler::compileAttention(const PhysicalExpression& expr) {
     if (expr.output_node >= expr.nodes.size()) {
         throw std::runtime_error("Attention stage output_node is out of range.");
@@ -2222,6 +2226,9 @@ shared_ptr<CompiledAttention> EquationCompiler::compileAttention(const PhysicalE
     }
     if (node.attention_use_fp8_forward_scaling) {
         auto validate_fp8_scalar = [&](uint32_t local_idx, const char* label) {
+            if (local_idx == UINT32_MAX) {
+                throw std::runtime_error(std::string("Attention FP8 forward is missing required '") + label + "' scale/descale/amax input.");
+            }
             const ExprNode& input_node = validate_local_input(local_idx, label);
             if (input_node.input_tensor_dtype.value() != DataType::FP32) {
                 throw std::runtime_error(std::string("Attention FP8 scalar input '") + label + "' must be an FP32 tensor.");
@@ -2243,14 +2250,24 @@ shared_ptr<CompiledAttention> EquationCompiler::compileAttention(const PhysicalE
     if (!node.compute_dtype.has_value()) {
         throw std::runtime_error("Attention node missing resolved compute_dtype.");
     }
+
+    const DataType q_dtype = q_input.input_tensor_dtype.value();
+    const DataType k_dtype = k_input.input_tensor_dtype.value();
+    const DataType v_dtype = v_input.input_tensor_dtype.value();
+    const DataType output_dtype = node.output_dtype.value();
+    if (node.compute_dtype.value() != DataType::FP32) {
+        throw std::runtime_error("cuDNN attention expression stages require FP32 compute dtype.");
+    }
     if (node.attention_use_fp8_forward_scaling) {
-        const DataType q_dtype = q_input.input_tensor_dtype.value();
-        const DataType k_dtype = k_input.input_tensor_dtype.value();
-        const DataType v_dtype = v_input.input_tensor_dtype.value();
-        const bool q_is_fp8 = q_dtype == DataType::FP8_E4M3 || q_dtype == DataType::FP8_E5M2;
-        if (!q_is_fp8 || q_dtype != k_dtype || q_dtype != v_dtype || node.output_dtype.value() != q_dtype) {
+        if (!isFp8AttentionTensorDType(q_dtype) || q_dtype != k_dtype || q_dtype != v_dtype || output_dtype != q_dtype) {
             throw std::runtime_error(
                 "FP8 attention forward requires q/k/v/output to use the same FP8 dtype in Thor's experimental cuDNN path.");
+        }
+    } else {
+        if (!isFp16OrBf16AttentionTensorDType(q_dtype) || q_dtype != k_dtype || q_dtype != v_dtype || output_dtype != q_dtype) {
+            throw std::runtime_error(
+                "non-FP8 attention requires q/k/v/output to use the same FP16 or BF16 dtype; insert explicit cast() nodes before attention "
+                "instead of relying on hidden attention-stage conversion.");
         }
     }
     if (node.compute_dtype.value() != DataType::FP32) {

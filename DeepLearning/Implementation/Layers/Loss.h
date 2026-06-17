@@ -236,7 +236,7 @@ class Loss : public Layer {
     DataType lossDataType;
 
     // FIXME: only const for now for convenience
-    static constexpr float lossScalingFactor = 1;  // 32;
+    static constexpr float lossScalingFactor = 32;
     Stream labelsStream;
 
     bool featureInputReceived;

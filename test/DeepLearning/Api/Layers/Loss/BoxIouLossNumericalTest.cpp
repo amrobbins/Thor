@@ -2,6 +2,7 @@
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "test/DeepLearning/Api/Helpers/GradientRivet.h"
+#include "test/DeepLearning/Api/Layers/Loss/LossNumericalTestTolerance.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Implementation/Layers/Loss/BoxIouLoss.h"
 #include "DeepLearning/Implementation/Layers/Loss.h"
@@ -262,7 +263,7 @@ void expectForwardAndBackwardMatchReference(Impl::BoxIouLoss::Kind kind) {
     BoxLossRunResult actual = runRawBoxLossNetwork<LossT>(predictions, labels, batchSize, boxCount, eps);
 
     expectClose(actual.loss, expectedLoss, 2.5e-5f);
-    expectClose(actual.predictionsGradient, expectedGradient, 3.5e-2f);
+    expectClose(actual.predictionsGradient, expectedGradient, ThorTest::lossScaleAwareGradientTolerance(3.5e-2f));
 }
 
 }  // namespace

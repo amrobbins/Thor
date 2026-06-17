@@ -30,6 +30,10 @@ using namespace std::filesystem;
 namespace {
 constexpr uint64_t RAW_EXAMPLE_BYTES = 4;
 constexpr uint64_t NUM_CLASSES = 4;
+constexpr uint32_t SHARD_FORMAT_VERSION = 1;
+constexpr uint32_t SHARD_METADATA_LAYOUT_COMPACT = 1;
+constexpr uint32_t SHARD_METADATA_LAYOUT_BYTE_CORPUS = 2;
+constexpr uint32_t SHARD_HEADER_BYTES = 88;
 
 struct RawExampleSpec {
     const char *split;
@@ -55,6 +59,136 @@ const vector<RawExampleSpec> &rawExampleSpecs() {
         {"test", "white", "test_white_1.bin", {120, 121, 122, 123}},
     };
     return specs;
+}
+
+
+void writeExact(std::ostream &stream, const void *data, uint64_t numBytes) {
+    stream.write(reinterpret_cast<const char *>(data), static_cast<std::streamsize>(numBytes));
+    ASSERT_TRUE(stream.good());
+}
+
+void writeUint32(std::ostream &stream, uint32_t value) { writeExact(stream, &value, sizeof(value)); }
+
+void writeUint64(std::ostream &stream, uint64_t value) { writeExact(stream, &value, sizeof(value)); }
+
+void writeString(std::ostream &stream, const std::string &value) {
+    writeUint64(stream, value.size());
+    if (!value.empty()) {
+        writeExact(stream, value.data(), value.size());
+    }
+}
+
+void writeCompactHeader(std::fstream &stream,
+                        uint64_t trainCount,
+                        uint64_t validateCount,
+                        uint64_t testCount,
+                        uint64_t metadataOffset,
+                        uint64_t metadataBytes) {
+    static const array<char, 16> magic = {'T', 'H', 'O', 'R', '_', 'R', 'A', 'W', '_', 'S', 'H', 'A', 'R', 'D', '\0', '\0'};
+    stream.seekp(0, std::ios::beg);
+    writeExact(stream, magic.data(), magic.size());
+    writeUint32(stream, SHARD_FORMAT_VERSION);
+    writeUint32(stream, SHARD_HEADER_BYTES);
+    writeUint64(stream, RAW_EXAMPLE_BYTES);
+    writeUint32(stream, static_cast<uint32_t>(ThorImplementation::DataType::UINT8));
+    writeUint32(stream, SHARD_METADATA_LAYOUT_COMPACT);
+    writeUint64(stream, trainCount);
+    writeUint64(stream, validateCount);
+    writeUint64(stream, testCount);
+    writeUint64(stream, 1);
+    writeUint64(stream, metadataOffset);
+    writeUint64(stream, metadataBytes);
+    ASSERT_EQ(stream.tellp(), static_cast<std::streampos>(SHARD_HEADER_BYTES));
+}
+
+void writeByteCorpusHeader(std::fstream &stream,
+                           uint64_t recordBytes,
+                           uint64_t trainCount,
+                           uint64_t validateCount,
+                           uint64_t testCount,
+                           uint64_t metadataOffset,
+                           uint64_t metadataBytes) {
+    static const array<char, 16> magic = {'T', 'H', 'O', 'R', '_', 'R', 'A', 'W', '_', 'S', 'H', 'A', 'R', 'D', '\0', '\0'};
+    stream.seekp(0, std::ios::beg);
+    writeExact(stream, magic.data(), magic.size());
+    writeUint32(stream, SHARD_FORMAT_VERSION);
+    writeUint32(stream, SHARD_HEADER_BYTES);
+    writeUint64(stream, recordBytes);
+    writeUint32(stream, static_cast<uint32_t>(ThorImplementation::DataType::UINT8));
+    writeUint32(stream, SHARD_METADATA_LAYOUT_BYTE_CORPUS);
+    writeUint64(stream, trainCount);
+    writeUint64(stream, validateCount);
+    writeUint64(stream, testCount);
+    writeUint64(stream, 1);
+    writeUint64(stream, metadataOffset);
+    writeUint64(stream, metadataBytes);
+    ASSERT_EQ(stream.tellp(), static_cast<std::streampos>(SHARD_HEADER_BYTES));
+}
+
+void writeCompactShard(const path &shardPath) {
+    const vector<array<uint8_t, RAW_EXAMPLE_BYTES>> train = {{{1, 2, 3, 4}}, {{5, 6, 7, 8}}};
+    const vector<array<uint8_t, RAW_EXAMPLE_BYTES>> validate = {{{9, 10, 11, 12}}};
+    const vector<array<uint8_t, RAW_EXAMPLE_BYTES>> test = {{{13, 14, 15, 16}}, {{17, 18, 19, 20}}};
+
+    std::fstream file(shardPath, std::ios::binary | std::ios::in | std::ios::out | std::ios::trunc);
+    ASSERT_TRUE(file.is_open());
+    file.write(std::string(SHARD_HEADER_BYTES, '\0').data(), SHARD_HEADER_BYTES);
+
+    const uint64_t trainOffset = static_cast<uint64_t>(file.tellp());
+    for (const auto &record : train) writeExact(file, record.data(), record.size());
+    const uint64_t validateOffset = static_cast<uint64_t>(file.tellp());
+    for (const auto &record : validate) writeExact(file, record.data(), record.size());
+    const uint64_t testOffset = static_cast<uint64_t>(file.tellp());
+    for (const auto &record : test) writeExact(file, record.data(), record.size());
+
+    const uint64_t metadataOffset = static_cast<uint64_t>(file.tellp());
+    writeString(file, "sequence");
+    writeUint64(file, trainOffset);
+    writeUint64(file, train.size());
+    writeUint64(file, validateOffset);
+    writeUint64(file, validate.size());
+    writeUint64(file, testOffset);
+    writeUint64(file, test.size());
+    const uint64_t metadataEnd = static_cast<uint64_t>(file.tellp());
+    writeCompactHeader(file, train.size(), validate.size(), test.size(), metadataOffset, metadataEnd - metadataOffset);
+}
+
+void writeByteCorpusShard(const path &shardPath) {
+    constexpr uint64_t CONTEXT_BYTES = 4;
+    constexpr uint64_t RECORD_BYTES = CONTEXT_BYTES + 1;
+    constexpr uint64_t STRIDE_BYTES = 2;
+    const vector<uint8_t> train = {10, 11, 12, 13, 14, 15, 16, 17, 18};
+    const vector<uint8_t> validate = {30, 31, 32, 33, 34};
+    const vector<uint8_t> test = {40, 41, 42, 43, 44, 45, 46};
+    const uint64_t trainCount = 1 + (train.size() - CONTEXT_BYTES - 1) / STRIDE_BYTES;
+    const uint64_t validateCount = 1 + (validate.size() - CONTEXT_BYTES - 1) / STRIDE_BYTES;
+    const uint64_t testCount = 1 + (test.size() - CONTEXT_BYTES - 1) / STRIDE_BYTES;
+
+    std::fstream file(shardPath, std::ios::binary | std::ios::in | std::ios::out | std::ios::trunc);
+    ASSERT_TRUE(file.is_open());
+    file.write(std::string(SHARD_HEADER_BYTES, '\0').data(), SHARD_HEADER_BYTES);
+
+    const uint64_t trainOffset = static_cast<uint64_t>(file.tellp());
+    writeExact(file, train.data(), train.size());
+    const uint64_t validateOffset = static_cast<uint64_t>(file.tellp());
+    writeExact(file, validate.data(), validate.size());
+    const uint64_t testOffset = static_cast<uint64_t>(file.tellp());
+    writeExact(file, test.data(), test.size());
+
+    const uint64_t metadataOffset = static_cast<uint64_t>(file.tellp());
+    writeString(file, "sequence");
+    writeUint64(file, STRIDE_BYTES);
+    writeUint64(file, trainOffset);
+    writeUint64(file, trainCount);
+    writeUint64(file, train.size());
+    writeUint64(file, validateOffset);
+    writeUint64(file, validateCount);
+    writeUint64(file, validate.size());
+    writeUint64(file, testOffset);
+    writeUint64(file, testCount);
+    writeUint64(file, test.size());
+    const uint64_t metadataEnd = static_cast<uint64_t>(file.tellp());
+    writeByteCorpusHeader(file, RECORD_BYTES, trainCount, validateCount, testCount, metadataOffset, metadataEnd - metadataOffset);
 }
 
 unordered_map<string, array<uint8_t, RAW_EXAMPLE_BYTES>> expectedBytesByFilename() {
@@ -219,5 +353,106 @@ TEST(ShardedRawDatasetCreator, evaluatesDataset) {
     reopenedShard.openShard(shardPath.native());
     verifyRawExamples(reopenedShard);
 
+    remove_all(tempDirectoryPath);
+}
+
+
+TEST(Shard, opensCompactContiguousShardWithImplicitO1Offsets) {
+    path tempDirectoryPath = temp_directory_path() / "ThorFrameworkCompactShardTest";
+    remove_all(tempDirectoryPath);
+    create_directories(tempDirectoryPath);
+    path shardPath = tempDirectoryPath / "compact.shard";
+    writeCompactShard(shardPath);
+
+    Shard shard;
+    shard.openShard(shardPath.native());
+    ASSERT_EQ(shard.getNumExamples(ExampleType::TRAIN), 2u);
+    ASSERT_EQ(shard.getNumExamples(ExampleType::VALIDATE), 1u);
+    ASSERT_EQ(shard.getNumExamples(ExampleType::TEST), 2u);
+
+    uint8_t buffer[RAW_EXAMPLE_BYTES] = {};
+    string label;
+    string filename;
+    shard.loadExample(buffer, label, filename, ExampleType::TRAIN, 1);
+    EXPECT_EQ(label, "sequence");
+    EXPECT_TRUE(filename.empty());
+    EXPECT_EQ(buffer[0], 5u);
+    EXPECT_EQ(buffer[3], 8u);
+    shard.loadExample(buffer, label, filename, ExampleType::TEST, 0);
+    EXPECT_EQ(buffer[0], 13u);
+    EXPECT_EQ(buffer[3], 16u);
+
+    remove_all(tempDirectoryPath);
+}
+
+TEST(Shard, opensByteCorpusShardWithStrideO1Offsets) {
+    path tempDirectoryPath = temp_directory_path() / "ThorFrameworkByteCorpusShardTest";
+    remove_all(tempDirectoryPath);
+    create_directories(tempDirectoryPath);
+    path shardPath = tempDirectoryPath / "byte_corpus.shard";
+    writeByteCorpusShard(shardPath);
+
+    Shard shard;
+    shard.openShard(shardPath.native());
+    ASSERT_EQ(shard.getNumExamples(ExampleType::TRAIN), 3u);
+    ASSERT_EQ(shard.getNumExamples(ExampleType::VALIDATE), 1u);
+    ASSERT_EQ(shard.getNumExamples(ExampleType::TEST), 2u);
+
+    uint8_t buffer[5] = {};
+    string label;
+    string filename;
+    shard.loadExample(buffer, label, filename, ExampleType::TRAIN, 0);
+    EXPECT_EQ(label, "sequence");
+    EXPECT_TRUE(filename.empty());
+    EXPECT_EQ(buffer[0], 10u);
+    EXPECT_EQ(buffer[4], 14u);
+
+    shard.loadExample(buffer, label, filename, ExampleType::TRAIN, 2);
+    EXPECT_EQ(buffer[0], 14u);
+    EXPECT_EQ(buffer[4], 18u);
+
+    shard.loadExample(buffer, label, filename, ExampleType::TEST, 1);
+    EXPECT_EQ(buffer[0], 42u);
+    EXPECT_EQ(buffer[4], 46u);
+
+    remove_all(tempDirectoryPath);
+}
+
+TEST(BatchAssembler, derivesShiftedUint8LabelsFromByteCorpusRecords) {
+    srand(0);
+    path tempDirectoryPath = temp_directory_path() / "ThorFrameworkByteCorpusBatchAssemblerTest";
+    remove_all(tempDirectoryPath);
+    create_directories(tempDirectoryPath);
+    path shardPath = tempDirectoryPath / "byte_corpus.shard";
+    writeByteCorpusShard(shardPath);
+
+    {
+        auto shard = std::make_shared<Shard>();
+        shard->openShard(shardPath.native());
+        vector<shared_ptr<Shard>> shards = {shard};
+
+        BatchAssembler batchAssembler(
+            shards,
+            ExampleType::TRAIN,
+            ThorImplementation::TensorDescriptor(ThorImplementation::DataType::UINT8, {4}),
+            ThorImplementation::TensorDescriptor(ThorImplementation::DataType::UINT8, {4}),
+            2);
+
+        ThorImplementation::Tensor batchTensor;
+        ThorImplementation::Tensor labelTensor;
+        uint64_t batchNum;
+        batchAssembler.getBatch(batchTensor, labelTensor, batchNum);
+
+        const uint8_t *examples = static_cast<const uint8_t *>(batchTensor.getMemPtr());
+        const uint8_t *labels = static_cast<const uint8_t *>(labelTensor.getMemPtr());
+        for (uint64_t batchElement = 0; batchElement < 2; ++batchElement) {
+            const uint8_t *example = examples + batchElement * 4;
+            const uint8_t *label = labels + batchElement * 4;
+            for (uint64_t i = 0; i < 4; ++i) {
+                EXPECT_EQ(label[i], static_cast<uint8_t>(example[i] + 1));
+            }
+        }
+        batchAssembler.returnBuffer(batchTensor, labelTensor);
+    }
     remove_all(tempDirectoryPath);
 }

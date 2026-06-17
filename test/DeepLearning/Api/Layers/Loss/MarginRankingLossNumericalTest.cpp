@@ -4,6 +4,7 @@
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "test/DeepLearning/Api/Helpers/GradientRivet.h"
+#include "test/DeepLearning/Api/Layers/Loss/LossNumericalTestTolerance.h"
 
 #include <gtest/gtest.h>
 
@@ -208,6 +209,6 @@ TEST(MarginRankingLossApi, NumericalRawLossAndBackwardGradientsMatchReference) {
     MarginRankingRunResult actual = runRawMarginRankingLossNetwork(input1, input2, target, margin);
 
     expectClose(actual.loss, referenceLoss, 2.0e-5f);
-    expectClose(actual.input1Gradient, referenceInput1Gradient, 2.0e-3f);
-    expectClose(actual.input2Gradient, referenceInput2Gradient, 2.0e-3f);
+    expectClose(actual.input1Gradient, referenceInput1Gradient, ThorTest::lossScaleAwareGradientTolerance(2.0e-3f));
+    expectClose(actual.input2Gradient, referenceInput2Gradient, ThorTest::lossScaleAwareGradientTolerance(2.0e-3f));
 }

@@ -4,6 +4,7 @@
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "test/DeepLearning/Api/Helpers/GradientRivet.h"
+#include "test/DeepLearning/Api/Layers/Loss/LossNumericalTestTolerance.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Implementation/Layers/Loss/CustomLoss.h"
 #include "DeepLearning/Implementation/Layers/Loss/MultiInputCustomLoss.h"
@@ -447,7 +448,7 @@ TEST(ListwiseSoftmaxCrossEntropyLossApi, NumericalRawLossAndBackwardGradientMatc
     ListwiseSoftmaxCrossEntropyRunResult actual = runRawListwiseSoftmaxCrossEntropyLossNetwork(predictions, labels, temperature);
 
     expectClose(actual.loss, referenceLoss, 2.0e-5f);
-    expectClose(actual.gradient, referenceGradient, 3.0e-3f);
+    expectClose(actual.gradient, referenceGradient, ThorTest::lossScaleAwareGradientTolerance(3.0e-3f));
 }
 
 
@@ -476,5 +477,5 @@ TEST(ListwiseSoftmaxCrossEntropyLossApi, MaskedNumericalRawLossAndBackwardGradie
         runRawMaskedListwiseSoftmaxCrossEntropyLossNetwork(predictions, labels, mask, temperature);
 
     expectClose(actual.loss, referenceLoss, 2.0e-5f);
-    expectClose(actual.gradient, referenceGradient, 3.0e-3f);
+    expectClose(actual.gradient, referenceGradient, ThorTest::lossScaleAwareGradientTolerance(3.0e-3f));
 }

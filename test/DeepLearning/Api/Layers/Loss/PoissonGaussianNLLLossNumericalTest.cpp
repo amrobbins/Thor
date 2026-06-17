@@ -13,6 +13,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Common/Stream.h"
 #include "test/DeepLearning/Api/Helpers/GradientRivet.h"
+#include "test/DeepLearning/Api/Layers/Loss/LossNumericalTestTolerance.h"
 
 #include "gtest/gtest.h"
 
@@ -428,7 +429,7 @@ TEST(PoissonNLLLossApi, NumericalRawLossAndBackwardGradientMatchReferenceForLogI
     PoissonNLLRunResult actual = runRawPoissonNLLLossNetwork(predictions, labels, logInput, full, eps);
 
     expectClose(actual.loss, referenceLoss, 2.0e-5f);
-    expectClose(actual.predictionGradient, referenceGradient, 2.5e-3f);
+    expectClose(actual.predictionGradient, referenceGradient, ThorTest::lossScaleAwareGradientTolerance(2.5e-3f));
 }
 
 TEST(PoissonNLLLossApi, NumericalRawLossAndBackwardGradientMatchReferenceForRateInput) {
@@ -446,7 +447,7 @@ TEST(PoissonNLLLossApi, NumericalRawLossAndBackwardGradientMatchReferenceForRate
     PoissonNLLRunResult actual = runRawPoissonNLLLossNetwork(predictions, labels, logInput, full, eps);
 
     expectClose(actual.loss, referenceLoss, 2.0e-5f);
-    expectClose(actual.predictionGradient, referenceGradient, 5.0e-3f);
+    expectClose(actual.predictionGradient, referenceGradient, ThorTest::lossScaleAwareGradientTolerance(5.0e-3f));
 }
 
 TEST(GaussianNLLLossApi, NumericalRawLossAndBackwardGradientsMatchReference) {
@@ -467,6 +468,6 @@ TEST(GaussianNLLLossApi, NumericalRawLossAndBackwardGradientsMatchReference) {
     GaussianNLLRunResult actual = runRawGaussianNLLLossNetwork(mean, target, variance, full, eps);
 
     expectClose(actual.loss, referenceLoss, 2.0e-5f);
-    expectClose(actual.meanGradient, referenceMeanGradient, 2.5e-3f);
-    expectClose(actual.varianceGradient, referenceVarianceGradient, 2.5e-3f);
+    expectClose(actual.meanGradient, referenceMeanGradient, ThorTest::lossScaleAwareGradientTolerance(2.5e-3f));
+    expectClose(actual.varianceGradient, referenceVarianceGradient, ThorTest::lossScaleAwareGradientTolerance(2.5e-3f));
 }

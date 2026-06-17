@@ -97,6 +97,18 @@ class Shard {
     std::vector<ShardExampleRecord> testExamples;
     std::vector<std::string> allClasses;
 
+    bool compactMetadata;
+    uint64_t compactTrainOffsetBytes;
+    uint64_t compactValidateOffsetBytes;
+    uint64_t compactTestOffsetBytes;
+    uint64_t compactTrainCount;
+    uint64_t compactValidateCount;
+    uint64_t compactTestCount;
+    uint64_t compactTrainBytes;
+    uint64_t compactValidateBytes;
+    uint64_t compactTestBytes;
+    uint64_t compactRecordStrideBytes;
+
     std::mutex mtx;
     std::mutex cachedReaderMtx;
     std::unique_ptr<UringDirect> cachedReader;
@@ -104,12 +116,16 @@ class Shard {
     void readExamplePayloadCached(uint8_t *buffer, uint64_t fileOffsetBytes);
     void writeHeader(uint64_t metadataOffsetBytes, uint64_t metadataBytes);
     void writeMetadata();
-    void readMetadata(uint64_t metadataOffsetBytes,
+    void readMetadata(uint32_t metadataLayout,
+                      uint64_t metadataOffsetBytes,
                       uint64_t metadataBytes,
                       uint64_t trainCount,
                       uint64_t validateCount,
                       uint64_t testCount,
                       uint64_t classCount);
+    uint64_t compactOffsetFor(ExampleType exampleType) const;
+    uint64_t compactCountFor(ExampleType exampleType) const;
+    uint64_t compactBytesFor(ExampleType exampleType) const;
     std::vector<ShardExampleRecord> &mutableRecordsFor(ExampleType exampleType);
     const std::vector<ShardExampleRecord> &recordsFor(ExampleType exampleType) const;
 };

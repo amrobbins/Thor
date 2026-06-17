@@ -1122,6 +1122,9 @@ void CudnnAttentionDescriptor::validateForward() const {
             throwInvalidAttention("ragged attention requires q and o to either both use ragged offsets or both be dense");
         if (k.ragged != v.ragged)
             throwInvalidAttention("ragged attention requires k and v to either both use ragged offsets or both be dense");
+        if (q.dimensions[3] != v.dimensions[3])
+            throwInvalidAttention(
+                "ragged attention requires value head_dim to match query/key head_dim because Thor uses shared Q/O and K/V element offsets");
         if (usePagedKvCache && !experimentalCudnnAttentionSupportSurfaceProbeEnabled())
             throwInvalidAttention("ragged attention and paged KV cache are separate variable-length modes and cannot be combined");
         if (useFp8 && !experimentalCudnnAttentionSupportSurfaceProbeEnabled())

@@ -2040,6 +2040,11 @@ static std::vector<uint64_t> resolveAttentionOutputDimsFromInputs(const Compiled
         next_optional_idx += 2;
     }
     if (compiled_stage.use_ragged_offsets) {
+        if (qk_dim != v_dim) {
+            throw std::runtime_error(
+                "Attention ragged offsets require value head_dim to match query/key head_dim because Thor uses shared Q/O and K/V "
+                "element offsets.");
+        }
         if (stage_input_dims.size() <= next_optional_idx + 1) {
             throw std::runtime_error("Attention stage with ragged offsets expected q_ragged_offsets and kv_ragged_offsets input shapes.");
         }

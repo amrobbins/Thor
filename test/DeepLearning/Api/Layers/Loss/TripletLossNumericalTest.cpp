@@ -3,6 +3,7 @@
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "test/DeepLearning/Api/Helpers/GradientRivet.h"
+#include "test/DeepLearning/Api/Layers/Loss/LossNumericalTestTolerance.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Implementation/Layers/Loss/MultiInputCustomLoss.h"
 #include "DeepLearning/Implementation/Layers/Loss.h"
@@ -273,7 +274,7 @@ TEST(TripletLossApi, NumericalRawLossAndAllBackwardGradientsMatchReference) {
     TripletRunResult actual = runRawTripletLossNetwork(anchor, positive, negative, margin, eps);
 
     expectClose(actual.loss, referenceLoss, 2.0e-5f);
-    expectClose(actual.anchorGradient, referenceAnchorGradient, 3.0e-3f);
-    expectClose(actual.positiveGradient, referencePositiveGradient, 3.0e-3f);
-    expectClose(actual.negativeGradient, referenceNegativeGradient, 3.0e-3f);
+    expectClose(actual.anchorGradient, referenceAnchorGradient, ThorTest::lossScaleAwareGradientTolerance(3.0e-3f));
+    expectClose(actual.positiveGradient, referencePositiveGradient, ThorTest::lossScaleAwareGradientTolerance(3.0e-3f));
+    expectClose(actual.negativeGradient, referenceNegativeGradient, ThorTest::lossScaleAwareGradientTolerance(3.0e-3f));
 }

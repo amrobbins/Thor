@@ -14,6 +14,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Common/Stream.h"
 #include "test/DeepLearning/Api/Helpers/GradientRivet.h"
+#include "test/DeepLearning/Api/Layers/Loss/LossNumericalTestTolerance.h"
 
 #include "gtest/gtest.h"
 
@@ -336,7 +337,7 @@ TEST(BinaryFocalLossApi, NumericalRawLossAndBackwardGradientMatchReference) {
     scaleByLossScalingFactor(expectedGradient);
 
     expectClose(actual.loss, expectedLoss, 1.0e-5f);
-    expectClose(actual.predictionGradient, expectedGradient, 1.0e-2f);
+    expectClose(actual.predictionGradient, expectedGradient, ThorTest::lossScaleAwareGradientTolerance(1.0e-2f));
 }
 
 TEST(CategoricalFocalLossApi, NumericalRawLossAndBackwardGradientMatchReference) {
@@ -368,7 +369,7 @@ TEST(CategoricalFocalLossApi, NumericalRawLossAndBackwardGradientMatchReference)
     scaleByLossScalingFactor(expectedGradient);
 
     expectClose(actual.loss, expectedLoss, 1.0e-5f);
-    expectClose(actual.predictionGradient, expectedGradient, 1.0e-2f);
+    expectClose(actual.predictionGradient, expectedGradient, ThorTest::lossScaleAwareGradientTolerance(1.0e-2f));
 }
 
 TEST(DiceLossApi, NumericalRawLossAndBackwardGradientMatchReference) {
@@ -399,7 +400,7 @@ TEST(DiceLossApi, NumericalRawLossAndBackwardGradientMatchReference) {
     scaleByLossScalingFactor(expectedGradient);
 
     expectClose(actual.loss, expectedLoss, 1.0e-5f);
-    expectClose(actual.predictionGradient, expectedGradient, 1.0e-2f);
+    expectClose(actual.predictionGradient, expectedGradient, ThorTest::lossScaleAwareGradientTolerance(1.0e-2f));
 }
 
 TEST(TverskyLossApi, NumericalRawLossAndBackwardGradientMatchReference) {
@@ -434,7 +435,7 @@ TEST(TverskyLossApi, NumericalRawLossAndBackwardGradientMatchReference) {
     scaleByLossScalingFactor(expectedGradient);
 
     expectClose(actual.loss, expectedLoss, 1.0e-5f);
-    expectClose(actual.predictionGradient, expectedGradient, 1.0e-2f);
+    expectClose(actual.predictionGradient, expectedGradient, ThorTest::lossScaleAwareGradientTolerance(1.0e-2f));
 }
 
 TEST(FocalTverskyLossApi, NumericalRawLossAndBackwardGradientMatchReference) {
@@ -471,5 +472,5 @@ TEST(FocalTverskyLossApi, NumericalRawLossAndBackwardGradientMatchReference) {
     scaleByLossScalingFactor(expectedGradient);
 
     expectClose(actual.loss, expectedLoss, 1.0e-5f);
-    expectClose(actual.predictionGradient, expectedGradient, 1.0e-2f);
+    expectClose(actual.predictionGradient, expectedGradient, ThorTest::lossScaleAwareGradientTolerance(1.0e-2f));
 }

@@ -3,6 +3,7 @@
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "test/DeepLearning/Api/Helpers/GradientRivet.h"
+#include "test/DeepLearning/Api/Layers/Loss/LossNumericalTestTolerance.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Implementation/Layers/Loss/CustomLoss.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
@@ -224,5 +225,5 @@ TEST(InfoNCELossApi, NumericalRawLossAndBackwardGradientMatchReference) {
     InfoNCERunResult actual = runRawInfoNCELossNetwork(predictions, labels, temperature);
 
     expectClose(actual.loss, referenceLoss, 2.0e-5f);
-    expectClose(actual.gradient, referenceGradient, 2.5e-3f);
+    expectClose(actual.gradient, referenceGradient, ThorTest::lossScaleAwareGradientTolerance(2.5e-3f));
 }

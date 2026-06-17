@@ -11,6 +11,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Common/Stream.h"
 #include "test/DeepLearning/Api/Helpers/GradientRivet.h"
+#include "test/DeepLearning/Api/Layers/Loss/LossNumericalTestTolerance.h"
 
 #include "gtest/gtest.h"
 
@@ -300,7 +301,7 @@ TEST(GammaNLLLossApi, NumericalRawLossAndBackwardGradientMatchReference) {
         });
 
     expectClose(actual.loss, referenceLoss, 2.0e-5f);
-    expectClose(actual.predictionGradient, referenceGradient, 3.0e-3f);
+    expectClose(actual.predictionGradient, referenceGradient, ThorTest::lossScaleAwareGradientTolerance(3.0e-3f));
 }
 
 TEST(TweedieLossApi, NumericalRawLossAndBackwardGradientMatchReferenceForCompoundPoissonGammaPower) {
@@ -332,7 +333,7 @@ TEST(TweedieLossApi, NumericalRawLossAndBackwardGradientMatchReferenceForCompoun
         });
 
     expectClose(actual.loss, referenceLoss, 3.0e-5f);
-    expectClose(actual.predictionGradient, referenceGradient, 3.0e-3f);
+    expectClose(actual.predictionGradient, referenceGradient, ThorTest::lossScaleAwareGradientTolerance(3.0e-3f));
 }
 
 TEST(TweedieLossApi, NumericalRawLossAndBackwardGradientMatchReferenceForNormalPoissonAndGammaPowers) {
@@ -364,6 +365,6 @@ TEST(TweedieLossApi, NumericalRawLossAndBackwardGradientMatchReferenceForNormalP
             });
 
         expectClose(actual.loss, referenceLoss, 3.0e-5f);
-        expectClose(actual.predictionGradient, referenceGradient, 4.0e-3f);
+        expectClose(actual.predictionGradient, referenceGradient, ThorTest::lossScaleAwareGradientTolerance(4.0e-3f));
     }
 }

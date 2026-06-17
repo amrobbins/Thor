@@ -3,6 +3,7 @@
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "test/DeepLearning/Api/Helpers/GradientRivet.h"
+#include "test/DeepLearning/Api/Layers/Loss/LossNumericalTestTolerance.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Implementation/Layers/Loss/CustomLoss.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
@@ -176,5 +177,5 @@ TEST(ContrastiveLossApi, NumericalRawLossAndBackwardGradientMatchReference) {
     ContrastiveRunResult actual = runRawContrastiveLossNetwork(predictions, labels, margin);
 
     expectClose(actual.loss, referenceLoss, 1.0e-5f);
-    expectClose(actual.gradient, referenceGradient, 1.0e-3f);
+    expectClose(actual.gradient, referenceGradient, ThorTest::lossScaleAwareGradientTolerance(1.0e-3f));
 }

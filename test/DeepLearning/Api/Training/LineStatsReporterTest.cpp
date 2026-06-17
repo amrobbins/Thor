@@ -88,7 +88,7 @@ std::string stripAnsiSequences(const std::string& output) {
 }
 
 const char* alignedColorStatsLineWithoutAnsi() {
-    return "INFO trainer: phase=train    epoch=      1/3 step=        17 batch=    7/100 loss= 1.250000 accuracy=0.7500 "
+    return "INFO trainer: phase=train    epoch=      1/3 step=        17 batch=        7/100 loss= 1.250000 accuracy=0.7500 "
            "lr=3.000e-04 samples/s=1.02K batches/s= 8.00 flops/s=2.50T in_flight=   32 elapsed= 00:01:05";
 }
 
@@ -168,8 +168,8 @@ TEST(LineStatsReporter, PrintsFirstStatsForEachPhaseOccurrenceDespiteInterval) {
     reporter.onTrainingEvent(TrainingEvent::statsUpdated(makeStats(2.0, TrainingPhase::VALIDATE, 1, 1, 1, 5)));
 
     const std::string output = readAndCloseFile(out);
-    EXPECT_NE(output.find("phase=train    epoch=      1/3 step=         1 batch=    1/100"), std::string::npos);
-    EXPECT_NE(output.find("phase=validate epoch=      1/3 step=         1 batch=      1/5"), std::string::npos);
+    EXPECT_NE(output.find("phase=train    epoch=      1/3 step=         1 batch=        1/100"), std::string::npos);
+    EXPECT_NE(output.find("phase=validate epoch=      1/3 step=         1 batch=          1/5"), std::string::npos);
 }
 
 TEST(LineStatsReporter, PrintsLastStatsAtPhaseFinishDespiteInterval) {
@@ -183,8 +183,8 @@ TEST(LineStatsReporter, PrintsLastStatsAtPhaseFinishDespiteInterval) {
 
     const std::string output = readAndCloseFile(out);
     EXPECT_EQ(countLines(output), 2u);
-    EXPECT_NE(output.find("phase=train    epoch=      1/3 step=         1 batch=    1/100"), std::string::npos);
-    EXPECT_NE(output.find("phase=train    epoch=      1/3 step=         2 batch=    2/100"), std::string::npos);
+    EXPECT_NE(output.find("phase=train    epoch=      1/3 step=         1 batch=        1/100"), std::string::npos);
+    EXPECT_NE(output.find("phase=train    epoch=      1/3 step=         2 batch=        2/100"), std::string::npos);
 }
 
 TEST(LineStatsReporter, DoesNotDuplicatePhaseFinishWhenLastStatsAlreadyPrinted) {
@@ -197,7 +197,7 @@ TEST(LineStatsReporter, DoesNotDuplicatePhaseFinishWhenLastStatsAlreadyPrinted) 
 
     const std::string output = readAndCloseFile(out);
     EXPECT_EQ(countLines(output), 1u);
-    EXPECT_NE(output.find("phase=train    epoch=      1/3 step=         1 batch=    1/100"), std::string::npos);
+    EXPECT_NE(output.find("phase=train    epoch=      1/3 step=         1 batch=        1/100"), std::string::npos);
 }
 
 TEST(LineStatsReporter, ColorModeNeverEmitsPlainStatsLine) {

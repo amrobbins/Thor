@@ -12,6 +12,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Common/Stream.h"
 #include "test/DeepLearning/Api/Helpers/GradientRivet.h"
+#include "test/DeepLearning/Api/Layers/Loss/LossNumericalTestTolerance.h"
 
 #include "gtest/gtest.h"
 
@@ -373,8 +374,8 @@ TEST(WassersteinGANLossApi, CriticNumericalRawLossAndBackwardGradientsMatchRefer
         expectedLoss[i] = fakeScores[i] - realScores[i];
 
     expectClose(actual.loss, expectedLoss, 1.0e-6f);
-    expectClose(actual.realGradient, constantGradient(realScores.size(), -1.0f), 1.0e-6f);
-    expectClose(actual.fakeGradient, constantGradient(fakeScores.size(), 1.0f), 1.0e-6f);
+    expectClose(actual.realGradient, constantGradient(realScores.size(), -1.0f), ThorTest::lossScaleAwareGradientTolerance(1.0e-6f));
+    expectClose(actual.fakeGradient, constantGradient(fakeScores.size(), 1.0f), ThorTest::lossScaleAwareGradientTolerance(1.0e-6f));
 }
 
 TEST(WassersteinGANLossApi, GeneratorNumericalRawLossAndBackwardGradientMatchReference) {
@@ -386,7 +387,7 @@ TEST(WassersteinGANLossApi, GeneratorNumericalRawLossAndBackwardGradientMatchRef
         expectedLoss[i] = -fakeScores[i];
 
     expectClose(actual.loss, expectedLoss, 1.0e-6f);
-    expectClose(actual.fakeGradient, constantGradient(fakeScores.size(), -1.0f), 1.0e-6f);
+    expectClose(actual.fakeGradient, constantGradient(fakeScores.size(), -1.0f), ThorTest::lossScaleAwareGradientTolerance(1.0e-6f));
 }
 
 TEST(WassersteinGANLossApi, GradientPenaltyNumericalRawLossAndBackwardGradientsMatchReference) {
@@ -420,7 +421,7 @@ TEST(WassersteinGANLossApi, GradientPenaltyNumericalRawLossAndBackwardGradientsM
     }
 
     expectClose(actual.loss, expectedLoss, 1.0e-5f);
-    expectClose(actual.realGradient, constantGradient(kBatchSize, -1.0f), 1.0e-6f);
-    expectClose(actual.fakeGradient, constantGradient(kBatchSize, 1.0f), 1.0e-6f);
-    expectClose(actual.sampleGradient, expectedSampleGradient, 2.0e-5f);
+    expectClose(actual.realGradient, constantGradient(kBatchSize, -1.0f), ThorTest::lossScaleAwareGradientTolerance(1.0e-6f));
+    expectClose(actual.fakeGradient, constantGradient(kBatchSize, 1.0f), ThorTest::lossScaleAwareGradientTolerance(1.0e-6f));
+    expectClose(actual.sampleGradient, expectedSampleGradient, ThorTest::lossScaleAwareGradientTolerance(2.0e-5f));
 }

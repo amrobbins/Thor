@@ -96,6 +96,7 @@ class BatchAssembler {
     void emitQueueDiagnostics(const char* event, uint64_t batchNum, uint64_t waitMicros = 0);
 
     bool inlinePayloadLabels;
+    bool shiftedInlinePayloadLabels;
     bool perClassLabels;
     bool classIndexLabels;
 

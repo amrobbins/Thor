@@ -11,6 +11,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Common/Stream.h"
 #include "test/DeepLearning/Api/Helpers/GradientRivet.h"
+#include "test/DeepLearning/Api/Layers/Loss/LossNumericalTestTolerance.h"
 
 #include "gtest/gtest.h"
 
@@ -363,8 +364,8 @@ TEST(LSGANLossApi, DiscriminatorNumericalRawLossAndBackwardGradientsMatchReferen
     DiscriminatorRunResult actual = runRawDiscriminatorLossNetwork(realScores, fakeScores, realTarget, fakeTarget);
 
     expectClose(actual.loss, referenceLoss, 2.0e-5f);
-    expectClose(actual.realGradient, referenceRealGradient, 2.5e-3f);
-    expectClose(actual.fakeGradient, referenceFakeGradient, 2.5e-3f);
+    expectClose(actual.realGradient, referenceRealGradient, ThorTest::lossScaleAwareGradientTolerance(2.5e-3f));
+    expectClose(actual.fakeGradient, referenceFakeGradient, ThorTest::lossScaleAwareGradientTolerance(2.5e-3f));
 }
 
 
@@ -390,8 +391,8 @@ TEST(LSGANLossApi, DiscriminatorLossWeightScalesReportedLossAndAllPredictionGrad
     DiscriminatorRunResult actual = runRawDiscriminatorLossNetwork(realScores, fakeScores, realTarget, fakeTarget, lossWeight);
 
     expectClose(actual.loss, referenceLoss, 3.0e-5f);
-    expectClose(actual.realGradient, referenceRealGradient, 5.0e-3f);
-    expectClose(actual.fakeGradient, referenceFakeGradient, 5.0e-3f);
+    expectClose(actual.realGradient, referenceRealGradient, ThorTest::lossScaleAwareGradientTolerance(5.0e-3f));
+    expectClose(actual.fakeGradient, referenceFakeGradient, ThorTest::lossScaleAwareGradientTolerance(5.0e-3f));
 }
 
 TEST(LSGANLossApi, GeneratorNumericalRawLossAndBackwardGradientMatchReference) {
@@ -408,7 +409,7 @@ TEST(LSGANLossApi, GeneratorNumericalRawLossAndBackwardGradientMatchReference) {
     GeneratorRunResult actual = runRawGeneratorLossNetwork(fakeScores, target);
 
     expectClose(actual.loss, referenceLoss, 2.0e-5f);
-    expectClose(actual.fakeGradient, referenceGradient, 2.5e-3f);
+    expectClose(actual.fakeGradient, referenceGradient, ThorTest::lossScaleAwareGradientTolerance(2.5e-3f));
 }
 
 TEST(LSGANLossApi, GeneratorLossWeightScalesReportedLossAndPredictionGradient) {
@@ -427,5 +428,5 @@ TEST(LSGANLossApi, GeneratorLossWeightScalesReportedLossAndPredictionGradient) {
     GeneratorRunResult actual = runRawGeneratorLossNetwork(fakeScores, target, lossWeight);
 
     expectClose(actual.loss, referenceLoss, 2.0e-5f);
-    expectClose(actual.fakeGradient, referenceGradient, 2.5e-3f);
+    expectClose(actual.fakeGradient, referenceGradient, ThorTest::lossScaleAwareGradientTolerance(2.5e-3f));
 }

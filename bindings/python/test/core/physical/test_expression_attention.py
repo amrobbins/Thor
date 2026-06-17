@@ -2906,6 +2906,112 @@ def test_attention_bshd_layout_options_stamp_without_teaching_planner_new_stage_
 
 
 @pytest.mark.cuda
+def test_attention_rejects_fp32_qkv_without_explicit_cast_before_cudnn_stage():
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    out = ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        output_dtype=thor.DataType.fp16,
+        compute_dtype=thor.DataType.fp32,
+    )
+    eq = ex.compile(out, device_num=0)
+
+    q_np, k_np, v_np = _attention_inputs(batch=1, query_heads=2, kv_heads=2, query_len=4, kv_len=4, dtype=thor.DataType.fp32)
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(q_np, thor.DataType.fp32, stream),
+        "k": _host_to_gpu(k_np, thor.DataType.fp32, stream),
+        "v": _host_to_gpu(v_np, thor.DataType.fp32, stream),
+    }
+
+    with pytest.raises(RuntimeError, match="non-FP8 attention requires q/k/v/output to use the same FP16 or BF16 dtype"):
+        eq.output_shape(inputs_gpu)
+
+
+@pytest.mark.cuda
+def test_attention_accepts_fp32_qkv_when_user_inserts_explicit_cast_before_attention():
+    q = ex.input("q").cast(thor.DataType.fp16)
+    k = ex.input("k").cast(thor.DataType.fp16)
+    v = ex.input("v").cast(thor.DataType.fp16)
+    out = ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        output_dtype=thor.DataType.fp16,
+        compute_dtype=thor.DataType.fp32,
+    )
+    eq = ex.compile(out, device_num=0)
+
+    q_np, k_np, v_np = _attention_inputs(batch=1, query_heads=2, kv_heads=2, query_len=4, kv_len=4, dtype=thor.DataType.fp32)
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(q_np, thor.DataType.fp32, stream),
+        "k": _host_to_gpu(k_np, thor.DataType.fp32, stream),
+        "v": _host_to_gpu(v_np, thor.DataType.fp32, stream),
+    }
+
+    assert eq.output_shape(inputs_gpu) == [1, 2, 4, 16]
+    eq.stamp(inputs_gpu, stream)
+
+
+@pytest.mark.cuda
+def test_attention_ragged_offsets_reject_distinct_value_head_dim_for_shared_offset_contract():
+    dtype = thor.DataType.fp16
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    q_seq_len = ex.input("q_seq_len")
+    kv_seq_len = ex.input("kv_seq_len")
+    q_offsets = ex.input("q_offsets")
+    kv_offsets = ex.input("kv_offsets")
+    out = ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        q_seq_len=q_seq_len,
+        kv_seq_len=kv_seq_len,
+        q_ragged_offsets=q_offsets,
+        kv_ragged_offsets=kv_offsets,
+        q_layout=AttentionTensorLayout.bshd,
+        k_layout=AttentionTensorLayout.bshd,
+        v_layout=AttentionTensorLayout.bshd,
+        o_layout=AttentionTensorLayout.bshd,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+    eq = ex.compile(out, device_num=0)
+
+    q_np, k_np, v_np = _attention_inputs(
+        batch=2,
+        query_heads=2,
+        kv_heads=2,
+        query_len=4,
+        kv_len=4,
+        qk_dim=16,
+        v_dim=32,
+        dtype=dtype,
+    )
+    q_lengths = np.asarray([4, 3], dtype=np.int32)
+    kv_lengths = np.asarray([4, 2], dtype=np.int32)
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(_pack_bshd_ragged_storage(q_np, q_lengths), dtype, stream),
+        "k": _host_to_gpu(_pack_bshd_ragged_storage(k_np, kv_lengths), dtype, stream),
+        "v": _host_to_gpu(_pack_bshd_ragged_storage(v_np, kv_lengths), dtype, stream),
+        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
+        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
+        "q_offsets": _host_to_gpu(_ragged_element_offsets(q_lengths, heads=2, dim=16), thor.DataType.int32, stream),
+        "kv_offsets": _host_to_gpu(_ragged_element_offsets(kv_lengths, heads=2, dim=16), thor.DataType.int32, stream),
+    }
+
+    with pytest.raises(RuntimeError, match="ragged offsets require value head_dim to match query/key head_dim"):
+        eq.output_shape(inputs_gpu)
+
+
+@pytest.mark.cuda
 def test_attention_invalid_gqa_head_ratio_raises_before_execution():
     dtype = thor.DataType.fp16
     eq = _compile_attention(dtype=dtype)

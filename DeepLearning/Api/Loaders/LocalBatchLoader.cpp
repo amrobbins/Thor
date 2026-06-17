@@ -24,7 +24,12 @@ LocalBatchLoader::LocalBatchLoader(set<string> shardPaths,
         const bool classMetadataLabels = shardRecordSizeInBytes == exampleSizeInBytes;
         const bool inlinePayloadLabels = canUseInlinePayloadLabels &&
                                          shardRecordSizeInBytes == exampleSizeInBytes + labelSizeInBytes;
-        THOR_THROW_IF_FALSE(classMetadataLabels || inlinePayloadLabels);
+        const bool shiftedInlinePayloadLabels = canUseInlinePayloadLabels &&
+                                                exampleDescriptor.getDataType() == ThorImplementation::DataType::UINT8 &&
+                                                labelDescriptor.getDataType() == ThorImplementation::DataType::UINT8 &&
+                                                labelSizeInBytes == exampleSizeInBytes &&
+                                                shardRecordSizeInBytes == exampleSizeInBytes + 1;
+        THOR_THROW_IF_FALSE(classMetadataLabels || inlinePayloadLabels || shiftedInlinePayloadLabels);
         THOR_THROW_IF_FALSE(shards.back()->getDataType() == exampleDescriptor.getDataType());
     }
 
