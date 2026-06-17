@@ -242,3 +242,78 @@ def test_categorical_cross_entropy_rejects_wrong_arity():
 
     with pytest.raises(TypeError):
         thor.losses.SparseCategoricalCrossEntropy(n, preds, sparse_labels, 5, thor.DataType.fp32, thor.losses.LossShape.batch, 123)
+
+
+def test_sparse_categorical_cross_entropy_raw_loss_is_prediction_prefix_shape():
+    n = _net()
+    preds = thor.Tensor([3, 7, 257], thor.DataType.fp32)
+    labels = thor.Tensor([3, 7], thor.DataType.uint32)
+
+    loss = thor.losses.SparseCategoricalCrossEntropy(
+        n,
+        preds,
+        labels,
+        257,
+        thor.DataType.fp32,
+        thor.losses.LossShape.raw,
+    )
+
+    assert loss.get_loss().get_dimensions() == [3, 7]
+
+
+def test_sparse_categorical_cross_entropy_accepts_ignore_index_and_mask():
+    n = _net()
+    preds = thor.Tensor([3, 7, 257], thor.DataType.fp32)
+    labels = thor.Tensor([3, 7], thor.DataType.uint32)
+    mask = thor.Tensor([3, 7], thor.DataType.uint8)
+
+    loss = thor.losses.SparseCategoricalCrossEntropy(
+        n,
+        preds,
+        labels,
+        257,
+        ignore_index=0,
+        mask=mask,
+    )
+
+    assert isinstance(loss, thor.losses.SparseCategoricalCrossEntropy)
+
+
+@pytest.mark.parametrize("mask_dtype", [thor.DataType.uint8, thor.DataType.bool, thor.DataType.fp16, thor.DataType.fp32])
+def test_sparse_categorical_cross_entropy_accepts_mask_dtypes(mask_dtype):
+    n = _net()
+    preds = thor.Tensor([5, 11], thor.DataType.fp32)
+    labels = thor.Tensor([5], thor.DataType.uint32)
+    mask = thor.Tensor([5], mask_dtype)
+
+    loss = thor.losses.SparseCategoricalCrossEntropy(n, preds, labels, 11, mask=mask)
+    assert isinstance(loss, thor.losses.SparseCategoricalCrossEntropy)
+
+
+def test_sparse_categorical_cross_entropy_rejects_bad_mask_shape():
+    n = _net()
+    preds = thor.Tensor([3, 7, 257], thor.DataType.fp32)
+    labels = thor.Tensor([3, 7], thor.DataType.uint32)
+    mask = thor.Tensor([3], thor.DataType.uint8)
+
+    with pytest.raises(ValueError, match=r"mask dimensions"):
+        thor.losses.SparseCategoricalCrossEntropy(n, preds, labels, 257, mask=mask)
+
+
+def test_sparse_categorical_cross_entropy_rejects_bad_mask_dtype():
+    n = _net()
+    preds = thor.Tensor([3, 7, 257], thor.DataType.fp32)
+    labels = thor.Tensor([3, 7], thor.DataType.uint32)
+    mask = thor.Tensor([3, 7], thor.DataType.uint32)
+
+    with pytest.raises(ValueError, match=r"mask must use"):
+        thor.losses.SparseCategoricalCrossEntropy(n, preds, labels, 257, mask=mask)
+
+
+def test_sparse_categorical_cross_entropy_rejects_negative_ignore_index():
+    n = _net()
+    preds = thor.Tensor([7, 10], thor.DataType.fp32)
+    labels = thor.Tensor([7], thor.DataType.uint32)
+
+    with pytest.raises(ValueError, match=r"ignore_index"):
+        thor.losses.SparseCategoricalCrossEntropy(n, preds, labels, 10, ignore_index=-1)

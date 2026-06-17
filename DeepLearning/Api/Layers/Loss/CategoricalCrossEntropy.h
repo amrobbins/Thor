@@ -7,6 +7,7 @@
 
 #include "DeepLearning/Implementation/Layers/Activation/Softmax.h"
 #include "DeepLearning/Implementation/Layers/Loss/CrossEntropy.h"
+#include "DeepLearning/Implementation/Layers/Loss/SparseCategoricalCrossEntropyWithLogits.h"
 #include <optional>
 
 namespace Thor {
@@ -24,7 +25,19 @@ class CategoricalCrossEntropy : public Loss {
 
     std::string getLayerType() const override { return "CategoricalCrossEntropy"; }
 
-    Tensor getPredictions() const override { return softmaxOutput; }
+    Tensor getPredictions() const override { return softmaxOutput.isInitialized() ? softmaxOutput : predictionsTensor; }
+
+    std::vector<Tensor> getLossInputTensors() const override {
+        if (maskTensor.has_value())
+            return {predictionsTensor, labelsTensor, maskTensor.value()};
+        return {predictionsTensor, labelsTensor};
+    }
+
+    int getConnectionType(Tensor connectingTensor) const override {
+        if (maskTensor.has_value() && connectingTensor == maskTensor.value())
+            return ThorImplementation::SparseCategoricalCrossEntropyWithLogits::MASK_CONNECTION_TYPE;
+        return Loss::getConnectionType(connectingTensor);
+    }
 
     nlohmann::json architectureJson() const override;
     static void deserialize(const nlohmann::json &j, Network *network);
@@ -37,6 +50,11 @@ class CategoricalCrossEntropy : public Loss {
                                 const std::string &expectedLayerType);
 
     virtual bool isMultiLayer() const {
+        if (labelType == LabelType::SPARSE) {
+            if (lossShape != LossShape::RAW || !logitsNativeLossAddedToNetwork)
+                return true;
+            return false;
+        }
         if (lossShape != LossShape::RAW || !softmaxAddedToNetwork)
             return true;
         return false;
@@ -54,9 +72,15 @@ class CategoricalCrossEntropy : public Loss {
         (void)drivingApiLayer;
         (void)inferenceOnly;
         THOR_THROW_IF_FALSE(initialized);
-        THOR_THROW_IF_FALSE(connectingApiTensor == predictionsTensor || connectingApiTensor == labelsTensor);
+        THOR_THROW_IF_FALSE(connectingApiTensor == predictionsTensor || connectingApiTensor == labelsTensor ||
+                            (maskTensor.has_value() && connectingApiTensor == maskTensor.value()));
 
         // Softmax and LossShaper are connected during multi-layer flattening.
+        if (labelType == LabelType::SPARSE && logitsNativeLossAddedToNetwork) {
+            return std::make_shared<ThorImplementation::SparseCategoricalCrossEntropyWithLogits>(
+                lossDataType, lossWeight, ignoreIndex);
+        }
+
         return std::make_shared<ThorImplementation::CrossEntropy>(
             CrossEntropyLossType::CATEGORICAL, lossDataType, labelType == LabelType::SPARSE, lossWeight);
     }
@@ -64,7 +88,10 @@ class CategoricalCrossEntropy : public Loss {
     LabelType labelType = LabelType::DENSE;
     uint32_t numClasses = 0;
     bool softmaxAddedToNetwork = false;
+    bool logitsNativeLossAddedToNetwork = false;
     Tensor softmaxOutput;
+    std::optional<uint32_t> ignoreIndex;
+    std::optional<Tensor> maskTensor;
 };
 
 class CategoricalCrossEntropy::Builder {
@@ -217,13 +244,22 @@ class CategoricalCrossEntropy::Builder {
             THOR_THROW_IF_FALSE(sparseNumClasses.has_value());
             THOR_THROW_IF_FALSE(sparseNumClasses.value() > 1);
             THOR_THROW_IF_FALSE(predictionDimensions.back() == sparseNumClasses.value());
+            if (_mask.has_value()) {
+                THOR_THROW_IF_FALSE(sparseLabelDimensionsMatchPredictionPrefix(predictionDimensions, _mask.value().getDimensions()));
+                DataType maskDataType = _mask.value().getDataType();
+                THOR_THROW_IF_FALSE(maskDataType == DataType::BOOLEAN || maskDataType == DataType::UINT8 ||
+                                    maskDataType == DataType::FP16 || maskDataType == DataType::FP32);
+            }
             categoricalCrossEntropy.numClasses = sparseNumClasses.value();
         }
 
         categoricalCrossEntropy.softmaxAddedToNetwork = _softmaxAddedToNetwork.value_or(false);
+        categoricalCrossEntropy.logitsNativeLossAddedToNetwork = _logitsNativeLossAddedToNetwork.value_or(false);
+        categoricalCrossEntropy.ignoreIndex = _ignoreIndex;
+        categoricalCrossEntropy.maskTensor = _mask;
         categoricalCrossEntropy.predictionsTensor = _predictions.value();
         categoricalCrossEntropy.labelsTensor = _labels.value();
-        if (categoricalCrossEntropy.softmaxAddedToNetwork)
+        if (categoricalCrossEntropy.softmaxAddedToNetwork || categoricalCrossEntropy.logitsNativeLossAddedToNetwork)
             categoricalCrossEntropy.softmaxOutput = categoricalCrossEntropy.predictionsTensor;
         if (!_lossDataType.has_value())
             _lossDataType = DataType::FP32;
@@ -245,7 +281,14 @@ class CategoricalCrossEntropy::Builder {
             categoricalCrossEntropy.buildSupportLayersAndAddToNetwork();
         } else {
             THOR_THROW_IF_FALSE(categoricalCrossEntropy.lossShape == LossShape::RAW);
-            categoricalCrossEntropy.lossTensor = Tensor(_lossDataType.value(), predictionDimensions);
+            std::vector<uint64_t> rawLossDimensions = predictionDimensions;
+            if (categoricalCrossEntropy.labelType == LabelType::SPARSE && categoricalCrossEntropy.logitsNativeLossAddedToNetwork) {
+                if (rawLossDimensions.size() == 1)
+                    rawLossDimensions = {1};
+                else
+                    rawLossDimensions.pop_back();
+            }
+            categoricalCrossEntropy.lossTensor = Tensor(_lossDataType.value(), rawLossDimensions);
             categoricalCrossEntropy.lossShaperInput = categoricalCrossEntropy.lossTensor;
             categoricalCrossEntropy.addToNetwork(_network.value());
         }
@@ -261,6 +304,12 @@ class CategoricalCrossEntropy::Builder {
         return *this;
     }
 
+    virtual CategoricalCrossEntropy::Builder &logitsNativeLossAddedToNetwork() {
+        THOR_THROW_IF_FALSE(!_logitsNativeLossAddedToNetwork.has_value());
+        _logitsNativeLossAddedToNetwork = true;
+        return *this;
+    }
+
     std::optional<Network *> _network;
     std::optional<Tensor> _predictions;
     std::optional<Tensor> _labels;
@@ -268,6 +317,9 @@ class CategoricalCrossEntropy::Builder {
     std::optional<DataType> _lossDataType;
     std::optional<float> _lossWeight;
     std::optional<bool> _softmaxAddedToNetwork;
+    std::optional<bool> _logitsNativeLossAddedToNetwork;
+    std::optional<uint32_t> _ignoreIndex;
+    std::optional<Tensor> _mask;
 
     friend class CategoricalCrossEntropy;
     friend class SparseCategoricalCrossEntropy;
@@ -317,6 +369,19 @@ class SparseCategoricalCrossEntropy::Builder : public CategoricalCrossEntropy::B
         return *this;
     }
 
+    virtual SparseCategoricalCrossEntropy::Builder &ignoreIndex(uint32_t _ignoreIndex) {
+        THOR_THROW_IF_FALSE(!this->_ignoreIndex.has_value());
+        this->_ignoreIndex = _ignoreIndex;
+        return *this;
+    }
+
+    virtual SparseCategoricalCrossEntropy::Builder &mask(Tensor _mask) {
+        THOR_THROW_IF_FALSE(!this->_mask.has_value());
+        THOR_THROW_IF_FALSE(!_mask.getDimensions().empty());
+        this->_mask = _mask;
+        return *this;
+    }
+
     virtual SparseCategoricalCrossEntropy::Builder &reportsBatchLoss() {
         CategoricalCrossEntropy::Builder::reportsBatchLoss();
         return *this;
@@ -342,9 +407,19 @@ class SparseCategoricalCrossEntropy::Builder : public CategoricalCrossEntropy::B
         return *this;
     }
 
+    virtual SparseCategoricalCrossEntropy::Builder &lossWeight(float lossWeight) {
+        CategoricalCrossEntropy::Builder::lossWeight(lossWeight);
+        return *this;
+    }
+
    protected:
     virtual SparseCategoricalCrossEntropy::Builder &softmaxAddedToNetwork() {
         CategoricalCrossEntropy::Builder::softmaxAddedToNetwork();
+        return *this;
+    }
+
+    virtual SparseCategoricalCrossEntropy::Builder &logitsNativeLossAddedToNetwork() {
+        CategoricalCrossEntropy::Builder::logitsNativeLossAddedToNetwork();
         return *this;
     }
 

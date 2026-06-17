@@ -6,6 +6,42 @@ using json = nlohmann::json;
 
 namespace Thor {
 void CategoricalCrossEntropy::buildSupportLayersAndAddToNetwork() {
+    if (labelType == LabelType::SPARSE) {
+        THOR_THROW_IF_FALSE(!logitsNativeLossAddedToNetwork);
+        SparseCategoricalCrossEntropy::Builder sparseBuilder;
+        sparseBuilder.network(*network)
+            .predictions(predictionsTensor)
+            .labels(labelsTensor)
+            .numClasses(numClasses)
+            .logitsNativeLossAddedToNetwork()
+            .reportsRawLoss()
+            .lossDataType(lossDataType);
+        sparseBuilder.lossWeight(lossWeight.value_or(1.0f));
+        if (ignoreIndex.has_value())
+            sparseBuilder.ignoreIndex(ignoreIndex.value());
+        if (maskTensor.has_value())
+            sparseBuilder.mask(maskTensor.value());
+
+        SparseCategoricalCrossEntropy rawSparseCrossEntropy;
+        sparseBuilder.populateAndAdd(rawSparseCrossEntropy, LabelType::SPARSE, std::optional<uint32_t>(numClasses));
+        lossShaperInput = rawSparseCrossEntropy.getLoss();
+
+        if (lossShape == LossShape::BATCH) {
+            LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(lossShaperInput).reportsBatchLoss().build();
+            lossTensor = lossShaper.getLossOutput();
+        } else if (lossShape == LossShape::CLASSWISE) {
+            LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(lossShaperInput).reportsClasswiseLoss().build();
+            lossTensor = lossShaper.getLossOutput();
+        } else if (lossShape == LossShape::ELEMENTWISE) {
+            LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(lossShaperInput).reportsElementwiseLoss().build();
+            lossTensor = lossShaper.getLossOutput();
+        } else {
+            THOR_THROW_IF_FALSE(lossShape == LossShape::RAW);
+            lossTensor = lossShaperInput;
+        }
+        return;
+    }
+
     THOR_THROW_IF_FALSE(!softmaxAddedToNetwork);
     shared_ptr<Activation> softmax = Softmax::Builder().backwardComputedExternally().build();
     softmaxOutput = softmax->addToNetwork(predictionsTensor, network);
@@ -51,6 +87,12 @@ json CategoricalCrossEntropy::architectureJson() const {
     j["loss_data_type"] = lossDataType;
     j["labels_tensor"] = labelsTensor.architectureJson();
     j["predictions_tensor"] = predictionsTensor.architectureJson();
+    j["num_classes"] = numClasses;
+    j["logits_native"] = logitsNativeLossAddedToNetwork;
+    if (ignoreIndex.has_value())
+        j["ignore_index"] = ignoreIndex.value();
+    if (maskTensor.has_value())
+        j["mask_tensor"] = maskTensor.value().architectureJson();
     j["softmax_output_tensor"] = softmaxOutput.architectureJson();
     j["loss_shaper_input_tensor"] = lossShaperInput.architectureJson();
     j["loss_tensor"] = lossTensor.architectureJson();
@@ -72,17 +114,33 @@ void CategoricalCrossEntropy::deserializeInto(const json &j,
     categoricalCrossEntropy.labelType = labelType;
     categoricalCrossEntropy.lossShape = j.at("loss_shape").get<Loss::LossShape>();
     categoricalCrossEntropy.lossDataType = j.at("loss_data_type").get<DataType>();
+    categoricalCrossEntropy.numClasses = j.value("num_classes", 0u);
+    categoricalCrossEntropy.logitsNativeLossAddedToNetwork = j.value("logits_native", false);
+    if (j.contains("ignore_index"))
+        categoricalCrossEntropy.ignoreIndex = j.at("ignore_index").get<uint32_t>();
 
     categoricalCrossEntropy.lossWeight = ThorImplementation::lossWeightFromJson(j);
 
     uint64_t originalTensorId;
-    originalTensorId = j["softmax_output_tensor"].at("id").get<uint64_t>();
-    categoricalCrossEntropy.predictionsTensor = network->getApiTensorByOriginalId(originalTensorId);
+    if (categoricalCrossEntropy.logitsNativeLossAddedToNetwork) {
+        originalTensorId = j["predictions_tensor"].at("id").get<uint64_t>();
+        categoricalCrossEntropy.predictionsTensor = network->getApiTensorByOriginalId(originalTensorId);
+        categoricalCrossEntropy.softmaxOutput = categoricalCrossEntropy.predictionsTensor;
+    } else {
+        originalTensorId = j["softmax_output_tensor"].at("id").get<uint64_t>();
+        categoricalCrossEntropy.predictionsTensor = network->getApiTensorByOriginalId(originalTensorId);
+        categoricalCrossEntropy.softmaxAddedToNetwork = true;
+        categoricalCrossEntropy.softmaxOutput = categoricalCrossEntropy.predictionsTensor;
+    }
+
     originalTensorId = j["labels_tensor"].at("id").get<uint64_t>();
     categoricalCrossEntropy.labelsTensor = network->getApiTensorByOriginalId(originalTensorId);
 
-    categoricalCrossEntropy.softmaxAddedToNetwork = true;
-    categoricalCrossEntropy.softmaxOutput = categoricalCrossEntropy.predictionsTensor;
+    if (j.contains("mask_tensor")) {
+        originalTensorId = j["mask_tensor"].at("id").get<uint64_t>();
+        categoricalCrossEntropy.maskTensor = network->getApiTensorByOriginalId(originalTensorId);
+    }
+
     categoricalCrossEntropy.lossTensor = Tensor::deserialize(j["loss_shaper_input_tensor"]);
     categoricalCrossEntropy.lossShaperInput = categoricalCrossEntropy.lossTensor;
 

@@ -2,6 +2,8 @@
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/vector.h>
 
+#include <limits>
+
 #include "DeepLearning/Api/Layers/Loss/CategoricalCrossEntropy.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
@@ -89,6 +91,23 @@ void validateCategoricalCommon(const string &loss_name, Tensor predictions, Data
     }
     validateReportedLossShape(reported_loss_shape, loss_name);
 }
+
+void validateSparseMask(const string &loss_name, Tensor predictions, Tensor mask) {
+    if (!sparseLabelsMatchPredictionPrefix(predictions, mask)) {
+        const std::vector<uint64_t> predictionDims = predictions.getDimensions();
+        const std::vector<uint64_t> predictionPrefix(predictionDims.begin(), predictionDims.end() - 1);
+        string error_message = loss_name + ": mask dimensions " + dimsToString(mask.getDimensions()) +
+                               " must match predictions prefix dimensions " + dimsToString(predictionPrefix) +
+                               " or that prefix with a trailing singleton";
+        throw nb::value_error(error_message.c_str());
+    }
+    DataType maskDataType = mask.getDataType();
+    if (maskDataType != DataType::BOOLEAN && maskDataType != DataType::UINT8 && maskDataType != DataType::FP16 &&
+        maskDataType != DataType::FP32) {
+        string error_message = loss_name + ": mask must use bool, uint8, fp16, or fp32 dtype";
+        throw nb::value_error(error_message.c_str());
+    }
+}
 }  // namespace
 
 void bind_categorical_cross_entropy(nb::module_ &losses) {
@@ -169,7 +188,9 @@ Use SparseCategoricalCrossEntropy when labels are integer class ids.
            int32_t num_classes,
            DataType loss_data_type,
            LossShape reported_loss_shape,
-           std::optional<float> loss_weight) {
+           std::optional<float> loss_weight,
+           std::optional<int64_t> ignore_index,
+           std::optional<Tensor> mask) {
             const string loss_name = "SparseCategoricalCrossEntropy instance";
             validateCategoricalCommon(loss_name, predictions, loss_data_type, reported_loss_shape);
             if (num_classes <= 1) {
@@ -197,13 +218,24 @@ Use SparseCategoricalCrossEntropy when labels are integer class ids.
                 throw nb::value_error(error_message.c_str());
             }
 
+            if (ignore_index.has_value() && (ignore_index.value() < 0 || ignore_index.value() > int64_t(std::numeric_limits<uint32_t>::max()))) {
+                string error_message = loss_name + ": ignore_index must be between 0 and UINT32_MAX";
+                throw nb::value_error(error_message.c_str());
+            }
+            if (mask.has_value())
+                validateSparseMask(loss_name, predictions, mask.value());
+
             SparseCategoricalCrossEntropy::Builder builder;
             builder.network(network)
                 .predictions(predictions)
                 .labels(labels)
                 .numClasses(uint32_t(num_classes))
-                .lossDataType(loss_data_type)
-                .lossWeight(loss_weight.value_or(1.0f));
+                .lossDataType(loss_data_type);
+            builder.lossWeight(loss_weight.value_or(1.0f));
+            if (ignore_index.has_value())
+                builder.ignoreIndex(uint32_t(ignore_index.value()));
+            if (mask.has_value())
+                builder.mask(mask.value());
             setReportedLossShape(builder, reported_loss_shape);
             SparseCategoricalCrossEntropy built = builder.build();
 
@@ -217,6 +249,8 @@ Use SparseCategoricalCrossEntropy when labels are integer class ids.
         "reported_loss_shape"_a = LossShape::BATCH,
         nb::kw_only(),
         "loss_weight"_a.none() = nb::none(),
+        "ignore_index"_a.none() = nb::none(),
+        "mask"_a.none() = nb::none(),
         R"nbdoc(Construct a sparse categorical cross-entropy loss.)nbdoc");
 
     sparse_categorical_cross_entropy.attr("__doc__") = R"nbdoc(
@@ -234,13 +268,17 @@ num_classes : int
 loss_data_type : thor.DataType, default thor.DataType.FP32
 reported_loss_shape : thor.losses.LossShape, default batch
     This setting does not affect training; it only controls the reported loss tensor shape.
+ignore_index : int, optional keyword-only
+    Label id that contributes zero loss and zero logits gradient.
+mask : thor.Tensor, optional keyword-only
+    Prefix-shaped boolean/uint8/fp16/fp32 mask. Entries > 0.5 are valid; masked entries contribute zero loss and zero gradient.
 
 Notes
 -----
-Sparse categorical cross-entropy applies softmax internally and computes:
+Sparse categorical cross-entropy is logits-native: it computes logsumexp(logits) - logits[class_id]
+without materializing a separate softmax tensor or a per-class raw loss tensor. The raw loss shape is
+the predictions prefix shape, e.g. predictions [B, S, V] produce raw loss [B, S].
 
-    L = -\log(p_true)
-
-The logits gradient is dense and equivalent to p - one_hot(class_id).
+The logits gradient is dense and equivalent to softmax(logits) - one_hot(class_id).
 )nbdoc";
 }
