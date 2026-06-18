@@ -24,7 +24,7 @@
 namespace ThorImplementation {
 
 struct PhysicalExecutionStage {
-    enum class Kind { FusedKernel, CudaKernel, Reduction, ArgMinMax, Scan, Softmax, RmsNorm, EmbeddingLookup, Matmul, InPlaceRope, Attention, AttentionBackward, Convolution, ConvolutionBackward, ReduceMinMaxBackward, ScanMinMaxBackward };
+    enum class Kind { FusedKernel, CudaKernel, Reduction, ArgMinMax, SegmentedReduction, Scan, Softmax, RmsNorm, EmbeddingLookup, Matmul, InPlaceRope, Attention, AttentionBackward, Convolution, ConvolutionBackward, ReduceMinMaxBackward, ScanMinMaxBackward };
 
     Kind kind;
     PhysicalExpression expr;
@@ -54,6 +54,7 @@ class EquationCompiler {
 
     static std::shared_ptr<CompiledReduction> compileReduction(const PhysicalExpression& expr);
     static std::shared_ptr<CompiledArgMinMax> compileArgMinMax(const PhysicalExpression& expr);
+    static std::shared_ptr<CompiledSegmentedReduction> compileSegmentedReduction(const PhysicalExpression& expr);
     static std::shared_ptr<CompiledScan> compileScan(const PhysicalExpression& expr);
     static std::shared_ptr<CompiledSoftmax> compileSoftmax(const PhysicalExpression& expr);
     static std::shared_ptr<CompiledRmsNorm> compileRmsNorm(const PhysicalExpression& expr);

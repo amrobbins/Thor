@@ -19,15 +19,15 @@ class FakeLoader : public Loader {
    public:
     FakeLoader() { batchSize = 4; }
 
-    std::map<std::string, ThorImplementation::Tensor> getBatch(ExampleType exampleType, uint64_t& batchNum) override {
+    Batch getBatch(ExampleType exampleType, uint64_t& batchNum) override {
         (void)exampleType;
         (void)batchNum;
         return {};
     }
 
-    void returnBatchBuffers(ExampleType exampleType, std::map<std::string, ThorImplementation::Tensor>&& tensorMap) override {
+    void returnBatchBuffers(ExampleType exampleType, Batch&& batch) override {
         (void)exampleType;
-        (void)tensorMap;
+        (void)batch;
     }
 
     uint64_t getNumBatchesPerEpoch(ExampleType exampleType) override {

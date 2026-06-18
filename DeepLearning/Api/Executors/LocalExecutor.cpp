@@ -115,9 +115,9 @@ void CUDART_CB LocalExecutor::bufferStampTensors(void *data) {
     for (auto it = params->tensorsToReturn.begin(); it != params->tensorsToReturn.end(); ++it) {
         string tensorName = *it;
         ThorImplementation::Tensor copyFromTensor;
-        if (params->batchletInput.count(tensorName) == 1) {
+        if (params->batchletInput.contains(tensorName)) {
             THOR_THROW_IF_FALSE(params->batchletOutput.count(tensorName) == 0);
-            copyFromTensor = params->batchletInput[tensorName];
+            copyFromTensor = params->batchletInput.getTensor(tensorName);
         } else {
             THOR_THROW_IF_FALSE(params->batchletOutput.count(tensorName) == 1);
             copyFromTensor = params->batchletOutput[tensorName];
@@ -244,7 +244,9 @@ void LocalExecutor::trainBatches(uint64_t initialEpochBatchNum, uint64_t batches
 
             // Execute the stamp, noting the time taken using events.
             Event startBatchletEvent = stream.putEvent(true, false);
-            Event doneBatchletEvent = stampedNetwork.sendBatch(bufferStampTensorsParams->batchletInput,
+            std::map<std::string, ThorImplementation::Tensor> denseBatchletInput = denseTensorMapFromBatchOrThrow(
+                bufferStampTensorsParams->batchletInput, "LocalExecutor::trainBatches");
+            Event doneBatchletEvent = stampedNetwork.sendBatch(std::move(denseBatchletInput),
                                                                bufferStampTensorsParams->batchletOutput,
                                                                outputReadyEvents[nextStampToProcess],
                                                                validationPass);

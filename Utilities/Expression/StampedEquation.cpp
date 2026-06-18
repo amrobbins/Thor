@@ -1125,6 +1125,74 @@ void StampedArgMinMax::runOn(Stream& run_stream) const {
                                   (void*)reduction_value_output.getMemPtr()));
 }
 
+StampedSegmentedReduction::StampedSegmentedReduction(std::shared_ptr<CompiledSegmentedReduction> compiled,
+                                                     const Tensor& input,
+                                                     const Tensor& output,
+                                                     const Tensor& segment_offsets,
+                                                     const Stream& stream)
+    : compiled_segmented_reduction(std::move(compiled)), input(input), output(output), segment_offsets(segment_offsets), stream(stream) {
+    if (!compiled_segmented_reduction) {
+        throw std::runtime_error("StampedSegmentedReduction requires a compiled segmented reduction descriptor.");
+    }
+    if (input.getDataType() != compiled_segmented_reduction->input_dtype ||
+        output.getDataType() != compiled_segmented_reduction->output_dtype ||
+        segment_offsets.getDataType() != compiled_segmented_reduction->offset_dtype) {
+        throw std::runtime_error("Segmented-reduction tensor dtypes do not match the compiled descriptor.");
+    }
+    if (input.getPlacement() != output.getPlacement() || input.getPlacement() != segment_offsets.getPlacement()) {
+        throw std::runtime_error("Segmented-reduction input, output, and offsets must share one GPU placement.");
+    }
+    if (input.getDimensions().size() != 1) {
+        throw std::runtime_error("Segmented-reduction expression currently supports rank-1 scalar ragged values only.");
+    }
+    const std::vector<uint64_t> offset_dims = segment_offsets.getDimensions();
+    if (offset_dims.size() != 1 || offset_dims[0] == 0) {
+        throw std::runtime_error("Segmented-reduction offsets must be a non-empty rank-1 tensor of shape [num_segments + 1].");
+    }
+    const uint64_t num_items = input.getTotalNumElements();
+    const uint64_t num_segments = offset_dims[0] - 1;
+    if (output.getDimensions() != std::vector<uint64_t>{num_segments}) {
+        throw std::runtime_error("Segmented-reduction output must have shape [num_segments].");
+    }
+
+    size_t temp_storage_bytes = 1;
+    switch (compiled_segmented_reduction->op) {
+        case ExprOp::SEGMENTED_REDUCE_SUM:
+            sum_plan = prepareCubDeviceSegmentedReduceSum(input, output, segment_offsets, num_items, num_segments);
+            temp_storage_bytes = sum_plan.temp_storage_bytes;
+            break;
+        case ExprOp::SEGMENTED_REDUCE_MIN:
+            min_plan = prepareCubDeviceSegmentedReduceMin(input, output, segment_offsets, num_items, num_segments);
+            temp_storage_bytes = min_plan.temp_storage_bytes;
+            break;
+        case ExprOp::SEGMENTED_REDUCE_MAX:
+            max_plan = prepareCubDeviceSegmentedReduceMax(input, output, segment_offsets, num_items, num_segments);
+            temp_storage_bytes = max_plan.temp_storage_bytes;
+            break;
+        default:
+            throw std::runtime_error("Unsupported segmented-reduction op.");
+    }
+    temp_storage = Tensor(input.getPlacement(), TensorDescriptor(DataType::UINT8, {std::max<size_t>(temp_storage_bytes, 1)}));
+}
+
+void StampedSegmentedReduction::run() { runOn(stream); }
+
+void StampedSegmentedReduction::runOn(Stream& run_stream) const {
+    switch (compiled_segmented_reduction->op) {
+        case ExprOp::SEGMENTED_REDUCE_SUM:
+            cubDeviceSegmentedReduceSum(sum_plan, temp_storage, input, output, segment_offsets, run_stream);
+            break;
+        case ExprOp::SEGMENTED_REDUCE_MIN:
+            cubDeviceSegmentedReduceMin(min_plan, temp_storage, input, output, segment_offsets, run_stream);
+            break;
+        case ExprOp::SEGMENTED_REDUCE_MAX:
+            cubDeviceSegmentedReduceMax(max_plan, temp_storage, input, output, segment_offsets, run_stream);
+            break;
+        default:
+            throw std::runtime_error("Unsupported segmented-reduction op.");
+    }
+}
+
 StampedScan::StampedScan(std::shared_ptr<CompiledScan> compiled,
                          const Tensor& input,
                          const Tensor& output,

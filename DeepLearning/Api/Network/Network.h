@@ -12,6 +12,7 @@
 #include "DeepLearning/Api/Parameter/ParameterReference.h"
 #include "DeepLearning/Api/Parameter/BoundParameter.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "Utilities/Expression/CudaKernelSecurity.h"
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
@@ -136,6 +137,12 @@ class Network {
     Tensor resolveApiTensorByOriginalId(uint64_t originalId) const;
     Tensor getApiTensorByOriginalId(uint64_t originalId);
 
+    void registerRaggedNetworkInput(const std::string& name,
+                                    const RaggedTensor& raggedTensor,
+                                    const std::string& valuesInputName,
+                                    const std::string& offsetsInputName);
+    [[nodiscard]] bool hasRaggedNetworkInput(const std::string& name) const;
+
    protected:
     virtual StatusCode connect(bool inferenceOnly);
     void attachOptimizerToLayers(bool replaceIfExisting);
@@ -160,6 +167,14 @@ class Network {
     std::map<Tensor, std::shared_ptr<Layer>> apiTensorToApiDrivingLayer;
     std::map<std::shared_ptr<Layer>, std::vector<Tensor>, Network::LayerComparator> apiLayerToApiOutputTensors;
     std::map<std::shared_ptr<Layer>, std::vector<Tensor>, Network::LayerComparator> apiLayerToApiInputTensors;
+
+    struct RaggedNetworkInputRecord {
+        std::string name;
+        std::string valuesInputName;
+        std::string offsetsInputName;
+        RaggedTensor raggedTensor;
+    };
+    std::map<std::string, RaggedNetworkInputRecord> raggedNetworkInputs;
 
     std::shared_ptr<Optimizer> defaultOptimizer;
 

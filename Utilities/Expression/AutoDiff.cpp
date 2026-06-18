@@ -341,6 +341,9 @@ static bool isStageBoundaryLikeBackwardOutputOp(ExprOp op) {
         case ExprOp::REDUCE_NORM2:
         case ExprOp::SCAN:
         case ExprOp::SEGMENTED_SCAN:
+        case ExprOp::SEGMENTED_REDUCE_SUM:
+        case ExprOp::SEGMENTED_REDUCE_MIN:
+        case ExprOp::SEGMENTED_REDUCE_MAX:
         case ExprOp::REDUCE_MIN:
         case ExprOp::REDUCE_MAX:
         case ExprOp::SOFTMAX:
@@ -477,6 +480,11 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
             case ExprOp::REDUCE_NORM2:
             case ExprOp::SCAN:
             case ExprOp::SEGMENTED_SCAN:
+                reaches[i] = reaches.at(node.lhs);
+                break;
+            case ExprOp::SEGMENTED_REDUCE_SUM:
+            case ExprOp::SEGMENTED_REDUCE_MIN:
+            case ExprOp::SEGMENTED_REDUCE_MAX:
                 reaches[i] = reaches.at(node.lhs);
                 break;
             case ExprOp::MATMUL:
@@ -2483,6 +2491,17 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
             case ExprOp::SEGMENTED_SCAN:
                 node_dims[i] = node_dims[node.lhs];
                 break;
+            case ExprOp::SEGMENTED_REDUCE_SUM:
+            case ExprOp::SEGMENTED_REDUCE_MIN:
+            case ExprOp::SEGMENTED_REDUCE_MAX: {
+                const std::vector<uint64_t>& values_dims = node_dims[node.lhs];
+                const std::vector<uint64_t>& offsets_dims = node_dims[node.rhs];
+                if (values_dims.size() != 1 || offsets_dims.size() != 1 || offsets_dims[0] == 0) {
+                    throw std::runtime_error("inferForwardNodeDims segmented reduce currently requires rank-1 values and non-empty rank-1 offsets.");
+                }
+                node_dims[i] = std::vector<uint64_t>{offsets_dims[0] - 1};
+                break;
+            }
             case ExprOp::MATMUL:
                 node_dims[i] = inferMatmulOutputDims(node, node_dims[node.lhs], node_dims[node.rhs]);
                 break;
@@ -4108,6 +4127,11 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
             case ExprOp::ATTENTION_BACKWARD_V:
             case ExprOp::ATTENTION_BACKWARD_BIAS:
                 throw std::runtime_error("Thor expressions autodiff does not support second derivatives for attention backward yet.");
+
+            case ExprOp::SEGMENTED_REDUCE_SUM:
+            case ExprOp::SEGMENTED_REDUCE_MIN:
+            case ExprOp::SEGMENTED_REDUCE_MAX:
+                throw std::runtime_error("Thor expressions autodiff for segmented ragged reductions is deferred to the ragged autodiff chunk.");
 
             case ExprOp::SCAN:
             case ExprOp::SEGMENTED_SCAN: {

@@ -89,7 +89,7 @@ uint64_t LocalBatchLoader::getNumExamples(ExampleType exampleType) {
         THOR_UNREACHABLE();
 }
 
-map<string, Tensor> LocalBatchLoader::getBatch(ExampleType exampleType, uint64_t &batchNum) {
+Batch LocalBatchLoader::getBatch(ExampleType exampleType, uint64_t &batchNum) {
     map<string, Tensor> tensorMap;
 
     if (exampleType == ExampleType::TRAIN) {
@@ -102,12 +102,13 @@ map<string, Tensor> LocalBatchLoader::getBatch(ExampleType exampleType, uint64_t
         THOR_UNREACHABLE();
     }
 
-    return tensorMap;
+    return batchFromTensorMap(std::move(tensorMap));
 }
 
-void LocalBatchLoader::returnBatchBuffers(ExampleType exampleType, map<std::string, Tensor>&& tensorMap) {
-    THOR_THROW_IF_FALSE(tensorMap.count("examples") == 1);
-    THOR_THROW_IF_FALSE(tensorMap.count("labels") == 1);
+void LocalBatchLoader::returnBatchBuffers(ExampleType exampleType, Batch&& batch) {
+    THOR_THROW_IF_FALSE(batch.contains("examples"));
+    THOR_THROW_IF_FALSE(batch.contains("labels"));
+    map<std::string, Tensor> tensorMap = denseTensorMapFromBatchOrThrow(batch, "LocalBatchLoader::returnBatchBuffers");
 
     if (exampleType == ExampleType::TRAIN) {
         batchAssemblerTrain->returnBuffer(tensorMap["examples"], tensorMap["labels"]);

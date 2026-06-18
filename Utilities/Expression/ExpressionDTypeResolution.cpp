@@ -60,6 +60,9 @@ static bool isLogicalOp(ExprOp op) { return op == ExprOp::LOGICAL_AND || op == E
 static bool isWhereOp(ExprOp op) { return op == ExprOp::WHERE; }
 
 static bool isScanOp(ExprOp op) { return op == ExprOp::SCAN || op == ExprOp::SEGMENTED_SCAN; }
+static bool isSegmentedReduceOp(ExprOp op) {
+    return op == ExprOp::SEGMENTED_REDUCE_SUM || op == ExprOp::SEGMENTED_REDUCE_MIN || op == ExprOp::SEGMENTED_REDUCE_MAX;
+}
 
 static bool isCastOp(ExprOp op) { return op == ExprOp::CAST; }
 
@@ -100,7 +103,7 @@ DataType toSupportedComputeDType(ExprOp op, DataType requested_compute_dtype) {
         throw std::runtime_error("Unsupported passthrough dtype in toSupportedComputeDType.");
     }
 
-    if (isScanOp(op)) {
+    if (isScanOp(op) || isSegmentedReduceOp(op)) {
         switch (requested_compute_dtype) {
             case DataType::UINT32:
             case DataType::UINT64:
@@ -110,7 +113,7 @@ DataType toSupportedComputeDType(ExprOp op, DataType requested_compute_dtype) {
             case DataType::FP64:
                 return requested_compute_dtype;
             default:
-                throw std::runtime_error("Unsupported scan dtype in toSupportedComputeDType.");
+                throw std::runtime_error("Unsupported scan/segmented-reduction dtype in toSupportedComputeDType.");
         }
     }
 
@@ -356,6 +359,18 @@ static DataType resolveNodeLogicalInputDType(const ExprNode& node,
         return resolved_output_dtypes[node.lhs];
     }
 
+    if (isSegmentedReduceOp(node.op)) {
+        if (node.lhs >= resolved_output_dtypes.size() || node.rhs >= resolved_output_dtypes.size()) {
+            throw std::runtime_error("segmented-reduction node has parent index out of range in resolveNodeLogicalInputDType.");
+        }
+        const DataType offsets_dtype = resolved_output_dtypes[node.rhs];
+        if (offsets_dtype != DataType::UINT32 && offsets_dtype != DataType::UINT64) {
+            throw std::runtime_error("segmented-reduction offsets must have UINT32 or UINT64 dtype, received: " +
+                                     TensorDescriptor::getElementTypeName(offsets_dtype));
+        }
+        return resolved_output_dtypes[node.lhs];
+    }
+
     if (node.op == ExprOp::SCAN_MIN_BACKWARD || node.op == ExprOp::SCAN_MAX_BACKWARD ||
         node.op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD || node.op == ExprOp::SEGMENTED_SCAN_MAX_BACKWARD) {
         const bool segmented = node.op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD || node.op == ExprOp::SEGMENTED_SCAN_MAX_BACKWARD;
@@ -556,6 +571,22 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
         return default_output_dtype;
     }
 
+    if (isSegmentedReduceOp(node.op)) {
+        if (node.lhs >= resolved_output_dtypes.size() || node.rhs >= resolved_output_dtypes.size()) {
+            throw std::runtime_error("segmented-reduction node has parent index out of range in resolveNodeOutputDType.");
+        }
+        const DataType offsets_dtype = resolved_output_dtypes[node.rhs];
+        if (offsets_dtype != DataType::UINT32 && offsets_dtype != DataType::UINT64) {
+            throw std::runtime_error("segmented-reduction offsets must have UINT32 or UINT64 dtype, received: " +
+                                     TensorDescriptor::getElementTypeName(offsets_dtype));
+        }
+        const DataType input_dtype = resolved_output_dtypes[node.lhs];
+        if (node.output_dtype.has_value() && node.output_dtype.value() != input_dtype) {
+            throw std::runtime_error("Expression segmented reduction currently requires output dtype to match input dtype.");
+        }
+        return input_dtype;
+    }
+
 
     if (node.op == ExprOp::SCAN_MIN_BACKWARD || node.op == ExprOp::SCAN_MAX_BACKWARD ||
         node.op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD || node.op == ExprOp::SEGMENTED_SCAN_MAX_BACKWARD) {
@@ -748,6 +779,10 @@ static void propagateMaterializedOutputComputeDTypes(PhysicalExpression& expr,
             // Only floating-value branches should be widened by a materialized where output.
             propagate_to_floating_parent(node.rhs);
             propagate_to_floating_parent(node.aux);
+        } else if (isSegmentedReduceOp(node.op)) {
+            // Segment offsets are structural metadata; reduction compute dtype
+            // propagates only through values.
+            propagate_to_parent(node.lhs);
         } else if (node.op == ExprOp::SCAN_MIN_BACKWARD || node.op == ExprOp::SCAN_MAX_BACKWARD ||
                    node.op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD || node.op == ExprOp::SEGMENTED_SCAN_MAX_BACKWARD) {
             // Segmented-scan offsets are index metadata. Propagate the requested

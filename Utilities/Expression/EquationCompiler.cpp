@@ -594,6 +594,9 @@ static bool isScanMinMaxBackwardOp(ExprOp op) {
 }
 static bool isSoftmaxOp(ExprOp op) { return op == ExprOp::SOFTMAX; }
 static bool isScanOp(ExprOp op) { return op == ExprOp::SCAN || op == ExprOp::SEGMENTED_SCAN; }
+static bool isSegmentedReduceOp(ExprOp op) {
+    return op == ExprOp::SEGMENTED_REDUCE_SUM || op == ExprOp::SEGMENTED_REDUCE_MIN || op == ExprOp::SEGMENTED_REDUCE_MAX;
+}
 static bool isRmsNormOp(ExprOp op) { return op == ExprOp::RMSNORM; }
 static bool isEmbeddingLookupOp(ExprOp op) { return op == ExprOp::EMBEDDING_LOOKUP; }
 static bool isAttentionOp(ExprOp op) { return op == ExprOp::ATTENTION; }
@@ -610,7 +613,7 @@ static bool expressionHasIndexAwareOps(const PhysicalExpression& expr) {
 static bool isTransposeOp(ExprOp op) { return op == ExprOp::TRANSPOSE; }
 
 static bool isStageBoundaryOp(ExprOp op) {
-    return isCudnnReduceOp(op) || isSoftmaxOp(op) || isScanOp(op) || isRmsNormOp(op) || isMatmulOp(op) || isAttentionOp(op) ||
+    return isCudnnReduceOp(op) || isSoftmaxOp(op) || isScanOp(op) || isSegmentedReduceOp(op) || isRmsNormOp(op) || isMatmulOp(op) || isAttentionOp(op) ||
            isAttentionBackwardOp(op) || isConvolutionOp(op) || isReduceMinMaxBackwardOp(op) || isScanMinMaxBackwardOp(op) || isEmbeddingLookupOp(op) ||
            op == ExprOp::STRIDED_VIEW || op == ExprOp::CUDA_KERNEL_OUTPUT;
 }
@@ -937,6 +940,12 @@ static const char* fusedOpTag(ExprOp op) {
             return "SCAN";
         case ExprOp::SEGMENTED_SCAN:
             return "SEGMENTED_SCAN";
+        case ExprOp::SEGMENTED_REDUCE_SUM:
+            return "SEG_REDUCE_SUM";
+        case ExprOp::SEGMENTED_REDUCE_MIN:
+            return "SEG_REDUCE_MIN";
+        case ExprOp::SEGMENTED_REDUCE_MAX:
+            return "SEG_REDUCE_MAX";
         case ExprOp::RMSNORM:
             return "RMSNORM";
         case ExprOp::EMBEDDING_LOOKUP:
@@ -1117,6 +1126,9 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
             s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs +
                 ",algorithm=" + std::to_string(static_cast<int>(node.softmax_algorithm)) +
                 ",mode=" + std::to_string(static_cast<int>(node.softmax_mode)) + ")";
+        } else if (isSegmentedReduceOp(node.op)) {
+            const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
+            s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",offsets=" + rhs + ")";
         } else if (isScanOp(node.op)) {
             s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs;
             if (node.op == ExprOp::SEGMENTED_SCAN) {
@@ -1592,6 +1604,64 @@ shared_ptr<CompiledArgMinMax> EquationCompiler::compileArgMinMax(const PhysicalE
 
     return make_shared<CompiledArgMinMax>(
         node.op, node.reduction_axes, node.squeeze_axes, supported_input_dtype, node.output_dtype.value(), node.compute_dtype);
+}
+
+shared_ptr<CompiledSegmentedReduction> EquationCompiler::compileSegmentedReduction(const PhysicalExpression& expr) {
+    if (expr.numInputs() != 2) {
+        throw std::runtime_error("Segmented-reduction stage must have exactly two inputs: values and offsets.");
+    }
+    if (expr.output_node >= expr.nodes.size()) {
+        throw std::runtime_error("Segmented-reduction stage output_node is out of range.");
+    }
+
+    const ExprNode& node = expr.nodes[expr.output_node];
+    if (!isSegmentedReduceOp(node.op)) {
+        throw std::runtime_error("Segmented-reduction stage output node is not a supported segmented reduction op.");
+    }
+    if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || node.lhs >= expr.nodes.size() || node.rhs >= expr.nodes.size()) {
+        throw std::runtime_error("Segmented-reduction node is missing values or offsets input.");
+    }
+
+    const ExprNode& input_node = expr.nodes[node.lhs];
+    const ExprNode& offsets_node = expr.nodes[node.rhs];
+    if (input_node.op != ExprOp::INPUT || offsets_node.op != ExprOp::INPUT) {
+        throw std::runtime_error("Segmented-reduction stage inputs must be local INPUT nodes.");
+    }
+    if (!input_node.input_tensor_dtype.has_value() || !offsets_node.input_tensor_dtype.has_value()) {
+        throw std::runtime_error("Segmented-reduction input nodes missing resolved input_tensor_dtype.");
+    }
+    if (!node.output_dtype.has_value()) {
+        throw std::runtime_error("Segmented-reduction node missing resolved output_dtype.");
+    }
+    if (!isCubSegmentOffsetDTypeSupported(offsets_node.input_tensor_dtype.value())) {
+        throw std::runtime_error("Expression segmented-reduction offsets dtype is not supported by CUB.");
+    }
+
+    const DataType input_dtype = input_node.input_tensor_dtype.value();
+    if (input_dtype != node.output_dtype.value()) {
+        throw std::runtime_error("Expression segmented-reduction currently requires input/output dtypes to match.");
+    }
+    switch (node.op) {
+        case ExprOp::SEGMENTED_REDUCE_SUM:
+            if (!isCubSegmentedReduceSumDTypeSupported(input_dtype)) {
+                throw std::runtime_error("Expression segmented reduce-sum dtype is not supported by CUB.");
+            }
+            break;
+        case ExprOp::SEGMENTED_REDUCE_MIN:
+            if (!isCubSegmentedReduceMinDTypeSupported(input_dtype)) {
+                throw std::runtime_error("Expression segmented reduce-min dtype is not supported by CUB.");
+            }
+            break;
+        case ExprOp::SEGMENTED_REDUCE_MAX:
+            if (!isCubSegmentedReduceMaxDTypeSupported(input_dtype)) {
+                throw std::runtime_error("Expression segmented reduce-max dtype is not supported by CUB.");
+            }
+            break;
+        default:
+            throw std::runtime_error("Unsupported segmented-reduction op.");
+    }
+
+    return make_shared<CompiledSegmentedReduction>(node.op, input_dtype, node.output_dtype.value(), offsets_node.input_tensor_dtype.value());
 }
 
 shared_ptr<CompiledScan> EquationCompiler::compileScan(const PhysicalExpression& expr) {
@@ -3314,6 +3384,81 @@ static uint32_t findPairedScanNode(const PhysicalExpression& expr, uint32_t node
         }
     }
     return UINT32_MAX;
+}
+
+static PhysicalExecutionStage buildSegmentedReductionStage(const PhysicalExpression& expr,
+                                                              uint32_t node_idx,
+                                                              uint32_t output_value_id,
+                                                              const std::string& output_name,
+                                                              const std::unordered_map<uint32_t, uint32_t>& node_output_value_id) {
+    const ExprNode& node = expr.nodes.at(node_idx);
+    if (!isSegmentedReduceOp(node.op)) {
+        throw std::runtime_error("buildSegmentedReductionStage called on non-segmented-reduction node.");
+    }
+    if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || node.lhs >= expr.nodes.size() || node.rhs >= expr.nodes.size()) {
+        throw std::runtime_error("Segmented-reduction node missing values or offsets input.");
+    }
+
+    auto resolve_stage_parent = [&](uint32_t parent_idx, const char* what) -> std::pair<uint32_t, DataType> {
+        const ExprNode& parent = expr.nodes[parent_idx];
+        auto out_it = node_output_value_id.find(parent_idx);
+        if (out_it != node_output_value_id.end()) {
+            if (!parent.output_dtype.has_value()) {
+                throw std::runtime_error(std::string("Segmented-reduction ") + what + " parent node is missing output dtype.");
+            }
+            return {out_it->second, parent.output_dtype.value()};
+        }
+        if (parent.op == ExprOp::INPUT) {
+            if (!parent.input_tensor_dtype.has_value()) {
+                throw std::runtime_error(std::string("Segmented-reduction ") + what + " input node is missing input dtype.");
+            }
+            return {parent.input_slot, parent.input_tensor_dtype.value()};
+        }
+        throw std::runtime_error(std::string("Missing value id for segmented-reduction ") + what + ".");
+    };
+
+    const auto [values_value_id, values_dtype] = resolve_stage_parent(node.lhs, "values");
+    const auto [offsets_value_id, offsets_dtype] = resolve_stage_parent(node.rhs, "offsets");
+    if (!isCubSegmentOffsetDTypeSupported(offsets_dtype)) {
+        throw std::runtime_error("Expression segmented-reduction offsets dtype is not supported by CUB.");
+    }
+
+    PhysicalExpression stage_expr;
+    stage_expr.inputs.push_back(NamedInput{"__arg0", 0});
+    ExprNode values_node;
+    values_node.op = ExprOp::INPUT;
+    values_node.input_slot = 0;
+    values_node.input_tensor_dtype = values_dtype;
+    values_node.output_dtype = values_dtype;
+    values_node.compute_dtype = values_dtype;
+    values_node.backward_output_dtype = values_dtype;
+    values_node.backward_compute_dtype = values_dtype;
+    stage_expr.nodes.push_back(std::move(values_node));
+
+    stage_expr.inputs.push_back(NamedInput{"__arg1", 1});
+    ExprNode offsets_node;
+    offsets_node.op = ExprOp::INPUT;
+    offsets_node.input_slot = 1;
+    offsets_node.input_tensor_dtype = offsets_dtype;
+    offsets_node.output_dtype = offsets_dtype;
+    offsets_node.compute_dtype = offsets_dtype;
+    offsets_node.backward_output_dtype = offsets_dtype;
+    offsets_node.backward_compute_dtype = offsets_dtype;
+    stage_expr.nodes.push_back(std::move(offsets_node));
+
+    ExprNode reduction = node;
+    reduction.lhs = 0;
+    reduction.rhs = 1;
+    const uint32_t local_node_idx = static_cast<uint32_t>(stage_expr.nodes.size());
+    stage_expr.nodes.push_back(std::move(reduction));
+    stage_expr.output_node = local_node_idx;
+
+    return PhysicalExecutionStage{
+        .kind = PhysicalExecutionStage::Kind::SegmentedReduction,
+        .expr = std::move(stage_expr),
+        .input_value_ids = {values_value_id, offsets_value_id},
+        .outputs = {CompiledStageOutput{.name = output_name, .local_node_idx = local_node_idx, .value_id = output_value_id}},
+    };
 }
 
 static PhysicalExecutionStage buildScanStage(const PhysicalExpression& expr,
@@ -5811,7 +5956,7 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 ensureBoundaryParentEmitted(lhs_dependency_idx, "lhs", isCudnnReduceOp(root.op));
             }
             if (isReduceMinMaxBackwardOp(root.op) || isScanMinMaxBackwardOp(root.op) || isMatmulOp(root.op) || isEmbeddingLookupOp(root.op) ||
-                root.op == ExprOp::SEGMENTED_SCAN || isAttentionOp(root.op) || isAttentionBackwardOp(root.op) ||
+                root.op == ExprOp::SEGMENTED_SCAN || isSegmentedReduceOp(root.op) || isAttentionOp(root.op) || isAttentionBackwardOp(root.op) ||
                 isConvolutionOp(root.op)) {
                 if (!grouped_rope_roots.contains(rhs_dependency_idx)) {
                     ensureBoundaryParentEmitted(rhs_dependency_idx, "rhs", false);
@@ -5908,6 +6053,8 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 planned.stages.push_back(buildReduceMinMaxBackwardStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             } else if (isScanMinMaxBackwardOp(root.op)) {
                 planned.stages.push_back(buildScanMinMaxBackwardStage(expr, root_idx, stage_out_id, "", node_output_value_id));
+            } else if (isSegmentedReduceOp(root.op)) {
+                planned.stages.push_back(buildSegmentedReductionStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             } else if (isScanOp(root.op)) {
                 planned.stages.push_back(buildScanStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             } else if (isSoftmaxOp(root.op)) {
@@ -6190,7 +6337,7 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 ensureBoundaryParentEmitted(lhs_dependency_idx, "lhs", isCudnnReduceOp(root.op));
             }
             if (isReduceMinMaxBackwardOp(root.op) || isScanMinMaxBackwardOp(root.op) || isMatmulOp(root.op) || isEmbeddingLookupOp(root.op) ||
-                root.op == ExprOp::SEGMENTED_SCAN || isAttentionOp(root.op) || isAttentionBackwardOp(root.op) ||
+                root.op == ExprOp::SEGMENTED_SCAN || isSegmentedReduceOp(root.op) || isAttentionOp(root.op) || isAttentionBackwardOp(root.op) ||
                 isConvolutionOp(root.op)) {
                 if (!grouped_rope_roots.contains(rhs_dependency_idx)) {
                     ensureBoundaryParentEmitted(rhs_dependency_idx, "rhs", false);
@@ -6295,6 +6442,9 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             } else if (isScanMinMaxBackwardOp(root.op)) {
                 planned.stages.push_back(
                     buildScanMinMaxBackwardStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
+            } else if (isSegmentedReduceOp(root.op)) {
+                planned.stages.push_back(
+                    buildSegmentedReductionStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
             } else if (isScanOp(root.op)) {
                 planned.stages.push_back(
                     buildScanStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
@@ -6491,6 +6641,11 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
             case PhysicalExecutionStage::Kind::ArgMinMax: {
                 std::shared_ptr<CompiledArgMinMax> arg_minmax = compileArgMinMax(stage.expr);
                 compiled->stages.emplace_back(arg_minmax, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
+                break;
+            }
+            case PhysicalExecutionStage::Kind::SegmentedReduction: {
+                std::shared_ptr<CompiledSegmentedReduction> segmented_reduction = compileSegmentedReduction(stage.expr);
+                compiled->stages.emplace_back(segmented_reduction, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
                 break;
             }
             case PhysicalExecutionStage::Kind::Scan: {

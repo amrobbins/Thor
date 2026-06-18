@@ -160,7 +160,7 @@ class NumpyBatchLoader : public Loader {
         closeSplitQueues(test);
     }
 
-    std::map<std::string, ThorImplementation::Tensor> getBatch(ExampleType exampleType, uint64_t& batchNum) override {
+    Batch getBatch(ExampleType exampleType, uint64_t& batchNum) override {
         InMemoryNumpySplit<ScalarT>& split = mutableSplit(exampleType);
         const uint64_t batchesPerEpoch = getNumBatchesPerEpoch(exampleType);
         if (batchNum >= batchesPerEpoch) {
@@ -200,19 +200,20 @@ class NumpyBatchLoader : public Loader {
         queueOpen = split.labelQueue->getBufferToUnload(labels);
         THOR_THROW_IF_FALSE(queueOpen);
 
-        return {{exampleInputName, examples}, {labelInputName, labels}};
+        Batch batch;
+        batch.insert(exampleInputName, examples);
+        batch.insert(labelInputName, labels);
+        return batch;
     }
 
-    void returnBatchBuffers(ExampleType exampleType, std::map<std::string, ThorImplementation::Tensor>&& tensorMap) override {
+    void returnBatchBuffers(ExampleType exampleType, Batch&& batch) override {
         InMemoryNumpySplit<ScalarT>& split = mutableSplit(exampleType);
-        auto exampleIt = tensorMap.find(exampleInputName);
-        auto labelIt = tensorMap.find(labelInputName);
-        THOR_THROW_IF_FALSE(exampleIt != tensorMap.end());
-        THOR_THROW_IF_FALSE(labelIt != tensorMap.end());
+        THOR_THROW_IF_FALSE(batch.contains(exampleInputName));
+        THOR_THROW_IF_FALSE(batch.contains(labelInputName));
 
-        bool queueOpen = split.exampleQueue->bufferUnloaded(exampleIt->second);
+        bool queueOpen = split.exampleQueue->bufferUnloaded(batch.getTensor(exampleInputName));
         THOR_THROW_IF_FALSE(queueOpen);
-        queueOpen = split.labelQueue->bufferUnloaded(labelIt->second);
+        queueOpen = split.labelQueue->bufferUnloaded(batch.getTensor(labelInputName));
         THOR_THROW_IF_FALSE(queueOpen);
     }
 

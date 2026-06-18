@@ -47,7 +47,7 @@ struct BufferStampTensorsParams {
     uint64_t numBatchesInEpoch;
 
     std::set<std::string> tensorsToReturn;
-    std::map<std::string, ThorImplementation::Tensor> batchletInput;
+    Batch batchletInput;
     std::map<std::string, ThorImplementation::Tensor> batchletOutput;
 };
 

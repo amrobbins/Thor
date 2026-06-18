@@ -37,6 +37,12 @@ void StampedNetwork::initialize(bool initializeWeights, bool copyWeightsFromOthe
         THOR_THROW_IF_FALSE(inputNamed.count(it->first) == 1);
         THOR_THROW_IF_FALSE(inputNamed[it->first] == it->second.get());
     }
+    for (auto it = raggedInputNamedShared.begin(); it != raggedInputNamedShared.end(); ++it) {
+        THOR_THROW_IF_FALSE(raggedInputNamed.count(it->first) == 1);
+        THOR_THROW_IF_FALSE(raggedInputNamed[it->first].valuesInputName == it->second.valuesInputName);
+        THOR_THROW_IF_FALSE(raggedInputNamed[it->first].offsetsInputName == it->second.offsetsInputName);
+        THOR_THROW_IF_FALSE(raggedInputNamed[it->first].descriptor == it->second.descriptor);
+    }
     for (auto it = outputNamedShared.begin(); it != outputNamedShared.end(); ++it) {
         THOR_THROW_IF_FALSE(outputNamed.count(it->first) == 1);
         THOR_THROW_IF_FALSE(outputNamed[it->first] == it->second.get());
@@ -109,8 +115,6 @@ Event StampedNetwork::sendBatch(std::map<std::string, Tensor> batchInputs,
                                 bool isInferenceOnly,
                                 Event* reusableProcessingFinishedEvent,
                                 bool waitForOutputsOnProcessingStream) {
-    THOR_THROW_IF_FALSE(batchInputs.size() == inputs.size());
-
     std::optional<uint32_t> batchSize;
     for (const auto &[inputName, inputTensor] : batchInputs) {
         (void)inputName;
@@ -124,12 +128,78 @@ Event StampedNetwork::sendBatch(std::map<std::string, Tensor> batchInputs,
         }
     }
     THOR_THROW_IF_FALSE(batchSize.has_value());
+    return sendPhysicalBatch(std::move(batchInputs),
+                             batchOutputs,
+                             outputReadyEvents,
+                             isInferenceOnly,
+                             batchSize.value(),
+                             reusableProcessingFinishedEvent,
+                             waitForOutputsOnProcessingStream);
+}
+
+Event StampedNetwork::sendBatch(const Batch& batchInputs,
+                                std::map<std::string, Tensor> &batchOutputs,
+                                std::map<std::string, Event> &outputReadyEvents,
+                                bool isInferenceOnly,
+                                Event* reusableProcessingFinishedEvent,
+                                bool waitForOutputsOnProcessingStream) {
+    std::map<std::string, Tensor> physicalBatchInputs;
+    std::optional<uint32_t> batchSize;
+
+    auto requireConsistentBatchSize = [&batchSize](uint64_t candidate) {
+        THOR_THROW_IF_FALSE(candidate <= std::numeric_limits<uint32_t>::max());
+        if (!batchSize.has_value()) {
+            batchSize = static_cast<uint32_t>(candidate);
+        } else {
+            THOR_THROW_IF_FALSE(batchSize.value() == candidate);
+        }
+    };
+
+    for (const auto& [name, value] : batchInputs.values()) {
+        if (std::holds_alternative<Tensor>(value)) {
+            Tensor inputTensor = std::get<Tensor>(value);
+            const std::vector<uint64_t> dimensions = inputTensor.getDescriptor().getDimensions();
+            THOR_THROW_IF_FALSE(!dimensions.empty());
+            requireConsistentBatchSize(dimensions[0]);
+            THOR_THROW_IF_FALSE(physicalBatchInputs.emplace(name, inputTensor).second);
+        } else if (std::holds_alternative<RaggedTensor>(value)) {
+            auto raggedIt = raggedInputNamed.find(name);
+            THOR_THROW_IF_FALSE(raggedIt != raggedInputNamed.end());
+            const RaggedInputBinding& binding = raggedIt->second;
+            RaggedTensor raggedTensor = std::get<RaggedTensor>(value);
+            THOR_THROW_IF_FALSE(raggedTensor.getDescriptor() == binding.descriptor);
+            requireConsistentBatchSize(raggedTensor.getBatchSize());
+            THOR_THROW_IF_FALSE(physicalBatchInputs.emplace(binding.valuesInputName, raggedTensor.getValues()).second);
+            THOR_THROW_IF_FALSE(physicalBatchInputs.emplace(binding.offsetsInputName, raggedTensor.getOffsets()).second);
+        } else {
+            THOR_UNREACHABLE();
+        }
+    }
+
+    THOR_THROW_IF_FALSE(batchSize.has_value());
+    return sendPhysicalBatch(std::move(physicalBatchInputs),
+                             batchOutputs,
+                             outputReadyEvents,
+                             isInferenceOnly,
+                             batchSize.value(),
+                             reusableProcessingFinishedEvent,
+                             waitForOutputsOnProcessingStream);
+}
+
+Event StampedNetwork::sendPhysicalBatch(std::map<std::string, Tensor> batchInputs,
+                                        std::map<std::string, Tensor> &batchOutputs,
+                                        std::map<std::string, Event> &outputReadyEvents,
+                                        bool isInferenceOnly,
+                                        uint32_t batchSize,
+                                        Event* reusableProcessingFinishedEvent,
+                                        bool waitForOutputsOnProcessingStream) {
+    THOR_THROW_IF_FALSE(batchInputs.size() == inputs.size());
 
     for (uint32_t i = 0; i < inputs.size(); ++i) {
         auto it = batchInputs.find(inputs[i]->getName());
         THOR_THROW_IF_FALSE(it != batchInputs.end());
         Tensor inputTensor = it->second;
-        inputs[i]->forward(inputTensor, isInferenceOnly, batchSize.value());
+        inputs[i]->forward(inputTensor, isInferenceOnly, batchSize);
     }
 
     // Capture each NetworkOutput-owned ready event.  NetworkOutput may offload its
@@ -195,6 +265,7 @@ void StampedNetwork::clear() {
     physicalLayerToApiLayer.clear();
     apiTensorToApiDrivingLayer.clear();
     inputNamed.clear();
+    raggedInputNamed.clear();
     outputNamed.clear();
 
     inputsShared.clear();
@@ -206,6 +277,7 @@ void StampedNetwork::clear() {
     physicalLayerToApiLayerShared.clear();
     apiTensorToApiDrivingLayerShared.clear();
     inputNamedShared.clear();
+    raggedInputNamedShared.clear();
     outputNamedShared.clear();
 }
 

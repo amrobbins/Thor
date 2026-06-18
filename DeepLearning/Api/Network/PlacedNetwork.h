@@ -3,6 +3,7 @@
 
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/StampedNetwork.h"
+#include "DeepLearning/Api/Loaders/Batch.h"
 #include "DeepLearning/Api/Parameter/BoundParameter.h"
 #include "DeepLearning/Api/Parameter/ParameterReference.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
@@ -35,8 +36,16 @@ class PlacedNetwork {
 
     std::map<std::string, ThorImplementation::Tensor> infer(std::map<std::string, ThorImplementation::Tensor> batchInputs,
                                                             uint64_t stampIndex = 0);
+    std::map<std::string, ThorImplementation::Tensor> infer(const Batch& batchInputs, uint64_t stampIndex = 0);
     Event submitBatch(uint64_t stampIndex,
                       std::map<std::string, ThorImplementation::Tensor> batchInputs,
+                      std::map<std::string, ThorImplementation::Tensor>& batchOutputs,
+                      std::map<std::string, Event>& outputReadyEvents,
+                      bool isInferenceOnly,
+                      Event* reusableProcessingFinishedEvent = nullptr,
+                      bool waitForOutputsOnProcessingStream = true);
+    Event submitBatch(uint64_t stampIndex,
+                      const Batch& batchInputs,
                       std::map<std::string, ThorImplementation::Tensor>& batchOutputs,
                       std::map<std::string, Event>& outputReadyEvents,
                       bool isInferenceOnly,

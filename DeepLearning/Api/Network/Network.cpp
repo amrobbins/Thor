@@ -374,6 +374,14 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
             stampLayer(inputTensor.value(), layer, gpuNum, batchSize, stampedNetwork, inferenceOnly);
         }
 
+        for (const auto& [name, record] : raggedNetworkInputs) {
+            THOR_THROW_IF_FALSE(record.raggedTensor.getBatchSize() == batchSize);
+            ThorImplementation::StampedNetwork::RaggedInputBinding binding{
+                record.valuesInputName, record.offsetsInputName, record.raggedTensor.getDescriptor()};
+            stampedNetwork.raggedInputNamedShared[name] = binding;
+            stampedNetwork.raggedInputNamed[name] = binding;
+        }
+
         // 3. Now that all layers have been constructed and connected, compile all layers.
         //
         // Some physical layers are inserted by stamping and do not have a corresponding API layer.
@@ -572,6 +580,17 @@ void Network::save(vector<ThorImplementation::StampedNetwork> &stampedNetworks,
         if (stampIndex >= stampedNetworks.size())
             stampIndex = 0;
     }
+    if (!raggedNetworkInputs.empty()) {
+        modelJson["ragged_network_inputs"] = json::array();
+        for (const auto& [name, record] : raggedNetworkInputs) {
+            (void)name;
+            modelJson["ragged_network_inputs"].push_back(json{{"version", "1.0.0"},
+                                                             {"name", record.name},
+                                                             {"values_input_name", record.valuesInputName},
+                                                             {"offsets_input_name", record.offsetsInputName},
+                                                             {"ragged_tensor", record.raggedTensor.serialize(archiveWriter)}});
+        }
+    }
     if (defaultOptimizer != nullptr)
         modelJson["default_optimizer"] = defaultOptimizer->architectureJson();
 
@@ -597,6 +616,28 @@ void Network::save(vector<ThorImplementation::StampedNetwork> &stampedNetworks,
     archiveWriter.createArchive(directory, overwrite);
 }
 
+
+void Network::registerRaggedNetworkInput(const std::string& name,
+                                         const RaggedTensor& raggedTensor,
+                                         const std::string& valuesInputName,
+                                         const std::string& offsetsInputName) {
+    THOR_THROW_IF_FALSE(!name.empty());
+    THOR_THROW_IF_FALSE(raggedTensor.isInitialized());
+    THOR_THROW_IF_FALSE(!valuesInputName.empty());
+    THOR_THROW_IF_FALSE(!offsetsInputName.empty());
+    THOR_THROW_IF_FALSE(valuesInputName != offsetsInputName);
+    THOR_THROW_IF_FALSE(raggedNetworkInputs.count(name) == 0);
+
+    RaggedNetworkInputRecord record;
+    record.name = name;
+    record.valuesInputName = valuesInputName;
+    record.offsetsInputName = offsetsInputName;
+    record.raggedTensor = raggedTensor;
+    raggedNetworkInputs[name] = record;
+}
+
+bool Network::hasRaggedNetworkInput(const std::string& name) const { return raggedNetworkInputs.count(name) != 0; }
+
 json Network::architectureJson() const {
     json modelJson;
     modelJson["layers"] = json::array();
@@ -604,6 +645,17 @@ json Network::architectureJson() const {
     for (const shared_ptr<Layer> &layer : allLayersInNetworkList) {
         modelJson["layers"].push_back(layer->architectureJson());
         ++layerIndex;
+    }
+    if (!raggedNetworkInputs.empty()) {
+        modelJson["ragged_network_inputs"] = json::array();
+        for (const auto& [name, record] : raggedNetworkInputs) {
+            (void)name;
+            modelJson["ragged_network_inputs"].push_back(json{{"version", "1.0.0"},
+                                                             {"name", record.name},
+                                                             {"values_input_name", record.valuesInputName},
+                                                             {"offsets_input_name", record.offsetsInputName},
+                                                             {"ragged_tensor", record.raggedTensor.architectureJson()}});
+        }
     }
     if (defaultOptimizer != nullptr) {
         modelJson["default_optimizer"] = defaultOptimizer->architectureJson();
@@ -685,6 +737,24 @@ void Network::load(const string &directory,
     for (const json &layerJson : layers) {
         // printf("%s\n", layerJson.dump(4).c_str());
         Layer::deserialize(archiveReader, layerJson, this);
+    }
+
+    raggedNetworkInputs.clear();
+    if (modelJson.contains("ragged_network_inputs")) {
+        const json raggedInputs = modelJson["ragged_network_inputs"];
+        if (!raggedInputs.is_array()) {
+            throw runtime_error("\"ragged_network_inputs\" is not a JSON array");
+        }
+        for (const json& raggedInputJson : raggedInputs) {
+            if (raggedInputJson.at("version").get<string>() != "1.0.0") {
+                throw runtime_error("Unsupported ragged_network_inputs version: " + raggedInputJson.at("version").get<string>());
+            }
+            const string name = raggedInputJson.at("name").get<string>();
+            const string valuesInputName = raggedInputJson.at("values_input_name").get<string>();
+            const string offsetsInputName = raggedInputJson.at("offsets_input_name").get<string>();
+            RaggedTensor raggedTensor = RaggedTensor::deserialize(raggedInputJson.at("ragged_tensor"), archiveReader.get());
+            registerRaggedNetworkInput(name, raggedTensor, valuesInputName, offsetsInputName);
+        }
     }
 }
 
@@ -876,6 +946,15 @@ Network::StatusCode Network::checkForDuplicateInOutPortNames() {
             }
             inputNames.insert(networkInput->getName());
         }
+    }
+
+    for (const auto& [name, record] : raggedNetworkInputs) {
+        (void)record;
+        if (inputNames.count(name) != 0) {
+            printf("Duplicate network input name used: %s\n", name.c_str());
+            status = StatusCode::DUPLICATE_NAMED_NETWORK_INPUT;
+        }
+        inputNames.insert(name);
     }
 
     set<string> outputNames;

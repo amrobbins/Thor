@@ -1,6 +1,7 @@
 #include "DeepLearning/Api/Training/Executors/NativeQueuedTrainingRunner.h"
 
 #include "DeepLearning/Api/Loaders/Loader.h"
+#include "DeepLearning/Api/Loaders/Batch.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
@@ -27,6 +28,7 @@
 #include <thread>
 #include <utility>
 #include <vector>
+#include <variant>
 
 namespace Thor {
 
@@ -46,7 +48,7 @@ struct NativeBatchCompletionParams {
     uint64_t currentEpoch = 0;
     uint64_t epochBatchNum = 0;
     uint64_t slotIndex = 0;
-    std::map<std::string, ThorImplementation::Tensor> batchInput;
+    Batch batchInput;
     std::map<std::string, ThorImplementation::Tensor> batchOutput;
     std::vector<ScalarStatSlot> scalarStats;
 };
@@ -90,14 +92,13 @@ struct QueuedTrainingState {
     uint64_t numBatchesInEpoch = 0;
 };
 
-float copyScalarStatTensor(const std::map<std::string, ThorImplementation::Tensor>& batchInput,
+float copyScalarStatTensor(const Batch& batchInput,
                            const std::map<std::string, ThorImplementation::Tensor>& batchOutput,
                            const std::string& tensorName) {
     ThorImplementation::Tensor copyFromTensor;
-    auto inputIt = batchInput.find(tensorName);
     auto outputIt = batchOutput.find(tensorName);
-    if (inputIt != batchInput.end()) {
-        copyFromTensor = inputIt->second;
+    if (batchInput.contains(tensorName)) {
+        copyFromTensor = batchInput.getTensor(tensorName);
     } else if (outputIt != batchOutput.end()) {
         copyFromTensor = outputIt->second;
     } else {
@@ -329,16 +330,21 @@ void attachPlacementFallbackOptimizerIfNeeded(const TrainingRunRequest& request,
     }
 }
 
-std::map<std::string, ThorImplementation::Tensor> bindBatchInputs(const StepExecutable& step,
-                                                                  const std::map<std::string, ThorImplementation::Tensor>& batchInput) {
-    std::map<std::string, ThorImplementation::Tensor> bound;
+Batch bindBatchInputs(const StepExecutable& step, const Batch& batchInput) {
+    Batch bound;
     for (const TrainingInputBinding& binding : step.getResolvedInputBindings()) {
-        auto it = batchInput.find(binding.getBatchInputName());
-        if (it == batchInput.end()) {
+        if (!batchInput.contains(binding.getBatchInputName())) {
             throw std::runtime_error("Training batch is missing input '" + binding.getBatchInputName() + "' required for network input '" +
                                      binding.getNetworkInputName() + "'.");
         }
-        bound.emplace(binding.getNetworkInputName(), it->second);
+        const BatchValue& value = batchInput.at(binding.getBatchInputName());
+        if (std::holds_alternative<ThorImplementation::Tensor>(value)) {
+            bound.insert(binding.getNetworkInputName(), std::get<ThorImplementation::Tensor>(value));
+        } else if (std::holds_alternative<ThorImplementation::RaggedTensor>(value)) {
+            bound.insert(binding.getNetworkInputName(), std::get<ThorImplementation::RaggedTensor>(value));
+        } else {
+            THOR_UNREACHABLE();
+        }
     }
     return bound;
 }
@@ -435,7 +441,7 @@ struct BatchPopResult {
     uint64_t inFlightAfterPop = 0;
     uint64_t doneInEpoch = 0;
     uint64_t batchesInEpoch = 0;
-    std::map<std::string, ThorImplementation::Tensor> batchInput;
+    Batch batchInput;
     std::vector<ScalarStatSlot> scalarStats;
 };
 
@@ -689,10 +695,10 @@ class NativeQueuedEpochScheduler {
             const auto submitStart = std::chrono::high_resolution_clock::now();
             for (const StepExecutable& step : steps) {
                 for (uint32_t repeat = 0; repeat < step.getRepeatCount(); ++repeat) {
-                    std::map<std::string, ThorImplementation::Tensor> boundBatchInput = bindBatchInputs(step, params->batchInput);
+                    Batch boundBatchInput = bindBatchInputs(step, params->batchInput);
                     params->batchOutput.clear();
                     placedNetwork->submitBatch(nextStampToProcess,
-                                               std::move(boundBatchInput),
+                                               boundBatchInput,
                                                params->batchOutput,
                                                outputReadyEvents[nextStampToProcess],
                                                validationPass,

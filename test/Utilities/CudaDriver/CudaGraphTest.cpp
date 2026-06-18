@@ -3,6 +3,7 @@
 #include "DeepLearning/Implementation/Layers/Optimizers/SparseRowGradient.h"
 #include "Utilities/Expression/SparseRowUpdate.h"
 #include "Utilities/TensorOperations/Embedding/EmbeddingSparseGradient.h"
+#include "Utilities/TensorOperations/Ragged/RuntimeExtentCudaGraph.h"
 #include "Utilities/Expression/CudaHelpers.h"
 #include "Utilities/Expression/EquationCompiler.h"
 #include "Utilities/Expression/FusedEquation.h"
@@ -311,6 +312,48 @@ TEST(CudaGraphTest, CapturesSiblingBranchesOnExplicitStreams) {
     executable.launch(stream);
     std::vector<uint32_t> values = readGpuUint32Tensor(out, stream);
     EXPECT_EQ(values, (std::vector<uint32_t>{10U, 11U, 12U, 20U, 21U, 22U, 30U, 31U, 32U}));
+}
+
+
+TEST(CudaGraphTest, DeviceUpdatedGridCanUseRaggedOffsetsLastElementAlias) {
+    constexpr int deviceNum = 0;
+    Stream stream(deviceNum);
+    TestCudaModule module(deviceNum);
+    Tensor hostOffsets(cpuPlacement, TensorDescriptor(DataType::UINT32, {4}));
+    uint32_t* hostPtr = hostOffsets.getMemPtr<uint32_t>();
+    hostPtr[0] = 0U;
+    hostPtr[1] = 2U;
+    hostPtr[2] = 5U;
+    hostPtr[3] = 5U;
+    Tensor offsets(gpuPlacement, TensorDescriptor(DataType::UINT32, {4}));
+    offsets.copyFromAsync(hostOffsets, stream);
+    Tensor out(gpuPlacement, TensorDescriptor(DataType::UINT32, {8}));
+    DeviceUpdatableKernelNodeDeviceHandle targetHandle(deviceNum);
+
+    out.memsetAsync(stream, 0);
+    stream.synchronize();
+
+    RaggedRuntimeExtent extent = raggedRuntimeExtentFromOffsets(offsets, /*batch_size=*/3, /*max_total_values=*/8);
+    EXPECT_EQ(extent.activeValueCount.getMemPtr<uint32_t>(), offsets.getMemPtr<uint32_t>() + 3);
+
+    void* outPtr = out.getMemPtr();
+    void* args[] = {&outPtr};
+
+    CudaGraphCaptureBuilder builder(stream);
+    launchUpdateDeviceGrid1DFromScalar(raggedRuntimeExtentDynamicGrid1DDescriptor(extent, &targetHandle, /*target_block_dim_x=*/1), stream);
+    DeviceUpdatableKernelNode targetNode = builder.captureDeviceUpdatableKernel(
+        CudaGraphKernelLaunch{module.writeBlockX, dim3(1, 1, 1), dim3(1, 1, 1), 0, args, nullptr});
+    CudaGraphExecutable executable = builder.endCaptureAndInstantiate(stream);
+    targetHandle.upload(targetNode, stream);
+
+    executable.launch(stream);
+    expectPrefixAndZeros(readGpuUint32Tensor(out, stream), 5);
+
+    hostPtr[3] = 3U;
+    offsets.copyFromAsync(hostOffsets, stream);
+    out.memsetAsync(stream, 0);
+    executable.launch(stream);
+    expectPrefixAndZeros(readGpuUint32Tensor(out, stream), 3);
 }
 
 TEST(CudaGraphTest, DeviceUpdatedOneDimensionalGridUsesRuntimeDeviceScalarAcrossLaunches) {

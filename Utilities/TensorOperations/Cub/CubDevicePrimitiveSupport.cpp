@@ -507,6 +507,17 @@ void validateSegmentedReduceMax(const Tensor& input,
     }
 }
 
+void validateSegmentedReduceMin(const Tensor& input,
+                                const Tensor& output,
+                                const Tensor& segment_offsets,
+                                uint64_t num_items,
+                                uint64_t num_segments) {
+    validateSegmentedReduceCommon(input, output, segment_offsets, num_items, num_segments, "reduce-min");
+    if (!isCubSegmentedReduceMinDTypeSupported(input.getDataType())) {
+        throw std::invalid_argument("Unsupported CUB segmented reduce-min dtype " + dtypeName(input.getDataType()) + ".");
+    }
+}
+
 }  // namespace ThorImplementation::CubDevicePrimitiveSupport
 
 namespace ThorImplementation {
@@ -683,6 +694,7 @@ bool isCubSegmentedExclusiveSumDTypeSupported(DataType dtype) { return isCubExcl
 bool isCubSegmentedReduceSumDTypeSupported(DataType dtype) { return isCubExclusiveSumDTypeSupported(dtype); }
 
 bool isCubSegmentedReduceMaxDTypeSupported(DataType dtype) { return isCubExclusiveSumDTypeSupported(dtype); }
+bool isCubSegmentedReduceMinDTypeSupported(DataType dtype) { return isCubExclusiveSumDTypeSupported(dtype); }
 
 bool isCubSegmentOffsetDTypeSupported(DataType dtype) {
     switch (dtype) {

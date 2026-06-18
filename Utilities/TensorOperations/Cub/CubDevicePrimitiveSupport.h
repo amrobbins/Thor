@@ -107,6 +107,11 @@ void validateSegmentedReduceMax(const Tensor& input,
                                 const Tensor& segment_offsets,
                                 uint64_t num_items,
                                 uint64_t num_segments);
+void validateSegmentedReduceMin(const Tensor& input,
+                                const Tensor& output,
+                                const Tensor& segment_offsets,
+                                uint64_t num_items,
+                                uint64_t num_segments);
 
 template <typename Fn>
 decltype(auto) dispatchSortKeyDType(DataType dtype, Fn&& fn) {

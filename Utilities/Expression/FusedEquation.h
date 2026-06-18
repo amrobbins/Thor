@@ -38,6 +38,7 @@ struct CompiledExecutionStage {
         CudaKernel,
         Reduction,
         ArgMinMax,
+        SegmentedReduction,
         Scan,
         Softmax,
         RmsNorm,
@@ -61,6 +62,8 @@ struct CompiledExecutionStage {
                 return "Reduction";
             case Kind::ArgMinMax:
                 return "ArgMinMax";
+            case Kind::SegmentedReduction:
+                return "SegmentedReduction";
             case Kind::Scan:
                 return "Scan";
             case Kind::Softmax:
@@ -99,6 +102,7 @@ struct CompiledExecutionStage {
     const std::vector<DataType> cuda_kernel_output_dtypes = {};
     const std::shared_ptr<CompiledReduction> reduction = nullptr;
     const std::shared_ptr<CompiledArgMinMax> arg_minmax = nullptr;
+    const std::shared_ptr<CompiledSegmentedReduction> segmented_reduction = nullptr;
     const std::shared_ptr<CompiledScan> scan = nullptr;
     const std::shared_ptr<CompiledSoftmax> softmax = nullptr;
     const std::shared_ptr<CompiledRmsNorm> rms_norm = nullptr;
@@ -145,6 +149,12 @@ struct CompiledExecutionStage {
                     throw std::runtime_error("CompiledExecutionStage::outputDType missing arg-min/max stage.");
                 }
                 return arg_minmax->output_dtype;
+
+            case Kind::SegmentedReduction:
+                if (!segmented_reduction) {
+                    throw std::runtime_error("CompiledExecutionStage::outputDType missing segmented-reduction stage.");
+                }
+                return segmented_reduction->output_dtype;
 
             case Kind::Scan: {
                 if (!scan) {
@@ -283,6 +293,16 @@ struct CompiledExecutionStage {
                            std::vector<ParameterFanOverride> parameter_fan_overrides = {})
         : kind(Kind::ArgMinMax),
           arg_minmax(arg_minmax),
+          input_value_ids(std::move(input_value_ids)),
+          outputs(std::move(outputs)),
+          parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
+
+    CompiledExecutionStage(const std::shared_ptr<CompiledSegmentedReduction>& segmented_reduction,
+                           std::vector<uint32_t> input_value_ids,
+                           std::vector<CompiledStageOutput> outputs,
+                           std::vector<ParameterFanOverride> parameter_fan_overrides = {})
+        : kind(Kind::SegmentedReduction),
+          segmented_reduction(segmented_reduction),
           input_value_ids(std::move(input_value_ids)),
           outputs(std::move(outputs)),
           parameter_fan_overrides(std::move(parameter_fan_overrides)) {}

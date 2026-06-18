@@ -133,6 +133,18 @@ struct CompiledReduction {
     }
 };
 
+struct CompiledSegmentedReduction {
+    ExprOp op = ExprOp::SEGMENTED_REDUCE_SUM;
+    DataType input_dtype = DataType::FP32;
+    DataType output_dtype = DataType::FP32;
+    DataType offset_dtype = DataType::UINT32;
+
+    bool operator==(const CompiledSegmentedReduction& other) const = default;
+
+    CompiledSegmentedReduction(ExprOp op, DataType input_dtype, DataType output_dtype, DataType offset_dtype)
+        : op(op), input_dtype(input_dtype), output_dtype(output_dtype), offset_dtype(offset_dtype) {}
+};
+
 struct CompiledScan {
     const ScanOp op;
     const ScanMode mode;

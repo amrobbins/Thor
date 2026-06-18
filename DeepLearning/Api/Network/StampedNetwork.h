@@ -6,6 +6,8 @@
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
+#include "DeepLearning/Api/Loaders/Batch.h"
+#include "DeepLearning/Implementation/Tensor/RaggedTensorDescriptor.h"
 #include "Utilities/Common/Event.h"
 
 #include <vector>
@@ -46,6 +48,12 @@ class StampedNetwork {
     uint64_t getFloatingPointOperationsPerExampleTraining() const {
         return floatingPointOperationsPerExampleForward + floatingPointOperationsPerExampleBackward;
     }
+    struct RaggedInputBinding {
+        std::string valuesInputName;
+        std::string offsetsInputName;
+        ThorImplementation::RaggedTensorDescriptor descriptor;
+    };
+
     std::vector<std::shared_ptr<ThorImplementation::NetworkInput>> getInputs() { return inputsShared; }
     std::vector<std::shared_ptr<ThorImplementation::NetworkOutput>> getOutputs() { return outputsShared; }
 
@@ -96,6 +104,21 @@ class StampedNetwork {
                     Event* reusableProcessingFinishedEvent = nullptr,
                     bool waitForOutputsOnProcessingStream = true);
 
+    Event sendBatch(const Batch& batchInputs,
+                    std::map<std::string, Tensor> &batchOutputs,
+                    std::map<std::string, Event> &outputReadyEvents,
+                    bool isInferenceOnly,
+                    Event* reusableProcessingFinishedEvent = nullptr,
+                    bool waitForOutputsOnProcessingStream = true);
+
+    Event sendPhysicalBatch(std::map<std::string, Tensor> batchInputs,
+                            std::map<std::string, Tensor> &batchOutputs,
+                            std::map<std::string, Event> &outputReadyEvents,
+                            bool isInferenceOnly,
+                            uint32_t batchSize,
+                            Event* reusableProcessingFinishedEvent = nullptr,
+                            bool waitForOutputsOnProcessingStream = true);
+
     void extendOutputWritableEvents(Event event);
 
     void clear();
@@ -109,6 +132,7 @@ class StampedNetwork {
     std::map<std::shared_ptr<ThorImplementation::Layer>, uint64_t, StampedNetwork::LayerComparatorShared> physicalLayerToApiLayerShared;
     std::map<Thor::Tensor, std::shared_ptr<Thor::Layer>> apiTensorToApiDrivingLayerShared;
     std::map<std::string, std::shared_ptr<ThorImplementation::NetworkInput>> inputNamedShared;
+    std::map<std::string, RaggedInputBinding> raggedInputNamedShared;
     std::map<std::string, std::shared_ptr<ThorImplementation::NetworkOutput>> outputNamedShared;
 
     // std::map<uint64_t, std::shared_ptr<ThorImplementation::Parameterizable>> apiParameterizableToPhysicalParameterizable;
@@ -123,6 +147,7 @@ class StampedNetwork {
     std::map<ThorImplementation::Layer *, uint64_t, StampedNetwork::LayerComparator> physicalLayerToApiLayer;
     std::map<Thor::Tensor, Thor::Layer *> apiTensorToApiDrivingLayer;
     std::map<std::string, ThorImplementation::NetworkInput *> inputNamed;
+    std::map<std::string, RaggedInputBinding> raggedInputNamed;
     std::map<std::string, ThorImplementation::NetworkOutput *> outputNamed;
 
     uint32_t gpuNum;

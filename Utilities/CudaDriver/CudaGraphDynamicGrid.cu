@@ -28,7 +28,7 @@ void validateCountTensor(const Tensor& tensor, int gpuNum, const char* label) {
     if (tensor.getPlacement().getMemDevice() != TensorPlacement::MemDevices::GPU || tensor.getPlacement().getDeviceNum() != gpuNum) {
         throw std::invalid_argument(std::string("CUDA graph dynamic-grid ") + label + " tensor must live on the target GPU.");
     }
-    if (tensor.hasCustomStrides() || !tensor.isDenseContiguous()) {
+    if (!tensor.isDenseContiguous()) {
         throw std::invalid_argument(std::string("CUDA graph dynamic-grid ") + label + " tensor must be dense contiguous.");
     }
     if (tensor.getDimensions() != std::vector<uint64_t>{1}) {

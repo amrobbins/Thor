@@ -366,6 +366,12 @@ std::string exprOpExternalName(ExprOp op) {
             return "cuda_kernel_output";
         case ExprOp::SEGMENTED_SCAN:
             return "segmented_scan";
+        case ExprOp::SEGMENTED_REDUCE_SUM:
+            return "segmented_reduce_sum";
+        case ExprOp::SEGMENTED_REDUCE_MIN:
+            return "segmented_reduce_min";
+        case ExprOp::SEGMENTED_REDUCE_MAX:
+            return "segmented_reduce_max";
         default:
             throw std::runtime_error("Unknown ExprOp.");
     }
@@ -495,6 +501,9 @@ ExprOp exprOpFromExternalName(const std::string& op) {
         {"embedding_lookup", ExprOp::EMBEDDING_LOOKUP},
         {"cuda_kernel_output", ExprOp::CUDA_KERNEL_OUTPUT},
         {"segmented_scan", ExprOp::SEGMENTED_SCAN},
+        {"segmented_reduce_sum", ExprOp::SEGMENTED_REDUCE_SUM},
+        {"segmented_reduce_min", ExprOp::SEGMENTED_REDUCE_MIN},
+        {"segmented_reduce_max", ExprOp::SEGMENTED_REDUCE_MAX},
     };
 
     auto it = lookup.find(op);
@@ -1023,6 +1032,12 @@ std::string opName(ExprOp op) {
             return "SCAN";
         case ExprOp::SEGMENTED_SCAN:
             return "SEGMENTED_SCAN";
+        case ExprOp::SEGMENTED_REDUCE_SUM:
+            return "SEGMENTED_REDUCE_SUM";
+        case ExprOp::SEGMENTED_REDUCE_MIN:
+            return "SEGMENTED_REDUCE_MIN";
+        case ExprOp::SEGMENTED_REDUCE_MAX:
+            return "SEGMENTED_REDUCE_MAX";
         case ExprOp::RMSNORM:
             return "RMSNORM";
         case ExprOp::ATTENTION:
@@ -2159,6 +2174,9 @@ bool Expression::isBinaryOp(const ExprOp op) {
         case ExprOp::EMBEDDING_LOOKUP:
         case ExprOp::TAKE_ALONG_AXIS:
         case ExprOp::SEGMENTED_SCAN:
+        case ExprOp::SEGMENTED_REDUCE_SUM:
+        case ExprOp::SEGMENTED_REDUCE_MIN:
+        case ExprOp::SEGMENTED_REDUCE_MAX:
         case ExprOp::CONV2D:
         case ExprOp::CONV2D_BACKWARD_DATA:
         case ExprOp::CONV2D_BACKWARD_FILTER:
@@ -3445,11 +3463,11 @@ Expression Expression::scan(const Expression& input, ScanOp op, int64_t axis, bo
     return out;
 }
 
-Expression Expression::segmentedScan(const Expression& offsets, ScanOp op, bool inclusive) const {
-    return segmentedScan(*this, offsets, op, inclusive);
+Expression Expression::segmentedScan(const Expression& offsets, ScanOp op, bool inclusive, bool reverse) const {
+    return segmentedScan(*this, offsets, op, inclusive, reverse);
 }
 
-Expression Expression::segmentedScan(const Expression& input, const Expression& offsets, ScanOp op, bool inclusive) {
+Expression Expression::segmentedScan(const Expression& input, const Expression& offsets, ScanOp op, bool inclusive, bool reverse) {
     const ScanMode mode = scanModeFromInclusive(inclusive);
     validateScanAttributes(op, mode, "Expression::segmentedScan");
 
@@ -3458,7 +3476,24 @@ Expression Expression::segmentedScan(const Expression& input, const Expression& 
     node.scan_op = op;
     node.scan_mode = mode;
     node.scan_axis = UINT64_MAX;
+    node.scan_reverse = reverse;
     return out;
+}
+
+Expression Expression::segmentedReduceSum(const Expression& offsets) const { return segmentedReduceSum(*this, offsets); }
+Expression Expression::segmentedReduceMin(const Expression& offsets) const { return segmentedReduceMin(*this, offsets); }
+Expression Expression::segmentedReduceMax(const Expression& offsets) const { return segmentedReduceMax(*this, offsets); }
+
+Expression Expression::segmentedReduceSum(const Expression& input, const Expression& offsets) {
+    return binaryOp(input, offsets, ExprOp::SEGMENTED_REDUCE_SUM);
+}
+
+Expression Expression::segmentedReduceMin(const Expression& input, const Expression& offsets) {
+    return binaryOp(input, offsets, ExprOp::SEGMENTED_REDUCE_MIN);
+}
+
+Expression Expression::segmentedReduceMax(const Expression& input, const Expression& offsets) {
+    return binaryOp(input, offsets, ExprOp::SEGMENTED_REDUCE_MAX);
 }
 
 std::pair<Expression, Expression> Expression::scanWithIndices(ScanOp op, int64_t axis, bool inclusive) const {

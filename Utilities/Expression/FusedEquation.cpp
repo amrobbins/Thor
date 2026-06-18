@@ -3673,6 +3673,9 @@ static uint64_t computeFusedStageFlops(const PhysicalExpression& expr,
             case ExprOp::CUDA_KERNEL_OUTPUT:
             case ExprOp::SCAN:
             case ExprOp::SEGMENTED_SCAN:
+            case ExprOp::SEGMENTED_REDUCE_SUM:
+            case ExprOp::SEGMENTED_REDUCE_MIN:
+            case ExprOp::SEGMENTED_REDUCE_MAX:
             case ExprOp::EMBEDDING_LOOKUP:
             case ExprOp::SOFTMAX:
             case ExprOp::ATTENTION:
@@ -3911,6 +3914,13 @@ static uint64_t computeStageFlops(const CompiledExecutionStage& stage, const std
                 throw std::runtime_error("ArgMinMax stage missing payload while computing FLOPs.");
             return computeArgMinMaxStageFlops(*stage.arg_minmax, stage_input_dims);
 
+        case CompiledExecutionStage::Kind::SegmentedReduction:
+            if (!stage.segmented_reduction)
+                throw std::runtime_error("SegmentedReduction stage missing payload while computing FLOPs.");
+            if (stage_input_dims.empty())
+                throw std::runtime_error("SegmentedReduction stage missing input dims while computing FLOPs.");
+            return numelFromDims(stage_input_dims[0]);
+
         case CompiledExecutionStage::Kind::Scan:
             if (stage_input_dims.empty())
                 throw std::runtime_error("Scan stage missing input dims while computing FLOPs.");
@@ -4016,6 +4026,19 @@ static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecu
             const auto reduction_axes = resolveReductionAxesForInputRank(stage.arg_minmax->reduction_axes, stage_input_dims[0].size());
 
             return StampedEquation::computeReductionOutputDims(stage_input_dims[0], reduction_axes, stage.arg_minmax->squeeze_axes);
+        }
+
+        case CompiledExecutionStage::Kind::SegmentedReduction: {
+            if (!stage.segmented_reduction) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput segmented-reduction stage missing payload.");
+            }
+            if (stage_input_dims.size() != 2) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput segmented-reduction stage expected values and offsets shapes.");
+            }
+            if (stage_input_dims[0].size() != 1 || stage_input_dims[1].size() != 1 || stage_input_dims[1][0] == 0) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput segmented-reduction currently requires rank-1 values and non-empty rank-1 offsets.");
+            }
+            return std::vector<uint64_t>{stage_input_dims[1][0] - 1};
         }
 
         case CompiledExecutionStage::Kind::Scan: {
@@ -5284,6 +5307,17 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
 
             value_dims[stage.outputs[0].value_id] = StampedEquation::computeReductionOutputDims(
                 stage_input_dims[0], stage.arg_minmax->reduction_axes, stage.arg_minmax->squeeze_axes);
+        } else if (stage.kind == CompiledExecutionStage::Kind::SegmentedReduction) {
+            if (!stage.segmented_reduction) {
+                throw std::runtime_error("Missing compiled segmented-reduction stage.");
+            }
+            if (stage.input_value_ids.size() != 2 || stage.outputs.size() != 1) {
+                throw std::runtime_error("Segmented-reduction stage expected values, offsets, and one output.");
+            }
+            if (stage_input_dims[0].size() != 1 || stage_input_dims[1].size() != 1 || stage_input_dims[1][0] == 0) {
+                throw std::runtime_error("Segmented-reduction stage currently requires rank-1 values and non-empty rank-1 offsets.");
+            }
+            value_dims[stage.outputs[0].value_id] = std::vector<uint64_t>{stage_input_dims[1][0] - 1};
         } else if (stage.kind == CompiledExecutionStage::Kind::Scan) {
             if (!stage.scan) {
                 throw std::runtime_error("Missing compiled scan stage.");
@@ -7866,6 +7900,45 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 stampedStages.emplace_back(stampedArgMinMax, std::move(dependency_stage_indices), stage_flops);
                 break;
             }
+            case CompiledExecutionStage::Kind::SegmentedReduction: {
+                if (!stage.segmented_reduction) {
+                    throw std::runtime_error("Segmented-reduction stage missing compiled payload.");
+                }
+                if (stageInputs.size() != 2) {
+                    throw std::runtime_error("Segmented-reduction stage expects values and offsets inputs.");
+                }
+                if (stage.outputs.size() != 1) {
+                    throw std::runtime_error("Segmented-reduction stage expects exactly one output.");
+                }
+
+                Tensor inputTensor = runtimeInputTensor(stageInputs[0]);
+                Tensor offsetsTensor = runtimeInputTensor(stageInputs[1]);
+                const CompiledStageOutput& stageOutput = stage.outputs[0];
+
+                std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, 0, stageInputs);
+                auto requested_it = effectiveRequestedOutputShapes.find(stageOutput.name);
+                if (requested_it != effectiveRequestedOutputShapes.end() && !requested_it->second.empty()) {
+                    verifyRequestedOutputLayout(requested_it->second, output_dims);
+                    output_dims = requested_it->second;
+                }
+
+                auto preallocated_it = preallocated_final_outputs_by_name.find(stageOutput.name);
+                Tensor outputTensor;
+                if (preallocated_it != preallocated_final_outputs_by_name.end()) {
+                    outputTensor = preallocated_it->second;
+                } else {
+                    TensorDescriptor outputDescriptor(stage.segmented_reduction->output_dtype, output_dims);
+                    outputTensor = Tensor(inputTensor.getPlacement(), outputDescriptor);
+                }
+
+                std::shared_ptr<StampedSegmentedReduction> stampedSegmentedReduction =
+                    std::make_shared<StampedSegmentedReduction>(stage.segmented_reduction, inputTensor, outputTensor, offsetsTensor, stream);
+
+                values[stageOutput.value_id] = outputTensor;
+                producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
+                stampedStages.emplace_back(stampedSegmentedReduction, std::move(dependency_stage_indices), stage_flops);
+                break;
+            }
             case CompiledExecutionStage::Kind::Scan: {
                 if (!stage.scan) {
                     throw std::runtime_error("Scan stage missing compiled payload.");
@@ -8960,6 +9033,17 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
             }
             value_dims[stage.outputs[0].value_id] = StampedEquation::computeReductionOutputDims(
                 stage_input_dims[0], stage.arg_minmax->reduction_axes, stage.arg_minmax->squeeze_axes);
+        } else if (stage.kind == CompiledExecutionStage::Kind::SegmentedReduction) {
+            if (!stage.segmented_reduction) {
+                throw std::runtime_error("Missing compiled segmented-reduction stage.");
+            }
+            if (stage.input_value_ids.size() != 2 || stage.outputs.size() != 1) {
+                throw std::runtime_error("Segmented-reduction stage expected values, offsets, and one output.");
+            }
+            if (stage_input_dims[0].size() != 1 || stage_input_dims[1].size() != 1 || stage_input_dims[1][0] == 0) {
+                throw std::runtime_error("Segmented-reduction stage currently requires rank-1 values and non-empty rank-1 offsets.");
+            }
+            value_dims[stage.outputs[0].value_id] = std::vector<uint64_t>{stage_input_dims[1][0] - 1};
         } else if (stage.kind == CompiledExecutionStage::Kind::Scan) {
             if (!stage.scan) {
                 throw std::runtime_error("Missing compiled scan stage.");

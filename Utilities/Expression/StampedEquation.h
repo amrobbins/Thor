@@ -525,6 +525,33 @@ class StampedArgMinMax {
     const void* beta = &beta_0;
 };
 
+class StampedSegmentedReduction {
+   public:
+    void run();
+    void runOn(Stream& run_stream) const;
+
+    uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
+
+    Tensor getOutputTensor() const { return output; }
+
+    StampedSegmentedReduction(std::shared_ptr<CompiledSegmentedReduction> compiled,
+                              const Tensor& input,
+                              const Tensor& output,
+                              const Tensor& segment_offsets,
+                              const Stream& stream);
+
+   private:
+    const std::shared_ptr<CompiledSegmentedReduction> compiled_segmented_reduction;
+    const Tensor input;
+    mutable Tensor output;
+    const Tensor segment_offsets;
+    Tensor temp_storage;
+    Stream stream;
+    CubDeviceSegmentedReduceSumPlan sum_plan;
+    CubDeviceSegmentedReduceMinPlan min_plan;
+    CubDeviceSegmentedReduceMaxPlan max_plan;
+};
+
 class StampedScan {
    public:
     void run();
@@ -1013,7 +1040,7 @@ class StampedConditional {
 };
 
 struct StampedExecutionStage {
-    enum class Kind { FusedKernel, CudaKernel, Reduction, ArgMinMax, Scan, Softmax, RmsNorm, EmbeddingLookup, Matmul, InPlaceRope, Attention, AttentionBackward, Convolution, ConvolutionBackward, ReduceMinMaxBackward, ScanMinMaxBackward, Conditional };
+    enum class Kind { FusedKernel, CudaKernel, Reduction, ArgMinMax, SegmentedReduction, Scan, Softmax, RmsNorm, EmbeddingLookup, Matmul, InPlaceRope, Attention, AttentionBackward, Convolution, ConvolutionBackward, ReduceMinMaxBackward, ScanMinMaxBackward, Conditional };
     static std::string kindToString(const Kind kind) {
         switch (kind) {
             case Kind::FusedKernel:
@@ -1024,6 +1051,8 @@ struct StampedExecutionStage {
                 return "Reduction";
             case Kind::ArgMinMax:
                 return "ArgMinMax";
+            case Kind::SegmentedReduction:
+                return "SegmentedReduction";
             case Kind::Scan:
                 return "Scan";
             case Kind::Softmax:
@@ -1064,6 +1093,7 @@ struct StampedExecutionStage {
     const std::shared_ptr<StampedCudaKernel> cuda_kernel = nullptr;
     const std::shared_ptr<StampedReduction> reduction = nullptr;
     const std::shared_ptr<StampedArgMinMax> arg_minmax = nullptr;
+    const std::shared_ptr<StampedSegmentedReduction> segmented_reduction = nullptr;
     const std::shared_ptr<StampedScan> scan = nullptr;
     const std::shared_ptr<StampedSoftmax> softmax = nullptr;
     const std::shared_ptr<StampedRmsNorm> rms_norm = nullptr;
@@ -1113,6 +1143,15 @@ struct StampedExecutionStage {
           gpu_num(arg_minmax->gpuNum()),
           flop_count(flop_count),
           arg_minmax(arg_minmax) {}
+
+    explicit StampedExecutionStage(const std::shared_ptr<StampedSegmentedReduction>& segmented_reduction,
+                                   std::vector<uint32_t> dependency_stage_indices = {},
+                                   uint64_t flop_count = 0)
+        : kind(Kind::SegmentedReduction),
+          dependency_stage_indices(std::move(dependency_stage_indices)),
+          gpu_num(segmented_reduction->gpuNum()),
+          flop_count(flop_count),
+          segmented_reduction(segmented_reduction) {}
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedScan>& scan,
                                    std::vector<uint32_t> dependency_stage_indices = {},
@@ -1255,6 +1294,9 @@ struct StampedExecutionStage {
         } else if (kind == Kind::ArgMinMax) {
             THOR_THROW_IF_FALSE(arg_minmax != nullptr);
             arg_minmax->runOn(run_stream);
+        } else if (kind == Kind::SegmentedReduction) {
+            THOR_THROW_IF_FALSE(segmented_reduction != nullptr);
+            segmented_reduction->runOn(run_stream);
         } else if (kind == Kind::Scan) {
             THOR_THROW_IF_FALSE(scan != nullptr);
             scan->runOn(run_stream);

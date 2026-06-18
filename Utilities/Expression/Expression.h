@@ -134,6 +134,9 @@ enum class ExprOp : uint16_t {
     EMBEDDING_LOOKUP,
     CUDA_KERNEL_OUTPUT,
     SEGMENTED_SCAN,
+    SEGMENTED_REDUCE_SUM,
+    SEGMENTED_REDUCE_MIN,
+    SEGMENTED_REDUCE_MAX,
 };
 
 enum class RotaryScalingKind : uint8_t {
@@ -518,6 +521,9 @@ class Expression {
     }
 
     [[nodiscard]] PhysicalExpression expression() const;
+    [[nodiscard]] bool isSameLogicalNode(const Expression& other) const {
+        return expr && other.expr && expr.get() == other.expr.get() && nodeIndex == other.nodeIndex;
+    }
 
     [[nodiscard]] Expression operator+(const Expression& other) const;
     [[nodiscard]] Expression operator-(const Expression& other) const;
@@ -639,11 +645,19 @@ class Expression {
     [[nodiscard]] Expression prefixCount(bool inclusive = true, int64_t axis = -1) const;
     [[nodiscard]] Expression segmentedScan(const Expression& offsets,
                                            ScanOp op = ScanOp::Sum,
-                                           bool inclusive = true) const;
+                                           bool inclusive = true,
+                                           bool reverse = false) const;
     [[nodiscard]] static Expression segmentedScan(const Expression& input,
                                                   const Expression& offsets,
                                                   ScanOp op = ScanOp::Sum,
-                                                  bool inclusive = true);
+                                                  bool inclusive = true,
+                                                  bool reverse = false);
+    [[nodiscard]] Expression segmentedReduceSum(const Expression& offsets) const;
+    [[nodiscard]] Expression segmentedReduceMin(const Expression& offsets) const;
+    [[nodiscard]] Expression segmentedReduceMax(const Expression& offsets) const;
+    [[nodiscard]] static Expression segmentedReduceSum(const Expression& input, const Expression& offsets);
+    [[nodiscard]] static Expression segmentedReduceMin(const Expression& input, const Expression& offsets);
+    [[nodiscard]] static Expression segmentedReduceMax(const Expression& input, const Expression& offsets);
     [[nodiscard]] std::pair<Expression, Expression> scanWithIndices(ScanOp op, int64_t axis = -1, bool inclusive = true) const;
     [[nodiscard]] std::pair<Expression, Expression> segmentedScanWithIndices(const Expression& offsets,
                                                                              ScanOp op,

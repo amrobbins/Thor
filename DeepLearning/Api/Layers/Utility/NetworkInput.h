@@ -21,6 +21,7 @@ class NetworkInput : public Layer {
     virtual std::string getName() const { return name; }
     std::vector<uint64_t> getDimensions() const { return dimensions; }
     DataType getDataType() const { return dataType; }
+    bool dimensionsIncludeBatch() const { return dimensionsIncludeBatch_; }
 
     std::shared_ptr<Layer> clone() const override { return std::make_shared<NetworkInput>(*this); }
 
@@ -39,13 +40,18 @@ class NetworkInput : public Layer {
                                                                     uint32_t batchSize) const {
         THOR_THROW_IF_FALSE(initialized);
 
-        std::vector<uint64_t> batchDimensions;
-        batchDimensions.push_back(batchSize);
-        for (uint32_t i = 0; i < dimensions.size(); ++i)
-            batchDimensions.push_back(dimensions[i]);
+        std::vector<uint64_t> physicalDimensions;
+        if (dimensionsIncludeBatch_) {
+            (void)batchSize;
+            physicalDimensions = dimensions;
+        } else {
+            physicalDimensions.push_back(batchSize);
+            for (uint32_t i = 0; i < dimensions.size(); ++i)
+                physicalDimensions.push_back(dimensions[i]);
+        }
 
         std::shared_ptr<ThorImplementation::NetworkInput> networkInput =
-            std::make_shared<ThorImplementation::NetworkInput>(placement, dataType, batchDimensions);
+            std::make_shared<ThorImplementation::NetworkInput>(placement, dataType, physicalDimensions);
         networkInput->setName(name);
 
         return networkInput;
@@ -69,6 +75,7 @@ class NetworkInput : public Layer {
     std::string name;
     std::vector<uint64_t> dimensions;
     DataType dataType;
+    bool dimensionsIncludeBatch_ = false;
 
     friend class Network;
 };
@@ -87,6 +94,7 @@ class NetworkInput::Builder {
             networkInput.name = std::string("NetworkInput") + std::to_string(networkInput.getId());
         networkInput.dimensions = _dimensions.value();
         networkInput.dataType = _dataType.value();
+        networkInput.dimensionsIncludeBatch_ = _dimensionsIncludeBatch;
         networkInput.featureInput = Tensor(_dataType.value(), _dimensions.value());
         networkInput.featureOutput = Tensor(_dataType.value(), _dimensions.value());
         networkInput.initialized = true;
@@ -120,11 +128,17 @@ class NetworkInput::Builder {
         return *this;
     }
 
+    virtual NetworkInput::Builder &dimensionsIncludeBatch(bool includeBatch) {
+        this->_dimensionsIncludeBatch = includeBatch;
+        return *this;
+    }
+
    private:
     std::optional<std::string> _name;
     std::optional<Network *> _network;
     std::optional<std::vector<uint64_t>> _dimensions;
     std::optional<DataType> _dataType;
+    bool _dimensionsIncludeBatch = false;
 };
 
 }  // namespace Thor

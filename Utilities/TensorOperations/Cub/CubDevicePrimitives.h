@@ -311,6 +311,15 @@ struct CubDeviceSegmentedReduceMaxPlan {
     size_t temp_storage_bytes = 0;
 };
 
+struct CubDeviceSegmentedReduceMinPlan {
+    TensorPlacement placement;
+    DataType dtype = DataType::UINT32;
+    DataType offset_dtype = DataType::UINT32;
+    uint64_t num_items = 0;
+    uint64_t num_segments = 0;
+    size_t temp_storage_bytes = 0;
+};
+
 struct CubDeviceSegmentedRadixSortKeysPlan {
     TensorPlacement placement;
     DataType key_dtype = DataType::UINT8;
@@ -353,6 +362,7 @@ struct CubDeviceSegmentedRadixSortPairsPlan {
 [[nodiscard]] bool isCubSegmentedExclusiveSumDTypeSupported(DataType dtype);
 [[nodiscard]] bool isCubSegmentedReduceSumDTypeSupported(DataType dtype);
 [[nodiscard]] bool isCubSegmentedReduceMaxDTypeSupported(DataType dtype);
+[[nodiscard]] bool isCubSegmentedReduceMinDTypeSupported(DataType dtype);
 [[nodiscard]] bool isCubSegmentOffsetDTypeSupported(DataType dtype);
 
 [[nodiscard]] CubTemporaryStoragePlan cubTemporaryStoragePlan(const TensorPlacement& placement, size_t bytes);
@@ -1001,6 +1011,35 @@ void cubDeviceSegmentedReduceMax(const CubDeviceSegmentedReduceMaxPlan& plan,
                                  Stream& stream);
 
 void cubDeviceSegmentedReduceMax(const Tensor& temp_storage,
+                                 size_t temp_storage_bytes,
+                                 const Tensor& input,
+                                 Tensor& output,
+                                 const Tensor& segment_offsets,
+                                 uint64_t num_items,
+                                 uint64_t num_segments,
+                                 Stream& stream);
+
+[[nodiscard]] CubDeviceSegmentedReduceMinPlan prepareCubDeviceSegmentedReduceMin(
+    const Tensor& input,
+    const Tensor& output,
+    const Tensor& segment_offsets,
+    uint64_t num_items,
+    uint64_t num_segments);
+
+[[nodiscard]] size_t cubDeviceSegmentedReduceMinTempBytes(const Tensor& input,
+                                                          const Tensor& output,
+                                                          const Tensor& segment_offsets,
+                                                          uint64_t num_items,
+                                                          uint64_t num_segments);
+
+void cubDeviceSegmentedReduceMin(const CubDeviceSegmentedReduceMinPlan& plan,
+                                 const Tensor& temp_storage,
+                                 const Tensor& input,
+                                 Tensor& output,
+                                 const Tensor& segment_offsets,
+                                 Stream& stream);
+
+void cubDeviceSegmentedReduceMin(const Tensor& temp_storage,
                                  size_t temp_storage_bytes,
                                  const Tensor& input,
                                  Tensor& output,
