@@ -59,6 +59,7 @@ struct QueuedBatchSlot {
     bool ready = false;
     uint64_t epochBatchNum = 0;
     uint64_t paramsIndex = 0;
+    std::chrono::high_resolution_clock::time_point completionTime{};
     std::vector<ScalarStatSlot> scalarStats;
 };
 
@@ -387,6 +388,12 @@ void CUDART_CB completeNativeQueuedBatch(void* data) {
             THOR_THROW_IF_FALSE(slot.epochBatchNum == epochBatchNum);
             THOR_THROW_IF_FALSE(slot.scalarStats.size() == params->scalarStats.size());
             slot.scalarStats = params->scalarStats;
+            // Timestamp the batch when the completion callback has actually observed the
+            // GPU work and required output copies as complete. Throughput must be based
+            // on completion times, not on when the consumer thread later pops an already
+            // ready slot; otherwise draining a backlog of completed slots can create
+            // impossible end-of-epoch rate spikes.
+            slot.completionTime = std::chrono::high_resolution_clock::now();
             slot.ready = true;
             state->numBatchesDoneInEpoch += 1;
             inFlightAtComplete = state->inFlightBatches;
@@ -417,6 +424,7 @@ void CUDART_CB completeNativeQueuedBatch(void* data) {
         if (slotIndex < state->slots.size()) {
             QueuedBatchSlot& slot = state->slots[slotIndex];
             if (slot.occupied && slot.epochBatchNum == epochBatchNum) {
+                slot.completionTime = std::chrono::high_resolution_clock::now();
                 slot.ready = true;
             }
         }
@@ -455,6 +463,7 @@ struct BatchPopResult {
     uint64_t inFlightAfterPop = 0;
     uint64_t doneInEpoch = 0;
     uint64_t batchesInEpoch = 0;
+    std::chrono::high_resolution_clock::time_point completionTime{};
     Batch batchInput;
     std::vector<ScalarStatSlot> scalarStats;
 };
@@ -481,6 +490,7 @@ BatchPopResult popBatchData(const std::shared_ptr<QueuedTrainingState>& state) {
     result.slotIndex = state->headSlot;
     result.doneInEpoch = state->numBatchesDoneInEpoch;
     result.batchesInEpoch = state->numBatchesInEpoch;
+    result.completionTime = slot.completionTime;
     result.batchInput = std::move(params.batchInput);
     result.scalarStats = slot.scalarStats;
 
@@ -662,6 +672,7 @@ class NativeQueuedEpochScheduler {
                 slot.ready = false;
                 slot.epochBatchNum = epochBatchNum;
                 slot.paramsIndex = slotIndex;
+                slot.completionTime = {};
                 for (ScalarStatSlot& scalarStat : slot.scalarStats) {
                     scalarStat.present = false;
                     scalarStat.value = 0.0f;
@@ -988,7 +999,8 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                 }
             };
 
-            auto previousBatchDone = std::chrono::high_resolution_clock::now();
+            std::chrono::high_resolution_clock::time_point previousBatchCompletionTime{};
+            bool havePreviousBatchCompletionTime = false;
             bool haveCompletedBatchTimingInPhase = false;
             try {
                 while (true) {
@@ -1025,28 +1037,35 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                     }
 
                     if (request.runtime.statsEnabled) {
-                        const auto now = std::chrono::high_resolution_clock::now();
-                        const std::chrono::duration<double> elapsed =
-                            std::chrono::duration_cast<std::chrono::duration<double>>(now - previousBatchDone);
-                        previousBatchDone = now;
-
                         double& averageBatchTime = (phase == TrainingEventPhase::TRAIN) ? averageTrainingBatchTime : averageValidationBatchTime;
-                        const double completedBatchTime = elapsed.count();
+                        double completedBatchTime = -1.0;
+                        if (havePreviousBatchCompletionTime && completedBatch.completionTime > previousBatchCompletionTime) {
+                            const std::chrono::duration<double> elapsed =
+                                std::chrono::duration_cast<std::chrono::duration<double>>(completedBatch.completionTime - previousBatchCompletionTime);
+                            completedBatchTime = elapsed.count();
+                        }
+                        previousBatchCompletionTime = completedBatch.completionTime;
+                        havePreviousBatchCompletionTime = true;
+
                         double batchTimeForStats = completedBatchTime;
-                        if (haveCompletedBatchTimingInPhase) {
-                            if (averageBatchTime < 0.0) {
-                                averageBatchTime = completedBatchTime;
-                            } else {
-                                averageBatchTime = 0.25 * completedBatchTime + 0.75 * averageBatchTime;
+                        if (completedBatchTime > 0.0) {
+                            if (haveCompletedBatchTimingInPhase) {
+                                if (averageBatchTime < 0.0) {
+                                    averageBatchTime = completedBatchTime;
+                                } else {
+                                    averageBatchTime = 0.25 * completedBatchTime + 0.75 * averageBatchTime;
+                                }
+                                batchTimeForStats = averageBatchTime;
+                            } else if (averageBatchTime > 0.0) {
+                                // The first completion in a phase includes queue fill and any loader/startup
+                                // latency before the pipeline reaches steady state. Use the previous phase EMA
+                                // for the current line, but do not let the first interval poison the EMA.
+                                batchTimeForStats = averageBatchTime;
                             }
-                            batchTimeForStats = averageBatchTime;
+                            haveCompletedBatchTimingInPhase = true;
                         } else if (averageBatchTime > 0.0) {
-                            // The first completion in a phase includes queue fill and any loader/startup
-                            // latency before the pipeline reaches steady state.  Use it for the current
-                            // line only when no prior phase average exists; do not let it poison the EMA.
                             batchTimeForStats = averageBatchTime;
                         }
-                        haveCompletedBatchTimingInPhase = true;
 
                         TrainingStatsSnapshot snapshot = makeBaseSnapshot(phase, humanEpoch, batchSize, batchesPerEpoch, state);
                         snapshot.stepInEpoch = batchNum + 1;

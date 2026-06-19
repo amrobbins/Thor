@@ -814,17 +814,17 @@ def test_training_runs_digits_dense_five_fold_cross_validation(capfd):
             )
             run_specs.append((f"fold_{fold_index}", trainer, "digits_dense_cv5"))
 
-        # for fold in cv_manifest["folds"][:3]:
-        #     fold_index = int(fold["fold_index"])
-        #     trainer = make_fold_trainer(
-        #         fold=fold,
-        #         run_name=f"alt_fold_{fold_index}",
-        #         model_name=f"python_integration_digits_dense_alt3_fold_{fold_index}",
-        #         width=DIGITS_DENSE_CV5_ALT_WIDTH,
-        #         hidden_layers=DIGITS_DENSE_CV5_ALT_HIDDEN_LAYERS,
-        #         save_model_dir=artifact_root / f"alt_fold_{fold_index}",
-        #     )
-        #     run_specs.append((f"alt_fold_{fold_index}", trainer, "digits_dense_alt3"))
+        for fold in cv_manifest["folds"][:3]:
+            fold_index = int(fold["fold_index"])
+            trainer = make_fold_trainer(
+                fold=fold,
+                run_name=f"alt_fold_{fold_index}",
+                model_name=f"python_integration_digits_dense_alt3_fold_{fold_index}",
+                width=DIGITS_DENSE_CV5_ALT_WIDTH,
+                hidden_layers=DIGITS_DENSE_CV5_ALT_HIDDEN_LAYERS,
+                save_model_dir=artifact_root / f"alt_fold_{fold_index}",
+            )
+            run_specs.append((f"alt_fold_{fold_index}", trainer, "digits_dense_alt3"))
 
         runs = thor.training.TrainingRuns(
             run_specs,
