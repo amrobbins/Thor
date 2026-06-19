@@ -89,6 +89,28 @@ uint64_t product(const std::vector<uint64_t>& values) {
     return result;
 }
 
+std::optional<std::string> optionalPathStringFromPython(const nb::object& obj, const std::string& argumentName) {
+    if (obj.is_none()) {
+        return std::nullopt;
+    }
+
+    nb::object pathObject;
+    try {
+        pathObject = nb::module_::import_("os").attr("fspath")(obj);
+    } catch (const nb::python_error&) {
+        throw nb::type_error((argumentName + " must be str, bytes, os.PathLike, or None").c_str());
+    }
+
+    if (nb::isinstance<nb::bytes>(pathObject)) {
+        pathObject = nb::module_::import_("os").attr("fsdecode")(pathObject);
+    }
+    std::string path = nb::cast<std::string>(pathObject);
+    if (path.empty()) {
+        throw nb::value_error((argumentName + " must not be empty").c_str());
+    }
+    return path;
+}
+
 template <typename ScalarT, typename ArrayT>
 void copyNumpyArrayBytes(std::vector<uint8_t>& dest, const ArrayT& src) {
     const size_t bytes = src.size() * sizeof(ScalarT);
@@ -647,7 +669,7 @@ calling this helper.
            std::vector<std::string> scalar_tensors_to_report,
            bool stats_stderr_also,
            std::string stats_color,
-           std::optional<std::string> save_model_dir,
+           nb::object save_model_dir,
            bool save_model_overwrite,
            bool save_optimizer_state) -> std::shared_ptr<Trainer> {
             (void)cls;
@@ -660,7 +682,7 @@ calling this helper.
                 .statsColorMode(lineStatsColorModeFromString(stats_color))
                 .maxInFlightBatches(max_in_flight_batches)
                 .scalarTensorsToReport(stringSetFromVector(std::move(scalar_tensors_to_report)))
-                .saveModelDirectory(std::move(save_model_dir))
+                .saveModelDirectory(optionalPathStringFromPython(save_model_dir, "save_model_dir"))
                 .saveModelOverwrite(save_model_overwrite)
                 .saveOptimizerState(save_optimizer_state);
             if (optimizer != nullptr) {
@@ -703,7 +725,7 @@ calling this helper.
            std::vector<std::string>,
            bool,
            std::string,
-           std::optional<std::string>,
+           nb::object,
            bool,
            bool) {},
         "network"_a,
@@ -813,6 +835,15 @@ calling this helper.
     training_run_result.def("failed", &TrainingRunResult::failed);
     training_run_result.def("cancelled", &TrainingRunResult::cancelled);
 
+    auto training_run_input_signature = nb::class_<TrainingRunInputSignature>(training, "TrainingRunInputSignature");
+    training_run_input_signature.attr("__module__") = "thor.training";
+    training_run_input_signature.def_prop_ro("input_name", [](const TrainingRunInputSignature& self) { return self.inputName; });
+    training_run_input_signature.def_prop_ro("dimensions", [](const TrainingRunInputSignature& self) { return self.dimensions; });
+    training_run_input_signature.def_prop_ro("data_type", [](const TrainingRunInputSignature& self) { return self.dataType; });
+    training_run_input_signature.def_prop_ro("dimensions_include_batch", [](const TrainingRunInputSignature& self) {
+        return self.dimensionsIncludeBatch;
+    });
+
     auto training_run_output_signature = nb::class_<TrainingRunOutputSignature>(training, "TrainingRunOutputSignature");
     training_run_output_signature.attr("__module__") = "thor.training";
     training_run_output_signature.def_prop_ro("output_name", [](const TrainingRunOutputSignature& self) { return self.outputName; });
@@ -833,6 +864,7 @@ calling this helper.
     training_ensemble_result.attr("__module__") = "thor.training";
     training_ensemble_result.def_prop_ro("ensemble_group", [](const TrainingEnsembleResult& self) { return self.ensembleGroup; });
     training_ensemble_result.def_prop_ro("members", [](const TrainingEnsembleResult& self) { return self.members; });
+    training_ensemble_result.def_prop_ro("input_signature", [](const TrainingEnsembleResult& self) { return self.inputSignature; });
     training_ensemble_result.def_prop_ro("output_signature", [](const TrainingEnsembleResult& self) { return self.outputSignature; });
     training_ensemble_result.def("__len__", &TrainingEnsembleResult::size);
     training_ensemble_result.def("__bool__", [](const TrainingEnsembleResult& self) { return !self.empty(); });
@@ -840,26 +872,14 @@ calling this helper.
     training_ensemble_result.def("any_failed", &TrainingEnsembleResult::anyFailed);
     training_ensemble_result.def_prop_ro("total_weight", &TrainingEnsembleResult::totalWeight);
     training_ensemble_result.def_prop_ro("status_counts", &TrainingEnsembleResult::statusCounts);
-    training_ensemble_result.def("weighted_final_loss", [](const TrainingEnsembleResult& self, const std::string& phase) {
-        return optionalDouble(self.weightedFinalLossForPhase(trainingEventPhaseFromString(phase)));
-    }, "phase"_a);
-    training_ensemble_result.def_prop_ro("weighted_final_training_loss", [](const TrainingEnsembleResult& self) {
-        return optionalDouble(self.weightedFinalTrainingLoss());
+    training_ensemble_result.def_prop_ro("ensemble_training_loss", [](const TrainingEnsembleResult& self) {
+        return optionalDouble(self.ensembleFinalTrainingLoss());
     });
-    training_ensemble_result.def_prop_ro("weighted_member_training_loss", [](const TrainingEnsembleResult& self) {
-        return optionalDouble(self.weightedFinalTrainingLoss());
+    training_ensemble_result.def_prop_ro("ensemble_train_loss", [](const TrainingEnsembleResult& self) {
+        return optionalDouble(self.ensembleFinalTrainingLoss());
     });
-    training_ensemble_result.def_prop_ro("weighted_final_validation_loss", [](const TrainingEnsembleResult& self) {
-        return optionalDouble(self.weightedFinalValidationLoss());
-    });
-    training_ensemble_result.def_prop_ro("weighted_member_validation_loss", [](const TrainingEnsembleResult& self) {
-        return optionalDouble(self.weightedFinalValidationLoss());
-    });
-    training_ensemble_result.def_prop_ro("weighted_final_test_loss", [](const TrainingEnsembleResult& self) {
-        return optionalDouble(self.weightedFinalTestLoss());
-    });
-    training_ensemble_result.def_prop_ro("weighted_member_test_loss", [](const TrainingEnsembleResult& self) {
-        return optionalDouble(self.weightedFinalTestLoss());
+    training_ensemble_result.def_prop_ro("ensemble_test_loss", [](const TrainingEnsembleResult& self) {
+        return optionalDouble(self.ensembleFinalTestLoss());
     });
 
     auto training_runs_result = nb::class_<TrainingRunsResult>(training, "TrainingRunsResult");
@@ -918,10 +938,14 @@ calling this helper.
         "failure_policy"_a = "cancel_siblings",
         "max_summary_logs_per_second"_a = 2.0,
         "max_parallel_runs"_a.none() = nb::none());
-    training_runs.def("fit", [](TrainingRuns& self, uint32_t epochs) {
+    training_runs.def("fit", [](TrainingRuns& self,
+                                      uint32_t epochs,
+                                      std::shared_ptr<Loader> test_loader) {
+        TrainingRunsEvaluationOptions evaluationOptions;
+        evaluationOptions.testLoader = std::move(test_loader);
         nb::gil_scoped_release release;
-        return self.fit(epochs);
-    }, "epochs"_a);
+        return self.fit(TrainerFitOptions{epochs}, evaluationOptions);
+    }, "epochs"_a, "test_loader"_a.none() = nb::none());
 
     auto gradient_clear_policy = nb::enum_<TrainingStep::GradientClearPolicy>(training, "GradientClearPolicy")
                                      .value("clear_before_step", TrainingStep::GradientClearPolicy::CLEAR_BEFORE_STEP)

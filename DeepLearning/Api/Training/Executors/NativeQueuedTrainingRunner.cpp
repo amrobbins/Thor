@@ -836,10 +836,17 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     THOR_THROW_IF_FALSE(request.loader != nullptr);
     THOR_THROW_IF_FALSE(request.epochs > 0);
     THOR_THROW_IF_FALSE(options.maxInFlightBatches >= 1);
+    THOR_THROW_IF_FALSE(request.executionMode == TrainingRunExecutionMode::FIT ||
+                        request.executionMode == TrainingRunExecutionMode::EVALUATE);
     request.cancellationToken.throwIfCancellationRequested();
 
     std::shared_ptr<TrainingProgram> trainingProgram = defaultTrainingProgramForRequest(request);
     attachPlacementFallbackOptimizerIfNeeded(request, *trainingProgram);
+
+    const bool evaluateOnly = request.executionMode == TrainingRunExecutionMode::EVALUATE;
+    if (evaluateOnly && request.evaluationPhase == TrainingEventPhase::UNKNOWN) {
+        throw std::runtime_error("Trainer evaluation requires a concrete evaluation phase.");
+    }
 
     const uint64_t batchSize = request.loader->getBatchSize();
     std::vector<Event> initDoneEvents;
@@ -898,8 +905,15 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         request.cancellationToken.throwIfCancellationRequested();
         const uint64_t humanEpoch = currentEpoch + 1;
 
-        for (const auto& phaseSpec : {std::pair<ExampleType, TrainingEventPhase>{ExampleType::TRAIN, TrainingEventPhase::TRAIN},
-                                      std::pair<ExampleType, TrainingEventPhase>{ExampleType::VALIDATE, TrainingEventPhase::VALIDATE}}) {
+        std::vector<std::pair<ExampleType, TrainingEventPhase>> phaseSpecs;
+        if (evaluateOnly) {
+            phaseSpecs.emplace_back(request.evaluationExampleType, request.evaluationPhase);
+        } else {
+            phaseSpecs.emplace_back(ExampleType::TRAIN, TrainingEventPhase::TRAIN);
+            phaseSpecs.emplace_back(ExampleType::VALIDATE, TrainingEventPhase::VALIDATE);
+        }
+
+        for (const auto& phaseSpec : phaseSpecs) {
             request.cancellationToken.throwIfCancellationRequested();
             const ExampleType exampleType = phaseSpec.first;
             const TrainingEventPhase phase = phaseSpec.second;
@@ -1071,7 +1085,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     }
 
     request.cancellationToken.throwIfCancellationRequested();
-    if (request.saveModelDirectory.has_value()) {
+    if (!evaluateOnly && request.saveModelDirectory.has_value()) {
         placedNetwork->save(*request.saveModelDirectory, request.saveModelOverwrite, request.saveOptimizerState);
     }
 

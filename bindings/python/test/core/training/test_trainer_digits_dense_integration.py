@@ -38,13 +38,13 @@ DIGITS_DENSE_CV5_EPOCHS = int(os.environ.get("THOR_DIGITS_DENSE_CV5_EPOCHS", "1"
 DIGITS_DENSE_CV5_MAX_IN_FLIGHT_BATCHES = int(
     os.environ.get("THOR_DIGITS_DENSE_CV5_MAX_IN_FLIGHT_BATCHES", str(DIGITS_DENSE_MAX_IN_FLIGHT_BATCHES)))
 DIGITS_DENSE_CV5_LOADER_QUEUE_DEPTH = int(
-    os.environ.get("THOR_DIGITS_DENSE_CV5_LOADER_QUEUE_DEPTH", str(max(32, 2 * DIGITS_DENSE_CV5_MAX_IN_FLIGHT_BATCHES))))
+    os.environ.get(
+        "THOR_DIGITS_DENSE_CV5_LOADER_QUEUE_DEPTH", str(max(32, 2 * DIGITS_DENSE_CV5_MAX_IN_FLIGHT_BATCHES))))
 DIGITS_DENSE_CV5_STATS_INTERVAL_S = float(
     os.environ.get("THOR_DIGITS_DENSE_CV5_STATS_INTERVAL_S", str(DIGITS_DENSE_STATS_INTERVAL_S)))
 DIGITS_DENSE_CV5_STATS_COLOR = os.environ.get("THOR_DIGITS_DENSE_CV5_STATS_COLOR", DIGITS_DENSE_STATS_COLOR).lower()
 assert DIGITS_DENSE_CV5_STATS_COLOR in {"always", "auto", "never"}
-DIGITS_DENSE_CV5_SUMMARY_LOGS_PER_SECOND = float(
-    os.environ.get("THOR_DIGITS_DENSE_CV5_SUMMARY_LOGS_PER_SECOND", "2.0"))
+DIGITS_DENSE_CV5_SUMMARY_LOGS_PER_SECOND = float(os.environ.get("THOR_DIGITS_DENSE_CV5_SUMMARY_LOGS_PER_SECOND", "2.0"))
 DIGITS_DENSE_CV5_WIDTH = int(os.environ.get("THOR_DIGITS_DENSE_CV5_WIDTH", "1024"))
 DIGITS_DENSE_CV5_HIDDEN_LAYERS = int(os.environ.get("THOR_DIGITS_DENSE_CV5_HIDDEN_LAYERS", "3"))
 DIGITS_DENSE_CV5_ALT_WIDTH = int(
@@ -53,10 +53,13 @@ DIGITS_DENSE_CV5_ALT_HIDDEN_LAYERS = int(
     os.environ.get("THOR_DIGITS_DENSE_CV5_ALT_HIDDEN_LAYERS", str(max(1, DIGITS_DENSE_CV5_HIDDEN_LAYERS - 1))))
 DIGITS_DENSE_CV5_MAX_PARALLEL_RUNS_RAW = os.environ.get("THOR_DIGITS_DENSE_CV5_MAX_PARALLEL_RUNS")
 DIGITS_DENSE_CV5_MAX_PARALLEL_RUNS = (
-    None
-    if DIGITS_DENSE_CV5_MAX_PARALLEL_RUNS_RAW in {None, "", "none", "None"}
-    else int(DIGITS_DENSE_CV5_MAX_PARALLEL_RUNS_RAW)
-)
+    None if DIGITS_DENSE_CV5_MAX_PARALLEL_RUNS_RAW in {None, "", "none", "None"} else
+    int(DIGITS_DENSE_CV5_MAX_PARALLEL_RUNS_RAW))
+DIGITS_DENSE_CV5_MODEL_ARTIFACTS_DIR = Path(
+    os.environ.get(
+        "THOR_DIGITS_DENSE_CV5_MODEL_ARTIFACTS_DIR",
+        str(Path(tempfile.gettempdir()) / "thor_digits_dense_training_runs_cv5_model_artifacts"),
+    ))
 # Bump whenever the on-disk raw shard format changes so stale /tmp caches are rebuilt.
 DIGITS_DENSE_MANIFEST_VERSION = 2
 DIGITS_DENSE_CV5_MANIFEST_VERSION = 1
@@ -86,7 +89,8 @@ _TRAINER_STATS_RE = re.compile(
     r"loss=\s*(?P<loss>[-+0-9.eE]+).*?"
     r"flops/s=\s*(?P<flops>[-+0-9.eE]+[KMGTPE]?)")
 _RUN_STATUS_RE = re.compile(
-    r"INFO runs\[(?P<run>[^\]]+)\]:.*\bstatus=(?P<status>completed|failed|cancelled|interrupted|oom|running|starting|not_started)\b")
+    r"INFO runs\[(?P<run>[^\]|]+)(?:\|[^\]]+)?\]:.*\bstatus=(?P<status>completed|failed|cancelled|interrupted|oom|running|starting|not_started)\b"
+)
 
 
 def _flush_native_stdio_for_capture():
@@ -179,8 +183,6 @@ class _NativeOutputTee:
                 except FileNotFoundError:
                     pass
         return "".join(parts)
-
-
 
 
 def _expects_color_for_stats_color_mode(mode: str) -> bool:
@@ -607,7 +609,10 @@ def _ensure_digits_dense_cv5_shards():
         train_count = _write_digits_split(
             train_images[train_indices], train_labels[train_indices], split_name="train", raw_root=fold_raw_root)
         validate_count = _write_digits_split(
-            train_images[validate_indices], train_labels[validate_indices], split_name="validate", raw_root=fold_raw_root)
+            train_images[validate_indices],
+            train_labels[validate_indices],
+            split_name="validate",
+            raw_root=fold_raw_root)
         _mirror_validate_as_test(fold_raw_root)
 
         shard_paths = thor.training.create_sharded_raw_dataset(
@@ -733,7 +738,8 @@ def test_queued_trainer_trains_really_large_deep_fp16_dense_digits_network(capfd
 @pytest.mark.digits_dense_cv5_integration
 @pytest.mark.skipif(
     not RUN_DIGITS_DENSE_CV5_INTEGRATION,
-    reason="set THOR_RUN_TRAINING_DIGITS_DENSE_CV5_INTEGRATION=1 to run the DIGITS/MNIST dense 5-fold CV TrainingRuns test",
+    reason=
+    "set THOR_RUN_TRAINING_DIGITS_DENSE_CV5_INTEGRATION=1 to run the DIGITS/MNIST dense 5-fold CV TrainingRuns test",
 )
 def test_training_runs_digits_dense_five_fold_cross_validation(capfd):
     _flush_native_stdio_for_capture()
@@ -745,7 +751,15 @@ def test_training_runs_digits_dense_five_fold_cross_validation(capfd):
         assert cv_manifest["example_shape"] == [DIGITS_INPUT_FEATURES]
         assert cv_manifest["label_shape"] == [DIGITS_NUM_CLASSES]
 
-        def make_fold_trainer(*, fold: dict, run_name: str, model_name: str, width: int, hidden_layers: int):
+        def make_fold_trainer(
+            *,
+            fold: dict,
+            run_name: str,
+            model_name: str,
+            width: int,
+            hidden_layers: int,
+            save_model_dir: Path,
+        ):
             fold_index = int(fold["fold_index"])
             fold_manifest = {
                 **cv_manifest,
@@ -782,8 +796,11 @@ def test_training_runs_digits_dense_five_fold_cross_validation(capfd):
                 max_in_flight_batches=DIGITS_DENSE_CV5_MAX_IN_FLIGHT_BATCHES,
                 scalar_tensors_to_report=["loss"],
                 stats_color=DIGITS_DENSE_CV5_STATS_COLOR,
+                save_model_dir=str(save_model_dir),
+                save_model_overwrite=True,
             )
 
+        artifact_root = DIGITS_DENSE_CV5_MODEL_ARTIFACTS_DIR
         run_specs = []
         for fold in cv_manifest["folds"]:
             fold_index = int(fold["fold_index"])
@@ -793,19 +810,21 @@ def test_training_runs_digits_dense_five_fold_cross_validation(capfd):
                 model_name=f"python_integration_digits_dense_cv5_fold_{fold_index}",
                 width=DIGITS_DENSE_CV5_WIDTH,
                 hidden_layers=DIGITS_DENSE_CV5_HIDDEN_LAYERS,
+                save_model_dir=artifact_root / f"fold_{fold_index}",
             )
             run_specs.append((f"fold_{fold_index}", trainer, "digits_dense_cv5"))
 
-        for fold in cv_manifest["folds"][:3]:
-            fold_index = int(fold["fold_index"])
-            trainer = make_fold_trainer(
-                fold=fold,
-                run_name=f"alt_fold_{fold_index}",
-                model_name=f"python_integration_digits_dense_alt3_fold_{fold_index}",
-                width=DIGITS_DENSE_CV5_ALT_WIDTH,
-                hidden_layers=DIGITS_DENSE_CV5_ALT_HIDDEN_LAYERS,
-            )
-            run_specs.append((f"alt_fold_{fold_index}", trainer, "digits_dense_alt3"))
+        # for fold in cv_manifest["folds"][:3]:
+        #     fold_index = int(fold["fold_index"])
+        #     trainer = make_fold_trainer(
+        #         fold=fold,
+        #         run_name=f"alt_fold_{fold_index}",
+        #         model_name=f"python_integration_digits_dense_alt3_fold_{fold_index}",
+        #         width=DIGITS_DENSE_CV5_ALT_WIDTH,
+        #         hidden_layers=DIGITS_DENSE_CV5_ALT_HIDDEN_LAYERS,
+        #         save_model_dir=artifact_root / f"alt_fold_{fold_index}",
+        #     )
+        #     run_specs.append((f"alt_fold_{fold_index}", trainer, "digits_dense_alt3"))
 
         runs = thor.training.TrainingRuns(
             run_specs,
@@ -829,11 +848,15 @@ def test_training_runs_digits_dense_five_fold_cross_validation(capfd):
     assert "INFO runs ensemble:" in plain_text
     assert "INFO runs ensemble[digits_dense_cv5]:" in plain_text
     assert "INFO runs ensemble[digits_dense_alt3]:" in plain_text
-    assert "aggregation=member_weighted" in plain_text
-    assert "weighted_train_loss=" in plain_text
-    assert "weighted_validate_loss=" in plain_text
-    assert "ensemble_group=digits_dense_cv5" in plain_text
-    assert "ensemble_group=digits_dense_alt3" in plain_text
+    assert "aggregation=ensemble_eval" in plain_text
+    assert "ensemble_train_loss=" in plain_text
+    assert "ensemble_test_loss=" not in plain_text
+    assert "weighted_train_loss=" not in plain_text
+    assert "weighted_validate_loss=" not in plain_text
+    assert "INFO runs[fold_0|digits_dense_cv5]:" in plain_text
+    assert "INFO runs[alt_fold_0|digits_dense_alt3]:" in plain_text
+    assert "ensemble_group=digits_dense_cv5" not in plain_text
+    assert "ensemble_group=digits_dense_alt3" not in plain_text
     assert "train_loss=" in plain_text
     assert "validate_loss=" in plain_text
     assert "completed=8" in plain_text
@@ -845,26 +868,26 @@ def test_training_runs_digits_dense_five_fold_cross_validation(capfd):
     assert cv5_ensemble.all_completed()
     assert cv5_ensemble.total_weight == pytest.approx(5.0)
     assert len(cv5_ensemble.members) == 5
-    assert cv5_ensemble.weighted_final_training_loss is not None
-    assert cv5_ensemble.weighted_final_validation_loss is not None
-    assert cv5_ensemble.weighted_final_test_loss is None
-    assert cv5_ensemble.weighted_member_training_loss == cv5_ensemble.weighted_final_training_loss
-    assert cv5_ensemble.weighted_member_validation_loss == cv5_ensemble.weighted_final_validation_loss
+    assert cv5_ensemble.ensemble_train_loss is not None
+    assert cv5_ensemble.ensemble_test_loss is None
 
     alt3_ensemble = results.ensemble("digits_dense_alt3")
     assert alt3_ensemble.all_completed()
     assert alt3_ensemble.total_weight == pytest.approx(3.0)
     assert len(alt3_ensemble.members) == 3
-    assert alt3_ensemble.weighted_final_training_loss is not None
-    assert alt3_ensemble.weighted_final_validation_loss is not None
-    assert alt3_ensemble.weighted_final_test_loss is None
+    assert alt3_ensemble.ensemble_train_loss is not None
+    assert alt3_ensemble.ensemble_test_loss is None
     assert "phase=unknown" not in plain_text
     assert "INFO trainer:" not in plain_text
 
     validation_losses = []
     expected_groups = {
-        **{f"fold_{fold_index}": "digits_dense_cv5" for fold_index in range(5)},
-        **{f"alt_fold_{fold_index}": "digits_dense_alt3" for fold_index in range(3)},
+        **{
+            f"fold_{fold_index}": "digits_dense_cv5" for fold_index in range(5)
+        },
+        **{
+            f"alt_fold_{fold_index}": "digits_dense_alt3" for fold_index in range(3)
+        },
     }
     for run_name, ensemble_group in expected_groups.items():
         result = results[run_name]

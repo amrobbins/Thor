@@ -2,6 +2,7 @@
 
 #include "DeepLearning/Api/Loaders/Loader.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Training/Events/TrainingEvent.h"
 #include "DeepLearning/Api/Training/Executors/TrainingExecutor.h"
@@ -167,6 +168,7 @@ class CoordinatedExecutor : public TrainingExecutor {
 
 std::shared_ptr<Network> makeNetworkWithOutput(const std::string& name, const std::vector<uint64_t>& dimensions) {
     auto network = std::make_shared<Network>(name);
+    NetworkInput::Builder().network(*network).name("features").dimensions({0, 4}).dataType(DataType::FP32).build();
     Tensor outputTensor(DataType::FP32, dimensions);
     NetworkOutput::Builder().network(*network).name("predictions").inputTensor(outputTensor).dataType(DataType::FP32).build();
     return network;
@@ -275,7 +277,7 @@ TEST(TrainingRuns, RejectsIncompatibleEnsembleOutputDimensions) {
                  std::runtime_error);
 }
 
-TEST(TrainingRunsResult, ReportsEnsembleWeightedLosses) {
+TEST(TrainingRunsResult, ReportsEnsembleMetadata) {
     auto network0 = makeNetworkWithOutput("training-runs-ensemble-result-0", {0, 10});
     auto network1 = makeNetworkWithOutput("training-runs-ensemble-result-1", {0, 10});
     auto coordinator = std::make_shared<Coordinator>(2);
@@ -290,7 +292,9 @@ TEST(TrainingRunsResult, ReportsEnsembleWeightedLosses) {
     std::exception_ptr exception;
     std::thread fitThread([&]() {
         try {
-            result = runs.fit(1);
+            TrainingRunsEvaluationOptions evaluationOptions;
+            evaluationOptions.evaluateTrainingPopulation = false;
+            result = runs.fit(TrainerFitOptions{1}, evaluationOptions);
         } catch (...) {
             exception = std::current_exception();
         }
@@ -310,8 +314,8 @@ TEST(TrainingRunsResult, ReportsEnsembleWeightedLosses) {
     EXPECT_EQ(ensemble.outputSignature[0].outputName, "predictions");
     EXPECT_EQ(ensemble.outputSignature[0].dimensions, (std::vector<uint64_t>{0, 10}));
     EXPECT_DOUBLE_EQ(ensemble.totalWeight(), 4.0);
-    ASSERT_TRUE(ensemble.weightedFinalTrainingLoss().has_value());
-    EXPECT_DOUBLE_EQ(*ensemble.weightedFinalTrainingLoss(), 0.5);
+    ASSERT_EQ(ensemble.inputSignature.size(), 1u);
+    EXPECT_EQ(ensemble.inputSignature[0].inputName, "features");
 }
 
 TEST(TrainingRuns, StartsAllTrainersConcurrentlyAndReturnsCompletedResults) {

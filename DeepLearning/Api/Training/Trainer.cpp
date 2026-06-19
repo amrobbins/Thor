@@ -58,11 +58,11 @@ class ResultCapturingTrainingObserver : public TrainingObserver {
     void onTrainingEvent(const TrainingEvent& event) override {
         if (event.type == TrainingEventType::STATS) {
             if (event.stats.phase == TrainingEventPhase::TRAIN) {
-                finalTrainingStats = event.stats;
+                finalTrainingStats = trainingLoss.update(event.stats);
             } else if (event.stats.phase == TrainingEventPhase::VALIDATE) {
-                finalValidationStats = event.stats;
+                finalValidationStats = validationLoss.update(event.stats);
             } else if (event.stats.phase == TrainingEventPhase::TEST) {
-                finalTestStats = event.stats;
+                finalTestStats = testLoss.update(event.stats);
             }
         }
         inner.onTrainingEvent(event);
@@ -76,8 +76,36 @@ class ResultCapturingTrainingObserver : public TrainingObserver {
     std::optional<TrainingStatsSnapshot> finalTestStats{};
 
    private:
+    struct FinalEpochLossAccumulator {
+        uint64_t currentEpoch = 0;
+        double currentEpochLossSum = 0.0;
+        uint64_t currentEpochLossCount = 0;
+
+        TrainingStatsSnapshot update(const TrainingStatsSnapshot& stats) {
+            TrainingStatsSnapshot finalStats = stats;
+            if (!stats.loss.has_value()) {
+                return finalStats;
+            }
+
+            if (currentEpoch != stats.epoch) {
+                currentEpoch = stats.epoch;
+                currentEpochLossSum = 0.0;
+                currentEpochLossCount = 0;
+            }
+
+            currentEpochLossSum += stats.loss.value();
+            currentEpochLossCount += 1;
+            finalStats.loss = currentEpochLossSum / static_cast<double>(currentEpochLossCount);
+            return finalStats;
+        }
+    };
+
     TrainingObserver& inner;
+    FinalEpochLossAccumulator trainingLoss{};
+    FinalEpochLossAccumulator validationLoss{};
+    FinalEpochLossAccumulator testLoss{};
 };
+
 
 }  // namespace
 
@@ -105,7 +133,12 @@ void Trainer::fitInternal(const TrainerFitOptions& options,
     request.saveModelOverwrite = saveModelOverwrite;
     request.saveOptimizerState = saveOptimizerState;
     request.cancellationToken = cancellationToken;
+    request.executionMode = TrainingRunExecutionMode::FIT;
 
+    executeRequest(request, observer);
+}
+
+void Trainer::executeRequest(const TrainingRunRequest& request, TrainingObserver& observer) {
     try {
         executor->fit(request, observer);
     } catch (...) {
@@ -134,6 +167,80 @@ TrainingRunResult Trainer::fitTrainingRun(std::string runName,
             capturingObserver.finalValidationStats,
             capturingObserver.finalTestStats);
     }
+}
+
+TrainingRunResult Trainer::evaluateTrainingRun(std::string runName,
+                                               std::shared_ptr<Loader> evaluationLoader,
+                                               ExampleType exampleType,
+                                               TrainingEventPhase phase,
+                                               TrainingObserver& observer,
+                                               const TrainingCancellationToken& cancellationToken) {
+    if (network == nullptr) {
+        throw std::runtime_error("Trainer::evaluate requires a Network.");
+    }
+    if (evaluationLoader == nullptr) {
+        throw std::runtime_error("Trainer::evaluate requires a Loader.");
+    }
+    if (executor == nullptr) {
+        throw std::runtime_error("Trainer::evaluate requires a TrainingExecutor.");
+    }
+    if (phase == TrainingEventPhase::UNKNOWN) {
+        throw std::runtime_error("Trainer::evaluate requires a concrete phase.");
+    }
+
+    ResultCapturingTrainingObserver capturingObserver(observer);
+    TrainingRunRequest request;
+    request.network = network;
+    request.loader = std::move(evaluationLoader);
+    request.optimizer = optimizer;
+    request.trainingProgram = trainingProgram;
+    request.runtime = runtimeConfig;
+    request.runtime.statsEnabled = true;
+    request.runtime.scalarTensorsToReport.insert("loss");
+    request.epochs = 1;
+    request.cancellationToken = cancellationToken;
+    request.executionMode = TrainingRunExecutionMode::EVALUATE;
+    request.evaluationExampleType = exampleType;
+    request.evaluationPhase = phase;
+
+    try {
+        executeRequest(request, capturingObserver);
+        capturingObserver.flush();
+        return TrainingRunResult::completedResult(
+            std::move(runName), capturingObserver.finalTrainingStats, capturingObserver.finalValidationStats, capturingObserver.finalTestStats);
+    } catch (...) {
+        capturingObserver.flush();
+        return TrainingRunResult::fromException(
+            std::move(runName),
+            std::current_exception(),
+            capturingObserver.finalTrainingStats,
+            capturingObserver.finalValidationStats,
+            capturingObserver.finalTestStats);
+    }
+}
+
+
+TrainingRunResult Trainer::evaluateSavedTrainingRun(std::string runName,
+                                                    const std::string& modelArtifactDirectory,
+                                                    std::shared_ptr<Loader> evaluationLoader,
+                                                    ExampleType exampleType,
+                                                    TrainingEventPhase phase,
+                                                    TrainingObserver& observer,
+                                                    const TrainingCancellationToken& cancellationToken) {
+    if (network == nullptr) {
+        throw std::runtime_error("Trainer::evaluateSavedTrainingRun requires an original Network for artifact loading context.");
+    }
+    auto loadedNetwork = std::make_shared<Network>(network->getNetworkName());
+    loadedNetwork->load(modelArtifactDirectory);
+
+    Trainer evaluator = *this;
+    evaluator.network = std::move(loadedNetwork);
+    return evaluator.evaluateTrainingRun(std::move(runName),
+                                         std::move(evaluationLoader),
+                                         exampleType,
+                                         phase,
+                                         observer,
+                                         cancellationToken);
 }
 
 void Trainer::validateFitOptions(const TrainerFitOptions& options) const {

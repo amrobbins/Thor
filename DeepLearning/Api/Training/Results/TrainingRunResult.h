@@ -169,13 +169,25 @@ struct TrainingRunResult {
     }
 };
 
+struct TrainingRunInputSignature {
+    std::string inputName{};
+    std::vector<uint64_t> dimensions{};
+    std::string dataType{};
+    bool dimensionsIncludeBatch = false;
+
+    [[nodiscard]] bool compatibleWith(const TrainingRunInputSignature& other) const {
+        return inputName == other.inputName && dimensions == other.dimensions && dataType == other.dataType &&
+               dimensionsIncludeBatch == other.dimensionsIncludeBatch;
+    }
+};
+
 struct TrainingRunOutputSignature {
     std::string outputName{};
     std::vector<uint64_t> dimensions{};
     std::string dataType{};
 
     [[nodiscard]] bool compatibleWith(const TrainingRunOutputSignature& other) const {
-        return outputName == other.outputName && dimensions == other.dimensions;
+        return outputName == other.outputName && dimensions == other.dimensions && dataType == other.dataType;
     }
 };
 
@@ -191,7 +203,10 @@ struct TrainingEnsembleMemberResult {
 struct TrainingEnsembleResult {
     std::string ensembleGroup{};
     std::vector<TrainingEnsembleMemberResult> members{};
+    std::vector<TrainingRunInputSignature> inputSignature{};
     std::vector<TrainingRunOutputSignature> outputSignature{};
+    std::optional<double> ensembleTrainingLoss{};
+    std::optional<double> ensembleTestLoss{};
 
     [[nodiscard]] size_t size() const { return members.size(); }
     [[nodiscard]] bool empty() const { return members.empty(); }
@@ -199,13 +214,8 @@ struct TrainingEnsembleResult {
     [[nodiscard]] bool anyFailed() const;
     [[nodiscard]] double totalWeight() const;
     [[nodiscard]] std::map<std::string, size_t> statusCounts() const;
-    [[nodiscard]] std::optional<double> weightedFinalLossForPhase(TrainingEventPhase phase) const;
-    [[nodiscard]] std::optional<double> weightedFinalTrainingLoss() const { return weightedFinalLossForPhase(TrainingEventPhase::TRAIN); }
-    [[nodiscard]] std::optional<double> weightedFinalValidationLoss() const { return weightedFinalLossForPhase(TrainingEventPhase::VALIDATE); }
-    [[nodiscard]] std::optional<double> weightedFinalTestLoss() const { return weightedFinalLossForPhase(TrainingEventPhase::TEST); }
-    [[nodiscard]] std::optional<double> weightedMemberFinalTrainingLoss() const { return weightedFinalTrainingLoss(); }
-    [[nodiscard]] std::optional<double> weightedMemberFinalValidationLoss() const { return weightedFinalValidationLoss(); }
-    [[nodiscard]] std::optional<double> weightedMemberFinalTestLoss() const { return weightedFinalTestLoss(); }
+    [[nodiscard]] std::optional<double> ensembleFinalTrainingLoss() const { return ensembleTrainingLoss; }
+    [[nodiscard]] std::optional<double> ensembleFinalTestLoss() const { return ensembleTestLoss; }
 };
 
 }  // namespace Thor

@@ -125,9 +125,11 @@ TEST(TrainingRunsStatsReporter, PrefixesQueuedStatsLinesWithRunName) {
     reporter.close();
 
     const std::string output = readAndCloseFile(out);
-    EXPECT_NE(output.find("INFO runs[fold_0]: phase=train"), std::string::npos);
+    EXPECT_NE(output.find("INFO runs[fold_0]: epoch=       2/5"), std::string::npos);
     EXPECT_EQ(output.find("INFO trainer:"), std::string::npos);
-    EXPECT_NE(output.find("loss= 0.250000"), std::string::npos);
+    EXPECT_EQ(output.find(" phase="), std::string::npos);
+    EXPECT_EQ(output.find(" loss= 0.250000"), std::string::npos);
+    EXPECT_NE(output.find("train_loss=0.250000"), std::string::npos);
 }
 
 TEST(TrainingRunsStatsReporter, DrainsQueuedStatsForMultipleRunsBeforeClose) {
@@ -141,11 +143,48 @@ TEST(TrainingRunsStatsReporter, DrainsQueuedStatsForMultipleRunsBeforeClose) {
     reporter.close();
 
     const std::string output = readAndCloseFile(out);
-    EXPECT_NE(output.find("INFO runs[fold_0]: phase=train"), std::string::npos);
-    EXPECT_NE(output.find("INFO runs[fold_1]: phase=train"), std::string::npos);
+    EXPECT_NE(output.find("INFO runs[fold_0]: epoch=       2/5"), std::string::npos);
+    EXPECT_NE(output.find("INFO runs[fold_1]: epoch=       2/5"), std::string::npos);
+    EXPECT_EQ(output.find(" phase="), std::string::npos);
+    EXPECT_EQ(output.find(" loss= 0.250000"), std::string::npos);
 }
 
-TEST(TrainingRunsStatsReporter, RunningLineIncludesEnsembleGroupAndLatestPhaseLosses) {
+
+TEST(TrainingRunsStatsReporter, RunningLossColumnsUsePreviousEpochWeightedCurrentEpochAverages) {
+    std::FILE* out = std::tmpfile();
+    TrainingRunsStatsReporter reporter(out, LineStatsColorMode::NEVER, 0.0);
+    reporter.configureRun("fold_0", TrainingRunsStatsReporter::RunConfig{0.0, true});
+
+    TrainingStatsSnapshot epoch1Batch1 = makeStats(TrainingEventPhase::TRAIN, 0.20);
+    epoch1Batch1.epoch = 1;
+    epoch1Batch1.epochs = 2;
+    epoch1Batch1.stepInEpoch = 1;
+    epoch1Batch1.stepsPerEpoch = 2;
+    epoch1Batch1.step = 1;
+
+    TrainingStatsSnapshot epoch1Batch2 = epoch1Batch1;
+    epoch1Batch2.loss = 0.40;
+    epoch1Batch2.stepInEpoch = 2;
+    epoch1Batch2.step = 2;
+
+    TrainingStatsSnapshot epoch2Batch1 = epoch1Batch1;
+    epoch2Batch1.epoch = 2;
+    epoch2Batch1.loss = 0.10;
+    epoch2Batch1.stepInEpoch = 1;
+    epoch2Batch1.step = 3;
+
+    reporter.markRunStarting("fold_0");
+    reporter.onStatsEvent(TrainingStatsEvent::fromTrainingEvent(TrainingEvent::statsUpdated(epoch1Batch1), "fold_0"));
+    reporter.onStatsEvent(TrainingStatsEvent::fromTrainingEvent(TrainingEvent::statsUpdated(epoch1Batch2), "fold_0"));
+    reporter.onStatsEvent(TrainingStatsEvent::fromTrainingEvent(TrainingEvent::statsUpdated(epoch2Batch1), "fold_0"));
+    reporter.close();
+
+    const std::string output = readAndCloseFile(out);
+    EXPECT_NE(output.find("train_loss=0.300000"), std::string::npos);
+    EXPECT_NE(output.find("train_loss=0.233333"), std::string::npos);
+}
+
+TEST(TrainingRunsStatsReporter, RunningLineIncludesEnsembleGroupAndCurrentTrainAndValidationLossColumns) {
     std::FILE* out = std::tmpfile();
     TrainingRunsStatsReporter reporter(out, LineStatsColorMode::NEVER, 0.0);
     reporter.configureRun("fold_0", TrainingRunsStatsReporter::RunConfig{0.0, true, std::string("digits_dense_cv5"), 2.0});
@@ -158,11 +197,12 @@ TEST(TrainingRunsStatsReporter, RunningLineIncludesEnsembleGroupAndLatestPhaseLo
     reporter.close();
 
     const std::string output = readAndCloseFile(out);
-    EXPECT_NE(output.find("INFO runs[fold_0]: phase=validate"), std::string::npos);
-    EXPECT_NE(output.find("ensemble_group=digits_dense_cv5"), std::string::npos);
-    EXPECT_NE(output.find("ensemble_weight=2.000000"), std::string::npos);
-    EXPECT_NE(output.find("train_loss=0.300000"), std::string::npos);
-    EXPECT_NE(output.find("validate_loss=0.200000"), std::string::npos);
+    EXPECT_NE(output.find("INFO runs[fold_0|digits_dense_cv5]: epoch=       2/5"), std::string::npos);
+    EXPECT_EQ(output.find(" phase="), std::string::npos);
+    EXPECT_EQ(output.find(" loss= 0.200000"), std::string::npos);
+    EXPECT_EQ(output.find("ensemble_group=digits_dense_cv5"), std::string::npos);
+    EXPECT_EQ(output.find("ensemble_weight=2.000000"), std::string::npos);
+    EXPECT_NE(output.find("batch=        7/100 train_loss=0.300000 validate_loss=0.200000 samples/s=1.02K"), std::string::npos);
 }
 
 TEST(TrainingRunsStatsReporter, EmitsWholeGroupSummaryIncludingRunsWithoutStats) {
@@ -176,9 +216,10 @@ TEST(TrainingRunsStatsReporter, EmitsWholeGroupSummaryIncludingRunsWithoutStats)
     reporter.close();
 
     const std::string output = readAndCloseFile(out);
-    EXPECT_NE(output.find("INFO runs summary:"), std::string::npos);
+    EXPECT_NE(output.find("\nINFO runs summary:"), std::string::npos);
     EXPECT_NE(output.find("total=2"), std::string::npos);
-    EXPECT_NE(output.find("INFO runs[fold_0]: phase=train"), std::string::npos);
+    EXPECT_NE(output.find("INFO runs[fold_0]: epoch=       2/5"), std::string::npos);
+    EXPECT_EQ(output.find(" phase="), std::string::npos);
     EXPECT_NE(output.find("INFO runs[fold_1]: status=not_started"), std::string::npos);
 }
 
@@ -214,25 +255,30 @@ TEST(TrainingRunsStatsReporter, IgnoresNonStatsTrainingEventsWhenTrackingLatestR
     reporter.close();
 
     const std::string output = readAndCloseFile(out);
-    EXPECT_NE(output.find("INFO runs[fold_0]: phase=train"), std::string::npos);
-    EXPECT_EQ(output.find("phase=unknown"), std::string::npos);
+    EXPECT_NE(output.find("INFO runs[fold_0]: epoch=       2/5"), std::string::npos);
+    EXPECT_EQ(output.find(" phase="), std::string::npos);
 }
 
 TEST(TrainingRunsStatsReporter, EmitsTerminalStatusInGroupSummary) {
     std::FILE* out = std::tmpfile();
     TrainingRunsStatsReporter reporter(out, LineStatsColorMode::NEVER, 0.0);
-    reporter.configureRun("fold_0", TrainingRunsStatsReporter::RunConfig{0.0, true});
+    reporter.configureRun("fold_0", TrainingRunsStatsReporter::RunConfig{0.0, true, std::string("digits_dense_cv5"), 1.0});
 
     reporter.markRunStarting("fold_0");
     reporter.onStatsEvent(TrainingStatsEvent::fromTrainingEvent(TrainingEvent::statsUpdated(makeStats()), "fold_0"));
-    reporter.markRunFinished(TrainingRunResult::completedResult("fold_0", makeStats(), makeStats()));
+    TrainingRunResult result = TrainingRunResult::completedResult("fold_0", makeStats(), makeStats());
+    result.ensembleGroup = "digits_dense_cv5";
+    reporter.markRunFinished(result);
     reporter.close();
 
     const std::string output = readAndCloseFile(out);
     EXPECT_NE(output.find("completed=1"), std::string::npos);
-    EXPECT_NE(output.find("status=completed"), std::string::npos);
-    EXPECT_NE(output.find("final_train_loss=0.250000"), std::string::npos);
-    EXPECT_NE(output.find("final_validate_loss=0.250000"), std::string::npos);
+    EXPECT_NE(output.find("INFO runs[fold_0|digits_dense_cv5]: status=completed"), std::string::npos);
+    EXPECT_EQ(output.find("ensemble_group=digits_dense_cv5"), std::string::npos);
+    EXPECT_EQ(output.find("final_train_loss="), std::string::npos);
+    EXPECT_EQ(output.find("final_validate_loss="), std::string::npos);
+    EXPECT_NE(output.find("train_loss=0.250000"), std::string::npos);
+    EXPECT_NE(output.find("validate_loss=0.250000"), std::string::npos);
 }
 
 
@@ -257,7 +303,8 @@ TEST(TrainingRunsStatsReporter, IncludesStatsDisabledRunsInLifecycleSummaries) {
     const std::string output = readAndCloseFile(out);
     EXPECT_NE(output.find("total=2"), std::string::npos);
     EXPECT_NE(output.find("INFO runs[stats_disabled]: status=failed"), std::string::npos);
-    EXPECT_NE(output.find("INFO runs[stats_enabled]:  phase=train"), std::string::npos);
+    EXPECT_NE(output.find("INFO runs[stats_enabled]:  epoch=       2/5"), std::string::npos);
+    EXPECT_EQ(output.find("INFO runs[stats_enabled]:  phase=train"), std::string::npos);
     EXPECT_EQ(output.find("INFO runs[stats_disabled]: phase=train"), std::string::npos);
 }
 
@@ -290,19 +337,25 @@ TEST(TrainingRunsStatsReporter, SeparatesFinalReportAndIncludesTestLoss) {
         makeStats(TrainingEventPhase::TRAIN, 0.50),
         makeStats(TrainingEventPhase::VALIDATE, 0.40),
         makeStats(TrainingEventPhase::TEST, 0.35));
+    result.ensembleGroup = "digits_dense_cv5";
     reporter.emitFinalReport(std::vector<TrainingRunResult>{result});
     reporter.close();
 
     const std::string output = readAndCloseFile(out);
     EXPECT_NE(output.find("\nINFO runs final: ==================== final results"), std::string::npos);
     EXPECT_NE(output.find("INFO runs final: total=1"), std::string::npos);
-    EXPECT_NE(output.find("final_train_loss=0.500000"), std::string::npos);
-    EXPECT_NE(output.find("final_validate_loss=0.400000"), std::string::npos);
-    EXPECT_NE(output.find("final_test_loss=0.350000"), std::string::npos);
+    EXPECT_NE(output.find("INFO runs[fold_0|digits_dense_cv5]: status=completed"), std::string::npos);
+    EXPECT_EQ(output.find("ensemble_group=digits_dense_cv5"), std::string::npos);
+    EXPECT_EQ(output.find("final_train_loss="), std::string::npos);
+    EXPECT_EQ(output.find("final_validate_loss="), std::string::npos);
+    EXPECT_EQ(output.find("final_test_loss="), std::string::npos);
+    EXPECT_NE(output.find("train_loss=0.500000"), std::string::npos);
+    EXPECT_NE(output.find("validate_loss=0.400000"), std::string::npos);
+    EXPECT_NE(output.find("test_loss=0.350000"), std::string::npos);
     EXPECT_NE(output.find("INFO runs final: ====================================================="), std::string::npos);
 }
 
-TEST(TrainingRunsStatsReporter, EnsembleReportLabelsMemberWeightedLosses) {
+TEST(TrainingRunsStatsReporter, EnsembleReportShowsOnlyEnsembleEvaluationLosses) {
     std::FILE* out = std::tmpfile();
     TrainingRunsStatsReporter reporter(out, LineStatsColorMode::NEVER, 0.0);
 
@@ -318,15 +371,51 @@ TEST(TrainingRunsStatsReporter, EnsembleReportLabelsMemberWeightedLosses) {
     member1.finalTrainingLoss = 0.4;
     member1.finalValidationLoss = 0.8;
     ensemble.members = {member0, member1};
+    ensemble.ensembleTrainingLoss = 0.123;
+    ensemble.ensembleTestLoss = 0.456;
 
     reporter.emitEnsembleReport(std::vector<TrainingEnsembleResult>{ensemble});
     reporter.close();
 
     const std::string output = readAndCloseFile(out);
-    EXPECT_NE(output.find("aggregation=member_weighted"), std::string::npos);
-    EXPECT_NE(output.find("weighted_train_loss=0.300000"), std::string::npos);
-    EXPECT_NE(output.find("weighted_validate_loss=0.600000"), std::string::npos);
-    EXPECT_EQ(output.find("final_train_loss=0.300000"), std::string::npos);
+    EXPECT_NE(output.find("aggregation=ensemble_eval"), std::string::npos);
+    EXPECT_NE(output.find("members=2"), std::string::npos);
+    EXPECT_EQ(output.find("total_weight="), std::string::npos);
+    EXPECT_EQ(output.find(" completed=2"), std::string::npos);
+    EXPECT_EQ(output.find(" failed=0"), std::string::npos);
+    EXPECT_NE(output.find("ensemble_train_loss=0.123000"), std::string::npos);
+    EXPECT_NE(output.find("ensemble_test_loss=0.456000"), std::string::npos);
+    EXPECT_EQ(output.find("weighted_train_loss="), std::string::npos);
+    EXPECT_EQ(output.find("weighted_validate_loss="), std::string::npos);
+    EXPECT_EQ(output.find("weighted_test_loss="), std::string::npos);
+}
+
+TEST(TrainingRunsStatsReporter, EnsembleReportShowsStatusCountsOnlyWhenNotAllCompleted) {
+    std::FILE* out = std::tmpfile();
+    TrainingRunsStatsReporter reporter(out, LineStatsColorMode::NEVER, 0.0);
+
+    TrainingEnsembleResult ensemble;
+    ensemble.ensembleGroup = "digits_dense_cv5";
+    TrainingEnsembleMemberResult member0;
+    member0.runName = "fold_0";
+    member0.status = TrainingRunStatus::COMPLETED;
+    TrainingEnsembleMemberResult member1 = member0;
+    member1.runName = "fold_1";
+    member1.status = TrainingRunStatus::FAILED;
+    ensemble.members = {member0, member1};
+
+    reporter.emitEnsembleReport(std::vector<TrainingEnsembleResult>{ensemble});
+    reporter.close();
+
+    const std::string output = readAndCloseFile(out);
+    EXPECT_NE(output.find("status=failed"), std::string::npos);
+    EXPECT_NE(output.find("members=2"), std::string::npos);
+    EXPECT_NE(output.find(" completed=1"), std::string::npos);
+    EXPECT_NE(output.find(" failed=1"), std::string::npos);
+    EXPECT_NE(output.find(" cancelled=0"), std::string::npos);
+    EXPECT_NE(output.find(" interrupted=0"), std::string::npos);
+    EXPECT_NE(output.find(" oom=0"), std::string::npos);
+    EXPECT_EQ(output.find("total_weight="), std::string::npos);
 }
 
 TEST(TrainingRunsStatsReporter, ColorCodesFinalReportStatusBorderAndLossColumns) {
@@ -353,7 +442,7 @@ TEST(TrainingRunsStatsReporter, ColorCodesFinalReportStatusBorderAndLossColumns)
     EXPECT_NE(output.find("\x1b[1;38;5;33mINFO runs final: ==================== final results"), std::string::npos);
     EXPECT_NE(output.find("\x1b[1;38;5;28mstatus=completed\x1b[0m"), std::string::npos);
     EXPECT_NE(output.find("\x1b[1;38;5;196mstatus=failed\x1b[0m"), std::string::npos);
-    EXPECT_NE(output.find("\x1b[1;38;5;208mfinal_train_loss=0.500000\x1b[0m"), std::string::npos);
-    EXPECT_NE(output.find("\x1b[1;38;5;33mfinal_validate_loss=0.400000\x1b[0m"), std::string::npos);
-    EXPECT_NE(output.find("\x1b[1;38;5;129mfinal_test_loss=0.350000\x1b[0m"), std::string::npos);
+    EXPECT_NE(output.find("\x1b[1;38;5;208mtrain_loss=0.500000\x1b[0m"), std::string::npos);
+    EXPECT_NE(output.find("\x1b[1;38;5;33mvalidate_loss=0.400000\x1b[0m"), std::string::npos);
+    EXPECT_NE(output.find("\x1b[1;38;5;129mtest_loss=0.350000\x1b[0m"), std::string::npos);
 }

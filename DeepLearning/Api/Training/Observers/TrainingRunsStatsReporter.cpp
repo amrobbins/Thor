@@ -22,11 +22,187 @@ std::FILE* requireTrainingRunsOutput(std::FILE* output) {
 
 const char* terminalStatusName(const TrainingRunResult& result) { return trainingRunStatusName(result.status); }
 
-std::optional<double> lossFromEvent(const std::optional<TrainingStatsEvent>& event) {
-    if (!event.has_value()) {
-        return std::nullopt;
+enum class PadAlignment { LEFT, RIGHT };
+
+std::string formatFixedString(double value, int precision) {
+    char buffer[64];
+    std::snprintf(buffer, sizeof(buffer), "%.*f", precision, value);
+    return std::string(buffer);
+}
+
+std::string formatScientificString(double value, int precision) {
+    char buffer[64];
+    std::snprintf(buffer, sizeof(buffer), "%.*e", precision, value);
+    return std::string(buffer);
+}
+
+std::string formatCompactRateString(double value, bool integral = false) {
+    const double absValue = std::abs(value);
+    const char* suffix = "";
+    double scaled = value;
+    if (absValue >= 1.0e24) {
+        scaled = value / 1.0e24;
+        suffix = "Y";
+    } else if (absValue >= 1.0e21) {
+        scaled = value / 1.0e21;
+        suffix = "Z";
+    } else if (absValue >= 1.0e18) {
+        scaled = value / 1.0e18;
+        suffix = "E";
+    } else if (absValue >= 1.0e15) {
+        scaled = value / 1.0e15;
+        suffix = "P";
+    } else if (absValue >= 1.0e12) {
+        scaled = value / 1.0e12;
+        suffix = "T";
+    } else if (absValue >= 1.0e9) {
+        scaled = value / 1.0e9;
+        suffix = "G";
+    } else if (absValue >= 1.0e6) {
+        scaled = value / 1.0e6;
+        suffix = "M";
+    } else if (absValue >= 1.0e3) {
+        scaled = value / 1.0e3;
+        suffix = "K";
     }
-    return event->stats.loss;
+
+    const double absScaled = std::abs(scaled);
+    const int precision = integral ? 0 : (absScaled >= 100.0 ? 0 : (absScaled >= 10.0 ? 1 : 2));
+    char buffer[64];
+    std::snprintf(buffer, sizeof(buffer), "%.*f%s", precision, scaled, suffix);
+    return std::string(buffer);
+}
+
+std::string formatUnsigned(uint64_t value) { return std::to_string(value); }
+
+std::string formatRatio(uint64_t numerator, uint64_t denominator) { return std::to_string(numerator) + "/" + std::to_string(denominator); }
+
+void appendPadded(std::string& line, const std::string& value, size_t width, PadAlignment alignment = PadAlignment::RIGHT) {
+    if (value.size() < width && alignment == PadAlignment::RIGHT) {
+        line.append(width - value.size(), ' ');
+    }
+    line += value;
+    if (value.size() < width && alignment == PadAlignment::LEFT) {
+        line.append(width - value.size(), ' ');
+    }
+}
+
+void appendPlainDimKey(std::string& line, const char* key) {
+    line += " ";
+    line += key;
+    line += "=";
+}
+
+constexpr size_t RATE_FIELD_WIDTH = 5;
+constexpr size_t TRAIN_LOSS_FIELD_WIDTH = sizeof(" train_loss=0.000000") - 1;
+constexpr size_t VALIDATE_LOSS_FIELD_WIDTH = sizeof(" validate_loss=0.000000") - 1;
+constexpr size_t RUN_PROGRESS_FIELDS_WIDTH = sizeof(" epoch=     20/20 step=       480 batch=        24/24") - 1;
+
+std::string formatRunLabel(std::string_view runName, const std::optional<std::string>& ensembleGroup) {
+    std::string label(runName);
+    if (ensembleGroup.has_value()) {
+        label += "|";
+        label += *ensembleGroup;
+    }
+    return label;
+}
+
+std::string formatRunPrefixForLabel(std::string_view runLabel, size_t runPrefixWidth) {
+    std::string prefix = "INFO runs[" + std::string(runLabel) + "]:";
+    if (prefix.size() < runPrefixWidth) {
+        prefix.append(runPrefixWidth - prefix.size(), ' ');
+    }
+    return prefix;
+}
+
+
+std::string styledText(std::string_view text, const char* style, bool useColor) {
+    if (!useColor || style == nullptr || style[0] == '\0') {
+        return std::string(text);
+    }
+    std::string out;
+    out.reserve(std::char_traits<char>::length(style) + text.size() + std::char_traits<char>::length("\x1b[0m"));
+    out += style;
+    out += text;
+    out += "\x1b[0m";
+    return out;
+}
+
+void appendPhaseLossColumns(std::string& line,
+                            std::optional<double> trainLoss,
+                            std::optional<double> validateLoss,
+                            bool useColor,
+                            const char* trainLossStyle,
+                            const char* validateLossStyle);
+
+std::string formatRunsStatsLineBase(const TrainingStatsSnapshot& stats,
+                                    std::string_view runLabel,
+                                    size_t runPrefixWidth,
+                                    std::optional<double> trainLoss,
+                                    std::optional<double> validateLoss,
+                                    bool useColor,
+                                    const char* trainLossStyle,
+                                    const char* validateLossStyle) {
+    std::string line = formatRunPrefixForLabel(runLabel, runPrefixWidth);
+
+    if (stats.epochs > 0) {
+        appendPlainDimKey(line, "epoch");
+        appendPadded(line, formatRatio(stats.epoch, stats.epochs), 10);
+    } else if (stats.epoch > 0) {
+        appendPlainDimKey(line, "epoch");
+        appendPadded(line, formatUnsigned(stats.epoch), 10);
+    }
+
+    if (stats.step > 0) {
+        appendPlainDimKey(line, "step");
+        appendPadded(line, formatUnsigned(stats.step), 10);
+    }
+
+    if (stats.stepsPerEpoch > 0) {
+        appendPlainDimKey(line, "batch");
+        appendPadded(line, formatRatio(stats.stepInEpoch, stats.stepsPerEpoch), 13);
+    } else if (stats.stepInEpoch > 0) {
+        appendPlainDimKey(line, "batch");
+        appendPadded(line, formatUnsigned(stats.stepInEpoch), 13);
+    }
+
+    appendPhaseLossColumns(line, trainLoss, validateLoss, useColor, trainLossStyle, validateLossStyle);
+
+    if (stats.accuracy.has_value()) {
+        appendPlainDimKey(line, "accuracy");
+        appendPadded(line, formatFixedString(stats.accuracy.value(), 4), 6);
+    }
+    if (stats.learningRate.has_value()) {
+        appendPlainDimKey(line, "lr");
+        appendPadded(line, formatScientificString(stats.learningRate.value(), 3), 9);
+    }
+    for (const auto& metric : stats.metrics) {
+        appendPlainDimKey(line, metric.first.c_str());
+        appendPadded(line, formatFixedString(metric.second, 6), 9);
+    }
+
+    if (stats.samplesPerSecond > 0.0) {
+        appendPlainDimKey(line, "samples/s");
+        appendPadded(line, formatCompactRateString(stats.samplesPerSecond), RATE_FIELD_WIDTH);
+    }
+    if (stats.batchesPerSecond > 0.0) {
+        appendPlainDimKey(line, "batches/s");
+        appendPadded(line, formatCompactRateString(stats.batchesPerSecond), RATE_FIELD_WIDTH);
+    }
+    if (stats.floatingPointOperationsPerSecond > 0.0) {
+        appendPlainDimKey(line, "flops/s");
+        appendPadded(line, formatCompactRateString(stats.floatingPointOperationsPerSecond), RATE_FIELD_WIDTH);
+    }
+    if (stats.inFlightBatches > 0) {
+        appendPlainDimKey(line, "in_flight");
+        appendPadded(line, formatCompactRateString(stats.inFlightBatches, true), RATE_FIELD_WIDTH);
+    } else {
+        line.append(16, ' ');
+    }
+
+    appendPlainDimKey(line, "elapsed");
+    appendPadded(line, LineStatsReporter::formatElapsedSeconds(stats.elapsedSeconds), 9);
+    return line;
 }
 
 // Final-report colors live here so they are easy to tune without touching the
@@ -45,6 +221,31 @@ constexpr const char* trainLoss = "\x1b[1;38;5;208m";
 constexpr const char* validateLoss = "\x1b[1;38;5;33m";
 constexpr const char* testLoss = "\x1b[1;38;5;129m";
 }  // namespace FinalReportAnsi
+
+void appendPhaseLossColumns(std::string& line,
+                            std::optional<double> trainLoss,
+                            std::optional<double> validateLoss,
+                            bool useColor,
+                            const char* trainLossStyle,
+                            const char* validateLossStyle) {
+    if (trainLoss.has_value()) {
+        char buffer[64];
+        std::snprintf(buffer, sizeof(buffer), "train_loss=%.6f", trainLoss.value());
+        line += " ";
+        line += styledText(buffer, trainLossStyle, useColor);
+    } else {
+        line.append(TRAIN_LOSS_FIELD_WIDTH, ' ');
+    }
+
+    if (validateLoss.has_value()) {
+        char buffer[64];
+        std::snprintf(buffer, sizeof(buffer), "validate_loss=%.6f", validateLoss.value());
+        line += " ";
+        line += styledText(buffer, validateLossStyle, useColor);
+    } else {
+        line.append(VALIDATE_LOSS_FIELD_WIDTH, ' ');
+    }
+}
 
 }  // namespace
 
@@ -107,7 +308,8 @@ void TrainingRunsStatsReporter::emitFinalReport(const std::vector<TrainingRunRes
     std::lock_guard<std::mutex> lock(mutex);
     size_t runPrefixWidth = runPrefixWidthLocked();
     for (const TrainingRunResult& result : results) {
-        runPrefixWidth = std::max(runPrefixWidth, std::string("INFO runs[").size() + result.runName.size() + std::string("]:").size());
+        const std::string runLabel = formatRunLabel(result.runName, result.ensembleGroup);
+        runPrefixWidth = std::max(runPrefixWidth, std::string("INFO runs[").size() + runLabel.size() + std::string("]:").size());
     }
 
     size_t completed = 0;
@@ -297,9 +499,11 @@ void TrainingRunsStatsReporter::processEvent(const ReporterEvent& event) {
             switch (event.stats.stats.phase) {
                 case TrainingEventPhase::TRAIN:
                     state.latestTrainingStats = event.stats;
+                    updateSmoothedLossState(state.trainingLoss, event.stats.stats);
                     break;
                 case TrainingEventPhase::VALIDATE:
                     state.latestValidationStats = event.stats;
+                    updateSmoothedLossState(state.validationLoss, event.stats.stats);
                     break;
                 case TrainingEventPhase::TEST:
                     state.latestTestStats = event.stats;
@@ -314,13 +518,58 @@ void TrainingRunsStatsReporter::processEvent(const ReporterEvent& event) {
             state.dirty = true;
             dirty = true;
             break;
-        case ReporterEventType::RUN_FINISHED:
-            state.terminalResult = event.result;
-            state.status = displayStatusFromRunStatus(event.result.status);
+        case ReporterEventType::RUN_FINISHED: {
+            TrainingRunResult result = event.result;
+            if (!result.ensembleGroup.has_value() && state.config.ensembleGroup.has_value()) {
+                result.ensembleGroup = state.config.ensembleGroup;
+                result.ensembleWeight = state.config.ensembleWeight;
+            }
+            state.terminalResult = std::move(result);
+            state.status = displayStatusFromRunStatus(state.terminalResult->status);
             state.dirty = true;
             dirty = true;
             break;
+        }
     }
+}
+
+void TrainingRunsStatsReporter::updateSmoothedLossState(PhaseLossState& lossState, const TrainingStatsSnapshot& stats) {
+    if (!stats.loss.has_value()) {
+        return;
+    }
+
+    if (lossState.currentEpoch != stats.epoch) {
+        if (lossState.currentEpoch != 0 && lossState.currentEpochLossCount > 0) {
+            lossState.previousEpochLoss = lossState.currentEpochLossSum / static_cast<double>(lossState.currentEpochLossCount);
+        }
+        lossState.currentEpoch = stats.epoch;
+        lossState.currentEpochLossSum = 0.0;
+        lossState.currentEpochLossCount = 0;
+    }
+
+    lossState.currentEpochLossSum += stats.loss.value();
+    lossState.currentEpochLossCount += 1;
+
+    const double currentEpochLoss = lossState.currentEpochLossSum / static_cast<double>(lossState.currentEpochLossCount);
+    if (!lossState.previousEpochLoss.has_value()) {
+        // In the first observed epoch for this phase there is no previous epoch to stabilize against,
+        // so report the running average of the current epoch.
+        lossState.displayedLoss = currentEpochLoss;
+        return;
+    }
+
+    double progress = 1.0;
+    if (stats.stepsPerEpoch > 0) {
+        const uint64_t effectiveStepInEpoch = stats.stepInEpoch > 0 ? stats.stepInEpoch : lossState.currentEpochLossCount;
+        progress = static_cast<double>(effectiveStepInEpoch) / static_cast<double>(stats.stepsPerEpoch);
+        progress = std::clamp(progress, 0.0, 1.0);
+    }
+
+    lossState.displayedLoss = (lossState.previousEpochLoss.value() + currentEpochLoss * progress) / (1.0 + progress);
+}
+
+std::optional<double> TrainingRunsStatsReporter::displayedLossFromState(const PhaseLossState& lossState) {
+    return lossState.displayedLoss;
 }
 
 TrainingRunsStatsReporter::RunState& TrainingRunsStatsReporter::stateForRun(const std::string& runName) {
@@ -401,6 +650,8 @@ void TrainingRunsStatsReporter::writeSummaryHeaderLocked(std::string_view label)
         }
     }
 
+    emitLineLocked("");
+
     std::string line = "INFO runs " + std::string(label) + ":";
     line += " total=" + std::to_string(enabledRuns);
     line += " not_started=" + std::to_string(notStarted);
@@ -416,9 +667,14 @@ void TrainingRunsStatsReporter::writeSummaryHeaderLocked(std::string_view label)
 
 void TrainingRunsStatsReporter::writeRunLineLocked(const RunState& state, size_t runPrefixWidth) {
     if (state.status == DisplayStatus::RUNNING && state.latestStats.has_value()) {
-        std::string line = LineStatsReporter::formatStatsLine(state.latestStats->stats, state.runName, runPrefixWidth, colorMode, output);
-        appendRunMetadataLocked(line, state);
-        appendPhaseLossesLocked(line, state);
+        std::string line = formatRunsStatsLineBase(state.latestStats->stats,
+                                                  formatRunLabel(state.runName, state.config.ensembleGroup),
+                                                  runPrefixWidth,
+                                                  displayedLossFromState(state.trainingLoss),
+                                                  displayedLossFromState(state.validationLoss),
+                                                  shouldUseColorLocked(),
+                                                  FinalReportAnsi::trainLoss,
+                                                  FinalReportAnsi::validateLoss);
         emitLineLocked(line);
         return;
     }
@@ -428,83 +684,61 @@ void TrainingRunsStatsReporter::writeRunLineLocked(const RunState& state, size_t
         return;
     }
 
-    std::string line = formatRunPrefix(state.runName, runPrefixWidth) + " status=" + displayStatusName(state.status);
-    appendRunMetadataLocked(line, state);
-    appendPhaseLossesLocked(line, state);
+    std::string line = formatRunPrefix(formatRunLabel(state.runName, state.config.ensembleGroup), runPrefixWidth) + " status=" + displayStatusName(state.status);
+    appendPhaseLossColumnsLocked(line, state);
     emitLineLocked(line);
 }
 
-void TrainingRunsStatsReporter::appendRunMetadataLocked(std::string& line, const RunState& state) {
-    if (!state.config.ensembleGroup.has_value()) {
-        return;
-    }
-    line += " ensemble_group=";
-    line += *state.config.ensembleGroup;
-    if (state.config.ensembleWeight != 1.0) {
-        char buffer[64];
-        std::snprintf(buffer, sizeof(buffer), " ensemble_weight=%.6f", state.config.ensembleWeight);
-        line += buffer;
-    }
-}
-
-void TrainingRunsStatsReporter::appendPhaseLossesLocked(std::string& line, const RunState& state) {
+void TrainingRunsStatsReporter::appendPhaseLossColumnsLocked(std::string& line, const RunState& state) {
     const bool useColor = shouldUseColorLocked();
-    const std::optional<double> trainLoss = lossFromEvent(state.latestTrainingStats);
+
+    const std::optional<double> trainLoss = displayedLossFromState(state.trainingLoss);
     if (trainLoss.has_value()) {
         char buffer[64];
         std::snprintf(buffer, sizeof(buffer), "train_loss=%.6f", trainLoss.value());
         line += " ";
         line += styled(buffer, FinalReportAnsi::trainLoss, useColor);
+    } else {
+        line.append(TRAIN_LOSS_FIELD_WIDTH, ' ');
     }
-    const std::optional<double> validateLoss = lossFromEvent(state.latestValidationStats);
+
+    const std::optional<double> validateLoss = displayedLossFromState(state.validationLoss);
     if (validateLoss.has_value()) {
         char buffer[64];
         std::snprintf(buffer, sizeof(buffer), "validate_loss=%.6f", validateLoss.value());
         line += " ";
         line += styled(buffer, FinalReportAnsi::validateLoss, useColor);
+    } else {
+        line.append(VALIDATE_LOSS_FIELD_WIDTH, ' ');
     }
-    const std::optional<double> testLoss = lossFromEvent(state.latestTestStats);
-    if (testLoss.has_value()) {
-        char buffer[64];
-        std::snprintf(buffer, sizeof(buffer), "test_loss=%.6f", testLoss.value());
-        line += " ";
-        line += styled(buffer, FinalReportAnsi::testLoss, useColor);
-    }
+
 }
 
 void TrainingRunsStatsReporter::writeResultLineLocked(const TrainingRunResult& result, size_t runPrefixWidth) {
     const bool useColor = shouldUseColorLocked();
     const char* statusStyle = statusColorStyle(result.status);
 
-    std::string line = formatRunPrefix(result.runName, runPrefixWidth);
+    std::string line = formatRunPrefix(formatRunLabel(result.runName, result.ensembleGroup), runPrefixWidth);
+    const std::string statusText = std::string("status=") + displayStatusName(displayStatusFromRunStatus(result.status));
+    const std::string resultText = std::string("result=") + terminalStatusName(result);
+    const size_t terminalStatusWidth = 1 + statusText.size() + 1 + resultText.size();
     line += " ";
-    line += styled(std::string("status=") + displayStatusName(displayStatusFromRunStatus(result.status)), statusStyle, useColor);
+    line += styled(statusText, statusStyle, useColor);
     line += " ";
-    line += styled(std::string("result=") + terminalStatusName(result), statusStyle, useColor);
-    if (result.ensembleGroup.has_value()) {
-        line += " ensemble_group=";
-        line += *result.ensembleGroup;
-        if (result.ensembleWeight != 1.0) {
-            char buffer[64];
-            std::snprintf(buffer, sizeof(buffer), " ensemble_weight=%.6f", result.ensembleWeight);
-            line += buffer;
-        }
+    line += styled(resultText, statusStyle, useColor);
+    if (terminalStatusWidth < RUN_PROGRESS_FIELDS_WIDTH) {
+        line.append(RUN_PROGRESS_FIELDS_WIDTH - terminalStatusWidth, ' ');
     }
-    if (result.finalTrainingStats.has_value() && result.finalTrainingStats->loss.has_value()) {
-        char buffer[64];
-        std::snprintf(buffer, sizeof(buffer), "final_train_loss=%.6f", result.finalTrainingStats->loss.value());
-        line += " ";
-        line += styled(buffer, FinalReportAnsi::trainLoss, useColor);
-    }
-    if (result.finalValidationStats.has_value() && result.finalValidationStats->loss.has_value()) {
-        char buffer[64];
-        std::snprintf(buffer, sizeof(buffer), "final_validate_loss=%.6f", result.finalValidationStats->loss.value());
-        line += " ";
-        line += styled(buffer, FinalReportAnsi::validateLoss, useColor);
-    }
+
+    appendPhaseLossColumns(line,
+                           result.finalTrainingStats.has_value() ? result.finalTrainingStats->loss : std::optional<double>{},
+                           result.finalValidationStats.has_value() ? result.finalValidationStats->loss : std::optional<double>{},
+                           useColor,
+                           FinalReportAnsi::trainLoss,
+                           FinalReportAnsi::validateLoss);
     if (result.finalTestStats.has_value() && result.finalTestStats->loss.has_value()) {
         char buffer[64];
-        std::snprintf(buffer, sizeof(buffer), "final_test_loss=%.6f", result.finalTestStats->loss.value());
+        std::snprintf(buffer, sizeof(buffer), "test_loss=%.6f", result.finalTestStats->loss.value());
         line += " ";
         line += styled(buffer, FinalReportAnsi::testLoss, useColor);
     }
@@ -526,40 +760,30 @@ void TrainingRunsStatsReporter::writeEnsembleLineLocked(const TrainingEnsembleRe
         return it == counts.end() ? 0u : it->second;
     };
 
-    char weightBuffer[64];
-    std::snprintf(weightBuffer, sizeof(weightBuffer), "total_weight=%.6f", result.totalWeight());
-
     std::string line = formatEnsemblePrefix(result.ensembleGroup, ensemblePrefixWidth);
     line += " ";
     line += styled(std::string("status=") + trainingRunStatusName(aggregateStatus), statusStyle, useColor);
-    line += " aggregation=member_weighted";
+    if (result.ensembleTrainingLoss.has_value() || result.ensembleTestLoss.has_value()) {
+        line += " aggregation=ensemble_eval";
+    }
     line += " members=" + std::to_string(result.size());
-    line += " ";
-    line += weightBuffer;
-    line += " completed=" + std::to_string(count("completed"));
-    line += " failed=" + std::to_string(count("failed"));
-    line += " cancelled=" + std::to_string(count("cancelled"));
-    line += " interrupted=" + std::to_string(count("interrupted"));
-    line += " oom=" + std::to_string(count("oom"));
+    if (!result.allCompleted()) {
+        line += " completed=" + std::to_string(count("completed"));
+        line += " failed=" + std::to_string(count("failed"));
+        line += " cancelled=" + std::to_string(count("cancelled"));
+        line += " interrupted=" + std::to_string(count("interrupted"));
+        line += " oom=" + std::to_string(count("oom"));
+    }
 
-    const std::optional<double> trainLoss = result.weightedFinalTrainingLoss();
-    if (trainLoss.has_value()) {
+    if (result.ensembleTrainingLoss.has_value()) {
         char buffer[64];
-        std::snprintf(buffer, sizeof(buffer), "weighted_train_loss=%.6f", trainLoss.value());
+        std::snprintf(buffer, sizeof(buffer), "ensemble_train_loss=%.6f", result.ensembleTrainingLoss.value());
         line += " ";
         line += styled(buffer, FinalReportAnsi::trainLoss, useColor);
     }
-    const std::optional<double> validateLoss = result.weightedFinalValidationLoss();
-    if (validateLoss.has_value()) {
+    if (result.ensembleTestLoss.has_value()) {
         char buffer[64];
-        std::snprintf(buffer, sizeof(buffer), "weighted_validate_loss=%.6f", validateLoss.value());
-        line += " ";
-        line += styled(buffer, FinalReportAnsi::validateLoss, useColor);
-    }
-    const std::optional<double> testLoss = result.weightedFinalTestLoss();
-    if (testLoss.has_value()) {
-        char buffer[64];
-        std::snprintf(buffer, sizeof(buffer), "weighted_test_loss=%.6f", testLoss.value());
+        std::snprintf(buffer, sizeof(buffer), "ensemble_test_loss=%.6f", result.ensembleTestLoss.value());
         line += " ";
         line += styled(buffer, FinalReportAnsi::testLoss, useColor);
     }
@@ -611,17 +835,14 @@ std::string TrainingRunsStatsReporter::styled(std::string_view text, const char*
 size_t TrainingRunsStatsReporter::runPrefixWidthLocked() const {
     size_t width = 0;
     for (const RunState& state : runStates) {
-        width = std::max(width, std::string("INFO runs[").size() + state.runName.size() + std::string("]:").size());
+        const std::string runLabel = formatRunLabel(state.runName, state.config.ensembleGroup);
+        width = std::max(width, std::string("INFO runs[").size() + runLabel.size() + std::string("]:").size());
     }
     return width;
 }
 
 std::string TrainingRunsStatsReporter::formatRunPrefix(std::string_view runName, size_t runPrefixWidth) {
-    std::string prefix = "INFO runs[" + std::string(runName) + "]:";
-    if (prefix.size() < runPrefixWidth) {
-        prefix.append(runPrefixWidth - prefix.size(), ' ');
-    }
-    return prefix;
+    return formatRunPrefixForLabel(runName, runPrefixWidth);
 }
 
 std::string TrainingRunsStatsReporter::formatEnsemblePrefix(std::string_view ensembleGroup, size_t ensemblePrefixWidth) {

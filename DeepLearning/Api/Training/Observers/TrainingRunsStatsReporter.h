@@ -55,6 +55,14 @@ class TrainingRunsStatsReporter : public TrainingStatsSink {
         TrainingRunResult result{};
     };
 
+    struct PhaseLossState {
+        uint64_t currentEpoch = 0;
+        double currentEpochLossSum = 0.0;
+        uint64_t currentEpochLossCount = 0;
+        std::optional<double> previousEpochLoss{};
+        std::optional<double> displayedLoss{};
+    };
+
     struct RunState {
         std::string runName{};
         RunConfig config{};
@@ -63,6 +71,8 @@ class TrainingRunsStatsReporter : public TrainingStatsSink {
         std::optional<TrainingStatsEvent> latestTrainingStats{};
         std::optional<TrainingStatsEvent> latestValidationStats{};
         std::optional<TrainingStatsEvent> latestTestStats{};
+        PhaseLossState trainingLoss{};
+        PhaseLossState validationLoss{};
         std::optional<TrainingRunResult> terminalResult{};
         bool dirty = false;
     };
@@ -70,13 +80,14 @@ class TrainingRunsStatsReporter : public TrainingStatsSink {
     void enqueueEvent(ReporterEvent event);
     void workerLoop() noexcept;
     void processEvent(const ReporterEvent& event);
+    static void updateSmoothedLossState(PhaseLossState& lossState, const TrainingStatsSnapshot& stats);
+    static std::optional<double> displayedLossFromState(const PhaseLossState& lossState);
     RunState& stateForRun(const std::string& runName);
     void maybeEmitSummary(std::chrono::steady_clock::time_point now, bool force = false);
     void emitSummaryLocked(std::chrono::steady_clock::time_point now);
     void writeSummaryHeaderLocked(std::string_view label);
     void writeRunLineLocked(const RunState& state, size_t runPrefixWidth);
-    void appendRunMetadataLocked(std::string& line, const RunState& state);
-    void appendPhaseLossesLocked(std::string& line, const RunState& state);
+    void appendPhaseLossColumnsLocked(std::string& line, const RunState& state);
     void writeResultLineLocked(const TrainingRunResult& result, size_t runPrefixWidth);
     void writeEnsembleLineLocked(const TrainingEnsembleResult& result, size_t ensemblePrefixWidth);
     [[nodiscard]] bool shouldUseColorLocked() const;

@@ -13,6 +13,8 @@
 #include <string>
 #include <utility>
 
+#include "Utilities/Loaders/Shard.h"
+
 class Loader;
 
 namespace Thor {
@@ -44,10 +46,24 @@ class Trainer {
     void validateFitOptions(const TrainerFitOptions& options) const;
     TrainingObserver& effectiveObserver();
     void fitInternal(const TrainerFitOptions& options, TrainingObserver& observer, const TrainingCancellationToken& cancellationToken);
+    void executeRequest(const TrainingRunRequest& request, TrainingObserver& observer);
     TrainingRunResult fitTrainingRun(std::string runName,
                                      const TrainerFitOptions& options,
                                      TrainingObserver& observer,
                                      const TrainingCancellationToken& cancellationToken);
+    TrainingRunResult evaluateTrainingRun(std::string runName,
+                                          std::shared_ptr<Loader> evaluationLoader,
+                                          ExampleType exampleType,
+                                          TrainingEventPhase phase,
+                                          TrainingObserver& observer,
+                                          const TrainingCancellationToken& cancellationToken);
+    TrainingRunResult evaluateSavedTrainingRun(std::string runName,
+                                               const std::string& modelArtifactDirectory,
+                                               std::shared_ptr<Loader> evaluationLoader,
+                                               ExampleType exampleType,
+                                               TrainingEventPhase phase,
+                                               TrainingObserver& observer,
+                                               const TrainingCancellationToken& cancellationToken);
 
     friend class TrainingRuns;
 
