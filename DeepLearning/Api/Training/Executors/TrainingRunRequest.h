@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Api/Training/TrainingProgram.h"
+#include "DeepLearning/Api/Training/Cancellation/TrainingCancellation.h"
 
 #include <cstdint>
 #include <memory>
@@ -25,7 +26,7 @@ struct TrainingRuntimeConfig {
 };
 
 struct TrainingRunRequest {
-    Network* network = nullptr;
+    std::shared_ptr<Network> network = nullptr;
     std::shared_ptr<Loader> loader = nullptr;
     std::shared_ptr<Optimizer> optimizer = nullptr;
     std::shared_ptr<TrainingProgram> trainingProgram = nullptr;
@@ -34,6 +35,7 @@ struct TrainingRunRequest {
     std::optional<std::string> saveModelDirectory{};
     bool saveModelOverwrite = false;
     bool saveOptimizerState = true;
+    TrainingCancellationToken cancellationToken{};
 };
 
 }  // namespace Thor

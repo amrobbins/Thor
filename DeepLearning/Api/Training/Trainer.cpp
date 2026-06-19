@@ -4,6 +4,7 @@
 #include "DeepLearning/Api/Network/Network.h"
 
 #include <cmath>
+#include <exception>
 #include <stdexcept>
 #include <utility>
 
@@ -48,10 +49,47 @@ Trainer Trainer::Builder::build() const {
     return trainer;
 }
 
+namespace {
+
+class ResultCapturingTrainingObserver : public TrainingObserver {
+   public:
+    explicit ResultCapturingTrainingObserver(TrainingObserver& inner) : inner(inner) {}
+
+    void onTrainingEvent(const TrainingEvent& event) override {
+        if (event.type == TrainingEventType::STATS) {
+            if (event.stats.phase == TrainingEventPhase::TRAIN) {
+                finalTrainingStats = event.stats;
+            } else if (event.stats.phase == TrainingEventPhase::VALIDATE) {
+                finalValidationStats = event.stats;
+            }
+        }
+        inner.onTrainingEvent(event);
+    }
+
+    void flush() override { inner.flush(); }
+    void close() override { inner.close(); }
+
+    std::optional<TrainingStatsSnapshot> finalTrainingStats{};
+    std::optional<TrainingStatsSnapshot> finalValidationStats{};
+
+   private:
+    TrainingObserver& inner;
+};
+
+}  // namespace
+
 void Trainer::fit(uint32_t epochs) { fit(TrainerFitOptions{epochs}); }
 
 void Trainer::fit(const TrainerFitOptions& options) {
+    TrainingObserver& observer = effectiveObserver();
+    fitInternal(options, observer, TrainingCancellationToken{});
+}
+
+void Trainer::fitInternal(const TrainerFitOptions& options,
+                          TrainingObserver& observer,
+                          const TrainingCancellationToken& cancellationToken) {
     validateFitOptions(options);
+    cancellationToken.throwIfCancellationRequested();
 
     TrainingRunRequest request;
     request.network = network;
@@ -63,8 +101,8 @@ void Trainer::fit(const TrainerFitOptions& options) {
     request.saveModelDirectory = saveModelDirectory;
     request.saveModelOverwrite = saveModelOverwrite;
     request.saveOptimizerState = saveOptimizerState;
+    request.cancellationToken = cancellationToken;
 
-    TrainingObserver& observer = effectiveObserver();
     try {
         executor->fit(request, observer);
     } catch (...) {
@@ -72,6 +110,23 @@ void Trainer::fit(const TrainerFitOptions& options) {
         throw;
     }
     observer.flush();
+}
+
+TrainingRunResult Trainer::fitTrainingRun(std::string runName,
+                                          const TrainerFitOptions& options,
+                                          TrainingObserver& observer,
+                                          const TrainingCancellationToken& cancellationToken) {
+    ResultCapturingTrainingObserver capturingObserver(observer);
+    try {
+        fitInternal(options, capturingObserver, cancellationToken);
+        capturingObserver.flush();
+        return TrainingRunResult::completedResult(
+            std::move(runName), capturingObserver.finalTrainingStats, capturingObserver.finalValidationStats);
+    } catch (...) {
+        capturingObserver.flush();
+        return TrainingRunResult::fromException(
+            std::move(runName), std::current_exception(), capturingObserver.finalTrainingStats, capturingObserver.finalValidationStats);
+    }
 }
 
 void Trainer::validateFitOptions(const TrainerFitOptions& options) const {

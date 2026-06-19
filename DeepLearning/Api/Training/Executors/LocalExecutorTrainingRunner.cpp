@@ -32,6 +32,7 @@ void runLocalExecutorBackedTraining(const TrainingRunRequest& request,
     THOR_THROW_IF_FALSE(request.loader != nullptr);
     THOR_THROW_IF_FALSE(request.epochs > 0);
     THOR_THROW_IF_FALSE(options.maxInFlightBatches >= 1);
+    request.cancellationToken.throwIfCancellationRequested();
 
     if (request.trainingProgram != nullptr && !request.trainingProgram->isInitialized()) {
         throw std::runtime_error("Trainer execution received an uninitialized TrainingProgram.");
@@ -50,6 +51,7 @@ void runLocalExecutorBackedTraining(const TrainingRunRequest& request,
         builder = builder.optimizer(request.optimizer);
     }
     std::shared_ptr<LocalExecutor> localExecutor = builder.build();
+    request.cancellationToken.throwIfCancellationRequested();
     localExecutor->trainEpochs(request.epochs, request.runtime.statsEnabled ? request.runtime.scalarTensorsToReport
                                                                              : std::set<std::string>{});
 }

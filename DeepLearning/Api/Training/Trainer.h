@@ -3,6 +3,8 @@
 #include "DeepLearning/Api/Training/Executors/DebugSynchronousTrainingExecutor.h"
 #include "DeepLearning/Api/Training/Executors/LocalTrainingExecutor.h"
 #include "DeepLearning/Api/Training/Observers/LineStatsReporter.h"
+#include "DeepLearning/Api/Training/Cancellation/TrainingCancellation.h"
+#include "DeepLearning/Api/Training/Results/TrainingRunResult.h"
 
 #include <cstdint>
 #include <memory>
@@ -17,6 +19,7 @@ namespace Thor {
 
 class Network;
 class Optimizer;
+class TrainingRuns;
 
 struct TrainerFitOptions {
     uint32_t epochs = 1;
@@ -36,8 +39,15 @@ class Trainer {
    private:
     void validateFitOptions(const TrainerFitOptions& options) const;
     TrainingObserver& effectiveObserver();
+    void fitInternal(const TrainerFitOptions& options, TrainingObserver& observer, const TrainingCancellationToken& cancellationToken);
+    TrainingRunResult fitTrainingRun(std::string runName,
+                                     const TrainerFitOptions& options,
+                                     TrainingObserver& observer,
+                                     const TrainingCancellationToken& cancellationToken);
 
-    Network* network = nullptr;
+    friend class TrainingRuns;
+
+    std::shared_ptr<Network> network = nullptr;
     std::shared_ptr<Loader> loader = nullptr;
     std::shared_ptr<Optimizer> optimizer = nullptr;
     std::shared_ptr<TrainingProgram> trainingProgram = nullptr;
@@ -51,8 +61,8 @@ class Trainer {
 
 class Trainer::Builder {
    public:
-    Builder& network(Network& network) {
-        this->network_ = &network;
+    Builder& network(std::shared_ptr<Network> network) {
+        this->network_ = std::move(network);
         return *this;
     }
 
@@ -134,7 +144,7 @@ class Trainer::Builder {
     [[nodiscard]] Trainer build() const;
 
    private:
-    Network* network_ = nullptr;
+    std::shared_ptr<Network> network_ = nullptr;
     std::shared_ptr<Loader> loader_ = nullptr;
     std::shared_ptr<Optimizer> optimizer_ = nullptr;
     std::shared_ptr<TrainingProgram> trainingProgram_ = nullptr;

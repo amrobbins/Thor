@@ -8,6 +8,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 #if defined(__unix__) || defined(__APPLE__)
 #include <unistd.h>
@@ -309,8 +310,14 @@ void appendPlainDimKey(LineBuffer& out, const char* key) {
 
 constexpr size_t RATE_FIELD_WIDTH = 5;
 
-void appendPlainStatsLine(LineBuffer& out, const TrainingStatsSnapshot& stats) {
-    out.append("INFO trainer:");
+void appendPlainStatsLine(LineBuffer& out, const TrainingStatsSnapshot& stats, std::string_view runName = {}) {
+    if (runName.empty()) {
+        out.append("INFO trainer:");
+    } else {
+        out.append("INFO runs[");
+        out.append(std::string(runName).c_str());
+        out.append("]:");
+    }
 
     appendPlainDimKey(out, "phase");
     appendPadded(out, trainingPhaseName(stats.phase), 8, PadAlignment::LEFT);
@@ -376,12 +383,18 @@ void appendPlainStatsLine(LineBuffer& out, const TrainingStatsSnapshot& stats) {
     appendPadded(out, formatElapsedString(stats.elapsedSeconds), 9);
 }
 
-void appendColorStatsLine(LineBuffer& out, const TrainingStatsSnapshot& stats) {
+void appendColorStatsLine(LineBuffer& out, const TrainingStatsSnapshot& stats, std::string_view runName = {}) {
     out.append(Ansi::label);
     out.append("INFO ");
     out.append(Ansi::reset);
     out.append(Ansi::bold);
-    out.append("trainer:");
+    if (runName.empty()) {
+        out.append("trainer:");
+    } else {
+        out.append("runs[");
+        out.append(std::string(runName).c_str());
+        out.append("]:");
+    }
     out.append(Ansi::reset);
 
     appendDimKey(out, "phase");
@@ -474,6 +487,10 @@ void LineStatsReporter::setIntervalSeconds(double intervalSeconds) {
 }
 
 void LineStatsReporter::onTrainingEvent(const TrainingEvent& event) {
+    onStatsEvent(TrainingStatsEvent::fromTrainingEvent(event));
+}
+
+void LineStatsReporter::onStatsEvent(const TrainingStatsEvent& event) {
     if (!enabled || (outputFile == nullptr && printer == nullptr)) {
         return;
     }
@@ -484,7 +501,7 @@ void LineStatsReporter::onTrainingEvent(const TrainingEvent& event) {
     }
 
     if (event.type == TrainingEventType::EPOCH_FINISHED) {
-        finishPhase(event.stats);
+        finishPhase(event.stats, event.runName);
         return;
     }
 
@@ -501,7 +518,7 @@ void LineStatsReporter::onTrainingEvent(const TrainingEvent& event) {
         return;
     }
 
-    writeStatsLine(event.stats);
+    writeStatsLine(event.stats, event.runName);
 }
 
 bool LineStatsReporter::shouldPrintStats(const TrainingStatsSnapshot& stats) {
@@ -539,7 +556,7 @@ void LineStatsReporter::beginPhase(const TrainingStatsSnapshot& stats) {
     lastSeenStats.reset();
 }
 
-void LineStatsReporter::finishPhase(const TrainingStatsSnapshot& stats) {
+void LineStatsReporter::finishPhase(const TrainingStatsSnapshot& stats, std::string_view runName) {
     if (!lastSeenStats.has_value()) {
         return;
     }
@@ -553,7 +570,7 @@ void LineStatsReporter::finishPhase(const TrainingStatsSnapshot& stats) {
     printedAnyStats = true;
     printedStatsForActivePhase = true;
     lastPrintedElapsedSeconds = lastSeenStats->elapsedSeconds;
-    writeStatsLine(lastSeenStats.value());
+    writeStatsLine(lastSeenStats.value(), runName);
 }
 
 bool LineStatsReporter::samePhaseOccurrence(const TrainingStatsSnapshot& stats) const {
@@ -584,12 +601,12 @@ bool LineStatsReporter::shouldUseColor() const {
 #endif
 }
 
-void LineStatsReporter::writeStatsLine(const TrainingStatsSnapshot& stats) {
+void LineStatsReporter::writeStatsLine(const TrainingStatsSnapshot& stats, std::string_view runName) {
     LineBuffer line;
     if (shouldUseColor()) {
-        appendColorStatsLine(line, stats);
+        appendColorStatsLine(line, stats, runName);
     } else {
-        appendPlainStatsLine(line, stats);
+        appendPlainStatsLine(line, stats, runName);
     }
     emitLine(line.c_str());
     lastPrintedStats = stats;
@@ -629,8 +646,12 @@ void LineStatsReporter::close() {
 }
 
 std::string LineStatsReporter::formatStatsLine(const TrainingStatsSnapshot& stats) {
+    return formatStatsLine(stats, std::string_view{});
+}
+
+std::string LineStatsReporter::formatStatsLine(const TrainingStatsSnapshot& stats, std::string_view runName) {
     LineBuffer line;
-    appendPlainStatsLine(line, stats);
+    appendPlainStatsLine(line, stats, runName);
     return std::string(line.c_str());
 }
 

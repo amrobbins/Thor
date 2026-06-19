@@ -1,19 +1,21 @@
 #pragma once
 
 #include "DeepLearning/Api/Training/Observers/TrainingObserver.h"
+#include "DeepLearning/Api/Training/Observers/TrainingStatsSink.h"
 #include "Utilities/Common/AsyncBufferedPrinter.h"
 
 #include <cstdio>
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 
 namespace Thor {
 
 enum class LineStatsColorMode { AUTO, NEVER, ALWAYS };
 enum class LineStatsOutputMode { STDOUT, STDOUT_AND_STDERR };
 
-class LineStatsReporter : public TrainingObserver {
+class LineStatsReporter : public TrainingObserver, public TrainingStatsSink {
    public:
     explicit LineStatsReporter(std::FILE* output,
                                double intervalSeconds = 10.0,
@@ -26,6 +28,7 @@ class LineStatsReporter : public TrainingObserver {
     ~LineStatsReporter() override;
 
     void onTrainingEvent(const TrainingEvent& event) override;
+    void onStatsEvent(const TrainingStatsEvent& event) override;
     void flush() override;
     void close() override;
 
@@ -43,16 +46,17 @@ class LineStatsReporter : public TrainingObserver {
 
     [[nodiscard]] static bool isAnsiColorSupported(std::FILE* output);
     [[nodiscard]] static std::string formatStatsLine(const TrainingStatsSnapshot& stats);
+    [[nodiscard]] static std::string formatStatsLine(const TrainingStatsSnapshot& stats, std::string_view runName);
     [[nodiscard]] static std::string formatElapsedSeconds(double elapsedSeconds);
 
    private:
     bool shouldPrintStats(const TrainingStatsSnapshot& stats);
     void beginPhase(const TrainingStatsSnapshot& stats);
-    void finishPhase(const TrainingStatsSnapshot& stats);
+    void finishPhase(const TrainingStatsSnapshot& stats, std::string_view runName = {});
     [[nodiscard]] bool samePhaseOccurrence(const TrainingStatsSnapshot& stats) const;
     [[nodiscard]] bool sameStatsIdentity(const TrainingStatsSnapshot& lhs, const TrainingStatsSnapshot& rhs) const;
     [[nodiscard]] bool shouldUseColor() const;
-    void writeStatsLine(const TrainingStatsSnapshot& stats);
+    void writeStatsLine(const TrainingStatsSnapshot& stats, std::string_view runName = {});
     void emitLine(const char* line);
 
     std::FILE* outputFile = nullptr;

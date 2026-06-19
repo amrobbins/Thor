@@ -7,6 +7,7 @@
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
 #include "DeepLearning/Api/Training/ExecutableTrainingPlan.h"
 #include "DeepLearning/Api/Training/TrainingProgram.h"
+#include "DeepLearning/Api/Training/Cancellation/TrainingCancellation.h"
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include <cuda_runtime_api.h>
@@ -91,6 +92,18 @@ struct QueuedTrainingState {
     uint64_t numBatchesDoneInEpoch = 0;
     uint64_t numBatchesInEpoch = 0;
 };
+
+void requestQueuedTrainingCancellation(const std::shared_ptr<QueuedTrainingState>& state) {
+    if (state == nullptr) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->cancelRequested = true;
+    }
+    state->batchFinished.notify_all();
+    state->batchPopped.notify_all();
+}
 
 float copyScalarStatTensor(const Batch& batchInput,
                            const std::map<std::string, ThorImplementation::Tensor>& batchOutput,
@@ -513,10 +526,10 @@ void throwIfQueuedTrainingStateFailed(const std::shared_ptr<QueuedTrainingState>
         std::rethrow_exception(failure);
     }
     if (interruptRequested) {
-        throw std::runtime_error("Native queued trainer interrupted by SIGINT.");
+        throw TrainingInterrupted("Native queued trainer interrupted by SIGINT.");
     }
     if (cancelRequested) {
-        throw std::runtime_error("Native queued trainer was cancelled without a recorded failure.");
+        throw TrainingCancelled("Native queued trainer was cancelled.");
     }
 }
 
@@ -561,7 +574,8 @@ class NativeQueuedEpochScheduler {
                                std::shared_ptr<QueuedTrainingState> state,
                                uint64_t currentEpoch,
                                uint64_t batchesPerEpoch,
-                               ExampleType exampleType)
+                               ExampleType exampleType,
+                               TrainingCancellationToken cancellationToken)
         : placedNetwork(std::move(placedNetwork)),
           loader(std::move(loader)),
           plan(plan),
@@ -569,7 +583,8 @@ class NativeQueuedEpochScheduler {
           state(std::move(state)),
           currentEpoch(currentEpoch),
           batchesPerEpoch(batchesPerEpoch),
-          exampleType(exampleType) {}
+          exampleType(exampleType),
+          cancellationToken(std::move(cancellationToken)) {}
 
     void operator()(uint64_t initialEpochBatchNum, uint64_t batches) {
         if (batches == 0) {
@@ -618,6 +633,10 @@ class NativeQueuedEpochScheduler {
         const std::vector<StepExecutable>& steps = plan.getSteps();
 
         for (uint64_t batch = 0; batch < batches; ++batch) {
+            if (cancellationToken.isCancellationRequested()) {
+                requestQueuedTrainingCancellation(state);
+                return;
+            }
             const auto scheduleIterationStart = std::chrono::high_resolution_clock::now();
             uint64_t epochBatchNum = initialEpochBatchNum + batch;
             const auto optimizerStart = std::chrono::high_resolution_clock::now();
@@ -805,6 +824,7 @@ class NativeQueuedEpochScheduler {
     uint64_t currentEpoch;
     uint64_t batchesPerEpoch;
     ExampleType exampleType;
+    TrainingCancellationToken cancellationToken;
 };
 
 }  // namespace
@@ -816,18 +836,22 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     THOR_THROW_IF_FALSE(request.loader != nullptr);
     THOR_THROW_IF_FALSE(request.epochs > 0);
     THOR_THROW_IF_FALSE(options.maxInFlightBatches >= 1);
+    request.cancellationToken.throwIfCancellationRequested();
 
     std::shared_ptr<TrainingProgram> trainingProgram = defaultTrainingProgramForRequest(request);
     attachPlacementFallbackOptimizerIfNeeded(request, *trainingProgram);
 
     const uint64_t batchSize = request.loader->getBatchSize();
     std::vector<Event> initDoneEvents;
+    request.cancellationToken.throwIfCancellationRequested();
     std::shared_ptr<PlacedNetwork> placedNetwork = request.network->place(batchSize, initDoneEvents, /*inferenceOnly=*/false);
     THOR_THROW_IF_FALSE(placedNetwork->getNumStamps() == 1);
     for (size_t i = 0; i < initDoneEvents.size(); ++i) {
+        request.cancellationToken.throwIfCancellationRequested();
         initDoneEvents[i].synchronize();
     }
 
+    request.cancellationToken.throwIfCancellationRequested();
     ExecutableTrainingPlan plan = ExecutableTrainingPlan::compile(*trainingProgram, *placedNetwork);
     ensureNativeQueuedPlanCompatible(plan, *request.network);
 
@@ -871,10 +895,12 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     }
 
     for (uint32_t epochOffset = 0; epochOffset < request.epochs; ++epochOffset) {
+        request.cancellationToken.throwIfCancellationRequested();
         const uint64_t humanEpoch = currentEpoch + 1;
 
         for (const auto& phaseSpec : {std::pair<ExampleType, TrainingEventPhase>{ExampleType::TRAIN, TrainingEventPhase::TRAIN},
                                       std::pair<ExampleType, TrainingEventPhase>{ExampleType::VALIDATE, TrainingEventPhase::VALIDATE}}) {
+            request.cancellationToken.throwIfCancellationRequested();
             const ExampleType exampleType = phaseSpec.first;
             const TrainingEventPhase phase = phaseSpec.second;
             uint64_t batchNum = request.loader->getNextBatchNum(exampleType);
@@ -899,7 +925,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
             }
 
             NativeQueuedEpochScheduler scheduler(
-                placedNetwork, request.loader, plan, options, state, currentEpoch, batchesPerEpoch, exampleType);
+                placedNetwork, request.loader, plan, options, state, currentEpoch, batchesPerEpoch, exampleType, request.cancellationToken);
             std::thread schedulingThread([scheduler = std::move(scheduler), state, batchNum, batchesToRun]() mutable {
                 try {
                     scheduler(batchNum, batchesToRun);
@@ -933,24 +959,26 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                 }
             };
 
-            auto requestSigintCancel = [&]() {
-                if (!sigintScope.interrupted()) {
-                    return;
+            auto requestExternalCancel = [&]() {
+                if (request.cancellationToken.isCancellationRequested()) {
+                    requestQueuedTrainingCancellation(state);
                 }
-                {
-                    std::lock_guard<std::mutex> lock(state->mutex);
-                    state->cancelRequested = true;
-                    state->interruptRequested = true;
+                if (sigintScope.interrupted()) {
+                    {
+                        std::lock_guard<std::mutex> lock(state->mutex);
+                        state->cancelRequested = true;
+                        state->interruptRequested = true;
+                    }
+                    state->batchFinished.notify_all();
+                    state->batchPopped.notify_all();
                 }
-                state->batchFinished.notify_all();
-                state->batchPopped.notify_all();
             };
 
             auto previousBatchDone = std::chrono::high_resolution_clock::now();
             bool haveCompletedBatchTimingInPhase = false;
             try {
                 while (true) {
-                    requestSigintCancel();
+                    requestExternalCancel();
                     BatchPopResult completedBatch = popBatchData(state);
                     if (!completedBatch.hasBatch) {
                         break;
@@ -1042,6 +1070,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         currentEpoch += 1;
     }
 
+    request.cancellationToken.throwIfCancellationRequested();
     if (request.saveModelDirectory.has_value()) {
         placedNetwork->save(*request.saveModelDirectory, request.saveModelOverwrite, request.saveOptimizerState);
     }

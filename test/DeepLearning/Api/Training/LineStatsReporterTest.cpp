@@ -255,3 +255,12 @@ TEST(LineStatsReporter, ColorModeAutoDoesNotColorNonTerminalFiles) {
     EXPECT_EQ(output.find("\x1b["), std::string::npos);
     EXPECT_EQ(output, LineStatsReporter::formatStatsLine(makeStats(65.0)) + "\n");
 }
+
+TEST(LineStatsReporter, StructuredStatsEventsCanPrefixRunName) {
+    std::FILE* out = std::tmpfile();
+    LineStatsReporter reporter(out, 0.0, true, LineStatsColorMode::NEVER);
+
+    reporter.onStatsEvent(TrainingStatsEvent::fromTrainingEvent(TrainingEvent::statsUpdated(makeStats(65.0)), "fold_0"));
+
+    EXPECT_EQ(readAndCloseFile(out), LineStatsReporter::formatStatsLine(makeStats(65.0), "fold_0") + "\n");
+}

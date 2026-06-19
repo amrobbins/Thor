@@ -51,7 +51,7 @@ class CapturingExecutor : public TrainingExecutor {
     void fit(const TrainingRunRequest& request, TrainingObserver& observer) override {
         (void)observer;
         lastEpochs = request.epochs;
-        lastNetwork = request.network;
+        lastNetwork = request.network.get();
         lastStatsEnabled = request.runtime.statsEnabled;
         lastMaxInFlightBatches = request.runtime.maxInFlightBatches;
         lastHasTrainingProgram = request.trainingProgram != nullptr;
@@ -59,6 +59,7 @@ class CapturingExecutor : public TrainingExecutor {
         lastFirstStepEnabled = request.trainingProgram != nullptr && request.trainingProgram->getNumSteps() > 0
                                    ? request.trainingProgram->getStep(0).isEnabled()
                                    : false;
+        lastCancellationRequested = request.cancellationToken.isCancellationRequested();
         calls += 1;
     }
 
@@ -69,13 +70,43 @@ class CapturingExecutor : public TrainingExecutor {
     bool lastHasTrainingProgram = false;
     uint64_t lastTrainingProgramStepCount = 0;
     bool lastFirstStepEnabled = false;
+    bool lastCancellationRequested = true;
     uint32_t calls = 0;
 };
 
 }  // namespace
 
+TEST(Trainer, BuilderRetainsSharedNetworkLifetime) {
+    auto loader = std::make_shared<FakeLoader>();
+    auto executor = std::make_shared<CapturingExecutor>();
+    auto observer = std::make_shared<NullTrainingObserver>();
+    std::weak_ptr<Network> weakNetwork;
+    Network* expectedNetwork = nullptr;
+
+    Trainer trainer;
+    {
+        auto network = std::make_shared<Network>("trainer-shared-network-lifetime");
+        weakNetwork = network;
+        expectedNetwork = network.get();
+        trainer = Trainer::Builder()
+                      .network(network)
+                      .loader(loader)
+                      .executor(executor)
+                      .observer(observer)
+                      .statsEnabled(false)
+                      .build();
+    }
+
+    EXPECT_FALSE(weakNetwork.expired());
+
+    trainer.fit(1);
+
+    EXPECT_EQ(executor->lastNetwork, expectedNetwork);
+    EXPECT_FALSE(weakNetwork.expired());
+}
+
 TEST(Trainer, FitPassesEpochsAsRunParameter) {
-    Network network("trainer-test");
+    auto network = std::make_shared<Network>("trainer-test");
     auto loader = std::make_shared<FakeLoader>();
     auto executor = std::make_shared<CapturingExecutor>();
     auto observer = std::make_shared<NullTrainingObserver>();
@@ -93,14 +124,15 @@ TEST(Trainer, FitPassesEpochsAsRunParameter) {
 
     EXPECT_EQ(executor->calls, 1u);
     EXPECT_EQ(executor->lastEpochs, 5u);
-    EXPECT_EQ(executor->lastNetwork, &network);
+    EXPECT_EQ(executor->lastNetwork, network.get());
     EXPECT_FALSE(executor->lastStatsEnabled);
     EXPECT_EQ(executor->lastMaxInFlightBatches, 64u);
+    EXPECT_FALSE(executor->lastCancellationRequested);
 }
 
 
 TEST(Trainer, FitPassesTrainingProgramAsRunParameter) {
-    Network network("trainer-test");
+    auto network = std::make_shared<Network>("trainer-test");
     auto loader = std::make_shared<FakeLoader>();
     auto executor = std::make_shared<CapturingExecutor>();
     auto observer = std::make_shared<NullTrainingObserver>();
@@ -128,7 +160,7 @@ TEST(Trainer, FitPassesTrainingProgramAsRunParameter) {
 
 
 TEST(Trainer, FitSeesTrainingProgramMutationsBetweenCalls) {
-    Network network("trainer-test");
+    auto network = std::make_shared<Network>("trainer-test");
     auto loader = std::make_shared<FakeLoader>();
     auto executor = std::make_shared<CapturingExecutor>();
     auto observer = std::make_shared<NullTrainingObserver>();
@@ -157,7 +189,7 @@ TEST(Trainer, FitSeesTrainingProgramMutationsBetweenCalls) {
 }
 
 TEST(Trainer, RejectsZeroEpochsAtFitTime) {
-    Network network("trainer-test");
+    auto network = std::make_shared<Network>("trainer-test");
     auto loader = std::make_shared<FakeLoader>();
     auto executor = std::make_shared<CapturingExecutor>();
 
@@ -176,7 +208,7 @@ TEST(DebugSynchronousTrainingExecutor, IsPluggableTrainingExecutorBackend) {
 }
 
 TEST(Trainer, BuilderProvidesDebugSynchronousExecutorShortcut) {
-    Network network("trainer-test");
+    auto network = std::make_shared<Network>("trainer-test");
     auto loader = std::make_shared<FakeLoader>();
 
     Trainer trainer = Trainer::Builder()

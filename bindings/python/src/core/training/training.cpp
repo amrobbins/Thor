@@ -5,6 +5,7 @@
 #include <nanobind/stl/set.h>
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/unordered_map.h>
 #include <nanobind/stl/vector.h>
 
 #include <algorithm>
@@ -21,12 +22,14 @@
 
 #include "DeepLearning/Api/Loaders/Loader.h"
 #include "DeepLearning/Api/Loaders/LocalBatchLoader.h"
+#include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
 #include "DeepLearning/Api/Parameter/ParameterReference.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 #include "DeepLearning/Api/Training/StepExecutable.h"
 #include "DeepLearning/Api/Training/Trainer.h"
+#include "DeepLearning/Api/Training/TrainingRuns.h"
 #include "DeepLearning/Api/Training/TrainingInputBinding.h"
 #include "DeepLearning/Api/Training/TrainingProgram.h"
 #include "DeepLearning/Api/Training/TrainingPhase.h"
@@ -311,6 +314,52 @@ LineStatsColorMode lineStatsColorModeFromString(const std::string& value) {
     throw nb::value_error("stats_color must be one of: 'always', 'auto', 'never'");
 }
 
+TrainingRunsFailurePolicy trainingRunsFailurePolicyFromString(const std::string& value) {
+    if (value == "cancel_siblings") {
+        return TrainingRunsFailurePolicy::CANCEL_SIBLINGS;
+    }
+    if (value == "continue") {
+        return TrainingRunsFailurePolicy::CONTINUE;
+    }
+    throw nb::value_error("failure_policy must be one of: 'cancel_siblings', 'continue'");
+}
+
+std::vector<TrainingRunsSpec> trainingRunsSpecsFromPython(nb::iterable runs) {
+    std::vector<TrainingRunsSpec> specs;
+    for (nb::handle item : runs) {
+        nb::sequence pair = nb::cast<nb::sequence>(item);
+        if (nb::len(pair) != 2) {
+            throw nb::value_error("TrainingRuns entries must be (run_name, trainer) pairs");
+        }
+
+        std::string runName = nb::cast<std::string>(pair[0]);
+        std::shared_ptr<Trainer> trainer = nb::cast<std::shared_ptr<Trainer>>(pair[1]);
+        specs.emplace_back(std::move(runName), std::move(trainer));
+    }
+    return specs;
+}
+
+nb::object optionalDouble(std::optional<double> value) {
+    if (!value.has_value()) {
+        return nb::none();
+    }
+    return nb::cast(*value);
+}
+
+nb::object optionalUint64FromStats(const std::optional<TrainingStatsSnapshot>& stats, uint64_t TrainingStatsSnapshot::*field) {
+    if (!stats.has_value()) {
+        return nb::none();
+    }
+    return nb::cast((*stats).*field);
+}
+
+nb::object optionalLossFromStats(const std::optional<TrainingStatsSnapshot>& stats) {
+    if (!stats.has_value()) {
+        return nb::none();
+    }
+    return optionalDouble(stats->loss);
+}
+
 }  // namespace
 
 void bind_training(nb::module_& training) {
@@ -561,10 +610,10 @@ calling this helper.
 
     auto trainer = nb::class_<Trainer>(training, "Trainer");
     trainer.attr("__module__") = "thor.training";
-    trainer.def(
-        "__init__",
-        [](Trainer* self,
-           Network& network,
+    trainer.def_static(
+        "__new__",
+        [](nb::handle cls,
+           std::shared_ptr<Network> network,
            std::shared_ptr<Loader> loader,
            std::shared_ptr<Optimizer> optimizer,
            nb::object training_program,
@@ -577,9 +626,10 @@ calling this helper.
            std::string stats_color,
            std::optional<std::string> save_model_dir,
            bool save_model_overwrite,
-           bool save_optimizer_state) {
+           bool save_optimizer_state) -> std::shared_ptr<Trainer> {
+            (void)cls;
             Trainer::Builder builder;
-            builder.network(network)
+            builder.network(std::move(network))
                 .loader(std::move(loader))
                 .statsEnabled(stats)
                 .statsIntervalSeconds(stats_interval_s)
@@ -599,8 +649,9 @@ calling this helper.
             if (debug_synchronous) {
                 builder.debugSynchronousExecutor();
             }
-            new (self) Trainer(builder.build());
+            return std::make_shared<Trainer>(builder.build());
         },
+        "cls"_a,
         "network"_a,
         "loader"_a,
         "optimizer"_a.none() = nb::none(),
@@ -615,7 +666,157 @@ calling this helper.
         "save_model_dir"_a.none() = nb::none(),
         "save_model_overwrite"_a = false,
         "save_optimizer_state"_a = true);
-    trainer.def("fit", nb::overload_cast<uint32_t>(&Trainer::fit), "epochs"_a);
+    trainer.def(
+        "__init__",
+        [](Trainer*,
+           std::shared_ptr<Network>,
+           std::shared_ptr<Loader>,
+           std::shared_ptr<Optimizer>,
+           nb::object,
+           bool,
+           bool,
+           double,
+           uint64_t,
+           std::vector<std::string>,
+           bool,
+           std::string,
+           std::optional<std::string>,
+           bool,
+           bool) {},
+        "network"_a,
+        "loader"_a,
+        "optimizer"_a.none() = nb::none(),
+        "training_program"_a.none() = nb::none(),
+        "debug_synchronous"_a = false,
+        "stats"_a = true,
+        "stats_interval_s"_a = 10.0,
+        "max_in_flight_batches"_a = 32,
+        "scalar_tensors_to_report"_a = std::vector<std::string>{"loss"},
+        "stats_stderr_also"_a = false,
+        "stats_color"_a = "auto",
+        "save_model_dir"_a.none() = nb::none(),
+        "save_model_overwrite"_a = false,
+        "save_optimizer_state"_a = true);
+    trainer.def("fit", [](Trainer& self, uint32_t epochs) {
+        nb::gil_scoped_release release;
+        self.fit(epochs);
+    }, "epochs"_a);
+
+    auto training_event_phase = nb::enum_<TrainingEventPhase>(training, "TrainingEventPhase")
+                                    .value("unknown", TrainingEventPhase::UNKNOWN)
+                                    .value("train", TrainingEventPhase::TRAIN)
+                                    .value("validate", TrainingEventPhase::VALIDATE)
+                                    .value("test", TrainingEventPhase::TEST);
+    training_event_phase.attr("__module__") = "thor.training";
+
+    auto training_stats_snapshot = nb::class_<TrainingStatsSnapshot>(training, "TrainingStatsSnapshot");
+    training_stats_snapshot.attr("__module__") = "thor.training";
+    training_stats_snapshot.def_ro("network_name", &TrainingStatsSnapshot::networkName);
+    training_stats_snapshot.def_ro("dataset_name", &TrainingStatsSnapshot::datasetName);
+    training_stats_snapshot.def_ro("phase", &TrainingStatsSnapshot::phase);
+    training_stats_snapshot.def_ro("epoch", &TrainingStatsSnapshot::epoch);
+    training_stats_snapshot.def_ro("epochs", &TrainingStatsSnapshot::epochs);
+    training_stats_snapshot.def_ro("step", &TrainingStatsSnapshot::step);
+    training_stats_snapshot.def_ro("step_in_epoch", &TrainingStatsSnapshot::stepInEpoch);
+    training_stats_snapshot.def_ro("steps_per_epoch", &TrainingStatsSnapshot::stepsPerEpoch);
+    training_stats_snapshot.def_ro("batch_size", &TrainingStatsSnapshot::batchSize);
+    training_stats_snapshot.def_ro("samples_processed", &TrainingStatsSnapshot::samplesProcessed);
+    training_stats_snapshot.def_ro("in_flight_batches", &TrainingStatsSnapshot::inFlightBatches);
+    training_stats_snapshot.def_ro("elapsed_seconds", &TrainingStatsSnapshot::elapsedSeconds);
+    training_stats_snapshot.def_ro("samples_per_second", &TrainingStatsSnapshot::samplesPerSecond);
+    training_stats_snapshot.def_ro("batches_per_second", &TrainingStatsSnapshot::batchesPerSecond);
+    training_stats_snapshot.def_ro("floating_point_operations_per_batch",
+                                   &TrainingStatsSnapshot::floatingPointOperationsPerBatch);
+    training_stats_snapshot.def_ro("floating_point_operations_per_second",
+                                   &TrainingStatsSnapshot::floatingPointOperationsPerSecond);
+    training_stats_snapshot.def_prop_ro("loss", [](const TrainingStatsSnapshot& self) { return optionalDouble(self.loss); });
+    training_stats_snapshot.def_prop_ro("accuracy", [](const TrainingStatsSnapshot& self) { return optionalDouble(self.accuracy); });
+    training_stats_snapshot.def_prop_ro("learning_rate",
+                                        [](const TrainingStatsSnapshot& self) { return optionalDouble(self.learningRate); });
+    training_stats_snapshot.def_prop_ro("momentum", [](const TrainingStatsSnapshot& self) { return optionalDouble(self.momentum); });
+    training_stats_snapshot.def_ro("metrics", &TrainingStatsSnapshot::metrics);
+
+    auto training_run_status = nb::enum_<TrainingRunStatus>(training, "TrainingRunStatus")
+                                   .value("not_started", TrainingRunStatus::NOT_STARTED)
+                                   .value("running", TrainingRunStatus::RUNNING)
+                                   .value("completed", TrainingRunStatus::COMPLETED)
+                                   .value("failed", TrainingRunStatus::FAILED)
+                                   .value("cancelled", TrainingRunStatus::CANCELLED)
+                                   .value("interrupted", TrainingRunStatus::INTERRUPTED)
+                                   .value("oom", TrainingRunStatus::OUT_OF_MEMORY);
+    training_run_status.attr("__module__") = "thor.training";
+
+    auto training_runs_failure_policy = nb::enum_<TrainingRunsFailurePolicy>(training, "TrainingRunsFailurePolicy")
+                                            .value("continue_", TrainingRunsFailurePolicy::CONTINUE)
+                                            .value("cancel_siblings", TrainingRunsFailurePolicy::CANCEL_SIBLINGS);
+    training_runs_failure_policy.attr("__module__") = "thor.training";
+
+    auto training_run_result = nb::class_<TrainingRunResult>(training, "TrainingRunResult");
+    training_run_result.attr("__module__") = "thor.training";
+    training_run_result.def_prop_ro("run_name", [](const TrainingRunResult& self) { return self.runName; });
+    training_run_result.def_prop_ro("status", [](const TrainingRunResult& self) { return trainingRunStatusName(self.status); });
+    training_run_result.def_prop_ro("status_enum", [](const TrainingRunResult& self) { return self.status; });
+    training_run_result.def_prop_ro("exception_type", [](const TrainingRunResult& self) { return self.exception.type; });
+    training_run_result.def_prop_ro("exception_message", [](const TrainingRunResult& self) { return self.exception.message; });
+    training_run_result.def_prop_ro("final_training_stats", [](const TrainingRunResult& self) { return self.finalTrainingStats; });
+    training_run_result.def_prop_ro("final_validation_stats", [](const TrainingRunResult& self) { return self.finalValidationStats; });
+    training_run_result.def_prop_ro("final_training_loss",
+                                    [](const TrainingRunResult& self) { return optionalLossFromStats(self.finalTrainingStats); });
+    training_run_result.def_prop_ro("final_validation_loss",
+                                    [](const TrainingRunResult& self) { return optionalLossFromStats(self.finalValidationStats); });
+    training_run_result.def_prop_ro("final_training_step", [](const TrainingRunResult& self) {
+        return optionalUint64FromStats(self.finalTrainingStats, &TrainingStatsSnapshot::step);
+    });
+    training_run_result.def_prop_ro("final_validation_step", [](const TrainingRunResult& self) {
+        return optionalUint64FromStats(self.finalValidationStats, &TrainingStatsSnapshot::step);
+    });
+    training_run_result.def("completed", &TrainingRunResult::completed);
+    training_run_result.def("failed", &TrainingRunResult::failed);
+    training_run_result.def("cancelled", &TrainingRunResult::cancelled);
+
+    auto training_runs_result = nb::class_<TrainingRunsResult>(training, "TrainingRunsResult");
+    training_runs_result.attr("__module__") = "thor.training";
+    training_runs_result.def("__len__", &TrainingRunsResult::size);
+    training_runs_result.def("__bool__", [](const TrainingRunsResult& self) { return !self.empty(); });
+    training_runs_result.def("__getitem__", [](const TrainingRunsResult& self, int64_t index) -> const TrainingRunResult& {
+        int64_t resolvedIndex = index;
+        if (resolvedIndex < 0) {
+            resolvedIndex += static_cast<int64_t>(self.size());
+        }
+        if (resolvedIndex < 0) {
+            throw nb::index_error("TrainingRunsResult index is out of range");
+        }
+        return self.at(static_cast<size_t>(resolvedIndex));
+    }, nb::rv_policy::reference_internal);
+    training_runs_result.def("__getitem__", [](const TrainingRunsResult& self, const std::string& runName) -> const TrainingRunResult& {
+        return self.at(runName);
+    }, nb::rv_policy::reference_internal);
+    training_runs_result.def_prop_ro("runs", [](const TrainingRunsResult& self) { return self.runs(); });
+    training_runs_result.def("all_completed", &TrainingRunsResult::allCompleted);
+    training_runs_result.def("any_failed", &TrainingRunsResult::anyFailed);
+    training_runs_result.def("any_cancelled", &TrainingRunsResult::anyCancelled);
+
+    auto training_runs = nb::class_<TrainingRuns>(training, "TrainingRuns");
+    training_runs.attr("__module__") = "thor.training";
+    training_runs.def_static(
+        "__new__",
+        [](nb::handle cls, nb::iterable runs, const std::string& failure_policy) -> std::shared_ptr<TrainingRuns> {
+            (void)cls;
+            return std::make_shared<TrainingRuns>(trainingRunsSpecsFromPython(runs),
+                                                  trainingRunsFailurePolicyFromString(failure_policy));
+        },
+        "cls"_a,
+        "runs"_a,
+        "failure_policy"_a = "cancel_siblings");
+    training_runs.def(
+        "__init__",
+        [](TrainingRuns*, nb::iterable, const std::string&) {},
+        "runs"_a,
+        "failure_policy"_a = "cancel_siblings");
+    training_runs.def("fit", [](TrainingRuns& self, uint32_t epochs) {
+        nb::gil_scoped_release release;
+        return self.fit(epochs);
+    }, "epochs"_a);
 
     auto gradient_clear_policy = nb::enum_<TrainingStep::GradientClearPolicy>(training, "GradientClearPolicy")
                                      .value("clear_before_step", TrainingStep::GradientClearPolicy::CLEAR_BEFORE_STEP)
