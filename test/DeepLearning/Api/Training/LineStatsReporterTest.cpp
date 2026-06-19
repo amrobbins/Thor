@@ -231,6 +231,16 @@ TEST(LineStatsReporter, ColorModeAlwaysAddsAnsi) {
     EXPECT_EQ(stripAnsiSequences(output), LineStatsReporter::formatStatsLine(makeStats(65.0)) + "\n");
 }
 
+TEST(LineStatsReporter, StaticFormatStatsLineCanEmitAnsiForTrainingRuns) {
+    const std::string output =
+        LineStatsReporter::formatStatsLine(makeStats(65.0), "fold_0", 24, LineStatsColorMode::ALWAYS);
+
+    EXPECT_NE(output.find("\x1b["), std::string::npos);
+    EXPECT_NE(output.find("runs[fold_0]:"), std::string::npos);
+    EXPECT_TRUE(tokenHasAnsiStyle(output, "train", true));
+    EXPECT_EQ(stripAnsiSequences(output), LineStatsReporter::formatStatsLine(makeStats(65.0), "fold_0", 24));
+}
+
 TEST(LineStatsReporter, ColorModeAlwaysBoldColorsPhaseByPhaseType) {
     std::FILE* out = std::tmpfile();
     LineStatsReporter reporter(out, 0.0, true, LineStatsColorMode::ALWAYS);

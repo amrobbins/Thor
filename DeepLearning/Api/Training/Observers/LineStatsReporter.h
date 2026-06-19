@@ -47,6 +47,14 @@ class LineStatsReporter : public TrainingObserver, public TrainingStatsSink {
     [[nodiscard]] static bool isAnsiColorSupported(std::FILE* output);
     [[nodiscard]] static std::string formatStatsLine(const TrainingStatsSnapshot& stats);
     [[nodiscard]] static std::string formatStatsLine(const TrainingStatsSnapshot& stats, std::string_view runName);
+    [[nodiscard]] static std::string formatStatsLine(const TrainingStatsSnapshot& stats,
+                                                     std::string_view runName,
+                                                     size_t runPrefixWidth);
+    [[nodiscard]] static std::string formatStatsLine(const TrainingStatsSnapshot& stats,
+                                                     std::string_view runName,
+                                                     size_t runPrefixWidth,
+                                                     LineStatsColorMode colorMode,
+                                                     std::FILE* output = stdout);
     [[nodiscard]] static std::string formatElapsedSeconds(double elapsedSeconds);
 
    private:

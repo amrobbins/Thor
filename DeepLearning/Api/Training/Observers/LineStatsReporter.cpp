@@ -276,6 +276,23 @@ bool fileSupportsAnsiColor(std::FILE* output) {
 #endif
 }
 
+bool shouldUseColorForOutput(std::FILE* output, LineStatsColorMode colorMode) {
+    if (colorMode == LineStatsColorMode::NEVER) {
+        return false;
+    }
+    if (colorMode == LineStatsColorMode::ALWAYS) {
+        return true;
+    }
+#if defined(__unix__) || defined(__APPLE__)
+    if (output != nullptr) {
+        return fileSupportsAnsiColor(output);
+    }
+    return fileDescriptorSupportsAnsiColor(STDOUT_FILENO);
+#else
+    return fileSupportsAnsiColor(output != nullptr ? output : stdout);
+#endif
+}
+
 const char* phaseStyle(TrainingEventPhase phase) {
     switch (phase) {
         case TrainingEventPhase::TRAIN:
@@ -310,13 +327,20 @@ void appendPlainDimKey(LineBuffer& out, const char* key) {
 
 constexpr size_t RATE_FIELD_WIDTH = 5;
 
-void appendPlainStatsLine(LineBuffer& out, const TrainingStatsSnapshot& stats, std::string_view runName = {}) {
+void appendPlainStatsLine(LineBuffer& out,
+                          const TrainingStatsSnapshot& stats,
+                          std::string_view runName = {},
+                          size_t runPrefixWidth = 0) {
     if (runName.empty()) {
         out.append("INFO trainer:");
     } else {
-        out.append("INFO runs[");
-        out.append(std::string(runName).c_str());
-        out.append("]:");
+        std::string prefix = "INFO runs[" + std::string(runName) + "]:";
+        out.append(prefix.c_str());
+        if (prefix.size() < runPrefixWidth) {
+            for (size_t i = prefix.size(); i < runPrefixWidth; ++i) {
+                out.append(' ');
+            }
+        }
     }
 
     appendPlainDimKey(out, "phase");
@@ -383,7 +407,10 @@ void appendPlainStatsLine(LineBuffer& out, const TrainingStatsSnapshot& stats, s
     appendPadded(out, formatElapsedString(stats.elapsedSeconds), 9);
 }
 
-void appendColorStatsLine(LineBuffer& out, const TrainingStatsSnapshot& stats, std::string_view runName = {}) {
+void appendColorStatsLine(LineBuffer& out,
+                          const TrainingStatsSnapshot& stats,
+                          std::string_view runName = {},
+                          size_t runPrefixWidth = 0) {
     out.append(Ansi::label);
     out.append("INFO ");
     out.append(Ansi::reset);
@@ -391,9 +418,14 @@ void appendColorStatsLine(LineBuffer& out, const TrainingStatsSnapshot& stats, s
     if (runName.empty()) {
         out.append("trainer:");
     } else {
-        out.append("runs[");
-        out.append(std::string(runName).c_str());
-        out.append("]:");
+        std::string prefix = "runs[" + std::string(runName) + "]:";
+        out.append(prefix.c_str());
+        const size_t visiblePrefixWidth = runPrefixWidth > std::string("INFO ").size() ? runPrefixWidth - std::string("INFO ").size() : 0;
+        if (prefix.size() < visiblePrefixWidth) {
+            for (size_t i = prefix.size(); i < visiblePrefixWidth; ++i) {
+                out.append(' ');
+            }
+        }
     }
     out.append(Ansi::reset);
 
@@ -584,30 +616,10 @@ bool LineStatsReporter::sameStatsIdentity(const TrainingStatsSnapshot& lhs, cons
 
 bool LineStatsReporter::isAnsiColorSupported(std::FILE* output) { return fileSupportsAnsiColor(output); }
 
-bool LineStatsReporter::shouldUseColor() const {
-    if (colorMode == LineStatsColorMode::NEVER) {
-        return false;
-    }
-    if (colorMode == LineStatsColorMode::ALWAYS) {
-        return true;
-    }
-#if defined(__unix__) || defined(__APPLE__)
-    if (outputFile != nullptr) {
-        return fileSupportsAnsiColor(outputFile);
-    }
-    return fileDescriptorSupportsAnsiColor(STDOUT_FILENO);
-#else
-    return fileSupportsAnsiColor(outputFile != nullptr ? outputFile : stdout);
-#endif
-}
+bool LineStatsReporter::shouldUseColor() const { return shouldUseColorForOutput(outputFile, colorMode); }
 
 void LineStatsReporter::writeStatsLine(const TrainingStatsSnapshot& stats, std::string_view runName) {
-    LineBuffer line;
-    if (shouldUseColor()) {
-        appendColorStatsLine(line, stats, runName);
-    } else {
-        appendPlainStatsLine(line, stats, runName);
-    }
+    const std::string line = formatStatsLine(stats, runName, 0, colorMode, outputFile);
     emitLine(line.c_str());
     lastPrintedStats = stats;
 }
@@ -650,8 +662,24 @@ std::string LineStatsReporter::formatStatsLine(const TrainingStatsSnapshot& stat
 }
 
 std::string LineStatsReporter::formatStatsLine(const TrainingStatsSnapshot& stats, std::string_view runName) {
+    return formatStatsLine(stats, runName, 0);
+}
+
+std::string LineStatsReporter::formatStatsLine(const TrainingStatsSnapshot& stats, std::string_view runName, size_t runPrefixWidth) {
+    return formatStatsLine(stats, runName, runPrefixWidth, LineStatsColorMode::NEVER, stdout);
+}
+
+std::string LineStatsReporter::formatStatsLine(const TrainingStatsSnapshot& stats,
+                                               std::string_view runName,
+                                               size_t runPrefixWidth,
+                                               LineStatsColorMode colorMode,
+                                               std::FILE* output) {
     LineBuffer line;
-    appendPlainStatsLine(line, stats, runName);
+    if (shouldUseColorForOutput(output, colorMode)) {
+        appendColorStatsLine(line, stats, runName, runPrefixWidth);
+    } else {
+        appendPlainStatsLine(line, stats, runName, runPrefixWidth);
+    }
     return std::string(line.c_str());
 }
 

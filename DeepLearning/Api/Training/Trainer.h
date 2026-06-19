@@ -35,6 +35,10 @@ class Trainer {
     void fit(const TrainerFitOptions& options);
 
     [[nodiscard]] const TrainingRuntimeConfig& getRuntimeConfig() const { return runtimeConfig; }
+    [[nodiscard]] std::shared_ptr<Network> getNetwork() const { return network; }
+    [[nodiscard]] const std::optional<std::string>& getSaveModelDirectory() const { return saveModelDirectory; }
+    [[nodiscard]] bool getSaveModelOverwrite() const { return saveModelOverwrite; }
+    [[nodiscard]] bool getSaveOptimizerState() const { return saveOptimizerState; }
 
    private:
     void validateFitOptions(const TrainerFitOptions& options) const;
@@ -112,7 +116,7 @@ class Trainer::Builder {
     }
 
     Builder& statsColorMode(LineStatsColorMode colorMode) {
-        this->statsColorMode_ = colorMode;
+        runtimeConfig_.statsColorMode = colorMode;
         return *this;
     }
 
@@ -149,7 +153,6 @@ class Trainer::Builder {
     std::shared_ptr<Optimizer> optimizer_ = nullptr;
     std::shared_ptr<TrainingProgram> trainingProgram_ = nullptr;
     TrainingRuntimeConfig runtimeConfig_{};
-    LineStatsColorMode statsColorMode_ = LineStatsColorMode::AUTO;
     std::shared_ptr<TrainingExecutor> executor_ = nullptr;
     std::shared_ptr<TrainingObserver> observer_ = nullptr;
     std::optional<std::string> saveModelDirectory_{};

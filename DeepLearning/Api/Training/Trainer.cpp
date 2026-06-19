@@ -39,8 +39,8 @@ Trainer Trainer::Builder::build() const {
         if (trainer.runtimeConfig.statsEnabled) {
             const LineStatsOutputMode outputMode =
                 trainer.runtimeConfig.statsStderrAlso ? LineStatsOutputMode::STDOUT_AND_STDERR : LineStatsOutputMode::STDOUT;
-            trainer.observer =
-                std::make_shared<LineStatsReporter>(trainer.runtimeConfig.statsIntervalSeconds, true, statsColorMode_, outputMode);
+            trainer.observer = std::make_shared<LineStatsReporter>(
+                trainer.runtimeConfig.statsIntervalSeconds, true, trainer.runtimeConfig.statsColorMode, outputMode);
         } else {
             trainer.observer = std::make_shared<NullTrainingObserver>();
         }
@@ -61,6 +61,8 @@ class ResultCapturingTrainingObserver : public TrainingObserver {
                 finalTrainingStats = event.stats;
             } else if (event.stats.phase == TrainingEventPhase::VALIDATE) {
                 finalValidationStats = event.stats;
+            } else if (event.stats.phase == TrainingEventPhase::TEST) {
+                finalTestStats = event.stats;
             }
         }
         inner.onTrainingEvent(event);
@@ -71,6 +73,7 @@ class ResultCapturingTrainingObserver : public TrainingObserver {
 
     std::optional<TrainingStatsSnapshot> finalTrainingStats{};
     std::optional<TrainingStatsSnapshot> finalValidationStats{};
+    std::optional<TrainingStatsSnapshot> finalTestStats{};
 
    private:
     TrainingObserver& inner;
@@ -121,11 +124,15 @@ TrainingRunResult Trainer::fitTrainingRun(std::string runName,
         fitInternal(options, capturingObserver, cancellationToken);
         capturingObserver.flush();
         return TrainingRunResult::completedResult(
-            std::move(runName), capturingObserver.finalTrainingStats, capturingObserver.finalValidationStats);
+            std::move(runName), capturingObserver.finalTrainingStats, capturingObserver.finalValidationStats, capturingObserver.finalTestStats);
     } catch (...) {
         capturingObserver.flush();
         return TrainingRunResult::fromException(
-            std::move(runName), std::current_exception(), capturingObserver.finalTrainingStats, capturingObserver.finalValidationStats);
+            std::move(runName),
+            std::current_exception(),
+            capturingObserver.finalTrainingStats,
+            capturingObserver.finalValidationStats,
+            capturingObserver.finalTestStats);
     }
 }
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Api/Training/TrainingProgram.h"
+#include "DeepLearning/Api/Training/Observers/LineStatsReporter.h"
 #include "DeepLearning/Api/Training/Cancellation/TrainingCancellation.h"
 
 #include <cstdint>
@@ -22,6 +23,7 @@ struct TrainingRuntimeConfig {
     bool statsEnabled = true;
     double statsIntervalSeconds = 10.0;
     bool statsStderrAlso = false;
+    LineStatsColorMode statsColorMode = LineStatsColorMode::AUTO;
     std::set<std::string> scalarTensorsToReport = {"loss", "accuracy"};
 };
 

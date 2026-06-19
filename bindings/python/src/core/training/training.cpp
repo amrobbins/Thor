@@ -314,6 +314,19 @@ LineStatsColorMode lineStatsColorModeFromString(const std::string& value) {
     throw nb::value_error("stats_color must be one of: 'always', 'auto', 'never'");
 }
 
+TrainingEventPhase trainingEventPhaseFromString(const std::string& value) {
+    if (value == "train") {
+        return TrainingEventPhase::TRAIN;
+    }
+    if (value == "validate" || value == "validation") {
+        return TrainingEventPhase::VALIDATE;
+    }
+    if (value == "test") {
+        return TrainingEventPhase::TEST;
+    }
+    throw nb::value_error("phase must be one of: 'train', 'validate', 'validation', 'test'");
+}
+
 TrainingRunsFailurePolicy trainingRunsFailurePolicyFromString(const std::string& value) {
     if (value == "cancel_siblings") {
         return TrainingRunsFailurePolicy::CANCEL_SIBLINGS;
@@ -327,14 +340,24 @@ TrainingRunsFailurePolicy trainingRunsFailurePolicyFromString(const std::string&
 std::vector<TrainingRunsSpec> trainingRunsSpecsFromPython(nb::iterable runs) {
     std::vector<TrainingRunsSpec> specs;
     for (nb::handle item : runs) {
-        nb::sequence pair = nb::cast<nb::sequence>(item);
-        if (nb::len(pair) != 2) {
-            throw nb::value_error("TrainingRuns entries must be (run_name, trainer) pairs");
+        nb::sequence entry = nb::cast<nb::sequence>(item);
+        const size_t entrySize = nb::len(entry);
+        if (entrySize < 2 || entrySize > 4) {
+            throw nb::value_error(
+                "TrainingRuns entries must be (run_name, trainer), (run_name, trainer, ensemble_group), or "
+                "(run_name, trainer, ensemble_group, ensemble_weight)");
         }
 
-        std::string runName = nb::cast<std::string>(pair[0]);
-        std::shared_ptr<Trainer> trainer = nb::cast<std::shared_ptr<Trainer>>(pair[1]);
-        specs.emplace_back(std::move(runName), std::move(trainer));
+        std::string runName = nb::cast<std::string>(entry[0]);
+        std::shared_ptr<Trainer> trainer = nb::cast<std::shared_ptr<Trainer>>(entry[1]);
+        TrainingRunsSpec spec(std::move(runName), std::move(trainer));
+        if (entrySize >= 3 && !entry[2].is_none()) {
+            spec.ensembleGroup = nb::cast<std::string>(entry[2]);
+        }
+        if (entrySize >= 4 && !entry[3].is_none()) {
+            spec.ensembleWeight = nb::cast<double>(entry[3]);
+        }
+        specs.push_back(std::move(spec));
     }
     return specs;
 }
@@ -754,25 +777,90 @@ calling this helper.
     auto training_run_result = nb::class_<TrainingRunResult>(training, "TrainingRunResult");
     training_run_result.attr("__module__") = "thor.training";
     training_run_result.def_prop_ro("run_name", [](const TrainingRunResult& self) { return self.runName; });
+    training_run_result.def_prop_ro("ensemble_group", [](const TrainingRunResult& self) -> nb::object {
+        if (!self.ensembleGroup.has_value()) {
+            return nb::none();
+        }
+        return nb::cast(*self.ensembleGroup);
+    });
+    training_run_result.def_ro("ensemble_weight", &TrainingRunResult::ensembleWeight);
     training_run_result.def_prop_ro("status", [](const TrainingRunResult& self) { return trainingRunStatusName(self.status); });
     training_run_result.def_prop_ro("status_enum", [](const TrainingRunResult& self) { return self.status; });
     training_run_result.def_prop_ro("exception_type", [](const TrainingRunResult& self) { return self.exception.type; });
     training_run_result.def_prop_ro("exception_message", [](const TrainingRunResult& self) { return self.exception.message; });
     training_run_result.def_prop_ro("final_training_stats", [](const TrainingRunResult& self) { return self.finalTrainingStats; });
     training_run_result.def_prop_ro("final_validation_stats", [](const TrainingRunResult& self) { return self.finalValidationStats; });
+    training_run_result.def_prop_ro("final_test_stats", [](const TrainingRunResult& self) { return self.finalTestStats; });
     training_run_result.def_prop_ro("final_training_loss",
                                     [](const TrainingRunResult& self) { return optionalLossFromStats(self.finalTrainingStats); });
     training_run_result.def_prop_ro("final_validation_loss",
                                     [](const TrainingRunResult& self) { return optionalLossFromStats(self.finalValidationStats); });
+    training_run_result.def_prop_ro("final_test_loss",
+                                    [](const TrainingRunResult& self) { return optionalLossFromStats(self.finalTestStats); });
+    training_run_result.def("final_loss", [](const TrainingRunResult& self, const std::string& phase) {
+        return optionalLossFromStats(self.finalStatsForPhase(trainingEventPhaseFromString(phase)));
+    }, "phase"_a);
     training_run_result.def_prop_ro("final_training_step", [](const TrainingRunResult& self) {
         return optionalUint64FromStats(self.finalTrainingStats, &TrainingStatsSnapshot::step);
     });
     training_run_result.def_prop_ro("final_validation_step", [](const TrainingRunResult& self) {
         return optionalUint64FromStats(self.finalValidationStats, &TrainingStatsSnapshot::step);
     });
+    training_run_result.def_prop_ro("final_test_step", [](const TrainingRunResult& self) {
+        return optionalUint64FromStats(self.finalTestStats, &TrainingStatsSnapshot::step);
+    });
     training_run_result.def("completed", &TrainingRunResult::completed);
     training_run_result.def("failed", &TrainingRunResult::failed);
     training_run_result.def("cancelled", &TrainingRunResult::cancelled);
+
+    auto training_run_output_signature = nb::class_<TrainingRunOutputSignature>(training, "TrainingRunOutputSignature");
+    training_run_output_signature.attr("__module__") = "thor.training";
+    training_run_output_signature.def_prop_ro("output_name", [](const TrainingRunOutputSignature& self) { return self.outputName; });
+    training_run_output_signature.def_prop_ro("dimensions", [](const TrainingRunOutputSignature& self) { return self.dimensions; });
+    training_run_output_signature.def_prop_ro("data_type", [](const TrainingRunOutputSignature& self) { return self.dataType; });
+
+    auto training_ensemble_member_result = nb::class_<TrainingEnsembleMemberResult>(training, "TrainingEnsembleMemberResult");
+    training_ensemble_member_result.attr("__module__") = "thor.training";
+    training_ensemble_member_result.def_prop_ro("run_name", [](const TrainingEnsembleMemberResult& self) { return self.runName; });
+    training_ensemble_member_result.def_ro("weight", &TrainingEnsembleMemberResult::weight);
+    training_ensemble_member_result.def_prop_ro("status", [](const TrainingEnsembleMemberResult& self) { return trainingRunStatusName(self.status); });
+    training_ensemble_member_result.def_prop_ro("status_enum", [](const TrainingEnsembleMemberResult& self) { return self.status; });
+    training_ensemble_member_result.def_prop_ro("final_training_loss", [](const TrainingEnsembleMemberResult& self) { return optionalDouble(self.finalTrainingLoss); });
+    training_ensemble_member_result.def_prop_ro("final_validation_loss", [](const TrainingEnsembleMemberResult& self) { return optionalDouble(self.finalValidationLoss); });
+    training_ensemble_member_result.def_prop_ro("final_test_loss", [](const TrainingEnsembleMemberResult& self) { return optionalDouble(self.finalTestLoss); });
+
+    auto training_ensemble_result = nb::class_<TrainingEnsembleResult>(training, "TrainingEnsembleResult");
+    training_ensemble_result.attr("__module__") = "thor.training";
+    training_ensemble_result.def_prop_ro("ensemble_group", [](const TrainingEnsembleResult& self) { return self.ensembleGroup; });
+    training_ensemble_result.def_prop_ro("members", [](const TrainingEnsembleResult& self) { return self.members; });
+    training_ensemble_result.def_prop_ro("output_signature", [](const TrainingEnsembleResult& self) { return self.outputSignature; });
+    training_ensemble_result.def("__len__", &TrainingEnsembleResult::size);
+    training_ensemble_result.def("__bool__", [](const TrainingEnsembleResult& self) { return !self.empty(); });
+    training_ensemble_result.def("all_completed", &TrainingEnsembleResult::allCompleted);
+    training_ensemble_result.def("any_failed", &TrainingEnsembleResult::anyFailed);
+    training_ensemble_result.def_prop_ro("total_weight", &TrainingEnsembleResult::totalWeight);
+    training_ensemble_result.def_prop_ro("status_counts", &TrainingEnsembleResult::statusCounts);
+    training_ensemble_result.def("weighted_final_loss", [](const TrainingEnsembleResult& self, const std::string& phase) {
+        return optionalDouble(self.weightedFinalLossForPhase(trainingEventPhaseFromString(phase)));
+    }, "phase"_a);
+    training_ensemble_result.def_prop_ro("weighted_final_training_loss", [](const TrainingEnsembleResult& self) {
+        return optionalDouble(self.weightedFinalTrainingLoss());
+    });
+    training_ensemble_result.def_prop_ro("weighted_member_training_loss", [](const TrainingEnsembleResult& self) {
+        return optionalDouble(self.weightedFinalTrainingLoss());
+    });
+    training_ensemble_result.def_prop_ro("weighted_final_validation_loss", [](const TrainingEnsembleResult& self) {
+        return optionalDouble(self.weightedFinalValidationLoss());
+    });
+    training_ensemble_result.def_prop_ro("weighted_member_validation_loss", [](const TrainingEnsembleResult& self) {
+        return optionalDouble(self.weightedFinalValidationLoss());
+    });
+    training_ensemble_result.def_prop_ro("weighted_final_test_loss", [](const TrainingEnsembleResult& self) {
+        return optionalDouble(self.weightedFinalTestLoss());
+    });
+    training_ensemble_result.def_prop_ro("weighted_member_test_loss", [](const TrainingEnsembleResult& self) {
+        return optionalDouble(self.weightedFinalTestLoss());
+    });
 
     auto training_runs_result = nb::class_<TrainingRunsResult>(training, "TrainingRunsResult");
     training_runs_result.attr("__module__") = "thor.training";
@@ -792,27 +880,44 @@ calling this helper.
         return self.at(runName);
     }, nb::rv_policy::reference_internal);
     training_runs_result.def_prop_ro("runs", [](const TrainingRunsResult& self) { return self.runs(); });
+    training_runs_result.def_prop_ro("ensembles", [](const TrainingRunsResult& self) { return self.ensembles(); });
+    training_runs_result.def_prop_ro("has_ensembles", &TrainingRunsResult::hasEnsembles);
+    training_runs_result.def("ensemble", [](const TrainingRunsResult& self, const std::string& ensembleGroup) -> const TrainingEnsembleResult& {
+        return self.ensemble(ensembleGroup);
+    }, nb::rv_policy::reference_internal, "ensemble_group"_a);
     training_runs_result.def("all_completed", &TrainingRunsResult::allCompleted);
     training_runs_result.def("any_failed", &TrainingRunsResult::anyFailed);
     training_runs_result.def("any_cancelled", &TrainingRunsResult::anyCancelled);
+    training_runs_result.def_prop_ro("status_counts", &TrainingRunsResult::statusCounts);
+    training_runs_result.def("get_status_counts", &TrainingRunsResult::statusCounts);
 
     auto training_runs = nb::class_<TrainingRuns>(training, "TrainingRuns");
     training_runs.attr("__module__") = "thor.training";
     training_runs.def_static(
         "__new__",
-        [](nb::handle cls, nb::iterable runs, const std::string& failure_policy) -> std::shared_ptr<TrainingRuns> {
+        [](nb::handle cls,
+           nb::iterable runs,
+           const std::string& failure_policy,
+           double max_summary_logs_per_second,
+           std::optional<size_t> max_parallel_runs) -> std::shared_ptr<TrainingRuns> {
             (void)cls;
             return std::make_shared<TrainingRuns>(trainingRunsSpecsFromPython(runs),
-                                                  trainingRunsFailurePolicyFromString(failure_policy));
+                                                  trainingRunsFailurePolicyFromString(failure_policy),
+                                                  max_summary_logs_per_second,
+                                                  max_parallel_runs);
         },
         "cls"_a,
         "runs"_a,
-        "failure_policy"_a = "cancel_siblings");
+        "failure_policy"_a = "cancel_siblings",
+        "max_summary_logs_per_second"_a = 2.0,
+        "max_parallel_runs"_a.none() = nb::none());
     training_runs.def(
         "__init__",
-        [](TrainingRuns*, nb::iterable, const std::string&) {},
+        [](TrainingRuns*, nb::iterable, const std::string&, double, std::optional<size_t>) {},
         "runs"_a,
-        "failure_policy"_a = "cancel_siblings");
+        "failure_policy"_a = "cancel_siblings",
+        "max_summary_logs_per_second"_a = 2.0,
+        "max_parallel_runs"_a.none() = nb::none());
     training_runs.def("fit", [](TrainingRuns& self, uint32_t epochs) {
         nb::gil_scoped_release release;
         return self.fit(epochs);
