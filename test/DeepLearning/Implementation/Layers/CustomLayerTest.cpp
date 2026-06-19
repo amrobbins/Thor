@@ -13,8 +13,10 @@
 #include "cuda_fp16.h"
 #include "gtest/gtest.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -23,6 +25,7 @@
 
 #include "DeepLearning/Implementation/Layers/Optimizers/Adam.h"
 #include "DeepLearning/Implementation/Layers/Optimizers/Sgd.h"
+#include "DeepLearning/Implementation/Parameter/ParameterConstraint.h"
 #include "Helpers/GradientRivet.h"
 
 using namespace ThorImplementation;
@@ -806,6 +809,127 @@ TEST(CustomLayer, CustomLossGradientFusionFeedsFusedSgdOptimizerUpdateNumericall
     expectAllClose(readCpuTensor(scaleWeights_h), expectedScale, 4e-5f, 4e-5f);
 
     cleanupLayers({&input, &labelsInput, &gradientRivet, &bridge, &custom, &loss, &lossSink});
+}
+
+void expectFusedSgdOptimizerAppliesConstraintInsideFusedUpdateNumerically(
+    std::shared_ptr<ParameterConstraint> constraint,
+    const std::vector<float>& labelValues,
+    const std::function<float(float)>& projectValue) {
+    const uint64_t batchSize = 2;
+    const uint64_t features = 3;
+    const float learningRate = 1.0f;
+
+    TensorDescriptor descriptor(DataType::FP32, {batchSize, features});
+    Tensor x_h(cpuPlacement, descriptor);
+    Tensor labels_h(cpuPlacement, descriptor);
+
+    const std::vector<float> xValues{1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+    const std::vector<float> initialScale{0.10f, 0.20f, 0.30f};
+
+    ASSERT_EQ(labelValues.size(), xValues.size());
+    writeCpuTensor(x_h, xValues);
+    writeCpuTensor(labels_h, labelValues);
+
+    auto scale = std::make_shared<FixedVectorParameter>("scale", initialScale, true);
+    scale->addConstraint(std::move(constraint));
+    scale->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(906, learningRate, 0.0f, 0.0f, false)));
+
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    NetworkInput labelsInput(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    GradientRivet gradientRivet;
+    CountingPassthrough bridge;
+    CustomLayer custom(buildSingleInputScaleExpression(gpuPlacement), {"x"}, {"out"}, gpuPlacement, {scale}, false);
+    CustomLoss loss(buildSquaredErrorLossExpression(gpuPlacement), buildSquaredErrorGradientExpression(gpuPlacement));
+    CountingPassthrough lossSink;
+
+    input.connectToNextLayer(&gradientRivet);
+    gradientRivet.connectToNextLayer(&bridge);
+    bridge.connectToNextLayer(&custom);
+    custom.connectToNextLayer(&loss, 0, static_cast<int>(Loss::ConnectionType::FORWARD_BACKWARD));
+    labelsInput.connectToNextLayer(&loss, 0, static_cast<int>(Loss::ConnectionType::LABELS));
+    loss.connectToNextLayer(&lossSink);
+
+    compileAndInitialize({&input, &labelsInput, &gradientRivet, &bridge, &custom, &loss, &lossSink});
+
+    ASSERT_TRUE(loss.isGradientFusedIntoDrivingLayer());
+    EXPECT_EQ(custom.getNumFusedCustomLossGradients(), 1u);
+    EXPECT_FALSE(scale->getOptimizer()->getWeightsGradient().has_value())
+        << "Single-input dense SGD should consume the fused loss gradient without materializing a parameter gradient tensor.";
+
+    std::vector<float> expectedLoss(xValues.size());
+    std::vector<float> expectedInputGrad(xValues.size());
+    std::vector<float> rawScaleGradient(features, 0.0f);
+    std::vector<float> expectedScale = initialScale;
+
+    for (uint64_t i = 0; i < xValues.size(); ++i) {
+        const uint64_t f = i % features;
+        const float prediction = xValues[i] * initialScale[f];
+        const float diff = prediction - labelValues[i];
+        const float predictionGrad = 2.0f * Loss::getLossScalingFactor() * diff;
+        expectedLoss[i] = diff * diff;
+        expectedInputGrad[i] = predictionGrad * initialScale[f];
+        rawScaleGradient[f] += xValues[i] * predictionGrad;
+    }
+
+    const float optimizerScale = learningRate / (static_cast<float>(batchSize) * Loss::getLossScalingFactor());
+    subtractScaledInPlace(expectedScale, rawScaleGradient, optimizerScale);
+    for (float& value : expectedScale) {
+        value = projectValue(value);
+    }
+
+    input.forward(x_h, false, batchSize);
+    labelsInput.forward(labels_h, false, batchSize);
+
+    ASSERT_EQ(lossSink.forwardCalls, 1);
+    ASSERT_EQ(bridge.backwardCalls, 1);
+
+    Stream lossStream = loss.getStream();
+    Stream gradientUpdateStream = custom.getGradientUpdateStream().value();
+
+    Tensor loss_h = copyTensorToCpu(lossSink.getFeatureInput().value(), lossStream);
+    Tensor xGrad_h = copyTensorToCpu(custom.getErrorOutputs()[0].value(), custom.getStreams()[0]);
+    Tensor scaleWeights_h = copyTensorToCpu(scale->getStorage().value(), gradientUpdateStream);
+
+    expectAllClose(readCpuTensor(loss_h), expectedLoss, 2e-5f, 2e-5f);
+    expectAllClose(readCpuTensor(xGrad_h), expectedInputGrad, 3e-5f, 3e-5f);
+    expectAllClose(readCpuTensor(scaleWeights_h), expectedScale, 4e-5f, 4e-5f);
+
+    cleanupLayers({&input, &labelsInput, &gradientRivet, &bridge, &custom, &loss, &lossSink});
+}
+
+TEST(CustomLayer, FusedSgdOptimizerAppliesNonNegativeConstraintInsideFusedUpdateNumerically) {
+    expectFusedSgdOptimizerAppliesConstraintInsideFusedUpdateNumerically(
+        std::make_shared<NonNegativeParameterConstraint>(),
+        std::vector<float>({-10.0f, -10.0f, -10.0f, -10.0f, -10.0f, -10.0f}),
+        [](float value) { return std::max(value, 0.0f); });
+}
+
+TEST(CustomLayer, FusedSgdOptimizerAppliesNonPositiveConstraintInsideFusedUpdateNumerically) {
+    expectFusedSgdOptimizerAppliesConstraintInsideFusedUpdateNumerically(
+        std::make_shared<NonPositiveParameterConstraint>(),
+        std::vector<float>({10.0f, 10.0f, 10.0f, 10.0f, 10.0f, 10.0f}),
+        [](float value) { return std::min(value, 0.0f); });
+}
+
+TEST(CustomLayer, FusedSgdOptimizerAppliesMinConstraintInsideFusedUpdateNumerically) {
+    expectFusedSgdOptimizerAppliesConstraintInsideFusedUpdateNumerically(
+        std::make_shared<MinParameterConstraint>(-0.5),
+        std::vector<float>({-10.0f, -10.0f, -10.0f, -10.0f, -10.0f, -10.0f}),
+        [](float value) { return std::max(value, -0.5f); });
+}
+
+TEST(CustomLayer, FusedSgdOptimizerAppliesMaxConstraintInsideFusedUpdateNumerically) {
+    expectFusedSgdOptimizerAppliesConstraintInsideFusedUpdateNumerically(
+        std::make_shared<MaxParameterConstraint>(0.75),
+        std::vector<float>({10.0f, 10.0f, 10.0f, 10.0f, 10.0f, 10.0f}),
+        [](float value) { return std::min(value, 0.75f); });
+}
+
+TEST(CustomLayer, FusedSgdOptimizerAppliesMinMaxConstraintInsideFusedUpdateNumerically) {
+    expectFusedSgdOptimizerAppliesConstraintInsideFusedUpdateNumerically(
+        std::make_shared<MinMaxParameterConstraint>(-0.5, 0.75),
+        std::vector<float>({-10.0f, 0.25f, 10.0f, -10.0f, 0.25f, 10.0f}),
+        [](float value) { return std::min(std::max(value, -0.5f), 0.75f); });
 }
 
 TEST(CustomLayer, CustomLossGradientStaysFusedWhenLossIsMaterializedToNetworkOutput) {

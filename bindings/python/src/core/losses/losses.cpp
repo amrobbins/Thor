@@ -16,6 +16,7 @@ void bind_huber_loss(nb::module_ &losses);
 void bind_soft_target_cross_entropy(nb::module_ &losses);
 void bind_kl_div_loss(nb::module_ &losses);
 void bind_ctc_loss(nb::module_ &losses);
+void bind_quantile_loss(nb::module_ &losses);
 
 void bind_classification_losses(nb::module_ &classification);
 void bind_detection_losses(nb::module_ &detection);
@@ -63,6 +64,7 @@ void bind_losses(nb::module_ &losses) {
     bind_soft_target_cross_entropy(losses);
     bind_kl_div_loss(losses);
     bind_ctc_loss(losses);
+    bind_quantile_loss(losses);
 
     auto classification = losses.def_submodule("classification");
     bind_classification_losses(classification);

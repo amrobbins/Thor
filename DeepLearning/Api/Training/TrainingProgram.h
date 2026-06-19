@@ -22,13 +22,15 @@ class PlacedNetwork;
 class TrainingProgram {
    public:
     TrainingProgram() = default;
-    explicit TrainingProgram(std::vector<TrainingStep> steps);
+    explicit TrainingProgram(std::vector<std::shared_ptr<TrainingStep>> steps);
 
-    void addStep(const TrainingStep& step);
+    void addStep(std::shared_ptr<TrainingStep> step);
 
     [[nodiscard]] uint64_t getNumSteps() const { return steps.size(); }
+    [[nodiscard]] TrainingStep& getStep(uint64_t index);
     [[nodiscard]] const TrainingStep& getStep(uint64_t index) const;
-    [[nodiscard]] const std::vector<TrainingStep>& getSteps() const { return steps; }
+    [[nodiscard]] std::shared_ptr<TrainingStep> getStepReference(uint64_t index) const;
+    [[nodiscard]] const std::vector<std::shared_ptr<TrainingStep>>& getSteps() const { return steps; }
     [[nodiscard]] bool isInitialized() const { return initialized; }
 
     [[nodiscard]] nlohmann::json architectureJson() const;
@@ -43,7 +45,7 @@ class TrainingProgram {
     void validate() const;
     void validateStepNameIsUnique(const TrainingStep& step) const;
 
-    std::vector<TrainingStep> steps{};
+    std::vector<std::shared_ptr<TrainingStep>> steps{};
     bool initialized = false;
 };
 

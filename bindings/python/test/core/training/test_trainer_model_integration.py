@@ -67,6 +67,22 @@ def _phase_epoch_mean_losses(stats, phase: str):
     return [float(np.mean(grouped[epoch])) for epoch in sorted(grouped)]
 
 
+def _named_scalar_losses(captured_text: str, phase: str, scalar_name: str):
+    plain_text = _ANSI_RE.sub("", captured_text)
+    values = []
+    scalar_re = re.compile(rf"\b{re.escape(scalar_name)}=\s*(?P<value>[-+0-9.eE]+)")
+    for line in plain_text.splitlines():
+        if "INFO trainer:" not in line:
+            continue
+        phase_match = re.search(r"\bphase=\s*(train|validate|test)\b", line)
+        if phase_match is None or phase_match.group(1) != phase:
+            continue
+        value_match = scalar_re.search(line)
+        if value_match is not None:
+            values.append(float(value_match.group("value")))
+    return values
+
+
 def _assert_zero_initialized_two_class_batch_loss(loss: float, *, batch_size: int, name: str):
     del batch_size
     expected = float(np.log(2.0))
@@ -104,6 +120,23 @@ def _fit_and_capture_stats(trainer, capfd, *, epochs: int):
         sys.stdout.flush()
 
     return stats
+
+
+def _fit_and_capture_text_and_stats(trainer, capfd, *, epochs: int):
+    _flush_native_stdio_for_capture()
+    capfd.readouterr()
+    trainer.fit(epochs=epochs)
+    _flush_native_stdio_for_capture()
+    captured = capfd.readouterr()
+    captured_text = captured.out + captured.err
+    stats = _captured_trainer_stats(captured_text)
+    assert stats, "trainer emitted no parseable stats"
+
+    with capfd.disabled():
+        sys.stdout.write(captured_text)
+        sys.stdout.flush()
+
+    return captured_text, stats
 
 
 def _linearly_separable_one_batch_loader(*, batch_size: int = 16, dtype=np.float32):
@@ -346,6 +379,103 @@ def _build_zero_initialized_linear_regressor(name: str, *, dtype=thor.DataType.f
         weights_initializer=zero,
         biases_initializer=zero,
     )
+
+
+def _opposing_phase_one_batch_loader(*, batch_size: int = 1, dtype=np.float32):
+    x = np.ones((batch_size, 1), dtype=np.float32)
+    y = np.ones((batch_size, 1), dtype=np.float32)
+    loader_cls = thor.training.NumpyFloat16BatchLoader if dtype == np.float16 else thor.training.NumpyFloat32BatchLoader
+    return loader_cls(
+        np.ascontiguousarray(x, dtype=dtype),
+        np.ascontiguousarray(y, dtype=dtype),
+        np.ascontiguousarray(x, dtype=dtype),
+        np.ascontiguousarray(y, dtype=dtype),
+        batch_size=batch_size,
+        example_input_name="examples",
+        label_input_name="labels",
+        dataset_name="opposing_phase_one_batch",
+    )
+
+
+def _build_opposing_phase_regressor(
+    name: str,
+    *,
+    aggregate_enabled: bool,
+    daily_loss_active: bool,
+    aggregate_loss_active: bool,
+    primary_loss_name: str,
+):
+    network = thor.Network(name)
+    examples = thor.layers.NetworkInput(network, "examples", [1], thor.DataType.fp32)
+    labels = thor.layers.NetworkInput(network, "labels", [1], thor.DataType.fp32)
+
+    zero = thor.initializers.UniformRandom(0.0, 0.0)
+    negative_one = thor.initializers.UniformRandom(-1.0, -1.0)
+
+    daily = thor.layers.FullyConnected(
+        network,
+        examples.get_feature_output(),
+        1,
+        False,
+        activation=None,
+        weights_initializer=zero,
+    )
+    aggregate = thor.layers.FullyConnected(
+        network,
+        daily.get_feature_output(),
+        1,
+        False,
+        activation=None,
+        weights_initializer=negative_one,
+    )
+
+    daily_loss = thor.losses.MSE(
+        network,
+        daily.get_feature_output(),
+        labels.get_feature_output(),
+        thor.DataType.fp32,
+    )
+    aggregate_loss = thor.losses.MSE(
+        network,
+        aggregate.get_feature_output(),
+        labels.get_feature_output(),
+        thor.DataType.fp32,
+    )
+
+    daily_loss_tensor = daily_loss.get_loss()
+    aggregate_loss_tensor = aggregate_loss.get_loss()
+    primary_loss_tensor = daily_loss_tensor if primary_loss_name == "daily_loss" else aggregate_loss_tensor
+
+    thor.layers.NetworkOutput(network, "loss", primary_loss_tensor, thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "daily_loss", daily_loss_tensor, thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "aggregate_loss", aggregate_loss_tensor, thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "daily_prediction", daily.get_feature_output(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "aggregate_prediction", aggregate.get_feature_output(), thor.DataType.fp32)
+
+    daily_roots = [daily_loss_tensor] if daily_loss_active else []
+    aggregate_roots = [aggregate_loss_tensor] if aggregate_loss_active else []
+    daily_phase = thor.training.TrainingPhase(
+        "daily_prediction",
+        loss_roots=daily_roots,
+        outputs={"daily_prediction": daily.get_feature_output()},
+        enabled=True,
+    )
+    aggregate_phase = thor.training.TrainingPhase(
+        "aggregate_prediction",
+        loss_roots=aggregate_roots,
+        outputs={"aggregate_prediction": aggregate.get_feature_output()},
+        depends_on=["daily_prediction"],
+        enabled=aggregate_enabled,
+    )
+    optimizer = thor.optimizers.Sgd(initial_learning_rate=0.25, momentum=0.0)
+    step = thor.training.TrainingStep(
+        "opposing_phase_step",
+        phases=[daily_phase, aggregate_phase],
+        optimizer=optimizer,
+        update_parameters=[daily.get_parameter_reference("weights")],
+    )
+    program = thor.training.TrainingProgram([step])
+    return network, program
 
 
 def _download_if_missing(url: str, path: Path) -> None:
@@ -742,6 +872,233 @@ def test_debug_synchronous_trainer_applies_deterministic_one_batch_mse_sgd_updat
     assert post_first_update_loss < train_losses[0] * 0.90, (
         "one-batch MSE SGD update did not materially change the next loss: "
         f"train_losses={train_losses}, validate_losses={validate_losses}")
+
+
+def test_debug_synchronous_phase_disabled_aggregate_loss_does_not_backpropagate(capfd):
+    network, program = _build_opposing_phase_regressor(
+        "python_integration_dynamic_phase_daily_only_blocks_aggregate_gradient",
+        aggregate_enabled=False,
+        daily_loss_active=True,
+        aggregate_loss_active=True,
+        primary_loss_name="daily_loss",
+    )
+    loader = _opposing_phase_one_batch_loader(batch_size=1, dtype=np.float32)
+
+    trainer = thor.training.Trainer(
+        network,
+        loader,
+        training_program=program,
+        debug_synchronous=True,
+        stats=True,
+        stats_interval_s=0.0,
+        max_in_flight_batches=1,
+        scalar_tensors_to_report=["loss", "daily_loss", "aggregate_loss"],
+        stats_color="never",
+    )
+
+    captured_text, stats = _fit_and_capture_text_and_stats(trainer, capfd, epochs=1)
+    train_daily = _named_scalar_losses(captured_text, "train", "daily_loss")
+    train_aggregate = _named_scalar_losses(captured_text, "train", "aggregate_loss")
+    validate_daily = _named_scalar_losses(captured_text, "validate", "daily_loss")
+    validate_aggregate = _named_scalar_losses(captured_text, "validate", "aggregate_loss")
+
+    assert program.get_step(0).get_active_phase_names() == ["daily_prediction"]
+    assert len(_phase_losses(stats, "train")) == 1
+    assert train_daily == pytest.approx([1.0], rel=2e-3, abs=2e-3)
+    assert train_aggregate == pytest.approx([1.0], rel=2e-3, abs=2e-3)
+    assert len(validate_daily) == 1
+    assert len(validate_aggregate) == 1
+
+    # The daily and aggregate losses have exactly opposing gradients at the zero-initialized
+    # point.  If the disabled aggregate phase leaked into backward, the first update would
+    # cancel and both validation losses would remain near 1.0.
+    assert validate_daily[0] < 0.95, (validate_daily, validate_aggregate)
+    assert validate_aggregate[0] > 1.05, (validate_daily, validate_aggregate)
+
+
+def test_debug_synchronous_aggregate_phase_backpropagates_through_forward_only_daily_phase(capfd):
+    network, program = _build_opposing_phase_regressor(
+        "python_integration_dynamic_phase_aggregate_backprops_through_daily",
+        aggregate_enabled=True,
+        daily_loss_active=False,
+        aggregate_loss_active=True,
+        primary_loss_name="aggregate_loss",
+    )
+    loader = _opposing_phase_one_batch_loader(batch_size=1, dtype=np.float32)
+
+    trainer = thor.training.Trainer(
+        network,
+        loader,
+        training_program=program,
+        debug_synchronous=True,
+        stats=True,
+        stats_interval_s=0.0,
+        max_in_flight_batches=1,
+        scalar_tensors_to_report=["loss", "daily_loss", "aggregate_loss"],
+        stats_color="never",
+    )
+
+    captured_text, stats = _fit_and_capture_text_and_stats(trainer, capfd, epochs=1)
+    train_daily = _named_scalar_losses(captured_text, "train", "daily_loss")
+    train_aggregate = _named_scalar_losses(captured_text, "train", "aggregate_loss")
+    validate_daily = _named_scalar_losses(captured_text, "validate", "daily_loss")
+    validate_aggregate = _named_scalar_losses(captured_text, "validate", "aggregate_loss")
+
+    assert program.get_step(0).get_active_phase_names() == ["daily_prediction", "aggregate_prediction"]
+    assert len(_phase_losses(stats, "train")) == 1
+    assert train_daily == pytest.approx([1.0], rel=2e-3, abs=2e-3)
+    assert train_aggregate == pytest.approx([1.0], rel=2e-3, abs=2e-3)
+    assert len(validate_daily) == 1
+    assert len(validate_aggregate) == 1
+
+    # Only the aggregate loss is active, and the aggregate head is a fixed -1 projection
+    # over the daily prediction.  The aggregate loss can improve only if its gradient
+    # propagates back through the enabled forward-only daily phase into the daily weight.
+    assert validate_aggregate[0] < 0.95, (validate_daily, validate_aggregate)
+    assert validate_daily[0] > 1.05, (validate_daily, validate_aggregate)
+
+
+def test_queued_phase_disabled_aggregate_loss_does_not_backpropagate(capfd):
+    network, program = _build_opposing_phase_regressor(
+        "python_integration_queued_dynamic_phase_daily_only_blocks_aggregate_gradient",
+        aggregate_enabled=False,
+        daily_loss_active=True,
+        aggregate_loss_active=True,
+        primary_loss_name="daily_loss",
+    )
+    loader = _opposing_phase_one_batch_loader(batch_size=1, dtype=np.float32)
+
+    trainer = thor.training.Trainer(
+        network,
+        loader,
+        training_program=program,
+        debug_synchronous=False,
+        stats=True,
+        stats_interval_s=0.0,
+        max_in_flight_batches=1,
+        scalar_tensors_to_report=["loss", "daily_loss", "aggregate_loss"],
+        stats_color="never",
+    )
+
+    captured_text, stats = _fit_and_capture_text_and_stats(trainer, capfd, epochs=1)
+    train_daily = _named_scalar_losses(captured_text, "train", "daily_loss")
+    train_aggregate = _named_scalar_losses(captured_text, "train", "aggregate_loss")
+    validate_daily = _named_scalar_losses(captured_text, "validate", "daily_loss")
+    validate_aggregate = _named_scalar_losses(captured_text, "validate", "aggregate_loss")
+
+    assert program.get_step(0).get_active_phase_names() == ["daily_prediction"]
+    assert len(_phase_losses(stats, "train")) == 1
+    assert train_daily == pytest.approx([1.0], rel=2e-3, abs=2e-3)
+    assert train_aggregate == pytest.approx([1.0], rel=2e-3, abs=2e-3)
+    assert len(validate_daily) == 1
+    assert len(validate_aggregate) == 1
+
+    # This is the same opposing-gradient leak detector as the debug-synchronous test,
+    # but it exercises the native queued runner's StepExecutable -> submitBatch path.
+    assert validate_daily[0] < 0.95, (validate_daily, validate_aggregate)
+    assert validate_aggregate[0] > 1.05, (validate_daily, validate_aggregate)
+
+
+def test_queued_aggregate_phase_backpropagates_through_forward_only_daily_phase(capfd):
+    network, program = _build_opposing_phase_regressor(
+        "python_integration_queued_dynamic_phase_aggregate_backprops_through_daily",
+        aggregate_enabled=True,
+        daily_loss_active=False,
+        aggregate_loss_active=True,
+        primary_loss_name="aggregate_loss",
+    )
+    loader = _opposing_phase_one_batch_loader(batch_size=1, dtype=np.float32)
+
+    trainer = thor.training.Trainer(
+        network,
+        loader,
+        training_program=program,
+        debug_synchronous=False,
+        stats=True,
+        stats_interval_s=0.0,
+        max_in_flight_batches=1,
+        scalar_tensors_to_report=["loss", "daily_loss", "aggregate_loss"],
+        stats_color="never",
+    )
+
+    captured_text, stats = _fit_and_capture_text_and_stats(trainer, capfd, epochs=1)
+    train_daily = _named_scalar_losses(captured_text, "train", "daily_loss")
+    train_aggregate = _named_scalar_losses(captured_text, "train", "aggregate_loss")
+    validate_daily = _named_scalar_losses(captured_text, "validate", "daily_loss")
+    validate_aggregate = _named_scalar_losses(captured_text, "validate", "aggregate_loss")
+
+    assert program.get_step(0).get_active_phase_names() == ["daily_prediction", "aggregate_prediction"]
+    assert len(_phase_losses(stats, "train")) == 1
+    assert train_daily == pytest.approx([1.0], rel=2e-3, abs=2e-3)
+    assert train_aggregate == pytest.approx([1.0], rel=2e-3, abs=2e-3)
+    assert len(validate_daily) == 1
+    assert len(validate_aggregate) == 1
+
+    # The queued runner must also allow the enabled aggregate loss to seed backward
+    # through the daily predictor when the daily phase is forward-only.
+    assert validate_aggregate[0] < 0.95, (validate_daily, validate_aggregate)
+    assert validate_daily[0] > 1.05, (validate_daily, validate_aggregate)
+
+
+def test_same_trainer_fit_recompiles_after_phase_enable_mutation(capfd):
+    network, program = _build_opposing_phase_regressor(
+        "python_integration_same_trainer_recompile_after_phase_enable",
+        aggregate_enabled=False,
+        daily_loss_active=True,
+        aggregate_loss_active=True,
+        primary_loss_name="daily_loss",
+    )
+    loader = _opposing_phase_one_batch_loader(batch_size=1, dtype=np.float32)
+
+    trainer = thor.training.Trainer(
+        network,
+        loader,
+        training_program=program,
+        debug_synchronous=True,
+        stats=True,
+        stats_interval_s=0.0,
+        max_in_flight_batches=1,
+        scalar_tensors_to_report=["loss", "daily_loss", "aggregate_loss"],
+        stats_color="never",
+    )
+
+    first_text, first_stats = _fit_and_capture_text_and_stats(trainer, capfd, epochs=1)
+    first_validate_daily = _named_scalar_losses(first_text, "validate", "daily_loss")
+    first_validate_aggregate = _named_scalar_losses(first_text, "validate", "aggregate_loss")
+
+    assert program.get_step(0).get_active_phase_names() == ["daily_prediction"]
+    assert len(_phase_losses(first_stats, "train")) == 1
+    assert first_validate_daily[0] < 0.95, (first_validate_daily, first_validate_aggregate)
+    assert first_validate_aggregate[0] > 1.05, (first_validate_daily, first_validate_aggregate)
+
+    program.get_step(0).get_phases()[1].enable()
+    assert program.get_step(0).get_active_phase_names() == ["daily_prediction", "aggregate_prediction"]
+
+    second_text, second_stats = _fit_and_capture_text_and_stats(trainer, capfd, epochs=1)
+    second_train_daily = _named_scalar_losses(second_text, "train", "daily_loss")
+    second_train_aggregate = _named_scalar_losses(second_text, "train", "aggregate_loss")
+    second_validate_daily = _named_scalar_losses(second_text, "validate", "daily_loss")
+    second_validate_aggregate = _named_scalar_losses(second_text, "validate", "aggregate_loss")
+
+    assert len(_phase_losses(second_stats, "train")) == 1
+    # The second fit must start from the parameters produced by the daily-only fit.
+    # If the trainer rebuilt the model, these would both be back at 1.0.
+    assert second_train_daily[0] == pytest.approx(first_validate_daily[0], rel=5e-3, abs=5e-3)
+    assert second_train_aggregate[0] == pytest.approx(first_validate_aggregate[0], rel=5e-3, abs=5e-3)
+
+    # With both opposing losses active, the next update is materially different from
+    # the daily-only update and drives the tiny one-weight model back toward zero.
+    # That proves the second fit compiled from the newly enabled aggregate phase.
+    assert second_validate_daily[0] > first_validate_daily[0] + 0.25, (
+        first_validate_daily,
+        second_validate_daily,
+        second_validate_aggregate,
+    )
+    assert second_validate_aggregate[0] < first_validate_aggregate[0] - 0.25, (
+        first_validate_aggregate,
+        second_validate_daily,
+        second_validate_aggregate,
+    )
 
 
 def test_debug_synchronous_trainer_reduces_deterministic_repeated_batch_mse_loss_with_sgd(capfd):

@@ -28,7 +28,7 @@ struct TrainingRunRequest {
     Network* network = nullptr;
     std::shared_ptr<Loader> loader = nullptr;
     std::shared_ptr<Optimizer> optimizer = nullptr;
-    std::optional<TrainingProgram> trainingProgram{};
+    std::shared_ptr<TrainingProgram> trainingProgram = nullptr;
     TrainingRuntimeConfig runtime{};
     uint32_t epochs = 1;
     std::optional<std::string> saveModelDirectory{};

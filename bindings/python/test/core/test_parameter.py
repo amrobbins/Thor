@@ -127,3 +127,94 @@ def test_dynamic_parameter_constructor_rejects_non_callable_factory():
             name="weights",
             create_storage_from_context=123,
         )
+
+
+def test_non_negative_parameter_constraint_constructs_and_serializes():
+    constraint = thor.NonNegativeParameterConstraint()
+
+    assert isinstance(constraint, thor.ParameterConstraint)
+    assert constraint.constraint_type == "non_negative"
+    assert '"constraint_type":"non_negative"' in constraint.get_architecture_json()
+
+
+def test_parameter_spec_accepts_single_constraint_and_exposes_it():
+    parameter = thor.ParameterSpecification(
+        name="weights",
+        shape=[4, 7],
+        dtype=thor.DataType.fp32,
+        constraints=thor.NonNegativeParameterConstraint(),
+    )
+
+    assert parameter.has_constraints() is True
+    constraints = parameter.get_constraints()
+    assert len(constraints) == 1
+    assert constraints[0].constraint_type == "non_negative"
+    assert '"constraint_type":"non_negative"' in parameter.get_architecture_json()
+
+
+def test_parameter_spec_accepts_constraint_sequence():
+    parameter = thor.ParameterSpecification(
+        name="weights",
+        shape=[4, 7],
+        dtype=thor.DataType.fp32,
+        constraints=[thor.NonNegativeParameterConstraint()],
+    )
+
+    assert parameter.has_constraints() is True
+    assert len(parameter.get_constraints()) == 1
+
+
+def test_parameter_spec_rejects_invalid_constraint_object():
+    with pytest.raises(TypeError, match="constraints"):
+        thor.ParameterSpecification(
+            name="weights",
+            shape=[4, 7],
+            dtype=thor.DataType.fp32,
+            constraints=123,
+        )
+
+
+def test_additional_parameter_constraints_construct_and_serialize():
+    cases = [
+        (thor.NonPositiveParameterConstraint(), "non_positive"),
+        (thor.MinParameterConstraint(-0.25), "min"),
+        (thor.MaxParameterConstraint(0.75), "max"),
+        (thor.MinMaxParameterConstraint(-0.5, 0.5), "min_max"),
+    ]
+
+    for constraint, constraint_type in cases:
+        assert isinstance(constraint, thor.ParameterConstraint)
+        assert constraint.constraint_type == constraint_type
+        assert f'"constraint_type":"{constraint_type}"' in constraint.get_architecture_json()
+
+    assert thor.MinParameterConstraint(-0.25).min_value == pytest.approx(-0.25)
+    assert thor.MaxParameterConstraint(0.75).max_value == pytest.approx(0.75)
+    min_max = thor.MinMaxParameterConstraint(-0.5, 0.5)
+    assert min_max.min_value == pytest.approx(-0.5)
+    assert min_max.max_value == pytest.approx(0.5)
+
+
+def test_min_max_parameter_constraint_rejects_reversed_bounds():
+    with pytest.raises(RuntimeError, match="min_value <= max_value"):
+        thor.MinMaxParameterConstraint(1.0, -1.0)
+
+
+def test_parameter_spec_accepts_additional_constraint_sequence():
+    parameter = thor.ParameterSpecification(
+        name="weights",
+        shape=[4, 7],
+        dtype=thor.DataType.fp32,
+        constraints=[
+            thor.MinParameterConstraint(-0.5),
+            thor.MaxParameterConstraint(0.75),
+        ],
+    )
+
+    assert parameter.has_constraints() is True
+    constraints = parameter.get_constraints()
+    assert [constraint.constraint_type for constraint in constraints] == ["min", "max"]
+    architecture_json = parameter.get_architecture_json()
+    assert '"constraint_type":"min"' in architecture_json
+    assert '"constraint_type":"max"' in architecture_json
+    assert '"min_value":-0.5' in architecture_json
+    assert '"max_value":0.75' in architecture_json

@@ -7,12 +7,12 @@ using json = nlohmann::json;
 
 namespace Thor {
 
-TrainingProgram::TrainingProgram(std::vector<TrainingStep> steps) {
+TrainingProgram::TrainingProgram(std::vector<std::shared_ptr<TrainingStep>> steps) {
     if (steps.empty()) {
         throw std::runtime_error("TrainingProgram requires at least one TrainingStep.");
     }
-    for (const TrainingStep& step : steps) {
-        addStep(step);
+    for (std::shared_ptr<TrainingStep>& step : steps) {
+        addStep(std::move(step));
     }
 }
 
@@ -20,28 +20,59 @@ void TrainingProgram::validate() const {
     if (!initialized || steps.empty()) {
         throw std::runtime_error("TrainingProgram requires at least one TrainingStep.");
     }
+    for (const std::shared_ptr<TrainingStep>& step : steps) {
+        if (step == nullptr || !step->isInitialized()) {
+            throw std::runtime_error("TrainingProgram cannot contain an uninitialized TrainingStep.");
+        }
+    }
 }
 
 void TrainingProgram::validateStepNameIsUnique(const TrainingStep& step) const {
     if (!step.isInitialized()) {
         throw std::runtime_error("TrainingProgram cannot contain an uninitialized TrainingStep.");
     }
-    for (const TrainingStep& existingStep : steps) {
-        if (existingStep.getName() == step.getName()) {
+    for (const std::shared_ptr<TrainingStep>& existingStep : steps) {
+        if (existingStep != nullptr && existingStep->getName() == step.getName()) {
             throw std::runtime_error("TrainingProgram already contains a step named '" + step.getName() + "'.");
         }
     }
 }
 
-void TrainingProgram::addStep(const TrainingStep& step) {
-    validateStepNameIsUnique(step);
-    steps.push_back(step);
+void TrainingProgram::addStep(std::shared_ptr<TrainingStep> step) {
+    if (step == nullptr) {
+        throw std::runtime_error("TrainingProgram cannot contain a null TrainingStep reference.");
+    }
+    validateStepNameIsUnique(*step);
+    steps.push_back(std::move(step));
     initialized = true;
+}
+
+TrainingStep& TrainingProgram::getStep(uint64_t index) {
+    if (index >= steps.size()) {
+        throw std::runtime_error("TrainingProgram step index out of range.");
+    }
+    if (steps[index] == nullptr) {
+        throw std::runtime_error("TrainingProgram contains a null TrainingStep reference.");
+    }
+    return *steps[index];
 }
 
 const TrainingStep& TrainingProgram::getStep(uint64_t index) const {
     if (index >= steps.size()) {
         throw std::runtime_error("TrainingProgram step index out of range.");
+    }
+    if (steps[index] == nullptr) {
+        throw std::runtime_error("TrainingProgram contains a null TrainingStep reference.");
+    }
+    return *steps[index];
+}
+
+std::shared_ptr<TrainingStep> TrainingProgram::getStepReference(uint64_t index) const {
+    if (index >= steps.size()) {
+        throw std::runtime_error("TrainingProgram step index out of range.");
+    }
+    if (steps[index] == nullptr) {
+        throw std::runtime_error("TrainingProgram contains a null TrainingStep reference.");
     }
     return steps[index];
 }
@@ -52,8 +83,8 @@ json TrainingProgram::architectureJson() const {
     json j;
     j["version"] = getVersion();
     j["steps"] = json::array();
-    for (const TrainingStep& step : steps) {
-        j["steps"].push_back(step.architectureJson());
+    for (const std::shared_ptr<TrainingStep>& step : steps) {
+        j["steps"].push_back(step->architectureJson());
     }
     return j;
 }
@@ -65,8 +96,19 @@ std::vector<StepExecutable> TrainingProgram::compile(PlacedNetwork& placedNetwor
 
     std::vector<StepExecutable> executables;
     executables.reserve(steps.size());
-    for (const TrainingStep& step : steps) {
-        executables.emplace_back(step, placedNetwork);
+    for (const std::shared_ptr<TrainingStep>& step : steps) {
+        if (!step->isEnabled()) {
+            continue;
+        }
+        step->validateEnabledPhaseDependencies();
+        if (step->getActiveLossRoots().empty()) {
+            throw std::runtime_error("TrainingProgram enabled TrainingStep '" + step->getName() +
+                                     "' has no active loss roots from enabled TrainingPhases.");
+        }
+        executables.emplace_back(*step, placedNetwork);
+    }
+    if (executables.empty()) {
+        throw std::runtime_error("TrainingProgram has no enabled TrainingStep with active loss roots.");
     }
     return executables;
 }
@@ -78,9 +120,9 @@ TrainingProgram TrainingProgram::deserialize(const json& j, std::shared_ptr<thor
         throw std::runtime_error("Unsupported TrainingProgram version: " + version);
     }
 
-    std::vector<TrainingStep> steps;
+    std::vector<std::shared_ptr<TrainingStep>> steps;
     for (const json& stepJson : j.at("steps")) {
-        steps.push_back(TrainingStep::deserialize(stepJson, archiveReader, network));
+        steps.push_back(std::make_shared<TrainingStep>(TrainingStep::deserialize(stepJson, archiveReader, network)));
     }
 
     return TrainingProgram(std::move(steps));

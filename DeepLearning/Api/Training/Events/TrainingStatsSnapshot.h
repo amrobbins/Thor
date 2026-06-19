@@ -7,14 +7,14 @@
 
 namespace Thor {
 
-enum class TrainingPhase { UNKNOWN, TRAIN, VALIDATE, TEST };
+enum class TrainingEventPhase { UNKNOWN, TRAIN, VALIDATE, TEST };
 
-[[nodiscard]] const char* trainingPhaseName(TrainingPhase phase);
+[[nodiscard]] const char* trainingPhaseName(TrainingEventPhase phase);
 
 struct TrainingStatsSnapshot {
     std::string networkName{};
     std::string datasetName{};
-    TrainingPhase phase = TrainingPhase::UNKNOWN;
+    TrainingEventPhase phase = TrainingEventPhase::UNKNOWN;
 
     uint64_t epoch = 0;
     uint64_t epochs = 0;

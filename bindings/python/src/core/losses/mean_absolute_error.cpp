@@ -36,9 +36,9 @@ void bind_mean_absolute_error(nb::module_ &losses) {
                 builder.lossDataType(loss_data_type.value());
             builder.lossWeight(loss_weight.value_or(1.0f));
 
-            if (labels.getDimensions().size() != 1 || labels.getDimensions()[0] != 1) {
-                string error_message = "MAE instance: labels tensor is not sized right. label tensor is " +
-                                       labels.getDescriptorString() + ". labels must be a 1 dimensional tensor of size 1.";
+            if (predictions.getDimensions() != labels.getDimensions()) {
+                string error_message = "MAE instance: predictions and labels dimensions must match. predictions tensor is " +
+                                       predictions.getDescriptorString() + "; labels tensor is " + labels.getDescriptorString() + ".";
                 throw nb::value_error(error_message.c_str());
             }
 
@@ -75,8 +75,8 @@ Notes
 -----
 Loss reductions available, meant to aid in hand analysis of a data set:
 
- * Batch [b][1] -> [1] - default
- * Elementwise [b][1] -> [b]
+ * Batch [b][...] -> [1] - default
+ * Elementwise [b][...] -> [b]
 
 So you could send a single batch and check the loss per example using Elementwise.
 

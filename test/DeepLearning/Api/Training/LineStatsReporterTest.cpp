@@ -12,7 +12,7 @@ using namespace Thor;
 namespace {
 
 TrainingStatsSnapshot makeStats(double elapsedSeconds,
-                                TrainingPhase phase = TrainingPhase::TRAIN,
+                                TrainingEventPhase phase = TrainingEventPhase::TRAIN,
                                 uint64_t epoch = 1,
                                 uint64_t step = 17,
                                 uint64_t stepInEpoch = 7,
@@ -159,13 +159,13 @@ TEST(LineStatsReporter, PrintsFirstStatsForEachPhaseOccurrenceDespiteInterval) {
     std::FILE* out = std::tmpfile();
     LineStatsReporter reporter(out, 100.0, true, LineStatsColorMode::NEVER);
 
-    reporter.onTrainingEvent(TrainingEvent::epochStarted(makeStats(0.0, TrainingPhase::TRAIN, 1, 0, 0)));
-    reporter.onTrainingEvent(TrainingEvent::statsUpdated(makeStats(0.0, TrainingPhase::TRAIN, 1, 1, 1)));
-    reporter.onTrainingEvent(TrainingEvent::statsUpdated(makeStats(1.0, TrainingPhase::TRAIN, 1, 2, 2)));
-    reporter.onTrainingEvent(TrainingEvent::epochFinished(makeStats(1.0, TrainingPhase::TRAIN, 1, 0, 0)));
+    reporter.onTrainingEvent(TrainingEvent::epochStarted(makeStats(0.0, TrainingEventPhase::TRAIN, 1, 0, 0)));
+    reporter.onTrainingEvent(TrainingEvent::statsUpdated(makeStats(0.0, TrainingEventPhase::TRAIN, 1, 1, 1)));
+    reporter.onTrainingEvent(TrainingEvent::statsUpdated(makeStats(1.0, TrainingEventPhase::TRAIN, 1, 2, 2)));
+    reporter.onTrainingEvent(TrainingEvent::epochFinished(makeStats(1.0, TrainingEventPhase::TRAIN, 1, 0, 0)));
 
-    reporter.onTrainingEvent(TrainingEvent::epochStarted(makeStats(2.0, TrainingPhase::VALIDATE, 1, 0, 0, 5)));
-    reporter.onTrainingEvent(TrainingEvent::statsUpdated(makeStats(2.0, TrainingPhase::VALIDATE, 1, 1, 1, 5)));
+    reporter.onTrainingEvent(TrainingEvent::epochStarted(makeStats(2.0, TrainingEventPhase::VALIDATE, 1, 0, 0, 5)));
+    reporter.onTrainingEvent(TrainingEvent::statsUpdated(makeStats(2.0, TrainingEventPhase::VALIDATE, 1, 1, 1, 5)));
 
     const std::string output = readAndCloseFile(out);
     EXPECT_NE(output.find("phase=train    epoch=      1/3 step=         1 batch=        1/100"), std::string::npos);
@@ -176,10 +176,10 @@ TEST(LineStatsReporter, PrintsLastStatsAtPhaseFinishDespiteInterval) {
     std::FILE* out = std::tmpfile();
     LineStatsReporter reporter(out, 100.0, true, LineStatsColorMode::NEVER);
 
-    reporter.onTrainingEvent(TrainingEvent::epochStarted(makeStats(0.0, TrainingPhase::TRAIN, 1, 0, 0)));
-    reporter.onTrainingEvent(TrainingEvent::statsUpdated(makeStats(0.0, TrainingPhase::TRAIN, 1, 1, 1)));
-    reporter.onTrainingEvent(TrainingEvent::statsUpdated(makeStats(1.0, TrainingPhase::TRAIN, 1, 2, 2)));
-    reporter.onTrainingEvent(TrainingEvent::epochFinished(makeStats(1.0, TrainingPhase::TRAIN, 1, 0, 0)));
+    reporter.onTrainingEvent(TrainingEvent::epochStarted(makeStats(0.0, TrainingEventPhase::TRAIN, 1, 0, 0)));
+    reporter.onTrainingEvent(TrainingEvent::statsUpdated(makeStats(0.0, TrainingEventPhase::TRAIN, 1, 1, 1)));
+    reporter.onTrainingEvent(TrainingEvent::statsUpdated(makeStats(1.0, TrainingEventPhase::TRAIN, 1, 2, 2)));
+    reporter.onTrainingEvent(TrainingEvent::epochFinished(makeStats(1.0, TrainingEventPhase::TRAIN, 1, 0, 0)));
 
     const std::string output = readAndCloseFile(out);
     EXPECT_EQ(countLines(output), 2u);
@@ -191,9 +191,9 @@ TEST(LineStatsReporter, DoesNotDuplicatePhaseFinishWhenLastStatsAlreadyPrinted) 
     std::FILE* out = std::tmpfile();
     LineStatsReporter reporter(out, 0.0, true, LineStatsColorMode::NEVER);
 
-    reporter.onTrainingEvent(TrainingEvent::epochStarted(makeStats(0.0, TrainingPhase::TRAIN, 1, 0, 0)));
-    reporter.onTrainingEvent(TrainingEvent::statsUpdated(makeStats(0.0, TrainingPhase::TRAIN, 1, 1, 1)));
-    reporter.onTrainingEvent(TrainingEvent::epochFinished(makeStats(0.0, TrainingPhase::TRAIN, 1, 0, 0)));
+    reporter.onTrainingEvent(TrainingEvent::epochStarted(makeStats(0.0, TrainingEventPhase::TRAIN, 1, 0, 0)));
+    reporter.onTrainingEvent(TrainingEvent::statsUpdated(makeStats(0.0, TrainingEventPhase::TRAIN, 1, 1, 1)));
+    reporter.onTrainingEvent(TrainingEvent::epochFinished(makeStats(0.0, TrainingEventPhase::TRAIN, 1, 0, 0)));
 
     const std::string output = readAndCloseFile(out);
     EXPECT_EQ(countLines(output), 1u);
@@ -235,9 +235,9 @@ TEST(LineStatsReporter, ColorModeAlwaysBoldColorsPhaseByPhaseType) {
     std::FILE* out = std::tmpfile();
     LineStatsReporter reporter(out, 0.0, true, LineStatsColorMode::ALWAYS);
 
-    reporter.onTrainingEvent(TrainingEvent::statsUpdated(makeStats(1.0, TrainingPhase::TRAIN, 1, 1, 1)));
-    reporter.onTrainingEvent(TrainingEvent::statsUpdated(makeStats(2.0, TrainingPhase::VALIDATE, 1, 2, 1, 5)));
-    reporter.onTrainingEvent(TrainingEvent::statsUpdated(makeStats(3.0, TrainingPhase::TEST, 1, 3, 1, 5)));
+    reporter.onTrainingEvent(TrainingEvent::statsUpdated(makeStats(1.0, TrainingEventPhase::TRAIN, 1, 1, 1)));
+    reporter.onTrainingEvent(TrainingEvent::statsUpdated(makeStats(2.0, TrainingEventPhase::VALIDATE, 1, 2, 1, 5)));
+    reporter.onTrainingEvent(TrainingEvent::statsUpdated(makeStats(3.0, TrainingEventPhase::TEST, 1, 3, 1, 5)));
 
     const std::string output = readAndCloseFile(out);
     EXPECT_TRUE(tokenHasAnsiStyle(output, "train", true));

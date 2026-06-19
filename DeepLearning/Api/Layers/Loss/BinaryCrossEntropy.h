@@ -58,9 +58,12 @@ class BinaryCrossEntropy::Builder {
         if (!_lossShape.has_value())
             _lossShape = LossShape::BATCH;
 
+        std::vector<uint64_t> predictionDimensions = _predictions.value().getDimensions();
         std::vector<uint64_t> labelDimensions = _labels.value().getDimensions();
-        // API layer does not have a batch dimension:
-        THOR_THROW_IF_FALSE(labelDimensions.size() == 1 && labelDimensions[0] == 1);
+        // API layer does not have a batch dimension. Allow vector-valued BCE for multi-output/multi-label heads.
+        THOR_THROW_IF_FALSE(predictionDimensions.size() == 1);
+        THOR_THROW_IF_FALSE(labelDimensions.size() == 1);
+        THOR_THROW_IF_FALSE(predictionDimensions == labelDimensions);
 
         BinaryCrossEntropy binaryCrossEntropy;
         binaryCrossEntropy.rawLossAddedToNetwork = _rawLossAddedToNetwork.value_or(false);
@@ -82,7 +85,7 @@ class BinaryCrossEntropy::Builder {
             // Legacy/deserialization-only path: build the single raw BCE layer itself. New public BCE construction
             // builds a raw CustomLoss support layer instead.
             THOR_THROW_IF_FALSE(binaryCrossEntropy.lossShape == LossShape::ELEMENTWISE);
-            binaryCrossEntropy.lossTensor = Tensor(_lossDataType.value(), {1});
+            binaryCrossEntropy.lossTensor = Tensor(_lossDataType.value(), predictionDimensions);
             binaryCrossEntropy.lossShaperInput = binaryCrossEntropy.lossTensor;
             binaryCrossEntropy.addToNetwork(_network.value());
         } else {
@@ -100,14 +103,14 @@ class BinaryCrossEntropy::Builder {
 
     virtual BinaryCrossEntropy::Builder &predictions(Tensor _predictions) {
         THOR_THROW_IF_FALSE(!this->_predictions.has_value());
-        THOR_THROW_IF_FALSE(_predictions.getDimensions().size() == 1 && _predictions.getDimensions()[0] == 1);
+        THOR_THROW_IF_FALSE(_predictions.getDimensions().size() == 1);
         this->_predictions = _predictions;
         return *this;
     }
 
     virtual BinaryCrossEntropy::Builder &labels(Tensor _labels) {
         THOR_THROW_IF_FALSE(!this->_labels.has_value());
-        THOR_THROW_IF_FALSE(_labels.getDimensions().size() == 1 && _labels.getDimensions()[0] == 1);
+        THOR_THROW_IF_FALSE(_labels.getDimensions().size() == 1);
         this->_labels = _labels;
         return *this;
     }

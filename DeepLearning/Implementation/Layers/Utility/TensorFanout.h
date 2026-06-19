@@ -6,6 +6,9 @@
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 
+#include <cuda_bf16.h>
+#include <cuda_fp8.h>
+
 #include <unordered_set>
 
 namespace ThorImplementation {
@@ -88,21 +91,21 @@ class TensorFanout : public MultiConnectionLayer {
         THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
         ScopedGpu scopedGpu(featureInputs[0].value().getPlacement().getDeviceNum());
         cudaError_t cudaStatus;
-        cudaStatus = cudaMalloc(&errorInputArray_d, numPresentTensors(errorInputs) * sizeof(half *));
+        cudaStatus = cudaMalloc(&errorInputArray_d, numPresentTensors(errorInputs) * sizeof(void *));
         THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
 
         if (numPresentTensors(errorInputs) > 0) {
-            half **errorInputArray = new half *[numPresentTensors(errorInputs)];
+            void **errorInputArray = new void *[numPresentTensors(errorInputs)];
             uint32_t j = 0;
             for (unsigned int i = 0; i < errorInputs.size(); ++i) {
                 if (errorInputs[i].has_value()) {
-                    errorInputArray[j] = (half *)errorInputs[i].value().getMemPtr();
+                    errorInputArray[j] = errorInputs[i].value().getMemPtr();
                     allErrorInputTensorIds.insert(errorInputs[i].value().getTensorId());
                     ++j;
                 }
             }
             cudaStatus =
-                cudaMemcpy(errorInputArray_d, errorInputArray, numPresentTensors(errorInputs) * sizeof(half *), cudaMemcpyHostToDevice);
+                cudaMemcpy(errorInputArray_d, errorInputArray, numPresentTensors(errorInputs) * sizeof(void *), cudaMemcpyHostToDevice);
             THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
             delete[] errorInputArray;
         }
@@ -170,16 +173,16 @@ class TensorFanout : public MultiConnectionLayer {
             THOR_THROW_IF_FALSE(featureInputs[0].has_value());
             ScopedGpu scopedGpu(featureInputs[0].value().getPlacement().getDeviceNum());
 
-            half **errorInputArray = new half *[numPresentTensors(errorInputs)];
+            void **errorInputArray = new void *[numPresentTensors(errorInputs)];
             uint32_t j = 0;
             for (unsigned int i = 0; i < errorInputs.size(); ++i) {
                 if (errorInputs[i].has_value()) {
-                    errorInputArray[j] = (half *)errorInputs[i].value().getMemPtr();
+                    errorInputArray[j] = errorInputs[i].value().getMemPtr();
                     ++j;
                 }
             }
             cudaError_t cudaStatus =
-                cudaMemcpy(errorInputArray_d, errorInputArray, numPresentTensors(errorInputs) * sizeof(half *), cudaMemcpyHostToDevice);
+                cudaMemcpy(errorInputArray_d, errorInputArray, numPresentTensors(errorInputs) * sizeof(void *), cudaMemcpyHostToDevice);
             THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
             delete[] errorInputArray;
         }
@@ -256,11 +259,7 @@ class TensorFanout : public MultiConnectionLayer {
         for (unsigned int i = 1; i < errorInputs.size(); ++i)
             streams[0].waitEvent(streams[i].putEvent());
 
-        sum((half *)errorOutputs[0].value().getMemPtr(),
-            errorInputArray_d,
-            numPresentTensors(errorInputs),
-            (uint64_t)errorOutputs[0].value().getDescriptor().getTotalNumElements(),
-            streams[0]);
+        sumErrorInputsByDType();
 
         // Expecting to get tail-recursion optimization of -O3 so that stack space does not build up here.
         previousLayers[0].value()->backward(errorOutputs[0], batchSize);
@@ -285,7 +284,63 @@ class TensorFanout : public MultiConnectionLayer {
     Tensor fusedCustomLossGradientPredictions;
 
    protected:
-    half **errorInputArray_d = nullptr;
+    void sumErrorInputsByDType() {
+        THOR_THROW_IF_FALSE(errorOutputs.size() == 1);
+        THOR_THROW_IF_FALSE(errorOutputs[0].has_value());
+        THOR_THROW_IF_FALSE(errorInputArray_d != nullptr);
+
+        Tensor& errorOutput = errorOutputs[0].value();
+        const uint32_t presentInputCount = numPresentTensors(errorInputs);
+        const uint64_t elementCount = static_cast<uint64_t>(errorOutput.getDescriptor().getTotalNumElements());
+        switch (errorOutput.getDescriptor().getDataType()) {
+            case DataType::FP16:
+                launchSum<half>(reinterpret_cast<half*>(errorOutput.getMemPtr()),
+                                reinterpret_cast<half**>(errorInputArray_d),
+                                presentInputCount,
+                                elementCount,
+                                streams[0]);
+                break;
+            case DataType::BF16:
+                launchSum<__nv_bfloat16>(reinterpret_cast<__nv_bfloat16*>(errorOutput.getMemPtr()),
+                                         reinterpret_cast<__nv_bfloat16**>(errorInputArray_d),
+                                         presentInputCount,
+                                         elementCount,
+                                         streams[0]);
+                break;
+            case DataType::FP8_E4M3:
+                launchSum<__nv_fp8_e4m3>(reinterpret_cast<__nv_fp8_e4m3*>(errorOutput.getMemPtr()),
+                                         reinterpret_cast<__nv_fp8_e4m3**>(errorInputArray_d),
+                                         presentInputCount,
+                                         elementCount,
+                                         streams[0]);
+                break;
+            case DataType::FP8_E5M2:
+                launchSum<__nv_fp8_e5m2>(reinterpret_cast<__nv_fp8_e5m2*>(errorOutput.getMemPtr()),
+                                         reinterpret_cast<__nv_fp8_e5m2**>(errorInputArray_d),
+                                         presentInputCount,
+                                         elementCount,
+                                         streams[0]);
+                break;
+            case DataType::FP32:
+                launchSum<float>(reinterpret_cast<float*>(errorOutput.getMemPtr()),
+                                 reinterpret_cast<float**>(errorInputArray_d),
+                                 presentInputCount,
+                                 elementCount,
+                                 streams[0]);
+                break;
+            case DataType::FP64:
+                launchSum<double>(reinterpret_cast<double*>(errorOutput.getMemPtr()),
+                                  reinterpret_cast<double**>(errorInputArray_d),
+                                  presentInputCount,
+                                  elementCount,
+                                  streams[0]);
+                break;
+            default:
+                THOR_UNREACHABLE();
+        }
+    }
+
+    void *errorInputArray_d = nullptr;
 };
 
 }  // namespace ThorImplementation

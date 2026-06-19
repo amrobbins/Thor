@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <optional>
 #include <set>
@@ -28,6 +29,7 @@
 #include "DeepLearning/Api/Training/Trainer.h"
 #include "DeepLearning/Api/Training/TrainingInputBinding.h"
 #include "DeepLearning/Api/Training/TrainingProgram.h"
+#include "DeepLearning/Api/Training/TrainingPhase.h"
 #include "DeepLearning/Api/Training/TrainingStep.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "DeepLearning/Implementation/Tensor/TensorPlacement.h"
@@ -592,7 +594,7 @@ calling this helper.
                 builder.optimizer(std::move(optimizer));
             }
             if (!training_program.is_none()) {
-                builder.trainingProgram(nb::cast<TrainingProgram>(training_program));
+                builder.trainingProgram(nb::cast<std::shared_ptr<TrainingProgram>>(training_program));
             }
             if (debug_synchronous) {
                 builder.debugSynchronousExecutor();
@@ -639,38 +641,137 @@ calling this helper.
         "architecture_json"_a);
     training_input_binding.def("__eq__", &TrainingInputBinding::operator==);
 
-    auto training_step = nb::class_<TrainingStep>(training, "TrainingStep");
-    training_step.attr("__module__") = "thor.training";
-    training_step.def(
-        "__init__",
-        [](TrainingStep* self,
+    auto training_phase = nb::class_<TrainingPhase>(training, "TrainingPhase");
+    training_phase.attr("__module__") = "thor.training";
+    training_phase.def_static(
+        "__new__",
+        [](nb::handle cls,
            const std::string& name,
            std::vector<Tensor> loss_roots,
+           std::map<std::string, Tensor> outputs,
+           std::vector<std::string> depends_on,
+           bool enabled) -> std::shared_ptr<TrainingPhase> {
+            (void)cls;
+            return std::make_shared<TrainingPhase>(
+                name, std::move(loss_roots), std::move(outputs), std::move(depends_on), enabled);
+        },
+        "cls"_a,
+        "name"_a,
+        "loss_roots"_a = std::vector<Tensor>{},
+        "outputs"_a = std::map<std::string, Tensor>{},
+        "depends_on"_a = std::vector<std::string>{},
+        "enabled"_a = true);
+    training_phase.def(
+        "__init__",
+        [](TrainingPhase*, const std::string&, std::vector<Tensor>, std::map<std::string, Tensor>, std::vector<std::string>, bool) {},
+        "name"_a,
+        "loss_roots"_a = std::vector<Tensor>{},
+        "outputs"_a = std::map<std::string, Tensor>{},
+        "depends_on"_a = std::vector<std::string>{},
+        "enabled"_a = true);
+    training_phase.def_prop_ro("name", &TrainingPhase::getName);
+    training_phase.def_prop_rw("enabled", &TrainingPhase::isEnabled, &TrainingPhase::setEnabled);
+    training_phase.def("is_initialized", &TrainingPhase::isInitialized);
+    training_phase.def("is_enabled", &TrainingPhase::isEnabled);
+    training_phase.def("enable", &TrainingPhase::enable);
+    training_phase.def("disable", &TrainingPhase::disable);
+    training_phase.def("set_enabled", &TrainingPhase::setEnabled, "enabled"_a);
+    training_phase.def("get_loss_roots", &TrainingPhase::getLossRoots, nb::rv_policy::reference_internal);
+    training_phase.def("get_outputs", &TrainingPhase::getOutputs, nb::rv_policy::reference_internal);
+    training_phase.def("get_depends_on", &TrainingPhase::getDependsOn, nb::rv_policy::reference_internal);
+    training_phase.def("get_architecture_json", &TrainingPhase::architectureJsonString);
+    training_phase.def_static(
+        "deserialize",
+        [](const std::string& payload) {
+            std::shared_ptr<thor_file::TarReader> archiveReader = nullptr;
+            return std::make_shared<TrainingPhase>(TrainingPhase::deserialize(nlohmann::json::parse(payload), archiveReader));
+        },
+        "architecture_json"_a);
+
+    auto training_step = nb::class_<TrainingStep>(training, "TrainingStep");
+    training_step.attr("__module__") = "thor.training";
+    training_step.def_static(
+        "__new__",
+        [](nb::handle cls,
+           const std::string& name,
+           nb::object loss_roots,
            std::shared_ptr<Optimizer> optimizer,
            std::vector<ParameterReference> update_parameters,
            uint32_t repeat_count,
            TrainingStep::GradientClearPolicy gradient_clear_policy,
-           std::vector<TrainingInputBinding> input_bindings) {
-            new (self) TrainingStep(name,
-                                    std::move(loss_roots),
-                                    std::move(optimizer),
-                                    std::move(update_parameters),
-                                    repeat_count,
-                                    gradient_clear_policy,
-                                    std::move(input_bindings));
+           std::vector<TrainingInputBinding> input_bindings,
+           bool enabled,
+           nb::object phases) -> std::shared_ptr<TrainingStep> {
+            (void)cls;
+            const bool hasLossRoots = !loss_roots.is_none();
+            const bool hasPhases = !phases.is_none();
+            if (hasLossRoots == hasPhases) {
+                throw nb::value_error("TrainingStep requires exactly one of loss_roots or phases.");
+            }
+            if (hasPhases) {
+                return std::make_shared<TrainingStep>(name,
+                                                      nb::cast<std::vector<std::shared_ptr<TrainingPhase>>>(phases),
+                                                      std::move(optimizer),
+                                                      std::move(update_parameters),
+                                                      repeat_count,
+                                                      gradient_clear_policy,
+                                                      std::move(input_bindings),
+                                                      enabled);
+            }
+            return std::make_shared<TrainingStep>(name,
+                                                  nb::cast<std::vector<Tensor>>(loss_roots),
+                                                  std::move(optimizer),
+                                                  std::move(update_parameters),
+                                                  repeat_count,
+                                                  gradient_clear_policy,
+                                                  std::move(input_bindings),
+                                                  enabled);
         },
+        "cls"_a,
         "name"_a,
-        "loss_roots"_a,
+        "loss_roots"_a.none() = nb::none(),
         "optimizer"_a.none() = nb::none(),
         "update_parameters"_a = std::vector<ParameterReference>{},
         "repeat_count"_a = 1,
         "gradient_clear_policy"_a = TrainingStep::GradientClearPolicy::CLEAR_BEFORE_STEP,
-        "input_bindings"_a = std::vector<TrainingInputBinding>{});
+        "input_bindings"_a = std::vector<TrainingInputBinding>{},
+        "enabled"_a = true,
+        "phases"_a.none() = nb::none());
+    training_step.def(
+        "__init__",
+        [](TrainingStep*,
+           const std::string&,
+           nb::object,
+           std::shared_ptr<Optimizer>,
+           std::vector<ParameterReference>,
+           uint32_t,
+           TrainingStep::GradientClearPolicy,
+           std::vector<TrainingInputBinding>,
+           bool,
+           nb::object) {},
+        "name"_a,
+        "loss_roots"_a.none() = nb::none(),
+        "optimizer"_a.none() = nb::none(),
+        "update_parameters"_a = std::vector<ParameterReference>{},
+        "repeat_count"_a = 1,
+        "gradient_clear_policy"_a = TrainingStep::GradientClearPolicy::CLEAR_BEFORE_STEP,
+        "input_bindings"_a = std::vector<TrainingInputBinding>{},
+        "enabled"_a = true,
+        "phases"_a.none() = nb::none());
     training_step.def_prop_ro("name", &TrainingStep::getName);
     training_step.def_prop_ro("repeat_count", &TrainingStep::getRepeatCount);
     training_step.def_prop_ro("gradient_clear_policy", &TrainingStep::getGradientClearPolicy);
+    training_step.def_prop_rw("enabled", &TrainingStep::isEnabled, &TrainingStep::setEnabled);
     training_step.def("is_initialized", &TrainingStep::isInitialized);
+    training_step.def("is_enabled", &TrainingStep::isEnabled);
+    training_step.def("enable", &TrainingStep::enable);
+    training_step.def("disable", &TrainingStep::disable);
+    training_step.def("set_enabled", &TrainingStep::setEnabled, "enabled"_a);
+    training_step.def("validate_enabled_phase_dependencies", &TrainingStep::validateEnabledPhaseDependencies);
     training_step.def("get_loss_roots", &TrainingStep::getLossRoots, nb::rv_policy::reference_internal);
+    training_step.def("get_active_loss_roots", &TrainingStep::getActiveLossRoots);
+    training_step.def("get_active_phase_names", &TrainingStep::getActivePhaseNames);
+    training_step.def("get_phases", &TrainingStep::getPhases, nb::rv_policy::reference_internal);
     training_step.def("get_optimizer", &TrainingStep::getOptimizer);
     training_step.def("get_update_parameters", &TrainingStep::getUpdateParameters, nb::rv_policy::reference_internal);
     training_step.def("get_input_bindings", &TrainingStep::getInputBindings, nb::rv_policy::reference_internal);
@@ -680,7 +781,7 @@ calling this helper.
         "deserialize",
         [](const std::string& payload) {
             std::shared_ptr<thor_file::TarReader> archiveReader = nullptr;
-            return TrainingStep::deserialize(nlohmann::json::parse(payload), archiveReader, nullptr);
+            return std::make_shared<TrainingStep>(TrainingStep::deserialize(nlohmann::json::parse(payload), archiveReader, nullptr));
         },
         "architecture_json"_a);
 
@@ -692,6 +793,7 @@ calling this helper.
     step_executable.def_prop_ro("gradient_clear_policy", &StepExecutable::getGradientClearPolicy);
     step_executable.def("get_loss_roots", &StepExecutable::getLossRoots, nb::rv_policy::reference_internal);
     step_executable.def("get_resolved_loss_roots", &StepExecutable::getResolvedLossRoots, nb::rv_policy::reference_internal);
+    step_executable.def("get_active_phase_names", &StepExecutable::getActivePhaseNames, nb::rv_policy::reference_internal);
     step_executable.def("get_optimizer", &StepExecutable::getOptimizer);
     step_executable.def(
         "get_update_parameter_references", &StepExecutable::getUpdateParameterReferences, nb::rv_policy::reference_internal);
@@ -703,11 +805,21 @@ calling this helper.
 
     auto training_program = nb::class_<TrainingProgram>(training, "TrainingProgram");
     training_program.attr("__module__") = "thor.training";
-    training_program.def(nb::init<>());
-    training_program.def(nb::init<std::vector<TrainingStep>>(), "steps"_a);
+    training_program.def_static(
+        "__new__",
+        [](nb::handle cls, nb::object steps) -> std::shared_ptr<TrainingProgram> {
+            (void)cls;
+            if (steps.is_none()) {
+                return std::make_shared<TrainingProgram>();
+            }
+            return std::make_shared<TrainingProgram>(nb::cast<std::vector<std::shared_ptr<TrainingStep>>>(steps));
+        },
+        "cls"_a,
+        "steps"_a.none() = nb::none());
+    training_program.def("__init__", [](TrainingProgram*, nb::object) {}, "steps"_a.none() = nb::none());
     training_program.def("add_step", &TrainingProgram::addStep, "step"_a);
     training_program.def("get_num_steps", &TrainingProgram::getNumSteps);
-    training_program.def("get_step", &TrainingProgram::getStep, "index"_a, nb::rv_policy::reference_internal);
+    training_program.def("get_step", [](TrainingProgram& self, uint64_t index) { return self.getStepReference(index); }, "index"_a);
     training_program.def("get_steps", &TrainingProgram::getSteps, nb::rv_policy::reference_internal);
     training_program.def("is_initialized", &TrainingProgram::isInitialized);
     training_program.def("get_architecture_json", &TrainingProgram::architectureJsonString);
@@ -715,7 +827,7 @@ calling this helper.
         "deserialize",
         [](const std::string& payload) {
             std::shared_ptr<thor_file::TarReader> archiveReader = nullptr;
-            return TrainingProgram::deserialize(nlohmann::json::parse(payload), archiveReader, nullptr);
+            return std::make_shared<TrainingProgram>(TrainingProgram::deserialize(nlohmann::json::parse(payload), archiveReader, nullptr));
         },
         "architecture_json"_a);
     training_program.def("compile", &TrainingProgram::compile, "placed_network"_a);

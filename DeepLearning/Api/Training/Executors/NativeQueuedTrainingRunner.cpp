@@ -113,15 +113,15 @@ float copyScalarStatTensor(const Batch& batchInput,
     return value;
 }
 
-std::string phaseName(TrainingPhase phase) {
+std::string phaseName(TrainingEventPhase phase) {
     switch (phase) {
-        case TrainingPhase::TRAIN:
+        case TrainingEventPhase::TRAIN:
             return "train";
-        case TrainingPhase::VALIDATE:
+        case TrainingEventPhase::VALIDATE:
             return "validate";
-        case TrainingPhase::TEST:
+        case TrainingEventPhase::TEST:
             return "test";
-        case TrainingPhase::UNKNOWN:
+        case TrainingEventPhase::UNKNOWN:
         default:
             return "unknown";
     }
@@ -158,7 +158,7 @@ uint64_t elapsedMicros(std::chrono::high_resolution_clock::time_point start,
 }
 
 void emitNativeQueueDiagnostic(const char* event,
-                               TrainingPhase phase,
+                               TrainingEventPhase phase,
                                uint64_t epoch,
                                uint64_t batch,
                                uint64_t slot,
@@ -183,7 +183,7 @@ void emitNativeQueueDiagnostic(const char* event,
     std::fflush(stderr);
 }
 
-void emitNativeQueueScheduleTimingDiagnostic(TrainingPhase phase,
+void emitNativeQueueScheduleTimingDiagnostic(TrainingEventPhase phase,
                                              uint64_t epoch,
                                              uint64_t batch,
                                              uint64_t slot,
@@ -218,7 +218,7 @@ void emitNativeQueueScheduleTimingDiagnostic(TrainingPhase phase,
     std::fflush(stderr);
 }
 
-void emitNativeQueueCompletionTimingDiagnostic(TrainingPhase phase,
+void emitNativeQueueCompletionTimingDiagnostic(TrainingEventPhase phase,
                                                uint64_t epoch,
                                                uint64_t batch,
                                                uint64_t slot,
@@ -280,12 +280,12 @@ void ensureNativeQueuedPlanCompatible(const ExecutableTrainingPlan& plan, const 
     plan.validateNativeQueuedExecutorCompatible(network.getTrainableParameterReferences(/*trainingEnabledOnly=*/true));
 }
 
-TrainingProgram defaultTrainingProgramForRequest(const TrainingRunRequest& request) {
-    if (request.trainingProgram.has_value()) {
+std::shared_ptr<TrainingProgram> defaultTrainingProgramForRequest(const TrainingRunRequest& request) {
+    if (request.trainingProgram != nullptr) {
         if (!request.trainingProgram->isInitialized()) {
             throw std::runtime_error("Trainer execution received an uninitialized TrainingProgram.");
         }
-        return request.trainingProgram.value();
+        return request.trainingProgram;
     }
 
     std::vector<Tensor> lossRoots = request.network->getLossRootTensors();
@@ -303,7 +303,8 @@ TrainingProgram defaultTrainingProgramForRequest(const TrainingRunRequest& reque
         optimizer = request.network->getDefaultOptimizer();
     }
 
-    return TrainingProgram({TrainingStep("default", std::move(lossRoots), optimizer, std::move(parameters))});
+    auto defaultStep = std::make_shared<TrainingStep>("default", std::move(lossRoots), optimizer, std::move(parameters));
+    return std::make_shared<TrainingProgram>(std::vector<std::shared_ptr<TrainingStep>>{defaultStep});
 }
 
 std::shared_ptr<Optimizer> placementFallbackOptimizerForRequest(const TrainingRunRequest& request, const TrainingProgram& program) {
@@ -381,10 +382,10 @@ void CUDART_CB completeNativeQueuedBatch(void* data) {
         }
         if (shouldEmitQueueDiagnostic(doneAtComplete)) {
             emitNativeQueueDiagnostic("complete",
-                                      params->exampleType == ExampleType::TRAIN ? TrainingPhase::TRAIN
+                                      params->exampleType == ExampleType::TRAIN ? TrainingEventPhase::TRAIN
                                                                                 : params->exampleType == ExampleType::VALIDATE
-                                                                                      ? TrainingPhase::VALIDATE
-                                                                                      : TrainingPhase::TEST,
+                                                                                      ? TrainingEventPhase::VALIDATE
+                                                                                      : TrainingEventPhase::TEST,
                                       params->currentEpoch,
                                       epochBatchNum,
                                       slotIndex,
@@ -575,9 +576,9 @@ class NativeQueuedEpochScheduler {
             return;
         }
 
-        const TrainingPhase diagnosticPhase = exampleType == ExampleType::TRAIN
-                                                  ? TrainingPhase::TRAIN
-                                                  : exampleType == ExampleType::VALIDATE ? TrainingPhase::VALIDATE : TrainingPhase::TEST;
+        const TrainingEventPhase diagnosticPhase = exampleType == ExampleType::TRAIN
+                                                  ? TrainingEventPhase::TRAIN
+                                                  : exampleType == ExampleType::VALIDATE ? TrainingEventPhase::VALIDATE : TrainingEventPhase::TEST;
         emitNativeQueueDiagnostic("phase_schedule_start",
                                   diagnosticPhase,
                                   currentEpoch,
@@ -702,6 +703,7 @@ class NativeQueuedEpochScheduler {
                                                params->batchOutput,
                                                outputReadyEvents[nextStampToProcess],
                                                validationPass,
+                                               step.getLossRoots(),
                                                &processingFinishedEvents[slotIndex],
                                                /*waitForOutputsOnProcessingStream=*/false);
                 }
@@ -815,8 +817,8 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     THOR_THROW_IF_FALSE(request.epochs > 0);
     THOR_THROW_IF_FALSE(options.maxInFlightBatches >= 1);
 
-    TrainingProgram trainingProgram = defaultTrainingProgramForRequest(request);
-    attachPlacementFallbackOptimizerIfNeeded(request, trainingProgram);
+    std::shared_ptr<TrainingProgram> trainingProgram = defaultTrainingProgramForRequest(request);
+    attachPlacementFallbackOptimizerIfNeeded(request, *trainingProgram);
 
     const uint64_t batchSize = request.loader->getBatchSize();
     std::vector<Event> initDoneEvents;
@@ -826,7 +828,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         initDoneEvents[i].synchronize();
     }
 
-    ExecutableTrainingPlan plan = ExecutableTrainingPlan::compile(trainingProgram, *placedNetwork);
+    ExecutableTrainingPlan plan = ExecutableTrainingPlan::compile(*trainingProgram, *placedNetwork);
     ensureNativeQueuedPlanCompatible(plan, *request.network);
 
     ThorImplementation::StampedNetwork& statsStampedNetwork = placedNetwork->getStampedNetwork(0);
@@ -844,7 +846,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         return elapsed.count();
     };
 
-    auto makeBaseSnapshot = [&](TrainingPhase phase,
+    auto makeBaseSnapshot = [&](TrainingEventPhase phase,
                                 uint64_t epoch,
                                 uint64_t batchSize,
                                 uint64_t batchesPerEpoch,
@@ -865,16 +867,16 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     if (request.runtime.statsEnabled) {
         emitTrainingEvent(observer,
                           request.runtime.statsEnabled,
-                          TrainingEvent::runStarted(makeBaseSnapshot(TrainingPhase::UNKNOWN, 0, batchSize, 0, nullptr)));
+                          TrainingEvent::runStarted(makeBaseSnapshot(TrainingEventPhase::UNKNOWN, 0, batchSize, 0, nullptr)));
     }
 
     for (uint32_t epochOffset = 0; epochOffset < request.epochs; ++epochOffset) {
         const uint64_t humanEpoch = currentEpoch + 1;
 
-        for (const auto& phaseSpec : {std::pair<ExampleType, TrainingPhase>{ExampleType::TRAIN, TrainingPhase::TRAIN},
-                                      std::pair<ExampleType, TrainingPhase>{ExampleType::VALIDATE, TrainingPhase::VALIDATE}}) {
+        for (const auto& phaseSpec : {std::pair<ExampleType, TrainingEventPhase>{ExampleType::TRAIN, TrainingEventPhase::TRAIN},
+                                      std::pair<ExampleType, TrainingEventPhase>{ExampleType::VALIDATE, TrainingEventPhase::VALIDATE}}) {
             const ExampleType exampleType = phaseSpec.first;
-            const TrainingPhase phase = phaseSpec.second;
+            const TrainingEventPhase phase = phaseSpec.second;
             uint64_t batchNum = request.loader->getNextBatchNum(exampleType);
             const uint64_t batchesPerEpoch = request.loader->getNumBatchesPerEpoch(exampleType);
             if (batchNum > batchesPerEpoch) {
@@ -986,7 +988,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                             std::chrono::duration_cast<std::chrono::duration<double>>(now - previousBatchDone);
                         previousBatchDone = now;
 
-                        double& averageBatchTime = (phase == TrainingPhase::TRAIN) ? averageTrainingBatchTime : averageValidationBatchTime;
+                        double& averageBatchTime = (phase == TrainingEventPhase::TRAIN) ? averageTrainingBatchTime : averageValidationBatchTime;
                         const double completedBatchTime = elapsed.count();
                         double batchTimeForStats = completedBatchTime;
                         if (haveCompletedBatchTimingInPhase) {
@@ -1012,7 +1014,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                             snapshot.samplesPerSecond = static_cast<double>(batchSize) / batchTimeForStats;
                             snapshot.batchesPerSecond = 1.0 / batchTimeForStats;
                             snapshot.floatingPointOperationsPerBatch =
-                                (phase == TrainingPhase::TRAIN) ? trainingFlopsPerBatch : forwardFlopsPerBatch;
+                                (phase == TrainingEventPhase::TRAIN) ? trainingFlopsPerBatch : forwardFlopsPerBatch;
                             snapshot.floatingPointOperationsPerSecond =
                                 static_cast<double>(snapshot.floatingPointOperationsPerBatch) / batchTimeForStats;
                         }
@@ -1047,7 +1049,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     if (request.runtime.statsEnabled) {
         emitTrainingEvent(observer,
                           request.runtime.statsEnabled,
-                          TrainingEvent::runFinished(makeBaseSnapshot(TrainingPhase::UNKNOWN, currentEpoch, batchSize, 0, nullptr)));
+                          TrainingEvent::runFinished(makeBaseSnapshot(TrainingEventPhase::UNKNOWN, currentEpoch, batchSize, 0, nullptr)));
     }
 }
 

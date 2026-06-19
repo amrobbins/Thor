@@ -12,6 +12,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include <cstdio>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <unordered_set>
 
@@ -1286,6 +1287,101 @@ std::vector<Tensor> Network::getLossRootTensors() const {
         }
     }
     return result;
+}
+
+std::vector<Tensor> Network::getRawLossTensorsForTrainingRoots(const std::vector<Tensor>& lossRoots) const {
+    bool needsGraphEvaluation = apiTensorToApiDrivingLayer.empty() || apiLayerToApiInputTensors.empty();
+    if (!needsGraphEvaluation) {
+        for (const Tensor& lossRoot : lossRoots) {
+            if (!lossRoot.isInitialized()) {
+                continue;
+            }
+            bool foundRootOriginalId = false;
+            for (const auto& [apiTensor, drivingLayer] : apiTensorToApiDrivingLayer) {
+                (void)drivingLayer;
+                if (apiTensor.getOriginalId() == lossRoot.getOriginalId()) {
+                    foundRootOriginalId = true;
+                    break;
+                }
+            }
+            if (!foundRootOriginalId) {
+                needsGraphEvaluation = true;
+                break;
+            }
+        }
+    }
+    if (needsGraphEvaluation) {
+        // Loss root resolution may be needed before a full placement pass.  evaluateGraph() populates the
+        // tensor/layer adjacency maps before running validity checks.  We intentionally validate the requested
+        // active roots below instead of accepting any invalid graph state silently.
+        (void)const_cast<Network*>(this)->evaluateGraph();
+    }
+
+    auto findDrivenTensorByOriginalId = [&](uint64_t originalId) -> std::optional<std::pair<Tensor, std::shared_ptr<Layer>>> {
+        for (const auto& [apiTensor, drivingLayer] : apiTensorToApiDrivingLayer) {
+            if (apiTensor.getOriginalId() == originalId) {
+                return std::make_pair(apiTensor, drivingLayer);
+            }
+        }
+        return std::nullopt;
+    };
+
+    std::vector<Tensor> rawLossRoots;
+    std::set<uint64_t> emittedLossOriginalIds;
+
+    std::function<void(const Tensor&, std::set<uint64_t>&, std::set<uint64_t>&)> visitTensor =
+        [&](const Tensor& candidateRoot, std::set<uint64_t>& visitedTensorOriginalIds, std::set<uint64_t>& rootResolvedLossOriginalIds) {
+            if (!candidateRoot.isInitialized()) {
+                throw std::runtime_error("Cannot resolve uninitialized active loss root tensor.");
+            }
+
+            const uint64_t candidateOriginalId = candidateRoot.getOriginalId();
+            if (!visitedTensorOriginalIds.insert(candidateOriginalId).second) {
+                return;
+            }
+
+            std::optional<std::pair<Tensor, std::shared_ptr<Layer>>> drivenTensorAndLayer =
+                findDrivenTensorByOriginalId(candidateOriginalId);
+            if (!drivenTensorAndLayer.has_value()) {
+                throw std::runtime_error("Active loss root tensor with original id " + std::to_string(candidateOriginalId) +
+                                         " does not have a driving layer in network '" + networkName + "'.");
+            }
+
+            const Tensor& tensor = drivenTensorAndLayer->first;
+            const std::shared_ptr<Layer>& drivingLayer = drivenTensorAndLayer->second;
+            std::shared_ptr<Loss> lossLayer = std::dynamic_pointer_cast<Loss>(drivingLayer);
+            if (lossLayer != nullptr) {
+                rootResolvedLossOriginalIds.insert(tensor.getOriginalId());
+                if (emittedLossOriginalIds.insert(tensor.getOriginalId()).second) {
+                    // Return the canonical tensor object used as the key in the evaluated/stamped graph.  Do not
+                    // round-trip through apiTensorByOriginalId here: that map is keyed by original id and may contain
+                    // an equivalent tensor object from the pre-clone builder side, while downstream stamped-network
+                    // lookup is by Tensor identity.
+                    rawLossRoots.push_back(tensor);
+                }
+                return;
+            }
+
+            auto inputsIt = apiLayerToApiInputTensors.find(drivingLayer);
+            if (inputsIt == apiLayerToApiInputTensors.end()) {
+                return;
+            }
+            for (const Tensor& inputTensor : inputsIt->second) {
+                visitTensor(inputTensor, visitedTensorOriginalIds, rootResolvedLossOriginalIds);
+            }
+        };
+
+    for (const Tensor& lossRoot : lossRoots) {
+        std::set<uint64_t> visitedTensorOriginalIds;
+        std::set<uint64_t> rootResolvedLossOriginalIds;
+        visitTensor(lossRoot, visitedTensorOriginalIds, rootResolvedLossOriginalIds);
+        if (rootResolvedLossOriginalIds.empty()) {
+            throw std::runtime_error("Active loss root tensor with original id " + std::to_string(lossRoot.getOriginalId()) +
+                                     " does not resolve to any physical loss layer in network '" + networkName + "'.");
+        }
+    }
+
+    return rawLossRoots;
 }
 
 std::vector<ParameterReference> Network::getTrainableParameterReferences(bool trainingEnabledOnly) const {

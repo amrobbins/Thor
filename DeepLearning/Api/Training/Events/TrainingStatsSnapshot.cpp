@@ -2,15 +2,15 @@
 
 namespace Thor {
 
-const char* trainingPhaseName(TrainingPhase phase) {
+const char* trainingPhaseName(TrainingEventPhase phase) {
     switch (phase) {
-        case TrainingPhase::TRAIN:
+        case TrainingEventPhase::TRAIN:
             return "train";
-        case TrainingPhase::VALIDATE:
+        case TrainingEventPhase::VALIDATE:
             return "validate";
-        case TrainingPhase::TEST:
+        case TrainingEventPhase::TEST:
             return "test";
-        case TrainingPhase::UNKNOWN:
+        case TrainingEventPhase::UNKNOWN:
         default:
             return "unknown";
     }

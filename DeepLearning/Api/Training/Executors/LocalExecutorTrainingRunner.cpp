@@ -33,7 +33,7 @@ void runLocalExecutorBackedTraining(const TrainingRunRequest& request,
     THOR_THROW_IF_FALSE(request.epochs > 0);
     THOR_THROW_IF_FALSE(options.maxInFlightBatches >= 1);
 
-    if (request.trainingProgram.has_value() && !request.trainingProgram->isInitialized()) {
+    if (request.trainingProgram != nullptr && !request.trainingProgram->isInitialized()) {
         throw std::runtime_error("Trainer execution received an uninitialized TrainingProgram.");
     }
     auto borrowedObserver = std::make_shared<BorrowedTrainingObserver>(observer);

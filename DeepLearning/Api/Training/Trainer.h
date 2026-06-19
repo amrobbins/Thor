@@ -40,7 +40,7 @@ class Trainer {
     Network* network = nullptr;
     std::shared_ptr<Loader> loader = nullptr;
     std::shared_ptr<Optimizer> optimizer = nullptr;
-    std::optional<TrainingProgram> trainingProgram{};
+    std::shared_ptr<TrainingProgram> trainingProgram = nullptr;
     TrainingRuntimeConfig runtimeConfig{};
     std::shared_ptr<TrainingExecutor> executor = nullptr;
     std::shared_ptr<TrainingObserver> observer = nullptr;
@@ -66,7 +66,7 @@ class Trainer::Builder {
         return *this;
     }
 
-    Builder& trainingProgram(TrainingProgram trainingProgram) {
+    Builder& trainingProgram(std::shared_ptr<TrainingProgram> trainingProgram) {
         this->trainingProgram_ = std::move(trainingProgram);
         return *this;
     }
@@ -137,7 +137,7 @@ class Trainer::Builder {
     Network* network_ = nullptr;
     std::shared_ptr<Loader> loader_ = nullptr;
     std::shared_ptr<Optimizer> optimizer_ = nullptr;
-    std::optional<TrainingProgram> trainingProgram_{};
+    std::shared_ptr<TrainingProgram> trainingProgram_ = nullptr;
     TrainingRuntimeConfig runtimeConfig_{};
     LineStatsColorMode statsColorMode_ = LineStatsColorMode::AUTO;
     std::shared_ptr<TrainingExecutor> executor_ = nullptr;

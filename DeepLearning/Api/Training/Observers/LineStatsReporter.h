@@ -64,7 +64,7 @@ class LineStatsReporter : public TrainingObserver {
     bool printedAnyStats = false;
     std::optional<double> lastPrintedElapsedSeconds{};
     bool hasActivePhase = false;
-    TrainingPhase activePhase = TrainingPhase::UNKNOWN;
+    TrainingEventPhase activePhase = TrainingEventPhase::UNKNOWN;
     uint64_t activeEpoch = 0;
     bool printedStatsForActivePhase = false;
     std::optional<TrainingStatsSnapshot> lastSeenStats{};

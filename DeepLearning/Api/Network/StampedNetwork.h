@@ -60,6 +60,8 @@ class StampedNetwork {
     uint64_t getNumTrainableLayers() { return trainableLayersShared.size(); }
     std::shared_ptr<ThorImplementation::TrainableLayer> &getTrainableLayer(uint64_t i) { return trainableLayersShared[i]; }
     std::vector<std::shared_ptr<ThorImplementation::Layer>> getOtherLayers() { return otherLayersShared; }
+    void setActiveTrainingLossRoots(const std::vector<Thor::Tensor>& activeRawLossRoots);
+    std::vector<uint64_t> getActiveTrainingRawLossOriginalIdsForDebug() const;
 
     std::shared_ptr<ThorImplementation::Layer> getPhysicalLayerFromApiLayer(uint64_t apiLayerId) {
         return apiLayerToPhysicalLayerShared[apiLayerId];

@@ -40,6 +40,12 @@ void launchSum(DATA_TYPE *dest_d, DATA_TYPE *source_d_pd[], uint32_t numInstance
 }
 
 template void launchSum<half>(half *dest, half *source_d_pd[], uint32_t numInstances, uint64_t numElements, Stream stream);
+template void launchSum<__nv_bfloat16>(
+    __nv_bfloat16 *dest, __nv_bfloat16 *source_d_pd[], uint32_t numInstances, uint64_t numElements, Stream stream);
+template void launchSum<__nv_fp8_e4m3>(
+    __nv_fp8_e4m3 *dest, __nv_fp8_e4m3 *source_d_pd[], uint32_t numInstances, uint64_t numElements, Stream stream);
+template void launchSum<__nv_fp8_e5m2>(
+    __nv_fp8_e5m2 *dest, __nv_fp8_e5m2 *source_d_pd[], uint32_t numInstances, uint64_t numElements, Stream stream);
 template void launchSum<float>(float *dest, float *source_d_pd[], uint32_t numInstances, uint64_t numElements, Stream stream);
 template void launchSum<double>(double *dest, double *source_d_pd[], uint32_t numInstances, uint64_t numElements, Stream stream);
 template void launchSum<int8_t>(int8_t *dest, int8_t *source_d_pd[], uint32_t numInstances, uint64_t numElements, Stream stream);

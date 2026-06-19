@@ -14,6 +14,8 @@ _CORE_FLAT_LOSSES = [
     "HuberLoss",
     "SoftTargetCrossEntropy",
     "KLDivLoss",
+    "QuantileLoss",
+    "PinballLoss",
 ]
 
 _DOMAIN_LOSSES = {

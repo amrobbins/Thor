@@ -166,8 +166,8 @@ TEST(CustomLossApi, RejectsSavingNonSerializableLossExpression) {
 
 TEST(BinaryCrossEntropyApi, PublicBuilderBacksRawLossWithCustomLoss) {
     Network network("bce_backed_by_custom_loss");
-    Tensor predictions(DataType::FP32, {1});
-    Tensor labels(DataType::FP32, {1});
+    Tensor predictions(DataType::FP32, {100});
+    Tensor labels(DataType::FP32, {100});
 
     BinaryCrossEntropy bce = BinaryCrossEntropy::Builder()
                                  .network(network)
@@ -179,7 +179,7 @@ TEST(BinaryCrossEntropyApi, PublicBuilderBacksRawLossWithCustomLoss) {
 
     ASSERT_TRUE(bce.isInitialized());
     ASSERT_EQ(bce.getLoss().getDataType(), DataType::FP32);
-    ASSERT_EQ(bce.getLoss().getDimensions(), vector<uint64_t>({1}));
+    ASSERT_EQ(bce.getLoss().getDimensions(), vector<uint64_t>({100}));
 
     bool foundCustomLoss = false;
     bool foundRawBinaryCrossEntropy = false;
@@ -195,8 +195,8 @@ TEST(BinaryCrossEntropyApi, PublicBuilderBacksRawLossWithCustomLoss) {
 
 TEST(MAEApi, PublicBuilderBacksRawLossWithCustomLoss) {
     Network network("mae_backed_by_custom_loss");
-    Tensor predictions(DataType::FP32, {3});
-    Tensor labels(DataType::FP32, {3});
+    Tensor predictions(DataType::FP32, {100});
+    Tensor labels(DataType::FP32, {100});
 
     MAE mae = MAE::Builder()
                                 .network(network)
@@ -208,7 +208,7 @@ TEST(MAEApi, PublicBuilderBacksRawLossWithCustomLoss) {
 
     ASSERT_TRUE(mae.isInitialized());
     ASSERT_EQ(mae.getLoss().getDataType(), DataType::FP32);
-    ASSERT_EQ(mae.getLoss().getDimensions(), vector<uint64_t>({3}));
+    ASSERT_EQ(mae.getLoss().getDimensions(), vector<uint64_t>({100}));
 
     bool foundCustomLoss = false;
     bool foundRawMAE = false;
@@ -223,8 +223,8 @@ TEST(MAEApi, PublicBuilderBacksRawLossWithCustomLoss) {
 
 TEST(MSEApi, PublicBuilderBacksRawLossWithCustomLoss) {
     Network network("mse_backed_by_custom_loss");
-    Tensor predictions(DataType::FP32, {3});
-    Tensor labels(DataType::FP32, {3});
+    Tensor predictions(DataType::FP32, {100});
+    Tensor labels(DataType::FP32, {100});
 
     MSE mse = MSE::Builder()
                               .network(network)
@@ -236,7 +236,7 @@ TEST(MSEApi, PublicBuilderBacksRawLossWithCustomLoss) {
 
     ASSERT_TRUE(mse.isInitialized());
     ASSERT_EQ(mse.getLoss().getDataType(), DataType::FP32);
-    ASSERT_EQ(mse.getLoss().getDimensions(), vector<uint64_t>({3}));
+    ASSERT_EQ(mse.getLoss().getDimensions(), vector<uint64_t>({100}));
 
     bool foundCustomLoss = false;
     bool foundRawMSE = false;

@@ -576,6 +576,7 @@ FullyConnected FullyConnected::Builder::build() {
         .trainable(true);
     if (_weightsOptimizer != nullptr)
         weightsParameterBuilder.optimizer(_weightsOptimizer);
+    weightsParameterBuilder.constraints(_weightsConstraints);
     fullyConnected.addParameter(std::make_shared<ParameterSpecification>(weightsParameterBuilder.build()));
 
     if (fullyConnected.hasBias) {
@@ -587,6 +588,7 @@ FullyConnected FullyConnected::Builder::build() {
             .trainable(true);
         if (_biasesOptimizer != nullptr)
             biasesParameterBuilder.optimizer(_biasesOptimizer);
+        biasesParameterBuilder.constraints(_biasesConstraints);
         fullyConnected.addParameter(std::make_shared<ParameterSpecification>(biasesParameterBuilder.build()));
     }
 

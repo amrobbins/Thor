@@ -17,7 +17,9 @@
 
 #include <stdio.h>
 #include "cuda.h"
+#include "cuda_bf16.h"
 #include "cuda_fp16.h"
+#include "cuda_fp8.h"
 #include "cuda_runtime.h"
 #include "gtest/gtest.h"
 
@@ -43,6 +45,7 @@ inline int randomElement(set<int> &filledSet) {
     filledSet.erase(it);
     return element;
 }
+
 
 class BackpropDescriptorSinkLayer : public ThorImplementation::Layer {
    public:
@@ -85,6 +88,100 @@ class BackpropDescriptorSinkLayer : public ThorImplementation::Layer {
         (void)stream;
     }
 };
+
+
+template <typename T>
+struct TensorFanoutSumDTypeTraits;
+
+template <>
+struct TensorFanoutSumDTypeTraits<__nv_bfloat16> {
+    static constexpr DataType dtype = DataType::BF16;
+};
+
+template <>
+struct TensorFanoutSumDTypeTraits<__nv_fp8_e4m3> {
+    static constexpr DataType dtype = DataType::FP8_E4M3;
+};
+
+template <>
+struct TensorFanoutSumDTypeTraits<__nv_fp8_e5m2> {
+    static constexpr DataType dtype = DataType::FP8_E5M2;
+};
+
+template <typename T>
+void writeTensorFanoutSumValues(Tensor &tensor, const std::vector<float> &values) {
+    T *mem = reinterpret_cast<T *>(tensor.getMemPtr());
+    for (uint32_t i = 0; i < values.size(); ++i) {
+        mem[i] = T(values[i]);
+    }
+}
+
+template <typename T>
+float readTensorFanoutSumValue(const Tensor &tensor, uint32_t index) {
+    const T *mem = reinterpret_cast<const T *>(tensor.getMemPtr());
+    return static_cast<float>(mem[index]);
+}
+
+template <typename T>
+void expectTensorFanoutSumsBackwardErrorsForDType() {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+
+    const std::vector<unsigned long> dimensions{2, 4};
+    const uint32_t elementCount = 8;
+    TensorDescriptor descriptor(TensorFanoutSumDTypeTraits<T>::dtype, dimensions);
+
+    Tensor firstGradientCpu(cpuPlacement, descriptor);
+    Tensor secondGradientCpu(cpuPlacement, descriptor);
+    Tensor summedGradientCpu(cpuPlacement, descriptor);
+
+    const std::vector<float> firstGradient{1.0f, -2.0f, 3.0f, -4.0f, 5.0f, -6.0f, 7.0f, -8.0f};
+    const std::vector<float> secondGradient{-3.0f, 5.0f, -1.0f, 8.0f, -2.0f, 10.0f, -4.0f, 12.0f};
+    writeTensorFanoutSumValues<T>(firstGradientCpu, firstGradient);
+    writeTensorFanoutSumValues<T>(secondGradientCpu, secondGradient);
+
+    auto input = make_shared<NetworkInput>(gpuPlacement, TensorFanoutSumDTypeTraits<T>::dtype, dimensions);
+    auto upstream = make_shared<NoOpLayer>();
+    auto fanout = make_shared<TensorFanout>();
+    auto firstSink = make_shared<BackpropDescriptorSinkLayer>();
+    auto secondSink = make_shared<BackpropDescriptorSinkLayer>();
+
+    input->connectToNextLayer(upstream.get());
+    upstream->connectToNextLayer(fanout.get());
+    fanout->connectToNextLayer(firstSink.get());
+    fanout->connectToNextLayer(secondSink.get());
+
+    std::vector<shared_ptr<Layer>> layers{input, upstream, fanout, firstSink, secondSink};
+    LayerTestHelper::initializeNetwork(layers);
+
+    std::vector<std::optional<Tensor>> errorInputs = fanout->getErrorInputs();
+    std::vector<std::optional<Tensor>> errorOutputs = fanout->getErrorOutputs();
+    ASSERT_EQ(errorInputs.size(), 2U);
+    ASSERT_EQ(errorOutputs.size(), 1U);
+    ASSERT_TRUE(errorInputs[0].has_value());
+    ASSERT_TRUE(errorInputs[1].has_value());
+    ASSERT_TRUE(errorOutputs[0].has_value());
+
+    std::vector<Stream> streams = fanout->getStreams();
+    ASSERT_EQ(streams.size(), 2U);
+    errorInputs[0].value().copyFromAsync(firstGradientCpu, streams[0]);
+    errorInputs[1].value().copyFromAsync(secondGradientCpu, streams[1]);
+
+    fanout->backward(errorInputs[0], static_cast<uint32_t>(dimensions[0]));
+    fanout->backward(errorInputs[1], static_cast<uint32_t>(dimensions[0]));
+
+    summedGradientCpu.copyFromAsync(errorOutputs[0].value(), streams[0]);
+    cudaError_t cudaStatus = cudaStreamSynchronize(streams[0].getStream());
+    ASSERT_EQ(cudaStatus, cudaSuccess);
+
+    for (uint32_t i = 0; i < elementCount; ++i) {
+        const float expected = firstGradient[i] + secondGradient[i];
+        const float actual = readTensorFanoutSumValue<T>(summedGradientCpu, i);
+        ASSERT_NEAR(actual, expected, 1.0e-3f) << "element " << i;
+    }
+
+    LayerTestHelper::tearDownNetwork(layers);
+}
 
 TEST(InOut, NoOpWorks) {
     srand(time(NULL));
@@ -686,6 +783,19 @@ TEST(TensorFanout, CreatesFanout) {
     ASSERT_EQ(tensorFanout->getStreams().size(), 2U);
 
     LayerTestHelper::tearDownNetwork(layers);
+}
+
+
+TEST(TensorFanout, BackwardSumsBF16Errors) {
+    expectTensorFanoutSumsBackwardErrorsForDType<__nv_bfloat16>();
+}
+
+TEST(TensorFanout, BackwardSumsFp8E4M3Errors) {
+    expectTensorFanoutSumsBackwardErrorsForDType<__nv_fp8_e4m3>();
+}
+
+TEST(TensorFanout, BackwardSumsFp8E5M2Errors) {
+    expectTensorFanoutSumsBackwardErrorsForDType<__nv_fp8_e5m2>();
 }
 
 inline void computeIndex(int flatIndex, int index[], int numDimensions, long stridePerDimension[]) {

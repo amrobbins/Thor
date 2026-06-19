@@ -1,7 +1,7 @@
 #pragma once
 
-#include <optional>
 #include <algorithm>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "DeepLearning/Implementation/Layers/Optimizers/Optimizer.h"
+#include "DeepLearning/Implementation/Parameter/ParameterConstraint.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
 namespace ThorImplementation {
@@ -78,28 +79,34 @@ class PhysicalParameter {
 
     virtual ~PhysicalParameter() = default;
 
-    PhysicalParameter(std::string name, bool trainable);  // Later add constraint here
-    PhysicalParameter(std::string name,
-                      bool trainable,
-                      const std::vector<uint64_t> &shape,
-                      const DataType dtype);  // Later add constraint here
+    PhysicalParameter(std::string name, bool trainable);
+    PhysicalParameter(std::string name, bool trainable, const std::vector<uint64_t> &shape, const DataType dtype);
 
     virtual void compileStorage(const StorageContext &context);
     virtual void compileStorage(const Tensor &inputTensor);
     void compileInitializer(uint64_t fanIn, uint64_t fanOut);
     void compileInitializer();
-    virtual void compileOptimizer(const std::optional<Stream> &gradientUpdateStream, bool inferenceOnly, bool materializeDenseGradient = true);
+    virtual void compileOptimizer(const std::optional<Stream> &gradientUpdateStream,
+                                  bool inferenceOnly,
+                                  bool materializeDenseGradient = true);
 
     virtual void createStorage(const StorageContext &context);
-    static Tensor allocateStorage(const TensorPlacement placement,
-                                  const std::vector<uint64_t> &shape,
-                                  const DataType dtype);
+    static Tensor allocateStorage(const TensorPlacement placement, const std::vector<uint64_t> &shape, const DataType dtype);
     void clearStorage();
 
     void initialize(Stream initStream);
 
     // Parameters are not responsible for computing output gradient, expressions compute the gradients.
     bool applyGradient(uint32_t batchSize);
+    bool applyConstraintsAfterExternalUpdate();
+
+    void addConstraint(std::shared_ptr<ParameterConstraint> constraint);
+    void setConstraints(const std::vector<std::shared_ptr<ParameterConstraint>> &constraints);
+    std::vector<std::shared_ptr<ParameterConstraint>> getConstraints() const;
+    bool hasConstraints() const;
+    [[nodiscard]] bool supportsDenseExpressionConstraintFusion() const;
+    [[nodiscard]] Expression applyDenseExpressionConstraints(const Expression &unconstrainedParameterUpdate,
+                                                             const std::string &namePrefix) const;
 
     bool hasOptimizer();
     void setOptimizer(std::optional<std::shared_ptr<Optimizer>> newOptimizer);
@@ -145,6 +152,10 @@ class PhysicalParameter {
 
     std::optional<std::vector<uint64_t>> shape = std::nullopt;
     std::optional<DataType> dtype;
+
+    std::vector<std::shared_ptr<ParameterConstraint>> constraints;
+
+    bool applyConstraints();
 };
 
 }  // namespace ThorImplementation

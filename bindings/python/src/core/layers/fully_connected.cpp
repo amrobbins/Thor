@@ -2,6 +2,7 @@
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/vector.h>
 
 #include <memory>
 #include <exception>
@@ -12,6 +13,7 @@
 #include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Parameter/ParameterConstraint.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 #include "Utilities/Expression/Expression.h"
 
@@ -90,6 +92,51 @@ void applyPythonEpilogueInputs(FullyConnected::Builder &builder, const nb::objec
     }
 }
 
+
+std::vector<std::shared_ptr<ParameterConstraint>> constraintsFromPython(const nb::object& obj, const char* argumentName) {
+    std::vector<std::shared_ptr<ParameterConstraint>> constraints;
+    if (obj.is_none()) {
+        return constraints;
+    }
+
+    auto appendConstraint = [&constraints, argumentName](const nb::handle& handle) {
+        std::shared_ptr<ParameterConstraint> constraint;
+        try {
+            constraint = nb::cast<std::shared_ptr<ParameterConstraint>>(handle);
+        } catch (const std::exception&) {
+            throw nb::type_error((std::string(argumentName) + " must contain thor.ParameterConstraint instances").c_str());
+        }
+        if (constraint == nullptr) {
+            throw nb::value_error((std::string(argumentName) + " may not contain None").c_str());
+        }
+        constraints.push_back(constraint->clone());
+    };
+
+    try {
+        std::shared_ptr<ParameterConstraint> single = nb::cast<std::shared_ptr<ParameterConstraint>>(obj);
+        if (single != nullptr) {
+            constraints.push_back(single->clone());
+            return constraints;
+        }
+    } catch (const std::exception&) {
+    }
+
+    if (!nb::isinstance<nb::sequence>(obj) || nb::isinstance<nb::str>(obj)) {
+        throw nb::type_error((std::string(argumentName) + " must be a thor.ParameterConstraint, a sequence of constraints, or None").c_str());
+    }
+
+    nb::sequence seq = nb::cast<nb::sequence>(obj);
+    constraints.reserve(nb::len(seq));
+    for (nb::handle item : seq) {
+        appendConstraint(item);
+    }
+    return constraints;
+}
+
+void applyConstraints(FullyConnected::Builder& builder, const nb::object& weightsConstraints, const nb::object& biasesConstraints) {
+    builder.weightsConstraints(constraintsFromPython(weightsConstraints, "weights_constraints"));
+    builder.biasesConstraints(constraintsFromPython(biasesConstraints, "biases_constraints"));
+}
 void applyPythonEpilogue(FullyConnected::Builder &builder, const nb::object &epilogue) {
     if (epilogue.is_none()) {
         return;
@@ -119,7 +166,9 @@ void bind_fully_connected(nb::module_ &m) {
            shared_ptr<Optimizer> biases_optimizer,
            nb::object epilogue,
            nb::object epilogue_inputs,
-           bool preserve_prefix_dimensions) {
+           bool preserve_prefix_dimensions,
+           nb::object weights_constraints,
+           nb::object biases_constraints) {
             if (numOutputFeatures == 0) {
                 throw nb::value_error("FullyConnected instance: num_output_features must be > 0.");
             }
@@ -141,6 +190,7 @@ void bind_fully_connected(nb::module_ &m) {
                 builder.biasInitializer(biases_initializer);
             builder.weightsOptimizer(weights_optimizer);
             builder.biasesOptimizer(biases_optimizer);
+            applyConstraints(builder, weights_constraints, biases_constraints);
 
             FullyConnected built = builder.build();
 
@@ -157,7 +207,9 @@ void bind_fully_connected(nb::module_ &m) {
         "biases_optimizer"_a.none() = nb::none(),
         "epilogue"_a.none() = nb::none(),
         "epilogue_inputs"_a.none() = nb::none(),
-        "preserve_prefix_dimensions"_a = false);
+        "preserve_prefix_dimensions"_a = false,
+        "weights_constraints"_a.none() = nb::none(),
+        "biases_constraints"_a.none() = nb::none());
 
     fully_connected.def_static(
         "epilogue_input",

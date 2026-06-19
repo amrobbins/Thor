@@ -26,15 +26,20 @@ void bind_binary_cross_entropy(nb::module_ &losses) {
            DataType loss_data_type,
            bool reportsElementwiseLoss,
            std::optional<float> loss_weight) {
-            if (predictions.getDimensions().size() != 1 || predictions.getDimensions()[0] != 1) {
+            if (predictions.getDimensions().size() != 1) {
                 string error_message =
-                    "BinaryCrossEntropy instance: predictions must be a 1 dimensional tensor of size one but predictions is " +
+                    "BinaryCrossEntropy instance: predictions must be a 1 dimensional tensor but predictions is " +
                     predictions.getDescriptorString();
                 throw nb::value_error(error_message.c_str());
             }
-            if (labels.getDimensions().size() != 1 || labels.getDimensions()[0] != 1) {
-                string error_message = "BinaryCrossEntropy instance: labels must be a 1 dimensional tensor of size one but labels is " +
+            if (labels.getDimensions().size() != 1) {
+                string error_message = "BinaryCrossEntropy instance: labels must be a 1 dimensional tensor but labels is " +
                                        labels.getDescriptorString();
+                throw nb::value_error(error_message.c_str());
+            }
+            if (predictions.getDimensions() != labels.getDimensions()) {
+                string error_message = "BinaryCrossEntropy instance: predictions and labels dimensions must match. predictions tensor is " +
+                                       predictions.getDescriptorString() + "; labels tensor is " + labels.getDescriptorString() + ".";
                 throw nb::value_error(error_message.c_str());
             }
             if (loss_data_type != DataType::FP16 && loss_data_type != DataType::FP32) {

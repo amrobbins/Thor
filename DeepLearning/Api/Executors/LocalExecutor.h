@@ -129,8 +129,8 @@ class LocalExecutor::Builder {
         return *this;
     }
 
-    LocalExecutor::Builder trainingProgram(std::optional<TrainingProgram> trainingProgram) {
-        THOR_THROW_IF_FALSE(!this->trainingProgram_.has_value());
+    LocalExecutor::Builder trainingProgram(std::shared_ptr<TrainingProgram> trainingProgram) {
+        THOR_THROW_IF_FALSE(this->trainingProgram_ == nullptr);
         this->trainingProgram_ = std::move(trainingProgram);
         return *this;
     }
@@ -179,7 +179,7 @@ class LocalExecutor::Builder {
     Network* _network;
     std::shared_ptr<Loader> _loader;
     std::shared_ptr<Optimizer> _optimizer;
-    std::optional<TrainingProgram> trainingProgram_;
+    std::shared_ptr<TrainingProgram> trainingProgram_ = nullptr;
     std::optional<std::vector<std::shared_ptr<TrainingObserver>>> observers_;
     bool statsEnabled_ = true;
     double statsIntervalSeconds_ = 10.0;

@@ -13,10 +13,12 @@ namespace Thor {
 
 StepExecutable::StepExecutable(const TrainingStep& step, PlacedNetwork& placedNetwork)
     : name(step.getName()),
-      lossRoots(step.getLossRoots()),
+      lossRoots(step.getActiveLossRoots()),
       resolvedLossRoots(placedNetwork.resolveApiTensors(lossRoots)),
+      activePhaseNames(step.getActivePhaseNames()),
       optimizer(step.getOptimizer()),
-      updateParameterReferences(step.getUpdateParameters()),
+      updateParameterReferences(step.getUpdateParameters().empty() ? placedNetwork.getTrainableParameterReferences(/*trainingEnabledOnly=*/true)
+                                                                 : step.getUpdateParameters()),
       resolvedUpdateParameters(placedNetwork.resolveParameterReferences(updateParameterReferences)),
       inputBindings(step.getInputBindings()),
       repeatCount(step.getRepeatCount()),
@@ -65,6 +67,9 @@ void StepExecutable::validate() const {
     }
     if (lossRoots.size() != resolvedLossRoots.size()) {
         throw std::runtime_error("StepExecutable resolved loss-root count does not match logical loss-root count.");
+    }
+    if (activePhaseNames.empty()) {
+        throw std::runtime_error("StepExecutable requires at least one active TrainingPhase.");
     }
     if (updateParameterReferences.size() != resolvedUpdateParameters.size()) {
         throw std::runtime_error("StepExecutable resolved update parameter count does not match logical reference count.");
@@ -128,6 +133,7 @@ json StepExecutable::architectureJson() const {
     }
 
     j["resolved_loss_root_count"] = resolvedLossRoots.size();
+    j["active_phase_names"] = activePhaseNames;
 
     j["required_batch_input_names"] = requiredBatchInputNames;
 

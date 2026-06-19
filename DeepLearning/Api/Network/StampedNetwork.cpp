@@ -1,11 +1,57 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Network/StampedNetwork.h"
 #include "DeepLearning/Implementation/Layers/TrainableLayer.h"
+#include "DeepLearning/Implementation/Layers/Loss.h"
 
 #include <limits>
+#include <stdexcept>
+#include <algorithm>
 #include <optional>
 
 namespace ThorImplementation {
+
+void StampedNetwork::setActiveTrainingLossRoots(const std::vector<Thor::Tensor>& activeRawLossRoots) {
+    for (const Thor::Tensor& rawLossRoot : activeRawLossRoots) {
+        THOR_THROW_IF_FALSE(rawLossRoot.isInitialized());
+    }
+
+    for (const auto& [apiLayerId, physicalLayer] : apiLayerToPhysicalLayerShared) {
+        (void)apiLayerId;
+        std::shared_ptr<ThorImplementation::Loss> physicalLoss = std::dynamic_pointer_cast<ThorImplementation::Loss>(physicalLayer);
+        if (physicalLoss != nullptr) {
+            physicalLoss->setTrainingActive(false);
+        }
+    }
+
+    for (const Thor::Tensor& rawLossRoot : activeRawLossRoots) {
+        auto drivingLayerIt = apiTensorToPhysicalDrivingLayerShared.find(rawLossRoot);
+        if (drivingLayerIt == apiTensorToPhysicalDrivingLayerShared.end()) {
+            throw std::runtime_error("Active raw loss tensor with original id " + std::to_string(rawLossRoot.getOriginalId()) +
+                                     " is not present in the stamped network.");
+        }
+        std::shared_ptr<ThorImplementation::Loss> physicalLoss =
+            std::dynamic_pointer_cast<ThorImplementation::Loss>(drivingLayerIt->second);
+        if (physicalLoss == nullptr) {
+            throw std::runtime_error("Active raw loss tensor with original id " + std::to_string(rawLossRoot.getOriginalId()) +
+                                     " is not driven by a physical loss layer.");
+        }
+        physicalLoss->setTrainingActive(true);
+    }
+}
+
+std::vector<uint64_t> StampedNetwork::getActiveTrainingRawLossOriginalIdsForDebug() const {
+    std::vector<uint64_t> result;
+    for (const auto& [apiTensor, physicalLayer] : apiTensorToPhysicalDrivingLayerShared) {
+        std::shared_ptr<ThorImplementation::Loss> physicalLoss = std::dynamic_pointer_cast<ThorImplementation::Loss>(physicalLayer);
+        if (physicalLoss != nullptr && physicalLoss->isTrainingActive()) {
+            result.push_back(apiTensor.getOriginalId());
+        }
+    }
+    std::sort(result.begin(), result.end());
+    result.erase(std::unique(result.begin(), result.end()), result.end());
+    return result;
+}
+
 
 void StampedNetwork::initialize(bool initializeWeights, bool copyWeightsFromOtherStamp, StampedNetwork *otherStamp) {
     // First, ensure the shared pointers and raw pointers match

@@ -120,6 +120,7 @@ class Network {
     void setDefaultOptimizer(std::shared_ptr<Optimizer> optimizer);
     bool allTrainingEnabledParametersHaveOptimizers() const;
     std::vector<Tensor> getLossRootTensors() const;
+    std::vector<Tensor> getRawLossTensorsForTrainingRoots(const std::vector<Tensor>& lossRoots) const;
     void freezeTraining();
     void unfreezeTraining();
 

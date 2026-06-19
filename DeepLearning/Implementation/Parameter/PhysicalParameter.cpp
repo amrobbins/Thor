@@ -1,6 +1,7 @@
 #include <optional>
 #include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
 #include "DeepLearning/Implementation/Initializers/Initializer.h"
+#include "DeepLearning/Implementation/Parameter/ParameterConstraint.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
 using namespace std;
@@ -61,6 +62,80 @@ bool PhysicalParameter::applyGradient(uint32_t batchSize) {
         return false;
     THOR_THROW_IF_FALSE(optimizer != nullptr);
     optimizer->updateWeights(batchSize);
+    applyConstraints();
+    return true;
+}
+
+bool PhysicalParameter::applyConstraintsAfterExternalUpdate() {
+    THOR_THROW_IF_FALSE(!needExpressionRecompile);
+    if (!isTrainingEnabled())
+        return false;
+    return applyConstraints();
+}
+
+void PhysicalParameter::addConstraint(std::shared_ptr<ParameterConstraint> constraint) {
+    if (constraint == nullptr) {
+        throw std::runtime_error("Cannot add a null ParameterConstraint to parameter " + name + ".");
+    }
+    constraints.push_back(constraint->clone());
+}
+
+void PhysicalParameter::setConstraints(const std::vector<std::shared_ptr<ParameterConstraint>>& constraints) {
+    this->constraints.clear();
+    this->constraints.reserve(constraints.size());
+    for (const auto& constraint : constraints) {
+        addConstraint(constraint);
+    }
+}
+
+std::vector<std::shared_ptr<ParameterConstraint>> PhysicalParameter::getConstraints() const {
+    std::vector<std::shared_ptr<ParameterConstraint>> result;
+    result.reserve(constraints.size());
+    for (const auto& constraint : constraints) {
+        THOR_THROW_IF_FALSE(constraint != nullptr);
+        result.push_back(constraint->clone());
+    }
+    return result;
+}
+
+bool PhysicalParameter::hasConstraints() const { return !constraints.empty(); }
+
+bool PhysicalParameter::supportsDenseExpressionConstraintFusion() const {
+    for (const auto& constraint : constraints) {
+        THOR_THROW_IF_FALSE(constraint != nullptr);
+        if (!constraint->supportsDenseExpressionFusion()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+Expression PhysicalParameter::applyDenseExpressionConstraints(const Expression& unconstrainedParameterUpdate,
+                                                              const std::string& namePrefix) const {
+    if (!supportsDenseExpressionConstraintFusion()) {
+        throw std::runtime_error("PhysicalParameter " + name + " has at least one constraint that cannot be fused into a dense optimizer expression.");
+    }
+
+    Expression constrainedUpdate = unconstrainedParameterUpdate;
+    for (uint64_t i = 0; i < constraints.size(); ++i) {
+        const auto& constraint = constraints[i];
+        THOR_THROW_IF_FALSE(constraint != nullptr);
+        constrainedUpdate = constraint->applyDenseExpressionConstraint(constrainedUpdate,
+                                                                       namePrefix + "constraint_" + std::to_string(i) + "__");
+    }
+    return constrainedUpdate;
+}
+
+bool PhysicalParameter::applyConstraints() {
+    if (constraints.empty()) {
+        return false;
+    }
+    THOR_THROW_IF_FALSE(storage.has_value());
+    THOR_THROW_IF_FALSE(gradientUpdateStream.has_value());
+    for (const auto& constraint : constraints) {
+        THOR_THROW_IF_FALSE(constraint != nullptr);
+        constraint->apply(storage.value(), gradientUpdateStream.value());
+    }
     return true;
 }
 

@@ -189,3 +189,38 @@ def test_fully_connected_rejects_wrong_epilogue_type():
 
     with pytest.raises(TypeError, match="epilogue must be"):
         thor.layers.FullyConnected(n, x, 8, True, epilogue=123)
+
+
+def test_fully_connected_serializes_weight_constraints():
+    n = _net()
+    x = _input_tensor(n, 16, thor.DataType.fp32)
+
+    fc = thor.layers.FullyConnected(
+        n,
+        x,
+        8,
+        True,
+        activation=None,
+        weights_constraints=thor.NonNegativeParameterConstraint(),
+    )
+
+    assert isinstance(fc, thor.layers.FullyConnected)
+    arch = _only_layer_architecture(n, "fully_connected")
+    weight_constraints = arch["parameters"]["weights"].get("constraints", [])
+    assert len(weight_constraints) == 1
+    assert weight_constraints[0]["constraint_type"] == "non_negative"
+
+
+def test_fully_connected_rejects_invalid_weight_constraint():
+    n = _net()
+    x = _input_tensor(n, 16, thor.DataType.fp32)
+
+    with pytest.raises(TypeError, match="weights_constraints"):
+        thor.layers.FullyConnected(
+            n,
+            x,
+            8,
+            True,
+            activation=None,
+            weights_constraints=123,
+        )

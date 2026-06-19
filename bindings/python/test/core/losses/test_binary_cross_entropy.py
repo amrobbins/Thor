@@ -21,6 +21,16 @@ def test_binary_cross_entropy_constructs_defaults():
     assert isinstance(loss, thor.losses.BinaryCrossEntropy)
 
 
+def test_binary_cross_entropy_constructs_vector_width_100():
+    n = _net()
+    preds = _tensor_1d(100, thor.DataType.fp32)
+    labels = _tensor_1d(100, thor.DataType.fp32)
+
+    loss = thor.losses.BinaryCrossEntropy(n, preds, labels)
+    assert loss is not None
+    assert isinstance(loss, thor.losses.BinaryCrossEntropy)
+
+
 def test_binary_cross_entropy_constructs_fp16():
     n = _net()
     preds = _tensor_1d(1, thor.DataType.fp16)
@@ -50,29 +60,30 @@ def test_binary_cross_entropy_constructs_reports_elementwise():
     assert isinstance(loss, thor.losses.BinaryCrossEntropy)
 
 
-def test_binary_cross_entropy_rejects_predictions_not_1d_size_1():
+def test_binary_cross_entropy_rejects_predictions_not_1d():
     n = _net()
     labels = _tensor_1d(1, thor.DataType.fp32)
 
-    preds = _tensor_1d(2, thor.DataType.fp32)
-    with pytest.raises(ValueError, match=r"predictions must be a 1 dimensional tensor of size one"):
-        thor.losses.BinaryCrossEntropy(n, preds, labels)
-
     preds = thor.Tensor([1, 1], thor.DataType.fp32)
-    with pytest.raises(ValueError, match=r"predictions must be a 1 dimensional tensor of size one"):
+    with pytest.raises(ValueError, match=r"predictions must be a 1 dimensional tensor"):
         thor.losses.BinaryCrossEntropy(n, preds, labels)
 
 
-def test_binary_cross_entropy_rejects_labels_not_1d_size_1():
+def test_binary_cross_entropy_rejects_labels_not_1d():
     n = _net()
     preds = _tensor_1d(1, thor.DataType.fp32)
 
-    labels = _tensor_1d(2, thor.DataType.fp32)
-    with pytest.raises(ValueError, match=r"labels must be a 1 dimensional tensor of size one"):
+    labels = thor.Tensor([1, 1], thor.DataType.fp32)
+    with pytest.raises(ValueError, match=r"labels must be a 1 dimensional tensor"):
         thor.losses.BinaryCrossEntropy(n, preds, labels)
 
-    labels = thor.Tensor([1, 1], thor.DataType.fp32)
-    with pytest.raises(ValueError, match=r"labels must be a 1 dimensional tensor of size one"):
+
+def test_binary_cross_entropy_rejects_mismatched_label_dimensions():
+    n = _net()
+    preds = _tensor_1d(1, thor.DataType.fp32)
+    labels = _tensor_1d(2, thor.DataType.fp32)
+
+    with pytest.raises(ValueError, match=r"predictions and labels dimensions must match"):
         thor.losses.BinaryCrossEntropy(n, preds, labels)
 
 

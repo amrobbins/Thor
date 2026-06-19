@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "DeepLearning/Api/Initializers/Initializer.h"
+#include "DeepLearning/Api/Parameter/ParameterConstraint.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 #include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
 #include <optional>
@@ -29,13 +30,15 @@ class ParameterSpecification {
                            std::shared_ptr<Initializer> initializer,
                            bool trainable = true,
                            std::shared_ptr<Optimizer> optimizer = nullptr,
-                           bool trainingInitiallyEnabled = true);
+                           bool trainingInitiallyEnabled = true,
+                           std::vector<std::shared_ptr<ParameterConstraint>> constraints = {});
     ParameterSpecification(std::string name,
                            StorageContextStorageFactory createStorage,
                            std::shared_ptr<Initializer> initializer,
                            bool trainable = true,
                            std::shared_ptr<Optimizer> optimizer = nullptr,
-                           bool trainingInitiallyEnabled = true);
+                           bool trainingInitiallyEnabled = true,
+                           std::vector<std::shared_ptr<ParameterConstraint>> constraints = {});
 
     virtual ~ParameterSpecification() = default;
 
@@ -50,6 +53,11 @@ class ParameterSpecification {
     bool isTrainable() const;
     bool isTrainingInitiallyEnabled() const;
     void setTrainingInitiallyEnabled(bool enabled);
+
+    void addConstraint(std::shared_ptr<ParameterConstraint> constraint);
+    void setConstraints(const std::vector<std::shared_ptr<ParameterConstraint>>& constraints);
+    [[nodiscard]] std::vector<std::shared_ptr<ParameterConstraint>> getConstraints() const;
+    [[nodiscard]] bool hasConstraints() const;
 
     bool hasOptimizer() const;
     std::shared_ptr<Optimizer> getOptimizer();
@@ -86,6 +94,7 @@ class ParameterSpecification {
     bool trainable = false;
     std::shared_ptr<Optimizer> optimizer = nullptr;
     bool trainingInitiallyEnabled = true;
+    std::vector<std::shared_ptr<ParameterConstraint>> constraints;
 
     // A parameter uses either storageContextCreateStorage function to determine attributes at layer compile time
     // -- OR --
@@ -111,6 +120,8 @@ class ParameterSpecification::Builder {
     virtual ParameterSpecification::Builder& trainingInitiallyEnabled(const bool enabled);
     virtual ParameterSpecification::Builder& optimizer(std::shared_ptr<Optimizer>& _optimizerOverride);
     virtual ParameterSpecification::Builder& optimizer(std::shared_ptr<Optimizer>&& _optimizerOverride);
+    virtual ParameterSpecification::Builder& constraint(std::shared_ptr<ParameterConstraint> _constraint);
+    virtual ParameterSpecification::Builder& constraints(const std::vector<std::shared_ptr<ParameterConstraint>>& _constraints);
     virtual ParameterSpecification::Builder& createStorage(StorageContextStorageFactory _storageContextCreateStorage);
     virtual ParameterSpecification::Builder& shape(const std::vector<uint64_t>& _shape);
     virtual ParameterSpecification::Builder& dtype(const DataType _dtype);
@@ -121,6 +132,7 @@ class ParameterSpecification::Builder {
     std::optional<bool> _trainable = std::nullopt;
     std::optional<bool> _trainingInitiallyEnabled = std::nullopt;
     std::shared_ptr<Optimizer> _optimizerOverride = nullptr;
+    std::vector<std::shared_ptr<ParameterConstraint>> _constraints;
     StorageContextStorageFactory _storageContextCreateStorage = nullptr;
     std::vector<uint64_t> _shape{};
     std::optional<DataType> _dtype;

@@ -54,8 +54,11 @@ class CapturingExecutor : public TrainingExecutor {
         lastNetwork = request.network;
         lastStatsEnabled = request.runtime.statsEnabled;
         lastMaxInFlightBatches = request.runtime.maxInFlightBatches;
-        lastHasTrainingProgram = request.trainingProgram.has_value();
-        lastTrainingProgramStepCount = request.trainingProgram.has_value() ? request.trainingProgram->getNumSteps() : 0;
+        lastHasTrainingProgram = request.trainingProgram != nullptr;
+        lastTrainingProgramStepCount = request.trainingProgram != nullptr ? request.trainingProgram->getNumSteps() : 0;
+        lastFirstStepEnabled = request.trainingProgram != nullptr && request.trainingProgram->getNumSteps() > 0
+                                   ? request.trainingProgram->getStep(0).isEnabled()
+                                   : false;
         calls += 1;
     }
 
@@ -65,6 +68,7 @@ class CapturingExecutor : public TrainingExecutor {
     uint64_t lastMaxInFlightBatches = 0;
     bool lastHasTrainingProgram = false;
     uint64_t lastTrainingProgramStepCount = 0;
+    bool lastFirstStepEnabled = false;
     uint32_t calls = 0;
 };
 
@@ -102,7 +106,8 @@ TEST(Trainer, FitPassesTrainingProgramAsRunParameter) {
     auto observer = std::make_shared<NullTrainingObserver>();
 
     Tensor loss(DataType::FP32, {1});
-    TrainingProgram program({TrainingStep("step", {loss}, nullptr, {})});
+    auto step = std::make_shared<TrainingStep>("step", std::vector<Tensor>{loss}, nullptr, std::vector<ParameterReference>{});
+    auto program = std::make_shared<TrainingProgram>(std::vector<std::shared_ptr<TrainingStep>>{step});
 
     Trainer trainer = Trainer::Builder()
                           .network(network)
@@ -118,6 +123,37 @@ TEST(Trainer, FitPassesTrainingProgramAsRunParameter) {
     EXPECT_EQ(executor->calls, 1u);
     EXPECT_TRUE(executor->lastHasTrainingProgram);
     EXPECT_EQ(executor->lastTrainingProgramStepCount, 1u);
+}
+
+
+
+TEST(Trainer, FitSeesTrainingProgramMutationsBetweenCalls) {
+    Network network("trainer-test");
+    auto loader = std::make_shared<FakeLoader>();
+    auto executor = std::make_shared<CapturingExecutor>();
+    auto observer = std::make_shared<NullTrainingObserver>();
+
+    Tensor loss(DataType::FP32, {1});
+    auto step = std::make_shared<TrainingStep>("step", std::vector<Tensor>{loss}, nullptr, std::vector<ParameterReference>{});
+    auto program = std::make_shared<TrainingProgram>(std::vector<std::shared_ptr<TrainingStep>>{step});
+
+    Trainer trainer = Trainer::Builder()
+                          .network(network)
+                          .loader(loader)
+                          .trainingProgram(program)
+                          .executor(executor)
+                          .observer(observer)
+                          .statsEnabled(false)
+                          .build();
+
+    trainer.fit(1);
+    EXPECT_EQ(executor->calls, 1u);
+    EXPECT_TRUE(executor->lastFirstStepEnabled);
+
+    step->disable();
+    trainer.fit(1);
+    EXPECT_EQ(executor->calls, 2u);
+    EXPECT_FALSE(executor->lastFirstStepEnabled);
 }
 
 TEST(Trainer, RejectsZeroEpochsAtFitTime) {

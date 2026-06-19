@@ -23,6 +23,7 @@ class StepExecutable {
     [[nodiscard]] const std::string& getName() const { return name; }
     [[nodiscard]] const std::vector<Tensor>& getLossRoots() const { return lossRoots; }
     [[nodiscard]] const std::vector<Tensor>& getResolvedLossRoots() const { return resolvedLossRoots; }
+    [[nodiscard]] const std::vector<std::string>& getActivePhaseNames() const { return activePhaseNames; }
     [[nodiscard]] std::shared_ptr<Optimizer> getOptimizer() const { return optimizer; }
     [[nodiscard]] const std::vector<ParameterReference>& getUpdateParameterReferences() const { return updateParameterReferences; }
     [[nodiscard]] const std::vector<BoundParameter>& getResolvedUpdateParameters() const { return resolvedUpdateParameters; }
@@ -43,6 +44,7 @@ class StepExecutable {
     std::string name{};
     std::vector<Tensor> lossRoots{};
     std::vector<Tensor> resolvedLossRoots{};
+    std::vector<std::string> activePhaseNames{};
     std::shared_ptr<Optimizer> optimizer = nullptr;
     std::vector<ParameterReference> updateParameterReferences{};
     std::vector<BoundParameter> resolvedUpdateParameters{};

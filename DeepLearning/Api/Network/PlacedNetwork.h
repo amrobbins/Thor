@@ -45,12 +45,29 @@ class PlacedNetwork {
                       Event* reusableProcessingFinishedEvent = nullptr,
                       bool waitForOutputsOnProcessingStream = true);
     Event submitBatch(uint64_t stampIndex,
+                      std::map<std::string, ThorImplementation::Tensor> batchInputs,
+                      std::map<std::string, ThorImplementation::Tensor>& batchOutputs,
+                      std::map<std::string, Event>& outputReadyEvents,
+                      bool isInferenceOnly,
+                      const std::vector<Tensor>& activeTrainingLossRoots,
+                      Event* reusableProcessingFinishedEvent = nullptr,
+                      bool waitForOutputsOnProcessingStream = true);
+    Event submitBatch(uint64_t stampIndex,
                       const Batch& batchInputs,
                       std::map<std::string, ThorImplementation::Tensor>& batchOutputs,
                       std::map<std::string, Event>& outputReadyEvents,
                       bool isInferenceOnly,
                       Event* reusableProcessingFinishedEvent = nullptr,
                       bool waitForOutputsOnProcessingStream = true);
+    Event submitBatch(uint64_t stampIndex,
+                      const Batch& batchInputs,
+                      std::map<std::string, ThorImplementation::Tensor>& batchOutputs,
+                      std::map<std::string, Event>& outputReadyEvents,
+                      bool isInferenceOnly,
+                      const std::vector<Tensor>& activeTrainingLossRoots,
+                      Event* reusableProcessingFinishedEvent = nullptr,
+                      bool waitForOutputsOnProcessingStream = true);
+    std::vector<uint64_t> getActiveTrainingRawLossOriginalIdsForDebug(uint64_t stampIndex = 0) const;
 
     void extendOutputWritableEvents(uint64_t stampIndex, Event event);
 
@@ -61,6 +78,7 @@ class PlacedNetwork {
     }
     virtual std::string getNetworkName() { return networkName; }
     uint32_t getNumTrainableLayers() { return network.getNumTrainableLayers(); }
+    std::vector<ParameterReference> getTrainableParameterReferences(bool trainingEnabledOnly = true);
 
     BoundParameter resolveParameterReference(const ParameterReference& parameterReference);
     std::vector<BoundParameter> resolveParameterReferences(const std::vector<ParameterReference>& parameterReferences);

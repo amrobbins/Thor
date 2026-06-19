@@ -21,6 +21,16 @@ def test_mse_constructs_defaults():
     assert isinstance(loss, thor.losses.MSE)
 
 
+def test_mse_constructs_vector_width_100():
+    n = _net()
+    preds = _tensor_1d(100, thor.DataType.fp32)
+    labels = _tensor_1d(100, thor.DataType.fp32)
+
+    loss = thor.losses.MSE(n, preds, labels)
+    assert loss is not None
+    assert isinstance(loss, thor.losses.MSE)
+
+
 
 
 def test_mse_exposes_default_and_custom_loss_weight():
@@ -68,16 +78,16 @@ def test_mse_constructs_reports_elementwise():
     assert isinstance(loss, thor.losses.MSE)
 
 
-def test_mse_rejects_labels_not_1d_size_1():
+def test_mse_rejects_mismatched_label_dimensions():
     n = _net()
     preds = _tensor_1d(1, thor.DataType.fp32)
 
     labels = _tensor_1d(2, thor.DataType.fp32)
-    with pytest.raises(ValueError, match=r"labels must be a 1 dimensional tensor of size 1"):
+    with pytest.raises(ValueError, match=r"predictions and labels dimensions must match"):
         thor.losses.MSE(n, preds, labels)
 
     labels = thor.Tensor([1, 1], thor.DataType.fp32)
-    with pytest.raises(ValueError, match=r"labels must be a 1 dimensional tensor of size 1"):
+    with pytest.raises(ValueError, match=r"predictions and labels dimensions must match"):
         thor.losses.MSE(n, preds, labels)
 
 

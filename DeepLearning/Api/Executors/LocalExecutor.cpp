@@ -52,7 +52,7 @@ shared_ptr<LocalExecutor> LocalExecutor::Builder::build() {
 
     if (_network->getDefaultOptimizer() == nullptr && !_network->allTrainingEnabledParametersHaveOptimizers()) {
         std::shared_ptr<Optimizer> fallbackOptimizer = _optimizer;
-        if (fallbackOptimizer == nullptr && trainingProgram_.has_value() && trainingProgram_->getNumSteps() == 1) {
+        if (fallbackOptimizer == nullptr && trainingProgram_ != nullptr && trainingProgram_->getNumSteps() == 1) {
             fallbackOptimizer = trainingProgram_->getStep(0).getOptimizer();
         }
         if (fallbackOptimizer != nullptr) {
@@ -67,8 +67,8 @@ shared_ptr<LocalExecutor> LocalExecutor::Builder::build() {
 
     THOR_THROW_IF_FALSE(localExecutor->placedNetwork->getNumStamps() >= 1);
 
-    if (trainingProgram_.has_value()) {
-        localExecutor->executableTrainingPlan = ExecutableTrainingPlan::compile(trainingProgram_.value(), *localExecutor->placedNetwork);
+    if (trainingProgram_ != nullptr) {
+        localExecutor->executableTrainingPlan = ExecutableTrainingPlan::compile(*trainingProgram_, *localExecutor->placedNetwork);
         localExecutor->executableTrainingPlan->assertLegacyLocalExecutorCompatible();
         std::shared_ptr<Optimizer> stepOptimizer = localExecutor->executableTrainingPlan->getStep(0).getOptimizer();
         if (stepOptimizer != nullptr) {
@@ -316,7 +316,7 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
         return static_cast<double>(value);
     };
 
-    auto makeBaseSnapshot = [&](TrainingPhase phase, uint64_t epoch, uint64_t batchSize, uint64_t batchesPerEpoch) {
+    auto makeBaseSnapshot = [&](TrainingEventPhase phase, uint64_t epoch, uint64_t batchSize, uint64_t batchesPerEpoch) {
         TrainingStatsSnapshot snapshot;
         snapshot.networkName = placedNetwork->getNetworkName();
         snapshot.datasetName = loader->getDatasetName();
@@ -330,7 +330,7 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
         return snapshot;
     };
 
-    emitTrainingEvent(TrainingEvent::runStarted(makeBaseSnapshot(TrainingPhase::UNKNOWN, 0, loader->getBatchSize(), 0)));
+    emitTrainingEvent(TrainingEvent::runStarted(makeBaseSnapshot(TrainingEventPhase::UNKNOWN, 0, loader->getBatchSize(), 0)));
 
     for (uint32_t epochOffset = 0; epochOffset < numEpochs; ++epochOffset) {
         const uint64_t humanEpoch = *currentEpoch + 1;
@@ -344,7 +344,7 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
         *numBatchesDoneInEpoch = batchNum;
         *numBatchesInEpoch = batchesPerEpoch;
 
-        emitTrainingEvent(TrainingEvent::epochStarted(makeBaseSnapshot(TrainingPhase::TRAIN, humanEpoch, batchSize, batchesPerEpoch)));
+        emitTrainingEvent(TrainingEvent::epochStarted(makeBaseSnapshot(TrainingEventPhase::TRAIN, humanEpoch, batchSize, batchesPerEpoch)));
 
         thread trainingThread(&LocalExecutor::trainBatches, this, batchNum, batchesToTrain, ExampleType::TRAIN, tensorsToReturn);
         unordered_map<string, vector<uint8_t>> batchData;
@@ -369,7 +369,7 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
 
                 batchData = popBatchData();
 
-                TrainingStatsSnapshot snapshot = makeBaseSnapshot(TrainingPhase::TRAIN, humanEpoch, batchSize, batchesPerEpoch);
+                TrainingStatsSnapshot snapshot = makeBaseSnapshot(TrainingEventPhase::TRAIN, humanEpoch, batchSize, batchesPerEpoch);
                 snapshot.stepInEpoch = batchNum + 1;
                 snapshot.step = (*currentEpoch * batchesPerEpoch) + snapshot.stepInEpoch;
                 snapshot.samplesProcessed = snapshot.step * batchSize;
@@ -395,7 +395,7 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
             }
         }
         trainingThread.join();
-        emitTrainingEvent(TrainingEvent::epochFinished(makeBaseSnapshot(TrainingPhase::TRAIN, humanEpoch, batchSize, batchesPerEpoch)));
+        emitTrainingEvent(TrainingEvent::epochFinished(makeBaseSnapshot(TrainingEventPhase::TRAIN, humanEpoch, batchSize, batchesPerEpoch)));
 
         // Validation phase
         batchNum = loader->getNextBatchNum(ExampleType::VALIDATE);
@@ -406,7 +406,7 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
         *numBatchesDoneInEpoch = batchNum;
         *numBatchesInEpoch = batchesPerEpoch;
 
-        emitTrainingEvent(TrainingEvent::epochStarted(makeBaseSnapshot(TrainingPhase::VALIDATE, humanEpoch, batchSize, batchesPerEpoch)));
+        emitTrainingEvent(TrainingEvent::epochStarted(makeBaseSnapshot(TrainingEventPhase::VALIDATE, humanEpoch, batchSize, batchesPerEpoch)));
 
         // FIXME: I am currently training using the validation data. A validation step needs to be built.
         thread validationThread(&LocalExecutor::trainBatches, this, batchNum, batchesToValidate, ExampleType::VALIDATE, tensorsToReturn);
@@ -431,7 +431,7 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
 
                 batchData = popBatchData();
 
-                TrainingStatsSnapshot snapshot = makeBaseSnapshot(TrainingPhase::VALIDATE, humanEpoch, batchSize, batchesPerEpoch);
+                TrainingStatsSnapshot snapshot = makeBaseSnapshot(TrainingEventPhase::VALIDATE, humanEpoch, batchSize, batchesPerEpoch);
                 snapshot.stepInEpoch = batchNum + 1;
                 snapshot.step = (*currentEpoch * batchesPerEpoch) + snapshot.stepInEpoch;
                 snapshot.samplesProcessed = snapshot.step * batchSize;
@@ -457,12 +457,12 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
             }
         }
         validationThread.join();
-        emitTrainingEvent(TrainingEvent::epochFinished(makeBaseSnapshot(TrainingPhase::VALIDATE, humanEpoch, batchSize, batchesPerEpoch)));
+        emitTrainingEvent(TrainingEvent::epochFinished(makeBaseSnapshot(TrainingEventPhase::VALIDATE, humanEpoch, batchSize, batchesPerEpoch)));
 
         (*currentEpoch) += 1;
     }
 
-    emitTrainingEvent(TrainingEvent::runFinished(makeBaseSnapshot(TrainingPhase::UNKNOWN, *currentEpoch, loader->getBatchSize(), 0)));
+    emitTrainingEvent(TrainingEvent::runFinished(makeBaseSnapshot(TrainingEventPhase::UNKNOWN, *currentEpoch, loader->getBatchSize(), 0)));
 }
 
 bool LocalExecutor::isBatchDataReady() {

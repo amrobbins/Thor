@@ -4,6 +4,7 @@
 #include "DeepLearning/Api/Initializers/Initializer.h"
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
 #include "DeepLearning/Api/Layers/Learning/LayerEpilogue.h"
+#include "DeepLearning/Api/Parameter/ParameterConstraint.h"
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "DeepLearning/Implementation/Tensor/TensorPlacement.h"
@@ -288,6 +289,36 @@ class FullyConnected::Builder {
         return *this;
     }
 
+    virtual FullyConnected::Builder &weightsConstraint(std::shared_ptr<ParameterConstraint> constraint) {
+        if (constraint == nullptr) {
+            throw std::invalid_argument("FullyConnected weightsConstraint cannot be null.");
+        }
+        _weightsConstraints.push_back(constraint->clone());
+        return *this;
+    }
+
+    virtual FullyConnected::Builder &biasesConstraint(std::shared_ptr<ParameterConstraint> constraint) {
+        if (constraint == nullptr) {
+            throw std::invalid_argument("FullyConnected biasesConstraint cannot be null.");
+        }
+        _biasesConstraints.push_back(constraint->clone());
+        return *this;
+    }
+
+    virtual FullyConnected::Builder &weightsConstraints(const std::vector<std::shared_ptr<ParameterConstraint>> &constraints) {
+        for (const auto &constraint : constraints) {
+            weightsConstraint(constraint);
+        }
+        return *this;
+    }
+
+    virtual FullyConnected::Builder &biasesConstraints(const std::vector<std::shared_ptr<ParameterConstraint>> &constraints) {
+        for (const auto &constraint : constraints) {
+            biasesConstraint(constraint);
+        }
+        return *this;
+    }
+
    private:
     void verifyConfig() const;
 
@@ -305,6 +336,8 @@ class FullyConnected::Builder {
     std::shared_ptr<Initializer> _biasInitializer;
     std::shared_ptr<Optimizer> _weightsOptimizer;
     std::shared_ptr<Optimizer> _biasesOptimizer;
+    std::vector<std::shared_ptr<ParameterConstraint>> _weightsConstraints;
+    std::vector<std::shared_ptr<ParameterConstraint>> _biasesConstraints;
     bool _activationExplicitlyRemoved;
 
     // FIXME: Future optimization, automatically fuse adjacent expressions from adjacent layers.

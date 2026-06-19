@@ -952,14 +952,16 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::buildFusedOptimizerUpdatePlan
             throw runtime_error("CustomLayer could not build fused optimizer update: missing storage for parameter '" + parameterName + "'.");
         }
 
+        shared_ptr<PhysicalParameter> targetParameter;
         shared_ptr<Optimizer> optimizer;
         for (const auto& parameter : parameters) {
             if (parameter->getName() == parameterName) {
+                targetParameter = parameter;
                 optimizer = parameter->getOptimizer();
                 break;
             }
         }
-        if (optimizer == nullptr || !optimizer->supportsDenseUpdateFusion()) {
+        if (targetParameter == nullptr || optimizer == nullptr || !optimizer->supportsDenseUpdateFusion()) {
             throw runtime_error("CustomLayer fused optimizer update requested for unsupported parameter '" + parameterName + "'.");
         }
 
@@ -986,7 +988,12 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::buildFusedOptimizerUpdatePlan
                 throw runtime_error("CustomLayer fused optimizer update missing preallocated output for '" + output.name +
                                     "' on parameter '" + parameterName + "'.");
             }
-            fusedOutputs.emplace_back(uniqueOutputName, Expression::fromPhysicalNode(updateExpression.outputs.expr, output.node_idx));
+            Expression outputExpression = Expression::fromPhysicalNode(updateExpression.outputs.expr, output.node_idx);
+            if (output.name == "weights" && targetParameter->hasConstraints() &&
+                targetParameter->supportsDenseExpressionConstraintFusion()) {
+                outputExpression = targetParameter->applyDenseExpressionConstraints(outputExpression, prefix + "constraints__");
+            }
+            fusedOutputs.emplace_back(uniqueOutputName, outputExpression);
             preallocatedOutputs.emplace(uniqueOutputName, preallocIt->second);
         }
     }
@@ -2037,10 +2044,12 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
             }
 
             bool anyWeightsUpdated = false;
+            std::set<std::string> fusedUpdateParameterNames;
             for (const ApplicationState& app : applications) {
                 if (app.backwardRanThisPass && !app.optimizerUpdateFusedParameterNames.empty()) {
                     anyWeightsUpdated = true;
-                    break;
+                    fusedUpdateParameterNames.insert(app.optimizerUpdateFusedParameterNames.begin(),
+                                                     app.optimizerUpdateFusedParameterNames.end());
                 }
             }
             for (const auto& parameter : parameters) {
@@ -2051,6 +2060,27 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
                                      diagnosticLabel().c_str(),
                                      parameter->getName().c_str());
                     }
+                    continue;
+                }
+
+                if (fusedUpdateParameterNames.contains(parameter->getName())) {
+                    if (!parameter->hasConstraints() || parameter->supportsDenseExpressionConstraintFusion()) {
+                        if (trainingUpdateDiagnosticsEnabled()) {
+                            std::fprintf(stderr,
+                                         "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s parameter=%s apply_skip reason=fused_optimizer_update_constraints_fused\n",
+                                         diagnosticLabel().c_str(),
+                                         parameter->getName().c_str());
+                        }
+                        continue;
+                    }
+
+                    if (trainingUpdateDiagnosticsEnabled()) {
+                        std::fprintf(stderr,
+                                     "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s parameter=%s apply_post_update_constraints reason=fused_optimizer_update_unfused_constraint\n",
+                                     diagnosticLabel().c_str(),
+                                     parameter->getName().c_str());
+                    }
+                    parameter->applyConstraintsAfterExternalUpdate();
                     continue;
                 }
 

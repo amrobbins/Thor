@@ -275,21 +275,21 @@ bool fileSupportsAnsiColor(std::FILE* output) {
 #endif
 }
 
-const char* phaseStyle(TrainingPhase phase) {
+const char* phaseStyle(TrainingEventPhase phase) {
     switch (phase) {
-        case TrainingPhase::TRAIN:
+        case TrainingEventPhase::TRAIN:
             return Ansi::phaseTrain;
-        case TrainingPhase::VALIDATE:
+        case TrainingEventPhase::VALIDATE:
             return Ansi::phaseValidate;
-        case TrainingPhase::TEST:
+        case TrainingEventPhase::TEST:
             return Ansi::phaseTest;
-        case TrainingPhase::UNKNOWN:
+        case TrainingEventPhase::UNKNOWN:
         default:
             return Ansi::phaseUnknown;
     }
 }
 
-void appendPhaseValue(LineBuffer& out, TrainingPhase phase) {
+void appendPhaseValue(LineBuffer& out, TrainingEventPhase phase) {
     appendStyledPadded(out, phaseStyle(phase), trainingPhaseName(phase), 8, PadAlignment::LEFT);
 }
 

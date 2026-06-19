@@ -48,6 +48,30 @@ Event PlacedNetwork::submitBatch(uint64_t stampIndex,
                                  Event* reusableProcessingFinishedEvent,
                                  bool waitForOutputsOnProcessingStream) {
     THOR_THROW_IF_FALSE(stampIndex < stampedNetworks.size());
+    if (!isInferenceOnly) {
+        stampedNetworks[stampIndex].setActiveTrainingLossRoots(network.getRawLossTensorsForTrainingRoots(network.getLossRootTensors()));
+    }
+    return stampedNetworks[stampIndex].sendBatch(std::move(batchInputs),
+                                                 batchOutputs,
+                                                 outputReadyEvents,
+                                                 isInferenceOnly,
+                                                 reusableProcessingFinishedEvent,
+                                                 waitForOutputsOnProcessingStream);
+}
+
+Event PlacedNetwork::submitBatch(uint64_t stampIndex,
+                                 std::map<std::string, ThorImplementation::Tensor> batchInputs,
+                                 std::map<std::string, ThorImplementation::Tensor>& batchOutputs,
+                                 std::map<std::string, Event>& outputReadyEvents,
+                                 bool isInferenceOnly,
+                                 const std::vector<Tensor>& activeTrainingLossRoots,
+                                 Event* reusableProcessingFinishedEvent,
+                                 bool waitForOutputsOnProcessingStream) {
+    THOR_THROW_IF_FALSE(stampIndex < stampedNetworks.size());
+    if (!isInferenceOnly) {
+        std::vector<Tensor> activeRawLossRoots = network.getRawLossTensorsForTrainingRoots(activeTrainingLossRoots);
+        stampedNetworks[stampIndex].setActiveTrainingLossRoots(activeRawLossRoots);
+    }
     return stampedNetworks[stampIndex].sendBatch(std::move(batchInputs),
                                                  batchOutputs,
                                                  outputReadyEvents,
@@ -64,6 +88,9 @@ Event PlacedNetwork::submitBatch(uint64_t stampIndex,
                                  Event* reusableProcessingFinishedEvent,
                                  bool waitForOutputsOnProcessingStream) {
     THOR_THROW_IF_FALSE(stampIndex < stampedNetworks.size());
+    if (!isInferenceOnly) {
+        stampedNetworks[stampIndex].setActiveTrainingLossRoots(network.getRawLossTensorsForTrainingRoots(network.getLossRootTensors()));
+    }
     return stampedNetworks[stampIndex].sendBatch(batchInputs,
                                                  batchOutputs,
                                                  outputReadyEvents,
@@ -72,9 +99,39 @@ Event PlacedNetwork::submitBatch(uint64_t stampIndex,
                                                  waitForOutputsOnProcessingStream);
 }
 
+Event PlacedNetwork::submitBatch(uint64_t stampIndex,
+                                 const Batch& batchInputs,
+                                 std::map<std::string, ThorImplementation::Tensor>& batchOutputs,
+                                 std::map<std::string, Event>& outputReadyEvents,
+                                 bool isInferenceOnly,
+                                 const std::vector<Tensor>& activeTrainingLossRoots,
+                                 Event* reusableProcessingFinishedEvent,
+                                 bool waitForOutputsOnProcessingStream) {
+    THOR_THROW_IF_FALSE(stampIndex < stampedNetworks.size());
+    if (!isInferenceOnly) {
+        std::vector<Tensor> activeRawLossRoots = network.getRawLossTensorsForTrainingRoots(activeTrainingLossRoots);
+        stampedNetworks[stampIndex].setActiveTrainingLossRoots(activeRawLossRoots);
+    }
+    return stampedNetworks[stampIndex].sendBatch(batchInputs,
+                                                 batchOutputs,
+                                                 outputReadyEvents,
+                                                 isInferenceOnly,
+                                                 reusableProcessingFinishedEvent,
+                                                 waitForOutputsOnProcessingStream);
+}
+
+std::vector<uint64_t> PlacedNetwork::getActiveTrainingRawLossOriginalIdsForDebug(uint64_t stampIndex) const {
+    THOR_THROW_IF_FALSE(stampIndex < stampedNetworks.size());
+    return stampedNetworks[stampIndex].getActiveTrainingRawLossOriginalIdsForDebug();
+}
+
 void PlacedNetwork::extendOutputWritableEvents(uint64_t stampIndex, Event event) {
     THOR_THROW_IF_FALSE(stampIndex < stampedNetworks.size());
     stampedNetworks[stampIndex].extendOutputWritableEvents(event);
+}
+
+std::vector<ParameterReference> PlacedNetwork::getTrainableParameterReferences(bool trainingEnabledOnly) {
+    return network.getTrainableParameterReferences(trainingEnabledOnly);
 }
 
 BoundParameter PlacedNetwork::resolveParameterReference(const ParameterReference& parameterReference) {

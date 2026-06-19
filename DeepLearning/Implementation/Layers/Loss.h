@@ -225,6 +225,9 @@ class Loss : public Layer {
     // When a loss shaper is present, that will provide batch loss etc. Loss::getLossOutput() provides raw loss
     virtual std::optional<Tensor> getLossOutput() { return featureOutput; }
 
+    void setTrainingActive(bool active) { trainingActive = active; }
+    bool isTrainingActive() const { return trainingActive; }
+
     enum class ConnectionType { FORWARD_BACKWARD = 4289, LABELS };
 
     enum class LossType { BATCH = (int)ConnectionType::LABELS + 1027, CLASSWISE, ELEMENTWISE, RAW };
@@ -241,6 +244,7 @@ class Loss : public Layer {
 
     bool featureInputReceived;
     bool labelsReceived;
+    bool trainingActive = true;
     uint32_t currentBatchSize = 0;
 
     virtual void advanceDataIfReady(bool validationPass) {
@@ -255,7 +259,7 @@ class Loss : public Layer {
         if (nextLayer.has_value())
             nextLayer.value()->forward(featureOutput, validationPass, currentBatchSize);
 
-        if (isInferenceOnly() || validationPass)
+        if (isInferenceOnly() || validationPass || !trainingActive)
             return;
 
         // Initiate back propagation

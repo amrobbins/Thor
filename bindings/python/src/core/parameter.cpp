@@ -15,6 +15,7 @@
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
 #include "DeepLearning/Api/Parameter/BoundParameter.h"
+#include "DeepLearning/Api/Parameter/ParameterConstraint.h"
 #include "DeepLearning/Api/Parameter/ParameterSpecification.h"
 #include "DeepLearning/Api/Parameter/ParameterReference.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
@@ -55,6 +56,46 @@ class GilSafePythonObject {
     PyObject* object = nullptr;
 };
 
+
+std::vector<std::shared_ptr<ParameterConstraint>> constraintsFromPython(const nb::object& obj) {
+    std::vector<std::shared_ptr<ParameterConstraint>> constraints;
+    if (obj.is_none()) {
+        return constraints;
+    }
+
+    auto appendConstraint = [&constraints](const nb::handle& handle) {
+        std::shared_ptr<ParameterConstraint> constraint;
+        try {
+            constraint = nb::cast<std::shared_ptr<ParameterConstraint>>(handle);
+        } catch (const std::exception&) {
+            throw nb::type_error("parameter constraints must be thor.ParameterConstraint instances");
+        }
+        if (constraint == nullptr) {
+            throw nb::value_error("parameter constraints may not contain None");
+        }
+        constraints.push_back(constraint->clone());
+    };
+
+    try {
+        std::shared_ptr<ParameterConstraint> single = nb::cast<std::shared_ptr<ParameterConstraint>>(obj);
+        if (single != nullptr) {
+            constraints.push_back(single->clone());
+            return constraints;
+        }
+    } catch (const std::exception&) {
+    }
+
+    if (!nb::isinstance<nb::sequence>(obj) || nb::isinstance<nb::str>(obj)) {
+        throw nb::type_error("constraints must be a thor.ParameterConstraint, a sequence of constraints, or None");
+    }
+
+    nb::sequence seq = nb::cast<nb::sequence>(obj);
+    constraints.reserve(nb::len(seq));
+    for (nb::handle item : seq) {
+        appendConstraint(item);
+    }
+    return constraints;
+}
 }  // namespace
 
 void bind_parameter(nb::module_& thor) {
@@ -77,6 +118,56 @@ void bind_parameter(nb::module_& thor) {
     bound_parameter.def("is_training_enabled", &BoundParameter::isTrainingEnabled);
     bound_parameter.def("set_training_enabled", &BoundParameter::setTrainingEnabled, "enabled"_a);
     bound_parameter.def("has_optimizer", &BoundParameter::hasOptimizer);
+
+    auto parameter_constraint = nb::class_<ParameterConstraint>(thor, "ParameterConstraint");
+    parameter_constraint.attr("__module__") = "thor";
+    parameter_constraint.def_prop_ro("constraint_type", &ParameterConstraint::getConstraintType);
+    parameter_constraint.def("get_architecture_json", [](const ParameterConstraint& self) { return self.architectureJson().dump(); });
+
+    auto non_negative_constraint = nb::class_<NonNegativeParameterConstraint, ParameterConstraint>(
+        thor, "NonNegativeParameterConstraint");
+    non_negative_constraint.attr("__module__") = "thor";
+    non_negative_constraint.def(nb::init<>());
+    non_negative_constraint.attr("__doc__") = R"nbdoc(
+Post-update parameter constraint that clips parameter values to be non-negative.
+
+This is a general Thor parameter constraint, not a layer-specific hack. It can be
+attached to any trainable ParameterSpecification or to layer builders that expose
+parameter-specific constraint arguments.
+    )nbdoc";
+
+    auto non_positive_constraint = nb::class_<NonPositiveParameterConstraint, ParameterConstraint>(
+        thor, "NonPositiveParameterConstraint");
+    non_positive_constraint.attr("__module__") = "thor";
+    non_positive_constraint.def(nb::init<>());
+    non_positive_constraint.attr("__doc__") = R"nbdoc(
+Post-update parameter constraint that clips parameter values to be non-positive.
+    )nbdoc";
+
+    auto min_constraint = nb::class_<MinParameterConstraint, ParameterConstraint>(thor, "MinParameterConstraint");
+    min_constraint.attr("__module__") = "thor";
+    min_constraint.def(nb::init<double>(), "min_value"_a);
+    min_constraint.def_prop_ro("min_value", &MinParameterConstraint::getMinValue);
+    min_constraint.attr("__doc__") = R"nbdoc(
+Post-update parameter constraint that clips parameter values to be at least min_value.
+    )nbdoc";
+
+    auto max_constraint = nb::class_<MaxParameterConstraint, ParameterConstraint>(thor, "MaxParameterConstraint");
+    max_constraint.attr("__module__") = "thor";
+    max_constraint.def(nb::init<double>(), "max_value"_a);
+    max_constraint.def_prop_ro("max_value", &MaxParameterConstraint::getMaxValue);
+    max_constraint.attr("__doc__") = R"nbdoc(
+Post-update parameter constraint that clips parameter values to be at most max_value.
+    )nbdoc";
+
+    auto min_max_constraint = nb::class_<MinMaxParameterConstraint, ParameterConstraint>(thor, "MinMaxParameterConstraint");
+    min_max_constraint.attr("__module__") = "thor";
+    min_max_constraint.def(nb::init<double, double>(), "min_value"_a, "max_value"_a);
+    min_max_constraint.def_prop_ro("min_value", &MinMaxParameterConstraint::getMinValue);
+    min_max_constraint.def_prop_ro("max_value", &MinMaxParameterConstraint::getMaxValue);
+    min_max_constraint.attr("__doc__") = R"nbdoc(
+Post-update parameter constraint that clips parameter values into [min_value, max_value].
+    )nbdoc";
 
     auto parameter = nb::class_<ParameterSpecification>(thor, "ParameterSpecification");
     parameter.attr("__module__") = "thor";
@@ -104,7 +195,8 @@ void bind_parameter(nb::module_& thor) {
            std::shared_ptr<Initializer> initializer,
            bool trainable,
            std::shared_ptr<Optimizer> optimizer_override,
-           std::optional<bool> training_initially_enabled) {
+           std::optional<bool> training_initially_enabled,
+           nb::object constraints) {
             if (initializer == nullptr)
                 initializer = Glorot(GlorotMode::UNIFORM).clone();
             if (!training_initially_enabled.has_value())
@@ -121,6 +213,7 @@ void bind_parameter(nb::module_& thor) {
             if (optimizer_override != nullptr) {
                 builder.optimizer(optimizer_override);
             }
+            builder.constraints(constraintsFromPython(constraints));
 
             ParameterSpecification built = builder.build();
 
@@ -133,6 +226,7 @@ void bind_parameter(nb::module_& thor) {
         "trainable"_a = true,
         "optimizer"_a.none() = nb::none(),
         "training_initially_enabled"_a.none() = nb::none(),
+        "constraints"_a.none() = nb::none(),
         R"nbdoc(
 Create an API parameter with storage attributes determined at parameter definition time.
 
@@ -153,7 +247,8 @@ This form is for statically-shaped parameters. For compile-time-dynamic paramete
            std::shared_ptr<Initializer> initializer,
            bool trainable,
            std::shared_ptr<Optimizer> optimizer_override,
-           std::optional<bool> training_initially_enabled) {
+           std::optional<bool> training_initially_enabled,
+           nb::object constraints) {
             if (create_storage_from_context.is_none()) {
                 throw std::runtime_error("create_storage_from_context must be provided.");
             }
@@ -188,6 +283,7 @@ This form is for statically-shaped parameters. For compile-time-dynamic paramete
             if (optimizer_override != nullptr) {
                 builder.optimizer(optimizer_override);
             }
+            builder.constraints(constraintsFromPython(constraints));
 
             ParameterSpecification built = builder.build();
 
@@ -199,6 +295,7 @@ This form is for statically-shaped parameters. For compile-time-dynamic paramete
         "trainable"_a = true,
         "optimizer_override"_a.none() = nb::none(),
         "training_initially_enabled"_a.none() = nb::none(),
+        "constraints"_a.none() = nb::none(),
         R"nbdoc(
 Create an API parameter whose implementation storage is allocated at physical layer compile time.
 
@@ -221,4 +318,8 @@ Allocate implementation storage on the same placement as ``input_tensor`` with t
     parameter.def("is_trainable", &ParameterSpecification::isTrainable);
     parameter.def("is_training_initially_enabled", &ParameterSpecification::isTrainingInitiallyEnabled);
     parameter.def("has_optimizer", &ParameterSpecification::hasOptimizer);
+    parameter.def("get_architecture_json", [](const ParameterSpecification& self) { return self.architectureJson().dump(); });
+    parameter.def("has_constraints", &ParameterSpecification::hasConstraints);
+    parameter.def("get_constraints", &ParameterSpecification::getConstraints);
 }
+

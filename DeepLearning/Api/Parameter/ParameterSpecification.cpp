@@ -1,6 +1,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Parameter/ParameterSpecification.h"
 #include "DeepLearning/Api/Parameter/Parameterizable.h"
+#include "DeepLearning/Api/Parameter/ParameterConstraint.h"
 
 #include "DeepLearning/Implementation/Parameter/Parameterizable.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
@@ -86,13 +87,15 @@ ParameterSpecification::ParameterSpecification(std::string name,
                                                std::shared_ptr<Initializer> initializer,
                                                bool trainable,
                                                std::shared_ptr<Optimizer> optimizer,
-                                               bool trainingInitiallyEnabled)
+                                               bool trainingInitiallyEnabled,
+                                               std::vector<std::shared_ptr<ParameterConstraint>> constraints)
     : initialized(true),
       name(std::move(name)),
       initializer(std::move(initializer)),
       trainable(trainable),
       optimizer(std::move(optimizer)),
       trainingInitiallyEnabled(trainingInitiallyEnabled),
+      constraints(std::move(constraints)),
       shape(shape),
       dtype(dtype) {
     validateReadyForUse();
@@ -103,13 +106,15 @@ ParameterSpecification::ParameterSpecification(std::string name,
                                                std::shared_ptr<Initializer> initializer,
                                                bool trainable,
                                                std::shared_ptr<Optimizer> optimizer,
-                                               bool trainingInitiallyEnabled)
+                                               bool trainingInitiallyEnabled,
+                                               std::vector<std::shared_ptr<ParameterConstraint>> constraints)
     : initialized(true),
       name(std::move(name)),
       initializer(std::move(initializer)),
       trainable(trainable),
       optimizer(std::move(optimizer)),
       trainingInitiallyEnabled(trainingInitiallyEnabled),
+      constraints(std::move(constraints)),
       storageContextCreateStorage(std::move(createStorage)) {
     validateReadyForUse();
 }
@@ -132,6 +137,10 @@ void ParameterSpecification::validateReadyForUse() const {
         throw runtime_error("All parameters require an initializer, initializer is nullptr.");
     if (optimizer != nullptr && !trainable)
         throw runtime_error("Only trainable parameters may have optimizer overrides.");
+    for (const auto& constraint : constraints) {
+        if (constraint == nullptr)
+            throw runtime_error("Parameter constraints may not contain nullptr. Parameter: " + name + ".");
+    }
 }
 
 void ParameterSpecification::validateStorageFactoryReadyForStamping() const {
@@ -173,6 +182,13 @@ json ParameterSpecification::architectureJson() const {
         j["initializer"] = initializer->architectureJson();
     if (optimizer != nullptr)
         j["optimizer_override"] = optimizer->architectureJson();
+    if (!constraints.empty()) {
+        j["constraints"] = json::array();
+        for (const auto& constraint : constraints) {
+            THOR_THROW_IF_FALSE(constraint != nullptr);
+            j["constraints"].push_back(constraint->architectureJson());
+        }
+    }
     return j;
 }
 
@@ -214,6 +230,14 @@ ParameterSpecification ParameterSpecification::deserialize(const json &j, std::s
         deserialized.trainingInitiallyEnabled = false;
     if (j.contains("initializer"))
         deserialized.initializer = Initializer::deserialize(j["initializer"]);
+    if (j.contains("constraints")) {
+        if (!j.at("constraints").is_array()) {
+            throw runtime_error("ParameterSpecification constraints must be an array.");
+        }
+        for (const json& constraintJson : j.at("constraints")) {
+            deserialized.constraints.push_back(ParameterConstraint::deserialize(constraintJson));
+        }
+    }
     if (j.contains("optimizer_override"))
         deserialized.optimizer = Optimizer::deserialize(archiveReader, j["optimizer_override"], nullptr);
     else if (j.contains("optimizer"))
@@ -236,6 +260,33 @@ void ParameterSpecification::setTrainingInitiallyEnabled(bool enabled) {
     }
     trainingInitiallyEnabled = enabled;
 }
+
+void ParameterSpecification::addConstraint(std::shared_ptr<ParameterConstraint> constraint) {
+    if (constraint == nullptr) {
+        throw runtime_error("Cannot add a null ParameterConstraint to parameter " + name + ".");
+    }
+    constraints.push_back(constraint->clone());
+}
+
+void ParameterSpecification::setConstraints(const std::vector<std::shared_ptr<ParameterConstraint>>& constraints) {
+    this->constraints.clear();
+    this->constraints.reserve(constraints.size());
+    for (const auto& constraint : constraints) {
+        addConstraint(constraint);
+    }
+}
+
+std::vector<std::shared_ptr<ParameterConstraint>> ParameterSpecification::getConstraints() const {
+    std::vector<std::shared_ptr<ParameterConstraint>> result;
+    result.reserve(constraints.size());
+    for (const auto& constraint : constraints) {
+        THOR_THROW_IF_FALSE(constraint != nullptr);
+        result.push_back(constraint->clone());
+    }
+    return result;
+}
+
+bool ParameterSpecification::hasConstraints() const { return !constraints.empty(); }
 
 bool ParameterSpecification::hasOptimizer() const { return optimizer != nullptr; }
 std::shared_ptr<Optimizer> ParameterSpecification::getOptimizer() { return optimizer; }
@@ -272,6 +323,14 @@ std::shared_ptr<ThorImplementation::PhysicalParameter> ParameterSpecification::s
     if (optimizer != nullptr) {
         physicalParameter->setOptimizer(optimizer->stamp(nullptr));
     }
+
+    std::vector<std::shared_ptr<ThorImplementation::ParameterConstraint>> implementationConstraints;
+    implementationConstraints.reserve(constraints.size());
+    for (const auto& constraint : constraints) {
+        THOR_THROW_IF_FALSE(constraint != nullptr);
+        implementationConstraints.push_back(constraint->stamp());
+    }
+    physicalParameter->setConstraints(implementationConstraints);
 
     if (trainable && !trainingInitiallyEnabled) {
         physicalParameter->setTrainingEnabled(false);
@@ -313,6 +372,12 @@ ParameterSpecification ParameterSpecification::Builder::build() {
         p.optimizer = nullptr;
     } else {
         p.optimizer = _optimizerOverride.get()->clone();
+    }
+    for (const auto& constraint : _constraints) {
+        if (constraint == nullptr) {
+            throw runtime_error("ParameterSpecification::Builder constraints may not contain nullptr for parameter " + p.name + ".");
+        }
+        p.constraints.push_back(constraint->clone());
     }
     if (!_storageContextCreateStorage) {
         if (!_dtype.has_value()) {
@@ -381,6 +446,22 @@ ParameterSpecification::Builder &ParameterSpecification::Builder::optimizer(std:
     this->_optimizerOverride = _optimizerOverride;
     return *this;
 };
+
+ParameterSpecification::Builder& ParameterSpecification::Builder::constraint(std::shared_ptr<ParameterConstraint> _constraint) {
+    if (_constraint == nullptr) {
+        throw runtime_error("ParameterSpecification::Builder constraint may not be nullptr.");
+    }
+    _constraints.push_back(_constraint->clone());
+    return *this;
+}
+
+ParameterSpecification::Builder& ParameterSpecification::Builder::constraints(
+    const std::vector<std::shared_ptr<ParameterConstraint>>& _constraints) {
+    for (const auto& constraint : _constraints) {
+        this->constraint(constraint);
+    }
+    return *this;
+}
 
 ParameterSpecification::Builder &ParameterSpecification::Builder::createStorage(StorageContextStorageFactory _storageContextCreateStorage) {
     if (this->_storageContextCreateStorage) {
