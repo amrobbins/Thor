@@ -3,6 +3,9 @@ FROM quay.io/pypa/manylinux_2_28_x86_64:latest
 ARG CUDA_MAJOR=13
 ARG CUDA_MINOR=3
 
+ENV PIP_ROOT_USER_ACTION=ignore
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+
 RUN dnf install -y \
       dnf-plugins-core \
       ca-certificates \
@@ -92,7 +95,7 @@ RUN git config --global --add safe.directory /io
 #  -w /io \
 #  thor-manylinux_2_28-cuda13 \
 #  bash
-#
+
 ## Clean hard, so no local Ubuntu artifacts leak in.
 #rm -rf build bindings/python/build bindings/python/dist bindings/python/wheelhouse
 #find . -name '*.so' -path '*/build/*' -delete
@@ -140,7 +143,7 @@ RUN git config --global --add safe.directory /io
 ## Test the wheel
 #/opt/python/cp312-cp312/bin/python -m venv /tmp/thor-wheel-test
 #source /tmp/thor-wheel-test/bin/activate
-#python -m pip install -U pip pytest numpy ml_dtypes
+#python -m pip install -U pip pytest
 #python -m pip install wheelhouse/*.whl
 #cd /tmp
 #python - <<'PY'
