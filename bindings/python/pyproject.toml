@@ -87,6 +87,9 @@ include = ["src/thor/py.typed"]
 
 [tool.pytest.ini_options]
 addopts = "-s -vv"
+markers = [
+    "imagenet100_cv5_integration: ImageNet-100 five-fold TrainingRuns integration tests",
+]
 
 [tool.isort]
 profile = "black"

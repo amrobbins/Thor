@@ -116,7 +116,7 @@ constexpr size_t RATE_FIELD_WIDTH = 5;
 constexpr size_t FLOPS_RATE_FIELD_WIDTH = 6;
 constexpr size_t TRAIN_LOSS_FIELD_WIDTH = sizeof(" train_loss=0.000000") - 1;
 constexpr size_t VALIDATE_LOSS_FIELD_WIDTH = sizeof(" validate_loss=0.000000") - 1;
-constexpr size_t RUN_PROGRESS_FIELDS_WIDTH = sizeof(" epoch=     20/20 step=       480 batch=        24/24") - 1;
+constexpr size_t RUN_PROGRESS_FIELDS_WIDTH = sizeof(" epoch=     20/20 batch=        24/24 step=       480") - 1;
 
 std::string formatRunLabel(std::string_view runName, const std::optional<std::string>& ensembleGroup) {
     std::string label(runName);
@@ -236,17 +236,17 @@ std::string formatRunsStatsLineBase(const TrainingStatsSnapshot& stats,
         appendStyledPadded(line, formatUnsigned(stats.epoch), 10, SummaryAnsi::progress, useColor);
     }
 
-    if (stats.step > 0) {
-        appendSummaryDimKey(line, "step", useColor);
-        appendStyledPadded(line, formatUnsigned(stats.step), 10, SummaryAnsi::progress, useColor);
-    }
-
     if (stats.stepsPerEpoch > 0) {
         appendSummaryDimKey(line, "batch", useColor);
         appendStyledPadded(line, formatRatio(stats.stepInEpoch, stats.stepsPerEpoch), 13, SummaryAnsi::progress, useColor);
     } else if (stats.stepInEpoch > 0) {
         appendSummaryDimKey(line, "batch", useColor);
         appendStyledPadded(line, formatUnsigned(stats.stepInEpoch), 13, SummaryAnsi::progress, useColor);
+    }
+
+    if (stats.step > 0) {
+        appendSummaryDimKey(line, "step", useColor);
+        appendStyledPadded(line, formatUnsigned(stats.step), 10, SummaryAnsi::progress, useColor);
     }
 
     appendPhaseLossColumns(line, trainLoss, validateLoss, useColor, trainLossStyle, validateLossStyle);

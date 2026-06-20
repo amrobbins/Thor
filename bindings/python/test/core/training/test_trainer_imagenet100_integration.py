@@ -17,6 +17,16 @@ import pytest
 import thor
 
 RUN_IMAGENET100_INTEGRATION = os.environ.get("THOR_RUN_TRAINING_IMAGENET100_INTEGRATION") == "1"
+RUN_IMAGENET100_CV5_ALEXNET_INTEGRATION = (
+    os.environ.get("THOR_RUN_TRAINING_IMAGENET100_CV5_ALEXNET_INTEGRATION") == "1")
+RUN_IMAGENET100_CV5_RESNET18_INTEGRATION = (
+    os.environ.get("THOR_RUN_TRAINING_IMAGENET100_CV5_RESNET18_INTEGRATION") == "1")
+RUN_IMAGENET100_ANY_INTEGRATION = any(
+    [
+        RUN_IMAGENET100_INTEGRATION,
+        RUN_IMAGENET100_CV5_ALEXNET_INTEGRATION,
+        RUN_IMAGENET100_CV5_RESNET18_INTEGRATION,
+    ])
 IMAGENET100_CACHE_DIR = Path(os.environ.get("THOR_IMAGENET100_CACHE_DIR", "/tmp/thor_imagenet100_training"))
 IMAGENET100_DATASET_ID = os.environ.get("THOR_IMAGENET100_DATASET_ID", "clane9/imagenet-100")
 IMAGENET100_IMAGE_SIZE = int(os.environ.get("THOR_IMAGENET100_IMAGE_SIZE", "224"))
@@ -27,8 +37,37 @@ IMAGENET100_MAX_IN_FLIGHT_BATCHES = int(os.environ.get("THOR_IMAGENET100_MAX_IN_
 IMAGENET100_STATS_INTERVAL_S = float(os.environ.get("THOR_IMAGENET100_STATS_INTERVAL_S", "5.0"))
 IMAGENET100_REBUILD = os.environ.get("THOR_IMAGENET100_REBUILD") == "1"
 IMAGENET100_NUM_SHARDS = int(os.environ.get("THOR_IMAGENET100_NUM_SHARDS", "1"))
+IMAGENET100_CV5_BATCH_SIZE = int(os.environ.get("THOR_IMAGENET100_CV5_BATCH_SIZE", str(IMAGENET100_BATCH_SIZE)))
+IMAGENET100_CV5_EPOCHS = int(os.environ.get("THOR_IMAGENET100_CV5_EPOCHS", str(IMAGENET100_EPOCHS)))
+IMAGENET100_CV5_MAX_IN_FLIGHT_BATCHES = int(
+    os.environ.get("THOR_IMAGENET100_CV5_MAX_IN_FLIGHT_BATCHES", str(IMAGENET100_MAX_IN_FLIGHT_BATCHES)))
+IMAGENET100_CV5_LOADER_QUEUE_DEPTH = int(
+    os.environ.get("THOR_IMAGENET100_CV5_LOADER_QUEUE_DEPTH", str(max(32, 2 * IMAGENET100_CV5_MAX_IN_FLIGHT_BATCHES))))
+IMAGENET100_CV5_STATS_INTERVAL_S = float(
+    os.environ.get("THOR_IMAGENET100_CV5_STATS_INTERVAL_S", str(IMAGENET100_STATS_INTERVAL_S)))
+IMAGENET100_CV5_STATS_COLOR = os.environ.get("THOR_IMAGENET100_CV5_STATS_COLOR", "never").lower()
+assert IMAGENET100_CV5_STATS_COLOR in {"always", "auto", "never"}
+IMAGENET100_CV5_SUMMARY_LOGS_PER_SECOND = float(
+    os.environ.get("THOR_IMAGENET100_CV5_SUMMARY_LOGS_PER_SECOND", "0.5"))
+IMAGENET100_CV5_MAX_PARALLEL_RUNS_RAW = os.environ.get("THOR_IMAGENET100_CV5_MAX_PARALLEL_RUNS", "1")
+IMAGENET100_CV5_MAX_PARALLEL_RUNS = (
+    None if IMAGENET100_CV5_MAX_PARALLEL_RUNS_RAW in {None, "", "none", "None"} else
+    int(IMAGENET100_CV5_MAX_PARALLEL_RUNS_RAW))
+IMAGENET100_CV5_NUM_SHARDS = int(os.environ.get("THOR_IMAGENET100_CV5_NUM_SHARDS", str(IMAGENET100_NUM_SHARDS)))
+IMAGENET100_CV5_REBUILD = os.environ.get("THOR_IMAGENET100_CV5_REBUILD") == "1"
+IMAGENET100_CV5_MAX_EXAMPLES_PER_CLASS = int(os.environ.get("THOR_IMAGENET100_CV5_MAX_EXAMPLES_PER_CLASS", "0"))
+IMAGENET100_CV5_LEARNING_RATE = float(os.environ.get("THOR_IMAGENET100_CV5_LEARNING_RATE", "0.01"))
+IMAGENET100_CV5_DECAY = float(os.environ.get("THOR_IMAGENET100_CV5_DECAY", "0.02"))
+IMAGENET100_CV5_MOMENTUM = float(os.environ.get("THOR_IMAGENET100_CV5_MOMENTUM", "0.9"))
+IMAGENET100_CV5_MODEL_ARTIFACTS_DIR = Path(
+    os.environ.get(
+        "THOR_IMAGENET100_CV5_MODEL_ARTIFACTS_DIR",
+        str(Path(tempfile.gettempdir()) / "thor_imagenet100_training_runs_cv5_model_artifacts"),
+    ))
 # Bump whenever the on-disk raw shard format changes so stale /tmp caches are rebuilt.
 IMAGENET100_MANIFEST_VERSION = 2
+IMAGENET100_CV5_MANIFEST_VERSION = 1
+IMAGENET100_CV5_HOLDOUT_TEST_FRACTION = 0.10
 IMAGENET100_NUM_CLASSES = 100
 IMAGENET100_TRAIN_EXAMPLES = 126_689
 IMAGENET100_VALIDATE_EXAMPLES = 5_000
@@ -81,8 +120,11 @@ pytestmark = [
     pytest.mark.training_integration,
     pytest.mark.imagenet100_integration,
     pytest.mark.skipif(
-        not RUN_IMAGENET100_INTEGRATION,
-        reason="set THOR_RUN_TRAINING_IMAGENET100_INTEGRATION=1 to run heavyweight ImageNet-100 model training tests",
+        not RUN_IMAGENET100_ANY_INTEGRATION,
+        reason=(
+            "set THOR_RUN_TRAINING_IMAGENET100_INTEGRATION=1 or one of "
+            "THOR_RUN_TRAINING_IMAGENET100_CV5_ALEXNET_INTEGRATION=1 / "
+            "THOR_RUN_TRAINING_IMAGENET100_CV5_RESNET18_INTEGRATION=1 to run heavyweight ImageNet-100 tests"),
     ),
 ]
 
@@ -90,9 +132,12 @@ _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _TRAINER_STATS_RE = re.compile(
     r"INFO trainer:\s+phase=\s*(?P<phase>train|validate|test)\s+"
     r"epoch=\s*(?P<epoch>\d+)/(?:\d+)\s+"
-    r"step=\s*(?P<step>\d+)\s+"
     r"batch=\s*(?P<batch>\d+)/(?:\d+)\s+"
+    r"step=\s*(?P<step>\d+)\s+"
     r"loss=\s*(?P<loss>[-+0-9.eE]+)")
+_RUN_STATUS_RE = re.compile(
+    r"INFO runs\[(?P<run>[^\]|]+)(?:\|[^\]]+)?\]:.*\bstatus=(?P<status>completed|failed|cancelled|interrupted|oom|running|starting|not_started)\b"
+)
 
 
 def _flush_native_stdio_for_capture():
@@ -192,6 +237,20 @@ def _captured_trainer_stats(captured_text: str):
                 "loss": float(match.group("loss")),
             })
     return stats
+
+
+def _captured_run_statuses(captured_text: str):
+    plain_text = _ANSI_RE.sub("", captured_text)
+    statuses = {}
+    for match in _RUN_STATUS_RE.finditer(plain_text):
+        statuses[match.group("run")] = match.group("status")
+    return statuses
+
+
+def _fit_training_runs_and_capture_text(runs, *, epochs: int, test_loader=None):
+    with _NativeOutputTee() as tee:
+        results = runs.fit(epochs=epochs, test_loader=test_loader)
+    return results, tee.text()
 
 
 def _fit_and_capture_stats(trainer, *, epochs: int):
@@ -468,8 +527,7 @@ def _ensure_imagenet100_shards():
     return manifest
 
 
-def _imagenet100_loader(*, batch_size: int):
-    manifest = _ensure_imagenet100_shards()
+def _imagenet100_loader_from_manifest(manifest: dict, *, batch_size: int, batch_queue_depth: int, dataset_name: str):
     loader = thor.training.LocalBatchLoader(
         manifest["shard_paths"],
         manifest["example_shape"],
@@ -477,9 +535,375 @@ def _imagenet100_loader(*, batch_size: int):
         manifest["label_shape"],
         thor.DataType.fp16,
         batch_size=batch_size,
+        dataset_name=dataset_name,
+        batch_queue_depth=batch_queue_depth,
+    )
+    return loader
+
+
+def _imagenet100_loader(*, batch_size: int):
+    manifest = _ensure_imagenet100_shards()
+    loader = _imagenet100_loader_from_manifest(
+        manifest,
+        batch_size=batch_size,
+        batch_queue_depth=32,
         dataset_name="clane9_imagenet100_preprocessed_fp16_chw",
     )
     return loader, manifest
+
+
+def _imagenet100_cv5_manifest_path(cache_root: Path) -> Path:
+    return cache_root / f"imagenet100_{IMAGENET100_IMAGE_SIZE}_fp16_cv5_manifest.json"
+
+
+def _imagenet100_cv5_shard_root(cache_root: Path) -> Path:
+    return cache_root / f"cv5_shards_raw_v1_{IMAGENET100_IMAGE_SIZE}_fp16"
+
+
+def _imagenet100_cv5_base_manifest(
+    *,
+    source_examples: int,
+    cv_examples: int,
+    test_examples: int,
+    num_classes: int,
+    label_names: list[str],
+    folds: list[dict],
+) -> dict:
+    return {
+        "version": IMAGENET100_CV5_MANIFEST_VERSION,
+        "source_version": IMAGENET100_MANIFEST_VERSION,
+        "dataset_id": IMAGENET100_DATASET_ID,
+        "split_source": "train",
+        "image_size": IMAGENET100_IMAGE_SIZE,
+        "resize_shorter_side": IMAGENET100_RESIZE_SHORTER_SIDE,
+        "dtype": "fp16",
+        "num_classes": num_classes,
+        "num_folds": 5,
+        "holdout_test_fraction": IMAGENET100_CV5_HOLDOUT_TEST_FRACTION,
+        "num_shards": IMAGENET100_CV5_NUM_SHARDS,
+        "max_examples_per_class": IMAGENET100_CV5_MAX_EXAMPLES_PER_CLASS,
+        "source_examples": source_examples,
+        "cv_examples": cv_examples,
+        "test_examples": test_examples,
+        "example_shape": [3, IMAGENET100_IMAGE_SIZE, IMAGENET100_IMAGE_SIZE],
+        "label_shape": [num_classes],
+        "label_names": list(label_names),
+        "folds": folds,
+    }
+
+
+def _read_imagenet100_cv5_manifest_if_valid(cache_root: Path):
+    manifest_file = _imagenet100_cv5_manifest_path(cache_root)
+    if IMAGENET100_REBUILD or IMAGENET100_CV5_REBUILD or not manifest_file.exists():
+        return None
+    try:
+        manifest = json.loads(manifest_file.read_text())
+    except json.JSONDecodeError:
+        return None
+
+    expected = {
+        "version": IMAGENET100_CV5_MANIFEST_VERSION,
+        "source_version": IMAGENET100_MANIFEST_VERSION,
+        "dataset_id": IMAGENET100_DATASET_ID,
+        "split_source": "train",
+        "image_size": IMAGENET100_IMAGE_SIZE,
+        "resize_shorter_side": IMAGENET100_RESIZE_SHORTER_SIDE,
+        "dtype": "fp16",
+        "num_folds": 5,
+        "holdout_test_fraction": IMAGENET100_CV5_HOLDOUT_TEST_FRACTION,
+        "num_shards": IMAGENET100_CV5_NUM_SHARDS,
+        "max_examples_per_class": IMAGENET100_CV5_MAX_EXAMPLES_PER_CLASS,
+        "example_shape": [3, IMAGENET100_IMAGE_SIZE, IMAGENET100_IMAGE_SIZE],
+    }
+    for key, value in expected.items():
+        if manifest.get(key) != value:
+            return None
+    folds = manifest.get("folds")
+    if not isinstance(folds, list) or len(folds) != 5:
+        return None
+    source_examples = manifest.get("source_examples")
+    cv_examples = manifest.get("cv_examples")
+    test_examples = manifest.get("test_examples")
+    if not isinstance(source_examples, int) or source_examples <= 0:
+        return None
+    if not isinstance(cv_examples, int) or cv_examples <= 0:
+        return None
+    if not isinstance(test_examples, int) or test_examples <= 0:
+        return None
+    if cv_examples + test_examples != source_examples:
+        return None
+    if manifest.get("label_shape") != [manifest.get("num_classes")]:
+        return None
+    for fold in folds:
+        shard_paths = fold.get("shard_paths") if isinstance(fold, dict) else None
+        if not shard_paths or not all(Path(path).exists() for path in shard_paths):
+            return None
+        if fold.get("test_examples") != test_examples:
+            return None
+    return manifest
+
+
+def _stratified_fold_indices(labels: np.ndarray, *, num_classes: int, num_folds: int) -> list[np.ndarray]:
+    fold_parts: list[list[np.ndarray]] = [[] for _ in range(num_folds)]
+    for label in range(num_classes):
+        label_indices = np.flatnonzero(labels == label)
+        if label_indices.shape[0] < num_folds:
+            raise RuntimeError(
+                f"class {label} has only {label_indices.shape[0]} examples, cannot make {num_folds} stratified folds")
+        for fold_index in range(num_folds):
+            fold_parts[fold_index].append(label_indices[fold_index::num_folds])
+    folds = []
+    for fold_index in range(num_folds):
+        fold_indices = np.concatenate(fold_parts[fold_index])
+        fold_indices.sort()
+        folds.append(fold_indices)
+    return folds
+
+
+def _stratified_holdout_indices(labels: np.ndarray, *, num_classes: int, fraction: float) -> np.ndarray:
+    if not 0.0 < fraction < 1.0:
+        raise RuntimeError(f"holdout fraction must be between 0 and 1, got {fraction}")
+
+    total_count = int(labels.shape[0])
+    target_count = int(round(total_count * fraction))
+    if target_count <= 0 or target_count >= total_count:
+        raise RuntimeError(f"invalid holdout target count {target_count} for {total_count} examples")
+
+    label_parts = []
+    allocated = 0
+    for label in range(num_classes):
+        label_indices = np.flatnonzero(labels == label)
+        if label_indices.shape[0] == 0:
+            raise RuntimeError(f"class {label} has no examples")
+        exact_count = float(label_indices.shape[0]) * fraction
+        base_count = int(math.floor(exact_count))
+        label_parts.append(
+            {
+                "label": label,
+                "indices": label_indices,
+                "count": base_count,
+                "remainder": exact_count - base_count,
+            })
+        allocated += base_count
+
+    remaining = target_count - allocated
+    if remaining > 0:
+        for label_part in sorted(label_parts, key=lambda part: (-part["remainder"], part["label"]))[:remaining]:
+            label_part["count"] += 1
+
+    holdout_parts = []
+    for label_part in label_parts:
+        count = int(label_part["count"])
+        if count <= 0:
+            raise RuntimeError(
+                f"class {label_part['label']} would contribute no holdout examples; use more data or a larger fraction")
+        label_indices = label_part["indices"]
+        stride = max(1, int(round(1.0 / fraction)))
+        selected = label_indices[::stride]
+        if selected.shape[0] < count:
+            selected = label_indices
+        holdout_parts.append(selected[:count])
+
+    holdout_indices = np.concatenate(holdout_parts)
+    holdout_indices.sort()
+    if holdout_indices.shape[0] != target_count:
+        raise RuntimeError(f"holdout split selected {holdout_indices.shape[0]} examples, expected {target_count}")
+    return holdout_indices
+
+
+def _imagenet100_cv5_source_indices(labels: np.ndarray, *, num_classes: int) -> np.ndarray:
+    if IMAGENET100_CV5_MAX_EXAMPLES_PER_CLASS <= 0:
+        return np.arange(labels.shape[0], dtype=np.int64)
+
+    parts = []
+    for label in range(num_classes):
+        label_indices = np.flatnonzero(labels == label)
+        if label_indices.shape[0] == 0:
+            raise RuntimeError(f"class {label} has no examples")
+        parts.append(label_indices[:IMAGENET100_CV5_MAX_EXAMPLES_PER_CLASS])
+    source_indices = np.concatenate(parts).astype(np.int64, copy=False)
+    source_indices.sort()
+    return source_indices
+
+
+def _prepare_imagenet100_indexed_source(
+    ds,
+    *,
+    source_indices: np.ndarray,
+    labels: np.ndarray,
+    source_root: Path,
+    num_classes: int,
+) -> dict[int, Path]:
+    for label in range(num_classes):
+        (source_root / _class_dir(label)).mkdir(parents=True, exist_ok=True)
+
+    source_paths: dict[int, Path] = {}
+    for source_index in source_indices:
+        label = int(labels[int(source_index)])
+        if label < 0 or label >= num_classes:
+            raise RuntimeError(f"source index {source_index}: label {label} is outside [0, {num_classes})")
+        processed = _center_crop_resize_to_chw_fp16(
+            ds[int(source_index)]["image"],
+            image_size=IMAGENET100_IMAGE_SIZE,
+            resize_shorter_side=IMAGENET100_RESIZE_SHORTER_SIDE,
+        )
+        filename = source_root / _class_dir(label) / f"source_{int(source_index):08d}.bin"
+        filename.write_bytes(processed.tobytes(order="C"))
+        source_paths[int(source_index)] = filename
+    return source_paths
+
+
+def _link_preprocessed_imagenet100_split(
+    *,
+    source_paths: dict[int, Path],
+    labels: np.ndarray,
+    indices: np.ndarray,
+    split_name: str,
+    raw_root: Path,
+    num_classes: int,
+) -> int:
+    for label in range(num_classes):
+        (raw_root / split_name / _class_dir(label)).mkdir(parents=True, exist_ok=True)
+
+    for ordinal, source_index in enumerate(indices):
+        source_index_int = int(source_index)
+        label = int(labels[source_index_int])
+        src = source_paths[source_index_int]
+        dest = raw_root / split_name / _class_dir(label) / f"{split_name}_{ordinal:08d}_source_{source_index_int:08d}.bin"
+        try:
+            os.link(src, dest)
+        except OSError:
+            shutil.copy2(src, dest)
+    return int(indices.shape[0])
+
+
+def _ensure_imagenet100_cv5_shards():
+    IMAGENET100_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    manifest = _read_imagenet100_cv5_manifest_if_valid(IMAGENET100_CACHE_DIR)
+    if manifest is not None:
+        return manifest
+
+    load_dataset, _ = _import_imagenet_dependencies()
+    processing_root = IMAGENET100_CACHE_DIR / "cv5_processing_tmp"
+    source_root = processing_root / "source_fp16_chw"
+    raw_root = processing_root / "raw_fp16_chw"
+    shard_root = _imagenet100_cv5_shard_root(IMAGENET100_CACHE_DIR)
+    hf_cache = IMAGENET100_CACHE_DIR / "hf_datasets"
+    base_name = f"imagenet100_{IMAGENET100_IMAGE_SIZE}_fp16_cv5"
+
+    if processing_root.exists():
+        shutil.rmtree(processing_root)
+    if shard_root.exists():
+        shutil.rmtree(shard_root)
+    processing_root.mkdir(parents=True, exist_ok=True)
+    source_root.mkdir(parents=True, exist_ok=True)
+    raw_root.mkdir(parents=True, exist_ok=True)
+    shard_root.mkdir(parents=True, exist_ok=True)
+
+    train = load_dataset(IMAGENET100_DATASET_ID, split="train", cache_dir=str(hf_cache))
+    label_feature = train.features["label"]
+    label_names = list(getattr(label_feature, "names", []))
+    labels = np.asarray(train["label"], dtype=np.int64)
+    num_classes = len(label_names) if label_names else int(np.max(labels)) + 1
+    if num_classes != IMAGENET100_NUM_CLASSES:
+        raise RuntimeError(f"expected {IMAGENET100_NUM_CLASSES} ImageNet-100 classes, got {num_classes}")
+
+    source_indices = _imagenet100_cv5_source_indices(labels, num_classes=num_classes)
+    source_labels = labels[source_indices]
+    holdout_relative_indices = _stratified_holdout_indices(
+        source_labels,
+        num_classes=num_classes,
+        fraction=IMAGENET100_CV5_HOLDOUT_TEST_FRACTION,
+    )
+    selected_mask = np.ones(source_indices.shape[0], dtype=bool)
+    selected_mask[holdout_relative_indices] = False
+    cv_indices = source_indices[selected_mask]
+    holdout_indices = source_indices[holdout_relative_indices]
+    fold_indices = _stratified_fold_indices(labels[cv_indices], num_classes=num_classes, num_folds=5)
+
+    source_paths = _prepare_imagenet100_indexed_source(
+        train,
+        source_indices=source_indices,
+        labels=labels,
+        source_root=source_root,
+        num_classes=num_classes,
+    )
+
+    example_size_in_bytes = 3 * IMAGENET100_IMAGE_SIZE * IMAGENET100_IMAGE_SIZE * np.dtype(np.float16).itemsize
+    folds = []
+    for fold_index, validate_relative_indices in enumerate(fold_indices):
+        fold_cv_train_mask = np.ones(cv_indices.shape[0], dtype=bool)
+        fold_cv_train_mask[validate_relative_indices] = False
+        train_indices = cv_indices[fold_cv_train_mask]
+        validate_indices = cv_indices[validate_relative_indices]
+
+        fold_raw_root = raw_root / f"fold_{fold_index}"
+        fold_shard_root = shard_root / f"fold_{fold_index}"
+        fold_shard_root.mkdir(parents=True, exist_ok=True)
+        shard_dest_dirs = []
+        for shard_index in range(IMAGENET100_CV5_NUM_SHARDS):
+            dest = fold_shard_root / f"dest_{shard_index:02d}"
+            dest.mkdir(parents=True, exist_ok=True)
+            shard_dest_dirs.append(dest)
+
+        train_count = _link_preprocessed_imagenet100_split(
+            source_paths=source_paths,
+            labels=labels,
+            indices=train_indices,
+            split_name="train",
+            raw_root=fold_raw_root,
+            num_classes=num_classes,
+        )
+        validate_count = _link_preprocessed_imagenet100_split(
+            source_paths=source_paths,
+            labels=labels,
+            indices=validate_indices,
+            split_name="validate",
+            raw_root=fold_raw_root,
+            num_classes=num_classes,
+        )
+        test_count = _link_preprocessed_imagenet100_split(
+            source_paths=source_paths,
+            labels=labels,
+            indices=holdout_indices,
+            split_name="test",
+            raw_root=fold_raw_root,
+            num_classes=num_classes,
+        )
+
+        shard_paths = thor.training.create_sharded_raw_dataset(
+            [str(fold_raw_root)],
+            [str(path) for path in shard_dest_dirs],
+            f"{base_name}_fold_{fold_index}",
+            example_size_in_bytes,
+            thor.DataType.fp16,
+        )
+        shard_paths = sorted(str(Path(path)) for path in shard_paths)
+        for path in shard_paths:
+            assert Path(path).exists(), f"expected CV shard file {path} to exist"
+
+        folds.append(
+            {
+                "fold_index": fold_index,
+                "train_examples": train_count,
+                "validate_examples": validate_count,
+                "test_examples": test_count,
+                "shard_paths": shard_paths,
+            })
+
+        shutil.rmtree(fold_raw_root)
+
+    manifest = _imagenet100_cv5_base_manifest(
+        source_examples=int(source_indices.shape[0]),
+        cv_examples=int(cv_indices.shape[0]),
+        test_examples=int(holdout_indices.shape[0]),
+        num_classes=num_classes,
+        label_names=label_names,
+        folds=folds,
+    )
+    _imagenet100_cv5_manifest_path(IMAGENET100_CACHE_DIR).write_text(json.dumps(manifest, indent=2, sort_keys=True))
+    shutil.rmtree(processing_root)
+    return manifest
 
 
 def _object_detection_image_elems(image_size: int) -> int:
@@ -1079,6 +1503,183 @@ def _run_full_voc2012_detection_model_training(model_builder, *, model_name: str
         _assert_finite_positive_losses(stats, model_name=model_name)
 
 
+def _imagenet100_cv5_optimizer():
+    # Classic SGD+momentum is the most robust default for these fp16 convolutional
+    # ImageNet-style models. The small per-epoch decay keeps longer CV runs from
+    # over-driving the later epochs while leaving 1-epoch smoke runs effectively unchanged.
+    return thor.optimizers.Sgd(
+        initial_learning_rate=IMAGENET100_CV5_LEARNING_RATE,
+        decay=IMAGENET100_CV5_DECAY,
+        momentum=IMAGENET100_CV5_MOMENTUM,
+        nesterov_momentum=True,
+    )
+
+
+def _run_imagenet100_cv5_training_runs(model_builder, *, model_name: str, capfd):
+    _flush_native_stdio_for_capture()
+    capfd.readouterr()
+    ensemble_group = f"imagenet100_cv5_{model_name}"
+    with capfd.disabled():
+        cv_manifest = _ensure_imagenet100_cv5_shards()
+        assert cv_manifest["num_folds"] == 5
+        assert len(cv_manifest["folds"]) == 5
+        assert cv_manifest["example_shape"] == [3, IMAGENET100_IMAGE_SIZE, IMAGENET100_IMAGE_SIZE]
+        assert cv_manifest["label_shape"] == [cv_manifest["num_classes"]]
+        assert cv_manifest["test_examples"] == int(
+            round(cv_manifest["source_examples"] * IMAGENET100_CV5_HOLDOUT_TEST_FRACTION))
+        assert cv_manifest["cv_examples"] + cv_manifest["test_examples"] == cv_manifest["source_examples"]
+
+        def make_fold_trainer(*, fold: dict, run_name: str, save_model_dir: Path):
+            fold_index = int(fold["fold_index"])
+            fold_manifest = {
+                **cv_manifest,
+                "shard_paths": fold["shard_paths"],
+                "train_examples": fold["train_examples"],
+                "validate_examples": fold["validate_examples"],
+                "test_examples": fold["test_examples"],
+            }
+            loader = _imagenet100_loader_from_manifest(
+                fold_manifest,
+                batch_size=IMAGENET100_CV5_BATCH_SIZE,
+                batch_queue_depth=IMAGENET100_CV5_LOADER_QUEUE_DEPTH,
+                dataset_name=f"clane9_imagenet100_fp16_cv5_{model_name}_{run_name}",
+            )
+            assert fold["train_examples"] == loader.get_num_train_examples()
+            assert fold["validate_examples"] == loader.get_num_validate_examples()
+            assert fold["test_examples"] == cv_manifest["test_examples"]
+            assert loader.get_num_train_batches() > 0
+            assert loader.get_num_validate_batches() > 0
+
+            network = model_builder(
+                f"python_integration_imagenet100_cv5_{model_name}_fold_{fold_index}",
+                num_classes=cv_manifest["num_classes"],
+            )
+            return thor.training.Trainer(
+                network,
+                loader,
+                optimizer=_imagenet100_cv5_optimizer(),
+                debug_synchronous=False,
+                stats=True,
+                stats_interval_s=IMAGENET100_CV5_STATS_INTERVAL_S,
+                max_in_flight_batches=IMAGENET100_CV5_MAX_IN_FLIGHT_BATCHES,
+                scalar_tensors_to_report=["loss"],
+                stats_color=IMAGENET100_CV5_STATS_COLOR,
+                save_model_dir=str(save_model_dir),
+                save_model_overwrite=True,
+            )
+
+        artifact_root = IMAGENET100_CV5_MODEL_ARTIFACTS_DIR / model_name
+        run_specs = []
+        for fold in cv_manifest["folds"]:
+            fold_index = int(fold["fold_index"])
+            trainer = make_fold_trainer(
+                fold=fold,
+                run_name=f"fold_{fold_index}",
+                save_model_dir=artifact_root / f"fold_{fold_index}",
+            )
+            run_specs.append((f"fold_{fold_index}", trainer, ensemble_group))
+
+        runs = thor.training.TrainingRuns(
+            run_specs,
+            max_summary_logs_per_second=IMAGENET100_CV5_SUMMARY_LOGS_PER_SECOND,
+            max_parallel_runs=IMAGENET100_CV5_MAX_PARALLEL_RUNS,
+        )
+        test_fold = cv_manifest["folds"][0]
+        test_manifest = {
+            **cv_manifest,
+            "shard_paths": test_fold["shard_paths"],
+            "train_examples": test_fold["train_examples"],
+            "validate_examples": test_fold["validate_examples"],
+            "test_examples": test_fold["test_examples"],
+        }
+        test_loader = _imagenet100_loader_from_manifest(
+            test_manifest,
+            batch_size=IMAGENET100_CV5_BATCH_SIZE,
+            batch_queue_depth=IMAGENET100_CV5_LOADER_QUEUE_DEPTH,
+            dataset_name=f"clane9_imagenet100_fp16_cv5_{model_name}_holdout_test",
+        )
+        results, captured_text = _fit_training_runs_and_capture_text(
+            runs,
+            epochs=IMAGENET100_CV5_EPOCHS,
+            test_loader=test_loader,
+        )
+
+    plain_text = _ANSI_RE.sub("", captured_text)
+    statuses = _captured_run_statuses(captured_text)
+
+    assert len(results) == 5
+    assert results.all_completed()
+    assert "INFO runs summary:" in plain_text
+    assert "\nINFO runs final: ==================== final results" in plain_text
+    assert "INFO runs final: total=5" in plain_text
+    assert f"INFO runs ensemble[{ensemble_group}]:" in plain_text
+    assert "aggregation=ensemble_eval" in plain_text
+    assert "ensemble_train_loss=" in plain_text
+    assert "ensemble_test_loss=" in plain_text
+    assert "ensemble_test_accuracy=" in plain_text
+    assert "train_loss=" in plain_text
+    assert "validate_loss=" in plain_text
+    assert "test_loss=" in plain_text
+    assert "test_accuracy=" in plain_text
+    assert results.status_counts["completed"] == 5
+    assert results.has_ensembles
+    assert len(results.ensembles) == 1
+
+    ensemble = results.ensemble(ensemble_group)
+    assert ensemble.all_completed()
+    assert ensemble.total_weight == pytest.approx(5.0)
+    assert len(ensemble.members) == 5
+    assert ensemble.ensemble_train_loss is not None
+    assert ensemble.ensemble_test_loss is not None
+    assert ensemble.ensemble_test_accuracy is not None
+    assert math.isfinite(ensemble.ensemble_train_loss)
+    assert math.isfinite(ensemble.ensemble_test_loss)
+    assert math.isfinite(ensemble.ensemble_test_accuracy)
+    assert ensemble.ensemble_train_loss > 0.0
+    assert ensemble.ensemble_test_loss > 0.0
+    assert 0.0 <= ensemble.ensemble_test_accuracy <= 1.0
+
+    validation_losses = []
+    test_losses = []
+    for fold_index in range(5):
+        run_name = f"fold_{fold_index}"
+        assert statuses[run_name] == "completed"
+        assert re.search(
+            rf"INFO runs\[{re.escape(run_name)}\|{re.escape(ensemble_group)}\]:.*"
+            rf"train_loss=.*validate_loss=.*test_loss=.*test_accuracy=",
+            plain_text,
+        ), f"final report did not include per-fold test_loss/test_accuracy for {run_name}:\n{plain_text}"
+        result = results[run_name]
+        assert result.status == "completed"
+        assert result.ensemble_group == ensemble_group
+        assert result.ensemble_weight == pytest.approx(1.0)
+        assert result.final_training_loss is not None
+        assert result.final_validation_loss is not None
+        assert result.final_test_loss is not None
+        assert result.final_test_accuracy is not None
+        assert result.final_loss("train") == result.final_training_loss
+        assert result.final_loss("validate") == result.final_validation_loss
+        assert result.final_loss("test") == result.final_test_loss
+        assert result.final_accuracy("test") == result.final_test_accuracy
+        assert math.isfinite(result.final_training_loss)
+        assert math.isfinite(result.final_validation_loss)
+        assert math.isfinite(result.final_test_loss)
+        assert math.isfinite(result.final_test_accuracy)
+        assert result.final_training_loss > 0.0
+        assert result.final_validation_loss > 0.0
+        assert result.final_test_loss > 0.0
+        assert 0.0 <= result.final_test_accuracy <= 1.0
+        validation_losses.append(result.final_validation_loss)
+        test_losses.append(result.final_test_loss)
+
+    assert math.isfinite(float(np.mean(validation_losses)))
+    assert math.isfinite(float(np.mean(test_losses)))
+
+
+@pytest.mark.skipif(
+    not RUN_IMAGENET100_INTEGRATION,
+    reason="set THOR_RUN_TRAINING_IMAGENET100_INTEGRATION=1 to run VOC2012 object-detection training integration",
+)
 @pytest.mark.parametrize(
     ("model_name", "model_builder"),
     [
@@ -1089,9 +1690,35 @@ def test_queued_trainer_trains_voc2012_object_detection_networks_end_to_end(mode
     _run_full_voc2012_detection_model_training(model_builder, model_name=model_name, capfd=capfd)
 
 
+@pytest.mark.skipif(
+    not RUN_IMAGENET100_INTEGRATION,
+    reason="set THOR_RUN_TRAINING_IMAGENET100_INTEGRATION=1 to run full AlexNet ImageNet-100 training integration",
+)
 def test_queued_trainer_trains_full_alexnet_on_full_clane9_imagenet100(capfd):
     _run_full_imagenet100_model_training(_build_alexnet_imagenet100, model_name="alexnet", capfd=capfd)
 
 
+@pytest.mark.skipif(
+    not RUN_IMAGENET100_INTEGRATION,
+    reason="set THOR_RUN_TRAINING_IMAGENET100_INTEGRATION=1 to run full ResNet-18 ImageNet-100 training integration",
+)
 def test_queued_trainer_trains_full_resnet18_on_full_clane9_imagenet100(capfd):
     _run_full_imagenet100_model_training(_build_resnet18_imagenet100, model_name="resnet18", capfd=capfd)
+
+
+@pytest.mark.imagenet100_cv5_integration
+@pytest.mark.skipif(
+    not RUN_IMAGENET100_CV5_ALEXNET_INTEGRATION,
+    reason="set THOR_RUN_TRAINING_IMAGENET100_CV5_ALEXNET_INTEGRATION=1 to run AlexNet ImageNet-100 CV5 TrainingRuns",
+)
+def test_training_runs_imagenet100_alexnet_five_fold_cross_validation(capfd):
+    _run_imagenet100_cv5_training_runs(_build_alexnet_imagenet100, model_name="alexnet", capfd=capfd)
+
+
+@pytest.mark.imagenet100_cv5_integration
+@pytest.mark.skipif(
+    not RUN_IMAGENET100_CV5_RESNET18_INTEGRATION,
+    reason="set THOR_RUN_TRAINING_IMAGENET100_CV5_RESNET18_INTEGRATION=1 to run ResNet-18 ImageNet-100 CV5 TrainingRuns",
+)
+def test_training_runs_imagenet100_resnet18_five_fold_cross_validation(capfd):
+    _run_imagenet100_cv5_training_runs(_build_resnet18_imagenet100, model_name="resnet18", capfd=capfd)

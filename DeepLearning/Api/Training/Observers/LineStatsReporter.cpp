@@ -380,17 +380,17 @@ void appendPlainStatsLine(LineBuffer& out,
         appendPadded(out, formatUnsigned(stats.epoch), 9);
     }
 
-    if (stats.step > 0) {
-        appendPlainDimKey(out, "step");
-        appendPadded(out, formatUnsigned(stats.step), 10);
-    }
-
     if (stats.stepsPerEpoch > 0) {
         appendPlainDimKey(out, "batch");
         appendPadded(out, formatRatio(stats.stepInEpoch, stats.stepsPerEpoch), 13);
     } else if (stats.stepInEpoch > 0) {
         appendPlainDimKey(out, "batch");
         appendPadded(out, formatUnsigned(stats.stepInEpoch), 13);
+    }
+
+    if (stats.step > 0) {
+        appendPlainDimKey(out, "step");
+        appendPadded(out, formatUnsigned(stats.step), 10);
     }
 
     if (stats.loss.has_value()) {
@@ -466,17 +466,17 @@ void appendColorStatsLine(LineBuffer& out,
         appendStyledPadded(out, Ansi::progress, formatUnsigned(stats.epoch), 9);
     }
 
-    if (stats.step > 0) {
-        appendDimKey(out, "step");
-        appendStyledPadded(out, Ansi::progress, formatUnsigned(stats.step), 10);
-    }
-
     if (stats.stepsPerEpoch > 0) {
         appendDimKey(out, "batch");
         appendStyledPadded(out, Ansi::progress, formatRatio(stats.stepInEpoch, stats.stepsPerEpoch), 13);
     } else if (stats.stepInEpoch > 0) {
         appendDimKey(out, "batch");
         appendStyledPadded(out, Ansi::progress, formatUnsigned(stats.stepInEpoch), 13);
+    }
+
+    if (stats.step > 0) {
+        appendDimKey(out, "step");
+        appendStyledPadded(out, Ansi::progress, formatUnsigned(stats.step), 10);
     }
 
     if (stats.loss.has_value()) {

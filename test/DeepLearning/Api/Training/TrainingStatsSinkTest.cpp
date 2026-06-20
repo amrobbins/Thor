@@ -198,6 +198,7 @@ TEST(TrainingRunsStatsReporter, RunningLineIncludesEnsembleGroupAndCurrentTrainA
 
     const std::string output = readAndCloseFile(out);
     EXPECT_NE(output.find("INFO runs[fold_0|digits_dense_cv5]: epoch=       2/5"), std::string::npos);
+    EXPECT_NE(output.find("epoch=       2/5 batch=        7/100 step=        17"), std::string::npos);
     EXPECT_EQ(output.find(" phase="), std::string::npos);
     EXPECT_EQ(output.find(" loss= 0.200000"), std::string::npos);
     EXPECT_EQ(output.find("ensemble_group=digits_dense_cv5"), std::string::npos);
