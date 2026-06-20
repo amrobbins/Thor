@@ -57,7 +57,8 @@ Event PlacedNetwork::submitBatch(uint64_t stampIndex,
                                  bool isInferenceOnly,
                                  Event* reusableProcessingFinishedEvent,
                                  bool waitForOutputsOnProcessingStream,
-                                 ThorImplementation::BatchSubmissionTiming* submitTiming) {
+                                 ThorImplementation::BatchSubmissionTiming* submitTiming,
+                                 std::optional<uint32_t> outputSlotIndex) {
     THOR_THROW_IF_FALSE(stampIndex < stampedNetworks.size());
     const auto totalStart = std::chrono::high_resolution_clock::now();
     if (!isInferenceOnly) {
@@ -80,7 +81,8 @@ Event PlacedNetwork::submitBatch(uint64_t stampIndex,
                                                                            isInferenceOnly,
                                                                            reusableProcessingFinishedEvent,
                                                                            waitForOutputsOnProcessingStream,
-                                                                           submitTiming);
+                                                                           submitTiming,
+                                                                           outputSlotIndex);
     const auto sendBatchFinish = std::chrono::high_resolution_clock::now();
     if (submitTiming != nullptr) {
         submitTiming->sendBatchMicros += elapsedMicros(sendBatchStart, sendBatchFinish);
@@ -97,7 +99,8 @@ Event PlacedNetwork::submitBatch(uint64_t stampIndex,
                                  const std::vector<Tensor>& activeTrainingLossRoots,
                                  Event* reusableProcessingFinishedEvent,
                                  bool waitForOutputsOnProcessingStream,
-                                 ThorImplementation::BatchSubmissionTiming* submitTiming) {
+                                 ThorImplementation::BatchSubmissionTiming* submitTiming,
+                                 std::optional<uint32_t> outputSlotIndex) {
     THOR_THROW_IF_FALSE(stampIndex < stampedNetworks.size());
     const auto totalStart = std::chrono::high_resolution_clock::now();
     if (!isInferenceOnly) {
@@ -120,7 +123,8 @@ Event PlacedNetwork::submitBatch(uint64_t stampIndex,
                                                                            isInferenceOnly,
                                                                            reusableProcessingFinishedEvent,
                                                                            waitForOutputsOnProcessingStream,
-                                                                           submitTiming);
+                                                                           submitTiming,
+                                                                           outputSlotIndex);
     const auto sendBatchFinish = std::chrono::high_resolution_clock::now();
     if (submitTiming != nullptr) {
         submitTiming->sendBatchMicros += elapsedMicros(sendBatchStart, sendBatchFinish);
@@ -136,7 +140,8 @@ Event PlacedNetwork::submitBatch(uint64_t stampIndex,
                                  bool isInferenceOnly,
                                  Event* reusableProcessingFinishedEvent,
                                  bool waitForOutputsOnProcessingStream,
-                                 ThorImplementation::BatchSubmissionTiming* submitTiming) {
+                                 ThorImplementation::BatchSubmissionTiming* submitTiming,
+                                 std::optional<uint32_t> outputSlotIndex) {
     THOR_THROW_IF_FALSE(stampIndex < stampedNetworks.size());
     const auto totalStart = std::chrono::high_resolution_clock::now();
     if (!isInferenceOnly) {
@@ -159,7 +164,8 @@ Event PlacedNetwork::submitBatch(uint64_t stampIndex,
                                                                            isInferenceOnly,
                                                                            reusableProcessingFinishedEvent,
                                                                            waitForOutputsOnProcessingStream,
-                                                                           submitTiming);
+                                                                           submitTiming,
+                                                                           outputSlotIndex);
     const auto sendBatchFinish = std::chrono::high_resolution_clock::now();
     if (submitTiming != nullptr) {
         submitTiming->sendBatchMicros += elapsedMicros(sendBatchStart, sendBatchFinish);
@@ -176,7 +182,8 @@ Event PlacedNetwork::submitBatch(uint64_t stampIndex,
                                  const std::vector<Tensor>& activeTrainingLossRoots,
                                  Event* reusableProcessingFinishedEvent,
                                  bool waitForOutputsOnProcessingStream,
-                                 ThorImplementation::BatchSubmissionTiming* submitTiming) {
+                                 ThorImplementation::BatchSubmissionTiming* submitTiming,
+                                 std::optional<uint32_t> outputSlotIndex) {
     THOR_THROW_IF_FALSE(stampIndex < stampedNetworks.size());
     const auto totalStart = std::chrono::high_resolution_clock::now();
     if (!isInferenceOnly) {
@@ -199,7 +206,8 @@ Event PlacedNetwork::submitBatch(uint64_t stampIndex,
                                                                            isInferenceOnly,
                                                                            reusableProcessingFinishedEvent,
                                                                            waitForOutputsOnProcessingStream,
-                                                                           submitTiming);
+                                                                           submitTiming,
+                                                                           outputSlotIndex);
     const auto sendBatchFinish = std::chrono::high_resolution_clock::now();
     if (submitTiming != nullptr) {
         submitTiming->sendBatchMicros += elapsedMicros(sendBatchStart, sendBatchFinish);
@@ -213,9 +221,16 @@ std::vector<uint64_t> PlacedNetwork::getActiveTrainingRawLossOriginalIdsForDebug
     return stampedNetworks[stampIndex].getActiveTrainingRawLossOriginalIdsForDebug();
 }
 
-void PlacedNetwork::extendOutputWritableEvents(uint64_t stampIndex, Event event) {
+void PlacedNetwork::preallocateOutputSlots(uint32_t numSlots) {
+    THOR_THROW_IF_FALSE(numSlots >= 1);
+    for (ThorImplementation::StampedNetwork& stampedNetwork : stampedNetworks) {
+        stampedNetwork.preallocateOutputSlots(numSlots);
+    }
+}
+
+void PlacedNetwork::extendOutputWritableEvents(uint64_t stampIndex, Event event, std::optional<uint32_t> outputSlotIndex) {
     THOR_THROW_IF_FALSE(stampIndex < stampedNetworks.size());
-    stampedNetworks[stampIndex].extendOutputWritableEvents(event);
+    stampedNetworks[stampIndex].extendOutputWritableEvents(event, outputSlotIndex);
 }
 
 std::vector<ParameterReference> PlacedNetwork::getTrainableParameterReferences(bool trainingEnabledOnly) {

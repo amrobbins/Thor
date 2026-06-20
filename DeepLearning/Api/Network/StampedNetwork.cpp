@@ -171,7 +171,8 @@ Event StampedNetwork::sendBatch(std::map<std::string, Tensor> batchInputs,
                                 bool isInferenceOnly,
                                 Event* reusableProcessingFinishedEvent,
                                 bool waitForOutputsOnProcessingStream,
-                                BatchSubmissionTiming* submitTiming) {
+                                BatchSubmissionTiming* submitTiming,
+                                std::optional<uint32_t> outputSlotIndex) {
     std::optional<uint32_t> batchSize;
     const auto unwrapStart = std::chrono::high_resolution_clock::now();
     for (const auto &[inputName, inputTensor] : batchInputs) {
@@ -195,7 +196,8 @@ Event StampedNetwork::sendBatch(std::map<std::string, Tensor> batchInputs,
                                                        batchSize.value(),
                                                        reusableProcessingFinishedEvent,
                                                        waitForOutputsOnProcessingStream,
-                                                       submitTiming == nullptr ? nullptr : &localTiming);
+                                                       submitTiming == nullptr ? nullptr : &localTiming,
+                                                       outputSlotIndex);
     if (submitTiming != nullptr) {
         localTiming.batchUnwrapMicros += elapsedMicros(unwrapStart, unwrapFinish);
         accumulateBatchSubmissionTiming(*submitTiming, localTiming);
@@ -209,7 +211,8 @@ Event StampedNetwork::sendBatch(const Batch& batchInputs,
                                 bool isInferenceOnly,
                                 Event* reusableProcessingFinishedEvent,
                                 bool waitForOutputsOnProcessingStream,
-                                BatchSubmissionTiming* submitTiming) {
+                                BatchSubmissionTiming* submitTiming,
+                                std::optional<uint32_t> outputSlotIndex) {
     std::map<std::string, Tensor> physicalBatchInputs;
     std::optional<uint32_t> batchSize;
     const auto unwrapStart = std::chrono::high_resolution_clock::now();
@@ -254,7 +257,8 @@ Event StampedNetwork::sendBatch(const Batch& batchInputs,
                                                        batchSize.value(),
                                                        reusableProcessingFinishedEvent,
                                                        waitForOutputsOnProcessingStream,
-                                                       submitTiming == nullptr ? nullptr : &localTiming);
+                                                       submitTiming == nullptr ? nullptr : &localTiming,
+                                                       outputSlotIndex);
     if (submitTiming != nullptr) {
         localTiming.batchUnwrapMicros += elapsedMicros(unwrapStart, unwrapFinish);
         accumulateBatchSubmissionTiming(*submitTiming, localTiming);
@@ -269,9 +273,15 @@ Event StampedNetwork::sendPhysicalBatch(std::map<std::string, Tensor> batchInput
                                         uint32_t batchSize,
                                         Event* reusableProcessingFinishedEvent,
                                         bool waitForOutputsOnProcessingStream,
-                                        BatchSubmissionTiming* submitTiming) {
+                                        BatchSubmissionTiming* submitTiming,
+                                        std::optional<uint32_t> outputSlotIndex) {
     const auto physicalStart = std::chrono::high_resolution_clock::now();
     THOR_THROW_IF_FALSE(batchInputs.size() == inputs.size());
+
+    const uint32_t outputSlot = outputSlotIndex.value_or(0);
+    for (uint32_t i = 0; i < outputs.size(); ++i) {
+        outputs[i]->setActiveOutputSlot(outputSlot);
+    }
 
     const auto inputForwardStart = std::chrono::high_resolution_clock::now();
     for (uint32_t i = 0; i < inputs.size(); ++i) {
@@ -290,8 +300,8 @@ Event StampedNetwork::sendPhysicalBatch(std::map<std::string, Tensor> batchInput
     // must wait on the NetworkOutput ready event, not on the producer stream.
     const auto outputCollectStart = std::chrono::high_resolution_clock::now();
     for (uint32_t i = 0; i < outputs.size(); ++i) {
-        batchOutputs[outputs[i]->getName()] = outputs[i]->getFeatureOutput().value();
-        Event outputReadyEvent = outputs[i]->getOutputReadyEvent();
+        batchOutputs[outputs[i]->getName()] = outputs[i]->getFeatureOutputForSlot(outputSlot).value();
+        Event outputReadyEvent = outputs[i]->getOutputReadyEventForSlot(outputSlot);
         outputReadyEvents[outputs[i]->getName()] = outputReadyEvent;
     }
     const auto outputCollectFinish = std::chrono::high_resolution_clock::now();
@@ -384,9 +394,23 @@ void StampedNetwork::clear() {
     outputNamedShared.clear();
 }
 
-void StampedNetwork::extendOutputWritableEvents(Event event) {
+void StampedNetwork::preallocateOutputSlots(uint32_t numSlots) {
+    THOR_THROW_IF_FALSE(numSlots >= 1);
     for (NetworkOutput* output : outputs) {
-        output->extendOutputWritableEvent(event);
+        output->preallocateOutputSlots(numSlots);
+    }
+}
+
+void StampedNetwork::extendOutputWritableEvents(Event event, std::optional<uint32_t> outputSlotIndex) {
+    if (outputSlotIndex.has_value()) {
+        const uint32_t outputSlot = outputSlotIndex.value();
+        for (NetworkOutput* output : outputs) {
+            output->extendOutputWritableEventForSlot(outputSlot, event);
+        }
+    } else {
+        for (NetworkOutput* output : outputs) {
+            output->extendOutputWritableEvent(event);
+        }
     }
 }
 

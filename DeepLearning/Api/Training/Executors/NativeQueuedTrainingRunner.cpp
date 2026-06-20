@@ -1036,7 +1036,8 @@ class NativeQueuedEpochScheduler {
                                                           step.getLossRoots(),
                                                           &processingFinishedEvents[slotIndex],
                                                           /*waitForOutputsOnProcessingStream=*/false,
-                                                          &singleSubmitTiming);
+                                                          &singleSubmitTiming,
+                                                          slotIndex);
                     };
 
                     const auto submitBatchStart = std::chrono::high_resolution_clock::now();
@@ -1103,7 +1104,7 @@ class NativeQueuedEpochScheduler {
             const auto putEventFinish = std::chrono::high_resolution_clock::now();
 
             const auto extendOutputsStart = std::chrono::high_resolution_clock::now();
-            placedNetwork->extendOutputWritableEvents(nextStampToProcess, completionFinishedEvents[slotIndex]);
+            placedNetwork->extendOutputWritableEvents(nextStampToProcess, completionFinishedEvents[slotIndex], slotIndex);
             const auto extendOutputsFinish = std::chrono::high_resolution_clock::now();
             const auto completionSetupFinish = extendOutputsFinish;
 
@@ -1212,6 +1213,12 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         request.cancellationToken.throwIfCancellationRequested();
         initDoneEvents[i].synchronize();
     }
+
+    request.cancellationToken.throwIfCancellationRequested();
+    // Native queued training uses the queue slot index as the NetworkOutput slot.
+    // Preallocate the whole output ring before the first scheduled batch so OOM or
+    // other allocation failures happen during setup rather than in the hot submit path.
+    placedNetwork->preallocateOutputSlots(static_cast<uint32_t>(options.maxInFlightBatches));
 
     request.cancellationToken.throwIfCancellationRequested();
     ExecutableTrainingPlan plan =

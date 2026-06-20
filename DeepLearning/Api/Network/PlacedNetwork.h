@@ -10,6 +10,7 @@
 #include "Utilities/TarFile/TarWriter.h"
 
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -44,7 +45,8 @@ class PlacedNetwork {
                       bool isInferenceOnly,
                       Event* reusableProcessingFinishedEvent = nullptr,
                       bool waitForOutputsOnProcessingStream = true,
-                      ThorImplementation::BatchSubmissionTiming* submitTiming = nullptr);
+                      ThorImplementation::BatchSubmissionTiming* submitTiming = nullptr,
+                      std::optional<uint32_t> outputSlotIndex = std::nullopt);
     Event submitBatch(uint64_t stampIndex,
                       std::map<std::string, ThorImplementation::Tensor> batchInputs,
                       std::map<std::string, ThorImplementation::Tensor>& batchOutputs,
@@ -53,7 +55,8 @@ class PlacedNetwork {
                       const std::vector<Tensor>& activeTrainingLossRoots,
                       Event* reusableProcessingFinishedEvent = nullptr,
                       bool waitForOutputsOnProcessingStream = true,
-                      ThorImplementation::BatchSubmissionTiming* submitTiming = nullptr);
+                      ThorImplementation::BatchSubmissionTiming* submitTiming = nullptr,
+                      std::optional<uint32_t> outputSlotIndex = std::nullopt);
     Event submitBatch(uint64_t stampIndex,
                       const Batch& batchInputs,
                       std::map<std::string, ThorImplementation::Tensor>& batchOutputs,
@@ -61,7 +64,8 @@ class PlacedNetwork {
                       bool isInferenceOnly,
                       Event* reusableProcessingFinishedEvent = nullptr,
                       bool waitForOutputsOnProcessingStream = true,
-                      ThorImplementation::BatchSubmissionTiming* submitTiming = nullptr);
+                      ThorImplementation::BatchSubmissionTiming* submitTiming = nullptr,
+                      std::optional<uint32_t> outputSlotIndex = std::nullopt);
     Event submitBatch(uint64_t stampIndex,
                       const Batch& batchInputs,
                       std::map<std::string, ThorImplementation::Tensor>& batchOutputs,
@@ -70,10 +74,12 @@ class PlacedNetwork {
                       const std::vector<Tensor>& activeTrainingLossRoots,
                       Event* reusableProcessingFinishedEvent = nullptr,
                       bool waitForOutputsOnProcessingStream = true,
-                      ThorImplementation::BatchSubmissionTiming* submitTiming = nullptr);
+                      ThorImplementation::BatchSubmissionTiming* submitTiming = nullptr,
+                      std::optional<uint32_t> outputSlotIndex = std::nullopt);
     std::vector<uint64_t> getActiveTrainingRawLossOriginalIdsForDebug(uint64_t stampIndex = 0) const;
 
-    void extendOutputWritableEvents(uint64_t stampIndex, Event event);
+    void extendOutputWritableEvents(uint64_t stampIndex, Event event, std::optional<uint32_t> outputSlotIndex = std::nullopt);
+    void preallocateOutputSlots(uint32_t numSlots);
 
     uint64_t getNumStamps() { return stampedNetworks.size(); }
     ThorImplementation::StampedNetwork& getStampedNetwork(uint64_t i) {

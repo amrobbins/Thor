@@ -11,6 +11,7 @@
 #include "Utilities/Common/Event.h"
 
 #include <vector>
+#include <optional>
 #include <cstdint>
 
 #include "DeepLearning/Api/Parameter/Parameterizable.h"
@@ -91,6 +92,7 @@ class StampedNetwork {
 
     std::vector<std::shared_ptr<ThorImplementation::NetworkInput>> getInputs() { return inputsShared; }
     std::vector<std::shared_ptr<ThorImplementation::NetworkOutput>> getOutputs() { return outputsShared; }
+    void preallocateOutputSlots(uint32_t numSlots);
 
     uint64_t getNumTrainableLayers() { return trainableLayersShared.size(); }
     std::shared_ptr<ThorImplementation::TrainableLayer> &getTrainableLayer(uint64_t i) { return trainableLayersShared[i]; }
@@ -140,7 +142,8 @@ class StampedNetwork {
                     bool isInferenceOnly,
                     Event* reusableProcessingFinishedEvent = nullptr,
                     bool waitForOutputsOnProcessingStream = true,
-                    BatchSubmissionTiming* submitTiming = nullptr);
+                    BatchSubmissionTiming* submitTiming = nullptr,
+                    std::optional<uint32_t> outputSlotIndex = std::nullopt);
 
     Event sendBatch(const Batch& batchInputs,
                     std::map<std::string, Tensor> &batchOutputs,
@@ -148,7 +151,8 @@ class StampedNetwork {
                     bool isInferenceOnly,
                     Event* reusableProcessingFinishedEvent = nullptr,
                     bool waitForOutputsOnProcessingStream = true,
-                    BatchSubmissionTiming* submitTiming = nullptr);
+                    BatchSubmissionTiming* submitTiming = nullptr,
+                    std::optional<uint32_t> outputSlotIndex = std::nullopt);
 
     Event sendPhysicalBatch(std::map<std::string, Tensor> batchInputs,
                             std::map<std::string, Tensor> &batchOutputs,
@@ -157,9 +161,10 @@ class StampedNetwork {
                             uint32_t batchSize,
                             Event* reusableProcessingFinishedEvent = nullptr,
                             bool waitForOutputsOnProcessingStream = true,
-                            BatchSubmissionTiming* submitTiming = nullptr);
+                            BatchSubmissionTiming* submitTiming = nullptr,
+                            std::optional<uint32_t> outputSlotIndex = std::nullopt);
 
-    void extendOutputWritableEvents(Event event);
+    void extendOutputWritableEvents(Event event, std::optional<uint32_t> outputSlotIndex = std::nullopt);
 
     void clear();
 
