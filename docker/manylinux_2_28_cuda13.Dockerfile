@@ -23,6 +23,20 @@ RUN dnf install -y \
       openssl-devel \
     && dnf clean all
 
+ARG NLOHMANN_JSON_VERSION=3.11.3
+
+RUN curl -L \
+      "https://github.com/nlohmann/json/releases/download/v${NLOHMANN_JSON_VERSION}/json.tar.xz" \
+      -o /tmp/json.tar.xz && \
+    mkdir -p /tmp/json-src && \
+    tar -xf /tmp/json.tar.xz -C /tmp/json-src --strip-components=1 && \
+    cmake -S /tmp/json-src -B /tmp/json-build \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DJSON_BuildTests=OFF \
+      -DCMAKE_INSTALL_PREFIX=/usr/local && \
+    cmake --build /tmp/json-build --target install && \
+    rm -rf /tmp/json-src /tmp/json-build /tmp/json.tar.xz
+
 RUN dnf config-manager --add-repo \
       https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo \
     && dnf makecache
@@ -61,11 +75,7 @@ RUN /opt/python/cp312-cp312/bin/python -m pip install -U \
       twine \
       nvidia-cudnn-frontend==1.23.0
 
-RUN dnf install -y boost-devel
-
 RUN dnf install -y libarchive-devel
-
-RUN dnf install -y json-devel
 
 RUN dnf install -y ccache
 
