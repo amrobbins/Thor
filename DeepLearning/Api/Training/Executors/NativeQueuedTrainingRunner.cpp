@@ -338,11 +338,50 @@ class NativeQueuedSigintScope {
     SignalHandler previousHandler = SIG_DFL;
 };
 
-void ensureNativeQueuedPlanCompatible(const ExecutableTrainingPlan& plan, const Network& network) {
+void ensureNativeQueuedPlanCompatible(const ExecutableTrainingPlan& plan, const Network& network, bool evaluateOnly) {
+    if (evaluateOnly) {
+        plan.validateNativeQueuedExecutorCompatible({});
+        return;
+    }
     plan.validateNativeQueuedExecutorCompatible(network.getTrainableParameterReferences(/*trainingEnabledOnly=*/true));
 }
 
+std::shared_ptr<TrainingProgram> evaluationOnlyProgramForRequest(const TrainingRunRequest& request) {
+    std::vector<std::shared_ptr<TrainingStep>> evaluationSteps;
+
+    if (request.trainingProgram != nullptr) {
+        if (!request.trainingProgram->isInitialized()) {
+            throw std::runtime_error("Trainer execution received an uninitialized TrainingProgram.");
+        }
+        evaluationSteps.reserve(request.trainingProgram->getNumSteps());
+        for (uint64_t i = 0; i < request.trainingProgram->getNumSteps(); ++i) {
+            const TrainingStep& step = request.trainingProgram->getStep(i);
+            evaluationSteps.push_back(std::make_shared<TrainingStep>(step.getName(),
+                                                                     step.getPhases(),
+                                                                     /*optimizer=*/nullptr,
+                                                                     std::vector<ParameterReference>{},
+                                                                     step.getRepeatCount(),
+                                                                     step.getGradientClearPolicy(),
+                                                                     step.getInputBindings(),
+                                                                     step.isEnabled()));
+        }
+    } else {
+        std::vector<Tensor> lossRoots = request.network->getLossRootTensors();
+        if (lossRoots.empty()) {
+            throw std::runtime_error("Trainer could not synthesize an evaluation TrainingProgram because the Network has no loss roots.");
+        }
+        evaluationSteps.push_back(
+            std::make_shared<TrainingStep>("default", std::move(lossRoots), /*optimizer=*/nullptr, std::vector<ParameterReference>{}));
+    }
+
+    return std::make_shared<TrainingProgram>(std::move(evaluationSteps));
+}
+
 std::shared_ptr<TrainingProgram> defaultTrainingProgramForRequest(const TrainingRunRequest& request) {
+    if (request.executionMode == TrainingRunExecutionMode::EVALUATE) {
+        return evaluationOnlyProgramForRequest(request);
+    }
+
     if (request.trainingProgram != nullptr) {
         if (!request.trainingProgram->isInitialized()) {
             throw std::runtime_error("Trainer execution received an uninitialized TrainingProgram.");
@@ -938,10 +977,12 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                         request.executionMode == TrainingRunExecutionMode::EVALUATE);
     request.cancellationToken.throwIfCancellationRequested();
 
-    std::shared_ptr<TrainingProgram> trainingProgram = defaultTrainingProgramForRequest(request);
-    attachPlacementFallbackOptimizerIfNeeded(request, *trainingProgram);
-
     const bool evaluateOnly = request.executionMode == TrainingRunExecutionMode::EVALUATE;
+    std::shared_ptr<TrainingProgram> trainingProgram = defaultTrainingProgramForRequest(request);
+    if (!evaluateOnly) {
+        attachPlacementFallbackOptimizerIfNeeded(request, *trainingProgram);
+    }
+
     if (evaluateOnly && request.evaluationPhase == TrainingEventPhase::UNKNOWN) {
         throw std::runtime_error("Trainer evaluation requires a concrete evaluation phase.");
     }
@@ -949,7 +990,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     const uint64_t batchSize = request.loader->getBatchSize();
     std::vector<Event> initDoneEvents;
     request.cancellationToken.throwIfCancellationRequested();
-    std::shared_ptr<PlacedNetwork> placedNetwork = request.network->place(batchSize, initDoneEvents, /*inferenceOnly=*/false);
+    std::shared_ptr<PlacedNetwork> placedNetwork = request.network->place(batchSize, initDoneEvents, /*inferenceOnly=*/evaluateOnly);
     THOR_THROW_IF_FALSE(placedNetwork->getNumStamps() == 1);
     for (size_t i = 0; i < initDoneEvents.size(); ++i) {
         request.cancellationToken.throwIfCancellationRequested();
@@ -957,8 +998,8 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     }
 
     request.cancellationToken.throwIfCancellationRequested();
-    ExecutableTrainingPlan plan = ExecutableTrainingPlan::compile(*trainingProgram, *placedNetwork);
-    ensureNativeQueuedPlanCompatible(plan, *request.network);
+    ExecutableTrainingPlan plan = ExecutableTrainingPlan::compile(*trainingProgram, *placedNetwork, /*resolveEmptyUpdateParametersAsAllTrainable=*/!evaluateOnly);
+    ensureNativeQueuedPlanCompatible(plan, *request.network, evaluateOnly);
 
     ThorImplementation::StampedNetwork& statsStampedNetwork = placedNetwork->getStampedNetwork(0);
     const uint64_t forwardFlopsPerBatch = statsStampedNetwork.getFloatingPointOperationsPerExampleForward() * batchSize;

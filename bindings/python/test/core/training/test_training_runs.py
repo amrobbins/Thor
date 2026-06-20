@@ -24,10 +24,10 @@ def _captured_terminal_statuses(captured_text: str):
     return seen
 
 
-def _fit_runs_and_capture_text(runs, capfd, *, epochs: int):
+def _fit_runs_and_capture_text(runs, capfd, *, epochs: int, test_loader=None):
     _flush_native_stdio_for_capture()
     capfd.readouterr()
-    results = runs.fit(epochs=epochs)
+    results = runs.fit(epochs=epochs, test_loader=test_loader)
     _flush_native_stdio_for_capture()
     captured = capfd.readouterr()
     captured_text = captured.out + captured.err
@@ -107,8 +107,17 @@ def _make_signature_only_trainer(name: str, *, input_dtype=thor.DataType.fp32, o
     )
 
 
-def _make_tiny_regression_trainer(name: str, *, optimizer=True, stats=True, save_model_dir=None, save_model_overwrite=False):
-    optimizer_obj = thor.optimizers.Sgd(initial_learning_rate=0.01, momentum=0.0) if optimizer else None
+def _make_tiny_regression_trainer(
+    name: str,
+    *,
+    optimizer=True,
+    optimizer_obj=None,
+    stats=True,
+    save_model_dir=None,
+    save_model_overwrite=False,
+):
+    if optimizer_obj is None:
+        optimizer_obj = thor.optimizers.Sgd(initial_learning_rate=0.01, momentum=0.0) if optimizer else None
     return thor.training.Trainer(
         _build_tiny_regressor(name),
         _regression_one_batch_loader(),
@@ -215,6 +224,35 @@ def test_training_runs_rejects_ensemble_output_dtype_mismatch_before_fit():
     not RUN_TRAINING_INTEGRATION,
     reason="set THOR_RUN_TRAINING_INTEGRATION=1 to run opt-in TrainingRuns CUDA integration tests",
 )
+def test_training_runs_evaluates_saved_adam_model_on_test_loader(capfd, tmp_path):
+    trainer = _make_tiny_regression_trainer(
+        "training_runs_saved_adam_test_eval",
+        optimizer_obj=thor.optimizers.Adam(),
+        stats=True,
+        save_model_dir=tmp_path / "adam_model",
+        save_model_overwrite=True,
+    )
+    runs = thor.training.TrainingRuns([("fold_0", trainer, "tiny_ensemble")])
+
+    results, captured_text = _fit_runs_and_capture_text(
+        runs,
+        capfd,
+        epochs=1,
+        test_loader=_regression_one_batch_loader(),
+    )
+
+    assert results.all_completed()
+    assert results["fold_0"].final_test_loss is not None
+    plain_text = _ANSI_RE.sub("", captured_text)
+    assert re.search(r"INFO runs\[fold_0\|tiny_ensemble\]:.*test_loss=", plain_text)
+
+
+@pytest.mark.cuda
+@pytest.mark.training_integration
+@pytest.mark.skipif(
+    not RUN_TRAINING_INTEGRATION,
+    reason="set THOR_RUN_TRAINING_INTEGRATION=1 to run opt-in TrainingRuns CUDA integration tests",
+)
 def test_training_runs_fits_two_tiny_trainers_on_one_gpu_and_prefixes_stats(capfd, tmp_path):
     runs = thor.training.TrainingRuns(
         [
@@ -241,7 +279,8 @@ def test_training_runs_fits_two_tiny_trainers_on_one_gpu_and_prefixes_stats(capf
         ],
     )
 
-    results, captured_text = _fit_runs_and_capture_text(runs, capfd, epochs=1)
+    test_loader = _regression_one_batch_loader()
+    results, captured_text = _fit_runs_and_capture_text(runs, capfd, epochs=1, test_loader=test_loader)
 
     assert len(results) == 2
     assert results.all_completed()
@@ -251,13 +290,13 @@ def test_training_runs_fits_two_tiny_trainers_on_one_gpu_and_prefixes_stats(capf
         assert result.ensemble_group == "tiny_ensemble"
         assert result.final_training_loss is not None
         assert result.final_validation_loss is not None
-        assert result.final_test_loss is None
+        assert result.final_test_loss is not None
         assert result.final_loss("train") == result.final_training_loss
         assert result.final_loss("validate") == result.final_validation_loss
-        assert result.final_loss("test") is None
+        assert result.final_loss("test") == result.final_test_loss
         assert result.final_training_step is not None
         assert result.final_validation_step is not None
-        assert result.final_test_step is None
+        assert result.final_test_step is not None
 
     plain_text = _ANSI_RE.sub("", captured_text)
     statuses = _captured_terminal_statuses(captured_text)
@@ -278,7 +317,7 @@ def test_training_runs_fits_two_tiny_trainers_on_one_gpu_and_prefixes_stats(capf
     assert ensemble.ensemble_train_loss is not None
     assert (tmp_path / "fold_0_model").exists()
     assert (tmp_path / "longer_fold_1_model").exists()
-    assert ensemble.ensemble_test_loss is None
+    assert ensemble.ensemble_test_loss is not None
     assert len(ensemble.members) == 2
     assert [member.run_name for member in ensemble.members] == ["fold_0", "longer_fold_1"]
     assert [member.weight for member in ensemble.members] == [1.0, 2.0]
@@ -290,12 +329,18 @@ def test_training_runs_fits_two_tiny_trainers_on_one_gpu_and_prefixes_stats(capf
     assert "ensemble_group=tiny_ensemble" not in plain_text
     assert "aggregation=ensemble_eval" in plain_text
     assert "ensemble_train_loss=" in plain_text
-    assert "ensemble_test_loss=" not in plain_text
+    assert "ensemble_test_loss=" in plain_text
     assert "weighted_train_loss=" not in plain_text
     assert "weighted_validate_loss=" not in plain_text
     assert re.search(r"INFO runs\[fold_0\|tiny_ensemble\]:\s+status=completed", plain_text)
+    for run_name in ("fold_0", "longer_fold_1"):
+        assert re.search(
+            rf"INFO runs\[{re.escape(run_name)}\|tiny_ensemble\]:.*train_loss=.*validate_loss=.*test_loss=",
+            plain_text,
+        ), f"final report did not include per-run test_loss for {run_name}:\n{plain_text}"
     assert "train_loss=" in plain_text
     assert "validate_loss=" in plain_text
+    assert "test_loss=" in plain_text
     assert "final_train_loss=" not in plain_text
     assert "final_validate_loss=" not in plain_text
     assert "phase=unknown" not in plain_text

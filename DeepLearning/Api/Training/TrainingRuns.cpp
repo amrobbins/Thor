@@ -533,7 +533,6 @@ TrainingRunsResult TrainingRuns::fit(const TrainerFitOptions& options, const Tra
     }
 
     statsReporter->flush();
-    statsReporter->emitFinalReport(results);
 
     std::map<std::string, TrainingEnsembleResult> ensembleResultsByGroup = buildEnsembleResultsByGroup(results);
     if (evaluationOptions.evaluateTrainingPopulation) {
@@ -542,6 +541,9 @@ TrainingRunsResult TrainingRuns::fit(const TrainerFitOptions& options, const Tra
     if (evaluationOptions.testLoader != nullptr) {
         evaluateEnsemblesOnTestLoader(results, ensembleResultsByGroup, evaluationOptions.testLoader);
     }
+
+    statsReporter->flush();
+    statsReporter->emitFinalReport(results);
 
     std::vector<TrainingEnsembleResult> ensembleResults;
     ensembleResults.reserve(ensembleResultsByGroup.size());
@@ -681,6 +683,7 @@ std::map<std::string, TrainingEnsembleResult> TrainingRuns::buildEnsembleResults
         member.finalTrainingLoss = result.finalLossForPhase(TrainingEventPhase::TRAIN);
         member.finalValidationLoss = result.finalLossForPhase(TrainingEventPhase::VALIDATE);
         member.finalTestLoss = result.finalLossForPhase(TrainingEventPhase::TEST);
+        member.finalTestAccuracy = result.finalAccuracyForPhase(TrainingEventPhase::TEST);
         ensemble.members.push_back(std::move(member));
     }
 
@@ -904,6 +907,180 @@ std::optional<double> meanSquaredErrorFromWeightedMemberPredictions(
     return lossSum / static_cast<double>(labels.size());
 }
 
+
+uint64_t argmaxRow(const std::vector<double>& values, uint64_t row, uint64_t width) {
+    const uint64_t offset = row * width;
+    uint64_t best = 0;
+    double bestValue = values[offset];
+    for (uint64_t c = 1; c < width; ++c) {
+        const double value = values[offset + c];
+        if (value > bestValue) {
+            best = c;
+            bestValue = value;
+        }
+    }
+    return best;
+}
+
+struct PredictionEvaluationMetrics {
+    std::optional<double> loss{};
+    std::optional<double> accuracy{};
+    std::vector<std::optional<double>> memberLosses{};
+    std::vector<std::optional<double>> memberAccuracies{};
+    uint64_t batches = 0;
+    uint64_t rows = 0;
+};
+
+PredictionEvaluationMetrics evaluateEnsemblePredictionMetricsOnLoader(const PlacedEnsembleArtifacts& artifacts,
+                                                                      Loader& loader,
+                                                                      ExampleType exampleType,
+                                                                      const TrainingEnsembleResult& ensembleTemplate) {
+    PredictionEvaluationMetrics metrics;
+    metrics.memberLosses.resize(artifacts.placedMembers.size());
+    metrics.memberAccuracies.resize(artifacts.placedMembers.size());
+    if (artifacts.placedMembers.empty()) {
+        return metrics;
+    }
+    validateEnsembleEvaluationBatchSize(artifacts, loader);
+    const std::string predictionOutputName = choosePredictionOutputName(ensembleTemplate.outputSignature);
+    const bool categoricalPrediction = predictionOutputName == "scores" || predictionOutputName == "logits";
+    const std::vector<double>& weights = artifacts.weights;
+    const double weightSum = std::accumulate(weights.begin(), weights.end(), 0.0);
+    if (weightSum <= 0.0) {
+        return metrics;
+    }
+
+    const uint64_t batchesPerEpoch = loader.getNumBatchesPerEpoch(exampleType);
+    uint64_t batchNum = loader.getNextBatchNum(exampleType);
+    if (batchNum > batchesPerEpoch) {
+        throw std::runtime_error("TrainingRuns ensemble evaluation loader returned next batch beyond batches per epoch.");
+    }
+    const uint64_t batchesToRun = batchesPerEpoch - batchNum;
+    double weightedLossSum = 0.0;
+    uint64_t weightedRows = 0;
+    uint64_t weightedElements = 0;
+    uint64_t ensembleCorrect = 0;
+    std::vector<double> memberLossSums(artifacts.placedMembers.size(), 0.0);
+    std::vector<uint64_t> memberCorrect(artifacts.placedMembers.size(), 0);
+
+    for (uint64_t batchOffset = 0; batchOffset < batchesToRun; ++batchOffset) {
+        Batch batch = loader.getBatch(exampleType, batchNum);
+        if (!batch.contains("labels") || !batch.isTensor("labels")) {
+            throw std::runtime_error("TrainingRuns ensemble evaluation requires a dense 'labels' tensor in the evaluation batch.");
+        }
+        ThorImplementation::Tensor labelsTensor = batch.getTensor("labels");
+        const uint64_t labelLastDim = lastDimensionOrThrow(labelsTensor, "labels");
+        const uint64_t rows = labelsTensor.getTotalNumElements() / labelLastDim;
+        if (rows == 0) {
+            loader.returnBatchBuffers(exampleType, std::move(batch));
+            continue;
+        }
+        const std::vector<double> labels = tensorToDoubleVector(labelsTensor);
+
+        std::vector<std::vector<double>> memberPredictions;
+        memberPredictions.reserve(artifacts.placedMembers.size());
+        for (const std::shared_ptr<PlacedNetwork>& placedMember : artifacts.placedMembers) {
+            std::map<std::string, ThorImplementation::Tensor> outputs = placedMember->infer(batch);
+            auto outputIt = outputs.find(predictionOutputName);
+            if (outputIt == outputs.end()) {
+                throw std::runtime_error("TrainingRuns ensemble evaluation did not receive prediction output '" + predictionOutputName + "'.");
+            }
+            ThorImplementation::Tensor predictionTensor = outputIt->second;
+            if (predictionTensor.getTotalNumElements() != labels.size()) {
+                throw std::runtime_error("TrainingRuns ensemble prediction tensor and labels tensor have different element counts.");
+            }
+            if (lastDimensionOrThrow(predictionTensor, predictionOutputName) != labelLastDim) {
+                throw std::runtime_error("TrainingRuns ensemble prediction tensor and labels tensor have incompatible class/value dimensions.");
+            }
+            memberPredictions.push_back(tensorToDoubleVector(predictionTensor));
+        }
+
+        if (categoricalPrediction) {
+            for (uint64_t row = 0; row < rows; ++row) {
+                std::vector<double> ensembleProbabilities(labelLastDim, 0.0);
+                const uint64_t offset = row * labelLastDim;
+                const uint64_t labelClass = argmaxRow(labels, row, labelLastDim);
+                for (size_t memberIndex = 0; memberIndex < memberPredictions.size(); ++memberIndex) {
+                    const std::vector<double>& logits = memberPredictions[memberIndex];
+                    const uint64_t predictedClass = argmaxRow(logits, row, labelLastDim);
+                    if (predictedClass == labelClass) {
+                        memberCorrect[memberIndex] += 1;
+                    }
+
+                    double maxLogit = logits[offset];
+                    for (uint64_t c = 1; c < labelLastDim; ++c) {
+                        maxLogit = std::max(maxLogit, logits[offset + c]);
+                    }
+                    double denom = 0.0;
+                    for (uint64_t c = 0; c < labelLastDim; ++c) {
+                        denom += std::exp(logits[offset + c] - maxLogit);
+                    }
+                    for (uint64_t c = 0; c < labelLastDim; ++c) {
+                        const double probability = std::exp(logits[offset + c] - maxLogit) / denom;
+                        memberLossSums[memberIndex] += -labels[offset + c] * std::log(std::max(probability, 1.0e-12));
+                        ensembleProbabilities[c] += weights[memberIndex] * probability;
+                    }
+                }
+                for (double& probability : ensembleProbabilities) {
+                    probability /= weightSum;
+                }
+                const uint64_t ensembleClass = argmaxRow(ensembleProbabilities, 0, labelLastDim);
+                if (ensembleClass == labelClass) {
+                    ensembleCorrect += 1;
+                }
+                double sampleLoss = 0.0;
+                for (uint64_t c = 0; c < labelLastDim; ++c) {
+                    sampleLoss += -labels[offset + c] * std::log(std::max(ensembleProbabilities[c], 1.0e-12));
+                }
+                weightedLossSum += sampleLoss;
+            }
+        } else {
+            std::vector<double> ensemblePredictions(labels.size(), 0.0);
+            for (size_t memberIndex = 0; memberIndex < memberPredictions.size(); ++memberIndex) {
+                const std::vector<double>& predictions = memberPredictions[memberIndex];
+                for (size_t i = 0; i < labels.size(); ++i) {
+                    const double diff = predictions[i] - labels[i];
+                    memberLossSums[memberIndex] += diff * diff;
+                    ensemblePredictions[i] += weights[memberIndex] * predictions[i];
+                }
+            }
+            for (size_t i = 0; i < labels.size(); ++i) {
+                ensemblePredictions[i] /= weightSum;
+                const double diff = ensemblePredictions[i] - labels[i];
+                weightedLossSum += diff * diff;
+            }
+        }
+
+        weightedRows += rows;
+        weightedElements += labels.size();
+        metrics.batches += 1;
+        loader.returnBatchBuffers(exampleType, std::move(batch));
+    }
+
+    metrics.rows = weightedRows;
+    if (weightedRows == 0) {
+        return metrics;
+    }
+    if (categoricalPrediction) {
+        metrics.loss = weightedLossSum / static_cast<double>(weightedRows);
+        metrics.accuracy = static_cast<double>(ensembleCorrect) / static_cast<double>(weightedRows);
+        for (size_t memberIndex = 0; memberIndex < artifacts.placedMembers.size(); ++memberIndex) {
+            metrics.memberLosses[memberIndex] = memberLossSums[memberIndex] / static_cast<double>(weightedRows);
+            metrics.memberAccuracies[memberIndex] = static_cast<double>(memberCorrect[memberIndex]) / static_cast<double>(weightedRows);
+        }
+    } else {
+        // This path is kept for non-classification ensembles.  Accuracy is intentionally absent.
+        if (weightedElements == 0) {
+            return metrics;
+        }
+        metrics.loss = weightedLossSum / static_cast<double>(weightedElements);
+        for (size_t memberIndex = 0; memberIndex < artifacts.placedMembers.size(); ++memberIndex) {
+            metrics.memberLosses[memberIndex] = memberLossSums[memberIndex] / static_cast<double>(weightedElements);
+        }
+    }
+    return metrics;
+}
+
 std::optional<double> evaluateEnsemblePredictionLossOnLoader(const PlacedEnsembleArtifacts& artifacts,
                                                              Loader& loader,
                                                              ExampleType exampleType,
@@ -1061,83 +1238,43 @@ void TrainingRuns::evaluateEnsemblesOnTestLoader(std::vector<TrainingRunResult>&
         }
 
         PlacedEnsembleArtifacts placedArtifacts = loadPlacedMemberArtifacts(members, testLoader->getBatchSize());
-        ensembleIt->second.ensembleTestLoss = evaluateEnsemblePredictionLossOnLoader(
+        PredictionEvaluationMetrics metrics = evaluateEnsemblePredictionMetricsOnLoader(
             placedArtifacts, *testLoader, ExampleType::TEST, ensembleIt->second);
+        ensembleIt->second.ensembleTestLoss = metrics.loss;
+        ensembleIt->second.ensembleTestAccuracy = metrics.accuracy;
 
-        // Per-model test losses remain scalar member losses, because they are displayed in the
-        // per-run summary rather than the ensemble summary. Use the saved trained artifacts rather
-        // than the pre-fit API networks so these scores reflect the completed training run.
-        std::vector<std::optional<double>> memberTestLosses(members.size());
-        std::vector<std::thread> workers;
-        std::mutex scheduleMutex;
-        std::condition_variable scheduleChanged;
-        std::mutex sharedLoaderMutex;
-        size_t nextMember = 0;
-        std::atomic_size_t activeMembers{0};
-        std::atomic_size_t finishedMembers{0};
-        const size_t maxActiveEvaluations = std::max<size_t>(1, getEffectiveMaxParallelRuns());
-
-        auto launchMember = [&](size_t memberIndex) {
-            activeMembers.fetch_add(1, std::memory_order_acq_rel);
-            workers.emplace_back([&, memberIndex]() {
-                TrainingRunResult evaluationResult;
-                {
-                    std::lock_guard<std::mutex> lock(sharedLoaderMutex);
-                    NullTrainingObserver observer;
-                    TrainingCancellationSource cancellationSource;
-                    const std::optional<std::string>& artifactDir = members[memberIndex].spec->trainer->getSaveModelDirectory();
-                    if (!artifactDir.has_value()) {
-                        throw std::runtime_error("TrainingRuns ensemble member '" + members[memberIndex].spec->runName +
-                                                 "' does not have a model artifact for test evaluation.");
-                    }
-                    evaluationResult = members[memberIndex].spec->trainer->evaluateSavedTrainingRun(
-                        members[memberIndex].spec->runName + ":ensemble_test_member",
-                        *artifactDir,
-                        testLoader,
-                        ExampleType::TEST,
-                        TrainingEventPhase::TEST,
-                        observer,
-                        cancellationSource.token());
-                }
-                memberTestLosses[memberIndex] = evaluationResult.finalLossForPhase(TrainingEventPhase::TEST);
-                {
-                    std::lock_guard<std::mutex> lock(scheduleMutex);
-                    TrainingRunResult& runResult = results[members[memberIndex].runIndex];
-                    if (evaluationResult.completed()) {
-                        runResult.finalTestStats = evaluationResult.finalTestStats;
-                    } else {
-                        runResult.status = evaluationResult.status;
-                        runResult.exception = evaluationResult.exception;
-                    }
-                    activeMembers.fetch_sub(1, std::memory_order_acq_rel);
-                    finishedMembers.fetch_add(1, std::memory_order_acq_rel);
-                }
-                scheduleChanged.notify_one();
-            });
-        };
-
-        while (finishedMembers.load(std::memory_order_acquire) < members.size()) {
-            while (nextMember < members.size() && activeMembers.load(std::memory_order_acquire) < maxActiveEvaluations) {
-                launchMember(nextMember);
-                nextMember += 1;
+        const uint64_t stepsPerEpoch = testLoader->getNumBatchesPerEpoch(ExampleType::TEST);
+        for (size_t i = 0; i < members.size(); ++i) {
+            TrainingRunResult& runResult = results[members[i].runIndex];
+            TrainingStatsSnapshot testStats;
+            if (runResult.finalTestStats.has_value()) {
+                testStats = *runResult.finalTestStats;
             }
-            std::unique_lock<std::mutex> lock(scheduleMutex);
-            scheduleChanged.wait(lock, [&]() {
-                return finishedMembers.load(std::memory_order_acquire) >= members.size() ||
-                       activeMembers.load(std::memory_order_acquire) < maxActiveEvaluations;
-            });
-        }
-        for (std::thread& worker : workers) {
-            if (worker.joinable()) {
-                worker.join();
+            testStats.networkName = members[i].spec->trainer->getNetwork()->getNetworkName();
+            testStats.datasetName = testLoader->getDatasetName();
+            testStats.phase = TrainingEventPhase::TEST;
+            testStats.epoch = 1;
+            testStats.epochs = 1;
+            testStats.step = metrics.batches;
+            testStats.stepInEpoch = metrics.batches;
+            testStats.stepsPerEpoch = stepsPerEpoch;
+            testStats.batchSize = testLoader->getBatchSize();
+            testStats.samplesProcessed = metrics.rows;
+            if (i < metrics.memberLosses.size()) {
+                testStats.loss = metrics.memberLosses[i];
             }
+            if (i < metrics.memberAccuracies.size()) {
+                testStats.accuracy = metrics.memberAccuracies[i];
+            }
+            runResult.finalTestStats = std::move(testStats);
         }
 
         for (TrainingEnsembleMemberResult& memberResult : ensembleIt->second.members) {
             for (size_t i = 0; i < members.size(); ++i) {
                 if (memberResult.runName == members[i].spec->runName) {
                     memberResult.status = results[members[i].runIndex].status;
-                    memberResult.finalTestLoss = memberTestLosses[i];
+                    memberResult.finalTestLoss = i < metrics.memberLosses.size() ? metrics.memberLosses[i] : std::optional<double>{};
+                    memberResult.finalTestAccuracy = i < metrics.memberAccuracies.size() ? metrics.memberAccuracies[i] : std::optional<double>{};
                 }
             }
         }

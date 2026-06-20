@@ -91,7 +91,7 @@ json TrainingProgram::architectureJson() const {
 
 std::string TrainingProgram::architectureJsonString() const { return architectureJson().dump(); }
 
-std::vector<StepExecutable> TrainingProgram::compile(PlacedNetwork& placedNetwork) const {
+std::vector<StepExecutable> TrainingProgram::compile(PlacedNetwork& placedNetwork, bool resolveEmptyUpdateParametersAsAllTrainable) const {
     validate();
 
     std::vector<StepExecutable> executables;
@@ -105,7 +105,7 @@ std::vector<StepExecutable> TrainingProgram::compile(PlacedNetwork& placedNetwor
             throw std::runtime_error("TrainingProgram enabled TrainingStep '" + step->getName() +
                                      "' has no active loss roots from enabled TrainingPhases.");
         }
-        executables.emplace_back(*step, placedNetwork);
+        executables.emplace_back(*step, placedNetwork, resolveEmptyUpdateParametersAsAllTrainable);
     }
     if (executables.empty()) {
         throw std::runtime_error("TrainingProgram has no enabled TrainingStep with active loss roots.");

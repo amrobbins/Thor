@@ -16,8 +16,26 @@ import numpy as np
 import pytest
 import thor
 
+
+def _digits_dense_network_dtype_from_env(env_name: str, raw_value: str):
+    dtype_name = raw_value.strip().lower()
+    if dtype_name in {"fp16", "float16", "half"}:
+        return "fp16", thor.DataType.fp16
+    if dtype_name in {"fp32", "float32", "single"}:
+        return "fp32", thor.DataType.fp32
+    raise RuntimeError(f"{env_name} must be one of fp16 or fp32, got {raw_value!r}")
+
+
 RUN_DIGITS_DENSE_INTEGRATION = os.environ.get("THOR_RUN_TRAINING_DIGITS_DENSE_INTEGRATION") == "1"
 RUN_DIGITS_DENSE_CV5_INTEGRATION = os.environ.get("THOR_RUN_TRAINING_DIGITS_DENSE_CV5_INTEGRATION") == "1"
+DIGITS_DENSE_NETWORK_DTYPE_NAME, DIGITS_DENSE_NETWORK_DTYPE = _digits_dense_network_dtype_from_env(
+    "THOR_DIGITS_DENSE_NETWORK_DTYPE",
+    os.environ.get("THOR_DIGITS_DENSE_NETWORK_DTYPE", "fp16"),
+)
+DIGITS_DENSE_CV5_NETWORK_DTYPE_NAME, DIGITS_DENSE_CV5_NETWORK_DTYPE = _digits_dense_network_dtype_from_env(
+    "THOR_DIGITS_DENSE_CV5_NETWORK_DTYPE",
+    os.environ.get("THOR_DIGITS_DENSE_CV5_NETWORK_DTYPE", DIGITS_DENSE_NETWORK_DTYPE_NAME),
+)
 DIGITS_DENSE_CACHE_DIR = Path(os.environ.get("THOR_DIGITS_DENSE_CACHE_DIR", "/tmp/thor_digits_dense_training"))
 DIGITS_DENSE_URL_BASE = os.environ.get(
     "THOR_DIGITS_DENSE_URL_BASE", "https://storage.googleapis.com/cvdf-datasets/mnist")
@@ -62,7 +80,8 @@ DIGITS_DENSE_CV5_MODEL_ARTIFACTS_DIR = Path(
     ))
 # Bump whenever the on-disk raw shard format changes so stale /tmp caches are rebuilt.
 DIGITS_DENSE_MANIFEST_VERSION = 2
-DIGITS_DENSE_CV5_MANIFEST_VERSION = 1
+DIGITS_DENSE_CV5_MANIFEST_VERSION = 2
+DIGITS_DENSE_CV5_HOLDOUT_TEST_FRACTION = 0.10
 DIGITS_IMAGE_HEIGHT = 28
 DIGITS_IMAGE_WIDTH = 28
 DIGITS_INPUT_FEATURES = DIGITS_IMAGE_HEIGHT * DIGITS_IMAGE_WIDTH
@@ -223,9 +242,9 @@ def _captured_run_statuses(captured_text: str):
     return statuses
 
 
-def _fit_training_runs_and_capture_text(runs, *, epochs: int):
+def _fit_training_runs_and_capture_text(runs, *, epochs: int, test_loader=None):
     with _NativeOutputTee() as tee:
-        results = runs.fit(epochs=epochs)
+        results = runs.fit(epochs=epochs, test_loader=test_loader)
     return results, tee.text()
 
 
@@ -405,7 +424,7 @@ def _digits_base_manifest(*, shard_paths: list[str], train_examples: int, valida
     }
 
 
-def _digits_cv5_base_manifest(*, folds: list[dict]) -> dict:
+def _digits_cv5_base_manifest(*, source_examples: int, cv_examples: int, test_examples: int, folds: list[dict]) -> dict:
     return {
         "version": DIGITS_DENSE_CV5_MANIFEST_VERSION,
         "source_version": DIGITS_DENSE_MANIFEST_VERSION,
@@ -416,7 +435,11 @@ def _digits_cv5_base_manifest(*, folds: list[dict]) -> dict:
         "normalization": "uint8_div_255",
         "num_classes": DIGITS_NUM_CLASSES,
         "num_folds": 5,
+        "holdout_test_fraction": DIGITS_DENSE_CV5_HOLDOUT_TEST_FRACTION,
         "num_shards": DIGITS_DENSE_NUM_SHARDS,
+        "source_examples": source_examples,
+        "cv_examples": cv_examples,
+        "test_examples": test_examples,
         "example_shape": [DIGITS_INPUT_FEATURES],
         "image_shape": [1, DIGITS_IMAGE_HEIGHT, DIGITS_IMAGE_WIDTH],
         "label_shape": [DIGITS_NUM_CLASSES],
@@ -476,6 +499,7 @@ def _read_digits_cv5_manifest_if_valid(cache_root: Path):
         "normalization": "uint8_div_255",
         "num_classes": DIGITS_NUM_CLASSES,
         "num_folds": 5,
+        "holdout_test_fraction": DIGITS_DENSE_CV5_HOLDOUT_TEST_FRACTION,
         "num_shards": DIGITS_DENSE_NUM_SHARDS,
         "example_shape": [DIGITS_INPUT_FEATURES],
         "label_shape": [DIGITS_NUM_CLASSES],
@@ -486,9 +510,22 @@ def _read_digits_cv5_manifest_if_valid(cache_root: Path):
     folds = manifest.get("folds")
     if not isinstance(folds, list) or len(folds) != 5:
         return None
+    source_examples = manifest.get("source_examples")
+    cv_examples = manifest.get("cv_examples")
+    test_examples = manifest.get("test_examples")
+    if not isinstance(source_examples, int) or source_examples <= 0:
+        return None
+    if not isinstance(cv_examples, int) or cv_examples <= 0:
+        return None
+    if not isinstance(test_examples, int) or test_examples <= 0:
+        return None
+    if cv_examples + test_examples != source_examples:
+        return None
     for fold in folds:
         shard_paths = fold.get("shard_paths") if isinstance(fold, dict) else None
         if not shard_paths or not all(Path(path).exists() for path in shard_paths):
+            return None
+        if fold.get("test_examples") != test_examples:
             return None
     return manifest
 
@@ -564,6 +601,55 @@ def _stratified_fold_indices(labels: np.ndarray, *, num_folds: int) -> list[np.n
     return folds
 
 
+def _stratified_holdout_indices(labels: np.ndarray, *, fraction: float) -> np.ndarray:
+    if not 0.0 < fraction < 1.0:
+        raise RuntimeError(f"holdout fraction must be between 0 and 1, got {fraction}")
+
+    total_count = int(labels.shape[0])
+    target_count = int(round(total_count * fraction))
+    if target_count <= 0 or target_count >= total_count:
+        raise RuntimeError(f"invalid holdout target count {target_count} for {total_count} examples")
+
+    label_parts = []
+    allocated = 0
+    for label in range(DIGITS_NUM_CLASSES):
+        label_indices = np.flatnonzero(labels == label)
+        exact_count = float(label_indices.shape[0]) * fraction
+        base_count = int(math.floor(exact_count))
+        label_parts.append(
+            {
+                "label": label,
+                "indices": label_indices,
+                "count": base_count,
+                "remainder": exact_count - base_count,
+            })
+        allocated += base_count
+
+    remaining = target_count - allocated
+    if remaining > 0:
+        for label_part in sorted(label_parts, key=lambda part: (-part["remainder"], part["label"]))[:remaining]:
+            label_part["count"] += 1
+
+    holdout_parts = []
+    for label_part in label_parts:
+        count = int(label_part["count"])
+        label_indices = label_part["indices"]
+        # Use a deterministic strided sample from each class instead of taking
+        # one contiguous prefix of the IDX order. This keeps the hold-out set
+        # representative without adding random state to the integration cache.
+        stride = max(1, int(round(1.0 / fraction)))
+        selected = label_indices[::stride]
+        if selected.shape[0] < count:
+            selected = label_indices
+        holdout_parts.append(selected[:count])
+
+    holdout_indices = np.concatenate(holdout_parts)
+    holdout_indices.sort()
+    if holdout_indices.shape[0] != target_count:
+        raise RuntimeError(f"holdout split selected {holdout_indices.shape[0]} examples, expected {target_count}")
+    return holdout_indices
+
+
 def _ensure_digits_dense_cv5_shards():
     DIGITS_DENSE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     manifest = _read_digits_cv5_manifest_if_valid(DIGITS_DENSE_CACHE_DIR)
@@ -587,15 +673,23 @@ def _ensure_digits_dense_cv5_shards():
     raw_root.mkdir(parents=True, exist_ok=True)
     shard_root.mkdir(parents=True, exist_ok=True)
 
-    fold_indices = _stratified_fold_indices(train_labels, num_folds=5)
     all_indices = np.arange(train_labels.shape[0])
+    holdout_indices = _stratified_holdout_indices(
+        train_labels,
+        fraction=DIGITS_DENSE_CV5_HOLDOUT_TEST_FRACTION,
+    )
+    cv_mask = np.ones(train_labels.shape[0], dtype=bool)
+    cv_mask[holdout_indices] = False
+    cv_indices = all_indices[cv_mask]
+    fold_indices = _stratified_fold_indices(train_labels[cv_indices], num_folds=5)
     example_size_in_bytes = DIGITS_INPUT_FEATURES * np.dtype(np.float16).itemsize
     folds = []
 
-    for fold_index, validate_indices in enumerate(fold_indices):
-        train_mask = np.ones(train_labels.shape[0], dtype=bool)
-        train_mask[validate_indices] = False
-        train_indices = all_indices[train_mask]
+    for fold_index, validate_relative_indices in enumerate(fold_indices):
+        fold_cv_train_mask = np.ones(cv_indices.shape[0], dtype=bool)
+        fold_cv_train_mask[validate_relative_indices] = False
+        train_indices = cv_indices[fold_cv_train_mask]
+        validate_indices = cv_indices[validate_relative_indices]
 
         fold_raw_root = raw_root / f"fold_{fold_index}"
         fold_shard_root = shard_root / f"fold_{fold_index}"
@@ -613,7 +707,8 @@ def _ensure_digits_dense_cv5_shards():
             train_labels[validate_indices],
             split_name="validate",
             raw_root=fold_raw_root)
-        _mirror_validate_as_test(fold_raw_root)
+        test_count = _write_digits_split(
+            train_images[holdout_indices], train_labels[holdout_indices], split_name="test", raw_root=fold_raw_root)
 
         shard_paths = thor.training.create_sharded_raw_dataset(
             [str(fold_raw_root)],
@@ -631,11 +726,16 @@ def _ensure_digits_dense_cv5_shards():
                 "fold_index": fold_index,
                 "train_examples": train_count,
                 "validate_examples": validate_count,
-                "test_examples": validate_count,
+                "test_examples": test_count,
                 "shard_paths": shard_paths,
             })
 
-    manifest = _digits_cv5_base_manifest(folds=folds)
+    manifest = _digits_cv5_base_manifest(
+        source_examples=int(train_labels.shape[0]),
+        cv_examples=int(cv_indices.shape[0]),
+        test_examples=int(holdout_indices.shape[0]),
+        folds=folds,
+    )
     _digits_cv5_manifest_path(DIGITS_DENSE_CACHE_DIR).write_text(json.dumps(manifest, indent=2, sort_keys=True))
     shutil.rmtree(processing_root)
     return manifest
@@ -672,7 +772,7 @@ def _build_deep_dense_digits_classifier(
     num_classes: int,
     width: int = DIGITS_DENSE_WIDTH,
     hidden_layers: int = DIGITS_DENSE_HIDDEN_LAYERS,
-    dtype=thor.DataType.fp16,
+    dtype=DIGITS_DENSE_NETWORK_DTYPE,
 ):
     assert width > 0
     assert hidden_layers > 0
@@ -716,8 +816,9 @@ def test_queued_trainer_trains_really_large_deep_fp16_dense_digits_network(capfd
         assert manifest["example_shape"] == [DIGITS_INPUT_FEATURES]
 
         network = _build_deep_dense_digits_classifier(
-            "python_integration_really_large_deep_dense_fp16_digits",
+            f"python_integration_really_large_deep_dense_{DIGITS_DENSE_NETWORK_DTYPE_NAME}_digits",
             num_classes=manifest["num_classes"],
+            dtype=DIGITS_DENSE_NETWORK_DTYPE,
         )
         optimizer = thor.optimizers.Sgd(initial_learning_rate=0.01, momentum=0.7, decay=0.01)
         trainer = thor.training.Trainer(
@@ -750,6 +851,9 @@ def test_training_runs_digits_dense_five_fold_cross_validation(capfd):
         assert len(cv_manifest["folds"]) == 5
         assert cv_manifest["example_shape"] == [DIGITS_INPUT_FEATURES]
         assert cv_manifest["label_shape"] == [DIGITS_NUM_CLASSES]
+        assert cv_manifest["test_examples"] == int(
+            round(cv_manifest["source_examples"] * DIGITS_DENSE_CV5_HOLDOUT_TEST_FRACTION))
+        assert cv_manifest["cv_examples"] + cv_manifest["test_examples"] == cv_manifest["source_examples"]
 
         def make_fold_trainer(
             *,
@@ -776,6 +880,7 @@ def test_training_runs_digits_dense_five_fold_cross_validation(capfd):
             )
             assert fold["train_examples"] == loader.get_num_train_examples()
             assert fold["validate_examples"] == loader.get_num_validate_examples()
+            assert fold["test_examples"] == cv_manifest["test_examples"]
             assert loader.get_num_train_batches() > 0
             assert loader.get_num_validate_batches() > 0
 
@@ -784,8 +889,10 @@ def test_training_runs_digits_dense_five_fold_cross_validation(capfd):
                 num_classes=cv_manifest["num_classes"],
                 width=width,
                 hidden_layers=hidden_layers,
+                dtype=DIGITS_DENSE_CV5_NETWORK_DTYPE,
             )
-            optimizer = thor.optimizers.Sgd(initial_learning_rate=0.01, momentum=0.7, decay=0.01)
+            #optimizer = thor.optimizers.Sgd(initial_learning_rate=0.01, momentum=0.7, decay=0.01)
+            optimizer = thor.optimizers.Adam()
             return thor.training.Trainer(
                 network,
                 loader,
@@ -831,7 +938,25 @@ def test_training_runs_digits_dense_five_fold_cross_validation(capfd):
             max_summary_logs_per_second=DIGITS_DENSE_CV5_SUMMARY_LOGS_PER_SECOND,
             max_parallel_runs=DIGITS_DENSE_CV5_MAX_PARALLEL_RUNS,
         )
-        results, captured_text = _fit_training_runs_and_capture_text(runs, epochs=DIGITS_DENSE_CV5_EPOCHS)
+        test_fold = cv_manifest["folds"][0]
+        test_manifest = {
+            **cv_manifest,
+            "shard_paths": test_fold["shard_paths"],
+            "train_examples": test_fold["train_examples"],
+            "validate_examples": test_fold["validate_examples"],
+            "test_examples": test_fold["test_examples"],
+        }
+        test_loader = _digits_dense_loader_from_manifest(
+            test_manifest,
+            batch_size=DIGITS_DENSE_CV5_BATCH_SIZE,
+            batch_queue_depth=DIGITS_DENSE_CV5_LOADER_QUEUE_DEPTH,
+            dataset_name="mnist_digits_dense_fp16_cv5_holdout_test",
+        )
+        results, captured_text = _fit_training_runs_and_capture_text(
+            runs,
+            epochs=DIGITS_DENSE_CV5_EPOCHS,
+            test_loader=test_loader,
+        )
 
     plain_text = _ANSI_RE.sub("", captured_text)
     statuses = _captured_run_statuses(captured_text)
@@ -850,7 +975,8 @@ def test_training_runs_digits_dense_five_fold_cross_validation(capfd):
     # assert "INFO runs ensemble[digits_dense_alt3]:" in plain_text
     assert "aggregation=ensemble_eval" in plain_text
     assert "ensemble_train_loss=" in plain_text
-    assert "ensemble_test_loss=" not in plain_text
+    assert "ensemble_test_loss=" in plain_text
+    assert "ensemble_test_accuracy=" in plain_text
     assert "weighted_train_loss=" not in plain_text
     assert "weighted_validate_loss=" not in plain_text
     assert "INFO runs[fold_0|digits_dense_cv5]:" in plain_text
@@ -859,6 +985,13 @@ def test_training_runs_digits_dense_five_fold_cross_validation(capfd):
     assert "ensemble_group=digits_dense_alt3" not in plain_text
     assert "train_loss=" in plain_text
     assert "validate_loss=" in plain_text
+    assert "test_loss=" in plain_text
+    for fold_index in range(5):
+        run_name = f"fold_{fold_index}"
+        assert re.search(
+            rf"INFO runs\[{re.escape(run_name)}\|digits_dense_cv5\]:.*train_loss=.*validate_loss=.*test_loss=.*test_accuracy=",
+            plain_text,
+        ), f"final report did not include per-fold test_loss/test_accuracy for {run_name}:\n{plain_text}"
     assert "completed=5" in plain_text
     assert results.status_counts["completed"] == 5
     assert results.has_ensembles
@@ -869,7 +1002,8 @@ def test_training_runs_digits_dense_five_fold_cross_validation(capfd):
     assert cv5_ensemble.total_weight == pytest.approx(5.0)
     assert len(cv5_ensemble.members) == 5
     assert cv5_ensemble.ensemble_train_loss is not None
-    assert cv5_ensemble.ensemble_test_loss is None
+    assert cv5_ensemble.ensemble_test_loss is not None
+    assert cv5_ensemble.ensemble_test_accuracy is not None
 
     # alt3_ensemble = results.ensemble("digits_dense_alt3")
     # assert alt3_ensemble.all_completed()
@@ -881,6 +1015,7 @@ def test_training_runs_digits_dense_five_fold_cross_validation(capfd):
     # assert "INFO trainer:" not in plain_text
 
     validation_losses = []
+    test_losses = []
     expected_groups = {
         **{
             f"fold_{fold_index}": "digits_dense_cv5" for fold_index in range(5)
@@ -897,18 +1032,33 @@ def test_training_runs_digits_dense_five_fold_cross_validation(capfd):
         assert result.ensemble_weight == pytest.approx(1.0)
         assert result.final_training_loss is not None
         assert result.final_validation_loss is not None
-        assert result.final_test_loss is None
+        assert result.final_test_loss is not None
+        assert result.final_test_accuracy is not None
         assert result.final_loss("train") == result.final_training_loss
         assert result.final_loss("validate") == result.final_validation_loss
-        assert result.final_loss("test") is None
+        assert result.final_loss("test") == result.final_test_loss
+        assert result.final_accuracy("test") == result.final_test_accuracy
         assert math.isfinite(result.final_training_loss)
         assert math.isfinite(result.final_validation_loss)
+        assert math.isfinite(result.final_test_loss)
+        assert math.isfinite(result.final_test_accuracy)
+        assert 0.0 <= result.final_test_accuracy <= 1.0
         assert result.final_training_loss > 0.0
         assert result.final_validation_loss > 0.0
+        assert result.final_test_loss > 0.0
         assert result.final_training_step is not None
         assert result.final_validation_step is not None
+        assert result.final_test_step is not None
         validation_losses.append(result.final_validation_loss)
+        test_losses.append(result.final_test_loss)
 
     mean_validation_loss = float(np.mean(validation_losses))
     assert math.isfinite(mean_validation_loss)
     assert mean_validation_loss > 0.0
+    mean_test_loss = float(np.mean(test_losses))
+    assert math.isfinite(mean_test_loss)
+    assert mean_test_loss > 0.0
+    assert math.isfinite(cv5_ensemble.ensemble_test_loss)
+    assert cv5_ensemble.ensemble_test_loss > 0.0
+    assert math.isfinite(cv5_ensemble.ensemble_test_accuracy)
+    assert 0.0 <= cv5_ensemble.ensemble_test_accuracy <= 1.0

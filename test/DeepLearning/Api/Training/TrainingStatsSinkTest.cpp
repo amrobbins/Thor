@@ -206,6 +206,39 @@ TEST(TrainingRunsStatsReporter, RunningLineIncludesEnsembleGroupAndCurrentTrainA
 }
 
 
+TEST(TrainingRunsStatsReporter, ColorCodesRunningSummaryProgressAndThroughputColumns) {
+    std::FILE* out = std::tmpfile();
+    TrainingRunsStatsReporter reporter(out, LineStatsColorMode::ALWAYS, 0.0);
+    reporter.configureRun("fold_0", TrainingRunsStatsReporter::RunConfig{0.0, true, std::string("digits_dense_cv5"), 1.0});
+
+    TrainingStatsSnapshot stats = makeStats(TrainingEventPhase::TRAIN, 0.25);
+    stats.accuracy = 0.75;
+    stats.learningRate = 3.0e-4;
+    stats.floatingPointOperationsPerSecond = 2.5e12;
+
+    reporter.markRunStarting("fold_0");
+    reporter.onStatsEvent(TrainingStatsEvent::fromTrainingEvent(TrainingEvent::statsUpdated(stats), "fold_0"));
+    reporter.close();
+
+    const std::string output = readAndCloseFile(out);
+    EXPECT_NE(output.find("\x1b[38;5;235mINFO \x1b[0m\x1b[1mruns[fold_0|digits_dense_cv5]:\x1b[0m"),
+              std::string::npos);
+    EXPECT_NE(output.find("\x1b[38;5;235mepoch=\x1b[0m\x1b[38;5;21m       2/5\x1b[0m"),
+              std::string::npos);
+    EXPECT_NE(output.find("\x1b[38;5;235mstep=\x1b[0m\x1b[38;5;21m        17\x1b[0m"),
+              std::string::npos);
+    EXPECT_NE(output.find("\x1b[38;5;235maccuracy=\x1b[0m\x1b[38;5;22m0.7500\x1b[0m"),
+              std::string::npos);
+    EXPECT_NE(output.find("\x1b[38;5;235mlr=\x1b[0m\x1b[38;5;53m3.000e-04\x1b[0m"),
+              std::string::npos);
+    EXPECT_NE(output.find("\x1b[38;5;235msamples/s=\x1b[0m\x1b[1;38;2;140;84;0m1.02K\x1b[0m"),
+              std::string::npos);
+    EXPECT_NE(output.find("\x1b[38;5;235mflops/s=\x1b[0m\x1b[1;38;2;140;84;0m2.500T\x1b[0m"),
+              std::string::npos);
+    EXPECT_NE(output.find("\x1b[38;5;235melapsed=\x1b[0m\x1b[38;5;0m 00:00:12\x1b[0m"),
+              std::string::npos);
+}
+
 TEST(TrainingRunsStatsReporter, RunningLineUsesTrainingProgressWhenValidationStatsArriveLater) {
     std::FILE* out = std::tmpfile();
     TrainingRunsStatsReporter reporter(out, LineStatsColorMode::NEVER, 0.0);

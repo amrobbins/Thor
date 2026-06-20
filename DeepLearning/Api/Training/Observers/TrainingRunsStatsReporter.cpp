@@ -112,12 +112,6 @@ void appendPadded(std::string& line, const std::string& value, size_t width, Pad
     }
 }
 
-void appendPlainDimKey(std::string& line, const char* key) {
-    line += " ";
-    line += key;
-    line += "=";
-}
-
 constexpr size_t RATE_FIELD_WIDTH = 5;
 constexpr size_t FLOPS_RATE_FIELD_WIDTH = 6;
 constexpr size_t TRAIN_LOSS_FIELD_WIDTH = sizeof(" train_loss=0.000000") - 1;
@@ -141,6 +135,21 @@ std::string formatRunPrefixForLabel(std::string_view runLabel, size_t runPrefixW
     return prefix;
 }
 
+// Multi-run progress colors intentionally mirror the single-trainer
+// LineStatsReporter palette so TrainingRuns summaries do not look like a
+// partially colorized downgrade of the normal trainer output.
+namespace SummaryAnsi {
+constexpr const char* reset = "\x1b[0m";
+constexpr const char* bold = "\x1b[1m";
+constexpr const char* key = "\x1b[38;5;235m";
+constexpr const char* label = "\x1b[38;5;235m";
+constexpr const char* progress = "\x1b[38;5;21m";
+constexpr const char* loss = "\x1b[1;38;5;0m";
+constexpr const char* accuracy = "\x1b[38;5;22m";
+constexpr const char* learningRate = "\x1b[38;5;53m";
+constexpr const char* throughput = "\x1b[1;38;2;140;84;0m";
+constexpr const char* elapsed = "\x1b[38;5;0m";
+}  // namespace SummaryAnsi
 
 std::string styledText(std::string_view text, const char* style, bool useColor) {
     if (!useColor || style == nullptr || style[0] == '\0') {
@@ -152,6 +161,54 @@ std::string styledText(std::string_view text, const char* style, bool useColor) 
     out += text;
     out += "\x1b[0m";
     return out;
+}
+
+std::string formatRunPrefixForLabel(std::string_view runLabel, size_t runPrefixWidth, bool useColor) {
+    if (!useColor) {
+        return formatRunPrefixForLabel(runLabel, runPrefixWidth);
+    }
+
+    const std::string info = "INFO ";
+    const std::string suffix = "runs[" + std::string(runLabel) + "]:";
+    const size_t visibleWidth = info.size() + suffix.size();
+
+    std::string prefix = styledText(info, SummaryAnsi::label, true);
+    prefix += styledText(suffix, SummaryAnsi::bold, true);
+    if (visibleWidth < runPrefixWidth) {
+        prefix.append(runPrefixWidth - visibleWidth, ' ');
+    }
+    return prefix;
+}
+
+void appendStyledPadded(std::string& line,
+                        const std::string& value,
+                        size_t width,
+                        PadAlignment alignment,
+                        const char* style,
+                        bool useColor) {
+    if (useColor && style != nullptr && style[0] != '\0') {
+        line += style;
+    }
+    appendPadded(line, value, width, alignment);
+    if (useColor && style != nullptr && style[0] != '\0') {
+        line += SummaryAnsi::reset;
+    }
+}
+
+void appendStyledPadded(std::string& line, const std::string& value, size_t width, const char* style, bool useColor) {
+    appendStyledPadded(line, value, width, PadAlignment::RIGHT, style, useColor);
+}
+
+void appendSummaryDimKey(std::string& line, const char* key, bool useColor) {
+    line += " ";
+    if (useColor) {
+        line += SummaryAnsi::key;
+    }
+    line += key;
+    line += "=";
+    if (useColor) {
+        line += SummaryAnsi::reset;
+    }
 }
 
 void appendPhaseLossColumns(std::string& line,
@@ -169,65 +226,65 @@ std::string formatRunsStatsLineBase(const TrainingStatsSnapshot& stats,
                                     bool useColor,
                                     const char* trainLossStyle,
                                     const char* validateLossStyle) {
-    std::string line = formatRunPrefixForLabel(runLabel, runPrefixWidth);
+    std::string line = formatRunPrefixForLabel(runLabel, runPrefixWidth, useColor);
 
     if (stats.epochs > 0) {
-        appendPlainDimKey(line, "epoch");
-        appendPadded(line, formatRatio(stats.epoch, stats.epochs), 10);
+        appendSummaryDimKey(line, "epoch", useColor);
+        appendStyledPadded(line, formatRatio(stats.epoch, stats.epochs), 10, SummaryAnsi::progress, useColor);
     } else if (stats.epoch > 0) {
-        appendPlainDimKey(line, "epoch");
-        appendPadded(line, formatUnsigned(stats.epoch), 10);
+        appendSummaryDimKey(line, "epoch", useColor);
+        appendStyledPadded(line, formatUnsigned(stats.epoch), 10, SummaryAnsi::progress, useColor);
     }
 
     if (stats.step > 0) {
-        appendPlainDimKey(line, "step");
-        appendPadded(line, formatUnsigned(stats.step), 10);
+        appendSummaryDimKey(line, "step", useColor);
+        appendStyledPadded(line, formatUnsigned(stats.step), 10, SummaryAnsi::progress, useColor);
     }
 
     if (stats.stepsPerEpoch > 0) {
-        appendPlainDimKey(line, "batch");
-        appendPadded(line, formatRatio(stats.stepInEpoch, stats.stepsPerEpoch), 13);
+        appendSummaryDimKey(line, "batch", useColor);
+        appendStyledPadded(line, formatRatio(stats.stepInEpoch, stats.stepsPerEpoch), 13, SummaryAnsi::progress, useColor);
     } else if (stats.stepInEpoch > 0) {
-        appendPlainDimKey(line, "batch");
-        appendPadded(line, formatUnsigned(stats.stepInEpoch), 13);
+        appendSummaryDimKey(line, "batch", useColor);
+        appendStyledPadded(line, formatUnsigned(stats.stepInEpoch), 13, SummaryAnsi::progress, useColor);
     }
 
     appendPhaseLossColumns(line, trainLoss, validateLoss, useColor, trainLossStyle, validateLossStyle);
 
     if (stats.accuracy.has_value()) {
-        appendPlainDimKey(line, "accuracy");
-        appendPadded(line, formatFixedString(stats.accuracy.value(), 4), 6);
+        appendSummaryDimKey(line, "accuracy", useColor);
+        appendStyledPadded(line, formatFixedString(stats.accuracy.value(), 4), 6, SummaryAnsi::accuracy, useColor);
     }
     if (stats.learningRate.has_value()) {
-        appendPlainDimKey(line, "lr");
-        appendPadded(line, formatScientificString(stats.learningRate.value(), 3), 9);
+        appendSummaryDimKey(line, "lr", useColor);
+        appendStyledPadded(line, formatScientificString(stats.learningRate.value(), 3), 9, SummaryAnsi::learningRate, useColor);
     }
     for (const auto& metric : stats.metrics) {
-        appendPlainDimKey(line, metric.first.c_str());
-        appendPadded(line, formatFixedString(metric.second, 6), 9);
+        appendSummaryDimKey(line, metric.first.c_str(), useColor);
+        appendStyledPadded(line, formatFixedString(metric.second, 6), 9, SummaryAnsi::loss, useColor);
     }
 
     if (stats.samplesPerSecond > 0.0) {
-        appendPlainDimKey(line, "samples/s");
-        appendPadded(line, formatCompactRateString(stats.samplesPerSecond), RATE_FIELD_WIDTH);
+        appendSummaryDimKey(line, "samples/s", useColor);
+        appendStyledPadded(line, formatCompactRateString(stats.samplesPerSecond), RATE_FIELD_WIDTH, SummaryAnsi::throughput, useColor);
     }
     if (stats.batchesPerSecond > 0.0) {
-        appendPlainDimKey(line, "batches/s");
-        appendPadded(line, formatCompactRateString(stats.batchesPerSecond), RATE_FIELD_WIDTH);
+        appendSummaryDimKey(line, "batches/s", useColor);
+        appendStyledPadded(line, formatCompactRateString(stats.batchesPerSecond), RATE_FIELD_WIDTH, SummaryAnsi::throughput, useColor);
     }
     if (stats.floatingPointOperationsPerSecond > 0.0) {
-        appendPlainDimKey(line, "flops/s");
-        appendPadded(line, formatCompactFlopsRateString(stats.floatingPointOperationsPerSecond), FLOPS_RATE_FIELD_WIDTH);
+        appendSummaryDimKey(line, "flops/s", useColor);
+        appendStyledPadded(line, formatCompactFlopsRateString(stats.floatingPointOperationsPerSecond), FLOPS_RATE_FIELD_WIDTH, SummaryAnsi::throughput, useColor);
     }
     if (stats.inFlightBatches > 0) {
-        appendPlainDimKey(line, "in_flight");
-        appendPadded(line, formatCompactRateString(stats.inFlightBatches, true), RATE_FIELD_WIDTH);
+        appendSummaryDimKey(line, "in_flight", useColor);
+        appendStyledPadded(line, formatCompactRateString(stats.inFlightBatches, true), RATE_FIELD_WIDTH, SummaryAnsi::throughput, useColor);
     } else {
         line.append(16, ' ');
     }
 
-    appendPlainDimKey(line, "elapsed");
-    appendPadded(line, LineStatsReporter::formatElapsedSeconds(stats.elapsedSeconds), 9);
+    appendSummaryDimKey(line, "elapsed", useColor);
+    appendStyledPadded(line, LineStatsReporter::formatElapsedSeconds(stats.elapsedSeconds), 9, SummaryAnsi::elapsed, useColor);
     return line;
 }
 
@@ -246,6 +303,7 @@ constexpr const char* running = "\x1b[1;38;5;21m";
 constexpr const char* trainLoss = "\x1b[1;38;5;208m";
 constexpr const char* validateLoss = "\x1b[1;38;5;33m";
 constexpr const char* testLoss = "\x1b[1;38;5;129m";
+constexpr const char* accuracy = "\x1b[38;5;22m";
 }  // namespace FinalReportAnsi
 
 void appendPhaseLossColumns(std::string& line,
@@ -775,6 +833,12 @@ void TrainingRunsStatsReporter::writeResultLineLocked(const TrainingRunResult& r
         line += " ";
         line += styled(buffer, FinalReportAnsi::testLoss, useColor);
     }
+    if (result.finalTestStats.has_value() && result.finalTestStats->accuracy.has_value()) {
+        char buffer[64];
+        std::snprintf(buffer, sizeof(buffer), "test_accuracy=%.4f", result.finalTestStats->accuracy.value());
+        line += " ";
+        line += styled(buffer, FinalReportAnsi::accuracy, useColor);
+    }
     if (!result.exception.message.empty()) {
         line += " message=\"" + result.exception.message + "\"";
     }
@@ -819,6 +883,12 @@ void TrainingRunsStatsReporter::writeEnsembleLineLocked(const TrainingEnsembleRe
         std::snprintf(buffer, sizeof(buffer), "ensemble_test_loss=%.6f", result.ensembleTestLoss.value());
         line += " ";
         line += styled(buffer, FinalReportAnsi::testLoss, useColor);
+    }
+    if (result.ensembleTestAccuracy.has_value()) {
+        char buffer[64];
+        std::snprintf(buffer, sizeof(buffer), "ensemble_test_accuracy=%.4f", result.ensembleTestAccuracy.value());
+        line += " ";
+        line += styled(buffer, FinalReportAnsi::accuracy, useColor);
     }
     emitLineLocked(line);
 }

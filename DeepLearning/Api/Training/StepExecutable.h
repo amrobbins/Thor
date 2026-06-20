@@ -18,7 +18,7 @@ class PlacedNetwork;
 class StepExecutable {
    public:
     StepExecutable() = default;
-    StepExecutable(const TrainingStep& step, PlacedNetwork& placedNetwork);
+    StepExecutable(const TrainingStep& step, PlacedNetwork& placedNetwork, bool resolveEmptyUpdateParametersAsAllTrainable = true);
 
     [[nodiscard]] const std::string& getName() const { return name; }
     [[nodiscard]] const std::vector<Tensor>& getLossRoots() const { return lossRoots; }

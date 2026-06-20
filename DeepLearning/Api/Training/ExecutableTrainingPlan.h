@@ -19,7 +19,7 @@ class ExecutableTrainingPlan {
     ExecutableTrainingPlan() = default;
     explicit ExecutableTrainingPlan(std::vector<StepExecutable> steps);
 
-    [[nodiscard]] static ExecutableTrainingPlan compile(const TrainingProgram& program, PlacedNetwork& placedNetwork);
+    [[nodiscard]] static ExecutableTrainingPlan compile(const TrainingProgram& program, PlacedNetwork& placedNetwork, bool resolveEmptyUpdateParametersAsAllTrainable = true);
 
     [[nodiscard]] bool isInitialized() const { return initialized; }
     [[nodiscard]] uint64_t getNumSteps() const { return steps.size(); }

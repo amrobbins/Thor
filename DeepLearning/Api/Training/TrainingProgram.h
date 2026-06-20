@@ -35,7 +35,7 @@ class TrainingProgram {
 
     [[nodiscard]] nlohmann::json architectureJson() const;
     [[nodiscard]] std::string architectureJsonString() const;
-    [[nodiscard]] std::vector<StepExecutable> compile(PlacedNetwork& placedNetwork) const;
+    [[nodiscard]] std::vector<StepExecutable> compile(PlacedNetwork& placedNetwork, bool resolveEmptyUpdateParametersAsAllTrainable = true) const;
     static TrainingProgram deserialize(const nlohmann::json& j,
                                        std::shared_ptr<thor_file::TarReader> archiveReader = nullptr,
                                        Network* network = nullptr);

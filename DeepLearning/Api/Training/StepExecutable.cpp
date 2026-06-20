@@ -11,14 +11,15 @@ using json = nlohmann::json;
 
 namespace Thor {
 
-StepExecutable::StepExecutable(const TrainingStep& step, PlacedNetwork& placedNetwork)
+StepExecutable::StepExecutable(const TrainingStep& step, PlacedNetwork& placedNetwork, bool resolveEmptyUpdateParametersAsAllTrainable)
     : name(step.getName()),
       lossRoots(step.getActiveLossRoots()),
       resolvedLossRoots(placedNetwork.resolveApiTensors(lossRoots)),
       activePhaseNames(step.getActivePhaseNames()),
       optimizer(step.getOptimizer()),
-      updateParameterReferences(step.getUpdateParameters().empty() ? placedNetwork.getTrainableParameterReferences(/*trainingEnabledOnly=*/true)
-                                                                 : step.getUpdateParameters()),
+      updateParameterReferences((resolveEmptyUpdateParametersAsAllTrainable && step.getUpdateParameters().empty())
+                                    ? placedNetwork.getTrainableParameterReferences(/*trainingEnabledOnly=*/true)
+                                    : step.getUpdateParameters()),
       resolvedUpdateParameters(placedNetwork.resolveParameterReferences(updateParameterReferences)),
       inputBindings(step.getInputBindings()),
       repeatCount(step.getRepeatCount()),

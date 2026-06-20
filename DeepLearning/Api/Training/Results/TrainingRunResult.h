@@ -140,6 +140,14 @@ struct TrainingRunResult {
         return stats->loss;
     }
 
+    [[nodiscard]] std::optional<double> finalAccuracyForPhase(TrainingEventPhase phase) const {
+        const std::optional<TrainingStatsSnapshot>& stats = finalStatsForPhase(phase);
+        if (!stats.has_value()) {
+            return std::nullopt;
+        }
+        return stats->accuracy;
+    }
+
     [[nodiscard]] static TrainingRunResult completedResult(std::string runName,
                                                            std::optional<TrainingStatsSnapshot> finalTrainingStats = {},
                                                            std::optional<TrainingStatsSnapshot> finalValidationStats = {},
@@ -198,6 +206,7 @@ struct TrainingEnsembleMemberResult {
     std::optional<double> finalTrainingLoss{};
     std::optional<double> finalValidationLoss{};
     std::optional<double> finalTestLoss{};
+    std::optional<double> finalTestAccuracy{};
 };
 
 struct TrainingEnsembleResult {
@@ -207,6 +216,7 @@ struct TrainingEnsembleResult {
     std::vector<TrainingRunOutputSignature> outputSignature{};
     std::optional<double> ensembleTrainingLoss{};
     std::optional<double> ensembleTestLoss{};
+    std::optional<double> ensembleTestAccuracy{};
 
     [[nodiscard]] size_t size() const { return members.size(); }
     [[nodiscard]] bool empty() const { return members.empty(); }
@@ -216,6 +226,7 @@ struct TrainingEnsembleResult {
     [[nodiscard]] std::map<std::string, size_t> statusCounts() const;
     [[nodiscard]] std::optional<double> ensembleFinalTrainingLoss() const { return ensembleTrainingLoss; }
     [[nodiscard]] std::optional<double> ensembleFinalTestLoss() const { return ensembleTestLoss; }
+    [[nodiscard]] std::optional<double> ensembleFinalTestAccuracy() const { return ensembleTestAccuracy; }
 };
 
 }  // namespace Thor

@@ -405,6 +405,13 @@ nb::object optionalLossFromStats(const std::optional<TrainingStatsSnapshot>& sta
     return optionalDouble(stats->loss);
 }
 
+nb::object optionalAccuracyFromStats(const std::optional<TrainingStatsSnapshot>& stats) {
+    if (!stats.has_value()) {
+        return nb::none();
+    }
+    return optionalDouble(stats->accuracy);
+}
+
 }  // namespace
 
 void bind_training(nb::module_& training) {
@@ -822,6 +829,15 @@ calling this helper.
     training_run_result.def("final_loss", [](const TrainingRunResult& self, const std::string& phase) {
         return optionalLossFromStats(self.finalStatsForPhase(trainingEventPhaseFromString(phase)));
     }, "phase"_a);
+    training_run_result.def_prop_ro("final_training_accuracy",
+                                    [](const TrainingRunResult& self) { return optionalAccuracyFromStats(self.finalTrainingStats); });
+    training_run_result.def_prop_ro("final_validation_accuracy",
+                                    [](const TrainingRunResult& self) { return optionalAccuracyFromStats(self.finalValidationStats); });
+    training_run_result.def_prop_ro("final_test_accuracy",
+                                    [](const TrainingRunResult& self) { return optionalAccuracyFromStats(self.finalTestStats); });
+    training_run_result.def("final_accuracy", [](const TrainingRunResult& self, const std::string& phase) {
+        return optionalAccuracyFromStats(self.finalStatsForPhase(trainingEventPhaseFromString(phase)));
+    }, "phase"_a);
     training_run_result.def_prop_ro("final_training_step", [](const TrainingRunResult& self) {
         return optionalUint64FromStats(self.finalTrainingStats, &TrainingStatsSnapshot::step);
     });
@@ -859,6 +875,7 @@ calling this helper.
     training_ensemble_member_result.def_prop_ro("final_training_loss", [](const TrainingEnsembleMemberResult& self) { return optionalDouble(self.finalTrainingLoss); });
     training_ensemble_member_result.def_prop_ro("final_validation_loss", [](const TrainingEnsembleMemberResult& self) { return optionalDouble(self.finalValidationLoss); });
     training_ensemble_member_result.def_prop_ro("final_test_loss", [](const TrainingEnsembleMemberResult& self) { return optionalDouble(self.finalTestLoss); });
+    training_ensemble_member_result.def_prop_ro("final_test_accuracy", [](const TrainingEnsembleMemberResult& self) { return optionalDouble(self.finalTestAccuracy); });
 
     auto training_ensemble_result = nb::class_<TrainingEnsembleResult>(training, "TrainingEnsembleResult");
     training_ensemble_result.attr("__module__") = "thor.training";
@@ -880,6 +897,9 @@ calling this helper.
     });
     training_ensemble_result.def_prop_ro("ensemble_test_loss", [](const TrainingEnsembleResult& self) {
         return optionalDouble(self.ensembleFinalTestLoss());
+    });
+    training_ensemble_result.def_prop_ro("ensemble_test_accuracy", [](const TrainingEnsembleResult& self) {
+        return optionalDouble(self.ensembleFinalTestAccuracy());
     });
 
     auto training_runs_result = nb::class_<TrainingRunsResult>(training, "TrainingRunsResult");
@@ -1160,5 +1180,9 @@ calling this helper.
             return std::make_shared<TrainingProgram>(TrainingProgram::deserialize(nlohmann::json::parse(payload), archiveReader, nullptr));
         },
         "architecture_json"_a);
-    training_program.def("compile", &TrainingProgram::compile, "placed_network"_a);
+    training_program.def(
+        "compile",
+        &TrainingProgram::compile,
+        "placed_network"_a,
+        "resolve_empty_update_parameters_as_all_trainable"_a = true);
 }

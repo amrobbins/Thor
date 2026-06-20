@@ -128,7 +128,7 @@ std::vector<Event> TrainableLayer::initialize(std::shared_ptr<ThorImplementation
         parameter->initialize(initStream);
         initDoneEvents.push_back(initStream.putEvent(false, true));
 
-        if (parameter->hasOptimizer() && hasParameter(parameterName)) {
+        if (!layer->isInferenceOnly() && parameter->hasOptimizer() && hasParameter(parameterName)) {
             std::shared_ptr<Optimizer> apiOptimizer = getParameterSpecification(parameterName)->getOptimizer();
             if (apiOptimizer != nullptr) {
                 std::shared_ptr<ThorImplementation::Optimizer> sisterOptimizer = nullptr;

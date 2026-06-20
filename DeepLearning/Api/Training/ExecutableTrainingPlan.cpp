@@ -15,8 +15,10 @@ ExecutableTrainingPlan::ExecutableTrainingPlan(std::vector<StepExecutable> steps
     validate();
 }
 
-ExecutableTrainingPlan ExecutableTrainingPlan::compile(const TrainingProgram& program, PlacedNetwork& placedNetwork) {
-    return ExecutableTrainingPlan(program.compile(placedNetwork));
+ExecutableTrainingPlan ExecutableTrainingPlan::compile(const TrainingProgram& program,
+                                                         PlacedNetwork& placedNetwork,
+                                                         bool resolveEmptyUpdateParametersAsAllTrainable) {
+    return ExecutableTrainingPlan(program.compile(placedNetwork, resolveEmptyUpdateParametersAsAllTrainable));
 }
 
 const StepExecutable& ExecutableTrainingPlan::getStep(uint64_t index) const {
