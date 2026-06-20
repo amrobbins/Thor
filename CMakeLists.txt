@@ -11,8 +11,8 @@ cmake_minimum_required(VERSION 3.22)
 set(THOR_MIN_CUDA_TOOLKIT_VERSION 13.3)
 string(TOUPPER "${CMAKE_BUILD_TYPE}" _thor_build_type_upper)
 if (_thor_build_type_upper MATCHES "^(RELEASE|RELWITHDEBINFO|MINSIZEREL)$")
-    set(_thor_default_cuda_architectures "80;89;120")
-    set(_thor_default_cuda_architectures_description "sm_80 for NVIDIA A100, sm_89 for NVIDIA L4, and sm_120 for RTX 50-series / Blackwell")
+    set(_thor_default_cuda_architectures "75;80;89;120")
+    set(_thor_default_cuda_architectures_description "sm_75 for NVIDIA Turing / TITAN RTX, sm_80 for NVIDIA A100, sm_89 for NVIDIA L4/Ada, and sm_120 for RTX 50-series / Blackwell")
 else ()
     set(_thor_default_cuda_architectures "120")
     set(_thor_default_cuda_architectures_description "sm_120 for RTX 50-series / Blackwell")
@@ -24,7 +24,20 @@ set(
         CACHE STRING
         "CUDA architectures for Thor AOT CUDA compilation. Defaults to ${_thor_default_cuda_architectures_description} for this build type."
 )
-set_property(CACHE THOR_CUDA_ARCHITECTURES PROPERTY STRINGS 80 89 120 "80;89" "80;89;120" "120")
+
+set_property(
+        CACHE THOR_CUDA_ARCHITECTURES
+        PROPERTY STRINGS
+        75
+        80
+        89
+        120
+        "75;80;89;120"
+        "80;89;120"
+        "75;80"
+        "80;89"
+        "120"
+)
 
 if (NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR "${CMAKE_CUDA_ARCHITECTURES}" STREQUAL "")
     set(CMAKE_CUDA_ARCHITECTURES "${THOR_CUDA_ARCHITECTURES}" CACHE STRING "CUDA architectures" FORCE)
