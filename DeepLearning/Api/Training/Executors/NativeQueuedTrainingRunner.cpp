@@ -1,25 +1,29 @@
 #include "DeepLearning/Api/Training/Executors/NativeQueuedTrainingRunner.h"
 
-#include "DeepLearning/Api/Loaders/Loader.h"
 #include "DeepLearning/Api/Loaders/Batch.h"
+#include "DeepLearning/Api/Loaders/Loader.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
+#include "DeepLearning/Api/Training/Cancellation/TrainingCancellation.h"
 #include "DeepLearning/Api/Training/ExecutableTrainingPlan.h"
 #include "DeepLearning/Api/Training/TrainingProgram.h"
-#include "DeepLearning/Api/Training/Cancellation/TrainingCancellation.h"
-#include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Implementation/Layers/LayerSubmitDiagnostics.h"
+#include "DeepLearning/Implementation/ThorError.h"
+#include "Utilities/Common/ScopedGpu.h"
 
 #include <cuda_runtime_api.h>
 
 #include <chrono>
-#include <csignal>
 #include <condition_variable>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <exception>
+#include <functional>
+#include <future>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -28,9 +32,11 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <type_traits>
+#include <unordered_map>
 #include <utility>
-#include <vector>
 #include <variant>
+#include <vector>
 
 namespace Thor {
 
@@ -142,7 +148,6 @@ std::string phaseName(TrainingEventPhase phase) {
     }
 }
 
-
 bool queueDiagnosticsEnabled() {
     const char* enabled = std::getenv("THOR_TRAINING_QUEUE_DIAGNOSTICS");
     return enabled != nullptr && enabled[0] != '\0' && !(enabled[0] == '0' && enabled[1] == '\0');
@@ -166,11 +171,154 @@ bool shouldEmitQueueDiagnostic(uint64_t index, uint64_t waitMicros = 0) {
     return waitMicros > 0 || index <= 3 || (every != 0 && (index % every) == 0);
 }
 
-uint64_t elapsedMicros(std::chrono::high_resolution_clock::time_point start,
-                       std::chrono::high_resolution_clock::time_point finish) {
-    return static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(finish - start).count());
+uint64_t elapsedMicros(std::chrono::high_resolution_clock::time_point start, std::chrono::high_resolution_clock::time_point finish) {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(finish - start).count());
 }
+
+bool gpuSubmitCoordinatorEnabled() {
+    const char* enabled = std::getenv("THOR_TRAINING_GPU_SUBMIT_COORDINATOR");
+
+    // Enabled by default. Disable explicitly with:
+    //   THOR_TRAINING_GPU_SUBMIT_COORDINATOR=0
+    return enabled == nullptr || enabled[0] == '\0' || !(enabled[0] == '0' && enabled[1] == '\0');
+}
+
+struct GpuSubmitCoordinatorTiming {
+    uint64_t queueWaitMicros = 0;
+    uint64_t setGpuMicros = 0;
+    uint64_t execMicros = 0;
+};
+
+class GpuSubmitCoordinator {
+   public:
+    explicit GpuSubmitCoordinator(int gpuNum) : gpuNum(gpuNum), worker(&GpuSubmitCoordinator::workerLoop, this) {}
+
+    ~GpuSubmitCoordinator() { stop(); }
+
+    GpuSubmitCoordinator(const GpuSubmitCoordinator&) = delete;
+    GpuSubmitCoordinator& operator=(const GpuSubmitCoordinator&) = delete;
+
+    template <typename Fn>
+    auto submit(Fn&& fn, GpuSubmitCoordinatorTiming* timing = nullptr) -> std::future<std::invoke_result_t<Fn>> {
+        using Result = std::invoke_result_t<Fn>;
+
+        const auto enqueuedAt = std::chrono::high_resolution_clock::now();
+        auto task =
+            std::make_shared<std::packaged_task<Result()>>([this, fn = std::forward<Fn>(fn), timing, enqueuedAt]() mutable -> Result {
+                const auto startedAt = std::chrono::high_resolution_clock::now();
+                if (timing != nullptr) {
+                    timing->queueWaitMicros = elapsedMicros(enqueuedAt, startedAt);
+                }
+                ScopedGpu scopedGpu(gpuNum);
+                const auto execStartedAt = std::chrono::high_resolution_clock::now();
+                if (timing != nullptr) {
+                    timing->setGpuMicros = elapsedMicros(startedAt, execStartedAt);
+                }
+
+                if constexpr (std::is_void_v<Result>) {
+                    try {
+                        std::invoke(fn);
+                    } catch (...) {
+                        const auto finishedAt = std::chrono::high_resolution_clock::now();
+                        if (timing != nullptr) {
+                            timing->execMicros = elapsedMicros(execStartedAt, finishedAt);
+                        }
+                        throw;
+                    }
+
+                    const auto finishedAt = std::chrono::high_resolution_clock::now();
+                    if (timing != nullptr) {
+                        timing->execMicros = elapsedMicros(execStartedAt, finishedAt);
+                    }
+                } else {
+                    try {
+                        Result result = std::invoke(fn);
+                        const auto finishedAt = std::chrono::high_resolution_clock::now();
+                        if (timing != nullptr) {
+                            timing->execMicros = elapsedMicros(execStartedAt, finishedAt);
+                        }
+                        return result;
+                    } catch (...) {
+                        const auto finishedAt = std::chrono::high_resolution_clock::now();
+                        if (timing != nullptr) {
+                            timing->execMicros = elapsedMicros(execStartedAt, finishedAt);
+                        }
+                        throw;
+                    }
+                }
+            });
+
+        std::future<Result> future = task->get_future();
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (stopping) {
+                throw std::runtime_error("GpuSubmitCoordinator is stopping.");
+            }
+            queue.emplace_back([task]() { (*task)(); });
+        }
+        cv.notify_one();
+        return future;
+    }
+
+    void stop() {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (stopping) {
+                return;
+            }
+            stopping = true;
+        }
+        cv.notify_all();
+        if (worker.joinable()) {
+            worker.join();
+        }
+    }
+
+   private:
+    void workerLoop() {
+        while (true) {
+            std::function<void()> task;
+            {
+                std::unique_lock<std::mutex> lock(mutex);
+                cv.wait(lock, [this]() { return stopping || !queue.empty(); });
+                if (queue.empty() && stopping) {
+                    break;
+                }
+                task = std::move(queue.front());
+                queue.pop_front();
+            }
+            task();
+        }
+    }
+
+    int gpuNum;
+    std::thread worker;
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::deque<std::function<void()>> queue;
+    bool stopping = false;
+};
+
+class GpuSubmitCoordinatorRegistry {
+   public:
+    static GpuSubmitCoordinator& get(int gpuNum) {
+        static GpuSubmitCoordinatorRegistry registry;
+        return registry.getCoordinator(gpuNum);
+    }
+
+   private:
+    GpuSubmitCoordinator& getCoordinator(int gpuNum) {
+        std::lock_guard<std::mutex> lock(mutex);
+        auto& coordinator = coordinators[gpuNum];
+        if (coordinator == nullptr) {
+            coordinator = std::make_unique<GpuSubmitCoordinator>(gpuNum);
+        }
+        return *coordinator;
+    }
+
+    std::mutex mutex;
+    std::unordered_map<int, std::unique_ptr<GpuSubmitCoordinator>> coordinators;
+};
 
 void emitNativeQueueDiagnostic(const char* event,
                                TrainingEventPhase phase,
@@ -184,17 +332,18 @@ void emitNativeQueueDiagnostic(const char* event,
     if (!queueDiagnosticsEnabled()) {
         return;
     }
-    std::fprintf(stderr,
-                 "THOR_TRAINING_QUEUE_DIAGNOSTIC native event=%s phase=%s epoch=%lu batch=%lu slot=%lu in_flight=%lu done=%lu/%lu wait_us=%lu\n",
-                 event,
-                 phaseName(phase).c_str(),
-                 epoch + 1,
-                 batch + 1,
-                 slot,
-                 inFlight,
-                 done,
-                 total,
-                 waitMicros);
+    std::fprintf(
+        stderr,
+        "THOR_TRAINING_QUEUE_DIAGNOSTIC native event=%s phase=%s epoch=%lu batch=%lu slot=%lu in_flight=%lu done=%lu/%lu wait_us=%lu\n",
+        event,
+        phaseName(phase).c_str(),
+        epoch + 1,
+        batch + 1,
+        slot,
+        inFlight,
+        done,
+        total,
+        waitMicros);
     std::fflush(stderr);
 }
 
@@ -214,22 +363,23 @@ void emitNativeQueueScheduleTimingDiagnostic(TrainingEventPhase phase,
     if (!queueDiagnosticsEnabled()) {
         return;
     }
-    std::fprintf(stderr,
-                 "THOR_TRAINING_QUEUE_DIAGNOSTIC native event=schedule_timing phase=%s epoch=%lu batch=%lu slot=%lu "
-                 "in_flight=%lu done=%lu/%lu optimizer_us=%lu reserve_us=%lu get_batch_us=%lu submit_us=%lu completion_us=%lu total_us=%lu\n",
-                 phaseName(phase).c_str(),
-                 epoch + 1,
-                 batch + 1,
-                 slot,
-                 inFlight,
-                 done,
-                 total,
-                 optimizerMicros,
-                 reserveMicros,
-                 getBatchMicros,
-                 submitMicros,
-                 completionMicros,
-                 totalMicros);
+    std::fprintf(
+        stderr,
+        "THOR_TRAINING_QUEUE_DIAGNOSTIC native event=schedule_timing phase=%s epoch=%lu batch=%lu slot=%lu "
+        "in_flight=%lu done=%lu/%lu optimizer_us=%lu reserve_us=%lu get_batch_us=%lu submit_us=%lu completion_us=%lu total_us=%lu\n",
+        phaseName(phase).c_str(),
+        epoch + 1,
+        batch + 1,
+        slot,
+        inFlight,
+        done,
+        total,
+        optimizerMicros,
+        reserveMicros,
+        getBatchMicros,
+        submitMicros,
+        completionMicros,
+        totalMicros);
     std::fflush(stderr);
 }
 
@@ -281,40 +431,85 @@ void emitNativeQueueSubmitTimingDiagnostic(TrainingEventPhase phase,
                                            uint64_t submitCalls,
                                            uint64_t bindMicros,
                                            uint64_t submitBatchMicros,
-                                           const ThorImplementation::BatchSubmissionTiming& timing) {
+                                           const ThorImplementation::BatchSubmissionTiming& timing,
+                                           bool usedGpuSubmitCoordinator = false,
+                                           uint64_t coordinatorQueueWaitMicros = 0,
+                                           uint64_t coordinatorSetGpuMicros = 0,
+                                           uint64_t coordinatorExecMicros = 0,
+                                           uint64_t coordinatorRoundtripMicros = 0) {
     if (!queueDiagnosticsEnabled()) {
         return;
     }
-    std::fprintf(stderr,
-                 "THOR_TRAINING_QUEUE_DIAGNOSTIC native event=submit_timing phase=%s epoch=%lu batch=%lu slot=%lu "
-                 "in_flight=%lu done=%lu/%lu submit_calls=%lu bind_us=%lu submit_batch_us=%lu "
-                 "active_loss_roots_us=%lu set_active_loss_roots_us=%lu send_batch_us=%lu batch_unwrap_us=%lu "
-                 "physical_total_us=%lu input_forward_us=%lu output_collect_us=%lu output_wait_processing_us=%lu "
-                 "processing_event_us=%lu input_fanout_us=%lu total_us=%lu inputs=%lu outputs=%lu active_loss_roots=%lu\n",
-                 phaseName(phase).c_str(),
-                 epoch + 1,
-                 batch + 1,
-                 slot,
-                 inFlight,
-                 done,
-                 total,
-                 submitCalls,
-                 bindMicros,
-                 submitBatchMicros,
-                 timing.activeLossRootsMicros,
-                 timing.setActiveLossRootsMicros,
-                 timing.sendBatchMicros,
-                 timing.batchUnwrapMicros,
-                 timing.physicalTotalMicros,
-                 timing.inputForwardMicros,
-                 timing.outputCollectMicros,
-                 timing.outputWaitOnProcessingMicros,
-                 timing.processingEventMicros,
-                 timing.inputFanoutMicros,
-                 timing.totalMicros,
-                 timing.numInputs,
-                 timing.numOutputs,
-                 timing.activeLossRootCount);
+
+    if (!usedGpuSubmitCoordinator) {
+        std::fprintf(stderr,
+                     "THOR_TRAINING_QUEUE_DIAGNOSTIC native event=submit_timing phase=%s epoch=%lu batch=%lu slot=%lu "
+                     "in_flight=%lu done=%lu/%lu submit_calls=%lu bind_us=%lu submit_batch_us=%lu "
+                     "active_loss_roots_us=%lu set_active_loss_roots_us=%lu send_batch_us=%lu batch_unwrap_us=%lu "
+                     "physical_total_us=%lu input_forward_us=%lu output_collect_us=%lu output_wait_processing_us=%lu "
+                     "processing_event_us=%lu input_fanout_us=%lu total_us=%lu inputs=%lu outputs=%lu active_loss_roots=%lu\n",
+                     phaseName(phase).c_str(),
+                     epoch + 1,
+                     batch + 1,
+                     slot,
+                     inFlight,
+                     done,
+                     total,
+                     submitCalls,
+                     bindMicros,
+                     submitBatchMicros,
+                     timing.activeLossRootsMicros,
+                     timing.setActiveLossRootsMicros,
+                     timing.sendBatchMicros,
+                     timing.batchUnwrapMicros,
+                     timing.physicalTotalMicros,
+                     timing.inputForwardMicros,
+                     timing.outputCollectMicros,
+                     timing.outputWaitOnProcessingMicros,
+                     timing.processingEventMicros,
+                     timing.inputFanoutMicros,
+                     timing.totalMicros,
+                     timing.numInputs,
+                     timing.numOutputs,
+                     timing.activeLossRootCount);
+    } else {
+        std::fprintf(stderr,
+                     "THOR_TRAINING_QUEUE_DIAGNOSTIC native event=submit_timing phase=%s epoch=%lu batch=%lu slot=%lu "
+                     "in_flight=%lu done=%lu/%lu submit_calls=%lu bind_us=%lu submit_batch_us=%lu "
+                     "active_loss_roots_us=%lu set_active_loss_roots_us=%lu send_batch_us=%lu batch_unwrap_us=%lu "
+                     "physical_total_us=%lu input_forward_us=%lu output_collect_us=%lu output_wait_processing_us=%lu "
+                     "processing_event_us=%lu input_fanout_us=%lu total_us=%lu inputs=%lu outputs=%lu active_loss_roots=%lu "
+                     "gpu_submit_coord=1 coord_queue_wait_us=%lu coord_set_gpu_us=%lu coord_exec_us=%lu "
+                     "coord_roundtrip_us=%lu\n",
+                     phaseName(phase).c_str(),
+                     epoch + 1,
+                     batch + 1,
+                     slot,
+                     inFlight,
+                     done,
+                     total,
+                     submitCalls,
+                     bindMicros,
+                     submitBatchMicros,
+                     timing.activeLossRootsMicros,
+                     timing.setActiveLossRootsMicros,
+                     timing.sendBatchMicros,
+                     timing.batchUnwrapMicros,
+                     timing.physicalTotalMicros,
+                     timing.inputForwardMicros,
+                     timing.outputCollectMicros,
+                     timing.outputWaitOnProcessingMicros,
+                     timing.processingEventMicros,
+                     timing.inputFanoutMicros,
+                     timing.totalMicros,
+                     timing.numInputs,
+                     timing.numOutputs,
+                     timing.activeLossRootCount,
+                     coordinatorQueueWaitMicros,
+                     coordinatorSetGpuMicros,
+                     coordinatorExecMicros,
+                     coordinatorRoundtripMicros);
+    }
     std::fflush(stderr);
 }
 
@@ -489,10 +684,9 @@ void CUDART_CB completeNativeQueuedBatch(void* data) {
         }
         if (shouldEmitQueueDiagnostic(doneAtComplete)) {
             emitNativeQueueDiagnostic("complete",
-                                      params->exampleType == ExampleType::TRAIN ? TrainingEventPhase::TRAIN
-                                                                                : params->exampleType == ExampleType::VALIDATE
-                                                                                      ? TrainingEventPhase::VALIDATE
-                                                                                      : TrainingEventPhase::TEST,
+                                      params->exampleType == ExampleType::TRAIN      ? TrainingEventPhase::TRAIN
+                                      : params->exampleType == ExampleType::VALIDATE ? TrainingEventPhase::VALIDATE
+                                                                                     : TrainingEventPhase::TEST,
                                       params->currentEpoch,
                                       epochBatchNum,
                                       slotIndex,
@@ -688,17 +882,11 @@ class NativeQueuedEpochScheduler {
             return;
         }
 
-        const TrainingEventPhase diagnosticPhase = exampleType == ExampleType::TRAIN
-                                                  ? TrainingEventPhase::TRAIN
-                                                  : exampleType == ExampleType::VALIDATE ? TrainingEventPhase::VALIDATE : TrainingEventPhase::TEST;
-        emitNativeQueueDiagnostic("phase_schedule_start",
-                                  diagnosticPhase,
-                                  currentEpoch,
-                                  initialEpochBatchNum,
-                                  0,
-                                  0,
-                                  initialEpochBatchNum,
-                                  batchesPerEpoch);
+        const TrainingEventPhase diagnosticPhase = exampleType == ExampleType::TRAIN      ? TrainingEventPhase::TRAIN
+                                                   : exampleType == ExampleType::VALIDATE ? TrainingEventPhase::VALIDATE
+                                                                                          : TrainingEventPhase::TEST;
+        emitNativeQueueDiagnostic(
+            "phase_schedule_start", diagnosticPhase, currentEpoch, initialEpochBatchNum, 0, 0, initialEpochBatchNum, batchesPerEpoch);
 
         uint64_t nextStampToProcess = 0;
         std::vector<std::map<std::string, Event>> outputReadyEvents(placedNetwork->getNumStamps());
@@ -727,6 +915,7 @@ class NativeQueuedEpochScheduler {
             completionStreams.push_back(Stream::getNextDownloadStream(stampGpuNums[stamp]));
         }
         const bool validationPass = exampleType != ExampleType::TRAIN;
+        const bool useGpuSubmitCoordinator = gpuSubmitCoordinatorEnabled();
         const std::vector<StepExecutable>& steps = plan.getSteps();
 
         for (uint64_t batch = 0; batch < batches; ++batch) {
@@ -814,6 +1003,10 @@ class NativeQueuedEpochScheduler {
             uint64_t bindMicros = 0;
             uint64_t submitBatchMicros = 0;
             uint64_t submitCalls = 0;
+            uint64_t coordinatorQueueWaitMicros = 0;
+            uint64_t coordinatorSetGpuMicros = 0;
+            uint64_t coordinatorExecMicros = 0;
+            uint64_t coordinatorRoundtripMicros = 0;
             ThorImplementation::BatchSubmissionTiming submitTiming;
             for (const StepExecutable& step : steps) {
                 for (uint32_t repeat = 0; repeat < step.getRepeatCount(); ++repeat) {
@@ -823,29 +1016,47 @@ class NativeQueuedEpochScheduler {
                     bindMicros += elapsedMicros(bindStart, bindFinish);
                     params->batchOutput.clear();
                     ThorImplementation::BatchSubmissionTiming singleSubmitTiming;
+                    auto submitWork = [&]() {
+                        const bool emitLayerSubmitDiagnostics =
+                            ThorImplementation::layerSubmitDiagnosticsEnabled() && shouldEmitQueueDiagnostic(batch + 1);
+                        ThorImplementation::ScopedLayerSubmitDiagnosticContext layerSubmitContext(phaseName(diagnosticPhase),
+                                                                                                  currentEpoch,
+                                                                                                  epochBatchNum,
+                                                                                                  slotIndex,
+                                                                                                  inFlightAfterReserve,
+                                                                                                  initialEpochBatchNum + batch,
+                                                                                                  batchesPerEpoch,
+                                                                                                  validationPass,
+                                                                                                  emitLayerSubmitDiagnostics);
+                        return placedNetwork->submitBatch(nextStampToProcess,
+                                                          boundBatchInput,
+                                                          params->batchOutput,
+                                                          outputReadyEvents[nextStampToProcess],
+                                                          validationPass,
+                                                          step.getLossRoots(),
+                                                          &processingFinishedEvents[slotIndex],
+                                                          /*waitForOutputsOnProcessingStream=*/false,
+                                                          &singleSubmitTiming);
+                    };
+
                     const auto submitBatchStart = std::chrono::high_resolution_clock::now();
-                    const bool emitLayerSubmitDiagnostics =
-                        ThorImplementation::layerSubmitDiagnosticsEnabled() && shouldEmitQueueDiagnostic(batch + 1);
-                    ThorImplementation::ScopedLayerSubmitDiagnosticContext layerSubmitContext(phaseName(diagnosticPhase),
-                                                                                              currentEpoch,
-                                                                                              epochBatchNum,
-                                                                                              slotIndex,
-                                                                                              inFlightAfterReserve,
-                                                                                              initialEpochBatchNum + batch,
-                                                                                              batchesPerEpoch,
-                                                                                              validationPass,
-                                                                                              emitLayerSubmitDiagnostics);
-                    placedNetwork->submitBatch(nextStampToProcess,
-                                               boundBatchInput,
-                                               params->batchOutput,
-                                               outputReadyEvents[nextStampToProcess],
-                                               validationPass,
-                                               step.getLossRoots(),
-                                               &processingFinishedEvents[slotIndex],
-                                               /*waitForOutputsOnProcessingStream=*/false,
-                                               &singleSubmitTiming);
+                    if (useGpuSubmitCoordinator) {
+                        GpuSubmitCoordinatorTiming coordinatorTiming;
+                        auto& coordinator = GpuSubmitCoordinatorRegistry::get(stampGpuNums[nextStampToProcess]);
+                        auto submitFuture = coordinator.submit(submitWork, &coordinatorTiming);
+                        submitFuture.get();
+                        coordinatorQueueWaitMicros += coordinatorTiming.queueWaitMicros;
+                        coordinatorSetGpuMicros += coordinatorTiming.setGpuMicros;
+                        coordinatorExecMicros += coordinatorTiming.execMicros;
+                    } else {
+                        submitWork();
+                    }
                     const auto submitBatchFinish = std::chrono::high_resolution_clock::now();
-                    submitBatchMicros += elapsedMicros(submitBatchStart, submitBatchFinish);
+                    const uint64_t submitBatchElapsedMicros = elapsedMicros(submitBatchStart, submitBatchFinish);
+                    submitBatchMicros += submitBatchElapsedMicros;
+                    if (useGpuSubmitCoordinator) {
+                        coordinatorRoundtripMicros += submitBatchElapsedMicros;
+                    }
                     ThorImplementation::accumulateBatchSubmissionTiming(submitTiming, singleSubmitTiming);
                     submitCalls += 1;
                 }
@@ -924,7 +1135,12 @@ class NativeQueuedEpochScheduler {
                                                       submitCalls,
                                                       bindMicros,
                                                       submitBatchMicros,
-                                                      submitTiming);
+                                                      submitTiming,
+                                                      useGpuSubmitCoordinator,
+                                                      coordinatorQueueWaitMicros,
+                                                      coordinatorSetGpuMicros,
+                                                      coordinatorExecMicros,
+                                                      coordinatorRoundtripMicros);
             }
 
             if (shouldEmitQueueDiagnostic(batch + 1)) {
@@ -998,7 +1214,8 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     }
 
     request.cancellationToken.throwIfCancellationRequested();
-    ExecutableTrainingPlan plan = ExecutableTrainingPlan::compile(*trainingProgram, *placedNetwork, /*resolveEmptyUpdateParametersAsAllTrainable=*/!evaluateOnly);
+    ExecutableTrainingPlan plan =
+        ExecutableTrainingPlan::compile(*trainingProgram, *placedNetwork, /*resolveEmptyUpdateParametersAsAllTrainable=*/!evaluateOnly);
     ensureNativeQueuedPlanCompatible(plan, *request.network, evaluateOnly);
 
     ThorImplementation::StampedNetwork& statsStampedNetwork = placedNetwork->getStampedNetwork(0);
@@ -1165,11 +1382,12 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                     }
 
                     if (request.runtime.statsEnabled) {
-                        double& averageBatchTime = (phase == TrainingEventPhase::TRAIN) ? averageTrainingBatchTime : averageValidationBatchTime;
+                        double& averageBatchTime =
+                            (phase == TrainingEventPhase::TRAIN) ? averageTrainingBatchTime : averageValidationBatchTime;
                         double completedBatchTime = -1.0;
                         if (havePreviousBatchCompletionTime && completedBatch.completionTime > previousBatchCompletionTime) {
-                            const std::chrono::duration<double> elapsed =
-                                std::chrono::duration_cast<std::chrono::duration<double>>(completedBatch.completionTime - previousBatchCompletionTime);
+                            const std::chrono::duration<double> elapsed = std::chrono::duration_cast<std::chrono::duration<double>>(
+                                completedBatch.completionTime - previousBatchCompletionTime);
                             completedBatchTime = elapsed.count();
                         }
                         previousBatchCompletionTime = completedBatch.completionTime;

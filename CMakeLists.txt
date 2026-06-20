@@ -204,14 +204,14 @@ message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 # ============================================================
 # Fast / multi-threaded linker selection
 # ============================================================
-set(THOR_LINKER "default" CACHE STRING "Linker to use: default, auto, mold, lld, gold, bfd")
+set(THOR_LINKER "lld" CACHE STRING "Linker to use: lld, default, auto, mold, gold, bfd")
 set_property(CACHE THOR_LINKER PROPERTY STRINGS auto default mold lld gold bfd)
 
 set(
         THOR_LINKER_THREADS
         ""
         CACHE STRING
-        "Explicit linker thread count. Empty means use the selected linker's default."
+        "Explicit linker thread count. Empty means use the selected linker's maximum/default thread count; for lld this uses all available hardware threads."
 )
 
 set(_thor_selected_linker "")
@@ -353,6 +353,10 @@ function(thor_apply_linker_settings target_name)
             )
         endif ()
     elseif (_thor_selected_linker STREQUAL "lld")
+        # ld.lld uses all available hardware threads by default.  Do not pass
+        # --threads=0 for "max" parallelism: lld expects a positive integer.
+        # Leave THOR_LINKER_THREADS empty for the default/max behavior, or set
+        # it to a positive integer to cap linker CPU usage.
         if (THOR_LINKER_THREADS)
             target_link_options(${target_name} PRIVATE
                     "LINKER:--threads=${THOR_LINKER_THREADS}"
@@ -459,6 +463,8 @@ function(thor_enable_release_cuda_device_lto target_name)
     # optimizes the LTO IR emitted by the compile step.
     target_link_options(${target_name} PRIVATE
             "$<$<CONFIG:Release>:$<DEVICE_LINK:-dlto>>"
+            "$<DEVICE_LINK:--threads=0>"
+            "$<DEVICE_LINK:--split-compile=0>"
     )
 endfunction()
 
