@@ -1,16 +1,12 @@
 #pragma once
 
-// TODO: Integrate with DALI
-//       https://developer.nvidia.com/DALI
-//       https://github.com/NVIDIA/DALI#compiling-dali-from-source-bare-metal
-//       Will need a C++ api, currently that is experimental. Will need to talk to nVidia.
-
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "Utilities/Common/Stream.h"
 #include "Utilities/Loaders/Shard.h"
 #include "Utilities/WorkQueue/AsyncQueue.h"
 #include "Utilities/WorkQueue/WorkQueueUnordered.h"
 
+#include <filesystem>
 #include "omp.h"
 
 #include <unistd.h>

@@ -651,8 +651,8 @@ TEST(Convolution2dApi, MultiInputEpilogueRejectsMissingOrInvalidAuxiliaryBinding
     Impl::Expression convOutput = Api::Convolution2d::epilogueInput(DataType::FP32, DataType::FP16);
     Impl::Expression residualInput = Api::Convolution2d::epilogueAuxInput("residual", DataType::FP32, DataType::FP16);
 
-    EXPECT_THROW(Api::Convolution2d::epilogueAuxInput("__reserved"), invalid_argument);
-    EXPECT_THROW(Api::Convolution2d::epilogueAuxInput("weights"), invalid_argument);
+    EXPECT_THROW(static_cast<void>(Api::Convolution2d::epilogueAuxInput("__reserved")), invalid_argument);
+    EXPECT_THROW(static_cast<void>(Api::Convolution2d::epilogueAuxInput("weights")), invalid_argument);
 
     EXPECT_THROW(Api::Convolution2d::Builder()
                      .network(network)

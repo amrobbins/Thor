@@ -505,7 +505,7 @@ TEST(TrainingRuns, RejectsInvalidFitOptionsBeforeLaunchingThreads) {
     std::shared_ptr<Trainer> trainer = makeTrainer(network, executor);
     TrainingRuns runs({{"fold_0", trainer}});
 
-    EXPECT_THROW(runs.fit(0), std::runtime_error);
+    EXPECT_THROW(static_cast<void>(runs.fit(0)), std::runtime_error);
     EXPECT_EQ(coordinator->startedCount(), 0u);
     EXPECT_EQ(executor->calls, 0u);
 }

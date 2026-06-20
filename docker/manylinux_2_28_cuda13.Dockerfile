@@ -1,7 +1,7 @@
 FROM quay.io/pypa/manylinux_2_28_x86_64:latest
 
 ARG CUDA_MAJOR=13
-ARG CUDA_MINOR=2
+ARG CUDA_MINOR=3
 
 RUN dnf install -y \
       dnf-plugins-core \
@@ -15,13 +15,12 @@ RUN dnf install -y \
       git \
       ninja-build \
       cmake \
-      ncurses-libs \
-      ncurses-devel \
       libgcc \
       libstdc++ \
       libgomp \
       liburing \
       liburing-devel \
+      openssl-devel \
     && dnf clean all
 
 RUN dnf config-manager --add-repo \
@@ -59,18 +58,8 @@ RUN /opt/python/cp312-cp312/bin/python -m pip install -U \
       pytest \
       numpy \
       ml_dtypes \
-      twine
-
-# manylinux_2_28 is AlmaLinux/RHEL8-like.
-# GraphicsMagick++ is in EPEL for EL8.
-RUN dnf install -y epel-release && \
-    dnf install -y \
-      GraphicsMagick \
-      GraphicsMagick-devel \
-      GraphicsMagick-c++ \
-      GraphicsMagick-c++-devel \
-    && dnf clean all \
-    && rm -rf /var/cache/dnf
+      twine \
+      nvidia-cudnn-frontend==1.23.0
 
 RUN dnf install -y boost-devel
 
@@ -84,16 +73,16 @@ RUN dnf install -y ccache
 RUN git config --global --add safe.directory /io
 
 
-# ~/Thor$ sudo docker build -f docker/manylinux_2_28_cuda13.Dockerfile -t thor-manylinux_2_28-cuda13 .
-
-sudo docker run --rm -it --gpus all \
-  --privileged \
-  -e NVIDIA_DRIVER_CAPABILITIES=compute,utility \
-  -v "$PWD":/io \
-  -w /io \
-  thor-manylinux_2_28-cuda13 \
-  bash
-
+#~/Thor$ sudo docker build -f docker/manylinux_2_28_cuda13.Dockerfile -t thor-manylinux_2_28-cuda13 .
+#
+#sudo docker run --rm -it --gpus all \
+#  --privileged \
+#  -e NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+#  -v "$PWD":/io \
+#  -w /io \
+#  thor-manylinux_2_28-cuda13 \
+#  bash
+#
 ## Clean hard, so no local Ubuntu artifacts leak in.
 #rm -rf build bindings/python/build bindings/python/dist bindings/python/wheelhouse
 #find . -name '*.so' -path '*/build/*' -delete

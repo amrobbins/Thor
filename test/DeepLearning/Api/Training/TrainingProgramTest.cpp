@@ -251,7 +251,7 @@ TEST(TrainingProgramApi, TrainingStepActiveLossRootsComeOnlyFromEnabledPhases) {
     EXPECT_EQ(activeRoots[1], aggregateLoss);
 
     dailyPhase->disable();
-    EXPECT_THROW(step.getActiveLossRoots(), std::runtime_error);
+    EXPECT_THROW(static_cast<void>(step.getActiveLossRoots()), std::runtime_error);
 }
 
 TEST(TrainingProgramApi, TrainingStepActivePhaseNamesComeOnlyFromEnabledPhasesAndMayIncludeForwardOnlyPhases) {
@@ -367,7 +367,7 @@ TEST(TrainingProgramApi, TrainingStepRejectsInvalidPhaseDependencies) {
     TrainingStep disabledDependencyStep(
         "demand_forecast", std::vector<std::shared_ptr<TrainingPhase>>{disabledDaily, aggregateDependsOnDisabled}, nullptr, {});
     EXPECT_THROW(disabledDependencyStep.validateEnabledPhaseDependencies(), std::runtime_error);
-    EXPECT_THROW(disabledDependencyStep.getActiveLossRoots(), std::runtime_error);
+    EXPECT_THROW(static_cast<void>(disabledDependencyStep.getActiveLossRoots()), std::runtime_error);
 
     auto aggregateMissingDependency = std::make_shared<TrainingPhase>("aggregate_prediction",
                                                                       std::vector<Tensor>{loss},
@@ -682,7 +682,7 @@ TEST(TrainingProgramApi, DisabledPhasesDoNotValidateInactiveDependenciesUntilEna
 
     disabledAggregateWithMissingDependency->enable();
     EXPECT_THROW(step.validateEnabledPhaseDependencies(), std::runtime_error);
-    EXPECT_THROW(step.getActiveLossRoots(), std::runtime_error);
+    EXPECT_THROW(static_cast<void>(step.getActiveLossRoots()), std::runtime_error);
 }
 
 TEST(TrainingProgramApi, PhaseMutationAfterProgramConstructionIsVisibleThroughStep) {
@@ -711,7 +711,7 @@ TEST(TrainingProgramApi, PhaseMutationAfterProgramConstructionIsVisibleThroughSt
     EXPECT_EQ(activeRoots[1], aggregateLoss);
 
     dailyPhase->disable();
-    EXPECT_THROW(program.getStep(0).getActiveLossRoots(), std::runtime_error);
+    EXPECT_THROW(static_cast<void>(program.getStep(0).getActiveLossRoots()), std::runtime_error);
 }
 
 TEST(TrainingProgramApi, TrainingProgramRejectsEmptyProgramsAtConstructionSerializationAndCompileTime) {
@@ -719,7 +719,7 @@ TEST(TrainingProgramApi, TrainingProgramRejectsEmptyProgramsAtConstructionSerial
 
     TrainingProgram program;
     EXPECT_FALSE(program.isInitialized());
-    EXPECT_THROW(program.architectureJson(), std::runtime_error);
+    EXPECT_THROW(static_cast<void>(program.architectureJson()), std::runtime_error);
 
     nlohmann::json emptyProgramJson{{"version", "1.0.0"}, {"steps", nlohmann::json::array()}};
     EXPECT_THROW(TrainingProgram::deserialize(emptyProgramJson), std::runtime_error);
@@ -843,7 +843,7 @@ TEST(TrainingProgramApi, TrainingProgramRejectsOutOfRangeAccessAndUnsupportedVer
     TrainingProgram program(std::vector<std::shared_ptr<TrainingStep>>{step});
 
     EXPECT_THROW(static_cast<void>(program.getStep(1)), std::runtime_error);
-    EXPECT_THROW(program.getStepReference(1), std::runtime_error);
+    EXPECT_THROW(static_cast<void>(program.getStepReference(1)), std::runtime_error);
 
     nlohmann::json programJson = program.architectureJson();
     programJson["version"] = "2.0.0";
@@ -1008,10 +1008,10 @@ TEST(TrainingProgramApi, PlacedNetworkResolvesParameterReferencesAndStepExecutab
     EXPECT_EQ(executables[0].getLossRoots()[1].getOriginalId(), aggregateLossRoot.getOriginalId());
 
     dailyPhase->disable();
-    EXPECT_THROW(phasedProgram.compile(*placed), std::runtime_error);
+    EXPECT_THROW(static_cast<void>(phasedProgram.compile(*placed)), std::runtime_error);
 
     aggregatePhase->disable();
-    EXPECT_THROW(phasedProgram.compile(*placed), std::runtime_error);
+    EXPECT_THROW(static_cast<void>(phasedProgram.compile(*placed)), std::runtime_error);
     dailyPhase->enable();
 
     ParameterReference biases = fc.getParameterReference("biases");
@@ -1032,7 +1032,7 @@ TEST(TrainingProgramApi, PlacedNetworkResolvesParameterReferencesAndStepExecutab
     EXPECT_EQ(executables[0].getName(), "disabled");
 
     disabledStep->disable();
-    EXPECT_THROW(referenceProgram.compile(*placed), std::runtime_error);
+    EXPECT_THROW(static_cast<void>(referenceProgram.compile(*placed)), std::runtime_error);
 
     auto skippedBadDependencyStep = std::make_shared<TrainingStep>(
         "skipped_bad_dependency",
