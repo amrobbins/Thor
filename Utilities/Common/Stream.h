@@ -10,6 +10,7 @@
 #include "Utilities/ComputeTopology/MachineEvaluator.h"
 
 #include <cudnn.h>
+#include <cublasLt.h>
 #include "cublas_v2.h"
 #include "cuda.h"
 #include "cuda_runtime.h"
@@ -156,6 +157,16 @@ class Stream : private ReferenceCounted {
         return cublasHandle->value();
     }
 
+    cublasLtHandle_t getCublasLtHandle() const {
+        return getCublasLtHandleUnchecked();
+    }
+
+    cublasLtHandle_t getCublasLtHandleUnchecked() const {
+        THOR_THROW_IF_FALSE(!uninitialized());
+        THOR_THROW_IF_FALSE(cublasLtHandle->has_value());
+        return cublasLtHandle->value();
+    }
+
     bool operator==(const Stream &other) const { return cudaStream == other.cudaStream && cudaStream != nullptr; }
 
     int getGpuNum() const {
@@ -199,6 +210,7 @@ class Stream : private ReferenceCounted {
         cudaStream = other.cudaStream;
         cudnnHandle = other.cudnnHandle;
         cublasHandle = other.cublasHandle;
+        cublasLtHandle = other.cublasLtHandle;
         isStatic = other.isStatic;
         mtx = other.mtx;
     }
@@ -210,12 +222,14 @@ class Stream : private ReferenceCounted {
     cudaStream_t cudaStream;
     std::optional<cudnnHandle_t> *cudnnHandle;
     std::optional<cublasHandle_t> *cublasHandle;
+    std::optional<cublasLtHandle_t> *cublasLtHandle;
 
     bool isStatic = false;
     static std::unordered_map<uint32_t, Stream> staticDeviceStreams;
 
     static int numCudnnHandles;
     static int numCublasHandles;
+    static int numCublasLtHandles;
 
     std::mutex *mtx;
 };

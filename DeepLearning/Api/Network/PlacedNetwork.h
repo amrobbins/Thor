@@ -43,7 +43,8 @@ class PlacedNetwork {
                       std::map<std::string, Event>& outputReadyEvents,
                       bool isInferenceOnly,
                       Event* reusableProcessingFinishedEvent = nullptr,
-                      bool waitForOutputsOnProcessingStream = true);
+                      bool waitForOutputsOnProcessingStream = true,
+                      ThorImplementation::BatchSubmissionTiming* submitTiming = nullptr);
     Event submitBatch(uint64_t stampIndex,
                       std::map<std::string, ThorImplementation::Tensor> batchInputs,
                       std::map<std::string, ThorImplementation::Tensor>& batchOutputs,
@@ -51,14 +52,16 @@ class PlacedNetwork {
                       bool isInferenceOnly,
                       const std::vector<Tensor>& activeTrainingLossRoots,
                       Event* reusableProcessingFinishedEvent = nullptr,
-                      bool waitForOutputsOnProcessingStream = true);
+                      bool waitForOutputsOnProcessingStream = true,
+                      ThorImplementation::BatchSubmissionTiming* submitTiming = nullptr);
     Event submitBatch(uint64_t stampIndex,
                       const Batch& batchInputs,
                       std::map<std::string, ThorImplementation::Tensor>& batchOutputs,
                       std::map<std::string, Event>& outputReadyEvents,
                       bool isInferenceOnly,
                       Event* reusableProcessingFinishedEvent = nullptr,
-                      bool waitForOutputsOnProcessingStream = true);
+                      bool waitForOutputsOnProcessingStream = true,
+                      ThorImplementation::BatchSubmissionTiming* submitTiming = nullptr);
     Event submitBatch(uint64_t stampIndex,
                       const Batch& batchInputs,
                       std::map<std::string, ThorImplementation::Tensor>& batchOutputs,
@@ -66,7 +69,8 @@ class PlacedNetwork {
                       bool isInferenceOnly,
                       const std::vector<Tensor>& activeTrainingLossRoots,
                       Event* reusableProcessingFinishedEvent = nullptr,
-                      bool waitForOutputsOnProcessingStream = true);
+                      bool waitForOutputsOnProcessingStream = true,
+                      ThorImplementation::BatchSubmissionTiming* submitTiming = nullptr);
     std::vector<uint64_t> getActiveTrainingRawLossOriginalIdsForDebug(uint64_t stampIndex = 0) const;
 
     void extendOutputWritableEvents(uint64_t stampIndex, Event event);

@@ -4,6 +4,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
+#include "DeepLearning/Implementation/Layers/LayerSubmitDiagnostics.h"
 
 namespace ThorImplementation {
 
@@ -126,6 +127,11 @@ class Loss : public Layer {
     }
 
     void forward(std::optional<Tensor> inputTensor, bool validationPass, uint32_t batchSize = 0) override {
+        const bool emitDiagnostics = layerSubmitDiagnosticsActive();
+        const auto totalStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
+        uint64_t arrivalMicros = 0;
+        uint64_t inferMicros = 0;
+        uint64_t labelsWaitMicros = 0;
         THOR_THROW_IF_FALSE(running);
         if (!isInferenceOnly()) {
             THOR_THROW_IF_FALSE(labelsStream.isInitialized());
@@ -143,6 +149,7 @@ class Loss : public Layer {
         // After all inputs have been received an empty input tensor is sent to indicate
         // that the layer is ready to perform the forward pass.
         if (inputTensor.has_value()) {
+            const auto arrivalStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
             if (batchSize != 0)
                 currentBatchSize = batchSize;
             if (inputTensor.value() == featureInput.value())
@@ -151,6 +158,9 @@ class Loss : public Layer {
                 forwardLabels(inputTensor.value(), validationPass);
             else
                 THOR_UNREACHABLE();
+            if (emitDiagnostics) {
+                arrivalMicros = layerSubmitDiagnosticElapsedMicros(arrivalStart, layerSubmitDiagnosticNow());
+            }
         } else {
             THOR_THROW_IF_FALSE(!inputTensor.has_value());
             THOR_THROW_IF_FALSE(featureInputReceived);
@@ -158,10 +168,28 @@ class Loss : public Layer {
             featureInputReceived = false;
             labelsReceived = false;
 
+            const auto inferStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
             infer(featureInput, featureOutput, stream);
+            if (emitDiagnostics) {
+                inferMicros = layerSubmitDiagnosticElapsedMicros(inferStart, layerSubmitDiagnosticNow());
+            }
 
             // Labels stream waits for infer to finish
+            const auto labelsWaitStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
             labelsStream.waitEvent(stream.putEvent());
+            if (emitDiagnostics) {
+                labelsWaitMicros = layerSubmitDiagnosticElapsedMicros(labelsWaitStart, layerSubmitDiagnosticNow());
+            }
+        }
+        if (emitDiagnostics) {
+            emitLayerSubmitDiagnostic("loss_forward",
+                                      layerSubmitDiagnosticLabel("Loss", getId(), getName()),
+                                      getId(),
+                                      layerSubmitDiagnosticElapsedMicros(totalStart, layerSubmitDiagnosticNow()),
+                                      {{"arrival_us", arrivalMicros},
+                                       {"infer_us", inferMicros},
+                                       {"labels_wait_us", labelsWaitMicros},
+                                       {"input_present", inputTensor.has_value() ? 1UL : 0UL}});
         }
     }
 
@@ -184,6 +212,11 @@ class Loss : public Layer {
     }
 
     void backward(std::optional<Tensor> errorInput, uint32_t batchSize = 0) override {
+        const bool emitDiagnostics = layerSubmitDiagnosticsActive();
+        const auto totalStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
+        uint64_t backPropMicros = 0;
+        uint64_t labelsWaitMicros = 0;
+        uint64_t upstreamMicros = 0;
         THOR_THROW_IF_FALSE(running);
         THOR_THROW_IF_FALSE(labelsInput.has_value());
         THOR_THROW_IF_FALSE(labelsInput.value().isInitialized());
@@ -193,18 +226,38 @@ class Loss : public Layer {
         THOR_THROW_IF_FALSE(!errorInput.has_value());
 
         if (errorOutput.has_value()) {
+            const auto backPropStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
             backProp(labelsInput, featureInput, errorOutput, stream);
+            if (emitDiagnostics) {
+                backPropMicros = layerSubmitDiagnosticElapsedMicros(backPropStart, layerSubmitDiagnosticNow());
+            }
             // Labels stream waits for backProp to finish
+            const auto labelsWaitStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
             labelsStream.waitEvent(stream.putEvent());
+            if (emitDiagnostics) {
+                labelsWaitMicros = layerSubmitDiagnosticElapsedMicros(labelsWaitStart, layerSubmitDiagnosticNow());
+            }
         }
 
-        if (!previousLayer.has_value())
-            return;
+        if (previousLayer.has_value()) {
+            const uint32_t effectiveBatchSize = batchSize != 0 ? batchSize : currentBatchSize;
+            const auto upstreamStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
+            // Expecting to get tail-recursion optimization of -O3 so that stack space does not build up here.
+            previousLayer.value()->backward(errorOutput, effectiveBatchSize);
+            if (emitDiagnostics) {
+                upstreamMicros = layerSubmitDiagnosticElapsedMicros(upstreamStart, layerSubmitDiagnosticNow());
+            }
+        }
 
-        const uint32_t effectiveBatchSize = batchSize != 0 ? batchSize : currentBatchSize;
-
-        // Expecting to get tail-recursion optimization of -O3 so that stack space does not build up here.
-        previousLayer.value()->backward(errorOutput, effectiveBatchSize);
+        if (emitDiagnostics) {
+            emitLayerSubmitDiagnostic("loss_backward",
+                                      layerSubmitDiagnosticLabel("Loss", getId(), getName()),
+                                      getId(),
+                                      layerSubmitDiagnosticElapsedMicros(totalStart, layerSubmitDiagnosticNow()),
+                                      {{"backprop_us", backPropMicros},
+                                       {"labels_wait_us", labelsWaitMicros},
+                                       {"upstream_us", upstreamMicros}});
+        }
     }
 
     void ensureNoDeviceCrossing() override {

@@ -7,8 +7,18 @@
 #include <stdexcept>
 #include <algorithm>
 #include <optional>
+#include <chrono>
 
 namespace ThorImplementation {
+
+namespace {
+
+uint64_t elapsedMicros(std::chrono::high_resolution_clock::time_point start,
+                       std::chrono::high_resolution_clock::time_point finish) {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(finish - start).count());
+}
+
+}  // namespace
 
 void StampedNetwork::setActiveTrainingLossRoots(const std::vector<Thor::Tensor>& activeRawLossRoots) {
     for (const Thor::Tensor& rawLossRoot : activeRawLossRoots) {
@@ -160,8 +170,10 @@ Event StampedNetwork::sendBatch(std::map<std::string, Tensor> batchInputs,
                                 std::map<std::string, Event> &outputReadyEvents,
                                 bool isInferenceOnly,
                                 Event* reusableProcessingFinishedEvent,
-                                bool waitForOutputsOnProcessingStream) {
+                                bool waitForOutputsOnProcessingStream,
+                                BatchSubmissionTiming* submitTiming) {
     std::optional<uint32_t> batchSize;
+    const auto unwrapStart = std::chrono::high_resolution_clock::now();
     for (const auto &[inputName, inputTensor] : batchInputs) {
         (void)inputName;
         const std::vector<uint64_t> dimensions = inputTensor.getDescriptor().getDimensions();
@@ -174,13 +186,21 @@ Event StampedNetwork::sendBatch(std::map<std::string, Tensor> batchInputs,
         }
     }
     THOR_THROW_IF_FALSE(batchSize.has_value());
-    return sendPhysicalBatch(std::move(batchInputs),
-                             batchOutputs,
-                             outputReadyEvents,
-                             isInferenceOnly,
-                             batchSize.value(),
-                             reusableProcessingFinishedEvent,
-                             waitForOutputsOnProcessingStream);
+    const auto unwrapFinish = std::chrono::high_resolution_clock::now();
+    BatchSubmissionTiming localTiming;
+    Event processingFinishedEvent = sendPhysicalBatch(std::move(batchInputs),
+                                                       batchOutputs,
+                                                       outputReadyEvents,
+                                                       isInferenceOnly,
+                                                       batchSize.value(),
+                                                       reusableProcessingFinishedEvent,
+                                                       waitForOutputsOnProcessingStream,
+                                                       submitTiming == nullptr ? nullptr : &localTiming);
+    if (submitTiming != nullptr) {
+        localTiming.batchUnwrapMicros += elapsedMicros(unwrapStart, unwrapFinish);
+        accumulateBatchSubmissionTiming(*submitTiming, localTiming);
+    }
+    return processingFinishedEvent;
 }
 
 Event StampedNetwork::sendBatch(const Batch& batchInputs,
@@ -188,9 +208,11 @@ Event StampedNetwork::sendBatch(const Batch& batchInputs,
                                 std::map<std::string, Event> &outputReadyEvents,
                                 bool isInferenceOnly,
                                 Event* reusableProcessingFinishedEvent,
-                                bool waitForOutputsOnProcessingStream) {
+                                bool waitForOutputsOnProcessingStream,
+                                BatchSubmissionTiming* submitTiming) {
     std::map<std::string, Tensor> physicalBatchInputs;
     std::optional<uint32_t> batchSize;
+    const auto unwrapStart = std::chrono::high_resolution_clock::now();
 
     auto requireConsistentBatchSize = [&batchSize](uint64_t candidate) {
         THOR_THROW_IF_FALSE(candidate <= std::numeric_limits<uint32_t>::max());
@@ -223,13 +245,21 @@ Event StampedNetwork::sendBatch(const Batch& batchInputs,
     }
 
     THOR_THROW_IF_FALSE(batchSize.has_value());
-    return sendPhysicalBatch(std::move(physicalBatchInputs),
-                             batchOutputs,
-                             outputReadyEvents,
-                             isInferenceOnly,
-                             batchSize.value(),
-                             reusableProcessingFinishedEvent,
-                             waitForOutputsOnProcessingStream);
+    const auto unwrapFinish = std::chrono::high_resolution_clock::now();
+    BatchSubmissionTiming localTiming;
+    Event processingFinishedEvent = sendPhysicalBatch(std::move(physicalBatchInputs),
+                                                       batchOutputs,
+                                                       outputReadyEvents,
+                                                       isInferenceOnly,
+                                                       batchSize.value(),
+                                                       reusableProcessingFinishedEvent,
+                                                       waitForOutputsOnProcessingStream,
+                                                       submitTiming == nullptr ? nullptr : &localTiming);
+    if (submitTiming != nullptr) {
+        localTiming.batchUnwrapMicros += elapsedMicros(unwrapStart, unwrapFinish);
+        accumulateBatchSubmissionTiming(*submitTiming, localTiming);
+    }
+    return processingFinishedEvent;
 }
 
 Event StampedNetwork::sendPhysicalBatch(std::map<std::string, Tensor> batchInputs,
@@ -238,15 +268,19 @@ Event StampedNetwork::sendPhysicalBatch(std::map<std::string, Tensor> batchInput
                                         bool isInferenceOnly,
                                         uint32_t batchSize,
                                         Event* reusableProcessingFinishedEvent,
-                                        bool waitForOutputsOnProcessingStream) {
+                                        bool waitForOutputsOnProcessingStream,
+                                        BatchSubmissionTiming* submitTiming) {
+    const auto physicalStart = std::chrono::high_resolution_clock::now();
     THOR_THROW_IF_FALSE(batchInputs.size() == inputs.size());
 
+    const auto inputForwardStart = std::chrono::high_resolution_clock::now();
     for (uint32_t i = 0; i < inputs.size(); ++i) {
         auto it = batchInputs.find(inputs[i]->getName());
         THOR_THROW_IF_FALSE(it != batchInputs.end());
         Tensor inputTensor = it->second;
         inputs[i]->forward(inputTensor, isInferenceOnly, batchSize);
     }
+    const auto inputForwardFinish = std::chrono::high_resolution_clock::now();
 
     // Capture each NetworkOutput-owned ready event.  NetworkOutput may offload its
     // value through a dedicated download stream when the requested output placement
@@ -254,14 +288,22 @@ Event StampedNetwork::sendPhysicalBatch(std::map<std::string, Tensor> batchInput
     // tensor).  In that case getStream() is the producing/compute stream, not the
     // stream that owns the final D2H copy.  Consumers that need materialized outputs
     // must wait on the NetworkOutput ready event, not on the producer stream.
+    const auto outputCollectStart = std::chrono::high_resolution_clock::now();
     for (uint32_t i = 0; i < outputs.size(); ++i) {
         batchOutputs[outputs[i]->getName()] = outputs[i]->getFeatureOutput().value();
         Event outputReadyEvent = outputs[i]->getOutputReadyEvent();
         outputReadyEvents[outputs[i]->getName()] = outputReadyEvent;
-        if (waitForOutputsOnProcessingStream) {
+    }
+    const auto outputCollectFinish = std::chrono::high_resolution_clock::now();
+
+    const auto outputWaitStart = std::chrono::high_resolution_clock::now();
+    if (waitForOutputsOnProcessingStream) {
+        for (const auto& [outputName, outputReadyEvent] : outputReadyEvents) {
+            (void)outputName;
             inputs[0]->getStream().waitEvent(outputReadyEvent);
         }
     }
+    const auto outputWaitFinish = std::chrono::high_resolution_clock::now();
 
     // Processing is finished when the stream from input 0 is ready.  The native queued
     // trainer deliberately does not fold CPU output/stat readiness back into this stream;
@@ -270,16 +312,31 @@ Event StampedNetwork::sendPhysicalBatch(std::map<std::string, Tensor> batchInput
     // The native queued trainer passes a per-in-flight reusable event here so the
     // hot training path does not allocate/destroy a CUDA event for every batch.
     Event processingFinishedEvent;
+    const auto processingEventStart = std::chrono::high_resolution_clock::now();
     if (reusableProcessingFinishedEvent != nullptr) {
         inputs[0]->getStream().putEvent(*reusableProcessingFinishedEvent, true, true);
         processingFinishedEvent = *reusableProcessingFinishedEvent;
     } else {
         processingFinishedEvent = inputs[0]->getStream().putEvent(true, true);
     }
+    const auto processingEventFinish = std::chrono::high_resolution_clock::now();
 
     // The streams from all other inputs wait for the stream from input 0 to be ready
+    const auto inputFanoutStart = std::chrono::high_resolution_clock::now();
     for (uint i = 1; i < inputs.size(); ++i) {
         inputs[i]->getStream().waitEvent(processingFinishedEvent);
+    }
+    const auto inputFanoutFinish = std::chrono::high_resolution_clock::now();
+
+    if (submitTiming != nullptr) {
+        submitTiming->physicalTotalMicros += elapsedMicros(physicalStart, inputFanoutFinish);
+        submitTiming->inputForwardMicros += elapsedMicros(inputForwardStart, inputForwardFinish);
+        submitTiming->outputCollectMicros += elapsedMicros(outputCollectStart, outputCollectFinish);
+        submitTiming->outputWaitOnProcessingMicros += elapsedMicros(outputWaitStart, outputWaitFinish);
+        submitTiming->processingEventMicros += elapsedMicros(processingEventStart, processingEventFinish);
+        submitTiming->inputFanoutMicros += elapsedMicros(inputFanoutStart, inputFanoutFinish);
+        submitTiming->numInputs += inputs.size();
+        submitTiming->numOutputs += outputs.size();
     }
 
     return processingFinishedEvent;

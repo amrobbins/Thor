@@ -89,7 +89,7 @@ std::string stripAnsiSequences(const std::string& output) {
 
 const char* alignedColorStatsLineWithoutAnsi() {
     return "INFO trainer: phase=train    epoch=      1/3 step=        17 batch=        7/100 loss= 1.250000 accuracy=0.7500 "
-           "lr=3.000e-04 samples/s=1.02K batches/s= 8.00 flops/s=2.50T in_flight=   32 elapsed= 00:01:05";
+           "lr=3.000e-04 samples/s=1.02K batches/s= 8.00 flops/s=2.500T in_flight=   32 elapsed= 00:01:05";
 }
 
 bool tokenHasAnsiStyle(const std::string& output, const std::string& token, bool requireBold) {
@@ -125,6 +125,19 @@ TEST(LineStatsReporter, FormatsAlignedStatsLineWithoutAnsi) {
     const std::string line = LineStatsReporter::formatStatsLine(makeStats(65.0));
 
     EXPECT_EQ(line, alignedColorStatsLineWithoutAnsi());
+}
+
+TEST(LineStatsReporter, FormatsFlopsRateWithFixedFiveCharacterNumber) {
+    TrainingStatsSnapshot stats = makeStats(65.0);
+
+    stats.floatingPointOperationsPerSecond = 857.0e9;
+    EXPECT_NE(LineStatsReporter::formatStatsLine(stats).find("flops/s=857.0G"), std::string::npos);
+
+    stats.floatingPointOperationsPerSecond = 1.14e12;
+    EXPECT_NE(LineStatsReporter::formatStatsLine(stats).find("flops/s=1.140T"), std::string::npos);
+
+    stats.floatingPointOperationsPerSecond = 29.7e12;
+    EXPECT_NE(LineStatsReporter::formatStatsLine(stats).find("flops/s=29.70T"), std::string::npos);
 }
 
 
@@ -221,11 +234,11 @@ TEST(LineStatsReporter, ColorModeAlwaysAddsAnsi) {
     EXPECT_NE(output.find("loss"), std::string::npos);
     EXPECT_NE(output.find("1.250000"), std::string::npos);
     EXPECT_NE(output.find("flops/s"), std::string::npos);
-    EXPECT_NE(output.find("2.50T"), std::string::npos);
+    EXPECT_NE(output.find("2.500T"), std::string::npos);
     EXPECT_TRUE(tokenHasAnsiStyle(output, "train", true));
     EXPECT_TRUE(tokenHasAnsiStyle(output, "1.02K", true));
     EXPECT_TRUE(tokenHasAnsiStyle(output, "8.00", true));
-    EXPECT_TRUE(tokenHasAnsiStyle(output, "2.50T", true));
+    EXPECT_TRUE(tokenHasAnsiStyle(output, "2.500T", true));
     EXPECT_TRUE(tokenHasAnsiStyle(output, "1.250000", false));
     EXPECT_TRUE(tokenHasAnsiStyle(output, "00:01:05", false));
     EXPECT_EQ(stripAnsiSequences(output), LineStatsReporter::formatStatsLine(makeStats(65.0)) + "\n");

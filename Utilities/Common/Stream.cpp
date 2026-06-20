@@ -7,6 +7,7 @@ using namespace std;
 
 int Stream::numCudnnHandles = 0;
 int Stream::numCublasHandles = 0;
+int Stream::numCublasLtHandles = 0;
 
 // Note: These are global because destroying a stream when static members are destroyed seems to be a problem.
 // Also Note: I would rather be able to use unlimited streams to avoid potential false dependencies in very large very branched networks
@@ -190,6 +191,7 @@ void Stream::construct(int gpuNum, Priority priority) {
 
     cudnnHandle = new std::optional<cudnnHandle_t>;
     cublasHandle = new std::optional<cublasHandle_t>;
+    cublasLtHandle = new std::optional<cublasLtHandle_t>;
     mtx = new std::mutex;
 
     ScopedGpu scopedGpu(gpuNum);
@@ -208,6 +210,17 @@ void Stream::construct(int gpuNum, Priority priority) {
         priorityValue = greatestPriority + 2;
 
     CUDA_CHECK(cudaStreamCreateWithPriority(&cudaStream, cudaStreamNonBlocking, priorityValue));
+
+    cublasStatus_t cublasStatus;
+    cublasLtHandle_t ltHandle;
+    cublasStatus = cublasLtCreate(&ltHandle);
+    if (cublasStatus != CUBLAS_STATUS_SUCCESS) {
+        printf("cublasLtStatus %d    gpu:%d   numCublasLtHandles %d\n", cublasStatus, gpuNum, numCublasLtHandles);
+        fflush(stdout);
+    }
+    THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    numCublasLtHandles += 1;
+    *cublasLtHandle = ltHandle;
 }
 
 void Stream::destroy() {
@@ -233,12 +246,22 @@ void Stream::destroy() {
             THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
         }
 
+        if (cublasLtHandle->has_value()) {
+            numCublasLtHandles -= 1;
+
+            cublasStatus_t cublasStatus;
+            cublasStatus = cublasLtDestroy(cublasLtHandle->value());
+            THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        }
+
         CUDA_CHECK(cudaStreamDestroy(cudaStream));
 
         delete cudnnHandle;
         cudnnHandle = nullptr;
         delete cublasHandle;
         cublasHandle = nullptr;
+        delete cublasLtHandle;
+        cublasLtHandle = nullptr;
     }
     delete mtx;
     mtx = nullptr;

@@ -5,7 +5,6 @@
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Common/ReferenceCounted.h"
-#include "Utilities/ComputeTopology/MachineEvaluator.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasKernelOptions.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasKernelRequirement.h"
 #include "Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTranspose.h"
@@ -187,6 +186,47 @@ class CublasKernel : private ReferenceCounted {
         THOR_THROW_IF_FALSE(runWithoutChecks(A, B, C, D, workspace, alpha, beta, stream, pointerMode, fp8Scales) == CUBLAS_STATUS_SUCCESS);
     }
 
+    inline cublasStatus_t launchUncheckedPrevalidated(Tensor A,
+                                                       Tensor B,
+                                                       Tensor C,
+                                                       Tensor D,
+                                                       std::optional<Tensor> workspace,
+                                                       const float *alpha,
+                                                       const float *beta,
+                                                       Stream stream,
+                                                       CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host,
+                                                       CublasFp8MatmulScales fp8Scales = CublasFp8MatmulScales::none()) {
+        THOR_THROW_IF_FALSE(!uninitialized());
+        ScopedGpu scopedGpu(stream.getGpuNum());
+
+        // The stamped expression path has already validated tensor shape/dtype and workspace capacity in the
+        // build/stamp phase.  Keep the common FP16/FP32/BF16 launch path as close to submit-only as possible:
+        // no descriptor/dimension validation, no workspace-size recomputation, and no descriptor mutation.
+        // FP8 still needs the older path for per-launch scale pointers and optional row-major transpose workspace.
+        if (usesFp8ColumnMajorLtPath() || fp8Scales.hasAnyScalePointer()) {
+            return runWithoutChecks(A, B, C, D, workspace, alpha, beta, stream, pointerMode, fp8Scales);
+        }
+
+        void *ltWorkspace = cublasKernelOptions->workspaceSizeInBytes > 0 ? workspace.value().getMemPtr() : nullptr;
+
+        return cublasLtMatmul(stream.getCublasLtHandleUnchecked(),
+                              getOperationDesc(pointerMode),
+                              alpha,
+                              A.getMemPtr(),
+                              *ADesc,
+                              B.getMemPtr(),
+                              *BDesc,
+                              beta,
+                              C.getMemPtr(),
+                              *CDesc,
+                              D.getMemPtr(),
+                              *DDesc,
+                              &cublasKernelOptions->algorithm,
+                              ltWorkspace,
+                              cublasKernelOptions->workspaceSizeInBytes,
+                              stream);
+    }
+
     inline cublasStatus_t runWithoutChecks(Tensor A,
                                            Tensor B,
                                            Tensor C,
@@ -200,9 +240,7 @@ class CublasKernel : private ReferenceCounted {
         THOR_THROW_IF_FALSE(!uninitialized());
         ScopedGpu scopedGpu(stream.getGpuNum());
 
-        bool kernelWillRunOnGpu;
-        const size_t requiredWorkspaceSize = getWorkspaceSizeInBytes(stream.getGpuNum(), kernelWillRunOnGpu, fp8Scales);
-        THOR_THROW_IF_FALSE(kernelWillRunOnGpu);
+        const size_t requiredWorkspaceSize = getWorkspaceSizeInBytes(stream.getGpuNum(), fp8Scales);
 
         if (requiredWorkspaceSize > 0 && !workspace.has_value()) {
             throw std::runtime_error("CublasKernel::runWithoutChecks requires a workspace tensor for this cuBLASLt kernel.");
@@ -272,7 +310,7 @@ class CublasKernel : private ReferenceCounted {
         }
 
         cublasStatus_t cublasStatus;
-        cublasStatus = cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
+        cublasStatus = cublasLtMatmul(stream.getCublasLtHandleUnchecked(),
                                       operationDesc,
                                       alpha,
                                       ltA,
@@ -318,8 +356,7 @@ class CublasKernel : private ReferenceCounted {
         description += " stagesId: " + std::to_string(cublasKernelOptions->stagesId);
         description += " innerShapeId: " + std::to_string(cublasKernelOptions->innerShapeId);
         description += " clusterShapeId: " + std::to_string(cublasKernelOptions->clusterShapeId);
-        bool kernelWillRunOnGpu;
-        int workspaceSize = getWorkspaceSizeInBytes(gpuNum, kernelWillRunOnGpu);
+        int workspaceSize = getWorkspaceSizeInBytes(gpuNum);
         description += " workspace: " + std::to_string(workspaceSize);
 
         if (cublasKernelOptions->runStats.runCount > 0) {
@@ -347,29 +384,39 @@ class CublasKernel : private ReferenceCounted {
 
     unsigned long getWorkspaceSizeInBytes(int gpuNum,
                                           bool &kernelWillRunOnGpu,
-                                          CublasFp8MatmulScales fp8Scales = CublasFp8MatmulScales::none()) {
+                                          CublasFp8MatmulScales fp8Scales = CublasFp8MatmulScales::none()) const {
+        (void)gpuNum;
+        (void)fp8Scales;
+        THOR_THROW_IF_FALSE(!uninitialized());
+        kernelWillRunOnGpu = true;
+        return totalWorkspaceSizeInBytes();
+    }
+
+    unsigned long getWorkspaceSizeInBytes(int gpuNum,
+                                          CublasFp8MatmulScales fp8Scales = CublasFp8MatmulScales::none()) const {
+        bool kernelWillRunOnGpu = false;
+        unsigned long workspaceSize = getWorkspaceSizeInBytes(gpuNum, kernelWillRunOnGpu, fp8Scales);
+        THOR_THROW_IF_FALSE(kernelWillRunOnGpu);
+        return workspaceSize;
+    }
+
+    bool validateAlgorithmForBuild(cublasLtHandle_t ltHandle,
+                                   CublasFp8MatmulScales fp8Scales = CublasFp8MatmulScales::none()) {
         THOR_THROW_IF_FALSE(!uninitialized());
 
-        cublasStatus_t cublasStatus;
         cublasLtMatmulHeuristicResult_t result;
         cublasLtMatmulDesc_t operationDesc = getOperationDesc(CublasScalarPointerMode::Host);
         configureTensorwideFp8Scales(operationDesc, fp8Scales);
 
-        cublasStatus = cublasLtMatmulAlgoCheck(MachineEvaluator::instance().getCublasLtHandle(gpuNum),
-                                               operationDesc,
-                                               *ADesc,
-                                               *BDesc,
-                                               *CDesc,
-                                               *DDesc,
-                                               &cublasKernelOptions->algorithm,
-                                               &result);
-        if (cublasStatus != CUBLAS_STATUS_SUCCESS) {
-            kernelWillRunOnGpu = false;
-        } else {
-            kernelWillRunOnGpu = true;
-        }
-
-        return totalWorkspaceSizeInBytes();
+        cublasStatus_t cublasStatus = cublasLtMatmulAlgoCheck(ltHandle,
+                                                              operationDesc,
+                                                              *ADesc,
+                                                              *BDesc,
+                                                              *CDesc,
+                                                              *DDesc,
+                                                              &cublasKernelOptions->algorithm,
+                                                              &result);
+        return cublasStatus == CUBLAS_STATUS_SUCCESS;
     }
 
     CublasKernelRequirement getCublasKernelRequirement() {

@@ -73,6 +73,31 @@ std::string formatCompactRateString(double value, bool integral = false) {
     return std::string(buffer);
 }
 
+std::string formatCompactFlopsRateString(double value) {
+    static constexpr const char* suffixes[] = {"", "K", "M", "G", "T", "P", "E", "Z", "Y"};
+    constexpr int maxSuffixIndex = static_cast<int>(sizeof(suffixes) / sizeof(suffixes[0])) - 1;
+
+    double scaled = value;
+    int suffixIndex = 0;
+    while (std::abs(scaled) >= 1000.0 && suffixIndex < maxSuffixIndex) {
+        scaled /= 1000.0;
+        ++suffixIndex;
+    }
+
+    while (true) {
+        const double absScaled = std::abs(scaled);
+        const int precision = absScaled >= 100.0 ? 1 : (absScaled >= 10.0 ? 2 : 3);
+        char number[64];
+        std::snprintf(number, sizeof(number), "%.*f", precision, scaled);
+        if (std::char_traits<char>::length(number) <= 5 || suffixIndex >= maxSuffixIndex) {
+            return std::string(number) + suffixes[suffixIndex];
+        }
+
+        scaled /= 1000.0;
+        ++suffixIndex;
+    }
+}
+
 std::string formatUnsigned(uint64_t value) { return std::to_string(value); }
 
 std::string formatRatio(uint64_t numerator, uint64_t denominator) { return std::to_string(numerator) + "/" + std::to_string(denominator); }
@@ -94,6 +119,7 @@ void appendPlainDimKey(std::string& line, const char* key) {
 }
 
 constexpr size_t RATE_FIELD_WIDTH = 5;
+constexpr size_t FLOPS_RATE_FIELD_WIDTH = 6;
 constexpr size_t TRAIN_LOSS_FIELD_WIDTH = sizeof(" train_loss=0.000000") - 1;
 constexpr size_t VALIDATE_LOSS_FIELD_WIDTH = sizeof(" validate_loss=0.000000") - 1;
 constexpr size_t RUN_PROGRESS_FIELDS_WIDTH = sizeof(" epoch=     20/20 step=       480 batch=        24/24") - 1;
@@ -191,7 +217,7 @@ std::string formatRunsStatsLineBase(const TrainingStatsSnapshot& stats,
     }
     if (stats.floatingPointOperationsPerSecond > 0.0) {
         appendPlainDimKey(line, "flops/s");
-        appendPadded(line, formatCompactRateString(stats.floatingPointOperationsPerSecond), RATE_FIELD_WIDTH);
+        appendPadded(line, formatCompactFlopsRateString(stats.floatingPointOperationsPerSecond), FLOPS_RATE_FIELD_WIDTH);
     }
     if (stats.inFlightBatches > 0) {
         appendPlainDimKey(line, "in_flight");
@@ -667,7 +693,14 @@ void TrainingRunsStatsReporter::writeSummaryHeaderLocked(std::string_view label)
 
 void TrainingRunsStatsReporter::writeRunLineLocked(const RunState& state, size_t runPrefixWidth) {
     if (state.status == DisplayStatus::RUNNING && state.latestStats.has_value()) {
-        std::string line = formatRunsStatsLineBase(state.latestStats->stats,
+        // A multi-run progress row should describe training progress. Validation/test
+        // stats can arrive after the latest train stat for an epoch and are still used
+        // to update validate_loss/test_loss, but using them as the row base makes the
+        // line appear to jump from e.g. batch=24/24 to batch=6/6 and shows
+        // forward-only validation throughput as if it were training throughput.
+        const TrainingStatsEvent& progressEvent = state.latestTrainingStats.has_value() ? state.latestTrainingStats.value()
+                                                                                         : state.latestStats.value();
+        std::string line = formatRunsStatsLineBase(progressEvent.stats,
                                                   formatRunLabel(state.runName, state.config.ensembleGroup),
                                                   runPrefixWidth,
                                                   displayedLossFromState(state.trainingLoss),

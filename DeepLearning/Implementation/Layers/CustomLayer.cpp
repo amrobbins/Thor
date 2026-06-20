@@ -10,6 +10,7 @@
 #include <unordered_set>
 
 #include "DeepLearning/Implementation/ThorError.h"
+#include "DeepLearning/Implementation/Layers/LayerSubmitDiagnostics.h"
 #include "Utilities/Expression/AutoDiff.h"
 using namespace std;
 
@@ -918,7 +919,9 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::buildFusedOptimizerUpdatePlan
         throw runtime_error("CustomLayer fused optimizer update requires a gradient update stream.");
     }
 
-    const ApplicationState& app = applications[applicationIndex];
+    ApplicationState& app = applications[applicationIndex];
+    app.fusedOptimizerRuntimeScalarBindings.clear();
+    app.fusedOptimizerRuntimeScalars.clear();
 
     PhysicalOutputs backwardOutputs = buildBackwardOutputsForApplication(applicationIndex, fusedParameterTargets, false);
 
@@ -966,6 +969,13 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::buildFusedOptimizerUpdatePlan
         }
 
         const std::string prefix = optimizerFusionNamePrefix(parameterName);
+        app.fusedOptimizerRuntimeScalarBindings.push_back({parameterName, optimizer, prefix});
+
+        // Do not call denseUpdateRuntimeScalars(...) while building/stamping the fused
+        // optimizer update. Several optimizers, including Adam-family optimizers,
+        // intentionally advance their runtime step counter when that method is called.
+        // The reusable map is populated lazily during the first actual optimizer
+        // update so compile/stamp remains side-effect-free.
 
         // Dense optimizer fusion consumes the parameter-gradient expression directly.  Do not
         // materialize the optimizer-owned dense gradient tensor for fused parameters; that memory
@@ -1006,38 +1016,31 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::buildFusedOptimizerUpdatePlan
         fusedUpdateEquation.stamp(filteredStampInputs, gradientUpdateStream.value(), {}, preallocatedOutputs));
 }
 
-std::unordered_map<std::string, float> CustomLayer::buildFusedOptimizerRuntimeScalars(uint32_t applicationIndex, uint32_t batchSize) {
+const std::unordered_map<std::string, float>& CustomLayer::updateFusedOptimizerRuntimeScalars(uint32_t applicationIndex,
+                                                                                              uint32_t batchSize) {
     if (batchSize == 0) {
         throw runtime_error("CustomLayer fused optimizer update requires a non-zero batch size.");
     }
     if (applicationIndex >= applications.size()) {
-        return {};
+        throw runtime_error("CustomLayer fused optimizer update requested for an invalid application index.");
     }
 
-    const ApplicationState& app = applications[applicationIndex];
-    std::unordered_map<std::string, float> runtimeScalars;
-    for (const std::string& parameterName : app.optimizerUpdateFusedParameterNames) {
-        shared_ptr<Optimizer> optimizer;
-        for (const auto& parameter : parameters) {
-            if (parameter->getName() == parameterName) {
-                optimizer = parameter->getOptimizer();
-                break;
-            }
-        }
-        if (optimizer == nullptr) {
-            throw runtime_error("CustomLayer fused optimizer update lost optimizer for parameter '" + parameterName + "'.");
+    ApplicationState& app = applications[applicationIndex];
+    for (const FusedOptimizerRuntimeScalarBinding& binding : app.fusedOptimizerRuntimeScalarBindings) {
+        if (binding.optimizer == nullptr) {
+            throw runtime_error("CustomLayer fused optimizer update lost optimizer for parameter '" + binding.parameterName + "'.");
         }
 
-        const std::string prefix = optimizerFusionNamePrefix(parameterName);
-        auto scalars = optimizer->denseUpdateRuntimeScalars(batchSize, prefix);
+        auto scalars = binding.optimizer->denseUpdateRuntimeScalars(batchSize, binding.namePrefix);
+        app.fusedOptimizerRuntimeScalars.reserve(app.fusedOptimizerRuntimeScalars.size() + scalars.size());
         for (const auto& [name, value] : scalars) {
-            auto [_, inserted] = runtimeScalars.emplace(name, value);
+            auto [it, inserted] = app.fusedOptimizerRuntimeScalars.emplace(name, value);
             if (!inserted) {
-                throw runtime_error("CustomLayer fused optimizer runtime scalar name collision: " + name);
+                it->second = value;
             }
         }
     }
-    return runtimeScalars;
+    return app.fusedOptimizerRuntimeScalars;
 }
 
 void CustomLayer::initialize() {
@@ -1391,6 +1394,8 @@ void CustomLayer::compileImpl() {
         app.backwardWeightsAccumulateStamped = nullptr;
         app.backwardWeightsFusedOptimizerUpdateStamped = nullptr;
         app.optimizerUpdateFusedParameterNames.clear();
+        app.fusedOptimizerRuntimeScalarBindings.clear();
+        app.fusedOptimizerRuntimeScalars.clear();
         app.backwardAdditionalInputsByName.clear();
         app.backwardInputGradOutputsByName.clear();
         app.expectedBackwardErrorInputTensorIds.clear();
@@ -1791,11 +1796,21 @@ void CustomLayer::forward(std::optional<Tensor> featureInput, bool validationPas
     if (needsRecompile)
         compileImpl();
 
-    std::set<uint32_t> candidateApplications;
-    for (uint32_t flat = 0; flat < featureInputs.size(); ++flat) {
-        if (featureInputs[flat].has_value() && featureInputs[flat].value() == featureInput.value()) {
-            candidateApplications.insert(flat / inputNames.size());
+    const bool singleApplicationSingleInputFastPath =
+        applications.size() == 1 && inputNames.size() == 1 && featureInputs.size() == 1 && featureInputs[0].has_value() &&
+        featureInputs[0].value() == featureInput.value();
+
+    std::vector<uint32_t> candidateApplications;
+    if (singleApplicationSingleInputFastPath) {
+        candidateApplications.push_back(0);
+    } else {
+        std::set<uint32_t> deduplicatedCandidateApplications;
+        for (uint32_t flat = 0; flat < featureInputs.size(); ++flat) {
+            if (featureInputs[flat].has_value() && featureInputs[flat].value() == featureInput.value()) {
+                deduplicatedCandidateApplications.insert(flat / inputNames.size());
+            }
         }
+        candidateApplications.assign(deduplicatedCandidateApplications.begin(), deduplicatedCandidateApplications.end());
     }
     THOR_THROW_IF_FALSE(!candidateApplications.empty());
 
@@ -1834,7 +1849,7 @@ void CustomLayer::forward(std::optional<Tensor> featureInput, bool validationPas
             }
             continue;
         }
-        if (app.stillWaitingForForwardInputTensorIds.count(tensorId) == 0) {
+        if (!singleApplicationSingleInputFastPath && app.stillWaitingForForwardInputTensorIds.count(tensorId) == 0) {
             if (trainingUpdateDiagnosticsEnabled()) {
                 std::fprintf(stderr,
                              "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u forward_skip reason=unexpected_input tensor=%lu batch=%u validation=%d is_start_forward=%d waiting_forward=%zu all_forward=%zu num_backward_applications=%u completed_backward_applications=%u\n",
@@ -1851,9 +1866,11 @@ void CustomLayer::forward(std::optional<Tensor> featureInput, bool validationPas
             }
             continue;
         }
-        app.stillWaitingForForwardInputTensorIds.erase(tensorId);
+        if (!singleApplicationSingleInputFastPath) {
+            app.stillWaitingForForwardInputTensorIds.erase(tensorId);
+        }
 
-        if (!app.stillWaitingForForwardInputTensorIds.empty()) {
+        if (!singleApplicationSingleInputFastPath && !app.stillWaitingForForwardInputTensorIds.empty()) {
             if (trainingUpdateDiagnosticsEnabled()) {
                 std::fprintf(stderr,
                              "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u forward_waiting tensor=%lu batch=%u validation=%d remaining=%zu all_forward=%zu\n",
@@ -1882,15 +1899,38 @@ void CustomLayer::forward(std::optional<Tensor> featureInput, bool validationPas
                          numBackwardApplicationsCompletedThisPass);
         }
 
-        app.forwardRanThisPass = true;
-        synchronizeComputeStreamForForwardInputs(applicationIndex);
-        computeFeatureOut(inputFlatIndex(applicationIndex, 0));
+        const bool emitLayerDiagnostics = layerSubmitDiagnosticsActive();
+        const auto appForwardStart = emitLayerDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
+        uint64_t syncMicros = 0;
+        uint64_t computeMicros = 0;
+        uint64_t downstreamMicros = 0;
+        uint64_t resetMicros = 0;
 
+        app.forwardRanThisPass = true;
+        if (!singleApplicationSingleInputFastPath) {
+            const auto syncStart = emitLayerDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
+            synchronizeComputeStreamForForwardInputs(applicationIndex);
+            if (emitLayerDiagnostics) {
+                syncMicros = layerSubmitDiagnosticElapsedMicros(syncStart, layerSubmitDiagnosticNow());
+            }
+        }
+        const auto computeStart = emitLayerDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
+        computeFeatureOut(inputFlatIndex(applicationIndex, 0));
+        if (emitLayerDiagnostics) {
+            computeMicros = layerSubmitDiagnosticElapsedMicros(computeStart, layerSubmitDiagnosticNow());
+        }
+
+        const auto downstreamStart = emitLayerDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
+        uint64_t downstreamCount = 0;
         for (uint32_t outputPort = 0; outputPort < outputNames.size(); ++outputPort) {
             const uint32_t flat = outputFlatIndex(applicationIndex, outputPort);
             if (!nextLayers[flat].has_value())
                 continue;
+            downstreamCount += 1;
             nextLayers[flat].value()->forward(featureOutputs[flat], validationPass, batchSize);
+        }
+        if (emitLayerDiagnostics) {
+            downstreamMicros = layerSubmitDiagnosticElapsedMicros(downstreamStart, layerSubmitDiagnosticNow());
         }
 
         // In inference-only / forward-only topologies there is no backward pass to mark the end of an execution
@@ -1903,8 +1943,24 @@ void CustomLayer::forward(std::optional<Tensor> featureInput, bool validationPas
         // train/validation batch sees app.forwardRanThisPass from the validation pass,
         // skips the forward computation, and downstream multi-input layers can receive
         // a second labels tensor for a stale feature tensor.
-        if (validationPass || !applicationHasAnyDownstreamBackprop(applicationIndex)) {
+        const auto resetStart = emitLayerDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
+        const bool resetForwardState = validationPass || !applicationHasAnyDownstreamBackprop(applicationIndex);
+        if (resetForwardState) {
             clearForwardArrivalBookkeeping(applicationIndex);
+        }
+        if (emitLayerDiagnostics) {
+            resetMicros = layerSubmitDiagnosticElapsedMicros(resetStart, layerSubmitDiagnosticNow());
+            emitLayerSubmitDiagnostic("custom_forward_application",
+                                      diagnosticLabel(),
+                                      getId(),
+                                      layerSubmitDiagnosticElapsedMicros(appForwardStart, layerSubmitDiagnosticNow()),
+                                      {{"app", applicationIndex},
+                                       {"sync_us", syncMicros},
+                                       {"compute_us", computeMicros},
+                                       {"downstream_us", downstreamMicros},
+                                       {"reset_us", resetMicros},
+                                       {"downstream_count", downstreamCount},
+                                       {"reset_forward_state", resetForwardState ? 1UL : 0UL}});
         }
     }
 }
@@ -1926,11 +1982,22 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
         return;
     }
 
-    std::set<uint32_t> candidateApplications;
-    for (uint32_t flat = 0; flat < errorInputs.size(); ++flat) {
-        if (errorInputs[flat].has_value() && errorInputs[flat].value() == errorInput.value()) {
-            candidateApplications.insert(flat / outputNames.size());
+    const bool singleApplicationSingleInputOutputFastPath =
+        applications.size() == 1 && inputNames.size() == 1 && outputNames.size() == 1 && errorInputs.size() == 1 &&
+        errorInputs[0].has_value() && errorInputs[0].value() == errorInput.value() &&
+        applications[0].expectedBackwardErrorInputTensorIds.size() == 1;
+
+    std::vector<uint32_t> candidateApplications;
+    if (singleApplicationSingleInputOutputFastPath) {
+        candidateApplications.push_back(0);
+    } else {
+        std::set<uint32_t> deduplicatedCandidateApplications;
+        for (uint32_t flat = 0; flat < errorInputs.size(); ++flat) {
+            if (errorInputs[flat].has_value() && errorInputs[flat].value() == errorInput.value()) {
+                deduplicatedCandidateApplications.insert(flat / outputNames.size());
+            }
         }
+        candidateApplications.assign(deduplicatedCandidateApplications.begin(), deduplicatedCandidateApplications.end());
     }
     THOR_THROW_IF_FALSE(!candidateApplications.empty());
 
@@ -1957,12 +2024,14 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
         if (app.backwardRanThisPass) {
             continue;
         }
-        if (app.stillWaitingForBackwardErrorInputTensorIds.count(tensorId) == 0) {
+        if (!singleApplicationSingleInputOutputFastPath && app.stillWaitingForBackwardErrorInputTensorIds.count(tensorId) == 0) {
             continue;
         }
-        app.stillWaitingForBackwardErrorInputTensorIds.erase(tensorId);
+        if (!singleApplicationSingleInputOutputFastPath) {
+            app.stillWaitingForBackwardErrorInputTensorIds.erase(tensorId);
+        }
 
-        if (!app.stillWaitingForBackwardErrorInputTensorIds.empty()) {
+        if (!singleApplicationSingleInputOutputFastPath && !app.stillWaitingForBackwardErrorInputTensorIds.empty()) {
             if (trainingUpdateDiagnosticsEnabled()) {
                 std::fprintf(stderr,
                              "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u backward_waiting remaining_errors=%zu\n",
@@ -1986,45 +2055,100 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
                          app.backwardWeightsFusedOptimizerUpdateStamped != nullptr ? 1 : 0);
         }
 
+        const bool emitLayerDiagnostics = layerSubmitDiagnosticsActive();
+        const auto appBackwardStart = emitLayerDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
+        uint64_t readyEventMicros = 0;
+        uint64_t errorComputeMicros = 0;
+        uint64_t waitErrorInputMicros = 0;
+        uint64_t waitFusedUpdateMicros = 0;
+        uint64_t accumulateMicros = 0;
+        uint64_t recordBatchMicros = 0;
+        uint64_t upstreamMicros = 0;
+        uint64_t upstreamCount = 0;
+
         app.backwardRanThisPass = true;
 
         std::optional<Event> errorInputReadyEvent = std::nullopt;
         if (gradientUpdateStream.has_value()) {
+            const auto readyEventStart = emitLayerDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
             errorInputReadyEvent = computeStream(applicationIndex).putEvent();
+            if (emitLayerDiagnostics) {
+                readyEventMicros = layerSubmitDiagnosticElapsedMicros(readyEventStart, layerSubmitDiagnosticNow());
+            }
         }
 
         std::optional<Event> errorOutHasBeenComputedEvent = std::nullopt;
         if (app.backwardErrorStamped != nullptr) {
+            const auto errorComputeStart = emitLayerDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
             errorOutHasBeenComputedEvent = computeErrorOut(inputFlatIndex(applicationIndex, 0));
+            if (emitLayerDiagnostics) {
+                errorComputeMicros = layerSubmitDiagnosticElapsedMicros(errorComputeStart, layerSubmitDiagnosticNow());
+            }
             if (errorOutHasBeenComputedEvent.has_value()) {
                 errorOutHasBeenComputedEvents.push_back(errorOutHasBeenComputedEvent.value());
             }
         }
 
         if (gradientUpdateStream.has_value() && errorInputReadyEvent.has_value()) {
+            const auto waitStart = emitLayerDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
             gradientUpdateStream.value().waitEvent(errorInputReadyEvent.value());
+            if (emitLayerDiagnostics) {
+                waitErrorInputMicros = layerSubmitDiagnosticElapsedMicros(waitStart, layerSubmitDiagnosticNow());
+            }
         }
         if (gradientUpdateStream.has_value() && errorOutHasBeenComputedEvent.has_value() &&
             app.backwardWeightsFusedOptimizerUpdateStamped != nullptr) {
             // Fused optimizer stamps update parameter storage directly, so they must preserve the same
             // ordering as the legacy materialized path: upstream input-gradient computation reads old
             // weights before the optimizer overwrites them.
+            const auto waitStart = emitLayerDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
             gradientUpdateStream.value().waitEvent(errorOutHasBeenComputedEvent.value());
+            if (emitLayerDiagnostics) {
+                waitFusedUpdateMicros = layerSubmitDiagnosticElapsedMicros(waitStart, layerSubmitDiagnosticNow());
+            }
         }
 
+        const auto accumulateStart = emitLayerDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
         accumulateWeightsGradientForApplication(applicationIndex, clearGradientFirstThisBackwardPass, batchSize);
+        if (emitLayerDiagnostics) {
+            accumulateMicros = layerSubmitDiagnosticElapsedMicros(accumulateStart, layerSubmitDiagnosticNow());
+        }
+        const auto recordBatchStart = emitLayerDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
         recordEffectiveParameterBatchSizeForApplication(applicationIndex, batchSize);
+        if (emitLayerDiagnostics) {
+            recordBatchMicros = layerSubmitDiagnosticElapsedMicros(recordBatchStart, layerSubmitDiagnosticNow());
+        }
         clearGradientFirstThisBackwardPass = false;
 
+        const auto upstreamStart = emitLayerDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
         for (uint32_t inputPort = 0; inputPort < inputNames.size(); ++inputPort) {
             const uint32_t inputFlat = inputFlatIndex(applicationIndex, inputPort);
             if (!previousLayers[inputFlat].has_value() || !errorOutputs[inputFlat].has_value()) {
                 continue;
             }
+            upstreamCount += 1;
             previousLayers[inputFlat].value()->backward(errorOutputs[inputFlat], batchSize);
+        }
+        if (emitLayerDiagnostics) {
+            upstreamMicros = layerSubmitDiagnosticElapsedMicros(upstreamStart, layerSubmitDiagnosticNow());
         }
 
         numBackwardApplicationsCompletedThisPass += 1;
+        if (emitLayerDiagnostics) {
+            emitLayerSubmitDiagnostic("custom_backward_application",
+                                      diagnosticLabel(),
+                                      getId(),
+                                      layerSubmitDiagnosticElapsedMicros(appBackwardStart, layerSubmitDiagnosticNow()),
+                                      {{"app", applicationIndex},
+                                       {"ready_event_us", readyEventMicros},
+                                       {"error_compute_us", errorComputeMicros},
+                                       {"wait_error_input_us", waitErrorInputMicros},
+                                       {"wait_fused_update_us", waitFusedUpdateMicros},
+                                       {"accumulate_us", accumulateMicros},
+                                       {"record_batch_us", recordBatchMicros},
+                                       {"upstream_us", upstreamMicros},
+                                       {"upstream_count", upstreamCount}});
+        }
     }
 
     if (numBackwardApplications > 0 && numBackwardApplicationsCompletedThisPass == numBackwardApplications) {
@@ -2039,18 +2163,35 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
         weightsAreUpToDateEvent.reset();
 
         if (gradientUpdateStream.has_value()) {
+            const bool emitApplyDiagnostics = layerSubmitDiagnosticsActive();
+            const auto waitErrorOutputsStart = emitApplyDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
             for (const Event& eOutComputedEvent : errorOutHasBeenComputedEvents) {
                 gradientUpdateStream.value().waitEvent(eOutComputedEvent);
             }
+            const uint64_t waitErrorOutputsMicros =
+                emitApplyDiagnostics ? layerSubmitDiagnosticElapsedMicros(waitErrorOutputsStart, layerSubmitDiagnosticNow()) : 0;
 
+
+            const auto applyTotalStart = emitApplyDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
+            uint64_t fusedParameterScanMicros = 0;
+            uint64_t parameterApplyMicros = 0;
+            uint64_t constraintApplyMicros = 0;
+            uint64_t skippedParameters = 0;
+            uint64_t appliedParameters = 0;
+            uint64_t constrainedParameters = 0;
+            uint64_t fusedSkippedParameters = 0;
             bool anyWeightsUpdated = false;
             std::set<std::string> fusedUpdateParameterNames;
+            const auto fusedParameterScanStart = emitApplyDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
             for (const ApplicationState& app : applications) {
                 if (app.backwardRanThisPass && !app.optimizerUpdateFusedParameterNames.empty()) {
                     anyWeightsUpdated = true;
                     fusedUpdateParameterNames.insert(app.optimizerUpdateFusedParameterNames.begin(),
                                                      app.optimizerUpdateFusedParameterNames.end());
                 }
+            }
+            if (emitApplyDiagnostics) {
+                fusedParameterScanMicros = layerSubmitDiagnosticElapsedMicros(fusedParameterScanStart, layerSubmitDiagnosticNow());
             }
             for (const auto& parameter : parameters) {
                 if (!parameter->isTrainingEnabled()) {
@@ -2060,6 +2201,7 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
                                      diagnosticLabel().c_str(),
                                      parameter->getName().c_str());
                     }
+                    skippedParameters += 1;
                     continue;
                 }
 
@@ -2071,6 +2213,7 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
                                          diagnosticLabel().c_str(),
                                          parameter->getName().c_str());
                         }
+                        fusedSkippedParameters += 1;
                         continue;
                     }
 
@@ -2080,7 +2223,12 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
                                      diagnosticLabel().c_str(),
                                      parameter->getName().c_str());
                     }
+                    const auto constraintStart = emitApplyDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
                     parameter->applyConstraintsAfterExternalUpdate();
+                    if (emitApplyDiagnostics) {
+                        constraintApplyMicros += layerSubmitDiagnosticElapsedMicros(constraintStart, layerSubmitDiagnosticNow());
+                    }
+                    constrainedParameters += 1;
                     continue;
                 }
 
@@ -2093,6 +2241,7 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
                                      parameter->getName().c_str(),
                                      joinNames(effectiveBatchSizeByParameterName).c_str());
                     }
+                    skippedParameters += 1;
                     continue;
                 }
 
@@ -2108,7 +2257,28 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
                                  parameter->getName().c_str(),
                                  static_cast<unsigned long long>(effectiveBatchSizeIt->second));
                 }
+                const auto parameterApplyStart = emitApplyDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
                 anyWeightsUpdated |= parameter->applyGradient(static_cast<uint32_t>(effectiveBatchSizeIt->second));
+                if (emitApplyDiagnostics) {
+                    parameterApplyMicros += layerSubmitDiagnosticElapsedMicros(parameterApplyStart, layerSubmitDiagnosticNow());
+                }
+                appliedParameters += 1;
+            }
+            if (emitApplyDiagnostics) {
+                emitLayerSubmitDiagnostic("custom_apply_gradients",
+                                          diagnosticLabel(),
+                                          getId(),
+                                          layerSubmitDiagnosticElapsedMicros(applyTotalStart, layerSubmitDiagnosticNow()),
+                                          {{"wait_error_outputs_us", waitErrorOutputsMicros},
+                                           {"fused_scan_us", fusedParameterScanMicros},
+                                           {"parameter_apply_us", parameterApplyMicros},
+                                           {"constraint_apply_us", constraintApplyMicros},
+                                           {"parameters", parameters.size()},
+                                           {"applied", appliedParameters},
+                                           {"skipped", skippedParameters},
+                                           {"fused_skipped", fusedSkippedParameters},
+                                           {"constrained", constrainedParameters},
+                                           {"any_updated", anyWeightsUpdated ? 1UL : 0UL}});
             }
             effectiveBatchSizeByParameterName.clear();
             if (trainingUpdateDiagnosticsEnabled()) {
@@ -2127,23 +2297,74 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
 }
 
 void CustomLayer::computeFeatureOut(uint32_t connectionNumber) {
+    const bool emitDiagnostics = layerSubmitDiagnosticsActive();
+    const auto totalStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
+    uint64_t preRunHookMicros = 0;
+    uint64_t runMicros = 0;
     DecodedConnection decoded = decodeInputConnectionType(static_cast<int>(connectionNumber));
     if (decoded.applicationIndex >= applications.size() || !applications[decoded.applicationIndex].forwardStamped) {
         throw runtime_error("CustomLayer::computeFeatureOut requires a stamped forward plan.");
     }
     if (applications[decoded.applicationIndex].forwardPreRunHook) {
+        const auto preRunStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
         applications[decoded.applicationIndex].forwardPreRunHook(computeStream(decoded.applicationIndex));
+        if (emitDiagnostics) {
+            preRunHookMicros = layerSubmitDiagnosticElapsedMicros(preRunStart, layerSubmitDiagnosticNow());
+        }
     }
+    const auto runStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
     applications[decoded.applicationIndex].forwardStamped->run();
+    if (emitDiagnostics) {
+        runMicros = layerSubmitDiagnosticElapsedMicros(runStart, layerSubmitDiagnosticNow());
+        emitLayerSubmitDiagnostic("custom_forward_compute",
+                                  diagnosticLabel(),
+                                  getId(),
+                                  layerSubmitDiagnosticElapsedMicros(totalStart, layerSubmitDiagnosticNow()),
+                                  {{"app", decoded.applicationIndex},
+                                   {"connection", connectionNumber},
+                                   {"prerun_us", preRunHookMicros},
+                                   {"run_us", runMicros},
+                                   {"has_prerun", applications[decoded.applicationIndex].forwardPreRunHook ? 1UL : 0UL},
+                                   {"flops", applications[decoded.applicationIndex].forwardStamped->flopCount()}});
+    }
 }
 
 std::optional<Event> CustomLayer::computeErrorOut(uint32_t connectionNumber) {
+    const bool emitDiagnostics = layerSubmitDiagnosticsActive();
+    const auto totalStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
+    uint64_t runMicros = 0;
+    uint64_t eventMicros = 0;
     DecodedConnection decoded = decodeInputConnectionType(static_cast<int>(connectionNumber));
     if (decoded.applicationIndex >= applications.size() || applications[decoded.applicationIndex].backwardErrorStamped == nullptr) {
+        if (emitDiagnostics) {
+            emitLayerSubmitDiagnostic("custom_backward_error_skip",
+                                      diagnosticLabel(),
+                                      getId(),
+                                      layerSubmitDiagnosticElapsedMicros(totalStart, layerSubmitDiagnosticNow()),
+                                      {{"app", decoded.applicationIndex}, {"connection", connectionNumber}, {"reason_no_stamp", 1}});
+        }
         return std::nullopt;
     }
+    const auto runStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
     applications[decoded.applicationIndex].backwardErrorStamped->run();
-    return computeStream(decoded.applicationIndex).putEvent();
+    if (emitDiagnostics) {
+        runMicros = layerSubmitDiagnosticElapsedMicros(runStart, layerSubmitDiagnosticNow());
+    }
+    const auto eventStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
+    Event readyEvent = computeStream(decoded.applicationIndex).putEvent();
+    if (emitDiagnostics) {
+        eventMicros = layerSubmitDiagnosticElapsedMicros(eventStart, layerSubmitDiagnosticNow());
+        emitLayerSubmitDiagnostic("custom_backward_error_compute",
+                                  diagnosticLabel(),
+                                  getId(),
+                                  layerSubmitDiagnosticElapsedMicros(totalStart, layerSubmitDiagnosticNow()),
+                                  {{"app", decoded.applicationIndex},
+                                   {"connection", connectionNumber},
+                                   {"run_us", runMicros},
+                                   {"put_event_us", eventMicros},
+                                   {"flops", applications[decoded.applicationIndex].backwardErrorStamped->flopCount()}});
+    }
+    return readyEvent;
 }
 
 void CustomLayer::accumulateWeightsGradientForApplication(uint32_t applicationIndex, bool clearGradientFirst, uint32_t batchSize) {
@@ -2174,16 +2395,48 @@ void CustomLayer::accumulateWeightsGradientForApplication(uint32_t applicationIn
                      app.backwardWeightsFusedOptimizerUpdateStamped != nullptr ? 1 : 0,
                      joinNames(app.activeParameterTargetNames).c_str());
     }
+    const bool emitDiagnostics = layerSubmitDiagnosticsActive();
+    const auto totalStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
+    uint64_t clearMicros = 0;
+    uint64_t fusedUpdateMicros = 0;
+    uint64_t accumulateMicros = 0;
     if (ranMaterializedOverwrite) {
+        const auto clearStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
         app.backwardWeightsClearStamped->run();
+        if (emitDiagnostics) {
+            clearMicros = layerSubmitDiagnosticElapsedMicros(clearStart, layerSubmitDiagnosticNow());
+        }
     }
 
     if (app.backwardWeightsFusedOptimizerUpdateStamped != nullptr) {
-        app.backwardWeightsFusedOptimizerUpdateStamped->run(buildFusedOptimizerRuntimeScalars(applicationIndex, batchSize));
+        const auto fusedStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
+        app.backwardWeightsFusedOptimizerUpdateStamped->run(updateFusedOptimizerRuntimeScalars(applicationIndex, batchSize));
+        if (emitDiagnostics) {
+            fusedUpdateMicros = layerSubmitDiagnosticElapsedMicros(fusedStart, layerSubmitDiagnosticNow());
+        }
     }
 
     if (!ranMaterializedOverwrite && app.backwardWeightsAccumulateStamped != nullptr) {
+        const auto accumulateStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
         app.backwardWeightsAccumulateStamped->run();
+        if (emitDiagnostics) {
+            accumulateMicros = layerSubmitDiagnosticElapsedMicros(accumulateStart, layerSubmitDiagnosticNow());
+        }
+    }
+    if (emitDiagnostics) {
+        emitLayerSubmitDiagnostic("custom_backward_weights_compute",
+                                  diagnosticLabel(),
+                                  getId(),
+                                  layerSubmitDiagnosticElapsedMicros(totalStart, layerSubmitDiagnosticNow()),
+                                  {{"app", applicationIndex},
+                                   {"batch", batchSize},
+                                   {"clear_first", clearGradientFirst ? 1UL : 0UL},
+                                   {"clear_us", clearMicros},
+                                   {"fused_update_us", fusedUpdateMicros},
+                                   {"accumulate_us", accumulateMicros},
+                                   {"has_clear", app.backwardWeightsClearStamped != nullptr ? 1UL : 0UL},
+                                   {"has_fused_update", app.backwardWeightsFusedOptimizerUpdateStamped != nullptr ? 1UL : 0UL},
+                                   {"has_accumulate", app.backwardWeightsAccumulateStamped != nullptr ? 1UL : 0UL}});
     }
 }
 

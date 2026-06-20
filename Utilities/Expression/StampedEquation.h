@@ -211,6 +211,8 @@ struct MatmulCacheKey {
 struct BuiltMatmul {
     MatmulCacheKey key;
     size_t workspace_bytes = 0;
+    std::optional<CublasKernel> cublas_kernel;
+    std::shared_ptr<CublasMatrixMultiply::LtMatmulPlan> epilogue_plan;
     std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> epilogue_algorithm;
 
     explicit BuiltMatmul(MatmulCacheKey key) : key(std::move(key)) {}

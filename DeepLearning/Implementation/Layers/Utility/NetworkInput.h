@@ -5,6 +5,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
+#include "DeepLearning/Implementation/Layers/LayerSubmitDiagnostics.h"
 
 namespace ThorImplementation {
 
@@ -82,14 +83,15 @@ class NetworkInput : public Layer {
     // Only called for input endpoints
     // This version of forward expects that the memory in featureInput has already been populated before forward is called.
     void forward(std::optional<Tensor> featureInput, bool validationPass, uint32_t batchSize = 0) override {
+        const bool emitDiagnostics = layerSubmitDiagnosticsActive();
+        const auto totalStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
         THOR_THROW_IF_FALSE(contentDimensions.has_value() == featureInput.has_value());
 
         if (contentDimensions.has_value())
             THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDimensions() == contentDimensions.value());
 
-        if (!nextLayer.has_value())
-            return;
-
+        const auto copyStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
+        uint64_t copyMicros = 0;
         if (contentDimensions.has_value()) {
             THOR_THROW_IF_FALSE(featureOutput.has_value());
 
@@ -105,8 +107,33 @@ class NetworkInput : public Layer {
             featureOutput.value().copyFromAsync(outputBuffer, stream);
             loadStream.waitEvent(stream.putEvent());
         }
+        if (emitDiagnostics) {
+            copyMicros = layerSubmitDiagnosticElapsedMicros(copyStart, layerSubmitDiagnosticNow());
+        }
 
+        if (!nextLayer.has_value()) {
+            if (emitDiagnostics) {
+                emitLayerSubmitDiagnostic("network_input_forward",
+                                          layerSubmitDiagnosticLabel("NetworkInput", getId(), getName()),
+                                          getId(),
+                                          layerSubmitDiagnosticElapsedMicros(totalStart, layerSubmitDiagnosticNow()),
+                                          {{"copy_us", copyMicros}, {"downstream_us", 0}, {"has_content", contentDimensions.has_value() ? 1UL : 0UL}});
+            }
+            return;
+        }
+
+        const auto downstreamStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
         nextLayer.value()->forward(featureOutput, validationPass, batchSize);
+        const uint64_t downstreamMicros =
+            emitDiagnostics ? layerSubmitDiagnosticElapsedMicros(downstreamStart, layerSubmitDiagnosticNow()) : 0;
+
+        if (emitDiagnostics) {
+            emitLayerSubmitDiagnostic("network_input_forward",
+                                      layerSubmitDiagnosticLabel("NetworkInput", getId(), getName()),
+                                      getId(),
+                                      layerSubmitDiagnosticElapsedMicros(totalStart, layerSubmitDiagnosticNow()),
+                                      {{"copy_us", copyMicros}, {"downstream_us", downstreamMicros}, {"has_content", contentDimensions.has_value() ? 1UL : 0UL}});
+        }
     }
 
     void backward(std::optional<Tensor> errorInput, uint32_t batchSize = 0) override {}

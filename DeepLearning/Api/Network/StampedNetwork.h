@@ -11,6 +11,7 @@
 #include "Utilities/Common/Event.h"
 
 #include <vector>
+#include <cstdint>
 
 #include "DeepLearning/Api/Parameter/Parameterizable.h"
 #include "DeepLearning/Implementation/Parameter/Parameterizable.h"
@@ -22,6 +23,40 @@ class LocalExecutor;
 }  // namespace Thor
 
 namespace ThorImplementation {
+
+struct BatchSubmissionTiming {
+    uint64_t activeLossRootsMicros = 0;
+    uint64_t setActiveLossRootsMicros = 0;
+    uint64_t sendBatchMicros = 0;
+    uint64_t batchUnwrapMicros = 0;
+    uint64_t physicalTotalMicros = 0;
+    uint64_t inputForwardMicros = 0;
+    uint64_t outputCollectMicros = 0;
+    uint64_t outputWaitOnProcessingMicros = 0;
+    uint64_t processingEventMicros = 0;
+    uint64_t inputFanoutMicros = 0;
+    uint64_t totalMicros = 0;
+    uint64_t numInputs = 0;
+    uint64_t numOutputs = 0;
+    uint64_t activeLossRootCount = 0;
+};
+
+inline void accumulateBatchSubmissionTiming(BatchSubmissionTiming& dst, const BatchSubmissionTiming& src) {
+    dst.activeLossRootsMicros += src.activeLossRootsMicros;
+    dst.setActiveLossRootsMicros += src.setActiveLossRootsMicros;
+    dst.sendBatchMicros += src.sendBatchMicros;
+    dst.batchUnwrapMicros += src.batchUnwrapMicros;
+    dst.physicalTotalMicros += src.physicalTotalMicros;
+    dst.inputForwardMicros += src.inputForwardMicros;
+    dst.outputCollectMicros += src.outputCollectMicros;
+    dst.outputWaitOnProcessingMicros += src.outputWaitOnProcessingMicros;
+    dst.processingEventMicros += src.processingEventMicros;
+    dst.inputFanoutMicros += src.inputFanoutMicros;
+    dst.totalMicros += src.totalMicros;
+    dst.numInputs += src.numInputs;
+    dst.numOutputs += src.numOutputs;
+    dst.activeLossRootCount += src.activeLossRootCount;
+}
 
 class StampedNetwork {
    private:
@@ -104,14 +139,16 @@ class StampedNetwork {
                     std::map<std::string, Event> &outputReadyEvents,
                     bool isInferenceOnly,
                     Event* reusableProcessingFinishedEvent = nullptr,
-                    bool waitForOutputsOnProcessingStream = true);
+                    bool waitForOutputsOnProcessingStream = true,
+                    BatchSubmissionTiming* submitTiming = nullptr);
 
     Event sendBatch(const Batch& batchInputs,
                     std::map<std::string, Tensor> &batchOutputs,
                     std::map<std::string, Event> &outputReadyEvents,
                     bool isInferenceOnly,
                     Event* reusableProcessingFinishedEvent = nullptr,
-                    bool waitForOutputsOnProcessingStream = true);
+                    bool waitForOutputsOnProcessingStream = true,
+                    BatchSubmissionTiming* submitTiming = nullptr);
 
     Event sendPhysicalBatch(std::map<std::string, Tensor> batchInputs,
                             std::map<std::string, Tensor> &batchOutputs,
@@ -119,7 +156,8 @@ class StampedNetwork {
                             bool isInferenceOnly,
                             uint32_t batchSize,
                             Event* reusableProcessingFinishedEvent = nullptr,
-                            bool waitForOutputsOnProcessingStream = true);
+                            bool waitForOutputsOnProcessingStream = true,
+                            BatchSubmissionTiming* submitTiming = nullptr);
 
     void extendOutputWritableEvents(Event event);
 

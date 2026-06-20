@@ -174,6 +174,31 @@ std::string formatCompactRateString(double value, bool integral = false) {
     return std::string(buffer);
 }
 
+std::string formatCompactFlopsRateString(double value) {
+    static constexpr const char* suffixes[] = {"", "K", "M", "G", "T", "P", "E", "Z", "Y"};
+    constexpr int maxSuffixIndex = static_cast<int>(sizeof(suffixes) / sizeof(suffixes[0])) - 1;
+
+    double scaled = value;
+    int suffixIndex = 0;
+    while (std::abs(scaled) >= 1000.0 && suffixIndex < maxSuffixIndex) {
+        scaled /= 1000.0;
+        ++suffixIndex;
+    }
+
+    while (true) {
+        const double absScaled = std::abs(scaled);
+        const int precision = absScaled >= 100.0 ? 1 : (absScaled >= 10.0 ? 2 : 3);
+        char number[64];
+        std::snprintf(number, sizeof(number), "%.*f", precision, scaled);
+        if (std::char_traits<char>::length(number) <= 5 || suffixIndex >= maxSuffixIndex) {
+            return std::string(number) + suffixes[suffixIndex];
+        }
+
+        scaled /= 1000.0;
+        ++suffixIndex;
+    }
+}
+
 std::string formatElapsedString(double elapsedSeconds) {
     const uint64_t roundedSeconds = static_cast<uint64_t>(std::max(0.0, elapsedSeconds));
     const uint64_t hours = roundedSeconds / 3600;
@@ -326,6 +351,7 @@ void appendPlainDimKey(LineBuffer& out, const char* key) {
 }
 
 constexpr size_t RATE_FIELD_WIDTH = 5;
+constexpr size_t FLOPS_RATE_FIELD_WIDTH = 6;
 
 void appendPlainStatsLine(LineBuffer& out,
                           const TrainingStatsSnapshot& stats,
@@ -394,7 +420,7 @@ void appendPlainStatsLine(LineBuffer& out,
     }
     if (stats.floatingPointOperationsPerSecond > 0.0) {
         appendPlainDimKey(out, "flops/s");
-        appendPadded(out, formatCompactRateString(stats.floatingPointOperationsPerSecond), RATE_FIELD_WIDTH);
+        appendPadded(out, formatCompactFlopsRateString(stats.floatingPointOperationsPerSecond), FLOPS_RATE_FIELD_WIDTH);
     }
     if (stats.inFlightBatches > 0) {
         appendPlainDimKey(out, "in_flight");
@@ -480,7 +506,7 @@ void appendColorStatsLine(LineBuffer& out,
     }
     if (stats.floatingPointOperationsPerSecond > 0.0) {
         appendDimKey(out, "flops/s");
-        appendStyledPadded(out, Ansi::throughput, formatCompactRateString(stats.floatingPointOperationsPerSecond), RATE_FIELD_WIDTH);
+        appendStyledPadded(out, Ansi::throughput, formatCompactFlopsRateString(stats.floatingPointOperationsPerSecond), FLOPS_RATE_FIELD_WIDTH);
     }
     if (stats.inFlightBatches > 0) {
         appendDimKey(out, "in_flight");

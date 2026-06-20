@@ -67,6 +67,139 @@ const float CublasMatrixMultiply::BETA_CLEAR = 0.0f;
 
 namespace {
 
+void destroyLtMatrixLayoutNoThrow(cublasLtMatrixLayout_t& desc) noexcept {
+    if (desc) {
+        (void)cublasLtMatrixLayoutDestroy(desc);
+        desc = nullptr;
+    }
+}
+
+void destroyLtMatmulDescNoThrow(cublasLtMatmulDesc_t& desc) noexcept {
+    if (desc) {
+        (void)cublasLtMatmulDescDestroy(desc);
+        desc = nullptr;
+    }
+}
+
+}  // namespace
+
+CublasMatrixMultiply::LtMatmulPlan::~LtMatmulPlan() {
+    destroyLtMatrixLayoutNoThrow(d_desc);
+    destroyLtMatrixLayoutNoThrow(c_desc);
+    destroyLtMatrixLayoutNoThrow(b_desc);
+    destroyLtMatrixLayoutNoThrow(a_desc);
+    destroyLtMatmulDescNoThrow(operation_desc_device);
+    destroyLtMatmulDescNoThrow(operation_desc_host);
+}
+
+void CublasMatrixMultiply::LtMatmulPlan::runGemmWithEpilogue(Tensor A,
+                                                             Tensor B,
+                                                             std::optional<Tensor> addend,
+                                                             Tensor D,
+                                                             const float *alpha,
+                                                             const float *beta,
+                                                             Stream stream,
+                                                             CublasScalarPointerMode pointerMode,
+                                                             std::optional<Tensor> workspace,
+                                                             bool addendIsBiasVector) const {
+    ScopedGpu scopedGpu(stream.getGpuNum());
+    const uint64_t workspaceLimitBytes = workspace.has_value() ? workspace.value().getArraySizeInBytes() : 0;
+    const uint64_t selectedWorkspaceBytes = algorithm.workspace_size_in_bytes;
+    if (selectedWorkspaceBytes > workspaceLimitBytes) {
+        throw std::runtime_error("Cached cuBLASLt epilogue GEMM plan requires more workspace than the stamped launch provided.");
+    }
+
+    const void *ltA = B.getMemPtr();
+    const void *ltB = A.getMemPtr();
+    const void *ltC = (addend.has_value() && !addendIsBiasVector) ? addend.value().getMemPtr() : D.getMemPtr();
+    const float betaZero = 0.0f;
+    const float betaOne = 1.0f;
+    const float *effectiveBeta = addend.has_value() && !addendIsBiasVector ? beta : &betaZero;
+    if (addendIsBiasVector) {
+        effectiveBeta = &betaZero;
+    } else if (addend.has_value() && effectiveBeta == nullptr) {
+        effectiveBeta = &betaOne;
+    }
+    void *workspacePtr = selectedWorkspaceBytes > 0 ? workspace.value().getMemPtr() : nullptr;
+
+    CHECK_CUBLAS(cublasLtMatmul(stream.getCublasLtHandleUnchecked(),
+                                operationDesc(pointerMode),
+                                alpha,
+                                ltA,
+                                a_desc,
+                                ltB,
+                                b_desc,
+                                effectiveBeta,
+                                ltC,
+                                c_desc,
+                                D.getMemPtr(),
+                                d_desc,
+                                &algorithm.algorithm,
+                                workspacePtr,
+                                static_cast<size_t>(selectedWorkspaceBytes),
+                                stream));
+}
+
+void CublasMatrixMultiply::LtMatmulPlan::runGemmWithBackwardEpilogue(Tensor A,
+                                                                     Tensor B,
+                                                                     std::optional<Tensor> addend,
+                                                                     Tensor D,
+                                                                     const float *alpha,
+                                                                     const float *beta,
+                                                                     Stream stream,
+                                                                     CublasScalarPointerMode pointerMode,
+                                                                     std::optional<Tensor> workspace) const {
+    ScopedGpu scopedGpu(stream.getGpuNum());
+    const uint64_t workspaceLimitBytes = workspace.has_value() ? workspace.value().getArraySizeInBytes() : 0;
+    const uint64_t selectedWorkspaceBytes = algorithm.workspace_size_in_bytes;
+    if (selectedWorkspaceBytes > workspaceLimitBytes) {
+        throw std::runtime_error("Cached cuBLASLt backward epilogue GEMM plan requires more workspace than the stamped launch provided.");
+    }
+
+    const void *ltA = B.getMemPtr();
+    const void *ltB = A.getMemPtr();
+    const void *ltC = addend.has_value() ? addend.value().getMemPtr() : D.getMemPtr();
+    const float betaZero = 0.0f;
+    const float betaOne = 1.0f;
+    const float *effectiveBeta = addend.has_value() ? beta : &betaZero;
+    if (addend.has_value() && effectiveBeta == nullptr) {
+        effectiveBeta = &betaOne;
+    }
+    void *workspacePtr = selectedWorkspaceBytes > 0 ? workspace.value().getMemPtr() : nullptr;
+
+    CHECK_CUBLAS(cublasLtMatmul(stream.getCublasLtHandleUnchecked(),
+                                operationDesc(pointerMode),
+                                alpha,
+                                ltA,
+                                a_desc,
+                                ltB,
+                                b_desc,
+                                effectiveBeta,
+                                ltC,
+                                c_desc,
+                                D.getMemPtr(),
+                                d_desc,
+                                &algorithm.algorithm,
+                                workspacePtr,
+                                static_cast<size_t>(selectedWorkspaceBytes),
+                                stream));
+}
+
+
+namespace {
+
+cublasLtHandle_t compileTimeCublasLtHandle(int gpuNum) {
+    static std::mutex compileHandleMutex;
+    static std::unordered_map<int, Stream> compileStreamsByDevice;
+
+    std::lock_guard<std::mutex> lock(compileHandleMutex);
+    auto [it, inserted] = compileStreamsByDevice.try_emplace(gpuNum, gpuNum);
+    if (inserted) {
+        it->second.informIsStatic();
+    }
+    return it->second.getCublasLtHandle();
+}
+
 void setTensorwideFp8ScaleMode(cublasLtMatmulDesc_t operationDesc, cublasLtMatmulDescAttributes_t attribute) {
     const cublasLtMatmulMatrixScale_t scaleMode = CUBLASLT_MATMUL_MATRIX_SCALE_SCALAR_32F;
     CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, attribute, &scaleMode, sizeof(scaleMode)));
@@ -1071,7 +1204,7 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
     if (auto optimalKernel = CublasMatrixMultiply::instance().optimalKernels.get(cublasKernelRequirement); optimalKernel.has_value()) {
         cublasLtMatmulAlgo_t algorithm = optimalKernel->getAlgorithm(stream.getGpuNum());
 
-        CHECK_CUBLAS(cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
+        CHECK_CUBLAS(cublasLtMatmul(stream.getCublasLtHandle(),
                                     operationDesc,
                                     alpha,
                                     ltA,
@@ -1099,7 +1232,7 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
                heuristicAlgorithm.has_value()) {
         cublasLtMatmulAlgo_t algorithm = *heuristicAlgorithm;
 
-        CHECK_CUBLAS(cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
+        CHECK_CUBLAS(cublasLtMatmul(stream.getCublasLtHandle(),
                                     operationDesc,
                                     alpha,
                                     ltA,
@@ -1140,7 +1273,7 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
 
     int returnedAlgoCount;
     vector<cublasLtMatmulHeuristicResult_t> results(30);
-    CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
+    CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(stream.getCublasLtHandle(),
                                                 operationDesc,
                                                 ADesc,
                                                 BDesc,
@@ -1159,7 +1292,7 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
         // have seen kernels that say wavesCount == 0 that sporadically fail.
         if (!(results[i].wavesCount > 0.0f))
             continue;
-        cublasStatus_t cublasStatus = cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
+        cublasStatus_t cublasStatus = cublasLtMatmul(stream.getCublasLtHandle(),
                                                      operationDesc,
                                                      alpha,
                                                      ltA,
@@ -1183,7 +1316,7 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
 
     if (!kernelLaunchedSuccessfully) {
         results = vector<cublasLtMatmulHeuristicResult_t>(10000);
-        CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
+        CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(stream.getCublasLtHandle(),
                                                     operationDesc,
                                                     ADesc,
                                                     BDesc,
@@ -1197,7 +1330,7 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
         results.resize(returnedAlgoCount);
 
         for (int i = 0; i < returnedAlgoCount && !kernelLaunchedSuccessfully; ++i) {
-            cublasStatus_t cublasStatus = cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
+            cublasStatus_t cublasStatus = cublasLtMatmul(stream.getCublasLtHandle(),
                                                          operationDesc,
                                                          alpha,
                                                          ltA,
@@ -1233,6 +1366,8 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
     CHECK_CUBLAS(cublasLtMatmulDescDestroy(operationDesc));
 }
 
+static cublasLtEpilogue_t toCublasLtBackwardEpilogue(CublasMatrixMultiply::BackwardEpilogueFusion epilogue, bool hasBgrad);
+
 static cublasLtEpilogue_t toCublasLtEpilogue(CublasMatrixMultiply::EpilogueFusion epilogue, bool hasBias) {
     switch (epilogue) {
         case CublasMatrixMultiply::EpilogueFusion::Default:
@@ -1243,6 +1378,267 @@ static cublasLtEpilogue_t toCublasLtEpilogue(CublasMatrixMultiply::EpilogueFusio
             return hasBias ? static_cast<cublasLtEpilogue_t>(CUBLASLT_EPILOGUE_GELU | CUBLASLT_EPILOGUE_BIAS) : CUBLASLT_EPILOGUE_GELU;
     }
     throw std::runtime_error("Unknown cuBLASLt GEMM epilogue fusion kind.");
+}
+
+std::shared_ptr<CublasMatrixMultiply::LtMatmulPlan> CublasMatrixMultiply::buildGemmWithEpiloguePlan(
+    int gpuNum,
+    const int32_t A_rows,
+    const int32_t A_cols,
+    const int32_t B_rows,
+    const int32_t B_cols,
+    const int32_t ld_A,
+    const int32_t ld_B,
+    const int32_t ld_C,
+    const int32_t ld_D,
+    bool transposeA,
+    bool transposeB,
+    const MatmulDataTypes dataTypes,
+    EpilogueFusion epilogue,
+    std::optional<Tensor> addend,
+    bool addendIsBiasVector,
+    std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> selectedAlgorithm,
+    std::optional<uint64_t> maxWorkspaceSizeInBytes) {
+    if (!addend.has_value() && epilogue == EpilogueFusion::Default) {
+        throw std::runtime_error("CublasMatrixMultiply::buildGemmWithEpiloguePlan requires an addend or a non-default epilogue.");
+    }
+    if (transposeA || transposeB) {
+        throw std::runtime_error("CublasMatrixMultiply::buildGemmWithEpiloguePlan currently supports only non-transposed row-major GEMM epilogues.");
+    }
+
+    validateMatmulDataTypesOrThrow(dataTypes, "CublasMatrixMultiply::buildGemmWithEpiloguePlan");
+    validateFp8MatmulScaleConfigurationOrThrow(dataTypes, Fp8MatmulScales::none(), "CublasMatrixMultiply::buildGemmWithEpiloguePlan");
+
+    ScopedGpu scopedGpu(gpuNum);
+    OperationType operationType = makeOperationType(dataTypes);
+    validateFp8RowMajorGemmShapeAndLayoutOrThrow(operationType,
+                                                 A_rows,
+                                                 A_cols,
+                                                 B_rows,
+                                                 B_cols,
+                                                 ld_A,
+                                                 ld_B,
+                                                 ld_C,
+                                                 ld_D,
+                                                 transposeA,
+                                                 transposeB,
+                                                 "CublasMatrixMultiply::buildGemmWithEpiloguePlan");
+    if (fp8NeedsRowMajorTransposeWorkspace(operationType, transposeA, transposeB)) {
+        throw std::runtime_error("CublasMatrixMultiply::buildGemmWithEpiloguePlan FP8 row-major path requires non-epilogue workspace support.");
+    }
+
+    auto selection = selectedAlgorithm.has_value()
+                         ? selectedAlgorithm
+                         : selectGemmWithEpilogueAlgorithm(gpuNum,
+                                                           A_rows,
+                                                           A_cols,
+                                                           B_rows,
+                                                           B_cols,
+                                                           ld_A,
+                                                           ld_B,
+                                                           ld_C,
+                                                           ld_D,
+                                                           transposeA,
+                                                           transposeB,
+                                                           dataTypes,
+                                                           epilogue,
+                                                           addend.has_value(),
+                                                           addendIsBiasVector,
+                                                           maxWorkspaceSizeInBytes);
+    if (!selection.has_value()) {
+        return nullptr;
+    }
+
+    const int32_t D_rows = A_rows;
+    const int32_t D_cols = B_cols;
+    const cublasLtEpilogue_t cublasEpilogue = toCublasLtEpilogue(epilogue, addendIsBiasVector);
+    auto plan = std::make_shared<LtMatmulPlan>();
+    plan->algorithm = selection.value();
+
+    auto createOperationDesc = [&](cublasLtPointerMode_t pointerMode, cublasLtMatmulDesc_t *desc) {
+        CHECK_CUBLAS(cublasLtMatmulDescCreate(desc, operationType.computeDataType, operationType.scaleDataType));
+        CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(*desc, CUBLASLT_MATMUL_DESC_POINTER_MODE, &pointerMode, sizeof(pointerMode)));
+        configureTensorwideFp8Scales(*desc, operationType, Fp8MatmulScales::none());
+        CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(*desc, CUBLASLT_MATMUL_DESC_EPILOGUE, &cublasEpilogue, sizeof(cublasEpilogue)));
+        if (addendIsBiasVector) {
+            void *biasPtr = addend.value().getMemPtr();
+            CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(*desc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &biasPtr, sizeof(biasPtr)));
+        }
+    };
+    createOperationDesc(CUBLASLT_POINTER_MODE_HOST, &plan->operation_desc_host);
+    createOperationDesc(CUBLASLT_POINTER_MODE_DEVICE, &plan->operation_desc_device);
+
+    const cublasLtOrder_t columnMajorOrder = CUBLASLT_ORDER_COL;
+    int64_t ld = 0;
+    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&plan->a_desc, operationType.BDataType, B_cols, B_rows, ld_B));
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(plan->a_desc, CUBLASLT_MATRIX_LAYOUT_ORDER, &columnMajorOrder, sizeof(columnMajorOrder)));
+    ld = ld_B;
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(plan->a_desc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
+
+    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&plan->b_desc, operationType.ADataType, A_cols, A_rows, ld_A));
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(plan->b_desc, CUBLASLT_MATRIX_LAYOUT_ORDER, &columnMajorOrder, sizeof(columnMajorOrder)));
+    ld = ld_A;
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(plan->b_desc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
+
+    const cudaDataType_t cDescType = addend.has_value() && !addendIsBiasVector ? operationType.CDataType : operationType.DDataType;
+    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&plan->c_desc, cDescType, D_cols, D_rows, ld_C));
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(plan->c_desc, CUBLASLT_MATRIX_LAYOUT_ORDER, &columnMajorOrder, sizeof(columnMajorOrder)));
+    ld = ld_C;
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(plan->c_desc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
+
+    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&plan->d_desc, operationType.DDataType, D_cols, D_rows, ld_D));
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(plan->d_desc, CUBLASLT_MATRIX_LAYOUT_ORDER, &columnMajorOrder, sizeof(columnMajorOrder)));
+    ld = ld_D;
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(plan->d_desc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
+    return plan;
+}
+
+void CublasMatrixMultiply::runGemmWithEpiloguePlan(Tensor A,
+                                                   Tensor B,
+                                                   std::optional<Tensor> addend,
+                                                   Tensor D,
+                                                   const float *alpha,
+                                                   const float *beta,
+                                                   Stream stream,
+                                                   CublasScalarPointerMode pointerMode,
+                                                   std::optional<Tensor> workspace,
+                                                   const std::shared_ptr<LtMatmulPlan>& plan,
+                                                   bool addendIsBiasVector) {
+    if (!plan) {
+        throw std::runtime_error("CublasMatrixMultiply::runGemmWithEpiloguePlan called with null plan.");
+    }
+    plan->runGemmWithEpilogue(A, B, addend, D, alpha, beta, stream, pointerMode, workspace, addendIsBiasVector);
+}
+
+std::shared_ptr<CublasMatrixMultiply::LtMatmulPlan> CublasMatrixMultiply::buildGemmWithBackwardEpiloguePlan(
+    int gpuNum,
+    const int32_t A_rows,
+    const int32_t A_cols,
+    const int32_t B_rows,
+    const int32_t B_cols,
+    const int32_t ld_A,
+    const int32_t ld_B,
+    const int32_t ld_C,
+    const int32_t ld_D,
+    bool transposeA,
+    bool transposeB,
+    const MatmulDataTypes dataTypes,
+    BackwardEpilogueFusion epilogue,
+    bool hasAddend,
+    Tensor epilogueAux,
+    std::optional<Tensor> biasGradient,
+    std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> selectedAlgorithm,
+    std::optional<uint64_t> maxWorkspaceSizeInBytes) {
+    if (transposeA || transposeB) {
+        throw std::runtime_error("CublasMatrixMultiply::buildGemmWithBackwardEpiloguePlan currently supports only non-transposed row-major GEMM epilogues.");
+    }
+    validateMatmulDataTypesOrThrow(dataTypes, "CublasMatrixMultiply::buildGemmWithBackwardEpiloguePlan");
+    validateFp8MatmulScaleConfigurationOrThrow(dataTypes, Fp8MatmulScales::none(), "CublasMatrixMultiply::buildGemmWithBackwardEpiloguePlan");
+
+    ScopedGpu scopedGpu(gpuNum);
+    OperationType operationType = makeOperationType(dataTypes);
+    validateFp8RowMajorGemmShapeAndLayoutOrThrow(operationType,
+                                                 A_rows,
+                                                 A_cols,
+                                                 B_rows,
+                                                 B_cols,
+                                                 ld_A,
+                                                 ld_B,
+                                                 ld_C,
+                                                 ld_D,
+                                                 transposeA,
+                                                 transposeB,
+                                                 "CublasMatrixMultiply::buildGemmWithBackwardEpiloguePlan");
+    if (fp8NeedsRowMajorTransposeWorkspace(operationType, transposeA, transposeB)) {
+        throw std::runtime_error("CublasMatrixMultiply::buildGemmWithBackwardEpiloguePlan FP8 row-major path requires non-epilogue workspace support.");
+    }
+
+    const int64_t epilogueAuxLd = static_cast<int64_t>(epilogueAux.getDimensions()[1]);
+    auto selection = selectedAlgorithm.has_value()
+                         ? selectedAlgorithm
+                         : selectGemmWithBackwardEpilogueAlgorithm(gpuNum,
+                                                                   A_rows,
+                                                                   A_cols,
+                                                                   B_rows,
+                                                                   B_cols,
+                                                                   ld_A,
+                                                                   ld_B,
+                                                                   ld_C,
+                                                                   ld_D,
+                                                                   transposeA,
+                                                                   transposeB,
+                                                                   dataTypes,
+                                                                   epilogue,
+                                                                   hasAddend,
+                                                                   biasGradient.has_value(),
+                                                                   epilogueAuxLd,
+                                                                   maxWorkspaceSizeInBytes);
+    if (!selection.has_value()) {
+        return nullptr;
+    }
+
+    const int32_t D_rows = A_rows;
+    const int32_t D_cols = B_cols;
+    const cublasLtEpilogue_t cublasEpilogue = toCublasLtBackwardEpilogue(epilogue, biasGradient.has_value());
+    auto plan = std::make_shared<LtMatmulPlan>();
+    plan->algorithm = selection.value();
+
+    auto createOperationDesc = [&](cublasLtPointerMode_t pointerMode, cublasLtMatmulDesc_t *desc) {
+        CHECK_CUBLAS(cublasLtMatmulDescCreate(desc, operationType.computeDataType, operationType.scaleDataType));
+        CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(*desc, CUBLASLT_MATMUL_DESC_POINTER_MODE, &pointerMode, sizeof(pointerMode)));
+        configureTensorwideFp8Scales(*desc, operationType, Fp8MatmulScales::none());
+        CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(*desc, CUBLASLT_MATMUL_DESC_EPILOGUE, &cublasEpilogue, sizeof(cublasEpilogue)));
+        const void *auxPtr = epilogueAux.getMemPtr();
+        CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(*desc, CUBLASLT_MATMUL_DESC_EPILOGUE_AUX_POINTER, &auxPtr, sizeof(auxPtr)));
+        CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(*desc, CUBLASLT_MATMUL_DESC_EPILOGUE_AUX_LD, &epilogueAuxLd, sizeof(epilogueAuxLd)));
+        if (biasGradient.has_value()) {
+            void *biasPtr = biasGradient.value().getMemPtr();
+            CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(*desc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &biasPtr, sizeof(biasPtr)));
+        }
+    };
+    createOperationDesc(CUBLASLT_POINTER_MODE_HOST, &plan->operation_desc_host);
+    createOperationDesc(CUBLASLT_POINTER_MODE_DEVICE, &plan->operation_desc_device);
+
+    const cublasLtOrder_t columnMajorOrder = CUBLASLT_ORDER_COL;
+    int64_t ld = 0;
+    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&plan->a_desc, operationType.BDataType, B_cols, B_rows, ld_B));
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(plan->a_desc, CUBLASLT_MATRIX_LAYOUT_ORDER, &columnMajorOrder, sizeof(columnMajorOrder)));
+    ld = ld_B;
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(plan->a_desc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
+
+    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&plan->b_desc, operationType.ADataType, A_cols, A_rows, ld_A));
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(plan->b_desc, CUBLASLT_MATRIX_LAYOUT_ORDER, &columnMajorOrder, sizeof(columnMajorOrder)));
+    ld = ld_A;
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(plan->b_desc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
+
+    const cudaDataType_t cDescType = hasAddend ? operationType.CDataType : operationType.DDataType;
+    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&plan->c_desc, cDescType, D_cols, D_rows, ld_C));
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(plan->c_desc, CUBLASLT_MATRIX_LAYOUT_ORDER, &columnMajorOrder, sizeof(columnMajorOrder)));
+    ld = ld_C;
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(plan->c_desc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
+
+    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&plan->d_desc, operationType.DDataType, D_cols, D_rows, ld_D));
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(plan->d_desc, CUBLASLT_MATRIX_LAYOUT_ORDER, &columnMajorOrder, sizeof(columnMajorOrder)));
+    ld = ld_D;
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(plan->d_desc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
+    return plan;
+}
+
+void CublasMatrixMultiply::runGemmWithBackwardEpiloguePlan(Tensor A,
+                                                           Tensor B,
+                                                           std::optional<Tensor> addend,
+                                                           Tensor epilogueAux,
+                                                           Tensor D,
+                                                           const float *alpha,
+                                                           const float *beta,
+                                                           Stream stream,
+                                                           CublasScalarPointerMode pointerMode,
+                                                           std::optional<Tensor> workspace,
+                                                           const std::shared_ptr<LtMatmulPlan>& plan) {
+    (void)epilogueAux;
+    if (!plan) {
+        throw std::runtime_error("CublasMatrixMultiply::runGemmWithBackwardEpiloguePlan called with null plan.");
+    }
+    plan->runGemmWithBackwardEpilogue(A, B, addend, D, alpha, beta, stream, pointerMode, workspace);
 }
 
 void CublasMatrixMultiply::gemmWithEpilogueUsingHeuristicKernelChoice(
@@ -1295,189 +1691,30 @@ void CublasMatrixMultiply::gemmWithEpilogueUsingHeuristicKernelChoice(
         THOR_THROW_IF_FALSE(addend.value().getDimensions()[1] == static_cast<uint64_t>(ld_C));
     }
 
-    if (!addend.has_value() && epilogue == EpilogueFusion::Default) {
-        throw std::runtime_error(
-            "CublasMatrixMultiply::gemmWithEpilogueUsingHeuristicKernelChoice requires an addend or a non-default epilogue.");
+    const std::optional<uint64_t> workspaceLimitBytes = workspace.has_value()
+                                                            ? std::optional<uint64_t>(workspace.value().getArraySizeInBytes())
+                                                            : std::optional<uint64_t>(0);
+    auto plan = buildGemmWithEpiloguePlan(stream.getGpuNum(),
+                                          A_rows,
+                                          A_cols,
+                                          B_rows,
+                                          B_cols,
+                                          ld_A,
+                                          ld_B,
+                                          ld_C,
+                                          ld_D,
+                                          transposeA,
+                                          transposeB,
+                                          dataTypes,
+                                          epilogue,
+                                          addend,
+                                          addendIsBiasVector,
+                                          selectedAlgorithm,
+                                          workspaceLimitBytes);
+    if (!plan) {
+        throw std::runtime_error("Unable to build cuBLASLt epilogue GEMM plan for legacy heuristic wrapper.");
     }
-    if (transposeA || transposeB) {
-        throw std::runtime_error(
-            "CublasMatrixMultiply::gemmWithEpilogueUsingHeuristicKernelChoice currently supports only non-transposed row-major GEMM "
-            "epilogues.");
-    }
-
-    validateMatmulDataTypesOrThrow(dataTypes, "CublasMatrixMultiply::gemmWithEpilogueUsingHeuristicKernelChoice");
-    validateFp8MatmulScaleConfigurationOrThrow(
-        dataTypes, Fp8MatmulScales::none(), "CublasMatrixMultiply::gemmWithEpilogueUsingHeuristicKernelChoice");
-
-    ScopedGpu scopedGpu(stream.getGpuNum());
-
-    cublasLtMatmulDesc_t operationDesc;
-    cublasLtMatrixLayout_t ADesc;
-    cublasLtMatrixLayout_t BDesc;
-    cublasLtMatrixLayout_t CDesc;
-    cublasLtMatrixLayout_t DDesc;
-
-    OperationType operationType = makeOperationType(dataTypes);
-    validateFp8RowMajorGemmShapeAndLayoutOrThrow(operationType,
-                                                 A_rows,
-                                                 A_cols,
-                                                 B_rows,
-                                                 B_cols,
-                                                 ld_A,
-                                                 ld_B,
-                                                 ld_C,
-                                                 ld_D,
-                                                 transposeA,
-                                                 transposeB,
-                                                 "CublasMatrixMultiply::gemmWithEpilogueUsingHeuristicKernelChoice");
-    if (fp8NeedsRowMajorTransposeWorkspace(operationType, transposeA, transposeB)) {
-        throw std::runtime_error(
-            "CublasMatrixMultiply::gemmWithEpilogueUsingHeuristicKernelChoice FP8 row-major path requires non-epilogue workspace support.");
-    }
-
-    CHECK_CUBLAS(cublasLtMatmulDescCreate(&operationDesc, operationType.computeDataType, operationType.scaleDataType));
-    const cublasLtMatmulDescAttributes_t pointerModeAttribute = CUBLASLT_MATMUL_DESC_POINTER_MODE;
-    const cublasLtPointerMode_t cublasPointerMode =
-        (pointerMode == CublasScalarPointerMode::Device) ? CUBLASLT_POINTER_MODE_DEVICE : CUBLASLT_POINTER_MODE_HOST;
-    CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, pointerModeAttribute, &cublasPointerMode, sizeof(cublasPointerMode)));
-    configureTensorwideFp8Scales(operationDesc, operationType, Fp8MatmulScales::none());
-
-    const cublasLtEpilogue_t cublasEpilogue = toCublasLtEpilogue(epilogue, addendIsBiasVector);
-    CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_EPILOGUE, &cublasEpilogue, sizeof(cublasEpilogue)));
-    if (addendIsBiasVector) {
-        void *biasPtr = addend.value().getMemPtr();
-        CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &biasPtr, sizeof(biasPtr)));
-    }
-
-    // cuBLASLt's bias epilogue is most reliable in the column-major convention where the
-    // bias vector has one element per row of D.  Thor tensors are row-major, so present the
-    // public D[M,N] buffer as a column-major D^T[N,M] view and compute:
-    //
-    //     D^T = B^T * A^T + optional C^T/bias, then activation if requested
-    //
-    // This preserves the public row-major D = A * B API, makes the rank-1 bias length N,
-    // and avoids a separate expression kernel for bias/ReLU/GELU epilogues.
-    const cublasLtOrder_t columnMajorOrder = CUBLASLT_ORDER_COL;
-    int64_t ld = 0;
-
-    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&ADesc, operationType.BDataType, B_cols, B_rows, ld_B));
-    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(ADesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &columnMajorOrder, sizeof(columnMajorOrder)));
-    ld = ld_B;
-    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(ADesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
-
-    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&BDesc, operationType.ADataType, A_cols, A_rows, ld_A));
-    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(BDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &columnMajorOrder, sizeof(columnMajorOrder)));
-    ld = ld_A;
-    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(BDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
-
-    const cudaDataType_t cDescType = addend.has_value() && !addendIsBiasVector ? operationType.CDataType : operationType.DDataType;
-    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&CDesc, cDescType, D_cols, D_rows, ld_C));
-    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(CDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &columnMajorOrder, sizeof(columnMajorOrder)));
-    ld = ld_C;
-    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(CDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
-
-    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&DDesc, operationType.DDataType, D_cols, D_rows, ld_D));
-    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(DDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &columnMajorOrder, sizeof(columnMajorOrder)));
-    ld = ld_D;
-    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(DDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
-
-    const void *ltA = B.getMemPtr();
-    const void *ltB = A.getMemPtr();
-    const void *ltC = (addend.has_value() && !addendIsBiasVector) ? addend.value().getMemPtr() : D.getMemPtr();
-    const float betaZero = 0.0f;
-    const float betaOne = 1.0f;
-    const float *effectiveBeta = addend.has_value() && !addendIsBiasVector ? beta : &betaZero;
-    if (addendIsBiasVector) {
-        effectiveBeta = &betaZero;
-    } else if (addend.has_value() && effectiveBeta == nullptr) {
-        effectiveBeta = &betaOne;
-    }
-
-    const uint64_t workspaceLimitBytes = workspace.has_value() ? workspace.value().getArraySizeInBytes() : 0;
-    void *workspacePtr = workspaceLimitBytes > 0 ? workspace.value().getMemPtr() : nullptr;
-
-    if (selectedAlgorithm.has_value()) {
-        const uint64_t selectedWorkspaceBytes = selectedAlgorithm->workspace_size_in_bytes;
-        if (selectedWorkspaceBytes > workspaceLimitBytes) {
-            throw std::runtime_error("Selected cuBLASLt epilogue GEMM algorithm requires more workspace than the stamped launch provided.");
-        }
-        CHECK_CUBLAS(cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
-                                    operationDesc,
-                                    alpha,
-                                    ltA,
-                                    ADesc,
-                                    ltB,
-                                    BDesc,
-                                    effectiveBeta,
-                                    ltC,
-                                    CDesc,
-                                    D.getMemPtr(),
-                                    DDesc,
-                                    const_cast<cublasLtMatmulAlgo_t *>(&selectedAlgorithm->algorithm),
-                                    workspacePtr,
-                                    static_cast<size_t>(selectedWorkspaceBytes),
-                                    stream));
-        CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(DDesc));
-        CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(CDesc));
-        CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(BDesc));
-        CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(ADesc));
-        CHECK_CUBLAS(cublasLtMatmulDescDestroy(operationDesc));
-        return;
-    }
-
-    cublasLtMatmulPreference_t searchPreferences;
-    CHECK_CUBLAS(cublasLtMatmulPreferenceCreate(&searchPreferences));
-    CHECK_CUBLAS(cublasLtMatmulPreferenceInit(searchPreferences));
-    CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
-        searchPreferences, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspaceLimitBytes, sizeof(workspaceLimitBytes)));
-
-    int returnedAlgoCount = 0;
-    std::vector<cublasLtMatmulHeuristicResult_t> results(64);
-    CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
-                                                operationDesc,
-                                                ADesc,
-                                                BDesc,
-                                                CDesc,
-                                                DDesc,
-                                                searchPreferences,
-                                                static_cast<int>(results.size()),
-                                                results.data(),
-                                                &returnedAlgoCount));
-    results.resize(returnedAlgoCount);
-
-    bool kernelLaunchedSuccessfully = false;
-    for (int i = 0; i < returnedAlgoCount && !kernelLaunchedSuccessfully; ++i) {
-        if (results[i].state != CUBLAS_STATUS_SUCCESS || !(results[i].wavesCount > 0.0f) ||
-            static_cast<uint64_t>(results[i].workspaceSize) > workspaceLimitBytes) {
-            continue;
-        }
-        cublasStatus_t status = cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
-                                               operationDesc,
-                                               alpha,
-                                               ltA,
-                                               ADesc,
-                                               ltB,
-                                               BDesc,
-                                               effectiveBeta,
-                                               ltC,
-                                               CDesc,
-                                               D.getMemPtr(),
-                                               DDesc,
-                                               &(results[i].algo),
-                                               workspacePtr,
-                                               static_cast<size_t>(results[i].workspaceSize),
-                                               stream);
-        kernelLaunchedSuccessfully = status == CUBLAS_STATUS_SUCCESS;
-    }
-
-    CHECK_CUBLAS(cublasLtMatmulPreferenceDestroy(searchPreferences));
-    CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(DDesc));
-    CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(CDesc));
-    CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(BDesc));
-    CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(ADesc));
-    CHECK_CUBLAS(cublasLtMatmulDescDestroy(operationDesc));
-
-    THOR_THROW_IF_FALSE(kernelLaunchedSuccessfully);
+    plan->runGemmWithEpilogue(A, B, addend, D, alpha, beta, stream, pointerMode, workspace, addendIsBiasVector);
 }
 
 void CublasMatrixMultiply::gemmWithBiasUsingHeuristicKernelChoice(Tensor A,
@@ -1812,7 +2049,7 @@ static std::vector<LtMeasuredMatmulAlgorithm> cublasLtGetVerifiedHeuristicContes
 
     int returnedAlgoCount = 0;
     std::vector<cublasLtMatmulHeuristicResult_t> results(static_cast<size_t>(maxCandidateCount));
-    const cublasStatus_t heuristicStatus = cublasLtMatmulAlgoGetHeuristic(MachineEvaluator::instance().getCublasLtHandle(gpuNum),
+    const cublasStatus_t heuristicStatus = cublasLtMatmulAlgoGetHeuristic(compileTimeCublasLtHandle(gpuNum),
                                                                           operationDesc,
                                                                           ADesc,
                                                                           BDesc,
@@ -1840,7 +2077,7 @@ static std::vector<LtMeasuredMatmulAlgorithm> cublasLtGetVerifiedHeuristicContes
 
         cublasLtMatmulHeuristicResult_t checked{};
         const cublasStatus_t checkStatus = cublasLtMatmulAlgoCheck(
-            MachineEvaluator::instance().getCublasLtHandle(gpuNum), operationDesc, ADesc, BDesc, CDesc, DDesc, &results[i].algo, &checked);
+            compileTimeCublasLtHandle(gpuNum), operationDesc, ADesc, BDesc, CDesc, DDesc, &results[i].algo, &checked);
         if (checkStatus != CUBLAS_STATUS_SUCCESS || checked.state != CUBLAS_STATUS_SUCCESS) {
             continue;
         }
@@ -1874,7 +2111,7 @@ static cublasStatus_t runLtMatmulContestant(int gpuNum,
                                             LtMeasuredMatmulAlgorithm &candidate,
                                             void *workspacePtr,
                                             Stream stream) {
-    return cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(gpuNum),
+    return cublasLtMatmul(compileTimeCublasLtHandle(gpuNum),
                           operationDesc,
                           alpha,
                           ltA,
@@ -2103,7 +2340,8 @@ std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> CublasMatrixMult
     const MatmulDataTypes dataTypes,
     EpilogueFusion epilogue,
     bool hasAddend,
-    bool addendIsBiasVector) {
+    bool addendIsBiasVector,
+    std::optional<uint64_t> maxWorkspaceSizeInBytes) {
     if (transposeA || transposeB) {
         return std::nullopt;
     }
@@ -2191,7 +2429,7 @@ std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> CublasMatrixMult
                                                             effectiveBeta,
                                                             ltC,
                                                             ltD,
-                                                            cublasLtEpilogueWorkspacePolicyLimitBytes(gpuNum),
+                                                            maxWorkspaceSizeInBytes.value_or(cublasLtEpilogueWorkspacePolicyLimitBytes(gpuNum)),
                                                             operationBytes,
                                                             "CublasMatrixMultiply::selectGemmWithEpilogueAlgorithm");
 
@@ -2254,7 +2492,8 @@ std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> CublasMatrixMult
     BackwardEpilogueFusion epilogue,
     bool hasAddend,
     bool hasBiasGradient,
-    int64_t epilogueAuxLd) {
+    int64_t epilogueAuxLd,
+    std::optional<uint64_t> maxWorkspaceSizeInBytes) {
     if (transposeA || transposeB) {
         return std::nullopt;
     }
@@ -2347,7 +2586,7 @@ std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> CublasMatrixMult
                                                             effectiveBeta,
                                                             ltC,
                                                             ltD,
-                                                            cublasLtEpilogueWorkspacePolicyLimitBytes(gpuNum),
+                                                            maxWorkspaceSizeInBytes.value_or(cublasLtEpilogueWorkspacePolicyLimitBytes(gpuNum)),
                                                             operationBytes,
                                                             "CublasMatrixMultiply::selectGemmWithBackwardEpilogueAlgorithm");
 
@@ -2428,14 +2667,16 @@ void CublasMatrixMultiply::gemmWithBackwardEpilogueUsingHeuristicKernelChoice(
 
     THOR_THROW_IF_FALSE(A.getDimensions().size() == 2);
     THOR_THROW_IF_FALSE(B.getDimensions().size() == 2);
-    THOR_THROW_IF_FALSE(D.getDimensions().size() == 2);
     THOR_THROW_IF_FALSE(epilogueAux.getDimensions().size() == 2);
-    THOR_THROW_IF_FALSE(A.getDimensions()[0] == static_cast<uint32_t>(A_rows));
-    THOR_THROW_IF_FALSE(A.getDimensions()[1] == static_cast<uint32_t>(ld_A));
-    THOR_THROW_IF_FALSE(B.getDimensions()[0] == static_cast<uint32_t>(B_rows));
-    THOR_THROW_IF_FALSE(B.getDimensions()[1] == static_cast<uint32_t>(ld_B));
-    THOR_THROW_IF_FALSE(D.getDimensions()[0] == static_cast<uint32_t>(D_rows));
-    THOR_THROW_IF_FALSE(D.getDimensions()[1] == static_cast<uint32_t>(ld_D));
+    THOR_THROW_IF_FALSE(D.getDimensions().size() == 2);
+    THOR_THROW_IF_FALSE(A.getDimensions()[0] == static_cast<uint64_t>(A_rows));
+    THOR_THROW_IF_FALSE(A.getDimensions()[1] == static_cast<uint64_t>(ld_A));
+    THOR_THROW_IF_FALSE(B.getDimensions()[0] == static_cast<uint64_t>(B_rows));
+    THOR_THROW_IF_FALSE(B.getDimensions()[1] == static_cast<uint64_t>(ld_B));
+    THOR_THROW_IF_FALSE(D.getDimensions()[0] == static_cast<uint64_t>(D_rows));
+    THOR_THROW_IF_FALSE(D.getDimensions()[1] == static_cast<uint64_t>(ld_D));
+    THOR_THROW_IF_FALSE(epilogueAux.getDimensions()[0] == static_cast<uint64_t>(D_rows));
+    THOR_THROW_IF_FALSE(epilogueAux.getDimensions()[1] >= static_cast<uint64_t>(D_cols));
 
     if (addend.has_value()) {
         THOR_THROW_IF_FALSE(addend.value().getDimensions().size() == 2);
@@ -2448,228 +2689,31 @@ void CublasMatrixMultiply::gemmWithBackwardEpilogueUsingHeuristicKernelChoice(
         THOR_THROW_IF_FALSE(biasGradient.value().getDescriptor().getDataType() == D.getDescriptor().getDataType());
     }
 
-    const int64_t epilogueAuxLd = static_cast<int64_t>(epilogueAux.getDimensions()[1]);
-    if (epilogue == BackwardEpilogueFusion::DGelu) {
-        THOR_THROW_IF_FALSE(epilogueAux.getDimensions()[0] == static_cast<uint64_t>(D_rows));
-        THOR_THROW_IF_FALSE(epilogueAux.getDimensions()[1] >= static_cast<uint64_t>(D_cols));
-        if (epilogueAuxLd % 8 != 0) {
-            throw std::runtime_error("cuBLASLt DGELU epilogue aux leading dimension must be divisible by 8.");
-        }
-        THOR_THROW_IF_FALSE(epilogueAux.getDescriptor().getDataType() == D.getDescriptor().getDataType());
-    } else {
-        // cuBLASLt DRELU consumes the ReLU bit-mask produced by RELU_AUX/RELU_AUX_BIAS.
-        // The aux leading dimension is measured in bits by cuBLASLt and must be aligned to 128.
-        if (epilogueAuxLd % 128 != 0) {
-            throw std::runtime_error("cuBLASLt DRELU epilogue aux leading dimension must be divisible by 128.");
-        }
+    const std::optional<uint64_t> workspaceLimitBytes = workspace.has_value()
+                                                            ? std::optional<uint64_t>(workspace.value().getArraySizeInBytes())
+                                                            : std::optional<uint64_t>(0);
+    auto plan = buildGemmWithBackwardEpiloguePlan(stream.getGpuNum(),
+                                                  A_rows,
+                                                  A_cols,
+                                                  B_rows,
+                                                  B_cols,
+                                                  ld_A,
+                                                  ld_B,
+                                                  ld_C,
+                                                  ld_D,
+                                                  transposeA,
+                                                  transposeB,
+                                                  dataTypes,
+                                                  epilogue,
+                                                  addend.has_value(),
+                                                  epilogueAux,
+                                                  biasGradient,
+                                                  selectedAlgorithm,
+                                                  workspaceLimitBytes);
+    if (!plan) {
+        throw std::runtime_error("Unable to build cuBLASLt backward epilogue GEMM plan for legacy heuristic wrapper.");
     }
-
-    if (transposeA || transposeB) {
-        throw std::runtime_error(
-            "CublasMatrixMultiply::gemmWithBackwardEpilogueUsingHeuristicKernelChoice currently supports only non-transposed row-major "
-            "GEMM epilogues.");
-    }
-
-    validateMatmulDataTypesOrThrow(dataTypes, "CublasMatrixMultiply::gemmWithBackwardEpilogueUsingHeuristicKernelChoice");
-    validateFp8MatmulScaleConfigurationOrThrow(
-        dataTypes, Fp8MatmulScales::none(), "CublasMatrixMultiply::gemmWithBackwardEpilogueUsingHeuristicKernelChoice");
-
-    ScopedGpu scopedGpu(stream.getGpuNum());
-
-    cublasLtMatmulDesc_t operationDesc;
-    cublasLtMatrixLayout_t ADesc;
-    cublasLtMatrixLayout_t BDesc;
-    cublasLtMatrixLayout_t CDesc;
-    cublasLtMatrixLayout_t DDesc;
-
-    OperationType operationType = makeOperationType(dataTypes);
-    validateFp8RowMajorGemmShapeAndLayoutOrThrow(operationType,
-                                                 A_rows,
-                                                 A_cols,
-                                                 B_rows,
-                                                 B_cols,
-                                                 ld_A,
-                                                 ld_B,
-                                                 ld_C,
-                                                 ld_D,
-                                                 transposeA,
-                                                 transposeB,
-                                                 "CublasMatrixMultiply::gemmWithBackwardEpilogueUsingHeuristicKernelChoice");
-    if (fp8NeedsRowMajorTransposeWorkspace(operationType, transposeA, transposeB)) {
-        throw std::runtime_error(
-            "CublasMatrixMultiply::gemmWithBackwardEpilogueUsingHeuristicKernelChoice FP8 row-major path requires non-epilogue workspace "
-            "support.");
-    }
-
-    CHECK_CUBLAS(cublasLtMatmulDescCreate(&operationDesc, operationType.computeDataType, operationType.scaleDataType));
-    const cublasLtMatmulDescAttributes_t pointerModeAttribute = CUBLASLT_MATMUL_DESC_POINTER_MODE;
-    const cublasLtPointerMode_t cublasPointerMode =
-        (pointerMode == CublasScalarPointerMode::Device) ? CUBLASLT_POINTER_MODE_DEVICE : CUBLASLT_POINTER_MODE_HOST;
-    CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, pointerModeAttribute, &cublasPointerMode, sizeof(cublasPointerMode)));
-    configureTensorwideFp8Scales(operationDesc, operationType, Fp8MatmulScales::none());
-
-    const cublasLtEpilogue_t cublasEpilogue = toCublasLtBackwardEpilogue(epilogue, biasGradient.has_value());
-    CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_EPILOGUE, &cublasEpilogue, sizeof(cublasEpilogue)));
-
-    const void *auxPtr = epilogueAux.getMemPtr();
-    CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_EPILOGUE_AUX_POINTER, &auxPtr, sizeof(auxPtr)));
-    CHECK_CUBLAS(
-        cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_EPILOGUE_AUX_LD, &epilogueAuxLd, sizeof(epilogueAuxLd)));
-
-    if (biasGradient.has_value()) {
-        void *biasPtr = biasGradient.value().getMemPtr();
-        CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &biasPtr, sizeof(biasPtr)));
-    }
-
-    // Present public row-major D[M,N] as column-major D^T[N,M], matching the
-    // existing forward epilogue wrapper. BGRAD therefore reduces across the public
-    // batch rows and produces one element per public output column.
-    const cublasLtOrder_t columnMajorOrder = CUBLASLT_ORDER_COL;
-    int64_t ld = 0;
-
-    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&ADesc, operationType.BDataType, B_cols, B_rows, ld_B));
-    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(ADesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &columnMajorOrder, sizeof(columnMajorOrder)));
-    ld = ld_B;
-    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(ADesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
-
-    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&BDesc, operationType.ADataType, A_cols, A_rows, ld_A));
-    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(BDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &columnMajorOrder, sizeof(columnMajorOrder)));
-    ld = ld_A;
-    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(BDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
-
-    const cudaDataType_t cDescType = addend.has_value() ? operationType.CDataType : operationType.DDataType;
-    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&CDesc, cDescType, D_cols, D_rows, ld_C));
-    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(CDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &columnMajorOrder, sizeof(columnMajorOrder)));
-    ld = ld_C;
-    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(CDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
-
-    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&DDesc, operationType.DDataType, D_cols, D_rows, ld_D));
-    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(DDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &columnMajorOrder, sizeof(columnMajorOrder)));
-    ld = ld_D;
-    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(DDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
-
-    const void *ltA = B.getMemPtr();
-    const void *ltB = A.getMemPtr();
-    const void *ltC = addend.has_value() ? addend.value().getMemPtr() : D.getMemPtr();
-    const float betaZero = 0.0f;
-    const float betaOne = 1.0f;
-    const float *effectiveBeta = addend.has_value() ? beta : &betaZero;
-    if (addend.has_value() && effectiveBeta == nullptr) {
-        effectiveBeta = &betaOne;
-    }
-
-    const uint64_t workspaceLimitBytes = workspace.has_value() ? workspace.value().getArraySizeInBytes() : 0;
-    void *workspacePtr = workspaceLimitBytes > 0 ? workspace.value().getMemPtr() : nullptr;
-
-    if (selectedAlgorithm.has_value()) {
-        const uint64_t selectedWorkspaceBytes = selectedAlgorithm->workspace_size_in_bytes;
-        if (selectedWorkspaceBytes > workspaceLimitBytes) {
-            throw std::runtime_error(
-                "Selected cuBLASLt backward epilogue GEMM algorithm requires more workspace than the stamped launch provided.");
-        }
-        CHECK_CUBLAS(cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
-                                    operationDesc,
-                                    alpha,
-                                    ltA,
-                                    ADesc,
-                                    ltB,
-                                    BDesc,
-                                    effectiveBeta,
-                                    ltC,
-                                    CDesc,
-                                    D.getMemPtr(),
-                                    DDesc,
-                                    const_cast<cublasLtMatmulAlgo_t *>(&selectedAlgorithm->algorithm),
-                                    workspacePtr,
-                                    static_cast<size_t>(selectedWorkspaceBytes),
-                                    stream));
-        CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(DDesc));
-        CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(CDesc));
-        CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(BDesc));
-        CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(ADesc));
-        CHECK_CUBLAS(cublasLtMatmulDescDestroy(operationDesc));
-        return;
-    }
-
-    cublasStatus_t lastHeuristicStatus = CUBLAS_STATUS_SUCCESS;
-    cublasStatus_t lastMatmulStatus = CUBLAS_STATUS_SUCCESS;
-    uint64_t largestRejectedWorkspaceBytes = 0;
-    uint64_t selectedWorkspaceBytes = 0;
-
-    cublasLtMatmulPreference_t searchPreferences;
-    CHECK_CUBLAS(cublasLtMatmulPreferenceCreate(&searchPreferences));
-    CHECK_CUBLAS(cublasLtMatmulPreferenceInit(searchPreferences));
-    CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
-        searchPreferences, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspaceLimitBytes, sizeof(workspaceLimitBytes)));
-
-    int returnedAlgoCount = 0;
-    std::vector<cublasLtMatmulHeuristicResult_t> results(64);
-    lastHeuristicStatus = cublasLtMatmulAlgoGetHeuristic(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
-                                                         operationDesc,
-                                                         ADesc,
-                                                         BDesc,
-                                                         CDesc,
-                                                         DDesc,
-                                                         searchPreferences,
-                                                         static_cast<int>(results.size()),
-                                                         results.data(),
-                                                         &returnedAlgoCount);
-    CHECK_CUBLAS(cublasLtMatmulPreferenceDestroy(searchPreferences));
-
-    bool kernelLaunchedSuccessfully = false;
-    if (lastHeuristicStatus == CUBLAS_STATUS_SUCCESS) {
-        results.resize(returnedAlgoCount);
-        for (int i = 0; i < returnedAlgoCount; ++i) {
-            if (results[i].state != CUBLAS_STATUS_SUCCESS || !(results[i].wavesCount > 0.0f)) {
-                continue;
-            }
-
-            const uint64_t algoWorkspaceSize = static_cast<uint64_t>(results[i].workspaceSize);
-            if (algoWorkspaceSize > workspaceLimitBytes) {
-                largestRejectedWorkspaceBytes = std::max(largestRejectedWorkspaceBytes, algoWorkspaceSize);
-                continue;
-            }
-
-            lastMatmulStatus = cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
-                                              operationDesc,
-                                              alpha,
-                                              ltA,
-                                              ADesc,
-                                              ltB,
-                                              BDesc,
-                                              effectiveBeta,
-                                              ltC,
-                                              CDesc,
-                                              D.getMemPtr(),
-                                              DDesc,
-                                              &(results[i].algo),
-                                              workspacePtr,
-                                              static_cast<size_t>(algoWorkspaceSize),
-                                              stream);
-            if (lastMatmulStatus == CUBLAS_STATUS_SUCCESS) {
-                selectedWorkspaceBytes = algoWorkspaceSize;
-                kernelLaunchedSuccessfully = true;
-                break;
-            }
-        }
-    }
-
-    if (!kernelLaunchedSuccessfully) {
-        std::ostringstream message;
-        message << "Unable to find a cuBLASLt backward epilogue GEMM algorithm. workspace_bytes=" << workspaceLimitBytes
-                << ", selected_workspace_bytes=" << selectedWorkspaceBytes
-                << ", largest_rejected_workspace_bytes=" << largestRejectedWorkspaceBytes
-                << ", heuristic_status=" << static_cast<int>(lastHeuristicStatus)
-                << ", last_matmul_status=" << static_cast<int>(lastMatmulStatus) << '.';
-        throw std::runtime_error(message.str());
-    }
-    CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(DDesc));
-    CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(CDesc));
-    CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(BDesc));
-    CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(ADesc));
-    CHECK_CUBLAS(cublasLtMatmulDescDestroy(operationDesc));
-
-    THOR_THROW_IF_FALSE(kernelLaunchedSuccessfully);
+    plan->runGemmWithBackwardEpilogue(A, B, addend, D, alpha, beta, stream, pointerMode, workspace);
 }
 
 void CublasMatrixMultiply::gemmWithDReluUsingHeuristicKernelChoice(Tensor A,
@@ -2941,7 +2985,7 @@ vector<CublasKernel> CublasMatrixMultiply::getHeuristicGemmKernels(const int32_t
 
     int returnedAlgoCount;
     vector<cublasLtMatmulHeuristicResult_t> rawResults(numChoices);
-    CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(MachineEvaluator::instance().getCublasLtHandle(gpuNum),
+    CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(compileTimeCublasLtHandle(gpuNum),
                                                 operationDesc,
                                                 ADesc,
                                                 BDesc,
@@ -2963,7 +3007,7 @@ vector<CublasKernel> CublasMatrixMultiply::getHeuristicGemmKernels(const int32_t
 
         // It would be nice if cublasLt only returned algos that are supported by the GPU, but that is not the case.
         cublasLtMatmulHeuristicResult_t result;
-        cublasStatus = cublasLtMatmulAlgoCheck(MachineEvaluator::instance().getCublasLtHandle(gpuNum),
+        cublasStatus = cublasLtMatmulAlgoCheck(compileTimeCublasLtHandle(gpuNum),
                                                operationDesc,
                                                ADesc,
                                                BDesc,
@@ -3767,7 +3811,7 @@ void CublasMatrixMultiply::getSupportedCublasAlgorithms(const OperationType &ope
         numRequestedAlgos *= 2;
         allSupportedAlgorithmIds = vector<int>(numRequestedAlgos);
 
-        CHECK_CUBLAS(cublasLtMatmulAlgoGetIds(MachineEvaluator::instance().getCublasLtHandle(gpuNum),
+        CHECK_CUBLAS(cublasLtMatmulAlgoGetIds(compileTimeCublasLtHandle(gpuNum),
                                               operationType.computeDataType,
                                               operationType.scaleDataType,
                                               operationType.ADataType,
@@ -3781,7 +3825,7 @@ void CublasMatrixMultiply::getSupportedCublasAlgorithms(const OperationType &ope
 
     for (int i = 0; i < numReturnedAlgos; ++i) {
         cublasLtMatmulAlgo_t algo;
-        cublasStatus = cublasLtMatmulAlgoInit(MachineEvaluator::instance().getCublasLtHandle(gpuNum),
+        cublasStatus = cublasLtMatmulAlgoInit(compileTimeCublasLtHandle(gpuNum),
                                               operationType.computeDataType,
                                               operationType.scaleDataType,
                                               operationType.ADataType,
@@ -3857,6 +3901,46 @@ int CublasMatrixMultiply::getCustomKernelOptionMaxValue(cublasLtMatmulAlgo_t alg
     THOR_THROW_IF_FALSE(sizeWritten == sizeof(kernelOptionMaxValue));
 
     return kernelOptionMaxValue;
+}
+
+CublasKernel CublasMatrixMultiply::getCachedGemmKernel(int gpuNum,
+                                                     int rowsA,
+                                                     int colsA,
+                                                     int rowsB,
+                                                     int colsB,
+                                                     int ldA,
+                                                     int ldB,
+                                                     int ldC,
+                                                     int ldD,
+                                                     bool transposeA,
+                                                     bool transposeB,
+                                                     bool transposeC,
+                                                     MatmulDataTypes dataTypes,
+                                                     bool workspaceAllowed) {
+    validateMatmulDataTypesOrThrow(dataTypes, "CublasMatrixMultiply::getCachedGemmKernel");
+    validateFp8MatmulScaleConfigurationOrThrow(dataTypes, Fp8MatmulScales::none(), "CublasMatrixMultiply::getCachedGemmKernel");
+
+    KernelRequirement kernelRequirement(MachineEvaluator::instance().getGpuType(gpuNum),
+                                        rowsA,
+                                        colsA,
+                                        rowsB,
+                                        colsB,
+                                        transposeA,
+                                        transposeB,
+                                        transposeC,
+                                        ldA,
+                                        ldB,
+                                        ldC,
+                                        ldD,
+                                        workspaceAllowed);
+    OperationType operationType = makeOperationType(dataTypes);
+    CublasKernelRequirement cublasKernelRequirement(kernelRequirement, operationType);
+
+    auto optimalKernel = optimalKernels.get(cublasKernelRequirement);
+    if (!optimalKernel.has_value()) {
+        throw std::runtime_error("CublasMatrixMultiply::getCachedGemmKernel called before chooseOptimalGemmKernel populated the cache.");
+    }
+    return optimalKernel.value();
 }
 
 unsigned int CublasMatrixMultiply::getGemmWorkspaceSizeInBytes(int gpuNum,

@@ -12,7 +12,6 @@
 #include <thread>
 #include <vector>
 
-#include <cublasLt.h>
 #include "cuda.h"
 #include "cuda_runtime.h"
 
@@ -75,7 +74,6 @@ class MachineEvaluator {
     // returns the previously active device
     static int swapActiveDevice(int newGpuNum);
 
-    cublasLtHandle_t getCublasLtHandle(int gpuNum);
 
     static const int NONE;
     static const int CPU_DEVICE_NUM;
@@ -96,6 +94,4 @@ class MachineEvaluator {
     void evaluateConnectionSpeeds();
     void getGpuTypes();
     void getGpuPciBusIds();
-
-    std::vector<cublasLtHandle_t> cublasLtHandlePerDevice;
 };

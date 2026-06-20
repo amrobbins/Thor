@@ -205,6 +205,64 @@ TEST(TrainingRunsStatsReporter, RunningLineIncludesEnsembleGroupAndCurrentTrainA
     EXPECT_NE(output.find("batch=        7/100 train_loss=0.300000 validate_loss=0.200000 samples/s=1.02K"), std::string::npos);
 }
 
+
+TEST(TrainingRunsStatsReporter, RunningLineUsesTrainingProgressWhenValidationStatsArriveLater) {
+    std::FILE* out = std::tmpfile();
+    TrainingRunsStatsReporter reporter(out, LineStatsColorMode::NEVER, 0.0);
+    reporter.configureRun("fold_0", TrainingRunsStatsReporter::RunConfig{0.0, true, std::string("digits_dense_cv5"), 1.0});
+
+    TrainingStatsSnapshot trainStats = makeStats(TrainingEventPhase::TRAIN, 0.30);
+    trainStats.epoch = 20;
+    trainStats.epochs = 20;
+    trainStats.step = 480;
+    trainStats.stepInEpoch = 24;
+    trainStats.stepsPerEpoch = 24;
+    trainStats.samplesPerSecond = 300000.0;
+    trainStats.batchesPerSecond = 147.0;
+    trainStats.floatingPointOperationsPerSecond = 91.32e12;
+
+    TrainingStatsSnapshot validateStats = makeStats(TrainingEventPhase::VALIDATE, 0.20);
+    validateStats.epoch = 20;
+    validateStats.epochs = 20;
+    validateStats.step = 115;
+    validateStats.stepInEpoch = 1;
+    validateStats.stepsPerEpoch = 6;
+    validateStats.samplesPerSecond = 1710000.0;
+    validateStats.batchesPerSecond = 834.0;
+    validateStats.floatingPointOperationsPerSecond = 105.8e12;
+
+    reporter.markRunStarting("fold_0");
+    reporter.onStatsEvent(TrainingStatsEvent::fromTrainingEvent(TrainingEvent::statsUpdated(trainStats), "fold_0"));
+    reporter.onStatsEvent(TrainingStatsEvent::fromTrainingEvent(TrainingEvent::statsUpdated(validateStats), "fold_0"));
+    reporter.close();
+
+    const std::string output = readAndCloseFile(out);
+    EXPECT_NE(output.find("batch=        24/24 train_loss=0.300000 validate_loss=0.200000"), std::string::npos);
+    EXPECT_NE(output.find("samples/s= 300K"), std::string::npos);
+    EXPECT_NE(output.find("flops/s=91.32T"), std::string::npos);
+    EXPECT_EQ(output.find("batch=          1/6"), std::string::npos);
+    EXPECT_EQ(output.find("samples/s=1.71M"), std::string::npos);
+    EXPECT_EQ(output.find("flops/s=105.8T"), std::string::npos);
+}
+
+TEST(TrainingRunsStatsReporter, FormatsFlopsRateWithFixedFiveCharacterNumber) {
+    std::FILE* out = std::tmpfile();
+    TrainingRunsStatsReporter reporter(out, LineStatsColorMode::NEVER, 0.0);
+    reporter.configureRun("fold_0", TrainingRunsStatsReporter::RunConfig{0.0, true, std::string("digits_dense_cv5"), 1.0});
+
+    TrainingStatsSnapshot stats = makeStats(TrainingEventPhase::TRAIN, 0.30);
+    stats.floatingPointOperationsPerSecond = 857.0e9;
+    reporter.onStatsEvent(TrainingStatsEvent::fromTrainingEvent(TrainingEvent::statsUpdated(stats), "fold_0"));
+
+    stats.floatingPointOperationsPerSecond = 1.14e12;
+    reporter.onStatsEvent(TrainingStatsEvent::fromTrainingEvent(TrainingEvent::statsUpdated(stats), "fold_0"));
+    reporter.close();
+
+    const std::string output = readAndCloseFile(out);
+    EXPECT_NE(output.find("flops/s=857.0G"), std::string::npos);
+    EXPECT_NE(output.find("flops/s=1.140T"), std::string::npos);
+}
+
 TEST(TrainingRunsStatsReporter, EmitsWholeGroupSummaryIncludingRunsWithoutStats) {
     std::FILE* out = std::tmpfile();
     TrainingRunsStatsReporter reporter(out, LineStatsColorMode::NEVER, 0.0);

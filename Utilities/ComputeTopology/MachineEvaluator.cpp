@@ -18,26 +18,9 @@ MachineEvaluator::MachineEvaluator() {
     getGpuPciBusIds();
     evaluateConnectionSpeeds();
 
-    for (unsigned int gpuNum = 0; gpuNum < numGpus; ++gpuNum) {
-        ScopedGpu scopedGpu(gpuNum);
-
-        cublasStatus_t cublasStatus;
-        cublasLtHandle_t cublasLtHandle;
-        cublasStatus = cublasLtCreate(&cublasLtHandle);
-        THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
-
-        cublasLtHandlePerDevice.push_back(cublasLtHandle);
-    }
 }
 
-MachineEvaluator::~MachineEvaluator() {
-    for (unsigned int gpuNum = 0; gpuNum < numGpus; ++gpuNum) {
-        ScopedGpu scopedGpu(gpuNum);
-        cublasStatus_t cublasStatus;
-        cublasStatus = cublasLtDestroy(cublasLtHandlePerDevice[gpuNum]);
-        THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
-    }
-}
+MachineEvaluator::~MachineEvaluator() = default;
 
 int MachineEvaluator::getCurrentGpuNum() {
     int curGpuNum;
@@ -201,7 +184,3 @@ unsigned long MachineEvaluator::getFreeMemBytes(int gpuNum) {
     return freeMemBytes;
 }
 
-cublasLtHandle_t MachineEvaluator::getCublasLtHandle(int gpuNum) {
-    THOR_THROW_IF_FALSE((unsigned int)gpuNum < numGpus);
-    return cublasLtHandlePerDevice[gpuNum];
-}

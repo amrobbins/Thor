@@ -1,12 +1,12 @@
 #include "Utilities/Expression/StampedEquation.h"
+#include "Utilities/ComputeTopology/MachineEvaluator.h"
+#include "Utilities/CudaDriver/CudaGraphConditional.h"
 #include "Utilities/Expression/CudaHelpers.h"
 #include "Utilities/Expression/EquationRunner.h"
 #include "Utilities/Expression/FusedEquation.h"
 #include "Utilities/Expression/MatmulScalarKernel.h"
 #include "Utilities/Expression/ReduceMinMaxBackwardKernel.h"
-#include "Utilities/CudaDriver/CudaGraphConditional.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
-#include "Utilities/ComputeTopology/MachineEvaluator.h"
 
 #include <cudnn_frontend.h>
 
@@ -16,11 +16,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <type_traits>
-#include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -72,14 +72,13 @@ static CubScanOp toCubScanOp(ScanOp op) {
 
 static bool isArgScanOp(ScanOp op) { return op == ScanOp::ArgMin || op == ScanOp::ArgMax; }
 
-
 static bool thorMatmulDiagnosticsEnabled() {
-    const char *value = std::getenv("THOR_MATMUL_DIAGNOSTICS");
+    const char* value = std::getenv("THOR_MATMUL_DIAGNOSTICS");
     return value != nullptr && value[0] != '\0' && std::string(value) != "0";
 }
 
 static bool thorMatmulDiagnosticsVerbose() {
-    const char *value = std::getenv("THOR_MATMUL_DIAGNOSTICS");
+    const char* value = std::getenv("THOR_MATMUL_DIAGNOSTICS");
     if (value == nullptr) {
         return false;
     }
@@ -87,7 +86,7 @@ static bool thorMatmulDiagnosticsVerbose() {
     return mode == "2" || mode == "verbose" || mode == "VERBOSE" || mode == "full" || mode == "FULL";
 }
 
-static const char *matmulExprOpName(ExprOp op) {
+static const char* matmulExprOpName(ExprOp op) {
     switch (op) {
         case ExprOp::MATMUL:
             return "MATMUL";
@@ -98,7 +97,7 @@ static const char *matmulExprOpName(ExprOp op) {
     }
 }
 
-static const char *matmulEpilogueName(MatmulEpilogue epilogue) {
+static const char* matmulEpilogueName(MatmulEpilogue epilogue) {
     switch (epilogue) {
         case MatmulEpilogue::Default:
             return "Default";
@@ -110,7 +109,7 @@ static const char *matmulEpilogueName(MatmulEpilogue epilogue) {
     return "Unknown";
 }
 
-static const char *matmulBackwardEpilogueName(MatmulBackwardEpilogue epilogue) {
+static const char* matmulBackwardEpilogueName(MatmulBackwardEpilogue epilogue) {
     switch (epilogue) {
         case MatmulBackwardEpilogue::Default:
             return "Default";
@@ -122,7 +121,7 @@ static const char *matmulBackwardEpilogueName(MatmulBackwardEpilogue epilogue) {
     return "Unknown";
 }
 
-static bool shouldPrintStampedMatmulDiagnosticOnce(const std::string &key) {
+static bool shouldPrintStampedMatmulDiagnosticOnce(const std::string& key) {
     static std::mutex mutex;
     static std::unordered_set<std::string> printed;
     std::lock_guard<std::mutex> lock(mutex);
@@ -151,9 +150,7 @@ static CubScanMode toCubScanMode(ScanMode mode) {
     throw std::runtime_error("Unsupported Expression scan mode.");
 }
 
-static CubScanDirection toCubScanDirection(bool reverse) {
-    return reverse ? CubScanDirection::Reverse : CubScanDirection::Forward;
-}
+static CubScanDirection toCubScanDirection(bool reverse) { return reverse ? CubScanDirection::Reverse : CubScanDirection::Forward; }
 
 static int64_t checkedDim(const std::vector<uint64_t>& dims, size_t idx, const char* tensor_name) {
     if (idx >= dims.size()) {
@@ -329,11 +326,10 @@ CudnnAttentionDescriptor CompiledAttention::descriptorFor(const Tensor& qTensor,
     descriptor.dropout.probability = dropout_probability;
     descriptor.dropout.usePhilox = true;
     descriptor.debugName = debug_name;
-    descriptor.useFp8 =
-        qTensor.getDataType() == DataType::FP8_E4M3 || qTensor.getDataType() == DataType::FP8_E5M2 ||
-        kTensor.getDataType() == DataType::FP8_E4M3 || kTensor.getDataType() == DataType::FP8_E5M2 ||
-        vTensor.getDataType() == DataType::FP8_E4M3 || vTensor.getDataType() == DataType::FP8_E5M2 ||
-        oTensor.getDataType() == DataType::FP8_E4M3 || oTensor.getDataType() == DataType::FP8_E5M2;
+    descriptor.useFp8 = qTensor.getDataType() == DataType::FP8_E4M3 || qTensor.getDataType() == DataType::FP8_E5M2 ||
+                        kTensor.getDataType() == DataType::FP8_E4M3 || kTensor.getDataType() == DataType::FP8_E5M2 ||
+                        vTensor.getDataType() == DataType::FP8_E4M3 || vTensor.getDataType() == DataType::FP8_E5M2 ||
+                        oTensor.getDataType() == DataType::FP8_E4M3 || oTensor.getDataType() == DataType::FP8_E5M2;
     descriptor.validateForward();
     return descriptor;
 }
@@ -369,11 +365,10 @@ CudnnAttentionDescriptor CompiledAttentionBackward::descriptorFor(const Tensor& 
     descriptor.generateStats = true;
     descriptor.deterministicBackward = deterministic_backward;
     descriptor.debugName = debug_name;
-    descriptor.useFp8 =
-        qTensor.getDataType() == DataType::FP8_E4M3 || qTensor.getDataType() == DataType::FP8_E5M2 ||
-        kTensor.getDataType() == DataType::FP8_E4M3 || kTensor.getDataType() == DataType::FP8_E5M2 ||
-        vTensor.getDataType() == DataType::FP8_E4M3 || vTensor.getDataType() == DataType::FP8_E5M2 ||
-        oTensor.getDataType() == DataType::FP8_E4M3 || oTensor.getDataType() == DataType::FP8_E5M2;
+    descriptor.useFp8 = qTensor.getDataType() == DataType::FP8_E4M3 || qTensor.getDataType() == DataType::FP8_E5M2 ||
+                        kTensor.getDataType() == DataType::FP8_E4M3 || kTensor.getDataType() == DataType::FP8_E5M2 ||
+                        vTensor.getDataType() == DataType::FP8_E4M3 || vTensor.getDataType() == DataType::FP8_E5M2 ||
+                        oTensor.getDataType() == DataType::FP8_E4M3 || oTensor.getDataType() == DataType::FP8_E5M2;
     descriptor.validateBackward();
     return descriptor;
 }
@@ -405,9 +400,7 @@ bool sameOptionalFloat(const std::optional<float>& lhs, const std::optional<floa
     return lhs.value() == rhs.value();
 }
 
-bool attentionConfigMatchesBackward(const CompiledAttention& forward,
-                                    const CompiledAttentionBackward& backward,
-                                    DataType output_dtype) {
+bool attentionConfigMatchesBackward(const CompiledAttention& forward, const CompiledAttentionBackward& backward, DataType output_dtype) {
     return forward.q_layout == backward.q_layout && forward.k_layout == backward.k_layout && forward.v_layout == backward.v_layout &&
            forward.o_layout == backward.o_layout && forward.mask_kind == backward.mask_kind &&
            forward.diagonal_left_bound == backward.diagonal_left_bound && forward.diagonal_right_bound == backward.diagonal_right_bound &&
@@ -1288,7 +1281,8 @@ StampedScan::StampedScan(std::shared_ptr<CompiledScan> compiled,
             }
         } else {
             if (arg_scan) {
-                arg_scan_plan = prepareCubDeviceArgScan(input, output, num_items, toCubArgScanOp(compiled_scan->op), cub_mode, cub_direction);
+                arg_scan_plan =
+                    prepareCubDeviceArgScan(input, output, num_items, toCubArgScanOp(compiled_scan->op), cub_mode, cub_direction);
                 temp_storage_bytes = arg_scan_plan.temp_storage_bytes;
             } else {
                 scan_plan = prepareCubDeviceScan(input, output, num_items, toCubScanOp(compiled_scan->op), cub_mode, cub_direction);
@@ -1473,13 +1467,12 @@ void StampedRmsNorm::runOn(Stream& run_stream) const {
     CudnnRmsNorm::instance().forward(descriptor, args, run_stream);
 }
 
-
 StampedEmbeddingLookup::StampedEmbeddingLookup(std::shared_ptr<CompiledEmbeddingLookup> compiled,
-                                                 const Tensor& indices,
-                                                 const Tensor& weights,
-                                                 const Tensor& output,
-                                                 const Stream& stream,
-                                                 std::vector<Tensor> epilogue_inputs)
+                                               const Tensor& indices,
+                                               const Tensor& weights,
+                                               const Tensor& output,
+                                               const Stream& stream,
+                                               std::vector<Tensor> epilogue_inputs)
     : compiled_embedding_lookup(std::move(compiled)),
       indices(indices),
       weights(weights),
@@ -1489,13 +1482,12 @@ StampedEmbeddingLookup::StampedEmbeddingLookup(std::shared_ptr<CompiledEmbedding
     if (!compiled_embedding_lookup) {
         throw std::runtime_error("StampedEmbeddingLookup constructed with null compiled payload.");
     }
-    prepared_forward = prepareEmbeddingForward(indices,
-                                               weights,
-                                               output,
-                                               compiled_embedding_lookup->has_padding_index
-                                                   ? std::optional<uint64_t>(compiled_embedding_lookup->padding_index)
-                                                   : std::nullopt,
-                                               compiled_embedding_lookup->epilogue);
+    prepared_forward = prepareEmbeddingForward(
+        indices,
+        weights,
+        output,
+        compiled_embedding_lookup->has_padding_index ? std::optional<uint64_t>(compiled_embedding_lookup->padding_index) : std::nullopt,
+        compiled_embedding_lookup->epilogue);
 }
 
 void StampedEmbeddingLookup::runOn(Stream& run_stream) const {
@@ -1769,19 +1761,7 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
         throw std::runtime_error("StampedMatmul currently only supports rank-2 tensors.");
     }
 
-    const auto lhs_dims = lhs.getDimensions();
-    const auto rhs_dims = rhs.getDimensions();
-    const int32_t a_rows = static_cast<int32_t>(lhs_dims[0]);
-    const int32_t a_cols = static_cast<int32_t>(lhs_dims[1]);
-    const int32_t b_rows = static_cast<int32_t>(rhs_dims[0]);
-    const int32_t b_cols = static_cast<int32_t>(rhs_dims[1]);
-
     if (compiled_matmul->op == ExprOp::MATMUL) {
-        const CublasMatrixMultiply::MatmulDataTypes dataTypes{lhs.getDescriptor().getDataType(),
-                                                              rhs.getDescriptor().getDataType(),
-                                                              output.getDescriptor().getDataType(),
-                                                              output.getDescriptor().getDataType(),
-                                                              compiled_matmul->compute_dtype};
         if (compiled_matmul->backward_epilogue != MatmulBackwardEpilogue::Default) {
             if (compiled_matmul->epilogue != MatmulEpilogue::Default) {
                 throw std::runtime_error("Stamped MATMUL cannot combine forward and backward cuBLASLt epilogues in one stage.");
@@ -1795,45 +1775,29 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
             }
             const float alphaOne = 1.0f;
             const float betaZero = 0.0f;
-            CublasMatrixMultiply::instance().gemmWithBackwardEpilogueUsingHeuristicKernelChoice(
-                lhs,
-                rhs,
-                std::nullopt,
-                epilogue_aux.value(),
-                output,
-                bgrad_output,
-                a_rows,
-                a_cols,
-                b_rows,
-                b_cols,
-                compiled_matmul->transpose_lhs,
-                compiled_matmul->transpose_rhs,
-                &alphaOne,
-                &betaZero,
-                dataTypes,
-                toCublasBackwardEpilogueFusion(compiled_matmul->backward_epilogue),
-                run_stream,
-                CublasScalarPointerMode::Host,
-                workspace,
-                built_matmul->epilogue_algorithm);
+            if (!built_matmul->epilogue_plan) {
+                throw std::runtime_error("Stamped MATMUL backward epilogue runtime missing compile-time cuBLASLt plan.");
+            }
+            built_matmul->epilogue_plan->runGemmWithBackwardEpilogue(
+                lhs, rhs, std::nullopt, output, &alphaOne, &betaZero, run_stream, CublasScalarPointerMode::Host, workspace);
             return;
         }
 
         if (compiled_matmul->epilogue == MatmulEpilogue::Default) {
-            CublasMatrixMultiply::instance().multiply(lhs,
-                                                      rhs,
-                                                      output,
-                                                      workspace,
-                                                      a_rows,
-                                                      a_cols,
-                                                      b_rows,
-                                                      b_cols,
-                                                      compiled_matmul->transpose_lhs,
-                                                      compiled_matmul->transpose_rhs,
-                                                      false,
-                                                      false,
-                                                      dataTypes,
-                                                      run_stream);
+            if (!built_matmul->cublas_kernel.has_value()) {
+                throw std::runtime_error("Stamped MATMUL runtime missing compile-time cuBLAS kernel artifact.");
+            }
+            const float alphaOne = 1.0f;
+            const float betaZero = 0.0f;
+            CHECK_CUBLAS(built_matmul->cublas_kernel->launchUncheckedPrevalidated(lhs,
+                                                                        rhs,
+                                                                        output,
+                                                                        output,
+                                                                        workspace,
+                                                                        &alphaOne,
+                                                                        &betaZero,
+                                                                        run_stream,
+                                                                        CublasScalarPointerMode::Host));
             return;
         }
 
@@ -1842,25 +1806,11 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
         }
         const float alphaOne = 1.0f;
         const float betaZero = 0.0f;
-        CublasMatrixMultiply::instance().gemmWithEpilogueUsingHeuristicKernelChoice(lhs,
-                                                                                    rhs,
-                                                                                    std::nullopt,
-                                                                                    output,
-                                                                                    a_rows,
-                                                                                    a_cols,
-                                                                                    b_rows,
-                                                                                    b_cols,
-                                                                                    compiled_matmul->transpose_lhs,
-                                                                                    compiled_matmul->transpose_rhs,
-                                                                                    &alphaOne,
-                                                                                    &betaZero,
-                                                                                    dataTypes,
-                                                                                    toCublasEpilogueFusion(compiled_matmul->epilogue),
-                                                                                    false,
-                                                                                    run_stream,
-                                                                                    CublasScalarPointerMode::Host,
-                                                                                    workspace,
-                                                                                    built_matmul->epilogue_algorithm);
+        if (!built_matmul->epilogue_plan) {
+            throw std::runtime_error("Stamped MATMUL epilogue runtime missing compile-time cuBLASLt plan.");
+        }
+        built_matmul->epilogue_plan->runGemmWithEpilogue(
+            lhs, rhs, std::nullopt, output, &alphaOne, &betaZero, run_stream, CublasScalarPointerMode::Host, workspace, false);
         return;
     }
 
@@ -1885,12 +1835,6 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
                                                                       beta_host_scratch,
                                                                       run_stream);
 
-    const CublasMatrixMultiply::MatmulDataTypes dataTypes{
-        lhs.getDescriptor().getDataType(),
-        rhs.getDescriptor().getDataType(),
-        use_bias_epilogue ? output.getDescriptor().getDataType() : addend.value().getDescriptor().getDataType(),
-        output.getDescriptor().getDataType(),
-        compiled_matmul->compute_dtype};
     const bool use_backward_epilogue = compiled_matmul->backward_epilogue != MatmulBackwardEpilogue::Default;
     if (use_backward_epilogue) {
         if (compiled_matmul->epilogue != MatmulEpilogue::Default) {
@@ -1906,27 +1850,18 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
         if (compiled_matmul->transpose_lhs || compiled_matmul->transpose_rhs) {
             throw std::runtime_error("GEMM cuBLASLt backward epilogue fusion currently supports only non-transposed row-major stages.");
         }
-        CublasMatrixMultiply::instance().gemmWithBackwardEpilogueUsingHeuristicKernelChoice(
-            lhs,
-            rhs,
-            addend,
-            epilogue_aux.value(),
-            output,
-            bgrad_output,
-            a_rows,
-            a_cols,
-            b_rows,
-            b_cols,
-            compiled_matmul->transpose_lhs,
-            compiled_matmul->transpose_rhs,
-            resolved_scales.alpha.ptr,
-            resolved_scales.beta.ptr,
-            dataTypes,
-            toCublasBackwardEpilogueFusion(compiled_matmul->backward_epilogue),
-            run_stream,
-            resolved_scales.pointer_mode,
-            workspace,
-            built_matmul->epilogue_algorithm);
+        if (!built_matmul->epilogue_plan) {
+            throw std::runtime_error("Stamped GEMM backward epilogue runtime missing compile-time cuBLASLt plan.");
+        }
+        built_matmul->epilogue_plan->runGemmWithBackwardEpilogue(lhs,
+                                                                 rhs,
+                                                                 addend,
+                                                                 output,
+                                                                 resolved_scales.alpha.ptr,
+                                                                 resolved_scales.beta.ptr,
+                                                                 run_stream,
+                                                                 resolved_scales.pointer_mode,
+                                                                 workspace);
         return;
     }
 
@@ -1947,47 +1882,35 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
                 throw std::runtime_error("GEMM bias epilogue currently requires an unscaled +bias addend.");
             }
         }
-        CublasMatrixMultiply::instance().gemmWithEpilogueUsingHeuristicKernelChoice(lhs,
-                                                                                    rhs,
-                                                                                    addend.value(),
-                                                                                    output,
-                                                                                    a_rows,
-                                                                                    a_cols,
-                                                                                    b_rows,
-                                                                                    b_cols,
-                                                                                    compiled_matmul->transpose_lhs,
-                                                                                    compiled_matmul->transpose_rhs,
-                                                                                    resolved_scales.alpha.ptr,
-                                                                                    resolved_scales.beta.ptr,
-                                                                                    dataTypes,
-                                                                                    toCublasEpilogueFusion(compiled_matmul->epilogue),
-                                                                                    use_bias_epilogue,
-                                                                                    run_stream,
-                                                                                    resolved_scales.pointer_mode,
-                                                                                    workspace,
-                                                                                    built_matmul->epilogue_algorithm);
+        if (!built_matmul->epilogue_plan) {
+            throw std::runtime_error("Stamped GEMM epilogue runtime missing compile-time cuBLASLt plan.");
+        }
+        built_matmul->epilogue_plan->runGemmWithEpilogue(lhs,
+                                                         rhs,
+                                                         addend.value(),
+                                                         output,
+                                                         resolved_scales.alpha.ptr,
+                                                         resolved_scales.beta.ptr,
+                                                         run_stream,
+                                                         resolved_scales.pointer_mode,
+                                                         workspace,
+                                                         use_bias_epilogue);
         return;
     }
 
-    CublasMatrixMultiply::instance().gemm(lhs,
-                                          rhs,
-                                          addend.value(),
-                                          output,
-                                          workspace,
-                                          a_rows,
-                                          a_cols,
-                                          b_rows,
-                                          b_cols,
-                                          compiled_matmul->transpose_lhs,
-                                          compiled_matmul->transpose_rhs,
-                                          compiled_matmul->transpose_aux,
-                                          resolved_scales.alpha.ptr,
-                                          resolved_scales.beta.ptr,
-                                          dataTypes,
-                                          run_stream,
-                                          resolved_scales.pointer_mode);
+    if (!built_matmul->cublas_kernel.has_value()) {
+        throw std::runtime_error("Stamped GEMM runtime missing compile-time cuBLAS kernel artifact.");
+    }
+    CHECK_CUBLAS(built_matmul->cublas_kernel->launchUncheckedPrevalidated(lhs,
+                                                                rhs,
+                                                                addend.value(),
+                                                                output,
+                                                                workspace,
+                                                                resolved_scales.alpha.ptr,
+                                                                resolved_scales.beta.ptr,
+                                                                run_stream,
+                                                                resolved_scales.pointer_mode));
 }
-
 
 StampedScanMinMaxBackward::StampedScanMinMaxBackward(std::shared_ptr<CompiledScanMinMaxBackward> compiled,
                                                      std::shared_ptr<StampedScan> arg_scan,
@@ -2097,7 +2020,6 @@ void StampedReduceMinMaxBackward::runOn(Stream& run_stream) {
                                       run_stream);
 }
 
-
 static uint64_t conditionalPredicateNumel(const Tensor& predicate) {
     uint64_t numel = 1;
     for (uint64_t d : predicate.getDimensions()) {
@@ -2149,12 +2071,8 @@ static void capturePlanSequentiallyIntoGraph(const StampedExecutionPlan& plan,
                                              const std::vector<cudaGraphNode_t>& dependencies = {}) {
     cudaGraph_t captured_graph = nullptr;
     const cudaGraphNode_t* deps = dependencies.empty() ? nullptr : dependencies.data();
-    CUDA_CHECK(cudaStreamBeginCaptureToGraph(capture_stream.getStream(),
-                                             graph,
-                                             deps,
-                                             nullptr,
-                                             dependencies.size(),
-                                             cudaStreamCaptureModeGlobal));
+    CUDA_CHECK(
+        cudaStreamBeginCaptureToGraph(capture_stream.getStream(), graph, deps, nullptr, dependencies.size(), cudaStreamCaptureModeGlobal));
 
     try {
         plan.runSequentialOn(capture_stream);
@@ -2176,18 +2094,14 @@ static void capturePlanSequentiallyIntoGraph(const StampedExecutionPlan& plan,
 }
 
 static void captureConditionalSetterIntoGraph(cudaGraphConditionalHandle conditional_handle,
-                                                const Tensor& predicate,
-                                                cudaGraph_t graph,
-                                                Stream& capture_stream,
-                                                const std::vector<cudaGraphNode_t>& dependencies) {
+                                              const Tensor& predicate,
+                                              cudaGraph_t graph,
+                                              Stream& capture_stream,
+                                              const std::vector<cudaGraphNode_t>& dependencies) {
     cudaGraph_t captured_graph = nullptr;
     const cudaGraphNode_t* deps = dependencies.empty() ? nullptr : dependencies.data();
-    CUDA_CHECK(cudaStreamBeginCaptureToGraph(capture_stream.getStream(),
-                                             graph,
-                                             deps,
-                                             nullptr,
-                                             dependencies.size(),
-                                             cudaStreamCaptureModeGlobal));
+    CUDA_CHECK(
+        cudaStreamBeginCaptureToGraph(capture_stream.getStream(), graph, deps, nullptr, dependencies.size(), cudaStreamCaptureModeGlobal));
 
     try {
         launchSetCudaGraphConditionalFromBool(conditional_handle, predicate, capture_stream);
@@ -2250,12 +2164,8 @@ static CudaGraphExecutable buildConditionalCudaGraph(const StampedExecutionPlan&
         conditional_params.conditional.size = 2;
 
         cudaGraphNode_t conditional_node = nullptr;
-        CUDA_CHECK(cudaGraphAddNode(&conditional_node,
-                                    root_graph,
-                                    conditional_dependencies.data(),
-                                    nullptr,
-                                    conditional_dependencies.size(),
-                                    &conditional_params));
+        CUDA_CHECK(cudaGraphAddNode(
+            &conditional_node, root_graph, conditional_dependencies.data(), nullptr, conditional_dependencies.size(), &conditional_params));
 
         if (conditional_params.conditional.phGraph_out == nullptr) {
             throw std::runtime_error("CUDA did not return body graphs for graph-level conditional node.");
@@ -2571,8 +2481,7 @@ static cudnnDataType_t toCudnnDataType(DataType dtype) {
             return CUDNN_DATA_FP8_E5M2;
 
         default:
-            throw std::runtime_error("toCudnnDataType: unsupported DataType value " +
-                                     std::to_string(static_cast<int>(dtype)));
+            throw std::runtime_error("toCudnnDataType: unsupported DataType value " + std::to_string(static_cast<int>(dtype)));
     }
 }
 
@@ -2890,18 +2799,15 @@ static int chooseFrontendConvolutionAutotuneRotationSlots(const std::vector<Fron
 
     const uint64_t rotating_budget = available_for_autotune - fixed_scratch_bytes;
     const uint64_t max_affordable_slots = std::max<uint64_t>(1, rotating_budget / rotating_slot_bytes);
-    const uint64_t target_slots = std::max<uint64_t>(1,
-                                                     (kConvolutionAutotuneTargetRotationBytes + rotating_slot_bytes - 1) /
-                                                         rotating_slot_bytes);
-    const uint64_t bounded_slots = std::min<uint64_t>(
-        static_cast<uint64_t>(kConvolutionAutotuneMaxRotationSlots), std::min(target_slots, max_affordable_slots));
+    const uint64_t target_slots =
+        std::max<uint64_t>(1, (kConvolutionAutotuneTargetRotationBytes + rotating_slot_bytes - 1) / rotating_slot_bytes);
+    const uint64_t bounded_slots =
+        std::min<uint64_t>(static_cast<uint64_t>(kConvolutionAutotuneMaxRotationSlots), std::min(target_slots, max_affordable_slots));
     return static_cast<int>(std::max<uint64_t>(1, bounded_slots));
 }
 
 static FrontendConvolutionAutotuneTensorPool createFrontendConvolutionAutotuneTensorPool(
-    const std::vector<FrontendConvolutionAutotuneBinding>& bindings,
-    const TensorPlacement& workspace_placement,
-    int64_t workspace_bytes) {
+    const std::vector<FrontendConvolutionAutotuneBinding>& bindings, const TensorPlacement& workspace_placement, int64_t workspace_bytes) {
     FrontendConvolutionAutotuneTensorPool pool;
     const int rotation_slots = chooseFrontendConvolutionAutotuneRotationSlots(bindings, workspace_placement, workspace_bytes);
 
@@ -2950,13 +2856,12 @@ static float timeFrontendConvolutionPlan(BuiltConvolution& built,
     Stream timing_stream = stream;
     auto run_once = [&](int iteration) {
         std::unordered_map<int64_t, void*>& tensor_pack = pool.tensor_packs[static_cast<size_t>(iteration) % pool.tensor_packs.size()];
-        void* workspace_ptr = pool.workspace.has_value()
-                                  ? const_cast<void*>(static_cast<const void*>(pool.workspace.value().getMemPtr<void>()))
-                                  : nullptr;
+        void* workspace_ptr =
+            pool.workspace.has_value() ? const_cast<void*>(static_cast<const void*>(pool.workspace.value().getMemPtr<void>())) : nullptr;
         auto status = built.frontend_graph->execute(timing_stream.getCudnnHandle(), tensor_pack, workspace_ptr);
         if (!status.is_good()) {
-            throw std::runtime_error(std::string("Failed to execute cuDNN Frontend ") + op_name + " plan during autotune: " +
-                                     status.get_message());
+            throw std::runtime_error(std::string("Failed to execute cuDNN Frontend ") + op_name +
+                                     " plan during autotune: " + status.get_message());
         }
     };
 
@@ -3214,6 +3119,9 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
         throw std::runtime_error("buildMatmul tensor dtypes do not match the compiled matmul dtype plan.");
     }
 
+    const bool use_cublaslt_epilogue_wrapper =
+        use_bias_epilogue || compiled_matmul->epilogue != MatmulEpilogue::Default || use_backward_epilogue;
+
     MatmulCacheKey key(compiled_matmul->op,
                        a_rows,
                        a_cols,
@@ -3237,7 +3145,7 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
                        dataTypes.compute,
                        device_num);
 
-    std::shared_ptr<BuiltMatmul> hit = cacheLookup(key);
+    std::shared_ptr<BuiltMatmul> hit = use_cublaslt_epilogue_wrapper ? nullptr : cacheLookup(key);
     if (hit) {
         return hit;
     }
@@ -3245,10 +3153,7 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
     auto built = std::make_shared<BuiltMatmul>(key);
     bool kernelWillRunOnGpu = false;
     const bool print_verbose_matmul_diagnostics = thorMatmulDiagnosticsVerbose();
-    const char *diagnostic_path = "unknown";
-
-    const bool use_cublaslt_epilogue_wrapper =
-        use_bias_epilogue || compiled_matmul->epilogue != MatmulEpilogue::Default || use_backward_epilogue;
+    const char* diagnostic_path = "unknown";
 
     if (compiled_matmul->op == ExprOp::MATMUL && !use_cublaslt_epilogue_wrapper) {
         CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(device_num,
@@ -3264,26 +3169,29 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
                                                                            dataTypes,
                                                                            print_verbose_matmul_diagnostics);
         diagnostic_path = "optimal-matmul-picker";
-        built->workspace_bytes = CublasMatrixMultiply::instance().getMatrixMultiplyWorkspaceSizeInBytes(device_num,
-                                                                                                        a_rows,
-                                                                                                        a_cols,
-                                                                                                        b_rows,
-                                                                                                        b_cols,
-                                                                                                        ld_a,
-                                                                                                        ld_b,
-                                                                                                        ld_d,
-                                                                                                        compiled_matmul->transpose_lhs,
-                                                                                                        compiled_matmul->transpose_rhs,
-                                                                                                        dataTypes,
-                                                                                                        kernelWillRunOnGpu);
+        built->cublas_kernel = CublasMatrixMultiply::instance().getCachedGemmKernel(device_num,
+                                                                                    a_rows,
+                                                                                    a_cols,
+                                                                                    b_rows,
+                                                                                    b_cols,
+                                                                                    ld_a,
+                                                                                    ld_b,
+                                                                                    ld_d,
+                                                                                    ld_d,
+                                                                                    compiled_matmul->transpose_lhs,
+                                                                                    compiled_matmul->transpose_rhs,
+                                                                                    false,
+                                                                                    dataTypes,
+                                                                                    true);
+        built->workspace_bytes = built->cublas_kernel->getWorkspaceSizeInBytes(device_num);
+        kernelWillRunOnGpu = true;
     } else if (use_cublaslt_epilogue_wrapper) {
         diagnostic_path = "epilogue-workspace-wrapper";
         if (use_backward_epilogue) {
             if (!epilogue_aux.has_value()) {
                 throw std::runtime_error("buildMatmul backward cuBLASLt epilogue requires epilogue_aux.");
             }
-            const int64_t epilogue_aux_ld = static_cast<int64_t>(epilogue_aux.value().getDimensions()[1]);
-            built->epilogue_algorithm = CublasMatrixMultiply::instance().selectGemmWithBackwardEpilogueAlgorithm(
+            built->epilogue_plan = CublasMatrixMultiply::instance().buildGemmWithBackwardEpiloguePlan(
                 device_num,
                 a_rows,
                 a_cols,
@@ -3298,29 +3206,35 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
                 dataTypes,
                 toCublasBackwardEpilogueFusion(compiled_matmul->backward_epilogue),
                 addend.has_value(),
-                bgrad_output.has_value(),
-                epilogue_aux_ld);
-            kernelWillRunOnGpu = built->epilogue_algorithm.has_value();
-            built->workspace_bytes = kernelWillRunOnGpu ? built->epilogue_algorithm->workspace_size_in_bytes : 0;
+                epilogue_aux.value(),
+                bgrad_output);
+            kernelWillRunOnGpu = static_cast<bool>(built->epilogue_plan);
+            if (kernelWillRunOnGpu) {
+                built->epilogue_algorithm = built->epilogue_plan->algorithm;
+                built->workspace_bytes = built->epilogue_plan->algorithm.workspace_size_in_bytes;
+            }
         } else {
-            built->epilogue_algorithm = CublasMatrixMultiply::instance().selectGemmWithEpilogueAlgorithm(
-                device_num,
-                a_rows,
-                a_cols,
-                b_rows,
-                b_cols,
-                ld_a,
-                ld_b,
-                ld_c,
-                ld_d,
-                compiled_matmul->transpose_lhs,
-                compiled_matmul->transpose_rhs,
-                dataTypes,
-                toCublasEpilogueFusion(compiled_matmul->epilogue),
-                addend.has_value(),
-                use_bias_epilogue);
-            kernelWillRunOnGpu = built->epilogue_algorithm.has_value();
-            built->workspace_bytes = kernelWillRunOnGpu ? built->epilogue_algorithm->workspace_size_in_bytes : 0;
+            built->epilogue_plan =
+                CublasMatrixMultiply::instance().buildGemmWithEpiloguePlan(device_num,
+                                                                           a_rows,
+                                                                           a_cols,
+                                                                           b_rows,
+                                                                           b_cols,
+                                                                           ld_a,
+                                                                           ld_b,
+                                                                           ld_c,
+                                                                           ld_d,
+                                                                           compiled_matmul->transpose_lhs,
+                                                                           compiled_matmul->transpose_rhs,
+                                                                           dataTypes,
+                                                                           toCublasEpilogueFusion(compiled_matmul->epilogue),
+                                                                           addend,
+                                                                           use_bias_epilogue);
+            kernelWillRunOnGpu = static_cast<bool>(built->epilogue_plan);
+            if (kernelWillRunOnGpu) {
+                built->epilogue_algorithm = built->epilogue_plan->algorithm;
+                built->workspace_bytes = built->epilogue_plan->algorithm.workspace_size_in_bytes;
+            }
         }
     } else {
         CublasMatrixMultiply::instance().chooseOptimalGemmKernel(device_num,
@@ -3338,20 +3252,22 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
                                                                  dataTypes,
                                                                  print_verbose_matmul_diagnostics);
         diagnostic_path = "optimal-gemm-picker";
-        built->workspace_bytes = CublasMatrixMultiply::instance().getGemmWorkspaceSizeInBytes(device_num,
-                                                                                              a_rows,
-                                                                                              a_cols,
-                                                                                              b_rows,
-                                                                                              b_cols,
-                                                                                              ld_a,
-                                                                                              ld_b,
-                                                                                              ld_c,
-                                                                                              ld_d,
-                                                                                              compiled_matmul->transpose_lhs,
-                                                                                              compiled_matmul->transpose_rhs,
-                                                                                              compiled_matmul->transpose_aux,
-                                                                                              dataTypes,
-                                                                                              kernelWillRunOnGpu);
+        built->cublas_kernel = CublasMatrixMultiply::instance().getCachedGemmKernel(device_num,
+                                                                                    a_rows,
+                                                                                    a_cols,
+                                                                                    b_rows,
+                                                                                    b_cols,
+                                                                                    ld_a,
+                                                                                    ld_b,
+                                                                                    ld_c,
+                                                                                    ld_d,
+                                                                                    compiled_matmul->transpose_lhs,
+                                                                                    compiled_matmul->transpose_rhs,
+                                                                                    compiled_matmul->transpose_aux,
+                                                                                    dataTypes,
+                                                                                    true);
+        built->workspace_bytes = built->cublas_kernel->getWorkspaceSizeInBytes(device_num);
+        kernelWillRunOnGpu = true;
     }
 
     if (!kernelWillRunOnGpu) {
@@ -3360,17 +3276,17 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
 
     if (thorMatmulDiagnosticsEnabled()) {
         std::ostringstream diagnostic_key;
-        diagnostic_key << "build:" << diagnostic_path << ':' << device_num << ':' << matmulExprOpName(compiled_matmul->op) << ':'
-                       << a_rows << 'x' << a_cols << ':' << b_rows << 'x' << b_cols << ":ld=" << ld_a << ',' << ld_b << ','
-                       << ld_c << ',' << ld_d << ":trans=" << static_cast<int>(compiled_matmul->transpose_lhs)
-                       << static_cast<int>(compiled_matmul->transpose_rhs) << static_cast<int>(compiled_matmul->transpose_aux)
-                       << ":bias=" << static_cast<int>(use_bias_epilogue) << ":epilogue="
-                       << matmulEpilogueName(compiled_matmul->epilogue) << ":backward_epilogue="
-                       << matmulBackwardEpilogueName(compiled_matmul->backward_epilogue) << ":bgrad="
-                       << static_cast<int>(bgrad_output.has_value()) << ":dtypes=" << TensorDescriptor::getElementTypeName(dataTypes.A)
-                       << ',' << TensorDescriptor::getElementTypeName(dataTypes.B) << ','
-                       << TensorDescriptor::getElementTypeName(dataTypes.C) << ',' << TensorDescriptor::getElementTypeName(dataTypes.D)
-                       << ',' << TensorDescriptor::getElementTypeName(dataTypes.compute);
+        diagnostic_key << "build:" << diagnostic_path << ':' << device_num << ':' << matmulExprOpName(compiled_matmul->op) << ':' << a_rows
+                       << 'x' << a_cols << ':' << b_rows << 'x' << b_cols << ":ld=" << ld_a << ',' << ld_b << ',' << ld_c << ',' << ld_d
+                       << ":trans=" << static_cast<int>(compiled_matmul->transpose_lhs) << static_cast<int>(compiled_matmul->transpose_rhs)
+                       << static_cast<int>(compiled_matmul->transpose_aux) << ":bias=" << static_cast<int>(use_bias_epilogue)
+                       << ":epilogue=" << matmulEpilogueName(compiled_matmul->epilogue)
+                       << ":backward_epilogue=" << matmulBackwardEpilogueName(compiled_matmul->backward_epilogue)
+                       << ":bgrad=" << static_cast<int>(bgrad_output.has_value())
+                       << ":dtypes=" << TensorDescriptor::getElementTypeName(dataTypes.A) << ','
+                       << TensorDescriptor::getElementTypeName(dataTypes.B) << ',' << TensorDescriptor::getElementTypeName(dataTypes.C)
+                       << ',' << TensorDescriptor::getElementTypeName(dataTypes.D) << ','
+                       << TensorDescriptor::getElementTypeName(dataTypes.compute);
         if (shouldPrintStampedMatmulDiagnosticOnce(diagnostic_key.str())) {
             std::fprintf(stderr,
                          "THOR_MATMUL_DIAGNOSTIC build path=%s op=%s gpu=%d A=%dx%d B=%dx%d ld=%d,%d,%d,%d "
@@ -3403,7 +3319,9 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
         }
     }
 
-    builtMatmulCache.put(key, built);
+    if (!use_cublaslt_epilogue_wrapper) {
+        builtMatmulCache.put(key, built);
+    }
     return built;
 }
 
@@ -3458,9 +3376,8 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolution(const std::s
     setFrontendConvolutionOutputTensor(
         y, std::string(prefix) + "_y", CUDNN_FRONTEND_CONV_Y_UID, output.getDimensions(), compiled_convolution->output_dtype);
 
-    std::vector<FrontendConvolutionAutotuneBinding> autotune_bindings = {{CUDNN_FRONTEND_CONV_X_UID, input, true},
-                                                                         {CUDNN_FRONTEND_CONV_W_UID, filter, true},
-                                                                         {CUDNN_FRONTEND_CONV_Y_UID, output, false}};
+    std::vector<FrontendConvolutionAutotuneBinding> autotune_bindings = {
+        {CUDNN_FRONTEND_CONV_X_UID, input, true}, {CUDNN_FRONTEND_CONV_W_UID, filter, true}, {CUDNN_FRONTEND_CONV_Y_UID, output, false}};
     autotuneFrontendConvolutionGraph(*built, stream, autotune_bindings, input.getPlacement(), is_3d ? "CONV3D forward" : "CONV2D forward");
     return built;
 }

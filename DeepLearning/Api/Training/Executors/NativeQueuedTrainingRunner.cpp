@@ -9,6 +9,7 @@
 #include "DeepLearning/Api/Training/TrainingProgram.h"
 #include "DeepLearning/Api/Training/Cancellation/TrainingCancellation.h"
 #include "DeepLearning/Implementation/ThorError.h"
+#include "DeepLearning/Implementation/Layers/LayerSubmitDiagnostics.h"
 
 #include <cuda_runtime_api.h>
 
@@ -267,6 +268,53 @@ void emitNativeQueueCompletionTimingDiagnostic(TrainingEventPhase phase,
                  putEventMicros,
                  extendOutputsMicros,
                  totalMicros);
+    std::fflush(stderr);
+}
+
+void emitNativeQueueSubmitTimingDiagnostic(TrainingEventPhase phase,
+                                           uint64_t epoch,
+                                           uint64_t batch,
+                                           uint64_t slot,
+                                           uint64_t inFlight,
+                                           uint64_t done,
+                                           uint64_t total,
+                                           uint64_t submitCalls,
+                                           uint64_t bindMicros,
+                                           uint64_t submitBatchMicros,
+                                           const ThorImplementation::BatchSubmissionTiming& timing) {
+    if (!queueDiagnosticsEnabled()) {
+        return;
+    }
+    std::fprintf(stderr,
+                 "THOR_TRAINING_QUEUE_DIAGNOSTIC native event=submit_timing phase=%s epoch=%lu batch=%lu slot=%lu "
+                 "in_flight=%lu done=%lu/%lu submit_calls=%lu bind_us=%lu submit_batch_us=%lu "
+                 "active_loss_roots_us=%lu set_active_loss_roots_us=%lu send_batch_us=%lu batch_unwrap_us=%lu "
+                 "physical_total_us=%lu input_forward_us=%lu output_collect_us=%lu output_wait_processing_us=%lu "
+                 "processing_event_us=%lu input_fanout_us=%lu total_us=%lu inputs=%lu outputs=%lu active_loss_roots=%lu\n",
+                 phaseName(phase).c_str(),
+                 epoch + 1,
+                 batch + 1,
+                 slot,
+                 inFlight,
+                 done,
+                 total,
+                 submitCalls,
+                 bindMicros,
+                 submitBatchMicros,
+                 timing.activeLossRootsMicros,
+                 timing.setActiveLossRootsMicros,
+                 timing.sendBatchMicros,
+                 timing.batchUnwrapMicros,
+                 timing.physicalTotalMicros,
+                 timing.inputForwardMicros,
+                 timing.outputCollectMicros,
+                 timing.outputWaitOnProcessingMicros,
+                 timing.processingEventMicros,
+                 timing.inputFanoutMicros,
+                 timing.totalMicros,
+                 timing.numInputs,
+                 timing.numOutputs,
+                 timing.activeLossRootCount);
     std::fflush(stderr);
 }
 
@@ -724,10 +772,30 @@ class NativeQueuedEpochScheduler {
             }
 
             const auto submitStart = std::chrono::high_resolution_clock::now();
+            uint64_t bindMicros = 0;
+            uint64_t submitBatchMicros = 0;
+            uint64_t submitCalls = 0;
+            ThorImplementation::BatchSubmissionTiming submitTiming;
             for (const StepExecutable& step : steps) {
                 for (uint32_t repeat = 0; repeat < step.getRepeatCount(); ++repeat) {
+                    const auto bindStart = std::chrono::high_resolution_clock::now();
                     Batch boundBatchInput = bindBatchInputs(step, params->batchInput);
+                    const auto bindFinish = std::chrono::high_resolution_clock::now();
+                    bindMicros += elapsedMicros(bindStart, bindFinish);
                     params->batchOutput.clear();
+                    ThorImplementation::BatchSubmissionTiming singleSubmitTiming;
+                    const auto submitBatchStart = std::chrono::high_resolution_clock::now();
+                    const bool emitLayerSubmitDiagnostics =
+                        ThorImplementation::layerSubmitDiagnosticsEnabled() && shouldEmitQueueDiagnostic(batch + 1);
+                    ThorImplementation::ScopedLayerSubmitDiagnosticContext layerSubmitContext(phaseName(diagnosticPhase),
+                                                                                              currentEpoch,
+                                                                                              epochBatchNum,
+                                                                                              slotIndex,
+                                                                                              inFlightAfterReserve,
+                                                                                              initialEpochBatchNum + batch,
+                                                                                              batchesPerEpoch,
+                                                                                              validationPass,
+                                                                                              emitLayerSubmitDiagnostics);
                     placedNetwork->submitBatch(nextStampToProcess,
                                                boundBatchInput,
                                                params->batchOutput,
@@ -735,7 +803,12 @@ class NativeQueuedEpochScheduler {
                                                validationPass,
                                                step.getLossRoots(),
                                                &processingFinishedEvents[slotIndex],
-                                               /*waitForOutputsOnProcessingStream=*/false);
+                                               /*waitForOutputsOnProcessingStream=*/false,
+                                               &singleSubmitTiming);
+                    const auto submitBatchFinish = std::chrono::high_resolution_clock::now();
+                    submitBatchMicros += elapsedMicros(submitBatchStart, submitBatchFinish);
+                    ThorImplementation::accumulateBatchSubmissionTiming(submitTiming, singleSubmitTiming);
+                    submitCalls += 1;
                 }
             }
             const auto submitFinish = std::chrono::high_resolution_clock::now();
@@ -799,6 +872,20 @@ class NativeQueuedEpochScheduler {
                                                           elapsedMicros(putEventStart, putEventFinish),
                                                           elapsedMicros(extendOutputsStart, extendOutputsFinish),
                                                           elapsedMicros(completionSetupStart, completionSetupFinish));
+            }
+
+            if (shouldEmitQueueDiagnostic(batch + 1)) {
+                emitNativeQueueSubmitTimingDiagnostic(diagnosticPhase,
+                                                      currentEpoch,
+                                                      epochBatchNum,
+                                                      slotIndex,
+                                                      inFlightAfterReserve,
+                                                      initialEpochBatchNum + batch,
+                                                      batchesPerEpoch,
+                                                      submitCalls,
+                                                      bindMicros,
+                                                      submitBatchMicros,
+                                                      submitTiming);
             }
 
             if (shouldEmitQueueDiagnostic(batch + 1)) {

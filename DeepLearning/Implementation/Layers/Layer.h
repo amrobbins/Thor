@@ -2,6 +2,7 @@
 
 #include <optional>
 #include "DeepLearning/Implementation/ThorError.h"
+#include "DeepLearning/Implementation/Layers/LayerSubmitDiagnostics.h"
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
@@ -109,33 +110,69 @@ class Layer {
     }
 
     virtual void forward(std::optional<Tensor> featureInput, bool validationPass, uint32_t batchSize = 0) {
+        const bool emitDiagnostics = layerSubmitDiagnosticsActive();
+        const auto totalStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
         THOR_THROW_IF_FALSE(running);
 
+        const auto inferStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
         infer(featureInput, featureOutput, stream);
+        const uint64_t inferMicros = emitDiagnostics ? layerSubmitDiagnosticElapsedMicros(inferStart, layerSubmitDiagnosticNow()) : 0;
 
-        if (!nextLayer.has_value())
-            return;
+        uint64_t downstreamMicros = 0;
+        if (nextLayer.has_value()) {
+            const auto downstreamStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
+            // Expecting to get tail-recursion optimization of -O3 so that stack space does not build up here.
+            nextLayer.value()->forward(featureOutput, validationPass, batchSize);
+            downstreamMicros = emitDiagnostics ? layerSubmitDiagnosticElapsedMicros(downstreamStart, layerSubmitDiagnosticNow()) : 0;
+        }
 
-        // Expecting to get tail-recursion optimization of -O3 so that stack space does not build up here.
-        nextLayer.value()->forward(featureOutput, validationPass, batchSize);
+        if (emitDiagnostics) {
+            emitLayerSubmitDiagnostic("layer_forward",
+                                      layerSubmitDiagnosticLabel("Layer", getId(), getName()),
+                                      getId(),
+                                      layerSubmitDiagnosticElapsedMicros(totalStart, layerSubmitDiagnosticNow()),
+                                      {{"infer_us", inferMicros}, {"downstream_us", downstreamMicros}});
+        }
     }
 
     virtual void backward(std::optional<Tensor> errorInput, uint32_t batchSize = 0) {
+        const bool emitDiagnostics = layerSubmitDiagnosticsActive();
+        const auto totalStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
         THOR_THROW_IF_FALSE(running);
 
         // Experimental - back propagation stops at empty error input
         // i.e. the errorInput data is the thing necessitates processing.
         // if all errorInputs are empty for any layer that back propagation path will stop at that layer.
-        if (!errorInput.has_value())
+        if (!errorInput.has_value()) {
+            if (emitDiagnostics) {
+                emitLayerSubmitDiagnostic("layer_backward_skip",
+                                          layerSubmitDiagnosticLabel("Layer", getId(), getName()),
+                                          getId(),
+                                          layerSubmitDiagnosticElapsedMicros(totalStart, layerSubmitDiagnosticNow()),
+                                          {{"reason_no_error_input", 1}});
+            }
             return;
+        }
 
+        const auto backPropStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
         backProp(featureInput, errorInput, errorOutput, stream);
+        const uint64_t backPropMicros = emitDiagnostics ? layerSubmitDiagnosticElapsedMicros(backPropStart, layerSubmitDiagnosticNow()) : 0;
 
-        if (!previousLayer.has_value())
-            return;
+        uint64_t upstreamMicros = 0;
+        if (previousLayer.has_value()) {
+            const auto upstreamStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
+            // Expecting to get tail-recursion optimization of -O3 so that stack space does not build up here.
+            previousLayer.value()->backward(errorOutput, batchSize);
+            upstreamMicros = emitDiagnostics ? layerSubmitDiagnosticElapsedMicros(upstreamStart, layerSubmitDiagnosticNow()) : 0;
+        }
 
-        // Expecting to get tail-recursion optimization of -O3 so that stack space does not build up here.
-        previousLayer.value()->backward(errorOutput, batchSize);
+        if (emitDiagnostics) {
+            emitLayerSubmitDiagnostic("layer_backward",
+                                      layerSubmitDiagnosticLabel("Layer", getId(), getName()),
+                                      getId(),
+                                      layerSubmitDiagnosticElapsedMicros(totalStart, layerSubmitDiagnosticNow()),
+                                      {{"backprop_us", backPropMicros}, {"upstream_us", upstreamMicros}});
+        }
     }
 
     virtual void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) {

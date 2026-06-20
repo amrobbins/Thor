@@ -103,6 +103,12 @@ class CustomLayer : public TrainableLayer {
         std::string fusedLabelsInputName;
     };
 
+    struct FusedOptimizerRuntimeScalarBinding {
+        std::string parameterName;
+        std::shared_ptr<Optimizer> optimizer;
+        std::string namePrefix;
+    };
+
     struct ApplicationState {
         std::set<unsigned long> allForwardInputTensorIds;
         std::set<unsigned long> stillWaitingForForwardInputTensorIds;
@@ -127,6 +133,8 @@ class CustomLayer : public TrainableLayer {
         std::shared_ptr<StampedExecutionPlan> backwardWeightsFusedOptimizerUpdateStamped;
 
         std::unordered_set<std::string> optimizerUpdateFusedParameterNames;
+        std::vector<FusedOptimizerRuntimeScalarBinding> fusedOptimizerRuntimeScalarBindings;
+        std::unordered_map<std::string, float> fusedOptimizerRuntimeScalars;
 
         std::unordered_map<std::string, Tensor> forwardInputsByName;
         std::unordered_map<std::string, Tensor> forwardOutputsByName;
@@ -180,7 +188,7 @@ class CustomLayer : public TrainableLayer {
         uint32_t applicationIndex,
         const std::vector<std::string>& fusedParameterTargets,
         const std::unordered_map<std::string, Tensor>& optimizerUpdateInputs);
-    std::unordered_map<std::string, float> buildFusedOptimizerRuntimeScalars(uint32_t applicationIndex, uint32_t batchSize);
+    const std::unordered_map<std::string, float>& updateFusedOptimizerRuntimeScalars(uint32_t applicationIndex, uint32_t batchSize);
     void accumulateWeightsGradientForApplication(uint32_t applicationIndex, bool clearGradientFirst, uint32_t batchSize);
     uint64_t batchSizeForFlopEstimate() const;
 

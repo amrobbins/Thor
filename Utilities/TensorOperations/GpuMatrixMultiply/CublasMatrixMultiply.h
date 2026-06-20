@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <exception>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
 #include <utility>
@@ -38,6 +39,11 @@ namespace ThorImplementation {
  * The recommendation is that if you plan to do a matrix multiply of a certain size many times, first find the optimal kernel.
  *
  * The singleton object is accessed as CublasMatrixMultiply::instance().multiply(...)
+ *
+ * Non-hot-path warning: multiply(...), gemm(...), and the *UsingHeuristicKernelChoice(...) helpers perform
+ * runtime cache/heuristic lookup and/or descriptor construction. Stamped/layer runtime code should not call
+ * those APIs directly; it should store a preselected CublasKernel or LtMatmulPlan during build/stamp and launch
+ * that prebuilt artifact.
  *
  * Note: By having the member functions be non-static, they cannot be called unless the constructor has already been called.
  *       Member variables should be non-static so that they are only initialized upon creation of the singleton instance.
@@ -96,6 +102,47 @@ class CublasMatrixMultiply {
         cublasLtMatmulAlgo_t algorithm{};
         uint64_t workspace_size_in_bytes = 0;
     };
+    struct LtMatmulPlan {
+        cublasLtMatmulDesc_t operation_desc_host = nullptr;
+        cublasLtMatmulDesc_t operation_desc_device = nullptr;
+        cublasLtMatrixLayout_t a_desc = nullptr;
+        cublasLtMatrixLayout_t b_desc = nullptr;
+        cublasLtMatrixLayout_t c_desc = nullptr;
+        cublasLtMatrixLayout_t d_desc = nullptr;
+        LtMatmulAlgorithmSelection algorithm;
+
+        LtMatmulPlan() = default;
+        ~LtMatmulPlan();
+
+        LtMatmulPlan(const LtMatmulPlan&) = delete;
+        LtMatmulPlan& operator=(const LtMatmulPlan&) = delete;
+
+        cublasLtMatmulDesc_t operationDesc(CublasScalarPointerMode pointerMode) const {
+            return (pointerMode == CublasScalarPointerMode::Device) ? operation_desc_device : operation_desc_host;
+        }
+
+        void runGemmWithEpilogue(Tensor A,
+                                 Tensor B,
+                                 std::optional<Tensor> addend,
+                                 Tensor D,
+                                 const float *alpha,
+                                 const float *beta,
+                                 Stream stream,
+                                 CublasScalarPointerMode pointerMode,
+                                 std::optional<Tensor> workspace,
+                                 bool addendIsBiasVector) const;
+
+        void runGemmWithBackwardEpilogue(Tensor A,
+                                         Tensor B,
+                                         std::optional<Tensor> addend,
+                                         Tensor D,
+                                         const float *alpha,
+                                         const float *beta,
+                                         Stream stream,
+                                         CublasScalarPointerMode pointerMode,
+                                         std::optional<Tensor> workspace) const;
+    };
+
 
     // fills C as C = A * B, where A, B and C are all matrices whose memory is allocated on the GPU that will be performing the computation.
     //
@@ -115,6 +162,10 @@ class CublasMatrixMultiply {
     //
     // Note that the number of columns in an input matrix does not have to be the same size as its leading dimension i.e. A.getDimensions[0]
     // in this case the ldA/ldB etc facitilies of GEMM are used. The matrix size is instead specified by the number of columns.
+    // Non-hot-path legacy/debug API: performs runtime global kernel-cache lookup. Stamped/layer code must use
+    // a prebuilt CublasKernel stored in the built expression artifact instead.
+    // Non-hot-path legacy/debug API: performs runtime global kernel-cache lookup. Stamped/layer code must use
+    // a prebuilt CublasKernel stored in the built expression artifact instead.
     void multiply(Tensor A,
                   Tensor B,
                   Tensor C,
@@ -151,6 +202,12 @@ class CublasMatrixMultiply {
     // since you need to pass some compatible tensor and D is compatible.
     // When C and D are the same tensor transposeC must be false:
     // https://docs.nvidia.com/cuda/archive/10.2/cublas/index.html#cublasLtMatmulDescAttributes_t
+    // Non-hot-path legacy/debug API: performs runtime global kernel-cache lookup. Stamped/layer code must use
+    // a prebuilt CublasKernel stored in the built expression artifact instead.
+    // Non-hot-path legacy/debug API: performs runtime global kernel-cache lookup. Stamped/layer code must use
+    // a prebuilt CublasKernel stored in the built expression artifact instead.
+    // Non-hot-path legacy/debug API: performs runtime global kernel-cache lookup. Stamped/layer code must use
+    // a prebuilt CublasKernel stored in the built expression artifact instead.
     void gemm(Tensor A,
               Tensor B,
               Tensor C,
@@ -337,7 +394,38 @@ class CublasMatrixMultiply {
                                                                                 const MatmulDataTypes dataTypes,
                                                                                 EpilogueFusion epilogue,
                                                                                 bool hasAddend,
-                                                                                bool addendIsBiasVector);
+                                                                                bool addendIsBiasVector,
+                                                                                std::optional<uint64_t> maxWorkspaceSizeInBytes = std::nullopt);
+
+    std::shared_ptr<LtMatmulPlan> buildGemmWithEpiloguePlan(int gpuNum,
+                                                              const int32_t A_rows,
+                                                              const int32_t A_cols,
+                                                              const int32_t B_rows,
+                                                              const int32_t B_cols,
+                                                              const int32_t ld_A,
+                                                              const int32_t ld_B,
+                                                              const int32_t ld_C,
+                                                              const int32_t ld_D,
+                                                              bool transposeA,
+                                                              bool transposeB,
+                                                              const MatmulDataTypes dataTypes,
+                                                              EpilogueFusion epilogue,
+                                                              std::optional<Tensor> addend,
+                                                              bool addendIsBiasVector,
+                                                              std::optional<LtMatmulAlgorithmSelection> selectedAlgorithm = std::nullopt,
+                                                              std::optional<uint64_t> maxWorkspaceSizeInBytes = std::nullopt);
+
+    void runGemmWithEpiloguePlan(Tensor A,
+                                 Tensor B,
+                                 std::optional<Tensor> addend,
+                                 Tensor D,
+                                 const float *alpha,
+                                 const float *beta,
+                                 Stream stream,
+                                 CublasScalarPointerMode pointerMode,
+                                 std::optional<Tensor> workspace,
+                                 const std::shared_ptr<LtMatmulPlan>& plan,
+                                 bool addendIsBiasVector);
 
     uint64_t getGemmWithEpilogueWorkspaceSizeInBytes(int gpuNum,
                                                       const int32_t A_rows,
@@ -371,7 +459,39 @@ class CublasMatrixMultiply {
                                                                                          BackwardEpilogueFusion epilogue,
                                                                                          bool hasAddend,
                                                                                          bool hasBiasGradient,
-                                                                                         int64_t epilogueAuxLd);
+                                                                                         int64_t epilogueAuxLd,
+                                                                                         std::optional<uint64_t> maxWorkspaceSizeInBytes = std::nullopt);
+
+    std::shared_ptr<LtMatmulPlan> buildGemmWithBackwardEpiloguePlan(int gpuNum,
+                                                                      const int32_t A_rows,
+                                                                      const int32_t A_cols,
+                                                                      const int32_t B_rows,
+                                                                      const int32_t B_cols,
+                                                                      const int32_t ld_A,
+                                                                      const int32_t ld_B,
+                                                                      const int32_t ld_C,
+                                                                      const int32_t ld_D,
+                                                                      bool transposeA,
+                                                                      bool transposeB,
+                                                                      const MatmulDataTypes dataTypes,
+                                                                      BackwardEpilogueFusion epilogue,
+                                                                      bool hasAddend,
+                                                                      Tensor epilogueAux,
+                                                                      std::optional<Tensor> biasGradient,
+                                                                      std::optional<LtMatmulAlgorithmSelection> selectedAlgorithm = std::nullopt,
+                                                                      std::optional<uint64_t> maxWorkspaceSizeInBytes = std::nullopt);
+
+    void runGemmWithBackwardEpiloguePlan(Tensor A,
+                                         Tensor B,
+                                         std::optional<Tensor> addend,
+                                         Tensor epilogueAux,
+                                         Tensor D,
+                                         const float *alpha,
+                                         const float *beta,
+                                         Stream stream,
+                                         CublasScalarPointerMode pointerMode,
+                                         std::optional<Tensor> workspace,
+                                         const std::shared_ptr<LtMatmulPlan>& plan);
 
     uint64_t getGemmWithBackwardEpilogueWorkspaceSizeInBytes(int gpuNum,
                                                               const int32_t A_rows,
@@ -391,6 +511,9 @@ class CublasMatrixMultiply {
                                                               int64_t epilogueAuxLd,
                                                               bool &kernelWillRunOnGpu);
 
+    // Non-hot-path legacy/debug API: this helper may construct cuBLASLt descriptors/layouts and run
+    // heuristic selection in the call path. Stamped/layer code must use a prebuilt LtMatmulPlan instead.
+    //
     // D = epilogue(alpha*(A*B) + optional addend). If addendIsBiasVector is true, addend must
     // be a packed rank-1 vector with one element per output column and is applied through
     // the cuBLASLt bias epilogue. Otherwise addend, when present, must be a rank-2 C tensor.
@@ -743,6 +866,22 @@ class CublasMatrixMultiply {
             gpuNum, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, ldD, transposeA, transposeB, false, ABCDataType, kernelWillRunOnGpu);
     }
 
+
+    CublasKernel getCachedGemmKernel(int gpuNum,
+                                     int rowsA,
+                                     int colsA,
+                                     int rowsB,
+                                     int colsB,
+                                     int ldA,
+                                     int ldB,
+                                     int ldC,
+                                     int ldD,
+                                     bool transposeA,
+                                     bool transposeB,
+                                     bool transposeC,
+                                     MatmulDataTypes dataTypes,
+                                     bool workspaceAllowed);
+
     unsigned int getGemmWorkspaceSizeInBytes(int gpuNum,
                                              int rowsA,
                                              int colsA,
@@ -757,6 +896,7 @@ class CublasMatrixMultiply {
                                              bool transposeC,
                                              DataType ABCDataType,
                                              bool &kernelWillRunOnGpu);
+
     unsigned int getGemmWorkspaceSizeInBytes(int gpuNum,
                                              int rowsA,
                                              int colsA,
@@ -771,6 +911,7 @@ class CublasMatrixMultiply {
                                              bool transposeC,
                                              MatmulDataTypes dataTypes,
                                              bool &kernelWillRunOnGpu);
+
     unsigned int getGemmWorkspaceSizeInBytes(int gpuNum,
                                              int rowsA,
                                              int colsA,
