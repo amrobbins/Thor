@@ -40,9 +40,11 @@ def _configure_cuda_include_dirs() -> None:
         Path("vector_types.h"),
     )
 
-    # CUB is shipped as part of CCCL. CUDA 13 installs it into the unified
-    # nvidia/cu13/include tree; older layouts may use nvidia/cuda_cccl/include.
+    # CUB is shipped as part of CCCL. Current CUDA 13 toolkit wheels expose
+    # CUB under nvidia/cu13/include/cccl. Keep the unified include root and
+    # older split-wheel layout as fallbacks.
     cub_include_candidates = [
+        site_packages / "nvidia" / "cu13" / "include" / "cccl",
         site_packages / "nvidia" / "cu13" / "include",
         site_packages / "nvidia" / "cuda_cccl" / "include",
     ]
