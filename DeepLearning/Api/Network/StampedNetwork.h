@@ -92,6 +92,7 @@ class StampedNetwork {
 
     std::vector<std::shared_ptr<ThorImplementation::NetworkInput>> getInputs() { return inputsShared; }
     std::vector<std::shared_ptr<ThorImplementation::NetworkOutput>> getOutputs() { return outputsShared; }
+    void preallocateInputSlots(uint32_t numSlots);
     void preallocateOutputSlots(uint32_t numSlots);
 
     uint64_t getNumTrainableLayers() { return trainableLayersShared.size(); }

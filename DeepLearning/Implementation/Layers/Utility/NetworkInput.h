@@ -2,6 +2,7 @@
 
 #include <optional>
 #include <utility>
+#include <vector>
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
@@ -47,10 +48,8 @@ class NetworkInput : public Layer {
 
         this->nextLayer = nextLayer;
 
-        std::optional<Tensor> outputBufferTensor = createFeatureOutputTensor();
-        if (outputBufferTensor.has_value())
-            outputBuffer = outputBufferTensor.value();
         featureOutput = createFeatureOutputTensor();
+        initializeInputSlotZero();
 
         nextLayer->connectToPreviousLayer(this, featureOutput, stream, false, loaderConnectionType);
     }
@@ -64,6 +63,23 @@ class NetworkInput : public Layer {
         if (contentDimensions.has_value())
             return Tensor(networkPlacement, TensorDescriptor(contentDataType.value(), contentDimensions.value()));
         return std::nullopt;
+    }
+
+    virtual void setActiveInputSlot(uint32_t slotIndex) {
+        if (!contentDimensions.has_value()) {
+            return;
+        }
+        requireInputSlot(slotIndex);
+        activeInputSlot = slotIndex;
+    }
+
+    virtual void preallocateInputSlots(uint32_t numSlots) {
+        THOR_THROW_IF_FALSE(numSlots >= 1);
+        if (!contentDimensions.has_value()) {
+            return;
+        }
+        THOR_THROW_IF_FALSE(featureOutput.has_value());
+        allocateInputSlots(numSlots);
     }
 
     void infer(std::optional<Tensor> inputTensor, std::optional<Tensor> outputTensor, Stream stream) override {}
@@ -94,18 +110,28 @@ class NetworkInput : public Layer {
         uint64_t copyMicros = 0;
         if (contentDimensions.has_value()) {
             THOR_THROW_IF_FALSE(featureOutput.has_value());
+            THOR_THROW_IF_FALSE(activeInputSlot < inputSlots.size());
+            InputSlot& slot = inputSlots[activeInputSlot];
+            THOR_THROW_IF_FALSE(slot.outputBuffer.has_value());
 
-            // Wait for previous featureOutput load to finish
-            // Copy into buffer using the load stream
-            // stream waits for all previously scheduled work to finish and for copy to finish - copy tends to finish first
-            outputBuffer.copyFromAsync(featureInput.value(), loadStream);
-            stream.waitEvent(loadStream.putEvent());
+            // Only wait when reusing the same slot-local prefetch buffer.  Other
+            // native-queued slots may upload into their own buffers while this
+            // slot's previous buffer -> featureOutput copy is still pending on
+            // the processing stream.
+            loadStream.waitEvent(slot.outputBufferWritableEvent);
 
-            // Copy from buffer to featureOutput
-            // LoadStream waits for copy to finish.
-            // After this happens the buffer can be loaded with the next payload.
-            featureOutput.value().copyFromAsync(outputBuffer, stream);
-            loadStream.waitEvent(stream.putEvent());
+            // Copy into the slot-local prefetch buffer using the upload stream.
+            slot.outputBuffer.value().copyFromAsync(featureInput.value(), loadStream);
+            loadStream.putEvent(slot.outputBufferLoadedEvent);
+            stream.waitEvent(slot.outputBufferLoadedEvent);
+
+            // Copy from the slot-local prefetch buffer into the connected public
+            // NetworkInput feature tensor.  The public feature tensor remains
+            // single-address/statically connected to downstream layers, so this
+            // ring only removes false dependencies on the staging buffer without
+            // changing layer-graph tensor identities.
+            featureOutput.value().copyFromAsync(slot.outputBuffer.value(), stream);
+            stream.putEvent(slot.outputBufferWritableEvent);
         }
         if (emitDiagnostics) {
             copyMicros = layerSubmitDiagnosticElapsedMicros(copyStart, layerSubmitDiagnosticNow());
@@ -139,11 +165,60 @@ class NetworkInput : public Layer {
     void backward(std::optional<Tensor> errorInput, uint32_t batchSize = 0) override {}
 
    protected:
+    struct InputSlot {
+        std::optional<Tensor> outputBuffer;
+        Event outputBufferLoadedEvent;
+        Event outputBufferWritableEvent;
+    };
+
+    void initializeInputSlotZero() {
+        THOR_THROW_IF_FALSE(featureOutput.has_value() == contentDimensions.has_value());
+        if (!contentDimensions.has_value()) {
+            return;
+        }
+        THOR_THROW_IF_FALSE(inputSlots.empty());
+        InputSlot slot;
+        slot.outputBuffer = createFeatureOutputTensor();
+        // Pre-initialize and record the slot-local events so the hot path never
+        // allocates Events and first use can wait on already-complete events.
+        loadStream.putEvent(slot.outputBufferLoadedEvent);
+        loadStream.putEvent(slot.outputBufferWritableEvent);
+        inputSlots.push_back(slot);
+    }
+
+    void requireInputSlot(uint32_t slotIndex) const {
+        if (!contentDimensions.has_value()) {
+            return;
+        }
+        THOR_THROW_IF_FALSE(featureOutput.has_value());
+        THOR_THROW_IF_FALSE(slotIndex < inputSlots.size());
+    }
+
+    void allocateInputSlots(uint32_t numSlots) {
+        THOR_THROW_IF_FALSE(contentDimensions.has_value());
+        THOR_THROW_IF_FALSE(featureOutput.has_value());
+        THOR_THROW_IF_FALSE(numSlots >= 1);
+
+        if (inputSlots.empty()) {
+            initializeInputSlotZero();
+        }
+
+        while (inputSlots.size() < numSlots) {
+            InputSlot slot;
+            slot.outputBuffer = createFeatureOutputTensor();
+            // Eagerly allocate/reuse-initialize the events as well as the tensor.
+            loadStream.putEvent(slot.outputBufferLoadedEvent);
+            loadStream.putEvent(slot.outputBufferWritableEvent);
+            inputSlots.push_back(slot);
+        }
+    }
+
     std::optional<std::vector<unsigned long>> contentDimensions;
     TensorPlacement networkPlacement;
     std::optional<DataType> contentDataType;
 
-    Tensor outputBuffer;
+    uint32_t activeInputSlot = 0;
+    std::vector<InputSlot> inputSlots;
     Stream loadStream;
 };
 

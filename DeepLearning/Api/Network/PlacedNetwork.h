@@ -79,6 +79,7 @@ class PlacedNetwork {
     std::vector<uint64_t> getActiveTrainingRawLossOriginalIdsForDebug(uint64_t stampIndex = 0) const;
 
     void extendOutputWritableEvents(uint64_t stampIndex, Event event, std::optional<uint32_t> outputSlotIndex = std::nullopt);
+    void preallocateInputSlots(uint32_t numSlots);
     void preallocateOutputSlots(uint32_t numSlots);
 
     uint64_t getNumStamps() { return stampedNetworks.size(); }

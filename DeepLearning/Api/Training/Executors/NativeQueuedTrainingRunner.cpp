@@ -1215,9 +1215,11 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     }
 
     request.cancellationToken.throwIfCancellationRequested();
-    // Native queued training uses the queue slot index as the NetworkOutput slot.
-    // Preallocate the whole output ring before the first scheduled batch so OOM or
-    // other allocation failures happen during setup rather than in the hot submit path.
+    // Native queued training uses the queue slot index as the NetworkInput/NetworkOutput
+    // slot.  Preallocate the whole input/output rings before the first scheduled batch
+    // so OOM or other allocation failures happen during setup rather than in the hot
+    // submit path.
+    placedNetwork->preallocateInputSlots(static_cast<uint32_t>(options.maxInFlightBatches));
     placedNetwork->preallocateOutputSlots(static_cast<uint32_t>(options.maxInFlightBatches));
 
     request.cancellationToken.throwIfCancellationRequested();

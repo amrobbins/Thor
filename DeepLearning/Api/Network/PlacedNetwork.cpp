@@ -221,6 +221,13 @@ std::vector<uint64_t> PlacedNetwork::getActiveTrainingRawLossOriginalIdsForDebug
     return stampedNetworks[stampIndex].getActiveTrainingRawLossOriginalIdsForDebug();
 }
 
+void PlacedNetwork::preallocateInputSlots(uint32_t numSlots) {
+    THOR_THROW_IF_FALSE(numSlots >= 1);
+    for (ThorImplementation::StampedNetwork& stampedNetwork : stampedNetworks) {
+        stampedNetwork.preallocateInputSlots(numSlots);
+    }
+}
+
 void PlacedNetwork::preallocateOutputSlots(uint32_t numSlots) {
     THOR_THROW_IF_FALSE(numSlots >= 1);
     for (ThorImplementation::StampedNetwork& stampedNetwork : stampedNetworks) {

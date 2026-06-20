@@ -278,7 +278,11 @@ Event StampedNetwork::sendPhysicalBatch(std::map<std::string, Tensor> batchInput
     const auto physicalStart = std::chrono::high_resolution_clock::now();
     THOR_THROW_IF_FALSE(batchInputs.size() == inputs.size());
 
-    const uint32_t outputSlot = outputSlotIndex.value_or(0);
+    const uint32_t queueSlot = outputSlotIndex.value_or(0);
+    const uint32_t outputSlot = queueSlot;
+    for (uint32_t i = 0; i < inputs.size(); ++i) {
+        inputs[i]->setActiveInputSlot(queueSlot);
+    }
     for (uint32_t i = 0; i < outputs.size(); ++i) {
         outputs[i]->setActiveOutputSlot(outputSlot);
     }
@@ -392,6 +396,13 @@ void StampedNetwork::clear() {
     inputNamedShared.clear();
     raggedInputNamedShared.clear();
     outputNamedShared.clear();
+}
+
+void StampedNetwork::preallocateInputSlots(uint32_t numSlots) {
+    THOR_THROW_IF_FALSE(numSlots >= 1);
+    for (NetworkInput* input : inputs) {
+        input->preallocateInputSlots(numSlots);
+    }
 }
 
 void StampedNetwork::preallocateOutputSlots(uint32_t numSlots) {
