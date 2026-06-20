@@ -204,7 +204,7 @@ message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 # ============================================================
 # Fast / multi-threaded linker selection
 # ============================================================
-set(THOR_LINKER "lld" CACHE STRING "Linker to use: lld, default, auto, mold, gold, bfd")
+set(THOR_LINKER "default" CACHE STRING "Linker to use: default, auto, mold, lld, gold, bfd")
 set_property(CACHE THOR_LINKER PROPERTY STRINGS auto default mold lld gold bfd)
 
 set(
