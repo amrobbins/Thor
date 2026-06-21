@@ -5,6 +5,8 @@ token
 .clangd
 .idea/
 .venv/
+.whl
+ndist
 
 # Compiled source #
 ###################
