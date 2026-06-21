@@ -130,6 +130,7 @@ TEST(AdamApi, BuilderDefaultsSettersAndArchitectureJson) {
     EXPECT_FLOAT_EQ(adam->getBeta1(), 0.9f);
     EXPECT_FLOAT_EQ(adam->getBeta2(), 0.999f);
     EXPECT_FLOAT_EQ(adam->getEpsilon(), 1e-7f);
+    EXPECT_FALSE(adam->getAmsgrad());
     EXPECT_EQ(adam->getOriginalId(), adam->getId());
 
     adam->setAlpha(0.02f, nullptr);
@@ -151,6 +152,7 @@ TEST(AdamApi, BuilderDefaultsSettersAndArchitectureJson) {
     EXPECT_FLOAT_EQ(j.at("beta1").get<float>(), 0.75f);
     EXPECT_FLOAT_EQ(j.at("beta2").get<float>(), 0.92f);
     EXPECT_FLOAT_EQ(j.at("epsilon").get<float>(), 1e-5f);
+    EXPECT_FALSE(j.at("amsgrad").get<bool>());
 }
 
 TEST(AdamApi, BuilderCustomValuesStampAndCompilePhysicalAdam) {
@@ -161,7 +163,7 @@ TEST(AdamApi, BuilderCustomValuesStampAndCompilePhysicalAdam) {
     constexpr float beta2 = 0.95f;
     constexpr float epsilon = 1e-4f;
 
-    std::shared_ptr<Api::Adam> adam = Api::Adam::Builder().alpha(alpha).beta1(beta1).beta2(beta2).epsilon(epsilon).build();
+    std::shared_ptr<Api::Adam> adam = Api::Adam::Builder().alpha(alpha).beta1(beta1).beta2(beta2).epsilon(epsilon).amsgrad(true).build();
     ASSERT_NE(adam, nullptr);
 
     Impl::Tensor weights(gpuPlacement, Impl::TensorDescriptor(DataType::FP32, {2, 3}));
@@ -177,6 +179,8 @@ TEST(AdamApi, BuilderCustomValuesStampAndCompilePhysicalAdam) {
     EXPECT_FLOAT_EQ(physicalAdam->getBeta1(), beta1);
     EXPECT_FLOAT_EQ(physicalAdam->getBeta2(), beta2);
     EXPECT_FLOAT_EQ(physicalAdam->getEpsilon(), epsilon);
+    EXPECT_TRUE(adam->getAmsgrad());
+    EXPECT_TRUE(physicalAdam->getAmsgrad());
 
     std::optional<Impl::Tensor> gradient = physicalAdam->getWeightsGradient();
     ASSERT_TRUE(gradient.has_value());
@@ -186,13 +190,17 @@ TEST(AdamApi, BuilderCustomValuesStampAndCompilePhysicalAdam) {
 
     Impl::Tensor m = requireOptimizerStorage(physicalAdam, "m");
     Impl::Tensor v = requireOptimizerStorage(physicalAdam, "v");
+    Impl::Tensor vhat = requireOptimizerStorage(physicalAdam, "vhat");
 
     EXPECT_EQ(m.getPlacement(), gpuPlacement);
     EXPECT_EQ(v.getPlacement(), gpuPlacement);
+    EXPECT_EQ(vhat.getPlacement(), gpuPlacement);
     EXPECT_EQ(m.getDataType(), DataType::FP32);
     EXPECT_EQ(v.getDataType(), DataType::FP32);
+    EXPECT_EQ(vhat.getDataType(), DataType::FP32);
     EXPECT_EQ(m.getDimensions(), weights.getDimensions());
     EXPECT_EQ(v.getDimensions(), weights.getDimensions());
+    EXPECT_EQ(vhat.getDimensions(), weights.getDimensions());
 
     std::unordered_map<std::string, float> params = physicalAdam->getAllHyperParameters();
     ASSERT_EQ(params.size(), 5u);
@@ -226,6 +234,34 @@ TEST(AdamApi, InitializeFirstStampZerosMomentParameters) {
 
     expectAllClose(copyGpuFp32TensorToValues(m, stream), {0.0f, 0.0f, 0.0f, 0.0f});
     expectAllClose(copyGpuFp32TensorToValues(v, stream), {0.0f, 0.0f, 0.0f, 0.0f});
+}
+
+TEST(AdamApi, InitializeFirstStampZerosAmsgradVhat) {
+    Stream stream(gpuPlacement);
+
+    std::shared_ptr<Api::Adam> adam = Api::Adam::Builder().alpha(0.01f).beta1(0.8f).beta2(0.95f).epsilon(1e-4f).amsgrad(true).build();
+    ASSERT_NE(adam, nullptr);
+
+    Impl::Tensor weights(gpuPlacement, Impl::TensorDescriptor(DataType::FP32, {2, 2}));
+    copyValuesToGpuFp32Tensor(weights, {1.0f, 2.0f, 3.0f, 4.0f}, stream);
+
+    std::shared_ptr<Impl::Adam> physicalAdam = stampCompileAdam(*adam, weights, stream);
+
+    Impl::Tensor m = requireOptimizerStorage(physicalAdam, "m");
+    Impl::Tensor v = requireOptimizerStorage(physicalAdam, "v");
+    Impl::Tensor vhat = requireOptimizerStorage(physicalAdam, "vhat");
+
+    copyValuesToGpuFp32Tensor(m, {1.0f, -2.0f, 3.0f, -4.0f}, stream);
+    copyValuesToGpuFp32Tensor(v, {5.0f, 6.0f, 7.0f, 8.0f}, stream);
+    copyValuesToGpuFp32Tensor(vhat, {9.0f, 10.0f, 11.0f, 12.0f}, stream);
+
+    std::vector<Event> initEvents = adam->initialize(physicalAdam, /*isFirstStamp=*/true, nullptr, std::nullopt);
+    synchronizeEvents(initEvents);
+    stream.synchronize();
+
+    expectAllClose(copyGpuFp32TensorToValues(m, stream), {0.0f, 0.0f, 0.0f, 0.0f});
+    expectAllClose(copyGpuFp32TensorToValues(v, stream), {0.0f, 0.0f, 0.0f, 0.0f});
+    expectAllClose(copyGpuFp32TensorToValues(vhat, stream), {0.0f, 0.0f, 0.0f, 0.0f});
 }
 
 TEST(AdamApi, InitializeNonFirstStampCopiesMomentParametersFromSisterOptimizer) {
@@ -272,7 +308,7 @@ TEST(AdamApi, SerializeArchitectureOnlyAndDeserialize) {
     constexpr float beta2 = 0.789f;
     constexpr float epsilon = 1e-4f;
 
-    std::shared_ptr<Api::Adam> adam = Api::Adam::Builder().alpha(alpha).beta1(beta1).beta2(beta2).epsilon(epsilon).build();
+    std::shared_ptr<Api::Adam> adam = Api::Adam::Builder().alpha(alpha).beta1(beta1).beta2(beta2).epsilon(epsilon).amsgrad(true).build();
     ASSERT_NE(adam, nullptr);
 
     json j = adam->architectureJson();
@@ -287,6 +323,7 @@ TEST(AdamApi, SerializeArchitectureOnlyAndDeserialize) {
     EXPECT_FLOAT_EQ(deserializedAdam->getBeta1(), beta1);
     EXPECT_FLOAT_EQ(deserializedAdam->getBeta2(), beta2);
     EXPECT_FLOAT_EQ(deserializedAdam->getEpsilon(), epsilon);
+    EXPECT_TRUE(deserializedAdam->getAmsgrad());
 
     Stream stream(gpuPlacement);
     Impl::Tensor weights(gpuPlacement, Impl::TensorDescriptor(DataType::FP32, {2, 2}));
@@ -300,6 +337,7 @@ TEST(AdamApi, SerializeArchitectureOnlyAndDeserialize) {
     EXPECT_FLOAT_EQ(physicalAdam->getBeta1(), beta1);
     EXPECT_FLOAT_EQ(physicalAdam->getBeta2(), beta2);
     EXPECT_FLOAT_EQ(physicalAdam->getEpsilon(), epsilon);
+    EXPECT_TRUE(physicalAdam->getAmsgrad());
 }
 
 TEST(AdamApi, SerializeWithStateRecordsMomentFilesAndPhysicalTime) {
@@ -310,7 +348,7 @@ TEST(AdamApi, SerializeWithStateRecordsMomentFilesAndPhysicalTime) {
     constexpr float beta2 = 0.95f;
     constexpr float epsilon = 1e-4f;
 
-    std::shared_ptr<Api::Adam> adam = Api::Adam::Builder().alpha(alpha).beta1(beta1).beta2(beta2).epsilon(epsilon).build();
+    std::shared_ptr<Api::Adam> adam = Api::Adam::Builder().alpha(alpha).beta1(beta1).beta2(beta2).epsilon(epsilon).amsgrad(true).build();
     ASSERT_NE(adam, nullptr);
 
     Impl::Tensor weights(gpuPlacement, Impl::TensorDescriptor(DataType::FP32, {2, 2}));
@@ -320,8 +358,10 @@ TEST(AdamApi, SerializeWithStateRecordsMomentFilesAndPhysicalTime) {
 
     Impl::Tensor m = requireOptimizerStorage(physicalAdam, "m");
     Impl::Tensor v = requireOptimizerStorage(physicalAdam, "v");
+    Impl::Tensor vhat = requireOptimizerStorage(physicalAdam, "vhat");
     copyValuesToGpuFp32Tensor(m, {0.1f, 0.2f, 0.3f, 0.4f}, stream);
     copyValuesToGpuFp32Tensor(v, {1.1f, 1.2f, 1.3f, 1.4f}, stream);
+    copyValuesToGpuFp32Tensor(vhat, {2.1f, 2.2f, 2.3f, 2.4f}, stream);
     physicalAdam->setT(12.0f);
 
     thor_file::TarWriter archiveWriter("adam_api_test");
@@ -335,11 +375,14 @@ TEST(AdamApi, SerializeWithStateRecordsMomentFilesAndPhysicalTime) {
     EXPECT_FLOAT_EQ(stateJson.at("beta1").get<float>(), beta1);
     EXPECT_FLOAT_EQ(stateJson.at("beta2").get<float>(), beta2);
     EXPECT_FLOAT_EQ(stateJson.at("epsilon").get<float>(), epsilon);
+    EXPECT_TRUE(stateJson.at("amsgrad").get<bool>());
 
     ASSERT_TRUE(stateJson.contains("m_tensor"));
     ASSERT_TRUE(stateJson.contains("v_tensor"));
+    ASSERT_TRUE(stateJson.contains("vhat_tensor"));
     EXPECT_EQ(stateJson.at("m_tensor").get<std::string>(), "layer123_weights_adam_m.gds");
     EXPECT_EQ(stateJson.at("v_tensor").get<std::string>(), "layer123_weights_adam_v.gds");
+    EXPECT_EQ(stateJson.at("vhat_tensor").get<std::string>(), "layer123_weights_adam_vhat.gds");
 
     EXPECT_FALSE(stateJson.contains("m_bias_tensor"));
     EXPECT_FALSE(stateJson.contains("v_bias_tensor"));
@@ -349,5 +392,7 @@ TEST(AdamApi, SerializeWithStateRecordsMomentFilesAndPhysicalTime) {
 
     EXPECT_FALSE(architectureOnlyJson.contains("m_tensor"));
     EXPECT_FALSE(architectureOnlyJson.contains("v_tensor"));
+    EXPECT_FALSE(architectureOnlyJson.contains("vhat_tensor"));
+    EXPECT_TRUE(architectureOnlyJson.at("amsgrad").get<bool>());
     EXPECT_FLOAT_EQ(architectureOnlyJson.at("t").get<float>(), 0.0f);
 }

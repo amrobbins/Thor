@@ -13,10 +13,10 @@ name = "thor-cuda"
 dynamic = ["version"]
 description = "Thor deep learning framework (C++/CUDA) Python bindings"
 requires-python = ">=3.12"
-license = { file = "../../LICENSE" }
-authors = [
-    { name = "Andrew Robbins" },
-]
+license = "Apache-2.0"
+#authors = [
+#    { name = "Andrew Robbins" },
+#]
 dependencies = [
     "numpy>=2.3.4",
     "ml_dtypes>=0.5.4",

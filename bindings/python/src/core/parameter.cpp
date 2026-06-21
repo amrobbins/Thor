@@ -68,7 +68,7 @@ std::vector<std::shared_ptr<ParameterConstraint>> constraintsFromPython(const nb
         try {
             constraint = nb::cast<std::shared_ptr<ParameterConstraint>>(handle);
         } catch (const std::exception&) {
-            throw nb::type_error("parameter constraints must be thor.ParameterConstraint instances");
+            throw nb::type_error("parameter constraints must be thor.constraints.ParameterConstraint instances");
         }
         if (constraint == nullptr) {
             throw nb::value_error("parameter constraints may not contain None");
@@ -86,7 +86,7 @@ std::vector<std::shared_ptr<ParameterConstraint>> constraintsFromPython(const nb
     }
 
     if (!nb::isinstance<nb::sequence>(obj) || nb::isinstance<nb::str>(obj)) {
-        throw nb::type_error("constraints must be a thor.ParameterConstraint, a sequence of constraints, or None");
+        throw nb::type_error("constraints must be a thor.constraints.ParameterConstraint, a sequence of constraints, or None");
     }
 
     nb::sequence seq = nb::cast<nb::sequence>(obj);
@@ -173,8 +173,8 @@ Post-update parameter constraint that clips parameter values into [min_value, ma
     parameter.attr("__module__") = "thor";
 
     auto storage_context = nb::class_<StorageContext>(parameter, "StorageContext");
-    storage_context.attr("__module__") = "thor";
-    storage_context.attr("__qualname__") = "Parameter.StorageContext";
+    storage_context.attr("__module__") = "thor.parameters";
+    storage_context.attr("__qualname__") = "ParameterSpecification.StorageContext";
     storage_context.def(nb::init<>());
     storage_context.def(nb::init<std::unordered_map<std::string, PhysicalTensor>>(), "named_inputs"_a);
     storage_context.def(nb::init<PhysicalTensor>(), "feature_input"_a);
@@ -300,7 +300,7 @@ This form is for statically-shaped parameters. For compile-time-dynamic paramete
 Create an API parameter whose implementation storage is allocated at physical layer compile time.
 
 Provide ``create_storage_from_context``. For single-input layers, the default feature input name is
-``"feature_input"``, and ``Parameter.StorageContext.get_feature_input()`` returns that tensor when
+``"feature_input"``, and ``ParameterSpecification.StorageContext.get_feature_input()`` returns that tensor when
 exactly one input is present.
     )nbdoc");
 

@@ -1,27 +1,23 @@
-"""
-Thor Python package.
-
-This wraps the native nanobind extension `thor._thor` and re-exports its public API.
-"""
+"""Public Thor Python API."""
 
 from __future__ import annotations
 
-import ctypes
-import os
-from pathlib import Path
+import ctypes as _ctypes
+import os as _os
+from pathlib import Path as _Path
 
 
-def _find_site_packages_root() -> Path:
-    return Path(__file__).resolve().parents[1]
+def _find_site_packages_root() -> _Path:
+    return _Path(__file__).resolve().parents[1]
 
 
-def _set_env_from_first_existing_include(env_name: str, candidates: list[Path], sentinel: Path) -> None:
-    if env_name in os.environ:
+def _set_env_from_first_existing_include(env_name: str, candidates: list[_Path], sentinel: _Path) -> None:
+    if env_name in _os.environ:
         return
 
     for candidate in candidates:
         if (candidate / sentinel).exists():
-            os.environ.setdefault(env_name, str(candidate))
+            _os.environ.setdefault(env_name, str(candidate))
             return
 
 
@@ -37,7 +33,7 @@ def _configure_cuda_include_dirs() -> None:
     _set_env_from_first_existing_include(
         "THOR_CUDA_INCLUDE_DIR",
         cuda_include_candidates,
-        Path("vector_types.h"),
+        _Path("vector_types.h"),
     )
 
     # CUB is shipped as part of CCCL. Current CUDA 13 toolkit wheels expose
@@ -51,7 +47,7 @@ def _configure_cuda_include_dirs() -> None:
     _set_env_from_first_existing_include(
         "THOR_CUDA_CCCL_INCLUDE_DIR",
         cub_include_candidates,
-        Path("cub") / "cub.cuh",
+        _Path("cub") / "cub.cuh",
     )
 
 
@@ -77,11 +73,11 @@ def _preload_cuda_user_space_libs() -> None:
         "libnvrtc-builtins.so.13.*",
     ]
 
-    rtld_global = getattr(os, "RTLD_GLOBAL", 0)
+    rtld_global = getattr(_os, "RTLD_GLOBAL", 0)
 
-    def preload(path: Path) -> None:
+    def preload(path: _Path) -> None:
         try:
-            ctypes.CDLL(str(path), mode=rtld_global)
+            _ctypes.CDLL(str(path), mode=rtld_global)
         except OSError:
             pass
 
@@ -98,23 +94,64 @@ def _preload_cuda_user_space_libs() -> None:
 
 
 def _configure_cudnn_frontend_include_dir() -> None:
-    if "THOR_CUDNN_FRONTEND_INCLUDE_DIR" in os.environ:
+    if "THOR_CUDNN_FRONTEND_INCLUDE_DIR" in _os.environ:
         return
 
     site_packages = _find_site_packages_root()
     candidate = site_packages / "include"
 
     if (candidate / "cudnn_frontend.h").exists():
-        os.environ.setdefault("THOR_CUDNN_FRONTEND_INCLUDE_DIR", str(candidate))
+        _os.environ.setdefault("THOR_CUDNN_FRONTEND_INCLUDE_DIR", str(candidate))
 
 
 _configure_cuda_include_dirs()
 _configure_cudnn_frontend_include_dir()
 _preload_cuda_user_space_libs()
 
-from ._thor import *
-from ._thor import __version__, __git_version__
+from ._thor import DataType, Network, Tensor
+from ._thor import __git_version__, __version__
 
-# Keep ``thor.losses`` as a Python package so organized domain namespaces such
-# as ``thor.losses.ranking`` are available after a plain ``import thor``.
+from . import activations as activations
+from . import constraints as constraints
+from . import initializers as initializers
+from . import layers as layers
 from . import losses as losses
+from . import metrics as metrics
+from . import optimizers as optimizers
+from . import parameters as parameters
+from . import physical as physical
+from . import random as random
+from . import runtime as runtime
+from . import training as training
+
+__all__ = [
+    "DataType",
+    "Network",
+    "Tensor",
+    "__git_version__",
+    "__version__",
+    "activations",
+    "constraints",
+    "initializers",
+    "layers",
+    "losses",
+    "metrics",
+    "optimizers",
+    "parameters",
+    "physical",
+    "random",
+    "runtime",
+    "training",
+]
+
+
+def __dir__() -> list[str]:
+    return sorted(__all__)
+
+
+# Hide the native implementation module from the package namespace after all
+# public wrapper modules have bound the native symbols they need.
+try:
+    del _thor
+except NameError:
+    pass

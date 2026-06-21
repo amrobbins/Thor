@@ -13,7 +13,7 @@ Adam::Adam() : Optimizer() {}
 Adam::Adam(uint64_t originalId) : Optimizer(originalId) {}
 
 shared_ptr<ThorImplementation::Optimizer> Adam::stamp(shared_ptr<ThorImplementation::TrainableLayer> trainableLayer) {
-    auto physicalAdam = make_shared<ThorImplementation::Adam>(getId(), alpha, beta1, beta2, epsilon);
+    auto physicalAdam = make_shared<ThorImplementation::Adam>(getId(), alpha, beta1, beta2, epsilon, amsgrad);
     physicalAdam->setT(t);
     return physicalAdam;
 }
@@ -49,6 +49,8 @@ float Adam::getBeta1() { return beta1; }
 float Adam::getBeta2() { return beta2; }
 
 float Adam::getEpsilon() { return epsilon; }
+
+bool Adam::getAmsgrad() { return amsgrad; }
 
 shared_ptr<Optimizer> Adam::clone() const { return make_shared<Adam>(*this); }
 
@@ -90,6 +92,7 @@ json Adam::architectureJson() const {
     j["beta1"] = beta1;
     j["beta2"] = beta2;
     j["epsilon"] = epsilon;
+    j["amsgrad"] = amsgrad;
 
     return j;
 }
@@ -109,16 +112,16 @@ json Adam::serialize(thor_file::TarWriter &archiveWriter,
         THOR_THROW_IF_FALSE(physicalOptimizer != nullptr);
         THOR_THROW_IF_FALSE(!filenamePrefix.empty());
 
+        shared_ptr<ThorImplementation::Adam> physicalAdam = dynamic_pointer_cast<ThorImplementation::Adam>(physicalOptimizer);
+        THOR_THROW_IF_FALSE(physicalAdam != nullptr);
+
         string optimizerName = filenamePrefix + "_adam";
         string mFile = optimizerName + "_m.gds";
         string vFile = optimizerName + "_v.gds";
         j["m_tensor"] = mFile;
         j["v_tensor"] = vFile;
 
-        shared_ptr<ThorImplementation::Adam> physicalAdam = dynamic_pointer_cast<ThorImplementation::Adam>(physicalOptimizer);
-        THOR_THROW_IF_FALSE(physicalAdam != nullptr);
         std::optional<ThorImplementation::Tensor> m = physicalAdam->getParameter("m")->getStorage();
-
         if (m.has_value())
             archiveWriter.addArchiveFile(mFile, m.value());
 
@@ -126,7 +129,16 @@ json Adam::serialize(thor_file::TarWriter &archiveWriter,
         if (v.has_value())
             archiveWriter.addArchiveFile(vFile, v.value());
 
+        if (physicalAdam->getAmsgrad()) {
+            string vhatFile = optimizerName + "_vhat.gds";
+            j["vhat_tensor"] = vhatFile;
+            std::optional<ThorImplementation::Tensor> vhat = physicalAdam->getParameter("vhat")->getStorage();
+            if (vhat.has_value())
+                archiveWriter.addArchiveFile(vhatFile, vhat.value());
+        }
+
         j["t"] = physicalAdam->getT();
+        j["amsgrad"] = physicalAdam->getAmsgrad();
     }
 
     return j;
@@ -144,15 +156,21 @@ shared_ptr<Optimizer> Adam::deserialize(shared_ptr<thor_file::TarReader> &archiv
     float beta1 = j.at("beta1").get<float>();
     float beta2 = j.at("beta2").get<float>();
     float epsilon = j.at("epsilon").get<float>();
+    bool amsgrad = j.value("amsgrad", false);
 
     std::optional<string> mFile;
     std::optional<string> vFile;
+    std::optional<string> vhatFile;
     std::optional<string> mBiasFile;
     std::optional<string> vBiasFile;
     if (j.contains("m_tensor")) {
         THOR_THROW_IF_FALSE(j.contains("v_tensor"));
         mFile = j.at("m_tensor").get<string>();
         vFile = j.at("v_tensor").get<string>();
+        if (amsgrad) {
+            THOR_THROW_IF_FALSE(j.contains("vhat_tensor"));
+            vhatFile = j.at("vhat_tensor").get<string>();
+        }
     }
     if (j.contains("m_bias_tensor")) {
         THOR_THROW_IF_FALSE(j.contains("v_bias_tensor"));
@@ -166,9 +184,11 @@ shared_ptr<Optimizer> Adam::deserialize(shared_ptr<thor_file::TarReader> &archiv
     adam.beta1 = beta1;
     adam.beta2 = beta2;
     adam.epsilon = epsilon;
+    adam.amsgrad = amsgrad;
     adam.archiveReader = archiveReader;
     adam.mFile = mFile;
     adam.vFile = vFile;
+    adam.vhatFile = vhatFile;
     adam.mBiasFile = mBiasFile;
     adam.vBiasFile = vBiasFile;
     return adam.clone();
@@ -183,6 +203,10 @@ vector<Event> Adam::initialize(shared_ptr<ThorImplementation::Optimizer> physica
 
     ThorImplementation::Tensor m = physicalAdam->getParameter("m")->getStorage().value();
     ThorImplementation::Tensor v = physicalAdam->getParameter("v")->getStorage().value();
+    std::optional<ThorImplementation::Tensor> vhat;
+    if (physicalAdam->getAmsgrad()) {
+        vhat = physicalAdam->getParameter("vhat")->getStorage().value();
+    }
     Stream stream = physicalAdam->getGradientUpdateStream();
 
     // Parameter values are initialized right now, based on 1 of 3 methods:
@@ -201,21 +225,35 @@ vector<Event> Adam::initialize(shared_ptr<ThorImplementation::Optimizer> physica
         THOR_THROW_IF_FALSE(sisterPhysicalAdam->getParameter("v")->getStorage().has_value());
         m.copyFromAsync(sisterPhysicalAdam->getParameter("m")->getStorage().value(), stream);
         v.copyFromAsync(sisterPhysicalAdam->getParameter("v")->getStorage().value(), stream);
+        if (physicalAdam->getAmsgrad()) {
+            THOR_THROW_IF_FALSE(sisterPhysicalAdam->getAmsgrad());
+            THOR_THROW_IF_FALSE(vhat.has_value());
+            THOR_THROW_IF_FALSE(sisterPhysicalAdam->getParameter("vhat")->getStorage().has_value());
+            vhat->copyFromAsync(sisterPhysicalAdam->getParameter("vhat")->getStorage().value(), stream);
+        }
     } else if (mFile.has_value()) {
         THOR_THROW_IF_FALSE(vFile.has_value());
         THOR_THROW_IF_FALSE(archiveReader != nullptr);
         archiveReader->registerReadRequest(mFile.value(), m);
         archiveReader->registerReadRequest(vFile.value(), v);
+        if (physicalAdam->getAmsgrad()) {
+            THOR_THROW_IF_FALSE(vhat.has_value());
+            THOR_THROW_IF_FALSE(vhatFile.has_value());
+            archiveReader->registerReadRequest(vhatFile.value(), vhat.value());
+        }
 
         // Can't use the files later, they may not still be there
         archiveReader = nullptr;
         mFile.reset();
         vFile.reset();
+        vhatFile.reset();
         mBiasFile.reset();
         vBiasFile.reset();
     } else {
         m.memsetAsync(stream, 0);
         v.memsetAsync(stream, 0);
+        if (vhat.has_value())
+            vhat->memsetAsync(stream, 0);
     }
 
     return {stream.putEvent(false, true)};

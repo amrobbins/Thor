@@ -14,7 +14,7 @@ def test_fixed_shape_parameter_allocate_storage_uses_input_placement_and_request
     shape = [16, 32]
     dtype = thor.DataType.fp32
 
-    parameter = thor.ParameterSpecification(
+    parameter = thor.parameters.ParameterSpecification(
         name="weights",
         shape=shape,
         dtype=dtype,
@@ -32,7 +32,7 @@ def test_fixed_shape_parameter_allocate_storage_uses_input_placement_and_request
 
 
 def test_fixed_shape_parameter_constructor_defaults_dtype_to_fp32():
-    parameter = thor.ParameterSpecification(
+    parameter = thor.parameters.ParameterSpecification(
         name="biases",
         shape=[7],
     )
@@ -43,7 +43,7 @@ def test_fixed_shape_parameter_constructor_defaults_dtype_to_fp32():
 
 
 def test_api_parameter_does_not_expose_training_enabled_setter():
-    parameter = thor.ParameterSpecification(
+    parameter = thor.parameters.ParameterSpecification(
         name="biases",
         shape=[7],
     )
@@ -54,7 +54,7 @@ def test_api_parameter_does_not_expose_training_enabled_setter():
 
 def test_storage_context_accepts_single_tensor_and_uses_feature_input_name():
     input_tensor = _cpu_input(dims=(4, 7))
-    ctx = thor.ParameterSpecification.StorageContext(input_tensor)
+    ctx = thor.parameters.ParameterSpecification.StorageContext(input_tensor)
 
     assert ctx.input_names() == ["feature_input"]
     assert ctx.has_input("feature_input") is True
@@ -65,7 +65,7 @@ def test_storage_context_accepts_single_tensor_and_uses_feature_input_name():
 def test_storage_context_exposes_named_inputs_from_mapping():
     x = _cpu_input(dims=(4, 7))
     y = _cpu_input(dims=(4, 9))
-    ctx = thor.ParameterSpecification.StorageContext({
+    ctx = thor.parameters.ParameterSpecification.StorageContext({
         "y": y,
         "x": x,
     })
@@ -80,14 +80,14 @@ def test_storage_context_exposes_named_inputs_from_mapping():
 
 
 def test_storage_context_get_input_raises_for_missing_name():
-    ctx = thor.ParameterSpecification.StorageContext(_cpu_input(dims=(4, 7)))
+    ctx = thor.parameters.ParameterSpecification.StorageContext(_cpu_input(dims=(4, 7)))
 
     with pytest.raises(RuntimeError, match='No input named "missing"'):
         ctx.get_input("missing")
 
 
 def test_storage_context_get_feature_input_raises_when_multiple_inputs_are_present():
-    ctx = thor.ParameterSpecification.StorageContext({
+    ctx = thor.parameters.ParameterSpecification.StorageContext({
         "x": _cpu_input(dims=(4, 7)),
         "y": _cpu_input(dims=(4, 9)),
     })
@@ -97,9 +97,9 @@ def test_storage_context_get_feature_input_raises_when_multiple_inputs_are_prese
 
 
 def test_dynamic_parameter_constructor_accepts_context_factory_callable():
-    parameter = thor.ParameterSpecification(
+    parameter = thor.parameters.ParameterSpecification(
         name="weights",
-        create_storage_from_context=lambda ctx: thor.ParameterSpecification.allocate_storage(
+        create_storage_from_context=lambda ctx: thor.parameters.ParameterSpecification.allocate_storage(
             ctx.get_feature_input(),
             shape=[ctx.get_feature_input().get_descriptor().get_dimensions()[-1]],
             dtype=ctx.get_feature_input().get_descriptor().get_data_type(),
@@ -115,7 +115,7 @@ def test_dynamic_parameter_constructor_accepts_context_factory_callable():
 
 def test_dynamic_parameter_constructor_rejects_none_factory():
     with pytest.raises(TypeError, match="incompatible function arguments"):
-        thor.ParameterSpecification(
+        thor.parameters.ParameterSpecification(
             name="weights",
             create_storage_from_context=None,
         )
@@ -123,26 +123,26 @@ def test_dynamic_parameter_constructor_rejects_none_factory():
 
 def test_dynamic_parameter_constructor_rejects_non_callable_factory():
     with pytest.raises(RuntimeError, match="create_storage_from_context must be callable"):
-        thor.ParameterSpecification(
+        thor.parameters.ParameterSpecification(
             name="weights",
             create_storage_from_context=123,
         )
 
 
 def test_non_negative_parameter_constraint_constructs_and_serializes():
-    constraint = thor.NonNegativeParameterConstraint()
+    constraint = thor.constraints.NonNegative()
 
-    assert isinstance(constraint, thor.ParameterConstraint)
+    assert isinstance(constraint, thor.constraints.ParameterConstraint)
     assert constraint.constraint_type == "non_negative"
     assert '"constraint_type":"non_negative"' in constraint.get_architecture_json()
 
 
 def test_parameter_spec_accepts_single_constraint_and_exposes_it():
-    parameter = thor.ParameterSpecification(
+    parameter = thor.parameters.ParameterSpecification(
         name="weights",
         shape=[4, 7],
         dtype=thor.DataType.fp32,
-        constraints=thor.NonNegativeParameterConstraint(),
+        constraints=thor.constraints.NonNegative(),
     )
 
     assert parameter.has_constraints() is True
@@ -153,11 +153,11 @@ def test_parameter_spec_accepts_single_constraint_and_exposes_it():
 
 
 def test_parameter_spec_accepts_constraint_sequence():
-    parameter = thor.ParameterSpecification(
+    parameter = thor.parameters.ParameterSpecification(
         name="weights",
         shape=[4, 7],
         dtype=thor.DataType.fp32,
-        constraints=[thor.NonNegativeParameterConstraint()],
+        constraints=[thor.constraints.NonNegative()],
     )
 
     assert parameter.has_constraints() is True
@@ -166,7 +166,7 @@ def test_parameter_spec_accepts_constraint_sequence():
 
 def test_parameter_spec_rejects_invalid_constraint_object():
     with pytest.raises(TypeError, match="constraints"):
-        thor.ParameterSpecification(
+        thor.parameters.ParameterSpecification(
             name="weights",
             shape=[4, 7],
             dtype=thor.DataType.fp32,
@@ -176,37 +176,37 @@ def test_parameter_spec_rejects_invalid_constraint_object():
 
 def test_additional_parameter_constraints_construct_and_serialize():
     cases = [
-        (thor.NonPositiveParameterConstraint(), "non_positive"),
-        (thor.MinParameterConstraint(-0.25), "min"),
-        (thor.MaxParameterConstraint(0.75), "max"),
-        (thor.MinMaxParameterConstraint(-0.5, 0.5), "min_max"),
+        (thor.constraints.NonPositive(), "non_positive"),
+        (thor.constraints.Min(-0.25), "min"),
+        (thor.constraints.Max(0.75), "max"),
+        (thor.constraints.MinMax(-0.5, 0.5), "min_max"),
     ]
 
     for constraint, constraint_type in cases:
-        assert isinstance(constraint, thor.ParameterConstraint)
+        assert isinstance(constraint, thor.constraints.ParameterConstraint)
         assert constraint.constraint_type == constraint_type
         assert f'"constraint_type":"{constraint_type}"' in constraint.get_architecture_json()
 
-    assert thor.MinParameterConstraint(-0.25).min_value == pytest.approx(-0.25)
-    assert thor.MaxParameterConstraint(0.75).max_value == pytest.approx(0.75)
-    min_max = thor.MinMaxParameterConstraint(-0.5, 0.5)
+    assert thor.constraints.Min(-0.25).min_value == pytest.approx(-0.25)
+    assert thor.constraints.Max(0.75).max_value == pytest.approx(0.75)
+    min_max = thor.constraints.MinMax(-0.5, 0.5)
     assert min_max.min_value == pytest.approx(-0.5)
     assert min_max.max_value == pytest.approx(0.5)
 
 
 def test_min_max_parameter_constraint_rejects_reversed_bounds():
     with pytest.raises(RuntimeError, match="min_value <= max_value"):
-        thor.MinMaxParameterConstraint(1.0, -1.0)
+        thor.constraints.MinMax(1.0, -1.0)
 
 
 def test_parameter_spec_accepts_additional_constraint_sequence():
-    parameter = thor.ParameterSpecification(
+    parameter = thor.parameters.ParameterSpecification(
         name="weights",
         shape=[4, 7],
         dtype=thor.DataType.fp32,
         constraints=[
-            thor.MinParameterConstraint(-0.5),
-            thor.MaxParameterConstraint(0.75),
+            thor.constraints.Min(-0.5),
+            thor.constraints.Max(0.75),
         ],
     )
 

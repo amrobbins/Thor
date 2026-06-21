@@ -17,29 +17,29 @@ class FusedLinear(thor.layers.CustomLayer):
             inputs=x,
         )
 
-    def parameters(self) -> list[thor.ParameterSpecification]:
+    def parameters(self) -> list[thor.parameters.ParameterSpecification]:
         num_units = self.num_units
 
         def create_weights_storage_from_context(
-                context: thor.ParameterSpecification.StorageContext) -> thor.physical.PhysicalTensor:
+                context: thor.parameters.ParameterSpecification.StorageContext) -> thor.physical.PhysicalTensor:
             input_tensor = context.get_feature_input()
             batch_size = input_tensor.get_descriptor().get_dimensions()[0]
             num_input_features = input_tensor.get_descriptor().get_total_num_elements() // batch_size
-            return thor.ParameterSpecification.allocate_storage(
+            return thor.parameters.ParameterSpecification.allocate_storage(
                 input_tensor,
                 shape=[num_input_features, num_units],
                 dtype=input_tensor.get_descriptor().get_data_type(),
             )
 
-        weights = thor.ParameterSpecification(
+        weights = thor.parameters.ParameterSpecification(
             name="weights",
             create_storage_from_context=create_weights_storage_from_context,
             trainable=True,
         )
 
-        params: list[thor.ParameterSpecification] = [weights]
+        params: list[thor.parameters.ParameterSpecification] = [weights]
         if self.has_bias:
-            biases = thor.ParameterSpecification(
+            biases = thor.parameters.ParameterSpecification(
                 name="biases",
                 shape=[num_units],
                 dtype=thor.DataType.fp32,
@@ -107,12 +107,12 @@ class MultiInputMultiOutputAffine(thor.layers.CustomLayer):
             output_names=["sum_output", "affine_output"],
                     )
 
-    def parameters(self) -> list[thor.ParameterSpecification]:
+    def parameters(self) -> list[thor.parameters.ParameterSpecification]:
         storage_context_input_names = self.storage_context_input_names
         storage_context_input_dims = self.storage_context_input_dims
 
         def allocate_vector(
-                context: thor.ParameterSpecification.StorageContext, name: str) -> thor.physical.PhysicalTensor:
+                context: thor.parameters.ParameterSpecification.StorageContext, name: str) -> thor.physical.PhysicalTensor:
             assert context.has_input("lhs") is True
             assert context.has_input("rhs") is True
             assert context.input_names() == ["lhs", "rhs"]
@@ -133,19 +133,19 @@ class MultiInputMultiOutputAffine(thor.layers.CustomLayer):
                 "rhs": rhs_dims,
             })
 
-            return thor.ParameterSpecification.allocate_storage(
+            return thor.parameters.ParameterSpecification.allocate_storage(
                 lhs,
                 shape=[lhs_dims[1]],
                 dtype=lhs.get_descriptor().get_data_type(),
             )
 
         return [
-            thor.ParameterSpecification(
+            thor.parameters.ParameterSpecification(
                 name="scale",
                 create_storage_from_context=lambda ctx: allocate_vector(ctx, "scale"),
                 trainable=True,
             ),
-            thor.ParameterSpecification(
+            thor.parameters.ParameterSpecification(
                 name="bias",
                 create_storage_from_context=lambda ctx: allocate_vector(ctx, "bias"),
                 trainable=True,
@@ -246,7 +246,7 @@ def _place_for_custom_layer_test(
     *,
     batch_size: int = 2,
     inference_only: bool = True,
-) -> thor.PlacedNetwork:
+) -> thor.runtime.PlacedNetwork:
     return network.place(
         batch_size,
         inference_only=inference_only,
@@ -418,21 +418,21 @@ def test_python_custom_layer_place_invokes_build_with_physical_context():
 
     assert placed.get_num_stamps() >= 1
 
-    weights: thor.ParameterSpecification = layer.get_parameters()[0]
+    weights: thor.parameters.ParameterSpecification = layer.get_parameters()[0]
     assert weights.name == "weights"
     assert weights.trainable is True
     assert weights.is_trainable() is True
     assert weights.is_training_initially_enabled() is True
     assert weights.has_optimizer() is False
 
-    biases: thor.ParameterSpecification = layer.get_parameters()[1]
+    biases: thor.parameters.ParameterSpecification = layer.get_parameters()[1]
     assert biases.name == "biases"
     assert biases.trainable is True
     assert biases.is_trainable() is True
     assert biases.is_training_initially_enabled() is True
     assert biases.has_optimizer() is False
 
-    bound_weights: thor.BoundParameter = layer.get_bound_parameter(placed, "weights")
+    bound_weights: thor.parameters.BoundParameter = layer.get_bound_parameter(placed, "weights")
     assert bound_weights.name == "weights"
     assert bound_weights.trainable is True
     assert bound_weights.is_trainable() is True
@@ -443,7 +443,7 @@ def test_python_custom_layer_place_invokes_build_with_physical_context():
     bound_weights.set_training_enabled(False)
     assert bound_weights.is_training_enabled() is False
 
-    bound_biases: thor.BoundParameter = layer.get_bound_parameters(placed)[1]
+    bound_biases: thor.parameters.BoundParameter = layer.get_bound_parameters(placed)[1]
     assert bound_biases.name == "biases"
     assert bound_biases.is_training_enabled() is False
     bound_biases.set_training_enabled(True)
@@ -520,9 +520,9 @@ def test_python_custom_layer_supports_inherited_python_build_and_parameters():
 
         def parameters(self):
             return [
-                thor.ParameterSpecification(
+                thor.parameters.ParameterSpecification(
                     name="bias",
-                    create_storage_from_context=lambda ctx: thor.ParameterSpecification.allocate_storage(
+                    create_storage_from_context=lambda ctx: thor.parameters.ParameterSpecification.allocate_storage(
                         ctx.get_feature_input(),
                         shape=[ctx.get_feature_input().get_descriptor().get_dimensions()[1]],
                         dtype=ctx.get_feature_input().get_descriptor().get_data_type(),
@@ -565,7 +565,7 @@ def test_python_custom_layer_parameters_must_return_list_not_dict():
 
         def parameters(self):
             return {
-                "weights": thor.ParameterSpecification(name="weights", shape=[3])
+                "weights": thor.parameters.ParameterSpecification(name="weights", shape=[3])
             }
 
         def build(self, context):
@@ -573,7 +573,7 @@ def test_python_custom_layer_parameters_must_return_list_not_dict():
                 "feature_output": context.input("feature_input")
             }
 
-    with pytest.raises(RuntimeError, match=r"parameters\(\) must return list\[thor.ParameterSpecification\], not dict"):
+    with pytest.raises(RuntimeError, match=r"parameters\(\) must return list\[thor.parameters.ParameterSpecification\], not dict"):
         BadParametersDict()
 
 
@@ -597,7 +597,7 @@ def test_python_custom_layer_parameters_must_return_list():
                 "feature_output": context.input("feature_input")
             }
 
-    with pytest.raises(RuntimeError, match=r"parameters\(\) must return list\[thor.ParameterSpecification\]"):
+    with pytest.raises(RuntimeError, match=r"parameters\(\) must return list\[thor.parameters.ParameterSpecification\]"):
         BadParametersScalar()
 
 
@@ -615,8 +615,8 @@ def test_python_custom_layer_rejects_duplicate_parameter_names():
 
         def parameters(self):
             return [
-                thor.ParameterSpecification(name="weights", shape=[3]),
-                thor.ParameterSpecification(name="weights", shape=[3]),
+                thor.parameters.ParameterSpecification(name="weights", shape=[3]),
+                thor.parameters.ParameterSpecification(name="weights", shape=[3]),
             ]
 
         def build(self, context):
@@ -641,7 +641,7 @@ def test_python_custom_layer_rejects_parameter_name_that_conflicts_with_feature_
             )
 
         def parameters(self):
-            return [thor.ParameterSpecification(name="feature_input", shape=[3])]
+            return [thor.parameters.ParameterSpecification(name="feature_input", shape=[3])]
 
         def build(self, context):
             return {
@@ -665,9 +665,9 @@ def test_python_custom_layer_place_rejects_parameter_name_that_conflicts_with_ou
 
         def parameters(self):
             return [
-                thor.ParameterSpecification(
+                thor.parameters.ParameterSpecification(
                     name="feature_output",
-                    create_storage_from_context=lambda ctx: thor.ParameterSpecification.allocate_storage(
+                    create_storage_from_context=lambda ctx: thor.parameters.ParameterSpecification.allocate_storage(
                         ctx.get_feature_input(),
                         shape=[ctx.get_feature_input().get_descriptor().get_dimensions()[1]],
                         dtype=ctx.get_feature_input().get_descriptor().get_data_type(),
@@ -798,9 +798,9 @@ def test_python_custom_layer_place_rejects_unreferenced_declared_parameter():
 
         def parameters(self):
             return [
-                thor.ParameterSpecification(
+                thor.parameters.ParameterSpecification(
                     name="scale",
-                    create_storage_from_context=lambda ctx: thor.ParameterSpecification.allocate_storage(
+                    create_storage_from_context=lambda ctx: thor.parameters.ParameterSpecification.allocate_storage(
                         ctx.get_feature_input(),
                         shape=[ctx.get_feature_input().get_descriptor().get_dimensions()[1]],
                         dtype=ctx.get_feature_input().get_descriptor().get_data_type(),
@@ -1056,7 +1056,7 @@ def test_python_custom_layer_direct_construction_places_with_named_inputs_and_pa
     storage_context_input_dims: list[dict[str, list[int]]] = []
     build_contexts: list[dict[str, object]] = []
 
-    def allocate_vector(context: thor.ParameterSpecification.StorageContext) -> thor.physical.PhysicalTensor:
+    def allocate_vector(context: thor.parameters.ParameterSpecification.StorageContext) -> thor.physical.PhysicalTensor:
         assert context.input_names() == ["lhs", "rhs"]
         lhs_tensor = context.get_input("lhs")
         rhs_tensor = context.get_input("rhs")
@@ -1070,18 +1070,18 @@ def test_python_custom_layer_direct_construction_places_with_named_inputs_and_pa
             "rhs": rhs_dims,
         })
 
-        return thor.ParameterSpecification.allocate_storage(
+        return thor.parameters.ParameterSpecification.allocate_storage(
             lhs_tensor,
             shape=[lhs_dims[1]],
             dtype=lhs_tensor.get_descriptor().get_data_type(),
         )
 
-    scale = thor.ParameterSpecification(
+    scale = thor.parameters.ParameterSpecification(
         name="scale",
         create_storage_from_context=allocate_vector,
         trainable=True,
     )
-    bias = thor.ParameterSpecification(
+    bias = thor.parameters.ParameterSpecification(
         name="bias",
         create_storage_from_context=allocate_vector,
         trainable=True,
@@ -1189,15 +1189,15 @@ def test_python_custom_layer_tokenwise_linear_preserves_sequence_axis():
             self.parameter_dtype = x.get_data_type()
             super().__init__(network=network, inputs=x, output_names=["feature_output"])
 
-        def parameters(self) -> list[thor.ParameterSpecification]:
+        def parameters(self) -> list[thor.parameters.ParameterSpecification]:
             return [
-                thor.ParameterSpecification(
+                thor.parameters.ParameterSpecification(
                     name="weights",
                     shape=[self.input_features, self.output_features],
                     dtype=self.parameter_dtype,
                     trainable=True,
                 ),
-                thor.ParameterSpecification(
+                thor.parameters.ParameterSpecification(
                     name="biases",
                     shape=[self.output_features],
                     dtype=self.parameter_dtype,

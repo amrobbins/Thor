@@ -33,6 +33,7 @@ class Adam : public Optimizer {
     virtual float getBeta2();
     virtual void setEpsilon(float newEpsilon, PlacedNetwork *placedNetwork);
     virtual float getEpsilon();
+    virtual bool getAmsgrad();
 
     nlohmann::json serialize(thor_file::TarWriter &archiveWriter,
                                      Stream stream,
@@ -58,10 +59,12 @@ class Adam : public Optimizer {
     float beta1;
     float beta2;
     float epsilon;
+    bool amsgrad;
 
     std::shared_ptr<thor_file::TarReader> archiveReader = nullptr;
     std::optional<std::string> mFile;
     std::optional<std::string> vFile;
+    std::optional<std::string> vhatFile;
     std::optional<std::string> mBiasFile;
     std::optional<std::string> vBiasFile;
 };
@@ -77,11 +80,14 @@ class Adam::Builder {
             _beta2 = 0.999f;
         if (!_epsilon.has_value())
             _epsilon = 1e-7f;
+        if (!_amsgrad.has_value())
+            _amsgrad = false;
         Adam adam;
         adam.alpha = _alpha.value();
         adam.beta1 = _beta1.value();
         adam.beta2 = _beta2.value();
         adam.epsilon = _epsilon.value();
+        adam.amsgrad = _amsgrad.value();
 
         THOR_THROW_IF_FALSE(adam.alpha > 0.0f);
         THOR_THROW_IF_FALSE(adam.beta1 >= 0.0f && adam.beta1 < 1.0f);
@@ -122,6 +128,11 @@ class Adam::Builder {
         this->_epsilon = _epsilon;
         return *this;
     }
+    virtual Adam::Builder &amsgrad(bool _amsgrad) {
+        THOR_THROW_IF_FALSE(!this->_amsgrad.has_value());
+        this->_amsgrad = _amsgrad;
+        return *this;
+    }
 
    private:
     std::optional<Network *> _network;
@@ -129,6 +140,7 @@ class Adam::Builder {
     std::optional<float> _beta1;
     std::optional<float> _beta2;
     std::optional<float> _epsilon;
+    std::optional<bool> _amsgrad;
 };
 
 }  // namespace Thor

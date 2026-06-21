@@ -104,7 +104,7 @@ std::vector<std::shared_ptr<ParameterConstraint>> constraintsFromPython(const nb
         try {
             constraint = nb::cast<std::shared_ptr<ParameterConstraint>>(handle);
         } catch (const std::exception&) {
-            throw nb::type_error((std::string(argumentName) + " must contain thor.ParameterConstraint instances").c_str());
+            throw nb::type_error((std::string(argumentName) + " must contain thor.constraints.ParameterConstraint instances").c_str());
         }
         if (constraint == nullptr) {
             throw nb::value_error((std::string(argumentName) + " may not contain None").c_str());
@@ -122,7 +122,7 @@ std::vector<std::shared_ptr<ParameterConstraint>> constraintsFromPython(const nb
     }
 
     if (!nb::isinstance<nb::sequence>(obj) || nb::isinstance<nb::str>(obj)) {
-        throw nb::type_error((std::string(argumentName) + " must be a thor.ParameterConstraint, a sequence of constraints, or None").c_str());
+        throw nb::type_error((std::string(argumentName) + " must be a thor.constraints.ParameterConstraint, a sequence of constraints, or None").c_str());
     }
 
     nb::sequence seq = nb::cast<nb::sequence>(obj);

@@ -73,7 +73,7 @@ def test_training_step_and_program_are_ordered_logical_execution_specs():
 def test_training_program_rejects_duplicate_step_names():
     sgd = thor.optimizers.Sgd(initial_learning_rate=0.01)
     loss = thor.Tensor([1], thor.DataType.fp32)
-    step = thor.training.TrainingStep("same", [loss], optimizer=sgd, update_parameters=[thor.ParameterReference(1, "weights")])
+    step = thor.training.TrainingStep("same", [loss], optimizer=sgd, update_parameters=[thor.parameters.ParameterReference(1, "weights")])
     program = thor.training.TrainingProgram([step])
 
     with pytest.raises(RuntimeError, match="already contains a step named"):
@@ -343,7 +343,7 @@ def test_training_program_holds_training_steps_by_reference_in_python():
 
 def test_training_step_allows_updates_without_step_optimizer_for_parameter_overrides():
     loss = thor.Tensor([1], thor.DataType.fp32)
-    weights = thor.ParameterReference(1, "weights")
+    weights = thor.parameters.ParameterReference(1, "weights")
 
     step = thor.training.TrainingStep("per_parameter", [loss], update_parameters=[weights])
 

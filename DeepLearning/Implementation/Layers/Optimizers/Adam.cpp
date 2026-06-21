@@ -19,19 +19,29 @@ struct Adam::RuntimeState {
     float beta2;
     float epsilon;
     float t;
+    bool amsgrad;
 };
 
 namespace {
 
-shared_ptr<Adam::RuntimeState> makeRuntimeState(float alpha, float beta1, float beta2, float epsilon, float t = 0.0f) {
-    return make_shared<Adam::RuntimeState>(Adam::RuntimeState{alpha, beta1, beta2, epsilon, t});
+shared_ptr<Adam::RuntimeState> makeRuntimeState(float alpha,
+                                                float beta1,
+                                                float beta2,
+                                                float epsilon,
+                                                bool amsgrad,
+                                                float t = 0.0f) {
+    return make_shared<Adam::RuntimeState>(Adam::RuntimeState{alpha, beta1, beta2, epsilon, t, amsgrad});
 }
 
-vector<CustomOptimizerStateSpec> adamStateSpecs() {
-    return {
+vector<CustomOptimizerStateSpec> adamStateSpecs(bool amsgrad) {
+    vector<CustomOptimizerStateSpec> specs{
         CustomOptimizerStateSpec::sameShapeAsWeights("m", DataType::FP32),
         CustomOptimizerStateSpec::sameShapeAsWeights("v", DataType::FP32),
     };
+    if (amsgrad) {
+        specs.push_back(CustomOptimizerStateSpec::sameShapeAsWeights("vhat", DataType::FP32));
+    }
+    return specs;
 }
 
 CustomOptimizer::UpdateExpressionBuilder makeUpdateExpressionBuilder(shared_ptr<Adam::RuntimeState> state) {
@@ -42,6 +52,9 @@ CustomOptimizer::UpdateExpressionBuilder makeUpdateExpressionBuilder(shared_ptr<
         // m_{t+1} = beta1 * m_t + (1 - beta1) * g_t
         // v_{t+1} = beta2 * v_t + (1 - beta2) * g_t^2
         // w_{t+1} = w_t - alphaT * m_{t+1} / (sqrt(v_{t+1}) + epsilon)
+        //
+        // AMSGrad additionally tracks vhat_{t+1} = max(vhat_t, v_{t+1}) and
+        // uses vhat_{t+1} in the denominator.
         //
         // alphaT is the bias-corrected learning rate computed on CPU and passed
         // in as a runtime scalar. The raw gradient is normalized here so the same
@@ -62,13 +75,24 @@ CustomOptimizer::UpdateExpressionBuilder makeUpdateExpressionBuilder(shared_ptr<
 
         Expression mNext = beta1Expr * m + oneMinusBeta1Expr * g;
         Expression vNext = beta2Expr * v + oneMinusBeta2Expr * g * g;
-        Expression wNext = (w - alphaT * mNext / (Expression::sqrt(vNext) + epsilonExpr)).withOutputDType(weightsDType);
-
-        return CustomOptimizerUpdateExpression{{
-            {"weights", wNext},
+        Expression denominatorSecondMoment = vNext;
+        CustomOptimizerUpdateExpression update{{
+            {"weights", Expression::constantScalar(0.0f)},
             {"m", mNext},
             {"v", vNext},
         }};
+
+        if (state->amsgrad) {
+            auto vhat = context.state("vhat", DataType::FP32, DataType::FP32);
+            Expression vhatNext = vhat.max(vNext);
+            denominatorSecondMoment = vhatNext;
+            update.outputs.push_back({"vhat", vhatNext});
+        }
+
+        Expression wNext =
+            (w - alphaT * mNext / (Expression::sqrt(denominatorSecondMoment) + epsilonExpr)).withOutputDType(weightsDType);
+        update.outputs[0] = {"weights", wNext};
+        return update;
     };
 }
 
@@ -114,12 +138,12 @@ CustomOptimizer::HyperParameterSnapshotBuilder makeHyperParameterSnapshotBuilder
 
 }  // namespace
 
-Adam::Adam(uint64_t id, float alpha, float beta1, float beta2, float epsilon)
-    : Adam(id, makeRuntimeState(alpha, beta1, beta2, epsilon)) {}
+Adam::Adam(uint64_t id, float alpha, float beta1, float beta2, float epsilon, bool amsgrad)
+    : Adam(id, makeRuntimeState(alpha, beta1, beta2, epsilon, amsgrad)) {}
 
 Adam::Adam(uint64_t id, shared_ptr<RuntimeState> runtimeState)
     : CustomOptimizer(id,
-                      adamStateSpecs(),
+                      adamStateSpecs(runtimeState->amsgrad),
                       makeUpdateExpressionBuilder(runtimeState),
                       makeRuntimeScalarBuilder(runtimeState),
                       /*supportsSparseRowGradients=*/true,
@@ -137,6 +161,8 @@ float Adam::getBeta2() const { return runtimeState->beta2; }
 
 float Adam::getEpsilon() const { return runtimeState->epsilon; }
 
+bool Adam::getAmsgrad() const { return runtimeState->amsgrad; }
+
 void Adam::setT(float t) { runtimeState->t = t; }
 
 void Adam::setAlpha(float alpha) { runtimeState->alpha = alpha; }
@@ -153,6 +179,7 @@ shared_ptr<Optimizer> Adam::clone() const {
                                                       runtimeState->beta1,
                                                       runtimeState->beta2,
                                                       runtimeState->epsilon,
+                                                      runtimeState->amsgrad,
                                                       runtimeState->t)));
 }
 

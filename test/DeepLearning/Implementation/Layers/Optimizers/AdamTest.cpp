@@ -178,7 +178,10 @@ struct AdamReferenceState {
     std::vector<float> weights;
     std::vector<float> m;
     std::vector<float> v;
+    std::vector<float> vhat;
     float t = 0.0f;
+
+    bool amsgrad() const { return !vhat.empty(); }
 };
 
 void applyAdamReferenceStep(AdamReferenceState& state,
@@ -191,6 +194,8 @@ void applyAdamReferenceStep(AdamReferenceState& state,
     ASSERT_EQ(state.weights.size(), rawGradient.size());
     ASSERT_EQ(state.m.size(), rawGradient.size());
     ASSERT_EQ(state.v.size(), rawGradient.size());
+    if (state.amsgrad())
+        ASSERT_EQ(state.vhat.size(), rawGradient.size());
     ASSERT_GT(batchSize, 0u);
 
     state.t += 1.0f;
@@ -205,8 +210,9 @@ void applyAdamReferenceStep(AdamReferenceState& state,
 
         state.m[i] = beta1 * state.m[i] + (1.0f - beta1) * g;
         state.v[i] = beta2 * state.v[i] + (1.0f - beta2) * g * g;
+        const float denominatorSecondMoment = state.amsgrad() ? (state.vhat[i] = std::max(state.vhat[i], state.v[i])) : state.v[i];
 
-        state.weights[i] = state.weights[i] - alphaT * state.m[i] / (std::sqrt(state.v[i]) + epsilon);
+        state.weights[i] = state.weights[i] - alphaT * state.m[i] / (std::sqrt(denominatorSecondMoment) + epsilon);
     }
 }
 
@@ -225,6 +231,8 @@ void applySparseAdamReferenceStep(AdamReferenceState& state,
     ASSERT_GE(sparseGradientValues.size(), numRows * embeddingDim);
     ASSERT_EQ(state.weights.size(), state.m.size());
     ASSERT_EQ(state.weights.size(), state.v.size());
+    if (state.amsgrad())
+        ASSERT_EQ(state.weights.size(), state.vhat.size());
     ASSERT_GT(batchSize, 0u);
 
     state.t += 1.0f;
@@ -243,7 +251,10 @@ void applySparseAdamReferenceStep(AdamReferenceState& state,
 
             state.m[denseIndex] = beta1 * state.m[denseIndex] + (1.0f - beta1) * g;
             state.v[denseIndex] = beta2 * state.v[denseIndex] + (1.0f - beta2) * g * g;
-            state.weights[denseIndex] -= alphaT * state.m[denseIndex] / (std::sqrt(state.v[denseIndex]) + epsilon);
+            const float denominatorSecondMoment = state.amsgrad()
+                                                      ? (state.vhat[denseIndex] = std::max(state.vhat[denseIndex], state.v[denseIndex]))
+                                                      : state.v[denseIndex];
+            state.weights[denseIndex] -= alphaT * state.m[denseIndex] / (std::sqrt(denominatorSecondMoment) + epsilon);
         }
     }
 }
@@ -369,6 +380,8 @@ void applyAdamReferenceStepE5M2Weights(AdamReferenceState& state,
     ASSERT_EQ(state.weights.size(), rawGradient.size());
     ASSERT_EQ(state.m.size(), rawGradient.size());
     ASSERT_EQ(state.v.size(), rawGradient.size());
+    if (state.amsgrad())
+        ASSERT_EQ(state.vhat.size(), rawGradient.size());
     ASSERT_GT(batchSize, 0u);
 
     state.t += 1.0f;
@@ -385,8 +398,9 @@ void applyAdamReferenceStepE5M2Weights(AdamReferenceState& state,
 
         state.m[i] = beta1 * state.m[i] + (1.0f - beta1) * g;
         state.v[i] = beta2 * state.v[i] + (1.0f - beta2) * g * g;
+        const float denominatorSecondMoment = state.amsgrad() ? (state.vhat[i] = std::max(state.vhat[i], state.v[i])) : state.v[i];
 
-        const float wNext = state.weights[i] - alphaT * state.m[i] / (std::sqrt(state.v[i]) + epsilon);
+        const float wNext = state.weights[i] - alphaT * state.m[i] / (std::sqrt(denominatorSecondMoment) + epsilon);
 
         // Adam writes weights with output dtype equal to the original weights dtype.
         state.weights[i] = quantizeE5M2ToFloat(wNext);
@@ -417,6 +431,7 @@ TEST(AdamTest, ConstructorGettersSettersAndHyperParameters) {
     EXPECT_FLOAT_EQ(adam.getBeta1(), 0.9f);
     EXPECT_FLOAT_EQ(adam.getBeta2(), 0.999f);
     EXPECT_FLOAT_EQ(adam.getEpsilon(), 1e-8f);
+    EXPECT_FALSE(adam.getAmsgrad());
     EXPECT_FLOAT_EQ(adam.getT(), 0.0f);
 
     adam.setAlpha(0.01f);
@@ -429,6 +444,7 @@ TEST(AdamTest, ConstructorGettersSettersAndHyperParameters) {
     EXPECT_FLOAT_EQ(adam.getBeta1(), 0.8f);
     EXPECT_FLOAT_EQ(adam.getBeta2(), 0.95f);
     EXPECT_FLOAT_EQ(adam.getEpsilon(), 1e-5f);
+    EXPECT_FALSE(adam.getAmsgrad());
     EXPECT_FLOAT_EQ(adam.getT(), 7.0f);
 
     std::unordered_map<std::string, float> updated = adam.updateHyperParameters(/*epoch=*/3, /*batch=*/4, /*batchesPerEpoch=*/5);
@@ -502,6 +518,74 @@ TEST(AdamTest, CompileInitializesMomentsToZero) {
 
     expectAllClose(copyGpuFp32TensorToValues(m, stream), {0.0f, 0.0f, 0.0f, 0.0f});
     expectAllClose(copyGpuFp32TensorToValues(v, stream), {0.0f, 0.0f, 0.0f, 0.0f});
+}
+
+TEST(AdamTest, CompileAmsgradCreatesAndInitializesVhat) {
+    Stream stream(gpuPlacement);
+
+    Tensor weights(gpuPlacement, TensorDescriptor(DataType::FP32, {2, 2}));
+    copyValuesToGpuFp32Tensor(weights, {1.0f, 2.0f, 3.0f, 4.0f}, stream);
+
+    Adam adam(21, 0.001f, 0.9f, 0.999f, 1e-8f, /*amsgrad=*/true);
+    EXPECT_TRUE(adam.getAmsgrad());
+
+    adam.compile(weights, stream);
+    stream.synchronize();
+
+    EXPECT_TRUE(adam.hasParameter("m"));
+    EXPECT_TRUE(adam.hasParameter("v"));
+    EXPECT_TRUE(adam.hasParameter("vhat"));
+
+    Tensor vhat = adam.getOptimizerParameterTensor("vhat");
+    EXPECT_EQ(vhat.getDataType(), DataType::FP32);
+    EXPECT_EQ(vhat.getDimensions(), weights.getDimensions());
+    expectAllClose(copyGpuFp32TensorToValues(vhat, stream), {0.0f, 0.0f, 0.0f, 0.0f});
+
+    std::vector<std::string> outputNames = adam.getOptimizerParameterNames();
+    std::set<std::string> names(outputNames.begin(), outputNames.end());
+    EXPECT_EQ(names, (std::set<std::string>{"weights", "m", "v", "vhat"}));
+}
+
+TEST(AdamTest, AmsgradTwoStepsUsesMaximumSecondMoment) {
+    Stream stream(gpuPlacement);
+
+    const std::vector<float> initialWeights{1.0f, -2.0f, 3.0f, -4.0f};
+    const std::vector<float> gradient1{100.0f, -50.0f, 25.0f, -12.5f};
+    const std::vector<float> gradient2{1.0f, -0.5f, 0.25f, -0.125f};
+
+    constexpr float alpha = 0.05f;
+    constexpr float beta1 = 0.8f;
+    constexpr float beta2 = 0.5f;
+    constexpr float epsilon = 1e-4f;
+
+    Tensor weights(gpuPlacement, TensorDescriptor(DataType::FP32, {2, 2}));
+    copyValuesToGpuFp32Tensor(weights, initialWeights, stream);
+
+    Adam adam(22, alpha, beta1, beta2, epsilon, /*amsgrad=*/true);
+    adam.compile(weights, stream);
+    stream.synchronize();
+
+    AdamReferenceState expected;
+    expected.weights = initialWeights;
+    expected.m.assign(initialWeights.size(), 0.0f);
+    expected.v.assign(initialWeights.size(), 0.0f);
+    expected.vhat.assign(initialWeights.size(), 0.0f);
+
+    applyAdamReferenceStep(expected, gradient1, /*batchSize=*/1, alpha, beta1, beta2, epsilon);
+    runAdamStep(adam, gradient1, /*batchSize=*/1, stream);
+
+    applyAdamReferenceStep(expected, gradient2, /*batchSize=*/1, alpha, beta1, beta2, epsilon);
+    runAdamStep(adam, gradient2, /*batchSize=*/1, stream);
+
+    Tensor m = adam.getOptimizerParameterTensor("m");
+    Tensor v = adam.getOptimizerParameterTensor("v");
+    Tensor vhat = adam.getOptimizerParameterTensor("vhat");
+
+    EXPECT_FLOAT_EQ(adam.getT(), 2.0f);
+    expectAllClose(copyGpuFp32TensorToValues(weights, stream), expected.weights, 3e-5f, 3e-5f);
+    expectAllClose(copyGpuFp32TensorToValues(m, stream), expected.m, 3e-5f, 3e-5f);
+    expectAllClose(copyGpuFp32TensorToValues(v, stream), expected.v, 3e-5f, 3e-5f);
+    expectAllClose(copyGpuFp32TensorToValues(vhat, stream), expected.vhat, 3e-5f, 3e-5f);
 }
 
 TEST(AdamTest, SingleStepFromPrecomputedGradientMatchesCpuReference) {
@@ -757,6 +841,80 @@ TEST(AdamTest, SparseRowUpdateTwoStepsCarryMomentsOnlyForTouchedRows) {
     expectAllClose(copyGpuFp32TensorToValues(weights, stream), expected.weights, 3e-5f, 3e-5f);
     expectAllClose(copyGpuFp32TensorToValues(adam.getOptimizerParameterTensor("m"), stream), expected.m, 3e-5f, 3e-5f);
     expectAllClose(copyGpuFp32TensorToValues(adam.getOptimizerParameterTensor("v"), stream), expected.v, 3e-5f, 3e-5f);
+}
+
+TEST(AdamTest, SparseRowAmsgradCarriesMaximumSecondMomentForTouchedRows) {
+    Stream stream(gpuPlacement);
+
+    constexpr uint64_t vocabularySize = 4;
+    constexpr uint64_t embeddingDim = 3;
+    constexpr uint64_t capacity = 3;
+    constexpr float alpha = 0.02f;
+    constexpr float beta1 = 0.7f;
+    constexpr float beta2 = 0.5f;
+    constexpr float epsilon = 1e-4f;
+
+    const std::vector<float> initialWeights{
+        1.0f, 1.1f, 1.2f,
+        2.0f, 2.1f, 2.2f,
+        3.0f, 3.1f, 3.2f,
+        4.0f, 4.1f, 4.2f,
+    };
+    const std::vector<uint64_t> rows1{2, 0, 3};
+    const std::vector<float> values1{
+        30.0f, -20.0f, 10.0f,
+        -15.0f, 12.0f, -9.0f,
+        1111.0f, 1111.0f, 1111.0f,
+    };
+    const std::vector<uint64_t> rows2{0, 2, 1};
+    const std::vector<float> values2{
+        -0.3f, 0.2f, -0.1f,
+        0.4f, -0.2f, 0.1f,
+        2222.0f, 2222.0f, 2222.0f,
+    };
+
+    Tensor weights(gpuPlacement, TensorDescriptor(DataType::FP32, {vocabularySize, embeddingDim}));
+    copyValuesToGpuFp32Tensor(weights, initialWeights, stream);
+
+    Adam adam(63, alpha, beta1, beta2, epsilon, /*amsgrad=*/true);
+    SparseRowGradient gradient = adam.compileSparseRows(weights, capacity, stream);
+    stream.synchronize();
+
+    AdamReferenceState expected;
+    expected.weights = initialWeights;
+    expected.m.assign(initialWeights.size(), 0.0f);
+    expected.v.assign(initialWeights.size(), 0.0f);
+    expected.vhat.assign(initialWeights.size(), 0.0f);
+
+    applySparseAdamReferenceStep(expected,
+                                 rows1,
+                                 values1,
+                                 /*numRows=*/2,
+                                 embeddingDim,
+                                 /*batchSize=*/1,
+                                 alpha,
+                                 beta1,
+                                 beta2,
+                                 epsilon);
+    runSparseAdamStep(adam, gradient, rows1, values1, /*numRows=*/2, /*batchSize=*/1, stream);
+
+    applySparseAdamReferenceStep(expected,
+                                 rows2,
+                                 values2,
+                                 /*numRows=*/2,
+                                 embeddingDim,
+                                 /*batchSize=*/1,
+                                 alpha,
+                                 beta1,
+                                 beta2,
+                                 epsilon);
+    runSparseAdamStep(adam, gradient, rows2, values2, /*numRows=*/2, /*batchSize=*/1, stream);
+
+    EXPECT_FLOAT_EQ(adam.getT(), 2.0f);
+    expectAllClose(copyGpuFp32TensorToValues(weights, stream), expected.weights, 3e-5f, 3e-5f);
+    expectAllClose(copyGpuFp32TensorToValues(adam.getOptimizerParameterTensor("m"), stream), expected.m, 3e-5f, 3e-5f);
+    expectAllClose(copyGpuFp32TensorToValues(adam.getOptimizerParameterTensor("v"), stream), expected.v, 3e-5f, 3e-5f);
+    expectAllClose(copyGpuFp32TensorToValues(adam.getOptimizerParameterTensor("vhat"), stream), expected.vhat, 3e-5f, 3e-5f);
 }
 
 

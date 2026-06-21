@@ -201,7 +201,7 @@ def test_fully_connected_serializes_weight_constraints():
         8,
         True,
         activation=None,
-        weights_constraints=thor.NonNegativeParameterConstraint(),
+        weights_constraints=thor.constraints.NonNegative(),
     )
 
     assert isinstance(fc, thor.layers.FullyConnected)

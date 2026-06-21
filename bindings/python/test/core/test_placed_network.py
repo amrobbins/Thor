@@ -20,7 +20,7 @@ def test_network_place_returns_placed_network():
 
     placed = net.place(32)
 
-    assert isinstance(placed, thor.PlacedNetwork)
+    assert isinstance(placed, thor.runtime.PlacedNetwork)
     assert placed.get_network_name() == "pytest_net"
     assert placed.get_num_stamps() >= 1
     assert placed.get_num_trainable_layers() == net.get_num_trainable_layers()
@@ -68,7 +68,7 @@ def test_placed_network_basic_api(tmp_path):
 
     placed = net.place(1)
 
-    assert isinstance(placed, thor.PlacedNetwork)
+    assert isinstance(placed, thor.runtime.PlacedNetwork)
     assert placed.get_network_name() == "pytest_net"
 
     num_stamps = placed.get_num_stamps()
@@ -87,7 +87,7 @@ def test_placed_network_basic_api(tmp_path):
     n.load(str(save_dir))
     placed2 = n.place(8)
 
-    assert isinstance(placed2, thor.PlacedNetwork)
+    assert isinstance(placed2, thor.runtime.PlacedNetwork)
     assert placed2.get_network_name() == "pytest_net"
 
     num_stamps = placed2.get_num_stamps()

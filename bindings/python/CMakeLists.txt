@@ -185,7 +185,7 @@ if (THOR_PYTHON_STUBS)
     )
 
     # Generate stubs for the public wrapper modules so IDEs see thor.layers.*, etc.
-    set(THOR_PY_PUBLIC_SUBMODULES activations initializers layers losses metrics optimizers)
+    set(THOR_PY_PUBLIC_SUBMODULES activations constraints initializers layers losses metrics optimizers parameters physical random runtime training)
     set(THOR_PY_PUBLIC_NESTED_SUBMODULES
             losses.classification
             losses.detection

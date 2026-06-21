@@ -95,7 +95,7 @@
 #     )
 #
 #     # Ensure it's the enum type you expect
-#     assert isinstance(placed_network, thor.PlacedNetwork)
+#     assert isinstance(placed_network, thor.runtime.PlacedNetwork)
 #
 #     # If placement succeeds, num_stamps should be non-zero
 #     assert placed_network is not None

@@ -15,7 +15,8 @@ void bind_adam(nb::module_ &optimizers) {
 
     adam.def_static(
         "__new__",
-        [](nb::handle cls, float alpha, float beta1, float beta2, float epsilon, shared_ptr<Network> network) -> std::shared_ptr<Adam> {
+        [](nb::handle cls, float alpha, float beta1, float beta2, float epsilon, bool amsgrad, shared_ptr<Network> network)
+            -> std::shared_ptr<Adam> {
             if (alpha <= 0.0f) {
                 string error_message = "Adam builder: alpha must be > 0. alpha: " + to_string(alpha);
                 throw nb::value_error(error_message.c_str());
@@ -35,7 +36,7 @@ void bind_adam(nb::module_ &optimizers) {
             }
 
             Adam::Builder builder;
-            builder.alpha(alpha).beta1(beta1).beta2(beta2).epsilon(epsilon);
+            builder.alpha(alpha).beta1(beta1).beta2(beta2).epsilon(epsilon).amsgrad(amsgrad);
 
             if (network != nullptr)
                 builder.network(*network);
@@ -51,19 +52,28 @@ void bind_adam(nb::module_ &optimizers) {
         "beta1"_a = 0.9f,
         "beta2"_a = 0.999f,
         "epsilon"_a = 1e-7f,
+        "amsgrad"_a = false,
         "network"_a.none() = nb::none(),
         R"nbdoc(Construct an ADAM optimizer.)nbdoc");
 
     // No-op __init__ (construction happens in __new__)
     adam.def(
         "__init__",
-        [](Adam *self, float alpha, float beta1, float beta2, float epsilon, shared_ptr<Network> network) -> void {
+        [](Adam *self, float alpha, float beta1, float beta2, float epsilon, bool amsgrad, shared_ptr<Network> network) -> void {
+            (void)self;
+            (void)alpha;
+            (void)beta1;
+            (void)beta2;
+            (void)epsilon;
+            (void)amsgrad;
+            (void)network;
             // no-op: constructed in __new__
         },
         "alpha"_a = 0.001f,
         "beta1"_a = 0.9f,
         "beta2"_a = 0.999f,
         "epsilon"_a = 1e-7f,
+        "amsgrad"_a = false,
         "network"_a.none() = nb::none(),
         R"nbdoc(Construct an ADAM optimizer.)nbdoc");
 
@@ -87,6 +97,9 @@ beta2 : float, default 0.999
     Typical values are close to 0.999.
 epsilon : float, default fp32: 1e-7, fp16: 1e-4
     Small constant added to the denominator for numerical stability.
+amsgrad : bool, default False
+    If True, use AMSGrad by tracking the maximum second-moment estimate and using
+    that maximum in Adam's denominator.
 network : thor.Network, default None
     When network is passed in, then this optimizer will be set as the default optimizer in
     the network and attached to all layers that do not have a layer specific optimizer
@@ -97,10 +110,12 @@ network : thor.Network, default None
 Notes
 -----
 Adam maintains, for each parameter, a first-moment buffer ``m`` and a second-moment
-buffer ``v``:
+buffer ``v``. With ``amsgrad=True``, it also maintains ``vhat``, the elementwise
+maximum of the second-moment estimate:
 
 - ``m <- beta1 * m + (1 - beta1) * g``
 - ``v <- beta2 * v + (1 - beta2) * (g * g)``
+- ``vhat <- max(vhat, v)`` when ``amsgrad=True``
 
 It then uses bias-corrected moments:
 
@@ -110,6 +125,8 @@ It then uses bias-corrected moments:
 and applies the update:
 
 - ``w <- w - alpha * m_hat / (sqrt(v_hat) + epsilon)``
+
+For ``amsgrad=True``, the denominator uses the tracked maximum second moment.
 
 where ``t`` is the update step count.
 
@@ -125,6 +142,10 @@ Basic usage::
 Custom hyperparameters::
 
     opt = Adam(network, alpha=1e-3, beta1=0.9, beta2=0.999, epsilon=1e-7)
+
+AMSGrad::
+
+    opt = Adam(alpha=1e-3, amsgrad=True)
 
 See Also
 --------

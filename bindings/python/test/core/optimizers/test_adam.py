@@ -28,6 +28,7 @@ def test_adam_constructs_custom_params():
         beta1=0.9,
         beta2=0.999,
         epsilon=1e-7,
+        amsgrad=True,
     )
     assert isinstance(opt, thor.optimizers.Adam)
 
@@ -91,7 +92,7 @@ def test_adam_rejects_wrong_arity_and_kwargs():
     n = _net()
 
     with pytest.raises(TypeError):
-        thor.optimizers.Adam(1e-3, 0.9, 0.999, 1e-7, 123, network=n)  # extra positional
+        thor.optimizers.Adam(1e-3, 0.9, 0.999, 1e-7, True, 123, network=n)  # extra positional
 
     with pytest.raises(TypeError):
         thor.optimizers.Adam(bogus=123, network=n)  # wrong kw

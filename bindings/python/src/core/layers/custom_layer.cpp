@@ -156,12 +156,12 @@ std::vector<std::shared_ptr<ParameterSpecification>> parametersFromPythonObject(
 
     if (nb::isinstance<nb::dict>(obj)) {
         throw std::runtime_error(
-            "CustomLayer parameters() must return list[thor.ParameterSpecification], not dict[str, thor.ParameterSpecification]. "
+            "CustomLayer parameters() must return list[thor.parameters.ParameterSpecification], not dict[str, thor.parameters.ParameterSpecification]. "
             "Parameter names are owned by the Parameter objects themselves.");
     }
 
     if (!nb::isinstance<nb::list>(obj)) {
-        throw std::runtime_error("CustomLayer parameters() must return list[thor.ParameterSpecification].");
+        throw std::runtime_error("CustomLayer parameters() must return list[thor.parameters.ParameterSpecification].");
     }
 
     nb::list parameters = nb::cast<nb::list>(obj);
