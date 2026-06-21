@@ -882,7 +882,7 @@ std::optional<double> categoricalCrossEntropyFromWeightedMemberLogits(
     return lossSum / static_cast<double>(rows);
 }
 
-std::optional<double> meanSquaredErrorFromWeightedMemberPredictions(
+std::optional<double> meanAbsoluteErrorFromWeightedMemberPredictions(
     const std::vector<std::vector<double>>& memberPredictions,
     const std::vector<double>& labels,
     const std::vector<double>& weights) {
@@ -902,7 +902,7 @@ std::optional<double> meanSquaredErrorFromWeightedMemberPredictions(
         }
         prediction /= weightSum;
         const double diff = prediction - labels[i];
-        lossSum += diff * diff;
+        lossSum += std::abs(diff);
     }
     return lossSum / static_cast<double>(labels.size());
 }
@@ -1040,14 +1040,14 @@ PredictionEvaluationMetrics evaluateEnsemblePredictionMetricsOnLoader(const Plac
                 const std::vector<double>& predictions = memberPredictions[memberIndex];
                 for (size_t i = 0; i < labels.size(); ++i) {
                     const double diff = predictions[i] - labels[i];
-                    memberLossSums[memberIndex] += diff * diff;
+                    memberLossSums[memberIndex] += std::abs(diff);
                     ensemblePredictions[i] += weights[memberIndex] * predictions[i];
                 }
             }
             for (size_t i = 0; i < labels.size(); ++i) {
                 ensemblePredictions[i] /= weightSum;
                 const double diff = ensemblePredictions[i] - labels[i];
-                weightedLossSum += diff * diff;
+                weightedLossSum += std::abs(diff);
             }
         }
 
@@ -1069,7 +1069,7 @@ PredictionEvaluationMetrics evaluateEnsemblePredictionMetricsOnLoader(const Plac
             metrics.memberAccuracies[memberIndex] = static_cast<double>(memberCorrect[memberIndex]) / static_cast<double>(weightedRows);
         }
     } else {
-        // This path is kept for non-classification ensembles.  Accuracy is intentionally absent.
+        // Non-classification ensemble loss is MAE. Accuracy is intentionally absent.
         if (weightedElements == 0) {
             return metrics;
         }
@@ -1136,7 +1136,7 @@ std::optional<double> evaluateEnsemblePredictionLossOnLoader(const PlacedEnsembl
 
         std::optional<double> batchLoss = categoricalPrediction
             ? categoricalCrossEntropyFromWeightedMemberLogits(memberPredictions, labels, weights, rows, labelLastDim)
-            : meanSquaredErrorFromWeightedMemberPredictions(memberPredictions, labels, weights);
+            : meanAbsoluteErrorFromWeightedMemberPredictions(memberPredictions, labels, weights);
         if (!batchLoss.has_value()) {
             loader.returnBatchBuffers(exampleType, std::move(batch));
             return std::nullopt;

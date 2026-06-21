@@ -77,6 +77,7 @@ class MSE::Builder {
         MSE meanSquaredError;
         meanSquaredError.predictionsTensor = _predictions.value();
         meanSquaredError.labelsTensor = _labels.value();
+        meanSquaredError.exampleWeightsTensor = _exampleWeights;
         meanSquaredError.lossDataType = _lossDataType.value();
 
         meanSquaredError.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
@@ -106,6 +107,13 @@ class MSE::Builder {
         THOR_THROW_IF_FALSE(!this->_labels.has_value());
         THOR_THROW_IF_FALSE(!_labels.getDimensions().empty());
         this->_labels = _labels;
+        return *this;
+    }
+
+    virtual MSE::Builder &exampleWeights(Tensor _exampleWeights) {
+        THOR_THROW_IF_FALSE(!this->_exampleWeights.has_value());
+        THOR_THROW_IF_FALSE(_exampleWeights.isInitialized());
+        this->_exampleWeights = _exampleWeights;
         return *this;
     }
 
@@ -150,6 +158,7 @@ class MSE::Builder {
     std::optional<Network *> _network;
     std::optional<Tensor> _predictions;
     std::optional<Tensor> _labels;
+    std::optional<Tensor> _exampleWeights;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
     std::optional<float> _lossWeight;

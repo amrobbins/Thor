@@ -18,6 +18,8 @@ json Loss::architectureJson() const {
     ThorImplementation::addLossWeightToJson(j, lossWeight);
     j["labels_tensor"] = labelsTensor.architectureJson();
     j["predictions_tensor"] = predictionsTensor.architectureJson();
+    if (exampleWeightsTensor.has_value())
+        j["example_weights_tensor"] = exampleWeightsTensor.value().architectureJson();
     j["loss_shaper_input_tensor"] = lossShaperInput.architectureJson();
     j["loss_tensor"] = lossTensor.architectureJson();
 

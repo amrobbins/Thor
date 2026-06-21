@@ -116,3 +116,41 @@ def test_mse_rejects_wrong_arity():
 
     with pytest.raises(TypeError):
         thor.losses.MSE(n, preds, labels, None, False, 123, 456)  # extra arg
+
+
+def test_mse_constructs_with_scalar_example_weights():
+    n = _net()
+    preds = _tensor_1d(4, thor.DataType.fp32)
+    labels = _tensor_1d(4, thor.DataType.fp32)
+    weights = _tensor_1d(1, thor.DataType.fp32)
+
+    loss = thor.losses.MSE(n, preds, labels, example_weights=weights)
+    assert isinstance(loss, thor.losses.MSE)
+    assert loss.example_weights == weights
+    assert loss.get_example_weights() == weights
+
+
+def test_mse_constructs_with_elementwise_example_weights():
+    n = _net()
+    preds = _tensor_1d(4, thor.DataType.fp32)
+    labels = _tensor_1d(4, thor.DataType.fp32)
+    weights = _tensor_1d(4, thor.DataType.fp16)
+
+    loss = thor.losses.MSE(n, preds, labels, example_weights=weights)
+    assert isinstance(loss, thor.losses.MSE)
+    assert loss.example_weights == weights
+
+
+def test_mse_rejects_bad_example_weights():
+    n = _net()
+    preds = _tensor_1d(4, thor.DataType.fp32)
+    labels = _tensor_1d(4, thor.DataType.fp32)
+
+    with pytest.raises(ValueError, match=r"example_weights must be distinct"):
+        thor.losses.MSE(n, preds, labels, example_weights=labels)
+
+    with pytest.raises(ValueError, match=r"example_weights must be fp16 or fp32"):
+        thor.losses.MSE(n, preds, labels, example_weights=_tensor_1d(1, thor.DataType.uint32))
+
+    with pytest.raises(ValueError, match=r"example_weights dimensions must be \[1\]"):
+        thor.losses.MSE(n, preds, labels, example_weights=_tensor_1d(3, thor.DataType.fp32))

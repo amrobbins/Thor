@@ -29,16 +29,17 @@
 #include "DeepLearning/Api/Tensor/Tensor.h"
 #include "DeepLearning/Api/Training/StepExecutable.h"
 #include "DeepLearning/Api/Training/Trainer.h"
-#include "DeepLearning/Api/Training/TrainingRuns.h"
 #include "DeepLearning/Api/Training/TrainingInputBinding.h"
-#include "DeepLearning/Api/Training/TrainingProgram.h"
 #include "DeepLearning/Api/Training/TrainingPhase.h"
+#include "DeepLearning/Api/Training/TrainingProgram.h"
+#include "DeepLearning/Api/Training/TrainingRuns.h"
 #include "DeepLearning/Api/Training/TrainingStep.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "DeepLearning/Implementation/Tensor/TensorPlacement.h"
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Loaders/NoOpDataProcessor.h"
 #include "Utilities/Loaders/ShardedRawDatasetCreator.h"
+#include "Utilities/Random/FullPeriodRandom.h"
 #include "Utilities/WorkQueue/AsyncTensorQueue.h"
 #include "bindings/python/src/core/physical/NanobindDTypes.h"
 
@@ -50,7 +51,6 @@ namespace {
 
 using Float32Array = nb::ndarray<const float, nb::numpy, nb::c_contig>;
 using Float16Array = nb::ndarray<const half, nb::numpy, nb::c_contig>;
-
 
 template <typename ScalarT>
 struct InMemoryNumpySplit {
@@ -317,6 +317,317 @@ class NumpyBatchLoader : public Loader {
 using NumpyFloat32BatchLoader = NumpyBatchLoader<float, ThorImplementation::DataType::FP32, Float32Array>;
 using NumpyFloat16BatchLoader = NumpyBatchLoader<half, ThorImplementation::DataType::FP16, Float16Array>;
 
+struct NamedFloat32NumpyTensor {
+    std::vector<uint8_t> data;
+    std::vector<uint64_t> shapeWithoutBatch;
+    ThorImplementation::TensorDescriptor batchDescriptor;
+    std::unique_ptr<AsyncTensorQueue> queue;
+    uint64_t elementsPerExample = 0;
+};
+
+struct InMemoryNumpyDictSplit {
+    std::map<std::string, NamedFloat32NumpyTensor> tensors;
+    uint64_t numExamples = 0;
+    uint64_t nextBatchNum = 0;
+    std::unique_ptr<FullPeriodRandom> randomizer;
+};
+
+Float32Array asContiguousFloat32Array(nb::handle value, const std::string& context) {
+    nb::object numpy = nb::module_::import_("numpy");
+    nb::object arrayObject;
+    try {
+        arrayObject = numpy.attr("ascontiguousarray")(value, numpy.attr("float32"));
+    } catch (const nb::python_error&) {
+        throw nb::type_error((context + " must be convertible to a contiguous numpy.float32 array").c_str());
+    }
+
+    try {
+        return nb::cast<Float32Array>(arrayObject);
+    } catch (const nb::cast_error&) {
+        throw nb::type_error((context + " must be convertible to a contiguous numpy.float32 array").c_str());
+    }
+}
+
+std::vector<uint64_t> float32ArrayShapeWithoutBatchDim(const Float32Array& array, const std::string& name) {
+    if (array.ndim() < 1) {
+        throw nb::value_error((name + " must have shape [N, ...]").c_str());
+    }
+    if (array.shape(0) == 0) {
+        throw nb::value_error((name + " must contain at least one example").c_str());
+    }
+
+    std::vector<uint64_t> shape;
+    if (array.ndim() == 1) {
+        // NetworkInput requires a non-empty non-batch shape.  Treat a flat [N]
+        // vector as [N, 1], which is the natural representation for scalar
+        // tensors such as example weights.
+        shape.push_back(1);
+        return shape;
+    }
+
+    for (size_t i = 1; i < array.ndim(); ++i) {
+        if (array.shape(i) == 0) {
+            throw nb::value_error((name + " dimensions must all be positive").c_str());
+        }
+        shape.push_back(static_cast<uint64_t>(array.shape(i)));
+    }
+    return shape;
+}
+
+std::string tensorNameFromPythonKey(nb::handle key, const std::string& context) {
+    std::string name;
+    try {
+        name = nb::cast<std::string>(key);
+    } catch (const nb::cast_error&) {
+        throw nb::type_error((context + " keys must be strings").c_str());
+    }
+    if (name.empty()) {
+        throw nb::value_error((context + " tensor names must be non-empty").c_str());
+    }
+    return name;
+}
+
+InMemoryNumpyDictSplit makeFloat32NumpyDictSplit(const nb::dict& tensors,
+                                                 const std::string& splitName,
+                                                 const std::string& loaderClassName) {
+    if (nb::len(tensors) == 0) {
+        throw nb::value_error((loaderClassName + " " + splitName + " dict must contain at least one tensor").c_str());
+    }
+
+    InMemoryNumpyDictSplit split;
+    bool haveNumExamples = false;
+    for (auto item : tensors) {
+        const std::string name = tensorNameFromPythonKey(item.first, loaderClassName + " " + splitName);
+        const std::string context = loaderClassName + " " + splitName + "['" + name + "']";
+        Float32Array array = asContiguousFloat32Array(item.second, context);
+        const uint64_t numExamples = static_cast<uint64_t>(array.shape(0));
+        if (!haveNumExamples) {
+            split.numExamples = numExamples;
+            haveNumExamples = true;
+        } else if (split.numExamples != numExamples) {
+            throw nb::value_error((loaderClassName + " " + splitName + " tensors must all have the same leading dimension; tensor '" +
+                                   name + "' has a different N")
+                                      .c_str());
+        }
+
+        NamedFloat32NumpyTensor tensor;
+        tensor.shapeWithoutBatch = float32ArrayShapeWithoutBatchDim(array, context);
+        tensor.elementsPerExample = product(tensor.shapeWithoutBatch);
+        const size_t bytes = array.size() * sizeof(float);
+        tensor.data.resize(bytes);
+        std::memcpy(tensor.data.data(), array.data(), bytes);
+
+        auto [it, inserted] = split.tensors.emplace(name, std::move(tensor));
+        (void)it;
+        if (!inserted) {
+            throw nb::value_error((loaderClassName + " " + splitName + " duplicate tensor name '" + name + "'").c_str());
+        }
+    }
+
+    return split;
+}
+
+void validateFloat32NumpyDictSchemas(const InMemoryNumpyDictSplit& train,
+                                     const InMemoryNumpyDictSplit& validate,
+                                     const std::string& loaderClassName) {
+    if (train.tensors.size() != validate.tensors.size()) {
+        throw nb::value_error((loaderClassName + " train and validate dicts must have the same tensor names").c_str());
+    }
+    for (const auto& [name, trainTensor] : train.tensors) {
+        auto validateIt = validate.tensors.find(name);
+        if (validateIt == validate.tensors.end()) {
+            throw nb::value_error((loaderClassName + " validate dict is missing tensor '" + name + "'").c_str());
+        }
+        if (trainTensor.shapeWithoutBatch != validateIt->second.shapeWithoutBatch) {
+            throw nb::value_error(
+                (loaderClassName + " train and validate tensor '" + name + "' must have matching non-batch shapes").c_str());
+        }
+    }
+}
+
+class NumpyFloat32DictBatchLoader : public Loader {
+   public:
+    NumpyFloat32DictBatchLoader(nb::dict trainTensors,
+                                nb::dict validateTensors,
+                                uint64_t batchSize,
+                                std::string loaderClassName,
+                                bool randomizeTrain,
+                                uint64_t batchQueueDepth)
+        : loaderClassName(std::move(loaderClassName)), randomizeTrain(randomizeTrain), batchQueueDepth(batchQueueDepth) {
+        if (batchSize == 0) {
+            throw nb::value_error((this->loaderClassName + " batch_size must be >= 1").c_str());
+        }
+        if (batchQueueDepth == 0) {
+            throw nb::value_error((this->loaderClassName + " batch_queue_depth must be >= 1").c_str());
+        }
+        this->batchSize = batchSize;
+
+        train = makeFloat32NumpyDictSplit(trainTensors, "train", this->loaderClassName);
+        validate = makeFloat32NumpyDictSplit(validateTensors, "validate", this->loaderClassName);
+        test = makeFloat32NumpyDictSplit(validateTensors, "test", this->loaderClassName);
+        validateFloat32NumpyDictSchemas(train, validate, this->loaderClassName);
+        validateFloat32NumpyDictSchemas(train, test, this->loaderClassName);
+
+        if (this->randomizeTrain) {
+            train.randomizer = std::make_unique<FullPeriodRandom>(train.numExamples, false);
+        }
+
+        initializeSplitQueues(train);
+        initializeSplitQueues(validate);
+        initializeSplitQueues(test);
+    }
+
+    ~NumpyFloat32DictBatchLoader() override {
+        closeSplitQueues(train);
+        closeSplitQueues(validate);
+        closeSplitQueues(test);
+    }
+
+    Batch getBatch(ExampleType exampleType, uint64_t& batchNum) override {
+        InMemoryNumpyDictSplit& split = mutableSplit(exampleType);
+        const uint64_t batchesPerEpoch = getNumBatchesPerEpoch(exampleType);
+        if (batchNum >= batchesPerEpoch) {
+            batchNum = split.nextBatchNum;
+        }
+
+        std::map<std::string, ThorImplementation::Tensor> loadedTensors;
+        for (auto& [name, spec] : split.tensors) {
+            ThorImplementation::Tensor tensor;
+            bool queueOpen = spec.queue->getBufferToLoad(tensor);
+            THOR_THROW_IF_FALSE(queueOpen);
+            loadedTensors.emplace(name, tensor);
+        }
+
+        const uint64_t firstExample = batchNum * batchSize;
+        const bool useRandomizer = exampleType == ExampleType::TRAIN && randomizeTrain;
+        for (uint64_t i = 0; i < batchSize; ++i) {
+            const uint64_t exampleIndex = useRandomizer ? split.randomizer->getRandomNumber() : (firstExample + i) % split.numExamples;
+            for (const auto& [name, spec] : split.tensors) {
+                ThorImplementation::Tensor& tensor = loadedTensors.at(name);
+                float* dest = tensor.getMemPtr<float>();
+                const float* src = reinterpret_cast<const float*>(spec.data.data());
+                std::memcpy(dest + (i * spec.elementsPerExample),
+                            src + (exampleIndex * spec.elementsPerExample),
+                            spec.elementsPerExample * sizeof(float));
+            }
+        }
+
+        split.nextBatchNum = (batchNum + 1) % batchesPerEpoch;
+
+        for (auto& [name, spec] : split.tensors) {
+            ThorImplementation::Tensor& tensor = loadedTensors.at(name);
+            bool queueOpen = spec.queue->bufferLoaded(tensor);
+            THOR_THROW_IF_FALSE(queueOpen);
+        }
+        for (auto& [name, spec] : split.tensors) {
+            ThorImplementation::Tensor& tensor = loadedTensors.at(name);
+            bool queueOpen = spec.queue->getBufferToUnload(tensor);
+            THOR_THROW_IF_FALSE(queueOpen);
+        }
+
+        Batch batch;
+        for (auto& [name, tensor] : loadedTensors) {
+            batch.insert(name, tensor);
+        }
+        return batch;
+    }
+
+    void returnBatchBuffers(ExampleType exampleType, Batch&& batch) override {
+        InMemoryNumpyDictSplit& split = mutableSplit(exampleType);
+        if (batch.size() != split.tensors.size()) {
+            throw std::runtime_error(loaderClassName + " returned batch has unexpected tensor count");
+        }
+        for (auto& [name, spec] : split.tensors) {
+            if (!batch.contains(name)) {
+                throw std::runtime_error(loaderClassName + " returned batch is missing tensor '" + name + "'");
+            }
+            bool queueOpen = spec.queue->bufferUnloaded(batch.getTensor(name));
+            THOR_THROW_IF_FALSE(queueOpen);
+        }
+    }
+
+    uint64_t getNumBatchesPerEpoch(ExampleType exampleType) override {
+        const InMemoryNumpyDictSplit& split = immutableSplit(exampleType);
+        return (split.numExamples + batchSize - 1) / batchSize;
+    }
+
+    uint64_t getNumExamples(ExampleType exampleType) override { return immutableSplit(exampleType).numExamples; }
+
+    uint64_t getNextBatchNum(ExampleType exampleType) override { return immutableSplit(exampleType).nextBatchNum; }
+
+    std::vector<std::string> getTensorNames() const {
+        std::vector<std::string> names;
+        names.reserve(train.tensors.size());
+        for (const auto& [name, spec] : train.tensors) {
+            (void)spec;
+            names.push_back(name);
+        }
+        return names;
+    }
+
+    std::map<std::string, std::vector<uint64_t>> getTensorShapes() const {
+        std::map<std::string, std::vector<uint64_t>> shapes;
+        for (const auto& [name, spec] : train.tensors) {
+            shapes.emplace(name, spec.shapeWithoutBatch);
+        }
+        return shapes;
+    }
+
+   private:
+    void initializeSplitQueues(InMemoryNumpyDictSplit& split) {
+        ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+        for (auto& [name, spec] : split.tensors) {
+            std::vector<uint64_t> batchShape{batchSize};
+            batchShape.insert(batchShape.end(), spec.shapeWithoutBatch.begin(), spec.shapeWithoutBatch.end());
+            spec.batchDescriptor = ThorImplementation::TensorDescriptor(ThorImplementation::DataType::FP32, batchShape);
+            spec.queue = std::make_unique<AsyncTensorQueue>(batchQueueDepth, spec.batchDescriptor, cpuPlacement);
+            spec.queue->open();
+        }
+    }
+
+    void closeSplitQueues(InMemoryNumpyDictSplit& split) {
+        for (auto& [name, spec] : split.tensors) {
+            (void)name;
+            if (spec.queue != nullptr) {
+                spec.queue->close();
+            }
+        }
+    }
+
+    InMemoryNumpyDictSplit& mutableSplit(ExampleType exampleType) {
+        if (exampleType == ExampleType::TRAIN) {
+            return train;
+        }
+        if (exampleType == ExampleType::VALIDATE) {
+            return validate;
+        }
+        if (exampleType == ExampleType::TEST) {
+            return test;
+        }
+        throw std::runtime_error("Unsupported ExampleType");
+    }
+
+    const InMemoryNumpyDictSplit& immutableSplit(ExampleType exampleType) const {
+        if (exampleType == ExampleType::TRAIN) {
+            return train;
+        }
+        if (exampleType == ExampleType::VALIDATE) {
+            return validate;
+        }
+        if (exampleType == ExampleType::TEST) {
+            return test;
+        }
+        throw std::runtime_error("Unsupported ExampleType");
+    }
+
+    std::string loaderClassName;
+    bool randomizeTrain = true;
+    uint64_t batchQueueDepth = 32;
+    InMemoryNumpyDictSplit train;
+    InMemoryNumpyDictSplit validate;
+    InMemoryNumpyDictSplit test;
+};
+
 std::set<std::string> stringSetFromVector(std::vector<std::string> values) { return std::set<std::string>(values.begin(), values.end()); }
 
 std::unordered_set<std::string> unorderedStringSetFromVector(const std::vector<std::string>& values) {
@@ -391,7 +702,7 @@ nb::object optionalDouble(std::optional<double> value) {
     return nb::cast(*value);
 }
 
-nb::object optionalUint64FromStats(const std::optional<TrainingStatsSnapshot>& stats, uint64_t TrainingStatsSnapshot::*field) {
+nb::object optionalUint64FromStats(const std::optional<TrainingStatsSnapshot>& stats, uint64_t TrainingStatsSnapshot::* field) {
     if (!stats.has_value()) {
         return nb::none();
     }
@@ -546,6 +857,65 @@ void bind_training(nb::module_& training) {
                                    [](NumpyFloat16BatchLoader& self) { return self.getNumBatchesPerEpoch(ExampleType::TRAIN); });
     numpy_float16_batch_loader.def("get_num_validate_batches",
                                    [](NumpyFloat16BatchLoader& self) { return self.getNumBatchesPerEpoch(ExampleType::VALIDATE); });
+
+    auto numpy_float32_dict_batch_loader = nb::class_<NumpyFloat32DictBatchLoader, Loader>(training, "NumpyFloat32DictBatchLoader");
+    numpy_float32_dict_batch_loader.attr("__module__") = "thor.training";
+    numpy_float32_dict_batch_loader.def_static(
+        "__new__",
+        [](nb::handle cls,
+           nb::dict train,
+           nb::dict validate,
+           uint64_t batch_size,
+           const std::string& dataset_name,
+           bool randomize_train,
+           uint64_t batch_queue_depth) -> std::shared_ptr<NumpyFloat32DictBatchLoader> {
+            (void)cls;
+            auto loader = std::make_shared<NumpyFloat32DictBatchLoader>(
+                std::move(train), std::move(validate), batch_size, "NumpyFloat32DictBatchLoader", randomize_train, batch_queue_depth);
+            loader->setDatasetName(dataset_name);
+            return loader;
+        },
+        "cls"_a,
+        "train"_a,
+        "validate"_a,
+        "batch_size"_a,
+        "dataset_name"_a = "numpy_dict",
+        "randomize_train"_a = true,
+        "batch_queue_depth"_a = 32,
+        R"nbdoc(
+Create an eager in-memory batch loader from dictionaries of named float32 tensors.
+
+The train and validate dictionaries must have the same string keys and matching
+non-batch shapes.  Values may be numpy arrays or objects convertible with
+``numpy.ascontiguousarray(value, dtype=numpy.float32)``.  The loader copies all
+arrays into C++-owned memory during construction and allocates fixed-size CPU
+batch tensor queues up front, so no Python callbacks or per-batch numpy work are
+needed in the training hot path.
+
+The leading dimension is the example dimension.  A one-dimensional array with
+shape ``[N]`` is exposed to the network as non-batch shape ``[1]``, which is
+convenient for scalar tensors such as ``example_weights``.  ``batch_queue_depth``
+controls how many fixed CPU batch buffers are allocated up front per named tensor.
+        )nbdoc");
+    numpy_float32_dict_batch_loader.def(
+        "__init__",
+        [](NumpyFloat32DictBatchLoader*, nb::dict, nb::dict, uint64_t, const std::string&, bool, uint64_t) {},
+        "train"_a,
+        "validate"_a,
+        "batch_size"_a,
+        "dataset_name"_a = "numpy_dict",
+        "randomize_train"_a = true,
+        "batch_queue_depth"_a = 32);
+    numpy_float32_dict_batch_loader.def("get_num_train_examples",
+                                        [](NumpyFloat32DictBatchLoader& self) { return self.getNumExamples(ExampleType::TRAIN); });
+    numpy_float32_dict_batch_loader.def("get_num_validate_examples",
+                                        [](NumpyFloat32DictBatchLoader& self) { return self.getNumExamples(ExampleType::VALIDATE); });
+    numpy_float32_dict_batch_loader.def("get_num_train_batches",
+                                        [](NumpyFloat32DictBatchLoader& self) { return self.getNumBatchesPerEpoch(ExampleType::TRAIN); });
+    numpy_float32_dict_batch_loader.def(
+        "get_num_validate_batches", [](NumpyFloat32DictBatchLoader& self) { return self.getNumBatchesPerEpoch(ExampleType::VALIDATE); });
+    numpy_float32_dict_batch_loader.def("get_tensor_names", &NumpyFloat32DictBatchLoader::getTensorNames);
+    numpy_float32_dict_batch_loader.def("get_tensor_shapes", &NumpyFloat32DictBatchLoader::getTensorShapes);
 
     training.def(
         "create_sharded_raw_dataset",
@@ -749,10 +1119,13 @@ calling this helper.
         "save_model_dir"_a.none() = nb::none(),
         "save_model_overwrite"_a = false,
         "save_optimizer_state"_a = true);
-    trainer.def("fit", [](Trainer& self, uint32_t epochs) {
-        nb::gil_scoped_release release;
-        self.fit(epochs);
-    }, "epochs"_a);
+    trainer.def(
+        "fit",
+        [](Trainer& self, uint32_t epochs) {
+            nb::gil_scoped_release release;
+            self.fit(epochs);
+        },
+        "epochs"_a);
 
     auto training_event_phase = nb::enum_<TrainingEventPhase>(training, "TrainingEventPhase")
                                     .value("unknown", TrainingEventPhase::UNKNOWN)
@@ -777,10 +1150,8 @@ calling this helper.
     training_stats_snapshot.def_ro("elapsed_seconds", &TrainingStatsSnapshot::elapsedSeconds);
     training_stats_snapshot.def_ro("samples_per_second", &TrainingStatsSnapshot::samplesPerSecond);
     training_stats_snapshot.def_ro("batches_per_second", &TrainingStatsSnapshot::batchesPerSecond);
-    training_stats_snapshot.def_ro("floating_point_operations_per_batch",
-                                   &TrainingStatsSnapshot::floatingPointOperationsPerBatch);
-    training_stats_snapshot.def_ro("floating_point_operations_per_second",
-                                   &TrainingStatsSnapshot::floatingPointOperationsPerSecond);
+    training_stats_snapshot.def_ro("floating_point_operations_per_batch", &TrainingStatsSnapshot::floatingPointOperationsPerBatch);
+    training_stats_snapshot.def_ro("floating_point_operations_per_second", &TrainingStatsSnapshot::floatingPointOperationsPerSecond);
     training_stats_snapshot.def_prop_ro("loss", [](const TrainingStatsSnapshot& self) { return optionalDouble(self.loss); });
     training_stats_snapshot.def_prop_ro("accuracy", [](const TrainingStatsSnapshot& self) { return optionalDouble(self.accuracy); });
     training_stats_snapshot.def_prop_ro("learning_rate",
@@ -826,18 +1197,24 @@ calling this helper.
                                     [](const TrainingRunResult& self) { return optionalLossFromStats(self.finalValidationStats); });
     training_run_result.def_prop_ro("final_test_loss",
                                     [](const TrainingRunResult& self) { return optionalLossFromStats(self.finalTestStats); });
-    training_run_result.def("final_loss", [](const TrainingRunResult& self, const std::string& phase) {
-        return optionalLossFromStats(self.finalStatsForPhase(trainingEventPhaseFromString(phase)));
-    }, "phase"_a);
+    training_run_result.def(
+        "final_loss",
+        [](const TrainingRunResult& self, const std::string& phase) {
+            return optionalLossFromStats(self.finalStatsForPhase(trainingEventPhaseFromString(phase)));
+        },
+        "phase"_a);
     training_run_result.def_prop_ro("final_training_accuracy",
                                     [](const TrainingRunResult& self) { return optionalAccuracyFromStats(self.finalTrainingStats); });
     training_run_result.def_prop_ro("final_validation_accuracy",
                                     [](const TrainingRunResult& self) { return optionalAccuracyFromStats(self.finalValidationStats); });
     training_run_result.def_prop_ro("final_test_accuracy",
                                     [](const TrainingRunResult& self) { return optionalAccuracyFromStats(self.finalTestStats); });
-    training_run_result.def("final_accuracy", [](const TrainingRunResult& self, const std::string& phase) {
-        return optionalAccuracyFromStats(self.finalStatsForPhase(trainingEventPhaseFromString(phase)));
-    }, "phase"_a);
+    training_run_result.def(
+        "final_accuracy",
+        [](const TrainingRunResult& self, const std::string& phase) {
+            return optionalAccuracyFromStats(self.finalStatsForPhase(trainingEventPhaseFromString(phase)));
+        },
+        "phase"_a);
     training_run_result.def_prop_ro("final_training_step", [](const TrainingRunResult& self) {
         return optionalUint64FromStats(self.finalTrainingStats, &TrainingStatsSnapshot::step);
     });
@@ -856,9 +1233,8 @@ calling this helper.
     training_run_input_signature.def_prop_ro("input_name", [](const TrainingRunInputSignature& self) { return self.inputName; });
     training_run_input_signature.def_prop_ro("dimensions", [](const TrainingRunInputSignature& self) { return self.dimensions; });
     training_run_input_signature.def_prop_ro("data_type", [](const TrainingRunInputSignature& self) { return self.dataType; });
-    training_run_input_signature.def_prop_ro("dimensions_include_batch", [](const TrainingRunInputSignature& self) {
-        return self.dimensionsIncludeBatch;
-    });
+    training_run_input_signature.def_prop_ro("dimensions_include_batch",
+                                             [](const TrainingRunInputSignature& self) { return self.dimensionsIncludeBatch; });
 
     auto training_run_output_signature = nb::class_<TrainingRunOutputSignature>(training, "TrainingRunOutputSignature");
     training_run_output_signature.attr("__module__") = "thor.training";
@@ -870,12 +1246,17 @@ calling this helper.
     training_ensemble_member_result.attr("__module__") = "thor.training";
     training_ensemble_member_result.def_prop_ro("run_name", [](const TrainingEnsembleMemberResult& self) { return self.runName; });
     training_ensemble_member_result.def_ro("weight", &TrainingEnsembleMemberResult::weight);
-    training_ensemble_member_result.def_prop_ro("status", [](const TrainingEnsembleMemberResult& self) { return trainingRunStatusName(self.status); });
+    training_ensemble_member_result.def_prop_ro(
+        "status", [](const TrainingEnsembleMemberResult& self) { return trainingRunStatusName(self.status); });
     training_ensemble_member_result.def_prop_ro("status_enum", [](const TrainingEnsembleMemberResult& self) { return self.status; });
-    training_ensemble_member_result.def_prop_ro("final_training_loss", [](const TrainingEnsembleMemberResult& self) { return optionalDouble(self.finalTrainingLoss); });
-    training_ensemble_member_result.def_prop_ro("final_validation_loss", [](const TrainingEnsembleMemberResult& self) { return optionalDouble(self.finalValidationLoss); });
-    training_ensemble_member_result.def_prop_ro("final_test_loss", [](const TrainingEnsembleMemberResult& self) { return optionalDouble(self.finalTestLoss); });
-    training_ensemble_member_result.def_prop_ro("final_test_accuracy", [](const TrainingEnsembleMemberResult& self) { return optionalDouble(self.finalTestAccuracy); });
+    training_ensemble_member_result.def_prop_ro(
+        "final_training_loss", [](const TrainingEnsembleMemberResult& self) { return optionalDouble(self.finalTrainingLoss); });
+    training_ensemble_member_result.def_prop_ro(
+        "final_validation_loss", [](const TrainingEnsembleMemberResult& self) { return optionalDouble(self.finalValidationLoss); });
+    training_ensemble_member_result.def_prop_ro(
+        "final_test_loss", [](const TrainingEnsembleMemberResult& self) { return optionalDouble(self.finalTestLoss); });
+    training_ensemble_member_result.def_prop_ro(
+        "final_test_accuracy", [](const TrainingEnsembleMemberResult& self) { return optionalDouble(self.finalTestAccuracy); });
 
     auto training_ensemble_result = nb::class_<TrainingEnsembleResult>(training, "TrainingEnsembleResult");
     training_ensemble_result.attr("__module__") = "thor.training";
@@ -889,42 +1270,46 @@ calling this helper.
     training_ensemble_result.def("any_failed", &TrainingEnsembleResult::anyFailed);
     training_ensemble_result.def_prop_ro("total_weight", &TrainingEnsembleResult::totalWeight);
     training_ensemble_result.def_prop_ro("status_counts", &TrainingEnsembleResult::statusCounts);
-    training_ensemble_result.def_prop_ro("ensemble_training_loss", [](const TrainingEnsembleResult& self) {
-        return optionalDouble(self.ensembleFinalTrainingLoss());
-    });
-    training_ensemble_result.def_prop_ro("ensemble_train_loss", [](const TrainingEnsembleResult& self) {
-        return optionalDouble(self.ensembleFinalTrainingLoss());
-    });
-    training_ensemble_result.def_prop_ro("ensemble_test_loss", [](const TrainingEnsembleResult& self) {
-        return optionalDouble(self.ensembleFinalTestLoss());
-    });
-    training_ensemble_result.def_prop_ro("ensemble_test_accuracy", [](const TrainingEnsembleResult& self) {
-        return optionalDouble(self.ensembleFinalTestAccuracy());
-    });
+    training_ensemble_result.def_prop_ro(
+        "ensemble_training_loss", [](const TrainingEnsembleResult& self) { return optionalDouble(self.ensembleFinalTrainingLoss()); });
+    training_ensemble_result.def_prop_ro(
+        "ensemble_train_loss", [](const TrainingEnsembleResult& self) { return optionalDouble(self.ensembleFinalTrainingLoss()); });
+    training_ensemble_result.def_prop_ro("ensemble_test_loss",
+                                         [](const TrainingEnsembleResult& self) { return optionalDouble(self.ensembleFinalTestLoss()); });
+    training_ensemble_result.def_prop_ro(
+        "ensemble_test_accuracy", [](const TrainingEnsembleResult& self) { return optionalDouble(self.ensembleFinalTestAccuracy()); });
 
     auto training_runs_result = nb::class_<TrainingRunsResult>(training, "TrainingRunsResult");
     training_runs_result.attr("__module__") = "thor.training";
     training_runs_result.def("__len__", &TrainingRunsResult::size);
     training_runs_result.def("__bool__", [](const TrainingRunsResult& self) { return !self.empty(); });
-    training_runs_result.def("__getitem__", [](const TrainingRunsResult& self, int64_t index) -> const TrainingRunResult& {
-        int64_t resolvedIndex = index;
-        if (resolvedIndex < 0) {
-            resolvedIndex += static_cast<int64_t>(self.size());
-        }
-        if (resolvedIndex < 0) {
-            throw nb::index_error("TrainingRunsResult index is out of range");
-        }
-        return self.at(static_cast<size_t>(resolvedIndex));
-    }, nb::rv_policy::reference_internal);
-    training_runs_result.def("__getitem__", [](const TrainingRunsResult& self, const std::string& runName) -> const TrainingRunResult& {
-        return self.at(runName);
-    }, nb::rv_policy::reference_internal);
+    training_runs_result.def(
+        "__getitem__",
+        [](const TrainingRunsResult& self, int64_t index) -> const TrainingRunResult& {
+            int64_t resolvedIndex = index;
+            if (resolvedIndex < 0) {
+                resolvedIndex += static_cast<int64_t>(self.size());
+            }
+            if (resolvedIndex < 0) {
+                throw nb::index_error("TrainingRunsResult index is out of range");
+            }
+            return self.at(static_cast<size_t>(resolvedIndex));
+        },
+        nb::rv_policy::reference_internal);
+    training_runs_result.def(
+        "__getitem__",
+        [](const TrainingRunsResult& self, const std::string& runName) -> const TrainingRunResult& { return self.at(runName); },
+        nb::rv_policy::reference_internal);
     training_runs_result.def_prop_ro("runs", [](const TrainingRunsResult& self) { return self.runs(); });
     training_runs_result.def_prop_ro("ensembles", [](const TrainingRunsResult& self) { return self.ensembles(); });
     training_runs_result.def_prop_ro("has_ensembles", &TrainingRunsResult::hasEnsembles);
-    training_runs_result.def("ensemble", [](const TrainingRunsResult& self, const std::string& ensembleGroup) -> const TrainingEnsembleResult& {
-        return self.ensemble(ensembleGroup);
-    }, nb::rv_policy::reference_internal, "ensemble_group"_a);
+    training_runs_result.def(
+        "ensemble",
+        [](const TrainingRunsResult& self, const std::string& ensembleGroup) -> const TrainingEnsembleResult& {
+            return self.ensemble(ensembleGroup);
+        },
+        nb::rv_policy::reference_internal,
+        "ensemble_group"_a);
     training_runs_result.def("all_completed", &TrainingRunsResult::allCompleted);
     training_runs_result.def("any_failed", &TrainingRunsResult::anyFailed);
     training_runs_result.def("any_cancelled", &TrainingRunsResult::anyCancelled);
@@ -958,14 +1343,16 @@ calling this helper.
         "failure_policy"_a = "cancel_siblings",
         "max_summary_logs_per_second"_a = 2.0,
         "max_parallel_runs"_a.none() = nb::none());
-    training_runs.def("fit", [](TrainingRuns& self,
-                                      uint32_t epochs,
-                                      std::shared_ptr<Loader> test_loader) {
-        TrainingRunsEvaluationOptions evaluationOptions;
-        evaluationOptions.testLoader = std::move(test_loader);
-        nb::gil_scoped_release release;
-        return self.fit(TrainerFitOptions{epochs}, evaluationOptions);
-    }, "epochs"_a, "test_loader"_a.none() = nb::none());
+    training_runs.def(
+        "fit",
+        [](TrainingRuns& self, uint32_t epochs, std::shared_ptr<Loader> test_loader) {
+            TrainingRunsEvaluationOptions evaluationOptions;
+            evaluationOptions.testLoader = std::move(test_loader);
+            nb::gil_scoped_release release;
+            return self.fit(TrainerFitOptions{epochs}, evaluationOptions);
+        },
+        "epochs"_a,
+        "test_loader"_a.none() = nb::none());
 
     auto gradient_clear_policy = nb::enum_<TrainingStep::GradientClearPolicy>(training, "GradientClearPolicy")
                                      .value("clear_before_step", TrainingStep::GradientClearPolicy::CLEAR_BEFORE_STEP)
@@ -1002,8 +1389,7 @@ calling this helper.
            std::vector<std::string> depends_on,
            bool enabled) -> std::shared_ptr<TrainingPhase> {
             (void)cls;
-            return std::make_shared<TrainingPhase>(
-                name, std::move(loss_roots), std::move(outputs), std::move(depends_on), enabled);
+            return std::make_shared<TrainingPhase>(name, std::move(loss_roots), std::move(outputs), std::move(depends_on), enabled);
         },
         "cls"_a,
         "name"_a,
@@ -1181,8 +1567,5 @@ calling this helper.
         },
         "architecture_json"_a);
     training_program.def(
-        "compile",
-        &TrainingProgram::compile,
-        "placed_network"_a,
-        "resolve_empty_update_parameters_as_all_trainable"_a = true);
+        "compile", &TrainingProgram::compile, "placed_network"_a, "resolve_empty_update_parameters_as_all_trainable"_a = true);
 }

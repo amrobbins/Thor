@@ -38,8 +38,14 @@ class Loss : public Layer {
     virtual Tensor getPredictions() const { return predictionsTensor; }
     virtual Tensor getLabels() const { return labelsTensor; }
     virtual Tensor getLoss() const { return lossTensor; }
+    virtual std::optional<Tensor> getExampleWeights() const { return exampleWeightsTensor; }
     std::optional<float> getLossWeight() const { return lossWeight; }
-    virtual std::vector<Tensor> getLossInputTensors() const { return {predictionsTensor, labelsTensor}; }
+    virtual std::vector<Tensor> getLossInputTensors() const {
+        std::vector<Tensor> inputs{predictionsTensor, labelsTensor};
+        if (exampleWeightsTensor.has_value())
+            inputs.push_back(exampleWeightsTensor.value());
+        return inputs;
+    }
 
     // getPredictions() ia a synonym for getFeatureInput().value() and in losses BY DEFAULT ONLY.
     // If the raw predictions are transformed. i.e. by softmax before becoming predictions
@@ -53,6 +59,8 @@ class Loss : public Layer {
             return (int)ThorImplementation::Loss::ConnectionType::LABELS;
         } else if (connectingTensor == predictionsTensor) {
             return (int)ThorImplementation::Loss::ConnectionType::FORWARD_BACKWARD;
+        } else if (exampleWeightsTensor.has_value() && connectingTensor == exampleWeightsTensor.value()) {
+            return (int)ThorImplementation::Loss::ConnectionType::LABELS;
         } else if (connectingTensor == lossTensor) {
             return 0;
         } else {
@@ -75,6 +83,7 @@ class Loss : public Layer {
     Tensor labelsTensor;
     Tensor predictionsTensor;
     Tensor lossTensor;
+    std::optional<Tensor> exampleWeightsTensor;
 
     DataType lossDataType;
     std::optional<float> lossWeight;
@@ -93,10 +102,13 @@ class Loss : public Layer {
         // Predictions
         uint64_t predictionsOutputBytes = predictionsTensor.getTotalSizeInBytes();
 
+        // Example weights
+        uint64_t exampleWeightsBytes = exampleWeightsTensor.has_value() ? exampleWeightsTensor.value().getTotalSizeInBytes() : 0;
+
         // Loss
         uint64_t lossBytes = lossTensor.getTotalSizeInBytes();
 
-        return fixedMem + batchSize * (predictionsOutputBytes + labelsBytes + errorOutputBytes + lossBytes);
+        return fixedMem + batchSize * (predictionsOutputBytes + labelsBytes + exampleWeightsBytes + errorOutputBytes + lossBytes);
     }
 
     LossShape lossShape;

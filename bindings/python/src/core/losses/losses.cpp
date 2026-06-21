@@ -36,7 +36,9 @@ void bind_losses(nb::module_ &losses) {
     loss.def("get_predictions", &Loss::getPredictions);
     loss.def("get_labels", &Loss::getLabels);
     loss.def("get_loss", &Loss::getLoss);
+    loss.def("get_example_weights", &Loss::getExampleWeights);
     loss.def_prop_ro("loss_weight", &Loss::getLossWeight);
+    loss.def_prop_ro("example_weights", &Loss::getExampleWeights);
 
     auto label_type =
         nb::enum_<Loss::LabelType>(losses, "LabelType").value("index", Loss::LabelType::INDEX).value("one_hot", Loss::LabelType::ONE_HOT);

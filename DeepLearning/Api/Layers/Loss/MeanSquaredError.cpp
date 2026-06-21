@@ -2,6 +2,8 @@
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "DeepLearning/Api/Layers/Loss/MeanSquaredError.h"
 
+#include "DeepLearning/Api/Layers/Loss/MultiInputCustomLoss.h"
+
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/Expression.h"
 
@@ -13,6 +15,7 @@ namespace {
 
 constexpr const char* kPredictionsName = "predictions";
 constexpr const char* kLabelsName = "labels";
+constexpr const char* kExampleWeightsName = "example_weights";
 constexpr const char* kLossName = "loss";
 constexpr const char* kGradientName = "predictions_grad";
 
@@ -37,11 +40,37 @@ void validatePredictionsDType(DataType dtype) {
     }
 }
 
+void validateExampleWeights(Tensor predictions, Tensor labels, std::optional<Tensor> exampleWeights) {
+    if (!exampleWeights.has_value())
+        return;
+    if (exampleWeights.value() == predictions || exampleWeights.value() == labels)
+        throw runtime_error("MSE example_weights tensor must be distinct from predictions and labels.");
+    const DataType dtype = exampleWeights.value().getDataType();
+    if (dtype != DataType::FP16 && dtype != DataType::FP32)
+        throw runtime_error("Unsupported MSE example_weights dtype: " + ThorImplementation::TensorDescriptor::getElementTypeName(dtype));
+    const vector<uint64_t>& dims = exampleWeights.value().getDimensions();
+    if (dims != vector<uint64_t>{1} && dims != predictions.getDimensions()) {
+        throw runtime_error("MSE example_weights dimensions must be [1] for per-example weights or match predictions dimensions.");
+    }
+}
+
 ThorImplementation::DynamicExpression makeMSELossExpression(DataType lossDataType) {
     ThorImplementation::Expression predictions = ThorImplementation::Expression::input(kPredictionsName, DataType::FP32, DataType::FP32);
     ThorImplementation::Expression labels = ThorImplementation::Expression::input(kLabelsName, DataType::FP32, DataType::FP32);
     ThorImplementation::Expression diff = predictions - labels;
     ThorImplementation::Expression loss = (diff * diff).withOutputDType(lossDataType);
+    ThorImplementation::ExpressionDefinition definition =
+        ThorImplementation::ExpressionDefinition::fromOutputs(ThorImplementation::Expression::outputs({{kLossName, loss}}));
+    return ThorImplementation::DynamicExpression::fromExpressionDefinition(definition);
+}
+
+ThorImplementation::DynamicExpression makeWeightedMSELossExpression(DataType lossDataType) {
+    ThorImplementation::Expression predictions = ThorImplementation::Expression::input(kPredictionsName, DataType::FP32, DataType::FP32);
+    ThorImplementation::Expression labels = ThorImplementation::Expression::input(kLabelsName, DataType::FP32, DataType::FP32);
+    ThorImplementation::Expression exampleWeights =
+        ThorImplementation::Expression::input(kExampleWeightsName, DataType::FP32, DataType::FP32);
+    ThorImplementation::Expression diff = predictions - labels;
+    ThorImplementation::Expression loss = ((diff * diff) * exampleWeights).withOutputDType(lossDataType);
     ThorImplementation::ExpressionDefinition definition =
         ThorImplementation::ExpressionDefinition::fromOutputs(ThorImplementation::Expression::outputs({{kLossName, loss}}));
     return ThorImplementation::DynamicExpression::fromExpressionDefinition(definition);
@@ -60,28 +89,61 @@ ThorImplementation::DynamicExpression makeMSEGradientExpression(DataType predict
     return ThorImplementation::DynamicExpression::fromExpressionDefinition(definition);
 }
 
+ThorImplementation::DynamicExpression makeWeightedMSEGradientExpression(DataType predictionsDataType) {
+    validatePredictionsDType(predictionsDataType);
+
+    ThorImplementation::Expression predictions = ThorImplementation::Expression::input(kPredictionsName, DataType::FP32, DataType::FP32);
+    ThorImplementation::Expression labels = ThorImplementation::Expression::input(kLabelsName, DataType::FP32, DataType::FP32);
+    ThorImplementation::Expression exampleWeights =
+        ThorImplementation::Expression::input(kExampleWeightsName, DataType::FP32, DataType::FP32);
+    ThorImplementation::Expression diff = predictions - labels;
+    ThorImplementation::Expression gradient =
+        (diff * exampleWeights * ThorImplementation::Expression(2.0f * ThorImplementation::Loss::getLossScalingFactor()))
+            .withOutputDType(predictionsDataType);
+    ThorImplementation::ExpressionDefinition definition = ThorImplementation::ExpressionDefinition::fromOutputs(
+        ThorImplementation::Expression::outputs({{kGradientName, gradient}}));
+    return ThorImplementation::DynamicExpression::fromExpressionDefinition(definition);
+}
+
 }  // namespace
 
 void MSE::buildSupportLayersAndAddToNetwork() {
     validatePredictionsDType(predictionsTensor.getDataType());
     validateLabelsDType(labelsTensor.getDataType());
+    validateExampleWeights(predictionsTensor, labelsTensor, exampleWeightsTensor);
 
-    CustomLoss rawMSE = CustomLoss::Builder()
-                                       .network(*network)
-                                       .lossExpression(makeMSELossExpression(lossDataType))
-                                       .gradientExpression(makeMSEGradientExpression(predictionsTensor.getDataType()))
-                                       .predictions(predictionsTensor)
-                                       .labels(labelsTensor)
-                                       .predictionsName(kPredictionsName)
-                                       .labelsName(kLabelsName)
-                                       .lossName(kLossName)
-                                       .gradientName(kGradientName)
-                                       .lossDataType(lossDataType)
-                                       .lossWeight(lossWeight.value_or(1.0f))
-                                       .reportsRawLoss()
-                                       .build();
+    if (exampleWeightsTensor.has_value()) {
+        MultiInputCustomLoss rawMSE = MultiInputCustomLoss::Builder()
+                                          .network(*network)
+                                          .lossExpression(makeWeightedMSELossExpression(lossDataType))
+                                          .gradientExpression(makeWeightedMSEGradientExpression(predictionsTensor.getDataType()))
+                                          .input(kPredictionsName, predictionsTensor, std::string(kGradientName))
+                                          .auxiliaryInput(kLabelsName, labelsTensor)
+                                          .auxiliaryInput(kExampleWeightsName, exampleWeightsTensor.value())
+                                          .lossName(kLossName)
+                                          .lossDataType(lossDataType)
+                                          .lossWeight(lossWeight.value_or(1.0f))
+                                          .reportsRawLoss()
+                                          .build();
+        lossShaperInput = rawMSE.getLoss();
+    } else {
+        CustomLoss rawMSE = CustomLoss::Builder()
+                                           .network(*network)
+                                           .lossExpression(makeMSELossExpression(lossDataType))
+                                           .gradientExpression(makeMSEGradientExpression(predictionsTensor.getDataType()))
+                                           .predictions(predictionsTensor)
+                                           .labels(labelsTensor)
+                                           .predictionsName(kPredictionsName)
+                                           .labelsName(kLabelsName)
+                                           .lossName(kLossName)
+                                           .gradientName(kGradientName)
+                                           .lossDataType(lossDataType)
+                                           .lossWeight(lossWeight.value_or(1.0f))
+                                           .reportsRawLoss()
+                                           .build();
 
-    lossShaperInput = rawMSE.getLoss();
+        lossShaperInput = rawMSE.getLoss();
+    }
 
     if (lossShape == LossShape::BATCH) {
         LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(lossShaperInput).reportsBatchLoss().build();
@@ -122,6 +184,10 @@ void MSE::deserialize(const json& j, Network* network) {
     meanSquaredError.lossWeight = ThorImplementation::lossWeightFromJson(j);
     meanSquaredError.predictionsTensor = predictions;
     meanSquaredError.labelsTensor = labels;
+    if (j.contains("example_weights_tensor")) {
+        originalTensorId = j["example_weights_tensor"].at("id").get<uint64_t>();
+        meanSquaredError.exampleWeightsTensor = network->getApiTensorByOriginalId(originalTensorId);
+    }
     meanSquaredError.network = network;
     meanSquaredError.initialized = true;
     meanSquaredError.buildSupportLayersAndAddToNetwork();

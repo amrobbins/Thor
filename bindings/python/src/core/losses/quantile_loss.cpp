@@ -1,6 +1,7 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/optional.h>
 #include <optional>
+#include <vector>
 
 #include "DeepLearning/Api/Layers/Loss/QuantileLoss.h"
 #include "DeepLearning/Api/Network/Network.h"
@@ -37,6 +38,28 @@ void setReportedLossShape(QuantileLoss::Builder &builder, LossShape reported_los
         builder.reportsRawLoss();
     }
 }
+
+void maybeSetExampleWeights(QuantileLoss::Builder &builder,
+                            Tensor predictions,
+                            Tensor labels,
+                            std::optional<Tensor> example_weights) {
+    if (!example_weights.has_value())
+        return;
+    if (example_weights.value() == predictions || example_weights.value() == labels)
+        throw nb::value_error("QuantileLoss instance: example_weights must be distinct from predictions and labels.");
+    DataType dtype = example_weights.value().getDataType();
+    if (dtype != DataType::FP16 && dtype != DataType::FP32)
+        throw nb::value_error("QuantileLoss instance: example_weights must be fp16 or fp32.");
+    const std::vector<uint64_t>& dims = example_weights.value().getDimensions();
+    if (dims != std::vector<uint64_t>{1} && dims != predictions.getDimensions()) {
+        string error_message = "QuantileLoss instance: example_weights dimensions must be [1] for per-example weights or match predictions. "
+                               "example_weights tensor is " +
+                               example_weights.value().getDescriptorString() + "; predictions tensor is " +
+                               predictions.getDescriptorString() + ".";
+        throw nb::value_error(error_message.c_str());
+    }
+    builder.exampleWeights(example_weights.value());
+}
 }  // namespace
 
 void bind_quantile_loss(nb::module_ &losses) {
@@ -52,7 +75,8 @@ void bind_quantile_loss(nb::module_ &losses) {
            float quantile,
            std::optional<DataType> loss_data_type,
            LossShape reported_loss_shape,
-           std::optional<float> loss_weight) {
+           std::optional<float> loss_weight,
+           std::optional<Tensor> example_weights) {
             const string loss_name = "QuantileLoss instance";
             if (predictions.getDimensions().size() != 1) {
                 string error_message = loss_name + ": predictions must be a 1 dimensional tensor but predictions is " +
@@ -78,6 +102,7 @@ void bind_quantile_loss(nb::module_ &losses) {
             QuantileLoss::Builder builder;
             builder.network(network).predictions(predictions).labels(labels).quantile(quantile).lossDataType(effectiveLossDataType)
                 .lossWeight(loss_weight.value_or(1.0f));
+            maybeSetExampleWeights(builder, predictions, labels, example_weights);
             setReportedLossShape(builder, reported_loss_shape);
             QuantileLoss built = builder.build();
 
@@ -91,6 +116,7 @@ void bind_quantile_loss(nb::module_ &losses) {
         "reported_loss_shape"_a = LossShape::BATCH,
         nb::kw_only(),
         "loss_weight"_a.none() = nb::none(),
+        "example_weights"_a.none() = nb::none(),
         R"nbdoc(Construct a Quantile / pinball loss.)nbdoc");
 
     quantile_loss.def_prop_ro("quantile", &QuantileLoss::getQuantile);
