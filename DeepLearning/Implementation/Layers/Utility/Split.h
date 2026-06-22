@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <optional>
 #include "DeepLearning/Implementation/ThorError.h"
 
@@ -95,28 +96,28 @@ class Split : public MultiConnectionLayer {
         uint32_t numPresentErrorInputs = numPresentTensors(errorInputs);
         THOR_THROW_IF_FALSE(numPresentErrorInputs == errorInputs.size() || numPresentErrorInputs == 0);
 
-        cudaStatus = cudaMalloc(&splitTensorFeatureOutputMemoriesArray_d, numSplitTensors * sizeof(half *));
+        cudaStatus = cudaMalloc(reinterpret_cast<void **>(&splitTensorFeatureOutputMemoriesArray_d), numSplitTensors * sizeof(void *));
         THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
-        half **splitTensorFeatureOutputMemoriesArray = new half *[numSplitTensors];
+        void **splitTensorFeatureOutputMemoriesArray = new void *[numSplitTensors];
         for (int i = 0; i < numSplitTensors; ++i)
-            splitTensorFeatureOutputMemoriesArray[i] = (half *)featureOutputs[i].value().getMemPtr();
+            splitTensorFeatureOutputMemoriesArray[i] = featureOutputs[i].value().getMemPtr();
         cudaStatus = cudaMemcpy(splitTensorFeatureOutputMemoriesArray_d,
                                 splitTensorFeatureOutputMemoriesArray,
-                                numSplitTensors * sizeof(half *),
+                                numSplitTensors * sizeof(void *),
                                 cudaMemcpyHostToDevice);
         THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
         delete[] splitTensorFeatureOutputMemoriesArray;
 
         if (numPresentErrorInputs > 0) {
-            cudaStatus = cudaMalloc(&splitTensorErrorInputMemoriesArray_d, numSplitTensors * sizeof(half *));
+            cudaStatus = cudaMalloc(reinterpret_cast<void **>(&splitTensorErrorInputMemoriesArray_d), numSplitTensors * sizeof(void *));
             THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
-            half **splitTensorErrorInputMemoriesArray = new half *[numSplitTensors];
+            void **splitTensorErrorInputMemoriesArray = new void *[numSplitTensors];
             for (int i = 0; i < numSplitTensors; ++i) {
-                splitTensorErrorInputMemoriesArray[i] = (half *)errorInputs[i].value().getMemPtr();
+                splitTensorErrorInputMemoriesArray[i] = errorInputs[i].value().getMemPtr();
             }
             cudaStatus = cudaMemcpy(splitTensorErrorInputMemoriesArray_d,
                                     splitTensorErrorInputMemoriesArray,
-                                    numSplitTensors * sizeof(half *),
+                                    numSplitTensors * sizeof(void *),
                                     cudaMemcpyHostToDevice);
             THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
             delete[] splitTensorErrorInputMemoriesArray;
@@ -179,7 +180,8 @@ class Split : public MultiConnectionLayer {
         THOR_THROW_IF_FALSE(featureInput.has_value());
 
         launchSplit(splitTensorFeatureOutputMemoriesArray_d,
-                    (half *)featureInput.value().getMemPtr(),
+                    featureInput.value().getMemPtr(),
+                    static_cast<std::size_t>(TensorDescriptor::getElementSizeInBytes(featureInput.value().getDescriptor().getDataType())),
                     featureInput.value().getDescriptor().getTotalNumElements(),
                     featureInput.value().getDescriptor().getDimensions().size(),
                     featureOutputs.size(),
@@ -219,8 +221,9 @@ class Split : public MultiConnectionLayer {
         for (unsigned int i = 1; i < errorInputs.size(); ++i)
             streams[0].waitEvent(streams[i].putEvent());
 
-        launchConcatenate((half *)errorOutputs[0].value().getMemPtr(),
+        launchConcatenate(errorOutputs[0].value().getMemPtr(),
                           splitTensorErrorInputMemoriesArray_d,
+                          static_cast<std::size_t>(TensorDescriptor::getElementSizeInBytes(errorOutputs[0].value().getDescriptor().getDataType())),
                           errorOutputs[0].value().getDescriptor().getTotalNumElements(),
                           errorOutputs[0].value().getDescriptor().getDimensions().size(),
                           errorInputs.size(),
@@ -320,8 +323,8 @@ class Split : public MultiConnectionLayer {
     unsigned int axis;
     std::vector<unsigned long> axisElements;
 
-    half **splitTensorErrorInputMemoriesArray_d;
-    half **splitTensorFeatureOutputMemoriesArray_d;
+    void **splitTensorErrorInputMemoriesArray_d;
+    void **splitTensorFeatureOutputMemoriesArray_d;
     long *stridePerPackedTensorDimension_d;
     long *stridePerSplitTensorDimension_d;
     long *axisElementsPerSplitTensor_d;

@@ -1051,6 +1051,24 @@ struct PredictionEvaluationMetrics {
     uint64_t rows = 0;
 };
 
+Batch inferenceBatchForPlacedNetwork(PlacedNetwork& placedNetwork, const Batch& sourceBatch) {
+    Batch inferenceBatch;
+    for (const std::string& inputName : placedNetwork.getNetworkInputNames()) {
+        if (!sourceBatch.contains(inputName)) {
+            throw std::runtime_error("TrainingRuns ensemble evaluation batch is missing inference input '" + inputName + "'.");
+        }
+        const BatchValue& value = sourceBatch.at(inputName);
+        if (std::holds_alternative<ThorImplementation::Tensor>(value)) {
+            inferenceBatch.insert(inputName, std::get<ThorImplementation::Tensor>(value));
+        } else if (std::holds_alternative<ThorImplementation::RaggedTensor>(value)) {
+            inferenceBatch.insert(inputName, std::get<ThorImplementation::RaggedTensor>(value));
+        } else {
+            throw std::runtime_error("TrainingRuns ensemble evaluation batch input '" + inputName + "' has an unsupported value type.");
+        }
+    }
+    return inferenceBatch;
+}
+
 PredictionEvaluationMetrics evaluateEnsemblePredictionMetricsOnLoader(const PlacedEnsembleArtifacts& artifacts,
                                                                       Loader& loader,
                                                                       ExampleType exampleType,
@@ -1100,7 +1118,8 @@ PredictionEvaluationMetrics evaluateEnsemblePredictionMetricsOnLoader(const Plac
         std::vector<std::vector<double>> memberPredictions;
         memberPredictions.reserve(artifacts.placedMembers.size());
         for (const std::shared_ptr<PlacedNetwork>& placedMember : artifacts.placedMembers) {
-            std::map<std::string, ThorImplementation::Tensor> outputs = placedMember->infer(batch);
+            Batch inferenceBatch = inferenceBatchForPlacedNetwork(*placedMember, batch);
+            std::map<std::string, ThorImplementation::Tensor> outputs = placedMember->infer(inferenceBatch);
             auto outputIt = outputs.find(predictionOutputName);
             if (outputIt == outputs.end()) {
                 throw std::runtime_error("TrainingRuns ensemble evaluation did not receive prediction output '" + predictionOutputName + "'.");
@@ -1239,7 +1258,8 @@ std::optional<double> evaluateEnsemblePredictionLossOnLoader(const PlacedEnsembl
         std::vector<std::vector<double>> memberPredictions;
         memberPredictions.reserve(artifacts.placedMembers.size());
         for (const std::shared_ptr<PlacedNetwork>& placedMember : artifacts.placedMembers) {
-            std::map<std::string, ThorImplementation::Tensor> outputs = placedMember->infer(batch);
+            Batch inferenceBatch = inferenceBatchForPlacedNetwork(*placedMember, batch);
+            std::map<std::string, ThorImplementation::Tensor> outputs = placedMember->infer(inferenceBatch);
             auto outputIt = outputs.find(predictionOutputName);
             if (outputIt == outputs.end()) {
                 throw std::runtime_error("TrainingRuns ensemble evaluation did not receive prediction output '" + predictionOutputName + "'.");

@@ -292,9 +292,9 @@ void Network::writeCudaKernelSaveKeysToCaptureFile(
 }
 
 // Records the layers in sorted DAG order.
-Network::StatusCode Network::createDagAndFreeze() {
+Network::StatusCode Network::createDagAndFreeze(bool inferenceOnly) {
     if (!frozen) {
-        StatusCode status = evaluateGraph();
+        StatusCode status = evaluateGraph(inferenceOnly);
         if (status != StatusCode::SUCCESS)
             return status;
         topologicalSort();
@@ -474,7 +474,7 @@ Network::StatusCode Network::connect(bool inferenceOnly) {
         }
     }
 
-    StatusCode dagStatus = createDagAndFreeze();
+    StatusCode dagStatus = createDagAndFreeze(inferenceOnly);
     if (dagStatus != StatusCode::SUCCESS) {
         printf("ERROR: evaluateGraph() returned %s\n", statusCodeToString(dagStatus).c_str());
         fflush(stdout);
@@ -739,6 +739,7 @@ void Network::load(const string &directory,
         // printf("%s\n", layerJson.dump(4).c_str());
         Layer::deserialize(archiveReader, layerJson, this);
     }
+    loadedFromArchive = true;
 
     raggedNetworkInputs.clear();
     if (modelJson.contains("ragged_network_inputs")) {
@@ -759,9 +760,176 @@ void Network::load(const string &directory,
     }
 }
 
+
+void Network::pruneLoadedTrainingArtifactsForInference() {
+    // Saved training artifacts often contain loss layers and label-only NetworkInputs.
+    // When such an artifact is loaded and placed for inference, keep the graph rooted
+    // at non-loss NetworkOutputs and prune the training-only loss/label subgraph.
+    std::set<Tensor> lossOutputTensors;
+    for (const std::shared_ptr<Layer>& layer : network) {
+        std::shared_ptr<Loss> loss = std::dynamic_pointer_cast<Loss>(layer);
+        if (loss) {
+            lossOutputTensors.insert(loss->getLoss());
+        }
+    }
+    if (lossOutputTensors.empty()) {
+        return;
+    }
+
+    std::set<std::shared_ptr<Layer>, Network::LayerComparator> liveLayers;
+    std::set<Tensor> liveTensors;
+
+    std::function<void(const std::shared_ptr<Layer>&)> markLiveLayer = [&](const std::shared_ptr<Layer>& layer) {
+        if (liveLayers.count(layer) != 0) {
+            return;
+        }
+        if (std::dynamic_pointer_cast<Loss>(layer)) {
+            return;
+        }
+        liveLayers.insert(layer);
+
+        auto outputsIt = apiLayerToApiOutputTensors.find(layer);
+        if (outputsIt != apiLayerToApiOutputTensors.end()) {
+            for (const Tensor& outputTensor : outputsIt->second) {
+                liveTensors.insert(outputTensor);
+            }
+        }
+
+        auto inputsIt = apiLayerToApiInputTensors.find(layer);
+        if (inputsIt == apiLayerToApiInputTensors.end()) {
+            return;
+        }
+        for (const Tensor& inputTensor : inputsIt->second) {
+            liveTensors.insert(inputTensor);
+            auto driverIt = apiTensorToApiDrivingLayer.find(inputTensor);
+            if (driverIt != apiTensorToApiDrivingLayer.end()) {
+                markLiveLayer(driverIt->second);
+            }
+        }
+    };
+
+    std::map<Tensor, bool> tensorDependsOnLossCache;
+    std::function<bool(const Tensor&)> tensorDependsOnLoss = [&](const Tensor& tensor) -> bool {
+        auto cacheIt = tensorDependsOnLossCache.find(tensor);
+        if (cacheIt != tensorDependsOnLossCache.end()) {
+            return cacheIt->second;
+        }
+
+        auto driverIt = apiTensorToApiDrivingLayer.find(tensor);
+        if (driverIt == apiTensorToApiDrivingLayer.end()) {
+            tensorDependsOnLossCache[tensor] = false;
+            return false;
+        }
+
+        const std::shared_ptr<Layer>& driver = driverIt->second;
+        if (std::dynamic_pointer_cast<Loss>(driver)) {
+            tensorDependsOnLossCache[tensor] = true;
+            return true;
+        }
+
+        auto inputsIt = apiLayerToApiInputTensors.find(driver);
+        if (inputsIt != apiLayerToApiInputTensors.end()) {
+            for (const Tensor& inputTensor : inputsIt->second) {
+                if (tensorDependsOnLoss(inputTensor)) {
+                    tensorDependsOnLossCache[tensor] = true;
+                    return true;
+                }
+            }
+        }
+
+        tensorDependsOnLossCache[tensor] = false;
+        return false;
+    };
+
+    for (const std::shared_ptr<Layer>& layer : network) {
+        std::shared_ptr<NetworkOutput> networkOutput = std::dynamic_pointer_cast<NetworkOutput>(layer);
+        if (!networkOutput) {
+            continue;
+        }
+        Tensor inputTensor = networkOutput->getFeatureInput().value();
+        if (lossOutputTensors.count(inputTensor) != 0 || tensorDependsOnLoss(inputTensor)) {
+            continue;
+        }
+        markLiveLayer(networkOutput);
+    }
+
+    // Preserve existing behavior for artifacts that only expose loss outputs. In
+    // that case there is no prediction root to prune to, and keeping the loss
+    // graph is more useful than producing a graph with no outputs.
+    bool hasLiveNetworkOutput = false;
+    for (const std::shared_ptr<Layer>& layer : liveLayers) {
+        if (std::dynamic_pointer_cast<NetworkOutput>(layer)) {
+            hasLiveNetworkOutput = true;
+            break;
+        }
+    }
+    if (!hasLiveNetworkOutput) {
+        return;
+    }
+
+    for (auto it = apiTensorToApiDrivingLayer.begin(); it != apiTensorToApiDrivingLayer.end();) {
+        if (liveTensors.count(it->first) == 0 || liveLayers.count(it->second) == 0) {
+            it = apiTensorToApiDrivingLayer.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    for (auto it = apiTensorToApiLoadingLayers.begin(); it != apiTensorToApiLoadingLayers.end();) {
+        if (liveTensors.count(it->first) == 0) {
+            it = apiTensorToApiLoadingLayers.erase(it);
+            continue;
+        }
+        std::vector<std::shared_ptr<Layer>> filtered;
+        for (const std::shared_ptr<Layer>& loadingLayer : it->second) {
+            if (liveLayers.count(loadingLayer) != 0) {
+                filtered.push_back(loadingLayer);
+            }
+        }
+        if (filtered.empty()) {
+            it = apiTensorToApiLoadingLayers.erase(it);
+        } else {
+            it->second = std::move(filtered);
+            ++it;
+        }
+    }
+
+    for (auto it = apiLayerToApiInputTensors.begin(); it != apiLayerToApiInputTensors.end();) {
+        if (liveLayers.count(it->first) == 0) {
+            it = apiLayerToApiInputTensors.erase(it);
+            continue;
+        }
+        std::vector<Tensor> filtered;
+        for (const Tensor& tensor : it->second) {
+            if (liveTensors.count(tensor) != 0) {
+                filtered.push_back(tensor);
+            }
+        }
+        it->second = std::move(filtered);
+        ++it;
+    }
+
+    for (auto it = apiLayerToApiOutputTensors.begin(); it != apiLayerToApiOutputTensors.end();) {
+        if (liveLayers.count(it->first) == 0) {
+            it = apiLayerToApiOutputTensors.erase(it);
+            continue;
+        }
+        std::vector<Tensor> filtered;
+        for (const Tensor& tensor : it->second) {
+            if (liveTensors.count(tensor) != 0) {
+                filtered.push_back(tensor);
+            }
+        }
+        it->second = std::move(filtered);
+        ++it;
+    }
+
+    allTensors = std::move(liveTensors);
+}
+
 // Determine the graph structure
 // Tensors are the edges that connect the Layers which are nodes.
-Network::StatusCode Network::evaluateGraph() {
+Network::StatusCode Network::evaluateGraph(bool inferenceOnly) {
     allTensors.clear();
     apiTensorToApiLoadingLayers.clear();
     apiTensorToApiDrivingLayer.clear();
@@ -913,6 +1081,10 @@ Network::StatusCode Network::evaluateGraph() {
         apiLayerToApiOutputTensors[layer].push_back(outputTensor);
     }
 
+    if (inferenceOnly && loadedFromArchive) {
+        pruneLoadedTrainingArtifactsForInference();
+    }
+
     StatusCode status;
     status = checkForDuplicateInOutPortNames();
     if (status != StatusCode::SUCCESS)
@@ -1052,7 +1224,12 @@ void Network::topologicalSort() {
         const shared_ptr<NetworkInput> networkInput = dynamic_pointer_cast<NetworkInput>(layer);
         if (networkInput) {
             Tensor outputTensor = layer->getFeatureOutput().value();
-            vector<shared_ptr<Layer>> loadingLayers = apiTensorToApiLoadingLayers[outputTensor];
+            if (allTensors.count(outputTensor) == 0)
+                continue;
+            auto loadingLayerIt = apiTensorToApiLoadingLayers.find(outputTensor);
+            if (loadingLayerIt == apiTensorToApiLoadingLayers.end())
+                continue;
+            vector<shared_ptr<Layer>> loadingLayers = loadingLayerIt->second;
             for (uint32_t i = 0; i < loadingLayers.size(); ++i) {
                 workQueue.push_front(make_pair(outputTensor, loadingLayers[i]));
             }
@@ -1314,7 +1491,7 @@ std::vector<Tensor> Network::getRawLossTensorsForTrainingRoots(const std::vector
         // Loss root resolution may be needed before a full placement pass.  evaluateGraph() populates the
         // tensor/layer adjacency maps before running validity checks.  We intentionally validate the requested
         // active roots below instead of accepting any invalid graph state silently.
-        (void)const_cast<Network*>(this)->evaluateGraph();
+        (void)const_cast<Network*>(this)->evaluateGraph(false);
     }
 
     auto findDrivenTensorByOriginalId = [&](uint64_t originalId) -> std::optional<std::pair<Tensor, std::shared_ptr<Layer>>> {

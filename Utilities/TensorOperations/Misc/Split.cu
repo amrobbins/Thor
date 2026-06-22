@@ -33,8 +33,9 @@ __device__ __forceinline__ long computeFlatIndexFromIndex(long index[], long str
     return flatIndex;
 }
 
-__global__ void split(half *dest[],
-                      half *source,
+__global__ void split(unsigned char *dest[],
+                      unsigned char *source,
+                      unsigned long elementSizeBytes,
                       long numElements,
                       int numDimensions,
                       int numDestArrays,
@@ -80,14 +81,18 @@ __global__ void split(half *dest[],
         long destFlatIndex =
             computeFlatIndexFromIndex(sourceIndex, &(stridePerDestDimensionShared[destArray * numDimensions]), numDimensions);
 
-        dest[destArray][destFlatIndex] = source[sourceFlatIndex];
+        unsigned char *destElement = dest[destArray] + static_cast<unsigned long>(destFlatIndex) * elementSizeBytes;
+        unsigned char *sourceElement = source + static_cast<unsigned long>(sourceFlatIndex) * elementSizeBytes;
+        for (unsigned long byte = 0; byte < elementSizeBytes; ++byte)
+            destElement[byte] = sourceElement[byte];
 
         sourceFlatIndex += 256;
     }
 }
 
-void launchSplit(half *dest[],
-                 half *source,
+void launchSplit(void *dest[],
+                 void *source,
+                 std::size_t elementSizeBytes,
                  long numElements,
                  int numDimensions,
                  int numDestArrays,
@@ -101,8 +106,9 @@ void launchSplit(half *dest[],
     dim3 blockSize(256);
     dim3 gridSize((numElements + 4095) / 4096);
     int sharedRequirement = (256 * numDimensions + numDestArrays + numDimensions + numDestArrays * numDimensions) * sizeof(long);
-    split<<<gridSize, blockSize, sharedRequirement, stream.getStream()>>>(dest,
-                                                                          source,
+    split<<<gridSize, blockSize, sharedRequirement, stream.getStream()>>>(reinterpret_cast<unsigned char **>(dest),
+                                                                          static_cast<unsigned char *>(source),
+                                                                          static_cast<unsigned long>(elementSizeBytes),
                                                                           numElements,
                                                                           numDimensions,
                                                                           numDestArrays,

@@ -185,7 +185,7 @@ class Network {
     uint64_t firstInstanceBytes;
     uint64_t nonFirstInstanceBytes;
 
-    virtual StatusCode createDagAndFreeze();
+    virtual StatusCode createDagAndFreeze(bool inferenceOnly);
     virtual void preOptimize(uint32_t gpuNum, uint32_t batchSize);
     virtual StatusCode stampNetwork(uint32_t gpuNum,
                                     std::vector<Event> &initDoneEvents,
@@ -193,7 +193,8 @@ class Network {
                                     std::vector<ThorImplementation::StampedNetwork> &stampedNetworks,
                                     const bool inferenceOnly);
 
-    virtual StatusCode evaluateGraph();
+    virtual StatusCode evaluateGraph(bool inferenceOnly);
+    virtual void pruneLoadedTrainingArtifactsForInference();
     virtual StatusCode checkForDuplicateInOutPortNames();
     virtual StatusCode checkForFloatingInputs();
     virtual StatusCode checkForDanglingOutputs();
@@ -231,6 +232,7 @@ class Network {
     bool terminatesWithoutHitting(Tensor tensor, std::shared_ptr<Layer> layer);
 
     bool frozen;
+    bool loadedFromArchive = false;
 
     bool allowUnsafeLoadedCudaKernelSourceCompilation_ = false;
     std::string trustedLoadedCudaKernelPublicKey_;

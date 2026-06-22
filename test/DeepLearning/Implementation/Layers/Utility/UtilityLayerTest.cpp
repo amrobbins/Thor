@@ -123,6 +123,275 @@ float readTensorFanoutSumValue(const Tensor &tensor, uint32_t index) {
 }
 
 template <typename T>
+struct UtilityLayerDTypeTraits;
+
+template <>
+struct UtilityLayerDTypeTraits<float> {
+    static constexpr DataType dtype = DataType::FP32;
+    static constexpr float tolerance = 0.0f;
+};
+
+template <>
+struct UtilityLayerDTypeTraits<__nv_bfloat16> {
+    static constexpr DataType dtype = DataType::BF16;
+    static constexpr float tolerance = 1.0e-2f;
+};
+
+template <typename T>
+void writeUtilityLayerValue(Tensor &tensor, uint64_t index, float value) {
+    reinterpret_cast<T *>(tensor.getMemPtr())[index] = T(value);
+}
+
+template <typename T>
+float readUtilityLayerValue(const Tensor &tensor, uint64_t index) {
+    return static_cast<float>(reinterpret_cast<const T *>(tensor.getMemPtr())[index]);
+}
+
+template <typename T>
+void expectUtilityLayerValueNear(const Tensor &tensor, uint64_t index, float expected) {
+    ASSERT_NEAR(readUtilityLayerValue<T>(tensor, index), expected, UtilityLayerDTypeTraits<T>::tolerance) << "index " << index;
+}
+
+template <typename T>
+void expectMapForwardAndBackwardForDType() {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    Stream stream(0);
+
+    const vector<unsigned long> sourceDimensions{3};
+    const vector<unsigned long> destDimensions{5};
+    Tensor mappingCpu(cpuPlacement, TensorDescriptor(DataType::UINT32, destDimensions));
+    Tensor mappingGpu(gpuPlacement, mappingCpu.getDescriptor());
+    uint32_t *mappingMem = reinterpret_cast<uint32_t *>(mappingCpu.getMemPtr());
+    const uint32_t mappingValues[] = {2, 0, 1, 2, 0};
+    for (uint32_t i = 0; i < 5; ++i)
+        mappingMem[i] = mappingValues[i];
+    mappingGpu.copyFromAsync(mappingCpu, stream);
+    stream.synchronize();
+
+    Tensor sourceCpu(cpuPlacement, TensorDescriptor(UtilityLayerDTypeTraits<T>::dtype, sourceDimensions));
+    Tensor sourceGpu(gpuPlacement, sourceCpu.getDescriptor());
+    const float sourceValues[] = {1.25f, -2.5f, 4.0f};
+    for (uint32_t i = 0; i < 3; ++i)
+        writeUtilityLayerValue<T>(sourceCpu, i, sourceValues[i]);
+
+    {
+        Tensor destCpu(cpuPlacement, TensorDescriptor(UtilityLayerDTypeTraits<T>::dtype, destDimensions));
+        vector<shared_ptr<Layer>> layers;
+        layers.push_back(make_shared<NetworkInput>(sourceGpu));
+        layers.push_back(make_shared<Map<uint32_t>>(mappingGpu, sourceDimensions));
+        layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
+
+        LayerTestHelper::connectAndInitializeNetwork(layers);
+        Tensor outputGpu = layers.back()->getFeatureOutput().value();
+        ASSERT_EQ(outputGpu.getDescriptor().getDataType(), UtilityLayerDTypeTraits<T>::dtype);
+
+        Stream runStream = layers.front()->getStream();
+        layers.front()->forward(sourceCpu, false);
+        runStream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
+        destCpu.copyFromAsync(outputGpu, runStream);
+        runStream.synchronize();
+
+        for (uint32_t i = 0; i < 5; ++i)
+            expectUtilityLayerValueNear<T>(destCpu, i, sourceValues[mappingValues[i]]);
+
+        LayerTestHelper::tearDownNetwork(layers);
+    }
+
+    {
+        Tensor errorInputCpu(cpuPlacement, TensorDescriptor(UtilityLayerDTypeTraits<T>::dtype, destDimensions));
+        Tensor errorOutputCpu(cpuPlacement, TensorDescriptor(UtilityLayerDTypeTraits<T>::dtype, sourceDimensions));
+        const float errorInputValues[] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f};
+        for (uint32_t i = 0; i < 5; ++i)
+            writeUtilityLayerValue<T>(errorInputCpu, i, errorInputValues[i]);
+
+        auto mapLayer = make_shared<Map<uint32_t>>(mappingGpu, sourceDimensions);
+        vector<shared_ptr<Layer>> layers;
+        layers.push_back(make_shared<NetworkInput>(gpuPlacement, UtilityLayerDTypeTraits<T>::dtype, sourceDimensions));
+        layers.push_back(make_shared<NoOpLayer>());
+        layers.push_back(mapLayer);
+        layers.push_back(make_shared<BackpropDescriptorSinkLayer>());
+
+        LayerTestHelper::connectAndInitializeNetwork(layers);
+        Tensor errorInput = mapLayer->getErrorInput().value();
+        Tensor errorOutput = mapLayer->getErrorOutput().value();
+        ASSERT_EQ(errorInput.getDescriptor().getDataType(), UtilityLayerDTypeTraits<T>::dtype);
+        ASSERT_EQ(errorOutput.getDescriptor().getDataType(), UtilityLayerDTypeTraits<T>::dtype);
+
+        Stream runStream = mapLayer->getStream();
+        errorInput.copyFromAsync(errorInputCpu, runStream);
+        mapLayer->backward(errorInput);
+        errorOutputCpu.copyFromAsync(errorOutput, runStream);
+        runStream.synchronize();
+
+        const float expectedErrorOutput[] = {7.0f, 3.0f, 5.0f};
+        for (uint32_t i = 0; i < 3; ++i)
+            expectUtilityLayerValueNear<T>(errorOutputCpu, i, expectedErrorOutput[i]);
+
+        LayerTestHelper::tearDownNetwork(layers);
+    }
+}
+
+template <typename T>
+void expectPadForwardAndBackwardForDType() {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+
+    const vector<unsigned long> inputDimensions{2, 3};
+    const vector<unsigned long> outputDimensions{3, 6};
+    map<unsigned int, pair<unsigned int, unsigned int>> paddingAmount{{0, {1, 0}}, {1, {2, 1}}};
+
+    Tensor sourceCpu(cpuPlacement, TensorDescriptor(UtilityLayerDTypeTraits<T>::dtype, inputDimensions));
+    Tensor sourceGpu(gpuPlacement, sourceCpu.getDescriptor());
+    for (uint32_t i = 0; i < 6; ++i)
+        writeUtilityLayerValue<T>(sourceCpu, i, static_cast<float>(i + 1));
+
+    {
+        Tensor destCpu(cpuPlacement, TensorDescriptor(UtilityLayerDTypeTraits<T>::dtype, outputDimensions));
+        vector<shared_ptr<Layer>> layers;
+        layers.push_back(make_shared<NetworkInput>(sourceGpu));
+        layers.push_back(make_shared<Pad>(paddingAmount));
+        layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
+
+        LayerTestHelper::connectAndInitializeNetwork(layers);
+        Tensor outputGpu = layers.back()->getFeatureOutput().value();
+        ASSERT_EQ(outputGpu.getDescriptor().getDataType(), UtilityLayerDTypeTraits<T>::dtype);
+
+        Stream runStream = layers.front()->getStream();
+        layers.front()->forward(sourceCpu, false);
+        runStream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
+        destCpu.copyFromAsync(outputGpu, runStream);
+        runStream.synchronize();
+
+        for (uint32_t destIndex = 0; destIndex < outputGpu.getDescriptor().getTotalNumElements(); ++destIndex) {
+            vector<unsigned long> outIndex = destCpu.getDescriptor().getDimensionalIndex(destIndex);
+            const bool isPadding = outIndex[0] < 1 || outIndex[1] < 2 || outIndex[1] >= 5;
+            if (isPadding) {
+                expectUtilityLayerValueNear<T>(destCpu, destIndex, 0.0f);
+            } else {
+                const uint64_t sourceIndex = (outIndex[0] - 1) * inputDimensions[1] + (outIndex[1] - 2);
+                expectUtilityLayerValueNear<T>(destCpu, destIndex, static_cast<float>(sourceIndex + 1));
+            }
+        }
+
+        LayerTestHelper::tearDownNetwork(layers);
+    }
+
+    {
+        Tensor errorInputCpu(cpuPlacement, TensorDescriptor(UtilityLayerDTypeTraits<T>::dtype, outputDimensions));
+        Tensor errorOutputCpu(cpuPlacement, TensorDescriptor(UtilityLayerDTypeTraits<T>::dtype, inputDimensions));
+        for (uint32_t i = 0; i < errorInputCpu.getDescriptor().getTotalNumElements(); ++i)
+            writeUtilityLayerValue<T>(errorInputCpu, i, static_cast<float>(i + 1));
+
+        auto padLayer = make_shared<Pad>(paddingAmount);
+        vector<shared_ptr<Layer>> layers;
+        layers.push_back(make_shared<NetworkInput>(gpuPlacement, UtilityLayerDTypeTraits<T>::dtype, inputDimensions));
+        layers.push_back(make_shared<NoOpLayer>());
+        layers.push_back(padLayer);
+        layers.push_back(make_shared<BackpropDescriptorSinkLayer>());
+
+        LayerTestHelper::connectAndInitializeNetwork(layers);
+        Tensor errorInput = padLayer->getErrorInput().value();
+        Tensor errorOutput = padLayer->getErrorOutput().value();
+        ASSERT_EQ(errorInput.getDescriptor().getDataType(), UtilityLayerDTypeTraits<T>::dtype);
+        ASSERT_EQ(errorOutput.getDescriptor().getDataType(), UtilityLayerDTypeTraits<T>::dtype);
+
+        Stream runStream = padLayer->getStream();
+        errorInput.copyFromAsync(errorInputCpu, runStream);
+        padLayer->backward(errorInput);
+        errorOutputCpu.copyFromAsync(errorOutput, runStream);
+        runStream.synchronize();
+
+        for (uint32_t sourceIndex = 0; sourceIndex < sourceCpu.getDescriptor().getTotalNumElements(); ++sourceIndex) {
+            vector<unsigned long> inIndex = sourceCpu.getDescriptor().getDimensionalIndex(sourceIndex);
+            const uint64_t paddedIndex = (inIndex[0] + 1) * outputDimensions[1] + (inIndex[1] + 2);
+            expectUtilityLayerValueNear<T>(errorOutputCpu, sourceIndex, static_cast<float>(paddedIndex + 1));
+        }
+
+        LayerTestHelper::tearDownNetwork(layers);
+    }
+}
+
+template <typename T>
+void expectExtractForwardAndBackwardForDType() {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+
+    const vector<unsigned long> inputDimensions{3, 4};
+    const vector<unsigned long> outputDimensions{2, 3};
+    vector<pair<unsigned int, unsigned int>> dimensionSpans{{1, 2}, {1, 3}};
+
+    Tensor sourceCpu(cpuPlacement, TensorDescriptor(UtilityLayerDTypeTraits<T>::dtype, inputDimensions));
+    Tensor sourceGpu(gpuPlacement, sourceCpu.getDescriptor());
+    for (uint32_t i = 0; i < sourceCpu.getDescriptor().getTotalNumElements(); ++i)
+        writeUtilityLayerValue<T>(sourceCpu, i, static_cast<float>(i + 1));
+
+    {
+        Tensor destCpu(cpuPlacement, TensorDescriptor(UtilityLayerDTypeTraits<T>::dtype, outputDimensions));
+        vector<shared_ptr<Layer>> layers;
+        layers.push_back(make_shared<NetworkInput>(sourceGpu));
+        layers.push_back(make_shared<Extract>(dimensionSpans));
+        layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
+
+        LayerTestHelper::connectAndInitializeNetwork(layers);
+        Tensor outputGpu = layers.back()->getFeatureOutput().value();
+        ASSERT_EQ(outputGpu.getDescriptor().getDataType(), UtilityLayerDTypeTraits<T>::dtype);
+
+        Stream runStream = layers.front()->getStream();
+        layers.front()->forward(sourceCpu, false);
+        runStream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
+        destCpu.copyFromAsync(outputGpu, runStream);
+        runStream.synchronize();
+
+        for (uint32_t destIndex = 0; destIndex < destCpu.getDescriptor().getTotalNumElements(); ++destIndex) {
+            vector<unsigned long> outIndex = destCpu.getDescriptor().getDimensionalIndex(destIndex);
+            const uint64_t sourceIndex = (outIndex[0] + 1) * inputDimensions[1] + (outIndex[1] + 1);
+            expectUtilityLayerValueNear<T>(destCpu, destIndex, static_cast<float>(sourceIndex + 1));
+        }
+
+        LayerTestHelper::tearDownNetwork(layers);
+    }
+
+    {
+        Tensor errorInputCpu(cpuPlacement, TensorDescriptor(UtilityLayerDTypeTraits<T>::dtype, outputDimensions));
+        Tensor errorOutputCpu(cpuPlacement, TensorDescriptor(UtilityLayerDTypeTraits<T>::dtype, inputDimensions));
+        for (uint32_t i = 0; i < errorInputCpu.getDescriptor().getTotalNumElements(); ++i)
+            writeUtilityLayerValue<T>(errorInputCpu, i, static_cast<float>(10 * (i + 1)));
+
+        auto extractLayer = make_shared<Extract>(dimensionSpans);
+        vector<shared_ptr<Layer>> layers;
+        layers.push_back(make_shared<NetworkInput>(gpuPlacement, UtilityLayerDTypeTraits<T>::dtype, inputDimensions));
+        layers.push_back(make_shared<NoOpLayer>());
+        layers.push_back(extractLayer);
+        layers.push_back(make_shared<BackpropDescriptorSinkLayer>());
+
+        LayerTestHelper::connectAndInitializeNetwork(layers);
+        Tensor errorInput = extractLayer->getErrorInput().value();
+        Tensor errorOutput = extractLayer->getErrorOutput().value();
+        ASSERT_EQ(errorInput.getDescriptor().getDataType(), UtilityLayerDTypeTraits<T>::dtype);
+        ASSERT_EQ(errorOutput.getDescriptor().getDataType(), UtilityLayerDTypeTraits<T>::dtype);
+
+        Stream runStream = extractLayer->getStream();
+        errorInput.copyFromAsync(errorInputCpu, runStream);
+        extractLayer->backward(errorInput);
+        errorOutputCpu.copyFromAsync(errorOutput, runStream);
+        runStream.synchronize();
+
+        for (uint32_t sourceIndex = 0; sourceIndex < errorOutputCpu.getDescriptor().getTotalNumElements(); ++sourceIndex) {
+            vector<unsigned long> inIndex = errorOutputCpu.getDescriptor().getDimensionalIndex(sourceIndex);
+            if (inIndex[0] < 1 || inIndex[0] > 2 || inIndex[1] < 1 || inIndex[1] > 3) {
+                expectUtilityLayerValueNear<T>(errorOutputCpu, sourceIndex, 0.0f);
+            } else {
+                const uint64_t extractedIndex = (inIndex[0] - 1) * outputDimensions[1] + (inIndex[1] - 1);
+                expectUtilityLayerValueNear<T>(errorOutputCpu, sourceIndex, static_cast<float>(10 * (extractedIndex + 1)));
+            }
+        }
+
+        LayerTestHelper::tearDownNetwork(layers);
+    }
+}
+
+template <typename T>
 void expectTensorFanoutSumsBackwardErrorsForDType() {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
@@ -435,6 +704,10 @@ TEST(Map, MapsCorrectlyToMoreElements) {
 
     LayerTestHelper::tearDownNetwork(layers);
 }
+
+TEST(Map, MapsFp32ForwardAndBackward) { expectMapForwardAndBackwardForDType<float>(); }
+
+TEST(Map, MapsBf16ForwardAndBackward) { expectMapForwardAndBackwardForDType<__nv_bfloat16>(); }
 
 TEST(Flatten, BackwardAliasPreservesInputDescriptor) {
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
@@ -1245,6 +1518,10 @@ TEST(Pad, Pads) {
     }
 }
 
+TEST(Pad, PadsFp32ForwardAndBackward) { expectPadForwardAndBackwardForDType<float>(); }
+
+TEST(Pad, PadsBf16ForwardAndBackward) { expectPadForwardAndBackwardForDType<__nv_bfloat16>(); }
+
 unsigned int safeMod(unsigned int a, unsigned int b) {
     if (b == 0)
         return 0;
@@ -1338,3 +1615,7 @@ TEST(Extract, Extracts) {
         LayerTestHelper::tearDownNetwork(layers);
     }
 }
+
+TEST(Extract, ExtractsFp32ForwardAndBackward) { expectExtractForwardAndBackwardForDType<float>(); }
+
+TEST(Extract, ExtractsBf16ForwardAndBackward) { expectExtractForwardAndBackwardForDType<__nv_bfloat16>(); }

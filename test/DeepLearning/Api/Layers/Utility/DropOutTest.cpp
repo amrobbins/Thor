@@ -9,6 +9,40 @@ using namespace Thor;
 using namespace std;
 using json = nlohmann::json;
 
+namespace {
+
+class TestableDropOut : public DropOut {
+   public:
+    explicit TestableDropOut(const DropOut &dropOut) : DropOut(dropOut) {}
+
+    uint64_t reservedStateSizeInBytes(uint32_t batchSize) const { return getReservedStateSizeInBytes(batchSize); }
+};
+
+}  // namespace
+
+TEST(UtilityApiLayers, DropOutReservedSpaceEstimateUsesFeatureInputDataType) {
+    Network network("dropout_reserved_space_uses_dtype");
+    const uint32_t batchSize = 7;
+    const vector<uint64_t> dimensions = {3, 5};
+
+    Tensor featureInput(DataType::FP32, dimensions);
+    DropOut dropOut = DropOut::Builder().network(network).featureInput(featureInput).dropProportion(0.25f).build();
+
+    vector<uint64_t> dimensionsWithBatchSize = {batchSize};
+    dimensionsWithBatchSize.insert(dimensionsWithBatchSize.end(), dimensions.begin(), dimensions.end());
+
+    const uint64_t expectedFp32ReserveBytes =
+        ThorImplementation::DropOut::getReservedSpaceSizeInBytes(dimensionsWithBatchSize, DataType::FP32);
+    const uint64_t fp16ReserveBytes =
+        ThorImplementation::DropOut::getReservedSpaceSizeInBytes(dimensionsWithBatchSize, DataType::FP16);
+
+    TestableDropOut testableDropOut(dropOut);
+    EXPECT_EQ(testableDropOut.reservedStateSizeInBytes(batchSize), expectedFp32ReserveBytes);
+    if (expectedFp32ReserveBytes != fp16ReserveBytes) {
+        EXPECT_NE(testableDropOut.reservedStateSizeInBytes(batchSize), fp16ReserveBytes);
+    }
+}
+
 TEST(UtilityApiLayers, DropOutBuilds) {
     srand(time(nullptr));
 

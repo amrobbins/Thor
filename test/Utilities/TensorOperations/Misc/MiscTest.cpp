@@ -13,6 +13,7 @@
 #include "cuda_runtime.h"
 #include "gtest/gtest.h"
 
+#include <cstddef>
 #include <set>
 
 using namespace ThorImplementation;
@@ -65,7 +66,7 @@ TEST(MapInt, MapsCorrectly) {
         cudaStatus = cudaMemcpyAsync(mapping_d, mapping, numElements * sizeof(int), cudaMemcpyHostToDevice, stream.getStream());
         assert(cudaStatus == cudaSuccess);
 
-        launchMap<unsigned int>(dest_d, source_d, mapping_d, numElements, stream);
+        launchMap<unsigned int>(dest_d, source_d, mapping_d, numElements, DataType::FP16, stream);
 
         cudaStatus = cudaMemcpyAsync(dest, dest_d, numElements * sizeof(half), cudaMemcpyDeviceToHost, stream.getStream());
         assert(cudaStatus == cudaSuccess);
@@ -124,7 +125,7 @@ TEST(MapLong, MapsCorrectly) {
         cudaStatus = cudaMemcpyAsync(mapping_d, mapping, numElements * sizeof(long), cudaMemcpyHostToDevice, stream.getStream());
         assert(cudaStatus == cudaSuccess);
 
-        launchMap<unsigned long>(dest_d, source_d, mapping_d, numElements, stream);
+        launchMap<unsigned long>(dest_d, source_d, mapping_d, numElements, DataType::FP16, stream);
 
         cudaStatus = cudaMemcpyAsync(dest, dest_d, numElements * sizeof(half), cudaMemcpyDeviceToHost, stream.getStream());
         assert(cudaStatus == cudaSuccess);
@@ -264,8 +265,9 @@ TEST(Split, SplitsCorrectly) {
                                      stream.getStream());
         assert(cudaStatus == cudaSuccess);
 
-        launchSplit(splitTensorMemArray_d,
-                    (half *)wholeGpu.getMemPtr(),
+        launchSplit(reinterpret_cast<void **>(splitTensorMemArray_d),
+                    wholeGpu.getMemPtr(),
+                    sizeof(half),
                     numElements,
                     numDimensions,
                     numSplitTensors,
@@ -420,8 +422,9 @@ TEST(Concatenate, ConcatenatesCorrectly) {
         assert(cudaStatus == cudaSuccess);
 
         long numElements = wholeCpu.getDescriptor().getTotalNumElements();
-        launchConcatenate((half *)wholeGpu.getMemPtr(),
-                          splitTensorMemArray_d,
+        launchConcatenate(wholeGpu.getMemPtr(),
+                          reinterpret_cast<void **>(splitTensorMemArray_d),
+                          static_cast<std::size_t>(TensorDescriptor::getElementSizeInBytes(wholeGpu.getDescriptor().getDataType())),
                           numElements,
                           numDimensions,
                           numSplitTensors,

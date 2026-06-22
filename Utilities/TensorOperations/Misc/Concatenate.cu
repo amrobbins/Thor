@@ -30,8 +30,9 @@ __device__ __forceinline__ long computeFlatIndexFromIndex(long index[], long str
     return flatIndex;
 }
 
-__global__ void concatenate(half *dest,
-                            half *source[],
+__global__ void concatenate(unsigned char *dest,
+                            unsigned char *source[],
+                            unsigned long elementSizeBytes,
                             long numElements,
                             int numDimensions,
                             int numSourceArrays,
@@ -78,14 +79,18 @@ __global__ void concatenate(half *dest,
         long sourceFlatIndex =
             computeFlatIndexFromIndex(destIndex, &(stridePerSourceDimensionShared[sourceArray * numDimensions]), numDimensions);
 
-        dest[destFlatIndex] = source[sourceArray][sourceFlatIndex];
+        unsigned char *destElement = dest + static_cast<unsigned long>(destFlatIndex) * elementSizeBytes;
+        unsigned char *sourceElement = source[sourceArray] + static_cast<unsigned long>(sourceFlatIndex) * elementSizeBytes;
+        for (unsigned long byte = 0; byte < elementSizeBytes; ++byte)
+            destElement[byte] = sourceElement[byte];
 
         destFlatIndex += 256;
     }
 }
 
-void launchConcatenate(half *dest,
-                       half *source[],
+void launchConcatenate(void *dest,
+                       void *source[],
+                       std::size_t elementSizeBytes,
                        long numElements,
                        int numDimensions,
                        int numSourceArrays,
@@ -99,8 +104,9 @@ void launchConcatenate(half *dest,
     dim3 blockSize(256);
     dim3 gridSize((numElements + 4095) / 4096);
     int sharedRequirement = (256 * numDimensions + numSourceArrays + numDimensions + numSourceArrays * numDimensions) * sizeof(long);
-    concatenate<<<gridSize, blockSize, sharedRequirement, stream.getStream()>>>(dest,
-                                                                                source,
+    concatenate<<<gridSize, blockSize, sharedRequirement, stream.getStream()>>>(static_cast<unsigned char *>(dest),
+                                                                                reinterpret_cast<unsigned char **>(source),
+                                                                                static_cast<unsigned long>(elementSizeBytes),
                                                                                 numElements,
                                                                                 numDimensions,
                                                                                 numSourceArrays,

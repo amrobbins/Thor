@@ -1,14 +1,23 @@
 #include "Pad.h"
+#include "DataTypeDispatch.h"
 #include "DeepLearning/Implementation/ThorError.h"
 
-__global__ void pad(half *dest,
-                    half *source,
-                    unsigned long numDestElements,
-                    unsigned int numDimensions,
-                    unsigned long stridePerPaddedDimension[],
-                    unsigned long stridePerUnpaddedDimension[],
-                    unsigned int padBefore[],
-                    unsigned int padAfter[]) {
+namespace {
+
+template <typename ELEMENT_TYPE>
+__device__ ELEMENT_TYPE zeroValue() {
+    return ELEMENT_TYPE(0.0f);
+}
+
+template <typename ELEMENT_TYPE>
+__global__ void padKernel(ELEMENT_TYPE *dest,
+                          ELEMENT_TYPE *source,
+                          unsigned long numDestElements,
+                          unsigned int numDimensions,
+                          unsigned long stridePerPaddedDimension[],
+                          unsigned long stridePerUnpaddedDimension[],
+                          unsigned int padBefore[],
+                          unsigned int padAfter[]) {
     extern __shared__ unsigned long dynamicShared[];
 
     unsigned long *stridePerPaddedDimensionShared = dynamicShared;
@@ -51,22 +60,23 @@ __global__ void pad(half *dest,
 
             sourceIndex += (dimensionIndex - padBeforeShared[d]) * stridePerUnpaddedDimensionShared[d];
         }
-        half val = isPadding ? (half)0.0f : source[sourceIndex];
+        ELEMENT_TYPE val = isPadding ? zeroValue<ELEMENT_TYPE>() : source[sourceIndex];
         dest[destIndex] = val;
 
         destIndex += 256;
     }
 }
 
-void launchPad(half *dest_d,
-               half *source_d,
-               unsigned long numDestElements,
-               unsigned int numDimensions,
-               unsigned long stridePerPaddedDimension_d[],
-               unsigned long stridePerUnpaddedDimension_d[],
-               unsigned int padBefore_d[],
-               unsigned int padAfter_d[],
-               Stream stream) {
+template <typename ELEMENT_TYPE>
+void launchPadTyped(void *dest_d,
+                    void *source_d,
+                    unsigned long numDestElements,
+                    unsigned int numDimensions,
+                    unsigned long stridePerPaddedDimension_d[],
+                    unsigned long stridePerUnpaddedDimension_d[],
+                    unsigned int padBefore_d[],
+                    unsigned int padAfter_d[],
+                    Stream stream) {
     // in place is not supported
     THOR_THROW_IF_FALSE(dest_d != source_d);
 
@@ -74,12 +84,61 @@ void launchPad(half *dest_d,
     dim3 gridSize((numDestElements + 2047) / 2048);
 
     int sharedRequirement = 4 * numDimensions * sizeof(unsigned long);
-    pad<<<gridSize, blockSize, sharedRequirement, stream>>>(dest_d,
-                                                            source_d,
-                                                            numDestElements,
-                                                            numDimensions,
-                                                            stridePerPaddedDimension_d,
-                                                            stridePerUnpaddedDimension_d,
-                                                            padBefore_d,
-                                                            padAfter_d);
+    padKernel<ELEMENT_TYPE><<<gridSize, blockSize, sharedRequirement, stream>>>(reinterpret_cast<ELEMENT_TYPE *>(dest_d),
+                                                                                reinterpret_cast<ELEMENT_TYPE *>(source_d),
+                                                                                numDestElements,
+                                                                                numDimensions,
+                                                                                stridePerPaddedDimension_d,
+                                                                                stridePerUnpaddedDimension_d,
+                                                                                padBefore_d,
+                                                                                padAfter_d);
+}
+
+struct LaunchPadFunctor {
+    void *dest_d;
+    void *source_d;
+    unsigned long numDestElements;
+    unsigned int numDimensions;
+    unsigned long *stridePerPaddedDimension_d;
+    unsigned long *stridePerUnpaddedDimension_d;
+    unsigned int *padBefore_d;
+    unsigned int *padAfter_d;
+    Stream stream;
+
+    template <typename ELEMENT_TYPE>
+    void operator()() const {
+        launchPadTyped<ELEMENT_TYPE>(dest_d,
+                                     source_d,
+                                     numDestElements,
+                                     numDimensions,
+                                     stridePerPaddedDimension_d,
+                                     stridePerUnpaddedDimension_d,
+                                     padBefore_d,
+                                     padAfter_d,
+                                     stream);
+    }
+};
+
+}  // namespace
+
+void launchPad(void *dest_d,
+               void *source_d,
+               unsigned long numDestElements,
+               unsigned int numDimensions,
+               unsigned long stridePerPaddedDimension_d[],
+               unsigned long stridePerUnpaddedDimension_d[],
+               unsigned int padBefore_d[],
+               unsigned int padAfter_d[],
+               ThorImplementation::DataType dataType,
+               Stream stream) {
+    ThorImplementation::MiscTensorOperationSupport::dispatchTensorDataType(dataType,
+                                                                           LaunchPadFunctor{dest_d,
+                                                                                            source_d,
+                                                                                            numDestElements,
+                                                                                            numDimensions,
+                                                                                            stridePerPaddedDimension_d,
+                                                                                            stridePerUnpaddedDimension_d,
+                                                                                            padBefore_d,
+                                                                                            padAfter_d,
+                                                                                            stream});
 }

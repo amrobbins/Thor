@@ -6,6 +6,7 @@
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "Utilities/TensorOperations/Misc/Map.h"
 
+#include <cstdint>
 #include <type_traits>
 
 namespace ThorImplementation {
@@ -53,6 +54,7 @@ class Map : public Layer {
         THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDimensions() == sourceDimensions);
 
         THOR_THROW_IF_FALSE(mappingOfSourceTensorIntoDestTensor.getPlacement() == featureInput.value().getPlacement());
+        THOR_THROW_IF_FALSE(mappingOfSourceTensorIntoDestTensor.getDescriptor().getDataType() == indexDataType());
         THOR_THROW_IF_FALSE(featureOutput.value().getDescriptor().getDimensions() == mappingOfSourceTensorIntoDestTensor.getDescriptor().getDimensions());
         if (errorInput.has_value())
             THOR_THROW_IF_FALSE(errorInput.value().getDescriptor().getDimensions() == mappingOfSourceTensorIntoDestTensor.getDescriptor().getDimensions());
@@ -62,7 +64,7 @@ class Map : public Layer {
                 uint64_t N = it->first;
                 Tensor mappingTensorHost = it->second;
                 backwardPassMappingOfNTo1Device[N] = mappingTensorHost.clone(featureInput.value().getPlacement());
-                backwardPassMappingOfNTo1Device[N].copyFromAsync(featureInput.value(), stream);
+                backwardPassMappingOfNTo1Device[N].copyFromAsync(mappingTensorHost, stream);
             }
             stream.synchronize();
         }
@@ -74,10 +76,12 @@ class Map : public Layer {
         THOR_THROW_IF_FALSE(outputTensor.has_value());
 
         ScopedGpu scopedGpu(inputTensor.value().getPlacement().getDeviceNum());
-        launchMap<INDEX_TYPE>((half *)outputTensor.value().getMemPtr(),
-                              (half *)inputTensor.value().getMemPtr(),
+        THOR_THROW_IF_FALSE(inputTensor.value().getDescriptor().getDataType() == outputTensor.value().getDescriptor().getDataType());
+        launchMap<INDEX_TYPE>(outputTensor.value().getMemPtr(),
+                              inputTensor.value().getMemPtr(),
                               (INDEX_TYPE *)mappingOfSourceTensorIntoDestTensor.getMemPtr(),
                               (INDEX_TYPE)mappingOfSourceTensorIntoDestTensor.getDescriptor().getTotalNumElements(),
+                              inputTensor.value().getDescriptor().getDataType(),
                               stream);
     }
 
@@ -86,6 +90,7 @@ class Map : public Layer {
         if (!errorOut.has_value())
             return;
         THOR_THROW_IF_FALSE(errorIn.has_value());
+        THOR_THROW_IF_FALSE(errorIn.value().getDescriptor().getDataType() == errorOut.value().getDescriptor().getDataType());
 
         ScopedGpu scopedGpu(errorIn.value().getPlacement().getDeviceNum());
 
@@ -94,10 +99,11 @@ class Map : public Layer {
             Tensor nMappingTensor = it->second;
             THOR_THROW_IF_FALSE(nMappingTensor.getDescriptor().getTotalNumElements() % (N + 1) == 0);
             launchMapNInto1<INDEX_TYPE>(N,
-                                        (half *)errorOut.value().getMemPtr(),
-                                        (half *)errorIn.value().getMemPtr(),
+                                        errorOut.value().getMemPtr(),
+                                        errorIn.value().getMemPtr(),
                                         (INDEX_TYPE *)nMappingTensor.getMemPtr(),
                                         (INDEX_TYPE)nMappingTensor.getDescriptor().getTotalNumElements() / (N + 1),
+                                        errorOut.value().getDescriptor().getDataType(),
                                         stream);
         }
     }
@@ -121,9 +127,30 @@ class Map : public Layer {
 
     std::vector<unsigned long> sourceDimensions;
 
+    static constexpr DataType indexDataType() {
+        if constexpr (std::is_same<INDEX_TYPE, uint8_t>::value) {
+            return DataType::UINT8;
+        } else if constexpr (std::is_same<INDEX_TYPE, uint16_t>::value) {
+            return DataType::UINT16;
+        } else if constexpr (std::is_same<INDEX_TYPE, uint32_t>::value || std::is_same<INDEX_TYPE, unsigned int>::value) {
+            return DataType::UINT32;
+        } else if constexpr (std::is_same<INDEX_TYPE, uint64_t>::value || std::is_same<INDEX_TYPE, unsigned long>::value ||
+                             std::is_same<INDEX_TYPE, unsigned long long>::value) {
+            return DataType::UINT64;
+        } else {
+            static_assert(std::is_same<INDEX_TYPE, uint8_t>::value || std::is_same<INDEX_TYPE, uint16_t>::value ||
+                              std::is_same<INDEX_TYPE, uint32_t>::value || std::is_same<INDEX_TYPE, uint64_t>::value ||
+                              std::is_same<INDEX_TYPE, unsigned int>::value || std::is_same<INDEX_TYPE, unsigned long>::value ||
+                              std::is_same<INDEX_TYPE, unsigned long long>::value,
+                          "Unsupported Map index type");
+        }
+    }
+
     void setup(Tensor mappingOfSourceTensorIntoDestTensor, std::vector<unsigned long> sourceDimensions) {
         THOR_THROW_IF_FALSE(std::is_integral<INDEX_TYPE>());
         THOR_THROW_IF_FALSE(!std::is_signed<INDEX_TYPE>());
+        THOR_THROW_IF_FALSE(mappingOfSourceTensorIntoDestTensor.getDescriptor().getDataType() == indexDataType());
+
         if (sizeof(INDEX_TYPE) < sizeof(uint64_t)) {
             uint64_t numSourceElements = TensorDescriptor(DataType::BOOLEAN, sourceDimensions).getTotalNumElements();
             uint64_t numDestElements = mappingOfSourceTensorIntoDestTensor.getDescriptor().getTotalNumElements();
@@ -197,7 +224,7 @@ class Map : public Layer {
             //   errorOutputIndex_mappingsOfSizeN, {errorInputIndex1, ..., errorInputIndexN} }
             flatDimension.push_back((N + 1) * mappingsOfSizeN);
 
-            Tensor backwardMappingTensor = Tensor(cpuPlacement, TensorDescriptor(DataType::UINT64, flatDimension));
+            Tensor backwardMappingTensor = Tensor(cpuPlacement, TensorDescriptor(indexDataType(), flatDimension));
             INDEX_TYPE *backwardMappingMem = (INDEX_TYPE *)backwardMappingTensor.getMemPtr();
 
             INDEX_TYPE i = 0;

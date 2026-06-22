@@ -577,3 +577,111 @@ TEST(Pooling, AveragePoolingWorks) {
         LayerTestHelper::tearDownNetwork(layers);
     }
 }
+
+TEST(Pooling, MaxPoolingUsesFp32TensorDescriptorsForwardAndBackward) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+
+    Tensor featureIn(cpuPlacement, TensorDescriptor(DataType::FP32, {1, 1, 2, 2}));
+    float *featureInMem = reinterpret_cast<float *>(featureIn.getMemPtr());
+    featureInMem[0] = 1.0f;
+    featureInMem[1] = 2.0f;
+    featureInMem[2] = 3.0f;
+    featureInMem[3] = 4.0f;
+
+    vector<shared_ptr<Layer>> layers;
+    layers.push_back(make_shared<NetworkInput>(gpuPlacement, DataType::FP32, featureIn.getDescriptor().getDimensions()));
+    layers.push_back(make_shared<NoOpLayer>());
+    auto poolingLayer = make_shared<Pooling>(Pooling::Type::MAX, 2, 2, 1, 1, 0, 0);
+    layers.push_back(poolingLayer);
+    layers.push_back(make_shared<NoOpLayer>());
+    layers.push_back(make_shared<NetworkOutput>(cpuPlacement));
+
+    Stream stream = layers.front()->getStream();
+    LayerTestHelper::connectAndInitializeNetwork(layers);
+
+    layers.front()->forward(featureIn, false);
+    stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
+    stream.synchronize();
+
+    Tensor featureOut = layers.back()->getFeatureOutput().value();
+    ASSERT_EQ(featureOut.getDescriptor().getDataType(), DataType::FP32);
+    const float *featureOutMem = reinterpret_cast<const float *>(featureOut.getMemPtr());
+    ASSERT_EQ(featureOut.getDescriptor().getTotalNumElements(), 1U);
+    ASSERT_FLOAT_EQ(featureOutMem[0], 4.0f);
+
+    Tensor errorInput = poolingLayer->getErrorInput().value();
+    Tensor errorOutput = poolingLayer->getErrorOutput().value();
+    ASSERT_EQ(errorInput.getDescriptor().getDataType(), DataType::FP32);
+    ASSERT_EQ(errorOutput.getDescriptor().getDataType(), DataType::FP32);
+
+    Tensor errorInputCpu(cpuPlacement, errorInput.getDescriptor());
+    reinterpret_cast<float *>(errorInputCpu.getMemPtr())[0] = 5.0f;
+    Tensor errorOutputCpu(cpuPlacement, errorOutput.getDescriptor());
+
+    errorInput.copyFromAsync(errorInputCpu, stream);
+    poolingLayer->backward(errorInput);
+    errorOutputCpu.copyFromAsync(errorOutput, stream);
+    stream.synchronize();
+
+    const float *errorOutputMem = reinterpret_cast<const float *>(errorOutputCpu.getMemPtr());
+    ASSERT_FLOAT_EQ(errorOutputMem[0], 0.0f);
+    ASSERT_FLOAT_EQ(errorOutputMem[1], 0.0f);
+    ASSERT_FLOAT_EQ(errorOutputMem[2], 0.0f);
+    ASSERT_FLOAT_EQ(errorOutputMem[3], 5.0f);
+
+    LayerTestHelper::tearDownNetwork(layers);
+}
+
+TEST(Pooling, AveragePoolingUsesFp32TensorDescriptorsForwardAndBackward) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+
+    Tensor featureIn(cpuPlacement, TensorDescriptor(DataType::FP32, {1, 1, 2, 2}));
+    float *featureInMem = reinterpret_cast<float *>(featureIn.getMemPtr());
+    featureInMem[0] = 1.0f;
+    featureInMem[1] = 2.0f;
+    featureInMem[2] = 3.0f;
+    featureInMem[3] = 4.0f;
+
+    vector<shared_ptr<Layer>> layers;
+    layers.push_back(make_shared<NetworkInput>(gpuPlacement, DataType::FP32, featureIn.getDescriptor().getDimensions()));
+    layers.push_back(make_shared<NoOpLayer>());
+    auto poolingLayer = make_shared<Pooling>(Pooling::Type::AVERAGE, 2, 2, 1, 1, 0, 0);
+    layers.push_back(poolingLayer);
+    layers.push_back(make_shared<NoOpLayer>());
+    layers.push_back(make_shared<NetworkOutput>(cpuPlacement));
+
+    Stream stream = layers.front()->getStream();
+    LayerTestHelper::connectAndInitializeNetwork(layers);
+
+    layers.front()->forward(featureIn, false);
+    stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
+    stream.synchronize();
+
+    Tensor featureOut = layers.back()->getFeatureOutput().value();
+    ASSERT_EQ(featureOut.getDescriptor().getDataType(), DataType::FP32);
+    const float *featureOutMem = reinterpret_cast<const float *>(featureOut.getMemPtr());
+    ASSERT_EQ(featureOut.getDescriptor().getTotalNumElements(), 1U);
+    ASSERT_FLOAT_EQ(featureOutMem[0], 2.5f);
+
+    Tensor errorInput = poolingLayer->getErrorInput().value();
+    Tensor errorOutput = poolingLayer->getErrorOutput().value();
+    ASSERT_EQ(errorInput.getDescriptor().getDataType(), DataType::FP32);
+    ASSERT_EQ(errorOutput.getDescriptor().getDataType(), DataType::FP32);
+
+    Tensor errorInputCpu(cpuPlacement, errorInput.getDescriptor());
+    reinterpret_cast<float *>(errorInputCpu.getMemPtr())[0] = 8.0f;
+    Tensor errorOutputCpu(cpuPlacement, errorOutput.getDescriptor());
+
+    errorInput.copyFromAsync(errorInputCpu, stream);
+    poolingLayer->backward(errorInput);
+    errorOutputCpu.copyFromAsync(errorOutput, stream);
+    stream.synchronize();
+
+    const float *errorOutputMem = reinterpret_cast<const float *>(errorOutputCpu.getMemPtr());
+    for (uint32_t i = 0; i < errorOutputCpu.getDescriptor().getTotalNumElements(); ++i)
+        ASSERT_FLOAT_EQ(errorOutputMem[i], 2.0f) << "index " << i;
+
+    LayerTestHelper::tearDownNetwork(layers);
+}

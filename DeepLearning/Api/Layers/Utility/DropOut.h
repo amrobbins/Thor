@@ -52,7 +52,8 @@ class DropOut : public Layer {
 
    protected:
     virtual uint64_t getReservedStateSizeInBytes(uint32_t batchSize) const {
-        ThorImplementation::DataType dataType = ThorImplementation::DataType::FP16;
+        THOR_THROW_IF_FALSE(featureInput.has_value());
+        ThorImplementation::DataType dataType = featureInput.value().getDataType();
         std::vector<uint64_t> featureInputDimensionsWithBatchSize;
         featureInputDimensionsWithBatchSize.push_back(batchSize);
         for (uint32_t i = 0; i < featureInput.value().getDimensions().size(); ++i)

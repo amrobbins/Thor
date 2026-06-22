@@ -488,8 +488,8 @@ def _prediction_from_saved_tiny_regressor(save_dir, network_name: str):
     loaded = thor.Network(network_name)
     loaded.load(str(save_dir))
     placed = loaded.place(4, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
-    x, y = _regression_arrays(dtype=np.float32)
-    outputs = placed.infer({"examples": _cpu_tensor(x, thor.DataType.fp32), "labels": _cpu_tensor(y, thor.DataType.fp32)})
+    x, _ = _regression_arrays(dtype=np.float32)
+    outputs = placed.infer({"examples": _cpu_tensor(x, thor.DataType.fp32)})
     return np.array(outputs["prediction"].numpy(), copy=True)
 
 
@@ -522,18 +522,15 @@ def test_saved_trained_model_load_place_inference_only_infer_sequence(tmp_path):
     placed = loaded.place(4, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
 
     assert isinstance(placed, thor.runtime.PlacedNetwork)
-    assert set(placed.get_network_input_names()) == {"examples", "labels"}
+    assert set(placed.get_network_input_names()) == {"examples"}
 
-    x, y = _regression_arrays(dtype=np.float32)
-    outputs = placed.infer({"examples": _cpu_tensor(x, thor.DataType.fp32), "labels": _cpu_tensor(y, thor.DataType.fp32)})
+    x, _ = _regression_arrays(dtype=np.float32)
+    outputs = placed.infer({"examples": _cpu_tensor(x, thor.DataType.fp32)})
 
-    assert set(outputs) == {"loss", "prediction"}
+    assert set(outputs) == {"prediction"}
     prediction = np.array(outputs["prediction"].numpy(), copy=True)
-    loss = np.array(outputs["loss"].numpy(), copy=True)
     assert prediction.shape == (4, 1)
-    assert loss.shape == (4, 1)
     assert np.all(np.isfinite(prediction))
-    assert np.all(np.isfinite(loss))
     assert not np.allclose(prediction, 0.0, atol=1e-7)
 
 
@@ -546,23 +543,29 @@ def test_saved_trained_model_load_place_inference_only_infer_sequence(tmp_path):
         description="opt-in TrainingRuns CUDA integration tests",
     ),
 )
-def test_saved_training_graph_inference_requires_all_network_inputs(tmp_path):
-    save_dir = tmp_path / "saved_training_graph_requires_all_inputs"
+def test_saved_training_graph_inference_prunes_loss_and_label_only_inputs(tmp_path):
+    save_dir = tmp_path / "saved_training_graph_prunes_loss_labels"
     trainer = _make_tiny_regression_trainer(
-        "saved_training_graph_requires_all_inputs",
+        "saved_training_graph_prunes_loss_labels",
         save_model_dir=save_dir,
         save_model_overwrite=True,
         check_best_model_every_epochs=1,
     )
     trainer.fit(1)
 
-    loaded = thor.Network("saved_training_graph_requires_all_inputs")
+    loaded = thor.Network("saved_training_graph_prunes_loss_labels")
     loaded.load(str(save_dir))
     placed = loaded.place(4, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
 
+    assert set(placed.get_network_input_names()) == {"examples"}
+
     x, _ = _regression_arrays(dtype=np.float32)
-    with pytest.raises(RuntimeError):
-        placed.infer({"examples": _cpu_tensor(x, thor.DataType.fp32)})
+    outputs = placed.infer({"examples": _cpu_tensor(x, thor.DataType.fp32)})
+
+    assert set(outputs) == {"prediction"}
+    prediction = np.array(outputs["prediction"].numpy(), copy=True)
+    assert prediction.shape == (4, 1)
+    assert np.all(np.isfinite(prediction))
 
 
 @pytest.mark.cuda

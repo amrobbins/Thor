@@ -91,15 +91,17 @@ class Pad : public Layer {
         THOR_THROW_IF_FALSE(inputTensor.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
         THOR_THROW_IF_FALSE(outputTensor.has_value());
         ScopedGpu scopedGpu(inputTensor.value().getPlacement().getDeviceNum());
+        THOR_THROW_IF_FALSE(inputTensor.value().getDescriptor().getDataType() == outputTensor.value().getDescriptor().getDataType());
 
-        launchPad((half *)outputTensor.value().getMemPtr(),
-                  (half *)inputTensor.value().getMemPtr(),
+        launchPad(outputTensor.value().getMemPtr(),
+                  inputTensor.value().getMemPtr(),
                   outputTensor.value().getDescriptor().getTotalNumElements(),
                   outputTensor.value().getDescriptor().getDimensions().size(),
                   (unsigned long *)stridePerPaddedDimension_d.getMemPtr(),
                   (unsigned long *)stridePerUnpaddedDimension_d.getMemPtr(),
                   (unsigned int *)padBefore_d.getMemPtr(),
                   (unsigned int *)padAfter_d.getMemPtr(),
+                  inputTensor.value().getDescriptor().getDataType(),
                   stream);
     }
 
@@ -110,15 +112,17 @@ class Pad : public Layer {
         THOR_THROW_IF_FALSE(errorIn.has_value());
         THOR_THROW_IF_FALSE(errorIn.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
         ScopedGpu scopedGpu(errorIn.value().getPlacement().getDeviceNum());
+        THOR_THROW_IF_FALSE(errorIn.value().getDescriptor().getDataType() == errorOut.value().getDescriptor().getDataType());
 
-        launchExtract((half *)errorOut.value().getMemPtr(),
-                      (half *)errorIn.value().getMemPtr(),
+        launchExtract(errorOut.value().getMemPtr(),
+                      errorIn.value().getMemPtr(),
                       errorOut.value().getDescriptor().getTotalNumElements(),
                       errorOut.value().getDescriptor().getDimensions().size(),
                       (unsigned long *)stridePerPaddedDimension_d.getMemPtr(),
                       (unsigned long *)stridePerUnpaddedDimension_d.getMemPtr(),
                       (unsigned int *)padBefore_d.getMemPtr(),
                       (unsigned int *)padAfter_d.getMemPtr(),
+                      errorOut.value().getDescriptor().getDataType(),
                       stream);
     }
 

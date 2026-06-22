@@ -1,6 +1,8 @@
 #pragma once
 
 #include <optional>
+#include <stdexcept>
+#include <string>
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
@@ -63,6 +65,9 @@ class Pooling : public Layer {
         stream.getCudnnHandle();
 
         std::vector<unsigned long> outputDimensions = featureOutput.value().getDescriptor().getDimensions();
+        DataType inputDataType = featureInput.value().getDescriptor().getDataType();
+        THOR_THROW_IF_FALSE(featureOutput.value().getDescriptor().getDataType() == inputDataType);
+        cudnnDataType_t cudnnDataType = toCudnnPoolingDataType(inputDataType);
         THOR_THROW_IF_FALSE(outputDimensions.size() == 4);
         THOR_THROW_IF_FALSE(outputDimensions[0] == (uint32_t)batchSize);
         THOR_THROW_IF_FALSE(outputDimensions[1] == (uint32_t)numFeatures);
@@ -90,14 +95,14 @@ class Pooling : public Layer {
         cudnnStatus = cudnnCreateTensorDescriptor(&featureInputDescriptor.value());
         THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
         cudnnStatus = cudnnSetTensor4dDescriptor(
-            featureInputDescriptor.value(), CUDNN_TENSOR_NCHW, CUDNN_DATA_HALF, batchSize, numFeatures, inputHeight, inputWidth);
+            featureInputDescriptor.value(), CUDNN_TENSOR_NCHW, cudnnDataType, batchSize, numFeatures, inputHeight, inputWidth);
         THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
         featureOutputDescriptor = cudnnTensorDescriptor_t();
         cudnnStatus = cudnnCreateTensorDescriptor(&featureOutputDescriptor.value());
         THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
         cudnnStatus = cudnnSetTensor4dDescriptor(
-            featureOutputDescriptor.value(), CUDNN_TENSOR_NCHW, CUDNN_DATA_HALF, batchSize, numFeatures, outputHeight, outputWidth);
+            featureOutputDescriptor.value(), CUDNN_TENSOR_NCHW, cudnnDataType, batchSize, numFeatures, outputHeight, outputWidth);
         THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
     }
 
@@ -230,6 +235,20 @@ class Pooling : public Layer {
     std::optional<cudnnPoolingDescriptor_t> poolingDescriptor;
     std::optional<cudnnTensorDescriptor_t> featureOutputDescriptor;
     std::optional<cudnnTensorDescriptor_t> featureInputDescriptor;
+
+    static cudnnDataType_t toCudnnPoolingDataType(DataType dtype) {
+        switch (dtype) {
+            case DataType::FP16:
+                return CUDNN_DATA_HALF;
+            case DataType::FP32:
+                return CUDNN_DATA_FLOAT;
+            case DataType::BF16:
+                return CUDNN_DATA_BFLOAT16;
+            default:
+                throw std::runtime_error("Pooling supports FP16, FP32, and BF16 tensors with the cuDNN pooling API; got " +
+                                         TensorDescriptor::getElementTypeName(dtype));
+        }
+    }
 };
 
 }  // namespace ThorImplementation

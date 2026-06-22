@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -95,31 +96,31 @@ class Concatenate : public MultiConnectionLayer {
         cudaError_t cudaStatus;
         int numSplitTensors = featureInputs.size();
 
-        cudaStatus = cudaMalloc(&splitTensorFeatureInputMemoriesArray_d, numSplitTensors * sizeof(half *));
+        cudaStatus = cudaMalloc(reinterpret_cast<void **>(&splitTensorFeatureInputMemoriesArray_d), numSplitTensors * sizeof(void *));
         THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
-        half **splitTensorFeatureInputMemoriesArray = new half *[numSplitTensors];
+        void **splitTensorFeatureInputMemoriesArray = new void *[numSplitTensors];
         for (int i = 0; i < numSplitTensors; ++i) {
             THOR_THROW_IF_FALSE(featureInputs[i].has_value());
-            splitTensorFeatureInputMemoriesArray[i] = (half *)featureInputs[i].value().getMemPtr();
+            splitTensorFeatureInputMemoriesArray[i] = featureInputs[i].value().getMemPtr();
         }
         cudaStatus = cudaMemcpy(splitTensorFeatureInputMemoriesArray_d,
                                 splitTensorFeatureInputMemoriesArray,
-                                numSplitTensors * sizeof(half *),
+                                numSplitTensors * sizeof(void *),
                                 cudaMemcpyHostToDevice);
         THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
         delete[] splitTensorFeatureInputMemoriesArray;
 
         if (errorInputs[0].has_value()) {
-            cudaStatus = cudaMalloc(&splitTensorErrorOutputMemoriesArray_d, numPresentTensors(errorOutputs) * sizeof(half *));
+            cudaStatus = cudaMalloc(reinterpret_cast<void **>(&splitTensorErrorOutputMemoriesArray_d), numPresentTensors(errorOutputs) * sizeof(void *));
             THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
-            half **splitTensorErrorOutputMemoriesArray = new half *[numSplitTensors];
+            void **splitTensorErrorOutputMemoriesArray = new void *[numSplitTensors];
             for (int i = 0; i < numSplitTensors; ++i) {
                 if (errorOutputs[i].has_value())
-                    splitTensorErrorOutputMemoriesArray[i] = (half *)errorOutputs[i].value().getMemPtr();
+                    splitTensorErrorOutputMemoriesArray[i] = errorOutputs[i].value().getMemPtr();
             }
             cudaStatus = cudaMemcpy(splitTensorErrorOutputMemoriesArray_d,
                                     splitTensorErrorOutputMemoriesArray,
-                                    numPresentTensors(errorOutputs) * sizeof(half *),
+                                    numPresentTensors(errorOutputs) * sizeof(void *),
                                     cudaMemcpyHostToDevice);
             THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
             delete[] splitTensorErrorOutputMemoriesArray;
@@ -184,7 +185,8 @@ class Concatenate : public MultiConnectionLayer {
     void backward(std::optional<Tensor> errorInput, uint32_t batchSize = 0) override {
         if (errorInput.has_value()) {
             launchSplit(splitTensorErrorOutputMemoriesArray_d,
-                        (half *)errorInput.value().getMemPtr(),
+                        errorInput.value().getMemPtr(),
+                        static_cast<std::size_t>(TensorDescriptor::getElementSizeInBytes(errorInput.value().getDescriptor().getDataType())),
                         errorInput.value().getDescriptor().getTotalNumElements(),
                         errorInput.value().getDescriptor().getDimensions().size(),
                         numPresentTensors(errorOutputs),
@@ -219,8 +221,9 @@ class Concatenate : public MultiConnectionLayer {
 
         refreshFeatureInputMemoryArray(streams[0]);
 
-        launchConcatenate((half *)featureOutputs[0].value().getMemPtr(),
+        launchConcatenate(featureOutputs[0].value().getMemPtr(),
                           splitTensorFeatureInputMemoriesArray_d,
+                          static_cast<std::size_t>(TensorDescriptor::getElementSizeInBytes(featureOutputs[0].value().getDescriptor().getDataType())),
                           featureOutputs[0].value().getDescriptor().getTotalNumElements(),
                           featureOutputs[0].value().getDescriptor().getDimensions().size(),
                           featureInputs.size(),
@@ -325,7 +328,7 @@ class Concatenate : public MultiConnectionLayer {
 
    private:
     struct FeatureInputMemoryArrayRefreshArgs : public HostFunctionArgsBase {
-        std::vector<half *> splitTensorFeatureInputMemories;
+        std::vector<void *> splitTensorFeatureInputMemories;
     };
 
     static void releaseFeatureInputMemoryArrayRefresh(void *) {}
@@ -338,12 +341,12 @@ class Concatenate : public MultiConnectionLayer {
         refreshArgs->splitTensorFeatureInputMemories.resize(numSplitTensors);
         for (int i = 0; i < numSplitTensors; ++i) {
             THOR_THROW_IF_FALSE(featureInputs[i].has_value());
-            refreshArgs->splitTensorFeatureInputMemories[i] = (half *)featureInputs[i].value().getMemPtr();
+            refreshArgs->splitTensorFeatureInputMemories[i] = featureInputs[i].value().getMemPtr();
         }
 
         cudaError_t cudaStatus = cudaMemcpyAsync(splitTensorFeatureInputMemoriesArray_d,
                                                  refreshArgs->splitTensorFeatureInputMemories.data(),
-                                                 numSplitTensors * sizeof(half *),
+                                                 numSplitTensors * sizeof(void *),
                                                  cudaMemcpyHostToDevice,
                                                  stream);
         THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
@@ -352,8 +355,8 @@ class Concatenate : public MultiConnectionLayer {
 
     unsigned int axis;
 
-    half **splitTensorFeatureInputMemoriesArray_d;
-    half **splitTensorErrorOutputMemoriesArray_d;
+    void **splitTensorFeatureInputMemoriesArray_d;
+    void **splitTensorErrorOutputMemoriesArray_d;
     long *stridePerPackedTensorDimension_d;
     long *stridePerSplitTensorDimension_d;
     long *axisElementsPerSplitTensor_d;
