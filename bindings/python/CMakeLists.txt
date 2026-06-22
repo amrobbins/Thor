@@ -282,9 +282,14 @@ endif ()
 # ---- Pytest target + optional CTest ----
 if (THOR_PYTHON_TESTS)
     set(THOR_PY_TEST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/test")
+    set(THOR_PY_TEST_ENV
+            "THOR_CUDA_BOOTSTRAP_SOURCE_TREE=1"
+            "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR}"
+    )
 
     add_custom_target(check-python
-            COMMAND "${Python_EXECUTABLE}" -m pytest
+            COMMAND ${CMAKE_COMMAND} -E env ${THOR_PY_TEST_ENV}
+            "${Python_EXECUTABLE}" -m pytest
             -q
             --color=yes
             --code-highlight=yes
@@ -299,7 +304,8 @@ if (THOR_PYTHON_TESTS)
     include(CTest)
     add_test(
             NAME thor_python_pytest
-            COMMAND "${Python_EXECUTABLE}" -m pytest -q "${THOR_PY_TEST_DIR}"
+            COMMAND ${CMAKE_COMMAND} -E env ${THOR_PY_TEST_ENV}
+            "${Python_EXECUTABLE}" -m pytest -q "${THOR_PY_TEST_DIR}"
     )
 endif ()
 
@@ -356,6 +362,7 @@ add_custom_target(check
         COMMAND ${CMAKE_COMMAND} -E chdir ${CMAKE_BINARY_DIR}
         $<TARGET_FILE:thor_tests> --gtest_color=yes
         COMMAND ${CMAKE_COMMAND} -E chdir ${CMAKE_SOURCE_DIR}
+        ${CMAKE_COMMAND} -E env ${THOR_PY_TEST_ENV}
         "${Python_EXECUTABLE}" -m pytest -q "${THOR_PY_TEST_DIR}"
         DEPENDS thor_tests thor_py_install thor_py_deps
         USES_TERMINAL

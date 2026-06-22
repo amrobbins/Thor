@@ -104,6 +104,17 @@ def test_runtime_bootstrap_rejects_stale_resolved_manifest(monkeypatch):
         bootstrap._validate_resolved_manifest_matches_source_selection()
 
 
+def test_runtime_bootstrap_detects_source_tree_test_bypass(monkeypatch):
+    monkeypatch.setenv("THOR_CUDA_BOOTSTRAP_SOURCE_TREE", "1")
+
+    assert bootstrap._source_tree_bootstrap_enabled()
+
+
+def test_runtime_bootstrap_source_tree_bypass_requires_exact_one(monkeypatch):
+    monkeypatch.setenv("THOR_CUDA_BOOTSTRAP_SOURCE_TREE", "true")
+
+    assert not bootstrap._source_tree_bootstrap_enabled()
+
 def test_runtime_bootstrap_detects_nanobind_stubgen(monkeypatch):
     monkeypatch.setattr(
         bootstrap._sys,
@@ -147,6 +158,29 @@ def test_configure_skips_cuda_distribution_validation_for_nanobind_stubgen(monke
     assert bootstrap._configured
     assert calls == []
 
+
+def test_configure_skips_cuda_distribution_validation_for_source_tree_test(monkeypatch):
+    calls: list[str] = []
+
+    monkeypatch.setattr(bootstrap, "_configured", False)
+    monkeypatch.setenv("THOR_CUDA_BOOTSTRAP_SOURCE_TREE", "1")
+    monkeypatch.setattr(
+        bootstrap,
+        "_validate_resolved_manifest_matches_source_selection",
+        lambda: calls.append("manifest"),
+    )
+    monkeypatch.setattr(bootstrap, "_configure_include_dirs", lambda: calls.append("includes"))
+    monkeypatch.setattr(bootstrap, "_preload_cuda_user_space_libs", lambda: calls.append("libs"))
+
+    def fail_metadata(_name: str):
+        raise AssertionError("source-tree tests must not require installed CUDA wheel metadata")
+
+    monkeypatch.setattr(bootstrap, "_metadata_distribution", fail_metadata)
+
+    bootstrap.configure()
+
+    assert bootstrap._configured
+    assert calls == []
 
 def test_cuda_include_env_uses_exact_declared_distribution_files(monkeypatch, tmp_path):
     cuda_include = tmp_path / "runtime_root" / "nvidia" / "cu13" / "include"

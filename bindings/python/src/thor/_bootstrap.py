@@ -28,6 +28,8 @@ _LIBRARY_SPECS: tuple[_LibrarySpec, ...] = _CUDA_STACK.libraries
 
 _configured = False
 
+_SOURCE_TREE_BOOTSTRAP_ENV = "THOR_CUDA_BOOTSTRAP_SOURCE_TREE"
+
 
 _VERSION_PART_RE = _re.compile(r"^(\d+)")
 _SPECIFIER_RE = _re.compile(r"^(==|!=|<=|>=|<|>)\s*(.+)$")
@@ -96,6 +98,19 @@ def _version_satisfies(version: str, specifier: str) -> bool:
             return False
     return True
 
+
+def _source_tree_bootstrap_enabled() -> bool:
+    """Return true for CMake/source-tree test imports.
+
+    Source-tree CMake test targets run against the just-built extension before
+    the final wheel has been installed with its frozen NVIDIA Python wheel
+    dependency metadata.  Those tests use the build/link environment selected
+    by CMake rather than the wheel-runtime CUDA preload path, so they opt out
+    explicitly via this environment variable.  Normal installed-wheel imports
+    do not set it and still require the exact frozen CUDA stack.
+    """
+
+    return _os.environ.get(_SOURCE_TREE_BOOTSTRAP_ENV) == "1"
 
 
 def _running_under_nanobind_stubgen() -> bool:
@@ -249,7 +264,7 @@ def configure() -> None:
     if _configured:
         return
 
-    if _running_under_nanobind_stubgen():
+    if _running_under_nanobind_stubgen() or _source_tree_bootstrap_enabled():
         _configured = True
         return
 
