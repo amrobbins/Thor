@@ -104,6 +104,50 @@ def test_runtime_bootstrap_rejects_stale_resolved_manifest(monkeypatch):
         bootstrap._validate_resolved_manifest_matches_source_selection()
 
 
+def test_runtime_bootstrap_detects_nanobind_stubgen(monkeypatch):
+    monkeypatch.setattr(
+        bootstrap._sys,
+        "argv",
+        ["/opt/python/cp312-cp312/lib/python3.12/site-packages/nanobind/stubgen.py"],
+    )
+
+    assert bootstrap._running_under_nanobind_stubgen()
+
+
+def test_runtime_bootstrap_does_not_treat_other_stubgen_as_nanobind(monkeypatch):
+    monkeypatch.setattr(bootstrap._sys, "argv", ["/tmp/other_tool/stubgen.py"])
+
+    assert not bootstrap._running_under_nanobind_stubgen()
+
+
+def test_configure_skips_cuda_distribution_validation_for_nanobind_stubgen(monkeypatch):
+    calls: list[str] = []
+
+    monkeypatch.setattr(bootstrap, "_configured", False)
+    monkeypatch.setattr(
+        bootstrap._sys,
+        "argv",
+        ["/opt/python/cp312-cp312/lib/python3.12/site-packages/nanobind/stubgen.py"],
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "_validate_resolved_manifest_matches_source_selection",
+        lambda: calls.append("manifest"),
+    )
+    monkeypatch.setattr(bootstrap, "_configure_include_dirs", lambda: calls.append("includes"))
+    monkeypatch.setattr(bootstrap, "_preload_cuda_user_space_libs", lambda: calls.append("libs"))
+
+    def fail_metadata(_name: str):
+        raise AssertionError("stub generation must not require installed CUDA wheel metadata")
+
+    monkeypatch.setattr(bootstrap, "_metadata_distribution", fail_metadata)
+
+    bootstrap.configure()
+
+    assert bootstrap._configured
+    assert calls == []
+
+
 def test_cuda_include_env_uses_exact_declared_distribution_files(monkeypatch, tmp_path):
     cuda_include = tmp_path / "runtime_root" / "nvidia" / "cu13" / "include"
     cccl_include = cuda_include / "cccl"

@@ -225,12 +225,12 @@ TEST(Trainer, RejectsZeroBestModelCandidateCheckCadence) {
     auto loader = std::make_shared<FakeLoader>();
     auto executor = std::make_shared<CapturingExecutor>();
 
-    EXPECT_THROW((Trainer::Builder()
-                      .network(network)
-                      .loader(loader)
-                      .executor(executor)
-                      .checkBestModelEveryEpochs(0)
-                      .build()),
+    EXPECT_THROW((static_cast<void>(Trainer::Builder()
+                                        .network(network)
+                                        .loader(loader)
+                                        .executor(executor)
+                                        .checkBestModelEveryEpochs(0)
+                                        .build())),
                  std::runtime_error);
 }
 
@@ -266,12 +266,12 @@ TEST(Trainer, RejectsEarlyCompletionPolicyWithoutCondition) {
     auto loader = std::make_shared<FakeLoader>();
     auto executor = std::make_shared<CapturingExecutor>();
 
-    EXPECT_THROW((Trainer::Builder()
-                      .network(network)
-                      .loader(loader)
-                      .executor(executor)
-                      .earlyCompletionPolicies({TrainingEarlyCompletionPolicy{}})
-                      .build()),
+    EXPECT_THROW((static_cast<void>(Trainer::Builder()
+                                        .network(network)
+                                        .loader(loader)
+                                        .executor(executor)
+                                        .earlyCompletionPolicies({TrainingEarlyCompletionPolicy{}})
+                                        .build())),
                  std::runtime_error);
 }
 

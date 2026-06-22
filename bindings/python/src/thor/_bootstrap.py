@@ -7,6 +7,7 @@ from fnmatch import fnmatch as _fnmatch
 from importlib import metadata as _metadata
 import os as _os
 from pathlib import Path as _Path
+import sys as _sys
 import re as _re
 from typing import Iterable as _Iterable
 from typing import Sequence as _Sequence
@@ -95,6 +96,26 @@ def _version_satisfies(version: str, specifier: str) -> bool:
             return False
     return True
 
+
+
+def _running_under_nanobind_stubgen() -> bool:
+    """Return true for nanobind's build-time stub generator process.
+
+    Stub generation imports the build-tree Python package before the final wheel
+    has been installed with its runtime dependency metadata.  In that context
+    the native extension is resolved from the build tree and linked build
+    environment, while the built wheel still records and enforces the exact
+    CUDA Python dependency stack for normal imports.
+    """
+
+    if not _sys.argv:
+        return False
+
+    argv0 = _Path(_sys.argv[0])
+    if argv0.name != "stubgen.py":
+        return False
+
+    return any(part.lower() == "nanobind" for part in argv0.parts)
 
 
 def _validate_resolved_manifest_matches_source_selection() -> None:
@@ -226,6 +247,10 @@ def _preload_cuda_user_space_libs() -> None:
 def configure() -> None:
     global _configured
     if _configured:
+        return
+
+    if _running_under_nanobind_stubgen():
+        _configured = True
         return
 
     _validate_resolved_manifest_matches_source_selection()
