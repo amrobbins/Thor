@@ -1078,7 +1078,6 @@ def test_queued_trainer_trains_byte_level_transformer_lm_on_fineweb_edu(capfd):
             loader,
             optimizer=optimizer,
             debug_synchronous=False,
-            stats=True,
             stats_interval_s=BYTE_LM_STATS_INTERVAL_S,
             max_in_flight_batches=BYTE_LM_MAX_IN_FLIGHT_BATCHES,
             scalar_tensors_to_report=["loss"],

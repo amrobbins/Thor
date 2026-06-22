@@ -587,6 +587,7 @@ struct TrainingSelectionMetadata {
     uint64_t completedEpoch = 0;
     std::string completionReason = "completed";
     uint32_t checkBestModelEveryEpochs = 1;
+    uint64_t minEarlyCompletionEpochs = 0;
 };
 
 class BestModelCandidateManager {
@@ -646,8 +647,9 @@ class BestModelCandidateManager {
 
         const std::filesystem::path finalDirectory = std::filesystem::path(saveModelDirectory.value());
         if (!bestCandidateDirectory.has_value()) {
-            placedNetwork.save(finalDirectory.string(), overwrite, saveOptimizerState);
-            writeSelectionMetadata(finalDirectory, metadata);
+            if (overwrite && std::filesystem::exists(finalDirectory)) {
+                removePathIfExists(finalDirectory);
+            }
             return;
         }
 
@@ -739,7 +741,8 @@ class BestModelCandidateManager {
             out << ",\n";
             out << "  \"completed_epoch\": " << metadata.completedEpoch << ",\n";
             out << "  \"completion_reason\": \"" << metadata.completionReason << "\",\n";
-            out << "  \"check_best_model_every_epochs\": " << metadata.checkBestModelEveryEpochs << "\n";
+            out << "  \"check_best_model_every_epochs\": " << metadata.checkBestModelEveryEpochs << ",\n";
+            out << "  \"min_early_completion_epochs\": " << metadata.minEarlyCompletionEpochs << "\n";
             out << "}\n";
             if (!out) {
                 throw std::runtime_error("Failed while writing training selection metadata file: " + tmpPath.string());
@@ -1059,10 +1062,7 @@ void throwIfQueuedTrainingStateFailed(const std::shared_ptr<QueuedTrainingState>
     }
 }
 
-void emitTrainingEvent(TrainingObserver& observer, bool statsEnabled, const TrainingEvent& event) {
-    if (!statsEnabled && event.type == TrainingEventType::STATS) {
-        return;
-    }
+void emitTrainingEvent(TrainingObserver& observer, const TrainingEvent& event) {
     observer.onTrainingEvent(event);
 }
 
@@ -1435,10 +1435,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     }
 
     TrainingRuntimeConfig runtime = request.runtime;
-    const bool emitStatsEvents = request.runtime.statsEnabled;
-    const bool collectBestModelStats = !evaluateOnly && (request.saveModelDirectory.has_value() || !request.earlyCompletionPolicies.empty());
-    if (collectBestModelStats) {
-        runtime.statsEnabled = true;
+    if (!evaluateOnly && (request.saveModelDirectory.has_value() || !request.earlyCompletionPolicies.empty())) {
         runtime.scalarTensorsToReport.insert("loss");
     }
 
@@ -1484,7 +1481,8 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     const uint64_t trainingFlopsPerBatch = statsStampedNetwork.getFloatingPointOperationsPerExampleTraining() * batchSize;
 
     const auto runStart = std::chrono::high_resolution_clock::now();
-    uint64_t currentEpoch = 0;
+    uint64_t currentEpoch = evaluateOnly ? 0 : request.initialCompletedEpochs;
+    const uint64_t totalRequestedEpochs = currentEpoch + request.epochs;
     double averageTrainingBatchTime = -1.0;
     double averageValidationBatchTime = -1.0;
 
@@ -1504,7 +1502,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         snapshot.datasetName = request.loader->getDatasetName();
         snapshot.phase = phase;
         snapshot.epoch = epoch;
-        snapshot.epochs = request.epochs;
+        snapshot.epochs = totalRequestedEpochs;
         snapshot.batchSize = batchSize;
         snapshot.stepsPerEpoch = batchesPerEpoch;
         snapshot.elapsedSeconds = elapsedSinceRunStart();
@@ -1513,14 +1511,13 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     };
 
     BestModelCandidateManager bestModelCandidate(request.saveModelDirectory, request.saveModelOverwrite, request.saveOptimizerState);
+    const uint64_t firstEarlyCompletionEpoch =
+        request.minEarlyCompletionEpochs == 0 ? request.checkBestModelEveryEpochs : request.minEarlyCompletionEpochs;
     bool runEarlyCompleted = false;
     std::optional<uint64_t> completedEpoch{};
 
-    if (emitStatsEvents) {
-        emitTrainingEvent(observer,
-                          emitStatsEvents,
-                          TrainingEvent::runStarted(makeBaseSnapshot(TrainingEventPhase::UNKNOWN, 0, batchSize, 0, nullptr)));
-    }
+    emitTrainingEvent(observer,
+                      TrainingEvent::runStarted(makeBaseSnapshot(TrainingEventPhase::UNKNOWN, 0, batchSize, 0, nullptr)));
 
     for (uint32_t epochOffset = 0; epochOffset < request.epochs; ++epochOffset) {
         request.cancellationToken.throwIfCancellationRequested();
@@ -1546,19 +1543,13 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
             }
             const uint64_t batchesToRun = batchesPerEpoch - batchNum;
 
-            std::vector<std::string> scalarTensorNames;
-            if (runtime.statsEnabled) {
-                scalarTensorNames.assign(runtime.scalarTensorsToReport.begin(), runtime.scalarTensorsToReport.end());
-            }
+            std::vector<std::string> scalarTensorNames(runtime.scalarTensorsToReport.begin(), runtime.scalarTensorsToReport.end());
             auto state = std::make_shared<QueuedTrainingState>(options.maxInFlightBatches, std::move(scalarTensorNames));
             state->numBatchesDoneInEpoch = batchNum;
             state->numBatchesInEpoch = batchesPerEpoch;
 
-            if (emitStatsEvents) {
-                emitTrainingEvent(observer,
-                                  emitStatsEvents,
-                                  TrainingEvent::epochStarted(makeBaseSnapshot(phase, humanEpoch, batchSize, batchesPerEpoch, state)));
-            }
+            emitTrainingEvent(observer,
+                              TrainingEvent::epochStarted(makeBaseSnapshot(phase, humanEpoch, batchSize, batchesPerEpoch, state)));
 
             NativeQueuedEpochScheduler scheduler(
                 placedNetwork, request.loader, plan, options, state, currentEpoch, batchesPerEpoch, exampleType, request.cancellationToken);
@@ -1647,7 +1638,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                         }
                     }
 
-                    if (runtime.statsEnabled) {
+                    {
                         double& averageBatchTime =
                             (phase == TrainingEventPhase::TRAIN) ? averageTrainingBatchTime : averageValidationBatchTime;
                         double completedBatchTime = -1.0;
@@ -1694,7 +1685,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
 
                         assignScalarStatsToSnapshot(snapshot, state->scalarTensorNames, completedBatch.scalarStats);
                         epochLosses.update(snapshot);
-                        emitTrainingEvent(observer, emitStatsEvents, TrainingEvent::statsUpdated(std::move(snapshot)));
+                        emitTrainingEvent(observer, TrainingEvent::statsUpdated(std::move(snapshot)));
                     }
 
                     batchNum += 1;
@@ -1706,15 +1697,14 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
 
             schedulingThread.join();
             throwIfQueuedTrainingStateFailed(state);
-            if (emitStatsEvents) {
-                emitTrainingEvent(observer,
-                                  emitStatsEvents,
-                                  TrainingEvent::epochFinished(makeBaseSnapshot(phase, humanEpoch, batchSize, batchesPerEpoch, state)));
-            }
+            emitTrainingEvent(observer,
+                              TrainingEvent::epochFinished(makeBaseSnapshot(phase, humanEpoch, batchSize, batchesPerEpoch, state)));
         }
 
         bool earlyCompletionRequested = false;
-        if (!evaluateOnly && humanEpoch % request.checkBestModelEveryEpochs == 0) {
+        const bool earlyCompletionEligible = !evaluateOnly && humanEpoch >= firstEarlyCompletionEpoch &&
+                                             ((humanEpoch - firstEarlyCompletionEpoch) % request.checkBestModelEveryEpochs == 0);
+        if (earlyCompletionEligible) {
             const std::optional<double> currentScore = request.modelSelectionScore.evaluate(
                 epochLosses.validationLoss(), epochLosses.trainLoss(), humanEpoch);
             bestModelCandidate.maybeSnapshot(*placedNetwork, humanEpoch, currentScore);
@@ -1748,14 +1738,19 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         selectionMetadata.completedEpoch = finalCompletedEpoch;
         selectionMetadata.completionReason = finalCompletionReason;
         selectionMetadata.checkBestModelEveryEpochs = request.checkBestModelEveryEpochs;
+        selectionMetadata.minEarlyCompletionEpochs = request.minEarlyCompletionEpochs;
         bestModelCandidate.finalize(*placedNetwork, selectionMetadata);
         if (request.completedPlacedNetwork != nullptr) {
             *request.completedPlacedNetwork = placedNetwork;
+        }
+        if (request.completedTrainingEpochs != nullptr) {
+            *request.completedTrainingEpochs = finalCompletedEpoch;
         }
     }
 
     TrainingStatsSnapshot finishedStats = makeBaseSnapshot(TrainingEventPhase::UNKNOWN, currentEpoch, batchSize, 0, nullptr);
     finishedStats.metrics["completed_epoch"] = static_cast<double>(finalCompletedEpoch);
+    finishedStats.metrics["min_early_completion_epochs"] = static_cast<double>(request.minEarlyCompletionEpochs);
     if (bestModelCandidate.getBestEpoch().has_value()) {
         finishedStats.metrics["best_epoch"] = static_cast<double>(bestModelCandidate.getBestEpoch().value());
     }
@@ -1763,7 +1758,6 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         finishedStats.metrics["best_score"] = bestModelCandidate.getBestScore().value();
     }
     emitTrainingEvent(observer,
-                      emitStatsEvents,
                       TrainingEvent::runFinished(std::move(finishedStats), finalCompletionReason));
 }
 

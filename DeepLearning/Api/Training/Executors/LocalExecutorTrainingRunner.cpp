@@ -43,7 +43,6 @@ void runLocalExecutorBackedTraining(const TrainingRunRequest& request,
                                          .loader(request.loader)
                                          .trainingProgram(request.trainingProgram)
                                          .observer(borrowedObserver)
-                                         .statsEnabled(request.runtime.statsEnabled)
                                          .statsIntervalSeconds(request.runtime.statsIntervalSeconds)
                                          .maxInFlightBatches(options.maxInFlightBatches)
                                          .synchronizeAfterEveryBatch(options.synchronizeAfterEveryBatch);
@@ -52,8 +51,7 @@ void runLocalExecutorBackedTraining(const TrainingRunRequest& request,
     }
     std::shared_ptr<LocalExecutor> localExecutor = builder.build();
     request.cancellationToken.throwIfCancellationRequested();
-    localExecutor->trainEpochs(request.epochs, request.runtime.statsEnabled ? request.runtime.scalarTensorsToReport
-                                                                             : std::set<std::string>{});
+    localExecutor->trainEpochs(request.epochs, request.runtime.scalarTensorsToReport);
 }
 
 }  // namespace Thor

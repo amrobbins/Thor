@@ -174,34 +174,42 @@ class RestartProgressExecutor : public TrainingExecutor {
 
     void fit(const TrainingRunRequest& request, TrainingObserver& observer) override {
         calls += 1;
-        sawStatsEnabled = sawStatsEnabled || request.runtime.statsEnabled;
         sawLossRequested = sawLossRequested || request.runtime.scalarTensorsToReport.count("loss") != 0;
         lastEarlyCompletionPolicyCount = request.earlyCompletionPolicies.size();
+        lastInitialCompletedEpochs = request.initialCompletedEpochs;
+        lastMinEarlyCompletionEpochs = request.minEarlyCompletionEpochs;
         if (!request.earlyCompletionPolicies.empty()) {
             lastEarlyCompletionDecision = request.earlyCompletionPolicies.front().shouldComplete(10.0, 9.0, 5, 4);
         }
 
         const size_t attemptIndex = static_cast<size_t>(calls - 1);
         const std::vector<double>& losses = attemptEpochLosses.at(std::min(attemptIndex, attemptEpochLosses.size() - 1));
+        uint64_t finalEpoch = request.initialCompletedEpochs;
         for (uint32_t epoch = 1; epoch <= request.epochs; ++epoch) {
             request.cancellationToken.throwIfCancellationRequested();
+            const uint64_t globalEpoch = request.initialCompletedEpochs + epoch;
             TrainingStatsSnapshot stats;
             stats.phase = TrainingEventPhase::TRAIN;
-            stats.epoch = epoch;
-            stats.epochs = request.epochs;
-            stats.step = epoch;
+            stats.epoch = globalEpoch;
+            stats.epochs = request.initialCompletedEpochs + request.epochs;
+            stats.step = globalEpoch;
             stats.stepInEpoch = 1;
             stats.stepsPerEpoch = 1;
             stats.loss = losses[std::min<size_t>(epoch - 1, losses.size() - 1)];
             observer.onTrainingEvent(TrainingEvent::statsUpdated(stats));
+            finalEpoch = globalEpoch;
+        }
+        if (request.completedTrainingEpochs != nullptr) {
+            *request.completedTrainingEpochs = finalEpoch;
         }
     }
 
     uint32_t calls = 0;
-    bool sawStatsEnabled = false;
     bool sawLossRequested = false;
     size_t lastEarlyCompletionPolicyCount = 0;
     bool lastEarlyCompletionDecision = false;
+    uint64_t lastInitialCompletedEpochs = 0;
+    uint64_t lastMinEarlyCompletionEpochs = 0;
 
    private:
     std::vector<std::vector<double>> attemptEpochLosses;
@@ -226,7 +234,6 @@ std::shared_ptr<Trainer> makeTrainer(std::shared_ptr<Network> network,
                                          .loader(std::make_shared<FakeLoader>())
                                          .executor(std::move(executor))
                                          .observer(std::make_shared<NullTrainingObserver>())
-                                         .statsEnabled(false)
                                          .saveModelDirectory(std::move(saveModelDirectory))
                                          .restartConditions(std::move(restartConditions))
                                          .earlyCompletionPolicies(std::move(earlyCompletionPolicies))
@@ -238,6 +245,12 @@ void rethrowIfSet(std::exception_ptr exception) {
         std::rethrow_exception(exception);
     }
 }
+
+std::filesystem::path uniqueTempPath(const std::string& prefix) {
+    return std::filesystem::temp_directory_path() /
+           (prefix + "-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+}
+
 
 }  // namespace
 
@@ -277,6 +290,29 @@ TEST(TrainingRuns, RejectsInvalidRunSpecs) {
     EXPECT_THROW(duplicateTrainer(), std::runtime_error);
     EXPECT_THROW(invalidSummaryRate(), std::runtime_error);
     EXPECT_THROW(invalidMaxParallelRuns(), std::runtime_error);
+}
+
+
+TEST(TrainingRuns, FitRejectsExistingSaveModelDirectoryBeforeStartingWorkersWhenOverwriteIsFalse) {
+    auto network0 = std::make_shared<Network>("training-runs-existing-save-dir-0");
+    auto network1 = std::make_shared<Network>("training-runs-existing-save-dir-1");
+    auto coordinator = std::make_shared<Coordinator>(2);
+    auto executor0 = std::make_shared<CoordinatedExecutor>(coordinator, FakeExecutorBehavior::COMPLETE_AFTER_RELEASE);
+    auto executor1 = std::make_shared<CoordinatedExecutor>(coordinator, FakeExecutorBehavior::COMPLETE_AFTER_RELEASE);
+    const std::filesystem::path existingSaveDir = uniqueTempPath("thor-training-runs-existing-save-dir");
+    const std::filesystem::path freshSaveDir = uniqueTempPath("thor-training-runs-fresh-save-dir");
+    std::filesystem::create_directories(existingSaveDir);
+
+    std::shared_ptr<Trainer> trainer0 = makeTrainer(network0, executor0, existingSaveDir.string());
+    std::shared_ptr<Trainer> trainer1 = makeTrainer(network1, executor1, freshSaveDir.string());
+    TrainingRuns runs({TrainingRunsSpec{"fold_0", trainer0}, TrainingRunsSpec{"fold_1", trainer1}});
+
+    EXPECT_THROW(runs.fit(1), std::runtime_error);
+    EXPECT_EQ(executor0->calls, 0u);
+    EXPECT_EQ(executor1->calls, 0u);
+
+    std::filesystem::remove_all(existingSaveDir);
+    std::filesystem::remove_all(freshSaveDir);
 }
 
 TEST(TrainingRuns, RejectsDuplicateSaveModelDirectories) {
@@ -557,17 +593,88 @@ TEST(TrainingRuns, RejectsInvalidFitOptionsBeforeLaunchingThreads) {
 }
 
 
+TEST(Trainer, RestartConditionUsesCumulativeEpochAcrossFitCalls) {
+    auto network = std::make_shared<Network>("trainer-restart-global-epoch");
+    auto executor = std::make_shared<RestartProgressExecutor>(
+        std::vector<std::vector<double>>{{100.0}, {100.0}});
+    std::shared_ptr<Trainer> trainer = makeTrainer(
+        network,
+        executor,
+        std::nullopt,
+        {TrainingRestartCondition{/*progressCheckEpochs=*/2, /*progressImprovementMinPercentage=*/5.0, /*maxRestarts=*/0}});
+
+    trainer->fit(1);
+    EXPECT_EQ(executor->calls, 1u);
+    EXPECT_EQ(executor->lastInitialCompletedEpochs, 0u);
+    EXPECT_EQ(trainer->getCompletedTrainingEpochs(), 1u);
+
+    EXPECT_THROW(trainer->fit(1), std::exception);
+    EXPECT_EQ(executor->calls, 2u);
+    EXPECT_EQ(executor->lastInitialCompletedEpochs, 1u);
+    EXPECT_EQ(trainer->getCompletedTrainingEpochs(), 1u);
+}
+
+
+TEST(TrainingRuns, RestartPolicyUsesCumulativeEpochAcrossFitCalls) {
+    auto network = std::make_shared<Network>("training-runs-restart-global-epoch");
+    auto executor = std::make_shared<RestartProgressExecutor>(std::vector<std::vector<double>>{{100.0}, {100.0}});
+    std::shared_ptr<Trainer> trainer = makeTrainer(network, executor);
+    TrainingRunsRestartPolicy condition = TrainingRunsRestartPolicy::forRun(
+        "fold_0", /*progressCheckEpochs=*/2, /*progressImprovementMinPercentage=*/5.0, /*maxRestarts=*/0);
+    TrainingRuns runs({{"fold_0", trainer}}, TrainingRunsFailurePolicy::CONTINUE, 0.0, std::nullopt, {condition});
+    TrainingRunsEvaluationOptions evaluationOptions;
+    evaluationOptions.evaluateTrainingPopulation = false;
+
+    TrainingRunsResult firstResult = runs.fit(TrainerFitOptions{1}, evaluationOptions);
+    EXPECT_TRUE(firstResult.allCompleted());
+    EXPECT_EQ(executor->calls, 1u);
+    EXPECT_EQ(executor->lastInitialCompletedEpochs, 0u);
+    EXPECT_EQ(trainer->getCompletedTrainingEpochs(), 1u);
+
+    TrainingRunsResult secondResult = runs.fit(TrainerFitOptions{1}, evaluationOptions);
+    ASSERT_TRUE(secondResult.anyFailed());
+    EXPECT_EQ(executor->calls, 2u);
+    EXPECT_EQ(executor->lastInitialCompletedEpochs, 1u);
+    EXPECT_EQ(trainer->getCompletedTrainingEpochs(), 1u);
+    const TrainingRunResult& failed = secondResult["fold_0"];
+    EXPECT_EQ(failed.status, TrainingRunStatus::FAILED);
+    EXPECT_EQ(failed.exception.type, "TrainingRestartConditionExceeded");
+    EXPECT_NE(failed.exception.message.find("progress_check_epochs=2"), std::string::npos);
+}
+
+TEST(TrainingRuns, RestartPolicyDoesNotRecheckPastCumulativeEpochOnLaterFit) {
+    auto network = std::make_shared<Network>("training-runs-restart-past-global-epoch");
+    auto executor = std::make_shared<RestartProgressExecutor>(std::vector<std::vector<double>>{{100.0, 90.0}, {100.0, 100.0}});
+    std::shared_ptr<Trainer> trainer = makeTrainer(network, executor);
+    TrainingRunsRestartPolicy condition = TrainingRunsRestartPolicy::forRun(
+        "fold_0", /*progressCheckEpochs=*/2, /*progressImprovementMinPercentage=*/5.0, /*maxRestarts=*/0);
+    TrainingRuns runs({{"fold_0", trainer}}, TrainingRunsFailurePolicy::CONTINUE, 0.0, std::nullopt, {condition});
+    TrainingRunsEvaluationOptions evaluationOptions;
+    evaluationOptions.evaluateTrainingPopulation = false;
+
+    TrainingRunsResult firstResult = runs.fit(TrainerFitOptions{2}, evaluationOptions);
+    EXPECT_TRUE(firstResult.allCompleted());
+    EXPECT_EQ(executor->calls, 1u);
+    EXPECT_EQ(executor->lastInitialCompletedEpochs, 0u);
+    EXPECT_EQ(trainer->getCompletedTrainingEpochs(), 2u);
+
+    TrainingRunsResult secondResult = runs.fit(TrainerFitOptions{2}, evaluationOptions);
+    EXPECT_TRUE(secondResult.allCompleted());
+    EXPECT_EQ(executor->calls, 2u);
+    EXPECT_EQ(executor->lastInitialCompletedEpochs, 2u);
+    EXPECT_EQ(trainer->getCompletedTrainingEpochs(), 4u);
+}
+
 TEST(Trainer, RestartConditionRestartsSingleTrainerUntilProgressImproves) {
     auto network = std::make_shared<Network>("trainer-restart-progress");
     auto executor = std::make_shared<RestartProgressExecutor>(
         std::vector<std::vector<double>>{{100.0, 98.0, 98.0}, {100.0, 90.0, 85.0}});
     std::shared_ptr<Trainer> trainer = makeTrainer(
-        network, executor, std::nullopt, {TrainingRestartCondition{/*progressCheckEpochs=*/2, /*progressPercentage=*/5.0, /*maxRestarts=*/5}});
+        network, executor, std::nullopt, {TrainingRestartCondition{/*progressCheckEpochs=*/2, /*progressImprovementMinPercentage=*/5.0, /*maxRestarts=*/5}});
 
     trainer->fit(3);
 
     EXPECT_EQ(executor->calls, 2u);
-    EXPECT_TRUE(executor->sawStatsEnabled);
     EXPECT_TRUE(executor->sawLossRequested);
 }
 
@@ -577,14 +684,13 @@ TEST(TrainingRuns, RestartConditionRestartsRunUntilProgressImproves) {
         std::vector<std::vector<double>>{{100.0, 98.0, 98.0}, {100.0, 90.0, 85.0}});
     std::shared_ptr<Trainer> trainer = makeTrainer(network, executor);
     TrainingRunsRestartPolicy condition = TrainingRunsRestartPolicy::forRun(
-        "fold_0", /*progressCheckEpochs=*/2, /*progressPercentage=*/5.0, /*maxRestarts=*/5);
+        "fold_0", /*progressCheckEpochs=*/2, /*progressImprovementMinPercentage=*/5.0, /*maxRestarts=*/5);
     TrainingRuns runs({{"fold_0", trainer}}, TrainingRunsFailurePolicy::CONTINUE, 0.0, std::nullopt, {condition});
 
     TrainingRunsResult result = runs.fit(3);
 
     ASSERT_TRUE(result.allCompleted());
     EXPECT_EQ(executor->calls, 2u);
-    EXPECT_TRUE(executor->sawStatsEnabled);
     EXPECT_TRUE(executor->sawLossRequested);
     ASSERT_TRUE(result["fold_0"].finalLossForPhase(TrainingEventPhase::TRAIN).has_value());
     EXPECT_DOUBLE_EQ(result["fold_0"].finalLossForPhase(TrainingEventPhase::TRAIN).value(), 85.0);
@@ -596,7 +702,7 @@ TEST(TrainingRuns, RestartConditionExhaustionFailsRunWithAttemptProgress) {
         std::vector<std::vector<double>>{{100.0, 98.0}, {100.0, 97.0}, {100.0, 96.0}});
     std::shared_ptr<Trainer> trainer = makeTrainer(network, executor);
     TrainingRunsRestartPolicy condition = TrainingRunsRestartPolicy::forRun(
-        "fold_0", /*progressCheckEpochs=*/2, /*progressPercentage=*/5.0, /*maxRestarts=*/2);
+        "fold_0", /*progressCheckEpochs=*/2, /*progressImprovementMinPercentage=*/5.0, /*maxRestarts=*/2);
     TrainingRuns runs({{"fold_0", trainer}}, TrainingRunsFailurePolicy::CONTINUE, 0.0, std::nullopt, {condition});
 
     TrainingRunsResult result = runs.fit(2);
@@ -622,7 +728,7 @@ TEST(TrainingRuns, RestartConditionCanTargetEnsembleGroup) {
     std::shared_ptr<Trainer> trainer0 = makeTrainer(network0, executor0);
     std::shared_ptr<Trainer> trainer1 = makeTrainer(network1, executor1);
     TrainingRunsRestartPolicy condition = TrainingRunsRestartPolicy::forEnsembleGroup(
-        "digits", /*progressCheckEpochs=*/2, /*progressPercentage=*/5.0, /*maxRestarts=*/1);
+        "digits", /*progressCheckEpochs=*/2, /*progressImprovementMinPercentage=*/5.0, /*maxRestarts=*/1);
     TrainingRuns runs({TrainingRunsSpec{"fold_0", trainer0, "digits"}, TrainingRunsSpec{"fold_1", trainer1, "digits"}},
                       TrainingRunsFailurePolicy::CONTINUE,
                       0.0,
@@ -644,9 +750,9 @@ TEST(TrainingRuns, RestartConditionAllowsMultipleConditionsForSameEnsembleGroupW
         std::vector<std::vector<double>>{{100.0, 98.0, 98.0}, {100.0, 90.0, 85.0}, {100.0, 90.0, 70.0}});
     std::shared_ptr<Trainer> trainer = makeTrainer(network, executor);
     TrainingRunsRestartPolicy earlyCondition = TrainingRunsRestartPolicy::forEnsembleGroup(
-        "digits", /*progressCheckEpochs=*/2, /*progressPercentage=*/5.0, /*maxRestarts=*/1);
+        "digits", /*progressCheckEpochs=*/2, /*progressImprovementMinPercentage=*/5.0, /*maxRestarts=*/1);
     TrainingRunsRestartPolicy laterCondition = TrainingRunsRestartPolicy::forEnsembleGroup(
-        "digits", /*progressCheckEpochs=*/3, /*progressPercentage=*/20.0, /*maxRestarts=*/1);
+        "digits", /*progressCheckEpochs=*/3, /*progressImprovementMinPercentage=*/20.0, /*maxRestarts=*/1);
     TrainingRuns runs({TrainingRunsSpec{"fold_0", trainer, "digits"}},
                       TrainingRunsFailurePolicy::CONTINUE,
                       0.0,
@@ -669,9 +775,9 @@ TEST(TrainingRuns, RestartConditionAllowsMultipleConditionsForSameRunWithIndepen
         std::vector<std::vector<double>>{{100.0, 98.0, 98.0}, {100.0, 90.0, 85.0}, {100.0, 90.0, 84.0}});
     std::shared_ptr<Trainer> trainer = makeTrainer(network, executor);
     TrainingRunsRestartPolicy earlyCondition = TrainingRunsRestartPolicy::forRun(
-        "fold_0", /*progressCheckEpochs=*/2, /*progressPercentage=*/5.0, /*maxRestarts=*/1);
+        "fold_0", /*progressCheckEpochs=*/2, /*progressImprovementMinPercentage=*/5.0, /*maxRestarts=*/1);
     TrainingRunsRestartPolicy laterCondition = TrainingRunsRestartPolicy::forRun(
-        "fold_0", /*progressCheckEpochs=*/3, /*progressPercentage=*/20.0, /*maxRestarts=*/1);
+        "fold_0", /*progressCheckEpochs=*/3, /*progressImprovementMinPercentage=*/20.0, /*maxRestarts=*/1);
     TrainingRuns runs({{"fold_0", trainer}}, TrainingRunsFailurePolicy::CONTINUE, 0.0, std::nullopt, {earlyCondition, laterCondition});
 
     TrainingRunsResult result = runs.fit(3);
@@ -682,7 +788,7 @@ TEST(TrainingRuns, RestartConditionAllowsMultipleConditionsForSameRunWithIndepen
     EXPECT_EQ(failed.status, TrainingRunStatus::FAILED);
     EXPECT_EQ(failed.exception.type, "TrainingRestartConditionExceeded");
     EXPECT_NE(failed.exception.message.find("progress_check_epochs=3"), std::string::npos);
-    EXPECT_NE(failed.exception.message.find("progress_percentage=20"), std::string::npos);
+    EXPECT_NE(failed.exception.message.find("progress_improvement_min_percentage=20"), std::string::npos);
     EXPECT_NE(failed.exception.message.find("max_restarts=1"), std::string::npos);
     EXPECT_EQ(failed.exception.message.find("progress_check_epochs=2"), std::string::npos);
 }

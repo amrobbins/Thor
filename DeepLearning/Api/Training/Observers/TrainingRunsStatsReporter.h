@@ -22,7 +22,6 @@ class TrainingRunsStatsReporter : public TrainingStatsSink {
    public:
     struct RunConfig {
         double intervalSeconds = 10.0;
-        bool enabled = true;
         std::optional<std::string> ensembleGroup{};
         double ensembleWeight = 1.0;
     };

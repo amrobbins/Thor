@@ -167,8 +167,8 @@ TEST(TrainingStatsSinkObserver, IgnoresNullSink) {
 TEST(TrainingRunsStatsReporter, EmitsConfiguredRunSummaryWithoutDependingOnColumnWidths) {
     std::FILE* out = std::tmpfile();
     TrainingRunsStatsReporter reporter(out, LineStatsColorMode::NEVER, 0.0);
-    reporter.configureRun("fold_0", TrainingRunsStatsReporter::RunConfig{0.0, true});
-    reporter.configureRun("fold_1", TrainingRunsStatsReporter::RunConfig{0.0, true});
+    reporter.configureRun("fold_0", TrainingRunsStatsReporter::RunConfig{0.0});
+    reporter.configureRun("fold_1", TrainingRunsStatsReporter::RunConfig{0.0});
 
     reporter.markRunStarting("fold_0");
     reporter.onStatsEvent(TrainingStatsEvent::fromTrainingEvent(TrainingEvent::statsUpdated(makeStats()), "fold_0"));
@@ -184,48 +184,10 @@ TEST(TrainingRunsStatsReporter, EmitsConfiguredRunSummaryWithoutDependingOnColum
     EXPECT_TRUE(hasLineWithAll(output, {"INFO runs[fold_1]:", "status=not_started"})) << output;
 }
 
-TEST(TrainingRunsStatsReporter, StatsDisabledRunsDoNotEmitStatsOnlyNoise) {
-    std::FILE* out = std::tmpfile();
-    TrainingRunsStatsReporter reporter(out, LineStatsColorMode::NEVER, 0.0);
-    reporter.configureRun("stats_disabled", TrainingRunsStatsReporter::RunConfig{0.0, false});
-
-    reporter.onStatsEvent(TrainingStatsEvent::fromTrainingEvent(TrainingEvent::statsUpdated(makeStats()), "stats_disabled"));
-    reporter.close();
-
-    const std::string output = readAndCloseFile(out);
-    EXPECT_TRUE(output.empty()) << output;
-}
-
-TEST(TrainingRunsStatsReporter, IncludesStatsDisabledRunsInLifecycleSummariesWithoutConsumingTheirStats) {
-    std::FILE* out = std::tmpfile();
-    TrainingRunsStatsReporter reporter(out, LineStatsColorMode::NEVER, 0.0);
-    reporter.configureRun("stats_disabled", TrainingRunsStatsReporter::RunConfig{0.0, false});
-    reporter.configureRun("stats_enabled", TrainingRunsStatsReporter::RunConfig{0.0, true});
-
-    reporter.markRunStarting("stats_disabled");
-    reporter.markRunStarting("stats_enabled");
-    reporter.onStatsEvent(TrainingStatsEvent::fromTrainingEvent(TrainingEvent::statsUpdated(makeStats()), "stats_disabled"));
-    reporter.onStatsEvent(TrainingStatsEvent::fromTrainingEvent(TrainingEvent::statsUpdated(makeStats()), "stats_enabled"));
-
-    TrainingRunResult failedResult;
-    failedResult.runName = "stats_disabled";
-    failedResult.status = TrainingRunStatus::FAILED;
-    failedResult.exception = TrainingRunExceptionSummary{"FakeError", "boom"};
-    reporter.markRunFinished(failedResult);
-    reporter.close();
-
-    const std::string output = readAndCloseFile(out);
-    EXPECT_TRUE(hasLineWithAll(output, {"INFO runs summary:", "total=2"})) << output;
-    const std::string disabledLine = findLineWithAll(output, {"INFO runs[stats_disabled]:", "status=failed"});
-    ASSERT_FALSE(disabledLine.empty()) << output;
-    EXPECT_EQ(disabledLine.find("train_loss="), std::string::npos) << disabledLine;
-    EXPECT_TRUE(hasLineWithAll(output, {"INFO runs[stats_enabled]:", "train_loss="})) << output;
-}
-
 TEST(TrainingRunsStatsReporter, ValidationStatsUpdateValidationLossWithoutReplacingTrainingProgress) {
     std::FILE* out = std::tmpfile();
     TrainingRunsStatsReporter reporter(out, LineStatsColorMode::NEVER, 0.0);
-    reporter.configureRun("fold_0", TrainingRunsStatsReporter::RunConfig{0.0, true, std::string("digits_dense_cv5"), 1.0});
+    reporter.configureRun("fold_0", TrainingRunsStatsReporter::RunConfig{0.0, std::string("digits_dense_cv5"), 1.0});
 
     TrainingStatsSnapshot trainStats = makeStats(TrainingEventPhase::TRAIN, 0.30);
     trainStats.epoch = 20;
@@ -264,7 +226,7 @@ TEST(TrainingRunsStatsReporter, ValidationStatsUpdateValidationLossWithoutReplac
 TEST(TrainingRunsStatsReporter, IgnoresNonStatsTrainingEventsWhenTrackingLatestRunningStats) {
     std::FILE* out = std::tmpfile();
     TrainingRunsStatsReporter reporter(out, LineStatsColorMode::NEVER, 0.0);
-    reporter.configureRun("fold_0", TrainingRunsStatsReporter::RunConfig{0.0, true});
+    reporter.configureRun("fold_0", TrainingRunsStatsReporter::RunConfig{0.0});
 
     reporter.markRunStarting("fold_0");
     reporter.onStatsEvent(TrainingStatsEvent::fromTrainingEvent(TrainingEvent::statsUpdated(makeStats()), "fold_0"));
@@ -279,8 +241,8 @@ TEST(TrainingRunsStatsReporter, IgnoresNonStatsTrainingEventsWhenTrackingLatestR
 TEST(TrainingRunsStatsReporter, TerminalRunResultsReportStatusAndPhaseLosses) {
     std::FILE* out = std::tmpfile();
     TrainingRunsStatsReporter reporter(out, LineStatsColorMode::NEVER, 0.0);
-    reporter.configureRun("completed_fold", TrainingRunsStatsReporter::RunConfig{0.0, true, std::string("digits_dense_cv5"), 2.0});
-    reporter.configureRun("failed_fold", TrainingRunsStatsReporter::RunConfig{0.0, true});
+    reporter.configureRun("completed_fold", TrainingRunsStatsReporter::RunConfig{0.0, std::string("digits_dense_cv5"), 2.0});
+    reporter.configureRun("failed_fold", TrainingRunsStatsReporter::RunConfig{0.0});
 
     TrainingRunResult completed = TrainingRunResult::completedResult(
         "completed_fold", makeStats(TrainingEventPhase::TRAIN, 0.50), makeStats(TrainingEventPhase::VALIDATE, 0.40));
@@ -306,7 +268,7 @@ TEST(TrainingRunsStatsReporter, TerminalRunResultsReportStatusAndPhaseLosses) {
 TEST(TrainingRunsStatsReporter, EarlyCompletedRunResultReportsCompletionMetadata) {
     std::FILE* out = std::tmpfile();
     TrainingRunsStatsReporter reporter(out, LineStatsColorMode::NEVER, 0.0);
-    reporter.configureRun("early_fold", TrainingRunsStatsReporter::RunConfig{0.0, true});
+    reporter.configureRun("early_fold", TrainingRunsStatsReporter::RunConfig{0.0});
 
     TrainingRunResult result = TrainingRunResult::completedResult(
         "early_fold",

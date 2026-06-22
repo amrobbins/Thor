@@ -27,7 +27,6 @@ enum class TrainingRunExecutionMode { FIT, EVALUATE };
 
 struct TrainingRuntimeConfig {
     uint64_t maxInFlightBatches = 32;
-    bool statsEnabled = true;
     double statsIntervalSeconds = 10.0;
     bool statsStderrAlso = false;
     LineStatsColorMode statsColorMode = LineStatsColorMode::AUTO;
@@ -50,8 +49,17 @@ struct TrainingRunRequest {
     // current epoch-average validation loss when present, otherwise current
     // epoch-average training loss. Lower is better. If saveModelDirectory is
     // configured, the best observed candidate is saved from the runtime
-    // PlacedNetwork state and becomes the final saved artifact.
+    // PlacedNetwork state and becomes the final saved artifact. If no eligible
+    // candidate is ever selected, no automatic model artifact is written; callers
+    // can explicitly save the final trained state from Trainer after fit.
     uint32_t checkBestModelEveryEpochs = 1;
+
+    // Global/cumulative epoch before best-candidate snapshotting and early-completion
+    // policy evaluation begin. Epochs count total successful training epochs for the
+    // model across Trainer.fit(...) calls, not just epochs in the current fit call.
+    // A value of 0 preserves the original cadence-only behavior.
+    uint64_t minEarlyCompletionEpochs = 0;
+
     TrainingModelSelectionScore modelSelectionScore{};
 
     // Checked at the same epoch cadence as best-candidate selection. The
@@ -75,6 +83,12 @@ struct TrainingRunRequest {
     // copying it from the previous placed network into the fresh placement.
     std::shared_ptr<PlacedNetwork> previousPlacedNetwork = nullptr;
     std::shared_ptr<PlacedNetwork>* completedPlacedNetwork = nullptr;
+
+    // Cumulative completed training epochs before/after this request. FIT trains
+    // `epochs` additional epochs starting after initialCompletedEpochs. The native
+    // runner emits and evaluates epoch thresholds using global epoch numbers.
+    uint64_t initialCompletedEpochs = 0;
+    uint64_t* completedTrainingEpochs = nullptr;
 };
 
 }  // namespace Thor

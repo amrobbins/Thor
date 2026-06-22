@@ -47,12 +47,10 @@ std::string normalizedOutputPathForCollisionCheck(const std::string& path) {
 
 LineStatsColorMode combinedTrainingRunsColorMode(const std::vector<TrainingRunsSpec>& runs) {
     bool sawAuto = false;
-    bool sawEnabledRun = false;
     for (const TrainingRunsSpec& spec : runs) {
-        if (spec.trainer == nullptr || !spec.trainer->getRuntimeConfig().statsEnabled) {
+        if (spec.trainer == nullptr) {
             continue;
         }
-        sawEnabledRun = true;
         const LineStatsColorMode mode = spec.trainer->getRuntimeConfig().statsColorMode;
         if (mode == LineStatsColorMode::ALWAYS) {
             return LineStatsColorMode::ALWAYS;
@@ -61,10 +59,7 @@ LineStatsColorMode combinedTrainingRunsColorMode(const std::vector<TrainingRunsS
             sawAuto = true;
         }
     }
-    if (!sawEnabledRun || sawAuto) {
-        return LineStatsColorMode::AUTO;
-    }
-    return LineStatsColorMode::NEVER;
+    return sawAuto ? LineStatsColorMode::AUTO : LineStatsColorMode::NEVER;
 }
 
 std::vector<TrainingRunInputSignature> collectNetworkInputSignature(const std::shared_ptr<Network>& network) {
@@ -384,7 +379,6 @@ TrainingRunsResult TrainingRuns::fit(const TrainerFitOptions& options, const Tra
         const TrainingRuntimeConfig& runtime = spec.trainer->getRuntimeConfig();
         statsReporter->configureRun(spec.runName,
                                     TrainingRunsStatsReporter::RunConfig{runtime.statsIntervalSeconds,
-                                                                         runtime.statsEnabled,
                                                                          spec.ensembleGroup,
                                                                          spec.ensembleWeight});
     }
@@ -677,9 +671,9 @@ void TrainingRuns::validateRestartConditions() const {
             throw std::runtime_error("TrainingRuns restart_condition at index " + std::to_string(i) +
                                      " must have progress_check_epochs >= 1.");
         }
-        if (!std::isfinite(condition.progressPercentage) || condition.progressPercentage < 0.0 || condition.progressPercentage > 100.0) {
+        if (!std::isfinite(condition.progressImprovementMinPercentage) || condition.progressImprovementMinPercentage < 0.0 || condition.progressImprovementMinPercentage > 100.0) {
             throw std::runtime_error("TrainingRuns restart_condition at index " + std::to_string(i) +
-                                     " must have progress_percentage in [0, 100].");
+                                     " must have progress_improvement_min_percentage in [0, 100].");
         }
 
         if (hasRunName) {

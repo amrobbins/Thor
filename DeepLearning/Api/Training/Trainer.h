@@ -33,12 +33,12 @@ struct TrainerFitOptions {
 
 struct TrainingRestartCondition {
     uint32_t progressCheckEpochs = 3;
-    double progressPercentage = 5.0;
+    double progressImprovementMinPercentage = 5.0;
     uint32_t maxRestarts = 5;
 
     TrainingRestartCondition() = default;
-    TrainingRestartCondition(uint32_t progressCheckEpochs, double progressPercentage = 5.0, uint32_t maxRestarts = 5)
-        : progressCheckEpochs(progressCheckEpochs), progressPercentage(progressPercentage), maxRestarts(maxRestarts) {}
+    TrainingRestartCondition(uint32_t progressCheckEpochs, double progressImprovementMinPercentage = 5.0, uint32_t maxRestarts = 5)
+        : progressCheckEpochs(progressCheckEpochs), progressImprovementMinPercentage(progressImprovementMinPercentage), maxRestarts(maxRestarts) {}
 };
 
 struct TrainingRunsRestartPolicy : public TrainingRestartCondition {
@@ -48,29 +48,29 @@ struct TrainingRunsRestartPolicy : public TrainingRestartCondition {
     TrainingRunsRestartPolicy() = default;
     static TrainingRunsRestartPolicy forRun(std::string runName,
                                             uint32_t progressCheckEpochs = 3,
-                                            double progressPercentage = 5.0,
+                                            double progressImprovementMinPercentage = 5.0,
                                             uint32_t maxRestarts = 5) {
         TrainingRunsRestartPolicy policy;
         policy.runName = std::move(runName);
         policy.progressCheckEpochs = progressCheckEpochs;
-        policy.progressPercentage = progressPercentage;
+        policy.progressImprovementMinPercentage = progressImprovementMinPercentage;
         policy.maxRestarts = maxRestarts;
         return policy;
     }
     static TrainingRunsRestartPolicy forEnsembleGroup(std::string ensembleGroup,
                                                       uint32_t progressCheckEpochs = 3,
-                                                      double progressPercentage = 5.0,
+                                                      double progressImprovementMinPercentage = 5.0,
                                                       uint32_t maxRestarts = 5) {
         TrainingRunsRestartPolicy policy;
         policy.ensembleGroup = std::move(ensembleGroup);
         policy.progressCheckEpochs = progressCheckEpochs;
-        policy.progressPercentage = progressPercentage;
+        policy.progressImprovementMinPercentage = progressImprovementMinPercentage;
         policy.maxRestarts = maxRestarts;
         return policy;
     }
 
     [[nodiscard]] TrainingRestartCondition toRestartCondition() const {
-        return TrainingRestartCondition{progressCheckEpochs, progressPercentage, maxRestarts};
+        return TrainingRestartCondition{progressCheckEpochs, progressImprovementMinPercentage, maxRestarts};
     }
 };
 
@@ -86,6 +86,7 @@ class Trainer {
 
     TrainingRunResult fit(uint32_t epochs);
     TrainingRunResult fit(const TrainerFitOptions& options);
+    void saveModel(const std::string& directory, bool overwrite = false, bool saveOptimizerState = true) const;
 
     [[nodiscard]] const TrainingRuntimeConfig& getRuntimeConfig() const { return runtimeConfig; }
     [[nodiscard]] std::shared_ptr<Network> getNetwork() const { return network; }
@@ -93,6 +94,8 @@ class Trainer {
     [[nodiscard]] bool getSaveModelOverwrite() const { return saveModelOverwrite; }
     [[nodiscard]] bool getSaveOptimizerState() const { return saveOptimizerState; }
     [[nodiscard]] uint32_t getCheckBestModelEveryEpochs() const { return checkBestModelEveryEpochs; }
+    [[nodiscard]] uint64_t getMinEarlyCompletionEpochs() const { return minEarlyCompletionEpochs; }
+    [[nodiscard]] uint64_t getCompletedTrainingEpochs() const { return completedTrainingEpochs; }
     [[nodiscard]] const TrainingModelSelectionScore& getModelSelectionScore() const { return modelSelectionScore; }
     [[nodiscard]] const std::vector<TrainingRestartCondition>& getRestartConditions() const { return restartConditions; }
     [[nodiscard]] const std::vector<TrainingEarlyCompletionPolicy>& getEarlyCompletionPolicies() const { return earlyCompletionPolicies; }
@@ -146,10 +149,12 @@ class Trainer {
     bool saveModelOverwrite = false;
     bool saveOptimizerState = true;
     uint32_t checkBestModelEveryEpochs = 1;
+    uint64_t minEarlyCompletionEpochs = 0;
     TrainingModelSelectionScore modelSelectionScore{};
     std::vector<TrainingRestartCondition> restartConditions{};
     std::vector<TrainingEarlyCompletionPolicy> earlyCompletionPolicies{};
     std::shared_ptr<PlacedNetwork> placedNetworkAfterLastFit = nullptr;
+    uint64_t completedTrainingEpochs = 0;
 };
 
 class Trainer::Builder {
@@ -186,11 +191,6 @@ class Trainer::Builder {
 
     Builder& observer(std::shared_ptr<TrainingObserver> observer) {
         this->observer_ = std::move(observer);
-        return *this;
-    }
-
-    Builder& statsEnabled(bool statsEnabled) {
-        runtimeConfig_.statsEnabled = statsEnabled;
         return *this;
     }
 
@@ -239,6 +239,11 @@ class Trainer::Builder {
         return *this;
     }
 
+    Builder& minEarlyCompletionEpochs(uint64_t minEarlyCompletionEpochs) {
+        this->minEarlyCompletionEpochs_ = minEarlyCompletionEpochs;
+        return *this;
+    }
+
     Builder& modelSelectionScore(TrainingModelSelectionScore modelSelectionScore) {
         this->modelSelectionScore_ = std::move(modelSelectionScore);
         return *this;
@@ -268,6 +273,7 @@ class Trainer::Builder {
     bool saveModelOverwrite_ = false;
     bool saveOptimizerState_ = true;
     uint32_t checkBestModelEveryEpochs_ = 1;
+    uint64_t minEarlyCompletionEpochs_ = 0;
     TrainingModelSelectionScore modelSelectionScore_{};
     std::vector<TrainingRestartCondition> restartConditions_{};
     std::vector<TrainingEarlyCompletionPolicy> earlyCompletionPolicies_{};

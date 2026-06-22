@@ -576,7 +576,7 @@ void TrainingRunsStatsReporter::processEvent(const ReporterEvent& event) {
             dirty = true;
             break;
         case ReporterEventType::RUN_STATS:
-            if (!state.config.enabled || event.stats.type != TrainingEventType::STATS) {
+            if (event.stats.type != TrainingEventType::STATS) {
                 break;
             }
             state.latestStats = event.stats;

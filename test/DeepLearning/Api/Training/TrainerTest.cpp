@@ -8,6 +8,8 @@
 
 #include "gtest/gtest.h"
 
+#include <chrono>
+#include <filesystem>
 #include <memory>
 #include <optional>
 #include <string>
@@ -54,7 +56,6 @@ class CapturingExecutor : public TrainingExecutor {
         (void)observer;
         lastEpochs = request.epochs;
         lastNetwork = request.network.get();
-        lastStatsEnabled = request.runtime.statsEnabled;
         lastMaxInFlightBatches = request.runtime.maxInFlightBatches;
         lastHasTrainingProgram = request.trainingProgram != nullptr;
         lastTrainingProgramStepCount = request.trainingProgram != nullptr ? request.trainingProgram->getNumSteps() : 0;
@@ -66,6 +67,11 @@ class CapturingExecutor : public TrainingExecutor {
         lastSaveModelOverwrite = request.saveModelOverwrite;
         lastSaveOptimizerState = request.saveOptimizerState;
         lastCheckBestModelEveryEpochs = request.checkBestModelEveryEpochs;
+        lastMinEarlyCompletionEpochs = request.minEarlyCompletionEpochs;
+        lastInitialCompletedEpochs = request.initialCompletedEpochs;
+        if (request.completedTrainingEpochs != nullptr) {
+            *request.completedTrainingEpochs = request.initialCompletedEpochs + request.epochs;
+        }
         lastModelSelectionScoreIsCustom = request.modelSelectionScore.isCustom();
         lastModelSelectionScore = request.modelSelectionScore.evaluate(3.0, 7.0, 11);
         lastEarlyCompletionPolicyCount = request.earlyCompletionPolicies.size();
@@ -77,7 +83,6 @@ class CapturingExecutor : public TrainingExecutor {
 
     uint32_t lastEpochs = 0;
     Network* lastNetwork = nullptr;
-    bool lastStatsEnabled = true;
     uint64_t lastMaxInFlightBatches = 0;
     bool lastHasTrainingProgram = false;
     uint64_t lastTrainingProgramStepCount = 0;
@@ -87,12 +92,20 @@ class CapturingExecutor : public TrainingExecutor {
     bool lastSaveModelOverwrite = false;
     bool lastSaveOptimizerState = true;
     uint32_t lastCheckBestModelEveryEpochs = 0;
+    uint64_t lastMinEarlyCompletionEpochs = 0;
+    uint64_t lastInitialCompletedEpochs = 0;
     bool lastModelSelectionScoreIsCustom = false;
     std::optional<double> lastModelSelectionScore{};
     size_t lastEarlyCompletionPolicyCount = 0;
     bool lastEarlyCompletionDecision = false;
     uint32_t calls = 0;
 };
+
+
+std::filesystem::path uniqueTempPath(const std::string& prefix) {
+    return std::filesystem::temp_directory_path() /
+           (prefix + "-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+}
 
 }  // namespace
 
@@ -113,7 +126,6 @@ TEST(Trainer, BuilderRetainsSharedNetworkLifetime) {
                       .loader(loader)
                       .executor(executor)
                       .observer(observer)
-                      .statsEnabled(false)
                       .build();
     }
 
@@ -136,7 +148,6 @@ TEST(Trainer, FitPassesEpochsAsRunParameter) {
                           .loader(loader)
                           .executor(executor)
                           .observer(observer)
-                          .statsEnabled(false)
                           .maxInFlightBatches(64)
                           .build();
 
@@ -145,7 +156,6 @@ TEST(Trainer, FitPassesEpochsAsRunParameter) {
     EXPECT_EQ(executor->calls, 1u);
     EXPECT_EQ(executor->lastEpochs, 5u);
     EXPECT_EQ(executor->lastNetwork, network.get());
-    EXPECT_FALSE(executor->lastStatsEnabled);
     EXPECT_EQ(executor->lastMaxInFlightBatches, 64u);
     EXPECT_FALSE(executor->lastCancellationRequested);
 }
@@ -162,11 +172,11 @@ TEST(Trainer, FitPassesBestModelCandidateOptionsAsRunParameters) {
                           .loader(loader)
                           .executor(executor)
                           .observer(observer)
-                          .statsEnabled(false)
                           .saveModelDirectory("/tmp/thor-best-candidate-options")
                           .saveModelOverwrite(true)
                           .saveOptimizerState(false)
                           .checkBestModelEveryEpochs(3)
+                          .minEarlyCompletionEpochs(7)
                           .build();
 
     trainer.fit(5);
@@ -177,6 +187,53 @@ TEST(Trainer, FitPassesBestModelCandidateOptionsAsRunParameters) {
     EXPECT_TRUE(executor->lastSaveModelOverwrite);
     EXPECT_FALSE(executor->lastSaveOptimizerState);
     EXPECT_EQ(executor->lastCheckBestModelEveryEpochs, 3u);
+    EXPECT_EQ(executor->lastMinEarlyCompletionEpochs, 7u);
+}
+
+TEST(Trainer, FitPassesCumulativeCompletedEpochsAcrossFitCalls) {
+    auto network = std::make_shared<Network>("trainer-cumulative-epochs");
+    auto loader = std::make_shared<FakeLoader>();
+    auto executor = std::make_shared<CapturingExecutor>();
+    auto observer = std::make_shared<NullTrainingObserver>();
+
+    Trainer trainer = Trainer::Builder()
+                          .network(network)
+                          .loader(loader)
+                          .executor(executor)
+                          .observer(observer)
+                          .minEarlyCompletionEpochs(4)
+                          .build();
+
+    trainer.fit(2);
+    EXPECT_EQ(executor->lastInitialCompletedEpochs, 0u);
+    EXPECT_EQ(trainer.getCompletedTrainingEpochs(), 2u);
+
+    trainer.fit(3);
+    EXPECT_EQ(executor->lastInitialCompletedEpochs, 2u);
+    EXPECT_EQ(trainer.getCompletedTrainingEpochs(), 5u);
+}
+
+
+TEST(Trainer, RejectsExistingSaveModelDirectoryBeforeFitWhenOverwriteIsFalse) {
+    auto network = std::make_shared<Network>("trainer-existing-save-dir");
+    auto loader = std::make_shared<FakeLoader>();
+    auto executor = std::make_shared<CapturingExecutor>();
+    auto observer = std::make_shared<NullTrainingObserver>();
+    const std::filesystem::path saveDir = uniqueTempPath("thor-trainer-existing-save-dir");
+    std::filesystem::create_directories(saveDir);
+
+    Trainer trainer = Trainer::Builder()
+                          .network(network)
+                          .loader(loader)
+                          .executor(executor)
+                          .observer(observer)
+                          .saveModelDirectory(saveDir.string())
+                          .build();
+
+    EXPECT_THROW(trainer.fit(1), std::runtime_error);
+    EXPECT_EQ(executor->calls, 0u);
+
+    std::filesystem::remove_all(saveDir);
 }
 
 TEST(Trainer, FitPassesCustomModelSelectionScoreAsRunParameter) {
@@ -194,7 +251,6 @@ TEST(Trainer, FitPassesCustomModelSelectionScoreAsRunParameter) {
                           .loader(loader)
                           .executor(executor)
                           .observer(observer)
-                          .statsEnabled(false)
                           .modelSelectionScore(score)
                           .build();
 
@@ -250,7 +306,6 @@ TEST(Trainer, FitPassesEarlyCompletionPoliciesAsRunParameters) {
                           .loader(loader)
                           .executor(executor)
                           .observer(observer)
-                          .statsEnabled(false)
                           .earlyCompletionPolicies({policy})
                           .build();
 
@@ -291,7 +346,6 @@ TEST(Trainer, FitPassesTrainingProgramAsRunParameter) {
                           .trainingProgram(program)
                           .executor(executor)
                           .observer(observer)
-                          .statsEnabled(false)
                           .build();
 
     trainer.fit(1);
@@ -319,7 +373,6 @@ TEST(Trainer, FitSeesTrainingProgramMutationsBetweenCalls) {
                           .trainingProgram(program)
                           .executor(executor)
                           .observer(observer)
-                          .statsEnabled(false)
                           .build();
 
     trainer.fit(1);
@@ -359,7 +412,6 @@ TEST(Trainer, BuilderProvidesDebugSynchronousExecutorShortcut) {
                           .network(network)
                           .loader(loader)
                           .debugSynchronousExecutor()
-                          .statsEnabled(false)
                           .build();
 
     EXPECT_THROW(trainer.fit(1), std::runtime_error);

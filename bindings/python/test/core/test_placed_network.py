@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import numpy as np
 import pytest
 import thor
 
@@ -12,6 +13,59 @@ def _build_minimal_network() -> thor.Network:
     ni = thor.layers.NetworkInput(n, "in", [1], thor.DataType.fp16)
     thor.layers.NetworkOutput(n, "out", ni.get_feature_output(), thor.DataType.fp16)
     return n
+
+
+def _cpu_tensor(values: np.ndarray, dtype: thor.DataType) -> thor.physical.PhysicalTensor:
+    values = np.asarray(values, dtype=thor.physical.numpy_dtypes.from_thor(dtype), order="C")
+    placement = thor.physical.Placement(thor.physical.DeviceType.cpu, 0)
+    descriptor = thor.physical.PhysicalTensor.Descriptor(dtype, list(values.shape))
+    tensor = thor.physical.PhysicalTensor(placement, descriptor)
+    tensor.numpy()[...] = values
+    return tensor
+
+
+def _build_identity_network(name: str, dtype=thor.DataType.fp32) -> thor.Network:
+    n = thor.Network(name)
+    ni = thor.layers.NetworkInput(n, "input", [2], dtype)
+    thor.layers.NetworkOutput(n, "output", ni.get_feature_output(), dtype)
+    return n
+
+
+@pytest.mark.cuda
+def test_loaded_network_place_inference_only_infer_round_trip_identity(tmp_path):
+    network_name = "pytest_loaded_inference_identity"
+    values = np.array([[1.0, -2.0], [0.5, 3.0], [-4.0, 2.5]], dtype=np.float32)
+
+    net = _build_identity_network(network_name, thor.DataType.fp32)
+    placed = net.place(
+        values.shape[0],
+        inference_only=True,
+        forced_devices=[0],
+        forced_num_stamps_per_gpu=1,
+    )
+    original_outputs = placed.infer({"input": _cpu_tensor(values, thor.DataType.fp32)})
+    assert set(original_outputs) == {"output"}
+    assert np.allclose(original_outputs["output"].numpy(), values, atol=0.0)
+
+    save_dir = tmp_path / "identity_saved_model"
+    placed.save(str(save_dir), overwrite=False, save_optimizer_state=False)
+
+    loaded = thor.Network(network_name)
+    loaded.load(str(save_dir))
+    loaded_placed = loaded.place(
+        values.shape[0],
+        inference_only=True,
+        forced_devices=[0],
+        forced_num_stamps_per_gpu=1,
+    )
+
+    assert isinstance(loaded_placed, thor.runtime.PlacedNetwork)
+    assert set(loaded_placed.get_network_input_names()) == {"input"}
+
+    loaded_outputs = loaded_placed.infer({"input": _cpu_tensor(values, thor.DataType.fp32)})
+
+    assert set(loaded_outputs) == {"output"}
+    assert np.allclose(loaded_outputs["output"].numpy(), values, atol=0.0)
 
 
 @pytest.mark.cuda

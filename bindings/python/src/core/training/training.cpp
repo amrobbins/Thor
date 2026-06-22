@@ -111,6 +111,14 @@ std::optional<std::string> optionalPathStringFromPython(const nb::object& obj, c
     return path;
 }
 
+std::string pathStringFromPython(const nb::object& obj, const std::string& argumentName) {
+    std::optional<std::string> path = optionalPathStringFromPython(obj, argumentName);
+    if (!path.has_value()) {
+        throw nb::type_error((argumentName + " must be str, bytes, or os.PathLike").c_str());
+    }
+    return *path;
+}
+
 template <typename ScalarT, typename ArrayT>
 void copyNumpyArrayBytes(std::vector<uint8_t>& dest, const ArrayT& src) {
     const size_t bytes = src.size() * sizeof(ScalarT);
@@ -1133,7 +1141,6 @@ calling this helper.
            std::shared_ptr<Optimizer> optimizer,
            nb::object training_program,
            bool debug_synchronous,
-           bool stats,
            double stats_interval_s,
            uint64_t max_in_flight_batches,
            std::vector<std::string> scalar_tensors_to_report,
@@ -1143,6 +1150,7 @@ calling this helper.
            bool save_model_overwrite,
            bool save_optimizer_state,
            uint32_t check_best_model_every_epochs,
+           uint64_t min_early_completion_epochs,
            nb::object model_selection_score,
            nb::object restart_conditions,
            nb::object early_completion_policies) -> std::shared_ptr<Trainer> {
@@ -1150,7 +1158,6 @@ calling this helper.
             Trainer::Builder builder;
             builder.network(std::move(network))
                 .loader(std::move(loader))
-                .statsEnabled(stats)
                 .statsIntervalSeconds(stats_interval_s)
                 .statsStderrAlso(stats_stderr_also)
                 .statsColorMode(lineStatsColorModeFromString(stats_color))
@@ -1160,6 +1167,7 @@ calling this helper.
                 .saveModelOverwrite(save_model_overwrite)
                 .saveOptimizerState(save_optimizer_state)
                 .checkBestModelEveryEpochs(check_best_model_every_epochs)
+                .minEarlyCompletionEpochs(min_early_completion_epochs)
                 .modelSelectionScore(trainingModelSelectionScoreFromPython(model_selection_score))
                 .restartConditions(trainingRestartConditionsFromPython(restart_conditions))
                 .earlyCompletionPolicies(trainingEarlyCompletionPoliciesFromPython(early_completion_policies));
@@ -1180,7 +1188,6 @@ calling this helper.
         "optimizer"_a.none() = nb::none(),
         "training_program"_a.none() = nb::none(),
         "debug_synchronous"_a = false,
-        "stats"_a = true,
         "stats_interval_s"_a = 10.0,
         "max_in_flight_batches"_a = 32,
         "scalar_tensors_to_report"_a = std::vector<std::string>{"loss"},
@@ -1190,6 +1197,7 @@ calling this helper.
         "save_model_overwrite"_a = false,
         "save_optimizer_state"_a = true,
         "check_best_model_every_epochs"_a = 1,
+        "min_early_completion_epochs"_a = 0,
         "model_selection_score"_a.none() = nb::none(),
         "restart_conditions"_a.none() = nb::none(),
         "early_completion_policies"_a.none() = nb::none());
@@ -1201,7 +1209,6 @@ calling this helper.
            std::shared_ptr<Optimizer>,
            nb::object,
            bool,
-           bool,
            double,
            uint64_t,
            std::vector<std::string>,
@@ -1211,6 +1218,7 @@ calling this helper.
            bool,
            bool,
            uint32_t,
+           uint64_t,
            nb::object,
            nb::object,
            nb::object) {},
@@ -1219,7 +1227,6 @@ calling this helper.
         "optimizer"_a.none() = nb::none(),
         "training_program"_a.none() = nb::none(),
         "debug_synchronous"_a = false,
-        "stats"_a = true,
         "stats_interval_s"_a = 10.0,
         "max_in_flight_batches"_a = 32,
         "scalar_tensors_to_report"_a = std::vector<std::string>{"loss"},
@@ -1229,6 +1236,7 @@ calling this helper.
         "save_model_overwrite"_a = false,
         "save_optimizer_state"_a = true,
         "check_best_model_every_epochs"_a = 1,
+        "min_early_completion_epochs"_a = 0,
         "model_selection_score"_a.none() = nb::none(),
         "restart_conditions"_a.none() = nb::none(),
         "early_completion_policies"_a.none() = nb::none());
@@ -1243,6 +1251,18 @@ calling this helper.
             return nb::cast(std::move(result));
         },
         "epochs"_a);
+    trainer.def(
+        "save_model",
+        [](Trainer& self, nb::object directory, bool overwrite, bool save_optimizer_state) {
+            std::string path = pathStringFromPython(directory, "directory");
+            nb::gil_scoped_release release;
+            self.saveModel(path, overwrite, save_optimizer_state);
+        },
+        "directory"_a,
+        "overwrite"_a = false,
+        "save_optimizer_state"_a = true);
+    trainer.def_prop_ro("min_early_completion_epochs", &Trainer::getMinEarlyCompletionEpochs);
+    trainer.def_prop_ro("completed_training_epochs", &Trainer::getCompletedTrainingEpochs);
 
     auto training_event_phase = nb::enum_<TrainingEventPhase>(training, "TrainingEventPhase")
                                     .value("unknown", TrainingEventPhase::UNKNOWN)
@@ -1415,14 +1435,14 @@ calling this helper.
     training_restart_condition.attr("__module__") = "thor.training";
     training_restart_condition.def(
         "__init__",
-        [](TrainingRestartCondition* self, uint32_t progress_check_epochs, double progress_percentage, uint32_t max_restarts) {
-            new (self) TrainingRestartCondition(progress_check_epochs, progress_percentage, max_restarts);
+        [](TrainingRestartCondition* self, uint32_t progress_check_epochs, double progress_improvement_min_percentage, uint32_t max_restarts) {
+            new (self) TrainingRestartCondition(progress_check_epochs, progress_improvement_min_percentage, max_restarts);
         },
         "progress_check_epochs"_a = 3,
-        "progress_percentage"_a = 5.0,
+        "progress_improvement_min_percentage"_a = 5.0,
         "max_restarts"_a = 5);
     training_restart_condition.def_ro("progress_check_epochs", &TrainingRestartCondition::progressCheckEpochs);
-    training_restart_condition.def_ro("progress_percentage", &TrainingRestartCondition::progressPercentage);
+    training_restart_condition.def_ro("progress_improvement_min_percentage", &TrainingRestartCondition::progressImprovementMinPercentage);
     training_restart_condition.def_ro("max_restarts", &TrainingRestartCondition::maxRestarts);
     training.attr("RestartCondition") = training.attr("TrainingRestartCondition");
 
@@ -1434,19 +1454,19 @@ calling this helper.
            std::optional<std::string> run_name,
            std::optional<std::string> ensemble_group,
            uint32_t progress_check_epochs,
-           double progress_percentage,
+           double progress_improvement_min_percentage,
            uint32_t max_restarts) {
             new (self) TrainingRunsRestartPolicy();
             self->runName = std::move(run_name);
             self->ensembleGroup = std::move(ensemble_group);
             self->progressCheckEpochs = progress_check_epochs;
-            self->progressPercentage = progress_percentage;
+            self->progressImprovementMinPercentage = progress_improvement_min_percentage;
             self->maxRestarts = max_restarts;
         },
         "run_name"_a.none() = nb::none(),
         "ensemble_group"_a.none() = nb::none(),
         "progress_check_epochs"_a = 3,
-        "progress_percentage"_a = 5.0,
+        "progress_improvement_min_percentage"_a = 5.0,
         "max_restarts"_a = 5);
     training_runs_restart_policy.def_prop_ro("run_name", [](const TrainingRunsRestartPolicy& self) -> nb::object {
         if (!self.runName.has_value()) {
@@ -1461,7 +1481,7 @@ calling this helper.
         return nb::cast(*self.ensembleGroup);
     });
     training_runs_restart_policy.def_prop_ro("progress_check_epochs", [](const TrainingRunsRestartPolicy& self) { return self.progressCheckEpochs; });
-    training_runs_restart_policy.def_prop_ro("progress_percentage", [](const TrainingRunsRestartPolicy& self) { return self.progressPercentage; });
+    training_runs_restart_policy.def_prop_ro("progress_improvement_min_percentage", [](const TrainingRunsRestartPolicy& self) { return self.progressImprovementMinPercentage; });
     training_runs_restart_policy.def_prop_ro("max_restarts", [](const TrainingRunsRestartPolicy& self) { return self.maxRestarts; });
     training.attr("RestartPolicy") = training.attr("TrainingRunsRestartPolicy");
     training.attr("TrainingRunsRestartCondition") = training.attr("TrainingRunsRestartPolicy");

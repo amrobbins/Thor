@@ -866,7 +866,6 @@ def _run_full_ucf101_3d_model_training(model_builder, *, model_name: str, capfd)
             loader,
             optimizer=optimizer,
             debug_synchronous=False,
-            stats=True,
             stats_interval_s=UCF101_3D_STATS_INTERVAL_S,
             max_in_flight_batches=UCF101_3D_MAX_IN_FLIGHT_BATCHES,
             scalar_tensors_to_report=["loss"],
