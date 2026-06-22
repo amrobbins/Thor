@@ -79,6 +79,10 @@ class LibrarySpec:
     patterns: tuple[str, ...]
 
 
+# Runtime bootstrap skips the CUDA Toolkit/CCCL include specs below because
+# Thor vendors a complete CUDA Toolkit header tree into the package for NVRTC.
+# They remain in the manifest so local CMake can validate that the selected
+# Python environment has the expected NVIDIA component wheels installed.
 INCLUDE_SPECS = (
     IncludeSpec("THOR_CUDA_INCLUDE_DIR", "nvidia-cuda-runtime", Path("vector_types.h")),
     IncludeSpec("THOR_CUDA_CCCL_INCLUDE_DIR", "nvidia-cuda-cccl", Path("cub") / "cub.cuh"),

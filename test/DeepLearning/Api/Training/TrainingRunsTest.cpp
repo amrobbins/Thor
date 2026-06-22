@@ -307,7 +307,11 @@ TEST(TrainingRuns, FitRejectsExistingSaveModelDirectoryBeforeStartingWorkersWhen
     std::shared_ptr<Trainer> trainer1 = makeTrainer(network1, executor1, freshSaveDir.string());
     TrainingRuns runs({TrainingRunsSpec{"fold_0", trainer0}, TrainingRunsSpec{"fold_1", trainer1}});
 
-    EXPECT_THROW(runs.fit(1), std::runtime_error);
+    EXPECT_THROW(
+        {
+            [[maybe_unused]] TrainingRunsResult result = runs.fit(1);
+        },
+        std::runtime_error);
     EXPECT_EQ(executor0->calls, 0u);
     EXPECT_EQ(executor1->calls, 0u);
 

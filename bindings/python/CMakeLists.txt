@@ -47,6 +47,12 @@ add_custom_command(
 )
 add_custom_target(thor_py_pkg_sync DEPENDS "${THOR_PY_PKG_BUILD_DIR}/.thor_pkg_sync.stamp")
 
+# Runtime NVRTC JIT uses libnvrtc-builtins bundled headers installed into a
+# writable cache directory at import/compile time. No CUDA Toolkit header tree is
+# copied into the Python package or wheel.
+add_custom_target(thor_py_nvrtc_headers)
+add_dependencies(thor_py_nvrtc_headers thor_py_pkg_sync)
+
 # ---- Collect all binding sources (C++ only) ----
 file(GLOB_RECURSE THOR_PY_BIND_SOURCES CONFIGURE_DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
@@ -65,7 +71,7 @@ install(TARGETS Thor
         LIBRARY DESTINATION thor
 )
 
-add_dependencies(_thor thor_py_pkg_sync)
+add_dependencies(_thor thor_py_pkg_sync thor_py_nvrtc_headers)
 
 target_link_libraries(_thor PRIVATE Thor)
 target_compile_features(_thor PRIVATE cxx_std_20)
@@ -95,6 +101,7 @@ target_include_directories(_thor PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
 
+
 # ---- venv install target: copy package + extension into .venv site-packages ----
 if (THOR_PYTHON_AUTO_INSTALL AND NOT DEFINED SKBUILD_PROJECT_NAME)
     add_custom_target(thor_py_install ALL
@@ -115,12 +122,27 @@ else ()
 endif ()
 
 # ---- Python deps from pyproject.toml, with a stamp file ----
-set(THOR_PYPROJECT_TOML "${CMAKE_CURRENT_SOURCE_DIR}/pyproject.toml")
-set(THOR_PY_DEPS_SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/install_py_deps.py")
-set(THOR_PY_DEPS_STAMP "${CMAKE_CURRENT_BINARY_DIR}/thor_py_deps.stamp")
+# This is a local-development convenience target.  Do not run it from an
+# isolated PEP 517/scikit-build wheel build: the backend has already installed
+# the build requirements and dynamic runtime requirements, and the isolated
+# interpreter is not guaranteed to expose `python -m pip` during the native
+# build step.
+set(_thor_python_install_deps_default ON)
+if (DEFINED SKBUILD_PROJECT_NAME)
+    set(_thor_python_install_deps_default OFF)
+endif ()
+option(THOR_PYTHON_INSTALL_DEPS
+        "Install Python project/dev dependencies into the selected local interpreter before local tests"
+        ${_thor_python_install_deps_default}
+)
 
-# Generate a small helper script at configure time (no quoting issues at build time)
-file(WRITE "${THOR_PY_DEPS_SCRIPT}" [=[
+if (THOR_PYTHON_INSTALL_DEPS)
+    set(THOR_PYPROJECT_TOML "${CMAKE_CURRENT_SOURCE_DIR}/pyproject.toml")
+    set(THOR_PY_DEPS_SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/install_py_deps.py")
+    set(THOR_PY_DEPS_STAMP "${CMAKE_CURRENT_BINARY_DIR}/thor_py_deps.stamp")
+
+    # Generate a small helper script at configure time (no quoting issues at build time)
+    file(WRITE "${THOR_PY_DEPS_SCRIPT}" [=[
 import sys
 import pathlib
 import subprocess
@@ -150,18 +172,24 @@ if __name__ == "__main__":
     raise SystemExit(main())
 ]=])
 
-add_custom_command(
-        OUTPUT "${THOR_PY_DEPS_STAMP}"
-        COMMAND "${Python_EXECUTABLE}" "${THOR_PY_DEPS_SCRIPT}" "${THOR_PYPROJECT_TOML}"
-        COMMAND "${CMAKE_COMMAND}" -E touch "${THOR_PY_DEPS_STAMP}"
-        DEPENDS "${THOR_PYPROJECT_TOML}"
-        COMMENT "Thor: installing Python deps from pyproject.toml (dependencies + dev) into venv"
-        VERBATIM
-)
+    add_custom_command(
+            OUTPUT "${THOR_PY_DEPS_STAMP}"
+            COMMAND "${Python_EXECUTABLE}" "${THOR_PY_DEPS_SCRIPT}" "${THOR_PYPROJECT_TOML}"
+            COMMAND "${CMAKE_COMMAND}" -E touch "${THOR_PY_DEPS_STAMP}"
+            DEPENDS "${THOR_PYPROJECT_TOML}"
+            COMMENT "Thor: installing Python deps from pyproject.toml (dependencies + dev) into venv"
+            VERBATIM
+    )
 
-add_custom_target(thor_py_deps
-        DEPENDS "${THOR_PY_DEPS_STAMP}"
-)
+    add_custom_target(thor_py_deps
+            DEPENDS "${THOR_PY_DEPS_STAMP}"
+    )
+else ()
+    add_custom_target(thor_py_deps
+            COMMAND ${CMAKE_COMMAND} -E echo "Thor: skipping local Python dependency installation"
+            VERBATIM
+    )
+endif ()
 
 # ---- Stub generation ----
 # Generates build-tree: <bin>/bindings/python/thor/_thor.pyi and py.typed marker if requested. :contentReference[oaicite:7]{index=7}

@@ -72,6 +72,7 @@ class EquationCompiler {
                                                                               const std::vector<SpecializedBroadcastGroup>& groups);
     static std::string getCudaIncludeDir();
     static std::vector<std::string> getCudaIncludeDirs();
+    static std::string getNvrtcBundledHeadersDir();
 };
 
 }  // namespace ThorImplementation

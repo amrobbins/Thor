@@ -7,6 +7,7 @@
 #include "CudaSourceEmitter.h"
 
 #include <algorithm>
+#include <filesystem>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
@@ -148,10 +149,18 @@ static std::string makeSpecializedBroadcastCacheKey(const std::string& cuda_src,
 #define THOR_CUDA_CCCL_INCLUDE_DIR ""
 #endif
 
+#ifndef THOR_NVRTC_BUNDLED_HEADERS_DIR
+#define THOR_NVRTC_BUNDLED_HEADERS_DIR ""
+#endif
+
 string EquationCompiler::getCudaIncludeDir() {
     if (const char* p = std::getenv("THOR_CUDA_INCLUDE_DIR")) {
         if (*p)
             return std::string(p);
+    }
+
+    if (std::string(THOR_CUDA_INCLUDE_DIR).empty() == false) {
+        return THOR_CUDA_INCLUDE_DIR;  // compile-time fallback from CMake
     }
 
     if (const char* p = std::getenv("CUDA_HOME")) {
@@ -162,7 +171,7 @@ string EquationCompiler::getCudaIncludeDir() {
         return std::string(p) + "/include";
     }
 
-    return THOR_CUDA_INCLUDE_DIR;  // compile-time fallback from CMake
+    return "";
 }
 
 vector<string> EquationCompiler::getCudaIncludeDirs() {
@@ -185,6 +194,19 @@ vector<string> EquationCompiler::getCudaIncludeDirs() {
     add_unique(THOR_CUDA_CCCL_INCLUDE_DIR);  // compile-time fallback from CMake
 
     return include_dirs;
+}
+
+string EquationCompiler::getNvrtcBundledHeadersDir() {
+    if (const char* p = std::getenv("THOR_NVRTC_BUNDLED_HEADERS_DIR")) {
+        if (*p)
+            return std::string(p);
+    }
+
+    if (std::string(THOR_NVRTC_BUNDLED_HEADERS_DIR).empty() == false) {
+        return THOR_NVRTC_BUNDLED_HEADERS_DIR;
+    }
+
+    return "";
 }
 
 static void ensureCudaContextCurrent(int device_num) {
@@ -1437,17 +1459,29 @@ vector<char> EquationCompiler::compileToLtoIr(const string& src, const string& k
 
     string arch = "--gpu-architecture=compute_" + to_string(sig.sm_major) + to_string(sig.sm_minor);
 
-    const vector<string> cuda_include_dirs = getCudaIncludeDirs();
-    vector<string> cuda_include_paths;
-    cuda_include_paths.reserve(cuda_include_dirs.size());
-    for (const string& include_dir : cuda_include_dirs)
-        cuda_include_paths.emplace_back(std::string("--include-path=") + include_dir);
+    vector<string> option_strings = {arch, "-dlto", "--std=c++20", "-fmad=true"};
 
-    vector<const char*> opts = {arch.c_str(), "-dlto", "--std=c++20", "-fmad=true"};
-    for (const string& include_path : cuda_include_paths)
-        opts.push_back(include_path.c_str());
+    const string bundled_headers_dir = getNvrtcBundledHeadersDir();
+    if (!bundled_headers_dir.empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(bundled_headers_dir, ec);
+        if (ec) {
+            throw runtime_error("Failed to create NVRTC bundled CUDA headers directory " + bundled_headers_dir + ": " + ec.message());
+        }
+        option_strings.emplace_back("--use-bundled-headers=" + bundled_headers_dir);
+    } else {
+        const vector<string> cuda_include_dirs = getCudaIncludeDirs();
+        for (const string& include_dir : cuda_include_dirs)
+            option_strings.emplace_back(std::string("--include-path=") + include_dir);
+    }
+
     if (sig.use_fast_math)
-        opts.push_back("--use_fast_math");
+        option_strings.emplace_back("--use_fast_math");
+
+    vector<const char*> opts;
+    opts.reserve(option_strings.size());
+    for (const string& option : option_strings)
+        opts.push_back(option.c_str());
 
     NVRTC_COMPILE_CHECK(prog, (int)opts.size(), opts.data());
 

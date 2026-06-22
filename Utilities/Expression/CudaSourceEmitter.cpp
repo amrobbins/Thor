@@ -372,9 +372,10 @@ static uint32_t transposePackScalars(DataType dtype) {
 }
 
 static void emitSharedTransposeWordHelpers(std::ostringstream& ss) {
-    ss << R"(#include <vector_types.h>
-
-template <unsigned int Bytes>
+    // NVRTC bundled headers in CUDA 13.3 do not ship a top-level vector_types.h.
+    // NVRTC still provides CUDA vector builtins such as float4, uchar4, and ushort2
+    // without an explicit include, so do not emit the legacy header include here.
+    ss << R"(template <unsigned int Bytes>
 struct thor_transpose_storage_for_bytes;
 
 template <>
@@ -710,6 +711,13 @@ static void emitDigammaHelperDefinition(std::ostringstream& ss) {
 )";
 }
 
+static void emitCudaFp16Header(std::ostringstream& ss) {
+    // Runtime JIT uses NVRTC's CUDA 13.3 bundled headers, passed via
+    // --use-bundled-headers by EquationCompiler.  Use the public CUDA Math API
+    // header normally and rely on its official half/half2 aliases.
+    ss << "#include <cuda_fp16.h>\n";
+}
+
 static void emitRequiredHeaders(const PhysicalExpression& expr, std::ostringstream& ss) {
     bool need_fp16 = false;
     bool need_bf16 = false;
@@ -748,7 +756,7 @@ static void emitRequiredHeaders(const PhysicalExpression& expr, std::ostringstre
     }
 
     if (need_fp16) {
-        ss << "#include <cuda_fp16.h>\n";
+        emitCudaFp16Header(ss);
     }
     if (need_bf16) {
         ss << "#include <cuda_bf16.h>\n";
@@ -756,11 +764,10 @@ static void emitRequiredHeaders(const PhysicalExpression& expr, std::ostringstre
     if (need_fp8) {
         ss << "#include <cuda_fp8.h>\n";
     }
-    const bool needs_gamma_math_header =
-        expressionUsesOp(expr, ExprOp::TGAMMA) || expressionUsesOp(expr, ExprOp::LGAMMA) || expressionUsesOp(expr, ExprOp::DIGAMMA);
-    if (needs_gamma_math_header) {
-        ss << "#include <math_functions.h>\n";
-    }
+    // CUDA 13.3 NVRTC bundled headers do not expose the legacy top-level
+    // <math_functions.h> header.  NVRTC/libdevice still provide the device
+    // math builtins used below (tgammaf, lgammaf, floorf, tanf, logf, nanf,
+    // isnan, isinf), so do not emit that legacy include for JIT sources.
     if (expressionUsesOp(expr, ExprOp::DIGAMMA)) {
         emitDigammaHelperDefinition(ss);
     }
@@ -1331,7 +1338,7 @@ static std::string castScalarExpr(const std::string& expr, DataType src_dtype, D
                     return "float(" + expr + ")";
                 case DataType::FP8_E4M3:
                 case DataType::FP8_E5M2:
-                    return "float(half(" + expr + "))";
+                    return "float(" + expr + ")";
                 case DataType::BOOLEAN:
                     return "(" + expr + " ? 1.0f : 0.0f)";
                 case DataType::UINT8:
@@ -1360,7 +1367,7 @@ static std::string castScalarExpr(const std::string& expr, DataType src_dtype, D
                     return "half(float(" + expr + "))";
                 case DataType::FP8_E4M3:
                 case DataType::FP8_E5M2:
-                    return "half(" + expr + ")";
+                    return "half(float(" + expr + "))";
                 default:
                     break;
             }
@@ -1378,7 +1385,7 @@ static std::string castScalarExpr(const std::string& expr, DataType src_dtype, D
                     return expr;
                 case DataType::FP8_E4M3:
                 case DataType::FP8_E5M2:
-                    return "__nv_bfloat16(float(half(" + expr + ")))";
+                    return "__nv_bfloat16(float(" + expr + "))";
                 default:
                     break;
             }
@@ -1387,15 +1394,15 @@ static std::string castScalarExpr(const std::string& expr, DataType src_dtype, D
         case DataType::FP8_E4M3:
             switch (src_dtype) {
                 case DataType::FP32:
-                    return "__nv_fp8_e4m3(half(" + expr + "))";
-                case DataType::FP16:
                     return "__nv_fp8_e4m3(" + expr + ")";
+                case DataType::FP16:
+                    return "__nv_fp8_e4m3(float(" + expr + "))";
                 case DataType::BF16:
-                    return "__nv_fp8_e4m3(half(float(" + expr + ")))";
+                    return "__nv_fp8_e4m3(float(" + expr + "))";
                 case DataType::FP8_E4M3:
                     return expr;
                 case DataType::FP8_E5M2:
-                    return "__nv_fp8_e4m3(half(" + expr + "))";
+                    return "__nv_fp8_e4m3(float(" + expr + "))";
                 default:
                     break;
             }
@@ -1404,13 +1411,13 @@ static std::string castScalarExpr(const std::string& expr, DataType src_dtype, D
         case DataType::FP8_E5M2:
             switch (src_dtype) {
                 case DataType::FP32:
-                    return "__nv_fp8_e5m2(half(" + expr + "))";
-                case DataType::FP16:
                     return "__nv_fp8_e5m2(" + expr + ")";
+                case DataType::FP16:
+                    return "__nv_fp8_e5m2(float(" + expr + "))";
                 case DataType::BF16:
-                    return "__nv_fp8_e5m2(half(float(" + expr + ")))";
+                    return "__nv_fp8_e5m2(float(" + expr + "))";
                 case DataType::FP8_E4M3:
-                    return "__nv_fp8_e5m2(half(" + expr + "))";
+                    return "__nv_fp8_e5m2(float(" + expr + "))";
                 case DataType::FP8_E5M2:
                     return expr;
                 default:
@@ -4880,27 +4887,27 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
         compute_dtype_vector = "__nv_bfloat162";
         storage_dtype_vector = "__nv_bfloat162";
         packs_per_thread = 4;
-        ss << "#include <cuda_fp16.h>\n";
+        emitCudaFp16Header(ss);
         ss << "#include <cuda_bf16.h>\n";
     } else if (dtype == DataType::FP16) {
         compute_dtype = "half";
         compute_dtype_vector = "half2";
         storage_dtype_vector = "half2";
         packs_per_thread = 4;
-        ss << "#include <cuda_fp16.h>\n";
+        emitCudaFp16Header(ss);
     } else if (dtype == DataType::FP8_E4M3) {
         compute_dtype = "half";
         compute_dtype_vector = "half2";
         storage_dtype_vector = "__nv_fp8x2_e4m3";
         packs_per_thread = 8;
-        ss << "#include <cuda_fp16.h>\n";
+        emitCudaFp16Header(ss);
         ss << "#include <cuda_fp8.h>\n";
     } else if (dtype == DataType::FP8_E5M2) {
         compute_dtype = "half";
         compute_dtype_vector = "half2";
         storage_dtype_vector = "__nv_fp8x2_e5m2";
         packs_per_thread = 8;
-        ss << "#include <cuda_fp16.h>\n";
+        emitCudaFp16Header(ss);
         ss << "#include <cuda_fp8.h>\n";
     } else {
         throw runtime_error("emitVector2Flat called with non-vectorizable dtype.");
@@ -4910,7 +4917,8 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
     const std::string index_type = emittedIndexType(use_uint32_index_math);
     const std::vector<DataType> input_dtypes = collectInputSlotDTypes(stage.expr);
 
-    ss << "#include <vector_types.h>\n";
+    // CUDA vector builtins are available to NVRTC without <vector_types.h>;
+    // CUDA 13.3 bundled headers do not include that legacy top-level header.
     ss << "extern \"C\" __global__\n";
     ss << "void " << kernel_name << "(";
 
@@ -5224,7 +5232,8 @@ static std::string emitWideScalarFlat(const PhysicalExecutionStage& stage,
     std::ostringstream ss;
     emitRequiredHeaders(stage.expr, ss);
 
-    ss << "#include <vector_types.h>\n";
+    // CUDA vector builtins are available to NVRTC without <vector_types.h>;
+    // CUDA 13.3 bundled headers do not include that legacy top-level header.
     ss << "extern \"C\" __global__\n";
     ss << "void " << kernel_name << "(";
 
@@ -5337,27 +5346,27 @@ static std::string emitVector2SpecializedBroadcast(const CompiledExecutionStage&
         compute_dtype_vector = "__nv_bfloat162";
         storage_dtype = "__nv_bfloat16";
         storage_dtype_vector = "__nv_bfloat162";
-        ss << "#include <cuda_fp16.h>\n";
+        emitCudaFp16Header(ss);
         ss << "#include <cuda_bf16.h>\n";
     } else if (dtype == DataType::FP16) {
         compute_dtype = "half";
         compute_dtype_vector = "half2";
         storage_dtype = "half";
         storage_dtype_vector = "half2";
-        ss << "#include <cuda_fp16.h>\n";
+        emitCudaFp16Header(ss);
     } else if (dtype == DataType::FP8_E4M3) {
         compute_dtype = "half";
         compute_dtype_vector = "half2";
         storage_dtype = "__nv_fp8_e4m3";
         storage_dtype_vector = "__nv_fp8x2_e4m3";
-        ss << "#include <cuda_fp16.h>\n";
+        emitCudaFp16Header(ss);
         ss << "#include <cuda_fp8.h>\n";
     } else if (dtype == DataType::FP8_E5M2) {
         compute_dtype = "half";
         compute_dtype_vector = "half2";
         storage_dtype = "__nv_fp8_e5m2";
         storage_dtype_vector = "__nv_fp8x2_e5m2";
-        ss << "#include <cuda_fp16.h>\n";
+        emitCudaFp16Header(ss);
         ss << "#include <cuda_fp8.h>\n";
     } else {
         throw runtime_error("emitVector2SpecializedBroadcast called with non-vectorizable dtype.");

@@ -8,6 +8,7 @@ import tomllib
 import pytest
 
 import thor._bootstrap as bootstrap
+import thor._nvrtc_headers as nvrtc_headers
 import thor._cuda_stack_resolved as resolved_cuda_stack
 
 _BUILD_BACKEND_ROOT = Path(__file__).resolve().parents[2] / "build_backend"
@@ -182,29 +183,12 @@ def test_configure_skips_cuda_distribution_validation_for_source_tree_test(monke
     assert bootstrap._configured
     assert calls == []
 
-def test_cuda_include_env_uses_exact_declared_distribution_files(monkeypatch, tmp_path):
-    cuda_include = tmp_path / "runtime_root" / "nvidia" / "cu13" / "include"
-    cccl_include = cuda_include / "cccl"
+def test_cuda_include_env_uses_nvrtc_bundled_headers_and_exact_declared_distribution_files(monkeypatch, tmp_path):
     cudnn_frontend_include = tmp_path / "frontend_root" / "include"
-
-    (cuda_include).mkdir(parents=True)
-    (cccl_include / "cub").mkdir(parents=True)
-    (cudnn_frontend_include).mkdir(parents=True)
-    (cuda_include / "vector_types.h").write_text("// sentinel\n")
-    (cccl_include / "cub" / "cub.cuh").write_text("// sentinel\n")
+    cudnn_frontend_include.mkdir(parents=True)
     (cudnn_frontend_include / "cudnn_frontend.h").write_text("// sentinel\n")
 
     distributions = {
-        "nvidia-cuda-runtime": _dist(
-            tmp_path / "runtime_root",
-            "13.3.29",
-            "nvidia/cu13/include/vector_types.h",
-        ),
-        "nvidia-cuda-cccl": _dist(
-            tmp_path / "runtime_root",
-            "13.3.3.3.1",
-            "nvidia/cu13/include/cccl/cub/cub.cuh",
-        ),
         "nvidia-cudnn-frontend": _dist(
             tmp_path / "frontend_root",
             "1.25.0",
@@ -212,40 +196,39 @@ def test_cuda_include_env_uses_exact_declared_distribution_files(monkeypatch, tm
         ),
     }
 
+    bundled_headers = tmp_path / "nvrtc_headers" / "cuda-13.3"
     monkeypatch.delenv("THOR_CUDA_INCLUDE_DIR", raising=False)
     monkeypatch.delenv("THOR_CUDA_CCCL_INCLUDE_DIR", raising=False)
+    monkeypatch.delenv("THOR_NVRTC_BUNDLED_HEADERS_DIR", raising=False)
     monkeypatch.delenv("THOR_CUDNN_FRONTEND_INCLUDE_DIR", raising=False)
+    monkeypatch.setattr(nvrtc_headers, "nvrtc_bundled_headers_dir", lambda cuda_version: bundled_headers)
+    monkeypatch.setattr(bootstrap, "_nvrtc_bundled_headers_dir", lambda cuda_version: bundled_headers)
     monkeypatch.setattr(bootstrap, "_metadata_distribution", lambda name: distributions[name])
 
     bootstrap._configure_include_dirs()
 
-    assert Path(os.environ["THOR_CUDA_INCLUDE_DIR"]) == cuda_include
-    assert Path(os.environ["THOR_CUDA_CCCL_INCLUDE_DIR"]) == cccl_include
+    assert "THOR_CUDA_INCLUDE_DIR" not in os.environ
+    assert "THOR_CUDA_CCCL_INCLUDE_DIR" not in os.environ
+    assert Path(os.environ["THOR_NVRTC_BUNDLED_HEADERS_DIR"]) == bundled_headers
     assert Path(os.environ["THOR_CUDNN_FRONTEND_INCLUDE_DIR"]) == cudnn_frontend_include
 
+def test_nvrtc_bundled_headers_default_cache_uses_cuda_version(monkeypatch, tmp_path):
+    monkeypatch.delenv("THOR_NVRTC_BUNDLED_HEADERS_DIR", raising=False)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+
+    assert nvrtc_headers.nvrtc_bundled_headers_dir("13.3") == tmp_path / "cache" / "thor" / "nvrtc_bundled_headers" / "cuda-13.3"
+
+def test_nvrtc_bundled_headers_env_override(monkeypatch, tmp_path):
+    override = tmp_path / "override"
+    monkeypatch.setenv("THOR_NVRTC_BUNDLED_HEADERS_DIR", str(override))
+
+    assert nvrtc_headers.nvrtc_bundled_headers_dir("13.3") == override
 
 def test_cuda_include_env_rejects_conflicting_user_override(monkeypatch, tmp_path):
-    cuda_include = tmp_path / "runtime_root" / "nvidia" / "cu13" / "include"
-    cuda_include.mkdir(parents=True)
-    (cuda_include / "vector_types.h").write_text("// sentinel\n")
+    monkeypatch.setenv("THOR_NVRTC_BUNDLED_HEADERS_DIR", str(tmp_path / "wrong_headers"))
 
-    distributions = {
-        "nvidia-cuda-runtime": _dist(
-            tmp_path / "runtime_root",
-            "13.3.29",
-            "nvidia/cu13/include/vector_types.h",
-        ),
-    }
-
-    monkeypatch.setenv("THOR_CUDA_INCLUDE_DIR", str(tmp_path / "wrong_cuda"))
-    monkeypatch.setattr(bootstrap, "_metadata_distribution", lambda name: distributions[name])
-
-    with pytest.raises(bootstrap.CudaBootstrapError, match="THOR_CUDA_INCLUDE_DIR"):
-        bootstrap._set_strict_env(
-            "THOR_CUDA_INCLUDE_DIR",
-            bootstrap._distribution_root_containing("nvidia-cuda-runtime", Path("vector_types.h")),
-        )
-
+    with pytest.raises(bootstrap.CudaBootstrapError, match="THOR_NVRTC_BUNDLED_HEADERS_DIR"):
+        bootstrap._set_strict_env("THOR_NVRTC_BUNDLED_HEADERS_DIR", tmp_path / "right_headers")
 
 def test_metadata_distribution_rejects_missing_required_distribution(monkeypatch):
 

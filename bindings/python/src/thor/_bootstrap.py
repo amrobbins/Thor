@@ -13,6 +13,7 @@ from typing import Iterable as _Iterable
 from typing import Sequence as _Sequence
 
 from ._cuda_stack import CUDA_VERSION as _SOURCE_CUDA_VERSION
+from ._nvrtc_headers import nvrtc_bundled_headers_dir as _nvrtc_bundled_headers_dir
 from ._cuda_stack_resolved import CUDA_STACK as _CUDA_STACK
 from ._cuda_stack_resolved import LibrarySpec as _LibrarySpec
 
@@ -232,7 +233,15 @@ def _set_strict_env(env_name: str, value: _Path) -> None:
 
 
 def _configure_include_dirs() -> None:
+    # CUDA 13.3+ provides CUDA Runtime and CCCL headers through libnvrtc-builtins.
+    # Thor points NVRTC at a writable cache and uses --use-bundled-headers so
+    # installed wheels do not require host CUDA headers or the incomplete pip
+    # runtime-header layout.
+    _set_strict_env("THOR_NVRTC_BUNDLED_HEADERS_DIR", _nvrtc_bundled_headers_dir(_CUDA_STACK.cuda_version))
+
     for spec in _INCLUDE_SPECS:
+        if spec.env_name in {"THOR_CUDA_INCLUDE_DIR", "THOR_CUDA_CCCL_INCLUDE_DIR"}:
+            continue
         include_root = _distribution_root_containing(spec.distribution, spec.sentinel)
         _set_strict_env(spec.env_name, include_root)
 

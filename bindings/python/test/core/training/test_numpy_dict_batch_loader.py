@@ -81,3 +81,106 @@ def test_numpy_float32_dict_batch_loader_rejects_mismatched_non_batch_shape():
             validate={"x": np.zeros((2, 4), dtype=np.float32)},
             batch_size=2,
         )
+
+
+def test_numpy_float32_dict_batch_loader_accepts_explicit_test_split_and_reports_counts():
+    train = {
+        "trend_inputs": np.zeros((7, 4), dtype=np.float32),
+        "sales": np.zeros((7, 2), dtype=np.float32),
+    }
+    validate = {
+        "trend_inputs": np.zeros((3, 4), dtype=np.float32),
+        "sales": np.zeros((3, 2), dtype=np.float32),
+    }
+    test = {
+        "trend_inputs": np.zeros((5, 4), dtype=np.float32),
+        "sales": np.zeros((5, 2), dtype=np.float32),
+    }
+
+    loader = thor.training.NumpyFloat32DictBatchLoader(
+        train=train,
+        validate=validate,
+        test=test,
+        batch_size=4,
+        randomize_train=False,
+        batch_queue_depth=3,
+    )
+
+    assert loader.has_explicit_test_split()
+    assert not loader.get_randomize_train()
+    assert loader.get_random_seed() is None
+    assert loader.get_batch_queue_depth() == 3
+    assert loader.get_num_train_examples() == 7
+    assert loader.get_num_validate_examples() == 3
+    assert loader.get_num_test_examples() == 5
+    assert loader.get_num_train_batches() == 2
+    assert loader.get_num_validate_batches() == 1
+    assert loader.get_num_test_batches() == 2
+
+
+def test_numpy_float32_dict_batch_loader_defaults_test_to_validate_for_backcompat():
+    train = {"x": np.zeros((4, 2), dtype=np.float32)}
+    validate = {"x": np.zeros((3, 2), dtype=np.float32)}
+
+    loader = thor.training.NumpyFloat32DictBatchLoader(
+        train=train,
+        validate=validate,
+        batch_size=2,
+        randomize_train=False,
+    )
+
+    assert not loader.has_explicit_test_split()
+    assert loader.get_num_validate_examples() == 3
+    assert loader.get_num_test_examples() == 3
+    assert loader.get_num_validate_batches() == 2
+    assert loader.get_num_test_batches() == 2
+
+
+def test_numpy_float32_dict_batch_loader_records_seed_and_requires_randomization():
+    loader = thor.training.NumpyFloat32DictBatchLoader(
+        train={"x": np.zeros((4, 2), dtype=np.float32)},
+        validate={"x": np.zeros((2, 2), dtype=np.float32)},
+        batch_size=2,
+        randomize_train=True,
+        random_seed=12345,
+    )
+
+    assert loader.get_randomize_train()
+    assert loader.get_random_seed() == 12345
+
+    with pytest.raises(ValueError, match="random_seed requires randomize_train=True"):
+        thor.training.NumpyFloat32DictBatchLoader(
+            train={"x": np.zeros((4, 2), dtype=np.float32)},
+            validate={"x": np.zeros((2, 2), dtype=np.float32)},
+            batch_size=2,
+            randomize_train=False,
+            random_seed=12345,
+        )
+
+
+def test_numpy_float32_dict_batch_loader_rejects_mismatched_test_split():
+    with pytest.raises(ValueError, match="train and test dicts must have the same tensor names"):
+        thor.training.NumpyFloat32DictBatchLoader(
+            train={"x": np.zeros((2, 3), dtype=np.float32), "y": np.zeros((2, 1), dtype=np.float32)},
+            validate={"x": np.zeros((2, 3), dtype=np.float32), "y": np.zeros((2, 1), dtype=np.float32)},
+            test={"x": np.zeros((2, 3), dtype=np.float32)},
+            batch_size=2,
+        )
+
+    with pytest.raises(ValueError, match="train and test tensor 'x' must have matching non-batch shapes"):
+        thor.training.NumpyFloat32DictBatchLoader(
+            train={"x": np.zeros((2, 3), dtype=np.float32)},
+            validate={"x": np.zeros((2, 3), dtype=np.float32)},
+            test={"x": np.zeros((2, 4), dtype=np.float32)},
+            batch_size=2,
+        )
+
+
+def test_numpy_float32_dict_batch_loader_rejects_non_dict_test_split():
+    with pytest.raises(TypeError, match="test must be a dict or None"):
+        thor.training.NumpyFloat32DictBatchLoader(
+            train={"x": np.zeros((2, 3), dtype=np.float32)},
+            validate={"x": np.zeros((2, 3), dtype=np.float32)},
+            test=[("x", np.zeros((2, 3), dtype=np.float32))],
+            batch_size=2,
+        )

@@ -1,18 +1,160 @@
 cmake_minimum_required(VERSION 3.22)
 
 # ============================================================
-# CUDA compiler bootstrap
+# Python and CUDA stack bootstrap
 # ============================================================
 # CMake has to identify the CUDA compiler while project() is executing, so
 # the compiler path and target architectures must be initialized before the
-# CUDA language is enabled. CUDA 13.x no longer supports some older default
-# probe architectures, and CMake's automatic architecture detection can fail
-# before Thor's normal configuration code runs.
+# CUDA language is enabled. Thor intentionally still uses host nvcc for local
+# builds. The CUDA runtime libraries come from the exact Python wheel stack.
+# Host CUDA Toolkit headers are used only to compile Thor's AOT C++/CUDA code;
+# runtime NVRTC JIT uses CUDA 13.3's bundled headers from the resolved NVRTC
+# wheel/libnvrtc-builtins stack so installed wheels do not require host CUDA
+# headers and local source-tree testing matches wheel runtime behavior.
+option(THOR_USE_PROJECT_VENV "Use project .venv Python when present" ON)
+
+set(
+        THOR_PYTHON_EXECUTABLE
+        ""
+        CACHE FILEPATH
+        "Python executable to use for Thor Python bindings and Python CUDA stack resolution. Overrides project .venv detection."
+)
+
+set(
+        THOR_CUDA_STACK
+        "python"
+        CACHE STRING
+        "CUDA user-space stack for local builds: python requires the selected Python environment's exact NVIDIA wheel runtime stack; host uses the host CUDA toolkit."
+)
+set_property(CACHE THOR_CUDA_STACK PROPERTY STRINGS python host)
+if (NOT THOR_CUDA_STACK STREQUAL "python" AND NOT THOR_CUDA_STACK STREQUAL "host")
+    message(FATAL_ERROR "Invalid THOR_CUDA_STACK='${THOR_CUDA_STACK}'. Use 'python' or 'host'.")
+endif ()
+
+set(_thor_selected_python "")
+
+if (THOR_PYTHON_EXECUTABLE)
+    set(_thor_selected_python "${THOR_PYTHON_EXECUTABLE}")
+elseif (DEFINED Python_EXECUTABLE AND Python_EXECUTABLE)
+    set(_thor_selected_python "${Python_EXECUTABLE}")
+elseif (DEFINED Python3_EXECUTABLE AND Python3_EXECUTABLE)
+    set(_thor_selected_python "${Python3_EXECUTABLE}")
+elseif (THOR_USE_PROJECT_VENV AND EXISTS "${CMAKE_SOURCE_DIR}/.venv/bin/python3")
+    set(_thor_selected_python "${CMAKE_SOURCE_DIR}/.venv/bin/python3")
+else ()
+    find_program(_thor_found_python3 NAMES python3 python)
+    if (_thor_found_python3)
+        set(_thor_selected_python "${_thor_found_python3}")
+    endif ()
+endif ()
+
+if (_thor_selected_python)
+    set(Python_EXECUTABLE "${_thor_selected_python}" CACHE FILEPATH "Python executable for Thor bindings" FORCE)
+    set(Python3_EXECUTABLE "${_thor_selected_python}" CACHE FILEPATH "Python3 executable for Thor/dependency CMake" FORCE)
+endif ()
+
+if (THOR_CUDA_STACK STREQUAL "python")
+    if (NOT _thor_selected_python)
+        message(FATAL_ERROR
+                "THOR_CUDA_STACK=python requires a selected Python interpreter. "
+                "Pass -DTHOR_PYTHON_EXECUTABLE=/path/to/venv/bin/python3 or use -DTHOR_CUDA_STACK=host.")
+    endif ()
+
+    set(_thor_cuda_stack_resolver "${CMAKE_SOURCE_DIR}/bindings/python/tools/resolve_cuda_stack_for_cmake.py")
+    if (NOT EXISTS "${_thor_cuda_stack_resolver}")
+        message(FATAL_ERROR "Thor Python CUDA stack resolver is missing: ${_thor_cuda_stack_resolver}")
+    endif ()
+
+    execute_process(
+            COMMAND "${_thor_selected_python}" "${_thor_cuda_stack_resolver}" "${CMAKE_SOURCE_DIR}"
+            RESULT_VARIABLE _thor_python_cuda_stack_result
+            OUTPUT_VARIABLE _thor_python_cuda_stack_json
+            ERROR_VARIABLE _thor_python_cuda_stack_error
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_STRIP_TRAILING_WHITESPACE
+    )
+
+    if (NOT _thor_python_cuda_stack_result EQUAL 0)
+        message(FATAL_ERROR
+                "Thor requires the selected Python environment to contain the exact CUDA user-space stack frozen into the Thor wheel manifest.\n"
+                "Python: ${_thor_selected_python}\n"
+                "Resolver: ${_thor_cuda_stack_resolver}\n"
+                "${_thor_python_cuda_stack_error}\n"
+                "Install/update the NVIDIA Python CUDA dependencies in that environment, or pass -DTHOR_CUDA_STACK=host to opt out.")
+    endif ()
+
+    string(JSON THOR_PYTHON_CUDA_VERSION GET "${_thor_python_cuda_stack_json}" cuda_version)
+    string(JSON THOR_PYTHON_CUDA_STACK_NAME GET "${_thor_python_cuda_stack_json}" stack_name)
+
+    set(_thor_python_cuda_variables
+            THOR_CUDA_INCLUDE_DIR
+            THOR_CUDA_CCCL_INCLUDE_DIR
+            THOR_CUDNN_INCLUDE_DIR
+            THOR_CUDNN_FRONTEND_INCLUDE_DIR
+            THOR_CUBLAS_INCLUDE_DIR
+            THOR_CUSOLVER_INCLUDE_DIR
+            THOR_CUSPARSE_INCLUDE_DIR
+            THOR_NVRTC_INCLUDE_DIR
+            THOR_NVJITLINK_INCLUDE_DIR
+            THOR_CUDART_LIBRARY
+            THOR_NVJITLINK_LIBRARY
+            THOR_NVRTC_BUILTINS_LIBRARY
+            THOR_NVRTC_LIBRARY
+            THOR_CUBLAS_LIBRARY
+            THOR_CUBLASLT_LIBRARY
+            THOR_CUSPARSE_LIBRARY
+            THOR_CUSOLVER_LIBRARY
+            THOR_CUDNN_LIBRARY
+    )
+    foreach (_thor_python_cuda_var IN LISTS _thor_python_cuda_variables)
+        string(JSON _thor_python_cuda_value GET "${_thor_python_cuda_stack_json}" variables ${_thor_python_cuda_var})
+        if (_thor_python_cuda_var MATCHES "_LIBRARY$")
+            set(${_thor_python_cuda_var} "${_thor_python_cuda_value}" CACHE FILEPATH "Thor Python CUDA stack ${_thor_python_cuda_var}" FORCE)
+        else ()
+            set(${_thor_python_cuda_var} "${_thor_python_cuda_value}" CACHE PATH "Thor Python CUDA stack ${_thor_python_cuda_var}" FORCE)
+        endif ()
+    endforeach ()
+
+    set(THOR_CUDA_INCLUDE_DIRS "")
+    string(JSON _thor_python_cuda_include_count LENGTH "${_thor_python_cuda_stack_json}" include_dirs)
+    if (_thor_python_cuda_include_count GREATER 0)
+        math(EXPR _thor_python_cuda_include_last "${_thor_python_cuda_include_count} - 1")
+        foreach (_thor_python_cuda_index RANGE 0 ${_thor_python_cuda_include_last})
+            string(JSON _thor_python_cuda_include_dir GET "${_thor_python_cuda_stack_json}" include_dirs ${_thor_python_cuda_index})
+            list(APPEND THOR_CUDA_INCLUDE_DIRS "${_thor_python_cuda_include_dir}")
+        endforeach ()
+    endif ()
+
+    set(THOR_CUDA_LINK_LIBRARIES "")
+    set(THOR_CUDA_RUNTIME_LIBRARY_DIRS "")
+    string(JSON _thor_python_cuda_library_count LENGTH "${_thor_python_cuda_stack_json}" link_libraries)
+    if (_thor_python_cuda_library_count GREATER 0)
+        math(EXPR _thor_python_cuda_library_last "${_thor_python_cuda_library_count} - 1")
+        foreach (_thor_python_cuda_index RANGE 0 ${_thor_python_cuda_library_last})
+            string(JSON _thor_python_cuda_library GET "${_thor_python_cuda_stack_json}" link_libraries ${_thor_python_cuda_index})
+            list(APPEND THOR_CUDA_LINK_LIBRARIES "${_thor_python_cuda_library}")
+            get_filename_component(_thor_python_cuda_library_dir "${_thor_python_cuda_library}" DIRECTORY)
+            list(APPEND THOR_CUDA_RUNTIME_LIBRARY_DIRS "${_thor_python_cuda_library_dir}")
+        endforeach ()
+    endif ()
+    list(REMOVE_DUPLICATES THOR_CUDA_RUNTIME_LIBRARY_DIRS)
+
+    # CMake would otherwise add the host CUDA runtime selected by nvcc.  Thor
+    # links the exact Python-wheel libcudart explicitly in this mode.
+    set(CMAKE_CUDA_RUNTIME_LIBRARY None CACHE STRING "CUDA runtime library" FORCE)
+endif ()
+
+# ============================================================
+# CUDA compiler bootstrap
+# ============================================================
+# CUDA 13.x no longer supports some older default probe architectures, and
+# CMake's automatic architecture detection can fail before Thor's normal
+# configuration code runs.
 set(THOR_MIN_CUDA_TOOLKIT_VERSION 13.3)
 string(TOUPPER "${CMAKE_BUILD_TYPE}" _thor_build_type_upper)
 if (_thor_build_type_upper MATCHES "^(RELEASE|RELWITHDEBINFO|MINSIZEREL)$")
-    set(_thor_default_cuda_architectures "75;80;89;120")
-    set(_thor_default_cuda_architectures_description "sm_75 for NVIDIA Turing / TITAN RTX, sm_80 for NVIDIA A100, sm_89 for NVIDIA L4/Ada, and sm_120 for RTX 50-series / Blackwell")
+    set(_thor_default_cuda_architectures "80;89;120")
+    set(_thor_default_cuda_architectures_description "sm_80 for NVIDIA A100, sm_89 for NVIDIA L4/Ada, and sm_120 for RTX 50-series / Blackwell")
 else ()
     set(_thor_default_cuda_architectures "120")
     set(_thor_default_cuda_architectures_description "sm_120 for RTX 50-series / Blackwell")
@@ -132,27 +274,6 @@ project(Thor VERSION ${THOR_VERSION_NUMERIC} LANGUAGES C CXX CUDA)
 # ============================================================
 # Thor Python selection
 # ============================================================
-option(THOR_USE_PROJECT_VENV "Use project .venv Python when present" ON)
-
-set(
-        THOR_PYTHON_EXECUTABLE
-        ""
-        CACHE FILEPATH
-        "Python executable to use for Thor Python bindings. Overrides project .venv detection."
-)
-
-set(_thor_selected_python "")
-
-if (THOR_PYTHON_EXECUTABLE)
-    set(_thor_selected_python "${THOR_PYTHON_EXECUTABLE}")
-elseif (DEFINED Python_EXECUTABLE AND Python_EXECUTABLE)
-    set(_thor_selected_python "${Python_EXECUTABLE}")
-elseif (DEFINED Python3_EXECUTABLE AND Python3_EXECUTABLE)
-    set(_thor_selected_python "${Python3_EXECUTABLE}")
-elseif (THOR_USE_PROJECT_VENV AND EXISTS "${CMAKE_SOURCE_DIR}/.venv/bin/python3")
-    set(_thor_selected_python "${CMAKE_SOURCE_DIR}/.venv/bin/python3")
-endif ()
-
 if (_thor_selected_python)
     set(Python_EXECUTABLE "${_thor_selected_python}" CACHE FILEPATH "Python executable for Thor bindings" FORCE)
     set(Python3_EXECUTABLE "${_thor_selected_python}" CACHE FILEPATH "Python3 executable for Thor/dependency CMake" FORCE)
@@ -188,9 +309,37 @@ if (CMAKE_CUDA_COMPILER_VERSION VERSION_LESS THOR_MIN_CUDA_TOOLKIT_VERSION)
             "Detected CUDA compiler ${CMAKE_CUDA_COMPILER_VERSION} at ${CMAKE_CUDA_COMPILER}.")
 endif ()
 
+if (THOR_CUDA_STACK STREQUAL "python")
+    string(REPLACE "." ";" _thor_python_cuda_version_parts "${THOR_PYTHON_CUDA_VERSION}")
+    list(GET _thor_python_cuda_version_parts 0 _thor_python_cuda_major)
+    list(GET _thor_python_cuda_version_parts 1 _thor_python_cuda_minor)
+    math(EXPR _thor_python_cuda_next_minor "${_thor_python_cuda_minor} + 1")
+    set(_thor_python_cuda_next_version "${_thor_python_cuda_major}.${_thor_python_cuda_next_minor}")
+
+    set(_thor_cuda_compiler_family_mismatch OFF)
+    if (CMAKE_CUDA_COMPILER_VERSION VERSION_LESS THOR_PYTHON_CUDA_VERSION)
+        set(_thor_cuda_compiler_family_mismatch ON)
+    elseif (CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL _thor_python_cuda_next_version)
+        set(_thor_cuda_compiler_family_mismatch ON)
+    endif ()
+
+    if (_thor_cuda_compiler_family_mismatch)
+        message(FATAL_ERROR
+                "THOR_CUDA_STACK=python requires host nvcc to be from the same CUDA family as the Python wheel runtime. "
+                "Python stack is ${THOR_PYTHON_CUDA_STACK_NAME} (${THOR_PYTHON_CUDA_VERSION}.x), "
+                "but nvcc is ${CMAKE_CUDA_COMPILER_VERSION} at ${CMAKE_CUDA_COMPILER}. "
+                "Install/use a matching host nvcc or pass -DTHOR_CUDA_STACK=host to opt out.")
+    endif ()
+endif ()
+
 message(STATUS "Thor: CUDA compiler = ${CMAKE_CUDA_COMPILER}")
 message(STATUS "Thor: CUDA compiler version = ${CMAKE_CUDA_COMPILER_VERSION}")
 message(STATUS "Thor: CUDA architectures = ${CMAKE_CUDA_ARCHITECTURES}")
+if (THOR_CUDA_STACK STREQUAL "python")
+    message(STATUS "Thor: CUDA user-space stack = ${THOR_PYTHON_CUDA_STACK_NAME} from ${_thor_selected_python}")
+else ()
+    message(STATUS "Thor: CUDA user-space stack = host CUDA toolkit")
+endif ()
 
 # ============================================================
 # Global settings
@@ -563,6 +712,10 @@ set_target_properties(Thor PROPERTIES
         BUILD_RPATH "\$ORIGIN"
         INSTALL_RPATH "\$ORIGIN"
 )
+if (THOR_CUDA_STACK STREQUAL "python")
+    set_property(TARGET Thor PROPERTY CUDA_RUNTIME_LIBRARY None)
+    set_property(TARGET Thor APPEND PROPERTY BUILD_RPATH "${THOR_CUDA_RUNTIME_LIBRARY_DIRS}")
+endif ()
 
 target_include_directories(Thor
         PUBLIC
@@ -590,84 +743,191 @@ thor_enable_release_no_semantic_interposition(Thor)
 thor_enable_release_cuda_device_lto(Thor)
 
 # OpenMP
-find_package(OpenMP REQUIRED)
+find_package(OpenMP REQUIRED COMPONENTS CXX)
 target_link_libraries(Thor PRIVATE OpenMP::OpenMP_CXX)
 
 find_package(CUDAToolkit ${THOR_MIN_CUDA_TOOLKIT_VERSION} REQUIRED)
 find_package(OpenSSL REQUIRED)
 
-# Main CUDA headers directory for things like cuda.h.
-# CUDAToolkit_INCLUDE_DIRS is a list; take the primary include dir and
-# normalize it so CMake never treats it as relative.
-list(GET CUDAToolkit_INCLUDE_DIRS 0 THOR_CUDA_INCLUDE_DIR)
-cmake_path(ABSOLUTE_PATH THOR_CUDA_INCLUDE_DIR NORMALIZE)
+if (THOR_CUDA_STACK STREQUAL "python")
+    foreach (_thor_required_python_cuda_path IN ITEMS
+            "${THOR_CUDA_INCLUDE_DIR}/cuda.h"
+            "${THOR_CUDA_CCCL_INCLUDE_DIR}/cub/cub.cuh"
+            "${THOR_CUDNN_INCLUDE_DIR}/cudnn.h"
+            "${THOR_CUDNN_FRONTEND_INCLUDE_DIR}/cudnn_frontend.h"
+            "${THOR_CUDART_LIBRARY}"
+            "${THOR_NVRTC_BUILTINS_LIBRARY}"
+            "${THOR_NVRTC_LIBRARY}"
+            "${THOR_CUBLAS_LIBRARY}"
+            "${THOR_CUBLASLT_LIBRARY}"
+            "${THOR_CUSOLVER_LIBRARY}"
+            "${THOR_CUSPARSE_LIBRARY}"
+            "${THOR_CUDNN_LIBRARY}"
+    )
+        if (NOT EXISTS "${_thor_required_python_cuda_path}")
+            message(FATAL_ERROR "Thor Python CUDA stack path is missing: ${_thor_required_python_cuda_path}")
+        endif ()
+    endforeach ()
 
-if (NOT EXISTS "${THOR_CUDA_INCLUDE_DIR}/cuda.h")
-    message(FATAL_ERROR
-            "Resolved CUDA include dir is invalid: ${THOR_CUDA_INCLUDE_DIR}")
-endif ()
+    set(THOR_PYTHON_CUDA_RUNTIME_INCLUDE_DIR "${THOR_CUDA_INCLUDE_DIR}" CACHE PATH "Validated Python CUDA runtime wheel include directory" FORCE)
+    set(THOR_PYTHON_CUDA_RUNTIME_CCCL_INCLUDE_DIR "${THOR_CUDA_CCCL_INCLUDE_DIR}" CACHE PATH "Validated Python CUDA CCCL wheel include directory" FORCE)
 
-target_link_libraries(Thor PRIVATE
-        OpenSSL::Crypto
-        CUDA::cudart
-        # CUDA::cuda_driver
-        CUDA::cublas
-        CUDA::cublasLt
-        CUDA::cusolver
-        CUDA::cusparse
-        CUDA::nvrtc
-)
+    # AOT/source compilation still uses the host CUDA Toolkit headers that match
+    # host nvcc. Runtime NVRTC JIT does not use these include paths; it uses
+    # libnvrtc-builtins bundled headers through --use-bundled-headers.
+    list(GET CUDAToolkit_INCLUDE_DIRS 0 THOR_CUDA_TOOLKIT_INCLUDE_DIR)
+    cmake_path(ABSOLUTE_PATH THOR_CUDA_TOOLKIT_INCLUDE_DIR NORMALIZE)
+    if (NOT EXISTS "${THOR_CUDA_TOOLKIT_INCLUDE_DIR}/cuda.h")
+        message(FATAL_ERROR "Host CUDA Toolkit include directory is invalid: ${THOR_CUDA_TOOLKIT_INCLUDE_DIR}")
+    endif ()
 
-# Find cuDNN without hard-coding platform-specific library directories.
-# Prefer the detected CUDA toolkit library locations, then fall back to the
-# normal system library search path.
-find_library(THOR_CUDNN_LIBRARY
-        NAMES cudnn
-        HINTS
-        "${CUDAToolkit_LIBRARY_DIR}"
-        "${CUDAToolkit_TARGET_DIR}/lib"
-        "${CUDAToolkit_TARGET_DIR}/lib64"
-)
-if (NOT THOR_CUDNN_LIBRARY)
-    find_library(THOR_CUDNN_LIBRARY NAMES cudnn REQUIRED)
-endif ()
+    set(THOR_CUDA_INCLUDE_DIR "${THOR_CUDA_TOOLKIT_INCLUDE_DIR}" CACHE PATH "Host CUDA Toolkit include directory used for AOT compilation" FORCE)
+    if (EXISTS "${THOR_CUDA_TOOLKIT_INCLUDE_DIR}/cccl/cub/cub.cuh")
+        set(THOR_CUDA_CCCL_INCLUDE_DIR "${THOR_CUDA_TOOLKIT_INCLUDE_DIR}/cccl" CACHE PATH "Host CUDA CCCL/CUB include directory used for AOT compilation" FORCE)
+    else ()
+        set(THOR_CUDA_CCCL_INCLUDE_DIR "${THOR_CUDA_TOOLKIT_INCLUDE_DIR}" CACHE PATH "Host CUDA CCCL/CUB include directory used for AOT compilation" FORCE)
+    endif ()
 
-target_link_libraries(Thor PRIVATE
-        "${THOR_CUDNN_LIBRARY}"
-)
+    set(THOR_NVRTC_BUNDLED_HEADERS_DIR
+            "${CMAKE_BINARY_DIR}/generated/thor_nvrtc_bundled_headers/cuda-${THOR_PYTHON_CUDA_VERSION}"
+            CACHE PATH
+            "Directory where NVRTC should install/use bundled CUDA headers for source-tree JIT")
 
-# CCCL provides the CUB headers. CUDA 13 wheels normally use the unified
-# nvidia/cu13/include tree, but older/split wheel layouts may use
-# nvidia/cuda_cccl/include. Default to the main CUDA include dir, then prefer
-# an explicitly configured or discoverable CCCL include root when available.
-set(THOR_CUDA_CCCL_INCLUDE_DIR "${THOR_CUDA_INCLUDE_DIR}" CACHE PATH "CUDA CCCL/CUB include directory")
+    set(THOR_CUDA_INCLUDE_DIRS
+            "${THOR_CUDA_INCLUDE_DIR}"
+            "${THOR_CUDA_CCCL_INCLUDE_DIR}"
+            "${THOR_CUDNN_INCLUDE_DIR}"
+            "${THOR_CUDNN_FRONTEND_INCLUDE_DIR}"
+    )
 
-if (DEFINED ENV{THOR_CUDA_CCCL_INCLUDE_DIR} AND NOT "$ENV{THOR_CUDA_CCCL_INCLUDE_DIR}" STREQUAL "")
-    set(THOR_CUDA_CCCL_INCLUDE_DIR "$ENV{THOR_CUDA_CCCL_INCLUDE_DIR}" CACHE PATH "CUDA CCCL/CUB include directory" FORCE)
-elseif (DEFINED Python3_EXECUTABLE AND Python3_EXECUTABLE)
-    execute_process(
-            COMMAND "${Python3_EXECUTABLE}" -c
-            "import sysconfig
+    message(STATUS "Thor: CUDA runtime wheel include = ${THOR_PYTHON_CUDA_RUNTIME_INCLUDE_DIR}")
+    message(STATUS "Thor: CUDA runtime wheel CCCL include = ${THOR_PYTHON_CUDA_RUNTIME_CCCL_INCLUDE_DIR}")
+    message(STATUS "Thor: host CUDA include for AOT = ${THOR_CUDA_INCLUDE_DIR}")
+    message(STATUS "Thor: host CUDA CCCL include for AOT = ${THOR_CUDA_CCCL_INCLUDE_DIR}")
+    message(STATUS "Thor: NVRTC bundled headers cache = ${THOR_NVRTC_BUNDLED_HEADERS_DIR}")
+    message(STATUS "Thor: cuDNN include = ${THOR_CUDNN_INCLUDE_DIR}")
+    message(STATUS "Thor: cuDNN Frontend include = ${THOR_CUDNN_FRONTEND_INCLUDE_DIR}")
+    message(STATUS "Thor: CUDA runtime libraries = ${THOR_CUDA_RUNTIME_LIBRARY_DIRS}")
+else ()
+    # Main CUDA headers directory for things like cuda.h.
+    # CUDAToolkit_INCLUDE_DIRS is a list; take the primary include dir and
+    # normalize it so CMake never treats it as relative.
+    list(GET CUDAToolkit_INCLUDE_DIRS 0 THOR_CUDA_INCLUDE_DIR)
+    cmake_path(ABSOLUTE_PATH THOR_CUDA_INCLUDE_DIR NORMALIZE)
+
+    if (NOT EXISTS "${THOR_CUDA_INCLUDE_DIR}/cuda.h")
+        message(FATAL_ERROR
+                "Resolved CUDA include dir is invalid: ${THOR_CUDA_INCLUDE_DIR}")
+    endif ()
+
+    set(THOR_CUDA_LINK_LIBRARIES
+            CUDA::cudart
+            CUDA::cublas
+            CUDA::cublasLt
+            CUDA::cusolver
+            CUDA::cusparse
+            CUDA::nvrtc
+    )
+
+    # Find cuDNN without hard-coding platform-specific library directories.
+    # Prefer the detected CUDA toolkit library locations, then fall back to the
+    # normal system library search path.
+    find_library(THOR_CUDNN_LIBRARY
+            NAMES cudnn
+            HINTS
+            "${CUDAToolkit_LIBRARY_DIR}"
+            "${CUDAToolkit_TARGET_DIR}/lib"
+            "${CUDAToolkit_TARGET_DIR}/lib64"
+    )
+    if (NOT THOR_CUDNN_LIBRARY)
+        find_library(THOR_CUDNN_LIBRARY NAMES cudnn REQUIRED)
+    endif ()
+
+    list(APPEND THOR_CUDA_LINK_LIBRARIES "${THOR_CUDNN_LIBRARY}")
+
+    # CCCL provides the CUB headers. CUDA 13 wheels normally use the unified
+    # nvidia/cu13/include tree, but older/split wheel layouts may use
+    # nvidia/cuda_cccl/include. Default to the main CUDA include dir, then prefer
+    # an explicitly configured or discoverable CCCL include root when available.
+    set(THOR_CUDA_CCCL_INCLUDE_DIR "${THOR_CUDA_INCLUDE_DIR}" CACHE PATH "CUDA CCCL/CUB include directory")
+
+    if (DEFINED ENV{THOR_CUDA_CCCL_INCLUDE_DIR} AND NOT "$ENV{THOR_CUDA_CCCL_INCLUDE_DIR}" STREQUAL "")
+        set(THOR_CUDA_CCCL_INCLUDE_DIR "$ENV{THOR_CUDA_CCCL_INCLUDE_DIR}" CACHE PATH "CUDA CCCL/CUB include directory" FORCE)
+    elseif (DEFINED Python3_EXECUTABLE AND Python3_EXECUTABLE)
+        execute_process(
+                COMMAND "${Python3_EXECUTABLE}" -c
+                "import sysconfig
 from pathlib import Path
 site = Path(sysconfig.get_paths()['platlib'])
 candidates = [site / 'nvidia' / 'cu13' / 'include', site / 'nvidia' / 'cuda_cccl' / 'include']
 print(next((str(c) for c in candidates if (c / 'cub' / 'cub.cuh').exists()), ''))"
-            OUTPUT_VARIABLE _thor_python_cccl_include_dir
-            OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
-    if (_thor_python_cccl_include_dir)
-        set(THOR_CUDA_CCCL_INCLUDE_DIR "${_thor_python_cccl_include_dir}" CACHE PATH "CUDA CCCL/CUB include directory" FORCE)
+                OUTPUT_VARIABLE _thor_python_cccl_include_dir
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+        if (_thor_python_cccl_include_dir)
+            set(THOR_CUDA_CCCL_INCLUDE_DIR "${_thor_python_cccl_include_dir}" CACHE PATH "CUDA CCCL/CUB include directory" FORCE)
+        endif ()
     endif ()
+
+    set(THOR_CUDA_INCLUDE_DIRS
+            ${CUDAToolkit_INCLUDE_DIRS}
+            "${THOR_CUDA_CCCL_INCLUDE_DIR}"
+    )
+
+    # cuDNN Frontend headers can be supplied explicitly or discovered from the
+    # selected Python interpreter for host-stack developer builds.
+    set(THOR_CUDNN_FRONTEND_INCLUDE_DIR "" CACHE PATH "cuDNN Frontend include directory")
+
+    if (DEFINED ENV{THOR_CUDNN_FRONTEND_INCLUDE_DIR} AND NOT "$ENV{THOR_CUDNN_FRONTEND_INCLUDE_DIR}" STREQUAL "")
+        set(THOR_CUDNN_FRONTEND_INCLUDE_DIR "$ENV{THOR_CUDNN_FRONTEND_INCLUDE_DIR}" CACHE PATH "cuDNN Frontend include directory" FORCE)
+    endif ()
+
+    if (NOT THOR_CUDNN_FRONTEND_INCLUDE_DIR)
+        execute_process(
+                COMMAND "${Python3_EXECUTABLE}" -c
+                "import importlib.metadata as md
+from pathlib import Path
+try:
+    dist = md.distribution('nvidia-cudnn-frontend')
+    hits = [Path(dist.locate_file(f)).parent for f in (dist.files or []) if f.name == 'cudnn_frontend.h']
+    print(hits[0] if hits else '')
+except Exception:
+    print('')"
+                OUTPUT_VARIABLE THOR_CUDNN_FRONTEND_INCLUDE_DIR
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+    endif ()
+
+    if (NOT THOR_CUDNN_FRONTEND_INCLUDE_DIR OR NOT EXISTS "${THOR_CUDNN_FRONTEND_INCLUDE_DIR}/cudnn_frontend.h")
+        message(FATAL_ERROR
+                "Thor attention requires nvidia-cudnn-frontend and cudnn_frontend.h. "
+                "Set THOR_CUDNN_FRONTEND_INCLUDE_DIR or install nvidia-cudnn-frontend into ${Python3_EXECUTABLE}.")
+    endif ()
+
+    list(APPEND THOR_CUDA_INCLUDE_DIRS "${THOR_CUDNN_FRONTEND_INCLUDE_DIR}")
+    message(STATUS "Thor: cuDNN Frontend include = ${THOR_CUDNN_FRONTEND_INCLUDE_DIR}")
 endif ()
 
-target_include_directories(Thor PUBLIC
-        ${CUDAToolkit_INCLUDE_DIRS}
-        "${THOR_CUDA_CCCL_INCLUDE_DIR}"
+target_link_libraries(Thor PRIVATE
+        OpenSSL::Crypto
+        ${THOR_CUDA_LINK_LIBRARIES}
 )
 
+# CUDA and cuDNN headers are required by Thor's public headers while building
+# from the source tree, but Python-stack mode resolves them inside the project
+# .venv.  Do not put those absolute .venv paths in Thor's install/export
+# interface; CMake rejects source-prefixed install interfaces and an installed
+# consumer should resolve its own CUDA stack.
+foreach (_thor_cuda_include_dir IN LISTS THOR_CUDA_INCLUDE_DIRS)
+    target_include_directories(Thor PUBLIC
+            $<BUILD_INTERFACE:${_thor_cuda_include_dir}>
+    )
+endforeach ()
+
 target_compile_definitions(Thor PRIVATE
-        THOR_CUDA_INCLUDE_DIR=\"${THOR_CUDA_INCLUDE_DIR}\"
-        THOR_CUDA_CCCL_INCLUDE_DIR=\"${THOR_CUDA_CCCL_INCLUDE_DIR}\"
+        THOR_CUDA_INCLUDE_DIR="${THOR_CUDA_INCLUDE_DIR}"
+        THOR_CUDA_CCCL_INCLUDE_DIR="${THOR_CUDA_CCCL_INCLUDE_DIR}"
+        THOR_NVRTC_BUNDLED_HEADERS_DIR="${THOR_NVRTC_BUNDLED_HEADERS_DIR}"
 )
 
 # Per-configuration flags
@@ -731,9 +991,17 @@ find_package(nlohmann_json 3 CONFIG REQUIRED)
 target_link_libraries(Thor PUBLIC nlohmann_json::nlohmann_json)
 
 # Link dependencies
-target_link_libraries(Thor PRIVATE
+#
+# CudaDrivertApi.h contains inline dlopen/dlsym helpers.  Targets that compile
+# code including that header (for example thor_tests under LTO) need libdl on
+# their own link line, not only on libThor's private link line.  Keep the
+# dependency portable via CMAKE_DL_LIBS and publish it through Thor's usage
+# requirements.
+target_link_libraries(Thor
+        PRIVATE
         pthread
-        dl
+        PUBLIC
+        ${CMAKE_DL_LIBS}
 )
 
 
@@ -871,9 +1139,8 @@ add_executable(thor_tests ${TEST_SOURCES})
 thor_apply_linker_settings(thor_tests)
 thor_enable_release_host_lto(thor_tests)
 thor_enable_release_no_semantic_interposition(thor_tests)
-target_link_libraries(thor_tests PRIVATE Thor GTest::gtest_main CUDA::cudart CUDA::cudart CUDA::cublas CUDA::cublasLt CUDA::cusolver CUDA::cusparse)
-target_link_libraries(thor_tests PRIVATE "${THOR_CUDNN_LIBRARY}")
-find_package(OpenMP REQUIRED)
+target_link_libraries(thor_tests PRIVATE Thor GTest::gtest_main ${THOR_CUDA_LINK_LIBRARIES})
+find_package(OpenMP REQUIRED COMPONENTS CXX)
 target_link_libraries(thor_tests PRIVATE OpenMP::OpenMP_CXX)
 target_link_libraries(thor_tests PRIVATE PkgConfig::LIBURING)   # FIXME: I think I can remove this once UringDirect.cpp
 include(GoogleTest)
@@ -897,8 +1164,7 @@ add_executable(thor_embedding_sparse_backward_profile EXCLUDE_FROM_ALL
 thor_apply_linker_settings(thor_embedding_sparse_backward_profile)
 thor_enable_release_host_lto(thor_embedding_sparse_backward_profile)
 thor_enable_release_no_semantic_interposition(thor_embedding_sparse_backward_profile)
-target_link_libraries(thor_embedding_sparse_backward_profile PRIVATE Thor CUDA::cudart CUDA::cublas CUDA::cublasLt CUDA::cusolver CUDA::cusparse)
-target_link_libraries(thor_embedding_sparse_backward_profile PRIVATE "${THOR_CUDNN_LIBRARY}")
+target_link_libraries(thor_embedding_sparse_backward_profile PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
 target_link_libraries(thor_embedding_sparse_backward_profile PRIVATE OpenMP::OpenMP_CXX)
 target_link_libraries(thor_embedding_sparse_backward_profile PRIVATE PkgConfig::LIBURING)
 target_compile_options(thor_embedding_sparse_backward_profile PRIVATE
@@ -1046,46 +1312,10 @@ option(THOR_BUILD_PYTHON "Build Python bindings" ON)
 if (THOR_BUILD_PYTHON)
     add_subdirectory(bindings/python)
 
-    if (TARGET thor_py_deps)
+    if (TARGET thor_py_deps AND NOT DEFINED SKBUILD_PROJECT_NAME)
         add_dependencies(Thor thor_py_deps)
     endif ()
 endif ()
 
 # For convenience, rebuild the python bindings before rebuilding the c++ tests
 add_dependencies(thor_tests _thor)
-
-# cuDNN Frontend headers can be supplied explicitly by the Python wheel build
-# backend after it resolves the frozen NVIDIA dependency stack.  Prefer that
-# exact include root; otherwise discover it from the selected Python
-# interpreter for local developer builds.
-set(THOR_CUDNN_FRONTEND_INCLUDE_DIR "" CACHE PATH "cuDNN Frontend include directory")
-
-if (DEFINED ENV{THOR_CUDNN_FRONTEND_INCLUDE_DIR} AND NOT "$ENV{THOR_CUDNN_FRONTEND_INCLUDE_DIR}" STREQUAL "")
-    set(THOR_CUDNN_FRONTEND_INCLUDE_DIR "$ENV{THOR_CUDNN_FRONTEND_INCLUDE_DIR}" CACHE PATH "cuDNN Frontend include directory" FORCE)
-endif ()
-
-if (NOT THOR_CUDNN_FRONTEND_INCLUDE_DIR)
-    execute_process(
-            COMMAND "${Python3_EXECUTABLE}" -c
-            "import importlib.metadata as md
-from pathlib import Path
-try:
-    dist = md.distribution('nvidia-cudnn-frontend')
-    hits = [Path(dist.locate_file(f)).parent for f in (dist.files or []) if f.name == 'cudnn_frontend.h']
-    print(hits[0] if hits else '')
-except Exception:
-    print('')"
-            OUTPUT_VARIABLE THOR_CUDNN_FRONTEND_INCLUDE_DIR
-            OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
-endif ()
-
-if (NOT THOR_CUDNN_FRONTEND_INCLUDE_DIR OR NOT EXISTS "${THOR_CUDNN_FRONTEND_INCLUDE_DIR}/cudnn_frontend.h")
-    message(FATAL_ERROR
-            "Thor attention requires nvidia-cudnn-frontend and cudnn_frontend.h. "
-            "Set THOR_CUDNN_FRONTEND_INCLUDE_DIR or install nvidia-cudnn-frontend into ${Python3_EXECUTABLE}.")
-endif ()
-
-message(STATUS "Thor: cuDNN Frontend include = ${THOR_CUDNN_FRONTEND_INCLUDE_DIR}")
-
-target_include_directories(Thor PRIVATE "${THOR_CUDNN_FRONTEND_INCLUDE_DIR}")

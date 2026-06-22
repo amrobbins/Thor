@@ -457,7 +457,7 @@ std::string emitVector4KernelSource(const PhysicalOutputs& outputs,
     std::ostringstream ss;
     ss << "#include <cuda_fp16.h>\n";
     ss << "#include <cuda_bf16.h>\n";
-    ss << "#include <math_functions.h>\n\n";
+    ss << "\n";
     ss << R"(__device__ __forceinline__ float thor_digammaf(float x) {
   constexpr float pi = 3.14159265358979323846264338327950288f;
   if (isnan(x)) return x;
@@ -712,7 +712,7 @@ std::string emitKernelSource(const PhysicalOutputs& outputs,
     std::ostringstream ss;
     ss << "#include <cuda_fp16.h>\n";
     ss << "#include <cuda_bf16.h>\n";
-    ss << "#include <math_functions.h>\n\n";
+    ss << "\n";
     ss << "__device__ __forceinline__ float thor_sparse_load_float(const float* p, unsigned long long i) { return p[i]; }\n";
     ss << "__device__ __forceinline__ float thor_sparse_load_float(const __half* p, unsigned long long i) { return __half2float(p[i]); }\n";
     ss << "__device__ __forceinline__ float thor_sparse_load_float(const __nv_bfloat16* p, unsigned long long i) { return "

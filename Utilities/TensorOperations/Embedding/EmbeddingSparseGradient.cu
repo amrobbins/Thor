@@ -919,7 +919,7 @@ std::string emitSparseGradientReduceKernelSource(DataType rowDType,
     std::ostringstream ss;
     ss << "#include <cuda_fp16.h>\n";
     ss << "#include <cuda_bf16.h>\n";
-    ss << "#include <math_functions.h>\n\n";
+    ss << "\n";
     if (sparseRowUpdate != nullptr) {
         ss << sparseRowUpdate->helperSource;
     }
@@ -1101,7 +1101,7 @@ std::string emitSparseGradientHighRunReduceKernelSource(DataType rowDType,
     std::ostringstream ss;
     ss << "#include <cuda_fp16.h>\n";
     ss << "#include <cuda_bf16.h>\n";
-    ss << "#include <math_functions.h>\n\n";
+    ss << "\n";
     if (sparseRowUpdate != nullptr) {
         ss << sparseRowUpdate->helperSource;
     }
@@ -1242,7 +1242,7 @@ std::string emitSparseGradientUltraHighPartialReduceKernelSource(
     std::ostringstream ss;
     ss << "#include <cuda_fp16.h>\n";
     ss << "#include <cuda_bf16.h>\n";
-    ss << "#include <math_functions.h>\n\n";
+    ss << "\n";
     ss << "__device__ __forceinline__ float thor_embedding_grad_to_float(float v) { return v; }\n";
     ss << "__device__ __forceinline__ float thor_embedding_grad_to_float(__half v) { return __half2float(v); }\n";
     ss << "__device__ __forceinline__ float thor_embedding_grad_to_float(__nv_bfloat16 v) { return __bfloat162float(v); }\n";
@@ -1376,7 +1376,7 @@ std::string emitSparseGradientUltraHighFinalReduceKernelSource(DataType rowDType
     std::ostringstream ss;
     ss << "#include <cuda_fp16.h>\n";
     ss << "#include <cuda_bf16.h>\n";
-    ss << "#include <math_functions.h>\n\n";
+    ss << "\n";
     if (sparseRowUpdate != nullptr) {
         ss << sparseRowUpdate->helperSource;
     }
