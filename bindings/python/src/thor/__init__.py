@@ -11,6 +11,7 @@ from ._thor import __git_version__, __version__
 
 from . import activations as activations
 from . import constraints as constraints
+from . import data as data
 from . import initializers as initializers
 from . import layers as layers
 from . import losses as losses
@@ -30,6 +31,7 @@ __all__ = [
     "__version__",
     "activations",
     "constraints",
+    "data",
     "initializers",
     "layers",
     "losses",

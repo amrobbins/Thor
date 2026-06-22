@@ -10,6 +10,7 @@ def test_top_level_api_is_curated():
         "__version__",
         "activations",
         "constraints",
+        "data",
         "initializers",
         "layers",
         "losses",
