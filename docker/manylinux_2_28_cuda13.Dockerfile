@@ -113,8 +113,7 @@ RUN git config --global --add safe.directory /io
 #    -DTHOR_USE_PROJECT_VENV=OFF \
 #    -DTHOR_PYTHON_EXECUTABLE=/opt/python/cp312-cp312/bin/python \
 #    -DTHOR_PYTHON_AUTO_INSTALL=OFF
-#cmake --build cmake-build-release -j 32
-#ctest --test-dir cmake-build-release --output-on-failure
+#cmake --build cmake-build-release -j 32 && ctest --test-dir cmake-build-release --output-on-failure
 #
 ## 2. wheel
 #cd /io/bindings/python
@@ -141,6 +140,26 @@ RUN git config --global --add safe.directory /io
 #/opt/python/cp312-cp312/bin/python -m twine check wheelhouse/*
 #
 ## Test the wheel
+#python - <<'PY'
+#from pathlib import Path
+#import zipfile
+#
+#wheel = next(Path("wheelhouse").glob("*.whl"))
+#with zipfile.ZipFile(wheel) as z:
+#    metadata_name = next(n for n in z.namelist() if n.endswith(".dist-info/METADATA"))
+#    metadata = z.read(metadata_name).decode()
+#    print(metadata_name)
+#    for line in metadata.splitlines():
+#        if line.startswith("Requires-Dist: nvidia") or line.startswith("Requires-Dist: cuda-toolkit"):
+#            print(line)
+#
+#    resolved = z.read("thor/_cuda_stack_resolved.py").decode()
+#    print("\n--- resolved stack ---")
+#    for line in resolved.splitlines():
+#        if "CudaDistribution(" in line:
+#            print(line.strip())
+#PY
+#
 #/opt/python/cp312-cp312/bin/python -m venv /tmp/thor-wheel-test
 #source /tmp/thor-wheel-test/bin/activate
 #python -m pip install -U pip pytest

@@ -220,7 +220,14 @@ void CustomLoss::tryFuseGradientIntoDrivingLayer() {
                                                                                                       weightedGradientExpression(),
                                                                                                       predictionsName,
                                                                                                       labelsName,
-                                                                                                      gradientName);
+                                                                                                      gradientName,
+                                                                                                      this);
+    }
+}
+
+void CustomLoss::notifyFusedGradientUnregisteredFromDrivingLayer(const Tensor& predictions) {
+    if (featureInput.has_value() && featureInput.value() == predictions) {
+        gradientFusedIntoDrivingLayer = false;
     }
 }
 

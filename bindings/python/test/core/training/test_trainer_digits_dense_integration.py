@@ -15,6 +15,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import thor
+from integration_flags import integration_flag_enabled, integration_skip_reason
 
 
 def _digits_dense_network_dtype_from_env(env_name: str, raw_value: str):
@@ -26,8 +27,8 @@ def _digits_dense_network_dtype_from_env(env_name: str, raw_value: str):
     raise RuntimeError(f"{env_name} must be one of fp16 or fp32, got {raw_value!r}")
 
 
-RUN_DIGITS_DENSE_INTEGRATION = os.environ.get("THOR_RUN_TRAINING_DIGITS_DENSE_INTEGRATION") == "1"
-RUN_DIGITS_DENSE_CV5_INTEGRATION = os.environ.get("THOR_RUN_TRAINING_DIGITS_DENSE_CV5_INTEGRATION") == "1"
+RUN_DIGITS_DENSE_INTEGRATION = integration_flag_enabled("THOR_RUN_TRAINING_DIGITS_DENSE_INTEGRATION")
+RUN_DIGITS_DENSE_CV5_INTEGRATION = integration_flag_enabled("THOR_RUN_TRAINING_DIGITS_DENSE_CV5_INTEGRATION")
 DIGITS_DENSE_NETWORK_DTYPE_NAME, DIGITS_DENSE_NETWORK_DTYPE = _digits_dense_network_dtype_from_env(
     "THOR_DIGITS_DENSE_NETWORK_DTYPE",
     os.environ.get("THOR_DIGITS_DENSE_NETWORK_DTYPE", "fp16"),
@@ -799,9 +800,10 @@ def _build_deep_dense_digits_classifier(
 
 @pytest.mark.skipif(
     not RUN_DIGITS_DENSE_INTEGRATION,
-    reason=(
-        "set THOR_RUN_TRAINING_DIGITS_DENSE_INTEGRATION=1 to run the heavyweight "
-        "fp16 dense DIGITS/MNIST training throughput test"),
+    reason=integration_skip_reason(
+        "THOR_RUN_TRAINING_DIGITS_DENSE_INTEGRATION",
+        description="the heavyweight fp16 dense DIGITS/MNIST training throughput test",
+    ),
 )
 def test_queued_trainer_trains_really_large_deep_fp16_dense_digits_network(capfd):
     _flush_native_stdio_for_capture()
@@ -839,8 +841,10 @@ def test_queued_trainer_trains_really_large_deep_fp16_dense_digits_network(capfd
 @pytest.mark.digits_dense_cv5_integration
 @pytest.mark.skipif(
     not RUN_DIGITS_DENSE_CV5_INTEGRATION,
-    reason=
-    "set THOR_RUN_TRAINING_DIGITS_DENSE_CV5_INTEGRATION=1 to run the DIGITS/MNIST dense 5-fold CV TrainingRuns test",
+    reason=integration_skip_reason(
+        "THOR_RUN_TRAINING_DIGITS_DENSE_CV5_INTEGRATION",
+        description="the DIGITS/MNIST dense 5-fold CV TrainingRuns test",
+    ),
 )
 def test_training_runs_digits_dense_five_fold_cross_validation(capfd):
     _flush_native_stdio_for_capture()

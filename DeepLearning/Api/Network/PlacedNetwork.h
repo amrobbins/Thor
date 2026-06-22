@@ -82,6 +82,12 @@ class PlacedNetwork {
     void preallocateInputSlots(uint32_t numSlots);
     void preallocateOutputSlots(uint32_t numSlots);
 
+    // Copy parameter storage (and optimizer-owned tensor state when present)
+    // from a previous placement of the same API network.  This lets Trainer.fit
+    // rebuild a fresh physical graph after phase mutations without resetting
+    // learned weights.
+    void copyTrainingStateFrom(PlacedNetwork& source);
+
     uint64_t getNumStamps() { return stampedNetworks.size(); }
     ThorImplementation::StampedNetwork& getStampedNetwork(uint64_t i) {
         THOR_THROW_IF_FALSE(i < stampedNetworks.size());

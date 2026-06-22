@@ -5,6 +5,7 @@
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
+#include "DeepLearning/Implementation/Layers/Loss.h"
 
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
@@ -59,7 +60,8 @@ class TensorFanout : public MultiConnectionLayer {
                                                          DynamicExpression gradientExpression,
                                                          std::string predictionsName,
                                                          std::string labelsName,
-                                                         std::string gradientName) {
+                                                         std::string gradientName,
+                                                         Loss* ownerLoss = nullptr) {
         if (isInferenceOnly())
             return false;
         if (featureInputs.size() != 1 || !featureInputs[0].has_value() || featureInputs[0].value() != predictions)
@@ -77,8 +79,12 @@ class TensorFanout : public MultiConnectionLayer {
                                                                                                            std::move(predictionsName),
                                                                                                            std::move(labelsName),
                                                                                                            std::move(gradientName));
-        if (fusedCustomLossGradientRegisteredWithDrivingLayer)
+        if (fusedCustomLossGradientRegisteredWithDrivingLayer) {
             fusedCustomLossGradientPredictions = predictions;
+            fusedCustomLossGradientOwner = ownerLoss;
+        } else {
+            fusedCustomLossGradientOwner = nullptr;
+        }
         return fusedCustomLossGradientRegisteredWithDrivingLayer;
     }
 
@@ -116,7 +122,11 @@ class TensorFanout : public MultiConnectionLayer {
             auto* customLayer = dynamic_cast<CustomLayer*>(previousLayers[0].value());
             THOR_THROW_IF_FALSE(customLayer != nullptr);
             THOR_THROW_IF_FALSE(customLayer->unregisterFusedCustomLossGradient(fusedCustomLossGradientPredictions));
+            if (fusedCustomLossGradientOwner != nullptr) {
+                fusedCustomLossGradientOwner->notifyFusedGradientUnregisteredFromDrivingLayer(fusedCustomLossGradientPredictions);
+            }
             fusedCustomLossGradientRegisteredWithDrivingLayer = false;
+            fusedCustomLossGradientOwner = nullptr;
         }
 
         // When there is only one layer that back propagates (for example if the fanout is just to connect the tensor to a network output),
@@ -168,12 +178,31 @@ class TensorFanout : public MultiConnectionLayer {
         }
         THOR_THROW_IF_FALSE(replacementHappend);
 
-        if (compiled && errorInputArray_d != nullptr && numPresentTensors(errorInputs) > 0) {
+        // Dynamic active-loss-root pruning can reduce the number of live downstream
+        // gradients after compile.  Do not fuse a post-compile single-input fanout
+        // by replacing errorOutputs[0] with the remaining downstream tensor: upstream
+        // layers have already stamped their backward equations against the original
+        // errorOutputs[0] tensor.  In that case TensorFanout::backward() must keep
+        // materializing the one remaining input into the original reducer output.
+        const uint32_t presentErrorInputCount = numPresentTensors(errorInputs);
+        if (errorOutputs[0].has_value() && previousLayers[0].has_value() && presentErrorInputCount == 0) {
+            previousLayers[0].value()->replaceErrorInput(errorOutputs[0], std::nullopt);
+            errorOutputs[0] = std::nullopt;
+        } else if (!compiled && errorOutputs[0].has_value() && previousLayers[0].has_value() && presentErrorInputCount == 1) {
+            std::optional<Tensor> onlyErrorInput = getFirstPresentTensor(errorInputs);
+            THOR_THROW_IF_FALSE(onlyErrorInput.has_value());
+            if (errorOutputs[0].value() != onlyErrorInput.value()) {
+                previousLayers[0].value()->replaceErrorInput(errorOutputs[0], onlyErrorInput);
+                errorOutputs[0] = onlyErrorInput;
+            }
+        }
+
+        if (compiled && errorInputArray_d != nullptr && presentErrorInputCount > 0) {
             THOR_THROW_IF_FALSE(featureInputs.size() == 1);
             THOR_THROW_IF_FALSE(featureInputs[0].has_value());
             ScopedGpu scopedGpu(featureInputs[0].value().getPlacement().getDeviceNum());
 
-            void **errorInputArray = new void *[numPresentTensors(errorInputs)];
+            void **errorInputArray = new void *[presentErrorInputCount];
             uint32_t j = 0;
             for (unsigned int i = 0; i < errorInputs.size(); ++i) {
                 if (errorInputs[i].has_value()) {
@@ -182,7 +211,7 @@ class TensorFanout : public MultiConnectionLayer {
                 }
             }
             cudaError_t cudaStatus =
-                cudaMemcpy(errorInputArray_d, errorInputArray, numPresentTensors(errorInputs) * sizeof(void *), cudaMemcpyHostToDevice);
+                cudaMemcpy(errorInputArray_d, errorInputArray, presentErrorInputCount * sizeof(void *), cudaMemcpyHostToDevice);
             THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
             delete[] errorInputArray;
         }
@@ -234,12 +263,22 @@ class TensorFanout : public MultiConnectionLayer {
             return;
 
         if (numPresentTensors(errorInputs) == 1) {
-            // NOP (errorInput[0] is connected to errorOutput[0])
-            // Just sync streams and initiate back prop
-            for (unsigned int i = 1; i < errorInputs.size(); ++i)
-                streams[0].waitEvent(streams[i].putEvent());
-            previousLayers[0].value()->backward(errorOutputs[0], batchSize);
-            return;
+            std::optional<Tensor> onlyErrorInput = getFirstPresentTensor(errorInputs);
+            THOR_THROW_IF_FALSE(onlyErrorInput.has_value());
+            if (errorOutputs[0].value() == onlyErrorInput.value()) {
+                // Compile-time single-input fanouts are fused so the downstream
+                // error tensor is also the upstream error tensor.  In that case
+                // backprop is a stream sync plus a direct upstream call.
+                for (unsigned int i = 1; i < errorInputs.size(); ++i)
+                    streams[0].waitEvent(streams[i].putEvent());
+                previousLayers[0].value()->backward(errorOutputs[0], batchSize);
+                return;
+            }
+            // A fanout that was compiled with multiple live gradient inputs may be
+            // dynamically pruned to one active loss root.  The upstream layer's
+            // stamped backward equation still reads errorOutputs[0], so fall
+            // through to sumErrorInputsByDType(); with one input this materializes
+            // a copy into the original reducer output tensor.
         }
 
         if (errorInput.has_value()) {
@@ -282,6 +321,7 @@ class TensorFanout : public MultiConnectionLayer {
    private:
     bool fusedCustomLossGradientRegisteredWithDrivingLayer = false;
     Tensor fusedCustomLossGradientPredictions;
+    Loss* fusedCustomLossGradientOwner = nullptr;
 
    protected:
     void sumErrorInputsByDType() {

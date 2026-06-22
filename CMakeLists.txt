@@ -1054,9 +1054,20 @@ endif ()
 # For convenience, rebuild the python bindings before rebuilding the c++ tests
 add_dependencies(thor_tests _thor)
 
-execute_process(
-        COMMAND "${Python3_EXECUTABLE}" -c
-        "import importlib.metadata as md
+# cuDNN Frontend headers can be supplied explicitly by the Python wheel build
+# backend after it resolves the frozen NVIDIA dependency stack.  Prefer that
+# exact include root; otherwise discover it from the selected Python
+# interpreter for local developer builds.
+set(THOR_CUDNN_FRONTEND_INCLUDE_DIR "" CACHE PATH "cuDNN Frontend include directory")
+
+if (DEFINED ENV{THOR_CUDNN_FRONTEND_INCLUDE_DIR} AND NOT "$ENV{THOR_CUDNN_FRONTEND_INCLUDE_DIR}" STREQUAL "")
+    set(THOR_CUDNN_FRONTEND_INCLUDE_DIR "$ENV{THOR_CUDNN_FRONTEND_INCLUDE_DIR}" CACHE PATH "cuDNN Frontend include directory" FORCE)
+endif ()
+
+if (NOT THOR_CUDNN_FRONTEND_INCLUDE_DIR)
+    execute_process(
+            COMMAND "${Python3_EXECUTABLE}" -c
+            "import importlib.metadata as md
 from pathlib import Path
 try:
     dist = md.distribution('nvidia-cudnn-frontend')
@@ -1064,14 +1075,15 @@ try:
     print(hits[0] if hits else '')
 except Exception:
     print('')"
-        OUTPUT_VARIABLE THOR_CUDNN_FRONTEND_INCLUDE_DIR
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-)
+            OUTPUT_VARIABLE THOR_CUDNN_FRONTEND_INCLUDE_DIR
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+endif ()
 
-if (NOT THOR_CUDNN_FRONTEND_INCLUDE_DIR)
+if (NOT THOR_CUDNN_FRONTEND_INCLUDE_DIR OR NOT EXISTS "${THOR_CUDNN_FRONTEND_INCLUDE_DIR}/cudnn_frontend.h")
     message(FATAL_ERROR
             "Thor attention requires nvidia-cudnn-frontend and cudnn_frontend.h. "
-            "Install it with: ${Python3_EXECUTABLE} -m pip install nvidia-cudnn-frontend==1.23.0")
+            "Set THOR_CUDNN_FRONTEND_INCLUDE_DIR or install nvidia-cudnn-frontend into ${Python3_EXECUTABLE}.")
 endif ()
 
 message(STATUS "Thor: cuDNN Frontend include = ${THOR_CUDNN_FRONTEND_INCLUDE_DIR}")

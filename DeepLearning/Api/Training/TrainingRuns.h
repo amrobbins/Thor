@@ -19,6 +19,7 @@ enum class TrainingRunsFailurePolicy { CONTINUE, CANCEL_SIBLINGS };
 
 [[nodiscard]] const char* trainingRunsFailurePolicyName(TrainingRunsFailurePolicy policy);
 
+
 struct TrainingRunsEvaluationOptions {
     // Ordinary held-out test loader for post-fit evaluation. For grouped runs,
     // callers are expected to supply the same logical test set they would attach
@@ -81,7 +82,9 @@ class TrainingRuns {
     explicit TrainingRuns(std::vector<TrainingRunsSpec> runs,
                           TrainingRunsFailurePolicy failurePolicy = TrainingRunsFailurePolicy::CANCEL_SIBLINGS,
                           double maxSummaryLogsPerSecond = 2.0,
-                          std::optional<size_t> maxParallelRuns = std::nullopt);
+                          std::optional<size_t> maxParallelRuns = std::nullopt,
+                          std::vector<TrainingRunsRestartPolicy> restartConditions = {},
+                          std::vector<TrainingRunsEarlyCompletionRule> earlyCompletionRules = {});
 
     [[nodiscard]] TrainingRunsResult fit(uint32_t epochs);
     [[nodiscard]] TrainingRunsResult fit(uint32_t epochs, std::shared_ptr<Loader> testLoader);
@@ -92,10 +95,16 @@ class TrainingRuns {
     [[nodiscard]] TrainingRunsFailurePolicy getFailurePolicy() const { return failurePolicy; }
     [[nodiscard]] double getMaxSummaryLogsPerSecond() const { return maxSummaryLogsPerSecond; }
     [[nodiscard]] std::optional<size_t> getMaxParallelRuns() const { return maxParallelRuns; }
+    [[nodiscard]] const std::vector<TrainingRunsRestartPolicy>& getRestartConditions() const { return restartConditions; }
+    [[nodiscard]] const std::vector<TrainingRunsEarlyCompletionRule>& getEarlyCompletionRules() const { return earlyCompletionRules; }
     [[nodiscard]] size_t getEffectiveMaxParallelRuns() const;
 
    private:
     void validateRunSpecs() const;
+    void validateRestartConditions() const;
+    void validateEarlyCompletionRules() const;
+    [[nodiscard]] std::vector<TrainingRestartCondition> restartConditionsForRun(const TrainingRunsSpec& run) const;
+    [[nodiscard]] std::vector<TrainingEarlyCompletionPolicy> earlyCompletionPoliciesForRun(const TrainingRunsSpec& run) const;
     [[nodiscard]] bool hasEnsembleGroups() const;
     void validateEnsembleArtifactsForFit(const TrainingRunsEvaluationOptions& evaluationOptions) const;
     void validateFitOptions(const TrainerFitOptions& options) const;
@@ -111,6 +120,8 @@ class TrainingRuns {
     TrainingRunsFailurePolicy failurePolicy = TrainingRunsFailurePolicy::CANCEL_SIBLINGS;
     double maxSummaryLogsPerSecond = 2.0;
     std::optional<size_t> maxParallelRuns{};
+    std::vector<TrainingRunsRestartPolicy> restartConditions{};
+    std::vector<TrainingRunsEarlyCompletionRule> earlyCompletionRules{};
 };
 
 }  // namespace Thor

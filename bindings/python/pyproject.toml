@@ -6,30 +6,18 @@ requires = [
     "cmake>=3.22",
     "ninja",
 ]
-build-backend = "scikit_build_core.build"
+build-backend = "thor_build_backend"
+backend-path = ["build_backend"]
 
 [project]
 name = "thor-cuda"
-dynamic = ["version"]
+dynamic = ["version", "dependencies"]
 description = "Thor deep learning framework (C++/CUDA) Python bindings"
 requires-python = ">=3.12"
 license = "Apache-2.0"
 #authors = [
 #    { name = "Andrew Robbins" },
 #]
-dependencies = [
-    "numpy>=2.3.4",
-    "ml_dtypes>=0.5.4",
-    "nvidia-cuda-runtime>=13.3.29,<14",
-    "nvidia-cuda-nvrtc>=13.3.33,<14",
-    "nvidia-cublas>=13.5.1.27,<14",
-    "nvidia-nvjitlink>=13.3.33,<14",
-    "nvidia-cudnn-cu13>=9.22,<10",
-    "nvidia-cusparse>=12.8.1.7,<13",
-    "nvidia-cusolver>=12.2.2.18,<13",
-    "nvidia-cudnn-frontend>=1.23.0, <2",
-    "nvidia-cuda-cccl>=13.3.3.3.1,<14"
-]
 readme = { file = "README.md", content-type = "text/markdown" }
 
 classifiers = [
@@ -65,6 +53,7 @@ Repository = "https://github.com/amrobbins/Thor"
 "Bug Tracker" = "https://github.com/amrobbins/Thor/issues"
 
 [tool.scikit-build]
+experimental = true
 # top-level CMake project
 cmake.source-dir = "../.."
 # Keep scikit-build’s CMake builds inside the python dir so they don’t clash with manual ./build or CLion builds.
@@ -76,6 +65,10 @@ wheel.packages = ["src/thor"]
 [tool.scikit-build.cmake.define]
 THOR_BUILD_PYTHON = true
 
+
+[tool.scikit-build.metadata.dependencies]
+provider = "thor_build.dynamic_metadata"
+
 [tool.scikit-build.metadata.version]
 provider = "scikit_build_core.metadata.regex"
 input = "../../ThorVersion.h.in"
@@ -83,7 +76,7 @@ regex = '''(?m)^\#define\s+THOR_VERSION\s+"v?(?P<value>[^"]+)"'''
 result = "{value}"
 
 [tool.scikit-build.sdist]
-include = ["src/thor/py.typed"]
+include = ["src/thor/py.typed", "build_backend/**/*.py", "src/thor/_cuda_stack_resolved.py"]
 
 [tool.pytest.ini_options]
 addopts = "-s -vv"

@@ -20,7 +20,7 @@ std::FILE* requireTrainingRunsOutput(std::FILE* output) {
     return output;
 }
 
-const char* terminalStatusName(const TrainingRunResult& result) { return trainingRunStatusName(result.status); }
+const char* terminalStatusName(const TrainingRunResult& result) { return result.resultName(); }
 
 enum class PadAlignment { LEFT, RIGHT };
 
@@ -838,6 +838,20 @@ void TrainingRunsStatsReporter::writeResultLineLocked(const TrainingRunResult& r
         std::snprintf(buffer, sizeof(buffer), "test_accuracy=%.4f", result.finalTestStats->accuracy.value());
         line += " ";
         line += styled(buffer, FinalReportAnsi::accuracy, useColor);
+    }
+    if (result.earlyCompleted()) {
+        if (result.completedEpoch.has_value()) {
+            line += " completed_epoch=" + std::to_string(result.completedEpoch.value());
+        }
+        if (result.bestEpoch.has_value()) {
+            line += " best_epoch=" + std::to_string(result.bestEpoch.value());
+        }
+        if (result.bestScore.has_value()) {
+            char buffer[64];
+            std::snprintf(buffer, sizeof(buffer), "best_score=%.6f", result.bestScore.value());
+            line += " ";
+            line += styled(buffer, FinalReportAnsi::validateLoss, useColor);
+        }
     }
     if (!result.exception.message.empty()) {
         line += " message=\"" + result.exception.message + "\"";

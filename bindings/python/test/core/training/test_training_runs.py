@@ -1,4 +1,5 @@
 import ctypes
+import json
 import os
 import re
 import sys
@@ -6,8 +7,9 @@ import sys
 import numpy as np
 import pytest
 import thor
+from integration_flags import integration_flag_enabled, integration_skip_reason
 
-RUN_TRAINING_INTEGRATION = os.environ.get("THOR_RUN_TRAINING_INTEGRATION") == "1"
+RUN_TRAINING_INTEGRATION = integration_flag_enabled("THOR_RUN_TRAINING_INTEGRATION")
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _RUN_STATUS_RE = re.compile(r"INFO runs\[(?P<run>[^\]|]+)(?:\|[^\]]+)?\]:.*\bstatus=(?P<status>completed|failed|cancelled|interrupted|oom|running|starting|not_started)\b")
 
@@ -41,7 +43,7 @@ def _fit_runs_and_capture_text(runs, capfd, *, epochs: int, test_loader=None):
     return results, captured_text
 
 
-def _regression_one_batch_loader(*, dtype=np.float32):
+def _regression_arrays(*, dtype=np.float32):
     x = np.array(
         [
             [-1.0, 0.0],
@@ -52,8 +54,20 @@ def _regression_one_batch_loader(*, dtype=np.float32):
         dtype=np.float32,
     )
     y = np.array([[-1.0], [1.0], [1.0], [-1.0]], dtype=np.float32)
-    x = np.ascontiguousarray(x, dtype=dtype)
-    y = np.ascontiguousarray(y, dtype=dtype)
+    return np.ascontiguousarray(x, dtype=dtype), np.ascontiguousarray(y, dtype=dtype)
+
+
+def _cpu_tensor(values: np.ndarray, dtype: thor.DataType) -> thor.physical.PhysicalTensor:
+    values = np.asarray(values, dtype=thor.physical.numpy_dtypes.from_thor(dtype), order="C")
+    placement = thor.physical.Placement(thor.physical.DeviceType.cpu, 0)
+    descriptor = thor.physical.PhysicalTensor.Descriptor(dtype, list(values.shape))
+    tensor = thor.physical.PhysicalTensor(placement, descriptor)
+    tensor.numpy()[...] = values
+    return tensor
+
+
+def _regression_one_batch_loader(*, dtype=np.float32):
+    x, y = _regression_arrays(dtype=dtype)
     loader_cls = thor.training.NumpyFloat16BatchLoader if dtype == np.float16 else thor.training.NumpyFloat32BatchLoader
     return loader_cls(
         x,
@@ -115,6 +129,10 @@ def _make_tiny_regression_trainer(
     stats=True,
     save_model_dir=None,
     save_model_overwrite=False,
+    check_best_model_every_epochs=1,
+    model_selection_score=None,
+    restart_conditions=None,
+    early_completion_policies=None,
 ):
     if optimizer_obj is None:
         optimizer_obj = thor.optimizers.Sgd(initial_learning_rate=0.01, momentum=0.0) if optimizer else None
@@ -129,6 +147,10 @@ def _make_tiny_regression_trainer(
         stats_color="never",
         save_model_dir=save_model_dir,
         save_model_overwrite=save_model_overwrite,
+        check_best_model_every_epochs=check_best_model_every_epochs,
+        model_selection_score=model_selection_score,
+        restart_conditions=restart_conditions,
+        early_completion_policies=early_completion_policies,
     )
 
 
@@ -164,8 +186,194 @@ def test_trainer_binding_rejects_empty_save_model_dir():
         _make_tiny_regression_trainer("training_runs_empty_save_model_dir", stats=False, save_model_dir="")
 
 
+
+def test_trainer_binding_accepts_best_model_candidate_cadence():
+    trainer = _make_tiny_regression_trainer(
+        "training_runs_best_candidate_cadence",
+        stats=False,
+        check_best_model_every_epochs=3,
+    )
+
+    assert trainer is not None
+
+
+def test_trainer_binding_rejects_zero_best_model_candidate_cadence():
+    with pytest.raises(RuntimeError, match="check_best_model_every_epochs"):
+        _make_tiny_regression_trainer(
+            "training_runs_best_candidate_invalid_cadence",
+            stats=False,
+            check_best_model_every_epochs=0,
+        )
+
+
+def test_trainer_binding_accepts_custom_model_selection_score():
+    trainer = _make_tiny_regression_trainer(
+        "training_runs_custom_model_selection_score",
+        stats=False,
+        model_selection_score=lambda validation_loss, training_loss, epoch: validation_loss if validation_loss is not None else training_loss,
+    )
+
+    assert trainer is not None
+
+
+def test_trainer_binding_rejects_non_callable_model_selection_score():
+    with pytest.raises(TypeError, match="model_selection_score"):
+        _make_tiny_regression_trainer(
+            "training_runs_custom_model_selection_score_invalid",
+            stats=False,
+            model_selection_score=3.0,
+        )
+
+
+def test_trainer_restart_condition_binding_defaults():
+    condition = thor.training.RestartCondition()
+
+    assert isinstance(condition, thor.training.TrainingRestartCondition)
+    assert condition.progress_check_epochs == 3
+    assert condition.progress_percentage == 5.0
+    assert condition.max_restarts == 5
+
+    trainer = _make_tiny_regression_trainer(
+        "trainer_restart_condition_binding",
+        stats=False,
+        restart_conditions=[thor.training.RestartCondition(progress_check_epochs=2, progress_percentage=10.0)],
+    )
+
+    assert trainer is not None
+
+
+def test_training_runs_restart_condition_binding_defaults_and_validation():
+    condition = thor.training.RestartPolicy(run_name="fold_0")
+
+    assert isinstance(condition, thor.training.TrainingRunsRestartPolicy)
+    assert condition.run_name == "fold_0"
+    assert condition.ensemble_group is None
+    assert condition.progress_check_epochs == 3
+    assert condition.progress_percentage == 5.0
+    assert condition.max_restarts == 5
+
+    trainer = _make_tiny_regression_trainer("training_runs_restart_condition_unknown", stats=False)
+    with pytest.raises(RuntimeError, match="unknown run_name"):
+        thor.training.TrainingRuns(
+            [("fold_0", trainer)],
+            failure_policy="continue",
+            restart_conditions=[thor.training.RestartPolicy(run_name="missing")],
+        )
+
+
+def test_training_runs_restart_condition_accepts_ensemble_group_target():
+    trainer = _make_tiny_regression_trainer("training_runs_restart_condition_group", stats=False)
+    runs = thor.training.TrainingRuns(
+        [("fold_0", trainer, "tiny_ensemble")],
+        failure_policy="continue",
+        restart_conditions=[
+            thor.training.RestartPolicy(
+                ensemble_group="tiny_ensemble",
+                progress_check_epochs=2,
+                progress_percentage=10.0,
+                max_restarts=1,
+            )
+        ],
+    )
+
+    assert runs is not None
+
+def test_training_runs_restart_condition_accepts_multiple_conditions_for_same_group():
+    trainer = _make_tiny_regression_trainer("training_runs_restart_condition_group_multiple", stats=False)
+    runs = thor.training.TrainingRuns(
+        [("fold_0", trainer, "tiny_ensemble")],
+        failure_policy="continue",
+        restart_conditions=[
+            thor.training.RestartPolicy(
+                ensemble_group="tiny_ensemble",
+                progress_check_epochs=3,
+                progress_percentage=5.0,
+                max_restarts=5,
+            ),
+            thor.training.RestartPolicy(
+                ensemble_group="tiny_ensemble",
+                progress_check_epochs=15,
+                progress_percentage=20.0,
+                max_restarts=5,
+            ),
+        ],
+    )
+
+    assert runs is not None
+
+
+def test_training_runs_restart_condition_accepts_multiple_conditions_for_same_run():
+    trainer = _make_tiny_regression_trainer("training_runs_restart_condition_run_multiple", stats=False)
+    runs = thor.training.TrainingRuns(
+        [("fold_0", trainer)],
+        failure_policy="continue",
+        restart_conditions=[
+            thor.training.RestartPolicy(run_name="fold_0", progress_check_epochs=3),
+            thor.training.RestartPolicy(run_name="fold_0", progress_check_epochs=15, progress_percentage=20.0),
+        ],
+    )
+
+    assert runs is not None
+
+
+def test_trainer_early_completion_policy_binding_accepts_callable():
+    policy = thor.training.EarlyCompletionPolicy(
+        lambda current_score, best_score, current_epoch, best_epoch: current_epoch - best_epoch >= 1
+    )
+    assert isinstance(policy, thor.training.TrainingEarlyCompletionPolicy)
+
+    trainer = _make_tiny_regression_trainer(
+        "trainer_early_completion_policy_binding",
+        stats=False,
+        early_completion_policies=[policy],
+    )
+
+    assert trainer is not None
+
+
+def test_training_runs_early_completion_rule_binding_defaults_and_validation():
+    rule = thor.training.EarlyCompletionRule(
+        lambda current_score, best_score, current_epoch, best_epoch: False,
+        run_name="fold_0",
+    )
+
+    assert isinstance(rule, thor.training.TrainingRunsEarlyCompletionRule)
+    assert rule.run_name == "fold_0"
+    assert rule.ensemble_group is None
+
+    trainer = _make_tiny_regression_trainer("training_runs_early_completion_rule_unknown", stats=False)
+    with pytest.raises(RuntimeError, match="unknown run_name"):
+        thor.training.TrainingRuns(
+            [("fold_0", trainer)],
+            failure_policy="continue",
+            early_completion_rules=[
+                thor.training.EarlyCompletionRule(
+                    lambda current_score, best_score, current_epoch, best_epoch: False,
+                    run_name="missing",
+                )
+            ],
+        )
+
+
+def test_training_runs_early_completion_rule_accepts_ensemble_group_target():
+    trainer = _make_tiny_regression_trainer("training_runs_early_completion_rule_group", stats=False)
+    runs = thor.training.TrainingRuns(
+        [("fold_0", trainer, "tiny_ensemble")],
+        failure_policy="continue",
+        early_completion_rules=[
+            thor.training.EarlyCompletionRule(
+                lambda current_score, best_score, current_epoch, best_epoch: False,
+                ensemble_group="tiny_ensemble",
+            )
+        ],
+    )
+
+    assert runs is not None
+
+
 def test_training_runs_result_status_names_are_exposed():
     assert thor.training.TrainingRunStatus.completed.name == "completed"
+    assert thor.training.TrainingRunCompletionReason.early_completed.name == "early_completed"
     assert thor.training.TrainingRunsFailurePolicy.cancel_siblings.name == "cancel_siblings"
 
 
@@ -222,7 +430,10 @@ def test_training_runs_rejects_ensemble_output_dtype_mismatch_before_fit():
 @pytest.mark.training_integration
 @pytest.mark.skipif(
     not RUN_TRAINING_INTEGRATION,
-    reason="set THOR_RUN_TRAINING_INTEGRATION=1 to run opt-in TrainingRuns CUDA integration tests",
+    reason=integration_skip_reason(
+        "THOR_RUN_TRAINING_INTEGRATION",
+        description="opt-in TrainingRuns CUDA integration tests",
+    ),
 )
 def test_training_runs_evaluates_saved_adam_model_on_test_loader(capfd, tmp_path):
     trainer = _make_tiny_regression_trainer(
@@ -247,11 +458,277 @@ def test_training_runs_evaluates_saved_adam_model_on_test_loader(capfd, tmp_path
     assert re.search(r"INFO runs\[fold_0\|tiny_ensemble\]:.*test_loss=", plain_text)
 
 
+
+
+def _training_selection_metadata(save_dir):
+    with open(save_dir / "training_selection_metadata.json", "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def _prediction_from_saved_tiny_regressor(save_dir, network_name: str):
+    loaded = thor.Network(network_name)
+    loaded.load(str(save_dir))
+    placed = loaded.place(4, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
+    x, y = _regression_arrays(dtype=np.float32)
+    outputs = placed.infer({"examples": _cpu_tensor(x, thor.DataType.fp32), "labels": _cpu_tensor(y, thor.DataType.fp32)})
+    return np.array(outputs["prediction"].numpy(), copy=True)
+
+
 @pytest.mark.cuda
 @pytest.mark.training_integration
 @pytest.mark.skipif(
     not RUN_TRAINING_INTEGRATION,
-    reason="set THOR_RUN_TRAINING_INTEGRATION=1 to run opt-in TrainingRuns CUDA integration tests",
+    reason=integration_skip_reason(
+        "THOR_RUN_TRAINING_INTEGRATION",
+        description="opt-in TrainingRuns CUDA integration tests",
+    ),
+)
+def test_trainer_best_candidate_snapshot_contains_trained_weights(tmp_path):
+    save_dir = tmp_path / "best_candidate_model"
+    trainer = _make_tiny_regression_trainer(
+        "trainer_best_candidate_snapshot_trained_weights",
+        stats=False,
+        save_model_dir=save_dir,
+        save_model_overwrite=True,
+        check_best_model_every_epochs=1,
+    )
+
+    trainer.fit(1)
+
+    prediction = _prediction_from_saved_tiny_regressor(save_dir, "trainer_best_candidate_snapshot_trained_weights")
+
+    assert save_dir.exists()
+    assert not np.allclose(prediction, 0.0, atol=1e-7)
+
+
+@pytest.mark.cuda
+@pytest.mark.training_integration
+@pytest.mark.skipif(
+    not RUN_TRAINING_INTEGRATION,
+    reason=integration_skip_reason(
+        "THOR_RUN_TRAINING_INTEGRATION",
+        description="opt-in TrainingRuns CUDA integration tests",
+    ),
+)
+def test_trainer_custom_model_selection_score_controls_saved_candidate(tmp_path):
+    first_epoch_dir = tmp_path / "custom_score_first_epoch"
+    one_epoch_reference_dir = tmp_path / "one_epoch_reference"
+    two_epoch_reference_dir = tmp_path / "two_epoch_reference"
+
+    _make_tiny_regression_trainer(
+        "trainer_custom_model_selection_first_epoch",
+        stats=False,
+        save_model_dir=first_epoch_dir,
+        save_model_overwrite=True,
+        check_best_model_every_epochs=1,
+        model_selection_score=lambda validation_loss, training_loss, epoch: float(epoch),
+    ).fit(2)
+
+    _make_tiny_regression_trainer(
+        "trainer_custom_model_selection_one_epoch_reference",
+        stats=False,
+        save_model_dir=one_epoch_reference_dir,
+        save_model_overwrite=True,
+        check_best_model_every_epochs=1,
+    ).fit(1)
+
+    _make_tiny_regression_trainer(
+        "trainer_custom_model_selection_two_epoch_reference",
+        stats=False,
+        save_model_dir=two_epoch_reference_dir,
+        save_model_overwrite=True,
+        check_best_model_every_epochs=1,
+        model_selection_score=lambda validation_loss, training_loss, epoch: -float(epoch),
+    ).fit(2)
+
+    selected_prediction = _prediction_from_saved_tiny_regressor(first_epoch_dir, "trainer_custom_model_selection_first_epoch")
+    one_epoch_prediction = _prediction_from_saved_tiny_regressor(one_epoch_reference_dir, "trainer_custom_model_selection_one_epoch_reference")
+    two_epoch_prediction = _prediction_from_saved_tiny_regressor(two_epoch_reference_dir, "trainer_custom_model_selection_two_epoch_reference")
+
+    assert np.allclose(selected_prediction, one_epoch_prediction, atol=1e-6)
+    assert not np.allclose(selected_prediction, two_epoch_prediction, atol=1e-7)
+
+
+
+
+
+
+@pytest.mark.cuda
+@pytest.mark.training_integration
+@pytest.mark.skipif(
+    not RUN_TRAINING_INTEGRATION,
+    reason=integration_skip_reason(
+        "THOR_RUN_TRAINING_INTEGRATION",
+        description="opt-in TrainingRuns CUDA integration tests",
+    ),
+)
+def test_trainer_fit_returns_result_and_persists_selection_metadata(tmp_path):
+    save_dir = tmp_path / "trainer_fit_result_metadata"
+    early_policy = thor.training.EarlyCompletionPolicy(
+        lambda current_score, best_score, current_epoch, best_epoch: current_epoch >= 2
+    )
+    trainer = _make_tiny_regression_trainer(
+        "trainer_fit_result_metadata",
+        stats=False,
+        save_model_dir=save_dir,
+        save_model_overwrite=True,
+        check_best_model_every_epochs=1,
+        model_selection_score=lambda validation_loss, training_loss, epoch: float(epoch),
+        early_completion_policies=[early_policy],
+    )
+
+    result = trainer.fit(50)
+
+    assert isinstance(result, thor.training.TrainingRunResult)
+    assert result.status == "completed"
+    assert result.result == "early_completed"
+    assert result.early_completed is True
+    assert result.completed_epoch == 2
+    assert result.best_epoch == 1
+    assert result.best_score == pytest.approx(1.0)
+    assert save_dir.exists()
+
+    metadata = _training_selection_metadata(save_dir)
+    assert metadata["schema_version"] == 1
+    assert metadata["best_epoch"] == 1
+    assert metadata["best_score"] == pytest.approx(1.0)
+    assert metadata["completed_epoch"] == 2
+    assert metadata["completion_reason"] == "early_completed"
+    assert metadata["check_best_model_every_epochs"] == 1
+
+
+@pytest.mark.cuda
+@pytest.mark.training_integration
+@pytest.mark.skipif(
+    not RUN_TRAINING_INTEGRATION,
+    reason=integration_skip_reason(
+        "THOR_RUN_TRAINING_INTEGRATION",
+        description="opt-in TrainingRuns CUDA integration tests",
+    ),
+)
+def test_trainer_model_selection_score_none_skips_candidate_for_epoch(tmp_path):
+    save_dir = tmp_path / "custom_score_none_skips_epoch"
+    one_epoch_reference_dir = tmp_path / "custom_score_none_one_epoch_reference"
+    two_epoch_reference_dir = tmp_path / "custom_score_none_two_epoch_reference"
+
+    result = _make_tiny_regression_trainer(
+        "trainer_custom_model_selection_none_skips_epoch",
+        stats=False,
+        save_model_dir=save_dir,
+        save_model_overwrite=True,
+        check_best_model_every_epochs=1,
+        model_selection_score=lambda validation_loss, training_loss, epoch: None if epoch == 1 else float(epoch),
+    ).fit(2)
+
+    _make_tiny_regression_trainer(
+        "trainer_custom_model_selection_none_one_epoch_reference",
+        stats=False,
+        save_model_dir=one_epoch_reference_dir,
+        save_model_overwrite=True,
+        check_best_model_every_epochs=1,
+    ).fit(1)
+
+    _make_tiny_regression_trainer(
+        "trainer_custom_model_selection_none_two_epoch_reference",
+        stats=False,
+        save_model_dir=two_epoch_reference_dir,
+        save_model_overwrite=True,
+        check_best_model_every_epochs=1,
+    ).fit(2)
+
+    assert result.status == "completed"
+    assert result.result == "completed"
+    assert result.completed_epoch == 2
+    assert result.best_epoch == 2
+    assert result.best_score == pytest.approx(2.0)
+
+    metadata = _training_selection_metadata(save_dir)
+    assert metadata["best_epoch"] == 2
+    assert metadata["best_score"] == pytest.approx(2.0)
+    assert metadata["completed_epoch"] == 2
+    assert metadata["completion_reason"] == "completed"
+
+    selected_prediction = _prediction_from_saved_tiny_regressor(save_dir, "trainer_custom_model_selection_none_skips_epoch")
+    one_epoch_prediction = _prediction_from_saved_tiny_regressor(
+        one_epoch_reference_dir, "trainer_custom_model_selection_none_one_epoch_reference"
+    )
+    two_epoch_prediction = _prediction_from_saved_tiny_regressor(
+        two_epoch_reference_dir, "trainer_custom_model_selection_none_two_epoch_reference"
+    )
+
+    assert np.allclose(selected_prediction, two_epoch_prediction, atol=1e-6)
+    assert not np.allclose(selected_prediction, one_epoch_prediction, atol=1e-7)
+
+
+@pytest.mark.cuda
+@pytest.mark.training_integration
+@pytest.mark.skipif(
+    not RUN_TRAINING_INTEGRATION,
+    reason=integration_skip_reason(
+        "THOR_RUN_TRAINING_INTEGRATION",
+        description="opt-in TrainingRuns CUDA integration tests",
+    ),
+)
+def test_training_runs_early_completion_stops_early_and_saves_best_candidate(capfd, tmp_path):
+    early_dir = tmp_path / "early_completed_best"
+    one_epoch_reference_dir = tmp_path / "one_epoch_reference"
+
+    early_policy = thor.training.EarlyCompletionPolicy(
+        lambda current_score, best_score, current_epoch, best_epoch: current_epoch >= 2
+    )
+    trainer = _make_tiny_regression_trainer(
+        "training_runs_early_completion_best_candidate",
+        stats=True,
+        save_model_dir=early_dir,
+        save_model_overwrite=True,
+        check_best_model_every_epochs=1,
+        model_selection_score=lambda validation_loss, training_loss, epoch: float(epoch),
+        early_completion_policies=[early_policy],
+    )
+    runs = thor.training.TrainingRuns([("fold_0", trainer)], failure_policy="continue")
+
+    results, captured_text = _fit_runs_and_capture_text(runs, capfd, epochs=50)
+
+    result = results["fold_0"]
+    assert results.all_completed()
+    assert result.status == "completed"
+    assert result.result == "early_completed"
+    assert result.early_completed is True
+    assert result.completed_epoch == 2
+    assert result.best_epoch == 1
+    assert result.best_score == pytest.approx(1.0)
+    assert result.final_training_stats.epoch == 2
+    assert result.final_training_stats.epochs == 50
+    assert early_dir.exists()
+
+    plain_text = _ANSI_RE.sub("", captured_text)
+    assert re.search(
+        r"INFO runs\[fold_0\]:.*status=completed.*result=early_completed.*completed_epoch=2.*best_epoch=1.*best_score=1\.000000",
+        plain_text,
+    )
+
+    _make_tiny_regression_trainer(
+        "training_runs_early_completion_one_epoch_reference",
+        stats=False,
+        save_model_dir=one_epoch_reference_dir,
+        save_model_overwrite=True,
+        check_best_model_every_epochs=1,
+    ).fit(1)
+
+    selected_prediction = _prediction_from_saved_tiny_regressor(early_dir, "training_runs_early_completion_best_candidate")
+    one_epoch_prediction = _prediction_from_saved_tiny_regressor(
+        one_epoch_reference_dir, "training_runs_early_completion_one_epoch_reference"
+    )
+
+    assert np.allclose(selected_prediction, one_epoch_prediction, atol=1e-6)
+
+@pytest.mark.cuda
+@pytest.mark.training_integration
+@pytest.mark.skipif(
+    not RUN_TRAINING_INTEGRATION,
+    reason=integration_skip_reason(
+        "THOR_RUN_TRAINING_INTEGRATION",
+        description="opt-in TrainingRuns CUDA integration tests",
+    ),
 )
 def test_training_runs_fits_two_tiny_trainers_on_one_gpu_and_prefixes_stats(capfd, tmp_path):
     runs = thor.training.TrainingRuns(
@@ -351,7 +828,10 @@ def test_training_runs_fits_two_tiny_trainers_on_one_gpu_and_prefixes_stats(capf
 @pytest.mark.training_integration
 @pytest.mark.skipif(
     not RUN_TRAINING_INTEGRATION,
-    reason="set THOR_RUN_TRAINING_INTEGRATION=1 to run opt-in TrainingRuns CUDA integration tests",
+    reason=integration_skip_reason(
+        "THOR_RUN_TRAINING_INTEGRATION",
+        description="opt-in TrainingRuns CUDA integration tests",
+    ),
 )
 def test_training_runs_fits_five_tiny_trainers_on_one_gpu(capfd):
     run_specs = [
@@ -383,7 +863,10 @@ def test_training_runs_fits_five_tiny_trainers_on_one_gpu(capfd):
 @pytest.mark.training_integration
 @pytest.mark.skipif(
     not RUN_TRAINING_INTEGRATION,
-    reason="set THOR_RUN_TRAINING_INTEGRATION=1 to run opt-in TrainingRuns CUDA integration tests",
+    reason=integration_skip_reason(
+        "THOR_RUN_TRAINING_INTEGRATION",
+        description="opt-in TrainingRuns CUDA integration tests",
+    ),
 )
 def test_training_runs_continue_policy_allows_real_cuda_sibling_to_finish_after_failure(capfd):
     bad_trainer = _make_tiny_regression_trainer("training_runs_cuda_continue_bad", optimizer=False, stats=False)

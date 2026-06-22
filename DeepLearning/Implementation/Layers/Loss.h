@@ -1,6 +1,7 @@
 #pragma once
 
 #include <optional>
+#include <stdexcept>
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
@@ -278,8 +279,34 @@ class Loss : public Layer {
     // When a loss shaper is present, that will provide batch loss etc. Loss::getLossOutput() provides raw loss
     virtual std::optional<Tensor> getLossOutput() { return featureOutput; }
 
-    void setTrainingActive(bool active) { trainingActive = active; }
+    void setTrainingActive(bool active) {
+        if (active && trainingBackpropPathPruned) {
+            throw std::logic_error("Cannot reactivate a loss after its inactive training backprop path was pruned for this placed network.");
+        }
+        trainingActive = active;
+    }
     bool isTrainingActive() const { return trainingActive; }
+
+    // A CustomLoss can optimistically fuse its prediction-gradient expression into
+    // the layer that produced the predictions while the graph is still being
+    // connected.  Non-API utility layers such as TensorFanout may later discover
+    // during compile that the fused path is not valid for the final downstream
+    // backprop topology.  This hook lets that utility layer invalidate the loss-side
+    // fused state before the loss compiles, so the loss materializes its ordinary
+    // gradient tensor instead of leaving an unpopulated errorOutput in the graph.
+    virtual void notifyFusedGradientUnregisteredFromDrivingLayer(const Tensor& predictions) {
+        (void)predictions;
+    }
+
+    void pruneTrainingBackpropPathIfInactive() {
+        if (trainingActive || trainingBackpropPathPruned || isInferenceOnly() || !errorOutput.has_value()) {
+            return;
+        }
+        if (previousLayer.has_value()) {
+            previousLayer.value()->replaceErrorInput(errorOutput, std::nullopt);
+        }
+        trainingBackpropPathPruned = true;
+    }
 
     enum class ConnectionType { FORWARD_BACKWARD = 4289, LABELS };
 
@@ -298,6 +325,7 @@ class Loss : public Layer {
     bool featureInputReceived;
     bool labelsReceived;
     bool trainingActive = true;
+    bool trainingBackpropPathPruned = false;
     uint32_t currentBatchSize = 0;
 
     virtual void advanceDataIfReady(bool validationPass) {

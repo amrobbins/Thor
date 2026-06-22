@@ -15,6 +15,7 @@
 #include <cuda_runtime_api.h>
 
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <csignal>
 #include <cstdio>
@@ -24,6 +25,9 @@
 #include <exception>
 #include <functional>
 #include <future>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -31,6 +35,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <sstream>
 #include <thread>
 #include <type_traits>
 #include <unordered_map>
@@ -531,6 +536,236 @@ class NativeQueuedSigintScope {
    private:
     using SignalHandler = void (*)(int);
     SignalHandler previousHandler = SIG_DFL;
+};
+
+class EpochLossAccumulator {
+   public:
+    void reset() {
+        trainLossSum = 0.0;
+        trainLossCount = 0;
+        validationLossSum = 0.0;
+        validationLossCount = 0;
+    }
+
+    void update(const TrainingStatsSnapshot& snapshot) {
+        if (!snapshot.loss.has_value()) {
+            return;
+        }
+        if (snapshot.phase == TrainingEventPhase::TRAIN) {
+            trainLossSum += snapshot.loss.value();
+            trainLossCount += 1;
+        } else if (snapshot.phase == TrainingEventPhase::VALIDATE) {
+            validationLossSum += snapshot.loss.value();
+            validationLossCount += 1;
+        }
+    }
+
+    [[nodiscard]] std::optional<double> trainLoss() const {
+        if (trainLossCount == 0) {
+            return std::nullopt;
+        }
+        return trainLossSum / static_cast<double>(trainLossCount);
+    }
+
+    [[nodiscard]] std::optional<double> validationLoss() const {
+        if (validationLossCount == 0) {
+            return std::nullopt;
+        }
+        return validationLossSum / static_cast<double>(validationLossCount);
+    }
+
+   private:
+    double trainLossSum = 0.0;
+    uint64_t trainLossCount = 0;
+    double validationLossSum = 0.0;
+    uint64_t validationLossCount = 0;
+};
+
+struct TrainingSelectionMetadata {
+    std::optional<uint64_t> bestEpoch{};
+    std::optional<double> bestScore{};
+    uint64_t completedEpoch = 0;
+    std::string completionReason = "completed";
+    uint32_t checkBestModelEveryEpochs = 1;
+};
+
+class BestModelCandidateManager {
+   public:
+    BestModelCandidateManager(std::optional<std::string> saveModelDirectory, bool overwrite, bool saveOptimizerState)
+        : saveModelDirectory(std::move(saveModelDirectory)), overwrite(overwrite), saveOptimizerState(saveOptimizerState) {}
+
+    ~BestModelCandidateManager() {
+        if (bestCandidateDirectory.has_value()) {
+            std::error_code errorCode;
+            std::filesystem::remove_all(bestCandidateDirectory.value(), errorCode);
+        }
+    }
+
+    [[nodiscard]] bool enabled() const { return saveModelDirectory.has_value(); }
+
+    void maybeSnapshot(PlacedNetwork& placedNetwork, uint64_t epoch, std::optional<double> score) {
+        if (!score.has_value() || !std::isfinite(score.value())) {
+            return;
+        }
+        if (bestScore.has_value() && score.value() >= bestScore.value()) {
+            return;
+        }
+
+        if (!enabled()) {
+            bestScore = score.value();
+            bestEpoch = epoch;
+            return;
+        }
+
+        const std::filesystem::path newCandidate = uniqueCandidateDirectory(epoch);
+        const std::filesystem::path tmpCandidate = uniqueTemporaryDirectory(epoch);
+        removePathIfExists(tmpCandidate);
+        removePathIfExists(newCandidate);
+
+        try {
+            placedNetwork.save(tmpCandidate.string(), /*overwrite=*/true, saveOptimizerState);
+            std::filesystem::rename(tmpCandidate, newCandidate);
+        } catch (...) {
+            removePathIfExists(tmpCandidate);
+            removePathIfExists(newCandidate);
+            throw;
+        }
+
+        if (bestCandidateDirectory.has_value()) {
+            removePathIfExists(bestCandidateDirectory.value());
+        }
+        bestCandidateDirectory = newCandidate;
+        bestScore = score.value();
+        bestEpoch = epoch;
+    }
+
+    void finalize(PlacedNetwork& placedNetwork, const TrainingSelectionMetadata& metadata) {
+        if (!enabled()) {
+            return;
+        }
+
+        const std::filesystem::path finalDirectory = std::filesystem::path(saveModelDirectory.value());
+        if (!bestCandidateDirectory.has_value()) {
+            placedNetwork.save(finalDirectory.string(), overwrite, saveOptimizerState);
+            writeSelectionMetadata(finalDirectory, metadata);
+            return;
+        }
+
+        if (std::filesystem::exists(finalDirectory)) {
+            if (!overwrite) {
+                throw std::runtime_error("Best model candidate cannot replace existing save_model_dir '" + finalDirectory.string() +
+                                         "' because save_model_overwrite is false.");
+            }
+            removePathIfExists(finalDirectory);
+        }
+        std::filesystem::rename(bestCandidateDirectory.value(), finalDirectory);
+        bestCandidateDirectory.reset();
+        writeSelectionMetadata(finalDirectory, metadata);
+    }
+
+    [[nodiscard]] std::optional<double> getBestScore() const { return bestScore; }
+    [[nodiscard]] std::optional<uint64_t> getBestEpoch() const { return bestEpoch; }
+
+   private:
+    static void removePathIfExists(const std::filesystem::path& path) {
+        std::error_code errorCode;
+        if (!std::filesystem::exists(path, errorCode) && !errorCode) {
+            return;
+        }
+        errorCode.clear();
+        std::filesystem::remove_all(path, errorCode);
+        if (errorCode) {
+            throw std::runtime_error("Failed to remove path '" + path.string() + "': " + errorCode.message());
+        }
+    }
+
+    [[nodiscard]] std::filesystem::path baseCandidatePrefix() const {
+        std::filesystem::path finalDirectory(saveModelDirectory.value());
+        std::filesystem::path parent = finalDirectory.parent_path();
+        std::string filename = finalDirectory.filename().string();
+        if (filename.empty()) {
+            filename = "model";
+        }
+        std::ostringstream out;
+        out << "." << filename << ".best_candidate." << reinterpret_cast<uintptr_t>(this);
+        return parent / out.str();
+    }
+
+    [[nodiscard]] std::filesystem::path uniqueCandidateDirectory(uint64_t epoch) const {
+        std::ostringstream out;
+        out << baseCandidatePrefix().string() << ".epoch_" << epoch;
+        return std::filesystem::path(out.str());
+    }
+
+    [[nodiscard]] std::filesystem::path uniqueTemporaryDirectory(uint64_t epoch) const {
+        std::ostringstream out;
+        out << baseCandidatePrefix().string() << ".epoch_" << epoch << ".tmp";
+        return std::filesystem::path(out.str());
+    }
+
+    static void writeOptionalUint64(std::ostream& out, std::optional<uint64_t> value) {
+        if (value.has_value()) {
+            out << value.value();
+        } else {
+            out << "null";
+        }
+    }
+
+    static void writeOptionalDouble(std::ostream& out, std::optional<double> value) {
+        if (value.has_value() && std::isfinite(value.value())) {
+            out << std::setprecision(17) << value.value();
+        } else {
+            out << "null";
+        }
+    }
+
+    static void writeSelectionMetadata(const std::filesystem::path& finalDirectory, const TrainingSelectionMetadata& metadata) {
+        std::filesystem::create_directories(finalDirectory);
+        const std::filesystem::path metadataPath = finalDirectory / "training_selection_metadata.json";
+        const std::filesystem::path tmpPath = finalDirectory / ".training_selection_metadata.json.tmp";
+
+        {
+            std::ofstream out(tmpPath, std::ios::binary | std::ios::trunc);
+            if (!out) {
+                throw std::runtime_error("Unable to open training selection metadata file for writing: " + tmpPath.string());
+            }
+            out << "{\n";
+            out << "  \"schema_version\": 1,\n";
+            out << "  \"best_epoch\": ";
+            writeOptionalUint64(out, metadata.bestEpoch);
+            out << ",\n";
+            out << "  \"best_score\": ";
+            writeOptionalDouble(out, metadata.bestScore);
+            out << ",\n";
+            out << "  \"completed_epoch\": " << metadata.completedEpoch << ",\n";
+            out << "  \"completion_reason\": \"" << metadata.completionReason << "\",\n";
+            out << "  \"check_best_model_every_epochs\": " << metadata.checkBestModelEveryEpochs << "\n";
+            out << "}\n";
+            if (!out) {
+                throw std::runtime_error("Failed while writing training selection metadata file: " + tmpPath.string());
+            }
+        }
+
+        std::error_code errorCode;
+        std::filesystem::rename(tmpPath, metadataPath, errorCode);
+        if (errorCode) {
+            removePathIfExists(metadataPath);
+            errorCode.clear();
+            std::filesystem::rename(tmpPath, metadataPath, errorCode);
+            if (errorCode) {
+                removePathIfExists(tmpPath);
+                throw std::runtime_error("Failed to finalize training selection metadata file '" + metadataPath.string() +
+                                         "': " + errorCode.message());
+            }
+        }
+    }
+
+    std::optional<std::string> saveModelDirectory{};
+    bool overwrite = false;
+    bool saveOptimizerState = true;
+    std::optional<double> bestScore{};
+    std::optional<uint64_t> bestEpoch{};
+    std::optional<std::filesystem::path> bestCandidateDirectory{};
 };
 
 void ensureNativeQueuedPlanCompatible(const ExecutableTrainingPlan& plan, const Network& network, bool evaluateOnly) {
@@ -1195,6 +1430,18 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     request.cancellationToken.throwIfCancellationRequested();
 
     const bool evaluateOnly = request.executionMode == TrainingRunExecutionMode::EVALUATE;
+    if (!evaluateOnly && request.checkBestModelEveryEpochs == 0) {
+        throw std::runtime_error("Trainer check_best_model_every_epochs must be >= 1.");
+    }
+
+    TrainingRuntimeConfig runtime = request.runtime;
+    const bool emitStatsEvents = request.runtime.statsEnabled;
+    const bool collectBestModelStats = !evaluateOnly && (request.saveModelDirectory.has_value() || !request.earlyCompletionPolicies.empty());
+    if (collectBestModelStats) {
+        runtime.statsEnabled = true;
+        runtime.scalarTensorsToReport.insert("loss");
+    }
+
     std::shared_ptr<TrainingProgram> trainingProgram = defaultTrainingProgramForRequest(request);
     if (!evaluateOnly) {
         attachPlacementFallbackOptimizerIfNeeded(request, *trainingProgram);
@@ -1212,6 +1459,11 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     for (size_t i = 0; i < initDoneEvents.size(); ++i) {
         request.cancellationToken.throwIfCancellationRequested();
         initDoneEvents[i].synchronize();
+    }
+
+    if (!evaluateOnly && request.previousPlacedNetwork != nullptr) {
+        request.cancellationToken.throwIfCancellationRequested();
+        placedNetwork->copyTrainingStateFrom(*request.previousPlacedNetwork);
     }
 
     request.cancellationToken.throwIfCancellationRequested();
@@ -1260,15 +1512,20 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         return snapshot;
     };
 
-    if (request.runtime.statsEnabled) {
+    BestModelCandidateManager bestModelCandidate(request.saveModelDirectory, request.saveModelOverwrite, request.saveOptimizerState);
+    bool runEarlyCompleted = false;
+    std::optional<uint64_t> completedEpoch{};
+
+    if (emitStatsEvents) {
         emitTrainingEvent(observer,
-                          request.runtime.statsEnabled,
+                          emitStatsEvents,
                           TrainingEvent::runStarted(makeBaseSnapshot(TrainingEventPhase::UNKNOWN, 0, batchSize, 0, nullptr)));
     }
 
     for (uint32_t epochOffset = 0; epochOffset < request.epochs; ++epochOffset) {
         request.cancellationToken.throwIfCancellationRequested();
         const uint64_t humanEpoch = currentEpoch + 1;
+        EpochLossAccumulator epochLosses;
 
         std::vector<std::pair<ExampleType, TrainingEventPhase>> phaseSpecs;
         if (evaluateOnly) {
@@ -1290,16 +1547,16 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
             const uint64_t batchesToRun = batchesPerEpoch - batchNum;
 
             std::vector<std::string> scalarTensorNames;
-            if (request.runtime.statsEnabled) {
-                scalarTensorNames.assign(request.runtime.scalarTensorsToReport.begin(), request.runtime.scalarTensorsToReport.end());
+            if (runtime.statsEnabled) {
+                scalarTensorNames.assign(runtime.scalarTensorsToReport.begin(), runtime.scalarTensorsToReport.end());
             }
             auto state = std::make_shared<QueuedTrainingState>(options.maxInFlightBatches, std::move(scalarTensorNames));
             state->numBatchesDoneInEpoch = batchNum;
             state->numBatchesInEpoch = batchesPerEpoch;
 
-            if (request.runtime.statsEnabled) {
+            if (emitStatsEvents) {
                 emitTrainingEvent(observer,
-                                  request.runtime.statsEnabled,
+                                  emitStatsEvents,
                                   TrainingEvent::epochStarted(makeBaseSnapshot(phase, humanEpoch, batchSize, batchesPerEpoch, state)));
             }
 
@@ -1390,7 +1647,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                         }
                     }
 
-                    if (request.runtime.statsEnabled) {
+                    if (runtime.statsEnabled) {
                         double& averageBatchTime =
                             (phase == TrainingEventPhase::TRAIN) ? averageTrainingBatchTime : averageValidationBatchTime;
                         double completedBatchTime = -1.0;
@@ -1436,7 +1693,8 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                         }
 
                         assignScalarStatsToSnapshot(snapshot, state->scalarTensorNames, completedBatch.scalarStats);
-                        emitTrainingEvent(observer, request.runtime.statsEnabled, TrainingEvent::statsUpdated(std::move(snapshot)));
+                        epochLosses.update(snapshot);
+                        emitTrainingEvent(observer, emitStatsEvents, TrainingEvent::statsUpdated(std::move(snapshot)));
                     }
 
                     batchNum += 1;
@@ -1448,26 +1706,65 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
 
             schedulingThread.join();
             throwIfQueuedTrainingStateFailed(state);
-            if (request.runtime.statsEnabled) {
+            if (emitStatsEvents) {
                 emitTrainingEvent(observer,
-                                  request.runtime.statsEnabled,
+                                  emitStatsEvents,
                                   TrainingEvent::epochFinished(makeBaseSnapshot(phase, humanEpoch, batchSize, batchesPerEpoch, state)));
             }
         }
 
+        bool earlyCompletionRequested = false;
+        if (!evaluateOnly && humanEpoch % request.checkBestModelEveryEpochs == 0) {
+            const std::optional<double> currentScore = request.modelSelectionScore.evaluate(
+                epochLosses.validationLoss(), epochLosses.trainLoss(), humanEpoch);
+            bestModelCandidate.maybeSnapshot(*placedNetwork, humanEpoch, currentScore);
+            const std::optional<double> bestScore = bestModelCandidate.getBestScore();
+            const std::optional<uint64_t> bestEpoch = bestModelCandidate.getBestEpoch();
+            if (currentScore.has_value() && std::isfinite(currentScore.value()) && bestScore.has_value() && bestEpoch.has_value()) {
+                for (const TrainingEarlyCompletionPolicy& policy : request.earlyCompletionPolicies) {
+                    if (policy.shouldComplete(currentScore.value(), bestScore.value(), humanEpoch, bestEpoch.value())) {
+                        earlyCompletionRequested = true;
+                        break;
+                    }
+                }
+            }
+        }
+
         currentEpoch += 1;
+        if (earlyCompletionRequested) {
+            runEarlyCompleted = true;
+            completedEpoch = humanEpoch;
+            break;
+        }
     }
 
     request.cancellationToken.throwIfCancellationRequested();
-    if (!evaluateOnly && request.saveModelDirectory.has_value()) {
-        placedNetwork->save(*request.saveModelDirectory, request.saveModelOverwrite, request.saveOptimizerState);
+    const uint64_t finalCompletedEpoch = completedEpoch.value_or(currentEpoch);
+    const char* finalCompletionReason = runEarlyCompleted ? "early_completed" : "completed";
+    if (!evaluateOnly) {
+        TrainingSelectionMetadata selectionMetadata;
+        selectionMetadata.bestEpoch = bestModelCandidate.getBestEpoch();
+        selectionMetadata.bestScore = bestModelCandidate.getBestScore();
+        selectionMetadata.completedEpoch = finalCompletedEpoch;
+        selectionMetadata.completionReason = finalCompletionReason;
+        selectionMetadata.checkBestModelEveryEpochs = request.checkBestModelEveryEpochs;
+        bestModelCandidate.finalize(*placedNetwork, selectionMetadata);
+        if (request.completedPlacedNetwork != nullptr) {
+            *request.completedPlacedNetwork = placedNetwork;
+        }
     }
 
-    if (request.runtime.statsEnabled) {
-        emitTrainingEvent(observer,
-                          request.runtime.statsEnabled,
-                          TrainingEvent::runFinished(makeBaseSnapshot(TrainingEventPhase::UNKNOWN, currentEpoch, batchSize, 0, nullptr)));
+    TrainingStatsSnapshot finishedStats = makeBaseSnapshot(TrainingEventPhase::UNKNOWN, currentEpoch, batchSize, 0, nullptr);
+    finishedStats.metrics["completed_epoch"] = static_cast<double>(finalCompletedEpoch);
+    if (bestModelCandidate.getBestEpoch().has_value()) {
+        finishedStats.metrics["best_epoch"] = static_cast<double>(bestModelCandidate.getBestEpoch().value());
     }
+    if (bestModelCandidate.getBestScore().has_value()) {
+        finishedStats.metrics["best_score"] = bestModelCandidate.getBestScore().value();
+    }
+    emitTrainingEvent(observer,
+                      emitStatsEvents,
+                      TrainingEvent::runFinished(std::move(finishedStats), finalCompletionReason));
 }
 
 }  // namespace Thor

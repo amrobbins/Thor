@@ -36,6 +36,7 @@ class CustomLoss : public Loss {
 
     void infer(std::optional<Tensor> predictions, std::optional<Tensor> loss, Stream stream) override;
     void backProp(std::optional<Tensor> labels, std::optional<Tensor> predictions, std::optional<Tensor> lossGradient, Stream stream) override;
+    void notifyFusedGradientUnregisteredFromDrivingLayer(const Tensor& predictions) override;
 
     std::string getType() override { return "CustomLoss"; }
     bool isGradientFusedIntoDrivingLayer() const { return gradientFusedIntoDrivingLayer; }

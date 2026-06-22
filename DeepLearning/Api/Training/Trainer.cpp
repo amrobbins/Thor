@@ -3,10 +3,15 @@
 #include "DeepLearning/Api/Loaders/Loader.h"
 #include "DeepLearning/Api/Network/Network.h"
 
+#include <algorithm>
 #include <cmath>
 #include <exception>
+#include <iomanip>
+#include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace Thor {
 
@@ -23,6 +28,23 @@ Trainer Trainer::Builder::build() const {
     if (!std::isfinite(runtimeConfig_.statsIntervalSeconds) || runtimeConfig_.statsIntervalSeconds < 0.0) {
         throw std::runtime_error("Trainer statsIntervalSeconds must be finite and >= 0.");
     }
+    if (checkBestModelEveryEpochs_ == 0) {
+        throw std::runtime_error("Trainer check_best_model_every_epochs must be >= 1.");
+    }
+    for (size_t i = 0; i < restartConditions_.size(); ++i) {
+        const TrainingRestartCondition& condition = restartConditions_[i];
+        if (condition.progressCheckEpochs == 0) {
+            throw std::runtime_error("Trainer restart_condition at index " + std::to_string(i) + " must have progress_check_epochs >= 1.");
+        }
+        if (!std::isfinite(condition.progressPercentage) || condition.progressPercentage < 0.0 || condition.progressPercentage > 100.0) {
+            throw std::runtime_error("Trainer restart_condition at index " + std::to_string(i) + " must have progress_percentage in [0, 100].");
+        }
+    }
+    for (size_t i = 0; i < earlyCompletionPolicies_.size(); ++i) {
+        if (!earlyCompletionPolicies_[i].completionCondition) {
+            throw std::runtime_error("Trainer early_completion_policy at index " + std::to_string(i) + " must have a completion_condition.");
+        }
+    }
 
     Trainer trainer;
     trainer.network = network_;
@@ -35,6 +57,10 @@ Trainer Trainer::Builder::build() const {
     trainer.saveModelDirectory = saveModelDirectory_;
     trainer.saveModelOverwrite = saveModelOverwrite_;
     trainer.saveOptimizerState = saveOptimizerState_;
+    trainer.checkBestModelEveryEpochs = checkBestModelEveryEpochs_;
+    trainer.modelSelectionScore = modelSelectionScore_;
+    trainer.restartConditions = restartConditions_;
+    trainer.earlyCompletionPolicies = earlyCompletionPolicies_;
     if (trainer.observer == nullptr) {
         if (trainer.runtimeConfig.statsEnabled) {
             const LineStatsOutputMode outputMode =
@@ -64,8 +90,185 @@ class ResultCapturingTrainingObserver : public TrainingObserver {
             } else if (event.stats.phase == TrainingEventPhase::TEST) {
                 finalTestStats = testLoss.update(event.stats);
             }
+        } else if (event.type == TrainingEventType::RUN_FINISHED) {
+            completionReason = event.message == "early_completed" ? TrainingRunCompletionReason::EARLY_COMPLETED
+                                                                  : TrainingRunCompletionReason::COMPLETED;
+            completedEpoch = uintMetric(event.stats, "completed_epoch");
+            if (!completedEpoch.has_value() && event.stats.epoch > 0) {
+                completedEpoch = event.stats.epoch;
+            }
+            bestEpoch = uintMetric(event.stats, "best_epoch");
+            bestScore = doubleMetric(event.stats, "best_score");
         }
         inner.onTrainingEvent(event);
+    }
+
+    void flush() override { inner.flush(); }
+    void close() override { inner.close(); }
+
+    std::optional<TrainingStatsSnapshot> finalTrainingStats{};
+    std::optional<TrainingStatsSnapshot> finalValidationStats{};
+    std::optional<TrainingStatsSnapshot> finalTestStats{};
+    TrainingRunCompletionReason completionReason = TrainingRunCompletionReason::COMPLETED;
+    std::optional<uint64_t> completedEpoch{};
+    std::optional<uint64_t> bestEpoch{};
+    std::optional<double> bestScore{};
+
+   private:
+    static std::optional<double> doubleMetric(const TrainingStatsSnapshot& stats, const std::string& name) {
+        const auto it = stats.metrics.find(name);
+        if (it == stats.metrics.end() || !std::isfinite(it->second)) {
+            return std::nullopt;
+        }
+        return it->second;
+    }
+
+    static std::optional<uint64_t> uintMetric(const TrainingStatsSnapshot& stats, const std::string& name) {
+        const std::optional<double> value = doubleMetric(stats, name);
+        if (!value.has_value() || value.value() < 0.0) {
+            return std::nullopt;
+        }
+        return static_cast<uint64_t>(value.value());
+    }
+
+    struct FinalEpochLossAccumulator {
+        uint64_t currentEpoch = 0;
+        double currentEpochLossSum = 0.0;
+        uint64_t currentEpochLossCount = 0;
+
+        TrainingStatsSnapshot update(const TrainingStatsSnapshot& stats) {
+            TrainingStatsSnapshot finalStats = stats;
+            if (!stats.loss.has_value()) {
+                return finalStats;
+            }
+
+            if (currentEpoch != stats.epoch) {
+                currentEpoch = stats.epoch;
+                currentEpochLossSum = 0.0;
+                currentEpochLossCount = 0;
+            }
+
+            currentEpochLossSum += stats.loss.value();
+            currentEpochLossCount += 1;
+            finalStats.loss = currentEpochLossSum / static_cast<double>(currentEpochLossCount);
+            return finalStats;
+        }
+    };
+
+    TrainingObserver& inner;
+    FinalEpochLossAccumulator trainingLoss{};
+    FinalEpochLossAccumulator validationLoss{};
+    FinalEpochLossAccumulator testLoss{};
+};
+
+
+struct RestartAttemptProgress {
+    uint64_t attempt = 1;
+    double firstStepLoss = 0.0;
+    double checkLoss = 0.0;
+    double requiredLoss = 0.0;
+    double observedProgressPercentage = 0.0;
+    uint64_t checkedEpoch = 0;
+};
+
+std::string formatDoubleForRestartMessage(double value) {
+    std::ostringstream out;
+    out << std::setprecision(8) << value;
+    return out.str();
+}
+
+std::string restartConditionName(const TrainingRestartCondition& condition) {
+    std::ostringstream out;
+    out << "progress_check_epochs=" << condition.progressCheckEpochs
+        << " progress_percentage=" << formatDoubleForRestartMessage(condition.progressPercentage)
+        << " max_restarts=" << condition.maxRestarts;
+    return out.str();
+}
+
+std::string restartAttemptProgressToString(const RestartAttemptProgress& progress) {
+    std::ostringstream out;
+    out << "attempt " << progress.attempt << ": first_step_loss=" << formatDoubleForRestartMessage(progress.firstStepLoss)
+        << " check_epoch=" << progress.checkedEpoch << " check_loss=" << formatDoubleForRestartMessage(progress.checkLoss)
+        << " required_loss<=" << formatDoubleForRestartMessage(progress.requiredLoss)
+        << " observed_progress=" << formatDoubleForRestartMessage(progress.observedProgressPercentage) << "%";
+    return out.str();
+}
+
+std::string restartAttemptsProgressMessage(const std::string& runName,
+                                           const TrainingRestartCondition& condition,
+                                           const std::vector<RestartAttemptProgress>& attempts) {
+    std::ostringstream out;
+    out << "run '" << runName << "' failed restart_condition (" << restartConditionName(condition)
+        << "): training loss did not improve by at least "
+        << formatDoubleForRestartMessage(condition.progressPercentage) << "% after " << condition.progressCheckEpochs
+        << " epoch" << (condition.progressCheckEpochs == 1 ? "" : "s") << " across " << attempts.size()
+        << " attempt" << (attempts.size() == 1 ? "" : "s") << " (max_restarts=" << condition.maxRestarts << ").";
+    if (!attempts.empty()) {
+        out << " Progress by failed attempt: ";
+        for (size_t i = 0; i < attempts.size(); ++i) {
+            if (i != 0) {
+                out << "; ";
+            }
+            out << restartAttemptProgressToString(attempts[i]);
+        }
+    }
+    return out.str();
+}
+
+class TrainingRestartRequested final : public std::exception {
+   public:
+    TrainingRestartRequested(const TrainingRestartCondition* condition, RestartAttemptProgress progress, std::string message)
+        : condition_(condition), progress_(std::move(progress)), message_(std::move(message)) {}
+
+    const char* what() const noexcept override { return message_.c_str(); }
+    [[nodiscard]] const TrainingRestartCondition* condition() const { return condition_; }
+    [[nodiscard]] const RestartAttemptProgress& progress() const { return progress_; }
+
+   private:
+    const TrainingRestartCondition* condition_ = nullptr;
+    RestartAttemptProgress progress_{};
+    std::string message_{};
+};
+
+class TrainingRestartConditionExceeded final : public std::exception {
+   public:
+    explicit TrainingRestartConditionExceeded(std::string message) : message_(std::move(message)) {}
+    const char* what() const noexcept override { return message_.c_str(); }
+
+   private:
+    std::string message_{};
+};
+
+class RestartAttemptObserver : public TrainingObserver {
+   public:
+    RestartAttemptObserver(TrainingObserver& inner,
+                           std::vector<const TrainingRestartCondition*> restartConditions,
+                           uint64_t attemptNumber)
+        : inner(inner), attemptNumber(attemptNumber) {
+        restartConditionStates.reserve(restartConditions.size());
+        for (const TrainingRestartCondition* condition : restartConditions) {
+            if (condition != nullptr) {
+                restartConditionStates.push_back(RestartConditionAttemptState{condition});
+            }
+        }
+    }
+
+    void onTrainingEvent(const TrainingEvent& event) override {
+        if (event.type == TrainingEventType::STATS) {
+            if (event.stats.phase == TrainingEventPhase::TRAIN) {
+                finalTrainingStats = trainingLoss.update(event.stats);
+            } else if (event.stats.phase == TrainingEventPhase::VALIDATE) {
+                finalValidationStats = validationLoss.update(event.stats);
+            } else if (event.stats.phase == TrainingEventPhase::TEST) {
+                finalTestStats = testLoss.update(event.stats);
+            }
+        }
+
+        inner.onTrainingEvent(event);
+
+        if (event.type == TrainingEventType::STATS && event.stats.phase == TrainingEventPhase::TRAIN) {
+            maybeThrowForRestartConditions(event.stats);
+        }
     }
 
     void flush() override { inner.flush(); }
@@ -100,26 +303,107 @@ class ResultCapturingTrainingObserver : public TrainingObserver {
         }
     };
 
+    struct RestartConditionAttemptState {
+        const TrainingRestartCondition* condition = nullptr;
+        bool checked = false;
+        std::optional<double> firstStepLoss{};
+    };
+
+    void maybeThrowForRestartConditions(const TrainingStatsSnapshot& stats) {
+        if (restartConditionStates.empty() || !stats.loss.has_value()) {
+            return;
+        }
+
+        for (RestartConditionAttemptState& state : restartConditionStates) {
+            if (!state.firstStepLoss.has_value()) {
+                state.firstStepLoss = stats.loss.value();
+            }
+        }
+
+        for (RestartConditionAttemptState& state : restartConditionStates) {
+            maybeThrowForRestartCondition(state, stats);
+        }
+    }
+
+    void maybeThrowForRestartCondition(RestartConditionAttemptState& state, const TrainingStatsSnapshot& stats) {
+        const TrainingRestartCondition* restartCondition = state.condition;
+        if (restartCondition == nullptr || state.checked || stats.epoch < restartCondition->progressCheckEpochs) {
+            return;
+        }
+
+        const bool epochComplete = stats.stepsPerEpoch == 0 || stats.stepInEpoch >= stats.stepsPerEpoch;
+        if (!epochComplete) {
+            return;
+        }
+
+        state.checked = true;
+        if (!finalTrainingStats.has_value() || !finalTrainingStats->loss.has_value() || !state.firstStepLoss.has_value()) {
+            return;
+        }
+
+        const double firstStepLoss = state.firstStepLoss.value();
+        const double checkLoss = finalTrainingStats->loss.value();
+        const double requiredLoss = firstStepLoss * (1.0 - restartCondition->progressPercentage / 100.0);
+        const double observedProgressPercentage =
+            firstStepLoss == 0.0 ? (checkLoss <= 0.0 ? 100.0 : -std::numeric_limits<double>::infinity())
+                                 : ((firstStepLoss - checkLoss) / firstStepLoss) * 100.0;
+
+        if (std::isfinite(firstStepLoss) && std::isfinite(checkLoss) && checkLoss <= requiredLoss) {
+            return;
+        }
+
+        RestartAttemptProgress progress;
+        progress.attempt = attemptNumber;
+        progress.firstStepLoss = firstStepLoss;
+        progress.checkLoss = checkLoss;
+        progress.requiredLoss = requiredLoss;
+        progress.observedProgressPercentage = observedProgressPercentage;
+        progress.checkedEpoch = stats.epoch;
+
+        throw TrainingRestartRequested(
+            restartCondition,
+            progress,
+            "training loss did not improve enough by restart progress checkpoint: " + restartAttemptProgressToString(progress));
+    }
+
     TrainingObserver& inner;
+    uint64_t attemptNumber = 1;
     FinalEpochLossAccumulator trainingLoss{};
     FinalEpochLossAccumulator validationLoss{};
     FinalEpochLossAccumulator testLoss{};
+    std::vector<RestartConditionAttemptState> restartConditionStates{};
 };
 
 
 }  // namespace
 
-void Trainer::fit(uint32_t epochs) { fit(TrainerFitOptions{epochs}); }
+TrainingRunResult Trainer::fit(uint32_t epochs) { return fit(TrainerFitOptions{epochs}); }
 
-void Trainer::fit(const TrainerFitOptions& options) {
+TrainingRunResult Trainer::fit(const TrainerFitOptions& options) {
     TrainingObserver& observer = effectiveObserver();
-    fitInternal(options, observer, TrainingCancellationToken{});
+    ResultCapturingTrainingObserver capturingObserver(observer);
+    fitWithRestartConditions(options, capturingObserver, TrainingCancellationToken{}, {}, {}, "trainer");
+    capturingObserver.flush();
+    return TrainingRunResult::completedResult("trainer",
+                                              capturingObserver.finalTrainingStats,
+                                              capturingObserver.finalValidationStats,
+                                              capturingObserver.finalTestStats,
+                                              capturingObserver.completionReason,
+                                              capturingObserver.completedEpoch,
+                                              capturingObserver.bestEpoch,
+                                              capturingObserver.bestScore);
 }
 
 void Trainer::fitInternal(const TrainerFitOptions& options,
                           TrainingObserver& observer,
-                          const TrainingCancellationToken& cancellationToken) {
+                          const TrainingCancellationToken& cancellationToken,
+                          const std::vector<TrainingEarlyCompletionPolicy>& additionalEarlyCompletionPolicies) {
     validateFitOptions(options);
+    std::vector<TrainingEarlyCompletionPolicy> combinedEarlyCompletionPolicies = earlyCompletionPolicies;
+    combinedEarlyCompletionPolicies.insert(combinedEarlyCompletionPolicies.end(),
+                                           additionalEarlyCompletionPolicies.begin(),
+                                           additionalEarlyCompletionPolicies.end());
+    validateEarlyCompletionPolicies(combinedEarlyCompletionPolicies);
     cancellationToken.throwIfCancellationRequested();
 
     TrainingRunRequest request;
@@ -132,10 +416,97 @@ void Trainer::fitInternal(const TrainerFitOptions& options,
     request.saveModelDirectory = saveModelDirectory;
     request.saveModelOverwrite = saveModelOverwrite;
     request.saveOptimizerState = saveOptimizerState;
+    request.checkBestModelEveryEpochs = checkBestModelEveryEpochs;
+    request.modelSelectionScore = modelSelectionScore;
+    request.earlyCompletionPolicies = std::move(combinedEarlyCompletionPolicies);
     request.cancellationToken = cancellationToken;
     request.executionMode = TrainingRunExecutionMode::FIT;
+    request.previousPlacedNetwork = placedNetworkAfterLastFit;
+    request.completedPlacedNetwork = &placedNetworkAfterLastFit;
 
     executeRequest(request, observer);
+}
+
+
+void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
+                                       TrainingObserver& observer,
+                                       const TrainingCancellationToken& cancellationToken,
+                                       const std::vector<TrainingRestartCondition>& additionalRestartConditions,
+                                       const std::vector<TrainingEarlyCompletionPolicy>& additionalEarlyCompletionPolicies,
+                                       const std::string& runNameForMessages) {
+    std::vector<TrainingRestartCondition> combinedConditions = restartConditions;
+    combinedConditions.insert(combinedConditions.end(), additionalRestartConditions.begin(), additionalRestartConditions.end());
+    validateRestartConditions(combinedConditions);
+
+    struct RestartConditionRunState {
+        const TrainingRestartCondition* condition = nullptr;
+        std::vector<RestartAttemptProgress> failedAttempts{};
+    };
+
+    std::vector<RestartConditionRunState> conditionStates;
+    conditionStates.reserve(combinedConditions.size());
+    for (const TrainingRestartCondition& condition : combinedConditions) {
+        if (options.epochs >= condition.progressCheckEpochs) {
+            conditionStates.push_back(RestartConditionRunState{&condition});
+        }
+    }
+
+    if (conditionStates.empty()) {
+        fitInternal(options, observer, cancellationToken, additionalEarlyCompletionPolicies);
+        return;
+    }
+
+    auto findConditionState = [&](const TrainingRestartCondition* condition) -> RestartConditionRunState* {
+        for (RestartConditionRunState& state : conditionStates) {
+            if (state.condition == condition) {
+                return &state;
+            }
+        }
+        return nullptr;
+    };
+
+    auto activeConditions = [&]() {
+        std::vector<const TrainingRestartCondition*> active;
+        active.reserve(conditionStates.size());
+        for (const RestartConditionRunState& state : conditionStates) {
+            if (state.condition != nullptr) {
+                active.push_back(state.condition);
+            }
+        }
+        return active;
+    };
+
+    for (uint64_t attempt = 1;; ++attempt) {
+        cancellationToken.throwIfCancellationRequested();
+        Trainer attemptTrainer = *this;
+        attemptTrainer.restartConditions.clear();
+        attemptTrainer.runtimeConfig.statsEnabled = true;
+        attemptTrainer.runtimeConfig.scalarTensorsToReport.insert("loss");
+        RestartAttemptObserver attemptObserver(observer, activeConditions(), attempt);
+        try {
+            attemptTrainer.fitInternal(options, attemptObserver, cancellationToken, additionalEarlyCompletionPolicies);
+            placedNetworkAfterLastFit = attemptTrainer.placedNetworkAfterLastFit;
+            attemptObserver.flush();
+            return;
+        } catch (const TrainingRestartRequested& e) {
+            attemptObserver.flush();
+            RestartConditionRunState* state = findConditionState(e.condition());
+            if (state == nullptr || state->condition == nullptr) {
+                throw;
+            }
+
+            state->failedAttempts.push_back(e.progress());
+            if (state->failedAttempts.size() <= state->condition->maxRestarts) {
+                continue;
+            }
+
+            throw TrainingRestartConditionExceeded(
+                restartAttemptsProgressMessage(runNameForMessages, *state->condition, state->failedAttempts));
+        } catch (...) {
+            attemptObserver.flush();
+            throw;
+        }
+    }
 }
 
 void Trainer::executeRequest(const TrainingRunRequest& request, TrainingObserver& observer) {
@@ -151,13 +522,31 @@ void Trainer::executeRequest(const TrainingRunRequest& request, TrainingObserver
 TrainingRunResult Trainer::fitTrainingRun(std::string runName,
                                           const TrainerFitOptions& options,
                                           TrainingObserver& observer,
-                                          const TrainingCancellationToken& cancellationToken) {
+                                          const TrainingCancellationToken& cancellationToken,
+                                          const std::vector<TrainingRestartCondition>& additionalRestartConditions,
+                                          const std::vector<TrainingEarlyCompletionPolicy>& additionalEarlyCompletionPolicies) {
     ResultCapturingTrainingObserver capturingObserver(observer);
     try {
-        fitInternal(options, capturingObserver, cancellationToken);
+        fitWithRestartConditions(options, capturingObserver, cancellationToken, additionalRestartConditions, additionalEarlyCompletionPolicies, runName);
         capturingObserver.flush();
-        return TrainingRunResult::completedResult(
-            std::move(runName), capturingObserver.finalTrainingStats, capturingObserver.finalValidationStats, capturingObserver.finalTestStats);
+        return TrainingRunResult::completedResult(std::move(runName),
+                                                  capturingObserver.finalTrainingStats,
+                                                  capturingObserver.finalValidationStats,
+                                                  capturingObserver.finalTestStats,
+                                                  capturingObserver.completionReason,
+                                                  capturingObserver.completedEpoch,
+                                                  capturingObserver.bestEpoch,
+                                                  capturingObserver.bestScore);
+    } catch (const TrainingRestartConditionExceeded& e) {
+        capturingObserver.flush();
+        TrainingRunResult result;
+        result.runName = std::move(runName);
+        result.status = TrainingRunStatus::FAILED;
+        result.finalTrainingStats = capturingObserver.finalTrainingStats;
+        result.finalValidationStats = capturingObserver.finalValidationStats;
+        result.finalTestStats = capturingObserver.finalTestStats;
+        result.exception = TrainingRunExceptionSummary{"TrainingRestartConditionExceeded", e.what()};
+        return result;
     } catch (...) {
         capturingObserver.flush();
         return TrainingRunResult::fromException(
@@ -197,6 +586,7 @@ TrainingRunResult Trainer::evaluateTrainingRun(std::string runName,
     request.runtime = runtimeConfig;
     request.runtime.statsEnabled = true;
     request.runtime.scalarTensorsToReport.insert("loss");
+    request.checkBestModelEveryEpochs = 1;
     request.epochs = 1;
     request.cancellationToken = cancellationToken;
     request.executionMode = TrainingRunExecutionMode::EVALUATE;
@@ -255,6 +645,31 @@ void Trainer::validateFitOptions(const TrainerFitOptions& options) const {
     }
     if (options.epochs == 0) {
         throw std::runtime_error("Trainer::fit epochs must be >= 1.");
+    }
+    if (checkBestModelEveryEpochs == 0) {
+        throw std::runtime_error("Trainer::fit check_best_model_every_epochs must be >= 1.");
+    }
+}
+
+
+void Trainer::validateRestartConditions(const std::vector<TrainingRestartCondition>& conditions) const {
+    for (size_t i = 0; i < conditions.size(); ++i) {
+        const TrainingRestartCondition& condition = conditions[i];
+        if (condition.progressCheckEpochs == 0) {
+            throw std::runtime_error("Trainer restart_condition at index " + std::to_string(i) + " must have progress_check_epochs >= 1.");
+        }
+        if (!std::isfinite(condition.progressPercentage) || condition.progressPercentage < 0.0 || condition.progressPercentage > 100.0) {
+            throw std::runtime_error("Trainer restart_condition at index " + std::to_string(i) + " must have progress_percentage in [0, 100].");
+        }
+    }
+}
+
+void Trainer::validateEarlyCompletionPolicies(const std::vector<TrainingEarlyCompletionPolicy>& policies) const {
+    for (size_t i = 0; i < policies.size(); ++i) {
+        if (!policies[i].completionCondition) {
+            throw std::runtime_error("Trainer early_completion_policy at index " + std::to_string(i) +
+                                     " must have a completion_condition.");
+        }
     }
 }
 

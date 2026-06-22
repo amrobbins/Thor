@@ -24,6 +24,8 @@
 #include <vector>
 #include <sstream>
 #include <stdexcept>
+#include <iomanip>
+#include <limits>
 #include <thread>
 #include <utility>
 
@@ -292,11 +294,15 @@ const TrainingEnsembleResult& TrainingRunsResult::ensemble(std::string_view ense
 TrainingRuns::TrainingRuns(std::vector<TrainingRunsSpec> runs,
                            TrainingRunsFailurePolicy failurePolicy,
                            double maxSummaryLogsPerSecond,
-                           std::optional<size_t> maxParallelRuns)
+                           std::optional<size_t> maxParallelRuns,
+                           std::vector<TrainingRunsRestartPolicy> restartConditions,
+                           std::vector<TrainingRunsEarlyCompletionRule> earlyCompletionRules)
     : runs(std::move(runs)),
       failurePolicy(failurePolicy),
       maxSummaryLogsPerSecond(maxSummaryLogsPerSecond),
-      maxParallelRuns(maxParallelRuns) {
+      maxParallelRuns(maxParallelRuns),
+      restartConditions(std::move(restartConditions)),
+      earlyCompletionRules(std::move(earlyCompletionRules)) {
     if (!std::isfinite(maxSummaryLogsPerSecond) || maxSummaryLogsPerSecond < 0.0) {
         throw std::runtime_error("TrainingRuns maxSummaryLogsPerSecond must be finite and >= 0.");
     }
@@ -304,6 +310,8 @@ TrainingRuns::TrainingRuns(std::vector<TrainingRunsSpec> runs,
         throw std::runtime_error("TrainingRuns maxParallelRuns must be >= 1 when specified.");
     }
     validateRunSpecs();
+    validateRestartConditions();
+    validateEarlyCompletionRules();
 }
 
 size_t TrainingRuns::getEffectiveMaxParallelRuns() const {
@@ -418,7 +426,12 @@ TrainingRunsResult TrainingRuns::fit(const TrainerFitOptions& options, const Tra
 
             try {
                 TrainingStatsSinkObserver observer(statsReporter, runs[i].runName);
-                result = runs[i].trainer->fitTrainingRun(runs[i].runName, options, observer, cancellationSource.token());
+                result = runs[i].trainer->fitTrainingRun(runs[i].runName,
+                                                          options,
+                                                          observer,
+                                                          cancellationSource.token(),
+                                                          restartConditionsForRun(runs[i]),
+                                                          earlyCompletionPoliciesForRun(runs[i]));
             } catch (...) {
                 result = TrainingRunResult::fromException(runs[i].runName, std::current_exception());
             }
@@ -640,6 +653,119 @@ void TrainingRuns::validateRunSpecs() const {
     }
 }
 
+
+
+void TrainingRuns::validateRestartConditions() const {
+    std::set<std::string> runNames;
+    std::set<std::string> ensembleGroups;
+    for (const TrainingRunsSpec& run : runs) {
+        runNames.insert(run.runName);
+        if (run.ensembleGroup.has_value()) {
+            ensembleGroups.insert(*run.ensembleGroup);
+        }
+    }
+
+    for (size_t i = 0; i < restartConditions.size(); ++i) {
+        const TrainingRunsRestartPolicy& condition = restartConditions[i];
+        const bool hasRunName = condition.runName.has_value();
+        const bool hasEnsembleGroup = condition.ensembleGroup.has_value();
+        if (hasRunName == hasEnsembleGroup) {
+            throw std::runtime_error("TrainingRuns restart_condition at index " + std::to_string(i) +
+                                     " must specify exactly one of run_name or ensemble_group.");
+        }
+        if (condition.progressCheckEpochs == 0) {
+            throw std::runtime_error("TrainingRuns restart_condition at index " + std::to_string(i) +
+                                     " must have progress_check_epochs >= 1.");
+        }
+        if (!std::isfinite(condition.progressPercentage) || condition.progressPercentage < 0.0 || condition.progressPercentage > 100.0) {
+            throw std::runtime_error("TrainingRuns restart_condition at index " + std::to_string(i) +
+                                     " must have progress_percentage in [0, 100].");
+        }
+
+        if (hasRunName) {
+            if (condition.runName->empty()) {
+                throw std::runtime_error("TrainingRuns restart_condition at index " + std::to_string(i) + " has an empty run_name.");
+            }
+            if (runNames.count(*condition.runName) == 0) {
+                throw std::runtime_error("TrainingRuns restart_condition targets unknown run_name '" + *condition.runName + "'.");
+            }
+            continue;
+        }
+
+        if (condition.ensembleGroup->empty()) {
+            throw std::runtime_error("TrainingRuns restart_condition at index " + std::to_string(i) + " has an empty ensemble_group.");
+        }
+        if (ensembleGroups.count(*condition.ensembleGroup) == 0) {
+            throw std::runtime_error("TrainingRuns restart_condition targets unknown ensemble_group '" + *condition.ensembleGroup + "'.");
+        }
+    }
+}
+
+std::vector<TrainingRestartCondition> TrainingRuns::restartConditionsForRun(const TrainingRunsSpec& run) const {
+    std::vector<TrainingRestartCondition> matches;
+    for (const TrainingRunsRestartPolicy& condition : restartConditions) {
+        if (condition.runName.has_value() && *condition.runName == run.runName) {
+            matches.push_back(condition.toRestartCondition());
+        } else if (condition.ensembleGroup.has_value() && run.ensembleGroup.has_value() && *condition.ensembleGroup == *run.ensembleGroup) {
+            matches.push_back(condition.toRestartCondition());
+        }
+    }
+    return matches;
+}
+
+void TrainingRuns::validateEarlyCompletionRules() const {
+    std::set<std::string> runNames;
+    std::set<std::string> ensembleGroups;
+    for (const TrainingRunsSpec& run : runs) {
+        runNames.insert(run.runName);
+        if (run.ensembleGroup.has_value()) {
+            ensembleGroups.insert(*run.ensembleGroup);
+        }
+    }
+
+    for (size_t i = 0; i < earlyCompletionRules.size(); ++i) {
+        const TrainingRunsEarlyCompletionRule& rule = earlyCompletionRules[i];
+        const bool hasRunName = rule.runName.has_value();
+        const bool hasEnsembleGroup = rule.ensembleGroup.has_value();
+        if (hasRunName == hasEnsembleGroup) {
+            throw std::runtime_error("TrainingRuns early_completion_rule at index " + std::to_string(i) +
+                                     " must specify exactly one of run_name or ensemble_group.");
+        }
+        if (!rule.completionCondition) {
+            throw std::runtime_error("TrainingRuns early_completion_rule at index " + std::to_string(i) +
+                                     " must have a completion_condition.");
+        }
+
+        if (hasRunName) {
+            if (rule.runName->empty()) {
+                throw std::runtime_error("TrainingRuns early_completion_rule at index " + std::to_string(i) + " has an empty run_name.");
+            }
+            if (runNames.count(*rule.runName) == 0) {
+                throw std::runtime_error("TrainingRuns early_completion_rule targets unknown run_name '" + *rule.runName + "'.");
+            }
+            continue;
+        }
+
+        if (rule.ensembleGroup->empty()) {
+            throw std::runtime_error("TrainingRuns early_completion_rule at index " + std::to_string(i) + " has an empty ensemble_group.");
+        }
+        if (ensembleGroups.count(*rule.ensembleGroup) == 0) {
+            throw std::runtime_error("TrainingRuns early_completion_rule targets unknown ensemble_group '" + *rule.ensembleGroup + "'.");
+        }
+    }
+}
+
+std::vector<TrainingEarlyCompletionPolicy> TrainingRuns::earlyCompletionPoliciesForRun(const TrainingRunsSpec& run) const {
+    std::vector<TrainingEarlyCompletionPolicy> matches;
+    for (const TrainingRunsEarlyCompletionRule& rule : earlyCompletionRules) {
+        if (rule.runName.has_value() && *rule.runName == run.runName) {
+            matches.push_back(rule.toEarlyCompletionPolicy());
+        } else if (rule.ensembleGroup.has_value() && run.ensembleGroup.has_value() && *rule.ensembleGroup == *run.ensembleGroup) {
+            matches.push_back(rule.toEarlyCompletionPolicy());
+        }
+    }
+    return matches;
+}
 
 std::vector<TrainingEnsembleResult> TrainingRuns::buildEnsembleResults(const std::vector<TrainingRunResult>& results) const {
     std::map<std::string, TrainingEnsembleResult> byGroup = buildEnsembleResultsByGroup(results);

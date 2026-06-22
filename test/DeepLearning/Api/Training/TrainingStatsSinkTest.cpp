@@ -302,6 +302,37 @@ TEST(TrainingRunsStatsReporter, TerminalRunResultsReportStatusAndPhaseLosses) {
     EXPECT_TRUE(hasLineWithAll(output, {"INFO runs[failed_fold]:", "status=failed", "result=failed", "message=\"boom\""})) << output;
 }
 
+
+TEST(TrainingRunsStatsReporter, EarlyCompletedRunResultReportsCompletionMetadata) {
+    std::FILE* out = std::tmpfile();
+    TrainingRunsStatsReporter reporter(out, LineStatsColorMode::NEVER, 0.0);
+    reporter.configureRun("early_fold", TrainingRunsStatsReporter::RunConfig{0.0, true});
+
+    TrainingRunResult result = TrainingRunResult::completedResult(
+        "early_fold",
+        makeStats(TrainingEventPhase::TRAIN, 0.50),
+        makeStats(TrainingEventPhase::VALIDATE, 0.40),
+        {},
+        TrainingRunCompletionReason::EARLY_COMPLETED,
+        2,
+        1,
+        0.125);
+
+    reporter.markRunStarting("early_fold");
+    reporter.markRunFinished(result);
+    reporter.close();
+
+    const std::string output = readAndCloseFile(out);
+    EXPECT_TRUE(hasLineWithAll(output,
+                               {"INFO runs[early_fold]:",
+                                "status=completed",
+                                "result=early_completed",
+                                "completed_epoch=2",
+                                "best_epoch=1",
+                                "best_score=0.125000"}))
+        << output;
+}
+
 TEST(TrainingRunsStatsReporter, FinalReportIncludesStatusCountsAndAvailablePhaseMetrics) {
     std::FILE* out = std::tmpfile();
     TrainingRunsStatsReporter reporter(out, LineStatsColorMode::NEVER, 0.0);

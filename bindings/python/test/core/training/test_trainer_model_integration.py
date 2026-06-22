@@ -8,8 +8,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 import thor
+from integration_flags import integration_flag_enabled, integration_skip_reason
 
-RUN_TRAINING_INTEGRATION = os.environ.get("THOR_RUN_TRAINING_INTEGRATION") == "1"
+RUN_TRAINING_INTEGRATION = integration_flag_enabled("THOR_RUN_TRAINING_INTEGRATION")
 DATA_DIR = Path(os.environ.get("THOR_TRAINING_DATA_DIR", "/tmp/thor_training_data"))
 IRIS_URL = "https://archive.ics.uci.edu/ml/machine-learning-databases/iris/iris.data"
 IRIS_PATH = DATA_DIR / "iris.data"
@@ -27,7 +28,10 @@ pytestmark = [
     pytest.mark.training_integration,
     pytest.mark.skipif(
         not RUN_TRAINING_INTEGRATION,
-        reason="set THOR_RUN_TRAINING_INTEGRATION=1 to run opt-in model training integration tests",
+        reason=integration_skip_reason(
+            "THOR_RUN_TRAINING_INTEGRATION",
+            description="opt-in model training integration tests",
+        ),
     ),
 ]
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -397,6 +401,30 @@ def _opposing_phase_one_batch_loader(*, batch_size: int = 1, dtype=np.float32):
     )
 
 
+def _opposing_phase_two_train_batch_loader(*, dtype=np.float32):
+    x_train = np.ones((2, 1), dtype=np.float32)
+    y_train = np.ones((2, 1), dtype=np.float32)
+    x_validate = np.ones((1, 1), dtype=np.float32)
+    y_validate = np.ones((1, 1), dtype=np.float32)
+    loader_cls = thor.training.NumpyFloat16BatchLoader if dtype == np.float16 else thor.training.NumpyFloat32BatchLoader
+    return loader_cls(
+        np.ascontiguousarray(x_train, dtype=dtype),
+        np.ascontiguousarray(y_train, dtype=dtype),
+        np.ascontiguousarray(x_validate, dtype=dtype),
+        np.ascontiguousarray(y_validate, dtype=dtype),
+        batch_size=1,
+        example_input_name="examples",
+        label_input_name="labels",
+        dataset_name="opposing_phase_two_train_batches",
+    )
+
+
+def _negate_no_parameter_build(context: thor.layers.CustomLayerBuildContext) -> dict[str, thor.physical.Expression]:
+    return {
+        "feature_output": context.input("feature_input") * -1.0,
+    }
+
+
 def _build_opposing_phase_regressor(
     name: str,
     *,
@@ -410,23 +438,20 @@ def _build_opposing_phase_regressor(
     labels = thor.layers.NetworkInput(network, "labels", [1], thor.DataType.fp32)
 
     zero = thor.initializers.UniformRandom(0.0, 0.0)
-    negative_one = thor.initializers.UniformRandom(-1.0, -1.0)
-
     daily = thor.layers.FullyConnected(
         network,
         examples.get_feature_output(),
         1,
-        False,
+        True,
         activation=None,
         weights_initializer=zero,
+        biases_initializer=zero,
     )
-    aggregate = thor.layers.FullyConnected(
+    aggregate = thor.layers.CustomLayer(
         network,
         daily.get_feature_output(),
-        1,
-        False,
-        activation=None,
-        weights_initializer=negative_one,
+        output_names=["feature_output"],
+        build=_negate_no_parameter_build,
     )
 
     daily_loss = thor.losses.MSE(
@@ -437,7 +462,7 @@ def _build_opposing_phase_regressor(
     )
     aggregate_loss = thor.losses.MSE(
         network,
-        aggregate.get_feature_output(),
+        aggregate.get_output("feature_output"),
         labels.get_feature_output(),
         thor.DataType.fp32,
     )
@@ -450,7 +475,7 @@ def _build_opposing_phase_regressor(
     thor.layers.NetworkOutput(network, "daily_loss", daily_loss_tensor, thor.DataType.fp32)
     thor.layers.NetworkOutput(network, "aggregate_loss", aggregate_loss_tensor, thor.DataType.fp32)
     thor.layers.NetworkOutput(network, "daily_prediction", daily.get_feature_output(), thor.DataType.fp32)
-    thor.layers.NetworkOutput(network, "aggregate_prediction", aggregate.get_feature_output(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "aggregate_prediction", aggregate.get_output("feature_output"), thor.DataType.fp32)
 
     daily_roots = [daily_loss_tensor] if daily_loss_active else []
     aggregate_roots = [aggregate_loss_tensor] if aggregate_loss_active else []
@@ -463,7 +488,7 @@ def _build_opposing_phase_regressor(
     aggregate_phase = thor.training.TrainingPhase(
         "aggregate_prediction",
         loss_roots=aggregate_roots,
-        outputs={"aggregate_prediction": aggregate.get_feature_output()},
+        outputs={"aggregate_prediction": aggregate.get_output("feature_output")},
         depends_on=["daily_prediction"],
         enabled=aggregate_enabled,
     )
@@ -472,7 +497,6 @@ def _build_opposing_phase_regressor(
         "opposing_phase_step",
         phases=[daily_phase, aggregate_phase],
         optimizer=optimizer,
-        update_parameters=[daily.get_parameter_reference("weights")],
     )
     program = thor.training.TrainingProgram([step])
     return network, program
@@ -563,8 +587,11 @@ def _build_iris_two_layer_classifier(
     if per_layer_optimizers:
         hidden_weights_optimizer = thor.optimizers.AdamW(alpha=0.003, weight_decay=0.0)
         hidden_biases_optimizer = thor.optimizers.AdamW(alpha=0.003, weight_decay=0.0)
-        output_weights_optimizer = thor.optimizers.Sgd(initial_learning_rate=0.01, momentum=0.9)
-        output_biases_optimizer = thor.optimizers.Sgd(initial_learning_rate=0.01, momentum=0.9)
+        # Keep this FP16 smoke test focused on per-parameter optimizer plumbing
+        # rather than optimizer-family mixing. The deeper FP32 integration test
+        # below still covers mixed AdamW/SGD per-layer overrides.
+        output_weights_optimizer = thor.optimizers.AdamW(alpha=0.003, weight_decay=0.0)
+        output_biases_optimizer = thor.optimizers.AdamW(alpha=0.003, weight_decay=0.0)
     else:
         hidden_weights_optimizer = None
         hidden_biases_optimizer = None
@@ -882,7 +909,12 @@ def test_debug_synchronous_phase_disabled_aggregate_loss_does_not_backpropagate(
         aggregate_loss_active=True,
         primary_loss_name="daily_loss",
     )
-    loader = _opposing_phase_one_batch_loader(batch_size=1, dtype=np.float32)
+
+    # Use two identical train batches in one epoch so the second train line is
+    # the post-update probe.  Do not use a second epoch here: these phase-root
+    # tests should isolate whether the disabled aggregate loss seeds backward,
+    # not loss-layer label lifetime across epochs.
+    loader = _opposing_phase_two_train_batch_loader(dtype=np.float32)
 
     trainer = thor.training.Trainer(
         network,
@@ -903,17 +935,24 @@ def test_debug_synchronous_phase_disabled_aggregate_loss_does_not_backpropagate(
     validate_aggregate = _named_scalar_losses(captured_text, "validate", "aggregate_loss")
 
     assert program.get_step(0).get_active_phase_names() == ["daily_prediction"]
-    assert len(_phase_losses(stats, "train")) == 1
-    assert train_daily == pytest.approx([1.0], rel=2e-3, abs=2e-3)
-    assert train_aggregate == pytest.approx([1.0], rel=2e-3, abs=2e-3)
+    assert len(_phase_losses(stats, "train")) == 2
+    assert len(train_daily) == 2
+    assert len(train_aggregate) == 2
     assert len(validate_daily) == 1
     assert len(validate_aggregate) == 1
 
-    # The daily and aggregate losses have exactly opposing gradients at the zero-initialized
-    # point.  If the disabled aggregate phase leaked into backward, the first update would
-    # cancel and both validation losses would remain near 1.0.
-    assert validate_daily[0] < 0.95, (validate_daily, validate_aggregate)
-    assert validate_aggregate[0] > 1.05, (validate_daily, validate_aggregate)
+    assert train_daily[0] == pytest.approx(1.0, rel=2e-3, abs=2e-3)
+    assert train_aggregate[0] == pytest.approx(1.0, rel=2e-3, abs=2e-3)
+
+    # At zero initialization, daily_loss and aggregate_loss have equal and
+    # opposite gradients through the shared daily predictor.  The aggregate
+    # phase is disabled, so aggregate_loss may be reported but must not seed
+    # backward.  A daily-only SGD update should improve the next daily loss and
+    # worsen the next aggregate loss.  If the disabled aggregate phase leaked
+    # into backward, the opposing gradients would cancel and both second-batch
+    # losses would stay near 1.0.
+    assert train_daily[1] < 0.95, (train_daily, train_aggregate, validate_daily, validate_aggregate)
+    assert train_aggregate[1] > 1.05, (train_daily, train_aggregate, validate_daily, validate_aggregate)
 
 
 def test_debug_synchronous_aggregate_phase_backpropagates_through_forward_only_daily_phase(capfd):
@@ -924,7 +963,7 @@ def test_debug_synchronous_aggregate_phase_backpropagates_through_forward_only_d
         aggregate_loss_active=True,
         primary_loss_name="aggregate_loss",
     )
-    loader = _opposing_phase_one_batch_loader(batch_size=1, dtype=np.float32)
+    loader = _opposing_phase_two_train_batch_loader(dtype=np.float32)
 
     trainer = thor.training.Trainer(
         network,
@@ -945,17 +984,19 @@ def test_debug_synchronous_aggregate_phase_backpropagates_through_forward_only_d
     validate_aggregate = _named_scalar_losses(captured_text, "validate", "aggregate_loss")
 
     assert program.get_step(0).get_active_phase_names() == ["daily_prediction", "aggregate_prediction"]
-    assert len(_phase_losses(stats, "train")) == 1
-    assert train_daily == pytest.approx([1.0], rel=2e-3, abs=2e-3)
-    assert train_aggregate == pytest.approx([1.0], rel=2e-3, abs=2e-3)
+    assert len(_phase_losses(stats, "train")) == 2
+    assert train_daily[0] == pytest.approx(1.0, rel=2e-3, abs=2e-3)
+    assert train_aggregate[0] == pytest.approx(1.0, rel=2e-3, abs=2e-3)
     assert len(validate_daily) == 1
     assert len(validate_aggregate) == 1
 
     # Only the aggregate loss is active, and the aggregate head is a fixed -1 projection
     # over the daily prediction.  The aggregate loss can improve only if its gradient
     # propagates back through the enabled forward-only daily phase into the daily weight.
-    assert validate_aggregate[0] < 0.95, (validate_daily, validate_aggregate)
-    assert validate_daily[0] > 1.05, (validate_daily, validate_aggregate)
+    # Use the next training batch as the post-update observation point, matching the
+    # deterministic SGD integration test above.
+    assert train_aggregate[1] < 0.95, (train_daily, train_aggregate, validate_daily, validate_aggregate)
+    assert train_daily[1] > 1.05, (train_daily, train_aggregate, validate_daily, validate_aggregate)
 
 
 def test_queued_phase_disabled_aggregate_loss_does_not_backpropagate(capfd):
@@ -966,7 +1007,7 @@ def test_queued_phase_disabled_aggregate_loss_does_not_backpropagate(capfd):
         aggregate_loss_active=True,
         primary_loss_name="daily_loss",
     )
-    loader = _opposing_phase_one_batch_loader(batch_size=1, dtype=np.float32)
+    loader = _opposing_phase_two_train_batch_loader(dtype=np.float32)
 
     trainer = thor.training.Trainer(
         network,
@@ -987,16 +1028,16 @@ def test_queued_phase_disabled_aggregate_loss_does_not_backpropagate(capfd):
     validate_aggregate = _named_scalar_losses(captured_text, "validate", "aggregate_loss")
 
     assert program.get_step(0).get_active_phase_names() == ["daily_prediction"]
-    assert len(_phase_losses(stats, "train")) == 1
-    assert train_daily == pytest.approx([1.0], rel=2e-3, abs=2e-3)
-    assert train_aggregate == pytest.approx([1.0], rel=2e-3, abs=2e-3)
+    assert len(_phase_losses(stats, "train")) == 2
+    assert train_daily[0] == pytest.approx(1.0, rel=2e-3, abs=2e-3)
+    assert train_aggregate[0] == pytest.approx(1.0, rel=2e-3, abs=2e-3)
     assert len(validate_daily) == 1
     assert len(validate_aggregate) == 1
 
     # This is the same opposing-gradient leak detector as the debug-synchronous test,
     # but it exercises the native queued runner's StepExecutable -> submitBatch path.
-    assert validate_daily[0] < 0.95, (validate_daily, validate_aggregate)
-    assert validate_aggregate[0] > 1.05, (validate_daily, validate_aggregate)
+    assert train_daily[1] < 0.95, (train_daily, train_aggregate, validate_daily, validate_aggregate)
+    assert train_aggregate[1] > 1.05, (train_daily, train_aggregate, validate_daily, validate_aggregate)
 
 
 def test_queued_aggregate_phase_backpropagates_through_forward_only_daily_phase(capfd):
@@ -1007,7 +1048,7 @@ def test_queued_aggregate_phase_backpropagates_through_forward_only_daily_phase(
         aggregate_loss_active=True,
         primary_loss_name="aggregate_loss",
     )
-    loader = _opposing_phase_one_batch_loader(batch_size=1, dtype=np.float32)
+    loader = _opposing_phase_two_train_batch_loader(dtype=np.float32)
 
     trainer = thor.training.Trainer(
         network,
@@ -1028,16 +1069,72 @@ def test_queued_aggregate_phase_backpropagates_through_forward_only_daily_phase(
     validate_aggregate = _named_scalar_losses(captured_text, "validate", "aggregate_loss")
 
     assert program.get_step(0).get_active_phase_names() == ["daily_prediction", "aggregate_prediction"]
-    assert len(_phase_losses(stats, "train")) == 1
-    assert train_daily == pytest.approx([1.0], rel=2e-3, abs=2e-3)
-    assert train_aggregate == pytest.approx([1.0], rel=2e-3, abs=2e-3)
+    assert len(_phase_losses(stats, "train")) == 2
+    assert train_daily[0] == pytest.approx(1.0, rel=2e-3, abs=2e-3)
+    assert train_aggregate[0] == pytest.approx(1.0, rel=2e-3, abs=2e-3)
     assert len(validate_daily) == 1
     assert len(validate_aggregate) == 1
 
     # The queued runner must also allow the enabled aggregate loss to seed backward
     # through the daily predictor when the daily phase is forward-only.
-    assert validate_aggregate[0] < 0.95, (validate_daily, validate_aggregate)
-    assert validate_daily[0] > 1.05, (validate_daily, validate_aggregate)
+    assert train_aggregate[1] < 0.95, (train_daily, train_aggregate, validate_daily, validate_aggregate)
+    assert train_daily[1] > 1.05, (train_daily, train_aggregate, validate_daily, validate_aggregate)
+
+
+def test_same_trainer_restart_enabled_successful_fit_preserves_state_for_next_fit(capfd):
+    network, program = _build_opposing_phase_regressor(
+        "python_integration_same_trainer_restart_success_preserves_state",
+        aggregate_enabled=False,
+        daily_loss_active=True,
+        aggregate_loss_active=True,
+        primary_loss_name="daily_loss",
+    )
+    loader = _opposing_phase_one_batch_loader(batch_size=1, dtype=np.float32)
+
+    trainer = thor.training.Trainer(
+        network,
+        loader,
+        training_program=program,
+        debug_synchronous=True,
+        stats=True,
+        stats_interval_s=0.0,
+        max_in_flight_batches=1,
+        scalar_tensors_to_report=["loss", "daily_loss", "aggregate_loss"],
+        stats_color="never",
+        restart_conditions=[
+            thor.training.RestartCondition(
+                progress_check_epochs=1,
+                progress_percentage=0.0,
+                max_restarts=0,
+            )
+        ],
+    )
+
+    first_text, first_stats = _fit_and_capture_text_and_stats(trainer, capfd, epochs=1)
+    first_train_daily = _named_scalar_losses(first_text, "train", "daily_loss")
+    first_train_aggregate = _named_scalar_losses(first_text, "train", "aggregate_loss")
+    first_validate_daily = _named_scalar_losses(first_text, "validate", "daily_loss")
+    first_validate_aggregate = _named_scalar_losses(first_text, "validate", "aggregate_loss")
+
+    assert program.get_step(0).get_active_phase_names() == ["daily_prediction"]
+    assert len(_phase_losses(first_stats, "train")) == 1
+    assert first_train_daily == pytest.approx([1.0], rel=2e-3, abs=2e-3)
+    assert first_train_aggregate == pytest.approx([1.0], rel=2e-3, abs=2e-3)
+    assert first_validate_daily == pytest.approx([0.0], rel=2e-3, abs=2e-3)
+    assert first_validate_aggregate == pytest.approx([4.0], rel=2e-3, abs=2e-3)
+
+    second_text, second_stats = _fit_and_capture_text_and_stats(trainer, capfd, epochs=1)
+    second_train_daily = _named_scalar_losses(second_text, "train", "daily_loss")
+    second_train_aggregate = _named_scalar_losses(second_text, "train", "aggregate_loss")
+
+    assert len(_phase_losses(second_stats, "train")) == 1
+
+    # Restart-enabled fit() executes the successful attempt on an internal
+    # attemptTrainer copy so failed attempts can restart from a fresh baseline.
+    # A successful attempt must still publish its completed placed state back to
+    # the user-visible Trainer so a later fit() continues from trained weights.
+    assert second_train_daily[0] < 0.05, (second_train_daily, second_train_aggregate)
+    assert second_train_aggregate[0] > 3.5, (second_train_daily, second_train_aggregate)
 
 
 def test_same_trainer_fit_recompiles_after_phase_enable_mutation(capfd):
@@ -1048,7 +1145,7 @@ def test_same_trainer_fit_recompiles_after_phase_enable_mutation(capfd):
         aggregate_loss_active=True,
         primary_loss_name="daily_loss",
     )
-    loader = _opposing_phase_one_batch_loader(batch_size=1, dtype=np.float32)
+    loader = _opposing_phase_two_train_batch_loader(dtype=np.float32)
 
     trainer = thor.training.Trainer(
         network,
@@ -1063,13 +1160,17 @@ def test_same_trainer_fit_recompiles_after_phase_enable_mutation(capfd):
     )
 
     first_text, first_stats = _fit_and_capture_text_and_stats(trainer, capfd, epochs=1)
+    first_train_daily = _named_scalar_losses(first_text, "train", "daily_loss")
+    first_train_aggregate = _named_scalar_losses(first_text, "train", "aggregate_loss")
     first_validate_daily = _named_scalar_losses(first_text, "validate", "daily_loss")
     first_validate_aggregate = _named_scalar_losses(first_text, "validate", "aggregate_loss")
 
     assert program.get_step(0).get_active_phase_names() == ["daily_prediction"]
-    assert len(_phase_losses(first_stats, "train")) == 1
-    assert first_validate_daily[0] < 0.95, (first_validate_daily, first_validate_aggregate)
-    assert first_validate_aggregate[0] > 1.05, (first_validate_daily, first_validate_aggregate)
+    assert len(_phase_losses(first_stats, "train")) == 2
+    assert first_train_daily == pytest.approx([1.0, 0.0], rel=2e-3, abs=2e-3)
+    assert first_train_aggregate == pytest.approx([1.0, 4.0], rel=2e-3, abs=2e-3)
+    assert first_validate_daily == pytest.approx([0.0], rel=2e-3, abs=2e-3)
+    assert first_validate_aggregate == pytest.approx([4.0], rel=2e-3, abs=2e-3)
 
     program.get_step(0).get_phases()[1].enable()
     assert program.get_step(0).get_active_phase_names() == ["daily_prediction", "aggregate_prediction"]
@@ -1080,22 +1181,42 @@ def test_same_trainer_fit_recompiles_after_phase_enable_mutation(capfd):
     second_validate_daily = _named_scalar_losses(second_text, "validate", "daily_loss")
     second_validate_aggregate = _named_scalar_losses(second_text, "validate", "aggregate_loss")
 
-    assert len(_phase_losses(second_stats, "train")) == 1
-    # The second fit must start from the parameters produced by the daily-only fit.
-    # If the trainer rebuilt the model, these would both be back at 1.0.
-    assert second_train_daily[0] == pytest.approx(first_validate_daily[0], rel=5e-3, abs=5e-3)
-    assert second_train_aggregate[0] == pytest.approx(first_validate_aggregate[0], rel=5e-3, abs=5e-3)
+    assert len(_phase_losses(second_stats, "train")) == 2
+    assert len(second_train_daily) == 2
+    assert len(second_train_aggregate) == 2
+    assert len(second_validate_daily) == 1
+    assert len(second_validate_aggregate) == 1
 
-    # With both opposing losses active, the next update is materially different from
-    # the daily-only update and drives the tiny one-weight model back toward zero.
-    # That proves the second fit compiled from the newly enabled aggregate phase.
-    assert second_validate_daily[0] > first_validate_daily[0] + 0.25, (
-        first_validate_daily,
+    # The second fit must start from the parameters produced by the daily-only
+    # fit.  If the trainer rebuilt the model without copying trained state, the
+    # first second-fit train line would be back at the zero-init [1.0, 1.0]
+    # baseline instead of the post-daily-only [0.0, 4.0] state.
+    assert second_train_daily[0] < 0.05, (
+        second_train_daily,
+        second_train_aggregate,
         second_validate_daily,
         second_validate_aggregate,
     )
-    assert second_validate_aggregate[0] < first_validate_aggregate[0] - 0.25, (
-        first_validate_aggregate,
+    assert second_train_aggregate[0] > 3.5, (
+        second_train_daily,
+        second_train_aggregate,
+        second_validate_daily,
+        second_validate_aggregate,
+    )
+
+    # With both opposing losses active, the next train batch must move in the
+    # opposite direction from the daily-only update.  That proves the same
+    # Trainer recompiled from the newly enabled aggregate phase instead of
+    # reusing the daily-only plan.
+    assert second_train_daily[1] > 3.5, (
+        second_train_daily,
+        second_train_aggregate,
+        second_validate_daily,
+        second_validate_aggregate,
+    )
+    assert second_train_aggregate[1] < 0.05, (
+        second_train_daily,
+        second_train_aggregate,
         second_validate_daily,
         second_validate_aggregate,
     )

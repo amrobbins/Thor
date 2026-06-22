@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <algorithm>
 #include <optional>
+#include <set>
 #include <chrono>
 
 namespace ThorImplementation {
@@ -25,14 +26,7 @@ void StampedNetwork::setActiveTrainingLossRoots(const std::vector<Thor::Tensor>&
         THOR_THROW_IF_FALSE(rawLossRoot.isInitialized());
     }
 
-    for (const auto& [apiLayerId, physicalLayer] : apiLayerToPhysicalLayerShared) {
-        (void)apiLayerId;
-        std::shared_ptr<ThorImplementation::Loss> physicalLoss = std::dynamic_pointer_cast<ThorImplementation::Loss>(physicalLayer);
-        if (physicalLoss != nullptr) {
-            physicalLoss->setTrainingActive(false);
-        }
-    }
-
+    std::set<ThorImplementation::Loss*> activePhysicalLosses;
     for (const Thor::Tensor& rawLossRoot : activeRawLossRoots) {
         auto drivingLayerIt = apiTensorToPhysicalDrivingLayerShared.find(rawLossRoot);
         if (drivingLayerIt == apiTensorToPhysicalDrivingLayerShared.end()) {
@@ -45,7 +39,21 @@ void StampedNetwork::setActiveTrainingLossRoots(const std::vector<Thor::Tensor>&
             throw std::runtime_error("Active raw loss tensor with original id " + std::to_string(rawLossRoot.getOriginalId()) +
                                      " is not driven by a physical loss layer.");
         }
-        physicalLoss->setTrainingActive(true);
+        activePhysicalLosses.insert(physicalLoss.get());
+    }
+
+    for (const auto& [apiLayerId, physicalLayer] : apiLayerToPhysicalLayerShared) {
+        (void)apiLayerId;
+        std::shared_ptr<ThorImplementation::Loss> physicalLoss = std::dynamic_pointer_cast<ThorImplementation::Loss>(physicalLayer);
+        if (physicalLoss == nullptr) {
+            continue;
+        }
+
+        const bool active = activePhysicalLosses.count(physicalLoss.get()) != 0;
+        physicalLoss->setTrainingActive(active);
+        if (!active) {
+            physicalLoss->pruneTrainingBackpropPathIfInactive();
+        }
     }
 }
 

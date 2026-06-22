@@ -17,8 +17,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 import thor
+from integration_flags import integration_flag_enabled, integration_skip_reason
 
-RUN_BYTE_LM_INTEGRATION = os.environ.get("THOR_RUN_TRAINING_BYTE_LM_INTEGRATION") == "1"
+RUN_BYTE_LM_INTEGRATION = integration_flag_enabled("THOR_RUN_TRAINING_BYTE_LM_INTEGRATION")
 
 
 def _env_int(name: str, default: int) -> int:
@@ -89,9 +90,9 @@ pytestmark = [
     pytest.mark.byte_lm_integration,
     pytest.mark.skipif(
         not RUN_BYTE_LM_INTEGRATION,
-        reason=(
-            "set THOR_RUN_TRAINING_BYTE_LM_INTEGRATION=1 to run the heavyweight "
-            "FineWeb-Edu byte-level causal LM training test"
+        reason=integration_skip_reason(
+            "THOR_RUN_TRAINING_BYTE_LM_INTEGRATION",
+            description="the heavyweight FineWeb-Edu byte-level causal LM training test",
         ),
     ),
 ]

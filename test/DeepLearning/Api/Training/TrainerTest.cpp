@@ -9,6 +9,8 @@
 #include "gtest/gtest.h"
 
 #include <memory>
+#include <optional>
+#include <string>
 #include <type_traits>
 
 using namespace Thor;
@@ -60,6 +62,16 @@ class CapturingExecutor : public TrainingExecutor {
                                    ? request.trainingProgram->getStep(0).isEnabled()
                                    : false;
         lastCancellationRequested = request.cancellationToken.isCancellationRequested();
+        lastSaveModelDirectory = request.saveModelDirectory;
+        lastSaveModelOverwrite = request.saveModelOverwrite;
+        lastSaveOptimizerState = request.saveOptimizerState;
+        lastCheckBestModelEveryEpochs = request.checkBestModelEveryEpochs;
+        lastModelSelectionScoreIsCustom = request.modelSelectionScore.isCustom();
+        lastModelSelectionScore = request.modelSelectionScore.evaluate(3.0, 7.0, 11);
+        lastEarlyCompletionPolicyCount = request.earlyCompletionPolicies.size();
+        if (!request.earlyCompletionPolicies.empty()) {
+            lastEarlyCompletionDecision = request.earlyCompletionPolicies.front().shouldComplete(10.0, 9.0, 5, 4);
+        }
         calls += 1;
     }
 
@@ -71,6 +83,14 @@ class CapturingExecutor : public TrainingExecutor {
     uint64_t lastTrainingProgramStepCount = 0;
     bool lastFirstStepEnabled = false;
     bool lastCancellationRequested = true;
+    std::optional<std::string> lastSaveModelDirectory{};
+    bool lastSaveModelOverwrite = false;
+    bool lastSaveOptimizerState = true;
+    uint32_t lastCheckBestModelEveryEpochs = 0;
+    bool lastModelSelectionScoreIsCustom = false;
+    std::optional<double> lastModelSelectionScore{};
+    size_t lastEarlyCompletionPolicyCount = 0;
+    bool lastEarlyCompletionDecision = false;
     uint32_t calls = 0;
 };
 
@@ -130,6 +150,130 @@ TEST(Trainer, FitPassesEpochsAsRunParameter) {
     EXPECT_FALSE(executor->lastCancellationRequested);
 }
 
+
+TEST(Trainer, FitPassesBestModelCandidateOptionsAsRunParameters) {
+    auto network = std::make_shared<Network>("trainer-best-candidate-options");
+    auto loader = std::make_shared<FakeLoader>();
+    auto executor = std::make_shared<CapturingExecutor>();
+    auto observer = std::make_shared<NullTrainingObserver>();
+
+    Trainer trainer = Trainer::Builder()
+                          .network(network)
+                          .loader(loader)
+                          .executor(executor)
+                          .observer(observer)
+                          .statsEnabled(false)
+                          .saveModelDirectory("/tmp/thor-best-candidate-options")
+                          .saveModelOverwrite(true)
+                          .saveOptimizerState(false)
+                          .checkBestModelEveryEpochs(3)
+                          .build();
+
+    trainer.fit(5);
+
+    EXPECT_EQ(executor->calls, 1u);
+    ASSERT_TRUE(executor->lastSaveModelDirectory.has_value());
+    EXPECT_EQ(executor->lastSaveModelDirectory.value(), "/tmp/thor-best-candidate-options");
+    EXPECT_TRUE(executor->lastSaveModelOverwrite);
+    EXPECT_FALSE(executor->lastSaveOptimizerState);
+    EXPECT_EQ(executor->lastCheckBestModelEveryEpochs, 3u);
+}
+
+TEST(Trainer, FitPassesCustomModelSelectionScoreAsRunParameter) {
+    auto network = std::make_shared<Network>("trainer-custom-model-selection-score");
+    auto loader = std::make_shared<FakeLoader>();
+    auto executor = std::make_shared<CapturingExecutor>();
+    auto observer = std::make_shared<NullTrainingObserver>();
+
+    TrainingModelSelectionScore score([](std::optional<double> validationLoss, std::optional<double> trainingLoss, uint64_t epoch) {
+        return validationLoss.value_or(0.0) + trainingLoss.value_or(0.0) + static_cast<double>(epoch);
+    });
+
+    Trainer trainer = Trainer::Builder()
+                          .network(network)
+                          .loader(loader)
+                          .executor(executor)
+                          .observer(observer)
+                          .statsEnabled(false)
+                          .modelSelectionScore(score)
+                          .build();
+
+    trainer.fit(5);
+
+    EXPECT_EQ(executor->calls, 1u);
+    EXPECT_TRUE(executor->lastModelSelectionScoreIsCustom);
+    ASSERT_TRUE(executor->lastModelSelectionScore.has_value());
+    EXPECT_EQ(executor->lastModelSelectionScore.value(), 21.0);
+}
+
+TEST(Trainer, DefaultModelSelectionScoreUsesValidationLossWhenPresentOtherwiseTrainingLoss) {
+    TrainingModelSelectionScore score;
+
+    std::optional<double> validationScore = score.evaluate(3.0, 7.0, 11);
+    ASSERT_TRUE(validationScore.has_value());
+    EXPECT_EQ(validationScore.value(), 3.0);
+
+    std::optional<double> trainingScore = score.evaluate(std::nullopt, 7.0, 11);
+    ASSERT_TRUE(trainingScore.has_value());
+    EXPECT_EQ(trainingScore.value(), 7.0);
+
+    EXPECT_FALSE(score.evaluate(std::nullopt, std::nullopt, 11).has_value());
+}
+
+TEST(Trainer, RejectsZeroBestModelCandidateCheckCadence) {
+    auto network = std::make_shared<Network>("trainer-best-candidate-invalid-cadence");
+    auto loader = std::make_shared<FakeLoader>();
+    auto executor = std::make_shared<CapturingExecutor>();
+
+    EXPECT_THROW((Trainer::Builder()
+                      .network(network)
+                      .loader(loader)
+                      .executor(executor)
+                      .checkBestModelEveryEpochs(0)
+                      .build()),
+                 std::runtime_error);
+}
+
+
+TEST(Trainer, FitPassesEarlyCompletionPoliciesAsRunParameters) {
+    auto network = std::make_shared<Network>("trainer-early-completion-options");
+    auto loader = std::make_shared<FakeLoader>();
+    auto executor = std::make_shared<CapturingExecutor>();
+    auto observer = std::make_shared<NullTrainingObserver>();
+
+    TrainingEarlyCompletionPolicy policy([](double currentScore, double bestScore, uint64_t currentEpoch, uint64_t bestEpoch) {
+        return currentScore > bestScore && currentEpoch > bestEpoch;
+    });
+
+    Trainer trainer = Trainer::Builder()
+                          .network(network)
+                          .loader(loader)
+                          .executor(executor)
+                          .observer(observer)
+                          .statsEnabled(false)
+                          .earlyCompletionPolicies({policy})
+                          .build();
+
+    trainer.fit(5);
+
+    EXPECT_EQ(executor->calls, 1u);
+    EXPECT_EQ(executor->lastEarlyCompletionPolicyCount, 1u);
+    EXPECT_TRUE(executor->lastEarlyCompletionDecision);
+}
+
+TEST(Trainer, RejectsEarlyCompletionPolicyWithoutCondition) {
+    auto network = std::make_shared<Network>("trainer-early-completion-invalid");
+    auto loader = std::make_shared<FakeLoader>();
+    auto executor = std::make_shared<CapturingExecutor>();
+
+    EXPECT_THROW((Trainer::Builder()
+                      .network(network)
+                      .loader(loader)
+                      .executor(executor)
+                      .earlyCompletionPolicies({TrainingEarlyCompletionPolicy{}})
+                      .build()),
+                 std::runtime_error);
+}
 
 TEST(Trainer, FitPassesTrainingProgramAsRunParameter) {
     auto network = std::make_shared<Network>("trainer-test");

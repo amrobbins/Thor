@@ -15,12 +15,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 import thor
+from integration_flags import integration_flag_enabled, integration_skip_reason
 
-RUN_IMAGENET100_INTEGRATION = os.environ.get("THOR_RUN_TRAINING_IMAGENET100_INTEGRATION") == "1"
-RUN_IMAGENET100_CV5_ALEXNET_INTEGRATION = (
-    os.environ.get("THOR_RUN_TRAINING_IMAGENET100_CV5_ALEXNET_INTEGRATION") == "1")
-RUN_IMAGENET100_CV5_RESNET18_INTEGRATION = (
-    os.environ.get("THOR_RUN_TRAINING_IMAGENET100_CV5_RESNET18_INTEGRATION") == "1")
+RUN_IMAGENET100_INTEGRATION = integration_flag_enabled("THOR_RUN_TRAINING_IMAGENET100_INTEGRATION")
+RUN_IMAGENET100_CV5_ALEXNET_INTEGRATION = integration_flag_enabled(
+    "THOR_RUN_TRAINING_IMAGENET100_CV5_ALEXNET_INTEGRATION")
+RUN_IMAGENET100_CV5_RESNET18_INTEGRATION = integration_flag_enabled(
+    "THOR_RUN_TRAINING_IMAGENET100_CV5_RESNET18_INTEGRATION")
 RUN_IMAGENET100_ANY_INTEGRATION = any(
     [
         RUN_IMAGENET100_INTEGRATION,
@@ -121,10 +122,12 @@ pytestmark = [
     pytest.mark.imagenet100_integration,
     pytest.mark.skipif(
         not RUN_IMAGENET100_ANY_INTEGRATION,
-        reason=(
-            "set THOR_RUN_TRAINING_IMAGENET100_INTEGRATION=1 or one of "
-            "THOR_RUN_TRAINING_IMAGENET100_CV5_ALEXNET_INTEGRATION=1 / "
-            "THOR_RUN_TRAINING_IMAGENET100_CV5_RESNET18_INTEGRATION=1 to run heavyweight ImageNet-100 tests"),
+        reason=integration_skip_reason(
+            "THOR_RUN_TRAINING_IMAGENET100_INTEGRATION",
+            "THOR_RUN_TRAINING_IMAGENET100_CV5_ALEXNET_INTEGRATION",
+            "THOR_RUN_TRAINING_IMAGENET100_CV5_RESNET18_INTEGRATION",
+            description="heavyweight ImageNet-100 tests",
+        ),
     ),
 ]
 
@@ -293,7 +296,8 @@ def _import_imagenet_dependencies():
         raise RuntimeError(
             "The heavyweight ImageNet-100 integration tests require the optional "
             "Python packages 'datasets' and 'Pillow'. Install them in the test venv "
-            "before setting THOR_RUN_TRAINING_IMAGENET100_INTEGRATION=1.") from exc
+            "before setting THOR_RUN_TRAINING_IMAGENET100_INTEGRATION=1 "
+            "or THOR_ALL_INTEGRATION_TESTS=1.") from exc
     return load_dataset, Image
 
 
@@ -994,7 +998,7 @@ def _import_object_detection_dependencies():
         raise RuntimeError(
             "The heavyweight object-detection integration tests require the optional "
             "Python package 'Pillow'. Install it in the test venv before setting "
-            "THOR_RUN_TRAINING_IMAGENET100_INTEGRATION=1."
+            "THOR_RUN_TRAINING_IMAGENET100_INTEGRATION=1 or THOR_ALL_INTEGRATION_TESTS=1."
         ) from exc
     return Image
 
@@ -1678,7 +1682,10 @@ def _run_imagenet100_cv5_training_runs(model_builder, *, model_name: str, capfd)
 
 @pytest.mark.skipif(
     not RUN_IMAGENET100_INTEGRATION,
-    reason="set THOR_RUN_TRAINING_IMAGENET100_INTEGRATION=1 to run VOC2012 object-detection training integration",
+    reason=integration_skip_reason(
+        "THOR_RUN_TRAINING_IMAGENET100_INTEGRATION",
+        description="VOC2012 object-detection training integration",
+    ),
 )
 @pytest.mark.parametrize(
     ("model_name", "model_builder"),
@@ -1692,7 +1699,10 @@ def test_queued_trainer_trains_voc2012_object_detection_networks_end_to_end(mode
 
 @pytest.mark.skipif(
     not RUN_IMAGENET100_INTEGRATION,
-    reason="set THOR_RUN_TRAINING_IMAGENET100_INTEGRATION=1 to run full AlexNet ImageNet-100 training integration",
+    reason=integration_skip_reason(
+        "THOR_RUN_TRAINING_IMAGENET100_INTEGRATION",
+        description="full AlexNet ImageNet-100 training integration",
+    ),
 )
 def test_queued_trainer_trains_full_alexnet_on_full_clane9_imagenet100(capfd):
     _run_full_imagenet100_model_training(_build_alexnet_imagenet100, model_name="alexnet", capfd=capfd)
@@ -1700,7 +1710,10 @@ def test_queued_trainer_trains_full_alexnet_on_full_clane9_imagenet100(capfd):
 
 @pytest.mark.skipif(
     not RUN_IMAGENET100_INTEGRATION,
-    reason="set THOR_RUN_TRAINING_IMAGENET100_INTEGRATION=1 to run full ResNet-18 ImageNet-100 training integration",
+    reason=integration_skip_reason(
+        "THOR_RUN_TRAINING_IMAGENET100_INTEGRATION",
+        description="full ResNet-18 ImageNet-100 training integration",
+    ),
 )
 def test_queued_trainer_trains_full_resnet18_on_full_clane9_imagenet100(capfd):
     _run_full_imagenet100_model_training(_build_resnet18_imagenet100, model_name="resnet18", capfd=capfd)
@@ -1709,7 +1722,10 @@ def test_queued_trainer_trains_full_resnet18_on_full_clane9_imagenet100(capfd):
 @pytest.mark.imagenet100_cv5_integration
 @pytest.mark.skipif(
     not RUN_IMAGENET100_CV5_ALEXNET_INTEGRATION,
-    reason="set THOR_RUN_TRAINING_IMAGENET100_CV5_ALEXNET_INTEGRATION=1 to run AlexNet ImageNet-100 CV5 TrainingRuns",
+    reason=integration_skip_reason(
+        "THOR_RUN_TRAINING_IMAGENET100_CV5_ALEXNET_INTEGRATION",
+        description="AlexNet ImageNet-100 CV5 TrainingRuns",
+    ),
 )
 def test_training_runs_imagenet100_alexnet_five_fold_cross_validation(capfd):
     _run_imagenet100_cv5_training_runs(_build_alexnet_imagenet100, model_name="alexnet", capfd=capfd)
@@ -1718,7 +1734,10 @@ def test_training_runs_imagenet100_alexnet_five_fold_cross_validation(capfd):
 @pytest.mark.imagenet100_cv5_integration
 @pytest.mark.skipif(
     not RUN_IMAGENET100_CV5_RESNET18_INTEGRATION,
-    reason="set THOR_RUN_TRAINING_IMAGENET100_CV5_RESNET18_INTEGRATION=1 to run ResNet-18 ImageNet-100 CV5 TrainingRuns",
+    reason=integration_skip_reason(
+        "THOR_RUN_TRAINING_IMAGENET100_CV5_RESNET18_INTEGRATION",
+        description="ResNet-18 ImageNet-100 CV5 TrainingRuns",
+    ),
 )
 def test_training_runs_imagenet100_resnet18_five_fold_cross_validation(capfd):
     _run_imagenet100_cv5_training_runs(_build_resnet18_imagenet100, model_name="resnet18", capfd=capfd)

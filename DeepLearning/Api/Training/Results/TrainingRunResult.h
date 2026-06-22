@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <exception>
 #include <new>
 #include <optional>
@@ -18,6 +19,19 @@
 namespace Thor {
 
 enum class TrainingRunStatus { NOT_STARTED, RUNNING, COMPLETED, FAILED, CANCELLED, INTERRUPTED, OUT_OF_MEMORY };
+
+enum class TrainingRunCompletionReason { COMPLETED, EARLY_COMPLETED };
+
+[[nodiscard]] inline const char* trainingRunCompletionReasonName(TrainingRunCompletionReason reason) {
+    switch (reason) {
+        case TrainingRunCompletionReason::COMPLETED:
+            return "completed";
+        case TrainingRunCompletionReason::EARLY_COMPLETED:
+            return "early_completed";
+        default:
+            return "unknown";
+    }
+}
 
 [[nodiscard]] inline const char* trainingRunStatusName(TrainingRunStatus status) {
     switch (status) {
@@ -107,12 +121,25 @@ struct TrainingRunResult {
     std::optional<std::string> ensembleGroup{};
     double ensembleWeight = 1.0;
     TrainingRunStatus status = TrainingRunStatus::NOT_STARTED;
+    TrainingRunCompletionReason completionReason = TrainingRunCompletionReason::COMPLETED;
+    std::optional<uint64_t> completedEpoch{};
+    std::optional<uint64_t> bestEpoch{};
+    std::optional<double> bestScore{};
     std::optional<TrainingStatsSnapshot> finalTrainingStats{};
     std::optional<TrainingStatsSnapshot> finalValidationStats{};
     std::optional<TrainingStatsSnapshot> finalTestStats{};
     TrainingRunExceptionSummary exception{};
 
     [[nodiscard]] bool completed() const { return status == TrainingRunStatus::COMPLETED; }
+    [[nodiscard]] bool earlyCompleted() const {
+        return status == TrainingRunStatus::COMPLETED && completionReason == TrainingRunCompletionReason::EARLY_COMPLETED;
+    }
+    [[nodiscard]] const char* resultName() const {
+        if (status == TrainingRunStatus::COMPLETED) {
+            return trainingRunCompletionReasonName(completionReason);
+        }
+        return trainingRunStatusName(status);
+    }
     [[nodiscard]] bool failed() const {
         return status == TrainingRunStatus::FAILED || status == TrainingRunStatus::OUT_OF_MEMORY || status == TrainingRunStatus::INTERRUPTED;
     }
@@ -151,10 +178,18 @@ struct TrainingRunResult {
     [[nodiscard]] static TrainingRunResult completedResult(std::string runName,
                                                            std::optional<TrainingStatsSnapshot> finalTrainingStats = {},
                                                            std::optional<TrainingStatsSnapshot> finalValidationStats = {},
-                                                           std::optional<TrainingStatsSnapshot> finalTestStats = {}) {
+                                                           std::optional<TrainingStatsSnapshot> finalTestStats = {},
+                                                           TrainingRunCompletionReason completionReason = TrainingRunCompletionReason::COMPLETED,
+                                                           std::optional<uint64_t> completedEpoch = {},
+                                                           std::optional<uint64_t> bestEpoch = {},
+                                                           std::optional<double> bestScore = {}) {
         TrainingRunResult result;
         result.runName = std::move(runName);
         result.status = TrainingRunStatus::COMPLETED;
+        result.completionReason = completionReason;
+        result.completedEpoch = completedEpoch;
+        result.bestEpoch = bestEpoch;
+        result.bestScore = bestScore;
         result.finalTrainingStats = std::move(finalTrainingStats);
         result.finalValidationStats = std::move(finalValidationStats);
         result.finalTestStats = std::move(finalTestStats);

@@ -59,6 +59,22 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
         THOR_THROW_IF_FALSE(aFeatureInput.has_value());
         THOR_THROW_IF_FALSE(aFeatureInput.value().getPlacement() == placement);
 
+        refreshNumBackwardConnectionsFromCurrentErrorInputs();
+    }
+
+    void replaceErrorInput(std::optional<Tensor> oldErrorInput, std::optional<Tensor> newErrorInput) override {
+        MultiConnectionLayer::replaceErrorInput(oldErrorInput, newErrorInput);
+
+        // Dynamic active-loss-root pruning can remove a downstream gradient edge after compile.
+        // TrainableLayer uses numBackwardConnections to decide when all gradients for the
+        // current batch have arrived and when it may apply the optimizer update.  If this
+        // count remains at the compile-time value, the layer waits forever for the pruned
+        // branch and the next forward observes stale weights.
+        refreshNumBackwardConnectionsFromCurrentErrorInputs();
+    }
+
+   private:
+    void refreshNumBackwardConnectionsFromCurrentErrorInputs() {
         numBackwardConnections = 0;
         for (const auto &errorInput : errorInputs) {
             if (errorInput.has_value())
@@ -66,7 +82,6 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
         }
     }
 
-   private:
     class UnsupportedBackwardImplementation : public std::logic_error {
        public:
         explicit UnsupportedBackwardImplementation(const std::string &message) : std::logic_error(message) {}

@@ -14,8 +14,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 import thor
+from integration_flags import integration_flag_enabled, integration_skip_reason
 
-RUN_UCF101_3D_INTEGRATION = os.environ.get("THOR_RUN_TRAINING_UCF101_3D_INTEGRATION") == "1"
+RUN_UCF101_3D_INTEGRATION = integration_flag_enabled("THOR_RUN_TRAINING_UCF101_3D_INTEGRATION")
 UCF101_3D_CACHE_DIR = Path(os.environ.get("THOR_UCF101_3D_CACHE_DIR", "/tmp/thor_ucf101_3d_training"))
 UCF101_3D_DATASET_URL = os.environ.get(
     "THOR_UCF101_3D_DATASET_URL",
@@ -50,7 +51,10 @@ pytestmark = [
     pytest.mark.ucf101_3d_integration,
     pytest.mark.skipif(
         not RUN_UCF101_3D_INTEGRATION,
-        reason="set THOR_RUN_TRAINING_UCF101_3D_INTEGRATION=1 to run heavyweight UCF101 3D video training tests",
+        reason=integration_skip_reason(
+            "THOR_RUN_TRAINING_UCF101_3D_INTEGRATION",
+            description="heavyweight UCF101 3D video training tests",
+        ),
     ),
 ]
 

@@ -17,8 +17,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 import thor
+from integration_flags import integration_flag_enabled, integration_skip_reason
 
-RUN_MRI_3D_INTEGRATION = os.environ.get("THOR_RUN_TRAINING_MRI_3D_INTEGRATION") == "1"
+RUN_MRI_3D_INTEGRATION = integration_flag_enabled("THOR_RUN_TRAINING_MRI_3D_INTEGRATION")
 MRI_3D_REBUILD = os.environ.get("THOR_MRI_3D_REBUILD") == "1"
 MRI_3D_STATS_INTERVAL_S = float(os.environ.get("THOR_MRI_3D_STATS_INTERVAL_S", "0.0"))
 MRI_3D_MAX_IN_FLIGHT_BATCHES = int(os.environ.get("THOR_MRI_3D_MAX_IN_FLIGHT_BATCHES", "2"))
@@ -55,7 +56,10 @@ pytestmark = [
     pytest.mark.mri_3d_integration,
     pytest.mark.skipif(
         not RUN_MRI_3D_INTEGRATION,
-        reason="set THOR_RUN_TRAINING_MRI_3D_INTEGRATION=1 to run heavyweight static-volume MRI 3D training tests",
+        reason=integration_skip_reason(
+            "THOR_RUN_TRAINING_MRI_3D_INTEGRATION",
+            description="heavyweight static-volume MRI 3D training tests",
+        ),
     ),
 ]
 
