@@ -31,7 +31,10 @@
 
 #include <deque>
 #include <filesystem>
+#include <map>
 #include <set>
+#include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -55,6 +58,38 @@
 #include <optional>
 
 namespace Thor {
+
+struct NetworkLossReference {
+    std::string lossName{};
+    std::string outputName{};
+    std::string targetInputName{};
+    std::optional<std::string> weightInputName{};
+    std::string lossLayerType{};
+    double lossWeight = 1.0;
+    std::optional<double> quantile{};
+};
+
+class ApiTensorRemap {
+   public:
+    void map(const Tensor& sourceTensor, const Tensor& destinationTensor);
+    [[nodiscard]] bool contains(const Tensor& sourceTensor) const;
+    [[nodiscard]] Tensor get(const Tensor& sourceTensor) const;
+    [[nodiscard]] const std::map<uint64_t, Tensor>& entriesBySourceOriginalId() const { return destinationTensorBySourceOriginalId; }
+
+   private:
+    std::map<uint64_t, Tensor> destinationTensorBySourceOriginalId;
+};
+
+struct ApiSubgraphCloneOptions {
+    std::string namePrefix;
+    bool inferenceOnly = true;
+    bool cloneTrainableParameters = true;
+};
+
+struct ApiSubgraphCloneResult {
+    std::map<std::string, Tensor> outputTensorsByName;
+    std::map<uint64_t, Tensor> clonedTensorBySourceOriginalId;
+};
 
 class PlacedNetwork;
 
@@ -127,6 +162,7 @@ class Network {
     [[nodiscard]] std::vector<std::string> getInferenceNetworkInputNames();
     [[nodiscard]] std::vector<std::string> getTrainingOnlyNetworkInputNames();
     [[nodiscard]] std::map<std::string, std::vector<std::string>> getLossLabelNetworkInputNamesByPredictionOutputName();
+    [[nodiscard]] std::map<std::string, std::vector<NetworkLossReference>> getLossReferencesByPredictionOutputName();
 
     // FIXME: I will need to support indexing layers by their name.
     uint32_t getNumTrainableLayers() { return allTrainableLayersInNetwork.size(); }
@@ -141,6 +177,11 @@ class Network {
     [[nodiscard]] bool hasApiTensorByOriginalId(uint64_t originalId) const;
     Tensor resolveApiTensorByOriginalId(uint64_t originalId) const;
     Tensor getApiTensorByOriginalId(uint64_t originalId);
+
+    ApiSubgraphCloneResult cloneInferenceSubgraphInto(const Network& sourceNetwork,
+                                                       const std::vector<std::string>& outputNames,
+                                                       const ApiTensorRemap& initialRemap,
+                                                       const ApiSubgraphCloneOptions& options = ApiSubgraphCloneOptions{});
 
     void registerRaggedNetworkInput(const std::string& name,
                                     const RaggedTensor& raggedTensor,
@@ -198,6 +239,7 @@ class Network {
                                     const bool inferenceOnly,
                                     bool networkOutputsOnGpu = false);
 
+    virtual void rebuildApiGraphIndexes(bool inferenceOnly);
     virtual StatusCode evaluateGraph(bool inferenceOnly);
     virtual void pruneLoadedTrainingArtifactsForInference();
     virtual StatusCode checkForDuplicateInOutPortNames();

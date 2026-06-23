@@ -249,6 +249,18 @@ struct TrainingEnsembleMemberResult {
     std::optional<double> finalTestAccuracy{};
 };
 
+struct TrainingNamedMetricResult {
+    std::string name{};
+    std::string outputName{};
+    std::string targetInputName{};
+    double overallWeight = 1.0;
+    std::string overallWeightSource{};
+    std::optional<double> trainValue{};
+    std::optional<double> testValue{};
+
+    [[nodiscard]] bool hasValue() const { return trainValue.has_value() || testValue.has_value(); }
+};
+
 struct TrainingEnsembleResult {
     std::string ensembleGroup{};
     std::vector<TrainingEnsembleMemberResult> members{};
@@ -257,6 +269,7 @@ struct TrainingEnsembleResult {
     std::optional<double> ensembleTrainingLoss{};
     std::optional<double> ensembleTestLoss{};
     std::optional<double> ensembleTestAccuracy{};
+    std::vector<TrainingNamedMetricResult> namedMetrics{};
     size_t minSuccessfulModels = 0;
 
     [[nodiscard]] size_t size() const { return members.size(); }
@@ -268,6 +281,14 @@ struct TrainingEnsembleResult {
     [[nodiscard]] bool hasEnoughSuccessfulModels() const;
     [[nodiscard]] double totalWeight() const;
     [[nodiscard]] std::map<std::string, size_t> statusCounts() const;
+    [[nodiscard]] bool hasNamedMetricValues() const {
+        return std::any_of(namedMetrics.begin(), namedMetrics.end(), [](const TrainingNamedMetricResult& metricResult) {
+            return metricResult.hasValue();
+        });
+    }
+    [[nodiscard]] bool hasEnsembleEvaluationMetrics() const {
+        return ensembleTrainingLoss.has_value() || ensembleTestLoss.has_value() || ensembleTestAccuracy.has_value() || hasNamedMetricValues();
+    }
     [[nodiscard]] std::optional<double> ensembleFinalTrainingLoss() const { return ensembleTrainingLoss; }
     [[nodiscard]] std::optional<double> ensembleFinalTestLoss() const { return ensembleTestLoss; }
     [[nodiscard]] std::optional<double> ensembleFinalTestAccuracy() const { return ensembleTestAccuracy; }

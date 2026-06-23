@@ -177,6 +177,7 @@ def _build_tiny_regressor(name: str):
         predictions.get_feature_output(),
         labels.get_feature_output(),
         thor.DataType.fp32,
+        loss_weight=2.0,
     )
     thor.layers.NetworkOutput(network, "loss", loss.get_loss(), thor.DataType.fp32)
     thor.layers.NetworkOutput(network, "prediction", predictions.get_feature_output(), thor.DataType.fp32)
@@ -287,6 +288,35 @@ def test_training_runs_binding_rejects_invalid_failure_policy():
 def test_training_runs_binding_rejects_invalid_max_parallel_runs():
     with pytest.raises(RuntimeError, match="maxParallelRuns"):
         thor.training.TrainingRuns([], max_parallel_runs=0)
+
+
+def test_training_runs_binding_accepts_reported_losses():
+    trainer = _make_tiny_regression_trainer("training_runs_binding_reported_losses")
+
+    runs = thor.training.TrainingRuns(
+        [("fold_0", trainer, "tiny_ensemble")],
+        reported_losses={"tiny_ensemble": ["loss"]},
+    )
+
+    assert runs.reported_losses["tiny_ensemble"] == ["loss"]
+    assert not hasattr(runs, "ensemble_metrics")
+    assert not hasattr(thor.training, "MetricSpec")
+
+
+def test_training_runs_binding_rejects_invalid_reported_losses():
+    trainer = _make_tiny_regression_trainer("training_runs_binding_invalid_reported_losses")
+
+    with pytest.raises(RuntimeError, match="requested reported loss .*missing"):
+        thor.training.TrainingRuns(
+            [("fold_0", trainer, "tiny_ensemble")],
+            reported_losses={"tiny_ensemble": ["missing"]},
+        )
+
+    with pytest.raises(TypeError, match="reported_losses"):
+        thor.training.TrainingRuns(
+            [("fold_0", trainer, "tiny_ensemble")],
+            reported_losses={"tiny_ensemble": [{"name": "loss"}]},
+        )
 
 
 def test_trainer_binding_accepts_pathlike_save_model_dir_for_training_runs_artifact(tmp_path):

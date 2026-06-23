@@ -3,6 +3,11 @@
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Layers/Learning/CustomLayer.h"
+#include "DeepLearning/Api/Layers/Loss/CategoricalCrossEntropy.h"
+#include "DeepLearning/Api/Layers/Loss/MeanAbsoluteError.h"
+#include "DeepLearning/Api/Layers/Loss/MeanSquaredError.h"
+#include "DeepLearning/Api/Layers/Loss/QuantileLoss.h"
+#include "DeepLearning/Api/Layers/Metrics/CategoricalAccuracy.h"
 #include "Utilities/Expression/DynamicExpression.h"
 #include "DeepLearning/Api/Loaders/Loader.h"
 #include "DeepLearning/Api/Network/Network.h"
@@ -18,12 +23,14 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <numeric>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <sstream>
 #include <stdexcept>
@@ -427,6 +434,214 @@ const char* trainingRunsFailurePolicyName(TrainingRunsFailurePolicy policy) {
     }
 }
 
+namespace {
+
+std::optional<std::string> lossReferenceMetricName(const NetworkLossReference& reference) {
+    if (reference.lossLayerType == "MAE") {
+        return "mae";
+    }
+    if (reference.lossLayerType == "MSE") {
+        return "mse";
+    }
+    if (reference.lossLayerType == "CategoricalCrossEntropy" || reference.lossLayerType == "SparseCategoricalCrossEntropy") {
+        return "categorical_cross_entropy";
+    }
+    if (reference.lossLayerType == "QuantileLoss") {
+        return "quantile";
+    }
+    if (reference.lossLayerType == "CustomLoss" || reference.lossLayerType == "MultiInputCustomLoss") {
+        return "custom";
+    }
+    return std::nullopt;
+}
+
+const TrainingRunInputSignature* findInputSignatureItem(const std::vector<TrainingRunInputSignature>& signature,
+                                                       const std::string& inputName) {
+    auto it = std::find_if(signature.begin(), signature.end(), [&](const TrainingRunInputSignature& item) {
+        return item.inputName == inputName;
+    });
+    return it == signature.end() ? nullptr : &*it;
+}
+
+const TrainingRunOutputSignature* findOutputSignatureItem(const std::vector<TrainingRunOutputSignature>& signature,
+                                                         const std::string& outputName) {
+    auto it = std::find_if(signature.begin(), signature.end(), [&](const TrainingRunOutputSignature& item) {
+        return item.outputName == outputName;
+    });
+    return it == signature.end() ? nullptr : &*it;
+}
+
+std::string inputSignatureItemToString(const TrainingRunInputSignature& item) {
+    std::ostringstream out;
+    out << item.inputName << ":" << dimensionsToString(item.dimensions) << ":" << item.dataType
+        << (item.dimensionsIncludeBatch ? ":batch_included" : ":batch_excluded");
+    return out.str();
+}
+
+std::string outputSignatureItemToString(const TrainingRunOutputSignature& item) {
+    std::ostringstream out;
+    out << item.outputName << ":" << dimensionsToString(item.dimensions) << ":" << item.dataType;
+    return out.str();
+}
+
+bool trainingRunsGroupHasReportedLosses(
+    const std::map<std::string, std::vector<std::string>>& reportedLossesByGroup,
+    const std::string& groupName) {
+    const auto it = reportedLossesByGroup.find(groupName);
+    return it != reportedLossesByGroup.end();
+}
+
+struct ResolvedEnsembleLoss {
+    std::string lossName{};
+    std::string predictionOutputName{};
+    std::string targetInputName{};
+    std::optional<std::string> weightInputName{};
+    std::string lossType{};
+    double lossWeight = 1.0;
+    std::optional<double> quantile{};
+};
+
+bool quantilesCompatible(std::optional<double> lhs, std::optional<double> rhs) {
+    if (!lhs.has_value() && !rhs.has_value()) {
+        return true;
+    }
+    if (!lhs.has_value() || !rhs.has_value()) {
+        return false;
+    }
+    return std::fabs(lhs.value() - rhs.value()) <= 1.0e-6;
+}
+
+bool trainingRunsLossReferencesCompatible(const NetworkLossReference& lhs, const NetworkLossReference& rhs) {
+    if (lhs.lossName != rhs.lossName) {
+        return false;
+    }
+    if (std::fabs(lhs.lossWeight - rhs.lossWeight) > 1.0e-6) {
+        return false;
+    }
+    if (lhs.outputName != rhs.outputName || lhs.targetInputName != rhs.targetInputName) {
+        return false;
+    }
+    if (lhs.weightInputName != rhs.weightInputName) {
+        return false;
+    }
+    if (lhs.lossLayerType != rhs.lossLayerType) {
+        return false;
+    }
+    if (!quantilesCompatible(lhs.quantile, rhs.quantile)) {
+        return false;
+    }
+    return true;
+}
+
+std::string trainingRunsLossReferenceDescription(const NetworkLossReference& reference) {
+    std::ostringstream out;
+    out << "loss_name='" << reference.lossName << "', output_name='" << reference.outputName
+        << "', target_input_name='" << reference.targetInputName << "'";
+    if (reference.weightInputName.has_value()) {
+        out << ", weight_input_name='" << *reference.weightInputName << "'";
+    }
+    std::optional<std::string> metric = lossReferenceMetricName(reference);
+    if (metric.has_value()) {
+        out << ", metric='" << *metric << "'";
+    }
+    if (reference.quantile.has_value()) {
+        out << ", quantile=" << *reference.quantile;
+    }
+    out << ", loss_layer_type='" << reference.lossLayerType << "'";
+    out << ", loss_weight=" << reference.lossWeight;
+    return out.str();
+}
+
+std::string trainingRunsLossReferenceListDescription(const std::vector<NetworkLossReference>& references) {
+    std::ostringstream oss;
+    for (size_t i = 0; i < references.size(); ++i) {
+        if (i != 0) {
+            oss << "; ";
+        }
+        oss << "[" << i << "] " << trainingRunsLossReferenceDescription(references[i]);
+    }
+    return oss.str();
+}
+
+std::map<std::string, NetworkLossReference> trainingRunsLossReferencesByName(
+    const std::map<std::string, std::vector<NetworkLossReference>>& referencesByOutputName,
+    const std::string& context) {
+    std::map<std::string, NetworkLossReference> byName;
+    for (const auto& [_, references] : referencesByOutputName) {
+        (void)_;
+        for (const NetworkLossReference& reference : references) {
+            auto [it, inserted] = byName.emplace(reference.lossName, reference);
+            if (!inserted && !trainingRunsLossReferencesCompatible(it->second, reference)) {
+                throw std::runtime_error(context + " found ambiguous graph loss name '" + reference.lossName +
+                                         "'. Multiple source losses with that report name have different wiring/configuration: " +
+                                         trainingRunsLossReferenceDescription(it->second) + "; " +
+                                         trainingRunsLossReferenceDescription(reference) +
+                                         ". Give graph losses unique NetworkOutput names before ensemble evaluation.");
+            }
+        }
+    }
+    return byName;
+}
+
+std::vector<ResolvedEnsembleLoss> resolveTrainingRunsReportedLosses(
+    const std::map<std::string, std::vector<NetworkLossReference>>& referencesByOutputName,
+    const std::vector<std::string>& requestedLossNames,
+    const std::string& context) {
+    const std::map<std::string, NetworkLossReference> byName = trainingRunsLossReferencesByName(referencesByOutputName, context);
+    if (byName.empty()) {
+        if (requestedLossNames.empty()) {
+            return {};
+        }
+        throw std::runtime_error(context + " did not find any reportable graph losses.");
+    }
+
+    std::vector<std::string> selectedNames;
+    if (requestedLossNames.empty()) {
+        selectedNames.reserve(byName.size());
+        for (const auto& [lossName, _] : byName) {
+            (void)_;
+            selectedNames.push_back(lossName);
+        }
+    } else {
+        std::set<std::string> seen;
+        for (const std::string& lossName : requestedLossNames) {
+            if (lossName.empty()) {
+                throw std::runtime_error(context + " contains an empty reported loss name.");
+            }
+            if (!seen.insert(lossName).second) {
+                throw std::runtime_error(context + " contains duplicate reported loss name '" + lossName + "'.");
+            }
+            if (byName.find(lossName) == byName.end()) {
+                std::ostringstream oss;
+                oss << context << " requested reported loss '" << lossName << "', but no graph loss with that name exists. Available losses:";
+                for (const auto& [availableName, reference] : byName) {
+                    oss << " " << availableName << "(" << trainingRunsLossReferenceDescription(reference) << ")";
+                }
+                throw std::runtime_error(oss.str());
+            }
+            selectedNames.push_back(lossName);
+        }
+    }
+
+    std::vector<ResolvedEnsembleLoss> resolved;
+    resolved.reserve(selectedNames.size());
+    for (const std::string& lossName : selectedNames) {
+        const NetworkLossReference& reference = byName.at(lossName);
+        ResolvedEnsembleLoss loss;
+        loss.lossName = reference.lossName;
+        loss.predictionOutputName = reference.outputName;
+        loss.targetInputName = reference.targetInputName;
+        loss.weightInputName = reference.weightInputName;
+        loss.lossType = reference.lossLayerType;
+        loss.lossWeight = reference.lossWeight;
+        loss.quantile = reference.quantile;
+        resolved.push_back(std::move(loss));
+    }
+    return resolved;
+}
+
+}  // namespace
+
 bool TrainingEnsembleResult::allCompleted() const {
     return !members.empty() && std::all_of(members.begin(), members.end(), [](const TrainingEnsembleMemberResult& member) {
         return member.status == TrainingRunStatus::COMPLETED;
@@ -690,14 +905,16 @@ TrainingRuns::TrainingRuns(std::vector<TrainingRunsSpec> runs,
                            std::optional<size_t> maxParallelRuns,
                            std::vector<TrainingRunsRestartPolicy> restartConditions,
                            std::vector<TrainingRunsEarlyCompletionRule> earlyCompletionRules,
-                           std::map<std::string, size_t> minSuccessfulModels)
+                           std::map<std::string, size_t> minSuccessfulModels,
+                           std::map<std::string, std::vector<std::string>> reportedLosses)
     : runs(std::move(runs)),
       failurePolicy(failurePolicy),
       maxSummaryLogsPerSecond(maxSummaryLogsPerSecond),
       maxParallelRuns(maxParallelRuns),
       minSuccessfulModels(std::move(minSuccessfulModels)),
       restartConditions(std::move(restartConditions)),
-      earlyCompletionRules(std::move(earlyCompletionRules)) {
+      earlyCompletionRules(std::move(earlyCompletionRules)),
+      reportedLosses(std::move(reportedLosses)) {
     if (!std::isfinite(maxSummaryLogsPerSecond) || maxSummaryLogsPerSecond < 0.0) {
         throw std::runtime_error("TrainingRuns maxSummaryLogsPerSecond must be finite and >= 0.");
     }
@@ -708,6 +925,7 @@ TrainingRuns::TrainingRuns(std::vector<TrainingRunsSpec> runs,
     validateMinSuccessfulModels();
     validateRestartConditions();
     validateEarlyCompletionRules();
+    validateReportedLosses();
 }
 
 size_t TrainingRuns::getEffectiveMaxParallelRuns() const {
@@ -1042,7 +1260,8 @@ void TrainingRuns::validateRunSpecs() const {
                                          it->second.firstRunName + "' has " + inputSignatureToString(it->second.inputSignature) +
                                          ", but run '" + spec.runName + "' has " + inputSignatureToString(inputSignature) + ".");
             }
-            if (!inserted && !outputSignaturesCompatible(it->second.outputSignature, outputSignature)) {
+            const bool reportedLossGroup = trainingRunsGroupHasReportedLosses(reportedLosses, *spec.ensembleGroup);
+            if (!inserted && !reportedLossGroup && !outputSignaturesCompatible(it->second.outputSignature, outputSignature)) {
                 throw std::runtime_error("TrainingRuns ensemble_group '" + *spec.ensembleGroup + "' has incompatible output signatures: run '" +
                                          it->second.firstRunName + "' has " + outputSignatureToString(it->second.outputSignature) +
                                          ", but run '" + spec.runName + "' has " + outputSignatureToString(outputSignature) + ".");
@@ -1240,6 +1459,179 @@ std::vector<TrainingEarlyCompletionPolicy> TrainingRuns::earlyCompletionPolicies
     return matches;
 }
 
+void TrainingRuns::validateReportedLosses() const {
+    struct EnsembleMemberSignatureState {
+        std::string runName{};
+        std::vector<TrainingRunInputSignature> inputSignature{};
+        std::vector<TrainingRunOutputSignature> outputSignature{};
+        std::shared_ptr<Network> network{};
+        std::optional<std::map<std::string, std::vector<NetworkLossReference>>> lossReferencesByOutputName{};
+    };
+
+    std::map<std::string, std::vector<EnsembleMemberSignatureState>> membersByGroup;
+    for (const TrainingRunsSpec& spec : runs) {
+        if (!spec.ensembleGroup.has_value()) {
+            continue;
+        }
+        EnsembleMemberSignatureState state;
+        state.runName = spec.runName;
+        state.network = spec.trainer->getNetwork();
+        state.inputSignature = collectNetworkInputSignature(state.network);
+        state.outputSignature = collectNetworkOutputSignature(state.network);
+        membersByGroup[*spec.ensembleGroup].push_back(std::move(state));
+    }
+
+    for (const auto& [groupName, requestedLossNames] : reportedLosses) {
+        if (groupName.empty()) {
+            throw std::runtime_error("TrainingRuns reported_losses contains an empty ensemble_group name.");
+        }
+        auto membersIt = membersByGroup.find(groupName);
+        if (membersIt == membersByGroup.end() || membersIt->second.empty()) {
+            throw std::runtime_error("TrainingRuns reported_losses targets unknown ensemble_group '" + groupName + "'.");
+        }
+        std::set<std::string> seen;
+        for (const std::string& lossName : requestedLossNames) {
+            if (lossName.empty()) {
+                throw std::runtime_error("TrainingRuns reported_losses for ensemble_group '" + groupName + "' contains an empty loss name.");
+            }
+            if (!seen.insert(lossName).second) {
+                throw std::runtime_error("TrainingRuns reported_losses for ensemble_group '" + groupName + "' contains duplicate loss name '" + lossName + "'.");
+            }
+        }
+    }
+
+    auto lossReferencesForMember = [](EnsembleMemberSignatureState& member) -> const std::map<std::string, std::vector<NetworkLossReference>>& {
+        if (!member.lossReferencesByOutputName.has_value()) {
+            member.lossReferencesByOutputName = member.network->getLossReferencesByPredictionOutputName();
+        }
+        return *member.lossReferencesByOutputName;
+    };
+
+    for (auto& [groupName, members] : membersByGroup) {
+        if (members.empty()) {
+            continue;
+        }
+        EnsembleMemberSignatureState& referenceMember = members.front();
+        const std::vector<std::string>& requestedLossNames = [&]() -> const std::vector<std::string>& {
+            static const std::vector<std::string> empty;
+            auto it = reportedLosses.find(groupName);
+            return it == reportedLosses.end() ? empty : it->second;
+        }();
+        const std::string context = "TrainingRuns reported_losses for ensemble_group '" + groupName + "'";
+        const std::vector<ResolvedEnsembleLoss> referenceLosses =
+            resolveTrainingRunsReportedLosses(lossReferencesForMember(referenceMember), requestedLossNames, context + " reference run '" + referenceMember.runName + "'");
+
+        for (const ResolvedEnsembleLoss& resolved : referenceLosses) {
+            const TrainingRunOutputSignature* referenceOutput = findOutputSignatureItem(referenceMember.outputSignature, resolved.predictionOutputName);
+            if (referenceOutput == nullptr) {
+                throw std::runtime_error(context + " resolved loss '" + resolved.lossName + "' to prediction output '" +
+                                         resolved.predictionOutputName + "', but reference run '" + referenceMember.runName +
+                                         "' has outputs " + outputSignatureToString(referenceMember.outputSignature) + ".");
+            }
+            const TrainingRunInputSignature* referenceTarget = findInputSignatureItem(referenceMember.inputSignature, resolved.targetInputName);
+            if (referenceTarget == nullptr) {
+                throw std::runtime_error(context + " resolved loss '" + resolved.lossName + "' to target input '" +
+                                         resolved.targetInputName + "', but reference run '" + referenceMember.runName +
+                                         "' has inputs " + inputSignatureToString(referenceMember.inputSignature) + ".");
+            }
+            const TrainingRunInputSignature* referenceWeight = nullptr;
+            if (resolved.weightInputName.has_value()) {
+                referenceWeight = findInputSignatureItem(referenceMember.inputSignature, *resolved.weightInputName);
+                if (referenceWeight == nullptr) {
+                    throw std::runtime_error(context + " resolved loss '" + resolved.lossName + "' to weight input '" +
+                                             *resolved.weightInputName + "', but reference run '" + referenceMember.runName +
+                                             "' has inputs " + inputSignatureToString(referenceMember.inputSignature) + ".");
+                }
+            }
+
+            for (size_t memberIndex = 1; memberIndex < members.size(); ++memberIndex) {
+                EnsembleMemberSignatureState& member = members[memberIndex];
+                const std::string memberContext = context + " run '" + member.runName + "'";
+                const std::vector<ResolvedEnsembleLoss> memberLosses =
+                    resolveTrainingRunsReportedLosses(lossReferencesForMember(member), requestedLossNames, memberContext);
+                auto memberResolvedIt = std::find_if(memberLosses.begin(), memberLosses.end(), [&](const ResolvedEnsembleLoss& candidate) {
+                    return candidate.lossName == resolved.lossName;
+                });
+                if (memberResolvedIt == memberLosses.end()) {
+                    throw std::runtime_error(memberContext + " is missing graph loss '" + resolved.lossName + "'.");
+                }
+                NetworkLossReference reference;
+                reference.lossName = resolved.lossName;
+                reference.outputName = resolved.predictionOutputName;
+                reference.targetInputName = resolved.targetInputName;
+                reference.weightInputName = resolved.weightInputName;
+                reference.lossLayerType = resolved.lossType;
+                reference.lossWeight = resolved.lossWeight;
+                reference.quantile = resolved.quantile;
+                NetworkLossReference memberReference;
+                memberReference.lossName = memberResolvedIt->lossName;
+                memberReference.outputName = memberResolvedIt->predictionOutputName;
+                memberReference.targetInputName = memberResolvedIt->targetInputName;
+                memberReference.weightInputName = memberResolvedIt->weightInputName;
+                memberReference.lossLayerType = memberResolvedIt->lossType;
+                memberReference.lossWeight = memberResolvedIt->lossWeight;
+                memberReference.quantile = memberResolvedIt->quantile;
+                if (!trainingRunsLossReferencesCompatible(reference, memberReference)) {
+                    throw std::runtime_error(memberContext + " resolved graph loss '" + resolved.lossName +
+                                             "' differently than reference run '" + referenceMember.runName + "'. Reference: " +
+                                             trainingRunsLossReferenceDescription(reference) + "; member: " +
+                                             trainingRunsLossReferenceDescription(memberReference) + ".");
+                }
+
+                const TrainingRunOutputSignature* memberOutput = findOutputSignatureItem(member.outputSignature, resolved.predictionOutputName);
+                if (memberOutput == nullptr || !referenceOutput->compatibleWith(*memberOutput)) {
+                    throw std::runtime_error(memberContext + " has incompatible prediction output '" + resolved.predictionOutputName + "'.");
+                }
+                const TrainingRunInputSignature* memberTarget = findInputSignatureItem(member.inputSignature, resolved.targetInputName);
+                if (memberTarget == nullptr || !referenceTarget->compatibleWith(*memberTarget)) {
+                    throw std::runtime_error(memberContext + " has incompatible target input '" + resolved.targetInputName + "'.");
+                }
+                if (referenceWeight != nullptr) {
+                    const TrainingRunInputSignature* memberWeight = findInputSignatureItem(member.inputSignature, *resolved.weightInputName);
+                    if (memberWeight == nullptr || !referenceWeight->compatibleWith(*memberWeight)) {
+                        throw std::runtime_error(memberContext + " has incompatible weight input '" + *resolved.weightInputName + "'.");
+                    }
+                }
+            }
+        }
+    }
+}
+
+std::vector<TrainingNamedMetricResult> TrainingRuns::namedMetricResultsForGroup(std::string_view ensembleGroup) const {
+    std::shared_ptr<Network> representativeNetwork;
+    for (const TrainingRunsSpec& run : runs) {
+        if (run.ensembleGroup.has_value() && std::string_view(run.ensembleGroup.value()) == ensembleGroup && run.trainer != nullptr &&
+            run.trainer->getNetwork() != nullptr) {
+            representativeNetwork = run.trainer->getNetwork();
+            break;
+        }
+    }
+    if (representativeNetwork == nullptr) {
+        return {};
+    }
+
+    static const std::vector<std::string> empty;
+    const auto reportedIt = reportedLosses.find(std::string(ensembleGroup));
+    const std::vector<std::string>& requestedLossNames = reportedIt == reportedLosses.end() ? empty : reportedIt->second;
+    const std::vector<ResolvedEnsembleLoss> resolvedLosses = resolveTrainingRunsReportedLosses(
+        representativeNetwork->getLossReferencesByPredictionOutputName(),
+        requestedLossNames,
+        "TrainingRuns reported_losses for ensemble_group '" + std::string(ensembleGroup) + "'");
+
+    std::vector<TrainingNamedMetricResult> results;
+    results.reserve(resolvedLosses.size());
+    for (const ResolvedEnsembleLoss& loss : resolvedLosses) {
+        TrainingNamedMetricResult result;
+        result.name = loss.lossName;
+        result.outputName = loss.predictionOutputName;
+        result.targetInputName = loss.targetInputName;
+        result.overallWeight = loss.lossWeight;
+        result.overallWeightSource = "loss_weight";
+        results.push_back(std::move(result));
+    }
+    return results;
+}
+
 std::vector<TrainingEnsembleResult> TrainingRuns::buildEnsembleResults(const std::vector<TrainingRunResult>& results) const {
     std::map<std::string, TrainingEnsembleResult> byGroup = buildEnsembleResultsByGroup(results);
     std::vector<TrainingEnsembleResult> ensembles;
@@ -1268,6 +1660,7 @@ std::map<std::string, TrainingEnsembleResult> TrainingRuns::buildEnsembleResults
             ensemble.inputSignature = collectNetworkInputSignature(spec.trainer->getNetwork());
             ensemble.outputSignature = collectNetworkOutputSignature(spec.trainer->getNetwork());
             ensemble.minSuccessfulModels = minSuccessfulModelsForGroup(*spec.ensembleGroup, 0);
+            ensemble.namedMetrics = namedMetricResultsForGroup(*spec.ensembleGroup);
         }
 
         const auto resultIt = resultByRunName.find(spec.runName);
@@ -1331,6 +1724,20 @@ std::optional<double> weightedAverage(const std::vector<std::optional<double>>& 
         return std::nullopt;
     }
     return weightedSum / weightSum;
+}
+
+std::optional<double> weightedLossSumFromWeightedLossValues(const std::vector<std::optional<double>>& weightedLossValues) {
+    if (weightedLossValues.empty()) {
+        return std::nullopt;
+    }
+    double lossSum = 0.0;
+    for (const std::optional<double>& value : weightedLossValues) {
+        if (!value.has_value() || !std::isfinite(value.value())) {
+            return std::nullopt;
+        }
+        lossSum += value.value();
+    }
+    return lossSum;
 }
 
 std::string choosePredictionOutputName(const std::vector<TrainingRunOutputSignature>& signature) {
@@ -1398,6 +1805,9 @@ struct PlacedEnsembleArtifacts {
     uint64_t batchSize = 0;
     std::vector<std::shared_ptr<Network>> memberNetworks{};
     std::vector<std::shared_ptr<PlacedNetwork>> placedMembers{};
+    std::shared_ptr<Network> inputDistributionNetwork = nullptr;
+    std::shared_ptr<PlacedNetwork> placedInputDistribution = nullptr;
+    std::vector<std::string> distributedInputNames{};
     std::shared_ptr<Network> accumulatorNetwork = nullptr;
     std::shared_ptr<PlacedNetwork> placedAccumulator = nullptr;
     std::vector<std::string> accumulatorOutputNames{};
@@ -1407,6 +1817,109 @@ struct PlacedEnsembleArtifacts {
 
 std::string trainingRunsAccumulatorInputName(size_t outputIndex, size_t memberIndex) {
     return "thor_training_runs_ensemble_output_" + std::to_string(outputIndex) + "_member_" + std::to_string(memberIndex);
+}
+
+using TrainingRunsInputDescriptorResolver = std::function<ThorImplementation::TensorDescriptor(const std::string& inputName)>;
+
+std::shared_ptr<Network> buildTrainingRunsInputDistributionNetworkFromInputDescriptors(
+    const std::vector<std::string>& inputNames,
+    const TrainingRunsInputDescriptorResolver& inputDescriptorFor) {
+    if (inputNames.empty()) {
+        throw std::runtime_error("TrainingRuns ensemble input distribution requires at least one input name.");
+    }
+
+    std::set<std::string> seenInputNames;
+    auto distributor = std::make_shared<Network>("training_runs_ensemble_input_distribution");
+    for (const std::string& inputName : inputNames) {
+        if (inputName.empty()) {
+            throw std::runtime_error("TrainingRuns ensemble input distribution received an empty input name.");
+        }
+        if (!seenInputNames.insert(inputName).second) {
+            throw std::runtime_error("TrainingRuns ensemble input distribution received duplicate input name '" + inputName + "'.");
+        }
+
+        const ThorImplementation::TensorDescriptor descriptor = inputDescriptorFor(inputName);
+        const std::vector<uint64_t> dimensions = descriptor.getDimensions();
+        if (dimensions.empty()) {
+            throw std::runtime_error("TrainingRuns ensemble input distribution input '" + inputName + "' has invalid dimensions.");
+        }
+
+        NetworkInput input = NetworkInput::Builder()
+                                 .network(*distributor)
+                                 .name(inputName)
+                                 .dimensions(dimensions)
+                                 .dataType(descriptor.getDataType())
+                                 .dimensionsIncludeBatch(true)
+                                 .build();
+        NetworkOutput::Builder()
+            .network(*distributor)
+            .name(inputName)
+            .inputTensor(input.getFeatureOutput().value())
+            .dataType(descriptor.getDataType())
+            .build();
+    }
+    return distributor;
+}
+
+std::vector<std::string> collectPlacedMemberInputNamesForDistribution(const std::vector<std::shared_ptr<PlacedNetwork>>& placedMembers) {
+    if (placedMembers.empty()) {
+        throw std::runtime_error("TrainingRuns ensemble input distribution requires at least one placed member network.");
+    }
+    std::vector<std::string> inputNames = placedMembers.front()->getNetworkInputNames();
+    std::sort(inputNames.begin(), inputNames.end());
+    for (size_t memberIndex = 1; memberIndex < placedMembers.size(); ++memberIndex) {
+        std::vector<std::string> memberInputNames = placedMembers[memberIndex]->getNetworkInputNames();
+        std::sort(memberInputNames.begin(), memberInputNames.end());
+        if (memberInputNames != inputNames) {
+            throw std::runtime_error("TrainingRuns ensemble members have incompatible network input names for shared input distribution.");
+        }
+    }
+    return inputNames;
+}
+
+std::shared_ptr<Network> buildTrainingRunsInputDistributionNetwork(const std::vector<std::shared_ptr<PlacedNetwork>>& placedMembers) {
+    const std::vector<std::string> inputNames = collectPlacedMemberInputNamesForDistribution(placedMembers);
+    if (inputNames.empty()) {
+        throw std::runtime_error("TrainingRuns ensemble input distribution requires at least one network input.");
+    }
+
+    bool sawRaggedOrUnsupportedInput = false;
+    std::map<std::string, ThorImplementation::TensorDescriptor> descriptors;
+    for (const std::string& inputName : inputNames) {
+        std::optional<ThorImplementation::TensorDescriptor> referenceDescriptor;
+        for (size_t memberIndex = 0; memberIndex < placedMembers.size(); ++memberIndex) {
+            std::shared_ptr<ThorImplementation::NetworkInput> physicalInput =
+                placedMembers[memberIndex]->getStampedNetwork(0).getNamedInput(inputName);
+            if (physicalInput == nullptr) {
+                sawRaggedOrUnsupportedInput = true;
+                break;
+            }
+            std::optional<ThorImplementation::Tensor> featureOutput = physicalInput->getFeatureOutput();
+            if (!featureOutput.has_value()) {
+                sawRaggedOrUnsupportedInput = true;
+                break;
+            }
+            const ThorImplementation::TensorDescriptor descriptor = featureOutput->getDescriptor();
+            if (!referenceDescriptor.has_value()) {
+                referenceDescriptor = descriptor;
+            } else if (referenceDescriptor.value() != descriptor) {
+                throw std::runtime_error("TrainingRuns ensemble members have incompatible descriptor for input '" + inputName + "'.");
+            }
+        }
+        if (sawRaggedOrUnsupportedInput) {
+            break;
+        }
+        descriptors[inputName] = referenceDescriptor.value();
+    }
+
+    if (sawRaggedOrUnsupportedInput) {
+        // Ragged ensemble input distribution needs a values/offsets distributor and
+        // is intentionally left on the legacy per-member submission path for now.
+        return nullptr;
+    }
+
+    return buildTrainingRunsInputDistributionNetworkFromInputDescriptors(
+        inputNames, [&](const std::string& inputName) { return descriptors.at(inputName); });
 }
 
 ThorImplementation::DynamicExpression makeWeightedMeanExpression(const std::vector<std::string>& inputNames,
@@ -1436,65 +1949,387 @@ ThorImplementation::DynamicExpression makeWeightedMeanExpression(const std::vect
     return ThorImplementation::DynamicExpression::fromExpressionDefinition(definition);
 }
 
-std::shared_ptr<Network> buildTrainingRunsAccumulatorNetwork(const std::vector<std::shared_ptr<PlacedNetwork>>& placedMembers,
-                                                             const std::vector<double>& weights,
-                                                             const std::vector<std::string>& outputNames,
-                                                             uint64_t batchSize) {
-    if (placedMembers.empty()) {
+
+struct TrainingRunsComposedEnsembleEvaluator {
+    std::shared_ptr<Network> network = nullptr;
+    std::map<std::string, Tensor> sharedInputTensorsByName{};
+    std::vector<std::map<std::string, Tensor>> memberOutputTensorsByName{};
+    std::map<std::string, Tensor> averagedOutputTensorsByName{};
+    std::map<std::string, Tensor> lossOutputTensorsByName{};
+    std::vector<std::string> externalInputNames{};
+};
+
+std::string trainingRunsMemberScopedName(size_t memberIndex, const std::string& name) {
+    return "member_" + std::to_string(memberIndex) + "/" + name;
+}
+
+std::string trainingRunsComposedAccumulatorInputName(const std::string& outputName, size_t memberIndex) {
+    return "member_" + std::to_string(memberIndex) + "_" + outputName;
+}
+
+std::map<std::string, std::shared_ptr<NetworkInput>> apiNetworkInputsByName(Network& network, bool includePassThroughInputs = true) {
+    std::map<std::string, std::shared_ptr<NetworkInput>> inputsByName;
+    const uint32_t layerCount = network.getNumLayers();
+    for (uint32_t layerIndex = 0; layerIndex < layerCount; ++layerIndex) {
+        std::shared_ptr<NetworkInput> input = std::dynamic_pointer_cast<NetworkInput>(network.getLayer(layerIndex));
+        if (input == nullptr) {
+            continue;
+        }
+        if (!includePassThroughInputs && input->hasPassThroughSource()) {
+            continue;
+        }
+        if (!inputsByName.emplace(input->getName(), input).second) {
+            throw std::runtime_error("TrainingRuns composed ensemble evaluator found duplicate API NetworkInput named '" + input->getName() +
+                                     "' in network '" + network.getNetworkName() + "'.");
+        }
+    }
+    return inputsByName;
+}
+
+std::shared_ptr<NetworkInput> requiredApiNetworkInputByName(Network& network,
+                                                            const std::map<std::string, std::shared_ptr<NetworkInput>>& inputsByName,
+                                                            const std::string& inputName,
+                                                            const std::string& context) {
+    auto inputIt = inputsByName.find(inputName);
+    if (inputIt == inputsByName.end() || inputIt->second == nullptr) {
+        throw std::runtime_error(context + " is missing API NetworkInput '" + inputName + "' in network '" +
+                                 network.getNetworkName() + "'.");
+    }
+    if (!inputIt->second->getFeatureOutput().has_value()) {
+        throw std::runtime_error(context + " API NetworkInput '" + inputName + "' has no feature output.");
+    }
+    return inputIt->second;
+}
+
+void validateComposedEvaluatorMemberInputsCompatible(const NetworkInput& referenceInput,
+                                                     const NetworkInput& memberInput,
+                                                     size_t memberIndex,
+                                                     const std::string& inputName) {
+    if (referenceInput.getDimensions() != memberInput.getDimensions() || referenceInput.getDataType() != memberInput.getDataType() ||
+        referenceInput.dimensionsIncludeBatch() != memberInput.dimensionsIncludeBatch()) {
+        throw std::runtime_error("TrainingRuns composed ensemble evaluator member " + std::to_string(memberIndex) +
+                                 " has incompatible descriptor for input '" + inputName + "'.");
+    }
+}
+
+TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluatorThroughAccumulator(
+    const std::vector<std::shared_ptr<Network>>& memberNetworks,
+    const std::vector<double>& weights,
+    const std::vector<std::string>& outputNames) {
+    if (memberNetworks.empty()) {
+        throw std::runtime_error("TrainingRuns composed ensemble evaluator requires at least one member network.");
+    }
+    if (weights.size() != memberNetworks.size()) {
+        throw std::runtime_error("TrainingRuns composed ensemble evaluator requires one ensemble weight per member network.");
+    }
+    if (outputNames.empty()) {
+        throw std::runtime_error("TrainingRuns composed ensemble evaluator requires at least one output name.");
+    }
+    for (double weight : weights) {
+        if (!std::isfinite(weight) || weight <= 0.0) {
+            throw std::runtime_error("TrainingRuns composed ensemble evaluator weights must be finite and positive.");
+        }
+    }
+    for (size_t memberIndex = 0; memberIndex < memberNetworks.size(); ++memberIndex) {
+        if (memberNetworks[memberIndex] == nullptr) {
+            throw std::runtime_error("TrainingRuns composed ensemble evaluator received a null member network at index " +
+                                     std::to_string(memberIndex) + ".");
+        }
+    }
+
+    Network& referenceMember = *memberNetworks.front();
+    std::vector<std::string> referenceInputNames = referenceMember.getInferenceNetworkInputNames();
+    if (referenceInputNames.empty()) {
+        throw std::runtime_error("TrainingRuns composed ensemble evaluator requires at least one shared member inference input.");
+    }
+    const std::map<std::string, std::shared_ptr<NetworkInput>> referenceInputsByName =
+        apiNetworkInputsByName(referenceMember, /*includePassThroughInputs=*/false);
+
+    TrainingRunsComposedEnsembleEvaluator evaluator;
+    evaluator.network = std::make_shared<Network>("training_runs_composed_ensemble_evaluator");
+    evaluator.memberOutputTensorsByName.resize(memberNetworks.size());
+
+    std::set<std::string> seenReferenceInputNames;
+    for (const std::string& inputName : referenceInputNames) {
+        if (!seenReferenceInputNames.insert(inputName).second) {
+            throw std::runtime_error("TrainingRuns composed ensemble evaluator found duplicate shared input name '" + inputName + "'.");
+        }
+        std::shared_ptr<NetworkInput> referenceInput =
+            requiredApiNetworkInputByName(referenceMember, referenceInputsByName, inputName, "TrainingRuns composed ensemble evaluator reference member");
+        NetworkInput evaluatorInput = NetworkInput::Builder()
+                                          .network(*evaluator.network)
+                                          .name(inputName)
+                                          .dimensions(referenceInput->getDimensions())
+                                          .dataType(referenceInput->getDataType())
+                                          .dimensionsIncludeBatch(referenceInput->dimensionsIncludeBatch())
+                                          .build();
+        evaluator.sharedInputTensorsByName[inputName] = evaluatorInput.getFeatureOutput().value();
+        evaluator.externalInputNames.push_back(inputName);
+    }
+
+    std::set<std::string> referenceInputNameSet(referenceInputNames.begin(), referenceInputNames.end());
+    for (size_t memberIndex = 0; memberIndex < memberNetworks.size(); ++memberIndex) {
+        Network& memberNetwork = *memberNetworks[memberIndex];
+        std::vector<std::string> memberInputNames = memberNetwork.getInferenceNetworkInputNames();
+        std::set<std::string> memberInputNameSet(memberInputNames.begin(), memberInputNames.end());
+        if (memberInputNameSet != referenceInputNameSet || memberInputNames.size() != memberInputNameSet.size()) {
+            throw std::runtime_error("TrainingRuns composed ensemble evaluator members have incompatible inference input names.");
+        }
+
+        const std::map<std::string, std::shared_ptr<NetworkInput>> memberInputsByName =
+            apiNetworkInputsByName(memberNetwork, /*includePassThroughInputs=*/false);
+        ApiTensorRemap remap;
+        for (const std::string& inputName : referenceInputNames) {
+            std::shared_ptr<NetworkInput> referenceInput =
+                requiredApiNetworkInputByName(referenceMember, referenceInputsByName, inputName, "TrainingRuns composed ensemble evaluator reference member");
+            std::shared_ptr<NetworkInput> memberInput =
+                requiredApiNetworkInputByName(memberNetwork, memberInputsByName, inputName, "TrainingRuns composed ensemble evaluator member");
+            validateComposedEvaluatorMemberInputsCompatible(*referenceInput, *memberInput, memberIndex, inputName);
+
+            const Tensor& sharedInputTensor = evaluator.sharedInputTensorsByName.at(inputName);
+            NetworkInput memberPassThroughInput = NetworkInput::Builder()
+                                                      .network(*evaluator.network)
+                                                      .name(trainingRunsMemberScopedName(memberIndex, inputName))
+                                                      .passThroughSource(sharedInputTensor)
+                                                      .build();
+            remap.map(memberInput->getFeatureOutput().value(), memberPassThroughInput.getFeatureOutput().value());
+        }
+
+        ApiSubgraphCloneOptions cloneOptions;
+        cloneOptions.namePrefix = trainingRunsMemberScopedName(memberIndex, "");
+        ApiSubgraphCloneResult cloneResult = evaluator.network->cloneInferenceSubgraphInto(memberNetwork, outputNames, remap, cloneOptions);
+        evaluator.memberOutputTensorsByName[memberIndex] = std::move(cloneResult.outputTensorsByName);
+    }
+
+    for (size_t outputIndex = 0; outputIndex < outputNames.size(); ++outputIndex) {
+        (void)outputIndex;
+        const std::string& outputName = outputNames[outputIndex];
+        const auto referenceOutputIt = evaluator.memberOutputTensorsByName[0].find(outputName);
+        if (referenceOutputIt == evaluator.memberOutputTensorsByName[0].end()) {
+            throw std::runtime_error("TrainingRuns composed ensemble evaluator member 0 did not produce requested output '" + outputName + "'.");
+        }
+        Tensor referenceOutput = referenceOutputIt->second;
+        const std::vector<uint64_t> dimensions = referenceOutput.getDimensions();
+        const DataType dataType = referenceOutput.getDataType();
+
+        CustomLayer::TensorMap inputInterface;
+        std::vector<std::string> accumulatorInputNames;
+        accumulatorInputNames.reserve(memberNetworks.size());
+        for (size_t memberIndex = 0; memberIndex < memberNetworks.size(); ++memberIndex) {
+            const auto outputIt = evaluator.memberOutputTensorsByName[memberIndex].find(outputName);
+            if (outputIt == evaluator.memberOutputTensorsByName[memberIndex].end()) {
+                throw std::runtime_error("TrainingRuns composed ensemble evaluator member " + std::to_string(memberIndex) +
+                                         " did not produce requested output '" + outputName + "'.");
+            }
+            const Tensor& memberOutput = outputIt->second;
+            if (memberOutput.getDimensions() != dimensions || memberOutput.getDataType() != dataType) {
+                throw std::runtime_error("TrainingRuns composed ensemble evaluator members have incompatible descriptors for output '" +
+                                         outputName + "'.");
+            }
+            const std::string accumulatorInputName = trainingRunsComposedAccumulatorInputName(outputName, memberIndex);
+            accumulatorInputNames.push_back(accumulatorInputName);
+            inputInterface.emplace(accumulatorInputName, memberOutput);
+        }
+
+        CustomLayer accumulator = CustomLayer::Builder()
+                                      .network(*evaluator.network)
+                                      .expression(makeWeightedMeanExpression(accumulatorInputNames, weights, outputName, dataType))
+                                      .inputNames(accumulatorInputNames)
+                                      .outputNames({outputName})
+                                      .inputInterface(inputInterface)
+                                      .build();
+        Tensor averagedOutput = accumulator.getOutput(outputName);
+        evaluator.averagedOutputTensorsByName[outputName] = averagedOutput;
+        // Patch B exposes averaged outputs so the composed evaluator is a valid
+        // placeable inference graph before named loss/metric outputs are attached
+        // in the next patch. Patch C will replace these temporary outputs with
+        // scalar named metric outputs for the explicit metric evaluation path.
+        NetworkOutput::Builder().network(*evaluator.network).name(outputName).inputTensor(averagedOutput).dataType(dataType).build();
+    }
+
+    return evaluator;
+}
+
+Tensor trainingRunsEvaluatorInputTensorForGraphInput(TrainingRunsComposedEnsembleEvaluator& evaluator,
+                                                     Network& referenceMember,
+                                                     const std::map<std::string, std::shared_ptr<NetworkInput>>& referenceInputsByName,
+                                                     const std::string& inputName) {
+    auto existingIt = evaluator.sharedInputTensorsByName.find(inputName);
+    if (existingIt != evaluator.sharedInputTensorsByName.end()) {
+        return existingIt->second;
+    }
+    std::shared_ptr<NetworkInput> referenceInput =
+        requiredApiNetworkInputByName(referenceMember, referenceInputsByName, inputName, "TrainingRuns composed ensemble evaluator reference member");
+    NetworkInput evaluatorInput = NetworkInput::Builder()
+                                      .network(*evaluator.network)
+                                      .name(inputName)
+                                      .dimensions(referenceInput->getDimensions())
+                                      .dataType(referenceInput->getDataType())
+                                      .dimensionsIncludeBatch(referenceInput->dimensionsIncludeBatch())
+                                      .build();
+    Tensor tensor = evaluatorInput.getFeatureOutput().value();
+    evaluator.sharedInputTensorsByName[inputName] = tensor;
+    evaluator.externalInputNames.push_back(inputName);
+    return tensor;
+}
+
+Tensor buildTrainingRunsEvaluatorLoss(TrainingRunsComposedEnsembleEvaluator& evaluator,
+                                      const ResolvedEnsembleLoss& loss,
+                                      const Tensor& predictions,
+                                      const Tensor& labels,
+                                      std::optional<Tensor> exampleWeights) {
+    if (!std::isfinite(loss.lossWeight) || loss.lossWeight <= 0.0) {
+        throw std::runtime_error("TrainingRuns evaluator loss '" + loss.lossName + "' has invalid lossWeight.");
+    }
+    const DataType lossDataType = DataType::FP32;
+    const float evaluatorLossWeight = static_cast<float>(loss.lossWeight);
+    if (loss.lossType == "MAE") {
+        MAE::Builder builder;
+        builder.network(*evaluator.network).predictions(predictions).labels(labels).lossDataType(lossDataType).lossWeight(evaluatorLossWeight);
+        if (exampleWeights.has_value()) {
+            builder.exampleWeights(*exampleWeights);
+        }
+        return builder.build().getLoss();
+    }
+    if (loss.lossType == "MSE") {
+        MSE::Builder builder;
+        builder.network(*evaluator.network).predictions(predictions).labels(labels).lossDataType(lossDataType).lossWeight(evaluatorLossWeight);
+        if (exampleWeights.has_value()) {
+            builder.exampleWeights(*exampleWeights);
+        }
+        return builder.build().getLoss();
+    }
+    if (loss.lossType == "QuantileLoss") {
+        QuantileLoss::Builder builder;
+        builder.network(*evaluator.network)
+            .predictions(predictions)
+            .labels(labels)
+            .lossDataType(lossDataType)
+            .lossWeight(evaluatorLossWeight)
+            .quantile(static_cast<float>(loss.quantile.value_or(0.5)));
+        if (exampleWeights.has_value()) {
+            builder.exampleWeights(*exampleWeights);
+        }
+        return builder.build().getLoss();
+    }
+    if (loss.lossType == "CategoricalCrossEntropy") {
+        (void)exampleWeights;
+        return CategoricalCrossEntropy::Builder()
+            .network(*evaluator.network)
+            .predictions(predictions)
+            .labels(labels)
+            .lossDataType(lossDataType)
+            .lossWeight(evaluatorLossWeight)
+            .build()
+            .getLoss();
+    }
+    if (loss.lossType == "SparseCategoricalCrossEntropy") {
+        (void)exampleWeights;
+        const std::vector<uint64_t>& dims = predictions.getDimensions();
+        if (dims.empty() || dims.back() > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+            throw std::runtime_error("TrainingRuns evaluator cannot infer SparseCategoricalCrossEntropy numClasses for loss '" + loss.lossName + "'.");
+        }
+        return SparseCategoricalCrossEntropy::Builder()
+            .network(*evaluator.network)
+            .predictions(predictions)
+            .labels(labels)
+            .numClasses(static_cast<uint32_t>(dims.back()))
+            .lossDataType(lossDataType)
+            .lossWeight(evaluatorLossWeight)
+            .build()
+            .getLoss();
+    }
+    throw std::runtime_error("TrainingRuns composed ensemble evaluator does not yet support graph loss type '" + loss.lossType +
+                             "' for reported loss '" + loss.lossName + "'.");
+}
+
+TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluatorForLosses(
+    const std::vector<std::shared_ptr<Network>>& memberNetworks,
+    const std::vector<double>& weights,
+    const std::vector<ResolvedEnsembleLoss>& losses) {
+    if (losses.empty()) {
+        throw std::runtime_error("TrainingRuns composed ensemble evaluator requires at least one graph loss to report.");
+    }
+    std::vector<std::string> outputNames;
+    std::set<std::string> seenOutputs;
+    for (const ResolvedEnsembleLoss& loss : losses) {
+        if (seenOutputs.insert(loss.predictionOutputName).second) {
+            outputNames.push_back(loss.predictionOutputName);
+        }
+    }
+    TrainingRunsComposedEnsembleEvaluator evaluator =
+        buildTrainingRunsComposedEnsembleEvaluatorThroughAccumulator(memberNetworks, weights, outputNames);
+
+    Network& referenceMember = *memberNetworks.front();
+    const std::map<std::string, std::shared_ptr<NetworkInput>> referenceInputsByName =
+        apiNetworkInputsByName(referenceMember, /*includePassThroughInputs=*/false);
+    for (const ResolvedEnsembleLoss& loss : losses) {
+        const auto predictionIt = evaluator.averagedOutputTensorsByName.find(loss.predictionOutputName);
+        if (predictionIt == evaluator.averagedOutputTensorsByName.end()) {
+            throw std::runtime_error("TrainingRuns composed ensemble evaluator did not build averaged prediction output '" +
+                                     loss.predictionOutputName + "' for reported loss '" + loss.lossName + "'.");
+        }
+        Tensor labels = trainingRunsEvaluatorInputTensorForGraphInput(evaluator, referenceMember, referenceInputsByName, loss.targetInputName);
+        std::optional<Tensor> weightsTensor;
+        if (loss.weightInputName.has_value()) {
+            weightsTensor = trainingRunsEvaluatorInputTensorForGraphInput(evaluator, referenceMember, referenceInputsByName, *loss.weightInputName);
+        }
+        Tensor lossTensor = buildTrainingRunsEvaluatorLoss(evaluator, loss, predictionIt->second, labels, weightsTensor);
+        evaluator.lossOutputTensorsByName[loss.lossName] = lossTensor;
+        NetworkOutput::Builder().network(*evaluator.network).name(loss.lossName).inputTensor(lossTensor).dataType(DataType::FP32).build();
+    }
+    return evaluator;
+}
+
+using TrainingRunsMemberOutputTensorResolver = std::function<ThorImplementation::Tensor(const std::string& outputName, size_t memberIndex)>;
+
+std::shared_ptr<Network> buildTrainingRunsAccumulatorNetworkFromMemberOutputTensors(
+    size_t memberCount,
+    const std::vector<double>& weights,
+    const std::vector<std::string>& outputNames,
+    uint64_t batchSize,
+    const TrainingRunsMemberOutputTensorResolver& memberOutputTensorFor) {
+    if (memberCount == 0) {
         throw std::runtime_error("TrainingRuns ensemble accumulator requires at least one placed member.");
     }
     if (outputNames.empty()) {
         throw std::runtime_error("TrainingRuns ensemble accumulator requires at least one prediction output name.");
     }
-    if (weights.size() != placedMembers.size()) {
+    if (weights.size() != memberCount) {
         throw std::runtime_error("TrainingRuns ensemble accumulator requires one weight per placed member.");
     }
 
     auto accumulator = std::make_shared<Network>("training_runs_ensemble_accumulator");
-    ThorImplementation::StampedNetwork& referenceStamp = placedMembers.front()->getStampedNetwork(0);
     for (size_t outputIndex = 0; outputIndex < outputNames.size(); ++outputIndex) {
         const std::string& outputName = outputNames[outputIndex];
-        auto referenceOutput = referenceStamp.getNamedOutput(outputName);
-        if (referenceOutput == nullptr) {
-            throw std::runtime_error("TrainingRuns ensemble member does not expose prediction output '" + outputName + "'.");
-        }
-        std::optional<ThorImplementation::Tensor> referenceTensor = referenceOutput->getFeatureOutputForSlot(0);
-        if (!referenceTensor.has_value()) {
-            throw std::runtime_error("TrainingRuns ensemble member prediction output '" + outputName + "' does not have a physical tensor.");
-        }
-        const std::vector<uint64_t> dimensions = referenceTensor.value().getDimensions();
+        ThorImplementation::Tensor referenceTensor = memberOutputTensorFor(outputName, /*memberIndex=*/0);
+        const std::vector<uint64_t> dimensions = referenceTensor.getDimensions();
         if (dimensions.empty() || dimensions.front() != batchSize) {
             throw std::runtime_error("TrainingRuns ensemble accumulator output '" + outputName + "' has an unexpected batch dimension.");
         }
-        const DataType dataType = referenceTensor.value().getDataType();
+        const DataType dataType = referenceTensor.getDataType();
 
         CustomLayer::TensorMap inputInterface;
         std::vector<std::string> inputNames;
-        inputNames.reserve(placedMembers.size());
-        for (size_t memberIndex = 0; memberIndex < placedMembers.size(); ++memberIndex) {
-            ThorImplementation::StampedNetwork& memberStamp = placedMembers[memberIndex]->getStampedNetwork(0);
-            auto memberOutput = memberStamp.getNamedOutput(outputName);
-            if (memberOutput == nullptr) {
-                throw std::runtime_error("TrainingRuns ensemble member does not expose prediction output '" + outputName + "'.");
-            }
-            std::optional<ThorImplementation::Tensor> memberTensor = memberOutput->getFeatureOutputForSlot(0);
-            if (!memberTensor.has_value() || memberTensor.value().getDescriptor() != referenceTensor.value().getDescriptor()) {
+        inputNames.reserve(memberCount);
+        for (size_t memberIndex = 0; memberIndex < memberCount; ++memberIndex) {
+            ThorImplementation::Tensor memberTensor = memberOutputTensorFor(outputName, memberIndex);
+            if (memberTensor.getDescriptor() != referenceTensor.getDescriptor()) {
                 throw std::runtime_error("TrainingRuns ensemble member prediction output '" + outputName + "' descriptors do not match.");
             }
 
             const std::string inputName = trainingRunsAccumulatorInputName(outputIndex, memberIndex);
             inputNames.push_back(inputName);
-            // Compose the accumulator over the member output tensor itself.  The
-            // NetworkInput is still named so submitBatch can attach the member
-            // output ready event, but no accumulator-side staging/copy tensor is
-            // allocated and the CustomLayer binds to the producer tensor identity.
+            // This is now a normal API NetworkInput.  API builders no longer
+            // accept implementation tensors for pass-through composition; the
+            // fully optimized path should be rebuilt as one API-composed graph
+            // where member outputs feed the accumulator through API tensors.
             NetworkInput input = NetworkInput::Builder()
                                      .network(*accumulator)
                                      .name(inputName)
                                      .dimensions(dimensions)
                                      .dataType(dataType)
                                      .dimensionsIncludeBatch(true)
-                                     .passThroughPhysicalSource(memberTensor.value())
                                      .build();
             inputInterface.emplace(inputName, input.getFeatureOutput().value());
         }
@@ -1514,6 +2349,29 @@ std::shared_ptr<Network> buildTrainingRunsAccumulatorNetwork(const std::vector<s
             .build();
     }
     return accumulator;
+}
+
+std::shared_ptr<Network> buildTrainingRunsAccumulatorNetwork(const std::vector<std::shared_ptr<PlacedNetwork>>& placedMembers,
+                                                             const std::vector<double>& weights,
+                                                             const std::vector<std::string>& outputNames,
+                                                             uint64_t batchSize) {
+    return buildTrainingRunsAccumulatorNetworkFromMemberOutputTensors(
+        placedMembers.size(),
+        weights,
+        outputNames,
+        batchSize,
+        [&](const std::string& outputName, size_t memberIndex) {
+            ThorImplementation::StampedNetwork& memberStamp = placedMembers.at(memberIndex)->getStampedNetwork(0);
+            auto memberOutput = memberStamp.getNamedOutput(outputName);
+            if (memberOutput == nullptr) {
+                throw std::runtime_error("TrainingRuns ensemble member does not expose prediction output '" + outputName + "'.");
+            }
+            std::optional<ThorImplementation::Tensor> memberTensor = memberOutput->getFeatureOutputForSlot(0);
+            if (!memberTensor.has_value()) {
+                throw std::runtime_error("TrainingRuns ensemble member prediction output '" + outputName + "' does not have a physical tensor.");
+            }
+            return memberTensor.value();
+        });
 }
 
 PlacedEnsembleArtifacts loadPlacedMemberArtifacts(const std::vector<EnsembleMemberSpecRef>& members,
@@ -1565,6 +2423,21 @@ PlacedEnsembleArtifacts loadPlacedMemberArtifacts(const std::vector<EnsembleMemb
         artifacts.weights.push_back(member.spec->ensembleWeight);
     }
 
+    artifacts.distributedInputNames = collectPlacedMemberInputNamesForDistribution(artifacts.placedMembers);
+    artifacts.inputDistributionNetwork = buildTrainingRunsInputDistributionNetwork(artifacts.placedMembers);
+    if (artifacts.inputDistributionNetwork != nullptr) {
+        std::vector<Event> inputDistributionInitDoneEvents;
+        artifacts.placedInputDistribution = artifacts.inputDistributionNetwork->place(static_cast<uint32_t>(batchSize),
+                                                                                     inputDistributionInitDoneEvents,
+                                                                                     /*inferenceOnly=*/true,
+                                                                                     /*forcedDevices=*/{},
+                                                                                     /*forcedNumStampsPerGpu=*/0,
+                                                                                     /*networkOutputsOnGpu=*/true);
+        for (Event& event : inputDistributionInitDoneEvents) {
+            event.synchronize();
+        }
+    }
+
     artifacts.accumulatorNetwork = buildTrainingRunsAccumulatorNetwork(artifacts.placedMembers, artifacts.weights, outputNames, batchSize);
     std::vector<Event> accumulatorInitDoneEvents;
     artifacts.placedAccumulator = artifacts.accumulatorNetwork->place(static_cast<uint32_t>(batchSize),
@@ -1608,11 +2481,13 @@ struct PredictionEvaluationMetrics {
     uint64_t rows = 0;
 };
 
-Batch inferenceBatchForPlacedNetwork(PlacedNetwork& placedNetwork, const Batch& sourceBatch) {
+Batch inferenceBatchForInputNames(const std::vector<std::string>& inputNames,
+                                  const Batch& sourceBatch,
+                                  const std::string& missingInputContext) {
     Batch inferenceBatch;
-    for (const std::string& inputName : placedNetwork.getNetworkInputNames()) {
+    for (const std::string& inputName : inputNames) {
         if (!sourceBatch.contains(inputName)) {
-            throw std::runtime_error("TrainingRuns ensemble evaluation batch is missing inference input '" + inputName + "'.");
+            throw std::runtime_error(missingInputContext + " is missing inference input '" + inputName + "'.");
         }
         const BatchValue& value = sourceBatch.at(inputName);
         if (std::holds_alternative<ThorImplementation::Tensor>(value)) {
@@ -1620,24 +2495,234 @@ Batch inferenceBatchForPlacedNetwork(PlacedNetwork& placedNetwork, const Batch& 
         } else if (std::holds_alternative<ThorImplementation::RaggedTensor>(value)) {
             inferenceBatch.insert(inputName, std::get<ThorImplementation::RaggedTensor>(value));
         } else {
-            throw std::runtime_error("TrainingRuns ensemble evaluation batch input '" + inputName + "' has an unsupported value type.");
+            throw std::runtime_error(missingInputContext + " input '" + inputName + "' has an unsupported value type.");
         }
     }
     return inferenceBatch;
 }
 
-Batch accumulatorBatchForMemberOutputs(const std::vector<std::map<std::string, ThorImplementation::Tensor>>& memberOutputs,
-                                       const std::string& predictionOutputName) {
-    Batch accumulatorBatch;
-    for (size_t memberIndex = 0; memberIndex < memberOutputs.size(); ++memberIndex) {
-        const auto outputIt = memberOutputs[memberIndex].find(predictionOutputName);
-        if (outputIt == memberOutputs[memberIndex].end()) {
-            throw std::runtime_error("TrainingRuns ensemble evaluation did not receive prediction output '" + predictionOutputName + "'.");
+Batch inferenceBatchForPlacedNetwork(PlacedNetwork& placedNetwork, const Batch& sourceBatch) {
+    return inferenceBatchForInputNames(placedNetwork.getNetworkInputNames(),
+                                       sourceBatch,
+                                       "TrainingRuns ensemble evaluation batch");
+}
+
+struct TrainingRunsDistributedInputBatchResult {
+    std::map<std::string, ThorImplementation::Tensor> inputs{};
+    std::map<std::string, Event> inputReadyEvents{};
+};
+
+TrainingRunsDistributedInputBatchResult runTrainingRunsInputDistributionForBatch(const PlacedEnsembleArtifacts& artifacts,
+                                                                                const Batch& sourceBatch) {
+    if (artifacts.placedInputDistribution == nullptr) {
+        throw std::runtime_error("TrainingRuns ensemble input distribution is not placed for this ensemble group.");
+    }
+
+    Batch distributionBatch = inferenceBatchForInputNames(artifacts.distributedInputNames,
+                                                          sourceBatch,
+                                                          "TrainingRuns ensemble input distribution batch");
+    if (!distributionBatch.isDenseOnly()) {
+        throw std::runtime_error("TrainingRuns ensemble input distribution currently supports dense tensor inputs only.");
+    }
+
+    TrainingRunsDistributedInputBatchResult result;
+    artifacts.placedInputDistribution->submitBatch(/*stampIndex=*/0,
+                                                   distributionBatch,
+                                                   result.inputs,
+                                                   result.inputReadyEvents,
+                                                   /*isInferenceOnly=*/true,
+                                                   /*reusableProcessingFinishedEvent=*/nullptr,
+                                                   /*waitForOutputsOnProcessingStream=*/true);
+    for (const std::string& inputName : artifacts.distributedInputNames) {
+        if (result.inputs.find(inputName) == result.inputs.end()) {
+            throw std::runtime_error("TrainingRuns ensemble input distribution did not produce input '" + inputName + "'.");
         }
-        accumulatorBatch.insert(trainingRunsAccumulatorInputName(/*outputIndex=*/0, memberIndex), outputIt->second);
+        if (result.inputReadyEvents.find(inputName) == result.inputReadyEvents.end()) {
+            throw std::runtime_error("TrainingRuns ensemble input distribution did not produce a ready event for input '" + inputName + "'.");
+        }
+    }
+    return result;
+}
+
+std::map<std::string, ThorImplementation::Tensor> memberInputTensorMapFromDistributedInputNames(
+    const std::vector<std::string>& inputNames,
+    const std::map<std::string, ThorImplementation::Tensor>& distributedInputTensors) {
+    std::map<std::string, ThorImplementation::Tensor> memberInputs;
+    for (const std::string& inputName : inputNames) {
+        const auto inputIt = distributedInputTensors.find(inputName);
+        if (inputIt == distributedInputTensors.end()) {
+            throw std::runtime_error("TrainingRuns ensemble distributed input batch is missing member input '" + inputName + "'.");
+        }
+        memberInputs[inputName] = inputIt->second;
+    }
+    return memberInputs;
+}
+
+std::map<std::string, ThorImplementation::Tensor> memberInputTensorMapFromDistributedInputs(
+    PlacedNetwork& placedMember,
+    const TrainingRunsDistributedInputBatchResult& distributedInputs) {
+    return memberInputTensorMapFromDistributedInputNames(placedMember.getNetworkInputNames(), distributedInputs.inputs);
+}
+
+std::map<std::string, Event> memberInputReadyEventsFromDistributedInputs(
+    PlacedNetwork& placedMember,
+    const TrainingRunsDistributedInputBatchResult& distributedInputs) {
+    std::map<std::string, Event> inputReadyEvents;
+    for (const std::string& inputName : placedMember.getNetworkInputNames()) {
+        const auto eventIt = distributedInputs.inputReadyEvents.find(inputName);
+        if (eventIt == distributedInputs.inputReadyEvents.end()) {
+            throw std::runtime_error("TrainingRuns ensemble distributed input batch is missing ready event for member input '" + inputName + "'.");
+        }
+        inputReadyEvents[inputName] = eventIt->second;
+    }
+    return inputReadyEvents;
+}
+
+std::map<std::string, Event> accumulatorInputReadyEventsForMemberOutputs(
+    const std::vector<std::map<std::string, Event>>& memberOutputReadyEvents,
+    const std::vector<std::string>& outputNames) {
+    if (outputNames.empty()) {
+        throw std::runtime_error("TrainingRuns ensemble accumulator ready-event map requires at least one prediction output name.");
+    }
+
+    std::map<std::string, Event> inputReadyEvents;
+    for (size_t outputIndex = 0; outputIndex < outputNames.size(); ++outputIndex) {
+        const std::string& outputName = outputNames[outputIndex];
+        for (size_t memberIndex = 0; memberIndex < memberOutputReadyEvents.size(); ++memberIndex) {
+            const auto eventIt = memberOutputReadyEvents[memberIndex].find(outputName);
+            if (eventIt == memberOutputReadyEvents[memberIndex].end()) {
+                throw std::runtime_error("TrainingRuns ensemble evaluation did not receive a ready event for prediction output '" + outputName + "'.");
+            }
+            inputReadyEvents[trainingRunsAccumulatorInputName(outputIndex, memberIndex)] = eventIt->second;
+        }
+    }
+    return inputReadyEvents;
+}
+
+Batch accumulatorBatchForMemberOutputs(const std::vector<std::map<std::string, ThorImplementation::Tensor>>& memberOutputs,
+                                       const std::vector<std::string>& outputNames) {
+    if (outputNames.empty()) {
+        throw std::runtime_error("TrainingRuns ensemble accumulator batch requires at least one prediction output name.");
+    }
+
+    Batch accumulatorBatch;
+    for (size_t outputIndex = 0; outputIndex < outputNames.size(); ++outputIndex) {
+        const std::string& outputName = outputNames[outputIndex];
+        for (size_t memberIndex = 0; memberIndex < memberOutputs.size(); ++memberIndex) {
+            const auto outputIt = memberOutputs[memberIndex].find(outputName);
+            if (outputIt == memberOutputs[memberIndex].end()) {
+                throw std::runtime_error("TrainingRuns ensemble evaluation did not receive prediction output '" + outputName + "'.");
+            }
+            accumulatorBatch.insert(trainingRunsAccumulatorInputName(outputIndex, memberIndex), outputIt->second);
+        }
     }
     return accumulatorBatch;
 }
+
+struct EnsembleAccumulatorBatchResult {
+    std::vector<std::map<std::string, ThorImplementation::Tensor>> memberOutputs{};
+    std::vector<std::map<std::string, Event>> memberOutputReadyEvents{};
+    std::map<std::string, ThorImplementation::Tensor> averagedOutputs{};
+    std::map<std::string, Event> averagedOutputReadyEvents{};
+};
+
+EnsembleAccumulatorBatchResult runTrainingRunsAccumulatorWithDistributedInputsForBatch(const PlacedEnsembleArtifacts& artifacts,
+                                                                                      const Batch& sourceBatch) {
+    TrainingRunsDistributedInputBatchResult distributedInputs = runTrainingRunsInputDistributionForBatch(artifacts, sourceBatch);
+
+    EnsembleAccumulatorBatchResult result;
+    result.memberOutputs.reserve(artifacts.placedMembers.size());
+    result.memberOutputReadyEvents.reserve(artifacts.placedMembers.size());
+    for (const std::shared_ptr<PlacedNetwork>& placedMember : artifacts.placedMembers) {
+        std::map<std::string, ThorImplementation::Tensor> memberInputs =
+            memberInputTensorMapFromDistributedInputs(*placedMember, distributedInputs);
+        std::map<std::string, Event> memberInputReadyEvents =
+            memberInputReadyEventsFromDistributedInputs(*placedMember, distributedInputs);
+
+        std::map<std::string, ThorImplementation::Tensor> outputs;
+        std::map<std::string, Event> outputReadyEvents;
+        placedMember->submitBatch(/*stampIndex=*/0,
+                                  std::move(memberInputs),
+                                  memberInputReadyEvents,
+                                  outputs,
+                                  outputReadyEvents,
+                                  /*isInferenceOnly=*/true,
+                                  /*reusableProcessingFinishedEvent=*/nullptr,
+                                  /*waitForOutputsOnProcessingStream=*/true);
+        for (const std::string& outputName : artifacts.accumulatorOutputNames) {
+            if (outputs.find(outputName) == outputs.end()) {
+                throw std::runtime_error("TrainingRuns ensemble evaluation did not receive prediction output '" + outputName + "'.");
+            }
+            if (outputReadyEvents.find(outputName) == outputReadyEvents.end()) {
+                throw std::runtime_error("TrainingRuns ensemble evaluation did not receive a ready event for prediction output '" + outputName + "'.");
+            }
+        }
+        result.memberOutputs.push_back(std::move(outputs));
+        result.memberOutputReadyEvents.push_back(std::move(outputReadyEvents));
+    }
+
+    Batch accumulatorBatch = accumulatorBatchForMemberOutputs(result.memberOutputs, artifacts.accumulatorOutputNames);
+    std::map<std::string, ThorImplementation::Tensor> accumulatorInputTensors =
+        denseTensorMapFromBatchOrThrow(accumulatorBatch, "TrainingRuns ensemble accumulator batch");
+    std::map<std::string, Event> accumulatorInputReadyEvents =
+        accumulatorInputReadyEventsForMemberOutputs(result.memberOutputReadyEvents, artifacts.accumulatorOutputNames);
+    Event accumulatorDone = artifacts.placedAccumulator->submitBatch(/*stampIndex=*/0,
+                                                                     std::move(accumulatorInputTensors),
+                                                                     accumulatorInputReadyEvents,
+                                                                     result.averagedOutputs,
+                                                                     result.averagedOutputReadyEvents,
+                                                                     /*isInferenceOnly=*/true,
+                                                                     /*reusableProcessingFinishedEvent=*/nullptr,
+                                                                     /*waitForOutputsOnProcessingStream=*/true);
+    accumulatorDone.synchronize();
+    for (const std::string& outputName : artifacts.accumulatorOutputNames) {
+        if (result.averagedOutputs.find(outputName) == result.averagedOutputs.end()) {
+            throw std::runtime_error("TrainingRuns ensemble accumulator did not produce prediction output '" + outputName + "'.");
+        }
+        if (result.averagedOutputReadyEvents.find(outputName) == result.averagedOutputReadyEvents.end()) {
+            throw std::runtime_error("TrainingRuns ensemble accumulator did not produce a ready event for prediction output '" + outputName + "'.");
+        }
+    }
+    return result;
+}
+
+EnsembleAccumulatorBatchResult runTrainingRunsAccumulatorLegacyForBatch(const PlacedEnsembleArtifacts& artifacts, const Batch& sourceBatch) {
+    EnsembleAccumulatorBatchResult result;
+    result.memberOutputs.reserve(artifacts.placedMembers.size());
+    for (const std::shared_ptr<PlacedNetwork>& placedMember : artifacts.placedMembers) {
+        Batch inferenceBatch = inferenceBatchForPlacedNetwork(*placedMember, sourceBatch);
+        std::map<std::string, ThorImplementation::Tensor> outputs = placedMember->infer(inferenceBatch);
+        for (const std::string& outputName : artifacts.accumulatorOutputNames) {
+            if (outputs.find(outputName) == outputs.end()) {
+                throw std::runtime_error("TrainingRuns ensemble evaluation did not receive prediction output '" + outputName + "'.");
+            }
+        }
+        result.memberOutputs.push_back(std::move(outputs));
+    }
+
+    Batch accumulatorBatch = accumulatorBatchForMemberOutputs(result.memberOutputs, artifacts.accumulatorOutputNames);
+    result.averagedOutputs = artifacts.placedAccumulator->infer(accumulatorBatch);
+    for (const std::string& outputName : artifacts.accumulatorOutputNames) {
+        if (result.averagedOutputs.find(outputName) == result.averagedOutputs.end()) {
+            throw std::runtime_error("TrainingRuns ensemble accumulator did not produce prediction output '" + outputName + "'.");
+        }
+    }
+    return result;
+}
+
+EnsembleAccumulatorBatchResult runTrainingRunsAccumulatorForBatch(const PlacedEnsembleArtifacts& artifacts, const Batch& sourceBatch) {
+    if (artifacts.placedMembers.empty()) {
+        throw std::runtime_error("TrainingRuns ensemble evaluation requires at least one placed member network.");
+    }
+    if (artifacts.placedAccumulator == nullptr) {
+        throw std::runtime_error("TrainingRuns ensemble evaluation requires a placed accumulator network.");
+    }
+    if (artifacts.placedInputDistribution != nullptr) {
+        return runTrainingRunsAccumulatorWithDistributedInputsForBatch(artifacts, sourceBatch);
+    }
+    return runTrainingRunsAccumulatorLegacyForBatch(artifacts, sourceBatch);
+}
+
 
 std::string structuralLabelInputNameForPredictionOutput(const PlacedEnsembleArtifacts& artifacts,
                                                         const std::string& predictionOutputName) {
@@ -1718,15 +2803,12 @@ PredictionEvaluationMetrics evaluateEnsemblePredictionMetricsOnLoader(const Plac
         }
         const std::vector<double> labels = tensorToDoubleVector(labelsTensor);
 
-        std::vector<std::map<std::string, ThorImplementation::Tensor>> memberOutputMaps;
-        memberOutputMaps.reserve(artifacts.placedMembers.size());
+        EnsembleAccumulatorBatchResult accumulatorResult = runTrainingRunsAccumulatorForBatch(artifacts, batch);
         std::vector<std::vector<double>> memberPredictions;
-        memberPredictions.reserve(artifacts.placedMembers.size());
-        for (const std::shared_ptr<PlacedNetwork>& placedMember : artifacts.placedMembers) {
-            Batch inferenceBatch = inferenceBatchForPlacedNetwork(*placedMember, batch);
-            std::map<std::string, ThorImplementation::Tensor> outputs = placedMember->infer(inferenceBatch);
-            auto outputIt = outputs.find(predictionOutputName);
-            if (outputIt == outputs.end()) {
+        memberPredictions.reserve(accumulatorResult.memberOutputs.size());
+        for (const std::map<std::string, ThorImplementation::Tensor>& memberOutputs : accumulatorResult.memberOutputs) {
+            auto outputIt = memberOutputs.find(predictionOutputName);
+            if (outputIt == memberOutputs.end()) {
                 throw std::runtime_error("TrainingRuns ensemble evaluation did not receive prediction output '" + predictionOutputName + "'.");
             }
             ThorImplementation::Tensor predictionTensor = outputIt->second;
@@ -1737,16 +2819,10 @@ PredictionEvaluationMetrics evaluateEnsemblePredictionMetricsOnLoader(const Plac
                 throw std::runtime_error("TrainingRuns ensemble prediction tensor and labels tensor have incompatible class/value dimensions.");
             }
             memberPredictions.push_back(tensorToDoubleVector(predictionTensor));
-            memberOutputMaps.push_back(std::move(outputs));
         }
 
-        if (artifacts.placedAccumulator == nullptr) {
-            throw std::runtime_error("TrainingRuns ensemble evaluation requires a placed accumulator network.");
-        }
-        Batch accumulatorBatch = accumulatorBatchForMemberOutputs(memberOutputMaps, predictionOutputName);
-        std::map<std::string, ThorImplementation::Tensor> accumulatorOutputs = artifacts.placedAccumulator->infer(accumulatorBatch);
-        auto ensembleOutputIt = accumulatorOutputs.find(predictionOutputName);
-        if (ensembleOutputIt == accumulatorOutputs.end()) {
+        auto ensembleOutputIt = accumulatorResult.averagedOutputs.find(predictionOutputName);
+        if (ensembleOutputIt == accumulatorResult.averagedOutputs.end()) {
             throw std::runtime_error("TrainingRuns ensemble accumulator did not produce prediction output '" + predictionOutputName + "'.");
         }
         ThorImplementation::Tensor ensemblePredictionTensor = ensembleOutputIt->second;
@@ -1877,13 +2953,10 @@ std::optional<double> evaluateEnsemblePredictionLossOnLoader(const PlacedEnsembl
         }
         const std::vector<double> labels = tensorToDoubleVector(labelsTensor);
 
-        std::vector<std::map<std::string, ThorImplementation::Tensor>> memberOutputMaps;
-        memberOutputMaps.reserve(artifacts.placedMembers.size());
-        for (const std::shared_ptr<PlacedNetwork>& placedMember : artifacts.placedMembers) {
-            Batch inferenceBatch = inferenceBatchForPlacedNetwork(*placedMember, batch);
-            std::map<std::string, ThorImplementation::Tensor> outputs = placedMember->infer(inferenceBatch);
-            auto outputIt = outputs.find(predictionOutputName);
-            if (outputIt == outputs.end()) {
+        EnsembleAccumulatorBatchResult accumulatorResult = runTrainingRunsAccumulatorForBatch(artifacts, batch);
+        for (const std::map<std::string, ThorImplementation::Tensor>& memberOutputs : accumulatorResult.memberOutputs) {
+            auto outputIt = memberOutputs.find(predictionOutputName);
+            if (outputIt == memberOutputs.end()) {
                 throw std::runtime_error("TrainingRuns ensemble evaluation did not receive prediction output '" + predictionOutputName + "'.");
             }
             ThorImplementation::Tensor predictionTensor = outputIt->second;
@@ -1893,16 +2966,10 @@ std::optional<double> evaluateEnsemblePredictionLossOnLoader(const PlacedEnsembl
             if (lastDimensionOrThrow(predictionTensor, predictionOutputName) != labelLastDim) {
                 throw std::runtime_error("TrainingRuns ensemble prediction tensor and labels tensor have incompatible class/value dimensions.");
             }
-            memberOutputMaps.push_back(std::move(outputs));
         }
 
-        if (artifacts.placedAccumulator == nullptr) {
-            throw std::runtime_error("TrainingRuns ensemble evaluation requires a placed accumulator network.");
-        }
-        Batch accumulatorBatch = accumulatorBatchForMemberOutputs(memberOutputMaps, predictionOutputName);
-        std::map<std::string, ThorImplementation::Tensor> accumulatorOutputs = artifacts.placedAccumulator->infer(accumulatorBatch);
-        auto ensembleOutputIt = accumulatorOutputs.find(predictionOutputName);
-        if (ensembleOutputIt == accumulatorOutputs.end()) {
+        auto ensembleOutputIt = accumulatorResult.averagedOutputs.find(predictionOutputName);
+        if (ensembleOutputIt == accumulatorResult.averagedOutputs.end()) {
             throw std::runtime_error("TrainingRuns ensemble accumulator did not produce prediction output '" + predictionOutputName + "'.");
         }
         ThorImplementation::Tensor ensemblePredictionTensor = ensembleOutputIt->second;
@@ -1950,6 +3017,133 @@ std::optional<double> evaluateEnsemblePredictionLossOnLoader(const PlacedEnsembl
 }
 
 }  // namespace
+
+namespace Testing {
+
+
+std::vector<std::string> trainingRunsComposedEvaluatorExternalInputNamesForTest(
+    const std::vector<std::shared_ptr<Network>>& memberNetworks,
+    const std::vector<double>& weights,
+    const std::vector<std::string>& outputNames) {
+    TrainingRunsComposedEnsembleEvaluator evaluator =
+        buildTrainingRunsComposedEnsembleEvaluatorThroughAccumulator(memberNetworks, weights, outputNames);
+    return evaluator.network->getInferenceNetworkInputNames();
+}
+
+std::map<std::string, bool> trainingRunsComposedEvaluatorMemberInputAliasStatesForTest(
+    const std::vector<std::shared_ptr<Network>>& memberNetworks,
+    const std::vector<double>& weights,
+    const std::vector<std::string>& outputNames) {
+    TrainingRunsComposedEnsembleEvaluator evaluator =
+        buildTrainingRunsComposedEnsembleEvaluatorThroughAccumulator(memberNetworks, weights, outputNames);
+
+    std::map<std::string, bool> states;
+    for (uint32_t layerIndex = 0; layerIndex < evaluator.network->getNumLayers(); ++layerIndex) {
+        std::shared_ptr<NetworkInput> input = std::dynamic_pointer_cast<NetworkInput>(evaluator.network->getLayer(layerIndex));
+        if (input == nullptr || !input->hasPassThroughSource()) {
+            continue;
+        }
+        const std::string name = input->getName();
+        const std::string memberPrefix = "member_";
+        if (name.rfind(memberPrefix, 0) != 0) {
+            continue;
+        }
+        const size_t slash = name.find('/');
+        if (slash == std::string::npos || slash + 1 >= name.size()) {
+            states[name] = false;
+            continue;
+        }
+        const std::string inputName = name.substr(slash + 1);
+        auto sharedIt = evaluator.sharedInputTensorsByName.find(inputName);
+        states[name] = sharedIt != evaluator.sharedInputTensorsByName.end() &&
+                       input->getPassThroughSource() == sharedIt->second &&
+                       input->getFeatureOutput().has_value() &&
+                       input->getFeatureOutput().value() == sharedIt->second;
+    }
+    return states;
+}
+
+std::map<std::string, std::vector<uint64_t>> trainingRunsComposedEvaluatorAveragedOutputDimensionsForTest(
+    const std::vector<std::shared_ptr<Network>>& memberNetworks,
+    const std::vector<double>& weights,
+    const std::vector<std::string>& outputNames) {
+    TrainingRunsComposedEnsembleEvaluator evaluator =
+        buildTrainingRunsComposedEnsembleEvaluatorThroughAccumulator(memberNetworks, weights, outputNames);
+
+    std::map<std::string, std::vector<uint64_t>> dimensionsByName;
+    for (const auto& [outputName, tensor] : evaluator.averagedOutputTensorsByName) {
+        dimensionsByName[outputName] = tensor.getDimensions();
+    }
+    return dimensionsByName;
+}
+
+std::map<std::string, std::string> trainingRunsComposedEvaluatorAveragedOutputDataTypesForTest(
+    const std::vector<std::shared_ptr<Network>>& memberNetworks,
+    const std::vector<double>& weights,
+    const std::vector<std::string>& outputNames) {
+    TrainingRunsComposedEnsembleEvaluator evaluator =
+        buildTrainingRunsComposedEnsembleEvaluatorThroughAccumulator(memberNetworks, weights, outputNames);
+
+    std::map<std::string, std::string> dataTypesByName;
+    for (const auto& [outputName, tensor] : evaluator.averagedOutputTensorsByName) {
+        dataTypesByName[outputName] = ThorImplementation::TensorDescriptor::getElementTypeName(tensor.getDataType());
+    }
+    return dataTypesByName;
+}
+
+std::optional<double> trainingRunsWeightedLossSumFromWeightedLossValuesForTest(
+    const std::vector<std::optional<double>>& weightedLossValues) {
+    return weightedLossSumFromWeightedLossValues(weightedLossValues);
+}
+
+Batch trainingRunsAccumulatorBatchForMemberOutputsForTest(
+    const std::vector<std::map<std::string, ThorImplementation::Tensor>>& memberOutputs,
+    const std::vector<std::string>& outputNames) {
+    return accumulatorBatchForMemberOutputs(memberOutputs, outputNames);
+}
+
+std::map<std::string, uint64_t> trainingRunsInputDistributionLayerCountsForTest(
+    const std::map<std::string, ThorImplementation::TensorDescriptor>& inputDescriptors) {
+    std::vector<std::string> inputNames;
+    inputNames.reserve(inputDescriptors.size());
+    for (const auto& [inputName, _] : inputDescriptors) {
+        (void)_;
+        inputNames.push_back(inputName);
+    }
+
+    std::shared_ptr<Network> distributor = buildTrainingRunsInputDistributionNetworkFromInputDescriptors(
+        inputNames, [&](const std::string& inputName) { return inputDescriptors.at(inputName); });
+
+    uint64_t networkInputs = 0;
+    uint64_t networkOutputs = 0;
+    for (uint32_t i = 0; i < distributor->getNumLayers(); ++i) {
+        if (std::dynamic_pointer_cast<NetworkInput>(distributor->getLayer(i)) != nullptr) {
+            ++networkInputs;
+        }
+        if (std::dynamic_pointer_cast<NetworkOutput>(distributor->getLayer(i)) != nullptr) {
+            ++networkOutputs;
+        }
+    }
+    return { {"network_inputs", networkInputs}, {"network_outputs", networkOutputs} };
+}
+
+std::map<std::string, bool> trainingRunsDistributedMemberInputsReuseSharedTensorsForTest(
+    const std::vector<std::vector<std::string>>& memberInputNames,
+    const std::map<std::string, ThorImplementation::Tensor>& distributedInputTensors) {
+    std::map<std::string, bool> states;
+    for (size_t memberIndex = 0; memberIndex < memberInputNames.size(); ++memberIndex) {
+        const std::map<std::string, ThorImplementation::Tensor> memberInputs =
+            memberInputTensorMapFromDistributedInputNames(memberInputNames[memberIndex], distributedInputTensors);
+        for (const std::string& inputName : memberInputNames[memberIndex]) {
+            states["member_" + std::to_string(memberIndex) + ":" + inputName] =
+                (memberInputs.at(inputName) == distributedInputTensors.at(inputName));
+        }
+    }
+    return states;
+}
+
+
+}  // namespace Testing
 
 void TrainingRuns::validateTestLoader(Loader& loader) const {
     if (loader.getBatchSize() == 0) {

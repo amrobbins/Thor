@@ -340,6 +340,18 @@ TEST(TrainingRunsStatsReporter, EnsembleReportShowsEvaluationMetricsAndIncomplet
     completedEnsemble.members = {member0, member1};
     completedEnsemble.ensembleTrainingLoss = 0.123;
     completedEnsemble.ensembleTestLoss = 0.456;
+    TrainingNamedMetricResult dailyLoss;
+    dailyLoss.name = "daily_loss";
+    dailyLoss.outputName = "daily";
+    dailyLoss.targetInputName = "observed_daily";
+    dailyLoss.trainValue = 0.111;
+    dailyLoss.testValue = 0.222;
+    TrainingNamedMetricResult aggregateLoss;
+    aggregateLoss.name = "aggregate_loss";
+    aggregateLoss.outputName = "aggregate";
+    aggregateLoss.targetInputName = "observed_aggregate";
+    aggregateLoss.testValue = 0.333;
+    completedEnsemble.namedMetrics = {dailyLoss, aggregateLoss};
 
     TrainingEnsembleResult incompleteEnsemble;
     incompleteEnsemble.ensembleGroup = "mixed_group";
@@ -356,7 +368,15 @@ TEST(TrainingRunsStatsReporter, EnsembleReportShowsEvaluationMetricsAndIncomplet
 
     const std::string output = readAndCloseFile(out);
     const std::string completedLine = findLineWithAll(
-        output, {"INFO runs ensemble[digits_dense_cv5]:", "status=completed", "aggregation=ensemble_eval", "members=2", "ensemble_train_loss=", "ensemble_test_loss="});
+        output, {"INFO runs ensemble[digits_dense_cv5]:",
+                 "status=completed",
+                 "aggregation=ensemble_eval",
+                 "members=2",
+                 "ensemble_train_loss=",
+                 "ensemble_test_loss=",
+                 "ensemble_train_daily_loss=",
+                 "ensemble_test_daily_loss=",
+                 "ensemble_test_aggregate_loss="});
     ASSERT_FALSE(completedLine.empty()) << output;
     EXPECT_EQ(completedLine.find(" completed="), std::string::npos) << completedLine;
     EXPECT_EQ(completedLine.find(" failed="), std::string::npos) << completedLine;

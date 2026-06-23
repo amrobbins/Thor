@@ -2,11 +2,14 @@
 #include "Utilities/Expression/CudaKernelSecurity.h"
 #include <optional>
 #include <algorithm>
+#include <cmath>
 #include <cctype>
 #include <set>
 #include <string_view>
 #include "DeepLearning/Api/Layers/Learning/CustomLayer.h"
+#include "DeepLearning/Api/Layers/Loss/CustomLoss.h"
 #include "DeepLearning/Api/Layers/Loss/MultiInputCustomLoss.h"
+#include "DeepLearning/Api/Layers/Loss/QuantileLoss.h"
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Parameter/ParameterSpecification.h"
@@ -204,6 +207,81 @@ void printCudaKernelOutOfBandKeys(const std::vector<ThorImplementation::CudaKern
     std::cout << std::endl;
 }
 
+
+bool isSerializedApiTensorJson(const json& value) {
+    return value.is_object() && value.contains("version") && value.contains("id") && value.contains("dimensions") &&
+           value.contains("data_type");
+}
+
+uint64_t allocateApiTensorOriginalIdForClone(const json& tensorJson) {
+    std::vector<uint64_t> dimensions = tensorJson.at("dimensions").get<std::vector<uint64_t>>();
+    Thor::DataType dataType = tensorJson.at("data_type").get<Thor::DataType>();
+    Thor::Tensor placeholder(dataType, dimensions);
+    return placeholder.getOriginalId();
+}
+
+void rewriteApiTensorIdsForClone(json& value,
+                                 const std::set<uint64_t>& sourceApiTensorOriginalIds,
+                                 const std::set<uint64_t>& clonedLayerOutputOriginalIds,
+                                 std::map<uint64_t, uint64_t>& destinationOriginalIdBySourceOriginalId,
+                                 const std::string& layerContext) {
+    if (isSerializedApiTensorJson(value)) {
+        const uint64_t sourceOriginalId = value.at("id").get<uint64_t>();
+        if (sourceApiTensorOriginalIds.count(sourceOriginalId) == 0) {
+            return;
+        }
+
+        auto mappedIt = destinationOriginalIdBySourceOriginalId.find(sourceOriginalId);
+        if (mappedIt == destinationOriginalIdBySourceOriginalId.end()) {
+            if (clonedLayerOutputOriginalIds.count(sourceOriginalId) == 0) {
+                throw std::runtime_error("cloneInferenceSubgraphInto: layer '" + layerContext +
+                                         "' references source API tensor " + std::to_string(sourceOriginalId) +
+                                         " before that tensor has been remapped or cloned.");
+            }
+            mappedIt = destinationOriginalIdBySourceOriginalId.emplace(sourceOriginalId, allocateApiTensorOriginalIdForClone(value)).first;
+        }
+        value["id"] = mappedIt->second;
+        return;
+    }
+
+    if (value.is_object()) {
+        for (auto it = value.begin(); it != value.end(); ++it) {
+            rewriteApiTensorIdsForClone(it.value(),
+                                        sourceApiTensorOriginalIds,
+                                        clonedLayerOutputOriginalIds,
+                                        destinationOriginalIdBySourceOriginalId,
+                                        layerContext);
+        }
+        return;
+    }
+
+    if (value.is_array()) {
+        for (json& element : value) {
+            rewriteApiTensorIdsForClone(element,
+                                        sourceApiTensorOriginalIds,
+                                        clonedLayerOutputOriginalIds,
+                                        destinationOriginalIdBySourceOriginalId,
+                                        layerContext);
+        }
+    }
+}
+
+std::string sourceLayerContext(const std::shared_ptr<Thor::Layer>& layer) {
+    if (layer == nullptr) {
+        return "<null>";
+    }
+    return layer->getLayerType() + "#" + std::to_string(layer->getId());
+}
+
+void prefixLayerNamesForClone(json& layerJson, const std::string& namePrefix) {
+    if (namePrefix.empty()) {
+        return;
+    }
+    if (layerJson.contains("layer_name") && layerJson.at("layer_name").is_string()) {
+        layerJson["layer_name"] = namePrefix + layerJson.at("layer_name").get<std::string>();
+    }
+}
+
 }  // namespace
 
 namespace Thor {
@@ -223,6 +301,190 @@ string Network::statusCodeToString(StatusCode statusCode) {
     else if (statusCode == StatusCode::DEADLOCK_CYCLE)
         return "DEADLOCK CYCLE";
     THOR_UNREACHABLE();
+}
+
+
+void ApiTensorRemap::map(const Tensor& sourceTensor, const Tensor& destinationTensor) {
+    THOR_THROW_IF_FALSE(sourceTensor.isInitialized());
+    THOR_THROW_IF_FALSE(destinationTensor.isInitialized());
+    if (sourceTensor.getDimensions() != destinationTensor.getDimensions()) {
+        throw std::runtime_error("ApiTensorRemap shape mismatch: source " + sourceTensor.getDescriptorString() +
+                                 " destination " + destinationTensor.getDescriptorString() + ".");
+    }
+    if (sourceTensor.getDataType() != destinationTensor.getDataType()) {
+        throw std::runtime_error("ApiTensorRemap dtype mismatch: source " + sourceTensor.getDescriptorString() +
+                                 " destination " + destinationTensor.getDescriptorString() + ".");
+    }
+    const uint64_t sourceOriginalId = sourceTensor.getOriginalId();
+    auto [it, inserted] = destinationTensorBySourceOriginalId.emplace(sourceOriginalId, destinationTensor);
+    if (!inserted && it->second != destinationTensor) {
+        throw std::runtime_error("ApiTensorRemap source tensor " + std::to_string(sourceOriginalId) +
+                                 " was mapped to two different destination tensors.");
+    }
+}
+
+bool ApiTensorRemap::contains(const Tensor& sourceTensor) const {
+    THOR_THROW_IF_FALSE(sourceTensor.isInitialized());
+    return destinationTensorBySourceOriginalId.count(sourceTensor.getOriginalId()) != 0;
+}
+
+Tensor ApiTensorRemap::get(const Tensor& sourceTensor) const {
+    THOR_THROW_IF_FALSE(sourceTensor.isInitialized());
+    auto it = destinationTensorBySourceOriginalId.find(sourceTensor.getOriginalId());
+    if (it == destinationTensorBySourceOriginalId.end()) {
+        throw std::runtime_error("ApiTensorRemap has no destination tensor for source tensor " +
+                                 std::to_string(sourceTensor.getOriginalId()) + ".");
+    }
+    return it->second;
+}
+
+ApiSubgraphCloneResult Network::cloneInferenceSubgraphInto(const Network& sourceNetworkConst,
+                                                           const std::vector<std::string>& outputNames,
+                                                           const ApiTensorRemap& initialRemap,
+                                                           const ApiSubgraphCloneOptions& options) {
+    if (outputNames.empty()) {
+        throw std::runtime_error("cloneInferenceSubgraphInto requires at least one output name.");
+    }
+    if (!options.inferenceOnly) {
+        throw std::runtime_error("cloneInferenceSubgraphInto currently supports inferenceOnly=true only.");
+    }
+    if (!options.cloneTrainableParameters) {
+        throw std::runtime_error("cloneInferenceSubgraphInto currently requires cloneTrainableParameters=true.");
+    }
+
+    Network& sourceNetwork = const_cast<Network&>(sourceNetworkConst);
+    sourceNetwork.rebuildApiGraphIndexes(/*inferenceOnly=*/true);
+    this->rebuildApiGraphIndexes(/*inferenceOnly=*/true);
+
+    std::map<uint64_t, uint64_t> destinationOriginalIdBySourceOriginalId;
+    ApiSubgraphCloneResult result;
+    for (const auto& [sourceOriginalId, destinationTensor] : initialRemap.entriesBySourceOriginalId()) {
+        if (!sourceNetwork.hasApiTensorByOriginalId(sourceOriginalId)) {
+            throw std::runtime_error("cloneInferenceSubgraphInto initial remap source tensor " + std::to_string(sourceOriginalId) +
+                                     " does not belong to source network '" + sourceNetwork.getNetworkName() + "'.");
+        }
+        Tensor sourceTensor = sourceNetwork.resolveApiTensorByOriginalId(sourceOriginalId);
+        if (sourceTensor.getDimensions() != destinationTensor.getDimensions() || sourceTensor.getDataType() != destinationTensor.getDataType()) {
+            throw std::runtime_error("cloneInferenceSubgraphInto initial remap tensor descriptor mismatch for source tensor " +
+                                     std::to_string(sourceOriginalId) + ".");
+        }
+        Tensor destinationCanonicalTensor = this->resolveApiTensorByOriginalId(destinationTensor.getOriginalId());
+        destinationOriginalIdBySourceOriginalId[sourceOriginalId] = destinationCanonicalTensor.getOriginalId();
+        result.clonedTensorBySourceOriginalId[sourceOriginalId] = destinationCanonicalTensor;
+    }
+
+    std::map<std::string, Tensor> sourceOutputTensorByName;
+    for (const std::shared_ptr<Layer>& layer : sourceNetwork.allLayersInNetworkList) {
+        std::shared_ptr<NetworkOutput> networkOutput = std::dynamic_pointer_cast<NetworkOutput>(layer);
+        if (networkOutput == nullptr) {
+            continue;
+        }
+        const std::string outputName = networkOutput->getName();
+        sourceOutputTensorByName[outputName] = networkOutput->getFeatureInput().value();
+    }
+
+    std::vector<Tensor> requestedSourceOutputTensors;
+    requestedSourceOutputTensors.reserve(outputNames.size());
+    for (const std::string& outputName : outputNames) {
+        auto outputIt = sourceOutputTensorByName.find(outputName);
+        if (outputIt == sourceOutputTensorByName.end()) {
+            throw std::runtime_error("cloneInferenceSubgraphInto could not find source NetworkOutput named '" + outputName +
+                                     "' in network '" + sourceNetwork.getNetworkName() + "'.");
+        }
+        requestedSourceOutputTensors.push_back(outputIt->second);
+    }
+
+    std::set<uint64_t> requiredLayerIds;
+    std::function<void(const Tensor&)> collectUpstream = [&](const Tensor& tensor) {
+        if (destinationOriginalIdBySourceOriginalId.count(tensor.getOriginalId()) != 0) {
+            return;
+        }
+        auto driverIt = sourceNetwork.apiTensorToApiDrivingLayer.find(tensor);
+        if (driverIt == sourceNetwork.apiTensorToApiDrivingLayer.end()) {
+            throw std::runtime_error("cloneInferenceSubgraphInto could not find a driving source layer for tensor " +
+                                     std::to_string(tensor.getOriginalId()) + ".");
+        }
+        std::shared_ptr<Layer> driver = driverIt->second;
+        if (std::dynamic_pointer_cast<NetworkInput>(driver) != nullptr) {
+            throw std::runtime_error("cloneInferenceSubgraphInto output depends on source NetworkInput '" +
+                                     std::dynamic_pointer_cast<NetworkInput>(driver)->getName() +
+                                     "' that was not provided in the initial ApiTensorRemap.");
+        }
+        if (std::dynamic_pointer_cast<NetworkOutput>(driver) != nullptr) {
+            throw std::runtime_error("cloneInferenceSubgraphInto encountered a NetworkOutput as a tensor driver; request the output's input tensor instead.");
+        }
+        if (requiredLayerIds.insert(driver->getId()).second) {
+            auto inputsIt = sourceNetwork.apiLayerToApiInputTensors.find(driver);
+            if (inputsIt != sourceNetwork.apiLayerToApiInputTensors.end()) {
+                for (const Tensor& inputTensor : inputsIt->second) {
+                    collectUpstream(inputTensor);
+                }
+            }
+        }
+    };
+
+    for (const Tensor& outputTensor : requestedSourceOutputTensors) {
+        collectUpstream(outputTensor);
+    }
+
+    std::set<uint64_t> sourceApiTensorOriginalIds;
+    for (const auto& entry : sourceNetwork.apiTensorByOriginalId) {
+        sourceApiTensorOriginalIds.insert(entry.first);
+    }
+
+    std::shared_ptr<thor_file::TarReader> nullArchiveReader;
+    std::vector<std::shared_ptr<Layer>> layersToClone;
+    for (const std::shared_ptr<Layer>& layer : sourceNetwork.allLayersInNetworkList) {
+        if (requiredLayerIds.count(layer->getId()) != 0) {
+            layersToClone.push_back(layer);
+        }
+    }
+
+    for (const std::shared_ptr<Layer>& layer : layersToClone) {
+        std::set<uint64_t> clonedLayerOutputOriginalIds;
+        auto outputIt = sourceNetwork.apiLayerToApiOutputTensors.find(layer);
+        if (outputIt != sourceNetwork.apiLayerToApiOutputTensors.end()) {
+            for (const Tensor& outputTensor : outputIt->second) {
+                clonedLayerOutputOriginalIds.insert(outputTensor.getOriginalId());
+            }
+        }
+
+        json layerJson = layer->architectureJson();
+        prefixLayerNamesForClone(layerJson, options.namePrefix);
+        rewriteApiTensorIdsForClone(layerJson,
+                                    sourceApiTensorOriginalIds,
+                                    clonedLayerOutputOriginalIds,
+                                    destinationOriginalIdBySourceOriginalId,
+                                    sourceLayerContext(layer));
+
+        const size_t previousLayerCount = this->allLayersInNetworkList.size();
+        Layer::deserialize(nullArchiveReader, layerJson, this);
+        if (this->allLayersInNetworkList.size() <= previousLayerCount) {
+            throw std::runtime_error("cloneInferenceSubgraphInto did not add a cloned layer for " + sourceLayerContext(layer) + ".");
+        }
+
+        for (uint64_t sourceOutputOriginalId : clonedLayerOutputOriginalIds) {
+            auto mappedIt = destinationOriginalIdBySourceOriginalId.find(sourceOutputOriginalId);
+            if (mappedIt == destinationOriginalIdBySourceOriginalId.end()) {
+                throw std::runtime_error("cloneInferenceSubgraphInto did not allocate a destination tensor for output tensor " +
+                                         std::to_string(sourceOutputOriginalId) + " of " + sourceLayerContext(layer) + ".");
+            }
+            Tensor destinationTensor = this->resolveApiTensorByOriginalId(mappedIt->second);
+            result.clonedTensorBySourceOriginalId[sourceOutputOriginalId] = destinationTensor;
+        }
+    }
+
+    for (size_t i = 0; i < outputNames.size(); ++i) {
+        const Tensor& sourceOutputTensor = requestedSourceOutputTensors[i];
+        auto mappedIt = destinationOriginalIdBySourceOriginalId.find(sourceOutputTensor.getOriginalId());
+        if (mappedIt == destinationOriginalIdBySourceOriginalId.end()) {
+            throw std::runtime_error("cloneInferenceSubgraphInto did not produce a destination tensor for output '" + outputNames[i] + "'.");
+        }
+        result.outputTensorsByName[outputNames[i]] = this->resolveApiTensorByOriginalId(mappedIt->second);
+    }
+
+    this->rebuildApiGraphIndexes(/*inferenceOnly=*/true);
+    return result;
 }
 
 bool Network::hasCudaKernelExpressions() const {
@@ -812,11 +1074,7 @@ std::vector<std::string> Network::getTrainingOnlyNetworkInputNames() {
     // loss roots in place there.  A training-only input is one whose value is used
     // only by loss/metric label-style inputs, possibly through pure transform layers
     // such as type conversions or reshapes.
-    const StatusCode status = evaluateGraph(/*inferenceOnly=*/false);
-    if (status != StatusCode::SUCCESS) {
-        throw std::runtime_error("Unable to evaluate training graph while collecting training-only network input names: " +
-                                 statusCodeToString(status));
-    }
+    rebuildApiGraphIndexes(/*inferenceOnly=*/false);
 
     std::map<Tensor, bool> memo;
     std::set<Tensor> visiting;
@@ -927,10 +1185,7 @@ std::map<std::string, std::vector<std::string>> Network::getLossLabelNetworkInpu
     const std::vector<std::string> trainingOnlyNames = getTrainingOnlyNetworkInputNames();
     const std::set<std::string> trainingOnlyNameSet(trainingOnlyNames.begin(), trainingOnlyNames.end());
 
-    const StatusCode status = evaluateGraph(/*inferenceOnly=*/false);
-    if (status != StatusCode::SUCCESS) {
-        throw std::runtime_error("Unable to evaluate training graph while collecting loss label network inputs: " + statusCodeToString(status));
-    }
+    rebuildApiGraphIndexes(/*inferenceOnly=*/false);
 
     auto sourceNetworkInputName = [&](const Tensor& tensor) -> std::optional<std::string> {
         std::set<Tensor> visiting;
@@ -1083,6 +1338,276 @@ std::map<std::string, std::vector<std::string>> Network::getLossLabelNetworkInpu
         std::sort(names.begin(), names.end());
     }
     return labelsByOutputName;
+}
+
+
+std::map<std::string, std::vector<NetworkLossReference>> Network::getLossReferencesByPredictionOutputName() {
+    const std::vector<std::string> trainingOnlyNames = getTrainingOnlyNetworkInputNames();
+    const std::set<std::string> trainingOnlyNameSet(trainingOnlyNames.begin(), trainingOnlyNames.end());
+
+    rebuildApiGraphIndexes(/*inferenceOnly=*/false);
+
+    auto sourceNetworkInputName = [&](const Tensor& tensor) -> std::optional<std::string> {
+        std::set<Tensor> visiting;
+        std::function<std::optional<std::string>(const Tensor&)> visit = [&](const Tensor& current) -> std::optional<std::string> {
+            if (visiting.count(current) != 0) {
+                return std::nullopt;
+            }
+            visiting.insert(current);
+
+            auto driverIt = apiTensorToApiDrivingLayer.find(current);
+            if (driverIt == apiTensorToApiDrivingLayer.end() || driverIt->second == nullptr) {
+                visiting.erase(current);
+                return std::nullopt;
+            }
+            std::shared_ptr<Layer> driver = driverIt->second;
+            std::shared_ptr<NetworkInput> input = std::dynamic_pointer_cast<NetworkInput>(driver);
+            if (input != nullptr) {
+                std::string name = input->getName();
+                visiting.erase(current);
+                return name;
+            }
+
+            auto inputsIt = apiLayerToApiInputTensors.find(driver);
+            if (inputsIt == apiLayerToApiInputTensors.end() || inputsIt->second.empty()) {
+                visiting.erase(current);
+                return std::nullopt;
+            }
+            std::optional<std::string> found;
+            for (const Tensor& upstream : inputsIt->second) {
+                std::optional<std::string> candidate = visit(upstream);
+                if (!candidate.has_value()) {
+                    continue;
+                }
+                if (found.has_value() && found.value() != candidate.value()) {
+                    visiting.erase(current);
+                    return std::nullopt;
+                }
+                found = candidate;
+            }
+            visiting.erase(current);
+            return found;
+        };
+        return visit(tensor);
+    };
+
+    std::map<Tensor, std::vector<std::string>> outputNamesByTensor;
+    const uint32_t numLayers = getNumLayers();
+    for (uint32_t i = 0; i < numLayers; ++i) {
+        std::shared_ptr<NetworkOutput> output = std::dynamic_pointer_cast<NetworkOutput>(getLayer(i));
+        if (output == nullptr) {
+            continue;
+        }
+        std::optional<Tensor> outputTensor = output->getFeatureInput();
+        if (!outputTensor.has_value()) {
+            outputTensor = output->getFeatureOutput();
+        }
+        if (!outputTensor.has_value()) {
+            continue;
+        }
+        outputNamesByTensor[outputTensor.value()].push_back(output->getName());
+    }
+
+    auto addUniqueName = [](std::vector<std::string>& names, const std::string& name) {
+        if (std::find(names.begin(), names.end(), name) == names.end()) {
+            names.push_back(name);
+        }
+    };
+
+    std::map<uint64_t, std::vector<std::string>> lossNamesByLayerId;
+    auto addLossOutputNameForTensor = [&](const Tensor& tensor, const std::string& outputName) {
+        std::set<Tensor> visiting;
+        std::function<void(const Tensor&)> visit = [&](const Tensor& current) {
+            if (visiting.count(current) != 0) {
+                return;
+            }
+            visiting.insert(current);
+            auto driverIt = apiTensorToApiDrivingLayer.find(current);
+            if (driverIt == apiTensorToApiDrivingLayer.end() || driverIt->second == nullptr) {
+                visiting.erase(current);
+                return;
+            }
+            std::shared_ptr<Layer> driver = driverIt->second;
+            std::shared_ptr<Loss> lossDriver = std::dynamic_pointer_cast<Loss>(driver);
+            if (lossDriver != nullptr) {
+                addUniqueName(lossNamesByLayerId[lossDriver->getId()], outputName);
+                visiting.erase(current);
+                return;
+            }
+            auto inputsIt = apiLayerToApiInputTensors.find(driver);
+            if (inputsIt != apiLayerToApiInputTensors.end()) {
+                for (const Tensor& upstream : inputsIt->second) {
+                    visit(upstream);
+                }
+            }
+            visiting.erase(current);
+        };
+        visit(tensor);
+    };
+
+    for (uint32_t i = 0; i < numLayers; ++i) {
+        std::shared_ptr<NetworkOutput> output = std::dynamic_pointer_cast<NetworkOutput>(getLayer(i));
+        if (output == nullptr) {
+            continue;
+        }
+        std::optional<Tensor> outputTensor = output->getFeatureInput();
+        if (!outputTensor.has_value()) {
+            outputTensor = output->getFeatureOutput();
+        }
+        if (!outputTensor.has_value()) {
+            continue;
+        }
+        addLossOutputNameForTensor(outputTensor.value(), output->getName());
+    }
+    auto predictionOutputNamesForTensor = [&](const Tensor& tensor) -> std::vector<std::string> {
+        std::vector<std::string> names;
+        std::set<Tensor> visiting;
+        std::function<void(const Tensor&)> visit = [&](const Tensor& current) {
+            if (visiting.count(current) != 0) {
+                return;
+            }
+            visiting.insert(current);
+
+            auto outputIt = outputNamesByTensor.find(current);
+            if (outputIt != outputNamesByTensor.end()) {
+                for (const std::string& outputName : outputIt->second) {
+                    addUniqueName(names, outputName);
+                }
+                visiting.erase(current);
+                return;
+            }
+
+            auto driverIt = apiTensorToApiDrivingLayer.find(current);
+            if (driverIt == apiTensorToApiDrivingLayer.end() || driverIt->second == nullptr) {
+                visiting.erase(current);
+                return;
+            }
+            std::shared_ptr<Layer> driver = driverIt->second;
+            if (std::dynamic_pointer_cast<NetworkInput>(driver) != nullptr || std::dynamic_pointer_cast<Loss>(driver) != nullptr ||
+                std::dynamic_pointer_cast<Metric>(driver) != nullptr) {
+                visiting.erase(current);
+                return;
+            }
+
+            auto inputsIt = apiLayerToApiInputTensors.find(driver);
+            if (inputsIt != apiLayerToApiInputTensors.end()) {
+                for (const Tensor& upstream : inputsIt->second) {
+                    visit(upstream);
+                }
+            }
+            visiting.erase(current);
+        };
+        visit(tensor);
+        return names;
+    };
+
+    std::map<std::string, std::vector<NetworkLossReference>> referencesByOutputName;
+    for (uint32_t i = 0; i < numLayers; ++i) {
+        std::shared_ptr<Loss> loss = std::dynamic_pointer_cast<Loss>(getLayer(i));
+        if (loss == nullptr) {
+            continue;
+        }
+
+        Tensor predictions;
+        std::optional<Tensor> labels;
+        std::optional<Tensor> exampleWeights;
+        std::shared_ptr<MultiInputCustomLoss> multiInputCustomLoss = std::dynamic_pointer_cast<MultiInputCustomLoss>(loss);
+        if (multiInputCustomLoss != nullptr) {
+            try {
+                predictions = multiInputCustomLoss->getPredictions();
+            } catch (const std::exception&) {
+                continue;
+            }
+            for (const MultiInputCustomLoss::InputSpec& input : multiInputCustomLoss->getInputs()) {
+                if (input.isDifferentiable()) {
+                    continue;
+                }
+                if (input.name == "labels") {
+                    labels = input.tensor;
+                } else if (input.name == "example_weights") {
+                    exampleWeights = input.tensor;
+                }
+            }
+            if (!labels.has_value()) {
+                continue;
+            }
+        } else {
+            try {
+                predictions = loss->getPredictions();
+                labels = loss->getLabels();
+            } catch (const std::exception&) {
+                continue;
+            }
+            exampleWeights = loss->getExampleWeights();
+        }
+
+        const std::vector<std::string> predictionOutputNames = predictionOutputNamesForTensor(predictions);
+        if (predictionOutputNames.empty()) {
+            continue;
+        }
+        std::optional<std::string> labelInputName = sourceNetworkInputName(labels.value());
+        if (!labelInputName.has_value() || trainingOnlyNameSet.count(labelInputName.value()) == 0) {
+            continue;
+        }
+
+        std::optional<std::string> weightInputName;
+        if (exampleWeights.has_value()) {
+            weightInputName = sourceNetworkInputName(exampleWeights.value());
+            if (weightInputName.has_value() && trainingOnlyNameSet.count(weightInputName.value()) == 0) {
+                weightInputName = std::nullopt;
+            }
+        }
+
+        const double lossWeight = static_cast<double>(loss->getLossWeight().value_or(1.0f));
+
+        std::optional<double> quantile;
+        std::shared_ptr<QuantileLoss> quantileLoss = std::dynamic_pointer_cast<QuantileLoss>(loss);
+        if (quantileLoss != nullptr) {
+            quantile = static_cast<double>(quantileLoss->getQuantile());
+        }
+
+        std::vector<std::string> lossNames;
+        auto lossNamesIt = lossNamesByLayerId.find(loss->getId());
+        if (lossNamesIt != lossNamesByLayerId.end()) {
+            lossNames = lossNamesIt->second;
+        }
+        if (lossNames.empty()) {
+            lossNames.push_back("loss_" + std::to_string(loss->getId()));
+        }
+
+        for (const std::string& outputName : predictionOutputNames) {
+            for (const std::string& lossName : lossNames) {
+            NetworkLossReference reference;
+            reference.lossName = lossName;
+            reference.outputName = outputName;
+            reference.targetInputName = labelInputName.value();
+            reference.weightInputName = weightInputName;
+            reference.lossLayerType = loss->getLayerType();
+            reference.lossWeight = lossWeight;
+            reference.quantile = quantile;
+            referencesByOutputName[outputName].push_back(std::move(reference));
+            }
+        }
+    }
+
+    for (auto& [_, references] : referencesByOutputName) {
+        std::sort(references.begin(), references.end(), [](const NetworkLossReference& lhs, const NetworkLossReference& rhs) {
+            if (lhs.lossName != rhs.lossName) {
+                return lhs.lossName < rhs.lossName;
+            }
+            if (lhs.targetInputName != rhs.targetInputName) {
+                return lhs.targetInputName < rhs.targetInputName;
+            }
+            if (lhs.lossLayerType != rhs.lossLayerType) {
+                return lhs.lossLayerType < rhs.lossLayerType;
+            }
+            if (lhs.weightInputName != rhs.weightInputName) {
+                return lhs.weightInputName < rhs.weightInputName;
+            }
+            return lhs.quantile < rhs.quantile;
+        });
+    }
+    return referencesByOutputName;
 }
 
 void Network::pruneLoadedTrainingArtifactsForInference() {
@@ -1253,7 +1778,7 @@ void Network::pruneLoadedTrainingArtifactsForInference() {
 
 // Determine the graph structure
 // Tensors are the edges that connect the Layers which are nodes.
-Network::StatusCode Network::evaluateGraph(bool inferenceOnly) {
+void Network::rebuildApiGraphIndexes(bool inferenceOnly) {
     allTensors.clear();
     apiTensorToApiLoadingLayers.clear();
     apiTensorToApiDrivingLayer.clear();
@@ -1266,6 +1791,13 @@ Network::StatusCode Network::evaluateGraph(bool inferenceOnly) {
         // Handle each class of layers
         shared_ptr<NetworkInput> networkInput = dynamic_pointer_cast<NetworkInput>(layer);
         if (networkInput) {
+            if (networkInput->hasPassThroughSource()) {
+                // API-level pass-through inputs are aliases for another API tensor.
+                // They are intentionally invisible to the graph as source layers:
+                // downstream layers consume the source tensor directly, so stamping
+                // can fan it out without creating another external-load endpoint.
+                continue;
+            }
             Tensor outputTensor = networkInput->getFeatureOutput().value();
             allTensors.insert(outputTensor);
             THOR_THROW_IF_FALSE(apiTensorToApiDrivingLayer.count(outputTensor) == 0);
@@ -1408,6 +1940,10 @@ Network::StatusCode Network::evaluateGraph(bool inferenceOnly) {
     if (inferenceOnly && loadedFromArchive) {
         pruneLoadedTrainingArtifactsForInference();
     }
+}
+
+Network::StatusCode Network::evaluateGraph(bool inferenceOnly) {
+    rebuildApiGraphIndexes(inferenceOnly);
 
     StatusCode status;
     status = checkForDuplicateInOutPortNames();
@@ -1437,6 +1973,9 @@ Network::StatusCode Network::checkForDuplicateInOutPortNames() {
         shared_ptr<Layer> layer = *it;
         const shared_ptr<NetworkInput> networkInput = dynamic_pointer_cast<NetworkInput>(layer);
         if (networkInput != nullptr) {
+            if (networkInput->hasPassThroughSource()) {
+                continue;
+            }
             if (inputNames.count(networkInput->getName()) != 0) {
                 printf("Duplicate network input name used: %s\n", networkInput->getName().c_str());
                 status = StatusCode::DUPLICATE_NAMED_NETWORK_INPUT;
@@ -1547,6 +2086,9 @@ void Network::topologicalSort() {
 
         const shared_ptr<NetworkInput> networkInput = dynamic_pointer_cast<NetworkInput>(layer);
         if (networkInput) {
+            if (networkInput->hasPassThroughSource()) {
+                continue;
+            }
             Tensor outputTensor = layer->getFeatureOutput().value();
             if (allTensors.count(outputTensor) == 0)
                 continue;
@@ -1686,6 +2228,10 @@ void Network::addLayerToNetwork(const Layer *layer) {
     if (networkInput) {
         Tensor outputTensor = networkInput->getFeatureOutput().value();
         apiTensorByOriginalId[outputTensor.getOriginalId()] = outputTensor;
+        if (networkInput->hasPassThroughSource()) {
+            Tensor sourceTensor = networkInput->getPassThroughSource();
+            apiTensorByOriginalId[sourceTensor.getOriginalId()] = sourceTensor;
+        }
     } else if (networkOutput) {
         Tensor inputTensor = networkOutput->getFeatureInput().value();
         apiTensorByOriginalId[inputTensor.getOriginalId()] = inputTensor;

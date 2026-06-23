@@ -766,6 +766,47 @@ std::map<std::string, size_t> trainingRunsMinSuccessfulModelsFromPython(nb::obje
     return result;
 }
 
+std::map<std::string, std::vector<std::string>> trainingRunsReportedLossesFromPython(nb::object reportedLosses) {
+    if (reportedLosses.is_none()) {
+        return {};
+    }
+    if (!nb::isinstance<nb::dict>(reportedLosses)) {
+        throw nb::type_error("TrainingRuns reported_losses must be a dict mapping ensemble_group names to loss-name iterables, or None.");
+    }
+
+    nb::dict mapping = nb::cast<nb::dict>(reportedLosses);
+    std::map<std::string, std::vector<std::string>> result;
+    for (auto item : mapping) {
+        if (!nb::isinstance<nb::str>(item.first)) {
+            throw nb::type_error("TrainingRuns reported_losses keys must be ensemble_group strings.");
+        }
+        const std::string groupName = nb::cast<std::string>(item.first);
+        if (item.second.is_none()) {
+            result.emplace(groupName, std::vector<std::string>{});
+            continue;
+        }
+        PyObject* iterator = nb::isinstance<nb::str>(item.second) ? nullptr : PyObject_GetIter(item.second.ptr());
+        if (iterator == nullptr) {
+            PyErr_Clear();
+            throw nb::type_error(("TrainingRuns reported_losses['" + groupName + "'] must be an iterable of loss-name strings or None.").c_str());
+        }
+        Py_DECREF(iterator);
+
+        std::vector<std::string> groupLosses;
+        size_t lossIndex = 0;
+        for (nb::handle lossObj : nb::cast<nb::iterable>(item.second)) {
+            if (!nb::isinstance<nb::str>(lossObj)) {
+                throw nb::type_error(("TrainingRuns reported_losses['" + groupName + "'][" + std::to_string(lossIndex) + "] must be a string.").c_str());
+            }
+            groupLosses.push_back(nb::cast<std::string>(lossObj));
+            ++lossIndex;
+        }
+        result.emplace(groupName, std::move(groupLosses));
+    }
+    return result;
+}
+
+
 std::vector<TrainingRunsSpec> trainingRunsSpecsFromPython(nb::iterable runs) {
     std::vector<TrainingRunsSpec> specs;
     for (nb::handle item : runs) {
@@ -807,6 +848,7 @@ std::vector<TrainingRunsRestartPolicy> trainingRunsRestartPoliciesFromPython(nb:
 }
 
 nb::object optionalDouble(std::optional<double> value);
+nb::object optionalString(std::optional<std::string> value);
 
 TrainingEarlyCompletionPolicy trainingEarlyCompletionPolicyFromCallable(nb::object completionCondition) {
     if (completionCondition.is_none() || !PyCallable_Check(completionCondition.ptr())) {
@@ -878,6 +920,13 @@ std::vector<TrainingRunsEarlyCompletionRule> trainingRunsEarlyCompletionRulesFro
 }
 
 nb::object optionalDouble(std::optional<double> value) {
+    if (!value.has_value()) {
+        return nb::none();
+    }
+    return nb::cast(*value);
+}
+
+nb::object optionalString(std::optional<std::string> value) {
     if (!value.has_value()) {
         return nb::none();
     }
@@ -1525,6 +1574,17 @@ calling this helper.
     training_ensemble_member_result.def_prop_ro(
         "final_test_accuracy", [](const TrainingEnsembleMemberResult& self) { return optionalDouble(self.finalTestAccuracy); });
 
+    auto training_named_metric_result = nb::class_<TrainingNamedMetricResult>(training, "TrainingNamedMetricResult");
+    training_named_metric_result.attr("__module__") = "thor.training";
+    training_named_metric_result.def_prop_ro("name", [](const TrainingNamedMetricResult& self) { return self.name; });
+    training_named_metric_result.def_prop_ro("output_name", [](const TrainingNamedMetricResult& self) { return self.outputName; });
+    training_named_metric_result.def_prop_ro("target_input_name", [](const TrainingNamedMetricResult& self) { return self.targetInputName; });
+    training_named_metric_result.def_ro("overall_weight", &TrainingNamedMetricResult::overallWeight);
+    training_named_metric_result.def_prop_ro("overall_weight_source", [](const TrainingNamedMetricResult& self) { return self.overallWeightSource; });
+    training_named_metric_result.def_prop_ro("train_value", [](const TrainingNamedMetricResult& self) { return optionalDouble(self.trainValue); });
+    training_named_metric_result.def_prop_ro("test_value", [](const TrainingNamedMetricResult& self) { return optionalDouble(self.testValue); });
+    training_named_metric_result.def("has_value", &TrainingNamedMetricResult::hasValue);
+
     auto training_ensemble_result = nb::class_<TrainingEnsembleResult>(training, "TrainingEnsembleResult");
     training_ensemble_result.attr("__module__") = "thor.training";
     training_ensemble_result.def_prop_ro("ensemble_group", [](const TrainingEnsembleResult& self) { return self.ensembleGroup; });
@@ -1543,6 +1603,9 @@ calling this helper.
     training_ensemble_result.def_prop_ro("actual_num_members", &TrainingEnsembleResult::successfulModels);
     training_ensemble_result.def_prop_ro("total_weight", &TrainingEnsembleResult::totalWeight);
     training_ensemble_result.def_prop_ro("status_counts", &TrainingEnsembleResult::statusCounts);
+    training_ensemble_result.def_prop_ro("named_metrics", [](const TrainingEnsembleResult& self) { return self.namedMetrics; });
+    training_ensemble_result.def("has_named_metric_values", &TrainingEnsembleResult::hasNamedMetricValues);
+    training_ensemble_result.def("has_ensemble_evaluation_metrics", &TrainingEnsembleResult::hasEnsembleEvaluationMetrics);
     training_ensemble_result.def_prop_ro(
         "ensemble_training_loss", [](const TrainingEnsembleResult& self) { return optionalDouble(self.ensembleFinalTrainingLoss()); });
     training_ensemble_result.def_prop_ro(
@@ -1710,7 +1773,8 @@ calling this helper.
            std::optional<size_t> max_parallel_runs,
            nb::object min_successful_models,
            nb::object restart_conditions,
-           nb::object early_completion_rules) -> std::shared_ptr<TrainingRuns> {
+           nb::object early_completion_rules,
+           nb::object reported_losses) -> std::shared_ptr<TrainingRuns> {
             (void)cls;
             return std::make_shared<TrainingRuns>(trainingRunsSpecsFromPython(runs),
                                                   trainingRunsFailurePolicyFromString(failure_policy),
@@ -1718,7 +1782,8 @@ calling this helper.
                                                   max_parallel_runs,
                                                   trainingRunsRestartPoliciesFromPython(restart_conditions),
                                                   trainingRunsEarlyCompletionRulesFromPython(early_completion_rules),
-                                                  trainingRunsMinSuccessfulModelsFromPython(min_successful_models));
+                                                  trainingRunsMinSuccessfulModelsFromPython(min_successful_models),
+                                                  trainingRunsReportedLossesFromPython(reported_losses));
         },
         "cls"_a,
         "runs"_a,
@@ -1727,17 +1792,20 @@ calling this helper.
         "max_parallel_runs"_a.none() = nb::none(),
         "min_successful_models"_a.none() = nb::none(),
         "restart_conditions"_a.none() = nb::none(),
-        "early_completion_rules"_a.none() = nb::none());
+        "early_completion_rules"_a.none() = nb::none(),
+        "reported_losses"_a.none() = nb::none());
     training_runs.def(
         "__init__",
-        [](TrainingRuns*, nb::iterable, const std::string&, double, std::optional<size_t>, nb::object, nb::object, nb::object) {},
+        [](TrainingRuns*, nb::iterable, const std::string&, double, std::optional<size_t>, nb::object, nb::object, nb::object, nb::object) {},
         "runs"_a,
         "failure_policy"_a = "cancel_siblings",
         "max_summary_logs_per_second"_a = 2.0,
         "max_parallel_runs"_a.none() = nb::none(),
         "min_successful_models"_a.none() = nb::none(),
         "restart_conditions"_a.none() = nb::none(),
-        "early_completion_rules"_a.none() = nb::none());
+        "early_completion_rules"_a.none() = nb::none(),
+        "reported_losses"_a.none() = nb::none());
+    training_runs.def_prop_ro("reported_losses", [](const TrainingRuns& self) { return self.getReportedLosses(); });
     training_runs.def(
         "fit",
         [](TrainingRuns& self, uint32_t epochs, std::shared_ptr<Loader> test_loader) {

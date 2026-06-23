@@ -17,7 +17,6 @@ using namespace std;
 using namespace Thor;
 
 using DataType = ThorImplementation::DataType;
-using PhysicalTensor = ThorImplementation::Tensor;
 
 void bind_network_input(nb::module_ &m) {
     auto network_input = nb::class_<NetworkInput, Layer>(m, "NetworkInput");
@@ -31,7 +30,7 @@ void bind_network_input(nb::module_ &m) {
            const vector<uint64_t> &dimensions,
            const DataType &data_type,
            bool dimensions_include_batch,
-           std::optional<PhysicalTensor> pass_through_source) {
+           std::optional<Tensor> pass_through_source) {
             if (name.length() == 0) {
                 string msg = "Network Input instance: name must have non-zero length but name=\"\" was passed in.";
                 throw nb::value_error(msg.c_str());
@@ -48,7 +47,7 @@ void bind_network_input(nb::module_ &m) {
                 .dataType(data_type)
                 .dimensionsIncludeBatch(dimensions_include_batch);
             if (pass_through_source.has_value()) {
-                builder.passThroughPhysicalSource(pass_through_source.value());
+                builder.passThroughSource(pass_through_source.value());
             }
             NetworkInput built = builder.build();
 
@@ -101,10 +100,10 @@ void bind_network_input(nb::module_ &m) {
             dimensions_include_batch : bool, default False
                 When True, ``dimensions`` already includes the batch dimension.
                 This is primarily for internal network-composition runtimes.
-            pass_through_source : thor.physical.PhysicalTensor | None, default None
-                Internal network-composition hook.  When supplied, the NetworkInput
-                is stamped as a placement-time pass-through over this physical
-                tensor, so downstream layers connect to the source tensor identity
-                directly rather than to a NetworkInput staging tensor.
+            pass_through_source : thor.Tensor | None, default None
+                Internal network-composition hook.  When supplied, this NetworkInput
+                is an API-level pass-through alias of the source tensor.  It is not
+                stamped as an external network input and does not allocate or copy
+                through an input staging tensor.
             )nbdoc";
 }

@@ -874,7 +874,7 @@ void TrainingRunsStatsReporter::writeEnsembleLineLocked(const TrainingEnsembleRe
     std::string line = formatEnsemblePrefix(result.ensembleGroup, ensemblePrefixWidth);
     line += " ";
     line += styled(std::string("status=") + trainingRunStatusName(aggregateStatus), statusStyle, useColor);
-    if (result.ensembleTrainingLoss.has_value() || result.ensembleTestLoss.has_value()) {
+    if (result.hasEnsembleEvaluationMetrics()) {
         line += " aggregation=ensemble_eval";
     }
     line += " members=" + std::to_string(result.size());
@@ -903,6 +903,20 @@ void TrainingRunsStatsReporter::writeEnsembleLineLocked(const TrainingEnsembleRe
         std::snprintf(buffer, sizeof(buffer), "ensemble_test_accuracy=%.4f", result.ensembleTestAccuracy.value());
         line += " ";
         line += styled(buffer, FinalReportAnsi::accuracy, useColor);
+    }
+    for (const TrainingNamedMetricResult& namedMetric : result.namedMetrics) {
+        if (namedMetric.trainValue.has_value()) {
+            char buffer[128];
+            std::snprintf(buffer, sizeof(buffer), "ensemble_train_%s=%.6f", namedMetric.name.c_str(), namedMetric.trainValue.value());
+            line += " ";
+            line += styled(buffer, FinalReportAnsi::trainLoss, useColor);
+        }
+        if (namedMetric.testValue.has_value()) {
+            char buffer[128];
+            std::snprintf(buffer, sizeof(buffer), "ensemble_test_%s=%.6f", namedMetric.name.c_str(), namedMetric.testValue.value());
+            line += " ";
+            line += styled(buffer, FinalReportAnsi::testLoss, useColor);
+        }
     }
     emitLineLocked(line);
 }

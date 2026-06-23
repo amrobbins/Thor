@@ -22,11 +22,16 @@ class NetworkInput : public Layer {
     std::vector<uint64_t> getDimensions() const { return dimensions; }
     DataType getDataType() const { return dataType; }
     bool dimensionsIncludeBatch() const { return dimensionsIncludeBatch_; }
-    bool hasPassThroughPhysicalSource() const { return passThroughPhysicalSource_.has_value(); }
+    bool hasPassThroughSource() const { return passThroughSource_.has_value(); }
+    Tensor getPassThroughSource() const {
+        THOR_THROW_IF_FALSE(passThroughSource_.has_value());
+        return passThroughSource_.value();
+    }
 
     std::shared_ptr<Layer> clone() const override { return std::make_shared<NetworkInput>(*this); }
 
     std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override {
+        (void)inputTensor;
         THOR_THROW_IF_FALSE(featureOutput.has_value());
         return {featureOutput.value()};
     }
@@ -40,6 +45,7 @@ class NetworkInput : public Layer {
     virtual std::shared_ptr<ThorImplementation::NetworkInput> stamp(ThorImplementation::TensorPlacement placement,
                                                                     uint32_t batchSize) const {
         THOR_THROW_IF_FALSE(initialized);
+        THOR_THROW_IF_FALSE(!passThroughSource_.has_value());
 
         std::vector<uint64_t> physicalDimensions;
         if (dimensionsIncludeBatch_) {
@@ -52,15 +58,7 @@ class NetworkInput : public Layer {
         }
 
         std::shared_ptr<ThorImplementation::NetworkInput> networkInput;
-        if (passThroughPhysicalSource_.has_value()) {
-            networkInput = std::make_shared<ThorImplementation::NetworkInput>(placement,
-                                                                               dataType,
-                                                                               physicalDimensions,
-                                                                               ThorImplementation::NetworkInput::Mode::PassThrough,
-                                                                               passThroughPhysicalSource_.value());
-        } else {
-            networkInput = std::make_shared<ThorImplementation::NetworkInput>(placement, dataType, physicalDimensions);
-        }
+        networkInput = std::make_shared<ThorImplementation::NetworkInput>(placement, dataType, physicalDimensions);
         networkInput->setName(name);
 
         return networkInput;
@@ -71,12 +69,18 @@ class NetworkInput : public Layer {
                                                      std::shared_ptr<Thor::Layer> drivingApiLayer,
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
+        (void)placement;
+        (void)drivingLayer;
+        (void)drivingApiLayer;
+        (void)connectingApiTensor;
         (void)inferenceOnly;
         THOR_UNREACHABLE();
     }
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
-        if (passThroughPhysicalSource_.has_value()) {
+        (void)batchSize;
+        (void)tensorPlacement;
+        if (passThroughSource_.has_value()) {
             return 0;
         }
         // Input has a prefetch buffer in addition to storing the output tensor
@@ -88,33 +92,14 @@ class NetworkInput : public Layer {
     std::vector<uint64_t> dimensions;
     DataType dataType;
     bool dimensionsIncludeBatch_ = false;
-    std::optional<ThorImplementation::Tensor> passThroughPhysicalSource_;
+    std::optional<Tensor> passThroughSource_;
 
     friend class Network;
 };
 
 class NetworkInput::Builder {
    public:
-    virtual NetworkInput build() {
-        THOR_THROW_IF_FALSE(_network.has_value());
-        THOR_THROW_IF_FALSE(_dimensions.has_value());
-        THOR_THROW_IF_FALSE(_dataType.has_value());
-
-        NetworkInput networkInput;
-        if (_name.has_value())
-            networkInput.name = _name.value();
-        else
-            networkInput.name = std::string("NetworkInput") + std::to_string(networkInput.getId());
-        networkInput.dimensions = _dimensions.value();
-        networkInput.dataType = _dataType.value();
-        networkInput.dimensionsIncludeBatch_ = _dimensionsIncludeBatch;
-        networkInput.passThroughPhysicalSource_ = _passThroughPhysicalSource;
-        networkInput.featureInput = Tensor(_dataType.value(), _dimensions.value());
-        networkInput.featureOutput = Tensor(_dataType.value(), _dimensions.value());
-        networkInput.initialized = true;
-        networkInput.addToNetwork(_network.value());
-        return networkInput;
-    }
+    virtual NetworkInput build();
 
     virtual NetworkInput::Builder &network(Network &_network) {
         THOR_THROW_IF_FALSE(!this->_network.has_value());
@@ -147,9 +132,9 @@ class NetworkInput::Builder {
         return *this;
     }
 
-    virtual NetworkInput::Builder &passThroughPhysicalSource(const ThorImplementation::Tensor &sourceTensor) {
+    virtual NetworkInput::Builder &passThroughSource(const Tensor &sourceTensor) {
         THOR_THROW_IF_FALSE(sourceTensor.isInitialized());
-        this->_passThroughPhysicalSource = sourceTensor;
+        this->_passThroughSource = sourceTensor;
         return *this;
     }
 
@@ -159,7 +144,7 @@ class NetworkInput::Builder {
     std::optional<std::vector<uint64_t>> _dimensions;
     std::optional<DataType> _dataType;
     bool _dimensionsIncludeBatch = false;
-    std::optional<ThorImplementation::Tensor> _passThroughPhysicalSource;
+    std::optional<Tensor> _passThroughSource;
 };
 
 }  // namespace Thor

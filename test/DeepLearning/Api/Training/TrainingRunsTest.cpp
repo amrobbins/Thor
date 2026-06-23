@@ -4,20 +4,26 @@
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
+#include "DeepLearning/Api/Layers/Activations/Relu.h"
 #include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
 #include "DeepLearning/Api/Layers/Loss/CategoricalCrossEntropy.h"
+#include "DeepLearning/Api/Layers/Loss/MeanAbsoluteError.h"
+#include "DeepLearning/Api/Layers/Loss/MeanSquaredError.h"
+#include "DeepLearning/Api/Layers/Loss/QuantileLoss.h"
 #include "DeepLearning/Api/Training/Events/TrainingEvent.h"
 #include "DeepLearning/Api/Training/Executors/TrainingExecutor.h"
 #include "DeepLearning/Api/Training/Observers/TrainingObserver.h"
 
 #include "gtest/gtest.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <condition_variable>
 #include <exception>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <filesystem>
 #include <map>
 #include <memory>
@@ -28,9 +34,60 @@
 #include <thread>
 #include <vector>
 
+namespace Thor::Testing {
+Batch trainingRunsAccumulatorBatchForMemberOutputsForTest(
+    const std::vector<std::map<std::string, ThorImplementation::Tensor>>& memberOutputs,
+    const std::vector<std::string>& outputNames);
+std::map<std::string, uint64_t> trainingRunsInputDistributionLayerCountsForTest(
+    const std::map<std::string, ThorImplementation::TensorDescriptor>& inputDescriptors);
+std::map<std::string, bool> trainingRunsDistributedMemberInputsReuseSharedTensorsForTest(
+    const std::vector<std::vector<std::string>>& memberInputNames,
+    const std::map<std::string, ThorImplementation::Tensor>& distributedInputTensors);
+std::vector<std::string> trainingRunsComposedEvaluatorExternalInputNamesForTest(
+    const std::vector<std::shared_ptr<Network>>& memberNetworks,
+    const std::vector<double>& weights,
+    const std::vector<std::string>& outputNames);
+std::map<std::string, bool> trainingRunsComposedEvaluatorMemberInputAliasStatesForTest(
+    const std::vector<std::shared_ptr<Network>>& memberNetworks,
+    const std::vector<double>& weights,
+    const std::vector<std::string>& outputNames);
+std::map<std::string, std::vector<uint64_t>> trainingRunsComposedEvaluatorAveragedOutputDimensionsForTest(
+    const std::vector<std::shared_ptr<Network>>& memberNetworks,
+    const std::vector<double>& weights,
+    const std::vector<std::string>& outputNames);
+std::map<std::string, std::string> trainingRunsComposedEvaluatorAveragedOutputDataTypesForTest(
+    const std::vector<std::shared_ptr<Network>>& memberNetworks,
+    const std::vector<double>& weights,
+    const std::vector<std::string>& outputNames);
+std::optional<double> trainingRunsWeightedLossSumFromWeightedLossValuesForTest(
+    const std::vector<std::optional<double>>& weightedLossValues);
+}
+
 using namespace Thor;
 
 namespace {
+
+ThorImplementation::Tensor makeCpuTensor(ThorImplementation::DataType dataType, std::vector<uint64_t> dimensions) {
+    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    return ThorImplementation::Tensor(cpuPlacement, ThorImplementation::TensorDescriptor(dataType, std::move(dimensions)));
+}
+
+std::shared_ptr<Network> makeReluMemberNetwork(const std::string& networkName,
+                                             const std::vector<uint64_t>& inputDimensions,
+                                             const std::vector<std::string>& outputNames) {
+    auto network = std::make_shared<Network>(networkName);
+    NetworkInput input = NetworkInput::Builder()
+                             .network(*network)
+                             .name("features")
+                             .dimensions(inputDimensions)
+                             .dataType(DataType::FP32)
+                             .build();
+    std::shared_ptr<Activation> relu = Relu::Builder().network(*network).featureInput(input.getFeatureOutput().value()).build();
+    for (const std::string& outputName : outputNames) {
+        NetworkOutput::Builder().network(*network).name(outputName).inputTensor(relu->getFeatureOutput().value()).build();
+    }
+    return network;
+}
 
 class FakeLoader : public Loader {
    public:
@@ -230,6 +287,132 @@ std::shared_ptr<Network> makeNetworkWithOutput(const std::string& name, const st
     return network;
 }
 
+std::shared_ptr<Network> makeDemandSignatureNetwork(const std::string& name) {
+    auto network = std::make_shared<Network>(name);
+    NetworkInput::Builder().network(*network).name("features").dimensions({0, 4}).dataType(DataType::FP32).build();
+    NetworkInput::Builder().network(*network).name("observed_daily").dimensions({0, 1}).dataType(DataType::FP32).build();
+    NetworkInput::Builder().network(*network).name("observed_aggregate").dimensions({0, 1}).dataType(DataType::FP32).build();
+    NetworkInput::Builder().network(*network).name("example_weights").dimensions({0, 1}).dataType(DataType::FP32).build();
+
+    Tensor outputTensor(DataType::FP32, {0, 1});
+    NetworkOutput::Builder().network(*network).name("daily").inputTensor(outputTensor).dataType(DataType::FP32).build();
+    NetworkOutput::Builder().network(*network).name("aggregate").inputTensor(outputTensor).dataType(DataType::FP32).build();
+    NetworkOutput::Builder().network(*network).name("forecast_p90").inputTensor(outputTensor).dataType(DataType::FP32).build();
+    return network;
+}
+
+std::shared_ptr<Network> makeLossWeightedDemandNetwork(const std::string& name, float dailyLossWeight = 2.0f) {
+    auto network = std::make_shared<Network>(name);
+    NetworkInput features = NetworkInput::Builder().network(*network).name("features").dimensions({4}).dataType(DataType::FP32).build();
+    NetworkInput observedDaily = NetworkInput::Builder().network(*network).name("observed_daily").dimensions({1}).dataType(DataType::FP32).build();
+    NetworkInput observedAggregate = NetworkInput::Builder().network(*network).name("observed_aggregate").dimensions({1}).dataType(DataType::FP32).build();
+
+    FullyConnected daily = FullyConnected::Builder()
+                               .network(*network)
+                               .featureInput(features.getFeatureOutput().value())
+                               .numOutputFeatures(1)
+                               .hasBias(true)
+                               .noActivation()
+                               .build();
+    FullyConnected aggregate = FullyConnected::Builder()
+                                   .network(*network)
+                                   .featureInput(features.getFeatureOutput().value())
+                                   .numOutputFeatures(1)
+                                   .hasBias(true)
+                                   .noActivation()
+                                   .build();
+    FullyConnected p90 = FullyConnected::Builder()
+                             .network(*network)
+                             .featureInput(features.getFeatureOutput().value())
+                             .numOutputFeatures(1)
+                             .hasBias(true)
+                             .noActivation()
+                             .build();
+
+    MAE dailyLoss = MAE::Builder()
+                        .network(*network)
+                        .predictions(daily.getFeatureOutput().value())
+                        .labels(observedDaily.getFeatureOutput().value())
+                        .lossDataType(DataType::FP32)
+                        .lossWeight(dailyLossWeight)
+                        .build();
+    MSE aggregateLoss = MSE::Builder()
+                            .network(*network)
+                            .predictions(aggregate.getFeatureOutput().value())
+                            .labels(observedAggregate.getFeatureOutput().value())
+                            .lossDataType(DataType::FP32)
+                            .lossWeight(1.5f)
+                            .build();
+    QuantileLoss p90Loss = QuantileLoss::Builder()
+                               .network(*network)
+                               .predictions(p90.getFeatureOutput().value())
+                               .labels(observedDaily.getFeatureOutput().value())
+                               .quantile(0.9f)
+                               .lossDataType(DataType::FP32)
+                               .lossWeight(0.5f)
+                               .build();
+
+    NetworkOutput::Builder().network(*network).name("daily").inputTensor(daily.getFeatureOutput().value()).dataType(DataType::FP32).build();
+    NetworkOutput::Builder().network(*network).name("aggregate").inputTensor(aggregate.getFeatureOutput().value()).dataType(DataType::FP32).build();
+    NetworkOutput::Builder().network(*network).name("forecast_p90").inputTensor(p90.getFeatureOutput().value()).dataType(DataType::FP32).build();
+    NetworkOutput::Builder().network(*network).name("daily_loss").inputTensor(dailyLoss.getLoss()).dataType(DataType::FP32).build();
+    NetworkOutput::Builder().network(*network).name("aggregate_loss").inputTensor(aggregateLoss.getLoss()).dataType(DataType::FP32).build();
+    NetworkOutput::Builder().network(*network).name("p90_loss").inputTensor(p90Loss.getLoss()).dataType(DataType::FP32).build();
+    return network;
+}
+
+std::shared_ptr<Network> makeDemandPredictionOnlyNetwork(const std::string& name,
+                                                         std::vector<uint64_t> dailyOutputDimensions = {1},
+                                                         bool includeDailyOutput = true) {
+    auto network = std::make_shared<Network>(name);
+    NetworkInput::Builder().network(*network).name("features").dimensions({4}).dataType(DataType::FP32).build();
+    NetworkInput::Builder().network(*network).name("observed_daily").dimensions({1}).dataType(DataType::FP32).build();
+    NetworkInput::Builder().network(*network).name("observed_aggregate").dimensions({1}).dataType(DataType::FP32).build();
+
+    if (includeDailyOutput) {
+        Tensor dailyTensor(DataType::FP32, std::move(dailyOutputDimensions));
+        NetworkOutput::Builder().network(*network).name("daily").inputTensor(dailyTensor).dataType(DataType::FP32).build();
+    }
+    Tensor aggregateTensor(DataType::FP32, {1});
+    Tensor p90Tensor(DataType::FP32, {1});
+    NetworkOutput::Builder().network(*network).name("aggregate").inputTensor(aggregateTensor).dataType(DataType::FP32).build();
+    NetworkOutput::Builder().network(*network).name("forecast_p90").inputTensor(p90Tensor).dataType(DataType::FP32).build();
+    return network;
+}
+
+std::shared_ptr<Network> makeAmbiguousDailyLossNetwork(const std::string& name) {
+    auto network = std::make_shared<Network>(name);
+    NetworkInput features = NetworkInput::Builder().network(*network).name("features").dimensions({4}).dataType(DataType::FP32).build();
+    NetworkInput observedDaily = NetworkInput::Builder().network(*network).name("observed_daily").dimensions({1}).dataType(DataType::FP32).build();
+
+    FullyConnected daily = FullyConnected::Builder()
+                               .network(*network)
+                               .featureInput(features.getFeatureOutput().value())
+                               .numOutputFeatures(1)
+                               .hasBias(true)
+                               .noActivation()
+                               .build();
+
+    MAE::Builder()
+        .network(*network)
+        .predictions(daily.getFeatureOutput().value())
+        .labels(observedDaily.getFeatureOutput().value())
+        .lossDataType(DataType::FP32)
+        .lossWeight(2.0f)
+        .build();
+    MAE::Builder()
+        .network(*network)
+        .predictions(daily.getFeatureOutput().value())
+        .labels(observedDaily.getFeatureOutput().value())
+        .lossDataType(DataType::FP32)
+        .lossWeight(3.0f)
+        .build();
+
+    NetworkOutput::Builder().network(*network).name("daily").inputTensor(daily.getFeatureOutput().value()).dataType(DataType::FP32).build();
+    return network;
+}
+
+
 std::shared_ptr<Trainer> makeTrainer(std::shared_ptr<Network> network,
                                     std::shared_ptr<TrainingExecutor> executor,
                                     std::optional<std::string> saveModelDirectory = std::nullopt,
@@ -290,6 +473,34 @@ TEST(TrainingRuns, StructuralLabelMappingResolvesCategoricalCrossEntropySupportS
     EXPECT_EQ(mapping.find("loss"), mapping.end());
 }
 
+TEST(TrainingRuns, LossReferencesExposeLossWeightsForNamedOutputs) {
+    auto network = makeLossWeightedDemandNetwork("training-runs-loss-metric-hints");
+
+    const std::map<std::string, std::vector<NetworkLossReference>> references = network->getLossReferencesByPredictionOutputName();
+
+    auto dailyIt = references.find("daily");
+    ASSERT_NE(dailyIt, references.end());
+    ASSERT_EQ(dailyIt->second.size(), 1u);
+    EXPECT_EQ(dailyIt->second[0].targetInputName, "observed_daily");
+    EXPECT_EQ(dailyIt->second[0].lossLayerType, "CustomLoss");
+    EXPECT_DOUBLE_EQ(dailyIt->second[0].lossWeight, 2.0);
+
+    auto aggregateIt = references.find("aggregate");
+    ASSERT_NE(aggregateIt, references.end());
+    ASSERT_EQ(aggregateIt->second.size(), 1u);
+    EXPECT_EQ(aggregateIt->second[0].targetInputName, "observed_aggregate");
+    EXPECT_EQ(aggregateIt->second[0].lossLayerType, "CustomLoss");
+    EXPECT_DOUBLE_EQ(aggregateIt->second[0].lossWeight, 1.5);
+
+    auto p90It = references.find("forecast_p90");
+    ASSERT_NE(p90It, references.end());
+    ASSERT_EQ(p90It->second.size(), 1u);
+    EXPECT_EQ(p90It->second[0].targetInputName, "observed_daily");
+    EXPECT_EQ(p90It->second[0].lossLayerType, "CustomLoss");
+    EXPECT_FALSE(p90It->second[0].quantile.has_value());
+    EXPECT_DOUBLE_EQ(p90It->second[0].lossWeight, 0.5);
+}
+
 TEST(TrainingRuns, RejectsInvalidRunSpecs) {
     auto network = std::make_shared<Network>("training-runs-invalid");
     auto coordinator = std::make_shared<Coordinator>(1);
@@ -330,99 +541,147 @@ TEST(TrainingRuns, RejectsInvalidRunSpecs) {
 
 
 
-TEST(TrainingRuns, ValidatesMinSuccessfulModelsTargetsKnownEnsembleGroups) {
-    auto network0 = makeNetworkWithOutput("training-runs-min-success-0", {0, 10});
-    auto network1 = makeNetworkWithOutput("training-runs-min-success-1", {0, 10});
+TEST(TrainingRuns, AcceptsReportedLossNameFilter) {
+    auto network0 = makeLossWeightedDemandNetwork("training-runs-reported-loss-policy-0");
+    auto network1 = makeLossWeightedDemandNetwork("training-runs-reported-loss-policy-1");
     auto coordinator = std::make_shared<Coordinator>(2);
     auto executor0 = std::make_shared<CoordinatedExecutor>(coordinator, FakeExecutorBehavior::COMPLETE_AFTER_RELEASE);
     auto executor1 = std::make_shared<CoordinatedExecutor>(coordinator, FakeExecutorBehavior::COMPLETE_AFTER_RELEASE);
     std::shared_ptr<Trainer> trainer0 = makeTrainer(network0, executor0);
     std::shared_ptr<Trainer> trainer1 = makeTrainer(network1, executor1);
 
-    EXPECT_NO_THROW((TrainingRuns({TrainingRunsSpec{"fold_0", trainer0, "digits"},
-                                   TrainingRunsSpec{"fold_1", trainer1, "digits"}},
-                                  TrainingRunsFailurePolicy::CANCEL_SIBLINGS,
-                                  2.0,
-                                  std::nullopt,
-                                  {},
-                                  {},
-                                  {{"digits", 1}})));
+    TrainingRuns runs({TrainingRunsSpec{"fold_0", trainer0, "demand"}, TrainingRunsSpec{"fold_1", trainer1, "demand"}},
+                      TrainingRunsFailurePolicy::CANCEL_SIBLINGS,
+                      2.0,
+                      std::nullopt,
+                      {},
+                      {},
+                      {},
+                      {{"demand", {"daily_loss", "p90_loss"}}});
 
-    EXPECT_THROW((TrainingRuns({TrainingRunsSpec{"fold_0", trainer0, "digits"},
-                                TrainingRunsSpec{"fold_1", trainer1, "digits"}},
+    const auto& reportedLosses = runs.getReportedLosses();
+    ASSERT_EQ(reportedLosses.size(), 1u);
+    const auto lossesIt = reportedLosses.find("demand");
+    ASSERT_NE(lossesIt, reportedLosses.end());
+    ASSERT_EQ(lossesIt->second.size(), 2u);
+    EXPECT_EQ(lossesIt->second[0], "daily_loss");
+    EXPECT_EQ(lossesIt->second[1], "p90_loss");
+}
+
+TEST(TrainingRuns, NamedMetricResultsUseGraphLossesAndSourceLossWeight) {
+    auto network = makeLossWeightedDemandNetwork("training-runs-reported-loss-weight-resolution");
+    auto coordinator = std::make_shared<Coordinator>(1);
+    auto executor = std::make_shared<CoordinatedExecutor>(coordinator, FakeExecutorBehavior::COMPLETE_AFTER_RELEASE);
+    std::shared_ptr<Trainer> trainer = makeTrainer(network, executor);
+
+    TrainingRuns runs({TrainingRunsSpec{"fold_0", trainer, "demand"}},
+                      TrainingRunsFailurePolicy::CANCEL_SIBLINGS,
+                      2.0,
+                      std::nullopt,
+                      {},
+                      {},
+                      {},
+                      {{"demand", {}}});
+
+    std::optional<TrainingRunsResult> result;
+    std::exception_ptr exception;
+    std::thread fitThread([&]() {
+        try {
+            TrainingRunsEvaluationOptions evaluationOptions;
+            evaluationOptions.evaluateTrainingPopulation = false;
+            result = runs.fit(TrainerFitOptions{1}, evaluationOptions);
+        } catch (...) {
+            exception = std::current_exception();
+        }
+    });
+
+    ASSERT_TRUE(coordinator->waitForAllStarted());
+    coordinator->releaseAll();
+    fitThread.join();
+    rethrowIfSet(exception);
+
+    ASSERT_TRUE(result.has_value());
+    const TrainingEnsembleResult& ensemble = result->ensemble("demand");
+    ASSERT_EQ(ensemble.namedMetrics.size(), 3u);
+
+    EXPECT_EQ(ensemble.namedMetrics[0].name, "aggregate_loss");
+    EXPECT_EQ(ensemble.namedMetrics[0].outputName, "aggregate");
+    EXPECT_EQ(ensemble.namedMetrics[0].targetInputName, "observed_aggregate");
+    EXPECT_DOUBLE_EQ(ensemble.namedMetrics[0].overallWeight, 1.5);
+    EXPECT_EQ(ensemble.namedMetrics[0].overallWeightSource, "loss_weight");
+
+    EXPECT_EQ(ensemble.namedMetrics[1].name, "daily_loss");
+    EXPECT_EQ(ensemble.namedMetrics[1].outputName, "daily");
+    EXPECT_EQ(ensemble.namedMetrics[1].targetInputName, "observed_daily");
+    EXPECT_DOUBLE_EQ(ensemble.namedMetrics[1].overallWeight, 2.0);
+    EXPECT_EQ(ensemble.namedMetrics[1].overallWeightSource, "loss_weight");
+
+    EXPECT_EQ(ensemble.namedMetrics[2].name, "p90_loss");
+    EXPECT_EQ(ensemble.namedMetrics[2].outputName, "forecast_p90");
+    EXPECT_EQ(ensemble.namedMetrics[2].targetInputName, "observed_daily");
+    EXPECT_DOUBLE_EQ(ensemble.namedMetrics[2].overallWeight, 0.5);
+    EXPECT_EQ(ensemble.namedMetrics[2].overallWeightSource, "loss_weight");
+}
+
+TEST(TrainingRuns, ReportedLossResolutionFailsFastForMissingAndAmbiguousGraphLosses) {
+    auto signatureOnlyNetwork = makeDemandSignatureNetwork("training-runs-missing-reported-loss");
+    auto signatureCoordinator = std::make_shared<Coordinator>(1);
+    auto signatureExecutor = std::make_shared<CoordinatedExecutor>(signatureCoordinator, FakeExecutorBehavior::COMPLETE_AFTER_RELEASE);
+    std::shared_ptr<Trainer> signatureTrainer = makeTrainer(signatureOnlyNetwork, signatureExecutor);
+
+    EXPECT_THROW((TrainingRuns({TrainingRunsSpec{"fold_0", signatureTrainer, "demand"}},
                                TrainingRunsFailurePolicy::CANCEL_SIBLINGS,
                                2.0,
                                std::nullopt,
                                {},
                                {},
-                               {{"digitz", 1}})),
-                 std::runtime_error);
-
-    EXPECT_THROW((TrainingRuns({TrainingRunsSpec{"fold_0", trainer0, "digits"},
-                                TrainingRunsSpec{"fold_1", trainer1, "digits"}},
-                               TrainingRunsFailurePolicy::CANCEL_SIBLINGS,
-                               2.0,
-                               std::nullopt,
                                {},
-                               {},
-                               {{"digits", 3}})),
+                               {{"demand", {"daily_loss"}}})),
                  std::runtime_error);
 }
 
-TEST(TrainingRuns, FitRejectsExistingSaveModelDirectoryBeforeStartingWorkersWhenOverwriteIsFalse) {
-    auto network0 = std::make_shared<Network>("training-runs-existing-save-dir-0");
-    auto network1 = std::make_shared<Network>("training-runs-existing-save-dir-1");
-    auto coordinator = std::make_shared<Coordinator>(2);
-    auto executor0 = std::make_shared<CoordinatedExecutor>(coordinator, FakeExecutorBehavior::COMPLETE_AFTER_RELEASE);
-    auto executor1 = std::make_shared<CoordinatedExecutor>(coordinator, FakeExecutorBehavior::COMPLETE_AFTER_RELEASE);
-    const std::filesystem::path existingSaveDir = uniqueTempPath("thor-training-runs-existing-save-dir");
-    const std::filesystem::path freshSaveDir = uniqueTempPath("thor-training-runs-fresh-save-dir");
-    std::filesystem::create_directories(existingSaveDir);
 
-    std::shared_ptr<Trainer> trainer0 = makeTrainer(network0, executor0, existingSaveDir.string());
-    std::shared_ptr<Trainer> trainer1 = makeTrainer(network1, executor1, freshSaveDir.string());
-    TrainingRuns runs({TrainingRunsSpec{"fold_0", trainer0}, TrainingRunsSpec{"fold_1", trainer1}});
+TEST(TrainingEnsembleResult, NamedMetricValuesContributeToEvaluationMetricPresence) {
+    TrainingEnsembleResult ensemble;
+    EXPECT_FALSE(ensemble.hasNamedMetricValues());
+    EXPECT_FALSE(ensemble.hasEnsembleEvaluationMetrics());
 
-    EXPECT_THROW(
-        {
-            [[maybe_unused]] TrainingRunsResult result = runs.fit(1);
-        },
-        std::runtime_error);
-    EXPECT_EQ(executor0->calls, 0u);
-    EXPECT_EQ(executor1->calls, 0u);
+    TrainingNamedMetricResult metric;
+    metric.name = "daily_loss";
+    metric.outputName = "daily";
+    metric.targetInputName = "observed_daily";
+    metric.overallWeight = 2.0;
+    metric.overallWeightSource = "loss_weight";
+    metric.testValue = 0.25;
+    ensemble.namedMetrics.push_back(metric);
 
-    std::filesystem::remove_all(existingSaveDir);
-    std::filesystem::remove_all(freshSaveDir);
+    ASSERT_EQ(ensemble.namedMetrics.size(), 1u);
+    EXPECT_TRUE(ensemble.namedMetrics[0].hasValue());
+    EXPECT_TRUE(ensemble.hasNamedMetricValues());
+    EXPECT_TRUE(ensemble.hasEnsembleEvaluationMetrics());
+    EXPECT_EQ(ensemble.namedMetrics[0].name, "daily_loss");
+    EXPECT_EQ(ensemble.namedMetrics[0].outputName, "daily");
+    EXPECT_EQ(ensemble.namedMetrics[0].targetInputName, "observed_daily");
+    EXPECT_DOUBLE_EQ(ensemble.namedMetrics[0].overallWeight, 2.0);
+    EXPECT_EQ(ensemble.namedMetrics[0].overallWeightSource, "loss_weight");
+    ASSERT_TRUE(ensemble.namedMetrics[0].testValue.has_value());
+    EXPECT_DOUBLE_EQ(ensemble.namedMetrics[0].testValue.value(), 0.25);
 }
 
-TEST(TrainingRuns, RejectsDuplicateSaveModelDirectories) {
-    auto network0 = std::make_shared<Network>("training-runs-save-dir-0");
-    auto network1 = std::make_shared<Network>("training-runs-save-dir-1");
-    auto coordinator = std::make_shared<Coordinator>(2);
-    auto executor0 = std::make_shared<CoordinatedExecutor>(coordinator, FakeExecutorBehavior::COMPLETE_AFTER_RELEASE);
-    auto executor1 = std::make_shared<CoordinatedExecutor>(coordinator, FakeExecutorBehavior::COMPLETE_AFTER_RELEASE);
+TEST(TrainingRuns, WeightedLossSumUsesAlreadyWeightedNamedLossValues) {
+    const std::vector<std::optional<double>> weightedLossValues{0.20, 0.60, 0.15};
 
-    const std::filesystem::path outputDir = std::filesystem::path("training-runs-output") / "shared-checkpoint";
-    std::shared_ptr<Trainer> trainer0 = makeTrainer(network0, executor0, outputDir.string());
-    std::shared_ptr<Trainer> trainer1 = makeTrainer(network1, executor1, (outputDir / ".." / "shared-checkpoint").string());
+    std::optional<double> overall = Thor::Testing::trainingRunsWeightedLossSumFromWeightedLossValuesForTest(
+        weightedLossValues);
 
-    EXPECT_THROW(
-        (TrainingRuns(std::vector<TrainingRunsSpec>{TrainingRunsSpec{"fold_0", trainer0}, TrainingRunsSpec{"fold_1", trainer1}})),
-        std::runtime_error);
+    ASSERT_TRUE(overall.has_value());
+    EXPECT_NEAR(overall.value(), 0.20 + 0.60 + 0.15, 1.0e-12);
 }
 
-TEST(TrainingRuns, AllowsDistinctSaveModelDirectories) {
-    auto network0 = std::make_shared<Network>("training-runs-save-distinct-0");
-    auto network1 = std::make_shared<Network>("training-runs-save-distinct-1");
-    auto coordinator = std::make_shared<Coordinator>(2);
-    auto executor0 = std::make_shared<CoordinatedExecutor>(coordinator, FakeExecutorBehavior::COMPLETE_AFTER_RELEASE);
-    auto executor1 = std::make_shared<CoordinatedExecutor>(coordinator, FakeExecutorBehavior::COMPLETE_AFTER_RELEASE);
-
-    std::shared_ptr<Trainer> trainer0 = makeTrainer(network0, executor0, "training-runs-output/fold-0");
-    std::shared_ptr<Trainer> trainer1 = makeTrainer(network1, executor1, "training-runs-output/fold-1");
-
-    EXPECT_NO_THROW(
-        (TrainingRuns(std::vector<TrainingRunsSpec>{TrainingRunsSpec{"fold_0", trainer0}, TrainingRunsSpec{"fold_1", trainer1}})));
+TEST(TrainingRuns, WeightedLossSumRejectsMissingOrNonFiniteValues) {
+    EXPECT_FALSE(Thor::Testing::trainingRunsWeightedLossSumFromWeightedLossValuesForTest({0.20, std::nullopt}).has_value());
+    EXPECT_FALSE(Thor::Testing::trainingRunsWeightedLossSumFromWeightedLossValuesForTest({0.20, std::numeric_limits<double>::infinity()}).has_value());
+    EXPECT_FALSE(Thor::Testing::trainingRunsWeightedLossSumFromWeightedLossValuesForTest({}).has_value());
 }
 
 TEST(TrainingRuns, RejectsIncompatibleEnsembleOutputDimensions) {

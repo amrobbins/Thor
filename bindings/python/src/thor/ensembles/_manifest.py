@@ -601,12 +601,6 @@ class EnsembleModel:
             logical_names: list[str] = []
             for member_index in range(len(self._members)):
                 member_spec = member_output_specs[member_index][output_name]
-                source_tensor = member_spec.get("tensor")
-                if source_tensor is None:
-                    raise RuntimeError(
-                        f"ensemble member output {output_name!r} did not expose a physical tensor "
-                        "for accumulator pass-through composition"
-                    )
                 input_name = _accumulator_input_name(output_index, member_index)
                 logical_names.append(input_name)
                 layer = thor.layers.NetworkInput(
@@ -615,7 +609,6 @@ class EnsembleModel:
                     dimensions,
                     data_type,
                     dimensions_include_batch=True,
-                    pass_through_source=source_tensor,
                 )
                 inputs[input_name] = layer.get_feature_output()
 
