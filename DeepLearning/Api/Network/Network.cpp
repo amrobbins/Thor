@@ -395,6 +395,8 @@ ApiSubgraphCloneResult Network::cloneInferenceSubgraphInto(const Network& source
     }
 
     std::set<uint64_t> requiredLayerIds;
+    std::set<uint64_t> visitingLayerIds;
+    std::vector<std::shared_ptr<Layer>> layersToClone;
     std::function<void(const Tensor&)> collectUpstream = [&](const Tensor& tensor) {
         if (destinationOriginalIdBySourceOriginalId.count(tensor.getOriginalId()) != 0) {
             return;
@@ -413,14 +415,25 @@ ApiSubgraphCloneResult Network::cloneInferenceSubgraphInto(const Network& source
         if (std::dynamic_pointer_cast<NetworkOutput>(driver) != nullptr) {
             throw std::runtime_error("cloneInferenceSubgraphInto encountered a NetworkOutput as a tensor driver; request the output's input tensor instead.");
         }
-        if (requiredLayerIds.insert(driver->getId()).second) {
-            auto inputsIt = sourceNetwork.apiLayerToApiInputTensors.find(driver);
-            if (inputsIt != sourceNetwork.apiLayerToApiInputTensors.end()) {
-                for (const Tensor& inputTensor : inputsIt->second) {
-                    collectUpstream(inputTensor);
-                }
+
+        const uint64_t driverId = driver->getId();
+        if (requiredLayerIds.count(driverId) != 0) {
+            return;
+        }
+        if (!visitingLayerIds.insert(driverId).second) {
+            throw std::runtime_error("cloneInferenceSubgraphInto encountered a cycle while cloning " + sourceLayerContext(driver) + ".");
+        }
+
+        auto inputsIt = sourceNetwork.apiLayerToApiInputTensors.find(driver);
+        if (inputsIt != sourceNetwork.apiLayerToApiInputTensors.end()) {
+            for (const Tensor& inputTensor : inputsIt->second) {
+                collectUpstream(inputTensor);
             }
         }
+
+        visitingLayerIds.erase(driverId);
+        requiredLayerIds.insert(driverId);
+        layersToClone.push_back(driver);
     };
 
     for (const Tensor& outputTensor : requestedSourceOutputTensors) {
@@ -433,12 +446,6 @@ ApiSubgraphCloneResult Network::cloneInferenceSubgraphInto(const Network& source
     }
 
     std::shared_ptr<thor_file::TarReader> nullArchiveReader;
-    std::vector<std::shared_ptr<Layer>> layersToClone;
-    for (const std::shared_ptr<Layer>& layer : sourceNetwork.allLayersInNetworkList) {
-        if (requiredLayerIds.count(layer->getId()) != 0) {
-            layersToClone.push_back(layer);
-        }
-    }
 
     for (const std::shared_ptr<Layer>& layer : layersToClone) {
         std::set<uint64_t> clonedLayerOutputOriginalIds;
