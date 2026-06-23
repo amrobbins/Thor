@@ -4,6 +4,7 @@ import thor
 def test_top_level_api_is_curated():
     expected = {
         "DataType",
+        "EnsembleModel",
         "Network",
         "Tensor",
         "__git_version__",
@@ -11,6 +12,7 @@ def test_top_level_api_is_curated():
         "activations",
         "constraints",
         "data",
+        "ensembles",
         "initializers",
         "layers",
         "losses",
@@ -27,6 +29,8 @@ def test_top_level_api_is_curated():
 
     for leaked_name in [
         "BoundParameter",
+        "EnsembleAggregation",
+        "EnsembleMemberSpec",
         "ParameterReference",
         "ParameterSpecification",
         "ParameterConstraint",
@@ -61,3 +65,10 @@ def test_parameter_and_constraint_namespaces_export_public_types():
 def test_runtime_namespace_exports_runtime_types():
     assert thor.runtime.StatusCode.success is thor.Network.StatusCode.success
     assert "PlacedNetwork" in dir(thor.runtime)
+
+
+def test_ensembles_namespace_exports_manifest_types():
+    assert thor.EnsembleModel is thor.ensembles.EnsembleModel
+    assert "EnsembleModel" in dir(thor.ensembles)
+    assert "EnsembleMemberSpec" in dir(thor.ensembles)
+    assert "EnsembleAggregation" in dir(thor.ensembles)

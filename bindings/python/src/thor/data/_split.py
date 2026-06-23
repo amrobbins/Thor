@@ -119,6 +119,84 @@ class StratifiedTrainValidationTestSplit:
 
 
 @dataclass(frozen=True)
+class NumpyDictSplit:
+    """Named NumPy arrays partitioned into train/validation[/test] dictionaries."""
+
+    train: dict[str, np.ndarray]
+    validate: dict[str, np.ndarray]
+    test: dict[str, np.ndarray] | None = None
+
+
+def make_numpy_dict_splits(
+    tensors: Mapping[str, Any],
+    *,
+    split: StratifiedSplit | StratifiedTrainValidationTestSplit,
+    keys: Sequence[Any] | None = None,
+    groups: Sequence[Any] | None = None,
+) -> NumpyDictSplit:
+    """Partition named array-like tensors according to a stratified split.
+
+    This helper is intended for demand-style in-memory loaders where each named
+    input/label/weight tensor shares a leading example dimension. Pass
+    ``groups`` when many rows belong to one split unit, e.g. product/date rows
+    grouped by product id. If ``groups`` is omitted, ``keys`` are matched
+    against the split's key fields.
+    """
+
+    if not isinstance(tensors, Mapping) or not tensors:
+        raise ValueError("tensors must be a non-empty mapping of tensor name to array-like values")
+    if keys is None and groups is None:
+        raise ValueError("exactly one of keys or groups must be provided")
+    if keys is not None and groups is not None:
+        raise ValueError("exactly one of keys or groups must be provided")
+
+    arrays: dict[str, np.ndarray] = {name: np.asarray(value) for name, value in tensors.items()}
+    first_name, first_array = next(iter(arrays.items()))
+    if first_array.ndim == 0:
+        raise ValueError(f"tensor {first_name!r} must have a leading example dimension")
+    num_examples = int(first_array.shape[0])
+    for name, array in arrays.items():
+        if array.ndim == 0:
+            raise ValueError(f"tensor {name!r} must have a leading example dimension")
+        if int(array.shape[0]) != num_examples:
+            raise ValueError(
+                "all tensors must have the same leading example dimension; "
+                f"tensor {name!r} has {array.shape[0]} examples but {first_name!r} has {num_examples}"
+            )
+
+    selector_values = tuple(groups if groups is not None else keys)
+    if len(selector_values) != num_examples:
+        selector_name = "groups" if groups is not None else "keys"
+        raise ValueError(f"{selector_name} length must match the tensor leading dimension")
+
+    train_values = set(split.train_groups if groups is not None else split.train_keys)
+    validate_values = set(split.validate_groups if groups is not None else split.validate_keys)
+    test_values = None
+    if isinstance(split, StratifiedTrainValidationTestSplit):
+        test_values = set(split.test_groups if groups is not None else split.test_keys)
+
+    train_indices = _indices_for_values(selector_values, train_values)
+    validate_indices = _indices_for_values(selector_values, validate_values)
+    test_indices = _indices_for_values(selector_values, test_values) if test_values is not None else None
+
+    return NumpyDictSplit(
+        train={name: np.ascontiguousarray(array[train_indices]) for name, array in arrays.items()},
+        validate={name: np.ascontiguousarray(array[validate_indices]) for name, array in arrays.items()},
+        test=(
+            {name: np.ascontiguousarray(array[test_indices]) for name, array in arrays.items()}
+            if test_indices is not None
+            else None
+        ),
+    )
+
+
+def _indices_for_values(values: Sequence[Any], selected: set[Any] | None) -> np.ndarray:
+    if selected is None:
+        return np.asarray([], dtype=np.int64)
+    return np.asarray([index for index, value in enumerate(values) if value in selected], dtype=np.int64)
+
+
+@dataclass(frozen=True)
 class _SplitUnit:
     group: Any
     keys: tuple[Any, ...]
@@ -542,9 +620,11 @@ class StratifiedSplitter:
 __all__ = [
     "StratificationMode",
     "StratifiedFold",
+    "NumpyDictSplit",
     "StratifiedHoldoutKFoldManifest",
     "StratifiedKFoldManifest",
     "StratifiedSplit",
     "StratifiedTrainValidationTestSplit",
     "StratifiedSplitter",
+    "make_numpy_dict_splits",
 ]

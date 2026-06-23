@@ -23,7 +23,13 @@ void bind_network_input(nb::module_ &m) {
 
     network_input.def(
         "__init__",
-        [](NetworkInput *self, Network &network, const string &name, const vector<uint64_t> &dimensions, const DataType &data_type) {
+        [](NetworkInput *self,
+           Network &network,
+           const string &name,
+           const vector<uint64_t> &dimensions,
+           const DataType &data_type,
+           bool dimensions_include_batch,
+           bool alias_same_placement_inputs) {
             if (name.length() == 0) {
                 string msg = "Network Input instance: name must have non-zero length but name=\"\" was passed in.";
                 throw nb::value_error(msg.c_str());
@@ -34,7 +40,13 @@ void bind_network_input(nb::module_ &m) {
             }
 
             NetworkInput::Builder builder;
-            NetworkInput built = builder.network(network).name(name).dimensions(dimensions).dataType(data_type).build();
+            NetworkInput built = builder.network(network)
+                                     .name(name)
+                                     .dimensions(dimensions)
+                                     .dataType(data_type)
+                                     .dimensionsIncludeBatch(dimensions_include_batch)
+                                     .aliasSamePlacementInputs(alias_same_placement_inputs)
+                                     .build();
 
             // Move the networkInput layer into the pre-allocated but uninitialized memory at self
             new (self) NetworkInput(std::move(built));
@@ -42,7 +54,9 @@ void bind_network_input(nb::module_ &m) {
         "network"_a,
         "name"_a,
         "dimensions"_a,
-        "data_type"_a);
+        "data_type"_a,
+        "dimensions_include_batch"_a = false,
+        "alias_same_placement_inputs"_a = false);
 
     network_input.def(
         "get_feature_output",
@@ -63,6 +77,7 @@ void bind_network_input(nb::module_ &m) {
             )nbdoc");
 
     network_input.def("version", &Layer::getLayerVersion);
+    network_input.def("alias_same_placement_inputs", &NetworkInput::aliasSamePlacementInputs);
 
     network_input.attr("__doc__") = R"nbdoc(
             Create and attach a NetworkInput to send data into a Network.
@@ -80,5 +95,13 @@ void bind_network_input(nb::module_ &m) {
                       the batch dimension is only added when stamping down a physical network instance.
             data_type : thor.DataType
                 Data type of the input tensor (e.g. thor.DataType.fp16).
+            dimensions_include_batch : bool, default False
+                When True, ``dimensions`` already includes the batch dimension.
+                This is primarily for internal network-composition runtimes.
+            alias_same_placement_inputs : bool, default False
+                When True, an already-ready same-device tensor can be forwarded
+                through this NetworkInput without a staging copy.  Normal user
+                inputs should leave this disabled; composed ensemble accumulator
+                networks enable it for no-copy member-output handoff.
             )nbdoc";
 }

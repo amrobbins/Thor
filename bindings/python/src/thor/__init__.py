@@ -7,11 +7,13 @@ from . import _bootstrap as _bootstrap
 _bootstrap.configure()
 
 from ._thor import DataType, Network, Tensor
+from .ensembles import EnsembleModel
 from ._thor import __git_version__, __version__
 
 from . import activations as activations
 from . import constraints as constraints
 from . import data as data
+from . import ensembles as ensembles
 from . import initializers as initializers
 from . import layers as layers
 from . import losses as losses
@@ -25,6 +27,7 @@ from . import training as training
 
 __all__ = [
     "DataType",
+    "EnsembleModel",
     "Network",
     "Tensor",
     "__git_version__",
@@ -32,6 +35,7 @@ __all__ = [
     "activations",
     "constraints",
     "data",
+    "ensembles",
     "initializers",
     "layers",
     "losses",

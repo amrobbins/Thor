@@ -68,6 +68,10 @@ class TrainingRunsResult {
     [[nodiscard]] const TrainingRunResult& at(size_t index) const;
     [[nodiscard]] const TrainingRunResult& at(std::string_view runName) const;
     [[nodiscard]] const TrainingEnsembleResult& ensemble(std::string_view ensembleGroup) const;
+    [[nodiscard]] std::string saveEnsemble(std::string_view ensembleGroup,
+                                           const std::string& directory,
+                                           std::string aggregation = "auto",
+                                           bool overwrite = false) const;
 
     [[nodiscard]] const TrainingRunResult& operator[](size_t index) const { return at(index); }
     [[nodiscard]] const TrainingRunResult& operator[](std::string_view runName) const { return at(runName); }
@@ -84,7 +88,8 @@ class TrainingRuns {
                           double maxSummaryLogsPerSecond = 2.0,
                           std::optional<size_t> maxParallelRuns = std::nullopt,
                           std::vector<TrainingRunsRestartPolicy> restartConditions = {},
-                          std::vector<TrainingRunsEarlyCompletionRule> earlyCompletionRules = {});
+                          std::vector<TrainingRunsEarlyCompletionRule> earlyCompletionRules = {},
+                          std::map<std::string, size_t> minSuccessfulModels = {});
 
     [[nodiscard]] TrainingRunsResult fit(uint32_t epochs);
     [[nodiscard]] TrainingRunsResult fit(uint32_t epochs, std::shared_ptr<Loader> testLoader);
@@ -95,12 +100,16 @@ class TrainingRuns {
     [[nodiscard]] TrainingRunsFailurePolicy getFailurePolicy() const { return failurePolicy; }
     [[nodiscard]] double getMaxSummaryLogsPerSecond() const { return maxSummaryLogsPerSecond; }
     [[nodiscard]] std::optional<size_t> getMaxParallelRuns() const { return maxParallelRuns; }
+    [[nodiscard]] const std::map<std::string, size_t>& getMinSuccessfulModels() const { return minSuccessfulModels; }
     [[nodiscard]] const std::vector<TrainingRunsRestartPolicy>& getRestartConditions() const { return restartConditions; }
     [[nodiscard]] const std::vector<TrainingRunsEarlyCompletionRule>& getEarlyCompletionRules() const { return earlyCompletionRules; }
     [[nodiscard]] size_t getEffectiveMaxParallelRuns() const;
 
    private:
     void validateRunSpecs() const;
+    void validateMinSuccessfulModels() const;
+    [[nodiscard]] bool failedRunShouldTriggerCancellation(size_t runIndex, const std::vector<TrainingRunResult>& results) const;
+    [[nodiscard]] size_t minSuccessfulModelsForGroup(std::string_view ensembleGroup, size_t defaultValue) const;
     void validateRestartConditions() const;
     void validateEarlyCompletionRules() const;
     [[nodiscard]] std::vector<TrainingRestartCondition> restartConditionsForRun(const TrainingRunsSpec& run) const;
@@ -120,6 +129,7 @@ class TrainingRuns {
     TrainingRunsFailurePolicy failurePolicy = TrainingRunsFailurePolicy::CANCEL_SIBLINGS;
     double maxSummaryLogsPerSecond = 2.0;
     std::optional<size_t> maxParallelRuns{};
+    std::map<std::string, size_t> minSuccessfulModels{};
     std::vector<TrainingRunsRestartPolicy> restartConditions{};
     std::vector<TrainingRunsEarlyCompletionRule> earlyCompletionRules{};
 };

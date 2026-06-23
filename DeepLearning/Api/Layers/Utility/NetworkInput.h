@@ -22,6 +22,7 @@ class NetworkInput : public Layer {
     std::vector<uint64_t> getDimensions() const { return dimensions; }
     DataType getDataType() const { return dataType; }
     bool dimensionsIncludeBatch() const { return dimensionsIncludeBatch_; }
+    bool aliasSamePlacementInputs() const { return aliasSamePlacementInputs_; }
 
     std::shared_ptr<Layer> clone() const override { return std::make_shared<NetworkInput>(*this); }
 
@@ -51,7 +52,7 @@ class NetworkInput : public Layer {
         }
 
         std::shared_ptr<ThorImplementation::NetworkInput> networkInput =
-            std::make_shared<ThorImplementation::NetworkInput>(placement, dataType, physicalDimensions);
+            std::make_shared<ThorImplementation::NetworkInput>(placement, dataType, physicalDimensions, aliasSamePlacementInputs_);
         networkInput->setName(name);
 
         return networkInput;
@@ -76,6 +77,7 @@ class NetworkInput : public Layer {
     std::vector<uint64_t> dimensions;
     DataType dataType;
     bool dimensionsIncludeBatch_ = false;
+    bool aliasSamePlacementInputs_ = false;
 
     friend class Network;
 };
@@ -95,6 +97,7 @@ class NetworkInput::Builder {
         networkInput.dimensions = _dimensions.value();
         networkInput.dataType = _dataType.value();
         networkInput.dimensionsIncludeBatch_ = _dimensionsIncludeBatch;
+        networkInput.aliasSamePlacementInputs_ = _aliasSamePlacementInputs;
         networkInput.featureInput = Tensor(_dataType.value(), _dimensions.value());
         networkInput.featureOutput = Tensor(_dataType.value(), _dimensions.value());
         networkInput.initialized = true;
@@ -133,12 +136,18 @@ class NetworkInput::Builder {
         return *this;
     }
 
+    virtual NetworkInput::Builder &aliasSamePlacementInputs(bool aliasSamePlacementInputs) {
+        this->_aliasSamePlacementInputs = aliasSamePlacementInputs;
+        return *this;
+    }
+
    private:
     std::optional<std::string> _name;
     std::optional<Network *> _network;
     std::optional<std::vector<uint64_t>> _dimensions;
     std::optional<DataType> _dataType;
     bool _dimensionsIncludeBatch = false;
+    bool _aliasSamePlacementInputs = false;
 };
 
 }  // namespace Thor

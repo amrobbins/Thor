@@ -14,6 +14,8 @@
 #include <cstdint>
 #include <condition_variable>
 #include <exception>
+#include <fstream>
+#include <iterator>
 #include <filesystem>
 #include <map>
 #include <memory>
@@ -177,6 +179,7 @@ class RestartProgressExecutor : public TrainingExecutor {
         sawLossRequested = sawLossRequested || request.runtime.scalarTensorsToReport.count("loss") != 0;
         lastEarlyCompletionPolicyCount = request.earlyCompletionPolicies.size();
         lastInitialCompletedEpochs = request.initialCompletedEpochs;
+        initialCompletedEpochsByCall.push_back(request.initialCompletedEpochs);
         lastMinEarlyCompletionEpochs = request.minEarlyCompletionEpochs;
         if (!request.earlyCompletionPolicies.empty()) {
             lastEarlyCompletionDecision = request.earlyCompletionPolicies.front().shouldComplete(10.0, 9.0, 5, 4);
@@ -209,6 +212,7 @@ class RestartProgressExecutor : public TrainingExecutor {
     size_t lastEarlyCompletionPolicyCount = 0;
     bool lastEarlyCompletionDecision = false;
     uint64_t lastInitialCompletedEpochs = 0;
+    std::vector<uint64_t> initialCompletedEpochsByCall{};
     uint64_t lastMinEarlyCompletionEpochs = 0;
 
    private:
@@ -292,6 +296,46 @@ TEST(TrainingRuns, RejectsInvalidRunSpecs) {
     EXPECT_THROW(invalidMaxParallelRuns(), std::runtime_error);
 }
 
+
+
+TEST(TrainingRuns, ValidatesMinSuccessfulModelsTargetsKnownEnsembleGroups) {
+    auto network0 = makeNetworkWithOutput("training-runs-min-success-0", {0, 10});
+    auto network1 = makeNetworkWithOutput("training-runs-min-success-1", {0, 10});
+    auto coordinator = std::make_shared<Coordinator>(2);
+    auto executor0 = std::make_shared<CoordinatedExecutor>(coordinator, FakeExecutorBehavior::COMPLETE_AFTER_RELEASE);
+    auto executor1 = std::make_shared<CoordinatedExecutor>(coordinator, FakeExecutorBehavior::COMPLETE_AFTER_RELEASE);
+    std::shared_ptr<Trainer> trainer0 = makeTrainer(network0, executor0);
+    std::shared_ptr<Trainer> trainer1 = makeTrainer(network1, executor1);
+
+    EXPECT_NO_THROW((TrainingRuns({TrainingRunsSpec{"fold_0", trainer0, "digits"},
+                                   TrainingRunsSpec{"fold_1", trainer1, "digits"}},
+                                  TrainingRunsFailurePolicy::CANCEL_SIBLINGS,
+                                  2.0,
+                                  std::nullopt,
+                                  {},
+                                  {},
+                                  {{"digits", 1}})));
+
+    EXPECT_THROW((TrainingRuns({TrainingRunsSpec{"fold_0", trainer0, "digits"},
+                                TrainingRunsSpec{"fold_1", trainer1, "digits"}},
+                               TrainingRunsFailurePolicy::CANCEL_SIBLINGS,
+                               2.0,
+                               std::nullopt,
+                               {},
+                               {},
+                               {{"digitz", 1}})),
+                 std::runtime_error);
+
+    EXPECT_THROW((TrainingRuns({TrainingRunsSpec{"fold_0", trainer0, "digits"},
+                                TrainingRunsSpec{"fold_1", trainer1, "digits"}},
+                               TrainingRunsFailurePolicy::CANCEL_SIBLINGS,
+                               2.0,
+                               std::nullopt,
+                               {},
+                               {},
+                               {{"digits", 3}})),
+                 std::runtime_error);
+}
 
 TEST(TrainingRuns, FitRejectsExistingSaveModelDirectoryBeforeStartingWorkersWhenOverwriteIsFalse) {
     auto network0 = std::make_shared<Network>("training-runs-existing-save-dir-0");
@@ -402,6 +446,56 @@ TEST(TrainingRunsResult, ReportsEnsembleMetadata) {
     EXPECT_DOUBLE_EQ(ensemble.totalWeight(), 4.0);
     ASSERT_EQ(ensemble.inputSignature.size(), 1u);
     EXPECT_EQ(ensemble.inputSignature[0].inputName, "features");
+}
+
+
+TEST(TrainingRunsResult, SaveEnsembleAllowsPartialSuccessWhenMinimumSatisfied) {
+    const std::filesystem::path root = uniqueTempPath("thor-training-runs-partial-ensemble-save");
+    const std::filesystem::path fold0 = root / "fold_0";
+    const std::filesystem::path fold2 = root / "fold_2";
+    const std::filesystem::path ensembleDir = root / "ensemble";
+    std::filesystem::create_directories(fold0);
+    std::filesystem::create_directories(fold2);
+    {
+        std::ofstream(fold0 / "training_selection_metadata.json") << "{}\n";
+        std::ofstream(fold2 / "training_selection_metadata.json") << "{}\n";
+    }
+
+    TrainingRunResult result0 = TrainingRunResult::completedResult("fold_0", {}, {}, {}, TrainingRunCompletionReason::COMPLETED, 1, 1, 1.0, fold0.string());
+    TrainingRunResult result1 = TrainingRunResult::fromException("fold_1", std::make_exception_ptr(std::runtime_error("planned failure")));
+    TrainingRunResult result2 = TrainingRunResult::completedResult("fold_2", {}, {}, {}, TrainingRunCompletionReason::COMPLETED, 1, 1, 1.0, fold2.string());
+    result0.ensembleGroup = "digits";
+    result1.ensembleGroup = "digits";
+    result2.ensembleGroup = "digits";
+
+    TrainingEnsembleResult ensemble;
+    ensemble.ensembleGroup = "digits";
+    ensemble.minSuccessfulModels = 2;
+    ensemble.members = {
+        TrainingEnsembleMemberResult{"fold_0", 1.0, TrainingRunStatus::COMPLETED},
+        TrainingEnsembleMemberResult{"fold_1", 1.0, TrainingRunStatus::FAILED},
+        TrainingEnsembleMemberResult{"fold_2", 1.0, TrainingRunStatus::COMPLETED},
+    };
+    ensemble.outputSignature = {TrainingRunOutputSignature{"predictions", {0, 10}, "FP32"}};
+
+    TrainingRunsResult results({result0, result1, result2}, {ensemble});
+    const std::string manifestPath = results.saveEnsemble("digits", ensembleDir.string());
+
+    EXPECT_EQ(manifestPath, (ensembleDir / "ensemble_manifest.json").string());
+    EXPECT_TRUE(std::filesystem::exists(ensembleDir / "members" / "0000_fold_0" / "training_selection_metadata.json"));
+    EXPECT_TRUE(std::filesystem::exists(ensembleDir / "members" / "0001_fold_2" / "training_selection_metadata.json"));
+    EXPECT_FALSE(std::filesystem::exists(ensembleDir / "members" / "0002_fold_1"));
+
+    std::ifstream manifest(manifestPath);
+    const std::string text((std::istreambuf_iterator<char>(manifest)), std::istreambuf_iterator<char>());
+    EXPECT_NE(text.find("\"target_num_members\": 3"), std::string::npos);
+    EXPECT_NE(text.find("\"actual_num_members\": 2"), std::string::npos);
+    EXPECT_NE(text.find("\"min_successful_models\": 2"), std::string::npos);
+    EXPECT_NE(text.find("\"name\": \"fold_0\""), std::string::npos);
+    EXPECT_NE(text.find("\"name\": \"fold_2\""), std::string::npos);
+    EXPECT_EQ(text.find("\"name\": \"fold_1\""), std::string::npos);
+
+    std::filesystem::remove_all(root);
 }
 
 TEST(TrainingRuns, StartsAllTrainersConcurrentlyAndReturnsCompletedResults) {
@@ -554,6 +648,111 @@ TEST(TrainingRuns, CancelSiblingsPolicyRequestsCancellationAfterFailure) {
     EXPECT_EQ((*result)["sibling_fold"].status, TrainingRunStatus::CANCELLED);
 }
 
+
+TEST(TrainingRuns, MinSuccessfulModelsToleratesFailureWhileEnsembleRemainsViable) {
+    auto network0 = makeNetworkWithOutput("training-runs-min-success-viable-0", {0, 10});
+    auto network1 = makeNetworkWithOutput("training-runs-min-success-viable-1", {0, 10});
+    auto network2 = makeNetworkWithOutput("training-runs-min-success-viable-2", {0, 10});
+    auto coordinator = std::make_shared<Coordinator>(3);
+    auto failingExecutor = std::make_shared<CoordinatedExecutor>(coordinator, FakeExecutorBehavior::FAIL_AFTER_RELEASE, 2);
+    auto completingExecutor1 = std::make_shared<CoordinatedExecutor>(coordinator, FakeExecutorBehavior::COMPLETE_AFTER_RELEASE, 7);
+    auto completingExecutor2 = std::make_shared<CoordinatedExecutor>(coordinator, FakeExecutorBehavior::COMPLETE_AFTER_RELEASE, 9);
+    std::shared_ptr<Trainer> failingTrainer = makeTrainer(network0, failingExecutor);
+    std::shared_ptr<Trainer> completingTrainer1 = makeTrainer(network1, completingExecutor1);
+    std::shared_ptr<Trainer> completingTrainer2 = makeTrainer(network2, completingExecutor2);
+    TrainingRuns runs({TrainingRunsSpec{"fold_0", failingTrainer, "digits"},
+                       TrainingRunsSpec{"fold_1", completingTrainer1, "digits"},
+                       TrainingRunsSpec{"fold_2", completingTrainer2, "digits"}},
+                      TrainingRunsFailurePolicy::CANCEL_SIBLINGS,
+                      2.0,
+                      2u,
+                      {},
+                      {},
+                      {{"digits", 2}});
+
+    std::optional<TrainingRunsResult> result;
+    std::exception_ptr exception;
+    std::thread fitThread([&]() {
+        try {
+            TrainingRunsEvaluationOptions evaluationOptions;
+            evaluationOptions.evaluateTrainingPopulation = false;
+            result = runs.fit(TrainerFitOptions{1}, evaluationOptions);
+        } catch (...) {
+            exception = std::current_exception();
+        }
+    });
+
+    ASSERT_TRUE(coordinator->waitForStartedCount(2));
+    coordinator->releaseAll();
+    ASSERT_TRUE(coordinator->waitForStartedCount(3));
+    fitThread.join();
+    rethrowIfSet(exception);
+
+    ASSERT_TRUE(result.has_value());
+    EXPECT_TRUE(result->anyFailed());
+    EXPECT_FALSE(result->anyCancelled());
+    EXPECT_EQ((*result)["fold_0"].status, TrainingRunStatus::FAILED);
+    EXPECT_EQ((*result)["fold_1"].status, TrainingRunStatus::COMPLETED);
+    EXPECT_EQ((*result)["fold_2"].status, TrainingRunStatus::COMPLETED);
+    const TrainingEnsembleResult& ensemble = result->ensemble("digits");
+    EXPECT_FALSE(ensemble.allCompleted());
+    EXPECT_TRUE(ensemble.anyFailed());
+    EXPECT_EQ(ensemble.successfulModels(), 2u);
+    EXPECT_EQ(ensemble.requiredSuccessfulModels(), 2u);
+    EXPECT_TRUE(ensemble.hasEnoughSuccessfulModels());
+}
+
+TEST(TrainingRuns, MinSuccessfulModelsCancelsWhenFailureMakesEnsembleImpossible) {
+    auto network0 = makeNetworkWithOutput("training-runs-min-success-impossible-0", {0, 10});
+    auto network1 = makeNetworkWithOutput("training-runs-min-success-impossible-1", {0, 10});
+    auto network2 = makeNetworkWithOutput("training-runs-min-success-impossible-2", {0, 10});
+    auto coordinator = std::make_shared<Coordinator>(2);
+    auto failingExecutor = std::make_shared<CoordinatedExecutor>(coordinator, FakeExecutorBehavior::FAIL_AFTER_RELEASE, 2);
+    auto waitingExecutor = std::make_shared<CoordinatedExecutor>(coordinator, FakeExecutorBehavior::WAIT_FOR_CANCEL_THEN_CANCEL, 7);
+    auto notStartedExecutor = std::make_shared<CoordinatedExecutor>(coordinator, FakeExecutorBehavior::COMPLETE_AFTER_RELEASE, 9);
+    std::shared_ptr<Trainer> failingTrainer = makeTrainer(network0, failingExecutor);
+    std::shared_ptr<Trainer> waitingTrainer = makeTrainer(network1, waitingExecutor);
+    std::shared_ptr<Trainer> notStartedTrainer = makeTrainer(network2, notStartedExecutor);
+    TrainingRuns runs({TrainingRunsSpec{"fold_0", failingTrainer, "digits"},
+                       TrainingRunsSpec{"fold_1", waitingTrainer, "digits"},
+                       TrainingRunsSpec{"fold_2", notStartedTrainer, "digits"}},
+                      TrainingRunsFailurePolicy::CANCEL_SIBLINGS,
+                      2.0,
+                      2u,
+                      {},
+                      {},
+                      {{"digits", 3}});
+
+    std::optional<TrainingRunsResult> result;
+    std::exception_ptr exception;
+    std::thread fitThread([&]() {
+        try {
+            TrainingRunsEvaluationOptions evaluationOptions;
+            evaluationOptions.evaluateTrainingPopulation = false;
+            result = runs.fit(TrainerFitOptions{1}, evaluationOptions);
+        } catch (...) {
+            exception = std::current_exception();
+        }
+    });
+
+    ASSERT_TRUE(coordinator->waitForStartedCount(2));
+    coordinator->releaseAll();
+    fitThread.join();
+    rethrowIfSet(exception);
+
+    ASSERT_TRUE(result.has_value());
+    EXPECT_TRUE(result->anyFailed());
+    EXPECT_TRUE(result->anyCancelled());
+    EXPECT_EQ((*result)["fold_0"].status, TrainingRunStatus::FAILED);
+    EXPECT_EQ((*result)["fold_1"].status, TrainingRunStatus::CANCELLED);
+    EXPECT_EQ((*result)["fold_2"].status, TrainingRunStatus::CANCELLED);
+    EXPECT_EQ(notStartedExecutor->calls, 0u);
+    const TrainingEnsembleResult& ensemble = result->ensemble("digits");
+    EXPECT_EQ(ensemble.successfulModels(), 0u);
+    EXPECT_EQ(ensemble.requiredSuccessfulModels(), 3u);
+    EXPECT_FALSE(ensemble.hasEnoughSuccessfulModels());
+}
+
 TEST(TrainingRuns, ClassifiesOutOfMemoryAndCancelsSiblings) {
     auto network0 = std::make_shared<Network>("training-runs-oom-0");
     auto network1 = std::make_shared<Network>("training-runs-oom-1");
@@ -597,34 +796,39 @@ TEST(TrainingRuns, RejectsInvalidFitOptionsBeforeLaunchingThreads) {
 }
 
 
-TEST(Trainer, RestartConditionUsesCumulativeEpochAcrossFitCalls) {
-    auto network = std::make_shared<Network>("trainer-restart-global-epoch");
+TEST(Trainer, RestartConditionResetsEpochCountAndStateBeforeRetry) {
+    auto network = std::make_shared<Network>("trainer-restart-global-epoch-reset");
     auto executor = std::make_shared<RestartProgressExecutor>(
-        std::vector<std::vector<double>>{{100.0}, {100.0}});
+        std::vector<std::vector<double>>{{100.0}, {100.0}, {100.0, 90.0}});
     std::shared_ptr<Trainer> trainer = makeTrainer(
         network,
         executor,
         std::nullopt,
-        {TrainingRestartCondition{/*progressCheckEpochs=*/2, /*progressImprovementMinPercentage=*/5.0, /*maxRestarts=*/0}});
+        {TrainingRestartCondition{/*progressCheckEpochs=*/2, /*progressImprovementMinPercentage=*/5.0, /*maxRestarts=*/1}});
 
     trainer->fit(1);
     EXPECT_EQ(executor->calls, 1u);
     EXPECT_EQ(executor->lastInitialCompletedEpochs, 0u);
     EXPECT_EQ(trainer->getCompletedTrainingEpochs(), 1u);
 
-    EXPECT_THROW(trainer->fit(1), std::exception);
-    EXPECT_EQ(executor->calls, 2u);
-    EXPECT_EQ(executor->lastInitialCompletedEpochs, 1u);
+    TrainingRunResult result = trainer->fit(1);
+    EXPECT_EQ(result.status, TrainingRunStatus::COMPLETED);
+    EXPECT_EQ(executor->calls, 3u);
+    ASSERT_EQ(executor->initialCompletedEpochsByCall.size(), 3u);
+    EXPECT_EQ(executor->initialCompletedEpochsByCall[0], 0u);
+    EXPECT_EQ(executor->initialCompletedEpochsByCall[1], 1u);
+    EXPECT_EQ(executor->initialCompletedEpochsByCall[2], 0u);
     EXPECT_EQ(trainer->getCompletedTrainingEpochs(), 1u);
 }
 
 
-TEST(TrainingRuns, RestartPolicyUsesCumulativeEpochAcrossFitCalls) {
-    auto network = std::make_shared<Network>("training-runs-restart-global-epoch");
-    auto executor = std::make_shared<RestartProgressExecutor>(std::vector<std::vector<double>>{{100.0}, {100.0}});
+TEST(TrainingRuns, RestartPolicyResetsEpochCountAndStateBeforeRetry) {
+    auto network = std::make_shared<Network>("training-runs-restart-global-epoch-reset");
+    auto executor = std::make_shared<RestartProgressExecutor>(
+        std::vector<std::vector<double>>{{100.0}, {100.0}, {100.0, 90.0}});
     std::shared_ptr<Trainer> trainer = makeTrainer(network, executor);
     TrainingRunsRestartPolicy condition = TrainingRunsRestartPolicy::forRun(
-        "fold_0", /*progressCheckEpochs=*/2, /*progressImprovementMinPercentage=*/5.0, /*maxRestarts=*/0);
+        "fold_0", /*progressCheckEpochs=*/2, /*progressImprovementMinPercentage=*/5.0, /*maxRestarts=*/1);
     TrainingRuns runs({{"fold_0", trainer}}, TrainingRunsFailurePolicy::CONTINUE, 0.0, std::nullopt, {condition});
     TrainingRunsEvaluationOptions evaluationOptions;
     evaluationOptions.evaluateTrainingPopulation = false;
@@ -636,14 +840,13 @@ TEST(TrainingRuns, RestartPolicyUsesCumulativeEpochAcrossFitCalls) {
     EXPECT_EQ(trainer->getCompletedTrainingEpochs(), 1u);
 
     TrainingRunsResult secondResult = runs.fit(TrainerFitOptions{1}, evaluationOptions);
-    ASSERT_TRUE(secondResult.anyFailed());
-    EXPECT_EQ(executor->calls, 2u);
-    EXPECT_EQ(executor->lastInitialCompletedEpochs, 1u);
+    ASSERT_TRUE(secondResult.allCompleted());
+    EXPECT_EQ(executor->calls, 3u);
+    ASSERT_EQ(executor->initialCompletedEpochsByCall.size(), 3u);
+    EXPECT_EQ(executor->initialCompletedEpochsByCall[0], 0u);
+    EXPECT_EQ(executor->initialCompletedEpochsByCall[1], 1u);
+    EXPECT_EQ(executor->initialCompletedEpochsByCall[2], 0u);
     EXPECT_EQ(trainer->getCompletedTrainingEpochs(), 1u);
-    const TrainingRunResult& failed = secondResult["fold_0"];
-    EXPECT_EQ(failed.status, TrainingRunStatus::FAILED);
-    EXPECT_EQ(failed.exception.type, "TrainingRestartConditionExceeded");
-    EXPECT_NE(failed.exception.message.find("progress_check_epochs=2"), std::string::npos);
 }
 
 TEST(TrainingRuns, RestartPolicyDoesNotRecheckPastCumulativeEpochOnLaterFit) {

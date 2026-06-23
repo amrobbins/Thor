@@ -125,6 +125,7 @@ struct TrainingRunResult {
     std::optional<uint64_t> completedEpoch{};
     std::optional<uint64_t> bestEpoch{};
     std::optional<double> bestScore{};
+    std::optional<std::string> savedModelDirectory{};
     std::optional<TrainingStatsSnapshot> finalTrainingStats{};
     std::optional<TrainingStatsSnapshot> finalValidationStats{};
     std::optional<TrainingStatsSnapshot> finalTestStats{};
@@ -182,7 +183,8 @@ struct TrainingRunResult {
                                                            TrainingRunCompletionReason completionReason = TrainingRunCompletionReason::COMPLETED,
                                                            std::optional<uint64_t> completedEpoch = {},
                                                            std::optional<uint64_t> bestEpoch = {},
-                                                           std::optional<double> bestScore = {}) {
+                                                           std::optional<double> bestScore = {},
+                                                           std::optional<std::string> savedModelDirectory = {}) {
         TrainingRunResult result;
         result.runName = std::move(runName);
         result.status = TrainingRunStatus::COMPLETED;
@@ -190,6 +192,7 @@ struct TrainingRunResult {
         result.completedEpoch = completedEpoch;
         result.bestEpoch = bestEpoch;
         result.bestScore = bestScore;
+        result.savedModelDirectory = std::move(savedModelDirectory);
         result.finalTrainingStats = std::move(finalTrainingStats);
         result.finalValidationStats = std::move(finalValidationStats);
         result.finalTestStats = std::move(finalTestStats);
@@ -200,13 +203,15 @@ struct TrainingRunResult {
                                                          std::exception_ptr exception,
                                                          std::optional<TrainingStatsSnapshot> finalTrainingStats = {},
                                                          std::optional<TrainingStatsSnapshot> finalValidationStats = {},
-                                                         std::optional<TrainingStatsSnapshot> finalTestStats = {}) {
+                                                         std::optional<TrainingStatsSnapshot> finalTestStats = {},
+                                                         std::optional<std::string> savedModelDirectory = {}) {
         TrainingRunResult result;
         result.runName = std::move(runName);
         result.status = classifyTrainingRunException(exception);
         result.finalTrainingStats = std::move(finalTrainingStats);
         result.finalValidationStats = std::move(finalValidationStats);
         result.finalTestStats = std::move(finalTestStats);
+        result.savedModelDirectory = std::move(savedModelDirectory);
         result.exception = summarizeTrainingRunException(exception);
         return result;
     }
@@ -252,11 +257,15 @@ struct TrainingEnsembleResult {
     std::optional<double> ensembleTrainingLoss{};
     std::optional<double> ensembleTestLoss{};
     std::optional<double> ensembleTestAccuracy{};
+    size_t minSuccessfulModels = 0;
 
     [[nodiscard]] size_t size() const { return members.size(); }
     [[nodiscard]] bool empty() const { return members.empty(); }
     [[nodiscard]] bool allCompleted() const;
     [[nodiscard]] bool anyFailed() const;
+    [[nodiscard]] size_t successfulModels() const;
+    [[nodiscard]] size_t requiredSuccessfulModels() const { return minSuccessfulModels == 0 ? members.size() : minSuccessfulModels; }
+    [[nodiscard]] bool hasEnoughSuccessfulModels() const;
     [[nodiscard]] double totalWeight() const;
     [[nodiscard]] std::map<std::string, size_t> statusCounts() const;
     [[nodiscard]] std::optional<double> ensembleFinalTrainingLoss() const { return ensembleTrainingLoss; }

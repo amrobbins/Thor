@@ -81,7 +81,8 @@ class Network {
                                                  std::vector<Event> &initDoneEvents,
                                                  bool inferenceOnly = false,
                                                  std::vector<int32_t> forcedDevices = std::vector<int32_t>(),
-                                                 uint32_t forcedNumStampsPerGpu = 0);
+                                                 uint32_t forcedNumStampsPerGpu = 0,
+                                                 bool networkOutputsOnGpu = false);
 
     virtual std::string getNetworkName() { return networkName; }
 
@@ -123,6 +124,9 @@ class Network {
     std::vector<Tensor> getRawLossTensorsForTrainingRoots(const std::vector<Tensor>& lossRoots) const;
     void freezeTraining();
     void unfreezeTraining();
+    [[nodiscard]] std::vector<std::string> getInferenceNetworkInputNames();
+    [[nodiscard]] std::vector<std::string> getTrainingOnlyNetworkInputNames();
+    [[nodiscard]] std::map<std::string, std::vector<std::string>> getLossLabelNetworkInputNamesByPredictionOutputName();
 
     // FIXME: I will need to support indexing layers by their name.
     uint32_t getNumTrainableLayers() { return allTrainableLayersInNetwork.size(); }
@@ -191,7 +195,8 @@ class Network {
                                     std::vector<Event> &initDoneEvents,
                                     uint32_t batchSize,
                                     std::vector<ThorImplementation::StampedNetwork> &stampedNetworks,
-                                    const bool inferenceOnly);
+                                    const bool inferenceOnly,
+                                    bool networkOutputsOnGpu = false);
 
     virtual StatusCode evaluateGraph(bool inferenceOnly);
     virtual void pruneLoadedTrainingArtifactsForInference();
@@ -210,7 +215,8 @@ class Network {
                                     uint32_t gpuNum,
                                     uint32_t batchSize,
                                     ThorImplementation::StampedNetwork &stampedNetwork,
-                                    const bool inferenceOnly);
+                                    const bool inferenceOnly,
+                                    bool networkOutputsOnGpu = false);
     virtual void stampLayer(Tensor inputTensor,
                             const std::shared_ptr<Thor::Layer> layer,
                             uint32_t gpuNum,

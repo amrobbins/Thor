@@ -2,6 +2,8 @@
 
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
+#include "DeepLearning/Api/Layers/Learning/CustomLayer.h"
+#include "Utilities/Expression/DynamicExpression.h"
 #include "DeepLearning/Api/Loaders/Loader.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
@@ -15,6 +17,7 @@
 #include <cstring>
 #include <exception>
 #include <filesystem>
+#include <fstream>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -27,6 +30,7 @@
 #include <iomanip>
 #include <limits>
 #include <thread>
+#include <cctype>
 #include <utility>
 
 namespace Thor {
@@ -197,6 +201,197 @@ bool outputSignatureHasPredictionTensor(const std::vector<TrainingRunOutputSigna
     });
 }
 
+std::string jsonEscape(const std::string& value) {
+    std::ostringstream out;
+    for (unsigned char ch : value) {
+        switch (ch) {
+            case '\\':
+                out << "\\\\";
+                break;
+            case '"':
+                out << "\\\"";
+                break;
+            case '\b':
+                out << "\\b";
+                break;
+            case '\f':
+                out << "\\f";
+                break;
+            case '\n':
+                out << "\\n";
+                break;
+            case '\r':
+                out << "\\r";
+                break;
+            case '\t':
+                out << "\\t";
+                break;
+            default:
+                if (ch < 0x20) {
+                    out << "\\u" << std::hex << std::setw(4) << std::setfill('0') << static_cast<unsigned int>(ch)
+                        << std::dec << std::setfill(' ');
+                } else {
+                    out << static_cast<char>(ch);
+                }
+                break;
+        }
+    }
+    return out.str();
+}
+
+void writeJsonString(std::ostream& out, const std::string& value) {
+    out << '"' << jsonEscape(value) << '"';
+}
+
+void writeJsonStringArray(std::ostream& out, const std::vector<std::string>& values, const std::string& indent) {
+    out << "[";
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i != 0) {
+            out << ",";
+        }
+        out << "\n" << indent;
+        writeJsonString(out, values[i]);
+    }
+    if (!values.empty()) {
+        out << "\n" << indent.substr(0, indent.size() >= 2 ? indent.size() - 2 : 0);
+    }
+    out << "]";
+}
+
+void writeOptionalUint64Json(std::ostream& out, const std::optional<uint64_t>& value) {
+    if (value.has_value()) {
+        out << value.value();
+    } else {
+        out << "null";
+    }
+}
+
+void writeOptionalDoubleJson(std::ostream& out, const std::optional<double>& value) {
+    if (value.has_value() && std::isfinite(value.value())) {
+        out << std::setprecision(17) << value.value();
+    } else {
+        out << "null";
+    }
+}
+
+std::vector<std::string> inputNamesFromSignature(const std::vector<TrainingRunInputSignature>& signature) {
+    std::vector<std::string> names;
+    names.reserve(signature.size());
+    for (const TrainingRunInputSignature& item : signature) {
+        names.push_back(item.inputName);
+    }
+    return names;
+}
+
+std::vector<std::string> inferenceInputNamesFromSavedArtifact(const std::filesystem::path& memberArtifactDirectory,
+                                                              const std::vector<TrainingRunInputSignature>& fallbackSignature) {
+    try {
+        Network model("thor_training_runs_ensemble_manifest_probe");
+        model.load(memberArtifactDirectory.string());
+        std::vector<std::string> names = model.getInferenceNetworkInputNames();
+        if (!names.empty()) {
+            return names;
+        }
+    } catch (const std::exception&) {
+        // Some unit tests construct synthetic TrainingRunsResult objects with minimal
+        // member artifact directories instead of full saved Network artifacts. Those
+        // tests still exercise the ensemble manifest writer, so fall back to the
+        // recorded training signature when the copied member cannot be loaded. Real
+        // saved training artifacts continue to use the inference-pruned signature so
+        // label-only inputs are not exposed as deployable ensemble inputs.
+    }
+    return inputNamesFromSignature(fallbackSignature);
+}
+
+std::vector<std::string> predictionOutputNamesFromSignature(const std::vector<TrainingRunOutputSignature>& signature) {
+    std::vector<std::string> names;
+    names.reserve(signature.size());
+    for (const TrainingRunOutputSignature& item : signature) {
+        if (item.outputName != "loss") {
+            names.push_back(item.outputName);
+        }
+    }
+    return names;
+}
+
+std::string safeMemberDirectoryName(size_t index, const std::string& runName) {
+    std::ostringstream out;
+    out << std::setw(4) << std::setfill('0') << index << "_";
+    bool wroteAnyNameChar = false;
+    for (unsigned char ch : runName) {
+        if (std::isalnum(ch) || ch == '-' || ch == '_' || ch == '.') {
+            out << static_cast<char>(ch);
+            wroteAnyNameChar = true;
+        } else {
+            out << '_';
+            wroteAnyNameChar = true;
+        }
+    }
+    if (!wroteAnyNameChar) {
+        out << "member";
+    }
+    return out.str();
+}
+
+void removePathIfExistsForEnsembleSave(const std::filesystem::path& path) {
+    std::error_code errorCode;
+    if (!std::filesystem::exists(path, errorCode) && !errorCode) {
+        return;
+    }
+    errorCode.clear();
+    std::filesystem::remove_all(path, errorCode);
+    if (errorCode) {
+        throw std::runtime_error("Failed to remove ensemble artifact path '" + path.string() + "': " + errorCode.message());
+    }
+}
+
+void copyMemberArtifactDirectory(const std::filesystem::path& source, const std::filesystem::path& destination) {
+    std::error_code errorCode;
+    if (!std::filesystem::exists(source, errorCode) || errorCode) {
+        throw std::runtime_error("TrainingRuns cannot save ensemble member because saved model artifact path does not exist: " +
+                                 source.string());
+    }
+    if (!std::filesystem::is_directory(source, errorCode) || errorCode) {
+        throw std::runtime_error("TrainingRuns cannot save ensemble member because saved model artifact path is not a directory: " +
+                                 source.string());
+    }
+    std::filesystem::create_directories(destination.parent_path(), errorCode);
+    if (errorCode) {
+        throw std::runtime_error("Failed to create ensemble members directory '" + destination.parent_path().string() +
+                                 "': " + errorCode.message());
+    }
+    std::filesystem::copy(source,
+                          destination,
+                          std::filesystem::copy_options::recursive,
+                          errorCode);
+    if (errorCode) {
+        throw std::runtime_error("Failed to copy saved model artifact from '" + source.string() + "' to '" + destination.string() +
+                                 "': " + errorCode.message());
+    }
+}
+
+std::string resolvedEnsembleAggregation(const TrainingEnsembleResult& ensemble, std::string aggregation) {
+    if (aggregation.empty() || aggregation == "auto") {
+        const bool allCompletedWeightsUnit = std::all_of(ensemble.members.begin(), ensemble.members.end(), [](const TrainingEnsembleMemberResult& member) {
+            return member.status != TrainingRunStatus::COMPLETED || member.weight == 1.0;
+        });
+        return allCompletedWeightsUnit ? "mean" : "weighted_mean";
+    }
+    if (aggregation != "mean" && aggregation != "weighted_mean") {
+        throw std::runtime_error("TrainingRunsResult.save_ensemble aggregation must be 'auto', 'mean', or 'weighted_mean'.");
+    }
+    if (aggregation == "mean") {
+        const bool allCompletedWeightsUnit = std::all_of(ensemble.members.begin(), ensemble.members.end(), [](const TrainingEnsembleMemberResult& member) {
+            return member.status != TrainingRunStatus::COMPLETED || member.weight == 1.0;
+        });
+        if (!allCompletedWeightsUnit) {
+            throw std::runtime_error("TrainingRunsResult.save_ensemble aggregation='mean' cannot be used with non-unit completed ensemble weights; "
+                                     "use aggregation='weighted_mean' or aggregation='auto'.");
+        }
+    }
+    return aggregation;
+}
+
 }  // namespace
 
 const char* trainingRunsFailurePolicyName(TrainingRunsFailurePolicy policy) {
@@ -221,6 +416,16 @@ bool TrainingEnsembleResult::anyFailed() const {
         return member.status == TrainingRunStatus::FAILED || member.status == TrainingRunStatus::OUT_OF_MEMORY ||
                member.status == TrainingRunStatus::INTERRUPTED;
     });
+}
+
+size_t TrainingEnsembleResult::successfulModels() const {
+    return static_cast<size_t>(std::count_if(members.begin(), members.end(), [](const TrainingEnsembleMemberResult& member) {
+        return member.status == TrainingRunStatus::COMPLETED;
+    }));
+}
+
+bool TrainingEnsembleResult::hasEnoughSuccessfulModels() const {
+    return successfulModels() >= requiredSuccessfulModels();
 }
 
 double TrainingEnsembleResult::totalWeight() const {
@@ -286,16 +491,189 @@ const TrainingEnsembleResult& TrainingRunsResult::ensemble(std::string_view ense
     return *it;
 }
 
+std::string TrainingRunsResult::saveEnsemble(std::string_view ensembleGroup,
+                                             const std::string& directory,
+                                             std::string aggregation,
+                                             bool overwrite) const {
+    if (directory.empty()) {
+        throw std::runtime_error("TrainingRunsResult.save_ensemble directory must not be empty.");
+    }
+
+    const TrainingEnsembleResult& ensembleResult = ensemble(ensembleGroup);
+    if (ensembleResult.empty()) {
+        throw std::runtime_error("TrainingRunsResult.save_ensemble cannot save empty ensemble group '" +
+                                 std::string(ensembleGroup) + "'.");
+    }
+    if (!ensembleResult.hasEnoughSuccessfulModels()) {
+        throw std::runtime_error("TrainingRunsResult.save_ensemble requires ensemble group '" + std::string(ensembleGroup) +
+                                 "' to have at least " + std::to_string(ensembleResult.requiredSuccessfulModels()) +
+                                 " completed member(s); only " + std::to_string(ensembleResult.successfulModels()) +
+                                 " completed.");
+    }
+
+    std::map<std::string, const TrainingRunResult*> resultByRunName;
+    for (const TrainingRunResult& result : results) {
+        resultByRunName.emplace(result.runName, &result);
+    }
+
+    const std::string manifestAggregation = resolvedEnsembleAggregation(ensembleResult, std::move(aggregation));
+    const std::filesystem::path artifactDirectory(directory);
+    const std::filesystem::path manifestPath = artifactDirectory / "ensemble_manifest.json";
+    std::error_code errorCode;
+    if (std::filesystem::exists(artifactDirectory, errorCode) && !overwrite) {
+        throw std::runtime_error("TrainingRunsResult.save_ensemble output directory already exists: " + artifactDirectory.string());
+    }
+    if (errorCode) {
+        throw std::runtime_error("Failed to inspect ensemble output directory '" + artifactDirectory.string() + "': " + errorCode.message());
+    }
+    if (overwrite) {
+        removePathIfExistsForEnsembleSave(artifactDirectory);
+    }
+    std::filesystem::create_directories(artifactDirectory / "members", errorCode);
+    if (errorCode) {
+        throw std::runtime_error("Failed to create ensemble output directory '" + artifactDirectory.string() + "': " + errorCode.message());
+    }
+
+    struct MemberManifestEntry {
+        const TrainingEnsembleMemberResult* member = nullptr;
+        const TrainingRunResult* result = nullptr;
+        std::string relativePath{};
+    };
+
+    std::vector<MemberManifestEntry> entries;
+    entries.reserve(ensembleResult.members.size());
+    size_t savedMemberIndex = 0;
+    for (size_t i = 0; i < ensembleResult.members.size(); ++i) {
+        const TrainingEnsembleMemberResult& member = ensembleResult.members[i];
+        if (member.status != TrainingRunStatus::COMPLETED) {
+            continue;
+        }
+        const auto resultIt = resultByRunName.find(member.runName);
+        if (resultIt == resultByRunName.end()) {
+            throw std::runtime_error("TrainingRunsResult.save_ensemble could not find run result for member '" + member.runName + "'.");
+        }
+        const TrainingRunResult& result = *resultIt->second;
+        if (!result.savedModelDirectory.has_value() || result.savedModelDirectory->empty()) {
+            throw std::runtime_error("TrainingRunsResult.save_ensemble requires member '" + member.runName +
+                                     "' to have a trainer save_model_dir / saved_model_dir artifact.");
+        }
+        const std::filesystem::path sourceDirectory(*result.savedModelDirectory);
+        const std::string memberRelativePath = std::string("members/") + safeMemberDirectoryName(savedMemberIndex, member.runName);
+        ++savedMemberIndex;
+        copyMemberArtifactDirectory(sourceDirectory, artifactDirectory / memberRelativePath);
+        entries.push_back(MemberManifestEntry{&member, &result, memberRelativePath});
+    }
+
+    const std::vector<std::string> manifestInputNames = entries.empty()
+        ? inputNamesFromSignature(ensembleResult.inputSignature)
+        : inferenceInputNamesFromSavedArtifact(artifactDirectory / entries.front().relativePath, ensembleResult.inputSignature);
+
+    const std::filesystem::path tmpManifestPath = artifactDirectory / ".ensemble_manifest.json.tmp";
+    {
+        std::ofstream out(tmpManifestPath, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            throw std::runtime_error("Unable to open ensemble manifest for writing: " + tmpManifestPath.string());
+        }
+
+        out << "{\n";
+        out << "  \"aggregation\": {\n";
+        out << "    \"type\": ";
+        writeJsonString(out, manifestAggregation);
+        out << "\n";
+        out << "  },\n";
+        out << "  \"artifact_type\": \"thor_ensemble_model\",\n";
+        out << "  \"ensemble_group\": ";
+        writeJsonString(out, ensembleResult.ensembleGroup);
+        out << ",\n";
+        out << "  \"target_num_members\": " << ensembleResult.members.size() << ",\n";
+        out << "  \"actual_num_members\": " << entries.size() << ",\n";
+        out << "  \"min_successful_models\": " << ensembleResult.requiredSuccessfulModels() << ",\n";
+        out << "  \"execution\": \"parallel_single_gpu\",\n";
+        out << "  \"input_names\": ";
+        writeJsonStringArray(out, manifestInputNames, "    ");
+        out << ",\n";
+        out << "  \"members\": [";
+        for (size_t i = 0; i < entries.size(); ++i) {
+            const MemberManifestEntry& entry = entries[i];
+            if (i != 0) {
+                out << ",";
+            }
+            out << "\n    {\n";
+            out << "      \"name\": ";
+            writeJsonString(out, entry.member->runName);
+            out << ",\n";
+            out << "      \"path\": ";
+            writeJsonString(out, entry.relativePath);
+            out << ",\n";
+            out << "      \"selection\": {\n";
+            out << "        \"best_epoch\": ";
+            writeOptionalUint64Json(out, entry.result->bestEpoch);
+            out << ",\n";
+            out << "        \"best_score\": ";
+            writeOptionalDoubleJson(out, entry.result->bestScore);
+            out << ",\n";
+            out << "        \"completed_epoch\": ";
+            writeOptionalUint64Json(out, entry.result->completedEpoch);
+            out << ",\n";
+            out << "        \"completion_reason\": ";
+            writeJsonString(out, trainingRunCompletionReasonName(entry.result->completionReason));
+            out << ",\n";
+            out << "        \"final_test_loss\": ";
+            writeOptionalDoubleJson(out, entry.result->finalLossForPhase(TrainingEventPhase::TEST));
+            out << ",\n";
+            out << "        \"final_training_loss\": ";
+            writeOptionalDoubleJson(out, entry.result->finalLossForPhase(TrainingEventPhase::TRAIN));
+            out << ",\n";
+            out << "        \"final_validation_loss\": ";
+            writeOptionalDoubleJson(out, entry.result->finalLossForPhase(TrainingEventPhase::VALIDATE));
+            out << ",\n";
+            out << "        \"result\": ";
+            writeJsonString(out, entry.result->resultName());
+            out << ",\n";
+            out << "        \"status\": ";
+            writeJsonString(out, trainingRunStatusName(entry.result->status));
+            out << "\n";
+            out << "      },\n";
+            out << "      \"weight\": " << std::setprecision(17) << entry.member->weight << "\n";
+            out << "    }";
+        }
+        out << "\n  ],\n";
+        out << "  \"output_names\": ";
+        writeJsonStringArray(out, predictionOutputNamesFromSignature(ensembleResult.outputSignature), "    ");
+        out << ",\n";
+        out << "  \"version\": 1\n";
+        out << "}\n";
+        if (!out) {
+            throw std::runtime_error("Failed while writing ensemble manifest: " + tmpManifestPath.string());
+        }
+    }
+
+    std::filesystem::rename(tmpManifestPath, manifestPath, errorCode);
+    if (errorCode) {
+        removePathIfExistsForEnsembleSave(manifestPath);
+        errorCode.clear();
+        std::filesystem::rename(tmpManifestPath, manifestPath, errorCode);
+        if (errorCode) {
+            removePathIfExistsForEnsembleSave(tmpManifestPath);
+            throw std::runtime_error("Failed to finalize ensemble manifest '" + manifestPath.string() + "': " + errorCode.message());
+        }
+    }
+
+    return manifestPath.string();
+}
+
 TrainingRuns::TrainingRuns(std::vector<TrainingRunsSpec> runs,
                            TrainingRunsFailurePolicy failurePolicy,
                            double maxSummaryLogsPerSecond,
                            std::optional<size_t> maxParallelRuns,
                            std::vector<TrainingRunsRestartPolicy> restartConditions,
-                           std::vector<TrainingRunsEarlyCompletionRule> earlyCompletionRules)
+                           std::vector<TrainingRunsEarlyCompletionRule> earlyCompletionRules,
+                           std::map<std::string, size_t> minSuccessfulModels)
     : runs(std::move(runs)),
       failurePolicy(failurePolicy),
       maxSummaryLogsPerSecond(maxSummaryLogsPerSecond),
       maxParallelRuns(maxParallelRuns),
+      minSuccessfulModels(std::move(minSuccessfulModels)),
       restartConditions(std::move(restartConditions)),
       earlyCompletionRules(std::move(earlyCompletionRules)) {
     if (!std::isfinite(maxSummaryLogsPerSecond) || maxSummaryLogsPerSecond < 0.0) {
@@ -305,6 +683,7 @@ TrainingRuns::TrainingRuns(std::vector<TrainingRunsSpec> runs,
         throw std::runtime_error("TrainingRuns maxParallelRuns must be >= 1 when specified.");
     }
     validateRunSpecs();
+    validateMinSuccessfulModels();
     validateRestartConditions();
     validateEarlyCompletionRules();
 }
@@ -431,8 +810,15 @@ TrainingRunsResult TrainingRuns::fit(const TrainerFitOptions& options, const Tra
             }
             result.ensembleGroup = runs[i].ensembleGroup;
             result.ensembleWeight = runs[i].ensembleWeight;
+            result.savedModelDirectory = runs[i].trainer->getSaveModelDirectory();
 
-            const bool shouldCancelSiblings = failurePolicy == TrainingRunsFailurePolicy::CANCEL_SIBLINGS && result.failed();
+            bool shouldCancelSiblings = false;
+            {
+                std::lock_guard<std::mutex> lock(resultMutex);
+                results[i] = result;
+                shouldCancelSiblings = failurePolicy == TrainingRunsFailurePolicy::CANCEL_SIBLINGS &&
+                                       result.failed() && failedRunShouldTriggerCancellation(i, results);
+            }
             if (shouldCancelSiblings) {
                 bool expected = false;
                 if (cancellationRequestedByFailure.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
@@ -441,11 +827,6 @@ TrainingRunsResult TrainingRuns::fit(const TrainerFitOptions& options, const Tra
             }
 
             statsReporter->markRunFinished(result);
-
-            {
-                std::lock_guard<std::mutex> lock(resultMutex);
-                results[i] = std::move(result);
-            }
             {
                 std::lock_guard<std::mutex> lock(schedulingMutex);
                 workerFinished[i] = true;
@@ -476,6 +857,7 @@ TrainingRunsResult TrainingRuns::fit(const TrainerFitOptions& options, const Tra
                     result.runName = runs[i].runName;
                     result.ensembleGroup = runs[i].ensembleGroup;
                     result.ensembleWeight = runs[i].ensembleWeight;
+                    result.savedModelDirectory = runs[i].trainer->getSaveModelDirectory();
                     result.status = TrainingRunStatus::CANCELLED;
                     result.exception = TrainingRunExceptionSummary{"TrainingCancelled", "cancelled before launch by sibling failure"};
                     {
@@ -648,6 +1030,81 @@ void TrainingRuns::validateRunSpecs() const {
 }
 
 
+void TrainingRuns::validateMinSuccessfulModels() const {
+    if (minSuccessfulModels.empty()) {
+        return;
+    }
+
+    std::map<std::string, size_t> ensembleGroupSizes;
+    for (const TrainingRunsSpec& spec : runs) {
+        if (spec.ensembleGroup.has_value()) {
+            ensembleGroupSizes[*spec.ensembleGroup] += 1;
+        }
+    }
+
+    for (const auto& [groupName, minimum] : minSuccessfulModels) {
+        if (groupName.empty()) {
+            throw std::runtime_error("TrainingRuns min_successful_models contains an empty ensemble_group name.");
+        }
+        const auto groupIt = ensembleGroupSizes.find(groupName);
+        if (groupIt == ensembleGroupSizes.end()) {
+            throw std::runtime_error("TrainingRuns min_successful_models targets unknown ensemble_group '" + groupName + "'.");
+        }
+        if (minimum == 0) {
+            throw std::runtime_error("TrainingRuns min_successful_models for ensemble_group '" + groupName + "' must be >= 1.");
+        }
+        if (minimum > groupIt->second) {
+            throw std::runtime_error("TrainingRuns min_successful_models for ensemble_group '" + groupName + "' is " +
+                                     std::to_string(minimum) + ", but the ensemble only has " +
+                                     std::to_string(groupIt->second) + " member(s).");
+        }
+    }
+}
+
+size_t TrainingRuns::minSuccessfulModelsForGroup(std::string_view ensembleGroup, size_t defaultValue) const {
+    const auto it = minSuccessfulModels.find(std::string(ensembleGroup));
+    if (it == minSuccessfulModels.end()) {
+        return defaultValue;
+    }
+    return it->second;
+}
+
+bool TrainingRuns::failedRunShouldTriggerCancellation(size_t runIndex, const std::vector<TrainingRunResult>& results) const {
+    if (runIndex >= runs.size()) {
+        return true;
+    }
+    const TrainingRunsSpec& failedSpec = runs[runIndex];
+    if (!failedSpec.ensembleGroup.has_value()) {
+        return true;
+    }
+
+    const auto minimumIt = minSuccessfulModels.find(*failedSpec.ensembleGroup);
+    if (minimumIt == minSuccessfulModels.end()) {
+        return true;
+    }
+
+    const size_t requiredSuccesses = minimumIt->second;
+    size_t possibleSuccesses = 0;
+    for (size_t i = 0; i < runs.size(); ++i) {
+        const TrainingRunsSpec& spec = runs[i];
+        if (!spec.ensembleGroup.has_value() || *spec.ensembleGroup != *failedSpec.ensembleGroup) {
+            continue;
+        }
+        if (i >= results.size()) {
+            possibleSuccesses += 1;
+            continue;
+        }
+        const TrainingRunStatus status = results[i].status;
+        if (status == TrainingRunStatus::COMPLETED || status == TrainingRunStatus::RUNNING ||
+            status == TrainingRunStatus::NOT_STARTED) {
+            possibleSuccesses += 1;
+        }
+    }
+
+    return possibleSuccesses < requiredSuccesses;
+}
+
+
 
 void TrainingRuns::validateRestartConditions() const {
     std::set<std::string> runNames;
@@ -788,6 +1245,7 @@ std::map<std::string, TrainingEnsembleResult> TrainingRuns::buildEnsembleResults
             ensemble.ensembleGroup = *spec.ensembleGroup;
             ensemble.inputSignature = collectNetworkInputSignature(spec.trainer->getNetwork());
             ensemble.outputSignature = collectNetworkOutputSignature(spec.trainer->getNetwork());
+            ensemble.minSuccessfulModels = minSuccessfulModelsForGroup(*spec.ensembleGroup, 0);
         }
 
         const auto resultIt = resultByRunName.find(spec.runName);
@@ -916,20 +1374,149 @@ uint64_t lastDimensionOrThrow(const ThorImplementation::Tensor& tensor, const st
 
 struct PlacedEnsembleArtifacts {
     uint64_t batchSize = 0;
+    std::vector<std::shared_ptr<Network>> memberNetworks{};
     std::vector<std::shared_ptr<PlacedNetwork>> placedMembers{};
+    std::shared_ptr<Network> accumulatorNetwork = nullptr;
+    std::shared_ptr<PlacedNetwork> placedAccumulator = nullptr;
+    std::vector<std::string> accumulatorOutputNames{};
     std::vector<double> weights{};
+    std::map<std::string, std::vector<std::string>> labelInputNamesByOutputName{};
 };
 
-PlacedEnsembleArtifacts loadPlacedMemberArtifacts(const std::vector<EnsembleMemberSpecRef>& members, uint64_t batchSize) {
+std::string trainingRunsAccumulatorInputName(size_t outputIndex, size_t memberIndex) {
+    return "thor_training_runs_ensemble_output_" + std::to_string(outputIndex) + "_member_" + std::to_string(memberIndex);
+}
+
+ThorImplementation::DynamicExpression makeWeightedMeanExpression(const std::vector<std::string>& inputNames,
+                                                                 const std::vector<double>& weights,
+                                                                 const std::string& outputName,
+                                                                 DataType dataType) {
+    if (inputNames.empty() || inputNames.size() != weights.size()) {
+        throw std::runtime_error("TrainingRuns ensemble accumulator requires one input name per member weight.");
+    }
+    double weightSum = 0.0;
+    std::optional<ThorImplementation::Expression> expr;
+    for (size_t i = 0; i < inputNames.size(); ++i) {
+        if (!std::isfinite(weights[i]) || weights[i] <= 0.0) {
+            throw std::runtime_error("TrainingRuns ensemble accumulator weights must be finite and positive.");
+        }
+        weightSum += weights[i];
+        ThorImplementation::Expression term =
+            ThorImplementation::Expression::input(inputNames[i], dataType, dataType) * static_cast<float>(weights[i]);
+        expr = expr.has_value() ? (expr.value() + term) : term;
+    }
+    if (weightSum <= 0.0 || !expr.has_value()) {
+        throw std::runtime_error("TrainingRuns ensemble accumulator weights must have a positive sum.");
+    }
+    ThorImplementation::Expression output = expr.value() * static_cast<float>(1.0 / weightSum);
+    ThorImplementation::ExpressionDefinition definition =
+        ThorImplementation::ExpressionDefinition::fromOutputs(ThorImplementation::Expression::outputs({{outputName, output}}));
+    return ThorImplementation::DynamicExpression::fromExpressionDefinition(definition);
+}
+
+std::shared_ptr<Network> buildTrainingRunsAccumulatorNetwork(const std::vector<std::shared_ptr<PlacedNetwork>>& placedMembers,
+                                                             const std::vector<double>& weights,
+                                                             const std::vector<std::string>& outputNames,
+                                                             uint64_t batchSize) {
+    if (placedMembers.empty()) {
+        throw std::runtime_error("TrainingRuns ensemble accumulator requires at least one placed member.");
+    }
+    if (outputNames.empty()) {
+        throw std::runtime_error("TrainingRuns ensemble accumulator requires at least one prediction output name.");
+    }
+    if (weights.size() != placedMembers.size()) {
+        throw std::runtime_error("TrainingRuns ensemble accumulator requires one weight per placed member.");
+    }
+
+    auto accumulator = std::make_shared<Network>("training_runs_ensemble_accumulator");
+    ThorImplementation::StampedNetwork& referenceStamp = placedMembers.front()->getStampedNetwork(0);
+    for (size_t outputIndex = 0; outputIndex < outputNames.size(); ++outputIndex) {
+        const std::string& outputName = outputNames[outputIndex];
+        auto referenceOutput = referenceStamp.getNamedOutput(outputName);
+        if (referenceOutput == nullptr) {
+            throw std::runtime_error("TrainingRuns ensemble member does not expose prediction output '" + outputName + "'.");
+        }
+        std::optional<ThorImplementation::Tensor> referenceTensor = referenceOutput->getFeatureOutputForSlot(0);
+        if (!referenceTensor.has_value()) {
+            throw std::runtime_error("TrainingRuns ensemble member prediction output '" + outputName + "' does not have a physical tensor.");
+        }
+        const std::vector<uint64_t> dimensions = referenceTensor.value().getDimensions();
+        if (dimensions.empty() || dimensions.front() != batchSize) {
+            throw std::runtime_error("TrainingRuns ensemble accumulator output '" + outputName + "' has an unexpected batch dimension.");
+        }
+        const DataType dataType = referenceTensor.value().getDataType();
+
+        CustomLayer::TensorMap inputInterface;
+        std::vector<std::string> inputNames;
+        inputNames.reserve(placedMembers.size());
+        for (size_t memberIndex = 0; memberIndex < placedMembers.size(); ++memberIndex) {
+            ThorImplementation::StampedNetwork& memberStamp = placedMembers[memberIndex]->getStampedNetwork(0);
+            auto memberOutput = memberStamp.getNamedOutput(outputName);
+            if (memberOutput == nullptr) {
+                throw std::runtime_error("TrainingRuns ensemble member does not expose prediction output '" + outputName + "'.");
+            }
+            std::optional<ThorImplementation::Tensor> memberTensor = memberOutput->getFeatureOutputForSlot(0);
+            if (!memberTensor.has_value() || memberTensor.value().getDescriptor() != referenceTensor.value().getDescriptor()) {
+                throw std::runtime_error("TrainingRuns ensemble member prediction output '" + outputName + "' descriptors do not match.");
+            }
+
+            const std::string inputName = trainingRunsAccumulatorInputName(outputIndex, memberIndex);
+            inputNames.push_back(inputName);
+            NetworkInput input = NetworkInput::Builder()
+                                     .network(*accumulator)
+                                     .name(inputName)
+                                     .dimensions(dimensions)
+                                     .dataType(dataType)
+                                     .dimensionsIncludeBatch(true)
+                                     .aliasSamePlacementInputs(false)
+                                     .build();
+            inputInterface.emplace(inputName, input.getFeatureOutput().value());
+        }
+
+        CustomLayer layer = CustomLayer::Builder()
+                                .network(*accumulator)
+                                .expression(makeWeightedMeanExpression(inputNames, weights, outputName, dataType))
+                                .inputNames(inputNames)
+                                .outputNames({outputName})
+                                .inputInterface(inputInterface)
+                                .build();
+        NetworkOutput::Builder()
+            .network(*accumulator)
+            .name(outputName)
+            .inputTensor(layer.getOutput(outputName))
+            .dataType(dataType)
+            .build();
+    }
+    return accumulator;
+}
+
+PlacedEnsembleArtifacts loadPlacedMemberArtifacts(const std::vector<EnsembleMemberSpecRef>& members,
+                                                  uint64_t batchSize,
+                                                  const std::vector<std::string>& outputNames) {
     if (batchSize == 0) {
         throw std::runtime_error("TrainingRuns ensemble evaluation cannot place saved model artifacts for batch_size=0.");
     }
 
     PlacedEnsembleArtifacts artifacts;
     artifacts.batchSize = batchSize;
+    artifacts.memberNetworks.reserve(members.size());
     artifacts.placedMembers.reserve(members.size());
     artifacts.weights.reserve(members.size());
+    artifacts.accumulatorOutputNames = outputNames;
+    bool sawLabelMapping = false;
     for (const EnsembleMemberSpecRef& member : members) {
+        if (member.spec == nullptr || member.spec->trainer == nullptr || member.spec->trainer->getNetwork() == nullptr) {
+            throw std::runtime_error("TrainingRuns ensemble evaluation requires a trainer network for structural label input resolution.");
+        }
+        const std::map<std::string, std::vector<std::string>> memberLabelMapping =
+            member.spec->trainer->getNetwork()->getLossLabelNetworkInputNamesByPredictionOutputName();
+        if (!sawLabelMapping) {
+            artifacts.labelInputNamesByOutputName = memberLabelMapping;
+            sawLabelMapping = true;
+        } else if (artifacts.labelInputNamesByOutputName != memberLabelMapping) {
+            throw std::runtime_error("TrainingRuns ensemble members have incompatible structural label input mappings.");
+        }
+
         const std::optional<std::string>& artifactDir = member.spec->trainer->getSaveModelDirectory();
         if (!artifactDir.has_value()) {
             throw std::runtime_error("TrainingRuns ensemble member '" + member.spec->runName +
@@ -938,12 +1525,27 @@ PlacedEnsembleArtifacts loadPlacedMemberArtifacts(const std::vector<EnsembleMemb
         auto loadedNetwork = std::make_shared<Network>(member.spec->trainer->getNetwork()->getNetworkName());
         loadedNetwork->load(*artifactDir);
         std::vector<Event> initDoneEvents;
-        std::shared_ptr<PlacedNetwork> placedNetwork = loadedNetwork->place(static_cast<uint32_t>(batchSize), initDoneEvents, /*inferenceOnly=*/true);
+        std::shared_ptr<PlacedNetwork> placedNetwork = loadedNetwork->place(static_cast<uint32_t>(batchSize),
+                                                                            initDoneEvents,
+                                                                            /*inferenceOnly=*/true,
+                                                                            /*forcedDevices=*/{},
+                                                                            /*forcedNumStampsPerGpu=*/0,
+                                                                            /*networkOutputsOnGpu=*/true);
         for (Event& event : initDoneEvents) {
             event.synchronize();
         }
+        artifacts.memberNetworks.push_back(std::move(loadedNetwork));
         artifacts.placedMembers.push_back(std::move(placedNetwork));
         artifacts.weights.push_back(member.spec->ensembleWeight);
+    }
+
+    artifacts.accumulatorNetwork = buildTrainingRunsAccumulatorNetwork(artifacts.placedMembers, artifacts.weights, outputNames, batchSize);
+    std::vector<Event> accumulatorInitDoneEvents;
+    artifacts.placedAccumulator = artifacts.accumulatorNetwork->place(static_cast<uint32_t>(batchSize),
+                                                                      accumulatorInitDoneEvents,
+                                                                      /*inferenceOnly=*/true);
+    for (Event& event : accumulatorInitDoneEvents) {
+        event.synchronize();
     }
     return artifacts;
 }
@@ -1069,6 +1671,54 @@ Batch inferenceBatchForPlacedNetwork(PlacedNetwork& placedNetwork, const Batch& 
     return inferenceBatch;
 }
 
+Batch accumulatorBatchForMemberOutputs(const std::vector<std::map<std::string, ThorImplementation::Tensor>>& memberOutputs,
+                                       const std::string& predictionOutputName) {
+    Batch accumulatorBatch;
+    for (size_t memberIndex = 0; memberIndex < memberOutputs.size(); ++memberIndex) {
+        const auto outputIt = memberOutputs[memberIndex].find(predictionOutputName);
+        if (outputIt == memberOutputs[memberIndex].end()) {
+            throw std::runtime_error("TrainingRuns ensemble evaluation did not receive prediction output '" + predictionOutputName + "'.");
+        }
+        accumulatorBatch.insert(trainingRunsAccumulatorInputName(/*outputIndex=*/0, memberIndex), outputIt->second);
+    }
+    return accumulatorBatch;
+}
+
+std::string structuralLabelInputNameForPredictionOutput(const PlacedEnsembleArtifacts& artifacts,
+                                                        const std::string& predictionOutputName) {
+    auto mappingIt = artifacts.labelInputNamesByOutputName.find(predictionOutputName);
+    if (mappingIt == artifacts.labelInputNamesByOutputName.end() || mappingIt->second.empty()) {
+        throw std::runtime_error("TrainingRuns ensemble evaluation could not structurally identify a label NetworkInput for prediction output '" +
+                                 predictionOutputName + "'. Labels are resolved from the training graph as NetworkInputs that are pruned when "
+                                 "loss roots are removed for inference, not by tensor name.");
+    }
+    if (mappingIt->second.size() != 1) {
+        std::ostringstream out;
+        out << "TrainingRuns ensemble evaluation found multiple structural label NetworkInputs for prediction output '" << predictionOutputName
+            << "': [";
+        for (size_t i = 0; i < mappingIt->second.size(); ++i) {
+            if (i != 0) {
+                out << ", ";
+            }
+            out << mappingIt->second[i];
+        }
+        out << "]. Ensemble evaluation needs exactly one label tensor for the selected prediction output.";
+        throw std::runtime_error(out.str());
+    }
+    return mappingIt->second.front();
+}
+
+ThorImplementation::Tensor structuralLabelsTensorFromBatch(const PlacedEnsembleArtifacts& artifacts,
+                                                            const std::string& predictionOutputName,
+                                                            const Batch& batch) {
+    const std::string labelInputName = structuralLabelInputNameForPredictionOutput(artifacts, predictionOutputName);
+    if (!batch.contains(labelInputName) || !batch.isTensor(labelInputName)) {
+        throw std::runtime_error("TrainingRuns ensemble evaluation batch is missing dense structural label input '" + labelInputName +
+                                 "' for prediction output '" + predictionOutputName + "'.");
+    }
+    return batch.getTensor(labelInputName);
+}
+
 PredictionEvaluationMetrics evaluateEnsemblePredictionMetricsOnLoader(const PlacedEnsembleArtifacts& artifacts,
                                                                       Loader& loader,
                                                                       ExampleType exampleType,
@@ -1103,11 +1753,9 @@ PredictionEvaluationMetrics evaluateEnsemblePredictionMetricsOnLoader(const Plac
 
     for (uint64_t batchOffset = 0; batchOffset < batchesToRun; ++batchOffset) {
         Batch batch = loader.getBatch(exampleType, batchNum);
-        if (!batch.contains("labels") || !batch.isTensor("labels")) {
-            throw std::runtime_error("TrainingRuns ensemble evaluation requires a dense 'labels' tensor in the evaluation batch.");
-        }
-        ThorImplementation::Tensor labelsTensor = batch.getTensor("labels");
-        const uint64_t labelLastDim = lastDimensionOrThrow(labelsTensor, "labels");
+        ThorImplementation::Tensor labelsTensor = structuralLabelsTensorFromBatch(artifacts, predictionOutputName, batch);
+        const std::string labelTensorDebugName = structuralLabelInputNameForPredictionOutput(artifacts, predictionOutputName);
+        const uint64_t labelLastDim = lastDimensionOrThrow(labelsTensor, labelTensorDebugName);
         const uint64_t rows = labelsTensor.getTotalNumElements() / labelLastDim;
         if (rows == 0) {
             loader.returnBatchBuffers(exampleType, std::move(batch));
@@ -1115,6 +1763,8 @@ PredictionEvaluationMetrics evaluateEnsemblePredictionMetricsOnLoader(const Plac
         }
         const std::vector<double> labels = tensorToDoubleVector(labelsTensor);
 
+        std::vector<std::map<std::string, ThorImplementation::Tensor>> memberOutputMaps;
+        memberOutputMaps.reserve(artifacts.placedMembers.size());
         std::vector<std::vector<double>> memberPredictions;
         memberPredictions.reserve(artifacts.placedMembers.size());
         for (const std::shared_ptr<PlacedNetwork>& placedMember : artifacts.placedMembers) {
@@ -1132,11 +1782,29 @@ PredictionEvaluationMetrics evaluateEnsemblePredictionMetricsOnLoader(const Plac
                 throw std::runtime_error("TrainingRuns ensemble prediction tensor and labels tensor have incompatible class/value dimensions.");
             }
             memberPredictions.push_back(tensorToDoubleVector(predictionTensor));
+            memberOutputMaps.push_back(std::move(outputs));
         }
+
+        if (artifacts.placedAccumulator == nullptr) {
+            throw std::runtime_error("TrainingRuns ensemble evaluation requires a placed accumulator network.");
+        }
+        Batch accumulatorBatch = accumulatorBatchForMemberOutputs(memberOutputMaps, predictionOutputName);
+        std::map<std::string, ThorImplementation::Tensor> accumulatorOutputs = artifacts.placedAccumulator->infer(accumulatorBatch);
+        auto ensembleOutputIt = accumulatorOutputs.find(predictionOutputName);
+        if (ensembleOutputIt == accumulatorOutputs.end()) {
+            throw std::runtime_error("TrainingRuns ensemble accumulator did not produce prediction output '" + predictionOutputName + "'.");
+        }
+        ThorImplementation::Tensor ensemblePredictionTensor = ensembleOutputIt->second;
+        if (ensemblePredictionTensor.getTotalNumElements() != labels.size()) {
+            throw std::runtime_error("TrainingRuns ensemble accumulator prediction tensor and labels tensor have different element counts.");
+        }
+        if (lastDimensionOrThrow(ensemblePredictionTensor, predictionOutputName) != labelLastDim) {
+            throw std::runtime_error("TrainingRuns ensemble accumulator prediction tensor and labels tensor have incompatible class/value dimensions.");
+        }
+        const std::vector<double> ensemblePredictions = tensorToDoubleVector(ensemblePredictionTensor);
 
         if (categoricalPrediction) {
             for (uint64_t row = 0; row < rows; ++row) {
-                std::vector<double> ensembleProbabilities(labelLastDim, 0.0);
                 const uint64_t offset = row * labelLastDim;
                 const uint64_t labelClass = argmaxRow(labels, row, labelLastDim);
                 for (size_t memberIndex = 0; memberIndex < memberPredictions.size(); ++memberIndex) {
@@ -1145,7 +1813,6 @@ PredictionEvaluationMetrics evaluateEnsemblePredictionMetricsOnLoader(const Plac
                     if (predictedClass == labelClass) {
                         memberCorrect[memberIndex] += 1;
                     }
-
                     double maxLogit = logits[offset];
                     for (uint64_t c = 1; c < labelLastDim; ++c) {
                         maxLogit = std::max(maxLogit, logits[offset + c]);
@@ -1157,34 +1824,37 @@ PredictionEvaluationMetrics evaluateEnsemblePredictionMetricsOnLoader(const Plac
                     for (uint64_t c = 0; c < labelLastDim; ++c) {
                         const double probability = std::exp(logits[offset + c] - maxLogit) / denom;
                         memberLossSums[memberIndex] += -labels[offset + c] * std::log(std::max(probability, 1.0e-12));
-                        ensembleProbabilities[c] += weights[memberIndex] * probability;
                     }
                 }
-                for (double& probability : ensembleProbabilities) {
-                    probability /= weightSum;
-                }
-                const uint64_t ensembleClass = argmaxRow(ensembleProbabilities, 0, labelLastDim);
+
+                const uint64_t ensembleClass = argmaxRow(ensemblePredictions, row, labelLastDim);
                 if (ensembleClass == labelClass) {
                     ensembleCorrect += 1;
                 }
+                double maxLogit = ensemblePredictions[offset];
+                for (uint64_t c = 1; c < labelLastDim; ++c) {
+                    maxLogit = std::max(maxLogit, ensemblePredictions[offset + c]);
+                }
+                double denom = 0.0;
+                for (uint64_t c = 0; c < labelLastDim; ++c) {
+                    denom += std::exp(ensemblePredictions[offset + c] - maxLogit);
+                }
                 double sampleLoss = 0.0;
                 for (uint64_t c = 0; c < labelLastDim; ++c) {
-                    sampleLoss += -labels[offset + c] * std::log(std::max(ensembleProbabilities[c], 1.0e-12));
+                    const double probability = std::exp(ensemblePredictions[offset + c] - maxLogit) / denom;
+                    sampleLoss += -labels[offset + c] * std::log(std::max(probability, 1.0e-12));
                 }
                 weightedLossSum += sampleLoss;
             }
         } else {
-            std::vector<double> ensemblePredictions(labels.size(), 0.0);
             for (size_t memberIndex = 0; memberIndex < memberPredictions.size(); ++memberIndex) {
                 const std::vector<double>& predictions = memberPredictions[memberIndex];
                 for (size_t i = 0; i < labels.size(); ++i) {
                     const double diff = predictions[i] - labels[i];
                     memberLossSums[memberIndex] += std::abs(diff);
-                    ensemblePredictions[i] += weights[memberIndex] * predictions[i];
                 }
             }
             for (size_t i = 0; i < labels.size(); ++i) {
-                ensemblePredictions[i] /= weightSum;
                 const double diff = ensemblePredictions[i] - labels[i];
                 weightedLossSum += std::abs(diff);
             }
@@ -1230,7 +1900,6 @@ std::optional<double> evaluateEnsemblePredictionLossOnLoader(const PlacedEnsembl
     validateEnsembleEvaluationBatchSize(artifacts, loader);
     const std::string predictionOutputName = choosePredictionOutputName(ensembleTemplate.outputSignature);
     const bool categoricalPrediction = predictionOutputName == "scores" || predictionOutputName == "logits";
-    const std::vector<double>& weights = artifacts.weights;
 
     const uint64_t batchesPerEpoch = loader.getNumBatchesPerEpoch(exampleType);
     uint64_t batchNum = loader.getNextBatchNum(exampleType);
@@ -1243,11 +1912,9 @@ std::optional<double> evaluateEnsemblePredictionLossOnLoader(const PlacedEnsembl
 
     for (uint64_t batchOffset = 0; batchOffset < batchesToRun; ++batchOffset) {
         Batch batch = loader.getBatch(exampleType, batchNum);
-        if (!batch.contains("labels") || !batch.isTensor("labels")) {
-            throw std::runtime_error("TrainingRuns ensemble evaluation requires a dense 'labels' tensor in the evaluation batch.");
-        }
-        ThorImplementation::Tensor labelsTensor = batch.getTensor("labels");
-        const uint64_t labelLastDim = lastDimensionOrThrow(labelsTensor, "labels");
+        ThorImplementation::Tensor labelsTensor = structuralLabelsTensorFromBatch(artifacts, predictionOutputName, batch);
+        const std::string labelTensorDebugName = structuralLabelInputNameForPredictionOutput(artifacts, predictionOutputName);
+        const uint64_t labelLastDim = lastDimensionOrThrow(labelsTensor, labelTensorDebugName);
         const uint64_t rows = labelsTensor.getTotalNumElements() / labelLastDim;
         if (rows == 0) {
             loader.returnBatchBuffers(exampleType, std::move(batch));
@@ -1255,8 +1922,8 @@ std::optional<double> evaluateEnsemblePredictionLossOnLoader(const PlacedEnsembl
         }
         const std::vector<double> labels = tensorToDoubleVector(labelsTensor);
 
-        std::vector<std::vector<double>> memberPredictions;
-        memberPredictions.reserve(artifacts.placedMembers.size());
+        std::vector<std::map<std::string, ThorImplementation::Tensor>> memberOutputMaps;
+        memberOutputMaps.reserve(artifacts.placedMembers.size());
         for (const std::shared_ptr<PlacedNetwork>& placedMember : artifacts.placedMembers) {
             Batch inferenceBatch = inferenceBatchForPlacedNetwork(*placedMember, batch);
             std::map<std::string, ThorImplementation::Tensor> outputs = placedMember->infer(inferenceBatch);
@@ -1271,17 +1938,52 @@ std::optional<double> evaluateEnsemblePredictionLossOnLoader(const PlacedEnsembl
             if (lastDimensionOrThrow(predictionTensor, predictionOutputName) != labelLastDim) {
                 throw std::runtime_error("TrainingRuns ensemble prediction tensor and labels tensor have incompatible class/value dimensions.");
             }
-            memberPredictions.push_back(tensorToDoubleVector(predictionTensor));
+            memberOutputMaps.push_back(std::move(outputs));
         }
 
-        std::optional<double> batchLoss = categoricalPrediction
-            ? categoricalCrossEntropyFromWeightedMemberLogits(memberPredictions, labels, weights, rows, labelLastDim)
-            : meanAbsoluteErrorFromWeightedMemberPredictions(memberPredictions, labels, weights);
-        if (!batchLoss.has_value()) {
-            loader.returnBatchBuffers(exampleType, std::move(batch));
-            return std::nullopt;
+        if (artifacts.placedAccumulator == nullptr) {
+            throw std::runtime_error("TrainingRuns ensemble evaluation requires a placed accumulator network.");
         }
-        weightedLossSum += batchLoss.value() * static_cast<double>(rows);
+        Batch accumulatorBatch = accumulatorBatchForMemberOutputs(memberOutputMaps, predictionOutputName);
+        std::map<std::string, ThorImplementation::Tensor> accumulatorOutputs = artifacts.placedAccumulator->infer(accumulatorBatch);
+        auto ensembleOutputIt = accumulatorOutputs.find(predictionOutputName);
+        if (ensembleOutputIt == accumulatorOutputs.end()) {
+            throw std::runtime_error("TrainingRuns ensemble accumulator did not produce prediction output '" + predictionOutputName + "'.");
+        }
+        ThorImplementation::Tensor ensemblePredictionTensor = ensembleOutputIt->second;
+        if (ensemblePredictionTensor.getTotalNumElements() != labels.size()) {
+            throw std::runtime_error("TrainingRuns ensemble accumulator prediction tensor and labels tensor have different element counts.");
+        }
+        if (lastDimensionOrThrow(ensemblePredictionTensor, predictionOutputName) != labelLastDim) {
+            throw std::runtime_error("TrainingRuns ensemble accumulator prediction tensor and labels tensor have incompatible class/value dimensions.");
+        }
+        const std::vector<double> ensemblePredictions = tensorToDoubleVector(ensemblePredictionTensor);
+
+        double batchLoss = 0.0;
+        if (categoricalPrediction) {
+            for (uint64_t row = 0; row < rows; ++row) {
+                const uint64_t offset = row * labelLastDim;
+                double maxLogit = ensemblePredictions[offset];
+                for (uint64_t c = 1; c < labelLastDim; ++c) {
+                    maxLogit = std::max(maxLogit, ensemblePredictions[offset + c]);
+                }
+                double denom = 0.0;
+                for (uint64_t c = 0; c < labelLastDim; ++c) {
+                    denom += std::exp(ensemblePredictions[offset + c] - maxLogit);
+                }
+                for (uint64_t c = 0; c < labelLastDim; ++c) {
+                    const double probability = std::exp(ensemblePredictions[offset + c] - maxLogit) / denom;
+                    batchLoss += -labels[offset + c] * std::log(std::max(probability, 1.0e-12));
+                }
+            }
+            batchLoss /= static_cast<double>(rows);
+        } else {
+            for (size_t i = 0; i < labels.size(); ++i) {
+                batchLoss += std::abs(ensemblePredictions[i] - labels[i]);
+            }
+            batchLoss /= static_cast<double>(labels.size());
+        }
+        weightedLossSum += batchLoss * static_cast<double>(rows);
         weightedRows += rows;
         loader.returnBatchBuffers(exampleType, std::move(batch));
     }
@@ -1340,7 +2042,8 @@ void TrainingRuns::evaluateEnsembles(std::vector<TrainingRunResult>& results,
             continue;
         }
 
-        PlacedEnsembleArtifacts placedArtifacts = loadPlacedMemberArtifacts(members, *evaluationBatchSize);
+        PlacedEnsembleArtifacts placedArtifacts = loadPlacedMemberArtifacts(
+            members, *evaluationBatchSize, {choosePredictionOutputName(ensembleIt->second.outputSignature)});
         std::vector<std::optional<double>> sourcePopulationLosses;
         std::vector<double> sourceWeights;
         sourcePopulationLosses.reserve(members.size());
@@ -1377,7 +2080,8 @@ void TrainingRuns::evaluateEnsemblesOnTestLoader(std::vector<TrainingRunResult>&
             continue;
         }
 
-        PlacedEnsembleArtifacts placedArtifacts = loadPlacedMemberArtifacts(members, testLoader->getBatchSize());
+        PlacedEnsembleArtifacts placedArtifacts = loadPlacedMemberArtifacts(
+            members, testLoader->getBatchSize(), {choosePredictionOutputName(ensembleIt->second.outputSignature)});
         PredictionEvaluationMetrics metrics = evaluateEnsemblePredictionMetricsOnLoader(
             placedArtifacts, *testLoader, ExampleType::TEST, ensembleIt->second);
         ensembleIt->second.ensembleTestLoss = metrics.loss;

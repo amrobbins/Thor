@@ -13,6 +13,8 @@
 #include <vector>
 #include <optional>
 #include <cstdint>
+#include <map>
+#include <string>
 
 #include "DeepLearning/Api/Parameter/Parameterizable.h"
 #include "DeepLearning/Implementation/Parameter/Parameterizable.h"
@@ -92,6 +94,37 @@ class StampedNetwork {
 
     std::vector<std::shared_ptr<ThorImplementation::NetworkInput>> getInputs() { return inputsShared; }
     std::vector<std::shared_ptr<ThorImplementation::NetworkOutput>> getOutputs() { return outputsShared; }
+
+    std::vector<std::string> getNamedInputNames() const {
+        std::vector<std::string> names;
+        names.reserve(inputNamedShared.size());
+        for (const auto& [name, _] : inputNamedShared) {
+            names.push_back(name);
+        }
+        return names;
+    }
+    std::vector<std::string> getNamedOutputNames() const {
+        std::vector<std::string> names;
+        names.reserve(outputNamedShared.size());
+        for (const auto& [name, _] : outputNamedShared) {
+            names.push_back(name);
+        }
+        return names;
+    }
+    std::shared_ptr<ThorImplementation::NetworkInput> getNamedInput(const std::string& name) const {
+        auto it = inputNamedShared.find(name);
+        if (it == inputNamedShared.end()) {
+            return nullptr;
+        }
+        return it->second;
+    }
+    std::shared_ptr<ThorImplementation::NetworkOutput> getNamedOutput(const std::string& name) const {
+        auto it = outputNamedShared.find(name);
+        if (it == outputNamedShared.end()) {
+            return nullptr;
+        }
+        return it->second;
+    }
     void preallocateInputSlots(uint32_t numSlots);
     void preallocateOutputSlots(uint32_t numSlots);
 
@@ -145,6 +178,15 @@ class StampedNetwork {
                     bool waitForOutputsOnProcessingStream = true,
                     BatchSubmissionTiming* submitTiming = nullptr,
                     std::optional<uint32_t> outputSlotIndex = std::nullopt);
+    Event sendBatch(std::map<std::string, Tensor> batchInputs,
+                    const std::map<std::string, Event>& inputReadyEvents,
+                    std::map<std::string, Tensor> &batchOutputs,
+                    std::map<std::string, Event> &outputReadyEvents,
+                    bool isInferenceOnly,
+                    Event* reusableProcessingFinishedEvent = nullptr,
+                    bool waitForOutputsOnProcessingStream = true,
+                    BatchSubmissionTiming* submitTiming = nullptr,
+                    std::optional<uint32_t> outputSlotIndex = std::nullopt);
 
     Event sendBatch(const Batch& batchInputs,
                     std::map<std::string, Tensor> &batchOutputs,
@@ -156,6 +198,7 @@ class StampedNetwork {
                     std::optional<uint32_t> outputSlotIndex = std::nullopt);
 
     Event sendPhysicalBatch(std::map<std::string, Tensor> batchInputs,
+                            const std::map<std::string, Event>& inputReadyEvents,
                             std::map<std::string, Tensor> &batchOutputs,
                             std::map<std::string, Event> &outputReadyEvents,
                             bool isInferenceOnly,

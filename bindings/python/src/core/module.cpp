@@ -14,6 +14,7 @@ using DataType = ThorImplementation::DataType;
 void bind_version(nb::module_ &thor);
 void bind_network(nb::module_ &thor);
 void bind_placed_network(nb::module_ &thor);
+void bind_ensemble_runtime(nb::module_ &thor);
 void bind_tensor(nb::module_ &thor);
 void bind_parameter(nb::module_ &thor);
 void bind_training(nb::module_ &training);
@@ -57,6 +58,7 @@ NB_MODULE(_thor, thor) {
     bind_parameter(thor);
     bind_network(thor);
     bind_placed_network(thor);
+    bind_ensemble_runtime(thor);
 
     auto activations = thor.def_submodule("activations");
     bind_activations(activations);

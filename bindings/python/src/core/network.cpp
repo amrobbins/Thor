@@ -156,17 +156,19 @@ pending marker and overwritten with the final save-time keys when save() runs.
            uint32_t batch_size,
            bool inference_only,
            std::vector<int32_t> forced_devices,
-           uint32_t forced_num_stamps_per_gpu) {
+           uint32_t forced_num_stamps_per_gpu,
+           bool network_outputs_on_gpu) {
             nb::gil_scoped_release release;
             std::vector<Event> init_done_events;
             shared_ptr<PlacedNetwork> placedNetwork =
-                self.place(batch_size, init_done_events, inference_only, forced_devices, forced_num_stamps_per_gpu);
+                self.place(batch_size, init_done_events, inference_only, forced_devices, forced_num_stamps_per_gpu, network_outputs_on_gpu);
             return placedNetwork;
         },
         "batch_size"_a,
         "inference_only"_a = false,
         "forced_devices"_a = std::vector<int32_t>{},
         "forced_num_stamps_per_gpu"_a = 0,
+        "network_outputs_on_gpu"_a = false,
         R"nbdoc(
 Place / compile the network for execution.
 
@@ -177,6 +179,11 @@ inference_only : bool, default False
 forced_devices : list[int], default []
     Device ids to force placement onto. Use Network.CPU for CPU.
 forced_num_stamps_per_gpu : int, default 0
+network_outputs_on_gpu : bool, default False
+    Stamp NetworkOutput layers to GPU instead of CPU. When the producer tensor is
+    already on that GPU, NetworkOutput aliases the producer instead of copying, so
+    ensemble runtime can aggregate member outputs on device before one final
+    materialization copy.
 
 Returns
 -------

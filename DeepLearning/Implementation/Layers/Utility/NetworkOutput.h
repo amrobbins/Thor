@@ -74,9 +74,18 @@ class NetworkOutput : public Layer {
 
         if (!outputPlacement.has_value()) {
             return std::nullopt;
-        } else {
-            return featureInput.value().clone(outputPlacement.value());
         }
+
+        // When the requested NetworkOutput placement is the same as the producer
+        // placement, the output layer is only an API boundary.  Alias the producer
+        // tensor instead of allocating a second tensor and copying into it.  This is
+        // the same fanout/splice behavior used by TensorFanout and lets ensemble
+        // inference aggregate member predictions directly from the producer tensor.
+        if (outputPlacement.value() == featureInput.value().getPlacement()) {
+            return featureInput;
+        }
+
+        return featureInput.value().clone(outputPlacement.value());
     }
 
     void forward(std::optional<Tensor> featureInput, bool validationPass, uint32_t batchSize = 0) override {
@@ -96,7 +105,13 @@ class NetworkOutput : public Layer {
             THOR_THROW_IF_FALSE(slot.outputTensor.has_value());
             THOR_THROW_IF_FALSE(slot.outputTensor.value() == outputTensor.value());
 
-            if (outputPlacement.value() == featureInput.value().getPlacement()) {
+            if (outputTensor.value() == inputTensor.value()) {
+                // Same-placement outputs are aliases of their producer tensor.  No
+                // materialization copy is needed; the producer stream event is enough
+                // to tell downstream consumers that the aliased output is ready.
+                stream.putEvent(slot.outputReadyEvent, false, true);
+                slot.outputWritableEvent = slot.outputReadyEvent;
+            } else if (outputPlacement.value() == featureInput.value().getPlacement()) {
                 if (slot.outputWritableEvent.isInitialized()) {
                     stream.waitEvent(slot.outputWritableEvent);
                 }
@@ -182,8 +197,10 @@ class NetworkOutput : public Layer {
 
         while (outputSlots.size() < numSlots) {
             OutputSlot slot;
-            slot.outputTensor = featureInput.value().clone(outputPlacement.value());
-            if (outputPlacement.value() != featureInput.value().getPlacement()) {
+            if (outputPlacement.value() == featureInput.value().getPlacement()) {
+                slot.outputTensor = featureInput;
+            } else {
+                slot.outputTensor = featureInput.value().clone(outputPlacement.value());
                 slot.outputBuffer = featureInput.value().clone();
                 if (!outputStream.has_value()) {
                     outputStream = Stream::getNextDownloadStream(featureInput.value().getPlacement().getDeviceNum());

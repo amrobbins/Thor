@@ -184,3 +184,59 @@ def test_numpy_float32_dict_batch_loader_rejects_non_dict_test_split():
             test=[("x", np.zeros((2, 3), dtype=np.float32))],
             batch_size=2,
         )
+
+
+def test_numpy_float32_dict_batch_loader_composes_with_stratified_demand_split_helpers():
+    product_ids = [f"product_{i}" for i in range(6)]
+    row_groups = []
+    for product_id in product_ids:
+        row_groups.extend([product_id, product_id])
+    num_rows = len(row_groups)
+
+    tensors = {
+        "trend_inputs": np.arange(num_rows, dtype=np.float32).reshape(num_rows, 1),
+        "seasonality_inputs": np.arange(num_rows * 2, dtype=np.float32).reshape(num_rows, 2),
+        "monotone_increasing_inputs": np.arange(num_rows, dtype=np.float32).reshape(num_rows, 1),
+        "forecast_labels": np.arange(num_rows * 4, dtype=np.float32).reshape(num_rows, 4),
+        "example_weights": np.ones((num_rows, 1), dtype=np.float32),
+    }
+
+    split_manifest = thor.data.StratifiedSplitter(
+        product_ids,
+        [float(index) for index in range(len(product_ids))],
+        mode="quantile",
+        num_bins=3,
+        seed=11,
+    ).holdout_plus_k_fold(test_size=2, k=2)
+    fold = split_manifest.folds[0]
+    fold_with_holdout = thor.data.StratifiedTrainValidationTestSplit(
+        train_keys=fold.train_keys,
+        validate_keys=fold.validate_keys,
+        test_keys=split_manifest.test_keys,
+        train_groups=fold.train_groups,
+        validate_groups=fold.validate_groups,
+        test_groups=split_manifest.test_groups,
+    )
+
+    split = thor.data.make_numpy_dict_splits(tensors, split=fold_with_holdout, groups=row_groups)
+    loader = thor.training.NumpyFloat32DictBatchLoader(
+        train=split.train,
+        validate=split.validate,
+        test=split.test,
+        batch_size=2,
+        randomize_train=False,
+        dataset_name="demand_kfold_smoke",
+    )
+
+    assert set(loader.get_tensor_names()) == set(tensors)
+    assert loader.has_explicit_test_split()
+    assert loader.get_num_train_examples() == 4
+    assert loader.get_num_validate_examples() == 4
+    assert loader.get_num_test_examples() == 4
+    assert loader.get_tensor_shapes() == {
+        "trend_inputs": [1],
+        "seasonality_inputs": [2],
+        "monotone_increasing_inputs": [1],
+        "forecast_labels": [4],
+        "example_weights": [1],
+    }

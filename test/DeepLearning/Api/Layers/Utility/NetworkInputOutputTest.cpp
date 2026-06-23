@@ -3,6 +3,8 @@
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
+#include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
+#include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
 
 #include "gtest/gtest.h"
 
@@ -228,4 +230,100 @@ TEST(UtilityApiLayers, NetworkInputOutputSerializeDeserialize) {
 
     ASSERT_EQ(stampedInput->getFeatureOutput().value().getDataType(), dataType);
     ASSERT_EQ(stampedOutput->getFeatureInput().value().getDataType(), dataType);
+}
+
+// Network composition primitive: a same-device NetworkOutput is an API boundary only.
+// It must splice/alias the producer tensor instead of materializing a copy.
+TEST(UtilityApiLayers, NetworkOutputAliasesProducerWhenOutputPlacementMatchesInputPlacement) {
+    Network network("networkOutputAliasGpu");
+    const uint32_t batchSize = 4;
+
+    NetworkInput networkInput = NetworkInput::Builder()
+                                    .network(network)
+                                    .name("input")
+                                    .dimensions({3})
+                                    .dataType(DataType::FP32)
+                                    .build();
+    NetworkOutput networkOutput = NetworkOutput::Builder()
+                                      .network(network)
+                                      .name("output")
+                                      .inputTensor(networkInput.getFeatureOutput().value())
+                                      .dataType(DataType::FP32)
+                                      .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<PlacedNetwork> placedNetwork = network.place(batchSize,
+                                                            initDoneEvents,
+                                                            /*inferenceOnly=*/true,
+                                                            /*forcedDevices=*/{0},
+                                                            /*forcedNumStampsPerGpu=*/1,
+                                                            /*networkOutputsOnGpu=*/true);
+    ASSERT_NE(placedNetwork, nullptr);
+    for (Event& event : initDoneEvents) {
+        event.synchronize();
+    }
+
+    ThorImplementation::StampedNetwork& stampedNetwork = placedNetwork->getStampedNetwork(0);
+    auto stampedInput = dynamic_pointer_cast<ThorImplementation::NetworkInput>(stampedNetwork.getPhysicalLayerFromApiLayer(networkInput.getId()));
+    auto stampedOutput = dynamic_pointer_cast<ThorImplementation::NetworkOutput>(stampedNetwork.getPhysicalLayerFromApiLayer(networkOutput.getId()));
+    ASSERT_NE(stampedInput, nullptr);
+    ASSERT_NE(stampedOutput, nullptr);
+    ASSERT_TRUE(stampedInput->getFeatureOutput().has_value());
+    ASSERT_TRUE(stampedOutput->getFeatureInput().has_value());
+    ASSERT_TRUE(stampedOutput->getFeatureOutput().has_value());
+
+    EXPECT_EQ(stampedInput->getFeatureOutput().value(), stampedOutput->getFeatureInput().value());
+    EXPECT_EQ(stampedOutput->getFeatureInput().value(), stampedOutput->getFeatureOutput().value());
+    EXPECT_EQ(stampedOutput->getFeatureInput().value(), stampedOutput->getFeatureOutputForSlot(0).value());
+    EXPECT_EQ(stampedOutput->getFeatureInput().value().getMemPtr<void>(), stampedOutput->getFeatureOutput().value().getMemPtr<void>());
+    EXPECT_EQ(stampedOutput->getFeatureInput().value().getMemPtr<void>(), stampedOutput->getFeatureOutputForSlot(0).value().getMemPtr<void>());
+    EXPECT_EQ(stampedOutput->getFeatureOutput().value().getPlacement().getMemDevice(), ThorImplementation::TensorPlacement::MemDevices::GPU);
+}
+
+// Network composition primitive: crossing a device boundary is still a real
+// materialization boundary. GPU producer -> CPU NetworkOutput must copy.
+TEST(UtilityApiLayers, NetworkOutputMaterializesWhenOutputPlacementDiffersFromInputPlacement) {
+    Network network("networkOutputMaterializeCpu");
+    const uint32_t batchSize = 4;
+
+    NetworkInput networkInput = NetworkInput::Builder()
+                                    .network(network)
+                                    .name("input")
+                                    .dimensions({3})
+                                    .dataType(DataType::FP32)
+                                    .build();
+    NetworkOutput networkOutput = NetworkOutput::Builder()
+                                      .network(network)
+                                      .name("output")
+                                      .inputTensor(networkInput.getFeatureOutput().value())
+                                      .dataType(DataType::FP32)
+                                      .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<PlacedNetwork> placedNetwork = network.place(batchSize,
+                                                            initDoneEvents,
+                                                            /*inferenceOnly=*/true,
+                                                            /*forcedDevices=*/{0},
+                                                            /*forcedNumStampsPerGpu=*/1,
+                                                            /*networkOutputsOnGpu=*/false);
+    ASSERT_NE(placedNetwork, nullptr);
+    for (Event& event : initDoneEvents) {
+        event.synchronize();
+    }
+
+    ThorImplementation::StampedNetwork& stampedNetwork = placedNetwork->getStampedNetwork(0);
+    auto stampedInput = dynamic_pointer_cast<ThorImplementation::NetworkInput>(stampedNetwork.getPhysicalLayerFromApiLayer(networkInput.getId()));
+    auto stampedOutput = dynamic_pointer_cast<ThorImplementation::NetworkOutput>(stampedNetwork.getPhysicalLayerFromApiLayer(networkOutput.getId()));
+    ASSERT_NE(stampedInput, nullptr);
+    ASSERT_NE(stampedOutput, nullptr);
+    ASSERT_TRUE(stampedInput->getFeatureOutput().has_value());
+    ASSERT_TRUE(stampedOutput->getFeatureInput().has_value());
+    ASSERT_TRUE(stampedOutput->getFeatureOutput().has_value());
+
+    EXPECT_EQ(stampedInput->getFeatureOutput().value(), stampedOutput->getFeatureInput().value());
+    EXPECT_NE(stampedOutput->getFeatureInput().value(), stampedOutput->getFeatureOutput().value());
+    EXPECT_NE(stampedOutput->getFeatureInput().value(), stampedOutput->getFeatureOutputForSlot(0).value());
+    EXPECT_NE(stampedOutput->getFeatureInput().value().getMemPtr<void>(), stampedOutput->getFeatureOutput().value().getMemPtr<void>());
+    EXPECT_NE(stampedOutput->getFeatureInput().value().getMemPtr<void>(), stampedOutput->getFeatureOutputForSlot(0).value().getMemPtr<void>());
+    EXPECT_EQ(stampedOutput->getFeatureOutput().value().getPlacement().getMemDevice(), ThorImplementation::TensorPlacement::MemDevices::CPU);
 }

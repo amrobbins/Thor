@@ -321,7 +321,8 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
                                           vector<Event> &initDoneEvents,
                                           uint32_t batchSize,
                                           vector<ThorImplementation::StampedNetwork> &stampedNetworks,
-                                          const bool inferenceOnly) {
+                                          const bool inferenceOnly,
+                                          bool networkOutputsOnGpu) {
     ThorImplementation::StampedNetwork stampedNetwork;
     stampedNetwork.gpuNum = gpuNum;
     stampedNetwork.floatingPointOperationsPerExampleForward = 0;
@@ -360,7 +361,7 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
             THOR_THROW_IF_FALSE(inputTensor.has_value());
             const shared_ptr<NetworkOutput> networkOutput = dynamic_pointer_cast<NetworkOutput>(layer);
             if (networkOutput) {
-                stampNetworkOutput(inputTensor.value(), networkOutput, gpuNum, batchSize, stampedNetwork, inferenceOnly);
+                stampNetworkOutput(inputTensor.value(), networkOutput, gpuNum, batchSize, stampedNetwork, inferenceOnly, networkOutputsOnGpu);
                 continue;
             }
 
@@ -483,8 +484,15 @@ Network::StatusCode Network::connect(bool inferenceOnly) {
     return dagStatus;
 }
 
-shared_ptr<PlacedNetwork> Network::place(
-    uint32_t batchSize, vector<Event> &initDoneEvents, bool inferenceOnly, vector<int32_t> forcedDevices, uint32_t forcedNumStampsPerGpu) {
+shared_ptr<PlacedNetwork> Network::place(uint32_t batchSize,
+                                         vector<Event> &initDoneEvents,
+                                         bool inferenceOnly,
+                                         vector<int32_t> forcedDevices,
+                                         uint32_t forcedNumStampsPerGpu,
+                                         bool networkOutputsOnGpu) {
+    if (networkOutputsOnGpu && !inferenceOnly) {
+        throw invalid_argument("networkOutputsOnGpu is only supported for inference-only placement.");
+    }
     if (!inferenceOnly) {
         enforceCudaKernelSaveKeyCaptureForTraining();
     }
@@ -525,7 +533,7 @@ shared_ptr<PlacedNetwork> Network::place(
     for (uint32_t i = 0; i < devices.size(); ++i) {
         for (uint32_t j = 0; j < numStampsPerDevice[i]; ++j) {
             // FIXME: need to propagate inferenceOnly from here through to the API layer to the implementation layer
-            StatusCode statusCode = stampNetwork(devices[i], initDoneEvents, batchSize, stampedNetworks, inferenceOnly);
+            StatusCode statusCode = stampNetwork(devices[i], initDoneEvents, batchSize, stampedNetworks, inferenceOnly, networkOutputsOnGpu);
             if (statusCode != StatusCode::SUCCESS)
                 throw logic_error("Error when stamping network, error: " + statusCodeToString(statusCode));
         }
@@ -760,6 +768,180 @@ void Network::load(const string &directory,
     }
 }
 
+
+
+std::vector<std::string> Network::getInferenceNetworkInputNames() {
+    // Build the same inference-only graph view used by place(..., inferenceOnly=true).
+    // For saved training artifacts this prunes loss roots and label-only inputs, so
+    // deployable ensemble manifests do not advertise labels as inference inputs.
+    const StatusCode status = evaluateGraph(/*inferenceOnly=*/true);
+    if (status != StatusCode::SUCCESS) {
+        throw std::runtime_error("Unable to evaluate inference graph while collecting network input names: " + statusCodeToString(status));
+    }
+
+    std::vector<std::string> names;
+    const uint32_t numLayers = getNumLayers();
+    names.reserve(numLayers);
+    for (uint32_t i = 0; i < numLayers; ++i) {
+        std::shared_ptr<NetworkInput> input = std::dynamic_pointer_cast<NetworkInput>(getLayer(i));
+        if (input == nullptr || !input->getFeatureOutput().has_value()) {
+            continue;
+        }
+        const Tensor outputTensor = input->getFeatureOutput().value();
+        if (allTensors.count(outputTensor) == 0) {
+            continue;
+        }
+        auto driverIt = apiTensorToApiDrivingLayer.find(outputTensor);
+        if (driverIt == apiTensorToApiDrivingLayer.end() || driverIt->second != input) {
+            continue;
+        }
+        auto loadingIt = apiTensorToApiLoadingLayers.find(outputTensor);
+        if (loadingIt == apiTensorToApiLoadingLayers.end() || loadingIt->second.empty()) {
+            continue;
+        }
+        names.push_back(input->getName());
+    }
+    std::sort(names.begin(), names.end());
+    names.erase(std::unique(names.begin(), names.end()), names.end());
+    return names;
+}
+
+std::vector<std::string> Network::getTrainingOnlyNetworkInputNames() {
+    const std::vector<std::string> inferenceNames = getInferenceNetworkInputNames();
+    const std::set<std::string> inferenceNameSet(inferenceNames.begin(), inferenceNames.end());
+
+    // Re-evaluate the full training graph after the inference-pruned query above.
+    const StatusCode status = evaluateGraph(/*inferenceOnly=*/false);
+    if (status != StatusCode::SUCCESS) {
+        throw std::runtime_error("Unable to evaluate training graph while collecting training-only network input names: " +
+                                 statusCodeToString(status));
+    }
+
+    std::vector<std::string> names;
+    const uint32_t numLayers = getNumLayers();
+    names.reserve(numLayers);
+    for (uint32_t i = 0; i < numLayers; ++i) {
+        std::shared_ptr<NetworkInput> input = std::dynamic_pointer_cast<NetworkInput>(getLayer(i));
+        if (input == nullptr) {
+            continue;
+        }
+        const std::string name = input->getName();
+        if (inferenceNameSet.count(name) == 0) {
+            names.push_back(name);
+        }
+    }
+    std::sort(names.begin(), names.end());
+    names.erase(std::unique(names.begin(), names.end()), names.end());
+    return names;
+}
+
+std::map<std::string, std::vector<std::string>> Network::getLossLabelNetworkInputNamesByPredictionOutputName() {
+    // This is the structural label mapping used by TrainingRuns ensemble evaluation.
+    // A label input is not identified by name. It is a NetworkInput that drives a
+    // Loss label tensor and is pruned from the inference-only graph when loss roots
+    // are removed.
+    const std::vector<std::string> trainingOnlyNames = getTrainingOnlyNetworkInputNames();
+    const std::set<std::string> trainingOnlyNameSet(trainingOnlyNames.begin(), trainingOnlyNames.end());
+
+    const StatusCode status = evaluateGraph(/*inferenceOnly=*/false);
+    if (status != StatusCode::SUCCESS) {
+        throw std::runtime_error("Unable to evaluate training graph while collecting loss label network inputs: " + statusCodeToString(status));
+    }
+
+    auto sourceNetworkInputName = [&](const Tensor& tensor) -> std::optional<std::string> {
+        std::set<Tensor> visiting;
+        std::function<std::optional<std::string>(const Tensor&)> visit = [&](const Tensor& current) -> std::optional<std::string> {
+            if (visiting.count(current) != 0) {
+                return std::nullopt;
+            }
+            visiting.insert(current);
+
+            auto driverIt = apiTensorToApiDrivingLayer.find(current);
+            if (driverIt == apiTensorToApiDrivingLayer.end() || driverIt->second == nullptr) {
+                return std::nullopt;
+            }
+            std::shared_ptr<Layer> driver = driverIt->second;
+            std::shared_ptr<NetworkInput> input = std::dynamic_pointer_cast<NetworkInput>(driver);
+            if (input != nullptr) {
+                return input->getName();
+            }
+
+            auto inputsIt = apiLayerToApiInputTensors.find(driver);
+            if (inputsIt == apiLayerToApiInputTensors.end() || inputsIt->second.empty()) {
+                return std::nullopt;
+            }
+            std::optional<std::string> found;
+            for (const Tensor& upstream : inputsIt->second) {
+                std::optional<std::string> candidate = visit(upstream);
+                if (!candidate.has_value()) {
+                    continue;
+                }
+                if (found.has_value() && found.value() != candidate.value()) {
+                    return std::nullopt;
+                }
+                found = candidate;
+            }
+            return found;
+        };
+        return visit(tensor);
+    };
+
+    std::map<Tensor, std::vector<std::string>> outputNamesByTensor;
+    const uint32_t numLayers = getNumLayers();
+    for (uint32_t i = 0; i < numLayers; ++i) {
+        std::shared_ptr<NetworkOutput> output = std::dynamic_pointer_cast<NetworkOutput>(getLayer(i));
+        if (output == nullptr) {
+            continue;
+        }
+        std::optional<Tensor> outputTensor = output->getFeatureInput();
+        if (!outputTensor.has_value()) {
+            outputTensor = output->getFeatureOutput();
+        }
+        if (!outputTensor.has_value()) {
+            continue;
+        }
+        outputNamesByTensor[outputTensor.value()].push_back(output->getName());
+    }
+
+    std::map<std::string, std::vector<std::string>> labelsByOutputName;
+    for (uint32_t i = 0; i < numLayers; ++i) {
+        std::shared_ptr<Loss> loss = std::dynamic_pointer_cast<Loss>(getLayer(i));
+        if (loss == nullptr) {
+            continue;
+        }
+
+        Tensor predictions;
+        Tensor labels;
+        try {
+            predictions = loss->getPredictions();
+            labels = loss->getLabels();
+        } catch (const std::exception&) {
+            // Multi-input/custom losses may not have a single labels tensor.
+            // They will require an explicit future evaluator mapping.
+            continue;
+        }
+
+        auto outputIt = outputNamesByTensor.find(predictions);
+        if (outputIt == outputNamesByTensor.end()) {
+            continue;
+        }
+        std::optional<std::string> labelInputName = sourceNetworkInputName(labels);
+        if (!labelInputName.has_value() || trainingOnlyNameSet.count(labelInputName.value()) == 0) {
+            continue;
+        }
+        for (const std::string& outputName : outputIt->second) {
+            std::vector<std::string>& names = labelsByOutputName[outputName];
+            if (std::find(names.begin(), names.end(), labelInputName.value()) == names.end()) {
+                names.push_back(labelInputName.value());
+            }
+        }
+    }
+
+    for (auto& [_, names] : labelsByOutputName) {
+        std::sort(names.begin(), names.end());
+    }
+    return labelsByOutputName;
+}
 
 void Network::pruneLoadedTrainingArtifactsForInference() {
     // Saved training artifacts often contain loss layers and label-only NetworkInputs.
@@ -1754,7 +1936,8 @@ void Network::stampNetworkOutput(Tensor inputTensor,
                                  uint32_t gpuNum,
                                  uint32_t batchSize,
                                  ThorImplementation::StampedNetwork &stampedNetwork,
-                                 const bool inferenceOnly) {
+                                 const bool inferenceOnly,
+                                 bool networkOutputsOnGpu) {
     ThorImplementation::TensorPlacement placement(TensorPlacement::MemDevices::GPU, gpuNum);
     shared_ptr<ThorImplementation::Layer> physicalDrivingLayer = stampedNetwork.apiTensorToPhysicalDrivingLayerShared[inputTensor];
     shared_ptr<Thor::Layer> apiDrivingLayer =
@@ -1782,10 +1965,14 @@ void Network::stampNetworkOutput(Tensor inputTensor,
         }
     }
 
-    // Stamp the network output
-    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    // Stamp ordinary inference/training outputs to CPU so PlacedNetwork.infer preserves its public API.
+    // Ensemble inference can request GPU output stamping so member predictions can be aggregated on device
+    // before a single final D2H copy is materialized.
+    TensorPlacement outputPlacement = networkOutputsOnGpu
+        ? TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum)
+        : TensorPlacement(TensorPlacement::MemDevices::CPU);
     shared_ptr<ThorImplementation::Layer> implementationLayer =
-        ((Layer *)networkOutput.get())->stamp(cpuPlacement, physicalDrivingLayer, apiDrivingLayer, inputTensor, inferenceOnly);
+        ((Layer *)networkOutput.get())->stamp(outputPlacement, physicalDrivingLayer, apiDrivingLayer, inputTensor, inferenceOnly);
     shared_ptr<ThorImplementation::NetworkOutput> implementationNetworkOutput =
         dynamic_pointer_cast<ThorImplementation::NetworkOutput>(implementationLayer);
     Layer::connectTwoLayers(physicalDrivingLayer, implementationNetworkOutput, apiDrivingLayer, networkOutput, inputTensor);

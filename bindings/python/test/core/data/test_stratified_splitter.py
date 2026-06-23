@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+import numpy as np
 
 import thor
 
@@ -266,3 +267,82 @@ def test_splitter_rejects_invalid_inputs():
         splitter.train_validation_split()
     with pytest.raises(ValueError, match="greater than 0"):
         splitter.train_validation_split(validation_fraction=0.0)
+
+
+def test_make_numpy_dict_splits_partitions_demand_style_arrays_by_group_with_explicit_test_split():
+    product_ids = [f"product_{i}" for i in range(8)]
+    row_groups = []
+    row_keys = []
+    for product_id in product_ids:
+        for date_idx in range(3):
+            row_groups.append(product_id)
+            row_keys.append(f"{product_id}:date_{date_idx}")
+
+    splitter = thor.data.StratifiedSplitter(
+        row_keys,
+        [float(product_id.rsplit("_", 1)[1]) for product_id in row_groups],
+        groups=row_groups,
+        mode="quantile",
+        num_bins=4,
+        seed=7,
+    )
+    split = splitter.train_validation_test_split(validation_size=2, test_size=2)
+
+    tensors = {
+        "trend_inputs": np.arange(len(row_keys) * 2, dtype=np.float32).reshape(len(row_keys), 2),
+        "seasonality_inputs": np.arange(len(row_keys) * 3, dtype=np.float32).reshape(len(row_keys), 3),
+        "monotone_increasing_inputs": np.arange(len(row_keys), dtype=np.float32).reshape(len(row_keys), 1),
+        "forecast": np.arange(len(row_keys), dtype=np.float32).reshape(len(row_keys), 1),
+        "example_weights": np.ones((len(row_keys), 1), dtype=np.float32),
+    }
+
+    partitions = thor.data.make_numpy_dict_splits(tensors, groups=row_groups, split=split)
+
+    assert isinstance(partitions, thor.data.NumpyDictSplit)
+    assert partitions.test is not None
+    assert set(partitions.train) == set(tensors)
+    assert set(partitions.validate) == set(tensors)
+    assert set(partitions.test) == set(tensors)
+    assert partitions.train["trend_inputs"].shape[0] == len(split.train_groups) * 3
+    assert partitions.validate["trend_inputs"].shape[0] == len(split.validate_groups) * 3
+    assert partitions.test["trend_inputs"].shape[0] == len(split.test_groups) * 3
+    assert partitions.train["seasonality_inputs"].shape[1:] == (3,)
+    assert partitions.train["monotone_increasing_inputs"].shape[1:] == (1,)
+
+    validate_groups = set(split.validate_groups)
+    expected_validate_indices = [idx for idx, group in enumerate(row_groups) if group in validate_groups]
+    assert np.array_equal(partitions.validate["forecast"], tensors["forecast"][expected_validate_indices])
+
+
+def test_make_numpy_dict_splits_partitions_by_key_for_plain_train_validation_split():
+    keys = [f"row_{i}" for i in range(6)]
+    splitter = thor.data.StratifiedSplitter(keys, [0, 0, 1, 1, 2, 2], mode="categorical", seed=2)
+    split = splitter.train_validation_split(validation_size=2)
+    tensors = {"x": np.arange(12, dtype=np.float32).reshape(6, 2), "y": np.arange(6, dtype=np.float32).reshape(6, 1)}
+
+    partitions = thor.data.make_numpy_dict_splits(tensors, keys=keys, split=split)
+
+    assert partitions.test is None
+    assert partitions.train["x"].shape[0] == len(split.train_keys)
+    assert partitions.validate["x"].shape[0] == len(split.validate_keys)
+    expected_train_indices = [idx for idx, key in enumerate(keys) if key in set(split.train_keys)]
+    assert np.array_equal(partitions.train["y"], tensors["y"][expected_train_indices])
+
+
+def test_make_numpy_dict_splits_rejects_ambiguous_or_mismatched_selectors():
+    splitter = thor.data.StratifiedSplitter(["a", "b", "c"], [0.0, 1.0, 2.0], seed=1)
+    split = splitter.train_validation_split(validation_size=1)
+    tensors = {"x": np.zeros((3, 2), dtype=np.float32)}
+
+    with pytest.raises(ValueError, match="exactly one of keys or groups"):
+        thor.data.make_numpy_dict_splits(tensors, split=split)
+    with pytest.raises(ValueError, match="exactly one of keys or groups"):
+        thor.data.make_numpy_dict_splits(tensors, keys=["a", "b", "c"], groups=["a", "b", "c"], split=split)
+    with pytest.raises(ValueError, match="keys length must match"):
+        thor.data.make_numpy_dict_splits(tensors, keys=["a", "b"], split=split)
+    with pytest.raises(ValueError, match="same leading example dimension"):
+        thor.data.make_numpy_dict_splits(
+            {"x": np.zeros((3, 2), dtype=np.float32), "y": np.zeros((2, 1), dtype=np.float32)},
+            keys=["a", "b", "c"],
+            split=split,
+        )

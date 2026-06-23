@@ -200,7 +200,7 @@ std::string restartAttemptsProgressMessage(const std::string& runName,
     std::ostringstream out;
     out << "run '" << runName << "' failed restart_condition (" << restartConditionName(condition)
         << "): training loss did not improve by at least "
-        << formatDoubleForRestartMessage(condition.progressImprovementMinPercentage) << "% by global epoch "
+        << formatDoubleForRestartMessage(condition.progressImprovementMinPercentage) << "% by epoch "
         << condition.progressCheckEpochs << " across " << attempts.size()
         << " attempt" << (attempts.size() == 1 ? "" : "s") << " (max_restarts=" << condition.maxRestarts << ").";
     if (!attempts.empty()) {
@@ -391,7 +391,8 @@ TrainingRunResult Trainer::fit(const TrainerFitOptions& options) {
                                               capturingObserver.completionReason,
                                               capturingObserver.completedEpoch,
                                               capturingObserver.bestEpoch,
-                                              capturingObserver.bestScore);
+                                              capturingObserver.bestScore,
+                                              saveModelDirectory);
 }
 
 
@@ -460,13 +461,24 @@ void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
     std::vector<RestartConditionRunState> conditionStates;
     conditionStates.reserve(combinedConditions.size());
     for (const TrainingRestartCondition& condition : combinedConditions) {
-        const uint64_t finalEpochAfterFit = completedTrainingEpochs + options.epochs;
-        if (condition.progressCheckEpochs > completedTrainingEpochs && condition.progressCheckEpochs <= finalEpochAfterFit) {
-            conditionStates.push_back(RestartConditionRunState{&condition});
-        }
+        conditionStates.push_back(RestartConditionRunState{&condition});
     }
 
-    if (conditionStates.empty()) {
+    auto conditionIsReachableInAttempt = [&](const TrainingRestartCondition& condition, uint64_t attemptInitialCompletedEpochs) {
+        const uint64_t finalEpochAfterFit = attemptInitialCompletedEpochs + options.epochs;
+        return condition.progressCheckEpochs > attemptInitialCompletedEpochs && condition.progressCheckEpochs <= finalEpochAfterFit;
+    };
+
+    const bool anyConditionReachableOnCurrentState = std::any_of(
+        combinedConditions.begin(),
+        combinedConditions.end(),
+        [&](const TrainingRestartCondition& condition) { return conditionIsReachableInAttempt(condition, completedTrainingEpochs); });
+    const bool anyConditionReachableAfterFreshRestart = std::any_of(
+        combinedConditions.begin(),
+        combinedConditions.end(),
+        [&](const TrainingRestartCondition& condition) { return conditionIsReachableInAttempt(condition, /*attemptInitialCompletedEpochs=*/0); });
+
+    if (!anyConditionReachableOnCurrentState && !anyConditionReachableAfterFreshRestart) {
         fitInternal(options, observer, cancellationToken, additionalEarlyCompletionPolicies);
         return;
     }
@@ -480,11 +492,11 @@ void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
         return nullptr;
     };
 
-    auto activeConditions = [&]() {
+    auto activeConditions = [&](uint64_t attemptInitialCompletedEpochs) {
         std::vector<const TrainingRestartCondition*> active;
         active.reserve(conditionStates.size());
         for (const RestartConditionRunState& state : conditionStates) {
-            if (state.condition != nullptr) {
+            if (state.condition != nullptr && conditionIsReachableInAttempt(*state.condition, attemptInitialCompletedEpochs)) {
                 active.push_back(state.condition);
             }
         }
@@ -496,7 +508,7 @@ void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
         Trainer attemptTrainer = *this;
         attemptTrainer.restartConditions.clear();
         attemptTrainer.runtimeConfig.scalarTensorsToReport.insert("loss");
-        RestartAttemptObserver attemptObserver(observer, activeConditions(), attempt);
+        RestartAttemptObserver attemptObserver(observer, activeConditions(attemptTrainer.completedTrainingEpochs), attempt);
         try {
             attemptTrainer.fitInternal(options, attemptObserver, cancellationToken, additionalEarlyCompletionPolicies);
             placedNetworkAfterLastFit = attemptTrainer.placedNetworkAfterLastFit;
@@ -512,6 +524,13 @@ void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
 
             state->failedAttempts.push_back(e.progress());
             if (state->failedAttempts.size() <= state->condition->maxRestarts) {
+                // A restart means the current model attempt is discarded. The next
+                // attempt must behave like a new model instance: no previously trained
+                // PlacedNetwork state is copied in, and epoch/progress accounting starts
+                // over from 0 for all restart checks, best-candidate selection, and
+                // early-completion policies.
+                placedNetworkAfterLastFit.reset();
+                completedTrainingEpochs = 0;
                 continue;
             }
 
@@ -551,7 +570,8 @@ TrainingRunResult Trainer::fitTrainingRun(std::string runName,
                                                   capturingObserver.completionReason,
                                                   capturingObserver.completedEpoch,
                                                   capturingObserver.bestEpoch,
-                                                  capturingObserver.bestScore);
+                                                  capturingObserver.bestScore,
+                                                  saveModelDirectory);
     } catch (const TrainingRestartConditionExceeded& e) {
         capturingObserver.flush();
         TrainingRunResult result;
@@ -560,6 +580,7 @@ TrainingRunResult Trainer::fitTrainingRun(std::string runName,
         result.finalTrainingStats = capturingObserver.finalTrainingStats;
         result.finalValidationStats = capturingObserver.finalValidationStats;
         result.finalTestStats = capturingObserver.finalTestStats;
+        result.savedModelDirectory = saveModelDirectory;
         result.exception = TrainingRunExceptionSummary{"TrainingRestartConditionExceeded", e.what()};
         return result;
     } catch (...) {
@@ -569,7 +590,8 @@ TrainingRunResult Trainer::fitTrainingRun(std::string runName,
             std::current_exception(),
             capturingObserver.finalTrainingStats,
             capturingObserver.finalValidationStats,
-            capturingObserver.finalTestStats);
+            capturingObserver.finalTestStats,
+            saveModelDirectory);
     }
 }
 

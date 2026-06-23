@@ -181,6 +181,27 @@ Event StampedNetwork::sendBatch(std::map<std::string, Tensor> batchInputs,
                                 bool waitForOutputsOnProcessingStream,
                                 BatchSubmissionTiming* submitTiming,
                                 std::optional<uint32_t> outputSlotIndex) {
+    static const std::map<std::string, Event> noInputReadyEvents;
+    return sendBatch(std::move(batchInputs),
+                     noInputReadyEvents,
+                     batchOutputs,
+                     outputReadyEvents,
+                     isInferenceOnly,
+                     reusableProcessingFinishedEvent,
+                     waitForOutputsOnProcessingStream,
+                     submitTiming,
+                     outputSlotIndex);
+}
+
+Event StampedNetwork::sendBatch(std::map<std::string, Tensor> batchInputs,
+                                const std::map<std::string, Event>& inputReadyEvents,
+                                std::map<std::string, Tensor> &batchOutputs,
+                                std::map<std::string, Event> &outputReadyEvents,
+                                bool isInferenceOnly,
+                                Event* reusableProcessingFinishedEvent,
+                                bool waitForOutputsOnProcessingStream,
+                                BatchSubmissionTiming* submitTiming,
+                                std::optional<uint32_t> outputSlotIndex) {
     std::optional<uint32_t> batchSize;
     const auto unwrapStart = std::chrono::high_resolution_clock::now();
     for (const auto &[inputName, inputTensor] : batchInputs) {
@@ -195,9 +216,14 @@ Event StampedNetwork::sendBatch(std::map<std::string, Tensor> batchInputs,
         }
     }
     THOR_THROW_IF_FALSE(batchSize.has_value());
+    for (const auto& [inputName, _] : inputReadyEvents) {
+        (void)_;
+        THOR_THROW_IF_FALSE(batchInputs.count(inputName) == 1);
+    }
     const auto unwrapFinish = std::chrono::high_resolution_clock::now();
     BatchSubmissionTiming localTiming;
     Event processingFinishedEvent = sendPhysicalBatch(std::move(batchInputs),
+                                                       inputReadyEvents,
                                                        batchOutputs,
                                                        outputReadyEvents,
                                                        isInferenceOnly,
@@ -258,7 +284,9 @@ Event StampedNetwork::sendBatch(const Batch& batchInputs,
     THOR_THROW_IF_FALSE(batchSize.has_value());
     const auto unwrapFinish = std::chrono::high_resolution_clock::now();
     BatchSubmissionTiming localTiming;
+    static const std::map<std::string, Event> noInputReadyEvents;
     Event processingFinishedEvent = sendPhysicalBatch(std::move(physicalBatchInputs),
+                                                       noInputReadyEvents,
                                                        batchOutputs,
                                                        outputReadyEvents,
                                                        isInferenceOnly,
@@ -275,6 +303,7 @@ Event StampedNetwork::sendBatch(const Batch& batchInputs,
 }
 
 Event StampedNetwork::sendPhysicalBatch(std::map<std::string, Tensor> batchInputs,
+                                        const std::map<std::string, Event>& inputReadyEvents,
                                         std::map<std::string, Tensor> &batchOutputs,
                                         std::map<std::string, Event> &outputReadyEvents,
                                         bool isInferenceOnly,
@@ -300,7 +329,12 @@ Event StampedNetwork::sendPhysicalBatch(std::map<std::string, Tensor> batchInput
         auto it = batchInputs.find(inputs[i]->getName());
         THOR_THROW_IF_FALSE(it != batchInputs.end());
         Tensor inputTensor = it->second;
-        inputs[i]->forward(inputTensor, isInferenceOnly, batchSize);
+        const auto readyIt = inputReadyEvents.find(inputs[i]->getName());
+        if (readyIt != inputReadyEvents.end()) {
+            inputs[i]->forward(inputTensor, isInferenceOnly, readyIt->second, batchSize);
+        } else {
+            inputs[i]->forward(inputTensor, isInferenceOnly, batchSize);
+        }
     }
     const auto inputForwardFinish = std::chrono::high_resolution_clock::now();
 

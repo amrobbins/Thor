@@ -87,6 +87,8 @@ struct TrainingRunRequest {
     // Cumulative completed training epochs before/after this request. FIT trains
     // `epochs` additional epochs starting after initialCompletedEpochs. The native
     // runner emits and evaluates epoch thresholds using global epoch numbers.
+    // Trainer restart handling resets this value to 0 before launching a retry
+    // because a restarted model attempt discards the previous trained state.
     uint64_t initialCompletedEpochs = 0;
     uint64_t* completedTrainingEpochs = nullptr;
 };

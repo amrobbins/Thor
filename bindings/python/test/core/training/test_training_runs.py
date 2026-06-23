@@ -447,6 +447,51 @@ def test_training_runs_rejects_ensemble_output_dtype_mismatch_before_fit():
         thor.training.TrainingRuns([("fold_0", trainer0, "tiny_ensemble"), ("fold_1", trainer1, "tiny_ensemble")])
 
 
+def test_training_runs_accepts_min_successful_models_for_known_ensemble_group():
+    trainer0 = _make_signature_only_trainer("training_runs_min_success_group_0")
+    trainer1 = _make_signature_only_trainer("training_runs_min_success_group_1")
+
+    runs = thor.training.TrainingRuns(
+        [("fold_0", trainer0, "tiny_ensemble"), ("fold_1", trainer1, "tiny_ensemble")],
+        min_successful_models={"tiny_ensemble": 1},
+    )
+
+    assert runs is not None
+
+
+def test_training_runs_rejects_min_successful_models_unknown_group():
+    trainer0 = _make_signature_only_trainer("training_runs_min_success_unknown_0")
+    trainer1 = _make_signature_only_trainer("training_runs_min_success_unknown_1")
+
+    with pytest.raises(RuntimeError, match="unknown ensemble_group"):
+        thor.training.TrainingRuns(
+            [("fold_0", trainer0, "tiny_ensemble"), ("fold_1", trainer1, "tiny_ensemble")],
+            min_successful_models={"tinny_ensemble": 1},
+        )
+
+
+def test_training_runs_rejects_min_successful_models_larger_than_group():
+    trainer0 = _make_signature_only_trainer("training_runs_min_success_too_large_0")
+    trainer1 = _make_signature_only_trainer("training_runs_min_success_too_large_1")
+
+    with pytest.raises(RuntimeError, match="only has 2 member"):
+        thor.training.TrainingRuns(
+            [("fold_0", trainer0, "tiny_ensemble"), ("fold_1", trainer1, "tiny_ensemble")],
+            min_successful_models={"tiny_ensemble": 3},
+        )
+
+
+def test_training_runs_rejects_min_successful_models_non_dict():
+    trainer0 = _make_signature_only_trainer("training_runs_min_success_non_dict_0")
+    trainer1 = _make_signature_only_trainer("training_runs_min_success_non_dict_1")
+
+    with pytest.raises(TypeError, match="min_successful_models"):
+        thor.training.TrainingRuns(
+            [("fold_0", trainer0, "tiny_ensemble"), ("fold_1", trainer1, "tiny_ensemble")],
+            min_successful_models=1,
+        )
+
+
 @pytest.mark.cuda
 @pytest.mark.training_integration
 @pytest.mark.skipif(
@@ -1067,6 +1112,40 @@ def test_training_runs_fits_two_tiny_trainers_on_one_gpu_and_prefixes_stats(capf
     assert ensemble.ensemble_train_loss is not None
     assert (tmp_path / "fold_0_model").exists()
     assert (tmp_path / "longer_fold_1_model").exists()
+    assert results["fold_0"].saved_model_dir == str(tmp_path / "fold_0_model")
+    assert results["longer_fold_1"].saved_model_dir == str(tmp_path / "longer_fold_1_model")
+
+    ensemble_artifact_dir = tmp_path / "tiny_ensemble_artifact"
+    manifest_path = results.save_ensemble("tiny_ensemble", ensemble_artifact_dir)
+    assert manifest_path == str(ensemble_artifact_dir / "ensemble_manifest.json")
+    loaded_ensemble = thor.EnsembleModel.load(ensemble_artifact_dir)
+    assert loaded_ensemble.get_num_members() == 2
+    assert loaded_ensemble.get_aggregation() == "weighted_mean"
+    assert loaded_ensemble.get_member_names() == ("fold_0", "longer_fold_1")
+    assert loaded_ensemble.get_member_weights() == (1.0, 2.0)
+    assert loaded_ensemble.get_input_names() == ("examples",)
+    assert loaded_ensemble.get_output_names() == ("prediction",)
+
+    test_examples, test_labels = _regression_arrays(dtype=np.float32)
+    loaded_outputs = loaded_ensemble.infer({"examples": _cpu_tensor(test_examples, thor.DataType.fp32)})
+    assert set(loaded_outputs) == {"prediction"}
+    loaded_predictions = loaded_outputs["prediction"].numpy()
+    loaded_ensemble_mae = float(np.mean(np.abs(loaded_predictions - test_labels)))
+    assert ensemble.ensemble_test_loss == pytest.approx(loaded_ensemble_mae, rel=1e-5, abs=1e-6)
+
+    assert (ensemble_artifact_dir / loaded_ensemble.members[0].path / "training_selection_metadata.json").exists()
+    assert (ensemble_artifact_dir / loaded_ensemble.members[1].path / "training_selection_metadata.json").exists()
+    manifest = json.loads((ensemble_artifact_dir / "ensemble_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["ensemble_group"] == "tiny_ensemble"
+    assert manifest["execution"] == "parallel_single_gpu"
+    assert manifest["members"][0]["selection"]["status"] == "completed"
+
+    with pytest.raises(RuntimeError, match="already exists"):
+        results.save_ensemble("tiny_ensemble", ensemble_artifact_dir)
+    assert results.save_ensemble("tiny_ensemble", ensemble_artifact_dir, overwrite=True) == str(
+        ensemble_artifact_dir / "ensemble_manifest.json"
+    )
+
     assert ensemble.ensemble_test_loss is not None
     assert len(ensemble.members) == 2
     assert [member.run_name for member in ensemble.members] == ["fold_0", "longer_fold_1"]
@@ -1165,3 +1244,182 @@ def test_training_runs_continue_policy_allows_real_cuda_sibling_to_finish_after_
     assert "INFO runs[good_fold]:" in plain_text
     assert "INFO runs final: total=2" in plain_text
     assert "INFO runs summary: total=1" not in plain_text
+
+
+def _demand_end_to_end_arrays():
+    product_ids = [f"product_{index}" for index in range(6)]
+    row_groups = []
+    trend_rows = []
+    seasonality_rows = []
+    monotone_rows = []
+    for product_index, product_id in enumerate(product_ids):
+        for date_index in range(2):
+            row_groups.append(product_id)
+            trend = np.array([float(product_index + 1)], dtype=np.float32)
+            seasonality = np.array([float(date_index), float(product_index - date_index)], dtype=np.float32)
+            monotone = np.array([float(product_index + date_index + 1)], dtype=np.float32)
+            trend_rows.append(trend)
+            seasonality_rows.append(seasonality)
+            monotone_rows.append(monotone)
+
+    trend_inputs = np.ascontiguousarray(np.stack(trend_rows, axis=0), dtype=np.float32)
+    seasonality_inputs = np.ascontiguousarray(np.stack(seasonality_rows, axis=0), dtype=np.float32)
+    monotone_inputs = np.ascontiguousarray(np.stack(monotone_rows, axis=0), dtype=np.float32)
+    observed_future_demand = np.ascontiguousarray(
+        np.concatenate([trend_inputs, seasonality_inputs, monotone_inputs], axis=1),
+        dtype=np.float32,
+    )
+    return product_ids, tuple(row_groups), {
+        "trend_inputs": trend_inputs,
+        "seasonality_inputs": seasonality_inputs,
+        "monotone_increasing_inputs": monotone_inputs,
+        "observed_future_demand": observed_future_demand,
+    }
+
+
+def _fold_split_with_holdout(fold, *, test_keys, test_groups):
+    return thor.data.StratifiedTrainValidationTestSplit(
+        train_keys=fold.train_keys,
+        validate_keys=fold.validate_keys,
+        test_keys=tuple(test_keys),
+        train_groups=fold.train_groups,
+        validate_groups=fold.validate_groups,
+        test_groups=tuple(test_groups),
+    )
+
+
+def _build_demand_end_to_end_network(name: str) -> thor.Network:
+    network = thor.Network(name)
+    trend = thor.layers.NetworkInput(network, "trend_inputs", [1], thor.DataType.fp32)
+    seasonality = thor.layers.NetworkInput(network, "seasonality_inputs", [2], thor.DataType.fp32)
+    monotone = thor.layers.NetworkInput(network, "monotone_increasing_inputs", [1], thor.DataType.fp32)
+    labels = thor.layers.NetworkInput(network, "observed_future_demand", [4], thor.DataType.fp32)
+    features = thor.layers.Concatenate(
+        network,
+        [
+            trend.get_feature_output(),
+            seasonality.get_feature_output(),
+            monotone.get_feature_output(),
+        ],
+        0,
+    )
+    forecast = thor.layers.FullyConnected(
+        network,
+        features.get_feature_output(),
+        4,
+        True,
+        activation=None,
+        weights_initializer=thor.initializers.UniformRandom(0.0, 0.0),
+        biases_initializer=thor.initializers.UniformRandom(0.0, 0.0),
+    )
+    quantile = thor.layers.CustomLayer(
+        network=network,
+        inputs={"forecast": forecast.get_feature_output()},
+        output_names=["forecast_quantile_high"],
+        build=lambda context: {"forecast_quantile_high": context.input("forecast") + 1.0},
+    )
+    loss = thor.losses.MSE(network, forecast.get_feature_output(), labels.get_feature_output(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "loss", loss.get_loss(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "forecast", forecast.get_feature_output(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "forecast_quantile_high", quantile["forecast_quantile_high"], thor.DataType.fp32)
+    return network
+
+
+@pytest.mark.cuda
+@pytest.mark.training_integration
+@pytest.mark.skipif(
+    not RUN_TRAINING_INTEGRATION,
+    reason=integration_skip_reason(
+        "THOR_RUN_TRAINING_INTEGRATION",
+        description="opt-in TrainingRuns demand-style k-fold ensemble smoke test",
+    ),
+)
+def test_training_runs_demand_style_kfold_full_path_saves_loadable_ensemble(capfd, tmp_path):
+    product_ids, row_groups, tensors = _demand_end_to_end_arrays()
+    split = thor.data.StratifiedSplitter(
+        product_ids,
+        [float(index) for index in range(len(product_ids))],
+        mode="quantile",
+        num_bins=3,
+        seed=23,
+    ).holdout_plus_k_fold(test_size=2, k=2)
+
+    def make_trainer(*, fold, run_name, test_keys, test_groups):
+        fold_split = _fold_split_with_holdout(fold, test_keys=test_keys, test_groups=test_groups)
+        numpy_splits = thor.data.make_numpy_dict_splits(tensors, split=fold_split, groups=row_groups)
+        loader = thor.training.NumpyFloat32DictBatchLoader(
+            train=numpy_splits.train,
+            validate=numpy_splits.validate,
+            test=numpy_splits.test,
+            batch_size=2,
+            randomize_train=False,
+            dataset_name=f"demand_kfold_{run_name}",
+        )
+        return thor.training.Trainer(
+            _build_demand_end_to_end_network(f"demand_kfold_network_{run_name}"),
+            loader,
+            optimizer=thor.optimizers.Sgd(initial_learning_rate=0.01, momentum=0.0),
+            stats_interval_s=0.0,
+            max_in_flight_batches=2,
+            scalar_tensors_to_report=["loss"],
+            stats_color="never",
+            save_model_dir=tmp_path / f"{run_name}_model",
+            save_model_overwrite=True,
+        )
+
+    runs = thor.training.training_runs_from_k_fold_split(
+        split,
+        make_trainer=make_trainer,
+        ensemble_group="brand_demand_cv2",
+        run_name_template="brand_fold_{fold_index}",
+        max_parallel_runs=2,
+        min_successful_models={"brand_demand_cv2": 2},
+    )
+    holdout_split = thor.data.StratifiedTrainValidationTestSplit(
+        train_keys=split.test_keys,
+        validate_keys=split.test_keys,
+        test_keys=split.test_keys,
+        train_groups=split.test_groups,
+        validate_groups=split.test_groups,
+        test_groups=split.test_groups,
+    )
+    holdout_numpy = thor.data.make_numpy_dict_splits(tensors, split=holdout_split, groups=row_groups)
+    test_loader = thor.training.NumpyFloat32DictBatchLoader(
+        train=holdout_numpy.train,
+        validate=holdout_numpy.validate,
+        test=holdout_numpy.test,
+        batch_size=2,
+        randomize_train=False,
+        dataset_name="demand_kfold_holdout",
+    )
+
+    results, captured_text = _fit_runs_and_capture_text(runs, capfd, epochs=1, test_loader=test_loader)
+
+    assert results.all_completed()
+    assert results.has_ensembles
+    ensemble_result = results.ensemble("brand_demand_cv2")
+    assert ensemble_result.all_completed()
+    assert ensemble_result.ensemble_test_loss is not None
+    assert "INFO runs ensemble[brand_demand_cv2]:" in _ANSI_RE.sub("", captured_text)
+
+    ensemble_artifact_dir = tmp_path / "brand_demand_cv2_ensemble"
+    results.save_ensemble("brand_demand_cv2", ensemble_artifact_dir)
+    ensemble = thor.EnsembleModel.load(ensemble_artifact_dir)
+    assert ensemble.get_num_members() == 2
+    assert ensemble.get_input_names() == ("trend_inputs", "seasonality_inputs", "monotone_increasing_inputs")
+    assert ensemble.get_output_names() == ("forecast", "forecast_quantile_high")
+
+    deploy_inputs = {
+        "trend_inputs": _cpu_tensor(holdout_numpy.test["trend_inputs"], thor.DataType.fp32),
+        "seasonality_inputs": _cpu_tensor(holdout_numpy.test["seasonality_inputs"], thor.DataType.fp32),
+        "monotone_increasing_inputs": _cpu_tensor(holdout_numpy.test["monotone_increasing_inputs"], thor.DataType.fp32),
+    }
+    outputs = ensemble.infer(deploy_inputs)
+
+    assert set(outputs) == {"forecast", "forecast_quantile_high"}
+    assert outputs["forecast"].get_placement().get_device_type() == thor.physical.DeviceType.cpu
+    assert outputs["forecast_quantile_high"].get_placement().get_device_type() == thor.physical.DeviceType.cpu
+    assert outputs["forecast"].numpy().shape == holdout_numpy.test["observed_future_demand"].shape
+    assert outputs["forecast_quantile_high"].numpy().shape == holdout_numpy.test["observed_future_demand"].shape
+    assert np.all(np.isfinite(outputs["forecast"].numpy()))
+    assert np.all(np.isfinite(outputs["forecast_quantile_high"].numpy()))

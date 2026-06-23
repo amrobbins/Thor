@@ -736,6 +736,36 @@ TrainingRunsFailurePolicy trainingRunsFailurePolicyFromString(const std::string&
     throw nb::value_error("failure_policy must be one of: 'cancel_siblings', 'continue'");
 }
 
+
+std::map<std::string, size_t> trainingRunsMinSuccessfulModelsFromPython(nb::object minSuccessfulModels) {
+    if (minSuccessfulModels.is_none()) {
+        return {};
+    }
+    if (!nb::isinstance<nb::dict>(minSuccessfulModels)) {
+        throw nb::type_error("TrainingRuns min_successful_models must be a dict mapping ensemble_group names to positive integers, or None.");
+    }
+
+    nb::dict mapping = nb::cast<nb::dict>(minSuccessfulModels);
+    std::map<std::string, size_t> result;
+    for (auto item : mapping) {
+        if (!nb::isinstance<nb::str>(item.first)) {
+            throw nb::type_error("TrainingRuns min_successful_models keys must be ensemble_group strings.");
+        }
+        const std::string groupName = nb::cast<std::string>(item.first);
+        int64_t minimum = 0;
+        try {
+            minimum = nb::cast<int64_t>(item.second);
+        } catch (const nb::cast_error&) {
+            throw nb::type_error("TrainingRuns min_successful_models values must be positive integers.");
+        }
+        if (minimum <= 0) {
+            throw nb::value_error("TrainingRuns min_successful_models values must be >= 1.");
+        }
+        result.emplace(groupName, static_cast<size_t>(minimum));
+    }
+    return result;
+}
+
 std::vector<TrainingRunsSpec> trainingRunsSpecsFromPython(nb::iterable runs) {
     std::vector<TrainingRunsSpec> specs;
     for (nb::handle item : runs) {
@@ -1417,6 +1447,12 @@ calling this helper.
     training_run_result.def_prop_ro("completed_epoch", [](const TrainingRunResult& self) { return optionalUint64(self.completedEpoch); });
     training_run_result.def_prop_ro("best_epoch", [](const TrainingRunResult& self) { return optionalUint64(self.bestEpoch); });
     training_run_result.def_prop_ro("best_score", [](const TrainingRunResult& self) { return optionalDouble(self.bestScore); });
+    training_run_result.def_prop_ro("saved_model_dir", [](const TrainingRunResult& self) -> nb::object {
+        if (!self.savedModelDirectory.has_value()) {
+            return nb::none();
+        }
+        return nb::cast(*self.savedModelDirectory);
+    });
     training_run_result.def_prop_ro("exception_type", [](const TrainingRunResult& self) { return self.exception.type; });
     training_run_result.def_prop_ro("exception_message", [](const TrainingRunResult& self) { return self.exception.message; });
     training_run_result.def_prop_ro("final_training_stats", [](const TrainingRunResult& self) { return self.finalTrainingStats; });
@@ -1499,6 +1535,12 @@ calling this helper.
     training_ensemble_result.def("__bool__", [](const TrainingEnsembleResult& self) { return !self.empty(); });
     training_ensemble_result.def("all_completed", &TrainingEnsembleResult::allCompleted);
     training_ensemble_result.def("any_failed", &TrainingEnsembleResult::anyFailed);
+    training_ensemble_result.def("has_enough_successful_models", &TrainingEnsembleResult::hasEnoughSuccessfulModels);
+    training_ensemble_result.def_prop_ro("successful_models", &TrainingEnsembleResult::successfulModels);
+    training_ensemble_result.def_prop_ro("required_successful_models", &TrainingEnsembleResult::requiredSuccessfulModels);
+    training_ensemble_result.def_prop_ro("min_successful_models", &TrainingEnsembleResult::requiredSuccessfulModels);
+    training_ensemble_result.def_prop_ro("target_num_members", &TrainingEnsembleResult::size);
+    training_ensemble_result.def_prop_ro("actual_num_members", &TrainingEnsembleResult::successfulModels);
     training_ensemble_result.def_prop_ro("total_weight", &TrainingEnsembleResult::totalWeight);
     training_ensemble_result.def_prop_ro("status_counts", &TrainingEnsembleResult::statusCounts);
     training_ensemble_result.def_prop_ro(
@@ -1643,6 +1685,19 @@ calling this helper.
     training_runs_result.def("any_cancelled", &TrainingRunsResult::anyCancelled);
     training_runs_result.def_prop_ro("status_counts", &TrainingRunsResult::statusCounts);
     training_runs_result.def("get_status_counts", &TrainingRunsResult::statusCounts);
+    training_runs_result.def(
+        "save_ensemble",
+        [](const TrainingRunsResult& self,
+           const std::string& ensemble_group,
+           nb::object path,
+           const std::string& aggregation,
+           bool overwrite) {
+            return self.saveEnsemble(ensemble_group, pathStringFromPython(path, "path"), aggregation, overwrite);
+        },
+        "ensemble_group"_a,
+        "path"_a,
+        "aggregation"_a = "auto",
+        "overwrite"_a = false);
 
     auto training_runs = nb::class_<TrainingRuns>(training, "TrainingRuns");
     training_runs.attr("__module__") = "thor.training";
@@ -1653,6 +1708,7 @@ calling this helper.
            const std::string& failure_policy,
            double max_summary_logs_per_second,
            std::optional<size_t> max_parallel_runs,
+           nb::object min_successful_models,
            nb::object restart_conditions,
            nb::object early_completion_rules) -> std::shared_ptr<TrainingRuns> {
             (void)cls;
@@ -1661,22 +1717,25 @@ calling this helper.
                                                   max_summary_logs_per_second,
                                                   max_parallel_runs,
                                                   trainingRunsRestartPoliciesFromPython(restart_conditions),
-                                                  trainingRunsEarlyCompletionRulesFromPython(early_completion_rules));
+                                                  trainingRunsEarlyCompletionRulesFromPython(early_completion_rules),
+                                                  trainingRunsMinSuccessfulModelsFromPython(min_successful_models));
         },
         "cls"_a,
         "runs"_a,
         "failure_policy"_a = "cancel_siblings",
         "max_summary_logs_per_second"_a = 2.0,
         "max_parallel_runs"_a.none() = nb::none(),
+        "min_successful_models"_a.none() = nb::none(),
         "restart_conditions"_a.none() = nb::none(),
         "early_completion_rules"_a.none() = nb::none());
     training_runs.def(
         "__init__",
-        [](TrainingRuns*, nb::iterable, const std::string&, double, std::optional<size_t>, nb::object, nb::object) {},
+        [](TrainingRuns*, nb::iterable, const std::string&, double, std::optional<size_t>, nb::object, nb::object, nb::object) {},
         "runs"_a,
         "failure_policy"_a = "cancel_siblings",
         "max_summary_logs_per_second"_a = 2.0,
         "max_parallel_runs"_a.none() = nb::none(),
+        "min_successful_models"_a.none() = nb::none(),
         "restart_conditions"_a.none() = nb::none(),
         "early_completion_rules"_a.none() = nb::none());
     training_runs.def(

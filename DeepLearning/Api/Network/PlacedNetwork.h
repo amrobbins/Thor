@@ -49,6 +49,16 @@ class PlacedNetwork {
                       std::optional<uint32_t> outputSlotIndex = std::nullopt);
     Event submitBatch(uint64_t stampIndex,
                       std::map<std::string, ThorImplementation::Tensor> batchInputs,
+                      const std::map<std::string, Event>& inputReadyEvents,
+                      std::map<std::string, ThorImplementation::Tensor>& batchOutputs,
+                      std::map<std::string, Event>& outputReadyEvents,
+                      bool isInferenceOnly,
+                      Event* reusableProcessingFinishedEvent = nullptr,
+                      bool waitForOutputsOnProcessingStream = true,
+                      ThorImplementation::BatchSubmissionTiming* submitTiming = nullptr,
+                      std::optional<uint32_t> outputSlotIndex = std::nullopt);
+    Event submitBatch(uint64_t stampIndex,
+                      std::map<std::string, ThorImplementation::Tensor> batchInputs,
                       std::map<std::string, ThorImplementation::Tensor>& batchOutputs,
                       std::map<std::string, Event>& outputReadyEvents,
                       bool isInferenceOnly,
