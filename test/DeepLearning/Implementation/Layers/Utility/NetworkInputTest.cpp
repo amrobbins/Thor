@@ -266,43 +266,51 @@ class RuntimeForwardedInputCaptureLayer : public Layer {
 
 }  // namespace
 
-// Network composition primitive: an opt-in same-device NetworkInput should
-// forward the runtime tensor directly to downstream layers. This is what lets
-// composed networks pass GPU tensors across NetworkOutput -> NetworkInput
-// boundaries without a D2D copy.
-TEST(NetworkInput, AliasSamePlacementInputsForwardsRuntimeTensorWithoutCopyWhenEnabled) {
+// Network composition primitive: a pass-through NetworkInput binds an upstream
+// physical tensor before downstream layers are connected. The downstream layer
+// therefore sees the upstream tensor's stable identity at connect/stamp time and
+// at runtime; forward() no longer substitutes a different tensor later.
+TEST(NetworkInput, PassThroughBindsSourceTensorIdentityBeforeDownstreamConnect) {
     if (MachineEvaluator::instance().getNumGpus() == 0) {
-        GTEST_SKIP() << "NetworkInput same-placement alias test requires a GPU";
+        GTEST_SKIP() << "NetworkInput pass-through test requires a GPU";
     }
 
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
     TensorDescriptor descriptor(DataType::FP32, {4});
     Stream setupStream(0);
-    Tensor externalInput = makeFilledGpuTensor(descriptor, 7.0f, setupStream);
+    Tensor source = makeFilledGpuTensor(descriptor, 7.0f, setupStream);
     setupStream.synchronize();
 
-    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions(), true);
-    EXPECT_TRUE(input.getAliasSamePlacementInputs());
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions(), NetworkInput::Mode::PassThrough, source);
+    EXPECT_TRUE(input.isPassThrough());
+    EXPECT_FALSE(input.requiresBatchInput());
+
     RuntimeForwardedInputCaptureLayer capture;
     input.connectToNextLayer(&capture);
 
     ASSERT_TRUE(input.getFeatureOutput().has_value());
-    ASSERT_NE(input.getFeatureOutput().value(), externalInput);
+    ASSERT_EQ(input.getFeatureOutput().value().getTensorId(), source.getTensorId());
+    ASSERT_EQ(input.getFeatureOutput().value().getMemPtr<void>(), source.getMemPtr<void>());
 
-    input.forward(externalInput, false, 1);
+    // These are intentionally no-ops for pass-through inputs; pass-through
+    // composition must not allocate external-load staging slots.
+    input.preallocateInputSlots(3);
+    input.setActiveInputSlot(2);
+
+    input.forward(source, false, 1);
     capture.synchronize();
 
     ASSERT_EQ(capture.invocationCount, 1u);
-    ASSERT_EQ(capture.forwardedTensorIds[0], externalInput.getTensorId());
-    ASSERT_EQ(capture.forwardedMemPtrs[0], externalInput.getMemPtr<void>());
-    ASSERT_EQ(capture.connectedTensorIds[0], input.getFeatureOutput().value().getTensorId());
-    ASSERT_NE(capture.connectedTensorIds[0], capture.forwardedTensorIds[0]);
+    ASSERT_EQ(capture.connectedTensorIds[0], source.getTensorId());
+    ASSERT_EQ(capture.forwardedTensorIds[0], source.getTensorId());
+    ASSERT_EQ(capture.connectedMemPtrs[0], source.getMemPtr<void>());
+    ASSERT_EQ(capture.forwardedMemPtrs[0], source.getMemPtr<void>());
     expectAllEqual(capture.readCapture(0), 7.0f);
 }
 
-// Default behavior remains conservative: regular NetworkInputs still
-// materialize into their owned feature tensor unless constructed for
-// composition aliasing.
+
+// Default behavior remains conservative: regular NetworkInputs materialize into
+// their owned feature tensor unless constructed in explicit pass-through mode.
 TEST(NetworkInput, SamePlacementInputStillCopiesByDefault) {
     if (MachineEvaluator::instance().getNumGpus() == 0) {
         GTEST_SKIP() << "NetworkInput same-placement default copy test requires a GPU";
@@ -315,7 +323,8 @@ TEST(NetworkInput, SamePlacementInputStillCopiesByDefault) {
     setupStream.synchronize();
 
     NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
-    EXPECT_FALSE(input.getAliasSamePlacementInputs());
+    EXPECT_FALSE(input.isPassThrough());
+    EXPECT_TRUE(input.requiresBatchInput());
     RuntimeForwardedInputCaptureLayer capture;
     input.connectToNextLayer(&capture);
 
@@ -329,32 +338,37 @@ TEST(NetworkInput, SamePlacementInputStillCopiesByDefault) {
     expectAllEqual(capture.readCapture(0), 3.0f);
 }
 
-// Network composition primitive: crossing a CPU/GPU boundary remains a real
-// materialization boundary even when same-placement aliasing is enabled.
-TEST(NetworkInput, AliasSamePlacementInputsFallsBackToCopyAcrossDeviceBoundary) {
+TEST(NetworkInput, PassThroughRejectsDifferentRuntimeTensor) {
     if (MachineEvaluator::instance().getNumGpus() == 0) {
-        GTEST_SKIP() << "NetworkInput cross-device fallback test requires a GPU";
+        GTEST_SKIP() << "NetworkInput pass-through validation test requires a GPU";
+    }
+
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    TensorDescriptor descriptor(DataType::FP32, {4});
+    Stream setupStream(0);
+    Tensor source = makeFilledGpuTensor(descriptor, 1.0f, setupStream);
+    Tensor differentSource = makeFilledGpuTensor(descriptor, 2.0f, setupStream);
+    setupStream.synchronize();
+
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions(), NetworkInput::Mode::PassThrough, source);
+    RuntimeForwardedInputCaptureLayer capture;
+    input.connectToNextLayer(&capture);
+
+    EXPECT_ANY_THROW(input.forward(differentSource, false, 1));
+}
+
+TEST(NetworkInput, PassThroughRejectsDescriptorOrPlacementMismatch) {
+    if (MachineEvaluator::instance().getNumGpus() == 0) {
+        GTEST_SKIP() << "NetworkInput pass-through validation test requires a GPU";
     }
 
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
     TensorDescriptor descriptor(DataType::FP32, {4});
-    Tensor cpuInput(cpuPlacement, descriptor);
-    Stream cpuFillStream(0);
-    cpuInput.fill(5.0f, cpuFillStream);
-    cpuFillStream.synchronize();
+    TensorDescriptor wrongDescriptor(DataType::FP32, {5});
+    Tensor cpuSource(cpuPlacement, descriptor);
+    Tensor gpuWrongShape(gpuPlacement, wrongDescriptor);
 
-    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions(), true);
-    EXPECT_TRUE(input.getAliasSamePlacementInputs());
-    RuntimeForwardedInputCaptureLayer capture;
-    input.connectToNextLayer(&capture);
-
-    input.forward(cpuInput, false, 1);
-    capture.synchronize();
-
-    ASSERT_EQ(capture.invocationCount, 1u);
-    ASSERT_EQ(capture.forwardedTensorIds[0], input.getFeatureOutput().value().getTensorId());
-    ASSERT_NE(capture.forwardedTensorIds[0], cpuInput.getTensorId());
-    EXPECT_EQ(capture.forwardedMemPtrs[0], input.getFeatureOutput().value().getMemPtr<void>());
-    expectAllEqual(capture.readCapture(0), 5.0f);
+    EXPECT_ANY_THROW(NetworkInput(gpuPlacement, DataType::FP32, descriptor.getDimensions(), NetworkInput::Mode::PassThrough, cpuSource));
+    EXPECT_ANY_THROW(NetworkInput(gpuPlacement, DataType::FP32, descriptor.getDimensions(), NetworkInput::Mode::PassThrough, gpuWrongShape));
 }

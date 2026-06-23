@@ -2,6 +2,7 @@
 
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
+#include <nanobind/stl/optional.h>
 #include <optional>
 
 #include "DeepLearning/Api/Layers/Layer.h"
@@ -16,6 +17,7 @@ using namespace std;
 using namespace Thor;
 
 using DataType = ThorImplementation::DataType;
+using PhysicalTensor = ThorImplementation::Tensor;
 
 void bind_network_input(nb::module_ &m) {
     auto network_input = nb::class_<NetworkInput, Layer>(m, "NetworkInput");
@@ -29,7 +31,7 @@ void bind_network_input(nb::module_ &m) {
            const vector<uint64_t> &dimensions,
            const DataType &data_type,
            bool dimensions_include_batch,
-           bool alias_same_placement_inputs) {
+           std::optional<PhysicalTensor> pass_through_source) {
             if (name.length() == 0) {
                 string msg = "Network Input instance: name must have non-zero length but name=\"\" was passed in.";
                 throw nb::value_error(msg.c_str());
@@ -40,13 +42,15 @@ void bind_network_input(nb::module_ &m) {
             }
 
             NetworkInput::Builder builder;
-            NetworkInput built = builder.network(network)
-                                     .name(name)
-                                     .dimensions(dimensions)
-                                     .dataType(data_type)
-                                     .dimensionsIncludeBatch(dimensions_include_batch)
-                                     .aliasSamePlacementInputs(alias_same_placement_inputs)
-                                     .build();
+            builder.network(network)
+                .name(name)
+                .dimensions(dimensions)
+                .dataType(data_type)
+                .dimensionsIncludeBatch(dimensions_include_batch);
+            if (pass_through_source.has_value()) {
+                builder.passThroughPhysicalSource(pass_through_source.value());
+            }
+            NetworkInput built = builder.build();
 
             // Move the networkInput layer into the pre-allocated but uninitialized memory at self
             new (self) NetworkInput(std::move(built));
@@ -56,7 +60,7 @@ void bind_network_input(nb::module_ &m) {
         "dimensions"_a,
         "data_type"_a,
         "dimensions_include_batch"_a = false,
-        "alias_same_placement_inputs"_a = false);
+        "pass_through_source"_a = nb::none());
 
     network_input.def(
         "get_feature_output",
@@ -77,7 +81,6 @@ void bind_network_input(nb::module_ &m) {
             )nbdoc");
 
     network_input.def("version", &Layer::getLayerVersion);
-    network_input.def("alias_same_placement_inputs", &NetworkInput::aliasSamePlacementInputs);
 
     network_input.attr("__doc__") = R"nbdoc(
             Create and attach a NetworkInput to send data into a Network.
@@ -98,10 +101,10 @@ void bind_network_input(nb::module_ &m) {
             dimensions_include_batch : bool, default False
                 When True, ``dimensions`` already includes the batch dimension.
                 This is primarily for internal network-composition runtimes.
-            alias_same_placement_inputs : bool, default False
-                When True, an already-ready same-device tensor can be forwarded
-                through this NetworkInput without a staging copy.  Normal user
-                inputs should leave this disabled; composed ensemble accumulator
-                networks enable it for no-copy member-output handoff.
+            pass_through_source : thor.physical.PhysicalTensor | None, default None
+                Internal network-composition hook.  When supplied, the NetworkInput
+                is stamped as a placement-time pass-through over this physical
+                tensor, so downstream layers connect to the source tensor identity
+                directly rather than to a NetworkInput staging tensor.
             )nbdoc";
 }

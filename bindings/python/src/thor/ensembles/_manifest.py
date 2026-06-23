@@ -3,17 +3,19 @@
 The manifest is the stable saved-artifact contract.  The runtime keeps all
 member networks resident after the first inference placement, stamps member
 NetworkOutput tensors to GPU, submits ensemble member inference from native code,
-and feeds the GPU-resident member outputs into a normal Thor accumulator network
-that materializes the aggregated result.  The current accumulator uses normal
-NetworkInput materialization because CustomLayer execution plans bind static
-input tensors at placement time; the member outputs still remain GPU-resident
-through aggregation and only the final accumulated result is copied to CPU.
+and feeds the GPU-resident member outputs into a Thor accumulator network.
+Accumulator NetworkInputs are built in placement-time pass-through mode, so the
+CustomLayer accumulator is stamped against the same physical tensors produced by
+the resident members instead of receiving dynamically swapped runtime tensors.
+Only the final accumulated result is copied to CPU for the Python API.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import math
+import numbers
 from pathlib import Path
 from threading import RLock
 from typing import Any, Mapping, Sequence
@@ -21,7 +23,9 @@ from typing import Any, Mapping, Sequence
 
 _MANIFEST_FILENAME = "ensemble_manifest.json"
 _SUPPORTED_ARTIFACT_TYPE = "thor_ensemble_model"
-_SUPPORTED_VERSION = 1
+_FIRST_ARTIFACT_VERSION = 1
+_CURRENT_ARTIFACT_VERSION = _FIRST_ARTIFACT_VERSION
+_SUPPORTED_ARTIFACT_VERSIONS = frozenset(range(_FIRST_ARTIFACT_VERSION, _CURRENT_ARTIFACT_VERSION + 1))
 _SUPPORTED_EXECUTIONS = frozenset({"parallel_single_gpu"})
 _SUPPORTED_AGGREGATIONS = frozenset({"mean", "weighted_mean"})
 
@@ -43,6 +47,12 @@ def _json_sequence(value: object, *, field_name: str) -> Sequence[object]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         raise ValueError(f"{field_name} must be a JSON array")
     return value
+
+
+def _required_manifest_field(manifest: Mapping[str, Any], field_name: str) -> Any:
+    if field_name not in manifest:
+        raise ValueError(f"ensemble manifest missing required field {field_name!r}")
+    return manifest[field_name]
 
 
 def _relative_path_string(path: str | Path, *, field_name: str) -> str:
@@ -140,7 +150,10 @@ def _normal_output_specs(raw_specs: Mapping[str, Mapping[str, object]]) -> dict[
         dim_tuple = tuple(int(d) for d in dims)
         if not dim_tuple:
             raise RuntimeError(f"ensemble output {output_name!r} must include a batch dimension")
-        specs[output_name] = {"dimensions": dim_tuple, "data_type": dtype}
+        spec = {"dimensions": dim_tuple, "data_type": dtype}
+        if "tensor" in raw:
+            spec["tensor"] = raw["tensor"]
+        specs[output_name] = spec
     return specs
 
 def _string_tuple(value: Sequence[str] | None, *, field_name: str) -> tuple[str, ...]:
@@ -198,9 +211,11 @@ class EnsembleMemberSpec:
         if not isinstance(self.name, str) or self.name == "":
             raise ValueError("member name must be a non-empty string")
         object.__setattr__(self, "path", _relative_path_string(self.path, field_name=f"member {self.name!r} path"))
+        if isinstance(self.weight, bool) or not isinstance(self.weight, numbers.Real):
+            raise ValueError(f"member {self.name!r} weight must be a finite positive number")
         weight = float(self.weight)
-        if weight <= 0.0:
-            raise ValueError(f"member {self.name!r} weight must be positive")
+        if not math.isfinite(weight) or weight <= 0.0:
+            raise ValueError(f"member {self.name!r} weight must be a finite positive number")
         object.__setattr__(self, "weight", weight)
         object.__setattr__(self, "selection", _copy_json_object(self.selection, field_name=f"member {self.name!r} selection"))
 
@@ -331,7 +346,7 @@ class EnsembleModel:
     def to_manifest(self) -> dict[str, Any]:
         return {
             "artifact_type": _SUPPORTED_ARTIFACT_TYPE,
-            "version": _SUPPORTED_VERSION,
+            "version": _CURRENT_ARTIFACT_VERSION,
             "execution": self._execution,
             "aggregation": self._aggregation.to_dict(),
             "input_names": list(self._input_names),
@@ -366,21 +381,45 @@ class EnsembleModel:
             raise ValueError(f"ensemble manifest is not valid JSON: {manifest_path}") from exc
 
         manifest = _json_mapping(raw_manifest, field_name="ensemble manifest")
-        artifact_type = manifest.get("artifact_type")
+        artifact_type = _required_manifest_field(manifest, "artifact_type")
         if artifact_type != _SUPPORTED_ARTIFACT_TYPE:
             raise ValueError(
                 f"unsupported ensemble artifact_type {artifact_type!r}; expected {_SUPPORTED_ARTIFACT_TYPE!r}"
             )
-        version = manifest.get("version")
-        if version != _SUPPORTED_VERSION:
-            raise ValueError(f"unsupported ensemble manifest version {version!r}; expected {_SUPPORTED_VERSION}")
-        execution = manifest.get("execution")
+        version = _required_manifest_field(manifest, "version")
+        if isinstance(version, bool) or not isinstance(version, int):
+            raise ValueError("ensemble manifest version must be an integer")
+        if version < _FIRST_ARTIFACT_VERSION:
+            raise ValueError(
+                f"unsupported ensemble manifest version {version}; "
+                f"first supported version is {_FIRST_ARTIFACT_VERSION}"
+            )
+        if version > _CURRENT_ARTIFACT_VERSION:
+            raise ValueError(
+                f"unsupported ensemble manifest version {version}; "
+                f"current supported version is {_CURRENT_ARTIFACT_VERSION}"
+            )
+        if version not in _SUPPORTED_ARTIFACT_VERSIONS:
+            raise ValueError(
+                f"unsupported ensemble manifest version {version}; "
+                f"supported versions are {sorted(_SUPPORTED_ARTIFACT_VERSIONS)!r}"
+            )
+        execution = _required_manifest_field(manifest, "execution")
         if not isinstance(execution, str):
             raise ValueError("ensemble manifest execution must be a string")
-        aggregation = EnsembleAggregation.from_user(manifest.get("aggregation", {"type": "mean"}))
-        input_names = _string_tuple(manifest.get("input_names", []), field_name="ensemble manifest input_names")
-        output_names = _string_tuple(manifest.get("output_names", []), field_name="ensemble manifest output_names")
-        member_values = _json_sequence(manifest.get("members"), field_name="ensemble manifest members")
+        aggregation = EnsembleAggregation.from_user(_required_manifest_field(manifest, "aggregation"))
+        input_names = _string_tuple(
+            _required_manifest_field(manifest, "input_names"),
+            field_name="ensemble manifest input_names",
+        )
+        output_names = _string_tuple(
+            _required_manifest_field(manifest, "output_names"),
+            field_name="ensemble manifest output_names",
+        )
+        member_values = _json_sequence(
+            _required_manifest_field(manifest, "members"),
+            field_name="ensemble manifest members",
+        )
         members = tuple(EnsembleMemberSpec.from_manifest(_json_mapping(member, field_name="member")) for member in member_values)
 
         model = cls(
@@ -432,14 +471,11 @@ class EnsembleModel:
         and submitted together through one native ensemble runtime bridge instead
         of Python worker threads.  Member ``NetworkOutput`` tensors are stamped to
         GPU.  When the producer is already on that GPU, ``NetworkOutput`` aliases
-        the producer tensor instead of copying.  Those tensors then feed a normal
-        Thor accumulator network.  The accumulator inputs intentionally use the
-        ordinary NetworkInput materialization path for now because CustomLayer
-        stamped execution plans bind their input tensor addresses when the
-        accumulator is placed; dynamically aliasing different member-output
-        tensors would require a deeper graph-composition contract.  The
-        accumulator ``NetworkOutput`` materializes the final CPU tensors for
-        this Python API.
+        the producer tensor instead of copying.  Those tensors then feed a Thor
+        accumulator network through placement-time pass-through NetworkInputs,
+        so the accumulator CustomLayer binds to the member-output tensor
+        identities that will arrive at runtime.  The accumulator
+        ``NetworkOutput`` materializes the final CPU tensors for this Python API.
         """
 
         if self._artifact_path is None:
@@ -487,10 +523,15 @@ class EnsembleModel:
                 )
                 placed_members.append(placed)
 
-            self._placed_members = tuple(placed_members)
-            self._accumulator_network, self._placed_accumulator, self._runtime_output_names = self._build_accumulator_runtime(
-                self._placed_members, batch_size=batch_size, device=int(device)
+            placed_members_tuple = tuple(placed_members)
+            accumulator_network, placed_accumulator, runtime_output_names = self._build_accumulator_runtime(
+                placed_members_tuple, batch_size=batch_size, device=int(device)
             )
+
+            self._placed_members = placed_members_tuple
+            self._accumulator_network = accumulator_network
+            self._placed_accumulator = placed_accumulator
+            self._runtime_output_names = runtime_output_names
             self._runtime_batch_size = batch_size
             self._runtime_device = int(device)
             return self._placed_members
@@ -508,16 +549,42 @@ class EnsembleModel:
         import thor  # Lazy import avoids a package-initialization cycle.
         import thor._thor as _thor  # type: ignore[import-not-found]
 
-        raw_specs = _thor._get_ensemble_member_output_specs(
-            placed_members[0], list(self._output_names)
-        )
-        output_specs = _normal_output_specs(raw_specs)
+        member_output_specs: list[dict[str, dict[str, object]]] = []
+        for placed_member in placed_members:
+            raw_specs = _thor._get_ensemble_member_output_specs(
+                placed_member, list(self._output_names)
+            )
+            member_output_specs.append(_normal_output_specs(raw_specs))
+
+        output_specs = member_output_specs[0]
         output_names = tuple(output_specs.keys())
         if self._output_names and output_names != self._output_names:
             raise RuntimeError(
                 f"ensemble output spec order mismatch: expected={list(self._output_names)!r} "
                 f"actual={list(output_names)!r}"
             )
+
+        for member_index, member_specs in enumerate(member_output_specs[1:], start=1):
+            if tuple(member_specs.keys()) != output_names:
+                raise RuntimeError(
+                    f"ensemble member output spec order mismatch: member_index={member_index} "
+                    f"expected={list(output_names)!r} actual={list(member_specs.keys())!r}"
+                )
+            for output_name in output_names:
+                expected = output_specs[output_name]
+                actual = member_specs[output_name]
+                if tuple(actual["dimensions"]) != tuple(expected["dimensions"]):
+                    raise RuntimeError(
+                        f"ensemble output dimensions differ for {output_name!r}: "
+                        f"member_index={member_index} dimensions={actual['dimensions']!r} "
+                        f"expected={expected['dimensions']!r}"
+                    )
+                if actual["data_type"] != expected["data_type"]:
+                    raise RuntimeError(
+                        f"ensemble output data type differs for {output_name!r}: "
+                        f"member_index={member_index} data_type={actual['data_type']!r} "
+                        f"expected={expected['data_type']!r}"
+                    )
 
         weights = tuple(float(weight) for weight in self.get_member_weights())
         weight_sum = sum(weights)
@@ -533,6 +600,13 @@ class EnsembleModel:
             inputs: dict[str, object] = {}
             logical_names: list[str] = []
             for member_index in range(len(self._members)):
+                member_spec = member_output_specs[member_index][output_name]
+                source_tensor = member_spec.get("tensor")
+                if source_tensor is None:
+                    raise RuntimeError(
+                        f"ensemble member output {output_name!r} did not expose a physical tensor "
+                        "for accumulator pass-through composition"
+                    )
                 input_name = _accumulator_input_name(output_index, member_index)
                 logical_names.append(input_name)
                 layer = thor.layers.NetworkInput(
@@ -541,16 +615,7 @@ class EnsembleModel:
                     dimensions,
                     data_type,
                     dimensions_include_batch=True,
-                    # Do not enable same-placement NetworkInput aliasing here yet.
-                    # CustomLayer stamps expression input tensor addresses at
-                    # accumulator placement time, so forwarding a different
-                    # runtime tensor through NetworkInput leaves CustomLayer
-                    # unable to match the arriving tensor to a connected input
-                    # application.  Keeping the accumulator input materialized
-                    # preserves the accumulator-network runtime while still
-                    # avoiding member NetworkOutput CPU offload and copying only
-                    # the final ensemble result back to CPU.
-                    alias_same_placement_inputs=False,
+                    pass_through_source=source_tensor,
                 )
                 inputs[input_name] = layer.get_feature_output()
 

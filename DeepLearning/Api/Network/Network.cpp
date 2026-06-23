@@ -6,6 +6,7 @@
 #include <set>
 #include <string_view>
 #include "DeepLearning/Api/Layers/Learning/CustomLayer.h"
+#include "DeepLearning/Api/Layers/Loss/MultiInputCustomLoss.h"
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Parameter/ParameterSpecification.h"
@@ -801,33 +802,116 @@ std::vector<std::string> Network::getInferenceNetworkInputNames() {
         }
         names.push_back(input->getName());
     }
-    std::sort(names.begin(), names.end());
-    names.erase(std::unique(names.begin(), names.end()), names.end());
     return names;
 }
 
 std::vector<std::string> Network::getTrainingOnlyNetworkInputNames() {
-    const std::vector<std::string> inferenceNames = getInferenceNetworkInputNames();
-    const std::set<std::string> inferenceNameSet(inferenceNames.begin(), inferenceNames.end());
-
-    // Re-evaluate the full training graph after the inference-pruned query above.
+    // Identify training-only inputs structurally instead of relying on archive-time
+    // inference pruning.  The original in-memory training graph is not
+    // loadedFromArchive, so evaluateGraph(inferenceOnly=true) intentionally leaves
+    // loss roots in place there.  A training-only input is one whose value is used
+    // only by loss/metric label-style inputs, possibly through pure transform layers
+    // such as type conversions or reshapes.
     const StatusCode status = evaluateGraph(/*inferenceOnly=*/false);
     if (status != StatusCode::SUCCESS) {
         throw std::runtime_error("Unable to evaluate training graph while collecting training-only network input names: " +
                                  statusCodeToString(status));
     }
 
+    std::map<Tensor, bool> memo;
+    std::set<Tensor> visiting;
+    std::function<bool(const Tensor&)> tensorFeedsOnlyTrainingLabelConsumers = [&](const Tensor& tensor) -> bool {
+        auto memoIt = memo.find(tensor);
+        if (memoIt != memo.end()) {
+            return memoIt->second;
+        }
+        if (visiting.count(tensor) != 0) {
+            memo[tensor] = false;
+            return false;
+        }
+        visiting.insert(tensor);
+
+        auto loadingIt = apiTensorToApiLoadingLayers.find(tensor);
+        if (loadingIt == apiTensorToApiLoadingLayers.end() || loadingIt->second.empty()) {
+            visiting.erase(tensor);
+            memo[tensor] = false;
+            return false;
+        }
+
+        bool result = true;
+        for (const std::shared_ptr<Layer>& loader : loadingIt->second) {
+            if (std::dynamic_pointer_cast<NetworkOutput>(loader) != nullptr) {
+                result = false;
+                break;
+            }
+
+            std::shared_ptr<MultiInputCustomLoss> multiInputCustomLoss = std::dynamic_pointer_cast<MultiInputCustomLoss>(loader);
+            if (multiInputCustomLoss != nullptr) {
+                bool isAuxiliaryLossInput = false;
+                for (const MultiInputCustomLoss::InputSpec& inputSpec : multiInputCustomLoss->getInputs()) {
+                    if (inputSpec.tensor == tensor) {
+                        isAuxiliaryLossInput = !inputSpec.isDifferentiable();
+                        break;
+                    }
+                }
+                if (!isAuxiliaryLossInput) {
+                    result = false;
+                    break;
+                }
+                continue;
+            }
+
+            std::shared_ptr<Loss> loss = std::dynamic_pointer_cast<Loss>(loader);
+            if (loss != nullptr) {
+                const int connectionType = loss->getConnectionType(tensor);
+                if (connectionType != static_cast<int>(ThorImplementation::Loss::ConnectionType::LABELS)) {
+                    result = false;
+                    break;
+                }
+                continue;
+            }
+
+            std::shared_ptr<Metric> metric = std::dynamic_pointer_cast<Metric>(loader);
+            if (metric != nullptr) {
+                const int connectionType = metric->getConnectionType(tensor);
+                if (connectionType != static_cast<int>(ThorImplementation::Metric::ConnectionType::LABELS)) {
+                    result = false;
+                    break;
+                }
+                continue;
+            }
+
+            auto outputsIt = apiLayerToApiOutputTensors.find(loader);
+            if (outputsIt == apiLayerToApiOutputTensors.end() || outputsIt->second.empty()) {
+                result = false;
+                break;
+            }
+            for (const Tensor& outputTensor : outputsIt->second) {
+                if (!tensorFeedsOnlyTrainingLabelConsumers(outputTensor)) {
+                    result = false;
+                    break;
+                }
+            }
+            if (!result) {
+                break;
+            }
+        }
+
+        visiting.erase(tensor);
+        memo[tensor] = result;
+        return result;
+    };
+
     std::vector<std::string> names;
     const uint32_t numLayers = getNumLayers();
     names.reserve(numLayers);
     for (uint32_t i = 0; i < numLayers; ++i) {
         std::shared_ptr<NetworkInput> input = std::dynamic_pointer_cast<NetworkInput>(getLayer(i));
-        if (input == nullptr) {
+        if (input == nullptr || !input->getFeatureOutput().has_value()) {
             continue;
         }
-        const std::string name = input->getName();
-        if (inferenceNameSet.count(name) == 0) {
-            names.push_back(name);
+        if (tensorFeedsOnlyTrainingLabelConsumers(input->getFeatureOutput().value())) {
+            names.push_back(input->getName());
         }
     }
     std::sort(names.begin(), names.end());
@@ -858,16 +942,20 @@ std::map<std::string, std::vector<std::string>> Network::getLossLabelNetworkInpu
 
             auto driverIt = apiTensorToApiDrivingLayer.find(current);
             if (driverIt == apiTensorToApiDrivingLayer.end() || driverIt->second == nullptr) {
+                visiting.erase(current);
                 return std::nullopt;
             }
             std::shared_ptr<Layer> driver = driverIt->second;
             std::shared_ptr<NetworkInput> input = std::dynamic_pointer_cast<NetworkInput>(driver);
             if (input != nullptr) {
-                return input->getName();
+                std::string name = input->getName();
+                visiting.erase(current);
+                return name;
             }
 
             auto inputsIt = apiLayerToApiInputTensors.find(driver);
             if (inputsIt == apiLayerToApiInputTensors.end() || inputsIt->second.empty()) {
+                visiting.erase(current);
                 return std::nullopt;
             }
             std::optional<std::string> found;
@@ -877,10 +965,12 @@ std::map<std::string, std::vector<std::string>> Network::getLossLabelNetworkInpu
                     continue;
                 }
                 if (found.has_value() && found.value() != candidate.value()) {
+                    visiting.erase(current);
                     return std::nullopt;
                 }
                 found = candidate;
             }
+            visiting.erase(current);
             return found;
         };
         return visit(tensor);
@@ -903,6 +993,61 @@ std::map<std::string, std::vector<std::string>> Network::getLossLabelNetworkInpu
         outputNamesByTensor[outputTensor.value()].push_back(output->getName());
     }
 
+    auto addUniqueName = [](std::vector<std::string>& names, const std::string& name) {
+        if (std::find(names.begin(), names.end(), name) == names.end()) {
+            names.push_back(name);
+        }
+    };
+
+    auto predictionOutputNamesForTensor = [&](const Tensor& tensor) -> std::vector<std::string> {
+        // A public prediction output may be the exact loss prediction tensor, or it may be
+        // upstream of a support layer inserted by the loss.  Dense CategoricalCrossEntropy
+        // is the important case: users commonly expose logits as NetworkOutput("scores"),
+        // while the loss consumes Softmax(logits).  Resolve that structurally by walking
+        // backwards from the loss prediction tensor until the nearest NetworkOutput input
+        // tensor(s) are found.  Stop at the first public output on each path so auxiliary
+        // upstream/debug outputs are not incorrectly treated as the selected prediction.
+        std::vector<std::string> names;
+        std::set<Tensor> visiting;
+        std::function<void(const Tensor&)> visit = [&](const Tensor& current) {
+            if (visiting.count(current) != 0) {
+                return;
+            }
+            visiting.insert(current);
+
+            auto outputIt = outputNamesByTensor.find(current);
+            if (outputIt != outputNamesByTensor.end()) {
+                for (const std::string& outputName : outputIt->second) {
+                    addUniqueName(names, outputName);
+                }
+                visiting.erase(current);
+                return;
+            }
+
+            auto driverIt = apiTensorToApiDrivingLayer.find(current);
+            if (driverIt == apiTensorToApiDrivingLayer.end() || driverIt->second == nullptr) {
+                visiting.erase(current);
+                return;
+            }
+            std::shared_ptr<Layer> driver = driverIt->second;
+            if (std::dynamic_pointer_cast<NetworkInput>(driver) != nullptr || std::dynamic_pointer_cast<Loss>(driver) != nullptr ||
+                std::dynamic_pointer_cast<Metric>(driver) != nullptr) {
+                visiting.erase(current);
+                return;
+            }
+
+            auto inputsIt = apiLayerToApiInputTensors.find(driver);
+            if (inputsIt != apiLayerToApiInputTensors.end()) {
+                for (const Tensor& upstream : inputsIt->second) {
+                    visit(upstream);
+                }
+            }
+            visiting.erase(current);
+        };
+        visit(tensor);
+        return names;
+    };
+
     std::map<std::string, std::vector<std::string>> labelsByOutputName;
     for (uint32_t i = 0; i < numLayers; ++i) {
         std::shared_ptr<Loss> loss = std::dynamic_pointer_cast<Loss>(getLayer(i));
@@ -921,19 +1066,16 @@ std::map<std::string, std::vector<std::string>> Network::getLossLabelNetworkInpu
             continue;
         }
 
-        auto outputIt = outputNamesByTensor.find(predictions);
-        if (outputIt == outputNamesByTensor.end()) {
+        const std::vector<std::string> predictionOutputNames = predictionOutputNamesForTensor(predictions);
+        if (predictionOutputNames.empty()) {
             continue;
         }
         std::optional<std::string> labelInputName = sourceNetworkInputName(labels);
         if (!labelInputName.has_value() || trainingOnlyNameSet.count(labelInputName.value()) == 0) {
             continue;
         }
-        for (const std::string& outputName : outputIt->second) {
-            std::vector<std::string>& names = labelsByOutputName[outputName];
-            if (std::find(names.begin(), names.end(), labelInputName.value()) == names.end()) {
-                names.push_back(labelInputName.value());
-            }
+        for (const std::string& outputName : predictionOutputNames) {
+            addUniqueName(labelsByOutputName[outputName], labelInputName.value());
         }
     }
 

@@ -81,6 +81,83 @@ def _regression_one_batch_loader(*, dtype=np.float32):
     )
 
 
+def _categorical_arrays(*, dtype=np.float32):
+    x = np.array(
+        [
+            [2.0, -1.0],
+            [-1.0, 2.0],
+            [3.0, 1.0],
+            [1.0, 3.0],
+        ],
+        dtype=np.float32,
+    )
+    y = np.array(
+        [
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    return np.ascontiguousarray(x, dtype=dtype), np.ascontiguousarray(y, dtype=dtype)
+
+
+def _categorical_one_batch_loader(*, dtype=np.float32):
+    x, y = _categorical_arrays(dtype=dtype)
+    loader_cls = thor.training.NumpyFloat16BatchLoader if dtype == np.float16 else thor.training.NumpyFloat32BatchLoader
+    return loader_cls(
+        x,
+        y,
+        x,
+        y,
+        batch_size=4,
+        example_input_name="examples",
+        label_input_name="class_targets",
+        dataset_name="training_runs_categorical_one_batch",
+    )
+
+
+def _categorical_mixed_accuracy_arrays(*, dtype=np.float32):
+    x, _ = _categorical_arrays(dtype=np.float32)
+    y = np.array(
+        [
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [0.0, 1.0],
+            [0.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    return np.ascontiguousarray(x, dtype=dtype), np.ascontiguousarray(y, dtype=dtype)
+
+
+def _categorical_mixed_accuracy_one_batch_loader(*, dtype=np.float32):
+    x, y = _categorical_mixed_accuracy_arrays(dtype=dtype)
+    loader_cls = thor.training.NumpyFloat16BatchLoader if dtype == np.float16 else thor.training.NumpyFloat32BatchLoader
+    return loader_cls(
+        x,
+        y,
+        x,
+        y,
+        batch_size=4,
+        example_input_name="examples",
+        label_input_name="class_targets",
+        dataset_name="training_runs_categorical_mixed_accuracy_one_batch",
+    )
+
+
+def _softmax_cross_entropy_and_accuracy(scores: np.ndarray, labels: np.ndarray) -> tuple[float, float]:
+    scores = np.asarray(scores, dtype=np.float64)
+    labels = np.asarray(labels, dtype=np.float64)
+    shifted = scores - np.max(scores, axis=-1, keepdims=True)
+    probabilities = np.exp(shifted)
+    probabilities /= np.sum(probabilities, axis=-1, keepdims=True)
+    losses = -np.sum(labels * np.log(np.maximum(probabilities, 1.0e-12)), axis=-1)
+    accuracy = np.mean(np.argmax(scores, axis=-1) == np.argmax(labels, axis=-1))
+    return float(np.mean(losses)), float(accuracy)
+
+
 def _build_tiny_regressor(name: str):
     network = thor.Network(name)
     examples = thor.layers.NetworkInput(network, "examples", [2], thor.DataType.fp32)
@@ -104,6 +181,50 @@ def _build_tiny_regressor(name: str):
     thor.layers.NetworkOutput(network, "loss", loss.get_loss(), thor.DataType.fp32)
     thor.layers.NetworkOutput(network, "prediction", predictions.get_feature_output(), thor.DataType.fp32)
     return network
+
+
+def _build_tiny_classifier(name: str):
+    network = thor.Network(name)
+    examples = thor.layers.NetworkInput(network, "examples", [2], thor.DataType.fp32)
+    labels = thor.layers.NetworkInput(network, "class_targets", [2], thor.DataType.fp32)
+
+    scores = thor.layers.FullyConnected(
+        network,
+        examples.get_feature_output(),
+        2,
+        True,
+        activation=None,
+        weights_initializer=thor.initializers.UniformRandom(0.0, 0.0),
+        biases_initializer=thor.initializers.UniformRandom(0.0, 0.0),
+    )
+    loss = thor.losses.CategoricalCrossEntropy(
+        network,
+        scores.get_feature_output(),
+        labels.get_feature_output(),
+        thor.DataType.fp32,
+    )
+    thor.layers.NetworkOutput(network, "loss", loss.get_loss(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "scores", scores.get_feature_output(), thor.DataType.fp32)
+    return network
+
+
+def _make_tiny_categorical_trainer(
+    name: str,
+    *,
+    save_model_dir=None,
+    save_model_overwrite=False,
+):
+    return thor.training.Trainer(
+        _build_tiny_classifier(name),
+        _categorical_one_batch_loader(),
+        optimizer=thor.optimizers.Sgd(initial_learning_rate=0.01, momentum=0.0),
+        stats_interval_s=0.0,
+        max_in_flight_batches=2,
+        scalar_tensors_to_report=["loss"],
+        stats_color="never",
+        save_model_dir=save_model_dir,
+        save_model_overwrite=save_model_overwrite,
+    )
 
 
 def _build_signature_only_network(name: str, *, input_dtype=thor.DataType.fp32, output_dtype=thor.DataType.fp32):
@@ -1136,6 +1257,7 @@ def test_training_runs_fits_two_tiny_trainers_on_one_gpu_and_prefixes_stats(capf
     assert (ensemble_artifact_dir / loaded_ensemble.members[0].path / "training_selection_metadata.json").exists()
     assert (ensemble_artifact_dir / loaded_ensemble.members[1].path / "training_selection_metadata.json").exists()
     manifest = json.loads((ensemble_artifact_dir / "ensemble_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["version"] == 1
     assert manifest["ensemble_group"] == "tiny_ensemble"
     assert manifest["execution"] == "parallel_single_gpu"
     assert manifest["members"][0]["selection"]["status"] == "completed"
@@ -1174,6 +1296,73 @@ def test_training_runs_fits_two_tiny_trainers_on_one_gpu_and_prefixes_stats(capf
     assert "final_validate_loss=" not in plain_text
     assert "phase=unknown" not in plain_text
     assert "INFO trainer:" not in plain_text
+
+
+@pytest.mark.cuda
+@pytest.mark.training_integration
+@pytest.mark.skipif(
+    not RUN_TRAINING_INTEGRATION,
+    reason=integration_skip_reason(
+        "THOR_RUN_TRAINING_INTEGRATION",
+        description="opt-in TrainingRuns CUDA integration tests",
+    ),
+)
+def test_training_runs_categorical_report_matches_loaded_ensemble_predictions(capfd, tmp_path):
+    runs = thor.training.TrainingRuns(
+        [
+            (
+                "fold_0",
+                _make_tiny_categorical_trainer(
+                    "training_runs_categorical_fold_0",
+                    save_model_dir=tmp_path / "categorical_fold_0_model",
+                    save_model_overwrite=True,
+                ),
+                "tiny_categorical_ensemble",
+                1.0,
+            ),
+            (
+                "fold_1",
+                _make_tiny_categorical_trainer(
+                    "training_runs_categorical_fold_1",
+                    save_model_dir=tmp_path / "categorical_fold_1_model",
+                    save_model_overwrite=True,
+                ),
+                "tiny_categorical_ensemble",
+                2.0,
+            ),
+        ],
+    )
+
+    results, _ = _fit_runs_and_capture_text(
+        runs,
+        capfd,
+        epochs=1,
+        test_loader=_categorical_mixed_accuracy_one_batch_loader(),
+    )
+
+    assert results.all_completed()
+    ensemble = results.ensemble("tiny_categorical_ensemble")
+    assert ensemble.ensemble_test_loss is not None
+    assert ensemble.ensemble_test_accuracy is not None
+
+    ensemble_artifact_dir = tmp_path / "tiny_categorical_ensemble_artifact"
+    results.save_ensemble("tiny_categorical_ensemble", ensemble_artifact_dir)
+    loaded_ensemble = thor.EnsembleModel.load(ensemble_artifact_dir)
+    assert loaded_ensemble.get_aggregation() == "weighted_mean"
+    assert loaded_ensemble.get_member_weights() == (1.0, 2.0)
+    assert loaded_ensemble.get_input_names() == ("examples",)
+    assert loaded_ensemble.get_output_names() == ("scores",)
+
+    test_examples, test_labels = _categorical_mixed_accuracy_arrays(dtype=np.float32)
+    loaded_outputs = loaded_ensemble.infer({"examples": _cpu_tensor(test_examples, thor.DataType.fp32)})
+    assert set(loaded_outputs) == {"scores"}
+    loaded_scores = np.array(loaded_outputs["scores"].numpy(), copy=True)
+    expected_loss, expected_accuracy = _softmax_cross_entropy_and_accuracy(loaded_scores, test_labels)
+    assert expected_accuracy == pytest.approx(0.75, abs=0.0)
+    assert 0.0 < expected_accuracy < 1.0
+
+    assert ensemble.ensemble_test_loss == pytest.approx(expected_loss, rel=1e-5, abs=1e-6)
+    assert ensemble.ensemble_test_accuracy == pytest.approx(expected_accuracy, rel=1e-5, abs=1e-6)
 
 
 @pytest.mark.cuda

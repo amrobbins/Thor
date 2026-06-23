@@ -18,7 +18,6 @@
 #include "DeepLearning/Implementation/Tensor/TensorPlacement.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "Utilities/Common/Stream.h"
-#include "Utilities/TensorOperations/Ensemble/EnsembleWeightedMean.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -41,27 +40,27 @@ std::vector<std::string> sortedOutputNames(const std::map<std::string, PhysicalT
 void validateOutputNames(const std::vector<std::map<std::string, PhysicalTensor>>& memberOutputs,
                          const std::vector<std::string>& outputNames) {
     if (memberOutputs.empty()) {
-        throw std::runtime_error("ensemble GPU aggregation requires at least one member output map");
+        throw std::runtime_error("ensemble accumulator runtime requires at least one member output map");
     }
     if (outputNames.empty()) {
-        throw std::runtime_error("ensemble GPU aggregation requires at least one output name");
+        throw std::runtime_error("ensemble accumulator runtime requires at least one output name");
     }
 
     const std::vector<std::string> firstNames = sortedOutputNames(memberOutputs.front());
     for (const std::string& outputName : outputNames) {
         if (memberOutputs.front().count(outputName) == 0) {
-            throw std::runtime_error("ensemble GPU aggregation output name '" + outputName + "' was not produced by the first member");
+            throw std::runtime_error("ensemble accumulator runtime output name '" + outputName + "' was not produced by the first member");
         }
     }
 
     for (size_t memberIndex = 1; memberIndex < memberOutputs.size(); ++memberIndex) {
         const std::vector<std::string> names = sortedOutputNames(memberOutputs[memberIndex]);
         if (names != firstNames) {
-            throw std::runtime_error("ensemble GPU aggregation requires all members to produce the same output names");
+            throw std::runtime_error("ensemble accumulator runtime requires all members to produce the same output names");
         }
         for (const std::string& outputName : outputNames) {
             if (memberOutputs[memberIndex].count(outputName) == 0) {
-                throw std::runtime_error("ensemble GPU aggregation output name '" + outputName + "' was not produced by all members");
+                throw std::runtime_error("ensemble accumulator runtime output name '" + outputName + "' was not produced by all members");
             }
         }
     }
@@ -117,6 +116,7 @@ nb::dict memberOutputSpecs(const std::shared_ptr<Thor::PlacedNetwork>& placedMem
         spec["dimensions"] = nb::cast(tensor.value().getDescriptor().getDimensions());
         spec["data_type"] = nb::cast(tensor.value().getDescriptor().getDataType());
         spec["device"] = tensor.value().getPlacement().getDeviceNum();
+        spec["tensor"] = nb::cast(tensor.value());
         result[nb::str(outputName.c_str())] = std::move(spec);
     }
     return result;
@@ -182,137 +182,6 @@ std::map<std::string, PhysicalTensor> debugStageEnsembleInputsOnce(
         stagingStream.synchronize();
     }
     return staged.tensors;
-}
-
-std::map<std::string, PhysicalTensor> submitMembersAndAggregateGpuToCpu(
-    std::vector<std::shared_ptr<Thor::PlacedNetwork>> placedMembers,
-    const std::map<std::string, PhysicalTensor>& batchInputs,
-    const std::vector<double>& weights,
-    std::vector<std::string> outputNames,
-    int32_t device) {
-    if (device < 0) {
-        throw nb::value_error("device must be >= 0");
-    }
-    if (placedMembers.empty()) {
-        throw nb::value_error("placed_members must not be empty");
-    }
-    if (weights.size() != placedMembers.size()) {
-        throw nb::value_error("weights must contain one value per placed member");
-    }
-    if (batchInputs.empty()) {
-        throw nb::value_error("batch_inputs must not be empty");
-    }
-    for (const auto& placedMember : placedMembers) {
-        if (placedMember == nullptr) {
-            throw nb::value_error("placed_members must not contain null entries");
-        }
-    }
-    for (double weight : weights) {
-        if (!std::isfinite(weight) || weight <= 0.0) {
-            throw nb::value_error("weights must be finite and positive");
-        }
-    }
-
-    std::vector<std::map<std::string, PhysicalTensor>> memberOutputs(placedMembers.size());
-    std::vector<std::map<std::string, Event>> memberOutputReadyEvents(placedMembers.size());
-    std::vector<Event> memberProcessingFinishedEvents;
-    memberProcessingFinishedEvents.reserve(placedMembers.size());
-
-    StagedEnsembleInputs stagedInputs;
-    {
-        nb::gil_scoped_release release;
-        Stream inputStagingStream(device, Stream::Priority::REGULAR);
-        stagedInputs = stageInputsOnceForEnsemble(placedMembers.front(), batchInputs, device, inputStagingStream);
-        TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, device);
-        for (size_t memberIndex = 1; memberIndex < placedMembers.size(); ++memberIndex) {
-            ThorImplementation::StampedNetwork& stampedNetwork = placedMembers[memberIndex]->getStampedNetwork(0);
-            for (const auto& [inputName, stagedTensor] : stagedInputs.tensors) {
-                auto inputLayer = stampedNetwork.getNamedInput(inputName);
-                if (inputLayer == nullptr) {
-                    throw std::runtime_error("ensemble input '" + inputName + "' is not present in all member networks");
-                }
-                std::optional<PhysicalTensor> expectedInput = inputLayer->getFeatureOutput();
-                if (!expectedInput.has_value() || expectedInput.value().getDescriptor() != stagedTensor.getDescriptor() ||
-                    expectedInput.value().getPlacement() != gpuPlacement) {
-                    throw std::runtime_error("ensemble input '" + inputName + "' descriptors or placements differ across members");
-                }
-            }
-        }
-
-        for (size_t memberIndex = 0; memberIndex < placedMembers.size(); ++memberIndex) {
-            // Stage each named user input once onto the ensemble GPU, then pass the
-            // same staged tensor to every resident member.  Member NetworkInput
-            // streams wait on the staged-input ready events, so this preserves
-            // stream ordering without repeating H2D copies for each fold.
-            std::map<std::string, PhysicalTensor> memberInputs(stagedInputs.tensors.begin(), stagedInputs.tensors.end());
-            Event done = placedMembers[memberIndex]->submitBatch(
-                /*stampIndex=*/0,
-                std::move(memberInputs),
-                stagedInputs.readyEvents,
-                memberOutputs[memberIndex],
-                memberOutputReadyEvents[memberIndex],
-                /*isInferenceOnly=*/true,
-                /*reusableProcessingFinishedEvent=*/nullptr,
-                /*waitForOutputsOnProcessingStream=*/false);
-            memberProcessingFinishedEvents.push_back(done);
-        }
-    }
-
-    if (outputNames.empty()) {
-        outputNames = sortedOutputNames(memberOutputs.front());
-    }
-    validateOutputNames(memberOutputs, outputNames);
-
-    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, device);
-    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
-    Stream aggregationStream(device, Stream::Priority::REGULAR);
-    std::map<std::string, PhysicalTensor> aggregatedOutputs;
-
-    {
-        nb::gil_scoped_release release;
-        for (const std::string& outputName : outputNames) {
-            const PhysicalTensor& first = memberOutputs.front().at(outputName);
-            if (first.getPlacement().getMemDevice() != TensorPlacement::MemDevices::GPU) {
-                throw std::runtime_error("ensemble member output '" + outputName + "' is not GPU-resident; "
-                                         "place ensemble members with network_outputs_on_gpu=True");
-            }
-            if (first.getPlacement().getDeviceNum() != device) {
-                throw std::runtime_error("ensemble member output '" + outputName + "' is on a different GPU than the aggregation device");
-            }
-
-            const TensorDescriptor descriptor = first.getDescriptor();
-            std::vector<PhysicalTensor> sources;
-            sources.reserve(memberOutputs.size());
-            for (size_t memberIndex = 0; memberIndex < memberOutputs.size(); ++memberIndex) {
-                const auto readyIt = memberOutputReadyEvents[memberIndex].find(outputName);
-                if (readyIt == memberOutputReadyEvents[memberIndex].end()) {
-                    throw std::runtime_error("ensemble member output '" + outputName + "' did not produce a ready event");
-                }
-                aggregationStream.waitEvent(readyIt->second);
-
-                const PhysicalTensor& tensor = memberOutputs[memberIndex].at(outputName);
-                if (tensor.getDescriptor() != descriptor) {
-                    throw std::runtime_error("ensemble member output '" + outputName + "' descriptors do not match");
-                }
-                if (tensor.getPlacement().getMemDevice() != TensorPlacement::MemDevices::GPU) {
-                    throw std::runtime_error("ensemble member output '" + outputName + "' is not GPU-resident");
-                }
-                if (tensor.getPlacement().getDeviceNum() != device) {
-                    throw std::runtime_error("ensemble member output '" + outputName + "' is on a different GPU than the aggregation device");
-                }
-                sources.push_back(tensor);
-            }
-
-            PhysicalTensor aggregatedGpu(gpuPlacement, descriptor);
-            ThorImplementation::Ensemble::launchWeightedMean(aggregatedGpu, sources, weights, aggregationStream);
-            PhysicalTensor aggregatedCpu(cpuPlacement, descriptor);
-            aggregatedCpu.copyFromAsync(aggregatedGpu, aggregationStream);
-            aggregatedOutputs.emplace(outputName, aggregatedCpu);
-        }
-        aggregationStream.synchronize();
-    }
-
-    return aggregatedOutputs;
 }
 
 
@@ -409,6 +278,10 @@ std::map<std::string, PhysicalTensor> submitMembersThenAccumulatorNetwork(
                 throw std::runtime_error("ensemble member output '" + outputName + "' did not produce a ready event");
             }
             const std::string inputName = accumulatorInputName(outputIndex, memberIndex);
+            // Accumulator NetworkInputs are placement-time pass-throughs over these
+            // member output tensors.  Passing the same tensors here is not a
+            // materialization path; it lets submitBatch validate identity and wait
+            // on each member-output ready event before running the accumulator.
             accumulatorInputs.emplace(inputName, tensor);
             accumulatorInputReadyEvents.emplace(inputName, readyIt->second);
         }
@@ -437,89 +310,6 @@ std::map<std::string, PhysicalTensor> submitMembersThenAccumulatorNetwork(
 }  // namespace
 
 void bind_ensemble_runtime(nb::module_& thor) {
-    thor.def(
-        "_aggregate_ensemble_outputs_gpu_to_cpu",
-        [](std::vector<std::map<std::string, PhysicalTensor>> memberOutputs,
-           std::vector<double> weights,
-           std::vector<std::string> outputNames,
-           int32_t device) {
-            if (device < 0) {
-                throw nb::value_error("device must be >= 0");
-            }
-            if (memberOutputs.empty()) {
-                throw nb::value_error("member_outputs must not be empty");
-            }
-            if (weights.size() != memberOutputs.size()) {
-                throw nb::value_error("weights must contain one value per member output map");
-            }
-            if (outputNames.empty()) {
-                outputNames = sortedOutputNames(memberOutputs.front());
-            }
-            validateOutputNames(memberOutputs, outputNames);
-
-            for (double weight : weights) {
-                if (!std::isfinite(weight) || weight <= 0.0) {
-                    throw nb::value_error("weights must be finite and positive");
-                }
-            }
-
-            TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, device);
-            TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
-            Stream aggregationStream(device, Stream::Priority::REGULAR);
-            std::map<std::string, PhysicalTensor> aggregatedOutputs;
-
-            {
-                nb::gil_scoped_release release;
-                for (const std::string& outputName : outputNames) {
-                    const PhysicalTensor& first = memberOutputs.front().at(outputName);
-                    if (first.getPlacement().getMemDevice() != TensorPlacement::MemDevices::GPU) {
-                        throw std::runtime_error("ensemble member output '" + outputName + "' is not GPU-resident; "
-                                                 "place ensemble members with network_outputs_on_gpu=True");
-                    }
-                    if (first.getPlacement().getDeviceNum() != device) {
-                        throw std::runtime_error("ensemble member output '" + outputName + "' is on a different GPU than the aggregation device");
-                    }
-
-                    const TensorDescriptor descriptor = first.getDescriptor();
-                    std::vector<PhysicalTensor> sources;
-                    sources.reserve(memberOutputs.size());
-                    for (size_t memberIndex = 0; memberIndex < memberOutputs.size(); ++memberIndex) {
-                        const PhysicalTensor& tensor = memberOutputs[memberIndex].at(outputName);
-                        if (tensor.getDescriptor() != descriptor) {
-                            throw std::runtime_error("ensemble member output '" + outputName + "' descriptors do not match");
-                        }
-                        if (tensor.getPlacement().getMemDevice() != TensorPlacement::MemDevices::GPU) {
-                            throw std::runtime_error("ensemble member output '" + outputName + "' is not GPU-resident");
-                        }
-                        if (tensor.getPlacement().getDeviceNum() != device) {
-                            throw std::runtime_error("ensemble member output '" + outputName + "' is on a different GPU than the aggregation device");
-                        }
-                        sources.push_back(tensor);
-                    }
-
-                    PhysicalTensor aggregatedGpu(gpuPlacement, descriptor);
-                    ThorImplementation::Ensemble::launchWeightedMean(aggregatedGpu, sources, weights, aggregationStream);
-                    PhysicalTensor aggregatedCpu(cpuPlacement, descriptor);
-                    aggregatedCpu.copyFromAsync(aggregatedGpu, aggregationStream);
-                    aggregatedOutputs.emplace(outputName, aggregatedCpu);
-                }
-                aggregationStream.synchronize();
-            }
-            return aggregatedOutputs;
-        },
-        "member_outputs"_a,
-        "weights"_a,
-        "output_names"_a = std::vector<std::string>{},
-        "device"_a = 0,
-        R"nbdoc(
-Aggregate GPU-resident ensemble member outputs with a weighted mean on GPU, then
-materialize exactly the aggregated outputs as CPU PhysicalTensors.
-
-This is an internal bridge for thor.EnsembleModel. Member networks should be
-placed with network_outputs_on_gpu=True so same-device NetworkOutput tensors alias
-their producer tensors and remain on GPU until this aggregation finishes.
-)nbdoc");
-
     thor.def(
         "_stage_ensemble_inputs_once_for_debug",
         [](std::shared_ptr<Thor::PlacedNetwork> referenceMember,
@@ -566,31 +356,9 @@ member networks.
         "device"_a = 0,
         R"nbdoc(
 Submit all resident ensemble member networks, feed their GPU-resident named
-outputs into a placed accumulator network using same-device NetworkInput aliasing,
-and return the accumulator NetworkOutput tensors.
+outputs into a placed accumulator network whose NetworkInputs were stamped as
+placement-time pass-throughs over those output tensors, and return the
+accumulator NetworkOutput tensors.
 )nbdoc");
 
-    thor.def(
-        "_infer_ensemble_members_and_aggregate_gpu_to_cpu",
-        [](std::vector<std::shared_ptr<Thor::PlacedNetwork>> placedMembers,
-           std::map<std::string, PhysicalTensor> batchInputs,
-           std::vector<double> weights,
-           std::vector<std::string> outputNames,
-           int32_t device) {
-            return submitMembersAndAggregateGpuToCpu(std::move(placedMembers), batchInputs, weights, std::move(outputNames), device);
-        },
-        "placed_members"_a,
-        "batch_inputs"_a,
-        "weights"_a,
-        "output_names"_a = std::vector<std::string>{},
-        "device"_a = 0,
-        R"nbdoc(
-Submit all resident ensemble member networks from native code, aggregate their
-GPU-resident outputs with a weighted mean on GPU, then materialize only the
-combined outputs as CPU PhysicalTensors.
-
-This removes Python ThreadPoolExecutor orchestration from thor.EnsembleModel.
-Member networks still run on their own Thor/CUDA streams; the aggregation stream
-waits on each member NetworkOutput ready event before launching aggregation.
-)nbdoc");
 }

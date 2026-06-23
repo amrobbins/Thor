@@ -37,6 +37,8 @@ namespace Thor {
 
 namespace {
 
+constexpr int ENSEMBLE_MANIFEST_FIRST_ARTIFACT_VERSION = 1;
+constexpr int ENSEMBLE_MANIFEST_CURRENT_ARTIFACT_VERSION = ENSEMBLE_MANIFEST_FIRST_ARTIFACT_VERSION;
 
 std::string normalizedOutputPathForCollisionCheck(const std::string& path) {
     std::filesystem::path outputPath(path);
@@ -88,9 +90,6 @@ std::vector<TrainingRunInputSignature> collectNetworkInputSignature(const std::s
         signature.push_back(std::move(item));
     }
 
-    std::sort(signature.begin(), signature.end(), [](const TrainingRunInputSignature& lhs, const TrainingRunInputSignature& rhs) {
-        return lhs.inputName < rhs.inputName;
-    });
     return signature;
 }
 
@@ -123,9 +122,6 @@ std::vector<TrainingRunOutputSignature> collectNetworkOutputSignature(const std:
         signature.push_back(std::move(item));
     }
 
-    std::sort(signature.begin(), signature.end(), [](const TrainingRunOutputSignature& lhs, const TrainingRunOutputSignature& rhs) {
-        return lhs.outputName < rhs.outputName;
-    });
     return signature;
 }
 
@@ -174,8 +170,21 @@ bool inputSignaturesCompatible(const std::vector<TrainingRunInputSignature>& lhs
     if (lhs.size() != rhs.size()) {
         return false;
     }
-    for (size_t i = 0; i < lhs.size(); ++i) {
-        if (!lhs[i].compatibleWith(rhs[i])) {
+
+    std::map<std::string, const TrainingRunInputSignature*> lhsByName;
+    for (const TrainingRunInputSignature& item : lhs) {
+        if (!lhsByName.emplace(item.inputName, &item).second) {
+            return false;
+        }
+    }
+
+    std::set<std::string> seenRhsNames;
+    for (const TrainingRunInputSignature& rhsItem : rhs) {
+        if (!seenRhsNames.insert(rhsItem.inputName).second) {
+            return false;
+        }
+        auto lhsIt = lhsByName.find(rhsItem.inputName);
+        if (lhsIt == lhsByName.end() || !lhsIt->second->compatibleWith(rhsItem)) {
             return false;
         }
     }
@@ -187,8 +196,21 @@ bool outputSignaturesCompatible(const std::vector<TrainingRunOutputSignature>& l
     if (lhs.size() != rhs.size()) {
         return false;
     }
-    for (size_t i = 0; i < lhs.size(); ++i) {
-        if (!lhs[i].compatibleWith(rhs[i])) {
+
+    std::map<std::string, const TrainingRunOutputSignature*> lhsByName;
+    for (const TrainingRunOutputSignature& item : lhs) {
+        if (!lhsByName.emplace(item.outputName, &item).second) {
+            return false;
+        }
+    }
+
+    std::set<std::string> seenRhsNames;
+    for (const TrainingRunOutputSignature& rhsItem : rhs) {
+        if (!seenRhsNames.insert(rhsItem.outputName).second) {
+            return false;
+        }
+        auto lhsIt = lhsByName.find(rhsItem.outputName);
+        if (lhsIt == lhsByName.end() || !lhsIt->second->compatibleWith(rhsItem)) {
             return false;
         }
     }
@@ -641,7 +663,7 @@ std::string TrainingRunsResult::saveEnsemble(std::string_view ensembleGroup,
         out << "  \"output_names\": ";
         writeJsonStringArray(out, predictionOutputNamesFromSignature(ensembleResult.outputSignature), "    ");
         out << ",\n";
-        out << "  \"version\": 1\n";
+        out << "  \"version\": " << ENSEMBLE_MANIFEST_CURRENT_ARTIFACT_VERSION << "\n";
         out << "}\n";
         if (!out) {
             throw std::runtime_error("Failed while writing ensemble manifest: " + tmpManifestPath.string());
@@ -1462,13 +1484,17 @@ std::shared_ptr<Network> buildTrainingRunsAccumulatorNetwork(const std::vector<s
 
             const std::string inputName = trainingRunsAccumulatorInputName(outputIndex, memberIndex);
             inputNames.push_back(inputName);
+            // Compose the accumulator over the member output tensor itself.  The
+            // NetworkInput is still named so submitBatch can attach the member
+            // output ready event, but no accumulator-side staging/copy tensor is
+            // allocated and the CustomLayer binds to the producer tensor identity.
             NetworkInput input = NetworkInput::Builder()
                                      .network(*accumulator)
                                      .name(inputName)
                                      .dimensions(dimensions)
                                      .dataType(dataType)
                                      .dimensionsIncludeBatch(true)
-                                     .aliasSamePlacementInputs(false)
+                                     .passThroughPhysicalSource(memberTensor.value())
                                      .build();
             inputInterface.emplace(inputName, input.getFeatureOutput().value());
         }
@@ -1556,77 +1582,6 @@ void validateEnsembleEvaluationBatchSize(const PlacedEnsembleArtifacts& artifact
                                  "to use the same batch_size as the placed artifacts. Expected " +
                                  std::to_string(artifacts.batchSize) + ", got " + std::to_string(loader.getBatchSize()) + ".");
     }
-}
-
-std::optional<double> categoricalCrossEntropyFromWeightedMemberLogits(
-    const std::vector<std::vector<double>>& memberLogits,
-    const std::vector<double>& labels,
-    const std::vector<double>& weights,
-    uint64_t rows,
-    uint64_t classes) {
-    if (memberLogits.empty() || memberLogits.size() != weights.size()) {
-        return std::nullopt;
-    }
-    const double weightSum = std::accumulate(weights.begin(), weights.end(), 0.0);
-    if (weightSum <= 0.0) {
-        return std::nullopt;
-    }
-
-    double lossSum = 0.0;
-    for (uint64_t row = 0; row < rows; ++row) {
-        std::vector<double> probabilities(classes, 0.0);
-        for (size_t memberIndex = 0; memberIndex < memberLogits.size(); ++memberIndex) {
-            const std::vector<double>& logits = memberLogits[memberIndex];
-            const uint64_t offset = row * classes;
-            double maxLogit = logits[offset];
-            for (uint64_t c = 1; c < classes; ++c) {
-                maxLogit = std::max(maxLogit, logits[offset + c]);
-            }
-            double denom = 0.0;
-            for (uint64_t c = 0; c < classes; ++c) {
-                denom += std::exp(logits[offset + c] - maxLogit);
-            }
-            for (uint64_t c = 0; c < classes; ++c) {
-                probabilities[c] += weights[memberIndex] * (std::exp(logits[offset + c] - maxLogit) / denom);
-            }
-        }
-        for (double& probability : probabilities) {
-            probability /= weightSum;
-        }
-
-        const uint64_t offset = row * classes;
-        double sampleLoss = 0.0;
-        for (uint64_t c = 0; c < classes; ++c) {
-            sampleLoss += -labels[offset + c] * std::log(std::max(probabilities[c], 1.0e-12));
-        }
-        lossSum += sampleLoss;
-    }
-    return lossSum / static_cast<double>(rows);
-}
-
-std::optional<double> meanAbsoluteErrorFromWeightedMemberPredictions(
-    const std::vector<std::vector<double>>& memberPredictions,
-    const std::vector<double>& labels,
-    const std::vector<double>& weights) {
-    if (memberPredictions.empty() || memberPredictions.size() != weights.size()) {
-        return std::nullopt;
-    }
-    const double weightSum = std::accumulate(weights.begin(), weights.end(), 0.0);
-    if (weightSum <= 0.0 || labels.empty()) {
-        return std::nullopt;
-    }
-
-    double lossSum = 0.0;
-    for (size_t i = 0; i < labels.size(); ++i) {
-        double prediction = 0.0;
-        for (size_t memberIndex = 0; memberIndex < memberPredictions.size(); ++memberIndex) {
-            prediction += weights[memberIndex] * memberPredictions[memberIndex][i];
-        }
-        prediction /= weightSum;
-        const double diff = prediction - labels[i];
-        lossSum += std::abs(diff);
-    }
-    return lossSum / static_cast<double>(labels.size());
 }
 
 

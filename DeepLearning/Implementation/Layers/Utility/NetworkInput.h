@@ -16,11 +16,21 @@ class NetworkInput : public Layer {
    public:
     ~NetworkInput() override {}
 
+    enum class Mode { ExternalLoad, PassThrough };
+
     NetworkInput(TensorPlacement networkPlacement,
                  std::optional<DataType> contentDataType,
                  std::optional<std::vector<unsigned long>> contentDimensions,
                  bool aliasSamePlacementInputs = false) {
-        construct(networkPlacement, contentDataType, contentDimensions, aliasSamePlacementInputs);
+        construct(networkPlacement, contentDataType, contentDimensions, Mode::ExternalLoad, aliasSamePlacementInputs, std::nullopt);
+    }
+
+    NetworkInput(TensorPlacement networkPlacement,
+                 std::optional<DataType> contentDataType,
+                 std::optional<std::vector<unsigned long>> contentDimensions,
+                 Mode mode,
+                 std::optional<Tensor> passThroughSourceTensor = std::nullopt) {
+        construct(networkPlacement, contentDataType, contentDimensions, mode, false, passThroughSourceTensor);
     }
 
     NetworkInput(Tensor exampleTensor, bool aliasSamePlacementInputs = false) {
@@ -28,32 +38,50 @@ class NetworkInput : public Layer {
         construct(exampleTensor.getPlacement(),
                   exampleTensor.getDescriptor().getDataType(),
                   exampleTensor.getDescriptor().getDimensions(),
-                  aliasSamePlacementInputs);
+                  Mode::ExternalLoad,
+                  aliasSamePlacementInputs,
+                  std::nullopt);
+    }
+
+    static NetworkInput passThrough(TensorPlacement networkPlacement,
+                                    std::optional<DataType> contentDataType,
+                                    std::optional<std::vector<unsigned long>> contentDimensions,
+                                    Tensor sourceTensor) {
+        return NetworkInput(networkPlacement, contentDataType, contentDimensions, Mode::PassThrough, sourceTensor);
     }
 
     void construct(TensorPlacement networkPlacement,
                    std::optional<DataType> contentDataType,
                    std::optional<std::vector<unsigned long>> contentDimensions,
-                   bool aliasSamePlacementInputs = false) {
+                   Mode mode = Mode::ExternalLoad,
+                   bool aliasSamePlacementInputs = false,
+                   std::optional<Tensor> passThroughSourceTensor = std::nullopt) {
         THOR_THROW_IF_FALSE(contentDimensions.has_value() == contentDataType.has_value());
+        THOR_THROW_IF_FALSE(mode == Mode::ExternalLoad || !aliasSamePlacementInputs);
+        THOR_THROW_IF_FALSE(mode == Mode::PassThrough || !passThroughSourceTensor.has_value());
         this->networkPlacement = networkPlacement;
         this->contentDataType = contentDataType;
         this->contentDimensions = contentDimensions;
+        this->mode = mode;
         this->aliasSamePlacementInputs = aliasSamePlacementInputs;
         int gpuNum = 0;
         if (networkPlacement.getMemDevice() == TensorPlacement::MemDevices::GPU)
             gpuNum = networkPlacement.getDeviceNum();
         this->stream = Stream(gpuNum);
         this->loadStream = Stream::getNextUploadStream(gpuNum);
+
+        if (passThroughSourceTensor.has_value()) {
+            configurePassThroughSource(passThroughSourceTensor.value());
+        }
     }
 
-    virtual bool isInput() { return true; }
+    virtual bool isInput() { return mode == Mode::ExternalLoad; }
+    virtual bool isPassThrough() const { return mode == Mode::PassThrough; }
+    virtual bool requiresBatchInput() const { return mode == Mode::ExternalLoad; }
 
-    // Composition/inference mode: when constructed with aliasSamePlacementInputs=true and the caller
-    // supplies an input tensor that already has the exact descriptor and placement expected by this
-    // network input, forward that tensor directly to downstream layers instead of copying through the
-    // NetworkInput-owned staging/output tensor.  This is constructor/stamp-time configuration so normal
-    // training/input buffering semantics remain unchanged unless the composing runtime opts in.
+    // Deprecated compatibility flag from the old runtime-alias attempt.  It is intentionally
+    // not used to swap tensors in forward(); correct NetworkInput composition is pass-through
+    // mode, where the upstream tensor is bound before downstream layers are connected.
     virtual bool getAliasSamePlacementInputs() const { return aliasSamePlacementInputs; }
 
     void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) override {
@@ -61,25 +89,45 @@ class NetworkInput : public Layer {
 
         this->nextLayer = nextLayer;
 
-        featureOutput = createFeatureOutputTensor();
-        initializeInputSlotZero();
+        if (isPassThrough()) {
+            THOR_THROW_IF_FALSE(featureOutput.has_value());
+        } else {
+            featureOutput = createFeatureOutputTensor();
+            initializeInputSlotZero();
+        }
 
         nextLayer->connectToPreviousLayer(this, featureOutput, stream, false, loaderConnectionType);
     }
 
     std::optional<Tensor> connectToPreviousLayer(
         Layer *previousLayer, std::optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType = 0) override {
-        THOR_UNREACHABLE();
+        (void)connectionType;
+        THOR_THROW_IF_FALSE(isPassThrough());
+        THOR_THROW_IF_FALSE(!this->previousLayer.has_value());
+        THOR_THROW_IF_FALSE(!this->featureInput.has_value());
+        // Pass-through NetworkInput is currently an inference/composition no-op.
+        // Do not silently create a separate gradient materialization path.
+        THOR_THROW_IF_FALSE(!backPropagateError);
+
+        this->previousLayer = previousLayer;
+        this->stream = stream;
+        configurePassThroughSource(featureInput);
+
+        return std::nullopt;
     }
 
     std::optional<Tensor> createFeatureOutputTensor() override {
+        if (isPassThrough()) {
+            THOR_THROW_IF_FALSE(featureOutput.has_value());
+            return featureOutput;
+        }
         if (contentDimensions.has_value())
             return Tensor(networkPlacement, TensorDescriptor(contentDataType.value(), contentDimensions.value()));
         return std::nullopt;
     }
 
     virtual void setActiveInputSlot(uint32_t slotIndex) {
-        if (!contentDimensions.has_value()) {
+        if (isPassThrough() || !contentDimensions.has_value()) {
             return;
         }
         requireInputSlot(slotIndex);
@@ -88,7 +136,7 @@ class NetworkInput : public Layer {
 
     virtual void preallocateInputSlots(uint32_t numSlots) {
         THOR_THROW_IF_FALSE(numSlots >= 1);
-        if (!contentDimensions.has_value()) {
+        if (isPassThrough() || !contentDimensions.has_value()) {
             return;
         }
         THOR_THROW_IF_FALSE(featureOutput.has_value());
@@ -105,12 +153,7 @@ class NetworkInput : public Layer {
                          bool validationPass,
                          Event copyToSourceTensorFinished,
                          uint32_t batchSize = 0) {
-        // When this input can alias the supplied tensor, the processing stream
-        // will consume that tensor directly, so the processing stream itself
-        // must wait for the producer event.  Otherwise keep the existing staging
-        // path where the upload/load stream waits before copying into the
-        // NetworkInput-owned slot buffer.
-        if (canAliasSamePlacementInput(featureInput)) {
+        if (isPassThrough()) {
             stream.waitEvent(copyToSourceTensorFinished);
         } else {
             loadStream.waitEvent(copyToSourceTensorFinished);
@@ -123,48 +166,41 @@ class NetworkInput : public Layer {
     void forward(std::optional<Tensor> featureInput, bool validationPass, uint32_t batchSize = 0) override {
         const bool emitDiagnostics = layerSubmitDiagnosticsActive();
         const auto totalStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
-        THOR_THROW_IF_FALSE(contentDimensions.has_value() == featureInput.has_value());
+        if (isPassThrough()) {
+            validateOptionalForwardTensorMatchesPassThrough(featureInput);
+        } else {
+            THOR_THROW_IF_FALSE(contentDimensions.has_value() == featureInput.has_value());
 
-        if (contentDimensions.has_value())
-            THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDimensions() == contentDimensions.value());
+            if (contentDimensions.has_value())
+                THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDimensions() == contentDimensions.value());
+        }
 
         const auto copyStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
         uint64_t copyMicros = 0;
         std::optional<Tensor> downstreamFeatureOutput = featureOutput;
-        const bool aliasInput = canAliasSamePlacementInput(featureInput);
-        if (contentDimensions.has_value()) {
+        if (contentDimensions.has_value() && !isPassThrough()) {
             THOR_THROW_IF_FALSE(featureOutput.has_value());
+            THOR_THROW_IF_FALSE(activeInputSlot < inputSlots.size());
+            InputSlot &slot = inputSlots[activeInputSlot];
+            THOR_THROW_IF_FALSE(slot.outputBuffer.has_value());
 
-            if (aliasInput) {
-                // Runtime composition path: the supplied tensor already is the
-                // correctly shaped, typed, and placed input for this network.
-                // Forward it directly so same-device NetworkOutput ->
-                // NetworkInput boundaries can compose without an extra D2D copy.
-                downstreamFeatureOutput = featureInput;
-            } else {
-                THOR_THROW_IF_FALSE(activeInputSlot < inputSlots.size());
-                InputSlot& slot = inputSlots[activeInputSlot];
-                THOR_THROW_IF_FALSE(slot.outputBuffer.has_value());
+            // Only wait when reusing the same slot-local prefetch buffer.  Other
+            // native-queued slots may upload into their own buffers while this
+            // slot's previous buffer -> featureOutput copy is still pending on
+            // the processing stream.
+            loadStream.waitEvent(slot.outputBufferWritableEvent);
 
-                // Only wait when reusing the same slot-local prefetch buffer.  Other
-                // native-queued slots may upload into their own buffers while this
-                // slot's previous buffer -> featureOutput copy is still pending on
-                // the processing stream.
-                loadStream.waitEvent(slot.outputBufferWritableEvent);
+            // Copy into the slot-local prefetch buffer using the upload stream.
+            slot.outputBuffer.value().copyFromAsync(featureInput.value(), loadStream);
+            loadStream.putEvent(slot.outputBufferLoadedEvent);
+            stream.waitEvent(slot.outputBufferLoadedEvent);
 
-                // Copy into the slot-local prefetch buffer using the upload stream.
-                slot.outputBuffer.value().copyFromAsync(featureInput.value(), loadStream);
-                loadStream.putEvent(slot.outputBufferLoadedEvent);
-                stream.waitEvent(slot.outputBufferLoadedEvent);
-
-                // Copy from the slot-local prefetch buffer into the connected public
-                // NetworkInput feature tensor.  The public feature tensor remains
-                // single-address/statically connected to downstream layers, so this
-                // ring only removes false dependencies on the staging buffer without
-                // changing layer-graph tensor identities.
-                featureOutput.value().copyFromAsync(slot.outputBuffer.value(), stream);
-                stream.putEvent(slot.outputBufferWritableEvent);
-            }
+            // Copy from the slot-local prefetch buffer into the connected public
+            // NetworkInput feature tensor.  The public feature tensor remains
+            // single-address/statically connected to downstream layers, so this
+            // ring only removes false dependencies on the staging buffer.
+            featureOutput.value().copyFromAsync(slot.outputBuffer.value(), stream);
+            stream.putEvent(slot.outputBufferWritableEvent);
         }
         if (emitDiagnostics) {
             copyMicros = layerSubmitDiagnosticElapsedMicros(copyStart, layerSubmitDiagnosticNow());
@@ -172,11 +208,12 @@ class NetworkInput : public Layer {
 
         if (!nextLayer.has_value()) {
             if (emitDiagnostics) {
-                emitLayerSubmitDiagnostic("network_input_forward",
-                                          layerSubmitDiagnosticLabel("NetworkInput", getId(), getName()),
-                                          getId(),
-                                          layerSubmitDiagnosticElapsedMicros(totalStart, layerSubmitDiagnosticNow()),
-                                          {{"copy_us", copyMicros}, {"downstream_us", 0}, {"has_content", contentDimensions.has_value() ? 1UL : 0UL}});
+                emitLayerSubmitDiagnostic(
+                    "network_input_forward",
+                    layerSubmitDiagnosticLabel("NetworkInput", getId(), getName()),
+                    getId(),
+                    layerSubmitDiagnosticElapsedMicros(totalStart, layerSubmitDiagnosticNow()),
+                    {{"copy_us", copyMicros}, {"downstream_us", 0}, {"has_content", contentDimensions.has_value() ? 1UL : 0UL}});
             }
             return;
         }
@@ -187,11 +224,12 @@ class NetworkInput : public Layer {
             emitDiagnostics ? layerSubmitDiagnosticElapsedMicros(downstreamStart, layerSubmitDiagnosticNow()) : 0;
 
         if (emitDiagnostics) {
-            emitLayerSubmitDiagnostic("network_input_forward",
-                                      layerSubmitDiagnosticLabel("NetworkInput", getId(), getName()),
-                                      getId(),
-                                      layerSubmitDiagnosticElapsedMicros(totalStart, layerSubmitDiagnosticNow()),
-                                      {{"copy_us", copyMicros}, {"downstream_us", downstreamMicros}, {"has_content", contentDimensions.has_value() ? 1UL : 0UL}});
+            emitLayerSubmitDiagnostic(
+                "network_input_forward",
+                layerSubmitDiagnosticLabel("NetworkInput", getId(), getName()),
+                getId(),
+                layerSubmitDiagnosticElapsedMicros(totalStart, layerSubmitDiagnosticNow()),
+                {{"copy_us", copyMicros}, {"downstream_us", downstreamMicros}, {"has_content", contentDimensions.has_value() ? 1UL : 0UL}});
         }
     }
 
@@ -205,6 +243,7 @@ class NetworkInput : public Layer {
     };
 
     void initializeInputSlotZero() {
+        THOR_THROW_IF_FALSE(!isPassThrough());
         THOR_THROW_IF_FALSE(featureOutput.has_value() == contentDimensions.has_value());
         if (!contentDimensions.has_value()) {
             return;
@@ -227,20 +266,35 @@ class NetworkInput : public Layer {
         THOR_THROW_IF_FALSE(slotIndex < inputSlots.size());
     }
 
-    bool canAliasSamePlacementInput(std::optional<Tensor> inputTensor) const {
-        if (!aliasSamePlacementInputs) {
-            return false;
+    void configurePassThroughSource(std::optional<Tensor> sourceTensor) {
+        THOR_THROW_IF_FALSE(isPassThrough());
+        THOR_THROW_IF_FALSE(contentDimensions.has_value() == sourceTensor.has_value());
+        if (!sourceTensor.has_value()) {
+            featureInput = std::nullopt;
+            featureOutput = std::nullopt;
+            return;
         }
-        if (!contentDimensions.has_value() || !inputTensor.has_value() || !featureOutput.has_value()) {
-            return false;
+
+        const TensorDescriptor expectedDescriptor(contentDataType.value(), contentDimensions.value());
+        THOR_THROW_IF_FALSE(sourceTensor.value().getDescriptor() == expectedDescriptor);
+        THOR_THROW_IF_FALSE(sourceTensor.value().getPlacement() == networkPlacement);
+        featureInput = sourceTensor;
+        featureOutput = sourceTensor;
+    }
+
+    void validateOptionalForwardTensorMatchesPassThrough(std::optional<Tensor> suppliedTensor) const {
+        THOR_THROW_IF_FALSE(featureOutput.has_value() == contentDimensions.has_value());
+        if (!contentDimensions.has_value()) {
+            THOR_THROW_IF_FALSE(!suppliedTensor.has_value());
+            return;
         }
-        if (inputTensor.value().getDescriptor() != featureOutput.value().getDescriptor()) {
-            return false;
+        if (suppliedTensor.has_value()) {
+            THOR_THROW_IF_FALSE(suppliedTensor.value() == featureOutput.value());
         }
-        return inputTensor.value().getPlacement() == featureOutput.value().getPlacement();
     }
 
     void allocateInputSlots(uint32_t numSlots) {
+        THOR_THROW_IF_FALSE(!isPassThrough());
         THOR_THROW_IF_FALSE(contentDimensions.has_value());
         THOR_THROW_IF_FALSE(featureOutput.has_value());
         THOR_THROW_IF_FALSE(numSlots >= 1);
@@ -266,6 +320,7 @@ class NetworkInput : public Layer {
     uint32_t activeInputSlot = 0;
     std::vector<InputSlot> inputSlots;
     Stream loadStream;
+    Mode mode = Mode::ExternalLoad;
     bool aliasSamePlacementInputs = false;
 };
 

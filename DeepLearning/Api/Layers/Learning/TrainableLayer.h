@@ -1,7 +1,6 @@
 #pragma once
 #include "DeepLearning/Implementation/ThorError.h"
 
-
 #include "DeepLearning/Api/Layers/MultiConnectionLayer.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
 #include "DeepLearning/Api/Parameter/ParameterSpecification.h"
@@ -11,9 +10,9 @@
 #include <nlohmann/json.hpp>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
-#include <optional>
 
 namespace Thor {
 
@@ -33,9 +32,9 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
     // Trainable layers cannot use serialize(thor_file::TarWriter &archiveWriter, Stream stream), they use the custom signature below.
     nlohmann::json serialize(thor_file::TarWriter &archiveWriter, Stream stream) const override final { THOR_UNREACHABLE(); }
     nlohmann::json serialize(thor_file::TarWriter &archiveWriter,
-                                     Stream stream,
-                                     bool saveOptimizerState,
-                                     ThorImplementation::StampedNetwork &stampedNetwork) const override;
+                             Stream stream,
+                             bool saveOptimizerState,
+                             ThorImplementation::StampedNetwork &stampedNetwork) const override;
     static void deserialize(std::shared_ptr<thor_file::TarReader> &archiveReader, const nlohmann::json &j, Network *network);
     using Deserializer = std::function<void(std::shared_ptr<thor_file::TarReader> &archiveReader, const nlohmann::json &, Network *)>;
     static std::unordered_map<std::string, Deserializer> &get_registry();
@@ -63,6 +62,8 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
     void freezeTraining();
     void unfreezeTraining();
     bool isTrainingFrozen() const;
+
+    virtual bool inferenceBatchPaddingSupported() { return true; }
 
    protected:
     void compile(std::shared_ptr<ThorImplementation::Layer> physicalLayer) override;

@@ -16,6 +16,26 @@ def _member_dir(root: Path, name: str) -> str:
     return path.relative_to(root).as_posix()
 
 
+def _minimal_manifest(root: Path, *, version: object = 1) -> dict[str, object]:
+    return {
+        "artifact_type": "thor_ensemble_model",
+        "version": version,
+        "execution": "parallel_single_gpu",
+        "aggregation": {"type": "mean"},
+        "input_names": ["matrix"],
+        "output_names": ["prediction"],
+        "members": [
+            {"name": "fold_0", "path": _member_dir(root, "fold_0"), "weight": 1.0, "selection": {}},
+        ],
+    }
+
+
+def _write_manifest(root: Path, manifest: dict[str, object]) -> Path:
+    manifest_path = root / "ensemble_manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    return manifest_path
+
+
 def test_ensemble_model_saves_and_loads_manifest(tmp_path):
     fold_0 = _member_dir(tmp_path, "fold_0")
     fold_1 = _member_dir(tmp_path, "fold_1")
@@ -92,6 +112,203 @@ def test_ensemble_model_load_accepts_manifest_path(tmp_path):
 
     assert loaded.artifact_path == tmp_path
     assert loaded.get_member_names() == ("fold_0",)
+
+
+def test_ensemble_manifest_current_version_is_first_artifact_version():
+    import thor.ensembles._manifest as manifest
+
+    assert manifest._FIRST_ARTIFACT_VERSION == 1
+    assert manifest._CURRENT_ARTIFACT_VERSION == manifest._FIRST_ARTIFACT_VERSION
+    assert manifest._SUPPORTED_ARTIFACT_VERSIONS == frozenset({1})
+
+
+def test_ensemble_model_load_accepts_first_artifact_version(tmp_path):
+    _write_manifest(tmp_path, _minimal_manifest(tmp_path, version=1))
+
+    loaded = thor.EnsembleModel.load(tmp_path)
+
+    assert loaded.get_member_names() == ("fold_0",)
+    assert loaded.get_input_names() == ("matrix",)
+    assert loaded.get_output_names() == ("prediction",)
+
+
+@pytest.mark.parametrize("bad_version", ["1", 1.0, True, None])
+def test_ensemble_model_load_rejects_malformed_manifest_version(tmp_path, bad_version):
+    _write_manifest(tmp_path, _minimal_manifest(tmp_path, version=bad_version))
+
+    with pytest.raises(ValueError, match="version must be an integer"):
+        thor.EnsembleModel.load(tmp_path)
+
+
+def test_ensemble_model_load_rejects_pre_first_manifest_version(tmp_path):
+    _write_manifest(tmp_path, _minimal_manifest(tmp_path, version=0))
+
+    with pytest.raises(ValueError, match="first supported version is 1"):
+        thor.EnsembleModel.load(tmp_path)
+
+
+def test_ensemble_model_load_rejects_future_manifest_version(tmp_path):
+    _write_manifest(tmp_path, _minimal_manifest(tmp_path, version=2))
+
+    with pytest.raises(ValueError, match="current supported version is 1"):
+        thor.EnsembleModel.load(tmp_path)
+
+
+def test_ensemble_model_load_rejects_missing_manifest(tmp_path):
+    with pytest.raises(FileNotFoundError, match="ensemble manifest not found"):
+        thor.EnsembleModel.load(tmp_path)
+
+
+def test_ensemble_model_load_rejects_invalid_json_manifest(tmp_path):
+    (tmp_path / "ensemble_manifest.json").write_text("{not valid json", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="not valid JSON"):
+        thor.EnsembleModel.load(tmp_path)
+
+
+@pytest.mark.parametrize("raw_manifest", [[], None, "not an object", 7])
+def test_ensemble_model_load_rejects_non_object_manifest(tmp_path, raw_manifest):
+    (tmp_path / "ensemble_manifest.json").write_text(json.dumps(raw_manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="ensemble manifest must be a JSON object"):
+        thor.EnsembleModel.load(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["artifact_type", "version", "execution", "aggregation", "input_names", "output_names", "members"],
+)
+def test_ensemble_model_load_rejects_missing_required_manifest_fields(tmp_path, field_name):
+    manifest = _minimal_manifest(tmp_path)
+    manifest.pop(field_name)
+    _write_manifest(tmp_path, manifest)
+
+    with pytest.raises(ValueError, match=f"missing required field {field_name!r}"):
+        thor.EnsembleModel.load(tmp_path)
+
+
+@pytest.mark.parametrize("artifact_type", ["thor_model", None, 1])
+def test_ensemble_model_load_rejects_bad_artifact_type(tmp_path, artifact_type):
+    manifest = _minimal_manifest(tmp_path)
+    manifest["artifact_type"] = artifact_type
+    _write_manifest(tmp_path, manifest)
+
+    with pytest.raises(ValueError, match="unsupported ensemble artifact_type"):
+        thor.EnsembleModel.load(tmp_path)
+
+
+@pytest.mark.parametrize("execution", [None, 1, ["parallel_single_gpu"]])
+def test_ensemble_model_load_rejects_non_string_execution(tmp_path, execution):
+    manifest = _minimal_manifest(tmp_path)
+    manifest["execution"] = execution
+    _write_manifest(tmp_path, manifest)
+
+    with pytest.raises(ValueError, match="execution must be a string"):
+        thor.EnsembleModel.load(tmp_path)
+
+
+def test_ensemble_model_load_rejects_unsupported_execution(tmp_path):
+    manifest = _minimal_manifest(tmp_path)
+    manifest["execution"] = "parallel_multi_gpu"
+    _write_manifest(tmp_path, manifest)
+
+    with pytest.raises(ValueError, match="unsupported ensemble execution"):
+        thor.EnsembleModel.load(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "aggregation, message",
+    [
+        (None, "aggregation must be a JSON object"),
+        ([], "aggregation must be a JSON object"),
+        ({}, "aggregation.type must be a string"),
+        ({"type": 1}, "aggregation.type must be a string"),
+        ({"type": "median"}, "unsupported ensemble aggregation"),
+    ],
+)
+def test_ensemble_model_load_rejects_malformed_aggregation(tmp_path, aggregation, message):
+    manifest = _minimal_manifest(tmp_path)
+    manifest["aggregation"] = aggregation
+    _write_manifest(tmp_path, manifest)
+
+    with pytest.raises(ValueError, match=message):
+        thor.EnsembleModel.load(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "field_name, value, message",
+    [
+        ("input_names", "matrix", "input_names must be a sequence of strings"),
+        ("output_names", "prediction", "output_names must be a sequence of strings"),
+        ("input_names", ["matrix", "matrix"], "input_names entries must be unique"),
+        ("output_names", [""], "output_names entries must be non-empty strings"),
+        ("input_names", [1], "input_names entries must be non-empty strings"),
+    ],
+)
+def test_ensemble_model_load_rejects_malformed_schema_name_lists(tmp_path, field_name, value, message):
+    manifest = _minimal_manifest(tmp_path)
+    manifest[field_name] = value
+    _write_manifest(tmp_path, manifest)
+
+    with pytest.raises(ValueError, match=message):
+        thor.EnsembleModel.load(tmp_path)
+
+
+@pytest.mark.parametrize("members", [None, {}, "fold_0"])
+def test_ensemble_model_load_rejects_non_array_members(tmp_path, members):
+    manifest = _minimal_manifest(tmp_path)
+    manifest["members"] = members
+    _write_manifest(tmp_path, manifest)
+
+    with pytest.raises(ValueError, match="members must be a JSON array"):
+        thor.EnsembleModel.load(tmp_path)
+
+
+def test_ensemble_model_load_rejects_empty_members(tmp_path):
+    manifest = _minimal_manifest(tmp_path)
+    manifest["members"] = []
+    _write_manifest(tmp_path, manifest)
+
+    with pytest.raises(ValueError, match="at least one member"):
+        thor.EnsembleModel.load(tmp_path)
+
+
+@pytest.mark.parametrize("member", [None, [], "fold_0"])
+def test_ensemble_model_load_rejects_non_object_member_entries(tmp_path, member):
+    manifest = _minimal_manifest(tmp_path)
+    manifest["members"] = [member]
+    _write_manifest(tmp_path, manifest)
+
+    with pytest.raises(ValueError, match="member must be a JSON object"):
+        thor.EnsembleModel.load(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "member_patch, message",
+    [
+        ({"name": None}, "member.name must be a string"),
+        ({"name": ""}, "member name must be a non-empty string"),
+        ({"path": None}, "member 'fold_0' path must be a string"),
+        ({"path": ""}, "path must not be empty"),
+        ({"path": "/tmp/fold_0"}, "must be relative"),
+        ({"path": "../fold_0"}, "must stay inside"),
+        ({"weight": "1.0"}, "weight must be a finite positive number"),
+        ({"weight": True}, "weight must be a finite positive number"),
+        ({"weight": 0.0}, "weight must be a finite positive number"),
+        ({"weight": -1.0}, "weight must be a finite positive number"),
+        ({"weight": float("nan")}, "weight must be a finite positive number"),
+        ({"selection": []}, "selection must be a mapping"),
+    ],
+)
+def test_ensemble_model_load_rejects_malformed_member_specs(tmp_path, member_patch, message):
+    manifest = _minimal_manifest(tmp_path)
+    member = dict(manifest["members"][0])
+    member.update(member_patch)
+    manifest["members"] = [member]
+    _write_manifest(tmp_path, manifest)
+
+    with pytest.raises(ValueError, match=message):
+        thor.EnsembleModel.load(tmp_path)
 
 
 def test_ensemble_model_rejects_empty_ensemble():
@@ -212,6 +429,32 @@ def _save_member_network(root: Path, name: str, *, transpose: bool, batch_size: 
     return member_path.relative_to(root).as_posix()
 
 
+def _build_scaled_scores_member(name: str, *, scale: float) -> thor.Network:
+    n = thor.Network(name)
+    examples = thor.layers.NetworkInput(n, "examples", [2], thor.DataType.fp32)
+    scores = thor.layers.CustomLayer(
+        network=n,
+        inputs={"examples": examples.get_feature_output()},
+        output_names=["scores"],
+        build=lambda context: {"scores": context.input("examples") * scale},
+    )
+    thor.layers.NetworkOutput(n, "scores", scores["scores"], thor.DataType.fp32)
+    return n
+
+
+def _save_scaled_scores_member(root: Path, name: str, *, scale: float, batch_size: int) -> str:
+    network = _build_scaled_scores_member(name, scale=scale)
+    placed = network.place(
+        batch_size,
+        inference_only=True,
+        forced_devices=[0],
+        forced_num_stamps_per_gpu=1,
+    )
+    member_path = root / "members" / name
+    placed.save(str(member_path), overwrite=False, save_optimizer_state=False)
+    return member_path.relative_to(root).as_posix()
+
+
 def _build_multi_output_transpose_member(name: str, *, transpose: bool) -> thor.Network:
     n = thor.Network(name)
     matrix = thor.layers.NetworkInput(n, "matrix", [2, 2], thor.DataType.fp32)
@@ -246,12 +489,14 @@ def _build_member_with_output_name(
     name: str,
     *,
     output_name: str,
+    input_name: str = "matrix",
     input_shape: list[int] | tuple[int, ...] = (2, 2),
+    input_dtype: thor.DataType = thor.DataType.fp32,
     transpose: bool = False,
     output_dtype: thor.DataType = thor.DataType.fp32,
 ) -> thor.Network:
     n = thor.Network(name)
-    matrix = thor.layers.NetworkInput(n, "matrix", list(input_shape), thor.DataType.fp32)
+    matrix = thor.layers.NetworkInput(n, input_name, list(input_shape), input_dtype)
     output = matrix.get_feature_output()
     if transpose:
         output = thor.layers.Transpose(n, output).get_feature_output()
@@ -265,14 +510,18 @@ def _save_custom_member(
     *,
     batch_size: int,
     output_name: str = "prediction",
+    input_name: str = "matrix",
     input_shape: list[int] | tuple[int, ...] = (2, 2),
+    input_dtype: thor.DataType = thor.DataType.fp32,
     transpose: bool = False,
     output_dtype: thor.DataType = thor.DataType.fp32,
 ) -> str:
     network = _build_member_with_output_name(
         name,
         output_name=output_name,
+        input_name=input_name,
         input_shape=input_shape,
+        input_dtype=input_dtype,
         transpose=transpose,
         output_dtype=output_dtype,
     )
@@ -324,21 +573,6 @@ def _save_demand_style_member(root: Path, name: str, *, batch_size: int) -> str:
     member_path = root / "members" / name
     placed.save(str(member_path), overwrite=False, save_optimizer_state=False)
     return member_path.relative_to(root).as_posix()
-
-
-def test_network_input_alias_same_placement_inputs_constructor_flag():
-    network = thor.Network("network-input-alias-flag")
-    default_input = thor.layers.NetworkInput(network, "default", [2], thor.DataType.fp32)
-    alias_input = thor.layers.NetworkInput(
-        network,
-        "alias",
-        [2],
-        thor.DataType.fp32,
-        alias_same_placement_inputs=True,
-    )
-
-    assert not default_input.alias_same_placement_inputs()
-    assert alias_input.alias_same_placement_inputs()
 
 
 @pytest.mark.cuda
@@ -410,7 +644,7 @@ def test_ensemble_runtime_stages_named_inputs_once_to_gpu(tmp_path):
 
 
 @pytest.mark.cuda
-def test_ensemble_model_parallel_infer_mean_aggregates_named_outputs(tmp_path, monkeypatch):
+def test_ensemble_model_parallel_infer_mean_aggregates_named_outputs(tmp_path):
     batch_size = 3
     member_0 = _save_member_network(tmp_path, "fold_0", transpose=False, batch_size=batch_size)
     member_1 = _save_member_network(tmp_path, "fold_1", transpose=True, batch_size=batch_size)
@@ -428,19 +662,8 @@ def test_ensemble_model_parallel_infer_mean_aggregates_named_outputs(tmp_path, m
 
     import thor._thor as _thor
 
-    def _old_python_aggregation_bridge_should_not_be_used(*args, **kwargs):
-        raise AssertionError("EnsembleModel.infer should use the accumulator-network bridge")
-
-    monkeypatch.setattr(
-        _thor,
-        "_aggregate_ensemble_outputs_gpu_to_cpu",
-        _old_python_aggregation_bridge_should_not_be_used,
-    )
-    monkeypatch.setattr(
-        _thor,
-        "_infer_ensemble_members_and_aggregate_gpu_to_cpu",
-        _old_python_aggregation_bridge_should_not_be_used,
-    )
+    assert not hasattr(_thor, "_aggregate_ensemble_outputs_gpu_to_cpu")
+    assert not hasattr(_thor, "_infer_ensemble_members_and_aggregate_gpu_to_cpu")
 
     matrix = np.array(
         [
@@ -493,6 +716,39 @@ def test_ensemble_model_parallel_infer_weighted_mean_aggregates_named_outputs(tm
     assert np.allclose(outputs["prediction"].numpy(), expected, atol=0.0)
 
 
+
+
+@pytest.mark.cuda
+def test_ensemble_model_parallel_infer_weighted_mean_aggregates_categorical_scores(tmp_path):
+    batch_size = 3
+    member_0 = _save_scaled_scores_member(tmp_path, "fold_0", scale=1.0, batch_size=batch_size)
+    member_1 = _save_scaled_scores_member(tmp_path, "fold_1", scale=-2.0, batch_size=batch_size)
+    thor.EnsembleModel(
+        [
+            {"name": "fold_0", "path": member_0, "weight": 1.0},
+            {"name": "fold_1", "path": member_1, "weight": 3.0},
+        ],
+        aggregation="weighted_mean",
+        input_names=["examples"],
+        output_names=["scores"],
+    ).save(tmp_path, overwrite=True)
+    ensemble = thor.EnsembleModel.load(tmp_path)
+
+    examples = np.array(
+        [
+            [3.0, -1.0],
+            [-2.0, 4.0],
+            [0.25, 0.75],
+        ],
+        dtype=np.float32,
+    )
+
+    outputs = ensemble.infer({"examples": _cpu_tensor(examples)})
+
+    expected_scores = (1.0 * examples + 3.0 * (examples * -2.0)) / 4.0
+    assert set(outputs) == {"scores"}
+    assert outputs["scores"].get_placement().get_device_type() == thor.physical.DeviceType.cpu
+    assert np.allclose(outputs["scores"].numpy(), expected_scores, atol=0.0)
 
 
 def test_ensemble_model_infer_runtime_does_not_use_thread_pool_executor():
@@ -624,8 +880,9 @@ def test_ensemble_model_parallel_infer_rejects_output_shape_mismatch(tmp_path):
     ).save(tmp_path, overwrite=True)
     ensemble = thor.EnsembleModel.load(tmp_path)
 
-    with pytest.raises(RuntimeError, match="descriptors do not match"):
+    with pytest.raises(RuntimeError, match="dimensions differ"):
         ensemble.infer({"matrix": _cpu_tensor(np.ones((1, 2, 3), dtype=np.float32))})
+    assert not ensemble.is_runtime_loaded()
 
 
 @pytest.mark.cuda
@@ -653,8 +910,9 @@ def test_ensemble_model_parallel_infer_rejects_output_dtype_mismatch(tmp_path):
     ).save(tmp_path, overwrite=True)
     ensemble = thor.EnsembleModel.load(tmp_path)
 
-    with pytest.raises(RuntimeError, match="descriptors do not match"):
+    with pytest.raises(RuntimeError, match="data type differs"):
         ensemble.infer({"matrix": _cpu_tensor(np.ones((1, 2, 2), dtype=np.float32))})
+    assert not ensemble.is_runtime_loaded()
 
 
 @pytest.mark.cuda
@@ -717,11 +975,23 @@ def test_ensemble_model_parallel_infer_reloads_runtime_when_batch_size_changes(t
     first_accumulator = getattr(ensemble, "_placed_accumulator")
 
     second_outputs = ensemble.infer({"matrix": _cpu_tensor(second_matrix)})
+    second_members = getattr(ensemble, "_placed_members")
+    second_accumulator = getattr(ensemble, "_placed_accumulator")
 
-    assert getattr(ensemble, "_placed_members") is not first_members
-    assert getattr(ensemble, "_placed_accumulator") is not first_accumulator
+    assert second_members is not first_members
+    assert second_accumulator is not first_accumulator
     assert np.allclose(first_outputs["prediction"].numpy(), (first_matrix + np.swapaxes(first_matrix, 1, 2)) / 2.0, atol=0.0)
     assert np.allclose(second_outputs["prediction"].numpy(), (second_matrix + np.swapaxes(second_matrix, 1, 2)) / 2.0, atol=0.0)
+
+    third_outputs = ensemble.infer({"matrix": _cpu_tensor(second_matrix + 100.0)})
+
+    assert getattr(ensemble, "_placed_members") is second_members
+    assert getattr(ensemble, "_placed_accumulator") is second_accumulator
+    assert np.allclose(
+        third_outputs["prediction"].numpy(),
+        ((second_matrix + 100.0) + np.swapaxes(second_matrix + 100.0, 1, 2)) / 2.0,
+        atol=0.0,
+    )
 
 
 @pytest.mark.cuda
@@ -745,6 +1015,54 @@ def test_ensemble_model_parallel_infer_rejects_input_schema_mismatch(tmp_path):
             "extra_matrix": _cpu_tensor(np.ones((1, 2, 2), dtype=np.float32)),
         })
     assert not ensemble.is_runtime_loaded()
+
+
+@pytest.mark.cuda
+def test_ensemble_model_parallel_infer_rejects_member_input_name_mismatch(tmp_path):
+    batch_size = 1
+    member_0 = _save_custom_member(
+        tmp_path,
+        "fold_0",
+        batch_size=batch_size,
+        input_name="matrix",
+    )
+    member_1 = _save_custom_member(
+        tmp_path,
+        "fold_1",
+        batch_size=batch_size,
+        input_name="other_matrix",
+    )
+    thor.EnsembleModel(
+        [
+            {"name": "fold_0", "path": member_0},
+            {"name": "fold_1", "path": member_1},
+        ],
+        output_names=["prediction"],
+    ).save(tmp_path, overwrite=True)
+    ensemble = thor.EnsembleModel.load(tmp_path)
+
+    with pytest.raises(RuntimeError, match="member input names differ.*other_matrix.*matrix"):
+        ensemble.infer({"matrix": _cpu_tensor(np.ones((1, 2, 2), dtype=np.float32))})
+
+
+@pytest.mark.cuda
+def test_ensemble_model_parallel_infer_rejects_member_derived_missing_and_extra_inputs(tmp_path):
+    batch_size = 1
+    member_0 = _save_member_network(tmp_path, "fold_0", transpose=False, batch_size=batch_size)
+    thor.EnsembleModel(
+        [{"name": "fold_0", "path": member_0}],
+        output_names=["prediction"],
+    ).save(tmp_path, overwrite=True)
+    ensemble = thor.EnsembleModel.load(tmp_path)
+
+    with pytest.raises(ValueError, match=r"missing=\['matrix'\].*extra=\['missing_matrix'\]"):
+        ensemble.infer({"missing_matrix": _cpu_tensor(np.ones((1, 2, 2), dtype=np.float32))})
+
+    with pytest.raises(ValueError, match=r"extra=\['extra_matrix'\]"):
+        ensemble.infer({
+            "matrix": _cpu_tensor(np.ones((1, 2, 2), dtype=np.float32)),
+            "extra_matrix": _cpu_tensor(np.ones((1, 2, 2), dtype=np.float32)),
+        })
 
 
 @pytest.mark.cuda
