@@ -210,6 +210,27 @@ std::vector<std::string> TrainingStep::getActivePhaseNames() const {
     return activeNames;
 }
 
+std::vector<PhaseGraphNetworkSpec> TrainingStep::getActivePhaseNetworkSpecs() const {
+    validate();
+    if (!enabled) {
+        return {};
+    }
+    validateEnabledPhaseDependencies();
+
+    std::vector<PhaseGraphNetworkSpec> specs;
+    for (const std::shared_ptr<TrainingPhase>& phase : phases) {
+        if (!phase->isEnabled()) {
+            continue;
+        }
+        if (!phase->hasNetwork()) {
+            throw std::runtime_error("TrainingStep '" + name + "' active phase '" + phase->getName() +
+                                     "' does not own a phase Network.");
+        }
+        specs.push_back(PhaseGraphNetworkSpec{phase->getName(), phase->getNetwork(), true});
+    }
+    return specs;
+}
+
 bool TrainingStep::updatesParameter(const ParameterReference& parameter) const {
     for (const ParameterReference& updateParameter : updateParameters) {
         if (updateParameter == parameter) {

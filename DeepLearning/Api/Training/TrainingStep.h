@@ -5,6 +5,7 @@
 #include "DeepLearning/Api/Tensor/Tensor.h"
 #include "DeepLearning/Api/Training/TrainingInputBinding.h"
 #include "DeepLearning/Api/Training/TrainingPhase.h"
+#include "DeepLearning/Api/Training/PhaseGraphConnector.h"
 
 #include <cstdint>
 #include <memory>
@@ -48,6 +49,7 @@ class TrainingStep {
     [[nodiscard]] const std::vector<Tensor>& getLossRoots() const { return lossRoots; }
     [[nodiscard]] std::vector<Tensor> getActiveLossRoots() const;
     [[nodiscard]] std::vector<std::string> getActivePhaseNames() const;
+    [[nodiscard]] std::vector<PhaseGraphNetworkSpec> getActivePhaseNetworkSpecs() const;
     [[nodiscard]] const std::vector<std::shared_ptr<TrainingPhase>>& getPhases() const { return phases; }
     [[nodiscard]] std::shared_ptr<Optimizer> getOptimizer() const { return optimizer; }
     [[nodiscard]] const std::vector<ParameterReference>& getUpdateParameters() const { return updateParameters; }

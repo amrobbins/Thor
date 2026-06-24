@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <set>
 #include <chrono>
+#include <unordered_map>
 
 using namespace std;
 using json = nlohmann::json;
@@ -360,6 +361,85 @@ void PlacedNetwork::copyTrainingStateFrom(PlacedNetwork& source) {
 
             const std::string description = "api layer " + std::to_string(parameterReference.getParameterizableId()) +
                                             " parameter '" + parameterReference.getParameterName() + "'";
+            ThorImplementation::Tensor destinationStorage = destinationParameter->getStorage().value();
+            Stream copyStream = Stream::getNextUploadStream(destinationStorage.getPlacement().getDeviceNum());
+            copyTensorState(destinationStorage, sourceParameter->getStorage().value(), copyStream, description);
+
+            if (destinationParameter->hasOptimizer() && sourceParameter->hasOptimizer()) {
+                copyOptimizerTensorState(*destinationParameter->getOptimizer(),
+                                         *sourceParameter->getOptimizer(),
+                                         copyStream,
+                                         description);
+            }
+            copyStreams.push_back(copyStream);
+        }
+    }
+
+    for (Stream& copyStream : copyStreams) {
+        copyStream.synchronize();
+    }
+}
+
+void PlacedNetwork::copyMatchingTrainingStateFrom(PlacedNetwork& source) {
+    if (source.getNumStamps() != getNumStamps()) {
+        throw std::runtime_error("Cannot copy matching placed-network training state between networks with different stamp counts.");
+    }
+
+    const std::vector<ParameterReference> destinationParameterReferences =
+        getTrainableParameterReferences(/*trainingEnabledOnly=*/false);
+    if (destinationParameterReferences.empty()) {
+        return;
+    }
+
+    std::unordered_map<std::string, ParameterReference> sourceParameterByCloneKey;
+    for (const ParameterReference& sourceReference : source.getTrainableParameterReferences(/*trainingEnabledOnly=*/false)) {
+        std::optional<std::string> sourceCloneKey =
+            source.network.getCloneSourceKeyForLayerId(sourceReference.getParameterizableId());
+        if (!sourceCloneKey.has_value()) {
+            continue;
+        }
+        const std::string key = sourceCloneKey.value() + ":" + sourceReference.getParameterName();
+        sourceParameterByCloneKey.emplace(key, sourceReference);
+    }
+
+    if (sourceParameterByCloneKey.empty()) {
+        return;
+    }
+
+    std::vector<Stream> copyStreams;
+    for (uint64_t stampIndex = 0; stampIndex < stampedNetworks.size(); ++stampIndex) {
+        ThorImplementation::StampedNetwork& destinationStamp = stampedNetworks[stampIndex];
+        ThorImplementation::StampedNetwork& sourceStamp = source.getStampedNetwork(stampIndex);
+
+        for (const ParameterReference& destinationReference : destinationParameterReferences) {
+            std::optional<std::string> destinationCloneKey =
+                network.getCloneSourceKeyForLayerId(destinationReference.getParameterizableId());
+            if (!destinationCloneKey.has_value()) {
+                continue;
+            }
+
+            const std::string key = destinationCloneKey.value() + ":" + destinationReference.getParameterName();
+            auto sourceIt = sourceParameterByCloneKey.find(key);
+            if (sourceIt == sourceParameterByCloneKey.end()) {
+                continue;
+            }
+
+            std::shared_ptr<ThorImplementation::PhysicalParameter> destinationParameter =
+                getPhysicalParameter(destinationStamp, destinationReference);
+            std::shared_ptr<ThorImplementation::PhysicalParameter> sourceParameter =
+                getPhysicalParameter(sourceStamp, sourceIt->second);
+
+            if (destinationParameter == nullptr || sourceParameter == nullptr) {
+                throw std::runtime_error("Cannot copy matching placed-network training state for parameter '" +
+                                         destinationReference.getParameterName() + "': missing physical parameter.");
+            }
+            if (!destinationParameter->getStorage().has_value() || !sourceParameter->getStorage().has_value()) {
+                throw std::runtime_error("Cannot copy matching placed-network training state for parameter '" +
+                                         destinationReference.getParameterName() + "': parameter storage is not initialized.");
+            }
+
+            const std::string description = "clone-source '" + destinationCloneKey.value() + "' parameter '" +
+                                            destinationReference.getParameterName() + "'";
             ThorImplementation::Tensor destinationStorage = destinationParameter->getStorage().value();
             Stream copyStream = Stream::getNextUploadStream(destinationStorage.getPlacement().getDeviceNum());
             copyTensorState(destinationStorage, sourceParameter->getStorage().value(), copyStream, description);

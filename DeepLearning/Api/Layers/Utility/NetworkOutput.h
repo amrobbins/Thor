@@ -17,6 +17,7 @@ class NetworkOutput : public Layer {
     ~NetworkOutput() override {}
 
     virtual std::string getName() const { return name; }
+    bool isExternal() const { return external_; }
 
     std::shared_ptr<Layer> clone() const override { return std::make_shared<NetworkOutput>(*this); }
 
@@ -57,6 +58,7 @@ class NetworkOutput : public Layer {
    private:
     std::string name;
     DataType dataType;
+    bool external_ = true;
     Network *network;
 };
 
@@ -74,6 +76,7 @@ class NetworkOutput::Builder {
         else
             networkOutput.name = std::string("NetworkOutput") + std::to_string(networkOutput.getId());
         networkOutput.dataType = _dataType.value();
+        networkOutput.external_ = _external;
         networkOutput.featureInput = _inputTensor.value();
         networkOutput.initialized = true;
         networkOutput.network = _network.value();
@@ -114,11 +117,17 @@ class NetworkOutput::Builder {
         return *this;
     }
 
+    virtual NetworkOutput::Builder &external(bool isExternal) {
+        this->_external = isExternal;
+        return *this;
+    }
+
    private:
     std::optional<std::string> _name;
     std::optional<Network *> _network;
     std::optional<Tensor> _inputTensor;
     std::optional<DataType> _dataType;
+    bool _external = true;
 };
 
 }  // namespace Thor

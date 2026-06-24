@@ -120,6 +120,43 @@ def test_training_phase_enable_disable_and_serialization():
     assert len(restored.get_loss_roots()) == 1
     assert set(restored.get_outputs().keys()) == {"forecast"}
 
+def test_training_phase_can_own_regular_network_and_derive_outputs():
+    phase_network = thor.Network("daily_phase_network")
+    phase_input = thor.layers.NetworkInput(phase_network, "features", [8], thor.DataType.fp32)
+    thor.layers.NetworkOutput(phase_network, "forecast", phase_input.get_feature_output(), thor.DataType.fp32)
+
+    phase = thor.training.TrainingPhase("daily_prediction", network=phase_network, enabled=False)
+
+    assert phase.name == "daily_prediction"
+    assert phase.has_network()
+    assert phase.get_network().get_network_name() == "daily_phase_network"
+    assert not phase.enabled
+    assert phase.get_loss_roots() == []
+    assert set(phase.get_outputs().keys()) == {"forecast"}
+    assert phase.get_depends_on() == []
+
+    arch = json.loads(phase.get_architecture_json())
+    assert arch["version"] == "1.1.0"
+    assert arch["name"] == "daily_prediction"
+    assert arch["enabled"] is False
+    assert arch["network"]["name"] == "daily_phase_network"
+    assert "depends_on" not in arch
+
+    restored = thor.training.TrainingPhase.deserialize(phase.get_architecture_json())
+    assert restored.name == "daily_prediction"
+    assert restored.has_network()
+    assert restored.get_network().get_network_name() == "daily_phase_network"
+    assert not restored.enabled
+    assert set(restored.get_outputs().keys()) == {"forecast"}
+
+
+def test_training_phase_rejects_network_with_legacy_fields():
+    phase_network = thor.Network("mixed_phase_network")
+    loss = thor.Tensor([1], thor.DataType.fp32)
+
+    with pytest.raises(ValueError, match="either network or legacy"):
+        thor.training.TrainingPhase("mixed", network=phase_network, loss_roots=[loss])
+
 
 def test_training_phase_validation_and_deserialization_errors_are_exposed():
     loss = thor.Tensor([1], thor.DataType.fp32)

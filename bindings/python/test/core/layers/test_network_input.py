@@ -12,6 +12,7 @@ def test_network_input_constructs_and_returns_feature_output():
 
     assert ni is not None
     assert isinstance(ni, thor.layers.NetworkInput)
+    assert ni.is_external()
 
     out = ni.get_feature_output()
     assert out is not None
@@ -28,6 +29,12 @@ def test_network_input_rejects_empty_dimensions():
     n = _net()
     with pytest.raises(ValueError, match=r"dimensions must be non-zero"):
         thor.layers.NetworkInput(n, "input", [], thor.DataType.fp16)
+
+
+def test_network_input_external_flag():
+    n = _net()
+    ni = thor.layers.NetworkInput(n, "internal", [16], thor.DataType.fp16, external=False)
+    assert not ni.is_external()
 
 
 def test_network_input_accepts_multi_dimensional_shape():

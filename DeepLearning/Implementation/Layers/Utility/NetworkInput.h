@@ -96,7 +96,21 @@ class NetworkInput : public Layer {
             initializeInputSlotZero();
         }
 
-        nextLayer->connectToPreviousLayer(this, featureOutput, stream, false, loaderConnectionType);
+        const bool backPropagateThroughInput =
+            isPassThrough() && previousLayer.has_value() && shouldConnectToBackPropErrorIn() && !isInferenceOnly();
+        errorInput = nextLayer->connectToPreviousLayer(this, featureOutput, stream, backPropagateThroughInput, loaderConnectionType);
+
+        // A pass-through NetworkInput is an identity edge.  If the upstream side
+        // was connected first, it returned a provisional errorOutput tensor to
+        // the producer.  Once the downstream layer exposes its real error input,
+        // fuse the identity by making the producer listen to that downstream
+        // tensor directly.  This is the same zero-copy gradient forwarding
+        // pattern used by other identity/fanout layers.
+        if (isPassThrough() && errorInput.has_value() && errorOutput.has_value() && previousLayer.has_value() &&
+            errorOutput.value() != errorInput.value()) {
+            previousLayer.value()->replaceErrorInput(errorOutput, errorInput);
+            errorOutput = errorInput;
+        }
     }
 
     std::optional<Tensor> connectToPreviousLayer(
@@ -105,15 +119,29 @@ class NetworkInput : public Layer {
         THOR_THROW_IF_FALSE(isPassThrough());
         THOR_THROW_IF_FALSE(!this->previousLayer.has_value());
         THOR_THROW_IF_FALSE(!this->featureInput.has_value());
-        // Pass-through NetworkInput is currently an inference/composition no-op.
-        // Do not silently create a separate gradient materialization path.
-        THOR_THROW_IF_FALSE(!backPropagateError);
+        if (backPropagateError) {
+            THOR_THROW_IF_FALSE(featureInput.has_value());
+        }
 
         this->previousLayer = previousLayer;
         this->stream = stream;
         configurePassThroughSource(featureInput);
 
-        return std::nullopt;
+        if (backPropagateError && !isInferenceOnly()) {
+            // If the downstream side is already connected, return that gradient
+            // tensor directly.  Otherwise create a temporary identity-gradient
+            // edge; connectToNextLayer() will replace it with the downstream
+            // tensor as soon as that side is connected.
+            if (errorInput.has_value()) {
+                errorOutput = errorInput;
+            } else {
+                errorOutput = featureInput.value().clone();
+            }
+        } else {
+            errorOutput = std::nullopt;
+        }
+
+        return errorOutput;
     }
 
     std::optional<Tensor> createFeatureOutputTensor() override {
@@ -233,7 +261,21 @@ class NetworkInput : public Layer {
         }
     }
 
-    void backward(std::optional<Tensor> errorInput, uint32_t batchSize = 0) override {}
+    void backward(std::optional<Tensor> incomingErrorInput, uint32_t batchSize = 0) override {
+        if (!isPassThrough()) {
+            return;
+        }
+        if (!incomingErrorInput.has_value()) {
+            return;
+        }
+        if (errorInput.has_value()) {
+            THOR_THROW_IF_FALSE(incomingErrorInput.value() == errorInput.value());
+        }
+        if (!previousLayer.has_value() || !errorOutput.has_value()) {
+            return;
+        }
+        previousLayer.value()->backward(errorOutput, batchSize);
+    }
 
    protected:
     struct InputSlot {

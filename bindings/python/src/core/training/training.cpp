@@ -1868,23 +1868,32 @@ calling this helper.
         "__new__",
         [](nb::handle cls,
            const std::string& name,
+           nb::object network,
            std::vector<Tensor> loss_roots,
            std::map<std::string, Tensor> outputs,
            std::vector<std::string> depends_on,
            bool enabled) -> std::shared_ptr<TrainingPhase> {
             (void)cls;
+            if (!network.is_none()) {
+                if (!loss_roots.empty() || !outputs.empty() || !depends_on.empty()) {
+                    throw nb::value_error("TrainingPhase requires either network or legacy loss_roots/outputs/depends_on, not both.");
+                }
+                return std::make_shared<TrainingPhase>(name, nb::cast<std::shared_ptr<Network>>(network), enabled);
+            }
             return std::make_shared<TrainingPhase>(name, std::move(loss_roots), std::move(outputs), std::move(depends_on), enabled);
         },
         "cls"_a,
         "name"_a,
+        "network"_a.none() = nb::none(),
         "loss_roots"_a = std::vector<Tensor>{},
         "outputs"_a = std::map<std::string, Tensor>{},
         "depends_on"_a = std::vector<std::string>{},
         "enabled"_a = true);
     training_phase.def(
         "__init__",
-        [](TrainingPhase*, const std::string&, std::vector<Tensor>, std::map<std::string, Tensor>, std::vector<std::string>, bool) {},
+        [](TrainingPhase*, const std::string&, nb::object, std::vector<Tensor>, std::map<std::string, Tensor>, std::vector<std::string>, bool) {},
         "name"_a,
+        "network"_a.none() = nb::none(),
         "loss_roots"_a = std::vector<Tensor>{},
         "outputs"_a = std::map<std::string, Tensor>{},
         "depends_on"_a = std::vector<std::string>{},
@@ -1896,6 +1905,8 @@ calling this helper.
     training_phase.def("enable", &TrainingPhase::enable);
     training_phase.def("disable", &TrainingPhase::disable);
     training_phase.def("set_enabled", &TrainingPhase::setEnabled, "enabled"_a);
+    training_phase.def("has_network", &TrainingPhase::hasNetwork);
+    training_phase.def("get_network", &TrainingPhase::getNetwork);
     training_phase.def("get_loss_roots", &TrainingPhase::getLossRoots, nb::rv_policy::reference_internal);
     training_phase.def("get_outputs", &TrainingPhase::getOutputs, nb::rv_policy::reference_internal);
     training_phase.def("get_depends_on", &TrainingPhase::getDependsOn, nb::rv_policy::reference_internal);

@@ -22,6 +22,7 @@ class NetworkInput : public Layer {
     std::vector<uint64_t> getDimensions() const { return dimensions; }
     DataType getDataType() const { return dataType; }
     bool dimensionsIncludeBatch() const { return dimensionsIncludeBatch_; }
+    bool isExternal() const { return external_; }
     bool hasPassThroughSource() const { return passThroughSource_.has_value(); }
     Tensor getPassThroughSource() const {
         THOR_THROW_IF_FALSE(passThroughSource_.has_value());
@@ -92,6 +93,7 @@ class NetworkInput : public Layer {
     std::vector<uint64_t> dimensions;
     DataType dataType;
     bool dimensionsIncludeBatch_ = false;
+    bool external_ = true;
     std::optional<Tensor> passThroughSource_;
 
     friend class Network;
@@ -132,6 +134,11 @@ class NetworkInput::Builder {
         return *this;
     }
 
+    virtual NetworkInput::Builder &external(bool isExternal) {
+        this->_external = isExternal;
+        return *this;
+    }
+
     virtual NetworkInput::Builder &passThroughSource(const Tensor &sourceTensor) {
         THOR_THROW_IF_FALSE(sourceTensor.isInitialized());
         this->_passThroughSource = sourceTensor;
@@ -144,6 +151,7 @@ class NetworkInput::Builder {
     std::optional<std::vector<uint64_t>> _dimensions;
     std::optional<DataType> _dataType;
     bool _dimensionsIncludeBatch = false;
+    bool _external = true;
     std::optional<Tensor> _passThroughSource;
 };
 

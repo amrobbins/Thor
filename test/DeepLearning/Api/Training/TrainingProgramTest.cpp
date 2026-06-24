@@ -103,6 +103,65 @@ TEST(TrainingPhaseApi, AllowsForwardOnlyPhaseWithoutLossRoots) {
     EXPECT_EQ(phase.getOutputs().at("forecast"), forecast);
 }
 
+
+TEST(TrainingPhaseApi, NetworkBackedPhaseDerivesLossRootsAndOutputs) {
+    auto phaseNetwork = std::make_shared<Network>("daily_phase_network");
+    NetworkInput input = NetworkInput::Builder().network(*phaseNetwork).name("features").dimensions({3}).dataType(DataType::FP32).build();
+    NetworkOutput::Builder().network(*phaseNetwork).name("forecast").inputTensor(input.getFeatureOutput().value()).build();
+
+    TrainingPhase phase("daily_prediction", phaseNetwork, false);
+
+    EXPECT_TRUE(phase.isInitialized());
+    EXPECT_FALSE(phase.isEnabled());
+    EXPECT_TRUE(phase.hasNetwork());
+    EXPECT_EQ(phase.getNetwork(), phaseNetwork);
+    EXPECT_TRUE(phase.getLossRoots().empty());
+    ASSERT_EQ(phase.getOutputs().size(), 1u);
+    EXPECT_EQ(phase.getOutputs().at("forecast"), input.getFeatureOutput().value());
+    EXPECT_TRUE(phase.getDependsOn().empty());
+
+    nlohmann::json phaseJson = phase.architectureJson();
+    EXPECT_EQ(phaseJson.at("version").get<std::string>(), "1.1.0");
+    EXPECT_EQ(phaseJson.at("network").at("name").get<std::string>(), "daily_phase_network");
+    EXPECT_FALSE(phaseJson.contains("depends_on"));
+
+    TrainingPhase restored = TrainingPhase::deserialize(phaseJson);
+    EXPECT_TRUE(restored.hasNetwork());
+    EXPECT_EQ(restored.getNetwork()->getNetworkName(), "daily_phase_network");
+    ASSERT_EQ(restored.getOutputs().size(), 1u);
+    EXPECT_TRUE(restored.getOutputs().count("forecast") != 0);
+    EXPECT_FALSE(restored.isEnabled());
+}
+
+TEST(TrainingStepApi, ActivePhaseNetworkSpecsExposeEnabledNetworkBackedPhases) {
+    auto encoderNetwork = std::make_shared<Network>("encoder_phase_network");
+    NetworkInput input = NetworkInput::Builder().network(*encoderNetwork).name("features").dimensions({3}).dataType(DataType::FP32).build();
+    NetworkOutput::Builder().network(*encoderNetwork).name("hidden").inputTensor(input.getFeatureOutput().value()).external(false).build();
+
+    auto headNetwork = std::make_shared<Network>("head_phase_network");
+    NetworkInput hidden = NetworkInput::Builder().network(*headNetwork).name("hidden").dimensions({3}).dataType(DataType::FP32).external(false).build();
+    NetworkInput labels = NetworkInput::Builder().network(*headNetwork).name("labels").dimensions({3}).dataType(DataType::FP32).build();
+    MSE mse = MSE::Builder().network(*headNetwork).predictions(hidden.getFeatureOutput().value()).labels(labels.getFeatureOutput().value()).build();
+    NetworkOutput::Builder().network(*headNetwork).name("prediction").inputTensor(hidden.getFeatureOutput().value()).build();
+    NetworkOutput::Builder().network(*headNetwork).name("mse_loss").inputTensor(mse.getLoss()).build();
+
+    auto encoderPhase = std::make_shared<TrainingPhase>("encoder", encoderNetwork);
+    auto headPhase = std::make_shared<TrainingPhase>("head", headNetwork, false);
+    TrainingStep step("two_phase", std::vector<std::shared_ptr<TrainingPhase>>{encoderPhase, headPhase}, nullptr, {});
+
+    std::vector<PhaseGraphNetworkSpec> specs = step.getActivePhaseNetworkSpecs();
+    ASSERT_EQ(specs.size(), 1u);
+    EXPECT_EQ(specs[0].phaseName, "encoder");
+    EXPECT_EQ(specs[0].network, encoderNetwork);
+    EXPECT_TRUE(specs[0].active);
+
+    headPhase->enable();
+    specs = step.getActivePhaseNetworkSpecs();
+    ASSERT_EQ(specs.size(), 2u);
+    EXPECT_EQ(specs[0].phaseName, "encoder");
+    EXPECT_EQ(specs[1].phaseName, "head");
+}
+
 TEST(TrainingPhaseApi, RejectsInvalidConstruction) {
     Tensor loss(DataType::FP32, {1});
     Tensor output(DataType::FP32, {100});

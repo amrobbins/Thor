@@ -152,6 +152,9 @@ class Network {
     std::vector<std::string> cudaKernelSources() const;
     std::string cudaKernelSourceInfoJsonString() const;
     [[nodiscard]] bool hasCudaKernelExpressions() const;
+
+    [[nodiscard]] std::optional<std::string> getCloneSourceKeyForLayerId(uint64_t layerId) const;
+    [[nodiscard]] const std::map<uint64_t, std::string>& getCloneSourceKeysByLayerId() const { return cloneSourceKeyByLayerId; }
     void captureCudaKernelSaveKeysToFile(const std::string &path, bool overwrite = false);
     void clearCudaKernelSaveKeyCapture();
     [[nodiscard]] bool cudaKernelSaveKeyCaptureConfigured() const { return cudaKernelSaveKeyCaptureFile_.has_value(); }
@@ -218,6 +221,12 @@ class Network {
     std::map<uint64_t, Tensor> apiTensorByOriginalId;
     std::map<Tensor, std::vector<std::shared_ptr<Layer>>> apiTensorToApiLoadingLayers;
     std::map<Tensor, std::shared_ptr<Layer>> apiTensorToApiDrivingLayer;
+
+    // When a Network is built by cloning phase subgraphs, each cloned API layer can
+    // carry a stable source identity.  Fresh composition creates fresh layer ids,
+    // so Trainer.fit(...) uses this key to preserve matching parameter and optimizer
+    // state across active-phase changes.
+    std::map<uint64_t, std::string> cloneSourceKeyByLayerId;
     std::map<std::shared_ptr<Layer>, std::vector<Tensor>, Network::LayerComparator> apiLayerToApiOutputTensors;
     std::map<std::shared_ptr<Layer>, std::vector<Tensor>, Network::LayerComparator> apiLayerToApiInputTensors;
 

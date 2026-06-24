@@ -28,12 +28,14 @@ NetworkInput NetworkInput::Builder::build() {
         }
         networkInput.dimensions = sourceTensor.getDimensions();
         networkInput.dataType = sourceTensor.getDataType();
+        networkInput.external_ = false;
         networkInput.passThroughSource_ = sourceTensor;
         networkInput.featureInput = sourceTensor;
         networkInput.featureOutput = sourceTensor;
     } else {
         networkInput.dimensions = _dimensions.value();
         networkInput.dataType = _dataType.value();
+        networkInput.external_ = _external;
         networkInput.featureInput = Tensor(_dataType.value(), _dimensions.value());
         networkInput.featureOutput = Tensor(_dataType.value(), _dimensions.value());
     }
@@ -50,6 +52,7 @@ json NetworkInput::architectureJson() const {
                 {"name", name},
                 {"dimensions", getDimensions()},
                 {"dimensions_include_batch", dimensionsIncludeBatch()},
+                {"external", isExternal()},
                 {"data_type", json(getDataType())},
                 {"feature_input", featureInput.value().architectureJson()},
                 {"feature_output", featureOutput.value().architectureJson()}};
@@ -64,6 +67,7 @@ void NetworkInput::deserialize(const json &j, Network *network) {
     vector<uint64_t> dimensions = j.at("dimensions").get<vector<uint64_t>>();
     DataType dataType = j.at("data_type").get<DataType>();
     bool dimensionsIncludeBatch = j.value("dimensions_include_batch", false);
+    bool external = j.value("external", true);
 
     NetworkInput networkInput;
     networkInput.name = name;
@@ -80,10 +84,12 @@ void NetworkInput::deserialize(const json &j, Network *network) {
         Tensor sourceTensor = network->resolveApiTensorByOriginalId(sourceOriginalId);
         THOR_THROW_IF_FALSE(sourceTensor.getDimensions() == dimensions);
         THOR_THROW_IF_FALSE(sourceTensor.getDataType() == dataType);
+        networkInput.external_ = false;
         networkInput.passThroughSource_ = sourceTensor;
         networkInput.featureInput = sourceTensor;
         networkInput.featureOutput = sourceTensor;
     } else {
+        networkInput.external_ = external;
         networkInput.featureInput = Tensor::deserialize(j["feature_input"]);
         networkInput.featureOutput = Tensor::deserialize(j["feature_output"]);
     }

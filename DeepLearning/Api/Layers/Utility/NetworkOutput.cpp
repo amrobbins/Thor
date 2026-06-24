@@ -20,6 +20,7 @@ void NetworkOutput::buildSupportLayersAndAddToNetwork() {
                               .name(name)
                               .inputTensor(currentFeatureInput)
                               .dataType(dataType)
+                              .external(external_)
                               .build()
                               .getFeatureOutput().value();
 
@@ -35,6 +36,7 @@ json NetworkOutput::architectureJson() const {
                 {"layer_type", "network_output"},
                 {"name", name},
                 {"data_type", json(getDataType())},
+                {"external", isExternal()},
                 {"feature_input", featureInput.value().architectureJson()},
                 {"feature_output", featureOutput.value().architectureJson()}};
 }
@@ -42,10 +44,12 @@ json NetworkOutput::architectureJson() const {
 void NetworkOutput::deserialize(const json &j, Network *network) {
     std::string name = j.at("name").get<std::string>();
     DataType dataType = j.at("data_type").get<DataType>();
+    bool external = j.value("external", true);
 
     NetworkOutput networkOutput;
     networkOutput.name = name;
     networkOutput.dataType = dataType;
+    networkOutput.external_ = external;
     uint64_t originalTensorId = j["feature_input"].at("id").get<uint64_t>();
     networkOutput.featureInput = network->getApiTensorByOriginalId(originalTensorId);
     networkOutput.featureOutput = Tensor::deserialize(j["feature_output"]);

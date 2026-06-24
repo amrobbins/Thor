@@ -30,7 +30,8 @@ void bind_network_input(nb::module_ &m) {
            const vector<uint64_t> &dimensions,
            const DataType &data_type,
            bool dimensions_include_batch,
-           std::optional<Tensor> pass_through_source) {
+           std::optional<Tensor> pass_through_source,
+           bool external) {
             if (name.length() == 0) {
                 string msg = "Network Input instance: name must have non-zero length but name=\"\" was passed in.";
                 throw nb::value_error(msg.c_str());
@@ -45,7 +46,8 @@ void bind_network_input(nb::module_ &m) {
                 .name(name)
                 .dimensions(dimensions)
                 .dataType(data_type)
-                .dimensionsIncludeBatch(dimensions_include_batch);
+                .dimensionsIncludeBatch(dimensions_include_batch)
+                .external(external);
             if (pass_through_source.has_value()) {
                 builder.passThroughSource(pass_through_source.value());
             }
@@ -59,7 +61,8 @@ void bind_network_input(nb::module_ &m) {
         "dimensions"_a,
         "data_type"_a,
         "dimensions_include_batch"_a = false,
-        "pass_through_source"_a = nb::none());
+        "pass_through_source"_a = nb::none(),
+        "external"_a = true);
 
     network_input.def(
         "get_feature_output",
@@ -78,6 +81,8 @@ void bind_network_input(nb::module_ &m) {
             thor.Tensor
                 The feature output tensor handle.
             )nbdoc");
+
+    network_input.def("is_external", &NetworkInput::isExternal);
 
     network_input.def("version", &Layer::getLayerVersion);
 
@@ -105,5 +110,9 @@ void bind_network_input(nb::module_ &m) {
                 is an API-level pass-through alias of the source tensor.  It is not
                 stamped as an external network input and does not allocate or copy
                 through an input staging tensor.
+            external : bool, default True
+                Whether this input may be satisfied by external data when no active
+                phase NetworkOutput with the same name is available.  Pass-through
+                inputs are always treated as non-external.
             )nbdoc";
 }

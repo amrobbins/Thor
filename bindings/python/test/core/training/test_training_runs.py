@@ -610,22 +610,53 @@ def _build_airfoil_two_phase_joint_quantile_regressor(
     name: str,
 ) -> tuple[thor.Network, thor.training.TrainingProgram, thor.training.TrainingPhase]:
     network = thor.Network(name)
-    examples = thor.layers.NetworkInput(network, "examples", [5], thor.DataType.fp32)
-    demand = thor.layers.NetworkInput(network, "demand", [1], thor.DataType.fp32)
+
+    point_network = thor.Network(f"{name}_point_forecast_phase")
+    point_examples = thor.layers.NetworkInput(point_network, "examples", [5], thor.DataType.fp32)
+    point_demand = thor.layers.NetworkInput(point_network, "demand", [1], thor.DataType.fp32)
 
     zero = thor.initializers.UniformRandom(0.0, 0.0)
     point_forecast = thor.layers.FullyConnected(
-        network,
-        examples.get_feature_output(),
+        point_network,
+        point_examples.get_feature_output(),
         1,
         True,
         activation=None,
         weights_initializer=zero,
         biases_initializer=zero,
     )
+    point_mse = thor.losses.MSE(
+        point_network,
+        point_forecast.get_feature_output(),
+        point_demand.get_feature_output(),
+        thor.DataType.fp32,
+    )
+    point_mae = thor.metrics.LossMetric(
+        point_network,
+        point_forecast.get_feature_output(),
+        point_demand.get_feature_output(),
+        formula=thor.metrics.LossFormula.mean_absolute_error,
+        display_name="Point MAE",
+    )
+
+    thor.layers.NetworkOutput(point_network, "point_mse_loss", point_mse.get_loss(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(point_network, "point_mae_accuracy", point_mae.get_metric(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(point_network, "forecast", point_forecast.get_feature_output(), thor.DataType.fp32)
+
+    joint_network = thor.Network(f"{name}_joint_and_quantile_phase")
+    joint_examples = thor.layers.NetworkInput(joint_network, "examples", [5], thor.DataType.fp32)
+    joint_demand = thor.layers.NetworkInput(joint_network, "demand", [1], thor.DataType.fp32)
+    point_forecast_input = thor.layers.NetworkInput(
+        joint_network,
+        "forecast",
+        [1],
+        thor.DataType.fp32,
+        external=False,
+    )
+
     high_quantile_forecast = thor.layers.FullyConnected(
-        network,
-        examples.get_feature_output(),
+        joint_network,
+        joint_examples.get_feature_output(),
         1,
         True,
         activation=None,
@@ -643,9 +674,9 @@ def _build_airfoil_two_phase_joint_quantile_regressor(
     # training-only label input, which would fail if a single multi-input
     # CustomLayer mixed the prediction path and label path.
     joint_forecast_projection = thor.layers.CustomLayer(
-        network=network,
+        network=joint_network,
         inputs={
-            "point_forecast": point_forecast.get_feature_output()
+            "point_forecast": point_forecast_input.get_feature_output()
         },
         output_names=["joint_forecast"],
         build=lambda context: {
@@ -653,86 +684,49 @@ def _build_airfoil_two_phase_joint_quantile_regressor(
         },
     )
     joint_demand_projection = thor.layers.CustomLayer(
-        network=network,
+        network=joint_network,
         inputs={
-            "demand": demand.get_feature_output()
+            "demand": joint_demand.get_feature_output()
         },
         output_names=["joint_demand"],
         build=lambda context: {
             "joint_demand": context.input("demand") * 2.0
         },
     )
-    point_mse = thor.losses.MSE(
-        network,
-        point_forecast.get_feature_output(),
-        demand.get_feature_output(),
-        thor.DataType.fp32,
-    )
     joint_mse = thor.losses.MSE(
-        network,
+        joint_network,
         joint_forecast_projection["joint_forecast"],
         joint_demand_projection["joint_demand"],
         thor.DataType.fp32,
     )
     high_quantile = thor.losses.QuantileLoss(
-        network,
+        joint_network,
         high_quantile_forecast.get_feature_output(),
-        demand.get_feature_output(),
+        joint_demand.get_feature_output(),
         0.9,
         thor.DataType.fp32,
     )
-    point_mae = thor.metrics.LossMetric(
-        network,
-        point_forecast.get_feature_output(),
-        demand.get_feature_output(),
-        formula=thor.metrics.LossFormula.mean_absolute_error,
-        display_name="Point MAE",
-    )
     joint_mae = thor.metrics.LossMetric(
-        network,
+        joint_network,
         joint_forecast_projection["joint_forecast"],
         joint_demand_projection["joint_demand"],
         formula=thor.metrics.LossFormula.mean_absolute_error,
         display_name="Joint MAE",
     )
 
-    point_mse_tensor = point_mse.get_loss()
-    joint_mse_tensor = joint_mse.get_loss()
-    high_quantile_tensor = high_quantile.get_loss()
-    point_mae_tensor = point_mae.get_metric()
-    joint_mae_tensor = joint_mae.get_metric()
-    point_prediction_tensor = point_forecast.get_feature_output()
-    high_prediction_tensor = high_quantile_forecast.get_feature_output()
-
-    thor.layers.NetworkOutput(network, "point_mse_loss", point_mse_tensor, thor.DataType.fp32)
-    thor.layers.NetworkOutput(network, "joint_mse_loss", joint_mse_tensor, thor.DataType.fp32)
-    thor.layers.NetworkOutput(network, "quantile_high_loss", high_quantile_tensor, thor.DataType.fp32)
-    thor.layers.NetworkOutput(network, "point_mae_accuracy", point_mae_tensor, thor.DataType.fp32)
-    thor.layers.NetworkOutput(network, "joint_mae_accuracy", joint_mae_tensor, thor.DataType.fp32)
-    thor.layers.NetworkOutput(network, "forecast", point_prediction_tensor, thor.DataType.fp32)
-    thor.layers.NetworkOutput(network, "forecast_p90", high_prediction_tensor, thor.DataType.fp32)
+    thor.layers.NetworkOutput(joint_network, "joint_mse_loss", joint_mse.get_loss(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(joint_network, "quantile_high_loss", high_quantile.get_loss(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(joint_network, "joint_mae_accuracy", joint_mae.get_metric(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(joint_network, "forecast_p90", high_quantile_forecast.get_feature_output(), thor.DataType.fp32)
 
     point_phase = thor.training.TrainingPhase(
         "point_forecast",
-        loss_roots=[point_mse_tensor],
-        outputs={
-            "forecast": point_prediction_tensor,
-            "point_mse_loss": point_mse_tensor,
-            "point_mae_accuracy": point_mae_tensor,
-        },
+        network=point_network,
         enabled=True,
     )
     second_phase = thor.training.TrainingPhase(
         "joint_and_quantile",
-        loss_roots=[joint_mse_tensor, high_quantile_tensor],
-        outputs={
-            "forecast": point_prediction_tensor,
-            "forecast_p90": high_prediction_tensor,
-            "joint_mse_loss": joint_mse_tensor,
-            "quantile_high_loss": high_quantile_tensor,
-            "joint_mae_accuracy": joint_mae_tensor,
-        },
-        depends_on=["point_forecast"],
+        network=joint_network,
         enabled=False,
     )
     step = thor.training.TrainingStep(
@@ -751,116 +745,129 @@ def _build_airfoil_two_phase_mae_then_mse_regressor(
 ) -> tuple[thor.Network, thor.training.TrainingProgram, thor.training.TrainingPhase]:
     """Real two-phase Airfoil model: MAE pretrain, then MSE head using MAE forecast.
 
-    Phase 1 trains a FullyConnected backbone plus an MAE forecast head. Phase 2
-    adds a second FullyConnected head whose input concatenates the shared hidden
-    representation with the phase-1 forecast, so the MSE head explicitly consumes
-    the pretrained prediction rather than being an independent sibling output.
+    Phase 1 is an ordinary network that exports hidden state and the MAE forecast.
+    Phase 2 is another ordinary network whose non-external inputs are satisfied by
+    those phase-1 NetworkOutputs when both phases are enabled.
     """
     network = thor.Network(name)
-    examples = thor.layers.NetworkInput(network, "examples", [5], thor.DataType.fp32)
-    demand = thor.layers.NetworkInput(network, "demand", [1], thor.DataType.fp32)
+
+    mae_network = thor.Network(f"{name}_mae_pretrain_phase")
+    mae_examples = thor.layers.NetworkInput(mae_network, "examples", [5], thor.DataType.fp32)
+    mae_demand = thor.layers.NetworkInput(mae_network, "demand", [1], thor.DataType.fp32)
 
     hidden = thor.layers.FullyConnected(
-        network,
-        examples.get_feature_output(),
+        mae_network,
+        mae_examples.get_feature_output(),
         width,
         True,
         activation=thor.activations.Relu(),
     )
     hidden = thor.layers.FullyConnected(
-        network,
+        mae_network,
         hidden.get_feature_output(),
         width,
         True,
         activation=thor.activations.Relu(),
     )
     mae_forecast = thor.layers.FullyConnected(
-        network,
+        mae_network,
         hidden.get_feature_output(),
         1,
         True,
         activation=None,
     )
+    mae_loss = thor.losses.MAE(
+        mae_network,
+        mae_forecast.get_feature_output(),
+        mae_demand.get_feature_output(),
+        thor.DataType.fp32,
+    )
+    mae_head_mae = thor.metrics.LossMetric(
+        mae_network,
+        mae_forecast.get_feature_output(),
+        mae_demand.get_feature_output(),
+        formula=thor.metrics.LossFormula.mean_absolute_error,
+        display_name="MAE Head MAE",
+    )
+
+    thor.layers.NetworkOutput(mae_network, "mae_loss", mae_loss.get_loss(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(mae_network, "mae_head_mae_accuracy", mae_head_mae.get_metric(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(
+        mae_network,
+        "hidden",
+        hidden.get_feature_output(),
+        thor.DataType.fp32,
+        external=False,
+    )
+    thor.layers.NetworkOutput(
+        mae_network,
+        "mae_forecast",
+        mae_forecast.get_feature_output(),
+        thor.DataType.fp32,
+        external=False,
+    )
+
+    mse_network = thor.Network(f"{name}_mse_finetune_phase")
+    mse_demand = thor.layers.NetworkInput(mse_network, "demand", [1], thor.DataType.fp32)
+    mse_hidden_input = thor.layers.NetworkInput(
+        mse_network,
+        "hidden",
+        [width],
+        thor.DataType.fp32,
+        external=False,
+    )
+    mse_mae_forecast_input = thor.layers.NetworkInput(
+        mse_network,
+        "mae_forecast",
+        [1],
+        thor.DataType.fp32,
+        external=False,
+    )
     mse_features = thor.layers.Concatenate(
-        network,
-        [hidden.get_feature_output(), mae_forecast.get_feature_output()],
+        mse_network,
+        [mse_hidden_input.get_feature_output(), mse_mae_forecast_input.get_feature_output()],
         0,
     )
     mse_hidden = thor.layers.FullyConnected(
-        network,
+        mse_network,
         mse_features.get_feature_output(),
         width,
         True,
         activation=thor.activations.Relu(),
     )
     mse_forecast = thor.layers.FullyConnected(
-        network,
+        mse_network,
         mse_hidden.get_feature_output(),
         1,
         True,
         activation=None,
     )
-
-    mae_loss = thor.losses.MAE(
-        network,
-        mae_forecast.get_feature_output(),
-        demand.get_feature_output(),
-        thor.DataType.fp32,
-    )
     mse_loss = thor.losses.MSE(
-        network,
+        mse_network,
         mse_forecast.get_feature_output(),
-        demand.get_feature_output(),
+        mse_demand.get_feature_output(),
         thor.DataType.fp32,
-    )
-    mae_head_mae = thor.metrics.LossMetric(
-        network,
-        mae_forecast.get_feature_output(),
-        demand.get_feature_output(),
-        formula=thor.metrics.LossFormula.mean_absolute_error,
-        display_name="MAE Head MAE",
     )
     mse_head_mae = thor.metrics.LossMetric(
-        network,
+        mse_network,
         mse_forecast.get_feature_output(),
-        demand.get_feature_output(),
+        mse_demand.get_feature_output(),
         formula=thor.metrics.LossFormula.mean_absolute_error,
         display_name="MSE Head MAE",
     )
 
-    mae_loss_tensor = mae_loss.get_loss()
-    mse_loss_tensor = mse_loss.get_loss()
-    mae_head_mae_tensor = mae_head_mae.get_metric()
-    mse_head_mae_tensor = mse_head_mae.get_metric()
-    mae_forecast_tensor = mae_forecast.get_feature_output()
-    mse_forecast_tensor = mse_forecast.get_feature_output()
-
-    thor.layers.NetworkOutput(network, "mae_loss", mae_loss_tensor, thor.DataType.fp32)
-    thor.layers.NetworkOutput(network, "mse_loss", mse_loss_tensor, thor.DataType.fp32)
-    thor.layers.NetworkOutput(network, "mae_head_mae_accuracy", mae_head_mae_tensor, thor.DataType.fp32)
-    thor.layers.NetworkOutput(network, "mse_head_mae_accuracy", mse_head_mae_tensor, thor.DataType.fp32)
-    thor.layers.NetworkOutput(network, "mae_forecast", mae_forecast_tensor, thor.DataType.fp32)
-    thor.layers.NetworkOutput(network, "mse_forecast", mse_forecast_tensor, thor.DataType.fp32)
+    thor.layers.NetworkOutput(mse_network, "mse_loss", mse_loss.get_loss(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(mse_network, "mse_head_mae_accuracy", mse_head_mae.get_metric(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(mse_network, "mse_forecast", mse_forecast.get_feature_output(), thor.DataType.fp32)
 
     mae_phase = thor.training.TrainingPhase(
         "mae_pretrain",
-        loss_roots=[mae_loss_tensor],
-        outputs={
-            "mae_forecast": mae_forecast_tensor,
-            "mae_loss": mae_loss_tensor,
-            "mae_head_mae_accuracy": mae_head_mae_tensor,
-        },
+        network=mae_network,
         enabled=True,
     )
     mse_phase = thor.training.TrainingPhase(
         "mse_finetune",
-        loss_roots=[mse_loss_tensor],
-        outputs={
-            "mse_forecast": mse_forecast_tensor,
-            "mse_loss": mse_loss_tensor,
-            "mse_head_mae_accuracy": mse_head_mae_tensor,
-        },
-        depends_on=["mae_pretrain"],
+        network=mse_network,
         enabled=False,
     )
     step = thor.training.TrainingStep(
@@ -2312,7 +2319,7 @@ def test_training_runs_airfoil_cv3_two_phase_pretrain_then_joint_multi_loss_metr
 @pytest.mark.cuda
 @pytest.mark.training_integration
 @pytest.mark.skipif(
-    not RUN_TRAINING_INTEGRATION,
+    not RUN_TRAINING_INTEGRATION_LARGE,
     reason=integration_skip_reason(
         "THOR_RUN_TRAINING_INTEGRATION",
         description="opt-in TrainingRuns Airfoil two-phase MAE/MSE holdout integration test",
@@ -2385,13 +2392,19 @@ def test_training_runs_airfoil_cv3_two_phase_mae_pretrain_then_mse_head_holdout(
         run_name = f"fold_{fold_index}"
         run_specs.append((run_name, make_fold_trainer(fold=fold, run_name=run_name), ensemble_group))
 
-    main_trainers = {run_name: trainer for run_name, trainer, _ in run_specs}
+    main_trainers = {
+        run_name: trainer for run_name, trainer, _ in run_specs
+    }
 
     def make_runs():
         return thor.training.TrainingRuns(
             run_specs,
-            reported_losses={ensemble_group: reported_losses},
-            reported_metrics={ensemble_group: reported_metrics},
+            reported_losses={
+                ensemble_group: reported_losses
+            },
+            reported_metrics={
+                ensemble_group: reported_metrics
+            },
             max_parallel_runs=3,
             max_summary_logs_per_second=AIRFOIL_QUANTILE_SUMMARY_LOGS_PER_SECOND,
         )
@@ -2475,8 +2488,12 @@ def test_training_runs_airfoil_cv3_two_phase_mae_pretrain_then_mse_head_holdout(
     assert ensemble.ensemble_train_loss > 0.0
     assert ensemble.ensemble_test_loss > 0.0
 
-    ensemble_loss_by_name = {metric.name: metric for metric in ensemble.named_metrics}
-    ensemble_metric_by_name = {metric.name: metric for metric in ensemble.reported_metrics}
+    ensemble_loss_by_name = {
+        metric.name: metric for metric in ensemble.named_metrics
+    }
+    ensemble_metric_by_name = {
+        metric.name: metric for metric in ensemble.reported_metrics
+    }
     assert ensemble_loss_by_name["mae_loss"].test_value < holdout_zero_mae * 0.98, (
         holdout_zero_mae,
         ensemble_loss_by_name["mae_loss"].test_value,

@@ -28,6 +28,7 @@ TEST(UtilityApiLayers, NetworkInputBuilds) {
     NetworkInput networkInput = NetworkInput::Builder().network(network).dimensions(dimensions).dataType(dataType).build();
 
     ASSERT_TRUE(networkInput.isInitialized());
+    ASSERT_TRUE(networkInput.isExternal());
 
     std::optional<Tensor> actualInput = networkInput.getFeatureInput();
     ASSERT_TRUE(actualInput.has_value());
@@ -81,6 +82,7 @@ TEST(UtilityApiLayers, NetworkOutputBuilds) {
     NetworkOutput networkOutput = NetworkOutput::Builder().network(network).inputTensor(featureInput).dataType(outputDataType).build();
 
     ASSERT_TRUE(networkOutput.isInitialized());
+    ASSERT_TRUE(networkOutput.isExternal());
 
     std::optional<Tensor> actualInput = networkOutput.getFeatureInput();
     ASSERT_TRUE(actualInput.has_value());
@@ -115,6 +117,38 @@ TEST(UtilityApiLayers, NetworkOutputBuilds) {
     ASSERT_FALSE(networkOutput != *clone);
     ASSERT_FALSE(networkOutput > *clone);
     ASSERT_FALSE(networkOutput < *clone);
+}
+
+
+TEST(UtilityApiLayers, NetworkInputOutputExternalFlagBuilds) {
+    Network network("externalFlagNetwork");
+
+    NetworkInput externalInput =
+        NetworkInput::Builder().network(network).name("externalInput").dimensions({3}).dataType(DataType::FP32).build();
+    NetworkInput internalInput = NetworkInput::Builder()
+                                    .network(network)
+                                    .name("internalInput")
+                                    .dimensions({3})
+                                    .dataType(DataType::FP32)
+                                    .external(false)
+                                    .build();
+
+    NetworkOutput externalOutput = NetworkOutput::Builder()
+                                       .network(network)
+                                       .name("externalOutput")
+                                       .inputTensor(externalInput.getFeatureOutput().value())
+                                       .build();
+    NetworkOutput internalOutput = NetworkOutput::Builder()
+                                       .network(network)
+                                       .name("internalOutput")
+                                       .inputTensor(internalInput.getFeatureOutput().value())
+                                       .external(false)
+                                       .build();
+
+    EXPECT_TRUE(externalInput.isExternal());
+    EXPECT_FALSE(internalInput.isExternal());
+    EXPECT_TRUE(externalOutput.isExternal());
+    EXPECT_FALSE(internalOutput.isExternal());
 }
 
 TEST(UtilityApiLayers, NetworkInputOutputSerializeDeserialize) {
@@ -164,6 +198,8 @@ TEST(UtilityApiLayers, NetworkInputOutputSerializeDeserialize) {
     ASSERT_EQ(networkInputJ["factory"], Layer::Factory::Layer.value());
     ASSERT_EQ(networkInputJ["version"], "1.0.0");
     ASSERT_EQ(networkInputJ["layer_type"], "network_input");
+    ASSERT_TRUE(networkInputJ.at("external").get<bool>());
+    ASSERT_TRUE(networkOutputJ.at("external").get<bool>());
     const auto &input = networkInputJ.at("feature_input");
     ASSERT_TRUE(input.is_object());
     EXPECT_EQ(input.at("data_type").get<string>(), dataTypeString);

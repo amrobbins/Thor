@@ -22,14 +22,14 @@ void bind_network_output(nb::module_ &m) {
 
     network_output.def(
         "__init__",
-        [](NetworkOutput *self, Network &network, const string &name, const Tensor &input_tensor, const DataType &data_type) {
+        [](NetworkOutput *self, Network &network, const string &name, const Tensor &input_tensor, const DataType &data_type, bool external) {
             if (name.length() == 0) {
                 string msg = "Network Output instance: name must have non-zero length but name=\"\" was passed in.";
                 throw nb::value_error(msg.c_str());
             }
 
             NetworkOutput::Builder builder;
-            NetworkOutput built = builder.network(network).name(name).inputTensor(input_tensor).dataType(data_type).build();
+            NetworkOutput built = builder.network(network).name(name).inputTensor(input_tensor).dataType(data_type).external(external).build();
 
             // Move the networkOutput layer into the pre-allocated but uninitialized memory at self
             new (self) NetworkOutput(std::move(built));
@@ -37,7 +37,8 @@ void bind_network_output(nb::module_ &m) {
         "network"_a,
         "name"_a,
         "input_tensor"_a,
-        "data_type"_a);
+        "data_type"_a,
+        "external"_a = true);
 
     network_output.def(
         "get_feature_output",
@@ -57,6 +58,8 @@ void bind_network_output(nb::module_ &m) {
                 The feature output tensor handle.
             )nbdoc");
 
+    network_output.def("is_external", &NetworkOutput::isExternal);
+
     network_output.def("version", &NetworkInput::getLayerVersion);
 
     network_output.attr("__doc__") = R"nbdoc(
@@ -72,5 +75,9 @@ void bind_network_output(nb::module_ &m) {
                 The tensor whose data the network output will send out of the network.
             data_type : thor.DataType
                 Data type of the output tensor (e.g. thor.DataType.fp16).
+            external : bool, default True
+                Whether this output should be exposed/materialized outside of a
+                composed local phase graph. Non-external outputs may still satisfy
+                downstream phase NetworkInputs by name.
             )nbdoc";
 }

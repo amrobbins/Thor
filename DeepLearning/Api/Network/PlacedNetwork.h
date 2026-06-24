@@ -98,6 +98,11 @@ class PlacedNetwork {
     // learned weights.
     void copyTrainingStateFrom(PlacedNetwork& source);
 
+    // Copy parameter/optimizer state for layers that share a stable clone-source
+    // identity.  This is used by composed phase graphs, where fresh placement may
+    // introduce new API layer ids while preserving phase/source-layer identity.
+    void copyMatchingTrainingStateFrom(PlacedNetwork& source);
+
     uint64_t getNumStamps() { return stampedNetworks.size(); }
     ThorImplementation::StampedNetwork& getStampedNetwork(uint64_t i) {
         THOR_THROW_IF_FALSE(i < stampedNetworks.size());

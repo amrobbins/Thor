@@ -562,6 +562,14 @@ ApiSubgraphCloneResult Network::cloneInferenceSubgraphInto(const Network& source
             throw std::runtime_error("cloneInferenceSubgraphInto did not add a cloned layer for " + sourceLayerContext(layer) + ".");
         }
 
+        const std::string cloneSourceKey = options.namePrefix + sourceLayerContext(layer);
+        for (size_t clonedLayerIndex = previousLayerCount; clonedLayerIndex < this->allLayersInNetworkList.size(); ++clonedLayerIndex) {
+            const std::shared_ptr<Layer>& clonedLayer = this->allLayersInNetworkList[clonedLayerIndex];
+            if (clonedLayer != nullptr) {
+                cloneSourceKeyByLayerId[clonedLayer->getId()] = cloneSourceKey;
+            }
+        }
+
         for (uint64_t sourceOutputOriginalId : clonedLayerOutputOriginalIds) {
             auto mappedIt = destinationOriginalIdBySourceOriginalId.find(sourceOutputOriginalId);
             if (mappedIt == destinationOriginalIdBySourceOriginalId.end()) {
@@ -584,6 +592,14 @@ ApiSubgraphCloneResult Network::cloneInferenceSubgraphInto(const Network& source
 
     this->rebuildApiGraphIndexes(options.inferenceOnly);
     return result;
+}
+
+std::optional<std::string> Network::getCloneSourceKeyForLayerId(uint64_t layerId) const {
+    auto it = cloneSourceKeyByLayerId.find(layerId);
+    if (it == cloneSourceKeyByLayerId.end()) {
+        return std::nullopt;
+    }
+    return it->second;
 }
 
 bool Network::hasCudaKernelExpressions() const {

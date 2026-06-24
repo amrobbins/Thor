@@ -22,10 +22,18 @@ def test_network_output_constructs_and_returns_feature_output():
 
     assert no is not None
     assert isinstance(no, thor.layers.NetworkOutput)
+    assert no.is_external()
 
     out = no.get_feature_output()
     assert out is not None
     assert isinstance(out, thor.Tensor)
+
+
+def test_network_output_external_flag():
+    n = _net()
+    ni = thor.layers.NetworkInput(n, "input", [16], thor.DataType.fp16)
+    no = thor.layers.NetworkOutput(n, "internal_output", ni.get_feature_output(), thor.DataType.fp16, external=False)
+    assert not no.is_external()
 
 
 def test_network_output_rejects_empty_name():
@@ -47,7 +55,7 @@ def test_network_output_rejects_wrong_types_and_arity():
         thor.layers.NetworkOutput(n, "out", x)  # missing data_type
 
     with pytest.raises(TypeError):
-        thor.layers.NetworkOutput(n, "out", x, thor.DataType.fp16, 123)  # extra arg
+        thor.layers.NetworkOutput(n, "out", x, thor.DataType.fp16, True, 123)  # extra arg
 
     with pytest.raises(TypeError):
         thor.layers.NetworkOutput("not a network", "out", x, thor.DataType.fp16)

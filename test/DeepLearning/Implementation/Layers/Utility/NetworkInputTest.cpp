@@ -264,6 +264,62 @@ class RuntimeForwardedInputCaptureLayer : public Layer {
     vector<Tensor> capturedCopies;
 };
 
+class FixedOutputBackpropCaptureLayer : public Layer {
+   public:
+    explicit FixedOutputBackpropCaptureLayer(Tensor output) : output(std::move(output)) {}
+
+    std::optional<Tensor> createFeatureOutputTensor() override { return output; }
+
+    bool isBackPropStub() override { return false; }
+
+    void backward(std::optional<Tensor> incomingErrorInput, uint32_t batchSize = 0) override {
+        (void)batchSize;
+        capturedErrors.push_back(incomingErrorInput);
+    }
+
+    void infer(std::optional<Tensor> inputTensor, std::optional<Tensor> outputTensor, Stream inferStream) override {
+        (void)inputTensor;
+        (void)outputTensor;
+        (void)inferStream;
+        THOR_UNREACHABLE();
+    }
+
+    void backProp(std::optional<Tensor> dataIn,
+                  std::optional<Tensor> errorIn,
+                  std::optional<Tensor> errorOut,
+                  Stream backPropStream) override {
+        (void)dataIn;
+        (void)errorIn;
+        (void)errorOut;
+        (void)backPropStream;
+        THOR_UNREACHABLE();
+    }
+
+    Tensor output;
+    vector<std::optional<Tensor>> capturedErrors;
+};
+
+class BackpropSinkLayer : public Layer {
+   public:
+    void infer(std::optional<Tensor> inputTensor, std::optional<Tensor> outputTensor, Stream inferStream) override {
+        (void)inputTensor;
+        (void)outputTensor;
+        (void)inferStream;
+        THOR_UNREACHABLE();
+    }
+
+    void backProp(std::optional<Tensor> dataIn,
+                  std::optional<Tensor> errorIn,
+                  std::optional<Tensor> errorOut,
+                  Stream backPropStream) override {
+        (void)dataIn;
+        (void)errorIn;
+        (void)errorOut;
+        (void)backPropStream;
+        THOR_UNREACHABLE();
+    }
+};
+
 }  // namespace
 
 // Network composition primitive: a pass-through NetworkInput binds an upstream
@@ -306,6 +362,65 @@ TEST(NetworkInput, PassThroughBindsSourceTensorIdentityBeforeDownstreamConnect) 
     ASSERT_EQ(capture.connectedMemPtrs[0], source.getMemPtr<void>());
     ASSERT_EQ(capture.forwardedMemPtrs[0], source.getMemPtr<void>());
     expectAllEqual(capture.readCapture(0), 7.0f);
+}
+
+TEST(NetworkInput, PassThroughConnectsAndForwardsBackwardErrorAsIdentity) {
+    if (MachineEvaluator::instance().getNumGpus() == 0) {
+        GTEST_SKIP() << "NetworkInput pass-through backward test requires a GPU";
+    }
+
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    TensorDescriptor descriptor(DataType::FP32, {4});
+    Stream setupStream(0);
+    Tensor source = makeFilledGpuTensor(descriptor, 1.0f, setupStream);
+    setupStream.synchronize();
+
+    FixedOutputBackpropCaptureLayer producer(source);
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions(), NetworkInput::Mode::PassThrough);
+    BackpropSinkLayer sink;
+
+    producer.connectToNextLayer(&input);
+    ASSERT_TRUE(input.getErrorOutput().has_value());
+    ASSERT_TRUE(producer.getErrorInput().has_value());
+    const Tensor provisionalError = input.getErrorOutput().value();
+    EXPECT_EQ(producer.getErrorInput().value(), provisionalError);
+
+    input.connectToNextLayer(&sink);
+    ASSERT_TRUE(sink.getErrorOutput().has_value());
+    ASSERT_TRUE(input.getErrorInput().has_value());
+    ASSERT_TRUE(input.getErrorOutput().has_value());
+    ASSERT_TRUE(producer.getErrorInput().has_value());
+
+    // The pass-through input is a differentiable identity edge: once the
+    // downstream side exists, the provisional upstream error tensor is fused
+    // into the downstream error tensor instead of materializing a copy.
+    EXPECT_NE(provisionalError, sink.getErrorOutput().value());
+    EXPECT_EQ(input.getErrorInput().value(), sink.getErrorOutput().value());
+    EXPECT_EQ(input.getErrorOutput().value(), sink.getErrorOutput().value());
+    EXPECT_EQ(producer.getErrorInput().value(), sink.getErrorOutput().value());
+
+    input.backward(sink.getErrorOutput(), 1);
+
+    ASSERT_EQ(producer.capturedErrors.size(), 1u);
+    ASSERT_TRUE(producer.capturedErrors[0].has_value());
+    EXPECT_EQ(producer.capturedErrors[0].value(), sink.getErrorOutput().value());
+}
+
+TEST(NetworkInput, ExternalLoadInputRemainsBackwardBoundary) {
+    if (MachineEvaluator::instance().getNumGpus() == 0) {
+        GTEST_SKIP() << "NetworkInput backward-boundary test requires a GPU";
+    }
+
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    TensorDescriptor descriptor(DataType::FP32, {4});
+
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    BackpropSinkLayer sink;
+    input.connectToNextLayer(&sink);
+
+    EXPECT_FALSE(input.getErrorInput().has_value());
+    EXPECT_FALSE(input.getErrorOutput().has_value());
+    EXPECT_FALSE(sink.getErrorOutput().has_value());
 }
 
 
