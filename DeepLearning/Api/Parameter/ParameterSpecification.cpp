@@ -154,7 +154,7 @@ void ParameterSpecification::validateStorageFactoryReadyForStamping() const {
 }
 
 // Parameters don't need to be serialized, bound parameters do. That will resolve the trainingInitiallyEnabled vs current state issue.
-json ParameterSpecification::architectureJson() const {
+json ParameterSpecification::architectureJson(bool includeArchiveStorageFile) const {
     // Here I call architectureJson for parameter, initializer and optimizer
 
     json j;
@@ -174,6 +174,9 @@ json ParameterSpecification::architectureJson() const {
             "Parameter '" + name +
             "' is not serializable because its storage is determined by a runtime StorageContext factory and no resolved storage "
             "or static shape/dtype definition is available.");
+    }
+    if (includeArchiveStorageFile && storageFile.has_value()) {
+        j["storage_file"] = storageFile.value();
     }
     j["trainable"] = trainable;
     if (trainable)

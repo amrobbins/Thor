@@ -49,7 +49,7 @@ class Parameterizable {
 
     std::string listParametersString() const;
 
-    nlohmann::json getParametersArchitectureJson() const;
+    nlohmann::json getParametersArchitectureJson(bool includeArchiveStorageFiles = false) const;
     void serializeParameters(nlohmann::json& parameterJson,
                              thor_file::TarWriter& archiveWriter,
                              Stream stream,

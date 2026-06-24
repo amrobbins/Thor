@@ -340,6 +340,12 @@ TEST(TrainingRunsStatsReporter, EnsembleReportShowsEvaluationMetricsAndIncomplet
     completedEnsemble.members = {member0, member1};
     completedEnsemble.ensembleTrainingLoss = 0.123;
     completedEnsemble.ensembleTestLoss = 0.456;
+    TrainingNamedMetricResult overallNamedLoss;
+    overallNamedLoss.name = "loss";
+    overallNamedLoss.outputName = "prediction";
+    overallNamedLoss.targetInputName = "labels";
+    overallNamedLoss.trainValue = 0.123;
+    overallNamedLoss.testValue = 0.456;
     TrainingNamedMetricResult dailyLoss;
     dailyLoss.name = "daily_loss";
     dailyLoss.outputName = "daily";
@@ -351,7 +357,7 @@ TEST(TrainingRunsStatsReporter, EnsembleReportShowsEvaluationMetricsAndIncomplet
     aggregateLoss.outputName = "aggregate";
     aggregateLoss.targetInputName = "observed_aggregate";
     aggregateLoss.testValue = 0.333;
-    completedEnsemble.namedMetrics = {dailyLoss, aggregateLoss};
+    completedEnsemble.namedMetrics = {overallNamedLoss, dailyLoss, aggregateLoss};
 
     TrainingEnsembleResult incompleteEnsemble;
     incompleteEnsemble.ensembleGroup = "mixed_group";
@@ -380,6 +386,12 @@ TEST(TrainingRunsStatsReporter, EnsembleReportShowsEvaluationMetricsAndIncomplet
     ASSERT_FALSE(completedLine.empty()) << output;
     EXPECT_EQ(completedLine.find(" completed="), std::string::npos) << completedLine;
     EXPECT_EQ(completedLine.find(" failed="), std::string::npos) << completedLine;
+    const std::string trainLossKey = "ensemble_train_loss=";
+    const std::string testLossKey = "ensemble_test_loss=";
+    EXPECT_NE(completedLine.find(trainLossKey), std::string::npos) << completedLine;
+    EXPECT_EQ(completedLine.find(trainLossKey, completedLine.find(trainLossKey) + trainLossKey.size()), std::string::npos) << completedLine;
+    EXPECT_NE(completedLine.find(testLossKey), std::string::npos) << completedLine;
+    EXPECT_EQ(completedLine.find(testLossKey, completedLine.find(testLossKey) + testLossKey.size()), std::string::npos) << completedLine;
 
     EXPECT_TRUE(hasLineWithAll(output,
                                {"INFO runs ensemble[mixed_group]:",

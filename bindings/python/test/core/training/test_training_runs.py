@@ -1281,8 +1281,8 @@ def test_training_runs_fits_two_tiny_trainers_on_one_gpu_and_prefixes_stats(capf
     loaded_outputs = loaded_ensemble.infer({"examples": _cpu_tensor(test_examples, thor.DataType.fp32)})
     assert set(loaded_outputs) == {"prediction"}
     loaded_predictions = loaded_outputs["prediction"].numpy()
-    loaded_ensemble_mae = float(np.mean(np.abs(loaded_predictions - test_labels)))
-    assert ensemble.ensemble_test_loss == pytest.approx(loaded_ensemble_mae, rel=1e-5, abs=1e-6)
+    expected_graph_loss = float(2.0 * np.mean(np.square(loaded_predictions - test_labels)))
+    assert ensemble.ensemble_test_loss == pytest.approx(expected_graph_loss, rel=1e-5, abs=1e-6)
 
     assert (ensemble_artifact_dir / loaded_ensemble.members[0].path / "training_selection_metadata.json").exists()
     assert (ensemble_artifact_dir / loaded_ensemble.members[1].path / "training_selection_metadata.json").exists()

@@ -13,6 +13,7 @@
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Parameter/ParameterSpecification.h"
+#include "DeepLearning/Api/Parameter/Parameterizable.h"
 #include "DeepLearning/Implementation/ThorError.h"
 #include <cstdio>
 #include <fstream>
@@ -221,13 +222,32 @@ uint64_t allocateApiTensorOriginalIdForClone(const json& tensorJson) {
 }
 
 void rewriteApiTensorIdsForClone(json& value,
-                                 const std::set<uint64_t>& sourceApiTensorOriginalIds,
+                                 const std::set<uint64_t>& cloneGraphTensorOriginalIds,
+                                 const std::map<uint64_t, uint64_t>& sourceOriginalIdBySerializedTensorId,
                                  const std::set<uint64_t>& clonedLayerOutputOriginalIds,
                                  std::map<uint64_t, uint64_t>& destinationOriginalIdBySourceOriginalId,
                                  const std::string& layerContext) {
     if (isSerializedApiTensorJson(value)) {
-        const uint64_t sourceOriginalId = value.at("id").get<uint64_t>();
-        if (sourceApiTensorOriginalIds.count(sourceOriginalId) == 0) {
+        const uint64_t serializedTensorId = value.at("id").get<uint64_t>();
+
+        // Tensor::architectureJson() serializes the live Tensor id.  For a freshly
+        // constructed network that is the same value as originalId, but after
+        // loading a saved artifact the live id is intentionally different from
+        // the original id used by Network's API tensor indexes.  Cloning must
+        // canonicalize the serialized id back to the source tensor's originalId
+        // before consulting destinationOriginalIdBySourceOriginalId.
+        auto sourceOriginalIt = sourceOriginalIdBySerializedTensorId.find(serializedTensorId);
+        uint64_t sourceOriginalId = 0;
+        if (sourceOriginalIt != sourceOriginalIdBySerializedTensorId.end()) {
+            sourceOriginalId = sourceOriginalIt->second;
+        } else if (cloneGraphTensorOriginalIds.count(serializedTensorId) != 0) {
+            // Be tolerant of older/manual layer JSON that stored the API tensor
+            // originalId directly instead of Tensor::architectureJson()'s live id.
+            sourceOriginalId = serializedTensorId;
+        } else {
+            // Some layer JSON contains non-API tensor-shaped metadata, such as
+            // saved parameter storage descriptors.  Only rewrite tensors that
+            // are part of the source API subgraph being cloned.
             return;
         }
 
@@ -236,7 +256,8 @@ void rewriteApiTensorIdsForClone(json& value,
             if (clonedLayerOutputOriginalIds.count(sourceOriginalId) == 0) {
                 throw std::runtime_error("cloneInferenceSubgraphInto: layer '" + layerContext +
                                          "' references source API tensor " + std::to_string(sourceOriginalId) +
-                                         " before that tensor has been remapped or cloned.");
+                                         " (serialized id " + std::to_string(serializedTensorId) +
+                                         ") before that tensor has been remapped or cloned.");
             }
             mappedIt = destinationOriginalIdBySourceOriginalId.emplace(sourceOriginalId, allocateApiTensorOriginalIdForClone(value)).first;
         }
@@ -247,7 +268,8 @@ void rewriteApiTensorIdsForClone(json& value,
     if (value.is_object()) {
         for (auto it = value.begin(); it != value.end(); ++it) {
             rewriteApiTensorIdsForClone(it.value(),
-                                        sourceApiTensorOriginalIds,
+                                        cloneGraphTensorOriginalIds,
+                                        sourceOriginalIdBySerializedTensorId,
                                         clonedLayerOutputOriginalIds,
                                         destinationOriginalIdBySourceOriginalId,
                                         layerContext);
@@ -258,10 +280,36 @@ void rewriteApiTensorIdsForClone(json& value,
     if (value.is_array()) {
         for (json& element : value) {
             rewriteApiTensorIdsForClone(element,
-                                        sourceApiTensorOriginalIds,
+                                        cloneGraphTensorOriginalIds,
+                                        sourceOriginalIdBySerializedTensorId,
                                         clonedLayerOutputOriginalIds,
                                         destinationOriginalIdBySourceOriginalId,
                                         layerContext);
+        }
+    }
+}
+
+
+void rewriteAlreadyMappedApiTensorIdsForClone(json& value,
+                                             const std::map<uint64_t, uint64_t>& destinationOriginalIdBySourceOriginalId) {
+    if (value.is_object()) {
+        auto idIt = value.find("id");
+        if (idIt != value.end() && idIt->is_number_unsigned()) {
+            const uint64_t sourceOriginalId = idIt->get<uint64_t>();
+            auto mappedIt = destinationOriginalIdBySourceOriginalId.find(sourceOriginalId);
+            if (mappedIt != destinationOriginalIdBySourceOriginalId.end()) {
+                *idIt = mappedIt->second;
+            }
+        }
+        for (auto it = value.begin(); it != value.end(); ++it) {
+            rewriteAlreadyMappedApiTensorIdsForClone(it.value(), destinationOriginalIdBySourceOriginalId);
+        }
+        return;
+    }
+
+    if (value.is_array()) {
+        for (json& element : value) {
+            rewriteAlreadyMappedApiTensorIdsForClone(element, destinationOriginalIdBySourceOriginalId);
         }
     }
 }
@@ -345,18 +393,22 @@ ApiSubgraphCloneResult Network::cloneInferenceSubgraphInto(const Network& source
     if (outputNames.empty()) {
         throw std::runtime_error("cloneInferenceSubgraphInto requires at least one output name.");
     }
-    if (!options.inferenceOnly) {
-        throw std::runtime_error("cloneInferenceSubgraphInto currently supports inferenceOnly=true only.");
-    }
     if (!options.cloneTrainableParameters) {
         throw std::runtime_error("cloneInferenceSubgraphInto currently requires cloneTrainableParameters=true.");
     }
 
     Network& sourceNetwork = const_cast<Network&>(sourceNetworkConst);
-    sourceNetwork.rebuildApiGraphIndexes(/*inferenceOnly=*/true);
-    this->rebuildApiGraphIndexes(/*inferenceOnly=*/true);
+    sourceNetwork.rebuildApiGraphIndexes(options.inferenceOnly);
+    this->rebuildApiGraphIndexes(options.inferenceOnly);
 
     std::map<uint64_t, uint64_t> destinationOriginalIdBySourceOriginalId;
+    std::map<uint64_t, uint64_t> sourceOriginalIdBySerializedTensorId;
+    auto rememberSourceCloneGraphTensor = [&](const Tensor& tensor) {
+        // Tensor JSON currently stores the live Tensor id.  Network indexes,
+        // initial remaps, and clone results are keyed by originalId.
+        sourceOriginalIdBySerializedTensorId[tensor.getId()] = tensor.getOriginalId();
+    };
+
     ApiSubgraphCloneResult result;
     for (const auto& [sourceOriginalId, destinationTensor] : initialRemap.entriesBySourceOriginalId()) {
         if (!sourceNetwork.hasApiTensorByOriginalId(sourceOriginalId)) {
@@ -364,6 +416,7 @@ ApiSubgraphCloneResult Network::cloneInferenceSubgraphInto(const Network& source
                                      " does not belong to source network '" + sourceNetwork.getNetworkName() + "'.");
         }
         Tensor sourceTensor = sourceNetwork.resolveApiTensorByOriginalId(sourceOriginalId);
+        rememberSourceCloneGraphTensor(sourceTensor);
         if (sourceTensor.getDimensions() != destinationTensor.getDimensions() || sourceTensor.getDataType() != destinationTensor.getDataType()) {
             throw std::runtime_error("cloneInferenceSubgraphInto initial remap tensor descriptor mismatch for source tensor " +
                                      std::to_string(sourceOriginalId) + ".");
@@ -440,12 +493,37 @@ ApiSubgraphCloneResult Network::cloneInferenceSubgraphInto(const Network& source
         collectUpstream(outputTensor);
     }
 
-    std::set<uint64_t> sourceApiTensorOriginalIds;
-    for (const auto& entry : sourceNetwork.apiTensorByOriginalId) {
-        sourceApiTensorOriginalIds.insert(entry.first);
+    std::set<uint64_t> cloneGraphTensorOriginalIds;
+    auto rememberCloneGraphTensor = [&](const Tensor& tensor) {
+        cloneGraphTensorOriginalIds.insert(tensor.getOriginalId());
+        rememberSourceCloneGraphTensor(tensor);
+    };
+    for (const auto& [sourceOriginalId, _] : initialRemap.entriesBySourceOriginalId()) {
+        Tensor sourceTensor = sourceNetwork.resolveApiTensorByOriginalId(sourceOriginalId);
+        rememberCloneGraphTensor(sourceTensor);
+    }
+    for (const Tensor& outputTensor : requestedSourceOutputTensors) {
+        rememberCloneGraphTensor(outputTensor);
+    }
+    for (const std::shared_ptr<Layer>& layer : layersToClone) {
+        auto inputIt = sourceNetwork.apiLayerToApiInputTensors.find(layer);
+        if (inputIt != sourceNetwork.apiLayerToApiInputTensors.end()) {
+            for (const Tensor& inputTensor : inputIt->second) {
+                rememberCloneGraphTensor(inputTensor);
+            }
+        }
+        auto outputIt = sourceNetwork.apiLayerToApiOutputTensors.find(layer);
+        if (outputIt != sourceNetwork.apiLayerToApiOutputTensors.end()) {
+            for (const Tensor& outputTensor : outputIt->second) {
+                rememberCloneGraphTensor(outputTensor);
+            }
+        }
     }
 
-    std::shared_ptr<thor_file::TarReader> nullArchiveReader;
+    std::shared_ptr<thor_file::TarReader> sourceArchiveReader = sourceNetwork.archiveReader;
+    if (sourceArchiveReader != nullptr) {
+        cloneInitializationArchiveReaders.push_back(sourceArchiveReader);
+    }
 
     for (const std::shared_ptr<Layer>& layer : layersToClone) {
         std::set<uint64_t> clonedLayerOutputOriginalIds;
@@ -457,15 +535,29 @@ ApiSubgraphCloneResult Network::cloneInferenceSubgraphInto(const Network& source
         }
 
         json layerJson = layer->architectureJson();
+        if (sourceArchiveReader != nullptr && layerJson.contains("parameters")) {
+            std::shared_ptr<Parameterizable> parameterizableLayer = std::dynamic_pointer_cast<Parameterizable>(layer);
+            if (parameterizableLayer != nullptr) {
+                layerJson["parameters"] = parameterizableLayer->getParametersArchitectureJson(
+                    /*includeArchiveStorageFiles=*/true)["parameters"];
+            }
+        }
         prefixLayerNamesForClone(layerJson, options.namePrefix);
         rewriteApiTensorIdsForClone(layerJson,
-                                    sourceApiTensorOriginalIds,
+                                    cloneGraphTensorOriginalIds,
+                                    sourceOriginalIdBySerializedTensorId,
                                     clonedLayerOutputOriginalIds,
                                     destinationOriginalIdBySourceOriginalId,
                                     sourceLayerContext(layer));
+        rewriteAlreadyMappedApiTensorIdsForClone(layerJson, destinationOriginalIdBySourceOriginalId);
 
         const size_t previousLayerCount = this->allLayersInNetworkList.size();
-        Layer::deserialize(nullArchiveReader, layerJson, this);
+        try {
+            Layer::deserialize(sourceArchiveReader, layerJson, this);
+        } catch (const std::exception& e) {
+            throw std::runtime_error("cloneInferenceSubgraphInto failed to deserialize cloned " + sourceLayerContext(layer) +
+                                     " into network '" + this->getNetworkName() + "': " + e.what());
+        }
         if (this->allLayersInNetworkList.size() <= previousLayerCount) {
             throw std::runtime_error("cloneInferenceSubgraphInto did not add a cloned layer for " + sourceLayerContext(layer) + ".");
         }
@@ -490,7 +582,7 @@ ApiSubgraphCloneResult Network::cloneInferenceSubgraphInto(const Network& source
         result.outputTensorsByName[outputNames[i]] = this->resolveApiTensorByOriginalId(mappedIt->second);
     }
 
-    this->rebuildApiGraphIndexes(/*inferenceOnly=*/true);
+    this->rebuildApiGraphIndexes(options.inferenceOnly);
     return result;
 }
 
@@ -724,8 +816,16 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
 
     stampedNetworks.push_back(stampedNetwork);
 
-    if (archiveReader != nullptr)
+    std::set<thor_file::TarReader*> executedArchiveReaders;
+    if (archiveReader != nullptr) {
         archiveReader->executeReadRequests();
+        executedArchiveReaders.insert(archiveReader.get());
+    }
+    for (const std::shared_ptr<thor_file::TarReader>& cloneArchiveReader : cloneInitializationArchiveReaders) {
+        if (cloneArchiveReader != nullptr && executedArchiveReaders.insert(cloneArchiveReader.get()).second) {
+            cloneArchiveReader->executeReadRequests();
+        }
+    }
 
     return StatusCode::SUCCESS;
 }
@@ -2702,15 +2802,116 @@ Tensor Network::resolveApiTensorByOriginalId(uint64_t originalId) const {
 }
 
 Tensor Network::getApiTensorByOriginalId(uint64_t originalId) {
-    if (apiTensorByOriginalId.count(originalId) == 0) {
-        printf("Looking for tensor orig id %ld.\n I have these:\n\n", originalId);
-        for (auto it = apiTensorByOriginalId.begin(); it != apiTensorByOriginalId.end(); ++it) {
-            printf("tensor orig id %ld\n", it->first);
-            fflush(stdout);
+    auto existingIt = apiTensorByOriginalId.find(originalId);
+    if (existingIt != apiTensorByOriginalId.end()) {
+        return existingIt->second;
+    }
+
+    auto rememberIfMatches = [&](const Tensor& tensor) -> std::optional<Tensor> {
+        if (tensor.isInitialized() && tensor.getOriginalId() == originalId) {
+            apiTensorByOriginalId[originalId] = tensor;
+            return tensor;
+        }
+        return std::nullopt;
+    };
+
+    auto rememberOptionalIfMatches = [&](const std::optional<Tensor>& tensor) -> std::optional<Tensor> {
+        if (!tensor.has_value()) {
+            return std::nullopt;
+        }
+        return rememberIfMatches(*tensor);
+    };
+
+    for (const std::shared_ptr<Layer>& layer : allLayersInNetworkList) {
+        if (layer == nullptr) {
+            continue;
+        }
+
+        if (std::optional<Tensor> found = rememberOptionalIfMatches(layer->getFeatureInput())) {
+            return *found;
+        }
+        if (std::optional<Tensor> found = rememberOptionalIfMatches(layer->getFeatureOutput())) {
+            return *found;
+        }
+
+        std::shared_ptr<NetworkInput> networkInput = std::dynamic_pointer_cast<NetworkInput>(layer);
+        if (networkInput != nullptr && networkInput->hasPassThroughSource()) {
+            if (std::optional<Tensor> found = rememberIfMatches(networkInput->getPassThroughSource())) {
+                return *found;
+            }
+        }
+
+        std::shared_ptr<Loss> loss = std::dynamic_pointer_cast<Loss>(layer);
+        if (loss != nullptr) {
+            for (const Tensor& tensor : loss->getLossInputTensors()) {
+                if (std::optional<Tensor> found = rememberIfMatches(tensor)) {
+                    return *found;
+                }
+            }
+            if (std::optional<Tensor> found = rememberIfMatches(loss->getLoss())) {
+                return *found;
+            }
+            continue;
+        }
+
+        std::shared_ptr<Metric> metric = std::dynamic_pointer_cast<Metric>(layer);
+        if (metric != nullptr && metric->requiresLabels()) {
+            if (std::optional<Tensor> found = rememberIfMatches(metric->getLabels())) {
+                return *found;
+            }
+        }
+
+        std::shared_ptr<CustomLayer> customLayer = std::dynamic_pointer_cast<CustomLayer>(layer);
+        if (customLayer != nullptr) {
+            for (const Tensor& tensor : customLayer->getFeatureInputs()) {
+                if (std::optional<Tensor> found = rememberIfMatches(tensor)) {
+                    return *found;
+                }
+            }
+            for (const Tensor& tensor : customLayer->getFeatureOutputs()) {
+                if (std::optional<Tensor> found = rememberIfMatches(tensor)) {
+                    return *found;
+                }
+            }
+            continue;
+        }
+
+        std::shared_ptr<Activation> activationLayer = std::dynamic_pointer_cast<Activation>(layer);
+        if (activationLayer != nullptr && activationLayer->mustConnectAllInputsToDriveOutput()) {
+            for (const Tensor& tensor : activationLayer->getFeatureInputs()) {
+                if (std::optional<Tensor> found = rememberIfMatches(tensor)) {
+                    return *found;
+                }
+            }
+            for (const Tensor& tensor : activationLayer->getFeatureOutputs()) {
+                if (std::optional<Tensor> found = rememberIfMatches(tensor)) {
+                    return *found;
+                }
+            }
+            continue;
+        }
+
+        std::shared_ptr<MultiConnectionLayer> multiConnectionLayer = std::dynamic_pointer_cast<MultiConnectionLayer>(layer);
+        if (multiConnectionLayer != nullptr) {
+            for (const Tensor& tensor : multiConnectionLayer->getFeatureInputs()) {
+                if (std::optional<Tensor> found = rememberIfMatches(tensor)) {
+                    return *found;
+                }
+            }
+            for (const Tensor& tensor : multiConnectionLayer->getFeatureOutputs()) {
+                if (std::optional<Tensor> found = rememberIfMatches(tensor)) {
+                    return *found;
+                }
+            }
+            continue;
         }
     }
-    THOR_THROW_IF_FALSE(apiTensorByOriginalId.count(originalId) != 0);
-    return apiTensorByOriginalId[originalId];
+
+    std::string message = "Tensor with original id " + std::to_string(originalId) + " does not belong to network '" + networkName + "'. Known tensor original ids:";
+    for (const auto& [knownOriginalId, _] : apiTensorByOriginalId) {
+        message += " " + std::to_string(knownOriginalId);
+    }
+    throw std::runtime_error(message);
 }
 
 }  // namespace Thor

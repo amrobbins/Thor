@@ -153,14 +153,14 @@ string Parameterizable::listParametersString() const {
     return result;
 }
 
-json Parameterizable::getParametersArchitectureJson() const {
+json Parameterizable::getParametersArchitectureJson(bool includeArchiveStorageFiles) const {
     json j;
     j["parameters"] = json::object();
     for (const auto& parameter : getParameters()) {
         if (parameter == nullptr) {
             continue;
         }
-        j["parameters"][parameter->getName()] = parameter->architectureJson();
+        j["parameters"][parameter->getName()] = parameter->architectureJson(includeArchiveStorageFiles);
     }
     return j;
 }

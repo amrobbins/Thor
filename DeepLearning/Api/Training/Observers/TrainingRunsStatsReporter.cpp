@@ -905,6 +905,14 @@ void TrainingRunsStatsReporter::writeEnsembleLineLocked(const TrainingEnsembleRe
         line += styled(buffer, FinalReportAnsi::accuracy, useColor);
     }
     for (const TrainingNamedMetricResult& namedMetric : result.namedMetrics) {
+        // The aggregate fields above are the public overall graph-loss columns.
+        // A single graph loss is commonly named "loss", which would format to the
+        // exact same ensemble_train_loss / ensemble_test_loss keys here. Avoid
+        // emitting duplicate columns while still reporting distinct named losses
+        // such as daily_loss or aggregate_loss.
+        if (namedMetric.name == "loss") {
+            continue;
+        }
         if (namedMetric.trainValue.has_value()) {
             char buffer[128];
             std::snprintf(buffer, sizeof(buffer), "ensemble_train_%s=%.6f", namedMetric.name.c_str(), namedMetric.trainValue.value());

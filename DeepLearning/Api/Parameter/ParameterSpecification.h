@@ -44,7 +44,7 @@ class ParameterSpecification {
 
     bool setOptimizer(const std::shared_ptr<Optimizer>& optimizer, bool override = true);
     static std::string getVersion();
-    virtual nlohmann::json architectureJson() const;
+    virtual nlohmann::json architectureJson(bool includeArchiveStorageFile = false) const;
     static ParameterSpecification deserialize(const nlohmann::json& j, std::shared_ptr<thor_file::TarReader>& archiveReader);
 
     [[nodiscard]] const std::string& getName() const;

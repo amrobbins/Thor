@@ -292,6 +292,7 @@ class Network {
     void writeCudaKernelSaveKeysToCaptureFile(const std::vector<ThorImplementation::CudaKernelOutOfBandKeys> &cudaKernelKeys) const;
 
     std::shared_ptr<thor_file::TarReader> archiveReader = nullptr;
+    std::vector<std::shared_ptr<thor_file::TarReader>> cloneInitializationArchiveReaders;
 
     class GpuOutOfMemoryError {};
 
