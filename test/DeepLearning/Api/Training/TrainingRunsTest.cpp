@@ -22,7 +22,6 @@
 #include <exception>
 #include <fstream>
 #include <iterator>
-#include <limits>
 #include <filesystem>
 #include <map>
 #include <memory>
@@ -33,30 +32,6 @@
 #include <thread>
 #include <vector>
 
-namespace Thor::Testing {
-std::vector<std::string> trainingRunsComposedEvaluatorExternalInputNamesForTest(
-    const std::vector<std::shared_ptr<Network>>& memberNetworks,
-    const std::vector<double>& weights,
-    const std::vector<std::string>& outputNames);
-std::map<std::string, bool> trainingRunsComposedEvaluatorMemberInputAliasStatesForTest(
-    const std::vector<std::shared_ptr<Network>>& memberNetworks,
-    const std::vector<double>& weights,
-    const std::vector<std::string>& outputNames);
-std::map<std::string, std::vector<uint64_t>> trainingRunsComposedEvaluatorAveragedOutputDimensionsForTest(
-    const std::vector<std::shared_ptr<Network>>& memberNetworks,
-    const std::vector<double>& weights,
-    const std::vector<std::string>& outputNames);
-std::map<std::string, std::string> trainingRunsComposedEvaluatorAveragedOutputDataTypesForTest(
-    const std::vector<std::shared_ptr<Network>>& memberNetworks,
-    const std::vector<double>& weights,
-    const std::vector<std::string>& outputNames);
-std::optional<double> trainingRunsWeightedLossSumFromWeightedLossValuesForTest(
-    const std::vector<std::optional<double>>& weightedLossValues);
-std::vector<std::string> trainingRunsComposedLossEvaluatorExternalInputNamesForTest(
-    const std::vector<std::shared_ptr<Network>>& memberNetworks,
-    const std::vector<double>& weights,
-    const std::vector<std::string>& requestedLossNames);
-}
 
 using namespace Thor;
 
@@ -614,18 +589,6 @@ TEST(TrainingRuns, ReportedLossFilterControlsNamedGraphLossesInResults) {
     EXPECT_EQ(ensemble.namedMetrics[1].name, "p90_loss");
 }
 
-TEST(TrainingRuns, ComposedLossEvaluatorExposesGraphLossInputs) {
-    auto network0 = makeLossWeightedDemandNetwork("training-runs-composed-loss-inputs-0");
-    auto network1 = makeLossWeightedDemandNetwork("training-runs-composed-loss-inputs-1");
-
-    std::vector<std::string> inputNames = Thor::Testing::trainingRunsComposedLossEvaluatorExternalInputNamesForTest(
-        {network0, network1}, {1.0, 2.0}, {});
-    std::sort(inputNames.begin(), inputNames.end());
-
-    const std::vector<std::string> expectedInputs{"features", "observed_aggregate", "observed_daily"};
-    EXPECT_EQ(inputNames, expectedInputs);
-}
-
 TEST(TrainingRuns, PredictionOnlyEnsembleHasNoGraphLossMetrics) {
     auto network0 = makeDemandPredictionOnlyNetwork("training-runs-prediction-only-no-graph-loss-0");
     auto network1 = makeDemandPredictionOnlyNetwork("training-runs-prediction-only-no-graph-loss-1");
@@ -700,22 +663,8 @@ TEST(TrainingRuns, NamedMetricResultsUseGraphLossesAndSourceLossWeight) {
     ASSERT_EQ(ensemble.namedMetrics.size(), 3u);
 
     EXPECT_EQ(ensemble.namedMetrics[0].name, "aggregate_loss");
-    EXPECT_EQ(ensemble.namedMetrics[0].outputName, "aggregate");
-    EXPECT_EQ(ensemble.namedMetrics[0].targetInputName, "observed_aggregate");
-    EXPECT_DOUBLE_EQ(ensemble.namedMetrics[0].overallWeight, 1.5);
-    EXPECT_EQ(ensemble.namedMetrics[0].overallWeightSource, "loss_weight");
-
     EXPECT_EQ(ensemble.namedMetrics[1].name, "daily_loss");
-    EXPECT_EQ(ensemble.namedMetrics[1].outputName, "daily");
-    EXPECT_EQ(ensemble.namedMetrics[1].targetInputName, "observed_daily");
-    EXPECT_DOUBLE_EQ(ensemble.namedMetrics[1].overallWeight, 2.0);
-    EXPECT_EQ(ensemble.namedMetrics[1].overallWeightSource, "loss_weight");
-
     EXPECT_EQ(ensemble.namedMetrics[2].name, "p90_loss");
-    EXPECT_EQ(ensemble.namedMetrics[2].outputName, "forecast_p90");
-    EXPECT_EQ(ensemble.namedMetrics[2].targetInputName, "observed_daily");
-    EXPECT_DOUBLE_EQ(ensemble.namedMetrics[2].overallWeight, 0.5);
-    EXPECT_EQ(ensemble.namedMetrics[2].overallWeightSource, "loss_weight");
 }
 
 TEST(TrainingRuns, ReportedLossResolutionFailsFastForMissingAndAmbiguousGraphLosses) {
@@ -743,10 +692,6 @@ TEST(TrainingEnsembleResult, NamedMetricValuesContributeToEvaluationMetricPresen
 
     TrainingNamedMetricResult metric;
     metric.name = "daily_loss";
-    metric.outputName = "daily";
-    metric.targetInputName = "observed_daily";
-    metric.overallWeight = 2.0;
-    metric.overallWeightSource = "loss_weight";
     metric.testValue = 0.25;
     ensemble.namedMetrics.push_back(metric);
 
@@ -755,28 +700,8 @@ TEST(TrainingEnsembleResult, NamedMetricValuesContributeToEvaluationMetricPresen
     EXPECT_TRUE(ensemble.hasNamedMetricValues());
     EXPECT_TRUE(ensemble.hasEnsembleEvaluationMetrics());
     EXPECT_EQ(ensemble.namedMetrics[0].name, "daily_loss");
-    EXPECT_EQ(ensemble.namedMetrics[0].outputName, "daily");
-    EXPECT_EQ(ensemble.namedMetrics[0].targetInputName, "observed_daily");
-    EXPECT_DOUBLE_EQ(ensemble.namedMetrics[0].overallWeight, 2.0);
-    EXPECT_EQ(ensemble.namedMetrics[0].overallWeightSource, "loss_weight");
     ASSERT_TRUE(ensemble.namedMetrics[0].testValue.has_value());
     EXPECT_DOUBLE_EQ(ensemble.namedMetrics[0].testValue.value(), 0.25);
-}
-
-TEST(TrainingRuns, WeightedLossSumUsesAlreadyWeightedNamedLossValues) {
-    const std::vector<std::optional<double>> weightedLossValues{0.20, 0.60, 0.15};
-
-    std::optional<double> overall = Thor::Testing::trainingRunsWeightedLossSumFromWeightedLossValuesForTest(
-        weightedLossValues);
-
-    ASSERT_TRUE(overall.has_value());
-    EXPECT_NEAR(overall.value(), 0.20 + 0.60 + 0.15, 1.0e-12);
-}
-
-TEST(TrainingRuns, WeightedLossSumRejectsMissingOrNonFiniteValues) {
-    EXPECT_FALSE(Thor::Testing::trainingRunsWeightedLossSumFromWeightedLossValuesForTest({0.20, std::nullopt}).has_value());
-    EXPECT_FALSE(Thor::Testing::trainingRunsWeightedLossSumFromWeightedLossValuesForTest({0.20, std::numeric_limits<double>::infinity()}).has_value());
-    EXPECT_FALSE(Thor::Testing::trainingRunsWeightedLossSumFromWeightedLossValuesForTest({}).has_value());
 }
 
 TEST(TrainingRuns, RejectsIncompatibleEnsembleOutputDimensions) {

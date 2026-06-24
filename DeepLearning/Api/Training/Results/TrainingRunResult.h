@@ -251,10 +251,6 @@ struct TrainingEnsembleMemberResult {
 
 struct TrainingNamedMetricResult {
     std::string name{};
-    std::string outputName{};
-    std::string targetInputName{};
-    double overallWeight = 1.0;
-    std::string overallWeightSource{};
     std::optional<double> trainValue{};
     std::optional<double> testValue{};
 

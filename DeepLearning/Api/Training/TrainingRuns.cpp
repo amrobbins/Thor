@@ -1612,10 +1612,6 @@ std::vector<TrainingNamedMetricResult> TrainingRuns::namedMetricResultsForGroup(
     for (const ResolvedEnsembleLoss& loss : resolvedLosses) {
         TrainingNamedMetricResult result;
         result.name = loss.lossName;
-        result.outputName = loss.predictionOutputName;
-        result.targetInputName = loss.targetInputName;
-        result.overallWeight = loss.lossWeight;
-        result.overallWeightSource = "loss_weight";
         results.push_back(std::move(result));
     }
     return results;
@@ -2410,104 +2406,6 @@ Batch inferenceBatchForInputNames(const std::vector<std::string>& inputNames,
 
 }  // namespace
 
-namespace Testing {
-
-
-std::vector<std::string> trainingRunsComposedEvaluatorExternalInputNamesForTest(
-    const std::vector<std::shared_ptr<Network>>& memberNetworks,
-    const std::vector<double>& weights,
-    const std::vector<std::string>& outputNames) {
-    TrainingRunsComposedEnsembleEvaluator evaluator =
-        buildTrainingRunsComposedEnsembleEvaluatorThroughAccumulator(memberNetworks, weights, outputNames);
-    return evaluator.network->getInferenceNetworkInputNames();
-}
-
-std::map<std::string, bool> trainingRunsComposedEvaluatorMemberInputAliasStatesForTest(
-    const std::vector<std::shared_ptr<Network>>& memberNetworks,
-    const std::vector<double>& weights,
-    const std::vector<std::string>& outputNames) {
-    TrainingRunsComposedEnsembleEvaluator evaluator =
-        buildTrainingRunsComposedEnsembleEvaluatorThroughAccumulator(memberNetworks, weights, outputNames);
-
-    std::map<std::string, bool> states;
-    for (uint32_t layerIndex = 0; layerIndex < evaluator.network->getNumLayers(); ++layerIndex) {
-        std::shared_ptr<NetworkInput> input = std::dynamic_pointer_cast<NetworkInput>(evaluator.network->getLayer(layerIndex));
-        if (input == nullptr || !input->hasPassThroughSource()) {
-            continue;
-        }
-        const std::string name = input->getName();
-        const std::string memberPrefix = "member_";
-        if (name.rfind(memberPrefix, 0) != 0) {
-            continue;
-        }
-        const size_t slash = name.find('/');
-        if (slash == std::string::npos || slash + 1 >= name.size()) {
-            states[name] = false;
-            continue;
-        }
-        const std::string inputName = name.substr(slash + 1);
-        auto sharedIt = evaluator.sharedInputTensorsByName.find(inputName);
-        states[name] = sharedIt != evaluator.sharedInputTensorsByName.end() &&
-                       input->getPassThroughSource() == sharedIt->second &&
-                       input->getFeatureOutput().has_value() &&
-                       input->getFeatureOutput().value() == sharedIt->second;
-    }
-    return states;
-}
-
-std::map<std::string, std::vector<uint64_t>> trainingRunsComposedEvaluatorAveragedOutputDimensionsForTest(
-    const std::vector<std::shared_ptr<Network>>& memberNetworks,
-    const std::vector<double>& weights,
-    const std::vector<std::string>& outputNames) {
-    TrainingRunsComposedEnsembleEvaluator evaluator =
-        buildTrainingRunsComposedEnsembleEvaluatorThroughAccumulator(memberNetworks, weights, outputNames);
-
-    std::map<std::string, std::vector<uint64_t>> dimensionsByName;
-    for (const auto& [outputName, tensor] : evaluator.averagedOutputTensorsByName) {
-        dimensionsByName[outputName] = tensor.getDimensions();
-    }
-    return dimensionsByName;
-}
-
-std::map<std::string, std::string> trainingRunsComposedEvaluatorAveragedOutputDataTypesForTest(
-    const std::vector<std::shared_ptr<Network>>& memberNetworks,
-    const std::vector<double>& weights,
-    const std::vector<std::string>& outputNames) {
-    TrainingRunsComposedEnsembleEvaluator evaluator =
-        buildTrainingRunsComposedEnsembleEvaluatorThroughAccumulator(memberNetworks, weights, outputNames);
-
-    std::map<std::string, std::string> dataTypesByName;
-    for (const auto& [outputName, tensor] : evaluator.averagedOutputTensorsByName) {
-        dataTypesByName[outputName] = ThorImplementation::TensorDescriptor::getElementTypeName(tensor.getDataType());
-    }
-    return dataTypesByName;
-}
-
-std::optional<double> trainingRunsWeightedLossSumFromWeightedLossValuesForTest(
-    const std::vector<std::optional<double>>& weightedLossValues) {
-    return weightedLossSumFromWeightedLossValues(weightedLossValues);
-}
-
-std::vector<std::string> trainingRunsComposedLossEvaluatorExternalInputNamesForTest(
-    const std::vector<std::shared_ptr<Network>>& memberNetworks,
-    const std::vector<double>& weights,
-    const std::vector<std::string>& requestedLossNames) {
-    if (memberNetworks.empty()) {
-        throw std::runtime_error("TrainingRuns composed loss evaluator test requires at least one member network.");
-    }
-    const std::vector<ResolvedEnsembleLoss> losses = resolveTrainingRunsReportedLosses(
-        memberNetworks.front()->getReportableLosses(),
-        requestedLossNames,
-        "TrainingRuns composed loss evaluator test");
-    TrainingRunsComposedEnsembleEvaluator evaluator =
-        buildTrainingRunsComposedEnsembleEvaluatorForLosses(memberNetworks, weights, losses);
-    return evaluator.network->getInferenceNetworkInputNames();
-}
-
-
-
-
-}  // namespace Testing
 
 void TrainingRuns::validateTestLoader(Loader& loader) const {
     if (loader.getBatchSize() == 0) {

@@ -1577,10 +1577,6 @@ calling this helper.
     auto training_named_metric_result = nb::class_<TrainingNamedMetricResult>(training, "TrainingNamedMetricResult");
     training_named_metric_result.attr("__module__") = "thor.training";
     training_named_metric_result.def_prop_ro("name", [](const TrainingNamedMetricResult& self) { return self.name; });
-    training_named_metric_result.def_prop_ro("output_name", [](const TrainingNamedMetricResult& self) { return self.outputName; });
-    training_named_metric_result.def_prop_ro("target_input_name", [](const TrainingNamedMetricResult& self) { return self.targetInputName; });
-    training_named_metric_result.def_ro("overall_weight", &TrainingNamedMetricResult::overallWeight);
-    training_named_metric_result.def_prop_ro("overall_weight_source", [](const TrainingNamedMetricResult& self) { return self.overallWeightSource; });
     training_named_metric_result.def_prop_ro("train_value", [](const TrainingNamedMetricResult& self) { return optionalDouble(self.trainValue); });
     training_named_metric_result.def_prop_ro("test_value", [](const TrainingNamedMetricResult& self) { return optionalDouble(self.testValue); });
     training_named_metric_result.def("has_value", &TrainingNamedMetricResult::hasValue);

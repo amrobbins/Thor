@@ -342,20 +342,14 @@ TEST(TrainingRunsStatsReporter, EnsembleReportShowsEvaluationMetricsAndIncomplet
     completedEnsemble.ensembleTestLoss = 0.456;
     TrainingNamedMetricResult overallNamedLoss;
     overallNamedLoss.name = "loss";
-    overallNamedLoss.outputName = "prediction";
-    overallNamedLoss.targetInputName = "labels";
     overallNamedLoss.trainValue = 0.123;
     overallNamedLoss.testValue = 0.456;
     TrainingNamedMetricResult dailyLoss;
     dailyLoss.name = "daily_loss";
-    dailyLoss.outputName = "daily";
-    dailyLoss.targetInputName = "observed_daily";
     dailyLoss.trainValue = 0.111;
     dailyLoss.testValue = 0.222;
     TrainingNamedMetricResult aggregateLoss;
     aggregateLoss.name = "aggregate_loss";
-    aggregateLoss.outputName = "aggregate";
-    aggregateLoss.targetInputName = "observed_aggregate";
     aggregateLoss.testValue = 0.333;
     completedEnsemble.namedMetrics = {overallNamedLoss, dailyLoss, aggregateLoss};
 
