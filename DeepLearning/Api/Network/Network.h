@@ -161,7 +161,6 @@ class Network {
     void unfreezeTraining();
     [[nodiscard]] std::vector<std::string> getInferenceNetworkInputNames();
     [[nodiscard]] std::vector<std::string> getTrainingOnlyNetworkInputNames();
-    [[nodiscard]] std::map<std::string, std::vector<std::string>> getLossLabelNetworkInputNamesByPredictionOutputName();
     [[nodiscard]] std::map<std::string, std::vector<NetworkLossReference>> getLossReferencesByPredictionOutputName();
 
     // FIXME: I will need to support indexing layers by their name.

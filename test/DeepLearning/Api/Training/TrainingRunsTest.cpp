@@ -6,7 +6,6 @@
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Layers/Activations/Relu.h"
 #include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
-#include "DeepLearning/Api/Layers/Loss/CategoricalCrossEntropy.h"
 #include "DeepLearning/Api/Layers/Loss/MeanAbsoluteError.h"
 #include "DeepLearning/Api/Layers/Loss/MeanSquaredError.h"
 #include "DeepLearning/Api/Layers/Loss/QuantileLoss.h"
@@ -439,35 +438,6 @@ std::filesystem::path uniqueTempPath(const std::string& prefix) {
 
 }  // namespace
 
-
-TEST(TrainingRuns, StructuralLabelMappingResolvesCategoricalCrossEntropySupportSoftmaxToPublicScoresOutput) {
-    Network network("structural_label_mapping_dense_categorical_scores");
-    NetworkInput examples = NetworkInput::Builder().network(network).name("examples").dimensions({4}).dataType(DataType::FP32).build();
-    NetworkInput labels = NetworkInput::Builder().network(network).name("labels").dimensions({3}).dataType(DataType::FP32).build();
-
-    FullyConnected logits = FullyConnected::Builder()
-                                .network(network)
-                                .featureInput(examples.getFeatureOutput().value())
-                                .numOutputFeatures(3)
-                                .hasBias(true)
-                                .noActivation()
-                                .build();
-    CategoricalCrossEntropy loss = CategoricalCrossEntropy::Builder()
-                                       .network(network)
-                                       .predictions(logits.getFeatureOutput().value())
-                                       .labels(labels.getFeatureOutput().value())
-                                       .lossDataType(DataType::FP32)
-                                       .reportsRawLoss()
-                                       .build();
-    NetworkOutput::Builder().network(network).name("loss").inputTensor(loss.getLoss()).dataType(DataType::FP32).build();
-    NetworkOutput::Builder().network(network).name("scores").inputTensor(logits.getFeatureOutput().value()).dataType(DataType::FP32).build();
-
-    const std::map<std::string, std::vector<std::string>> mapping = network.getLossLabelNetworkInputNamesByPredictionOutputName();
-    auto scoresIt = mapping.find("scores");
-    ASSERT_NE(scoresIt, mapping.end());
-    ASSERT_EQ(scoresIt->second, std::vector<std::string>({"labels"}));
-    EXPECT_EQ(mapping.find("loss"), mapping.end());
-}
 
 TEST(TrainingRuns, LossReferencesExposeLossWeightsForNamedOutputs) {
     auto network = makeLossWeightedDemandNetwork("training-runs-loss-metric-hints");

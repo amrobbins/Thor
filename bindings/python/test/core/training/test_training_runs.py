@@ -118,7 +118,7 @@ def _categorical_one_batch_loader(*, dtype=np.float32):
     )
 
 
-def _categorical_mixed_accuracy_arrays(*, dtype=np.float32):
+def _categorical_mixed_labels_arrays(*, dtype=np.float32):
     x, _ = _categorical_arrays(dtype=np.float32)
     y = np.array(
         [
@@ -132,8 +132,8 @@ def _categorical_mixed_accuracy_arrays(*, dtype=np.float32):
     return np.ascontiguousarray(x, dtype=dtype), np.ascontiguousarray(y, dtype=dtype)
 
 
-def _categorical_mixed_accuracy_one_batch_loader(*, dtype=np.float32):
-    x, y = _categorical_mixed_accuracy_arrays(dtype=dtype)
+def _categorical_mixed_labels_one_batch_loader(*, dtype=np.float32):
+    x, y = _categorical_mixed_labels_arrays(dtype=dtype)
     loader_cls = thor.training.NumpyFloat16BatchLoader if dtype == np.float16 else thor.training.NumpyFloat32BatchLoader
     return loader_cls(
         x,
@@ -143,19 +143,18 @@ def _categorical_mixed_accuracy_one_batch_loader(*, dtype=np.float32):
         batch_size=4,
         example_input_name="examples",
         label_input_name="class_targets",
-        dataset_name="training_runs_categorical_mixed_accuracy_one_batch",
+        dataset_name="training_runs_categorical_mixed_labels_one_batch",
     )
 
 
-def _softmax_cross_entropy_and_accuracy(scores: np.ndarray, labels: np.ndarray) -> tuple[float, float]:
+def _softmax_cross_entropy_loss(scores: np.ndarray, labels: np.ndarray) -> float:
     scores = np.asarray(scores, dtype=np.float64)
     labels = np.asarray(labels, dtype=np.float64)
     shifted = scores - np.max(scores, axis=-1, keepdims=True)
     probabilities = np.exp(shifted)
     probabilities /= np.sum(probabilities, axis=-1, keepdims=True)
     losses = -np.sum(labels * np.log(np.maximum(probabilities, 1.0e-12)), axis=-1)
-    accuracy = np.mean(np.argmax(scores, axis=-1) == np.argmax(labels, axis=-1))
-    return float(np.mean(losses)), float(accuracy)
+    return float(np.mean(losses))
 
 
 def _build_tiny_regressor(name: str):
@@ -1637,7 +1636,7 @@ def test_training_runs_categorical_report_matches_loaded_ensemble_predictions(ca
         runs,
         capfd,
         epochs=1,
-        test_loader=_categorical_mixed_accuracy_one_batch_loader(),
+        test_loader=_categorical_mixed_labels_one_batch_loader(),
     )
 
     assert results.all_completed()
@@ -1653,13 +1652,11 @@ def test_training_runs_categorical_report_matches_loaded_ensemble_predictions(ca
     assert loaded_ensemble.get_input_names() == ("examples",)
     assert loaded_ensemble.get_output_names() == ("scores",)
 
-    test_examples, test_labels = _categorical_mixed_accuracy_arrays(dtype=np.float32)
+    test_examples, test_labels = _categorical_mixed_labels_arrays(dtype=np.float32)
     loaded_outputs = loaded_ensemble.infer({"examples": _cpu_tensor(test_examples, thor.DataType.fp32)})
     assert set(loaded_outputs) == {"scores"}
     loaded_scores = np.array(loaded_outputs["scores"].numpy(), copy=True)
-    expected_loss, expected_accuracy = _softmax_cross_entropy_and_accuracy(loaded_scores, test_labels)
-    assert expected_accuracy == pytest.approx(0.75, abs=0.0)
-    assert 0.0 < expected_accuracy < 1.0
+    expected_loss = _softmax_cross_entropy_loss(loaded_scores, test_labels)
 
     assert ensemble.ensemble_test_loss == pytest.approx(expected_loss, rel=1e-5, abs=1e-6)
     assert ensemble.ensemble_test_accuracy is None
