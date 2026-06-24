@@ -1,7 +1,7 @@
 """Manifest-backed ensemble model artifact definitions.
 
-The manifest is the saved-artifact contract for loadable inference ensembles.
-Training-produced ensemble artifacts also store loss-centric reporting metadata:
+The manifest is the saved-artifact contract for TrainingRuns ensemble artifacts.
+Training-produced ensemble artifacts store loss-centric reporting metadata:
 ``reported_losses`` names the graph losses that were evaluated, ``losses`` stores
 only their train/test values, and ``overall_loss_reduction`` records how the
 overall ensemble loss was reduced from those graph loss values.  Legacy metric
@@ -16,7 +16,6 @@ import json
 import math
 import numbers
 from pathlib import Path
-from threading import RLock
 from typing import Any, Mapping, Sequence
 
 
@@ -136,76 +135,6 @@ def _validate_loss_reporting(*, reported_losses: Sequence[str], losses: Sequence
 
 
 
-def _name_mismatch_message(*, kind: str, expected: Sequence[str], actual: Sequence[str]) -> str:
-    expected_set = set(expected)
-    actual_set = set(actual)
-    missing = sorted(expected_set - actual_set)
-    extra = sorted(actual_set - expected_set)
-    parts = [
-        f"ensemble {kind} names do not match",
-        f"expected={list(expected)!r}",
-        f"actual={list(actual)!r}",
-    ]
-    if missing:
-        parts.append(f"missing={missing!r}")
-    if extra:
-        parts.append(f"extra={extra!r}")
-    return "; ".join(parts)
-
-
-def _validate_name_set(*, kind: str, expected: Sequence[str], actual: Sequence[str]) -> None:
-    if set(actual) != set(expected):
-        raise ValueError(_name_mismatch_message(kind=kind, expected=expected, actual=actual))
-
-
-def _batch_size_from_inputs(batch_inputs: Mapping[str, object]) -> int:
-    batch_size: int | None = None
-    for name, tensor in batch_inputs.items():
-        if not isinstance(name, str) or name == "":
-            raise ValueError("batch input names must be non-empty strings")
-        try:
-            dims = tuple(tensor.get_dimensions())
-        except AttributeError as exc:
-            raise TypeError(f"batch input {name!r} must be a thor.physical.PhysicalTensor") from exc
-        if not dims:
-            raise ValueError(f"batch input {name!r} must have a leading batch dimension")
-        current = int(dims[0])
-        if batch_size is None:
-            batch_size = current
-        elif current != batch_size:
-            raise ValueError(
-                f"all ensemble batch inputs must have the same batch dimension; "
-                f"input {name!r} has {current}, expected {batch_size}"
-            )
-    if batch_size is None or batch_size <= 0:
-        raise ValueError("ensemble inference batch size must be positive")
-    return batch_size
-
-
-
-
-
-def _accumulator_input_name(output_index: int, member_index: int) -> str:
-    return f"thor_ensemble_output_{output_index}_member_{member_index}"
-
-
-def _normal_output_specs(raw_specs: Mapping[str, Mapping[str, object]]) -> dict[str, dict[str, object]]:
-    specs: dict[str, dict[str, object]] = {}
-    for output_name, raw in raw_specs.items():
-        if not isinstance(output_name, str) or output_name == "":
-            raise RuntimeError("ensemble member output names must be non-empty strings")
-        dims = raw.get("dimensions")
-        dtype = raw.get("data_type")
-        if not isinstance(dims, Sequence) or isinstance(dims, (str, bytes, bytearray)):
-            raise RuntimeError(f"ensemble output {output_name!r} did not report dimensions")
-        dim_tuple = tuple(int(d) for d in dims)
-        if not dim_tuple:
-            raise RuntimeError(f"ensemble output {output_name!r} must include a batch dimension")
-        spec = {"dimensions": dim_tuple, "data_type": dtype}
-        if "tensor" in raw:
-            spec["tensor"] = raw["tensor"]
-        specs[output_name] = spec
-    return specs
 
 def _string_tuple(value: Sequence[str] | None, *, field_name: str) -> tuple[str, ...]:
     if value is None:
@@ -252,7 +181,7 @@ class EnsembleAggregation:
 
 @dataclass(frozen=True)
 class EnsembleMemberSpec:
-    """One resident member model in an ensemble artifact manifest."""
+    """One member model entry in an ensemble artifact manifest."""
 
     name: str
     path: str
@@ -300,9 +229,9 @@ class EnsembleMemberSpec:
 class EnsembleModel:
     """Manifest-backed Thor ensemble model artifact.
 
-    Ensemble artifacts are loadable, keep all member models resident during
-    inference, and expose a dict-in/dict-out ``infer`` API over named Thor
-    ``PhysicalTensor`` inputs and outputs.
+    Ensemble artifacts describe member selection and loss-reporting metadata.
+    They no longer own a Python-side inference runtime; ensemble evaluation is
+    performed by the composed graph-loss evaluator in TrainingRuns.
     """
 
     def __init__(
@@ -349,13 +278,6 @@ class EnsembleModel:
         self._losses = _loss_results_tuple(losses, field_name="losses")
         _validate_loss_reporting(reported_losses=self._reported_losses, losses=self._losses)
         self._artifact_path = Path(artifact_path) if artifact_path is not None else None
-        self._runtime_lock = RLock()
-        self._placed_members: tuple[object, ...] | None = None
-        self._accumulator_network: object | None = None
-        self._placed_accumulator: object | None = None
-        self._runtime_output_names: tuple[str, ...] = tuple()
-        self._runtime_batch_size: int | None = None
-        self._runtime_device: int | None = None
 
     @property
     def artifact_path(self) -> Path | None:
@@ -551,245 +473,3 @@ class EnsembleModel:
         missing = [member.path for member in self._members if not (self._artifact_path / member.path).exists()]
         if missing:
             raise FileNotFoundError(f"ensemble member artifact path(s) do not exist: {missing!r}")
-
-    def is_runtime_loaded(self) -> bool:
-        """Return True when member models are already loaded and placed."""
-
-        return self._placed_members is not None
-
-    def unload_runtime(self) -> None:
-        """Drop resident placed member networks so GPU memory can be released."""
-
-        with self._runtime_lock:
-            self._placed_members = None
-            self._accumulator_network = None
-            self._placed_accumulator = None
-            self._runtime_output_names = tuple()
-            self._runtime_batch_size = None
-            self._runtime_device = None
-
-    def infer(
-        self,
-        batch_inputs: Mapping[str, object],
-        *,
-        device: int = 0,
-        reload_runtime: bool = False,
-    ) -> dict[str, object]:
-        """Run one parallel single-GPU ensemble inference batch.
-
-        ``batch_inputs`` must contain CPU ``thor.physical.PhysicalTensor`` values
-        keyed by network input name.  All member models are loaded and placed on
-        first use, kept resident for subsequent calls with the same batch size,
-        and submitted together through one native ensemble runtime bridge instead
-        of Python worker threads.  Member ``NetworkOutput`` tensors are stamped to
-        GPU.  When the producer is already on that GPU, ``NetworkOutput`` aliases
-        the producer tensor instead of copying.  Those tensors then feed a Thor
-        accumulator network through placement-time pass-through NetworkInputs,
-        so the accumulator CustomLayer binds to the member-output tensor
-        identities that will arrive at runtime.  The accumulator
-        ``NetworkOutput`` materializes the final CPU tensors for this Python API.
-        """
-
-        if self._artifact_path is None:
-            raise RuntimeError("EnsembleModel.infer requires an ensemble loaded from or saved to an artifact path")
-        if self._execution != "parallel_single_gpu":
-            raise RuntimeError(f"unsupported ensemble execution for infer: {self._execution!r}")
-        if not isinstance(batch_inputs, Mapping):
-            raise TypeError("batch_inputs must be a mapping from input name to PhysicalTensor")
-        if not batch_inputs:
-            raise ValueError("batch_inputs must not be empty")
-
-        normalized_inputs = dict(batch_inputs)
-        if self._input_names:
-            _validate_name_set(kind="input", expected=self._input_names, actual=tuple(normalized_inputs.keys()))
-        batch_size = _batch_size_from_inputs(normalized_inputs)
-        placed_members = self._ensure_runtime_loaded(batch_size, device=device, reload_runtime=reload_runtime)
-        self._validate_input_names(normalized_inputs, placed_members)
-
-        return self._infer_members_and_aggregate(placed_members, normalized_inputs, device=int(device))
-
-    def _ensure_runtime_loaded(self, batch_size: int, *, device: int, reload_runtime: bool) -> tuple[object, ...]:
-        with self._runtime_lock:
-            if (
-                not reload_runtime
-                and self._placed_members is not None
-                and self._placed_accumulator is not None
-                and self._runtime_batch_size == batch_size
-                and self._runtime_device == device
-            ):
-                return self._placed_members
-
-            self._validate_member_paths_exist()
-            import thor  # Lazy import avoids a package-initialization cycle.
-
-            placed_members = []
-            for member in self._members:
-                network = thor.Network(member.name)
-                network.load(str(self._artifact_path / member.path))
-                placed = network.place(
-                    batch_size,
-                    inference_only=True,
-                    forced_devices=[int(device)],
-                    forced_num_stamps_per_gpu=1,
-                    network_outputs_on_gpu=True,
-                )
-                placed_members.append(placed)
-
-            placed_members_tuple = tuple(placed_members)
-            accumulator_network, placed_accumulator, runtime_output_names = self._build_accumulator_runtime(
-                placed_members_tuple, batch_size=batch_size, device=int(device)
-            )
-
-            self._placed_members = placed_members_tuple
-            self._accumulator_network = accumulator_network
-            self._placed_accumulator = placed_accumulator
-            self._runtime_output_names = runtime_output_names
-            self._runtime_batch_size = batch_size
-            self._runtime_device = int(device)
-            return self._placed_members
-
-    def _build_accumulator_runtime(
-        self,
-        placed_members: Sequence[object],
-        *,
-        batch_size: int,
-        device: int,
-    ) -> tuple[object, object, tuple[str, ...]]:
-        if not placed_members:
-            raise RuntimeError("ensemble runtime has no placed members")
-
-        import thor  # Lazy import avoids a package-initialization cycle.
-        import thor._thor as _thor  # type: ignore[import-not-found]
-
-        member_output_specs: list[dict[str, dict[str, object]]] = []
-        for placed_member in placed_members:
-            raw_specs = _thor._get_ensemble_member_output_specs(
-                placed_member, list(self._output_names)
-            )
-            member_output_specs.append(_normal_output_specs(raw_specs))
-
-        output_specs = member_output_specs[0]
-        output_names = tuple(output_specs.keys())
-        if self._output_names and output_names != self._output_names:
-            raise RuntimeError(
-                f"ensemble output spec order mismatch: expected={list(self._output_names)!r} "
-                f"actual={list(output_names)!r}"
-            )
-
-        for member_index, member_specs in enumerate(member_output_specs[1:], start=1):
-            if tuple(member_specs.keys()) != output_names:
-                raise RuntimeError(
-                    f"ensemble member output spec order mismatch: member_index={member_index} "
-                    f"expected={list(output_names)!r} actual={list(member_specs.keys())!r}"
-                )
-            for output_name in output_names:
-                expected = output_specs[output_name]
-                actual = member_specs[output_name]
-                if tuple(actual["dimensions"]) != tuple(expected["dimensions"]):
-                    raise RuntimeError(
-                        f"ensemble output dimensions differ for {output_name!r}: "
-                        f"member_index={member_index} dimensions={actual['dimensions']!r} "
-                        f"expected={expected['dimensions']!r}"
-                    )
-                if actual["data_type"] != expected["data_type"]:
-                    raise RuntimeError(
-                        f"ensemble output data type differs for {output_name!r}: "
-                        f"member_index={member_index} data_type={actual['data_type']!r} "
-                        f"expected={expected['data_type']!r}"
-                    )
-
-        weights = tuple(float(weight) for weight in self.get_member_weights())
-        weight_sum = sum(weights)
-        if weight_sum <= 0.0:
-            raise RuntimeError("ensemble member weights must have a positive finite sum")
-        inverse_weight_sum = 1.0 / weight_sum
-
-        accumulator = thor.Network(f"{self.get_execution()}_ensemble_accumulator")
-        for output_index, output_name in enumerate(output_names):
-            spec = output_specs[output_name]
-            dimensions = [int(d) for d in spec["dimensions"]]
-            data_type = spec["data_type"]
-            inputs: dict[str, object] = {}
-            logical_names: list[str] = []
-            for member_index in range(len(self._members)):
-                member_spec = member_output_specs[member_index][output_name]
-                input_name = _accumulator_input_name(output_index, member_index)
-                logical_names.append(input_name)
-                layer = thor.layers.NetworkInput(
-                    accumulator,
-                    input_name,
-                    dimensions,
-                    data_type,
-                    dimensions_include_batch=True,
-                )
-                inputs[input_name] = layer.get_feature_output()
-
-            def build(context, *, _output_name=output_name, _input_names=tuple(logical_names), _weights=weights):
-                expression = None
-                for input_name, weight in zip(_input_names, _weights):
-                    term = context.input(input_name) * float(weight)
-                    expression = term if expression is None else expression + term
-                if expression is None:
-                    raise RuntimeError("ensemble accumulator requires at least one member input")
-                return {_output_name: expression * inverse_weight_sum}
-
-            layer = thor.layers.CustomLayer(
-                network=accumulator,
-                inputs=inputs,
-                output_names=[output_name],
-                build=build,
-            )
-            thor.layers.NetworkOutput(accumulator, output_name, layer[output_name], data_type)
-
-        placed_accumulator = accumulator.place(
-            batch_size,
-            inference_only=True,
-            forced_devices=[int(device)],
-            forced_num_stamps_per_gpu=1,
-            network_outputs_on_gpu=False,
-        )
-        return accumulator, placed_accumulator, output_names
-
-    def _validate_input_names(self, batch_inputs: Mapping[str, object], placed_members: Sequence[object]) -> None:
-        actual_names = tuple(batch_inputs.keys())
-        if self._input_names:
-            _validate_name_set(kind="input", expected=self._input_names, actual=actual_names)
-
-        expected_from_members: set[str] | None = None
-        for member, placed_member in zip(self._members, placed_members):
-            member_names = set(placed_member.get_network_input_names())
-            if expected_from_members is None:
-                expected_from_members = member_names
-            elif member_names != expected_from_members:
-                raise RuntimeError(
-                    f"ensemble member input names differ: member={member.name!r} "
-                    f"input_names={sorted(member_names)!r} expected={sorted(expected_from_members)!r}"
-                )
-        if expected_from_members is not None and set(actual_names) != expected_from_members:
-            raise ValueError(
-                _name_mismatch_message(kind="input", expected=sorted(expected_from_members), actual=actual_names)
-            )
-
-    def _infer_members_and_aggregate(
-        self,
-        placed_members: Sequence[object],
-        batch_inputs: Mapping[str, object],
-        *,
-        device: int,
-    ) -> dict[str, object]:
-        if not placed_members:
-            raise RuntimeError("ensemble runtime has no placed members")
-
-        if self._placed_accumulator is None:
-            raise RuntimeError("ensemble accumulator runtime is not loaded")
-
-        output_iteration_order = self._runtime_output_names or self._output_names or tuple()
-        import thor._thor as _thor  # type: ignore[import-not-found]
-
-        return _thor._infer_ensemble_members_then_accumulator_network(
-            list(placed_members),
-            self._placed_accumulator,
-            dict(batch_inputs),
-            list(output_iteration_order),
-            int(device),
-        )

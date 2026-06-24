@@ -147,16 +147,6 @@ def _categorical_mixed_labels_one_batch_loader(*, dtype=np.float32):
     )
 
 
-def _softmax_cross_entropy_loss(scores: np.ndarray, labels: np.ndarray) -> float:
-    scores = np.asarray(scores, dtype=np.float64)
-    labels = np.asarray(labels, dtype=np.float64)
-    shifted = scores - np.max(scores, axis=-1, keepdims=True)
-    probabilities = np.exp(shifted)
-    probabilities /= np.sum(probabilities, axis=-1, keepdims=True)
-    losses = -np.sum(labels * np.log(np.maximum(probabilities, 1.0e-12)), axis=-1)
-    return float(np.mean(losses))
-
-
 def _build_tiny_regressor(name: str):
     network = thor.Network(name)
     examples = thor.layers.NetworkInput(network, "examples", [2], thor.DataType.fp32)
@@ -1546,12 +1536,7 @@ def test_training_runs_fits_two_tiny_trainers_on_one_gpu_and_prefixes_stats(capf
     assert loaded_ensemble.get_input_names() == ("examples",)
     assert loaded_ensemble.get_output_names() == ("prediction",)
 
-    test_examples, test_labels = _regression_arrays(dtype=np.float32)
-    loaded_outputs = loaded_ensemble.infer({"examples": _cpu_tensor(test_examples, thor.DataType.fp32)})
-    assert set(loaded_outputs) == {"prediction"}
-    loaded_predictions = loaded_outputs["prediction"].numpy()
-    expected_graph_loss = float(2.0 * np.mean(np.square(loaded_predictions - test_labels)))
-    assert ensemble.ensemble_test_loss == pytest.approx(expected_graph_loss, rel=1e-5, abs=1e-6)
+    assert not hasattr(loaded_ensemble, "infer")
 
     assert (ensemble_artifact_dir / loaded_ensemble.members[0].path / "training_selection_metadata.json").exists()
     assert (ensemble_artifact_dir / loaded_ensemble.members[1].path / "training_selection_metadata.json").exists()
@@ -1664,13 +1649,7 @@ def test_training_runs_categorical_report_matches_loaded_ensemble_predictions(ca
     assert loaded_ensemble.get_input_names() == ("examples",)
     assert loaded_ensemble.get_output_names() == ("scores",)
 
-    test_examples, test_labels = _categorical_mixed_labels_arrays(dtype=np.float32)
-    loaded_outputs = loaded_ensemble.infer({"examples": _cpu_tensor(test_examples, thor.DataType.fp32)})
-    assert set(loaded_outputs) == {"scores"}
-    loaded_scores = np.array(loaded_outputs["scores"].numpy(), copy=True)
-    expected_loss = _softmax_cross_entropy_loss(loaded_scores, test_labels)
-
-    assert ensemble.ensemble_test_loss == pytest.approx(expected_loss, rel=1e-5, abs=1e-6)
+    assert not hasattr(loaded_ensemble, "infer")
     assert ensemble.ensemble_test_accuracy is None
 
 
@@ -1907,17 +1886,4 @@ def test_training_runs_demand_style_kfold_full_path_saves_loadable_ensemble(capf
     assert ensemble.get_input_names() == ("trend_inputs", "seasonality_inputs", "monotone_increasing_inputs")
     assert ensemble.get_output_names() == ("forecast", "forecast_quantile_high")
 
-    deploy_inputs = {
-        "trend_inputs": _cpu_tensor(holdout_numpy.test["trend_inputs"], thor.DataType.fp32),
-        "seasonality_inputs": _cpu_tensor(holdout_numpy.test["seasonality_inputs"], thor.DataType.fp32),
-        "monotone_increasing_inputs": _cpu_tensor(holdout_numpy.test["monotone_increasing_inputs"], thor.DataType.fp32),
-    }
-    outputs = ensemble.infer(deploy_inputs)
-
-    assert set(outputs) == {"forecast", "forecast_quantile_high"}
-    assert outputs["forecast"].get_placement().get_device_type() == thor.physical.DeviceType.cpu
-    assert outputs["forecast_quantile_high"].get_placement().get_device_type() == thor.physical.DeviceType.cpu
-    assert outputs["forecast"].numpy().shape == holdout_numpy.test["observed_future_demand"].shape
-    assert outputs["forecast_quantile_high"].numpy().shape == holdout_numpy.test["observed_future_demand"].shape
-    assert np.all(np.isfinite(outputs["forecast"].numpy()))
-    assert np.all(np.isfinite(outputs["forecast_quantile_high"].numpy()))
+    assert not hasattr(ensemble, "infer")

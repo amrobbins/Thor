@@ -430,25 +430,6 @@ const char* trainingRunsFailurePolicyName(TrainingRunsFailurePolicy policy) {
 
 namespace {
 
-std::optional<std::string> lossReferenceMetricName(const NetworkLossReference& reference) {
-    if (reference.lossLayerType == "MAE") {
-        return "mae";
-    }
-    if (reference.lossLayerType == "MSE") {
-        return "mse";
-    }
-    if (reference.lossLayerType == "CategoricalCrossEntropy" || reference.lossLayerType == "SparseCategoricalCrossEntropy") {
-        return "categorical_cross_entropy";
-    }
-    if (reference.lossLayerType == "QuantileLoss") {
-        return "quantile";
-    }
-    if (reference.lossLayerType == "CustomLoss" || reference.lossLayerType == "MultiInputCustomLoss") {
-        return "custom";
-    }
-    return std::nullopt;
-}
-
 const TrainingRunInputSignature* findInputSignatureItem(const std::vector<TrainingRunInputSignature>& signature,
                                                        const std::string& inputName) {
     auto it = std::find_if(signature.begin(), signature.end(), [&](const TrainingRunInputSignature& item) {
@@ -526,10 +507,6 @@ std::string trainingRunsReportableLossDescription(const NetworkLossReference& re
         << "', target_input_name='" << reference.targetInputName << "'";
     if (reference.weightInputName.has_value()) {
         out << ", weight_input_name='" << *reference.weightInputName << "'";
-    }
-    std::optional<std::string> metric = lossReferenceMetricName(reference);
-    if (metric.has_value()) {
-        out << ", metric='" << *metric << "'";
     }
     if (reference.quantile.has_value()) {
         out << ", quantile=" << *reference.quantile;
