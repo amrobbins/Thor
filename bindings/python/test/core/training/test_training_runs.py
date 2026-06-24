@@ -1559,6 +1559,18 @@ def test_training_runs_fits_two_tiny_trainers_on_one_gpu_and_prefixes_stats(capf
     assert manifest["version"] == 1
     assert manifest["ensemble_group"] == "tiny_ensemble"
     assert manifest["execution"] == "parallel_single_gpu"
+    assert manifest["reported_losses"] == ["loss"]
+    assert manifest["overall_loss_reduction"] == "sum"
+    assert manifest["losses"] == [
+        {
+            "name": "loss",
+            "train_value": pytest.approx(ensemble.ensemble_train_loss),
+            "test_value": pytest.approx(ensemble.ensemble_test_loss),
+        }
+    ]
+    assert "output_name" not in manifest["losses"][0]
+    assert "target_input_name" not in manifest["losses"][0]
+    assert "overall_weight_source" not in manifest["losses"][0]
     assert manifest["members"][0]["selection"]["status"] == "completed"
 
     with pytest.raises(RuntimeError, match="already exists"):

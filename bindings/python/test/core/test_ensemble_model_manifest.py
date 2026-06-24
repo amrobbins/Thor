@@ -24,6 +24,9 @@ def _minimal_manifest(root: Path, *, version: object = 1) -> dict[str, object]:
         "aggregation": {"type": "mean"},
         "input_names": ["matrix"],
         "output_names": ["prediction"],
+        "reported_losses": [],
+        "overall_loss_reduction": "sum",
+        "losses": [],
         "members": [
             {"name": "fold_0", "path": _member_dir(root, "fold_0"), "weight": 1.0, "selection": {}},
         ],
@@ -70,6 +73,9 @@ def test_ensemble_model_saves_and_loads_manifest(tmp_path):
         "aggregation": {"type": "mean"},
         "input_names": ["trend_inputs", "seasonality_inputs", "monotone_increasing_inputs"],
         "output_names": ["forecast", "forecast_quantile_high"],
+        "reported_losses": [],
+        "overall_loss_reduction": "sum",
+        "losses": [],
         "members": [
             {
                 "name": "fold_0",
@@ -96,6 +102,9 @@ def test_ensemble_model_saves_and_loads_manifest(tmp_path):
     assert loaded.get_execution() == "parallel_single_gpu"
     assert loaded.get_input_names() == ("trend_inputs", "seasonality_inputs", "monotone_increasing_inputs")
     assert loaded.get_output_names() == ("forecast", "forecast_quantile_high")
+    assert loaded.reported_losses == ()
+    assert loaded.overall_loss_reduction == "sum"
+    assert loaded.losses == ()
     assert loaded.members[0].selection == {
         "best_epoch": 3,
         "best_score": 0.125,
@@ -176,7 +185,18 @@ def test_ensemble_model_load_rejects_non_object_manifest(tmp_path, raw_manifest)
 
 @pytest.mark.parametrize(
     "field_name",
-    ["artifact_type", "version", "execution", "aggregation", "input_names", "output_names", "members"],
+    [
+        "artifact_type",
+        "version",
+        "execution",
+        "aggregation",
+        "input_names",
+        "output_names",
+        "reported_losses",
+        "overall_loss_reduction",
+        "losses",
+        "members",
+    ],
 )
 def test_ensemble_model_load_rejects_missing_required_manifest_fields(tmp_path, field_name):
     manifest = _minimal_manifest(tmp_path)
@@ -194,6 +214,16 @@ def test_ensemble_model_load_rejects_bad_artifact_type(tmp_path, artifact_type):
     _write_manifest(tmp_path, manifest)
 
     with pytest.raises(ValueError, match="unsupported ensemble artifact_type"):
+        thor.EnsembleModel.load(tmp_path)
+
+
+def test_ensemble_model_load_rejects_legacy_top_level_metric_policy_fields(tmp_path):
+    manifest = _minimal_manifest(tmp_path)
+    manifest["metric"] = "mae"
+    manifest["target_input_name"] = "labels"
+    _write_manifest(tmp_path, manifest)
+
+    with pytest.raises(ValueError, match="unsupported field"):
         thor.EnsembleModel.load(tmp_path)
 
 
@@ -224,6 +254,7 @@ def test_ensemble_model_load_rejects_unsupported_execution(tmp_path):
         ({}, "aggregation.type must be a string"),
         ({"type": 1}, "aggregation.type must be a string"),
         ({"type": "median"}, "unsupported ensemble aggregation"),
+        ({"type": "mean", "legacy_metric": "mae"}, "unsupported field"),
     ],
 )
 def test_ensemble_model_load_rejects_malformed_aggregation(tmp_path, aggregation, message):
@@ -251,6 +282,53 @@ def test_ensemble_model_load_rejects_malformed_schema_name_lists(tmp_path, field
     _write_manifest(tmp_path, manifest)
 
     with pytest.raises(ValueError, match=message):
+        thor.EnsembleModel.load(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "field_name, value, message",
+    [
+        ("reported_losses", "loss", "reported_losses must be a sequence of strings"),
+        ("reported_losses", ["loss", "loss"], "reported_losses entries must be unique"),
+        ("reported_losses", [""], "reported_losses entries must be non-empty strings"),
+        ("overall_loss_reduction", "mean", "overall_loss_reduction must be 'sum'"),
+        ("overall_loss_reduction", None, "overall_loss_reduction must be 'sum'"),
+        ("losses", {}, "losses must be a JSON array"),
+        ("losses", [{"name": "loss", "train_value": "bad", "test_value": None}], "train_value must be a finite number or null"),
+        ("losses", [{"name": "loss", "train_value": None, "test_value": float("inf")}], "test_value must be a finite number or null"),
+        ("losses", [{"name": "", "train_value": None, "test_value": None}], "name must be a non-empty string"),
+        ("losses", [{"name": "loss", "train_value": None, "test_value": None, "target_input_name": "labels"}], "unsupported field"),
+    ],
+)
+def test_ensemble_model_load_rejects_malformed_loss_reporting(tmp_path, field_name, value, message):
+    manifest = _minimal_manifest(tmp_path)
+    manifest[field_name] = value
+    if field_name == "losses" and isinstance(value, list) and value and value[0].get("name") == "loss":
+        manifest["reported_losses"] = ["loss"]
+    _write_manifest(tmp_path, manifest)
+
+    with pytest.raises(ValueError, match=message):
+        thor.EnsembleModel.load(tmp_path)
+
+
+def test_ensemble_model_load_rejects_loss_reporting_mismatch(tmp_path):
+    manifest = _minimal_manifest(tmp_path)
+    manifest["reported_losses"] = ["mse_loss"]
+    manifest["losses"] = [{"name": "mae_loss", "train_value": 1.0, "test_value": 2.0}]
+    _write_manifest(tmp_path, manifest)
+
+    with pytest.raises(ValueError, match="unknown loss name"):
+        thor.EnsembleModel.load(tmp_path)
+
+
+def test_ensemble_model_load_rejects_legacy_manifest_without_loss_reporting(tmp_path):
+    manifest = _minimal_manifest(tmp_path)
+    manifest.pop("reported_losses")
+    manifest.pop("overall_loss_reduction")
+    manifest.pop("losses")
+    _write_manifest(tmp_path, manifest)
+
+    with pytest.raises(ValueError, match="missing required field 'reported_losses'"):
         thor.EnsembleModel.load(tmp_path)
 
 
@@ -298,6 +376,7 @@ def test_ensemble_model_load_rejects_non_object_member_entries(tmp_path, member)
         ({"weight": -1.0}, "weight must be a finite positive number"),
         ({"weight": float("nan")}, "weight must be a finite positive number"),
         ({"selection": []}, "selection must be a mapping"),
+        ({"target_input_name": "labels"}, "unsupported field"),
     ],
 )
 def test_ensemble_model_load_rejects_malformed_member_specs(tmp_path, member_patch, message):
@@ -333,6 +412,9 @@ def test_ensemble_model_rejects_missing_member_path(tmp_path):
         "aggregation": {"type": "mean"},
         "input_names": [],
         "output_names": [],
+        "reported_losses": [],
+        "overall_loss_reduction": "sum",
+        "losses": [],
         "members": [{"name": "fold_0", "path": "members/fold_0", "weight": 1.0, "selection": {}}],
     }
     (tmp_path / "ensemble_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")

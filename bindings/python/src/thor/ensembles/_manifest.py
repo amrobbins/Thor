@@ -1,13 +1,12 @@
 """Manifest-backed ensemble model artifact definitions.
 
-The manifest is the stable saved-artifact contract.  The runtime keeps all
-member networks resident after the first inference placement, stamps member
-NetworkOutput tensors to GPU, submits ensemble member inference from native code,
-and feeds the GPU-resident member outputs into a Thor accumulator network.
-Accumulator NetworkInputs are built in placement-time pass-through mode, so the
-CustomLayer accumulator is stamped against the same physical tensors produced by
-the resident members instead of receiving dynamically swapped runtime tensors.
-Only the final accumulated result is copied to CPU for the Python API.
+The manifest is the saved-artifact contract for loadable inference ensembles.
+Training-produced ensemble artifacts also store loss-centric reporting metadata:
+``reported_losses`` names the graph losses that were evaluated, ``losses`` stores
+only their train/test values, and ``overall_loss_reduction`` records how the
+overall ensemble loss was reduced from those graph loss values.  Legacy metric
+policy fields such as output-name, target-input-name, or CPU-computed accuracy
+are intentionally not part of the manifest schema.
 """
 
 from __future__ import annotations
@@ -55,6 +54,12 @@ def _required_manifest_field(manifest: Mapping[str, Any], field_name: str) -> An
     return manifest[field_name]
 
 
+def _reject_unknown_fields(mapping: Mapping[str, Any], *, allowed: set[str], field_name: str) -> None:
+    unknown = sorted(set(mapping) - allowed)
+    if unknown:
+        raise ValueError(f"{field_name} contains unsupported field(s): {unknown!r}")
+
+
 def _relative_path_string(path: str | Path, *, field_name: str) -> str:
     raw = str(path)
     if raw == "":
@@ -81,7 +86,53 @@ def _copy_json_object(value: Mapping[str, Any] | None, *, field_name: str) -> di
         raise ValueError(f"{field_name} must be JSON serializable") from exc
 
 
+def _json_nullable_number(value: object, *, field_name: str) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
+        raise ValueError(f"{field_name} must be a finite number or null")
+    out = float(value)
+    if not math.isfinite(out):
+        raise ValueError(f"{field_name} must be a finite number or null")
+    return out
 
+
+def _loss_result_from_manifest(value: Mapping[str, Any], *, index: int) -> dict[str, Any]:
+    mapping = _json_mapping(value, field_name=f"losses[{index}]")
+    allowed = {"name", "train_value", "test_value"}
+    unknown = sorted(set(mapping) - allowed)
+    if unknown:
+        raise ValueError(f"losses[{index}] contains unsupported field(s): {unknown!r}")
+    name = mapping.get("name")
+    if not isinstance(name, str) or name == "":
+        raise ValueError(f"losses[{index}].name must be a non-empty string")
+    return {
+        "name": name,
+        "train_value": _json_nullable_number(mapping.get("train_value"), field_name=f"losses[{index}].train_value"),
+        "test_value": _json_nullable_number(mapping.get("test_value"), field_name=f"losses[{index}].test_value"),
+    }
+
+
+def _loss_results_tuple(value: Sequence[Mapping[str, Any]] | None, *, field_name: str) -> tuple[dict[str, Any], ...]:
+    if value is None:
+        return tuple()
+    values = _json_sequence(value, field_name=field_name)
+    losses = tuple(_loss_result_from_manifest(_json_mapping(loss, field_name=f"{field_name}[{i}]"), index=i) for i, loss in enumerate(values))
+    names = [loss["name"] for loss in losses]
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    if duplicates:
+        raise ValueError(f"{field_name} names must be unique; duplicates={duplicates!r}")
+    return losses
+
+
+def _validate_loss_reporting(*, reported_losses: Sequence[str], losses: Sequence[Mapping[str, Any]]) -> None:
+    loss_names = tuple(loss["name"] for loss in losses)
+    missing = sorted(set(reported_losses) - set(loss_names))
+    if missing:
+        raise ValueError(f"reported_losses references unknown loss name(s): {missing!r}")
+    unreported = sorted(set(loss_names) - set(reported_losses))
+    if unreported:
+        raise ValueError(f"losses contains entry not listed in reported_losses: {unreported!r}")
 
 
 
@@ -189,6 +240,7 @@ class EnsembleAggregation:
         if isinstance(value, str):
             return cls(type=value)
         mapping = _json_mapping(value, field_name="aggregation")
+        _reject_unknown_fields(mapping, allowed={"type"}, field_name="aggregation")
         aggregation_type = mapping.get("type")
         if not isinstance(aggregation_type, str):
             raise ValueError("aggregation.type must be a string")
@@ -222,6 +274,7 @@ class EnsembleMemberSpec:
     @classmethod
     def from_manifest(cls, value: Mapping[str, Any]) -> "EnsembleMemberSpec":
         mapping = _json_mapping(value, field_name="member")
+        _reject_unknown_fields(mapping, allowed={"name", "path", "weight", "selection"}, field_name="member")
         name = mapping.get("name")
         path = mapping.get("path")
         if not isinstance(name, str):
@@ -260,6 +313,9 @@ class EnsembleModel:
         execution: str = "parallel_single_gpu",
         input_names: Sequence[str] | None = None,
         output_names: Sequence[str] | None = None,
+        reported_losses: Sequence[str] | None = None,
+        overall_loss_reduction: str = "sum",
+        losses: Sequence[Mapping[str, Any]] | None = None,
         artifact_path: str | Path | None = None,
     ) -> None:
         if execution not in _SUPPORTED_EXECUTIONS:
@@ -286,6 +342,12 @@ class EnsembleModel:
         self._execution = execution
         self._input_names = _string_tuple(input_names, field_name="input_names")
         self._output_names = _string_tuple(output_names, field_name="output_names")
+        self._reported_losses = _string_tuple(reported_losses, field_name="reported_losses")
+        if overall_loss_reduction != "sum":
+            raise ValueError("overall_loss_reduction must be 'sum'")
+        self._overall_loss_reduction = overall_loss_reduction
+        self._losses = _loss_results_tuple(losses, field_name="losses")
+        _validate_loss_reporting(reported_losses=self._reported_losses, losses=self._losses)
         self._artifact_path = Path(artifact_path) if artifact_path is not None else None
         self._runtime_lock = RLock()
         self._placed_members: tuple[object, ...] | None = None
@@ -319,6 +381,18 @@ class EnsembleModel:
     def output_names(self) -> tuple[str, ...]:
         return self._output_names
 
+    @property
+    def reported_losses(self) -> tuple[str, ...]:
+        return self._reported_losses
+
+    @property
+    def overall_loss_reduction(self) -> str:
+        return self._overall_loss_reduction
+
+    @property
+    def losses(self) -> tuple[Mapping[str, Any], ...]:
+        return self._losses
+
     def get_num_members(self) -> int:
         return len(self._members)
 
@@ -351,6 +425,9 @@ class EnsembleModel:
             "aggregation": self._aggregation.to_dict(),
             "input_names": list(self._input_names),
             "output_names": list(self._output_names),
+            "reported_losses": list(self._reported_losses),
+            "overall_loss_reduction": self._overall_loss_reduction,
+            "losses": [dict(loss) for loss in self._losses],
             "members": [member.to_dict() for member in self._members],
         }
 
@@ -381,6 +458,26 @@ class EnsembleModel:
             raise ValueError(f"ensemble manifest is not valid JSON: {manifest_path}") from exc
 
         manifest = _json_mapping(raw_manifest, field_name="ensemble manifest")
+        _reject_unknown_fields(
+            manifest,
+            allowed={
+                "artifact_type",
+                "version",
+                "execution",
+                "aggregation",
+                "input_names",
+                "output_names",
+                "reported_losses",
+                "overall_loss_reduction",
+                "losses",
+                "members",
+                "ensemble_group",
+                "target_num_members",
+                "actual_num_members",
+                "min_successful_models",
+            },
+            field_name="ensemble manifest",
+        )
         artifact_type = _required_manifest_field(manifest, "artifact_type")
         if artifact_type != _SUPPORTED_ARTIFACT_TYPE:
             raise ValueError(
@@ -416,6 +513,18 @@ class EnsembleModel:
             _required_manifest_field(manifest, "output_names"),
             field_name="ensemble manifest output_names",
         )
+        reported_losses = _string_tuple(
+            _required_manifest_field(manifest, "reported_losses"),
+            field_name="ensemble manifest reported_losses",
+        )
+        overall_loss_reduction = _required_manifest_field(manifest, "overall_loss_reduction")
+        if overall_loss_reduction != "sum":
+            raise ValueError("ensemble manifest overall_loss_reduction must be 'sum'")
+        losses = _loss_results_tuple(
+            _required_manifest_field(manifest, "losses"),
+            field_name="ensemble manifest losses",
+        )
+        _validate_loss_reporting(reported_losses=reported_losses, losses=losses)
         member_values = _json_sequence(
             _required_manifest_field(manifest, "members"),
             field_name="ensemble manifest members",
@@ -428,6 +537,9 @@ class EnsembleModel:
             execution=execution,
             input_names=input_names,
             output_names=output_names,
+            reported_losses=reported_losses,
+            overall_loss_reduction=overall_loss_reduction,
+            losses=losses,
             artifact_path=artifact_dir,
         )
         model._validate_member_paths_exist()

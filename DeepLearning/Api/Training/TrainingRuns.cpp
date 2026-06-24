@@ -803,6 +803,34 @@ std::string TrainingRunsResult::saveEnsemble(std::string_view ensembleGroup,
         out << "  \"input_names\": ";
         writeJsonStringArray(out, manifestInputNames, "    ");
         out << ",\n";
+        out << "  \"reported_losses\": ";
+        std::vector<std::string> reportedLossNames;
+        reportedLossNames.reserve(ensembleResult.namedMetrics.size());
+        for (const TrainingNamedMetricResult& metric : ensembleResult.namedMetrics) {
+            reportedLossNames.push_back(metric.name);
+        }
+        writeJsonStringArray(out, reportedLossNames, "    ");
+        out << ",\n";
+        out << "  \"overall_loss_reduction\": \"sum\",\n";
+        out << "  \"losses\": [";
+        for (size_t i = 0; i < ensembleResult.namedMetrics.size(); ++i) {
+            const TrainingNamedMetricResult& metric = ensembleResult.namedMetrics[i];
+            if (i != 0) {
+                out << ",";
+            }
+            out << "\n    {\n";
+            out << "      \"name\": ";
+            writeJsonString(out, metric.name);
+            out << ",\n";
+            out << "      \"train_value\": ";
+            writeOptionalDoubleJson(out, metric.trainValue);
+            out << ",\n";
+            out << "      \"test_value\": ";
+            writeOptionalDoubleJson(out, metric.testValue);
+            out << "\n";
+            out << "    }";
+        }
+        out << "\n  ],\n";
         out << "  \"members\": [";
         for (size_t i = 0; i < entries.size(); ++i) {
             const MemberManifestEntry& entry = entries[i];

@@ -802,6 +802,9 @@ TEST(TrainingRunsResult, SaveEnsembleAllowsPartialSuccessWhenMinimumSatisfied) {
     EXPECT_NE(text.find("\"target_num_members\": 3"), std::string::npos);
     EXPECT_NE(text.find("\"actual_num_members\": 2"), std::string::npos);
     EXPECT_NE(text.find("\"min_successful_models\": 2"), std::string::npos);
+    EXPECT_NE(text.find("\"reported_losses\": ["), std::string::npos);
+    EXPECT_NE(text.find("\"overall_loss_reduction\": \"sum\""), std::string::npos);
+    EXPECT_NE(text.find("\"losses\": ["), std::string::npos);
     EXPECT_NE(text.find("\"name\": \"fold_0\""), std::string::npos);
     EXPECT_NE(text.find("\"name\": \"fold_2\""), std::string::npos);
     EXPECT_EQ(text.find("\"name\": \"fold_1\""), std::string::npos);
