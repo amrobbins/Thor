@@ -934,22 +934,21 @@ def test_debug_synchronous_phase_disabled_aggregate_loss_does_not_backpropagate(
     assert program.get_step(0).get_active_phase_names() == ["daily_prediction"]
     assert len(_phase_losses(stats, "train")) == 2
     assert len(train_daily) == 2
-    assert len(train_aggregate) == 2
+    assert train_aggregate == []
     assert len(validate_daily) == 1
-    assert len(validate_aggregate) == 1
+    assert validate_aggregate == []
+    assert "aggregate_loss=" not in captured_text
 
     assert train_daily[0] == pytest.approx(1.0, rel=2e-3, abs=2e-3)
-    assert train_aggregate[0] == pytest.approx(1.0, rel=2e-3, abs=2e-3)
 
     # At zero initialization, daily_loss and aggregate_loss have equal and
     # opposite gradients through the shared daily predictor.  The aggregate
-    # phase is disabled, so aggregate_loss may be reported but must not seed
-    # backward.  A daily-only SGD update should improve the next daily loss and
-    # worsen the next aggregate loss.  If the disabled aggregate phase leaked
-    # into backward, the opposing gradients would cancel and both second-batch
-    # losses would stay near 1.0.
+    # phase is disabled, so aggregate_loss is phase-scoped out of reporting and
+    # must not seed backward.  A daily-only SGD update should improve the next
+    # daily loss.  If the disabled aggregate phase leaked into backward, the
+    # opposing gradients would cancel and the second daily loss would stay near
+    # 1.0.
     assert train_daily[1] < 0.95, (train_daily, train_aggregate, validate_daily, validate_aggregate)
-    assert train_aggregate[1] > 1.05, (train_daily, train_aggregate, validate_daily, validate_aggregate)
 
 
 def test_debug_synchronous_aggregate_phase_backpropagates_through_forward_only_daily_phase(capfd):
@@ -981,10 +980,11 @@ def test_debug_synchronous_aggregate_phase_backpropagates_through_forward_only_d
 
     assert program.get_step(0).get_active_phase_names() == ["daily_prediction", "aggregate_prediction"]
     assert len(_phase_losses(stats, "train")) == 2
-    assert train_daily[0] == pytest.approx(1.0, rel=2e-3, abs=2e-3)
+    assert train_daily == []
     assert train_aggregate[0] == pytest.approx(1.0, rel=2e-3, abs=2e-3)
-    assert len(validate_daily) == 1
+    assert validate_daily == []
     assert len(validate_aggregate) == 1
+    assert "daily_loss=" not in captured_text
 
     # Only the aggregate loss is active, and the aggregate head is a fixed -1 projection
     # over the daily prediction.  The aggregate loss can improve only if its gradient
@@ -992,7 +992,6 @@ def test_debug_synchronous_aggregate_phase_backpropagates_through_forward_only_d
     # Use the next training batch as the post-update observation point, matching the
     # deterministic SGD integration test above.
     assert train_aggregate[1] < 0.95, (train_daily, train_aggregate, validate_daily, validate_aggregate)
-    assert train_daily[1] > 1.05, (train_daily, train_aggregate, validate_daily, validate_aggregate)
 
 
 def test_queued_phase_disabled_aggregate_loss_does_not_backpropagate(capfd):
@@ -1116,9 +1115,10 @@ def test_same_trainer_restart_enabled_successful_fit_preserves_state_for_next_fi
     assert program.get_step(0).get_active_phase_names() == ["daily_prediction"]
     assert len(_phase_losses(first_stats, "train")) == 1
     assert first_train_daily == pytest.approx([1.0], rel=2e-3, abs=2e-3)
-    assert first_train_aggregate == pytest.approx([1.0], rel=2e-3, abs=2e-3)
+    assert first_train_aggregate == []
     assert first_validate_daily == pytest.approx([0.0], rel=2e-3, abs=2e-3)
-    assert first_validate_aggregate == pytest.approx([4.0], rel=2e-3, abs=2e-3)
+    assert first_validate_aggregate == []
+    assert "aggregate_loss=" not in first_text
 
     second_text, second_stats = _fit_and_capture_text_and_stats(trainer, capfd, epochs=1)
     second_train_daily = _named_scalar_losses(second_text, "train", "daily_loss")
@@ -1131,7 +1131,8 @@ def test_same_trainer_restart_enabled_successful_fit_preserves_state_for_next_fi
     # A successful attempt must still publish its completed placed state back to
     # the user-visible Trainer so a later fit() continues from trained weights.
     assert second_train_daily[0] < 0.05, (second_train_daily, second_train_aggregate)
-    assert second_train_aggregate[0] > 3.5, (second_train_daily, second_train_aggregate)
+    assert second_train_aggregate == []
+    assert "aggregate_loss=" not in second_text
 
 
 def test_same_trainer_fit_recompiles_after_phase_enable_mutation(capfd):
@@ -1164,9 +1165,10 @@ def test_same_trainer_fit_recompiles_after_phase_enable_mutation(capfd):
     assert program.get_step(0).get_active_phase_names() == ["daily_prediction"]
     assert len(_phase_losses(first_stats, "train")) == 2
     assert first_train_daily == pytest.approx([1.0, 0.0], rel=2e-3, abs=2e-3)
-    assert first_train_aggregate == pytest.approx([1.0, 4.0], rel=2e-3, abs=2e-3)
+    assert first_train_aggregate == []
     assert first_validate_daily == pytest.approx([0.0], rel=2e-3, abs=2e-3)
-    assert first_validate_aggregate == pytest.approx([4.0], rel=2e-3, abs=2e-3)
+    assert first_validate_aggregate == []
+    assert "aggregate_loss=" not in first_text
 
     program.get_step(0).get_phases()[1].enable()
     assert program.get_step(0).get_active_phase_names() == ["daily_prediction", "aggregate_prediction"]

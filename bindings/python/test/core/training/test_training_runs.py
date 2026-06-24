@@ -16,6 +16,7 @@ import thor
 from integration_flags import integration_flag_enabled, integration_skip_reason
 
 RUN_TRAINING_INTEGRATION = integration_flag_enabled("THOR_RUN_TRAINING_INTEGRATION")
+RUN_TRAINING_INTEGRATION_LARGE = integration_flag_enabled("THOR_RUN_TRAINING_INTEGRATION_LARGE")
 AIRFOIL_SELF_NOISE_URL = os.environ.get(
     "THOR_AIRFOIL_SELF_NOISE_URL",
     "https://archive.ics.uci.edu/ml/machine-learning-databases/00291/airfoil_self_noise.dat",
@@ -633,19 +634,32 @@ def _build_airfoil_two_phase_joint_quantile_regressor(
     )
 
     # Phase 2 intentionally depends on the phase-1 forecast through a distinct
-    # identity CustomLayer.  The reported point and joint losses have the same
-    # value and optimum, but when phase 2 is enabled its loss must seed a second
-    # same-direction gradient through this edge back into the point forecast
-    # parameters.  Keeping the identity edge distinct avoids structural
-    # de-duplication from hiding whether the second phase contributed backward.
-    joint_forecast = thor.layers.CustomLayer(
+    # CustomLayer and uses the same optimum, but it must not be numerically
+    # identical to point_mse_loss.  Scaling both prediction and target by 2 keeps
+    # the objective compatible with point_mse_loss while making the reported
+    # value exactly 4x the point loss and the MAE metric exactly 2x the point
+    # MAE.  Keep the prediction and target scaling in separate CustomLayers: the
+    # graph-loss discovery code must still be able to identify ``demand`` as a
+    # training-only label input, which would fail if a single multi-input
+    # CustomLayer mixed the prediction path and label path.
+    joint_forecast_projection = thor.layers.CustomLayer(
         network=network,
         inputs={
             "point_forecast": point_forecast.get_feature_output()
         },
         output_names=["joint_forecast"],
         build=lambda context: {
-            "joint_forecast": context.input("point_forecast") * 1.0
+            "joint_forecast": context.input("point_forecast") * 2.0
+        },
+    )
+    joint_demand_projection = thor.layers.CustomLayer(
+        network=network,
+        inputs={
+            "demand": demand.get_feature_output()
+        },
+        output_names=["joint_demand"],
+        build=lambda context: {
+            "joint_demand": context.input("demand") * 2.0
         },
     )
     point_mse = thor.losses.MSE(
@@ -656,8 +670,8 @@ def _build_airfoil_two_phase_joint_quantile_regressor(
     )
     joint_mse = thor.losses.MSE(
         network,
-        joint_forecast["joint_forecast"],
-        demand.get_feature_output(),
+        joint_forecast_projection["joint_forecast"],
+        joint_demand_projection["joint_demand"],
         thor.DataType.fp32,
     )
     high_quantile = thor.losses.QuantileLoss(
@@ -676,8 +690,8 @@ def _build_airfoil_two_phase_joint_quantile_regressor(
     )
     joint_mae = thor.metrics.LossMetric(
         network,
-        joint_forecast["joint_forecast"],
-        demand.get_feature_output(),
+        joint_forecast_projection["joint_forecast"],
+        joint_demand_projection["joint_demand"],
         formula=thor.metrics.LossFormula.mean_absolute_error,
         display_name="Joint MAE",
     )
@@ -728,6 +742,133 @@ def _build_airfoil_two_phase_joint_quantile_regressor(
     )
     program = thor.training.TrainingProgram([step])
     return network, program, second_phase
+
+
+def _build_airfoil_two_phase_mae_then_mse_regressor(
+    name: str,
+    *,
+    width: int = 32,
+) -> tuple[thor.Network, thor.training.TrainingProgram, thor.training.TrainingPhase]:
+    """Real two-phase Airfoil model: MAE pretrain, then MSE head using MAE forecast.
+
+    Phase 1 trains a FullyConnected backbone plus an MAE forecast head. Phase 2
+    adds a second FullyConnected head whose input concatenates the shared hidden
+    representation with the phase-1 forecast, so the MSE head explicitly consumes
+    the pretrained prediction rather than being an independent sibling output.
+    """
+    network = thor.Network(name)
+    examples = thor.layers.NetworkInput(network, "examples", [5], thor.DataType.fp32)
+    demand = thor.layers.NetworkInput(network, "demand", [1], thor.DataType.fp32)
+
+    hidden = thor.layers.FullyConnected(
+        network,
+        examples.get_feature_output(),
+        width,
+        True,
+        activation=thor.activations.Relu(),
+    )
+    hidden = thor.layers.FullyConnected(
+        network,
+        hidden.get_feature_output(),
+        width,
+        True,
+        activation=thor.activations.Relu(),
+    )
+    mae_forecast = thor.layers.FullyConnected(
+        network,
+        hidden.get_feature_output(),
+        1,
+        True,
+        activation=None,
+    )
+    mse_features = thor.layers.Concatenate(
+        network,
+        [hidden.get_feature_output(), mae_forecast.get_feature_output()],
+        0,
+    )
+    mse_hidden = thor.layers.FullyConnected(
+        network,
+        mse_features.get_feature_output(),
+        width,
+        True,
+        activation=thor.activations.Relu(),
+    )
+    mse_forecast = thor.layers.FullyConnected(
+        network,
+        mse_hidden.get_feature_output(),
+        1,
+        True,
+        activation=None,
+    )
+
+    mae_loss = thor.losses.MAE(
+        network,
+        mae_forecast.get_feature_output(),
+        demand.get_feature_output(),
+        thor.DataType.fp32,
+    )
+    mse_loss = thor.losses.MSE(
+        network,
+        mse_forecast.get_feature_output(),
+        demand.get_feature_output(),
+        thor.DataType.fp32,
+    )
+    mae_head_mae = thor.metrics.LossMetric(
+        network,
+        mae_forecast.get_feature_output(),
+        demand.get_feature_output(),
+        formula=thor.metrics.LossFormula.mean_absolute_error,
+        display_name="MAE Head MAE",
+    )
+    mse_head_mae = thor.metrics.LossMetric(
+        network,
+        mse_forecast.get_feature_output(),
+        demand.get_feature_output(),
+        formula=thor.metrics.LossFormula.mean_absolute_error,
+        display_name="MSE Head MAE",
+    )
+
+    mae_loss_tensor = mae_loss.get_loss()
+    mse_loss_tensor = mse_loss.get_loss()
+    mae_head_mae_tensor = mae_head_mae.get_metric()
+    mse_head_mae_tensor = mse_head_mae.get_metric()
+    mae_forecast_tensor = mae_forecast.get_feature_output()
+    mse_forecast_tensor = mse_forecast.get_feature_output()
+
+    thor.layers.NetworkOutput(network, "mae_loss", mae_loss_tensor, thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "mse_loss", mse_loss_tensor, thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "mae_head_mae_accuracy", mae_head_mae_tensor, thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "mse_head_mae_accuracy", mse_head_mae_tensor, thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "mae_forecast", mae_forecast_tensor, thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "mse_forecast", mse_forecast_tensor, thor.DataType.fp32)
+
+    mae_phase = thor.training.TrainingPhase(
+        "mae_pretrain",
+        loss_roots=[mae_loss_tensor],
+        outputs={
+            "mae_forecast": mae_forecast_tensor,
+            "mae_loss": mae_loss_tensor,
+            "mae_head_mae_accuracy": mae_head_mae_tensor,
+        },
+        enabled=True,
+    )
+    mse_phase = thor.training.TrainingPhase(
+        "mse_finetune",
+        loss_roots=[mse_loss_tensor],
+        outputs={
+            "mse_forecast": mse_forecast_tensor,
+            "mse_loss": mse_loss_tensor,
+            "mse_head_mae_accuracy": mse_head_mae_tensor,
+        },
+        depends_on=["mae_pretrain"],
+        enabled=False,
+    )
+    step = thor.training.TrainingStep(
+        "airfoil_mae_then_mse_step",
+        phases=[mae_phase, mse_phase],
+        optimizer=thor.optimizers.Adam(),
+    )
+    return network, thor.training.TrainingProgram([step]), mse_phase
 
 
 def _build_tiny_classifier(name: str):
@@ -1740,7 +1881,7 @@ def test_training_runs_airfoil_cv3_reports_mae_plus_low_high_quantile_losses(cap
 @pytest.mark.cuda
 @pytest.mark.training_integration
 @pytest.mark.skipif(
-    not RUN_TRAINING_INTEGRATION,
+    not RUN_TRAINING_INTEGRATION_LARGE,
     reason=integration_skip_reason(
         "THOR_RUN_TRAINING_INTEGRATION",
         description="opt-in TrainingRuns CUDA integration tests with downloaded Airfoil Self-Noise data",
@@ -1759,6 +1900,7 @@ def test_training_runs_airfoil_cv3_two_phase_pretrain_then_joint_multi_loss_metr
     pretrain_epochs = 20
     joint_epochs = 20
     baselines_by_run = {}
+    probe_indices_by_run = {}
     programs_by_run = {}
     second_phases_by_run = {}
 
@@ -1778,6 +1920,7 @@ def test_training_runs_airfoil_cv3_two_phase_pretrain_then_joint_multi_loss_metr
         )
         if store_main_handles:
             baselines_by_run[run_name] = baseline_mse
+            probe_indices_by_run[run_name] = probe_indices
         network, program, second_phase = _build_airfoil_two_phase_joint_quantile_regressor(
             f"{model_prefix}_{run_name}",
         )
@@ -1824,22 +1967,25 @@ def test_training_runs_airfoil_cv3_two_phase_pretrain_then_joint_multi_loss_metr
             fold_index = int(fold["fold_index"])
             fold_name = f"fold_{fold_index}"
             run_name = fold_name if run_name_prefix == "fold" else f"{run_name_prefix}_{fold_name}"
-            specs.append((
-                run_name,
-                make_fold_trainer(
-                    fold=fold,
-                    run_name=run_name,
-                    dataset_prefix=dataset_prefix,
-                    model_prefix=model_prefix,
-                    enable_second_phase=enable_second_phase,
-                    store_main_handles=store_main_handles,
-                ),
-                group_name,
-            ))
+            specs.append(
+                (
+                    run_name,
+                    make_fold_trainer(
+                        fold=fold,
+                        run_name=run_name,
+                        dataset_prefix=dataset_prefix,
+                        model_prefix=model_prefix,
+                        enable_second_phase=enable_second_phase,
+                        store_main_handles=store_main_handles,
+                    ),
+                    group_name,
+                ))
         return specs
 
     def run_spec_by_name(run_specs):
-        return {run_name: trainer for run_name, trainer, _ in run_specs}
+        return {
+            run_name: trainer for run_name, trainer, _ in run_specs
+        }
 
     def control_run_name(prefix: str, run_name: str):
         return run_name if prefix == "fold" else f"{prefix}_{run_name}"
@@ -1870,9 +2016,10 @@ def test_training_runs_airfoil_cv3_two_phase_pretrain_then_joint_multi_loss_metr
         ]
 
     # Control: phase 2 is enabled from the first update.  Because joint_mse_loss
-    # consumes the phase-1 forecast through a distinct identity edge, this should
-    # add same-direction gradient through the point forecast path and learn faster
-    # than the disabled pretrain.
+    # consumes a scaled projection of the phase-1 forecast with the same optimum,
+    # this should add same-direction gradient through the point forecast path and
+    # learn faster than the disabled pretrain.  The scaling also makes the joint
+    # loss/metric distinct from the point loss/metric in reports.
     enabled_start_group = "airfoil_two_phase_enabled_start_cv3"
     enabled_start_prefix = "enabled_start"
     enabled_start_specs = make_run_specs(
@@ -1955,8 +2102,7 @@ def test_training_runs_airfoil_cv3_two_phase_pretrain_then_joint_multi_loss_metr
         assert result.final_training_loss > 0.0
         assert result.final_training_loss == pytest.approx(point_after_disabled, rel=0.10, abs=1e-6)
         assert result.final_validation_loss == pytest.approx(
-            result.final_validation_stats.metrics["point_mse_loss"], rel=1e-5, abs=1e-6
-        )
+            result.final_validation_stats.metrics["point_mse_loss"], rel=1e-5, abs=1e-6)
         assert "joint_mse_loss" not in result.final_training_stats.metrics
         assert "quantile_high_loss" not in result.final_training_stats.metrics
         assert "joint_mae_accuracy" not in result.final_training_stats.metrics
@@ -1966,15 +2112,16 @@ def test_training_runs_airfoil_cv3_two_phase_pretrain_then_joint_multi_loss_metr
 
         # If the disabled second phase leaked gradients, the disabled pretrain
         # would behave like this enabled-from-start control because joint_mse_loss
-        # is the same objective over an identity projection of the same forecast
-        # tensor.  The disabled run must remain measurably worse, while still
-        # learning from phase 1 alone.
+        # has the same optimum and seeds same-direction gradients through a scaled
+        # projection of the same forecast tensor.  The disabled run must remain
+        # measurably worse, while still learning from phase 1 alone.
         assert point_enabled_start < point_after_disabled * 0.95, (
             run_name,
             point_after_disabled,
             point_enabled_start,
         )
-        assert joint_enabled_start == pytest.approx(point_enabled_start, rel=1e-5, abs=1e-6)
+        assert joint_enabled_start == pytest.approx(point_enabled_start * 4.0, rel=1e-5, abs=1e-6)
+        assert joint_enabled_start != pytest.approx(point_enabled_start, rel=1e-5, abs=1e-6)
         assert result.final_training_stats.metrics["point_mae_accuracy"] > 0.0
         assert result.final_validation_stats.metrics["point_mae_accuracy"] > 0.0
 
@@ -2012,14 +2159,28 @@ def test_training_runs_airfoil_cv3_two_phase_pretrain_then_joint_multi_loss_metr
     for program in programs_by_run.values():
         assert program.get_step(0).get_active_phase_names() == ["point_forecast", "joint_and_quantile"]
 
+    # This test is about end-to-end phase mechanics and composed ensemble
+    # evaluation, not distribution-shift generalization.  The model sees zeroed
+    # features, so it is intentionally bias-only; evaluating on the global
+    # holdout can make the test loss look catastrophically bad just because the
+    # selected training/probe target slice has a different mean.  Use the same
+    # deterministic fold probe slices as an in-distribution test loader so the
+    # test path exercises real ensemble evaluation while still behaving like the
+    # fitted phase-mechanics problem.
+    ensemble_test_indices = np.ascontiguousarray(
+        np.concatenate([probe_indices_by_run[run_name] for run_name, _, _ in run_specs]),
+        dtype=np.int64,
+    )
     test_loader = _airfoil_loader_from_indices(
         features,
         target,
-        train_indices=holdout_indices,
-        validate_indices=holdout_indices,
+        train_indices=ensemble_test_indices,
+        validate_indices=ensemble_test_indices,
         batch_size=batch_size,
-        dataset_name="airfoil_two_phase_cv3_holdout_test",
+        dataset_name="airfoil_two_phase_cv3_in_distribution_test",
     )
+    assert test_loader.get_num_validate_examples() == int(ensemble_test_indices.shape[0])
+    assert test_loader.get_num_validate_batches() == len(run_specs)
     second_runs = make_runs(run_specs)
     second_results, second_text = _fit_runs_and_capture_text(
         second_runs,
@@ -2054,6 +2215,24 @@ def test_training_runs_airfoil_cv3_two_phase_pretrain_then_joint_multi_loss_metr
     assert second_ensemble.ensemble_train_loss > 0.0
     assert second_ensemble.ensemble_test_loss > 0.0
 
+    ensemble_loss_by_name = {
+        metric.name: metric for metric in second_ensemble.named_metrics
+    }
+    ensemble_metric_by_name = {
+        metric.name: metric for metric in second_ensemble.reported_metrics
+    }
+    assert ensemble_loss_by_name["joint_mse_loss"].train_value == pytest.approx(
+        ensemble_loss_by_name["point_mse_loss"].train_value * 4.0, rel=1e-5, abs=1e-6)
+    assert ensemble_loss_by_name["joint_mse_loss"].test_value == pytest.approx(
+        ensemble_loss_by_name["point_mse_loss"].test_value * 4.0, rel=1e-5, abs=1e-6)
+    assert ensemble_metric_by_name["joint_mae_accuracy"].train_value == pytest.approx(
+        ensemble_metric_by_name["point_mae_accuracy"].train_value * 2.0, rel=1e-4, abs=1e-6)
+    assert ensemble_metric_by_name["joint_mae_accuracy"].test_value == pytest.approx(
+        ensemble_metric_by_name["point_mae_accuracy"].test_value * 2.0, rel=1e-4, abs=1e-6)
+    assert ensemble_loss_by_name["point_mse_loss"].test_value < 0.25
+    assert ensemble_metric_by_name["point_mae_accuracy"].test_value < 0.75
+    assert second_ensemble.ensemble_test_loss < second_ensemble.ensemble_train_loss * 2.0
+
     for run_name, _, _ in run_specs:
         result = second_results[run_name]
         disabled_result = disabled_throughout_results[control_run_name(disabled_throughout_prefix, run_name)]
@@ -2075,7 +2254,7 @@ def test_training_runs_airfoil_cv3_two_phase_pretrain_then_joint_multi_loss_metr
             pretrain_point_loss_by_run[run_name],
             point_after_joint,
         )
-        assert joint_after_joint < pretrain_point_loss_by_run[run_name] * 0.95, (
+        assert joint_after_joint < pretrain_point_loss_by_run[run_name] * 4.0 * 0.95, (
             run_name,
             pretrain_point_loss_by_run[run_name],
             joint_after_joint,
@@ -2086,18 +2265,21 @@ def test_training_runs_airfoil_cv3_two_phase_pretrain_then_joint_multi_loss_metr
             pretrain_point_mae_by_run[run_name],
             point_mae_after_joint,
         )
-        assert joint_mae_after_joint < pretrain_point_mae_by_run[run_name] * 0.95, (
+        assert joint_mae_after_joint < pretrain_point_mae_by_run[run_name] * 2.0 * 0.95, (
             run_name,
             pretrain_point_mae_by_run[run_name],
             joint_mae_after_joint,
         )
-        assert joint_after_joint == pytest.approx(point_after_joint, rel=1e-5, abs=1e-6)
+        assert joint_after_joint == pytest.approx(point_after_joint * 4.0, rel=1e-5, abs=1e-6)
+        assert joint_after_joint != pytest.approx(point_after_joint, rel=1e-5, abs=1e-6)
+        assert joint_mae_after_joint == pytest.approx(point_mae_after_joint * 2.0, rel=1e-5, abs=1e-6)
+        assert joint_mae_after_joint != pytest.approx(point_mae_after_joint, rel=1e-5, abs=1e-6)
         assert point_after_joint < point_disabled_throughout, (
             run_name,
             point_disabled_throughout,
             point_after_joint,
         )
-        assert joint_after_joint < point_disabled_throughout, (
+        assert joint_after_joint * 0.25 < point_disabled_throughout, (
             run_name,
             point_disabled_throughout,
             joint_after_joint,
@@ -2114,6 +2296,234 @@ def test_training_runs_airfoil_cv3_two_phase_pretrain_then_joint_multi_loss_metr
         final_line_match = re.search(
             rf"^INFO runs\[{re.escape(run_name)}\|airfoil_two_phase_cv3\]:.*status=completed.*train_loss=.*validate_loss=.*test_loss=.*$",
             second_plain_text,
+            flags=re.MULTILINE,
+        )
+        assert final_line_match is not None
+        final_line = final_line_match.group(0)
+        for column_name in ("train_loss", "validate_loss", "test_loss"):
+            assert f"{column_name}=" in final_line
+        for prefix in ("train", "validate", "test"):
+            for loss_name in reported_losses:
+                assert f"{prefix}_{loss_name}=" in final_line
+            for metric_name in reported_metrics:
+                assert f"{prefix}_{metric_name}=" in final_line
+
+
+@pytest.mark.cuda
+@pytest.mark.training_integration
+@pytest.mark.skipif(
+    not RUN_TRAINING_INTEGRATION,
+    reason=integration_skip_reason(
+        "THOR_RUN_TRAINING_INTEGRATION",
+        description="opt-in TrainingRuns Airfoil two-phase MAE/MSE holdout integration test",
+    ),
+)
+def test_training_runs_airfoil_cv3_two_phase_mae_pretrain_then_mse_head_holdout(capfd, tmp_path):
+    features, target = _ensure_airfoil_self_noise_arrays()
+    assert features.shape[0] == target.shape[0]
+    assert features.shape[1] == 5
+    assert target.shape[1] == 1
+
+    folds, holdout_indices = _airfoil_cv3_indices(features.shape[0])
+    assert len(folds) == 3
+    assert holdout_indices.shape[0] == int(round(features.shape[0] * 0.10))
+
+    ensemble_group = "airfoil_mae_then_mse_cv3"
+    reported_losses = ["mae_loss", "mse_loss"]
+    reported_metrics = ["mae_head_mae_accuracy", "mse_head_mae_accuracy"]
+    batch_size = 128
+    pretrain_epochs = 30
+    mse_epochs = 40
+    programs_by_run = {}
+    mse_phases_by_run = {}
+    validation_zero_mae_by_run = {}
+    validation_zero_mse_by_run = {}
+
+    holdout_target = target[holdout_indices]
+    holdout_zero_mae = float(np.mean(np.abs(holdout_target), dtype=np.float32))
+    holdout_zero_mse = float(np.mean(np.square(holdout_target, dtype=np.float32), dtype=np.float32))
+    assert holdout_zero_mae > 0.0
+    assert holdout_zero_mse > 0.0
+
+    def make_fold_trainer(*, fold: dict, run_name: str):
+        loader = _airfoil_loader_from_indices(
+            features,
+            target,
+            train_indices=fold["train_indices"],
+            validate_indices=fold["validate_indices"],
+            batch_size=batch_size,
+            dataset_name=f"airfoil_mae_then_mse_cv3_{run_name}",
+        )
+        assert loader.get_num_train_batches() > 1
+        assert loader.get_num_validate_batches() > 1
+        validation_target = target[fold["validate_indices"]]
+        validation_zero_mae_by_run[run_name] = float(np.mean(np.abs(validation_target), dtype=np.float32))
+        validation_zero_mse_by_run[run_name] = float(
+            np.mean(np.square(validation_target, dtype=np.float32), dtype=np.float32))
+        network, program, mse_phase = _build_airfoil_two_phase_mae_then_mse_regressor(
+            f"airfoil_mae_then_mse_{run_name}",
+            width=32,
+        )
+        programs_by_run[run_name] = program
+        mse_phases_by_run[run_name] = mse_phase
+        assert program.get_step(0).get_active_phase_names() == ["mae_pretrain"]
+        return thor.training.Trainer(
+            network,
+            loader,
+            training_program=program,
+            stats_interval_s=AIRFOIL_QUANTILE_STATS_INTERVAL_S,
+            max_in_flight_batches=2,
+            scalar_tensors_to_report=reported_losses,
+            stats_color=AIRFOIL_QUANTILE_STATS_COLOR,
+            save_model_dir=tmp_path / f"{run_name}_model",
+            save_model_overwrite=True,
+        )
+
+    run_specs = []
+    for fold in folds:
+        fold_index = int(fold["fold_index"])
+        run_name = f"fold_{fold_index}"
+        run_specs.append((run_name, make_fold_trainer(fold=fold, run_name=run_name), ensemble_group))
+
+    main_trainers = {run_name: trainer for run_name, trainer, _ in run_specs}
+
+    def make_runs():
+        return thor.training.TrainingRuns(
+            run_specs,
+            reported_losses={ensemble_group: reported_losses},
+            reported_metrics={ensemble_group: reported_metrics},
+            max_parallel_runs=3,
+            max_summary_logs_per_second=AIRFOIL_QUANTILE_SUMMARY_LOGS_PER_SECOND,
+        )
+
+    def completed_or_status_payload(results):
+        return [
+            (result.run_name, result.status, result.result, result.exception_type, result.exception_message)
+            for result in results
+        ]
+
+    pretrain_results, pretrain_text = _fit_runs_and_capture_text(
+        make_runs(),
+        capfd,
+        epochs=pretrain_epochs,
+    )
+    pretrain_plain_text = _ANSI_RE.sub("", pretrain_text)
+    if _expects_color_for_stats_color_mode(AIRFOIL_QUANTILE_STATS_COLOR):
+        assert "\x1b[" in pretrain_text
+    assert pretrain_results.all_completed(), completed_or_status_payload(pretrain_results)
+    assert "mse_loss=" not in pretrain_plain_text
+    assert "mse_head_mae_accuracy=" not in pretrain_plain_text
+    for run_name, trainer in main_trainers.items():
+        assert trainer.completed_training_epochs == pretrain_epochs
+        result = pretrain_results[run_name]
+        assert result.final_validation_stats.metrics["mae_loss"] < validation_zero_mae_by_run[run_name] * 0.98, (
+            run_name,
+            validation_zero_mae_by_run[run_name],
+            result.final_validation_stats.metrics["mae_loss"],
+        )
+        assert "mse_loss" not in result.final_training_stats.metrics
+        assert "mse_loss" not in result.final_validation_stats.metrics
+        assert "mse_head_mae_accuracy" not in result.final_training_stats.metrics
+        assert "mse_head_mae_accuracy" not in result.final_validation_stats.metrics
+
+    for mse_phase in mse_phases_by_run.values():
+        mse_phase.enable()
+    for program in programs_by_run.values():
+        assert program.get_step(0).get_active_phase_names() == ["mae_pretrain", "mse_finetune"]
+
+    test_loader = _airfoil_loader_from_indices(
+        features,
+        target,
+        train_indices=holdout_indices,
+        validate_indices=holdout_indices,
+        batch_size=batch_size,
+        dataset_name="airfoil_mae_then_mse_cv3_holdout_test",
+    )
+    assert test_loader.get_num_validate_examples() == int(holdout_indices.shape[0])
+    assert test_loader.get_num_validate_batches() > 1
+
+    final_results, final_text = _fit_runs_and_capture_text(
+        make_runs(),
+        capfd,
+        epochs=mse_epochs,
+        test_loader=test_loader,
+    )
+    final_plain_text = _ANSI_RE.sub("", final_text)
+    if _expects_color_for_stats_color_mode(AIRFOIL_QUANTILE_STATS_COLOR):
+        assert "\x1b[" in final_text
+    assert final_results.all_completed(), completed_or_status_payload(final_results)
+    assert "INFO runs ensemble[airfoil_mae_then_mse_cv3]:" in final_plain_text
+    for loss_name in reported_losses:
+        assert f"ensemble_train_{loss_name}=" in final_plain_text
+        assert f"ensemble_test_{loss_name}=" in final_plain_text
+    for metric_name in reported_metrics:
+        assert f"ensemble_train_{metric_name}=" in final_plain_text
+        assert f"ensemble_test_{metric_name}=" in final_plain_text
+
+    for trainer in main_trainers.values():
+        assert trainer.completed_training_epochs == pretrain_epochs + mse_epochs
+
+    ensemble = final_results.ensemble(ensemble_group)
+    assert ensemble.all_completed()
+    assert len(ensemble.members) == 3
+    assert [metric.name for metric in ensemble.named_metrics] == reported_losses
+    assert [metric.name for metric in ensemble.reported_metrics] == reported_metrics
+    assert ensemble.ensemble_train_loss is not None
+    assert ensemble.ensemble_test_loss is not None
+    assert math.isfinite(ensemble.ensemble_train_loss)
+    assert math.isfinite(ensemble.ensemble_test_loss)
+    assert ensemble.ensemble_train_loss > 0.0
+    assert ensemble.ensemble_test_loss > 0.0
+
+    ensemble_loss_by_name = {metric.name: metric for metric in ensemble.named_metrics}
+    ensemble_metric_by_name = {metric.name: metric for metric in ensemble.reported_metrics}
+    assert ensemble_loss_by_name["mae_loss"].test_value < holdout_zero_mae * 0.98, (
+        holdout_zero_mae,
+        ensemble_loss_by_name["mae_loss"].test_value,
+    )
+    assert ensemble_loss_by_name["mse_loss"].test_value < holdout_zero_mse * 0.98, (
+        holdout_zero_mse,
+        ensemble_loss_by_name["mse_loss"].test_value,
+    )
+    assert ensemble_metric_by_name["mae_head_mae_accuracy"].test_value == pytest.approx(
+        ensemble_loss_by_name["mae_loss"].test_value, rel=1e-4, abs=1e-6)
+    assert ensemble_metric_by_name["mse_head_mae_accuracy"].test_value < holdout_zero_mae * 1.05, (
+        holdout_zero_mae,
+        ensemble_metric_by_name["mse_head_mae_accuracy"].test_value,
+    )
+
+    for run_name, _, _ in run_specs:
+        result = final_results[run_name]
+        assert result.status == "completed"
+        assert result.final_test_loss is not None
+        for loss_name in reported_losses:
+            assert result.final_training_stats.metrics[loss_name] > 0.0
+            assert result.final_validation_stats.metrics[loss_name] > 0.0
+            assert result.final_test_stats.metrics[loss_name] > 0.0
+        for metric_name in reported_metrics:
+            assert result.final_training_stats.metrics[metric_name] > 0.0
+            assert result.final_validation_stats.metrics[metric_name] > 0.0
+            assert result.final_test_stats.metrics[metric_name] > 0.0
+        assert result.final_test_stats.metrics["mae_loss"] < holdout_zero_mae * 1.10, (
+            run_name,
+            holdout_zero_mae,
+            result.final_test_stats.metrics["mae_loss"],
+        )
+        assert result.final_test_stats.metrics["mse_loss"] < holdout_zero_mse * 1.10, (
+            run_name,
+            holdout_zero_mse,
+            result.final_test_stats.metrics["mse_loss"],
+        )
+        assert result.final_test_stats.metrics["mae_head_mae_accuracy"] == pytest.approx(
+            result.final_test_stats.metrics["mae_loss"], rel=1e-4, abs=1e-6)
+        assert result.final_test_stats.metrics["mse_head_mae_accuracy"] < holdout_zero_mae * 1.15, (
+            run_name,
+            holdout_zero_mae,
+            result.final_test_stats.metrics["mse_head_mae_accuracy"],
+        )
+        final_line_match = re.search(
+            rf"^INFO runs\[{re.escape(run_name)}\|airfoil_mae_then_mse_cv3\]:.*status=completed.*train_loss=.*validate_loss=.*test_loss=.*$",
+            final_plain_text,
             flags=re.MULTILINE,
         )
         assert final_line_match is not None

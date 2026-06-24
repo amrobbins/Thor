@@ -244,7 +244,9 @@ std::vector<std::string> outputBackedReportableLossNames(Network& network) {
     return std::vector<std::string>(lossNames.begin(), lossNames.end());
 }
 
-std::vector<std::string> outputBackedReportableLossNames(Network& network, const std::vector<Tensor>& activeTrainingLossRoots) {
+std::vector<std::string> outputBackedReportableLossNamesByActiveRoots(
+    Network& network,
+    const std::vector<Tensor>& activeTrainingLossRoots) {
     const std::map<std::string, uint64_t> outputInputOriginalIds = networkOutputInputOriginalIdsByName(network);
     std::set<uint64_t> activeLossRootOriginalIds;
     for (const Tensor& lossRoot : activeTrainingLossRoots) {
@@ -299,6 +301,38 @@ std::set<std::string> trainingProgramPhaseOutputNames(const TrainingProgram& pro
 
 std::set<std::string> setFromVector(const std::vector<std::string>& values) {
     return std::set<std::string>(values.begin(), values.end());
+}
+
+std::vector<std::string> activeOutputBackedReportableLossNames(Network& network,
+                                                               const TrainingProgram& trainingProgram,
+                                                               const std::vector<Tensor>& activeTrainingLossRoots) {
+    const std::set<std::string> allOutputBackedLossNames = setFromVector(outputBackedReportableLossNames(network));
+    if (allOutputBackedLossNames.empty()) {
+        return {};
+    }
+
+    const std::set<std::string> allPhaseOutputNames = trainingProgramPhaseOutputNames(trainingProgram, /*activeOnly=*/false);
+    if (allPhaseOutputNames.empty()) {
+        // Legacy/default TrainingProgram construction creates a single active phase from
+        // all graph loss roots, but that synthetic phase has no explicit output map.
+        // In that mode there are no inactive phase outputs to prune, so every
+        // output-backed graph loss remains active for reporting, aggregate loss,
+        // best-candidate selection, and saved-model finalization.
+        return std::vector<std::string>(allOutputBackedLossNames.begin(), allOutputBackedLossNames.end());
+    }
+
+    std::set<std::string> activeLossNames;
+    const std::set<std::string> activePhaseOutputNames = trainingProgramPhaseOutputNames(trainingProgram, /*activeOnly=*/true);
+    for (const std::string& name : activePhaseOutputNames) {
+        if (allOutputBackedLossNames.count(name) != 0) {
+            activeLossNames.insert(name);
+        }
+    }
+
+    for (const std::string& name : outputBackedReportableLossNamesByActiveRoots(network, activeTrainingLossRoots)) {
+        activeLossNames.insert(name);
+    }
+    return std::vector<std::string>(activeLossNames.begin(), activeLossNames.end());
 }
 
 bool isRuntimeScalarName(const std::string& name) {
@@ -1742,7 +1776,9 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         ExecutableTrainingPlan::compile(*trainingProgram, *placedNetwork, /*resolveEmptyUpdateParametersAsAllTrainable=*/!evaluateOnly);
     ensureNativeQueuedPlanCompatible(plan, *request.network, evaluateOnly);
 
-    const std::vector<std::string> aggregateLossTensorNames = outputBackedReportableLossNames(*request.network, activeTrainingLossRoots(plan));
+    const std::vector<Tensor> activeLossRoots = activeTrainingLossRoots(plan);
+    const std::vector<std::string> aggregateLossTensorNames =
+        activeOutputBackedReportableLossNames(*request.network, *trainingProgram, activeLossRoots);
     const bool hasConcreteLossOutput = outputNameExists(*request.network, "loss");
     filterRuntimeScalarsToActiveTrainingProgramOutputs(runtime, *request.network, *trainingProgram, aggregateLossTensorNames);
     if (!evaluateOnly && (request.saveModelDirectory.has_value() || !request.earlyCompletionPolicies.empty())) {
