@@ -58,6 +58,7 @@ class CustomLayer : public TrainableLayer {
     std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override;
     bool mustConnectAllInputsToDriveOutput() const override { return true; }
     void informThatInputConnectionMade(Tensor inputTensor) override;
+    void resetGraphTraversalState() override;
     std::string getLayerType() const override { return "CustomLayer"; }
 
    protected:

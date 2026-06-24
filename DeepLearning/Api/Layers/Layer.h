@@ -47,6 +47,12 @@ class Layer {
     virtual bool mustConnectAllInputsToDriveOutput() const { return false; }
     virtual void informThatInputConnectionMade(Tensor inputTensor) {}
 
+    // Some API layers keep temporary bookkeeping while Network::topologicalSort() waits for
+    // every logical input to arrive before emitting an output tensor.  The same Network can be
+    // sorted, placed, or re-placed more than once, so that traversal/stamping state must be reset
+    // before each graph walk or physical stamping pass.
+    virtual void resetGraphTraversalState() {}
+
     bool isInitialized() { return initialized; }
 
     virtual void preOptimize(Tensor inputTensor, uint64_t batchSize, Stream stream) {}

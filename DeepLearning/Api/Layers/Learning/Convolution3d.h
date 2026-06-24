@@ -108,6 +108,7 @@ class Convolution3d : public TrainableLayer {
     Tensor getFeatureOutput(Tensor inputTensor) const override;
     std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override;
     void informThatInputConnectionMade(Tensor inputTensor) override;
+    void resetGraphTraversalState() override;
     bool mustConnectAllInputsToDriveOutput() const override { return !epilogueInputBindings.empty(); }
 
    protected:

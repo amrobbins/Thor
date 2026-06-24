@@ -81,12 +81,12 @@ class Metric : public Layer {
     }
 
     std::optional<Tensor> createFeatureOutputTensor() override {
-        if (isInferenceOnly()) {
-            return std::nullopt;
-        } else {
-            THOR_THROW_IF_FALSE(featureInput.has_value());
-            return Tensor(featureInput.value().getPlacement(), TensorDescriptor(DataType::FP32, {1}));
-        }
+        // Metrics are forward-only, but they are still meaningful during
+        // inference/evaluation. TrainingRuns uses inference-only composed
+        // evaluator networks to report graph metrics, so a metric output must
+        // be materialized even when the placed network is inference-only.
+        THOR_THROW_IF_FALSE(featureInput.has_value());
+        return Tensor(featureInput.value().getPlacement(), TensorDescriptor(DataType::FP32, {1}));
     }
 
     virtual std::string toDisplayString(Tensor metric_h) = 0;
@@ -101,8 +101,6 @@ class Metric : public Layer {
 
     void forward(std::optional<Tensor> inputTensor, bool validationPass, uint32_t batchSize = 0) override {
         THOR_THROW_IF_FALSE(running);
-        if (isInferenceOnly())
-            return;
 
         if (requiresLabelsInput()) {
             THOR_THROW_IF_FALSE(labelsStream.isInitialized());

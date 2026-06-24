@@ -155,6 +155,12 @@ void Activation::informThatInputConnectionMade(Tensor inputTensor) {
     connectedInputPortIndices.insert(port);
 }
 
+void Activation::resetGraphTraversalState() {
+    connectedInputPortIndices.clear();
+    emittedFeatureOutputAfterAllInputsConnected = false;
+    nextInputConnectionCursorByTensorOriginalId.clear();
+}
+
 int Activation::getConnectionType(Tensor connectingTensor) const {
     THOR_THROW_IF_FALSE(featureInput.has_value());
     THOR_THROW_IF_FALSE(featureOutput.has_value());

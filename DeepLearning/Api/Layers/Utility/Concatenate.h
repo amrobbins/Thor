@@ -44,9 +44,11 @@ class Concatenate : public MultiConnectionLayer {
 
     bool mustConnectAllInputsToDriveOutput() const override { return true; }
     void informThatInputConnectionMade(Tensor inputTensor) override {
+        (void)inputTensor;
         numInputConnectionsMade += 1;
         THOR_THROW_IF_FALSE(numInputConnectionsMade <= featureInputs.size());
     }
+    void resetGraphTraversalState() override { numInputConnectionsMade = 0; }
 
     std::string getLayerType() const override { return "Concatenate"; }
 

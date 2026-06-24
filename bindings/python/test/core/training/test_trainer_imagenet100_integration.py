@@ -1617,7 +1617,6 @@ def _run_imagenet100_cv5_training_runs(model_builder, *, model_name: str, capfd)
     assert "aggregation=ensemble_eval" in plain_text
     assert "ensemble_train_loss=" in plain_text
     assert "ensemble_test_loss=" in plain_text
-    assert "ensemble_test_accuracy=" not in plain_text
     assert "train_loss=" in plain_text
     assert "validate_loss=" in plain_text
     assert "test_loss=" in plain_text
@@ -1632,7 +1631,6 @@ def _run_imagenet100_cv5_training_runs(model_builder, *, model_name: str, capfd)
     assert len(ensemble.members) == 5
     assert ensemble.ensemble_train_loss is not None
     assert ensemble.ensemble_test_loss is not None
-    assert ensemble.ensemble_test_accuracy is None
     assert math.isfinite(ensemble.ensemble_train_loss)
     assert math.isfinite(ensemble.ensemble_test_loss)
     assert ensemble.ensemble_train_loss > 0.0
@@ -1659,11 +1657,9 @@ def _run_imagenet100_cv5_training_runs(model_builder, *, model_name: str, capfd)
         assert result.final_training_loss is not None
         assert result.final_validation_loss is not None
         assert result.final_test_loss is not None
-        assert result.final_test_accuracy is None
         assert result.final_loss("train") == result.final_training_loss
         assert result.final_loss("validate") == result.final_validation_loss
         assert result.final_loss("test") == result.final_test_loss
-        assert result.final_accuracy("test") is None
         assert math.isfinite(result.final_training_loss)
         assert math.isfinite(result.final_validation_loss)
         assert math.isfinite(result.final_test_loss)

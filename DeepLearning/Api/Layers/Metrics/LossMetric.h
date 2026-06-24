@@ -44,22 +44,26 @@ class LossMetric : public Metric {
         (void)drivingApiLayer;
         (void)inferenceOnly;
         THOR_THROW_IF_FALSE(initialized);
-        THOR_THROW_IF_FALSE(connectingApiTensor == getPredictions() || connectingApiTensor == getLabels());
+        THOR_THROW_IF_FALSE(connectingApiTensor == getPredictions() || connectingApiTensor == getLabels() || connectingApiTensor == getMetric());
+
+        const std::string effectivePredictionsName = predictionsName.empty() ? std::string("predictions") : predictionsName;
+        const std::string effectiveLabelsName = labelsName.empty() ? std::string("labels") : labelsName;
+        const std::string effectiveMetricName = metricName.empty() ? std::string("metric") : metricName;
 
         ThorImplementation::LossExpression::Options options;
         options.formula = formula;
         options.computeDataType = DataType::FP32;
         options.epsilon = epsilon;
         options.maxMagnitude = maxMagnitude;
-        options.predictionsName = predictionsName;
-        options.labelsName = labelsName;
-        options.lossName = metricName;
+        options.predictionsName = effectivePredictionsName;
+        options.labelsName = effectiveLabelsName;
+        options.lossName = effectiveMetricName;
 
         return std::make_shared<ThorImplementation::CustomMetric>(
             ThorImplementation::LossExpression::makeBatchLossMetricExpression(std::move(options)),
-            predictionsName,
-            labelsName,
-            metricName,
+            effectivePredictionsName,
+            effectiveLabelsName,
+            effectiveMetricName,
             displayName);
     }
 
@@ -71,7 +75,10 @@ class LossMetric : public Metric {
                     float epsilon,
                     float maxMagnitude,
                     std::string displayName,
-                    std::optional<Tensor> metricTensor = std::nullopt);
+                    std::optional<Tensor> metricTensor = std::nullopt,
+                    std::string predictionsName = "predictions",
+                    std::string labelsName = "labels",
+                    std::string metricName = "metric");
 
     static void validateInputs(const Tensor& predictions, const Tensor& labels);
 

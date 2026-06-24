@@ -978,7 +978,6 @@ def test_training_runs_digits_dense_five_fold_cross_validation(capfd):
     assert "aggregation=ensemble_eval" in plain_text
     assert "ensemble_train_loss=" in plain_text
     assert "ensemble_test_loss=" in plain_text
-    assert "ensemble_test_accuracy=" not in plain_text
     assert "weighted_train_loss=" not in plain_text
     assert "weighted_validate_loss=" not in plain_text
     assert "INFO runs[fold_0|digits_dense_cv5]:" in plain_text
@@ -1009,7 +1008,6 @@ def test_training_runs_digits_dense_five_fold_cross_validation(capfd):
     assert len(cv5_ensemble.members) == 5
     assert cv5_ensemble.ensemble_train_loss is not None
     assert cv5_ensemble.ensemble_test_loss is not None
-    assert cv5_ensemble.ensemble_test_accuracy is None
 
     # alt3_ensemble = results.ensemble("digits_dense_alt3")
     # assert alt3_ensemble.all_completed()
@@ -1039,11 +1037,9 @@ def test_training_runs_digits_dense_five_fold_cross_validation(capfd):
         assert result.final_training_loss is not None
         assert result.final_validation_loss is not None
         assert result.final_test_loss is not None
-        assert result.final_test_accuracy is None
         assert result.final_loss("train") == result.final_training_loss
         assert result.final_loss("validate") == result.final_validation_loss
         assert result.final_loss("test") == result.final_test_loss
-        assert result.final_accuracy("test") is None
         assert math.isfinite(result.final_training_loss)
         assert math.isfinite(result.final_validation_loss)
         assert math.isfinite(result.final_test_loss)

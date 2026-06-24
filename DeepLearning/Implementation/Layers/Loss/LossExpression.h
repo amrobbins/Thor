@@ -137,8 +137,11 @@ inline DynamicExpression makeBatchLossMetricExpression(Options options) {
     if (options.predictionsName == options.labelsName)
         throw std::invalid_argument("Loss expression predictions and labels names must be distinct.");
 
-    return DynamicExpression({options.predictionsName, options.labelsName},
-                             {options.lossName},
+    const std::vector<std::string> expectedInputNames{options.predictionsName, options.labelsName};
+    const std::vector<std::string> expectedOutputNames{options.lossName};
+
+    return DynamicExpression(expectedInputNames,
+                             expectedOutputNames,
                              [options = std::move(options)](const DynamicExpression::TensorMap& inputs,
                                                             const DynamicExpression::TensorMap& outputs,
                                                             Stream& stream) -> DynamicExpressionBuild {

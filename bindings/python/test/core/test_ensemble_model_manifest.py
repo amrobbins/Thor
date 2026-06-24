@@ -23,8 +23,10 @@ def _minimal_manifest(root: Path, *, version: object = 1) -> dict[str, object]:
         "input_names": ["matrix"],
         "output_names": ["prediction"],
         "reported_losses": [],
+        "reported_metrics": [],
         "overall_loss_reduction": "sum",
         "losses": [],
+        "metrics": [],
         "members": [
             {"name": "fold_0", "path": _member_dir(root, "fold_0"), "weight": 1.0, "selection": {}},
         ],
@@ -72,8 +74,10 @@ def test_ensemble_model_saves_and_loads_manifest(tmp_path):
         "input_names": ["trend_inputs", "seasonality_inputs", "monotone_increasing_inputs"],
         "output_names": ["forecast", "forecast_quantile_high"],
         "reported_losses": [],
+        "reported_metrics": [],
         "overall_loss_reduction": "sum",
         "losses": [],
+        "metrics": [],
         "members": [
             {
                 "name": "fold_0",
@@ -101,8 +105,10 @@ def test_ensemble_model_saves_and_loads_manifest(tmp_path):
     assert loaded.get_input_names() == ("trend_inputs", "seasonality_inputs", "monotone_increasing_inputs")
     assert loaded.get_output_names() == ("forecast", "forecast_quantile_high")
     assert loaded.reported_losses == ()
+    assert loaded.reported_metrics == ()
     assert loaded.overall_loss_reduction == "sum"
     assert loaded.losses == ()
+    assert loaded.metrics == ()
     assert loaded.members[0].selection == {
         "best_epoch": 3,
         "best_score": 0.125,
@@ -191,8 +197,10 @@ def test_ensemble_model_load_rejects_non_object_manifest(tmp_path, raw_manifest)
         "input_names",
         "output_names",
         "reported_losses",
+        "reported_metrics",
         "overall_loss_reduction",
         "losses",
+        "metrics",
         "members",
     ],
 )
@@ -289,6 +297,9 @@ def test_ensemble_model_load_rejects_malformed_schema_name_lists(tmp_path, field
         ("reported_losses", "loss", "reported_losses must be a sequence of strings"),
         ("reported_losses", ["loss", "loss"], "reported_losses entries must be unique"),
         ("reported_losses", [""], "reported_losses entries must be non-empty strings"),
+        ("reported_metrics", "mae", "reported_metrics must be a sequence of strings"),
+        ("reported_metrics", ["mae", "mae"], "reported_metrics entries must be unique"),
+        ("reported_metrics", [""], "reported_metrics entries must be non-empty strings"),
         ("overall_loss_reduction", "mean", "overall_loss_reduction must be 'sum'"),
         ("overall_loss_reduction", None, "overall_loss_reduction must be 'sum'"),
         ("losses", {}, "losses must be a JSON array"),
@@ -296,6 +307,11 @@ def test_ensemble_model_load_rejects_malformed_schema_name_lists(tmp_path, field
         ("losses", [{"name": "loss", "train_value": None, "test_value": float("inf")}], "test_value must be a finite number or null"),
         ("losses", [{"name": "", "train_value": None, "test_value": None}], "name must be a non-empty string"),
         ("losses", [{"name": "loss", "train_value": None, "test_value": None, "target_input_name": "labels"}], "unsupported field"),
+        ("metrics", {}, "metrics must be a JSON array"),
+        ("metrics", [{"name": "mae", "train_value": "bad", "test_value": None}], "train_value must be a finite number or null"),
+        ("metrics", [{"name": "mae", "train_value": None, "test_value": float("inf")}], "test_value must be a finite number or null"),
+        ("metrics", [{"name": "", "train_value": None, "test_value": None}], "name must be a non-empty string"),
+        ("metrics", [{"name": "mae", "train_value": None, "test_value": None, "target_input_name": "labels"}], "unsupported field"),
     ],
 )
 def test_ensemble_model_load_rejects_malformed_loss_reporting(tmp_path, field_name, value, message):
@@ -303,6 +319,8 @@ def test_ensemble_model_load_rejects_malformed_loss_reporting(tmp_path, field_na
     manifest[field_name] = value
     if field_name == "losses" and isinstance(value, list) and value and value[0].get("name") == "loss":
         manifest["reported_losses"] = ["loss"]
+    if field_name == "metrics" and isinstance(value, list) and value and value[0].get("name") == "mae":
+        manifest["reported_metrics"] = ["mae"]
     _write_manifest(tmp_path, manifest)
 
     with pytest.raises(ValueError, match=message):
@@ -316,6 +334,16 @@ def test_ensemble_model_load_rejects_loss_reporting_mismatch(tmp_path):
     _write_manifest(tmp_path, manifest)
 
     with pytest.raises(ValueError, match="unknown loss name"):
+        thor.EnsembleModel.load(tmp_path)
+
+
+def test_ensemble_model_load_rejects_metric_reporting_mismatch(tmp_path):
+    manifest = _minimal_manifest(tmp_path)
+    manifest["reported_metrics"] = ["mse_metric"]
+    manifest["metrics"] = [{"name": "mae_metric", "train_value": 1.0, "test_value": 2.0}]
+    _write_manifest(tmp_path, manifest)
+
+    with pytest.raises(ValueError, match="unknown metric name"):
         thor.EnsembleModel.load(tmp_path)
 
 
@@ -411,8 +439,10 @@ def test_ensemble_model_rejects_missing_member_path(tmp_path):
         "input_names": [],
         "output_names": [],
         "reported_losses": [],
+        "reported_metrics": [],
         "overall_loss_reduction": "sum",
         "losses": [],
+        "metrics": [],
         "members": [{"name": "fold_0", "path": "members/fold_0", "weight": 1.0, "selection": {}}],
     }
     (tmp_path / "ensemble_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")

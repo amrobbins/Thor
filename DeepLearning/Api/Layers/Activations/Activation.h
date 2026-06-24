@@ -92,6 +92,7 @@ class Activation : public Layer {
     std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override;
     bool mustConnectAllInputsToDriveOutput() const override { return !epilogueInputBindings.empty(); }
     void informThatInputConnectionMade(Tensor inputTensor) override;
+    void resetGraphTraversalState() override;
     int getConnectionType(Tensor connectingTensor) const override;
 
     nlohmann::json architectureJson() const override;

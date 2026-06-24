@@ -85,21 +85,15 @@ TEST(CategoricalAccuracy, ComputesCorrectElementWiseResult_indicatorPerClassLabe
         LayerTestHelper::connectTwoLayers(predictionsInput, noOpLayer);
         LayerTestHelper::connectTwoLayers(noOpLayer, categoricalAccuracy, 0, (int)Metric::ConnectionType::FORWARD);
         LayerTestHelper::connectTwoLayers(labelsInput, categoricalAccuracy, 0, (int)Metric::ConnectionType::LABELS);
-        shared_ptr<NetworkOutput> accuracyOutput = nullptr;
-        if (!inferenceOnly) {
-            accuracyOutput = make_shared<NetworkOutput>(gpuPlacement);
-            layers.push_back(accuracyOutput);
-            LayerTestHelper::connectTwoLayers(categoricalAccuracy, accuracyOutput, (int)Metric::ConnectionType::METRIC);
-        }
+        shared_ptr<NetworkOutput> accuracyOutput = make_shared<NetworkOutput>(gpuPlacement);
+        layers.push_back(accuracyOutput);
+        LayerTestHelper::connectTwoLayers(categoricalAccuracy, accuracyOutput, (int)Metric::ConnectionType::METRIC);
         LayerTestHelper::initializeNetwork(layers);
 
         ASSERT_TRUE(!categoricalAccuracy->getErrorOutput().has_value());
         ASSERT_TRUE(!categoricalAccuracy->getErrorInput().has_value());
 
-        if (inferenceOnly) {
-            assert(!categoricalAccuracy->getFeatureOutput().has_value());
-            continue;
-        }
+        ASSERT_TRUE(categoricalAccuracy->getFeatureOutput().has_value());
 
         // Network is runnable here
         predictionsInput->forward(predictionsCpu, false);
@@ -197,21 +191,15 @@ TEST(CategoricalAccuracy, ComputesCorrectElementWiseResult_classIndexLabels) {
         LayerTestHelper::connectTwoLayers(predictionsInput, noOpLayer);
         LayerTestHelper::connectTwoLayers(noOpLayer, categoricalAccuracy, 0, (int)Metric::ConnectionType::FORWARD);
         LayerTestHelper::connectTwoLayers(labelsInput, categoricalAccuracy, 0, (int)Metric::ConnectionType::LABELS);
-        shared_ptr<NetworkOutput> accuracyOutput = nullptr;
-        if (!inferenceOnly) {
-            accuracyOutput = make_shared<NetworkOutput>(gpuPlacement);
-            layers.push_back(accuracyOutput);
-            LayerTestHelper::connectTwoLayers(categoricalAccuracy, accuracyOutput, (int)Metric::ConnectionType::METRIC);
-        }
+        shared_ptr<NetworkOutput> accuracyOutput = make_shared<NetworkOutput>(gpuPlacement);
+        layers.push_back(accuracyOutput);
+        LayerTestHelper::connectTwoLayers(categoricalAccuracy, accuracyOutput, (int)Metric::ConnectionType::METRIC);
         LayerTestHelper::initializeNetwork(layers);
 
         ASSERT_TRUE(!categoricalAccuracy->getErrorOutput().has_value());
         ASSERT_TRUE(!categoricalAccuracy->getErrorInput().has_value());
 
-        if (inferenceOnly) {
-            assert(!categoricalAccuracy->getFeatureOutput().has_value());
-            continue;
-        }
+        ASSERT_TRUE(categoricalAccuracy->getFeatureOutput().has_value());
 
         // Network is runnable here
         predictionsInput->forward(predictionsCpu, false);

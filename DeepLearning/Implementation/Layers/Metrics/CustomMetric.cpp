@@ -136,9 +136,6 @@ std::pair<std::vector<uint64_t>, DataType> CustomMetric::inferMetricOutputDescri
 }
 
 std::optional<Tensor> CustomMetric::createFeatureOutputTensor() {
-    if (isInferenceOnly())
-        return std::nullopt;
-
     const auto [outputShape, outputDType] = inferMetricOutputDescriptor();
     THOR_THROW_IF_FALSE(featureInput.has_value());
     return Tensor(featureInput.value().getPlacement(), TensorDescriptor(outputDType, outputShape));
@@ -146,9 +143,6 @@ std::optional<Tensor> CustomMetric::createFeatureOutputTensor() {
 
 void CustomMetric::compileImpl() {
     Metric::compileImpl();
-
-    if (isInferenceOnly())
-        return;
 
     THOR_THROW_IF_FALSE(featureInput.has_value());
     THOR_THROW_IF_FALSE(!requiresLabelsInput() || labelsInput.has_value());

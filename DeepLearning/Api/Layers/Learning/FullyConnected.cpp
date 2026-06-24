@@ -491,6 +491,12 @@ void FullyConnected::informThatInputConnectionMade(Tensor inputTensor) {
     }
 }
 
+void FullyConnected::resetGraphTraversalState() {
+    connectedInputPortIndices.clear();
+    emittedFeatureOutputAfterAllInputsConnected = false;
+    nextInputConnectionCursorByTensorOriginalId.clear();
+}
+
 int FullyConnected::getConnectionType(Tensor connectingTensor) const {
     if (!epilogueInputBindings.empty()) {
         std::vector<uint32_t> inputPorts = inputPortIndicesForTensor(connectingTensor);

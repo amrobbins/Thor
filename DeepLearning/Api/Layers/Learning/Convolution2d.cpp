@@ -233,6 +233,12 @@ void Convolution2d::informThatInputConnectionMade(Tensor inputTensor) {
     }
 }
 
+void Convolution2d::resetGraphTraversalState() {
+    connectedInputPortIndices.clear();
+    emittedFeatureOutputAfterAllInputsConnected = false;
+    nextInputConnectionCursorByTensorOriginalId.clear();
+}
+
 int Convolution2d::getConnectionType(Tensor connectingTensor) const {
     std::vector<uint32_t> inputPorts = inputPortIndicesForTensor(connectingTensor);
     if (!inputPorts.empty()) {

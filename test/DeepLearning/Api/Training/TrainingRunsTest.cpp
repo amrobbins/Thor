@@ -622,7 +622,6 @@ TEST(TrainingRuns, PredictionOnlyEnsembleHasNoGraphLossMetrics) {
     EXPECT_TRUE(ensemble.namedMetrics.empty());
     EXPECT_FALSE(ensemble.ensembleTrainingLoss.has_value());
     EXPECT_FALSE(ensemble.ensembleTestLoss.has_value());
-    EXPECT_FALSE(ensemble.ensembleTestAccuracy.has_value());
     EXPECT_FALSE(ensemble.hasEnsembleEvaluationMetrics());
 }
 

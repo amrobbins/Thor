@@ -290,6 +290,12 @@ void RMSNorm::informThatInputConnectionMade(Tensor inputTensor) {
     }
 }
 
+void RMSNorm::resetGraphTraversalState() {
+    connectedInputPortIndices.clear();
+    emittedFeatureOutputAfterAllInputsConnected = false;
+    nextInputConnectionCursorByTensorOriginalId.clear();
+}
+
 int RMSNorm::getConnectionType(Tensor connectingTensor) const {
     if (!epilogueInputBindings.empty()) {
         std::vector<uint32_t> inputPorts = inputPortIndicesForTensor(connectingTensor);

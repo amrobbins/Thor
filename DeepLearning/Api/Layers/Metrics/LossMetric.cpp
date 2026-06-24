@@ -10,6 +10,17 @@ using namespace std;
 using json = nlohmann::json;
 
 namespace Thor {
+namespace {
+
+constexpr const char* kDefaultPredictionsName = "predictions";
+constexpr const char* kDefaultLabelsName = "labels";
+constexpr const char* kDefaultMetricName = "metric";
+
+std::string nonEmptyMetricExpressionName(std::string name, const char* fallback) {
+    return name.empty() ? std::string(fallback) : std::move(name);
+}
+
+}  // namespace
 
 void LossMetric::validateInputs(const Tensor& predictions, const Tensor& labels) {
     THOR_THROW_IF_FALSE(predictions.isInitialized());
@@ -27,7 +38,10 @@ void LossMetric::initialize(Network* network,
                             float epsilon,
                             float maxMagnitude,
                             std::string displayName,
-                            std::optional<Tensor> metricTensorOverride) {
+                            std::optional<Tensor> metricTensorOverride,
+                            std::string predictionsName,
+                            std::string labelsName,
+                            std::string metricName) {
     THOR_THROW_IF_FALSE(network != nullptr);
     validateInputs(predictions, labels);
     THOR_THROW_IF_FALSE(epsilon >= 0.0f);
@@ -39,6 +53,12 @@ void LossMetric::initialize(Network* network,
     this->epsilon = epsilon;
     this->maxMagnitude = maxMagnitude;
     this->displayName = displayName.empty() ? ThorImplementation::LossExpression::displayName(formula) : std::move(displayName);
+    this->predictionsName = nonEmptyMetricExpressionName(std::move(predictionsName), kDefaultPredictionsName);
+    this->labelsName = nonEmptyMetricExpressionName(std::move(labelsName), kDefaultLabelsName);
+    this->metricName = nonEmptyMetricExpressionName(std::move(metricName), kDefaultMetricName);
+    if (this->predictionsName == this->labelsName) {
+        throw std::invalid_argument("LossMetric predictions and labels input names must be distinct.");
+    }
 
     Tensor inferredMetric(DataType::FP32, {1});
     if (metricTensorOverride.has_value()) {
@@ -84,9 +104,22 @@ void LossMetric::deserialize(const json& j, Network* network) {
     float epsilon = j.value("epsilon", 0.0001f);
     float maxMagnitude = j.value("max_magnitude", 1000.0f);
     std::string displayName = j.value("display_name", ThorImplementation::LossExpression::displayName(formula));
+    std::string predictionsName = j.value("predictions_name", std::string(kDefaultPredictionsName));
+    std::string labelsName = j.value("labels_name", std::string(kDefaultLabelsName));
+    std::string metricName = j.value("metric_name", std::string(kDefaultMetricName));
 
     LossMetric metric;
-    metric.initialize(network, predictions, labels, formula, epsilon, maxMagnitude, std::move(displayName), metricTensor);
+    metric.initialize(network,
+                      predictions,
+                      labels,
+                      formula,
+                      epsilon,
+                      maxMagnitude,
+                      std::move(displayName),
+                      metricTensor,
+                      std::move(predictionsName),
+                      std::move(labelsName),
+                      std::move(metricName));
 }
 
 }  // namespace Thor

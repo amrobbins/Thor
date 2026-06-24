@@ -1,12 +1,13 @@
 """Manifest-backed ensemble model artifact definitions.
 
 The manifest is the saved-artifact contract for TrainingRuns ensemble artifacts.
-Training-produced ensemble artifacts store loss-centric reporting metadata:
-``reported_losses`` names the graph losses that were evaluated, ``losses`` stores
-only their train/test values, and ``overall_loss_reduction`` records how the
-overall ensemble loss was reduced from those graph loss values.  Legacy metric
-policy fields such as output-name, target-input-name, or CPU-computed accuracy
-are intentionally not part of the manifest schema.
+Training-produced ensemble artifacts store graph-owned reporting metadata:
+``reported_losses`` names graph losses evaluated into ``losses``,
+``reported_metrics`` names graph metrics evaluated into ``metrics``, and
+``overall_loss_reduction`` records how the overall ensemble loss was reduced
+from the graph loss values.  Legacy metric policy fields such as output-name,
+target-input-name, or CPU-computed accuracy are intentionally not part of the
+manifest schema.
 """
 
 from __future__ import annotations
@@ -96,42 +97,79 @@ def _json_nullable_number(value: object, *, field_name: str) -> float | None:
     return out
 
 
-def _loss_result_from_manifest(value: Mapping[str, Any], *, index: int) -> dict[str, Any]:
-    mapping = _json_mapping(value, field_name=f"losses[{index}]")
+def _named_value_result_from_manifest(value: Mapping[str, Any], *, field_name: str, index: int) -> dict[str, Any]:
+    item_field = f"{field_name}[{index}]"
+    mapping = _json_mapping(value, field_name=item_field)
     allowed = {"name", "train_value", "test_value"}
     unknown = sorted(set(mapping) - allowed)
     if unknown:
-        raise ValueError(f"losses[{index}] contains unsupported field(s): {unknown!r}")
+        raise ValueError(f"{item_field} contains unsupported field(s): {unknown!r}")
     name = mapping.get("name")
     if not isinstance(name, str) or name == "":
-        raise ValueError(f"losses[{index}].name must be a non-empty string")
+        raise ValueError(f"{item_field}.name must be a non-empty string")
     return {
         "name": name,
-        "train_value": _json_nullable_number(mapping.get("train_value"), field_name=f"losses[{index}].train_value"),
-        "test_value": _json_nullable_number(mapping.get("test_value"), field_name=f"losses[{index}].test_value"),
+        "train_value": _json_nullable_number(mapping.get("train_value"), field_name=f"{item_field}.train_value"),
+        "test_value": _json_nullable_number(mapping.get("test_value"), field_name=f"{item_field}.test_value"),
     }
 
 
-def _loss_results_tuple(value: Sequence[Mapping[str, Any]] | None, *, field_name: str) -> tuple[dict[str, Any], ...]:
+def _named_value_results_tuple(value: Sequence[Mapping[str, Any]] | None, *, field_name: str) -> tuple[dict[str, Any], ...]:
     if value is None:
         return tuple()
     values = _json_sequence(value, field_name=field_name)
-    losses = tuple(_loss_result_from_manifest(_json_mapping(loss, field_name=f"{field_name}[{i}]"), index=i) for i, loss in enumerate(values))
-    names = [loss["name"] for loss in losses]
+    results = tuple(
+        _named_value_result_from_manifest(_json_mapping(item, field_name=f"{field_name}[{i}]"), field_name=field_name, index=i)
+        for i, item in enumerate(values)
+    )
+    names = [result["name"] for result in results]
     duplicates = sorted({name for name in names if names.count(name) > 1})
     if duplicates:
         raise ValueError(f"{field_name} names must be unique; duplicates={duplicates!r}")
-    return losses
+    return results
+
+
+def _loss_results_tuple(value: Sequence[Mapping[str, Any]] | None, *, field_name: str) -> tuple[dict[str, Any], ...]:
+    return _named_value_results_tuple(value, field_name=field_name)
+
+
+def _metric_results_tuple(value: Sequence[Mapping[str, Any]] | None, *, field_name: str) -> tuple[dict[str, Any], ...]:
+    return _named_value_results_tuple(value, field_name=field_name)
+
+
+def _validate_named_reporting(
+    *,
+    reported_names: Sequence[str],
+    results: Sequence[Mapping[str, Any]],
+    reported_field_name: str,
+    result_field_name: str,
+) -> None:
+    result_names = tuple(result["name"] for result in results)
+    missing = sorted(set(reported_names) - set(result_names))
+    if missing:
+        singular = {"losses": "loss", "metrics": "metric"}.get(result_field_name, result_field_name.rstrip("s"))
+        raise ValueError(f"{reported_field_name} references unknown {singular} name(s): {missing!r}")
+    unreported = sorted(set(result_names) - set(reported_names))
+    if unreported:
+        raise ValueError(f"{result_field_name} contains entry not listed in {reported_field_name}: {unreported!r}")
 
 
 def _validate_loss_reporting(*, reported_losses: Sequence[str], losses: Sequence[Mapping[str, Any]]) -> None:
-    loss_names = tuple(loss["name"] for loss in losses)
-    missing = sorted(set(reported_losses) - set(loss_names))
-    if missing:
-        raise ValueError(f"reported_losses references unknown loss name(s): {missing!r}")
-    unreported = sorted(set(loss_names) - set(reported_losses))
-    if unreported:
-        raise ValueError(f"losses contains entry not listed in reported_losses: {unreported!r}")
+    _validate_named_reporting(
+        reported_names=reported_losses,
+        results=losses,
+        reported_field_name="reported_losses",
+        result_field_name="losses",
+    )
+
+
+def _validate_metric_reporting(*, reported_metrics: Sequence[str], metrics: Sequence[Mapping[str, Any]]) -> None:
+    _validate_named_reporting(
+        reported_names=reported_metrics,
+        results=metrics,
+        reported_field_name="reported_metrics",
+        result_field_name="metrics",
+    )
 
 
 
@@ -243,8 +281,10 @@ class EnsembleModel:
         input_names: Sequence[str] | None = None,
         output_names: Sequence[str] | None = None,
         reported_losses: Sequence[str] | None = None,
+        reported_metrics: Sequence[str] | None = None,
         overall_loss_reduction: str = "sum",
         losses: Sequence[Mapping[str, Any]] | None = None,
+        metrics: Sequence[Mapping[str, Any]] | None = None,
         artifact_path: str | Path | None = None,
     ) -> None:
         if execution not in _SUPPORTED_EXECUTIONS:
@@ -272,11 +312,14 @@ class EnsembleModel:
         self._input_names = _string_tuple(input_names, field_name="input_names")
         self._output_names = _string_tuple(output_names, field_name="output_names")
         self._reported_losses = _string_tuple(reported_losses, field_name="reported_losses")
+        self._reported_metrics = _string_tuple(reported_metrics, field_name="reported_metrics")
         if overall_loss_reduction != "sum":
             raise ValueError("overall_loss_reduction must be 'sum'")
         self._overall_loss_reduction = overall_loss_reduction
         self._losses = _loss_results_tuple(losses, field_name="losses")
+        self._metrics = _metric_results_tuple(metrics, field_name="metrics")
         _validate_loss_reporting(reported_losses=self._reported_losses, losses=self._losses)
+        _validate_metric_reporting(reported_metrics=self._reported_metrics, metrics=self._metrics)
         self._artifact_path = Path(artifact_path) if artifact_path is not None else None
 
     @property
@@ -308,12 +351,20 @@ class EnsembleModel:
         return self._reported_losses
 
     @property
+    def reported_metrics(self) -> tuple[str, ...]:
+        return self._reported_metrics
+
+    @property
     def overall_loss_reduction(self) -> str:
         return self._overall_loss_reduction
 
     @property
     def losses(self) -> tuple[Mapping[str, Any], ...]:
         return self._losses
+
+    @property
+    def metrics(self) -> tuple[Mapping[str, Any], ...]:
+        return self._metrics
 
     def get_num_members(self) -> int:
         return len(self._members)
@@ -348,8 +399,10 @@ class EnsembleModel:
             "input_names": list(self._input_names),
             "output_names": list(self._output_names),
             "reported_losses": list(self._reported_losses),
+            "reported_metrics": list(self._reported_metrics),
             "overall_loss_reduction": self._overall_loss_reduction,
             "losses": [dict(loss) for loss in self._losses],
+            "metrics": [dict(metric) for metric in self._metrics],
             "members": [member.to_dict() for member in self._members],
         }
 
@@ -390,8 +443,10 @@ class EnsembleModel:
                 "input_names",
                 "output_names",
                 "reported_losses",
+                "reported_metrics",
                 "overall_loss_reduction",
                 "losses",
+                "metrics",
                 "members",
                 "ensemble_group",
                 "target_num_members",
@@ -439,6 +494,10 @@ class EnsembleModel:
             _required_manifest_field(manifest, "reported_losses"),
             field_name="ensemble manifest reported_losses",
         )
+        reported_metrics = _string_tuple(
+            _required_manifest_field(manifest, "reported_metrics"),
+            field_name="ensemble manifest reported_metrics",
+        )
         overall_loss_reduction = _required_manifest_field(manifest, "overall_loss_reduction")
         if overall_loss_reduction != "sum":
             raise ValueError("ensemble manifest overall_loss_reduction must be 'sum'")
@@ -446,7 +505,12 @@ class EnsembleModel:
             _required_manifest_field(manifest, "losses"),
             field_name="ensemble manifest losses",
         )
+        metrics = _metric_results_tuple(
+            _required_manifest_field(manifest, "metrics"),
+            field_name="ensemble manifest metrics",
+        )
         _validate_loss_reporting(reported_losses=reported_losses, losses=losses)
+        _validate_metric_reporting(reported_metrics=reported_metrics, metrics=metrics)
         member_values = _json_sequence(
             _required_manifest_field(manifest, "members"),
             field_name="ensemble manifest members",
@@ -460,8 +524,10 @@ class EnsembleModel:
             input_names=input_names,
             output_names=output_names,
             reported_losses=reported_losses,
+            reported_metrics=reported_metrics,
             overall_loss_reduction=overall_loss_reduction,
             losses=losses,
+            metrics=metrics,
             artifact_path=artifact_dir,
         )
         model._validate_member_paths_exist()

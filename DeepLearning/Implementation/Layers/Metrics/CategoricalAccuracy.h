@@ -96,15 +96,12 @@ class CategoricalAccuracy : public CustomMetric {
     ~CategoricalAccuracy() override = default;
 
     std::optional<Tensor> createFeatureOutputTensor() override {
-        if (isInferenceOnly())
-            return std::nullopt;
         validateCategoricalAccuracyInputs();
         return CustomMetric::createFeatureOutputTensor();
     }
 
     void compileImpl() override {
-        if (!isInferenceOnly())
-            validateCategoricalAccuracyInputs();
+        validateCategoricalAccuracyInputs();
         CustomMetric::compileImpl();
     }
 

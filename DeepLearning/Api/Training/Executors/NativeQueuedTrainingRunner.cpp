@@ -1227,8 +1227,6 @@ void assignScalarStatsToSnapshot(TrainingStatsSnapshot& snapshot,
         scalarValuesByName[name] = value;
         if (name == "loss") {
             snapshot.loss = value;
-        } else if (name == "accuracy") {
-            snapshot.accuracy = value;
         } else if (name == "learning_rate" || name == "learningRate" || name == "lr") {
             snapshot.learningRate = value;
         } else if (name == "momentum") {

@@ -462,6 +462,14 @@ void CustomLayer::informThatInputConnectionMade(Tensor inputTensor) {
     }
 }
 
+void CustomLayer::resetGraphTraversalState() {
+    for (std::set<uint32_t>& connectedInputPortIndices : connectedInputPortIndicesByInterface) {
+        connectedInputPortIndices.clear();
+    }
+    std::fill(emittedOutputInterface.begin(), emittedOutputInterface.end(), false);
+    nextInputBindingConnectionCursorByTensorOriginalId.clear();
+}
+
 std::vector<Tensor> CustomLayer::getOutputsFromInput(Tensor inputTensor) {
     auto it = inputBindingsByTensorOriginalId.find(inputTensor.getOriginalId());
     if (it == inputBindingsByTensorOriginalId.end()) {

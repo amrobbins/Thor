@@ -1,4 +1,5 @@
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/optional.h>
 
 #include "DeepLearning/Api/Layers/Metrics/Metric.h"
 
@@ -15,6 +16,8 @@ void bind_metrics(nb::module_ &metrics) {
 
     auto metric = nb::class_<Thor::Metric>(metrics, "Metric");
     metric.attr("__module__") = "thor.metrics";
+    metric.def("get_metric", &Thor::Metric::getMetric);
+    metric.def("get_feature_output", &Thor::Metric::getFeatureOutput);
 
     bind_binary_accuracy(metrics);
     bind_categorical_accuracy(metrics);

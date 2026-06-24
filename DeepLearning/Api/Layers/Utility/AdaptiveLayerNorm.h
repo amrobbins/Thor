@@ -49,6 +49,7 @@ class AdaptiveLayerNorm : public MultiConnectionLayer {
     int getConnectionType(Tensor connectingTensor) const override;
     bool mustConnectAllInputsToDriveOutput() const override { return true; }
     void informThatInputConnectionMade(Tensor inputTensor) override;
+    void resetGraphTraversalState() override;
     std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override;
 
     static void deserialize(const nlohmann::json& j, Network* network);

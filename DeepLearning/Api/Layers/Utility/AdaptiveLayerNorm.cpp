@@ -176,6 +176,10 @@ void AdaptiveLayerNorm::informThatInputConnectionMade(Tensor inputTensor) {
     }
 }
 
+void AdaptiveLayerNorm::resetGraphTraversalState() {
+    connectedInputOriginalIds.clear();
+}
+
 vector<Tensor> AdaptiveLayerNorm::getOutputsFromInput(Tensor inputTensor) {
     (void)inputTensor;
     THOR_THROW_IF_FALSE(featureOutputs.size() == 1);

@@ -34,6 +34,7 @@ class Loss : public Layer {
         numInputConnectionsMade += 1;
         THOR_THROW_IF_FALSE(numInputConnectionsMade <= getLossInputTensors().size());
     }
+    void resetGraphTraversalState() override { numInputConnectionsMade = 0; }
 
     virtual Tensor getPredictions() const { return predictionsTensor; }
     virtual Tensor getLabels() const { return labelsTensor; }

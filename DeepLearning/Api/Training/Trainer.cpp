@@ -409,7 +409,8 @@ void Trainer::saveModel(const std::string& directory, bool overwrite, bool saveO
 void Trainer::fitInternal(const TrainerFitOptions& options,
                           TrainingObserver& observer,
                           const TrainingCancellationToken& cancellationToken,
-                          const std::vector<TrainingEarlyCompletionPolicy>& additionalEarlyCompletionPolicies) {
+                          const std::vector<TrainingEarlyCompletionPolicy>& additionalEarlyCompletionPolicies,
+                          const std::set<std::string>& additionalScalarTensorsToReport) {
     validateFitOptions(options);
     std::vector<TrainingEarlyCompletionPolicy> combinedEarlyCompletionPolicies = earlyCompletionPolicies;
     combinedEarlyCompletionPolicies.insert(combinedEarlyCompletionPolicies.end(),
@@ -424,6 +425,7 @@ void Trainer::fitInternal(const TrainerFitOptions& options,
     request.optimizer = optimizer;
     request.trainingProgram = trainingProgram;
     request.runtime = runtimeConfig;
+    request.runtime.scalarTensorsToReport.insert(additionalScalarTensorsToReport.begin(), additionalScalarTensorsToReport.end());
     request.epochs = options.epochs;
     request.saveModelDirectory = saveModelDirectory;
     request.saveModelOverwrite = saveModelOverwrite;
@@ -448,7 +450,8 @@ void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
                                        const TrainingCancellationToken& cancellationToken,
                                        const std::vector<TrainingRestartCondition>& additionalRestartConditions,
                                        const std::vector<TrainingEarlyCompletionPolicy>& additionalEarlyCompletionPolicies,
-                                       const std::string& runNameForMessages) {
+                                       const std::string& runNameForMessages,
+                                       const std::set<std::string>& additionalScalarTensorsToReport) {
     std::vector<TrainingRestartCondition> combinedConditions = restartConditions;
     combinedConditions.insert(combinedConditions.end(), additionalRestartConditions.begin(), additionalRestartConditions.end());
     validateRestartConditions(combinedConditions);
@@ -479,7 +482,7 @@ void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
         [&](const TrainingRestartCondition& condition) { return conditionIsReachableInAttempt(condition, /*attemptInitialCompletedEpochs=*/0); });
 
     if (!anyConditionReachableOnCurrentState && !anyConditionReachableAfterFreshRestart) {
-        fitInternal(options, observer, cancellationToken, additionalEarlyCompletionPolicies);
+        fitInternal(options, observer, cancellationToken, additionalEarlyCompletionPolicies, additionalScalarTensorsToReport);
         return;
     }
 
@@ -510,7 +513,7 @@ void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
         attemptTrainer.runtimeConfig.scalarTensorsToReport.insert("loss");
         RestartAttemptObserver attemptObserver(observer, activeConditions(attemptTrainer.completedTrainingEpochs), attempt);
         try {
-            attemptTrainer.fitInternal(options, attemptObserver, cancellationToken, additionalEarlyCompletionPolicies);
+            attemptTrainer.fitInternal(options, attemptObserver, cancellationToken, additionalEarlyCompletionPolicies, additionalScalarTensorsToReport);
             placedNetworkAfterLastFit = attemptTrainer.placedNetworkAfterLastFit;
             completedTrainingEpochs = attemptTrainer.completedTrainingEpochs;
             attemptObserver.flush();
@@ -558,10 +561,17 @@ TrainingRunResult Trainer::fitTrainingRun(std::string runName,
                                           TrainingObserver& observer,
                                           const TrainingCancellationToken& cancellationToken,
                                           const std::vector<TrainingRestartCondition>& additionalRestartConditions,
-                                          const std::vector<TrainingEarlyCompletionPolicy>& additionalEarlyCompletionPolicies) {
+                                          const std::vector<TrainingEarlyCompletionPolicy>& additionalEarlyCompletionPolicies,
+                                          const std::set<std::string>& additionalScalarTensorsToReport) {
     ResultCapturingTrainingObserver capturingObserver(observer);
     try {
-        fitWithRestartConditions(options, capturingObserver, cancellationToken, additionalRestartConditions, additionalEarlyCompletionPolicies, runName);
+        fitWithRestartConditions(options,
+                                 capturingObserver,
+                                 cancellationToken,
+                                 additionalRestartConditions,
+                                 additionalEarlyCompletionPolicies,
+                                 runName,
+                                 additionalScalarTensorsToReport);
         capturingObserver.flush();
         return TrainingRunResult::completedResult(std::move(runName),
                                                   capturingObserver.finalTrainingStats,

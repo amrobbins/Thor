@@ -243,6 +243,12 @@ void Convolution3d::informThatInputConnectionMade(Tensor inputTensor) {
     }
 }
 
+void Convolution3d::resetGraphTraversalState() {
+    connectedInputPortIndices.clear();
+    emittedFeatureOutputAfterAllInputsConnected = false;
+    nextInputConnectionCursorByTensorOriginalId.clear();
+}
+
 int Convolution3d::getConnectionType(Tensor connectingTensor) const {
     if (!epilogueInputBindings.empty()) {
         std::vector<uint32_t> inputPorts = inputPortIndicesForTensor(connectingTensor);

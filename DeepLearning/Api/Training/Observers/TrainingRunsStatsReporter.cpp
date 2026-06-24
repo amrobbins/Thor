@@ -9,6 +9,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace Thor {
 namespace {
@@ -251,10 +252,6 @@ std::string formatRunsStatsLineBase(const TrainingStatsSnapshot& stats,
 
     appendPhaseLossColumns(line, trainLoss, validateLoss, useColor, trainLossStyle, validateLossStyle);
 
-    if (stats.accuracy.has_value()) {
-        appendSummaryDimKey(line, "accuracy", useColor);
-        appendStyledPadded(line, formatFixedString(stats.accuracy.value(), 4), 6, SummaryAnsi::accuracy, useColor);
-    }
     if (stats.learningRate.has_value()) {
         appendSummaryDimKey(line, "lr", useColor);
         appendStyledPadded(line, formatScientificString(stats.learningRate.value(), 3), 9, SummaryAnsi::learningRate, useColor);
@@ -328,6 +325,31 @@ void appendPhaseLossColumns(std::string& line,
         line += styledText(buffer, validateLossStyle, useColor);
     } else {
         line.append(VALIDATE_LOSS_FIELD_WIDTH, ' ');
+    }
+}
+
+void appendFinalPhaseMetricColumns(std::string& line,
+                                   const std::optional<TrainingStatsSnapshot>& stats,
+                                   const char* phasePrefix,
+                                   bool useColor) {
+    if (!stats.has_value()) {
+        return;
+    }
+
+
+    std::vector<std::pair<std::string, double>> metrics(stats->metrics.begin(), stats->metrics.end());
+    std::sort(metrics.begin(), metrics.end(), [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
+    for (const auto& [name, value] : metrics) {
+        if (name.empty() || name == "loss" || name == "learning_rate" || name == "learningRate" ||
+            name == "lr" || name == "momentum" || name == "completed_epoch" || name == "best_epoch" ||
+            name == "best_score" || name == "min_early_completion_epochs") {
+            continue;
+        }
+        char buffer[160];
+        const bool looksLikeAccuracy = name.find("accuracy") != std::string::npos;
+        std::snprintf(buffer, sizeof(buffer), "%s_%s=%.*f", phasePrefix, name.c_str(), looksLikeAccuracy ? 4 : 6, value);
+        line += " ";
+        line += styledText(buffer, looksLikeAccuracy ? FinalReportAnsi::accuracy : FinalReportAnsi::testLoss, useColor);
     }
 }
 
@@ -833,12 +855,9 @@ void TrainingRunsStatsReporter::writeResultLineLocked(const TrainingRunResult& r
         line += " ";
         line += styled(buffer, FinalReportAnsi::testLoss, useColor);
     }
-    if (result.finalTestStats.has_value() && result.finalTestStats->accuracy.has_value()) {
-        char buffer[64];
-        std::snprintf(buffer, sizeof(buffer), "test_accuracy=%.4f", result.finalTestStats->accuracy.value());
-        line += " ";
-        line += styled(buffer, FinalReportAnsi::accuracy, useColor);
-    }
+    appendFinalPhaseMetricColumns(line, result.finalTrainingStats, "train", useColor);
+    appendFinalPhaseMetricColumns(line, result.finalValidationStats, "validate", useColor);
+    appendFinalPhaseMetricColumns(line, result.finalTestStats, "test", useColor);
     if (result.earlyCompleted()) {
         if (result.completedEpoch.has_value()) {
             line += " completed_epoch=" + std::to_string(result.completedEpoch.value());
@@ -898,12 +917,6 @@ void TrainingRunsStatsReporter::writeEnsembleLineLocked(const TrainingEnsembleRe
         line += " ";
         line += styled(buffer, FinalReportAnsi::testLoss, useColor);
     }
-    if (result.ensembleTestAccuracy.has_value()) {
-        char buffer[64];
-        std::snprintf(buffer, sizeof(buffer), "ensemble_test_accuracy=%.4f", result.ensembleTestAccuracy.value());
-        line += " ";
-        line += styled(buffer, FinalReportAnsi::accuracy, useColor);
-    }
     for (const TrainingNamedMetricResult& namedMetric : result.namedMetrics) {
         // The aggregate fields above are the public overall graph-loss columns.
         // A single graph loss is commonly named "loss", which would format to the
@@ -924,6 +937,24 @@ void TrainingRunsStatsReporter::writeEnsembleLineLocked(const TrainingEnsembleRe
             std::snprintf(buffer, sizeof(buffer), "ensemble_test_%s=%.6f", namedMetric.name.c_str(), namedMetric.testValue.value());
             line += " ";
             line += styled(buffer, FinalReportAnsi::testLoss, useColor);
+        }
+    }
+    for (const TrainingNamedMetricResult& namedMetric : result.namedGraphMetrics) {
+        const bool looksLikeAccuracy = namedMetric.name.find("accuracy") != std::string::npos;
+        const char* style = looksLikeAccuracy ? FinalReportAnsi::accuracy : FinalReportAnsi::testLoss;
+        if (namedMetric.trainValue.has_value()) {
+            char buffer[128];
+            std::snprintf(buffer, sizeof(buffer), "ensemble_train_%s=%.*f", namedMetric.name.c_str(), looksLikeAccuracy ? 4 : 6,
+                          namedMetric.trainValue.value());
+            line += " ";
+            line += styled(buffer, style, useColor);
+        }
+        if (namedMetric.testValue.has_value()) {
+            char buffer[128];
+            std::snprintf(buffer, sizeof(buffer), "ensemble_test_%s=%.*f", namedMetric.name.c_str(), looksLikeAccuracy ? 4 : 6,
+                          namedMetric.testValue.value());
+            line += " ";
+            line += styled(buffer, style, useColor);
         }
     }
     emitLineLocked(line);

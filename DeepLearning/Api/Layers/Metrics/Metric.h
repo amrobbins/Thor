@@ -33,6 +33,7 @@ class Metric : public Layer {
         numInputConnectionsMade += 1;
         THOR_THROW_IF_FALSE(numInputConnectionsMade <= requiredInputConnectionCount());
     }
+    void resetGraphTraversalState() override { numInputConnectionsMade = 0; }
 
     virtual bool requiresLabels() const { return true; }
     virtual Tensor getPredictions() const { return getFeatureInput().value(); }

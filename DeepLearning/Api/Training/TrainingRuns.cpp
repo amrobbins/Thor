@@ -306,15 +306,28 @@ std::vector<std::string> inputNamesFromSignature(const std::vector<TrainingRunIn
     return names;
 }
 
+void eraseNames(std::vector<std::string>& names, const std::vector<std::string>& namesToErase) {
+    if (names.empty() || namesToErase.empty()) {
+        return;
+    }
+    const std::set<std::string> erased(namesToErase.begin(), namesToErase.end());
+    names.erase(std::remove_if(names.begin(), names.end(), [&](const std::string& name) { return erased.count(name) != 0; }),
+                names.end());
+}
+
 std::vector<std::string> inferenceInputNamesFromSavedArtifact(const std::filesystem::path& memberArtifactDirectory,
                                                               const std::vector<TrainingRunInputSignature>& fallbackSignature) {
     try {
         Network model("thor_training_runs_ensemble_manifest_probe");
         model.load(memberArtifactDirectory.string());
         std::vector<std::string> names = model.getInferenceNetworkInputNames();
-        if (!names.empty()) {
-            return names;
-        }
+        // Graph metrics intentionally remain runnable in inference/evaluation placements,
+        // so label-only inputs can appear in the inference graph when a saved member
+        // exposes reported metric outputs.  The ensemble artifact's public input
+        // contract is deploy/inference oriented: advertise only prediction inputs, not
+        // labels or example weights that are used exclusively by losses/metrics.
+        eraseNames(names, model.getTrainingOnlyNetworkInputNames());
+        return names;
     } catch (const std::exception&) {
         // Some unit tests construct synthetic TrainingRunsResult objects with minimal
         // member artifact directories instead of full saved Network artifacts. Those
@@ -469,6 +482,13 @@ struct ResolvedEnsembleLoss {
     std::optional<double> quantile{};
 };
 
+struct ResolvedEnsembleMetric {
+    std::string metricName{};
+    std::string predictionOutputName{};
+    std::optional<std::string> targetInputName{};
+    std::string metricType{};
+};
+
 bool quantilesCompatible(std::optional<double> lhs, std::optional<double> rhs) {
     if (!lhs.has_value() && !rhs.has_value()) {
         return true;
@@ -587,6 +607,92 @@ std::vector<ResolvedEnsembleLoss> resolveTrainingRunsReportedLosses(
         loss.lossWeight = reference.lossWeight;
         loss.quantile = reference.quantile;
         resolved.push_back(std::move(loss));
+    }
+    return resolved;
+}
+
+bool trainingRunsReportableMetricsCompatible(const NetworkMetricReference& lhs, const NetworkMetricReference& rhs) {
+    return lhs.metricName == rhs.metricName && lhs.predictionOutputName == rhs.predictionOutputName &&
+           lhs.targetInputName == rhs.targetInputName && lhs.metricLayerType == rhs.metricLayerType;
+}
+
+std::string trainingRunsReportableMetricDescription(const NetworkMetricReference& reference) {
+    std::ostringstream out;
+    out << "metric_name='" << reference.metricName << "', prediction_output_name='" << reference.predictionOutputName << "'";
+    if (reference.targetInputName.has_value()) {
+        out << ", target_input_name='" << *reference.targetInputName << "'";
+    }
+    out << ", metric_layer_type='" << reference.metricLayerType << "'";
+    return out.str();
+}
+
+std::map<std::string, NetworkMetricReference> trainingRunsReportableMetricsByName(
+    const std::vector<NetworkMetricReference>& reportableMetrics,
+    const std::string& context) {
+    std::map<std::string, NetworkMetricReference> byName;
+    for (const NetworkMetricReference& reference : reportableMetrics) {
+        auto [it, inserted] = byName.emplace(reference.metricName, reference);
+        if (!inserted && !trainingRunsReportableMetricsCompatible(it->second, reference)) {
+            throw std::runtime_error(context + " found ambiguous graph metric name '" + reference.metricName +
+                                     "'. Multiple source metrics with that report name have different wiring/configuration: " +
+                                     trainingRunsReportableMetricDescription(it->second) + "; " +
+                                     trainingRunsReportableMetricDescription(reference) +
+                                     ". Give graph metrics unique NetworkOutput names before ensemble evaluation.");
+        }
+    }
+    return byName;
+}
+
+std::vector<ResolvedEnsembleMetric> resolveTrainingRunsReportedMetrics(
+    const std::vector<NetworkMetricReference>& reportableMetrics,
+    const std::vector<std::string>& requestedMetricNames,
+    const std::string& context) {
+    const std::map<std::string, NetworkMetricReference> byName = trainingRunsReportableMetricsByName(reportableMetrics, context);
+    if (byName.empty()) {
+        if (requestedMetricNames.empty()) {
+            return {};
+        }
+        throw std::runtime_error(context + " did not find any reportable graph metrics.");
+    }
+
+    std::vector<std::string> selectedNames;
+    if (requestedMetricNames.empty()) {
+        selectedNames.reserve(byName.size());
+        for (const auto& [metricName, _] : byName) {
+            (void)_;
+            selectedNames.push_back(metricName);
+        }
+    } else {
+        std::set<std::string> seen;
+        for (const std::string& metricName : requestedMetricNames) {
+            if (metricName.empty()) {
+                throw std::runtime_error(context + " contains an empty reported metric name.");
+            }
+            if (!seen.insert(metricName).second) {
+                throw std::runtime_error(context + " contains duplicate reported metric name '" + metricName + "'.");
+            }
+            if (byName.find(metricName) == byName.end()) {
+                std::ostringstream oss;
+                oss << context << " requested reported metric '" << metricName << "', but no graph metric with that name exists. Available metrics:";
+                for (const auto& [availableName, reference] : byName) {
+                    oss << " " << availableName << "(" << trainingRunsReportableMetricDescription(reference) << ")";
+                }
+                throw std::runtime_error(oss.str());
+            }
+            selectedNames.push_back(metricName);
+        }
+    }
+
+    std::vector<ResolvedEnsembleMetric> resolved;
+    resolved.reserve(selectedNames.size());
+    for (const std::string& metricName : selectedNames) {
+        const NetworkMetricReference& reference = byName.at(metricName);
+        ResolvedEnsembleMetric metric;
+        metric.metricName = reference.metricName;
+        metric.predictionOutputName = reference.predictionOutputName;
+        metric.targetInputName = reference.targetInputName;
+        metric.metricType = reference.metricLayerType;
+        resolved.push_back(std::move(metric));
     }
     return resolved;
 }
@@ -788,10 +894,37 @@ std::string TrainingRunsResult::saveEnsemble(std::string_view ensembleGroup,
         }
         writeJsonStringArray(out, reportedLossNames, "    ");
         out << ",\n";
+        out << "  \"reported_metrics\": ";
+        std::vector<std::string> reportedMetricNames;
+        reportedMetricNames.reserve(ensembleResult.namedGraphMetrics.size());
+        for (const TrainingNamedMetricResult& metric : ensembleResult.namedGraphMetrics) {
+            reportedMetricNames.push_back(metric.name);
+        }
+        writeJsonStringArray(out, reportedMetricNames, "    ");
+        out << ",\n";
         out << "  \"overall_loss_reduction\": \"sum\",\n";
         out << "  \"losses\": [";
         for (size_t i = 0; i < ensembleResult.namedMetrics.size(); ++i) {
             const TrainingNamedMetricResult& metric = ensembleResult.namedMetrics[i];
+            if (i != 0) {
+                out << ",";
+            }
+            out << "\n    {\n";
+            out << "      \"name\": ";
+            writeJsonString(out, metric.name);
+            out << ",\n";
+            out << "      \"train_value\": ";
+            writeOptionalDoubleJson(out, metric.trainValue);
+            out << ",\n";
+            out << "      \"test_value\": ";
+            writeOptionalDoubleJson(out, metric.testValue);
+            out << "\n";
+            out << "    }";
+        }
+        out << "\n  ],\n";
+        out << "  \"metrics\": [";
+        for (size_t i = 0; i < ensembleResult.namedGraphMetrics.size(); ++i) {
+            const TrainingNamedMetricResult& metric = ensembleResult.namedGraphMetrics[i];
             if (i != 0) {
                 out << ",";
             }
@@ -885,7 +1018,8 @@ TrainingRuns::TrainingRuns(std::vector<TrainingRunsSpec> runs,
                            std::vector<TrainingRunsRestartPolicy> restartConditions,
                            std::vector<TrainingRunsEarlyCompletionRule> earlyCompletionRules,
                            std::map<std::string, size_t> minSuccessfulModels,
-                           std::map<std::string, std::vector<std::string>> reportedLosses)
+                           std::map<std::string, std::vector<std::string>> reportedLosses,
+                           std::map<std::string, std::vector<std::string>> reportedMetrics)
     : runs(std::move(runs)),
       failurePolicy(failurePolicy),
       maxSummaryLogsPerSecond(maxSummaryLogsPerSecond),
@@ -893,7 +1027,8 @@ TrainingRuns::TrainingRuns(std::vector<TrainingRunsSpec> runs,
       minSuccessfulModels(std::move(minSuccessfulModels)),
       restartConditions(std::move(restartConditions)),
       earlyCompletionRules(std::move(earlyCompletionRules)),
-      reportedLosses(std::move(reportedLosses)) {
+      reportedLosses(std::move(reportedLosses)),
+      reportedMetrics(std::move(reportedMetrics)) {
     if (!std::isfinite(maxSummaryLogsPerSecond) || maxSummaryLogsPerSecond < 0.0) {
         throw std::runtime_error("TrainingRuns maxSummaryLogsPerSecond must be finite and >= 0.");
     }
@@ -905,6 +1040,7 @@ TrainingRuns::TrainingRuns(std::vector<TrainingRunsSpec> runs,
     validateRestartConditions();
     validateEarlyCompletionRules();
     validateReportedLosses();
+    validateReportedMetrics();
 }
 
 size_t TrainingRuns::getEffectiveMaxParallelRuns() const {
@@ -1018,12 +1154,15 @@ TrainingRunsResult TrainingRuns::fit(const TrainerFitOptions& options, const Tra
 
             try {
                 TrainingStatsSinkObserver observer(statsReporter, runs[i].runName);
+                const std::vector<std::string> reportedMetricNames = reportedMetricNamesForSpec(runs[i]);
+                const std::set<std::string> additionalScalarTensorsToReport(reportedMetricNames.begin(), reportedMetricNames.end());
                 result = runs[i].trainer->fitTrainingRun(runs[i].runName,
                                                           options,
                                                           observer,
                                                           cancellationSource.token(),
                                                           restartConditionsForRun(runs[i]),
-                                                          earlyCompletionPoliciesForRun(runs[i]));
+                                                          earlyCompletionPoliciesForRun(runs[i]),
+                                                          additionalScalarTensorsToReport);
             } catch (...) {
                 result = TrainingRunResult::fromException(runs[i].runName, std::current_exception());
             }
@@ -1591,6 +1730,217 @@ void TrainingRuns::validateReportedLosses() const {
     }
 }
 
+void TrainingRuns::validateReportedMetrics() const {
+    struct MemberMetricState {
+        std::string runName{};
+        std::optional<std::string> ensembleGroup{};
+        std::vector<TrainingRunInputSignature> inputSignature{};
+        std::vector<TrainingRunOutputSignature> outputSignature{};
+        std::shared_ptr<Network> network{};
+        std::optional<std::vector<NetworkMetricReference>> reportableMetrics{};
+    };
+
+    std::set<std::string> runNames;
+    std::set<std::string> ensembleGroups;
+    std::map<std::string, std::vector<MemberMetricState*>> membersByGroup;
+    std::vector<MemberMetricState> memberStates;
+    memberStates.reserve(runs.size());
+    for (const TrainingRunsSpec& spec : runs) {
+        runNames.insert(spec.runName);
+        if (spec.ensembleGroup.has_value()) {
+            ensembleGroups.insert(*spec.ensembleGroup);
+        }
+        MemberMetricState state;
+        state.runName = spec.runName;
+        state.ensembleGroup = spec.ensembleGroup;
+        state.network = spec.trainer->getNetwork();
+        state.inputSignature = collectNetworkInputSignature(state.network);
+        state.outputSignature = collectNetworkOutputSignature(state.network);
+        memberStates.push_back(std::move(state));
+    }
+    for (MemberMetricState& state : memberStates) {
+        if (state.ensembleGroup.has_value()) {
+            membersByGroup[*state.ensembleGroup].push_back(&state);
+        }
+    }
+
+    for (const auto& [targetName, requestedMetricNames] : reportedMetrics) {
+        if (targetName.empty()) {
+            throw std::runtime_error("TrainingRuns reported_metrics contains an empty run_name/ensemble_group name.");
+        }
+        if (runNames.count(targetName) == 0 && ensembleGroups.count(targetName) == 0) {
+            throw std::runtime_error("TrainingRuns reported_metrics targets unknown run_name or ensemble_group '" + targetName + "'.");
+        }
+        std::set<std::string> seen;
+        for (const std::string& metricName : requestedMetricNames) {
+            if (metricName.empty()) {
+                throw std::runtime_error("TrainingRuns reported_metrics for '" + targetName + "' contains an empty metric name.");
+            }
+            if (!seen.insert(metricName).second) {
+                throw std::runtime_error("TrainingRuns reported_metrics for '" + targetName + "' contains duplicate metric name '" + metricName + "'.");
+            }
+        }
+    }
+
+    auto reportableMetricsForMember = [](MemberMetricState& member) -> const std::vector<NetworkMetricReference>& {
+        if (!member.reportableMetrics.has_value()) {
+            member.reportableMetrics = member.network->getReportableMetrics();
+        }
+        return *member.reportableMetrics;
+    };
+
+    for (MemberMetricState& state : memberStates) {
+        std::vector<std::string> requestedMetricNames;
+        if (state.ensembleGroup.has_value()) {
+            auto groupIt = reportedMetrics.find(*state.ensembleGroup);
+            if (groupIt != reportedMetrics.end()) {
+                requestedMetricNames = groupIt->second;
+            }
+        }
+        auto runIt = reportedMetrics.find(state.runName);
+        if (!state.ensembleGroup.has_value() && runIt != reportedMetrics.end()) {
+            requestedMetricNames = runIt->second;
+        }
+        const std::string context = "TrainingRuns reported_metrics for run '" + state.runName + "'";
+        const std::vector<ResolvedEnsembleMetric> resolvedMetrics = resolveTrainingRunsReportedMetrics(
+            reportableMetricsForMember(state), requestedMetricNames, context);
+        for (const ResolvedEnsembleMetric& resolved : resolvedMetrics) {
+            const TrainingRunOutputSignature* referenceOutput = findOutputSignatureItem(state.outputSignature, resolved.predictionOutputName);
+            if (referenceOutput == nullptr) {
+                throw std::runtime_error(context + " resolved metric '" + resolved.metricName + "' to prediction output '" +
+                                         resolved.predictionOutputName + "', but run has outputs " + outputSignatureToString(state.outputSignature) + ".");
+            }
+            if (resolved.targetInputName.has_value() && findInputSignatureItem(state.inputSignature, *resolved.targetInputName) == nullptr) {
+                throw std::runtime_error(context + " resolved metric '" + resolved.metricName + "' to target input '" +
+                                         *resolved.targetInputName + "', but run has inputs " + inputSignatureToString(state.inputSignature) + ".");
+            }
+        }
+    }
+
+    for (auto& [groupName, members] : membersByGroup) {
+        if (members.empty()) {
+            continue;
+        }
+        MemberMetricState& referenceMember = *members.front();
+        const std::vector<std::string> requestedMetricNames = [&]() -> std::vector<std::string> {
+            auto it = reportedMetrics.find(groupName);
+            return it == reportedMetrics.end() ? std::vector<std::string>{} : it->second;
+        }();
+        const std::string context = "TrainingRuns reported_metrics for ensemble_group '" + groupName + "'";
+        const std::vector<ResolvedEnsembleMetric> referenceMetrics = resolveTrainingRunsReportedMetrics(
+            reportableMetricsForMember(referenceMember), requestedMetricNames, context + " reference run '" + referenceMember.runName + "'");
+
+        for (const ResolvedEnsembleMetric& resolved : referenceMetrics) {
+            const TrainingRunOutputSignature* referenceOutput = findOutputSignatureItem(referenceMember.outputSignature, resolved.predictionOutputName);
+            const TrainingRunInputSignature* referenceTarget = resolved.targetInputName.has_value()
+                ? findInputSignatureItem(referenceMember.inputSignature, *resolved.targetInputName)
+                : nullptr;
+            for (size_t memberIndex = 1; memberIndex < members.size(); ++memberIndex) {
+                MemberMetricState& member = *members[memberIndex];
+                const std::string memberContext = context + " run '" + member.runName + "'";
+                const std::vector<ResolvedEnsembleMetric> memberMetrics = resolveTrainingRunsReportedMetrics(
+                    reportableMetricsForMember(member), requestedMetricNames, memberContext);
+                auto memberResolvedIt = std::find_if(memberMetrics.begin(), memberMetrics.end(), [&](const ResolvedEnsembleMetric& candidate) {
+                    return candidate.metricName == resolved.metricName;
+                });
+                if (memberResolvedIt == memberMetrics.end()) {
+                    throw std::runtime_error(memberContext + " is missing graph metric '" + resolved.metricName + "'.");
+                }
+                NetworkMetricReference reference;
+                reference.metricName = resolved.metricName;
+                reference.predictionOutputName = resolved.predictionOutputName;
+                reference.targetInputName = resolved.targetInputName;
+                reference.metricLayerType = resolved.metricType;
+                NetworkMetricReference memberReference;
+                memberReference.metricName = memberResolvedIt->metricName;
+                memberReference.predictionOutputName = memberResolvedIt->predictionOutputName;
+                memberReference.targetInputName = memberResolvedIt->targetInputName;
+                memberReference.metricLayerType = memberResolvedIt->metricType;
+                if (!trainingRunsReportableMetricsCompatible(reference, memberReference)) {
+                    throw std::runtime_error(memberContext + " resolved graph metric '" + resolved.metricName +
+                                             "' differently than reference run '" + referenceMember.runName + "'. Reference: " +
+                                             trainingRunsReportableMetricDescription(reference) + "; member: " +
+                                             trainingRunsReportableMetricDescription(memberReference) + ".");
+                }
+
+                const TrainingRunOutputSignature* memberOutput = findOutputSignatureItem(member.outputSignature, resolved.predictionOutputName);
+                if (referenceOutput != nullptr && (memberOutput == nullptr || !referenceOutput->compatibleWith(*memberOutput))) {
+                    throw std::runtime_error(memberContext + " has incompatible prediction output '" + resolved.predictionOutputName + "'.");
+                }
+                if (referenceTarget != nullptr) {
+                    const TrainingRunInputSignature* memberTarget = findInputSignatureItem(member.inputSignature, *resolved.targetInputName);
+                    if (memberTarget == nullptr || !referenceTarget->compatibleWith(*memberTarget)) {
+                        throw std::runtime_error(memberContext + " has incompatible target input '" + *resolved.targetInputName + "'.");
+                    }
+                }
+            }
+        }
+    }
+}
+
+std::vector<std::string> TrainingRuns::reportedMetricNamesForSpec(const TrainingRunsSpec& spec) const {
+    if (spec.trainer == nullptr || spec.trainer->getNetwork() == nullptr) {
+        return {};
+    }
+
+    std::vector<std::string> requestedMetricNames;
+    if (spec.ensembleGroup.has_value()) {
+        auto groupIt = reportedMetrics.find(*spec.ensembleGroup);
+        if (groupIt != reportedMetrics.end()) {
+            requestedMetricNames = groupIt->second;
+        }
+    }
+    if (!spec.ensembleGroup.has_value()) {
+        auto runIt = reportedMetrics.find(spec.runName);
+        if (runIt != reportedMetrics.end()) {
+            requestedMetricNames = runIt->second;
+        }
+    }
+
+    const std::vector<ResolvedEnsembleMetric> resolvedMetrics = resolveTrainingRunsReportedMetrics(
+        spec.trainer->getNetwork()->getReportableMetrics(),
+        requestedMetricNames,
+        "TrainingRuns reported_metrics for run '" + spec.runName + "'");
+
+    std::vector<std::string> names;
+    names.reserve(resolvedMetrics.size());
+    for (const ResolvedEnsembleMetric& metric : resolvedMetrics) {
+        names.push_back(metric.metricName);
+    }
+    return names;
+}
+
+std::vector<TrainingNamedMetricResult> TrainingRuns::namedGraphMetricResultsForGroup(std::string_view ensembleGroup) const {
+    std::shared_ptr<Network> representativeNetwork;
+    for (const TrainingRunsSpec& run : runs) {
+        if (run.ensembleGroup.has_value() && std::string_view(run.ensembleGroup.value()) == ensembleGroup && run.trainer != nullptr &&
+            run.trainer->getNetwork() != nullptr) {
+            representativeNetwork = run.trainer->getNetwork();
+            break;
+        }
+    }
+    if (representativeNetwork == nullptr) {
+        return {};
+    }
+
+    static const std::vector<std::string> empty;
+    const auto reportedIt = reportedMetrics.find(std::string(ensembleGroup));
+    const std::vector<std::string>& requestedMetricNames = reportedIt == reportedMetrics.end() ? empty : reportedIt->second;
+    const std::vector<ResolvedEnsembleMetric> resolvedMetrics = resolveTrainingRunsReportedMetrics(
+        representativeNetwork->getReportableMetrics(),
+        requestedMetricNames,
+        "TrainingRuns reported_metrics for ensemble_group '" + std::string(ensembleGroup) + "'");
+
+    std::vector<TrainingNamedMetricResult> results;
+    results.reserve(resolvedMetrics.size());
+    for (const ResolvedEnsembleMetric& metric : resolvedMetrics) {
+        TrainingNamedMetricResult result;
+        result.name = metric.metricName;
+        results.push_back(std::move(result));
+    }
+    return results;
+}
+
 std::vector<TrainingNamedMetricResult> TrainingRuns::namedMetricResultsForGroup(std::string_view ensembleGroup) const {
     std::shared_ptr<Network> representativeNetwork;
     for (const TrainingRunsSpec& run : runs) {
@@ -1651,6 +2001,7 @@ std::map<std::string, TrainingEnsembleResult> TrainingRuns::buildEnsembleResults
             ensemble.outputSignature = collectNetworkOutputSignature(spec.trainer->getNetwork());
             ensemble.minSuccessfulModels = minSuccessfulModelsForGroup(*spec.ensembleGroup, 0);
             ensemble.namedMetrics = namedMetricResultsForGroup(*spec.ensembleGroup);
+            ensemble.namedGraphMetrics = namedGraphMetricResultsForGroup(*spec.ensembleGroup);
         }
 
         const auto resultIt = resultByRunName.find(spec.runName);
@@ -1666,7 +2017,6 @@ std::map<std::string, TrainingEnsembleResult> TrainingRuns::buildEnsembleResults
         member.finalTrainingLoss = result.finalLossForPhase(TrainingEventPhase::TRAIN);
         member.finalValidationLoss = result.finalLossForPhase(TrainingEventPhase::VALIDATE);
         member.finalTestLoss = result.finalLossForPhase(TrainingEventPhase::TEST);
-        member.finalTestAccuracy = result.finalAccuracyForPhase(TrainingEventPhase::TEST);
         ensemble.members.push_back(std::move(member));
     }
 
@@ -1764,6 +2114,7 @@ struct TrainingRunsComposedEnsembleEvaluator {
     std::vector<std::map<std::string, Tensor>> memberOutputTensorsByName{};
     std::map<std::string, Tensor> averagedOutputTensorsByName{};
     std::map<std::string, Tensor> lossOutputTensorsByName{};
+    std::map<std::string, Tensor> metricOutputTensorsByName{};
     std::vector<std::string> externalInputNames{};
 };
 
@@ -2063,13 +2414,60 @@ Tensor cloneTrainingRunsEvaluatorLossFromReference(TrainingRunsComposedEnsembleE
     return lossIt->second;
 }
 
-TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluatorForLosses(
+Tensor cloneTrainingRunsEvaluatorMetricFromReference(TrainingRunsComposedEnsembleEvaluator& evaluator,
+                                                    Network& referenceMember,
+                                                    const std::map<std::string, std::shared_ptr<NetworkInput>>& referenceInputsByName,
+                                                    const std::map<std::string, std::shared_ptr<NetworkOutput>>& referenceOutputsByName,
+                                                    const ResolvedEnsembleMetric& metric,
+                                                    const Tensor& averagedPredictions,
+                                                    std::optional<Tensor> labels) {
+    std::shared_ptr<NetworkOutput> predictionOutput = requiredApiNetworkOutputByName(
+        referenceMember,
+        referenceOutputsByName,
+        metric.predictionOutputName,
+        "TrainingRuns composed ensemble evaluator reference prediction output for reported metric '" + metric.metricName + "'");
+    std::shared_ptr<NetworkOutput> metricOutput = requiredApiNetworkOutputByName(
+        referenceMember,
+        referenceOutputsByName,
+        metric.metricName,
+        "TrainingRuns composed ensemble evaluator reference metric output for reported metric '" + metric.metricName + "'");
+
+    ApiTensorRemap remap;
+    remap.map(predictionOutput->getFeatureInput().value(), averagedPredictions);
+    if (metric.targetInputName.has_value()) {
+        if (!labels.has_value()) {
+            throw std::runtime_error("TrainingRuns composed ensemble evaluator did not build target input '" + *metric.targetInputName +
+                                     "' for reported metric '" + metric.metricName + "'.");
+        }
+        std::shared_ptr<NetworkInput> labelInput = requiredApiNetworkInputByName(
+            referenceMember,
+            referenceInputsByName,
+            *metric.targetInputName,
+            "TrainingRuns composed ensemble evaluator reference target input for reported metric '" + metric.metricName + "'");
+        remap.map(labelInput->getFeatureOutput().value(), *labels);
+    }
+
+    ApiSubgraphCloneOptions cloneOptions;
+    cloneOptions.namePrefix = "reported_metric/" + metric.metricName + "/";
+    cloneOptions.inferenceOnly = false;
+    ApiSubgraphCloneResult cloneResult = evaluator.network->cloneInferenceSubgraphInto(referenceMember, {metric.metricName}, remap, cloneOptions);
+    auto metricIt = cloneResult.outputTensorsByName.find(metric.metricName);
+    if (metricIt == cloneResult.outputTensorsByName.end()) {
+        throw std::runtime_error("TrainingRuns composed ensemble evaluator did not clone metric output '" + metric.metricName + "'.");
+    }
+    (void)metricOutput;
+    return metricIt->second;
+}
+
+TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluatorForReports(
     const std::vector<std::shared_ptr<Network>>& memberNetworks,
     const std::vector<double>& weights,
-    const std::vector<ResolvedEnsembleLoss>& losses) {
-    if (losses.empty()) {
-        throw std::runtime_error("TrainingRuns composed ensemble evaluator requires at least one graph loss to report.");
+    const std::vector<ResolvedEnsembleLoss>& losses,
+    const std::vector<ResolvedEnsembleMetric>& metrics) {
+    if (losses.empty() && metrics.empty()) {
+        throw std::runtime_error("TrainingRuns composed ensemble evaluator requires at least one graph loss or metric to report.");
     }
+
     std::vector<std::string> outputNames;
     std::set<std::string> seenOutputs;
     for (const ResolvedEnsembleLoss& loss : losses) {
@@ -2077,6 +2475,12 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
             outputNames.push_back(loss.predictionOutputName);
         }
     }
+    for (const ResolvedEnsembleMetric& metric : metrics) {
+        if (seenOutputs.insert(metric.predictionOutputName).second) {
+            outputNames.push_back(metric.predictionOutputName);
+        }
+    }
+
     TrainingRunsComposedEnsembleEvaluator evaluator =
         buildTrainingRunsComposedEnsembleEvaluatorThroughAccumulator(
             memberNetworks, weights, outputNames, /*exposeAveragedOutputsAsNetworkOutputs=*/false);
@@ -2085,11 +2489,16 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
     const std::map<std::string, std::shared_ptr<NetworkInput>> referenceInputsByName =
         apiNetworkInputsByName(referenceMember, /*includePassThroughInputs=*/false);
     const std::map<std::string, std::shared_ptr<NetworkOutput>> referenceOutputsByName = apiNetworkOutputsByName(referenceMember);
+
+    std::set<std::string> exposedReportOutputs;
     for (const ResolvedEnsembleLoss& loss : losses) {
         const auto predictionIt = evaluator.averagedOutputTensorsByName.find(loss.predictionOutputName);
         if (predictionIt == evaluator.averagedOutputTensorsByName.end()) {
             throw std::runtime_error("TrainingRuns composed ensemble evaluator did not build averaged prediction output '" +
                                      loss.predictionOutputName + "' for reported loss '" + loss.lossName + "'.");
+        }
+        if (!exposedReportOutputs.insert(loss.lossName).second) {
+            throw std::runtime_error("TrainingRuns composed ensemble evaluator cannot expose duplicate report output '" + loss.lossName + "'.");
         }
         Tensor labels = trainingRunsEvaluatorInputTensorForGraphInput(evaluator, referenceMember, referenceInputsByName, loss.targetInputName);
         std::optional<Tensor> weightsTensor;
@@ -2101,6 +2510,25 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
         evaluator.lossOutputTensorsByName[loss.lossName] = lossTensor;
         NetworkOutput::Builder().network(*evaluator.network).name(loss.lossName).inputTensor(lossTensor).dataType(DataType::FP32).build();
     }
+
+    for (const ResolvedEnsembleMetric& metric : metrics) {
+        const auto predictionIt = evaluator.averagedOutputTensorsByName.find(metric.predictionOutputName);
+        if (predictionIt == evaluator.averagedOutputTensorsByName.end()) {
+            throw std::runtime_error("TrainingRuns composed ensemble evaluator did not build averaged prediction output '" +
+                                     metric.predictionOutputName + "' for reported metric '" + metric.metricName + "'.");
+        }
+        if (!exposedReportOutputs.insert(metric.metricName).second) {
+            throw std::runtime_error("TrainingRuns composed ensemble evaluator cannot expose duplicate report output '" + metric.metricName + "'.");
+        }
+        std::optional<Tensor> labels;
+        if (metric.targetInputName.has_value()) {
+            labels = trainingRunsEvaluatorInputTensorForGraphInput(evaluator, referenceMember, referenceInputsByName, *metric.targetInputName);
+        }
+        Tensor metricTensor = cloneTrainingRunsEvaluatorMetricFromReference(
+            evaluator, referenceMember, referenceInputsByName, referenceOutputsByName, metric, predictionIt->second, labels);
+        evaluator.metricOutputTensorsByName[metric.metricName] = metricTensor;
+        NetworkOutput::Builder().network(*evaluator.network).name(metric.metricName).inputTensor(metricTensor).dataType(DataType::FP32).build();
+    }
     return evaluator;
 }
 
@@ -2109,6 +2537,7 @@ struct TrainingRunsComposedEvaluatorArtifacts {
     std::vector<std::shared_ptr<Network>> memberNetworks{};
     std::vector<double> weights{};
     std::vector<ResolvedEnsembleLoss> losses{};
+    std::vector<ResolvedEnsembleMetric> metrics{};
     TrainingRunsComposedEnsembleEvaluator evaluator{};
     std::shared_ptr<PlacedNetwork> placedEvaluator = nullptr;
 };
@@ -2120,10 +2549,18 @@ std::vector<std::string> requestedReportedLossNamesForGroup(
     return it == reportedLosses.end() ? std::vector<std::string>{} : it->second;
 }
 
+std::vector<std::string> requestedReportedMetricNamesForGroup(
+    const std::map<std::string, std::vector<std::string>>& reportedMetrics,
+    const std::string& groupName) {
+    const auto it = reportedMetrics.find(groupName);
+    return it == reportedMetrics.end() ? std::vector<std::string>{} : it->second;
+}
+
 TrainingRunsComposedEvaluatorArtifacts loadTrainingRunsComposedEvaluatorArtifacts(
     const std::vector<EnsembleMemberSpecRef>& members,
     uint64_t batchSize,
     const std::vector<std::string>& requestedLossNames,
+    const std::vector<std::string>& requestedMetricNames,
     const std::string& context) {
     if (batchSize == 0) {
         throw std::runtime_error(context + " cannot place composed ensemble evaluator for batch_size=0.");
@@ -2155,7 +2592,10 @@ TrainingRunsComposedEvaluatorArtifacts loadTrainingRunsComposedEvaluatorArtifact
     artifacts.losses = resolveTrainingRunsReportedLosses(artifacts.memberNetworks.front()->getReportableLosses(),
                                                          requestedLossNames,
                                                          context);
-    if (artifacts.losses.empty()) {
+    artifacts.metrics = resolveTrainingRunsReportedMetrics(artifacts.memberNetworks.front()->getReportableMetrics(),
+                                                           requestedMetricNames,
+                                                           context);
+    if (artifacts.losses.empty() && artifacts.metrics.empty()) {
         return artifacts;
     }
 
@@ -2196,9 +2636,41 @@ TrainingRunsComposedEvaluatorArtifacts loadTrainingRunsComposedEvaluatorArtifact
                                          trainingRunsReportableLossDescription(memberReference) + ".");
             }
         }
+
+        const std::vector<ResolvedEnsembleMetric> memberMetrics = resolveTrainingRunsReportedMetrics(
+            artifacts.memberNetworks[memberIndex]->getReportableMetrics(),
+            requestedMetricNames,
+            context + " member " + std::to_string(memberIndex));
+        for (const ResolvedEnsembleMetric& referenceMetric : artifacts.metrics) {
+            const auto memberMetricIt = std::find_if(memberMetrics.begin(), memberMetrics.end(), [&](const ResolvedEnsembleMetric& candidate) {
+                return candidate.metricName == referenceMetric.metricName;
+            });
+            if (memberMetricIt == memberMetrics.end()) {
+                throw std::runtime_error(context + " member " + std::to_string(memberIndex) +
+                                         " is missing graph metric '" + referenceMetric.metricName + "'.");
+            }
+            NetworkMetricReference reference;
+            reference.metricName = referenceMetric.metricName;
+            reference.predictionOutputName = referenceMetric.predictionOutputName;
+            reference.targetInputName = referenceMetric.targetInputName;
+            reference.metricLayerType = referenceMetric.metricType;
+            NetworkMetricReference memberReference;
+            memberReference.metricName = memberMetricIt->metricName;
+            memberReference.predictionOutputName = memberMetricIt->predictionOutputName;
+            memberReference.targetInputName = memberMetricIt->targetInputName;
+            memberReference.metricLayerType = memberMetricIt->metricType;
+            if (!trainingRunsReportableMetricsCompatible(reference, memberReference)) {
+                throw std::runtime_error(context + " member " + std::to_string(memberIndex) +
+                                         " resolved graph metric '" + referenceMetric.metricName +
+                                         "' differently than the reference member. Reference: " +
+                                         trainingRunsReportableMetricDescription(reference) + "; member: " +
+                                         trainingRunsReportableMetricDescription(memberReference) + ".");
+            }
+        }
     }
 
-    artifacts.evaluator = buildTrainingRunsComposedEnsembleEvaluatorForLosses(artifacts.memberNetworks, artifacts.weights, artifacts.losses);
+    artifacts.evaluator = buildTrainingRunsComposedEnsembleEvaluatorForReports(
+        artifacts.memberNetworks, artifacts.weights, artifacts.losses, artifacts.metrics);
     std::vector<Event> initDoneEvents;
     artifacts.placedEvaluator = artifacts.evaluator.network->place(static_cast<uint32_t>(batchSize),
                                                                    initDoneEvents,
@@ -2279,8 +2751,9 @@ double tensorMeanAsDouble(ThorImplementation::Tensor tensor, const std::string& 
     return sum / static_cast<double>(cpuTensor.getTotalNumElements());
 }
 
-struct ComposedEnsembleLossEvaluationMetrics {
+struct ComposedEnsembleEvaluationMetrics {
     std::map<std::string, std::optional<double>> lossValues{};
+    std::map<std::string, std::optional<double>> metricValues{};
     std::optional<double> overallLoss{};
     uint64_t batches = 0;
     uint64_t rows = 0;
@@ -2290,12 +2763,12 @@ Batch inferenceBatchForInputNames(const std::vector<std::string>& inputNames,
                                   const Batch& sourceBatch,
                                   const std::string& missingInputContext);
 
-ComposedEnsembleLossEvaluationMetrics evaluateComposedEnsembleLossesOnLoader(
+ComposedEnsembleEvaluationMetrics evaluateComposedEnsembleReportsOnLoader(
     const TrainingRunsComposedEvaluatorArtifacts& artifacts,
     Loader& loader,
     ExampleType exampleType) {
-    ComposedEnsembleLossEvaluationMetrics metrics;
-    if (artifacts.losses.empty()) {
+    ComposedEnsembleEvaluationMetrics metrics;
+    if (artifacts.losses.empty() && artifacts.metrics.empty()) {
         return metrics;
     }
     if (artifacts.placedEvaluator == nullptr) {
@@ -2307,10 +2780,17 @@ ComposedEnsembleLossEvaluationMetrics evaluateComposedEnsembleLossesOnLoader(
     }
 
     std::map<std::string, double> weightedLossSums;
-    std::map<std::string, uint64_t> weightedRows;
+    std::map<std::string, uint64_t> weightedLossRows;
     for (const ResolvedEnsembleLoss& loss : artifacts.losses) {
         weightedLossSums[loss.lossName] = 0.0;
-        weightedRows[loss.lossName] = 0;
+        weightedLossRows[loss.lossName] = 0;
+    }
+
+    std::map<std::string, double> weightedMetricSums;
+    std::map<std::string, uint64_t> weightedMetricRows;
+    for (const ResolvedEnsembleMetric& metric : artifacts.metrics) {
+        weightedMetricSums[metric.metricName] = 0.0;
+        weightedMetricRows[metric.metricName] = 0;
     }
 
     const uint64_t batchesPerEpoch = loader.getNumBatchesPerEpoch(exampleType);
@@ -2340,7 +2820,17 @@ ComposedEnsembleLossEvaluationMetrics evaluateComposedEnsembleLossesOnLoader(
             const double lossValue = tensorMeanAsDouble(std::move(outputIt->second),
                                                         "TrainingRuns composed ensemble evaluator reported loss '" + loss.lossName + "'");
             weightedLossSums[loss.lossName] += lossValue * static_cast<double>(rows);
-            weightedRows[loss.lossName] += rows;
+            weightedLossRows[loss.lossName] += rows;
+        }
+        for (const ResolvedEnsembleMetric& metric : artifacts.metrics) {
+            auto outputIt = outputs.find(metric.metricName);
+            if (outputIt == outputs.end()) {
+                throw std::runtime_error("TrainingRuns composed ensemble evaluator did not produce reported metric '" + metric.metricName + "'.");
+            }
+            const double metricValue = tensorMeanAsDouble(std::move(outputIt->second),
+                                                          "TrainingRuns composed ensemble evaluator reported metric '" + metric.metricName + "'");
+            weightedMetricSums[metric.metricName] += metricValue * static_cast<double>(rows);
+            weightedMetricRows[metric.metricName] += rows;
         }
         metrics.batches += 1;
         metrics.rows += rows;
@@ -2350,8 +2840,8 @@ ComposedEnsembleLossEvaluationMetrics evaluateComposedEnsembleLossesOnLoader(
     std::vector<std::optional<double>> namedValuesForOverall;
     namedValuesForOverall.reserve(artifacts.losses.size());
     for (const ResolvedEnsembleLoss& loss : artifacts.losses) {
-        auto rowsIt = weightedRows.find(loss.lossName);
-        if (rowsIt == weightedRows.end() || rowsIt->second == 0) {
+        auto rowsIt = weightedLossRows.find(loss.lossName);
+        if (rowsIt == weightedLossRows.end() || rowsIt->second == 0) {
             metrics.lossValues[loss.lossName] = std::nullopt;
             namedValuesForOverall.push_back(std::nullopt);
             continue;
@@ -2361,12 +2851,21 @@ ComposedEnsembleLossEvaluationMetrics evaluateComposedEnsembleLossesOnLoader(
         namedValuesForOverall.push_back(value);
     }
     metrics.overallLoss = weightedLossSumFromWeightedLossValues(namedValuesForOverall);
+
+    for (const ResolvedEnsembleMetric& metric : artifacts.metrics) {
+        auto rowsIt = weightedMetricRows.find(metric.metricName);
+        if (rowsIt == weightedMetricRows.end() || rowsIt->second == 0) {
+            metrics.metricValues[metric.metricName] = std::nullopt;
+            continue;
+        }
+        metrics.metricValues[metric.metricName] = weightedMetricSums.at(metric.metricName) / static_cast<double>(rowsIt->second);
+    }
     return metrics;
 }
 
-void applyComposedLossEvaluationMetricsToEnsemble(TrainingEnsembleResult& ensemble,
-                                                  const ComposedEnsembleLossEvaluationMetrics& metrics,
-                                                  bool testPhase) {
+void applyComposedEvaluationMetricsToEnsemble(TrainingEnsembleResult& ensemble,
+                                              const ComposedEnsembleEvaluationMetrics& metrics,
+                                              bool testPhase) {
     std::vector<std::optional<double>> namedValuesForOverall;
     namedValuesForOverall.reserve(ensemble.namedMetrics.size());
     for (TrainingNamedMetricResult& namedMetric : ensemble.namedMetrics) {
@@ -2384,6 +2883,16 @@ void applyComposedLossEvaluationMetricsToEnsemble(TrainingEnsembleResult& ensemb
         ensemble.ensembleTestLoss = overall;
     } else {
         ensemble.ensembleTrainingLoss = overall;
+    }
+
+    for (TrainingNamedMetricResult& namedMetric : ensemble.namedGraphMetrics) {
+        auto valueIt = metrics.metricValues.find(namedMetric.name);
+        const std::optional<double> value = valueIt == metrics.metricValues.end() ? std::optional<double>{} : valueIt->second;
+        if (testPhase) {
+            namedMetric.testValue = value;
+        } else {
+            namedMetric.trainValue = value;
+        }
     }
 }
 
@@ -2458,7 +2967,7 @@ void TrainingRuns::evaluateEnsembles(std::vector<TrainingRunResult>& results,
             continue;
         }
 
-        if (ensembleIt->second.namedMetrics.empty()) {
+        if (ensembleIt->second.namedMetrics.empty() && ensembleIt->second.namedGraphMetrics.empty()) {
             ensembleIt->second.ensembleTrainingLoss = std::nullopt;
             continue;
         }
@@ -2467,13 +2976,18 @@ void TrainingRuns::evaluateEnsembles(std::vector<TrainingRunResult>& results,
             members,
             *evaluationBatchSize,
             requestedReportedLossNamesForGroup(reportedLosses, groupName),
+            requestedReportedMetricNamesForGroup(reportedMetrics, groupName),
             "TrainingRuns composed ensemble training-population evaluation for ensemble_group '" + groupName + "'");
 
         std::map<std::string, std::vector<std::optional<double>>> sourcePopulationLossesByName;
+        std::map<std::string, std::vector<std::optional<double>>> sourcePopulationMetricValuesByName;
         std::vector<double> sourceWeights;
         sourceWeights.reserve(members.size());
         for (const TrainingNamedMetricResult& metric : ensembleIt->second.namedMetrics) {
             sourcePopulationLossesByName[metric.name].reserve(members.size());
+        }
+        for (const TrainingNamedMetricResult& metric : ensembleIt->second.namedGraphMetrics) {
+            sourcePopulationMetricValuesByName[metric.name].reserve(members.size());
         }
 
         for (const EnsembleMemberSpecRef& sourceMember : members) {
@@ -2483,15 +2997,23 @@ void TrainingRuns::evaluateEnsembles(std::vector<TrainingRunResult>& results,
                 for (const TrainingNamedMetricResult& metric : ensembleIt->second.namedMetrics) {
                     sourcePopulationLossesByName[metric.name].push_back(std::nullopt);
                 }
+                for (const TrainingNamedMetricResult& metric : ensembleIt->second.namedGraphMetrics) {
+                    sourcePopulationMetricValuesByName[metric.name].push_back(std::nullopt);
+                }
                 continue;
             }
 
-            ComposedEnsembleLossEvaluationMetrics sourceMetrics = evaluateComposedEnsembleLossesOnLoader(
+            ComposedEnsembleEvaluationMetrics sourceMetrics = evaluateComposedEnsembleReportsOnLoader(
                 composedArtifacts, *sourceMember.spec->trainer->loader, ExampleType::VALIDATE);
             for (const TrainingNamedMetricResult& metric : ensembleIt->second.namedMetrics) {
                 auto valueIt = sourceMetrics.lossValues.find(metric.name);
                 sourcePopulationLossesByName[metric.name].push_back(
                     valueIt == sourceMetrics.lossValues.end() ? std::optional<double>{} : valueIt->second);
+            }
+            for (const TrainingNamedMetricResult& metric : ensembleIt->second.namedGraphMetrics) {
+                auto valueIt = sourceMetrics.metricValues.find(metric.name);
+                sourcePopulationMetricValuesByName[metric.name].push_back(
+                    valueIt == sourceMetrics.metricValues.end() ? std::optional<double>{} : valueIt->second);
             }
         }
 
@@ -2502,27 +3024,33 @@ void TrainingRuns::evaluateEnsembles(std::vector<TrainingRunResult>& results,
             namedTrainValuesForOverall.push_back(metric.trainValue);
         }
         ensembleIt->second.ensembleTrainingLoss = weightedLossSumFromWeightedLossValues(namedTrainValuesForOverall);
+        for (TrainingNamedMetricResult& metric : ensembleIt->second.namedGraphMetrics) {
+            metric.trainValue = weightedAverage(sourcePopulationMetricValuesByName[metric.name], sourceWeights);
+        }
     }
 }
 
-struct MemberGraphLossEvaluationMetrics {
+struct MemberGraphEvaluationMetrics {
     std::optional<double> loss{};
+    std::map<std::string, std::optional<double>> lossValues{};
+    std::map<std::string, std::optional<double>> metricValues{};
     uint64_t batches = 0;
     uint64_t rows = 0;
 };
 
-std::vector<MemberGraphLossEvaluationMetrics> evaluateMemberGraphLossesOnLoader(
+std::vector<MemberGraphEvaluationMetrics> evaluateMemberGraphReportsOnLoader(
     const std::vector<EnsembleMemberSpecRef>& members,
     uint64_t batchSize,
     const std::vector<std::string>& requestedLossNames,
+    const std::vector<std::string>& requestedMetricNames,
     Loader& loader,
     ExampleType exampleType,
     const std::string& context) {
-    std::vector<MemberGraphLossEvaluationMetrics> memberMetrics;
+    std::vector<MemberGraphEvaluationMetrics> memberMetrics;
     memberMetrics.reserve(members.size());
     for (size_t memberIndex = 0; memberIndex < members.size(); ++memberIndex) {
         const EnsembleMemberSpecRef& member = members[memberIndex];
-        MemberGraphLossEvaluationMetrics result;
+        MemberGraphEvaluationMetrics result;
         if (member.spec == nullptr || member.spec->trainer == nullptr || member.spec->trainer->getNetwork() == nullptr) {
             memberMetrics.push_back(result);
             continue;
@@ -2531,30 +3059,33 @@ std::vector<MemberGraphLossEvaluationMetrics> evaluateMemberGraphLossesOnLoader(
             std::vector<EnsembleMemberSpecRef>{member},
             batchSize,
             requestedLossNames,
+            requestedMetricNames,
             context + " member '" + member.spec->runName + "'");
-        if (!artifacts.losses.empty()) {
-            ComposedEnsembleLossEvaluationMetrics metrics = evaluateComposedEnsembleLossesOnLoader(artifacts, loader, exampleType);
+        if (!artifacts.losses.empty() || !artifacts.metrics.empty()) {
+            ComposedEnsembleEvaluationMetrics metrics = evaluateComposedEnsembleReportsOnLoader(artifacts, loader, exampleType);
             result.loss = metrics.overallLoss;
+            result.lossValues = std::move(metrics.lossValues);
+            result.metricValues = std::move(metrics.metricValues);
             result.batches = metrics.batches;
             result.rows = metrics.rows;
         }
-        memberMetrics.push_back(result);
+        memberMetrics.push_back(std::move(result));
     }
     return memberMetrics;
 }
 
-void applyGraphLossEvaluationMemberTestStats(std::vector<TrainingRunResult>& results,
-                                             TrainingEnsembleResult& ensemble,
-                                             const std::vector<EnsembleMemberSpecRef>& members,
-                                             Loader& testLoader,
-                                             const std::vector<MemberGraphLossEvaluationMetrics>& memberMetrics) {
+void applyGraphEvaluationMemberTestStats(std::vector<TrainingRunResult>& results,
+                                         TrainingEnsembleResult& ensemble,
+                                         const std::vector<EnsembleMemberSpecRef>& members,
+                                         Loader& testLoader,
+                                         const std::vector<MemberGraphEvaluationMetrics>& memberMetrics) {
     const uint64_t stepsPerEpoch = testLoader.getNumBatchesPerEpoch(ExampleType::TEST);
 
     for (size_t i = 0; i < members.size(); ++i) {
         if (members[i].spec == nullptr || members[i].spec->trainer == nullptr || members[i].spec->trainer->getNetwork() == nullptr) {
             continue;
         }
-        const MemberGraphLossEvaluationMetrics metrics = i < memberMetrics.size() ? memberMetrics[i] : MemberGraphLossEvaluationMetrics{};
+        const MemberGraphEvaluationMetrics metrics = i < memberMetrics.size() ? memberMetrics[i] : MemberGraphEvaluationMetrics{};
         TrainingRunResult& runResult = results[members[i].runIndex];
         TrainingStatsSnapshot testStats;
         if (runResult.finalTestStats.has_value()) {
@@ -2571,17 +3102,31 @@ void applyGraphLossEvaluationMemberTestStats(std::vector<TrainingRunResult>& res
         testStats.batchSize = testLoader.getBatchSize();
         testStats.samplesProcessed = metrics.rows;
         testStats.loss = metrics.loss;
-        testStats.accuracy = std::nullopt;
+        for (const auto& [name, value] : metrics.lossValues) {
+            if (value.has_value()) {
+                testStats.metrics[name] = *value;
+            }
+        }
+        for (const auto& [name, value] : metrics.metricValues) {
+            if (value.has_value()) {
+                testStats.metrics[name] = *value;
+            }
+        }
         runResult.finalTestStats = std::move(testStats);
     }
 
     for (TrainingEnsembleMemberResult& memberResult : ensemble.members) {
         for (size_t i = 0; i < members.size(); ++i) {
             if (members[i].spec != nullptr && memberResult.runName == members[i].spec->runName) {
-                const MemberGraphLossEvaluationMetrics metrics = i < memberMetrics.size() ? memberMetrics[i] : MemberGraphLossEvaluationMetrics{};
+                const MemberGraphEvaluationMetrics metrics = i < memberMetrics.size() ? memberMetrics[i] : MemberGraphEvaluationMetrics{};
                 memberResult.status = results[members[i].runIndex].status;
                 memberResult.finalTestLoss = metrics.loss;
-                memberResult.finalTestAccuracy = std::nullopt;
+                memberResult.finalTestMetrics.clear();
+                for (const auto& [name, value] : metrics.metricValues) {
+                    if (value.has_value()) {
+                        memberResult.finalTestMetrics[name] = *value;
+                    }
+                }
             }
         }
     }
@@ -2604,9 +3149,8 @@ void TrainingRuns::evaluateEnsemblesOnTestLoader(std::vector<TrainingRunResult>&
             continue;
         }
 
-        if (ensembleIt->second.namedMetrics.empty()) {
+        if (ensembleIt->second.namedMetrics.empty() && ensembleIt->second.namedGraphMetrics.empty()) {
             ensembleIt->second.ensembleTestLoss = std::nullopt;
-            ensembleIt->second.ensembleTestAccuracy = std::nullopt;
             continue;
         }
 
@@ -2614,20 +3158,21 @@ void TrainingRuns::evaluateEnsemblesOnTestLoader(std::vector<TrainingRunResult>&
             members,
             testLoader->getBatchSize(),
             requestedReportedLossNamesForGroup(reportedLosses, groupName),
+            requestedReportedMetricNamesForGroup(reportedMetrics, groupName),
             "TrainingRuns composed ensemble test evaluation for ensemble_group '" + groupName + "'");
-        ComposedEnsembleLossEvaluationMetrics metrics = evaluateComposedEnsembleLossesOnLoader(
+        ComposedEnsembleEvaluationMetrics metrics = evaluateComposedEnsembleReportsOnLoader(
             composedArtifacts, *testLoader, ExampleType::TEST);
-        applyComposedLossEvaluationMetricsToEnsemble(ensembleIt->second, metrics, /*testPhase=*/true);
-        ensembleIt->second.ensembleTestAccuracy = std::nullopt;
+        applyComposedEvaluationMetricsToEnsemble(ensembleIt->second, metrics, /*testPhase=*/true);
 
-        std::vector<MemberGraphLossEvaluationMetrics> memberMetrics = evaluateMemberGraphLossesOnLoader(
+        std::vector<MemberGraphEvaluationMetrics> memberMetrics = evaluateMemberGraphReportsOnLoader(
             members,
             testLoader->getBatchSize(),
             requestedReportedLossNamesForGroup(reportedLosses, groupName),
+            requestedReportedMetricNamesForGroup(reportedMetrics, groupName),
             *testLoader,
             ExampleType::TEST,
             "TrainingRuns composed ensemble per-member test evaluation for ensemble_group '" + groupName + "'");
-        applyGraphLossEvaluationMemberTestStats(results, ensembleIt->second, members, *testLoader, memberMetrics);
+        applyGraphEvaluationMemberTestStats(results, ensembleIt->second, members, *testLoader, memberMetrics);
     }
 }
 

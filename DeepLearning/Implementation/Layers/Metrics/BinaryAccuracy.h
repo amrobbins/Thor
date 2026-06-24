@@ -39,15 +39,12 @@ class BinaryAccuracy : public CustomMetric {
     ~BinaryAccuracy() override = default;
 
     std::optional<Tensor> createFeatureOutputTensor() override {
-        if (isInferenceOnly())
-            return std::nullopt;
         validateBinaryAccuracyInputs();
         return CustomMetric::createFeatureOutputTensor();
     }
 
     void compileImpl() override {
-        if (!isInferenceOnly())
-            validateBinaryAccuracyInputs();
+        validateBinaryAccuracyInputs();
         CustomMetric::compileImpl();
     }
 

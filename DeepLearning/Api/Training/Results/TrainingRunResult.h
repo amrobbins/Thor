@@ -168,14 +168,6 @@ struct TrainingRunResult {
         return stats->loss;
     }
 
-    [[nodiscard]] std::optional<double> finalAccuracyForPhase(TrainingEventPhase phase) const {
-        const std::optional<TrainingStatsSnapshot>& stats = finalStatsForPhase(phase);
-        if (!stats.has_value()) {
-            return std::nullopt;
-        }
-        return stats->accuracy;
-    }
-
     [[nodiscard]] static TrainingRunResult completedResult(std::string runName,
                                                            std::optional<TrainingStatsSnapshot> finalTrainingStats = {},
                                                            std::optional<TrainingStatsSnapshot> finalValidationStats = {},
@@ -246,7 +238,7 @@ struct TrainingEnsembleMemberResult {
     std::optional<double> finalTrainingLoss{};
     std::optional<double> finalValidationLoss{};
     std::optional<double> finalTestLoss{};
-    std::optional<double> finalTestAccuracy{};
+    std::map<std::string, double> finalTestMetrics{};
 };
 
 struct TrainingNamedMetricResult {
@@ -264,8 +256,8 @@ struct TrainingEnsembleResult {
     std::vector<TrainingRunOutputSignature> outputSignature{};
     std::optional<double> ensembleTrainingLoss{};
     std::optional<double> ensembleTestLoss{};
-    std::optional<double> ensembleTestAccuracy{};
     std::vector<TrainingNamedMetricResult> namedMetrics{};
+    std::vector<TrainingNamedMetricResult> namedGraphMetrics{};
     size_t minSuccessfulModels = 0;
 
     [[nodiscard]] size_t size() const { return members.size(); }
@@ -282,12 +274,16 @@ struct TrainingEnsembleResult {
             return metricResult.hasValue();
         });
     }
+    [[nodiscard]] bool hasNamedGraphMetricValues() const {
+        return std::any_of(namedGraphMetrics.begin(), namedGraphMetrics.end(), [](const TrainingNamedMetricResult& metricResult) {
+            return metricResult.hasValue();
+        });
+    }
     [[nodiscard]] bool hasEnsembleEvaluationMetrics() const {
-        return ensembleTrainingLoss.has_value() || ensembleTestLoss.has_value() || ensembleTestAccuracy.has_value() || hasNamedMetricValues();
+        return ensembleTrainingLoss.has_value() || ensembleTestLoss.has_value() || hasNamedMetricValues() || hasNamedGraphMetricValues();
     }
     [[nodiscard]] std::optional<double> ensembleFinalTrainingLoss() const { return ensembleTrainingLoss; }
     [[nodiscard]] std::optional<double> ensembleFinalTestLoss() const { return ensembleTestLoss; }
-    [[nodiscard]] std::optional<double> ensembleFinalTestAccuracy() const { return ensembleTestAccuracy; }
 };
 
 }  // namespace Thor

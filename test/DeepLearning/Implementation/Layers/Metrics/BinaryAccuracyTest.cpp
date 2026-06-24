@@ -69,21 +69,15 @@ TEST(BinaryAccuracy, ComputesCorrectElementWiseResult) {
         LayerTestHelper::connectTwoLayers(predictionsInput, noOpLayer);
         LayerTestHelper::connectTwoLayers(noOpLayer, binaryAccuracy, 0, (int)Metric::ConnectionType::FORWARD);
         LayerTestHelper::connectTwoLayers(labelsInput, binaryAccuracy, 0, (int)Metric::ConnectionType::LABELS);
-        shared_ptr<NetworkOutput> accuracyOutput = nullptr;
-        if (!inferenceOnly) {
-            accuracyOutput = make_shared<NetworkOutput>(gpuPlacement);
-            layers.push_back(accuracyOutput);
-            LayerTestHelper::connectTwoLayers(binaryAccuracy, accuracyOutput, (int)Metric::ConnectionType::METRIC);
-        }
+        shared_ptr<NetworkOutput> accuracyOutput = make_shared<NetworkOutput>(gpuPlacement);
+        layers.push_back(accuracyOutput);
+        LayerTestHelper::connectTwoLayers(binaryAccuracy, accuracyOutput, (int)Metric::ConnectionType::METRIC);
         LayerTestHelper::initializeNetwork(layers);
 
         ASSERT_TRUE(!binaryAccuracy->getErrorOutput().has_value());
         ASSERT_TRUE(!binaryAccuracy->getErrorInput().has_value());
 
-        if (inferenceOnly) {
-            assert(!binaryAccuracy->getFeatureOutput().has_value());
-            continue;
-        }
+        ASSERT_TRUE(binaryAccuracy->getFeatureOutput().has_value());
 
         // Network is runnable here
         predictionsInput->forward(predictionsCpu, false);

@@ -95,6 +95,7 @@ class RMSNorm : public TrainableLayer {
     Tensor getFeatureOutput(Tensor inputTensor) const override;
     std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override;
     void informThatInputConnectionMade(Tensor inputTensor) override;
+    void resetGraphTraversalState() override;
     bool mustConnectAllInputsToDriveOutput() const override { return !epilogueInputBindings.empty(); }
 
     nlohmann::json serialize(thor_file::TarWriter& archiveWriter,

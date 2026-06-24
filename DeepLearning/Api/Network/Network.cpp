@@ -709,6 +709,12 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
     try {
         // FIXME: need to throw GPU_OUT_OF_MEMORY when stamping and run out of memory
 
+        for (const shared_ptr<Layer>& layer : network) {
+            if (layer != nullptr) {
+                layer->resetGraphTraversalState();
+            }
+        }
+
         uint64_t orderedIndex = 0;
         for (auto it = orderedNetwork.begin(); it != orderedNetwork.end(); ++it, ++orderedIndex) {
             std::optional<Tensor> inputTensor = it->first;
@@ -1554,6 +1560,236 @@ std::vector<NetworkLossReference> Network::getReportableLosses() {
     return references;
 }
 
+std::vector<NetworkMetricReference> Network::getReportableMetrics() {
+    const std::vector<std::string> trainingOnlyNames = getTrainingOnlyNetworkInputNames();
+    const std::set<std::string> trainingOnlyNameSet(trainingOnlyNames.begin(), trainingOnlyNames.end());
+
+    rebuildApiGraphIndexes(/*inferenceOnly=*/false);
+
+    auto sourceNetworkInputName = [&](const Tensor& tensor) -> std::optional<std::string> {
+        std::set<Tensor> visiting;
+        std::function<std::optional<std::string>(const Tensor&)> visit = [&](const Tensor& current) -> std::optional<std::string> {
+            if (visiting.count(current) != 0) {
+                return std::nullopt;
+            }
+            visiting.insert(current);
+
+            auto driverIt = apiTensorToApiDrivingLayer.find(current);
+            if (driverIt == apiTensorToApiDrivingLayer.end() || driverIt->second == nullptr) {
+                visiting.erase(current);
+                return std::nullopt;
+            }
+            std::shared_ptr<Layer> driver = driverIt->second;
+            std::shared_ptr<NetworkInput> input = std::dynamic_pointer_cast<NetworkInput>(driver);
+            if (input != nullptr) {
+                std::string name = input->getName();
+                visiting.erase(current);
+                return name;
+            }
+
+            auto inputsIt = apiLayerToApiInputTensors.find(driver);
+            if (inputsIt == apiLayerToApiInputTensors.end() || inputsIt->second.empty()) {
+                visiting.erase(current);
+                return std::nullopt;
+            }
+            std::optional<std::string> found;
+            for (const Tensor& upstream : inputsIt->second) {
+                std::optional<std::string> candidate = visit(upstream);
+                if (!candidate.has_value()) {
+                    continue;
+                }
+                if (found.has_value() && found.value() != candidate.value()) {
+                    visiting.erase(current);
+                    return std::nullopt;
+                }
+                found = candidate;
+            }
+            visiting.erase(current);
+            return found;
+        };
+        return visit(tensor);
+    };
+
+    std::map<Tensor, std::vector<std::string>> outputNamesByTensor;
+    const uint32_t numLayers = getNumLayers();
+    for (uint32_t i = 0; i < numLayers; ++i) {
+        std::shared_ptr<NetworkOutput> output = std::dynamic_pointer_cast<NetworkOutput>(getLayer(i));
+        if (output == nullptr) {
+            continue;
+        }
+        std::optional<Tensor> outputTensor = output->getFeatureInput();
+        if (!outputTensor.has_value()) {
+            outputTensor = output->getFeatureOutput();
+        }
+        if (!outputTensor.has_value()) {
+            continue;
+        }
+        outputNamesByTensor[outputTensor.value()].push_back(output->getName());
+    }
+
+    auto addUniqueName = [](std::vector<std::string>& names, const std::string& name) {
+        if (std::find(names.begin(), names.end(), name) == names.end()) {
+            names.push_back(name);
+        }
+    };
+
+    std::map<uint64_t, std::vector<std::string>> metricNamesByLayerId;
+    auto addMetricOutputNameForTensor = [&](const Tensor& tensor, const std::string& outputName) {
+        std::set<Tensor> visiting;
+        std::function<void(const Tensor&)> visit = [&](const Tensor& current) {
+            if (visiting.count(current) != 0) {
+                return;
+            }
+            visiting.insert(current);
+            auto driverIt = apiTensorToApiDrivingLayer.find(current);
+            if (driverIt == apiTensorToApiDrivingLayer.end() || driverIt->second == nullptr) {
+                visiting.erase(current);
+                return;
+            }
+            std::shared_ptr<Layer> driver = driverIt->second;
+            std::shared_ptr<Metric> metricDriver = std::dynamic_pointer_cast<Metric>(driver);
+            if (metricDriver != nullptr) {
+                addUniqueName(metricNamesByLayerId[metricDriver->getId()], outputName);
+                visiting.erase(current);
+                return;
+            }
+            auto inputsIt = apiLayerToApiInputTensors.find(driver);
+            if (inputsIt != apiLayerToApiInputTensors.end()) {
+                for (const Tensor& upstream : inputsIt->second) {
+                    visit(upstream);
+                }
+            }
+            visiting.erase(current);
+        };
+        visit(tensor);
+    };
+
+    for (uint32_t i = 0; i < numLayers; ++i) {
+        std::shared_ptr<NetworkOutput> output = std::dynamic_pointer_cast<NetworkOutput>(getLayer(i));
+        if (output == nullptr) {
+            continue;
+        }
+        std::optional<Tensor> outputTensor = output->getFeatureInput();
+        if (!outputTensor.has_value()) {
+            outputTensor = output->getFeatureOutput();
+        }
+        if (!outputTensor.has_value()) {
+            continue;
+        }
+        addMetricOutputNameForTensor(outputTensor.value(), output->getName());
+    }
+
+    auto predictionOutputNamesForTensor = [&](const Tensor& tensor) -> std::vector<std::string> {
+        std::vector<std::string> names;
+        std::set<Tensor> visiting;
+        std::function<void(const Tensor&)> visit = [&](const Tensor& current) {
+            if (visiting.count(current) != 0) {
+                return;
+            }
+            visiting.insert(current);
+
+            auto outputIt = outputNamesByTensor.find(current);
+            if (outputIt != outputNamesByTensor.end()) {
+                for (const std::string& outputName : outputIt->second) {
+                    addUniqueName(names, outputName);
+                }
+                visiting.erase(current);
+                return;
+            }
+
+            auto driverIt = apiTensorToApiDrivingLayer.find(current);
+            if (driverIt == apiTensorToApiDrivingLayer.end() || driverIt->second == nullptr) {
+                visiting.erase(current);
+                return;
+            }
+            std::shared_ptr<Layer> driver = driverIt->second;
+            if (std::dynamic_pointer_cast<NetworkInput>(driver) != nullptr || std::dynamic_pointer_cast<Loss>(driver) != nullptr ||
+                std::dynamic_pointer_cast<Metric>(driver) != nullptr) {
+                visiting.erase(current);
+                return;
+            }
+
+            auto inputsIt = apiLayerToApiInputTensors.find(driver);
+            if (inputsIt != apiLayerToApiInputTensors.end()) {
+                for (const Tensor& upstream : inputsIt->second) {
+                    visit(upstream);
+                }
+            }
+            visiting.erase(current);
+        };
+        visit(tensor);
+        return names;
+    };
+
+    std::vector<NetworkMetricReference> references;
+    for (uint32_t i = 0; i < numLayers; ++i) {
+        std::shared_ptr<Metric> metric = std::dynamic_pointer_cast<Metric>(getLayer(i));
+        if (metric == nullptr) {
+            continue;
+        }
+
+        Tensor predictions;
+        std::optional<Tensor> labels;
+        try {
+            predictions = metric->getPredictions();
+            if (metric->requiresLabels()) {
+                labels = metric->getLabels();
+            }
+        } catch (const std::exception&) {
+            continue;
+        }
+
+        const std::vector<std::string> predictionOutputNames = predictionOutputNamesForTensor(predictions);
+        if (predictionOutputNames.empty()) {
+            continue;
+        }
+
+        std::optional<std::string> labelInputName;
+        if (labels.has_value()) {
+            labelInputName = sourceNetworkInputName(labels.value());
+            if (!labelInputName.has_value() || trainingOnlyNameSet.count(labelInputName.value()) == 0) {
+                continue;
+            }
+        }
+
+        std::vector<std::string> metricNames;
+        auto metricNamesIt = metricNamesByLayerId.find(metric->getId());
+        if (metricNamesIt != metricNamesByLayerId.end()) {
+            metricNames = metricNamesIt->second;
+        }
+        if (metricNames.empty()) {
+            // Metrics must be wired to NetworkOutput to be materialized by the training
+            // stats path and by the composed ensemble evaluator.
+            continue;
+        }
+
+        for (const std::string& outputName : predictionOutputNames) {
+            for (const std::string& metricName : metricNames) {
+                NetworkMetricReference reference;
+                reference.metricName = metricName;
+                reference.predictionOutputName = outputName;
+                reference.targetInputName = labelInputName;
+                reference.metricLayerType = metric->getLayerType();
+                references.push_back(std::move(reference));
+            }
+        }
+    }
+
+    std::sort(references.begin(), references.end(), [](const NetworkMetricReference& lhs, const NetworkMetricReference& rhs) {
+        if (lhs.metricName != rhs.metricName) {
+            return lhs.metricName < rhs.metricName;
+        }
+        if (lhs.predictionOutputName != rhs.predictionOutputName) {
+            return lhs.predictionOutputName < rhs.predictionOutputName;
+        }
+        if (lhs.targetInputName != rhs.targetInputName) {
+            return lhs.targetInputName < rhs.targetInputName;
+        }
+        return lhs.metricLayerType < rhs.metricLayerType;
+    });
+    return references;
+}
+
 void Network::pruneLoadedTrainingArtifactsForInference() {
     // Saved training artifacts often contain loss layers and label-only NetworkInputs.
     // When such an artifact is loaded and placed for inference, keep the graph rooted
@@ -2022,6 +2258,11 @@ bool Network::terminatesWithoutHitting(Tensor tensor, shared_ptr<Layer> layer) {
 void Network::topologicalSort() {
     deque<pair<std::optional<Tensor>, shared_ptr<Layer>>> workQueue;
 
+    for (const shared_ptr<Layer>& layer : network) {
+        if (layer != nullptr) {
+            layer->resetGraphTraversalState();
+        }
+    }
     orderedNetwork.clear();
 
     // Put all network inputs into the work queue

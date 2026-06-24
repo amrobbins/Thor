@@ -299,10 +299,16 @@ TEST(TrainingRunsStatsReporter, FinalReportIncludesStatusCountsAndAvailablePhase
     std::FILE* out = std::tmpfile();
     TrainingRunsStatsReporter reporter(out, LineStatsColorMode::NEVER, 0.0);
 
+    TrainingStatsSnapshot trainStats = makeStats(TrainingEventPhase::TRAIN, 0.50);
+    trainStats.metrics["top1_accuracy"] = 0.90;
+    trainStats.metrics["top5_accuracy"] = 0.98;
+    TrainingStatsSnapshot validateStats = makeStats(TrainingEventPhase::VALIDATE, 0.40);
+    validateStats.metrics["f1_score"] = 0.72;
     TrainingStatsSnapshot testStats = makeStats(TrainingEventPhase::TEST, 0.35);
-    testStats.accuracy = 0.875;
+    testStats.metrics["top1_accuracy"] = 0.875;
+    testStats.metrics["top5_accuracy"] = 0.975;
     TrainingRunResult completed = TrainingRunResult::completedResult(
-        "completed_fold", makeStats(TrainingEventPhase::TRAIN, 0.50), makeStats(TrainingEventPhase::VALIDATE, 0.40), testStats);
+        "completed_fold", trainStats, validateStats, testStats);
     completed.ensembleGroup = "digits_dense_cv5";
 
     TrainingRunResult failed;
@@ -321,7 +327,11 @@ TEST(TrainingRunsStatsReporter, FinalReportIncludesStatusCountsAndAvailablePhase
                                 "train_loss=",
                                 "validate_loss=",
                                 "test_loss=",
-                                "test_accuracy="}))
+                                "train_top1_accuracy=",
+                                "train_top5_accuracy=",
+                                "validate_f1_score=",
+                                "test_top1_accuracy=",
+                                "test_top5_accuracy="}))
         << output;
     EXPECT_TRUE(hasLineWithAll(output, {"INFO runs[failed_fold]:", "status=failed", "message=\"boom\""})) << output;
 }
@@ -352,6 +362,15 @@ TEST(TrainingRunsStatsReporter, EnsembleReportShowsEvaluationMetricsAndIncomplet
     aggregateLoss.name = "aggregate_loss";
     aggregateLoss.testValue = 0.333;
     completedEnsemble.namedMetrics = {overallNamedLoss, dailyLoss, aggregateLoss};
+    TrainingNamedMetricResult accuracyMetric;
+    accuracyMetric.name = "top1_accuracy";
+    accuracyMetric.trainValue = 0.889;
+    accuracyMetric.testValue = 0.901;
+    TrainingNamedMetricResult top5Metric;
+    top5Metric.name = "top5_accuracy";
+    top5Metric.trainValue = 0.970;
+    top5Metric.testValue = 0.981;
+    completedEnsemble.namedGraphMetrics = {accuracyMetric, top5Metric};
 
     TrainingEnsembleResult incompleteEnsemble;
     incompleteEnsemble.ensembleGroup = "mixed_group";
@@ -374,9 +393,13 @@ TEST(TrainingRunsStatsReporter, EnsembleReportShowsEvaluationMetricsAndIncomplet
                  "members=2",
                  "ensemble_train_loss=",
                  "ensemble_test_loss=",
+                 "ensemble_train_top1_accuracy=",
+                 "ensemble_test_top1_accuracy=",
                  "ensemble_train_daily_loss=",
                  "ensemble_test_daily_loss=",
-                 "ensemble_test_aggregate_loss="});
+                 "ensemble_test_aggregate_loss=",
+                 "ensemble_train_top5_accuracy=",
+                 "ensemble_test_top5_accuracy="});
     ASSERT_FALSE(completedLine.empty()) << output;
     EXPECT_EQ(completedLine.find(" completed="), std::string::npos) << completedLine;
     EXPECT_EQ(completedLine.find(" failed="), std::string::npos) << completedLine;

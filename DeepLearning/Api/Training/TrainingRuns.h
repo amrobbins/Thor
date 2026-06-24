@@ -90,7 +90,8 @@ class TrainingRuns {
                           std::vector<TrainingRunsRestartPolicy> restartConditions = {},
                           std::vector<TrainingRunsEarlyCompletionRule> earlyCompletionRules = {},
                           std::map<std::string, size_t> minSuccessfulModels = {},
-                          std::map<std::string, std::vector<std::string>> reportedLosses = {});
+                          std::map<std::string, std::vector<std::string>> reportedLosses = {},
+                          std::map<std::string, std::vector<std::string>> reportedMetrics = {});
 
     [[nodiscard]] TrainingRunsResult fit(uint32_t epochs);
     [[nodiscard]] TrainingRunsResult fit(uint32_t epochs, std::shared_ptr<Loader> testLoader);
@@ -105,6 +106,7 @@ class TrainingRuns {
     [[nodiscard]] const std::vector<TrainingRunsRestartPolicy>& getRestartConditions() const { return restartConditions; }
     [[nodiscard]] const std::vector<TrainingRunsEarlyCompletionRule>& getEarlyCompletionRules() const { return earlyCompletionRules; }
     [[nodiscard]] const std::map<std::string, std::vector<std::string>>& getReportedLosses() const { return reportedLosses; }
+    [[nodiscard]] const std::map<std::string, std::vector<std::string>>& getReportedMetrics() const { return reportedMetrics; }
     [[nodiscard]] size_t getEffectiveMaxParallelRuns() const;
 
    private:
@@ -115,9 +117,12 @@ class TrainingRuns {
     void validateRestartConditions() const;
     void validateEarlyCompletionRules() const;
     void validateReportedLosses() const;
+    void validateReportedMetrics() const;
     [[nodiscard]] std::vector<TrainingRestartCondition> restartConditionsForRun(const TrainingRunsSpec& run) const;
     [[nodiscard]] std::vector<TrainingEarlyCompletionPolicy> earlyCompletionPoliciesForRun(const TrainingRunsSpec& run) const;
     [[nodiscard]] std::vector<TrainingNamedMetricResult> namedMetricResultsForGroup(std::string_view ensembleGroup) const;
+    [[nodiscard]] std::vector<TrainingNamedMetricResult> namedGraphMetricResultsForGroup(std::string_view ensembleGroup) const;
+    [[nodiscard]] std::vector<std::string> reportedMetricNamesForSpec(const TrainingRunsSpec& spec) const;
     [[nodiscard]] bool hasEnsembleGroups() const;
     void validateEnsembleArtifactsForFit(const TrainingRunsEvaluationOptions& evaluationOptions) const;
     void validateFitOptions(const TrainerFitOptions& options) const;
@@ -137,6 +142,7 @@ class TrainingRuns {
     std::vector<TrainingRunsRestartPolicy> restartConditions{};
     std::vector<TrainingRunsEarlyCompletionRule> earlyCompletionRules{};
     std::map<std::string, std::vector<std::string>> reportedLosses{};
+    std::map<std::string, std::vector<std::string>> reportedMetrics{};
 };
 
 }  // namespace Thor

@@ -69,6 +69,13 @@ struct NetworkLossReference {
     std::optional<double> quantile{};
 };
 
+struct NetworkMetricReference {
+    std::string metricName{};
+    std::string predictionOutputName{};
+    std::optional<std::string> targetInputName{};
+    std::string metricLayerType{};
+};
+
 class ApiTensorRemap {
    public:
     void map(const Tensor& sourceTensor, const Tensor& destinationTensor);
@@ -162,6 +169,7 @@ class Network {
     [[nodiscard]] std::vector<std::string> getInferenceNetworkInputNames();
     [[nodiscard]] std::vector<std::string> getTrainingOnlyNetworkInputNames();
     [[nodiscard]] std::vector<NetworkLossReference> getReportableLosses();
+    [[nodiscard]] std::vector<NetworkMetricReference> getReportableMetrics();
 
     // FIXME: I will need to support indexing layers by their name.
     uint32_t getNumTrainableLayers() { return allTrainableLayersInNetwork.size(); }
