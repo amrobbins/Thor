@@ -184,6 +184,69 @@ def _build_tiny_regressor(name: str):
     return network
 
 
+def _build_named_graph_loss_regressor(name: str):
+    network = thor.Network(name)
+    examples = thor.layers.NetworkInput(network, "examples", [2], thor.DataType.fp32)
+    labels = thor.layers.NetworkInput(network, "labels", [1], thor.DataType.fp32)
+
+    predictions = thor.layers.FullyConnected(
+        network,
+        examples.get_feature_output(),
+        1,
+        True,
+        activation=None,
+        weights_initializer=thor.initializers.UniformRandom(0.0, 0.0),
+        biases_initializer=thor.initializers.UniformRandom(0.0, 0.0),
+    )
+    graph_loss = thor.losses.MSE(
+        network,
+        predictions.get_feature_output(),
+        labels.get_feature_output(),
+        thor.DataType.fp32,
+        loss_weight=2.0,
+    )
+    # Name the graph loss through the graph itself.  This test is about rejecting
+    # synthetic prediction-output metrics, not about the later generated-name
+    # cleanup for losses that do not yet have a graph-owned display name.
+    thor.layers.NetworkOutput(network, "graph_loss", graph_loss.get_loss(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "prediction", predictions.get_feature_output(), thor.DataType.fp32)
+    return network
+
+
+def _build_two_loss_regressor(name: str):
+    network = thor.Network(name)
+    examples = thor.layers.NetworkInput(network, "examples", [2], thor.DataType.fp32)
+    labels = thor.layers.NetworkInput(network, "labels", [1], thor.DataType.fp32)
+
+    predictions = thor.layers.FullyConnected(
+        network,
+        examples.get_feature_output(),
+        1,
+        True,
+        activation=None,
+        weights_initializer=thor.initializers.UniformRandom(0.0, 0.0),
+        biases_initializer=thor.initializers.UniformRandom(0.0, 0.0),
+    )
+    mse = thor.losses.MSE(
+        network,
+        predictions.get_feature_output(),
+        labels.get_feature_output(),
+        thor.DataType.fp32,
+        loss_weight=2.0,
+    )
+    mae = thor.losses.MAE(
+        network,
+        predictions.get_feature_output(),
+        labels.get_feature_output(),
+        thor.DataType.fp32,
+        loss_weight=3.0,
+    )
+    thor.layers.NetworkOutput(network, "mae_loss", mae.get_loss(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "mse_loss", mse.get_loss(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "prediction", predictions.get_feature_output(), thor.DataType.fp32)
+    return network
+
+
 def _build_tiny_classifier(name: str):
     network = thor.Network(name)
     examples = thor.layers.NetworkInput(network, "examples", [2], thor.DataType.fp32)
@@ -235,10 +298,19 @@ def _build_signature_only_network(name: str, *, input_dtype=thor.DataType.fp32, 
     return network
 
 
-def _make_signature_only_trainer(name: str, *, input_dtype=thor.DataType.fp32, output_dtype=thor.DataType.fp32):
+def _make_signature_only_trainer(
+    name: str,
+    *,
+    input_dtype=thor.DataType.fp32,
+    output_dtype=thor.DataType.fp32,
+    save_model_dir=None,
+    save_model_overwrite=False,
+):
     return thor.training.Trainer(
         _build_signature_only_network(name, input_dtype=input_dtype, output_dtype=output_dtype),
         _regression_one_batch_loader(),
+        save_model_dir=save_model_dir,
+        save_model_overwrite=save_model_overwrite,
     )
 
 
@@ -272,6 +344,45 @@ def _make_tiny_regression_trainer(
         model_selection_score=model_selection_score,
         restart_conditions=restart_conditions,
         early_completion_policies=early_completion_policies,
+    )
+
+
+def _make_named_graph_loss_regression_trainer(
+    name: str,
+    *,
+    save_model_dir=None,
+    save_model_overwrite=False,
+):
+    return thor.training.Trainer(
+        _build_named_graph_loss_regressor(name),
+        _regression_one_batch_loader(),
+        optimizer=thor.optimizers.Sgd(initial_learning_rate=1.0e-12, momentum=0.0),
+        stats_interval_s=0.0,
+        max_in_flight_batches=2,
+        scalar_tensors_to_report=[],
+        stats_color="never",
+        save_model_dir=save_model_dir,
+        save_model_overwrite=save_model_overwrite,
+        model_selection_score=lambda validation_loss, training_loss, epoch: 0.0,
+    )
+
+
+def _make_two_loss_regression_trainer(
+    name: str,
+    *,
+    save_model_dir=None,
+    save_model_overwrite=False,
+):
+    return thor.training.Trainer(
+        _build_two_loss_regressor(name),
+        _regression_one_batch_loader(),
+        optimizer=thor.optimizers.Sgd(initial_learning_rate=1.0e-12, momentum=0.0),
+        stats_interval_s=0.0,
+        max_in_flight_batches=2,
+        scalar_tensors_to_report=["mse_loss", "mae_loss"],
+        stats_color="never",
+        save_model_dir=save_model_dir,
+        save_model_overwrite=save_model_overwrite,
     )
 
 
@@ -672,6 +783,165 @@ def test_training_runs_evaluates_saved_adam_model_on_test_loader(capfd, tmp_path
     assert results["fold_0"].final_test_loss is not None
     plain_text = _ANSI_RE.sub("", captured_text)
     assert re.search(r"INFO runs\[fold_0\|tiny_ensemble\]:.*test_loss=", plain_text)
+
+
+
+
+@pytest.mark.cuda
+@pytest.mark.training_integration
+@pytest.mark.skipif(
+    not RUN_TRAINING_INTEGRATION,
+    reason=integration_skip_reason(
+        "THOR_RUN_TRAINING_INTEGRATION",
+        description="opt-in TrainingRuns CUDA integration tests",
+    ),
+)
+def test_training_runs_default_reported_losses_reports_all_graph_losses(capfd, tmp_path):
+    runs = thor.training.TrainingRuns(
+        [
+            (
+                "fold_0",
+                _make_two_loss_regression_trainer(
+                    "training_runs_all_graph_losses_fold_0",
+                    save_model_dir=tmp_path / "fold_0_model",
+                    save_model_overwrite=True,
+                ),
+                "two_loss_ensemble",
+                1.0,
+            ),
+            (
+                "fold_1",
+                _make_two_loss_regression_trainer(
+                    "training_runs_all_graph_losses_fold_1",
+                    save_model_dir=tmp_path / "fold_1_model",
+                    save_model_overwrite=True,
+                ),
+                "two_loss_ensemble",
+                2.0,
+            ),
+        ],
+    )
+
+    results, captured_text = _fit_runs_and_capture_text(
+        runs,
+        capfd,
+        epochs=1,
+        test_loader=_regression_one_batch_loader(),
+    )
+
+    assert results.all_completed()
+    ensemble = results.ensemble("two_loss_ensemble")
+    assert [metric.name for metric in ensemble.named_metrics] == ["mae_loss", "mse_loss"]
+    assert ensemble.ensemble_test_accuracy is None
+    assert all(metric.test_value is not None for metric in ensemble.named_metrics)
+    named_test_sum = sum(metric.test_value for metric in ensemble.named_metrics)
+    assert ensemble.ensemble_test_loss == pytest.approx(named_test_sum, rel=1e-6, abs=1e-6)
+
+    # The near-zero-learning-rate trainer leaves predictions effectively at zero, so
+    # the graph-owned weighted losses are deterministic: MAE=1 * 3.0 and MSE=1 * 2.0.
+    by_name = {metric.name: metric for metric in ensemble.named_metrics}
+    assert by_name["mae_loss"].test_value == pytest.approx(3.0, rel=1e-5, abs=1e-6)
+    assert by_name["mse_loss"].test_value == pytest.approx(2.0, rel=1e-5, abs=1e-6)
+    assert ensemble.ensemble_test_loss == pytest.approx(5.0, rel=1e-5, abs=1e-6)
+
+    plain_text = _ANSI_RE.sub("", captured_text)
+    ensemble_line = next(
+        line for line in plain_text.splitlines() if "INFO runs ensemble[two_loss_ensemble]:" in line
+    )
+    assert "ensemble_test_mae_loss=" in ensemble_line
+    assert "ensemble_test_mse_loss=" in ensemble_line
+    assert "ensemble_test_accuracy=" not in ensemble_line
+
+
+@pytest.mark.cuda
+@pytest.mark.training_integration
+@pytest.mark.skipif(
+    not RUN_TRAINING_INTEGRATION,
+    reason=integration_skip_reason(
+        "THOR_RUN_TRAINING_INTEGRATION",
+        description="opt-in TrainingRuns CUDA integration tests",
+    ),
+)
+def test_training_runs_reported_losses_filter_selects_graph_loss_subset(capfd, tmp_path):
+    runs = thor.training.TrainingRuns(
+        [
+            (
+                "fold_0",
+                _make_two_loss_regression_trainer(
+                    "training_runs_filtered_graph_losses_fold_0",
+                    save_model_dir=tmp_path / "fold_0_model",
+                    save_model_overwrite=True,
+                ),
+                "two_loss_ensemble",
+                1.0,
+            )
+        ],
+        reported_losses={"two_loss_ensemble": ["mae_loss"]},
+    )
+
+    results, captured_text = _fit_runs_and_capture_text(
+        runs,
+        capfd,
+        epochs=1,
+        test_loader=_regression_one_batch_loader(),
+    )
+
+    assert results.all_completed()
+    ensemble = results.ensemble("two_loss_ensemble")
+    assert [metric.name for metric in ensemble.named_metrics] == ["mae_loss"]
+    assert ensemble.ensemble_test_loss == pytest.approx(ensemble.named_metrics[0].test_value, rel=1e-6, abs=1e-6)
+    assert ensemble.ensemble_test_loss == pytest.approx(3.0, rel=1e-5, abs=1e-6)
+
+    ensemble_line = next(
+        line
+        for line in _ANSI_RE.sub("", captured_text).splitlines()
+        if "INFO runs ensemble[two_loss_ensemble]:" in line
+    )
+    assert "ensemble_test_mae_loss=" in ensemble_line
+    assert "ensemble_test_mse_loss=" not in ensemble_line
+
+
+@pytest.mark.cuda
+@pytest.mark.training_integration
+@pytest.mark.skipif(
+    not RUN_TRAINING_INTEGRATION,
+    reason=integration_skip_reason(
+        "THOR_RUN_TRAINING_INTEGRATION",
+        description="opt-in TrainingRuns CUDA integration tests",
+    ),
+)
+def test_training_runs_graph_loss_does_not_invent_prediction_loss(capfd, tmp_path):
+    trainer = _make_named_graph_loss_regression_trainer(
+        "training_runs_graph_loss_no_synthetic_prediction_loss",
+        save_model_dir=tmp_path / "model",
+        save_model_overwrite=True,
+    )
+    runs = thor.training.TrainingRuns([("fold_0", trainer, "graph_loss_ensemble")])
+
+    results, captured_text = _fit_runs_and_capture_text(
+        runs,
+        capfd,
+        epochs=1,
+        test_loader=_regression_one_batch_loader(),
+    )
+
+    assert results.all_completed()
+    ensemble = results.ensemble("graph_loss_ensemble")
+    assert len(ensemble.named_metrics) == 1
+    assert ensemble.named_metrics[0].name == "graph_loss"
+    assert ensemble.named_metrics[0].test_value == pytest.approx(2.0, rel=1e-5, abs=1e-6)
+    assert ensemble.ensemble_test_loss == pytest.approx(2.0, rel=1e-5, abs=1e-6)
+    assert ensemble.ensemble_test_accuracy is None
+
+    # This must be the graph-owned loss value, not a synthetic MAE/CE value derived
+    # by looking at a prediction output and guessing a label tensor on the CPU.
+    ensemble_line = next(
+        line
+        for line in _ANSI_RE.sub("", captured_text).splitlines()
+        if "INFO runs ensemble[graph_loss_ensemble]:" in line
+    )
+    assert "ensemble_test_graph_loss=" in ensemble_line
+    assert "ensemble_test_accuracy=" not in ensemble_line
 
 
 
@@ -1373,7 +1643,7 @@ def test_training_runs_categorical_report_matches_loaded_ensemble_predictions(ca
     assert results.all_completed()
     ensemble = results.ensemble("tiny_categorical_ensemble")
     assert ensemble.ensemble_test_loss is not None
-    assert ensemble.ensemble_test_accuracy is not None
+    assert ensemble.ensemble_test_accuracy is None
 
     ensemble_artifact_dir = tmp_path / "tiny_categorical_ensemble_artifact"
     results.save_ensemble("tiny_categorical_ensemble", ensemble_artifact_dir)
@@ -1392,7 +1662,7 @@ def test_training_runs_categorical_report_matches_loaded_ensemble_predictions(ca
     assert 0.0 < expected_accuracy < 1.0
 
     assert ensemble.ensemble_test_loss == pytest.approx(expected_loss, rel=1e-5, abs=1e-6)
-    assert ensemble.ensemble_test_accuracy == pytest.approx(expected_accuracy, rel=1e-5, abs=1e-6)
+    assert ensemble.ensemble_test_accuracy is None
 
 
 @pytest.mark.cuda

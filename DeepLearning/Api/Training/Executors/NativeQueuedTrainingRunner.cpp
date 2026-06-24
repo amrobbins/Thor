@@ -3,6 +3,7 @@
 #include "DeepLearning/Api/Loaders/Batch.h"
 #include "DeepLearning/Api/Loaders/Loader.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
 #include "DeepLearning/Api/Training/Cancellation/TrainingCancellation.h"
@@ -28,6 +29,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -76,8 +78,13 @@ struct QueuedBatchSlot {
 };
 
 struct QueuedTrainingState {
-    QueuedTrainingState(uint64_t maxInFlightBatches, std::vector<std::string> scalarTensorNames)
-        : scalarTensorNames(std::move(scalarTensorNames)), slots(maxInFlightBatches), completionParams(maxInFlightBatches) {
+    QueuedTrainingState(uint64_t maxInFlightBatches,
+                        std::vector<std::string> scalarTensorNames,
+                        std::vector<std::string> aggregateLossTensorNames)
+        : scalarTensorNames(std::move(scalarTensorNames)),
+          aggregateLossTensorNames(std::move(aggregateLossTensorNames)),
+          slots(maxInFlightBatches),
+          completionParams(maxInFlightBatches) {
         THOR_THROW_IF_FALSE(maxInFlightBatches >= 1);
         for (QueuedBatchSlot& slot : slots) {
             slot.scalarStats.resize(this->scalarTensorNames.size());
@@ -92,6 +99,7 @@ struct QueuedTrainingState {
     std::condition_variable batchPopped;
 
     std::vector<std::string> scalarTensorNames;
+    std::vector<std::string> aggregateLossTensorNames;
     std::vector<QueuedBatchSlot> slots;
     std::vector<NativeBatchCompletionParams> completionParams;
     uint64_t headSlot = 0;
@@ -118,15 +126,72 @@ void requestQueuedTrainingCancellation(const std::shared_ptr<QueuedTrainingState
     state->batchPopped.notify_all();
 }
 
+std::set<std::string> networkOutputNames(Network& network) {
+    std::set<std::string> names;
+    const uint32_t numLayers = network.getNumLayers();
+    for (uint32_t i = 0; i < numLayers; ++i) {
+        std::shared_ptr<NetworkOutput> output = std::dynamic_pointer_cast<NetworkOutput>(network.getLayer(i));
+        if (output != nullptr) {
+            names.insert(output->getName());
+        }
+    }
+    return names;
+}
+
+std::vector<std::string> outputBackedReportableLossNames(Network& network) {
+    const std::set<std::string> outputs = networkOutputNames(network);
+    std::set<std::string> lossNames;
+    for (const auto& [_, references] : network.getLossReferencesByPredictionOutputName()) {
+        (void)_;
+        for (const NetworkLossReference& reference : references) {
+            if (outputs.count(reference.lossName) != 0) {
+                lossNames.insert(reference.lossName);
+            }
+        }
+    }
+    return std::vector<std::string>(lossNames.begin(), lossNames.end());
+}
+
+bool outputNameExists(Network& network, const std::string& name) {
+    return networkOutputNames(network).count(name) != 0;
+}
+
+float copyAggregateLossStatTensor(const std::map<std::string, ThorImplementation::Tensor>& batchOutput,
+                                  const std::vector<std::string>& aggregateLossTensorNames) {
+    if (aggregateLossTensorNames.empty()) {
+        throw std::runtime_error("Requested aggregate training stat tensor 'loss', but the graph has no output-backed reportable losses.");
+    }
+
+    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    double sum = 0.0;
+    for (const std::string& lossTensorName : aggregateLossTensorNames) {
+        auto outputIt = batchOutput.find(lossTensorName);
+        if (outputIt == batchOutput.end()) {
+            throw std::runtime_error("Requested aggregate training stat tensor 'loss', but reportable graph loss '" + lossTensorName +
+                                     "' was not present in batch outputs.");
+        }
+        const ThorImplementation::Tensor& copyFromTensor = outputIt->second;
+        THOR_THROW_IF_FALSE(copyFromTensor.getPlacement() == cpuPlacement);
+        THOR_THROW_IF_FALSE(copyFromTensor.getDescriptor().getArraySizeInBytes() >= sizeof(float));
+        float value = 0.0f;
+        std::memcpy(&value, copyFromTensor.getMemPtr(), sizeof(float));
+        sum += static_cast<double>(value);
+    }
+    return static_cast<float>(sum);
+}
+
 float copyScalarStatTensor(const Batch& batchInput,
                            const std::map<std::string, ThorImplementation::Tensor>& batchOutput,
-                           const std::string& tensorName) {
+                           const std::string& tensorName,
+                           const std::vector<std::string>& aggregateLossTensorNames) {
     ThorImplementation::Tensor copyFromTensor;
     auto outputIt = batchOutput.find(tensorName);
     if (batchInput.contains(tensorName)) {
         copyFromTensor = batchInput.getTensor(tensorName);
     } else if (outputIt != batchOutput.end()) {
         copyFromTensor = outputIt->second;
+    } else if (tensorName == "loss") {
+        return copyAggregateLossStatTensor(batchOutput, aggregateLossTensorNames);
     } else {
         throw std::runtime_error("Requested training stat tensor '" + tensorName + "' was not present in batch inputs or outputs.");
     }
@@ -893,7 +958,8 @@ void CUDART_CB completeNativeQueuedBatch(void* data) {
     try {
         THOR_THROW_IF_FALSE(params->scalarStats.size() == state->scalarTensorNames.size());
         for (size_t i = 0; i < state->scalarTensorNames.size(); ++i) {
-            params->scalarStats[i].value = copyScalarStatTensor(params->batchInput, params->batchOutput, state->scalarTensorNames[i]);
+            params->scalarStats[i].value = copyScalarStatTensor(
+                params->batchInput, params->batchOutput, state->scalarTensorNames[i], state->aggregateLossTensorNames);
             params->scalarStats[i].present = true;
         }
 
@@ -1068,8 +1134,10 @@ void emitTrainingEvent(TrainingObserver& observer, const TrainingEvent& event) {
 
 void assignScalarStatsToSnapshot(TrainingStatsSnapshot& snapshot,
                                  const std::vector<std::string>& scalarTensorNames,
-                                 const std::vector<ScalarStatSlot>& scalarStats) {
+                                 const std::vector<ScalarStatSlot>& scalarStats,
+                                 const std::vector<std::string>& aggregateLossTensorNames) {
     THOR_THROW_IF_FALSE(scalarTensorNames.size() == scalarStats.size());
+    std::map<std::string, double> scalarValuesByName;
     for (size_t i = 0; i < scalarTensorNames.size(); ++i) {
         if (!scalarStats[i].present) {
             continue;
@@ -1077,6 +1145,7 @@ void assignScalarStatsToSnapshot(TrainingStatsSnapshot& snapshot,
 
         const double value = static_cast<double>(scalarStats[i].value);
         const std::string& name = scalarTensorNames[i];
+        scalarValuesByName[name] = value;
         if (name == "loss") {
             snapshot.loss = value;
         } else if (name == "accuracy") {
@@ -1087,6 +1156,21 @@ void assignScalarStatsToSnapshot(TrainingStatsSnapshot& snapshot,
             snapshot.momentum = value;
         } else {
             snapshot.metrics[name] = value;
+        }
+    }
+
+    if (!snapshot.loss.has_value() && !aggregateLossTensorNames.empty()) {
+        double aggregateLoss = 0.0;
+        for (const std::string& lossTensorName : aggregateLossTensorNames) {
+            auto valueIt = scalarValuesByName.find(lossTensorName);
+            if (valueIt == scalarValuesByName.end()) {
+                aggregateLoss = std::numeric_limits<double>::quiet_NaN();
+                break;
+            }
+            aggregateLoss += valueIt->second;
+        }
+        if (std::isfinite(aggregateLoss)) {
+            snapshot.loss = aggregateLoss;
         }
     }
 }
@@ -1435,8 +1519,19 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     }
 
     TrainingRuntimeConfig runtime = request.runtime;
+    const std::vector<std::string> aggregateLossTensorNames = outputBackedReportableLossNames(*request.network);
+    const bool hasConcreteLossOutput = outputNameExists(*request.network, "loss");
     if (!evaluateOnly && (request.saveModelDirectory.has_value() || !request.earlyCompletionPolicies.empty())) {
-        runtime.scalarTensorsToReport.insert("loss");
+        if (hasConcreteLossOutput || !aggregateLossTensorNames.empty()) {
+            runtime.scalarTensorsToReport.insert("loss");
+        }
+    }
+    if (runtime.scalarTensorsToReport.count("loss") != 0 && !hasConcreteLossOutput && aggregateLossTensorNames.empty()) {
+        // The default Python/C++ training runtime historically asked for a scalar named "loss".
+        // In loss-centric graphs, a model may have graph losses without exposing a NetworkOutput
+        // named "loss" yet. If there is no concrete or output-backed aggregate loss tensor to
+        // read, do not fail the run just because the default reporter asked for it.
+        runtime.scalarTensorsToReport.erase("loss");
     }
 
     std::shared_ptr<TrainingProgram> trainingProgram = defaultTrainingProgramForRequest(request);
@@ -1544,7 +1639,8 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
             const uint64_t batchesToRun = batchesPerEpoch - batchNum;
 
             std::vector<std::string> scalarTensorNames(runtime.scalarTensorsToReport.begin(), runtime.scalarTensorsToReport.end());
-            auto state = std::make_shared<QueuedTrainingState>(options.maxInFlightBatches, std::move(scalarTensorNames));
+            auto state = std::make_shared<QueuedTrainingState>(
+                options.maxInFlightBatches, std::move(scalarTensorNames), aggregateLossTensorNames);
             state->numBatchesDoneInEpoch = batchNum;
             state->numBatchesInEpoch = batchesPerEpoch;
 
@@ -1683,7 +1779,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                                 static_cast<double>(snapshot.floatingPointOperationsPerBatch) / batchTimeForStats;
                         }
 
-                        assignScalarStatsToSnapshot(snapshot, state->scalarTensorNames, completedBatch.scalarStats);
+                        assignScalarStatsToSnapshot(snapshot, state->scalarTensorNames, completedBatch.scalarStats, state->aggregateLossTensorNames);
                         epochLosses.update(snapshot);
                         emitTrainingEvent(observer, TrainingEvent::statsUpdated(std::move(snapshot)));
                     }

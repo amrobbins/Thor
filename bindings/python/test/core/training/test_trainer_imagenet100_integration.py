@@ -1617,11 +1617,11 @@ def _run_imagenet100_cv5_training_runs(model_builder, *, model_name: str, capfd)
     assert "aggregation=ensemble_eval" in plain_text
     assert "ensemble_train_loss=" in plain_text
     assert "ensemble_test_loss=" in plain_text
-    assert "ensemble_test_accuracy=" in plain_text
+    assert "ensemble_test_accuracy=" not in plain_text
     assert "train_loss=" in plain_text
     assert "validate_loss=" in plain_text
     assert "test_loss=" in plain_text
-    assert "test_accuracy=" in plain_text
+    assert "test_accuracy=" not in plain_text
     assert results.status_counts["completed"] == 5
     assert results.has_ensembles
     assert len(results.ensembles) == 1
@@ -1632,13 +1632,11 @@ def _run_imagenet100_cv5_training_runs(model_builder, *, model_name: str, capfd)
     assert len(ensemble.members) == 5
     assert ensemble.ensemble_train_loss is not None
     assert ensemble.ensemble_test_loss is not None
-    assert ensemble.ensemble_test_accuracy is not None
+    assert ensemble.ensemble_test_accuracy is None
     assert math.isfinite(ensemble.ensemble_train_loss)
     assert math.isfinite(ensemble.ensemble_test_loss)
-    assert math.isfinite(ensemble.ensemble_test_accuracy)
     assert ensemble.ensemble_train_loss > 0.0
     assert ensemble.ensemble_test_loss > 0.0
-    assert 0.0 <= ensemble.ensemble_test_accuracy <= 1.0
 
     validation_losses = []
     test_losses = []
@@ -1647,9 +1645,13 @@ def _run_imagenet100_cv5_training_runs(model_builder, *, model_name: str, capfd)
         assert statuses[run_name] == "completed"
         assert re.search(
             rf"INFO runs\[{re.escape(run_name)}\|{re.escape(ensemble_group)}\]:.*"
-            rf"train_loss=.*validate_loss=.*test_loss=.*test_accuracy=",
+            rf"train_loss=.*validate_loss=.*test_loss=",
             plain_text,
-        ), f"final report did not include per-fold test_loss/test_accuracy for {run_name}:\n{plain_text}"
+        ), f"final report did not include per-fold test_loss for {run_name}:\n{plain_text}"
+        assert not re.search(
+            rf"INFO runs\[{re.escape(run_name)}\|{re.escape(ensemble_group)}\]:.*test_accuracy=",
+            plain_text,
+        ), f"final report should not synthesize per-fold test_accuracy for {run_name}:\n{plain_text}"
         result = results[run_name]
         assert result.status == "completed"
         assert result.ensemble_group == ensemble_group
@@ -1657,19 +1659,17 @@ def _run_imagenet100_cv5_training_runs(model_builder, *, model_name: str, capfd)
         assert result.final_training_loss is not None
         assert result.final_validation_loss is not None
         assert result.final_test_loss is not None
-        assert result.final_test_accuracy is not None
+        assert result.final_test_accuracy is None
         assert result.final_loss("train") == result.final_training_loss
         assert result.final_loss("validate") == result.final_validation_loss
         assert result.final_loss("test") == result.final_test_loss
-        assert result.final_accuracy("test") == result.final_test_accuracy
+        assert result.final_accuracy("test") is None
         assert math.isfinite(result.final_training_loss)
         assert math.isfinite(result.final_validation_loss)
         assert math.isfinite(result.final_test_loss)
-        assert math.isfinite(result.final_test_accuracy)
         assert result.final_training_loss > 0.0
         assert result.final_validation_loss > 0.0
         assert result.final_test_loss > 0.0
-        assert 0.0 <= result.final_test_accuracy <= 1.0
         validation_losses.append(result.final_validation_loss)
         test_losses.append(result.final_test_loss)
 

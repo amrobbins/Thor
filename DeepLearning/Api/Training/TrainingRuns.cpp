@@ -3,7 +3,6 @@
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Layers/Learning/CustomLayer.h"
-#include "DeepLearning/Api/Layers/Metrics/CategoricalAccuracy.h"
 #include "Utilities/Expression/DynamicExpression.h"
 #include "DeepLearning/Api/Loaders/Loader.h"
 #include "DeepLearning/Api/Network/Network.h"
@@ -23,7 +22,6 @@
 #include <map>
 #include <memory>
 #include <mutex>
-#include <numeric>
 #include <set>
 #include <string>
 #include <string_view>
@@ -1744,188 +1742,6 @@ std::optional<double> weightedLossSumFromWeightedLossValues(const std::vector<st
     return lossSum;
 }
 
-std::string choosePredictionOutputName(const std::vector<TrainingRunOutputSignature>& signature) {
-    for (const TrainingRunOutputSignature& output : signature) {
-        if (output.outputName == "scores" || output.outputName == "logits") {
-            return output.outputName;
-        }
-    }
-    for (const TrainingRunOutputSignature& output : signature) {
-        if (output.outputName != "loss") {
-            return output.outputName;
-        }
-    }
-    throw std::runtime_error(
-        "TrainingRuns ensemble evaluation requires a non-loss NetworkOutput prediction tensor such as 'scores', 'logits', or 'prediction'.");
-}
-
-ThorImplementation::Tensor tensorOnCpu(ThorImplementation::Tensor tensor) {
-    if (tensor.getPlacement().getMemDevice() == ThorImplementation::TensorPlacement::MemDevices::CPU) {
-        return tensor;
-    }
-    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
-    ThorImplementation::Tensor cpuTensor(cpuPlacement, tensor.getDescriptor());
-    Stream stream = Stream::getNextDownloadStream(tensor.getPlacement().getDeviceNum());
-    cpuTensor.copyFromAsync(tensor, stream);
-    stream.synchronize();
-    return cpuTensor;
-}
-
-double tensorElementAsDouble(const ThorImplementation::Tensor& tensor, uint64_t index) {
-    using ThorImplementation::DataType;
-    switch (tensor.getDataType()) {
-        case DataType::FP16:
-            return static_cast<double>(__half2float(tensor.getMemPtr<half>()[index]));
-        case DataType::BF16:
-            return static_cast<double>(__bfloat162float(tensor.getMemPtr<__nv_bfloat16>()[index]));
-        case DataType::FP32:
-            return static_cast<double>(tensor.getMemPtr<float>()[index]);
-        case DataType::FP64:
-            return tensor.getMemPtr<double>()[index];
-        default:
-            throw std::runtime_error("TrainingRuns ensemble evaluation currently supports floating-point prediction and label tensors only.");
-    }
-}
-
-std::vector<double> tensorToDoubleVector(ThorImplementation::Tensor tensor) {
-    ThorImplementation::Tensor cpuTensor = tensorOnCpu(std::move(tensor));
-    std::vector<double> values;
-    values.reserve(cpuTensor.getTotalNumElements());
-    for (uint64_t i = 0; i < cpuTensor.getTotalNumElements(); ++i) {
-        values.push_back(tensorElementAsDouble(cpuTensor, i));
-    }
-    return values;
-}
-
-uint64_t lastDimensionOrThrow(const ThorImplementation::Tensor& tensor, const std::string& name) {
-    const std::vector<uint64_t> dims = tensor.getDimensions();
-    if (dims.empty() || dims.back() == 0) {
-        throw std::runtime_error("TrainingRuns ensemble evaluation tensor '" + name + "' has invalid dimensions.");
-    }
-    return dims.back();
-}
-
-struct PlacedEnsembleArtifacts {
-    uint64_t batchSize = 0;
-    std::vector<std::shared_ptr<Network>> memberNetworks{};
-    std::vector<std::shared_ptr<PlacedNetwork>> placedMembers{};
-    std::shared_ptr<Network> inputDistributionNetwork = nullptr;
-    std::shared_ptr<PlacedNetwork> placedInputDistribution = nullptr;
-    std::vector<std::string> distributedInputNames{};
-    std::shared_ptr<Network> accumulatorNetwork = nullptr;
-    std::shared_ptr<PlacedNetwork> placedAccumulator = nullptr;
-    std::vector<std::string> accumulatorOutputNames{};
-    std::vector<double> weights{};
-    std::map<std::string, std::vector<std::string>> labelInputNamesByOutputName{};
-};
-
-std::string trainingRunsAccumulatorInputName(size_t outputIndex, size_t memberIndex) {
-    return "thor_training_runs_ensemble_output_" + std::to_string(outputIndex) + "_member_" + std::to_string(memberIndex);
-}
-
-using TrainingRunsInputDescriptorResolver = std::function<ThorImplementation::TensorDescriptor(const std::string& inputName)>;
-
-std::shared_ptr<Network> buildTrainingRunsInputDistributionNetworkFromInputDescriptors(
-    const std::vector<std::string>& inputNames,
-    const TrainingRunsInputDescriptorResolver& inputDescriptorFor) {
-    if (inputNames.empty()) {
-        throw std::runtime_error("TrainingRuns ensemble input distribution requires at least one input name.");
-    }
-
-    std::set<std::string> seenInputNames;
-    auto distributor = std::make_shared<Network>("training_runs_ensemble_input_distribution");
-    for (const std::string& inputName : inputNames) {
-        if (inputName.empty()) {
-            throw std::runtime_error("TrainingRuns ensemble input distribution received an empty input name.");
-        }
-        if (!seenInputNames.insert(inputName).second) {
-            throw std::runtime_error("TrainingRuns ensemble input distribution received duplicate input name '" + inputName + "'.");
-        }
-
-        const ThorImplementation::TensorDescriptor descriptor = inputDescriptorFor(inputName);
-        const std::vector<uint64_t> dimensions = descriptor.getDimensions();
-        if (dimensions.empty()) {
-            throw std::runtime_error("TrainingRuns ensemble input distribution input '" + inputName + "' has invalid dimensions.");
-        }
-
-        NetworkInput input = NetworkInput::Builder()
-                                 .network(*distributor)
-                                 .name(inputName)
-                                 .dimensions(dimensions)
-                                 .dataType(descriptor.getDataType())
-                                 .dimensionsIncludeBatch(true)
-                                 .build();
-        NetworkOutput::Builder()
-            .network(*distributor)
-            .name(inputName)
-            .inputTensor(input.getFeatureOutput().value())
-            .dataType(descriptor.getDataType())
-            .build();
-    }
-    return distributor;
-}
-
-std::vector<std::string> collectPlacedMemberInputNamesForDistribution(const std::vector<std::shared_ptr<PlacedNetwork>>& placedMembers) {
-    if (placedMembers.empty()) {
-        throw std::runtime_error("TrainingRuns ensemble input distribution requires at least one placed member network.");
-    }
-    std::vector<std::string> inputNames = placedMembers.front()->getNetworkInputNames();
-    std::sort(inputNames.begin(), inputNames.end());
-    for (size_t memberIndex = 1; memberIndex < placedMembers.size(); ++memberIndex) {
-        std::vector<std::string> memberInputNames = placedMembers[memberIndex]->getNetworkInputNames();
-        std::sort(memberInputNames.begin(), memberInputNames.end());
-        if (memberInputNames != inputNames) {
-            throw std::runtime_error("TrainingRuns ensemble members have incompatible network input names for shared input distribution.");
-        }
-    }
-    return inputNames;
-}
-
-std::shared_ptr<Network> buildTrainingRunsInputDistributionNetwork(const std::vector<std::shared_ptr<PlacedNetwork>>& placedMembers) {
-    const std::vector<std::string> inputNames = collectPlacedMemberInputNamesForDistribution(placedMembers);
-    if (inputNames.empty()) {
-        throw std::runtime_error("TrainingRuns ensemble input distribution requires at least one network input.");
-    }
-
-    bool sawRaggedOrUnsupportedInput = false;
-    std::map<std::string, ThorImplementation::TensorDescriptor> descriptors;
-    for (const std::string& inputName : inputNames) {
-        std::optional<ThorImplementation::TensorDescriptor> referenceDescriptor;
-        for (size_t memberIndex = 0; memberIndex < placedMembers.size(); ++memberIndex) {
-            std::shared_ptr<ThorImplementation::NetworkInput> physicalInput =
-                placedMembers[memberIndex]->getStampedNetwork(0).getNamedInput(inputName);
-            if (physicalInput == nullptr) {
-                sawRaggedOrUnsupportedInput = true;
-                break;
-            }
-            std::optional<ThorImplementation::Tensor> featureOutput = physicalInput->getFeatureOutput();
-            if (!featureOutput.has_value()) {
-                sawRaggedOrUnsupportedInput = true;
-                break;
-            }
-            const ThorImplementation::TensorDescriptor descriptor = featureOutput->getDescriptor();
-            if (!referenceDescriptor.has_value()) {
-                referenceDescriptor = descriptor;
-            } else if (referenceDescriptor.value() != descriptor) {
-                throw std::runtime_error("TrainingRuns ensemble members have incompatible descriptor for input '" + inputName + "'.");
-            }
-        }
-        if (sawRaggedOrUnsupportedInput) {
-            break;
-        }
-        descriptors[inputName] = referenceDescriptor.value();
-    }
-
-    if (sawRaggedOrUnsupportedInput) {
-        // Ragged ensemble input distribution needs a values/offsets distributor and
-        // is intentionally left on the legacy per-member submission path for now.
-        return nullptr;
-    }
-
-    return buildTrainingRunsInputDistributionNetworkFromInputDescriptors(
-        inputNames, [&](const std::string& inputName) { return descriptors.at(inputName); });
-}
-
 ThorImplementation::DynamicExpression makeWeightedMeanExpression(const std::vector<std::string>& inputNames,
                                                                  const std::vector<double>& weights,
                                                                  const std::string& outputName,
@@ -2431,19 +2247,48 @@ uint64_t batchRowsForEvaluatorInputs(const Batch& batch, const std::vector<std::
     throw std::runtime_error(context + " evaluator input '" + inputName + "' has an unsupported value type.");
 }
 
+ThorImplementation::Tensor tensorOnCpuForLossReadback(ThorImplementation::Tensor tensor) {
+    if (tensor.getPlacement().getMemDevice() == ThorImplementation::TensorPlacement::MemDevices::CPU) {
+        return tensor;
+    }
+    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::Tensor cpuTensor(cpuPlacement, tensor.getDescriptor());
+    Stream stream = Stream::getNextDownloadStream(tensor.getPlacement().getDeviceNum());
+    cpuTensor.copyFromAsync(tensor, stream);
+    stream.synchronize();
+    return cpuTensor;
+}
+
+double tensorElementAsDoubleForLossReadback(const ThorImplementation::Tensor& tensor, uint64_t index, const std::string& context) {
+    using ThorImplementation::DataType;
+    switch (tensor.getDataType()) {
+        case DataType::FP16:
+            return static_cast<double>(__half2float(tensor.getMemPtr<half>()[index]));
+        case DataType::BF16:
+            return static_cast<double>(__bfloat162float(tensor.getMemPtr<__nv_bfloat16>()[index]));
+        case DataType::FP32:
+            return static_cast<double>(tensor.getMemPtr<float>()[index]);
+        case DataType::FP64:
+            return tensor.getMemPtr<double>()[index];
+        default:
+            throw std::runtime_error(context + " produced a non-floating-point loss tensor.");
+    }
+}
+
 double tensorMeanAsDouble(ThorImplementation::Tensor tensor, const std::string& context) {
-    const std::vector<double> values = tensorToDoubleVector(std::move(tensor));
-    if (values.empty()) {
+    ThorImplementation::Tensor cpuTensor = tensorOnCpuForLossReadback(std::move(tensor));
+    if (cpuTensor.getTotalNumElements() == 0) {
         throw std::runtime_error(context + " produced an empty loss tensor.");
     }
     double sum = 0.0;
-    for (double value : values) {
+    for (uint64_t i = 0; i < cpuTensor.getTotalNumElements(); ++i) {
+        const double value = tensorElementAsDoubleForLossReadback(cpuTensor, i, context);
         if (!std::isfinite(value)) {
             throw std::runtime_error(context + " produced a non-finite loss value.");
         }
         sum += value;
     }
-    return sum / static_cast<double>(values.size());
+    return sum / static_cast<double>(cpuTensor.getTotalNumElements());
 }
 
 struct ComposedEnsembleLossEvaluationMetrics {
@@ -2555,206 +2400,6 @@ void applyComposedLossEvaluationMetricsToEnsemble(TrainingEnsembleResult& ensemb
 }
 
 
-using TrainingRunsMemberOutputTensorResolver = std::function<ThorImplementation::Tensor(const std::string& outputName, size_t memberIndex)>;
-
-std::shared_ptr<Network> buildTrainingRunsAccumulatorNetworkFromMemberOutputTensors(
-    size_t memberCount,
-    const std::vector<double>& weights,
-    const std::vector<std::string>& outputNames,
-    uint64_t batchSize,
-    const TrainingRunsMemberOutputTensorResolver& memberOutputTensorFor) {
-    if (memberCount == 0) {
-        throw std::runtime_error("TrainingRuns ensemble accumulator requires at least one placed member.");
-    }
-    if (outputNames.empty()) {
-        throw std::runtime_error("TrainingRuns ensemble accumulator requires at least one prediction output name.");
-    }
-    if (weights.size() != memberCount) {
-        throw std::runtime_error("TrainingRuns ensemble accumulator requires one weight per placed member.");
-    }
-
-    auto accumulator = std::make_shared<Network>("training_runs_ensemble_accumulator");
-    for (size_t outputIndex = 0; outputIndex < outputNames.size(); ++outputIndex) {
-        const std::string& outputName = outputNames[outputIndex];
-        ThorImplementation::Tensor referenceTensor = memberOutputTensorFor(outputName, /*memberIndex=*/0);
-        const std::vector<uint64_t> dimensions = referenceTensor.getDimensions();
-        if (dimensions.empty() || dimensions.front() != batchSize) {
-            throw std::runtime_error("TrainingRuns ensemble accumulator output '" + outputName + "' has an unexpected batch dimension.");
-        }
-        const DataType dataType = referenceTensor.getDataType();
-
-        CustomLayer::TensorMap inputInterface;
-        std::vector<std::string> inputNames;
-        inputNames.reserve(memberCount);
-        for (size_t memberIndex = 0; memberIndex < memberCount; ++memberIndex) {
-            ThorImplementation::Tensor memberTensor = memberOutputTensorFor(outputName, memberIndex);
-            if (memberTensor.getDescriptor() != referenceTensor.getDescriptor()) {
-                throw std::runtime_error("TrainingRuns ensemble member prediction output '" + outputName + "' descriptors do not match.");
-            }
-
-            const std::string inputName = trainingRunsAccumulatorInputName(outputIndex, memberIndex);
-            inputNames.push_back(inputName);
-            // This is now a normal API NetworkInput.  API builders no longer
-            // accept implementation tensors for pass-through composition; the
-            // fully optimized path should be rebuilt as one API-composed graph
-            // where member outputs feed the accumulator through API tensors.
-            NetworkInput input = NetworkInput::Builder()
-                                     .network(*accumulator)
-                                     .name(inputName)
-                                     .dimensions(dimensions)
-                                     .dataType(dataType)
-                                     .dimensionsIncludeBatch(true)
-                                     .build();
-            inputInterface.emplace(inputName, input.getFeatureOutput().value());
-        }
-
-        CustomLayer layer = CustomLayer::Builder()
-                                .network(*accumulator)
-                                .expression(makeWeightedMeanExpression(inputNames, weights, outputName, dataType))
-                                .inputNames(inputNames)
-                                .outputNames({outputName})
-                                .inputInterface(inputInterface)
-                                .build();
-        NetworkOutput::Builder()
-            .network(*accumulator)
-            .name(outputName)
-            .inputTensor(layer.getOutput(outputName))
-            .dataType(dataType)
-            .build();
-    }
-    return accumulator;
-}
-
-std::shared_ptr<Network> buildTrainingRunsAccumulatorNetwork(const std::vector<std::shared_ptr<PlacedNetwork>>& placedMembers,
-                                                             const std::vector<double>& weights,
-                                                             const std::vector<std::string>& outputNames,
-                                                             uint64_t batchSize) {
-    return buildTrainingRunsAccumulatorNetworkFromMemberOutputTensors(
-        placedMembers.size(),
-        weights,
-        outputNames,
-        batchSize,
-        [&](const std::string& outputName, size_t memberIndex) {
-            ThorImplementation::StampedNetwork& memberStamp = placedMembers.at(memberIndex)->getStampedNetwork(0);
-            auto memberOutput = memberStamp.getNamedOutput(outputName);
-            if (memberOutput == nullptr) {
-                throw std::runtime_error("TrainingRuns ensemble member does not expose prediction output '" + outputName + "'.");
-            }
-            std::optional<ThorImplementation::Tensor> memberTensor = memberOutput->getFeatureOutputForSlot(0);
-            if (!memberTensor.has_value()) {
-                throw std::runtime_error("TrainingRuns ensemble member prediction output '" + outputName + "' does not have a physical tensor.");
-            }
-            return memberTensor.value();
-        });
-}
-
-PlacedEnsembleArtifacts loadPlacedMemberArtifacts(const std::vector<EnsembleMemberSpecRef>& members,
-                                                  uint64_t batchSize,
-                                                  const std::vector<std::string>& outputNames) {
-    if (batchSize == 0) {
-        throw std::runtime_error("TrainingRuns ensemble evaluation cannot place saved model artifacts for batch_size=0.");
-    }
-
-    PlacedEnsembleArtifacts artifacts;
-    artifacts.batchSize = batchSize;
-    artifacts.memberNetworks.reserve(members.size());
-    artifacts.placedMembers.reserve(members.size());
-    artifacts.weights.reserve(members.size());
-    artifacts.accumulatorOutputNames = outputNames;
-    bool sawLabelMapping = false;
-    for (const EnsembleMemberSpecRef& member : members) {
-        if (member.spec == nullptr || member.spec->trainer == nullptr || member.spec->trainer->getNetwork() == nullptr) {
-            throw std::runtime_error("TrainingRuns ensemble evaluation requires a trainer network for structural label input resolution.");
-        }
-        const std::map<std::string, std::vector<std::string>> memberLabelMapping =
-            member.spec->trainer->getNetwork()->getLossLabelNetworkInputNamesByPredictionOutputName();
-        if (!sawLabelMapping) {
-            artifacts.labelInputNamesByOutputName = memberLabelMapping;
-            sawLabelMapping = true;
-        } else if (artifacts.labelInputNamesByOutputName != memberLabelMapping) {
-            throw std::runtime_error("TrainingRuns ensemble members have incompatible structural label input mappings.");
-        }
-
-        const std::optional<std::string>& artifactDir = member.spec->trainer->getSaveModelDirectory();
-        if (!artifactDir.has_value()) {
-            throw std::runtime_error("TrainingRuns ensemble member '" + member.spec->runName +
-                                     "' does not have a saved model artifact directory for ensemble evaluation.");
-        }
-        auto loadedNetwork = std::make_shared<Network>(member.spec->trainer->getNetwork()->getNetworkName());
-        loadedNetwork->load(*artifactDir);
-        std::vector<Event> initDoneEvents;
-        std::shared_ptr<PlacedNetwork> placedNetwork = loadedNetwork->place(static_cast<uint32_t>(batchSize),
-                                                                            initDoneEvents,
-                                                                            /*inferenceOnly=*/true,
-                                                                            /*forcedDevices=*/{},
-                                                                            /*forcedNumStampsPerGpu=*/0,
-                                                                            /*networkOutputsOnGpu=*/true);
-        for (Event& event : initDoneEvents) {
-            event.synchronize();
-        }
-        artifacts.memberNetworks.push_back(std::move(loadedNetwork));
-        artifacts.placedMembers.push_back(std::move(placedNetwork));
-        artifacts.weights.push_back(member.spec->ensembleWeight);
-    }
-
-    artifacts.distributedInputNames = collectPlacedMemberInputNamesForDistribution(artifacts.placedMembers);
-    artifacts.inputDistributionNetwork = buildTrainingRunsInputDistributionNetwork(artifacts.placedMembers);
-    if (artifacts.inputDistributionNetwork != nullptr) {
-        std::vector<Event> inputDistributionInitDoneEvents;
-        artifacts.placedInputDistribution = artifacts.inputDistributionNetwork->place(static_cast<uint32_t>(batchSize),
-                                                                                     inputDistributionInitDoneEvents,
-                                                                                     /*inferenceOnly=*/true,
-                                                                                     /*forcedDevices=*/{},
-                                                                                     /*forcedNumStampsPerGpu=*/0,
-                                                                                     /*networkOutputsOnGpu=*/true);
-        for (Event& event : inputDistributionInitDoneEvents) {
-            event.synchronize();
-        }
-    }
-
-    artifacts.accumulatorNetwork = buildTrainingRunsAccumulatorNetwork(artifacts.placedMembers, artifacts.weights, outputNames, batchSize);
-    std::vector<Event> accumulatorInitDoneEvents;
-    artifacts.placedAccumulator = artifacts.accumulatorNetwork->place(static_cast<uint32_t>(batchSize),
-                                                                      accumulatorInitDoneEvents,
-                                                                      /*inferenceOnly=*/true);
-    for (Event& event : accumulatorInitDoneEvents) {
-        event.synchronize();
-    }
-    return artifacts;
-}
-
-void validateEnsembleEvaluationBatchSize(const PlacedEnsembleArtifacts& artifacts, Loader& loader) {
-    if (loader.getBatchSize() != artifacts.batchSize) {
-        throw std::runtime_error("TrainingRuns ensemble evaluation currently requires all evaluated loaders for a placed ensemble group "
-                                 "to use the same batch_size as the placed artifacts. Expected " +
-                                 std::to_string(artifacts.batchSize) + ", got " + std::to_string(loader.getBatchSize()) + ".");
-    }
-}
-
-
-uint64_t argmaxRow(const std::vector<double>& values, uint64_t row, uint64_t width) {
-    const uint64_t offset = row * width;
-    uint64_t best = 0;
-    double bestValue = values[offset];
-    for (uint64_t c = 1; c < width; ++c) {
-        const double value = values[offset + c];
-        if (value > bestValue) {
-            best = c;
-            bestValue = value;
-        }
-    }
-    return best;
-}
-
-struct PredictionEvaluationMetrics {
-    std::optional<double> loss{};
-    std::optional<double> accuracy{};
-    std::vector<std::optional<double>> memberLosses{};
-    std::vector<std::optional<double>> memberAccuracies{};
-    uint64_t batches = 0;
-    uint64_t rows = 0;
-};
-
 Batch inferenceBatchForInputNames(const std::vector<std::string>& inputNames,
                                   const Batch& sourceBatch,
                                   const std::string& missingInputContext) {
@@ -2775,520 +2420,6 @@ Batch inferenceBatchForInputNames(const std::vector<std::string>& inputNames,
     return inferenceBatch;
 }
 
-Batch inferenceBatchForPlacedNetwork(PlacedNetwork& placedNetwork, const Batch& sourceBatch) {
-    return inferenceBatchForInputNames(placedNetwork.getNetworkInputNames(),
-                                       sourceBatch,
-                                       "TrainingRuns ensemble evaluation batch");
-}
-
-struct TrainingRunsDistributedInputBatchResult {
-    std::map<std::string, ThorImplementation::Tensor> inputs{};
-    std::map<std::string, Event> inputReadyEvents{};
-};
-
-TrainingRunsDistributedInputBatchResult runTrainingRunsInputDistributionForBatch(const PlacedEnsembleArtifacts& artifacts,
-                                                                                const Batch& sourceBatch) {
-    if (artifacts.placedInputDistribution == nullptr) {
-        throw std::runtime_error("TrainingRuns ensemble input distribution is not placed for this ensemble group.");
-    }
-
-    Batch distributionBatch = inferenceBatchForInputNames(artifacts.distributedInputNames,
-                                                          sourceBatch,
-                                                          "TrainingRuns ensemble input distribution batch");
-    if (!distributionBatch.isDenseOnly()) {
-        throw std::runtime_error("TrainingRuns ensemble input distribution currently supports dense tensor inputs only.");
-    }
-
-    TrainingRunsDistributedInputBatchResult result;
-    artifacts.placedInputDistribution->submitBatch(/*stampIndex=*/0,
-                                                   distributionBatch,
-                                                   result.inputs,
-                                                   result.inputReadyEvents,
-                                                   /*isInferenceOnly=*/true,
-                                                   /*reusableProcessingFinishedEvent=*/nullptr,
-                                                   /*waitForOutputsOnProcessingStream=*/true);
-    for (const std::string& inputName : artifacts.distributedInputNames) {
-        if (result.inputs.find(inputName) == result.inputs.end()) {
-            throw std::runtime_error("TrainingRuns ensemble input distribution did not produce input '" + inputName + "'.");
-        }
-        if (result.inputReadyEvents.find(inputName) == result.inputReadyEvents.end()) {
-            throw std::runtime_error("TrainingRuns ensemble input distribution did not produce a ready event for input '" + inputName + "'.");
-        }
-    }
-    return result;
-}
-
-std::map<std::string, ThorImplementation::Tensor> memberInputTensorMapFromDistributedInputNames(
-    const std::vector<std::string>& inputNames,
-    const std::map<std::string, ThorImplementation::Tensor>& distributedInputTensors) {
-    std::map<std::string, ThorImplementation::Tensor> memberInputs;
-    for (const std::string& inputName : inputNames) {
-        const auto inputIt = distributedInputTensors.find(inputName);
-        if (inputIt == distributedInputTensors.end()) {
-            throw std::runtime_error("TrainingRuns ensemble distributed input batch is missing member input '" + inputName + "'.");
-        }
-        memberInputs[inputName] = inputIt->second;
-    }
-    return memberInputs;
-}
-
-std::map<std::string, ThorImplementation::Tensor> memberInputTensorMapFromDistributedInputs(
-    PlacedNetwork& placedMember,
-    const TrainingRunsDistributedInputBatchResult& distributedInputs) {
-    return memberInputTensorMapFromDistributedInputNames(placedMember.getNetworkInputNames(), distributedInputs.inputs);
-}
-
-std::map<std::string, Event> memberInputReadyEventsFromDistributedInputs(
-    PlacedNetwork& placedMember,
-    const TrainingRunsDistributedInputBatchResult& distributedInputs) {
-    std::map<std::string, Event> inputReadyEvents;
-    for (const std::string& inputName : placedMember.getNetworkInputNames()) {
-        const auto eventIt = distributedInputs.inputReadyEvents.find(inputName);
-        if (eventIt == distributedInputs.inputReadyEvents.end()) {
-            throw std::runtime_error("TrainingRuns ensemble distributed input batch is missing ready event for member input '" + inputName + "'.");
-        }
-        inputReadyEvents[inputName] = eventIt->second;
-    }
-    return inputReadyEvents;
-}
-
-std::map<std::string, Event> accumulatorInputReadyEventsForMemberOutputs(
-    const std::vector<std::map<std::string, Event>>& memberOutputReadyEvents,
-    const std::vector<std::string>& outputNames) {
-    if (outputNames.empty()) {
-        throw std::runtime_error("TrainingRuns ensemble accumulator ready-event map requires at least one prediction output name.");
-    }
-
-    std::map<std::string, Event> inputReadyEvents;
-    for (size_t outputIndex = 0; outputIndex < outputNames.size(); ++outputIndex) {
-        const std::string& outputName = outputNames[outputIndex];
-        for (size_t memberIndex = 0; memberIndex < memberOutputReadyEvents.size(); ++memberIndex) {
-            const auto eventIt = memberOutputReadyEvents[memberIndex].find(outputName);
-            if (eventIt == memberOutputReadyEvents[memberIndex].end()) {
-                throw std::runtime_error("TrainingRuns ensemble evaluation did not receive a ready event for prediction output '" + outputName + "'.");
-            }
-            inputReadyEvents[trainingRunsAccumulatorInputName(outputIndex, memberIndex)] = eventIt->second;
-        }
-    }
-    return inputReadyEvents;
-}
-
-Batch accumulatorBatchForMemberOutputs(const std::vector<std::map<std::string, ThorImplementation::Tensor>>& memberOutputs,
-                                       const std::vector<std::string>& outputNames) {
-    if (outputNames.empty()) {
-        throw std::runtime_error("TrainingRuns ensemble accumulator batch requires at least one prediction output name.");
-    }
-
-    Batch accumulatorBatch;
-    for (size_t outputIndex = 0; outputIndex < outputNames.size(); ++outputIndex) {
-        const std::string& outputName = outputNames[outputIndex];
-        for (size_t memberIndex = 0; memberIndex < memberOutputs.size(); ++memberIndex) {
-            const auto outputIt = memberOutputs[memberIndex].find(outputName);
-            if (outputIt == memberOutputs[memberIndex].end()) {
-                throw std::runtime_error("TrainingRuns ensemble evaluation did not receive prediction output '" + outputName + "'.");
-            }
-            accumulatorBatch.insert(trainingRunsAccumulatorInputName(outputIndex, memberIndex), outputIt->second);
-        }
-    }
-    return accumulatorBatch;
-}
-
-struct EnsembleAccumulatorBatchResult {
-    std::vector<std::map<std::string, ThorImplementation::Tensor>> memberOutputs{};
-    std::vector<std::map<std::string, Event>> memberOutputReadyEvents{};
-    std::map<std::string, ThorImplementation::Tensor> averagedOutputs{};
-    std::map<std::string, Event> averagedOutputReadyEvents{};
-};
-
-EnsembleAccumulatorBatchResult runTrainingRunsAccumulatorWithDistributedInputsForBatch(const PlacedEnsembleArtifacts& artifacts,
-                                                                                      const Batch& sourceBatch) {
-    TrainingRunsDistributedInputBatchResult distributedInputs = runTrainingRunsInputDistributionForBatch(artifacts, sourceBatch);
-
-    EnsembleAccumulatorBatchResult result;
-    result.memberOutputs.reserve(artifacts.placedMembers.size());
-    result.memberOutputReadyEvents.reserve(artifacts.placedMembers.size());
-    for (const std::shared_ptr<PlacedNetwork>& placedMember : artifacts.placedMembers) {
-        std::map<std::string, ThorImplementation::Tensor> memberInputs =
-            memberInputTensorMapFromDistributedInputs(*placedMember, distributedInputs);
-        std::map<std::string, Event> memberInputReadyEvents =
-            memberInputReadyEventsFromDistributedInputs(*placedMember, distributedInputs);
-
-        std::map<std::string, ThorImplementation::Tensor> outputs;
-        std::map<std::string, Event> outputReadyEvents;
-        placedMember->submitBatch(/*stampIndex=*/0,
-                                  std::move(memberInputs),
-                                  memberInputReadyEvents,
-                                  outputs,
-                                  outputReadyEvents,
-                                  /*isInferenceOnly=*/true,
-                                  /*reusableProcessingFinishedEvent=*/nullptr,
-                                  /*waitForOutputsOnProcessingStream=*/true);
-        for (const std::string& outputName : artifacts.accumulatorOutputNames) {
-            if (outputs.find(outputName) == outputs.end()) {
-                throw std::runtime_error("TrainingRuns ensemble evaluation did not receive prediction output '" + outputName + "'.");
-            }
-            if (outputReadyEvents.find(outputName) == outputReadyEvents.end()) {
-                throw std::runtime_error("TrainingRuns ensemble evaluation did not receive a ready event for prediction output '" + outputName + "'.");
-            }
-        }
-        result.memberOutputs.push_back(std::move(outputs));
-        result.memberOutputReadyEvents.push_back(std::move(outputReadyEvents));
-    }
-
-    Batch accumulatorBatch = accumulatorBatchForMemberOutputs(result.memberOutputs, artifacts.accumulatorOutputNames);
-    std::map<std::string, ThorImplementation::Tensor> accumulatorInputTensors =
-        denseTensorMapFromBatchOrThrow(accumulatorBatch, "TrainingRuns ensemble accumulator batch");
-    std::map<std::string, Event> accumulatorInputReadyEvents =
-        accumulatorInputReadyEventsForMemberOutputs(result.memberOutputReadyEvents, artifacts.accumulatorOutputNames);
-    Event accumulatorDone = artifacts.placedAccumulator->submitBatch(/*stampIndex=*/0,
-                                                                     std::move(accumulatorInputTensors),
-                                                                     accumulatorInputReadyEvents,
-                                                                     result.averagedOutputs,
-                                                                     result.averagedOutputReadyEvents,
-                                                                     /*isInferenceOnly=*/true,
-                                                                     /*reusableProcessingFinishedEvent=*/nullptr,
-                                                                     /*waitForOutputsOnProcessingStream=*/true);
-    accumulatorDone.synchronize();
-    for (const std::string& outputName : artifacts.accumulatorOutputNames) {
-        if (result.averagedOutputs.find(outputName) == result.averagedOutputs.end()) {
-            throw std::runtime_error("TrainingRuns ensemble accumulator did not produce prediction output '" + outputName + "'.");
-        }
-        if (result.averagedOutputReadyEvents.find(outputName) == result.averagedOutputReadyEvents.end()) {
-            throw std::runtime_error("TrainingRuns ensemble accumulator did not produce a ready event for prediction output '" + outputName + "'.");
-        }
-    }
-    return result;
-}
-
-EnsembleAccumulatorBatchResult runTrainingRunsAccumulatorLegacyForBatch(const PlacedEnsembleArtifacts& artifacts, const Batch& sourceBatch) {
-    EnsembleAccumulatorBatchResult result;
-    result.memberOutputs.reserve(artifacts.placedMembers.size());
-    for (const std::shared_ptr<PlacedNetwork>& placedMember : artifacts.placedMembers) {
-        Batch inferenceBatch = inferenceBatchForPlacedNetwork(*placedMember, sourceBatch);
-        std::map<std::string, ThorImplementation::Tensor> outputs = placedMember->infer(inferenceBatch);
-        for (const std::string& outputName : artifacts.accumulatorOutputNames) {
-            if (outputs.find(outputName) == outputs.end()) {
-                throw std::runtime_error("TrainingRuns ensemble evaluation did not receive prediction output '" + outputName + "'.");
-            }
-        }
-        result.memberOutputs.push_back(std::move(outputs));
-    }
-
-    Batch accumulatorBatch = accumulatorBatchForMemberOutputs(result.memberOutputs, artifacts.accumulatorOutputNames);
-    result.averagedOutputs = artifacts.placedAccumulator->infer(accumulatorBatch);
-    for (const std::string& outputName : artifacts.accumulatorOutputNames) {
-        if (result.averagedOutputs.find(outputName) == result.averagedOutputs.end()) {
-            throw std::runtime_error("TrainingRuns ensemble accumulator did not produce prediction output '" + outputName + "'.");
-        }
-    }
-    return result;
-}
-
-EnsembleAccumulatorBatchResult runTrainingRunsAccumulatorForBatch(const PlacedEnsembleArtifacts& artifacts, const Batch& sourceBatch) {
-    if (artifacts.placedMembers.empty()) {
-        throw std::runtime_error("TrainingRuns ensemble evaluation requires at least one placed member network.");
-    }
-    if (artifacts.placedAccumulator == nullptr) {
-        throw std::runtime_error("TrainingRuns ensemble evaluation requires a placed accumulator network.");
-    }
-    if (artifacts.placedInputDistribution != nullptr) {
-        return runTrainingRunsAccumulatorWithDistributedInputsForBatch(artifacts, sourceBatch);
-    }
-    return runTrainingRunsAccumulatorLegacyForBatch(artifacts, sourceBatch);
-}
-
-
-std::string structuralLabelInputNameForPredictionOutput(const PlacedEnsembleArtifacts& artifacts,
-                                                        const std::string& predictionOutputName) {
-    auto mappingIt = artifacts.labelInputNamesByOutputName.find(predictionOutputName);
-    if (mappingIt == artifacts.labelInputNamesByOutputName.end() || mappingIt->second.empty()) {
-        throw std::runtime_error("TrainingRuns ensemble evaluation could not structurally identify a label NetworkInput for prediction output '" +
-                                 predictionOutputName + "'. Labels are resolved from the training graph as NetworkInputs that are pruned when "
-                                 "loss roots are removed for inference, not by tensor name.");
-    }
-    if (mappingIt->second.size() != 1) {
-        std::ostringstream out;
-        out << "TrainingRuns ensemble evaluation found multiple structural label NetworkInputs for prediction output '" << predictionOutputName
-            << "': [";
-        for (size_t i = 0; i < mappingIt->second.size(); ++i) {
-            if (i != 0) {
-                out << ", ";
-            }
-            out << mappingIt->second[i];
-        }
-        out << "]. Ensemble evaluation needs exactly one label tensor for the selected prediction output.";
-        throw std::runtime_error(out.str());
-    }
-    return mappingIt->second.front();
-}
-
-ThorImplementation::Tensor structuralLabelsTensorFromBatch(const PlacedEnsembleArtifacts& artifacts,
-                                                            const std::string& predictionOutputName,
-                                                            const Batch& batch) {
-    const std::string labelInputName = structuralLabelInputNameForPredictionOutput(artifacts, predictionOutputName);
-    if (!batch.contains(labelInputName) || !batch.isTensor(labelInputName)) {
-        throw std::runtime_error("TrainingRuns ensemble evaluation batch is missing dense structural label input '" + labelInputName +
-                                 "' for prediction output '" + predictionOutputName + "'.");
-    }
-    return batch.getTensor(labelInputName);
-}
-
-PredictionEvaluationMetrics evaluateEnsemblePredictionMetricsOnLoader(const PlacedEnsembleArtifacts& artifacts,
-                                                                      Loader& loader,
-                                                                      ExampleType exampleType,
-                                                                      const TrainingEnsembleResult& ensembleTemplate) {
-    PredictionEvaluationMetrics metrics;
-    metrics.memberLosses.resize(artifacts.placedMembers.size());
-    metrics.memberAccuracies.resize(artifacts.placedMembers.size());
-    if (artifacts.placedMembers.empty()) {
-        return metrics;
-    }
-    validateEnsembleEvaluationBatchSize(artifacts, loader);
-    const std::string predictionOutputName = choosePredictionOutputName(ensembleTemplate.outputSignature);
-    const bool categoricalPrediction = predictionOutputName == "scores" || predictionOutputName == "logits";
-    const std::vector<double>& weights = artifacts.weights;
-    const double weightSum = std::accumulate(weights.begin(), weights.end(), 0.0);
-    if (weightSum <= 0.0) {
-        return metrics;
-    }
-
-    const uint64_t batchesPerEpoch = loader.getNumBatchesPerEpoch(exampleType);
-    uint64_t batchNum = loader.getNextBatchNum(exampleType);
-    if (batchNum > batchesPerEpoch) {
-        throw std::runtime_error("TrainingRuns ensemble evaluation loader returned next batch beyond batches per epoch.");
-    }
-    const uint64_t batchesToRun = batchesPerEpoch - batchNum;
-    double weightedLossSum = 0.0;
-    uint64_t weightedRows = 0;
-    uint64_t weightedElements = 0;
-    uint64_t ensembleCorrect = 0;
-    std::vector<double> memberLossSums(artifacts.placedMembers.size(), 0.0);
-    std::vector<uint64_t> memberCorrect(artifacts.placedMembers.size(), 0);
-
-    for (uint64_t batchOffset = 0; batchOffset < batchesToRun; ++batchOffset) {
-        Batch batch = loader.getBatch(exampleType, batchNum);
-        ThorImplementation::Tensor labelsTensor = structuralLabelsTensorFromBatch(artifacts, predictionOutputName, batch);
-        const std::string labelTensorDebugName = structuralLabelInputNameForPredictionOutput(artifacts, predictionOutputName);
-        const uint64_t labelLastDim = lastDimensionOrThrow(labelsTensor, labelTensorDebugName);
-        const uint64_t rows = labelsTensor.getTotalNumElements() / labelLastDim;
-        if (rows == 0) {
-            loader.returnBatchBuffers(exampleType, std::move(batch));
-            continue;
-        }
-        const std::vector<double> labels = tensorToDoubleVector(labelsTensor);
-
-        EnsembleAccumulatorBatchResult accumulatorResult = runTrainingRunsAccumulatorForBatch(artifacts, batch);
-        std::vector<std::vector<double>> memberPredictions;
-        memberPredictions.reserve(accumulatorResult.memberOutputs.size());
-        for (const std::map<std::string, ThorImplementation::Tensor>& memberOutputs : accumulatorResult.memberOutputs) {
-            auto outputIt = memberOutputs.find(predictionOutputName);
-            if (outputIt == memberOutputs.end()) {
-                throw std::runtime_error("TrainingRuns ensemble evaluation did not receive prediction output '" + predictionOutputName + "'.");
-            }
-            ThorImplementation::Tensor predictionTensor = outputIt->second;
-            if (predictionTensor.getTotalNumElements() != labels.size()) {
-                throw std::runtime_error("TrainingRuns ensemble prediction tensor and labels tensor have different element counts.");
-            }
-            if (lastDimensionOrThrow(predictionTensor, predictionOutputName) != labelLastDim) {
-                throw std::runtime_error("TrainingRuns ensemble prediction tensor and labels tensor have incompatible class/value dimensions.");
-            }
-            memberPredictions.push_back(tensorToDoubleVector(predictionTensor));
-        }
-
-        auto ensembleOutputIt = accumulatorResult.averagedOutputs.find(predictionOutputName);
-        if (ensembleOutputIt == accumulatorResult.averagedOutputs.end()) {
-            throw std::runtime_error("TrainingRuns ensemble accumulator did not produce prediction output '" + predictionOutputName + "'.");
-        }
-        ThorImplementation::Tensor ensemblePredictionTensor = ensembleOutputIt->second;
-        if (ensemblePredictionTensor.getTotalNumElements() != labels.size()) {
-            throw std::runtime_error("TrainingRuns ensemble accumulator prediction tensor and labels tensor have different element counts.");
-        }
-        if (lastDimensionOrThrow(ensemblePredictionTensor, predictionOutputName) != labelLastDim) {
-            throw std::runtime_error("TrainingRuns ensemble accumulator prediction tensor and labels tensor have incompatible class/value dimensions.");
-        }
-        const std::vector<double> ensemblePredictions = tensorToDoubleVector(ensemblePredictionTensor);
-
-        if (categoricalPrediction) {
-            for (uint64_t row = 0; row < rows; ++row) {
-                const uint64_t offset = row * labelLastDim;
-                const uint64_t labelClass = argmaxRow(labels, row, labelLastDim);
-                for (size_t memberIndex = 0; memberIndex < memberPredictions.size(); ++memberIndex) {
-                    const std::vector<double>& logits = memberPredictions[memberIndex];
-                    const uint64_t predictedClass = argmaxRow(logits, row, labelLastDim);
-                    if (predictedClass == labelClass) {
-                        memberCorrect[memberIndex] += 1;
-                    }
-                    double maxLogit = logits[offset];
-                    for (uint64_t c = 1; c < labelLastDim; ++c) {
-                        maxLogit = std::max(maxLogit, logits[offset + c]);
-                    }
-                    double denom = 0.0;
-                    for (uint64_t c = 0; c < labelLastDim; ++c) {
-                        denom += std::exp(logits[offset + c] - maxLogit);
-                    }
-                    for (uint64_t c = 0; c < labelLastDim; ++c) {
-                        const double probability = std::exp(logits[offset + c] - maxLogit) / denom;
-                        memberLossSums[memberIndex] += -labels[offset + c] * std::log(std::max(probability, 1.0e-12));
-                    }
-                }
-
-                const uint64_t ensembleClass = argmaxRow(ensemblePredictions, row, labelLastDim);
-                if (ensembleClass == labelClass) {
-                    ensembleCorrect += 1;
-                }
-                double maxLogit = ensemblePredictions[offset];
-                for (uint64_t c = 1; c < labelLastDim; ++c) {
-                    maxLogit = std::max(maxLogit, ensemblePredictions[offset + c]);
-                }
-                double denom = 0.0;
-                for (uint64_t c = 0; c < labelLastDim; ++c) {
-                    denom += std::exp(ensemblePredictions[offset + c] - maxLogit);
-                }
-                double sampleLoss = 0.0;
-                for (uint64_t c = 0; c < labelLastDim; ++c) {
-                    const double probability = std::exp(ensemblePredictions[offset + c] - maxLogit) / denom;
-                    sampleLoss += -labels[offset + c] * std::log(std::max(probability, 1.0e-12));
-                }
-                weightedLossSum += sampleLoss;
-            }
-        } else {
-            for (size_t memberIndex = 0; memberIndex < memberPredictions.size(); ++memberIndex) {
-                const std::vector<double>& predictions = memberPredictions[memberIndex];
-                for (size_t i = 0; i < labels.size(); ++i) {
-                    const double diff = predictions[i] - labels[i];
-                    memberLossSums[memberIndex] += std::abs(diff);
-                }
-            }
-            for (size_t i = 0; i < labels.size(); ++i) {
-                const double diff = ensemblePredictions[i] - labels[i];
-                weightedLossSum += std::abs(diff);
-            }
-        }
-
-        weightedRows += rows;
-        weightedElements += labels.size();
-        metrics.batches += 1;
-        loader.returnBatchBuffers(exampleType, std::move(batch));
-    }
-
-    metrics.rows = weightedRows;
-    if (weightedRows == 0) {
-        return metrics;
-    }
-    if (categoricalPrediction) {
-        metrics.loss = weightedLossSum / static_cast<double>(weightedRows);
-        metrics.accuracy = static_cast<double>(ensembleCorrect) / static_cast<double>(weightedRows);
-        for (size_t memberIndex = 0; memberIndex < artifacts.placedMembers.size(); ++memberIndex) {
-            metrics.memberLosses[memberIndex] = memberLossSums[memberIndex] / static_cast<double>(weightedRows);
-            metrics.memberAccuracies[memberIndex] = static_cast<double>(memberCorrect[memberIndex]) / static_cast<double>(weightedRows);
-        }
-    } else {
-        // Non-classification ensemble loss is MAE. Accuracy is intentionally absent.
-        if (weightedElements == 0) {
-            return metrics;
-        }
-        metrics.loss = weightedLossSum / static_cast<double>(weightedElements);
-        for (size_t memberIndex = 0; memberIndex < artifacts.placedMembers.size(); ++memberIndex) {
-            metrics.memberLosses[memberIndex] = memberLossSums[memberIndex] / static_cast<double>(weightedElements);
-        }
-    }
-    return metrics;
-}
-
-std::optional<double> evaluateEnsemblePredictionLossOnLoader(const PlacedEnsembleArtifacts& artifacts,
-                                                             Loader& loader,
-                                                             ExampleType exampleType,
-                                                             const TrainingEnsembleResult& ensembleTemplate) {
-    if (artifacts.placedMembers.empty()) {
-        return std::nullopt;
-    }
-    validateEnsembleEvaluationBatchSize(artifacts, loader);
-    const std::string predictionOutputName = choosePredictionOutputName(ensembleTemplate.outputSignature);
-    const bool categoricalPrediction = predictionOutputName == "scores" || predictionOutputName == "logits";
-
-    const uint64_t batchesPerEpoch = loader.getNumBatchesPerEpoch(exampleType);
-    uint64_t batchNum = loader.getNextBatchNum(exampleType);
-    if (batchNum > batchesPerEpoch) {
-        throw std::runtime_error("TrainingRuns ensemble evaluation loader returned next batch beyond batches per epoch.");
-    }
-    const uint64_t batchesToRun = batchesPerEpoch - batchNum;
-    double weightedLossSum = 0.0;
-    uint64_t weightedRows = 0;
-
-    for (uint64_t batchOffset = 0; batchOffset < batchesToRun; ++batchOffset) {
-        Batch batch = loader.getBatch(exampleType, batchNum);
-        ThorImplementation::Tensor labelsTensor = structuralLabelsTensorFromBatch(artifacts, predictionOutputName, batch);
-        const std::string labelTensorDebugName = structuralLabelInputNameForPredictionOutput(artifacts, predictionOutputName);
-        const uint64_t labelLastDim = lastDimensionOrThrow(labelsTensor, labelTensorDebugName);
-        const uint64_t rows = labelsTensor.getTotalNumElements() / labelLastDim;
-        if (rows == 0) {
-            loader.returnBatchBuffers(exampleType, std::move(batch));
-            continue;
-        }
-        const std::vector<double> labels = tensorToDoubleVector(labelsTensor);
-
-        EnsembleAccumulatorBatchResult accumulatorResult = runTrainingRunsAccumulatorForBatch(artifacts, batch);
-        for (const std::map<std::string, ThorImplementation::Tensor>& memberOutputs : accumulatorResult.memberOutputs) {
-            auto outputIt = memberOutputs.find(predictionOutputName);
-            if (outputIt == memberOutputs.end()) {
-                throw std::runtime_error("TrainingRuns ensemble evaluation did not receive prediction output '" + predictionOutputName + "'.");
-            }
-            ThorImplementation::Tensor predictionTensor = outputIt->second;
-            if (predictionTensor.getTotalNumElements() != labels.size()) {
-                throw std::runtime_error("TrainingRuns ensemble prediction tensor and labels tensor have different element counts.");
-            }
-            if (lastDimensionOrThrow(predictionTensor, predictionOutputName) != labelLastDim) {
-                throw std::runtime_error("TrainingRuns ensemble prediction tensor and labels tensor have incompatible class/value dimensions.");
-            }
-        }
-
-        auto ensembleOutputIt = accumulatorResult.averagedOutputs.find(predictionOutputName);
-        if (ensembleOutputIt == accumulatorResult.averagedOutputs.end()) {
-            throw std::runtime_error("TrainingRuns ensemble accumulator did not produce prediction output '" + predictionOutputName + "'.");
-        }
-        ThorImplementation::Tensor ensemblePredictionTensor = ensembleOutputIt->second;
-        if (ensemblePredictionTensor.getTotalNumElements() != labels.size()) {
-            throw std::runtime_error("TrainingRuns ensemble accumulator prediction tensor and labels tensor have different element counts.");
-        }
-        if (lastDimensionOrThrow(ensemblePredictionTensor, predictionOutputName) != labelLastDim) {
-            throw std::runtime_error("TrainingRuns ensemble accumulator prediction tensor and labels tensor have incompatible class/value dimensions.");
-        }
-        const std::vector<double> ensemblePredictions = tensorToDoubleVector(ensemblePredictionTensor);
-
-        double batchLoss = 0.0;
-        if (categoricalPrediction) {
-            for (uint64_t row = 0; row < rows; ++row) {
-                const uint64_t offset = row * labelLastDim;
-                double maxLogit = ensemblePredictions[offset];
-                for (uint64_t c = 1; c < labelLastDim; ++c) {
-                    maxLogit = std::max(maxLogit, ensemblePredictions[offset + c]);
-                }
-                double denom = 0.0;
-                for (uint64_t c = 0; c < labelLastDim; ++c) {
-                    denom += std::exp(ensemblePredictions[offset + c] - maxLogit);
-                }
-                for (uint64_t c = 0; c < labelLastDim; ++c) {
-                    const double probability = std::exp(ensemblePredictions[offset + c] - maxLogit) / denom;
-                    batchLoss += -labels[offset + c] * std::log(std::max(probability, 1.0e-12));
-                }
-            }
-            batchLoss /= static_cast<double>(rows);
-        } else {
-            for (size_t i = 0; i < labels.size(); ++i) {
-                batchLoss += std::abs(ensemblePredictions[i] - labels[i]);
-            }
-            batchLoss /= static_cast<double>(labels.size());
-        }
-        weightedLossSum += batchLoss * static_cast<double>(rows);
-        weightedRows += rows;
-        loader.returnBatchBuffers(exampleType, std::move(batch));
-    }
-
-    if (weightedRows == 0) {
-        return std::nullopt;
-    }
-    return weightedLossSum / static_cast<double>(weightedRows);
-}
 
 }  // namespace
 
@@ -3370,51 +2501,23 @@ std::optional<double> trainingRunsWeightedLossSumFromWeightedLossValuesForTest(
     return weightedLossSumFromWeightedLossValues(weightedLossValues);
 }
 
-Batch trainingRunsAccumulatorBatchForMemberOutputsForTest(
-    const std::vector<std::map<std::string, ThorImplementation::Tensor>>& memberOutputs,
-    const std::vector<std::string>& outputNames) {
-    return accumulatorBatchForMemberOutputs(memberOutputs, outputNames);
+std::vector<std::string> trainingRunsComposedLossEvaluatorExternalInputNamesForTest(
+    const std::vector<std::shared_ptr<Network>>& memberNetworks,
+    const std::vector<double>& weights,
+    const std::vector<std::string>& requestedLossNames) {
+    if (memberNetworks.empty()) {
+        throw std::runtime_error("TrainingRuns composed loss evaluator test requires at least one member network.");
+    }
+    const std::vector<ResolvedEnsembleLoss> losses = resolveTrainingRunsReportedLosses(
+        memberNetworks.front()->getLossReferencesByPredictionOutputName(),
+        requestedLossNames,
+        "TrainingRuns composed loss evaluator test");
+    TrainingRunsComposedEnsembleEvaluator evaluator =
+        buildTrainingRunsComposedEnsembleEvaluatorForLosses(memberNetworks, weights, losses);
+    return evaluator.network->getInferenceNetworkInputNames();
 }
 
-std::map<std::string, uint64_t> trainingRunsInputDistributionLayerCountsForTest(
-    const std::map<std::string, ThorImplementation::TensorDescriptor>& inputDescriptors) {
-    std::vector<std::string> inputNames;
-    inputNames.reserve(inputDescriptors.size());
-    for (const auto& [inputName, _] : inputDescriptors) {
-        (void)_;
-        inputNames.push_back(inputName);
-    }
 
-    std::shared_ptr<Network> distributor = buildTrainingRunsInputDistributionNetworkFromInputDescriptors(
-        inputNames, [&](const std::string& inputName) { return inputDescriptors.at(inputName); });
-
-    uint64_t networkInputs = 0;
-    uint64_t networkOutputs = 0;
-    for (uint32_t i = 0; i < distributor->getNumLayers(); ++i) {
-        if (std::dynamic_pointer_cast<NetworkInput>(distributor->getLayer(i)) != nullptr) {
-            ++networkInputs;
-        }
-        if (std::dynamic_pointer_cast<NetworkOutput>(distributor->getLayer(i)) != nullptr) {
-            ++networkOutputs;
-        }
-    }
-    return { {"network_inputs", networkInputs}, {"network_outputs", networkOutputs} };
-}
-
-std::map<std::string, bool> trainingRunsDistributedMemberInputsReuseSharedTensorsForTest(
-    const std::vector<std::vector<std::string>>& memberInputNames,
-    const std::map<std::string, ThorImplementation::Tensor>& distributedInputTensors) {
-    std::map<std::string, bool> states;
-    for (size_t memberIndex = 0; memberIndex < memberInputNames.size(); ++memberIndex) {
-        const std::map<std::string, ThorImplementation::Tensor> memberInputs =
-            memberInputTensorMapFromDistributedInputNames(memberInputNames[memberIndex], distributedInputTensors);
-        for (const std::string& inputName : memberInputNames[memberIndex]) {
-            states["member_" + std::to_string(memberIndex) + ":" + inputName] =
-                (memberInputs.at(inputName) == distributedInputTensors.at(inputName));
-        }
-    }
-    return states;
-}
 
 
 }  // namespace Testing
@@ -3454,7 +2557,7 @@ void TrainingRuns::evaluateEnsembles(std::vector<TrainingRunResult>& results,
                 evaluationBatchSize = sourceBatchSize;
             } else if (*evaluationBatchSize != sourceBatchSize) {
                 throw std::runtime_error("TrainingRuns ensemble_group '" + groupName +
-                                         "' cannot reuse placed ensemble artifacts across validation populations with different batch_size values. "
+                                         "' cannot reuse composed ensemble evaluator across validation populations with different batch_size values. "
                                          "Expected " +
                                          std::to_string(*evaluationBatchSize) + ", got " + std::to_string(sourceBatchSize) +
                                          " for run '" + sourceMember.spec->runName + "'.");
@@ -3465,82 +2568,73 @@ void TrainingRuns::evaluateEnsembles(std::vector<TrainingRunResult>& results,
             continue;
         }
 
-        if (!ensembleIt->second.namedMetrics.empty()) {
-            TrainingRunsComposedEvaluatorArtifacts composedArtifacts = loadTrainingRunsComposedEvaluatorArtifacts(
-                members,
-                *evaluationBatchSize,
-                requestedReportedLossNamesForGroup(reportedLosses, groupName),
-                "TrainingRuns composed ensemble training-population evaluation for ensemble_group '" + groupName + "'");
-
-            std::map<std::string, std::vector<std::optional<double>>> sourcePopulationLossesByName;
-            std::vector<double> sourceWeights;
-            sourceWeights.reserve(members.size());
-            for (const TrainingNamedMetricResult& metric : ensembleIt->second.namedMetrics) {
-                sourcePopulationLossesByName[metric.name].reserve(members.size());
-            }
-
-            for (const EnsembleMemberSpecRef& sourceMember : members) {
-                const double sourceWeight = sourceMember.spec == nullptr ? 1.0 : sourceMember.spec->ensembleWeight;
-                sourceWeights.push_back(sourceWeight);
-                if (sourceMember.spec == nullptr || sourceMember.spec->trainer == nullptr || sourceMember.spec->trainer->loader == nullptr) {
-                    for (const TrainingNamedMetricResult& metric : ensembleIt->second.namedMetrics) {
-                        sourcePopulationLossesByName[metric.name].push_back(std::nullopt);
-                    }
-                    continue;
-                }
-
-                ComposedEnsembleLossEvaluationMetrics sourceMetrics = evaluateComposedEnsembleLossesOnLoader(
-                    composedArtifacts, *sourceMember.spec->trainer->loader, ExampleType::VALIDATE);
-                for (const TrainingNamedMetricResult& metric : ensembleIt->second.namedMetrics) {
-                    auto valueIt = sourceMetrics.lossValues.find(metric.name);
-                    sourcePopulationLossesByName[metric.name].push_back(
-                        valueIt == sourceMetrics.lossValues.end() ? std::optional<double>{} : valueIt->second);
-                }
-            }
-
-            std::vector<std::optional<double>> namedTrainValuesForOverall;
-            namedTrainValuesForOverall.reserve(ensembleIt->second.namedMetrics.size());
-            for (TrainingNamedMetricResult& metric : ensembleIt->second.namedMetrics) {
-                metric.trainValue = weightedAverage(sourcePopulationLossesByName[metric.name], sourceWeights);
-                namedTrainValuesForOverall.push_back(metric.trainValue);
-            }
-            ensembleIt->second.ensembleTrainingLoss = weightedLossSumFromWeightedLossValues(namedTrainValuesForOverall);
-        } else {
-            PlacedEnsembleArtifacts placedArtifacts = loadPlacedMemberArtifacts(
-                members, *evaluationBatchSize, {choosePredictionOutputName(ensembleIt->second.outputSignature)});
-            std::vector<std::optional<double>> sourcePopulationLosses;
-            std::vector<double> sourceWeights;
-            sourcePopulationLosses.reserve(members.size());
-            sourceWeights.reserve(members.size());
-            for (const EnsembleMemberSpecRef& sourceMember : members) {
-                if (sourceMember.spec == nullptr || sourceMember.spec->trainer == nullptr || sourceMember.spec->trainer->loader == nullptr) {
-                    sourcePopulationLosses.push_back(std::nullopt);
-                    sourceWeights.push_back(sourceMember.spec == nullptr ? 1.0 : sourceMember.spec->ensembleWeight);
-                    continue;
-                }
-                sourcePopulationLosses.push_back(evaluateEnsemblePredictionLossOnLoader(
-                    placedArtifacts, *sourceMember.spec->trainer->loader, ExampleType::VALIDATE, ensembleIt->second));
-                sourceWeights.push_back(sourceMember.spec->ensembleWeight);
-            }
-
-            ensembleIt->second.ensembleTrainingLoss = weightedAverage(sourcePopulationLosses, sourceWeights);
+        if (ensembleIt->second.namedMetrics.empty()) {
+            ensembleIt->second.ensembleTrainingLoss = std::nullopt;
+            continue;
         }
+
+        TrainingRunsComposedEvaluatorArtifacts composedArtifacts = loadTrainingRunsComposedEvaluatorArtifacts(
+            members,
+            *evaluationBatchSize,
+            requestedReportedLossNamesForGroup(reportedLosses, groupName),
+            "TrainingRuns composed ensemble training-population evaluation for ensemble_group '" + groupName + "'");
+
+        std::map<std::string, std::vector<std::optional<double>>> sourcePopulationLossesByName;
+        std::vector<double> sourceWeights;
+        sourceWeights.reserve(members.size());
+        for (const TrainingNamedMetricResult& metric : ensembleIt->second.namedMetrics) {
+            sourcePopulationLossesByName[metric.name].reserve(members.size());
+        }
+
+        for (const EnsembleMemberSpecRef& sourceMember : members) {
+            const double sourceWeight = sourceMember.spec == nullptr ? 1.0 : sourceMember.spec->ensembleWeight;
+            sourceWeights.push_back(sourceWeight);
+            if (sourceMember.spec == nullptr || sourceMember.spec->trainer == nullptr || sourceMember.spec->trainer->loader == nullptr) {
+                for (const TrainingNamedMetricResult& metric : ensembleIt->second.namedMetrics) {
+                    sourcePopulationLossesByName[metric.name].push_back(std::nullopt);
+                }
+                continue;
+            }
+
+            ComposedEnsembleLossEvaluationMetrics sourceMetrics = evaluateComposedEnsembleLossesOnLoader(
+                composedArtifacts, *sourceMember.spec->trainer->loader, ExampleType::VALIDATE);
+            for (const TrainingNamedMetricResult& metric : ensembleIt->second.namedMetrics) {
+                auto valueIt = sourceMetrics.lossValues.find(metric.name);
+                sourcePopulationLossesByName[metric.name].push_back(
+                    valueIt == sourceMetrics.lossValues.end() ? std::optional<double>{} : valueIt->second);
+            }
+        }
+
+        std::vector<std::optional<double>> namedTrainValuesForOverall;
+        namedTrainValuesForOverall.reserve(ensembleIt->second.namedMetrics.size());
+        for (TrainingNamedMetricResult& metric : ensembleIt->second.namedMetrics) {
+            metric.trainValue = weightedAverage(sourcePopulationLossesByName[metric.name], sourceWeights);
+            namedTrainValuesForOverall.push_back(metric.trainValue);
+        }
+        ensembleIt->second.ensembleTrainingLoss = weightedLossSumFromWeightedLossValues(namedTrainValuesForOverall);
     }
 }
 
-std::vector<std::optional<double>> evaluateMemberGraphLossesOnLoader(
+struct MemberGraphLossEvaluationMetrics {
+    std::optional<double> loss{};
+    uint64_t batches = 0;
+    uint64_t rows = 0;
+};
+
+std::vector<MemberGraphLossEvaluationMetrics> evaluateMemberGraphLossesOnLoader(
     const std::vector<EnsembleMemberSpecRef>& members,
     uint64_t batchSize,
     const std::vector<std::string>& requestedLossNames,
     Loader& loader,
     ExampleType exampleType,
     const std::string& context) {
-    std::vector<std::optional<double>> memberLosses;
-    memberLosses.reserve(members.size());
+    std::vector<MemberGraphLossEvaluationMetrics> memberMetrics;
+    memberMetrics.reserve(members.size());
     for (size_t memberIndex = 0; memberIndex < members.size(); ++memberIndex) {
         const EnsembleMemberSpecRef& member = members[memberIndex];
+        MemberGraphLossEvaluationMetrics result;
         if (member.spec == nullptr || member.spec->trainer == nullptr || member.spec->trainer->getNetwork() == nullptr) {
-            memberLosses.push_back(std::nullopt);
+            memberMetrics.push_back(result);
             continue;
         }
         TrainingRunsComposedEvaluatorArtifacts artifacts = loadTrainingRunsComposedEvaluatorArtifacts(
@@ -3548,34 +2642,29 @@ std::vector<std::optional<double>> evaluateMemberGraphLossesOnLoader(
             batchSize,
             requestedLossNames,
             context + " member '" + member.spec->runName + "'");
-        if (artifacts.losses.empty()) {
-            memberLosses.push_back(std::nullopt);
-            continue;
+        if (!artifacts.losses.empty()) {
+            ComposedEnsembleLossEvaluationMetrics metrics = evaluateComposedEnsembleLossesOnLoader(artifacts, loader, exampleType);
+            result.loss = metrics.overallLoss;
+            result.batches = metrics.batches;
+            result.rows = metrics.rows;
         }
-        ComposedEnsembleLossEvaluationMetrics metrics = evaluateComposedEnsembleLossesOnLoader(artifacts, loader, exampleType);
-        memberLosses.push_back(metrics.overallLoss);
+        memberMetrics.push_back(result);
     }
-    return memberLosses;
+    return memberMetrics;
 }
 
-void applyPredictionEvaluationMemberTestStats(std::vector<TrainingRunResult>& results,
-                                          TrainingEnsembleResult& ensemble,
-                                          const std::vector<EnsembleMemberSpecRef>& members,
-                                          Loader& testLoader,
-                                          const PredictionEvaluationMetrics& metrics,
-                                          const std::vector<std::optional<double>>* graphMemberLosses = nullptr) {
+void applyGraphLossEvaluationMemberTestStats(std::vector<TrainingRunResult>& results,
+                                             TrainingEnsembleResult& ensemble,
+                                             const std::vector<EnsembleMemberSpecRef>& members,
+                                             Loader& testLoader,
+                                             const std::vector<MemberGraphLossEvaluationMetrics>& memberMetrics) {
     const uint64_t stepsPerEpoch = testLoader.getNumBatchesPerEpoch(ExampleType::TEST);
-    auto memberLossAt = [&](size_t index) -> std::optional<double> {
-        if (graphMemberLosses != nullptr && index < graphMemberLosses->size()) {
-            return (*graphMemberLosses)[index];
-        }
-        return index < metrics.memberLosses.size() ? metrics.memberLosses[index] : std::optional<double>{};
-    };
 
     for (size_t i = 0; i < members.size(); ++i) {
         if (members[i].spec == nullptr || members[i].spec->trainer == nullptr || members[i].spec->trainer->getNetwork() == nullptr) {
             continue;
         }
+        const MemberGraphLossEvaluationMetrics metrics = i < memberMetrics.size() ? memberMetrics[i] : MemberGraphLossEvaluationMetrics{};
         TrainingRunResult& runResult = results[members[i].runIndex];
         TrainingStatsSnapshot testStats;
         if (runResult.finalTestStats.has_value()) {
@@ -3591,19 +2680,18 @@ void applyPredictionEvaluationMemberTestStats(std::vector<TrainingRunResult>& re
         testStats.stepsPerEpoch = stepsPerEpoch;
         testStats.batchSize = testLoader.getBatchSize();
         testStats.samplesProcessed = metrics.rows;
-        testStats.loss = memberLossAt(i);
-        if (i < metrics.memberAccuracies.size()) {
-            testStats.accuracy = metrics.memberAccuracies[i];
-        }
+        testStats.loss = metrics.loss;
+        testStats.accuracy = std::nullopt;
         runResult.finalTestStats = std::move(testStats);
     }
 
     for (TrainingEnsembleMemberResult& memberResult : ensemble.members) {
         for (size_t i = 0; i < members.size(); ++i) {
             if (members[i].spec != nullptr && memberResult.runName == members[i].spec->runName) {
+                const MemberGraphLossEvaluationMetrics metrics = i < memberMetrics.size() ? memberMetrics[i] : MemberGraphLossEvaluationMetrics{};
                 memberResult.status = results[members[i].runIndex].status;
-                memberResult.finalTestLoss = memberLossAt(i);
-                memberResult.finalTestAccuracy = i < metrics.memberAccuracies.size() ? metrics.memberAccuracies[i] : std::optional<double>{};
+                memberResult.finalTestLoss = metrics.loss;
+                memberResult.finalTestAccuracy = std::nullopt;
             }
         }
     }
@@ -3626,39 +2714,30 @@ void TrainingRuns::evaluateEnsemblesOnTestLoader(std::vector<TrainingRunResult>&
             continue;
         }
 
-        if (!ensembleIt->second.namedMetrics.empty()) {
-            TrainingRunsComposedEvaluatorArtifacts composedArtifacts = loadTrainingRunsComposedEvaluatorArtifacts(
-                members,
-                testLoader->getBatchSize(),
-                requestedReportedLossNamesForGroup(reportedLosses, groupName),
-                "TrainingRuns composed ensemble test evaluation for ensemble_group '" + groupName + "'");
-            ComposedEnsembleLossEvaluationMetrics metrics = evaluateComposedEnsembleLossesOnLoader(
-                composedArtifacts, *testLoader, ExampleType::TEST);
-            applyComposedLossEvaluationMetricsToEnsemble(ensembleIt->second, metrics, /*testPhase=*/true);
-
-            PlacedEnsembleArtifacts predictionArtifacts = loadPlacedMemberArtifacts(
-                members, testLoader->getBatchSize(), {choosePredictionOutputName(ensembleIt->second.outputSignature)});
-            PredictionEvaluationMetrics predictionMetrics = evaluateEnsemblePredictionMetricsOnLoader(
-                predictionArtifacts, *testLoader, ExampleType::TEST, ensembleIt->second);
-            ensembleIt->second.ensembleTestAccuracy = predictionMetrics.accuracy;
-            std::vector<std::optional<double>> graphMemberLosses = evaluateMemberGraphLossesOnLoader(
-                members,
-                testLoader->getBatchSize(),
-                requestedReportedLossNamesForGroup(reportedLosses, groupName),
-                *testLoader,
-                ExampleType::TEST,
-                "TrainingRuns composed ensemble per-member test evaluation for ensemble_group '" + groupName + "'");
-            applyPredictionEvaluationMemberTestStats(results, ensembleIt->second, members, *testLoader, predictionMetrics, &graphMemberLosses);
-        } else {
-            PlacedEnsembleArtifacts placedArtifacts = loadPlacedMemberArtifacts(
-                members, testLoader->getBatchSize(), {choosePredictionOutputName(ensembleIt->second.outputSignature)});
-            PredictionEvaluationMetrics metrics = evaluateEnsemblePredictionMetricsOnLoader(
-                placedArtifacts, *testLoader, ExampleType::TEST, ensembleIt->second);
-            ensembleIt->second.ensembleTestLoss = metrics.loss;
-            ensembleIt->second.ensembleTestAccuracy = metrics.accuracy;
-
-            applyPredictionEvaluationMemberTestStats(results, ensembleIt->second, members, *testLoader, metrics);
+        if (ensembleIt->second.namedMetrics.empty()) {
+            ensembleIt->second.ensembleTestLoss = std::nullopt;
+            ensembleIt->second.ensembleTestAccuracy = std::nullopt;
+            continue;
         }
+
+        TrainingRunsComposedEvaluatorArtifacts composedArtifacts = loadTrainingRunsComposedEvaluatorArtifacts(
+            members,
+            testLoader->getBatchSize(),
+            requestedReportedLossNamesForGroup(reportedLosses, groupName),
+            "TrainingRuns composed ensemble test evaluation for ensemble_group '" + groupName + "'");
+        ComposedEnsembleLossEvaluationMetrics metrics = evaluateComposedEnsembleLossesOnLoader(
+            composedArtifacts, *testLoader, ExampleType::TEST);
+        applyComposedLossEvaluationMetricsToEnsemble(ensembleIt->second, metrics, /*testPhase=*/true);
+        ensembleIt->second.ensembleTestAccuracy = std::nullopt;
+
+        std::vector<MemberGraphLossEvaluationMetrics> memberMetrics = evaluateMemberGraphLossesOnLoader(
+            members,
+            testLoader->getBatchSize(),
+            requestedReportedLossNamesForGroup(reportedLosses, groupName),
+            *testLoader,
+            ExampleType::TEST,
+            "TrainingRuns composed ensemble per-member test evaluation for ensemble_group '" + groupName + "'");
+        applyGraphLossEvaluationMemberTestStats(results, ensembleIt->second, members, *testLoader, memberMetrics);
     }
 }
 

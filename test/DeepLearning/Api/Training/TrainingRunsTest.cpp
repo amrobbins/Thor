@@ -35,14 +35,6 @@
 #include <vector>
 
 namespace Thor::Testing {
-Batch trainingRunsAccumulatorBatchForMemberOutputsForTest(
-    const std::vector<std::map<std::string, ThorImplementation::Tensor>>& memberOutputs,
-    const std::vector<std::string>& outputNames);
-std::map<std::string, uint64_t> trainingRunsInputDistributionLayerCountsForTest(
-    const std::map<std::string, ThorImplementation::TensorDescriptor>& inputDescriptors);
-std::map<std::string, bool> trainingRunsDistributedMemberInputsReuseSharedTensorsForTest(
-    const std::vector<std::vector<std::string>>& memberInputNames,
-    const std::map<std::string, ThorImplementation::Tensor>& distributedInputTensors);
 std::vector<std::string> trainingRunsComposedEvaluatorExternalInputNamesForTest(
     const std::vector<std::shared_ptr<Network>>& memberNetworks,
     const std::vector<double>& weights,
@@ -61,6 +53,10 @@ std::map<std::string, std::string> trainingRunsComposedEvaluatorAveragedOutputDa
     const std::vector<std::string>& outputNames);
 std::optional<double> trainingRunsWeightedLossSumFromWeightedLossValuesForTest(
     const std::vector<std::optional<double>>& weightedLossValues);
+std::vector<std::string> trainingRunsComposedLossEvaluatorExternalInputNamesForTest(
+    const std::vector<std::shared_ptr<Network>>& memberNetworks,
+    const std::vector<double>& weights,
+    const std::vector<std::string>& requestedLossNames);
 }
 
 using namespace Thor;
@@ -566,6 +562,128 @@ TEST(TrainingRuns, AcceptsReportedLossNameFilter) {
     ASSERT_EQ(lossesIt->second.size(), 2u);
     EXPECT_EQ(lossesIt->second[0], "daily_loss");
     EXPECT_EQ(lossesIt->second[1], "p90_loss");
+}
+
+
+TEST(TrainingRuns, OmittedReportedLossesResolveAllGraphLosses) {
+    auto network = makeLossWeightedDemandNetwork("training-runs-default-all-graph-losses");
+    auto coordinator = std::make_shared<Coordinator>(1);
+    auto executor = std::make_shared<CoordinatedExecutor>(coordinator, FakeExecutorBehavior::COMPLETE_AFTER_RELEASE);
+    std::shared_ptr<Trainer> trainer = makeTrainer(network, executor);
+
+    TrainingRuns runs({TrainingRunsSpec{"fold_0", trainer, "demand"}});
+
+    std::optional<TrainingRunsResult> result;
+    std::exception_ptr exception;
+    std::thread fitThread([&]() {
+        try {
+            TrainingRunsEvaluationOptions evaluationOptions;
+            evaluationOptions.evaluateTrainingPopulation = false;
+            result = runs.fit(TrainerFitOptions{1}, evaluationOptions);
+        } catch (...) {
+            exception = std::current_exception();
+        }
+    });
+
+    ASSERT_TRUE(coordinator->waitForAllStarted());
+    coordinator->releaseAll();
+    fitThread.join();
+    rethrowIfSet(exception);
+
+    ASSERT_TRUE(result.has_value());
+    const TrainingEnsembleResult& ensemble = result->ensemble("demand");
+    ASSERT_EQ(ensemble.namedMetrics.size(), 3u);
+    EXPECT_EQ(ensemble.namedMetrics[0].name, "aggregate_loss");
+    EXPECT_EQ(ensemble.namedMetrics[1].name, "daily_loss");
+    EXPECT_EQ(ensemble.namedMetrics[2].name, "p90_loss");
+}
+
+TEST(TrainingRuns, ReportedLossFilterControlsNamedGraphLossesInResults) {
+    auto network = makeLossWeightedDemandNetwork("training-runs-filtered-graph-losses");
+    auto coordinator = std::make_shared<Coordinator>(1);
+    auto executor = std::make_shared<CoordinatedExecutor>(coordinator, FakeExecutorBehavior::COMPLETE_AFTER_RELEASE);
+    std::shared_ptr<Trainer> trainer = makeTrainer(network, executor);
+
+    TrainingRuns runs({TrainingRunsSpec{"fold_0", trainer, "demand"}},
+                      TrainingRunsFailurePolicy::CANCEL_SIBLINGS,
+                      2.0,
+                      std::nullopt,
+                      {},
+                      {},
+                      {},
+                      {{"demand", {"daily_loss", "p90_loss"}}});
+
+    std::optional<TrainingRunsResult> result;
+    std::exception_ptr exception;
+    std::thread fitThread([&]() {
+        try {
+            TrainingRunsEvaluationOptions evaluationOptions;
+            evaluationOptions.evaluateTrainingPopulation = false;
+            result = runs.fit(TrainerFitOptions{1}, evaluationOptions);
+        } catch (...) {
+            exception = std::current_exception();
+        }
+    });
+
+    ASSERT_TRUE(coordinator->waitForAllStarted());
+    coordinator->releaseAll();
+    fitThread.join();
+    rethrowIfSet(exception);
+
+    ASSERT_TRUE(result.has_value());
+    const TrainingEnsembleResult& ensemble = result->ensemble("demand");
+    ASSERT_EQ(ensemble.namedMetrics.size(), 2u);
+    EXPECT_EQ(ensemble.namedMetrics[0].name, "daily_loss");
+    EXPECT_EQ(ensemble.namedMetrics[1].name, "p90_loss");
+}
+
+TEST(TrainingRuns, ComposedLossEvaluatorExposesGraphLossInputs) {
+    auto network0 = makeLossWeightedDemandNetwork("training-runs-composed-loss-inputs-0");
+    auto network1 = makeLossWeightedDemandNetwork("training-runs-composed-loss-inputs-1");
+
+    std::vector<std::string> inputNames = Thor::Testing::trainingRunsComposedLossEvaluatorExternalInputNamesForTest(
+        {network0, network1}, {1.0, 2.0}, {});
+    std::sort(inputNames.begin(), inputNames.end());
+
+    const std::vector<std::string> expectedInputs{"features", "observed_aggregate", "observed_daily"};
+    EXPECT_EQ(inputNames, expectedInputs);
+}
+
+TEST(TrainingRuns, PredictionOnlyEnsembleHasNoGraphLossMetrics) {
+    auto network0 = makeDemandPredictionOnlyNetwork("training-runs-prediction-only-no-graph-loss-0");
+    auto network1 = makeDemandPredictionOnlyNetwork("training-runs-prediction-only-no-graph-loss-1");
+    auto coordinator = std::make_shared<Coordinator>(2);
+    auto executor0 = std::make_shared<CoordinatedExecutor>(coordinator, FakeExecutorBehavior::COMPLETE_AFTER_RELEASE);
+    auto executor1 = std::make_shared<CoordinatedExecutor>(coordinator, FakeExecutorBehavior::COMPLETE_AFTER_RELEASE);
+    std::shared_ptr<Trainer> trainer0 = makeTrainer(network0, executor0);
+    std::shared_ptr<Trainer> trainer1 = makeTrainer(network1, executor1);
+
+    TrainingRuns runs({TrainingRunsSpec{"fold_0", trainer0, "demand"}, TrainingRunsSpec{"fold_1", trainer1, "demand"}});
+
+    std::optional<TrainingRunsResult> result;
+    std::exception_ptr exception;
+    std::thread fitThread([&]() {
+        try {
+            TrainingRunsEvaluationOptions evaluationOptions;
+            evaluationOptions.evaluateTrainingPopulation = false;
+            result = runs.fit(TrainerFitOptions{1}, evaluationOptions);
+        } catch (...) {
+            exception = std::current_exception();
+        }
+    });
+
+    ASSERT_TRUE(coordinator->waitForAllStarted());
+    coordinator->releaseAll();
+    fitThread.join();
+    rethrowIfSet(exception);
+
+    ASSERT_TRUE(result.has_value());
+    const TrainingEnsembleResult& ensemble = result->ensemble("demand");
+    EXPECT_TRUE(ensemble.namedMetrics.empty());
+    EXPECT_FALSE(ensemble.ensembleTrainingLoss.has_value());
+    EXPECT_FALSE(ensemble.ensembleTestLoss.has_value());
+    EXPECT_FALSE(ensemble.ensembleTestAccuracy.has_value());
+    EXPECT_FALSE(ensemble.hasEnsembleEvaluationMetrics());
 }
 
 TEST(TrainingRuns, NamedMetricResultsUseGraphLossesAndSourceLossWeight) {
