@@ -61,7 +61,7 @@ namespace Thor {
 
 struct NetworkLossReference {
     std::string lossName{};
-    std::string outputName{};
+    std::string predictionOutputName{};
     std::string targetInputName{};
     std::optional<std::string> weightInputName{};
     std::string lossLayerType{};
@@ -161,7 +161,7 @@ class Network {
     void unfreezeTraining();
     [[nodiscard]] std::vector<std::string> getInferenceNetworkInputNames();
     [[nodiscard]] std::vector<std::string> getTrainingOnlyNetworkInputNames();
-    [[nodiscard]] std::map<std::string, std::vector<NetworkLossReference>> getLossReferencesByPredictionOutputName();
+    [[nodiscard]] std::vector<NetworkLossReference> getReportableLosses();
 
     // FIXME: I will need to support indexing layers by their name.
     uint32_t getNumTrainableLayers() { return allTrainableLayersInNetwork.size(); }

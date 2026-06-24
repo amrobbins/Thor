@@ -141,12 +141,9 @@ std::set<std::string> networkOutputNames(Network& network) {
 std::vector<std::string> outputBackedReportableLossNames(Network& network) {
     const std::set<std::string> outputs = networkOutputNames(network);
     std::set<std::string> lossNames;
-    for (const auto& [_, references] : network.getLossReferencesByPredictionOutputName()) {
-        (void)_;
-        for (const NetworkLossReference& reference : references) {
-            if (outputs.count(reference.lossName) != 0) {
-                lossNames.insert(reference.lossName);
-            }
+    for (const NetworkLossReference& reference : network.getReportableLosses()) {
+        if (outputs.count(reference.lossName) != 0) {
+            lossNames.insert(reference.lossName);
         }
     }
     return std::vector<std::string>(lossNames.begin(), lossNames.end());

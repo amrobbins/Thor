@@ -439,32 +439,39 @@ std::filesystem::path uniqueTempPath(const std::string& prefix) {
 }  // namespace
 
 
-TEST(TrainingRuns, LossReferencesExposeLossWeightsForNamedOutputs) {
+TEST(TrainingRuns, ReportableLossesExposeLossWeightsForNamedGraphLosses) {
     auto network = makeLossWeightedDemandNetwork("training-runs-loss-metric-hints");
 
-    const std::map<std::string, std::vector<NetworkLossReference>> references = network->getLossReferencesByPredictionOutputName();
+    const std::vector<NetworkLossReference> reportableLosses = network->getReportableLosses();
 
-    auto dailyIt = references.find("daily");
-    ASSERT_NE(dailyIt, references.end());
-    ASSERT_EQ(dailyIt->second.size(), 1u);
-    EXPECT_EQ(dailyIt->second[0].targetInputName, "observed_daily");
-    EXPECT_EQ(dailyIt->second[0].lossLayerType, "CustomLoss");
-    EXPECT_DOUBLE_EQ(dailyIt->second[0].lossWeight, 2.0);
+    auto findLoss = [&](const std::string& lossName) -> const NetworkLossReference* {
+        auto it = std::find_if(reportableLosses.begin(), reportableLosses.end(), [&](const NetworkLossReference& reference) {
+            return reference.lossName == lossName;
+        });
+        return it == reportableLosses.end() ? nullptr : &*it;
+    };
 
-    auto aggregateIt = references.find("aggregate");
-    ASSERT_NE(aggregateIt, references.end());
-    ASSERT_EQ(aggregateIt->second.size(), 1u);
-    EXPECT_EQ(aggregateIt->second[0].targetInputName, "observed_aggregate");
-    EXPECT_EQ(aggregateIt->second[0].lossLayerType, "CustomLoss");
-    EXPECT_DOUBLE_EQ(aggregateIt->second[0].lossWeight, 1.5);
+    const NetworkLossReference* daily = findLoss("daily_loss");
+    ASSERT_NE(daily, nullptr);
+    EXPECT_EQ(daily->predictionOutputName, "daily");
+    EXPECT_EQ(daily->targetInputName, "observed_daily");
+    EXPECT_EQ(daily->lossLayerType, "CustomLoss");
+    EXPECT_DOUBLE_EQ(daily->lossWeight, 2.0);
 
-    auto p90It = references.find("forecast_p90");
-    ASSERT_NE(p90It, references.end());
-    ASSERT_EQ(p90It->second.size(), 1u);
-    EXPECT_EQ(p90It->second[0].targetInputName, "observed_daily");
-    EXPECT_EQ(p90It->second[0].lossLayerType, "CustomLoss");
-    EXPECT_FALSE(p90It->second[0].quantile.has_value());
-    EXPECT_DOUBLE_EQ(p90It->second[0].lossWeight, 0.5);
+    const NetworkLossReference* aggregate = findLoss("aggregate_loss");
+    ASSERT_NE(aggregate, nullptr);
+    EXPECT_EQ(aggregate->predictionOutputName, "aggregate");
+    EXPECT_EQ(aggregate->targetInputName, "observed_aggregate");
+    EXPECT_EQ(aggregate->lossLayerType, "CustomLoss");
+    EXPECT_DOUBLE_EQ(aggregate->lossWeight, 1.5);
+
+    const NetworkLossReference* p90 = findLoss("p90_loss");
+    ASSERT_NE(p90, nullptr);
+    EXPECT_EQ(p90->predictionOutputName, "forecast_p90");
+    EXPECT_EQ(p90->targetInputName, "observed_daily");
+    EXPECT_EQ(p90->lossLayerType, "CustomLoss");
+    EXPECT_FALSE(p90->quantile.has_value());
+    EXPECT_DOUBLE_EQ(p90->lossWeight, 0.5);
 }
 
 TEST(TrainingRuns, RejectsInvalidRunSpecs) {

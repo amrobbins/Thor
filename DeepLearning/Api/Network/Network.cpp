@@ -1284,7 +1284,7 @@ std::vector<std::string> Network::getTrainingOnlyNetworkInputNames() {
     return names;
 }
 
-std::map<std::string, std::vector<NetworkLossReference>> Network::getLossReferencesByPredictionOutputName() {
+std::vector<NetworkLossReference> Network::getReportableLosses() {
     const std::vector<std::string> trainingOnlyNames = getTrainingOnlyNetworkInputNames();
     const std::set<std::string> trainingOnlyNameSet(trainingOnlyNames.begin(), trainingOnlyNames.end());
 
@@ -1444,7 +1444,7 @@ std::map<std::string, std::vector<NetworkLossReference>> Network::getLossReferen
         return names;
     };
 
-    std::map<std::string, std::vector<NetworkLossReference>> referencesByOutputName;
+    std::vector<NetworkLossReference> references;
     for (uint32_t i = 0; i < numLayers; ++i) {
         std::shared_ptr<Loss> loss = std::dynamic_pointer_cast<Loss>(getLayer(i));
         if (loss == nullptr) {
@@ -1520,37 +1520,38 @@ std::map<std::string, std::vector<NetworkLossReference>> Network::getLossReferen
 
         for (const std::string& outputName : predictionOutputNames) {
             for (const std::string& lossName : lossNames) {
-            NetworkLossReference reference;
-            reference.lossName = lossName;
-            reference.outputName = outputName;
-            reference.targetInputName = labelInputName.value();
-            reference.weightInputName = weightInputName;
-            reference.lossLayerType = loss->getLayerType();
-            reference.lossWeight = lossWeight;
-            reference.quantile = quantile;
-            referencesByOutputName[outputName].push_back(std::move(reference));
+                NetworkLossReference reference;
+                reference.lossName = lossName;
+                reference.predictionOutputName = outputName;
+                reference.targetInputName = labelInputName.value();
+                reference.weightInputName = weightInputName;
+                reference.lossLayerType = loss->getLayerType();
+                reference.lossWeight = lossWeight;
+                reference.quantile = quantile;
+                references.push_back(std::move(reference));
             }
         }
     }
 
-    for (auto& [_, references] : referencesByOutputName) {
-        std::sort(references.begin(), references.end(), [](const NetworkLossReference& lhs, const NetworkLossReference& rhs) {
-            if (lhs.lossName != rhs.lossName) {
-                return lhs.lossName < rhs.lossName;
-            }
-            if (lhs.targetInputName != rhs.targetInputName) {
-                return lhs.targetInputName < rhs.targetInputName;
-            }
-            if (lhs.lossLayerType != rhs.lossLayerType) {
-                return lhs.lossLayerType < rhs.lossLayerType;
-            }
-            if (lhs.weightInputName != rhs.weightInputName) {
-                return lhs.weightInputName < rhs.weightInputName;
-            }
-            return lhs.quantile < rhs.quantile;
-        });
-    }
-    return referencesByOutputName;
+    std::sort(references.begin(), references.end(), [](const NetworkLossReference& lhs, const NetworkLossReference& rhs) {
+        if (lhs.lossName != rhs.lossName) {
+            return lhs.lossName < rhs.lossName;
+        }
+        if (lhs.predictionOutputName != rhs.predictionOutputName) {
+            return lhs.predictionOutputName < rhs.predictionOutputName;
+        }
+        if (lhs.targetInputName != rhs.targetInputName) {
+            return lhs.targetInputName < rhs.targetInputName;
+        }
+        if (lhs.lossLayerType != rhs.lossLayerType) {
+            return lhs.lossLayerType < rhs.lossLayerType;
+        }
+        if (lhs.weightInputName != rhs.weightInputName) {
+            return lhs.weightInputName < rhs.weightInputName;
+        }
+        return lhs.quantile < rhs.quantile;
+    });
+    return references;
 }
 
 void Network::pruneLoadedTrainingArtifactsForInference() {

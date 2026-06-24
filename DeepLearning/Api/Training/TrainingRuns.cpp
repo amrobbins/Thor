@@ -498,14 +498,14 @@ bool quantilesCompatible(std::optional<double> lhs, std::optional<double> rhs) {
     return std::fabs(lhs.value() - rhs.value()) <= 1.0e-6;
 }
 
-bool trainingRunsLossReferencesCompatible(const NetworkLossReference& lhs, const NetworkLossReference& rhs) {
+bool trainingRunsReportableLossesCompatible(const NetworkLossReference& lhs, const NetworkLossReference& rhs) {
     if (lhs.lossName != rhs.lossName) {
         return false;
     }
     if (std::fabs(lhs.lossWeight - rhs.lossWeight) > 1.0e-6) {
         return false;
     }
-    if (lhs.outputName != rhs.outputName || lhs.targetInputName != rhs.targetInputName) {
+    if (lhs.predictionOutputName != rhs.predictionOutputName || lhs.targetInputName != rhs.targetInputName) {
         return false;
     }
     if (lhs.weightInputName != rhs.weightInputName) {
@@ -520,9 +520,9 @@ bool trainingRunsLossReferencesCompatible(const NetworkLossReference& lhs, const
     return true;
 }
 
-std::string trainingRunsLossReferenceDescription(const NetworkLossReference& reference) {
+std::string trainingRunsReportableLossDescription(const NetworkLossReference& reference) {
     std::ostringstream out;
-    out << "loss_name='" << reference.lossName << "', output_name='" << reference.outputName
+    out << "loss_name='" << reference.lossName << "', prediction_output_name='" << reference.predictionOutputName
         << "', target_input_name='" << reference.targetInputName << "'";
     if (reference.weightInputName.has_value()) {
         out << ", weight_input_name='" << *reference.weightInputName << "'";
@@ -539,42 +539,29 @@ std::string trainingRunsLossReferenceDescription(const NetworkLossReference& ref
     return out.str();
 }
 
-std::string trainingRunsLossReferenceListDescription(const std::vector<NetworkLossReference>& references) {
-    std::ostringstream oss;
-    for (size_t i = 0; i < references.size(); ++i) {
-        if (i != 0) {
-            oss << "; ";
-        }
-        oss << "[" << i << "] " << trainingRunsLossReferenceDescription(references[i]);
-    }
-    return oss.str();
-}
 
-std::map<std::string, NetworkLossReference> trainingRunsLossReferencesByName(
-    const std::map<std::string, std::vector<NetworkLossReference>>& referencesByOutputName,
+std::map<std::string, NetworkLossReference> trainingRunsReportableLossesByName(
+    const std::vector<NetworkLossReference>& reportableLosses,
     const std::string& context) {
     std::map<std::string, NetworkLossReference> byName;
-    for (const auto& [_, references] : referencesByOutputName) {
-        (void)_;
-        for (const NetworkLossReference& reference : references) {
-            auto [it, inserted] = byName.emplace(reference.lossName, reference);
-            if (!inserted && !trainingRunsLossReferencesCompatible(it->second, reference)) {
-                throw std::runtime_error(context + " found ambiguous graph loss name '" + reference.lossName +
-                                         "'. Multiple source losses with that report name have different wiring/configuration: " +
-                                         trainingRunsLossReferenceDescription(it->second) + "; " +
-                                         trainingRunsLossReferenceDescription(reference) +
-                                         ". Give graph losses unique NetworkOutput names before ensemble evaluation.");
-            }
+    for (const NetworkLossReference& reference : reportableLosses) {
+        auto [it, inserted] = byName.emplace(reference.lossName, reference);
+        if (!inserted && !trainingRunsReportableLossesCompatible(it->second, reference)) {
+            throw std::runtime_error(context + " found ambiguous graph loss name '" + reference.lossName +
+                                     "'. Multiple source losses with that report name have different wiring/configuration: " +
+                                     trainingRunsReportableLossDescription(it->second) + "; " +
+                                     trainingRunsReportableLossDescription(reference) +
+                                     ". Give graph losses unique NetworkOutput names before ensemble evaluation.");
         }
     }
     return byName;
 }
 
 std::vector<ResolvedEnsembleLoss> resolveTrainingRunsReportedLosses(
-    const std::map<std::string, std::vector<NetworkLossReference>>& referencesByOutputName,
+    const std::vector<NetworkLossReference>& reportableLosses,
     const std::vector<std::string>& requestedLossNames,
     const std::string& context) {
-    const std::map<std::string, NetworkLossReference> byName = trainingRunsLossReferencesByName(referencesByOutputName, context);
+    const std::map<std::string, NetworkLossReference> byName = trainingRunsReportableLossesByName(reportableLosses, context);
     if (byName.empty()) {
         if (requestedLossNames.empty()) {
             return {};
@@ -602,7 +589,7 @@ std::vector<ResolvedEnsembleLoss> resolveTrainingRunsReportedLosses(
                 std::ostringstream oss;
                 oss << context << " requested reported loss '" << lossName << "', but no graph loss with that name exists. Available losses:";
                 for (const auto& [availableName, reference] : byName) {
-                    oss << " " << availableName << "(" << trainingRunsLossReferenceDescription(reference) << ")";
+                    oss << " " << availableName << "(" << trainingRunsReportableLossDescription(reference) << ")";
                 }
                 throw std::runtime_error(oss.str());
             }
@@ -616,7 +603,7 @@ std::vector<ResolvedEnsembleLoss> resolveTrainingRunsReportedLosses(
         const NetworkLossReference& reference = byName.at(lossName);
         ResolvedEnsembleLoss loss;
         loss.lossName = reference.lossName;
-        loss.predictionOutputName = reference.outputName;
+        loss.predictionOutputName = reference.predictionOutputName;
         loss.targetInputName = reference.targetInputName;
         loss.weightInputName = reference.weightInputName;
         loss.lossType = reference.lossLayerType;
@@ -1246,7 +1233,7 @@ void TrainingRuns::validateRunSpecs() const {
             const std::vector<std::string>& requestedLossNames =
                 reportedLossesIt == reportedLosses.end() ? emptyReportedLossNames : reportedLossesIt->second;
             const bool reportsGraphLosses = !resolveTrainingRunsReportedLosses(
-                spec.trainer->getNetwork()->getLossReferencesByPredictionOutputName(),
+                spec.trainer->getNetwork()->getReportableLosses(),
                 requestedLossNames,
                 "TrainingRuns reported_losses for ensemble_group '" + *spec.ensembleGroup + "' run '" + spec.runName + "'")
                                                  .empty();
@@ -1467,7 +1454,7 @@ void TrainingRuns::validateReportedLosses() const {
         std::vector<TrainingRunInputSignature> inputSignature{};
         std::vector<TrainingRunOutputSignature> outputSignature{};
         std::shared_ptr<Network> network{};
-        std::optional<std::map<std::string, std::vector<NetworkLossReference>>> lossReferencesByOutputName{};
+        std::optional<std::vector<NetworkLossReference>> reportableLosses{};
     };
 
     std::map<std::string, std::vector<EnsembleMemberSignatureState>> membersByGroup;
@@ -1502,11 +1489,11 @@ void TrainingRuns::validateReportedLosses() const {
         }
     }
 
-    auto lossReferencesForMember = [](EnsembleMemberSignatureState& member) -> const std::map<std::string, std::vector<NetworkLossReference>>& {
-        if (!member.lossReferencesByOutputName.has_value()) {
-            member.lossReferencesByOutputName = member.network->getLossReferencesByPredictionOutputName();
+    auto reportableLossesForMember = [](EnsembleMemberSignatureState& member) -> const std::vector<NetworkLossReference>& {
+        if (!member.reportableLosses.has_value()) {
+            member.reportableLosses = member.network->getReportableLosses();
         }
-        return *member.lossReferencesByOutputName;
+        return *member.reportableLosses;
     };
 
     for (auto& [groupName, members] : membersByGroup) {
@@ -1521,7 +1508,7 @@ void TrainingRuns::validateReportedLosses() const {
         }();
         const std::string context = "TrainingRuns reported_losses for ensemble_group '" + groupName + "'";
         const std::vector<ResolvedEnsembleLoss> referenceLosses =
-            resolveTrainingRunsReportedLosses(lossReferencesForMember(referenceMember), requestedLossNames, context + " reference run '" + referenceMember.runName + "'");
+            resolveTrainingRunsReportedLosses(reportableLossesForMember(referenceMember), requestedLossNames, context + " reference run '" + referenceMember.runName + "'");
 
         for (const ResolvedEnsembleLoss& resolved : referenceLosses) {
             const TrainingRunOutputSignature* referenceOutput = findOutputSignatureItem(referenceMember.outputSignature, resolved.predictionOutputName);
@@ -1550,7 +1537,7 @@ void TrainingRuns::validateReportedLosses() const {
                 EnsembleMemberSignatureState& member = members[memberIndex];
                 const std::string memberContext = context + " run '" + member.runName + "'";
                 const std::vector<ResolvedEnsembleLoss> memberLosses =
-                    resolveTrainingRunsReportedLosses(lossReferencesForMember(member), requestedLossNames, memberContext);
+                    resolveTrainingRunsReportedLosses(reportableLossesForMember(member), requestedLossNames, memberContext);
                 auto memberResolvedIt = std::find_if(memberLosses.begin(), memberLosses.end(), [&](const ResolvedEnsembleLoss& candidate) {
                     return candidate.lossName == resolved.lossName;
                 });
@@ -1559,7 +1546,7 @@ void TrainingRuns::validateReportedLosses() const {
                 }
                 NetworkLossReference reference;
                 reference.lossName = resolved.lossName;
-                reference.outputName = resolved.predictionOutputName;
+                reference.predictionOutputName = resolved.predictionOutputName;
                 reference.targetInputName = resolved.targetInputName;
                 reference.weightInputName = resolved.weightInputName;
                 reference.lossLayerType = resolved.lossType;
@@ -1567,17 +1554,17 @@ void TrainingRuns::validateReportedLosses() const {
                 reference.quantile = resolved.quantile;
                 NetworkLossReference memberReference;
                 memberReference.lossName = memberResolvedIt->lossName;
-                memberReference.outputName = memberResolvedIt->predictionOutputName;
+                memberReference.predictionOutputName = memberResolvedIt->predictionOutputName;
                 memberReference.targetInputName = memberResolvedIt->targetInputName;
                 memberReference.weightInputName = memberResolvedIt->weightInputName;
                 memberReference.lossLayerType = memberResolvedIt->lossType;
                 memberReference.lossWeight = memberResolvedIt->lossWeight;
                 memberReference.quantile = memberResolvedIt->quantile;
-                if (!trainingRunsLossReferencesCompatible(reference, memberReference)) {
+                if (!trainingRunsReportableLossesCompatible(reference, memberReference)) {
                     throw std::runtime_error(memberContext + " resolved graph loss '" + resolved.lossName +
                                              "' differently than reference run '" + referenceMember.runName + "'. Reference: " +
-                                             trainingRunsLossReferenceDescription(reference) + "; member: " +
-                                             trainingRunsLossReferenceDescription(memberReference) + ".");
+                                             trainingRunsReportableLossDescription(reference) + "; member: " +
+                                             trainingRunsReportableLossDescription(memberReference) + ".");
                 }
 
                 const TrainingRunOutputSignature* memberOutput = findOutputSignatureItem(member.outputSignature, resolved.predictionOutputName);
@@ -1616,7 +1603,7 @@ std::vector<TrainingNamedMetricResult> TrainingRuns::namedMetricResultsForGroup(
     const auto reportedIt = reportedLosses.find(std::string(ensembleGroup));
     const std::vector<std::string>& requestedLossNames = reportedIt == reportedLosses.end() ? empty : reportedIt->second;
     const std::vector<ResolvedEnsembleLoss> resolvedLosses = resolveTrainingRunsReportedLosses(
-        representativeNetwork->getLossReferencesByPredictionOutputName(),
+        representativeNetwork->getReportableLosses(),
         requestedLossNames,
         "TrainingRuns reported_losses for ensemble_group '" + std::string(ensembleGroup) + "'");
 
@@ -2164,7 +2151,7 @@ TrainingRunsComposedEvaluatorArtifacts loadTrainingRunsComposedEvaluatorArtifact
         artifacts.weights.push_back(member.spec->ensembleWeight);
     }
 
-    artifacts.losses = resolveTrainingRunsReportedLosses(artifacts.memberNetworks.front()->getLossReferencesByPredictionOutputName(),
+    artifacts.losses = resolveTrainingRunsReportedLosses(artifacts.memberNetworks.front()->getReportableLosses(),
                                                          requestedLossNames,
                                                          context);
     if (artifacts.losses.empty()) {
@@ -2173,7 +2160,7 @@ TrainingRunsComposedEvaluatorArtifacts loadTrainingRunsComposedEvaluatorArtifact
 
     for (size_t memberIndex = 1; memberIndex < artifacts.memberNetworks.size(); ++memberIndex) {
         const std::vector<ResolvedEnsembleLoss> memberLosses = resolveTrainingRunsReportedLosses(
-            artifacts.memberNetworks[memberIndex]->getLossReferencesByPredictionOutputName(),
+            artifacts.memberNetworks[memberIndex]->getReportableLosses(),
             requestedLossNames,
             context + " member " + std::to_string(memberIndex));
         for (const ResolvedEnsembleLoss& referenceLoss : artifacts.losses) {
@@ -2186,7 +2173,7 @@ TrainingRunsComposedEvaluatorArtifacts loadTrainingRunsComposedEvaluatorArtifact
             }
             NetworkLossReference reference;
             reference.lossName = referenceLoss.lossName;
-            reference.outputName = referenceLoss.predictionOutputName;
+            reference.predictionOutputName = referenceLoss.predictionOutputName;
             reference.targetInputName = referenceLoss.targetInputName;
             reference.weightInputName = referenceLoss.weightInputName;
             reference.lossLayerType = referenceLoss.lossType;
@@ -2194,18 +2181,18 @@ TrainingRunsComposedEvaluatorArtifacts loadTrainingRunsComposedEvaluatorArtifact
             reference.quantile = referenceLoss.quantile;
             NetworkLossReference memberReference;
             memberReference.lossName = memberLossIt->lossName;
-            memberReference.outputName = memberLossIt->predictionOutputName;
+            memberReference.predictionOutputName = memberLossIt->predictionOutputName;
             memberReference.targetInputName = memberLossIt->targetInputName;
             memberReference.weightInputName = memberLossIt->weightInputName;
             memberReference.lossLayerType = memberLossIt->lossType;
             memberReference.lossWeight = memberLossIt->lossWeight;
             memberReference.quantile = memberLossIt->quantile;
-            if (!trainingRunsLossReferencesCompatible(reference, memberReference)) {
+            if (!trainingRunsReportableLossesCompatible(reference, memberReference)) {
                 throw std::runtime_error(context + " member " + std::to_string(memberIndex) +
                                          " resolved graph loss '" + referenceLoss.lossName +
                                          "' differently than the reference member. Reference: " +
-                                         trainingRunsLossReferenceDescription(reference) + "; member: " +
-                                         trainingRunsLossReferenceDescription(memberReference) + ".");
+                                         trainingRunsReportableLossDescription(reference) + "; member: " +
+                                         trainingRunsReportableLossDescription(memberReference) + ".");
             }
         }
     }
@@ -2509,7 +2496,7 @@ std::vector<std::string> trainingRunsComposedLossEvaluatorExternalInputNamesForT
         throw std::runtime_error("TrainingRuns composed loss evaluator test requires at least one member network.");
     }
     const std::vector<ResolvedEnsembleLoss> losses = resolveTrainingRunsReportedLosses(
-        memberNetworks.front()->getLossReferencesByPredictionOutputName(),
+        memberNetworks.front()->getReportableLosses(),
         requestedLossNames,
         "TrainingRuns composed loss evaluator test");
     TrainingRunsComposedEnsembleEvaluator evaluator =
