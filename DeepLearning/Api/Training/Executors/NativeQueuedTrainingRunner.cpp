@@ -113,6 +113,88 @@ struct QueuedTrainingState {
     uint64_t numBatchesDoneInEpoch = 0;
     uint64_t numBatchesInEpoch = 0;
 };
+struct WallThroughputEmaState {
+    bool initialized = false;
+    double lastElapsedSeconds = 0.0;
+    uint64_t lastCompletedBatches = 0;
+    double samplesPerSecond = 0.0;
+    double batchesPerSecond = 0.0;
+    double floatingPointOperationsPerSecond = 0.0;
+};
+
+constexpr double WALL_THROUGHPUT_EMA_ALPHA = 0.25;
+constexpr double WALL_THROUGHPUT_EMA_MIN_INTERVAL_SECONDS = 0.25;
+
+void updateWallThroughputRates(TrainingStatsSnapshot& snapshot,
+                               WallThroughputEmaState& state,
+                               uint64_t completedBatches,
+                               uint64_t batchSize,
+                               uint64_t floatingPointOperationsPerBatch) {
+    snapshot.floatingPointOperationsPerBatch = floatingPointOperationsPerBatch;
+    if (snapshot.elapsedSeconds <= 0.0 || completedBatches == 0 || batchSize == 0) {
+        return;
+    }
+
+    auto assignRates = [&](double batchesPerSecond,
+                           double samplesPerSecond,
+                           double floatingPointOperationsPerSecond) {
+        snapshot.batchesPerSecond = batchesPerSecond;
+        snapshot.samplesPerSecond = samplesPerSecond;
+        snapshot.floatingPointOperationsPerSecond = floatingPointOperationsPerSecond;
+    };
+
+    if (!state.initialized) {
+        const double batchesPerSecond = static_cast<double>(completedBatches) / snapshot.elapsedSeconds;
+        const double samplesPerSecond = (static_cast<double>(completedBatches) * static_cast<double>(batchSize)) /
+                                        snapshot.elapsedSeconds;
+        const double floatingPointOperationsPerSecond =
+            (static_cast<double>(completedBatches) * static_cast<double>(floatingPointOperationsPerBatch)) /
+            snapshot.elapsedSeconds;
+        state.initialized = true;
+        state.lastElapsedSeconds = snapshot.elapsedSeconds;
+        state.lastCompletedBatches = completedBatches;
+        state.batchesPerSecond = batchesPerSecond;
+        state.samplesPerSecond = samplesPerSecond;
+        state.floatingPointOperationsPerSecond = floatingPointOperationsPerSecond;
+        assignRates(batchesPerSecond, samplesPerSecond, floatingPointOperationsPerSecond);
+        return;
+    }
+
+    if (snapshot.elapsedSeconds <= state.lastElapsedSeconds || completedBatches <= state.lastCompletedBatches) {
+        assignRates(state.batchesPerSecond, state.samplesPerSecond, state.floatingPointOperationsPerSecond);
+        return;
+    }
+
+    const double intervalSeconds = snapshot.elapsedSeconds - state.lastElapsedSeconds;
+    if (intervalSeconds < WALL_THROUGHPUT_EMA_MIN_INTERVAL_SECONDS) {
+        // Completion callbacks can leave several finished batches queued for the
+        // host to pop back-to-back.  Updating the wall-clock EMA on those tiny
+        // dequeue intervals turns a short drain burst into a visible throughput
+        // spike.  Keep accumulating progress until there is a meaningful wall
+        // interval; the eventual update uses the full elapsed/progress delta.
+        assignRates(state.batchesPerSecond, state.samplesPerSecond, state.floatingPointOperationsPerSecond);
+        return;
+    }
+
+    const double intervalBatches = static_cast<double>(completedBatches - state.lastCompletedBatches);
+    const double intervalBatchesPerSecond = intervalBatches / intervalSeconds;
+    const double intervalSamplesPerSecond = (intervalBatches * static_cast<double>(batchSize)) / intervalSeconds;
+    const double intervalFloatingPointOperationsPerSecond =
+        (intervalBatches * static_cast<double>(floatingPointOperationsPerBatch)) / intervalSeconds;
+
+    state.batchesPerSecond = (WALL_THROUGHPUT_EMA_ALPHA * intervalBatchesPerSecond) +
+                             ((1.0 - WALL_THROUGHPUT_EMA_ALPHA) * state.batchesPerSecond);
+    state.samplesPerSecond = (WALL_THROUGHPUT_EMA_ALPHA * intervalSamplesPerSecond) +
+                             ((1.0 - WALL_THROUGHPUT_EMA_ALPHA) * state.samplesPerSecond);
+    state.floatingPointOperationsPerSecond =
+        (WALL_THROUGHPUT_EMA_ALPHA * intervalFloatingPointOperationsPerSecond) +
+        ((1.0 - WALL_THROUGHPUT_EMA_ALPHA) * state.floatingPointOperationsPerSecond);
+
+    state.lastElapsedSeconds = snapshot.elapsedSeconds;
+    state.lastCompletedBatches = completedBatches;
+    assignRates(state.batchesPerSecond, state.samplesPerSecond, state.floatingPointOperationsPerSecond);
+}
+
 
 void requestQueuedTrainingCancellation(const std::shared_ptr<QueuedTrainingState>& state) {
     if (state == nullptr) {
@@ -1574,10 +1656,9 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
 
     const auto runStart = std::chrono::high_resolution_clock::now();
     uint64_t currentEpoch = evaluateOnly ? 0 : request.initialCompletedEpochs;
+    const uint64_t initialEpochForThroughput = currentEpoch;
+    std::map<TrainingEventPhase, WallThroughputEmaState> throughputByPhase;
     const uint64_t totalRequestedEpochs = currentEpoch + request.epochs;
-    double averageTrainingBatchTime = -1.0;
-    double averageValidationBatchTime = -1.0;
-
     auto elapsedSinceRunStart = [&]() {
         const auto now = std::chrono::high_resolution_clock::now();
         const std::chrono::duration<double> elapsed = std::chrono::duration_cast<std::chrono::duration<double>>(now - runStart);
@@ -1694,9 +1775,6 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                 }
             };
 
-            std::chrono::high_resolution_clock::time_point previousBatchCompletionTime{};
-            bool havePreviousBatchCompletionTime = false;
-            bool haveCompletedBatchTimingInPhase = false;
             try {
                 while (true) {
                     requestExternalCancel();
@@ -1732,49 +1810,28 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                     }
 
                     {
-                        double& averageBatchTime =
-                            (phase == TrainingEventPhase::TRAIN) ? averageTrainingBatchTime : averageValidationBatchTime;
-                        double completedBatchTime = -1.0;
-                        if (havePreviousBatchCompletionTime && completedBatch.completionTime > previousBatchCompletionTime) {
-                            const std::chrono::duration<double> elapsed = std::chrono::duration_cast<std::chrono::duration<double>>(
-                                completedBatch.completionTime - previousBatchCompletionTime);
-                            completedBatchTime = elapsed.count();
-                        }
-                        previousBatchCompletionTime = completedBatch.completionTime;
-                        havePreviousBatchCompletionTime = true;
-
-                        double batchTimeForStats = completedBatchTime;
-                        if (completedBatchTime > 0.0) {
-                            if (haveCompletedBatchTimingInPhase) {
-                                if (averageBatchTime < 0.0) {
-                                    averageBatchTime = completedBatchTime;
-                                } else {
-                                    averageBatchTime = 0.25 * completedBatchTime + 0.75 * averageBatchTime;
-                                }
-                                batchTimeForStats = averageBatchTime;
-                            } else if (averageBatchTime > 0.0) {
-                                // The first completion in a phase includes queue fill and any loader/startup
-                                // latency before the pipeline reaches steady state. Use the previous phase EMA
-                                // for the current line, but do not let the first interval poison the EMA.
-                                batchTimeForStats = averageBatchTime;
-                            }
-                            haveCompletedBatchTimingInPhase = true;
-                        } else if (averageBatchTime > 0.0) {
-                            batchTimeForStats = averageBatchTime;
-                        }
-
                         TrainingStatsSnapshot snapshot = makeBaseSnapshot(phase, humanEpoch, batchSize, batchesPerEpoch, state);
                         snapshot.stepInEpoch = batchNum + 1;
                         snapshot.step = (currentEpoch * batchesPerEpoch) + snapshot.stepInEpoch;
                         snapshot.samplesProcessed = snapshot.step * batchSize;
-                        if (batchTimeForStats > 0.0) {
-                            snapshot.samplesPerSecond = static_cast<double>(batchSize) / batchTimeForStats;
-                            snapshot.batchesPerSecond = 1.0 / batchTimeForStats;
-                            snapshot.floatingPointOperationsPerBatch =
-                                (phase == TrainingEventPhase::TRAIN) ? trainingFlopsPerBatch : forwardFlopsPerBatch;
-                            snapshot.floatingPointOperationsPerSecond =
-                                static_cast<double>(snapshot.floatingPointOperationsPerBatch) / batchTimeForStats;
-                        }
+
+                        // Public throughput stats use wall-clock time, not the CUDA
+                        // completion-callback interval.  Smooth the exact wall-clock
+                        // interval rate between same-phase stats snapshots so the visible
+                        // numbers respond to changes without reverting to active-kernel
+                        // micro-throughput.  For TRAIN snapshots, the same-phase interval
+                        // crosses validation/model-selection gaps between epochs, so the
+                        // reported rate remains end-to-end for the training request.
+                        const uint64_t completedEpochsThisRequest = currentEpoch - initialEpochForThroughput;
+                        const uint64_t completedBatchesThisRequest =
+                            (completedEpochsThisRequest * batchesPerEpoch) + snapshot.stepInEpoch;
+                        const uint64_t phaseFlopsPerBatch =
+                            (phase == TrainingEventPhase::TRAIN) ? trainingFlopsPerBatch : forwardFlopsPerBatch;
+                        updateWallThroughputRates(snapshot,
+                                                  throughputByPhase[phase],
+                                                  completedBatchesThisRequest,
+                                                  batchSize,
+                                                  phaseFlopsPerBatch);
 
                         assignScalarStatsToSnapshot(snapshot, state->scalarTensorNames, completedBatch.scalarStats, state->aggregateLossTensorNames);
                         epochLosses.update(snapshot);

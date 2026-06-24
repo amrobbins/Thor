@@ -1,8 +1,14 @@
 import ctypes
 import json
+import math
 import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
+import urllib.request
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -10,8 +16,19 @@ import thor
 from integration_flags import integration_flag_enabled, integration_skip_reason
 
 RUN_TRAINING_INTEGRATION = integration_flag_enabled("THOR_RUN_TRAINING_INTEGRATION")
+AIRFOIL_SELF_NOISE_URL = os.environ.get(
+    "THOR_AIRFOIL_SELF_NOISE_URL",
+    "https://archive.ics.uci.edu/ml/machine-learning-databases/00291/airfoil_self_noise.dat",
+)
+AIRFOIL_QUANTILE_CACHE_DIR = Path(
+    os.environ.get("THOR_AIRFOIL_QUANTILE_CACHE_DIR", "/tmp/thor_airfoil_quantile_training"))
+AIRFOIL_QUANTILE_STATS_COLOR = os.environ.get("THOR_AIRFOIL_QUANTILE_STATS_COLOR", "auto")
+AIRFOIL_QUANTILE_STATS_INTERVAL_S = float(os.environ.get("THOR_AIRFOIL_QUANTILE_STATS_INTERVAL_S", "0.0"))
+AIRFOIL_QUANTILE_SUMMARY_LOGS_PER_SECOND = float(os.environ.get("THOR_AIRFOIL_QUANTILE_SUMMARY_LOGS_PER_SECOND", "2.0"))
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
-_RUN_STATUS_RE = re.compile(r"INFO runs\[(?P<run>[^\]|]+)(?:\|[^\]]+)?\]:.*\bstatus=(?P<status>completed|failed|cancelled|interrupted|oom|running|starting|not_started)\b")
+_RUN_STATUS_RE = re.compile(
+    r"INFO runs\[(?P<run>[^\]|]+)(?:\|[^\]]+)?\]:.*\bstatus=(?P<status>completed|failed|cancelled|interrupted|oom|running|starting|not_started)\b"
+)
 
 
 def _flush_native_stdio_for_capture():
@@ -26,21 +43,115 @@ def _captured_terminal_statuses(captured_text: str):
     return seen
 
 
+class _NativeOutputTee:
+    """Mirror native stdout/stderr immediately while keeping text for assertions."""
+
+    def __init__(self):
+        self._saved_fds = {}
+        self._tee_processes = []
+        self._capture_paths = []
+        self._saved_force_color = None
+        self._had_force_color = False
+        self._set_force_color_for_tty_tee = False
+
+    def __enter__(self):
+        _flush_native_stdio_for_capture()
+        self._had_force_color = "FORCE_COLOR" in os.environ
+        self._saved_force_color = os.environ.get("FORCE_COLOR")
+        self._set_force_color_for_tty_tee = False
+        if os.isatty(1) and not os.environ.get("NO_COLOR"):
+            # Native stdout/stderr are about to be redirected to pipes so the
+            # helper tee process can mirror output and capture it for assertions.
+            # Preserve color=auto terminal behavior by forcing color only when
+            # the original stdout was a TTY. Shell redirection still leaves this
+            # unset, so redirected files stay plain.
+            os.environ["FORCE_COLOR"] = "1"
+            self._set_force_color_for_tty_tee = True
+        tee_exe = shutil.which("tee")
+        assert tee_exe is not None, "the temporary native-output tee requires /usr/bin/tee on PATH"
+
+        for fd in (1, 2):
+            saved_fd = os.dup(fd)
+            read_fd, write_fd = os.pipe()
+            capture_file = tempfile.NamedTemporaryFile(
+                prefix=f"thor_training_runs_fit_fd{fd}_", suffix=".log", delete=False)
+            capture_path = capture_file.name
+            capture_file.close()
+
+            process = subprocess.Popen(
+                [tee_exe, capture_path],
+                stdin=read_fd,
+                stdout=saved_fd,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+            )
+            os.close(read_fd)
+            os.dup2(write_fd, fd)
+            os.close(write_fd)
+
+            self._saved_fds[fd] = saved_fd
+            self._tee_processes.append(process)
+            self._capture_paths.append(capture_path)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+            _flush_native_stdio_for_capture()
+        finally:
+            for fd, saved_fd in self._saved_fds.items():
+                os.dup2(saved_fd, fd)
+
+            for process in self._tee_processes:
+                process.wait()
+
+            for saved_fd in self._saved_fds.values():
+                os.close(saved_fd)
+
+            if self._set_force_color_for_tty_tee:
+                if self._had_force_color:
+                    os.environ["FORCE_COLOR"] = self._saved_force_color
+                else:
+                    os.environ.pop("FORCE_COLOR", None)
+
+        return False
+
+    def text(self) -> str:
+        parts = []
+        for capture_path in self._capture_paths:
+            path = Path(capture_path)
+            try:
+                parts.append(path.read_text(errors="replace"))
+            finally:
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+        return "".join(parts)
+
+
+def _expects_color_for_stats_color_mode(mode: str) -> bool:
+    if os.environ.get("NO_COLOR"):
+        return False
+    if mode == "always":
+        return True
+    if mode == "never":
+        return False
+    if os.environ.get("CLICOLOR_FORCE") not in {None, "", "0"}:
+        return True
+    if os.environ.get("FORCE_COLOR") not in {None, "", "0"}:
+        return True
+    return os.isatty(1)
+
+
 def _fit_runs_and_capture_text(runs, capfd, *, epochs: int, test_loader=None):
     _flush_native_stdio_for_capture()
     capfd.readouterr()
-    results = runs.fit(epochs=epochs, test_loader=test_loader)
-    _flush_native_stdio_for_capture()
-    captured = capfd.readouterr()
-    captured_text = captured.out + captured.err
-
-    # Mirror the trainer integration tests: native fprintf output is captured for
-    # assertions, then replayed outside capture so failures still show useful logs.
     with capfd.disabled():
-        sys.stdout.write(captured_text)
-        sys.stdout.flush()
-
-    return results, captured_text
+        with _NativeOutputTee() as tee:
+            results = runs.fit(epochs=epochs, test_loader=test_loader)
+    return results, tee.text()
 
 
 def _regression_arrays(*, dtype=np.float32):
@@ -78,6 +189,120 @@ def _regression_one_batch_loader(*, dtype=np.float32):
         example_input_name="examples",
         label_input_name="labels",
         dataset_name="training_runs_regression_one_batch",
+    )
+
+
+def _mae_quantile_regression_arrays(*, dtype=np.float32):
+    # Positive, continuous targets make this a better regression/forecast smoke
+    # dataset than the symmetric +/-1 toy data used by the generic tiny regressor.
+    # With zero-initialized prediction heads and effectively-frozen training, the
+    # deterministic mean target value is 3.5.  That gives MAE=3.5, p10 pinball
+    # loss=0.35, and p90 pinball loss=3.15.
+    x = np.array(
+        [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [1.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    y = np.array([[1.0], [2.0], [4.0], [7.0]], dtype=np.float32)
+    return np.ascontiguousarray(x, dtype=dtype), np.ascontiguousarray(y, dtype=dtype)
+
+
+def _mae_quantile_regression_one_batch_loader(*, dtype=np.float32):
+    x, y = _mae_quantile_regression_arrays(dtype=dtype)
+    loader_cls = thor.training.NumpyFloat16BatchLoader if dtype == np.float16 else thor.training.NumpyFloat32BatchLoader
+    return loader_cls(
+        x,
+        y,
+        x,
+        y,
+        batch_size=4,
+        example_input_name="examples",
+        label_input_name="demand",
+        dataset_name="training_runs_mae_quantile_regression_one_batch",
+    )
+
+
+def _download_file_if_missing(url: str, path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and path.stat().st_size > 0:
+        return
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    try:
+        urllib.request.urlretrieve(url, tmp_path)
+        tmp_path.replace(path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def _ensure_airfoil_self_noise_arrays(*, cache_root: Path = AIRFOIL_QUANTILE_CACHE_DIR):
+    # UCI Airfoil Self-Noise is a compact real regression dataset: 1503 rows,
+    # five numeric features, and one continuous sound-pressure target.
+    data_path = cache_root / "downloads" / "airfoil_self_noise.dat"
+    _download_file_if_missing(AIRFOIL_SELF_NOISE_URL, data_path)
+    data = np.loadtxt(data_path, dtype=np.float32)
+    assert data.ndim == 2
+    assert data.shape[0] >= 1000
+    assert data.shape[1] == 6
+
+    features = np.ascontiguousarray(data[:, :5], dtype=np.float32)
+    target = np.ascontiguousarray(data[:, 5:6], dtype=np.float32)
+
+    feature_mean = features.mean(axis=0, keepdims=True)
+    feature_std = features.std(axis=0, keepdims=True)
+    feature_std[feature_std == 0.0] = 1.0
+    features = np.ascontiguousarray((features - feature_mean) / feature_std, dtype=np.float32)
+
+    target_mean = target.mean(axis=0, keepdims=True)
+    target_std = target.std(axis=0, keepdims=True)
+    target_std[target_std == 0.0] = 1.0
+    target = np.ascontiguousarray((target - target_mean) / target_std, dtype=np.float32)
+    return features, target
+
+
+def _airfoil_cv3_indices(num_examples: int, *, seed: int = 746):
+    assert num_examples >= 1000
+    rng = np.random.default_rng(seed)
+    indices = rng.permutation(num_examples)
+    test_count = int(round(num_examples * 0.10))
+    test_indices = np.ascontiguousarray(indices[:test_count], dtype=np.int64)
+    cv_indices = indices[test_count:]
+    validate_folds = [np.ascontiguousarray(fold, dtype=np.int64) for fold in np.array_split(cv_indices, 3)]
+    folds = []
+    for fold_index, validate_indices in enumerate(validate_folds):
+        train_indices = np.concatenate([fold for index, fold in enumerate(validate_folds) if index != fold_index])
+        folds.append(
+            {
+                "fold_index": fold_index,
+                "train_indices": np.ascontiguousarray(train_indices, dtype=np.int64),
+                "validate_indices": validate_indices,
+                "test_indices": test_indices,
+            })
+    return folds, test_indices
+
+
+def _airfoil_loader_from_indices(
+    features: np.ndarray,
+    target: np.ndarray,
+    *,
+    train_indices: np.ndarray,
+    validate_indices: np.ndarray,
+    batch_size: int,
+    dataset_name: str,
+):
+    return thor.training.NumpyFloat32BatchLoader(
+        np.ascontiguousarray(features[train_indices], dtype=np.float32),
+        np.ascontiguousarray(target[train_indices], dtype=np.float32),
+        np.ascontiguousarray(features[validate_indices], dtype=np.float32),
+        np.ascontiguousarray(target[validate_indices], dtype=np.float32),
+        batch_size=batch_size,
+        example_input_name="examples",
+        label_input_name="demand",
+        dataset_name=dataset_name,
     )
 
 
@@ -236,6 +461,119 @@ def _build_two_loss_regressor(name: str):
     return network
 
 
+def _zero_initialized_regression_head(network: thor.Network, features: thor.Tensor):
+    return thor.layers.FullyConnected(
+        network,
+        features,
+        1,
+        True,
+        activation=None,
+        weights_initializer=thor.initializers.UniformRandom(0.0, 0.0),
+        biases_initializer=thor.initializers.UniformRandom(0.0, 0.0),
+    )
+
+
+def _build_mae_low_high_quantile_regressor(name: str):
+    network = thor.Network(name)
+    examples = thor.layers.NetworkInput(network, "examples", [2], thor.DataType.fp32)
+    demand = thor.layers.NetworkInput(network, "demand", [1], thor.DataType.fp32)
+
+    point_forecast = _zero_initialized_regression_head(network, examples.get_feature_output())
+    low_quantile_forecast = _zero_initialized_regression_head(network, examples.get_feature_output())
+    high_quantile_forecast = _zero_initialized_regression_head(network, examples.get_feature_output())
+
+    mae = thor.losses.MAE(
+        network,
+        point_forecast.get_feature_output(),
+        demand.get_feature_output(),
+        thor.DataType.fp32,
+    )
+    low_quantile = thor.losses.QuantileLoss(
+        network,
+        low_quantile_forecast.get_feature_output(),
+        demand.get_feature_output(),
+        0.1,
+        thor.DataType.fp32,
+    )
+    high_quantile = thor.losses.QuantileLoss(
+        network,
+        high_quantile_forecast.get_feature_output(),
+        demand.get_feature_output(),
+        0.9,
+        thor.DataType.fp32,
+    )
+    thor.layers.NetworkOutput(network, "mae_loss", mae.get_loss(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "quantile_low_loss", low_quantile.get_loss(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "quantile_high_loss", high_quantile.get_loss(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "forecast", point_forecast.get_feature_output(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "forecast_p10", low_quantile_forecast.get_feature_output(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "forecast_p90", high_quantile_forecast.get_feature_output(), thor.DataType.fp32)
+    return network
+
+
+def _build_airfoil_mae_low_high_quantile_regressor(name: str, *, width: int = 16):
+    network = thor.Network(name)
+    examples = thor.layers.NetworkInput(network, "examples", [5], thor.DataType.fp32)
+    demand = thor.layers.NetworkInput(network, "demand", [1], thor.DataType.fp32)
+
+    hidden = thor.layers.FullyConnected(
+        network,
+        examples.get_feature_output(),
+        width,
+        True,
+        activation=thor.activations.Relu(),
+    )
+    point_forecast = thor.layers.FullyConnected(
+        network,
+        hidden.get_feature_output(),
+        1,
+        True,
+        activation=None,
+    )
+    low_quantile_forecast = thor.layers.FullyConnected(
+        network,
+        hidden.get_feature_output(),
+        1,
+        True,
+        activation=None,
+    )
+    high_quantile_forecast = thor.layers.FullyConnected(
+        network,
+        hidden.get_feature_output(),
+        1,
+        True,
+        activation=None,
+    )
+
+    mae = thor.losses.MAE(
+        network,
+        point_forecast.get_feature_output(),
+        demand.get_feature_output(),
+        thor.DataType.fp32,
+    )
+    low_quantile = thor.losses.QuantileLoss(
+        network,
+        low_quantile_forecast.get_feature_output(),
+        demand.get_feature_output(),
+        0.1,
+        thor.DataType.fp32,
+    )
+    high_quantile = thor.losses.QuantileLoss(
+        network,
+        high_quantile_forecast.get_feature_output(),
+        demand.get_feature_output(),
+        0.9,
+        thor.DataType.fp32,
+    )
+    thor.layers.NetworkOutput(network, "mae_loss", mae.get_loss(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "quantile_low_loss", low_quantile.get_loss(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "quantile_high_loss", high_quantile.get_loss(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "forecast", point_forecast.get_feature_output(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "forecast_p10", low_quantile_forecast.get_feature_output(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "forecast_p90", high_quantile_forecast.get_feature_output(), thor.DataType.fp32)
+    return network
+
+
 def _build_tiny_classifier(name: str):
     network = thor.Network(name)
     examples = thor.layers.NetworkInput(network, "examples", [2], thor.DataType.fp32)
@@ -352,7 +690,9 @@ def _make_named_graph_loss_regression_trainer(
         stats_color="never",
         save_model_dir=save_model_dir,
         save_model_overwrite=save_model_overwrite,
-        model_selection_score=lambda validation_loss, training_loss, epoch: 0.0,
+        model_selection_score=lambda validation_loss,
+        training_loss,
+        epoch: 0.0,
     )
 
 
@@ -369,6 +709,25 @@ def _make_two_loss_regression_trainer(
         stats_interval_s=0.0,
         max_in_flight_batches=2,
         scalar_tensors_to_report=["mse_loss", "mae_loss"],
+        stats_color="never",
+        save_model_dir=save_model_dir,
+        save_model_overwrite=save_model_overwrite,
+    )
+
+
+def _make_mae_low_high_quantile_regression_trainer(
+    name: str,
+    *,
+    save_model_dir=None,
+    save_model_overwrite=False,
+):
+    return thor.training.Trainer(
+        _build_mae_low_high_quantile_regressor(name),
+        _mae_quantile_regression_one_batch_loader(),
+        optimizer=thor.optimizers.Sgd(initial_learning_rate=1.0e-12, momentum=0.0),
+        stats_interval_s=0.0,
+        max_in_flight_batches=2,
+        scalar_tensors_to_report=["mae_loss", "quantile_low_loss", "quantile_high_loss"],
         stats_color="never",
         save_model_dir=save_model_dir,
         save_model_overwrite=save_model_overwrite,
@@ -395,7 +754,9 @@ def test_training_runs_binding_accepts_reported_losses():
 
     runs = thor.training.TrainingRuns(
         [("fold_0", trainer, "tiny_ensemble")],
-        reported_losses={"tiny_ensemble": ["loss"]},
+        reported_losses={
+            "tiny_ensemble": ["loss"]
+        },
     )
 
     assert runs.reported_losses["tiny_ensemble"] == ["loss"]
@@ -409,13 +770,19 @@ def test_training_runs_binding_rejects_invalid_reported_losses():
     with pytest.raises(RuntimeError, match="requested reported loss .*missing"):
         thor.training.TrainingRuns(
             [("fold_0", trainer, "tiny_ensemble")],
-            reported_losses={"tiny_ensemble": ["missing"]},
+            reported_losses={
+                "tiny_ensemble": ["missing"]
+            },
         )
 
     with pytest.raises(TypeError, match="reported_losses"):
         thor.training.TrainingRuns(
             [("fold_0", trainer, "tiny_ensemble")],
-            reported_losses={"tiny_ensemble": [{"name": "loss"}]},
+            reported_losses={
+                "tiny_ensemble": [{
+                    "name": "loss"
+                }]
+            },
         )
 
 
@@ -487,7 +854,9 @@ def test_trainer_binding_rejects_zero_best_model_candidate_cadence():
 def test_trainer_binding_accepts_custom_model_selection_score():
     trainer = _make_tiny_regression_trainer(
         "training_runs_custom_model_selection_score",
-        model_selection_score=lambda validation_loss, training_loss, epoch: validation_loss if validation_loss is not None else training_loss,
+        model_selection_score=lambda validation_loss,
+        training_loss,
+        epoch: validation_loss if validation_loss is not None else training_loss,
     )
 
     assert trainer is not None
@@ -511,7 +880,9 @@ def test_trainer_restart_condition_binding_defaults():
 
     trainer = _make_tiny_regression_trainer(
         "trainer_restart_condition_binding",
-        restart_conditions=[thor.training.RestartCondition(progress_check_epochs=2, progress_improvement_min_percentage=10.0)],
+        restart_conditions=[
+            thor.training.RestartCondition(progress_check_epochs=2, progress_improvement_min_percentage=10.0)
+        ],
     )
 
     assert trainer is not None
@@ -553,6 +924,7 @@ def test_training_runs_restart_condition_accepts_ensemble_group_target():
 
     assert runs is not None
 
+
 def test_training_runs_restart_condition_accepts_multiple_conditions_for_same_group():
     trainer = _make_tiny_regression_trainer("training_runs_restart_condition_group_multiple")
     runs = thor.training.TrainingRuns(
@@ -584,7 +956,8 @@ def test_training_runs_restart_condition_accepts_multiple_conditions_for_same_ru
         failure_policy="continue",
         restart_conditions=[
             thor.training.RestartPolicy(run_name="fold_0", progress_check_epochs=3),
-            thor.training.RestartPolicy(run_name="fold_0", progress_check_epochs=15, progress_improvement_min_percentage=20.0),
+            thor.training.RestartPolicy(
+                run_name="fold_0", progress_check_epochs=15, progress_improvement_min_percentage=20.0),
         ],
     )
 
@@ -593,8 +966,7 @@ def test_training_runs_restart_condition_accepts_multiple_conditions_for_same_ru
 
 def test_trainer_early_completion_policy_binding_accepts_callable():
     policy = thor.training.EarlyCompletionPolicy(
-        lambda current_score, best_score, current_epoch, best_epoch: current_epoch - best_epoch >= 1
-    )
+        lambda current_score, best_score, current_epoch, best_epoch: current_epoch - best_epoch >= 1)
     assert isinstance(policy, thor.training.TrainingEarlyCompletionPolicy)
 
     trainer = _make_tiny_regression_trainer(
@@ -607,7 +979,10 @@ def test_trainer_early_completion_policy_binding_accepts_callable():
 
 def test_training_runs_early_completion_rule_binding_defaults_and_validation():
     rule = thor.training.EarlyCompletionRule(
-        lambda current_score, best_score, current_epoch, best_epoch: False,
+        lambda current_score,
+        best_score,
+        current_epoch,
+        best_epoch: False,
         run_name="fold_0",
     )
 
@@ -622,7 +997,10 @@ def test_training_runs_early_completion_rule_binding_defaults_and_validation():
             failure_policy="continue",
             early_completion_rules=[
                 thor.training.EarlyCompletionRule(
-                    lambda current_score, best_score, current_epoch, best_epoch: False,
+                    lambda current_score,
+                    best_score,
+                    current_epoch,
+                    best_epoch: False,
                     run_name="missing",
                 )
             ],
@@ -636,7 +1014,10 @@ def test_training_runs_early_completion_rule_accepts_ensemble_group_target():
         failure_policy="continue",
         early_completion_rules=[
             thor.training.EarlyCompletionRule(
-                lambda current_score, best_score, current_epoch, best_epoch: False,
+                lambda current_score,
+                best_score,
+                current_epoch,
+                best_epoch: False,
                 ensemble_group="tiny_ensemble",
             )
         ],
@@ -704,7 +1085,9 @@ def test_training_runs_accepts_min_successful_models_for_known_ensemble_group():
 
     runs = thor.training.TrainingRuns(
         [("fold_0", trainer0, "tiny_ensemble"), ("fold_1", trainer1, "tiny_ensemble")],
-        min_successful_models={"tiny_ensemble": 1},
+        min_successful_models={
+            "tiny_ensemble": 1
+        },
     )
 
     assert runs is not None
@@ -717,7 +1100,9 @@ def test_training_runs_rejects_min_successful_models_unknown_group():
     with pytest.raises(RuntimeError, match="unknown ensemble_group"):
         thor.training.TrainingRuns(
             [("fold_0", trainer0, "tiny_ensemble"), ("fold_1", trainer1, "tiny_ensemble")],
-            min_successful_models={"tinny_ensemble": 1},
+            min_successful_models={
+                "tinny_ensemble": 1
+            },
         )
 
 
@@ -728,7 +1113,9 @@ def test_training_runs_rejects_min_successful_models_larger_than_group():
     with pytest.raises(RuntimeError, match="only has 2 member"):
         thor.training.TrainingRuns(
             [("fold_0", trainer0, "tiny_ensemble"), ("fold_1", trainer1, "tiny_ensemble")],
-            min_successful_models={"tiny_ensemble": 3},
+            min_successful_models={
+                "tiny_ensemble": 3
+            },
         )
 
 
@@ -772,8 +1159,6 @@ def test_training_runs_evaluates_saved_adam_model_on_test_loader(capfd, tmp_path
     assert results["fold_0"].final_test_loss is not None
     plain_text = _ANSI_RE.sub("", captured_text)
     assert re.search(r"INFO runs\[fold_0\|tiny_ensemble\]:.*test_loss=", plain_text)
-
-
 
 
 @pytest.mark.cuda
@@ -828,15 +1213,15 @@ def test_training_runs_default_reported_losses_reports_all_graph_losses(capfd, t
 
     # The near-zero-learning-rate trainer leaves predictions effectively at zero, so
     # the graph-owned weighted losses are deterministic: MAE=1 * 3.0 and MSE=1 * 2.0.
-    by_name = {metric.name: metric for metric in ensemble.named_metrics}
+    by_name = {
+        metric.name: metric for metric in ensemble.named_metrics
+    }
     assert by_name["mae_loss"].test_value == pytest.approx(3.0, rel=1e-5, abs=1e-6)
     assert by_name["mse_loss"].test_value == pytest.approx(2.0, rel=1e-5, abs=1e-6)
     assert ensemble.ensemble_test_loss == pytest.approx(5.0, rel=1e-5, abs=1e-6)
 
     plain_text = _ANSI_RE.sub("", captured_text)
-    ensemble_line = next(
-        line for line in plain_text.splitlines() if "INFO runs ensemble[two_loss_ensemble]:" in line
-    )
+    ensemble_line = next(line for line in plain_text.splitlines() if "INFO runs ensemble[two_loss_ensemble]:" in line)
     assert "ensemble_test_mae_loss=" in ensemble_line
     assert "ensemble_test_mse_loss=" in ensemble_line
     assert "ensemble_test_accuracy=" not in ensemble_line
@@ -865,7 +1250,9 @@ def test_training_runs_reported_losses_filter_selects_graph_loss_subset(capfd, t
                 1.0,
             )
         ],
-        reported_losses={"two_loss_ensemble": ["mae_loss"]},
+        reported_losses={
+            "two_loss_ensemble": ["mae_loss"]
+        },
     )
 
     results, captured_text = _fit_runs_and_capture_text(
@@ -882,12 +1269,296 @@ def test_training_runs_reported_losses_filter_selects_graph_loss_subset(capfd, t
     assert ensemble.ensemble_test_loss == pytest.approx(3.0, rel=1e-5, abs=1e-6)
 
     ensemble_line = next(
-        line
-        for line in _ANSI_RE.sub("", captured_text).splitlines()
-        if "INFO runs ensemble[two_loss_ensemble]:" in line
-    )
+        line for line in _ANSI_RE.sub("", captured_text).splitlines()
+        if "INFO runs ensemble[two_loss_ensemble]:" in line)
     assert "ensemble_test_mae_loss=" in ensemble_line
     assert "ensemble_test_mse_loss=" not in ensemble_line
+
+
+@pytest.mark.cuda
+@pytest.mark.training_integration
+@pytest.mark.skipif(
+    not RUN_TRAINING_INTEGRATION,
+    reason=integration_skip_reason(
+        "THOR_RUN_TRAINING_INTEGRATION",
+        description="opt-in TrainingRuns CUDA integration tests",
+    ),
+)
+def test_training_runs_reports_mae_plus_low_high_quantile_losses(capfd, tmp_path):
+    reported_losses = ["mae_loss", "quantile_low_loss", "quantile_high_loss"]
+    runs = thor.training.TrainingRuns(
+        [
+            (
+                "fold_0",
+                _make_mae_low_high_quantile_regression_trainer(
+                    "training_runs_mae_quantile_losses_fold_0",
+                    save_model_dir=tmp_path / "fold_0_model",
+                    save_model_overwrite=True,
+                ),
+                "demand_quantile_ensemble",
+                1.0,
+            ),
+            (
+                "fold_1",
+                _make_mae_low_high_quantile_regression_trainer(
+                    "training_runs_mae_quantile_losses_fold_1",
+                    save_model_dir=tmp_path / "fold_1_model",
+                    save_model_overwrite=True,
+                ),
+                "demand_quantile_ensemble",
+                2.0,
+            ),
+        ],
+        reported_losses={
+            "demand_quantile_ensemble": reported_losses
+        },
+    )
+
+    results, captured_text = _fit_runs_and_capture_text(
+        runs,
+        capfd,
+        epochs=1,
+        test_loader=_mae_quantile_regression_one_batch_loader(),
+    )
+
+    assert results.all_completed()
+    assert results.has_ensembles
+    ensemble = results.ensemble("demand_quantile_ensemble")
+    assert ensemble.all_completed()
+    assert [metric.name for metric in ensemble.named_metrics] == reported_losses
+    assert ensemble.ensemble_test_accuracy is None
+    assert all(metric.test_value is not None for metric in ensemble.named_metrics)
+
+    by_name = {
+        metric.name: metric for metric in ensemble.named_metrics
+    }
+    assert by_name["mae_loss"].test_value == pytest.approx(3.5, rel=1e-5, abs=1e-6)
+    assert by_name["quantile_low_loss"].test_value == pytest.approx(0.35, rel=1e-5, abs=1e-6)
+    assert by_name["quantile_high_loss"].test_value == pytest.approx(3.15, rel=1e-5, abs=1e-6)
+    assert ensemble.ensemble_test_loss == pytest.approx(7.0, rel=1e-5, abs=1e-6)
+    assert ensemble.ensemble_test_loss == pytest.approx(
+        sum(metric.test_value for metric in ensemble.named_metrics),
+        rel=1e-6,
+        abs=1e-6,
+    )
+
+    plain_text = _ANSI_RE.sub("", captured_text)
+    ensemble_line = next(
+        line for line in plain_text.splitlines() if "INFO runs ensemble[demand_quantile_ensemble]:" in line)
+    assert "ensemble_test_mae_loss=" in ensemble_line
+    assert "ensemble_test_quantile_low_loss=" in ensemble_line
+    assert "ensemble_test_quantile_high_loss=" in ensemble_line
+    assert "ensemble_test_accuracy=" not in ensemble_line
+
+    ensemble_artifact_dir = tmp_path / "demand_quantile_ensemble_artifact"
+    manifest_path = results.save_ensemble("demand_quantile_ensemble", ensemble_artifact_dir)
+    assert manifest_path == str(ensemble_artifact_dir / "ensemble_manifest.json")
+    manifest = json.loads((ensemble_artifact_dir / "ensemble_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["reported_losses"] == reported_losses
+    assert manifest["overall_loss_reduction"] == "sum"
+    manifest_losses = {
+        loss["name"]: loss for loss in manifest["losses"]
+    }
+    assert list(manifest_losses.keys()) == reported_losses
+    assert manifest_losses["mae_loss"]["test_value"] == pytest.approx(by_name["mae_loss"].test_value)
+    assert manifest_losses["quantile_low_loss"]["test_value"] == pytest.approx(by_name["quantile_low_loss"].test_value)
+    assert manifest_losses["quantile_high_loss"]["test_value"] == pytest.approx(
+        by_name["quantile_high_loss"].test_value)
+    assert "output_name" not in manifest_losses["mae_loss"]
+    assert "target_input_name" not in manifest_losses["mae_loss"]
+
+    loaded_ensemble = thor.EnsembleModel.load(ensemble_artifact_dir)
+    assert loaded_ensemble.get_num_members() == 2
+    assert loaded_ensemble.get_input_names() == ("examples",)
+    loaded_output_names = loaded_ensemble.get_output_names()
+    assert set(loaded_output_names) == {
+        "mae_loss",
+        "quantile_low_loss",
+        "quantile_high_loss",
+        "forecast",
+        "forecast_p10",
+        "forecast_p90",
+    }
+    loaded_output_names = loaded_ensemble.get_output_names()
+    assert set(loaded_output_names) == {
+        "mae_loss",
+        "quantile_low_loss",
+        "quantile_high_loss",
+        "forecast",
+        "forecast_p10",
+        "forecast_p90",
+    }
+    assert loaded_output_names[-3:] == ("forecast", "forecast_p10", "forecast_p90")
+
+
+@pytest.mark.cuda
+@pytest.mark.training_integration
+@pytest.mark.skipif(
+    not RUN_TRAINING_INTEGRATION,
+    reason=integration_skip_reason(
+        "THOR_RUN_TRAINING_INTEGRATION",
+        description="opt-in TrainingRuns CUDA integration tests with downloaded Airfoil Self-Noise data",
+    ),
+)
+def test_training_runs_airfoil_cv3_reports_mae_plus_low_high_quantile_losses(capfd, tmp_path):
+    features, target = _ensure_airfoil_self_noise_arrays()
+    assert features.shape[0] == target.shape[0]
+    assert features.shape[1] == 5
+    assert target.shape[1] == 1
+
+    folds, holdout_indices = _airfoil_cv3_indices(features.shape[0])
+    assert len(folds) == 3
+    assert holdout_indices.shape[0] == int(round(features.shape[0] * 0.10))
+
+    reported_losses = ["mae_loss", "quantile_low_loss", "quantile_high_loss"]
+    batch_size = 128
+
+    def make_fold_trainer(*, fold: dict, run_name: str):
+        loader = _airfoil_loader_from_indices(
+            features,
+            target,
+            train_indices=fold["train_indices"],
+            validate_indices=fold["validate_indices"],
+            batch_size=batch_size,
+            dataset_name=f"airfoil_self_noise_cv3_{run_name}",
+        )
+        assert loader.get_num_train_examples() == int(fold["train_indices"].shape[0])
+        assert loader.get_num_validate_examples() == int(fold["validate_indices"].shape[0])
+        assert loader.get_num_train_examples() > loader.get_num_validate_examples()
+        assert loader.get_num_train_batches() > 1
+        assert loader.get_num_validate_batches() > 1
+        return thor.training.Trainer(
+            _build_airfoil_mae_low_high_quantile_regressor(
+                f"airfoil_self_noise_quantile_{run_name}",
+                width=16,
+            ),
+            loader,
+            optimizer=thor.optimizers.Adam(),
+            stats_interval_s=AIRFOIL_QUANTILE_STATS_INTERVAL_S,
+            max_in_flight_batches=2,
+            scalar_tensors_to_report=reported_losses,
+            stats_color=AIRFOIL_QUANTILE_STATS_COLOR,
+            save_model_dir=tmp_path / f"{run_name}_model",
+            save_model_overwrite=True,
+        )
+
+    run_specs = []
+    for fold in folds:
+        fold_index = int(fold["fold_index"])
+        run_specs.append(
+            (
+                f"fold_{fold_index}",
+                make_fold_trainer(fold=fold, run_name=f"fold_{fold_index}"),
+                "airfoil_noise_cv3",
+            ))
+
+    runs = thor.training.TrainingRuns(
+        run_specs,
+        reported_losses={
+            "airfoil_noise_cv3": reported_losses,
+        },
+        max_parallel_runs=3,
+        max_summary_logs_per_second=AIRFOIL_QUANTILE_SUMMARY_LOGS_PER_SECOND,
+    )
+
+    test_loader = _airfoil_loader_from_indices(
+        features,
+        target,
+        train_indices=holdout_indices,
+        validate_indices=holdout_indices,
+        batch_size=batch_size,
+        dataset_name="airfoil_self_noise_cv3_holdout_test",
+    )
+    assert test_loader.get_num_validate_examples() == int(holdout_indices.shape[0])
+    assert test_loader.get_num_validate_batches() > 1
+
+    results, captured_text = _fit_runs_and_capture_text(
+        runs,
+        capfd,
+        epochs=100,
+        test_loader=test_loader,
+    )
+
+    plain_text = _ANSI_RE.sub("", captured_text)
+    if _expects_color_for_stats_color_mode(AIRFOIL_QUANTILE_STATS_COLOR):
+        assert "\x1b[" in captured_text
+    assert len(results) == 3
+    assert results.all_completed()
+    assert results.has_ensembles
+    assert "INFO runs ensemble[airfoil_noise_cv3]:" in plain_text
+    assert "ensemble_test_accuracy=" not in plain_text
+
+    ensemble = results.ensemble("airfoil_noise_cv3")
+    assert ensemble.all_completed()
+    assert ensemble.total_weight == pytest.approx(3.0)
+    assert len(ensemble.members) == 3
+    assert [metric.name for metric in ensemble.named_metrics] == reported_losses
+    assert ensemble.ensemble_train_loss is not None
+    assert ensemble.ensemble_test_loss is not None
+    assert ensemble.ensemble_test_accuracy is None
+    assert math.isfinite(ensemble.ensemble_train_loss)
+    assert math.isfinite(ensemble.ensemble_test_loss)
+    assert ensemble.ensemble_train_loss > 0.0
+    assert ensemble.ensemble_test_loss > 0.0
+
+    train_metric_sum = 0.0
+    test_metric_sum = 0.0
+    for metric in ensemble.named_metrics:
+        assert metric.train_value is not None
+        assert metric.test_value is not None
+        assert math.isfinite(metric.train_value)
+        assert math.isfinite(metric.test_value)
+        assert metric.train_value > 0.0
+        assert metric.test_value > 0.0
+        train_metric_sum += metric.train_value
+        test_metric_sum += metric.test_value
+        assert f"ensemble_train_{metric.name}=" in plain_text
+        assert f"ensemble_test_{metric.name}=" in plain_text
+
+    assert ensemble.ensemble_train_loss == pytest.approx(train_metric_sum, rel=1e-5, abs=1e-6)
+    assert ensemble.ensemble_test_loss == pytest.approx(test_metric_sum, rel=1e-5, abs=1e-6)
+
+    for fold_index in range(3):
+        run_name = f"fold_{fold_index}"
+        result = results[run_name]
+        assert result.status == "completed"
+        assert result.ensemble_group == "airfoil_noise_cv3"
+        assert result.ensemble_weight == pytest.approx(1.0)
+        assert result.final_training_loss is not None
+        assert result.final_validation_loss is not None
+        assert result.final_test_loss is not None
+        assert result.final_test_accuracy is None
+        assert math.isfinite(result.final_training_loss)
+        assert math.isfinite(result.final_validation_loss)
+        assert math.isfinite(result.final_test_loss)
+        assert result.final_training_loss > 0.0
+        assert result.final_validation_loss > 0.0
+        assert result.final_test_loss > 0.0
+        assert re.search(
+            rf"INFO runs\[{re.escape(run_name)}\|airfoil_noise_cv3\]:.*train_loss=.*validate_loss=.*test_loss=",
+            plain_text,
+        )
+
+    ensemble_artifact_dir = tmp_path / "airfoil_noise_cv3_ensemble"
+    manifest_path = results.save_ensemble("airfoil_noise_cv3", ensemble_artifact_dir)
+    assert manifest_path == str(ensemble_artifact_dir / "ensemble_manifest.json")
+    manifest = json.loads((ensemble_artifact_dir / "ensemble_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["reported_losses"] == reported_losses
+    assert manifest["overall_loss_reduction"] == "sum"
+    assert len(manifest["members"]) == 3
+    assert [loss["name"] for loss in manifest["losses"]] == reported_losses
+
+    loaded_ensemble = thor.EnsembleModel.load(ensemble_artifact_dir)
+    assert loaded_ensemble.get_num_members() == 3
+    assert loaded_ensemble.get_input_names() == ("examples",)
+    assert set(loaded_ensemble.get_output_names()) == {
+        "mae_loss",
+        "quantile_low_loss",
+        "quantile_high_loss",
+        "forecast",
+        "forecast_p10",
+        "forecast_p90",
+    }
 
 
 @pytest.mark.cuda
@@ -925,26 +1596,25 @@ def test_training_runs_graph_loss_does_not_invent_prediction_loss(capfd, tmp_pat
     # This must be the graph-owned loss value, not a synthetic MAE/CE value derived
     # by looking at a prediction output and guessing a label tensor on the CPU.
     ensemble_line = next(
-        line
-        for line in _ANSI_RE.sub("", captured_text).splitlines()
-        if "INFO runs ensemble[graph_loss_ensemble]:" in line
-    )
+        line for line in _ANSI_RE.sub("", captured_text).splitlines()
+        if "INFO runs ensemble[graph_loss_ensemble]:" in line)
     assert "ensemble_test_graph_loss=" in ensemble_line
     assert "ensemble_test_accuracy=" not in ensemble_line
-
-
 
 
 def _training_selection_metadata(save_dir):
     with open(save_dir / "training_selection_metadata.json", "r", encoding="utf-8") as f:
         return json.load(f)
 
+
 def _prediction_from_saved_tiny_regressor(save_dir, network_name: str):
     loaded = thor.Network(network_name)
     loaded.load(str(save_dir))
     placed = loaded.place(4, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
     x, _ = _regression_arrays(dtype=np.float32)
-    outputs = placed.infer({"examples": _cpu_tensor(x, thor.DataType.fp32)})
+    outputs = placed.infer({
+        "examples": _cpu_tensor(x, thor.DataType.fp32)
+    })
     return np.array(outputs["prediction"].numpy(), copy=True)
 
 
@@ -980,7 +1650,9 @@ def test_saved_trained_model_load_place_inference_only_infer_sequence(tmp_path):
     assert set(placed.get_network_input_names()) == {"examples"}
 
     x, _ = _regression_arrays(dtype=np.float32)
-    outputs = placed.infer({"examples": _cpu_tensor(x, thor.DataType.fp32)})
+    outputs = placed.infer({
+        "examples": _cpu_tensor(x, thor.DataType.fp32)
+    })
 
     assert set(outputs) == {"prediction"}
     prediction = np.array(outputs["prediction"].numpy(), copy=True)
@@ -1015,7 +1687,9 @@ def test_saved_training_graph_inference_prunes_loss_and_label_only_inputs(tmp_pa
     assert set(placed.get_network_input_names()) == {"examples"}
 
     x, _ = _regression_arrays(dtype=np.float32)
-    outputs = placed.infer({"examples": _cpu_tensor(x, thor.DataType.fp32)})
+    outputs = placed.infer({
+        "examples": _cpu_tensor(x, thor.DataType.fp32)
+    })
 
     assert set(outputs) == {"prediction"}
     prediction = np.array(outputs["prediction"].numpy(), copy=True)
@@ -1068,7 +1742,9 @@ def test_trainer_custom_model_selection_score_controls_saved_candidate(tmp_path)
         save_model_dir=first_epoch_dir,
         save_model_overwrite=True,
         check_best_model_every_epochs=1,
-        model_selection_score=lambda validation_loss, training_loss, epoch: float(epoch),
+        model_selection_score=lambda validation_loss,
+        training_loss,
+        epoch: float(epoch),
     ).fit(2)
 
     _make_tiny_regression_trainer(
@@ -1083,19 +1759,20 @@ def test_trainer_custom_model_selection_score_controls_saved_candidate(tmp_path)
         save_model_dir=two_epoch_reference_dir,
         save_model_overwrite=True,
         check_best_model_every_epochs=1,
-        model_selection_score=lambda validation_loss, training_loss, epoch: -float(epoch),
+        model_selection_score=lambda validation_loss,
+        training_loss,
+        epoch: -float(epoch),
     ).fit(2)
 
-    selected_prediction = _prediction_from_saved_tiny_regressor(first_epoch_dir, "trainer_custom_model_selection_first_epoch")
-    one_epoch_prediction = _prediction_from_saved_tiny_regressor(one_epoch_reference_dir, "trainer_custom_model_selection_one_epoch_reference")
-    two_epoch_prediction = _prediction_from_saved_tiny_regressor(two_epoch_reference_dir, "trainer_custom_model_selection_two_epoch_reference")
+    selected_prediction = _prediction_from_saved_tiny_regressor(
+        first_epoch_dir, "trainer_custom_model_selection_first_epoch")
+    one_epoch_prediction = _prediction_from_saved_tiny_regressor(
+        one_epoch_reference_dir, "trainer_custom_model_selection_one_epoch_reference")
+    two_epoch_prediction = _prediction_from_saved_tiny_regressor(
+        two_epoch_reference_dir, "trainer_custom_model_selection_two_epoch_reference")
 
     assert np.allclose(selected_prediction, one_epoch_prediction, atol=1e-6)
     assert not np.allclose(selected_prediction, two_epoch_prediction, atol=1e-7)
-
-
-
-
 
 
 @pytest.mark.cuda
@@ -1110,14 +1787,15 @@ def test_trainer_custom_model_selection_score_controls_saved_candidate(tmp_path)
 def test_trainer_fit_returns_result_and_persists_selection_metadata(tmp_path):
     save_dir = tmp_path / "trainer_fit_result_metadata"
     early_policy = thor.training.EarlyCompletionPolicy(
-        lambda current_score, best_score, current_epoch, best_epoch: current_epoch >= 2
-    )
+        lambda current_score, best_score, current_epoch, best_epoch: current_epoch >= 2)
     trainer = _make_tiny_regression_trainer(
         "trainer_fit_result_metadata",
         save_model_dir=save_dir,
         save_model_overwrite=True,
         check_best_model_every_epochs=1,
-        model_selection_score=lambda validation_loss, training_loss, epoch: float(epoch),
+        model_selection_score=lambda validation_loss,
+        training_loss,
+        epoch: float(epoch),
         early_completion_policies=[early_policy],
     )
 
@@ -1161,7 +1839,9 @@ def test_trainer_model_selection_score_none_skips_candidate_for_epoch(tmp_path):
         save_model_dir=save_dir,
         save_model_overwrite=True,
         check_best_model_every_epochs=1,
-        model_selection_score=lambda validation_loss, training_loss, epoch: None if epoch == 1 else float(epoch),
+        model_selection_score=lambda validation_loss,
+        training_loss,
+        epoch: None if epoch == 1 else float(epoch),
     ).fit(2)
 
     _make_tiny_regression_trainer(
@@ -1190,13 +1870,12 @@ def test_trainer_model_selection_score_none_skips_candidate_for_epoch(tmp_path):
     assert metadata["completed_epoch"] == 2
     assert metadata["completion_reason"] == "completed"
 
-    selected_prediction = _prediction_from_saved_tiny_regressor(save_dir, "trainer_custom_model_selection_none_skips_epoch")
+    selected_prediction = _prediction_from_saved_tiny_regressor(
+        save_dir, "trainer_custom_model_selection_none_skips_epoch")
     one_epoch_prediction = _prediction_from_saved_tiny_regressor(
-        one_epoch_reference_dir, "trainer_custom_model_selection_none_one_epoch_reference"
-    )
+        one_epoch_reference_dir, "trainer_custom_model_selection_none_one_epoch_reference")
     two_epoch_prediction = _prediction_from_saved_tiny_regressor(
-        two_epoch_reference_dir, "trainer_custom_model_selection_none_two_epoch_reference"
-    )
+        two_epoch_reference_dir, "trainer_custom_model_selection_none_two_epoch_reference")
 
     assert np.allclose(selected_prediction, two_epoch_prediction, atol=1e-6)
     assert not np.allclose(selected_prediction, one_epoch_prediction, atol=1e-7)
@@ -1219,7 +1898,9 @@ def test_trainer_min_early_completion_epochs_can_complete_without_candidate_or_s
         save_model_overwrite=True,
         check_best_model_every_epochs=1,
         min_early_completion_epochs=5,
-        model_selection_score=lambda validation_loss, training_loss, epoch: float(epoch),
+        model_selection_score=lambda validation_loss,
+        training_loss,
+        epoch: float(epoch),
     )
 
     result = trainer.fit(2)
@@ -1251,15 +1932,16 @@ def test_trainer_min_early_completion_epochs_can_complete_without_candidate_or_s
 def test_trainer_min_early_completion_epochs_uses_cumulative_epoch_across_fit_calls(tmp_path):
     save_dir = tmp_path / "min_early_completion_cumulative"
     early_policy = thor.training.EarlyCompletionPolicy(
-        lambda current_score, best_score, current_epoch, best_epoch: current_epoch >= 3
-    )
+        lambda current_score, best_score, current_epoch, best_epoch: current_epoch >= 3)
     trainer = _make_tiny_regression_trainer(
         "trainer_min_early_completion_cumulative",
         save_model_dir=save_dir,
         save_model_overwrite=True,
         check_best_model_every_epochs=1,
         min_early_completion_epochs=3,
-        model_selection_score=lambda validation_loss, training_loss, epoch: float(epoch),
+        model_selection_score=lambda validation_loss,
+        training_loss,
+        epoch: float(epoch),
         early_completion_policies=[early_policy],
     )
 
@@ -1301,15 +1983,16 @@ def test_trainer_min_early_completion_epochs_uses_cumulative_epoch_across_fit_ca
 def test_training_runs_min_early_completion_epochs_uses_cumulative_epoch_across_fit_calls(tmp_path):
     save_dir = tmp_path / "training_runs_min_early_completion_cumulative"
     early_policy = thor.training.EarlyCompletionPolicy(
-        lambda current_score, best_score, current_epoch, best_epoch: current_epoch >= 3
-    )
+        lambda current_score, best_score, current_epoch, best_epoch: current_epoch >= 3)
     trainer = _make_tiny_regression_trainer(
         "training_runs_min_early_completion_cumulative",
         save_model_dir=save_dir,
         save_model_overwrite=True,
         check_best_model_every_epochs=1,
         min_early_completion_epochs=3,
-        model_selection_score=lambda validation_loss, training_loss, epoch: float(epoch),
+        model_selection_score=lambda validation_loss,
+        training_loss,
+        epoch: float(epoch),
         early_completion_policies=[early_policy],
     )
     runs = thor.training.TrainingRuns([("fold_0", trainer)], failure_policy="continue")
@@ -1344,7 +2027,6 @@ def test_training_runs_min_early_completion_epochs_uses_cumulative_epoch_across_
     assert metadata["completion_reason"] == "early_completed"
     assert metadata["check_best_model_every_epochs"] == 1
     assert metadata["min_early_completion_epochs"] == 3
-
 
 
 @pytest.mark.cuda
@@ -1388,7 +2070,6 @@ def test_training_runs_restart_policy_uses_cumulative_epoch_across_fit_calls():
     assert trainer.completed_training_epochs == 2
 
 
-
 @pytest.mark.cuda
 @pytest.mark.training_integration
 @pytest.mark.skipif(
@@ -1403,14 +2084,15 @@ def test_training_runs_early_completion_stops_early_and_saves_best_candidate(cap
     one_epoch_reference_dir = tmp_path / "one_epoch_reference"
 
     early_policy = thor.training.EarlyCompletionPolicy(
-        lambda current_score, best_score, current_epoch, best_epoch: current_epoch >= 2
-    )
+        lambda current_score, best_score, current_epoch, best_epoch: current_epoch >= 2)
     trainer = _make_tiny_regression_trainer(
         "training_runs_early_completion_best_candidate",
         save_model_dir=early_dir,
         save_model_overwrite=True,
         check_best_model_every_epochs=1,
-        model_selection_score=lambda validation_loss, training_loss, epoch: float(epoch),
+        model_selection_score=lambda validation_loss,
+        training_loss,
+        epoch: float(epoch),
         early_completion_policies=[early_policy],
     )
     runs = thor.training.TrainingRuns([("fold_0", trainer)], failure_policy="continue")
@@ -1442,12 +2124,13 @@ def test_training_runs_early_completion_stops_early_and_saves_best_candidate(cap
         check_best_model_every_epochs=1,
     ).fit(1)
 
-    selected_prediction = _prediction_from_saved_tiny_regressor(early_dir, "training_runs_early_completion_best_candidate")
+    selected_prediction = _prediction_from_saved_tiny_regressor(
+        early_dir, "training_runs_early_completion_best_candidate")
     one_epoch_prediction = _prediction_from_saved_tiny_regressor(
-        one_epoch_reference_dir, "training_runs_early_completion_one_epoch_reference"
-    )
+        one_epoch_reference_dir, "training_runs_early_completion_one_epoch_reference")
 
     assert np.allclose(selected_prediction, one_epoch_prediction, atol=1e-6)
+
 
 @pytest.mark.cuda
 @pytest.mark.training_integration
@@ -1560,9 +2243,9 @@ def test_training_runs_fits_two_tiny_trainers_on_one_gpu_and_prefixes_stats(capf
 
     with pytest.raises(RuntimeError, match="already exists"):
         results.save_ensemble("tiny_ensemble", ensemble_artifact_dir)
-    assert results.save_ensemble("tiny_ensemble", ensemble_artifact_dir, overwrite=True) == str(
-        ensemble_artifact_dir / "ensemble_manifest.json"
-    )
+    assert results.save_ensemble(
+        "tiny_ensemble", ensemble_artifact_dir,
+        overwrite=True) == str(ensemble_artifact_dir / "ensemble_manifest.json")
 
     assert ensemble.ensemble_test_loss is not None
     assert len(ensemble.members) == 2
@@ -1791,9 +2474,13 @@ def _build_demand_end_to_end_network(name: str) -> thor.Network:
     )
     quantile = thor.layers.CustomLayer(
         network=network,
-        inputs={"forecast": forecast.get_feature_output()},
+        inputs={
+            "forecast": forecast.get_feature_output()
+        },
         output_names=["forecast_quantile_high"],
-        build=lambda context: {"forecast_quantile_high": context.input("forecast") + 1.0},
+        build=lambda context: {
+            "forecast_quantile_high": context.input("forecast") + 1.0
+        },
     )
     loss = thor.losses.MSE(network, forecast.get_feature_output(), labels.get_feature_output(), thor.DataType.fp32)
     thor.layers.NetworkOutput(network, "loss", loss.get_loss(), thor.DataType.fp32)
@@ -1819,7 +2506,8 @@ def test_training_runs_demand_style_kfold_full_path_saves_loadable_ensemble(capf
         mode="quantile",
         num_bins=3,
         seed=23,
-    ).holdout_plus_k_fold(test_size=2, k=2)
+    ).holdout_plus_k_fold(
+        test_size=2, k=2)
 
     def make_trainer(*, fold, run_name, test_keys, test_groups):
         fold_split = _fold_split_with_holdout(fold, test_keys=test_keys, test_groups=test_groups)
@@ -1850,7 +2538,9 @@ def test_training_runs_demand_style_kfold_full_path_saves_loadable_ensemble(capf
         ensemble_group="brand_demand_cv2",
         run_name_template="brand_fold_{fold_index}",
         max_parallel_runs=2,
-        min_successful_models={"brand_demand_cv2": 2},
+        min_successful_models={
+            "brand_demand_cv2": 2
+        },
     )
     holdout_split = thor.data.StratifiedTrainValidationTestSplit(
         train_keys=split.test_keys,

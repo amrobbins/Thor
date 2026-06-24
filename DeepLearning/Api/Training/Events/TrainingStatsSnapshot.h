@@ -25,7 +25,12 @@ struct TrainingStatsSnapshot {
     uint64_t samplesProcessed = 0;
     uint64_t inFlightBatches = 0;
 
+    // Elapsed wall-clock seconds since the current native training/evaluation request started.
     double elapsedSeconds = 0.0;
+
+    // Public throughput rates share the same wall-clock basis as elapsedSeconds.
+    // Native queued training reports EMA-smoothed exact wall-clock interval rates
+    // between same-phase stats snapshots, not CUDA callback/active-kernel rates.
     double samplesPerSecond = 0.0;
     double batchesPerSecond = 0.0;
     uint64_t floatingPointOperationsPerBatch = 0;
