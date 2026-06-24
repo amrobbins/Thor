@@ -122,6 +122,7 @@ class TrainingRuns {
     [[nodiscard]] std::vector<TrainingEarlyCompletionPolicy> earlyCompletionPoliciesForRun(const TrainingRunsSpec& run) const;
     [[nodiscard]] std::vector<TrainingNamedMetricResult> namedMetricResultsForGroup(std::string_view ensembleGroup) const;
     [[nodiscard]] std::vector<TrainingNamedMetricResult> namedGraphMetricResultsForGroup(std::string_view ensembleGroup) const;
+    [[nodiscard]] std::shared_ptr<Network> validationNetworkForSpec(const TrainingRunsSpec& spec) const;
     [[nodiscard]] std::vector<std::string> reportedMetricNamesForSpec(const TrainingRunsSpec& spec) const;
     [[nodiscard]] bool hasEnsembleGroups() const;
     void validateEnsembleArtifactsForFit(const TrainingRunsEvaluationOptions& evaluationOptions) const;

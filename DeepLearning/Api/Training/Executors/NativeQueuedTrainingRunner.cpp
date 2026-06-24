@@ -1248,7 +1248,7 @@ NativeQueuedExecutionGraph resolveNativeQueuedExecutionGraph(const TrainingRunRe
     const TrainingStep& sourceStep = requestedProgram->getStep(0);
 
     PhaseGraphComposeOptions composeOptions;
-    composeOptions.networkName = request.network->getNetworkName() + "/active_training_phases";
+    composeOptions.networkName = request.network->getNetworkName() + "_active_training_phases";
     composeOptions.inferenceOnly = evaluateOnly;
     composeOptions.exposePhaseOutputsAsNetworkOutputs = true;
 

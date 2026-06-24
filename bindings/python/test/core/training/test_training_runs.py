@@ -799,12 +799,15 @@ def _build_airfoil_two_phase_mae_then_mse_regressor(
         thor.DataType.fp32,
         external=False,
     )
+    # ``mae_forecast`` is both a phase-local dependency consumed by the MSE
+    # phase and the prediction tensor for ``mae_loss``/``mae_head_mae_accuracy``
+    # ensemble evaluation, so keep it external/materialized.  Pure internal
+    # exports, such as ``hidden``, stay ``external=False``.
     thor.layers.NetworkOutput(
         mae_network,
         "mae_forecast",
         mae_forecast.get_feature_output(),
         thor.DataType.fp32,
-        external=False,
     )
 
     mse_network = thor.Network(f"{name}_mse_finetune_phase")

@@ -10,6 +10,10 @@
 #include "DeepLearning/Api/Layers/Loss/MeanSquaredError.h"
 #include "DeepLearning/Api/Layers/Loss/QuantileLoss.h"
 #include "DeepLearning/Api/Training/Events/TrainingEvent.h"
+#include "DeepLearning/Api/Training/TrainingPhase.h"
+#include "DeepLearning/Api/Training/TrainingProgram.h"
+#include "DeepLearning/Api/Training/TrainingStep.h"
+#include "DeepLearning/Api/Optimizers/Sgd.h"
 #include "DeepLearning/Api/Training/Executors/TrainingExecutor.h"
 #include "DeepLearning/Api/Training/Observers/TrainingObserver.h"
 
@@ -399,6 +403,57 @@ std::shared_ptr<Trainer> makeTrainer(std::shared_ptr<Network> network,
                                          .build());
 }
 
+std::shared_ptr<Trainer> makeNetworkBackedPhaseTrainerForValidation(const std::string& name,
+                                                                    std::shared_ptr<TrainingExecutor> executor) {
+    auto placeholderNetwork = std::make_shared<Network>(name + "_placeholder");
+    auto phaseNetwork = std::make_shared<Network>(name + "_phase");
+
+    NetworkInput features = NetworkInput::Builder()
+                                .network(*phaseNetwork)
+                                .name("features")
+                                .dimensions({4})
+                                .dataType(DataType::FP32)
+                                .build();
+    NetworkInput labels = NetworkInput::Builder()
+                              .network(*phaseNetwork)
+                              .name("labels")
+                              .dimensions({1})
+                              .dataType(DataType::FP32)
+                              .build();
+
+    FullyConnected prediction = FullyConnected::Builder()
+                                    .network(*phaseNetwork)
+                                    .featureInput(features.getFeatureOutput().value())
+                                    .numOutputFeatures(1)
+                                    .hasBias(true)
+                                    .noActivation()
+                                    .build();
+    MSE loss = MSE::Builder()
+                   .network(*phaseNetwork)
+                   .predictions(prediction.getFeatureOutput().value())
+                   .labels(labels.getFeatureOutput().value())
+                   .lossDataType(DataType::FP32)
+                   .build();
+
+    NetworkOutput::Builder().network(*phaseNetwork).name("prediction").inputTensor(prediction.getFeatureOutput().value()).build();
+    NetworkOutput::Builder().network(*phaseNetwork).name("mse_loss").inputTensor(loss.getLoss()).build();
+
+    auto phase = std::make_shared<TrainingPhase>("phase", phaseNetwork, true);
+    auto step = std::make_shared<TrainingStep>("step",
+                                               std::vector<std::shared_ptr<TrainingPhase>>{phase},
+                                               Sgd::Builder().initialLearningRate(0.01f).build(),
+                                               std::vector<ParameterReference>{});
+    auto program = std::make_shared<TrainingProgram>(std::vector<std::shared_ptr<TrainingStep>>{step});
+
+    return std::make_shared<Trainer>(Trainer::Builder()
+                                         .network(std::move(placeholderNetwork))
+                                         .loader(std::make_shared<FakeLoader>())
+                                         .executor(std::move(executor))
+                                         .observer(std::make_shared<NullTrainingObserver>())
+                                         .trainingProgram(std::move(program))
+                                         .build());
+}
+
 void rethrowIfSet(std::exception_ptr exception) {
     if (exception != nullptr) {
         std::rethrow_exception(exception);
@@ -488,6 +543,25 @@ TEST(TrainingRuns, RejectsInvalidRunSpecs) {
 }
 
 
+
+TEST(TrainingRuns, UsesNetworkBackedTrainingPhaseSignaturesForEnsembleValidation) {
+    auto coordinator = std::make_shared<Coordinator>(2);
+    auto executor0 = std::make_shared<CoordinatedExecutor>(coordinator, FakeExecutorBehavior::COMPLETE_AFTER_RELEASE);
+    auto executor1 = std::make_shared<CoordinatedExecutor>(coordinator, FakeExecutorBehavior::COMPLETE_AFTER_RELEASE);
+
+    std::shared_ptr<Trainer> trainer0 = makeNetworkBackedPhaseTrainerForValidation("phase_member_0", executor0);
+    std::shared_ptr<Trainer> trainer1 = makeNetworkBackedPhaseTrainerForValidation("phase_member_1", executor1);
+
+    EXPECT_NO_THROW((TrainingRuns({TrainingRunsSpec{"fold_0", trainer0, "phase_group"},
+                                   TrainingRunsSpec{"fold_1", trainer1, "phase_group"}},
+                                  TrainingRunsFailurePolicy::CANCEL_SIBLINGS,
+                                  2.0,
+                                  std::nullopt,
+                                  {},
+                                  {},
+                                  {},
+                                  {{"phase_group", {"mse_loss"}}})));
+}
 
 TEST(TrainingRuns, AcceptsReportedLossNameFilter) {
     auto network0 = makeLossWeightedDemandNetwork("training-runs-reported-loss-policy-0");
