@@ -220,6 +220,19 @@ std::set<std::string> networkOutputNames(Network& network) {
     return names;
 }
 
+std::map<std::string, uint64_t> networkOutputInputOriginalIdsByName(Network& network) {
+    std::map<std::string, uint64_t> inputOriginalIdsByName;
+    const uint32_t numLayers = network.getNumLayers();
+    for (uint32_t i = 0; i < numLayers; ++i) {
+        std::shared_ptr<NetworkOutput> output = std::dynamic_pointer_cast<NetworkOutput>(network.getLayer(i));
+        if (output == nullptr || !output->getFeatureInput().has_value()) {
+            continue;
+        }
+        inputOriginalIdsByName[output->getName()] = output->getFeatureInput()->getOriginalId();
+    }
+    return inputOriginalIdsByName;
+}
+
 std::vector<std::string> outputBackedReportableLossNames(Network& network) {
     const std::set<std::string> outputs = networkOutputNames(network);
     std::set<std::string> lossNames;
@@ -229,6 +242,99 @@ std::vector<std::string> outputBackedReportableLossNames(Network& network) {
         }
     }
     return std::vector<std::string>(lossNames.begin(), lossNames.end());
+}
+
+std::vector<std::string> outputBackedReportableLossNames(Network& network, const std::vector<Tensor>& activeTrainingLossRoots) {
+    const std::map<std::string, uint64_t> outputInputOriginalIds = networkOutputInputOriginalIdsByName(network);
+    std::set<uint64_t> activeLossRootOriginalIds;
+    for (const Tensor& lossRoot : activeTrainingLossRoots) {
+        if (lossRoot.isInitialized()) {
+            activeLossRootOriginalIds.insert(lossRoot.getOriginalId());
+        }
+    }
+
+    std::set<std::string> lossNames;
+    for (const NetworkLossReference& reference : network.getReportableLosses()) {
+        auto outputIt = outputInputOriginalIds.find(reference.lossName);
+        if (outputIt != outputInputOriginalIds.end() && activeLossRootOriginalIds.count(outputIt->second) != 0) {
+            lossNames.insert(reference.lossName);
+        }
+    }
+    return std::vector<std::string>(lossNames.begin(), lossNames.end());
+}
+
+std::vector<Tensor> activeTrainingLossRoots(const ExecutableTrainingPlan& plan) {
+    std::vector<Tensor> roots;
+    for (const StepExecutable& step : plan.getSteps()) {
+        const std::vector<Tensor>& stepRoots = step.getLossRoots();
+        roots.insert(roots.end(), stepRoots.begin(), stepRoots.end());
+    }
+    return roots;
+}
+
+std::set<std::string> trainingProgramPhaseOutputNames(const TrainingProgram& program, bool activeOnly) {
+    std::set<std::string> names;
+    for (const std::shared_ptr<TrainingStep>& step : program.getSteps()) {
+        if (step == nullptr || !step->isInitialized()) {
+            continue;
+        }
+        if (activeOnly && !step->isEnabled()) {
+            continue;
+        }
+        for (const std::shared_ptr<TrainingPhase>& phase : step->getPhases()) {
+            if (phase == nullptr || !phase->isInitialized()) {
+                continue;
+            }
+            if (activeOnly && !phase->isEnabled()) {
+                continue;
+            }
+            for (const auto& [outputName, outputTensor] : phase->getOutputs()) {
+                (void)outputTensor;
+                names.insert(outputName);
+            }
+        }
+    }
+    return names;
+}
+
+std::set<std::string> setFromVector(const std::vector<std::string>& values) {
+    return std::set<std::string>(values.begin(), values.end());
+}
+
+bool isRuntimeScalarName(const std::string& name) {
+    return name == "loss" || name == "learning_rate" || name == "learningRate" || name == "lr" || name == "momentum";
+}
+
+void filterRuntimeScalarsToActiveTrainingProgramOutputs(TrainingRuntimeConfig& runtime,
+                                                        Network& network,
+                                                        const TrainingProgram& trainingProgram,
+                                                        const std::vector<std::string>& activeAggregateLossTensorNames) {
+    const std::set<std::string> allOutputBackedLossNames = setFromVector(outputBackedReportableLossNames(network));
+    const std::set<std::string> activeOutputBackedLossNames = setFromVector(activeAggregateLossTensorNames);
+    const std::set<std::string> allPhaseOutputNames = trainingProgramPhaseOutputNames(trainingProgram, /*activeOnly=*/false);
+    const std::set<std::string> activePhaseOutputNames = trainingProgramPhaseOutputNames(trainingProgram, /*activeOnly=*/true);
+
+    for (auto it = runtime.scalarTensorsToReport.begin(); it != runtime.scalarTensorsToReport.end();) {
+        const std::string& name = *it;
+        const bool isReportableLoss = allOutputBackedLossNames.count(name) != 0;
+        if (isReportableLoss && activeOutputBackedLossNames.count(name) == 0) {
+            it = runtime.scalarTensorsToReport.erase(it);
+            continue;
+        }
+
+        const bool isPhaseOutput = allPhaseOutputNames.count(name) != 0;
+        if (isPhaseOutput && activePhaseOutputNames.count(name) == 0) {
+            it = runtime.scalarTensorsToReport.erase(it);
+            continue;
+        }
+
+        if (isRuntimeScalarName(name)) {
+            ++it;
+            continue;
+        }
+
+        ++it;
+    }
 }
 
 bool outputNameExists(Network& network, const std::string& name) {
@@ -267,6 +373,8 @@ float copyScalarStatTensor(const Batch& batchInput,
     auto outputIt = batchOutput.find(tensorName);
     if (batchInput.contains(tensorName)) {
         copyFromTensor = batchInput.getTensor(tensorName);
+    } else if (tensorName == "loss" && !aggregateLossTensorNames.empty()) {
+        return copyAggregateLossStatTensor(batchOutput, aggregateLossTensorNames);
     } else if (outputIt != batchOutput.end()) {
         copyFromTensor = outputIt->second;
     } else if (tensorName == "loss") {
@@ -1596,20 +1704,6 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     }
 
     TrainingRuntimeConfig runtime = request.runtime;
-    const std::vector<std::string> aggregateLossTensorNames = outputBackedReportableLossNames(*request.network);
-    const bool hasConcreteLossOutput = outputNameExists(*request.network, "loss");
-    if (!evaluateOnly && (request.saveModelDirectory.has_value() || !request.earlyCompletionPolicies.empty())) {
-        if (hasConcreteLossOutput || !aggregateLossTensorNames.empty()) {
-            runtime.scalarTensorsToReport.insert("loss");
-        }
-    }
-    if (runtime.scalarTensorsToReport.count("loss") != 0 && !hasConcreteLossOutput && aggregateLossTensorNames.empty()) {
-        // The default Python/C++ training runtime historically asked for a scalar named "loss".
-        // In loss-centric graphs, a model may have graph losses without exposing a NetworkOutput
-        // named "loss" yet. If there is no concrete or output-backed aggregate loss tensor to
-        // read, do not fail the run just because the default reporter asked for it.
-        runtime.scalarTensorsToReport.erase("loss");
-    }
 
     std::shared_ptr<TrainingProgram> trainingProgram = defaultTrainingProgramForRequest(request);
     if (!evaluateOnly) {
@@ -1647,6 +1741,25 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     ExecutableTrainingPlan plan =
         ExecutableTrainingPlan::compile(*trainingProgram, *placedNetwork, /*resolveEmptyUpdateParametersAsAllTrainable=*/!evaluateOnly);
     ensureNativeQueuedPlanCompatible(plan, *request.network, evaluateOnly);
+
+    const std::vector<std::string> aggregateLossTensorNames = outputBackedReportableLossNames(*request.network, activeTrainingLossRoots(plan));
+    const bool hasConcreteLossOutput = outputNameExists(*request.network, "loss");
+    filterRuntimeScalarsToActiveTrainingProgramOutputs(runtime, *request.network, *trainingProgram, aggregateLossTensorNames);
+    if (!evaluateOnly && (request.saveModelDirectory.has_value() || !request.earlyCompletionPolicies.empty())) {
+        const bool concreteLossOutputIsInactiveReportableLoss =
+            setFromVector(outputBackedReportableLossNames(*request.network)).count("loss") != 0 &&
+            setFromVector(aggregateLossTensorNames).count("loss") == 0;
+        if (!aggregateLossTensorNames.empty() || (hasConcreteLossOutput && !concreteLossOutputIsInactiveReportableLoss)) {
+            runtime.scalarTensorsToReport.insert("loss");
+        }
+    }
+    if (runtime.scalarTensorsToReport.count("loss") != 0 && !hasConcreteLossOutput && aggregateLossTensorNames.empty()) {
+        // The default Python/C++ training runtime historically asked for a scalar named "loss".
+        // In loss-centric graphs, a model may have graph losses without exposing a NetworkOutput
+        // named "loss" yet. If there is no concrete or active output-backed aggregate loss tensor to
+        // read, do not fail the run just because the default reporter asked for it.
+        runtime.scalarTensorsToReport.erase("loss");
+    }
 
     ThorImplementation::StampedNetwork& statsStampedNetwork = placedNetwork->getStampedNetwork(0);
     const uint64_t forwardFlopsPerBatch = statsStampedNetwork.getFloatingPointOperationsPerExampleForward() * batchSize;

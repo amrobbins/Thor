@@ -1025,14 +1025,17 @@ def test_queued_phase_disabled_aggregate_loss_does_not_backpropagate(capfd):
     assert program.get_step(0).get_active_phase_names() == ["daily_prediction"]
     assert len(_phase_losses(stats, "train")) == 2
     assert train_daily[0] == pytest.approx(1.0, rel=2e-3, abs=2e-3)
-    assert train_aggregate[0] == pytest.approx(1.0, rel=2e-3, abs=2e-3)
+    assert train_aggregate == []
     assert len(validate_daily) == 1
-    assert len(validate_aggregate) == 1
+    assert validate_aggregate == []
+    assert "aggregate_loss=" not in captured_text
 
     # This is the same opposing-gradient leak detector as the debug-synchronous test,
     # but it exercises the native queued runner's StepExecutable -> submitBatch path.
+    # The disabled aggregate phase is no longer reported by the queued runner, so
+    # the post-update daily loss is the leak detector: opposing disabled gradients
+    # would cancel the daily update and keep the second daily loss near 1.0.
     assert train_daily[1] < 0.95, (train_daily, train_aggregate, validate_daily, validate_aggregate)
-    assert train_aggregate[1] > 1.05, (train_daily, train_aggregate, validate_daily, validate_aggregate)
 
 
 def test_queued_aggregate_phase_backpropagates_through_forward_only_daily_phase(capfd):
@@ -1064,15 +1067,16 @@ def test_queued_aggregate_phase_backpropagates_through_forward_only_daily_phase(
 
     assert program.get_step(0).get_active_phase_names() == ["daily_prediction", "aggregate_prediction"]
     assert len(_phase_losses(stats, "train")) == 2
-    assert train_daily[0] == pytest.approx(1.0, rel=2e-3, abs=2e-3)
+    assert train_daily == []
     assert train_aggregate[0] == pytest.approx(1.0, rel=2e-3, abs=2e-3)
-    assert len(validate_daily) == 1
+    assert validate_daily == []
     assert len(validate_aggregate) == 1
+    assert "daily_loss=" not in captured_text
 
     # The queued runner must also allow the enabled aggregate loss to seed backward
-    # through the daily predictor when the daily phase is forward-only.
+    # through the daily predictor when the daily phase is forward-only.  If the
+    # daily path did not receive gradients, the aggregate loss could not improve.
     assert train_aggregate[1] < 0.95, (train_daily, train_aggregate, validate_daily, validate_aggregate)
-    assert train_daily[1] > 1.05, (train_daily, train_aggregate, validate_daily, validate_aggregate)
 
 
 def test_same_trainer_restart_enabled_successful_fit_preserves_state_for_next_fit(capfd):
