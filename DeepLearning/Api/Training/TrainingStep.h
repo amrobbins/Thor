@@ -28,15 +28,6 @@ class TrainingStep {
 
     TrainingStep() = default;
     TrainingStep(std::string name,
-                 std::vector<Tensor> lossRoots,
-                 std::shared_ptr<Optimizer> optimizer,
-                 std::vector<ParameterReference> updateParameters,
-                 uint32_t repeatCount = 1,
-                 GradientClearPolicy gradientClearPolicy = GradientClearPolicy::CLEAR_BEFORE_STEP,
-                 std::vector<TrainingInputBinding> inputBindings = {},
-                 bool enabled = true);
-
-    TrainingStep(std::string name,
                  std::vector<std::shared_ptr<TrainingPhase>> phases,
                  std::shared_ptr<Optimizer> optimizer,
                  std::vector<ParameterReference> updateParameters,
@@ -46,8 +37,8 @@ class TrainingStep {
                  bool enabled = true);
 
     [[nodiscard]] const std::string& getName() const { return name; }
-    [[nodiscard]] const std::vector<Tensor>& getLossRoots() const { return lossRoots; }
-    [[nodiscard]] std::vector<Tensor> getActiveLossRoots() const;
+    [[nodiscard]] std::vector<Tensor> getObjectiveRoots() const;
+    [[nodiscard]] std::vector<Tensor> getActiveObjectiveRoots() const;
     [[nodiscard]] std::vector<std::string> getActivePhaseNames() const;
     [[nodiscard]] std::vector<PhaseGraphNetworkSpec> getActivePhaseNetworkSpecs() const;
     [[nodiscard]] const std::vector<std::shared_ptr<TrainingPhase>>& getPhases() const { return phases; }
@@ -70,14 +61,16 @@ class TrainingStep {
                                     std::shared_ptr<thor_file::TarReader> archiveReader = nullptr,
                                     Network* network = nullptr);
 
-    [[nodiscard]] std::string getVersion() const { return "1.1.0"; }
+    [[nodiscard]] std::string getVersion() const { return "1.2.0"; }
 
    private:
+    friend class StepExecutable;
+    friend class TrainingProgram;
+
     void validate() const;
-    static std::vector<Tensor> collectAllLossRoots(const std::vector<std::shared_ptr<TrainingPhase>>& phases);
+    static std::vector<Tensor> collectObjectiveRoots(const std::vector<std::shared_ptr<TrainingPhase>>& phases, bool activeOnly);
 
     std::string name{};
-    std::vector<Tensor> lossRoots{};
     std::vector<std::shared_ptr<TrainingPhase>> phases{};
     std::shared_ptr<Optimizer> optimizer = nullptr;
     std::vector<ParameterReference> updateParameters{};

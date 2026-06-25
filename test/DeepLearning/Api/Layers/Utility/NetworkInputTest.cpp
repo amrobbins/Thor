@@ -217,7 +217,7 @@ TEST(NetworkInput, PassThroughSourceSerializationRoundTripPreservesAliasBehavior
 
     network.save(archiveDir.string(), true);
 
-    Network loaded("loaded_network_input_api_pass_through_source_round_trip");
+    Network loaded("network_input_api_pass_through_source_round_trip");
     loaded.load(archiveDir.string());
 
     std::vector<std::string> inputNames = loaded.getInferenceNetworkInputNames();

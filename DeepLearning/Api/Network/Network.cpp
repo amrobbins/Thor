@@ -65,129 +65,47 @@ void writeJsonFile(const std::filesystem::path& path, const json& j) {
 }
 
 
-bool hasSuffix(std::string_view value, std::string_view suffix) {
-    return value.size() >= suffix.size() && value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
-}
-
-bool isSixDigits(std::string_view value) {
-    if (value.size() != 6) {
-        return false;
-    }
-    return std::all_of(value.begin(), value.end(), [](unsigned char c) { return std::isdigit(c) != 0; });
-}
-
-std::vector<std::string> archiveNamesFromShardFilename(const std::string& filename) {
-    constexpr std::string_view kSuffix = ".thor.tar";
-    if (!hasSuffix(filename, kSuffix)) {
-        return {};
-    }
-
-    std::vector<std::string> archiveNames;
-    std::string archiveName = filename.substr(0, filename.size() - kSuffix.size());
-    if (!archiveName.empty()) {
-        archiveNames.push_back(archiveName);
-    }
-
-    const size_t dot = archiveName.rfind('.');
-    if (dot != std::string::npos && isSixDigits(std::string_view(archiveName).substr(dot + 1))) {
-        archiveName.erase(dot);
-        if (!archiveName.empty()) {
-            archiveNames.push_back(archiveName);
-        }
-    }
-    return archiveNames;
-}
-
 bool hasArchiveShard0(const std::filesystem::path& directory, const std::string& archiveName) {
     return std::filesystem::exists(directory / (archiveName + ".thor.tar")) ||
            std::filesystem::exists(directory / (archiveName + ".000000.thor.tar"));
 }
 
-bool isThorModelJsonName(const std::string& pathInArchive) {
-    constexpr std::string_view kSuffix = ".thor.json";
-    return hasSuffix(pathInArchive, kSuffix) && pathInArchive.find('/') == std::string::npos;
-}
 
 struct NetworkArchiveSelection {
     std::string archiveName;
     std::string modelJsonFileName;
 };
 
-NetworkArchiveSelection selectNetworkArchiveForLoad(const std::filesystem::path& directory, const std::string& preferredArchiveName) {
-    if (hasArchiveShard0(directory, preferredArchiveName)) {
-        auto reader = std::make_shared<thor_file::TarReader>(preferredArchiveName, directory);
-        const std::string preferredModelJsonFileName = preferredArchiveName + ".thor.json";
-        if (reader->containsFile(preferredModelJsonFileName)) {
-            return {preferredArchiveName, preferredModelJsonFileName};
-        }
-
-        std::vector<std::string> modelJsonFiles;
-        for (const auto& [pathInArchive, _] : reader->getArchiveEntries()) {
-            if (isThorModelJsonName(pathInArchive)) {
-                modelJsonFiles.push_back(pathInArchive);
-            }
-        }
-        if (modelJsonFiles.size() == 1) {
-            return {preferredArchiveName, modelJsonFiles.front()};
-        }
-        throw std::runtime_error("Network::load: archive '" + preferredArchiveName + "' in " + directory.string() +
-                                 " does not contain a unique top-level .thor.json model file");
+NetworkArchiveSelection selectNetworkArchiveForLoad(const std::filesystem::path& directory, const std::string& archiveName) {
+    if (archiveName.empty()) {
+        throw std::runtime_error("Network::load requires a non-empty network/archive name.");
+    }
+    std::error_code errorCode;
+    if (!std::filesystem::exists(directory, errorCode)) {
+        throw std::runtime_error("Network::load: directory does not exist: " + directory.string());
+    }
+    if (errorCode) {
+        throw std::runtime_error("Network::load: failed to inspect directory '" + directory.string() + "': " + errorCode.message());
+    }
+    if (!std::filesystem::is_directory(directory, errorCode)) {
+        throw std::runtime_error("Network::load: expected a directory containing archive '" + archiveName +
+                                 ".thor.tar', got: " + directory.string());
+    }
+    if (errorCode) {
+        throw std::runtime_error("Network::load: failed to inspect directory '" + directory.string() + "': " + errorCode.message());
+    }
+    if (!hasArchiveShard0(directory, archiveName)) {
+        throw std::runtime_error("Network::load: expected archive '" + archiveName + ".thor.tar' or sharded archive '" +
+                                 archiveName + ".000000.thor.tar' in directory " + directory.string() + ".");
     }
 
-    std::set<std::string> candidateArchiveNames;
-    if (std::filesystem::exists(directory)) {
-        for (const std::filesystem::directory_entry& entry : std::filesystem::directory_iterator(directory)) {
-            if (!entry.is_regular_file() && !entry.is_symlink()) {
-                continue;
-            }
-            for (const std::string& archiveName : archiveNamesFromShardFilename(entry.path().filename().string())) {
-                if (hasArchiveShard0(directory, archiveName)) {
-                    candidateArchiveNames.insert(archiveName);
-                }
-            }
-        }
+    auto reader = std::make_shared<thor_file::TarReader>(archiveName, directory);
+    const std::string modelJsonFileName = archiveName + ".thor.json";
+    if (!reader->containsFile(modelJsonFileName)) {
+        throw std::runtime_error("Network::load: archive '" + archiveName + "' in " + directory.string() +
+                                 " is missing expected model file '" + modelJsonFileName + "'.");
     }
-
-    std::vector<NetworkArchiveSelection> matches;
-    std::vector<std::string> scanErrors;
-    for (const std::string& candidateArchiveName : candidateArchiveNames) {
-        try {
-            auto reader = std::make_shared<thor_file::TarReader>(candidateArchiveName, directory);
-            std::vector<std::string> modelJsonFiles;
-            for (const auto& [pathInArchive, _] : reader->getArchiveEntries()) {
-                if (isThorModelJsonName(pathInArchive)) {
-                    modelJsonFiles.push_back(pathInArchive);
-                }
-            }
-            if (modelJsonFiles.size() == 1) {
-                matches.push_back({candidateArchiveName, modelJsonFiles.front()});
-            }
-        } catch (const std::exception& e) {
-            scanErrors.push_back(candidateArchiveName + ": " + e.what());
-        }
-    }
-
-    if (matches.size() == 1) {
-        return matches.front();
-    }
-    if (matches.empty()) {
-        std::string message = "Network::load: missing archive for network '" + preferredArchiveName + "' in " + directory.string() +
-                              " and no alternate archive with a unique top-level .thor.json model file was found";
-        if (!scanErrors.empty()) {
-            message += "; scan errors:";
-            for (const std::string& scanError : scanErrors) {
-                message += " [" + scanError + "]";
-            }
-        }
-        throw std::runtime_error(message);
-    }
-
-    std::string message = "Network::load: archive name is ambiguous for network '" + preferredArchiveName + "' in " +
-                          directory.string() + "; candidates:";
-    for (const NetworkArchiveSelection& match : matches) {
-        message += " " + match.archiveName;
-    }
-    throw std::runtime_error(message);
+    return {archiveName, modelJsonFileName};
 }
 
 void printCudaKernelOutOfBandKeys(const std::vector<ThorImplementation::CudaKernelOutOfBandKeys>& cudaKernelKeys) {
@@ -1112,9 +1030,9 @@ void Network::load(const string &directory,
     allowUnsafeLoadedCudaKernelSourceCompilation_ = allowUnsafeLoadedCudaKernelSource;
     trustedLoadedCudaKernelPublicKey_ = trustedCudaKernelPublicKey;
     trustedLoadedCudaKernelSourceDecryptionKey_ = trustedCudaKernelSourceDecryptionKey;
-    // Read the model json from the archive. Prefer the current network name for
-    // backward-compatible behavior, but allow a load target with a different
-    // in-memory name when the save directory contains exactly one Thor model.
+    // Read the model JSON from the exact archive matching this Network name.
+    // Thor intentionally does not fall back to "whatever unique model" is in
+    // the directory; callers must name the artifact they intend to load.
     const NetworkArchiveSelection archiveSelection = selectNetworkArchiveForLoad(directory, networkName);
     archiveReader = make_shared<thor_file::TarReader>(archiveSelection.archiveName, directory);
     const string& modelJsonFileName = archiveSelection.modelJsonFileName;

@@ -21,8 +21,8 @@ class StepExecutable {
     StepExecutable(const TrainingStep& step, PlacedNetwork& placedNetwork, bool resolveEmptyUpdateParametersAsAllTrainable = true);
 
     [[nodiscard]] const std::string& getName() const { return name; }
-    [[nodiscard]] const std::vector<Tensor>& getLossRoots() const { return lossRoots; }
-    [[nodiscard]] const std::vector<Tensor>& getResolvedLossRoots() const { return resolvedLossRoots; }
+    [[nodiscard]] const std::vector<Tensor>& getObjectiveRoots() const { return objectiveRoots; }
+    [[nodiscard]] const std::vector<Tensor>& getResolvedObjectiveRoots() const { return resolvedObjectiveRoots; }
     [[nodiscard]] const std::vector<std::string>& getActivePhaseNames() const { return activePhaseNames; }
     [[nodiscard]] std::shared_ptr<Optimizer> getOptimizer() const { return optimizer; }
     [[nodiscard]] const std::vector<ParameterReference>& getUpdateParameterReferences() const { return updateParameterReferences; }
@@ -42,8 +42,8 @@ class StepExecutable {
     void validate() const;
 
     std::string name{};
-    std::vector<Tensor> lossRoots{};
-    std::vector<Tensor> resolvedLossRoots{};
+    std::vector<Tensor> objectiveRoots{};
+    std::vector<Tensor> resolvedObjectiveRoots{};
     std::vector<std::string> activePhaseNames{};
     std::shared_ptr<Optimizer> optimizer = nullptr;
     std::vector<ParameterReference> updateParameterReferences{};

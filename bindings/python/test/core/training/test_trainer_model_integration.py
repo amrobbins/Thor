@@ -746,7 +746,7 @@ def _build_iris_two_input_multi_output_classifier(name: str, *, dtype=thor.DataT
     # storing the expression graph they build, but this test does not need that
     # extra surface area.  Two ordinary branches still exercise explicit
     # input binding, multiple NetworkInputs, multiple NetworkOutputs, and
-    # multiple loss roots in one TrainingStep.
+    # multiple declared graph losses in one TrainingStep.
     left_hidden = thor.layers.FullyConnected(
         network,
         examples_left.get_feature_output(),
@@ -1665,18 +1665,18 @@ def test_queued_trainer_fits_iris_fp16_deep_mlp_with_nadam(capfd):
 
 
 def test_queued_trainer_fits_iris_fp32_two_input_multi_output_network_with_explicit_bindings(capfd):
-    network, loss_roots = _build_iris_two_input_multi_output_classifier(
+    network, _losses = _build_iris_two_input_multi_output_classifier(
         "python_integration_iris_queued_fp32_two_input_multi_output",
         dtype=thor.DataType.fp32,
     )
     loader = _iris_loader(batch_size=16, dtype=np.float32)
     optimizer = thor.optimizers.Adam(alpha=0.003)
+    phase = thor.training.TrainingPhase("two_input_iris_phase", network=network)
     training_program = thor.training.TrainingProgram([
         thor.training.TrainingStep(
             "two_input_iris",
-            loss_roots,
+            phases=[phase],
             optimizer=optimizer,
-            update_parameters=network.get_trainable_parameter_references(),
             input_bindings=[
                 thor.training.TrainingInputBinding("examples_left", "examples"),
                 thor.training.TrainingInputBinding("examples_right", "examples"),

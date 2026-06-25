@@ -28,8 +28,8 @@ class LocalExecutor;
 namespace ThorImplementation {
 
 struct BatchSubmissionTiming {
-    uint64_t activeLossRootsMicros = 0;
-    uint64_t setActiveLossRootsMicros = 0;
+    uint64_t activeObjectiveRootsMicros = 0;
+    uint64_t setActiveObjectiveRootsMicros = 0;
     uint64_t sendBatchMicros = 0;
     uint64_t batchUnwrapMicros = 0;
     uint64_t physicalTotalMicros = 0;
@@ -41,12 +41,12 @@ struct BatchSubmissionTiming {
     uint64_t totalMicros = 0;
     uint64_t numInputs = 0;
     uint64_t numOutputs = 0;
-    uint64_t activeLossRootCount = 0;
+    uint64_t activeObjectiveRootCount = 0;
 };
 
 inline void accumulateBatchSubmissionTiming(BatchSubmissionTiming& dst, const BatchSubmissionTiming& src) {
-    dst.activeLossRootsMicros += src.activeLossRootsMicros;
-    dst.setActiveLossRootsMicros += src.setActiveLossRootsMicros;
+    dst.activeObjectiveRootsMicros += src.activeObjectiveRootsMicros;
+    dst.setActiveObjectiveRootsMicros += src.setActiveObjectiveRootsMicros;
     dst.sendBatchMicros += src.sendBatchMicros;
     dst.batchUnwrapMicros += src.batchUnwrapMicros;
     dst.physicalTotalMicros += src.physicalTotalMicros;
@@ -58,7 +58,7 @@ inline void accumulateBatchSubmissionTiming(BatchSubmissionTiming& dst, const Ba
     dst.totalMicros += src.totalMicros;
     dst.numInputs += src.numInputs;
     dst.numOutputs += src.numOutputs;
-    dst.activeLossRootCount += src.activeLossRootCount;
+    dst.activeObjectiveRootCount += src.activeObjectiveRootCount;
 }
 
 class StampedNetwork {

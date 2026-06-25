@@ -75,11 +75,11 @@ PhaseNetworkFixture buildPhaseNetwork(const std::string& networkName,
         lossRoot = loss.getLoss();
         NetworkOutput::Builder().network(*network).name(outputName + "_loss").inputTensor(lossRoot).dataType(DataType::FP32).build();
 
-        std::vector<Tensor> derivedLossRoots = network->getLossRootTensors();
-        if (derivedLossRoots.size() != 1) {
-            throw std::runtime_error("test phase fixture expected exactly one derived phase loss root");
+        std::vector<Tensor> derivedObjectiveRoots = network->getLossRootTensors();
+        if (derivedObjectiveRoots.size() != 1) {
+            throw std::runtime_error("test phase fixture expected exactly one derived phase graph loss");
         }
-        lossRoot = derivedLossRoots[0];
+        lossRoot = derivedObjectiveRoots[0];
     }
     NetworkOutput::Builder()
         .network(*network)
@@ -108,6 +108,14 @@ std::shared_ptr<TrainingPhase> makePhase(const std::string& phaseName,
     return std::make_shared<TrainingPhase>(phaseName, fixture.network, enabled);
 }
 
+std::shared_ptr<Network> nonOwningNetworkPtr(Network& network) {
+    return std::shared_ptr<Network>(&network, [](Network*) {});
+}
+
+std::shared_ptr<TrainingPhase> makeNonOwningPhase(const std::string& phaseName, Network& network, bool enabled = true) {
+    return std::make_shared<TrainingPhase>(phaseName, nonOwningNetworkPtr(network), enabled);
+}
+
 ComposedPhaseGraph composeActivePhases(const TrainingStep& step) {
     PhaseGraphComposeOptions options;
     options.networkName = "training_program_test_composed_phases";
@@ -129,7 +137,7 @@ void expectRuntimeErrorContains(Fn&& fn, const std::string& expectedMessageFragm
 
 }  // namespace
 
-TEST(TrainingPhaseApi, ConstructsWithNetworkAndDerivesLossRootsAndOutputs) {
+TEST(TrainingPhaseApi, ConstructsWithNetworkAndDerivesOutputs) {
     PhaseNetworkFixture fixture = buildPhaseNetwork("daily_phase_network", "examples", "forecast");
 
     TrainingPhase phase("daily_prediction", fixture.network, true);
@@ -139,8 +147,8 @@ TEST(TrainingPhaseApi, ConstructsWithNetworkAndDerivesLossRootsAndOutputs) {
     EXPECT_NE(phase.getNetwork(), nullptr);
     EXPECT_EQ(phase.getName(), "daily_prediction");
     EXPECT_EQ(phase.getNetwork(), fixture.network);
-    ASSERT_EQ(phase.getLossRoots().size(), 1u);
-    EXPECT_EQ(phase.getLossRoots()[0], fixture.lossRoot);
+    ASSERT_EQ(phase.getNetwork()->getLossRootTensors().size(), 1u);
+    EXPECT_EQ(phase.getNetwork()->getLossRootTensors()[0], fixture.lossRoot);
     ASSERT_EQ(phase.getOutputs().size(), 2u);
     EXPECT_EQ(phase.getOutputs().at("forecast"), fixture.outputTensor);
     EXPECT_TRUE(phase.getOutputs().count("forecast_loss") != 0);
@@ -161,13 +169,13 @@ TEST(TrainingPhaseApi, EnableDisableMutatesPhaseState) {
     EXPECT_TRUE(phase.isEnabled());
 }
 
-TEST(TrainingPhaseApi, AllowsForwardOnlyPhaseWithoutLossRoots) {
+TEST(TrainingPhaseApi, AllowsForwardOnlyPhaseWithoutGraphLosses) {
     PhaseNetworkFixture fixture = buildPhaseNetwork("daily_forward_network", "examples", "forecast", true, true, false);
     TrainingPhase phase("daily_forward", fixture.network, true);
 
     EXPECT_TRUE(phase.isInitialized());
     EXPECT_NE(phase.getNetwork(), nullptr);
-    EXPECT_TRUE(phase.getLossRoots().empty());
+    EXPECT_TRUE(phase.getNetwork()->getLossRootTensors().empty());
     ASSERT_EQ(phase.getOutputs().size(), 1u);
     EXPECT_EQ(phase.getOutputs().at("forecast"), fixture.outputTensor);
 }
@@ -181,7 +189,7 @@ TEST(TrainingPhaseApi, PhasePreservesExternalFalseOutputsForLocalWiring) {
     EXPECT_FALSE(phase.isEnabled());
     EXPECT_NE(phase.getNetwork(), nullptr);
     EXPECT_EQ(phase.getNetwork(), fixture.network);
-    EXPECT_TRUE(phase.getLossRoots().empty());
+    EXPECT_TRUE(phase.getNetwork()->getLossRootTensors().empty());
     ASSERT_EQ(phase.getOutputs().size(), 1u);
     EXPECT_EQ(phase.getOutputs().at("hidden"), fixture.outputTensor);
 
@@ -252,7 +260,7 @@ TEST(TrainingPhaseApi, SerializesAndDeserializes) {
     EXPECT_NE(restored.getNetwork(), nullptr);
     EXPECT_EQ(restored.getName(), phase.getName());
     EXPECT_EQ(restored.getNetwork()->getNetworkName(), "daily_phase_network");
-    ASSERT_EQ(restored.getLossRoots().size(), 1u);
+    ASSERT_EQ(restored.getNetwork()->getLossRootTensors().size(), 1u);
     ASSERT_EQ(restored.getOutputs().size(), 2u);
     EXPECT_TRUE(restored.getOutputs().count("forecast") != 0);
     EXPECT_TRUE(restored.getOutputs().count("forecast_loss") != 0);
@@ -295,42 +303,44 @@ TEST(TrainingPhaseApi, RejectsInvalidConstructionWithSpecificErrors) {
     expectRuntimeErrorContains([&]() { TrainingPhase("bad", unnamedNetwork); }, "network must have a non-empty Network name");
 }
 
-TEST(TrainingProgramApi, TrainingStepLossRootsRemainNonPhasedExecutionView) {
-    Tensor loss(DataType::FP32, {1});
+TEST(TrainingProgramApi, TrainingStepDerivesObjectiveRootsFromNetworkBackedPhases) {
+    PhaseNetworkFixture fixture;
+    auto phase = makePhase("daily", "examples", "daily", true, true, true, true, &fixture);
     auto sgd = Sgd::Builder().initialLearningRate(0.01f).build();
 
-    TrainingStep step("daily", {loss}, sgd, {});
+    TrainingStep step("daily", std::vector<std::shared_ptr<TrainingPhase>>{phase}, sgd, {});
 
     EXPECT_TRUE(step.isInitialized());
     EXPECT_TRUE(step.isEnabled());
-    ASSERT_EQ(step.getLossRoots().size(), 1u);
-    EXPECT_EQ(step.getLossRoots()[0], loss);
-    ASSERT_EQ(step.getActiveLossRoots().size(), 1u);
-    EXPECT_EQ(step.getActiveLossRoots()[0], loss);
-    EXPECT_TRUE(step.getPhases().empty());
-    EXPECT_TRUE(step.getActivePhaseNames().empty());
-    EXPECT_TRUE(step.getActivePhaseNetworkSpecs().empty());
+    ASSERT_EQ(step.getObjectiveRoots().size(), 1u);
+    EXPECT_EQ(step.getObjectiveRoots()[0], fixture.lossRoot);
+    ASSERT_EQ(step.getActiveObjectiveRoots().size(), 1u);
+    EXPECT_EQ(step.getActiveObjectiveRoots()[0], fixture.lossRoot);
+    ASSERT_EQ(step.getPhases().size(), 1u);
+    EXPECT_EQ(step.getActivePhaseNames(), (std::vector<std::string>{"daily"}));
+    ASSERT_EQ(step.getActivePhaseNetworkSpecs().size(), 1u);
 }
 
-TEST(TrainingProgramApi, TrainingStepEnableDisableMutatesStepStateAndActiveLossRoots) {
-    Tensor loss(DataType::FP32, {1});
-    TrainingStep step("daily", {loss}, nullptr, {});
+TEST(TrainingProgramApi, TrainingStepEnableDisableMutatesStepStateAndActiveObjectiveRoots) {
+    PhaseNetworkFixture fixture;
+    auto phase = makePhase("daily", "examples", "daily", true, true, true, true, &fixture);
+    TrainingStep step("daily", std::vector<std::shared_ptr<TrainingPhase>>{phase}, nullptr, {});
 
     EXPECT_TRUE(step.isEnabled());
-    ASSERT_EQ(step.getActiveLossRoots().size(), 1u);
+    ASSERT_EQ(step.getActiveObjectiveRoots().size(), 1u);
     step.disable();
     EXPECT_FALSE(step.isEnabled());
-    EXPECT_TRUE(step.getActiveLossRoots().empty());
+    EXPECT_TRUE(step.getActiveObjectiveRoots().empty());
     step.enable();
     EXPECT_TRUE(step.isEnabled());
-    ASSERT_EQ(step.getActiveLossRoots().size(), 1u);
+    ASSERT_EQ(step.getActiveObjectiveRoots().size(), 1u);
     step.setEnabled(false);
     EXPECT_FALSE(step.isEnabled());
     step.setEnabled(true);
     EXPECT_TRUE(step.isEnabled());
 }
 
-TEST(TrainingProgramApi, TrainingStepActiveLossRootsComeOnlyFromEnabledPhases) {
+TEST(TrainingProgramApi, TrainingStepActiveObjectiveRootsComeOnlyFromEnabledPhases) {
     PhaseNetworkFixture dailyFixture;
     PhaseNetworkFixture aggregateFixture;
     auto dailyPhase = makePhase("daily_prediction", "examples", "", true, true, true, true, &dailyFixture);
@@ -338,19 +348,19 @@ TEST(TrainingProgramApi, TrainingStepActiveLossRootsComeOnlyFromEnabledPhases) {
 
     TrainingStep step("demand_forecast", std::vector<std::shared_ptr<TrainingPhase>>{dailyPhase, aggregatePhase}, nullptr, {});
 
-    ASSERT_EQ(step.getLossRoots().size(), 2u);
-    std::vector<Tensor> activeRoots = step.getActiveLossRoots();
+    ASSERT_EQ(step.getObjectiveRoots().size(), 2u);
+    std::vector<Tensor> activeRoots = step.getActiveObjectiveRoots();
     ASSERT_EQ(activeRoots.size(), 1u);
     EXPECT_EQ(activeRoots[0], dailyFixture.lossRoot);
 
     aggregatePhase->enable();
-    activeRoots = step.getActiveLossRoots();
+    activeRoots = step.getActiveObjectiveRoots();
     ASSERT_EQ(activeRoots.size(), 2u);
     EXPECT_EQ(activeRoots[0], dailyFixture.lossRoot);
     EXPECT_EQ(activeRoots[1], aggregateFixture.lossRoot);
 
     dailyPhase->disable();
-    activeRoots = step.getActiveLossRoots();
+    activeRoots = step.getActiveObjectiveRoots();
     ASSERT_EQ(activeRoots.size(), 1u);
     EXPECT_EQ(activeRoots[0], aggregateFixture.lossRoot);
 }
@@ -366,13 +376,13 @@ TEST(TrainingProgramApi, TrainingStepActivePhaseNamesComeOnlyFromEnabledPhasesAn
         "demand_forecast", std::vector<std::shared_ptr<TrainingPhase>>{preprocessingPhase, dailyPhase, aggregatePhase}, nullptr, {});
 
     EXPECT_EQ(step.getActivePhaseNames(), (std::vector<std::string>{"feature_preprocessing", "daily_prediction"}));
-    std::vector<Tensor> activeRoots = step.getActiveLossRoots();
+    std::vector<Tensor> activeRoots = step.getActiveObjectiveRoots();
     ASSERT_EQ(activeRoots.size(), 1u);
     EXPECT_EQ(activeRoots[0], dailyFixture.lossRoot);
 
     aggregatePhase->enable();
     EXPECT_EQ(step.getActivePhaseNames(), (std::vector<std::string>{"feature_preprocessing", "daily_prediction", "aggregate_prediction"}));
-    activeRoots = step.getActiveLossRoots();
+    activeRoots = step.getActiveObjectiveRoots();
     ASSERT_EQ(activeRoots.size(), 2u);
     EXPECT_EQ(activeRoots[0], dailyFixture.lossRoot);
     EXPECT_EQ(activeRoots[1], aggregateFixture.lossRoot);
@@ -402,7 +412,7 @@ TEST(TrainingProgramApi, TrainingStepPhaseGraphValidationSkipsDisabledPhasesAndD
                               {},
                               false);
     EXPECT_TRUE(disabledStep.getActivePhaseNames().empty());
-    EXPECT_TRUE(disabledStep.getActiveLossRoots().empty());
+    EXPECT_TRUE(disabledStep.getActiveObjectiveRoots().empty());
 }
 
 TEST(TrainingProgramApi, PhaseGraphDependencyErrorsAreSpecificAndSearchable) {
@@ -468,10 +478,9 @@ TEST(TrainingProgramApi, TrainingStepSerializesPhaseAwareExecutionView) {
                       false);
 
     nlohmann::json j = step.architectureJson();
-    EXPECT_EQ(j.at("version").get<std::string>(), "1.1.0");
+    EXPECT_EQ(j.at("version").get<std::string>(), "1.2.0");
     EXPECT_EQ(j.at("name").get<std::string>(), "demand_forecast");
     EXPECT_FALSE(j.at("enabled").get<bool>());
-    ASSERT_EQ(j.at("loss_roots").size(), 2u);
     ASSERT_EQ(j.at("phases").size(), 2u);
     EXPECT_EQ(j.at("phases").at(0).at("name").get<std::string>(), "daily_prediction");
     EXPECT_EQ(j.at("phases").at(1).at("name").get<std::string>(), "aggregate_prediction");
@@ -485,14 +494,14 @@ TEST(TrainingProgramApi, TrainingStepSerializesPhaseAwareExecutionView) {
     EXPECT_EQ(restored.getName(), step.getName());
     EXPECT_EQ(restored.getRepeatCount(), step.getRepeatCount());
     EXPECT_EQ(restored.getGradientClearPolicy(), step.getGradientClearPolicy());
-    ASSERT_EQ(restored.getLossRoots().size(), 2u);
+    ASSERT_EQ(restored.getObjectiveRoots().size(), 2u);
     ASSERT_EQ(restored.getPhases().size(), 2u);
     EXPECT_EQ(restored.getPhases()[0]->getName(), "daily_prediction");
     EXPECT_EQ(restored.getPhases()[1]->getName(), "aggregate_prediction");
     EXPECT_NE(restored.getPhases()[0]->getNetwork(), nullptr);
     EXPECT_NE(restored.getPhases()[1]->getNetwork(), nullptr);
     EXPECT_FALSE(restored.getPhases()[1]->isEnabled());
-    EXPECT_TRUE(restored.getActiveLossRoots().empty());
+    EXPECT_TRUE(restored.getActiveObjectiveRoots().empty());
     EXPECT_EQ(restored.getUpdateParameters(), step.getUpdateParameters());
     ASSERT_EQ(restored.getInputBindings().size(), 1u);
     EXPECT_EQ(restored.getInputBindings()[0].getBatchInputName(), "input");
@@ -564,11 +573,16 @@ TEST(TrainingProgramApi, NetworkTrainableParameterReferencesRespectFreezeState) 
 }
 
 TEST(TrainingProgramApi, TrainingStepSerializesLogicalExecutionView) {
-    Tensor dLoss(DataType::FP32, {1});
     auto sgd = Sgd::Builder().initialLearningRate(0.01f).build();
     std::vector<ParameterReference> params{ParameterReference(123, "weights"), ParameterReference(123, "biases")};
+    auto phase = makePhase("discriminator");
 
-    TrainingStep step("discriminator", {dLoss}, sgd, params, 2, TrainingStep::GradientClearPolicy::CLEAR_BEFORE_STEP);
+    TrainingStep step("discriminator",
+                      std::vector<std::shared_ptr<TrainingPhase>>{phase},
+                      sgd,
+                      params,
+                      2,
+                      TrainingStep::GradientClearPolicy::CLEAR_BEFORE_STEP);
 
     EXPECT_TRUE(step.isInitialized());
     EXPECT_EQ(step.getName(), "discriminator");
@@ -577,11 +591,10 @@ TEST(TrainingProgramApi, TrainingStepSerializesLogicalExecutionView) {
     EXPECT_FALSE(step.updatesParameter(ParameterReference(999, "weights")));
 
     nlohmann::json j = step.architectureJson();
-    EXPECT_EQ(j.at("version").get<std::string>(), "1.1.0");
+    EXPECT_EQ(j.at("version").get<std::string>(), "1.2.0");
     EXPECT_EQ(j.at("name").get<std::string>(), "discriminator");
     EXPECT_EQ(j.at("repeat_count").get<uint32_t>(), 2u);
-    EXPECT_EQ(j.at("loss_roots").size(), 1u);
-    EXPECT_FALSE(j.contains("phases"));
+    ASSERT_EQ(j.at("phases").size(), 1u);
     EXPECT_EQ(j.at("update_parameters").size(), 2u);
     EXPECT_TRUE(j.contains("optimizer"));
 
@@ -590,25 +603,24 @@ TEST(TrainingProgramApi, TrainingStepSerializesLogicalExecutionView) {
     EXPECT_EQ(restored.getName(), step.getName());
     EXPECT_EQ(restored.getRepeatCount(), step.getRepeatCount());
     EXPECT_EQ(restored.getGradientClearPolicy(), step.getGradientClearPolicy());
-    EXPECT_EQ(restored.getLossRoots().size(), step.getLossRoots().size());
-    EXPECT_EQ(restored.getLossRoots()[0].getOriginalId(), step.getLossRoots()[0].getOriginalId());
+    EXPECT_EQ(restored.getObjectiveRoots().size(), step.getObjectiveRoots().size());
     EXPECT_EQ(restored.getUpdateParameters(), step.getUpdateParameters());
     EXPECT_NE(restored.getOptimizer(), nullptr);
 }
 
 TEST(TrainingProgramApi, TrainingStepRejectsDuplicateUpdateParameters) {
-    Tensor loss(DataType::FP32, {1});
     auto sgd = Sgd::Builder().initialLearningRate(0.01f).build();
     ParameterReference weights(123, "weights");
+    auto phase = makePhase("bad_phase");
 
-    EXPECT_THROW(TrainingStep("bad", {loss}, sgd, {weights, weights}), std::runtime_error);
+    EXPECT_THROW(TrainingStep("bad", std::vector<std::shared_ptr<TrainingPhase>>{phase}, sgd, {weights, weights}), std::runtime_error);
 }
 
 TEST(TrainingProgramApi, TrainingStepAllowsUpdatesWithoutStepOptimizerForPerParameterOptimizers) {
-    Tensor loss(DataType::FP32, {1});
     ParameterReference weights(123, "weights");
+    auto phase = makePhase("per_parameter_phase");
 
-    TrainingStep step("per_parameter", {loss}, nullptr, {weights});
+    TrainingStep step("per_parameter", std::vector<std::shared_ptr<TrainingPhase>>{phase}, nullptr, {weights});
     EXPECT_TRUE(step.isInitialized());
     EXPECT_EQ(step.getOptimizer(), nullptr);
 
@@ -622,15 +634,13 @@ TEST(TrainingProgramApi, TrainingStepAllowsUpdatesWithoutStepOptimizerForPerPara
 }
 
 TEST(TrainingProgramApi, TrainingProgramKeepsOrderedUniqueSteps) {
-    Tensor dLoss(DataType::FP32, {1});
-    Tensor gLoss(DataType::FP32, {1});
     auto dSgd = Sgd::Builder().initialLearningRate(0.01f).build();
     auto gSgd = Sgd::Builder().initialLearningRate(0.02f).build();
 
     auto dStep = std::make_shared<TrainingStep>(
-        "discriminator", std::vector<Tensor>{dLoss}, dSgd, std::vector<ParameterReference>{ParameterReference(1, "weights")});
+        "discriminator", std::vector<std::shared_ptr<TrainingPhase>>{makePhase("discriminator_phase")}, dSgd, std::vector<ParameterReference>{ParameterReference(1, "weights")});
     auto gStep = std::make_shared<TrainingStep>(
-        "generator", std::vector<Tensor>{gLoss}, gSgd, std::vector<ParameterReference>{ParameterReference(2, "weights")});
+        "generator", std::vector<std::shared_ptr<TrainingPhase>>{makePhase("generator_phase")}, gSgd, std::vector<ParameterReference>{ParameterReference(2, "weights")});
 
     TrainingProgram program;
     EXPECT_FALSE(program.isInitialized());
@@ -657,8 +667,7 @@ TEST(TrainingProgramApi, TrainingProgramKeepsOrderedUniqueSteps) {
 }
 
 TEST(TrainingProgramApi, HoldsTrainingStepsByReference) {
-    Tensor loss(DataType::FP32, {1});
-    auto step = std::make_shared<TrainingStep>("daily", std::vector<Tensor>{loss}, nullptr, std::vector<ParameterReference>{});
+    auto step = std::make_shared<TrainingStep>("daily", std::vector<std::shared_ptr<TrainingPhase>>{makePhase("daily_phase")}, nullptr, std::vector<ParameterReference>{});
 
     TrainingProgram program(std::vector<std::shared_ptr<TrainingStep>>{step});
     EXPECT_TRUE(program.isInitialized());
@@ -680,8 +689,7 @@ TEST(TrainingProgramApi, HoldsTrainingStepsByReference) {
 }
 
 TEST(TrainingProgramApi, AddStepStoresSharedReferenceAndRejectsNullReference) {
-    Tensor loss(DataType::FP32, {1});
-    auto step = std::make_shared<TrainingStep>("daily", std::vector<Tensor>{loss}, nullptr, std::vector<ParameterReference>{});
+    auto step = std::make_shared<TrainingStep>("daily", std::vector<std::shared_ptr<TrainingPhase>>{makePhase("daily_phase")}, nullptr, std::vector<ParameterReference>{});
 
     TrainingProgram program;
     EXPECT_THROW(program.addStep(nullptr), std::runtime_error);
@@ -708,7 +716,7 @@ TEST(TrainingProgramApi, DisabledPhasesDoNotValidateInactiveInternalInputsUntilE
                       std::vector<ParameterReference>{});
 
     EXPECT_EQ(step.getActivePhaseNames(), (std::vector<std::string>{"daily_prediction"}));
-    std::vector<Tensor> activeRoots = step.getActiveLossRoots();
+    std::vector<Tensor> activeRoots = step.getActiveObjectiveRoots();
     ASSERT_EQ(activeRoots.size(), 1u);
     EXPECT_EQ(activeRoots[0], dailyFixture.lossRoot);
     EXPECT_NO_THROW((void)composeActivePhases(step));
@@ -728,18 +736,18 @@ TEST(TrainingProgramApi, PhaseMutationAfterProgramConstructionIsVisibleThroughSt
                                                std::vector<ParameterReference>{});
 
     TrainingProgram program(std::vector<std::shared_ptr<TrainingStep>>{step});
-    std::vector<Tensor> activeRoots = program.getStep(0).getActiveLossRoots();
+    std::vector<Tensor> activeRoots = program.getStep(0).getActiveObjectiveRoots();
     ASSERT_EQ(activeRoots.size(), 1u);
     EXPECT_EQ(activeRoots[0], dailyFixture.lossRoot);
 
     aggregatePhase->enable();
-    activeRoots = program.getStep(0).getActiveLossRoots();
+    activeRoots = program.getStep(0).getActiveObjectiveRoots();
     ASSERT_EQ(activeRoots.size(), 2u);
     EXPECT_EQ(activeRoots[0], dailyFixture.lossRoot);
     EXPECT_EQ(activeRoots[1], aggregateFixture.lossRoot);
 
     dailyPhase->disable();
-    activeRoots = program.getStep(0).getActiveLossRoots();
+    activeRoots = program.getStep(0).getActiveObjectiveRoots();
     ASSERT_EQ(activeRoots.size(), 1u);
     EXPECT_EQ(activeRoots[0], aggregateFixture.lossRoot);
 }
@@ -755,7 +763,7 @@ TEST(TrainingProgramApi, TrainingProgramRejectsEmptyProgramsAtConstructionSerial
     EXPECT_THROW(TrainingProgram::deserialize(emptyProgramJson), std::runtime_error);
 }
 
-TEST(TrainingProgramApi, NetworkResolvesApiSideShapedLossRootsToCanonicalRawLossLayers) {
+TEST(TrainingProgramApi, NetworkResolvesApiSideShapedObjectiveRootsToCanonicalRawLossLayers) {
     Network network("training_program_raw_loss_root_resolution");
     auto sgd = Sgd::Builder().network(network).initialLearningRate(0.01f).build();
     NetworkInput input = NetworkInput::Builder().network(network).name("input").dimensions({1}).dataType(DataType::FP32).build();
@@ -807,7 +815,7 @@ TEST(TrainingProgramApi, NetworkResolvesApiSideShapedLossRootsToCanonicalRawLoss
     std::vector<Tensor> dailyRaw = network.getRawLossTensorsForTrainingRoots({dailyLoss.getLoss()});
     ASSERT_EQ(dailyRaw.size(), 1u);
     EXPECT_NE(dailyRaw[0].getOriginalId(), dailyLoss.getLoss().getOriginalId())
-        << "Batch-shaped loss roots must resolve to the underlying raw physical loss tensor, not remain on the shaper output.";
+        << "Batch-shaped graph losses must resolve to the underlying raw physical loss tensor, not remain on the shaper output.";
 
     std::vector<Tensor> aggregateRaw = network.getRawLossTensorsForTrainingRoots({aggregateLoss.getLoss()});
     ASSERT_EQ(aggregateRaw.size(), 1u);
@@ -817,7 +825,7 @@ TEST(TrainingProgramApi, NetworkResolvesApiSideShapedLossRootsToCanonicalRawLoss
     std::vector<Tensor> rawRoot = network.getRawLossTensorsForTrainingRoots({rawLoss.getLoss()});
     ASSERT_EQ(rawRoot.size(), 1u);
     EXPECT_EQ(rawRoot[0].getOriginalId(), rawLoss.getLoss().getOriginalId())
-        << "A raw loss root is already the physical backward seed and should resolve to itself.";
+        << "A raw graph loss is already the physical backward seed and should resolve to itself.";
 
     std::vector<Tensor> mixedRaw =
         network.getRawLossTensorsForTrainingRoots({dailyLoss.getLoss(), aggregateLoss.getLoss(), rawLoss.getLoss()});
@@ -830,9 +838,10 @@ TEST(TrainingProgramApi, NetworkResolvesApiSideShapedLossRootsToCanonicalRawLoss
     ASSERT_EQ(duplicateRaw.size(), 1u);
     EXPECT_EQ(duplicateRaw[0].getOriginalId(), dailyRaw[0].getOriginalId());
 
+    auto phase = makeNonOwningPhase("demand_forecast_phase", network);
     auto step = std::make_shared<TrainingStep>(
         "demand_forecast",
-        std::vector<Tensor>{dailyLoss.getLoss(), aggregateLoss.getLoss(), rawLoss.getLoss()},
+        std::vector<std::shared_ptr<TrainingPhase>>{phase},
         nullptr,
         std::vector<ParameterReference>{});
     TrainingProgram program(std::vector<std::shared_ptr<TrainingStep>>{step});
@@ -845,17 +854,17 @@ TEST(TrainingProgramApi, NetworkResolvesApiSideShapedLossRootsToCanonicalRawLoss
 
     std::vector<StepExecutable> executables = program.compile(*placed);
     ASSERT_EQ(executables.size(), 1u);
-    EXPECT_TRUE(executables[0].getActivePhaseNames().empty());
-    ASSERT_EQ(executables[0].getLossRoots().size(), 3u);
-    EXPECT_EQ(executables[0].getLossRoots()[0].getOriginalId(), dailyLoss.getLoss().getOriginalId());
-    EXPECT_EQ(executables[0].getLossRoots()[1].getOriginalId(), aggregateLoss.getLoss().getOriginalId());
-    EXPECT_EQ(executables[0].getLossRoots()[2].getOriginalId(), rawLoss.getLoss().getOriginalId());
+    EXPECT_EQ(executables[0].getActivePhaseNames(), (std::vector<std::string>{"demand_forecast_phase"}));
+    ASSERT_EQ(executables[0].getObjectiveRoots().size(), 3u);
+    EXPECT_EQ(executables[0].getObjectiveRoots()[0].getOriginalId(), dailyRaw[0].getOriginalId());
+    EXPECT_EQ(executables[0].getObjectiveRoots()[1].getOriginalId(), aggregateRaw[0].getOriginalId());
+    EXPECT_EQ(executables[0].getObjectiveRoots()[2].getOriginalId(), rawRoot[0].getOriginalId());
 
-    const std::vector<Tensor>& resolvedPhaseRoots = executables[0].getResolvedLossRoots();
+    const std::vector<Tensor>& resolvedPhaseRoots = executables[0].getResolvedObjectiveRoots();
     ASSERT_EQ(resolvedPhaseRoots.size(), 3u);
-    EXPECT_EQ(resolvedPhaseRoots[0].getOriginalId(), dailyLoss.getLoss().getOriginalId());
-    EXPECT_EQ(resolvedPhaseRoots[1].getOriginalId(), aggregateLoss.getLoss().getOriginalId());
-    EXPECT_EQ(resolvedPhaseRoots[2].getOriginalId(), rawLoss.getLoss().getOriginalId());
+    EXPECT_EQ(resolvedPhaseRoots[0].getOriginalId(), dailyRaw[0].getOriginalId());
+    EXPECT_EQ(resolvedPhaseRoots[1].getOriginalId(), aggregateRaw[0].getOriginalId());
+    EXPECT_EQ(resolvedPhaseRoots[2].getOriginalId(), rawRoot[0].getOriginalId());
 
     expectRuntimeErrorContains(
         [&]() { (void)network.getRawLossTensorsForTrainingRoots({fc.getFeatureOutput().value()}); },
@@ -863,8 +872,7 @@ TEST(TrainingProgramApi, NetworkResolvesApiSideShapedLossRootsToCanonicalRawLoss
 }
 
 TEST(TrainingProgramApi, TrainingProgramRejectsOutOfRangeAccessAndUnsupportedVersion) {
-    Tensor loss(DataType::FP32, {1});
-    auto step = std::make_shared<TrainingStep>("daily", std::vector<Tensor>{loss}, nullptr, std::vector<ParameterReference>{});
+    auto step = std::make_shared<TrainingStep>("daily", std::vector<std::shared_ptr<TrainingPhase>>{makePhase("daily_phase")}, nullptr, std::vector<ParameterReference>{});
     TrainingProgram program(std::vector<std::shared_ptr<TrainingStep>>{step});
 
     EXPECT_THROW(static_cast<void>(program.getStep(1)), std::runtime_error);
@@ -887,9 +895,9 @@ TEST(TrainingProgramApi, TrainingInputBindingsSerializeAndAttachToStep) {
     EXPECT_EQ(bindingJson.at("batch_input_name").get<std::string>(), "z_discriminator");
     EXPECT_EQ(TrainingInputBinding::deserialize(bindingJson), zBinding);
 
-    Tensor loss(DataType::FP32, {1});
+    auto phase = makePhase("discriminator_phase");
     TrainingStep step("discriminator",
-                      {loss},
+                      std::vector<std::shared_ptr<TrainingPhase>>{phase},
                       nullptr,
                       {},
                       1,
@@ -905,7 +913,7 @@ TEST(TrainingProgramApi, TrainingInputBindingsSerializeAndAttachToStep) {
     EXPECT_THROW(TrainingInputBinding("", "batch"), std::runtime_error);
     EXPECT_THROW(TrainingInputBinding("input", ""), std::runtime_error);
     EXPECT_THROW(TrainingStep("bad",
-                              {loss},
+                              std::vector<std::shared_ptr<TrainingPhase>>{phase},
                               nullptr,
                               {},
                               1,
@@ -932,14 +940,11 @@ TEST(TrainingProgramApi, PlacedNetworkResolvesParameterReferencesAndStepExecutab
                             .noActivation()
                             .build();
     NetworkInput labels = NetworkInput::Builder().network(network).name("labels").dimensions({2}).dataType(DataType::FP32).build();
-    const Tensor lossRoot = fc.getFeatureOutput().value();
-    NetworkOutput::Builder().network(network).name("scores").inputTensor(lossRoot).dataType(DataType::FP32).build();
-    NetworkOutput::Builder()
-        .network(network)
-        .name("labels_out")
-        .inputTensor(labels.getFeatureOutput().value())
-        .dataType(DataType::FP32)
-        .build();
+    MSE mse = MSE::Builder().network(network).predictions(fc.getFeatureOutput().value()).labels(labels.getFeatureOutput().value()).build();
+    NetworkOutput::Builder().network(network).name("scores").inputTensor(fc.getFeatureOutput().value()).dataType(DataType::FP32).build();
+    NetworkOutput::Builder().network(network).name("mse_loss").inputTensor(mse.getLoss()).dataType(DataType::FP32).build();
+    auto generatorPhase = makeNonOwningPhase("generator_phase", network);
+    const Tensor lossRoot = generatorPhase->getNetwork()->getLossRootTensors()[0];
 
     std::vector<Event> initDoneEvents;
     std::shared_ptr<PlacedNetwork> placed = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/false);
@@ -960,7 +965,7 @@ TEST(TrainingProgramApi, PlacedNetworkResolvesParameterReferencesAndStepExecutab
     EXPECT_TRUE(boundWeights.isTrainingEnabled());
 
     TrainingStep step("generator",
-                      {lossRoot},
+                      std::vector<std::shared_ptr<TrainingPhase>>{generatorPhase},
                       sgd,
                       {weights},
                       3,
@@ -972,9 +977,9 @@ TEST(TrainingProgramApi, PlacedNetworkResolvesParameterReferencesAndStepExecutab
     EXPECT_EQ(executable.getName(), "generator");
     EXPECT_EQ(executable.getRepeatCount(), 3u);
     EXPECT_EQ(executable.getGradientClearPolicy(), TrainingStep::GradientClearPolicy::ACCUMULATE);
-    ASSERT_EQ(executable.getLossRoots().size(), 1u);
-    ASSERT_EQ(executable.getResolvedLossRoots().size(), 1u);
-    EXPECT_EQ(executable.getResolvedLossRoots()[0].getOriginalId(), lossRoot.getOriginalId());
+    ASSERT_EQ(executable.getObjectiveRoots().size(), 1u);
+    ASSERT_EQ(executable.getResolvedObjectiveRoots().size(), 1u);
+    EXPECT_EQ(executable.getResolvedObjectiveRoots()[0].getOriginalId(), lossRoot.getOriginalId());
     ASSERT_EQ(executable.getUpdateParameterReferences().size(), 1u);
     ASSERT_EQ(executable.getResolvedUpdateParameters().size(), 1u);
     EXPECT_EQ(executable.getResolvedUpdateParameters()[0].getName(), "weights");
@@ -991,7 +996,7 @@ TEST(TrainingProgramApi, PlacedNetworkResolvesParameterReferencesAndStepExecutab
 
     nlohmann::json executableJson = executable.architectureJson();
     EXPECT_TRUE(executableJson.at("planned").get<bool>());
-    EXPECT_EQ(executableJson.at("resolved_loss_root_count").get<uint64_t>(), 1u);
+    EXPECT_EQ(executableJson.at("resolved_objective_root_count").get<uint64_t>(), 1u);
     EXPECT_EQ(executableJson.at("resolved_update_parameter_count").get<uint64_t>(), 1u);
     EXPECT_EQ(executableJson.at("input_bindings").at(0).at("network_input_name").get<std::string>(), "input");
     ASSERT_EQ(executableJson.at("resolved_input_bindings").size(), 2u);
@@ -1011,18 +1016,18 @@ TEST(TrainingProgramApi, PlacedNetworkResolvesParameterReferencesAndStepExecutab
     auto phasedStep = std::make_shared<TrainingStep>(
         "demand_forecast", std::vector<std::shared_ptr<TrainingPhase>>{dailyPhase, aggregatePhase}, sgd, std::vector<ParameterReference>{});
 
-    ASSERT_EQ(phasedStep->getActiveLossRoots().size(), 1u);
+    ASSERT_EQ(phasedStep->getActiveObjectiveRoots().size(), 1u);
     EXPECT_EQ(phasedStep->getActivePhaseNames(), (std::vector<std::string>{"daily_prediction"}));
-    EXPECT_EQ(phasedStep->getActiveLossRoots()[0], dailyPhaseFixture.lossRoot);
+    EXPECT_EQ(phasedStep->getActiveObjectiveRoots()[0], dailyPhaseFixture.lossRoot);
     nlohmann::json phasedJson = phasedStep->architectureJson();
     EXPECT_EQ(phasedJson.at("phases").at(0).at("network").at("name").get<std::string>(), "daily_prediction_network");
     EXPECT_FALSE(phasedJson.at("phases").at(1).at("enabled").get<bool>());
 
     aggregatePhase->enable();
-    ASSERT_EQ(phasedStep->getActiveLossRoots().size(), 2u);
+    ASSERT_EQ(phasedStep->getActiveObjectiveRoots().size(), 2u);
     EXPECT_EQ(phasedStep->getActivePhaseNames(), (std::vector<std::string>{"daily_prediction", "aggregate_prediction"}));
-    EXPECT_EQ(phasedStep->getActiveLossRoots()[0], dailyPhaseFixture.lossRoot);
-    EXPECT_EQ(phasedStep->getActiveLossRoots()[1], aggregatePhaseFixture.lossRoot);
+    EXPECT_EQ(phasedStep->getActiveObjectiveRoots()[0], dailyPhaseFixture.lossRoot);
+    EXPECT_EQ(phasedStep->getActiveObjectiveRoots()[1], aggregatePhaseFixture.lossRoot);
     EXPECT_NO_THROW((void)composeActivePhases(*phasedStep));
 
     dailyPhase->disable();
@@ -1033,10 +1038,10 @@ TEST(TrainingProgramApi, PlacedNetworkResolvesParameterReferencesAndStepExecutab
     dailyPhase->enable();
 
     ParameterReference biases = fc.getParameterReference("biases");
-    auto disabledStep =
-        std::make_shared<TrainingStep>("disabled", std::vector<Tensor>{lossRoot}, sgd, std::vector<ParameterReference>{weights, biases});
-    auto enabledStep =
-        std::make_shared<TrainingStep>("enabled", std::vector<Tensor>{lossRoot}, sgd, std::vector<ParameterReference>{weights, biases});
+    auto disabledStep = std::make_shared<TrainingStep>(
+        "disabled", std::vector<std::shared_ptr<TrainingPhase>>{generatorPhase}, sgd, std::vector<ParameterReference>{weights, biases});
+    auto enabledStep = std::make_shared<TrainingStep>(
+        "enabled", std::vector<std::shared_ptr<TrainingPhase>>{generatorPhase}, sgd, std::vector<ParameterReference>{weights, biases});
     disabledStep->disable();
     TrainingProgram referenceProgram(std::vector<std::shared_ptr<TrainingStep>>{disabledStep, enabledStep});
     executables = referenceProgram.compile(*placed);
@@ -1056,8 +1061,8 @@ TEST(TrainingProgramApi, PlacedNetworkResolvesParameterReferencesAndStepExecutab
     auto skippedBadDependencyStep = std::make_shared<TrainingStep>(
         "skipped_bad_dependency", std::vector<std::shared_ptr<TrainingPhase>>{skippedBadDependencyPhase}, sgd, std::vector<ParameterReference>{weights});
     skippedBadDependencyStep->disable();
-    auto validReferenceStep =
-        std::make_shared<TrainingStep>("valid_reference", std::vector<Tensor>{lossRoot}, sgd, std::vector<ParameterReference>{weights});
+    auto validReferenceStep = std::make_shared<TrainingStep>(
+        "valid_reference", std::vector<std::shared_ptr<TrainingPhase>>{generatorPhase}, sgd, std::vector<ParameterReference>{weights});
     TrainingProgram skipDisabledInvalidProgram(std::vector<std::shared_ptr<TrainingStep>>{skippedBadDependencyStep, validReferenceStep});
     executables = skipDisabledInvalidProgram.compile(*placed);
     ASSERT_EQ(executables.size(), 1u);
@@ -1077,7 +1082,7 @@ TEST(TrainingProgramApi, PlacedNetworkResolvesParameterReferencesAndStepExecutab
     EXPECT_THROW(plan.validateNativeQueuedExecutorCompatible(network.getTrainableParameterReferences()), std::runtime_error);
 
     TrainingStep nativeStep("native",
-                            {lossRoot},
+                            std::vector<std::shared_ptr<TrainingPhase>>{generatorPhase},
                             sgd,
                             {weights, biases},
                             1,
@@ -1089,7 +1094,7 @@ TEST(TrainingProgramApi, PlacedNetworkResolvesParameterReferencesAndStepExecutab
     EXPECT_NO_THROW(nativePlan.validateNativeQueuedExecutorCompatible(network.getTrainableParameterReferences()));
     EXPECT_THROW(nativePlan.assertLegacyLocalExecutorCompatible(), std::runtime_error);
 
-    TrainingStep perParameterOptimizerStep("per_parameter", {lossRoot}, nullptr, {weights, biases});
+    TrainingStep perParameterOptimizerStep("per_parameter", std::vector<std::shared_ptr<TrainingPhase>>{generatorPhase}, nullptr, {weights, biases});
     auto perParameterOptimizerStepRef = std::make_shared<TrainingStep>(perParameterOptimizerStep);
     ExecutableTrainingPlan perParameterOptimizerPlan =
         ExecutableTrainingPlan::compile(TrainingProgram(std::vector<std::shared_ptr<TrainingStep>>{perParameterOptimizerStepRef}), *placed);
@@ -1097,7 +1102,7 @@ TEST(TrainingProgramApi, PlacedNetworkResolvesParameterReferencesAndStepExecutab
     EXPECT_NO_THROW(perParameterOptimizerPlan.assertLegacyLocalExecutorCompatible());
     EXPECT_NO_THROW(perParameterOptimizerPlan.validateNativeQueuedExecutorCompatible(network.getTrainableParameterReferences()));
 
-    TrainingStep legacyStep("legacy", {lossRoot}, sgd, {weights, biases});
+    TrainingStep legacyStep("native_single_step", std::vector<std::shared_ptr<TrainingPhase>>{generatorPhase}, sgd, {weights, biases});
     auto legacyStepRef = std::make_shared<TrainingStep>(legacyStep);
     ExecutableTrainingPlan legacyPlan =
         ExecutableTrainingPlan::compile(TrainingProgram(std::vector<std::shared_ptr<TrainingStep>>{legacyStepRef}), *placed);
@@ -1109,11 +1114,17 @@ TEST(TrainingProgramApi, PlacedNetworkResolvesParameterReferencesAndStepExecutab
     EXPECT_EQ(planJson.at("total_step_repeats_per_iteration").get<uint64_t>(), 1u);
 
     EXPECT_THROW(placed->resolveParameterReference(ParameterReference(fc.getId(), "missing")), std::runtime_error);
-    EXPECT_THROW(StepExecutable(TrainingStep("bad", {lossRoot}, sgd, {ParameterReference(999999, "weights")}), *placed),
+    EXPECT_THROW(StepExecutable(TrainingStep("bad",
+                                             std::vector<std::shared_ptr<TrainingPhase>>{generatorPhase},
+                                             sgd,
+                                             {ParameterReference(999999, "weights")}),
+                                *placed),
                  std::runtime_error);
-    EXPECT_THROW(StepExecutable(TrainingStep("bad_loss", {Tensor(DataType::FP32, {1})}, sgd, {weights}), *placed), std::runtime_error);
+    auto foreignPhase = makePhase("foreign_phase");
+    EXPECT_THROW(StepExecutable(TrainingStep("bad_loss", std::vector<std::shared_ptr<TrainingPhase>>{foreignPhase}, sgd, {weights}), *placed),
+                 std::runtime_error);
     EXPECT_THROW(StepExecutable(TrainingStep("bad_input",
-                                             {lossRoot},
+                                             std::vector<std::shared_ptr<TrainingPhase>>{generatorPhase},
                                              sgd,
                                              {weights},
                                              1,

@@ -1,5 +1,7 @@
 #include "DeepLearning/Api/Training/TrainingStep.h"
 
+#include "DeepLearning/Api/Network/Network.h"
+
 #include <set>
 #include <stdexcept>
 #include <utility>
@@ -7,26 +9,6 @@
 using json = nlohmann::json;
 
 namespace Thor {
-
-TrainingStep::TrainingStep(std::string name,
-                           std::vector<Tensor> lossRoots,
-                           std::shared_ptr<Optimizer> optimizer,
-                           std::vector<ParameterReference> updateParameters,
-                           uint32_t repeatCount,
-                           GradientClearPolicy gradientClearPolicy,
-                           std::vector<TrainingInputBinding> inputBindings,
-                           bool enabled)
-    : name(std::move(name)),
-      lossRoots(std::move(lossRoots)),
-      optimizer(std::move(optimizer)),
-      updateParameters(std::move(updateParameters)),
-      inputBindings(std::move(inputBindings)),
-      repeatCount(repeatCount),
-      gradientClearPolicy(gradientClearPolicy),
-      enabled(enabled),
-      initialized(true) {
-    validate();
-}
 
 TrainingStep::TrainingStep(std::string name,
                            std::vector<std::shared_ptr<TrainingPhase>> phases,
@@ -37,7 +19,6 @@ TrainingStep::TrainingStep(std::string name,
                            std::vector<TrainingInputBinding> inputBindings,
                            bool enabled)
     : name(std::move(name)),
-      lossRoots(collectAllLossRoots(phases)),
       phases(std::move(phases)),
       optimizer(std::move(optimizer)),
       updateParameters(std::move(updateParameters)),
@@ -49,13 +30,17 @@ TrainingStep::TrainingStep(std::string name,
     validate();
 }
 
-std::vector<Tensor> TrainingStep::collectAllLossRoots(const std::vector<std::shared_ptr<TrainingPhase>>& phases) {
+std::vector<Tensor> TrainingStep::collectObjectiveRoots(const std::vector<std::shared_ptr<TrainingPhase>>& phases, bool activeOnly) {
     std::vector<Tensor> roots;
     for (const std::shared_ptr<TrainingPhase>& phase : phases) {
-        if (phase == nullptr) {
+        if (phase == nullptr || (activeOnly && !phase->isEnabled())) {
             continue;
         }
-        const std::vector<Tensor>& phaseRoots = phase->getLossRoots();
+        std::shared_ptr<Network> phaseNetwork = phase->getNetwork();
+        if (phaseNetwork == nullptr) {
+            continue;
+        }
+        std::vector<Tensor> phaseRoots = phaseNetwork->getLossRootTensors();
         roots.insert(roots.end(), phaseRoots.begin(), phaseRoots.end());
     }
     return roots;
@@ -86,16 +71,8 @@ void TrainingStep::validate() const {
     if (repeatCount == 0) {
         throw std::runtime_error("TrainingStep repeat_count must be >= 1.");
     }
-    if (phases.empty() && lossRoots.empty()) {
-        throw std::runtime_error("TrainingStep requires at least one loss root tensor or one TrainingPhase with a loss root.");
-    }
-    if (!phases.empty() && lossRoots.empty()) {
-        throw std::runtime_error("TrainingStep requires at least one loss root tensor across its phases.");
-    }
-    for (const Tensor& lossRoot : lossRoots) {
-        if (!lossRoot.isInitialized()) {
-            throw std::runtime_error("TrainingStep loss roots must all be initialized tensors.");
-        }
+    if (phases.empty()) {
+        throw std::runtime_error("TrainingStep requires at least one TrainingPhase.");
     }
 
     std::set<std::string> seenPhaseNames;
@@ -133,24 +110,17 @@ void TrainingStep::validate() const {
     }
 }
 
-std::vector<Tensor> TrainingStep::getActiveLossRoots() const {
+std::vector<Tensor> TrainingStep::getObjectiveRoots() const {
+    validate();
+    return collectObjectiveRoots(phases, /*activeOnly=*/false);
+}
+
+std::vector<Tensor> TrainingStep::getActiveObjectiveRoots() const {
     validate();
     if (!enabled) {
         return {};
     }
-    if (phases.empty()) {
-        return lossRoots;
-    }
-
-    std::vector<Tensor> activeRoots;
-    for (const std::shared_ptr<TrainingPhase>& phase : phases) {
-        if (!phase->isEnabled()) {
-            continue;
-        }
-        const std::vector<Tensor>& phaseRoots = phase->getLossRoots();
-        activeRoots.insert(activeRoots.end(), phaseRoots.begin(), phaseRoots.end());
-    }
-    return activeRoots;
+    return collectObjectiveRoots(phases, /*activeOnly=*/true);
 }
 
 std::vector<std::string> TrainingStep::getActivePhaseNames() const {
@@ -209,16 +179,9 @@ json TrainingStep::architectureJson() const {
     j["repeat_count"] = repeatCount;
     j["gradient_clear_policy"] = gradientClearPolicy;
 
-    j["loss_roots"] = json::array();
-    for (const Tensor& lossRoot : lossRoots) {
-        j["loss_roots"].push_back(lossRoot.architectureJson());
-    }
-
-    if (!phases.empty()) {
-        j["phases"] = json::array();
-        for (const std::shared_ptr<TrainingPhase>& phase : phases) {
-            j["phases"].push_back(phase->architectureJson());
-        }
+    j["phases"] = json::array();
+    for (const std::shared_ptr<TrainingPhase>& phase : phases) {
+        j["phases"].push_back(phase->architectureJson());
     }
 
     j["update_parameters"] = json::array();
@@ -243,7 +206,7 @@ std::string TrainingStep::architectureJsonString() const { return architectureJs
 
 TrainingStep TrainingStep::deserialize(const json& j, std::shared_ptr<thor_file::TarReader> archiveReader, Network* network) {
     const std::string version = j.at("version").get<std::string>();
-    if (version != "1.0.0" && version != "1.1.0") {
+    if (version != "1.1.0" && version != "1.2.0") {
         throw std::runtime_error("Unsupported TrainingStep version: " + version);
     }
 
@@ -268,28 +231,16 @@ TrainingStep TrainingStep::deserialize(const json& j, std::shared_ptr<thor_file:
     const GradientClearPolicy gradientClearPolicy = j.at("gradient_clear_policy").get<TrainingStep::GradientClearPolicy>();
     const bool enabled = j.contains("enabled") ? j.at("enabled").get<bool>() : true;
 
-    if (j.contains("phases") && !j.at("phases").empty()) {
-        std::vector<std::shared_ptr<TrainingPhase>> phases;
-        for (const json& phaseJson : j.at("phases")) {
-            phases.push_back(std::make_shared<TrainingPhase>(TrainingPhase::deserialize(phaseJson, archiveReader)));
-        }
-        return TrainingStep(j.at("name").get<std::string>(),
-                            std::move(phases),
-                            std::move(optimizer),
-                            std::move(updateParameters),
-                            repeatCount,
-                            gradientClearPolicy,
-                            std::move(inputBindings),
-                            enabled);
+    if (!j.contains("phases") || j.at("phases").empty()) {
+        throw std::runtime_error("TrainingStep serialized data requires one or more TrainingPhase entries.");
     }
 
-    std::vector<Tensor> lossRoots;
-    for (const json& lossRootJson : j.at("loss_roots")) {
-        lossRoots.push_back(Tensor::deserialize(lossRootJson, archiveReader.get()));
+    std::vector<std::shared_ptr<TrainingPhase>> phases;
+    for (const json& phaseJson : j.at("phases")) {
+        phases.push_back(std::make_shared<TrainingPhase>(TrainingPhase::deserialize(phaseJson, archiveReader)));
     }
-
     return TrainingStep(j.at("name").get<std::string>(),
-                        std::move(lossRoots),
+                        std::move(phases),
                         std::move(optimizer),
                         std::move(updateParameters),
                         repeatCount,

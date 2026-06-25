@@ -100,14 +100,14 @@ std::vector<StepExecutable> TrainingProgram::compile(PlacedNetwork& placedNetwor
         if (!step->isEnabled()) {
             continue;
         }
-        if (step->getActiveLossRoots().empty()) {
+        if (step->getActiveObjectiveRoots().empty()) {
             throw std::runtime_error("TrainingProgram enabled TrainingStep '" + step->getName() +
-                                     "' has no active loss roots.");
+                                     "' has no active graph losses in its enabled phases.");
         }
         executables.emplace_back(*step, placedNetwork, resolveEmptyUpdateParametersAsAllTrainable);
     }
     if (executables.empty()) {
-        throw std::runtime_error("TrainingProgram has no enabled TrainingStep with active loss roots.");
+        throw std::runtime_error("TrainingProgram has no enabled TrainingStep with active graph losses.");
     }
     return executables;
 }

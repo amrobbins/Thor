@@ -25,7 +25,6 @@ class TrainingPhase {
 
     [[nodiscard]] const std::string& getName() const { return name; }
     [[nodiscard]] std::shared_ptr<Network> getNetwork() const { return network; }
-    [[nodiscard]] const std::vector<Tensor>& getLossRoots() const;
     [[nodiscard]] const std::map<std::string, Tensor>& getOutputs() const;
     [[nodiscard]] bool isEnabled() const { return enabled; }
     [[nodiscard]] bool isInitialized() const { return initialized; }
@@ -48,7 +47,6 @@ class TrainingPhase {
     std::shared_ptr<Network> network = nullptr;
 
     mutable bool networkDerivedCachesValid = false;
-    mutable std::vector<Tensor> cachedNetworkLossRoots{};
     mutable std::map<std::string, Tensor> cachedNetworkOutputs{};
 
     bool enabled = true;

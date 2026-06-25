@@ -1535,6 +1535,12 @@ calling this helper.
         }
         return nb::cast(*self.savedModelDirectory);
     });
+    training_run_result.def_prop_ro("saved_model_network_name", [](const TrainingRunResult& self) -> nb::object {
+        if (!self.savedModelNetworkName.has_value()) {
+            return nb::none();
+        }
+        return nb::cast(*self.savedModelNetworkName);
+    });
     training_run_result.def_prop_ro("exception_type", [](const TrainingRunResult& self) { return self.exception.type; });
     training_run_result.def_prop_ro("exception_message", [](const TrainingRunResult& self) { return self.exception.message; });
     training_run_result.def_prop_ro("final_training_stats", [](const TrainingRunResult& self) { return self.finalTrainingStats; });
@@ -1883,7 +1889,6 @@ calling this helper.
     training_phase.def("disable", &TrainingPhase::disable);
     training_phase.def("set_enabled", &TrainingPhase::setEnabled, "enabled"_a);
     training_phase.def("get_network", &TrainingPhase::getNetwork);
-    training_phase.def("get_loss_roots", &TrainingPhase::getLossRoots, nb::rv_policy::reference_internal);
     training_phase.def("get_outputs", &TrainingPhase::getOutputs, nb::rv_policy::reference_internal);
     training_phase.def("get_architecture_json", &TrainingPhase::architectureJsonString);
     training_phase.def_static(
@@ -1900,32 +1905,16 @@ calling this helper.
         "__new__",
         [](nb::handle cls,
            const std::string& name,
-           nb::object loss_roots,
+           std::vector<std::shared_ptr<TrainingPhase>> phases,
            std::shared_ptr<Optimizer> optimizer,
            std::vector<ParameterReference> update_parameters,
            uint32_t repeat_count,
            TrainingStep::GradientClearPolicy gradient_clear_policy,
            std::vector<TrainingInputBinding> input_bindings,
-           bool enabled,
-           nb::object phases) -> std::shared_ptr<TrainingStep> {
+           bool enabled) -> std::shared_ptr<TrainingStep> {
             (void)cls;
-            const bool hasLossRoots = !loss_roots.is_none();
-            const bool hasPhases = !phases.is_none();
-            if (hasLossRoots == hasPhases) {
-                throw nb::value_error("TrainingStep requires exactly one of loss_roots or phases.");
-            }
-            if (hasPhases) {
-                return std::make_shared<TrainingStep>(name,
-                                                      nb::cast<std::vector<std::shared_ptr<TrainingPhase>>>(phases),
-                                                      std::move(optimizer),
-                                                      std::move(update_parameters),
-                                                      repeat_count,
-                                                      gradient_clear_policy,
-                                                      std::move(input_bindings),
-                                                      enabled);
-            }
             return std::make_shared<TrainingStep>(name,
-                                                  nb::cast<std::vector<Tensor>>(loss_roots),
+                                                  std::move(phases),
                                                   std::move(optimizer),
                                                   std::move(update_parameters),
                                                   repeat_count,
@@ -1935,35 +1924,32 @@ calling this helper.
         },
         "cls"_a,
         "name"_a,
-        "loss_roots"_a.none() = nb::none(),
+        "phases"_a,
         "optimizer"_a.none() = nb::none(),
         "update_parameters"_a = std::vector<ParameterReference>{},
         "repeat_count"_a = 1,
         "gradient_clear_policy"_a = TrainingStep::GradientClearPolicy::CLEAR_BEFORE_STEP,
         "input_bindings"_a = std::vector<TrainingInputBinding>{},
-        "enabled"_a = true,
-        "phases"_a.none() = nb::none());
+        "enabled"_a = true);
     training_step.def(
         "__init__",
         [](TrainingStep*,
            const std::string&,
-           nb::object,
+           std::vector<std::shared_ptr<TrainingPhase>>,
            std::shared_ptr<Optimizer>,
            std::vector<ParameterReference>,
            uint32_t,
            TrainingStep::GradientClearPolicy,
            std::vector<TrainingInputBinding>,
-           bool,
-           nb::object) {},
+           bool) {},
         "name"_a,
-        "loss_roots"_a.none() = nb::none(),
+        "phases"_a,
         "optimizer"_a.none() = nb::none(),
         "update_parameters"_a = std::vector<ParameterReference>{},
         "repeat_count"_a = 1,
         "gradient_clear_policy"_a = TrainingStep::GradientClearPolicy::CLEAR_BEFORE_STEP,
         "input_bindings"_a = std::vector<TrainingInputBinding>{},
-        "enabled"_a = true,
-        "phases"_a.none() = nb::none());
+        "enabled"_a = true);
     training_step.def_prop_ro("name", &TrainingStep::getName);
     training_step.def_prop_ro("repeat_count", &TrainingStep::getRepeatCount);
     training_step.def_prop_ro("gradient_clear_policy", &TrainingStep::getGradientClearPolicy);
@@ -1973,8 +1959,6 @@ calling this helper.
     training_step.def("enable", &TrainingStep::enable);
     training_step.def("disable", &TrainingStep::disable);
     training_step.def("set_enabled", &TrainingStep::setEnabled, "enabled"_a);
-    training_step.def("get_loss_roots", &TrainingStep::getLossRoots, nb::rv_policy::reference_internal);
-    training_step.def("get_active_loss_roots", &TrainingStep::getActiveLossRoots);
     training_step.def("get_active_phase_names", &TrainingStep::getActivePhaseNames);
     training_step.def("get_phases", &TrainingStep::getPhases, nb::rv_policy::reference_internal);
     training_step.def("get_optimizer", &TrainingStep::getOptimizer);
@@ -1996,8 +1980,6 @@ calling this helper.
     step_executable.def_prop_ro("name", &StepExecutable::getName);
     step_executable.def_prop_ro("repeat_count", &StepExecutable::getRepeatCount);
     step_executable.def_prop_ro("gradient_clear_policy", &StepExecutable::getGradientClearPolicy);
-    step_executable.def("get_loss_roots", &StepExecutable::getLossRoots, nb::rv_policy::reference_internal);
-    step_executable.def("get_resolved_loss_roots", &StepExecutable::getResolvedLossRoots, nb::rv_policy::reference_internal);
     step_executable.def("get_active_phase_names", &StepExecutable::getActivePhaseNames, nb::rv_policy::reference_internal);
     step_executable.def("get_optimizer", &StepExecutable::getOptimizer);
     step_executable.def(

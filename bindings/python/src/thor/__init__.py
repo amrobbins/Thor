@@ -14,8 +14,8 @@ class _NetworkLoadDescriptor:
 
     Nanobind does not allow a static method and an instance method to share the
     same overload name.  Keep the public API ergonomic by dispatching
-    ``thor.Network.load(path)`` to the native static loader and ``network.load(path)``
-    to the native in-place loader.
+    ``thor.Network.load(path, network_name=...)`` to the native static loader and
+    ``network.load(path)`` to the native in-place loader.
     """
 
     def __get__(self, instance, owner=None):

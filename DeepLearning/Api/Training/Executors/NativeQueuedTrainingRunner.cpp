@@ -10,6 +10,7 @@
 #include "DeepLearning/Api/Training/ExecutableTrainingPlan.h"
 #include "DeepLearning/Api/Training/PhaseGraphConnector.h"
 #include "DeepLearning/Api/Training/TrainingProgram.h"
+#include "DeepLearning/Api/Training/TrainingPhase.h"
 #include "DeepLearning/Implementation/Layers/LayerSubmitDiagnostics.h"
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Common/ScopedGpu.h"
@@ -237,9 +238,8 @@ std::set<std::string> setFromVector(const std::vector<std::string>& values) {
 }
 
 std::vector<std::string> plainTrainingProgramAggregateLossNames(Network& network) {
-    // Phase-backed programs are resolved into a composed active graph before placement.
-    // The only remaining caller is the plain TrainingStep(loss_roots=...) path, where
-    // all output-backed graph losses remain reportable for aggregate loss/stat purposes.
+    // Explicit and implicit TrainingStep programs are resolved to a regular active graph before placement.
+    // All output-backed graph losses in that graph remain reportable for aggregate loss/stat purposes.
     return outputBackedReportableLossNames(network);
 }
 
@@ -642,9 +642,9 @@ void emitNativeQueueSubmitTimingDiagnostic(TrainingEventPhase phase,
         std::fprintf(stderr,
                      "THOR_TRAINING_QUEUE_DIAGNOSTIC native event=submit_timing phase=%s epoch=%lu batch=%lu slot=%lu "
                      "in_flight=%lu done=%lu/%lu submit_calls=%lu bind_us=%lu submit_batch_us=%lu "
-                     "active_loss_roots_us=%lu set_active_loss_roots_us=%lu send_batch_us=%lu batch_unwrap_us=%lu "
+                     "active_objective_roots_us=%lu set_active_objective_roots_us=%lu send_batch_us=%lu batch_unwrap_us=%lu "
                      "physical_total_us=%lu input_forward_us=%lu output_collect_us=%lu output_wait_processing_us=%lu "
-                     "processing_event_us=%lu input_fanout_us=%lu total_us=%lu inputs=%lu outputs=%lu active_loss_roots=%lu\n",
+                     "processing_event_us=%lu input_fanout_us=%lu total_us=%lu inputs=%lu outputs=%lu active_objective_roots=%lu\n",
                      phaseName(phase).c_str(),
                      epoch + 1,
                      batch + 1,
@@ -655,8 +655,8 @@ void emitNativeQueueSubmitTimingDiagnostic(TrainingEventPhase phase,
                      submitCalls,
                      bindMicros,
                      submitBatchMicros,
-                     timing.activeLossRootsMicros,
-                     timing.setActiveLossRootsMicros,
+                     timing.activeObjectiveRootsMicros,
+                     timing.setActiveObjectiveRootsMicros,
                      timing.sendBatchMicros,
                      timing.batchUnwrapMicros,
                      timing.physicalTotalMicros,
@@ -668,14 +668,14 @@ void emitNativeQueueSubmitTimingDiagnostic(TrainingEventPhase phase,
                      timing.totalMicros,
                      timing.numInputs,
                      timing.numOutputs,
-                     timing.activeLossRootCount);
+                     timing.activeObjectiveRootCount);
     } else {
         std::fprintf(stderr,
                      "THOR_TRAINING_QUEUE_DIAGNOSTIC native event=submit_timing phase=%s epoch=%lu batch=%lu slot=%lu "
                      "in_flight=%lu done=%lu/%lu submit_calls=%lu bind_us=%lu submit_batch_us=%lu "
-                     "active_loss_roots_us=%lu set_active_loss_roots_us=%lu send_batch_us=%lu batch_unwrap_us=%lu "
+                     "active_objective_roots_us=%lu set_active_objective_roots_us=%lu send_batch_us=%lu batch_unwrap_us=%lu "
                      "physical_total_us=%lu input_forward_us=%lu output_collect_us=%lu output_wait_processing_us=%lu "
-                     "processing_event_us=%lu input_fanout_us=%lu total_us=%lu inputs=%lu outputs=%lu active_loss_roots=%lu "
+                     "processing_event_us=%lu input_fanout_us=%lu total_us=%lu inputs=%lu outputs=%lu active_objective_roots=%lu "
                      "gpu_submit_coord=1 coord_queue_wait_us=%lu coord_set_gpu_us=%lu coord_exec_us=%lu "
                      "coord_roundtrip_us=%lu\n",
                      phaseName(phase).c_str(),
@@ -688,8 +688,8 @@ void emitNativeQueueSubmitTimingDiagnostic(TrainingEventPhase phase,
                      submitCalls,
                      bindMicros,
                      submitBatchMicros,
-                     timing.activeLossRootsMicros,
-                     timing.setActiveLossRootsMicros,
+                     timing.activeObjectiveRootsMicros,
+                     timing.setActiveObjectiveRootsMicros,
                      timing.sendBatchMicros,
                      timing.batchUnwrapMicros,
                      timing.physicalTotalMicros,
@@ -701,7 +701,7 @@ void emitNativeQueueSubmitTimingDiagnostic(TrainingEventPhase phase,
                      timing.totalMicros,
                      timing.numInputs,
                      timing.numOutputs,
-                     timing.activeLossRootCount,
+                     timing.activeObjectiveRootCount,
                      coordinatorQueueWaitMicros,
                      coordinatorSetGpuMicros,
                      coordinatorExecMicros,
@@ -971,6 +971,32 @@ void ensureNativeQueuedPlanCompatible(const ExecutableTrainingPlan& plan, const 
     plan.validateNativeQueuedExecutorCompatible(network.getTrainableParameterReferences(/*trainingEnabledOnly=*/true));
 }
 
+std::shared_ptr<TrainingStep> makeSingleNetworkTrainingStep(const std::string& stepName,
+                                                              std::shared_ptr<Network> network,
+                                                              std::shared_ptr<Optimizer> optimizer,
+                                                              std::vector<ParameterReference> updateParameters = {},
+                                                              uint32_t repeatCount = 1,
+                                                              TrainingStep::GradientClearPolicy gradientClearPolicy =
+                                                                  TrainingStep::GradientClearPolicy::CLEAR_BEFORE_STEP,
+                                                              std::vector<TrainingInputBinding> inputBindings = {},
+                                                              bool enabled = true) {
+    if (network == nullptr) {
+        throw std::runtime_error("TrainingStep default phase requires a Network.");
+    }
+    if (network->getLossRootTensors().empty()) {
+        throw std::runtime_error("TrainingStep default phase requires a Network with at least one graph loss.");
+    }
+    auto phase = std::make_shared<TrainingPhase>(stepName + "_phase", std::move(network), true);
+    return std::make_shared<TrainingStep>(stepName,
+                                          std::vector<std::shared_ptr<TrainingPhase>>{phase},
+                                          std::move(optimizer),
+                                          std::move(updateParameters),
+                                          repeatCount,
+                                          gradientClearPolicy,
+                                          std::move(inputBindings),
+                                          enabled);
+}
+
 std::shared_ptr<TrainingProgram> evaluationOnlyProgramForRequest(const TrainingRunRequest& request) {
     std::vector<std::shared_ptr<TrainingStep>> evaluationSteps;
 
@@ -991,12 +1017,8 @@ std::shared_ptr<TrainingProgram> evaluationOnlyProgramForRequest(const TrainingR
                                                                      step.isEnabled()));
         }
     } else {
-        std::vector<Tensor> lossRoots = request.network->getLossRootTensors();
-        if (lossRoots.empty()) {
-            throw std::runtime_error("Trainer could not synthesize an evaluation TrainingProgram because the Network has no loss roots.");
-        }
-        evaluationSteps.push_back(
-            std::make_shared<TrainingStep>("default", std::move(lossRoots), /*optimizer=*/nullptr, std::vector<ParameterReference>{}));
+        evaluationSteps.push_back(makeSingleNetworkTrainingStep(
+            "default", request.network, /*optimizer=*/nullptr, std::vector<ParameterReference>{}));
     }
 
     return std::make_shared<TrainingProgram>(std::move(evaluationSteps));
@@ -1014,9 +1036,8 @@ std::shared_ptr<TrainingProgram> defaultTrainingProgramForRequest(const Training
         return request.trainingProgram;
     }
 
-    std::vector<Tensor> lossRoots = request.network->getLossRootTensors();
-    if (lossRoots.empty()) {
-        throw std::runtime_error("Trainer could not synthesize a default TrainingProgram because the Network has no loss roots.");
+    if (request.network->getLossRootTensors().empty()) {
+        throw std::runtime_error("Trainer could not synthesize a default TrainingProgram because the Network has no graph losses.");
     }
 
     std::vector<ParameterReference> parameters = request.network->getTrainableParameterReferences(/*trainingEnabledOnly=*/true);
@@ -1029,7 +1050,9 @@ std::shared_ptr<TrainingProgram> defaultTrainingProgramForRequest(const Training
         optimizer = request.network->getDefaultOptimizer();
     }
 
-    auto defaultStep = std::make_shared<TrainingStep>("default", std::move(lossRoots), optimizer, std::move(parameters));
+    // Leave update_parameters empty on the implicit phase-backed step.  After active phase
+    // composition, an empty update set resolves to all trainable parameters in the composed graph.
+    auto defaultStep = makeSingleNetworkTrainingStep("default", request.network, optimizer, std::vector<ParameterReference>{});
     return std::make_shared<TrainingProgram>(std::vector<std::shared_ptr<TrainingStep>>{defaultStep});
 }
 
@@ -1075,6 +1098,19 @@ bool trainingProgramHasAnyPhase(const TrainingProgram& program) {
         }
     }
     return false;
+}
+
+bool isImplicitDefaultSingleNetworkProgram(const TrainingProgram& program, const std::shared_ptr<Network>& network) {
+    if (network == nullptr || program.getNumSteps() != 1) {
+        return false;
+    }
+    const TrainingStep& step = program.getStep(0);
+    if (step.getName() != "default") {
+        return false;
+    }
+    const std::vector<std::shared_ptr<TrainingPhase>>& phases = step.getPhases();
+    return phases.size() == 1 && phases[0] != nullptr && phases[0]->isInitialized() &&
+           phases[0]->getName() == "default_phase" && phases[0]->getNetwork() == network;
 }
 
 void validateTrainingPhaseNativeQueuedProgramShape(const TrainingProgram& program) {
@@ -1130,7 +1166,7 @@ NativeQueuedExecutionGraph resolveNativeQueuedExecutionGraph(const TrainingRunRe
     result.network = request.network;
     result.trainingProgram = requestedProgram;
 
-    if (!trainingProgramHasAnyPhase(*requestedProgram)) {
+    if (!trainingProgramHasAnyPhase(*requestedProgram) || isImplicitDefaultSingleNetworkProgram(*requestedProgram, request.network)) {
         return result;
     }
 
@@ -1147,9 +1183,8 @@ NativeQueuedExecutionGraph resolveNativeQueuedExecutionGraph(const TrainingRunRe
         throw std::runtime_error("TrainingPhase composition produced a null active graph Network.");
     }
 
-    std::vector<Tensor> lossRoots = composedGraph.network->getLossRootTensors();
-    if (lossRoots.empty()) {
-        throw std::runtime_error("TrainingPhase composition produced an active graph with no loss roots.");
+    if (composedGraph.network->getLossRootTensors().empty()) {
+        throw std::runtime_error("TrainingPhase composition produced an active graph with no graph losses.");
     }
 
     std::shared_ptr<Optimizer> composedOptimizer = optimizerForComposedPhaseGraph(request, sourceStep);
@@ -1157,8 +1192,9 @@ NativeQueuedExecutionGraph resolveNativeQueuedExecutionGraph(const TrainingRunRe
         composedGraph.network->setDefaultOptimizer(composedOptimizer);
     }
 
+    auto executionPhase = std::make_shared<TrainingPhase>(sourceStep.getName() + "_active_graph", composedGraph.network, true);
     auto executionStep = std::make_shared<TrainingStep>(sourceStep.getName(),
-                                                        std::move(lossRoots),
+                                                        std::vector<std::shared_ptr<TrainingPhase>>{executionPhase},
                                                         sourceStep.getOptimizer(),
                                                         std::vector<ParameterReference>{},
                                                         sourceStep.getRepeatCount(),
@@ -1592,7 +1628,7 @@ class NativeQueuedEpochScheduler {
                                                           params->batchOutput,
                                                           outputReadyEvents[nextStampToProcess],
                                                           validationPass,
-                                                          step.getLossRoots(),
+                                                          step.getObjectiveRoots(),
                                                           &processingFinishedEvents[slotIndex],
                                                           /*waitForOutputsOnProcessingStream=*/false,
                                                           &singleSubmitTiming,
@@ -1762,7 +1798,9 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
 
     std::shared_ptr<TrainingProgram> requestedTrainingProgram = defaultTrainingProgramForRequest(request);
     const bool requestedProgramUsesPhases = trainingProgramHasAnyPhase(*requestedTrainingProgram);
-    if (!evaluateOnly && !requestedProgramUsesPhases) {
+    const bool requestedProgramIsImplicitDefault =
+        isImplicitDefaultSingleNetworkProgram(*requestedTrainingProgram, request.network);
+    if (!evaluateOnly && (!requestedProgramUsesPhases || requestedProgramIsImplicitDefault)) {
         attachPlacementFallbackOptimizerIfNeeded(request, *requestedTrainingProgram);
     }
 

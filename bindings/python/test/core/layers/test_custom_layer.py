@@ -948,7 +948,7 @@ def test_python_custom_layer_callable_dict_build_is_serializable(tmp_path):
     save_dir = tmp_path / "custom_layer_direct_dict"
     network.save(str(save_dir), overwrite=False)
 
-    loaded = thor.Network("custom-layer-direct-dict-serializable-loaded")
+    loaded = thor.Network("custom-layer-direct-dict-serializable")
     loaded.load(str(save_dir))
     loaded_architecture = json.loads(loaded.get_architecture_json())
     loaded_custom_layers = [
@@ -1006,7 +1006,7 @@ def test_python_custom_layer_callable_dict_build_runs_numerically_after_save_loa
     save_dir = tmp_path / "custom_layer_direct_dict_numerical"
     network.save(str(save_dir), overwrite=False)
 
-    loaded = thor.Network("custom-layer-direct-dict-numerical-round-trip-loaded")
+    loaded = thor.Network("custom-layer-direct-dict-numerical-round-trip")
     loaded.load(str(save_dir))
     loaded_architecture = json.loads(loaded.get_architecture_json())
     loaded_custom_layers = [

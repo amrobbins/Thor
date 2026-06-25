@@ -415,15 +415,6 @@ void writeOptionalDoubleJson(std::ostream& out, const std::optional<double>& val
     }
 }
 
-std::vector<std::string> inputNamesFromSignature(const std::vector<TrainingRunInputSignature>& signature) {
-    std::vector<std::string> names;
-    names.reserve(signature.size());
-    for (const TrainingRunInputSignature& item : signature) {
-        names.push_back(item.inputName);
-    }
-    return names;
-}
-
 void eraseNames(std::vector<std::string>& names, const std::vector<std::string>& namesToErase) {
     if (names.empty() || namesToErase.empty()) {
         return;
@@ -433,40 +424,10 @@ void eraseNames(std::vector<std::string>& names, const std::vector<std::string>&
                 names.end());
 }
 
-std::vector<std::string> inferenceInputNamesFromSavedArtifact(const std::filesystem::path& memberArtifactDirectory,
-                                                              const std::vector<TrainingRunInputSignature>& fallbackSignature) {
-    try {
-        Network model("thor_training_runs_ensemble_manifest_probe");
-        model.load(memberArtifactDirectory.string());
-        std::vector<std::string> names = model.getInferenceNetworkInputNames();
-        // Graph metrics intentionally remain runnable in inference/evaluation placements,
-        // so label-only inputs can appear in the inference graph when a saved member
-        // exposes reported metric outputs.  The ensemble artifact's public input
-        // contract is deploy/inference oriented: advertise only prediction inputs, not
-        // labels or example weights that are used exclusively by losses/metrics.
-        eraseNames(names, model.getTrainingOnlyNetworkInputNames());
-        return names;
-    } catch (const std::exception&) {
-        // Some unit tests construct synthetic TrainingRunsResult objects with minimal
-        // member artifact directories instead of full saved Network artifacts. Those
-        // tests still exercise the ensemble manifest writer, so fall back to the
-        // recorded training signature when the copied member cannot be loaded. Real
-        // saved training artifacts continue to use the inference-pruned signature so
-        // label-only inputs are not exposed as deployable ensemble inputs.
-    }
-    return inputNamesFromSignature(fallbackSignature);
-}
-
-std::vector<std::string> predictionOutputNamesFromSignature(const std::vector<TrainingRunOutputSignature>& signature) {
-    std::vector<std::string> names;
-    names.reserve(signature.size());
-    for (const TrainingRunOutputSignature& item : signature) {
-        if (item.outputName != "loss") {
-            names.push_back(item.outputName);
-        }
-    }
-    return names;
-}
+struct SavedNetworkArtifactRef {
+    std::filesystem::path directory;
+    std::string networkName;
+};
 
 std::vector<std::string> deployableOutputNamesForSavedEnsemble(Network& referenceMember,
                                                                const std::vector<TrainingRunOutputSignature>& signature) {
@@ -487,25 +448,6 @@ std::vector<std::string> deployableOutputNamesForSavedEnsemble(Network& referenc
         }
     }
     return names;
-}
-
-std::string safeMemberDirectoryName(size_t index, const std::string& runName) {
-    std::ostringstream out;
-    out << std::setw(4) << std::setfill('0') << index << "_";
-    bool wroteAnyNameChar = false;
-    for (unsigned char ch : runName) {
-        if (std::isalnum(ch) || ch == '-' || ch == '_' || ch == '.') {
-            out << static_cast<char>(ch);
-            wroteAnyNameChar = true;
-        } else {
-            out << '_';
-            wroteAnyNameChar = true;
-        }
-    }
-    if (!wroteAnyNameChar) {
-        out << "member";
-    }
-    return out.str();
 }
 
 std::string safeNetworkNameForSavedEnsemble(std::string_view ensembleGroup) {
@@ -538,31 +480,6 @@ void removePathIfExistsForEnsembleSave(const std::filesystem::path& path) {
     std::filesystem::remove_all(path, errorCode);
     if (errorCode) {
         throw std::runtime_error("Failed to remove ensemble artifact path '" + path.string() + "': " + errorCode.message());
-    }
-}
-
-void copyMemberArtifactDirectory(const std::filesystem::path& source, const std::filesystem::path& destination) {
-    std::error_code errorCode;
-    if (!std::filesystem::exists(source, errorCode) || errorCode) {
-        throw std::runtime_error("TrainingRuns cannot save ensemble member because saved model artifact path does not exist: " +
-                                 source.string());
-    }
-    if (!std::filesystem::is_directory(source, errorCode) || errorCode) {
-        throw std::runtime_error("TrainingRuns cannot save ensemble member because saved model artifact path is not a directory: " +
-                                 source.string());
-    }
-    std::filesystem::create_directories(destination.parent_path(), errorCode);
-    if (errorCode) {
-        throw std::runtime_error("Failed to create ensemble members directory '" + destination.parent_path().string() +
-                                 "': " + errorCode.message());
-    }
-    std::filesystem::copy(source,
-                          destination,
-                          std::filesystem::copy_options::recursive,
-                          errorCode);
-    if (errorCode) {
-        throw std::runtime_error("Failed to copy saved model artifact from '" + source.string() + "' to '" + destination.string() +
-                                 "': " + errorCode.message());
     }
 }
 
@@ -913,7 +830,7 @@ bool TrainingRunsResult::anyCancelled() const {
 namespace {
 
 void saveComposedEnsembleNetworkArtifact(const TrainingEnsembleResult& ensembleResult,
-                                         const std::vector<std::filesystem::path>& memberArtifactDirectories,
+                                         const std::vector<SavedNetworkArtifactRef>& memberArtifacts,
                                          const std::string& aggregation,
                                          const std::filesystem::path& artifactDirectory,
                                          bool overwriteNetworkArchive);
@@ -993,8 +910,8 @@ std::string TrainingRunsResult::saveEnsemble(std::string_view ensembleGroup,
         removePathIfExistsForEnsembleSave(artifactDirectory);
     }
 
-    std::vector<std::filesystem::path> completedMemberArtifactDirectories;
-    completedMemberArtifactDirectories.reserve(ensembleResult.members.size());
+    std::vector<SavedNetworkArtifactRef> completedMemberArtifacts;
+    completedMemberArtifacts.reserve(ensembleResult.members.size());
     for (const TrainingEnsembleMemberResult& member : ensembleResult.members) {
         if (member.status != TrainingRunStatus::COMPLETED) {
             continue;
@@ -1008,13 +925,17 @@ std::string TrainingRunsResult::saveEnsemble(std::string_view ensembleGroup,
             throw std::runtime_error("TrainingRunsResult.save_ensemble requires member '" + member.runName +
                                      "' to have a trainer save_model_dir / saved_model_dir artifact.");
         }
-        completedMemberArtifactDirectories.emplace_back(*result.savedModelDirectory);
+        if (!result.savedModelNetworkName.has_value() || result.savedModelNetworkName->empty()) {
+            throw std::runtime_error("TrainingRunsResult.save_ensemble requires member '" + member.runName +
+                                     "' to record the saved model network name.");
+        }
+        completedMemberArtifacts.push_back(SavedNetworkArtifactRef{*result.savedModelDirectory, *result.savedModelNetworkName});
     }
 
     // save_ensemble produces a regular Thor Network artifact.  Member artifacts
     // and manifests are not copied into the deployable artifact.
     saveComposedEnsembleNetworkArtifact(ensembleResult,
-                                        completedMemberArtifactDirectories,
+                                        completedMemberArtifacts,
                                         resolvedAggregation,
                                         artifactDirectory,
                                         /*overwriteNetworkArchive=*/true);
@@ -1179,7 +1100,12 @@ TrainingRunsResult TrainingRuns::fit(const TrainerFitOptions& options, const Tra
             }
             result.ensembleGroup = runs[i].ensembleGroup;
             result.ensembleWeight = runs[i].ensembleWeight;
-            result.savedModelDirectory = runs[i].trainer->getSaveModelDirectory();
+            if (!result.savedModelDirectory.has_value()) {
+                result.savedModelDirectory = runs[i].trainer->getSaveModelDirectory();
+            }
+            if (!result.savedModelNetworkName.has_value() && runs[i].trainer->getNetwork() != nullptr) {
+                result.savedModelNetworkName = runs[i].trainer->getNetwork()->getNetworkName();
+            }
 
             bool shouldCancelSiblings = false;
             {
@@ -1227,6 +1153,9 @@ TrainingRunsResult TrainingRuns::fit(const TrainerFitOptions& options, const Tra
                     result.ensembleGroup = runs[i].ensembleGroup;
                     result.ensembleWeight = runs[i].ensembleWeight;
                     result.savedModelDirectory = runs[i].trainer->getSaveModelDirectory();
+                    if (runs[i].trainer->getNetwork() != nullptr) {
+                        result.savedModelNetworkName = runs[i].trainer->getNetwork()->getNetworkName();
+                    }
                     result.status = TrainingRunStatus::CANCELLED;
                     result.exception = TrainingRunExceptionSummary{"TrainingCancelled", "cancelled before launch by sibling failure"};
                     {
@@ -2140,6 +2069,7 @@ namespace {
 struct EnsembleMemberSpecRef {
     size_t runIndex = 0;
     const TrainingRunsSpec* spec = nullptr;
+    const TrainingRunResult* result = nullptr;
 };
 
 std::map<std::string, std::vector<EnsembleMemberSpecRef>> completedEnsembleMembersByGroup(
@@ -2153,7 +2083,7 @@ std::map<std::string, std::vector<EnsembleMemberSpecRef>> completedEnsembleMembe
         if (i >= results.size() || results[i].status != TrainingRunStatus::COMPLETED) {
             continue;
         }
-        byGroup[*runs[i].ensembleGroup].push_back(EnsembleMemberSpecRef{i, &runs[i]});
+        byGroup[*runs[i].ensembleGroup].push_back(EnsembleMemberSpecRef{i, &runs[i], &results[i]});
     }
     return byGroup;
 }
@@ -2455,31 +2385,34 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
 }
 
 void saveComposedEnsembleNetworkArtifact(const TrainingEnsembleResult& ensembleResult,
-                                         const std::vector<std::filesystem::path>& memberArtifactDirectories,
+                                         const std::vector<SavedNetworkArtifactRef>& memberArtifacts,
                                          const std::string& aggregation,
                                          const std::filesystem::path& artifactDirectory,
                                          bool overwriteNetworkArchive) {
-    if (memberArtifactDirectories.empty()) {
+    if (memberArtifacts.empty()) {
         throw std::runtime_error("TrainingRunsResult.save_ensemble cannot save an ensemble network with no completed member artifacts.");
     }
 
     std::vector<std::shared_ptr<Network>> memberNetworks;
-    memberNetworks.reserve(memberArtifactDirectories.size());
-    for (size_t memberIndex = 0; memberIndex < memberArtifactDirectories.size(); ++memberIndex) {
-        auto memberNetwork = std::make_shared<Network>("training_runs_save_ensemble_member_" + std::to_string(memberIndex));
-        memberNetwork->load(memberArtifactDirectories[memberIndex].string());
+    memberNetworks.reserve(memberArtifacts.size());
+    for (const SavedNetworkArtifactRef& memberArtifact : memberArtifacts) {
+        if (memberArtifact.networkName.empty()) {
+            throw std::runtime_error("TrainingRunsResult.save_ensemble member artifact is missing its saved model network name.");
+        }
+        auto memberNetwork = std::make_shared<Network>(memberArtifact.networkName);
+        memberNetwork->load(memberArtifact.directory.string());
         memberNetworks.push_back(std::move(memberNetwork));
     }
 
     std::vector<double> weights;
-    weights.reserve(memberArtifactDirectories.size());
+    weights.reserve(memberArtifacts.size());
     for (const TrainingEnsembleMemberResult& member : ensembleResult.members) {
         if (member.status != TrainingRunStatus::COMPLETED) {
             continue;
         }
         weights.push_back(aggregation == "mean" ? 1.0 : member.weight);
     }
-    if (weights.size() != memberArtifactDirectories.size()) {
+    if (weights.size() != memberArtifacts.size()) {
         throw std::runtime_error("TrainingRunsResult.save_ensemble internal error while collecting completed member weights.");
     }
 
@@ -2746,12 +2679,19 @@ TrainingRunsComposedEvaluatorArtifacts loadTrainingRunsComposedEvaluatorArtifact
         if (member.spec == nullptr || member.spec->trainer == nullptr || member.spec->trainer->getNetwork() == nullptr) {
             throw std::runtime_error(context + " requires a trainer network for every ensemble member.");
         }
-        const std::optional<std::string>& artifactDir = member.spec->trainer->getSaveModelDirectory();
+        const std::optional<std::string> artifactDir =
+            member.result != nullptr && member.result->savedModelDirectory.has_value()
+                ? member.result->savedModelDirectory
+                : member.spec->trainer->getSaveModelDirectory();
         if (!artifactDir.has_value()) {
             throw std::runtime_error(context + " ensemble member '" + member.spec->runName +
                                      "' does not have a saved model artifact directory for ensemble evaluation.");
         }
-        auto loadedNetwork = std::make_shared<Network>(member.spec->trainer->getNetwork()->getNetworkName());
+        if (member.result == nullptr || !member.result->savedModelNetworkName.has_value() || member.result->savedModelNetworkName->empty()) {
+            throw std::runtime_error(context + " ensemble member '" + member.spec->runName +
+                                     "' does not have the exact saved model network name required for strict artifact loading.");
+        }
+        auto loadedNetwork = std::make_shared<Network>(*member.result->savedModelNetworkName);
         loadedNetwork->load(*artifactDir);
         artifacts.memberNetworks.push_back(std::move(loadedNetwork));
         artifacts.weights.push_back(member.spec->ensembleWeight);
@@ -3267,7 +3207,9 @@ void applyGraphEvaluationMemberTestStats(std::vector<TrainingRunResult>& results
         if (runResult.finalTestStats.has_value()) {
             testStats = *runResult.finalTestStats;
         }
-        testStats.networkName = members[i].spec->trainer->getNetwork()->getNetworkName();
+        testStats.networkName = members[i].result != nullptr && members[i].result->savedModelNetworkName.has_value()
+            ? *members[i].result->savedModelNetworkName
+            : members[i].spec->trainer->getNetwork()->getNetworkName();
         testStats.datasetName = testLoader.getDatasetName();
         testStats.phase = TrainingEventPhase::TEST;
         testStats.epoch = 1;

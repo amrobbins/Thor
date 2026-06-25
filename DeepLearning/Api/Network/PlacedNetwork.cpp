@@ -115,9 +115,9 @@ Event PlacedNetwork::submitBatch(uint64_t stampIndex,
         stampedNetworks[stampIndex].setActiveTrainingLossRoots(activeRawLossRoots);
         const auto setActiveRootsFinish = std::chrono::high_resolution_clock::now();
         if (submitTiming != nullptr) {
-            submitTiming->activeLossRootsMicros += elapsedMicros(activeRootsStart, activeRootsFinish);
-            submitTiming->setActiveLossRootsMicros += elapsedMicros(setActiveRootsStart, setActiveRootsFinish);
-            submitTiming->activeLossRootCount += activeRawLossRoots.size();
+            submitTiming->activeObjectiveRootsMicros += elapsedMicros(activeRootsStart, activeRootsFinish);
+            submitTiming->setActiveObjectiveRootsMicros += elapsedMicros(setActiveRootsStart, setActiveRootsFinish);
+            submitTiming->activeObjectiveRootCount += activeRawLossRoots.size();
         }
     }
     const auto sendBatchStart = std::chrono::high_resolution_clock::now();
@@ -157,9 +157,9 @@ Event PlacedNetwork::submitBatch(uint64_t stampIndex,
         stampedNetworks[stampIndex].setActiveTrainingLossRoots(activeRawLossRoots);
         const auto setActiveRootsFinish = std::chrono::high_resolution_clock::now();
         if (submitTiming != nullptr) {
-            submitTiming->activeLossRootsMicros += elapsedMicros(activeRootsStart, activeRootsFinish);
-            submitTiming->setActiveLossRootsMicros += elapsedMicros(setActiveRootsStart, setActiveRootsFinish);
-            submitTiming->activeLossRootCount += activeRawLossRoots.size();
+            submitTiming->activeObjectiveRootsMicros += elapsedMicros(activeRootsStart, activeRootsFinish);
+            submitTiming->setActiveObjectiveRootsMicros += elapsedMicros(setActiveRootsStart, setActiveRootsFinish);
+            submitTiming->activeObjectiveRootCount += activeRawLossRoots.size();
         }
     }
     const auto sendBatchStart = std::chrono::high_resolution_clock::now();
@@ -200,9 +200,9 @@ Event PlacedNetwork::submitBatch(uint64_t stampIndex,
         stampedNetworks[stampIndex].setActiveTrainingLossRoots(activeRawLossRoots);
         const auto setActiveRootsFinish = std::chrono::high_resolution_clock::now();
         if (submitTiming != nullptr) {
-            submitTiming->activeLossRootsMicros += elapsedMicros(activeRootsStart, activeRootsFinish);
-            submitTiming->setActiveLossRootsMicros += elapsedMicros(setActiveRootsStart, setActiveRootsFinish);
-            submitTiming->activeLossRootCount += activeRawLossRoots.size();
+            submitTiming->activeObjectiveRootsMicros += elapsedMicros(activeRootsStart, activeRootsFinish);
+            submitTiming->setActiveObjectiveRootsMicros += elapsedMicros(setActiveRootsStart, setActiveRootsFinish);
+            submitTiming->activeObjectiveRootCount += activeRawLossRoots.size();
         }
     }
     const auto sendBatchStart = std::chrono::high_resolution_clock::now();
@@ -241,9 +241,9 @@ Event PlacedNetwork::submitBatch(uint64_t stampIndex,
         stampedNetworks[stampIndex].setActiveTrainingLossRoots(activeRawLossRoots);
         const auto setActiveRootsFinish = std::chrono::high_resolution_clock::now();
         if (submitTiming != nullptr) {
-            submitTiming->activeLossRootsMicros += elapsedMicros(activeRootsStart, activeRootsFinish);
-            submitTiming->setActiveLossRootsMicros += elapsedMicros(setActiveRootsStart, setActiveRootsFinish);
-            submitTiming->activeLossRootCount += activeRawLossRoots.size();
+            submitTiming->activeObjectiveRootsMicros += elapsedMicros(activeRootsStart, activeRootsFinish);
+            submitTiming->setActiveObjectiveRootsMicros += elapsedMicros(setActiveRootsStart, setActiveRootsFinish);
+            submitTiming->activeObjectiveRootCount += activeRawLossRoots.size();
         }
     }
     const auto sendBatchStart = std::chrono::high_resolution_clock::now();
@@ -283,9 +283,9 @@ Event PlacedNetwork::submitBatch(uint64_t stampIndex,
         stampedNetworks[stampIndex].setActiveTrainingLossRoots(activeRawLossRoots);
         const auto setActiveRootsFinish = std::chrono::high_resolution_clock::now();
         if (submitTiming != nullptr) {
-            submitTiming->activeLossRootsMicros += elapsedMicros(activeRootsStart, activeRootsFinish);
-            submitTiming->setActiveLossRootsMicros += elapsedMicros(setActiveRootsStart, setActiveRootsFinish);
-            submitTiming->activeLossRootCount += activeRawLossRoots.size();
+            submitTiming->activeObjectiveRootsMicros += elapsedMicros(activeRootsStart, activeRootsFinish);
+            submitTiming->setActiveObjectiveRootsMicros += elapsedMicros(setActiveRootsStart, setActiveRootsFinish);
+            submitTiming->activeObjectiveRootCount += activeRawLossRoots.size();
         }
     }
     const auto sendBatchStart = std::chrono::high_resolution_clock::now();

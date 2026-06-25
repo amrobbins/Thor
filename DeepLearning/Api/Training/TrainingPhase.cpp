@@ -75,12 +75,6 @@ void TrainingPhase::setEnabled(bool enabled) {
     this->enabled = enabled;
 }
 
-const std::vector<Tensor>& TrainingPhase::getLossRoots() const {
-    validate();
-    refreshNetworkDerivedCaches();
-    return cachedNetworkLossRoots;
-}
-
 const std::map<std::string, Tensor>& TrainingPhase::getOutputs() const {
     validate();
     refreshNetworkDerivedCaches();
@@ -92,7 +86,6 @@ void TrainingPhase::refreshNetworkDerivedCaches() const {
         return;
     }
 
-    cachedNetworkLossRoots = network->getLossRootTensors();
     cachedNetworkOutputs.clear();
 
     const uint32_t numLayers = network->getNumLayers();

@@ -851,8 +851,10 @@ TEST(TrainingRunsResult, SaveEnsembleAllowsPartialSuccessWhenMinimumSatisfied) {
     TrainingRunResult result1 = TrainingRunResult::fromException("fold_1", std::make_exception_ptr(std::runtime_error("planned failure")));
     TrainingRunResult result2 = TrainingRunResult::completedResult("fold_2", {}, {}, {}, TrainingRunCompletionReason::COMPLETED, 1, 1, 1.0, fold2.string());
     result0.ensembleGroup = "digits";
+    result0.savedModelNetworkName = "training_runs_save_ensemble_member_source_0";
     result1.ensembleGroup = "digits";
     result2.ensembleGroup = "digits";
+    result2.savedModelNetworkName = "training_runs_save_ensemble_member_source_2";
 
     TrainingEnsembleResult ensemble;
     ensemble.ensembleGroup = "digits";
@@ -871,7 +873,7 @@ TEST(TrainingRunsResult, SaveEnsembleAllowsPartialSuccessWhenMinimumSatisfied) {
     EXPECT_FALSE(std::filesystem::exists(ensembleDir / "ensemble_manifest.json"));
     EXPECT_FALSE(std::filesystem::exists(ensembleDir / "members"));
 
-    Network loadedEnsemble("training_runs_save_ensemble_loaded_partial_success");
+    Network loadedEnsemble("ensemble_digits");
     EXPECT_NO_THROW(loadedEnsemble.load(ensembleDir.string()));
 
     std::filesystem::remove_all(root);

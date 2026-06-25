@@ -129,10 +129,14 @@ allows the decrypted source to compile/run after signature verification.
     network.def_static(
         "_load_from_path",
         [](const std::string& directory,
+           const std::string& network_name,
            bool allow_unsafe_loaded_cuda_kernel_source,
            const std::string& trusted_cuda_kernel_public_key,
            const std::string& trusted_cuda_kernel_source_decryption_key) {
-            auto loaded = std::make_shared<Network>("loaded_network");
+            if (network_name.empty()) {
+                throw nb::value_error("network_name must be non-empty when loading a Thor Network artifact");
+            }
+            auto loaded = std::make_shared<Network>(network_name);
             loaded->load(directory,
                          allow_unsafe_loaded_cuda_kernel_source,
                          trusted_cuda_kernel_public_key,
@@ -140,11 +144,12 @@ allows the decrypted source to compile/run after signature verification.
             return loaded;
         },
         "directory"_a,
+        "network_name"_a,
         "allow_unsafe_loaded_cuda_kernel_source"_a = false,
         "trusted_cuda_kernel_public_key"_a = "",
         "trusted_cuda_kernel_source_decryption_key"_a = "",
         R"nbdoc(
-Load and return a saved Thor network.
+Load and return a saved Thor network with the explicit archive/network name.
 )nbdoc");
 
     network.def("cuda_kernel_source_info", [](const Network& self) { return cudaKernelSourceInspectionListToPython(self.cudaKernelSourceInfo()); });

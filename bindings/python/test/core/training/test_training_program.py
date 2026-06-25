@@ -11,6 +11,18 @@ def _make_fc_network(name: str):
     return n, fc
 
 
+def _make_fc_loss_phase(step_name: str, network_name: str, *, input_name: str = "input"):
+    n = thor.Network(network_name)
+    x = thor.layers.NetworkInput(n, input_name, [3], thor.DataType.fp32)
+    labels = thor.layers.NetworkInput(n, "labels", [1], thor.DataType.fp32)
+    fc = thor.layers.FullyConnected(n, x.get_feature_output(), 1, True, activation=None)
+    loss = thor.losses.MSE(n, fc.get_feature_output(), labels.get_feature_output(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(n, "scores", fc.get_feature_output(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(n, "mse_loss", loss.get_loss(), thor.DataType.fp32)
+    phase = thor.training.TrainingPhase(f"{step_name}_phase", network=n)
+    return phase, fc, None
+
+
 def _make_phase_network(
     name: str,
     *,
@@ -70,9 +82,7 @@ def _make_phase(
         with_loss=with_loss,
     )
     phase = thor.training.TrainingPhase(name, network=network, enabled=enabled)
-    phase_loss_roots = phase.get_loss_roots()
-    canonical_loss_root = phase_loss_roots[0] if phase_loss_roots else None
-    return phase, canonical_loss_root, prediction
+    return phase, None, prediction
 
 def test_parameter_references_are_logical_preplacement_handles():
     _, fc = _make_fc_network("test_training_program_parameter_refs")
@@ -99,20 +109,20 @@ def test_network_trainable_parameter_references_follow_default_freeze_state():
 
 
 def test_training_step_and_program_are_ordered_logical_execution_specs():
-    _, fc = _make_fc_network("test_training_program_ordered_steps")
+    d_phase, fc, _ = _make_fc_loss_phase("discriminator", "test_training_program_ordered_discriminator")
+    g_phase = thor.training.TrainingPhase("generator_phase", network=d_phase.get_network())
     sgd = thor.optimizers.Sgd(initial_learning_rate=0.01)
-    loss = thor.Tensor([1], thor.DataType.fp32)
 
     d_step = thor.training.TrainingStep(
         "discriminator",
-        [loss],
+        phases=[d_phase],
         optimizer=sgd,
         update_parameters=fc.get_parameter_references(),
         repeat_count=2,
     )
     g_step = thor.training.TrainingStep(
         "generator",
-        [loss],
+        phases=[g_phase],
         optimizer=sgd,
         update_parameters=[fc.get_parameter_reference("weights")],
     )
@@ -134,9 +144,9 @@ def test_training_step_and_program_are_ordered_logical_execution_specs():
 
 
 def test_training_program_rejects_duplicate_step_names():
+    phase, fc, _ = _make_fc_loss_phase("same", "test_training_program_duplicate_step")
     sgd = thor.optimizers.Sgd(initial_learning_rate=0.01)
-    loss = thor.Tensor([1], thor.DataType.fp32)
-    step = thor.training.TrainingStep("same", [loss], optimizer=sgd, update_parameters=[thor.parameters.ParameterReference(1, "weights")])
+    step = thor.training.TrainingStep("same", phases=[phase], optimizer=sgd, update_parameters=[fc.get_parameter_reference("weights")])
     program = thor.training.TrainingProgram([step])
 
     with pytest.raises(RuntimeError, match="already contains a step named"):
@@ -160,7 +170,6 @@ def test_training_phase_enable_disable_and_serialization():
     assert phase.get_network().get_network_name() == "daily_phase_network"
     assert not phase.enabled
     assert not phase.is_enabled()
-    assert len(phase.get_loss_roots()) == 1
     assert set(phase.get_outputs().keys()) == {"forecast", "forecast_loss"}
     assert phase.get_outputs()["forecast"] == forecast
 
@@ -182,7 +191,6 @@ def test_training_phase_enable_disable_and_serialization():
     assert restored.enabled
     assert restored.get_network() is not None
     assert restored.get_network().get_network_name() == "daily_phase_network"
-    assert len(restored.get_loss_roots()) == 1
     assert set(restored.get_outputs().keys()) == {"forecast", "forecast_loss"}
 
 
@@ -198,7 +206,6 @@ def test_training_phase_external_flags_derive_local_and_external_outputs():
 
     assert phase.name == "feature_preprocessing"
     assert phase.get_network() is not None
-    assert phase.get_loss_roots() == []
     assert set(phase.get_outputs().keys()) == {"hidden"}
     assert phase.get_outputs()["hidden"] == hidden
 
@@ -229,9 +236,9 @@ def test_training_phase_construction_and_deserialization_errors_are_exposed():
     with pytest.raises(RuntimeError, match="Unsupported TrainingPhase version: 2.0.0"):
         thor.training.TrainingPhase.deserialize(json.dumps(bad_arch))
 
-def test_training_step_phase_constructor_collects_enabled_phase_loss_roots():
-    daily_phase, daily_loss, _ = _make_phase("daily_prediction")
-    aggregate_phase, aggregate_loss, _ = _make_phase(
+def test_training_step_phase_constructor_tracks_enabled_phase_names():
+    daily_phase, _, _ = _make_phase("daily_prediction")
+    aggregate_phase, _, _ = _make_phase(
         "aggregate_prediction",
         input_name="daily_prediction",
         input_external=False,
@@ -242,20 +249,17 @@ def test_training_step_phase_constructor_collects_enabled_phase_loss_roots():
     assert step.enabled
     assert step.is_enabled()
     assert step.get_active_phase_names() == ["daily_prediction"]
-    assert step.get_active_loss_roots() == [daily_loss]
     assert [phase.name for phase in step.get_phases()] == ["daily_prediction", "aggregate_prediction"]
 
     aggregate_phase.enable()
     assert step.get_active_phase_names() == ["daily_prediction", "aggregate_prediction"]
-    assert step.get_active_loss_roots() == [daily_loss, aggregate_loss]
     daily_phase.disable()
     assert step.get_active_phase_names() == ["aggregate_prediction"]
-    assert step.get_active_loss_roots() == [aggregate_loss]
 
 
 def test_training_step_active_phase_view_skips_disabled_phases_and_steps():
-    daily_phase, daily_loss, _ = _make_phase("daily_prediction")
-    disabled_aggregate, aggregate_loss, _ = _make_phase(
+    daily_phase, _, _ = _make_phase("daily_prediction")
+    disabled_aggregate, _, _ = _make_phase(
         "aggregate_prediction",
         input_name="missing_daily",
         input_external=False,
@@ -263,11 +267,9 @@ def test_training_step_active_phase_view_skips_disabled_phases_and_steps():
     )
     step = thor.training.TrainingStep("demand_forecast", phases=[daily_phase, disabled_aggregate])
     assert step.get_active_phase_names() == ["daily_prediction"]
-    assert step.get_active_loss_roots() == [daily_loss]
 
     disabled_aggregate.enable()
     assert step.get_active_phase_names() == ["daily_prediction", "aggregate_prediction"]
-    assert step.get_active_loss_roots() == [daily_loss, aggregate_loss]
 
     disabled_daily, _, _ = _make_phase("daily_prediction", enabled=False)
     enabled_aggregate, _, _ = _make_phase(
@@ -282,16 +284,15 @@ def test_training_step_active_phase_view_skips_disabled_phases_and_steps():
         enabled=False,
     )
     assert disabled_step.get_active_phase_names() == []
-    assert disabled_step.get_active_loss_roots() == []
 
 
 def test_training_step_phase_names_are_independent_of_inferred_wiring_order():
-    aggregate_phase, aggregate_loss, _ = _make_phase(
+    aggregate_phase, _, _ = _make_phase(
         "aggregate_prediction",
         input_name="daily_prediction",
         input_external=False,
     )
-    daily_phase, daily_loss, _ = _make_phase("daily_prediction")
+    daily_phase, _, _ = _make_phase("daily_prediction")
 
     step = thor.training.TrainingStep("demand_forecast", phases=[aggregate_phase, daily_phase])
 
@@ -299,21 +300,20 @@ def test_training_step_phase_names_are_independent_of_inferred_wiring_order():
     # list for the logical API view; phase-graph composition topologically orders
     # execution later from NetworkInput/NetworkOutput names.
     assert step.get_active_phase_names() == ["aggregate_prediction", "daily_prediction"]
-    assert step.get_active_loss_roots() == [aggregate_loss, daily_loss]
 
-def test_training_step_forward_only_phase_can_be_active_without_contributing_loss_roots():
+def test_training_step_forward_only_phase_can_be_active_without_graph_losses():
     preprocessing, _, _ = _make_phase(
         "feature_preprocessing",
         output_name="features",
         output_external=False,
         with_loss=False,
     )
-    daily, daily_loss, _ = _make_phase(
+    daily, _, _ = _make_phase(
         "daily_prediction",
         input_name="features",
         input_external=False,
     )
-    aggregate, aggregate_loss, _ = _make_phase(
+    aggregate, _, _ = _make_phase(
         "aggregate_prediction",
         input_name="daily_prediction",
         input_external=False,
@@ -322,11 +322,9 @@ def test_training_step_forward_only_phase_can_be_active_without_contributing_los
     step = thor.training.TrainingStep("demand_forecast", phases=[preprocessing, daily, aggregate])
 
     assert step.get_active_phase_names() == ["feature_preprocessing", "daily_prediction"]
-    assert step.get_active_loss_roots() == [daily_loss]
 
     aggregate.enable()
     assert step.get_active_phase_names() == ["feature_preprocessing", "daily_prediction", "aggregate_prediction"]
-    assert step.get_active_loss_roots() == [daily_loss, aggregate_loss]
 
 
 def test_training_step_phase_serialization_preserves_network_backed_phases():
@@ -359,15 +357,17 @@ def test_training_step_phase_serialization_preserves_network_backed_phases():
         thor.training.TrainingStep.deserialize(json.dumps(bad_arch))
 
 
-def test_training_step_constructor_requires_loss_roots_or_phases_but_not_both():
-    loss = thor.Tensor([1], thor.DataType.fp32)
+def test_training_step_constructor_requires_network_backed_phases():
     phase, _, _ = _make_phase("daily_prediction")
 
-    with pytest.raises(ValueError, match="exactly one of loss_roots or phases"):
+    with pytest.raises(TypeError):
         thor.training.TrainingStep("bad")
 
-    with pytest.raises(ValueError, match="exactly one of loss_roots or phases"):
-        thor.training.TrainingStep("bad", [loss], phases=[phase])
+    with pytest.raises(RuntimeError, match="at least one TrainingPhase"):
+        thor.training.TrainingStep("bad", phases=[])
+
+    with pytest.raises(RuntimeError, match="duplicate phase name"):
+        thor.training.TrainingStep("bad", phases=[phase, phase])
 
 
 def test_training_program_holds_training_steps_by_reference_in_python():
@@ -401,10 +401,10 @@ def test_training_program_holds_training_steps_by_reference_in_python():
 
 
 def test_training_step_allows_updates_without_step_optimizer_for_parameter_overrides():
-    loss = thor.Tensor([1], thor.DataType.fp32)
-    weights = thor.parameters.ParameterReference(1, "weights")
+    phase, fc, _ = _make_fc_loss_phase("per_parameter", "test_training_program_per_parameter")
+    weights = fc.get_parameter_reference("weights")
 
-    step = thor.training.TrainingStep("per_parameter", [loss], update_parameters=[weights])
+    step = thor.training.TrainingStep("per_parameter", phases=[phase], update_parameters=[weights])
 
     assert step.get_optimizer() is None
     assert step.get_update_parameters() == [weights]
@@ -430,8 +430,8 @@ def test_training_program_rejects_empty_programs():
 
 
 def test_training_program_rejects_out_of_range_access_and_unsupported_version():
-    loss = thor.Tensor([1], thor.DataType.fp32)
-    step = thor.training.TrainingStep("daily", [loss])
+    phase, _, _ = _make_phase("daily")
+    step = thor.training.TrainingStep("daily", phases=[phase])
     program = thor.training.TrainingProgram([step])
 
     with pytest.raises(RuntimeError, match="step index out of range"):
@@ -444,7 +444,7 @@ def test_training_program_rejects_out_of_range_access_and_unsupported_version():
 
 
 def test_training_input_bindings_are_serialized_and_validated():
-    loss = thor.Tensor([1], thor.DataType.fp32)
+    phase, _, _ = _make_phase("discriminator", input_name="real_images")
     z_binding = thor.training.TrainingInputBinding("z", "z_discriminator")
 
     assert z_binding.network_input_name == "z"
@@ -457,7 +457,7 @@ def test_training_input_bindings_are_serialized_and_validated():
 
     step = thor.training.TrainingStep(
         "discriminator",
-        [loss],
+        phases=[phase],
         input_bindings=[thor.training.TrainingInputBinding("real_images", "real_images"), z_binding],
     )
     assert [binding.network_input_name for binding in step.get_input_bindings()] == ["real_images", "z"]
@@ -472,7 +472,7 @@ def test_training_input_bindings_are_serialized_and_validated():
     with pytest.raises(RuntimeError, match="duplicate binding"):
         thor.training.TrainingStep(
             "bad",
-            [loss],
+            phases=[phase],
             input_bindings=[
                 thor.training.TrainingInputBinding("input", "a"),
                 thor.training.TrainingInputBinding("input", "b"),
@@ -495,15 +495,15 @@ def test_training_program_compile_plans_step_executables_and_resolves_update_par
         weights_optimizer=optimizer,
         biases_optimizer=optimizer,
     )
-    loss_root = fc.get_feature_output()
-    thor.layers.NetworkOutput(n, "scores", loss_root, thor.DataType.fp32)
-    thor.layers.NetworkOutput(n, "labels_out", labels.get_feature_output(), thor.DataType.fp32)
+    loss = thor.losses.MSE(n, fc.get_feature_output(), labels.get_feature_output(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(n, "scores", fc.get_feature_output(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(n, "mse_loss", loss.get_loss(), thor.DataType.fp32)
+    phase = thor.training.TrainingPhase("generator_phase", network=n)
 
     placed = n.place(2, inference_only=False)
     assert placed.has_network_input("input")
     assert not placed.has_network_input("missing_input")
     assert set(placed.get_network_input_names()) == {"input", "labels"}
-    assert placed.has_api_tensor(loss_root)
 
     weights = fc.get_parameter_reference("weights")
     resolved = placed.resolve_parameter_reference(weights)
@@ -513,7 +513,7 @@ def test_training_program_compile_plans_step_executables_and_resolves_update_par
 
     step = thor.training.TrainingStep(
         "generator",
-        [loss_root],
+        phases=[phase],
         optimizer=optimizer,
         update_parameters=[weights],
         repeat_count=2,
@@ -527,7 +527,6 @@ def test_training_program_compile_plans_step_executables_and_resolves_update_par
     executable = executables[0]
     assert executable.name == "generator"
     assert executable.repeat_count == 2
-    assert len(executable.get_resolved_loss_roots()) == 1
     assert [param.name for param in executable.get_resolved_update_parameters()] == ["weights"]
     assert [binding.batch_input_name for binding in executable.get_input_bindings()] == ["z_generator"]
     resolved_input_bindings = {
@@ -538,7 +537,7 @@ def test_training_program_compile_plans_step_executables_and_resolves_update_par
 
     arch = json.loads(executable.get_architecture_json())
     assert arch["planned"] is True
-    assert arch["resolved_loss_root_count"] == 1
+    assert arch["resolved_objective_root_count"] == 1
     assert arch["resolved_update_parameter_count"] == 1
     assert arch["input_bindings"][0]["network_input_name"] == "input"
     assert len(arch["resolved_input_bindings"]) == 2
@@ -546,7 +545,7 @@ def test_training_program_compile_plans_step_executables_and_resolves_update_par
 
     bad_input_step = thor.training.TrainingStep(
         "bad_input",
-        [loss_root],
+        phases=[phase],
         optimizer=optimizer,
         update_parameters=[weights],
         input_bindings=[thor.training.TrainingInputBinding("missing_input", "batch")],
@@ -554,9 +553,10 @@ def test_training_program_compile_plans_step_executables_and_resolves_update_par
     with pytest.raises(RuntimeError, match="unknown NetworkInput"):
         thor.training.TrainingProgram([bad_input_step]).compile(placed)
 
+    foreign_phase, _, _ = _make_phase("foreign_phase")
     bad_loss_step = thor.training.TrainingStep(
         "bad_loss",
-        [thor.Tensor([1], thor.DataType.fp32)],
+        phases=[foreign_phase],
         optimizer=optimizer,
         update_parameters=[weights],
     )
@@ -564,8 +564,8 @@ def test_training_program_compile_plans_step_executables_and_resolves_update_par
         thor.training.TrainingProgram([bad_loss_step]).compile(placed)
 
 def test_training_program_reflects_python_phase_enable_mutation():
-    daily_phase, daily_loss, _ = _make_phase("daily_prediction")
-    aggregate_phase, aggregate_loss, _ = _make_phase(
+    daily_phase, _, _ = _make_phase("daily_prediction")
+    aggregate_phase, _, _ = _make_phase(
         "aggregate_prediction",
         input_name="daily_prediction",
         input_external=False,
@@ -578,15 +578,12 @@ def test_training_program_reflects_python_phase_enable_mutation():
     program = thor.training.TrainingProgram([step])
 
     assert program.get_step(0).get_active_phase_names() == ["daily_prediction"]
-    assert program.get_step(0).get_active_loss_roots() == [daily_loss]
 
     aggregate_phase.enable()
     assert program.get_step(0).get_active_phase_names() == ["daily_prediction", "aggregate_prediction"]
-    assert program.get_step(0).get_active_loss_roots() == [daily_loss, aggregate_loss]
 
     daily_phase.disable()
     assert program.get_step(0).get_active_phase_names() == ["aggregate_prediction"]
-    assert program.get_step(0).get_active_loss_roots() == [aggregate_loss]
 
 @pytest.mark.cuda
 def test_training_program_compile_skips_disabled_network_backed_step_even_if_not_placeable():
@@ -602,8 +599,11 @@ def test_training_program_compile_skips_disabled_network_backed_step_even_if_not
         weights_optimizer=optimizer,
         biases_optimizer=optimizer,
     )
-    loss = fc.get_feature_output()
-    thor.layers.NetworkOutput(n, "scores", loss, thor.DataType.fp32)
+    prediction = fc.get_feature_output()
+    labels = thor.layers.NetworkInput(n, "labels", [1], thor.DataType.fp32)
+    loss = thor.losses.MSE(n, prediction, labels.get_feature_output(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(n, "scores", prediction, thor.DataType.fp32)
+    thor.layers.NetworkOutput(n, "loss", loss.get_loss(), thor.DataType.fp32)
     placed = n.place(2, inference_only=False)
 
     bad_phase_network = thor.Network("aggregate_prediction_missing_compile_phase_network")
@@ -619,9 +619,10 @@ def test_training_program_compile_skips_disabled_network_backed_step_even_if_not
         update_parameters=[fc.get_parameter_reference("weights")],
         enabled=False,
     )
+    valid_phase = thor.training.TrainingPhase("valid_reference_phase", network=n)
     valid_step = thor.training.TrainingStep(
         "valid_reference",
-        [loss],
+        phases=[valid_phase],
         optimizer=optimizer,
         update_parameters=[fc.get_parameter_reference("weights")],
     )

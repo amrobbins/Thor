@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <limits>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <system_error>
@@ -18,6 +19,27 @@
 #include <vector>
 
 namespace Thor {
+
+namespace {
+
+std::optional<std::string> trainedArtifactNetworkName(const std::shared_ptr<PlacedNetwork>& placedNetwork,
+                                                       const std::shared_ptr<Network>& fallbackNetwork) {
+    if (placedNetwork != nullptr) {
+        const std::string name = placedNetwork->getNetworkName();
+        if (!name.empty()) {
+            return name;
+        }
+    }
+    if (fallbackNetwork != nullptr) {
+        const std::string name = fallbackNetwork->getNetworkName();
+        if (!name.empty()) {
+            return name;
+        }
+    }
+    return std::nullopt;
+}
+
+}  // namespace
 
 Trainer Trainer::Builder::build() const {
     if (network_ == nullptr) {
@@ -447,7 +469,8 @@ TrainingRunResult Trainer::fit(const TrainerFitOptions& options) {
                                               capturingObserver.completedEpoch,
                                               capturingObserver.bestEpoch,
                                               capturingObserver.bestScore,
-                                              saveModelDirectory);
+                                              saveModelDirectory,
+                                              trainedArtifactNetworkName(placedNetworkAfterLastFit, network));
 }
 
 
@@ -636,7 +659,8 @@ TrainingRunResult Trainer::fitTrainingRun(std::string runName,
                                                   capturingObserver.completedEpoch,
                                                   capturingObserver.bestEpoch,
                                                   capturingObserver.bestScore,
-                                                  saveModelDirectory);
+                                                  saveModelDirectory,
+                                                  trainedArtifactNetworkName(placedNetworkAfterLastFit, network));
     } catch (const TrainingRestartConditionExceeded& e) {
         capturingObserver.flush();
         TrainingRunResult result;
@@ -646,6 +670,7 @@ TrainingRunResult Trainer::fitTrainingRun(std::string runName,
         result.finalValidationStats = capturingObserver.finalValidationStats;
         result.finalTestStats = capturingObserver.finalTestStats;
         result.savedModelDirectory = saveModelDirectory;
+        result.savedModelNetworkName = trainedArtifactNetworkName(placedNetworkAfterLastFit, network);
         result.exception = TrainingRunExceptionSummary{"TrainingRestartConditionExceeded", e.what()};
         return result;
     } catch (...) {
@@ -656,7 +681,8 @@ TrainingRunResult Trainer::fitTrainingRun(std::string runName,
             capturingObserver.finalTrainingStats,
             capturingObserver.finalValidationStats,
             capturingObserver.finalTestStats,
-            saveModelDirectory);
+            saveModelDirectory,
+            trainedArtifactNetworkName(placedNetworkAfterLastFit, network));
     }
 }
 

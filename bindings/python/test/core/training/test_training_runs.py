@@ -717,7 +717,8 @@ def _build_airfoil_two_phase_joint_quantile_regressor(
     thor.layers.NetworkOutput(joint_network, "joint_mse_loss", joint_mse.get_loss(), thor.DataType.fp32)
     thor.layers.NetworkOutput(joint_network, "quantile_high_loss", high_quantile.get_loss(), thor.DataType.fp32)
     thor.layers.NetworkOutput(joint_network, "joint_mae_accuracy", joint_mae.get_metric(), thor.DataType.fp32)
-    thor.layers.NetworkOutput(joint_network, "forecast_p90", high_quantile_forecast.get_feature_output(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(
+        joint_network, "forecast_p90", high_quantile_forecast.get_feature_output(), thor.DataType.fp32)
 
     point_phase = thor.training.TrainingPhase(
         "point_forecast",
@@ -828,7 +829,8 @@ def _build_airfoil_two_phase_mae_then_mse_regressor(
     )
     mse_features = thor.layers.Concatenate(
         mse_network,
-        [mse_hidden_input.get_feature_output(), mse_mae_forecast_input.get_feature_output()],
+        [mse_hidden_input.get_feature_output(),
+         mse_mae_forecast_input.get_feature_output()],
         0,
     )
     mse_hidden = thor.layers.FullyConnected(
@@ -1099,7 +1101,8 @@ def _make_two_phase_trainer_with_inactive_future_reports(name: str):
     )
     thor.layers.NetworkOutput(first_network, "first_loss", first_loss.get_loss(), thor.DataType.fp32)
     thor.layers.NetworkOutput(first_network, "first_metric", first_metric.get_metric(), thor.DataType.fp32)
-    thor.layers.NetworkOutput(first_network, "first_prediction", first_prediction.get_feature_output(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(
+        first_network, "first_prediction", first_prediction.get_feature_output(), thor.DataType.fp32)
 
     second_network = thor.Network(f"{name}_second_phase")
     second_labels = thor.layers.NetworkInput(second_network, "labels", [1], thor.DataType.fp32)
@@ -1132,17 +1135,19 @@ def _make_two_phase_trainer_with_inactive_future_reports(name: str):
     )
     thor.layers.NetworkOutput(second_network, "second_loss", second_loss.get_loss(), thor.DataType.fp32)
     thor.layers.NetworkOutput(second_network, "second_metric", second_metric.get_metric(), thor.DataType.fp32)
-    thor.layers.NetworkOutput(second_network, "second_prediction", second_prediction.get_feature_output(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(
+        second_network, "second_prediction", second_prediction.get_feature_output(), thor.DataType.fp32)
 
     first_phase = thor.training.TrainingPhase("first", network=first_network)
     second_phase = thor.training.TrainingPhase("second", network=second_network, enabled=False)
-    program = thor.training.TrainingProgram([
-        thor.training.TrainingStep(
-            "two_phase_step",
-            phases=[first_phase, second_phase],
-            optimizer=thor.optimizers.Sgd(initial_learning_rate=1.0e-12, momentum=0.0),
-        )
-    ])
+    program = thor.training.TrainingProgram(
+        [
+            thor.training.TrainingStep(
+                "two_phase_step",
+                phases=[first_phase, second_phase],
+                optimizer=thor.optimizers.Sgd(initial_learning_rate=1.0e-12, momentum=0.0),
+            )
+        ])
 
     return thor.training.Trainer(
         base_network,
@@ -1156,8 +1161,7 @@ def _make_two_phase_trainer_with_inactive_future_reports(name: str):
 
 
 def test_training_runs_accepts_reported_names_from_inactive_future_phase():
-    trainer = _make_two_phase_trainer_with_inactive_future_reports(
-        "training_runs_future_phase_reported_names")
+    trainer = _make_two_phase_trainer_with_inactive_future_reports("training_runs_future_phase_reported_names")
 
     runs = thor.training.TrainingRuns(
         [("fold_0", trainer, "two_phase_ensemble")],
@@ -1760,7 +1764,7 @@ def test_training_runs_reports_mae_plus_low_high_quantile_losses(capfd, tmp_path
     assert artifact_path == str(ensemble_artifact_dir)
     assert not (ensemble_artifact_dir / "ensemble_manifest.json").exists()
     assert not (ensemble_artifact_dir / "members").exists()
-    loaded_network = thor.Network.load(str(ensemble_artifact_dir))
+    loaded_network = thor.Network.load(str(ensemble_artifact_dir), network_name="ensemble_demand_quantile_ensemble")
     placed_ensemble = loaded_network.place(4, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
     assert set(placed_ensemble.get_network_input_names()) == {"examples"}
     x, _ = _mae_quantile_regression_arrays(dtype=np.float32)
@@ -1944,8 +1948,9 @@ def test_training_runs_airfoil_cv3_reports_mae_plus_low_high_quantile_losses(cap
     assert artifact_path == str(ensemble_artifact_dir)
     assert not (ensemble_artifact_dir / "ensemble_manifest.json").exists()
     assert not (ensemble_artifact_dir / "members").exists()
-    loaded_network = thor.Network.load(str(ensemble_artifact_dir))
-    placed_ensemble = loaded_network.place(batch_size, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
+    loaded_network = thor.Network.load(str(ensemble_artifact_dir), network_name="ensemble_airfoil_noise_cv3")
+    placed_ensemble = loaded_network.place(
+        batch_size, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
     assert set(placed_ensemble.get_network_input_names()) == {"examples"}
 
 
@@ -3282,7 +3287,7 @@ def test_training_runs_fits_two_tiny_trainers_on_one_gpu_and_prefixes_stats(capf
     assert not (ensemble_artifact_dir / "ensemble_manifest.json").exists()
     assert not (ensemble_artifact_dir / "members").exists()
 
-    loaded_network = thor.Network.load(str(ensemble_artifact_dir))
+    loaded_network = thor.Network.load(str(ensemble_artifact_dir), network_name="ensemble_tiny_ensemble")
     placed_ensemble = loaded_network.place(4, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
     assert set(placed_ensemble.get_network_input_names()) == {"examples"}
     x, _ = _regression_arrays(dtype=np.float32)
@@ -3292,17 +3297,17 @@ def test_training_runs_fits_two_tiny_trainers_on_one_gpu_and_prefixes_stats(capf
     assert set(ensemble_outputs) == {"prediction"}
     ensemble_prediction = np.array(ensemble_outputs["prediction"].numpy(), copy=True)
 
-    fold_0_prediction = _prediction_from_saved_tiny_regressor(tmp_path / "fold_0_model", "fold_0_member_for_ensemble_check")
-    fold_1_prediction = _prediction_from_saved_tiny_regressor(tmp_path / "longer_fold_1_model", "fold_1_member_for_ensemble_check")
+    fold_0_prediction = _prediction_from_saved_tiny_regressor(
+        tmp_path / "fold_0_model", results["fold_0"].saved_model_network_name)
+    fold_1_prediction = _prediction_from_saved_tiny_regressor(
+        tmp_path / "longer_fold_1_model", results["longer_fold_1"].saved_model_network_name)
     expected_prediction = (fold_0_prediction + 2.0 * fold_1_prediction) / 3.0
     assert ensemble_prediction.shape == expected_prediction.shape
     np.testing.assert_allclose(ensemble_prediction, expected_prediction, rtol=1e-5, atol=1e-5)
 
     with pytest.raises(RuntimeError, match="already exists"):
         results.save_ensemble("tiny_ensemble", ensemble_artifact_dir)
-    assert results.save_ensemble(
-        "tiny_ensemble", ensemble_artifact_dir,
-        overwrite=True) == str(ensemble_artifact_dir)
+    assert results.save_ensemble("tiny_ensemble", ensemble_artifact_dir, overwrite=True) == str(ensemble_artifact_dir)
 
     assert ensemble.ensemble_test_loss is not None
     assert len(ensemble.members) == 2
@@ -3382,7 +3387,7 @@ def test_training_runs_categorical_report_matches_loaded_ensemble_predictions(ca
 
     ensemble_artifact_dir = tmp_path / "tiny_categorical_ensemble_artifact"
     assert results.save_ensemble("tiny_categorical_ensemble", ensemble_artifact_dir) == str(ensemble_artifact_dir)
-    loaded_network = thor.Network.load(str(ensemble_artifact_dir))
+    loaded_network = thor.Network.load(str(ensemble_artifact_dir), network_name="ensemble_tiny_categorical_ensemble")
     placed_ensemble = loaded_network.place(2, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
     assert set(placed_ensemble.get_network_input_names()) == {"examples"}
 
@@ -3622,7 +3627,7 @@ def test_training_runs_demand_style_kfold_full_path_saves_loadable_ensemble(capf
 
     ensemble_artifact_dir = tmp_path / "brand_demand_cv2_ensemble"
     assert results.save_ensemble("brand_demand_cv2", ensemble_artifact_dir) == str(ensemble_artifact_dir)
-    loaded_network = thor.Network.load(str(ensemble_artifact_dir))
+    loaded_network = thor.Network.load(str(ensemble_artifact_dir), network_name="ensemble_brand_demand_cv2")
     placed_ensemble = loaded_network.place(4, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
     assert set(placed_ensemble.get_network_input_names()) == {
         "trend_inputs", "seasonality_inputs", "monotone_increasing_inputs"

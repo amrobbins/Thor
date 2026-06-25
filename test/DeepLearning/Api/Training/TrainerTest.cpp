@@ -1,6 +1,7 @@
 #include "DeepLearning/Api/Training/Trainer.h"
 #include "DeepLearning/Api/Training/Executors/DebugSynchronousTrainingExecutor.h"
 #include "DeepLearning/Api/Training/TrainingProgram.h"
+#include "DeepLearning/Api/Training/TrainingPhase.h"
 #include "DeepLearning/Api/Training/TrainingStep.h"
 
 #include "DeepLearning/Api/Loaders/Loader.h"
@@ -336,8 +337,8 @@ TEST(Trainer, FitPassesTrainingProgramAsRunParameter) {
     auto executor = std::make_shared<CapturingExecutor>();
     auto observer = std::make_shared<NullTrainingObserver>();
 
-    Tensor loss(DataType::FP32, {1});
-    auto step = std::make_shared<TrainingStep>("step", std::vector<Tensor>{loss}, nullptr, std::vector<ParameterReference>{});
+    auto phase = std::make_shared<TrainingPhase>("phase", network);
+    auto step = std::make_shared<TrainingStep>("step", std::vector<std::shared_ptr<TrainingPhase>>{phase}, nullptr, std::vector<ParameterReference>{});
     auto program = std::make_shared<TrainingProgram>(std::vector<std::shared_ptr<TrainingStep>>{step});
 
     Trainer trainer = Trainer::Builder()
@@ -363,8 +364,8 @@ TEST(Trainer, FitSeesTrainingProgramMutationsBetweenCalls) {
     auto executor = std::make_shared<CapturingExecutor>();
     auto observer = std::make_shared<NullTrainingObserver>();
 
-    Tensor loss(DataType::FP32, {1});
-    auto step = std::make_shared<TrainingStep>("step", std::vector<Tensor>{loss}, nullptr, std::vector<ParameterReference>{});
+    auto phase = std::make_shared<TrainingPhase>("phase", network);
+    auto step = std::make_shared<TrainingStep>("step", std::vector<std::shared_ptr<TrainingPhase>>{phase}, nullptr, std::vector<ParameterReference>{});
     auto program = std::make_shared<TrainingProgram>(std::vector<std::shared_ptr<TrainingStep>>{step});
 
     Trainer trainer = Trainer::Builder()

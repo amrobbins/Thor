@@ -13,8 +13,8 @@ namespace Thor {
 
 StepExecutable::StepExecutable(const TrainingStep& step, PlacedNetwork& placedNetwork, bool resolveEmptyUpdateParametersAsAllTrainable)
     : name(step.getName()),
-      lossRoots(step.getActiveLossRoots()),
-      resolvedLossRoots(placedNetwork.resolveApiTensors(lossRoots)),
+      objectiveRoots(step.getActiveObjectiveRoots()),
+      resolvedObjectiveRoots(placedNetwork.resolveApiTensors(objectiveRoots)),
       activePhaseNames(step.getActivePhaseNames()),
       optimizer(step.getOptimizer()),
       updateParameterReferences((resolveEmptyUpdateParametersAsAllTrainable && step.getUpdateParameters().empty())
@@ -63,11 +63,11 @@ void StepExecutable::validate() const {
     if (repeatCount == 0) {
         throw std::runtime_error("StepExecutable repeat_count must be >= 1.");
     }
-    if (lossRoots.empty()) {
-        throw std::runtime_error("StepExecutable requires at least one loss root tensor.");
+    if (objectiveRoots.empty()) {
+        throw std::runtime_error("StepExecutable requires at least one derived training objective tensor.");
     }
-    if (lossRoots.size() != resolvedLossRoots.size()) {
-        throw std::runtime_error("StepExecutable resolved loss-root count does not match logical loss-root count.");
+    if (objectiveRoots.size() != resolvedObjectiveRoots.size()) {
+        throw std::runtime_error("StepExecutable resolved objective-root count does not match logical objective-root count.");
     }
     if (updateParameterReferences.size() != resolvedUpdateParameters.size()) {
         throw std::runtime_error("StepExecutable resolved update parameter count does not match logical reference count.");
@@ -115,9 +115,9 @@ json StepExecutable::architectureJson() const {
     j["gradient_clear_policy"] = gradientClearPolicy;
     j["planned"] = true;
 
-    j["loss_roots"] = json::array();
-    for (const Tensor& lossRoot : lossRoots) {
-        j["loss_roots"].push_back(lossRoot.architectureJson());
+    j["objective_roots"] = json::array();
+    for (const Tensor& lossRoot : objectiveRoots) {
+        j["objective_roots"].push_back(lossRoot.architectureJson());
     }
 
     j["input_bindings"] = json::array();
@@ -130,7 +130,7 @@ json StepExecutable::architectureJson() const {
         j["resolved_input_bindings"].push_back(inputBinding.architectureJson());
     }
 
-    j["resolved_loss_root_count"] = resolvedLossRoots.size();
+    j["resolved_objective_root_count"] = resolvedObjectiveRoots.size();
     j["active_phase_names"] = activePhaseNames;
 
     j["required_batch_input_names"] = requiredBatchInputNames;
