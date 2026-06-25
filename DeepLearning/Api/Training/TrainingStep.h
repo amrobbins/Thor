@@ -63,8 +63,6 @@ class TrainingStep {
     void disable();
     void setEnabled(bool enabled);
 
-    void validateEnabledPhaseDependencies() const;
-
     [[nodiscard]] bool updatesParameter(const ParameterReference& parameter) const;
     [[nodiscard]] nlohmann::json architectureJson() const;
     [[nodiscard]] std::string architectureJsonString() const;
@@ -76,8 +74,6 @@ class TrainingStep {
 
    private:
     void validate() const;
-    static std::vector<std::shared_ptr<TrainingPhase>> legacyLossRootsToPhases(const std::string& stepName,
-                                                                               const std::vector<Tensor>& lossRoots);
     static std::vector<Tensor> collectAllLossRoots(const std::vector<std::shared_ptr<TrainingPhase>>& phases);
 
     std::string name{};

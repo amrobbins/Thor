@@ -101,6 +101,17 @@ RUN git config --global --add safe.directory /io
 #find . -name '*.so' -path '*/build/*' -delete
 #
 ## 1. native
+#/opt/python/cp312-cp312/bin/python -m pip install -U pip setuptools wheel
+#/opt/python/cp312-cp312/bin/python -m pip install \
+#  nvidia-cuda-runtime==13.3.29 \
+#  nvidia-cuda-nvrtc==13.3.33 \
+#  nvidia-nvjitlink==13.3.33 \
+#  nvidia-cublas==13.5.1.27 \
+#  nvidia-cusparse==12.8.1.7 \
+#  nvidia-cusolver==12.2.2.18 \
+#  nvidia-cuda-cccl==13.3.3.3.1 \
+#  nvidia-cudnn-cu13==9.23.2.1 \
+#  nvidia-cudnn-frontend==1.25.0
 #export CMAKE_GENERATOR=Ninja
 #export CMAKE_ARGS="-DCMAKE_BUILD_TYPE=Release \
 #    -DTHOR_USE_PROJECT_VENV=OFF \

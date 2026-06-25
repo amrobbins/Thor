@@ -1866,38 +1866,15 @@ calling this helper.
     training_phase.attr("__module__") = "thor.training";
     training_phase.def_static(
         "__new__",
-        [](nb::handle cls,
-           const std::string& name,
-           nb::object network,
-           std::vector<Tensor> loss_roots,
-           std::map<std::string, Tensor> outputs,
-           std::vector<std::string> depends_on,
-           bool enabled) -> std::shared_ptr<TrainingPhase> {
+        [](nb::handle cls, const std::string& name, std::shared_ptr<Network> network, bool enabled) -> std::shared_ptr<TrainingPhase> {
             (void)cls;
-            if (!network.is_none()) {
-                if (!loss_roots.empty() || !outputs.empty() || !depends_on.empty()) {
-                    throw nb::value_error("TrainingPhase requires either network or legacy loss_roots/outputs/depends_on, not both.");
-                }
-                return std::make_shared<TrainingPhase>(name, nb::cast<std::shared_ptr<Network>>(network), enabled);
-            }
-            return std::make_shared<TrainingPhase>(name, std::move(loss_roots), std::move(outputs), std::move(depends_on), enabled);
+            return std::make_shared<TrainingPhase>(name, std::move(network), enabled);
         },
         "cls"_a,
         "name"_a,
-        "network"_a.none() = nb::none(),
-        "loss_roots"_a = std::vector<Tensor>{},
-        "outputs"_a = std::map<std::string, Tensor>{},
-        "depends_on"_a = std::vector<std::string>{},
+        "network"_a,
         "enabled"_a = true);
-    training_phase.def(
-        "__init__",
-        [](TrainingPhase*, const std::string&, nb::object, std::vector<Tensor>, std::map<std::string, Tensor>, std::vector<std::string>, bool) {},
-        "name"_a,
-        "network"_a.none() = nb::none(),
-        "loss_roots"_a = std::vector<Tensor>{},
-        "outputs"_a = std::map<std::string, Tensor>{},
-        "depends_on"_a = std::vector<std::string>{},
-        "enabled"_a = true);
+    training_phase.def("__init__", [](TrainingPhase*, const std::string&, std::shared_ptr<Network>, bool) {}, "name"_a, "network"_a, "enabled"_a = true);
     training_phase.def_prop_ro("name", &TrainingPhase::getName);
     training_phase.def_prop_rw("enabled", &TrainingPhase::isEnabled, &TrainingPhase::setEnabled);
     training_phase.def("is_initialized", &TrainingPhase::isInitialized);
@@ -1905,11 +1882,9 @@ calling this helper.
     training_phase.def("enable", &TrainingPhase::enable);
     training_phase.def("disable", &TrainingPhase::disable);
     training_phase.def("set_enabled", &TrainingPhase::setEnabled, "enabled"_a);
-    training_phase.def("has_network", &TrainingPhase::hasNetwork);
     training_phase.def("get_network", &TrainingPhase::getNetwork);
     training_phase.def("get_loss_roots", &TrainingPhase::getLossRoots, nb::rv_policy::reference_internal);
     training_phase.def("get_outputs", &TrainingPhase::getOutputs, nb::rv_policy::reference_internal);
-    training_phase.def("get_depends_on", &TrainingPhase::getDependsOn, nb::rv_policy::reference_internal);
     training_phase.def("get_architecture_json", &TrainingPhase::architectureJsonString);
     training_phase.def_static(
         "deserialize",
@@ -1998,7 +1973,6 @@ calling this helper.
     training_step.def("enable", &TrainingStep::enable);
     training_step.def("disable", &TrainingStep::disable);
     training_step.def("set_enabled", &TrainingStep::setEnabled, "enabled"_a);
-    training_step.def("validate_enabled_phase_dependencies", &TrainingStep::validateEnabledPhaseDependencies);
     training_step.def("get_loss_roots", &TrainingStep::getLossRoots, nb::rv_policy::reference_internal);
     training_step.def("get_active_loss_roots", &TrainingStep::getActiveLossRoots);
     training_step.def("get_active_phase_names", &TrainingStep::getActivePhaseNames);

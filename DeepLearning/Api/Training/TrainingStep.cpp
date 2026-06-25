@@ -1,6 +1,5 @@
 #include "DeepLearning/Api/Training/TrainingStep.h"
 
-#include <map>
 #include <set>
 #include <stdexcept>
 #include <utility>
@@ -19,7 +18,6 @@ TrainingStep::TrainingStep(std::string name,
                            bool enabled)
     : name(std::move(name)),
       lossRoots(std::move(lossRoots)),
-      phases(legacyLossRootsToPhases(this->name, this->lossRoots)),
       optimizer(std::move(optimizer)),
       updateParameters(std::move(updateParameters)),
       inputBindings(std::move(inputBindings)),
@@ -49,11 +47,6 @@ TrainingStep::TrainingStep(std::string name,
       enabled(enabled),
       initialized(true) {
     validate();
-}
-
-std::vector<std::shared_ptr<TrainingPhase>> TrainingStep::legacyLossRootsToPhases(const std::string& stepName,
-                                                                                  const std::vector<Tensor>& lossRoots) {
-    return {std::make_shared<TrainingPhase>(stepName + "_phase", lossRoots)};
 }
 
 std::vector<Tensor> TrainingStep::collectAllLossRoots(const std::vector<std::shared_ptr<TrainingPhase>>& phases) {
@@ -93,10 +86,10 @@ void TrainingStep::validate() const {
     if (repeatCount == 0) {
         throw std::runtime_error("TrainingStep repeat_count must be >= 1.");
     }
-    if (phases.empty()) {
-        throw std::runtime_error("TrainingStep requires at least one TrainingPhase.");
+    if (phases.empty() && lossRoots.empty()) {
+        throw std::runtime_error("TrainingStep requires at least one loss root tensor or one TrainingPhase with a loss root.");
     }
-    if (lossRoots.empty()) {
+    if (!phases.empty() && lossRoots.empty()) {
         throw std::runtime_error("TrainingStep requires at least one loss root tensor across its phases.");
     }
     for (const Tensor& lossRoot : lossRoots) {
@@ -140,48 +133,14 @@ void TrainingStep::validate() const {
     }
 }
 
-void TrainingStep::validateEnabledPhaseDependencies() const {
-    validate();
-    if (!enabled) {
-        return;
-    }
-
-    std::map<std::string, uint64_t> phaseIndexByName;
-    for (uint64_t i = 0; i < phases.size(); ++i) {
-        phaseIndexByName.emplace(phases[i]->getName(), i);
-    }
-
-    for (uint64_t phaseIndex = 0; phaseIndex < phases.size(); ++phaseIndex) {
-        const TrainingPhase& phase = *phases[phaseIndex];
-        if (!phase.isEnabled()) {
-            continue;
-        }
-        for (const std::string& dependencyName : phase.getDependsOn()) {
-            auto dependencyIt = phaseIndexByName.find(dependencyName);
-            if (dependencyIt == phaseIndexByName.end()) {
-                throw std::runtime_error("TrainingStep '" + name + "' enabled phase '" + phase.getName() +
-                                         "' depends on missing phase '" + dependencyName + "'.");
-            }
-            const uint64_t dependencyIndex = dependencyIt->second;
-            if (dependencyIndex >= phaseIndex) {
-                throw std::runtime_error("TrainingStep '" + name + "' enabled phase '" + phase.getName() +
-                                         "' depends on phase '" + dependencyName +
-                                         "', but that dependency does not appear earlier in the step.");
-            }
-            if (!phases[dependencyIndex]->isEnabled()) {
-                throw std::runtime_error("TrainingStep '" + name + "' enabled phase '" + phase.getName() +
-                                         "' depends on disabled phase '" + dependencyName + "'.");
-            }
-        }
-    }
-}
-
 std::vector<Tensor> TrainingStep::getActiveLossRoots() const {
     validate();
     if (!enabled) {
         return {};
     }
-    validateEnabledPhaseDependencies();
+    if (phases.empty()) {
+        return lossRoots;
+    }
 
     std::vector<Tensor> activeRoots;
     for (const std::shared_ptr<TrainingPhase>& phase : phases) {
@@ -199,7 +158,9 @@ std::vector<std::string> TrainingStep::getActivePhaseNames() const {
     if (!enabled) {
         return {};
     }
-    validateEnabledPhaseDependencies();
+    if (phases.empty()) {
+        return {};
+    }
 
     std::vector<std::string> activeNames;
     for (const std::shared_ptr<TrainingPhase>& phase : phases) {
@@ -215,16 +176,14 @@ std::vector<PhaseGraphNetworkSpec> TrainingStep::getActivePhaseNetworkSpecs() co
     if (!enabled) {
         return {};
     }
-    validateEnabledPhaseDependencies();
+    if (phases.empty()) {
+        return {};
+    }
 
     std::vector<PhaseGraphNetworkSpec> specs;
     for (const std::shared_ptr<TrainingPhase>& phase : phases) {
         if (!phase->isEnabled()) {
             continue;
-        }
-        if (!phase->hasNetwork()) {
-            throw std::runtime_error("TrainingStep '" + name + "' active phase '" + phase->getName() +
-                                     "' does not own a phase Network.");
         }
         specs.push_back(PhaseGraphNetworkSpec{phase->getName(), phase->getNetwork(), true});
     }
@@ -255,9 +214,11 @@ json TrainingStep::architectureJson() const {
         j["loss_roots"].push_back(lossRoot.architectureJson());
     }
 
-    j["phases"] = json::array();
-    for (const std::shared_ptr<TrainingPhase>& phase : phases) {
-        j["phases"].push_back(phase->architectureJson());
+    if (!phases.empty()) {
+        j["phases"] = json::array();
+        for (const std::shared_ptr<TrainingPhase>& phase : phases) {
+            j["phases"].push_back(phase->architectureJson());
+        }
     }
 
     j["update_parameters"] = json::array();
@@ -307,7 +268,7 @@ TrainingStep TrainingStep::deserialize(const json& j, std::shared_ptr<thor_file:
     const GradientClearPolicy gradientClearPolicy = j.at("gradient_clear_policy").get<TrainingStep::GradientClearPolicy>();
     const bool enabled = j.contains("enabled") ? j.at("enabled").get<bool>() : true;
 
-    if (j.contains("phases")) {
+    if (j.contains("phases") && !j.at("phases").empty()) {
         std::vector<std::shared_ptr<TrainingPhase>> phases;
         for (const json& phaseJson : j.at("phases")) {
             phases.push_back(std::make_shared<TrainingPhase>(TrainingPhase::deserialize(phaseJson, archiveReader)));

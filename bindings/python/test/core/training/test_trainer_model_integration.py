@@ -433,63 +433,88 @@ def _build_opposing_phase_regressor(
     aggregate_loss_active: bool,
     primary_loss_name: str,
 ):
+    # Placeholder owner used for Trainer identity/default settings.  The active
+    # execution graph is composed from the TrainingPhase networks below.
     network = thor.Network(name)
-    examples = thor.layers.NetworkInput(network, "examples", [1], thor.DataType.fp32)
-    labels = thor.layers.NetworkInput(network, "labels", [1], thor.DataType.fp32)
 
     zero = thor.initializers.UniformRandom(0.0, 0.0)
+
+    daily_network = thor.Network(f"{name}_daily_phase")
+    daily_examples = thor.layers.NetworkInput(daily_network, "examples", [1], thor.DataType.fp32)
+    daily_labels = thor.layers.NetworkInput(daily_network, "labels", [1], thor.DataType.fp32)
     daily = thor.layers.FullyConnected(
-        network,
-        examples.get_feature_output(),
+        daily_network,
+        daily_examples.get_feature_output(),
         1,
         True,
         activation=None,
         weights_initializer=zero,
         biases_initializer=zero,
     )
-    aggregate = thor.layers.CustomLayer(
-        network,
+
+    if daily_loss_active:
+        daily_loss = thor.losses.MSE(
+            daily_network,
+            daily.get_feature_output(),
+            daily_labels.get_feature_output(),
+            thor.DataType.fp32,
+        )
+        daily_loss_tensor = daily_loss.get_loss()
+        if primary_loss_name == "daily_loss":
+            thor.layers.NetworkOutput(daily_network, "loss", daily_loss_tensor, thor.DataType.fp32)
+        thor.layers.NetworkOutput(daily_network, "daily_loss", daily_loss_tensor, thor.DataType.fp32)
+
+    thor.layers.NetworkOutput(
+        daily_network,
+        "daily_prediction",
         daily.get_feature_output(),
+        thor.DataType.fp32,
+        external=False,
+    )
+
+    aggregate_network = thor.Network(f"{name}_aggregate_phase")
+    daily_prediction = thor.layers.NetworkInput(
+        aggregate_network,
+        "daily_prediction",
+        [1],
+        thor.DataType.fp32,
+        external=False,
+    )
+    aggregate_labels = thor.layers.NetworkInput(aggregate_network, "labels", [1], thor.DataType.fp32)
+    aggregate = thor.layers.CustomLayer(
+        aggregate_network,
+        daily_prediction.get_feature_output(),
         output_names=["feature_output"],
         build=_negate_no_parameter_build,
     )
 
-    daily_loss = thor.losses.MSE(
-        network,
-        daily.get_feature_output(),
-        labels.get_feature_output(),
-        thor.DataType.fp32,
-    )
-    aggregate_loss = thor.losses.MSE(
-        network,
+    if aggregate_loss_active:
+        aggregate_loss = thor.losses.MSE(
+            aggregate_network,
+            aggregate.get_output("feature_output"),
+            aggregate_labels.get_feature_output(),
+            thor.DataType.fp32,
+        )
+        aggregate_loss_tensor = aggregate_loss.get_loss()
+        if primary_loss_name == "aggregate_loss":
+            thor.layers.NetworkOutput(aggregate_network, "loss", aggregate_loss_tensor, thor.DataType.fp32)
+        thor.layers.NetworkOutput(aggregate_network, "aggregate_loss", aggregate_loss_tensor, thor.DataType.fp32)
+
+    thor.layers.NetworkOutput(
+        aggregate_network,
+        "aggregate_prediction",
         aggregate.get_output("feature_output"),
-        labels.get_feature_output(),
         thor.DataType.fp32,
     )
 
-    daily_loss_tensor = daily_loss.get_loss()
-    aggregate_loss_tensor = aggregate_loss.get_loss()
-    primary_loss_tensor = daily_loss_tensor if primary_loss_name == "daily_loss" else aggregate_loss_tensor
-
-    thor.layers.NetworkOutput(network, "loss", primary_loss_tensor, thor.DataType.fp32)
-    thor.layers.NetworkOutput(network, "daily_loss", daily_loss_tensor, thor.DataType.fp32)
-    thor.layers.NetworkOutput(network, "aggregate_loss", aggregate_loss_tensor, thor.DataType.fp32)
-    thor.layers.NetworkOutput(network, "daily_prediction", daily.get_feature_output(), thor.DataType.fp32)
-    thor.layers.NetworkOutput(network, "aggregate_prediction", aggregate.get_output("feature_output"), thor.DataType.fp32)
-
-    daily_roots = [daily_loss_tensor] if daily_loss_active else []
-    aggregate_roots = [aggregate_loss_tensor] if aggregate_loss_active else []
     daily_phase = thor.training.TrainingPhase(
         "daily_prediction",
-        loss_roots=daily_roots,
-        outputs={"daily_prediction": daily.get_feature_output()},
+        network=daily_network,
         enabled=True,
     )
     aggregate_phase = thor.training.TrainingPhase(
         "aggregate_prediction",
-        loss_roots=aggregate_roots,
-        outputs={"aggregate_prediction": aggregate.get_output("feature_output")},
-        depends_on=["daily_prediction"],
+        network=aggregate_network,
         enabled=aggregate_enabled,
     )
     optimizer = thor.optimizers.Sgd(initial_learning_rate=0.25, momentum=0.0)

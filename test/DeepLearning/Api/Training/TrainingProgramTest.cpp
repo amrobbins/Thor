@@ -9,6 +9,7 @@
 #include "DeepLearning/Api/Parameter/ParameterReference.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 #include "DeepLearning/Api/Training/ExecutableTrainingPlan.h"
+#include "DeepLearning/Api/Training/PhaseGraphConnector.h"
 #include "DeepLearning/Api/Training/StepExecutable.h"
 #include "DeepLearning/Api/Training/TrainingInputBinding.h"
 #include "DeepLearning/Api/Training/TrainingPhase.h"
@@ -44,6 +45,76 @@ FullyConnected buildFullyConnected(Network& network) {
         .build();
 }
 
+
+struct PhaseNetworkFixture {
+    std::shared_ptr<Network> network;
+    Tensor lossRoot;
+    Tensor outputTensor;
+};
+
+PhaseNetworkFixture buildPhaseNetwork(const std::string& networkName,
+                                      const std::string& inputName,
+                                      const std::string& outputName,
+                                      bool inputExternal = true,
+                                      bool outputExternal = true,
+                                      bool withLoss = true) {
+    auto network = std::make_shared<Network>(networkName);
+    NetworkInput input = NetworkInput::Builder()
+                             .network(*network)
+                             .name(inputName)
+                             .dimensions({1})
+                             .dataType(DataType::FP32)
+                             .external(inputExternal)
+                             .build();
+    Tensor outputTensor = input.getFeatureOutput().value();
+    Tensor lossRoot;
+    if (withLoss) {
+        NetworkInput labels =
+            NetworkInput::Builder().network(*network).name("labels").dimensions({1}).dataType(DataType::FP32).build();
+        MSE loss = MSE::Builder().network(*network).predictions(outputTensor).labels(labels.getFeatureOutput().value()).build();
+        lossRoot = loss.getLoss();
+        NetworkOutput::Builder().network(*network).name(outputName + "_loss").inputTensor(lossRoot).dataType(DataType::FP32).build();
+
+        std::vector<Tensor> derivedLossRoots = network->getLossRootTensors();
+        if (derivedLossRoots.size() != 1) {
+            throw std::runtime_error("test phase fixture expected exactly one derived phase loss root");
+        }
+        lossRoot = derivedLossRoots[0];
+    }
+    NetworkOutput::Builder()
+        .network(*network)
+        .name(outputName)
+        .inputTensor(outputTensor)
+        .dataType(DataType::FP32)
+        .external(outputExternal)
+        .build();
+    return PhaseNetworkFixture{network, lossRoot, outputTensor};
+}
+
+std::shared_ptr<TrainingPhase> makePhase(const std::string& phaseName,
+                                         const std::string& inputName = "examples",
+                                         const std::string& outputName = "",
+                                         bool inputExternal = true,
+                                         bool outputExternal = true,
+                                         bool withLoss = true,
+                                         bool enabled = true,
+                                         PhaseNetworkFixture* fixtureOut = nullptr) {
+    const std::string resolvedOutputName = outputName.empty() ? phaseName : outputName;
+    PhaseNetworkFixture fixture = buildPhaseNetwork(
+        phaseName + "_network", inputName, resolvedOutputName, inputExternal, outputExternal, withLoss);
+    if (fixtureOut != nullptr) {
+        *fixtureOut = fixture;
+    }
+    return std::make_shared<TrainingPhase>(phaseName, fixture.network, enabled);
+}
+
+ComposedPhaseGraph composeActivePhases(const TrainingStep& step) {
+    PhaseGraphComposeOptions options;
+    options.networkName = "training_program_test_composed_phases";
+    options.exposePhaseOutputsAsNetworkOutputs = true;
+    return buildComposedPhaseGraphByName(step.getActivePhaseNetworkSpecs(), options);
+}
+
 template <typename Fn>
 void expectRuntimeErrorContains(Fn&& fn, const std::string& expectedMessageFragment) {
     try {
@@ -58,29 +129,26 @@ void expectRuntimeErrorContains(Fn&& fn, const std::string& expectedMessageFragm
 
 }  // namespace
 
-TEST(TrainingPhaseApi, ConstructsWithNameLossRootsOutputsAndDependencies) {
-    Tensor dailyLoss(DataType::FP32, {1});
-    Tensor dailyForecast(DataType::FP32, {100});
-    Tensor dailyQuantile(DataType::FP32, {100});
+TEST(TrainingPhaseApi, ConstructsWithNetworkAndDerivesLossRootsAndOutputs) {
+    PhaseNetworkFixture fixture = buildPhaseNetwork("daily_phase_network", "examples", "forecast");
 
-    TrainingPhase phase(
-        "daily_prediction", {dailyLoss}, {{"forecast", dailyForecast}, {"quantile_high", dailyQuantile}}, {"feature_preprocessing"}, true);
+    TrainingPhase phase("daily_prediction", fixture.network, true);
 
     EXPECT_TRUE(phase.isInitialized());
     EXPECT_TRUE(phase.isEnabled());
+    EXPECT_NE(phase.getNetwork(), nullptr);
     EXPECT_EQ(phase.getName(), "daily_prediction");
+    EXPECT_EQ(phase.getNetwork(), fixture.network);
     ASSERT_EQ(phase.getLossRoots().size(), 1u);
-    EXPECT_EQ(phase.getLossRoots()[0], dailyLoss);
+    EXPECT_EQ(phase.getLossRoots()[0], fixture.lossRoot);
     ASSERT_EQ(phase.getOutputs().size(), 2u);
-    EXPECT_EQ(phase.getOutputs().at("forecast"), dailyForecast);
-    EXPECT_EQ(phase.getOutputs().at("quantile_high"), dailyQuantile);
-    ASSERT_EQ(phase.getDependsOn().size(), 1u);
-    EXPECT_EQ(phase.getDependsOn()[0], "feature_preprocessing");
+    EXPECT_EQ(phase.getOutputs().at("forecast"), fixture.outputTensor);
+    EXPECT_TRUE(phase.getOutputs().count("forecast_loss") != 0);
 }
 
 TEST(TrainingPhaseApi, EnableDisableMutatesPhaseState) {
-    Tensor loss(DataType::FP32, {1});
-    TrainingPhase phase("daily_prediction", {loss});
+    PhaseNetworkFixture fixture = buildPhaseNetwork("daily_phase_network", "examples", "forecast");
+    TrainingPhase phase("daily_prediction", fixture.network);
 
     EXPECT_TRUE(phase.isEnabled());
     phase.disable();
@@ -94,46 +162,42 @@ TEST(TrainingPhaseApi, EnableDisableMutatesPhaseState) {
 }
 
 TEST(TrainingPhaseApi, AllowsForwardOnlyPhaseWithoutLossRoots) {
-    Tensor forecast(DataType::FP32, {100});
-    TrainingPhase phase("daily_forward", {}, {{"forecast", forecast}}, {}, true);
+    PhaseNetworkFixture fixture = buildPhaseNetwork("daily_forward_network", "examples", "forecast", true, true, false);
+    TrainingPhase phase("daily_forward", fixture.network, true);
 
     EXPECT_TRUE(phase.isInitialized());
+    EXPECT_NE(phase.getNetwork(), nullptr);
     EXPECT_TRUE(phase.getLossRoots().empty());
     ASSERT_EQ(phase.getOutputs().size(), 1u);
-    EXPECT_EQ(phase.getOutputs().at("forecast"), forecast);
+    EXPECT_EQ(phase.getOutputs().at("forecast"), fixture.outputTensor);
 }
 
+TEST(TrainingPhaseApi, PhasePreservesExternalFalseOutputsForLocalWiring) {
+    PhaseNetworkFixture fixture = buildPhaseNetwork("daily_phase_network", "features", "hidden", true, false, false);
 
-TEST(TrainingPhaseApi, NetworkBackedPhaseDerivesLossRootsAndOutputs) {
-    auto phaseNetwork = std::make_shared<Network>("daily_phase_network");
-    NetworkInput input = NetworkInput::Builder().network(*phaseNetwork).name("features").dimensions({3}).dataType(DataType::FP32).build();
-    NetworkOutput::Builder().network(*phaseNetwork).name("forecast").inputTensor(input.getFeatureOutput().value()).build();
-
-    TrainingPhase phase("daily_prediction", phaseNetwork, false);
+    TrainingPhase phase("daily_prediction", fixture.network, false);
 
     EXPECT_TRUE(phase.isInitialized());
     EXPECT_FALSE(phase.isEnabled());
-    EXPECT_TRUE(phase.hasNetwork());
-    EXPECT_EQ(phase.getNetwork(), phaseNetwork);
+    EXPECT_NE(phase.getNetwork(), nullptr);
+    EXPECT_EQ(phase.getNetwork(), fixture.network);
     EXPECT_TRUE(phase.getLossRoots().empty());
     ASSERT_EQ(phase.getOutputs().size(), 1u);
-    EXPECT_EQ(phase.getOutputs().at("forecast"), input.getFeatureOutput().value());
-    EXPECT_TRUE(phase.getDependsOn().empty());
+    EXPECT_EQ(phase.getOutputs().at("hidden"), fixture.outputTensor);
 
     nlohmann::json phaseJson = phase.architectureJson();
     EXPECT_EQ(phaseJson.at("version").get<std::string>(), "1.1.0");
     EXPECT_EQ(phaseJson.at("network").at("name").get<std::string>(), "daily_phase_network");
-    EXPECT_FALSE(phaseJson.contains("depends_on"));
 
     TrainingPhase restored = TrainingPhase::deserialize(phaseJson);
-    EXPECT_TRUE(restored.hasNetwork());
+    EXPECT_NE(restored.getNetwork(), nullptr);
     EXPECT_EQ(restored.getNetwork()->getNetworkName(), "daily_phase_network");
     ASSERT_EQ(restored.getOutputs().size(), 1u);
-    EXPECT_TRUE(restored.getOutputs().count("forecast") != 0);
+    EXPECT_TRUE(restored.getOutputs().count("hidden") != 0);
     EXPECT_FALSE(restored.isEnabled());
 }
 
-TEST(TrainingStepApi, ActivePhaseNetworkSpecsExposeEnabledNetworkBackedPhases) {
+TEST(TrainingStepApi, ActivePhaseNetworkSpecsExposeEnabledPhases) {
     auto encoderNetwork = std::make_shared<Network>("encoder_phase_network");
     NetworkInput input = NetworkInput::Builder().network(*encoderNetwork).name("features").dimensions({3}).dataType(DataType::FP32).build();
     NetworkOutput::Builder().network(*encoderNetwork).name("hidden").inputTensor(input.getFeatureOutput().value()).external(false).build();
@@ -163,47 +227,35 @@ TEST(TrainingStepApi, ActivePhaseNetworkSpecsExposeEnabledNetworkBackedPhases) {
 }
 
 TEST(TrainingPhaseApi, RejectsInvalidConstruction) {
-    Tensor loss(DataType::FP32, {1});
-    Tensor output(DataType::FP32, {100});
-    Tensor uninitialized;
+    PhaseNetworkFixture fixture = buildPhaseNetwork("valid_phase_network", "examples", "prediction");
 
-    EXPECT_THROW(TrainingPhase("", {loss}), std::runtime_error);
-    EXPECT_THROW(TrainingPhase("bad", {uninitialized}), std::runtime_error);
-    EXPECT_THROW(TrainingPhase("bad", {}, {{"", output}}), std::runtime_error);
-    EXPECT_THROW(TrainingPhase("bad", {}, {{"forecast", uninitialized}}), std::runtime_error);
-    EXPECT_THROW(TrainingPhase("bad", {}, {}, {""}), std::runtime_error);
-    EXPECT_THROW(TrainingPhase("daily_prediction", {}, {}, {"daily_prediction"}), std::runtime_error);
-    EXPECT_THROW(TrainingPhase("aggregate_prediction", {}, {}, {"daily_prediction", "daily_prediction"}), std::runtime_error);
+    EXPECT_THROW(TrainingPhase("", fixture.network), std::runtime_error);
+
+    auto unnamedNetwork = std::make_shared<Network>("");
+    EXPECT_THROW(TrainingPhase("bad", unnamedNetwork), std::runtime_error);
 }
 
 TEST(TrainingPhaseApi, SerializesAndDeserializes) {
-    Tensor dailyLoss(DataType::FP32, {1});
-    Tensor dailyForecast(DataType::FP32, {100});
-    Tensor dailyQuantile(DataType::FP32, {100});
+    PhaseNetworkFixture fixture = buildPhaseNetwork("daily_phase_network", "examples", "forecast");
 
-    TrainingPhase phase(
-        "daily_prediction", {dailyLoss}, {{"forecast", dailyForecast}, {"quantile_high", dailyQuantile}}, {"feature_preprocessing"}, false);
+    TrainingPhase phase("daily_prediction", fixture.network, false);
 
     nlohmann::json j = phase.architectureJson();
-    EXPECT_EQ(j.at("version").get<std::string>(), "1.0.0");
+    EXPECT_EQ(j.at("version").get<std::string>(), "1.1.0");
     EXPECT_EQ(j.at("name").get<std::string>(), "daily_prediction");
     EXPECT_FALSE(j.at("enabled").get<bool>());
-    ASSERT_EQ(j.at("loss_roots").size(), 1u);
-    ASSERT_EQ(j.at("outputs").size(), 2u);
-    ASSERT_EQ(j.at("depends_on").size(), 1u);
-    EXPECT_EQ(j.at("depends_on").at(0).get<std::string>(), "feature_preprocessing");
+    ASSERT_TRUE(j.contains("network"));
 
     TrainingPhase restored = TrainingPhase::deserialize(j);
     EXPECT_TRUE(restored.isInitialized());
     EXPECT_FALSE(restored.isEnabled());
+    EXPECT_NE(restored.getNetwork(), nullptr);
     EXPECT_EQ(restored.getName(), phase.getName());
+    EXPECT_EQ(restored.getNetwork()->getNetworkName(), "daily_phase_network");
     ASSERT_EQ(restored.getLossRoots().size(), 1u);
-    EXPECT_EQ(restored.getLossRoots()[0].getOriginalId(), dailyLoss.getOriginalId());
     ASSERT_EQ(restored.getOutputs().size(), 2u);
-    EXPECT_EQ(restored.getOutputs().at("forecast").getOriginalId(), dailyForecast.getOriginalId());
-    EXPECT_EQ(restored.getOutputs().at("quantile_high").getOriginalId(), dailyQuantile.getOriginalId());
-    ASSERT_EQ(restored.getDependsOn().size(), 1u);
-    EXPECT_EQ(restored.getDependsOn()[0], "feature_preprocessing");
+    EXPECT_TRUE(restored.getOutputs().count("forecast") != 0);
+    EXPECT_TRUE(restored.getOutputs().count("forecast_loss") != 0);
 
     nlohmann::json badVersion = j;
     badVersion["version"] = "0.0.0";
@@ -211,10 +263,11 @@ TEST(TrainingPhaseApi, SerializesAndDeserializes) {
 }
 
 TEST(TrainingPhaseApi, SerializesAndDeserializesEnabledAndDisabledStateAndRejectsUnsupportedVersion) {
-    Tensor loss(DataType::FP32, {1});
+    PhaseNetworkFixture enabledFixture = buildPhaseNetwork("enabled_phase_network", "examples", "prediction");
+    PhaseNetworkFixture disabledFixture = buildPhaseNetwork("disabled_phase_network", "examples", "prediction");
 
-    TrainingPhase enabledPhase("enabled_phase", {loss}, {}, {}, true);
-    TrainingPhase disabledPhase("disabled_phase", {loss}, {}, {}, false);
+    TrainingPhase enabledPhase("enabled_phase", enabledFixture.network, true);
+    TrainingPhase disabledPhase("disabled_phase", disabledFixture.network, false);
 
     nlohmann::json enabledJson = enabledPhase.architectureJson();
     nlohmann::json disabledJson = disabledPhase.architectureJson();
@@ -234,21 +287,15 @@ TEST(TrainingPhaseApi, SerializesAndDeserializesEnabledAndDisabledStateAndReject
 }
 
 TEST(TrainingPhaseApi, RejectsInvalidConstructionWithSpecificErrors) {
-    Tensor loss(DataType::FP32, {1});
-    Tensor output(DataType::FP32, {100});
-    Tensor uninitialized;
+    PhaseNetworkFixture fixture = buildPhaseNetwork("valid_phase_network", "examples", "prediction");
 
-    expectRuntimeErrorContains([&]() { TrainingPhase("", {loss}); }, "requires a non-empty name");
-    expectRuntimeErrorContains([&]() { TrainingPhase("bad", {uninitialized}); }, "loss roots must all be initialized");
-    expectRuntimeErrorContains([&]() { TrainingPhase("bad", {}, {{"", output}}); }, "output names must be non-empty");
-    expectRuntimeErrorContains([&]() { TrainingPhase("bad", {}, {{"forecast", uninitialized}}); }, "outputs must all be initialized");
-    expectRuntimeErrorContains([&]() { TrainingPhase("bad", {}, {}, {""}); }, "dependency names must be non-empty");
-    expectRuntimeErrorContains([&]() { TrainingPhase("daily_prediction", {}, {}, {"daily_prediction"}); }, "cannot depend on itself");
-    expectRuntimeErrorContains([&]() { TrainingPhase("aggregate_prediction", {}, {}, {"daily_prediction", "daily_prediction"}); },
-                               "contains duplicate dependency 'daily_prediction'");
+    expectRuntimeErrorContains([&]() { TrainingPhase("", fixture.network); }, "requires a non-empty name");
+
+    auto unnamedNetwork = std::make_shared<Network>("");
+    expectRuntimeErrorContains([&]() { TrainingPhase("bad", unnamedNetwork); }, "network must have a non-empty Network name");
 }
 
-TEST(TrainingProgramApi, TrainingStepLegacyLossRootsNormalizeToSinglePhase) {
+TEST(TrainingProgramApi, TrainingStepLossRootsRemainNonPhasedExecutionView) {
     Tensor loss(DataType::FP32, {1});
     auto sgd = Sgd::Builder().initialLearningRate(0.01f).build();
 
@@ -260,12 +307,9 @@ TEST(TrainingProgramApi, TrainingStepLegacyLossRootsNormalizeToSinglePhase) {
     EXPECT_EQ(step.getLossRoots()[0], loss);
     ASSERT_EQ(step.getActiveLossRoots().size(), 1u);
     EXPECT_EQ(step.getActiveLossRoots()[0], loss);
-    ASSERT_EQ(step.getPhases().size(), 1u);
-    EXPECT_TRUE(step.getPhases()[0]->isInitialized());
-    EXPECT_TRUE(step.getPhases()[0]->isEnabled());
-    EXPECT_EQ(step.getPhases()[0]->getName(), "daily_phase");
-    ASSERT_EQ(step.getPhases()[0]->getLossRoots().size(), 1u);
-    EXPECT_EQ(step.getPhases()[0]->getLossRoots()[0], loss);
+    EXPECT_TRUE(step.getPhases().empty());
+    EXPECT_TRUE(step.getActivePhaseNames().empty());
+    EXPECT_TRUE(step.getActivePhaseNetworkSpecs().empty());
 }
 
 TEST(TrainingProgramApi, TrainingStepEnableDisableMutatesStepStateAndActiveLossRoots) {
@@ -287,48 +331,36 @@ TEST(TrainingProgramApi, TrainingStepEnableDisableMutatesStepStateAndActiveLossR
 }
 
 TEST(TrainingProgramApi, TrainingStepActiveLossRootsComeOnlyFromEnabledPhases) {
-    Tensor dailyLoss(DataType::FP32, {1});
-    Tensor aggregateLoss(DataType::FP32, {1});
-    auto dailyPhase = std::make_shared<TrainingPhase>("daily_prediction", std::vector<Tensor>{dailyLoss});
-    auto aggregatePhase = std::make_shared<TrainingPhase>("aggregate_prediction",
-                                                          std::vector<Tensor>{aggregateLoss},
-                                                          std::map<std::string, Tensor>{},
-                                                          std::vector<std::string>{"daily_prediction"},
-                                                          false);
+    PhaseNetworkFixture dailyFixture;
+    PhaseNetworkFixture aggregateFixture;
+    auto dailyPhase = makePhase("daily_prediction", "examples", "", true, true, true, true, &dailyFixture);
+    auto aggregatePhase = makePhase("aggregate_prediction", "daily_prediction", "", false, true, true, false, &aggregateFixture);
 
     TrainingStep step("demand_forecast", std::vector<std::shared_ptr<TrainingPhase>>{dailyPhase, aggregatePhase}, nullptr, {});
 
     ASSERT_EQ(step.getLossRoots().size(), 2u);
     std::vector<Tensor> activeRoots = step.getActiveLossRoots();
     ASSERT_EQ(activeRoots.size(), 1u);
-    EXPECT_EQ(activeRoots[0], dailyLoss);
+    EXPECT_EQ(activeRoots[0], dailyFixture.lossRoot);
 
     aggregatePhase->enable();
     activeRoots = step.getActiveLossRoots();
     ASSERT_EQ(activeRoots.size(), 2u);
-    EXPECT_EQ(activeRoots[0], dailyLoss);
-    EXPECT_EQ(activeRoots[1], aggregateLoss);
+    EXPECT_EQ(activeRoots[0], dailyFixture.lossRoot);
+    EXPECT_EQ(activeRoots[1], aggregateFixture.lossRoot);
 
     dailyPhase->disable();
-    EXPECT_THROW(static_cast<void>(step.getActiveLossRoots()), std::runtime_error);
+    activeRoots = step.getActiveLossRoots();
+    ASSERT_EQ(activeRoots.size(), 1u);
+    EXPECT_EQ(activeRoots[0], aggregateFixture.lossRoot);
 }
 
 TEST(TrainingProgramApi, TrainingStepActivePhaseNamesComeOnlyFromEnabledPhasesAndMayIncludeForwardOnlyPhases) {
-    Tensor preprocessedFeatures(DataType::FP32, {16});
-    Tensor dailyLoss(DataType::FP32, {1});
-    Tensor aggregateLoss(DataType::FP32, {1});
-
-    auto preprocessingPhase = std::make_shared<TrainingPhase>(
-        "feature_preprocessing", std::vector<Tensor>{}, std::map<std::string, Tensor>{{"features", preprocessedFeatures}});
-    auto dailyPhase = std::make_shared<TrainingPhase>("daily_prediction",
-                                                      std::vector<Tensor>{dailyLoss},
-                                                      std::map<std::string, Tensor>{},
-                                                      std::vector<std::string>{"feature_preprocessing"});
-    auto aggregatePhase = std::make_shared<TrainingPhase>("aggregate_prediction",
-                                                          std::vector<Tensor>{aggregateLoss},
-                                                          std::map<std::string, Tensor>{},
-                                                          std::vector<std::string>{"daily_prediction"},
-                                                          false);
+    PhaseNetworkFixture dailyFixture;
+    PhaseNetworkFixture aggregateFixture;
+    auto preprocessingPhase = makePhase("feature_preprocessing", "examples", "features", true, false, false);
+    auto dailyPhase = makePhase("daily_prediction", "features", "", false, true, true, true, &dailyFixture);
+    auto aggregatePhase = makePhase("aggregate_prediction", "daily_prediction", "", false, true, true, false, &aggregateFixture);
 
     TrainingStep step(
         "demand_forecast", std::vector<std::shared_ptr<TrainingPhase>>{preprocessingPhase, dailyPhase, aggregatePhase}, nullptr, {});
@@ -336,42 +368,31 @@ TEST(TrainingProgramApi, TrainingStepActivePhaseNamesComeOnlyFromEnabledPhasesAn
     EXPECT_EQ(step.getActivePhaseNames(), (std::vector<std::string>{"feature_preprocessing", "daily_prediction"}));
     std::vector<Tensor> activeRoots = step.getActiveLossRoots();
     ASSERT_EQ(activeRoots.size(), 1u);
-    EXPECT_EQ(activeRoots[0], dailyLoss);
+    EXPECT_EQ(activeRoots[0], dailyFixture.lossRoot);
 
     aggregatePhase->enable();
     EXPECT_EQ(step.getActivePhaseNames(), (std::vector<std::string>{"feature_preprocessing", "daily_prediction", "aggregate_prediction"}));
     activeRoots = step.getActiveLossRoots();
     ASSERT_EQ(activeRoots.size(), 2u);
-    EXPECT_EQ(activeRoots[0], dailyLoss);
-    EXPECT_EQ(activeRoots[1], aggregateLoss);
+    EXPECT_EQ(activeRoots[0], dailyFixture.lossRoot);
+    EXPECT_EQ(activeRoots[1], aggregateFixture.lossRoot);
 }
 
-TEST(TrainingProgramApi, TrainingStepDependencyValidationSkipsDisabledPhasesAndDisabledSteps) {
-    Tensor dailyLoss(DataType::FP32, {1});
-    Tensor aggregateLoss(DataType::FP32, {1});
-
-    auto dailyPhase = std::make_shared<TrainingPhase>("daily_prediction", std::vector<Tensor>{dailyLoss});
-    auto disabledAggregateWithMissingDependency = std::make_shared<TrainingPhase>("aggregate_prediction",
-                                                                                  std::vector<Tensor>{aggregateLoss},
-                                                                                  std::map<std::string, Tensor>{},
-                                                                                  std::vector<std::string>{"missing_phase"},
-                                                                                  false);
+TEST(TrainingProgramApi, TrainingStepPhaseGraphValidationSkipsDisabledPhasesAndDisabledSteps) {
+    PhaseNetworkFixture dailyFixture;
+    auto dailyPhase = makePhase("daily_prediction", "examples", "", true, true, true, true, &dailyFixture);
+    auto disabledAggregateWithMissingProducer = makePhase("aggregate_prediction", "missing_phase", "", false, true, true, false);
     TrainingStep disabledPhaseStep(
-        "demand_forecast", std::vector<std::shared_ptr<TrainingPhase>>{dailyPhase, disabledAggregateWithMissingDependency}, nullptr, {});
-    EXPECT_NO_THROW(disabledPhaseStep.validateEnabledPhaseDependencies());
+        "demand_forecast", std::vector<std::shared_ptr<TrainingPhase>>{dailyPhase, disabledAggregateWithMissingProducer}, nullptr, {});
     EXPECT_EQ(disabledPhaseStep.getActivePhaseNames(), (std::vector<std::string>{"daily_prediction"}));
+    EXPECT_NO_THROW((void)composeActivePhases(disabledPhaseStep));
 
-    disabledAggregateWithMissingDependency->enable();
-    expectRuntimeErrorContains([&]() { disabledPhaseStep.validateEnabledPhaseDependencies(); },
-                               "enabled phase 'aggregate_prediction' depends on missing phase 'missing_phase'");
+    disabledAggregateWithMissingProducer->enable();
+    expectRuntimeErrorContains([&]() { (void)composeActivePhases(disabledPhaseStep); },
+                               "non-external input 'missing_phase' in phase 'aggregate_prediction' is not satisfied");
 
-    auto disabledDaily = std::make_shared<TrainingPhase>(
-        "daily_prediction", std::vector<Tensor>{dailyLoss}, std::map<std::string, Tensor>{}, std::vector<std::string>{}, false);
-    auto aggregateDependsOnDisabledDaily = std::make_shared<TrainingPhase>("aggregate_prediction",
-                                                                           std::vector<Tensor>{aggregateLoss},
-                                                                           std::map<std::string, Tensor>{},
-                                                                           std::vector<std::string>{"daily_prediction"},
-                                                                           true);
+    auto disabledDaily = makePhase("daily_prediction", "examples", "", true, true, true, false);
+    auto aggregateDependsOnDisabledDaily = makePhase("aggregate_prediction", "daily_prediction", "", false, true, true, true);
     TrainingStep disabledStep("demand_forecast",
                               std::vector<std::shared_ptr<TrainingPhase>>{disabledDaily, aggregateDependsOnDisabledDaily},
                               nullptr,
@@ -380,78 +401,52 @@ TEST(TrainingProgramApi, TrainingStepDependencyValidationSkipsDisabledPhasesAndD
                               TrainingStep::GradientClearPolicy::CLEAR_BEFORE_STEP,
                               {},
                               false);
-    EXPECT_NO_THROW(disabledStep.validateEnabledPhaseDependencies());
     EXPECT_TRUE(disabledStep.getActivePhaseNames().empty());
     EXPECT_TRUE(disabledStep.getActiveLossRoots().empty());
 }
 
-TEST(TrainingProgramApi, TrainingStepDependencyErrorsAreSpecificAndSearchable) {
-    Tensor loss(DataType::FP32, {1});
+TEST(TrainingProgramApi, PhaseGraphDependencyErrorsAreSpecificAndSearchable) {
+    auto disabledDaily = makePhase("daily_prediction", "examples", "", true, true, true, false);
+    auto aggregate = makePhase("aggregate_prediction", "daily_prediction", "", false, true, true, true);
+    TrainingStep disabledProducerStep(
+        "demand_forecast", std::vector<std::shared_ptr<TrainingPhase>>{disabledDaily, aggregate}, nullptr, {});
+    expectRuntimeErrorContains([&]() { (void)composeActivePhases(disabledProducerStep); },
+                               "non-external input 'daily_prediction' in phase 'aggregate_prediction' is not satisfied");
 
-    auto disabledDaily = std::make_shared<TrainingPhase>(
-        "daily_prediction", std::vector<Tensor>{loss}, std::map<std::string, Tensor>{}, std::vector<std::string>{}, false);
-    auto aggregateDependsOnDisabled = std::make_shared<TrainingPhase>(
-        "aggregate_prediction", std::vector<Tensor>{loss}, std::map<std::string, Tensor>{}, std::vector<std::string>{"daily_prediction"});
-    TrainingStep disabledDependencyStep(
-        "demand_forecast", std::vector<std::shared_ptr<TrainingPhase>>{disabledDaily, aggregateDependsOnDisabled}, nullptr, {});
-    expectRuntimeErrorContains(
-        [&]() { disabledDependencyStep.validateEnabledPhaseDependencies(); },
-        "TrainingStep 'demand_forecast' enabled phase 'aggregate_prediction' depends on disabled phase 'daily_prediction'.");
+    auto missingProducerPhase = makePhase("aggregate_prediction", "daily_prediction", "", false, true, true, true);
+    TrainingStep missingProducerStep("demand_forecast", std::vector<std::shared_ptr<TrainingPhase>>{missingProducerPhase}, nullptr, {});
+    expectRuntimeErrorContains([&]() { (void)composeActivePhases(missingProducerStep); },
+                               "non-external input 'daily_prediction' in phase 'aggregate_prediction' is not satisfied");
 
-    auto missingDependencyPhase = std::make_shared<TrainingPhase>(
-        "aggregate_prediction", std::vector<Tensor>{loss}, std::map<std::string, Tensor>{}, std::vector<std::string>{"daily_prediction"});
-    TrainingStep missingDependencyStep("demand_forecast", std::vector<std::shared_ptr<TrainingPhase>>{missingDependencyPhase}, nullptr, {});
-    expectRuntimeErrorContains([&]() { missingDependencyStep.validateEnabledPhaseDependencies(); },
-                               "enabled phase 'aggregate_prediction' depends on missing phase 'daily_prediction'");
-
-    auto aggregateForwardDependency = std::make_shared<TrainingPhase>(
-        "aggregate_prediction", std::vector<Tensor>{loss}, std::map<std::string, Tensor>{}, std::vector<std::string>{"daily_prediction"});
-    auto dailyLater = std::make_shared<TrainingPhase>("daily_prediction", std::vector<Tensor>{loss});
-    TrainingStep forwardDependencyStep(
-        "demand_forecast", std::vector<std::shared_ptr<TrainingPhase>>{aggregateForwardDependency, dailyLater}, nullptr, {});
-    expectRuntimeErrorContains([&]() { forwardDependencyStep.validateEnabledPhaseDependencies(); },
-                               "but that dependency does not appear earlier in the step");
+    auto aggregateFirst = makePhase("aggregate_prediction", "daily_prediction", "", false, true, true, true);
+    auto dailySecond = makePhase("daily_prediction");
+    TrainingStep reorderableStep("demand_forecast", std::vector<std::shared_ptr<TrainingPhase>>{aggregateFirst, dailySecond}, nullptr, {});
+    ComposedPhaseGraph graph = composeActivePhases(reorderableStep);
+    EXPECT_EQ(graph.activePhaseNames, (std::vector<std::string>{"daily_prediction", "aggregate_prediction"}));
 }
 
-TEST(TrainingProgramApi, TrainingStepRejectsInvalidPhaseDependencies) {
-    Tensor loss(DataType::FP32, {1});
-
-    auto disabledDaily = std::make_shared<TrainingPhase>(
-        "daily_prediction", std::vector<Tensor>{loss}, std::map<std::string, Tensor>{}, std::vector<std::string>{}, false);
-    auto aggregateDependsOnDisabled = std::make_shared<TrainingPhase>("aggregate_prediction",
-                                                                      std::vector<Tensor>{loss},
-                                                                      std::map<std::string, Tensor>{},
-                                                                      std::vector<std::string>{"daily_prediction"},
-                                                                      true);
-    TrainingStep disabledDependencyStep(
+TEST(TrainingProgramApi, PhaseGraphRejectsInvalidProducerSets) {
+    auto disabledDaily = makePhase("daily_prediction", "examples", "", true, true, true, false);
+    auto aggregateDependsOnDisabled = makePhase("aggregate_prediction", "daily_prediction", "", false, true, true, true);
+    TrainingStep disabledProducerStep(
         "demand_forecast", std::vector<std::shared_ptr<TrainingPhase>>{disabledDaily, aggregateDependsOnDisabled}, nullptr, {});
-    EXPECT_THROW(disabledDependencyStep.validateEnabledPhaseDependencies(), std::runtime_error);
-    EXPECT_THROW(static_cast<void>(disabledDependencyStep.getActiveLossRoots()), std::runtime_error);
+    EXPECT_THROW((void)composeActivePhases(disabledProducerStep), std::runtime_error);
 
-    auto aggregateMissingDependency = std::make_shared<TrainingPhase>("aggregate_prediction",
-                                                                      std::vector<Tensor>{loss},
-                                                                      std::map<std::string, Tensor>{},
-                                                                      std::vector<std::string>{"daily_prediction"},
-                                                                      true);
-    TrainingStep missingDependencyStep(
+    auto aggregateMissingDependency = makePhase("aggregate_prediction", "daily_prediction", "", false, true, true, true);
+    TrainingStep missingProducerStep(
         "demand_forecast", std::vector<std::shared_ptr<TrainingPhase>>{aggregateMissingDependency}, nullptr, {});
-    EXPECT_THROW(missingDependencyStep.validateEnabledPhaseDependencies(), std::runtime_error);
+    EXPECT_THROW((void)composeActivePhases(missingProducerStep), std::runtime_error);
 
-    auto aggregateForwardDependency = std::make_shared<TrainingPhase>("aggregate_prediction",
-                                                                      std::vector<Tensor>{loss},
-                                                                      std::map<std::string, Tensor>{},
-                                                                      std::vector<std::string>{"daily_prediction"},
-                                                                      true);
-    auto dailyLater = std::make_shared<TrainingPhase>("daily_prediction", std::vector<Tensor>{loss});
-    TrainingStep forwardDependencyStep(
+    auto aggregateForwardDependency = makePhase("aggregate_prediction", "daily_prediction", "", false, true, true, true);
+    auto dailyLater = makePhase("daily_prediction");
+    TrainingStep forwardReferenceStep(
         "demand_forecast", std::vector<std::shared_ptr<TrainingPhase>>{aggregateForwardDependency, dailyLater}, nullptr, {});
-    EXPECT_THROW(forwardDependencyStep.validateEnabledPhaseDependencies(), std::runtime_error);
+    EXPECT_NO_THROW((void)composeActivePhases(forwardReferenceStep));
 }
 
 TEST(TrainingProgramApi, TrainingStepRejectsInvalidPhaseLists) {
-    Tensor loss(DataType::FP32, {1});
-    auto dailyA = std::make_shared<TrainingPhase>("daily_prediction", std::vector<Tensor>{loss});
-    auto dailyB = std::make_shared<TrainingPhase>("daily_prediction", std::vector<Tensor>{loss});
+    auto dailyA = makePhase("daily_prediction");
+    auto dailyB = makePhase("daily_prediction");
 
     EXPECT_THROW(TrainingStep("bad", std::vector<std::shared_ptr<TrainingPhase>>{}, nullptr, {}), std::runtime_error);
     EXPECT_THROW(TrainingStep("bad", std::vector<std::shared_ptr<TrainingPhase>>{nullptr}, nullptr, {}), std::runtime_error);
@@ -459,14 +454,8 @@ TEST(TrainingProgramApi, TrainingStepRejectsInvalidPhaseLists) {
 }
 
 TEST(TrainingProgramApi, TrainingStepSerializesPhaseAwareExecutionView) {
-    Tensor dailyLoss(DataType::FP32, {1});
-    Tensor aggregateLoss(DataType::FP32, {1});
-    auto dailyPhase = std::make_shared<TrainingPhase>("daily_prediction", std::vector<Tensor>{dailyLoss});
-    auto aggregatePhase = std::make_shared<TrainingPhase>("aggregate_prediction",
-                                                          std::vector<Tensor>{aggregateLoss},
-                                                          std::map<std::string, Tensor>{},
-                                                          std::vector<std::string>{"daily_prediction"},
-                                                          false);
+    auto dailyPhase = makePhase("daily_prediction");
+    auto aggregatePhase = makePhase("aggregate_prediction", "daily_prediction", "", false, true, true, false);
     auto sgd = Sgd::Builder().initialLearningRate(0.01f).build();
 
     TrainingStep step("demand_forecast",
@@ -486,6 +475,8 @@ TEST(TrainingProgramApi, TrainingStepSerializesPhaseAwareExecutionView) {
     ASSERT_EQ(j.at("phases").size(), 2u);
     EXPECT_EQ(j.at("phases").at(0).at("name").get<std::string>(), "daily_prediction");
     EXPECT_EQ(j.at("phases").at(1).at("name").get<std::string>(), "aggregate_prediction");
+    EXPECT_TRUE(j.at("phases").at(0).contains("network"));
+    EXPECT_TRUE(j.at("phases").at(1).contains("network"));
     EXPECT_FALSE(j.at("phases").at(1).at("enabled").get<bool>());
 
     TrainingStep restored = TrainingStep::deserialize(j);
@@ -498,6 +489,8 @@ TEST(TrainingProgramApi, TrainingStepSerializesPhaseAwareExecutionView) {
     ASSERT_EQ(restored.getPhases().size(), 2u);
     EXPECT_EQ(restored.getPhases()[0]->getName(), "daily_prediction");
     EXPECT_EQ(restored.getPhases()[1]->getName(), "aggregate_prediction");
+    EXPECT_NE(restored.getPhases()[0]->getNetwork(), nullptr);
+    EXPECT_NE(restored.getPhases()[1]->getNetwork(), nullptr);
     EXPECT_FALSE(restored.getPhases()[1]->isEnabled());
     EXPECT_TRUE(restored.getActiveLossRoots().empty());
     EXPECT_EQ(restored.getUpdateParameters(), step.getUpdateParameters());
@@ -506,15 +499,9 @@ TEST(TrainingProgramApi, TrainingStepSerializesPhaseAwareExecutionView) {
     EXPECT_NE(restored.getOptimizer(), nullptr);
 }
 
-TEST(TrainingProgramApi, TrainingStepSerializationPreservesPhaseEnablementAndLegacyJsonStillDeserializes) {
-    Tensor dailyLoss(DataType::FP32, {1});
-    Tensor aggregateLoss(DataType::FP32, {1});
-    auto dailyPhase = std::make_shared<TrainingPhase>("daily_prediction", std::vector<Tensor>{dailyLoss});
-    auto aggregatePhase = std::make_shared<TrainingPhase>("aggregate_prediction",
-                                                          std::vector<Tensor>{aggregateLoss},
-                                                          std::map<std::string, Tensor>{},
-                                                          std::vector<std::string>{"daily_prediction"},
-                                                          false);
+TEST(TrainingProgramApi, TrainingStepSerializationPreservesPhaseEnablement) {
+    auto dailyPhase = makePhase("daily_prediction");
+    auto aggregatePhase = makePhase("aggregate_prediction", "daily_prediction", "", false, true, true, false);
 
     TrainingStep phasedStep("demand_forecast",
                             std::vector<std::shared_ptr<TrainingPhase>>{dailyPhase, aggregatePhase},
@@ -527,17 +514,9 @@ TEST(TrainingProgramApi, TrainingStepSerializationPreservesPhaseEnablementAndLeg
     ASSERT_EQ(restoredPhasedStep.getPhases().size(), 2u);
     EXPECT_TRUE(restoredPhasedStep.getPhases()[0]->isEnabled());
     EXPECT_FALSE(restoredPhasedStep.getPhases()[1]->isEnabled());
-    EXPECT_EQ(restoredPhasedStep.getPhases()[1]->getDependsOn(), (std::vector<std::string>{"daily_prediction"}));
+    EXPECT_NE(restoredPhasedStep.getPhases()[0]->getNetwork(), nullptr);
+    EXPECT_NE(restoredPhasedStep.getPhases()[1]->getNetwork(), nullptr);
     EXPECT_EQ(restoredPhasedStep.getActivePhaseNames(), (std::vector<std::string>{"daily_prediction"}));
-
-    nlohmann::json legacyJson = phasedJson;
-    legacyJson["version"] = "1.0.0";
-    legacyJson.erase("phases");
-    TrainingStep restoredLegacyStep = TrainingStep::deserialize(legacyJson);
-    ASSERT_EQ(restoredLegacyStep.getPhases().size(), 1u);
-    EXPECT_EQ(restoredLegacyStep.getPhases()[0]->getName(), "demand_forecast_phase");
-    EXPECT_EQ(restoredLegacyStep.getActivePhaseNames(), (std::vector<std::string>{"demand_forecast_phase"}));
-    ASSERT_EQ(restoredLegacyStep.getActiveLossRoots().size(), 2u);
 
     nlohmann::json badVersion = phasedJson;
     badVersion["version"] = "9.9.9";
@@ -602,6 +581,7 @@ TEST(TrainingProgramApi, TrainingStepSerializesLogicalExecutionView) {
     EXPECT_EQ(j.at("name").get<std::string>(), "discriminator");
     EXPECT_EQ(j.at("repeat_count").get<uint32_t>(), 2u);
     EXPECT_EQ(j.at("loss_roots").size(), 1u);
+    EXPECT_FALSE(j.contains("phases"));
     EXPECT_EQ(j.at("update_parameters").size(), 2u);
     EXPECT_TRUE(j.contains("optimizer"));
 
@@ -717,42 +697,31 @@ TEST(TrainingProgramApi, AddStepStoresSharedReferenceAndRejectsNullReference) {
     EXPECT_TRUE(step->isEnabled());
 }
 
-TEST(TrainingProgramApi, DisabledPhasesDoNotValidateInactiveDependenciesUntilEnabled) {
-    Tensor dailyLoss(DataType::FP32, {1});
-    Tensor aggregateLoss(DataType::FP32, {1});
-
-    auto dailyPhase = std::make_shared<TrainingPhase>("daily_prediction", std::vector<Tensor>{dailyLoss});
-    auto disabledAggregateWithMissingDependency = std::make_shared<TrainingPhase>("aggregate_prediction",
-                                                                                  std::vector<Tensor>{aggregateLoss},
-                                                                                  std::map<std::string, Tensor>{},
-                                                                                  std::vector<std::string>{"not_declared_yet"},
-                                                                                  false);
+TEST(TrainingProgramApi, DisabledPhasesDoNotValidateInactiveInternalInputsUntilEnabled) {
+    PhaseNetworkFixture dailyFixture;
+    auto dailyPhase = makePhase("daily_prediction", "examples", "", true, true, true, true, &dailyFixture);
+    auto disabledAggregateWithMissingProducer = makePhase("aggregate_prediction", "not_declared_yet", "", false, true, true, false);
 
     TrainingStep step("demand_forecast",
-                      std::vector<std::shared_ptr<TrainingPhase>>{dailyPhase, disabledAggregateWithMissingDependency},
+                      std::vector<std::shared_ptr<TrainingPhase>>{dailyPhase, disabledAggregateWithMissingProducer},
                       nullptr,
                       std::vector<ParameterReference>{});
 
-    EXPECT_NO_THROW(step.validateEnabledPhaseDependencies());
     EXPECT_EQ(step.getActivePhaseNames(), (std::vector<std::string>{"daily_prediction"}));
     std::vector<Tensor> activeRoots = step.getActiveLossRoots();
     ASSERT_EQ(activeRoots.size(), 1u);
-    EXPECT_EQ(activeRoots[0], dailyLoss);
+    EXPECT_EQ(activeRoots[0], dailyFixture.lossRoot);
+    EXPECT_NO_THROW((void)composeActivePhases(step));
 
-    disabledAggregateWithMissingDependency->enable();
-    EXPECT_THROW(step.validateEnabledPhaseDependencies(), std::runtime_error);
-    EXPECT_THROW(static_cast<void>(step.getActiveLossRoots()), std::runtime_error);
+    disabledAggregateWithMissingProducer->enable();
+    EXPECT_THROW((void)composeActivePhases(step), std::runtime_error);
 }
 
 TEST(TrainingProgramApi, PhaseMutationAfterProgramConstructionIsVisibleThroughStep) {
-    Tensor dailyLoss(DataType::FP32, {1});
-    Tensor aggregateLoss(DataType::FP32, {1});
-    auto dailyPhase = std::make_shared<TrainingPhase>("daily_prediction", std::vector<Tensor>{dailyLoss});
-    auto aggregatePhase = std::make_shared<TrainingPhase>("aggregate_prediction",
-                                                          std::vector<Tensor>{aggregateLoss},
-                                                          std::map<std::string, Tensor>{},
-                                                          std::vector<std::string>{"daily_prediction"},
-                                                          false);
+    PhaseNetworkFixture dailyFixture;
+    PhaseNetworkFixture aggregateFixture;
+    auto dailyPhase = makePhase("daily_prediction", "examples", "", true, true, true, true, &dailyFixture);
+    auto aggregatePhase = makePhase("aggregate_prediction", "daily_prediction", "", false, true, true, false, &aggregateFixture);
     auto step = std::make_shared<TrainingStep>("demand_forecast",
                                                std::vector<std::shared_ptr<TrainingPhase>>{dailyPhase, aggregatePhase},
                                                nullptr,
@@ -761,16 +730,18 @@ TEST(TrainingProgramApi, PhaseMutationAfterProgramConstructionIsVisibleThroughSt
     TrainingProgram program(std::vector<std::shared_ptr<TrainingStep>>{step});
     std::vector<Tensor> activeRoots = program.getStep(0).getActiveLossRoots();
     ASSERT_EQ(activeRoots.size(), 1u);
-    EXPECT_EQ(activeRoots[0], dailyLoss);
+    EXPECT_EQ(activeRoots[0], dailyFixture.lossRoot);
 
     aggregatePhase->enable();
     activeRoots = program.getStep(0).getActiveLossRoots();
     ASSERT_EQ(activeRoots.size(), 2u);
-    EXPECT_EQ(activeRoots[0], dailyLoss);
-    EXPECT_EQ(activeRoots[1], aggregateLoss);
+    EXPECT_EQ(activeRoots[0], dailyFixture.lossRoot);
+    EXPECT_EQ(activeRoots[1], aggregateFixture.lossRoot);
 
     dailyPhase->disable();
-    EXPECT_THROW(static_cast<void>(program.getStep(0).getActiveLossRoots()), std::runtime_error);
+    activeRoots = program.getStep(0).getActiveLossRoots();
+    ASSERT_EQ(activeRoots.size(), 1u);
+    EXPECT_EQ(activeRoots[0], aggregateFixture.lossRoot);
 }
 
 TEST(TrainingProgramApi, TrainingProgramRejectsEmptyProgramsAtConstructionSerializationAndCompileTime) {
@@ -859,15 +830,11 @@ TEST(TrainingProgramApi, NetworkResolvesApiSideShapedLossRootsToCanonicalRawLoss
     ASSERT_EQ(duplicateRaw.size(), 1u);
     EXPECT_EQ(duplicateRaw[0].getOriginalId(), dailyRaw[0].getOriginalId());
 
-    auto dailyPhase = std::make_shared<TrainingPhase>("daily_prediction", std::vector<Tensor>{dailyLoss.getLoss()});
-    auto aggregatePhase = std::make_shared<TrainingPhase>("aggregate_prediction",
-                                                          std::vector<Tensor>{aggregateLoss.getLoss()},
-                                                          std::map<std::string, Tensor>{},
-                                                          std::vector<std::string>{"daily_prediction"},
-                                                          true);
-    auto rawPhase = std::make_shared<TrainingPhase>("raw_auxiliary", std::vector<Tensor>{rawLoss.getLoss()});
     auto step = std::make_shared<TrainingStep>(
-        "demand_forecast", std::vector<std::shared_ptr<TrainingPhase>>{dailyPhase, aggregatePhase, rawPhase}, nullptr, std::vector<ParameterReference>{});
+        "demand_forecast",
+        std::vector<Tensor>{dailyLoss.getLoss(), aggregateLoss.getLoss(), rawLoss.getLoss()},
+        nullptr,
+        std::vector<ParameterReference>{});
     TrainingProgram program(std::vector<std::shared_ptr<TrainingStep>>{step});
 
     std::vector<Event> initDoneEvents;
@@ -878,8 +845,7 @@ TEST(TrainingProgramApi, NetworkResolvesApiSideShapedLossRootsToCanonicalRawLoss
 
     std::vector<StepExecutable> executables = program.compile(*placed);
     ASSERT_EQ(executables.size(), 1u);
-    EXPECT_EQ(executables[0].getActivePhaseNames(),
-              (std::vector<std::string>{"daily_prediction", "aggregate_prediction", "raw_auxiliary"}));
+    EXPECT_TRUE(executables[0].getActivePhaseNames().empty());
     ASSERT_EQ(executables[0].getLossRoots().size(), 3u);
     EXPECT_EQ(executables[0].getLossRoots()[0].getOriginalId(), dailyLoss.getLoss().getOriginalId());
     EXPECT_EQ(executables[0].getLossRoots()[1].getOriginalId(), aggregateLoss.getLoss().getOriginalId());
@@ -1037,40 +1003,33 @@ TEST(TrainingProgramApi, PlacedNetworkResolvesParameterReferencesAndStepExecutab
     ASSERT_EQ(executables.size(), 1u);
     EXPECT_EQ(executables[0].getName(), "generator");
 
-    const Tensor aggregateLossRoot = labels.getFeatureOutput().value();
-    auto dailyPhase = std::make_shared<TrainingPhase>("daily_prediction", std::vector<Tensor>{lossRoot});
-    auto aggregatePhase = std::make_shared<TrainingPhase>("aggregate_prediction",
-                                                          std::vector<Tensor>{aggregateLossRoot},
-                                                          std::map<std::string, Tensor>{},
-                                                          std::vector<std::string>{"daily_prediction"},
-                                                          false);
+    PhaseNetworkFixture dailyPhaseFixture;
+    auto dailyPhase = makePhase("daily_prediction", "input", "daily_prediction", true, false, true, true, &dailyPhaseFixture);
+    PhaseNetworkFixture aggregatePhaseFixture;
+    auto aggregatePhase = makePhase(
+        "aggregate_prediction", "daily_prediction", "aggregate_prediction", false, true, true, false, &aggregatePhaseFixture);
     auto phasedStep = std::make_shared<TrainingStep>(
         "demand_forecast", std::vector<std::shared_ptr<TrainingPhase>>{dailyPhase, aggregatePhase}, sgd, std::vector<ParameterReference>{});
-    TrainingProgram phasedProgram(std::vector<std::shared_ptr<TrainingStep>>{phasedStep});
 
-    executables = phasedProgram.compile(*placed);
-    ASSERT_EQ(executables.size(), 1u);
-    EXPECT_EQ(executables[0].getName(), "demand_forecast");
-    EXPECT_EQ(executables[0].getActivePhaseNames(), (std::vector<std::string>{"daily_prediction"}));
-    ASSERT_EQ(executables[0].getLossRoots().size(), 1u);
-    EXPECT_EQ(executables[0].getLossRoots()[0].getOriginalId(), lossRoot.getOriginalId());
-    EXPECT_EQ(executables[0].getUpdateParameterReferences().size(), network.getTrainableParameterReferences().size());
-    nlohmann::json phasedJson = executables[0].architectureJson();
-    EXPECT_EQ(phasedJson.at("active_phase_names"), (nlohmann::json::array({"daily_prediction"})));
+    ASSERT_EQ(phasedStep->getActiveLossRoots().size(), 1u);
+    EXPECT_EQ(phasedStep->getActivePhaseNames(), (std::vector<std::string>{"daily_prediction"}));
+    EXPECT_EQ(phasedStep->getActiveLossRoots()[0], dailyPhaseFixture.lossRoot);
+    nlohmann::json phasedJson = phasedStep->architectureJson();
+    EXPECT_EQ(phasedJson.at("phases").at(0).at("network").at("name").get<std::string>(), "daily_prediction_network");
+    EXPECT_FALSE(phasedJson.at("phases").at(1).at("enabled").get<bool>());
 
     aggregatePhase->enable();
-    executables = phasedProgram.compile(*placed);
-    ASSERT_EQ(executables.size(), 1u);
-    EXPECT_EQ(executables[0].getActivePhaseNames(), (std::vector<std::string>{"daily_prediction", "aggregate_prediction"}));
-    ASSERT_EQ(executables[0].getLossRoots().size(), 2u);
-    EXPECT_EQ(executables[0].getLossRoots()[0].getOriginalId(), lossRoot.getOriginalId());
-    EXPECT_EQ(executables[0].getLossRoots()[1].getOriginalId(), aggregateLossRoot.getOriginalId());
+    ASSERT_EQ(phasedStep->getActiveLossRoots().size(), 2u);
+    EXPECT_EQ(phasedStep->getActivePhaseNames(), (std::vector<std::string>{"daily_prediction", "aggregate_prediction"}));
+    EXPECT_EQ(phasedStep->getActiveLossRoots()[0], dailyPhaseFixture.lossRoot);
+    EXPECT_EQ(phasedStep->getActiveLossRoots()[1], aggregatePhaseFixture.lossRoot);
+    EXPECT_NO_THROW((void)composeActivePhases(*phasedStep));
 
     dailyPhase->disable();
-    EXPECT_THROW(static_cast<void>(phasedProgram.compile(*placed)), std::runtime_error);
+    EXPECT_THROW((void)composeActivePhases(*phasedStep), std::runtime_error);
 
     aggregatePhase->disable();
-    EXPECT_THROW(static_cast<void>(phasedProgram.compile(*placed)), std::runtime_error);
+    EXPECT_THROW((void)composeActivePhases(*phasedStep), std::runtime_error);
     dailyPhase->enable();
 
     ParameterReference biases = fc.getParameterReference("biases");
@@ -1093,15 +1052,9 @@ TEST(TrainingProgramApi, PlacedNetworkResolvesParameterReferencesAndStepExecutab
     disabledStep->disable();
     EXPECT_THROW(static_cast<void>(referenceProgram.compile(*placed)), std::runtime_error);
 
+    auto skippedBadDependencyPhase = makePhase("aggregate_prediction", "missing_daily", "aggregate_prediction", false, true, true, true);
     auto skippedBadDependencyStep = std::make_shared<TrainingStep>(
-        "skipped_bad_dependency",
-        std::vector<std::shared_ptr<TrainingPhase>>{std::make_shared<TrainingPhase>("aggregate_prediction",
-                                                                                    std::vector<Tensor>{lossRoot},
-                                                                                    std::map<std::string, Tensor>{},
-                                                                                    std::vector<std::string>{"missing_daily"},
-                                                                                    true)},
-        sgd,
-        std::vector<ParameterReference>{weights});
+        "skipped_bad_dependency", std::vector<std::shared_ptr<TrainingPhase>>{skippedBadDependencyPhase}, sgd, std::vector<ParameterReference>{weights});
     skippedBadDependencyStep->disable();
     auto validReferenceStep =
         std::make_shared<TrainingStep>("valid_reference", std::vector<Tensor>{lossRoot}, sgd, std::vector<ParameterReference>{weights});
@@ -1111,8 +1064,8 @@ TEST(TrainingProgramApi, PlacedNetworkResolvesParameterReferencesAndStepExecutab
     EXPECT_EQ(executables[0].getName(), "valid_reference");
 
     skippedBadDependencyStep->enable();
-    expectRuntimeErrorContains([&]() { (void)skipDisabledInvalidProgram.compile(*placed); },
-                               "enabled phase 'aggregate_prediction' depends on missing phase 'missing_daily'");
+    expectRuntimeErrorContains([&]() { (void)composeActivePhases(*skippedBadDependencyStep); },
+                               "non-external input 'missing_daily'");
 
     ExecutableTrainingPlan plan = ExecutableTrainingPlan::compile(program, *placed);
     EXPECT_TRUE(plan.isInitialized());

@@ -403,7 +403,7 @@ std::shared_ptr<Trainer> makeTrainer(std::shared_ptr<Network> network,
                                          .build());
 }
 
-std::shared_ptr<Trainer> makeNetworkBackedPhaseTrainerForValidation(const std::string& name,
+std::shared_ptr<Trainer> makePhaseTrainerForValidation(const std::string& name,
                                                                     std::shared_ptr<TrainingExecutor> executor) {
     auto placeholderNetwork = std::make_shared<Network>(name + "_placeholder");
     auto phaseNetwork = std::make_shared<Network>(name + "_phase");
@@ -544,13 +544,13 @@ TEST(TrainingRuns, RejectsInvalidRunSpecs) {
 
 
 
-TEST(TrainingRuns, UsesNetworkBackedTrainingPhaseSignaturesForEnsembleValidation) {
+TEST(TrainingRuns, UsesTrainingPhaseSignaturesForEnsembleValidation) {
     auto coordinator = std::make_shared<Coordinator>(2);
     auto executor0 = std::make_shared<CoordinatedExecutor>(coordinator, FakeExecutorBehavior::COMPLETE_AFTER_RELEASE);
     auto executor1 = std::make_shared<CoordinatedExecutor>(coordinator, FakeExecutorBehavior::COMPLETE_AFTER_RELEASE);
 
-    std::shared_ptr<Trainer> trainer0 = makeNetworkBackedPhaseTrainerForValidation("phase_member_0", executor0);
-    std::shared_ptr<Trainer> trainer1 = makeNetworkBackedPhaseTrainerForValidation("phase_member_1", executor1);
+    std::shared_ptr<Trainer> trainer0 = makePhaseTrainerForValidation("phase_member_0", executor0);
+    std::shared_ptr<Trainer> trainer1 = makePhaseTrainerForValidation("phase_member_1", executor1);
 
     EXPECT_NO_THROW((TrainingRuns({TrainingRunsSpec{"fold_0", trainer0, "phase_group"},
                                    TrainingRunsSpec{"fold_1", trainer1, "phase_group"}},

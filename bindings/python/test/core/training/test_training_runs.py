@@ -1071,6 +1071,108 @@ def test_training_runs_binding_accepts_reported_losses():
     assert not hasattr(thor.training, "MetricSpec")
 
 
+def _make_two_phase_trainer_with_inactive_future_reports(name: str):
+    base_network = thor.Network(name)
+
+    first_network = thor.Network(f"{name}_first_phase")
+    first_examples = thor.layers.NetworkInput(first_network, "examples", [2], thor.DataType.fp32)
+    first_labels = thor.layers.NetworkInput(first_network, "labels", [1], thor.DataType.fp32)
+    first_prediction = thor.layers.FullyConnected(
+        first_network,
+        first_examples.get_feature_output(),
+        1,
+        True,
+        activation=None,
+    )
+    first_loss = thor.losses.MAE(
+        first_network,
+        first_prediction.get_feature_output(),
+        first_labels.get_feature_output(),
+        thor.DataType.fp32,
+    )
+    first_metric = thor.metrics.LossMetric(
+        first_network,
+        first_prediction.get_feature_output(),
+        first_labels.get_feature_output(),
+        formula=thor.metrics.LossFormula.mean_absolute_error,
+        display_name="first MAE",
+    )
+    thor.layers.NetworkOutput(first_network, "first_loss", first_loss.get_loss(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(first_network, "first_metric", first_metric.get_metric(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(first_network, "first_prediction", first_prediction.get_feature_output(), thor.DataType.fp32)
+
+    second_network = thor.Network(f"{name}_second_phase")
+    second_labels = thor.layers.NetworkInput(second_network, "labels", [1], thor.DataType.fp32)
+    first_prediction_input = thor.layers.NetworkInput(
+        second_network,
+        "first_prediction",
+        [1],
+        thor.DataType.fp32,
+        external=False,
+    )
+    second_prediction = thor.layers.FullyConnected(
+        second_network,
+        first_prediction_input.get_feature_output(),
+        1,
+        True,
+        activation=None,
+    )
+    second_loss = thor.losses.MSE(
+        second_network,
+        second_prediction.get_feature_output(),
+        second_labels.get_feature_output(),
+        thor.DataType.fp32,
+    )
+    second_metric = thor.metrics.LossMetric(
+        second_network,
+        second_prediction.get_feature_output(),
+        second_labels.get_feature_output(),
+        formula=thor.metrics.LossFormula.mean_absolute_error,
+        display_name="second MAE",
+    )
+    thor.layers.NetworkOutput(second_network, "second_loss", second_loss.get_loss(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(second_network, "second_metric", second_metric.get_metric(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(second_network, "second_prediction", second_prediction.get_feature_output(), thor.DataType.fp32)
+
+    first_phase = thor.training.TrainingPhase("first", network=first_network)
+    second_phase = thor.training.TrainingPhase("second", network=second_network, enabled=False)
+    program = thor.training.TrainingProgram([
+        thor.training.TrainingStep(
+            "two_phase_step",
+            phases=[first_phase, second_phase],
+            optimizer=thor.optimizers.Sgd(initial_learning_rate=1.0e-12, momentum=0.0),
+        )
+    ])
+
+    return thor.training.Trainer(
+        base_network,
+        _regression_one_batch_loader(),
+        training_program=program,
+        stats_interval_s=0.0,
+        max_in_flight_batches=2,
+        scalar_tensors_to_report=["first_loss", "second_loss"],
+        stats_color="never",
+    )
+
+
+def test_training_runs_accepts_reported_names_from_inactive_future_phase():
+    trainer = _make_two_phase_trainer_with_inactive_future_reports(
+        "training_runs_future_phase_reported_names")
+
+    runs = thor.training.TrainingRuns(
+        [("fold_0", trainer, "two_phase_ensemble")],
+        reported_losses={
+            "two_phase_ensemble": ["first_loss", "second_loss"],
+        },
+        reported_metrics={
+            "two_phase_ensemble": ["first_metric", "second_metric"],
+        },
+    )
+
+    assert runs.reported_losses["two_phase_ensemble"] == ["first_loss", "second_loss"]
+    assert runs.reported_metrics["two_phase_ensemble"] == ["first_metric", "second_metric"]
+
+
 def test_training_runs_binding_rejects_invalid_reported_losses():
     trainer = _make_tiny_regression_trainer("training_runs_binding_invalid_reported_losses")
 

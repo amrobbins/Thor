@@ -15,6 +15,8 @@
 
 namespace Thor {
 
+struct NetworkLossReference;
+
 enum class TrainingRunsFailurePolicy { CONTINUE, CANCEL_SIBLINGS };
 
 [[nodiscard]] const char* trainingRunsFailurePolicyName(TrainingRunsFailurePolicy policy);
@@ -123,6 +125,8 @@ class TrainingRuns {
     [[nodiscard]] std::vector<TrainingNamedMetricResult> namedMetricResultsForGroup(std::string_view ensembleGroup) const;
     [[nodiscard]] std::vector<TrainingNamedMetricResult> namedGraphMetricResultsForGroup(std::string_view ensembleGroup) const;
     [[nodiscard]] std::shared_ptr<Network> validationNetworkForSpec(const TrainingRunsSpec& spec) const;
+    [[nodiscard]] std::vector<std::shared_ptr<Network>> reportingValidationNetworksForSpec(const TrainingRunsSpec& spec) const;
+    [[nodiscard]] std::vector<NetworkLossReference> reportableLossesForSpec(const TrainingRunsSpec& spec) const;
     [[nodiscard]] std::vector<std::string> reportedMetricNamesForSpec(const TrainingRunsSpec& spec) const;
     [[nodiscard]] bool hasEnsembleGroups() const;
     void validateEnsembleArtifactsForFit(const TrainingRunsEvaluationOptions& evaluationOptions) const;

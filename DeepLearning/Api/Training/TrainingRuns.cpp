@@ -128,6 +128,110 @@ std::vector<TrainingRunOutputSignature> collectNetworkOutputSignature(const std:
     return signature;
 }
 
+std::vector<TrainingRunInputSignature> collectMergedNetworkInputSignature(
+    const std::vector<std::shared_ptr<Network>>& networks,
+    const std::string& context) {
+    std::vector<TrainingRunInputSignature> merged;
+    std::map<std::string, size_t> indexByName;
+    for (const std::shared_ptr<Network>& network : networks) {
+        for (const TrainingRunInputSignature& item : collectNetworkInputSignature(network)) {
+            auto [it, inserted] = indexByName.emplace(item.inputName, merged.size());
+            if (inserted) {
+                merged.push_back(item);
+                continue;
+            }
+            if (!merged[it->second].compatibleWith(item)) {
+                throw std::runtime_error(context + " has incompatible NetworkInput signatures for '" + item.inputName + "'.");
+            }
+        }
+    }
+    return merged;
+}
+
+std::vector<TrainingRunOutputSignature> collectMergedNetworkOutputSignature(
+    const std::vector<std::shared_ptr<Network>>& networks,
+    const std::string& context) {
+    std::vector<TrainingRunOutputSignature> merged;
+    std::map<std::string, size_t> indexByName;
+    for (const std::shared_ptr<Network>& network : networks) {
+        for (const TrainingRunOutputSignature& item : collectNetworkOutputSignature(network)) {
+            auto [it, inserted] = indexByName.emplace(item.outputName, merged.size());
+            if (inserted) {
+                merged.push_back(item);
+                continue;
+            }
+            if (!merged[it->second].compatibleWith(item)) {
+                throw std::runtime_error(context + " has incompatible NetworkOutput signatures for '" + item.outputName + "'.");
+            }
+        }
+    }
+    return merged;
+}
+
+std::vector<NetworkLossReference> collectNetworkReportableLosses(
+    const std::vector<std::shared_ptr<Network>>& networks) {
+    std::vector<NetworkLossReference> losses;
+    for (const std::shared_ptr<Network>& network : networks) {
+        if (network == nullptr) {
+            continue;
+        }
+        const std::vector<NetworkLossReference> networkLosses = network->getReportableLosses();
+        losses.insert(losses.end(), networkLosses.begin(), networkLosses.end());
+    }
+    return losses;
+}
+
+std::vector<NetworkMetricReference> collectNetworkReportableMetrics(
+    const std::vector<std::shared_ptr<Network>>& networks) {
+    std::vector<NetworkMetricReference> metrics;
+    for (const std::shared_ptr<Network>& network : networks) {
+        if (network == nullptr) {
+            continue;
+        }
+        const std::vector<NetworkMetricReference> networkMetrics = network->getReportableMetrics();
+        metrics.insert(metrics.end(), networkMetrics.begin(), networkMetrics.end());
+    }
+    return metrics;
+}
+
+std::vector<std::string> filterRequestedLossNamesToAvailable(const std::vector<NetworkLossReference>& availableLosses,
+                                                            const std::vector<std::string>& requestedLossNames) {
+    if (requestedLossNames.empty()) {
+        return {};
+    }
+    std::set<std::string> availableNames;
+    for (const NetworkLossReference& loss : availableLosses) {
+        availableNames.insert(loss.lossName);
+    }
+    std::vector<std::string> filtered;
+    filtered.reserve(requestedLossNames.size());
+    for (const std::string& requestedName : requestedLossNames) {
+        if (availableNames.count(requestedName) != 0) {
+            filtered.push_back(requestedName);
+        }
+    }
+    return filtered;
+}
+
+std::vector<std::string> filterRequestedMetricNamesToAvailable(const std::vector<NetworkMetricReference>& availableMetrics,
+                                                              const std::vector<std::string>& requestedMetricNames) {
+    if (requestedMetricNames.empty()) {
+        return {};
+    }
+    std::set<std::string> availableNames;
+    for (const NetworkMetricReference& metric : availableMetrics) {
+        availableNames.insert(metric.metricName);
+    }
+    std::vector<std::string> filtered;
+    filtered.reserve(requestedMetricNames.size());
+    for (const std::string& requestedName : requestedMetricNames) {
+        if (availableNames.count(requestedName) != 0) {
+            filtered.push_back(requestedName);
+        }
+    }
+    return filtered;
+}
+
 std::string dimensionsToString(const std::vector<uint64_t>& dimensions) {
     std::ostringstream out;
     out << "[";
@@ -226,34 +330,16 @@ bool outputSignatureHasPredictionTensor(const std::vector<TrainingRunOutputSigna
     });
 }
 
-bool trainingProgramHasNetworkBackedPhaseForValidation(const TrainingProgram& program) {
+bool trainingProgramHasActivePhaseForValidation(const TrainingProgram& program) {
     for (const std::shared_ptr<TrainingStep>& step : program.getSteps()) {
         if (step == nullptr || !step->isInitialized()) {
             continue;
         }
-        for (const std::shared_ptr<TrainingPhase>& phase : step->getPhases()) {
-            if (phase != nullptr && phase->isInitialized() && phase->hasNetwork()) {
-                return true;
-            }
+        if (!step->getActivePhaseNetworkSpecs().empty()) {
+            return true;
         }
     }
     return false;
-}
-
-std::vector<PhaseGraphNetworkSpec> allPhaseNetworkSpecsForValidation(const TrainingStep& step, const std::string& context) {
-    std::vector<PhaseGraphNetworkSpec> specs;
-    for (const std::shared_ptr<TrainingPhase>& phase : step.getPhases()) {
-        if (phase == nullptr || !phase->isInitialized()) {
-            throw std::runtime_error(context + " contains an uninitialized TrainingPhase.");
-        }
-        if (!phase->hasNetwork()) {
-            throw std::runtime_error(context +
-                                     " mixes network-backed TrainingPhase objects with legacy tensor-root TrainingPhase objects; "
-                                     "TrainingRuns ensemble validation requires one phase representation.");
-        }
-        specs.push_back(PhaseGraphNetworkSpec{phase->getName(), phase->getNetwork(), true});
-    }
-    return specs;
 }
 
 std::string jsonEscape(const std::string& value) {
@@ -1237,18 +1323,18 @@ std::shared_ptr<Network> TrainingRuns::validationNetworkForSpec(const TrainingRu
 
     std::shared_ptr<Network> trainerNetwork = spec.trainer->getNetwork();
     std::shared_ptr<TrainingProgram> program = spec.trainer->trainingProgram;
-    if (program == nullptr || !program->isInitialized() || !trainingProgramHasNetworkBackedPhaseForValidation(*program)) {
+    if (program == nullptr || !program->isInitialized() || !trainingProgramHasActivePhaseForValidation(*program)) {
         return trainerNetwork;
     }
 
     if (program->getNumSteps() != 1) {
         throw std::runtime_error("TrainingRuns run '" + spec.runName +
-                                 "' uses network-backed TrainingPhase objects, but ensemble/report validation currently supports exactly one TrainingStep.");
+                                 "' uses TrainingPhase objects, but ensemble/report validation currently supports exactly one TrainingStep.");
     }
 
     const TrainingStep& step = program->getStep(0);
-    const std::string context = "TrainingRuns run '" + spec.runName + "' network-backed TrainingPhase validation";
-    std::vector<PhaseGraphNetworkSpec> phaseSpecs = allPhaseNetworkSpecsForValidation(step, context);
+    const std::string context = "TrainingRuns run '" + spec.runName + "' TrainingPhase validation";
+    std::vector<PhaseGraphNetworkSpec> phaseSpecs = step.getActivePhaseNetworkSpecs();
     if (phaseSpecs.empty()) {
         return trainerNetwork;
     }
@@ -1265,6 +1351,49 @@ std::shared_ptr<Network> TrainingRuns::validationNetworkForSpec(const TrainingRu
     }
     return graph.network;
 }
+
+std::vector<std::shared_ptr<Network>> TrainingRuns::reportingValidationNetworksForSpec(const TrainingRunsSpec& spec) const {
+    if (spec.trainer == nullptr) {
+        return {};
+    }
+
+    std::shared_ptr<TrainingProgram> program = spec.trainer->trainingProgram;
+    if (program == nullptr || !program->isInitialized()) {
+        std::shared_ptr<Network> network = validationNetworkForSpec(spec);
+        return network == nullptr ? std::vector<std::shared_ptr<Network>>{} : std::vector<std::shared_ptr<Network>>{network};
+    }
+
+    std::vector<std::shared_ptr<Network>> phaseNetworks;
+    bool sawPhaseBackedStep = false;
+    for (const std::shared_ptr<TrainingStep>& step : program->getSteps()) {
+        if (step == nullptr || !step->isInitialized()) {
+            continue;
+        }
+        const std::vector<std::shared_ptr<TrainingPhase>>& phases = step->getPhases();
+        if (phases.empty()) {
+            continue;
+        }
+        sawPhaseBackedStep = true;
+        for (const std::shared_ptr<TrainingPhase>& phase : phases) {
+            if (phase == nullptr || !phase->isInitialized() || phase->getNetwork() == nullptr) {
+                throw std::runtime_error("TrainingRuns run '" + spec.runName + "' has an invalid TrainingPhase in its reporting validation view.");
+            }
+            phaseNetworks.push_back(phase->getNetwork());
+        }
+    }
+
+    if (sawPhaseBackedStep) {
+        return phaseNetworks;
+    }
+
+    std::shared_ptr<Network> network = validationNetworkForSpec(spec);
+    return network == nullptr ? std::vector<std::shared_ptr<Network>>{} : std::vector<std::shared_ptr<Network>>{network};
+}
+
+std::vector<NetworkLossReference> TrainingRuns::reportableLossesForSpec(const TrainingRunsSpec& spec) const {
+    return collectNetworkReportableLosses(reportingValidationNetworksForSpec(spec));
+}
+
 
 void TrainingRuns::validateRunSpecs() const {
     if (runs.empty()) {
@@ -1338,7 +1467,7 @@ void TrainingRuns::validateRunSpecs() const {
             const std::vector<std::string>& requestedLossNames =
                 reportedLossesIt == reportedLosses.end() ? emptyReportedLossNames : reportedLossesIt->second;
             const bool reportsGraphLosses = !resolveTrainingRunsReportedLosses(
-                validationNetworkForSpec(spec)->getReportableLosses(),
+                reportableLossesForSpec(spec),
                 requestedLossNames,
                 "TrainingRuns reported_losses for ensemble_group '" + *spec.ensembleGroup + "' run '" + spec.runName + "'")
                                                  .empty();
@@ -1558,7 +1687,7 @@ void TrainingRuns::validateReportedLosses() const {
         std::string runName{};
         std::vector<TrainingRunInputSignature> inputSignature{};
         std::vector<TrainingRunOutputSignature> outputSignature{};
-        std::shared_ptr<Network> network{};
+        std::vector<std::shared_ptr<Network>> reportingNetworks{};
         std::optional<std::vector<NetworkLossReference>> reportableLosses{};
     };
 
@@ -1569,9 +1698,10 @@ void TrainingRuns::validateReportedLosses() const {
         }
         EnsembleMemberSignatureState state;
         state.runName = spec.runName;
-        state.network = validationNetworkForSpec(spec);
-        state.inputSignature = collectNetworkInputSignature(state.network);
-        state.outputSignature = collectNetworkOutputSignature(state.network);
+        state.reportingNetworks = reportingValidationNetworksForSpec(spec);
+        const std::string context = "TrainingRuns reported_losses for ensemble_group '" + *spec.ensembleGroup + "' run '" + spec.runName + "'";
+        state.inputSignature = collectMergedNetworkInputSignature(state.reportingNetworks, context);
+        state.outputSignature = collectMergedNetworkOutputSignature(state.reportingNetworks, context);
         membersByGroup[*spec.ensembleGroup].push_back(std::move(state));
     }
 
@@ -1596,7 +1726,7 @@ void TrainingRuns::validateReportedLosses() const {
 
     auto reportableLossesForMember = [](EnsembleMemberSignatureState& member) -> const std::vector<NetworkLossReference>& {
         if (!member.reportableLosses.has_value()) {
-            member.reportableLosses = member.network->getReportableLosses();
+            member.reportableLosses = collectNetworkReportableLosses(member.reportingNetworks);
         }
         return *member.reportableLosses;
     };
@@ -1697,7 +1827,7 @@ void TrainingRuns::validateReportedMetrics() const {
         std::optional<std::string> ensembleGroup{};
         std::vector<TrainingRunInputSignature> inputSignature{};
         std::vector<TrainingRunOutputSignature> outputSignature{};
-        std::shared_ptr<Network> network{};
+        std::vector<std::shared_ptr<Network>> reportingNetworks{};
         std::optional<std::vector<NetworkMetricReference>> reportableMetrics{};
     };
 
@@ -1714,9 +1844,10 @@ void TrainingRuns::validateReportedMetrics() const {
         MemberMetricState state;
         state.runName = spec.runName;
         state.ensembleGroup = spec.ensembleGroup;
-        state.network = validationNetworkForSpec(spec);
-        state.inputSignature = collectNetworkInputSignature(state.network);
-        state.outputSignature = collectNetworkOutputSignature(state.network);
+        state.reportingNetworks = reportingValidationNetworksForSpec(spec);
+        const std::string context = "TrainingRuns reported_metrics for run '" + spec.runName + "'";
+        state.inputSignature = collectMergedNetworkInputSignature(state.reportingNetworks, context);
+        state.outputSignature = collectMergedNetworkOutputSignature(state.reportingNetworks, context);
         memberStates.push_back(std::move(state));
     }
     for (MemberMetricState& state : memberStates) {
@@ -1745,7 +1876,7 @@ void TrainingRuns::validateReportedMetrics() const {
 
     auto reportableMetricsForMember = [](MemberMetricState& member) -> const std::vector<NetworkMetricReference>& {
         if (!member.reportableMetrics.has_value()) {
-            member.reportableMetrics = member.network->getReportableMetrics();
+            member.reportableMetrics = collectNetworkReportableMetrics(member.reportingNetworks);
         }
         return *member.reportableMetrics;
     };
@@ -1840,7 +1971,8 @@ void TrainingRuns::validateReportedMetrics() const {
 }
 
 std::vector<std::string> TrainingRuns::reportedMetricNamesForSpec(const TrainingRunsSpec& spec) const {
-    if (spec.trainer == nullptr || validationNetworkForSpec(spec) == nullptr) {
+    std::shared_ptr<Network> activeNetwork = validationNetworkForSpec(spec);
+    if (spec.trainer == nullptr || activeNetwork == nullptr) {
         return {};
     }
 
@@ -1858,9 +1990,16 @@ std::vector<std::string> TrainingRuns::reportedMetricNamesForSpec(const Training
         }
     }
 
+    const std::vector<NetworkMetricReference> activeMetrics = activeNetwork->getReportableMetrics();
+    const std::vector<std::string> activeRequestedMetricNames =
+        filterRequestedMetricNamesToAvailable(activeMetrics, requestedMetricNames);
+    if (!requestedMetricNames.empty() && activeRequestedMetricNames.empty()) {
+        return {};
+    }
+
     const std::vector<ResolvedEnsembleMetric> resolvedMetrics = resolveTrainingRunsReportedMetrics(
-        validationNetworkForSpec(spec)->getReportableMetrics(),
-        requestedMetricNames,
+        activeMetrics,
+        requestedMetricNames.empty() ? requestedMetricNames : activeRequestedMetricNames,
         "TrainingRuns reported_metrics for run '" + spec.runName + "'");
 
     std::vector<std::string> names;
@@ -1887,9 +2026,15 @@ std::vector<TrainingNamedMetricResult> TrainingRuns::namedGraphMetricResultsForG
     static const std::vector<std::string> empty;
     const auto reportedIt = reportedMetrics.find(std::string(ensembleGroup));
     const std::vector<std::string>& requestedMetricNames = reportedIt == reportedMetrics.end() ? empty : reportedIt->second;
+    const std::vector<NetworkMetricReference> activeMetrics = representativeNetwork->getReportableMetrics();
+    const std::vector<std::string> activeRequestedMetricNames =
+        filterRequestedMetricNamesToAvailable(activeMetrics, requestedMetricNames);
+    if (!requestedMetricNames.empty() && activeRequestedMetricNames.empty()) {
+        return {};
+    }
     const std::vector<ResolvedEnsembleMetric> resolvedMetrics = resolveTrainingRunsReportedMetrics(
-        representativeNetwork->getReportableMetrics(),
-        requestedMetricNames,
+        activeMetrics,
+        requestedMetricNames.empty() ? requestedMetricNames : activeRequestedMetricNames,
         "TrainingRuns reported_metrics for ensemble_group '" + std::string(ensembleGroup) + "'");
 
     std::vector<TrainingNamedMetricResult> results;
@@ -1918,9 +2063,15 @@ std::vector<TrainingNamedMetricResult> TrainingRuns::namedMetricResultsForGroup(
     static const std::vector<std::string> empty;
     const auto reportedIt = reportedLosses.find(std::string(ensembleGroup));
     const std::vector<std::string>& requestedLossNames = reportedIt == reportedLosses.end() ? empty : reportedIt->second;
+    const std::vector<NetworkLossReference> activeLosses = representativeNetwork->getReportableLosses();
+    const std::vector<std::string> activeRequestedLossNames =
+        filterRequestedLossNamesToAvailable(activeLosses, requestedLossNames);
+    if (!requestedLossNames.empty() && activeRequestedLossNames.empty()) {
+        return {};
+    }
     const std::vector<ResolvedEnsembleLoss> resolvedLosses = resolveTrainingRunsReportedLosses(
-        representativeNetwork->getReportableLosses(),
-        requestedLossNames,
+        activeLosses,
+        requestedLossNames.empty() ? requestedLossNames : activeRequestedLossNames,
         "TrainingRuns reported_losses for ensemble_group '" + std::string(ensembleGroup) + "'");
 
     std::vector<TrainingNamedMetricResult> results;
@@ -2571,44 +2722,6 @@ std::vector<std::string> requestedReportedMetricNamesForGroup(
     const std::string& groupName) {
     const auto it = reportedMetrics.find(groupName);
     return it == reportedMetrics.end() ? std::vector<std::string>{} : it->second;
-}
-
-std::vector<std::string> filterRequestedLossNamesToAvailable(const std::vector<NetworkLossReference>& availableLosses,
-                                                            const std::vector<std::string>& requestedLossNames) {
-    if (requestedLossNames.empty()) {
-        return {};
-    }
-    std::set<std::string> availableNames;
-    for (const NetworkLossReference& loss : availableLosses) {
-        availableNames.insert(loss.lossName);
-    }
-    std::vector<std::string> filtered;
-    filtered.reserve(requestedLossNames.size());
-    for (const std::string& requestedName : requestedLossNames) {
-        if (availableNames.count(requestedName) != 0) {
-            filtered.push_back(requestedName);
-        }
-    }
-    return filtered;
-}
-
-std::vector<std::string> filterRequestedMetricNamesToAvailable(const std::vector<NetworkMetricReference>& availableMetrics,
-                                                              const std::vector<std::string>& requestedMetricNames) {
-    if (requestedMetricNames.empty()) {
-        return {};
-    }
-    std::set<std::string> availableNames;
-    for (const NetworkMetricReference& metric : availableMetrics) {
-        availableNames.insert(metric.metricName);
-    }
-    std::vector<std::string> filtered;
-    filtered.reserve(requestedMetricNames.size());
-    for (const std::string& requestedName : requestedMetricNames) {
-        if (availableNames.count(requestedName) != 0) {
-            filtered.push_back(requestedName);
-        }
-    }
-    return filtered;
 }
 
 TrainingRunsComposedEvaluatorArtifacts loadTrainingRunsComposedEvaluatorArtifacts(

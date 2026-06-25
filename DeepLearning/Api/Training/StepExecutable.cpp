@@ -69,9 +69,6 @@ void StepExecutable::validate() const {
     if (lossRoots.size() != resolvedLossRoots.size()) {
         throw std::runtime_error("StepExecutable resolved loss-root count does not match logical loss-root count.");
     }
-    if (activePhaseNames.empty()) {
-        throw std::runtime_error("StepExecutable requires at least one active TrainingPhase.");
-    }
     if (updateParameterReferences.size() != resolvedUpdateParameters.size()) {
         throw std::runtime_error("StepExecutable resolved update parameter count does not match logical reference count.");
     }

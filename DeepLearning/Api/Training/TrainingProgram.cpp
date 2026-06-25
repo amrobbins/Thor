@@ -100,10 +100,9 @@ std::vector<StepExecutable> TrainingProgram::compile(PlacedNetwork& placedNetwor
         if (!step->isEnabled()) {
             continue;
         }
-        step->validateEnabledPhaseDependencies();
         if (step->getActiveLossRoots().empty()) {
             throw std::runtime_error("TrainingProgram enabled TrainingStep '" + step->getName() +
-                                     "' has no active loss roots from enabled TrainingPhases.");
+                                     "' has no active loss roots.");
         }
         executables.emplace_back(*step, placedNetwork, resolveEmptyUpdateParametersAsAllTrainable);
     }

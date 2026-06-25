@@ -221,19 +221,6 @@ std::set<std::string> networkOutputNames(Network& network) {
     return names;
 }
 
-std::map<std::string, uint64_t> networkOutputInputOriginalIdsByName(Network& network) {
-    std::map<std::string, uint64_t> inputOriginalIdsByName;
-    const uint32_t numLayers = network.getNumLayers();
-    for (uint32_t i = 0; i < numLayers; ++i) {
-        std::shared_ptr<NetworkOutput> output = std::dynamic_pointer_cast<NetworkOutput>(network.getLayer(i));
-        if (output == nullptr || !output->getFeatureInput().has_value()) {
-            continue;
-        }
-        inputOriginalIdsByName[output->getName()] = output->getFeatureInput()->getOriginalId();
-    }
-    return inputOriginalIdsByName;
-}
-
 std::vector<std::string> outputBackedReportableLossNames(Network& network) {
     const std::set<std::string> outputs = networkOutputNames(network);
     std::set<std::string> lossNames;
@@ -245,95 +232,15 @@ std::vector<std::string> outputBackedReportableLossNames(Network& network) {
     return std::vector<std::string>(lossNames.begin(), lossNames.end());
 }
 
-std::vector<std::string> outputBackedReportableLossNamesByActiveRoots(
-    Network& network,
-    const std::vector<Tensor>& activeTrainingLossRoots) {
-    const std::map<std::string, uint64_t> outputInputOriginalIds = networkOutputInputOriginalIdsByName(network);
-    std::set<uint64_t> activeLossRootOriginalIds;
-    for (const Tensor& lossRoot : activeTrainingLossRoots) {
-        if (lossRoot.isInitialized()) {
-            activeLossRootOriginalIds.insert(lossRoot.getOriginalId());
-        }
-    }
-
-    std::set<std::string> lossNames;
-    for (const NetworkLossReference& reference : network.getReportableLosses()) {
-        auto outputIt = outputInputOriginalIds.find(reference.lossName);
-        if (outputIt != outputInputOriginalIds.end() && activeLossRootOriginalIds.count(outputIt->second) != 0) {
-            lossNames.insert(reference.lossName);
-        }
-    }
-    return std::vector<std::string>(lossNames.begin(), lossNames.end());
-}
-
-std::vector<Tensor> activeTrainingLossRoots(const ExecutableTrainingPlan& plan) {
-    std::vector<Tensor> roots;
-    for (const StepExecutable& step : plan.getSteps()) {
-        const std::vector<Tensor>& stepRoots = step.getLossRoots();
-        roots.insert(roots.end(), stepRoots.begin(), stepRoots.end());
-    }
-    return roots;
-}
-
-std::set<std::string> trainingProgramPhaseOutputNames(const TrainingProgram& program, bool activeOnly) {
-    std::set<std::string> names;
-    for (const std::shared_ptr<TrainingStep>& step : program.getSteps()) {
-        if (step == nullptr || !step->isInitialized()) {
-            continue;
-        }
-        if (activeOnly && !step->isEnabled()) {
-            continue;
-        }
-        for (const std::shared_ptr<TrainingPhase>& phase : step->getPhases()) {
-            if (phase == nullptr || !phase->isInitialized()) {
-                continue;
-            }
-            if (activeOnly && !phase->isEnabled()) {
-                continue;
-            }
-            for (const auto& [outputName, outputTensor] : phase->getOutputs()) {
-                (void)outputTensor;
-                names.insert(outputName);
-            }
-        }
-    }
-    return names;
-}
-
 std::set<std::string> setFromVector(const std::vector<std::string>& values) {
     return std::set<std::string>(values.begin(), values.end());
 }
 
-std::vector<std::string> activeOutputBackedReportableLossNames(Network& network,
-                                                               const TrainingProgram& trainingProgram,
-                                                               const std::vector<Tensor>& activeTrainingLossRoots) {
-    const std::set<std::string> allOutputBackedLossNames = setFromVector(outputBackedReportableLossNames(network));
-    if (allOutputBackedLossNames.empty()) {
-        return {};
-    }
-
-    const std::set<std::string> allPhaseOutputNames = trainingProgramPhaseOutputNames(trainingProgram, /*activeOnly=*/false);
-    if (allPhaseOutputNames.empty()) {
-        // Legacy/default TrainingProgram construction creates a single active phase from
-        // all graph loss roots, but that synthetic phase has no explicit output map.
-        // In that mode there are no inactive phase outputs to prune, so every
-        // output-backed graph loss remains active for reporting, aggregate loss,
-        // best-candidate selection, and saved-model finalization.
-        return std::vector<std::string>(allOutputBackedLossNames.begin(), allOutputBackedLossNames.end());
-    }
-
-    std::set<std::string> activeLossNames;
-    const std::set<std::string> activePhaseOutputNames = trainingProgramPhaseOutputNames(trainingProgram, /*activeOnly=*/true);
-    for (const std::string& name : activePhaseOutputNames) {
-        if (allOutputBackedLossNames.count(name) != 0) {
-            activeLossNames.insert(name);
-        }
-    }
-
-    for (const std::string& name : outputBackedReportableLossNamesByActiveRoots(network, activeTrainingLossRoots)) {
-        activeLossNames.insert(name);
-    }
-    return std::vector<std::string>(activeLossNames.begin(), activeLossNames.end());
+std::vector<std::string> plainTrainingProgramAggregateLossNames(Network& network) {
+    // Phase-backed programs are resolved into a composed active graph before placement.
+    // The only remaining caller is the plain TrainingStep(loss_roots=...) path, where
+    // all output-backed graph losses remain reportable for aggregate loss/stat purposes.
+    return outputBackedReportableLossNames(network);
 }
 
 bool isRuntimeScalarName(const std::string& name) {
@@ -342,29 +249,15 @@ bool isRuntimeScalarName(const std::string& name) {
 
 void filterRuntimeScalarsToActiveTrainingProgramOutputs(TrainingRuntimeConfig& runtime,
                                                         Network& network,
-                                                        const TrainingProgram& trainingProgram,
                                                         const std::vector<std::string>& activeAggregateLossTensorNames) {
     const std::set<std::string> allOutputBackedLossNames = setFromVector(outputBackedReportableLossNames(network));
     const std::set<std::string> activeOutputBackedLossNames = setFromVector(activeAggregateLossTensorNames);
-    const std::set<std::string> allPhaseOutputNames = trainingProgramPhaseOutputNames(trainingProgram, /*activeOnly=*/false);
-    const std::set<std::string> activePhaseOutputNames = trainingProgramPhaseOutputNames(trainingProgram, /*activeOnly=*/true);
 
     for (auto it = runtime.scalarTensorsToReport.begin(); it != runtime.scalarTensorsToReport.end();) {
         const std::string& name = *it;
         const bool isReportableLoss = allOutputBackedLossNames.count(name) != 0;
         if (isReportableLoss && activeOutputBackedLossNames.count(name) == 0) {
             it = runtime.scalarTensorsToReport.erase(it);
-            continue;
-        }
-
-        const bool isPhaseOutput = allPhaseOutputNames.count(name) != 0;
-        if (isPhaseOutput && activePhaseOutputNames.count(name) == 0) {
-            it = runtime.scalarTensorsToReport.erase(it);
-            continue;
-        }
-
-        if (isRuntimeScalarName(name)) {
-            ++it;
             continue;
         }
 
@@ -1167,16 +1060,16 @@ void attachPlacementFallbackOptimizerIfNeeded(const TrainingRunRequest& request,
 struct NativeQueuedExecutionGraph {
     std::shared_ptr<Network> network;
     std::shared_ptr<TrainingProgram> trainingProgram;
-    bool composedFromNetworkBackedPhases = false;
+    bool composedFromTrainingPhases = false;
 };
 
-bool trainingProgramHasAnyNetworkBackedPhase(const TrainingProgram& program) {
+bool trainingProgramHasAnyPhase(const TrainingProgram& program) {
     for (const std::shared_ptr<TrainingStep>& step : program.getSteps()) {
         if (step == nullptr || !step->isInitialized()) {
             continue;
         }
         for (const std::shared_ptr<TrainingPhase>& phase : step->getPhases()) {
-            if (phase != nullptr && phase->isInitialized() && phase->hasNetwork()) {
+            if (phase != nullptr && phase->isInitialized()) {
                 return true;
             }
         }
@@ -1184,35 +1077,32 @@ bool trainingProgramHasAnyNetworkBackedPhase(const TrainingProgram& program) {
     return false;
 }
 
-void validateNetworkBackedNativeQueuedProgramShape(const TrainingProgram& program) {
+void validateTrainingPhaseNativeQueuedProgramShape(const TrainingProgram& program) {
     if (program.getNumSteps() != 1) {
         throw std::runtime_error(
-            "Network-backed TrainingPhase native queued execution currently supports exactly one TrainingStep.");
+            "TrainingPhase native queued execution currently supports exactly one TrainingStep.");
     }
 
     const TrainingStep& step = program.getStep(0);
     if (!step.isEnabled()) {
-        throw std::runtime_error("Network-backed TrainingPhase native queued execution requires the TrainingStep to be enabled.");
+        throw std::runtime_error("TrainingPhase native queued execution requires the TrainingStep to be enabled.");
     }
     if (step.getRepeatCount() != 1) {
         throw std::runtime_error(
-            "Network-backed TrainingPhase native queued execution currently supports only repeat_count=1.");
+            "TrainingPhase native queued execution currently supports only repeat_count=1.");
     }
     if (step.getGradientClearPolicy() != TrainingStep::GradientClearPolicy::CLEAR_BEFORE_STEP) {
         throw std::runtime_error(
-            "Network-backed TrainingPhase native queued execution currently supports only clear_before_step gradient policy.");
+            "TrainingPhase native queued execution currently supports only clear_before_step gradient policy.");
     }
     if (!step.getUpdateParameters().empty()) {
         throw std::runtime_error(
-            "Network-backed TrainingPhase native queued execution currently requires empty update_parameters so the composed active graph can resolve all trainable parameters.");
+            "TrainingPhase native queued execution currently requires empty update_parameters so the composed active graph can resolve all trainable parameters.");
     }
 
     for (const std::shared_ptr<TrainingPhase>& phase : step.getPhases()) {
         if (phase == nullptr || !phase->isInitialized()) {
-            throw std::runtime_error("Network-backed TrainingPhase native queued execution received an uninitialized phase.");
-        }
-        if (!phase->hasNetwork()) {
-            throw std::runtime_error("Network-backed TrainingPhase native queued execution cannot mix network-backed and legacy tensor-root phases.");
+            throw std::runtime_error("TrainingPhase native queued execution received an uninitialized phase.");
         }
     }
 }
@@ -1240,11 +1130,11 @@ NativeQueuedExecutionGraph resolveNativeQueuedExecutionGraph(const TrainingRunRe
     result.network = request.network;
     result.trainingProgram = requestedProgram;
 
-    if (!trainingProgramHasAnyNetworkBackedPhase(*requestedProgram)) {
+    if (!trainingProgramHasAnyPhase(*requestedProgram)) {
         return result;
     }
 
-    validateNetworkBackedNativeQueuedProgramShape(*requestedProgram);
+    validateTrainingPhaseNativeQueuedProgramShape(*requestedProgram);
     const TrainingStep& sourceStep = requestedProgram->getStep(0);
 
     PhaseGraphComposeOptions composeOptions;
@@ -1254,12 +1144,12 @@ NativeQueuedExecutionGraph resolveNativeQueuedExecutionGraph(const TrainingRunRe
 
     ComposedPhaseGraph composedGraph = buildComposedPhaseGraphByName(sourceStep.getActivePhaseNetworkSpecs(), composeOptions);
     if (composedGraph.network == nullptr) {
-        throw std::runtime_error("Network-backed TrainingPhase composition produced a null active graph Network.");
+        throw std::runtime_error("TrainingPhase composition produced a null active graph Network.");
     }
 
     std::vector<Tensor> lossRoots = composedGraph.network->getLossRootTensors();
     if (lossRoots.empty()) {
-        throw std::runtime_error("Network-backed TrainingPhase composition produced an active graph with no loss roots.");
+        throw std::runtime_error("TrainingPhase composition produced an active graph with no loss roots.");
     }
 
     std::shared_ptr<Optimizer> composedOptimizer = optimizerForComposedPhaseGraph(request, sourceStep);
@@ -1278,7 +1168,7 @@ NativeQueuedExecutionGraph resolveNativeQueuedExecutionGraph(const TrainingRunRe
 
     result.network = composedGraph.network;
     result.trainingProgram = std::make_shared<TrainingProgram>(std::vector<std::shared_ptr<TrainingStep>>{executionStep});
-    result.composedFromNetworkBackedPhases = true;
+    result.composedFromTrainingPhases = true;
     return result;
 }
 
@@ -1871,8 +1761,8 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     TrainingRuntimeConfig runtime = request.runtime;
 
     std::shared_ptr<TrainingProgram> requestedTrainingProgram = defaultTrainingProgramForRequest(request);
-    const bool requestedProgramUsesNetworkBackedPhases = trainingProgramHasAnyNetworkBackedPhase(*requestedTrainingProgram);
-    if (!evaluateOnly && !requestedProgramUsesNetworkBackedPhases) {
+    const bool requestedProgramUsesPhases = trainingProgramHasAnyPhase(*requestedTrainingProgram);
+    if (!evaluateOnly && !requestedProgramUsesPhases) {
         attachPlacementFallbackOptimizerIfNeeded(request, *requestedTrainingProgram);
     }
 
@@ -1896,7 +1786,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
 
     if (!evaluateOnly && request.previousPlacedNetwork != nullptr) {
         request.cancellationToken.throwIfCancellationRequested();
-        if (executionGraph.composedFromNetworkBackedPhases) {
+        if (executionGraph.composedFromTrainingPhases) {
             placedNetwork->copyMatchingTrainingStateFrom(*request.previousPlacedNetwork);
         } else {
             placedNetwork->copyTrainingStateFrom(*request.previousPlacedNetwork);
@@ -1916,15 +1806,14 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         ExecutableTrainingPlan::compile(*trainingProgram, *placedNetwork, /*resolveEmptyUpdateParametersAsAllTrainable=*/!evaluateOnly);
     ensureNativeQueuedPlanCompatible(plan, *executionNetwork, evaluateOnly);
 
-    const std::vector<Tensor> activeLossRoots = activeTrainingLossRoots(plan);
-    const std::vector<std::string> aggregateLossTensorNames = executionGraph.composedFromNetworkBackedPhases
+    const std::vector<std::string> aggregateLossTensorNames = executionGraph.composedFromTrainingPhases
         ? outputBackedReportableLossNames(*executionNetwork)
-        : activeOutputBackedReportableLossNames(*executionNetwork, *trainingProgram, activeLossRoots);
+        : plainTrainingProgramAggregateLossNames(*executionNetwork);
     const bool hasConcreteLossOutput = outputNameExists(*executionNetwork, "loss");
-    if (executionGraph.composedFromNetworkBackedPhases) {
+    if (executionGraph.composedFromTrainingPhases) {
         filterRuntimeScalarsToExistingExecutionOutputs(runtime, *executionNetwork);
     } else {
-        filterRuntimeScalarsToActiveTrainingProgramOutputs(runtime, *executionNetwork, *trainingProgram, aggregateLossTensorNames);
+        filterRuntimeScalarsToActiveTrainingProgramOutputs(runtime, *executionNetwork, aggregateLossTensorNames);
     }
     if (!evaluateOnly && (request.saveModelDirectory.has_value() || !request.earlyCompletionPolicies.empty())) {
         const bool concreteLossOutputIsInactiveReportableLoss =
