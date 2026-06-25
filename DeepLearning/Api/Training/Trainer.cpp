@@ -289,6 +289,78 @@ class TrainingRestartConditionExceeded final : public std::exception {
     std::string message_{};
 };
 
+class TrainingNonFiniteLossDetected final : public std::exception {
+   public:
+    explicit TrainingNonFiniteLossDetected(std::string message) : message_(std::move(message)) {}
+    const char* what() const noexcept override { return message_.c_str(); }
+
+   private:
+    std::string message_{};
+};
+
+const char* phaseNameForNonFiniteLoss(TrainingEventPhase phase) {
+    switch (phase) {
+        case TrainingEventPhase::TRAIN:
+            return "training";
+        case TrainingEventPhase::VALIDATE:
+            return "validation";
+        case TrainingEventPhase::TEST:
+            return "test";
+        case TrainingEventPhase::UNKNOWN:
+        default:
+            return "unknown";
+    }
+}
+
+std::string formatDoubleForNonFiniteLoss(double value) {
+    if (std::isnan(value)) {
+        return "nan";
+    }
+    if (std::isinf(value)) {
+        return value > 0.0 ? "inf" : "-inf";
+    }
+    return formatDoubleForRestartMessage(value);
+}
+
+std::string nonFiniteLossMessage(const TrainingStatsSnapshot& stats, const std::string& lossName, double value) {
+    std::ostringstream out;
+    out << "non-finite " << phaseNameForNonFiniteLoss(stats.phase) << " loss";
+    if (!lossName.empty() && lossName != "loss") {
+        out << " '" << lossName << "'";
+    }
+    out << " detected at epoch " << stats.epoch;
+    if (stats.stepInEpoch > 0) {
+        out << " step " << stats.stepInEpoch;
+    }
+    out << ": " << formatDoubleForNonFiniteLoss(value);
+    return out.str();
+}
+
+class NonFiniteLossFailingObserver : public TrainingObserver {
+   public:
+    explicit NonFiniteLossFailingObserver(TrainingObserver& inner) : inner(inner) {}
+
+    void onTrainingEvent(const TrainingEvent& event) override {
+        if (event.type == TrainingEventType::STATS &&
+            (event.stats.phase == TrainingEventPhase::TRAIN || event.stats.phase == TrainingEventPhase::VALIDATE)) {
+            throwIfNonFiniteLoss(event.stats);
+        }
+        inner.onTrainingEvent(event);
+    }
+
+    void flush() override { inner.flush(); }
+    void close() override { inner.close(); }
+
+   private:
+    static void throwIfNonFiniteLoss(const TrainingStatsSnapshot& stats) {
+        if (stats.loss.has_value() && !std::isfinite(stats.loss.value())) {
+            throw TrainingNonFiniteLossDetected(nonFiniteLossMessage(stats, "loss", stats.loss.value()));
+        }
+    }
+
+    TrainingObserver& inner;
+};
+
 class RestartAttemptObserver : public TrainingObserver {
    public:
     RestartAttemptObserver(TrainingObserver& inner,
@@ -459,18 +531,32 @@ TrainingRunResult Trainer::fit(uint32_t epochs) { return fit(TrainerFitOptions{e
 TrainingRunResult Trainer::fit(const TrainerFitOptions& options) {
     TrainingObserver& observer = effectiveObserver();
     ResultCapturingTrainingObserver capturingObserver(observer);
-    fitWithRestartConditions(options, capturingObserver, TrainingCancellationToken{}, {}, {}, "trainer");
-    capturingObserver.flush();
-    return TrainingRunResult::completedResult("trainer",
-                                              capturingObserver.finalTrainingStats,
-                                              capturingObserver.finalValidationStats,
-                                              capturingObserver.finalTestStats,
-                                              capturingObserver.completionReason,
-                                              capturingObserver.completedEpoch,
-                                              capturingObserver.bestEpoch,
-                                              capturingObserver.bestScore,
-                                              saveModelDirectory,
-                                              trainedArtifactNetworkName(placedNetworkAfterLastFit, network));
+    try {
+        fitWithRestartConditions(options, capturingObserver, TrainingCancellationToken{}, {}, {}, "trainer");
+        capturingObserver.flush();
+        return TrainingRunResult::completedResult("trainer",
+                                                  capturingObserver.finalTrainingStats,
+                                                  capturingObserver.finalValidationStats,
+                                                  capturingObserver.finalTestStats,
+                                                  capturingObserver.completionReason,
+                                                  capturingObserver.completedEpoch,
+                                                  capturingObserver.bestEpoch,
+                                                  capturingObserver.bestScore,
+                                                  saveModelDirectory,
+                                                  trainedArtifactNetworkName(placedNetworkAfterLastFit, network));
+    } catch (const TrainingNonFiniteLossDetected& e) {
+        capturingObserver.flush();
+        TrainingRunResult result;
+        result.runName = "trainer";
+        result.status = TrainingRunStatus::FAILED;
+        result.finalTrainingStats = capturingObserver.finalTrainingStats;
+        result.finalValidationStats = capturingObserver.finalValidationStats;
+        result.finalTestStats = capturingObserver.finalTestStats;
+        result.savedModelDirectory = saveModelDirectory;
+        result.savedModelNetworkName = trainedArtifactNetworkName(placedNetworkAfterLastFit, network);
+        result.exception = TrainingRunExceptionSummary{"TrainingNonFiniteLossDetected", e.what()};
+        return result;
+    }
 }
 
 
@@ -550,16 +636,7 @@ void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
         return condition.progressCheckEpochs > attemptInitialCompletedEpochs && condition.progressCheckEpochs <= finalEpochAfterFit;
     };
 
-    const bool anyConditionReachableOnCurrentState = std::any_of(
-        combinedConditions.begin(),
-        combinedConditions.end(),
-        [&](const TrainingRestartCondition& condition) { return conditionIsReachableInAttempt(condition, completedTrainingEpochs); });
-    const bool anyConditionReachableAfterFreshRestart = std::any_of(
-        combinedConditions.begin(),
-        combinedConditions.end(),
-        [&](const TrainingRestartCondition& condition) { return conditionIsReachableInAttempt(condition, /*attemptInitialCompletedEpochs=*/0); });
-
-    if (!anyConditionReachableOnCurrentState && !anyConditionReachableAfterFreshRestart) {
+    if (combinedConditions.empty()) {
         fitInternal(options, observer, cancellationToken, additionalEarlyCompletionPolicies, additionalScalarTensorsToReport);
         return;
     }
@@ -583,6 +660,13 @@ void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
         }
         return active;
     };
+
+    const uint32_t nonFiniteLossMaxRestarts = std::max_element(
+        combinedConditions.begin(),
+        combinedConditions.end(),
+        [](const TrainingRestartCondition& lhs, const TrainingRestartCondition& rhs) { return lhs.maxRestarts < rhs.maxRestarts; })
+                                                  ->maxRestarts;
+    std::vector<std::string> nonFiniteLossFailedAttempts;
 
     for (uint64_t attempt = 1;; ++attempt) {
         cancellationToken.throwIfCancellationRequested();
@@ -617,6 +701,25 @@ void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
 
             throw TrainingRestartConditionExceeded(
                 restartAttemptsProgressMessage(runNameForMessages, *state->condition, state->failedAttempts));
+        } catch (const TrainingNonFiniteLossDetected& e) {
+            attemptObserver.flush();
+            nonFiniteLossFailedAttempts.push_back(e.what());
+            if (nonFiniteLossFailedAttempts.size() <= nonFiniteLossMaxRestarts) {
+                // A restart means the current model attempt is discarded. The next
+                // attempt must behave like a new model instance: no previously trained
+                // PlacedNetwork state is copied in, and epoch/progress accounting starts
+                // over from 0 for all restart checks, best-candidate selection, and
+                // early-completion policies.
+                placedNetworkAfterLastFit.reset();
+                completedTrainingEpochs = 0;
+                continue;
+            }
+
+            std::ostringstream message;
+            message << e.what() << " Restart policy exhausted after " << nonFiniteLossFailedAttempts.size()
+                    << " failed attempt" << (nonFiniteLossFailedAttempts.size() == 1 ? "" : "s")
+                    << " (max_restarts=" << nonFiniteLossMaxRestarts << ").";
+            throw TrainingNonFiniteLossDetected(message.str());
         } catch (...) {
             attemptObserver.flush();
             throw;
@@ -625,8 +728,9 @@ void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
 }
 
 void Trainer::executeRequest(const TrainingRunRequest& request, TrainingObserver& observer) {
+    NonFiniteLossFailingObserver nonFiniteLossObserver(observer);
     try {
-        executor->fit(request, observer);
+        executor->fit(request, nonFiniteLossObserver);
     } catch (...) {
         observer.flush();
         throw;
@@ -672,6 +776,18 @@ TrainingRunResult Trainer::fitTrainingRun(std::string runName,
         result.savedModelDirectory = saveModelDirectory;
         result.savedModelNetworkName = trainedArtifactNetworkName(placedNetworkAfterLastFit, network);
         result.exception = TrainingRunExceptionSummary{"TrainingRestartConditionExceeded", e.what()};
+        return result;
+    } catch (const TrainingNonFiniteLossDetected& e) {
+        capturingObserver.flush();
+        TrainingRunResult result;
+        result.runName = std::move(runName);
+        result.status = TrainingRunStatus::FAILED;
+        result.finalTrainingStats = capturingObserver.finalTrainingStats;
+        result.finalValidationStats = capturingObserver.finalValidationStats;
+        result.finalTestStats = capturingObserver.finalTestStats;
+        result.savedModelDirectory = saveModelDirectory;
+        result.savedModelNetworkName = trainedArtifactNetworkName(placedNetworkAfterLastFit, network);
+        result.exception = TrainingRunExceptionSummary{"TrainingNonFiniteLossDetected", e.what()};
         return result;
     } catch (...) {
         capturingObserver.flush();

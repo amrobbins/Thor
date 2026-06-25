@@ -193,6 +193,59 @@ def _regression_one_batch_loader(*, dtype=np.float32):
     )
 
 
+def _non_finite_regression_one_batch_loader(non_finite_phase: str, *, dtype=np.float32):
+    x, y = _regression_arrays(dtype=dtype)
+    train_y = y.copy()
+    validate_y = y.copy()
+    if non_finite_phase == "train":
+        train_y[0, 0] = np.inf
+    elif non_finite_phase == "validate":
+        validate_y[0, 0] = np.inf
+    else:
+        raise ValueError(f"unsupported non_finite_phase: {non_finite_phase}")
+
+    loader_cls = thor.training.NumpyFloat16BatchLoader if dtype == np.float16 else thor.training.NumpyFloat32BatchLoader
+    return loader_cls(
+        x,
+        np.ascontiguousarray(train_y, dtype=dtype),
+        x,
+        np.ascontiguousarray(validate_y, dtype=dtype),
+        batch_size=4,
+        example_input_name="examples",
+        label_input_name="labels",
+        dataset_name=f"training_runs_non_finite_{non_finite_phase}_loss",
+    )
+
+
+def _weighted_regression_arrays(*, dtype=np.float32):
+    x, y = _regression_arrays(dtype=dtype)
+    example_weights = np.array([[1.0], [0.5], [2.0], [3.0]], dtype=np.float32)
+    return x, y, np.ascontiguousarray(example_weights, dtype=dtype)
+
+
+def _weighted_regression_one_batch_loader(*, dtype=np.float32):
+    x, y, example_weights = _weighted_regression_arrays(dtype=dtype)
+    tensors = {
+        "examples": x,
+        "labels": y,
+        "example_weights": example_weights,
+    }
+    return thor.training.NumpyFloat32DictBatchLoader(
+        train={
+            name: value.copy() for name, value in tensors.items()
+        },
+        validate={
+            name: value.copy() for name, value in tensors.items()
+        },
+        test={
+            name: value.copy() for name, value in tensors.items()
+        },
+        batch_size=4,
+        dataset_name="training_runs_weighted_regression_one_batch",
+        randomize_train=False,
+    )
+
+
 def _mae_quantile_regression_arrays(*, dtype=np.float32):
     # Positive, continuous targets make this a better regression/forecast smoke
     # dataset than the symmetric +/-1 toy data used by the generic tiny regressor.
@@ -395,6 +448,33 @@ def _build_tiny_regressor(name: str):
         loss_weight=2.0,
     )
     thor.layers.NetworkOutput(network, "loss", loss.get_loss(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "prediction", predictions.get_feature_output(), thor.DataType.fp32)
+    return network
+
+
+def _build_weighted_tiny_regressor(name: str):
+    network = thor.Network(name)
+    examples = thor.layers.NetworkInput(network, "examples", [2], thor.DataType.fp32)
+    labels = thor.layers.NetworkInput(network, "labels", [1], thor.DataType.fp32)
+    example_weights = thor.layers.NetworkInput(network, "example_weights", [1], thor.DataType.fp32)
+
+    predictions = thor.layers.FullyConnected(
+        network,
+        examples.get_feature_output(),
+        1,
+        True,
+        activation=None,
+        weights_initializer=thor.initializers.UniformRandom(0.0, 0.0),
+        biases_initializer=thor.initializers.UniformRandom(0.0, 0.0),
+    )
+    loss = thor.losses.MSE(
+        network,
+        predictions.get_feature_output(),
+        labels.get_feature_output(),
+        thor.DataType.fp32,
+        example_weights=example_weights.get_feature_output(),
+    )
+    thor.layers.NetworkOutput(network, "weighted_mse_loss", loss.get_loss(), thor.DataType.fp32)
     thor.layers.NetworkOutput(network, "prediction", predictions.get_feature_output(), thor.DataType.fp32)
     return network
 
@@ -983,6 +1063,43 @@ def _make_tiny_regression_trainer(
     )
 
 
+def _make_non_finite_tiny_regression_trainer(
+    name: str,
+    non_finite_phase: str,
+    *,
+    restart_conditions=None,
+):
+    return thor.training.Trainer(
+        _build_tiny_regressor(name),
+        _non_finite_regression_one_batch_loader(non_finite_phase),
+        optimizer=thor.optimizers.Sgd(initial_learning_rate=1.0e-12, momentum=0.0),
+        stats_interval_s=0.0,
+        max_in_flight_batches=2,
+        scalar_tensors_to_report=["loss"],
+        stats_color="never",
+        restart_conditions=restart_conditions,
+    )
+
+
+def _make_weighted_tiny_regression_trainer(
+    name: str,
+    *,
+    save_model_dir=None,
+    save_model_overwrite=False,
+):
+    return thor.training.Trainer(
+        _build_weighted_tiny_regressor(name),
+        _weighted_regression_one_batch_loader(),
+        optimizer=thor.optimizers.Sgd(initial_learning_rate=1.0e-12, momentum=0.0),
+        stats_interval_s=0.0,
+        max_in_flight_batches=2,
+        scalar_tensors_to_report=["weighted_mse_loss"],
+        stats_color="never",
+        save_model_dir=save_model_dir,
+        save_model_overwrite=save_model_overwrite,
+    )
+
+
 def _make_named_graph_loss_regression_trainer(
     name: str,
     *,
@@ -1283,28 +1400,49 @@ def test_trainer_binding_rejects_non_callable_model_selection_score():
         )
 
 
-def test_trainer_restart_condition_binding_defaults():
-    condition = thor.training.RestartCondition()
+def test_restart_policy_binding_defaults_and_aliases():
+    condition = thor.training.RestartPolicy()
 
-    assert isinstance(condition, thor.training.TrainingRestartCondition)
+    assert isinstance(condition, thor.training.TrainingRestartPolicy)
+    assert condition.run_name is None
+    assert condition.ensemble_group is None
     assert condition.progress_check_epochs == 3
     assert condition.progress_improvement_min_percentage == 5.0
     assert condition.max_restarts == 5
+    assert thor.training.RestartCondition is thor.training.RestartPolicy
+    assert thor.training.TrainingRestartCondition is thor.training.RestartPolicy
+    assert thor.training.TrainingRunsRestartPolicy is thor.training.RestartPolicy
 
     trainer = _make_tiny_regression_trainer(
-        "trainer_restart_condition_binding",
+        "trainer_restart_policy_binding",
         restart_conditions=[
-            thor.training.RestartCondition(progress_check_epochs=2, progress_improvement_min_percentage=10.0)
+            thor.training.RestartPolicy(progress_check_epochs=2, progress_improvement_min_percentage=10.0)
         ],
     )
 
     assert trainer is not None
 
 
-def test_training_runs_restart_condition_binding_defaults_and_validation():
+def test_trainer_restart_policy_warns_and_ignores_training_runs_targets():
+    with pytest.warns(RuntimeWarning, match="ignore RestartPolicy.*ensemble_group"):
+        trainer = _make_tiny_regression_trainer(
+            "trainer_restart_policy_ignores_group_target",
+            restart_conditions=[
+                thor.training.RestartPolicy(
+                    ensemble_group="ignored_group",
+                    progress_check_epochs=2,
+                    progress_improvement_min_percentage=10.0,
+                )
+            ],
+        )
+
+    assert trainer is not None
+
+
+def test_training_runs_restart_policy_binding_defaults_and_validation():
     condition = thor.training.RestartPolicy(run_name="fold_0")
 
-    assert isinstance(condition, thor.training.TrainingRunsRestartPolicy)
+    assert isinstance(condition, thor.training.TrainingRestartPolicy)
     assert condition.run_name == "fold_0"
     assert condition.ensemble_group is None
     assert condition.progress_check_epochs == 3
@@ -1320,7 +1458,25 @@ def test_training_runs_restart_condition_binding_defaults_and_validation():
         )
 
 
-def test_training_runs_restart_condition_accepts_ensemble_group_target():
+def test_training_runs_restart_policy_accepts_global_untargeted_policy():
+    trainer0 = _make_tiny_regression_trainer("training_runs_restart_policy_global_0")
+    trainer1 = _make_tiny_regression_trainer("training_runs_restart_policy_global_1")
+    runs = thor.training.TrainingRuns(
+        [("fold_0", trainer0), ("fold_1", trainer1)],
+        failure_policy="continue",
+        restart_conditions=[
+            thor.training.RestartPolicy(
+                progress_check_epochs=2,
+                progress_improvement_min_percentage=10.0,
+                max_restarts=1,
+            )
+        ],
+    )
+
+    assert runs is not None
+
+
+def test_training_runs_restart_policy_accepts_ensemble_group_target():
     trainer = _make_tiny_regression_trainer("training_runs_restart_condition_group")
     runs = thor.training.TrainingRuns(
         [("fold_0", trainer, "tiny_ensemble")],
@@ -1338,7 +1494,7 @@ def test_training_runs_restart_condition_accepts_ensemble_group_target():
     assert runs is not None
 
 
-def test_training_runs_restart_condition_accepts_multiple_conditions_for_same_group():
+def test_training_runs_restart_policy_accepts_multiple_conditions_for_same_group():
     trainer = _make_tiny_regression_trainer("training_runs_restart_condition_group_multiple")
     runs = thor.training.TrainingRuns(
         [("fold_0", trainer, "tiny_ensemble")],
@@ -1362,7 +1518,7 @@ def test_training_runs_restart_condition_accepts_multiple_conditions_for_same_gr
     assert runs is not None
 
 
-def test_training_runs_restart_condition_accepts_multiple_conditions_for_same_run():
+def test_training_runs_restart_policy_accepts_multiple_conditions_for_same_run():
     trainer = _make_tiny_regression_trainer("training_runs_restart_condition_run_multiple")
     runs = thor.training.TrainingRuns(
         [("fold_0", trainer)],
@@ -1572,6 +1728,431 @@ def test_training_runs_evaluates_saved_adam_model_on_test_loader(capfd, tmp_path
     assert results["fold_0"].final_test_loss is not None
     plain_text = _ANSI_RE.sub("", captured_text)
     assert re.search(r"INFO runs\[fold_0\|tiny_ensemble\]:.*test_loss=", plain_text)
+
+
+@pytest.mark.cuda
+@pytest.mark.training_integration
+def test_training_runs_weighted_mse_example_weights_drives_training_loss(capfd, tmp_path):
+    # This intentionally covers the end-to-end TrainingRuns path, not just loss
+    # construction or forward inference.  The regression bug was that a weighted
+    # loss could produce an active raw loss tensor that the physical training
+    # loss-root logic did not recognize as being driven by a physical loss layer.
+    _, _, example_weights = _weighted_regression_arrays(dtype=np.float32)
+    expected_weighted_mse = float(np.mean(example_weights))
+
+    runs = thor.training.TrainingRuns(
+        [
+            (
+                "fold_0",
+                _make_weighted_tiny_regression_trainer(
+                    "training_runs_weighted_mse_example_weights",
+                    save_model_dir=tmp_path / "weighted_mse_model",
+                    save_model_overwrite=True,
+                ),
+                "weighted_mse_ensemble",
+                1.0,
+            )
+        ],
+        reported_losses={
+            "weighted_mse_ensemble": ["weighted_mse_loss"]
+        },
+    )
+
+    results, captured_text = _fit_runs_and_capture_text(
+        runs,
+        capfd,
+        epochs=1,
+        test_loader=_weighted_regression_one_batch_loader(),
+    )
+
+    assert results.all_completed(), [
+        (result.run_name, result.status, result.result, result.exception_type, result.exception_message)
+        for result in results
+    ]
+    result = results["fold_0"]
+    assert result.status == "completed"
+    assert result.final_training_loss == pytest.approx(expected_weighted_mse, rel=1e-5, abs=1e-6)
+    assert result.final_validation_loss == pytest.approx(expected_weighted_mse, rel=1e-5, abs=1e-6)
+    assert result.final_test_loss == pytest.approx(expected_weighted_mse, rel=1e-5, abs=1e-6)
+    assert result.final_training_stats.metrics["weighted_mse_loss"] == pytest.approx(
+        expected_weighted_mse, rel=1e-5, abs=1e-6)
+    assert result.final_validation_stats.metrics["weighted_mse_loss"] == pytest.approx(
+        expected_weighted_mse, rel=1e-5, abs=1e-6)
+    assert result.final_test_stats.metrics["weighted_mse_loss"] == pytest.approx(
+        expected_weighted_mse, rel=1e-5, abs=1e-6)
+
+    ensemble = results.ensemble("weighted_mse_ensemble")
+    assert [metric.name for metric in ensemble.named_metrics] == ["weighted_mse_loss"]
+    assert ensemble.ensemble_test_loss == pytest.approx(expected_weighted_mse, rel=1e-5, abs=1e-6)
+
+    plain_text = _ANSI_RE.sub("", captured_text)
+    assert "train_weighted_mse_loss=" in plain_text
+    assert "validate_weighted_mse_loss=" in plain_text
+    assert "test_weighted_mse_loss=" in plain_text
+    assert "ensemble_test_weighted_mse_loss=" in plain_text
+
+
+@pytest.mark.cuda
+@pytest.mark.training_integration
+def test_training_runs_weighted_cross_phase_backprop_after_phase_enable_does_not_crash():
+    # Regression reproducer for the SkuForecaster stage-1 -> stage-2 crash.  The
+    # important shape is:
+    #   phase 1 exports a normal prediction output,
+    #   phase 2 later consumes it through an external=False NetworkInput,
+    #   phase 2 uses weighted losses, and
+    #   there is no StopGradient between the phase-1 output and phase-2 losses.
+    #
+    # Today this can poison CUDA state with cudaErrorIllegalAddress.  Run the
+    # scenario in a child process so the pytest worker survives the abort and can
+    # report the failing command output.  Once the Thor-side bug is fixed, the
+    # child process should complete successfully.
+    reproducer = r'''
+import tempfile
+from pathlib import Path
+
+import numpy as np
+import thor
+
+
+def make_loader(seed):
+    rng = np.random.default_rng(seed)
+    n = 24
+    trend = np.ascontiguousarray(rng.normal(size=(n, 2)).astype(np.float32))
+    seasonality = np.ascontiguousarray(rng.normal(size=(n, 3)).astype(np.float32))
+    daily_labels = np.ascontiguousarray((3.0 + rng.random(size=(n, 1)) * 5.0).astype(np.float32))
+    aggregate_labels = np.ascontiguousarray((daily_labels * 2.0 + rng.random(size=(n, 1))).astype(np.float32))
+    example_weights = np.ascontiguousarray((0.5 + rng.random(size=(n, 1)) * 2.0).astype(np.float32))
+    tensors = {
+        "trend_inputs": trend,
+        "seasonality_inputs": seasonality,
+        "forecast_daily_labels": daily_labels,
+        "forecast_aggregate_labels": aggregate_labels,
+        "example_weights": example_weights,
+    }
+    return thor.training.NumpyFloat32DictBatchLoader(
+        train={name: value.copy() for name, value in tensors.items()},
+        validate={name: value.copy() for name, value in tensors.items()},
+        batch_size=8,
+        dataset_name=f"weighted_cross_phase_backprop_{seed}",
+        randomize_train=False,
+        batch_queue_depth=4,
+    )
+
+
+def make_network(name):
+    root = thor.Network(name)
+
+    daily = thor.Network(f"{name}_daily_phase")
+    daily_trend = thor.layers.NetworkInput(daily, "trend_inputs", [2], thor.DataType.fp32)
+    daily_seasonality = thor.layers.NetworkInput(daily, "seasonality_inputs", [3], thor.DataType.fp32)
+    daily_labels = thor.layers.NetworkInput(daily, "forecast_daily_labels", [1], thor.DataType.fp32)
+    daily_weights = thor.layers.NetworkInput(daily, "example_weights", [1], thor.DataType.fp32)
+    daily_all = thor.layers.Concatenate(
+        daily,
+        [daily_trend.get_feature_output(), daily_seasonality.get_feature_output()],
+        0,
+    ).get_feature_output()
+    daily_hidden = thor.layers.FullyConnected(
+        daily,
+        daily_all,
+        16,
+        True,
+        activation=thor.activations.SoftPlus(),
+        weights_initializer=thor.initializers.Glorot(),
+        biases_initializer=thor.initializers.Glorot(),
+    ).get_feature_output()
+    daily_forecast = thor.layers.FullyConnected(
+        daily,
+        daily_hidden,
+        1,
+        True,
+        activation=thor.activations.SoftPlus(),
+        weights_initializer=thor.initializers.Glorot(),
+        biases_initializer=thor.initializers.Glorot(),
+    ).get_feature_output()
+    daily_quantile = thor.layers.FullyConnected(
+        daily,
+        daily_forecast,
+        1,
+        False,
+        activation=thor.activations.SoftPlus(),
+        weights_initializer=thor.initializers.UniformRandom(0.95, 1.05),
+    ).get_feature_output()
+    daily_loss = thor.losses.MAE(
+        daily,
+        daily_forecast,
+        daily_labels.get_feature_output(),
+        thor.DataType.fp32,
+        False,
+        loss_weight=10.0,
+        example_weights=daily_weights.get_feature_output(),
+    )
+    daily_quantile_loss = thor.losses.QuantileLoss(
+        daily,
+        daily_quantile,
+        daily_labels.get_feature_output(),
+        0.85,
+        thor.DataType.fp32,
+        loss_weight=26.667,
+        example_weights=daily_weights.get_feature_output(),
+    )
+    thor.layers.NetworkOutput(daily, "forecast_daily_loss", daily_loss.get_loss(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(
+        daily,
+        "forecast_daily_quantile_high_loss",
+        daily_quantile_loss.get_loss(),
+        thor.DataType.fp32,
+    )
+    thor.layers.NetworkOutput(daily, "forecast_daily", daily_forecast, thor.DataType.fp32)
+    thor.layers.NetworkOutput(daily, "forecast_daily_quantile_high", daily_quantile, thor.DataType.fp32)
+
+    aggregate = thor.Network(f"{name}_aggregate_phase")
+    aggregate_trend = thor.layers.NetworkInput(aggregate, "trend_inputs", [2], thor.DataType.fp32)
+    aggregate_seasonality = thor.layers.NetworkInput(aggregate, "seasonality_inputs", [3], thor.DataType.fp32)
+    aggregate_labels = thor.layers.NetworkInput(aggregate, "forecast_aggregate_labels", [1], thor.DataType.fp32)
+    aggregate_weights = thor.layers.NetworkInput(aggregate, "example_weights", [1], thor.DataType.fp32)
+    daily_forecast_input = thor.layers.NetworkInput(
+        aggregate,
+        "forecast_daily",
+        [1],
+        thor.DataType.fp32,
+        external=False,
+    )
+    daily_quantile_input = thor.layers.NetworkInput(
+        aggregate,
+        "forecast_daily_quantile_high",
+        [1],
+        thor.DataType.fp32,
+        external=False,
+    )
+    aggregate_features = thor.layers.Concatenate(
+        aggregate,
+        [
+            daily_forecast_input.get_feature_output(),
+            aggregate_trend.get_feature_output(),
+            aggregate_seasonality.get_feature_output(),
+        ],
+        0,
+    ).get_feature_output()
+    aggregate_forecast = thor.layers.FullyConnected(
+        aggregate,
+        aggregate_features,
+        1,
+        False,
+        activation=thor.activations.SoftPlus(),
+        weights_initializer=thor.initializers.UniformRandom(0.95, 1.05),
+    ).get_feature_output()
+    aggregate_quantile_features = thor.layers.Concatenate(
+        aggregate,
+        [
+            daily_quantile_input.get_feature_output(),
+            aggregate_trend.get_feature_output(),
+            aggregate_seasonality.get_feature_output(),
+        ],
+        0,
+    ).get_feature_output()
+    aggregate_quantile = thor.layers.FullyConnected(
+        aggregate,
+        aggregate_quantile_features,
+        1,
+        False,
+        activation=thor.activations.SoftPlus(),
+        weights_initializer=thor.initializers.UniformRandom(0.95, 1.05),
+    ).get_feature_output()
+    aggregate_loss = thor.losses.MAE(
+        aggregate,
+        aggregate_forecast,
+        aggregate_labels.get_feature_output(),
+        thor.DataType.fp32,
+        False,
+        loss_weight=1.0,
+        example_weights=aggregate_weights.get_feature_output(),
+    )
+    aggregate_quantile_loss = thor.losses.QuantileLoss(
+        aggregate,
+        aggregate_quantile,
+        aggregate_labels.get_feature_output(),
+        0.85,
+        thor.DataType.fp32,
+        loss_weight=2.6667,
+        example_weights=aggregate_weights.get_feature_output(),
+    )
+    thor.layers.NetworkOutput(aggregate, "forecast_aggregate_loss", aggregate_loss.get_loss(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(
+        aggregate,
+        "forecast_aggregate_quantile_high_loss",
+        aggregate_quantile_loss.get_loss(),
+        thor.DataType.fp32,
+    )
+    thor.layers.NetworkOutput(aggregate, "forecast_aggregate", aggregate_forecast, thor.DataType.fp32)
+    thor.layers.NetworkOutput(aggregate, "forecast_aggregate_quantile_high", aggregate_quantile, thor.DataType.fp32)
+
+    daily_phase = thor.training.TrainingPhase("daily", network=daily, enabled=True)
+    aggregate_phase = thor.training.TrainingPhase("aggregate", network=aggregate, enabled=False)
+    optimizer = thor.optimizers.Adam(
+        alpha=0.001,
+        beta1=0.9,
+        beta2=0.999,
+        epsilon=1e-7,
+        amsgrad=True,
+    )
+    step = thor.training.TrainingStep(
+        "daily_then_aggregate",
+        phases=[daily_phase, aggregate_phase],
+        optimizer=optimizer,
+    )
+    return root, thor.training.TrainingProgram([step]), aggregate_phase
+
+
+def make_trainer(name, seed, model_root):
+    network, program, aggregate_phase = make_network(name)
+    trainer = thor.training.Trainer(
+        network,
+        make_loader(seed),
+        training_program=program,
+        stats_interval_s=0.0,
+        max_in_flight_batches=4,
+        scalar_tensors_to_report=[
+            "forecast_daily_loss",
+            "forecast_daily_quantile_high_loss",
+            "forecast_aggregate_loss",
+            "forecast_aggregate_quantile_high_loss",
+        ],
+        stats_color="never",
+        save_model_dir=model_root / name,
+        save_model_overwrite=True,
+        save_optimizer_state=True,
+        check_best_model_every_epochs=1,
+    )
+    return trainer, aggregate_phase
+
+
+loss_names = [
+    "forecast_daily_loss",
+    "forecast_daily_quantile_high_loss",
+    "forecast_aggregate_loss",
+    "forecast_aggregate_quantile_high_loss",
+]
+with tempfile.TemporaryDirectory(prefix="thor_weighted_cross_phase_") as tmp:
+    model_root = Path(tmp) / "members"
+    run_specs = []
+    aggregate_phases = []
+    for fold in range(3):
+        run_name = f"fold_{fold}"
+        trainer, aggregate_phase = make_trainer(f"weighted_cross_phase_{fold}", 1000 + fold, model_root)
+        run_specs.append((run_name, trainer, "weighted_cross_phase_cv3", 1.0))
+        aggregate_phases.append(aggregate_phase)
+
+    first_runs = thor.training.TrainingRuns(
+        run_specs,
+        reported_losses={"weighted_cross_phase_cv3": loss_names[:2]},
+        max_parallel_runs=3,
+    )
+    first_result = first_runs.fit(epochs=1)
+    if not first_result.all_completed():
+        raise RuntimeError("pretrain failed")
+
+    for phase in aggregate_phases:
+        phase.enable()
+
+    second_runs = thor.training.TrainingRuns(
+        run_specs,
+        reported_losses={"weighted_cross_phase_cv3": loss_names},
+        max_parallel_runs=3,
+    )
+    second_result = second_runs.fit(epochs=1)
+    if not second_result.all_completed():
+        raise RuntimeError("joint fit failed")
+'''
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-u", "-c", reproducer],
+            text=True,
+            capture_output=True,
+            timeout=90,
+        )
+    except subprocess.TimeoutExpired as exc:
+        pytest.fail(
+            "weighted cross-phase backprop reproducer timed out\n"
+            f"stdout:\n{exc.stdout or ''}\n"
+            f"stderr:\n{exc.stderr or ''}")
+
+    assert completed.returncode == 0, (
+        "weighted cross-phase backprop reproducer failed; this is expected "
+        "before the Thor-side fix for phase-2 weighted losses backpropagating "
+        "through phase-1 non-external outputs.\n"
+        f"returncode={completed.returncode}\n"
+        f"stdout:\n{completed.stdout}\n"
+        f"stderr:\n{completed.stderr}")
+
+
+@pytest.mark.cuda
+@pytest.mark.training_integration
+@pytest.mark.parametrize(
+    ("non_finite_phase", "message_fragment"),
+    [
+        ("train", "non-finite training loss"),
+        ("validate", "non-finite validation loss"),
+    ],
+)
+def test_training_runs_non_finite_train_or_validation_loss_fails_run(non_finite_phase, message_fragment):
+    runs = thor.training.TrainingRuns(
+        [
+            (
+                "fold_0",
+                _make_non_finite_tiny_regression_trainer(
+                    f"training_runs_non_finite_{non_finite_phase}_loss_fails",
+                    non_finite_phase,
+                ),
+            )
+        ],
+        failure_policy="continue",
+    )
+
+    results = runs.fit(epochs=1)
+    result = results["fold_0"]
+
+    assert results.any_failed()
+    assert not results.all_completed()
+    assert result.status == "failed"
+    assert result.result == "failed"
+    assert result.exception_type == "TrainingNonFiniteLossDetected"
+    assert message_fragment in result.exception_message
+
+
+@pytest.mark.cuda
+@pytest.mark.training_integration
+def test_training_runs_non_finite_loss_uses_restart_policy_before_failure():
+    runs = thor.training.TrainingRuns(
+        [
+            (
+                "fold_0",
+                _make_non_finite_tiny_regression_trainer(
+                    "training_runs_non_finite_loss_restart_exhausted",
+                    "train",
+                ),
+            )
+        ],
+        failure_policy="continue",
+        restart_conditions=[
+            thor.training.RestartPolicy(
+                run_name="fold_0",
+                progress_check_epochs=3,
+                progress_improvement_min_percentage=5.0,
+                max_restarts=1,
+            )
+        ],
+    )
+
+    results = runs.fit(epochs=1)
+    result = results["fold_0"]
+
+    assert results.any_failed()
+    assert result.status == "failed"
+    assert result.exception_type == "TrainingNonFiniteLossDetected"
+    assert "non-finite training loss" in result.exception_message
+    assert "Restart policy exhausted after 2 failed attempts" in result.exception_message
+    assert "max_restarts=1" in result.exception_message
 
 
 @pytest.mark.cuda
@@ -2680,9 +3261,37 @@ def _training_selection_metadata(save_dir):
         return json.load(f)
 
 
-def _prediction_from_saved_tiny_regressor(save_dir, network_name: str):
+def _training_artifact_latest_dir(save_dir):
+    return save_dir / "latest"
+
+
+def _training_artifact_best_dir(save_dir):
+    return save_dir / "best"
+
+
+def _training_artifact_selected_dir(save_dir):
+    best_dir = _training_artifact_best_dir(save_dir)
+    if best_dir.exists():
+        return best_dir
+    latest_dir = _training_artifact_latest_dir(save_dir)
+    if latest_dir.exists():
+        return latest_dir
+    return save_dir
+
+
+def _prediction_from_saved_tiny_regressor(save_dir, network_name: str, *, artifact="selected"):
+    if artifact == "selected":
+        model_dir = _training_artifact_selected_dir(save_dir)
+    elif artifact == "latest":
+        model_dir = _training_artifact_latest_dir(save_dir)
+    elif artifact == "best":
+        model_dir = _training_artifact_best_dir(save_dir)
+    elif artifact == "direct":
+        model_dir = save_dir
+    else:
+        raise ValueError(f"unsupported artifact selector: {artifact}")
     loaded = thor.Network(network_name)
-    loaded.load(str(save_dir))
+    loaded.load(str(model_dir))
     placed = loaded.place(4, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
     x, _ = _regression_arrays(dtype=np.float32)
     outputs = placed.infer({
@@ -2714,9 +3323,11 @@ def test_saved_trained_model_load_place_inference_only_infer_sequence(tmp_path):
     assert result.status == "completed"
     assert result.best_epoch == 1
     assert save_dir.exists()
+    assert _training_artifact_latest_dir(save_dir).exists()
+    assert _training_artifact_best_dir(save_dir).exists()
 
     loaded = thor.Network("saved_trained_inference_sequence")
-    loaded.load(str(save_dir))
+    loaded.load(str(_training_artifact_latest_dir(save_dir)))
     placed = loaded.place(4, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
 
     assert isinstance(placed, thor.runtime.PlacedNetwork)
@@ -2754,7 +3365,7 @@ def test_saved_training_graph_inference_prunes_loss_and_label_only_inputs(tmp_pa
     trainer.fit(1)
 
     loaded = thor.Network("saved_training_graph_prunes_loss_labels")
-    loaded.load(str(save_dir))
+    loaded.load(str(_training_artifact_latest_dir(save_dir)))
     placed = loaded.place(4, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
 
     assert set(placed.get_network_input_names()) == {"examples"}
@@ -2790,9 +3401,11 @@ def test_trainer_best_candidate_snapshot_contains_trained_weights(tmp_path):
 
     trainer.fit(1)
 
-    prediction = _prediction_from_saved_tiny_regressor(save_dir, "trainer_best_candidate_snapshot_trained_weights")
-
     assert save_dir.exists()
+    assert _training_artifact_latest_dir(save_dir).exists()
+    assert _training_artifact_best_dir(save_dir).exists()
+    prediction = _prediction_from_saved_tiny_regressor(
+        save_dir, "trainer_best_candidate_snapshot_trained_weights", artifact="best")
     assert not np.allclose(prediction, 0.0, atol=1e-7)
 
 
@@ -2882,9 +3495,16 @@ def test_trainer_fit_returns_result_and_persists_selection_metadata(tmp_path):
     assert result.best_epoch == 1
     assert result.best_score == pytest.approx(1.0)
     assert save_dir.exists()
+    assert _training_artifact_latest_dir(save_dir).exists()
+    assert _training_artifact_best_dir(save_dir).exists()
 
     metadata = _training_selection_metadata(save_dir)
-    assert metadata["schema_version"] == 1
+    assert metadata["schema_version"] == 2
+    assert metadata["latest_epoch"] == 2
+    assert metadata["latest_score"] == pytest.approx(2.0)
+    assert metadata["latest_training_loss"] is not None
+    assert metadata["latest_validation_loss"] is not None
+    assert metadata["has_best_candidate"] is True
     assert metadata["best_epoch"] == 1
     assert metadata["best_score"] == pytest.approx(1.0)
     assert metadata["completed_epoch"] == 2
@@ -2938,6 +3558,10 @@ def test_trainer_model_selection_score_none_skips_candidate_for_epoch(tmp_path):
     assert result.best_score == pytest.approx(2.0)
 
     metadata = _training_selection_metadata(save_dir)
+    assert metadata["schema_version"] == 2
+    assert metadata["latest_epoch"] == 2
+    assert metadata["latest_score"] == pytest.approx(2.0)
+    assert metadata["has_best_candidate"] is True
     assert metadata["best_epoch"] == 2
     assert metadata["best_score"] == pytest.approx(2.0)
     assert metadata["completed_epoch"] == 2
@@ -2984,12 +3608,27 @@ def test_trainer_min_early_completion_epochs_can_complete_without_candidate_or_s
     assert result.best_epoch is None
     assert result.best_score is None
     assert trainer.completed_training_epochs == 2
-    assert not save_dir.exists()
+    assert save_dir.exists()
+    assert _training_artifact_latest_dir(save_dir).exists()
+    assert not _training_artifact_best_dir(save_dir).exists()
+
+    metadata = _training_selection_metadata(save_dir)
+    assert metadata["schema_version"] == 2
+    assert metadata["latest_epoch"] == 2
+    assert metadata["latest_score"] is None
+    assert metadata["latest_training_loss"] is not None
+    assert metadata["latest_validation_loss"] is not None
+    assert metadata["has_best_candidate"] is False
+    assert metadata["best_epoch"] is None
+    assert metadata["best_score"] is None
+    assert metadata["completed_epoch"] == 2
+    assert metadata["completion_reason"] == "completed"
 
     final_dir = tmp_path / "manual_final_model_after_no_candidate"
     trainer.save_model(final_dir)
     assert final_dir.exists()
-    prediction = _prediction_from_saved_tiny_regressor(final_dir, "trainer_min_early_completion_no_candidate")
+    prediction = _prediction_from_saved_tiny_regressor(
+        final_dir, "trainer_min_early_completion_no_candidate", artifact="direct")
     assert not np.allclose(prediction, 0.0, atol=1e-7)
 
 
@@ -3022,7 +3661,14 @@ def test_trainer_min_early_completion_epochs_uses_cumulative_epoch_across_fit_ca
     assert first_result.completed_epoch == 2
     assert first_result.best_epoch is None
     assert trainer.completed_training_epochs == 2
-    assert not save_dir.exists()
+    assert save_dir.exists()
+    assert _training_artifact_latest_dir(save_dir).exists()
+    assert not _training_artifact_best_dir(save_dir).exists()
+
+    first_metadata = _training_selection_metadata(save_dir)
+    assert first_metadata["latest_epoch"] == 2
+    assert first_metadata["has_best_candidate"] is False
+    assert first_metadata["best_epoch"] is None
 
     second_result = trainer.fit(10)
 
@@ -3034,8 +3680,14 @@ def test_trainer_min_early_completion_epochs_uses_cumulative_epoch_across_fit_ca
     assert second_result.best_score == pytest.approx(3.0)
     assert trainer.completed_training_epochs == 3
     assert save_dir.exists()
+    assert _training_artifact_latest_dir(save_dir).exists()
+    assert _training_artifact_best_dir(save_dir).exists()
 
     metadata = _training_selection_metadata(save_dir)
+    assert metadata["schema_version"] == 2
+    assert metadata["latest_epoch"] == 3
+    assert metadata["latest_score"] == pytest.approx(3.0)
+    assert metadata["has_best_candidate"] is True
     assert metadata["best_epoch"] == 3
     assert metadata["best_score"] == pytest.approx(3.0)
     assert metadata["completed_epoch"] == 3
@@ -3079,7 +3731,14 @@ def test_training_runs_min_early_completion_epochs_uses_cumulative_epoch_across_
     assert first_result.best_epoch is None
     assert first_result.best_score is None
     assert trainer.completed_training_epochs == 2
-    assert not save_dir.exists()
+    assert save_dir.exists()
+    assert _training_artifact_latest_dir(save_dir).exists()
+    assert not _training_artifact_best_dir(save_dir).exists()
+
+    first_metadata = _training_selection_metadata(save_dir)
+    assert first_metadata["latest_epoch"] == 2
+    assert first_metadata["has_best_candidate"] is False
+    assert first_metadata["best_epoch"] is None
 
     second_results = runs.fit(epochs=10)
     second_result = second_results["fold_0"]
@@ -3092,8 +3751,14 @@ def test_training_runs_min_early_completion_epochs_uses_cumulative_epoch_across_
     assert second_result.best_score == pytest.approx(3.0)
     assert trainer.completed_training_epochs == 3
     assert save_dir.exists()
+    assert _training_artifact_latest_dir(save_dir).exists()
+    assert _training_artifact_best_dir(save_dir).exists()
 
     metadata = _training_selection_metadata(save_dir)
+    assert metadata["schema_version"] == 2
+    assert metadata["latest_epoch"] == 3
+    assert metadata["latest_score"] == pytest.approx(3.0)
+    assert metadata["has_best_candidate"] is True
     assert metadata["best_epoch"] == 3
     assert metadata["best_score"] == pytest.approx(3.0)
     assert metadata["completed_epoch"] == 3
@@ -3145,16 +3810,10 @@ def test_training_runs_restart_policy_uses_cumulative_epoch_across_fit_calls():
 
 @pytest.mark.cuda
 @pytest.mark.training_integration
-@pytest.mark.skipif(
-    not RUN_TRAINING_INTEGRATION,
-    reason=integration_skip_reason(
-        "THOR_RUN_TRAINING_INTEGRATION",
-        description="opt-in TrainingRuns CUDA integration tests",
-    ),
-)
 def test_training_runs_early_completion_stops_early_and_saves_best_candidate(capfd, tmp_path):
     early_dir = tmp_path / "early_completed_best"
     one_epoch_reference_dir = tmp_path / "one_epoch_reference"
+    two_epoch_reference_dir = tmp_path / "two_epoch_reference"
 
     early_policy = thor.training.EarlyCompletionPolicy(
         lambda current_score, best_score, current_epoch, best_epoch: current_epoch >= 2)
@@ -3183,6 +3842,8 @@ def test_training_runs_early_completion_stops_early_and_saves_best_candidate(cap
     assert result.final_training_stats.epoch == 2
     assert result.final_training_stats.epochs == 50
     assert early_dir.exists()
+    assert _training_artifact_latest_dir(early_dir).exists()
+    assert _training_artifact_best_dir(early_dir).exists()
 
     plain_text = _ANSI_RE.sub("", captured_text)
     assert re.search(
@@ -3197,12 +3858,25 @@ def test_training_runs_early_completion_stops_early_and_saves_best_candidate(cap
         check_best_model_every_epochs=1,
     ).fit(1)
 
+    _make_tiny_regression_trainer(
+        "training_runs_early_completion_two_epoch_reference",
+        save_model_dir=two_epoch_reference_dir,
+        save_model_overwrite=True,
+        check_best_model_every_epochs=1,
+    ).fit(2)
+
     selected_prediction = _prediction_from_saved_tiny_regressor(
-        early_dir, "training_runs_early_completion_best_candidate")
+        early_dir, "training_runs_early_completion_best_candidate", artifact="best")
+    latest_prediction = _prediction_from_saved_tiny_regressor(
+        early_dir, "training_runs_early_completion_best_candidate", artifact="latest")
     one_epoch_prediction = _prediction_from_saved_tiny_regressor(
         one_epoch_reference_dir, "training_runs_early_completion_one_epoch_reference")
+    two_epoch_prediction = _prediction_from_saved_tiny_regressor(
+        two_epoch_reference_dir, "training_runs_early_completion_two_epoch_reference")
 
     assert np.allclose(selected_prediction, one_epoch_prediction, atol=1e-6)
+    assert np.allclose(latest_prediction, two_epoch_prediction, atol=1e-6)
+    assert not np.allclose(selected_prediction, latest_prediction, atol=1e-7)
 
 
 @pytest.mark.cuda

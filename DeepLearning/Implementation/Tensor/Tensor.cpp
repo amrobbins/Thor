@@ -4,6 +4,7 @@
 #include <optional>
 
 #include "DeepLearning/Implementation/ThorError.h"
+#include "Utilities/Expression/CudaHelpers.h"
 using namespace ThorImplementation;
 using namespace std;
 
@@ -188,8 +189,6 @@ void Tensor::construct(TensorPlacement placement, TensorDescriptor descriptor, u
 static inline bool isPow2(std::size_t x) { return x && ((x & (x - 1)) == 0); }
 
 void Tensor::allocateMemory(uint32_t alignmentBytes) {
-    cudaError_t cudaStatus;
-
     unsigned long numElements = descriptor.getTotalNumElements();
     THOR_THROW_IF_FALSE(numElements > 0);
 
@@ -204,8 +203,7 @@ void Tensor::allocateMemory(uint32_t alignmentBytes) {
     if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
         if (alignmentBytes <= 256) {
             // Cuda gives this natively
-            cudaStatus = cudaHostAlloc(&backingMemory->mem, memBytes, cudaHostAllocPortable);
-            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+            CUDA_CHECK(cudaHostAlloc(&backingMemory->mem, memBytes, cudaHostAllocPortable));
         } else {
             void *p = nullptr;
             int prc = posix_memalign(&p, alignmentBytes, memBytes);
@@ -213,23 +211,13 @@ void Tensor::allocateMemory(uint32_t alignmentBytes) {
                 throw std::runtime_error(std::string("posix_memalign failed: ") + std::strerror(prc));
             }
             // Pin it so it still behaves like cudaHostAlloc memory for GPU transfers.
-            cudaStatus = cudaHostRegister(p, memBytes, cudaHostRegisterPortable);
-            if (cudaStatus != cudaSuccess) {
-                free(p);
-                throw std::runtime_error(std::string("cudaHostRegister failed: ") + cudaGetErrorString(cudaStatus));
-            }
+            CUDA_CHECK(cudaHostRegister(p, memBytes, cudaHostRegisterPortable));
             backingMemory->mem = p;
             backingMemory->cpuMemPinnedViaCudaHostRegister = true;
         }
     } else if (placement.getMemDevice() == TensorPlacement::MemDevices::GPU) {
         ScopedGpu scopedGpu(placement.getDeviceNum());
-        cudaStatus = cudaMalloc(&backingMemory->mem, memBytes);
-        if (cudaStatus != cudaSuccess) {
-            printf("cudaStatus %d\n", cudaStatus);
-            printf("%s\n", cudaGetErrorString(cudaStatus));
-            fflush(stdout);
-        }
-        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+        CUDA_CHECK(cudaMalloc(&backingMemory->mem, memBytes));
     } else {
         THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::CPU ||
                             placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
@@ -1430,7 +1418,6 @@ static void fillCpuRandomIntegral(
         }
     }
 }
-
 
 void fillCpuRandom(void *data) {
     HostFunctionArgsBase *baseArgs = static_cast<HostFunctionArgsBase *>(data);

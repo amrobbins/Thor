@@ -54,6 +54,18 @@ std::string normalizedOutputPathForCollisionCheck(const std::string& path) {
     return outputPath.lexically_normal().string();
 }
 
+std::filesystem::path selectedTrainingArtifactModelDirectory(const std::filesystem::path& artifactRoot) {
+    const std::filesystem::path bestDirectory = artifactRoot / "best";
+    if (std::filesystem::exists(bestDirectory)) {
+        return bestDirectory;
+    }
+    const std::filesystem::path latestDirectory = artifactRoot / "latest";
+    if (std::filesystem::exists(latestDirectory)) {
+        return latestDirectory;
+    }
+    return artifactRoot;
+}
+
 LineStatsColorMode combinedTrainingRunsColorMode(const std::vector<TrainingRunsSpec>& runs) {
     bool sawAuto = false;
     for (const TrainingRunsSpec& spec : runs) {
@@ -929,7 +941,8 @@ std::string TrainingRunsResult::saveEnsemble(std::string_view ensembleGroup,
             throw std::runtime_error("TrainingRunsResult.save_ensemble requires member '" + member.runName +
                                      "' to record the saved model network name.");
         }
-        completedMemberArtifacts.push_back(SavedNetworkArtifactRef{*result.savedModelDirectory, *result.savedModelNetworkName});
+        completedMemberArtifacts.push_back(
+            SavedNetworkArtifactRef{selectedTrainingArtifactModelDirectory(*result.savedModelDirectory), *result.savedModelNetworkName});
     }
 
     // save_ensemble produces a regular Thor Network artifact.  Member artifacts
@@ -1513,9 +1526,9 @@ void TrainingRuns::validateRestartConditions() const {
         const TrainingRunsRestartPolicy& condition = restartConditions[i];
         const bool hasRunName = condition.runName.has_value();
         const bool hasEnsembleGroup = condition.ensembleGroup.has_value();
-        if (hasRunName == hasEnsembleGroup) {
+        if (hasRunName && hasEnsembleGroup) {
             throw std::runtime_error("TrainingRuns restart_condition at index " + std::to_string(i) +
-                                     " must specify exactly one of run_name or ensemble_group.");
+                                     " cannot specify both run_name and ensemble_group.");
         }
         if (condition.progressCheckEpochs == 0) {
             throw std::runtime_error("TrainingRuns restart_condition at index " + std::to_string(i) +
@@ -1524,6 +1537,11 @@ void TrainingRuns::validateRestartConditions() const {
         if (!std::isfinite(condition.progressImprovementMinPercentage) || condition.progressImprovementMinPercentage < 0.0 || condition.progressImprovementMinPercentage > 100.0) {
             throw std::runtime_error("TrainingRuns restart_condition at index " + std::to_string(i) +
                                      " must have progress_improvement_min_percentage in [0, 100].");
+        }
+
+        if (!hasRunName && !hasEnsembleGroup) {
+            // Untargeted policies are global and apply to every run.
+            continue;
         }
 
         if (hasRunName) {
@@ -1548,10 +1566,12 @@ void TrainingRuns::validateRestartConditions() const {
 std::vector<TrainingRestartCondition> TrainingRuns::restartConditionsForRun(const TrainingRunsSpec& run) const {
     std::vector<TrainingRestartCondition> matches;
     for (const TrainingRunsRestartPolicy& condition : restartConditions) {
-        if (condition.runName.has_value() && *condition.runName == run.runName) {
-            matches.push_back(condition.toRestartCondition());
+        if (!condition.runName.has_value() && !condition.ensembleGroup.has_value()) {
+            matches.push_back(condition.withoutTarget());
+        } else if (condition.runName.has_value() && *condition.runName == run.runName) {
+            matches.push_back(condition.withoutTarget());
         } else if (condition.ensembleGroup.has_value() && run.ensembleGroup.has_value() && *condition.ensembleGroup == *run.ensembleGroup) {
-            matches.push_back(condition.toRestartCondition());
+            matches.push_back(condition.withoutTarget());
         }
     }
     return matches;
@@ -2692,7 +2712,7 @@ TrainingRunsComposedEvaluatorArtifacts loadTrainingRunsComposedEvaluatorArtifact
                                      "' does not have the exact saved model network name required for strict artifact loading.");
         }
         auto loadedNetwork = std::make_shared<Network>(*member.result->savedModelNetworkName);
-        loadedNetwork->load(*artifactDir);
+        loadedNetwork->load(selectedTrainingArtifactModelDirectory(*artifactDir).string());
         artifacts.memberNetworks.push_back(std::move(loadedNetwork));
         artifacts.weights.push_back(member.spec->ensembleWeight);
     }

@@ -32,37 +32,33 @@ struct TrainerFitOptions {
 };
 
 
-struct TrainingRestartCondition {
+struct TrainingRestartPolicy {
+    std::optional<std::string> runName{};
+    std::optional<std::string> ensembleGroup{};
     uint32_t progressCheckEpochs = 3;
     double progressImprovementMinPercentage = 5.0;
     uint32_t maxRestarts = 5;
 
-    TrainingRestartCondition() = default;
-    TrainingRestartCondition(uint32_t progressCheckEpochs, double progressImprovementMinPercentage = 5.0, uint32_t maxRestarts = 5)
+    TrainingRestartPolicy() = default;
+    TrainingRestartPolicy(uint32_t progressCheckEpochs, double progressImprovementMinPercentage = 5.0, uint32_t maxRestarts = 5)
         : progressCheckEpochs(progressCheckEpochs), progressImprovementMinPercentage(progressImprovementMinPercentage), maxRestarts(maxRestarts) {}
-};
 
-struct TrainingRunsRestartPolicy : public TrainingRestartCondition {
-    std::optional<std::string> runName{};
-    std::optional<std::string> ensembleGroup{};
-
-    TrainingRunsRestartPolicy() = default;
-    static TrainingRunsRestartPolicy forRun(std::string runName,
-                                            uint32_t progressCheckEpochs = 3,
-                                            double progressImprovementMinPercentage = 5.0,
-                                            uint32_t maxRestarts = 5) {
-        TrainingRunsRestartPolicy policy;
+    static TrainingRestartPolicy forRun(std::string runName,
+                                        uint32_t progressCheckEpochs = 3,
+                                        double progressImprovementMinPercentage = 5.0,
+                                        uint32_t maxRestarts = 5) {
+        TrainingRestartPolicy policy;
         policy.runName = std::move(runName);
         policy.progressCheckEpochs = progressCheckEpochs;
         policy.progressImprovementMinPercentage = progressImprovementMinPercentage;
         policy.maxRestarts = maxRestarts;
         return policy;
     }
-    static TrainingRunsRestartPolicy forEnsembleGroup(std::string ensembleGroup,
-                                                      uint32_t progressCheckEpochs = 3,
-                                                      double progressImprovementMinPercentage = 5.0,
-                                                      uint32_t maxRestarts = 5) {
-        TrainingRunsRestartPolicy policy;
+    static TrainingRestartPolicy forEnsembleGroup(std::string ensembleGroup,
+                                                  uint32_t progressCheckEpochs = 3,
+                                                  double progressImprovementMinPercentage = 5.0,
+                                                  uint32_t maxRestarts = 5) {
+        TrainingRestartPolicy policy;
         policy.ensembleGroup = std::move(ensembleGroup);
         policy.progressCheckEpochs = progressCheckEpochs;
         policy.progressImprovementMinPercentage = progressImprovementMinPercentage;
@@ -70,12 +66,16 @@ struct TrainingRunsRestartPolicy : public TrainingRestartCondition {
         return policy;
     }
 
-    [[nodiscard]] TrainingRestartCondition toRestartCondition() const {
-        return TrainingRestartCondition{progressCheckEpochs, progressImprovementMinPercentage, maxRestarts};
+    [[nodiscard]] TrainingRestartPolicy withoutTarget() const {
+        return TrainingRestartPolicy{progressCheckEpochs, progressImprovementMinPercentage, maxRestarts};
     }
+
+    [[nodiscard]] TrainingRestartPolicy toRestartCondition() const { return withoutTarget(); }
 };
 
-using TrainingRunsRestartConditionSpec = TrainingRunsRestartPolicy;
+using TrainingRestartCondition = TrainingRestartPolicy;
+using TrainingRunsRestartPolicy = TrainingRestartPolicy;
+using TrainingRunsRestartConditionSpec = TrainingRestartPolicy;
 
 class PlacedNetwork;
 

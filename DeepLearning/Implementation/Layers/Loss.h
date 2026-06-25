@@ -298,7 +298,7 @@ class Loss : public Layer {
         (void)predictions;
     }
 
-    void pruneTrainingBackpropPathIfInactive() {
+    virtual void pruneTrainingBackpropPathIfInactive() {
         if (trainingActive || trainingBackpropPathPruned || isInferenceOnly() || !errorOutput.has_value()) {
             return;
         }

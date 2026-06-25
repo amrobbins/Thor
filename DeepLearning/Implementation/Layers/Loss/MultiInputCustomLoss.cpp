@@ -20,12 +20,12 @@ MultiInputCustomLoss::MultiInputCustomLoss(DynamicExpression lossExpression,
                                            string lossName,
                                            DataType lossDataType,
                                            std::optional<float> lossWeight)
-    : lossExpression(std::move(lossExpression)),
+    : Loss(lossDataType),
+      lossExpression(std::move(lossExpression)),
       gradientExpression(std::move(gradientExpression)),
       inputNames(std::move(inputNames)),
       gradientNames(std::move(gradientNames)),
       lossName(std::move(lossName)),
-      lossDataType(lossDataType),
       lossWeight(normalizeLossWeight(lossWeight)) {
     THOR_THROW_IF_FALSE(!this->inputNames.empty());
     THOR_THROW_IF_FALSE(this->inputNames.size() == this->gradientNames.size());
@@ -358,6 +358,23 @@ void MultiInputCustomLoss::initialize() {
     currentBatchSize = 0;
 }
 
+void MultiInputCustomLoss::pruneTrainingBackpropPathIfInactive() {
+    if (trainingActive || trainingBackpropPathPruned || isInferenceOnly()) {
+        return;
+    }
+
+    for (size_t i = 0; i < errorOutputs.size(); ++i) {
+        if (!errorOutputs[i].has_value()) {
+            continue;
+        }
+        if (previousLayers[i].has_value()) {
+            previousLayers[i].value()->replaceErrorInput(errorOutputs[i], std::nullopt);
+        }
+        errorOutputs[i] = std::nullopt;
+    }
+    trainingBackpropPathPruned = true;
+}
+
 void MultiInputCustomLoss::synchronizeComputeStreamForInputs() {
     Stream& runStream = computeStream();
     for (size_t i = 0; i < inputStreams.size(); ++i) {
@@ -395,7 +412,8 @@ void MultiInputCustomLoss::forward(optional<Tensor> featureInput, bool validatio
         lossPreRunHook(computeStream());
     lossStamped->run();
 
-    if (gradientStamped != nullptr) {
+    const bool trainingPass = !isInferenceOnly() && !validationPass && trainingActive;
+    if (trainingPass && gradientStamped != nullptr) {
         if (gradientPreRunHook)
             gradientPreRunHook(computeStream());
         gradientStamped->run();
@@ -410,7 +428,7 @@ void MultiInputCustomLoss::forward(optional<Tensor> featureInput, bool validatio
     if (nextLayer.has_value())
         nextLayer.value()->forward(featureOutput, validationPass, currentBatchSize);
 
-    if (isInferenceOnly() || validationPass)
+    if (!trainingPass)
         return;
 
     backward(nullopt, currentBatchSize);

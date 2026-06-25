@@ -111,16 +111,28 @@ class Concatenate : public MultiConnectionLayer {
         delete[] splitTensorFeatureInputMemoriesArray;
 
         if (errorInputs[0].has_value()) {
-            cudaStatus = cudaMalloc(reinterpret_cast<void **>(&splitTensorErrorOutputMemoriesArray_d), numPresentTensors(errorOutputs) * sizeof(void *));
+            // Backpropagation through Concatenate may be intentionally sparse: some
+            // inputs can be real trainable graph edges while others are external data
+            // inputs that do not accept errors.  The split kernel still walks the
+            // original concatenated layout, so its destination pointer table must have
+            // one entry per original feature input.  Missing upstream error outputs are
+            // routed into throwaway tensors and then not propagated further.
+            discardedErrorOutputs.resize(numSplitTensors);
+            cudaStatus = cudaMalloc(reinterpret_cast<void **>(&splitTensorErrorOutputMemoriesArray_d), numSplitTensors * sizeof(void *));
             THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
             void **splitTensorErrorOutputMemoriesArray = new void *[numSplitTensors];
             for (int i = 0; i < numSplitTensors; ++i) {
-                if (errorOutputs[i].has_value())
+                if (errorOutputs[i].has_value()) {
                     splitTensorErrorOutputMemoriesArray[i] = errorOutputs[i].value().getMemPtr();
+                } else {
+                    THOR_THROW_IF_FALSE(featureInputs[i].has_value());
+                    discardedErrorOutputs[i] = featureInputs[i].value().clone();
+                    splitTensorErrorOutputMemoriesArray[i] = discardedErrorOutputs[i].value().getMemPtr();
+                }
             }
             cudaStatus = cudaMemcpy(splitTensorErrorOutputMemoriesArray_d,
                                     splitTensorErrorOutputMemoriesArray,
-                                    numPresentTensors(errorOutputs) * sizeof(void *),
+                                    numSplitTensors * sizeof(void *),
                                     cudaMemcpyHostToDevice);
             THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
             delete[] splitTensorErrorOutputMemoriesArray;
@@ -189,7 +201,7 @@ class Concatenate : public MultiConnectionLayer {
                         static_cast<std::size_t>(TensorDescriptor::getElementSizeInBytes(errorInput.value().getDescriptor().getDataType())),
                         errorInput.value().getDescriptor().getTotalNumElements(),
                         errorInput.value().getDescriptor().getDimensions().size(),
-                        numPresentTensors(errorOutputs),
+                        static_cast<int>(errorOutputs.size()),
                         axis,
                         axisElementsPerSplitTensor_d,
                         stridePerPackedTensorDimension_d,
@@ -253,6 +265,7 @@ class Concatenate : public MultiConnectionLayer {
             THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
             splitTensorErrorOutputMemoriesArray_d = nullptr;
         }
+        discardedErrorOutputs.clear();
         if (axisElementsPerSplitTensor_d != nullptr) {
             cudaStatus = cudaFree(axisElementsPerSplitTensor_d);
             THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
@@ -357,6 +370,7 @@ class Concatenate : public MultiConnectionLayer {
 
     void **splitTensorFeatureInputMemoriesArray_d;
     void **splitTensorErrorOutputMemoriesArray_d;
+    std::vector<std::optional<Tensor>> discardedErrorOutputs;
     long *stridePerPackedTensorDimension_d;
     long *stridePerSplitTensorDimension_d;
     long *axisElementsPerSplitTensor_d;

@@ -873,18 +873,52 @@ std::vector<TrainingRunsSpec> trainingRunsSpecsFromPython(nb::iterable runs) {
 }
 
 
-std::vector<TrainingRestartCondition> trainingRestartConditionsFromPython(nb::object restartConditions) {
-    if (restartConditions.is_none()) {
-        return {};
+void warnPythonRuntimeWarning(const std::string& message) {
+    if (PyErr_WarnEx(PyExc_RuntimeWarning, message.c_str(), 1) < 0) {
+        throw nb::python_error();
     }
-    return nb::cast<std::vector<TrainingRestartCondition>>(restartConditions);
 }
 
-std::vector<TrainingRunsRestartPolicy> trainingRunsRestartPoliciesFromPython(nb::object restartConditions) {
+std::vector<TrainingRestartPolicy> trainingRestartPoliciesFromPython(nb::object restartConditions, bool trainerScope) {
     if (restartConditions.is_none()) {
         return {};
     }
-    return nb::cast<std::vector<TrainingRunsRestartPolicy>>(restartConditions);
+
+    PyObject* iterator = PyObject_GetIter(restartConditions.ptr());
+    if (iterator == nullptr) {
+        PyErr_Clear();
+        throw nb::type_error("restart_conditions must be an iterable of RestartPolicy objects.");
+    }
+    Py_DECREF(iterator);
+
+    std::vector<TrainingRestartPolicy> policies;
+    size_t conditionIndex = 0;
+    for (nb::handle conditionObj : nb::cast<nb::iterable>(restartConditions)) {
+        if (!nb::isinstance<TrainingRestartPolicy>(conditionObj)) {
+            throw nb::type_error(
+                ("restart_conditions[" + std::to_string(conditionIndex) + "] must be a RestartPolicy object.").c_str());
+        }
+        TrainingRestartPolicy policy = nb::cast<TrainingRestartPolicy>(conditionObj);
+        if (trainerScope && (policy.runName.has_value() || policy.ensembleGroup.has_value())) {
+            std::string ignoredFields;
+            if (policy.runName.has_value()) {
+                ignoredFields += "run_name";
+            }
+            if (policy.ensembleGroup.has_value()) {
+                if (!ignoredFields.empty()) {
+                    ignoredFields += " and ";
+                }
+                ignoredFields += "ensemble_group";
+            }
+            warnPythonRuntimeWarning(
+                "Trainer restart_conditions ignore RestartPolicy " + ignoredFields +
+                "; targeting is only meaningful when the policy is passed to TrainingRuns.");
+            policy = policy.withoutTarget();
+        }
+        policies.push_back(std::move(policy));
+        ++conditionIndex;
+    }
+    return policies;
 }
 
 nb::object optionalDouble(std::optional<double> value);
@@ -1361,7 +1395,7 @@ calling this helper.
                 .checkBestModelEveryEpochs(check_best_model_every_epochs)
                 .minEarlyCompletionEpochs(min_early_completion_epochs)
                 .modelSelectionScore(trainingModelSelectionScoreFromPython(model_selection_score))
-                .restartConditions(trainingRestartConditionsFromPython(restart_conditions))
+                .restartConditions(trainingRestartPoliciesFromPython(restart_conditions, /*trainerScope=*/true))
                 .earlyCompletionPolicies(trainingEarlyCompletionPoliciesFromPython(early_completion_policies));
             if (optimizer != nullptr) {
                 builder.optimizer(std::move(optimizer));
@@ -1638,32 +1672,17 @@ calling this helper.
     training_ensemble_result.def_prop_ro("ensemble_test_loss",
                                          [](const TrainingEnsembleResult& self) { return optionalDouble(self.ensembleFinalTestLoss()); });
 
-    auto training_restart_condition = nb::class_<TrainingRestartCondition>(training, "TrainingRestartCondition");
-    training_restart_condition.attr("__module__") = "thor.training";
-    training_restart_condition.def(
+    auto training_restart_policy = nb::class_<TrainingRestartPolicy>(training, "TrainingRestartPolicy");
+    training_restart_policy.attr("__module__") = "thor.training";
+    training_restart_policy.def(
         "__init__",
-        [](TrainingRestartCondition* self, uint32_t progress_check_epochs, double progress_improvement_min_percentage, uint32_t max_restarts) {
-            new (self) TrainingRestartCondition(progress_check_epochs, progress_improvement_min_percentage, max_restarts);
-        },
-        "progress_check_epochs"_a = 3,
-        "progress_improvement_min_percentage"_a = 5.0,
-        "max_restarts"_a = 5);
-    training_restart_condition.def_ro("progress_check_epochs", &TrainingRestartCondition::progressCheckEpochs);
-    training_restart_condition.def_ro("progress_improvement_min_percentage", &TrainingRestartCondition::progressImprovementMinPercentage);
-    training_restart_condition.def_ro("max_restarts", &TrainingRestartCondition::maxRestarts);
-    training.attr("RestartCondition") = training.attr("TrainingRestartCondition");
-
-    auto training_runs_restart_policy = nb::class_<TrainingRunsRestartPolicy, TrainingRestartCondition>(training, "TrainingRunsRestartPolicy");
-    training_runs_restart_policy.attr("__module__") = "thor.training";
-    training_runs_restart_policy.def(
-        "__init__",
-        [](TrainingRunsRestartPolicy* self,
+        [](TrainingRestartPolicy* self,
            std::optional<std::string> run_name,
            std::optional<std::string> ensemble_group,
            uint32_t progress_check_epochs,
            double progress_improvement_min_percentage,
            uint32_t max_restarts) {
-            new (self) TrainingRunsRestartPolicy();
+            new (self) TrainingRestartPolicy();
             self->runName = std::move(run_name);
             self->ensembleGroup = std::move(ensemble_group);
             self->progressCheckEpochs = progress_check_epochs;
@@ -1675,23 +1694,30 @@ calling this helper.
         "progress_check_epochs"_a = 3,
         "progress_improvement_min_percentage"_a = 5.0,
         "max_restarts"_a = 5);
-    training_runs_restart_policy.def_prop_ro("run_name", [](const TrainingRunsRestartPolicy& self) -> nb::object {
+    training_restart_policy.def_prop_ro("run_name", [](const TrainingRestartPolicy& self) -> nb::object {
         if (!self.runName.has_value()) {
             return nb::none();
         }
         return nb::cast(*self.runName);
     });
-    training_runs_restart_policy.def_prop_ro("ensemble_group", [](const TrainingRunsRestartPolicy& self) -> nb::object {
+    training_restart_policy.def_prop_ro("ensemble_group", [](const TrainingRestartPolicy& self) -> nb::object {
         if (!self.ensembleGroup.has_value()) {
             return nb::none();
         }
         return nb::cast(*self.ensembleGroup);
     });
-    training_runs_restart_policy.def_prop_ro("progress_check_epochs", [](const TrainingRunsRestartPolicy& self) { return self.progressCheckEpochs; });
-    training_runs_restart_policy.def_prop_ro("progress_improvement_min_percentage", [](const TrainingRunsRestartPolicy& self) { return self.progressImprovementMinPercentage; });
-    training_runs_restart_policy.def_prop_ro("max_restarts", [](const TrainingRunsRestartPolicy& self) { return self.maxRestarts; });
-    training.attr("RestartPolicy") = training.attr("TrainingRunsRestartPolicy");
-    training.attr("TrainingRunsRestartCondition") = training.attr("TrainingRunsRestartPolicy");
+    training_restart_policy.def_prop_ro("progress_check_epochs", [](const TrainingRestartPolicy& self) { return self.progressCheckEpochs; });
+    training_restart_policy.def_prop_ro("progress_improvement_min_percentage", [](const TrainingRestartPolicy& self) {
+        return self.progressImprovementMinPercentage;
+    });
+    training_restart_policy.def_prop_ro("max_restarts", [](const TrainingRestartPolicy& self) { return self.maxRestarts; });
+
+    // Backward-compatible names are aliases to the single public restart-policy type.
+    training.attr("RestartPolicy") = training.attr("TrainingRestartPolicy");
+    training.attr("TrainingRestartCondition") = training.attr("TrainingRestartPolicy");
+    training.attr("RestartCondition") = training.attr("TrainingRestartPolicy");
+    training.attr("TrainingRunsRestartPolicy") = training.attr("TrainingRestartPolicy");
+    training.attr("TrainingRunsRestartCondition") = training.attr("TrainingRestartPolicy");
 
     auto training_early_completion_policy = nb::class_<TrainingEarlyCompletionPolicy>(training, "TrainingEarlyCompletionPolicy");
     training_early_completion_policy.attr("__module__") = "thor.training";
@@ -1803,7 +1829,7 @@ calling this helper.
                                                   trainingRunsFailurePolicyFromString(failure_policy),
                                                   max_summary_logs_per_second,
                                                   max_parallel_runs,
-                                                  trainingRunsRestartPoliciesFromPython(restart_conditions),
+                                                  trainingRestartPoliciesFromPython(restart_conditions, /*trainerScope=*/false),
                                                   trainingRunsEarlyCompletionRulesFromPython(early_completion_rules),
                                                   trainingRunsMinSuccessfulModelsFromPython(min_successful_models),
                                                   trainingRunsReportedLossesFromPython(reported_losses),

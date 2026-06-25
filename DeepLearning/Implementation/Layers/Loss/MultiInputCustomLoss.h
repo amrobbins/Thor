@@ -1,6 +1,6 @@
 #pragma once
 
-#include "DeepLearning/Implementation/Layers/Layer.h"
+#include "DeepLearning/Implementation/Layers/Loss.h"
 #include "Utilities/Expression/DynamicExpression.h"
 
 #include <functional>
@@ -13,7 +13,7 @@
 
 namespace ThorImplementation {
 
-class MultiInputCustomLoss : public Layer {
+class MultiInputCustomLoss : public Loss {
    public:
     MultiInputCustomLoss(DynamicExpression lossExpression,
                          DynamicExpression gradientExpression,
@@ -41,6 +41,7 @@ class MultiInputCustomLoss : public Layer {
     std::optional<Tensor> getErrorOutput(uint32_t inputIndex) const;
     std::vector<std::optional<Tensor>> getErrorOutputs() const { return errorOutputs; }
     Stream getStream() override;
+    void pruneTrainingBackpropPathIfInactive() override;
 
    protected:
     using TensorMap = std::unordered_map<std::string, Tensor>;
@@ -64,7 +65,6 @@ class MultiInputCustomLoss : public Layer {
     std::vector<std::string> inputNames;
     std::vector<std::optional<std::string>> gradientNames;
     std::string lossName;
-    DataType lossDataType;
     std::optional<float> lossWeight;
 
     std::vector<std::optional<Tensor>> featureInputs;
