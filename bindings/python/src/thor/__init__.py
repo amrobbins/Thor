@@ -7,6 +7,25 @@ from . import _bootstrap as _bootstrap
 _bootstrap.configure()
 
 from ._thor import DataType, Network, Tensor
+
+
+class _NetworkLoadDescriptor:
+    """Dual-use Network.load descriptor.
+
+    Nanobind does not allow a static method and an instance method to share the
+    same overload name.  Keep the public API ergonomic by dispatching
+    ``thor.Network.load(path)`` to the native static loader and ``network.load(path)``
+    to the native in-place loader.
+    """
+
+    def __get__(self, instance, owner=None):
+        if instance is None:
+            return Network._load_from_path
+        return instance._load_in_place
+
+
+Network.load = _NetworkLoadDescriptor()
+
 from .ensembles import EnsembleModel
 from ._thor import __git_version__, __version__
 

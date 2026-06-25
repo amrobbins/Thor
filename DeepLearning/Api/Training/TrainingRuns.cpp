@@ -382,6 +382,27 @@ std::vector<std::string> predictionOutputNamesFromSignature(const std::vector<Tr
     return names;
 }
 
+std::vector<std::string> deployableOutputNamesForSavedEnsemble(Network& referenceMember,
+                                                               const std::vector<TrainingRunOutputSignature>& signature) {
+    std::set<std::string> reportOnlyOutputNames;
+    reportOnlyOutputNames.insert("loss");
+    for (const NetworkLossReference& loss : referenceMember.getReportableLosses()) {
+        reportOnlyOutputNames.insert(loss.lossName);
+    }
+    for (const NetworkMetricReference& metric : referenceMember.getReportableMetrics()) {
+        reportOnlyOutputNames.insert(metric.metricName);
+    }
+
+    std::vector<std::string> names;
+    names.reserve(signature.size());
+    for (const TrainingRunOutputSignature& item : signature) {
+        if (reportOnlyOutputNames.count(item.outputName) == 0) {
+            names.push_back(item.outputName);
+        }
+    }
+    return names;
+}
+
 std::string safeMemberDirectoryName(size_t index, const std::string& runName) {
     std::ostringstream out;
     out << std::setw(4) << std::setfill('0') << index << "_";
@@ -399,6 +420,27 @@ std::string safeMemberDirectoryName(size_t index, const std::string& runName) {
         out << "member";
     }
     return out.str();
+}
+
+std::string safeNetworkNameForSavedEnsemble(std::string_view ensembleGroup) {
+    std::string name = "ensemble";
+    if (!ensembleGroup.empty()) {
+        name += "_";
+    }
+    bool wroteAnyNameChar = false;
+    for (unsigned char ch : ensembleGroup) {
+        if (std::isalnum(ch) || ch == '-' || ch == '_' || ch == '.') {
+            name.push_back(static_cast<char>(ch));
+            wroteAnyNameChar = true;
+        } else {
+            name.push_back('_');
+            wroteAnyNameChar = true;
+        }
+    }
+    if (!wroteAnyNameChar && ensembleGroup.empty()) {
+        name += "model";
+    }
+    return name;
 }
 
 void removePathIfExistsForEnsembleSave(const std::filesystem::path& path) {
@@ -782,6 +824,16 @@ bool TrainingRunsResult::anyCancelled() const {
     return std::any_of(results.begin(), results.end(), [](const TrainingRunResult& result) { return result.cancelled(); });
 }
 
+namespace {
+
+void saveComposedEnsembleNetworkArtifact(const TrainingEnsembleResult& ensembleResult,
+                                         const std::vector<std::filesystem::path>& memberArtifactDirectories,
+                                         const std::string& aggregation,
+                                         const std::filesystem::path& artifactDirectory,
+                                         bool overwriteNetworkArchive);
+
+}  // namespace
+
 std::map<std::string, size_t> TrainingRunsResult::statusCounts() const {
     std::map<std::string, size_t> counts;
     for (const TrainingRunResult& result : results) {
@@ -842,9 +894,8 @@ std::string TrainingRunsResult::saveEnsemble(std::string_view ensembleGroup,
         resultByRunName.emplace(result.runName, &result);
     }
 
-    const std::string manifestAggregation = resolvedEnsembleAggregation(ensembleResult, std::move(aggregation));
+    const std::string resolvedAggregation = resolvedEnsembleAggregation(ensembleResult, std::move(aggregation));
     const std::filesystem::path artifactDirectory(directory);
-    const std::filesystem::path manifestPath = artifactDirectory / "ensemble_manifest.json";
     std::error_code errorCode;
     if (std::filesystem::exists(artifactDirectory, errorCode) && !overwrite) {
         throw std::runtime_error("TrainingRunsResult.save_ensemble output directory already exists: " + artifactDirectory.string());
@@ -855,22 +906,10 @@ std::string TrainingRunsResult::saveEnsemble(std::string_view ensembleGroup,
     if (overwrite) {
         removePathIfExistsForEnsembleSave(artifactDirectory);
     }
-    std::filesystem::create_directories(artifactDirectory / "members", errorCode);
-    if (errorCode) {
-        throw std::runtime_error("Failed to create ensemble output directory '" + artifactDirectory.string() + "': " + errorCode.message());
-    }
 
-    struct MemberManifestEntry {
-        const TrainingEnsembleMemberResult* member = nullptr;
-        const TrainingRunResult* result = nullptr;
-        std::string relativePath{};
-    };
-
-    std::vector<MemberManifestEntry> entries;
-    entries.reserve(ensembleResult.members.size());
-    size_t savedMemberIndex = 0;
-    for (size_t i = 0; i < ensembleResult.members.size(); ++i) {
-        const TrainingEnsembleMemberResult& member = ensembleResult.members[i];
+    std::vector<std::filesystem::path> completedMemberArtifactDirectories;
+    completedMemberArtifactDirectories.reserve(ensembleResult.members.size());
+    for (const TrainingEnsembleMemberResult& member : ensembleResult.members) {
         if (member.status != TrainingRunStatus::COMPLETED) {
             continue;
         }
@@ -883,164 +922,18 @@ std::string TrainingRunsResult::saveEnsemble(std::string_view ensembleGroup,
             throw std::runtime_error("TrainingRunsResult.save_ensemble requires member '" + member.runName +
                                      "' to have a trainer save_model_dir / saved_model_dir artifact.");
         }
-        const std::filesystem::path sourceDirectory(*result.savedModelDirectory);
-        const std::string memberRelativePath = std::string("members/") + safeMemberDirectoryName(savedMemberIndex, member.runName);
-        ++savedMemberIndex;
-        copyMemberArtifactDirectory(sourceDirectory, artifactDirectory / memberRelativePath);
-        entries.push_back(MemberManifestEntry{&member, &result, memberRelativePath});
+        completedMemberArtifactDirectories.emplace_back(*result.savedModelDirectory);
     }
 
-    const std::vector<std::string> manifestInputNames = entries.empty()
-        ? inputNamesFromSignature(ensembleResult.inputSignature)
-        : inferenceInputNamesFromSavedArtifact(artifactDirectory / entries.front().relativePath, ensembleResult.inputSignature);
+    // save_ensemble produces a regular Thor Network artifact.  Member artifacts
+    // and manifests are not copied into the deployable artifact.
+    saveComposedEnsembleNetworkArtifact(ensembleResult,
+                                        completedMemberArtifactDirectories,
+                                        resolvedAggregation,
+                                        artifactDirectory,
+                                        /*overwriteNetworkArchive=*/true);
 
-    const std::filesystem::path tmpManifestPath = artifactDirectory / ".ensemble_manifest.json.tmp";
-    {
-        std::ofstream out(tmpManifestPath, std::ios::binary | std::ios::trunc);
-        if (!out) {
-            throw std::runtime_error("Unable to open ensemble manifest for writing: " + tmpManifestPath.string());
-        }
-
-        out << "{\n";
-        out << "  \"aggregation\": {\n";
-        out << "    \"type\": ";
-        writeJsonString(out, manifestAggregation);
-        out << "\n";
-        out << "  },\n";
-        out << "  \"artifact_type\": \"thor_ensemble_model\",\n";
-        out << "  \"ensemble_group\": ";
-        writeJsonString(out, ensembleResult.ensembleGroup);
-        out << ",\n";
-        out << "  \"target_num_members\": " << ensembleResult.members.size() << ",\n";
-        out << "  \"actual_num_members\": " << entries.size() << ",\n";
-        out << "  \"min_successful_models\": " << ensembleResult.requiredSuccessfulModels() << ",\n";
-        out << "  \"execution\": \"parallel_single_gpu\",\n";
-        out << "  \"input_names\": ";
-        writeJsonStringArray(out, manifestInputNames, "    ");
-        out << ",\n";
-        out << "  \"reported_losses\": ";
-        std::vector<std::string> reportedLossNames;
-        reportedLossNames.reserve(ensembleResult.namedMetrics.size());
-        for (const TrainingNamedMetricResult& metric : ensembleResult.namedMetrics) {
-            reportedLossNames.push_back(metric.name);
-        }
-        writeJsonStringArray(out, reportedLossNames, "    ");
-        out << ",\n";
-        out << "  \"reported_metrics\": ";
-        std::vector<std::string> reportedMetricNames;
-        reportedMetricNames.reserve(ensembleResult.namedGraphMetrics.size());
-        for (const TrainingNamedMetricResult& metric : ensembleResult.namedGraphMetrics) {
-            reportedMetricNames.push_back(metric.name);
-        }
-        writeJsonStringArray(out, reportedMetricNames, "    ");
-        out << ",\n";
-        out << "  \"overall_loss_reduction\": \"sum\",\n";
-        out << "  \"losses\": [";
-        for (size_t i = 0; i < ensembleResult.namedMetrics.size(); ++i) {
-            const TrainingNamedMetricResult& metric = ensembleResult.namedMetrics[i];
-            if (i != 0) {
-                out << ",";
-            }
-            out << "\n    {\n";
-            out << "      \"name\": ";
-            writeJsonString(out, metric.name);
-            out << ",\n";
-            out << "      \"train_value\": ";
-            writeOptionalDoubleJson(out, metric.trainValue);
-            out << ",\n";
-            out << "      \"test_value\": ";
-            writeOptionalDoubleJson(out, metric.testValue);
-            out << "\n";
-            out << "    }";
-        }
-        out << "\n  ],\n";
-        out << "  \"metrics\": [";
-        for (size_t i = 0; i < ensembleResult.namedGraphMetrics.size(); ++i) {
-            const TrainingNamedMetricResult& metric = ensembleResult.namedGraphMetrics[i];
-            if (i != 0) {
-                out << ",";
-            }
-            out << "\n    {\n";
-            out << "      \"name\": ";
-            writeJsonString(out, metric.name);
-            out << ",\n";
-            out << "      \"train_value\": ";
-            writeOptionalDoubleJson(out, metric.trainValue);
-            out << ",\n";
-            out << "      \"test_value\": ";
-            writeOptionalDoubleJson(out, metric.testValue);
-            out << "\n";
-            out << "    }";
-        }
-        out << "\n  ],\n";
-        out << "  \"members\": [";
-        for (size_t i = 0; i < entries.size(); ++i) {
-            const MemberManifestEntry& entry = entries[i];
-            if (i != 0) {
-                out << ",";
-            }
-            out << "\n    {\n";
-            out << "      \"name\": ";
-            writeJsonString(out, entry.member->runName);
-            out << ",\n";
-            out << "      \"path\": ";
-            writeJsonString(out, entry.relativePath);
-            out << ",\n";
-            out << "      \"selection\": {\n";
-            out << "        \"best_epoch\": ";
-            writeOptionalUint64Json(out, entry.result->bestEpoch);
-            out << ",\n";
-            out << "        \"best_score\": ";
-            writeOptionalDoubleJson(out, entry.result->bestScore);
-            out << ",\n";
-            out << "        \"completed_epoch\": ";
-            writeOptionalUint64Json(out, entry.result->completedEpoch);
-            out << ",\n";
-            out << "        \"completion_reason\": ";
-            writeJsonString(out, trainingRunCompletionReasonName(entry.result->completionReason));
-            out << ",\n";
-            out << "        \"final_test_loss\": ";
-            writeOptionalDoubleJson(out, entry.result->finalLossForPhase(TrainingEventPhase::TEST));
-            out << ",\n";
-            out << "        \"final_training_loss\": ";
-            writeOptionalDoubleJson(out, entry.result->finalLossForPhase(TrainingEventPhase::TRAIN));
-            out << ",\n";
-            out << "        \"final_validation_loss\": ";
-            writeOptionalDoubleJson(out, entry.result->finalLossForPhase(TrainingEventPhase::VALIDATE));
-            out << ",\n";
-            out << "        \"result\": ";
-            writeJsonString(out, entry.result->resultName());
-            out << ",\n";
-            out << "        \"status\": ";
-            writeJsonString(out, trainingRunStatusName(entry.result->status));
-            out << "\n";
-            out << "      },\n";
-            out << "      \"weight\": " << std::setprecision(17) << entry.member->weight << "\n";
-            out << "    }";
-        }
-        out << "\n  ],\n";
-        out << "  \"output_names\": ";
-        writeJsonStringArray(out, predictionOutputNamesFromSignature(ensembleResult.outputSignature), "    ");
-        out << ",\n";
-        out << "  \"version\": " << ENSEMBLE_MANIFEST_CURRENT_ARTIFACT_VERSION << "\n";
-        out << "}\n";
-        if (!out) {
-            throw std::runtime_error("Failed while writing ensemble manifest: " + tmpManifestPath.string());
-        }
-    }
-
-    std::filesystem::rename(tmpManifestPath, manifestPath, errorCode);
-    if (errorCode) {
-        removePathIfExistsForEnsembleSave(manifestPath);
-        errorCode.clear();
-        std::filesystem::rename(tmpManifestPath, manifestPath, errorCode);
-        if (errorCode) {
-            removePathIfExistsForEnsembleSave(tmpManifestPath);
-            throw std::runtime_error("Failed to finalize ensemble manifest '" + manifestPath.string() + "': " + errorCode.message());
-        }
-    }
-
-    return manifestPath.string();
+    return artifactDirectory.string();
 }
 
 TrainingRuns::TrainingRuns(std::vector<TrainingRunsSpec> runs,
@@ -2274,7 +2167,8 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
     const std::vector<std::shared_ptr<Network>>& memberNetworks,
     const std::vector<double>& weights,
     const std::vector<std::string>& outputNames,
-    bool exposeAveragedOutputsAsNetworkOutputs = true) {
+    bool exposeAveragedOutputsAsNetworkOutputs = true,
+    const std::string& networkName = "training_runs_composed_ensemble_evaluator") {
     if (memberNetworks.empty()) {
         throw std::runtime_error("TrainingRuns composed ensemble evaluator requires at least one member network.");
     }
@@ -2298,6 +2192,7 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
 
     Network& referenceMember = *memberNetworks.front();
     std::vector<std::string> referenceInputNames = referenceMember.getInferenceNetworkInputNames();
+    eraseNames(referenceInputNames, referenceMember.getTrainingOnlyNetworkInputNames());
     if (referenceInputNames.empty()) {
         throw std::runtime_error("TrainingRuns composed ensemble evaluator requires at least one shared member inference input.");
     }
@@ -2305,7 +2200,7 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
         apiNetworkInputsByName(referenceMember, /*includePassThroughInputs=*/false);
 
     TrainingRunsComposedEnsembleEvaluator evaluator;
-    evaluator.network = std::make_shared<Network>("training_runs_composed_ensemble_evaluator");
+    evaluator.network = std::make_shared<Network>(networkName);
     evaluator.memberOutputTensorsByName.resize(memberNetworks.size());
 
     std::set<std::string> seenReferenceInputNames;
@@ -2330,6 +2225,7 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
     for (size_t memberIndex = 0; memberIndex < memberNetworks.size(); ++memberIndex) {
         Network& memberNetwork = *memberNetworks[memberIndex];
         std::vector<std::string> memberInputNames = memberNetwork.getInferenceNetworkInputNames();
+        eraseNames(memberInputNames, memberNetwork.getTrainingOnlyNetworkInputNames());
         std::set<std::string> memberInputNameSet(memberInputNames.begin(), memberInputNames.end());
         if (memberInputNameSet != referenceInputNameSet || memberInputNames.size() != memberInputNameSet.size()) {
             throw std::runtime_error("TrainingRuns composed ensemble evaluator members have incompatible inference input names.");
@@ -2405,6 +2301,59 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
     }
 
     return evaluator;
+}
+
+void saveComposedEnsembleNetworkArtifact(const TrainingEnsembleResult& ensembleResult,
+                                         const std::vector<std::filesystem::path>& memberArtifactDirectories,
+                                         const std::string& aggregation,
+                                         const std::filesystem::path& artifactDirectory,
+                                         bool overwriteNetworkArchive) {
+    if (memberArtifactDirectories.empty()) {
+        throw std::runtime_error("TrainingRunsResult.save_ensemble cannot save an ensemble network with no completed member artifacts.");
+    }
+
+    std::vector<std::shared_ptr<Network>> memberNetworks;
+    memberNetworks.reserve(memberArtifactDirectories.size());
+    for (size_t memberIndex = 0; memberIndex < memberArtifactDirectories.size(); ++memberIndex) {
+        auto memberNetwork = std::make_shared<Network>("training_runs_save_ensemble_member_" + std::to_string(memberIndex));
+        memberNetwork->load(memberArtifactDirectories[memberIndex].string());
+        memberNetworks.push_back(std::move(memberNetwork));
+    }
+
+    std::vector<double> weights;
+    weights.reserve(memberArtifactDirectories.size());
+    for (const TrainingEnsembleMemberResult& member : ensembleResult.members) {
+        if (member.status != TrainingRunStatus::COMPLETED) {
+            continue;
+        }
+        weights.push_back(aggregation == "mean" ? 1.0 : member.weight);
+    }
+    if (weights.size() != memberArtifactDirectories.size()) {
+        throw std::runtime_error("TrainingRunsResult.save_ensemble internal error while collecting completed member weights.");
+    }
+
+    const std::vector<std::string> outputNames = deployableOutputNamesForSavedEnsemble(*memberNetworks.front(), ensembleResult.outputSignature);
+    if (outputNames.empty()) {
+        throw std::runtime_error("TrainingRunsResult.save_ensemble could not determine any deployable prediction output names for ensemble group '" +
+                                 ensembleResult.ensembleGroup + "'.");
+    }
+
+    TrainingRunsComposedEnsembleEvaluator evaluator = buildTrainingRunsComposedEnsembleEvaluatorThroughAccumulator(
+        memberNetworks,
+        weights,
+        outputNames,
+        /*exposeAveragedOutputsAsNetworkOutputs=*/true,
+        safeNetworkNameForSavedEnsemble(ensembleResult.ensembleGroup));
+
+    std::vector<Event> initDoneEvents;
+    std::shared_ptr<PlacedNetwork> placed = evaluator.network->place(
+        /*batchSize=*/1,
+        initDoneEvents,
+        /*inferenceOnly=*/true,
+        /*forcedDevices=*/{},
+        /*forcedNumStampsPerGpu=*/0,
+        /*networkOutputsOnGpu=*/false);
+    placed->save(artifactDirectory.string(), overwriteNetworkArchive, /*saveOptimizerState=*/false);
 }
 
 Tensor trainingRunsEvaluatorInputTensorForGraphInput(TrainingRunsComposedEnsembleEvaluator& evaluator,

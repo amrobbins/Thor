@@ -14,6 +14,7 @@
 #include <stdexcept>
 #include <system_error>
 #include <utility>
+#include <unordered_map>
 #include <vector>
 
 namespace Thor {
@@ -131,34 +132,61 @@ class ResultCapturingTrainingObserver : public TrainingObserver {
         return static_cast<uint64_t>(value.value());
     }
 
-    struct FinalEpochLossAccumulator {
+    struct FinalEpochStatsAccumulator {
+        struct RunningMean {
+            double sum = 0.0;
+            uint64_t count = 0;
+
+            void add(double value) {
+                sum += value;
+                count += 1;
+            }
+
+            [[nodiscard]] std::optional<double> mean() const {
+                if (count == 0) {
+                    return std::nullopt;
+                }
+                return sum / static_cast<double>(count);
+            }
+        };
+
         uint64_t currentEpoch = 0;
-        double currentEpochLossSum = 0.0;
-        uint64_t currentEpochLossCount = 0;
+        RunningMean lossMean{};
+        std::unordered_map<std::string, RunningMean> metricMeans{};
 
         TrainingStatsSnapshot update(const TrainingStatsSnapshot& stats) {
             TrainingStatsSnapshot finalStats = stats;
-            if (!stats.loss.has_value()) {
-                return finalStats;
-            }
-
             if (currentEpoch != stats.epoch) {
                 currentEpoch = stats.epoch;
-                currentEpochLossSum = 0.0;
-                currentEpochLossCount = 0;
+                lossMean = RunningMean{};
+                metricMeans.clear();
             }
 
-            currentEpochLossSum += stats.loss.value();
-            currentEpochLossCount += 1;
-            finalStats.loss = currentEpochLossSum / static_cast<double>(currentEpochLossCount);
+            if (stats.loss.has_value() && std::isfinite(stats.loss.value())) {
+                lossMean.add(stats.loss.value());
+                finalStats.loss = lossMean.mean();
+            }
+
+            for (const auto& [name, value] : stats.metrics) {
+                if (!std::isfinite(value)) {
+                    continue;
+                }
+                RunningMean& metricMean = metricMeans[name];
+                metricMean.add(value);
+                std::optional<double> mean = metricMean.mean();
+                if (mean.has_value()) {
+                    finalStats.metrics[name] = mean.value();
+                }
+            }
+
             return finalStats;
         }
     };
 
     TrainingObserver& inner;
-    FinalEpochLossAccumulator trainingLoss{};
-    FinalEpochLossAccumulator validationLoss{};
-    FinalEpochLossAccumulator testLoss{};
+    FinalEpochStatsAccumulator trainingLoss{};
+    FinalEpochStatsAccumulator validationLoss{};
+    FinalEpochStatsAccumulator testLoss{};
 };
 
 
@@ -279,26 +307,53 @@ class RestartAttemptObserver : public TrainingObserver {
     std::optional<TrainingStatsSnapshot> finalTestStats{};
 
    private:
-    struct FinalEpochLossAccumulator {
+    struct FinalEpochStatsAccumulator {
+        struct RunningMean {
+            double sum = 0.0;
+            uint64_t count = 0;
+
+            void add(double value) {
+                sum += value;
+                count += 1;
+            }
+
+            [[nodiscard]] std::optional<double> mean() const {
+                if (count == 0) {
+                    return std::nullopt;
+                }
+                return sum / static_cast<double>(count);
+            }
+        };
+
         uint64_t currentEpoch = 0;
-        double currentEpochLossSum = 0.0;
-        uint64_t currentEpochLossCount = 0;
+        RunningMean lossMean{};
+        std::unordered_map<std::string, RunningMean> metricMeans{};
 
         TrainingStatsSnapshot update(const TrainingStatsSnapshot& stats) {
             TrainingStatsSnapshot finalStats = stats;
-            if (!stats.loss.has_value()) {
-                return finalStats;
-            }
-
             if (currentEpoch != stats.epoch) {
                 currentEpoch = stats.epoch;
-                currentEpochLossSum = 0.0;
-                currentEpochLossCount = 0;
+                lossMean = RunningMean{};
+                metricMeans.clear();
             }
 
-            currentEpochLossSum += stats.loss.value();
-            currentEpochLossCount += 1;
-            finalStats.loss = currentEpochLossSum / static_cast<double>(currentEpochLossCount);
+            if (stats.loss.has_value() && std::isfinite(stats.loss.value())) {
+                lossMean.add(stats.loss.value());
+                finalStats.loss = lossMean.mean();
+            }
+
+            for (const auto& [name, value] : stats.metrics) {
+                if (!std::isfinite(value)) {
+                    continue;
+                }
+                RunningMean& metricMean = metricMeans[name];
+                metricMean.add(value);
+                std::optional<double> mean = metricMean.mean();
+                if (mean.has_value()) {
+                    finalStats.metrics[name] = mean.value();
+                }
+            }
+
             return finalStats;
         }
     };
@@ -368,9 +423,9 @@ class RestartAttemptObserver : public TrainingObserver {
 
     TrainingObserver& inner;
     uint64_t attemptNumber = 1;
-    FinalEpochLossAccumulator trainingLoss{};
-    FinalEpochLossAccumulator validationLoss{};
-    FinalEpochLossAccumulator testLoss{};
+    FinalEpochStatsAccumulator trainingLoss{};
+    FinalEpochStatsAccumulator validationLoss{};
+    FinalEpochStatsAccumulator testLoss{};
     std::vector<RestartConditionAttemptState> restartConditionStates{};
 };
 

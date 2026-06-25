@@ -101,7 +101,7 @@ A Network that contains layers. FIXME.
     network.def("get_architecture_json", &Network::architectureJsonString);
     network.def("save", nb::overload_cast<const std::string &, bool>(&Network::save), "directory"_a, "overwrite"_a = false);
     network.def(
-        "load",
+        "_load_in_place",
         [](Network& self,
            const std::string& directory,
            bool allow_unsafe_loaded_cuda_kernel_source,
@@ -117,13 +117,34 @@ A Network that contains layers. FIXME.
         "trusted_cuda_kernel_public_key"_a = "",
         "trusted_cuda_kernel_source_decryption_key"_a = "",
         R"nbdoc(
-Load a saved Thor network.
+Load a saved Thor network into this instance.
 
 CudaKernelExpression CUDA source saved by current Thor versions is encrypted in
 the model JSON. Loading such a model requires the out-of-band Ed25519 public
 signing key and AES-256-GCM source decryption key printed when the model was
 saved. Setting ``allow_unsafe_loaded_cuda_kernel_source=True`` additionally
 allows the decrypted source to compile/run after signature verification.
+)nbdoc");
+
+    network.def_static(
+        "_load_from_path",
+        [](const std::string& directory,
+           bool allow_unsafe_loaded_cuda_kernel_source,
+           const std::string& trusted_cuda_kernel_public_key,
+           const std::string& trusted_cuda_kernel_source_decryption_key) {
+            auto loaded = std::make_shared<Network>("loaded_network");
+            loaded->load(directory,
+                         allow_unsafe_loaded_cuda_kernel_source,
+                         trusted_cuda_kernel_public_key,
+                         trusted_cuda_kernel_source_decryption_key);
+            return loaded;
+        },
+        "directory"_a,
+        "allow_unsafe_loaded_cuda_kernel_source"_a = false,
+        "trusted_cuda_kernel_public_key"_a = "",
+        "trusted_cuda_kernel_source_decryption_key"_a = "",
+        R"nbdoc(
+Load and return a saved Thor network.
 )nbdoc");
 
     network.def("cuda_kernel_source_info", [](const Network& self) { return cudaKernelSourceInspectionListToPython(self.cudaKernelSourceInfo()); });

@@ -1654,44 +1654,18 @@ def test_training_runs_reports_mae_plus_low_high_quantile_losses(capfd, tmp_path
     assert "ensemble_test_quantile_high_loss=" in ensemble_line
 
     ensemble_artifact_dir = tmp_path / "demand_quantile_ensemble_artifact"
-    manifest_path = results.save_ensemble("demand_quantile_ensemble", ensemble_artifact_dir)
-    assert manifest_path == str(ensemble_artifact_dir / "ensemble_manifest.json")
-    manifest = json.loads((ensemble_artifact_dir / "ensemble_manifest.json").read_text(encoding="utf-8"))
-    assert manifest["reported_losses"] == reported_losses
-    assert manifest["overall_loss_reduction"] == "sum"
-    manifest_losses = {
-        loss["name"]: loss for loss in manifest["losses"]
-    }
-    assert list(manifest_losses.keys()) == reported_losses
-    assert manifest_losses["mae_loss"]["test_value"] == pytest.approx(by_name["mae_loss"].test_value)
-    assert manifest_losses["quantile_low_loss"]["test_value"] == pytest.approx(by_name["quantile_low_loss"].test_value)
-    assert manifest_losses["quantile_high_loss"]["test_value"] == pytest.approx(
-        by_name["quantile_high_loss"].test_value)
-    assert "output_name" not in manifest_losses["mae_loss"]
-    assert "target_input_name" not in manifest_losses["mae_loss"]
-
-    loaded_ensemble = thor.EnsembleModel.load(ensemble_artifact_dir)
-    assert loaded_ensemble.get_num_members() == 2
-    assert loaded_ensemble.get_input_names() == ("examples",)
-    loaded_output_names = loaded_ensemble.get_output_names()
-    assert set(loaded_output_names) == {
-        "mae_loss",
-        "quantile_low_loss",
-        "quantile_high_loss",
-        "forecast",
-        "forecast_p10",
-        "forecast_p90",
-    }
-    loaded_output_names = loaded_ensemble.get_output_names()
-    assert set(loaded_output_names) == {
-        "mae_loss",
-        "quantile_low_loss",
-        "quantile_high_loss",
-        "forecast",
-        "forecast_p10",
-        "forecast_p90",
-    }
-    assert loaded_output_names[-3:] == ("forecast", "forecast_p10", "forecast_p90")
+    artifact_path = results.save_ensemble("demand_quantile_ensemble", ensemble_artifact_dir)
+    assert artifact_path == str(ensemble_artifact_dir)
+    assert not (ensemble_artifact_dir / "ensemble_manifest.json").exists()
+    assert not (ensemble_artifact_dir / "members").exists()
+    loaded_network = thor.Network.load(str(ensemble_artifact_dir))
+    placed_ensemble = loaded_network.place(4, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
+    assert set(placed_ensemble.get_network_input_names()) == {"examples"}
+    x, _ = _mae_quantile_regression_arrays(dtype=np.float32)
+    ensemble_outputs = placed_ensemble.infer({
+        "examples": _cpu_tensor(x, thor.DataType.fp32)
+    })
+    assert set(ensemble_outputs) == {"forecast", "forecast_p10", "forecast_p90"}
 
 
 @pytest.mark.cuda
@@ -1864,28 +1838,13 @@ def test_training_runs_airfoil_cv3_reports_mae_plus_low_high_quantile_losses(cap
         )
 
     ensemble_artifact_dir = tmp_path / "airfoil_noise_cv3_ensemble"
-    manifest_path = results.save_ensemble("airfoil_noise_cv3", ensemble_artifact_dir)
-    assert manifest_path == str(ensemble_artifact_dir / "ensemble_manifest.json")
-    manifest = json.loads((ensemble_artifact_dir / "ensemble_manifest.json").read_text(encoding="utf-8"))
-    assert manifest["reported_losses"] == reported_losses
-    assert manifest["reported_metrics"] == reported_metrics
-    assert manifest["overall_loss_reduction"] == "sum"
-    assert len(manifest["members"]) == 3
-    assert [loss["name"] for loss in manifest["losses"]] == reported_losses
-    assert [metric["name"] for metric in manifest["metrics"]] == reported_metrics
-
-    loaded_ensemble = thor.EnsembleModel.load(ensemble_artifact_dir)
-    assert loaded_ensemble.get_num_members() == 3
-    assert loaded_ensemble.get_input_names() == ("examples",)
-    assert set(loaded_ensemble.get_output_names()) == {
-        "mae_loss",
-        "quantile_low_loss",
-        "quantile_high_loss",
-        "mae_accuracy",
-        "forecast",
-        "forecast_p10",
-        "forecast_p90",
-    }
+    artifact_path = results.save_ensemble("airfoil_noise_cv3", ensemble_artifact_dir)
+    assert artifact_path == str(ensemble_artifact_dir)
+    assert not (ensemble_artifact_dir / "ensemble_manifest.json").exists()
+    assert not (ensemble_artifact_dir / "members").exists()
+    loaded_network = thor.Network.load(str(ensemble_artifact_dir))
+    placed_ensemble = loaded_network.place(batch_size, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
+    assert set(placed_ensemble.get_network_input_names()) == {"examples"}
 
 
 @pytest.mark.cuda
@@ -2103,14 +2062,12 @@ def test_training_runs_airfoil_cv3_two_phase_pretrain_then_joint_multi_loss_metr
             baseline_mse,
             point_after_disabled,
         )
-        # The final training loss is the final-epoch average of the active
-        # training loss, while point_mse_loss is the last emitted scalar for the
-        # final batch.  They should be close and, most importantly, should not
-        # include disabled second-phase losses.  With one validation batch, the
-        # validation aggregate and scalar are the same value.
+        # Final per-run losses and reported named loss metrics are both final-epoch
+        # means, so the aggregate loss should match the active named loss exactly
+        # in this pretrain-only phase.
         assert result.final_training_loss is not None
         assert result.final_training_loss > 0.0
-        assert result.final_training_loss == pytest.approx(point_after_disabled, rel=0.10, abs=1e-6)
+        assert result.final_training_loss == pytest.approx(point_after_disabled, rel=1e-5, abs=1e-6)
         assert result.final_validation_loss == pytest.approx(
             result.final_validation_stats.metrics["point_mse_loss"], rel=1e-5, abs=1e-6)
         assert "joint_mse_loss" not in result.final_training_stats.metrics
@@ -2540,6 +2497,21 @@ def test_training_runs_airfoil_cv3_two_phase_mae_pretrain_then_mse_head_holdout(
             run_name,
             holdout_zero_mae,
             result.final_test_stats.metrics["mse_head_mae_accuracy"],
+        )
+        assert result.final_training_loss == pytest.approx(
+            result.final_training_stats.metrics["mae_loss"] + result.final_training_stats.metrics["mse_loss"],
+            rel=1e-5,
+            abs=1e-6,
+        )
+        assert result.final_validation_loss == pytest.approx(
+            result.final_validation_stats.metrics["mae_loss"] + result.final_validation_stats.metrics["mse_loss"],
+            rel=1e-5,
+            abs=1e-6,
+        )
+        assert result.final_test_loss == pytest.approx(
+            result.final_test_stats.metrics["mae_loss"] + result.final_test_stats.metrics["mse_loss"],
+            rel=1e-5,
+            abs=1e-6,
         )
         final_line_match = re.search(
             rf"^INFO runs\[{re.escape(run_name)}\|airfoil_mae_then_mse_cv3\]:.*status=completed.*train_loss=.*validate_loss=.*test_loss=.*$",
@@ -3203,43 +3175,32 @@ def test_training_runs_fits_two_tiny_trainers_on_one_gpu_and_prefixes_stats(capf
     assert results["longer_fold_1"].saved_model_dir == str(tmp_path / "longer_fold_1_model")
 
     ensemble_artifact_dir = tmp_path / "tiny_ensemble_artifact"
-    manifest_path = results.save_ensemble("tiny_ensemble", ensemble_artifact_dir)
-    assert manifest_path == str(ensemble_artifact_dir / "ensemble_manifest.json")
-    loaded_ensemble = thor.EnsembleModel.load(ensemble_artifact_dir)
-    assert loaded_ensemble.get_num_members() == 2
-    assert loaded_ensemble.get_aggregation() == "weighted_mean"
-    assert loaded_ensemble.get_member_names() == ("fold_0", "longer_fold_1")
-    assert loaded_ensemble.get_member_weights() == (1.0, 2.0)
-    assert loaded_ensemble.get_input_names() == ("examples",)
-    assert loaded_ensemble.get_output_names() == ("prediction",)
+    artifact_path = results.save_ensemble("tiny_ensemble", ensemble_artifact_dir)
+    assert artifact_path == str(ensemble_artifact_dir)
+    assert not (ensemble_artifact_dir / "ensemble_manifest.json").exists()
+    assert not (ensemble_artifact_dir / "members").exists()
 
-    assert not hasattr(loaded_ensemble, "infer")
+    loaded_network = thor.Network.load(str(ensemble_artifact_dir))
+    placed_ensemble = loaded_network.place(4, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
+    assert set(placed_ensemble.get_network_input_names()) == {"examples"}
+    x, _ = _regression_arrays(dtype=np.float32)
+    ensemble_outputs = placed_ensemble.infer({
+        "examples": _cpu_tensor(x, thor.DataType.fp32)
+    })
+    assert set(ensemble_outputs) == {"prediction"}
+    ensemble_prediction = np.array(ensemble_outputs["prediction"].numpy(), copy=True)
 
-    assert (ensemble_artifact_dir / loaded_ensemble.members[0].path / "training_selection_metadata.json").exists()
-    assert (ensemble_artifact_dir / loaded_ensemble.members[1].path / "training_selection_metadata.json").exists()
-    manifest = json.loads((ensemble_artifact_dir / "ensemble_manifest.json").read_text(encoding="utf-8"))
-    assert manifest["version"] == 1
-    assert manifest["ensemble_group"] == "tiny_ensemble"
-    assert manifest["execution"] == "parallel_single_gpu"
-    assert manifest["reported_losses"] == ["loss"]
-    assert manifest["overall_loss_reduction"] == "sum"
-    assert manifest["losses"] == [
-        {
-            "name": "loss",
-            "train_value": pytest.approx(ensemble.ensemble_train_loss),
-            "test_value": pytest.approx(ensemble.ensemble_test_loss),
-        }
-    ]
-    assert "output_name" not in manifest["losses"][0]
-    assert "target_input_name" not in manifest["losses"][0]
-    assert "overall_weight_source" not in manifest["losses"][0]
-    assert manifest["members"][0]["selection"]["status"] == "completed"
+    fold_0_prediction = _prediction_from_saved_tiny_regressor(tmp_path / "fold_0_model", "fold_0_member_for_ensemble_check")
+    fold_1_prediction = _prediction_from_saved_tiny_regressor(tmp_path / "longer_fold_1_model", "fold_1_member_for_ensemble_check")
+    expected_prediction = (fold_0_prediction + 2.0 * fold_1_prediction) / 3.0
+    assert ensemble_prediction.shape == expected_prediction.shape
+    np.testing.assert_allclose(ensemble_prediction, expected_prediction, rtol=1e-5, atol=1e-5)
 
     with pytest.raises(RuntimeError, match="already exists"):
         results.save_ensemble("tiny_ensemble", ensemble_artifact_dir)
     assert results.save_ensemble(
         "tiny_ensemble", ensemble_artifact_dir,
-        overwrite=True) == str(ensemble_artifact_dir / "ensemble_manifest.json")
+        overwrite=True) == str(ensemble_artifact_dir)
 
     assert ensemble.ensemble_test_loss is not None
     assert len(ensemble.members) == 2
@@ -3318,14 +3279,10 @@ def test_training_runs_categorical_report_matches_loaded_ensemble_predictions(ca
     assert ensemble.ensemble_test_loss is not None
 
     ensemble_artifact_dir = tmp_path / "tiny_categorical_ensemble_artifact"
-    results.save_ensemble("tiny_categorical_ensemble", ensemble_artifact_dir)
-    loaded_ensemble = thor.EnsembleModel.load(ensemble_artifact_dir)
-    assert loaded_ensemble.get_aggregation() == "weighted_mean"
-    assert loaded_ensemble.get_member_weights() == (1.0, 2.0)
-    assert loaded_ensemble.get_input_names() == ("examples",)
-    assert loaded_ensemble.get_output_names() == ("scores",)
-
-    assert not hasattr(loaded_ensemble, "infer")
+    assert results.save_ensemble("tiny_categorical_ensemble", ensemble_artifact_dir) == str(ensemble_artifact_dir)
+    loaded_network = thor.Network.load(str(ensemble_artifact_dir))
+    placed_ensemble = loaded_network.place(2, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
+    assert set(placed_ensemble.get_network_input_names()) == {"examples"}
 
 
 @pytest.mark.cuda
@@ -3562,10 +3519,9 @@ def test_training_runs_demand_style_kfold_full_path_saves_loadable_ensemble(capf
     assert "INFO runs ensemble[brand_demand_cv2]:" in _ANSI_RE.sub("", captured_text)
 
     ensemble_artifact_dir = tmp_path / "brand_demand_cv2_ensemble"
-    results.save_ensemble("brand_demand_cv2", ensemble_artifact_dir)
-    ensemble = thor.EnsembleModel.load(ensemble_artifact_dir)
-    assert ensemble.get_num_members() == 2
-    assert ensemble.get_input_names() == ("trend_inputs", "seasonality_inputs", "monotone_increasing_inputs")
-    assert ensemble.get_output_names() == ("forecast", "forecast_quantile_high")
-
-    assert not hasattr(ensemble, "infer")
+    assert results.save_ensemble("brand_demand_cv2", ensemble_artifact_dir) == str(ensemble_artifact_dir)
+    loaded_network = thor.Network.load(str(ensemble_artifact_dir))
+    placed_ensemble = loaded_network.place(4, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
+    assert set(placed_ensemble.get_network_input_names()) == {
+        "trend_inputs", "seasonality_inputs", "monotone_increasing_inputs"
+    }

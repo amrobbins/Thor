@@ -840,6 +840,8 @@ TEST(TrainingRunsResult, SaveEnsembleAllowsPartialSuccessWhenMinimumSatisfied) {
     const std::filesystem::path ensembleDir = root / "ensemble";
     std::filesystem::create_directories(fold0);
     std::filesystem::create_directories(fold2);
+    makeReluMemberNetwork("training_runs_save_ensemble_member_source_0", {10}, {"predictions"})->save(fold0.string(), true);
+    makeReluMemberNetwork("training_runs_save_ensemble_member_source_2", {10}, {"predictions"})->save(fold2.string(), true);
     {
         std::ofstream(fold0 / "training_selection_metadata.json") << "{}\n";
         std::ofstream(fold2 / "training_selection_metadata.json") << "{}\n";
@@ -863,24 +865,14 @@ TEST(TrainingRunsResult, SaveEnsembleAllowsPartialSuccessWhenMinimumSatisfied) {
     ensemble.outputSignature = {TrainingRunOutputSignature{"predictions", {0, 10}, "FP32"}};
 
     TrainingRunsResult results({result0, result1, result2}, {ensemble});
-    const std::string manifestPath = results.saveEnsemble("digits", ensembleDir.string());
+    const std::string artifactPath = results.saveEnsemble("digits", ensembleDir.string());
 
-    EXPECT_EQ(manifestPath, (ensembleDir / "ensemble_manifest.json").string());
-    EXPECT_TRUE(std::filesystem::exists(ensembleDir / "members" / "0000_fold_0" / "training_selection_metadata.json"));
-    EXPECT_TRUE(std::filesystem::exists(ensembleDir / "members" / "0001_fold_2" / "training_selection_metadata.json"));
-    EXPECT_FALSE(std::filesystem::exists(ensembleDir / "members" / "0002_fold_1"));
+    EXPECT_EQ(artifactPath, ensembleDir.string());
+    EXPECT_FALSE(std::filesystem::exists(ensembleDir / "ensemble_manifest.json"));
+    EXPECT_FALSE(std::filesystem::exists(ensembleDir / "members"));
 
-    std::ifstream manifest(manifestPath);
-    const std::string text((std::istreambuf_iterator<char>(manifest)), std::istreambuf_iterator<char>());
-    EXPECT_NE(text.find("\"target_num_members\": 3"), std::string::npos);
-    EXPECT_NE(text.find("\"actual_num_members\": 2"), std::string::npos);
-    EXPECT_NE(text.find("\"min_successful_models\": 2"), std::string::npos);
-    EXPECT_NE(text.find("\"reported_losses\": ["), std::string::npos);
-    EXPECT_NE(text.find("\"overall_loss_reduction\": \"sum\""), std::string::npos);
-    EXPECT_NE(text.find("\"losses\": ["), std::string::npos);
-    EXPECT_NE(text.find("\"name\": \"fold_0\""), std::string::npos);
-    EXPECT_NE(text.find("\"name\": \"fold_2\""), std::string::npos);
-    EXPECT_EQ(text.find("\"name\": \"fold_1\""), std::string::npos);
+    Network loadedEnsemble("training_runs_save_ensemble_loaded_partial_success");
+    EXPECT_NO_THROW(loadedEnsemble.load(ensembleDir.string()));
 
     std::filesystem::remove_all(root);
 }
