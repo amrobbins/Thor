@@ -356,6 +356,7 @@ ApiSubgraphCloneResult Network::cloneInferenceSubgraphInto(const Network& source
 
     std::vector<Tensor> requestedSourceOutputTensors;
     requestedSourceOutputTensors.reserve(outputNames.size());
+    std::set<uint64_t> requestedSourceOutputOriginalIds;
     for (const std::string& outputName : outputNames) {
         auto outputIt = sourceOutputTensorByName.find(outputName);
         if (outputIt == sourceOutputTensorByName.end()) {
@@ -363,6 +364,7 @@ ApiSubgraphCloneResult Network::cloneInferenceSubgraphInto(const Network& source
                                      "' in network '" + sourceNetwork.getNetworkName() + "'.");
         }
         requestedSourceOutputTensors.push_back(outputIt->second);
+        requestedSourceOutputOriginalIds.insert(outputIt->second.getOriginalId());
     }
 
     std::set<uint64_t> requiredLayerIds;
@@ -423,6 +425,7 @@ ApiSubgraphCloneResult Network::cloneInferenceSubgraphInto(const Network& source
     for (const Tensor& outputTensor : requestedSourceOutputTensors) {
         rememberCloneGraphTensor(outputTensor);
     }
+    std::set<uint64_t> clonedLayerOutputOriginalIdsToValidate;
     for (const std::shared_ptr<Layer>& layer : layersToClone) {
         auto inputIt = sourceNetwork.apiLayerToApiInputTensors.find(layer);
         if (inputIt != sourceNetwork.apiLayerToApiInputTensors.end()) {
@@ -434,6 +437,7 @@ ApiSubgraphCloneResult Network::cloneInferenceSubgraphInto(const Network& source
         if (outputIt != sourceNetwork.apiLayerToApiOutputTensors.end()) {
             for (const Tensor& outputTensor : outputIt->second) {
                 rememberCloneGraphTensor(outputTensor);
+                clonedLayerOutputOriginalIdsToValidate.insert(outputTensor.getOriginalId());
             }
         }
     }
@@ -509,6 +513,36 @@ ApiSubgraphCloneResult Network::cloneInferenceSubgraphInto(const Network& source
     }
 
     this->rebuildApiGraphIndexes(options.inferenceOnly);
+
+    // A requested output can depend on a multi-output source layer while only one
+    // of that layer's outputs is part of the cloned subgraph result.  The other
+    // cloned outputs are intentionally report/debug-only or otherwise unneeded,
+    // but Thor's graph validator still requires every produced tensor to have at
+    // least one loader.  Attach Stubs to unrequested, otherwise-unloaded cloned
+    // outputs so partial subgraph cloning does not leave the destination graph
+    // invalid.  Requested outputs are left unstubbed because callers usually wire
+    // them into accumulators or NetworkOutputs after cloning.
+    std::vector<Tensor> danglingUnrequestedOutputs;
+    for (uint64_t sourceOutputOriginalId : clonedLayerOutputOriginalIdsToValidate) {
+        if (requestedSourceOutputOriginalIds.count(sourceOutputOriginalId) != 0) {
+            continue;
+        }
+        auto destinationIt = result.clonedTensorBySourceOriginalId.find(sourceOutputOriginalId);
+        if (destinationIt == result.clonedTensorBySourceOriginalId.end()) {
+            continue;
+        }
+        const Tensor& destinationTensor = destinationIt->second;
+        auto loadingIt = apiTensorToApiLoadingLayers.find(destinationTensor);
+        if (loadingIt == apiTensorToApiLoadingLayers.end() || loadingIt->second.empty()) {
+            danglingUnrequestedOutputs.push_back(destinationTensor);
+        }
+    }
+    for (const Tensor& danglingOutput : danglingUnrequestedOutputs) {
+        Stub::Builder().network(*this).inputTensor(danglingOutput).build();
+    }
+    if (!danglingUnrequestedOutputs.empty()) {
+        this->rebuildApiGraphIndexes(options.inferenceOnly);
+    }
     return result;
 }
 
@@ -518,6 +552,34 @@ std::optional<std::string> Network::getCloneSourceKeyForLayerId(uint64_t layerId
         return std::nullopt;
     }
     return it->second;
+}
+
+void Network::attachStubsToDanglingOutputsForInferenceBoundary() {
+    rebuildApiGraphIndexes(/*inferenceOnly=*/true);
+
+    std::vector<Tensor> danglingOutputs;
+    for (const auto& [tensor, drivingLayer] : apiTensorToApiDrivingLayer) {
+        // Do not turn unused external inputs into visible no-op inference
+        // inputs.  This boundary repair is only for produced intermediate/layer
+        // outputs that are intentionally not exposed.
+        if (std::dynamic_pointer_cast<NetworkInput>(drivingLayer) != nullptr) {
+            continue;
+        }
+        auto loadingIt = apiTensorToApiLoadingLayers.find(tensor);
+        if (loadingIt == apiTensorToApiLoadingLayers.end() || loadingIt->second.empty()) {
+            danglingOutputs.push_back(tensor);
+        }
+    }
+
+    if (danglingOutputs.empty()) {
+        return;
+    }
+
+    for (const Tensor& tensor : danglingOutputs) {
+        Stub::Builder().network(*this).inputTensor(tensor).build();
+    }
+
+    rebuildApiGraphIndexes(/*inferenceOnly=*/true);
 }
 
 bool Network::hasCudaKernelExpressions() const {
@@ -887,6 +949,18 @@ void Network::save(vector<ThorImplementation::StampedNetwork> &stampedNetworks,
                    const bool saveOptimizerState) const {
     thor_file::TarWriter archiveWriter(networkName);
 
+    // This is a boundary operation, not the per-batch hot path.  Drain all CUDA
+    // work submitted by this process on devices used by the placed stamps before
+    // layer serialization starts so parameter/optimizer tensor copies cannot race
+    // the final gradient-update stream work from the last training batch.
+    std::set<uint32_t> stampedGpuNums;
+    for (const ThorImplementation::StampedNetwork& stampedNetwork : stampedNetworks) {
+        stampedGpuNums.insert(stampedNetwork.getGpuNum());
+    }
+    for (uint32_t gpu : stampedGpuNums) {
+        Stream::deviceSynchronize(static_cast<int>(gpu));
+    }
+
     // For the initial implementation, I will just force GPU 0.
     // I will optimize from there, but I need changes elsewhere first anyway.
     Stream stream = Stream::getNextDownloadStream(0);
@@ -926,11 +1000,6 @@ void Network::save(vector<ThorImplementation::StampedNetwork> &stampedNetworks,
     ThorImplementation::Tensor jsonDumpTensor(cpuPlacement, jsonTensorDescriptor);
     memcpy(jsonDumpTensor.getMemPtr<void>(), jsonDump.data(), jsonDump.size());
     archiveWriter.addArchiveFile(qualifiedModelName, jsonDumpTensor);
-
-    // First I must synchronize with all devices to make sure the final batch is completely finished updating the weights.
-    uint32_t numGpus = MachineEvaluator::instance().getNumGpus();
-    for (uint32_t gpu = 0; gpu < numGpus; ++gpu)
-        Stream::deviceSynchronize(gpu);
 
     archiveWriter.createArchive(directory, overwrite);
 }
@@ -1114,6 +1183,92 @@ std::vector<std::string> Network::getInferenceNetworkInputNames() {
     return names;
 }
 
+std::vector<std::string> Network::getInferenceNetworkInputNamesForOutputs(const std::vector<std::string>& outputNames) {
+    if (outputNames.empty()) {
+        return {};
+    }
+
+    // Build the same inference-only graph view used by place(..., inferenceOnly=true),
+    // then walk backward only from the requested deployable outputs.  A saved
+    // training artifact can legitimately have report-only NetworkOutputs such as
+    // Mean(labels).  Those reports make labels visible to getInferenceNetworkInputNames(),
+    // but labels are not required to compute prediction-only deployable outputs.
+    const StatusCode status = evaluateGraph(/*inferenceOnly=*/true);
+    if (status != StatusCode::SUCCESS) {
+        throw std::runtime_error("Unable to evaluate inference graph while collecting network input names for outputs: " +
+                                 statusCodeToString(status));
+    }
+
+    std::map<std::string, Tensor> outputTensorByName;
+    const uint32_t numLayers = getNumLayers();
+    for (uint32_t i = 0; i < numLayers; ++i) {
+        std::shared_ptr<NetworkOutput> output = std::dynamic_pointer_cast<NetworkOutput>(getLayer(i));
+        if (output == nullptr || !output->getFeatureInput().has_value()) {
+            continue;
+        }
+        outputTensorByName[output->getName()] = output->getFeatureInput().value();
+    }
+
+    std::set<std::string> requiredInputNames;
+    std::set<uint64_t> visitedLayerIds;
+    std::set<uint64_t> visitingLayerIds;
+    std::function<void(const Tensor&)> collectUpstreamInputs = [&](const Tensor& tensor) {
+        auto driverIt = apiTensorToApiDrivingLayer.find(tensor);
+        if (driverIt == apiTensorToApiDrivingLayer.end() || driverIt->second == nullptr) {
+            throw std::runtime_error("Unable to find a driving layer while collecting inference inputs for tensor " +
+                                     std::to_string(tensor.getOriginalId()) + ".");
+        }
+
+        std::shared_ptr<Layer> driver = driverIt->second;
+        std::shared_ptr<NetworkInput> input = std::dynamic_pointer_cast<NetworkInput>(driver);
+        if (input != nullptr) {
+            requiredInputNames.insert(input->getName());
+            return;
+        }
+        if (std::dynamic_pointer_cast<NetworkOutput>(driver) != nullptr) {
+            throw std::runtime_error("Encountered a NetworkOutput as a tensor driver while collecting inference inputs.");
+        }
+
+        const uint64_t driverId = driver->getId();
+        if (visitedLayerIds.count(driverId) != 0) {
+            return;
+        }
+        if (!visitingLayerIds.insert(driverId).second) {
+            throw std::runtime_error("Encountered a cycle while collecting inference inputs for output-bounded subgraph.");
+        }
+
+        auto inputsIt = apiLayerToApiInputTensors.find(driver);
+        if (inputsIt != apiLayerToApiInputTensors.end()) {
+            for (const Tensor& inputTensor : inputsIt->second) {
+                collectUpstreamInputs(inputTensor);
+            }
+        }
+
+        visitingLayerIds.erase(driverId);
+        visitedLayerIds.insert(driverId);
+    };
+
+    for (const std::string& outputName : outputNames) {
+        auto outputIt = outputTensorByName.find(outputName);
+        if (outputIt == outputTensorByName.end()) {
+            throw std::runtime_error("Unable to find NetworkOutput '" + outputName +
+                                     "' while collecting inference input names for network '" + getNetworkName() + "'.");
+        }
+        collectUpstreamInputs(outputIt->second);
+    }
+
+    std::vector<std::string> names;
+    names.reserve(requiredInputNames.size());
+    for (uint32_t i = 0; i < numLayers; ++i) {
+        std::shared_ptr<NetworkInput> input = std::dynamic_pointer_cast<NetworkInput>(getLayer(i));
+        if (input == nullptr || requiredInputNames.count(input->getName()) == 0) {
+            continue;
+        }
+        names.push_back(input->getName());
+    }
+    return names;
+}
+
 std::vector<std::string> Network::getTrainingOnlyNetworkInputNames() {
     // Identify training-only inputs structurally instead of relying on archive-time
     // inference pruning.  The original in-memory training graph is not
@@ -1225,9 +1380,11 @@ std::vector<std::string> Network::getTrainingOnlyNetworkInputNames() {
 }
 
 std::vector<NetworkLossReference> Network::getReportableLosses() {
-    const std::vector<std::string> trainingOnlyNames = getTrainingOnlyNetworkInputNames();
-    const std::set<std::string> trainingOnlyNameSet(trainingOnlyNames.begin(), trainingOnlyNames.end());
-
+    // Reportable loss discovery is based on actual Loss layers and their
+    // explicit prediction / label / example-weight roles.  Do not require the
+    // label or weight NetworkInput to be "training-only" here: users may also
+    // report label-derived training metrics, such as Mean(labels), and that
+    // should not make the underlying graph loss undiscoverable.
     rebuildApiGraphIndexes(/*inferenceOnly=*/false);
 
     auto sourceNetworkInputName = [&](const Tensor& tensor) -> std::optional<std::string> {
@@ -1429,16 +1586,13 @@ std::vector<NetworkLossReference> Network::getReportableLosses() {
             continue;
         }
         std::optional<std::string> labelInputName = sourceNetworkInputName(labels.value());
-        if (!labelInputName.has_value() || trainingOnlyNameSet.count(labelInputName.value()) == 0) {
+        if (!labelInputName.has_value()) {
             continue;
         }
 
         std::optional<std::string> weightInputName;
         if (exampleWeights.has_value()) {
             weightInputName = sourceNetworkInputName(exampleWeights.value());
-            if (weightInputName.has_value() && trainingOnlyNameSet.count(weightInputName.value()) == 0) {
-                weightInputName = std::nullopt;
-            }
         }
 
         const double lossWeight = static_cast<double>(loss->getLossWeight().value_or(1.0f));
@@ -1495,9 +1649,6 @@ std::vector<NetworkLossReference> Network::getReportableLosses() {
 }
 
 std::vector<NetworkMetricReference> Network::getReportableMetrics() {
-    const std::vector<std::string> trainingOnlyNames = getTrainingOnlyNetworkInputNames();
-    const std::set<std::string> trainingOnlyNameSet(trainingOnlyNames.begin(), trainingOnlyNames.end());
-
     rebuildApiGraphIndexes(/*inferenceOnly=*/false);
 
     auto sourceNetworkInputName = [&](const Tensor& tensor) -> std::optional<std::string> {
@@ -1662,6 +1813,18 @@ std::vector<NetworkMetricReference> Network::getReportableMetrics() {
             continue;
         }
 
+        std::vector<std::string> metricNames;
+        auto metricNamesIt = metricNamesByLayerId.find(metric->getId());
+        if (metricNamesIt != metricNamesByLayerId.end()) {
+            metricNames = metricNamesIt->second;
+        }
+        if (metricNames.empty()) {
+            // A graph metric is reportable only when the user explicitly exposes it
+            // through a NetworkOutput.  The metric's upstream source can be a
+            // prediction, label, weight, feature, or any other API tensor.
+            continue;
+        }
+
         Tensor predictions;
         std::optional<Tensor> labels;
         try {
@@ -1674,35 +1837,31 @@ std::vector<NetworkMetricReference> Network::getReportableMetrics() {
         }
 
         const std::vector<std::string> predictionOutputNames = predictionOutputNamesForTensor(predictions);
+        std::optional<std::string> inputSourceName;
         if (predictionOutputNames.empty()) {
-            continue;
+            inputSourceName = sourceNetworkInputName(predictions);
         }
-
         std::optional<std::string> labelInputName;
         if (labels.has_value()) {
             labelInputName = sourceNetworkInputName(labels.value());
-            if (!labelInputName.has_value() || trainingOnlyNameSet.count(labelInputName.value()) == 0) {
-                continue;
-            }
         }
 
-        std::vector<std::string> metricNames;
-        auto metricNamesIt = metricNamesByLayerId.find(metric->getId());
-        if (metricNamesIt != metricNamesByLayerId.end()) {
-            metricNames = metricNamesIt->second;
-        }
-        if (metricNames.empty()) {
-            // Metrics must be wired to NetworkOutput to be materialized by the training
-            // stats path and by the composed ensemble evaluator.
-            continue;
-        }
-
-        for (const std::string& outputName : predictionOutputNames) {
-            for (const std::string& metricName : metricNames) {
+        for (const std::string& metricName : metricNames) {
+            if (!predictionOutputNames.empty()) {
+                for (const std::string& outputName : predictionOutputNames) {
+                    NetworkMetricReference reference;
+                    reference.metricName = metricName;
+                    reference.predictionOutputName = outputName;
+                    reference.targetInputName = labelInputName;
+                    reference.inputSourceName = inputSourceName;
+                    reference.metricLayerType = metric->getLayerType();
+                    references.push_back(std::move(reference));
+                }
+            } else {
                 NetworkMetricReference reference;
                 reference.metricName = metricName;
-                reference.predictionOutputName = outputName;
                 reference.targetInputName = labelInputName;
+                reference.inputSourceName = inputSourceName;
                 reference.metricLayerType = metric->getLayerType();
                 references.push_back(std::move(reference));
             }
@@ -1718,6 +1877,9 @@ std::vector<NetworkMetricReference> Network::getReportableMetrics() {
         }
         if (lhs.targetInputName != rhs.targetInputName) {
             return lhs.targetInputName < rhs.targetInputName;
+        }
+        if (lhs.inputSourceName != rhs.inputSourceName) {
+            return lhs.inputSourceName < rhs.inputSourceName;
         }
         return lhs.metricLayerType < rhs.metricLayerType;
     });
@@ -1885,6 +2047,39 @@ void Network::pruneLoadedTrainingArtifactsForInference() {
         }
         it->second = std::move(filtered);
         ++it;
+    }
+
+    // Some live multi-output layers, especially CustomLayer, require every
+    // declared physical output port to be connected when the graph is placed.
+    // Inference pruning can keep such a layer because one output reaches a
+    // deployable NetworkOutput while removing a sibling report/debug/loss
+    // consumer.  The sibling tensor is still a live output of the retained
+    // layer, but it no longer has any loader, which makes placement fail with a
+    // dangling/missing output port.  Attach Stubs to those retained but
+    // otherwise-unloaded outputs.  This is an inference-boundary repair only; it
+    // does not affect the training hot path.
+    std::vector<Tensor> danglingLiveOutputs;
+    for (const auto& [tensor, drivingLayer] : apiTensorToApiDrivingLayer) {
+        if (liveTensors.count(tensor) == 0 || liveLayers.count(drivingLayer) == 0) {
+            continue;
+        }
+        auto loadingIt = apiTensorToApiLoadingLayers.find(tensor);
+        if (loadingIt == apiTensorToApiLoadingLayers.end() || loadingIt->second.empty()) {
+            danglingLiveOutputs.push_back(tensor);
+        }
+    }
+    for (const Tensor& tensor : danglingLiveOutputs) {
+        const size_t previousLayerCount = allLayersInNetworkList.size();
+        Stub::Builder().network(*this).inputTensor(tensor).build();
+        if (allLayersInNetworkList.size() <= previousLayerCount) {
+            throw std::runtime_error("pruneLoadedTrainingArtifactsForInference failed to attach Stub to dangling live output tensor " +
+                                     std::to_string(tensor.getOriginalId()) + ".");
+        }
+        const std::shared_ptr<Layer>& stubLayer = allLayersInNetworkList.back();
+        liveLayers.insert(stubLayer);
+        liveTensors.insert(tensor);
+        apiTensorToApiLoadingLayers[tensor].push_back(stubLayer);
+        apiLayerToApiInputTensors[stubLayer].push_back(tensor);
     }
 
     allTensors = std::move(liveTensors);

@@ -1,12 +1,19 @@
 #pragma once
 
-#include <chrono>
+#include "DeepLearning/Implementation/Diagnostics/TrainingDiagnostics.h"
+
 #include <cstdint>
 #include <initializer_list>
 #include <string>
 #include <utility>
 
+#if THOR_ENABLE_LAYER_SUBMIT_DIAGNOSTICS
+#include <chrono>
+#endif
+
 namespace ThorImplementation {
+
+#if THOR_ENABLE_LAYER_SUBMIT_DIAGNOSTICS
 
 using LayerSubmitDiagnosticTimePoint = std::chrono::high_resolution_clock::time_point;
 
@@ -63,5 +70,35 @@ void emitLayerSubmitDiagnostic(const char* event,
                                uint64_t layerId,
                                uint64_t totalMicros,
                                std::initializer_list<std::pair<const char*, uint64_t>> fields = {});
+
+#else
+
+struct LayerSubmitDiagnosticTimePoint {};
+
+inline constexpr bool layerSubmitDiagnosticsEnabled() { return false; }
+inline constexpr bool layerSubmitDiagnosticsActive() { return false; }
+inline constexpr LayerSubmitDiagnosticTimePoint layerSubmitDiagnosticNow() { return {}; }
+inline constexpr uint64_t layerSubmitDiagnosticElapsedMicros(LayerSubmitDiagnosticTimePoint, LayerSubmitDiagnosticTimePoint) { return 0; }
+inline std::string layerSubmitDiagnosticLabel(const char*, uint64_t, const std::string& = std::string()) { return {}; }
+
+inline void setLayerSubmitDiagnosticContext(const std::string&, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, bool) {}
+inline void clearLayerSubmitDiagnosticContext() {}
+
+class ScopedLayerSubmitDiagnosticContext {
+   public:
+    ScopedLayerSubmitDiagnosticContext(const std::string&, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, bool, bool) {}
+    ~ScopedLayerSubmitDiagnosticContext() = default;
+
+    ScopedLayerSubmitDiagnosticContext(const ScopedLayerSubmitDiagnosticContext&) = delete;
+    ScopedLayerSubmitDiagnosticContext& operator=(const ScopedLayerSubmitDiagnosticContext&) = delete;
+};
+
+inline void emitLayerSubmitDiagnostic(const char*,
+                                      const std::string&,
+                                      uint64_t,
+                                      uint64_t,
+                                      std::initializer_list<std::pair<const char*, uint64_t>> = {}) {}
+
+#endif
 
 }  // namespace ThorImplementation

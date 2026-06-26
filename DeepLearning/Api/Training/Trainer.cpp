@@ -3,6 +3,8 @@
 #include "DeepLearning/Api/Loaders/Loader.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
+#include "Utilities/Common/Stream.h"
+#include "Utilities/ComputeTopology/MachineEvaluator.h"
 
 #include <algorithm>
 #include <cmath>
@@ -21,6 +23,13 @@
 namespace Thor {
 
 namespace {
+
+void synchronizeAllCudaDevicesForTrainingBoundary() {
+    const uint32_t numGpus = MachineEvaluator::instance().getNumGpus();
+    for (uint32_t gpu = 0; gpu < numGpus; ++gpu) {
+        Stream::deviceSynchronize(static_cast<int>(gpu));
+    }
+}
 
 std::optional<std::string> trainedArtifactNetworkName(const std::shared_ptr<PlacedNetwork>& placedNetwork,
                                                        const std::shared_ptr<Network>& fallbackNetwork) {
@@ -689,6 +698,11 @@ void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
 
             state->failedAttempts.push_back(e.progress());
             if (state->failedAttempts.size() <= state->condition->maxRestarts) {
+                // Restart/retry is a semantic boundary. The failed attempt may have
+                // pending optimizer work on gradient-update streams even after the
+                // stats event that requested the restart, so drain this process's
+                // CUDA context before discarding the attempt and placing a fresh one.
+                synchronizeAllCudaDevicesForTrainingBoundary();
                 // A restart means the current model attempt is discarded. The next
                 // attempt must behave like a new model instance: no previously trained
                 // PlacedNetwork state is copied in, and epoch/progress accounting starts
@@ -705,6 +719,11 @@ void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
             attemptObserver.flush();
             nonFiniteLossFailedAttempts.push_back(e.what());
             if (nonFiniteLossFailedAttempts.size() <= nonFiniteLossMaxRestarts) {
+                // Restart/retry is a semantic boundary. The failed attempt may have
+                // pending optimizer work on gradient-update streams even after the
+                // stats event that requested the restart, so drain this process's
+                // CUDA context before discarding the attempt and placing a fresh one.
+                synchronizeAllCudaDevicesForTrainingBoundary();
                 // A restart means the current model attempt is discarded. The next
                 // attempt must behave like a new model instance: no previously trained
                 // PlacedNetwork state is copied in, and epoch/progress accounting starts

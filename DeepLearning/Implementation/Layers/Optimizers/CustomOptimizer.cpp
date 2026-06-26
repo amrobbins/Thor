@@ -4,6 +4,7 @@
 #include "DeepLearning/Implementation/Layers/Loss.h"
 #include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
 #include "DeepLearning/Implementation/ThorError.h"
+#include "DeepLearning/Implementation/Diagnostics/TrainingDiagnostics.h"
 #include "Utilities/Expression/FusedEquation.h"
 
 #include <algorithm>
@@ -48,10 +49,14 @@ std::string CustomOptimizerUpdateContext::runtimeScalarName(const std::string& n
 
 namespace {
 
+#if THOR_ENABLE_TRAINING_UPDATE_DIAGNOSTICS
 bool trainingUpdateDiagnosticsEnabled() {
     const char* value = std::getenv("THOR_TRAINING_UPDATE_DIAGNOSTICS");
     return value != nullptr && value[0] != '\0' && std::string(value) != "0";
 }
+#else
+constexpr bool trainingUpdateDiagnosticsEnabled() { return false; }
+#endif
 
 std::string joinRuntimeScalars(const std::unordered_map<std::string, float>& scalars) {
     std::vector<std::string> items;

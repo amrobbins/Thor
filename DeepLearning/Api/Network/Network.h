@@ -71,8 +71,15 @@ struct NetworkLossReference {
 
 struct NetworkMetricReference {
     std::string metricName{};
+    // Non-empty when the metric is directly associated with a NetworkOutput
+    // prediction tensor that can be remapped to an ensemble-averaged output.
     std::string predictionOutputName{};
+    // Label input used by label-aware metrics such as Accuracy/LossMetric.
     std::optional<std::string> targetInputName{};
+    // Input source used by source-only metrics such as Mean(labels).  Metrics are
+    // still discovered from their NetworkOutput; this field exists only so the
+    // composed evaluator can remap external inputs when re-evaluating them.
+    std::optional<std::string> inputSourceName{};
     std::string metricLayerType{};
 };
 
@@ -170,6 +177,7 @@ class Network {
     void freezeTraining();
     void unfreezeTraining();
     [[nodiscard]] std::vector<std::string> getInferenceNetworkInputNames();
+    [[nodiscard]] std::vector<std::string> getInferenceNetworkInputNamesForOutputs(const std::vector<std::string>& outputNames);
     [[nodiscard]] std::vector<std::string> getTrainingOnlyNetworkInputNames();
     [[nodiscard]] std::vector<NetworkLossReference> getReportableLosses();
     [[nodiscard]] std::vector<NetworkMetricReference> getReportableMetrics();
@@ -192,6 +200,13 @@ class Network {
                                                        const std::vector<std::string>& outputNames,
                                                        const ApiTensorRemap& initialRemap,
                                                        const ApiSubgraphCloneOptions& options = ApiSubgraphCloneOptions{});
+
+    // Boundary-only graph repair for internally composed inference graphs.  This
+    // intentionally is not part of normal user graph validation: explicit
+    // NetworkOutput roots should still be required for public models.  TrainingRuns
+    // uses it after partial cloning/pruning when a retained multi-output layer has
+    // sibling outputs that are deliberately not exposed in the saved ensemble.
+    void attachStubsToDanglingOutputsForInferenceBoundary();
 
     void registerRaggedNetworkInput(const std::string& name,
                                     const RaggedTensor& raggedTensor,

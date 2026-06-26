@@ -35,6 +35,12 @@ class PlacedNetwork {
 
     void save(const std::string& directory, bool overwrite, bool saveOptimizerState);
 
+    // Boundary-only correctness guard.  This intentionally is not used in the
+    // per-batch hot path; it drains all CUDA work submitted by this process on
+    // every GPU used by the placed stamps before out-of-band readers copy or
+    // serialize parameter state.
+    void synchronizeDevices() const;
+
     std::map<std::string, ThorImplementation::Tensor> infer(std::map<std::string, ThorImplementation::Tensor> batchInputs,
                                                             uint64_t stampIndex = 0);
     std::map<std::string, ThorImplementation::Tensor> infer(const Batch& batchInputs, uint64_t stampIndex = 0);

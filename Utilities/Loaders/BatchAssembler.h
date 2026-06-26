@@ -4,6 +4,7 @@
 #include "Utilities/Random/FullPeriodRandom.h"
 #include "Utilities/WorkQueue/AsyncQueue.h"
 #include "Utilities/WorkQueue/AsyncTensorQueue.h"
+#include "DeepLearning/Implementation/Diagnostics/TrainingDiagnostics.h"
 
 #include <cuda_fp16.h>
 
@@ -68,6 +69,7 @@ class BatchAssembler {
     uint64_t currentBatchNum;
     uint64_t currentExampleNum;
 
+#if THOR_ENABLE_BATCH_ASSEMBLER_DIAGNOSTICS
     std::atomic<uint64_t> diagnosticBatchesAssembled{0};
     std::atomic<uint64_t> diagnosticBatchesLoaded{0};
     std::atomic<uint64_t> diagnosticBuffersReturned{0};
@@ -77,6 +79,7 @@ class BatchAssembler {
     std::atomic<uint64_t> diagnosticShardQueuePushWaitMicros{0};
     std::atomic<uint64_t> diagnosticShardQueuePopWaitMicros{0};
     std::atomic<uint64_t> diagnosticBatchBufferWaitMicros{0};
+#endif
 
     std::unordered_map<std::string, uint64_t> classIndexes;
 

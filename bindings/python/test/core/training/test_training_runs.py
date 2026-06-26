@@ -1,4 +1,5 @@
 import ctypes
+import gc
 import json
 import math
 import os
@@ -8,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import urllib.request
+import weakref
 from pathlib import Path
 
 import numpy as np
@@ -450,6 +452,92 @@ def _build_tiny_regressor(name: str):
     thor.layers.NetworkOutput(network, "loss", loss.get_loss(), thor.DataType.fp32)
     thor.layers.NetworkOutput(network, "prediction", predictions.get_feature_output(), thor.DataType.fp32)
     return network
+
+
+def _build_tiny_regressor_with_label_mean_report(name: str):
+    network = thor.Network(name)
+    examples = thor.layers.NetworkInput(network, "examples", [2], thor.DataType.fp32)
+    labels = thor.layers.NetworkInput(network, "labels", [1], thor.DataType.fp32)
+
+    predictions = thor.layers.FullyConnected(
+        network,
+        examples.get_feature_output(),
+        1,
+        True,
+        activation=None,
+        weights_initializer=thor.initializers.UniformRandom(0.0, 0.0),
+        biases_initializer=thor.initializers.UniformRandom(0.0, 0.0),
+    )
+    loss = thor.losses.MSE(
+        network,
+        predictions.get_feature_output(),
+        labels.get_feature_output(),
+        thor.DataType.fp32,
+    )
+    true_mean = thor.metrics.Mean(network, labels.get_feature_output())
+    prediction_mean = thor.metrics.Mean(network, predictions.get_feature_output())
+    thor.layers.NetworkOutput(network, "loss", loss.get_loss(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "prediction", predictions.get_feature_output(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "true_mean", true_mean.get_metric(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "prediction_mean", prediction_mean.get_metric(), thor.DataType.fp32)
+    return network
+
+
+def _build_tiny_regressor_with_unrequested_multi_output_metric(name: str):
+    network = thor.Network(name)
+    examples = thor.layers.NetworkInput(network, "examples", [2], thor.DataType.fp32)
+    labels = thor.layers.NetworkInput(network, "labels", [1], thor.DataType.fp32)
+
+    base_prediction = thor.layers.FullyConnected(
+        network,
+        examples.get_feature_output(),
+        1,
+        True,
+        activation=None,
+        weights_initializer=thor.initializers.UniformRandom(0.0, 0.0),
+        biases_initializer=thor.initializers.UniformRandom(0.0, 0.0),
+    )
+    head = thor.layers.CustomLayer(
+        network=network,
+        inputs={
+            "base_prediction": base_prediction.get_feature_output(),
+        },
+        output_names=["prediction", "debug_value"],
+        build=lambda context: {
+            "prediction": context.input("base_prediction"),
+            "debug_value": context.input("base_prediction") + 1.0,
+        },
+    )
+    loss = thor.losses.MSE(
+        network,
+        head["prediction"],
+        labels.get_feature_output(),
+        thor.DataType.fp32,
+    )
+    debug_mean = thor.metrics.Mean(network, head["debug_value"])
+    thor.layers.NetworkOutput(network, "loss", loss.get_loss(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "prediction", head["prediction"], thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "debug_value_mean", debug_mean.get_metric(), thor.DataType.fp32)
+    return network
+
+
+def _make_tiny_regression_unrequested_multi_output_metric_trainer(
+    name: str,
+    *,
+    save_model_dir=None,
+    save_model_overwrite=False,
+):
+    return thor.training.Trainer(
+        _build_tiny_regressor_with_unrequested_multi_output_metric(name),
+        _regression_one_batch_loader(),
+        optimizer=thor.optimizers.Sgd(initial_learning_rate=0.01, momentum=0.0),
+        stats_interval_s=0.0,
+        max_in_flight_batches=2,
+        scalar_tensors_to_report=["debug_value_mean"],
+        stats_color="never",
+        save_model_dir=save_model_dir,
+        save_model_overwrite=save_model_overwrite,
+    )
 
 
 def _build_weighted_tiny_regressor(name: str):
@@ -1081,6 +1169,25 @@ def _make_non_finite_tiny_regression_trainer(
     )
 
 
+def _make_tiny_regression_with_label_mean_report_trainer(
+    name: str,
+    *,
+    save_model_dir=None,
+    save_model_overwrite=False,
+):
+    return thor.training.Trainer(
+        _build_tiny_regressor_with_label_mean_report(name),
+        _regression_one_batch_loader(),
+        optimizer=thor.optimizers.Sgd(initial_learning_rate=0.01, momentum=0.0),
+        stats_interval_s=0.0,
+        max_in_flight_batches=2,
+        scalar_tensors_to_report=["true_mean", "prediction_mean"],
+        stats_color="never",
+        save_model_dir=save_model_dir,
+        save_model_overwrite=save_model_overwrite,
+    )
+
+
 def _make_weighted_tiny_regression_trainer(
     name: str,
     *,
@@ -1188,6 +1295,36 @@ def test_training_runs_binding_accepts_reported_losses():
     assert runs.reported_losses["tiny_ensemble"] == ["loss"]
     assert not hasattr(runs, "ensemble_metrics")
     assert not hasattr(thor.training, "MetricSpec")
+
+
+def test_training_runs_reported_losses_survive_label_mean_report_metric():
+    trainer = _make_tiny_regression_with_label_mean_report_trainer(
+        "training_runs_reported_losses_with_label_mean_report"
+    )
+
+    runs = thor.training.TrainingRuns(
+        [("fold_0", trainer, "tiny_ensemble")],
+        reported_losses={
+            "tiny_ensemble": ["loss"]
+        },
+    )
+
+    assert runs.reported_losses["tiny_ensemble"] == ["loss"]
+
+
+def test_training_runs_reported_metrics_discovers_metric_outputs_without_prediction_role():
+    trainer = _make_tiny_regression_with_label_mean_report_trainer(
+        "training_runs_reported_metrics_with_label_mean_report"
+    )
+
+    runs = thor.training.TrainingRuns(
+        [("fold_0", trainer, "tiny_ensemble")],
+        reported_metrics={
+            "tiny_ensemble": ["true_mean", "prediction_mean"]
+        },
+    )
+
+    assert runs.reported_metrics["tiny_ensemble"] == ["true_mean", "prediction_mean"]
 
 
 def _make_two_phase_trainer_with_inactive_future_reports(name: str):
@@ -1593,6 +1730,37 @@ def test_training_runs_early_completion_rule_accepts_ensemble_group_target():
     )
 
     assert runs is not None
+
+
+
+
+def test_training_runs_early_completion_callback_cycle_is_collectable():
+    class Owner:
+        def __init__(self):
+            self.stop_after_epochs = 1
+            trainer = _make_tiny_regression_trainer("training_runs_callback_cycle_collectable")
+
+            def stop_when_stale(current_score, best_score, current_epoch, best_epoch):
+                del current_score, best_score
+                return current_epoch >= best_epoch + self.stop_after_epochs
+
+            self.runs = thor.training.TrainingRuns(
+                [("fold_0", trainer, "tiny_ensemble")],
+                failure_policy="continue",
+                early_completion_rules=[
+                    thor.training.EarlyCompletionRule(
+                        stop_when_stale,
+                        ensemble_group="tiny_ensemble",
+                    )
+                ],
+            )
+
+    owner = Owner()
+    owner_ref = weakref.ref(owner)
+    del owner
+    gc.collect()
+
+    assert owner_ref() is None
 
 
 def test_training_runs_result_status_names_are_exposed():
@@ -4011,6 +4179,117 @@ def test_training_runs_fits_two_tiny_trainers_on_one_gpu_and_prefixes_stats(capf
     assert "final_validate_loss=" not in plain_text
     assert "phase=unknown" not in plain_text
     assert "INFO trainer:" not in plain_text
+
+
+@pytest.mark.cuda
+@pytest.mark.training_integration
+@pytest.mark.skipif(
+    not RUN_TRAINING_INTEGRATION,
+    reason=integration_skip_reason(
+        "THOR_RUN_TRAINING_INTEGRATION",
+        description="opt-in TrainingRuns CUDA integration tests",
+    ),
+)
+def test_training_runs_save_ensemble_excludes_label_only_report_inputs(capfd, tmp_path):
+    runs = thor.training.TrainingRuns(
+        [
+            (
+                "fold_0",
+                _make_tiny_regression_with_label_mean_report_trainer(
+                    "training_runs_label_report_save_ensemble_fold_0",
+                    save_model_dir=tmp_path / "fold_0_model",
+                    save_model_overwrite=True,
+                ),
+                "tiny_ensemble",
+            ),
+            (
+                "fold_1",
+                _make_tiny_regression_with_label_mean_report_trainer(
+                    "training_runs_label_report_save_ensemble_fold_1",
+                    save_model_dir=tmp_path / "fold_1_model",
+                    save_model_overwrite=True,
+                ),
+                "tiny_ensemble",
+            ),
+        ],
+        reported_metrics={
+            "tiny_ensemble": ["true_mean", "prediction_mean"],
+        },
+    )
+
+    results, _ = _fit_runs_and_capture_text(runs, capfd, epochs=1)
+    assert results.all_completed()
+    graph_metric_by_name = {
+        metric.name: metric for metric in results.ensemble("tiny_ensemble").reported_metrics
+    }
+    assert graph_metric_by_name["true_mean"].train_value is not None
+    assert graph_metric_by_name["prediction_mean"].train_value is not None
+
+    ensemble_artifact_dir = tmp_path / "tiny_ensemble_label_report_artifact"
+    assert results.save_ensemble("tiny_ensemble", ensemble_artifact_dir) == str(ensemble_artifact_dir)
+    loaded_network = thor.Network.load(str(ensemble_artifact_dir), network_name="ensemble_tiny_ensemble")
+    placed_ensemble = loaded_network.place(4, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
+    assert set(placed_ensemble.get_network_input_names()) == {"examples"}
+    x, _ = _regression_arrays(dtype=np.float32)
+    ensemble_outputs = placed_ensemble.infer({
+        "examples": _cpu_tensor(x, thor.DataType.fp32)
+    })
+    assert set(ensemble_outputs) == {"prediction"}
+
+
+@pytest.mark.cuda
+@pytest.mark.training_integration
+@pytest.mark.skipif(
+    not RUN_TRAINING_INTEGRATION,
+    reason=integration_skip_reason(
+        "THOR_RUN_TRAINING_INTEGRATION",
+        description="opt-in TrainingRuns CUDA integration tests",
+    ),
+)
+def test_training_runs_save_ensemble_stubs_unrequested_outputs_from_partial_clone(capfd, tmp_path):
+    runs = thor.training.TrainingRuns(
+        [
+            (
+                "fold_0",
+                _make_tiny_regression_unrequested_multi_output_metric_trainer(
+                    "training_runs_partial_clone_fold_0",
+                    save_model_dir=tmp_path / "fold_0_model",
+                    save_model_overwrite=True,
+                ),
+                "tiny_ensemble",
+            ),
+            (
+                "fold_1",
+                _make_tiny_regression_unrequested_multi_output_metric_trainer(
+                    "training_runs_partial_clone_fold_1",
+                    save_model_dir=tmp_path / "fold_1_model",
+                    save_model_overwrite=True,
+                ),
+                "tiny_ensemble",
+            ),
+        ],
+        reported_metrics={
+            "tiny_ensemble": ["debug_value_mean"],
+        },
+    )
+
+    results, _ = _fit_runs_and_capture_text(runs, capfd, epochs=1)
+    assert results.all_completed()
+    graph_metric_by_name = {
+        metric.name: metric for metric in results.ensemble("tiny_ensemble").reported_metrics
+    }
+    assert graph_metric_by_name["debug_value_mean"].train_value is not None
+
+    ensemble_artifact_dir = tmp_path / "tiny_ensemble_partial_clone_artifact"
+    assert results.save_ensemble("tiny_ensemble", ensemble_artifact_dir) == str(ensemble_artifact_dir)
+    loaded_network = thor.Network.load(str(ensemble_artifact_dir), network_name="ensemble_tiny_ensemble")
+    placed_ensemble = loaded_network.place(4, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
+    assert set(placed_ensemble.get_network_input_names()) == {"examples"}
+    x, _ = _regression_arrays(dtype=np.float32)
+    ensemble_outputs = placed_ensemble.infer({
+        "examples": _cpu_tensor(x, thor.DataType.fp32)
+    })
+    assert set(ensemble_outputs) == {"prediction"}
 
 
 @pytest.mark.cuda

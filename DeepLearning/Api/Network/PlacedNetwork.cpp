@@ -1,14 +1,18 @@
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
+#include "DeepLearning/Implementation/Diagnostics/TrainingDiagnostics.h"
 
 #include "DeepLearning/Implementation/Layers/Optimizers/Optimizer.h"
 #include "DeepLearning/Implementation/Parameter/Parameterizable.h"
 #include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
 #include "Utilities/Common/Event.h"
+#include "Utilities/Common/Stream.h"
 
 #include <utility>
 #include <stdexcept>
 #include <set>
+#if THOR_ENABLE_BATCH_SUBMISSION_TIMING
 #include <chrono>
+#endif
 #include <unordered_map>
 
 using namespace std;
@@ -18,10 +22,28 @@ namespace Thor {
 
 namespace {
 
-uint64_t elapsedMicros(std::chrono::high_resolution_clock::time_point start,
-                       std::chrono::high_resolution_clock::time_point finish) {
+#if THOR_ENABLE_BATCH_SUBMISSION_TIMING
+using BatchTimingClock = std::chrono::high_resolution_clock;
+using BatchTimingTimePoint = BatchTimingClock::time_point;
+
+BatchTimingTimePoint timingNow(const ThorImplementation::BatchSubmissionTiming* submitTiming) {
+    return submitTiming == nullptr ? BatchTimingTimePoint{} : BatchTimingClock::now();
+}
+
+uint64_t elapsedMicros(BatchTimingTimePoint start, BatchTimingTimePoint finish) {
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(finish - start).count());
 }
+#else
+struct BatchTimingTimePoint {};
+
+constexpr BatchTimingTimePoint timingNow(const ThorImplementation::BatchSubmissionTiming*) {
+    return {};
+}
+
+constexpr uint64_t elapsedMicros(BatchTimingTimePoint, BatchTimingTimePoint) {
+    return 0;
+}
+#endif
 
 std::shared_ptr<ThorImplementation::PhysicalParameter> getPhysicalParameter(ThorImplementation::StampedNetwork& stampedNetwork,
                                                                             const ParameterReference& parameterReference) {
@@ -75,6 +97,16 @@ PlacedNetwork::~PlacedNetwork() {
     stampedNetworks.clear();
 }
 
+void PlacedNetwork::synchronizeDevices() const {
+    std::set<uint32_t> gpuNums;
+    for (const ThorImplementation::StampedNetwork& stampedNetwork : stampedNetworks) {
+        gpuNums.insert(stampedNetwork.getGpuNum());
+    }
+    for (uint32_t gpuNum : gpuNums) {
+        Stream::deviceSynchronize(static_cast<int>(gpuNum));
+    }
+}
+
 void PlacedNetwork::save(const std::string &directory, bool overwrite, bool saveOptimizerState) {
     network.save(stampedNetworks, directory, overwrite, saveOptimizerState);
 }
@@ -106,21 +138,21 @@ Event PlacedNetwork::submitBatch(uint64_t stampIndex,
                                  ThorImplementation::BatchSubmissionTiming* submitTiming,
                                  std::optional<uint32_t> outputSlotIndex) {
     THOR_THROW_IF_FALSE(stampIndex < stampedNetworks.size());
-    const auto totalStart = std::chrono::high_resolution_clock::now();
+    const auto totalStart = timingNow(submitTiming);
     if (!isInferenceOnly) {
-        const auto activeRootsStart = std::chrono::high_resolution_clock::now();
+        const auto activeRootsStart = timingNow(submitTiming);
         std::vector<Tensor> activeRawLossRoots = network.getRawLossTensorsForTrainingRoots(network.getLossRootTensors());
-        const auto activeRootsFinish = std::chrono::high_resolution_clock::now();
-        const auto setActiveRootsStart = std::chrono::high_resolution_clock::now();
+        const auto activeRootsFinish = timingNow(submitTiming);
+        const auto setActiveRootsStart = timingNow(submitTiming);
         stampedNetworks[stampIndex].setActiveTrainingLossRoots(activeRawLossRoots);
-        const auto setActiveRootsFinish = std::chrono::high_resolution_clock::now();
+        const auto setActiveRootsFinish = timingNow(submitTiming);
         if (submitTiming != nullptr) {
             submitTiming->activeObjectiveRootsMicros += elapsedMicros(activeRootsStart, activeRootsFinish);
             submitTiming->setActiveObjectiveRootsMicros += elapsedMicros(setActiveRootsStart, setActiveRootsFinish);
             submitTiming->activeObjectiveRootCount += activeRawLossRoots.size();
         }
     }
-    const auto sendBatchStart = std::chrono::high_resolution_clock::now();
+    const auto sendBatchStart = timingNow(submitTiming);
     Event processingFinishedEvent = stampedNetworks[stampIndex].sendBatch(std::move(batchInputs),
                                                                            batchOutputs,
                                                                            outputReadyEvents,
@@ -129,7 +161,7 @@ Event PlacedNetwork::submitBatch(uint64_t stampIndex,
                                                                            waitForOutputsOnProcessingStream,
                                                                            submitTiming,
                                                                            outputSlotIndex);
-    const auto sendBatchFinish = std::chrono::high_resolution_clock::now();
+    const auto sendBatchFinish = timingNow(submitTiming);
     if (submitTiming != nullptr) {
         submitTiming->sendBatchMicros += elapsedMicros(sendBatchStart, sendBatchFinish);
         submitTiming->totalMicros += elapsedMicros(totalStart, sendBatchFinish);
@@ -148,21 +180,21 @@ Event PlacedNetwork::submitBatch(uint64_t stampIndex,
                                  ThorImplementation::BatchSubmissionTiming* submitTiming,
                                  std::optional<uint32_t> outputSlotIndex) {
     THOR_THROW_IF_FALSE(stampIndex < stampedNetworks.size());
-    const auto totalStart = std::chrono::high_resolution_clock::now();
+    const auto totalStart = timingNow(submitTiming);
     if (!isInferenceOnly) {
-        const auto activeRootsStart = std::chrono::high_resolution_clock::now();
+        const auto activeRootsStart = timingNow(submitTiming);
         std::vector<Tensor> activeRawLossRoots = network.getRawLossTensorsForTrainingRoots(network.getLossRootTensors());
-        const auto activeRootsFinish = std::chrono::high_resolution_clock::now();
-        const auto setActiveRootsStart = std::chrono::high_resolution_clock::now();
+        const auto activeRootsFinish = timingNow(submitTiming);
+        const auto setActiveRootsStart = timingNow(submitTiming);
         stampedNetworks[stampIndex].setActiveTrainingLossRoots(activeRawLossRoots);
-        const auto setActiveRootsFinish = std::chrono::high_resolution_clock::now();
+        const auto setActiveRootsFinish = timingNow(submitTiming);
         if (submitTiming != nullptr) {
             submitTiming->activeObjectiveRootsMicros += elapsedMicros(activeRootsStart, activeRootsFinish);
             submitTiming->setActiveObjectiveRootsMicros += elapsedMicros(setActiveRootsStart, setActiveRootsFinish);
             submitTiming->activeObjectiveRootCount += activeRawLossRoots.size();
         }
     }
-    const auto sendBatchStart = std::chrono::high_resolution_clock::now();
+    const auto sendBatchStart = timingNow(submitTiming);
     Event processingFinishedEvent = stampedNetworks[stampIndex].sendBatch(std::move(batchInputs),
                                                                            inputReadyEvents,
                                                                            batchOutputs,
@@ -172,7 +204,7 @@ Event PlacedNetwork::submitBatch(uint64_t stampIndex,
                                                                            waitForOutputsOnProcessingStream,
                                                                            submitTiming,
                                                                            outputSlotIndex);
-    const auto sendBatchFinish = std::chrono::high_resolution_clock::now();
+    const auto sendBatchFinish = timingNow(submitTiming);
     if (submitTiming != nullptr) {
         submitTiming->sendBatchMicros += elapsedMicros(sendBatchStart, sendBatchFinish);
         submitTiming->totalMicros += elapsedMicros(totalStart, sendBatchFinish);
@@ -191,21 +223,21 @@ Event PlacedNetwork::submitBatch(uint64_t stampIndex,
                                  ThorImplementation::BatchSubmissionTiming* submitTiming,
                                  std::optional<uint32_t> outputSlotIndex) {
     THOR_THROW_IF_FALSE(stampIndex < stampedNetworks.size());
-    const auto totalStart = std::chrono::high_resolution_clock::now();
+    const auto totalStart = timingNow(submitTiming);
     if (!isInferenceOnly) {
-        const auto activeRootsStart = std::chrono::high_resolution_clock::now();
+        const auto activeRootsStart = timingNow(submitTiming);
         std::vector<Tensor> activeRawLossRoots = network.getRawLossTensorsForTrainingRoots(activeTrainingLossRoots);
-        const auto activeRootsFinish = std::chrono::high_resolution_clock::now();
-        const auto setActiveRootsStart = std::chrono::high_resolution_clock::now();
+        const auto activeRootsFinish = timingNow(submitTiming);
+        const auto setActiveRootsStart = timingNow(submitTiming);
         stampedNetworks[stampIndex].setActiveTrainingLossRoots(activeRawLossRoots);
-        const auto setActiveRootsFinish = std::chrono::high_resolution_clock::now();
+        const auto setActiveRootsFinish = timingNow(submitTiming);
         if (submitTiming != nullptr) {
             submitTiming->activeObjectiveRootsMicros += elapsedMicros(activeRootsStart, activeRootsFinish);
             submitTiming->setActiveObjectiveRootsMicros += elapsedMicros(setActiveRootsStart, setActiveRootsFinish);
             submitTiming->activeObjectiveRootCount += activeRawLossRoots.size();
         }
     }
-    const auto sendBatchStart = std::chrono::high_resolution_clock::now();
+    const auto sendBatchStart = timingNow(submitTiming);
     Event processingFinishedEvent = stampedNetworks[stampIndex].sendBatch(std::move(batchInputs),
                                                                            batchOutputs,
                                                                            outputReadyEvents,
@@ -214,7 +246,7 @@ Event PlacedNetwork::submitBatch(uint64_t stampIndex,
                                                                            waitForOutputsOnProcessingStream,
                                                                            submitTiming,
                                                                            outputSlotIndex);
-    const auto sendBatchFinish = std::chrono::high_resolution_clock::now();
+    const auto sendBatchFinish = timingNow(submitTiming);
     if (submitTiming != nullptr) {
         submitTiming->sendBatchMicros += elapsedMicros(sendBatchStart, sendBatchFinish);
         submitTiming->totalMicros += elapsedMicros(totalStart, sendBatchFinish);
@@ -232,21 +264,21 @@ Event PlacedNetwork::submitBatch(uint64_t stampIndex,
                                  ThorImplementation::BatchSubmissionTiming* submitTiming,
                                  std::optional<uint32_t> outputSlotIndex) {
     THOR_THROW_IF_FALSE(stampIndex < stampedNetworks.size());
-    const auto totalStart = std::chrono::high_resolution_clock::now();
+    const auto totalStart = timingNow(submitTiming);
     if (!isInferenceOnly) {
-        const auto activeRootsStart = std::chrono::high_resolution_clock::now();
+        const auto activeRootsStart = timingNow(submitTiming);
         std::vector<Tensor> activeRawLossRoots = network.getRawLossTensorsForTrainingRoots(network.getLossRootTensors());
-        const auto activeRootsFinish = std::chrono::high_resolution_clock::now();
-        const auto setActiveRootsStart = std::chrono::high_resolution_clock::now();
+        const auto activeRootsFinish = timingNow(submitTiming);
+        const auto setActiveRootsStart = timingNow(submitTiming);
         stampedNetworks[stampIndex].setActiveTrainingLossRoots(activeRawLossRoots);
-        const auto setActiveRootsFinish = std::chrono::high_resolution_clock::now();
+        const auto setActiveRootsFinish = timingNow(submitTiming);
         if (submitTiming != nullptr) {
             submitTiming->activeObjectiveRootsMicros += elapsedMicros(activeRootsStart, activeRootsFinish);
             submitTiming->setActiveObjectiveRootsMicros += elapsedMicros(setActiveRootsStart, setActiveRootsFinish);
             submitTiming->activeObjectiveRootCount += activeRawLossRoots.size();
         }
     }
-    const auto sendBatchStart = std::chrono::high_resolution_clock::now();
+    const auto sendBatchStart = timingNow(submitTiming);
     Event processingFinishedEvent = stampedNetworks[stampIndex].sendBatch(batchInputs,
                                                                            batchOutputs,
                                                                            outputReadyEvents,
@@ -255,7 +287,7 @@ Event PlacedNetwork::submitBatch(uint64_t stampIndex,
                                                                            waitForOutputsOnProcessingStream,
                                                                            submitTiming,
                                                                            outputSlotIndex);
-    const auto sendBatchFinish = std::chrono::high_resolution_clock::now();
+    const auto sendBatchFinish = timingNow(submitTiming);
     if (submitTiming != nullptr) {
         submitTiming->sendBatchMicros += elapsedMicros(sendBatchStart, sendBatchFinish);
         submitTiming->totalMicros += elapsedMicros(totalStart, sendBatchFinish);
@@ -274,21 +306,21 @@ Event PlacedNetwork::submitBatch(uint64_t stampIndex,
                                  ThorImplementation::BatchSubmissionTiming* submitTiming,
                                  std::optional<uint32_t> outputSlotIndex) {
     THOR_THROW_IF_FALSE(stampIndex < stampedNetworks.size());
-    const auto totalStart = std::chrono::high_resolution_clock::now();
+    const auto totalStart = timingNow(submitTiming);
     if (!isInferenceOnly) {
-        const auto activeRootsStart = std::chrono::high_resolution_clock::now();
+        const auto activeRootsStart = timingNow(submitTiming);
         std::vector<Tensor> activeRawLossRoots = network.getRawLossTensorsForTrainingRoots(activeTrainingLossRoots);
-        const auto activeRootsFinish = std::chrono::high_resolution_clock::now();
-        const auto setActiveRootsStart = std::chrono::high_resolution_clock::now();
+        const auto activeRootsFinish = timingNow(submitTiming);
+        const auto setActiveRootsStart = timingNow(submitTiming);
         stampedNetworks[stampIndex].setActiveTrainingLossRoots(activeRawLossRoots);
-        const auto setActiveRootsFinish = std::chrono::high_resolution_clock::now();
+        const auto setActiveRootsFinish = timingNow(submitTiming);
         if (submitTiming != nullptr) {
             submitTiming->activeObjectiveRootsMicros += elapsedMicros(activeRootsStart, activeRootsFinish);
             submitTiming->setActiveObjectiveRootsMicros += elapsedMicros(setActiveRootsStart, setActiveRootsFinish);
             submitTiming->activeObjectiveRootCount += activeRawLossRoots.size();
         }
     }
-    const auto sendBatchStart = std::chrono::high_resolution_clock::now();
+    const auto sendBatchStart = timingNow(submitTiming);
     Event processingFinishedEvent = stampedNetworks[stampIndex].sendBatch(batchInputs,
                                                                            batchOutputs,
                                                                            outputReadyEvents,
@@ -297,7 +329,7 @@ Event PlacedNetwork::submitBatch(uint64_t stampIndex,
                                                                            waitForOutputsOnProcessingStream,
                                                                            submitTiming,
                                                                            outputSlotIndex);
-    const auto sendBatchFinish = std::chrono::high_resolution_clock::now();
+    const auto sendBatchFinish = timingNow(submitTiming);
     if (submitTiming != nullptr) {
         submitTiming->sendBatchMicros += elapsedMicros(sendBatchStart, sendBatchFinish);
         submitTiming->totalMicros += elapsedMicros(totalStart, sendBatchFinish);

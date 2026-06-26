@@ -10,6 +10,7 @@
 #include <unordered_set>
 
 #include "DeepLearning/Implementation/ThorError.h"
+#include "DeepLearning/Implementation/Diagnostics/TrainingDiagnostics.h"
 #include "DeepLearning/Implementation/Layers/LayerSubmitDiagnostics.h"
 #include "Utilities/Expression/AutoDiff.h"
 using namespace std;
@@ -35,10 +36,14 @@ std::string optimizerFusionOutputName(const std::string& parameterName, const st
     return optimizerFusionNamePrefix(parameterName) + outputName;
 }
 
+#if THOR_ENABLE_TRAINING_UPDATE_DIAGNOSTICS
 bool trainingUpdateDiagnosticsEnabled() {
     const char* value = std::getenv("THOR_TRAINING_UPDATE_DIAGNOSTICS");
     return value != nullptr && value[0] != '\0' && std::string(value) != "0";
 }
+#else
+constexpr bool trainingUpdateDiagnosticsEnabled() { return false; }
+#endif
 
 std::string joinNames(const std::vector<std::string>& names) {
     std::string result;
@@ -1355,9 +1360,28 @@ void CustomLayer::compileImpl() {
 
         for (uint32_t outputPort = 0; outputPort < outputNames.size(); ++outputPort) {
             const uint32_t flat = outputFlatIndex(applicationIndex, outputPort);
-            if (flat >= featureOutputs.size() || !featureOutputs[flat].has_value()) {
-                throw runtime_error("CustomLayer missing connected output port '" + outputNames[outputPort] + "' for application " +
-                                    std::to_string(applicationIndex) + ".");
+            if (flat >= featureOutputs.size()) {
+                ensureApplicationStorageAllocated(applicationIndex);
+            }
+            if (flat >= featureOutputs.size()) {
+                throw runtime_error("CustomLayer internal error while allocating output port '" + outputNames[outputPort] +
+                                    "' for application " + std::to_string(applicationIndex) + ".");
+            }
+            if (!featureOutputs[flat].has_value()) {
+                // A retained multi-output CustomLayer can have a sibling output that
+                // is intentionally unconsumed after inference pruning or partial
+                // subgraph cloning.  The expression still declares and stamps every
+                // output name, so provide a throwaway tensor for the unconnected port
+                // instead of requiring a graph-level loader.  Public API graphs with
+                // true dangling tensors are still rejected by Network::evaluateGraph();
+                // this is a physical-layer boundary repair for graphs that have
+                // already been pruned to a valid inference/reporting subgraph.
+                std::optional<Tensor> outputTensor = inferFeatureOutputTensor(applicationIndex, outputPort);
+                if (!outputTensor.has_value()) {
+                    throw runtime_error("CustomLayer failed to infer unconnected output port '" + outputNames[outputPort] +
+                                        "' for application " + std::to_string(applicationIndex) + ".");
+                }
+                featureOutputs[flat] = outputTensor;
             }
         }
 

@@ -3,7 +3,9 @@
 #include "Utilities/TarFile/UringDirect.h"
 
 #include <algorithm>
+#if THOR_ENABLE_BATCH_ASSEMBLER_DIAGNOSTICS
 #include <chrono>
+#endif
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -25,6 +27,7 @@ uint64_t clampUint64(uint64_t value, uint64_t low, uint64_t high) {
 }
 
 
+#if THOR_ENABLE_BATCH_ASSEMBLER_DIAGNOSTICS
 bool queueDiagnosticsEnabled() {
     const char* enabled = std::getenv("THOR_TRAINING_QUEUE_DIAGNOSTICS");
     return enabled != nullptr && enabled[0] != '\0' && !(enabled[0] == '0' && enabled[1] == '\0');
@@ -47,6 +50,7 @@ bool shouldEmitQueueDiagnostic(uint64_t index, uint64_t waitMicros = 0) {
     const uint64_t every = queueDiagnosticsEvery();
     return waitMicros > 0 || index <= 3 || (every != 0 && (index % every) == 0);
 }
+#endif
 
 const char* exampleTypeName(ExampleType exampleType) {
     switch (exampleType) {
@@ -61,11 +65,13 @@ const char* exampleTypeName(ExampleType exampleType) {
     }
 }
 
+#if THOR_ENABLE_BATCH_ASSEMBLER_DIAGNOSTICS
 uint64_t microsSince(std::chrono::high_resolution_clock::time_point start,
                      std::chrono::high_resolution_clock::time_point finish) {
     return static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(finish - start).count());
 }
+#endif
 
 uint64_t computeShardReadQueueDepth(uint64_t exampleSizeInBytes) {
     constexpr uint64_t MIN_READS = 32;
@@ -169,6 +175,7 @@ BatchAssembler::BatchAssembler(vector<std::shared_ptr<Shard>> shards,
 
     batchesPerEpoch = (numExamples + (batchSize - 1)) / batchSize;
 
+#if THOR_ENABLE_BATCH_ASSEMBLER_DIAGNOSTICS
     if (queueDiagnosticsEnabled()) {
         std::fprintf(stderr,
                      "THOR_TRAINING_QUEUE_DIAGNOSTIC loader_config phase=%s shards=%zu examples=%lu batches_per_epoch=%lu batch_size=%lu batch_queue_depth=%lu example_bytes=%lu shard_example_queue_depth=%lu shard_read_queue_depth=%lu\n",
@@ -183,6 +190,7 @@ BatchAssembler::BatchAssembler(vector<std::shared_ptr<Shard>> shards,
                      shardReadQueueDepth);
         std::fflush(stderr);
     }
+#endif
 
     open();
 }
@@ -261,7 +269,10 @@ void BatchAssembler::shardReaderThread(uint64_t shard) {
                                               static_cast<uint32_t>(request.numBytes))) {
             cachedReader.submit();
         }
+
+#if THOR_ENABLE_BATCH_ASSEMBLER_DIAGNOSTICS
         diagnosticReadsSubmitted.fetch_add(1, std::memory_order_relaxed);
+#endif
     };
 
     auto waitOneRead = [&]() {
@@ -275,7 +286,10 @@ void BatchAssembler::shardReaderThread(uint64_t shard) {
                                      "': " + std::strerror(-completion.responseCode));
         }
         THOR_THROW_IF_FALSE(static_cast<uint64_t>(completion.responseCode) == pendingRead.expectedBytes);
+
+#if THOR_ENABLE_BATCH_ASSEMBLER_DIAGNOSTICS
         diagnosticReadsCompleted.fetch_add(1, std::memory_order_relaxed);
+#endif
         return pendingRead.labeledExample;
     };
 
@@ -298,13 +312,18 @@ void BatchAssembler::shardReaderThread(uint64_t shard) {
         cachedReader.submit();
         LabeledExample labeledExample = waitOneRead();
 
+
+#if THOR_ENABLE_BATCH_ASSEMBLER_DIAGNOSTICS
         const auto pushStart = std::chrono::high_resolution_clock::now();
+#endif
         bool queueOpen = shardQueues[shard]->push(labeledExample);
+#if THOR_ENABLE_BATCH_ASSEMBLER_DIAGNOSTICS
         const auto pushFinish = std::chrono::high_resolution_clock::now();
         diagnosticShardQueuePushWaitMicros.fetch_add(microsSince(pushStart, pushFinish), std::memory_order_relaxed);
         if (queueOpen) {
             diagnosticExamplesPushed.fetch_add(1, std::memory_order_relaxed);
         }
+#endif
         if (!queueOpen) {
             drainPendingReads();
             return;
@@ -340,13 +359,18 @@ void BatchAssembler::batchAssemblerThread() {
         }
 
         if (batchSlot == 0) {
+
+#if THOR_ENABLE_BATCH_ASSEMBLER_DIAGNOSTICS
             const auto bufferWaitStart = std::chrono::high_resolution_clock::now();
+#endif
             queueOpen = batchDataQueue.getBufferToLoad(batchDataBuffer);
             if (!queueOpen)
                 return;
             queueOpen = batchLabelQueue.getBufferToLoad(batchLabelsBuffer);
+#if THOR_ENABLE_BATCH_ASSEMBLER_DIAGNOSTICS
             const auto bufferWaitFinish = std::chrono::high_resolution_clock::now();
             diagnosticBatchBufferWaitMicros.fetch_add(microsSince(bufferWaitStart, bufferWaitFinish), std::memory_order_relaxed);
+#endif
             if (!queueOpen) {
                 batchDataQueue.bufferLoaded(batchDataBuffer);
                 return;
@@ -373,10 +397,15 @@ void BatchAssembler::batchAssemblerThread() {
         }
         THOR_THROW_IF_FALSE(chosenShard < numExamplesPerShard.size());
 
+
+#if THOR_ENABLE_BATCH_ASSEMBLER_DIAGNOSTICS
         const auto popStart = std::chrono::high_resolution_clock::now();
+#endif
         queueOpen = shardQueues[chosenShard]->pop(labeledExample);
+#if THOR_ENABLE_BATCH_ASSEMBLER_DIAGNOSTICS
         const auto popFinish = std::chrono::high_resolution_clock::now();
         diagnosticShardQueuePopWaitMicros.fetch_add(microsSince(popStart, popFinish), std::memory_order_relaxed);
+#endif
         if (!queueOpen) {
             batchDataQueue.bufferLoaded(batchDataBuffer);
             batchLabelQueue.bufferLoaded(batchLabelsBuffer);
@@ -452,10 +481,13 @@ void BatchAssembler::batchAssemblerThread() {
             batchLabelQueue.bufferLoaded(batchLabelsBuffer);
 
             batchNumQueue.push(currentBatchNum);
+
+#if THOR_ENABLE_BATCH_ASSEMBLER_DIAGNOSTICS
             const uint64_t assembled = diagnosticBatchesAssembled.fetch_add(1, std::memory_order_relaxed) + 1;
             if (queueDiagnosticsEnabled() && shouldEmitQueueDiagnostic(assembled)) {
                 emitQueueDiagnostics("assembled_batch", currentBatchNum);
             }
+#endif
             currentBatchNum += 1;
             if (currentBatchNum == batchesPerEpoch) {
                 // An epoch may not be exactly divisible by an integer number of batches, make sure this does not cause drift.
@@ -468,6 +500,7 @@ void BatchAssembler::batchAssemblerThread() {
 }
 
 
+#if THOR_ENABLE_BATCH_ASSEMBLER_DIAGNOSTICS
 void BatchAssembler::emitQueueDiagnostics(const char* event, uint64_t batchNum, uint64_t waitMicros) {
     if (!queueDiagnosticsEnabled()) {
         return;
@@ -531,9 +564,12 @@ void BatchAssembler::emitQueueDiagnostics(const char* event, uint64_t batchNum, 
                  shardCapacity);
     std::fflush(stderr);
 }
+#endif
 
 void BatchAssembler::getBatch(Tensor &batchTensor, Tensor &labelTensor, uint64_t &batchNum) {
+#if THOR_ENABLE_BATCH_ASSEMBLER_DIAGNOSTICS
     const auto start = std::chrono::high_resolution_clock::now();
+#endif
     bool queueOpen;
     queueOpen = batchDataQueue.getBufferToUnload(batchTensor);
     THOR_THROW_IF_FALSE(queueOpen);
@@ -541,6 +577,7 @@ void BatchAssembler::getBatch(Tensor &batchTensor, Tensor &labelTensor, uint64_t
     THOR_THROW_IF_FALSE(queueOpen);
     queueOpen = batchNumQueue.pop(batchNum);
     THOR_THROW_IF_FALSE(queueOpen);
+#if THOR_ENABLE_BATCH_ASSEMBLER_DIAGNOSTICS
     const auto finish = std::chrono::high_resolution_clock::now();
 
     const uint64_t loaded = diagnosticBatchesLoaded.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -548,6 +585,7 @@ void BatchAssembler::getBatch(Tensor &batchTensor, Tensor &labelTensor, uint64_t
     if (queueDiagnosticsEnabled() && shouldEmitQueueDiagnostic(loaded, waitMicros)) {
         emitQueueDiagnostics("get_batch", batchNum, waitMicros);
     }
+#endif
 }
 
 uint64_t BatchAssembler::getNextBatchNum() {
@@ -564,10 +602,13 @@ void BatchAssembler::returnBuffer(Tensor &batchTensor, Tensor &labelTensor) {
     queueOpen = batchLabelQueue.bufferUnloaded(labelTensor);
     THOR_THROW_IF_FALSE(queueOpen);
 
+
+#if THOR_ENABLE_BATCH_ASSEMBLER_DIAGNOSTICS
     const uint64_t returned = diagnosticBuffersReturned.fetch_add(1, std::memory_order_relaxed) + 1;
     if (queueDiagnosticsEnabled() && shouldEmitQueueDiagnostic(returned)) {
         emitQueueDiagnostics("return_batch", 0);
     }
+#endif
 }
 
 uint64_t BatchAssembler::getNumBatchesPerEpoch() { return batchesPerEpoch; }

@@ -1,5 +1,7 @@
 #include "DeepLearning/Implementation/Layers/LayerSubmitDiagnostics.h"
 
+#if THOR_ENABLE_LAYER_SUBMIT_DIAGNOSTICS
+
 #include <cstdio>
 #include <cstdlib>
 
@@ -107,3 +109,5 @@ void emitLayerSubmitDiagnostic(const char* event,
 }
 
 }  // namespace ThorImplementation
+
+#endif  // THOR_ENABLE_LAYER_SUBMIT_DIAGNOSTICS

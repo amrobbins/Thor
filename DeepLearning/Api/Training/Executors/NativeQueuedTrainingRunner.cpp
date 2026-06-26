@@ -12,6 +12,7 @@
 #include "DeepLearning/Api/Training/TrainingProgram.h"
 #include "DeepLearning/Api/Training/TrainingPhase.h"
 #include "DeepLearning/Implementation/Layers/LayerSubmitDiagnostics.h"
+#include "DeepLearning/Implementation/Diagnostics/TrainingDiagnostics.h"
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Common/ScopedGpu.h"
 
@@ -345,6 +346,7 @@ std::string phaseName(TrainingEventPhase phase) {
     }
 }
 
+#if THOR_ENABLE_TRAINING_QUEUE_DIAGNOSTICS
 bool queueDiagnosticsEnabled() {
     const char* enabled = std::getenv("THOR_TRAINING_QUEUE_DIAGNOSTICS");
     return enabled != nullptr && enabled[0] != '\0' && !(enabled[0] == '0' && enabled[1] == '\0');
@@ -368,9 +370,22 @@ bool shouldEmitQueueDiagnostic(uint64_t index, uint64_t waitMicros = 0) {
     return waitMicros > 0 || index <= 3 || (every != 0 && (index % every) == 0);
 }
 
-uint64_t elapsedMicros(std::chrono::high_resolution_clock::time_point start, std::chrono::high_resolution_clock::time_point finish) {
+using DiagnosticTimePoint = std::chrono::high_resolution_clock::time_point;
+
+uint64_t elapsedMicros(DiagnosticTimePoint start, DiagnosticTimePoint finish) {
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(finish - start).count());
 }
+
+DiagnosticTimePoint diagnosticNow(bool enabled) {
+    return enabled ? std::chrono::high_resolution_clock::now() : DiagnosticTimePoint{};
+}
+#else
+constexpr bool queueDiagnosticsEnabled() { return false; }
+constexpr bool shouldEmitQueueDiagnostic(uint64_t, uint64_t = 0) { return false; }
+struct DiagnosticTimePoint {};
+constexpr uint64_t elapsedMicros(DiagnosticTimePoint, DiagnosticTimePoint) { return 0; }
+constexpr DiagnosticTimePoint diagnosticNow(bool) { return {}; }
+#endif
 
 bool gpuSubmitCoordinatorEnabled() {
     const char* enabled = std::getenv("THOR_TRAINING_GPU_SUBMIT_COORDINATOR");
@@ -399,15 +414,15 @@ class GpuSubmitCoordinator {
     auto submit(Fn&& fn, GpuSubmitCoordinatorTiming* timing = nullptr) -> std::future<std::invoke_result_t<Fn>> {
         using Result = std::invoke_result_t<Fn>;
 
-        const auto enqueuedAt = std::chrono::high_resolution_clock::now();
+        const auto enqueuedAt = diagnosticNow(timing != nullptr);
         auto task =
             std::make_shared<std::packaged_task<Result()>>([this, fn = std::forward<Fn>(fn), timing, enqueuedAt]() mutable -> Result {
-                const auto startedAt = std::chrono::high_resolution_clock::now();
+                const auto startedAt = diagnosticNow(timing != nullptr);
                 if (timing != nullptr) {
                     timing->queueWaitMicros = elapsedMicros(enqueuedAt, startedAt);
                 }
                 ScopedGpu scopedGpu(gpuNum);
-                const auto execStartedAt = std::chrono::high_resolution_clock::now();
+                const auto execStartedAt = diagnosticNow(timing != nullptr);
                 if (timing != nullptr) {
                     timing->setGpuMicros = elapsedMicros(startedAt, execStartedAt);
                 }
@@ -416,27 +431,27 @@ class GpuSubmitCoordinator {
                     try {
                         std::invoke(fn);
                     } catch (...) {
-                        const auto finishedAt = std::chrono::high_resolution_clock::now();
+                        const auto finishedAt = diagnosticNow(timing != nullptr);
                         if (timing != nullptr) {
                             timing->execMicros = elapsedMicros(execStartedAt, finishedAt);
                         }
                         throw;
                     }
 
-                    const auto finishedAt = std::chrono::high_resolution_clock::now();
+                    const auto finishedAt = diagnosticNow(timing != nullptr);
                     if (timing != nullptr) {
                         timing->execMicros = elapsedMicros(execStartedAt, finishedAt);
                     }
                 } else {
                     try {
                         Result result = std::invoke(fn);
-                        const auto finishedAt = std::chrono::high_resolution_clock::now();
+                        const auto finishedAt = diagnosticNow(timing != nullptr);
                         if (timing != nullptr) {
                             timing->execMicros = elapsedMicros(execStartedAt, finishedAt);
                         }
                         return result;
                     } catch (...) {
-                        const auto finishedAt = std::chrono::high_resolution_clock::now();
+                        const auto finishedAt = diagnosticNow(timing != nullptr);
                         if (timing != nullptr) {
                             timing->execMicros = elapsedMicros(execStartedAt, finishedAt);
                         }
@@ -1540,6 +1555,11 @@ class NativeQueuedEpochScheduler {
         }
         const bool validationPass = exampleType != ExampleType::TRAIN;
         const bool useGpuSubmitCoordinator = gpuSubmitCoordinatorEnabled();
+#if THOR_ENABLE_TRAINING_QUEUE_DIAGNOSTICS
+        const bool collectQueueDiagnostics = queueDiagnosticsEnabled();
+#else
+        constexpr bool collectQueueDiagnostics = false;
+#endif
         const std::vector<StepExecutable>& steps = plan.getSteps();
 
         for (uint64_t batch = 0; batch < batches; ++batch) {
@@ -1547,15 +1567,15 @@ class NativeQueuedEpochScheduler {
                 requestQueuedTrainingCancellation(state);
                 return;
             }
-            const auto scheduleIterationStart = std::chrono::high_resolution_clock::now();
+            const auto scheduleIterationStart = diagnosticNow(collectQueueDiagnostics);
             uint64_t epochBatchNum = initialEpochBatchNum + batch;
-            const auto optimizerStart = std::chrono::high_resolution_clock::now();
+            const auto optimizerStart = diagnosticNow(collectQueueDiagnostics);
             Optimizer::updateHyperParameters(placedNetwork.get(), currentEpoch, epochBatchNum, batchesPerEpoch);
-            const auto optimizerFinish = std::chrono::high_resolution_clock::now();
+            const auto optimizerFinish = diagnosticNow(collectQueueDiagnostics);
 
             uint64_t slotIndex = 0;
             uint64_t inFlightAfterReserve = 0;
-            const auto reserveStart = std::chrono::high_resolution_clock::now();
+            const auto reserveStart = diagnosticNow(collectQueueDiagnostics);
             {
                 std::unique_lock<std::mutex> lock(state->mutex);
                 while (state->failure == nullptr && !state->cancelRequested && state->inFlightBatches >= options.maxInFlightBatches) {
@@ -1581,8 +1601,8 @@ class NativeQueuedEpochScheduler {
                 state->inFlightBatches += 1;
                 inFlightAfterReserve = state->inFlightBatches;
             }
-            const auto reserveFinish = std::chrono::high_resolution_clock::now();
-            if (shouldEmitQueueDiagnostic(batch + 1)) {
+            const auto reserveFinish = diagnosticNow(collectQueueDiagnostics);
+            if (collectQueueDiagnostics && shouldEmitQueueDiagnostic(batch + 1)) {
                 emitNativeQueueDiagnostic("reserve",
                                           diagnosticPhase,
                                           currentEpoch,
@@ -1607,11 +1627,11 @@ class NativeQueuedEpochScheduler {
                 scalarStat.value = 0.0f;
             }
 
-            const auto getBatchStart = std::chrono::high_resolution_clock::now();
+            const auto getBatchStart = diagnosticNow(collectQueueDiagnostics);
             params->batchInput = loader->getBatch(exampleType, epochBatchNum);
-            const auto getBatchFinish = std::chrono::high_resolution_clock::now();
-            const uint64_t getBatchWaitMicros = elapsedMicros(getBatchStart, getBatchFinish);
-            if (shouldEmitQueueDiagnostic(batch + 1, getBatchWaitMicros)) {
+            const auto getBatchFinish = diagnosticNow(collectQueueDiagnostics);
+            const uint64_t getBatchWaitMicros = collectQueueDiagnostics ? elapsedMicros(getBatchStart, getBatchFinish) : 0;
+            if (collectQueueDiagnostics && shouldEmitQueueDiagnostic(batch + 1, getBatchWaitMicros)) {
                 emitNativeQueueDiagnostic("get_batch_done",
                                           diagnosticPhase,
                                           currentEpoch,
@@ -1623,7 +1643,7 @@ class NativeQueuedEpochScheduler {
                                           getBatchWaitMicros);
             }
 
-            const auto submitStart = std::chrono::high_resolution_clock::now();
+            const auto submitStart = diagnosticNow(collectQueueDiagnostics);
             uint64_t bindMicros = 0;
             uint64_t submitBatchMicros = 0;
             uint64_t submitCalls = 0;
@@ -1634,10 +1654,12 @@ class NativeQueuedEpochScheduler {
             ThorImplementation::BatchSubmissionTiming submitTiming;
             for (const StepExecutable& step : steps) {
                 for (uint32_t repeat = 0; repeat < step.getRepeatCount(); ++repeat) {
-                    const auto bindStart = std::chrono::high_resolution_clock::now();
+                    const auto bindStart = diagnosticNow(collectQueueDiagnostics);
                     Batch boundBatchInput = bindBatchInputs(step, params->batchInput);
-                    const auto bindFinish = std::chrono::high_resolution_clock::now();
-                    bindMicros += elapsedMicros(bindStart, bindFinish);
+                    const auto bindFinish = diagnosticNow(collectQueueDiagnostics);
+                    if (collectQueueDiagnostics) {
+                        bindMicros += elapsedMicros(bindStart, bindFinish);
+                    }
                     params->batchOutput.clear();
                     ThorImplementation::BatchSubmissionTiming singleSubmitTiming;
                     auto submitWork = [&]() {
@@ -1660,35 +1682,41 @@ class NativeQueuedEpochScheduler {
                                                           step.getObjectiveRoots(),
                                                           &processingFinishedEvents[slotIndex],
                                                           /*waitForOutputsOnProcessingStream=*/false,
-                                                          &singleSubmitTiming,
+                                                          collectQueueDiagnostics ? &singleSubmitTiming : nullptr,
                                                           slotIndex);
                     };
 
-                    const auto submitBatchStart = std::chrono::high_resolution_clock::now();
+                    const auto submitBatchStart = diagnosticNow(collectQueueDiagnostics);
                     if (useGpuSubmitCoordinator) {
                         GpuSubmitCoordinatorTiming coordinatorTiming;
                         auto& coordinator = GpuSubmitCoordinatorRegistry::get(stampGpuNums[nextStampToProcess]);
-                        auto submitFuture = coordinator.submit(submitWork, &coordinatorTiming);
+                        auto submitFuture = coordinator.submit(submitWork, collectQueueDiagnostics ? &coordinatorTiming : nullptr);
                         submitFuture.get();
-                        coordinatorQueueWaitMicros += coordinatorTiming.queueWaitMicros;
-                        coordinatorSetGpuMicros += coordinatorTiming.setGpuMicros;
-                        coordinatorExecMicros += coordinatorTiming.execMicros;
+                        if (collectQueueDiagnostics) {
+                            coordinatorQueueWaitMicros += coordinatorTiming.queueWaitMicros;
+                            coordinatorSetGpuMicros += coordinatorTiming.setGpuMicros;
+                            coordinatorExecMicros += coordinatorTiming.execMicros;
+                        }
                     } else {
                         submitWork();
                     }
-                    const auto submitBatchFinish = std::chrono::high_resolution_clock::now();
-                    const uint64_t submitBatchElapsedMicros = elapsedMicros(submitBatchStart, submitBatchFinish);
-                    submitBatchMicros += submitBatchElapsedMicros;
-                    if (useGpuSubmitCoordinator) {
-                        coordinatorRoundtripMicros += submitBatchElapsedMicros;
+                    const auto submitBatchFinish = diagnosticNow(collectQueueDiagnostics);
+                    if (collectQueueDiagnostics) {
+                        const uint64_t submitBatchElapsedMicros = elapsedMicros(submitBatchStart, submitBatchFinish);
+                        submitBatchMicros += submitBatchElapsedMicros;
+                        if (useGpuSubmitCoordinator) {
+                            coordinatorRoundtripMicros += submitBatchElapsedMicros;
+                        }
                     }
-                    ThorImplementation::accumulateBatchSubmissionTiming(submitTiming, singleSubmitTiming);
+                    if (collectQueueDiagnostics) {
+                        ThorImplementation::accumulateBatchSubmissionTiming(submitTiming, singleSubmitTiming);
+                    }
                     submitCalls += 1;
                 }
             }
-            const auto submitFinish = std::chrono::high_resolution_clock::now();
+            const auto submitFinish = diagnosticNow(collectQueueDiagnostics);
 
-            const auto completionSetupStart = std::chrono::high_resolution_clock::now();
+            const auto completionSetupStart = diagnosticNow(collectQueueDiagnostics);
             // Keep CPU stats/output completion off the stamp's input stream.  The input stream
             // event is the point where the GPU training work is done enough for the next batch
             // to be queued on this single stamp.  Output tensors that are copied through
@@ -1696,24 +1724,24 @@ class NativeQueuedEpochScheduler {
             // snapshots the shared CPU output tensors into per-slot scalarStats before those
             // public output tensors may be reused by a later batch.
             Stream completionStream = completionStreams[slotIndex];
-            const auto waitProcessingStart = std::chrono::high_resolution_clock::now();
+            const auto waitProcessingStart = diagnosticNow(collectQueueDiagnostics);
             completionStream.waitEvent(processingFinishedEvents[slotIndex]);
-            const auto waitProcessingFinish = std::chrono::high_resolution_clock::now();
+            const auto waitProcessingFinish = diagnosticNow(collectQueueDiagnostics);
 
-            const auto waitOutputsStart = std::chrono::high_resolution_clock::now();
+            const auto waitOutputsStart = diagnosticNow(collectQueueDiagnostics);
             uint64_t outputWaitCount = 0;
             for (const auto& [outputName, outputReadyEvent] : outputReadyEvents[nextStampToProcess]) {
                 (void)outputName;
                 completionStream.waitEvent(outputReadyEvent);
                 outputWaitCount += 1;
             }
-            const auto waitOutputsFinish = std::chrono::high_resolution_clock::now();
+            const auto waitOutputsFinish = diagnosticNow(collectQueueDiagnostics);
 
-            const auto hostFuncStart = std::chrono::high_resolution_clock::now();
+            const auto hostFuncStart = diagnosticNow(collectQueueDiagnostics);
             cudaError_t cudaStatus = cudaLaunchHostFunc(completionStream, completeNativeQueuedBatch, params);
-            const auto hostFuncFinish = std::chrono::high_resolution_clock::now();
+            const auto hostFuncFinish = diagnosticNow(collectQueueDiagnostics);
             THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
-            if (shouldEmitQueueDiagnostic(batch + 1)) {
+            if (collectQueueDiagnostics && shouldEmitQueueDiagnostic(batch + 1)) {
                 emitNativeQueueDiagnostic("submit",
                                           diagnosticPhase,
                                           currentEpoch,
@@ -1723,16 +1751,16 @@ class NativeQueuedEpochScheduler {
                                           initialEpochBatchNum + batch,
                                           batchesPerEpoch);
             }
-            const auto putEventStart = std::chrono::high_resolution_clock::now();
+            const auto putEventStart = diagnosticNow(collectQueueDiagnostics);
             completionStream.putEvent(completionFinishedEvents[slotIndex], false, true);
-            const auto putEventFinish = std::chrono::high_resolution_clock::now();
+            const auto putEventFinish = diagnosticNow(collectQueueDiagnostics);
 
-            const auto extendOutputsStart = std::chrono::high_resolution_clock::now();
+            const auto extendOutputsStart = diagnosticNow(collectQueueDiagnostics);
             placedNetwork->extendOutputWritableEvents(nextStampToProcess, completionFinishedEvents[slotIndex], slotIndex);
-            const auto extendOutputsFinish = std::chrono::high_resolution_clock::now();
+            const auto extendOutputsFinish = diagnosticNow(collectQueueDiagnostics);
             const auto completionSetupFinish = extendOutputsFinish;
 
-            if (shouldEmitQueueDiagnostic(batch + 1)) {
+            if (collectQueueDiagnostics && shouldEmitQueueDiagnostic(batch + 1)) {
                 emitNativeQueueCompletionTimingDiagnostic(diagnosticPhase,
                                                           currentEpoch,
                                                           epochBatchNum,
@@ -1749,7 +1777,7 @@ class NativeQueuedEpochScheduler {
                                                           elapsedMicros(completionSetupStart, completionSetupFinish));
             }
 
-            if (shouldEmitQueueDiagnostic(batch + 1)) {
+            if (collectQueueDiagnostics && shouldEmitQueueDiagnostic(batch + 1)) {
                 emitNativeQueueSubmitTimingDiagnostic(diagnosticPhase,
                                                       currentEpoch,
                                                       epochBatchNum,
@@ -1768,7 +1796,7 @@ class NativeQueuedEpochScheduler {
                                                       coordinatorRoundtripMicros);
             }
 
-            if (shouldEmitQueueDiagnostic(batch + 1)) {
+            if (collectQueueDiagnostics && shouldEmitQueueDiagnostic(batch + 1)) {
                 emitNativeQueueScheduleTimingDiagnostic(diagnosticPhase,
                                                         currentEpoch,
                                                         epochBatchNum,
@@ -1853,6 +1881,10 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
 
     if (!evaluateOnly && request.previousPlacedNetwork != nullptr) {
         request.cancellationToken.throwIfCancellationRequested();
+        // Copying state from a previously trained placement is a phase/replacement
+        // boundary.  Ensure the source placement's final gradient-update work is
+        // visible before enqueueing parameter and optimizer-state copies.
+        request.previousPlacedNetwork->synchronizeDevices();
         if (executionGraph.composedFromTrainingPhases) {
             placedNetwork->copyMatchingTrainingStateFrom(*request.previousPlacedNetwork);
         } else {
@@ -2148,6 +2180,12 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         selectionMetadata.checkBestModelEveryEpochs = request.checkBestModelEveryEpochs;
         selectionMetadata.minEarlyCompletionEpochs = request.minEarlyCompletionEpochs;
         trainingArtifacts.finalize(*placedNetwork, selectionMetadata);
+        // fit() completion is a semantic boundary: even when no save_model_dir is
+        // configured, callers may immediately reuse, inspect, save, or pass the
+        // completed PlacedNetwork into a follow-up phase.  Preserve the pipelined
+        // batch path, but drain device work before publishing the final trained
+        // state outside this request.
+        placedNetwork->synchronizeDevices();
         if (request.completedPlacedNetwork != nullptr) {
             *request.completedPlacedNetwork = placedNetwork;
         }
