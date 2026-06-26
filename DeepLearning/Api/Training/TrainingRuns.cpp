@@ -1112,18 +1112,12 @@ TrainingRuns::TrainingRuns(std::vector<TrainingRunsSpec> runs,
                            TrainingRunsFailurePolicy failurePolicy,
                            double maxSummaryLogsPerSecond,
                            std::optional<size_t> maxParallelRuns,
-                           std::vector<TrainingRunsRestartPolicy> restartConditions,
-                           std::vector<TrainingRunsEarlyCompletionRule> earlyCompletionRules,
-                           std::map<std::string, size_t> minSuccessfulModels,
-                           std::map<std::string, std::vector<std::string>> reports)
+                           std::map<std::string, size_t> minSuccessfulModels)
     : runs(std::move(runs)),
       failurePolicy(failurePolicy),
       maxSummaryLogsPerSecond(maxSummaryLogsPerSecond),
       maxParallelRuns(maxParallelRuns),
-      minSuccessfulModels(std::move(minSuccessfulModels)),
-      restartConditions(std::move(restartConditions)),
-      earlyCompletionRules(std::move(earlyCompletionRules)),
-      reports(std::move(reports)) {
+      minSuccessfulModels(std::move(minSuccessfulModels)) {
     if (!std::isfinite(maxSummaryLogsPerSecond) || maxSummaryLogsPerSecond < 0.0) {
         throw std::runtime_error("TrainingRuns maxSummaryLogsPerSecond must be finite and >= 0.");
     }
@@ -1132,10 +1126,6 @@ TrainingRuns::TrainingRuns(std::vector<TrainingRunsSpec> runs,
     }
     validateRunSpecs();
     validateMinSuccessfulModels();
-    validateRestartConditions();
-    validateEarlyCompletionRules();
-    validateReportedLosses();
-    validateReportedMetrics();
 }
 
 size_t TrainingRuns::getEffectiveMaxParallelRuns() const {
@@ -1180,11 +1170,27 @@ TrainingRunsResult TrainingRuns::fit(uint32_t epochs, std::shared_ptr<Loader> te
 }
 
 TrainingRunsResult TrainingRuns::fit(const TrainerFitOptions& options) {
-    return fit(options, TrainingRunsEvaluationOptions{});
+    return fit(options, TrainingRunsSessionOptions{});
 }
 
 TrainingRunsResult TrainingRuns::fit(const TrainerFitOptions& options, const TrainingRunsEvaluationOptions& evaluationOptions) {
+    TrainingRunsSessionOptions sessionOptions;
+    sessionOptions.evaluation = evaluationOptions;
+    return fit(options, sessionOptions);
+}
+
+TrainingRunsResult TrainingRuns::fit(const TrainerFitOptions& options, const TrainingRunsSessionOptions& sessionOptions) {
+    restartConditions = sessionOptions.restartConditions;
+    earlyCompletionRules = sessionOptions.earlyCompletionRules;
+    reports = sessionOptions.reports;
+
+    const TrainingRunsEvaluationOptions& evaluationOptions = sessionOptions.evaluation;
+
     validateFitOptions(options);
+    validateRestartConditions();
+    validateEarlyCompletionRules();
+    validateReportedLosses();
+    validateReportedMetrics();
     if (evaluationOptions.testLoader != nullptr) {
         validateTestLoader(*evaluationOptions.testLoader);
     }

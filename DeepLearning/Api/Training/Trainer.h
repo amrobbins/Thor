@@ -27,12 +27,6 @@ class Network;
 class Optimizer;
 class TrainingRuns;
 
-struct TrainerFitOptions {
-    uint32_t epochs = 1;
-    uint32_t checkBestModelEveryEpochs = 0;
-};
-
-
 struct TrainingRestartPolicy {
     std::optional<std::string> runName{};
     std::optional<std::string> ensembleGroup{};
@@ -78,6 +72,15 @@ using TrainingRestartCondition = TrainingRestartPolicy;
 using TrainingRunsRestartPolicy = TrainingRestartPolicy;
 using TrainingRunsRestartConditionSpec = TrainingRestartPolicy;
 
+
+struct TrainerFitOptions {
+    uint32_t epochs = 1;
+    uint32_t checkBestModelEveryEpochs = 0;
+    uint64_t minEarlyCompletionEpochs = 0;
+    std::vector<TrainingRestartCondition> restartConditions{};
+    std::vector<TrainingEarlyCompletionPolicy> earlyCompletionPolicies{};
+};
+
 class PlacedNetwork;
 
 class Trainer {
@@ -96,11 +99,8 @@ class Trainer {
     [[nodiscard]] const std::optional<std::string>& getSaveModelDirectory() const { return saveModelDirectory; }
     [[nodiscard]] bool getSaveModelOverwrite() const { return saveModelOverwrite; }
     [[nodiscard]] bool getSaveOptimizerState() const { return saveOptimizerState; }
-    [[nodiscard]] uint64_t getMinEarlyCompletionEpochs() const { return minEarlyCompletionEpochs; }
     [[nodiscard]] uint64_t getCompletedTrainingEpochs() const { return completedTrainingEpochs; }
     [[nodiscard]] const TrainingModelSelectionScore& getModelSelectionScore() const { return modelSelectionScore; }
-    [[nodiscard]] const std::vector<TrainingRestartCondition>& getRestartConditions() const { return restartConditions; }
-    [[nodiscard]] const std::vector<TrainingEarlyCompletionPolicy>& getEarlyCompletionPolicies() const { return earlyCompletionPolicies; }
 
    private:
     void validateFitOptions(const TrainerFitOptions& options) const;
@@ -153,10 +153,7 @@ class Trainer {
     std::optional<std::string> saveModelDirectory{};
     bool saveModelOverwrite = false;
     bool saveOptimizerState = true;
-    uint64_t minEarlyCompletionEpochs = 0;
     TrainingModelSelectionScore modelSelectionScore{};
-    std::vector<TrainingRestartCondition> restartConditions{};
-    std::vector<TrainingEarlyCompletionPolicy> earlyCompletionPolicies{};
     std::shared_ptr<PlacedNetwork> placedNetworkAfterLastFit = nullptr;
     std::optional<std::string> lastCompletedArtifactDirectory{};
     std::optional<std::string> lastCompletedArtifactNetworkName{};
@@ -240,25 +237,13 @@ class Trainer::Builder {
         return *this;
     }
 
-    Builder& minEarlyCompletionEpochs(uint64_t minEarlyCompletionEpochs) {
-        this->minEarlyCompletionEpochs_ = minEarlyCompletionEpochs;
-        return *this;
-    }
 
     Builder& modelSelectionScore(TrainingModelSelectionScore modelSelectionScore) {
         this->modelSelectionScore_ = std::move(modelSelectionScore);
         return *this;
     }
 
-    Builder& restartConditions(std::vector<TrainingRestartCondition> restartConditions) {
-        this->restartConditions_ = std::move(restartConditions);
-        return *this;
-    }
 
-    Builder& earlyCompletionPolicies(std::vector<TrainingEarlyCompletionPolicy> earlyCompletionPolicies) {
-        this->earlyCompletionPolicies_ = std::move(earlyCompletionPolicies);
-        return *this;
-    }
 
     [[nodiscard]] Trainer build() const;
 
@@ -273,10 +258,7 @@ class Trainer::Builder {
     std::optional<std::string> saveModelDirectory_{};
     bool saveModelOverwrite_ = false;
     bool saveOptimizerState_ = true;
-    uint64_t minEarlyCompletionEpochs_ = 0;
     TrainingModelSelectionScore modelSelectionScore_{};
-    std::vector<TrainingRestartCondition> restartConditions_{};
-    std::vector<TrainingEarlyCompletionPolicy> earlyCompletionPolicies_{};
 };
 
 }  // namespace Thor

@@ -176,10 +176,13 @@ TEST(Trainer, FitPassesBestModelCandidateOptionsAsRunParameters) {
                           .saveModelDirectory("/tmp/thor-best-candidate-options")
                           .saveModelOverwrite(true)
                           .saveOptimizerState(false)
-                          .minEarlyCompletionEpochs(7)
                           .build();
 
-    trainer.fit(TrainerFitOptions{5, 3});
+    TrainerFitOptions options;
+    options.epochs = 5;
+    options.checkBestModelEveryEpochs = 3;
+    options.minEarlyCompletionEpochs = 7;
+    trainer.fit(options);
 
     EXPECT_EQ(executor->calls, 1u);
     ASSERT_TRUE(executor->lastSaveModelDirectory.has_value());
@@ -201,14 +204,17 @@ TEST(Trainer, FitPassesCumulativeCompletedEpochsAcrossFitCalls) {
                           .loader(loader)
                           .executor(executor)
                           .observer(observer)
-                          .minEarlyCompletionEpochs(4)
                           .build();
 
-    trainer.fit(2);
+    TrainerFitOptions options;
+    options.epochs = 2;
+    options.minEarlyCompletionEpochs = 4;
+    trainer.fit(options);
     EXPECT_EQ(executor->lastInitialCompletedEpochs, 0u);
     EXPECT_EQ(trainer.getCompletedTrainingEpochs(), 2u);
 
-    trainer.fit(3);
+    options.epochs = 3;
+    trainer.fit(options);
     EXPECT_EQ(executor->lastInitialCompletedEpochs, 2u);
     EXPECT_EQ(trainer.getCompletedTrainingEpochs(), 5u);
 }
@@ -311,10 +317,13 @@ TEST(Trainer, FitPassesEarlyCompletionPoliciesAsRunParameters) {
                           .loader(loader)
                           .executor(executor)
                           .observer(observer)
-                          .earlyCompletionPolicies({policy})
                           .build();
 
-    trainer.fit(TrainerFitOptions{5, 1});
+    TrainerFitOptions options;
+    options.epochs = 5;
+    options.checkBestModelEveryEpochs = 1;
+    options.earlyCompletionPolicies = {policy};
+    trainer.fit(options);
 
     EXPECT_EQ(executor->calls, 1u);
     EXPECT_EQ(executor->lastEarlyCompletionPolicyCount, 1u);
@@ -326,13 +335,17 @@ TEST(Trainer, RejectsEarlyCompletionPolicyWithoutCondition) {
     auto loader = std::make_shared<FakeLoader>();
     auto executor = std::make_shared<CapturingExecutor>();
 
-    EXPECT_THROW((static_cast<void>(Trainer::Builder()
-                                        .network(network)
-                                        .loader(loader)
-                                        .executor(executor)
-                                        .earlyCompletionPolicies({TrainingEarlyCompletionPolicy{}})
-                                        .build())),
-                 std::runtime_error);
+    Trainer trainer = Trainer::Builder()
+                          .network(network)
+                          .loader(loader)
+                          .executor(executor)
+                          .build();
+
+    TrainerFitOptions options;
+    options.epochs = 1;
+    options.checkBestModelEveryEpochs = 1;
+    options.earlyCompletionPolicies = {TrainingEarlyCompletionPolicy{}};
+    EXPECT_THROW(static_cast<void>(trainer.fit(options)), std::runtime_error);
 }
 
 TEST(Trainer, FitPassesTrainingProgramAsRunParameter) {

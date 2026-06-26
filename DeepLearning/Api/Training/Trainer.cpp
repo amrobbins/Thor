@@ -79,20 +79,7 @@ Trainer Trainer::Builder::build() const {
     if (!std::isfinite(runtimeConfig_.statsIntervalSeconds) || runtimeConfig_.statsIntervalSeconds < 0.0) {
         throw std::runtime_error("Trainer statsIntervalSeconds must be finite and >= 0.");
     }
-    for (size_t i = 0; i < restartConditions_.size(); ++i) {
-        const TrainingRestartCondition& condition = restartConditions_[i];
-        if (condition.progressCheckEpochs == 0) {
-            throw std::runtime_error("Trainer restart_condition at index " + std::to_string(i) + " must have progress_check_epochs >= 1.");
-        }
-        if (!std::isfinite(condition.progressImprovementMinPercentage) || condition.progressImprovementMinPercentage < 0.0 || condition.progressImprovementMinPercentage > 100.0) {
-            throw std::runtime_error("Trainer restart_condition at index " + std::to_string(i) + " must have progress_improvement_min_percentage in [0, 100].");
-        }
-    }
-    for (size_t i = 0; i < earlyCompletionPolicies_.size(); ++i) {
-        if (!earlyCompletionPolicies_[i].completionCondition) {
-            throw std::runtime_error("Trainer early_completion_policy at index " + std::to_string(i) + " must have a completion_condition.");
-        }
-    }
+
 
     Trainer trainer;
     trainer.network = network_;
@@ -105,10 +92,7 @@ Trainer Trainer::Builder::build() const {
     trainer.saveModelDirectory = saveModelDirectory_;
     trainer.saveModelOverwrite = saveModelOverwrite_;
     trainer.saveOptimizerState = saveOptimizerState_;
-    trainer.minEarlyCompletionEpochs = minEarlyCompletionEpochs_;
     trainer.modelSelectionScore = modelSelectionScore_;
-    trainer.restartConditions = restartConditions_;
-    trainer.earlyCompletionPolicies = earlyCompletionPolicies_;
     if (trainer.observer == nullptr) {
         const LineStatsOutputMode outputMode =
             trainer.runtimeConfig.statsStderrAlso ? LineStatsOutputMode::STDOUT_AND_STDERR : LineStatsOutputMode::STDOUT;
@@ -604,7 +588,7 @@ void Trainer::fitInternal(const TrainerFitOptions& options,
                           const std::vector<TrainingEarlyCompletionPolicy>& additionalEarlyCompletionPolicies,
                           const std::set<std::string>& additionalScalarTensorsToReport) {
     validateFitOptions(options);
-    std::vector<TrainingEarlyCompletionPolicy> combinedEarlyCompletionPolicies = earlyCompletionPolicies;
+    std::vector<TrainingEarlyCompletionPolicy> combinedEarlyCompletionPolicies = options.earlyCompletionPolicies;
     combinedEarlyCompletionPolicies.insert(combinedEarlyCompletionPolicies.end(),
                                            additionalEarlyCompletionPolicies.begin(),
                                            additionalEarlyCompletionPolicies.end());
@@ -626,7 +610,7 @@ void Trainer::fitInternal(const TrainerFitOptions& options,
     request.saveModelOverwrite = saveModelOverwrite;
     request.saveOptimizerState = saveOptimizerState;
     request.checkBestModelEveryEpochs = options.checkBestModelEveryEpochs;
-    request.minEarlyCompletionEpochs = minEarlyCompletionEpochs;
+    request.minEarlyCompletionEpochs = options.minEarlyCompletionEpochs;
     request.initialCompletedEpochs = completedTrainingEpochs;
     request.modelSelectionScore = modelSelectionScore;
     request.earlyCompletionPolicies = std::move(combinedEarlyCompletionPolicies);
@@ -670,7 +654,7 @@ void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
                                        const std::vector<TrainingEarlyCompletionPolicy>& additionalEarlyCompletionPolicies,
                                        const std::string& runNameForMessages,
                                        const std::set<std::string>& additionalScalarTensorsToReport) {
-    std::vector<TrainingRestartCondition> combinedConditions = restartConditions;
+    std::vector<TrainingRestartCondition> combinedConditions = options.restartConditions;
     combinedConditions.insert(combinedConditions.end(), additionalRestartConditions.begin(), additionalRestartConditions.end());
     validateRestartConditions(combinedConditions);
 
@@ -725,7 +709,6 @@ void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
     for (uint64_t attempt = 1;; ++attempt) {
         cancellationToken.throwIfCancellationRequested();
         Trainer attemptTrainer = *this;
-        attemptTrainer.restartConditions.clear();
         attemptTrainer.runtimeConfig.scalarTensorsToReport.insert("loss");
         RestartAttemptObserver attemptObserver(observer, activeConditions(attemptTrainer.completedTrainingEpochs), attempt);
         try {
@@ -955,9 +938,11 @@ void Trainer::validateFitOptions(const TrainerFitOptions& options) const {
     if (options.epochs == 0) {
         throw std::runtime_error("Trainer::fit epochs must be >= 1.");
     }
-    if (options.checkBestModelEveryEpochs == 0 && (!earlyCompletionPolicies.empty())) {
+    if (options.checkBestModelEveryEpochs == 0 && (!options.earlyCompletionPolicies.empty())) {
         throw std::runtime_error("Trainer::fit early_completion_policies require check_best_model_every_epochs > 0.");
     }
+    validateRestartConditions(options.restartConditions);
+    validateEarlyCompletionPolicies(options.earlyCompletionPolicies);
     if (saveModelDirectory.has_value()) {
         if (saveModelDirectory->empty()) {
             throw std::runtime_error("Trainer::fit save_model_dir must not be empty.");

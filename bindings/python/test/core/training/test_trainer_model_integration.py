@@ -126,10 +126,10 @@ def _fit_and_capture_stats(trainer, capfd, *, epochs: int):
     return stats
 
 
-def _fit_and_capture_text_and_stats(trainer, capfd, *, epochs: int):
+def _fit_and_capture_text_and_stats(trainer, capfd, *, epochs: int, **fit_kwargs):
     _flush_native_stdio_for_capture()
     capfd.readouterr()
-    trainer.fit(epochs=epochs)
+    trainer.fit(epochs=epochs, **fit_kwargs)
     _flush_native_stdio_for_capture()
     captured = capfd.readouterr()
     captured_text = captured.out + captured.err
@@ -1122,16 +1122,17 @@ def test_same_trainer_restart_enabled_successful_fit_preserves_state_for_next_fi
         max_in_flight_batches=1,
         scalar_tensors_to_report=["loss", "daily_loss", "aggregate_loss"],
         stats_color="never",
-        restart_conditions=[
-            thor.training.RestartCondition(
-                progress_check_epochs=1,
-                progress_improvement_min_percentage=0.0,
-                max_restarts=0,
-            )
-        ],
     )
+    restart_conditions = [
+        thor.training.RestartCondition(
+            progress_check_epochs=1,
+            progress_improvement_min_percentage=0.0,
+            max_restarts=0,
+        )
+    ]
 
-    first_text, first_stats = _fit_and_capture_text_and_stats(trainer, capfd, epochs=1)
+    first_text, first_stats = _fit_and_capture_text_and_stats(
+        trainer, capfd, epochs=1, restart_conditions=restart_conditions)
     first_train_daily = _named_scalar_losses(first_text, "train", "daily_loss")
     first_train_aggregate = _named_scalar_losses(first_text, "train", "aggregate_loss")
     first_validate_daily = _named_scalar_losses(first_text, "validate", "daily_loss")
@@ -1145,7 +1146,8 @@ def test_same_trainer_restart_enabled_successful_fit_preserves_state_for_next_fi
     assert first_validate_aggregate == []
     assert "aggregate_loss=" not in first_text
 
-    second_text, second_stats = _fit_and_capture_text_and_stats(trainer, capfd, epochs=1)
+    second_text, second_stats = _fit_and_capture_text_and_stats(
+        trainer, capfd, epochs=1, restart_conditions=restart_conditions)
     second_train_daily = _named_scalar_losses(second_text, "train", "daily_loss")
     second_train_aggregate = _named_scalar_losses(second_text, "train", "aggregate_loss")
 

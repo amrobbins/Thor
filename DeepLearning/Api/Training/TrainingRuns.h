@@ -35,6 +35,13 @@ struct TrainingRunsEvaluationOptions {
     bool evaluateTrainingPopulation = true;
 };
 
+struct TrainingRunsSessionOptions {
+    std::vector<TrainingRunsRestartPolicy> restartConditions{};
+    std::vector<TrainingRunsEarlyCompletionRule> earlyCompletionRules{};
+    std::map<std::string, std::vector<std::string>> reports{};
+    TrainingRunsEvaluationOptions evaluation{};
+};
+
 struct TrainingRunsSpec {
     std::string runName{};
     std::shared_ptr<Trainer> trainer = nullptr;
@@ -90,15 +97,13 @@ class TrainingRuns {
                           TrainingRunsFailurePolicy failurePolicy = TrainingRunsFailurePolicy::CANCEL_SIBLINGS,
                           double maxSummaryLogsPerSecond = 2.0,
                           std::optional<size_t> maxParallelRuns = std::nullopt,
-                          std::vector<TrainingRunsRestartPolicy> restartConditions = {},
-                          std::vector<TrainingRunsEarlyCompletionRule> earlyCompletionRules = {},
-                          std::map<std::string, size_t> minSuccessfulModels = {},
-                          std::map<std::string, std::vector<std::string>> reports = {});
+                          std::map<std::string, size_t> minSuccessfulModels = {});
 
     [[nodiscard]] TrainingRunsResult fit(uint32_t epochs);
     [[nodiscard]] TrainingRunsResult fit(uint32_t epochs, std::shared_ptr<Loader> testLoader);
     [[nodiscard]] TrainingRunsResult fit(const TrainerFitOptions& options);
     [[nodiscard]] TrainingRunsResult fit(const TrainerFitOptions& options, const TrainingRunsEvaluationOptions& evaluationOptions);
+    [[nodiscard]] TrainingRunsResult fit(const TrainerFitOptions& options, const TrainingRunsSessionOptions& sessionOptions);
 
     [[nodiscard]] const std::vector<TrainingRunsSpec>& getRuns() const { return runs; }
     [[nodiscard]] TrainingRunsFailurePolicy getFailurePolicy() const { return failurePolicy; }

@@ -1464,7 +1464,8 @@ calling this helper.
     trainer_fit_options.attr("__module__") = "thor.training";
     trainer_fit_options.def(nb::init<>())
         .def_rw("epochs", &TrainerFitOptions::epochs)
-        .def_rw("check_best_model_every_epochs", &TrainerFitOptions::checkBestModelEveryEpochs);
+        .def_rw("check_best_model_every_epochs", &TrainerFitOptions::checkBestModelEveryEpochs)
+        .def_rw("min_early_completion_epochs", &TrainerFitOptions::minEarlyCompletionEpochs);
 
     auto trainer = nb::class_<Trainer>(training, "Trainer", nb::dynamic_attr());
     trainer.attr("__module__") = "thor.training";
@@ -1484,12 +1485,8 @@ calling this helper.
            nb::object save_model_dir,
            bool save_model_overwrite,
            bool save_optimizer_state,
-           uint64_t min_early_completion_epochs,
-           nb::object model_selection_score,
-           nb::object restart_conditions,
-           nb::object early_completion_policies) -> nb::object {
+           nb::object model_selection_score) -> nb::object {
             (void)cls;
-            TrainingEarlyCompletionPoliciesBinding earlyPolicies = trainingEarlyCompletionPoliciesFromPython(early_completion_policies);
             Trainer::Builder builder;
             builder.network(std::move(network))
                 .loader(std::move(loader))
@@ -1501,10 +1498,7 @@ calling this helper.
                 .saveModelDirectory(optionalPathStringFromPython(save_model_dir, "save_model_dir"))
                 .saveModelOverwrite(save_model_overwrite)
                 .saveOptimizerState(save_optimizer_state)
-                .minEarlyCompletionEpochs(min_early_completion_epochs)
-                .modelSelectionScore(trainingModelSelectionScoreFromPython(model_selection_score))
-                .restartConditions(trainingRestartPoliciesFromPython(restart_conditions, /*trainerScope=*/true))
-                .earlyCompletionPolicies(std::move(earlyPolicies.policies));
+                .modelSelectionScore(trainingModelSelectionScoreFromPython(model_selection_score));
             if (optimizer != nullptr) {
                 builder.optimizer(std::move(optimizer));
             }
@@ -1515,7 +1509,6 @@ calling this helper.
                 builder.debugSynchronousExecutor();
             }
             nb::object object = nb::cast(std::make_shared<Trainer>(builder.build()));
-            attachCallbackRefs(object, earlyPolicies.callbackRefs);
             return object;
         },
         "cls"_a,
@@ -1532,10 +1525,7 @@ calling this helper.
         "save_model_dir"_a.none() = nb::none(),
         "save_model_overwrite"_a = false,
         "save_optimizer_state"_a = true,
-        "min_early_completion_epochs"_a = 0,
-        "model_selection_score"_a.none() = nb::none(),
-        "restart_conditions"_a.none() = nb::none(),
-        "early_completion_policies"_a.none() = nb::none());
+        "model_selection_score"_a.none() = nb::none());
     trainer.def(
         "__init__",
         [](Trainer*,
@@ -1552,9 +1542,6 @@ calling this helper.
            nb::object,
            bool,
            bool,
-           uint64_t,
-           nb::object,
-           nb::object,
            nb::object) {},
         "network"_a,
         "loader"_a,
@@ -1569,16 +1556,22 @@ calling this helper.
         "save_model_dir"_a.none() = nb::none(),
         "save_model_overwrite"_a = false,
         "save_optimizer_state"_a = true,
-        "min_early_completion_epochs"_a = 0,
-        "model_selection_score"_a.none() = nb::none(),
-        "restart_conditions"_a.none() = nb::none(),
-        "early_completion_policies"_a.none() = nb::none());
+        "model_selection_score"_a.none() = nb::none());
     trainer.def(
         "fit",
-        [](Trainer& self, uint32_t epochs, uint32_t check_best_model_every_epochs) -> nb::object {
+        [](Trainer& self,
+           uint32_t epochs,
+           uint32_t check_best_model_every_epochs,
+           uint64_t min_early_completion_epochs,
+           nb::object restart_conditions,
+           nb::object early_completion_policies) -> nb::object {
             TrainerFitOptions options;
             options.epochs = epochs;
             options.checkBestModelEveryEpochs = check_best_model_every_epochs;
+            options.minEarlyCompletionEpochs = min_early_completion_epochs;
+            options.restartConditions = trainingRestartPoliciesFromPython(restart_conditions, /*trainerScope=*/true);
+            TrainingEarlyCompletionPoliciesBinding earlyPolicies = trainingEarlyCompletionPoliciesFromPython(early_completion_policies);
+            options.earlyCompletionPolicies = std::move(earlyPolicies.policies);
             TrainingRunResult result;
             {
                 nb::gil_scoped_release release;
@@ -1587,7 +1580,10 @@ calling this helper.
             return nb::cast(std::move(result));
         },
         "epochs"_a,
-        "check_best_model_every_epochs"_a = 0);
+        "check_best_model_every_epochs"_a = 0,
+        "min_early_completion_epochs"_a = 0,
+        "restart_conditions"_a.none() = nb::none(),
+        "early_completion_policies"_a.none() = nb::none());
     trainer.def(
         "save_model",
         [](Trainer& self, nb::object directory, bool overwrite, bool save_optimizer_state) {
@@ -1598,7 +1594,6 @@ calling this helper.
         "directory"_a,
         "overwrite"_a = false,
         "save_optimizer_state"_a = true);
-    trainer.def_prop_ro("min_early_completion_epochs", &Trainer::getMinEarlyCompletionEpochs);
     trainer.def_prop_ro("completed_training_epochs", &Trainer::getCompletedTrainingEpochs);
 
     auto training_event_phase = nb::enum_<TrainingEventPhase>(training, "TrainingEventPhase")
@@ -1940,24 +1935,15 @@ calling this helper.
            const std::string& failure_policy,
            double max_summary_logs_per_second,
            std::optional<size_t> max_parallel_runs,
-           nb::object min_successful_models,
-           nb::object restart_conditions,
-           nb::object early_completion_rules,
-           nb::object reports) -> nb::object {
+           nb::object min_successful_models) -> nb::object {
             (void)cls;
             std::vector<TrainingRunsSpec> specs = trainingRunsSpecsFromPython(runs);
-            std::map<std::string, std::vector<std::string>> reportMap = trainingRunsReportsFromPython(reports, specs);
-            TrainingRunsEarlyCompletionRulesBinding earlyRules = trainingRunsEarlyCompletionRulesFromPython(early_completion_rules);
             auto self = std::make_shared<TrainingRuns>(std::move(specs),
                                                        trainingRunsFailurePolicyFromString(failure_policy),
                                                        max_summary_logs_per_second,
                                                        max_parallel_runs,
-                                                       trainingRestartPoliciesFromPython(restart_conditions, /*trainerScope=*/false),
-                                                       std::move(earlyRules.rules),
-                                                       trainingRunsMinSuccessfulModelsFromPython(min_successful_models),
-                                                       std::move(reportMap));
+                                                       trainingRunsMinSuccessfulModelsFromPython(min_successful_models));
             nb::object object = nb::cast(std::move(self));
-            attachCallbackRefs(object, earlyRules.callbackRefs);
             return object;
         },
         "cls"_a,
@@ -1965,10 +1951,7 @@ calling this helper.
         "failure_policy"_a = "cancel_siblings",
         "max_summary_logs_per_second"_a = 2.0,
         "max_parallel_runs"_a.none() = nb::none(),
-        "min_successful_models"_a.none() = nb::none(),
-        "restart_conditions"_a.none() = nb::none(),
-        "early_completion_rules"_a.none() = nb::none(),
-        "reports"_a.none() = nb::none());
+        "min_successful_models"_a.none() = nb::none());
     training_runs.def(
         "__init__",
         [](TrainingRuns*,
@@ -1976,33 +1959,46 @@ calling this helper.
            const std::string&,
            double,
            std::optional<size_t>,
-           nb::object,
-           nb::object,
-           nb::object,
            nb::object) {},
         "runs"_a,
         "failure_policy"_a = "cancel_siblings",
         "max_summary_logs_per_second"_a = 2.0,
         "max_parallel_runs"_a.none() = nb::none(),
-        "min_successful_models"_a.none() = nb::none(),
-        "restart_conditions"_a.none() = nb::none(),
-        "early_completion_rules"_a.none() = nb::none(),
-        "reports"_a.none() = nb::none());
+        "min_successful_models"_a.none() = nb::none());
     training_runs.def_prop_ro("reports", [](const TrainingRuns& self) { return self.getReports(); });
     training_runs.def(
         "fit",
-        [](TrainingRuns& self, uint32_t epochs, std::shared_ptr<Loader> test_loader, uint32_t check_best_model_every_epochs) {
+        [](TrainingRuns& self,
+           uint32_t epochs,
+           std::shared_ptr<Loader> test_loader,
+           uint32_t check_best_model_every_epochs,
+           uint64_t min_early_completion_epochs,
+           nb::object restart_conditions,
+           nb::object early_completion_rules,
+           nb::object reports,
+           bool evaluate_training_population) {
             TrainerFitOptions options;
             options.epochs = epochs;
             options.checkBestModelEveryEpochs = check_best_model_every_epochs;
-            TrainingRunsEvaluationOptions evaluationOptions;
-            evaluationOptions.testLoader = std::move(test_loader);
+            options.minEarlyCompletionEpochs = min_early_completion_epochs;
+            TrainingRunsSessionOptions sessionOptions;
+            sessionOptions.restartConditions = trainingRestartPoliciesFromPython(restart_conditions, /*trainerScope=*/false);
+            TrainingRunsEarlyCompletionRulesBinding earlyRules = trainingRunsEarlyCompletionRulesFromPython(early_completion_rules);
+            sessionOptions.earlyCompletionRules = std::move(earlyRules.rules);
+            sessionOptions.reports = trainingRunsReportsFromPython(reports, self.getRuns());
+            sessionOptions.evaluation.testLoader = std::move(test_loader);
+            sessionOptions.evaluation.evaluateTrainingPopulation = evaluate_training_population;
             nb::gil_scoped_release release;
-            return self.fit(options, evaluationOptions);
+            return self.fit(options, sessionOptions);
         },
         "epochs"_a,
         "test_loader"_a.none() = nb::none(),
-        "check_best_model_every_epochs"_a = 0);
+        "check_best_model_every_epochs"_a = 0,
+        "min_early_completion_epochs"_a = 0,
+        "restart_conditions"_a.none() = nb::none(),
+        "early_completion_rules"_a.none() = nb::none(),
+        "reports"_a.none() = nb::none(),
+        "evaluate_training_population"_a = true);
 
     auto gradient_clear_policy = nb::enum_<TrainingStep::GradientClearPolicy>(training, "GradientClearPolicy")
                                      .value("clear_before_step", TrainingStep::GradientClearPolicy::CLEAR_BEFORE_STEP)

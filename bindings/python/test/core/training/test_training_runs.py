@@ -148,13 +148,46 @@ def _expects_color_for_stats_color_mode(mode: str) -> bool:
     return os.isatty(1)
 
 
-def _fit_runs_and_capture_text(runs, capfd, *, epochs: int, test_loader=None, check_best_model_every_epochs=0):
+def _fit_runs_and_capture_text(
+    runs,
+    capfd,
+    *,
+    epochs: int,
+    test_loader=None,
+    check_best_model_every_epochs=0,
+    min_early_completion_epochs=0,
+    restart_conditions=None,
+    early_completion_rules=None,
+    reports=None,
+    evaluate_training_population=True,
+):
+    if reports is None:
+        reports = getattr(runs, "_test_reports", None)
     _flush_native_stdio_for_capture()
     capfd.readouterr()
     with capfd.disabled():
         with _NativeOutputTee() as tee:
-            results = runs.fit(epochs=epochs, test_loader=test_loader, check_best_model_every_epochs=check_best_model_every_epochs)
+            results = runs.fit(
+                epochs=epochs,
+                test_loader=test_loader,
+                check_best_model_every_epochs=check_best_model_every_epochs,
+                min_early_completion_epochs=min_early_completion_epochs,
+                restart_conditions=restart_conditions,
+                early_completion_rules=early_completion_rules,
+                reports=reports,
+                evaluate_training_population=evaluate_training_population,
+            )
     return results, tee.text()
+
+
+def _assert_trainer_fit_options_parse(trainer, **fit_kwargs):
+    with pytest.raises(RuntimeError, match="epochs must be >= 1"):
+        trainer.fit(epochs=0, **fit_kwargs)
+
+
+def _assert_training_runs_fit_options_parse(runs, **fit_kwargs):
+    with pytest.raises(RuntimeError, match="epochs must be >= 1"):
+        runs.fit(epochs=0, **fit_kwargs)
 
 
 def _regression_arrays(*, dtype=np.float32):
@@ -1199,10 +1232,7 @@ def _make_tiny_regression_trainer(
         stats_color="never",
         save_model_dir=save_model_dir,
         save_model_overwrite=save_model_overwrite,
-        min_early_completion_epochs=min_early_completion_epochs,
         model_selection_score=model_selection_score,
-        restart_conditions=restart_conditions,
-        early_completion_policies=early_completion_policies,
     )
 
 
@@ -1220,7 +1250,6 @@ def _make_non_finite_tiny_regression_trainer(
         max_in_flight_batches=2,
         scalar_tensors_to_report=["loss"],
         stats_color="never",
-        restart_conditions=restart_conditions,
     )
 
 
@@ -1384,108 +1413,70 @@ def test_training_runs_binding_rejects_invalid_max_parallel_runs():
         thor.training.TrainingRuns([], max_parallel_runs=0)
 
 
-def test_training_runs_binding_accepts_reported_losses():
+def test_training_runs_fit_accepts_reported_losses():
     trainer = _make_tiny_regression_trainer("training_runs_binding_reports")
+    runs = thor.training.TrainingRuns([("fold_0", trainer, "tiny_ensemble")])
 
-    runs = thor.training.TrainingRuns(
-        [("fold_0", trainer, "tiny_ensemble")],
-        reports={
-            "tiny_ensemble": ["loss"]
-        },
+    _assert_training_runs_fit_options_parse(
+        runs,
+        reports={"tiny_ensemble": ["loss"]},
     )
 
-    assert runs.reports["tiny_ensemble"] == ["loss"]
     assert not hasattr(runs, "ensemble_metrics")
     assert not hasattr(thor.training, "MetricSpec")
 
 
-def test_training_runs_binding_accepts_single_reports_list_for_ensemble_group():
+def test_training_runs_fit_accepts_single_reports_list_for_ensemble_group():
     trainer = _make_tiny_regression_trainer("training_runs_binding_single_reports_list")
+    runs = thor.training.TrainingRuns([("fold_0", trainer, "tiny_ensemble")])
 
-    runs = thor.training.TrainingRuns(
-        [("fold_0", trainer, "tiny_ensemble")],
-        reports=["loss"],
-    )
-
-    assert runs.reports["tiny_ensemble"] == ["loss"]
+    _assert_training_runs_fit_options_parse(runs, reports=["loss"])
 
 
-def test_training_runs_binding_preserves_single_reports_list_order():
-    trainer = _make_tiny_regression_with_label_mean_report_trainer("training_runs_binding_ordered_reports_list")
-
-    runs = thor.training.TrainingRuns(
-        [("fold_0", trainer, "tiny_ensemble")],
-        reports=["prediction_mean", "loss", "true_mean"],
-    )
-
-    assert runs.reports["tiny_ensemble"] == ["prediction_mean", "loss", "true_mean"]
-
-
-def test_training_runs_binding_accepts_empty_reports_list_as_all_for_ensemble_group():
+def test_training_runs_fit_accepts_empty_reports_list_as_all_for_ensemble_group():
     trainer = _make_tiny_regression_trainer("training_runs_binding_empty_reports_list")
+    runs = thor.training.TrainingRuns([("fold_0", trainer, "tiny_ensemble")])
 
-    runs = thor.training.TrainingRuns(
-        [("fold_0", trainer, "tiny_ensemble")],
-        reports=[],
-    )
+    _assert_training_runs_fit_options_parse(runs, reports=[])
 
-    assert runs.reports["tiny_ensemble"] == []
+
+def test_training_runs_fit_accepts_single_reports_list_order():
+    trainer = _make_tiny_regression_with_label_mean_report_trainer("training_runs_binding_ordered_reports_list")
+    runs = thor.training.TrainingRuns([("fold_0", trainer, "tiny_ensemble")])
+
+    _assert_training_runs_fit_options_parse(runs, reports=["prediction_mean", "loss", "true_mean"])
 
 
 def test_training_runs_reported_losses_survive_label_mean_report_metric():
     trainer = _make_tiny_regression_with_label_mean_report_trainer(
         "training_runs_reported_losses_with_label_mean_report")
+    runs = thor.training.TrainingRuns([("fold_0", trainer, "tiny_ensemble")])
 
-    runs = thor.training.TrainingRuns(
-        [("fold_0", trainer, "tiny_ensemble")],
-        reports={
-            "tiny_ensemble": ["loss"]
-        },
-    )
-
-    assert runs.reports["tiny_ensemble"] == ["loss"]
+    _assert_training_runs_fit_options_parse(runs, reports={"tiny_ensemble": ["loss"]})
 
 
 def test_training_runs_reported_metrics_discovers_metric_outputs_without_prediction_role():
     trainer = _make_tiny_regression_with_label_mean_report_trainer(
         "training_runs_reported_metrics_with_label_mean_report")
+    runs = thor.training.TrainingRuns([("fold_0", trainer, "tiny_ensemble")])
 
-    runs = thor.training.TrainingRuns(
-        [("fold_0", trainer, "tiny_ensemble")],
-        reports={
-            "tiny_ensemble": ["true_mean", "prediction_mean"]
-        },
-    )
-
-    assert runs.reports["tiny_ensemble"] == ["true_mean", "prediction_mean"]
+    _assert_training_runs_fit_options_parse(runs, reports={"tiny_ensemble": ["true_mean", "prediction_mean"]})
 
 
 def test_training_runs_reported_metrics_keeps_explicit_hidden_metric_output():
     trainer = _make_tiny_regression_with_hidden_metric_report_trainer(
         "training_runs_reported_metrics_with_hidden_metric_report")
+    runs = thor.training.TrainingRuns([("fold_0", trainer, "tiny_ensemble")])
 
-    runs = thor.training.TrainingRuns(
-        [("fold_0", trainer, "tiny_ensemble")],
-        reports={
-            "tiny_ensemble": ["hidden_mean"]
-        },
-    )
-
-    assert runs.reports["tiny_ensemble"] == ["hidden_mean"]
+    _assert_training_runs_fit_options_parse(runs, reports={"tiny_ensemble": ["hidden_mean"]})
 
 
 def test_training_runs_reported_losses_keeps_explicit_hidden_loss_output():
     trainer = _make_tiny_regression_with_hidden_loss_report_trainer(
         "training_runs_reported_losses_with_hidden_loss_report")
+    runs = thor.training.TrainingRuns([("fold_0", trainer, "tiny_ensemble")])
 
-    runs = thor.training.TrainingRuns(
-        [("fold_0", trainer, "tiny_ensemble")],
-        reports={
-            "tiny_ensemble": ["hidden_loss"]
-        },
-    )
-
-    assert runs.reports["tiny_ensemble"] == ["hidden_loss"]
+    _assert_training_runs_fit_options_parse(runs, reports={"tiny_ensemble": ["hidden_loss"]})
 
 
 def _make_two_phase_trainer_with_inactive_future_reports(name: str):
@@ -1578,30 +1569,31 @@ def _make_two_phase_trainer_with_inactive_future_reports(name: str):
 def test_training_runs_accepts_reported_names_from_inactive_future_phase():
     trainer = _make_two_phase_trainer_with_inactive_future_reports("training_runs_future_phase_reported_names")
 
-    runs = thor.training.TrainingRuns(
-        [("fold_0", trainer, "two_phase_ensemble")],
+    runs = thor.training.TrainingRuns([("fold_0", trainer, "two_phase_ensemble")])
+
+    _assert_training_runs_fit_options_parse(
+        runs,
         reports={
             "two_phase_ensemble": ["first_loss", "second_loss", "first_metric", "second_metric"],
         },
     )
 
-    assert runs.reports["two_phase_ensemble"] == ["first_loss", "second_loss", "first_metric", "second_metric"]
-
 
 def test_training_runs_binding_rejects_invalid_reported_losses():
     trainer = _make_tiny_regression_trainer("training_runs_binding_invalid_reports")
 
+    runs = thor.training.TrainingRuns([("fold_0", trainer, "tiny_ensemble")])
     with pytest.raises(RuntimeError, match="requested report .*missing"):
-        thor.training.TrainingRuns(
-            [("fold_0", trainer, "tiny_ensemble")],
+        runs.fit(
+            epochs=1,
             reports={
                 "tiny_ensemble": ["missing"]
             },
         )
 
     with pytest.raises(TypeError, match="reports"):
-        thor.training.TrainingRuns(
-            [("fold_0", trainer, "tiny_ensemble")],
+        runs.fit(
+            epochs=0,
             reports={
                 "tiny_ensemble": [{
                     "name": "loss"
@@ -1656,19 +1648,17 @@ def test_training_runs_fit_rejects_existing_save_model_dir_before_training(tmp_p
 
 
 def test_trainer_binding_accepts_min_early_completion_epochs_and_fit_options_cadence():
-    trainer = _make_tiny_regression_trainer(
-        "training_runs_best_candidate_cadence",
-        min_early_completion_epochs=7,
-    )
+    trainer = _make_tiny_regression_trainer("training_runs_best_candidate_cadence")
     options = thor.training.TrainerFitOptions()
     options.epochs = 3
     options.check_best_model_every_epochs = 2
+    options.min_early_completion_epochs = 7
 
     assert trainer is not None
-    assert trainer.min_early_completion_epochs == 7
     assert trainer.completed_training_epochs == 0
     assert options.epochs == 3
     assert options.check_best_model_every_epochs == 2
+    assert options.min_early_completion_epochs == 7
 
 
 def test_trainer_fit_options_accepts_zero_best_model_candidate_cadence_as_disabled():
@@ -1710,20 +1700,20 @@ def test_restart_policy_binding_defaults_and_aliases():
     assert thor.training.TrainingRestartCondition is thor.training.RestartPolicy
     assert thor.training.TrainingRunsRestartPolicy is thor.training.RestartPolicy
 
-    trainer = _make_tiny_regression_trainer(
-        "trainer_restart_policy_binding",
+    trainer = _make_tiny_regression_trainer("trainer_restart_policy_binding")
+    _assert_trainer_fit_options_parse(
+        trainer,
         restart_conditions=[
             thor.training.RestartPolicy(progress_check_epochs=2, progress_improvement_min_percentage=10.0)
         ],
     )
 
-    assert trainer is not None
-
 
 def test_trainer_restart_policy_warns_and_ignores_training_runs_targets():
+    trainer = _make_tiny_regression_trainer("trainer_restart_policy_ignores_group_target")
     with pytest.warns(RuntimeWarning, match="ignore RestartPolicy.*ensemble_group"):
-        trainer = _make_tiny_regression_trainer(
-            "trainer_restart_policy_ignores_group_target",
+        _assert_trainer_fit_options_parse(
+            trainer,
             restart_conditions=[
                 thor.training.RestartPolicy(
                     ensemble_group="ignored_group",
@@ -1732,8 +1722,6 @@ def test_trainer_restart_policy_warns_and_ignores_training_runs_targets():
                 )
             ],
         )
-
-    assert trainer is not None
 
 
 def test_training_runs_restart_policy_binding_defaults_and_validation():
@@ -1747,12 +1735,9 @@ def test_training_runs_restart_policy_binding_defaults_and_validation():
     assert condition.max_restarts == 5
 
     trainer = _make_tiny_regression_trainer("training_runs_restart_condition_unknown")
+    runs = thor.training.TrainingRuns([("fold_0", trainer)], failure_policy="continue")
     with pytest.raises(RuntimeError, match="unknown run_name"):
-        thor.training.TrainingRuns(
-            [("fold_0", trainer)],
-            failure_policy="continue",
-            restart_conditions=[thor.training.RestartPolicy(run_name="missing")],
-        )
+        runs.fit(epochs=1, restart_conditions=[thor.training.RestartPolicy(run_name="missing")])
 
 
 def test_training_runs_restart_policy_accepts_global_untargeted_policy():
@@ -1761,6 +1746,10 @@ def test_training_runs_restart_policy_accepts_global_untargeted_policy():
     runs = thor.training.TrainingRuns(
         [("fold_0", trainer0), ("fold_1", trainer1)],
         failure_policy="continue",
+    )
+
+    _assert_training_runs_fit_options_parse(
+        runs,
         restart_conditions=[
             thor.training.RestartPolicy(
                 progress_check_epochs=2,
@@ -1770,14 +1759,16 @@ def test_training_runs_restart_policy_accepts_global_untargeted_policy():
         ],
     )
 
-    assert runs is not None
-
 
 def test_training_runs_restart_policy_accepts_ensemble_group_target():
     trainer = _make_tiny_regression_trainer("training_runs_restart_condition_group")
     runs = thor.training.TrainingRuns(
         [("fold_0", trainer, "tiny_ensemble")],
         failure_policy="continue",
+    )
+
+    _assert_training_runs_fit_options_parse(
+        runs,
         restart_conditions=[
             thor.training.RestartPolicy(
                 ensemble_group="tiny_ensemble",
@@ -1788,14 +1779,16 @@ def test_training_runs_restart_policy_accepts_ensemble_group_target():
         ],
     )
 
-    assert runs is not None
-
 
 def test_training_runs_restart_policy_accepts_multiple_conditions_for_same_group():
     trainer = _make_tiny_regression_trainer("training_runs_restart_condition_group_multiple")
     runs = thor.training.TrainingRuns(
         [("fold_0", trainer, "tiny_ensemble")],
         failure_policy="continue",
+    )
+
+    _assert_training_runs_fit_options_parse(
+        runs,
         restart_conditions=[
             thor.training.RestartPolicy(
                 ensemble_group="tiny_ensemble",
@@ -1812,14 +1805,16 @@ def test_training_runs_restart_policy_accepts_multiple_conditions_for_same_group
         ],
     )
 
-    assert runs is not None
-
 
 def test_training_runs_restart_policy_accepts_multiple_conditions_for_same_run():
     trainer = _make_tiny_regression_trainer("training_runs_restart_condition_run_multiple")
     runs = thor.training.TrainingRuns(
         [("fold_0", trainer)],
         failure_policy="continue",
+    )
+
+    _assert_training_runs_fit_options_parse(
+        runs,
         restart_conditions=[
             thor.training.RestartPolicy(run_name="fold_0", progress_check_epochs=3),
             thor.training.RestartPolicy(
@@ -1827,20 +1822,18 @@ def test_training_runs_restart_policy_accepts_multiple_conditions_for_same_run()
         ],
     )
 
-    assert runs is not None
-
 
 def test_trainer_early_completion_policy_binding_accepts_callable():
     policy = thor.training.EarlyCompletionPolicy(
         lambda current_score, best_score, current_epoch, best_epoch: current_epoch - best_epoch >= 1)
     assert isinstance(policy, thor.training.TrainingEarlyCompletionPolicy)
 
-    trainer = _make_tiny_regression_trainer(
-        "trainer_early_completion_policy_binding",
+    trainer = _make_tiny_regression_trainer("trainer_early_completion_policy_binding")
+    _assert_trainer_fit_options_parse(
+        trainer,
+        check_best_model_every_epochs=1,
         early_completion_policies=[policy],
     )
-
-    assert trainer is not None
 
 
 def test_training_runs_early_completion_rule_binding_defaults_and_validation():
@@ -1857,10 +1850,11 @@ def test_training_runs_early_completion_rule_binding_defaults_and_validation():
     assert rule.ensemble_group is None
 
     trainer = _make_tiny_regression_trainer("training_runs_early_completion_rule_unknown")
+    runs = thor.training.TrainingRuns([("fold_0", trainer)], failure_policy="continue")
     with pytest.raises(RuntimeError, match="unknown run_name"):
-        thor.training.TrainingRuns(
-            [("fold_0", trainer)],
-            failure_policy="continue",
+        runs.fit(
+            epochs=1,
+            check_best_model_every_epochs=1,
             early_completion_rules=[
                 thor.training.EarlyCompletionRule(
                     lambda current_score,
@@ -1878,6 +1872,11 @@ def test_training_runs_early_completion_rule_accepts_ensemble_group_target():
     runs = thor.training.TrainingRuns(
         [("fold_0", trainer, "tiny_ensemble")],
         failure_policy="continue",
+    )
+
+    _assert_training_runs_fit_options_parse(
+        runs,
+        check_best_model_every_epochs=1,
         early_completion_rules=[
             thor.training.EarlyCompletionRule(
                 lambda current_score,
@@ -1888,8 +1887,6 @@ def test_training_runs_early_completion_rule_accepts_ensemble_group_target():
             )
         ],
     )
-
-    assert runs is not None
 
 
 def test_training_runs_early_completion_callback_cycle_is_collectable():
@@ -1907,13 +1904,18 @@ def test_training_runs_early_completion_callback_cycle_is_collectable():
             self.runs = thor.training.TrainingRuns(
                 [("fold_0", trainer, "tiny_ensemble")],
                 failure_policy="continue",
-                early_completion_rules=[
-                    thor.training.EarlyCompletionRule(
-                        stop_when_stale,
-                        ensemble_group="tiny_ensemble",
-                    )
-                ],
             )
+            with pytest.raises(RuntimeError, match="epochs must be >= 1"):
+                self.runs.fit(
+                    epochs=0,
+                    check_best_model_every_epochs=1,
+                    early_completion_rules=[
+                        thor.training.EarlyCompletionRule(
+                            stop_when_stale,
+                            ensemble_group="tiny_ensemble",
+                        )
+                    ],
+                )
 
     owner = Owner()
     owner_ref = weakref.ref(owner)
@@ -2081,9 +2083,6 @@ def test_training_runs_weighted_mse_example_weights_drives_training_loss(capfd, 
                 1.0,
             )
         ],
-        reports={
-            "weighted_mse_ensemble": ["weighted_mse_loss"]
-        },
     )
 
     results, captured_text = _fit_runs_and_capture_text(
@@ -2091,6 +2090,9 @@ def test_training_runs_weighted_mse_example_weights_drives_training_loss(capfd, 
         capfd,
         epochs=1,
         test_loader=_weighted_regression_one_batch_loader(),
+        reports={
+            "weighted_mse_ensemble": ["weighted_mse_loss"]
+        },
     )
 
     assert results.all_completed(), [
@@ -2372,10 +2374,9 @@ with tempfile.TemporaryDirectory(prefix="thor_weighted_cross_phase_") as tmp:
 
     first_runs = thor.training.TrainingRuns(
         run_specs,
-        reports={"weighted_cross_phase_cv3": loss_names[:2]},
         max_parallel_runs=3,
     )
-    first_result = first_runs.fit(epochs=1)
+    first_result = first_runs.fit(epochs=1, reports={"weighted_cross_phase_cv3": loss_names[:2]})
     if not first_result.all_completed():
         raise RuntimeError("pretrain failed")
 
@@ -2384,10 +2385,9 @@ with tempfile.TemporaryDirectory(prefix="thor_weighted_cross_phase_") as tmp:
 
     second_runs = thor.training.TrainingRuns(
         run_specs,
-        reports={"weighted_cross_phase_cv3": loss_names},
         max_parallel_runs=3,
     )
-    second_result = second_runs.fit(epochs=1)
+    second_result = second_runs.fit(epochs=1, reports={"weighted_cross_phase_cv3": loss_names})
     if not second_result.all_completed():
         raise RuntimeError("joint fit failed")
 '''
@@ -2450,6 +2450,14 @@ def test_training_runs_non_finite_train_or_validation_loss_fails_run(non_finite_
 @pytest.mark.cuda
 @pytest.mark.training_integration
 def test_training_runs_non_finite_loss_uses_restart_policy_before_failure():
+    restart_conditions = [
+        thor.training.RestartPolicy(
+            run_name="fold_0",
+            progress_check_epochs=3,
+            progress_improvement_min_percentage=5.0,
+            max_restarts=1,
+        )
+    ]
     runs = thor.training.TrainingRuns(
         [
             (
@@ -2461,17 +2469,9 @@ def test_training_runs_non_finite_loss_uses_restart_policy_before_failure():
             )
         ],
         failure_policy="continue",
-        restart_conditions=[
-            thor.training.RestartPolicy(
-                run_name="fold_0",
-                progress_check_epochs=3,
-                progress_improvement_min_percentage=5.0,
-                max_restarts=1,
-            )
-        ],
     )
 
-    results = runs.fit(epochs=1)
+    results = runs.fit(epochs=1, restart_conditions=restart_conditions)
     result = results["fold_0"]
 
     assert results.any_failed()
@@ -2569,9 +2569,6 @@ def test_training_runs_reported_losses_filter_selects_graph_loss_subset(capfd, t
                 1.0,
             )
         ],
-        reports={
-            "two_loss_ensemble": ["mae_loss"]
-        },
     )
 
     results, captured_text = _fit_runs_and_capture_text(
@@ -2579,6 +2576,9 @@ def test_training_runs_reported_losses_filter_selects_graph_loss_subset(capfd, t
         capfd,
         epochs=1,
         test_loader=_regression_one_batch_loader(),
+        reports={
+            "two_loss_ensemble": ["mae_loss"]
+        },
     )
 
     assert results.all_completed()
@@ -2628,9 +2628,6 @@ def test_training_runs_reports_mae_plus_low_high_quantile_losses(capfd, tmp_path
                 2.0,
             ),
         ],
-        reports={
-            "demand_quantile_ensemble": reported_losses
-        },
     )
 
     results, captured_text = _fit_runs_and_capture_text(
@@ -2638,6 +2635,9 @@ def test_training_runs_reports_mae_plus_low_high_quantile_losses(capfd, tmp_path
         capfd,
         epochs=1,
         test_loader=_mae_quantile_regression_one_batch_loader(),
+        reports={
+            "demand_quantile_ensemble": reported_losses
+        },
     )
 
     assert results.all_completed()
@@ -2746,9 +2746,6 @@ def test_training_runs_airfoil_cv3_reports_mae_plus_low_high_quantile_losses(cap
 
     runs = thor.training.TrainingRuns(
         run_specs,
-        reports={
-            "airfoil_noise_cv3": reported_losses + reported_metrics,
-        },
         max_parallel_runs=3,
         max_summary_logs_per_second=AIRFOIL_QUANTILE_SUMMARY_LOGS_PER_SECOND,
     )
@@ -2769,6 +2766,9 @@ def test_training_runs_airfoil_cv3_reports_mae_plus_low_high_quantile_losses(cap
         capfd,
         epochs=5,
         test_loader=test_loader,
+        reports={
+            "airfoil_noise_cv3": reported_losses + reported_metrics,
+        },
     )
 
     plain_text = _ANSI_RE.sub("", captured_text)
@@ -2999,16 +2999,17 @@ def test_training_runs_airfoil_cv3_two_phase_pretrain_then_joint_multi_loss_metr
         loss_names: list[str] | None = None,
         metric_names: list[str] | None = None,
     ):
-        return thor.training.TrainingRuns(
+        runs = thor.training.TrainingRuns(
             run_specs,
-            reports={
-                group_name:
-                    (reported_losses if loss_names is None else loss_names) +
-                    (reported_metrics if metric_names is None else metric_names)
-            },
             max_parallel_runs=3,
             max_summary_logs_per_second=AIRFOIL_QUANTILE_SUMMARY_LOGS_PER_SECOND,
         )
+        runs._test_reports = {
+            group_name:
+                (reported_losses if loss_names is None else loss_names) +
+                (reported_metrics if metric_names is None else metric_names)
+        }
+        return runs
 
     def completed_or_status_payload(results):
         return [
@@ -3389,14 +3390,15 @@ def test_training_runs_airfoil_cv3_two_phase_mae_pretrain_then_mse_head_holdout(
     }
 
     def make_runs():
-        return thor.training.TrainingRuns(
+        runs = thor.training.TrainingRuns(
             run_specs,
-            reports={
-                ensemble_group: reported_losses + reported_metrics
-            },
             max_parallel_runs=3,
             max_summary_logs_per_second=AIRFOIL_QUANTILE_SUMMARY_LOGS_PER_SECOND,
         )
+        runs._test_reports = {
+            ensemble_group: reported_losses + reported_metrics
+        }
+        return runs
 
     def completed_or_status_payload(results):
         return [
@@ -3630,9 +3632,6 @@ def test_training_runs_composed_evaluator_skips_uncomposed_predictionless_loss(c
                 1.0,
             ),
         ],
-        reports={
-            "mixed_loss_ensemble": ["loss", "hidden_loss"],
-        },
     )
 
     results, captured_text = _fit_runs_and_capture_text(
@@ -3640,6 +3639,9 @@ def test_training_runs_composed_evaluator_skips_uncomposed_predictionless_loss(c
         capfd,
         epochs=1,
         test_loader=_regression_one_batch_loader(),
+        reports={
+            "mixed_loss_ensemble": ["loss", "hidden_loss"],
+        },
     )
 
     assert results.all_completed()
@@ -3874,10 +3876,9 @@ def test_trainer_fit_returns_result_and_persists_selection_metadata(tmp_path):
         model_selection_score=lambda validation_loss,
         training_loss,
         epoch: float(epoch),
-        early_completion_policies=[early_policy],
     )
 
-    result = trainer.fit(50, check_best_model_every_epochs=1)
+    result = trainer.fit(50, check_best_model_every_epochs=1, early_completion_policies=[early_policy])
 
     assert isinstance(result, thor.training.TrainingRunResult)
     assert result.status == "completed"
@@ -3982,13 +3983,12 @@ def test_trainer_min_early_completion_epochs_can_complete_without_candidate_or_s
         "trainer_min_early_completion_no_candidate",
         save_model_dir=save_dir,
         save_model_overwrite=True,
-        min_early_completion_epochs=5,
         model_selection_score=lambda validation_loss,
         training_loss,
         epoch: float(epoch),
     )
 
-    result = trainer.fit(2, check_best_model_every_epochs=1)
+    result = trainer.fit(2, check_best_model_every_epochs=1, min_early_completion_epochs=5)
 
     assert result.status == "completed"
     assert result.result == "completed"
@@ -4037,14 +4037,17 @@ def test_trainer_min_early_completion_epochs_uses_cumulative_epoch_across_fit_ca
         "trainer_min_early_completion_cumulative",
         save_model_dir=save_dir,
         save_model_overwrite=True,
-        min_early_completion_epochs=3,
         model_selection_score=lambda validation_loss,
         training_loss,
         epoch: float(epoch),
-        early_completion_policies=[early_policy],
     )
 
-    first_result = trainer.fit(2, check_best_model_every_epochs=1)
+    first_result = trainer.fit(
+        2,
+        check_best_model_every_epochs=1,
+        min_early_completion_epochs=3,
+        early_completion_policies=[early_policy],
+    )
     assert first_result.completed_epoch == 2
     assert first_result.best_epoch is None
     assert trainer.completed_training_epochs == 2
@@ -4057,7 +4060,12 @@ def test_trainer_min_early_completion_epochs_uses_cumulative_epoch_across_fit_ca
     assert first_metadata["has_best_candidate"] is False
     assert first_metadata["best_epoch"] is None
 
-    second_result = trainer.fit(10, check_best_model_every_epochs=1)
+    second_result = trainer.fit(
+        10,
+        check_best_model_every_epochs=1,
+        min_early_completion_epochs=3,
+        early_completion_policies=[early_policy],
+    )
 
     assert second_result.status == "completed"
     assert second_result.result == "early_completed"
@@ -4094,21 +4102,26 @@ def test_trainer_min_early_completion_epochs_uses_cumulative_epoch_across_fit_ca
 )
 def test_training_runs_min_early_completion_epochs_uses_cumulative_epoch_across_fit_calls(tmp_path):
     save_dir = tmp_path / "training_runs_min_early_completion_cumulative"
-    early_policy = thor.training.EarlyCompletionPolicy(
-        lambda current_score, best_score, current_epoch, best_epoch: current_epoch >= 3)
+    early_rule = thor.training.EarlyCompletionRule(
+        lambda current_score, best_score, current_epoch, best_epoch: current_epoch >= 3,
+        run_name="fold_0",
+    )
     trainer = _make_tiny_regression_trainer(
         "training_runs_min_early_completion_cumulative",
         save_model_dir=save_dir,
         save_model_overwrite=True,
-        min_early_completion_epochs=3,
         model_selection_score=lambda validation_loss,
         training_loss,
         epoch: float(epoch),
-        early_completion_policies=[early_policy],
     )
     runs = thor.training.TrainingRuns([("fold_0", trainer)], failure_policy="continue")
 
-    first_results = runs.fit(epochs=2, check_best_model_every_epochs=1)
+    first_results = runs.fit(
+        epochs=2,
+        check_best_model_every_epochs=1,
+        min_early_completion_epochs=3,
+        early_completion_rules=[early_rule],
+    )
     first_result = first_results["fold_0"]
     assert first_results.all_completed()
     assert first_result.status == "completed"
@@ -4126,7 +4139,12 @@ def test_training_runs_min_early_completion_epochs_uses_cumulative_epoch_across_
     assert first_metadata["has_best_candidate"] is False
     assert first_metadata["best_epoch"] is None
 
-    second_results = runs.fit(epochs=10, check_best_model_every_epochs=1)
+    second_results = runs.fit(
+        epochs=10,
+        check_best_model_every_epochs=1,
+        min_early_completion_epochs=3,
+        early_completion_rules=[early_rule],
+    )
     second_result = second_results["fold_0"]
     assert second_results.all_completed()
     assert second_result.status == "completed"
@@ -4167,25 +4185,25 @@ def test_training_runs_restart_policy_uses_cumulative_epoch_across_fit_calls():
         "training_runs_restart_policy_cumulative_epoch",
         optimizer_obj=thor.optimizers.Sgd(initial_learning_rate=0.01, momentum=0.0),
     )
+    restart_conditions = [
+        thor.training.RestartPolicy(
+            run_name="fold_0",
+            progress_check_epochs=3,
+            progress_improvement_min_percentage=100.0,
+            max_restarts=0,
+        )
+    ]
     runs = thor.training.TrainingRuns(
         [("fold_0", trainer)],
         failure_policy="continue",
-        restart_conditions=[
-            thor.training.RestartPolicy(
-                run_name="fold_0",
-                progress_check_epochs=3,
-                progress_improvement_min_percentage=100.0,
-                max_restarts=0,
-            )
-        ],
     )
 
-    first_results = runs.fit(epochs=2)
+    first_results = runs.fit(epochs=2, restart_conditions=restart_conditions)
     assert first_results.all_completed()
     assert first_results["fold_0"].status == "completed"
     assert trainer.completed_training_epochs == 2
 
-    second_results = runs.fit(epochs=1)
+    second_results = runs.fit(epochs=1, restart_conditions=restart_conditions)
     second_result = second_results["fold_0"]
     assert second_results.any_failed()
     assert second_result.status == "failed"
@@ -4201,8 +4219,10 @@ def test_training_runs_early_completion_stops_early_and_saves_best_candidate(cap
     one_epoch_reference_dir = tmp_path / "one_epoch_reference"
     two_epoch_reference_dir = tmp_path / "two_epoch_reference"
 
-    early_policy = thor.training.EarlyCompletionPolicy(
-        lambda current_score, best_score, current_epoch, best_epoch: current_epoch >= 2)
+    early_rule = thor.training.EarlyCompletionRule(
+        lambda current_score, best_score, current_epoch, best_epoch: current_epoch >= 2,
+        run_name="fold_0",
+    )
     trainer = _make_tiny_regression_trainer(
         "training_runs_early_completion_best_candidate",
         save_model_dir=early_dir,
@@ -4210,11 +4230,16 @@ def test_training_runs_early_completion_stops_early_and_saves_best_candidate(cap
         model_selection_score=lambda validation_loss,
         training_loss,
         epoch: float(epoch),
-        early_completion_policies=[early_policy],
     )
     runs = thor.training.TrainingRuns([("fold_0", trainer)], failure_policy="continue")
 
-    results, captured_text = _fit_runs_and_capture_text(runs, capfd, epochs=50, check_best_model_every_epochs=1)
+    results, captured_text = _fit_runs_and_capture_text(
+        runs,
+        capfd,
+        epochs=50,
+        check_best_model_every_epochs=1,
+        early_completion_rules=[early_rule],
+    )
 
     result = results["fold_0"]
     assert results.all_completed()
@@ -4457,12 +4482,16 @@ def test_training_runs_ensemble_train_reports_full_validation_union_once(capfd, 
                 "tiny_ensemble",
             ),
         ],
+    )
+
+    results, captured_text = _fit_runs_and_capture_text(
+        runs,
+        capfd,
+        epochs=1,
         reports={
             "tiny_ensemble": ["true_mean"],
         },
     )
-
-    results, captured_text = _fit_runs_and_capture_text(runs, capfd, epochs=1)
 
     assert results.all_completed()
     true_mean = {
@@ -4507,12 +4536,16 @@ def test_training_runs_save_ensemble_excludes_label_only_report_inputs(capfd, tm
                 "tiny_ensemble",
             ),
         ],
+    )
+
+    results, _ = _fit_runs_and_capture_text(
+        runs,
+        capfd,
+        epochs=1,
         reports={
             "tiny_ensemble": ["true_mean", "prediction_mean"],
         },
     )
-
-    results, _ = _fit_runs_and_capture_text(runs, capfd, epochs=1)
     assert results.all_completed()
     graph_metric_by_name = {
         metric.name: metric for metric in results.ensemble("tiny_ensemble").reported_metrics
