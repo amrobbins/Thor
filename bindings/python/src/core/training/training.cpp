@@ -763,87 +763,75 @@ std::map<std::string, size_t> trainingRunsMinSuccessfulModelsFromPython(nb::obje
     return result;
 }
 
-std::map<std::string, std::vector<std::string>> trainingRunsReportedLossesFromPython(nb::object reportedLosses) {
-    if (reportedLosses.is_none()) {
+std::vector<std::string> trainingRunsReportNameListFromPython(nb::handle value,
+                                                                   const std::string& context,
+                                                                   const std::string& itemName = "report") {
+    if (value.is_none()) {
         return {};
     }
-    if (!nb::isinstance<nb::dict>(reportedLosses)) {
-        throw nb::type_error("TrainingRuns reported_losses must be a dict mapping ensemble_group names to loss-name iterables, or None.");
+    PyObject* iterator = nb::isinstance<nb::str>(value) ? nullptr : PyObject_GetIter(value.ptr());
+    if (iterator == nullptr) {
+        PyErr_Clear();
+        throw nb::type_error((context + " must be an iterable of " + itemName + "-name strings or None.").c_str());
     }
+    Py_DECREF(iterator);
 
-    nb::dict mapping = nb::cast<nb::dict>(reportedLosses);
-    std::map<std::string, std::vector<std::string>> result;
-    for (auto item : mapping) {
-        if (!nb::isinstance<nb::str>(item.first)) {
-            throw nb::type_error("TrainingRuns reported_losses keys must be ensemble_group strings.");
+    std::vector<std::string> names;
+    size_t index = 0;
+    for (nb::handle nameObj : nb::cast<nb::iterable>(value)) {
+        if (!nb::isinstance<nb::str>(nameObj)) {
+            throw nb::type_error((context + "[" + std::to_string(index) + "] must be a string.").c_str());
         }
-        const std::string groupName = nb::cast<std::string>(item.first);
-        if (item.second.is_none()) {
-            result.emplace(groupName, std::vector<std::string>{});
-            continue;
-        }
-        PyObject* iterator = nb::isinstance<nb::str>(item.second) ? nullptr : PyObject_GetIter(item.second.ptr());
-        if (iterator == nullptr) {
-            PyErr_Clear();
-            throw nb::type_error(
-                ("TrainingRuns reported_losses['" + groupName + "'] must be an iterable of loss-name strings or None.").c_str());
-        }
-        Py_DECREF(iterator);
-
-        std::vector<std::string> groupLosses;
-        size_t lossIndex = 0;
-        for (nb::handle lossObj : nb::cast<nb::iterable>(item.second)) {
-            if (!nb::isinstance<nb::str>(lossObj)) {
-                throw nb::type_error(
-                    ("TrainingRuns reported_losses['" + groupName + "'][" + std::to_string(lossIndex) + "] must be a string.").c_str());
-            }
-            groupLosses.push_back(nb::cast<std::string>(lossObj));
-            ++lossIndex;
-        }
-        result.emplace(groupName, std::move(groupLosses));
+        names.push_back(nb::cast<std::string>(nameObj));
+        ++index;
     }
-    return result;
+    return names;
 }
 
-std::map<std::string, std::vector<std::string>> trainingRunsReportedMetricsFromPython(nb::object reportedMetrics) {
-    if (reportedMetrics.is_none()) {
+std::map<std::string, std::vector<std::string>> trainingRunsReportsFromPython(nb::object reports,
+                                                                              const std::vector<TrainingRunsSpec>& specs) {
+    if (reports.is_none()) {
         return {};
     }
-    if (!nb::isinstance<nb::dict>(reportedMetrics)) {
-        throw nb::type_error(
-            "TrainingRuns reported_metrics must be a dict mapping ensemble_group names to metric-name iterables, or None.");
+
+    auto defaultTargets = [&specs]() {
+        std::set<std::string> ensembleGroups;
+        std::vector<std::string> runNames;
+        runNames.reserve(specs.size());
+        for (const TrainingRunsSpec& spec : specs) {
+            runNames.push_back(spec.runName);
+            if (spec.ensembleGroup.has_value()) {
+                ensembleGroups.insert(*spec.ensembleGroup);
+            }
+        }
+        std::vector<std::string> targets;
+        if (!ensembleGroups.empty()) {
+            targets.assign(ensembleGroups.begin(), ensembleGroups.end());
+        } else {
+            targets = std::move(runNames);
+        }
+        return targets;
+    };
+
+    std::map<std::string, std::vector<std::string>> result;
+    if (nb::isinstance<nb::dict>(reports)) {
+        nb::dict mapping = nb::cast<nb::dict>(reports);
+        for (auto item : mapping) {
+            if (!nb::isinstance<nb::str>(item.first)) {
+                throw nb::type_error("TrainingRuns reports keys must be run_name or ensemble_group strings.");
+            }
+            const std::string targetName = nb::cast<std::string>(item.first);
+            result.emplace(targetName,
+                           trainingRunsReportNameListFromPython(
+                               item.second,
+                               "TrainingRuns reports['" + targetName + "']"));
+        }
+        return result;
     }
 
-    nb::dict mapping = nb::cast<nb::dict>(reportedMetrics);
-    std::map<std::string, std::vector<std::string>> result;
-    for (auto item : mapping) {
-        if (!nb::isinstance<nb::str>(item.first)) {
-            throw nb::type_error("TrainingRuns reported_metrics keys must be ensemble_group strings.");
-        }
-        const std::string groupName = nb::cast<std::string>(item.first);
-        if (item.second.is_none()) {
-            result.emplace(groupName, std::vector<std::string>{});
-            continue;
-        }
-        PyObject* iterator = nb::isinstance<nb::str>(item.second) ? nullptr : PyObject_GetIter(item.second.ptr());
-        if (iterator == nullptr) {
-            PyErr_Clear();
-            throw nb::type_error(
-                ("TrainingRuns reported_metrics['" + groupName + "'] must be an iterable of metric-name strings or None.").c_str());
-        }
-        Py_DECREF(iterator);
-
-        std::vector<std::string> groupMetrics;
-        size_t metricIndex = 0;
-        for (nb::handle metricObj : nb::cast<nb::iterable>(item.second)) {
-            if (!nb::isinstance<nb::str>(metricObj)) {
-                throw nb::type_error(
-                    ("TrainingRuns reported_metrics['" + groupName + "'][" + std::to_string(metricIndex) + "] must be a string.").c_str());
-            }
-            groupMetrics.push_back(nb::cast<std::string>(metricObj));
-            ++metricIndex;
-        }
-        result.emplace(groupName, std::move(groupMetrics));
+    std::vector<std::string> reportNames = trainingRunsReportNameListFromPython(reports, "TrainingRuns reports");
+    for (const std::string& targetName : defaultTargets()) {
+        result.emplace(targetName, reportNames);
     }
     return result;
 }
@@ -1954,19 +1942,19 @@ calling this helper.
            nb::object min_successful_models,
            nb::object restart_conditions,
            nb::object early_completion_rules,
-           nb::object reported_losses,
-           nb::object reported_metrics) -> nb::object {
+           nb::object reports) -> nb::object {
             (void)cls;
+            std::vector<TrainingRunsSpec> specs = trainingRunsSpecsFromPython(runs);
+            std::map<std::string, std::vector<std::string>> reportMap = trainingRunsReportsFromPython(reports, specs);
             TrainingRunsEarlyCompletionRulesBinding earlyRules = trainingRunsEarlyCompletionRulesFromPython(early_completion_rules);
-            auto self = std::make_shared<TrainingRuns>(trainingRunsSpecsFromPython(runs),
+            auto self = std::make_shared<TrainingRuns>(std::move(specs),
                                                        trainingRunsFailurePolicyFromString(failure_policy),
                                                        max_summary_logs_per_second,
                                                        max_parallel_runs,
                                                        trainingRestartPoliciesFromPython(restart_conditions, /*trainerScope=*/false),
                                                        std::move(earlyRules.rules),
                                                        trainingRunsMinSuccessfulModelsFromPython(min_successful_models),
-                                                       trainingRunsReportedLossesFromPython(reported_losses),
-                                                       trainingRunsReportedMetricsFromPython(reported_metrics));
+                                                       std::move(reportMap));
             nb::object object = nb::cast(std::move(self));
             attachCallbackRefs(object, earlyRules.callbackRefs);
             return object;
@@ -1979,8 +1967,7 @@ calling this helper.
         "min_successful_models"_a.none() = nb::none(),
         "restart_conditions"_a.none() = nb::none(),
         "early_completion_rules"_a.none() = nb::none(),
-        "reported_losses"_a.none() = nb::none(),
-        "reported_metrics"_a.none() = nb::none());
+        "reports"_a.none() = nb::none());
     training_runs.def(
         "__init__",
         [](TrainingRuns*,
@@ -1988,7 +1975,6 @@ calling this helper.
            const std::string&,
            double,
            std::optional<size_t>,
-           nb::object,
            nb::object,
            nb::object,
            nb::object,
@@ -2000,10 +1986,8 @@ calling this helper.
         "min_successful_models"_a.none() = nb::none(),
         "restart_conditions"_a.none() = nb::none(),
         "early_completion_rules"_a.none() = nb::none(),
-        "reported_losses"_a.none() = nb::none(),
-        "reported_metrics"_a.none() = nb::none());
-    training_runs.def_prop_ro("reported_losses", [](const TrainingRuns& self) { return self.getReportedLosses(); });
-    training_runs.def_prop_ro("reported_metrics", [](const TrainingRuns& self) { return self.getReportedMetrics(); });
+        "reports"_a.none() = nb::none());
+    training_runs.def_prop_ro("reports", [](const TrainingRuns& self) { return self.getReports(); });
     training_runs.def(
         "fit",
         [](TrainingRuns& self, uint32_t epochs, std::shared_ptr<Loader> test_loader) {

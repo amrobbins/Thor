@@ -16,6 +16,7 @@
 namespace Thor {
 
 struct NetworkLossReference;
+struct NetworkMetricReference;
 
 enum class TrainingRunsFailurePolicy { CONTINUE, CANCEL_SIBLINGS };
 
@@ -92,8 +93,7 @@ class TrainingRuns {
                           std::vector<TrainingRunsRestartPolicy> restartConditions = {},
                           std::vector<TrainingRunsEarlyCompletionRule> earlyCompletionRules = {},
                           std::map<std::string, size_t> minSuccessfulModels = {},
-                          std::map<std::string, std::vector<std::string>> reportedLosses = {},
-                          std::map<std::string, std::vector<std::string>> reportedMetrics = {});
+                          std::map<std::string, std::vector<std::string>> reports = {});
 
     [[nodiscard]] TrainingRunsResult fit(uint32_t epochs);
     [[nodiscard]] TrainingRunsResult fit(uint32_t epochs, std::shared_ptr<Loader> testLoader);
@@ -107,8 +107,7 @@ class TrainingRuns {
     [[nodiscard]] const std::map<std::string, size_t>& getMinSuccessfulModels() const { return minSuccessfulModels; }
     [[nodiscard]] const std::vector<TrainingRunsRestartPolicy>& getRestartConditions() const { return restartConditions; }
     [[nodiscard]] const std::vector<TrainingRunsEarlyCompletionRule>& getEarlyCompletionRules() const { return earlyCompletionRules; }
-    [[nodiscard]] const std::map<std::string, std::vector<std::string>>& getReportedLosses() const { return reportedLosses; }
-    [[nodiscard]] const std::map<std::string, std::vector<std::string>>& getReportedMetrics() const { return reportedMetrics; }
+    [[nodiscard]] const std::map<std::string, std::vector<std::string>>& getReports() const { return reports; }
     [[nodiscard]] size_t getEffectiveMaxParallelRuns() const;
 
    private:
@@ -127,7 +126,9 @@ class TrainingRuns {
     [[nodiscard]] std::shared_ptr<Network> validationNetworkForSpec(const TrainingRunsSpec& spec) const;
     [[nodiscard]] std::vector<std::shared_ptr<Network>> reportingValidationNetworksForSpec(const TrainingRunsSpec& spec) const;
     [[nodiscard]] std::vector<NetworkLossReference> reportableLossesForSpec(const TrainingRunsSpec& spec) const;
-    [[nodiscard]] std::vector<std::string> reportedMetricNamesForSpec(const TrainingRunsSpec& spec) const;
+    [[nodiscard]] std::vector<NetworkMetricReference> reportableMetricsForSpec(const TrainingRunsSpec& spec) const;
+    [[nodiscard]] std::vector<std::string> reportedScalarTensorNamesForSpec(const TrainingRunsSpec& spec) const;
+    [[nodiscard]] std::vector<std::string> reportOrderForGroup(std::string_view ensembleGroup) const;
     [[nodiscard]] bool hasEnsembleGroups() const;
     void validateEnsembleArtifactsForFit(const TrainingRunsEvaluationOptions& evaluationOptions) const;
     void validateFitOptions(const TrainerFitOptions& options) const;
@@ -146,8 +147,7 @@ class TrainingRuns {
     std::map<std::string, size_t> minSuccessfulModels{};
     std::vector<TrainingRunsRestartPolicy> restartConditions{};
     std::vector<TrainingRunsEarlyCompletionRule> earlyCompletionRules{};
-    std::map<std::string, std::vector<std::string>> reportedLosses{};
-    std::map<std::string, std::vector<std::string>> reportedMetrics{};
+    std::map<std::string, std::vector<std::string>> reports{};
 };
 
 }  // namespace Thor

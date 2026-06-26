@@ -581,13 +581,13 @@ TEST(TrainingRuns, AcceptsReportedLossNameFilter) {
                       {},
                       {{"demand", {"daily_loss", "p90_loss"}}});
 
-    const auto& reportedLosses = runs.getReportedLosses();
-    ASSERT_EQ(reportedLosses.size(), 1u);
-    const auto lossesIt = reportedLosses.find("demand");
-    ASSERT_NE(lossesIt, reportedLosses.end());
-    ASSERT_EQ(lossesIt->second.size(), 2u);
-    EXPECT_EQ(lossesIt->second[0], "daily_loss");
-    EXPECT_EQ(lossesIt->second[1], "p90_loss");
+    const auto& reports = runs.getReports();
+    ASSERT_EQ(reports.size(), 1u);
+    const auto reportsIt = reports.find("demand");
+    ASSERT_NE(reportsIt, reports.end());
+    ASSERT_EQ(reportsIt->second.size(), 2u);
+    EXPECT_EQ(reportsIt->second[0], "daily_loss");
+    EXPECT_EQ(reportsIt->second[1], "p90_loss");
 }
 
 

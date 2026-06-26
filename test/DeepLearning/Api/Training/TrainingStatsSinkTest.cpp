@@ -4,6 +4,7 @@
 #include "gtest/gtest.h"
 
 #include <cstdio>
+#include <cstring>
 #include <initializer_list>
 #include <memory>
 #include <stdexcept>
@@ -100,6 +101,18 @@ std::string findLineWithAll(const std::string& output, std::initializer_list<con
 
 bool hasLineWithAll(const std::string& output, std::initializer_list<const char*> tokens) {
     return !findLineWithAll(output, tokens).empty();
+}
+
+bool tokensAppearInOrder(const std::string& line, std::initializer_list<const char*> tokens) {
+    size_t searchFrom = 0;
+    for (const char* token : tokens) {
+        const size_t pos = line.find(token, searchFrom);
+        if (pos == std::string::npos) {
+            return false;
+        }
+        searchFrom = pos + std::strlen(token);
+    }
+    return true;
 }
 
 bool hasTokenWithValue(const std::string& line, const std::string& key, const std::string& expectedValue) {
@@ -221,6 +234,78 @@ TEST(TrainingRunsStatsReporter, ValidationStatsUpdateValidationLossWithoutReplac
     EXPECT_TRUE(hasTokenWithValue(line, "step", "480")) << line;
     EXPECT_FALSE(hasTokenWithValue(line, "batch", "1/6")) << line;
     EXPECT_FALSE(hasTokenWithValue(line, "step", "115")) << line;
+}
+
+TEST(TrainingRunsStatsReporter, RunningSummaryPreservesConfiguredReportOrder) {
+    std::FILE* out = std::tmpfile();
+    TrainingRunsStatsReporter reporter(out, LineStatsColorMode::NEVER, 0.0);
+    reporter.configureRun("fold_0",
+                          TrainingRunsStatsReporter::RunConfig{0.0,
+                                                               std::string("sku_demand_cv5"),
+                                                               1.0,
+                                                               {"daily_true",
+                                                                "daily_pred",
+                                                                "agg_true",
+                                                                "agg_pred",
+                                                                "daily_upper",
+                                                                "agg_upper"}});
+
+    TrainingStatsSnapshot stats = makeStats(TrainingEventPhase::TRAIN, 0.50);
+    stats.metrics["daily_upper"] = 7.60;
+    stats.metrics["daily_pred"] = 4.96;
+    stats.metrics["daily_true"] = 5.57;
+    stats.metrics["agg_upper"] = 297.60;
+    stats.metrics["agg_true"] = 280.07;
+    stats.metrics["agg_pred"] = 259.65;
+
+    reporter.markRunStarting("fold_0");
+    reporter.onStatsEvent(TrainingStatsEvent::fromTrainingEvent(TrainingEvent::statsUpdated(stats), "fold_0"));
+    reporter.close();
+
+    const std::string output = readAndCloseFile(out);
+    const std::string line = findLineWithAll(output, {"INFO runs[fold_0|sku_demand_cv5]:", "daily_true=", "agg_upper="});
+    ASSERT_FALSE(line.empty()) << output;
+    EXPECT_TRUE(tokensAppearInOrder(line, {"daily_true=", "daily_pred=", "agg_true=", "agg_pred=", "daily_upper=", "agg_upper="}))
+        << line;
+}
+
+TEST(TrainingRunsStatsReporter, FinalReportPreservesConfiguredReportOrder) {
+    std::FILE* out = std::tmpfile();
+    TrainingRunsStatsReporter reporter(out, LineStatsColorMode::NEVER, 0.0);
+    reporter.configureRun("completed_fold",
+                          TrainingRunsStatsReporter::RunConfig{0.0,
+                                                               std::string("sku_demand_cv5"),
+                                                               1.0,
+                                                               {"daily_true",
+                                                                "daily_pred",
+                                                                "agg_true",
+                                                                "agg_pred",
+                                                                "daily_upper",
+                                                                "agg_upper"}});
+
+    TrainingStatsSnapshot trainStats = makeStats(TrainingEventPhase::TRAIN, 0.50);
+    trainStats.metrics["daily_upper"] = 7.60;
+    trainStats.metrics["daily_pred"] = 4.96;
+    trainStats.metrics["daily_true"] = 5.57;
+    trainStats.metrics["agg_upper"] = 297.60;
+    trainStats.metrics["agg_true"] = 280.07;
+    trainStats.metrics["agg_pred"] = 259.65;
+    TrainingRunResult completed = TrainingRunResult::completedResult("completed_fold", trainStats, std::nullopt, std::nullopt);
+    completed.ensembleGroup = "sku_demand_cv5";
+
+    reporter.emitFinalReport(std::vector<TrainingRunResult>{completed});
+    reporter.close();
+
+    const std::string output = readAndCloseFile(out);
+    const std::string line = findLineWithAll(output, {"INFO runs[completed_fold|sku_demand_cv5]:", "train_daily_true=", "train_agg_upper="});
+    ASSERT_FALSE(line.empty()) << output;
+    EXPECT_TRUE(tokensAppearInOrder(line, {"train_daily_true=",
+                                           "train_daily_pred=",
+                                           "train_agg_true=",
+                                           "train_agg_pred=",
+                                           "train_daily_upper=",
+                                           "train_agg_upper="}))
+        << line;
 }
 
 TEST(TrainingRunsStatsReporter, IgnoresNonStatsTrainingEventsWhenTrackingLatestRunningStats) {

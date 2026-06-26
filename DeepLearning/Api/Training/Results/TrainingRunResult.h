@@ -263,6 +263,7 @@ struct TrainingEnsembleResult {
     std::optional<double> ensembleTestLoss{};
     std::vector<TrainingNamedMetricResult> namedMetrics{};
     std::vector<TrainingNamedMetricResult> namedGraphMetrics{};
+    std::vector<std::string> reportOrder{};
     size_t minSuccessfulModels = 0;
 
     [[nodiscard]] size_t size() const { return members.size(); }

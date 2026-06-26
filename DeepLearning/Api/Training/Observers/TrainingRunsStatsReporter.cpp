@@ -6,8 +6,10 @@
 #include <exception>
 #include <map>
 #include <stdexcept>
+#include <set>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -219,12 +221,51 @@ void appendPhaseLossColumns(std::string& line,
                             const char* trainLossStyle,
                             const char* validateLossStyle);
 
+bool shouldSuppressMetricColumnName(const std::string& name) {
+    return name.empty() || name == "loss" || name == "learning_rate" || name == "learningRate" || name == "lr" ||
+           name == "momentum" || name == "completed_epoch" || name == "best_epoch" || name == "best_score" ||
+           name == "min_early_completion_epochs";
+}
+
+std::vector<std::pair<std::string, double>> orderedMetricColumns(
+    const std::unordered_map<std::string, double>& metrics,
+    const std::vector<std::string>& reportOrder) {
+    std::vector<std::pair<std::string, double>> ordered;
+    ordered.reserve(metrics.size());
+    std::set<std::string> emitted;
+
+    for (const std::string& name : reportOrder) {
+        if (shouldSuppressMetricColumnName(name)) {
+            continue;
+        }
+        const auto it = metrics.find(name);
+        if (it == metrics.end()) {
+            continue;
+        }
+        ordered.emplace_back(it->first, it->second);
+        emitted.insert(it->first);
+    }
+
+    std::vector<std::pair<std::string, double>> remaining;
+    remaining.reserve(metrics.size());
+    for (const auto& [name, value] : metrics) {
+        if (shouldSuppressMetricColumnName(name) || emitted.count(name) != 0) {
+            continue;
+        }
+        remaining.emplace_back(name, value);
+    }
+    std::sort(remaining.begin(), remaining.end(), [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
+    ordered.insert(ordered.end(), remaining.begin(), remaining.end());
+    return ordered;
+}
+
 std::string formatRunsStatsLineBase(const TrainingStatsSnapshot& stats,
                                     std::string_view runLabel,
                                     size_t runPrefixWidth,
                                     std::optional<double> trainLoss,
                                     std::optional<double> validateLoss,
                                     bool useColor,
+                                    const std::vector<std::string>& reportOrder,
                                     const char* trainLossStyle,
                                     const char* validateLossStyle) {
     std::string line = formatRunPrefixForLabel(runLabel, runPrefixWidth, useColor);
@@ -256,7 +297,7 @@ std::string formatRunsStatsLineBase(const TrainingStatsSnapshot& stats,
         appendSummaryDimKey(line, "lr", useColor);
         appendStyledPadded(line, formatScientificString(stats.learningRate.value(), 3), 9, SummaryAnsi::learningRate, useColor);
     }
-    for (const auto& metric : stats.metrics) {
+    for (const auto& metric : orderedMetricColumns(stats.metrics, reportOrder)) {
         appendSummaryDimKey(line, metric.first.c_str(), useColor);
         appendStyledPadded(line, formatFixedString(metric.second, 6), 9, SummaryAnsi::loss, useColor);
     }
@@ -331,20 +372,14 @@ void appendPhaseLossColumns(std::string& line,
 void appendFinalPhaseMetricColumns(std::string& line,
                                    const std::optional<TrainingStatsSnapshot>& stats,
                                    const char* phasePrefix,
-                                   bool useColor) {
+                                   bool useColor,
+                                   const std::vector<std::string>& reportOrder) {
     if (!stats.has_value()) {
         return;
     }
 
 
-    std::vector<std::pair<std::string, double>> metrics(stats->metrics.begin(), stats->metrics.end());
-    std::sort(metrics.begin(), metrics.end(), [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
-    for (const auto& [name, value] : metrics) {
-        if (name.empty() || name == "loss" || name == "learning_rate" || name == "learningRate" ||
-            name == "lr" || name == "momentum" || name == "completed_epoch" || name == "best_epoch" ||
-            name == "best_score" || name == "min_early_completion_epochs") {
-            continue;
-        }
+    for (const auto& [name, value] : orderedMetricColumns(stats->metrics, reportOrder)) {
         char buffer[160];
         const bool looksLikeAccuracy = name.find("accuracy") != std::string::npos;
         std::snprintf(buffer, sizeof(buffer), "%s_%s=%.*f", phasePrefix, name.c_str(), looksLikeAccuracy ? 4 : 6, value);
@@ -468,7 +503,12 @@ void TrainingRunsStatsReporter::emitFinalReport(const std::vector<TrainingRunRes
     emitLineLocked(line);
 
     for (const TrainingRunResult& result : results) {
-        writeResultLineLocked(result, runPrefixWidth);
+        const auto stateIt = runStateIndices.find(result.runName);
+        const std::vector<std::string> emptyReportOrder;
+        const std::vector<std::string>& reportOrder = stateIt == runStateIndices.end()
+            ? emptyReportOrder
+            : runStates[stateIt->second].config.reportOrder;
+        writeResultLineLocked(result, runPrefixWidth, reportOrder);
     }
     emitLineLocked(styled("INFO runs final: =====================================================", FinalReportAnsi::border, useColor));
     emitLineLocked("");
@@ -786,6 +826,7 @@ void TrainingRunsStatsReporter::writeRunLineLocked(const RunState& state, size_t
                                                   displayedLossFromState(state.trainingLoss),
                                                   displayedLossFromState(state.validationLoss),
                                                   shouldUseColorLocked(),
+                                                  state.config.reportOrder,
                                                   FinalReportAnsi::trainLoss,
                                                   FinalReportAnsi::validateLoss);
         emitLineLocked(line);
@@ -793,7 +834,7 @@ void TrainingRunsStatsReporter::writeRunLineLocked(const RunState& state, size_t
     }
 
     if (state.terminalResult.has_value()) {
-        writeResultLineLocked(state.terminalResult.value(), runPrefixWidth);
+        writeResultLineLocked(state.terminalResult.value(), runPrefixWidth, state.config.reportOrder);
         return;
     }
 
@@ -827,7 +868,9 @@ void TrainingRunsStatsReporter::appendPhaseLossColumnsLocked(std::string& line, 
 
 }
 
-void TrainingRunsStatsReporter::writeResultLineLocked(const TrainingRunResult& result, size_t runPrefixWidth) {
+void TrainingRunsStatsReporter::writeResultLineLocked(const TrainingRunResult& result,
+                                                      size_t runPrefixWidth,
+                                                      const std::vector<std::string>& reportOrder) {
     const bool useColor = shouldUseColorLocked();
     const char* statusStyle = statusColorStyle(result.status);
 
@@ -855,9 +898,9 @@ void TrainingRunsStatsReporter::writeResultLineLocked(const TrainingRunResult& r
         line += " ";
         line += styled(buffer, FinalReportAnsi::testLoss, useColor);
     }
-    appendFinalPhaseMetricColumns(line, result.finalTrainingStats, "train", useColor);
-    appendFinalPhaseMetricColumns(line, result.finalValidationStats, "validate", useColor);
-    appendFinalPhaseMetricColumns(line, result.finalTestStats, "test", useColor);
+    appendFinalPhaseMetricColumns(line, result.finalTrainingStats, "train", useColor, reportOrder);
+    appendFinalPhaseMetricColumns(line, result.finalValidationStats, "validate", useColor, reportOrder);
+    appendFinalPhaseMetricColumns(line, result.finalTestStats, "test", useColor, reportOrder);
     if (result.earlyCompleted()) {
         if (result.completedEpoch.has_value()) {
             line += " completed_epoch=" + std::to_string(result.completedEpoch.value());
@@ -917,14 +960,14 @@ void TrainingRunsStatsReporter::writeEnsembleLineLocked(const TrainingEnsembleRe
         line += " ";
         line += styled(buffer, FinalReportAnsi::testLoss, useColor);
     }
-    for (const TrainingNamedMetricResult& namedMetric : result.namedMetrics) {
+    auto appendNamedLossMetric = [&](const TrainingNamedMetricResult& namedMetric) {
         // The aggregate fields above are the public overall graph-loss columns.
         // A single graph loss is commonly named "loss", which would format to the
         // exact same ensemble_train_loss / ensemble_test_loss keys here. Avoid
         // emitting duplicate columns while still reporting distinct named losses
         // such as daily_loss or aggregate_loss.
         if (namedMetric.name == "loss") {
-            continue;
+            return;
         }
         if (namedMetric.trainValue.has_value()) {
             char buffer[128];
@@ -938,8 +981,9 @@ void TrainingRunsStatsReporter::writeEnsembleLineLocked(const TrainingEnsembleRe
             line += " ";
             line += styled(buffer, FinalReportAnsi::testLoss, useColor);
         }
-    }
-    for (const TrainingNamedMetricResult& namedMetric : result.namedGraphMetrics) {
+    };
+
+    auto appendNamedGraphMetric = [&](const TrainingNamedMetricResult& namedMetric) {
         const bool looksLikeAccuracy = namedMetric.name.find("accuracy") != std::string::npos;
         const char* style = looksLikeAccuracy ? FinalReportAnsi::accuracy : FinalReportAnsi::testLoss;
         if (namedMetric.trainValue.has_value()) {
@@ -955,6 +999,49 @@ void TrainingRunsStatsReporter::writeEnsembleLineLocked(const TrainingEnsembleRe
                           namedMetric.testValue.value());
             line += " ";
             line += styled(buffer, style, useColor);
+        }
+    };
+
+    if (!result.reportOrder.empty()) {
+        std::map<std::string, const TrainingNamedMetricResult*> lossByName;
+        std::map<std::string, const TrainingNamedMetricResult*> graphMetricByName;
+        for (const TrainingNamedMetricResult& namedMetric : result.namedMetrics) {
+            lossByName.emplace(namedMetric.name, &namedMetric);
+        }
+        for (const TrainingNamedMetricResult& namedMetric : result.namedGraphMetrics) {
+            graphMetricByName.emplace(namedMetric.name, &namedMetric);
+        }
+        std::set<std::string> emittedLosses;
+        std::set<std::string> emittedGraphMetrics;
+        for (const std::string& reportName : result.reportOrder) {
+            const auto lossIt = lossByName.find(reportName);
+            if (lossIt != lossByName.end()) {
+                appendNamedLossMetric(*lossIt->second);
+                emittedLosses.insert(reportName);
+                continue;
+            }
+            const auto graphMetricIt = graphMetricByName.find(reportName);
+            if (graphMetricIt != graphMetricByName.end()) {
+                appendNamedGraphMetric(*graphMetricIt->second);
+                emittedGraphMetrics.insert(reportName);
+            }
+        }
+        for (const TrainingNamedMetricResult& namedMetric : result.namedMetrics) {
+            if (emittedLosses.count(namedMetric.name) == 0) {
+                appendNamedLossMetric(namedMetric);
+            }
+        }
+        for (const TrainingNamedMetricResult& namedMetric : result.namedGraphMetrics) {
+            if (emittedGraphMetrics.count(namedMetric.name) == 0) {
+                appendNamedGraphMetric(namedMetric);
+            }
+        }
+    } else {
+        for (const TrainingNamedMetricResult& namedMetric : result.namedMetrics) {
+            appendNamedLossMetric(namedMetric);
+        }
+        for (const TrainingNamedMetricResult& namedMetric : result.namedGraphMetrics) {
+            appendNamedGraphMetric(namedMetric);
         }
     }
     emitLineLocked(line);

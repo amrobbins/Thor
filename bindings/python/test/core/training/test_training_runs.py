@@ -1387,78 +1387,107 @@ def test_training_runs_binding_rejects_invalid_max_parallel_runs():
 
 
 def test_training_runs_binding_accepts_reported_losses():
-    trainer = _make_tiny_regression_trainer("training_runs_binding_reported_losses")
+    trainer = _make_tiny_regression_trainer("training_runs_binding_reports")
 
     runs = thor.training.TrainingRuns(
         [("fold_0", trainer, "tiny_ensemble")],
-        reported_losses={
+        reports={
             "tiny_ensemble": ["loss"]
         },
     )
 
-    assert runs.reported_losses["tiny_ensemble"] == ["loss"]
+    assert runs.reports["tiny_ensemble"] == ["loss"]
     assert not hasattr(runs, "ensemble_metrics")
     assert not hasattr(thor.training, "MetricSpec")
 
 
-def test_training_runs_reported_losses_survive_label_mean_report_metric():
-    trainer = _make_tiny_regression_with_label_mean_report_trainer(
-        "training_runs_reported_losses_with_label_mean_report"
-    )
+def test_training_runs_binding_accepts_single_reports_list_for_ensemble_group():
+    trainer = _make_tiny_regression_trainer("training_runs_binding_single_reports_list")
 
     runs = thor.training.TrainingRuns(
         [("fold_0", trainer, "tiny_ensemble")],
-        reported_losses={
+        reports=["loss"],
+    )
+
+    assert runs.reports["tiny_ensemble"] == ["loss"]
+
+
+def test_training_runs_binding_preserves_single_reports_list_order():
+    trainer = _make_tiny_regression_with_label_mean_report_trainer("training_runs_binding_ordered_reports_list")
+
+    runs = thor.training.TrainingRuns(
+        [("fold_0", trainer, "tiny_ensemble")],
+        reports=["prediction_mean", "loss", "true_mean"],
+    )
+
+    assert runs.reports["tiny_ensemble"] == ["prediction_mean", "loss", "true_mean"]
+
+
+def test_training_runs_binding_accepts_empty_reports_list_as_all_for_ensemble_group():
+    trainer = _make_tiny_regression_trainer("training_runs_binding_empty_reports_list")
+
+    runs = thor.training.TrainingRuns(
+        [("fold_0", trainer, "tiny_ensemble")],
+        reports=[],
+    )
+
+    assert runs.reports["tiny_ensemble"] == []
+
+
+def test_training_runs_reported_losses_survive_label_mean_report_metric():
+    trainer = _make_tiny_regression_with_label_mean_report_trainer(
+        "training_runs_reported_losses_with_label_mean_report")
+
+    runs = thor.training.TrainingRuns(
+        [("fold_0", trainer, "tiny_ensemble")],
+        reports={
             "tiny_ensemble": ["loss"]
         },
     )
 
-    assert runs.reported_losses["tiny_ensemble"] == ["loss"]
+    assert runs.reports["tiny_ensemble"] == ["loss"]
 
 
 def test_training_runs_reported_metrics_discovers_metric_outputs_without_prediction_role():
     trainer = _make_tiny_regression_with_label_mean_report_trainer(
-        "training_runs_reported_metrics_with_label_mean_report"
-    )
+        "training_runs_reported_metrics_with_label_mean_report")
 
     runs = thor.training.TrainingRuns(
         [("fold_0", trainer, "tiny_ensemble")],
-        reported_metrics={
+        reports={
             "tiny_ensemble": ["true_mean", "prediction_mean"]
         },
     )
 
-    assert runs.reported_metrics["tiny_ensemble"] == ["true_mean", "prediction_mean"]
+    assert runs.reports["tiny_ensemble"] == ["true_mean", "prediction_mean"]
 
 
 def test_training_runs_reported_metrics_keeps_explicit_hidden_metric_output():
     trainer = _make_tiny_regression_with_hidden_metric_report_trainer(
-        "training_runs_reported_metrics_with_hidden_metric_report"
-    )
+        "training_runs_reported_metrics_with_hidden_metric_report")
 
     runs = thor.training.TrainingRuns(
         [("fold_0", trainer, "tiny_ensemble")],
-        reported_metrics={
+        reports={
             "tiny_ensemble": ["hidden_mean"]
         },
     )
 
-    assert runs.reported_metrics["tiny_ensemble"] == ["hidden_mean"]
+    assert runs.reports["tiny_ensemble"] == ["hidden_mean"]
 
 
 def test_training_runs_reported_losses_keeps_explicit_hidden_loss_output():
     trainer = _make_tiny_regression_with_hidden_loss_report_trainer(
-        "training_runs_reported_losses_with_hidden_loss_report"
-    )
+        "training_runs_reported_losses_with_hidden_loss_report")
 
     runs = thor.training.TrainingRuns(
         [("fold_0", trainer, "tiny_ensemble")],
-        reported_losses={
+        reports={
             "tiny_ensemble": ["hidden_loss"]
         },
     )
 
-    assert runs.reported_losses["tiny_ensemble"] == ["hidden_loss"]
+    assert runs.reports["tiny_ensemble"] == ["hidden_loss"]
 
 
 def _make_two_phase_trainer_with_inactive_future_reports(name: str):
@@ -1553,33 +1582,29 @@ def test_training_runs_accepts_reported_names_from_inactive_future_phase():
 
     runs = thor.training.TrainingRuns(
         [("fold_0", trainer, "two_phase_ensemble")],
-        reported_losses={
-            "two_phase_ensemble": ["first_loss", "second_loss"],
-        },
-        reported_metrics={
-            "two_phase_ensemble": ["first_metric", "second_metric"],
+        reports={
+            "two_phase_ensemble": ["first_loss", "second_loss", "first_metric", "second_metric"],
         },
     )
 
-    assert runs.reported_losses["two_phase_ensemble"] == ["first_loss", "second_loss"]
-    assert runs.reported_metrics["two_phase_ensemble"] == ["first_metric", "second_metric"]
+    assert runs.reports["two_phase_ensemble"] == ["first_loss", "second_loss", "first_metric", "second_metric"]
 
 
 def test_training_runs_binding_rejects_invalid_reported_losses():
-    trainer = _make_tiny_regression_trainer("training_runs_binding_invalid_reported_losses")
+    trainer = _make_tiny_regression_trainer("training_runs_binding_invalid_reports")
 
-    with pytest.raises(RuntimeError, match="requested reported loss .*missing"):
+    with pytest.raises(RuntimeError, match="requested report .*missing"):
         thor.training.TrainingRuns(
             [("fold_0", trainer, "tiny_ensemble")],
-            reported_losses={
+            reports={
                 "tiny_ensemble": ["missing"]
             },
         )
 
-    with pytest.raises(TypeError, match="reported_losses"):
+    with pytest.raises(TypeError, match="reports"):
         thor.training.TrainingRuns(
             [("fold_0", trainer, "tiny_ensemble")],
-            reported_losses={
+            reports={
                 "tiny_ensemble": [{
                     "name": "loss"
                 }]
@@ -1866,10 +1891,10 @@ def test_training_runs_early_completion_rule_accepts_ensemble_group_target():
     assert runs is not None
 
 
-
-
 def test_training_runs_early_completion_callback_cycle_is_collectable():
+
     class Owner:
+
         def __init__(self):
             self.stop_after_epochs = 1
             trainer = _make_tiny_regression_trainer("training_runs_callback_cycle_collectable")
@@ -2055,7 +2080,7 @@ def test_training_runs_weighted_mse_example_weights_drives_training_loss(capfd, 
                 1.0,
             )
         ],
-        reported_losses={
+        reports={
             "weighted_mse_ensemble": ["weighted_mse_loss"]
         },
     )
@@ -2347,7 +2372,7 @@ with tempfile.TemporaryDirectory(prefix="thor_weighted_cross_phase_") as tmp:
 
     first_runs = thor.training.TrainingRuns(
         run_specs,
-        reported_losses={"weighted_cross_phase_cv3": loss_names[:2]},
+        reports={"weighted_cross_phase_cv3": loss_names[:2]},
         max_parallel_runs=3,
     )
     first_result = first_runs.fit(epochs=1)
@@ -2359,7 +2384,7 @@ with tempfile.TemporaryDirectory(prefix="thor_weighted_cross_phase_") as tmp:
 
     second_runs = thor.training.TrainingRuns(
         run_specs,
-        reported_losses={"weighted_cross_phase_cv3": loss_names},
+        reports={"weighted_cross_phase_cv3": loss_names},
         max_parallel_runs=3,
     )
     second_result = second_runs.fit(epochs=1)
@@ -2544,7 +2569,7 @@ def test_training_runs_reported_losses_filter_selects_graph_loss_subset(capfd, t
                 1.0,
             )
         ],
-        reported_losses={
+        reports={
             "two_loss_ensemble": ["mae_loss"]
         },
     )
@@ -2603,7 +2628,7 @@ def test_training_runs_reports_mae_plus_low_high_quantile_losses(capfd, tmp_path
                 2.0,
             ),
         ],
-        reported_losses={
+        reports={
             "demand_quantile_ensemble": reported_losses
         },
     )
@@ -2721,11 +2746,8 @@ def test_training_runs_airfoil_cv3_reports_mae_plus_low_high_quantile_losses(cap
 
     runs = thor.training.TrainingRuns(
         run_specs,
-        reported_losses={
-            "airfoil_noise_cv3": reported_losses,
-        },
-        reported_metrics={
-            "airfoil_noise_cv3": reported_metrics,
+        reports={
+            "airfoil_noise_cv3": reported_losses + reported_metrics,
         },
         max_parallel_runs=3,
         max_summary_logs_per_second=AIRFOIL_QUANTILE_SUMMARY_LOGS_PER_SECOND,
@@ -2761,6 +2783,27 @@ def test_training_runs_airfoil_cv3_reports_mae_plus_low_high_quantile_losses(cap
     assert "INFO runs ensemble[airfoil_noise_cv3]:" in plain_text
     assert "ensemble_train_mae_accuracy=" in plain_text
     assert "ensemble_test_mae_accuracy=" in plain_text
+    ensemble_lines = [
+        line for line in plain_text.splitlines() if line.startswith("INFO runs ensemble[airfoil_noise_cv3]:")
+    ]
+    assert ensemble_lines
+    ensemble_line = ensemble_lines[-1]
+    ordered_train_report_tokens = [
+        "ensemble_train_mae_loss=",
+        "ensemble_train_quantile_low_loss=",
+        "ensemble_train_quantile_high_loss=",
+        "ensemble_train_mae_accuracy=",
+    ]
+    assert [ensemble_line.index(token) for token in ordered_train_report_tokens
+           ] == sorted(ensemble_line.index(token) for token in ordered_train_report_tokens)
+    ordered_test_report_tokens = [
+        "ensemble_test_mae_loss=",
+        "ensemble_test_quantile_low_loss=",
+        "ensemble_test_quantile_high_loss=",
+        "ensemble_test_mae_accuracy=",
+    ]
+    assert [ensemble_line.index(token) for token in ordered_test_report_tokens
+           ] == sorted(ensemble_line.index(token) for token in ordered_test_report_tokens)
 
     ensemble = results.ensemble("airfoil_noise_cv3")
     assert ensemble.all_completed()
@@ -2958,11 +3001,10 @@ def test_training_runs_airfoil_cv3_two_phase_pretrain_then_joint_multi_loss_metr
     ):
         return thor.training.TrainingRuns(
             run_specs,
-            reported_losses={
-                group_name: reported_losses if loss_names is None else loss_names
-            },
-            reported_metrics={
-                group_name: reported_metrics if metric_names is None else metric_names
+            reports={
+                group_name:
+                    (reported_losses if loss_names is None else loss_names) +
+                    (reported_metrics if metric_names is None else metric_names)
             },
             max_parallel_runs=3,
             max_summary_logs_per_second=AIRFOIL_QUANTILE_SUMMARY_LOGS_PER_SECOND,
@@ -3349,11 +3391,8 @@ def test_training_runs_airfoil_cv3_two_phase_mae_pretrain_then_mse_head_holdout(
     def make_runs():
         return thor.training.TrainingRuns(
             run_specs,
-            reported_losses={
-                ensemble_group: reported_losses
-            },
-            reported_metrics={
-                ensemble_group: reported_metrics
+            reports={
+                ensemble_group: reported_losses + reported_metrics
             },
             max_parallel_runs=3,
             max_summary_logs_per_second=AIRFOIL_QUANTILE_SUMMARY_LOGS_PER_SECOND,
@@ -3558,8 +3597,6 @@ def test_training_runs_graph_loss_does_not_invent_prediction_loss(capfd, tmp_pat
     assert "ensemble_test_graph_loss=" in ensemble_line
 
 
-
-
 @pytest.mark.cuda
 @pytest.mark.training_integration
 @pytest.mark.skipif(
@@ -3593,7 +3630,7 @@ def test_training_runs_composed_evaluator_skips_uncomposed_predictionless_loss(c
                 1.0,
             ),
         ],
-        reported_losses={
+        reports={
             "mixed_loss_ensemble": ["loss", "hidden_loss"],
         },
     )
@@ -4384,6 +4421,86 @@ def test_training_runs_fits_two_tiny_trainers_on_one_gpu_and_prefixes_stats(capf
         description="opt-in TrainingRuns CUDA integration tests",
     ),
 )
+def test_training_runs_ensemble_train_reports_full_validation_union_once(capfd, tmp_path):
+
+    def make_loader(validate_labels):
+        train_x, train_y = _regression_arrays(dtype=np.float32)
+        validate_labels = np.ascontiguousarray(validate_labels, dtype=np.float32).reshape(-1, 1)
+        validate_x = np.ascontiguousarray(
+            np.resize(train_x, (validate_labels.shape[0], train_x.shape[1])),
+            dtype=np.float32,
+        )
+        return thor.training.NumpyFloat32BatchLoader(
+            train_x,
+            train_y,
+            validate_x,
+            validate_labels,
+            batch_size=4,
+            example_input_name="examples",
+            label_input_name="labels",
+            dataset_name="training_runs_ensemble_train_full_validation_union",
+        )
+
+    def make_trainer(name, validate_labels):
+        return thor.training.Trainer(
+            _build_tiny_regressor_with_label_mean_report(name),
+            make_loader(validate_labels),
+            optimizer=thor.optimizers.Sgd(initial_learning_rate=1.0e-12, momentum=0.0),
+            stats_interval_s=0.0,
+            max_in_flight_batches=2,
+            scalar_tensors_to_report=["true_mean"],
+            stats_color="never",
+            save_model_dir=tmp_path / f"{name}_model",
+            save_model_overwrite=True,
+        )
+
+    runs = thor.training.TrainingRuns(
+        [
+            (
+                "fold_0",
+                make_trainer(
+                    "training_runs_full_validation_union_fold_0",
+                    [10.0, 10.0, 10.0, 10.0, 30.0, 30.0, 30.0, 30.0],
+                ),
+                "tiny_ensemble",
+            ),
+            (
+                "fold_1",
+                make_trainer(
+                    "training_runs_full_validation_union_fold_1",
+                    [80.0, 80.0, 80.0, 80.0],
+                ),
+                "tiny_ensemble",
+            ),
+        ],
+        reports={
+            "tiny_ensemble": ["true_mean"],
+        },
+    )
+
+    results, captured_text = _fit_runs_and_capture_text(runs, capfd, epochs=1)
+
+    assert results.all_completed()
+    true_mean = {
+        metric.name: metric for metric in results.ensemble("tiny_ensemble").reported_metrics
+    }["true_mean"]
+    # ensemble_train_* is the union of every member validation split exactly once:
+    # ((10 * 4 + 30 * 4) + (80 * 4)) / 12 = 40.
+    assert true_mean.train_value == pytest.approx(40.0, rel=1e-5, abs=1e-6)
+
+    plain_text = _ANSI_RE.sub("", captured_text)
+    assert "ensemble_train_true_mean=" in plain_text
+
+
+@pytest.mark.cuda
+@pytest.mark.training_integration
+@pytest.mark.skipif(
+    not RUN_TRAINING_INTEGRATION,
+    reason=integration_skip_reason(
+        "THOR_RUN_TRAINING_INTEGRATION",
+        description="opt-in TrainingRuns CUDA integration tests",
+    ),
+)
 def test_training_runs_save_ensemble_excludes_label_only_report_inputs(capfd, tmp_path):
     runs = thor.training.TrainingRuns(
         [
@@ -4406,7 +4523,7 @@ def test_training_runs_save_ensemble_excludes_label_only_report_inputs(capfd, tm
                 "tiny_ensemble",
             ),
         ],
-        reported_metrics={
+        reports={
             "tiny_ensemble": ["true_mean", "prediction_mean"],
         },
     )

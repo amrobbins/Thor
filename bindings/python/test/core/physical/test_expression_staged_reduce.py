@@ -384,7 +384,7 @@ def test_two_reduction_boundaries_staged(dtype: thor.DataType):
     stage2 = np.mean(stage1 + 2.0, axis=0, keepdims=True)
     expected = _apply_numpy_squeeze(stage2, True).astype(storage_dtype)
     if len(expected.shape) == 0:
-        expected.shape = (1,)
+        expected = np.reshape(expected, (1,))
 
     got = _run_staged_expr(expr, ["x", "y"], x_np, y_np, dtype=dtype)
 
@@ -653,7 +653,7 @@ def test_reduce_sum_squeeze_matrix(
     reduced = np.sum(x_ref + 1.0, axis=axes_tuple, keepdims=True)
     expected = _apply_numpy_squeeze(reduced, squeeze).astype(storage_dtype)
     if (len(expected.shape) == 0):
-        expected.shape = (1,)
+        expected = np.reshape(expected, (1,))
 
     got = _run_staged_expr(expr, ["x"], x_np, dtype=dtype)
 

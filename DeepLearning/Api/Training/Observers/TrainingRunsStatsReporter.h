@@ -24,6 +24,7 @@ class TrainingRunsStatsReporter : public TrainingStatsSink {
         double intervalSeconds = 10.0;
         std::optional<std::string> ensembleGroup{};
         double ensembleWeight = 1.0;
+        std::vector<std::string> reportOrder{};
     };
 
     explicit TrainingRunsStatsReporter(std::FILE* output = stdout,
@@ -87,7 +88,7 @@ class TrainingRunsStatsReporter : public TrainingStatsSink {
     void writeSummaryHeaderLocked(std::string_view label);
     void writeRunLineLocked(const RunState& state, size_t runPrefixWidth);
     void appendPhaseLossColumnsLocked(std::string& line, const RunState& state);
-    void writeResultLineLocked(const TrainingRunResult& result, size_t runPrefixWidth);
+    void writeResultLineLocked(const TrainingRunResult& result, size_t runPrefixWidth, const std::vector<std::string>& reportOrder);
     void writeEnsembleLineLocked(const TrainingEnsembleResult& result, size_t ensemblePrefixWidth);
     [[nodiscard]] bool shouldUseColorLocked() const;
     [[nodiscard]] static const char* statusColorStyle(TrainingRunStatus status);
