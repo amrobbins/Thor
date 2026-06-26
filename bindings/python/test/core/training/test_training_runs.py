@@ -556,6 +556,47 @@ def _build_tiny_regressor_with_hidden_loss_report(name: str):
     return network
 
 
+def _build_tiny_regressor_with_loss_and_hidden_loss_report(name: str):
+    network = thor.Network(name)
+    examples = thor.layers.NetworkInput(network, "examples", [2], thor.DataType.fp32)
+    labels = thor.layers.NetworkInput(network, "labels", [1], thor.DataType.fp32)
+
+    prediction = thor.layers.FullyConnected(
+        network,
+        examples.get_feature_output(),
+        1,
+        True,
+        activation=None,
+        weights_initializer=thor.initializers.UniformRandom(0.0, 0.0),
+        biases_initializer=thor.initializers.UniformRandom(0.0, 0.0),
+    )
+    hidden_prediction = thor.layers.FullyConnected(
+        network,
+        examples.get_feature_output(),
+        1,
+        True,
+        activation=None,
+        weights_initializer=thor.initializers.UniformRandom(0.0, 0.0),
+        biases_initializer=thor.initializers.UniformRandom(0.0, 0.0),
+    )
+    loss = thor.losses.MSE(
+        network,
+        prediction.get_feature_output(),
+        labels.get_feature_output(),
+        thor.DataType.fp32,
+    )
+    hidden_loss = thor.losses.MSE(
+        network,
+        hidden_prediction.get_feature_output(),
+        labels.get_feature_output(),
+        thor.DataType.fp32,
+    )
+    thor.layers.NetworkOutput(network, "loss", loss.get_loss(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "hidden_loss", hidden_loss.get_loss(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "prediction", prediction.get_feature_output(), thor.DataType.fp32)
+    return network
+
+
 def _build_weighted_tiny_regressor(name: str):
     network = thor.Network(name)
     examples = thor.layers.NetworkInput(network, "examples", [2], thor.DataType.fp32)
@@ -1229,6 +1270,25 @@ def _make_tiny_regression_with_hidden_loss_report_trainer(
         max_in_flight_batches=2,
         scalar_tensors_to_report=["hidden_loss"],
         stats_color="never",
+    )
+
+
+def _make_tiny_regression_with_loss_and_hidden_loss_report_trainer(
+    name: str,
+    *,
+    save_model_dir=None,
+    save_model_overwrite=False,
+):
+    return thor.training.Trainer(
+        _build_tiny_regressor_with_loss_and_hidden_loss_report(name),
+        _regression_one_batch_loader(),
+        optimizer=thor.optimizers.Sgd(initial_learning_rate=1.0e-12, momentum=0.0),
+        stats_interval_s=0.0,
+        max_in_flight_batches=2,
+        scalar_tensors_to_report=["loss", "hidden_loss"],
+        stats_color="never",
+        save_model_dir=save_model_dir,
+        save_model_overwrite=save_model_overwrite,
     )
 
 
@@ -3496,6 +3556,66 @@ def test_training_runs_graph_loss_does_not_invent_prediction_loss(capfd, tmp_pat
         line for line in _ANSI_RE.sub("", captured_text).splitlines()
         if "INFO runs ensemble[graph_loss_ensemble]:" in line)
     assert "ensemble_test_graph_loss=" in ensemble_line
+
+
+
+
+@pytest.mark.cuda
+@pytest.mark.training_integration
+@pytest.mark.skipif(
+    not RUN_TRAINING_INTEGRATION,
+    reason=integration_skip_reason(
+        "THOR_RUN_TRAINING_INTEGRATION",
+        description="opt-in TrainingRuns CUDA integration tests",
+    ),
+)
+def test_training_runs_composed_evaluator_skips_uncomposed_predictionless_loss(capfd, tmp_path):
+    runs = thor.training.TrainingRuns(
+        [
+            (
+                "fold_0",
+                _make_tiny_regression_with_loss_and_hidden_loss_report_trainer(
+                    "training_runs_skip_predictionless_loss_fold_0",
+                    save_model_dir=tmp_path / "fold_0_model",
+                    save_model_overwrite=True,
+                ),
+                "mixed_loss_ensemble",
+                1.0,
+            ),
+            (
+                "fold_1",
+                _make_tiny_regression_with_loss_and_hidden_loss_report_trainer(
+                    "training_runs_skip_predictionless_loss_fold_1",
+                    save_model_dir=tmp_path / "fold_1_model",
+                    save_model_overwrite=True,
+                ),
+                "mixed_loss_ensemble",
+                1.0,
+            ),
+        ],
+        reported_losses={
+            "mixed_loss_ensemble": ["loss", "hidden_loss"],
+        },
+    )
+
+    results, captured_text = _fit_runs_and_capture_text(
+        runs,
+        capfd,
+        epochs=1,
+        test_loader=_regression_one_batch_loader(),
+    )
+
+    assert results.all_completed()
+    ensemble = results.ensemble("mixed_loss_ensemble")
+    assert [metric.name for metric in ensemble.named_metrics] == ["loss"]
+    assert ensemble.named_metrics[0].test_value == pytest.approx(1.0, rel=1e-5, abs=1e-6)
+    assert ensemble.ensemble_test_loss == pytest.approx(1.0, rel=1e-5, abs=1e-6)
+
+    ensemble_line = next(
+        line for line in _ANSI_RE.sub("", captured_text).splitlines()
+        if "INFO runs ensemble[mixed_loss_ensemble]:" in line)
+    assert "ensemble_test_loss=" in ensemble_line
+    assert "ensemble_test_hidden_loss=" not in ensemble_line
 
 
 def _training_selection_metadata(save_dir):

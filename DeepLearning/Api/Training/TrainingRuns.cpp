@@ -437,6 +437,15 @@ void eraseNames(std::vector<std::string>& names, const std::vector<std::string>&
                 names.end());
 }
 
+void appendNameIfMissing(std::vector<std::string>& names, const std::string& name) {
+    if (name.empty()) {
+        return;
+    }
+    if (std::find(names.begin(), names.end(), name) == names.end()) {
+        names.push_back(name);
+    }
+}
+
 struct SavedNetworkArtifactRef {
     std::filesystem::path directory;
     std::string networkName;
@@ -800,7 +809,12 @@ std::vector<ResolvedEnsembleMetric> resolveTrainingRunsReportedMetrics(
 }
 
 bool trainingRunsLossCanParticipateInComposedEvaluation(const ResolvedEnsembleLoss& loss) {
-    return !loss.predictionOutputName.empty();
+    (void)loss;
+    // Loss reportability is established by the source network exposing the loss
+    // tensor through a NetworkOutput.  Whether that loss can be represented in a
+    // particular composed evaluator is decided when the evaluator is built from
+    // the tensors that composition actually contains.
+    return true;
 }
 
 bool trainingRunsMetricCanParticipateInComposedEvaluation(const ResolvedEnsembleMetric& metric) {
@@ -1716,8 +1730,9 @@ void TrainingRuns::validateReportedLosses() const {
             resolveTrainingRunsReportedLosses(reportableLossesForMember(referenceMember), requestedLossNames, context + " reference run '" + referenceMember.runName + "'");
 
         for (const ResolvedEnsembleLoss& resolved : referenceLosses) {
+            const TrainingRunOutputSignature* referenceOutput = nullptr;
             if (!resolved.predictionOutputName.empty()) {
-                const TrainingRunOutputSignature* referenceOutput = findOutputSignatureItem(referenceMember.outputSignature, resolved.predictionOutputName);
+                referenceOutput = findOutputSignatureItem(referenceMember.outputSignature, resolved.predictionOutputName);
                 if (referenceOutput == nullptr) {
                     throw std::runtime_error(context + " resolved loss '" + resolved.lossName + "' to prediction output '" +
                                              resolved.predictionOutputName + "', but reference run '" + referenceMember.runName +
@@ -1774,9 +1789,11 @@ void TrainingRuns::validateReportedLosses() const {
                                              trainingRunsReportableLossDescription(memberReference) + ".");
                 }
 
-                const TrainingRunOutputSignature* memberOutput = findOutputSignatureItem(member.outputSignature, resolved.predictionOutputName);
-                if (memberOutput == nullptr || !referenceOutput->compatibleWith(*memberOutput)) {
-                    throw std::runtime_error(memberContext + " has incompatible prediction output '" + resolved.predictionOutputName + "'.");
+                if (referenceOutput != nullptr) {
+                    const TrainingRunOutputSignature* memberOutput = findOutputSignatureItem(member.outputSignature, resolved.predictionOutputName);
+                    if (memberOutput == nullptr || !referenceOutput->compatibleWith(*memberOutput)) {
+                        throw std::runtime_error(memberContext + " has incompatible prediction output '" + resolved.predictionOutputName + "'.");
+                    }
                 }
                 const TrainingRunInputSignature* memberTarget = findInputSignatureItem(member.inputSignature, resolved.targetInputName);
                 if (memberTarget == nullptr || !referenceTarget->compatibleWith(*memberTarget)) {
@@ -2385,14 +2402,36 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
         return evaluator;
     }
 
+    std::vector<std::string> memberCloneInputNames = referenceInputNames;
+    if (!requireExactSharedInferenceInputSet) {
+        memberCloneInputNames = referenceMember.getInferenceNetworkInputNamesForOutputs(outputNames);
+        for (const std::string& inputName : memberCloneInputNames) {
+            if (referenceInputNameSet.count(inputName) == 0) {
+                throw std::runtime_error("TrainingRuns composed ensemble evaluator internal error: clone input '" + inputName +
+                                         "' is missing from the shared input set.");
+            }
+        }
+    }
+
     for (size_t memberIndex = 0; memberIndex < memberNetworks.size(); ++memberIndex) {
         Network& memberNetwork = *memberNetworks[memberIndex];
-        std::vector<std::string> memberInputNames = memberNetwork.getInferenceNetworkInputNames();
-        eraseNames(memberInputNames, memberNetwork.getTrainingOnlyNetworkInputNames());
+        const std::map<std::string, std::shared_ptr<NetworkInput>> memberInputsByName =
+            apiNetworkInputsByName(memberNetwork, /*includePassThroughInputs=*/false);
+        std::vector<std::string> memberInputNames;
+        if (requireExactSharedInferenceInputSet) {
+            memberInputNames = memberNetwork.getInferenceNetworkInputNames();
+            eraseNames(memberInputNames, memberNetwork.getTrainingOnlyNetworkInputNames());
+        } else {
+            memberInputNames.reserve(memberInputsByName.size());
+            for (const auto& [inputName, _] : memberInputsByName) {
+                (void)_;
+                memberInputNames.push_back(inputName);
+            }
+        }
         std::set<std::string> memberInputNameSet(memberInputNames.begin(), memberInputNames.end());
         if (memberInputNames.size() != memberInputNameSet.size()) {
             throw std::runtime_error("TrainingRuns composed ensemble evaluator member " + std::to_string(memberIndex) +
-                                     " has duplicate inference input names.");
+                                     " has duplicate input names.");
         }
         if (requireExactSharedInferenceInputSet) {
             if (memberInputNameSet != referenceInputNameSet) {
@@ -2402,15 +2441,13 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
             for (const std::string& inputName : referenceInputNames) {
                 if (memberInputNameSet.count(inputName) == 0) {
                     throw std::runtime_error("TrainingRuns composed ensemble evaluator member " + std::to_string(memberIndex) +
-                                             " is missing required deployable input '" + inputName + "'.");
+                                             " is missing required shared input '" + inputName + "'.");
                 }
             }
         }
 
-        const std::map<std::string, std::shared_ptr<NetworkInput>> memberInputsByName =
-            apiNetworkInputsByName(memberNetwork, /*includePassThroughInputs=*/false);
         ApiTensorRemap remap;
-        for (const std::string& inputName : referenceInputNames) {
+        for (const std::string& inputName : memberCloneInputNames) {
             std::shared_ptr<NetworkInput> referenceInput =
                 requiredApiNetworkInputByName(referenceMember, referenceInputsByName, inputName, "TrainingRuns composed ensemble evaluator reference member");
             std::shared_ptr<NetworkInput> memberInput =
@@ -2538,29 +2575,6 @@ void saveComposedEnsembleNetworkArtifact(const TrainingEnsembleResult& ensembleR
         /*forcedNumStampsPerGpu=*/0,
         /*networkOutputsOnGpu=*/false);
     placed->save(artifactDirectory.string(), overwriteNetworkArchive, /*saveOptimizerState=*/false);
-}
-
-Tensor trainingRunsEvaluatorInputTensorForGraphInput(TrainingRunsComposedEnsembleEvaluator& evaluator,
-                                                     Network& referenceMember,
-                                                     const std::map<std::string, std::shared_ptr<NetworkInput>>& referenceInputsByName,
-                                                     const std::string& inputName) {
-    auto existingIt = evaluator.sharedInputTensorsByName.find(inputName);
-    if (existingIt != evaluator.sharedInputTensorsByName.end()) {
-        return existingIt->second;
-    }
-    std::shared_ptr<NetworkInput> referenceInput =
-        requiredApiNetworkInputByName(referenceMember, referenceInputsByName, inputName, "TrainingRuns composed ensemble evaluator reference member");
-    NetworkInput evaluatorInput = NetworkInput::Builder()
-                                      .network(*evaluator.network)
-                                      .name(inputName)
-                                      .dimensions(referenceInput->getDimensions())
-                                      .dataType(referenceInput->getDataType())
-                                      .dimensionsIncludeBatch(referenceInput->dimensionsIncludeBatch())
-                                      .build();
-    Tensor tensor = evaluatorInput.getFeatureOutput().value();
-    evaluator.sharedInputTensorsByName[inputName] = tensor;
-    evaluator.externalInputNames.push_back(inputName);
-    return tensor;
 }
 
 std::optional<Tensor> existingTrainingRunsEvaluatorInputTensorForGraphInput(
@@ -2711,11 +2725,37 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
         }
     }
 
+    Network& referenceMember = *memberNetworks.front();
+    std::vector<std::string> sharedInputNames = outputNames.empty()
+        ? referenceMember.getInferenceNetworkInputNames()
+        : referenceMember.getInferenceNetworkInputNamesForOutputs(outputNames);
+    if (outputNames.empty()) {
+        eraseNames(sharedInputNames, referenceMember.getTrainingOnlyNetworkInputNames());
+    }
+    for (const ResolvedEnsembleLoss& loss : losses) {
+        appendNameIfMissing(sharedInputNames, loss.targetInputName);
+        if (loss.weightInputName.has_value()) {
+            appendNameIfMissing(sharedInputNames, *loss.weightInputName);
+        }
+    }
+    for (const ResolvedEnsembleMetric& metric : metrics) {
+        if (metric.targetInputName.has_value()) {
+            appendNameIfMissing(sharedInputNames, *metric.targetInputName);
+        }
+        if (metric.inputSourceName.has_value()) {
+            appendNameIfMissing(sharedInputNames, *metric.inputSourceName);
+        }
+    }
+
     TrainingRunsComposedEnsembleEvaluator evaluator =
         buildTrainingRunsComposedEnsembleEvaluatorThroughAccumulator(
-            memberNetworks, weights, outputNames, /*exposeAveragedOutputsAsNetworkOutputs=*/false);
+            memberNetworks,
+            weights,
+            outputNames,
+            /*exposeAveragedOutputsAsNetworkOutputs=*/false,
+            "training_runs_composed_ensemble_evaluator",
+            std::optional<std::vector<std::string>>{sharedInputNames});
 
-    Network& referenceMember = *memberNetworks.front();
     const std::map<std::string, std::shared_ptr<NetworkInput>> referenceInputsByName =
         apiNetworkInputsByName(referenceMember, /*includePassThroughInputs=*/false);
     const std::map<std::string, std::shared_ptr<NetworkOutput>> referenceOutputsByName = apiNetworkOutputsByName(referenceMember);
@@ -2738,13 +2778,19 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
         if (!exposedReportOutputs.insert(loss.lossName).second) {
             throw std::runtime_error("TrainingRuns composed ensemble evaluator cannot expose duplicate report output '" + loss.lossName + "'.");
         }
-        Tensor labels = trainingRunsEvaluatorInputTensorForGraphInput(evaluator, referenceMember, referenceInputsByName, loss.targetInputName);
+        std::optional<Tensor> labels = existingTrainingRunsEvaluatorInputTensorForGraphInput(evaluator, loss.targetInputName);
+        if (!labels.has_value()) {
+            continue;
+        }
         std::optional<Tensor> weightsTensor;
         if (loss.weightInputName.has_value()) {
-            weightsTensor = trainingRunsEvaluatorInputTensorForGraphInput(evaluator, referenceMember, referenceInputsByName, *loss.weightInputName);
+            weightsTensor = existingTrainingRunsEvaluatorInputTensorForGraphInput(evaluator, *loss.weightInputName);
+            if (!weightsTensor.has_value()) {
+                continue;
+            }
         }
         Tensor lossTensor = cloneTrainingRunsEvaluatorLossFromReference(
-            evaluator, referenceMember, referenceInputsByName, referenceOutputsByName, loss, predictionIt->second, labels, weightsTensor);
+            evaluator, referenceMember, referenceInputsByName, referenceOutputsByName, loss, predictionIt->second, *labels, weightsTensor);
         evaluator.lossOutputTensorsByName[loss.lossName] = lossTensor;
         NetworkOutput::Builder().network(*evaluator.network).name(loss.lossName).inputTensor(lossTensor).dataType(DataType::FP32).build();
         activeLosses.push_back(loss);
@@ -2877,13 +2923,6 @@ TrainingRunsComposedEvaluatorArtifacts loadTrainingRunsComposedEvaluatorArtifact
                                                              requestedLossNames.empty() ? requestedLossNames : activeRequestedLossNames,
                                                              context);
     }
-    artifacts.losses.erase(
-        std::remove_if(artifacts.losses.begin(),
-                       artifacts.losses.end(),
-                       [](const ResolvedEnsembleLoss& loss) {
-                           return !trainingRunsLossCanParticipateInComposedEvaluation(loss);
-                       }),
-        artifacts.losses.end());
     if (requestedMetricNames.empty() || !activeRequestedMetricNames.empty()) {
         artifacts.metrics = resolveTrainingRunsReportedMetrics(referenceAvailableMetrics,
                                                                requestedMetricNames.empty() ? requestedMetricNames : activeRequestedMetricNames,
@@ -3202,6 +3241,21 @@ void applyComposedEvaluationMetricsToEnsemble(TrainingEnsembleResult& ensemble,
     }
 }
 
+void retainNamedLossesAvailableInArtifacts(TrainingEnsembleResult& ensemble,
+                                            const std::vector<ResolvedEnsembleLoss>& losses) {
+    std::set<std::string> activeLossNames;
+    for (const ResolvedEnsembleLoss& loss : losses) {
+        activeLossNames.insert(loss.lossName);
+    }
+    ensemble.namedMetrics.erase(
+        std::remove_if(ensemble.namedMetrics.begin(),
+                       ensemble.namedMetrics.end(),
+                       [&](const TrainingNamedMetricResult& metric) {
+                           return activeLossNames.count(metric.name) == 0;
+                       }),
+        ensemble.namedMetrics.end());
+}
+
 void retainNamedGraphMetricsAvailableInArtifacts(TrainingEnsembleResult& ensemble,
                                                  const std::vector<ResolvedEnsembleMetric>& metrics) {
     std::set<std::string> activeMetricNames;
@@ -3299,6 +3353,7 @@ void TrainingRuns::evaluateEnsembles(std::vector<TrainingRunResult>& results,
             requestedReportedLossNamesForGroup(reportedLosses, groupName),
             requestedReportedMetricNamesForGroup(reportedMetrics, groupName),
             "TrainingRuns composed ensemble training-population evaluation for ensemble_group '" + groupName + "'");
+        retainNamedLossesAvailableInArtifacts(ensembleIt->second, composedArtifacts.losses);
         retainNamedGraphMetricsAvailableInArtifacts(ensembleIt->second, composedArtifacts.metrics);
 
         std::map<std::string, std::vector<std::optional<double>>> sourcePopulationLossesByName;
@@ -3484,6 +3539,7 @@ void TrainingRuns::evaluateEnsemblesOnTestLoader(std::vector<TrainingRunResult>&
             requestedReportedLossNamesForGroup(reportedLosses, groupName),
             requestedReportedMetricNamesForGroup(reportedMetrics, groupName),
             "TrainingRuns composed ensemble test evaluation for ensemble_group '" + groupName + "'");
+        retainNamedLossesAvailableInArtifacts(ensembleIt->second, composedArtifacts.losses);
         retainNamedGraphMetricsAvailableInArtifacts(ensembleIt->second, composedArtifacts.metrics);
         ComposedEnsembleEvaluationMetrics metrics = evaluateComposedEnsembleReportsOnLoader(
             composedArtifacts, *testLoader, ExampleType::TEST);
