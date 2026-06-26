@@ -176,11 +176,10 @@ TEST(Trainer, FitPassesBestModelCandidateOptionsAsRunParameters) {
                           .saveModelDirectory("/tmp/thor-best-candidate-options")
                           .saveModelOverwrite(true)
                           .saveOptimizerState(false)
-                          .checkBestModelEveryEpochs(3)
                           .minEarlyCompletionEpochs(7)
                           .build();
 
-    trainer.fit(5);
+    trainer.fit(TrainerFitOptions{5, 3});
 
     EXPECT_EQ(executor->calls, 1u);
     ASSERT_TRUE(executor->lastSaveModelDirectory.has_value());
@@ -277,18 +276,23 @@ TEST(Trainer, DefaultModelSelectionScoreUsesValidationLossWhenPresentOtherwiseTr
     EXPECT_FALSE(score.evaluate(std::nullopt, std::nullopt, 11).has_value());
 }
 
-TEST(Trainer, RejectsZeroBestModelCandidateCheckCadence) {
-    auto network = std::make_shared<Network>("trainer-best-candidate-invalid-cadence");
+TEST(Trainer, FitDisablesBestModelCandidateChecksByDefault) {
+    auto network = std::make_shared<Network>("trainer-best-candidate-default-disabled");
     auto loader = std::make_shared<FakeLoader>();
     auto executor = std::make_shared<CapturingExecutor>();
+    auto observer = std::make_shared<NullTrainingObserver>();
 
-    EXPECT_THROW((static_cast<void>(Trainer::Builder()
-                                        .network(network)
-                                        .loader(loader)
-                                        .executor(executor)
-                                        .checkBestModelEveryEpochs(0)
-                                        .build())),
-                 std::runtime_error);
+    Trainer trainer = Trainer::Builder()
+                          .network(network)
+                          .loader(loader)
+                          .executor(executor)
+                          .observer(observer)
+                          .build();
+
+    trainer.fit(5);
+
+    EXPECT_EQ(executor->calls, 1u);
+    EXPECT_EQ(executor->lastCheckBestModelEveryEpochs, 0u);
 }
 
 
@@ -310,7 +314,7 @@ TEST(Trainer, FitPassesEarlyCompletionPoliciesAsRunParameters) {
                           .earlyCompletionPolicies({policy})
                           .build();
 
-    trainer.fit(5);
+    trainer.fit(TrainerFitOptions{5, 1});
 
     EXPECT_EQ(executor->calls, 1u);
     EXPECT_EQ(executor->lastEarlyCompletionPolicyCount, 1u);

@@ -9,12 +9,12 @@
 #include <algorithm>
 #include <cmath>
 #include <exception>
-#include <filesystem>
 #include <iomanip>
 #include <limits>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
+#include <filesystem>
 #include <system_error>
 #include <utility>
 #include <unordered_map>
@@ -48,6 +48,22 @@ std::optional<std::string> trainedArtifactNetworkName(const std::shared_ptr<Plac
     return std::nullopt;
 }
 
+std::optional<std::string> selectedTrainingArtifactModelDirectory(const std::optional<std::string>& artifactRoot) {
+    if (!artifactRoot.has_value() || artifactRoot->empty()) {
+        return std::nullopt;
+    }
+    const std::filesystem::path root(*artifactRoot);
+    const std::filesystem::path bestDirectory = root / "best";
+    if (std::filesystem::exists(bestDirectory)) {
+        return bestDirectory.string();
+    }
+    const std::filesystem::path latestDirectory = root / "latest";
+    if (std::filesystem::exists(latestDirectory)) {
+        return latestDirectory.string();
+    }
+    return std::nullopt;
+}
+
 }  // namespace
 
 Trainer Trainer::Builder::build() const {
@@ -62,9 +78,6 @@ Trainer Trainer::Builder::build() const {
     }
     if (!std::isfinite(runtimeConfig_.statsIntervalSeconds) || runtimeConfig_.statsIntervalSeconds < 0.0) {
         throw std::runtime_error("Trainer statsIntervalSeconds must be finite and >= 0.");
-    }
-    if (checkBestModelEveryEpochs_ == 0) {
-        throw std::runtime_error("Trainer check_best_model_every_epochs must be >= 1.");
     }
     for (size_t i = 0; i < restartConditions_.size(); ++i) {
         const TrainingRestartCondition& condition = restartConditions_[i];
@@ -92,7 +105,6 @@ Trainer Trainer::Builder::build() const {
     trainer.saveModelDirectory = saveModelDirectory_;
     trainer.saveModelOverwrite = saveModelOverwrite_;
     trainer.saveOptimizerState = saveOptimizerState_;
-    trainer.checkBestModelEveryEpochs = checkBestModelEveryEpochs_;
     trainer.minEarlyCompletionEpochs = minEarlyCompletionEpochs_;
     trainer.modelSelectionScore = modelSelectionScore_;
     trainer.restartConditions = restartConditions_;
@@ -579,6 +591,13 @@ void Trainer::saveModel(const std::string& directory, bool overwrite, bool saveO
     placedNetworkAfterLastFit->save(directory, overwrite, saveOptimizerState);
 }
 
+void Trainer::releasePlacedNetworkAfterLastFit() {
+    if (placedNetworkAfterLastFit != nullptr) {
+        placedNetworkAfterLastFit->synchronizeDevices();
+        placedNetworkAfterLastFit.reset();
+    }
+}
+
 void Trainer::fitInternal(const TrainerFitOptions& options,
                           TrainingObserver& observer,
                           const TrainingCancellationToken& cancellationToken,
@@ -590,6 +609,9 @@ void Trainer::fitInternal(const TrainerFitOptions& options,
                                            additionalEarlyCompletionPolicies.begin(),
                                            additionalEarlyCompletionPolicies.end());
     validateEarlyCompletionPolicies(combinedEarlyCompletionPolicies);
+    if (options.checkBestModelEveryEpochs == 0 && !combinedEarlyCompletionPolicies.empty()) {
+        throw std::runtime_error("Trainer::fit early_completion_policies require check_best_model_every_epochs > 0.");
+    }
     cancellationToken.throwIfCancellationRequested();
 
     TrainingRunRequest request;
@@ -603,18 +625,41 @@ void Trainer::fitInternal(const TrainerFitOptions& options,
     request.saveModelDirectory = saveModelDirectory;
     request.saveModelOverwrite = saveModelOverwrite;
     request.saveOptimizerState = saveOptimizerState;
-    request.checkBestModelEveryEpochs = checkBestModelEveryEpochs;
+    request.checkBestModelEveryEpochs = options.checkBestModelEveryEpochs;
     request.minEarlyCompletionEpochs = minEarlyCompletionEpochs;
     request.initialCompletedEpochs = completedTrainingEpochs;
     request.modelSelectionScore = modelSelectionScore;
     request.earlyCompletionPolicies = std::move(combinedEarlyCompletionPolicies);
     request.cancellationToken = cancellationToken;
     request.executionMode = TrainingRunExecutionMode::FIT;
-    request.previousPlacedNetwork = placedNetworkAfterLastFit;
+
+    if (lastCompletedArtifactDirectory.has_value() && lastCompletedArtifactNetworkName.has_value()) {
+        // Artifact handoff is the low-memory phase-transition path: a previous
+        // fit has already finalized a selected model artifact, so the stale
+        // GPU-resident placement can be released before the next active graph is
+        // built/placed. The runner will reload the saved source only long enough
+        // to copy matching state into the fresh placement.
+        request.previousModelArtifactDirectory = lastCompletedArtifactDirectory;
+        request.previousModelNetworkName = lastCompletedArtifactNetworkName;
+        releasePlacedNetworkAfterLastFit();
+    } else {
+        request.previousPlacedNetwork = placedNetworkAfterLastFit;
+    }
     request.completedPlacedNetwork = &placedNetworkAfterLastFit;
     request.completedTrainingEpochs = &completedTrainingEpochs;
 
     executeRequest(request, observer);
+
+    if (saveModelDirectory.has_value()) {
+        lastCompletedArtifactDirectory = selectedTrainingArtifactModelDirectory(saveModelDirectory);
+        lastCompletedArtifactNetworkName = trainedArtifactNetworkName(placedNetworkAfterLastFit, network);
+        if (!lastCompletedArtifactDirectory.has_value()) {
+            lastCompletedArtifactNetworkName.reset();
+        }
+    } else {
+        lastCompletedArtifactDirectory.reset();
+        lastCompletedArtifactNetworkName.reset();
+    }
 }
 
 
@@ -686,6 +731,8 @@ void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
         try {
             attemptTrainer.fitInternal(options, attemptObserver, cancellationToken, additionalEarlyCompletionPolicies, additionalScalarTensorsToReport);
             placedNetworkAfterLastFit = attemptTrainer.placedNetworkAfterLastFit;
+            lastCompletedArtifactDirectory = attemptTrainer.lastCompletedArtifactDirectory;
+            lastCompletedArtifactNetworkName = attemptTrainer.lastCompletedArtifactNetworkName;
             completedTrainingEpochs = attemptTrainer.completedTrainingEpochs;
             attemptObserver.flush();
             return;
@@ -908,8 +955,8 @@ void Trainer::validateFitOptions(const TrainerFitOptions& options) const {
     if (options.epochs == 0) {
         throw std::runtime_error("Trainer::fit epochs must be >= 1.");
     }
-    if (checkBestModelEveryEpochs == 0) {
-        throw std::runtime_error("Trainer::fit check_best_model_every_epochs must be >= 1.");
+    if (options.checkBestModelEveryEpochs == 0 && (!earlyCompletionPolicies.empty())) {
+        throw std::runtime_error("Trainer::fit early_completion_policies require check_best_model_every_epochs > 0.");
     }
     if (saveModelDirectory.has_value()) {
         if (saveModelDirectory->empty()) {

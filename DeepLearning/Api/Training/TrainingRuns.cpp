@@ -1270,6 +1270,15 @@ TrainingRunsResult TrainingRuns::fit(const TrainerFitOptions& options, const Tra
             if (!result.savedModelNetworkName.has_value() && runs[i].trainer->getNetwork() != nullptr) {
                 result.savedModelNetworkName = runs[i].trainer->getNetwork()->getNetworkName();
             }
+            if (result.completed() && result.savedModelDirectory.has_value()) {
+                // TrainingRuns consumes trained members through saved artifacts for
+                // later phase handoff and ensemble composition. Once the artifact
+                // is finalized, keep the CPU-side trainer/spec but release the
+                // completed member placement so finished folds do not accumulate
+                // unnecessary GPU residency while siblings or composed evaluators
+                // run.
+                runs[i].trainer->releasePlacedNetworkAfterLastFit();
+            }
 
             bool shouldCancelSiblings = false;
             {

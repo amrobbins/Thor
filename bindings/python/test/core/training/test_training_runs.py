@@ -148,12 +148,12 @@ def _expects_color_for_stats_color_mode(mode: str) -> bool:
     return os.isatty(1)
 
 
-def _fit_runs_and_capture_text(runs, capfd, *, epochs: int, test_loader=None):
+def _fit_runs_and_capture_text(runs, capfd, *, epochs: int, test_loader=None, check_best_model_every_epochs=0):
     _flush_native_stdio_for_capture()
     capfd.readouterr()
     with capfd.disabled():
         with _NativeOutputTee() as tee:
-            results = runs.fit(epochs=epochs, test_loader=test_loader)
+            results = runs.fit(epochs=epochs, test_loader=test_loader, check_best_model_every_epochs=check_best_model_every_epochs)
     return results, tee.text()
 
 
@@ -1182,7 +1182,6 @@ def _make_tiny_regression_trainer(
     optimizer_obj=None,
     save_model_dir=None,
     save_model_overwrite=False,
-    check_best_model_every_epochs=1,
     min_early_completion_epochs=0,
     model_selection_score=None,
     restart_conditions=None,
@@ -1200,7 +1199,6 @@ def _make_tiny_regression_trainer(
         stats_color="never",
         save_model_dir=save_model_dir,
         save_model_overwrite=save_model_overwrite,
-        check_best_model_every_epochs=check_best_model_every_epochs,
         min_early_completion_epochs=min_early_completion_epochs,
         model_selection_score=model_selection_score,
         restart_conditions=restart_conditions,
@@ -1657,24 +1655,27 @@ def test_training_runs_fit_rejects_existing_save_model_dir_before_training(tmp_p
         runs.fit(epochs=1)
 
 
-def test_trainer_binding_accepts_best_model_candidate_cadence_and_min_early_completion_epochs():
+def test_trainer_binding_accepts_min_early_completion_epochs_and_fit_options_cadence():
     trainer = _make_tiny_regression_trainer(
         "training_runs_best_candidate_cadence",
-        check_best_model_every_epochs=3,
         min_early_completion_epochs=7,
     )
+    options = thor.training.TrainerFitOptions()
+    options.epochs = 3
+    options.check_best_model_every_epochs = 2
 
     assert trainer is not None
     assert trainer.min_early_completion_epochs == 7
     assert trainer.completed_training_epochs == 0
+    assert options.epochs == 3
+    assert options.check_best_model_every_epochs == 2
 
 
-def test_trainer_binding_rejects_zero_best_model_candidate_cadence():
-    with pytest.raises(RuntimeError, match="check_best_model_every_epochs"):
-        _make_tiny_regression_trainer(
-            "training_runs_best_candidate_invalid_cadence",
-            check_best_model_every_epochs=0,
-        )
+def test_trainer_fit_options_accepts_zero_best_model_candidate_cadence_as_disabled():
+    options = thor.training.TrainerFitOptions()
+    options.check_best_model_every_epochs = 0
+
+    assert options.check_best_model_every_epochs == 0
 
 
 def test_trainer_binding_accepts_custom_model_selection_score():
@@ -2349,7 +2350,6 @@ def make_trainer(name, seed, model_root):
         save_model_dir=model_root / name,
         save_model_overwrite=True,
         save_optimizer_state=True,
-        check_best_model_every_epochs=1,
     )
     return trainer, aggregate_phase
 
@@ -3714,10 +3714,9 @@ def test_saved_trained_model_load_place_inference_only_infer_sequence(tmp_path):
         "saved_trained_inference_sequence",
         save_model_dir=save_dir,
         save_model_overwrite=True,
-        check_best_model_every_epochs=1,
     )
 
-    result = trainer.fit(1)
+    result = trainer.fit(1, check_best_model_every_epochs=1)
 
     assert result.status == "completed"
     assert result.best_epoch == 1
@@ -3759,9 +3758,8 @@ def test_saved_training_graph_inference_prunes_loss_and_label_only_inputs(tmp_pa
         "saved_training_graph_prunes_loss_labels",
         save_model_dir=save_dir,
         save_model_overwrite=True,
-        check_best_model_every_epochs=1,
     )
-    trainer.fit(1)
+    trainer.fit(1, check_best_model_every_epochs=1)
 
     loaded = thor.Network("saved_training_graph_prunes_loss_labels")
     loaded.load(str(_training_artifact_latest_dir(save_dir)))
@@ -3795,10 +3793,9 @@ def test_trainer_best_candidate_snapshot_contains_trained_weights(tmp_path):
         "trainer_best_candidate_snapshot_trained_weights",
         save_model_dir=save_dir,
         save_model_overwrite=True,
-        check_best_model_every_epochs=1,
     )
 
-    trainer.fit(1)
+    trainer.fit(1, check_best_model_every_epochs=1)
 
     assert save_dir.exists()
     assert _training_artifact_latest_dir(save_dir).exists()
@@ -3826,28 +3823,25 @@ def test_trainer_custom_model_selection_score_controls_saved_candidate(tmp_path)
         "trainer_custom_model_selection_first_epoch",
         save_model_dir=first_epoch_dir,
         save_model_overwrite=True,
-        check_best_model_every_epochs=1,
         model_selection_score=lambda validation_loss,
         training_loss,
         epoch: float(epoch),
-    ).fit(2)
+    ).fit(2, check_best_model_every_epochs=1)
 
     _make_tiny_regression_trainer(
         "trainer_custom_model_selection_one_epoch_reference",
         save_model_dir=one_epoch_reference_dir,
         save_model_overwrite=True,
-        check_best_model_every_epochs=1,
-    ).fit(1)
+    ).fit(1, check_best_model_every_epochs=1)
 
     _make_tiny_regression_trainer(
         "trainer_custom_model_selection_two_epoch_reference",
         save_model_dir=two_epoch_reference_dir,
         save_model_overwrite=True,
-        check_best_model_every_epochs=1,
         model_selection_score=lambda validation_loss,
         training_loss,
         epoch: -float(epoch),
-    ).fit(2)
+    ).fit(2, check_best_model_every_epochs=1)
 
     selected_prediction = _prediction_from_saved_tiny_regressor(
         first_epoch_dir, "trainer_custom_model_selection_first_epoch")
@@ -3877,14 +3871,13 @@ def test_trainer_fit_returns_result_and_persists_selection_metadata(tmp_path):
         "trainer_fit_result_metadata",
         save_model_dir=save_dir,
         save_model_overwrite=True,
-        check_best_model_every_epochs=1,
         model_selection_score=lambda validation_loss,
         training_loss,
         epoch: float(epoch),
         early_completion_policies=[early_policy],
     )
 
-    result = trainer.fit(50)
+    result = trainer.fit(50, check_best_model_every_epochs=1)
 
     assert isinstance(result, thor.training.TrainingRunResult)
     assert result.status == "completed"
@@ -3930,25 +3923,22 @@ def test_trainer_model_selection_score_none_skips_candidate_for_epoch(tmp_path):
         "trainer_custom_model_selection_none_skips_epoch",
         save_model_dir=save_dir,
         save_model_overwrite=True,
-        check_best_model_every_epochs=1,
         model_selection_score=lambda validation_loss,
         training_loss,
         epoch: None if epoch == 1 else float(epoch),
-    ).fit(2)
+    ).fit(2, check_best_model_every_epochs=1)
 
     _make_tiny_regression_trainer(
         "trainer_custom_model_selection_none_one_epoch_reference",
         save_model_dir=one_epoch_reference_dir,
         save_model_overwrite=True,
-        check_best_model_every_epochs=1,
-    ).fit(1)
+    ).fit(1, check_best_model_every_epochs=1)
 
     _make_tiny_regression_trainer(
         "trainer_custom_model_selection_none_two_epoch_reference",
         save_model_dir=two_epoch_reference_dir,
         save_model_overwrite=True,
-        check_best_model_every_epochs=1,
-    ).fit(2)
+    ).fit(2, check_best_model_every_epochs=1)
 
     assert result.status == "completed"
     assert result.result == "completed"
@@ -3992,14 +3982,13 @@ def test_trainer_min_early_completion_epochs_can_complete_without_candidate_or_s
         "trainer_min_early_completion_no_candidate",
         save_model_dir=save_dir,
         save_model_overwrite=True,
-        check_best_model_every_epochs=1,
         min_early_completion_epochs=5,
         model_selection_score=lambda validation_loss,
         training_loss,
         epoch: float(epoch),
     )
 
-    result = trainer.fit(2)
+    result = trainer.fit(2, check_best_model_every_epochs=1)
 
     assert result.status == "completed"
     assert result.result == "completed"
@@ -4048,7 +4037,6 @@ def test_trainer_min_early_completion_epochs_uses_cumulative_epoch_across_fit_ca
         "trainer_min_early_completion_cumulative",
         save_model_dir=save_dir,
         save_model_overwrite=True,
-        check_best_model_every_epochs=1,
         min_early_completion_epochs=3,
         model_selection_score=lambda validation_loss,
         training_loss,
@@ -4056,7 +4044,7 @@ def test_trainer_min_early_completion_epochs_uses_cumulative_epoch_across_fit_ca
         early_completion_policies=[early_policy],
     )
 
-    first_result = trainer.fit(2)
+    first_result = trainer.fit(2, check_best_model_every_epochs=1)
     assert first_result.completed_epoch == 2
     assert first_result.best_epoch is None
     assert trainer.completed_training_epochs == 2
@@ -4069,7 +4057,7 @@ def test_trainer_min_early_completion_epochs_uses_cumulative_epoch_across_fit_ca
     assert first_metadata["has_best_candidate"] is False
     assert first_metadata["best_epoch"] is None
 
-    second_result = trainer.fit(10)
+    second_result = trainer.fit(10, check_best_model_every_epochs=1)
 
     assert second_result.status == "completed"
     assert second_result.result == "early_completed"
@@ -4112,7 +4100,6 @@ def test_training_runs_min_early_completion_epochs_uses_cumulative_epoch_across_
         "training_runs_min_early_completion_cumulative",
         save_model_dir=save_dir,
         save_model_overwrite=True,
-        check_best_model_every_epochs=1,
         min_early_completion_epochs=3,
         model_selection_score=lambda validation_loss,
         training_loss,
@@ -4121,7 +4108,7 @@ def test_training_runs_min_early_completion_epochs_uses_cumulative_epoch_across_
     )
     runs = thor.training.TrainingRuns([("fold_0", trainer)], failure_policy="continue")
 
-    first_results = runs.fit(epochs=2)
+    first_results = runs.fit(epochs=2, check_best_model_every_epochs=1)
     first_result = first_results["fold_0"]
     assert first_results.all_completed()
     assert first_result.status == "completed"
@@ -4139,7 +4126,7 @@ def test_training_runs_min_early_completion_epochs_uses_cumulative_epoch_across_
     assert first_metadata["has_best_candidate"] is False
     assert first_metadata["best_epoch"] is None
 
-    second_results = runs.fit(epochs=10)
+    second_results = runs.fit(epochs=10, check_best_model_every_epochs=1)
     second_result = second_results["fold_0"]
     assert second_results.all_completed()
     assert second_result.status == "completed"
@@ -4220,7 +4207,6 @@ def test_training_runs_early_completion_stops_early_and_saves_best_candidate(cap
         "training_runs_early_completion_best_candidate",
         save_model_dir=early_dir,
         save_model_overwrite=True,
-        check_best_model_every_epochs=1,
         model_selection_score=lambda validation_loss,
         training_loss,
         epoch: float(epoch),
@@ -4228,7 +4214,7 @@ def test_training_runs_early_completion_stops_early_and_saves_best_candidate(cap
     )
     runs = thor.training.TrainingRuns([("fold_0", trainer)], failure_policy="continue")
 
-    results, captured_text = _fit_runs_and_capture_text(runs, capfd, epochs=50)
+    results, captured_text = _fit_runs_and_capture_text(runs, capfd, epochs=50, check_best_model_every_epochs=1)
 
     result = results["fold_0"]
     assert results.all_completed()
@@ -4254,15 +4240,13 @@ def test_training_runs_early_completion_stops_early_and_saves_best_candidate(cap
         "training_runs_early_completion_one_epoch_reference",
         save_model_dir=one_epoch_reference_dir,
         save_model_overwrite=True,
-        check_best_model_every_epochs=1,
-    ).fit(1)
+    ).fit(1, check_best_model_every_epochs=1)
 
     _make_tiny_regression_trainer(
         "training_runs_early_completion_two_epoch_reference",
         save_model_dir=two_epoch_reference_dir,
         save_model_overwrite=True,
-        check_best_model_every_epochs=1,
-    ).fit(2)
+    ).fit(2, check_best_model_every_epochs=1)
 
     selected_prediction = _prediction_from_saved_tiny_regressor(
         early_dir, "training_runs_early_completion_best_candidate", artifact="best")

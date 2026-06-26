@@ -87,6 +87,27 @@ void copyOptimizerTensorState(ThorImplementation::Optimizer& destination, ThorIm
     }
 }
 
+std::vector<std::string> stateMatchKeysForParameter(Network& network, const ParameterReference& reference) {
+    std::vector<std::string> keys;
+    const std::optional<std::string> cloneKey = network.getCloneSourceKeyForLayerId(reference.getParameterizableId());
+    if (cloneKey.has_value() && !cloneKey->empty()) {
+        keys.push_back(cloneKey.value() + ":" + reference.getParameterName());
+    }
+
+
+    for (uint32_t i = 0; i < network.getNumTrainableLayers(); ++i) {
+        std::shared_ptr<TrainableLayer> trainableLayer = network.getTrainableLayer(i);
+        if (trainableLayer == nullptr || trainableLayer->getParameterizableId() != reference.getParameterizableId()) {
+            continue;
+        }
+        keys.push_back("trainable_ordinal:" + std::to_string(i) + ":" +
+                       trainableLayer->getLayerType() + ":" + reference.getParameterName());
+        break;
+    }
+
+    return keys;
+}
+
 }  // namespace
 
 PlacedNetwork::~PlacedNetwork() {
@@ -423,18 +444,14 @@ void PlacedNetwork::copyMatchingTrainingStateFrom(PlacedNetwork& source) {
         return;
     }
 
-    std::unordered_map<std::string, ParameterReference> sourceParameterByCloneKey;
+    std::unordered_map<std::string, ParameterReference> sourceParameterByStateKey;
     for (const ParameterReference& sourceReference : source.getTrainableParameterReferences(/*trainingEnabledOnly=*/false)) {
-        std::optional<std::string> sourceCloneKey =
-            source.network.getCloneSourceKeyForLayerId(sourceReference.getParameterizableId());
-        if (!sourceCloneKey.has_value()) {
-            continue;
+        for (const std::string& key : stateMatchKeysForParameter(source.network, sourceReference)) {
+            sourceParameterByStateKey.emplace(key, sourceReference);
         }
-        const std::string key = sourceCloneKey.value() + ":" + sourceReference.getParameterName();
-        sourceParameterByCloneKey.emplace(key, sourceReference);
     }
 
-    if (sourceParameterByCloneKey.empty()) {
+    if (sourceParameterByStateKey.empty()) {
         return;
     }
 
@@ -444,15 +461,17 @@ void PlacedNetwork::copyMatchingTrainingStateFrom(PlacedNetwork& source) {
         ThorImplementation::StampedNetwork& sourceStamp = source.getStampedNetwork(stampIndex);
 
         for (const ParameterReference& destinationReference : destinationParameterReferences) {
-            std::optional<std::string> destinationCloneKey =
-                network.getCloneSourceKeyForLayerId(destinationReference.getParameterizableId());
-            if (!destinationCloneKey.has_value()) {
-                continue;
+            const std::vector<std::string> destinationKeys = stateMatchKeysForParameter(network, destinationReference);
+            auto sourceIt = sourceParameterByStateKey.end();
+            std::string matchedKey;
+            for (const std::string& key : destinationKeys) {
+                sourceIt = sourceParameterByStateKey.find(key);
+                if (sourceIt != sourceParameterByStateKey.end()) {
+                    matchedKey = key;
+                    break;
+                }
             }
-
-            const std::string key = destinationCloneKey.value() + ":" + destinationReference.getParameterName();
-            auto sourceIt = sourceParameterByCloneKey.find(key);
-            if (sourceIt == sourceParameterByCloneKey.end()) {
+            if (sourceIt == sourceParameterByStateKey.end()) {
                 continue;
             }
 
@@ -470,7 +489,7 @@ void PlacedNetwork::copyMatchingTrainingStateFrom(PlacedNetwork& source) {
                                          destinationReference.getParameterName() + "': parameter storage is not initialized.");
             }
 
-            const std::string description = "clone-source '" + destinationCloneKey.value() + "' parameter '" +
+            const std::string description = "state key '" + matchedKey + "' parameter '" +
                                             destinationReference.getParameterName() + "'";
             ThorImplementation::Tensor destinationStorage = destinationParameter->getStorage().value();
             Stream copyStream = Stream::getNextUploadStream(destinationStorage.getPlacement().getDeviceNum());

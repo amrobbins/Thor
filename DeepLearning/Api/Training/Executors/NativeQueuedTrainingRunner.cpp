@@ -797,7 +797,7 @@ struct TrainingSelectionMetadata {
     std::optional<double> latestValidationLoss{};
     uint64_t completedEpoch = 0;
     std::string completionReason = "completed";
-    uint32_t checkBestModelEveryEpochs = 1;
+    uint32_t checkBestModelEveryEpochs = 0;
     uint64_t minEarlyCompletionEpochs = 0;
 };
 
@@ -1847,8 +1847,8 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     request.cancellationToken.throwIfCancellationRequested();
 
     const bool evaluateOnly = request.executionMode == TrainingRunExecutionMode::EVALUATE;
-    if (!evaluateOnly && request.checkBestModelEveryEpochs == 0) {
-        throw std::runtime_error("Trainer check_best_model_every_epochs must be >= 1.");
+    if (!evaluateOnly && request.checkBestModelEveryEpochs == 0 && !request.earlyCompletionPolicies.empty()) {
+        throw std::runtime_error("Trainer early_completion_policies require check_best_model_every_epochs > 0.");
     }
 
     TrainingRuntimeConfig runtime = request.runtime;
@@ -1890,6 +1890,33 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         } else {
             placedNetwork->copyTrainingStateFrom(*request.previousPlacedNetwork);
         }
+    }
+
+    if (!evaluateOnly && request.previousModelArtifactDirectory.has_value()) {
+        request.cancellationToken.throwIfCancellationRequested();
+        if (!request.previousModelNetworkName.has_value() || request.previousModelNetworkName->empty()) {
+            throw std::runtime_error("Trainer artifact handoff requires previousModelNetworkName.");
+        }
+
+        auto sourceNetwork = std::make_shared<Network>(request.previousModelNetworkName.value());
+        sourceNetwork->load(request.previousModelArtifactDirectory.value());
+        std::vector<Event> sourceInitDoneEvents;
+        std::shared_ptr<PlacedNetwork> sourcePlacedNetwork =
+            sourceNetwork->place(batchSize, sourceInitDoneEvents, /*inferenceOnly=*/false);
+        THOR_THROW_IF_FALSE(sourcePlacedNetwork->getNumStamps() == placedNetwork->getNumStamps());
+        for (Event& event : sourceInitDoneEvents) {
+            request.cancellationToken.throwIfCancellationRequested();
+            event.synchronize();
+        }
+
+        // Saved artifacts are a different API Network instance from the fresh
+        // active graph, so exact layer-id state copy is not valid. Match by
+        // stable clone-source key and, for non-composed or older artifacts, by
+        // serialized layer name.
+        sourcePlacedNetwork->synchronizeDevices();
+        placedNetwork->copyMatchingTrainingStateFrom(*sourcePlacedNetwork);
+        sourcePlacedNetwork.reset();
+        sourceNetwork.reset();
     }
 
     request.cancellationToken.throwIfCancellationRequested();
@@ -1964,7 +1991,8 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     };
 
     TrainingArtifactManager trainingArtifacts(request.saveModelDirectory, request.saveModelOverwrite, request.saveOptimizerState);
-    const uint64_t firstEarlyCompletionEpoch =
+    const bool modelSelectionEnabled = !evaluateOnly && request.checkBestModelEveryEpochs > 0;
+    const uint64_t firstModelSelectionEpoch =
         request.minEarlyCompletionEpochs == 0 ? request.checkBestModelEveryEpochs : request.minEarlyCompletionEpochs;
     bool runEarlyCompleted = false;
     std::optional<uint64_t> completedEpoch{};
@@ -2135,8 +2163,8 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         }
 
         bool earlyCompletionRequested = false;
-        const bool earlyCompletionEligible = !evaluateOnly && humanEpoch >= firstEarlyCompletionEpoch &&
-                                             ((humanEpoch - firstEarlyCompletionEpoch) % request.checkBestModelEveryEpochs == 0);
+        const bool earlyCompletionEligible = modelSelectionEnabled && humanEpoch >= firstModelSelectionEpoch &&
+                                             ((humanEpoch - firstModelSelectionEpoch) % request.checkBestModelEveryEpochs == 0);
         if (earlyCompletionEligible) {
             const std::optional<double> currentScore = request.modelSelectionScore.evaluate(
                 epochLosses.validationLoss(), epochLosses.trainLoss(), humanEpoch);
@@ -2167,6 +2195,17 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     request.cancellationToken.throwIfCancellationRequested();
     const uint64_t finalCompletedEpoch = completedEpoch.value_or(currentEpoch);
     const char* finalCompletionReason = runEarlyCompleted ? "early_completed" : "completed";
+    const bool finalModelSelectionEligible = modelSelectionEnabled && finalCompletedEpoch >= firstModelSelectionEpoch;
+    if (finalModelSelectionEligible) {
+        // The final/latest state is the handoff and deployment boundary. If best
+        // candidate tracking is enabled and the fit has reached the model-selection
+        // eligibility threshold, always consider the final state for best even when
+        // the final epoch does not fall on the periodic cadence.
+        const std::optional<double> finalScore = request.modelSelectionScore.evaluate(
+            latestValidationLoss, latestTrainingLoss, finalCompletedEpoch);
+        latestModelSelectionScore = finalScore;
+        trainingArtifacts.maybeSnapshotBestCandidate(*placedNetwork, finalCompletedEpoch, finalScore);
+    }
     if (!evaluateOnly) {
         TrainingSelectionMetadata selectionMetadata;
         selectionMetadata.bestEpoch = trainingArtifacts.getBestEpoch();

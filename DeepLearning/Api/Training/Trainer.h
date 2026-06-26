@@ -29,6 +29,7 @@ class TrainingRuns;
 
 struct TrainerFitOptions {
     uint32_t epochs = 1;
+    uint32_t checkBestModelEveryEpochs = 0;
 };
 
 
@@ -88,13 +89,13 @@ class Trainer {
     TrainingRunResult fit(uint32_t epochs);
     TrainingRunResult fit(const TrainerFitOptions& options);
     void saveModel(const std::string& directory, bool overwrite = false, bool saveOptimizerState = true) const;
+    void releasePlacedNetworkAfterLastFit();
 
     [[nodiscard]] const TrainingRuntimeConfig& getRuntimeConfig() const { return runtimeConfig; }
     [[nodiscard]] std::shared_ptr<Network> getNetwork() const { return network; }
     [[nodiscard]] const std::optional<std::string>& getSaveModelDirectory() const { return saveModelDirectory; }
     [[nodiscard]] bool getSaveModelOverwrite() const { return saveModelOverwrite; }
     [[nodiscard]] bool getSaveOptimizerState() const { return saveOptimizerState; }
-    [[nodiscard]] uint32_t getCheckBestModelEveryEpochs() const { return checkBestModelEveryEpochs; }
     [[nodiscard]] uint64_t getMinEarlyCompletionEpochs() const { return minEarlyCompletionEpochs; }
     [[nodiscard]] uint64_t getCompletedTrainingEpochs() const { return completedTrainingEpochs; }
     [[nodiscard]] const TrainingModelSelectionScore& getModelSelectionScore() const { return modelSelectionScore; }
@@ -152,12 +153,13 @@ class Trainer {
     std::optional<std::string> saveModelDirectory{};
     bool saveModelOverwrite = false;
     bool saveOptimizerState = true;
-    uint32_t checkBestModelEveryEpochs = 1;
     uint64_t minEarlyCompletionEpochs = 0;
     TrainingModelSelectionScore modelSelectionScore{};
     std::vector<TrainingRestartCondition> restartConditions{};
     std::vector<TrainingEarlyCompletionPolicy> earlyCompletionPolicies{};
     std::shared_ptr<PlacedNetwork> placedNetworkAfterLastFit = nullptr;
+    std::optional<std::string> lastCompletedArtifactDirectory{};
+    std::optional<std::string> lastCompletedArtifactNetworkName{};
     uint64_t completedTrainingEpochs = 0;
 };
 
@@ -238,11 +240,6 @@ class Trainer::Builder {
         return *this;
     }
 
-    Builder& checkBestModelEveryEpochs(uint32_t checkBestModelEveryEpochs) {
-        this->checkBestModelEveryEpochs_ = checkBestModelEveryEpochs;
-        return *this;
-    }
-
     Builder& minEarlyCompletionEpochs(uint64_t minEarlyCompletionEpochs) {
         this->minEarlyCompletionEpochs_ = minEarlyCompletionEpochs;
         return *this;
@@ -276,7 +273,6 @@ class Trainer::Builder {
     std::optional<std::string> saveModelDirectory_{};
     bool saveModelOverwrite_ = false;
     bool saveOptimizerState_ = true;
-    uint32_t checkBestModelEveryEpochs_ = 1;
     uint64_t minEarlyCompletionEpochs_ = 0;
     TrainingModelSelectionScore modelSelectionScore_{};
     std::vector<TrainingRestartCondition> restartConditions_{};

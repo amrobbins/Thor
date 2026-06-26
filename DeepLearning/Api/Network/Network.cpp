@@ -912,6 +912,19 @@ void Network::save(vector<ThorImplementation::StampedNetwork> &stampedNetworks,
         if (stampIndex >= stampedNetworks.size())
             stampIndex = 0;
     }
+    if (!cloneSourceKeyByLayerId.empty()) {
+        modelJson["clone_source_keys"] = json::array();
+        for (size_t layerIndex = 0; layerIndex < allLayersInNetworkList.size(); ++layerIndex) {
+            const shared_ptr<Layer>& layer = allLayersInNetworkList[layerIndex];
+            if (layer == nullptr) {
+                continue;
+            }
+            auto keyIt = cloneSourceKeyByLayerId.find(layer->getId());
+            if (keyIt != cloneSourceKeyByLayerId.end()) {
+                modelJson["clone_source_keys"].push_back(json{{"layer_index", layerIndex}, {"key", keyIt->second}});
+            }
+        }
+    }
     if (!raggedNetworkInputs.empty()) {
         modelJson["ragged_network_inputs"] = json::array();
         for (const auto& [name, record] : raggedNetworkInputs) {
@@ -982,6 +995,19 @@ json Network::architectureJson() const {
                                                              {"values_input_name", record.valuesInputName},
                                                              {"offsets_input_name", record.offsetsInputName},
                                                              {"ragged_tensor", record.raggedTensor.architectureJson()}});
+        }
+    }
+    if (!cloneSourceKeyByLayerId.empty()) {
+        modelJson["clone_source_keys"] = json::array();
+        for (size_t layerIndex = 0; layerIndex < allLayersInNetworkList.size(); ++layerIndex) {
+            const std::shared_ptr<Layer>& layer = allLayersInNetworkList[layerIndex];
+            if (layer == nullptr) {
+                continue;
+            }
+            auto keyIt = cloneSourceKeyByLayerId.find(layer->getId());
+            if (keyIt != cloneSourceKeyByLayerId.end()) {
+                modelJson["clone_source_keys"].push_back(json{{"layer_index", layerIndex}, {"key", keyIt->second}});
+            }
         }
     }
     if (defaultOptimizer != nullptr) {
@@ -1061,9 +1087,26 @@ void Network::load(const string &directory,
     if (modelJson.contains("default_optimizer"))
         defaultOptimizer = Optimizer::deserialize(archiveReader, modelJson["default_optimizer"], this);
 
+    const size_t firstLoadedLayerIndex = allLayersInNetworkList.size();
     for (const json &layerJson : layers) {
         // printf("%s\n", layerJson.dump(4).c_str());
         Layer::deserialize(archiveReader, layerJson, this);
+    }
+    cloneSourceKeyByLayerId.clear();
+    if (modelJson.contains("clone_source_keys")) {
+        const json cloneSourceKeys = modelJson.at("clone_source_keys");
+        if (!cloneSourceKeys.is_array()) {
+            throw runtime_error("\"clone_source_keys\" is not a JSON array");
+        }
+        for (const json& entry : cloneSourceKeys) {
+            const size_t layerIndex = entry.at("layer_index").get<size_t>();
+            const string key = entry.at("key").get<string>();
+            const size_t absoluteLayerIndex = firstLoadedLayerIndex + layerIndex;
+            if (absoluteLayerIndex >= allLayersInNetworkList.size() || allLayersInNetworkList[absoluteLayerIndex] == nullptr) {
+                throw runtime_error("clone_source_keys entry references invalid layer_index " + to_string(layerIndex));
+            }
+            cloneSourceKeyByLayerId[allLayersInNetworkList[absoluteLayerIndex]->getId()] = key;
+        }
     }
     loadedFromArchive = true;
 

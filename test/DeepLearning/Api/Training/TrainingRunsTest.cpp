@@ -1401,7 +1401,7 @@ TEST(TrainingRuns, EarlyCompletionRuleCanTargetEnsembleGroup) {
 
     TrainingRunsEvaluationOptions evaluationOptions;
     evaluationOptions.evaluateTrainingPopulation = false;
-    TrainingRunsResult result = runs.fit(TrainerFitOptions{2}, evaluationOptions);
+    TrainingRunsResult result = runs.fit(TrainerFitOptions{2, 1}, evaluationOptions);
 
     EXPECT_TRUE(result.allCompleted());
     EXPECT_EQ(executor0->lastEarlyCompletionPolicyCount, 1u);
@@ -1433,7 +1433,7 @@ TEST(TrainingRuns, EarlyCompletionRulesCombineTrainerPoliciesRunTargetsAndGroupT
 
     TrainingRunsEvaluationOptions evaluationOptions;
     evaluationOptions.evaluateTrainingPopulation = false;
-    TrainingRunsResult result = runs.fit(TrainerFitOptions{2}, evaluationOptions);
+    TrainingRunsResult result = runs.fit(TrainerFitOptions{2, 1}, evaluationOptions);
 
     EXPECT_TRUE(result.allCompleted());
     EXPECT_EQ(executor0->lastEarlyCompletionPolicyCount, 3u);

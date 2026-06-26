@@ -1462,7 +1462,9 @@ calling this helper.
 
     auto trainer_fit_options = nb::class_<TrainerFitOptions>(training, "TrainerFitOptions");
     trainer_fit_options.attr("__module__") = "thor.training";
-    trainer_fit_options.def(nb::init<>()).def_rw("epochs", &TrainerFitOptions::epochs);
+    trainer_fit_options.def(nb::init<>())
+        .def_rw("epochs", &TrainerFitOptions::epochs)
+        .def_rw("check_best_model_every_epochs", &TrainerFitOptions::checkBestModelEveryEpochs);
 
     auto trainer = nb::class_<Trainer>(training, "Trainer", nb::dynamic_attr());
     trainer.attr("__module__") = "thor.training";
@@ -1482,7 +1484,6 @@ calling this helper.
            nb::object save_model_dir,
            bool save_model_overwrite,
            bool save_optimizer_state,
-           uint32_t check_best_model_every_epochs,
            uint64_t min_early_completion_epochs,
            nb::object model_selection_score,
            nb::object restart_conditions,
@@ -1500,7 +1501,6 @@ calling this helper.
                 .saveModelDirectory(optionalPathStringFromPython(save_model_dir, "save_model_dir"))
                 .saveModelOverwrite(save_model_overwrite)
                 .saveOptimizerState(save_optimizer_state)
-                .checkBestModelEveryEpochs(check_best_model_every_epochs)
                 .minEarlyCompletionEpochs(min_early_completion_epochs)
                 .modelSelectionScore(trainingModelSelectionScoreFromPython(model_selection_score))
                 .restartConditions(trainingRestartPoliciesFromPython(restart_conditions, /*trainerScope=*/true))
@@ -1532,7 +1532,6 @@ calling this helper.
         "save_model_dir"_a.none() = nb::none(),
         "save_model_overwrite"_a = false,
         "save_optimizer_state"_a = true,
-        "check_best_model_every_epochs"_a = 1,
         "min_early_completion_epochs"_a = 0,
         "model_selection_score"_a.none() = nb::none(),
         "restart_conditions"_a.none() = nb::none(),
@@ -1553,7 +1552,6 @@ calling this helper.
            nb::object,
            bool,
            bool,
-           uint32_t,
            uint64_t,
            nb::object,
            nb::object,
@@ -1571,22 +1569,25 @@ calling this helper.
         "save_model_dir"_a.none() = nb::none(),
         "save_model_overwrite"_a = false,
         "save_optimizer_state"_a = true,
-        "check_best_model_every_epochs"_a = 1,
         "min_early_completion_epochs"_a = 0,
         "model_selection_score"_a.none() = nb::none(),
         "restart_conditions"_a.none() = nb::none(),
         "early_completion_policies"_a.none() = nb::none());
     trainer.def(
         "fit",
-        [](Trainer& self, uint32_t epochs) -> nb::object {
+        [](Trainer& self, uint32_t epochs, uint32_t check_best_model_every_epochs) -> nb::object {
+            TrainerFitOptions options;
+            options.epochs = epochs;
+            options.checkBestModelEveryEpochs = check_best_model_every_epochs;
             TrainingRunResult result;
             {
                 nb::gil_scoped_release release;
-                result = self.fit(epochs);
+                result = self.fit(options);
             }
             return nb::cast(std::move(result));
         },
-        "epochs"_a);
+        "epochs"_a,
+        "check_best_model_every_epochs"_a = 0);
     trainer.def(
         "save_model",
         [](Trainer& self, nb::object directory, bool overwrite, bool save_optimizer_state) {
@@ -1990,14 +1991,18 @@ calling this helper.
     training_runs.def_prop_ro("reports", [](const TrainingRuns& self) { return self.getReports(); });
     training_runs.def(
         "fit",
-        [](TrainingRuns& self, uint32_t epochs, std::shared_ptr<Loader> test_loader) {
+        [](TrainingRuns& self, uint32_t epochs, std::shared_ptr<Loader> test_loader, uint32_t check_best_model_every_epochs) {
+            TrainerFitOptions options;
+            options.epochs = epochs;
+            options.checkBestModelEveryEpochs = check_best_model_every_epochs;
             TrainingRunsEvaluationOptions evaluationOptions;
             evaluationOptions.testLoader = std::move(test_loader);
             nb::gil_scoped_release release;
-            return self.fit(TrainerFitOptions{epochs}, evaluationOptions);
+            return self.fit(options, evaluationOptions);
         },
         "epochs"_a,
-        "test_loader"_a.none() = nb::none());
+        "test_loader"_a.none() = nb::none(),
+        "check_best_model_every_epochs"_a = 0);
 
     auto gradient_clear_policy = nb::enum_<TrainingStep::GradientClearPolicy>(training, "GradientClearPolicy")
                                      .value("clear_before_step", TrainingStep::GradientClearPolicy::CLEAR_BEFORE_STEP)

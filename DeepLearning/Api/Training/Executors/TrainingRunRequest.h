@@ -44,15 +44,13 @@ struct TrainingRunRequest {
     bool saveModelOverwrite = false;
     bool saveOptimizerState = true;
 
-    // Trainer-owned best-candidate checkpoint cadence. During FIT, the native
-    // runner evaluates modelSelectionScore every N epochs. The default score is
-    // current epoch-average validation loss when present, otherwise current
-    // epoch-average training loss. Lower is better. If saveModelDirectory is
-    // configured, the best observed candidate is saved from the runtime
-    // PlacedNetwork state and becomes the final saved artifact. If no eligible
-    // candidate is ever selected, no automatic model artifact is written; callers
-    // can explicitly save the final trained state from Trainer after fit.
-    uint32_t checkBestModelEveryEpochs = 1;
+    // Trainer-owned best-candidate checkpoint cadence. A value of 0 disables
+    // best-candidate tracking/snapshotting; the final latest/end-of-fit artifact
+    // is still saved when saveModelDirectory is configured. When this is > 0,
+    // the native runner evaluates modelSelectionScore every N epochs and also
+    // always evaluates the final completed epoch, even if it does not land on
+    // the cadence. Lower scores are better.
+    uint32_t checkBestModelEveryEpochs = 0;
 
     // Global/cumulative epoch before best-candidate snapshotting and early-completion
     // policy evaluation begin. Epochs count total successful training epochs for the
@@ -82,6 +80,15 @@ struct TrainingRunRequest {
     // Trainer is fit again, preserve the trained parameter/optimizer state by
     // copying it from the previous placed network into the fresh placement.
     std::shared_ptr<PlacedNetwork> previousPlacedNetwork = nullptr;
+
+    // Artifact handoff source used when a previous fit has already finalized a
+    // model artifact and the old GPU-resident placement has been released. The
+    // runner places this saved source just long enough to copy matching
+    // parameter/optimizer state into the fresh execution placement, then drops it
+    // before training begins.
+    std::optional<std::string> previousModelArtifactDirectory{};
+    std::optional<std::string> previousModelNetworkName{};
+
     std::shared_ptr<PlacedNetwork>* completedPlacedNetwork = nullptr;
 
     // Cumulative completed training epochs before/after this request. FIT trains
