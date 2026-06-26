@@ -11,33 +11,37 @@
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 #include "Utilities/Expression/Expression.h"
+#include "bindings/python/src/core/cast.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
 using namespace std;
 using namespace Thor;
+namespace pybind = Thor::PythonBindings;
 
 namespace {
 using DataType = ThorImplementation::DataType;
 
-std::optional<DataType> optionalDataTypeFromPython(const nb::object& obj) {
+std::optional<DataType> optionalDataTypeFromPython(const nb::object& obj,
+                                               const char* functionName,
+                                               const char* argumentName) {
     if (obj.is_none()) {
         return std::nullopt;
     }
-    return nb::cast<DataType>(obj);
+    return pybind::castArgument<DataType>(obj, functionName, argumentName, "thor.DataType or None", false);
 }
 
 ThorImplementation::Expression makePythonActivationEpilogueInput(const nb::object& outputDTypeObj, const nb::object& computeDTypeObj) {
-    std::optional<DataType> outputDType = optionalDataTypeFromPython(outputDTypeObj);
-    std::optional<DataType> computeDType = optionalDataTypeFromPython(computeDTypeObj);
+    std::optional<DataType> outputDType = optionalDataTypeFromPython(outputDTypeObj, "Activation.epilogue_input", "output_dtype");
+    std::optional<DataType> computeDType = optionalDataTypeFromPython(computeDTypeObj, "Activation.epilogue_input", "compute_dtype");
     return Activation::epilogueInput(computeDType, outputDType);
 }
 
 ThorImplementation::Expression makePythonActivationEpilogueAuxInput(const std::string& inputName,
                                                                     const nb::object& outputDTypeObj,
                                                                     const nb::object& computeDTypeObj) {
-    std::optional<DataType> outputDType = optionalDataTypeFromPython(outputDTypeObj);
-    std::optional<DataType> computeDType = optionalDataTypeFromPython(computeDTypeObj);
+    std::optional<DataType> outputDType = optionalDataTypeFromPython(outputDTypeObj, "Activation.epilogue_aux_input", "output_dtype");
+    std::optional<DataType> computeDType = optionalDataTypeFromPython(computeDTypeObj, "Activation.epilogue_aux_input", "compute_dtype");
     return Activation::epilogueAuxInput(inputName, computeDType, outputDType);
 }
 
@@ -46,13 +50,17 @@ std::vector<std::pair<std::string, Tensor>> activationEpilogueInputsFromPython(c
     if (epilogueInputs.is_none()) {
         return bindings;
     }
-    if (!nb::isinstance<nb::dict>(epilogueInputs)) {
-        throw nb::type_error("epilogue_inputs must be a dict[str, thor.Tensor] or None");
-    }
-    nb::dict inputsDict = nb::cast<nb::dict>(epilogueInputs);
+    nb::dict inputsDict = pybind::castOrTypeError<nb::dict>(
+        epilogueInputs, "Activation.add_to_network() argument 'epilogue_inputs'", "dict[str, thor.Tensor] or None", false);
     bindings.reserve(inputsDict.size());
+    size_t index = 0;
     for (auto item : inputsDict) {
-        bindings.emplace_back(nb::cast<std::string>(item.first), nb::cast<Tensor>(item.second));
+        const std::string keyContext = "Activation.add_to_network() argument 'epilogue_inputs' key[" + std::to_string(index) + "]";
+        std::string name = pybind::castOrTypeError<std::string>(item.first, keyContext, "str", false);
+        const std::string valueContext = "Activation.add_to_network() argument 'epilogue_inputs'[" + name + "]";
+        Tensor tensor = pybind::castOrTypeError<Tensor>(item.second, valueContext, "thor.Tensor", false);
+        bindings.emplace_back(std::move(name), tensor);
+        ++index;
     }
     return bindings;
 }
@@ -61,10 +69,8 @@ std::optional<ThorImplementation::Expression> activationEpilogueFromPython(const
     if (epilogue.is_none()) {
         return std::nullopt;
     }
-    if (!nb::isinstance<ThorImplementation::Expression>(epilogue)) {
-        throw nb::type_error("epilogue must be a thor.physical.Expression instance or None");
-    }
-    return nb::cast<ThorImplementation::Expression>(epilogue);
+    return pybind::castArgument<ThorImplementation::Expression>(
+        epilogue, "Activation.add_to_network", "epilogue", "thor.physical.Expression or None", false);
 }
 }  // namespace
 

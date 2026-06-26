@@ -5,6 +5,7 @@
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 #include "Utilities/Expression/Expression.h"
+#include "bindings/python/src/core/cast.h"
 
 #include <optional>
 #include <string>
@@ -14,21 +15,24 @@ namespace nb = nanobind;
 using namespace nb::literals;
 using namespace std;
 using namespace Thor;
+namespace pybind = Thor::PythonBindings;
 
 using DataType = ThorImplementation::DataType;
 
 namespace {
 
-std::optional<DataType> optionalDataTypeFromPython(const nb::object &obj) {
+std::optional<DataType> optionalDataTypeFromPython(const nb::object &obj,
+                                                   const char *functionName,
+                                                   const char *argumentName) {
     if (obj.is_none()) {
         return std::nullopt;
     }
-    return nb::cast<DataType>(obj);
+    return pybind::castArgument<DataType>(obj, functionName, argumentName, "thor.DataType or None", false);
 }
 
 ThorImplementation::Expression makePythonEpilogueInput(const nb::object &outputDTypeObj, const nb::object &computeDTypeObj) {
-    std::optional<DataType> outputDType = optionalDataTypeFromPython(outputDTypeObj);
-    std::optional<DataType> computeDType = optionalDataTypeFromPython(computeDTypeObj);
+    std::optional<DataType> outputDType = optionalDataTypeFromPython(outputDTypeObj, "Transpose.epilogue_input", "output_dtype");
+    std::optional<DataType> computeDType = optionalDataTypeFromPython(computeDTypeObj, "Transpose.epilogue_input", "compute_dtype");
     return Transpose::epilogueInput(computeDType, outputDType);
 }
 
@@ -36,10 +40,8 @@ void applyPythonEpilogue(Transpose::Builder &builder, const nb::object &epilogue
     if (epilogue.is_none()) {
         return;
     }
-    if (!nb::isinstance<ThorImplementation::Expression>(epilogue)) {
-        throw nb::type_error("epilogue must be a thor.physical.Expression instance or None");
-    }
-    builder.epilogue(nb::cast<ThorImplementation::Expression>(epilogue));
+    builder.epilogue(pybind::castArgument<ThorImplementation::Expression>(
+        epilogue, "Transpose", "epilogue", "thor.physical.Expression or None", false));
 }
 
 }  // namespace
@@ -59,7 +61,8 @@ void bind_transpose(nb::module_ &m) {
             Transpose::Builder builder;
             builder.network(network).featureInput(feature_input);
             if (!output_dtype.is_none()) {
-                builder.outputDataType(nb::cast<DataType>(output_dtype));
+                builder.outputDataType(pybind::castArgument<DataType>(
+                    output_dtype, "Transpose", "output_dtype", "thor.DataType or None", false));
             }
             applyPythonEpilogue(builder, epilogue);
 

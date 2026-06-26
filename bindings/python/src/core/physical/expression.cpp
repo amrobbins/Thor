@@ -12,6 +12,7 @@
 #include <limits>
 #include <optional>
 #include <sstream>
+#include <string_view>
 #include <utility>
 #include <variant>
 
@@ -20,9 +21,11 @@
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/FusedEquation.h"
 #include "Utilities/Expression/StampedEquation.h"
+#include "bindings/python/src/core/cast.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
+namespace pybind = Thor::PythonBindings;
 
 using Expression = ThorImplementation::Expression;
 using FusedEquation = ThorImplementation::FusedEquation;
@@ -79,8 +82,59 @@ class GilSafePythonObject {
     PyObject* object = nullptr;
 };
 
+std::optional<DataType> optionalDataTypeFromPython(const nb::object& obj, std::string_view context) {
+    if (obj.is_none()) {
+        return std::nullopt;
+    }
+    return pybind::castOrTypeError<DataType>(obj, context, "thor.DataType or None", false);
+}
+
+Expression expressionFromPython(nb::handle obj, std::string_view context) {
+    return pybind::castOrTypeError<Expression>(obj, context, "thor.physical.Expression", false);
+}
+
+CudaKernelDimExpr cudaKernelDimExprFromPython(nb::handle obj, std::string_view context) {
+    return pybind::castOrTypeError<CudaKernelDimExpr>(obj, context, "thor.physical.CudaKernelDimExpr", false);
+}
+
+int64_t int64FromPython(nb::handle obj, std::string_view context) {
+    return pybind::castOrTypeError<int64_t>(obj, context, "int", false);
+}
+
+uint64_t uint64FromPython(nb::handle obj, std::string_view context) {
+    return pybind::castOrTypeError<uint64_t>(obj, context, "non-negative int", false);
+}
+
+double doubleFromPython(nb::handle obj, std::string_view context) {
+    return pybind::castOrTypeError<double>(obj, context, "float", true);
+}
+
+uint64_t checkedNonNegativeDim(int64_t dim, std::string_view context) {
+    if (dim < 0) {
+        throw nb::value_error((std::string(context) + " must be non-negative.").c_str());
+    }
+    return static_cast<uint64_t>(dim);
+}
+
+int32_t checkedInt32FromPython(nb::handle obj, std::string_view context) {
+    const int64_t value = int64FromPython(obj, context);
+    if (value < std::numeric_limits<int32_t>::min() || value > std::numeric_limits<int32_t>::max()) {
+        throw nb::value_error((std::string(context) + " must fit in int32.").c_str());
+    }
+    return static_cast<int32_t>(value);
+}
+
+uint32_t checkedUint32FromPython(nb::handle obj, std::string_view context) {
+    const uint64_t value = uint64FromPython(obj, context);
+    if (value > std::numeric_limits<uint32_t>::max()) {
+        throw nb::value_error((std::string(context) + " must fit in uint32.").c_str());
+    }
+    return static_cast<uint32_t>(value);
+}
+
 dim3 dim3FromPython(nb::handle value, const char* name) {
-    std::vector<uint32_t> dims = nb::cast<std::vector<uint32_t>>(value);
+    std::vector<uint32_t> dims = pybind::castOrTypeError<std::vector<uint32_t>>(
+        value, std::string("CudaKernelLaunchConfig ") + name, "sequence of 1 to 3 unsigned integer dimensions", false);
     if (dims.empty() || dims.size() > 3) {
         throw nb::value_error((std::string(name) + " must contain 1, 2, or 3 unsigned integer dimensions.").c_str());
     }
@@ -101,21 +155,20 @@ CudaKernelLaunchConfig makeCudaKernelLaunchConfig(nb::handle grid, nb::handle bl
 
 CudaKernelDimExpr dimExprFromPython(nb::handle value) {
     if (nb::isinstance<CudaKernelDimExpr>(value)) {
-        return nb::cast<CudaKernelDimExpr>(value);
+        return cudaKernelDimExprFromPython(value, "CudaKernelExpression dimension expression");
     }
     if (nb::isinstance<nb::int_>(value)) {
-        const int64_t dim = nb::cast<int64_t>(value);
-        if (dim < 0) {
-            throw nb::value_error("CudaKernelExpression dimensions must be non-negative.");
-        }
-        return CudaKernelDimExpr::constant(static_cast<uint64_t>(dim));
+        return CudaKernelDimExpr::constant(checkedNonNegativeDim(
+            int64FromPython(value, "CudaKernelExpression dimension"), "CudaKernelExpression dimension"));
     }
     throw nb::type_error("CudaKernelExpression shape entries must be integers or CudaKernelDimExpr objects.");
 }
 
 std::vector<CudaKernelDimExpr> dimExprVectorFromPython(nb::handle shape) {
     std::vector<CudaKernelDimExpr> dims;
-    for (nb::handle item : nb::cast<nb::sequence>(shape)) {
+    nb::sequence sequence = pybind::castOrTypeError<nb::sequence>(
+        shape, "CudaKernelExpression output shape", "sequence of integers or CudaKernelDimExpr objects", false);
+    for (nb::handle item : sequence) {
         dims.push_back(dimExprFromPython(item));
     }
     return dims;
@@ -124,22 +177,22 @@ std::vector<CudaKernelDimExpr> dimExprVectorFromPython(nb::handle shape) {
 std::variant<int32_t, uint32_t, int64_t, uint64_t, float, double, CudaKernelDimExpr> scalarValueFromPython(DataType type,
                                                                                                            nb::handle value) {
     if (nb::isinstance<CudaKernelDimExpr>(value)) {
-        return nb::cast<CudaKernelDimExpr>(value);
+        return cudaKernelDimExprFromPython(value, "CudaKernelExpression scalar value");
     }
 
     switch (type) {
         case DataType::INT32:
-            return static_cast<int32_t>(nb::cast<int64_t>(value));
+            return checkedInt32FromPython(value, "CudaKernelExpression scalar value");
         case DataType::UINT32:
-            return static_cast<uint32_t>(nb::cast<uint64_t>(value));
+            return checkedUint32FromPython(value, "CudaKernelExpression scalar value");
         case DataType::INT64:
-            return static_cast<int64_t>(nb::cast<int64_t>(value));
+            return int64FromPython(value, "CudaKernelExpression scalar value");
         case DataType::UINT64:
-            return static_cast<uint64_t>(nb::cast<uint64_t>(value));
+            return uint64FromPython(value, "CudaKernelExpression scalar value");
         case DataType::FP32:
-            return static_cast<float>(nb::cast<double>(value));
+            return static_cast<float>(doubleFromPython(value, "CudaKernelExpression scalar value"));
         case DataType::FP64:
-            return static_cast<double>(nb::cast<double>(value));
+            return static_cast<double>(doubleFromPython(value, "CudaKernelExpression scalar value"));
         default:
             throw nb::value_error("CudaKernelExpression scalar dtype is not supported for by-value kernel scalar arguments. Supported scalar dtypes are int32, uint32, int64, uint64, fp32, and fp64.");
     }
@@ -151,7 +204,8 @@ CudaKernelExpression::LaunchFn launchFnFromPython(nb::callable launch) {
         nb::gil_scoped_acquire gil;
         nb::callable launch_callable = nb::borrow<nb::callable>(launch_ref->get());
         nb::object result = launch_callable(nb::cast(&ctx, nb::rv_policy::reference));
-        return nb::cast<CudaKernelLaunchConfig>(result);
+        return pybind::castOrTypeError<CudaKernelLaunchConfig>(
+            result, "CudaKernelExpression launch callback return value", "thor.physical.CudaKernelLaunchConfig", false);
     };
 }
 
@@ -525,14 +579,8 @@ standalone custom kernels.
     expr.def_static(
         "input",
         [](const std::string& name, nb::object output_dtype_obj, nb::object compute_dtype_obj) {
-            std::optional<DataType> output_dtype = std::nullopt;
-            if (!output_dtype_obj.is_none()) {
-                output_dtype = nb::cast<DataType>(output_dtype_obj);
-            }
-            std::optional<DataType> compute_dtype = std::nullopt;
-            if (!compute_dtype_obj.is_none()) {
-                compute_dtype = nb::cast<DataType>(compute_dtype_obj);
-            }
+            std::optional<DataType> output_dtype = optionalDataTypeFromPython(output_dtype_obj, "output_dtype argument");
+            std::optional<DataType> compute_dtype = optionalDataTypeFromPython(compute_dtype_obj, "compute_dtype argument");
             return Expression::input(name, compute_dtype, output_dtype);
         },
         "name"_a,
@@ -565,14 +613,8 @@ thor.physical.Expression
     expr.def_static(
         "runtime_scalar",
         [](const std::string& name, nb::object output_dtype_obj, nb::object compute_dtype_obj) {
-            std::optional<DataType> output_dtype = std::nullopt;
-            if (!output_dtype_obj.is_none()) {
-                output_dtype = nb::cast<DataType>(output_dtype_obj);
-            }
-            std::optional<DataType> compute_dtype = std::nullopt;
-            if (!compute_dtype_obj.is_none()) {
-                compute_dtype = nb::cast<DataType>(compute_dtype_obj);
-            }
+            std::optional<DataType> output_dtype = optionalDataTypeFromPython(output_dtype_obj, "output_dtype argument");
+            std::optional<DataType> compute_dtype = optionalDataTypeFromPython(compute_dtype_obj, "compute_dtype argument");
             return Expression::runtimeScalar(name, compute_dtype, output_dtype);
         },
         "name"_a,
@@ -598,14 +640,8 @@ thor.physical.Expression
     expr.def_static(
         "tensor_runtime_scalar",
         [](const std::string& name, nb::object output_dtype_obj, nb::object compute_dtype_obj) {
-            std::optional<DataType> output_dtype = std::nullopt;
-            if (!output_dtype_obj.is_none()) {
-                output_dtype = nb::cast<DataType>(output_dtype_obj);
-            }
-            std::optional<DataType> compute_dtype = std::nullopt;
-            if (!compute_dtype_obj.is_none()) {
-                compute_dtype = nb::cast<DataType>(compute_dtype_obj);
-            }
+            std::optional<DataType> output_dtype = optionalDataTypeFromPython(output_dtype_obj, "output_dtype argument");
+            std::optional<DataType> compute_dtype = optionalDataTypeFromPython(compute_dtype_obj, "compute_dtype argument");
             return Expression::tensorRuntimeScalar(name, compute_dtype, output_dtype);
         },
         "name"_a,
@@ -621,14 +657,8 @@ TensorScalarBinding (buffer, byte_offset, source_dtype).
     expr.def(
         "with_dtypes",
         [](const Expression& self, nb::object output_dtype_obj, nb::object compute_dtype_obj) {
-            std::optional<DataType> output_dtype = std::nullopt;
-            if (!output_dtype_obj.is_none()) {
-                output_dtype = nb::cast<DataType>(output_dtype_obj);
-            }
-            std::optional<DataType> compute_dtype = std::nullopt;
-            if (!compute_dtype_obj.is_none()) {
-                compute_dtype = nb::cast<DataType>(compute_dtype_obj);
-            }
+            std::optional<DataType> output_dtype = optionalDataTypeFromPython(output_dtype_obj, "output_dtype argument");
+            std::optional<DataType> compute_dtype = optionalDataTypeFromPython(compute_dtype_obj, "compute_dtype argument");
             return self.withDTypes(compute_dtype, output_dtype);
         },
         "output_dtype"_a.none() = nb::none(),
@@ -894,14 +924,8 @@ Shorthand for ``self.transpose()``.
            int32_t pad_w,
            nb::object output_dtype_obj,
            nb::object compute_dtype_obj) {
-            std::optional<DataType> output_dtype = std::nullopt;
-            if (!output_dtype_obj.is_none()) {
-                output_dtype = nb::cast<DataType>(output_dtype_obj);
-            }
-            std::optional<DataType> compute_dtype = std::nullopt;
-            if (!compute_dtype_obj.is_none()) {
-                compute_dtype = nb::cast<DataType>(compute_dtype_obj);
-            }
+            std::optional<DataType> output_dtype = optionalDataTypeFromPython(output_dtype_obj, "output_dtype argument");
+            std::optional<DataType> compute_dtype = optionalDataTypeFromPython(compute_dtype_obj, "compute_dtype argument");
             return Expression::conv2d(x, w, stride_h, stride_w, pad_h, pad_w, compute_dtype, output_dtype);
         },
         "x"_a,
@@ -925,14 +949,8 @@ Shorthand for ``self.transpose()``.
            int32_t pad_w,
            nb::object output_dtype_obj,
            nb::object compute_dtype_obj) {
-            std::optional<DataType> output_dtype = std::nullopt;
-            if (!output_dtype_obj.is_none()) {
-                output_dtype = nb::cast<DataType>(output_dtype_obj);
-            }
-            std::optional<DataType> compute_dtype = std::nullopt;
-            if (!compute_dtype_obj.is_none()) {
-                compute_dtype = nb::cast<DataType>(compute_dtype_obj);
-            }
+            std::optional<DataType> output_dtype = optionalDataTypeFromPython(output_dtype_obj, "output_dtype argument");
+            std::optional<DataType> compute_dtype = optionalDataTypeFromPython(compute_dtype_obj, "compute_dtype argument");
             return Expression::conv3d(x, w, stride_d, stride_h, stride_w, pad_d, pad_h, pad_w, compute_dtype, output_dtype);
         },
         "x"_a,
@@ -954,14 +972,8 @@ Shorthand for ``self.transpose()``.
            bool transpose_b,
            nb::object output_dtype_obj,
            nb::object compute_dtype_obj) {
-            std::optional<DataType> output_dtype = std::nullopt;
-            if (!output_dtype_obj.is_none()) {
-                output_dtype = nb::cast<DataType>(output_dtype_obj);
-            }
-            std::optional<DataType> compute_dtype = std::nullopt;
-            if (!compute_dtype_obj.is_none()) {
-                compute_dtype = nb::cast<DataType>(compute_dtype_obj);
-            }
+            std::optional<DataType> output_dtype = optionalDataTypeFromPython(output_dtype_obj, "output_dtype argument");
+            std::optional<DataType> compute_dtype = optionalDataTypeFromPython(compute_dtype_obj, "compute_dtype argument");
             return Expression::matmul(a, b, transpose_a, transpose_b, compute_dtype, output_dtype);
         },
         "a"_a,
@@ -983,14 +995,8 @@ Shorthand for ``self.transpose()``.
            bool transpose_c,
            nb::object output_dtype_obj,
            nb::object compute_dtype_obj) {
-            std::optional<DataType> output_dtype = std::nullopt;
-            if (!output_dtype_obj.is_none()) {
-                output_dtype = nb::cast<DataType>(output_dtype_obj);
-            }
-            std::optional<DataType> compute_dtype = std::nullopt;
-            if (!compute_dtype_obj.is_none()) {
-                compute_dtype = nb::cast<DataType>(compute_dtype_obj);
-            }
+            std::optional<DataType> output_dtype = optionalDataTypeFromPython(output_dtype_obj, "output_dtype argument");
+            std::optional<DataType> compute_dtype = optionalDataTypeFromPython(compute_dtype_obj, "compute_dtype argument");
             return Expression::gemm(a, b, c, alpha, beta, transpose_a, transpose_b, transpose_c, compute_dtype, output_dtype);
         },
         "a"_a,
@@ -1005,10 +1011,7 @@ Shorthand for ``self.transpose()``.
         "compute_dtype"_a.none() = nb::none());
 
     auto parse_optional_dtype = [](const nb::object& dtype_obj) -> std::optional<DataType> {
-        if (dtype_obj.is_none()) {
-            return std::nullopt;
-        }
-        return nb::cast<DataType>(dtype_obj);
+        return optionalDataTypeFromPython(dtype_obj, "dtype argument");
     };
 
     expr.def_static(
@@ -1016,7 +1019,8 @@ Shorthand for ``self.transpose()``.
         [parse_optional_dtype](const Expression& indices, const Expression& weights, nb::object padding_index_obj, nb::object output_dtype_obj) {
             std::optional<uint64_t> padding_index = std::nullopt;
             if (!padding_index_obj.is_none()) {
-                padding_index = nb::cast<uint64_t>(padding_index_obj);
+                padding_index = pybind::castArgument<uint64_t>(
+                    padding_index_obj, "Expression.embedding_lookup", "padding_index", "non-negative int", false);
             }
             return Expression::embeddingLookup(indices, weights, padding_index, parse_optional_dtype(output_dtype_obj));
         },
@@ -1064,7 +1068,8 @@ matching rows are written as zeros without reading the weight table.
         options.diagonal_left_bound = diagonal_left_bound;
         options.diagonal_right_bound = diagonal_right_bound;
         if (!attention_scale_obj.is_none()) {
-            options.attention_scale = nb::cast<float>(attention_scale_obj);
+            options.attention_scale = static_cast<float>(pybind::castArgument<double>(
+                attention_scale_obj, "Expression.scaled_dot_product_attention", "attention_scale", "float or None", true));
         }
         options.use_alibi_mask = use_alibi_mask;
         options.output_dtype = parse_optional_dtype(output_dtype_obj);
@@ -1084,41 +1089,41 @@ matching rows are written as zeros without reading the weight table.
         const bool uses_dropout = dropout_probability > 0.0f;
 
         if (has_q_seq_len != has_kv_seq_len) {
-            throw std::runtime_error("q_seq_len and kv_seq_len must be provided together for padding-mask attention.");
+            throw nb::value_error("q_seq_len and kv_seq_len must be provided together for padding-mask attention.");
         }
         if (has_q_ragged_offsets != has_kv_ragged_offsets) {
-            throw std::runtime_error("q_ragged_offsets and kv_ragged_offsets must be provided together for ragged attention.");
+            throw nb::value_error("q_ragged_offsets and kv_ragged_offsets must be provided together for ragged attention.");
         }
         if (has_page_table_k != has_page_table_v) {
-            throw std::runtime_error("page_table_k and page_table_v must be provided together for paged KV attention.");
+            throw nb::value_error("page_table_k and page_table_v must be provided together for paged KV attention.");
         }
         if (has_q_ragged_offsets && has_page_table_k) {
-            throw std::runtime_error("ragged attention and paged KV cache cannot be combined.");
+            throw nb::value_error("ragged attention and paged KV cache cannot be combined.");
         }
         if (has_page_table_k && has_bias) {
-            throw std::runtime_error("paged KV attention cannot currently be combined with additive bias.");
+            throw nb::value_error("paged KV attention cannot currently be combined with additive bias.");
         }
         if (has_page_table_k && uses_dropout) {
-            throw std::runtime_error("paged KV attention is inference-only and cannot currently be combined with dropout.");
+            throw nb::value_error("paged KV attention is inference-only and cannot currently be combined with dropout.");
         }
         if (has_page_table_k && paged_kv_max_sequence_length <= 0) {
-            throw std::runtime_error("paged KV attention requires paged_kv_max_sequence_length > 0.");
+            throw nb::value_error("paged KV attention requires paged_kv_max_sequence_length > 0.");
         }
         if (has_page_table_k && !has_q_seq_len) {
-            throw std::runtime_error("paged KV attention requires q_seq_len and kv_seq_len.");
+            throw nb::value_error("paged KV attention requires q_seq_len and kv_seq_len.");
         }
         if (has_q_ragged_offsets && !has_q_seq_len) {
-            throw std::runtime_error(
+            throw nb::value_error(
                 "ragged attention requires q_seq_len and kv_seq_len along with q_ragged_offsets and kv_ragged_offsets.");
         }
         if (has_dropout_seed != has_dropout_offset) {
-            throw std::runtime_error("dropout_seed and dropout_offset must be provided together for attention dropout.");
+            throw nb::value_error("dropout_seed and dropout_offset must be provided together for attention dropout.");
         }
         if (uses_dropout && !has_dropout_seed) {
-            throw std::runtime_error("attention dropout_probability > 0 requires dropout_seed and dropout_offset expressions.");
+            throw nb::value_error("attention dropout_probability > 0 requires dropout_seed and dropout_offset expressions.");
         }
         if (!uses_dropout && has_dropout_seed) {
-            throw std::runtime_error("dropout_seed/dropout_offset were provided but attention dropout_probability is zero.");
+            throw nb::value_error("dropout_seed/dropout_offset were provided but attention dropout_probability is zero.");
         }
 
         if (has_q_seq_len) {
@@ -1126,27 +1131,27 @@ matching rows are written as zeros without reading the weight table.
         }
 
         if (has_page_table_k) {
-            const Expression& q_seq_len = nb::cast<Expression>(q_seq_len_obj);
-            const Expression& kv_seq_len = nb::cast<Expression>(kv_seq_len_obj);
-            const Expression& page_table_k = nb::cast<Expression>(page_table_k_obj);
-            const Expression& page_table_v = nb::cast<Expression>(page_table_v_obj);
+            Expression q_seq_len = expressionFromPython(q_seq_len_obj, "Expression.scaled_dot_product_attention() argument 'q_seq_len'");
+            Expression kv_seq_len = expressionFromPython(kv_seq_len_obj, "Expression.scaled_dot_product_attention() argument 'kv_seq_len'");
+            Expression page_table_k = expressionFromPython(page_table_k_obj, "Expression.scaled_dot_product_attention() argument 'page_table_k'");
+            Expression page_table_v = expressionFromPython(page_table_v_obj, "Expression.scaled_dot_product_attention() argument 'page_table_v'");
             return Expression::scaledDotProductAttentionPagedKv(
                 q, k, v, q_seq_len, kv_seq_len, page_table_k, page_table_v, std::move(options));
         }
 
         if (has_q_ragged_offsets) {
-            const Expression& q_seq_len = nb::cast<Expression>(q_seq_len_obj);
-            const Expression& kv_seq_len = nb::cast<Expression>(kv_seq_len_obj);
-            const Expression& q_offsets = nb::cast<Expression>(q_ragged_offsets_obj);
-            const Expression& kv_offsets = nb::cast<Expression>(kv_ragged_offsets_obj);
+            Expression q_seq_len = expressionFromPython(q_seq_len_obj, "Expression.scaled_dot_product_attention() argument 'q_seq_len'");
+            Expression kv_seq_len = expressionFromPython(kv_seq_len_obj, "Expression.scaled_dot_product_attention() argument 'kv_seq_len'");
+            Expression q_offsets = expressionFromPython(q_ragged_offsets_obj, "Expression.scaled_dot_product_attention() argument 'q_ragged_offsets'");
+            Expression kv_offsets = expressionFromPython(kv_ragged_offsets_obj, "Expression.scaled_dot_product_attention() argument 'kv_ragged_offsets'");
             if (uses_dropout) {
-                const Expression& dropout_seed = nb::cast<Expression>(dropout_seed_obj);
-                const Expression& dropout_offset = nb::cast<Expression>(dropout_offset_obj);
+                Expression dropout_seed = expressionFromPython(dropout_seed_obj, "Expression.scaled_dot_product_attention() argument 'dropout_seed'");
+                Expression dropout_offset = expressionFromPython(dropout_offset_obj, "Expression.scaled_dot_product_attention() argument 'dropout_offset'");
                 if (has_bias) {
                     return Expression::scaledDotProductAttentionRagged(q,
                                                                        k,
                                                                        v,
-                                                                       nb::cast<Expression>(bias_obj),
+                                                                       expressionFromPython(bias_obj, "Expression.scaled_dot_product_attention() argument 'bias'"),
                                                                        q_seq_len,
                                                                        kv_seq_len,
                                                                        q_offsets,
@@ -1160,42 +1165,42 @@ matching rows are written as zeros without reading the weight table.
             }
             if (has_bias) {
                 return Expression::scaledDotProductAttentionRagged(
-                    q, k, v, nb::cast<Expression>(bias_obj), q_seq_len, kv_seq_len, q_offsets, kv_offsets, std::move(options));
+                    q, k, v, expressionFromPython(bias_obj, "Expression.scaled_dot_product_attention() argument 'bias'"), q_seq_len, kv_seq_len, q_offsets, kv_offsets, std::move(options));
             }
             return Expression::scaledDotProductAttentionRagged(q, k, v, q_seq_len, kv_seq_len, q_offsets, kv_offsets, std::move(options));
         }
 
         if (uses_dropout) {
-            const Expression& dropout_seed = nb::cast<Expression>(dropout_seed_obj);
-            const Expression& dropout_offset = nb::cast<Expression>(dropout_offset_obj);
+            Expression dropout_seed = expressionFromPython(dropout_seed_obj, "Expression.scaled_dot_product_attention() argument 'dropout_seed'");
+            Expression dropout_offset = expressionFromPython(dropout_offset_obj, "Expression.scaled_dot_product_attention() argument 'dropout_offset'");
             if (has_q_seq_len) {
-                const Expression& q_seq_len = nb::cast<Expression>(q_seq_len_obj);
-                const Expression& kv_seq_len = nb::cast<Expression>(kv_seq_len_obj);
+                Expression q_seq_len = expressionFromPython(q_seq_len_obj, "Expression.scaled_dot_product_attention() argument 'q_seq_len'");
+                Expression kv_seq_len = expressionFromPython(kv_seq_len_obj, "Expression.scaled_dot_product_attention() argument 'kv_seq_len'");
                 if (has_bias) {
                     return Expression::scaledDotProductAttention(
-                        q, k, v, nb::cast<Expression>(bias_obj), q_seq_len, kv_seq_len, dropout_seed, dropout_offset, std::move(options));
+                        q, k, v, expressionFromPython(bias_obj, "Expression.scaled_dot_product_attention() argument 'bias'"), q_seq_len, kv_seq_len, dropout_seed, dropout_offset, std::move(options));
                 }
                 return Expression::scaledDotProductAttention(
                     q, k, v, q_seq_len, kv_seq_len, dropout_seed, dropout_offset, std::move(options));
             }
             if (has_bias) {
                 return Expression::scaledDotProductAttentionWithDropout(
-                    q, k, v, nb::cast<Expression>(bias_obj), dropout_seed, dropout_offset, std::move(options));
+                    q, k, v, expressionFromPython(bias_obj, "Expression.scaled_dot_product_attention() argument 'bias'"), dropout_seed, dropout_offset, std::move(options));
             }
             return Expression::scaledDotProductAttentionWithDropout(q, k, v, dropout_seed, dropout_offset, std::move(options));
         }
 
         if (has_q_seq_len) {
-            const Expression& q_seq_len = nb::cast<Expression>(q_seq_len_obj);
-            const Expression& kv_seq_len = nb::cast<Expression>(kv_seq_len_obj);
+            Expression q_seq_len = expressionFromPython(q_seq_len_obj, "Expression.scaled_dot_product_attention() argument 'q_seq_len'");
+            Expression kv_seq_len = expressionFromPython(kv_seq_len_obj, "Expression.scaled_dot_product_attention() argument 'kv_seq_len'");
             if (has_bias) {
                 return Expression::scaledDotProductAttention(
-                    q, k, v, nb::cast<Expression>(bias_obj), q_seq_len, kv_seq_len, std::move(options));
+                    q, k, v, expressionFromPython(bias_obj, "Expression.scaled_dot_product_attention() argument 'bias'"), q_seq_len, kv_seq_len, std::move(options));
             }
             return Expression::scaledDotProductAttention(q, k, v, q_seq_len, kv_seq_len, std::move(options));
         }
         if (has_bias) {
-            return Expression::scaledDotProductAttention(q, k, v, nb::cast<Expression>(bias_obj), std::move(options));
+            return Expression::scaledDotProductAttention(q, k, v, expressionFromPython(bias_obj, "Expression.scaled_dot_product_attention() argument 'bias'"), std::move(options));
         }
         return Expression::scaledDotProductAttention(q, k, v, std::move(options));
     };
@@ -1771,9 +1776,9 @@ Return cuDNN log-softmax of the input expression x.
             return {};
         }
         if (nb::isinstance<nb::int_>(axis)) {
-            return {nb::cast<uint64_t>(axis)};
+            return {pybind::castArgument<uint64_t>(axis, "Expression reduction", "axis", "non-negative int", false)};
         }
-        return nb::cast<std::vector<uint64_t>>(axis);
+        return pybind::castArgument<std::vector<uint64_t>>(axis, "Expression reduction", "axis", "sequence of non-negative ints", false);
     };
 
     expr.def_static(
@@ -1827,7 +1832,7 @@ thor.physical.Expression
         }
 
         if (nb::isinstance<nb::bool_>(squeeze)) {
-            bool b = nb::cast<bool>(squeeze);
+            bool b = pybind::castArgument<bool>(squeeze, "Expression.reshape_like", "squeeze", "bool, int, sequence of ints, or None", false);
             if (!b) {
                 return {};
             }
@@ -1835,10 +1840,11 @@ thor.physical.Expression
         }
 
         if (nb::isinstance<nb::int_>(squeeze)) {
-            return {nb::cast<uint64_t>(squeeze)};
+            return {pybind::castArgument<uint64_t>(squeeze, "Expression.reshape_like", "squeeze", "non-negative int", false)};
         }
 
-        return nb::cast<std::vector<uint64_t>>(squeeze);
+        return pybind::castArgument<std::vector<uint64_t>>(
+            squeeze, "Expression.reshape_like", "squeeze", "sequence of non-negative ints", false);
     };
 
     auto parse_reduction_compute_dtype = [](const std::string_view& op_name,
@@ -2172,15 +2178,8 @@ Only the selected branch is executed at runtime; both branches must expose ident
                 nb::handle key = item.first;
                 nb::handle value = item.second;
 
-                if (!nb::isinstance<nb::str>(key)) {
-                    throw std::runtime_error("Expression.outputs keys must be strings.");
-                }
-                if (!nb::isinstance<Expression>(value)) {
-                    throw std::runtime_error("Expression.outputs values must be Expression objects.");
-                }
-
-                std::string name = nb::cast<std::string>(key);
-                Expression out_expr = nb::cast<Expression>(value);
+                std::string name = pybind::castOrTypeError<std::string>(key, "Expression.outputs key", "str", false);
+                Expression out_expr = expressionFromPython(value, "Expression.outputs value");
 
                 named_exprs.emplace_back(std::move(name), std::move(out_expr));
             }
@@ -3045,7 +3044,8 @@ Return the compiled equation owned by this prepared dynamic expression.
                     nb::callable builderCallable = nb::borrow<nb::callable>(builderRef->get());
 
                     nb::object result = builderCallable(inputs, outputs, stream);
-                    return nb::cast<DynamicExpressionBuild>(result);
+                    return pybind::castOrTypeError<DynamicExpressionBuild>(
+                        result, "DynamicExpression builder return value", "thor.physical.DynamicExpressionBuild", false);
                 });
         },
         "builder"_a,

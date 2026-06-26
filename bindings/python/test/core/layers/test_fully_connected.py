@@ -187,7 +187,7 @@ def test_fully_connected_rejects_wrong_epilogue_type():
     n = _net()
     x = _input_tensor(n, 16, thor.DataType.fp16)
 
-    with pytest.raises(TypeError, match="epilogue must be"):
+    with pytest.raises(TypeError, match=r"argument 'epilogue'.*thor\.physical\.Expression or None"):
         thor.layers.FullyConnected(n, x, 8, True, epilogue=123)
 
 

@@ -5,12 +5,22 @@
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 
-#include "core/binding_types.h"
+#include "bindings/python/src/core/cast.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
 using namespace std;
 using namespace Thor;
+namespace pybind = Thor::PythonBindings;
+
+namespace {
+
+Tensor tensorFromFeatureInputs(const nb::list& featureInputs, size_t index) {
+    const std::string context = "Concatenate() argument 'feature_inputs'[" + std::to_string(index) + "]";
+    return pybind::castOrTypeError<Tensor>(featureInputs[index], context, "thor.Tensor", false);
+}
+
+}  // namespace
 
 void bind_concatenate(nb::module_ &m) {
     auto concatenate = nb::class_<Concatenate, Layer>(m, "Concatenate");
@@ -18,14 +28,15 @@ void bind_concatenate(nb::module_ &m) {
 
     concatenate.def(
         "__init__",
-        [](Concatenate *self, Network &network, TensorList feature_inputs, uint32_t concatenation_axis) {
+        [](Concatenate *self, Network &network, nb::object feature_inputs_obj, uint32_t concatenation_axis) {
+            nb::list feature_inputs = pybind::castArgument<nb::list>(
+                feature_inputs_obj, "Concatenate", "feature_inputs", "list[thor.Tensor]", false);
             if (feature_inputs.size() == 0) {
                 throw nb::value_error("Concatenate instance: feature_inputs must be a non-empty list of thor.Tensor.");
             }
 
             // Use first tensor as reference
-            nb::handle h0 = feature_inputs[0];
-            Tensor &t0 = nb::cast<Tensor &>(h0);
+            Tensor t0 = tensorFromFeatureInputs(feature_inputs, 0);
 
             const auto &ref_dims = t0.getDimensions();
             const size_t ref_rank = ref_dims.size();
@@ -44,7 +55,7 @@ void bind_concatenate(nb::module_ &m) {
 
             // Validate remaining tensors match requirements
             for (size_t i = 0; i < feature_inputs.size(); ++i) {
-                Tensor &ti = nb::cast<Tensor &>(feature_inputs[i]);
+                Tensor ti = tensorFromFeatureInputs(feature_inputs, i);
 
                 const auto &dims = ti.getDimensions();
                 const size_t rank = dims.size();
@@ -83,10 +94,8 @@ void bind_concatenate(nb::module_ &m) {
 
             Concatenate::Builder builder;
             builder.network(network).concatenationAxis(concatenation_axis);
-            // Iterate Python list and cast each element to Tensor&
-            for (nb::handle h : feature_inputs) {
-                Tensor &t = nb::cast<Tensor &>(h);
-                builder.featureInput(t);
+            for (size_t i = 0; i < feature_inputs.size(); ++i) {
+                builder.featureInput(tensorFromFeatureInputs(feature_inputs, i));
             }
 
             // Move the concatenate layer into the pre-allocated but uninitialized memory at self

@@ -1678,7 +1678,7 @@ def test_attention_paged_kv_cache_rejects_unsupported_combinations_early():
     dropout_seed = ex.input("dropout_seed")
     dropout_offset = ex.input("dropout_offset")
 
-    with pytest.raises(RuntimeError, match="page_table_k and page_table_v"):
+    with pytest.raises(ValueError, match="page_table_k and page_table_v"):
         ex.scaled_dot_product_attention(
             q,
             k,
@@ -1688,7 +1688,7 @@ def test_attention_paged_kv_cache_rejects_unsupported_combinations_early():
             output_dtype=dtype,
             compute_dtype=thor.DataType.fp32)
 
-    with pytest.raises(RuntimeError, match="paged KV attention requires paged_kv_max_sequence_length > 0"):
+    with pytest.raises(ValueError, match="paged KV attention requires paged_kv_max_sequence_length > 0"):
         ex.scaled_dot_product_attention(
             q,
             k,
@@ -1701,7 +1701,7 @@ def test_attention_paged_kv_cache_rejects_unsupported_combinations_early():
             compute_dtype=thor.DataType.fp32,
         )
 
-    with pytest.raises(RuntimeError, match="paged KV attention requires q_seq_len and kv_seq_len"):
+    with pytest.raises(ValueError, match="paged KV attention requires q_seq_len and kv_seq_len"):
         ex.scaled_dot_product_attention(
             q,
             k,
@@ -1713,7 +1713,7 @@ def test_attention_paged_kv_cache_rejects_unsupported_combinations_early():
             compute_dtype=thor.DataType.fp32,
         )
 
-    with pytest.raises(RuntimeError, match="paged KV attention cannot currently be combined with additive bias"):
+    with pytest.raises(ValueError, match="paged KV attention cannot currently be combined with additive bias"):
         ex.scaled_dot_product_attention(
             q,
             k,
@@ -1728,7 +1728,7 @@ def test_attention_paged_kv_cache_rejects_unsupported_combinations_early():
             compute_dtype=thor.DataType.fp32,
         )
 
-    with pytest.raises(RuntimeError, match="paged KV attention is inference-only"):
+    with pytest.raises(ValueError, match="paged KV attention is inference-only"):
         ex.scaled_dot_product_attention(
             q,
             k,
@@ -1745,7 +1745,7 @@ def test_attention_paged_kv_cache_rejects_unsupported_combinations_early():
             compute_dtype=thor.DataType.fp32,
         )
 
-    with pytest.raises(RuntimeError, match="ragged attention and paged KV cache cannot be combined"):
+    with pytest.raises(ValueError, match="ragged attention and paged KV cache cannot be combined"):
         ex.scaled_dot_product_attention(
             q,
             k,
@@ -2335,11 +2335,11 @@ def test_attention_ragged_offsets_reject_unsupported_combinations_early():
     dropout_seed = ex.input("dropout_seed")
     dropout_offset = ex.input("dropout_offset")
 
-    with pytest.raises(RuntimeError, match="q_ragged_offsets and kv_ragged_offsets"):
+    with pytest.raises(ValueError, match="q_ragged_offsets and kv_ragged_offsets"):
         ex.scaled_dot_product_attention(
             q, k, v, q_ragged_offsets=q_offsets, output_dtype=dtype, compute_dtype=thor.DataType.fp32)
 
-    with pytest.raises(RuntimeError, match="ragged attention requires q_seq_len and kv_seq_len"):
+    with pytest.raises(ValueError, match="ragged attention requires q_seq_len and kv_seq_len"):
         ex.scaled_dot_product_attention(
             q,
             k,
@@ -2591,7 +2591,7 @@ def test_attention_padding_mask_requires_q_and_kv_seq_lengths_together():
     v = ex.input("v")
     q_seq_len = ex.input("q_seq_len")
 
-    with pytest.raises(RuntimeError, match="provided together"):
+    with pytest.raises(ValueError, match="provided together"):
         ex.scaled_dot_product_attention(
             q,
             k,
@@ -2919,7 +2919,8 @@ def test_attention_rejects_fp32_qkv_without_explicit_cast_before_cudnn_stage():
     )
     eq = ex.compile(out, device_num=0)
 
-    q_np, k_np, v_np = _attention_inputs(batch=1, query_heads=2, kv_heads=2, query_len=4, kv_len=4, dtype=thor.DataType.fp32)
+    q_np, k_np, v_np = _attention_inputs(
+        batch=1, query_heads=2, kv_heads=2, query_len=4, kv_len=4, dtype=thor.DataType.fp32)
     stream = Stream(gpu_num=0)
     inputs_gpu = {
         "q": _host_to_gpu(q_np, thor.DataType.fp32, stream),
@@ -2927,7 +2928,8 @@ def test_attention_rejects_fp32_qkv_without_explicit_cast_before_cudnn_stage():
         "v": _host_to_gpu(v_np, thor.DataType.fp32, stream),
     }
 
-    with pytest.raises(RuntimeError, match="non-FP8 attention requires q/k/v/output to use the same FP16 or BF16 dtype"):
+    with pytest.raises(RuntimeError,
+                       match="non-FP8 attention requires q/k/v/output to use the same FP16 or BF16 dtype"):
         eq.output_shape(inputs_gpu)
 
 
@@ -2945,7 +2947,8 @@ def test_attention_accepts_fp32_qkv_when_user_inserts_explicit_cast_before_atten
     )
     eq = ex.compile(out, device_num=0)
 
-    q_np, k_np, v_np = _attention_inputs(batch=1, query_heads=2, kv_heads=2, query_len=4, kv_len=4, dtype=thor.DataType.fp32)
+    q_np, k_np, v_np = _attention_inputs(
+        batch=1, query_heads=2, kv_heads=2, query_len=4, kv_len=4, dtype=thor.DataType.fp32)
     stream = Stream(gpu_num=0)
     inputs_gpu = {
         "q": _host_to_gpu(q_np, thor.DataType.fp32, stream),
@@ -7634,11 +7637,11 @@ def test_attention_dropout_requires_seed_offset_together_and_probability_enabled
     dropout_seed = ex.input("dropout_seed")
     dropout_offset = ex.input("dropout_offset")
 
-    with pytest.raises(RuntimeError, match="dropout_probability"):
+    with pytest.raises(ValueError, match="dropout_probability"):
         ex.scaled_dot_product_attention(
             q, k, v, dropout_probability=0.25, output_dtype=dtype, compute_dtype=thor.DataType.fp32)
 
-    with pytest.raises(RuntimeError, match="dropout_seed and dropout_offset"):
+    with pytest.raises(ValueError, match="dropout_seed and dropout_offset"):
         ex.scaled_dot_product_attention(
             q,
             k,
@@ -7649,7 +7652,7 @@ def test_attention_dropout_requires_seed_offset_together_and_probability_enabled
             compute_dtype=thor.DataType.fp32,
         )
 
-    with pytest.raises(RuntimeError, match="dropout_probability is zero"):
+    with pytest.raises(ValueError, match="dropout_probability is zero"):
         ex.scaled_dot_product_attention(
             q,
             k,

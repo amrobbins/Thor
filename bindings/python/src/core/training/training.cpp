@@ -41,11 +41,13 @@
 #include "Utilities/Loaders/ShardedRawDatasetCreator.h"
 #include "Utilities/Random/FullPeriodRandom.h"
 #include "Utilities/WorkQueue/AsyncTensorQueue.h"
+#include "bindings/python/src/core/cast.h"
 #include "bindings/python/src/core/physical/NanobindDTypes.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
 using namespace Thor;
+namespace pybind = Thor::PythonBindings;
 
 namespace {
 
@@ -104,7 +106,7 @@ std::optional<std::string> optionalPathStringFromPython(const nb::object& obj, c
     if (nb::isinstance<nb::bytes>(pathObject)) {
         pathObject = nb::module_::import_("os").attr("fsdecode")(pathObject);
     }
-    std::string path = nb::cast<std::string>(pathObject);
+    std::string path = pybind::castOrTypeError<std::string>(pathObject, argumentName, "str", false);
     if (path.empty()) {
         throw nb::value_error((argumentName + " must not be empty").c_str());
     }
@@ -349,11 +351,8 @@ Float32Array asContiguousFloat32Array(nb::handle value, const std::string& conte
         throw nb::type_error((context + " must be convertible to a contiguous numpy.float32 array").c_str());
     }
 
-    try {
-        return nb::cast<Float32Array>(arrayObject);
-    } catch (const nb::cast_error&) {
-        throw nb::type_error((context + " must be convertible to a contiguous numpy.float32 array").c_str());
-    }
+    return pybind::castOrTypeError<Float32Array>(
+        arrayObject, context, "a contiguous numpy.float32 array", false);
 }
 
 std::vector<uint64_t> float32ArrayShapeWithoutBatchDim(const Float32Array& array, const std::string& name) {
@@ -383,12 +382,7 @@ std::vector<uint64_t> float32ArrayShapeWithoutBatchDim(const Float32Array& array
 }
 
 std::string tensorNameFromPythonKey(nb::handle key, const std::string& context) {
-    std::string name;
-    try {
-        name = nb::cast<std::string>(key);
-    } catch (const nb::cast_error&) {
-        throw nb::type_error((context + " keys must be strings").c_str());
-    }
+    std::string name = pybind::castOrTypeError<std::string>(key, context + " key", "str", false);
     if (name.empty()) {
         throw nb::value_error((context + " tensor names must be non-empty").c_str());
     }
@@ -459,18 +453,14 @@ nb::dict requireOptionalFloat32NumpyDictSplit(nb::object tensors, const std::str
     if (!nb::isinstance<nb::dict>(tensors)) {
         throw nb::type_error((loaderClassName + " " + splitName + " must be a dict or None").c_str());
     }
-    return nb::cast<nb::dict>(tensors);
+    return pybind::castOrTypeError<nb::dict>(tensors, loaderClassName + " " + splitName, "dict or None", false);
 }
 
 std::optional<uint64_t> optionalUint64FromPython(nb::object value, const std::string& name) {
     if (value.is_none()) {
         return std::nullopt;
     }
-    try {
-        return nb::cast<uint64_t>(value);
-    } catch (const nb::cast_error&) {
-        throw nb::type_error((name + " must be an integer or None").c_str());
-    }
+    return pybind::castOrTypeError<uint64_t>(value, name, "int or None", false);
 }
 
 class NumpyFloat32DictBatchLoader : public Loader {
@@ -742,19 +732,17 @@ std::map<std::string, size_t> trainingRunsMinSuccessfulModelsFromPython(nb::obje
             "TrainingRuns min_successful_models must be a dict mapping ensemble_group names to positive integers, or None.");
     }
 
-    nb::dict mapping = nb::cast<nb::dict>(minSuccessfulModels);
+    nb::dict mapping = pybind::castOrTypeError<nb::dict>(
+        minSuccessfulModels, "TrainingRuns min_successful_models", "dict mapping ensemble_group names to positive integers or None", false);
     std::map<std::string, size_t> result;
     for (auto item : mapping) {
         if (!nb::isinstance<nb::str>(item.first)) {
             throw nb::type_error("TrainingRuns min_successful_models keys must be ensemble_group strings.");
         }
-        const std::string groupName = nb::cast<std::string>(item.first);
-        int64_t minimum = 0;
-        try {
-            minimum = nb::cast<int64_t>(item.second);
-        } catch (const nb::cast_error&) {
-            throw nb::type_error("TrainingRuns min_successful_models values must be positive integers.");
-        }
+        const std::string groupName = pybind::castOrTypeError<std::string>(
+            item.first, "TrainingRuns min_successful_models key", "str", false);
+        int64_t minimum = pybind::castOrTypeError<int64_t>(
+            item.second, "TrainingRuns min_successful_models[\"" + groupName + "\"]", "positive int", false);
         if (minimum <= 0) {
             throw nb::value_error("TrainingRuns min_successful_models values must be >= 1.");
         }
@@ -778,11 +766,13 @@ std::vector<std::string> trainingRunsReportNameListFromPython(nb::handle value,
 
     std::vector<std::string> names;
     size_t index = 0;
-    for (nb::handle nameObj : nb::cast<nb::iterable>(value)) {
+    for (nb::handle nameObj : pybind::castOrTypeError<nb::iterable>(
+             value, context, "iterable of " + itemName + "-name strings or None", false)) {
         if (!nb::isinstance<nb::str>(nameObj)) {
             throw nb::type_error((context + "[" + std::to_string(index) + "] must be a string.").c_str());
         }
-        names.push_back(nb::cast<std::string>(nameObj));
+        names.push_back(pybind::castOrTypeError<std::string>(
+            nameObj, context + "[" + std::to_string(index) + "]", "str", false));
         ++index;
     }
     return names;
@@ -815,12 +805,12 @@ std::map<std::string, std::vector<std::string>> trainingRunsReportsFromPython(nb
 
     std::map<std::string, std::vector<std::string>> result;
     if (nb::isinstance<nb::dict>(reports)) {
-        nb::dict mapping = nb::cast<nb::dict>(reports);
+        nb::dict mapping = pybind::castOrTypeError<nb::dict>(reports, "TrainingRuns reports", "dict or iterable of report-name strings or None", false);
         for (auto item : mapping) {
             if (!nb::isinstance<nb::str>(item.first)) {
                 throw nb::type_error("TrainingRuns reports keys must be run_name or ensemble_group strings.");
             }
-            const std::string targetName = nb::cast<std::string>(item.first);
+            const std::string targetName = pybind::castOrTypeError<std::string>(item.first, "TrainingRuns reports key", "str", false);
             result.emplace(targetName,
                            trainingRunsReportNameListFromPython(
                                item.second,
@@ -839,7 +829,8 @@ std::map<std::string, std::vector<std::string>> trainingRunsReportsFromPython(nb
 std::vector<TrainingRunsSpec> trainingRunsSpecsFromPython(nb::iterable runs) {
     std::vector<TrainingRunsSpec> specs;
     for (nb::handle item : runs) {
-        nb::sequence entry = nb::cast<nb::sequence>(item);
+        nb::sequence entry = pybind::castOrTypeError<nb::sequence>(
+            item, "TrainingRuns runs entry", "sequence (run_name, trainer[, ensemble_group[, ensemble_weight]])", false);
         const size_t entrySize = nb::len(entry);
         if (entrySize < 2 || entrySize > 4) {
             throw nb::value_error(
@@ -847,14 +838,17 @@ std::vector<TrainingRunsSpec> trainingRunsSpecsFromPython(nb::iterable runs) {
                 "(run_name, trainer, ensemble_group, ensemble_weight)");
         }
 
-        std::string runName = nb::cast<std::string>(entry[0]);
-        std::shared_ptr<Trainer> trainer = nb::cast<std::shared_ptr<Trainer>>(entry[1]);
+        std::string runName = pybind::castOrTypeError<std::string>(entry[0], "TrainingRuns runs entry[0]", "str run_name", false);
+        std::shared_ptr<Trainer> trainer = pybind::castOrTypeError<std::shared_ptr<Trainer>>(
+            entry[1], "TrainingRuns runs entry[1]", "thor.training.Trainer", false);
         TrainingRunsSpec spec(std::move(runName), std::move(trainer));
         if (entrySize >= 3 && !entry[2].is_none()) {
-            spec.ensembleGroup = nb::cast<std::string>(entry[2]);
+            spec.ensembleGroup = pybind::castOrTypeError<std::string>(
+                entry[2], "TrainingRuns runs entry[2]", "str ensemble_group or None", false);
         }
         if (entrySize >= 4 && !entry[3].is_none()) {
-            spec.ensembleWeight = nb::cast<double>(entry[3]);
+            spec.ensembleWeight = pybind::castOrTypeError<double>(
+                entry[3], "TrainingRuns runs entry[3]", "float ensemble_weight or None", false);
         }
         specs.push_back(std::move(spec));
     }
@@ -881,11 +875,13 @@ std::vector<TrainingRestartPolicy> trainingRestartPoliciesFromPython(nb::object 
 
     std::vector<TrainingRestartPolicy> policies;
     size_t conditionIndex = 0;
-    for (nb::handle conditionObj : nb::cast<nb::iterable>(restartConditions)) {
+    for (nb::handle conditionObj : pybind::castOrTypeError<nb::iterable>(
+             restartConditions, "restart_conditions", "iterable of RestartPolicy objects or None", false)) {
         if (!nb::isinstance<TrainingRestartPolicy>(conditionObj)) {
             throw nb::type_error(("restart_conditions[" + std::to_string(conditionIndex) + "] must be a RestartPolicy object.").c_str());
         }
-        TrainingRestartPolicy policy = nb::cast<TrainingRestartPolicy>(conditionObj);
+        TrainingRestartPolicy policy = pybind::castOrTypeError<TrainingRestartPolicy>(
+            conditionObj, "restart_conditions[" + std::to_string(conditionIndex) + "]", "thor.training.RestartPolicy", false);
         if (trainerScope && (policy.runName.has_value() || policy.ensembleGroup.has_value())) {
             std::string ignoredFields;
             if (policy.runName.has_value()) {
@@ -968,7 +964,8 @@ BoundPythonEarlyCompletionPolicy trainingEarlyCompletionPolicyFromWeakCallable(n
                     "the owning Trainer/TrainingRuns object should retain the callback holder while the C++ callback is active.");
             }
             nb::object callableObject = holder.attr("callback");
-            return nb::cast<bool>(callableObject(currentScore, bestScore, currentEpoch, bestEpoch));
+            nb::object result = callableObject(currentScore, bestScore, currentEpoch, bestEpoch);
+            return pybind::castOrTypeError<bool>(result, "completion_condition return value", "bool", false);
         }};
 
     return BoundPythonEarlyCompletionPolicy{std::move(policy), std::move(holder)};
@@ -983,7 +980,8 @@ std::vector<nb::object> callbackRefsFromObject(nb::handle object) {
     if (refsObject.is_none()) {
         return refs;
     }
-    for (nb::handle ref : nb::cast<nb::iterable>(refsObject)) {
+    for (nb::handle ref : pybind::castOrTypeError<nb::iterable>(
+             refsObject, "_thor_callback_refs", "iterable callback-reference list", false)) {
         refs.emplace_back(nb::borrow<nb::object>(ref));
     }
     return refs;
@@ -1021,7 +1019,8 @@ TrainingEarlyCompletionPolicy trainingEarlyCompletionPolicyFromCallable(nb::obje
             // the GIL for every Python completion-condition invocation.
             nb::gil_scoped_acquire acquire;
             nb::object callableObject = nb::borrow<nb::object>(nb::handle(callback.get()));
-            return nb::cast<bool>(callableObject(currentScore, bestScore, currentEpoch, bestEpoch));
+            nb::object result = callableObject(currentScore, bestScore, currentEpoch, bestEpoch);
+            return pybind::castOrTypeError<bool>(result, "completion_condition return value", "bool", false);
         }};
 }
 
@@ -1051,7 +1050,7 @@ TrainingModelSelectionScore trainingModelSelectionScoreFromPython(nb::object mod
         if (result.is_none()) {
             return std::nullopt;
         }
-        return nb::cast<double>(result);
+        return pybind::castOrTypeError<double>(result, "model_selection_score return value", "float or None", false);
     }};
 }
 
@@ -1067,13 +1066,15 @@ TrainingEarlyCompletionPoliciesBinding trainingEarlyCompletionPoliciesFromPython
     }
 
     size_t policyIndex = 0;
-    for (nb::handle policyObject : nb::cast<nb::iterable>(earlyCompletionPolicies)) {
+    for (nb::handle policyObject : pybind::castOrTypeError<nb::iterable>(
+             earlyCompletionPolicies, "early_completion_policies", "iterable of EarlyCompletionPolicy objects or None", false)) {
         if (!nb::isinstance<TrainingEarlyCompletionPolicy>(policyObject)) {
             throw nb::type_error(
                 ("Trainer early_completion_policies[" + std::to_string(policyIndex) + "] must be an EarlyCompletionPolicy object.")
                     .c_str());
         }
-        out.policies.push_back(nb::cast<TrainingEarlyCompletionPolicy>(policyObject));
+        out.policies.push_back(pybind::castOrTypeError<TrainingEarlyCompletionPolicy>(
+            policyObject, "early_completion_policies[" + std::to_string(policyIndex) + "]", "thor.training.EarlyCompletionPolicy", false));
         std::vector<nb::object> refs = callbackRefsFromObject(policyObject);
         out.callbackRefs.insert(out.callbackRefs.end(), refs.begin(), refs.end());
         ++policyIndex;
@@ -1092,10 +1093,14 @@ TrainingRunsEarlyCompletionRulesBinding trainingRunsEarlyCompletionRulesFromPyth
         return out;
     }
 
-    for (nb::handle ruleObject : nb::cast<nb::iterable>(earlyCompletionRules)) {
-        out.rules.push_back(nb::cast<TrainingRunsEarlyCompletionRule>(ruleObject));
+    size_t ruleIndex = 0;
+    for (nb::handle ruleObject : pybind::castOrTypeError<nb::iterable>(
+             earlyCompletionRules, "early_completion_rules", "iterable of TrainingRunsEarlyCompletionRule objects or None", false)) {
+        out.rules.push_back(pybind::castOrTypeError<TrainingRunsEarlyCompletionRule>(
+            ruleObject, "early_completion_rules[" + std::to_string(ruleIndex) + "]", "thor.training.TrainingRunsEarlyCompletionRule", false));
         std::vector<nb::object> refs = callbackRefsFromObject(ruleObject);
         out.callbackRefs.insert(out.callbackRefs.end(), refs.begin(), refs.end());
+        ++ruleIndex;
     }
     return out;
 }
@@ -1503,7 +1508,8 @@ calling this helper.
                 builder.optimizer(std::move(optimizer));
             }
             if (!training_program.is_none()) {
-                builder.trainingProgram(nb::cast<std::shared_ptr<TrainingProgram>>(training_program));
+                builder.trainingProgram(pybind::castArgument<std::shared_ptr<TrainingProgram>>(
+                    training_program, "Trainer.__new__", "training_program", "thor.training.TrainingProgram or None", false));
             }
             if (debug_synchronous) {
                 builder.debugSynchronousExecutor();
@@ -2156,7 +2162,8 @@ calling this helper.
             if (steps.is_none()) {
                 return std::make_shared<TrainingProgram>();
             }
-            return std::make_shared<TrainingProgram>(nb::cast<std::vector<std::shared_ptr<TrainingStep>>>(steps));
+            return std::make_shared<TrainingProgram>(pybind::castArgument<std::vector<std::shared_ptr<TrainingStep>>>(
+                steps, "TrainingProgram.__new__", "steps", "sequence of thor.training.TrainingStep objects or None", false));
         },
         "cls"_a,
         "steps"_a.none() = nb::none());

@@ -11,11 +11,13 @@
 #include "DeepLearning/Api/Layers/Utility/LayerNorm.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
+#include "bindings/python/src/core/cast.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
 using namespace std;
 using namespace Thor;
+namespace pybind = Thor::PythonBindings;
 
 using DataType = ThorImplementation::DataType;
 
@@ -29,7 +31,7 @@ vector<uint64_t> normalizedShapeFromPython(const nb::object& obj, const Tensor& 
         }
         return {dims.back()};
     }
-    return nb::cast<vector<uint64_t>>(obj);
+    return pybind::castArgument<vector<uint64_t>>(obj, "LayerNorm", "normalized_shape", "Sequence[int] or None", false);
 }
 
 }  // namespace

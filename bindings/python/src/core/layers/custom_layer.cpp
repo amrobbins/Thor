@@ -25,10 +25,12 @@
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/Expression.h"
 #include "Utilities/Expression/FusedEquation.h"
+#include "bindings/python/src/core/cast.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
 using namespace std;
+namespace pybind = Thor::PythonBindings;
 
 using namespace Thor;
 using DataType = ThorImplementation::DataType;
@@ -78,15 +80,8 @@ OrderedApiTensorMap apiTensorMapFromPythonDict(nb::dict mapping, const std::stri
     result.names.reserve(mapping.size());
 
     for (auto item : mapping) {
-        if (!nb::isinstance<nb::str>(item.first)) {
-            throw std::runtime_error("CustomLayer " + what + " keys must be strings.");
-        }
-        if (!nb::isinstance<Tensor>(item.second)) {
-            throw std::runtime_error("CustomLayer " + what + " values must be thor.Tensor objects.");
-        }
-
-        std::string name = nb::cast<std::string>(item.first);
-        Tensor tensor = nb::cast<Tensor>(item.second);
+        std::string name = pybind::castOrTypeError<std::string>(item.first, "CustomLayer " + what + " key", "str", false);
+        Tensor tensor = pybind::castOrTypeError<Tensor>(item.second, "CustomLayer " + what + " value", "thor.Tensor", false);
         if (result.tensors.contains(name)) {
             throw std::runtime_error("CustomLayer " + what + " contains duplicate name '" + name + "'.");
         }
@@ -104,15 +99,16 @@ OrderedApiTensorMap normalizeInputs(nb::object inputsObj) {
     if (nb::isinstance<Tensor>(inputsObj)) {
         OrderedApiTensorMap result;
         result.names.push_back("feature_input");
-        result.tensors.emplace("feature_input", nb::cast<Tensor>(inputsObj));
+        result.tensors.emplace("feature_input", pybind::castOrTypeError<Tensor>(inputsObj, "CustomLayer inputs", "thor.Tensor", false));
         return result;
     }
 
     if (!nb::isinstance<nb::dict>(inputsObj)) {
-        throw std::runtime_error("CustomLayer inputs must be a thor.Tensor or a mapping of input name to thor.Tensor.");
+        pybind::raiseCastTypeError("CustomLayer inputs", "thor.Tensor or dict[str, thor.Tensor]", inputsObj);
     }
 
-    return apiTensorMapFromPythonDict(nb::cast<nb::dict>(inputsObj), "inputs");
+    return apiTensorMapFromPythonDict(
+        pybind::castOrTypeError<nb::dict>(inputsObj, "CustomLayer inputs", "dict[str, thor.Tensor]", false), "inputs");
 }
 
 std::vector<std::string> normalizeOutputNames(nb::object outputNamesObj, const OrderedApiTensorMap& inputs) {
@@ -120,29 +116,26 @@ std::vector<std::string> normalizeOutputNames(nb::object outputNamesObj, const O
         if (inputs.names.size() == 1 && inputs.names[0] == "feature_input") {
             return {"feature_output"};
         }
-        throw std::runtime_error(
+        throw nb::value_error(
             "CustomLayer with named inputs requires output_names. Omit output_names only when using the single-tensor convenience form.");
     }
 
     if (nb::isinstance<nb::str>(outputNamesObj)) {
-        return {nb::cast<std::string>(outputNamesObj)};
+        return {pybind::castOrTypeError<std::string>(outputNamesObj, "CustomLayer output_names", "str", false)};
     }
 
     if (!nb::isinstance<nb::sequence>(outputNamesObj)) {
-        throw std::runtime_error("CustomLayer output_names must be a string or a sequence of strings.");
+        pybind::raiseCastTypeError("CustomLayer output_names", "str or sequence[str]", outputNamesObj);
     }
 
     std::vector<std::string> names;
-    nb::sequence sequence = nb::cast<nb::sequence>(outputNamesObj);
+    nb::sequence sequence = pybind::castOrTypeError<nb::sequence>(outputNamesObj, "CustomLayer output_names", "sequence[str]", false);
     for (nb::handle item : sequence) {
-        if (!nb::isinstance<nb::str>(item)) {
-            throw std::runtime_error("CustomLayer output names must be strings.");
-        }
-        names.push_back(nb::cast<std::string>(item));
+        names.push_back(pybind::castOrTypeError<std::string>(item, "CustomLayer output_names item", "str", false));
     }
 
     if (names.empty()) {
-        throw std::runtime_error("CustomLayer requires at least one output name.");
+        throw nb::value_error("CustomLayer requires at least one output name.");
     }
 
     return names;
@@ -155,26 +148,38 @@ std::vector<std::shared_ptr<ParameterSpecification>> parametersFromPythonObject(
     }
 
     if (nb::isinstance<nb::dict>(obj)) {
-        throw std::runtime_error(
+        throw nb::type_error(
             "CustomLayer parameters() must return list[thor.parameters.ParameterSpecification], not dict[str, thor.parameters.ParameterSpecification]. "
             "Parameter names are owned by the Parameter objects themselves.");
     }
 
     if (!nb::isinstance<nb::list>(obj)) {
-        throw std::runtime_error("CustomLayer parameters() must return list[thor.parameters.ParameterSpecification].");
+        pybind::raiseCastTypeError(
+            "CustomLayer parameters() return value", "list[thor.parameters.ParameterSpecification]", obj);
     }
 
-    nb::list parameters = nb::cast<nb::list>(obj);
+    nb::list parameters = pybind::castOrTypeError<nb::list>(
+        obj, "CustomLayer parameters() return value", "list[thor.parameters.ParameterSpecification]", false);
     result.reserve(parameters.size());
+    size_t index = 0;
     for (nb::handle item : parameters) {
-        result.push_back(nb::cast<std::shared_ptr<ParameterSpecification>>(item));
+        auto parameter = pybind::castOrTypeError<std::shared_ptr<ParameterSpecification>>(
+            item,
+            "CustomLayer parameters()[" + std::to_string(index) + "]",
+            "thor.parameters.ParameterSpecification",
+            false);
+        if (parameter == nullptr) {
+            throw nb::value_error(("CustomLayer parameters()[" + std::to_string(index) + "] may not be None.").c_str());
+        }
+        result.push_back(std::move(parameter));
+        ++index;
     }
     return result;
 }
 
 nb::callable callableFromPythonObject(nb::object obj, const std::string& what) {
     if (!nb::isinstance<nb::callable>(obj)) {
-        throw std::runtime_error("CustomLayer " + what + " must be callable.");
+        pybind::raiseCastTypeError("CustomLayer " + what, "callable", obj);
     }
 
     return nb::borrow<nb::callable>(obj);
@@ -324,13 +329,11 @@ std::vector<std::pair<std::string, Expression>> expressionsFromPythonDict(nb::di
     std::vector<std::pair<std::string, Expression>> namedExpressions;
     namedExpressions.reserve(mapping.size());
     for (auto item : mapping) {
-        if (!nb::isinstance<nb::str>(item.first)) {
-            throw std::runtime_error("CustomLayer build result keys must be strings.");
-        }
-        if (!nb::isinstance<Expression>(item.second)) {
-            throw std::runtime_error("CustomLayer build result values must be thor.physical.Expression objects.");
-        }
-        namedExpressions.emplace_back(nb::cast<std::string>(item.first), nb::cast<Expression>(item.second));
+        std::string name = pybind::castOrTypeError<std::string>(
+            item.first, "CustomLayer build(context) return dict key", "str", false);
+        Expression expression = pybind::castOrTypeError<Expression>(
+            item.second, "CustomLayer build(context) return dict value", "thor.physical.Expression", false);
+        namedExpressions.emplace_back(std::move(name), std::move(expression));
     }
     return namedExpressions;
 }
@@ -415,13 +418,15 @@ class CustomLayerBuildContext {
         std::optional<DataType> computeDType = std::nullopt;
 
         if (!outputDTypeObj.is_none()) {
-            outputDType = nb::cast<DataType>(outputDTypeObj);
+            outputDType = pybind::castOrTypeError<DataType>(
+                outputDTypeObj, "CustomLayerBuildContext.input/param() argument 'output_dtype'", "thor.DataType or None", false);
         } else if (defaultDType.has_value()) {
             outputDType = defaultDType.value();
         }
 
         if (!computeDTypeObj.is_none()) {
-            computeDType = nb::cast<DataType>(computeDTypeObj);
+            computeDType = pybind::castOrTypeError<DataType>(
+                computeDTypeObj, "CustomLayerBuildContext.input/param() argument 'compute_dtype'", "thor.DataType or None", false);
         } else if (defaultDType.has_value()) {
             computeDType = defaultDType.value();
         }
@@ -452,18 +457,22 @@ DynamicExpressionBuild callBuildCallableForContext(nb::callable callable,
             throw std::runtime_error(
                 "CustomLayer activation can only be stitched when build(context) returns dict[str, thor.physical.Expression].");
         }
-        DynamicExpressionBuild build = nb::cast<DynamicExpressionBuild>(result);
+        DynamicExpressionBuild build = pybind::castOrTypeError<DynamicExpressionBuild>(
+            result, "CustomLayer build(context) return value", "thor.physical.DynamicExpressionBuild", false);
         validateCustomLayerExpressionInputs(expectedInputNames, toNameSet(build.stamp_inputs));
         validateCustomLayerForwardOutputs(outputNames, toNameSet(build.equation->getOutputNames()));
         return build;
     }
 
     if (!nb::isinstance<nb::dict>(result)) {
-        throw std::runtime_error(
-            "CustomLayer build(context) must return dict[str, thor.physical.Expression] or thor.physical.DynamicExpressionBuild.");
+        pybind::raiseCastTypeError("CustomLayer build(context) return value",
+                                   "dict[str, thor.physical.Expression] or thor.physical.DynamicExpressionBuild",
+                                   result);
     }
 
-    std::vector<std::pair<std::string, Expression>> namedExpressions = expressionsFromPythonDict(nb::cast<nb::dict>(result));
+    nb::dict resultDict = pybind::castOrTypeError<nb::dict>(
+        result, "CustomLayer build(context) return value", "dict[str, thor.physical.Expression]", false);
+    std::vector<std::pair<std::string, Expression>> namedExpressions = expressionsFromPythonDict(resultDict);
     applyActivationToNamedExpressions(namedExpressions, activation);
     Outputs expressionOutputs = Expression::outputs(namedExpressions);
     auto serializedDefinition = std::make_shared<ExpressionDefinition>(ExpressionDefinition::fromOutputs(expressionOutputs));
@@ -541,12 +550,12 @@ DynamicExpression makeDynamicExpressionFromSelf(nb::handle selfHandle,
 
             nb::object buildAttr = owner.attr("build");
             if (!nb::isinstance<nb::callable>(buildAttr)) {
-                throw std::runtime_error("CustomLayer build attribute is not callable.");
+                pybind::raiseCastTypeError("CustomLayer build attribute", "callable", buildAttr);
             }
 
             PhysicalTensorMap featureInputs = selectNamedTensors(inputs, featureInputNames, "feature input");
             PhysicalTensorMap parameterTensors = selectNamedTensors(inputs, parameterNames, "parameter");
-            return callBuildCallableForContext(nb::cast<nb::callable>(buildAttr),
+            return callBuildCallableForContext(nb::borrow<nb::callable>(buildAttr),
                                                expectedInputNames,
                                                outputNames,
                                                inputs,
@@ -637,7 +646,8 @@ void bind_custom_layer(nb::module_& layers) {
                             "dict[str, thor.physical.Expression].");
                     }
 
-                    DynamicExpression dynamicExpr = nb::cast<DynamicExpression>(buildObj);
+                    DynamicExpression dynamicExpr = pybind::castOrTypeError<DynamicExpression>(
+                        buildObj, "CustomLayer build", "thor.physical.DynamicExpression", false);
                     validateCustomLayerExpressionInputs(concatenateInputNames(inputs.names, paramNames),
                                                         toNameSet(dynamicExpr.getExpectedInputNames()));
                     validateCustomLayerForwardOutputs(outputNames, toNameSet(dynamicExpr.getExpectedOutputNames()));

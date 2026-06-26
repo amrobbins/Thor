@@ -10,25 +10,27 @@
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
+#include "bindings/python/src/core/cast.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
 using namespace std;
 using namespace Thor;
+namespace pybind = Thor::PythonBindings;
 
 using DataType = ThorImplementation::DataType;
 
 namespace {
-std::optional<DataType> optionalDataTypeFromPython(const nb::object& obj) {
+std::optional<DataType> optionalDataTypeFromPython(const nb::object& obj, const char* argumentName) {
     if (obj.is_none())
         return std::nullopt;
-    return nb::cast<DataType>(obj);
+    return pybind::castArgument<DataType>(obj, "Embedding", argumentName, "thor.DataType or None", false);
 }
 
-std::optional<uint64_t> optionalUInt64FromPython(const nb::object& obj) {
+std::optional<uint64_t> optionalUInt64FromPython(const nb::object& obj, const char* argumentName) {
     if (obj.is_none())
         return std::nullopt;
-    return nb::cast<uint64_t>(obj);
+    return pybind::castArgument<uint64_t>(obj, "Embedding", argumentName, "int or None", false);
 }
 }  // namespace
 
@@ -55,11 +57,11 @@ void bind_embedding(nb::module_& m) {
                 .embeddingDim(embeddingDim)
                 .sparseGradients(sparseGradients);
 
-            std::optional<DataType> weightsDataType = optionalDataTypeFromPython(weightsDataTypeObj);
+            std::optional<DataType> weightsDataType = optionalDataTypeFromPython(weightsDataTypeObj, "weights_data_type");
             if (weightsDataType.has_value())
                 builder.weightsDataType(weightsDataType.value());
 
-            std::optional<uint64_t> paddingIndex = optionalUInt64FromPython(paddingIndexObj);
+            std::optional<uint64_t> paddingIndex = optionalUInt64FromPython(paddingIndexObj, "padding_index");
             if (paddingIndex.has_value())
                 builder.paddingIndex(paddingIndex.value());
 

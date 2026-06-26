@@ -94,5 +94,5 @@ def test_transpose_rejects_wrong_epilogue_type():
     n = thor.Network("test_transpose_rejects_wrong_epilogue_type")
     x = _network_input(n, [3, 4], thor.DataType.fp32)
 
-    with pytest.raises(TypeError, match="epilogue must be"):
+    with pytest.raises(TypeError, match=r"argument 'epilogue'.*thor\.physical\.Expression or None"):
         thor.layers.Transpose(n, x, epilogue=123)

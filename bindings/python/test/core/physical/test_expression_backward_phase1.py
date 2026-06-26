@@ -785,7 +785,7 @@ def test_compile_backward_multi_output_explicit_upstreams_numerical(dtype: thor.
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
 def test_unsqueeze_forward_negative_axes_and_output_shape(dtype: thor.DataType):
     x = ex.input("x")
-    with pytest.raises(RuntimeError, match="bad_cast"):
+    with pytest.raises(TypeError, match="axis.*non-negative ints"):
         out = ex.unsqueeze(x, axis=[-1, 0])
 
 

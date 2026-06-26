@@ -573,7 +573,7 @@ def test_python_custom_layer_parameters_must_return_list_not_dict():
                 "feature_output": context.input("feature_input")
             }
 
-    with pytest.raises(RuntimeError, match=r"parameters\(\) must return list\[thor.parameters.ParameterSpecification\], not dict"):
+    with pytest.raises(TypeError, match=r"parameters\(\) must return list\[thor.parameters.ParameterSpecification\], not dict"):
         BadParametersDict()
 
 
@@ -597,7 +597,7 @@ def test_python_custom_layer_parameters_must_return_list():
                 "feature_output": context.input("feature_input")
             }
 
-    with pytest.raises(RuntimeError, match=r"parameters\(\) must return list\[thor.parameters.ParameterSpecification\]"):
+    with pytest.raises(TypeError, match=r"parameters\(\) return value: expected list\[thor.parameters.ParameterSpecification\]"):
         BadParametersScalar()
 
 
@@ -704,7 +704,7 @@ def test_python_custom_layer_rejects_empty_inputs_and_outputs():
             },
         )
 
-    with pytest.raises(RuntimeError, match="requires at least one output name"):
+    with pytest.raises(ValueError, match="requires at least one output name"):
         thor.layers.CustomLayer(
             network=network,
             inputs={
@@ -734,7 +734,7 @@ def test_python_custom_layer_place_rejects_build_returning_non_dict():
     network = thor.Network("custom-layer-build-non-dict")
     x = _network_input(network, "input", [3], thor.DataType.fp32)
 
-    with pytest.raises(RuntimeError, match=r"build\(context\) must return dict"):
+    with pytest.raises(TypeError, match=r"build\(context\) return value: expected dict"):
         NonDictBuild(network, x)
 
 
@@ -757,7 +757,7 @@ def test_python_custom_layer_place_rejects_build_returning_non_expression_value(
     network = thor.Network("custom-layer-build-non-expression")
     x = _network_input(network, "input", [3], thor.DataType.fp32)
 
-    with pytest.raises(RuntimeError, match="build result values must be thor.physical.Expression objects"):
+    with pytest.raises(TypeError, match=r"build\(context\) return dict value: expected thor\.physical\.Expression"):
         NonExpressionBuildValue(network, x)
 
 
@@ -1173,7 +1173,7 @@ def test_python_custom_layer_direct_construction_rejects_noncallable_build():
     network = thor.Network("custom-layer-direct-bad-build")
     x = thor.Tensor([3], thor.DataType.fp32)
 
-    with pytest.raises(RuntimeError, match="CustomLayer build must be callable"):
+    with pytest.raises(TypeError, match="CustomLayer build: expected callable"):
         thor.layers.CustomLayer(
             network=network,
             inputs=x,

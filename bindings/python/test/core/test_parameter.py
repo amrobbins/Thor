@@ -122,7 +122,7 @@ def test_dynamic_parameter_constructor_rejects_none_factory():
 
 
 def test_dynamic_parameter_constructor_rejects_non_callable_factory():
-    with pytest.raises(RuntimeError, match="create_storage_from_context must be callable"):
+    with pytest.raises(TypeError, match="create_storage_from_context.*expected callable"):
         thor.parameters.ParameterSpecification(
             name="weights",
             create_storage_from_context=123,

@@ -14,11 +14,13 @@
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 #include "Utilities/Expression/Expression.h"
+#include "bindings/python/src/core/cast.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
 using namespace std;
 using namespace Thor;
+namespace pybind = Thor::PythonBindings;
 
 using DataType = ThorImplementation::DataType;
 
@@ -32,27 +34,29 @@ vector<uint64_t> normalizedShapeFromPython(const nb::object& obj, const Tensor& 
         }
         return {dims.back()};
     }
-    return nb::cast<vector<uint64_t>>(obj);
+    return pybind::castArgument<vector<uint64_t>>(obj, "RMSNorm", "normalized_shape", "Sequence[int] or None", false);
 }
 
-std::optional<DataType> optionalDataTypeFromPython(const nb::object& obj) {
+std::optional<DataType> optionalDataTypeFromPython(const nb::object& obj,
+                                                   const char* functionName,
+                                                   const char* argumentName) {
     if (obj.is_none()) {
         return std::nullopt;
     }
-    return nb::cast<DataType>(obj);
+    return pybind::castArgument<DataType>(obj, functionName, argumentName, "thor.DataType or None", false);
 }
 
 ThorImplementation::Expression makePythonEpilogueInput(const nb::object& outputDTypeObj, const nb::object& computeDTypeObj) {
-    std::optional<DataType> outputDType = optionalDataTypeFromPython(outputDTypeObj);
-    std::optional<DataType> computeDType = optionalDataTypeFromPython(computeDTypeObj);
+    std::optional<DataType> outputDType = optionalDataTypeFromPython(outputDTypeObj, "RMSNorm.epilogue_input", "output_dtype");
+    std::optional<DataType> computeDType = optionalDataTypeFromPython(computeDTypeObj, "RMSNorm.epilogue_input", "compute_dtype");
     return RMSNorm::epilogueInput(computeDType, outputDType);
 }
 
 ThorImplementation::Expression makePythonEpilogueAuxInput(const std::string& inputName,
                                                           const nb::object& outputDTypeObj,
                                                           const nb::object& computeDTypeObj) {
-    std::optional<DataType> outputDType = optionalDataTypeFromPython(outputDTypeObj);
-    std::optional<DataType> computeDType = optionalDataTypeFromPython(computeDTypeObj);
+    std::optional<DataType> outputDType = optionalDataTypeFromPython(outputDTypeObj, "RMSNorm.epilogue_aux_input", "output_dtype");
+    std::optional<DataType> computeDType = optionalDataTypeFromPython(computeDTypeObj, "RMSNorm.epilogue_aux_input", "compute_dtype");
     return RMSNorm::epilogueAuxInput(inputName, computeDType, outputDType);
 }
 
@@ -60,14 +64,16 @@ void applyPythonEpilogueInputs(RMSNorm::Builder& builder, const nb::object& epil
     if (epilogueInputs.is_none()) {
         return;
     }
-    if (!nb::isinstance<nb::dict>(epilogueInputs)) {
-        throw nb::type_error("epilogue_inputs must be a dict[str, thor.Tensor] or None");
-    }
-    nb::dict inputsDict = nb::cast<nb::dict>(epilogueInputs);
+    nb::dict inputsDict = pybind::castOrTypeError<nb::dict>(
+        epilogueInputs, "RMSNorm() argument 'epilogue_inputs'", "dict[str, thor.Tensor] or None", false);
+    size_t index = 0;
     for (auto item : inputsDict) {
-        std::string name = nb::cast<std::string>(item.first);
-        Tensor tensor = nb::cast<Tensor>(item.second);
+        const std::string keyContext = "RMSNorm() argument 'epilogue_inputs' key[" + std::to_string(index) + "]";
+        std::string name = pybind::castOrTypeError<std::string>(item.first, keyContext, "str", false);
+        const std::string valueContext = "RMSNorm() argument 'epilogue_inputs'[" + name + "]";
+        Tensor tensor = pybind::castOrTypeError<Tensor>(item.second, valueContext, "thor.Tensor", false);
         builder.epilogueInput(name, tensor);
+        ++index;
     }
 }
 
@@ -75,10 +81,8 @@ void applyPythonEpilogue(RMSNorm::Builder& builder, const nb::object& epilogue) 
     if (epilogue.is_none()) {
         return;
     }
-    if (!nb::isinstance<ThorImplementation::Expression>(epilogue)) {
-        throw nb::type_error("epilogue must be a thor.physical.Expression instance or None");
-    }
-    builder.epilogue(nb::cast<ThorImplementation::Expression>(epilogue));
+    builder.epilogue(pybind::castArgument<ThorImplementation::Expression>(
+        epilogue, "RMSNorm", "epilogue", "thor.physical.Expression or None", false));
 }
 
 }  // namespace
@@ -107,8 +111,10 @@ void bind_rms_norm(nb::module_& m) {
 
             RMSNorm::Builder builder;
             builder.network(network).featureInput(feature_input).normalizedShape(shape).epsilon(epsilon);
-            if (!parameter_data_type.is_none())
-                builder.parameterDataType(nb::cast<DataType>(parameter_data_type));
+            if (!parameter_data_type.is_none()) {
+                builder.parameterDataType(pybind::castArgument<DataType>(
+                    parameter_data_type, "RMSNorm", "parameter_data_type", "thor.DataType or None", false));
+            }
             applyPythonEpilogueInputs(builder, epilogue_inputs);
             applyPythonEpilogue(builder, epilogue);
             if (weights_initializer != nullptr)

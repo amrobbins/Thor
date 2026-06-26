@@ -19,10 +19,12 @@
 #include "DeepLearning/Api/Parameter/ParameterSpecification.h"
 #include "DeepLearning/Api/Parameter/ParameterReference.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "bindings/python/src/core/cast.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
 using namespace std;
+namespace pybind = Thor::PythonBindings;
 
 using namespace Thor;
 using DataType = ThorImplementation::DataType;
@@ -65,9 +67,7 @@ std::vector<std::shared_ptr<ParameterConstraint>> constraintsFromPython(const nb
 
     auto appendConstraint = [&constraints](const nb::handle& handle) {
         std::shared_ptr<ParameterConstraint> constraint;
-        try {
-            constraint = nb::cast<std::shared_ptr<ParameterConstraint>>(handle);
-        } catch (const std::exception&) {
+        if (!pybind::tryCast<std::shared_ptr<ParameterConstraint>>(handle, constraint, false)) {
             throw nb::type_error("parameter constraints must be thor.constraints.ParameterConstraint instances");
         }
         if (constraint == nullptr) {
@@ -76,20 +76,20 @@ std::vector<std::shared_ptr<ParameterConstraint>> constraintsFromPython(const nb
         constraints.push_back(constraint->clone());
     };
 
-    try {
-        std::shared_ptr<ParameterConstraint> single = nb::cast<std::shared_ptr<ParameterConstraint>>(obj);
+    std::shared_ptr<ParameterConstraint> single;
+    if (pybind::tryCast<std::shared_ptr<ParameterConstraint>>(obj, single, false)) {
         if (single != nullptr) {
             constraints.push_back(single->clone());
             return constraints;
         }
-    } catch (const std::exception&) {
     }
 
     if (!nb::isinstance<nb::sequence>(obj) || nb::isinstance<nb::str>(obj)) {
         throw nb::type_error("constraints must be a thor.constraints.ParameterConstraint, a sequence of constraints, or None");
     }
 
-    nb::sequence seq = nb::cast<nb::sequence>(obj);
+    nb::sequence seq = pybind::castOrTypeError<nb::sequence>(
+        obj, "constraints", "thor.constraints.ParameterConstraint, sequence of constraints, or None", false);
     constraints.reserve(nb::len(seq));
     for (nb::handle item : seq) {
         appendConstraint(item);
@@ -250,11 +250,12 @@ This form is for statically-shaped parameters. For compile-time-dynamic paramete
            std::optional<bool> training_initially_enabled,
            nb::object constraints) {
             if (create_storage_from_context.is_none()) {
-                throw std::runtime_error("create_storage_from_context must be provided.");
+                throw nb::value_error("create_storage_from_context must be provided.");
             }
 
             if (!nb::isinstance<nb::callable>(create_storage_from_context)) {
-                throw std::runtime_error("create_storage_from_context must be callable.");
+                pybind::raiseCastTypeError(
+                    "ParameterSpecification() argument 'create_storage_from_context'", "callable", create_storage_from_context);
             }
 
             auto createStorageRef = std::make_shared<GilSafePythonObject>(create_storage_from_context);
@@ -265,7 +266,8 @@ This form is for statically-shaped parameters. For compile-time-dynamic paramete
                 nb::callable createStorageCallable = nb::borrow<nb::callable>(createStorageRef->get());
 
                 nb::object result = createStorageCallable(context);
-                return nb::cast<PhysicalTensor>(result);
+                return pybind::castOrTypeError<PhysicalTensor>(
+                    result, "create_storage_from_context return value", "thor.physical.Tensor", false);
             };
 
             if (initializer == nullptr)

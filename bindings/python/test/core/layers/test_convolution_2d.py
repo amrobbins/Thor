@@ -394,5 +394,5 @@ def test_conv2d_rejects_wrong_epilogue_type():
     n = _net("test_net_conv2d_bad_epilogue")
     x = _chw_input(n, 3, 8, 8)
 
-    with pytest.raises(TypeError, match="epilogue must be"):
+    with pytest.raises(TypeError, match=r"argument 'epilogue'.*thor\.physical\.Expression or None"):
         thor.layers.Convolution2d(n, x, 4, 3, 3, epilogue=123)
