@@ -201,13 +201,6 @@ class Network {
                                                        const ApiTensorRemap& initialRemap,
                                                        const ApiSubgraphCloneOptions& options = ApiSubgraphCloneOptions{});
 
-    // Boundary-only graph repair for internally composed inference graphs.  This
-    // intentionally is not part of normal user graph validation: explicit
-    // NetworkOutput roots should still be required for public models.  TrainingRuns
-    // uses it after partial cloning/pruning when a retained multi-output layer has
-    // sibling outputs that are deliberately not exposed in the saved ensemble.
-    void attachStubsToDanglingOutputsForInferenceBoundary();
-
     void registerRaggedNetworkInput(const std::string& name,
                                     const RaggedTensor& raggedTensor,
                                     const std::string& valuesInputName,

@@ -796,6 +796,10 @@ std::vector<ResolvedEnsembleMetric> resolveTrainingRunsReportedMetrics(
     return resolved;
 }
 
+bool trainingRunsMetricCanParticipateInComposedEvaluation(const ResolvedEnsembleMetric& metric) {
+    return !metric.predictionOutputName.empty() || metric.inputSourceName.has_value();
+}
+
 }  // namespace
 
 bool TrainingEnsembleResult::allCompleted() const {
@@ -2020,6 +2024,9 @@ std::vector<TrainingNamedMetricResult> TrainingRuns::namedGraphMetricResultsForG
     std::vector<TrainingNamedMetricResult> results;
     results.reserve(resolvedMetrics.size());
     for (const ResolvedEnsembleMetric& metric : resolvedMetrics) {
+        if (!trainingRunsMetricCanParticipateInComposedEvaluation(metric)) {
+            continue;
+        }
         TrainingNamedMetricResult result;
         result.name = metric.metricName;
         results.push_back(std::move(result));
@@ -2510,8 +2517,6 @@ void saveComposedEnsembleNetworkArtifact(const TrainingEnsembleResult& ensembleR
         /*exposeAveragedOutputsAsNetworkOutputs=*/true,
         safeNetworkNameForSavedEnsemble(ensembleResult.ensembleGroup),
         std::optional<std::vector<std::string>>{deployableInputNames});
-    evaluator.network->attachStubsToDanglingOutputsForInferenceBoundary();
-
     std::vector<Event> initDoneEvents;
     std::shared_ptr<PlacedNetwork> placed = evaluator.network->place(
         /*batchSize=*/1,
@@ -2544,6 +2549,16 @@ Tensor trainingRunsEvaluatorInputTensorForGraphInput(TrainingRunsComposedEnsembl
     evaluator.sharedInputTensorsByName[inputName] = tensor;
     evaluator.externalInputNames.push_back(inputName);
     return tensor;
+}
+
+std::optional<Tensor> existingTrainingRunsEvaluatorInputTensorForGraphInput(
+    const TrainingRunsComposedEnsembleEvaluator& evaluator,
+    const std::string& inputName) {
+    auto existingIt = evaluator.sharedInputTensorsByName.find(inputName);
+    if (existingIt == evaluator.sharedInputTensorsByName.end()) {
+        return std::nullopt;
+    }
+    return existingIt->second;
 }
 
 Tensor cloneTrainingRunsEvaluatorLossFromReference(TrainingRunsComposedEnsembleEvaluator& evaluator,
@@ -2666,7 +2681,7 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
     const std::vector<std::shared_ptr<Network>>& memberNetworks,
     const std::vector<double>& weights,
     const std::vector<ResolvedEnsembleLoss>& losses,
-    const std::vector<ResolvedEnsembleMetric>& metrics) {
+    std::vector<ResolvedEnsembleMetric>& metrics) {
     if (losses.empty() && metrics.empty()) {
         throw std::runtime_error("TrainingRuns composed ensemble evaluator requires at least one graph loss or metric to report.");
     }
@@ -2714,32 +2729,56 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
         NetworkOutput::Builder().network(*evaluator.network).name(loss.lossName).inputTensor(lossTensor).dataType(DataType::FP32).build();
     }
 
+    std::vector<ResolvedEnsembleMetric> activeMetrics;
+    activeMetrics.reserve(metrics.size());
     for (const ResolvedEnsembleMetric& metric : metrics) {
         std::optional<Tensor> averagedPredictions;
         if (!metric.predictionOutputName.empty()) {
             const auto predictionIt = evaluator.averagedOutputTensorsByName.find(metric.predictionOutputName);
             if (predictionIt == evaluator.averagedOutputTensorsByName.end()) {
-                throw std::runtime_error("TrainingRuns composed ensemble evaluator did not build averaged prediction output '" +
-                                         metric.predictionOutputName + "' for reported metric '" + metric.metricName + "'.");
+                // The metric's prediction source is not present in this composed
+                // evaluator.  In this composition the metric does not exist, so do
+                // not expose or report it.
+                continue;
             }
             averagedPredictions = predictionIt->second;
         }
-        if (!exposedReportOutputs.insert(metric.metricName).second) {
-            throw std::runtime_error("TrainingRuns composed ensemble evaluator cannot expose duplicate report output '" + metric.metricName + "'.");
-        }
+
         std::optional<Tensor> labels;
         if (metric.targetInputName.has_value()) {
-            labels = trainingRunsEvaluatorInputTensorForGraphInput(evaluator, referenceMember, referenceInputsByName, *metric.targetInputName);
+            labels = existingTrainingRunsEvaluatorInputTensorForGraphInput(evaluator, *metric.targetInputName);
+            if (!labels.has_value()) {
+                // Label-aware metrics are only valid in compositions that already
+                // carry that target input.  Do not invent an input just to make a
+                // metric reportable.
+                continue;
+            }
         }
+
         std::optional<Tensor> inputSource;
         if (metric.inputSourceName.has_value()) {
-            inputSource = trainingRunsEvaluatorInputTensorForGraphInput(evaluator, referenceMember, referenceInputsByName, *metric.inputSourceName);
+            inputSource = existingTrainingRunsEvaluatorInputTensorForGraphInput(evaluator, *metric.inputSourceName);
+            if (!inputSource.has_value()) {
+                continue;
+            }
+        } else if (metric.predictionOutputName.empty()) {
+            // The user explicitly exposed this metric in the source network, so it
+            // remains reportable for that network.  This composed evaluator has no
+            // tensor that can be remapped to the metric's source, so the metric is
+            // not part of this composition.
+            continue;
+        }
+
+        if (!exposedReportOutputs.insert(metric.metricName).second) {
+            throw std::runtime_error("TrainingRuns composed ensemble evaluator cannot expose duplicate report output '" + metric.metricName + "'.");
         }
         Tensor metricTensor = cloneTrainingRunsEvaluatorMetricFromReference(
             evaluator, referenceMember, referenceInputsByName, referenceOutputsByName, metric, averagedPredictions, labels, inputSource);
         evaluator.metricOutputTensorsByName[metric.metricName] = metricTensor;
         NetworkOutput::Builder().network(*evaluator.network).name(metric.metricName).inputTensor(metricTensor).dataType(DataType::FP32).build();
+        activeMetrics.push_back(metric);
     }
+    metrics = std::move(activeMetrics);
     return evaluator;
 }
 
@@ -2820,6 +2859,13 @@ TrainingRunsComposedEvaluatorArtifacts loadTrainingRunsComposedEvaluatorArtifact
         artifacts.metrics = resolveTrainingRunsReportedMetrics(referenceAvailableMetrics,
                                                                requestedMetricNames.empty() ? requestedMetricNames : activeRequestedMetricNames,
                                                                context);
+        artifacts.metrics.erase(
+            std::remove_if(artifacts.metrics.begin(),
+                           artifacts.metrics.end(),
+                           [](const ResolvedEnsembleMetric& metric) {
+                               return !trainingRunsMetricCanParticipateInComposedEvaluation(metric);
+                           }),
+            artifacts.metrics.end());
     }
     if (artifacts.losses.empty() && artifacts.metrics.empty()) {
         return artifacts;
@@ -2899,6 +2945,9 @@ TrainingRunsComposedEvaluatorArtifacts loadTrainingRunsComposedEvaluatorArtifact
 
     artifacts.evaluator = buildTrainingRunsComposedEnsembleEvaluatorForReports(
         artifacts.memberNetworks, artifacts.weights, artifacts.losses, artifacts.metrics);
+    if (artifacts.losses.empty() && artifacts.metrics.empty()) {
+        return artifacts;
+    }
     std::vector<Event> initDoneEvents;
     artifacts.placedEvaluator = artifacts.evaluator.network->place(static_cast<uint32_t>(batchSize),
                                                                    initDoneEvents,
@@ -3124,6 +3173,21 @@ void applyComposedEvaluationMetricsToEnsemble(TrainingEnsembleResult& ensemble,
     }
 }
 
+void retainNamedGraphMetricsAvailableInArtifacts(TrainingEnsembleResult& ensemble,
+                                                 const std::vector<ResolvedEnsembleMetric>& metrics) {
+    std::set<std::string> activeMetricNames;
+    for (const ResolvedEnsembleMetric& metric : metrics) {
+        activeMetricNames.insert(metric.metricName);
+    }
+    ensemble.namedGraphMetrics.erase(
+        std::remove_if(ensemble.namedGraphMetrics.begin(),
+                       ensemble.namedGraphMetrics.end(),
+                       [&](const TrainingNamedMetricResult& metric) {
+                           return activeMetricNames.count(metric.name) == 0;
+                       }),
+        ensemble.namedGraphMetrics.end());
+}
+
 
 Batch inferenceBatchForInputNames(const std::vector<std::string>& inputNames,
                                   const Batch& sourceBatch,
@@ -3206,6 +3270,7 @@ void TrainingRuns::evaluateEnsembles(std::vector<TrainingRunResult>& results,
             requestedReportedLossNamesForGroup(reportedLosses, groupName),
             requestedReportedMetricNamesForGroup(reportedMetrics, groupName),
             "TrainingRuns composed ensemble training-population evaluation for ensemble_group '" + groupName + "'");
+        retainNamedGraphMetricsAvailableInArtifacts(ensembleIt->second, composedArtifacts.metrics);
 
         std::map<std::string, std::vector<std::optional<double>>> sourcePopulationLossesByName;
         std::map<std::string, std::vector<std::optional<double>>> sourcePopulationMetricValuesByName;
@@ -3390,6 +3455,7 @@ void TrainingRuns::evaluateEnsemblesOnTestLoader(std::vector<TrainingRunResult>&
             requestedReportedLossNamesForGroup(reportedLosses, groupName),
             requestedReportedMetricNamesForGroup(reportedMetrics, groupName),
             "TrainingRuns composed ensemble test evaluation for ensemble_group '" + groupName + "'");
+        retainNamedGraphMetricsAvailableInArtifacts(ensembleIt->second, composedArtifacts.metrics);
         ComposedEnsembleEvaluationMetrics metrics = evaluateComposedEnsembleReportsOnLoader(
             composedArtifacts, *testLoader, ExampleType::TEST);
         applyComposedEvaluationMetricsToEnsemble(ensembleIt->second, metrics, /*testPhase=*/true);

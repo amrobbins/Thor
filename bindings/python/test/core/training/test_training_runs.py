@@ -483,12 +483,24 @@ def _build_tiny_regressor_with_label_mean_report(name: str):
     return network
 
 
-def _build_tiny_regressor_with_unrequested_multi_output_metric(name: str):
+def _build_tiny_regressor_with_hidden_metric_report(name: str):
     network = thor.Network(name)
     examples = thor.layers.NetworkInput(network, "examples", [2], thor.DataType.fp32)
+    context = thor.layers.NetworkInput(network, "context", [2], thor.DataType.fp32)
     labels = thor.layers.NetworkInput(network, "labels", [1], thor.DataType.fp32)
 
-    base_prediction = thor.layers.FullyConnected(
+    hidden = thor.layers.CustomLayer(
+        network=network,
+        inputs={
+            "examples": examples.get_feature_output(),
+            "context": context.get_feature_output(),
+        },
+        output_names=["hidden"],
+        build=lambda layer_context: {
+            "hidden": layer_context.input("examples") + layer_context.input("context"),
+        },
+    )
+    predictions = thor.layers.FullyConnected(
         network,
         examples.get_feature_output(),
         1,
@@ -497,47 +509,17 @@ def _build_tiny_regressor_with_unrequested_multi_output_metric(name: str):
         weights_initializer=thor.initializers.UniformRandom(0.0, 0.0),
         biases_initializer=thor.initializers.UniformRandom(0.0, 0.0),
     )
-    head = thor.layers.CustomLayer(
-        network=network,
-        inputs={
-            "base_prediction": base_prediction.get_feature_output(),
-        },
-        output_names=["prediction", "debug_value"],
-        build=lambda context: {
-            "prediction": context.input("base_prediction"),
-            "debug_value": context.input("base_prediction") + 1.0,
-        },
-    )
     loss = thor.losses.MSE(
         network,
-        head["prediction"],
+        predictions.get_feature_output(),
         labels.get_feature_output(),
         thor.DataType.fp32,
     )
-    debug_mean = thor.metrics.Mean(network, head["debug_value"])
+    hidden_mean = thor.metrics.Mean(network, hidden["hidden"])
     thor.layers.NetworkOutput(network, "loss", loss.get_loss(), thor.DataType.fp32)
-    thor.layers.NetworkOutput(network, "prediction", head["prediction"], thor.DataType.fp32)
-    thor.layers.NetworkOutput(network, "debug_value_mean", debug_mean.get_metric(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "prediction", predictions.get_feature_output(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "hidden_mean", hidden_mean.get_metric(), thor.DataType.fp32)
     return network
-
-
-def _make_tiny_regression_unrequested_multi_output_metric_trainer(
-    name: str,
-    *,
-    save_model_dir=None,
-    save_model_overwrite=False,
-):
-    return thor.training.Trainer(
-        _build_tiny_regressor_with_unrequested_multi_output_metric(name),
-        _regression_one_batch_loader(),
-        optimizer=thor.optimizers.Sgd(initial_learning_rate=0.01, momentum=0.0),
-        stats_interval_s=0.0,
-        max_in_flight_batches=2,
-        scalar_tensors_to_report=["debug_value_mean"],
-        stats_color="never",
-        save_model_dir=save_model_dir,
-        save_model_overwrite=save_model_overwrite,
-    )
 
 
 def _build_weighted_tiny_regressor(name: str):
@@ -1188,6 +1170,20 @@ def _make_tiny_regression_with_label_mean_report_trainer(
     )
 
 
+def _make_tiny_regression_with_hidden_metric_report_trainer(
+    name: str,
+):
+    return thor.training.Trainer(
+        _build_tiny_regressor_with_hidden_metric_report(name),
+        _regression_one_batch_loader(),
+        optimizer=thor.optimizers.Sgd(initial_learning_rate=0.01, momentum=0.0),
+        stats_interval_s=0.0,
+        max_in_flight_batches=2,
+        scalar_tensors_to_report=["hidden_mean"],
+        stats_color="never",
+    )
+
+
 def _make_weighted_tiny_regression_trainer(
     name: str,
     *,
@@ -1325,6 +1321,21 @@ def test_training_runs_reported_metrics_discovers_metric_outputs_without_predict
     )
 
     assert runs.reported_metrics["tiny_ensemble"] == ["true_mean", "prediction_mean"]
+
+
+def test_training_runs_reported_metrics_keeps_explicit_hidden_metric_output():
+    trainer = _make_tiny_regression_with_hidden_metric_report_trainer(
+        "training_runs_reported_metrics_with_hidden_metric_report"
+    )
+
+    runs = thor.training.TrainingRuns(
+        [("fold_0", trainer, "tiny_ensemble")],
+        reported_metrics={
+            "tiny_ensemble": ["hidden_mean"]
+        },
+    )
+
+    assert runs.reported_metrics["tiny_ensemble"] == ["hidden_mean"]
 
 
 def _make_two_phase_trainer_with_inactive_future_reports(name: str):
@@ -4226,61 +4237,6 @@ def test_training_runs_save_ensemble_excludes_label_only_report_inputs(capfd, tm
     assert graph_metric_by_name["prediction_mean"].train_value is not None
 
     ensemble_artifact_dir = tmp_path / "tiny_ensemble_label_report_artifact"
-    assert results.save_ensemble("tiny_ensemble", ensemble_artifact_dir) == str(ensemble_artifact_dir)
-    loaded_network = thor.Network.load(str(ensemble_artifact_dir), network_name="ensemble_tiny_ensemble")
-    placed_ensemble = loaded_network.place(4, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
-    assert set(placed_ensemble.get_network_input_names()) == {"examples"}
-    x, _ = _regression_arrays(dtype=np.float32)
-    ensemble_outputs = placed_ensemble.infer({
-        "examples": _cpu_tensor(x, thor.DataType.fp32)
-    })
-    assert set(ensemble_outputs) == {"prediction"}
-
-
-@pytest.mark.cuda
-@pytest.mark.training_integration
-@pytest.mark.skipif(
-    not RUN_TRAINING_INTEGRATION,
-    reason=integration_skip_reason(
-        "THOR_RUN_TRAINING_INTEGRATION",
-        description="opt-in TrainingRuns CUDA integration tests",
-    ),
-)
-def test_training_runs_save_ensemble_stubs_unrequested_outputs_from_partial_clone(capfd, tmp_path):
-    runs = thor.training.TrainingRuns(
-        [
-            (
-                "fold_0",
-                _make_tiny_regression_unrequested_multi_output_metric_trainer(
-                    "training_runs_partial_clone_fold_0",
-                    save_model_dir=tmp_path / "fold_0_model",
-                    save_model_overwrite=True,
-                ),
-                "tiny_ensemble",
-            ),
-            (
-                "fold_1",
-                _make_tiny_regression_unrequested_multi_output_metric_trainer(
-                    "training_runs_partial_clone_fold_1",
-                    save_model_dir=tmp_path / "fold_1_model",
-                    save_model_overwrite=True,
-                ),
-                "tiny_ensemble",
-            ),
-        ],
-        reported_metrics={
-            "tiny_ensemble": ["debug_value_mean"],
-        },
-    )
-
-    results, _ = _fit_runs_and_capture_text(runs, capfd, epochs=1)
-    assert results.all_completed()
-    graph_metric_by_name = {
-        metric.name: metric for metric in results.ensemble("tiny_ensemble").reported_metrics
-    }
-    assert graph_metric_by_name["debug_value_mean"].train_value is not None
-
-    ensemble_artifact_dir = tmp_path / "tiny_ensemble_partial_clone_artifact"
     assert results.save_ensemble("tiny_ensemble", ensemble_artifact_dir) == str(ensemble_artifact_dir)
     loaded_network = thor.Network.load(str(ensemble_artifact_dir), network_name="ensemble_tiny_ensemble")
     placed_ensemble = loaded_network.place(4, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)

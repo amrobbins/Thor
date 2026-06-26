@@ -1368,20 +1368,8 @@ void CustomLayer::compileImpl() {
                                     "' for application " + std::to_string(applicationIndex) + ".");
             }
             if (!featureOutputs[flat].has_value()) {
-                // A retained multi-output CustomLayer can have a sibling output that
-                // is intentionally unconsumed after inference pruning or partial
-                // subgraph cloning.  The expression still declares and stamps every
-                // output name, so provide a throwaway tensor for the unconnected port
-                // instead of requiring a graph-level loader.  Public API graphs with
-                // true dangling tensors are still rejected by Network::evaluateGraph();
-                // this is a physical-layer boundary repair for graphs that have
-                // already been pruned to a valid inference/reporting subgraph.
-                std::optional<Tensor> outputTensor = inferFeatureOutputTensor(applicationIndex, outputPort);
-                if (!outputTensor.has_value()) {
-                    throw runtime_error("CustomLayer failed to infer unconnected output port '" + outputNames[outputPort] +
-                                        "' for application " + std::to_string(applicationIndex) + ".");
-                }
-                featureOutputs[flat] = outputTensor;
+                throw runtime_error("CustomLayer missing connected output port '" + outputNames[outputPort] + "' for application " +
+                                    std::to_string(applicationIndex) + ".");
             }
         }
 
