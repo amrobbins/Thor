@@ -614,8 +614,11 @@ bool trainingRunsReportableLossesCompatible(const NetworkLossReference& lhs, con
 
 std::string trainingRunsReportableLossDescription(const NetworkLossReference& reference) {
     std::ostringstream out;
-    out << "loss_name='" << reference.lossName << "', prediction_output_name='" << reference.predictionOutputName
-        << "', target_input_name='" << reference.targetInputName << "'";
+    out << "loss_name='" << reference.lossName << "'";
+    if (!reference.predictionOutputName.empty()) {
+        out << ", prediction_output_name='" << reference.predictionOutputName << "'";
+    }
+    out << ", target_input_name='" << reference.targetInputName << "'";
     if (reference.weightInputName.has_value()) {
         out << ", weight_input_name='" << *reference.weightInputName << "'";
     }
@@ -794,6 +797,10 @@ std::vector<ResolvedEnsembleMetric> resolveTrainingRunsReportedMetrics(
         resolved.push_back(std::move(metric));
     }
     return resolved;
+}
+
+bool trainingRunsLossCanParticipateInComposedEvaluation(const ResolvedEnsembleLoss& loss) {
+    return !loss.predictionOutputName.empty();
 }
 
 bool trainingRunsMetricCanParticipateInComposedEvaluation(const ResolvedEnsembleMetric& metric) {
@@ -1709,11 +1716,13 @@ void TrainingRuns::validateReportedLosses() const {
             resolveTrainingRunsReportedLosses(reportableLossesForMember(referenceMember), requestedLossNames, context + " reference run '" + referenceMember.runName + "'");
 
         for (const ResolvedEnsembleLoss& resolved : referenceLosses) {
-            const TrainingRunOutputSignature* referenceOutput = findOutputSignatureItem(referenceMember.outputSignature, resolved.predictionOutputName);
-            if (referenceOutput == nullptr) {
-                throw std::runtime_error(context + " resolved loss '" + resolved.lossName + "' to prediction output '" +
-                                         resolved.predictionOutputName + "', but reference run '" + referenceMember.runName +
-                                         "' has outputs " + outputSignatureToString(referenceMember.outputSignature) + ".");
+            if (!resolved.predictionOutputName.empty()) {
+                const TrainingRunOutputSignature* referenceOutput = findOutputSignatureItem(referenceMember.outputSignature, resolved.predictionOutputName);
+                if (referenceOutput == nullptr) {
+                    throw std::runtime_error(context + " resolved loss '" + resolved.lossName + "' to prediction output '" +
+                                             resolved.predictionOutputName + "', but reference run '" + referenceMember.runName +
+                                             "' has outputs " + outputSignatureToString(referenceMember.outputSignature) + ".");
+                }
             }
             const TrainingRunInputSignature* referenceTarget = findInputSignatureItem(referenceMember.inputSignature, resolved.targetInputName);
             if (referenceTarget == nullptr) {
@@ -2064,6 +2073,9 @@ std::vector<TrainingNamedMetricResult> TrainingRuns::namedMetricResultsForGroup(
     std::vector<TrainingNamedMetricResult> results;
     results.reserve(resolvedLosses.size());
     for (const ResolvedEnsembleLoss& loss : resolvedLosses) {
+        if (!trainingRunsLossCanParticipateInComposedEvaluation(loss)) {
+            continue;
+        }
         TrainingNamedMetricResult result;
         result.name = loss.lossName;
         results.push_back(std::move(result));
@@ -2680,7 +2692,7 @@ Tensor cloneTrainingRunsEvaluatorMetricFromReference(TrainingRunsComposedEnsembl
 TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluatorForReports(
     const std::vector<std::shared_ptr<Network>>& memberNetworks,
     const std::vector<double>& weights,
-    const std::vector<ResolvedEnsembleLoss>& losses,
+    std::vector<ResolvedEnsembleLoss>& losses,
     std::vector<ResolvedEnsembleMetric>& metrics) {
     if (losses.empty() && metrics.empty()) {
         throw std::runtime_error("TrainingRuns composed ensemble evaluator requires at least one graph loss or metric to report.");
@@ -2689,7 +2701,7 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
     std::vector<std::string> outputNames;
     std::set<std::string> seenOutputs;
     for (const ResolvedEnsembleLoss& loss : losses) {
-        if (seenOutputs.insert(loss.predictionOutputName).second) {
+        if (!loss.predictionOutputName.empty() && seenOutputs.insert(loss.predictionOutputName).second) {
             outputNames.push_back(loss.predictionOutputName);
         }
     }
@@ -2709,11 +2721,19 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
     const std::map<std::string, std::shared_ptr<NetworkOutput>> referenceOutputsByName = apiNetworkOutputsByName(referenceMember);
 
     std::set<std::string> exposedReportOutputs;
+    std::vector<ResolvedEnsembleLoss> activeLosses;
+    activeLosses.reserve(losses.size());
     for (const ResolvedEnsembleLoss& loss : losses) {
+        if (loss.predictionOutputName.empty()) {
+            // The source network exposes this loss, but its prediction side is
+            // not represented by an averaged ensemble output in this composition.
+            // In this composed evaluator the loss does not exist, so do not
+            // expose or report it.
+            continue;
+        }
         const auto predictionIt = evaluator.averagedOutputTensorsByName.find(loss.predictionOutputName);
         if (predictionIt == evaluator.averagedOutputTensorsByName.end()) {
-            throw std::runtime_error("TrainingRuns composed ensemble evaluator did not build averaged prediction output '" +
-                                     loss.predictionOutputName + "' for reported loss '" + loss.lossName + "'.");
+            continue;
         }
         if (!exposedReportOutputs.insert(loss.lossName).second) {
             throw std::runtime_error("TrainingRuns composed ensemble evaluator cannot expose duplicate report output '" + loss.lossName + "'.");
@@ -2727,6 +2747,7 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
             evaluator, referenceMember, referenceInputsByName, referenceOutputsByName, loss, predictionIt->second, labels, weightsTensor);
         evaluator.lossOutputTensorsByName[loss.lossName] = lossTensor;
         NetworkOutput::Builder().network(*evaluator.network).name(loss.lossName).inputTensor(lossTensor).dataType(DataType::FP32).build();
+        activeLosses.push_back(loss);
     }
 
     std::vector<ResolvedEnsembleMetric> activeMetrics;
@@ -2778,6 +2799,7 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
         NetworkOutput::Builder().network(*evaluator.network).name(metric.metricName).inputTensor(metricTensor).dataType(DataType::FP32).build();
         activeMetrics.push_back(metric);
     }
+    losses = std::move(activeLosses);
     metrics = std::move(activeMetrics);
     return evaluator;
 }
@@ -2855,6 +2877,13 @@ TrainingRunsComposedEvaluatorArtifacts loadTrainingRunsComposedEvaluatorArtifact
                                                              requestedLossNames.empty() ? requestedLossNames : activeRequestedLossNames,
                                                              context);
     }
+    artifacts.losses.erase(
+        std::remove_if(artifacts.losses.begin(),
+                       artifacts.losses.end(),
+                       [](const ResolvedEnsembleLoss& loss) {
+                           return !trainingRunsLossCanParticipateInComposedEvaluation(loss);
+                       }),
+        artifacts.losses.end());
     if (requestedMetricNames.empty() || !activeRequestedMetricNames.empty()) {
         artifacts.metrics = resolveTrainingRunsReportedMetrics(referenceAvailableMetrics,
                                                                requestedMetricNames.empty() ? requestedMetricNames : activeRequestedMetricNames,

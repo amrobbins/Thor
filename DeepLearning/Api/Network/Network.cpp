@@ -1319,11 +1319,12 @@ std::vector<std::string> Network::getTrainingOnlyNetworkInputNames() {
 }
 
 std::vector<NetworkLossReference> Network::getReportableLosses() {
-    // Reportable loss discovery is based on actual Loss layers and their
-    // explicit prediction / label / example-weight roles.  Do not require the
-    // label or weight NetworkInput to be "training-only" here: users may also
-    // report label-derived training metrics, such as Mean(labels), and that
-    // should not make the underlying graph loss undiscoverable.
+    // Reportable loss discovery is based on actual Loss layers that the user
+    // explicitly exposes through NetworkOutput.  A loss can remain reportable
+    // for the source network even when its prediction tensor is an internal
+    // hidden/intermediate tensor that cannot be remapped in a composed ensemble
+    // evaluator.  Composition-time reporting decides whether that loss exists
+    // for that composition.
     rebuildApiGraphIndexes(/*inferenceOnly=*/false);
 
     auto sourceNetworkInputName = [&](const Tensor& tensor) -> std::optional<std::string> {
@@ -1520,10 +1521,18 @@ std::vector<NetworkLossReference> Network::getReportableLosses() {
             exampleWeights = loss->getExampleWeights();
         }
 
-        const std::vector<std::string> predictionOutputNames = predictionOutputNamesForTensor(predictions);
-        if (predictionOutputNames.empty()) {
+        std::vector<std::string> lossNames;
+        auto lossNamesIt = lossNamesByLayerId.find(loss->getId());
+        if (lossNamesIt != lossNamesByLayerId.end()) {
+            lossNames = lossNamesIt->second;
+        }
+        if (lossNames.empty()) {
+            // Only user-exposed graph losses are reportable.  Do not synthesize
+            // report names for unexposed Loss layers.
             continue;
         }
+
+        const std::vector<std::string> predictionOutputNames = predictionOutputNamesForTensor(predictions);
         std::optional<std::string> labelInputName = sourceNetworkInputName(labels.value());
         if (!labelInputName.has_value()) {
             continue;
@@ -1542,16 +1551,16 @@ std::vector<NetworkLossReference> Network::getReportableLosses() {
             quantile = static_cast<double>(quantileLoss->getQuantile());
         }
 
-        std::vector<std::string> lossNames;
-        auto lossNamesIt = lossNamesByLayerId.find(loss->getId());
-        if (lossNamesIt != lossNamesByLayerId.end()) {
-            lossNames = lossNamesIt->second;
-        }
-        if (lossNames.empty()) {
-            lossNames.push_back("loss_" + std::to_string(loss->getId()));
+        std::vector<std::string> predictionReportSources = predictionOutputNames;
+        if (predictionReportSources.empty()) {
+            // The loss itself is explicitly exposed, but its prediction side is
+            // not an exposed NetworkOutput.  Keep it reportable for the source
+            // network; composed ensemble evaluators will skip it because there is
+            // no averaged prediction tensor to remap.
+            predictionReportSources.push_back("");
         }
 
-        for (const std::string& outputName : predictionOutputNames) {
+        for (const std::string& outputName : predictionReportSources) {
             for (const std::string& lossName : lossNames) {
                 NetworkLossReference reference;
                 reference.lossName = lossName;

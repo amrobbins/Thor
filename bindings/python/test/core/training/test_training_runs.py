@@ -522,6 +522,40 @@ def _build_tiny_regressor_with_hidden_metric_report(name: str):
     return network
 
 
+def _build_tiny_regressor_with_hidden_loss_report(name: str):
+    network = thor.Network(name)
+    examples = thor.layers.NetworkInput(network, "examples", [2], thor.DataType.fp32)
+    labels = thor.layers.NetworkInput(network, "labels", [1], thor.DataType.fp32)
+
+    hidden_prediction = thor.layers.FullyConnected(
+        network,
+        examples.get_feature_output(),
+        1,
+        True,
+        activation=None,
+        weights_initializer=thor.initializers.UniformRandom(0.0, 0.0),
+        biases_initializer=thor.initializers.UniformRandom(0.0, 0.0),
+    )
+    deployable_prediction = thor.layers.FullyConnected(
+        network,
+        examples.get_feature_output(),
+        1,
+        True,
+        activation=None,
+        weights_initializer=thor.initializers.UniformRandom(0.0, 0.0),
+        biases_initializer=thor.initializers.UniformRandom(0.0, 0.0),
+    )
+    hidden_loss = thor.losses.MSE(
+        network,
+        hidden_prediction.get_feature_output(),
+        labels.get_feature_output(),
+        thor.DataType.fp32,
+    )
+    thor.layers.NetworkOutput(network, "hidden_loss", hidden_loss.get_loss(), thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "prediction", deployable_prediction.get_feature_output(), thor.DataType.fp32)
+    return network
+
+
 def _build_weighted_tiny_regressor(name: str):
     network = thor.Network(name)
     examples = thor.layers.NetworkInput(network, "examples", [2], thor.DataType.fp32)
@@ -1184,6 +1218,20 @@ def _make_tiny_regression_with_hidden_metric_report_trainer(
     )
 
 
+def _make_tiny_regression_with_hidden_loss_report_trainer(
+    name: str,
+):
+    return thor.training.Trainer(
+        _build_tiny_regressor_with_hidden_loss_report(name),
+        _regression_one_batch_loader(),
+        optimizer=thor.optimizers.Sgd(initial_learning_rate=0.01, momentum=0.0),
+        stats_interval_s=0.0,
+        max_in_flight_batches=2,
+        scalar_tensors_to_report=["hidden_loss"],
+        stats_color="never",
+    )
+
+
 def _make_weighted_tiny_regression_trainer(
     name: str,
     *,
@@ -1336,6 +1384,21 @@ def test_training_runs_reported_metrics_keeps_explicit_hidden_metric_output():
     )
 
     assert runs.reported_metrics["tiny_ensemble"] == ["hidden_mean"]
+
+
+def test_training_runs_reported_losses_keeps_explicit_hidden_loss_output():
+    trainer = _make_tiny_regression_with_hidden_loss_report_trainer(
+        "training_runs_reported_losses_with_hidden_loss_report"
+    )
+
+    runs = thor.training.TrainingRuns(
+        [("fold_0", trainer, "tiny_ensemble")],
+        reported_losses={
+            "tiny_ensemble": ["hidden_loss"]
+        },
+    )
+
+    assert runs.reported_losses["tiny_ensemble"] == ["hidden_loss"]
 
 
 def _make_two_phase_trainer_with_inactive_future_reports(name: str):
