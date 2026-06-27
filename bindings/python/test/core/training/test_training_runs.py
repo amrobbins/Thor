@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tarfile
 import urllib.request
 import weakref
 from pathlib import Path
@@ -4488,6 +4489,60 @@ def test_training_runs_fits_two_tiny_trainers_on_one_gpu_and_prefixes_stats(capf
     assert "final_validate_loss=" not in plain_text
     assert "phase=unknown" not in plain_text
     assert "INFO trainer:" not in plain_text
+
+
+@pytest.mark.cuda
+@pytest.mark.training_integration
+@pytest.mark.skipif(
+    not RUN_TRAINING_INTEGRATION,
+    reason=integration_skip_reason(
+        "THOR_RUN_TRAINING_INTEGRATION",
+        description="opt-in TrainingRuns CUDA integration tests",
+    ),
+)
+def test_training_runs_save_single_member_ensemble_uses_direct_member_graph(capfd, tmp_path):
+    trainer = _make_tiny_regression_trainer(
+        "training_runs_single_member_ensemble_direct",
+        save_model_dir=tmp_path / "single_member_model",
+        save_model_overwrite=True,
+    )
+    runs = thor.training.TrainingRuns([("fold_0", trainer, "tiny_ensemble")])
+
+    results, _ = _fit_runs_and_capture_text(runs, capfd, epochs=1)
+
+    assert results.all_completed()
+    ensemble = results.ensemble("tiny_ensemble")
+    assert ensemble.successful_models == 1
+
+    ensemble_artifact_dir = tmp_path / "single_member_ensemble_artifact"
+    assert results.save_ensemble("tiny_ensemble", ensemble_artifact_dir) == str(ensemble_artifact_dir)
+    assert not (ensemble_artifact_dir / "ensemble_manifest.json").exists()
+    assert not (ensemble_artifact_dir / "members").exists()
+
+    archive_path = ensemble_artifact_dir / "ensemble_tiny_ensemble.thor.tar"
+    assert archive_path.exists()
+    with tarfile.open(archive_path, "r") as archive:
+        model_file = archive.extractfile("ensemble_tiny_ensemble.thor.json")
+        assert model_file is not None
+        model_json = json.load(model_file)
+    serialized_model = json.dumps(model_json)
+    assert "member_0/" not in serialized_model
+    assert "member_0_" not in serialized_model
+    assert "training_runs_composed_ensemble" not in serialized_model
+
+    loaded_network = thor.Network.load(str(ensemble_artifact_dir), network_name="ensemble_tiny_ensemble")
+    placed_ensemble = loaded_network.place(4, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
+    assert set(placed_ensemble.get_network_input_names()) == {"examples"}
+    x, _ = _regression_arrays(dtype=np.float32)
+    ensemble_outputs = placed_ensemble.infer({
+        "examples": _cpu_tensor(x, thor.DataType.fp32)
+    })
+    assert set(ensemble_outputs) == {"prediction"}
+    ensemble_prediction = np.array(ensemble_outputs["prediction"].numpy(), copy=True)
+
+    member_prediction = _prediction_from_saved_tiny_regressor(
+        tmp_path / "single_member_model", results["fold_0"].saved_model_network_name)
+    np.testing.assert_allclose(ensemble_prediction, member_prediction, rtol=1e-5, atol=1e-5)
 
 
 @pytest.mark.cuda

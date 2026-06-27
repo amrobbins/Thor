@@ -993,11 +993,11 @@ bool TrainingRunsResult::anyCancelled() const {
 
 namespace {
 
-void saveComposedEnsembleNetworkArtifact(const TrainingEnsembleResult& ensembleResult,
-                                         const std::vector<SavedNetworkArtifactRef>& memberArtifacts,
-                                         const std::string& aggregation,
-                                         const std::filesystem::path& artifactDirectory,
-                                         bool overwriteNetworkArchive);
+void saveEnsembleNetworkArtifact(const TrainingEnsembleResult& ensembleResult,
+                                 const std::vector<SavedNetworkArtifactRef>& memberArtifacts,
+                                 const std::string& aggregation,
+                                 const std::filesystem::path& artifactDirectory,
+                                 bool overwriteNetworkArchive);
 
 }  // namespace
 
@@ -1099,11 +1099,11 @@ std::string TrainingRunsResult::saveEnsemble(std::string_view ensembleGroup,
 
     // save_ensemble produces a regular Thor Network artifact.  Member artifacts
     // and manifests are not copied into the deployable artifact.
-    saveComposedEnsembleNetworkArtifact(ensembleResult,
-                                        completedMemberArtifacts,
-                                        resolvedAggregation,
-                                        artifactDirectory,
-                                        /*overwriteNetworkArchive=*/true);
+    saveEnsembleNetworkArtifact(ensembleResult,
+                                completedMemberArtifacts,
+                                resolvedAggregation,
+                                artifactDirectory,
+                                /*overwriteNetworkArchive=*/true);
 
     return artifactDirectory.string();
 }
@@ -2701,11 +2701,72 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
     return evaluator;
 }
 
-void saveComposedEnsembleNetworkArtifact(const TrainingEnsembleResult& ensembleResult,
-                                         const std::vector<SavedNetworkArtifactRef>& memberArtifacts,
-                                         const std::string& aggregation,
-                                         const std::filesystem::path& artifactDirectory,
-                                         bool overwriteNetworkArchive) {
+std::shared_ptr<Network> buildSingleMemberEnsembleNetworkArtifact(Network& memberNetwork,
+                                                               const std::vector<std::string>& outputNames,
+                                                               const std::vector<std::string>& deployableInputNames,
+                                                               const std::string& networkName) {
+    if (outputNames.empty()) {
+        throw std::runtime_error("TrainingRunsResult.save_ensemble single-member artifact requires at least one deployable output.");
+    }
+    if (deployableInputNames.empty()) {
+        throw std::runtime_error("TrainingRunsResult.save_ensemble single-member artifact requires at least one deployable input.");
+    }
+
+    auto ensembleNetwork = std::make_shared<Network>(networkName);
+    const std::map<std::string, std::shared_ptr<NetworkInput>> memberInputsByName =
+        apiNetworkInputsByName(memberNetwork, /*includePassThroughInputs=*/false);
+
+    ApiTensorRemap remap;
+    std::set<std::string> seenInputNames;
+    for (const std::string& inputName : deployableInputNames) {
+        if (!seenInputNames.insert(inputName).second) {
+            throw std::runtime_error("TrainingRunsResult.save_ensemble single-member artifact found duplicate deployable input name '" +
+                                     inputName + "'.");
+        }
+        std::shared_ptr<NetworkInput> memberInput =
+            requiredApiNetworkInputByName(memberNetwork, memberInputsByName, inputName,
+                                          "TrainingRunsResult.save_ensemble single-member artifact member");
+        NetworkInput ensembleInput = NetworkInput::Builder()
+                                         .network(*ensembleNetwork)
+                                         .name(inputName)
+                                         .dimensions(memberInput->getDimensions())
+                                         .dataType(memberInput->getDataType())
+                                         .dimensionsIncludeBatch(memberInput->dimensionsIncludeBatch())
+                                         .build();
+        remap.map(memberInput->getFeatureOutput().value(), ensembleInput.getFeatureOutput().value());
+    }
+
+    ApiSubgraphCloneOptions cloneOptions;
+    cloneOptions.inferenceOnly = true;
+    ApiSubgraphCloneResult cloneResult = ensembleNetwork->cloneInferenceSubgraphInto(memberNetwork, outputNames, remap, cloneOptions);
+
+    std::set<std::string> seenOutputNames;
+    for (const std::string& outputName : outputNames) {
+        if (!seenOutputNames.insert(outputName).second) {
+            throw std::runtime_error("TrainingRunsResult.save_ensemble single-member artifact found duplicate deployable output name '" +
+                                     outputName + "'.");
+        }
+        const auto outputIt = cloneResult.outputTensorsByName.find(outputName);
+        if (outputIt == cloneResult.outputTensorsByName.end()) {
+            throw std::runtime_error("TrainingRunsResult.save_ensemble single-member artifact did not clone output '" + outputName + "'.");
+        }
+        const Tensor& outputTensor = outputIt->second;
+        NetworkOutput::Builder()
+            .network(*ensembleNetwork)
+            .name(outputName)
+            .inputTensor(outputTensor)
+            .dataType(outputTensor.getDataType())
+            .build();
+    }
+
+    return ensembleNetwork;
+}
+
+void saveEnsembleNetworkArtifact(const TrainingEnsembleResult& ensembleResult,
+                                 const std::vector<SavedNetworkArtifactRef>& memberArtifacts,
+                                 const std::string& aggregation,
+                                 const std::filesystem::path& artifactDirectory,
+                                 bool overwriteNetworkArchive) {
     if (memberArtifacts.empty()) {
         throw std::runtime_error("TrainingRunsResult.save_ensemble cannot save an ensemble network with no completed member artifacts.");
     }
@@ -2742,6 +2803,24 @@ void saveComposedEnsembleNetworkArtifact(const TrainingEnsembleResult& ensembleR
     if (deployableInputNames.empty()) {
         throw std::runtime_error("TrainingRunsResult.save_ensemble could not determine any deployable input names for ensemble group '" +
                                  ensembleResult.ensembleGroup + "'.");
+    }
+
+    if (memberNetworks.size() == 1) {
+        std::shared_ptr<Network> singleMemberEnsembleNetwork = buildSingleMemberEnsembleNetworkArtifact(
+            *memberNetworks.front(),
+            outputNames,
+            deployableInputNames,
+            safeNetworkNameForSavedEnsemble(ensembleResult.ensembleGroup));
+        std::vector<Event> initDoneEvents;
+        std::shared_ptr<PlacedNetwork> placed = singleMemberEnsembleNetwork->place(
+            /*batchSize=*/1,
+            initDoneEvents,
+            /*inferenceOnly=*/true,
+            /*forcedDevices=*/{},
+            /*forcedNumStampsPerGpu=*/0,
+            /*networkOutputsOnGpu=*/false);
+        placed->save(artifactDirectory.string(), overwriteNetworkArchive, /*saveOptimizerState=*/false);
+        return;
     }
 
     TrainingRunsComposedEnsembleEvaluator evaluator = buildTrainingRunsComposedEnsembleEvaluatorThroughAccumulator(
