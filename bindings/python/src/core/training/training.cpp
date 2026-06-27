@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <optional>
@@ -53,6 +54,7 @@ namespace {
 
 using Float32Array = nb::ndarray<const float, nb::numpy, nb::c_contig>;
 using Float16Array = nb::ndarray<const half, nb::numpy, nb::c_contig>;
+using Int64Array = nb::ndarray<const int64_t, nb::numpy, nb::c_contig>;
 
 template <typename ScalarT>
 struct InMemoryNumpySplit {
@@ -462,6 +464,350 @@ std::optional<uint64_t> optionalUint64FromPython(nb::object value, const std::st
     }
     return pybind::castOrTypeError<uint64_t>(value, name, "int or None", false);
 }
+
+struct SharedFloat32NumpyTensor {
+    std::optional<Float32Array> array;
+    const float* data = nullptr;
+    std::vector<uint64_t> shapeWithoutBatch;
+    ThorImplementation::TensorDescriptor batchDescriptor;
+    uint64_t elementsPerExample = 0;
+};
+
+struct IndexedNumpyDictSplit {
+    std::vector<uint64_t> indices;
+    uint64_t numExamples = 0;
+    uint64_t nextBatchNum = 0;
+    std::unique_ptr<FullPeriodRandom> randomizer;
+    std::map<std::string, std::unique_ptr<AsyncTensorQueue>> queues;
+};
+
+Float32Array requireFloat32NumpyArrayNoCopy(nb::handle value, const std::string& context) {
+    return pybind::castOrTypeError<Float32Array>(
+        value, context, "a C-contiguous numpy.float32 array", false);
+}
+
+void markNumpyArrayReadOnly(nb::handle value, const std::string& context) {
+    try {
+        nb::object arrayObject = nb::borrow<nb::object>(value);
+        arrayObject.attr("setflags")("write"_a = false);
+    } catch (const nb::python_error& e) {
+        throw nb::value_error((context + " could not be marked read-only").c_str());
+    }
+}
+
+std::map<std::string, SharedFloat32NumpyTensor> makeSharedFloat32NumpyDictTensors(const nb::dict& tensors,
+                                                                                 const std::string& loaderClassName) {
+    if (nb::len(tensors) == 0) {
+        throw nb::value_error((loaderClassName + " tensors dict must contain at least one tensor").c_str());
+    }
+
+    std::map<std::string, SharedFloat32NumpyTensor> sharedTensors;
+    bool haveNumExamples = false;
+    uint64_t expectedNumExamples = 0;
+    for (auto item : tensors) {
+        const std::string name = tensorNameFromPythonKey(item.first, loaderClassName + " tensors");
+        const std::string context = loaderClassName + " tensors['" + name + "']";
+        Float32Array array = requireFloat32NumpyArrayNoCopy(item.second, context);
+        markNumpyArrayReadOnly(item.second, context);
+        const uint64_t numExamples = static_cast<uint64_t>(array.shape(0));
+        if (!haveNumExamples) {
+            expectedNumExamples = numExamples;
+            haveNumExamples = true;
+        } else if (expectedNumExamples != numExamples) {
+            throw nb::value_error((loaderClassName + " tensors must all have the same leading dimension; tensor '" + name +
+                                   "' has a different N")
+                                      .c_str());
+        }
+
+        SharedFloat32NumpyTensor tensor;
+        tensor.shapeWithoutBatch = float32ArrayShapeWithoutBatchDim(array, context);
+        tensor.elementsPerExample = product(tensor.shapeWithoutBatch);
+        tensor.data = array.data();
+        tensor.array.emplace(std::move(array));
+
+        auto [it, inserted] = sharedTensors.emplace(name, std::move(tensor));
+        (void)it;
+        if (!inserted) {
+            throw nb::value_error((loaderClassName + " tensors duplicate tensor name '" + name + "'").c_str());
+        }
+    }
+
+    return sharedTensors;
+}
+
+std::vector<uint64_t> uint64IndicesFromPython(nb::object indices,
+                                              const std::string& context,
+                                              uint64_t maxExclusive) {
+    nb::object numpy = nb::module_::import_("numpy");
+    nb::object sourceObject;
+    nb::object arrayObject;
+    try {
+        sourceObject = numpy.attr("asarray")(indices);
+        const bool isInteger = pybind::castOrTypeError<bool>(
+            numpy.attr("issubdtype")(sourceObject.attr("dtype"), numpy.attr("integer")),
+            context + " dtype check",
+            "bool",
+            false);
+        if (!isInteger) {
+            throw nb::type_error((context + " must be an integer index array").c_str());
+        }
+        arrayObject = numpy.attr("ascontiguousarray")(sourceObject, numpy.attr("int64"));
+    } catch (const nb::python_error&) {
+        throw nb::type_error((context + " must be a one-dimensional integer index array").c_str());
+    }
+
+    Int64Array array = pybind::castOrTypeError<Int64Array>(
+        arrayObject, context, "a one-dimensional integer index array", false);
+    if (array.ndim() != 1) {
+        throw nb::value_error((context + " must be one-dimensional").c_str());
+    }
+    if (array.shape(0) == 0) {
+        throw nb::value_error((context + " must contain at least one row index").c_str());
+    }
+
+    std::vector<uint64_t> out;
+    out.reserve(static_cast<size_t>(array.shape(0)));
+    for (size_t i = 0; i < array.shape(0); ++i) {
+        const int64_t raw = array.data()[i];
+        if (raw < 0) {
+            throw nb::value_error((context + " contains a negative row index").c_str());
+        }
+        const uint64_t index = static_cast<uint64_t>(raw);
+        if (index >= maxExclusive) {
+            throw nb::value_error((context + " contains a row index outside the tensor leading dimension").c_str());
+        }
+        out.push_back(index);
+    }
+    return out;
+}
+
+IndexedNumpyDictSplit makeIndexedNumpyDictSplit(nb::object indices,
+                                                const std::string& splitName,
+                                                const std::string& loaderClassName,
+                                                uint64_t maxExclusive) {
+    IndexedNumpyDictSplit split;
+    split.indices = uint64IndicesFromPython(std::move(indices), loaderClassName + " " + splitName + "_indices", maxExclusive);
+    split.numExamples = static_cast<uint64_t>(split.indices.size());
+    return split;
+}
+
+class IndexedNumpyFloat32DictBatchLoader : public Loader {
+   public:
+    IndexedNumpyFloat32DictBatchLoader(nb::dict tensors,
+                                       nb::object trainIndices,
+                                       nb::object validateIndices,
+                                       nb::object testIndices,
+                                       uint64_t batchSize,
+                                       std::string loaderClassName,
+                                       bool randomizeTrain,
+                                       uint64_t batchQueueDepth,
+                                       std::optional<uint64_t> randomSeed)
+        : loaderClassName(std::move(loaderClassName)),
+          randomizeTrain(randomizeTrain),
+          batchQueueDepth(batchQueueDepth),
+          randomSeed(randomSeed),
+          explicitTestSplit(!testIndices.is_none()) {
+        if (batchSize == 0) {
+            throw nb::value_error((this->loaderClassName + " batch_size must be >= 1").c_str());
+        }
+        if (batchQueueDepth == 0) {
+            throw nb::value_error((this->loaderClassName + " batch_queue_depth must be >= 1").c_str());
+        }
+        this->batchSize = batchSize;
+
+        sharedTensors = makeSharedFloat32NumpyDictTensors(tensors, this->loaderClassName);
+        const uint64_t maxExclusive = static_cast<uint64_t>(sharedTensors.begin()->second.array.value().shape(0));
+
+        train = makeIndexedNumpyDictSplit(std::move(trainIndices), "train", this->loaderClassName, maxExclusive);
+        validate = makeIndexedNumpyDictSplit(std::move(validateIndices), "validate", this->loaderClassName, maxExclusive);
+        if (explicitTestSplit) {
+            test = makeIndexedNumpyDictSplit(std::move(testIndices), "test", this->loaderClassName, maxExclusive);
+        } else {
+            test.indices = validate.indices;
+            test.numExamples = validate.numExamples;
+        }
+
+        if (this->randomizeTrain) {
+            train.randomizer = std::make_unique<FullPeriodRandom>(train.numExamples, false);
+            if (this->randomSeed.has_value()) {
+                train.randomizer->reseed(this->randomSeed.value());
+            }
+        } else if (this->randomSeed.has_value()) {
+            throw nb::value_error((this->loaderClassName + " random_seed requires randomize_train=True").c_str());
+        }
+
+        initializeSplitQueues(train);
+        initializeSplitQueues(validate);
+        initializeSplitQueues(test);
+    }
+
+    ~IndexedNumpyFloat32DictBatchLoader() override {
+        closeSplitQueues(train);
+        closeSplitQueues(validate);
+        closeSplitQueues(test);
+    }
+
+    Batch getBatch(ExampleType exampleType, uint64_t& batchNum) override {
+        IndexedNumpyDictSplit& split = mutableSplit(exampleType);
+        const uint64_t batchesPerEpoch = getNumBatchesPerEpoch(exampleType);
+        if (batchNum >= batchesPerEpoch) {
+            batchNum = split.nextBatchNum;
+        }
+
+        std::map<std::string, ThorImplementation::Tensor> loadedTensors;
+        for (auto& [name, queue] : split.queues) {
+            ThorImplementation::Tensor tensor;
+            bool queueOpen = queue->getBufferToLoad(tensor);
+            THOR_THROW_IF_FALSE(queueOpen);
+            loadedTensors.emplace(name, tensor);
+        }
+
+        const uint64_t firstExample = batchNum * batchSize;
+        const bool useRandomizer = exampleType == ExampleType::TRAIN && randomizeTrain;
+        for (uint64_t i = 0; i < batchSize; ++i) {
+            const uint64_t logicalIndex = useRandomizer ? split.randomizer->getRandomNumber() : (firstExample + i) % split.numExamples;
+            const uint64_t exampleIndex = split.indices[logicalIndex];
+            for (const auto& [name, spec] : sharedTensors) {
+                ThorImplementation::Tensor& tensor = loadedTensors.at(name);
+                float* dest = tensor.getMemPtr<float>();
+                std::memcpy(dest + (i * spec.elementsPerExample),
+                            spec.data + (exampleIndex * spec.elementsPerExample),
+                            spec.elementsPerExample * sizeof(float));
+            }
+        }
+
+        split.nextBatchNum = (batchNum + 1) % batchesPerEpoch;
+
+        for (auto& [name, queue] : split.queues) {
+            ThorImplementation::Tensor& tensor = loadedTensors.at(name);
+            bool queueOpen = queue->bufferLoaded(tensor);
+            THOR_THROW_IF_FALSE(queueOpen);
+        }
+        for (auto& [name, queue] : split.queues) {
+            ThorImplementation::Tensor& tensor = loadedTensors.at(name);
+            bool queueOpen = queue->getBufferToUnload(tensor);
+            THOR_THROW_IF_FALSE(queueOpen);
+        }
+
+        Batch batch;
+        for (auto& [name, tensor] : loadedTensors) {
+            batch.insert(name, tensor);
+        }
+        return batch;
+    }
+
+    void returnBatchBuffers(ExampleType exampleType, Batch&& batch) override {
+        IndexedNumpyDictSplit& split = mutableSplit(exampleType);
+        if (batch.size() != sharedTensors.size()) {
+            throw std::runtime_error(loaderClassName + " returned batch has unexpected tensor count");
+        }
+        for (auto& [name, queue] : split.queues) {
+            if (!batch.contains(name)) {
+                throw std::runtime_error(loaderClassName + " returned batch is missing tensor '" + name + "'");
+            }
+            bool queueOpen = queue->bufferUnloaded(batch.getTensor(name));
+            THOR_THROW_IF_FALSE(queueOpen);
+        }
+    }
+
+    uint64_t getNumBatchesPerEpoch(ExampleType exampleType) override {
+        const IndexedNumpyDictSplit& split = immutableSplit(exampleType);
+        return (split.numExamples + batchSize - 1) / batchSize;
+    }
+
+    uint64_t getNumExamples(ExampleType exampleType) override { return immutableSplit(exampleType).numExamples; }
+
+    uint64_t getNextBatchNum(ExampleType exampleType) override { return immutableSplit(exampleType).nextBatchNum; }
+
+    std::vector<std::string> getTensorNames() const {
+        std::vector<std::string> names;
+        names.reserve(sharedTensors.size());
+        for (const auto& [name, spec] : sharedTensors) {
+            (void)spec;
+            names.push_back(name);
+        }
+        return names;
+    }
+
+    std::map<std::string, std::vector<uint64_t>> getTensorShapes() const {
+        std::map<std::string, std::vector<uint64_t>> shapes;
+        for (const auto& [name, spec] : sharedTensors) {
+            shapes.emplace(name, spec.shapeWithoutBatch);
+        }
+        return shapes;
+    }
+
+    uint64_t getBatchQueueDepth() const { return batchQueueDepth; }
+
+    bool getRandomizeTrain() const { return randomizeTrain; }
+
+    nb::object getRandomSeed() const {
+        if (!randomSeed.has_value()) {
+            return nb::none();
+        }
+        return nb::int_(randomSeed.value());
+    }
+
+    bool hasExplicitTestSplit() const { return explicitTestSplit; }
+
+   private:
+    void initializeSplitQueues(IndexedNumpyDictSplit& split) {
+        ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+        for (auto& [name, spec] : sharedTensors) {
+            std::vector<uint64_t> batchShape{batchSize};
+            batchShape.insert(batchShape.end(), spec.shapeWithoutBatch.begin(), spec.shapeWithoutBatch.end());
+            spec.batchDescriptor = ThorImplementation::TensorDescriptor(ThorImplementation::DataType::FP32, batchShape);
+            auto queue = std::make_unique<AsyncTensorQueue>(batchQueueDepth, spec.batchDescriptor, cpuPlacement);
+            queue->open();
+            split.queues.emplace(name, std::move(queue));
+        }
+    }
+
+    void closeSplitQueues(IndexedNumpyDictSplit& split) {
+        for (auto& [name, queue] : split.queues) {
+            (void)name;
+            if (queue != nullptr) {
+                queue->close();
+            }
+        }
+    }
+
+    IndexedNumpyDictSplit& mutableSplit(ExampleType exampleType) {
+        if (exampleType == ExampleType::TRAIN) {
+            return train;
+        }
+        if (exampleType == ExampleType::VALIDATE) {
+            return validate;
+        }
+        if (exampleType == ExampleType::TEST) {
+            return test;
+        }
+        throw std::runtime_error("Unsupported ExampleType");
+    }
+
+    const IndexedNumpyDictSplit& immutableSplit(ExampleType exampleType) const {
+        if (exampleType == ExampleType::TRAIN) {
+            return train;
+        }
+        if (exampleType == ExampleType::VALIDATE) {
+            return validate;
+        }
+        if (exampleType == ExampleType::TEST) {
+            return test;
+        }
+        throw std::runtime_error("Unsupported ExampleType");
+    }
+
+    std::string loaderClassName;
+    bool randomizeTrain = true;
+    uint64_t batchQueueDepth = 32;
+    std::optional<uint64_t> randomSeed;
+    bool explicitTestSplit = false;
+    std::map<std::string, SharedFloat32NumpyTensor> sharedTensors;
+    IndexedNumpyDictSplit train;
+    IndexedNumpyDictSplit validate;
+    IndexedNumpyDictSplit test;
+};
 
 class NumpyFloat32DictBatchLoader : public Loader {
    public:
@@ -1355,6 +1701,91 @@ controls how many fixed CPU batch buffers are allocated up front per named tenso
     numpy_float32_dict_batch_loader.def("get_randomize_train", &NumpyFloat32DictBatchLoader::getRandomizeTrain);
     numpy_float32_dict_batch_loader.def("get_random_seed", &NumpyFloat32DictBatchLoader::getRandomSeed);
     numpy_float32_dict_batch_loader.def("has_explicit_test_split", &NumpyFloat32DictBatchLoader::hasExplicitTestSplit);
+
+    auto indexed_numpy_float32_dict_batch_loader =
+        nb::class_<IndexedNumpyFloat32DictBatchLoader, Loader>(training, "IndexedNumpyFloat32DictBatchLoader");
+    indexed_numpy_float32_dict_batch_loader.attr("__module__") = "thor.training";
+    indexed_numpy_float32_dict_batch_loader.def_static(
+        "__new__",
+        [](nb::handle cls,
+           nb::dict tensors,
+           nb::object train_indices,
+           nb::object validate_indices,
+           uint64_t batch_size,
+           const std::string& dataset_name,
+           bool randomize_train,
+           uint64_t batch_queue_depth,
+           nb::object test_indices,
+           nb::object random_seed) -> std::shared_ptr<IndexedNumpyFloat32DictBatchLoader> {
+            (void)cls;
+            auto loader = std::make_shared<IndexedNumpyFloat32DictBatchLoader>(
+                std::move(tensors),
+                std::move(train_indices),
+                std::move(validate_indices),
+                std::move(test_indices),
+                batch_size,
+                "IndexedNumpyFloat32DictBatchLoader",
+                randomize_train,
+                batch_queue_depth,
+                optionalUint64FromPython(std::move(random_seed), "random_seed"));
+            loader->setDatasetName(dataset_name);
+            return loader;
+        },
+        "cls"_a,
+        "tensors"_a,
+        "train_indices"_a,
+        "validate_indices"_a,
+        "batch_size"_a,
+        "dataset_name"_a = "indexed_numpy_dict",
+        "randomize_train"_a = true,
+        "batch_queue_depth"_a = 32,
+        "test_indices"_a = nb::none(),
+        "random_seed"_a = nb::none(),
+        R"nbdoc(
+Create a no-copy batch loader from one shared dictionary of named float32 tensors
+and train/validate[/test] row-index arrays.
+
+The tensor dictionary must contain C-contiguous numpy.float32 arrays with matching
+leading dimensions.  Unlike ``NumpyFloat32DictBatchLoader``, this loader does
+not call ``numpy.ascontiguousarray`` and does not copy tensor data into
+loader-owned split buffers.  It marks the provided ndarray objects read-only,
+keeps them alive, and copies rows from the canonical tensors into batch buffers
+through the supplied integer indices.
+
+If test_indices is omitted, TEST uses a distinct queue over validate_indices for
+backward-compatible train/validate/test semantics without duplicating tensor
+data.
+        )nbdoc");
+    indexed_numpy_float32_dict_batch_loader.def(
+        "__init__",
+        [](IndexedNumpyFloat32DictBatchLoader*, nb::dict, nb::object, nb::object, uint64_t, const std::string&, bool, uint64_t, nb::object, nb::object) {},
+        "tensors"_a,
+        "train_indices"_a,
+        "validate_indices"_a,
+        "batch_size"_a,
+        "dataset_name"_a = "indexed_numpy_dict",
+        "randomize_train"_a = true,
+        "batch_queue_depth"_a = 32,
+        "test_indices"_a = nb::none(),
+        "random_seed"_a = nb::none());
+    indexed_numpy_float32_dict_batch_loader.def(
+        "get_num_train_examples", [](IndexedNumpyFloat32DictBatchLoader& self) { return self.getNumExamples(ExampleType::TRAIN); });
+    indexed_numpy_float32_dict_batch_loader.def(
+        "get_num_validate_examples", [](IndexedNumpyFloat32DictBatchLoader& self) { return self.getNumExamples(ExampleType::VALIDATE); });
+    indexed_numpy_float32_dict_batch_loader.def(
+        "get_num_test_examples", [](IndexedNumpyFloat32DictBatchLoader& self) { return self.getNumExamples(ExampleType::TEST); });
+    indexed_numpy_float32_dict_batch_loader.def(
+        "get_num_train_batches", [](IndexedNumpyFloat32DictBatchLoader& self) { return self.getNumBatchesPerEpoch(ExampleType::TRAIN); });
+    indexed_numpy_float32_dict_batch_loader.def(
+        "get_num_validate_batches", [](IndexedNumpyFloat32DictBatchLoader& self) { return self.getNumBatchesPerEpoch(ExampleType::VALIDATE); });
+    indexed_numpy_float32_dict_batch_loader.def(
+        "get_num_test_batches", [](IndexedNumpyFloat32DictBatchLoader& self) { return self.getNumBatchesPerEpoch(ExampleType::TEST); });
+    indexed_numpy_float32_dict_batch_loader.def("get_tensor_names", &IndexedNumpyFloat32DictBatchLoader::getTensorNames);
+    indexed_numpy_float32_dict_batch_loader.def("get_tensor_shapes", &IndexedNumpyFloat32DictBatchLoader::getTensorShapes);
+    indexed_numpy_float32_dict_batch_loader.def("get_batch_queue_depth", &IndexedNumpyFloat32DictBatchLoader::getBatchQueueDepth);
+    indexed_numpy_float32_dict_batch_loader.def("get_randomize_train", &IndexedNumpyFloat32DictBatchLoader::getRandomizeTrain);
+    indexed_numpy_float32_dict_batch_loader.def("get_random_seed", &IndexedNumpyFloat32DictBatchLoader::getRandomSeed);
+    indexed_numpy_float32_dict_batch_loader.def("has_explicit_test_split", &IndexedNumpyFloat32DictBatchLoader::hasExplicitTestSplit);
 
     training.def(
         "create_sharded_raw_dataset",

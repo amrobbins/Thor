@@ -4793,11 +4793,12 @@ def test_training_runs_demand_style_kfold_full_path_saves_loadable_ensemble(capf
 
     def make_trainer(*, fold, run_name, test_keys, test_groups):
         fold_split = _fold_split_with_holdout(fold, test_keys=test_keys, test_groups=test_groups)
-        numpy_splits = thor.data.make_numpy_dict_splits(tensors, split=fold_split, groups=row_groups)
-        loader = thor.training.NumpyFloat32DictBatchLoader(
-            train=numpy_splits.train,
-            validate=numpy_splits.validate,
-            test=numpy_splits.test,
+        split_indices = thor.data.make_numpy_dict_split_indices(tensors, split=fold_split, groups=row_groups)
+        loader = thor.training.IndexedNumpyFloat32DictBatchLoader(
+            tensors=tensors,
+            train_indices=split_indices.train,
+            validate_indices=split_indices.validate,
+            test_indices=split_indices.test,
             batch_size=2,
             randomize_train=False,
             dataset_name=f"demand_kfold_{run_name}",
@@ -4832,11 +4833,12 @@ def test_training_runs_demand_style_kfold_full_path_saves_loadable_ensemble(capf
         validate_groups=split.test_groups,
         test_groups=split.test_groups,
     )
-    holdout_numpy = thor.data.make_numpy_dict_splits(tensors, split=holdout_split, groups=row_groups)
-    test_loader = thor.training.NumpyFloat32DictBatchLoader(
-        train=holdout_numpy.train,
-        validate=holdout_numpy.validate,
-        test=holdout_numpy.test,
+    holdout_indices = thor.data.make_numpy_dict_split_indices(tensors, split=holdout_split, groups=row_groups)
+    test_loader = thor.training.IndexedNumpyFloat32DictBatchLoader(
+        tensors=tensors,
+        train_indices=holdout_indices.train,
+        validate_indices=holdout_indices.validate,
+        test_indices=holdout_indices.test,
         batch_size=2,
         randomize_train=False,
         dataset_name="demand_kfold_holdout",

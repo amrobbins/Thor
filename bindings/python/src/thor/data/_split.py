@@ -120,29 +120,66 @@ class StratifiedTrainValidationTestSplit:
 
 @dataclass(frozen=True)
 class NumpyDictSplit:
-    """Named NumPy arrays partitioned into train/validation[/test] dictionaries."""
+    """Named NumPy arrays partitioned into train/validation[/test] dictionaries.
+
+    Deprecated: this object owns materialized split arrays. Prefer
+    :class:`NumpyDictSplitIndices` and ``IndexedNumpyFloat32DictBatchLoader`` so
+    k-fold training can share one canonical tensor table.
+    """
 
     train: dict[str, np.ndarray]
     validate: dict[str, np.ndarray]
     test: dict[str, np.ndarray] | None = None
 
 
-def make_numpy_dict_splits(
-    tensors: Mapping[str, Any],
-    *,
-    split: StratifiedSplit | StratifiedTrainValidationTestSplit,
-    keys: Sequence[Any] | None = None,
-    groups: Sequence[Any] | None = None,
-) -> NumpyDictSplit:
-    """Partition named array-like tensors according to a stratified split.
+def _readonly_array(array: np.ndarray) -> np.ndarray:
+    array.setflags(write=False)
+    return array
 
-    This helper is intended for demand-style in-memory loaders where each named
-    input/label/weight tensor shares a leading example dimension. Pass
-    ``groups`` when many rows belong to one split unit, e.g. product/date rows
-    grouped by product id. If ``groups`` is omitted, ``keys`` are matched
-    against the split's key fields.
+
+def _readonly_index_array(indices: np.ndarray, name: str) -> np.ndarray:
+    array = np.asarray(indices, dtype=np.int64)
+    if array.ndim != 1:
+        raise ValueError(f"{name} indices must be one-dimensional")
+    if not array.flags.c_contiguous:
+        array = np.ascontiguousarray(array, dtype=np.int64)
+    return _readonly_array(array)
+
+
+def _freeze_numpy_tensor_table(tensors: Mapping[str, np.ndarray]) -> None:
+    for name, array in tensors.items():
+        if not isinstance(array, np.ndarray):
+            raise TypeError(f"tensor {name!r} must be a NumPy ndarray")
+        _readonly_array(array)
+
+
+@dataclass(frozen=True)
+class NumpyDictSplitIndices:
+    """Immutable row-index views into one shared NumPy tensor table.
+
+    ``train``/``validate``/``test`` contain physical row ids into the original
+    tensor dictionaries.  The arrays intentionally contain only integer indices;
+    no tensor data is copied.  The arrays are stored as read-only int64 vectors
+    so a split-index table cannot be mutated accidentally after construction.
     """
 
+    train: np.ndarray
+    validate: np.ndarray
+    test: np.ndarray | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "train", _readonly_index_array(self.train, "train"))
+        object.__setattr__(self, "validate", _readonly_index_array(self.validate, "validate"))
+        if self.test is not None:
+            object.__setattr__(self, "test", _readonly_index_array(self.test, "test"))
+
+
+def _validate_numpy_dict_split_inputs(
+    tensors: Mapping[str, Any],
+    *,
+    keys: Sequence[Any] | None,
+    groups: Sequence[Any] | None,
+) -> tuple[dict[str, np.ndarray], tuple[Any, ...], int, str]:
     if not isinstance(tensors, Mapping) or not tensors:
         raise ValueError("tensors must be a non-empty mapping of tensor name to array-like values")
     if keys is None and groups is None:
@@ -165,9 +202,61 @@ def make_numpy_dict_splits(
             )
 
     selector_values = tuple(groups if groups is not None else keys)
+    selector_name = "groups" if groups is not None else "keys"
     if len(selector_values) != num_examples:
-        selector_name = "groups" if groups is not None else "keys"
         raise ValueError(f"{selector_name} length must match the tensor leading dimension")
+
+    return arrays, selector_values, num_examples, selector_name
+
+
+def make_numpy_dict_split_indices(
+    tensors: Mapping[str, Any],
+    *,
+    split: StratifiedSplit | StratifiedTrainValidationTestSplit,
+    keys: Sequence[Any] | None = None,
+    groups: Sequence[Any] | None = None,
+) -> NumpyDictSplitIndices:
+    """Create row-index splits for named tensors without copying tensor data.
+
+    This is the preferred split helper for in-memory and memory-mapped NumPy
+    tensor tables.  Each tensor must share a leading example dimension.  Pass
+    ``groups`` when many rows belong to one split unit, e.g. SKU/date rows
+    grouped by SKU id.  The returned integer arrays index into the original
+    ``tensors`` mapping and are suitable for
+    ``thor.training.IndexedNumpyFloat32DictBatchLoader``.
+    """
+
+    arrays, selector_values, _, _ = _validate_numpy_dict_split_inputs(tensors, keys=keys, groups=groups)
+    _freeze_numpy_tensor_table(arrays)
+
+    train_values = set(split.train_groups if groups is not None else split.train_keys)
+    validate_values = set(split.validate_groups if groups is not None else split.validate_keys)
+    test_values = None
+    if isinstance(split, StratifiedTrainValidationTestSplit):
+        test_values = set(split.test_groups if groups is not None else split.test_keys)
+
+    return NumpyDictSplitIndices(
+        train=_indices_for_values(selector_values, train_values),
+        validate=_indices_for_values(selector_values, validate_values),
+        test=_indices_for_values(selector_values, test_values) if test_values is not None else None,
+    )
+
+
+def make_numpy_dict_splits_DEPRECATED(
+    tensors: Mapping[str, Any],
+    *,
+    split: StratifiedSplit | StratifiedTrainValidationTestSplit,
+    keys: Sequence[Any] | None = None,
+    groups: Sequence[Any] | None = None,
+) -> NumpyDictSplit:
+    """Partition named array-like tensors into copied train/validation[/test] arrays.
+
+    Deprecated: this helper materializes full tensor copies for each split.  Use
+    ``make_numpy_dict_split_indices`` with
+    ``thor.training.IndexedNumpyFloat32DictBatchLoader`` for k-fold training.
+    """
+
+    arrays, selector_values, _, _ = _validate_numpy_dict_split_inputs(tensors, keys=keys, groups=groups)
 
     train_values = set(split.train_groups if groups is not None else split.train_keys)
     validate_values = set(split.validate_groups if groups is not None else split.validate_keys)
@@ -192,8 +281,11 @@ def make_numpy_dict_splits(
 
 def _indices_for_values(values: Sequence[Any], selected: set[Any] | None) -> np.ndarray:
     if selected is None:
-        return np.asarray([], dtype=np.int64)
-    return np.asarray([index for index, value in enumerate(values) if value in selected], dtype=np.int64)
+        return _readonly_index_array(np.asarray([], dtype=np.int64), "split")
+    return _readonly_index_array(
+        np.asarray([index for index, value in enumerate(values) if value in selected], dtype=np.int64),
+        "split",
+    )
 
 
 @dataclass(frozen=True)
@@ -621,10 +713,12 @@ __all__ = [
     "StratificationMode",
     "StratifiedFold",
     "NumpyDictSplit",
+    "NumpyDictSplitIndices",
     "StratifiedHoldoutKFoldManifest",
     "StratifiedKFoldManifest",
     "StratifiedSplit",
     "StratifiedTrainValidationTestSplit",
     "StratifiedSplitter",
-    "make_numpy_dict_splits",
+    "make_numpy_dict_split_indices",
+    "make_numpy_dict_splits_DEPRECATED",
 ]

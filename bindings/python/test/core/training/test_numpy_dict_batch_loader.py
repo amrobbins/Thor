@@ -218,11 +218,12 @@ def test_numpy_float32_dict_batch_loader_composes_with_stratified_demand_split_h
         test_groups=split_manifest.test_groups,
     )
 
-    split = thor.data.make_numpy_dict_splits(tensors, split=fold_with_holdout, groups=row_groups)
-    loader = thor.training.NumpyFloat32DictBatchLoader(
-        train=split.train,
-        validate=split.validate,
-        test=split.test,
+    split = thor.data.make_numpy_dict_split_indices(tensors, split=fold_with_holdout, groups=row_groups)
+    loader = thor.training.IndexedNumpyFloat32DictBatchLoader(
+        tensors=tensors,
+        train_indices=split.train,
+        validate_indices=split.validate,
+        test_indices=split.test,
         batch_size=2,
         randomize_train=False,
         dataset_name="demand_kfold_smoke",
@@ -240,3 +241,99 @@ def test_numpy_float32_dict_batch_loader_composes_with_stratified_demand_split_h
         "forecast_labels": [4],
         "example_weights": [1],
     }
+
+
+def test_indexed_numpy_float32_dict_batch_loader_accepts_shared_tensors_and_indices():
+    tensors = {
+        "x": np.ascontiguousarray(np.arange(24, dtype=np.float32).reshape(8, 3)),
+        "y": np.ascontiguousarray(np.arange(8, dtype=np.float32).reshape(8, 1)),
+    }
+    loader = thor.training.IndexedNumpyFloat32DictBatchLoader(
+        tensors=tensors,
+        train_indices=np.asarray([0, 2, 4, 6], dtype=np.int64),
+        validate_indices=np.asarray([1, 3], dtype=np.int64),
+        test_indices=np.asarray([5, 7], dtype=np.int64),
+        batch_size=2,
+        randomize_train=False,
+        batch_queue_depth=3,
+        dataset_name="indexed_shared",
+    )
+
+    assert loader.get_dataset_name() == "indexed_shared"
+    assert loader.has_explicit_test_split()
+    assert not loader.get_randomize_train()
+    assert loader.get_batch_queue_depth() == 3
+    assert loader.get_num_train_examples() == 4
+    assert loader.get_num_validate_examples() == 2
+    assert loader.get_num_test_examples() == 2
+    assert loader.get_num_train_batches() == 2
+    assert loader.get_tensor_shapes() == {"x": [3], "y": [1]}
+    assert not tensors["x"].flags.writeable
+    assert not tensors["y"].flags.writeable
+    with pytest.raises(ValueError, match="read-only"):
+        tensors["x"][0, 0] = 99.0
+
+
+def test_indexed_numpy_float32_dict_batch_loader_defaults_test_to_validate_indices():
+    tensors = {"x": np.ascontiguousarray(np.zeros((5, 2), dtype=np.float32))}
+    loader = thor.training.IndexedNumpyFloat32DictBatchLoader(
+        tensors=tensors,
+        train_indices=np.asarray([0, 1, 2], dtype=np.int64),
+        validate_indices=np.asarray([3, 4], dtype=np.int64),
+        batch_size=2,
+        randomize_train=False,
+    )
+
+    assert not loader.has_explicit_test_split()
+    assert loader.get_num_validate_examples() == 2
+    assert loader.get_num_test_examples() == 2
+    assert loader.get_num_validate_batches() == 1
+    assert loader.get_num_test_batches() == 1
+
+
+def test_indexed_numpy_float32_dict_batch_loader_is_strict_no_copy_about_tensor_arrays():
+    with pytest.raises(TypeError, match="C-contiguous numpy.float32"):
+        thor.training.IndexedNumpyFloat32DictBatchLoader(
+            tensors={"x": np.zeros((4, 2), dtype=np.float64)},
+            train_indices=np.asarray([0, 1], dtype=np.int64),
+            validate_indices=np.asarray([2, 3], dtype=np.int64),
+            batch_size=2,
+        )
+
+    non_contiguous = np.zeros((4, 4), dtype=np.float32)[:, ::2]
+    assert not non_contiguous.flags.c_contiguous
+    with pytest.raises(TypeError, match="C-contiguous numpy.float32"):
+        thor.training.IndexedNumpyFloat32DictBatchLoader(
+            tensors={"x": non_contiguous},
+            train_indices=np.asarray([0, 1], dtype=np.int64),
+            validate_indices=np.asarray([2, 3], dtype=np.int64),
+            batch_size=2,
+        )
+
+
+def test_indexed_numpy_float32_dict_batch_loader_rejects_invalid_indices():
+    tensors = {"x": np.ascontiguousarray(np.zeros((4, 2), dtype=np.float32))}
+
+    with pytest.raises(ValueError, match="negative row index"):
+        thor.training.IndexedNumpyFloat32DictBatchLoader(
+            tensors=tensors,
+            train_indices=np.asarray([0, -1], dtype=np.int64),
+            validate_indices=np.asarray([2, 3], dtype=np.int64),
+            batch_size=2,
+        )
+
+    with pytest.raises(ValueError, match="outside the tensor leading dimension"):
+        thor.training.IndexedNumpyFloat32DictBatchLoader(
+            tensors=tensors,
+            train_indices=np.asarray([0, 4], dtype=np.int64),
+            validate_indices=np.asarray([2, 3], dtype=np.int64),
+            batch_size=2,
+        )
+
+    with pytest.raises(TypeError, match="integer index array"):
+        thor.training.IndexedNumpyFloat32DictBatchLoader(
+            tensors=tensors,
+            train_indices=np.asarray([0.0, 1.0], dtype=np.float32),
+            validate_indices=np.asarray([2, 3], dtype=np.int64),
+            batch_size=2,
+        )
