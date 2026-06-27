@@ -228,6 +228,15 @@ def _regression_one_batch_loader(*, dtype=np.float32):
     )
 
 
+def test_numpy_float32_batch_loader_supports_weakref():
+    loader = _regression_one_batch_loader()
+    loader_ref = weakref.ref(loader)
+
+    assert loader_ref() is loader
+    del loader
+    gc.collect()
+    assert loader_ref() is None
+
 def _non_finite_regression_one_batch_loader(non_finite_phase: str, *, dtype=np.float32):
     x, y = _regression_arrays(dtype=dtype)
     train_y = y.copy()
@@ -2069,20 +2078,27 @@ def test_training_runs_evaluates_saved_adam_model_on_test_loader(capfd, tmp_path
         description="opt-in TrainingRuns CUDA integration tests",
     ),
 )
-def test_native_queue_keeps_train_to_validate_transition_in_flight(capfd):
-    trainer = _make_tiny_regression_trainer("training_runs_train_validate_queue_stays_hot")
+def test_native_queue_keeps_train_to_validate_transition_in_flight(capfd, tmp_path):
+    trainer = _make_tiny_regression_trainer(
+        "training_runs_train_validate_queue_stays_hot",
+        save_model_dir=tmp_path / "train_validate_queue_stays_hot",
+        save_model_overwrite=True,
+    )
     runs = thor.training.TrainingRuns([("fold_0", trainer, "tiny_ensemble")])
 
     results, captured_text = _fit_runs_and_capture_text(runs, capfd, epochs=1)
 
     assert results.all_completed()
     plain_text = _ANSI_RE.sub("", captured_text)
+    # The stats reporter emits one aggregate epoch line rather than separate
+    # phase-prefixed lines.  With one train batch and one validate batch, the
+    # old per-phase queue drained the train batch before validate submission,
+    # so the aggregate line could not still have a queued batch in flight after
+    # both train and validate losses were available.
     assert re.search(
-        r"INFO runs\[fold_0\|tiny_ensemble\]:.*phase=train\s+epoch=\s*1/1\s+batch=\s*1/1.*in_flight=\s*1\b",
-        plain_text,
-    ), plain_text
-    assert re.search(
-        r"INFO runs\[fold_0\|tiny_ensemble\]:.*phase=validate\s+epoch=\s*1/1\s+batch=\s*1/1",
+        r"INFO runs\[fold_0\|tiny_ensemble\]:.*"
+        r"epoch=\s*1/1\s+batch=\s*1/1\s+step=\s*1\s+"
+        r"train_loss=[^\n]*validate_loss=[^\n]*in_flight=\s*1\b",
         plain_text,
     ), plain_text
 
@@ -2471,6 +2487,33 @@ def test_training_runs_non_finite_train_or_validation_loss_fails_run(non_finite_
     assert result.result == "failed"
     assert result.exception_type == "TrainingNonFiniteLossDetected"
     assert message_fragment in result.exception_message
+
+
+@pytest.mark.cuda
+@pytest.mark.training_integration
+def test_native_queued_failed_fit_releases_numpy_loader_reference():
+    loader = _non_finite_regression_one_batch_loader("validate")
+    loader_ref = weakref.ref(loader)
+    trainer = thor.training.Trainer(
+        _build_tiny_regressor("native_queued_failed_fit_releases_numpy_loader_reference"),
+        loader,
+        optimizer=thor.optimizers.Sgd(initial_learning_rate=1.0e-12, momentum=0.0),
+        stats_interval_s=0.0,
+        max_in_flight_batches=2,
+        scalar_tensors_to_report=["loss"],
+        stats_color="never",
+    )
+    runs = thor.training.TrainingRuns([("fold_0", trainer)], failure_policy="continue")
+
+    results = runs.fit(epochs=1)
+
+    assert results["fold_0"].status == "failed"
+    del results
+    del runs
+    del trainer
+    del loader
+    gc.collect()
+    assert loader_ref() is None
 
 
 @pytest.mark.cuda

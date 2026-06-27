@@ -43,6 +43,7 @@
 #include <string>
 #include <sstream>
 #include <thread>
+#include <tuple>
 #include <type_traits>
 #include <unordered_map>
 #include <utility>
@@ -63,6 +64,8 @@ struct ScalarStatSlot {
 struct NativeBatchCompletionParams {
     std::shared_ptr<QueuedTrainingState> state;
     std::shared_ptr<Loader> loader;
+    bool completionCallbackLaunched = false;
+    bool completionCallbackFinished = false;
     ExampleType exampleType = ExampleType::TRAIN;
     TrainingEventPhase phase = TrainingEventPhase::TRAIN;
     uint64_t currentEpoch = 0;
@@ -1294,6 +1297,9 @@ Batch bindBatchInputs(const StepExecutable& step, const Batch& batchInput) {
 void CUDART_CB completeNativeQueuedBatch(void* data) {
     NativeBatchCompletionParams* params = static_cast<NativeBatchCompletionParams*>(data);
     std::shared_ptr<QueuedTrainingState> state = params->state;
+    if (state == nullptr) {
+        return;
+    }
     const TrainingEventPhase phase = params->phase;
     const uint64_t epochBatchNum = params->epochBatchNum;
     const uint64_t slotIndex = params->slotIndex;
@@ -1330,6 +1336,7 @@ void CUDART_CB completeNativeQueuedBatch(void* data) {
             slot.completionTime = std::chrono::high_resolution_clock::now();
             slot.ready = true;
             state->numBatchesDoneInEpoch += 1;
+            params->completionCallbackFinished = true;
             inFlightAtComplete = state->inFlightBatches;
             doneAtComplete = slot.doneInEpochAtComplete;
             totalAtComplete = slot.batchesInEpoch;
@@ -1363,6 +1370,7 @@ void CUDART_CB completeNativeQueuedBatch(void* data) {
             }
         }
         state->numBatchesDoneInEpoch += 1;
+        params->completionCallbackFinished = true;
     }
     state->batchFinished.notify_all();
 }
@@ -1433,6 +1441,8 @@ BatchPopResult popBatchData(const std::shared_ptr<QueuedTrainingState>& state) {
     result.scalarStats = slot.scalarStats;
 
     params.batchOutput.clear();
+    params.completionCallbackLaunched = false;
+    params.completionCallbackFinished = false;
     params.loader.reset();
     params.state.reset();
     for (ScalarStatSlot& scalarStat : slot.scalarStats) {
@@ -1487,6 +1497,83 @@ void throwIfQueuedTrainingStateFailed(const std::shared_ptr<QueuedTrainingState>
     if (cancelRequested) {
         throw TrainingCancelled("Native queued trainer was cancelled.");
     }
+}
+
+bool queuedCompletionCallbacksPendingUnlocked(const QueuedTrainingState& state) {
+    for (const NativeBatchCompletionParams& params : state.completionParams) {
+        if (params.completionCallbackLaunched && !params.completionCallbackFinished) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void releaseQueuedTrainingStateReferencesAfterAbort(const std::shared_ptr<QueuedTrainingState>& state, bool submittedWorkDrained) {
+    if (state == nullptr) {
+        return;
+    }
+
+    std::vector<std::tuple<std::shared_ptr<Loader>, ExampleType, Batch>> batchesToReturn;
+
+    std::unique_lock<std::mutex> lock(state->mutex);
+    if (!submittedWorkDrained && queuedCompletionCallbacksPendingUnlocked(*state)) {
+        // If CUDA synchronization failed, a launched host callback may still hold
+        // a raw pointer into state->completionParams. Do not break those references
+        // here; preserving the old leak behavior is safer than risking a UAF in an
+        // already-failing CUDA context. Normal trainer failures reach this path with
+        // submittedWorkDrained=true and are cleaned up below.
+        return;
+    }
+    while (queuedCompletionCallbacksPendingUnlocked(*state)) {
+        state->batchFinished.wait_for(lock, std::chrono::milliseconds(50));
+    }
+
+    for (NativeBatchCompletionParams& params : state->completionParams) {
+        if (params.loader != nullptr && !params.batchInput.empty()) {
+            batchesToReturn.emplace_back(params.loader, params.exampleType, std::move(params.batchInput));
+        } else {
+            params.batchInput.clear();
+        }
+        params.batchOutput.clear();
+        for (ScalarStatSlot& scalarStat : params.scalarStats) {
+            scalarStat.present = false;
+            scalarStat.value = 0.0f;
+        }
+        params.completionCallbackLaunched = false;
+        params.completionCallbackFinished = false;
+        params.loader.reset();
+        params.state.reset();
+    }
+
+    for (QueuedBatchSlot& slot : state->slots) {
+        slot.occupied = false;
+        slot.ready = false;
+        slot.phase = TrainingEventPhase::TRAIN;
+        slot.epochBatchNum = 0;
+        slot.batchesInEpoch = 0;
+        slot.doneInEpochAtComplete = 0;
+        slot.paramsIndex = 0;
+        slot.completionTime = {};
+        for (ScalarStatSlot& scalarStat : slot.scalarStats) {
+            scalarStat.present = false;
+            scalarStat.value = 0.0f;
+        }
+    }
+    state->headSlot = 0;
+    state->tailSlot = 0;
+    state->inFlightBatches = 0;
+    lock.unlock();
+
+    for (auto& [loader, exampleType, batchInput] : batchesToReturn) {
+        try {
+            loader->returnBatchBuffers(exampleType, std::move(batchInput));
+        } catch (...) {
+            // This function runs while an earlier training failure/cancellation is
+            // already being propagated. Do not mask that primary failure during
+            // cleanup; the loader will still be released below.
+        }
+    }
+    state->batchPopped.notify_all();
 }
 
 void emitTrainingEvent(TrainingObserver& observer, const TrainingEvent& event) {
@@ -1672,6 +1759,8 @@ class NativeQueuedEpochScheduler {
             params->loader = loader;
             params->exampleType = exampleType;
             params->phase = diagnosticPhase;
+            params->completionCallbackLaunched = false;
+            params->completionCallbackFinished = false;
             params->currentEpoch = currentEpoch;
             params->epochBatchNum = epochBatchNum;
             params->batchesInEpoch = batchesPerEpoch;
@@ -1794,9 +1883,19 @@ class NativeQueuedEpochScheduler {
             const auto waitOutputsFinish = diagnosticNow(collectQueueDiagnostics);
 
             const auto hostFuncStart = diagnosticNow(collectQueueDiagnostics);
+            {
+                std::lock_guard<std::mutex> lock(state->mutex);
+                params->completionCallbackLaunched = true;
+                params->completionCallbackFinished = false;
+            }
             cudaError_t cudaStatus = cudaLaunchHostFunc(completionStream, completeNativeQueuedBatch, params);
             const auto hostFuncFinish = diagnosticNow(collectQueueDiagnostics);
-            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+            if (cudaStatus != cudaSuccess) {
+                std::lock_guard<std::mutex> lock(state->mutex);
+                params->completionCallbackLaunched = false;
+                params->completionCallbackFinished = false;
+                THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+            }
             if (collectQueueDiagnostics && shouldEmitQueueDiagnostic(batch + 1)) {
                 emitNativeQueueDiagnostic("submit",
                                           diagnosticPhase,
@@ -2163,6 +2262,16 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
             if (schedulingThread.joinable()) {
                 schedulingThread.join();
             }
+            bool submittedWorkDrained = false;
+            try {
+                placedNetwork->synchronizeDevices();
+                submittedWorkDrained = true;
+            } catch (...) {
+                // Preserve the original failure that is already being propagated
+                // through the native queued trainer. Synchronization here is only
+                // a best-effort cleanup barrier before releasing per-slot refs.
+            }
+            releaseQueuedTrainingStateReferencesAfterAbort(state, submittedWorkDrained);
         };
 
         auto requestExternalCancel = [&]() {

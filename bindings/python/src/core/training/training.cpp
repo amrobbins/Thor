@@ -1497,7 +1497,8 @@ void bind_training(nb::module_& training) {
     loader.def("get_dataset_name", &Loader::getDatasetName);
     loader.def("set_dataset_name", &Loader::setDatasetName, "dataset_name"_a);
 
-    auto numpy_float32_batch_loader = nb::class_<NumpyFloat32BatchLoader, Loader>(training, "NumpyFloat32BatchLoader");
+    auto numpy_float32_batch_loader = nb::class_<NumpyFloat32BatchLoader, Loader>(
+        training, "NumpyFloat32BatchLoader", nb::is_weak_referenceable());
     numpy_float32_batch_loader.attr("__module__") = "thor.training";
     numpy_float32_batch_loader.def_static(
         "__new__",
@@ -1559,7 +1560,8 @@ void bind_training(nb::module_& training) {
     numpy_float32_batch_loader.def("get_num_validate_batches",
                                    [](NumpyFloat32BatchLoader& self) { return self.getNumBatchesPerEpoch(ExampleType::VALIDATE); });
 
-    auto numpy_float16_batch_loader = nb::class_<NumpyFloat16BatchLoader, Loader>(training, "NumpyFloat16BatchLoader");
+    auto numpy_float16_batch_loader = nb::class_<NumpyFloat16BatchLoader, Loader>(
+        training, "NumpyFloat16BatchLoader", nb::is_weak_referenceable());
     numpy_float16_batch_loader.attr("__module__") = "thor.training";
     numpy_float16_batch_loader.def_static(
         "__new__",
