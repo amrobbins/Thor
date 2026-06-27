@@ -2062,6 +2062,33 @@ def test_training_runs_evaluates_saved_adam_model_on_test_loader(capfd, tmp_path
 
 @pytest.mark.cuda
 @pytest.mark.training_integration
+@pytest.mark.skipif(
+    not RUN_TRAINING_INTEGRATION,
+    reason=integration_skip_reason(
+        "THOR_RUN_TRAINING_INTEGRATION",
+        description="opt-in TrainingRuns CUDA integration tests",
+    ),
+)
+def test_native_queue_keeps_train_to_validate_transition_in_flight(capfd):
+    trainer = _make_tiny_regression_trainer("training_runs_train_validate_queue_stays_hot")
+    runs = thor.training.TrainingRuns([("fold_0", trainer, "tiny_ensemble")])
+
+    results, captured_text = _fit_runs_and_capture_text(runs, capfd, epochs=1)
+
+    assert results.all_completed()
+    plain_text = _ANSI_RE.sub("", captured_text)
+    assert re.search(
+        r"INFO runs\[fold_0\|tiny_ensemble\]:.*phase=train\s+epoch=\s*1/1\s+batch=\s*1/1.*in_flight=\s*1\b",
+        plain_text,
+    ), plain_text
+    assert re.search(
+        r"INFO runs\[fold_0\|tiny_ensemble\]:.*phase=validate\s+epoch=\s*1/1\s+batch=\s*1/1",
+        plain_text,
+    ), plain_text
+
+
+@pytest.mark.cuda
+@pytest.mark.training_integration
 def test_training_runs_weighted_mse_example_weights_drives_training_loss(capfd, tmp_path):
     # This intentionally covers the end-to-end TrainingRuns path, not just loss
     # construction or forward inference.  The regression bug was that a weighted
@@ -2351,7 +2378,6 @@ def make_trainer(name, seed, model_root):
         stats_color="never",
         save_model_dir=model_root / name,
         save_model_overwrite=True,
-        save_optimizer_state=True,
     )
     return trainer, aggregate_phase
 

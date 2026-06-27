@@ -91,7 +91,6 @@ Trainer Trainer::Builder::build() const {
     trainer.observer = observer_;
     trainer.saveModelDirectory = saveModelDirectory_;
     trainer.saveModelOverwrite = saveModelOverwrite_;
-    trainer.saveOptimizerState = saveOptimizerState_;
     trainer.modelSelectionScore = modelSelectionScore_;
     if (trainer.observer == nullptr) {
         const LineStatsOutputMode outputMode =
@@ -608,7 +607,6 @@ void Trainer::fitInternal(const TrainerFitOptions& options,
     request.epochs = options.epochs;
     request.saveModelDirectory = saveModelDirectory;
     request.saveModelOverwrite = saveModelOverwrite;
-    request.saveOptimizerState = saveOptimizerState;
     request.checkBestModelEveryEpochs = options.checkBestModelEveryEpochs;
     request.minEarlyCompletionEpochs = options.minEarlyCompletionEpochs;
     request.initialCompletedEpochs = completedTrainingEpochs;

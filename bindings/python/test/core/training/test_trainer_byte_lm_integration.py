@@ -68,7 +68,6 @@ BYTE_LM_LOSS_WEIGHT = float(os.environ.get("THOR_BYTE_LM_LOSS_WEIGHT", str(1.0 /
 BYTE_LM_SAVE_DIR_ENV = os.environ.get("THOR_BYTE_LM_SAVE_DIR")
 BYTE_LM_SAVE_DIR = Path(BYTE_LM_SAVE_DIR_ENV) if BYTE_LM_SAVE_DIR_ENV else None
 BYTE_LM_SAVE_OVERWRITE = os.environ.get("THOR_BYTE_LM_SAVE_OVERWRITE", "1") == "1"
-BYTE_LM_SAVE_OPTIMIZER_STATE = os.environ.get("THOR_BYTE_LM_SAVE_OPTIMIZER_STATE", "1") == "1"
 BYTE_LM_REBUILD = os.environ.get("THOR_BYTE_LM_REBUILD") == "1"
 BYTE_LM_VOCAB_SIZE = 256
 BYTE_LM_FULL_DATASET = BYTE_LM_TARGET_TEXT_BYTES == 0
@@ -1084,7 +1083,6 @@ def test_queued_trainer_trains_byte_level_transformer_lm_on_fineweb_edu(capfd):
             stats_color=BYTE_LM_STATS_COLOR,
             save_model_dir=str(BYTE_LM_SAVE_DIR) if BYTE_LM_SAVE_DIR is not None else None,
             save_model_overwrite=BYTE_LM_SAVE_OVERWRITE,
-            save_optimizer_state=BYTE_LM_SAVE_OPTIMIZER_STATE,
         )
         stats = _fit_and_capture_stats(trainer, epochs=BYTE_LM_EPOCHS)
         _assert_finite_positive_losses(stats, model_name="fineweb_edu_byte_transformer_lm")

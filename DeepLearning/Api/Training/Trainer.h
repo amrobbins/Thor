@@ -98,7 +98,6 @@ class Trainer {
     [[nodiscard]] std::shared_ptr<Network> getNetwork() const { return network; }
     [[nodiscard]] const std::optional<std::string>& getSaveModelDirectory() const { return saveModelDirectory; }
     [[nodiscard]] bool getSaveModelOverwrite() const { return saveModelOverwrite; }
-    [[nodiscard]] bool getSaveOptimizerState() const { return saveOptimizerState; }
     [[nodiscard]] uint64_t getCompletedTrainingEpochs() const { return completedTrainingEpochs; }
     [[nodiscard]] const TrainingModelSelectionScore& getModelSelectionScore() const { return modelSelectionScore; }
 
@@ -152,7 +151,6 @@ class Trainer {
     std::shared_ptr<TrainingObserver> observer = nullptr;
     std::optional<std::string> saveModelDirectory{};
     bool saveModelOverwrite = false;
-    bool saveOptimizerState = true;
     TrainingModelSelectionScore modelSelectionScore{};
     std::shared_ptr<PlacedNetwork> placedNetworkAfterLastFit = nullptr;
     std::optional<std::string> lastCompletedArtifactDirectory{};
@@ -232,12 +230,6 @@ class Trainer::Builder {
         return *this;
     }
 
-    Builder& saveOptimizerState(bool saveOptimizerState) {
-        this->saveOptimizerState_ = saveOptimizerState;
-        return *this;
-    }
-
-
     Builder& modelSelectionScore(TrainingModelSelectionScore modelSelectionScore) {
         this->modelSelectionScore_ = std::move(modelSelectionScore);
         return *this;
@@ -257,7 +249,6 @@ class Trainer::Builder {
     std::shared_ptr<TrainingObserver> observer_ = nullptr;
     std::optional<std::string> saveModelDirectory_{};
     bool saveModelOverwrite_ = false;
-    bool saveOptimizerState_ = true;
     TrainingModelSelectionScore modelSelectionScore_{};
 };
 

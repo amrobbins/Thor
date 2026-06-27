@@ -42,7 +42,6 @@ struct TrainingRunRequest {
     uint32_t epochs = 1;
     std::optional<std::string> saveModelDirectory{};
     bool saveModelOverwrite = false;
-    bool saveOptimizerState = true;
 
     // Trainer-owned best-candidate checkpoint cadence. A value of 0 disables
     // best-candidate tracking/snapshotting; the final latest/end-of-fit artifact

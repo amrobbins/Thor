@@ -1920,7 +1920,6 @@ calling this helper.
            std::string stats_color,
            nb::object save_model_dir,
            bool save_model_overwrite,
-           bool save_optimizer_state,
            nb::object model_selection_score) -> nb::object {
             (void)cls;
             Trainer::Builder builder;
@@ -1933,7 +1932,6 @@ calling this helper.
                 .scalarTensorsToReport(stringSetFromVector(std::move(scalar_tensors_to_report)))
                 .saveModelDirectory(optionalPathStringFromPython(save_model_dir, "save_model_dir"))
                 .saveModelOverwrite(save_model_overwrite)
-                .saveOptimizerState(save_optimizer_state)
                 .modelSelectionScore(trainingModelSelectionScoreFromPython(model_selection_score));
             if (optimizer != nullptr) {
                 builder.optimizer(std::move(optimizer));
@@ -1961,7 +1959,6 @@ calling this helper.
         "stats_color"_a = "auto",
         "save_model_dir"_a.none() = nb::none(),
         "save_model_overwrite"_a = false,
-        "save_optimizer_state"_a = true,
         "model_selection_score"_a.none() = nb::none());
     trainer.def(
         "__init__",
@@ -1978,7 +1975,6 @@ calling this helper.
            std::string,
            nb::object,
            bool,
-           bool,
            nb::object) {},
         "network"_a,
         "loader"_a,
@@ -1992,7 +1988,6 @@ calling this helper.
         "stats_color"_a = "auto",
         "save_model_dir"_a.none() = nb::none(),
         "save_model_overwrite"_a = false,
-        "save_optimizer_state"_a = true,
         "model_selection_score"_a.none() = nb::none());
     trainer.def(
         "fit",

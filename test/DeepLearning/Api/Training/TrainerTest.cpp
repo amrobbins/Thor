@@ -66,7 +66,6 @@ class CapturingExecutor : public TrainingExecutor {
         lastCancellationRequested = request.cancellationToken.isCancellationRequested();
         lastSaveModelDirectory = request.saveModelDirectory;
         lastSaveModelOverwrite = request.saveModelOverwrite;
-        lastSaveOptimizerState = request.saveOptimizerState;
         lastCheckBestModelEveryEpochs = request.checkBestModelEveryEpochs;
         lastMinEarlyCompletionEpochs = request.minEarlyCompletionEpochs;
         lastInitialCompletedEpochs = request.initialCompletedEpochs;
@@ -91,7 +90,6 @@ class CapturingExecutor : public TrainingExecutor {
     bool lastCancellationRequested = true;
     std::optional<std::string> lastSaveModelDirectory{};
     bool lastSaveModelOverwrite = false;
-    bool lastSaveOptimizerState = true;
     uint32_t lastCheckBestModelEveryEpochs = 0;
     uint64_t lastMinEarlyCompletionEpochs = 0;
     uint64_t lastInitialCompletedEpochs = 0;
@@ -175,7 +173,6 @@ TEST(Trainer, FitPassesBestModelCandidateOptionsAsRunParameters) {
                           .observer(observer)
                           .saveModelDirectory("/tmp/thor-best-candidate-options")
                           .saveModelOverwrite(true)
-                          .saveOptimizerState(false)
                           .build();
 
     TrainerFitOptions options;
@@ -188,7 +185,6 @@ TEST(Trainer, FitPassesBestModelCandidateOptionsAsRunParameters) {
     ASSERT_TRUE(executor->lastSaveModelDirectory.has_value());
     EXPECT_EQ(executor->lastSaveModelDirectory.value(), "/tmp/thor-best-candidate-options");
     EXPECT_TRUE(executor->lastSaveModelOverwrite);
-    EXPECT_FALSE(executor->lastSaveOptimizerState);
     EXPECT_EQ(executor->lastCheckBestModelEveryEpochs, 3u);
     EXPECT_EQ(executor->lastMinEarlyCompletionEpochs, 7u);
 }
