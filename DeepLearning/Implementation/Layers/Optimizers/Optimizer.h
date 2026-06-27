@@ -120,6 +120,12 @@ class Optimizer : public Parameterizable {
     virtual std::unordered_map<std::string, float> updateHyperParameters(uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch) = 0;
     virtual std::unordered_map<std::string, float> getAllHyperParameters() = 0;
 
+    // Restore non-tensor optimizer runtime state such as Adam-family step counters
+    // and scheduler counters. Tensor-backed optimizer state is copied separately.
+    virtual void restoreHyperParameters(const std::unordered_map<std::string, float> &hyperParameters) {
+        (void)hyperParameters;
+    }
+
     virtual Stream getGradientUpdateStream() const { return gradientUpdateStream; }
 
     uint64_t getId() const { return id; }

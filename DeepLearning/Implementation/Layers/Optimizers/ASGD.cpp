@@ -141,6 +141,13 @@ CustomOptimizer::HyperParameterSnapshotBuilder makeHyperParameterSnapshotBuilder
     };
 }
 
+CustomOptimizer::HyperParameterRestoreBuilder makeHyperParameterRestoreBuilder(shared_ptr<ASGD::RuntimeState> state) {
+    return [state](const unordered_map<string, float>& hyperParameters) {
+        if (auto it = hyperParameters.find("t"); it != hyperParameters.end()) {
+            state->t = it->second;
+        }
+    };
+}
 }  // namespace
 
 ASGD::ASGD(uint64_t id, float alpha, float lambd, float power, float t0, float weightDecay)
@@ -153,7 +160,8 @@ ASGD::ASGD(uint64_t id, shared_ptr<RuntimeState> runtimeState)
                       makeRuntimeScalarBuilder(runtimeState),
                       /*supportsSparseRowGradients=*/false,
                       makeHyperParameterUpdateBuilder(runtimeState),
-                      makeHyperParameterSnapshotBuilder(runtimeState)),
+                      makeHyperParameterSnapshotBuilder(runtimeState),
+                      makeHyperParameterRestoreBuilder(runtimeState)),
       runtimeState(std::move(runtimeState)) {}
 
 float ASGD::getAlpha() const { return runtimeState->alpha; }

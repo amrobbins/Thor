@@ -113,6 +113,7 @@ json Sgd::serialize(thor_file::TarWriter &archiveWriter,
         shared_ptr<ThorImplementation::Sgd> physicalSgd = dynamic_pointer_cast<ThorImplementation::Sgd>(physicalOptimizer);
         THOR_THROW_IF_FALSE(physicalSgd != nullptr);
         j["epoch"] = physicalSgd->getEpoch();
+        j["current_learning_rate"] = physicalSgd->getCurrentLearningRate();
     }
     return j;
 }

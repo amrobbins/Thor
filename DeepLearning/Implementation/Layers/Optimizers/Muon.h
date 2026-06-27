@@ -42,6 +42,7 @@ class Muon final : public Optimizer {
 
     std::unordered_map<std::string, float> updateHyperParameters(uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch) override;
     std::unordered_map<std::string, float> getAllHyperParameters() override;
+    void restoreHyperParameters(const std::unordered_map<std::string, float>& hyperParameters) override;
 
     float getAlpha() const;
     float getBeta() const;

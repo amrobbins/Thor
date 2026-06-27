@@ -1898,25 +1898,18 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
             throw std::runtime_error("Trainer artifact handoff requires previousModelNetworkName.");
         }
 
-        auto sourceNetwork = std::make_shared<Network>(request.previousModelNetworkName.value());
-        sourceNetwork->load(request.previousModelArtifactDirectory.value());
-        std::vector<Event> sourceInitDoneEvents;
-        std::shared_ptr<PlacedNetwork> sourcePlacedNetwork =
-            sourceNetwork->place(batchSize, sourceInitDoneEvents, /*inferenceOnly=*/false);
-        THOR_THROW_IF_FALSE(sourcePlacedNetwork->getNumStamps() == placedNetwork->getNumStamps());
-        for (Event& event : sourceInitDoneEvents) {
-            request.cancellationToken.throwIfCancellationRequested();
-            event.synchronize();
+        // Load tensors directly from the saved artifact into the fresh placement
+        // instead of placing the saved source network.  Non-composed repeated
+        // fits are the same API network and therefore use exact API layer ids.
+        // Composed phase graphs are fresh API networks, so they must prove
+        // identity with clone-source keys and never fall back to order/type/name.
+        if (executionGraph.composedFromTrainingPhases) {
+            placedNetwork->loadMatchingTrainingStateFromArtifact(request.previousModelArtifactDirectory.value(),
+                                                                 request.previousModelNetworkName.value());
+        } else {
+            placedNetwork->loadTrainingStateFromSameNetworkArtifact(request.previousModelArtifactDirectory.value(),
+                                                                    request.previousModelNetworkName.value());
         }
-
-        // Saved artifacts are a different API Network instance from the fresh
-        // active graph, so exact layer-id state copy is not valid. Match by
-        // stable clone-source key and, for non-composed or older artifacts, by
-        // serialized layer name.
-        sourcePlacedNetwork->synchronizeDevices();
-        placedNetwork->copyMatchingTrainingStateFrom(*sourcePlacedNetwork);
-        sourcePlacedNetwork.reset();
-        sourceNetwork.reset();
     }
 
     request.cancellationToken.throwIfCancellationRequested();

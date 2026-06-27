@@ -261,6 +261,12 @@ unordered_map<string, float> Muon::getAllHyperParameters() {
     return makeHyperParameterSnapshotBuilder(runtimeState_)();
 }
 
+void Muon::restoreHyperParameters(const unordered_map<string, float>& hyperParameters) {
+    if (selectedOptimizer_ != nullptr) {
+        selectedOptimizer_->restoreHyperParameters(hyperParameters);
+    }
+}
+
 float Muon::getAlpha() const { return runtimeState_->alpha; }
 float Muon::getBeta() const { return runtimeState_->beta; }
 float Muon::getEpsilon() const { return runtimeState_->epsilon; }

@@ -72,6 +72,7 @@ class CustomOptimizer : public Optimizer {
                                                                                              uint64_t batch,
                                                                                              uint64_t batchesPerEpoch)>;
     using HyperParameterSnapshotBuilder = std::function<std::unordered_map<std::string, float>()>;
+    using HyperParameterRestoreBuilder = std::function<void(const std::unordered_map<std::string, float>&)>;
 
     CustomOptimizer(uint64_t id,
                     std::vector<CustomOptimizerStateSpec> stateSpecs,
@@ -79,7 +80,8 @@ class CustomOptimizer : public Optimizer {
                     RuntimeScalarBuilder runtimeScalarBuilder = {},
                     bool supportsSparseRowGradients = false,
                     HyperParameterUpdateBuilder hyperParameterUpdateBuilder = {},
-                    HyperParameterSnapshotBuilder hyperParameterSnapshotBuilder = {});
+                    HyperParameterSnapshotBuilder hyperParameterSnapshotBuilder = {},
+                    HyperParameterRestoreBuilder hyperParameterRestoreBuilder = {});
 
     void compile(const Tensor& weights, Stream& gradientUpdateStream, bool materializeDenseGradient = true) override;
     SparseRowGradient compileSparseRows(const Tensor& weights, uint64_t maxSparseRows, Stream& gradientUpdateStream) override;
@@ -103,6 +105,7 @@ class CustomOptimizer : public Optimizer {
 
     std::unordered_map<std::string, float> updateHyperParameters(uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch) override;
     std::unordered_map<std::string, float> getAllHyperParameters() override;
+    void restoreHyperParameters(const std::unordered_map<std::string, float>& hyperParameters) override;
 
     const std::vector<CustomOptimizerStateSpec>& getStateSpecs() const { return stateSpecs_; }
 
@@ -113,7 +116,8 @@ class CustomOptimizer : public Optimizer {
                                                  runtimeScalarBuilder_,
                                                  supportsSparseRowGradients_,
                                                  hyperParameterUpdateBuilder_,
-                                                 hyperParameterSnapshotBuilder_);
+                                                 hyperParameterSnapshotBuilder_,
+                                                 hyperParameterRestoreBuilder_);
     }
 
    private:
@@ -129,6 +133,7 @@ class CustomOptimizer : public Optimizer {
     RuntimeScalarBuilder runtimeScalarBuilder_;
     HyperParameterUpdateBuilder hyperParameterUpdateBuilder_;
     HyperParameterSnapshotBuilder hyperParameterSnapshotBuilder_;
+    HyperParameterRestoreBuilder hyperParameterRestoreBuilder_;
     bool supportsSparseRowGradients_ = false;
 };
 

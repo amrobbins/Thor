@@ -30,13 +30,16 @@ shared_ptr<Sgd::RuntimeState> makeRuntimeState(float initialLearningRate,
                                                float momentum,
                                                bool useNesterovMomentum,
                                                uint64_t startResumeEpoch) {
+    const float currentLearningRate = static_cast<float>(
+        static_cast<double>(initialLearningRate) *
+        std::pow(1.0 - static_cast<double>(decay), static_cast<double>(startResumeEpoch)));
     return make_shared<Sgd::RuntimeState>(Sgd::RuntimeState{initialLearningRate,
                                                             decay,
                                                             momentum,
                                                             useNesterovMomentum,
                                                             startResumeEpoch,
                                                             0,
-                                                            initialLearningRate});
+                                                            currentLearningRate});
 }
 
 vector<CustomOptimizerStateSpec> stateSpecsFor(const Sgd::RuntimeState& state) {
@@ -122,6 +125,26 @@ CustomOptimizer::HyperParameterSnapshotBuilder makeHyperParameterSnapshotBuilder
     };
 }
 
+CustomOptimizer::HyperParameterRestoreBuilder makeHyperParameterRestoreBuilder(shared_ptr<Sgd::RuntimeState> state) {
+    return [state](const unordered_map<string, float>& hyperParameters) {
+        bool restoredLearningRate = false;
+        if (auto it = hyperParameters.find("currentLearningRate"); it != hyperParameters.end()) {
+            state->currentLearningRate = it->second;
+            restoredLearningRate = true;
+        }
+        if (auto it = hyperParameters.find("epoch"); it != hyperParameters.end()) {
+            state->currentEpoch = static_cast<uint64_t>(it->second);
+        }
+        if (auto it = hyperParameters.find("currentBatch"); it != hyperParameters.end()) {
+            state->currentBatch = static_cast<uint64_t>(it->second);
+        }
+        if (!restoredLearningRate) {
+            state->currentLearningRate = static_cast<float>(
+                static_cast<double>(state->initialLearningRate) *
+                std::pow(1.0 - static_cast<double>(state->decay), static_cast<double>(state->currentEpoch)));
+        }
+    };
+}
 }  // namespace
 
 Sgd::Sgd(uint64_t id, float initialLearningRate, float decay, float momentum, bool useNesterovMomentum, uint64_t startResumeEpoch)
@@ -134,7 +157,8 @@ Sgd::Sgd(uint64_t id, shared_ptr<RuntimeState> runtimeState)
                       makeRuntimeScalarBuilder(runtimeState),
                       /*supportsSparseRowGradients=*/true,
                       makeHyperParameterUpdateBuilder(runtimeState),
-                      makeHyperParameterSnapshotBuilder(runtimeState)),
+                      makeHyperParameterSnapshotBuilder(runtimeState),
+                      makeHyperParameterRestoreBuilder(runtimeState)),
       runtimeState(std::move(runtimeState)) {}
 
 void Sgd::setInitialLearningRate(float initialLearningRate) {

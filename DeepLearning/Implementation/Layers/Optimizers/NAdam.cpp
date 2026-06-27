@@ -126,6 +126,13 @@ CustomOptimizer::HyperParameterSnapshotBuilder makeHyperParameterSnapshotBuilder
     };
 }
 
+CustomOptimizer::HyperParameterRestoreBuilder makeHyperParameterRestoreBuilder(shared_ptr<NAdam::RuntimeState> state) {
+    return [state](const unordered_map<string, float>& hyperParameters) {
+        if (auto it = hyperParameters.find("t"); it != hyperParameters.end()) {
+            state->t = it->second;
+        }
+    };
+}
 }  // namespace
 
 NAdam::NAdam(uint64_t id, float alpha, float beta1, float beta2, float epsilon)
@@ -138,7 +145,8 @@ NAdam::NAdam(uint64_t id, shared_ptr<RuntimeState> runtimeState)
                       makeRuntimeScalarBuilder(runtimeState),
                       /*supportsSparseRowGradients=*/true,
                       makeHyperParameterUpdateBuilder(runtimeState),
-                      makeHyperParameterSnapshotBuilder(runtimeState)),
+                      makeHyperParameterSnapshotBuilder(runtimeState),
+                      makeHyperParameterRestoreBuilder(runtimeState)),
       runtimeState(std::move(runtimeState)) {}
 
 float NAdam::getT() const { return runtimeState->t; }

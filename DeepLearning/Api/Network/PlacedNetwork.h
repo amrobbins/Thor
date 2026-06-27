@@ -107,7 +107,22 @@ class PlacedNetwork {
     // Copy parameter/optimizer state for layers that share a stable clone-source
     // identity.  This is used by composed phase graphs, where fresh placement may
     // introduce new API layer ids while preserving phase/source-layer identity.
+    // No ordinal/type/name fallback is used because phase handoff must prove the
+    // exact intended parameter identity.
     void copyMatchingTrainingStateFrom(PlacedNetwork& source);
+
+    // Load parameter/optimizer state directly from a saved artifact produced by
+    // the same API network instance.  Matching uses the serialized API layer id
+    // (layer<N>) plus parameter name; this is the strict direct-artifact variant
+    // of copyTrainingStateFrom() and does not guess by ordinal/type/name.
+    void loadTrainingStateFromSameNetworkArtifact(const std::string& artifactDirectory, const std::string& artifactNetworkName);
+
+    // Load matching parameter/optimizer state directly from a saved artifact into
+    // this already-placed network.  Unlike copyMatchingTrainingStateFrom(), this
+    // does not place the saved source network, so phase handoff does not require
+    // old/new/source GPU residency overlap.  Matching requires clone-source
+    // identity; artifacts without that metadata are rejected rather than guessed.
+    void loadMatchingTrainingStateFromArtifact(const std::string& artifactDirectory, const std::string& artifactNetworkName);
 
     uint64_t getNumStamps() { return stampedNetworks.size(); }
     ThorImplementation::StampedNetwork& getStampedNetwork(uint64_t i) {

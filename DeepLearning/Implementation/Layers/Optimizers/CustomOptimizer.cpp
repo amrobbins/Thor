@@ -106,13 +106,15 @@ CustomOptimizer::CustomOptimizer(uint64_t id,
                                  RuntimeScalarBuilder runtimeScalarBuilder,
                                  bool supportsSparseRowGradients,
                                  HyperParameterUpdateBuilder hyperParameterUpdateBuilder,
-                                 HyperParameterSnapshotBuilder hyperParameterSnapshotBuilder)
+                                 HyperParameterSnapshotBuilder hyperParameterSnapshotBuilder,
+                                 HyperParameterRestoreBuilder hyperParameterRestoreBuilder)
     : Optimizer(id),
       stateSpecs_(std::move(stateSpecs)),
       updateExpressionBuilder_(std::move(updateExpressionBuilder)),
       runtimeScalarBuilder_(std::move(runtimeScalarBuilder)),
       hyperParameterUpdateBuilder_(std::move(hyperParameterUpdateBuilder)),
       hyperParameterSnapshotBuilder_(std::move(hyperParameterSnapshotBuilder)),
+      hyperParameterRestoreBuilder_(std::move(hyperParameterRestoreBuilder)),
       supportsSparseRowGradients_(supportsSparseRowGradients) {
     if (!updateExpressionBuilder_) {
         throw std::invalid_argument("CustomOptimizer requires an update expression builder.");
@@ -448,6 +450,13 @@ std::unordered_map<std::string, float> CustomOptimizer::getAllHyperParameters() 
         return {};
     }
     return hyperParameterSnapshotBuilder_();
+}
+
+void CustomOptimizer::restoreHyperParameters(const std::unordered_map<std::string, float>& hyperParameters) {
+    if (!hyperParameterRestoreBuilder_) {
+        return;
+    }
+    hyperParameterRestoreBuilder_(hyperParameters);
 }
 
 }  // namespace ThorImplementation

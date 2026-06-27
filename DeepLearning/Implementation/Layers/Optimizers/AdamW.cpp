@@ -123,6 +123,13 @@ CustomOptimizer::HyperParameterSnapshotBuilder makeHyperParameterSnapshotBuilder
     };
 }
 
+CustomOptimizer::HyperParameterRestoreBuilder makeHyperParameterRestoreBuilder(shared_ptr<AdamW::RuntimeState> state) {
+    return [state](const unordered_map<string, float>& hyperParameters) {
+        if (auto it = hyperParameters.find("t"); it != hyperParameters.end()) {
+            state->t = it->second;
+        }
+    };
+}
 }  // namespace
 
 AdamW::AdamW(uint64_t id, float alpha, float beta1, float beta2, float epsilon, float weightDecay)
@@ -135,7 +142,8 @@ AdamW::AdamW(uint64_t id, shared_ptr<RuntimeState> runtimeState)
                       makeRuntimeScalarBuilder(runtimeState),
                       /*supportsSparseRowGradients=*/true,
                       makeHyperParameterUpdateBuilder(runtimeState),
-                      makeHyperParameterSnapshotBuilder(runtimeState)),
+                      makeHyperParameterSnapshotBuilder(runtimeState),
+                      makeHyperParameterRestoreBuilder(runtimeState)),
       runtimeState(std::move(runtimeState)) {}
 
 float AdamW::getT() const { return runtimeState->t; }

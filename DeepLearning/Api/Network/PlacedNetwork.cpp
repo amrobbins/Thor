@@ -6,10 +6,14 @@
 #include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
 #include "Utilities/Common/Event.h"
 #include "Utilities/Common/Stream.h"
+#include "Utilities/TarFile/TarReader.h"
 
 #include <utility>
 #include <stdexcept>
 #include <set>
+#include <filesystem>
+#include <optional>
+#include <system_error>
 #if THOR_ENABLE_BATCH_SUBMISSION_TIMING
 #include <chrono>
 #endif
@@ -74,7 +78,7 @@ void copyTensorState(ThorImplementation::Tensor destination, ThorImplementation:
     destination.copyFromAsync(source, stream);
 }
 
-void copyOptimizerTensorState(ThorImplementation::Optimizer& destination, ThorImplementation::Optimizer& source, Stream& stream, const std::string& description) {
+void copyOptimizerState(ThorImplementation::Optimizer& destination, ThorImplementation::Optimizer& source, Stream& stream, const std::string& description) {
     if (!destination.isCompiled() || !source.isCompiled()) {
         return;
     }
@@ -85,27 +89,368 @@ void copyOptimizerTensorState(ThorImplementation::Optimizer& destination, ThorIm
         ThorImplementation::Tensor sourceTensor = source.getOptimizerParameterTensor(parameterName);
         copyTensorState(destinationTensor, sourceTensor, stream, description + " optimizer parameter '" + parameterName + "'");
     }
+
+    destination.restoreHyperParameters(source.getAllHyperParameters());
 }
 
-std::vector<std::string> stateMatchKeysForParameter(Network& network, const ParameterReference& reference) {
-    std::vector<std::string> keys;
+std::optional<std::string> stateMatchKeyForParameter(Network& network, const ParameterReference& reference) {
     const std::optional<std::string> cloneKey = network.getCloneSourceKeyForLayerId(reference.getParameterizableId());
-    if (cloneKey.has_value() && !cloneKey->empty()) {
-        keys.push_back(cloneKey.value() + ":" + reference.getParameterName());
+    if (!cloneKey.has_value() || cloneKey->empty()) {
+        return std::nullopt;
     }
 
+    return cloneKey.value() + ":" + reference.getParameterName();
+}
 
-    for (uint32_t i = 0; i < network.getNumTrainableLayers(); ++i) {
-        std::shared_ptr<TrainableLayer> trainableLayer = network.getTrainableLayer(i);
-        if (trainableLayer == nullptr || trainableLayer->getParameterizableId() != reference.getParameterizableId()) {
+std::string sameNetworkStateKeyForParameter(const ParameterReference& reference) {
+    return "layer" + std::to_string(reference.getParameterizableId()) + ":" + reference.getParameterName();
+}
+
+std::optional<std::string> sameNetworkStateKeyForSerializedParameter(const json& layerJson,
+                                                                     const std::string& parameterName) {
+    if (!layerJson.contains("layer_name") || !layerJson.at("layer_name").is_string()) {
+        return std::nullopt;
+    }
+
+    const std::string layerName = layerJson.at("layer_name").get<std::string>();
+    if (layerName.empty()) {
+        return std::nullopt;
+    }
+
+    return layerName + ":" + parameterName;
+}
+
+
+bool hasArchiveShard0(const std::filesystem::path& directory, const std::string& archiveName) {
+    return std::filesystem::exists(directory / (archiveName + ".thor.tar")) ||
+           std::filesystem::exists(directory / (archiveName + ".000000.thor.tar"));
+}
+
+struct PlacedNetworkArchiveSelection {
+    std::string archiveName;
+    std::string modelJsonFileName;
+};
+
+PlacedNetworkArchiveSelection selectArchiveForPlacedStateLoad(const std::filesystem::path& directory,
+                                                              const std::string& archiveName) {
+    if (archiveName.empty()) {
+        throw std::runtime_error("PlacedNetwork::loadMatchingTrainingStateFromArtifact requires a non-empty artifact network name.");
+    }
+
+    std::error_code errorCode;
+    if (!std::filesystem::exists(directory, errorCode)) {
+        throw std::runtime_error("PlacedNetwork::loadMatchingTrainingStateFromArtifact: directory does not exist: " + directory.string());
+    }
+    if (errorCode) {
+        throw std::runtime_error("PlacedNetwork::loadMatchingTrainingStateFromArtifact: failed to inspect directory '" +
+                                 directory.string() + "': " + errorCode.message());
+    }
+    if (!std::filesystem::is_directory(directory, errorCode)) {
+        throw std::runtime_error("PlacedNetwork::loadMatchingTrainingStateFromArtifact: expected a directory containing archive '" +
+                                 archiveName + ".thor.tar', got: " + directory.string());
+    }
+    if (errorCode) {
+        throw std::runtime_error("PlacedNetwork::loadMatchingTrainingStateFromArtifact: failed to inspect directory '" +
+                                 directory.string() + "': " + errorCode.message());
+    }
+    if (!hasArchiveShard0(directory, archiveName)) {
+        throw std::runtime_error("PlacedNetwork::loadMatchingTrainingStateFromArtifact: expected archive '" + archiveName +
+                                 ".thor.tar' or sharded archive '" + archiveName + ".000000.thor.tar' in directory " +
+                                 directory.string() + ".");
+    }
+
+    const std::string modelJsonFileName = archiveName + ".thor.json";
+    auto reader = std::make_shared<thor_file::TarReader>(archiveName, directory);
+    if (!reader->containsFile(modelJsonFileName)) {
+        throw std::runtime_error("PlacedNetwork::loadMatchingTrainingStateFromArtifact: archive '" + archiveName + "' in " +
+                                 directory.string() + " is missing expected model file '" + modelJsonFileName + "'.");
+    }
+
+    return {archiveName, modelJsonFileName};
+}
+
+json readModelJsonFromArchive(thor_file::TarReader& archiveReader, const std::string& modelJsonFileName) {
+    const uint32_t modelJsonNumBytes = static_cast<uint32_t>(archiveReader.getFileSize(modelJsonFileName));
+    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::TensorDescriptor descriptor(ThorImplementation::DataType::UINT8, {modelJsonNumBytes});
+    ThorImplementation::Tensor jsonTensor(cpuPlacement, descriptor);
+    archiveReader.registerReadRequest(modelJsonFileName, jsonTensor);
+    archiveReader.executeReadRequests();
+
+    const char* jsonBytes = jsonTensor.getMemPtr<char>();
+    return json::parse(jsonBytes, jsonBytes + modelJsonNumBytes);
+}
+
+struct ArchiveParameterState {
+    std::string storageFile;
+    json optimizerJson;
+    std::string description;
+};
+
+std::unordered_map<size_t, std::string> cloneSourceKeyByLayerIndex(const json& modelJson) {
+    std::unordered_map<size_t, std::string> result;
+    if (!modelJson.contains("clone_source_keys")) {
+        throw std::runtime_error(
+            "PlacedNetwork::loadMatchingTrainingStateFromArtifact: artifact is missing clone_source_keys; "
+            "phase handoff requires exact clone-source identity and will not fall back to positional matching.");
+    }
+
+    const json& cloneSourceKeys = modelJson.at("clone_source_keys");
+    if (!cloneSourceKeys.is_array()) {
+        throw std::runtime_error("PlacedNetwork::loadMatchingTrainingStateFromArtifact: clone_source_keys must be an array.");
+    }
+    for (const json& entry : cloneSourceKeys) {
+        const size_t layerIndex = entry.at("layer_index").get<size_t>();
+        const std::string key = entry.at("key").get<std::string>();
+        if (!key.empty()) {
+            result[layerIndex] = key;
+        }
+    }
+    return result;
+}
+
+std::optional<std::string> stateMatchKeyForSerializedParameter(size_t layerIndex,
+                                                               const std::unordered_map<size_t, std::string>& cloneKeys,
+                                                               const std::string& parameterName) {
+    auto cloneIt = cloneKeys.find(layerIndex);
+    if (cloneIt == cloneKeys.end() || cloneIt->second.empty()) {
+        return std::nullopt;
+    }
+
+    return cloneIt->second + ":" + parameterName;
+}
+
+std::unordered_map<std::string, ArchiveParameterState> archiveParameterStateByKey(const json& modelJson) {
+    const json& layers = modelJson.at("layers");
+    if (!layers.is_array()) {
+        throw std::runtime_error("PlacedNetwork::loadMatchingTrainingStateFromArtifact: model layers must be an array.");
+    }
+
+    const std::unordered_map<size_t, std::string> cloneKeys = cloneSourceKeyByLayerIndex(modelJson);
+    std::unordered_map<std::string, ArchiveParameterState> result;
+    for (size_t layerIndex = 0; layerIndex < layers.size(); ++layerIndex) {
+        const json& layerJson = layers[layerIndex];
+        if (!layerJson.contains("parameters")) {
             continue;
         }
-        keys.push_back("trainable_ordinal:" + std::to_string(i) + ":" +
-                       trainableLayer->getLayerType() + ":" + reference.getParameterName());
-        break;
+        const json& parametersJson = layerJson.at("parameters");
+        if (!parametersJson.is_object()) {
+            throw std::runtime_error("PlacedNetwork::loadMatchingTrainingStateFromArtifact: layer parameters must be an object.");
+        }
+
+        for (const auto& [parameterName, parameterJson] : parametersJson.items()) {
+            const char* storageFileKey = nullptr;
+            if (parameterJson.contains("storage_file")) {
+                storageFileKey = "storage_file";
+            } else if (parameterJson.contains("parameter_storage")) {
+                storageFileKey = "parameter_storage";
+            }
+            if (storageFileKey == nullptr) {
+                continue;
+            }
+
+            ArchiveParameterState state;
+            state.storageFile = parameterJson.at(storageFileKey).get<std::string>();
+            if (parameterJson.contains("optimizer_override")) {
+                state.optimizerJson = parameterJson.at("optimizer_override");
+            } else if (parameterJson.contains("optimizer")) {
+                state.optimizerJson = parameterJson.at("optimizer");
+            }
+            state.description = "artifact layer " + std::to_string(layerIndex) + " parameter '" + parameterName + "'";
+
+            const std::optional<std::string> key = stateMatchKeyForSerializedParameter(layerIndex, cloneKeys, parameterName);
+            if (!key.has_value()) {
+                continue;
+            }
+            auto insertResult = result.emplace(key.value(), state);
+            if (!insertResult.second) {
+                throw std::runtime_error("PlacedNetwork::loadMatchingTrainingStateFromArtifact: duplicate clone-source parameter key '" +
+                                         key.value() + "' in serialized artifact.");
+            }
+        }
+    }
+    return result;
+}
+
+std::unordered_map<std::string, ArchiveParameterState> archiveParameterStateBySameNetworkKey(const json& modelJson) {
+    const json& layers = modelJson.at("layers");
+    if (!layers.is_array()) {
+        throw std::runtime_error("PlacedNetwork::loadTrainingStateFromSameNetworkArtifact: model layers must be an array.");
     }
 
-    return keys;
+    std::unordered_map<std::string, ArchiveParameterState> result;
+    for (size_t layerIndex = 0; layerIndex < layers.size(); ++layerIndex) {
+        const json& layerJson = layers[layerIndex];
+        if (!layerJson.contains("parameters")) {
+            continue;
+        }
+        const json& parametersJson = layerJson.at("parameters");
+        if (!parametersJson.is_object()) {
+            throw std::runtime_error("PlacedNetwork::loadTrainingStateFromSameNetworkArtifact: layer parameters must be an object.");
+        }
+
+        for (const auto& [parameterName, parameterJson] : parametersJson.items()) {
+            const char* storageFileKey = nullptr;
+            if (parameterJson.contains("storage_file")) {
+                storageFileKey = "storage_file";
+            } else if (parameterJson.contains("parameter_storage")) {
+                storageFileKey = "parameter_storage";
+            }
+            if (storageFileKey == nullptr) {
+                continue;
+            }
+
+            const std::optional<std::string> key = sameNetworkStateKeyForSerializedParameter(layerJson, parameterName);
+            if (!key.has_value()) {
+                throw std::runtime_error(
+                    "PlacedNetwork::loadTrainingStateFromSameNetworkArtifact: serialized trainable parameter '" +
+                    parameterName + "' in artifact layer " + std::to_string(layerIndex) +
+                    " is missing layer_name; same-network restore requires exact API layer identity.");
+            }
+
+            ArchiveParameterState state;
+            state.storageFile = parameterJson.at(storageFileKey).get<std::string>();
+            if (parameterJson.contains("optimizer_override")) {
+                state.optimizerJson = parameterJson.at("optimizer_override");
+            } else if (parameterJson.contains("optimizer")) {
+                state.optimizerJson = parameterJson.at("optimizer");
+            }
+            state.description = "artifact layer " + std::to_string(layerIndex) + " parameter '" + parameterName + "'";
+
+            auto insertResult = result.emplace(key.value(), state);
+            if (!insertResult.second) {
+                throw std::runtime_error(
+                    "PlacedNetwork::loadTrainingStateFromSameNetworkArtifact: duplicate API-layer parameter key '" +
+                    key.value() + "' in serialized artifact.");
+            }
+        }
+    }
+    return result;
+}
+
+void registerArchiveTensorReadWithSizeCheck(thor_file::TarReader& archiveReader,
+                                            const std::string& fileName,
+                                            ThorImplementation::Tensor destination,
+                                            const std::string& description) {
+    if (fileName.empty()) {
+        throw std::runtime_error("Cannot load " + description + " from an empty artifact file name.");
+    }
+    const uint64_t archiveBytes = archiveReader.getFileSize(fileName);
+    const uint64_t destinationBytes = destination.getArraySizeInBytes();
+    if (archiveBytes != destinationBytes) {
+        throw std::runtime_error("Cannot load " + description + " from artifact file '" + fileName +
+                                 "': archive tensor byte size " + std::to_string(archiveBytes) +
+                                 " does not match destination tensor byte size " + std::to_string(destinationBytes) + ".");
+    }
+    archiveReader.registerReadRequest(fileName, destination);
+}
+
+std::optional<std::string> optimizerStateFileForParameter(const json& optimizerJson, const std::string& parameterName) {
+    if (!optimizerJson.is_object()) {
+        return std::nullopt;
+    }
+
+    const std::string exactKey = parameterName + "_tensor";
+    if (optimizerJson.contains(exactKey) && optimizerJson.at(exactKey).is_string()) {
+        return optimizerJson.at(exactKey).get<std::string>();
+    }
+
+    // Muon may serialize the selected fallback optimizer state as a nested optimizer.
+    static const std::vector<std::string> nestedOptimizerKeys = {"fallback_optimizer_state", "fallback_optimizer"};
+    for (const std::string& nestedKey : nestedOptimizerKeys) {
+        if (!optimizerJson.contains(nestedKey)) {
+            continue;
+        }
+        std::optional<std::string> nestedFile = optimizerStateFileForParameter(optimizerJson.at(nestedKey), parameterName);
+        if (nestedFile.has_value()) {
+            return nestedFile;
+        }
+    }
+
+    return std::nullopt;
+}
+
+
+std::unordered_map<std::string, float> optimizerHyperParametersFromJson(const json& optimizerJson) {
+    std::unordered_map<std::string, float> result;
+    if (!optimizerJson.is_object()) {
+        return result;
+    }
+
+    const auto readNumber = [&](const std::string& key) {
+        if (!optimizerJson.contains(key)) {
+            return;
+        }
+        const json& value = optimizerJson.at(key);
+        if (value.is_number_float() || value.is_number_integer() || value.is_number_unsigned()) {
+            result[key] = value.get<float>();
+        } else if (value.is_boolean()) {
+            result[key] = value.get<bool>() ? 1.0f : 0.0f;
+        }
+    };
+
+    // Only restore true runtime state. Static architecture/config hyperparameters
+    // are captured when the optimizer expression is compiled and must continue to
+    // come from the destination API optimizer.
+    readNumber("t");
+    readNumber("epoch");
+    readNumber("currentBatch");
+    readNumber("current_batch");
+    readNumber("currentLearningRate");
+    readNumber("current_learning_rate");
+
+    const auto alias = [&](const std::string& serializedName, const std::string& runtimeName) {
+        auto it = result.find(serializedName);
+        if (it != result.end() && result.find(runtimeName) == result.end()) {
+            result[runtimeName] = it->second;
+        }
+    };
+    alias("current_learning_rate", "currentLearningRate");
+    alias("current_batch", "currentBatch");
+
+    for (const std::string& nestedKey : {std::string("fallback_optimizer_state"), std::string("fallback_optimizer")}) {
+        if (!optimizerJson.contains(nestedKey)) {
+            continue;
+        }
+        std::unordered_map<std::string, float> nested = optimizerHyperParametersFromJson(optimizerJson.at(nestedKey));
+        for (const auto& [key, value] : nested) {
+            result.emplace(key, value);
+        }
+    }
+
+    return result;
+}
+
+void registerOptimizerStateReadRequests(thor_file::TarReader& archiveReader,
+                                        const json& sourceOptimizerJson,
+                                        ThorImplementation::Optimizer& destinationOptimizer,
+                                        const std::string& description) {
+    if (!sourceOptimizerJson.is_object() || !destinationOptimizer.isCompiled()) {
+        return;
+    }
+
+    destinationOptimizer.restoreHyperParameters(optimizerHyperParametersFromJson(sourceOptimizerJson));
+
+    for (const std::string& parameterName : destinationOptimizer.getOptimizerParameterNames()) {
+        if (parameterName == "weights") {
+            continue;
+        }
+
+        const std::optional<std::string> maybeFile = optimizerStateFileForParameter(sourceOptimizerJson, parameterName);
+        if (!maybeFile.has_value()) {
+            continue;
+        }
+        if (!archiveReader.containsFile(maybeFile.value())) {
+            throw std::runtime_error("Cannot load " + description + " optimizer parameter '" + parameterName +
+                                     "': artifact is missing file '" + maybeFile.value() + "'.");
+        }
+
+        ThorImplementation::Tensor destinationTensor = destinationOptimizer.getOptimizerParameterTensor(parameterName);
+        registerArchiveTensorReadWithSizeCheck(archiveReader,
+                                               maybeFile.value(),
+                                               destinationTensor,
+                                               description + " optimizer parameter '" + parameterName + "'");
+    }
 }
 
 }  // namespace
@@ -419,7 +764,7 @@ void PlacedNetwork::copyTrainingStateFrom(PlacedNetwork& source) {
             copyTensorState(destinationStorage, sourceParameter->getStorage().value(), copyStream, description);
 
             if (destinationParameter->hasOptimizer() && sourceParameter->hasOptimizer()) {
-                copyOptimizerTensorState(*destinationParameter->getOptimizer(),
+                copyOptimizerState(*destinationParameter->getOptimizer(),
                                          *sourceParameter->getOptimizer(),
                                          copyStream,
                                          description);
@@ -446,13 +791,20 @@ void PlacedNetwork::copyMatchingTrainingStateFrom(PlacedNetwork& source) {
 
     std::unordered_map<std::string, ParameterReference> sourceParameterByStateKey;
     for (const ParameterReference& sourceReference : source.getTrainableParameterReferences(/*trainingEnabledOnly=*/false)) {
-        for (const std::string& key : stateMatchKeysForParameter(source.network, sourceReference)) {
-            sourceParameterByStateKey.emplace(key, sourceReference);
+        const std::optional<std::string> sourceKey = stateMatchKeyForParameter(source.network, sourceReference);
+        if (!sourceKey.has_value()) {
+            continue;
+        }
+        auto insertResult = sourceParameterByStateKey.emplace(sourceKey.value(), sourceReference);
+        if (!insertResult.second) {
+            throw std::runtime_error("Cannot copy matching placed-network training state: duplicate clone-source parameter key '" +
+                                     sourceKey.value() + "' in source network.");
         }
     }
 
     if (sourceParameterByStateKey.empty()) {
-        return;
+        throw std::runtime_error(
+            "Cannot copy matching placed-network training state: source network has no clone-source keyed trainable parameters.");
     }
 
     std::vector<Stream> copyStreams;
@@ -461,19 +813,16 @@ void PlacedNetwork::copyMatchingTrainingStateFrom(PlacedNetwork& source) {
         ThorImplementation::StampedNetwork& sourceStamp = source.getStampedNetwork(stampIndex);
 
         for (const ParameterReference& destinationReference : destinationParameterReferences) {
-            const std::vector<std::string> destinationKeys = stateMatchKeysForParameter(network, destinationReference);
-            auto sourceIt = sourceParameterByStateKey.end();
-            std::string matchedKey;
-            for (const std::string& key : destinationKeys) {
-                sourceIt = sourceParameterByStateKey.find(key);
-                if (sourceIt != sourceParameterByStateKey.end()) {
-                    matchedKey = key;
-                    break;
-                }
+            const std::optional<std::string> destinationKey = stateMatchKeyForParameter(network, destinationReference);
+            if (!destinationKey.has_value()) {
+                continue;
             }
+
+            auto sourceIt = sourceParameterByStateKey.find(destinationKey.value());
             if (sourceIt == sourceParameterByStateKey.end()) {
                 continue;
             }
+            const std::string matchedKey = destinationKey.value();
 
             std::shared_ptr<ThorImplementation::PhysicalParameter> destinationParameter =
                 getPhysicalParameter(destinationStamp, destinationReference);
@@ -496,7 +845,7 @@ void PlacedNetwork::copyMatchingTrainingStateFrom(PlacedNetwork& source) {
             copyTensorState(destinationStorage, sourceParameter->getStorage().value(), copyStream, description);
 
             if (destinationParameter->hasOptimizer() && sourceParameter->hasOptimizer()) {
-                copyOptimizerTensorState(*destinationParameter->getOptimizer(),
+                copyOptimizerState(*destinationParameter->getOptimizer(),
                                          *sourceParameter->getOptimizer(),
                                          copyStream,
                                          description);
@@ -505,9 +854,157 @@ void PlacedNetwork::copyMatchingTrainingStateFrom(PlacedNetwork& source) {
         }
     }
 
+    if (copyStreams.empty()) {
+        throw std::runtime_error(
+            "Cannot copy matching placed-network training state: no destination parameters matched clone-source keyed source parameters.");
+    }
+
     for (Stream& copyStream : copyStreams) {
         copyStream.synchronize();
     }
+}
+
+
+void PlacedNetwork::loadTrainingStateFromSameNetworkArtifact(const std::string& artifactDirectory,
+                                                                     const std::string& artifactNetworkName) {
+    const std::vector<ParameterReference> destinationParameterReferences =
+        getTrainableParameterReferences(/*trainingEnabledOnly=*/false);
+    if (destinationParameterReferences.empty()) {
+        return;
+    }
+
+    const PlacedNetworkArchiveSelection archiveSelection =
+        selectArchiveForPlacedStateLoad(std::filesystem::path(artifactDirectory), artifactNetworkName);
+    auto archiveReader = std::make_shared<thor_file::TarReader>(archiveSelection.archiveName, std::filesystem::path(artifactDirectory));
+    const json modelJson = readModelJsonFromArchive(*archiveReader, archiveSelection.modelJsonFileName);
+    const std::unordered_map<std::string, ArchiveParameterState> sourceParameterByStateKey =
+        archiveParameterStateBySameNetworkKey(modelJson);
+    if (sourceParameterByStateKey.empty()) {
+        throw std::runtime_error(
+            "PlacedNetwork::loadTrainingStateFromSameNetworkArtifact: artifact contains no API-layer keyed trainable parameter state.");
+    }
+
+    uint64_t registeredStateLoads = 0;
+    for (uint64_t stampIndex = 0; stampIndex < stampedNetworks.size(); ++stampIndex) {
+        ThorImplementation::StampedNetwork& destinationStamp = stampedNetworks[stampIndex];
+
+        for (const ParameterReference& destinationReference : destinationParameterReferences) {
+            const std::string destinationKey = sameNetworkStateKeyForParameter(destinationReference);
+
+            auto sourceIt = sourceParameterByStateKey.find(destinationKey);
+            if (sourceIt == sourceParameterByStateKey.end()) {
+                throw std::runtime_error(
+                    "PlacedNetwork::loadTrainingStateFromSameNetworkArtifact: artifact has no saved state for exact API-layer parameter key '" +
+                    destinationKey + "'.");
+            }
+
+            std::shared_ptr<ThorImplementation::PhysicalParameter> destinationParameter =
+                getPhysicalParameter(destinationStamp, destinationReference);
+            if (destinationParameter == nullptr) {
+                throw std::runtime_error("Cannot load same-network placed-network training state for parameter '" +
+                                         destinationReference.getParameterName() + "': missing destination physical parameter.");
+            }
+            if (!destinationParameter->getStorage().has_value()) {
+                throw std::runtime_error("Cannot load same-network placed-network training state for parameter '" +
+                                         destinationReference.getParameterName() + "': destination parameter storage is not initialized.");
+            }
+
+            const std::string description = "API-layer state key '" + destinationKey + "' parameter '" +
+                                            destinationReference.getParameterName() + "'";
+            ThorImplementation::Tensor destinationStorage = destinationParameter->getStorage().value();
+            registerArchiveTensorReadWithSizeCheck(*archiveReader,
+                                                   sourceIt->second.storageFile,
+                                                   destinationStorage,
+                                                   description);
+            ++registeredStateLoads;
+
+            if (destinationParameter->hasOptimizer()) {
+                registerOptimizerStateReadRequests(*archiveReader,
+                                                   sourceIt->second.optimizerJson,
+                                                   *destinationParameter->getOptimizer(),
+                                                   description);
+            }
+        }
+    }
+
+    if (registeredStateLoads == 0) {
+        throw std::runtime_error(
+            "PlacedNetwork::loadTrainingStateFromSameNetworkArtifact: no destination parameters were loaded from artifact.");
+    }
+
+    archiveReader->executeReadRequests();
+}
+
+void PlacedNetwork::loadMatchingTrainingStateFromArtifact(const std::string& artifactDirectory,
+                                                          const std::string& artifactNetworkName) {
+    const std::vector<ParameterReference> destinationParameterReferences =
+        getTrainableParameterReferences(/*trainingEnabledOnly=*/false);
+    if (destinationParameterReferences.empty()) {
+        return;
+    }
+
+    const PlacedNetworkArchiveSelection archiveSelection =
+        selectArchiveForPlacedStateLoad(std::filesystem::path(artifactDirectory), artifactNetworkName);
+    auto archiveReader = std::make_shared<thor_file::TarReader>(archiveSelection.archiveName, std::filesystem::path(artifactDirectory));
+    const json modelJson = readModelJsonFromArchive(*archiveReader, archiveSelection.modelJsonFileName);
+    const std::unordered_map<std::string, ArchiveParameterState> sourceParameterByStateKey =
+        archiveParameterStateByKey(modelJson);
+    if (sourceParameterByStateKey.empty()) {
+        throw std::runtime_error(
+            "PlacedNetwork::loadMatchingTrainingStateFromArtifact: artifact contains no clone-source keyed trainable parameter state.");
+    }
+
+    uint64_t registeredStateLoads = 0;
+    for (uint64_t stampIndex = 0; stampIndex < stampedNetworks.size(); ++stampIndex) {
+        ThorImplementation::StampedNetwork& destinationStamp = stampedNetworks[stampIndex];
+
+        for (const ParameterReference& destinationReference : destinationParameterReferences) {
+            const std::optional<std::string> destinationKey = stateMatchKeyForParameter(network, destinationReference);
+            if (!destinationKey.has_value()) {
+                continue;
+            }
+
+            auto sourceIt = sourceParameterByStateKey.find(destinationKey.value());
+            if (sourceIt == sourceParameterByStateKey.end()) {
+                continue;
+            }
+            const std::string matchedKey = destinationKey.value();
+
+            std::shared_ptr<ThorImplementation::PhysicalParameter> destinationParameter =
+                getPhysicalParameter(destinationStamp, destinationReference);
+            if (destinationParameter == nullptr) {
+                throw std::runtime_error("Cannot load matching placed-network training state for parameter '" +
+                                         destinationReference.getParameterName() + "': missing destination physical parameter.");
+            }
+            if (!destinationParameter->getStorage().has_value()) {
+                throw std::runtime_error("Cannot load matching placed-network training state for parameter '" +
+                                         destinationReference.getParameterName() + "': destination parameter storage is not initialized.");
+            }
+
+            const std::string description = "state key '" + matchedKey + "' parameter '" +
+                                            destinationReference.getParameterName() + "'";
+            ThorImplementation::Tensor destinationStorage = destinationParameter->getStorage().value();
+            registerArchiveTensorReadWithSizeCheck(*archiveReader,
+                                                   sourceIt->second.storageFile,
+                                                   destinationStorage,
+                                                   description);
+            ++registeredStateLoads;
+
+            if (destinationParameter->hasOptimizer()) {
+                registerOptimizerStateReadRequests(*archiveReader,
+                                                   sourceIt->second.optimizerJson,
+                                                   *destinationParameter->getOptimizer(),
+                                                   description);
+            }
+        }
+    }
+
+    if (registeredStateLoads == 0) {
+        throw std::runtime_error(
+            "PlacedNetwork::loadMatchingTrainingStateFromArtifact: no destination parameters matched clone-source keyed artifact parameters.");
+    }
+
+    archiveReader->executeReadRequests();
 }
 
 std::vector<ParameterReference> PlacedNetwork::getTrainableParameterReferences(bool trainingEnabledOnly) {
