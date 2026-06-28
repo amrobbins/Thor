@@ -964,6 +964,7 @@ class TrainingArtifactManager {
 
     [[nodiscard]] std::optional<double> getBestScore() const { return bestScore; }
     [[nodiscard]] std::optional<uint64_t> getBestEpoch() const { return bestEpoch; }
+    [[nodiscard]] bool hasBestCandidateArtifact() const { return bestCandidateDirectory.has_value(); }
 
    private:
     static void removePathIfExists(const std::filesystem::path& path) {
@@ -2278,7 +2279,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
 
     for (uint32_t epochOffset = 0; epochOffset < request.epochs; ++epochOffset) {
         request.cancellationToken.throwIfCancellationRequested();
-        const uint64_t humanEpoch = currentEpoch + 1;
+        const uint64_t cumulativeEpoch = currentEpoch + 1;
         EpochLossAccumulator epochLosses;
 
         std::vector<std::pair<ExampleType, TrainingEventPhase>> phaseSpecs;
@@ -2330,7 +2331,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                     phaseStarted[index] = true;
                     emitTrainingEvent(observer,
                                       TrainingEvent::epochStarted(
-                                          makeBaseSnapshot(work.phase, humanEpoch, batchSize, work.batchesPerEpoch, state)));
+                                          makeBaseSnapshot(work.phase, cumulativeEpoch, batchSize, work.batchesPerEpoch, state)));
                 }
 
                 const QueuedPhaseProgress& progress = phaseProgress(*state, work.phase);
@@ -2342,7 +2343,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                     phaseFinished[index] = true;
                     emitTrainingEvent(observer,
                                       TrainingEvent::epochFinished(
-                                          makeBaseSnapshot(work.phase, humanEpoch, batchSize, work.batchesPerEpoch, state)));
+                                          makeBaseSnapshot(work.phase, cumulativeEpoch, batchSize, work.batchesPerEpoch, state)));
                 }
                 lifecyclePhaseIndex += 1;
             }
@@ -2462,7 +2463,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
 
                 {
                     TrainingStatsSnapshot snapshot =
-                        makeBaseSnapshot(completedBatch.phase, humanEpoch, batchSize, completedBatch.batchesInEpoch, state);
+                        makeBaseSnapshot(completedBatch.phase, cumulativeEpoch, batchSize, completedBatch.batchesInEpoch, state);
                     snapshot.inFlightBatches = completedBatch.inFlightAfterPop;
                     snapshot.stepInEpoch = completedBatch.epochBatchNum + 1;
                     snapshot.step = (currentEpoch * completedBatch.batchesInEpoch) + snapshot.stepInEpoch;
@@ -2508,18 +2509,19 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         emitReadyPhaseLifecycleEvents();
 
         bool earlyCompletionRequested = false;
-        const bool earlyCompletionEligible = modelSelectionEnabled && humanEpoch >= firstModelSelectionEpoch &&
-                                             ((humanEpoch - firstModelSelectionEpoch) % request.checkBestModelEveryEpochs == 0);
-        if (earlyCompletionEligible) {
-            const TrainingModelSelectionContext currentSelectionContext = epochLosses.modelSelectionContext(humanEpoch);
+        const uint64_t phaseLocalEpoch = cumulativeEpoch - request.initialCompletedEpochs;
+        const bool modelSelectionEligible = modelSelectionEnabled && phaseLocalEpoch >= firstModelSelectionEpoch &&
+                                            ((phaseLocalEpoch - firstModelSelectionEpoch) % request.checkBestModelEveryEpochs == 0);
+        if (modelSelectionEligible) {
+            const TrainingModelSelectionContext currentSelectionContext = epochLosses.modelSelectionContext(cumulativeEpoch);
             const std::optional<double> currentScore = request.modelSelectionScore.evaluate(currentSelectionContext);
             latestModelSelectionScore = currentScore;
-            trainingArtifacts.maybeSnapshotBestCandidate(*placedNetwork, humanEpoch, currentScore);
+            trainingArtifacts.maybeSnapshotBestCandidate(*placedNetwork, cumulativeEpoch, currentScore);
             const std::optional<double> bestScore = trainingArtifacts.getBestScore();
-            const std::optional<uint64_t> bestEpoch = trainingArtifacts.getBestEpoch();
-            if (currentScore.has_value() && std::isfinite(currentScore.value()) && bestScore.has_value() && bestEpoch.has_value()) {
+            const std::optional<uint64_t> bestCumulativeEpoch = trainingArtifacts.getBestEpoch();
+            if (currentScore.has_value() && std::isfinite(currentScore.value()) && bestScore.has_value() && bestCumulativeEpoch.has_value()) {
                 for (const TrainingEarlyCompletionPolicy& policy : request.earlyCompletionPolicies) {
-                    if (policy.shouldComplete(currentScore.value(), bestScore.value(), humanEpoch, bestEpoch.value())) {
+                    if (policy.shouldComplete(currentScore.value(), bestScore.value(), cumulativeEpoch, bestCumulativeEpoch.value())) {
                         earlyCompletionRequested = true;
                         break;
                     }
@@ -2529,12 +2531,12 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
 
         latestTrainingLoss = epochLosses.trainLoss();
         latestValidationLoss = epochLosses.validationLoss();
-        latestEpochSelectionContext = epochLosses.modelSelectionContext(humanEpoch);
+        latestEpochSelectionContext = epochLosses.modelSelectionContext(cumulativeEpoch);
         latestEpochSelectionContextValid = true;
         currentEpoch += 1;
         if (earlyCompletionRequested) {
             runEarlyCompleted = true;
-            completedEpoch = humanEpoch;
+            completedEpoch = cumulativeEpoch;
             break;
         }
     }
@@ -2542,7 +2544,8 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     request.cancellationToken.throwIfCancellationRequested();
     const uint64_t finalCompletedEpoch = completedEpoch.value_or(currentEpoch);
     const char* finalCompletionReason = runEarlyCompleted ? "early_completed" : "completed";
-    const bool finalModelSelectionEligible = modelSelectionEnabled && finalCompletedEpoch >= firstModelSelectionEpoch;
+    const uint64_t finalCompletedPhaseEpoch = finalCompletedEpoch - request.initialCompletedEpochs;
+    const bool finalModelSelectionEligible = modelSelectionEnabled && finalCompletedPhaseEpoch >= firstModelSelectionEpoch;
     if (finalModelSelectionEligible) {
         // The final/latest state is the handoff and deployment boundary. If best
         // candidate tracking is enabled and the fit has reached the model-selection
@@ -2573,6 +2576,17 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         selectionMetadata.completionReason = finalCompletionReason;
         selectionMetadata.checkBestModelEveryEpochs = request.checkBestModelEveryEpochs;
         selectionMetadata.firstModelSelectionEpoch = request.firstModelSelectionEpoch;
+
+        // The epoch counter used by later fit() calls must describe the state
+        // that will actually be handed off.  With a saved best candidate, Trainer
+        // will reload artifactRoot/best for the next phase, so resume from the
+        // selected best epoch rather than from the later epoch where early
+        // completion stopped.  Without a saved best artifact, the only reusable
+        // state is the latest in-memory placement/latest artifact, so keep the
+        // full completed epoch.
+        const std::optional<uint64_t> selectedArtifactEpoch =
+            trainingArtifacts.hasBestCandidateArtifact() ? trainingArtifacts.getBestEpoch() : std::nullopt;
+
         trainingArtifacts.finalize(*placedNetwork, selectionMetadata);
         // fit() completion is a semantic boundary: even when no save_model_dir is
         // configured, callers may immediately reuse, inspect, save, or pass the
@@ -2584,7 +2598,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
             *request.completedPlacedNetwork = placedNetwork;
         }
         if (request.completedTrainingEpochs != nullptr) {
-            *request.completedTrainingEpochs = finalCompletedEpoch;
+            *request.completedTrainingEpochs = selectedArtifactEpoch.value_or(finalCompletedEpoch);
         }
     }
 

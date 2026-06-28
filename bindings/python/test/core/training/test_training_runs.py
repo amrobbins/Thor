@@ -3995,6 +3995,50 @@ def test_trainer_fit_returns_result_and_persists_selection_metadata(tmp_path):
         description="opt-in TrainingRuns CUDA integration tests",
     ),
 )
+def test_trainer_followup_fit_resumes_epoch_counter_from_saved_best_candidate(tmp_path):
+    save_dir = tmp_path / "trainer_followup_fit_best_epoch_resume"
+    early_policy = thor.training.EarlyCompletionPolicy(
+        lambda current_score, best_score, current_epoch, best_epoch: current_epoch >= 2)
+    trainer = _make_tiny_regression_trainer(
+        "trainer_followup_fit_best_epoch_resume",
+        save_model_dir=save_dir,
+        save_model_overwrite=True,
+        model_selection_score=lambda validation_loss,
+        training_loss,
+        epoch: float(epoch),
+    )
+
+    first_result = trainer.fit(
+        50,
+        check_best_model_every_epochs=1,
+        early_completion_policies=[early_policy],
+    )
+
+    assert first_result.status == "completed"
+    assert first_result.result == "early_completed"
+    assert first_result.completed_epoch == 2
+    assert first_result.best_epoch == 1
+    assert trainer.completed_training_epochs == 1
+
+    second_result = trainer.fit(3)
+
+    assert second_result.status == "completed"
+    assert second_result.result == "completed"
+    assert second_result.completed_epoch == 4
+    assert second_result.final_training_stats.epoch == 4
+    assert second_result.final_training_stats.epochs == 4
+    assert trainer.completed_training_epochs == 4
+
+
+@pytest.mark.cuda
+@pytest.mark.training_integration
+@pytest.mark.skipif(
+    not RUN_TRAINING_INTEGRATION,
+    reason=integration_skip_reason(
+        "THOR_RUN_TRAINING_INTEGRATION",
+        description="opt-in TrainingRuns CUDA integration tests",
+    ),
+)
 def test_trainer_model_selection_score_receives_named_loss_context(tmp_path):
     contexts = []
 
@@ -4149,12 +4193,12 @@ def test_trainer_first_model_selection_epoch_can_complete_without_candidate_or_s
         description="opt-in TrainingRuns CUDA integration tests",
     ),
 )
-def test_trainer_first_model_selection_epoch_uses_cumulative_epoch_across_fit_calls(tmp_path):
-    save_dir = tmp_path / "first_model_selection_cumulative"
+def test_trainer_first_model_selection_epoch_is_phase_local_across_fit_calls(tmp_path):
+    save_dir = tmp_path / "first_model_selection_phase_local"
     early_policy = thor.training.EarlyCompletionPolicy(
         lambda current_score, best_score, current_epoch, best_epoch: current_epoch >= 3)
     trainer = _make_tiny_regression_trainer(
-        "trainer_first_model_selection_cumulative",
+        "trainer_first_model_selection_phase_local",
         save_model_dir=save_dir,
         save_model_overwrite=True,
         model_selection_score=lambda validation_loss,
@@ -4190,22 +4234,22 @@ def test_trainer_first_model_selection_epoch_uses_cumulative_epoch_across_fit_ca
     assert second_result.status == "completed"
     assert second_result.result == "early_completed"
     assert second_result.early_completed is True
-    assert second_result.completed_epoch == 3
-    assert second_result.best_epoch == 3
-    assert second_result.best_score == pytest.approx(3.0)
-    assert trainer.completed_training_epochs == 3
+    assert second_result.completed_epoch == 5
+    assert second_result.best_epoch == 5
+    assert second_result.best_score == pytest.approx(5.0)
+    assert trainer.completed_training_epochs == 5
     assert save_dir.exists()
     assert _training_artifact_latest_dir(save_dir).exists()
     assert _training_artifact_best_dir(save_dir).exists()
 
     metadata = _training_selection_metadata(save_dir)
     assert metadata["schema_version"] == 2
-    assert metadata["latest_epoch"] == 3
-    assert metadata["latest_score"] == pytest.approx(3.0)
+    assert metadata["latest_epoch"] == 5
+    assert metadata["latest_score"] == pytest.approx(5.0)
     assert metadata["has_best_candidate"] is True
-    assert metadata["best_epoch"] == 3
-    assert metadata["best_score"] == pytest.approx(3.0)
-    assert metadata["completed_epoch"] == 3
+    assert metadata["best_epoch"] == 5
+    assert metadata["best_score"] == pytest.approx(5.0)
+    assert metadata["completed_epoch"] == 5
     assert metadata["completion_reason"] == "early_completed"
     assert metadata["check_best_model_every_epochs"] == 1
     assert metadata["first_model_selection_epoch"] == 3
@@ -4220,14 +4264,14 @@ def test_trainer_first_model_selection_epoch_uses_cumulative_epoch_across_fit_ca
         description="opt-in TrainingRuns CUDA integration tests",
     ),
 )
-def test_training_runs_first_model_selection_epoch_uses_cumulative_epoch_across_fit_calls(tmp_path):
-    save_dir = tmp_path / "training_runs_first_model_selection_cumulative"
+def test_training_runs_first_model_selection_epoch_is_phase_local_across_fit_calls(tmp_path):
+    save_dir = tmp_path / "training_runs_first_model_selection_phase_local"
     early_rule = thor.training.EarlyCompletionRule(
         lambda current_score, best_score, current_epoch, best_epoch: current_epoch >= 3,
         run_name="fold_0",
     )
     trainer = _make_tiny_regression_trainer(
-        "training_runs_first_model_selection_cumulative",
+        "training_runs_first_model_selection_phase_local",
         save_model_dir=save_dir,
         save_model_overwrite=True,
         model_selection_score=lambda validation_loss,
@@ -4270,22 +4314,22 @@ def test_training_runs_first_model_selection_epoch_uses_cumulative_epoch_across_
     assert second_result.status == "completed"
     assert second_result.result == "early_completed"
     assert second_result.early_completed is True
-    assert second_result.completed_epoch == 3
-    assert second_result.best_epoch == 3
-    assert second_result.best_score == pytest.approx(3.0)
-    assert trainer.completed_training_epochs == 3
+    assert second_result.completed_epoch == 5
+    assert second_result.best_epoch == 5
+    assert second_result.best_score == pytest.approx(5.0)
+    assert trainer.completed_training_epochs == 5
     assert save_dir.exists()
     assert _training_artifact_latest_dir(save_dir).exists()
     assert _training_artifact_best_dir(save_dir).exists()
 
     metadata = _training_selection_metadata(save_dir)
     assert metadata["schema_version"] == 2
-    assert metadata["latest_epoch"] == 3
-    assert metadata["latest_score"] == pytest.approx(3.0)
+    assert metadata["latest_epoch"] == 5
+    assert metadata["latest_score"] == pytest.approx(5.0)
     assert metadata["has_best_candidate"] is True
-    assert metadata["best_epoch"] == 3
-    assert metadata["best_score"] == pytest.approx(3.0)
-    assert metadata["completed_epoch"] == 3
+    assert metadata["best_epoch"] == 5
+    assert metadata["best_score"] == pytest.approx(5.0)
+    assert metadata["completed_epoch"] == 5
     assert metadata["completion_reason"] == "early_completed"
     assert metadata["check_best_model_every_epochs"] == 1
     assert metadata["first_model_selection_epoch"] == 3

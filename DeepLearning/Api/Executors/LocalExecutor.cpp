@@ -333,7 +333,7 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
     emitTrainingEvent(TrainingEvent::runStarted(makeBaseSnapshot(TrainingEventPhase::UNKNOWN, 0, loader->getBatchSize(), 0)));
 
     for (uint32_t epochOffset = 0; epochOffset < numEpochs; ++epochOffset) {
-        const uint64_t humanEpoch = *currentEpoch + 1;
+        const uint64_t cumulativeEpoch = *currentEpoch + 1;
 
         // Training phase
         uint64_t batchNum = loader->getNextBatchNum(ExampleType::TRAIN);
@@ -344,7 +344,7 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
         *numBatchesDoneInEpoch = batchNum;
         *numBatchesInEpoch = batchesPerEpoch;
 
-        emitTrainingEvent(TrainingEvent::epochStarted(makeBaseSnapshot(TrainingEventPhase::TRAIN, humanEpoch, batchSize, batchesPerEpoch)));
+        emitTrainingEvent(TrainingEvent::epochStarted(makeBaseSnapshot(TrainingEventPhase::TRAIN, cumulativeEpoch, batchSize, batchesPerEpoch)));
 
         thread trainingThread(&LocalExecutor::trainBatches, this, batchNum, batchesToTrain, ExampleType::TRAIN, tensorsToReturn);
         unordered_map<string, vector<uint8_t>> batchData;
@@ -369,7 +369,7 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
 
                 batchData = popBatchData();
 
-                TrainingStatsSnapshot snapshot = makeBaseSnapshot(TrainingEventPhase::TRAIN, humanEpoch, batchSize, batchesPerEpoch);
+                TrainingStatsSnapshot snapshot = makeBaseSnapshot(TrainingEventPhase::TRAIN, cumulativeEpoch, batchSize, batchesPerEpoch);
                 snapshot.stepInEpoch = batchNum + 1;
                 snapshot.step = (*currentEpoch * batchesPerEpoch) + snapshot.stepInEpoch;
                 snapshot.samplesProcessed = snapshot.step * batchSize;
@@ -395,7 +395,7 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
             }
         }
         trainingThread.join();
-        emitTrainingEvent(TrainingEvent::epochFinished(makeBaseSnapshot(TrainingEventPhase::TRAIN, humanEpoch, batchSize, batchesPerEpoch)));
+        emitTrainingEvent(TrainingEvent::epochFinished(makeBaseSnapshot(TrainingEventPhase::TRAIN, cumulativeEpoch, batchSize, batchesPerEpoch)));
 
         // Validation phase
         batchNum = loader->getNextBatchNum(ExampleType::VALIDATE);
@@ -406,7 +406,7 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
         *numBatchesDoneInEpoch = batchNum;
         *numBatchesInEpoch = batchesPerEpoch;
 
-        emitTrainingEvent(TrainingEvent::epochStarted(makeBaseSnapshot(TrainingEventPhase::VALIDATE, humanEpoch, batchSize, batchesPerEpoch)));
+        emitTrainingEvent(TrainingEvent::epochStarted(makeBaseSnapshot(TrainingEventPhase::VALIDATE, cumulativeEpoch, batchSize, batchesPerEpoch)));
 
         // FIXME: I am currently training using the validation data. A validation step needs to be built.
         thread validationThread(&LocalExecutor::trainBatches, this, batchNum, batchesToValidate, ExampleType::VALIDATE, tensorsToReturn);
@@ -431,7 +431,7 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
 
                 batchData = popBatchData();
 
-                TrainingStatsSnapshot snapshot = makeBaseSnapshot(TrainingEventPhase::VALIDATE, humanEpoch, batchSize, batchesPerEpoch);
+                TrainingStatsSnapshot snapshot = makeBaseSnapshot(TrainingEventPhase::VALIDATE, cumulativeEpoch, batchSize, batchesPerEpoch);
                 snapshot.stepInEpoch = batchNum + 1;
                 snapshot.step = (*currentEpoch * batchesPerEpoch) + snapshot.stepInEpoch;
                 snapshot.samplesProcessed = snapshot.step * batchSize;
@@ -457,7 +457,7 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
             }
         }
         validationThread.join();
-        emitTrainingEvent(TrainingEvent::epochFinished(makeBaseSnapshot(TrainingEventPhase::VALIDATE, humanEpoch, batchSize, batchesPerEpoch)));
+        emitTrainingEvent(TrainingEvent::epochFinished(makeBaseSnapshot(TrainingEventPhase::VALIDATE, cumulativeEpoch, batchSize, batchesPerEpoch)));
 
         (*currentEpoch) += 1;
     }

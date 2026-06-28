@@ -92,11 +92,14 @@ struct TrainingRunRequest {
 
     std::shared_ptr<PlacedNetwork>* completedPlacedNetwork = nullptr;
 
-    // Cumulative completed training epochs before/after this request. FIT trains
-    // `epochs` additional epochs starting after initialCompletedEpochs. The native
-    // runner emits and evaluates epoch thresholds using global epoch numbers.
-    // Trainer restart handling resets this value to 0 before launching a retry
-    // because a restarted model attempt discards the previous trained state.
+    // Cumulative continuation epoch before/after this request. FIT trains `epochs`
+    // additional epochs starting after initialCompletedEpochs. The native runner
+    // emits and evaluates epoch thresholds using global epoch numbers. When a run
+    // saves and selects a best candidate, completedTrainingEpochs is set to the
+    // selected artifact epoch used for the next handoff; the run-finished stats
+    // still report the actual epoch where the training attempt stopped. Trainer
+    // restart handling resets this value to 0 before launching a retry because a
+    // restarted model attempt discards the previous trained state.
     uint64_t initialCompletedEpochs = 0;
     uint64_t* completedTrainingEpochs = nullptr;
 };
