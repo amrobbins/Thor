@@ -2083,6 +2083,7 @@ calling this helper.
         "overwrite"_a = false,
         "save_optimizer_state"_a = true);
     trainer.def_prop_ro("completed_training_epochs", &Trainer::getCompletedTrainingEpochs);
+    trainer.def_prop_ro("completed_training_elapsed_seconds", &Trainer::getCompletedTrainingElapsedSeconds);
 
     auto training_event_phase = nb::enum_<TrainingEventPhase>(training, "TrainingEventPhase")
                                     .value("unknown", TrainingEventPhase::UNKNOWN)
@@ -2454,7 +2455,7 @@ calling this helper.
         "runs"_a,
         "failure_policy"_a = "cancel_siblings",
         "max_summary_logs_per_second"_a = 2.0,
-        "max_parallel_runs"_a.none() = nb::none(),
+        "max_parallel_runs"_a.none() = size_t{3},
         "min_successful_models"_a.none() = nb::none());
     training_runs.def(
         "__init__",
@@ -2467,8 +2468,16 @@ calling this helper.
         "runs"_a,
         "failure_policy"_a = "cancel_siblings",
         "max_summary_logs_per_second"_a = 2.0,
-        "max_parallel_runs"_a.none() = nb::none(),
+        "max_parallel_runs"_a.none() = size_t{3},
         "min_successful_models"_a.none() = nb::none());
+    training_runs.def_prop_ro("max_parallel_runs", [](const TrainingRuns& self) -> nb::object {
+        std::optional<size_t> maxParallelRuns = self.getMaxParallelRuns();
+        if (!maxParallelRuns.has_value()) {
+            return nb::none();
+        }
+        return nb::cast(maxParallelRuns.value());
+    });
+    training_runs.def_prop_ro("effective_max_parallel_runs", &TrainingRuns::getEffectiveMaxParallelRuns);
     training_runs.def_prop_ro("reports", [](const TrainingRuns& self) { return self.getReports(); });
     training_runs.def(
         "fit",

@@ -51,12 +51,13 @@ struct TrainingRunRequest {
     // the cadence. Lower scores are better.
     uint32_t checkBestModelEveryEpochs = 0;
 
-    // First global/cumulative epoch at which model-selection scoring begins.
-    // Epochs count total successful training epochs for the model across
-    // Trainer.fit(...) calls. A value of 0 preserves the cadence-only behavior:
-    // the first selection happens at checkBestModelEveryEpochs. Early-completion
-    // policies are evaluated only on model-selection epochs after the candidate
-    // manager updates best_score/best_epoch.
+    // First epoch within this fit request at which model-selection scoring begins.
+    // This gate is phase-local: after a previous fit completed N selected epochs,
+    // firstModelSelectionEpoch=3 means the next fit first scores at cumulative
+    // epoch N + 3. A value of 0 preserves the cadence-only behavior: the first
+    // selection happens at checkBestModelEveryEpochs epochs into this request.
+    // Model-selection callbacks, early-completion policies, snapshots, and
+    // metadata still receive/report cumulative epoch numbers.
     uint64_t firstModelSelectionEpoch = 0;
 
     TrainingModelSelectionScore modelSelectionScore{};
@@ -93,15 +94,25 @@ struct TrainingRunRequest {
     std::shared_ptr<PlacedNetwork>* completedPlacedNetwork = nullptr;
 
     // Cumulative continuation epoch before/after this request. FIT trains `epochs`
-    // additional epochs starting after initialCompletedEpochs. The native runner
-    // emits and evaluates epoch thresholds using global epoch numbers. When a run
-    // saves and selects a best candidate, completedTrainingEpochs is set to the
-    // selected artifact epoch used for the next handoff; the run-finished stats
-    // still report the actual epoch where the training attempt stopped. Trainer
-    // restart handling resets this value to 0 before launching a retry because a
-    // restarted model attempt discards the previous trained state.
+    // additional epochs starting after initialCompletedEpochs. Public stats,
+    // model-selection callbacks, early-completion policies, snapshots, and
+    // metadata use cumulative epoch numbers. Phase-local options such as
+    // firstModelSelectionEpoch are evaluated relative to initialCompletedEpochs.
+    // When a run saves and selects a best candidate, completedTrainingEpochs is
+    // set to the selected artifact epoch used for the next handoff; run-finished
+    // stats still report the actual epoch where the training attempt stopped.
+    // Trainer restart handling resets this value to the phase-initial selected
+    // epoch before launching a retry because a restarted attempt discards the
+    // failed attempt's trained state.
     uint64_t initialCompletedEpochs = 0;
     uint64_t* completedTrainingEpochs = nullptr;
+
+    // Cumulative wall-clock seconds before/after this request. FIT stats add
+    // initialElapsedSeconds to this request's wall time so sequential training
+    // phases on the same Trainer report one continuous elapsed timer. EVALUATE
+    // requests keep their own request-local timer.
+    double initialElapsedSeconds = 0.0;
+    double* completedTrainingElapsedSeconds = nullptr;
 };
 
 }  // namespace Thor

@@ -25,7 +25,9 @@ struct TrainingStatsSnapshot {
     uint64_t samplesProcessed = 0;
     uint64_t inFlightBatches = 0;
 
-    // Elapsed wall-clock seconds since the current native training/evaluation request started.
+    // Elapsed wall-clock seconds for the active operation. FIT may include a
+    // Trainer-owned offset from earlier sequential training phases so user-facing
+    // stats show cumulative training time. EVALUATE reports request-local time.
     double elapsedSeconds = 0.0;
 
     // Public throughput rates share the same wall-clock basis as elapsedSeconds.

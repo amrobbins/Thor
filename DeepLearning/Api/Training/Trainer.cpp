@@ -649,6 +649,7 @@ void Trainer::fitInternal(const TrainerFitOptions& options,
     request.checkBestModelEveryEpochs = options.checkBestModelEveryEpochs;
     request.firstModelSelectionEpoch = options.firstModelSelectionEpoch;
     request.initialCompletedEpochs = completedTrainingEpochs;
+    request.initialElapsedSeconds = completedTrainingElapsedSeconds;
     request.modelSelectionScore = modelSelectionScore;
     request.earlyCompletionPolicies = std::move(combinedEarlyCompletionPolicies);
     request.cancellationToken = cancellationToken;
@@ -668,6 +669,7 @@ void Trainer::fitInternal(const TrainerFitOptions& options,
     }
     request.completedPlacedNetwork = &placedNetworkAfterLastFit;
     request.completedTrainingEpochs = &completedTrainingEpochs;
+    request.completedTrainingElapsedSeconds = &completedTrainingElapsedSeconds;
 
     executeRequest(request, observer);
 
@@ -744,6 +746,7 @@ void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
 
     const PhaseInitialArtifactRef phaseInitialArtifact{lastCompletedArtifactDirectory, lastCompletedArtifactNetworkName};
     const uint64_t phaseInitialCompletedEpochs = completedTrainingEpochs;
+    const double phaseInitialElapsedSeconds = completedTrainingElapsedSeconds;
 
     // When a previous fit completed to disk, that selected artifact is the immutable
     // phase-initial model for this fit call. Release the stale GPU-resident handoff
@@ -767,6 +770,7 @@ void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
         Trainer attemptTrainer = *this;
         attemptTrainer.runtimeConfig.scalarTensorsToReport.insert("loss");
         attemptTrainer.completedTrainingEpochs = phaseInitialCompletedEpochs;
+        attemptTrainer.completedTrainingElapsedSeconds = phaseInitialElapsedSeconds;
         if (phaseInitialArtifact.hasValue()) {
             attemptTrainer.lastCompletedArtifactDirectory = phaseInitialArtifact.directory;
             attemptTrainer.lastCompletedArtifactNetworkName = phaseInitialArtifact.networkName;
@@ -783,6 +787,7 @@ void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
             lastCompletedArtifactDirectory = attemptTrainer.lastCompletedArtifactDirectory;
             lastCompletedArtifactNetworkName = attemptTrainer.lastCompletedArtifactNetworkName;
             completedTrainingEpochs = attemptTrainer.completedTrainingEpochs;
+            completedTrainingElapsedSeconds = attemptTrainer.completedTrainingElapsedSeconds;
             attemptObserver.flush();
             return;
         } catch (const TrainingRestartRequested& e) {

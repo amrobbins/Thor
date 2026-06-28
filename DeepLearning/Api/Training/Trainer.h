@@ -99,6 +99,7 @@ class Trainer {
     [[nodiscard]] const std::optional<std::string>& getSaveModelDirectory() const { return saveModelDirectory; }
     [[nodiscard]] bool getSaveModelOverwrite() const { return saveModelOverwrite; }
     [[nodiscard]] uint64_t getCompletedTrainingEpochs() const { return completedTrainingEpochs; }
+    [[nodiscard]] double getCompletedTrainingElapsedSeconds() const { return completedTrainingElapsedSeconds; }
     [[nodiscard]] const TrainingModelSelectionScore& getModelSelectionScore() const { return modelSelectionScore; }
 
    private:
@@ -156,6 +157,7 @@ class Trainer {
     std::optional<std::string> lastCompletedArtifactDirectory{};
     std::optional<std::string> lastCompletedArtifactNetworkName{};
     uint64_t completedTrainingEpochs = 0;
+    double completedTrainingElapsedSeconds = 0.0;
 };
 
 class Trainer::Builder {

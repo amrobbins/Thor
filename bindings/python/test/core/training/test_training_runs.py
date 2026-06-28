@@ -1423,6 +1423,34 @@ def test_training_runs_binding_rejects_invalid_max_parallel_runs():
         thor.training.TrainingRuns([], max_parallel_runs=0)
 
 
+def test_training_runs_default_max_parallel_runs_is_three():
+    run_specs = [
+        (
+            f"fold_{index}",
+            _make_tiny_regression_trainer(f"training_runs_default_max_parallel_runs_{index}"),
+        )
+        for index in range(5)
+    ]
+    runs = thor.training.TrainingRuns(run_specs)
+
+    assert runs.max_parallel_runs == 3
+    assert runs.effective_max_parallel_runs == 3
+
+
+def test_training_runs_explicit_none_max_parallel_runs_means_unbounded():
+    run_specs = [
+        (
+            f"fold_{index}",
+            _make_tiny_regression_trainer(f"training_runs_none_max_parallel_runs_{index}"),
+        )
+        for index in range(5)
+    ]
+    runs = thor.training.TrainingRuns(run_specs, max_parallel_runs=None)
+
+    assert runs.max_parallel_runs is None
+    assert runs.effective_max_parallel_runs == 5
+
+
 def test_training_runs_fit_accepts_reported_losses():
     trainer = _make_tiny_regression_trainer("training_runs_binding_reports")
     runs = thor.training.TrainingRuns([("fold_0", trainer, "tiny_ensemble")])
@@ -4019,6 +4047,8 @@ def test_trainer_followup_fit_resumes_epoch_counter_from_saved_best_candidate(tm
     assert first_result.completed_epoch == 2
     assert first_result.best_epoch == 1
     assert trainer.completed_training_epochs == 1
+    assert first_result.final_training_stats.elapsed_seconds > 0.0
+    assert trainer.completed_training_elapsed_seconds >= first_result.final_training_stats.elapsed_seconds
 
     second_result = trainer.fit(3)
 
@@ -4027,7 +4057,9 @@ def test_trainer_followup_fit_resumes_epoch_counter_from_saved_best_candidate(tm
     assert second_result.completed_epoch == 4
     assert second_result.final_training_stats.epoch == 4
     assert second_result.final_training_stats.epochs == 4
+    assert second_result.final_training_stats.elapsed_seconds >= first_result.final_training_stats.elapsed_seconds
     assert trainer.completed_training_epochs == 4
+    assert trainer.completed_training_elapsed_seconds >= second_result.final_training_stats.elapsed_seconds
 
 
 @pytest.mark.cuda

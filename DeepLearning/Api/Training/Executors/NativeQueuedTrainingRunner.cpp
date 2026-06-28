@@ -18,6 +18,7 @@
 
 #include <cuda_runtime_api.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -2235,14 +2236,14 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     const uint64_t trainingFlopsPerBatch = statsStampedNetwork.getFloatingPointOperationsPerExampleTraining() * batchSize;
 
     const auto runStart = std::chrono::high_resolution_clock::now();
+    const double initialElapsedSeconds = evaluateOnly ? 0.0 : std::max(0.0, request.initialElapsedSeconds);
     uint64_t currentEpoch = evaluateOnly ? 0 : request.initialCompletedEpochs;
-    const uint64_t initialEpochForThroughput = currentEpoch;
     std::map<TrainingEventPhase, WallThroughputEmaState> throughputByPhase;
     const uint64_t totalRequestedEpochs = currentEpoch + request.epochs;
     auto elapsedSinceRunStart = [&]() {
         const auto now = std::chrono::high_resolution_clock::now();
         const std::chrono::duration<double> elapsed = std::chrono::duration_cast<std::chrono::duration<double>>(now - runStart);
-        return elapsed.count();
+        return initialElapsedSeconds + elapsed.count();
     };
 
     auto makeBaseSnapshot = [&](TrainingEventPhase phase,
@@ -2470,20 +2471,18 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                     snapshot.samplesProcessed = snapshot.step * batchSize;
 
                     // Public throughput stats use wall-clock time, not the CUDA
-                    // completion-callback interval.  Smooth the exact wall-clock
+                    // completion-callback interval. Smooth the exact wall-clock
                     // interval rate between same-phase stats snapshots so the visible
                     // numbers respond to changes without reverting to active-kernel
-                    // micro-throughput.  For TRAIN snapshots, the same-phase interval
-                    // crosses validation/model-selection gaps between epochs, so the
-                    // reported rate remains end-to-end for the training request.
-                    const uint64_t completedEpochsThisRequest = currentEpoch - initialEpochForThroughput;
-                    const uint64_t completedBatchesThisRequest =
-                        (completedEpochsThisRequest * completedBatch.batchesInEpoch) + snapshot.stepInEpoch;
+                    // micro-throughput. The progress basis matches snapshot.step, so
+                    // follow-up fit phases use the same cumulative timer/progress basis
+                    // as the reported elapsed time.
+                    const uint64_t completedBatchesForThroughput = snapshot.step;
                     const uint64_t phaseFlopsPerBatch =
                         (completedBatch.phase == TrainingEventPhase::TRAIN) ? trainingFlopsPerBatch : forwardFlopsPerBatch;
                     updateWallThroughputRates(snapshot,
                                               throughputByPhase[completedBatch.phase],
-                                              completedBatchesThisRequest,
+                                              completedBatchesForThroughput,
                                               batchSize,
                                               phaseFlopsPerBatch);
 
@@ -2599,6 +2598,9 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         }
         if (request.completedTrainingEpochs != nullptr) {
             *request.completedTrainingEpochs = selectedArtifactEpoch.value_or(finalCompletedEpoch);
+        }
+        if (request.completedTrainingElapsedSeconds != nullptr) {
+            *request.completedTrainingElapsedSeconds = elapsedSinceRunStart();
         }
     }
 

@@ -96,7 +96,7 @@ class TrainingRuns {
     explicit TrainingRuns(std::vector<TrainingRunsSpec> runs,
                           TrainingRunsFailurePolicy failurePolicy = TrainingRunsFailurePolicy::CANCEL_SIBLINGS,
                           double maxSummaryLogsPerSecond = 2.0,
-                          std::optional<size_t> maxParallelRuns = std::nullopt,
+                          std::optional<size_t> maxParallelRuns = std::optional<size_t>{3},
                           std::map<std::string, size_t> minSuccessfulModels = {});
 
     [[nodiscard]] TrainingRunsResult fit(uint32_t epochs);
