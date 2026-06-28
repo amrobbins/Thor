@@ -264,8 +264,10 @@ class ArchiveShardWriterWorker {
         std::memcpy(bounceBufferMem[freeBuffer], tailAndTarSeparator, numTailPadAndHeaderBytes);
         numCompletionsToFinish[freeBuffer] = dumpBufferToArchiveFile(freeBuffer, numTailPadAndHeaderBytes);
 
-        // Wait for dump of both buffers to disk to complete
-        if (numCompletionsToFinish[freeBuffer] > 0)
+        // Wait for dump of both buffers to disk to complete. Drain the final
+        // fetching buffer first because it was submitted first and completion
+        // delivery is ordered by submission sequence.
+        if (numCompletionsToFinish[finalFetchingBuffer] > 0)
             uringDirect.waitCompletionsInOrder(numCompletionsToFinish[finalFetchingBuffer]);
         numCompletionsToFinish[finalFetchingBuffer] = 0;
         if (numCompletionsToFinish[freeBuffer] > 0)

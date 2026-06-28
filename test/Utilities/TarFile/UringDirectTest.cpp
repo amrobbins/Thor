@@ -4,10 +4,15 @@
 #include "Utilities/TarFile/UringDirect.h"
 
 #include <cstdint>
+#include <deque>
+#include <cstdlib>
+#include <chrono>
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -687,4 +692,313 @@ TEST(UringDirect, FixedBuffer_SubOffsetsWriteDifferentBlocks) {
     for (uint32_t i = 0; i < kAlign; ++i) {
         EXPECT_EQ(v[kAlign + i], 0x55) << "mismatch in block1 at i=" << i;
     }
+}
+
+class ScopedUringDirectCompatibilityTestHooks {
+   public:
+    ScopedUringDirectCompatibilityTestHooks(std::optional<int> queueInitResult, bool directOpenUnavailable) {
+        UringDirect::testResetCompatibilityWarning();
+        UringDirect::testSetIoUringQueueInitResult(queueInitResult);
+        UringDirect::testSetDirectOpenUnavailable(directOpenUnavailable);
+    }
+    ~ScopedUringDirectCompatibilityTestHooks() {
+        UringDirect::testSetIoUringQueueInitResult(std::nullopt);
+        UringDirect::testSetDirectOpenUnavailable(false);
+        UringDirect::testResetFallbackWorkerBlock();
+        UringDirect::testResetCompatibilityWarning();
+    }
+};
+
+static void runExplicitPreadBackendFixedReadWriteRoundTrip(UringDirect::IoBackend backend, const char* expectedBackendName, const std::string& stem) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
+    constexpr uint32_t kAlign = 4096;
+    constexpr uint32_t kBytes = 2 * kAlign;
+
+    Tensor writeBuffer(cpuPlacement, TensorDescriptor(DataType::UINT8, {kBytes}), kAlign);
+    Tensor readBuffer(cpuPlacement, TensorDescriptor(DataType::UINT8, {kBytes}), kAlign);
+
+    uint8_t* writePtr = writeBuffer.getMemPtr<uint8_t>();
+    uint8_t* readPtr = readBuffer.getMemPtr<uint8_t>();
+    ASSERT_NE(writePtr, nullptr);
+    ASSERT_NE(readPtr, nullptr);
+    ASSERT_EQ(reinterpret_cast<uintptr_t>(writePtr) % kAlign, 0u);
+    ASSERT_EQ(reinterpret_cast<uintptr_t>(readPtr) % kAlign, 0u);
+
+    for (uint32_t i = 0; i < kBytes; ++i) {
+        writePtr[i] = static_cast<uint8_t>((i * 37u + 11u) & 0xFFu);
+        readPtr[i] = 0;
+    }
+
+    std::string filename = makeTmpPrefix(stem);
+    ScopedUnlink cleanup(filename);
+
+    {
+        UringDirect writer(64, backend);
+        ASSERT_STREQ(writer.requestedBackendName(), expectedBackendName);
+        ASSERT_STREQ(writer.activeBackendName(), expectedBackendName);
+        writer.registerReusableBuffers({writeBuffer.getMemPtr()}, {kBytes});
+        writer.registerDumpFile(filename);
+        ASSERT_STREQ(writer.activeBackendName(), expectedBackendName);
+
+        ASSERT_TRUE(writer.submitWriteFixed(/*bufIndex=*/0,
+                                           /*fileOffsetBytes=*/0,
+                                           /*lenBytes=*/kBytes,
+                                           /*bufOffsetBytes=*/0));
+        EXPECT_EQ(writer.submit(), 1);
+        auto writeCompletions = writer.waitCompletionsInOrder(1);
+        ASSERT_EQ(writeCompletions.size(), 1u);
+        ASSERT_EQ(writeCompletions[0].responseCode, static_cast<int>(kBytes));
+
+        auto fsyncCompletion = writer.finishDumpedFile(false);
+        EXPECT_EQ(fsyncCompletion.responseCode, 0);
+    }
+
+    ASSERT_EQ(fileSizeBytes(filename), static_cast<uint64_t>(kBytes));
+
+    {
+        UringDirect reader(64, backend);
+        ASSERT_STREQ(reader.requestedBackendName(), expectedBackendName);
+        ASSERT_STREQ(reader.activeBackendName(), expectedBackendName);
+        reader.registerReusableBuffers({readBuffer.getMemPtr()}, {kBytes});
+        reader.registerLoadFile(filename);
+        ASSERT_STREQ(reader.activeBackendName(), expectedBackendName);
+
+        ASSERT_TRUE(reader.submitReadFixed(/*bufIndex=*/0,
+                                          /*fileOffsetBytes=*/0,
+                                          /*lenBytes=*/kBytes,
+                                          /*bufOffsetBytes=*/0));
+        EXPECT_EQ(reader.submit(), 1);
+        auto readCompletions = reader.waitCompletionsInOrder(1);
+        ASSERT_EQ(readCompletions.size(), 1u);
+        ASSERT_EQ(readCompletions[0].responseCode, static_cast<int>(kBytes));
+    }
+
+    EXPECT_EQ(std::memcmp(readBuffer.getMemPtr(), writeBuffer.getMemPtr(), kBytes), 0);
+}
+
+static void runExplicitPreadBackendAsyncFixedReadWrite(UringDirect::IoBackend backend, const char* expectedBackendName, const std::string& stem) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
+    constexpr uint32_t kAlign = 4096;
+    constexpr uint32_t kBlocks = 4;
+    constexpr uint32_t kBytes = kBlocks * kAlign;
+
+    Tensor writeBuffer(cpuPlacement, TensorDescriptor(DataType::UINT8, {kBytes}), kAlign);
+    Tensor readBuffer(cpuPlacement, TensorDescriptor(DataType::UINT8, {kBytes}), kAlign);
+
+    uint8_t* writePtr = writeBuffer.getMemPtr<uint8_t>();
+    uint8_t* readPtr = readBuffer.getMemPtr<uint8_t>();
+    ASSERT_NE(writePtr, nullptr);
+    ASSERT_NE(readPtr, nullptr);
+    ASSERT_EQ(reinterpret_cast<uintptr_t>(writePtr) % kAlign, 0u);
+    ASSERT_EQ(reinterpret_cast<uintptr_t>(readPtr) % kAlign, 0u);
+
+    for (uint32_t i = 0; i < kBytes; ++i) {
+        writePtr[i] = static_cast<uint8_t>((i * 19u + 23u) & 0xFFu);
+        readPtr[i] = 0;
+    }
+
+    std::string filename = makeTmpPrefix(stem);
+    ScopedUnlink cleanup(filename);
+
+    {
+        UringDirect::testResetFallbackWorkerBlock();
+        UringDirect writer(kBlocks, backend);
+        ASSERT_STREQ(writer.requestedBackendName(), expectedBackendName);
+        ASSERT_STREQ(writer.activeBackendName(), expectedBackendName);
+        writer.registerReusableBuffers({writeBuffer.getMemPtr()}, {kBytes});
+        writer.registerDumpFile(filename);
+
+        UringDirect::testSetFallbackWorkerBlockEnabled(true);
+        for (uint32_t block = 0; block < kBlocks; ++block) {
+            ASSERT_TRUE(writer.submitWriteFixed(/*bufIndex=*/0,
+                                               /*fileOffsetBytes=*/block * kAlign,
+                                               /*lenBytes=*/kAlign,
+                                               /*bufOffsetBytes=*/block * kAlign));
+        }
+        EXPECT_EQ(writer.submit(), static_cast<int>(kBlocks));
+
+        bool writeWorkersStarted = UringDirect::testWaitForFallbackWorkerStartedCount(kBlocks, std::chrono::seconds(5));
+        EXPECT_TRUE(writeWorkersStarted) << "fallback pwrite requests were not picked up by multiple worker threads";
+        EXPECT_TRUE(writer.pollCompletionsInOrder(kBlocks).empty())
+            << "fallback write completed while test worker hook was still blocked";
+
+        UringDirect::testSetFallbackWorkerBlockEnabled(false);
+        ASSERT_TRUE(writeWorkersStarted);
+        auto writeCompletions = writer.waitCompletionsInOrder(kBlocks);
+        ASSERT_EQ(writeCompletions.size(), static_cast<std::size_t>(kBlocks));
+        for (const auto& completion : writeCompletions) {
+            ASSERT_EQ(completion.responseCode, static_cast<int>(kAlign));
+        }
+
+        auto fsyncCompletion = writer.finishDumpedFile(false);
+        EXPECT_EQ(fsyncCompletion.responseCode, 0);
+    }
+
+    ASSERT_EQ(fileSizeBytes(filename), static_cast<uint64_t>(kBytes));
+
+    {
+        UringDirect::testResetFallbackWorkerBlock();
+        UringDirect reader(kBlocks, backend);
+        ASSERT_STREQ(reader.requestedBackendName(), expectedBackendName);
+        ASSERT_STREQ(reader.activeBackendName(), expectedBackendName);
+        reader.registerReusableBuffers({readBuffer.getMemPtr()}, {kBytes});
+        reader.registerLoadFile(filename);
+
+        UringDirect::testSetFallbackWorkerBlockEnabled(true);
+        for (uint32_t block = 0; block < kBlocks; ++block) {
+            ASSERT_TRUE(reader.submitReadFixed(/*bufIndex=*/0,
+                                              /*fileOffsetBytes=*/block * kAlign,
+                                              /*lenBytes=*/kAlign,
+                                              /*bufOffsetBytes=*/block * kAlign));
+        }
+        EXPECT_EQ(reader.submit(), static_cast<int>(kBlocks));
+
+        bool readWorkersStarted = UringDirect::testWaitForFallbackWorkerStartedCount(kBlocks, std::chrono::seconds(5));
+        EXPECT_TRUE(readWorkersStarted) << "fallback pread requests were not picked up by multiple worker threads";
+        EXPECT_TRUE(reader.pollCompletionsInOrder(kBlocks).empty())
+            << "fallback read completed while test worker hook was still blocked";
+
+        UringDirect::testSetFallbackWorkerBlockEnabled(false);
+        ASSERT_TRUE(readWorkersStarted);
+        auto readCompletions = reader.waitCompletionsInOrder(kBlocks);
+        ASSERT_EQ(readCompletions.size(), static_cast<std::size_t>(kBlocks));
+        for (const auto& completion : readCompletions) {
+            ASSERT_EQ(completion.responseCode, static_cast<int>(kAlign));
+        }
+    }
+
+    UringDirect::testResetFallbackWorkerBlock();
+    EXPECT_EQ(std::memcmp(readBuffer.getMemPtr(), writeBuffer.getMemPtr(), kBytes), 0);
+}
+
+TEST(UringDirect, FinishDumpedFileRejectsUndrainedWriteCompletions) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
+    constexpr uint32_t kAlign = 4096;
+
+    Tensor buffer(cpuPlacement, TensorDescriptor(DataType::UINT8, {kAlign}), kAlign);
+    uint8_t* p = buffer.getMemPtr<uint8_t>();
+    ASSERT_NE(p, nullptr);
+    ASSERT_EQ(reinterpret_cast<uintptr_t>(p) % kAlign, 0u);
+    for (uint32_t i = 0; i < kAlign; ++i) {
+        p[i] = static_cast<uint8_t>(i & 0xFFu);
+    }
+
+    std::string filename = makeTmpPrefix("finish_dumped_file_pending_completion");
+    ScopedUnlink cleanup(filename);
+
+    UringDirect uring(64, UringDirect::IoBackend::PreadBuffered);
+    uring.registerReusableBuffers({buffer.getMemPtr()}, {kAlign});
+    uring.registerDumpFile(filename);
+
+    ASSERT_TRUE(uring.submitWriteFixed(/*bufIndex=*/0,
+                                       /*fileOffsetBytes=*/0,
+                                       /*lenBytes=*/kAlign,
+                                       /*bufOffsetBytes=*/0));
+    EXPECT_EQ(uring.submit(), 1);
+
+    try {
+        (void)uring.finishDumpedFile(false);
+        FAIL() << "finishDumpedFile should reject undrained write completions";
+    } catch (const std::runtime_error& e) {
+        EXPECT_NE(std::string(e.what()).find("pending read/write completions"), std::string::npos);
+    }
+
+    auto completions = uring.waitCompletionsInOrder(1);
+    ASSERT_EQ(completions.size(), 1u);
+    ASSERT_EQ(completions[0].responseCode, static_cast<int>(kAlign));
+
+    auto fsyncCompletion = uring.finishDumpedFile(false);
+    EXPECT_EQ(fsyncCompletion.responseCode, 0);
+}
+
+TEST(UringDirectCompatibility, ExplicitUringDirectDoesNotFallback) {
+    ScopedUringDirectCompatibilityTestHooks hooks(-EPERM, false);
+
+    try {
+        UringDirect uring(64, UringDirect::IoBackend::UringDirect);
+        FAIL() << "explicit uring_direct should fail when io_uring_queue_init is unavailable";
+    } catch (const std::runtime_error& e) {
+        std::string message = e.what();
+        EXPECT_NE(message.find("io_uring_queue_init failed"), std::string::npos);
+        EXPECT_NE(message.find("Operation not permitted"), std::string::npos);
+    }
+}
+
+TEST(UringDirectCompatibility, AutoFallsBackFromUnavailableIoUringToPreadDirectAndWarns) {
+    ScopedUringDirectCompatibilityTestHooks hooks(-EPERM, false);
+
+    testing::internal::CaptureStderr();
+    UringDirect uring(64, UringDirect::IoBackend::Auto);
+    std::string warning = testing::internal::GetCapturedStderr();
+
+    EXPECT_STREQ(uring.requestedBackendName(), "auto");
+    EXPECT_STREQ(uring.activeBackendName(), "pread_direct");
+    EXPECT_NE(warning.find("io_uring_queue_init failed"), std::string::npos);
+    EXPECT_NE(warning.find("Falling back to pread_direct"), std::string::npos);
+    EXPECT_NE(warning.find("Docker/dev-container workaround"), std::string::npos);
+    EXPECT_NE(warning.find("Managed cloud training environments"), std::string::npos);
+}
+
+TEST(UringDirectCompatibility, AutoFallsBackFromDirectOpenFailureToBufferedPreadAndStillWrites) {
+    ScopedUringDirectCompatibilityTestHooks hooks(-EPERM, true);
+
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
+    constexpr uint32_t kAlign = 4096;
+    Tensor buffer(cpuPlacement, TensorDescriptor(DataType::UINT8, {kAlign}), kAlign);
+    uint8_t* p = buffer.getMemPtr<uint8_t>();
+    ASSERT_NE(p, nullptr);
+    ASSERT_EQ(reinterpret_cast<uintptr_t>(p) % kAlign, 0u);
+    for (uint32_t i = 0; i < kAlign; ++i) {
+        p[i] = static_cast<uint8_t>((i * 17u) & 0xFFu);
+    }
+
+    std::string filename = makeTmpPrefix("uring_auto_buffered_fallback");
+    ScopedUnlink cleanup(filename);
+
+    testing::internal::CaptureStderr();
+    UringDirect uring(64, UringDirect::IoBackend::Auto);
+    std::string warning = testing::internal::GetCapturedStderr();
+    ASSERT_STREQ(uring.activeBackendName(), "pread_direct");
+    EXPECT_NE(warning.find("Falling back to pread_direct"), std::string::npos);
+
+    uring.registerReusableBuffers({buffer.getMemPtr()}, {kAlign});
+    uring.registerDumpFile(filename);
+    ASSERT_STREQ(uring.activeBackendName(), "pread_buffered");
+
+    ASSERT_TRUE(uring.submitWriteFixed(/*bufIndex=*/0,
+                                       /*fileOffsetBytes=*/0,
+                                       /*lenBytes=*/kAlign,
+                                       /*bufOffsetBytes=*/0));
+    EXPECT_EQ(uring.submit(), 1);
+    auto comps = uring.waitCompletionsInOrder(1);
+    ASSERT_EQ(comps.size(), 1u);
+    ASSERT_EQ(comps[0].responseCode, static_cast<int>(kAlign));
+    auto fsyncCompletion = uring.finishDumpedFile(false);
+    EXPECT_EQ(fsyncCompletion.responseCode, 0);
+
+    Tensor verify(cpuPlacement, TensorDescriptor(DataType::UINT8, {kAlign}));
+    readEntireFileInto(verify.getMemPtr(), kAlign, filename);
+    EXPECT_EQ(std::memcmp(verify.getMemPtr(), buffer.getMemPtr(), kAlign), 0);
+}
+
+
+TEST(UringDirectCompatibility, ExplicitPreadDirectFixedReadWriteRoundTrip) {
+    ScopedUringDirectCompatibilityTestHooks hooks(std::nullopt, false);
+    runExplicitPreadBackendFixedReadWriteRoundTrip(UringDirect::IoBackend::PreadDirect, "pread_direct", "explicit_pread_direct_roundtrip");
+}
+
+TEST(UringDirectCompatibility, ExplicitPreadBufferedFixedReadWriteRoundTrip) {
+    ScopedUringDirectCompatibilityTestHooks hooks(std::nullopt, false);
+    runExplicitPreadBackendFixedReadWriteRoundTrip(UringDirect::IoBackend::PreadBuffered, "pread_buffered", "explicit_pread_buffered_roundtrip");
+}
+
+
+TEST(UringDirectCompatibility, ExplicitPreadDirectFixedReadWriteIsAsyncAndAllowsMultipleInFlight) {
+    ScopedUringDirectCompatibilityTestHooks hooks(std::nullopt, false);
+    runExplicitPreadBackendAsyncFixedReadWrite(UringDirect::IoBackend::PreadDirect, "pread_direct", "explicit_pread_direct_async_roundtrip");
+}
+
+TEST(UringDirectCompatibility, ExplicitPreadBufferedFixedReadWriteIsAsyncAndAllowsMultipleInFlight) {
+    ScopedUringDirectCompatibilityTestHooks hooks(std::nullopt, false);
+    runExplicitPreadBackendAsyncFixedReadWrite(UringDirect::IoBackend::PreadBuffered, "pread_buffered", "explicit_pread_buffered_async_roundtrip");
 }

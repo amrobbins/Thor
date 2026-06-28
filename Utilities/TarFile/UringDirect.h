@@ -2,13 +2,22 @@
 
 #include <liburing.h>
 
+#include <algorithm>
 #include <cerrno>
+#include <chrono>
+#include <cctype>
+#include <condition_variable>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <iostream>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -20,21 +29,27 @@ class UringDirect {
    public:
     static constexpr std::size_t kAlign = 4096;
 
-    explicit UringDirect(unsigned queueDepth = 64) {
-        int responseCode = io_uring_queue_init(queueDepth, &ring_, /*flags=*/0);
-        if (responseCode < 0) {
-            throw std::runtime_error(std::string("io_uring_queue_init failed: ") + std::strerror(-responseCode));
-        }
-        ringInited_ = true;
+    enum class IoBackend {
+        Auto,
+        UringDirect,
+        PreadDirect,
+        PreadBuffered,
+    };
+
+    explicit UringDirect(unsigned queueDepth = 64, IoBackend backend = ioBackendFromEnv()) : requestedBackend_(backend) {
+        fallbackQueueDepth_ = std::max(1u, queueDepth);
+        initializeBackend(queueDepth);
     }
 
     ~UringDirect() {
+        shutdownFallbackWorkersNoexcept();
+
         // Unregister in reverse order (best-effort).
-        if (fileRegistered_) {
+        if (usesIoUring() && fileRegistered_) {
             (void)io_uring_unregister_files(&ring_);
             fileRegistered_ = false;
         }
-        if (buffersRegistered_) {
+        if (usesIoUring() && buffersRegistered_) {
             (void)io_uring_unregister_buffers(&ring_);
             buffersRegistered_ = false;
         }
@@ -59,6 +74,58 @@ class UringDirect {
         }
         return *this;
     }
+
+    static IoBackend ioBackendFromEnv() {
+        const char* raw = std::getenv("THOR_IO_BACKEND");
+        if (raw == nullptr || *raw == '\0') {
+            return IoBackend::Auto;
+        }
+
+        std::string value(raw);
+        value.erase(std::remove_if(value.begin(), value.end(), [](unsigned char c) { return std::isspace(c) != 0; }), value.end());
+        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+        if (value == "auto")
+            return IoBackend::Auto;
+        if (value == "uring_direct" || value == "io_uring" || value == "io_uring_direct")
+            return IoBackend::UringDirect;
+        if (value == "pread_direct" || value == "direct_pread" || value == "pread_odirect" || value == "pread_o_direct")
+            return IoBackend::PreadDirect;
+        if (value == "pread_buffered" || value == "buffered_pread" || value == "pread" || value == "buffered")
+            return IoBackend::PreadBuffered;
+
+        throw std::runtime_error("Unsupported THOR_IO_BACKEND='" + std::string(raw) +
+                                 "'. Supported values: auto, uring_direct, pread_direct, pread_buffered.");
+    }
+
+    const char* requestedBackendName() const { return backendName(requestedBackend_); }
+    const char* activeBackendName() const { return backendName(activeBackend_); }
+    IoBackend requestedBackend() const { return requestedBackend_; }
+    IoBackend activeBackend() const { return activeBackend_; }
+
+#ifdef THOR_GTEST
+    static void testSetIoUringQueueInitResult(std::optional<int> responseCode) { testIoUringQueueInitResult() = responseCode; }
+    static void testSetDirectOpenUnavailable(bool unavailable) { testDirectOpenUnavailable() = unavailable; }
+    static void testResetCompatibilityWarning() { compatibilityWarningEmitted() = false; }
+    static void testResetFallbackWorkerBlock() {
+        std::lock_guard<std::mutex> guard(testFallbackWorkerBlockMutex());
+        testFallbackWorkerBlockEnabled() = false;
+        testFallbackWorkerStartedCountValue() = 0;
+        testFallbackWorkerBlockCv().notify_all();
+    }
+    static void testSetFallbackWorkerBlockEnabled(bool enabled) {
+        std::lock_guard<std::mutex> guard(testFallbackWorkerBlockMutex());
+        testFallbackWorkerBlockEnabled() = enabled;
+        if (!enabled) {
+            testFallbackWorkerBlockCv().notify_all();
+        }
+    }
+    static bool testWaitForFallbackWorkerStartedCount(std::size_t count, std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(testFallbackWorkerBlockMutex());
+        return testFallbackWorkerBlockCv().wait_for(
+            lock, timeout, [count] { return testFallbackWorkerStartedCountValue() >= count; });
+    }
+#endif
 
     struct BufferDesc {
         void* ptr = nullptr;
@@ -94,9 +161,11 @@ class UringDirect {
 
         // If already registered, replace registration (must unregister first).
         if (buffersRegistered_) {
-            int rc = io_uring_unregister_buffers(&ring_);
-            if (rc < 0) {
-                throw std::runtime_error(std::string("io_uring_unregister_buffers failed: ") + std::strerror(-rc));
+            if (usesIoUring()) {
+                int rc = io_uring_unregister_buffers(&ring_);
+                if (rc < 0) {
+                    throw std::runtime_error(std::string("io_uring_unregister_buffers failed: ") + std::strerror(-rc));
+                }
             }
             buffersRegistered_ = false;
         }
@@ -112,9 +181,20 @@ class UringDirect {
             throw std::runtime_error("registerReusableBuffers: too many buffers");
         }
 
+        if (!usesIoUring()) {
+            buffersRegistered_ = true;
+            return;
+        }
+
         int rc = io_uring_register_buffers(&ring_, iovecs_.data(), static_cast<unsigned>(iovecs_.size()));
         if (rc < 0) {
-            throw std::runtime_error(std::string("io_uring_register_buffers failed: ") + std::strerror(-rc));
+            int e = -rc;
+            if (isAutoMode() && isBackendAvailabilityErrno(e)) {
+                fallbackFromIoUring("io_uring_register_buffers failed: " + std::string(std::strerror(e)), IoBackend::PreadDirect);
+                buffersRegistered_ = true;
+                return;
+            }
+            throw std::runtime_error(std::string("io_uring_register_buffers failed: ") + std::strerror(e));
         }
         buffersRegistered_ = true;
     }
@@ -145,36 +225,47 @@ class UringDirect {
     //   by the kernel/filesystem. Here we ensure we opened with O_DIRECT successfully.
     // - We don't attempt to query device logical block size here yet; we standardize on 4k.
     void registerDumpFile(const std::string& path, bool truncate = true, mode_t mode = 0644) {
-        // Close/unregister any previous file.
-        if (fileRegistered_) {
-            int responseCode = io_uring_unregister_files(&ring_);
-            if (responseCode < 0) {
-                throw std::runtime_error(std::string("io_uring_unregister_files failed: ") + std::strerror(-responseCode));
-            }
-            fileRegistered_ = false;
-        }
-        if (fd_ >= 0) {
-            close(fd_);
-            fd_ = -1;
-        }
+        closeRegisteredFile();
 
-        int flags = O_WRONLY | O_CREAT | O_CLOEXEC | O_DIRECT;
+        int flags = O_WRONLY | O_CREAT | O_CLOEXEC;
+        if (activeBackend_ != IoBackend::PreadBuffered)
+            flags |= O_DIRECT;
         if (truncate)
             flags |= O_TRUNC;
 
-        fd_ = open(path.c_str(), flags, mode);
+        fd_ = openForBackend(path, flags, mode, /*hasMode=*/true);
+        if (fd_ < 0 && isAutoMode() && activeBackend_ == IoBackend::UringDirect && (flags & O_DIRECT) &&
+            isBackendAvailabilityErrno(errno)) {
+            int e = errno;
+            fallbackFromIoUring("open(O_DIRECT) failed for '" + path + "': " + std::string(std::strerror(e)), IoBackend::PreadBuffered);
+            flags &= ~O_DIRECT;
+            fd_ = openForBackend(path, flags, mode, /*hasMode=*/true);
+        }
+        if (fd_ < 0 && isAutoMode() && activeBackend_ == IoBackend::PreadDirect && (flags & O_DIRECT) &&
+            isBackendAvailabilityErrno(errno)) {
+            int e = errno;
+            fallbackFromPreadDirect("open(O_DIRECT) failed for '" + path + "': " + std::string(std::strerror(e)), IoBackend::PreadBuffered);
+            flags &= ~O_DIRECT;
+            fd_ = openForBackend(path, flags, mode, /*hasMode=*/true);
+        }
         if (fd_ < 0) {
-            throw std::runtime_error("open(O_DIRECT) failed for '" + path + "': " + std::strerror(errno));
+            const char* modeName = (flags & O_DIRECT) ? "open(O_DIRECT)" : "open";
+            throw std::runtime_error(std::string(modeName) + " failed for '" + path + "': " + std::strerror(errno));
         }
 
-        // Register file with io_uring for "fixed file" ops.
-        int fdArr[1] = {fd_};
-        int responseCode = io_uring_register_files(&ring_, fdArr, 1);
-        if (responseCode < 0) {
-            int e = -responseCode;
-            close(fd_);
-            fd_ = -1;
-            throw std::runtime_error(std::string("io_uring_register_files failed: ") + std::strerror(e));
+        if (usesIoUring()) {
+            int fdArr[1] = {fd_};
+            int responseCode = io_uring_register_files(&ring_, fdArr, 1);
+            if (responseCode < 0) {
+                int e = -responseCode;
+                if (isAutoMode() && isBackendAvailabilityErrno(e)) {
+                    fallbackFromIoUring("io_uring_register_files failed: " + std::string(std::strerror(e)), IoBackend::PreadDirect);
+                } else {
+                    close(fd_);
+                    fd_ = -1;
+                    throw std::runtime_error(std::string("io_uring_register_files failed: ") + std::strerror(e));
+                }
+            }
         }
         fileRegistered_ = true;
     }
@@ -200,7 +291,8 @@ class UringDirect {
         if (lenBytes == 0)
             throw std::runtime_error("submitWriteFixed: lenBytes is 0");
 
-        // O_DIRECT alignment
+        // Fixed-buffer API keeps the direct-I/O alignment contract even if auto mode
+        // had to fall back to buffered pread/pwrite for container compatibility.
         if ((fileOffsetBytes % kAlign) != 0)
             throw std::runtime_error("submitWriteFixed: fileOffsetBytes not 4k aligned");
         if ((uint64_t(lenBytes) % kAlign) != 0)
@@ -213,6 +305,10 @@ class UringDirect {
 
         // pointer INSIDE the registered buffer
         void* ptr = static_cast<uint8_t*>(iovecs_[bufIndex].iov_base) + bufOffsetBytes;
+
+        if (!usesIoUring()) {
+            return submitFallbackIo(FallbackOp::Write, ptr, lenBytes, fileOffsetBytes);
+        }
 
         io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
         if (!sqe)
@@ -229,67 +325,6 @@ class UringDirect {
         sqe->user_data = nextSeq();
         return true;
     }
-
-    // // Submit an async write using:
-    // // - a registered fixed buffer (bufIndex),
-    // // - the registered dump file as a fixed file,
-    // // - O_DIRECT semantics (alignment enforced here).
-    // //
-    // // Returns true if the SQE was queued successfully.
-    // // Returns false if the SQ ring is full (caller should drain completions and retry).
-    // //
-    // // Notes:
-    // // - Completion result will be available via CQE with cqe->user_data == userData.
-    // // - On completion, cqe->res is bytes written (>=0) or -errno (<0).
-    // bool submitWriteFixed(unsigned bufIndex, std::uint64_t fileOffsetBytes, std::uint32_t lenBytes, ) {
-    //     if (!buffersRegistered_) {
-    //         throw std::runtime_error("submitWriteFixed: no registered buffers");
-    //     }
-    //     if (!fileRegistered_) {
-    //         throw std::runtime_error("submitWriteFixed: no registered file");
-    //     }
-    //     if (bufIndex >= iovecs_.size()) {
-    //         throw std::runtime_error("submitWriteFixed: bufIndex out of range");
-    //     }
-    //     if (lenBytes == 0) {
-    //         throw std::runtime_error("submitWriteFixed: lenBytes is 0");
-    //     }
-    //
-    //     // O_DIRECT alignment constraints (common safe choice: 4k).
-    //     if ((fileOffsetBytes % kAlign) != 0) {
-    //         throw std::runtime_error("submitWriteFixed: fileOffsetBytes not 4k aligned");
-    //     }
-    //     if ((static_cast<std::uint64_t>(lenBytes) % kAlign) != 0) {
-    //         throw std::runtime_error("submitWriteFixed: lenBytes not multiple of 4k");
-    //     }
-    //     if (static_cast<std::size_t>(lenBytes) > iovecs_[bufIndex].iov_len) {
-    //         throw std::runtime_error("submitWriteFixed: lenBytes exceeds registered buffer length");
-    //     }
-    //
-    //     io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
-    //     if (!sqe) {
-    //         return false;  // SQ full; caller should submit/drain and retry
-    //     }
-    //
-    //     // Use fixed buffer + fixed file.
-    //     //
-    //     // Important: io_uring_prep_write_fixed takes:
-    //     //   (sqe, fd, buf, nbytes, offset, buf_index)
-    //     //
-    //     // For fixed file, set IOSQE_FIXED_FILE and use fd=0 (index into registered files).
-    //     io_uring_prep_write_fixed(sqe,
-    //                               /*fd=*/0,  // fixed file index 0
-    //                               /*buf=*/iovecs_[bufIndex].iov_base,
-    //                               /*nbytes=*/lenBytes,
-    //                               /*offset=*/static_cast<off_t>(fileOffsetBytes),
-    //                               /*buf_index=*/bufIndex);
-    //     sqe->flags |= IOSQE_FIXED_FILE;
-    //     sqe->user_data = nextSeq();
-    //
-    //     // We do NOT call io_uring_submit() here so the caller can batch.
-    //     // Caller should call submit() / flush()
-    //     return true;
-    // }
 
     // Register a shard file for reading via O_DIRECT.
     // Replaces any previously registered file.
@@ -321,15 +356,25 @@ class UringDirect {
             throw std::runtime_error("submitReadFixed: lenBytes is 0");
         }
 
-        // O_DIRECT alignment constraints (safe choice: 4k)
+        // O_DIRECT alignment constraints (safe choice: 4k). Preserved for the
+        // fixed-buffer API even when auto mode falls back to buffered pread.
         if ((fileOffsetBytes % kAlign) != 0) {
             throw std::runtime_error("submitReadFixed: fileOffsetBytes not 4k aligned");
         }
         if ((static_cast<std::uint64_t>(lenBytes) % kAlign) != 0) {
             throw std::runtime_error("submitReadFixed: lenBytes not multiple of 4k");
         }
-        if (static_cast<std::size_t>(lenBytes) > iovecs_[bufIndex].iov_len) {
-            throw std::runtime_error("submitReadFixed: lenBytes exceeds registered buffer length");
+        if ((static_cast<std::uint64_t>(bufOffsetBytes) % kAlign) != 0) {
+            throw std::runtime_error("submitReadFixed: bufOffsetBytes not 4k aligned");
+        }
+        if (static_cast<std::size_t>(bufOffsetBytes) + static_cast<std::size_t>(lenBytes) > iovecs_[bufIndex].iov_len) {
+            throw std::runtime_error("submitReadFixed: (bufOffset+len) exceeds registered buffer length");
+        }
+
+        void* ptr = static_cast<uint8_t*>(iovecs_[bufIndex].iov_base) + bufOffsetBytes;
+
+        if (!usesIoUring()) {
+            return submitFallbackIo(FallbackOp::Read, ptr, lenBytes, fileOffsetBytes);
         }
 
         io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
@@ -337,7 +382,6 @@ class UringDirect {
             return false;
 
         // Fixed file index 0 + fixed buffer index bufIndex with offset.
-        void* ptr = static_cast<uint8_t*>(iovecs_[bufIndex].iov_base) + bufOffsetBytes;
         io_uring_prep_read_fixed(sqe,
                                  /*fd=*/0,  // fixed-file index 0
                                  /*buf=*/ptr,
@@ -366,6 +410,10 @@ class UringDirect {
             throw std::runtime_error("submitReadCached: lenBytes is 0");
         }
 
+        if (!usesIoUring()) {
+            return submitFallbackIo(FallbackOp::Read, buf, lenBytes, fileOffsetBytes);
+        }
+
         io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
         if (!sqe)
             return false;
@@ -382,6 +430,12 @@ class UringDirect {
     }
 
     int submit() {
+        if (!usesIoUring()) {
+            std::lock_guard<std::mutex> guard(fallbackMutex_);
+            int submitted = fallbackSubmittedSinceLastSubmit_;
+            fallbackSubmittedSinceLastSubmit_ = 0;
+            return submitted;
+        }
         int responseCode = io_uring_submit(&ring_);
         if (responseCode < 0) {
             throw std::runtime_error(std::string("io_uring_submit failed: ") + std::strerror(-responseCode));
@@ -391,7 +445,7 @@ class UringDirect {
 
     struct Completion {
         std::uint64_t userData = 0;
-        int responseCode = 0;  // >=0 bytes written, or -errno
+        int responseCode = 0;  // >=0 bytes written/read, 0 for fsync, or -errno
     };
 
     Completion waitCompletionInOrder() {
@@ -460,21 +514,12 @@ class UringDirect {
         // Pull as many ready CQEs as are currently available (non-blocking)
         // and stash them in pending_.
         for (;;) {
-            io_uring_cqe* cqe = nullptr;
-            int rc = io_uring_peek_cqe(&ring_, &cqe);
-
-            if (rc == -EAGAIN || cqe == nullptr) {
-                break;  // no more CQEs ready right now
-            }
-            if (rc < 0) {
-                throw std::runtime_error(std::string("io_uring_peek_cqe failed: ") + std::strerror(-rc));
+            auto maybe = pollCompletion();
+            if (!maybe.has_value()) {
+                break;
             }
 
-            Completion c;
-            c.userData = cqe->user_data;
-            c.responseCode = cqe->res;
-
-            io_uring_cqe_seen(&ring_, cqe);
+            Completion c = *maybe;
 
             // Stash; userData must be unique among in-flight ops.
             auto [it, inserted] = pending_.emplace(c.userData, c);
@@ -518,44 +563,66 @@ class UringDirect {
     }
 
     // Returns the completion for the fsync op (res == 0 on success, -errno on failure).
+    //
+    // Contract: all prior read/write completions must have been delivered before
+    // finishDumpedFile() is called. The fsync completion participates in the same
+    // in-order sequence as reads/writes, so this method must not consume an
+    // arbitrary CQE with waitCompletion(); doing so can steal a prior write
+    // completion and corrupt nextDeliverSeq_.
     Completion finishDumpedFile(bool dataOnly = false) {
         if (!fileRegistered_ || fd_ < 0) {
             throw std::runtime_error("finishDumpedFile: no registered/open file");
         }
+        if (hasUndeliveredCompletions()) {
+            throw std::runtime_error("finishDumpedFile: pending read/write completions must be drained before fsync");
+        }
 
-        // Get an SQE; if full, submit and wait for one completion, then retry once.
+        if (!usesIoUring()) {
+            Completion c;
+            c.userData = nextSeq();
+            c.responseCode = dataOnly ? ::fdatasync(fd_) : ::fsync(fd_);
+            if (c.responseCode != 0) {
+                int e = errno;
+                c.responseCode = -e;
+                throw std::runtime_error(std::string("finishDumpedFile: fsync failed: ") + std::strerror(e));
+            }
+            ++nextDeliverSeq_;
+            return c;
+        }
+
         io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
         if (!sqe) {
-            // push any pending SQEs
-            submit();
-            // wait for any completion to free CQ/SQ pressure
-            (void)waitCompletion();
-            sqe = io_uring_get_sqe(&ring_);
-            if (!sqe) {
-                throw std::runtime_error("finishDumpedFile: SQ ring still full");
-            }
+            throw std::runtime_error("finishDumpedFile: SQ ring is full despite no pending completions");
         }
 
         unsigned fsyncFlags = dataOnly ? IORING_FSYNC_DATASYNC : 0;
 
-        // Use fixed-file index 0 (since registerDumpFile registers exactly one fd)
+        // Use fixed-file index 0 (since registerDumpFile registers exactly one fd).
+        const std::uint64_t fsyncSeq = nextSeq();
         io_uring_prep_fsync(sqe, /*fd=*/0, fsyncFlags);
         sqe->flags |= IOSQE_FIXED_FILE;
-        sqe->user_data = nextSeq();
+        sqe->user_data = fsyncSeq;
 
         submit();
 
-        Completion c = waitCompletion();
+        Completion c = waitCompletionInOrder();
+        if (c.userData != fsyncSeq) {
+            throw std::runtime_error("finishDumpedFile: received non-fsync completion while waiting for fsync");
+        }
         if (c.responseCode < 0) {
             throw std::runtime_error(std::string("finishDumpedFile: fsync failed: ") + std::strerror(-c.responseCode));
         }
-        ++nextDeliverSeq_;
 
         return c;
     }
 
     // Accessors for later stages (submission/completion code).
-    io_uring* ring() { return &ring_; }
+    io_uring* ring() {
+        if (!usesIoUring()) {
+            throw std::runtime_error(std::string("UringDirect::ring requested while active I/O backend is ") + activeBackendName());
+        }
+        return &ring_;
+    }
     int fd() const { return fd_; }
     bool buffersRegistered() const { return buffersRegistered_; }
     bool fileRegistered() const { return fileRegistered_; }
@@ -564,6 +631,10 @@ class UringDirect {
     // Non-blocking: try to get one completion.
     // Returns std::nullopt if none are available.
     std::optional<Completion> pollCompletion() {
+        if (!usesIoUring()) {
+            return pollFallbackCompletion();
+        }
+
         io_uring_cqe* cqe = nullptr;
         int responseCode = io_uring_peek_cqe(&ring_, &cqe);
         if (responseCode == -EAGAIN || cqe == nullptr) {
@@ -583,6 +654,10 @@ class UringDirect {
 
     // Blocking: wait until at least one completion is available, then return it.
     Completion waitCompletion() {
+        if (!usesIoUring()) {
+            return waitFallbackCompletion();
+        }
+
         io_uring_cqe* cqe = nullptr;
         int responseCode = io_uring_wait_cqe(&ring_, &cqe);
         if (responseCode < 0) {
@@ -631,27 +706,61 @@ class UringDirect {
     }
 
    private:
-    void registerLoadFileImpl(const std::string& path, bool useDirect) {
-        // Unregister/close previous
-        if (fileRegistered_) {
-            int rc = io_uring_unregister_files(&ring_);
-            if (rc < 0) {
-                throw std::runtime_error(std::string("io_uring_unregister_files failed: ") + std::strerror(-rc));
-            }
-            fileRegistered_ = false;
+    void initializeBackend(unsigned queueDepth) {
+        if (requestedBackend_ == IoBackend::PreadBuffered) {
+            activeBackend_ = IoBackend::PreadBuffered;
+            return;
         }
-        if (fd_ >= 0) {
-            close(fd_);
-            fd_ = -1;
+        if (requestedBackend_ == IoBackend::PreadDirect) {
+            activeBackend_ = IoBackend::PreadDirect;
+            return;
         }
 
+        int responseCode = ioUringQueueInitForInstance(queueDepth);
+        if (responseCode >= 0) {
+            ringInited_ = true;
+            activeBackend_ = IoBackend::UringDirect;
+            return;
+        }
+
+        int e = -responseCode;
+        if (requestedBackend_ == IoBackend::UringDirect) {
+            throw std::runtime_error(std::string("io_uring_queue_init failed: ") + std::strerror(e));
+        }
+
+        activeBackend_ = IoBackend::PreadDirect;
+        emitCompatibilityWarningOnce("io_uring_queue_init failed: " + std::string(std::strerror(e)), activeBackend_);
+    }
+
+    void registerLoadFileImpl(const std::string& path, bool useDirect) {
+        closeRegisteredFile();
+
+        bool requestDirect = useDirect && activeBackend_ != IoBackend::PreadBuffered;
         int flags = O_RDONLY | O_CLOEXEC;
-        if (useDirect)
+        if (requestDirect)
             flags |= O_DIRECT;
 
-        fd_ = open(path.c_str(), flags);
+        fd_ = openForBackend(path, flags, 0, /*hasMode=*/false);
+        if (fd_ < 0 && isAutoMode() && activeBackend_ == IoBackend::UringDirect && useDirect && (flags & O_DIRECT) &&
+            isBackendAvailabilityErrno(errno)) {
+            int e = errno;
+            fallbackFromIoUring("open(O_DIRECT, RDONLY) failed for '" + path + "': " + std::string(std::strerror(e)),
+                                IoBackend::PreadBuffered);
+            requestDirect = false;
+            flags &= ~O_DIRECT;
+            fd_ = openForBackend(path, flags, 0, /*hasMode=*/false);
+        }
+        if (fd_ < 0 && isAutoMode() && activeBackend_ == IoBackend::PreadDirect && useDirect && (flags & O_DIRECT) &&
+            isBackendAvailabilityErrno(errno)) {
+            int e = errno;
+            fallbackFromPreadDirect("open(O_DIRECT, RDONLY) failed for '" + path + "': " + std::string(std::strerror(e)),
+                                    IoBackend::PreadBuffered);
+            requestDirect = false;
+            flags &= ~O_DIRECT;
+            fd_ = openForBackend(path, flags, 0, /*hasMode=*/false);
+        }
         if (fd_ < 0) {
-            const char* mode = useDirect ? "open(O_DIRECT, RDONLY)" : "open(RDONLY)";
+            const char* mode = requestDirect ? "open(O_DIRECT, RDONLY)" : "open(RDONLY)";
             throw std::runtime_error(std::string(mode) + " failed for '" + path + "': " + std::strerror(errno));
         }
 
@@ -669,14 +778,20 @@ class UringDirect {
             throw std::runtime_error("registerReadFile: path is not a regular file: '" + path + "'");
         }
 
-        // Register as fixed file index 0
-        int fdArr[1] = {fd_};
-        int rc = io_uring_register_files(&ring_, fdArr, 1);
-        if (rc < 0) {
-            int e = -rc;
-            close(fd_);
-            fd_ = -1;
-            throw std::runtime_error(std::string("io_uring_register_files failed: ") + std::strerror(e));
+        if (usesIoUring()) {
+            // Register as fixed file index 0
+            int fdArr[1] = {fd_};
+            int rc = io_uring_register_files(&ring_, fdArr, 1);
+            if (rc < 0) {
+                int e = -rc;
+                if (isAutoMode() && isBackendAvailabilityErrno(e)) {
+                    fallbackFromIoUring("io_uring_register_files failed: " + std::string(std::strerror(e)), IoBackend::PreadDirect);
+                } else {
+                    close(fd_);
+                    fd_ = -1;
+                    throw std::runtime_error(std::string("io_uring_register_files failed: ") + std::strerror(e));
+                }
+            }
         }
         fileRegistered_ = true;
     }
@@ -686,10 +801,360 @@ class UringDirect {
         return (v % align) == 0;
     }
 
+    void closeRegisteredFile() {
+        if (fileRegistered_ && !usesIoUring() && hasUndeliveredCompletions()) {
+            throw std::runtime_error("closeRegisteredFile: pending pread/pwrite completions must be drained before replacing the file");
+        }
+        if (fileRegistered_ && usesIoUring()) {
+            int rc = io_uring_unregister_files(&ring_);
+            if (rc < 0) {
+                throw std::runtime_error(std::string("io_uring_unregister_files failed: ") + std::strerror(-rc));
+            }
+        }
+        fileRegistered_ = false;
+        if (fd_ >= 0) {
+            close(fd_);
+            fd_ = -1;
+        }
+    }
+
+    void fallbackFromIoUring(const std::string& reason, IoBackend fallbackBackend) {
+        // Keep any already-open fd logically registered for the fallback backend, but
+        // tear down kernel io_uring registrations before exiting the ring.
+        if (ringInited_) {
+            if (fileRegistered_) {
+                (void)io_uring_unregister_files(&ring_);
+            }
+            if (buffersRegistered_) {
+                (void)io_uring_unregister_buffers(&ring_);
+            }
+            io_uring_queue_exit(&ring_);
+            ringInited_ = false;
+        }
+        activeBackend_ = fallbackBackend;
+        emitCompatibilityWarningOnce(reason, fallbackBackend);
+    }
+
+    void fallbackFromPreadDirect(const std::string& reason, IoBackend fallbackBackend) {
+        activeBackend_ = fallbackBackend;
+        emitCompatibilityWarningOnce(reason, fallbackBackend);
+    }
+
+    bool usesIoUring() const { return activeBackend_ == IoBackend::UringDirect; }
+    bool isAutoMode() const { return requestedBackend_ == IoBackend::Auto; }
+    bool hasUndeliveredCompletions() const { return nextIssueSeq_ != nextDeliverSeq_ || !pending_.empty() || hasFallbackCompletionsReady(); }
+
+    static const char* backendName(IoBackend backend) {
+        switch (backend) {
+            case IoBackend::Auto:
+                return "auto";
+            case IoBackend::UringDirect:
+                return "uring_direct";
+            case IoBackend::PreadDirect:
+                return "pread_direct";
+            case IoBackend::PreadBuffered:
+                return "pread_buffered";
+        }
+        return "unknown";
+    }
+
+    static bool isBackendAvailabilityErrno(int e) {
+        return e == EPERM || e == EACCES || e == ENOSYS || e == EINVAL || e == EOPNOTSUPP
+#ifdef ENOTSUP
+               || e == ENOTSUP
+#endif
+            ;
+    }
+
+    static void emitCompatibilityWarningOnce(const std::string& reason, IoBackend fallbackBackend) {
+        std::lock_guard<std::mutex> guard(compatibilityWarningMutex());
+        if (compatibilityWarningEmitted()) {
+            return;
+        }
+        compatibilityWarningEmitted() = true;
+        std::cerr << "Thor warning: I/O backend uring_direct is unavailable or not usable in this runtime.\n"
+                  << "  Reason: " << reason << "\n"
+                  << "  Falling back to " << backendName(fallbackBackend) << ".\n"
+                  << "  Backend order for THOR_IO_BACKEND=auto is: uring_direct, pread_direct, pread_buffered.\n"
+                  << "  Docker/dev-container workaround: run with a seccomp profile that allows io_uring_setup,\n"
+                  << "    io_uring_enter, and io_uring_register, or use --security-opt seccomp=unconfined when that is acceptable.\n"
+                  << "  Managed cloud training environments may block io_uring through container seccomp,\n"
+                  << "    kernel.io_uring_disabled, or provider security policy; those settings are often not configurable by jobs.\n"
+                  << "  For deterministic behavior set THOR_IO_BACKEND=uring_direct, pread_direct, or pread_buffered.\n";
+    }
+
+    static std::mutex& compatibilityWarningMutex() {
+        static std::mutex mutex;
+        return mutex;
+    }
+
+    static bool& compatibilityWarningEmitted() {
+        static bool emitted = false;
+        return emitted;
+    }
+
+    static int openForBackend(const std::string& path, int flags, mode_t mode, bool hasMode) {
+#ifdef THOR_GTEST
+        if ((flags & O_DIRECT) && testDirectOpenUnavailable()) {
+            errno = EINVAL;
+            return -1;
+        }
+#endif
+        if (hasMode) {
+            return ::open(path.c_str(), flags, mode);
+        }
+        return ::open(path.c_str(), flags);
+    }
+
+    int initIoUringRing(unsigned queueDepth) {
+#ifdef THOR_GTEST
+        if (testIoUringQueueInitResult().has_value()) {
+            return *testIoUringQueueInitResult();
+        }
+#endif
+        return io_uring_queue_init(queueDepth, &ring_, /*flags=*/0);
+    }
+
+    // initializeBackend needs to initialize this instance's ring, not a temporary.
+    // Keep the test hook centralized by routing through initIoUringRing().
+    int ioUringQueueInitForInstance(unsigned queueDepth) { return initIoUringRing(queueDepth); }
+
+    enum class FallbackOp { Read, Write };
+
+    struct FallbackRequest {
+        FallbackOp op = FallbackOp::Read;
+        Completion completion;
+        int fd = -1;
+        void* ptr = nullptr;
+        std::uint32_t lenBytes = 0;
+        std::uint64_t fileOffsetBytes = 0;
+    };
+
+    void ensureFallbackWorkers() {
+        if (usesIoUring()) {
+            return;
+        }
+
+        std::lock_guard<std::mutex> guard(fallbackMutex_);
+        if (!fallbackWorkers_.empty()) {
+            return;
+        }
+        fallbackStop_ = false;
+
+        const std::size_t numWorkers = fallbackWorkerCount();
+        fallbackWorkers_.reserve(numWorkers);
+        for (std::size_t i = 0; i < numWorkers; ++i) {
+            fallbackWorkers_.emplace_back([this] { fallbackWorkerLoop(); });
+        }
+    }
+
+    std::size_t fallbackWorkerCount() const {
+        return std::max<std::size_t>(1, std::min<std::size_t>(fallbackQueueDepth_, 64));
+    }
+
+    bool submitFallbackIo(FallbackOp op, void* ptr, std::uint32_t lenBytes, std::uint64_t fileOffsetBytes) {
+        ensureFallbackWorkers();
+
+        std::lock_guard<std::mutex> guard(fallbackMutex_);
+        if (fallbackStop_) {
+            throw std::runtime_error("submitFallbackIo: fallback worker pool is shutting down");
+        }
+        if (fallbackInFlight_ >= fallbackQueueDepth_) {
+            return false;
+        }
+
+        FallbackRequest req;
+        req.op = op;
+        req.completion.userData = nextSeq();
+        req.fd = fd_;
+        req.ptr = ptr;
+        req.lenBytes = lenBytes;
+        req.fileOffsetBytes = fileOffsetBytes;
+        fallbackWork_.push_back(req);
+        ++fallbackInFlight_;
+        ++fallbackSubmittedSinceLastSubmit_;
+        fallbackWorkCv_.notify_one();
+        return true;
+    }
+
+    std::optional<Completion> pollFallbackCompletion() {
+        std::lock_guard<std::mutex> guard(fallbackMutex_);
+        if (fallbackCompleted_.empty()) {
+            return std::nullopt;
+        }
+        Completion out = fallbackCompleted_.front();
+        fallbackCompleted_.pop_front();
+        if (fallbackInFlight_ > 0) {
+            --fallbackInFlight_;
+        }
+        return out;
+    }
+
+    Completion waitFallbackCompletion() {
+        std::unique_lock<std::mutex> lock(fallbackMutex_);
+        fallbackCompletedCv_.wait(lock, [this] { return !fallbackCompleted_.empty() || (fallbackStop_ && fallbackInFlight_ == 0); });
+        if (fallbackCompleted_.empty()) {
+            throw std::runtime_error("waitCompletion: no pending completion for pread/pwrite backend");
+        }
+        Completion out = fallbackCompleted_.front();
+        fallbackCompleted_.pop_front();
+        if (fallbackInFlight_ > 0) {
+            --fallbackInFlight_;
+        }
+        return out;
+    }
+
+    bool hasFallbackCompletionsReady() const {
+        std::lock_guard<std::mutex> guard(fallbackMutex_);
+        return !fallbackCompleted_.empty() || !fallbackWork_.empty() || fallbackInFlight_ != 0;
+    }
+
+    void fallbackWorkerLoop() {
+#ifdef THOR_GTEST
+        testCurrentThreadIsFallbackWorker() = true;
+#endif
+        for (;;) {
+            FallbackRequest req;
+            {
+                std::unique_lock<std::mutex> lock(fallbackMutex_);
+                fallbackWorkCv_.wait(lock, [this] { return fallbackStop_ || !fallbackWork_.empty(); });
+                if (fallbackStop_ && fallbackWork_.empty()) {
+                    break;
+                }
+                req = fallbackWork_.front();
+                fallbackWork_.pop_front();
+            }
+
+#ifdef THOR_GTEST
+            maybeBlockFallbackWorkerForTest();
+#endif
+
+            if (req.op == FallbackOp::Read) {
+                req.completion.responseCode = preadAll(req.fd, req.ptr, req.lenBytes, req.fileOffsetBytes);
+            } else {
+                req.completion.responseCode = pwriteAll(req.fd, req.ptr, req.lenBytes, req.fileOffsetBytes);
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(fallbackMutex_);
+                fallbackCompleted_.push_back(req.completion);
+            }
+            fallbackCompletedCv_.notify_one();
+        }
+#ifdef THOR_GTEST
+        testCurrentThreadIsFallbackWorker() = false;
+#endif
+    }
+
+    void shutdownFallbackWorkersNoexcept() noexcept {
+        {
+            std::lock_guard<std::mutex> guard(fallbackMutex_);
+            fallbackStop_ = true;
+        }
+        fallbackWorkCv_.notify_all();
+        for (std::thread& worker : fallbackWorkers_) {
+            if (worker.joinable()) {
+                worker.join();
+            }
+        }
+        fallbackWorkers_.clear();
+    }
+
+    static int preadAll(int fd, void* buf, std::uint32_t lenBytes, std::uint64_t fileOffsetBytes) {
+        std::uint64_t done = 0;
+        while (done < lenBytes) {
+            ssize_t n = ::pread(fd,
+                                static_cast<std::uint8_t*>(buf) + done,
+                                static_cast<std::size_t>(lenBytes - done),
+                                static_cast<off_t>(fileOffsetBytes + done));
+            if (n < 0) {
+                return -errno;
+            }
+            if (n == 0) {
+                break;
+            }
+            done += static_cast<std::uint64_t>(n);
+        }
+        return static_cast<int>(done);
+    }
+
+    static int pwriteAll(int fd, const void* buf, std::uint32_t lenBytes, std::uint64_t fileOffsetBytes) {
+        std::uint64_t done = 0;
+        while (done < lenBytes) {
+            ssize_t n = ::pwrite(fd,
+                                 static_cast<const std::uint8_t*>(buf) + done,
+                                 static_cast<std::size_t>(lenBytes - done),
+                                 static_cast<off_t>(fileOffsetBytes + done));
+            if (n < 0) {
+                return -errno;
+            }
+            if (n == 0) {
+                break;
+            }
+            done += static_cast<std::uint64_t>(n);
+        }
+        return static_cast<int>(done);
+    }
+
+#ifdef THOR_GTEST
+    static std::optional<int>& testIoUringQueueInitResult() {
+        static std::optional<int> responseCode;
+        return responseCode;
+    }
+
+    static bool& testDirectOpenUnavailable() {
+        static bool unavailable = false;
+        return unavailable;
+    }
+
+    static std::mutex& testFallbackWorkerBlockMutex() {
+        static std::mutex mutex;
+        return mutex;
+    }
+
+    static std::condition_variable& testFallbackWorkerBlockCv() {
+        static std::condition_variable cv;
+        return cv;
+    }
+
+    static bool& testFallbackWorkerBlockEnabled() {
+        static bool enabled = false;
+        return enabled;
+    }
+
+    static std::size_t& testFallbackWorkerStartedCountValue() {
+        static std::size_t count = 0;
+        return count;
+    }
+
+    static bool& testCurrentThreadIsFallbackWorker() {
+        thread_local bool isWorker = false;
+        return isWorker;
+    }
+
+    static void maybeBlockFallbackWorkerForTest() {
+        if (!testCurrentThreadIsFallbackWorker()) {
+            return;
+        }
+        std::unique_lock<std::mutex> lock(testFallbackWorkerBlockMutex());
+        if (!testFallbackWorkerBlockEnabled()) {
+            return;
+        }
+        ++testFallbackWorkerStartedCountValue();
+        testFallbackWorkerBlockCv().notify_all();
+        testFallbackWorkerBlockCv().wait(lock, [] { return !testFallbackWorkerBlockEnabled(); });
+    }
+#endif
+
     void moveFrom(UringDirect&& other) noexcept {
+        other.shutdownFallbackWorkersNoexcept();
+
         ring_ = other.ring_;
         ringInited_ = other.ringInited_;
         other.ringInited_ = false;
+
+        requestedBackend_ = other.requestedBackend_;
+        activeBackend_ = other.activeBackend_;
 
         fd_ = other.fd_;
         other.fd_ = -1;
@@ -701,12 +1166,31 @@ class UringDirect {
 
         fileRegistered_ = other.fileRegistered_;
         other.fileRegistered_ = false;
+
+        pending_ = std::move(other.pending_);
+        {
+            std::lock_guard<std::mutex> lock(other.fallbackMutex_);
+            fallbackWork_ = std::move(other.fallbackWork_);
+            fallbackCompleted_ = std::move(other.fallbackCompleted_);
+            fallbackInFlight_ = other.fallbackInFlight_;
+            fallbackSubmittedSinceLastSubmit_ = other.fallbackSubmittedSinceLastSubmit_;
+            other.fallbackInFlight_ = 0;
+            other.fallbackSubmittedSinceLastSubmit_ = 0;
+        }
+        fallbackQueueDepth_ = other.fallbackQueueDepth_;
+        fallbackStop_ = false;
+
+        nextIssueSeq_ = other.nextIssueSeq_;
+        nextDeliverSeq_ = other.nextDeliverSeq_;
     }
 
     uint64_t nextSeq() { return nextIssueSeq_++; }
 
     io_uring ring_{};
     bool ringInited_ = false;
+
+    IoBackend requestedBackend_ = IoBackend::Auto;
+    IoBackend activeBackend_ = IoBackend::PreadBuffered;
 
     int fd_ = -1;
 
@@ -715,6 +1199,18 @@ class UringDirect {
     bool fileRegistered_ = false;
 
     std::unordered_map<uint64_t, Completion> pending_;
+
+    mutable std::mutex fallbackMutex_;
+    std::condition_variable fallbackWorkCv_;
+    std::condition_variable fallbackCompletedCv_;
+    std::deque<FallbackRequest> fallbackWork_;
+    std::deque<Completion> fallbackCompleted_;
+    std::vector<std::thread> fallbackWorkers_;
+    bool fallbackStop_ = false;
+    std::size_t fallbackQueueDepth_ = 64;
+    std::size_t fallbackInFlight_ = 0;
+    int fallbackSubmittedSinceLastSubmit_ = 0;
+
     static constexpr uint64_t SEQUENCE_START = 1000;
     uint64_t nextIssueSeq_ = SEQUENCE_START;
     uint64_t nextDeliverSeq_ = SEQUENCE_START;
