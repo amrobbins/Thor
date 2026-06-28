@@ -40,6 +40,12 @@ struct TrainingStatsSnapshot {
     std::optional<double> accuracy{};
     std::optional<double> learningRate{};
     std::optional<double> momentum{};
+
+    // Named graph losses are kept separate from general scalar metrics so
+    // model-selection callbacks can choose a validation score that differs
+    // from the aggregate training objective. Loss names may also appear in
+    // metrics for backwards-compatible reporting.
+    std::unordered_map<std::string, double> losses{};
     std::unordered_map<std::string, double> metrics{};
 };
 

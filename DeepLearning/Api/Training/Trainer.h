@@ -76,7 +76,7 @@ using TrainingRunsRestartConditionSpec = TrainingRestartPolicy;
 struct TrainerFitOptions {
     uint32_t epochs = 1;
     uint32_t checkBestModelEveryEpochs = 0;
-    uint64_t minEarlyCompletionEpochs = 0;
+    uint64_t firstModelSelectionEpoch = 0;
     std::vector<TrainingRestartCondition> restartConditions{};
     std::vector<TrainingEarlyCompletionPolicy> earlyCompletionPolicies{};
 };

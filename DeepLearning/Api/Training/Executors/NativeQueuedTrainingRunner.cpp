@@ -123,6 +123,8 @@ struct QueuedTrainingState {
     uint64_t headSlot = 0;
     uint64_t tailSlot = 0;
     uint64_t inFlightBatches = 0;
+    uint64_t scheduledBatchesInEpoch = 0;
+    std::condition_variable batchScheduled;
 
     std::exception_ptr failure;
     bool cancelRequested = false;
@@ -776,45 +778,85 @@ class NativeQueuedSigintScope {
 
 class EpochLossAccumulator {
    public:
-    void reset() {
-        trainLossSum = 0.0;
-        trainLossCount = 0;
-        validationLossSum = 0.0;
-        validationLossCount = 0;
-    }
-
     void update(const TrainingStatsSnapshot& snapshot) {
-        if (!snapshot.loss.has_value()) {
-            return;
-        }
         if (snapshot.phase == TrainingEventPhase::TRAIN) {
-            trainLossSum += snapshot.loss.value();
-            trainLossCount += 1;
+            train.update(snapshot);
         } else if (snapshot.phase == TrainingEventPhase::VALIDATE) {
-            validationLossSum += snapshot.loss.value();
-            validationLossCount += 1;
+            validate.update(snapshot);
+        } else if (snapshot.phase == TrainingEventPhase::TEST) {
+            test.update(snapshot);
         }
     }
 
-    [[nodiscard]] std::optional<double> trainLoss() const {
-        if (trainLossCount == 0) {
-            return std::nullopt;
-        }
-        return trainLossSum / static_cast<double>(trainLossCount);
-    }
+    [[nodiscard]] std::optional<double> trainLoss() const { return train.snapshot().loss; }
+    [[nodiscard]] std::optional<double> validationLoss() const { return validate.snapshot().loss; }
 
-    [[nodiscard]] std::optional<double> validationLoss() const {
-        if (validationLossCount == 0) {
-            return std::nullopt;
-        }
-        return validationLossSum / static_cast<double>(validationLossCount);
+    [[nodiscard]] TrainingModelSelectionContext modelSelectionContext(uint64_t epoch) const {
+        TrainingModelSelectionContext context;
+        context.epoch = epoch;
+        context.train = train.snapshot();
+        context.validate = validate.snapshot();
+        context.test = test.snapshot();
+        return context;
     }
 
    private:
-    double trainLossSum = 0.0;
-    uint64_t trainLossCount = 0;
-    double validationLossSum = 0.0;
-    uint64_t validationLossCount = 0;
+    struct RunningMean {
+        double sum = 0.0;
+        uint64_t count = 0;
+
+        void add(double value) {
+            sum += value;
+            count += 1;
+        }
+
+        [[nodiscard]] std::optional<double> mean() const {
+            if (count == 0) {
+                return std::nullopt;
+            }
+            return sum / static_cast<double>(count);
+        }
+    };
+
+    struct PhaseAccumulator {
+        RunningMean lossMean{};
+        std::unordered_map<std::string, RunningMean> lossMeans{};
+        std::unordered_map<std::string, RunningMean> metricMeans{};
+
+        void update(const TrainingStatsSnapshot& snapshot) {
+            if (snapshot.loss.has_value()) {
+                lossMean.add(snapshot.loss.value());
+            }
+            for (const auto& [name, value] : snapshot.losses) {
+                lossMeans[name].add(value);
+            }
+            for (const auto& [name, value] : snapshot.metrics) {
+                metricMeans[name].add(value);
+            }
+        }
+
+        [[nodiscard]] TrainingModelSelectionPhaseStats snapshot() const {
+            TrainingModelSelectionPhaseStats out;
+            out.loss = lossMean.mean();
+            for (const auto& [name, mean] : lossMeans) {
+                const std::optional<double> value = mean.mean();
+                if (value.has_value()) {
+                    out.losses[name] = value.value();
+                }
+            }
+            for (const auto& [name, mean] : metricMeans) {
+                const std::optional<double> value = mean.mean();
+                if (value.has_value()) {
+                    out.metrics[name] = value.value();
+                }
+            }
+            return out;
+        }
+    };
+
+    PhaseAccumulator train{};
+    PhaseAccumulator validate{};
+    PhaseAccumulator test{};
 };
 
 struct TrainingSelectionMetadata {
@@ -827,7 +869,7 @@ struct TrainingSelectionMetadata {
     uint64_t completedEpoch = 0;
     std::string completionReason = "completed";
     uint32_t checkBestModelEveryEpochs = 0;
-    uint64_t minEarlyCompletionEpochs = 0;
+    uint64_t firstModelSelectionEpoch = 0;
 };
 
 class TrainingArtifactManager {
@@ -884,34 +926,40 @@ class TrainingArtifactManager {
         }
 
         const std::filesystem::path artifactRoot = std::filesystem::path(saveModelDirectory.value());
-        if (std::filesystem::exists(artifactRoot)) {
-            if (!overwrite) {
-                throw std::runtime_error("Training artifact cannot replace existing save_model_dir '" + artifactRoot.string() +
-                                         "' because save_model_overwrite is false.");
-            }
-            removePathIfExists(artifactRoot);
+        if (std::filesystem::exists(artifactRoot) && !overwrite) {
+            throw std::runtime_error("Training artifact cannot replace existing save_model_dir '" + artifactRoot.string() +
+                                     "' because save_model_overwrite is false.");
         }
-        std::filesystem::create_directories(artifactRoot);
 
-        const std::filesystem::path latestDirectory = artifactRoot / "latest";
-        const std::filesystem::path latestTemporaryDirectory = artifactRoot / ".latest.tmp";
-        removePathIfExists(latestTemporaryDirectory);
+        const std::filesystem::path finalTemporaryDirectory = uniqueFinalTemporaryDirectory();
+        const std::filesystem::path replacementBackupDirectory = uniqueReplacementBackupDirectory();
+        removePathIfExists(finalTemporaryDirectory);
+        removePathIfExists(replacementBackupDirectory);
+
         try {
+            std::filesystem::create_directories(finalTemporaryDirectory);
+
+            const std::filesystem::path latestDirectory = finalTemporaryDirectory / "latest";
+            const std::filesystem::path latestTemporaryDirectory = finalTemporaryDirectory / ".latest.tmp";
+            removePathIfExists(latestTemporaryDirectory);
             placedNetwork.save(latestTemporaryDirectory.string(), /*overwrite=*/true, /*saveOptimizerState=*/true);
             std::filesystem::rename(latestTemporaryDirectory, latestDirectory);
+
+            if (bestCandidateDirectory.has_value()) {
+                const std::filesystem::path bestDirectory = finalTemporaryDirectory / "best";
+                removePathIfExists(bestDirectory);
+                std::filesystem::rename(bestCandidateDirectory.value(), bestDirectory);
+                bestCandidateDirectory.reset();
+            }
+
+            writeSelectionMetadata(finalTemporaryDirectory, metadata);
+            replaceArtifactRoot(finalTemporaryDirectory, artifactRoot, replacementBackupDirectory);
         } catch (...) {
-            removePathIfExists(latestTemporaryDirectory);
+            restoreArtifactRootIfNeeded(artifactRoot, replacementBackupDirectory);
+            removePathIfExists(finalTemporaryDirectory);
+            removePathIfExists(replacementBackupDirectory);
             throw;
         }
-
-        if (bestCandidateDirectory.has_value()) {
-            const std::filesystem::path bestDirectory = artifactRoot / "best";
-            removePathIfExists(bestDirectory);
-            std::filesystem::rename(bestCandidateDirectory.value(), bestDirectory);
-            bestCandidateDirectory.reset();
-        }
-
-        writeSelectionMetadata(artifactRoot, metadata);
     }
 
     [[nodiscard]] std::optional<double> getBestScore() const { return bestScore; }
@@ -952,6 +1000,65 @@ class TrainingArtifactManager {
         std::ostringstream out;
         out << baseCandidatePrefix().string() << ".epoch_" << epoch << ".tmp";
         return std::filesystem::path(out.str());
+    }
+
+    [[nodiscard]] std::filesystem::path uniqueFinalTemporaryDirectory() const {
+        std::ostringstream out;
+        out << baseCandidatePrefix().string() << ".final.tmp";
+        return std::filesystem::path(out.str());
+    }
+
+    [[nodiscard]] std::filesystem::path uniqueReplacementBackupDirectory() const {
+        std::ostringstream out;
+        out << baseCandidatePrefix().string() << ".previous";
+        return std::filesystem::path(out.str());
+    }
+
+    static void replaceArtifactRoot(const std::filesystem::path& finalTemporaryDirectory,
+                                    const std::filesystem::path& artifactRoot,
+                                    const std::filesystem::path& replacementBackupDirectory) {
+        std::error_code errorCode;
+        const bool hadPreviousRoot = std::filesystem::exists(artifactRoot, errorCode);
+        if (errorCode) {
+            throw std::runtime_error("Failed to inspect training artifact root '" + artifactRoot.string() + "': " + errorCode.message());
+        }
+
+        if (hadPreviousRoot) {
+            std::filesystem::rename(artifactRoot, replacementBackupDirectory, errorCode);
+            if (errorCode) {
+                throw std::runtime_error("Failed to stage replacement of training artifact root '" + artifactRoot.string() +
+                                         "': " + errorCode.message());
+            }
+        }
+
+        errorCode.clear();
+        std::filesystem::rename(finalTemporaryDirectory, artifactRoot, errorCode);
+        if (errorCode) {
+            restoreArtifactRootIfNeeded(artifactRoot, replacementBackupDirectory);
+            throw std::runtime_error("Failed to finalize training artifact root '" + artifactRoot.string() + "': " + errorCode.message());
+        }
+
+        if (hadPreviousRoot) {
+            removePathIfExists(replacementBackupDirectory);
+        }
+    }
+
+    static void restoreArtifactRootIfNeeded(const std::filesystem::path& artifactRoot,
+                                            const std::filesystem::path& replacementBackupDirectory) {
+        std::error_code errorCode;
+        const bool backupExists = std::filesystem::exists(replacementBackupDirectory, errorCode);
+        if (errorCode || !backupExists) {
+            return;
+        }
+
+        errorCode.clear();
+        const bool artifactRootExists = std::filesystem::exists(artifactRoot, errorCode);
+        if (errorCode || artifactRootExists) {
+            return;
+        }
+
+        errorCode.clear();
+        std::filesystem::rename(replacementBackupDirectory, artifactRoot, errorCode);
     }
 
     static void writeOptionalUint64(std::ostream& out, std::optional<uint64_t> value) {
@@ -1002,7 +1109,7 @@ class TrainingArtifactManager {
             out << "  \"completed_epoch\": " << metadata.completedEpoch << ",\n";
             out << "  \"completion_reason\": \"" << metadata.completionReason << "\",\n";
             out << "  \"check_best_model_every_epochs\": " << metadata.checkBestModelEveryEpochs << ",\n";
-            out << "  \"min_early_completion_epochs\": " << metadata.minEarlyCompletionEpochs << "\n";
+            out << "  \"first_model_selection_epoch\": " << metadata.firstModelSelectionEpoch << "\n";
             out << "}\n";
             if (!out) {
                 throw std::runtime_error("Failed while writing training selection metadata file: " + tmpPath.string());
@@ -1586,6 +1693,7 @@ void assignScalarStatsToSnapshot(TrainingStatsSnapshot& snapshot,
                                  const std::vector<std::string>& aggregateLossTensorNames) {
     THOR_THROW_IF_FALSE(scalarTensorNames.size() == scalarStats.size());
     std::map<std::string, double> scalarValuesByName;
+    const std::set<std::string> aggregateLossTensorNameSet = setFromVector(aggregateLossTensorNames);
     for (size_t i = 0; i < scalarTensorNames.size(); ++i) {
         if (!scalarStats[i].present) {
             continue;
@@ -1601,6 +1709,9 @@ void assignScalarStatsToSnapshot(TrainingStatsSnapshot& snapshot,
         } else if (name == "momentum") {
             snapshot.momentum = value;
         } else {
+            if (aggregateLossTensorNameSet.count(name) != 0) {
+                snapshot.losses[name] = value;
+            }
             snapshot.metrics[name] = value;
         }
     }
@@ -1740,8 +1851,10 @@ class NativeQueuedEpochScheduler {
                 }
                 state->tailSlot = (state->tailSlot + 1) % state->slots.size();
                 state->inFlightBatches += 1;
+                state->scheduledBatchesInEpoch += 1;
                 inFlightAfterReserve = state->inFlightBatches;
             }
+            state->batchScheduled.notify_all();
             const auto reserveFinish = diagnosticNow(collectQueueDiagnostics);
             if (collectQueueDiagnostics && shouldEmitQueueDiagnostic(batch + 1)) {
                 emitNativeQueueDiagnostic("reserve",
@@ -2084,6 +2197,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         ExecutableTrainingPlan::compile(*trainingProgram, *placedNetwork, /*resolveEmptyUpdateParametersAsAllTrainable=*/!evaluateOnly);
     ensureNativeQueuedPlanCompatible(plan, *executionNetwork, evaluateOnly);
 
+    const bool modelSelectionEnabled = !evaluateOnly && request.checkBestModelEveryEpochs > 0;
     const std::vector<std::string> aggregateLossTensorNames = executionGraph.composedFromTrainingPhases
         ? outputBackedReportableLossNames(*executionNetwork)
         : plainTrainingProgramAggregateLossNames(*executionNetwork);
@@ -2093,12 +2207,18 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     } else {
         filterRuntimeScalarsToActiveTrainingProgramOutputs(runtime, *executionNetwork, aggregateLossTensorNames);
     }
-    if (!evaluateOnly && (request.saveModelDirectory.has_value() || !request.earlyCompletionPolicies.empty())) {
+    if (!evaluateOnly && (request.saveModelDirectory.has_value() || !request.earlyCompletionPolicies.empty() || modelSelectionEnabled)) {
         const bool concreteLossOutputIsInactiveReportableLoss =
             setFromVector(outputBackedReportableLossNames(*executionNetwork)).count("loss") != 0 &&
             setFromVector(aggregateLossTensorNames).count("loss") == 0;
         if (!aggregateLossTensorNames.empty() || (hasConcreteLossOutput && !concreteLossOutputIsInactiveReportableLoss)) {
             runtime.scalarTensorsToReport.insert("loss");
+        }
+        // Model selection can use named losses even when they are not part of
+        // the human report list. Always collect active graph-loss scalars while
+        // best-candidate/early-completion scoring is enabled.
+        if (modelSelectionEnabled) {
+            runtime.scalarTensorsToReport.insert(aggregateLossTensorNames.begin(), aggregateLossTensorNames.end());
         }
     }
     if (runtime.scalarTensorsToReport.count("loss") != 0 && !hasConcreteLossOutput && aggregateLossTensorNames.empty()) {
@@ -2143,14 +2263,15 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     };
 
     TrainingArtifactManager trainingArtifacts(request.saveModelDirectory, request.saveModelOverwrite);
-    const bool modelSelectionEnabled = !evaluateOnly && request.checkBestModelEveryEpochs > 0;
     const uint64_t firstModelSelectionEpoch =
-        request.minEarlyCompletionEpochs == 0 ? request.checkBestModelEveryEpochs : request.minEarlyCompletionEpochs;
+        request.firstModelSelectionEpoch == 0 ? request.checkBestModelEveryEpochs : request.firstModelSelectionEpoch;
     bool runEarlyCompleted = false;
     std::optional<uint64_t> completedEpoch{};
     std::optional<double> latestModelSelectionScore{};
     std::optional<double> latestTrainingLoss{};
     std::optional<double> latestValidationLoss{};
+    TrainingModelSelectionContext latestEpochSelectionContext{};
+    bool latestEpochSelectionContextValid = false;
 
     emitTrainingEvent(observer,
                       TrainingEvent::runStarted(makeBaseSnapshot(TrainingEventPhase::UNKNOWN, 0, batchSize, 0, nullptr)));
@@ -2191,6 +2312,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
             options.maxInFlightBatches, std::move(scalarTensorNames), aggregateLossTensorNames);
         state->numBatchesDoneInEpoch = initiallyCompletedBatches;
         state->numBatchesInEpoch = totalBatchesAcrossPhases;
+        state->scheduledBatchesInEpoch = initiallyCompletedBatches;
         for (const QueuedEpochPhaseWork& work : phaseWorks) {
             QueuedPhaseProgress& progress = phaseProgress(*state, work.phase);
             progress.completedBatches = work.initialBatchNum;
@@ -2242,11 +2364,24 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                     }
                     state->cancelRequested = true;
                     state->numBatchesDoneInEpoch = state->numBatchesInEpoch;
+                    state->scheduledBatchesInEpoch = state->numBatchesInEpoch;
                 }
+                state->batchScheduled.notify_all();
                 state->batchFinished.notify_all();
                 state->batchPopped.notify_all();
             }
         });
+
+        auto waitForInitialQueueWarmup = [&]() {
+            const uint64_t initialQueueTarget = std::min<uint64_t>(state->numBatchesInEpoch, options.maxInFlightBatches);
+            std::unique_lock<std::mutex> lock(state->mutex);
+            while (state->failure == nullptr && !state->cancelRequested &&
+                   state->scheduledBatchesInEpoch < initialQueueTarget) {
+                state->batchScheduled.wait_for(lock, std::chrono::milliseconds(50));
+            }
+        };
+
+        waitForInitialQueueWarmup();
 
         auto cancelAndJoinScheduler = [&](std::exception_ptr failure) {
             {
@@ -2256,7 +2391,9 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                 }
                 state->cancelRequested = true;
                 state->numBatchesDoneInEpoch = state->numBatchesInEpoch;
+                state->scheduledBatchesInEpoch = state->numBatchesInEpoch;
             }
+            state->batchScheduled.notify_all();
             state->batchFinished.notify_all();
             state->batchPopped.notify_all();
             if (schedulingThread.joinable()) {
@@ -2326,6 +2463,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                 {
                     TrainingStatsSnapshot snapshot =
                         makeBaseSnapshot(completedBatch.phase, humanEpoch, batchSize, completedBatch.batchesInEpoch, state);
+                    snapshot.inFlightBatches = completedBatch.inFlightAfterPop;
                     snapshot.stepInEpoch = completedBatch.epochBatchNum + 1;
                     snapshot.step = (currentEpoch * completedBatch.batchesInEpoch) + snapshot.stepInEpoch;
                     snapshot.samplesProcessed = snapshot.step * batchSize;
@@ -2373,8 +2511,8 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         const bool earlyCompletionEligible = modelSelectionEnabled && humanEpoch >= firstModelSelectionEpoch &&
                                              ((humanEpoch - firstModelSelectionEpoch) % request.checkBestModelEveryEpochs == 0);
         if (earlyCompletionEligible) {
-            const std::optional<double> currentScore = request.modelSelectionScore.evaluate(
-                epochLosses.validationLoss(), epochLosses.trainLoss(), humanEpoch);
+            const TrainingModelSelectionContext currentSelectionContext = epochLosses.modelSelectionContext(humanEpoch);
+            const std::optional<double> currentScore = request.modelSelectionScore.evaluate(currentSelectionContext);
             latestModelSelectionScore = currentScore;
             trainingArtifacts.maybeSnapshotBestCandidate(*placedNetwork, humanEpoch, currentScore);
             const std::optional<double> bestScore = trainingArtifacts.getBestScore();
@@ -2391,6 +2529,8 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
 
         latestTrainingLoss = epochLosses.trainLoss();
         latestValidationLoss = epochLosses.validationLoss();
+        latestEpochSelectionContext = epochLosses.modelSelectionContext(humanEpoch);
+        latestEpochSelectionContextValid = true;
         currentEpoch += 1;
         if (earlyCompletionRequested) {
             runEarlyCompleted = true;
@@ -2408,8 +2548,16 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         // candidate tracking is enabled and the fit has reached the model-selection
         // eligibility threshold, always consider the final state for best even when
         // the final epoch does not fall on the periodic cadence.
-        const std::optional<double> finalScore = request.modelSelectionScore.evaluate(
-            latestValidationLoss, latestTrainingLoss, finalCompletedEpoch);
+        TrainingModelSelectionContext finalSelectionContext;
+        if (latestEpochSelectionContextValid) {
+            finalSelectionContext = latestEpochSelectionContext;
+            finalSelectionContext.epoch = finalCompletedEpoch;
+        } else {
+            finalSelectionContext.epoch = finalCompletedEpoch;
+            finalSelectionContext.train.loss = latestTrainingLoss;
+            finalSelectionContext.validate.loss = latestValidationLoss;
+        }
+        const std::optional<double> finalScore = request.modelSelectionScore.evaluate(finalSelectionContext);
         latestModelSelectionScore = finalScore;
         trainingArtifacts.maybeSnapshotBestCandidate(*placedNetwork, finalCompletedEpoch, finalScore);
     }
@@ -2424,7 +2572,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         selectionMetadata.completedEpoch = finalCompletedEpoch;
         selectionMetadata.completionReason = finalCompletionReason;
         selectionMetadata.checkBestModelEveryEpochs = request.checkBestModelEveryEpochs;
-        selectionMetadata.minEarlyCompletionEpochs = request.minEarlyCompletionEpochs;
+        selectionMetadata.firstModelSelectionEpoch = request.firstModelSelectionEpoch;
         trainingArtifacts.finalize(*placedNetwork, selectionMetadata);
         // fit() completion is a semantic boundary: even when no save_model_dir is
         // configured, callers may immediately reuse, inspect, save, or pass the
@@ -2442,7 +2590,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
 
     TrainingStatsSnapshot finishedStats = makeBaseSnapshot(TrainingEventPhase::UNKNOWN, currentEpoch, batchSize, 0, nullptr);
     finishedStats.metrics["completed_epoch"] = static_cast<double>(finalCompletedEpoch);
-    finishedStats.metrics["min_early_completion_epochs"] = static_cast<double>(request.minEarlyCompletionEpochs);
+    finishedStats.metrics["first_model_selection_epoch"] = static_cast<double>(request.firstModelSelectionEpoch);
     if (trainingArtifacts.getBestEpoch().has_value()) {
         finishedStats.metrics["best_epoch"] = static_cast<double>(trainingArtifacts.getBestEpoch().value());
     }

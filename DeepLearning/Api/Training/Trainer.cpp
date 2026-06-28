@@ -178,6 +178,7 @@ class ResultCapturingTrainingObserver : public TrainingObserver {
 
         uint64_t currentEpoch = 0;
         RunningMean lossMean{};
+        std::unordered_map<std::string, RunningMean> lossMeans{};
         std::unordered_map<std::string, RunningMean> metricMeans{};
 
         TrainingStatsSnapshot update(const TrainingStatsSnapshot& stats) {
@@ -185,12 +186,25 @@ class ResultCapturingTrainingObserver : public TrainingObserver {
             if (currentEpoch != stats.epoch) {
                 currentEpoch = stats.epoch;
                 lossMean = RunningMean{};
+                lossMeans.clear();
                 metricMeans.clear();
             }
 
             if (stats.loss.has_value() && std::isfinite(stats.loss.value())) {
                 lossMean.add(stats.loss.value());
                 finalStats.loss = lossMean.mean();
+            }
+
+            for (const auto& [name, value] : stats.losses) {
+                if (!std::isfinite(value)) {
+                    continue;
+                }
+                RunningMean& lossMeanByName = lossMeans[name];
+                lossMeanByName.add(value);
+                std::optional<double> mean = lossMeanByName.mean();
+                if (mean.has_value()) {
+                    finalStats.losses[name] = mean.value();
+                }
             }
 
             for (const auto& [name, value] : stats.metrics) {
@@ -369,8 +383,9 @@ class RestartAttemptObserver : public TrainingObserver {
    public:
     RestartAttemptObserver(TrainingObserver& inner,
                            std::vector<const TrainingRestartCondition*> restartConditions,
-                           uint64_t attemptNumber)
-        : inner(inner), attemptNumber(attemptNumber) {
+                           uint64_t attemptNumber,
+                           uint64_t phaseInitialCompletedEpochs)
+        : inner(inner), attemptNumber(attemptNumber), phaseInitialCompletedEpochs(phaseInitialCompletedEpochs) {
         restartConditionStates.reserve(restartConditions.size());
         for (const TrainingRestartCondition* condition : restartConditions) {
             if (condition != nullptr) {
@@ -425,6 +440,7 @@ class RestartAttemptObserver : public TrainingObserver {
 
         uint64_t currentEpoch = 0;
         RunningMean lossMean{};
+        std::unordered_map<std::string, RunningMean> lossMeans{};
         std::unordered_map<std::string, RunningMean> metricMeans{};
 
         TrainingStatsSnapshot update(const TrainingStatsSnapshot& stats) {
@@ -432,12 +448,25 @@ class RestartAttemptObserver : public TrainingObserver {
             if (currentEpoch != stats.epoch) {
                 currentEpoch = stats.epoch;
                 lossMean = RunningMean{};
+                lossMeans.clear();
                 metricMeans.clear();
             }
 
             if (stats.loss.has_value() && std::isfinite(stats.loss.value())) {
                 lossMean.add(stats.loss.value());
                 finalStats.loss = lossMean.mean();
+            }
+
+            for (const auto& [name, value] : stats.losses) {
+                if (!std::isfinite(value)) {
+                    continue;
+                }
+                RunningMean& lossMeanByName = lossMeans[name];
+                lossMeanByName.add(value);
+                std::optional<double> mean = lossMeanByName.mean();
+                if (mean.has_value()) {
+                    finalStats.losses[name] = mean.value();
+                }
             }
 
             for (const auto& [name, value] : stats.metrics) {
@@ -480,7 +509,9 @@ class RestartAttemptObserver : public TrainingObserver {
 
     void maybeThrowForRestartCondition(RestartConditionAttemptState& state, const TrainingStatsSnapshot& stats) {
         const TrainingRestartCondition* restartCondition = state.condition;
-        if (restartCondition == nullptr || state.checked || stats.epoch < restartCondition->progressCheckEpochs) {
+        const std::optional<uint64_t> maybePhaseEpoch = phaseEpoch(stats.epoch);
+        if (restartCondition == nullptr || state.checked || !maybePhaseEpoch.has_value() ||
+            maybePhaseEpoch.value() < restartCondition->progressCheckEpochs) {
             return;
         }
 
@@ -511,7 +542,7 @@ class RestartAttemptObserver : public TrainingObserver {
         progress.checkLoss = checkLoss;
         progress.requiredLoss = requiredLoss;
         progress.observedProgressPercentage = observedProgressPercentage;
-        progress.checkedEpoch = stats.epoch;
+        progress.checkedEpoch = maybePhaseEpoch.value();
 
         throw TrainingRestartRequested(
             restartCondition,
@@ -519,8 +550,16 @@ class RestartAttemptObserver : public TrainingObserver {
             "training loss did not improve enough by restart progress checkpoint: " + restartAttemptProgressToString(progress));
     }
 
+    [[nodiscard]] std::optional<uint64_t> phaseEpoch(uint64_t globalEpoch) const {
+        if (globalEpoch <= phaseInitialCompletedEpochs) {
+            return std::nullopt;
+        }
+        return globalEpoch - phaseInitialCompletedEpochs;
+    }
+
     TrainingObserver& inner;
     uint64_t attemptNumber = 1;
+    uint64_t phaseInitialCompletedEpochs = 0;
     FinalEpochStatsAccumulator trainingLoss{};
     FinalEpochStatsAccumulator validationLoss{};
     FinalEpochStatsAccumulator testLoss{};
@@ -608,7 +647,7 @@ void Trainer::fitInternal(const TrainerFitOptions& options,
     request.saveModelDirectory = saveModelDirectory;
     request.saveModelOverwrite = saveModelOverwrite;
     request.checkBestModelEveryEpochs = options.checkBestModelEveryEpochs;
-    request.minEarlyCompletionEpochs = options.minEarlyCompletionEpochs;
+    request.firstModelSelectionEpoch = options.firstModelSelectionEpoch;
     request.initialCompletedEpochs = completedTrainingEpochs;
     request.modelSelectionScore = modelSelectionScore;
     request.earlyCompletionPolicies = std::move(combinedEarlyCompletionPolicies);
@@ -667,9 +706,8 @@ void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
         conditionStates.push_back(RestartConditionRunState{&condition});
     }
 
-    auto conditionIsReachableInAttempt = [&](const TrainingRestartCondition& condition, uint64_t attemptInitialCompletedEpochs) {
-        const uint64_t finalEpochAfterFit = attemptInitialCompletedEpochs + options.epochs;
-        return condition.progressCheckEpochs > attemptInitialCompletedEpochs && condition.progressCheckEpochs <= finalEpochAfterFit;
+    auto conditionIsReachableInPhaseAttempt = [&](const TrainingRestartCondition& condition) {
+        return condition.progressCheckEpochs > 0 && condition.progressCheckEpochs <= options.epochs;
     };
 
     if (combinedConditions.empty()) {
@@ -686,16 +724,36 @@ void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
         return nullptr;
     };
 
-    auto activeConditions = [&](uint64_t attemptInitialCompletedEpochs) {
+    auto activeConditions = [&]() {
         std::vector<const TrainingRestartCondition*> active;
         active.reserve(conditionStates.size());
         for (const RestartConditionRunState& state : conditionStates) {
-            if (state.condition != nullptr && conditionIsReachableInAttempt(*state.condition, attemptInitialCompletedEpochs)) {
+            if (state.condition != nullptr && conditionIsReachableInPhaseAttempt(*state.condition)) {
                 active.push_back(state.condition);
             }
         }
         return active;
     };
+
+    struct PhaseInitialArtifactRef {
+        std::optional<std::string> directory{};
+        std::optional<std::string> networkName{};
+
+        [[nodiscard]] bool hasValue() const { return directory.has_value() && networkName.has_value(); }
+    };
+
+    const PhaseInitialArtifactRef phaseInitialArtifact{lastCompletedArtifactDirectory, lastCompletedArtifactNetworkName};
+    const uint64_t phaseInitialCompletedEpochs = completedTrainingEpochs;
+
+    // When a previous fit completed to disk, that selected artifact is the immutable
+    // phase-initial model for this fit call. Release the stale GPU-resident handoff
+    // placement before any retry attempts; each attempt reloads from the same
+    // phase-initial artifact.  When there is no artifact, preserve the current
+    // in-memory phase-initial placement if one exists.  In the first phase there is
+    // no phase-initial state, so every retry places a freshly initialized model.
+    if (phaseInitialArtifact.hasValue()) {
+        releasePlacedNetworkAfterLastFit();
+    }
 
     const uint32_t nonFiniteLossMaxRestarts = std::max_element(
         combinedConditions.begin(),
@@ -708,7 +766,17 @@ void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
         cancellationToken.throwIfCancellationRequested();
         Trainer attemptTrainer = *this;
         attemptTrainer.runtimeConfig.scalarTensorsToReport.insert("loss");
-        RestartAttemptObserver attemptObserver(observer, activeConditions(attemptTrainer.completedTrainingEpochs), attempt);
+        attemptTrainer.completedTrainingEpochs = phaseInitialCompletedEpochs;
+        if (phaseInitialArtifact.hasValue()) {
+            attemptTrainer.lastCompletedArtifactDirectory = phaseInitialArtifact.directory;
+            attemptTrainer.lastCompletedArtifactNetworkName = phaseInitialArtifact.networkName;
+            attemptTrainer.placedNetworkAfterLastFit.reset();
+        } else if (phaseInitialCompletedEpochs == 0 && placedNetworkAfterLastFit == nullptr) {
+            attemptTrainer.lastCompletedArtifactDirectory.reset();
+            attemptTrainer.lastCompletedArtifactNetworkName.reset();
+            attemptTrainer.placedNetworkAfterLastFit.reset();
+        }
+        RestartAttemptObserver attemptObserver(observer, activeConditions(), attempt, phaseInitialCompletedEpochs);
         try {
             attemptTrainer.fitInternal(options, attemptObserver, cancellationToken, additionalEarlyCompletionPolicies, additionalScalarTensorsToReport);
             placedNetworkAfterLastFit = attemptTrainer.placedNetworkAfterLastFit;
@@ -732,12 +800,12 @@ void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
                 // CUDA context before discarding the attempt and placing a fresh one.
                 synchronizeAllCudaDevicesForTrainingBoundary();
                 // A restart means the current model attempt is discarded. The next
-                // attempt must behave like a new model instance: no previously trained
-                // PlacedNetwork state is copied in, and epoch/progress accounting starts
-                // over from 0 for all restart checks, best-candidate selection, and
-                // early-completion policies.
-                placedNetworkAfterLastFit.reset();
-                completedTrainingEpochs = 0;
+                // attempt starts again from the phase-initial state captured before
+                // this fit call: a freshly initialized model for phase 1, the selected
+                // completed artifact from the previous phase when one exists, or the
+                // preserved in-memory handoff placement for non-artifact repeated fits.
+                // Restart progress checks are phase-local; cumulative completed epochs
+                // remain anchored at the phase boundary until an attempt succeeds.
                 continue;
             }
 
@@ -753,12 +821,12 @@ void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
                 // CUDA context before discarding the attempt and placing a fresh one.
                 synchronizeAllCudaDevicesForTrainingBoundary();
                 // A restart means the current model attempt is discarded. The next
-                // attempt must behave like a new model instance: no previously trained
-                // PlacedNetwork state is copied in, and epoch/progress accounting starts
-                // over from 0 for all restart checks, best-candidate selection, and
-                // early-completion policies.
-                placedNetworkAfterLastFit.reset();
-                completedTrainingEpochs = 0;
+                // attempt starts again from the phase-initial state captured before
+                // this fit call: a freshly initialized model for phase 1, the selected
+                // completed artifact from the previous phase when one exists, or the
+                // preserved in-memory handoff placement for non-artifact repeated fits.
+                // Restart progress checks are phase-local; cumulative completed epochs
+                // remain anchored at the phase boundary until an attempt succeeds.
                 continue;
             }
 

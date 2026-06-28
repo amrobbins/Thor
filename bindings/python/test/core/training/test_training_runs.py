@@ -156,7 +156,7 @@ def _fit_runs_and_capture_text(
     epochs: int,
     test_loader=None,
     check_best_model_every_epochs=0,
-    min_early_completion_epochs=0,
+    first_model_selection_epoch=0,
     restart_conditions=None,
     early_completion_rules=None,
     reports=None,
@@ -172,7 +172,7 @@ def _fit_runs_and_capture_text(
                 epochs=epochs,
                 test_loader=test_loader,
                 check_best_model_every_epochs=check_best_model_every_epochs,
-                min_early_completion_epochs=min_early_completion_epochs,
+                first_model_selection_epoch=first_model_selection_epoch,
                 restart_conditions=restart_conditions,
                 early_completion_rules=early_completion_rules,
                 reports=reports,
@@ -1225,7 +1225,7 @@ def _make_tiny_regression_trainer(
     optimizer_obj=None,
     save_model_dir=None,
     save_model_overwrite=False,
-    min_early_completion_epochs=0,
+    first_model_selection_epoch=0,
     model_selection_score=None,
     restart_conditions=None,
     early_completion_policies=None,
@@ -1657,18 +1657,18 @@ def test_training_runs_fit_rejects_existing_save_model_dir_before_training(tmp_p
         runs.fit(epochs=1)
 
 
-def test_trainer_binding_accepts_min_early_completion_epochs_and_fit_options_cadence():
+def test_trainer_binding_accepts_first_model_selection_epoch_and_fit_options_cadence():
     trainer = _make_tiny_regression_trainer("training_runs_best_candidate_cadence")
     options = thor.training.TrainerFitOptions()
     options.epochs = 3
     options.check_best_model_every_epochs = 2
-    options.min_early_completion_epochs = 7
+    options.first_model_selection_epoch = 7
 
     assert trainer is not None
     assert trainer.completed_training_epochs == 0
     assert options.epochs == 3
     assert options.check_best_model_every_epochs == 2
-    assert options.min_early_completion_epochs == 7
+    assert options.first_model_selection_epoch == 7
 
 
 def test_trainer_fit_options_accepts_zero_best_model_candidate_cadence_as_disabled():
@@ -2093,13 +2093,21 @@ def test_native_queue_keeps_train_to_validate_transition_in_flight(capfd, tmp_pa
     plain_text = _ANSI_RE.sub("", captured_text)
     # The stats reporter emits one aggregate epoch line rather than separate
     # phase-prefixed lines.  With one train batch and one validate batch, the
-    # old per-phase queue drained the train batch before validate submission,
-    # so the aggregate line could not still have a queued batch in flight after
-    # both train and validate losses were available.
+    # old per-phase queue drained the train batch before validate submission.
+    # Seeing one in-flight batch on the train-loss line proves the validation
+    # batch was already queued at the train-to-validate boundary.  The later
+    # validate-loss line may have no in-flight work left because the epoch has
+    # only two total batches.
     assert re.search(
         r"INFO runs\[fold_0\|tiny_ensemble\]:.*"
         r"epoch=\s*1/1\s+batch=\s*1/1\s+step=\s*1\s+"
-        r"train_loss=[^\n]*validate_loss=[^\n]*in_flight=\s*1\b",
+        r"train_loss=[^\n]*in_flight=\s*1\b",
+        plain_text,
+    ), plain_text
+    assert re.search(
+        r"INFO runs\[fold_0\|tiny_ensemble\]:.*"
+        r"epoch=\s*1/1\s+batch=\s*1/1\s+step=\s*1\s+"
+        r"train_loss=[^\n]*validate_loss=",
         plain_text,
     ), plain_text
 
@@ -3973,8 +3981,50 @@ def test_trainer_fit_returns_result_and_persists_selection_metadata(tmp_path):
     assert metadata["completed_epoch"] == 2
     assert metadata["completion_reason"] == "early_completed"
     assert metadata["check_best_model_every_epochs"] == 1
-    assert metadata["min_early_completion_epochs"] == 0
+    assert metadata["first_model_selection_epoch"] == 0
 
+
+
+
+@pytest.mark.cuda
+@pytest.mark.training_integration
+@pytest.mark.skipif(
+    not RUN_TRAINING_INTEGRATION,
+    reason=integration_skip_reason(
+        "THOR_RUN_TRAINING_INTEGRATION",
+        description="opt-in TrainingRuns CUDA integration tests",
+    ),
+)
+def test_trainer_model_selection_score_receives_named_loss_context(tmp_path):
+    contexts = []
+
+    def score(context):
+        contexts.append(context)
+        validate_losses = context["validate"]["losses"]
+        assert "mse_loss" in validate_losses
+        assert "mae_loss" in validate_losses
+        assert context["validation_loss"] is not None
+        assert context["validate"]["loss"] == context["validation_loss"]
+        return validate_losses["mse_loss"] + 0.05 * validate_losses["mae_loss"]
+
+    trainer = thor.training.Trainer(
+        _build_two_loss_regressor("trainer_model_selection_named_loss_context"),
+        _regression_one_batch_loader(),
+        optimizer=thor.optimizers.Sgd(initial_learning_rate=1.0e-12, momentum=0.0),
+        stats_interval_s=0.0,
+        max_in_flight_batches=2,
+        scalar_tensors_to_report=[],
+        stats_color="never",
+        save_model_dir=tmp_path / "named_loss_context",
+        save_model_overwrite=True,
+        model_selection_score=score,
+    )
+
+    result = trainer.fit(1, check_best_model_every_epochs=1)
+
+    assert result.best_score is not None
+    assert contexts
+    assert contexts[-1]["epoch"] == 1
 
 @pytest.mark.cuda
 @pytest.mark.training_integration
@@ -4047,10 +4097,10 @@ def test_trainer_model_selection_score_none_skips_candidate_for_epoch(tmp_path):
         description="opt-in TrainingRuns CUDA integration tests",
     ),
 )
-def test_trainer_min_early_completion_epochs_can_complete_without_candidate_or_saved_model(tmp_path):
-    save_dir = tmp_path / "min_early_completion_no_candidate"
+def test_trainer_first_model_selection_epoch_can_complete_without_candidate_or_saved_model(tmp_path):
+    save_dir = tmp_path / "first_model_selection_no_candidate"
     trainer = _make_tiny_regression_trainer(
-        "trainer_min_early_completion_no_candidate",
+        "trainer_first_model_selection_no_candidate",
         save_model_dir=save_dir,
         save_model_overwrite=True,
         model_selection_score=lambda validation_loss,
@@ -4058,7 +4108,7 @@ def test_trainer_min_early_completion_epochs_can_complete_without_candidate_or_s
         epoch: float(epoch),
     )
 
-    result = trainer.fit(2, check_best_model_every_epochs=1, min_early_completion_epochs=5)
+    result = trainer.fit(2, check_best_model_every_epochs=1, first_model_selection_epoch=5)
 
     assert result.status == "completed"
     assert result.result == "completed"
@@ -4086,7 +4136,7 @@ def test_trainer_min_early_completion_epochs_can_complete_without_candidate_or_s
     trainer.save_model(final_dir)
     assert final_dir.exists()
     prediction = _prediction_from_saved_tiny_regressor(
-        final_dir, "trainer_min_early_completion_no_candidate", artifact="direct")
+        final_dir, "trainer_first_model_selection_no_candidate", artifact="direct")
     assert not np.allclose(prediction, 0.0, atol=1e-7)
 
 
@@ -4099,12 +4149,12 @@ def test_trainer_min_early_completion_epochs_can_complete_without_candidate_or_s
         description="opt-in TrainingRuns CUDA integration tests",
     ),
 )
-def test_trainer_min_early_completion_epochs_uses_cumulative_epoch_across_fit_calls(tmp_path):
-    save_dir = tmp_path / "min_early_completion_cumulative"
+def test_trainer_first_model_selection_epoch_uses_cumulative_epoch_across_fit_calls(tmp_path):
+    save_dir = tmp_path / "first_model_selection_cumulative"
     early_policy = thor.training.EarlyCompletionPolicy(
         lambda current_score, best_score, current_epoch, best_epoch: current_epoch >= 3)
     trainer = _make_tiny_regression_trainer(
-        "trainer_min_early_completion_cumulative",
+        "trainer_first_model_selection_cumulative",
         save_model_dir=save_dir,
         save_model_overwrite=True,
         model_selection_score=lambda validation_loss,
@@ -4115,7 +4165,7 @@ def test_trainer_min_early_completion_epochs_uses_cumulative_epoch_across_fit_ca
     first_result = trainer.fit(
         2,
         check_best_model_every_epochs=1,
-        min_early_completion_epochs=3,
+        first_model_selection_epoch=3,
         early_completion_policies=[early_policy],
     )
     assert first_result.completed_epoch == 2
@@ -4133,7 +4183,7 @@ def test_trainer_min_early_completion_epochs_uses_cumulative_epoch_across_fit_ca
     second_result = trainer.fit(
         10,
         check_best_model_every_epochs=1,
-        min_early_completion_epochs=3,
+        first_model_selection_epoch=3,
         early_completion_policies=[early_policy],
     )
 
@@ -4158,7 +4208,7 @@ def test_trainer_min_early_completion_epochs_uses_cumulative_epoch_across_fit_ca
     assert metadata["completed_epoch"] == 3
     assert metadata["completion_reason"] == "early_completed"
     assert metadata["check_best_model_every_epochs"] == 1
-    assert metadata["min_early_completion_epochs"] == 3
+    assert metadata["first_model_selection_epoch"] == 3
 
 
 @pytest.mark.cuda
@@ -4170,14 +4220,14 @@ def test_trainer_min_early_completion_epochs_uses_cumulative_epoch_across_fit_ca
         description="opt-in TrainingRuns CUDA integration tests",
     ),
 )
-def test_training_runs_min_early_completion_epochs_uses_cumulative_epoch_across_fit_calls(tmp_path):
-    save_dir = tmp_path / "training_runs_min_early_completion_cumulative"
+def test_training_runs_first_model_selection_epoch_uses_cumulative_epoch_across_fit_calls(tmp_path):
+    save_dir = tmp_path / "training_runs_first_model_selection_cumulative"
     early_rule = thor.training.EarlyCompletionRule(
         lambda current_score, best_score, current_epoch, best_epoch: current_epoch >= 3,
         run_name="fold_0",
     )
     trainer = _make_tiny_regression_trainer(
-        "training_runs_min_early_completion_cumulative",
+        "training_runs_first_model_selection_cumulative",
         save_model_dir=save_dir,
         save_model_overwrite=True,
         model_selection_score=lambda validation_loss,
@@ -4189,7 +4239,7 @@ def test_training_runs_min_early_completion_epochs_uses_cumulative_epoch_across_
     first_results = runs.fit(
         epochs=2,
         check_best_model_every_epochs=1,
-        min_early_completion_epochs=3,
+        first_model_selection_epoch=3,
         early_completion_rules=[early_rule],
     )
     first_result = first_results["fold_0"]
@@ -4212,7 +4262,7 @@ def test_training_runs_min_early_completion_epochs_uses_cumulative_epoch_across_
     second_results = runs.fit(
         epochs=10,
         check_best_model_every_epochs=1,
-        min_early_completion_epochs=3,
+        first_model_selection_epoch=3,
         early_completion_rules=[early_rule],
     )
     second_result = second_results["fold_0"]
@@ -4238,7 +4288,7 @@ def test_training_runs_min_early_completion_epochs_uses_cumulative_epoch_across_
     assert metadata["completed_epoch"] == 3
     assert metadata["completion_reason"] == "early_completed"
     assert metadata["check_best_model_every_epochs"] == 1
-    assert metadata["min_early_completion_epochs"] == 3
+    assert metadata["first_model_selection_epoch"] == 3
 
 
 @pytest.mark.cuda
@@ -4250,9 +4300,9 @@ def test_training_runs_min_early_completion_epochs_uses_cumulative_epoch_across_
         description="opt-in TrainingRuns CUDA integration tests",
     ),
 )
-def test_training_runs_restart_policy_uses_cumulative_epoch_across_fit_calls():
+def test_training_runs_restart_policy_uses_phase_local_epoch_across_fit_calls():
     trainer = _make_tiny_regression_trainer(
-        "training_runs_restart_policy_cumulative_epoch",
+        "training_runs_restart_policy_phase_local_epoch",
         optimizer_obj=thor.optimizers.Sgd(initial_learning_rate=0.01, momentum=0.0),
     )
     restart_conditions = [
@@ -4273,13 +4323,24 @@ def test_training_runs_restart_policy_uses_cumulative_epoch_across_fit_calls():
     assert first_results["fold_0"].status == "completed"
     assert trainer.completed_training_epochs == 2
 
+    # Restart policy progress checkpoints are phase-local. A second fit call
+    # that trains only one epoch must not trip a progress_check_epochs=3 policy
+    # merely because the trainer has now completed three cumulative epochs.
     second_results = runs.fit(epochs=1, restart_conditions=restart_conditions)
-    second_result = second_results["fold_0"]
-    assert second_results.any_failed()
-    assert second_result.status == "failed"
-    assert second_result.exception_type == "TrainingRestartConditionExceeded"
-    assert "progress_check_epochs=3" in second_result.exception_message
-    assert trainer.completed_training_epochs == 2
+    assert second_results.all_completed()
+    assert second_results["fold_0"].status == "completed"
+    assert trainer.completed_training_epochs == 3
+
+    # The same policy still fires once the current fit/phase attempt itself
+    # reaches epoch 3. A failed attempt must leave cumulative epoch state at
+    # the phase boundary from before that attempt.
+    third_results = runs.fit(epochs=3, restart_conditions=restart_conditions)
+    third_result = third_results["fold_0"]
+    assert third_results.any_failed()
+    assert third_result.status == "failed"
+    assert third_result.exception_type == "TrainingRestartConditionExceeded"
+    assert "progress_check_epochs=3" in third_result.exception_message
+    assert trainer.completed_training_epochs == 3
 
 
 @pytest.mark.cuda

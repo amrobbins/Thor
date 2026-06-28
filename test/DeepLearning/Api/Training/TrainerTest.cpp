@@ -10,6 +10,7 @@
 #include "gtest/gtest.h"
 
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -67,7 +68,7 @@ class CapturingExecutor : public TrainingExecutor {
         lastSaveModelDirectory = request.saveModelDirectory;
         lastSaveModelOverwrite = request.saveModelOverwrite;
         lastCheckBestModelEveryEpochs = request.checkBestModelEveryEpochs;
-        lastMinEarlyCompletionEpochs = request.minEarlyCompletionEpochs;
+        lastFirstModelSelectionEpoch = request.firstModelSelectionEpoch;
         lastInitialCompletedEpochs = request.initialCompletedEpochs;
         if (request.completedTrainingEpochs != nullptr) {
             *request.completedTrainingEpochs = request.initialCompletedEpochs + request.epochs;
@@ -91,7 +92,7 @@ class CapturingExecutor : public TrainingExecutor {
     std::optional<std::string> lastSaveModelDirectory{};
     bool lastSaveModelOverwrite = false;
     uint32_t lastCheckBestModelEveryEpochs = 0;
-    uint64_t lastMinEarlyCompletionEpochs = 0;
+    uint64_t lastFirstModelSelectionEpoch = 0;
     uint64_t lastInitialCompletedEpochs = 0;
     bool lastModelSelectionScoreIsCustom = false;
     std::optional<double> lastModelSelectionScore{};
@@ -178,7 +179,7 @@ TEST(Trainer, FitPassesBestModelCandidateOptionsAsRunParameters) {
     TrainerFitOptions options;
     options.epochs = 5;
     options.checkBestModelEveryEpochs = 3;
-    options.minEarlyCompletionEpochs = 7;
+    options.firstModelSelectionEpoch = 7;
     trainer.fit(options);
 
     EXPECT_EQ(executor->calls, 1u);
@@ -186,7 +187,7 @@ TEST(Trainer, FitPassesBestModelCandidateOptionsAsRunParameters) {
     EXPECT_EQ(executor->lastSaveModelDirectory.value(), "/tmp/thor-best-candidate-options");
     EXPECT_TRUE(executor->lastSaveModelOverwrite);
     EXPECT_EQ(executor->lastCheckBestModelEveryEpochs, 3u);
-    EXPECT_EQ(executor->lastMinEarlyCompletionEpochs, 7u);
+    EXPECT_EQ(executor->lastFirstModelSelectionEpoch, 7u);
 }
 
 TEST(Trainer, FitPassesCumulativeCompletedEpochsAcrossFitCalls) {
@@ -204,7 +205,7 @@ TEST(Trainer, FitPassesCumulativeCompletedEpochsAcrossFitCalls) {
 
     TrainerFitOptions options;
     options.epochs = 2;
-    options.minEarlyCompletionEpochs = 4;
+    options.firstModelSelectionEpoch = 4;
     trainer.fit(options);
     EXPECT_EQ(executor->lastInitialCompletedEpochs, 0u);
     EXPECT_EQ(trainer.getCompletedTrainingEpochs(), 2u);
@@ -262,6 +263,29 @@ TEST(Trainer, FitPassesCustomModelSelectionScoreAsRunParameter) {
     EXPECT_TRUE(executor->lastModelSelectionScoreIsCustom);
     ASSERT_TRUE(executor->lastModelSelectionScore.has_value());
     EXPECT_EQ(executor->lastModelSelectionScore.value(), 21.0);
+}
+
+
+TEST(Trainer, ModelSelectionScoreCanUseContextNamedValidationLossesAndMetrics) {
+    TrainingModelSelectionContext context;
+    context.epoch = 11;
+    context.train.loss = 100.0;
+    context.validate.loss = 200.0;
+    context.validate.losses["daily_mse_loss"] = 3.0;
+    context.validate.losses["aggregate_mse_loss"] = 40.0;
+    context.validate.metrics["daily_pred"] = 6.0;
+    context.validate.metrics["daily_true"] = 5.5;
+
+    TrainingModelSelectionScore score(TrainingModelSelectionScore::ContextScoreFunction(
+        [](const TrainingModelSelectionContext& context) -> std::optional<double> {
+            return context.validate.losses.at("daily_mse_loss") +
+                   0.05 * context.validate.losses.at("aggregate_mse_loss") +
+                   0.1 * std::abs(context.validate.metrics.at("daily_pred") - context.validate.metrics.at("daily_true"));
+        }));
+
+    std::optional<double> selectedScore = score.evaluate(context);
+    ASSERT_TRUE(selectedScore.has_value());
+    EXPECT_DOUBLE_EQ(selectedScore.value(), 5.05);
 }
 
 TEST(Trainer, DefaultModelSelectionScoreUsesValidationLossWhenPresentOtherwiseTrainingLoss) {

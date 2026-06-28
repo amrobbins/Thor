@@ -204,8 +204,8 @@ class CoordinatedExecutor : public TrainingExecutor {
 
 class RestartProgressExecutor : public TrainingExecutor {
    public:
-    explicit RestartProgressExecutor(std::vector<std::vector<double>> attemptEpochLosses)
-        : attemptEpochLosses(std::move(attemptEpochLosses)) {}
+    explicit RestartProgressExecutor(std::vector<std::vector<double>> attemptEpochLosses, bool writeLatestArtifact = false)
+        : attemptEpochLosses(std::move(attemptEpochLosses)), writeLatestArtifact(writeLatestArtifact) {}
 
     void fit(const TrainingRunRequest& request, TrainingObserver& observer) override {
         calls += 1;
@@ -213,7 +213,8 @@ class RestartProgressExecutor : public TrainingExecutor {
         lastEarlyCompletionPolicyCount = request.earlyCompletionPolicies.size();
         lastInitialCompletedEpochs = request.initialCompletedEpochs;
         initialCompletedEpochsByCall.push_back(request.initialCompletedEpochs);
-        lastMinEarlyCompletionEpochs = request.minEarlyCompletionEpochs;
+        previousModelArtifactDirectoriesByCall.push_back(request.previousModelArtifactDirectory);
+        lastFirstModelSelectionEpoch = request.firstModelSelectionEpoch;
         if (!request.earlyCompletionPolicies.empty()) {
             lastEarlyCompletionDecision = request.earlyCompletionPolicies.front().shouldComplete(10.0, 9.0, 5, 4);
         }
@@ -235,6 +236,11 @@ class RestartProgressExecutor : public TrainingExecutor {
             observer.onTrainingEvent(TrainingEvent::statsUpdated(stats));
             finalEpoch = globalEpoch;
         }
+        if (writeLatestArtifact && request.saveModelDirectory.has_value()) {
+            std::filesystem::path root(request.saveModelDirectory.value());
+            std::filesystem::remove_all(root);
+            std::filesystem::create_directories(root / "latest");
+        }
         if (request.completedTrainingEpochs != nullptr) {
             *request.completedTrainingEpochs = finalEpoch;
         }
@@ -246,11 +252,14 @@ class RestartProgressExecutor : public TrainingExecutor {
     bool lastEarlyCompletionDecision = false;
     uint64_t lastInitialCompletedEpochs = 0;
     std::vector<uint64_t> initialCompletedEpochsByCall{};
-    uint64_t lastMinEarlyCompletionEpochs = 0;
+    std::vector<std::optional<std::string>> previousModelArtifactDirectoriesByCall{};
+    uint64_t lastFirstModelSelectionEpoch = 0;
 
    private:
     std::vector<std::vector<double>> attemptEpochLosses;
+    bool writeLatestArtifact = false;
 };
+
 
 
 std::shared_ptr<Network> makeNetworkWithOutput(const std::string& name, const std::vector<uint64_t>& dimensions) {
@@ -389,13 +398,15 @@ std::shared_ptr<Network> makeAmbiguousDailyLossNetwork(const std::string& name) 
 
 std::shared_ptr<Trainer> makeTrainer(std::shared_ptr<Network> network,
                                     std::shared_ptr<TrainingExecutor> executor,
-                                    std::optional<std::string> saveModelDirectory = std::nullopt) {
+                                    std::optional<std::string> saveModelDirectory = std::nullopt,
+                                    bool saveModelOverwrite = false) {
     return std::make_shared<Trainer>(Trainer::Builder()
                                          .network(std::move(network))
                                          .loader(std::make_shared<FakeLoader>())
                                          .executor(std::move(executor))
                                          .observer(std::make_shared<NullTrainingObserver>())
                                          .saveModelDirectory(std::move(saveModelDirectory))
+                                         .saveModelOverwrite(saveModelOverwrite)
                                          .build());
 }
 
@@ -1184,36 +1195,36 @@ TEST(TrainingRuns, RejectsInvalidFitOptionsBeforeLaunchingThreads) {
 }
 
 
-TEST(Trainer, RestartConditionResetsEpochCountAndStateBeforeRetry) {
-    auto network = std::make_shared<Network>("trainer-restart-global-epoch-reset");
+TEST(Trainer, RestartConditionUsesPhaseLocalEpochsAndKeepsCumulativeEpochBoundary) {
+    auto network = std::make_shared<Network>("trainer-restart-phase-local-epoch");
     auto executor = std::make_shared<RestartProgressExecutor>(
-        std::vector<std::vector<double>>{{100.0}, {100.0}, {100.0, 90.0}});
+        std::vector<std::vector<double>>{{100.0}, {100.0, 100.0}, {100.0, 90.0}});
     std::shared_ptr<Trainer> trainer = makeTrainer(network, executor);
-    TrainerFitOptions restartOptions;
-    restartOptions.epochs = 1;
-    restartOptions.restartConditions = {
-        TrainingRestartCondition{/*progressCheckEpochs=*/2, /*progressImprovementMinPercentage=*/5.0, /*maxRestarts=*/1}};
 
-    trainer->fit(restartOptions);
+    trainer->fit(TrainerFitOptions{1});
     EXPECT_EQ(executor->calls, 1u);
     EXPECT_EQ(executor->lastInitialCompletedEpochs, 0u);
     EXPECT_EQ(trainer->getCompletedTrainingEpochs(), 1u);
 
+    TrainerFitOptions restartOptions;
+    restartOptions.epochs = 2;
+    restartOptions.restartConditions = {
+        TrainingRestartCondition{/*progressCheckEpochs=*/2, /*progressImprovementMinPercentage=*/5.0, /*maxRestarts=*/1}};
     TrainingRunResult result = trainer->fit(restartOptions);
     EXPECT_EQ(result.status, TrainingRunStatus::COMPLETED);
     EXPECT_EQ(executor->calls, 3u);
     ASSERT_EQ(executor->initialCompletedEpochsByCall.size(), 3u);
     EXPECT_EQ(executor->initialCompletedEpochsByCall[0], 0u);
     EXPECT_EQ(executor->initialCompletedEpochsByCall[1], 1u);
-    EXPECT_EQ(executor->initialCompletedEpochsByCall[2], 0u);
-    EXPECT_EQ(trainer->getCompletedTrainingEpochs(), 1u);
+    EXPECT_EQ(executor->initialCompletedEpochsByCall[2], 1u);
+    EXPECT_EQ(trainer->getCompletedTrainingEpochs(), 3u);
 }
 
 
-TEST(TrainingRuns, RestartPolicyResetsEpochCountAndStateBeforeRetry) {
-    auto network = std::make_shared<Network>("training-runs-restart-global-epoch-reset");
+TEST(TrainingRuns, RestartPolicyUsesPhaseLocalEpochsAndKeepsCumulativeEpochBoundary) {
+    auto network = std::make_shared<Network>("training-runs-restart-phase-local-epoch");
     auto executor = std::make_shared<RestartProgressExecutor>(
-        std::vector<std::vector<double>>{{100.0}, {100.0}, {100.0, 90.0}});
+        std::vector<std::vector<double>>{{100.0}, {100.0, 100.0}, {100.0, 90.0}});
     std::shared_ptr<Trainer> trainer = makeTrainer(network, executor);
     TrainingRunsRestartPolicy condition = TrainingRunsRestartPolicy::forRun(
         "fold_0", /*progressCheckEpochs=*/2, /*progressImprovementMinPercentage=*/5.0, /*maxRestarts=*/1);
@@ -1228,18 +1239,61 @@ TEST(TrainingRuns, RestartPolicyResetsEpochCountAndStateBeforeRetry) {
     EXPECT_EQ(executor->lastInitialCompletedEpochs, 0u);
     EXPECT_EQ(trainer->getCompletedTrainingEpochs(), 1u);
 
-    TrainingRunsResult secondResult = runs.fit(TrainerFitOptions{1}, sessionOptions);
+    TrainingRunsResult secondResult = runs.fit(TrainerFitOptions{2}, sessionOptions);
     ASSERT_TRUE(secondResult.allCompleted());
     EXPECT_EQ(executor->calls, 3u);
     ASSERT_EQ(executor->initialCompletedEpochsByCall.size(), 3u);
     EXPECT_EQ(executor->initialCompletedEpochsByCall[0], 0u);
     EXPECT_EQ(executor->initialCompletedEpochsByCall[1], 1u);
-    EXPECT_EQ(executor->initialCompletedEpochsByCall[2], 0u);
-    EXPECT_EQ(trainer->getCompletedTrainingEpochs(), 1u);
+    EXPECT_EQ(executor->initialCompletedEpochsByCall[2], 1u);
+    EXPECT_EQ(trainer->getCompletedTrainingEpochs(), 3u);
 }
 
-TEST(TrainingRuns, RestartPolicyDoesNotRecheckPastCumulativeEpochOnLaterFit) {
-    auto network = std::make_shared<Network>("training-runs-restart-past-global-epoch");
+TEST(Trainer, LaterPhaseRestartAttemptsReuseSamePhaseInitialArtifact) {
+    const std::filesystem::path saveDir = std::filesystem::temp_directory_path() / "thor_phase_initial_restart_test";
+    std::filesystem::remove_all(saveDir);
+
+    auto network = std::make_shared<Network>("trainer-restart-phase-initial-artifact");
+    auto executor = std::make_shared<RestartProgressExecutor>(
+        std::vector<std::vector<double>>{{100.0, 90.0}, {100.0, 100.0}, {100.0, 90.0}},
+        /*writeLatestArtifact=*/true);
+    std::shared_ptr<Trainer> trainer = makeTrainer(
+        network, executor, saveDir.string(), /*saveModelOverwrite=*/true);
+
+    trainer->fit(TrainerFitOptions{2});
+    ASSERT_EQ(executor->calls, 1u);
+    ASSERT_FALSE(executor->previousModelArtifactDirectoriesByCall[0].has_value());
+    EXPECT_EQ(trainer->getCompletedTrainingEpochs(), 2u);
+
+    const std::filesystem::path phaseInitialArtifact = saveDir / "latest";
+    ASSERT_TRUE(std::filesystem::exists(phaseInitialArtifact));
+
+    TrainerFitOptions restartOptions;
+    restartOptions.epochs = 2;
+    restartOptions.restartConditions = {
+        TrainingRestartCondition{/*progressCheckEpochs=*/2, /*progressImprovementMinPercentage=*/5.0, /*maxRestarts=*/1}};
+
+    TrainingRunResult result = trainer->fit(restartOptions);
+    EXPECT_EQ(result.status, TrainingRunStatus::COMPLETED);
+    EXPECT_EQ(executor->calls, 3u);
+    ASSERT_EQ(executor->initialCompletedEpochsByCall.size(), 3u);
+    EXPECT_EQ(executor->initialCompletedEpochsByCall[0], 0u);
+    EXPECT_EQ(executor->initialCompletedEpochsByCall[1], 2u);
+    EXPECT_EQ(executor->initialCompletedEpochsByCall[2], 2u);
+
+    ASSERT_EQ(executor->previousModelArtifactDirectoriesByCall.size(), 3u);
+    ASSERT_FALSE(executor->previousModelArtifactDirectoriesByCall[0].has_value());
+    ASSERT_TRUE(executor->previousModelArtifactDirectoriesByCall[1].has_value());
+    ASSERT_TRUE(executor->previousModelArtifactDirectoriesByCall[2].has_value());
+    EXPECT_EQ(executor->previousModelArtifactDirectoriesByCall[1].value(), phaseInitialArtifact.string());
+    EXPECT_EQ(executor->previousModelArtifactDirectoriesByCall[2].value(), phaseInitialArtifact.string());
+    EXPECT_EQ(trainer->getCompletedTrainingEpochs(), 4u);
+
+    std::filesystem::remove_all(saveDir);
+}
+
+TEST(TrainingRuns, RestartPolicyChecksCurrentPhaseEpochOnLaterFit) {
+    auto network = std::make_shared<Network>("training-runs-restart-current-phase-epoch");
     auto executor = std::make_shared<RestartProgressExecutor>(std::vector<std::vector<double>>{{100.0, 90.0}, {100.0, 100.0}});
     std::shared_ptr<Trainer> trainer = makeTrainer(network, executor);
     TrainingRunsRestartPolicy condition = TrainingRunsRestartPolicy::forRun(
@@ -1256,10 +1310,13 @@ TEST(TrainingRuns, RestartPolicyDoesNotRecheckPastCumulativeEpochOnLaterFit) {
     EXPECT_EQ(trainer->getCompletedTrainingEpochs(), 2u);
 
     TrainingRunsResult secondResult = runs.fit(TrainerFitOptions{2}, sessionOptions);
-    EXPECT_TRUE(secondResult.allCompleted());
-    EXPECT_EQ(executor->calls, 2u);
+    ASSERT_EQ(executor->calls, 2u);
+    EXPECT_FALSE(secondResult.allCompleted());
+    ASSERT_EQ(secondResult.runs().size(), 1u);
+    EXPECT_EQ(secondResult.runs()[0].status, TrainingRunStatus::FAILED);
+    EXPECT_EQ(secondResult.runs()[0].exception.type, "TrainingRestartConditionExceeded");
     EXPECT_EQ(executor->lastInitialCompletedEpochs, 2u);
-    EXPECT_EQ(trainer->getCompletedTrainingEpochs(), 4u);
+    EXPECT_EQ(trainer->getCompletedTrainingEpochs(), 2u);
 }
 
 TEST(Trainer, RestartConditionRestartsSingleTrainerUntilProgressImproves) {

@@ -224,7 +224,7 @@ void appendPhaseLossColumns(std::string& line,
 bool shouldSuppressMetricColumnName(const std::string& name) {
     return name.empty() || name == "loss" || name == "learning_rate" || name == "learningRate" || name == "lr" ||
            name == "momentum" || name == "completed_epoch" || name == "best_epoch" || name == "best_score" ||
-           name == "min_early_completion_epochs";
+           name == "first_model_selection_epoch";
 }
 
 std::vector<std::pair<std::string, double>> orderedMetricColumns(

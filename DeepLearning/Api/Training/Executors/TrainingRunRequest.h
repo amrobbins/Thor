@@ -51,11 +51,13 @@ struct TrainingRunRequest {
     // the cadence. Lower scores are better.
     uint32_t checkBestModelEveryEpochs = 0;
 
-    // Global/cumulative epoch before best-candidate snapshotting and early-completion
-    // policy evaluation begin. Epochs count total successful training epochs for the
-    // model across Trainer.fit(...) calls, not just epochs in the current fit call.
-    // A value of 0 preserves the original cadence-only behavior.
-    uint64_t minEarlyCompletionEpochs = 0;
+    // First global/cumulative epoch at which model-selection scoring begins.
+    // Epochs count total successful training epochs for the model across
+    // Trainer.fit(...) calls. A value of 0 preserves the cadence-only behavior:
+    // the first selection happens at checkBestModelEveryEpochs. Early-completion
+    // policies are evaluated only on model-selection epochs after the candidate
+    // manager updates best_score/best_epoch.
+    uint64_t firstModelSelectionEpoch = 0;
 
     TrainingModelSelectionScore modelSelectionScore{};
 

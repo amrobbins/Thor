@@ -1930,6 +1930,57 @@ static bool cublasLtMeasuredWorkspaceTradeIsWorthIt(double preferredTimeMillisec
            cublasLtWorkspaceTradeSlowdownBudgetFraction(preferredWorkspaceBytes, candidateWorkspaceBytes, operationBytes);
 }
 
+static uint64_t cublasLtContestInstanceCount(int gpuNum, uint64_t bytesPerInstance) {
+    if (bytesPerInstance == 0) {
+        return 1;
+    }
+
+    cudaDeviceProp deviceProperties;
+    CUDA_CHECK(cudaGetDeviceProperties(&deviceProperties, gpuNum));
+    const uint64_t l2CacheBytes = static_cast<uint64_t>(std::max(deviceProperties.l2CacheSize, 0));
+    const uint64_t totalGpuMemBytes = static_cast<uint64_t>(MachineEvaluator::instance().getTotalGlobalMemBytes(gpuNum));
+
+    // Keep enough distinct matrix instances that the contest does not just
+    // measure each candidate on the previous candidate's hot L2 footprint.  The
+    // total contest pool is intentionally capped so algorithm selection remains
+    // cheap and bounded even for very small GEMMs.
+    constexpr uint64_t MIN_INSTANCES = 2;
+    constexpr uint64_t MAX_INSTANCES = 5000;
+    const uint64_t targetBytes = std::max(bytesPerInstance * 10, l2CacheBytes * 3);
+    const uint64_t memoryBudgetBytes = std::max(bytesPerInstance, totalGpuMemBytes / 3);
+    const uint64_t boundedTargetBytes = std::min(targetBytes, memoryBudgetBytes);
+    return std::max<uint64_t>(1, std::min(MAX_INSTANCES, std::max(MIN_INSTANCES, boundedTargetBytes / bytesPerInstance)));
+}
+
+static uint64_t cublasLtContestWorkspaceInstanceCount(int gpuNum, uint64_t bytesPerWorkspace) {
+    if (bytesPerWorkspace == 0) {
+        return 1;
+    }
+
+    cudaDeviceProp deviceProperties;
+    CUDA_CHECK(cudaGetDeviceProperties(&deviceProperties, gpuNum));
+    const uint64_t l2CacheBytes = static_cast<uint64_t>(std::max(deviceProperties.l2CacheSize, 0));
+    const uint64_t totalGpuMemBytes = static_cast<uint64_t>(MachineEvaluator::instance().getTotalGlobalMemBytes(gpuNum));
+
+    constexpr uint64_t MAX_INSTANCES = 5000;
+    const uint64_t targetBytes = std::max(bytesPerWorkspace * 10, l2CacheBytes * 3);
+    const uint64_t memoryBudgetBytes = std::max(bytesPerWorkspace, totalGpuMemBytes / 5);
+    const uint64_t boundedTargetBytes = std::min(targetBytes, memoryBudgetBytes);
+    return std::max<uint64_t>(1, std::min(MAX_INSTANCES, boundedTargetBytes / bytesPerWorkspace));
+}
+
+static size_t rotatedContestIndex(size_t size, int run, size_t position) {
+    THOR_THROW_IF_FALSE(size > 0);
+    return (position + static_cast<size_t>(run % static_cast<int>(size))) % size;
+}
+
+static void touchContestTensors(std::vector<Tensor> &tensors, Stream stream) {
+    for (Tensor &tensor : tensors) {
+        tensor.memsetAsync(stream, 0);
+    }
+}
+
+
 static CublasKernel selectMeasuredKernelWithWorkspacePolicy(std::vector<CublasKernel> kernels,
                                                             int gpuNum,
                                                             uint64_t operationBytes,
@@ -1984,6 +2035,15 @@ struct LtMeasuredMatmulAlgorithm {
     RunStats runStats;
     bool errorFlag = false;
     float wavesCount = 0.0f;
+};
+
+struct LtMatmulContestInstance {
+    const void *ltA = nullptr;
+    const void *ltB = nullptr;
+    const void *ltC = nullptr;
+    void *ltD = nullptr;
+    void *bias = nullptr;
+    void *aux = nullptr;
 };
 
 static bool ltMeasuredMatmulExecutionTimeComparison(LtMeasuredMatmulAlgorithm &lhs, LtMeasuredMatmulAlgorithm &rhs) {
@@ -2099,29 +2159,45 @@ static std::vector<LtMeasuredMatmulAlgorithm> cublasLtGetVerifiedHeuristicContes
 static cublasStatus_t runLtMatmulContestant(int gpuNum,
                                             cublasLtMatmulDesc_t operationDesc,
                                             const void *alpha,
-                                            const void *ltA,
+                                            const LtMatmulContestInstance &contestInstance,
                                             cublasLtMatrixLayout_t ADesc,
-                                            const void *ltB,
                                             cublasLtMatrixLayout_t BDesc,
                                             const void *beta,
-                                            const void *ltC,
                                             cublasLtMatrixLayout_t CDesc,
-                                            void *ltD,
                                             cublasLtMatrixLayout_t DDesc,
                                             LtMeasuredMatmulAlgorithm &candidate,
                                             void *workspacePtr,
-                                            Stream stream) {
+                                            Stream stream,
+                                            bool setBiasPointer,
+                                            bool setAuxPointer) {
+    if (setBiasPointer) {
+        void *biasPtr = contestInstance.bias;
+        const cublasStatus_t status =
+            cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &biasPtr, sizeof(biasPtr));
+        if (status != CUBLAS_STATUS_SUCCESS) {
+            return status;
+        }
+    }
+    if (setAuxPointer) {
+        const void *auxPtr = contestInstance.aux;
+        const cublasStatus_t status =
+            cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_EPILOGUE_AUX_POINTER, &auxPtr, sizeof(auxPtr));
+        if (status != CUBLAS_STATUS_SUCCESS) {
+            return status;
+        }
+    }
+
     return cublasLtMatmul(compileTimeCublasLtHandle(gpuNum),
                           operationDesc,
                           alpha,
-                          ltA,
+                          contestInstance.ltA,
                           ADesc,
-                          ltB,
+                          contestInstance.ltB,
                           BDesc,
                           beta,
-                          ltC,
+                          contestInstance.ltC,
                           CDesc,
-                          ltD,
+                          contestInstance.ltD,
                           DDesc,
                           &candidate.selection.algorithm,
                           workspacePtr,
@@ -2137,11 +2213,10 @@ static std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> cublasLtS
     cublasLtMatrixLayout_t CDesc,
     cublasLtMatrixLayout_t DDesc,
     const void *alpha,
-    const void *ltA,
-    const void *ltB,
     const void *beta,
-    const void *ltC,
-    void *ltD,
+    const std::vector<LtMatmulContestInstance> &contestInstances,
+    bool setBiasPointer,
+    bool setAuxPointer,
     uint64_t workspaceLimitBytes,
     uint64_t operationBytes,
     const std::string &context) {
@@ -2149,6 +2224,8 @@ static std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> cublasLtS
     constexpr int FINAL_RUNS = 20;
     constexpr int INITIAL_CANDIDATE_COUNT = 100;
     constexpr int FALLBACK_CANDIDATE_COUNT = 10000;
+
+    THOR_THROW_IF_FALSE(!contestInstances.empty());
 
     std::vector<LtMeasuredMatmulAlgorithm> candidates = cublasLtGetVerifiedHeuristicContestants(
         gpuNum, operationDesc, ADesc, BDesc, CDesc, DDesc, workspaceLimitBytes, INITIAL_CANDIDATE_COUNT);
@@ -2165,15 +2242,41 @@ static std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> cublasLtS
         contestWorkspaceBytes = std::max(contestWorkspaceBytes, candidate.selection.workspace_size_in_bytes);
     }
 
-    std::optional<Tensor> contestWorkspace;
+    const uint64_t contestWorkspaceInstanceCount = cublasLtContestWorkspaceInstanceCount(gpuNum, contestWorkspaceBytes);
+    std::vector<Tensor> contestWorkspaces;
+    contestWorkspaces.reserve(contestWorkspaceInstanceCount);
     if (contestWorkspaceBytes > 0) {
-        contestWorkspace =
-            Tensor(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum), TensorDescriptor(DataType::UINT8, {contestWorkspaceBytes}));
+        for (uint64_t i = 0; i < contestWorkspaceInstanceCount; ++i) {
+            contestWorkspaces.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
+                                           TensorDescriptor(DataType::UINT8, {contestWorkspaceBytes}));
+        }
     }
-    void *workspacePtr = contestWorkspaceBytes > 0 ? contestWorkspace.value().getMemPtr() : nullptr;
 
     Stream stream(gpuNum);
+    touchContestTensors(contestWorkspaces, stream);
     stream.synchronize();
+
+    size_t contestInstanceIndex = 0;
+    size_t contestWorkspaceIndex = 0;
+    auto nextContestInstance = [&]() -> const LtMatmulContestInstance & {
+        const LtMatmulContestInstance &instance = contestInstances[contestInstanceIndex];
+        contestInstanceIndex += 1;
+        if (contestInstanceIndex >= contestInstances.size()) {
+            contestInstanceIndex = 0;
+        }
+        return instance;
+    };
+    auto nextWorkspacePointer = [&]() -> void * {
+        if (contestWorkspaceBytes == 0) {
+            return nullptr;
+        }
+        void *workspacePtr = contestWorkspaces[contestWorkspaceIndex].getMemPtr();
+        contestWorkspaceIndex += 1;
+        if (contestWorkspaceIndex >= contestWorkspaces.size()) {
+            contestWorkspaceIndex = 0;
+        }
+        return workspacePtr;
+    };
 
     // First prove each checked algorithm actually launches with the contest
     // tensors and workspace.  cuBLASLt heuristic/check metadata is necessary
@@ -2181,8 +2284,20 @@ static std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> cublasLtS
     std::vector<LtMeasuredMatmulAlgorithm> runnable;
     runnable.reserve(candidates.size());
     for (LtMeasuredMatmulAlgorithm &candidate : candidates) {
-        const cublasStatus_t status = runLtMatmulContestant(
-            gpuNum, operationDesc, alpha, ltA, ADesc, ltB, BDesc, beta, ltC, CDesc, ltD, DDesc, candidate, workspacePtr, stream);
+        const cublasStatus_t status = runLtMatmulContestant(gpuNum,
+                                                            operationDesc,
+                                                            alpha,
+                                                            nextContestInstance(),
+                                                            ADesc,
+                                                            BDesc,
+                                                            beta,
+                                                            CDesc,
+                                                            DDesc,
+                                                            candidate,
+                                                            nextWorkspacePointer(),
+                                                            stream,
+                                                            setBiasPointer,
+                                                            setAuxPointer);
         if (status == CUBLAS_STATUS_SUCCESS) {
             stream.synchronize();
             runnable.push_back(candidate);
@@ -2201,23 +2316,26 @@ static std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> cublasLtS
     }
 
     for (int run = 0; run < INITIAL_RUNS; ++run) {
-        for (size_t candidateIndex = 0; candidateIndex < candidates.size(); ++candidateIndex) {
+        for (size_t position = 0; position < candidates.size(); ++position) {
+            const size_t candidateIndex = rotatedContestIndex(candidates.size(), run, position);
             startEvents[candidateIndex].push_back(stream.putEvent(true));
-            const cublasStatus_t status = runLtMatmulContestant(gpuNum,
-                                                                operationDesc,
-                                                                alpha,
-                                                                ltA,
-                                                                ADesc,
-                                                                ltB,
-                                                                BDesc,
-                                                                beta,
-                                                                ltC,
-                                                                CDesc,
-                                                                ltD,
-                                                                DDesc,
-                                                                candidates[candidateIndex],
-                                                                workspacePtr,
-                                                                stream);
+            cublasStatus_t status = CUBLAS_STATUS_SUCCESS;
+            if (!candidates[candidateIndex].errorFlag) {
+                status = runLtMatmulContestant(gpuNum,
+                                               operationDesc,
+                                               alpha,
+                                               nextContestInstance(),
+                                               ADesc,
+                                               BDesc,
+                                               beta,
+                                               CDesc,
+                                               DDesc,
+                                               candidates[candidateIndex],
+                                               nextWorkspacePointer(),
+                                               stream,
+                                               setBiasPointer,
+                                               setAuxPointer);
+            }
             stopEvents[candidateIndex].push_back(stream.putEvent(true));
             if (status != CUBLAS_STATUS_SUCCESS) {
                 candidates[candidateIndex].errorFlag = true;
@@ -2250,23 +2368,26 @@ static std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> cublasLtS
     stopEvents.resize(candidates.size());
 
     for (int run = 0; run < FINAL_RUNS; ++run) {
-        for (size_t candidateIndex = 0; candidateIndex < candidates.size(); ++candidateIndex) {
+        for (size_t position = 0; position < candidates.size(); ++position) {
+            const size_t candidateIndex = rotatedContestIndex(candidates.size(), run, position);
             startEvents[candidateIndex].push_back(stream.putEvent(true));
-            const cublasStatus_t status = runLtMatmulContestant(gpuNum,
-                                                                operationDesc,
-                                                                alpha,
-                                                                ltA,
-                                                                ADesc,
-                                                                ltB,
-                                                                BDesc,
-                                                                beta,
-                                                                ltC,
-                                                                CDesc,
-                                                                ltD,
-                                                                DDesc,
-                                                                candidates[candidateIndex],
-                                                                workspacePtr,
-                                                                stream);
+            cublasStatus_t status = CUBLAS_STATUS_SUCCESS;
+            if (!candidates[candidateIndex].errorFlag) {
+                status = runLtMatmulContestant(gpuNum,
+                                               operationDesc,
+                                               alpha,
+                                               nextContestInstance(),
+                                               ADesc,
+                                               BDesc,
+                                               beta,
+                                               CDesc,
+                                               DDesc,
+                                               candidates[candidateIndex],
+                                               nextWorkspacePointer(),
+                                               stream,
+                                               setBiasPointer,
+                                               setAuxPointer);
+            }
             stopEvents[candidateIndex].push_back(stream.putEvent(true));
             if (status != CUBLAS_STATUS_SUCCESS) {
                 candidates[candidateIndex].errorFlag = true;
@@ -2374,22 +2495,43 @@ std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> CublasMatrixMult
     const int32_t D_cols = transposeB ? B_rows : B_cols;
     const cudaDataType_t cDescType = hasAddend && !addendIsBiasVector ? operationType.CDataType : operationType.DDataType;
 
-    Tensor contestA(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
-                    TensorDescriptor(dataTypes.A, {static_cast<uint64_t>(A_rows), static_cast<uint64_t>(ld_A)}));
-    Tensor contestB(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
-                    TensorDescriptor(dataTypes.B, {static_cast<uint64_t>(B_rows), static_cast<uint64_t>(ld_B)}));
-    Tensor contestD(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
-                    TensorDescriptor(dataTypes.D, {static_cast<uint64_t>(D_rows), static_cast<uint64_t>(ld_D)}));
-    std::optional<Tensor> contestAddend;
+    const uint64_t operationBytes =
+        cublasLtForwardEpilogueOperationBytes(operationType, A_rows, A_cols, B_rows, B_cols, D_rows, D_cols, hasAddend, addendIsBiasVector);
+    const uint64_t contestInstanceCount = cublasLtContestInstanceCount(gpuNum, operationBytes);
+
+    std::vector<Tensor> contestA;
+    std::vector<Tensor> contestB;
+    std::vector<Tensor> contestD;
+    std::vector<Tensor> contestAddend;
+    contestA.reserve(contestInstanceCount);
+    contestB.reserve(contestInstanceCount);
+    contestD.reserve(contestInstanceCount);
     if (hasAddend) {
-        if (addendIsBiasVector) {
-            contestAddend = Tensor(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
-                                   TensorDescriptor(dataTypes.D, {static_cast<uint64_t>(D_cols)}));
-        } else {
-            contestAddend = Tensor(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
-                                   TensorDescriptor(dataTypes.C, {static_cast<uint64_t>(D_rows), static_cast<uint64_t>(ld_C)}));
+        contestAddend.reserve(contestInstanceCount);
+    }
+    for (uint64_t i = 0; i < contestInstanceCount; ++i) {
+        contestA.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
+                              TensorDescriptor(dataTypes.A, {static_cast<uint64_t>(A_rows), static_cast<uint64_t>(ld_A)}));
+        contestB.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
+                              TensorDescriptor(dataTypes.B, {static_cast<uint64_t>(B_rows), static_cast<uint64_t>(ld_B)}));
+        contestD.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
+                              TensorDescriptor(dataTypes.D, {static_cast<uint64_t>(D_rows), static_cast<uint64_t>(ld_D)}));
+        if (hasAddend) {
+            if (addendIsBiasVector) {
+                contestAddend.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
+                                           TensorDescriptor(dataTypes.D, {static_cast<uint64_t>(D_cols)}));
+            } else {
+                contestAddend.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
+                                           TensorDescriptor(dataTypes.C, {static_cast<uint64_t>(D_rows), static_cast<uint64_t>(ld_C)}));
+            }
         }
     }
+    Stream contestInitStream(gpuNum);
+    touchContestTensors(contestA, contestInitStream);
+    touchContestTensors(contestB, contestInitStream);
+    touchContestTensors(contestD, contestInitStream);
+    touchContestTensors(contestAddend, contestInitStream);
+    contestInitStream.synchronize();
 
     cublasLtMatmulDesc_t operationDesc;
     cublasLtMatrixLayout_t ADesc;
@@ -2401,18 +2543,24 @@ std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> CublasMatrixMult
     const cublasLtEpilogue_t cublasEpilogue = toCublasLtEpilogue(epilogue, addendIsBiasVector);
     CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_EPILOGUE, &cublasEpilogue, sizeof(cublasEpilogue)));
     if (addendIsBiasVector) {
-        void *biasPtr = contestAddend.value().getMemPtr();
+        void *biasPtr = contestAddend[0].getMemPtr();
         CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &biasPtr, sizeof(biasPtr)));
     }
     createColumnMajorPublicRowMajorEpilogueLayouts(
         &ADesc, &BDesc, &CDesc, &DDesc, operationType, A_rows, A_cols, B_rows, B_cols, D_rows, D_cols, ld_A, ld_B, ld_C, ld_D, cDescType);
 
-    const uint64_t operationBytes =
-        cublasLtForwardEpilogueOperationBytes(operationType, A_rows, A_cols, B_rows, B_cols, D_rows, D_cols, hasAddend, addendIsBiasVector);
-    const void *ltA = contestB.getMemPtr();
-    const void *ltB = contestA.getMemPtr();
-    const void *ltC = (hasAddend && !addendIsBiasVector) ? contestAddend.value().getMemPtr() : contestD.getMemPtr();
-    void *ltD = contestD.getMemPtr();
+    std::vector<LtMatmulContestInstance> contestInstances;
+    contestInstances.reserve(contestInstanceCount);
+    for (uint64_t i = 0; i < contestInstanceCount; ++i) {
+        LtMatmulContestInstance instance;
+        instance.ltA = contestB[i].getMemPtr();
+        instance.ltB = contestA[i].getMemPtr();
+        instance.ltC = (hasAddend && !addendIsBiasVector) ? contestAddend[i].getMemPtr() : contestD[i].getMemPtr();
+        instance.ltD = contestD[i].getMemPtr();
+        instance.bias = addendIsBiasVector ? contestAddend[i].getMemPtr() : nullptr;
+        contestInstances.push_back(instance);
+    }
+
     const float alphaOne = 1.0f;
     const float betaZero = 0.0f;
     const float betaOne = 1.0f;
@@ -2424,11 +2572,10 @@ std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> CublasMatrixMult
                                                             CDesc,
                                                             DDesc,
                                                             &alphaOne,
-                                                            ltA,
-                                                            ltB,
                                                             effectiveBeta,
-                                                            ltC,
-                                                            ltD,
+                                                            contestInstances,
+                                                            addendIsBiasVector,
+                                                            false,
                                                             maxWorkspaceSizeInBytes.value_or(cublasLtEpilogueWorkspacePolicyLimitBytes(gpuNum)),
                                                             operationBytes,
                                                             "CublasMatrixMultiply::selectGemmWithEpilogueAlgorithm");
@@ -2524,25 +2671,55 @@ std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> CublasMatrixMult
     const int32_t D_cols = transposeB ? B_rows : B_cols;
     const cudaDataType_t cDescType = hasAddend ? operationType.CDataType : operationType.DDataType;
 
-    Tensor contestA(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
-                    TensorDescriptor(dataTypes.A, {static_cast<uint64_t>(A_rows), static_cast<uint64_t>(ld_A)}));
-    Tensor contestB(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
-                    TensorDescriptor(dataTypes.B, {static_cast<uint64_t>(B_rows), static_cast<uint64_t>(ld_B)}));
-    Tensor contestD(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
-                    TensorDescriptor(dataTypes.D, {static_cast<uint64_t>(D_rows), static_cast<uint64_t>(ld_D)}));
-    const DataType epilogueAuxDataType = epilogue == BackwardEpilogueFusion::DGelu ? dataTypes.D : DataType::UINT8;
-    Tensor contestEpilogueAux(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
-                              TensorDescriptor(epilogueAuxDataType, {static_cast<uint64_t>(D_rows), static_cast<uint64_t>(epilogueAuxLd)}));
-    std::optional<Tensor> contestAddend;
+    const uint64_t operationBytes = cublasLtBackwardEpilogueOperationBytes(
+        operationType, A_rows, A_cols, B_rows, B_cols, D_rows, D_cols, epilogueAuxLd, hasAddend, hasBiasGradient);
+    const uint64_t contestInstanceCount = cublasLtContestInstanceCount(gpuNum, operationBytes);
+
+    std::vector<Tensor> contestA;
+    std::vector<Tensor> contestB;
+    std::vector<Tensor> contestD;
+    std::vector<Tensor> contestEpilogueAux;
+    std::vector<Tensor> contestAddend;
+    std::vector<Tensor> contestBiasGradient;
+    contestA.reserve(contestInstanceCount);
+    contestB.reserve(contestInstanceCount);
+    contestD.reserve(contestInstanceCount);
+    contestEpilogueAux.reserve(contestInstanceCount);
     if (hasAddend) {
-        contestAddend = Tensor(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
-                               TensorDescriptor(dataTypes.C, {static_cast<uint64_t>(D_rows), static_cast<uint64_t>(ld_C)}));
+        contestAddend.reserve(contestInstanceCount);
     }
-    std::optional<Tensor> contestBiasGradient;
     if (hasBiasGradient) {
-        contestBiasGradient = Tensor(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
-                                     TensorDescriptor(dataTypes.D, {static_cast<uint64_t>(D_cols)}));
+        contestBiasGradient.reserve(contestInstanceCount);
     }
+
+    const DataType epilogueAuxDataType = epilogue == BackwardEpilogueFusion::DGelu ? dataTypes.D : DataType::UINT8;
+    for (uint64_t i = 0; i < contestInstanceCount; ++i) {
+        contestA.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
+                              TensorDescriptor(dataTypes.A, {static_cast<uint64_t>(A_rows), static_cast<uint64_t>(ld_A)}));
+        contestB.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
+                              TensorDescriptor(dataTypes.B, {static_cast<uint64_t>(B_rows), static_cast<uint64_t>(ld_B)}));
+        contestD.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
+                              TensorDescriptor(dataTypes.D, {static_cast<uint64_t>(D_rows), static_cast<uint64_t>(ld_D)}));
+        contestEpilogueAux.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
+                                        TensorDescriptor(epilogueAuxDataType,
+                                                         {static_cast<uint64_t>(D_rows), static_cast<uint64_t>(epilogueAuxLd)}));
+        if (hasAddend) {
+            contestAddend.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
+                                       TensorDescriptor(dataTypes.C, {static_cast<uint64_t>(D_rows), static_cast<uint64_t>(ld_C)}));
+        }
+        if (hasBiasGradient) {
+            contestBiasGradient.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
+                                             TensorDescriptor(dataTypes.D, {static_cast<uint64_t>(D_cols)}));
+        }
+    }
+    Stream contestInitStream(gpuNum);
+    touchContestTensors(contestA, contestInitStream);
+    touchContestTensors(contestB, contestInitStream);
+    touchContestTensors(contestD, contestInitStream);
+    touchContestTensors(contestEpilogueAux, contestInitStream);
+    touchContestTensors(contestAddend, contestInitStream);
+    touchContestTensors(contestBiasGradient, contestInitStream);
+    contestInitStream.synchronize();
 
     cublasLtMatmulDesc_t operationDesc;
     cublasLtMatrixLayout_t ADesc;
@@ -2553,23 +2730,30 @@ std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> CublasMatrixMult
     CHECK_CUBLAS(cublasLtMatmulDescCreate(&operationDesc, operationType.computeDataType, operationType.scaleDataType));
     const cublasLtEpilogue_t cublasEpilogue = toCublasLtBackwardEpilogue(epilogue, hasBiasGradient);
     CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_EPILOGUE, &cublasEpilogue, sizeof(cublasEpilogue)));
-    const void *auxPtr = contestEpilogueAux.getMemPtr();
+    const void *auxPtr = contestEpilogueAux[0].getMemPtr();
     CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_EPILOGUE_AUX_POINTER, &auxPtr, sizeof(auxPtr)));
     CHECK_CUBLAS(
         cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_EPILOGUE_AUX_LD, &epilogueAuxLd, sizeof(epilogueAuxLd)));
     if (hasBiasGradient) {
-        void *biasPtr = contestBiasGradient.value().getMemPtr();
+        void *biasPtr = contestBiasGradient[0].getMemPtr();
         CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &biasPtr, sizeof(biasPtr)));
     }
     createColumnMajorPublicRowMajorEpilogueLayouts(
         &ADesc, &BDesc, &CDesc, &DDesc, operationType, A_rows, A_cols, B_rows, B_cols, D_rows, D_cols, ld_A, ld_B, ld_C, ld_D, cDescType);
 
-    const uint64_t operationBytes = cublasLtBackwardEpilogueOperationBytes(
-        operationType, A_rows, A_cols, B_rows, B_cols, D_rows, D_cols, epilogueAuxLd, hasAddend, hasBiasGradient);
-    const void *ltA = contestB.getMemPtr();
-    const void *ltB = contestA.getMemPtr();
-    const void *ltC = hasAddend ? contestAddend.value().getMemPtr() : contestD.getMemPtr();
-    void *ltD = contestD.getMemPtr();
+    std::vector<LtMatmulContestInstance> contestInstances;
+    contestInstances.reserve(contestInstanceCount);
+    for (uint64_t i = 0; i < contestInstanceCount; ++i) {
+        LtMatmulContestInstance instance;
+        instance.ltA = contestB[i].getMemPtr();
+        instance.ltB = contestA[i].getMemPtr();
+        instance.ltC = hasAddend ? contestAddend[i].getMemPtr() : contestD[i].getMemPtr();
+        instance.ltD = contestD[i].getMemPtr();
+        instance.bias = hasBiasGradient ? contestBiasGradient[i].getMemPtr() : nullptr;
+        instance.aux = contestEpilogueAux[i].getMemPtr();
+        contestInstances.push_back(instance);
+    }
+
     const float alphaOne = 1.0f;
     const float betaZero = 0.0f;
     const float betaOne = 1.0f;
@@ -2581,11 +2765,10 @@ std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> CublasMatrixMult
                                                             CDesc,
                                                             DDesc,
                                                             &alphaOne,
-                                                            ltA,
-                                                            ltB,
                                                             effectiveBeta,
-                                                            ltC,
-                                                            ltD,
+                                                            contestInstances,
+                                                            hasBiasGradient,
+                                                            true,
                                                             maxWorkspaceSizeInBytes.value_or(cublasLtEpilogueWorkspacePolicyLimitBytes(gpuNum)),
                                                             operationBytes,
                                                             "CublasMatrixMultiply::selectGemmWithBackwardEpilogueAlgorithm");
@@ -3500,6 +3683,12 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
         workspace.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
                                TensorDescriptor(DataType::UINT8, {maxWorkspaceSizeInBytes}));
     }
+    touchContestTensors(A, stream);
+    touchContestTensors(B, stream);
+    touchContestTensors(C, stream);
+    touchContestTensors(D, stream);
+    touchContestTensors(workspace, stream);
+    stream.synchronize();
 
     vector<CublasKernel> prunedKernels;
     if (kernels.size() > initialContestantCount) {
@@ -3554,6 +3743,12 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
 
     int tensorInstance = 0;
     int workspaceInstance = 0;
+    size_t warmupKernelPosition = 0;
+    auto nextWarmupKernelIndex = [&]() -> size_t {
+        const size_t kernelIndex = warmupKernelPosition % kernels.size();
+        warmupKernelPosition += 1;
+        return kernelIndex;
+    };
 
     // Warm up
     double elapsedTime = 0.0;
@@ -3561,7 +3756,7 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
     const float ONE = 1.0f;
     const float ZERO = 0.0f;
     for (int i = 0; i < 5; ++i) {
-        kernels[rand() % kernels.size()].runWithoutChecks(A[tensorInstance],
+        kernels[nextWarmupKernelIndex()].runWithoutChecks(A[tensorInstance],
                                                           B[tensorInstance],
                                                           C[tensorInstance],
                                                           D[tensorInstance],
@@ -3589,7 +3784,7 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
         Event startEvent = stream.putEvent(true);
 
         for (int i = 0; i < kernelsToExecute; ++i) {
-            kernels[rand() % kernels.size()].runWithoutChecks(A[tensorInstance],
+            kernels[nextWarmupKernelIndex()].runWithoutChecks(A[tensorInstance],
                                                               B[tensorInstance],
                                                               C[tensorInstance],
                                                               D[tensorInstance],
@@ -3614,7 +3809,7 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
     // Run all kernels 10 times and measure performance of each
     // But first put some initial work in the stream so that all timed work will be queued before running
     for (int i = 0; i < 5; ++i) {
-        kernels[rand() % kernels.size()].runWithoutChecks(A[tensorInstance],
+        kernels[nextWarmupKernelIndex()].runWithoutChecks(A[tensorInstance],
                                                           B[tensorInstance],
                                                           C[tensorInstance],
                                                           D[tensorInstance],
@@ -3640,18 +3835,22 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
     }
 
     for (int run = 0; run < initialRun; ++run) {
-        for (unsigned int kernelIndex = 0; kernelIndex < kernels.size(); ++kernelIndex) {
+        for (size_t position = 0; position < kernels.size(); ++position) {
+            const size_t kernelIndex = rotatedContestIndex(kernels.size(), run, position);
             startEvents[kernelIndex].push_back(stream.putEvent(true));
-            cublasStatus = kernels[kernelIndex].runWithoutChecks(A[tensorInstance],
-                                                                 B[tensorInstance],
-                                                                 C[tensorInstance],
-                                                                 D[tensorInstance],
-                                                                 workspace[workspaceInstance],
-                                                                 &ONE,
-                                                                 &ZERO,
-                                                                 stream,
-                                                                 CublasScalarPointerMode::Host,
-                                                                 fp8Scales);
+            cublasStatus = CUBLAS_STATUS_SUCCESS;
+            if (!kernels[kernelIndex].getErrorFlag()) {
+                cublasStatus = kernels[kernelIndex].runWithoutChecks(A[tensorInstance],
+                                                                     B[tensorInstance],
+                                                                     C[tensorInstance],
+                                                                     D[tensorInstance],
+                                                                     workspace[workspaceInstance],
+                                                                     &ONE,
+                                                                     &ZERO,
+                                                                     stream,
+                                                                     CublasScalarPointerMode::Host,
+                                                                     fp8Scales);
+            }
 
             tensorInstance += 1;
             if (tensorInstance >= numInstances)
@@ -3667,8 +3866,10 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
 
     for (int run = 0; run < initialRun; ++run) {
         for (unsigned int kernelIndex = 0; kernelIndex < kernels.size(); ++kernelIndex) {
-            kernels[kernelIndex].recordRun(
-                stopEvents[kernelIndex][run].synchronizeAndReportElapsedTimeInMilliseconds(startEvents[kernelIndex][run]));
+            if (!kernels[kernelIndex].getErrorFlag()) {
+                kernels[kernelIndex].recordRun(
+                    stopEvents[kernelIndex][run].synchronizeAndReportElapsedTimeInMilliseconds(startEvents[kernelIndex][run]));
+            }
         }
     }
 
@@ -3697,9 +3898,10 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
     for (unsigned int i = 0; i < kernels.size(); ++i)
         kernels[i].stashRunStats();
 
-    THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    cublasStatus = CUBLAS_STATUS_SUCCESS;
     for (int run = 0; run < finalRun; ++run) {
-        for (unsigned int kernelIndex = 0; kernelIndex < kernels.size(); ++kernelIndex) {
+        for (size_t position = 0; position < kernels.size(); ++position) {
+            const size_t kernelIndex = rotatedContestIndex(kernels.size(), run, position);
             startEvents[kernelIndex].push_back(stream.putEvent(true));
             cublasStatus = CUBLAS_STATUS_SUCCESS;
             if (!kernels[kernelIndex].getErrorFlag()) {
@@ -3723,25 +3925,26 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
             stopEvents[kernelIndex].push_back(stream.putEvent(true));
 
             if (cublasStatus != CUBLAS_STATUS_SUCCESS) {
-                int checkIndex = kernelIndex == 0 ? kernels.size() - 1 : kernelIndex - 1;
-                kernels[checkIndex].setErrorFlag();
+                kernels[kernelIndex].setErrorFlag();
                 printf("cublasStatus %d on kernelIndex %d run %d tensorInstance %d of %ld workspaceInstance %d of %ld workspaceSize %ld\n",
                        cublasStatus,
-                       kernelIndex,
+                       static_cast<int>(kernelIndex),
                        run,
                        tensorInstance,
                        numInstances,
                        workspaceInstance,
                        numWorkspaceInstances,
                        maxWorkspaceSizeInBytes);
-                printf("%s\n", kernels[checkIndex].toString(gpuNum).c_str());
+                printf("%s\n", kernels[kernelIndex].toString(gpuNum).c_str());
             }
         }
     }
     for (int run = 0; run < finalRun; ++run) {
         for (unsigned int kernelIndex = 0; kernelIndex < kernels.size(); ++kernelIndex) {
-            kernels[kernelIndex].recordRun(
-                stopEvents[kernelIndex][run].synchronizeAndReportElapsedTimeInMilliseconds(startEvents[kernelIndex][run]));
+            if (!kernels[kernelIndex].getErrorFlag()) {
+                kernels[kernelIndex].recordRun(
+                    stopEvents[kernelIndex][run].synchronizeAndReportElapsedTimeInMilliseconds(startEvents[kernelIndex][run]));
+            }
         }
     }
 

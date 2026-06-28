@@ -1370,6 +1370,47 @@ TrainingEarlyCompletionPolicy trainingEarlyCompletionPolicyFromCallable(nb::obje
         }};
 }
 
+nb::dict doubleMapToPythonDict(const std::unordered_map<std::string, double>& values) {
+    nb::dict out;
+    for (const auto& [name, value] : values) {
+        out[nb::str(name.c_str())] = value;
+    }
+    return out;
+}
+
+nb::dict modelSelectionPhaseStatsToPythonDict(const TrainingModelSelectionPhaseStats& stats) {
+    nb::dict out;
+    out["loss"] = optionalDouble(stats.loss);
+    out["losses"] = doubleMapToPythonDict(stats.losses);
+    out["metrics"] = doubleMapToPythonDict(stats.metrics);
+    return out;
+}
+
+nb::dict modelSelectionContextToPythonDict(const TrainingModelSelectionContext& context) {
+    nb::dict out;
+    out["epoch"] = context.epoch;
+    out["training_loss"] = optionalDouble(context.train.loss);
+    out["train_loss"] = optionalDouble(context.train.loss);
+    out["validation_loss"] = optionalDouble(context.validate.loss);
+    out["validate_loss"] = optionalDouble(context.validate.loss);
+
+    nb::dict train = modelSelectionPhaseStatsToPythonDict(context.train);
+    nb::dict validate = modelSelectionPhaseStatsToPythonDict(context.validate);
+    nb::dict test = modelSelectionPhaseStatsToPythonDict(context.test);
+    out["train"] = train;
+    out["validate"] = validate;
+    out["validation"] = validate;
+    out["test"] = test;
+    return out;
+}
+
+std::optional<double> modelSelectionScoreFromPythonResult(nb::object result) {
+    if (result.is_none()) {
+        return std::nullopt;
+    }
+    return pybind::castOrTypeError<double>(result, "model_selection_score return value", "float or None", false);
+}
+
 TrainingModelSelectionScore trainingModelSelectionScoreFromPython(nb::object modelSelectionScore) {
     if (modelSelectionScore.is_none()) {
         return TrainingModelSelectionScore{};
@@ -1385,19 +1426,32 @@ TrainingModelSelectionScore trainingModelSelectionScoreFromPython(nb::object mod
         Py_DECREF(object);
     });
 
-    return TrainingModelSelectionScore{[callback = std::move(callback)](std::optional<double> validationLoss,
-                                                                        std::optional<double> trainingLoss,
-                                                                        uint64_t epoch) -> std::optional<double> {
-        // Trainer::fit() / TrainingRuns::fit() release the GIL while native training runs.
-        // The model-selection callback can also run from a native TrainingRuns worker thread.
-        nb::gil_scoped_acquire acquire;
-        nb::object callableObject = nb::borrow<nb::object>(nb::handle(callback.get()));
-        nb::object result = callableObject(optionalDouble(validationLoss), optionalDouble(trainingLoss), epoch);
-        if (result.is_none()) {
-            return std::nullopt;
-        }
-        return pybind::castOrTypeError<double>(result, "model_selection_score return value", "float or None", false);
-    }};
+    return TrainingModelSelectionScore{TrainingModelSelectionScore::ContextScoreFunction(
+        [callback = std::move(callback)](const TrainingModelSelectionContext& context) -> std::optional<double> {
+            // Trainer::fit() / TrainingRuns::fit() release the GIL while native training runs.
+            // The model-selection callback can also run from a native TrainingRuns worker thread.
+            nb::gil_scoped_acquire acquire;
+            nb::dict contextObject = modelSelectionContextToPythonDict(context);
+
+            PyObject* resultPtr = PyObject_CallFunctionObjArgs(callback.get(), contextObject.ptr(), nullptr);
+            if (resultPtr == nullptr && PyErr_ExceptionMatches(PyExc_TypeError)) {
+                // Backwards compatibility: pre-context callbacks accepted
+                // (validation_loss, training_loss, epoch). Retry that contract
+                // when the one-argument context call raises TypeError.
+                PyErr_Clear();
+                nb::object validationLoss = optionalDouble(context.validate.loss);
+                nb::object trainingLoss = optionalDouble(context.train.loss);
+                nb::object epoch = nb::cast(context.epoch);
+                resultPtr = PyObject_CallFunctionObjArgs(
+                    callback.get(), validationLoss.ptr(), trainingLoss.ptr(), epoch.ptr(), nullptr);
+            }
+            if (resultPtr == nullptr) {
+                throw nb::python_error();
+            }
+
+            nb::object result = nb::steal<nb::object>(nb::handle(resultPtr));
+            return modelSelectionScoreFromPythonResult(std::move(result));
+        })};
 }
 
 struct TrainingEarlyCompletionPoliciesBinding {
@@ -1903,7 +1957,7 @@ calling this helper.
     trainer_fit_options.def(nb::init<>())
         .def_rw("epochs", &TrainerFitOptions::epochs)
         .def_rw("check_best_model_every_epochs", &TrainerFitOptions::checkBestModelEveryEpochs)
-        .def_rw("min_early_completion_epochs", &TrainerFitOptions::minEarlyCompletionEpochs);
+        .def_rw("first_model_selection_epoch", &TrainerFitOptions::firstModelSelectionEpoch);
 
     auto trainer = nb::class_<Trainer>(training, "Trainer", nb::dynamic_attr());
     trainer.attr("__module__") = "thor.training";
@@ -1996,13 +2050,13 @@ calling this helper.
         [](Trainer& self,
            uint32_t epochs,
            uint32_t check_best_model_every_epochs,
-           uint64_t min_early_completion_epochs,
+           uint64_t first_model_selection_epoch,
            nb::object restart_conditions,
            nb::object early_completion_policies) -> nb::object {
             TrainerFitOptions options;
             options.epochs = epochs;
             options.checkBestModelEveryEpochs = check_best_model_every_epochs;
-            options.minEarlyCompletionEpochs = min_early_completion_epochs;
+            options.firstModelSelectionEpoch = first_model_selection_epoch;
             options.restartConditions = trainingRestartPoliciesFromPython(restart_conditions, /*trainerScope=*/true);
             TrainingEarlyCompletionPoliciesBinding earlyPolicies = trainingEarlyCompletionPoliciesFromPython(early_completion_policies);
             options.earlyCompletionPolicies = std::move(earlyPolicies.policies);
@@ -2015,7 +2069,7 @@ calling this helper.
         },
         "epochs"_a,
         "check_best_model_every_epochs"_a = 0,
-        "min_early_completion_epochs"_a = 0,
+        "first_model_selection_epoch"_a = 0,
         "restart_conditions"_a.none() = nb::none(),
         "early_completion_policies"_a.none() = nb::none());
     trainer.def(
@@ -2060,6 +2114,7 @@ calling this helper.
     training_stats_snapshot.def_prop_ro("learning_rate",
                                         [](const TrainingStatsSnapshot& self) { return optionalDouble(self.learningRate); });
     training_stats_snapshot.def_prop_ro("momentum", [](const TrainingStatsSnapshot& self) { return optionalDouble(self.momentum); });
+    training_stats_snapshot.def_ro("losses", &TrainingStatsSnapshot::losses);
     training_stats_snapshot.def_ro("metrics", &TrainingStatsSnapshot::metrics);
 
     auto training_run_status = nb::enum_<TrainingRunStatus>(training, "TrainingRunStatus")
@@ -2235,7 +2290,14 @@ calling this helper.
         "ensemble_group"_a.none() = nb::none(),
         "progress_check_epochs"_a = 3,
         "progress_improvement_min_percentage"_a = 5.0,
-        "max_restarts"_a = 5);
+        "max_restarts"_a = 5,
+        nb::sig("def __init__(self, "
+                "run_name: str | None = None, "
+                "ensemble_group: str | None = None, "
+                "progress_check_epochs: int = 3, "
+                "progress_improvement_min_percentage: float = 5.0, "
+                "max_restarts: int = 5"
+                ") -> None"));
     training_restart_policy.def_prop_ro("run_name", [](const TrainingRestartPolicy& self) -> nb::object {
         if (!self.runName.has_value()) {
             return nb::none();
@@ -2274,7 +2336,10 @@ calling this helper.
             return object;
         },
         "cls"_a,
-        "completion_condition"_a);
+        "completion_condition"_a,
+        nb::sig("def __new__(cls, "
+                "completion_condition: object"
+                ") -> thor.training.TrainingEarlyCompletionPolicy"));
     training.attr("EarlyCompletionPolicy") = training.attr("TrainingEarlyCompletionPolicy");
 
     auto training_runs_early_completion_rule = nb::class_<TrainingRunsEarlyCompletionRule, TrainingEarlyCompletionPolicy>(
@@ -2296,7 +2361,12 @@ calling this helper.
         "cls"_a,
         "completion_condition"_a,
         "run_name"_a.none() = nb::none(),
-        "ensemble_group"_a.none() = nb::none());
+        "ensemble_group"_a.none() = nb::none(),
+        nb::sig("def __new__(cls, "
+                "completion_condition: object, "
+                "run_name: str | None = None, "
+                "ensemble_group: str | None = None"
+                ") -> thor.training.TrainingRunsEarlyCompletionRule"));
     training_runs_early_completion_rule.def_prop_ro("run_name", [](const TrainingRunsEarlyCompletionRule& self) -> nb::object {
         if (!self.runName.has_value()) {
             return nb::none();
@@ -2406,7 +2476,7 @@ calling this helper.
            uint32_t epochs,
            std::shared_ptr<Loader> test_loader,
            uint32_t check_best_model_every_epochs,
-           uint64_t min_early_completion_epochs,
+           uint64_t first_model_selection_epoch,
            nb::object restart_conditions,
            nb::object early_completion_rules,
            nb::object reports,
@@ -2414,7 +2484,7 @@ calling this helper.
             TrainerFitOptions options;
             options.epochs = epochs;
             options.checkBestModelEveryEpochs = check_best_model_every_epochs;
-            options.minEarlyCompletionEpochs = min_early_completion_epochs;
+            options.firstModelSelectionEpoch = first_model_selection_epoch;
             TrainingRunsSessionOptions sessionOptions;
             sessionOptions.restartConditions = trainingRestartPoliciesFromPython(restart_conditions, /*trainerScope=*/false);
             TrainingRunsEarlyCompletionRulesBinding earlyRules = trainingRunsEarlyCompletionRulesFromPython(early_completion_rules);
@@ -2428,7 +2498,7 @@ calling this helper.
         "epochs"_a,
         "test_loader"_a.none() = nb::none(),
         "check_best_model_every_epochs"_a = 0,
-        "min_early_completion_epochs"_a = 0,
+        "first_model_selection_epoch"_a = 0,
         "restart_conditions"_a.none() = nb::none(),
         "early_completion_rules"_a.none() = nb::none(),
         "reports"_a.none() = nb::none(),

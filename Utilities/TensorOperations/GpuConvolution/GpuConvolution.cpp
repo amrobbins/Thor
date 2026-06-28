@@ -95,7 +95,7 @@ void GpuConvolution::chooseOptimalKernelForward(ConvolutionKernelRequirement con
                                               perfResults[i].algo,
                                               workspace.has_value() ? workspace.value().getMemPtr() : nullptr,
                                               perfResults[i].memory,
-                                              &BETA_ACCUMULATE,
+                                              &BETA_CLEAR,
                                               convolutionKernelRequirement.getDataOutputTensorDescriptor(),
                                               dataOutput.getMemPtr());
         if (cudnnStatus == CUDNN_STATUS_SUCCESS) {
@@ -203,7 +203,7 @@ void GpuConvolution::chooseOptimalKernelBackwardData(ConvolutionKernelRequiremen
                                                    perfResults[i].algo,
                                                    workspace.has_value() ? workspace.value().getMemPtr() : nullptr,
                                                    perfResults[i].memory,
-                                                   &BETA_ACCUMULATE,
+                                                   &BETA_CLEAR,
                                                    convolutionKernelRequirement.getErrorOutputTensorDescriptor(),
                                                    errorOutput.getMemPtr());
         if (cudnnStatus == CUDNN_STATUS_SUCCESS) {
@@ -285,10 +285,10 @@ void GpuConvolution::chooseOptimalKernelBackwardFilter(ConvolutionKernelRequirem
         if (perfResults[i].status != CUDNN_STATUS_SUCCESS)
             continue;
 
-        // FIXME: I'm seeing that the nondeterministic algorithms often give very wrong results, not sure why, problem with atomics?
-        // FIXME: For now I am not using them, I should check later to see if they start to work better.
-        // if (perfResults[i].determinism == 0)
-        //    continue;
+        // Thor requires deterministic convolution backward-filter selection. cuDNN reports some
+        // non-deterministic algorithms as runnable, but they can produce unstable gradients.
+        if (perfResults[i].determinism != CUDNN_DETERMINISTIC)
+            continue;
 
         uint64_t workspaceSizeInBytes = perfResults[i].memory;
         // if (workspaceSizeInBytes > maxWorkspaceSizeInBytes)
@@ -297,29 +297,37 @@ void GpuConvolution::chooseOptimalKernelBackwardFilter(ConvolutionKernelRequirem
         if (workspaceSizeInBytes > 0)
             workspace = Tensor(gpuPlacement, TensorDescriptor(DataType::UINT8, {workspaceSizeInBytes}));
 
-        // Clear any possible runtime errors
-        THOR_THROW_IF_FALSE(cudnnQueryRuntimeError(stream.getCudnnHandle(), &cudnnStatus, CUDNN_ERRQUERY_BLOCKING, nullptr) == CUDNN_STATUS_SUCCESS);
+        auto runsWithBeta = [&](const float* beta) {
+            // Clear any possible runtime errors
+            THOR_THROW_IF_FALSE(cudnnQueryRuntimeError(stream.getCudnnHandle(), &cudnnStatus, CUDNN_ERRQUERY_BLOCKING, nullptr) ==
+                                CUDNN_STATUS_SUCCESS);
 
-        cudnnStatus = cudnnConvolutionBackwardFilter(stream.getCudnnHandle(),
-                                                     &ALPHA_NO_SCALE,
-                                                     convolutionKernelRequirement.getDataInputTensorDescriptor(),
-                                                     dataInput.getMemPtr(),
-                                                     convolutionKernelRequirement.getErrorInputTensorDescriptor(),
-                                                     errorInput.getMemPtr(),
-                                                     convolutionKernelRequirement.getConvolutionDescriptor(),
-                                                     perfResults[i].algo,
-                                                     workspace.has_value() ? workspace.value().getMemPtr() : nullptr,
-                                                     perfResults[i].memory,
-                                                     &BETA_ACCUMULATE,
-                                                     convolutionKernelRequirement.getWeightsGradientFilterDescriptor(),
-                                                     weightsGradient.getMemPtr());
-        if (cudnnStatus == CUDNN_STATUS_SUCCESS) {
-            // Check for a runtime error
-            THOR_THROW_IF_FALSE(cudnnQueryRuntimeError(stream.getCudnnHandle(), &cudnnStatus, CUDNN_ERRQUERY_BLOCKING, nullptr) == CUDNN_STATUS_SUCCESS);
-            if (cudnnStatus == CUDNN_STATUS_SUCCESS) {
-                GpuConvolution::instance().optimalBackwardFilterKernels.put(convolutionKernelRequirement, perfResults[i]);
-                return;
+            cudnnStatus = cudnnConvolutionBackwardFilter(stream.getCudnnHandle(),
+                                                         &ALPHA_NO_SCALE,
+                                                         convolutionKernelRequirement.getDataInputTensorDescriptor(),
+                                                         dataInput.getMemPtr(),
+                                                         convolutionKernelRequirement.getErrorInputTensorDescriptor(),
+                                                         errorInput.getMemPtr(),
+                                                         convolutionKernelRequirement.getConvolutionDescriptor(),
+                                                         perfResults[i].algo,
+                                                         workspace.has_value() ? workspace.value().getMemPtr() : nullptr,
+                                                         perfResults[i].memory,
+                                                         beta,
+                                                         convolutionKernelRequirement.getWeightsGradientFilterDescriptor(),
+                                                         weightsGradient.getMemPtr());
+            if (cudnnStatus != CUDNN_STATUS_SUCCESS) {
+                return false;
             }
+
+            // Check for a runtime error
+            THOR_THROW_IF_FALSE(cudnnQueryRuntimeError(stream.getCudnnHandle(), &cudnnStatus, CUDNN_ERRQUERY_BLOCKING, nullptr) ==
+                                CUDNN_STATUS_SUCCESS);
+            return cudnnStatus == CUDNN_STATUS_SUCCESS;
+        };
+
+        if (runsWithBeta(&BETA_CLEAR) && runsWithBeta(&BETA_ACCUMULATE)) {
+            GpuConvolution::instance().optimalBackwardFilterKernels.put(convolutionKernelRequirement, perfResults[i]);
+            return;
         }
     }
 
