@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.22)
+cmake_minimum_required(VERSION 3.28)
 
 # ---- Options ----
 option(THOR_PYTHON_TESTS "Enable Python binding tests (pytest)" ON)

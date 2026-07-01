@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.22)
+cmake_minimum_required(VERSION 3.28)
 
 # ============================================================
 # Python and CUDA stack bootstrap
@@ -12,6 +12,38 @@ cmake_minimum_required(VERSION 3.22)
 # wheel/libnvrtc-builtins stack so installed wheels do not require host CUDA
 # headers and local source-tree testing matches wheel runtime behavior.
 option(THOR_USE_PROJECT_VENV "Use project .venv Python when present" ON)
+option(THOR_ENABLE_CPU_BACKEND "Build Thor CPU backend dependency support" ON)
+option(THOR_CPU_BACKEND_USE_SYSTEM_ONEDNN "Use a system-installed oneDNN/DNNL package instead of FetchContent" OFF)
+
+set(
+        THOR_ONEDNN_CPU_RUNTIME
+        "OMP"
+        CACHE STRING
+        "oneDNN CPU runtime for Thor's CPU backend dependency surface: OMP, TBB, THREADPOOL, SYCL, or NONE."
+)
+set_property(CACHE THOR_ONEDNN_CPU_RUNTIME PROPERTY STRINGS OMP TBB THREADPOOL SYCL NONE)
+
+set(
+        THOR_ONEDNN_GPU_RUNTIME
+        "NONE"
+        CACHE STRING
+        "oneDNN GPU runtime for Thor's CPU backend dependency surface: NONE, OCL, or SYCL."
+)
+set_property(CACHE THOR_ONEDNN_GPU_RUNTIME PROPERTY STRINGS NONE OCL SYCL)
+
+set(
+        THOR_ONEDNN_GIT_TAG
+        "v3.12.1"
+        CACHE STRING
+        "oneDNN Git tag to fetch when THOR_ENABLE_CPU_BACKEND=ON and THOR_CPU_BACKEND_USE_SYSTEM_ONEDNN=OFF. Must match an upstream oneDNN release tag exactly."
+)
+
+set(
+        THOR_ONEDNN_ENABLE_PRIMITIVES
+        "BINARY;CONCAT;ELTWISE;INNER_PRODUCT;MATMUL;POOLING;REDUCTION;REORDER;SOFTMAX;SUM"
+        CACHE STRING
+        "Semicolon-delimited oneDNN primitive set for Thor's initial CPU backend dependency surface. Use ALL to keep every oneDNN primitive."
+)
 
 set(
         THOR_PYTHON_EXECUTABLE
@@ -745,6 +777,83 @@ thor_enable_release_cuda_device_lto(Thor)
 # OpenMP
 find_package(OpenMP REQUIRED COMPONENTS CXX)
 target_link_libraries(Thor PRIVATE OpenMP::OpenMP_CXX)
+
+# ============================================================
+# CPU backend dependency surface
+# ============================================================
+# Milestone 1 keeps CUDA as a required backend while adding the CPU dependency
+# surface needed for a limited inference-oriented backend.  oneDNN/DNNL is
+# intentionally the only new backend dependency here: it covers FullyConnected
+# via inner_product/matmul and leaves simple expression/loss kernels free to use
+# Thor-owned C++/OpenMP loops until the CPU backend grows.
+if (THOR_ENABLE_CPU_BACKEND)
+    include(FetchContent)
+
+    if (THOR_ONEDNN_CPU_RUNTIME STREQUAL "SYCL" AND NOT THOR_ONEDNN_GPU_RUNTIME STREQUAL "SYCL")
+        message(FATAL_ERROR
+                "Thor requested THOR_ONEDNN_CPU_RUNTIME=SYCL, but oneDNN requires ONEDNN_GPU_RUNTIME=SYCL with that CPU runtime. "
+                "Thor's default is THOR_ONEDNN_CPU_RUNTIME=OMP and THOR_ONEDNN_GPU_RUNTIME=NONE. "
+                "Use OMP for the CPU backend unless you intentionally want a full SYCL oneDNN build.")
+    endif ()
+
+    function(thor_resolve_onednn_target result_var)
+        set(_thor_onednn_target "")
+        foreach (_candidate IN ITEMS DNNL::dnnl dnnl::dnnl dnnl DNNL)
+            if (TARGET ${_candidate})
+                set(_thor_onednn_target ${_candidate})
+                break()
+            endif ()
+        endforeach ()
+
+        if (NOT _thor_onednn_target)
+            message(FATAL_ERROR "Thor CPU backend is enabled, but no known oneDNN/DNNL CMake target was found.")
+        endif ()
+
+        set(${result_var} ${_thor_onednn_target} PARENT_SCOPE)
+    endfunction()
+
+    if (THOR_CPU_BACKEND_USE_SYSTEM_ONEDNN)
+        find_package(DNNL CONFIG QUIET)
+        if (NOT DNNL_FOUND)
+            find_package(dnnl CONFIG REQUIRED)
+        endif ()
+        thor_resolve_onednn_target(THOR_ONEDNN_TARGET)
+        message(STATUS "Thor: CPU backend dependency = system oneDNN target ${THOR_ONEDNN_TARGET}")
+    else ()
+        set(ONEDNN_LIBRARY_TYPE STATIC CACHE STRING "" FORCE)
+        set(ONEDNN_CPU_RUNTIME ${THOR_ONEDNN_CPU_RUNTIME} CACHE STRING "" FORCE)
+        set(ONEDNN_GPU_RUNTIME ${THOR_ONEDNN_GPU_RUNTIME} CACHE STRING "" FORCE)
+        set(ONEDNN_BLAS_VENDOR NONE CACHE STRING "" FORCE)
+        set(ONEDNN_BUILD_GRAPH OFF CACHE BOOL "" FORCE)
+        set(ONEDNN_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+        set(ONEDNN_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+        set(ONEDNN_BUILD_DOC OFF CACHE BOOL "" FORCE)
+        set(ONEDNN_ENABLE_WORKLOAD INFERENCE CACHE STRING "" FORCE)
+        set(ONEDNN_ENABLE_PRIMITIVE "${THOR_ONEDNN_ENABLE_PRIMITIVES}" CACHE STRING "" FORCE)
+
+        FetchContent_Declare(
+                onednn
+                GIT_REPOSITORY https://github.com/uxlfoundation/oneDNN.git
+                GIT_TAG ${THOR_ONEDNN_GIT_TAG}
+                GIT_SHALLOW TRUE
+                SYSTEM
+                EXCLUDE_FROM_ALL
+        )
+        FetchContent_MakeAvailable(onednn)
+
+        thor_resolve_onednn_target(THOR_ONEDNN_TARGET)
+        message(STATUS "Thor: CPU backend dependency = FetchContent oneDNN ${THOR_ONEDNN_GIT_TAG} target ${THOR_ONEDNN_TARGET}")
+        message(STATUS "Thor: oneDNN CPU runtime = ${THOR_ONEDNN_CPU_RUNTIME}")
+        message(STATUS "Thor: oneDNN GPU runtime = ${THOR_ONEDNN_GPU_RUNTIME}")
+        message(STATUS "Thor: oneDNN enabled primitives = ${THOR_ONEDNN_ENABLE_PRIMITIVES}")
+    endif ()
+
+    target_link_libraries(Thor PRIVATE ${THOR_ONEDNN_TARGET})
+    target_compile_definitions(Thor PUBLIC THOR_ENABLE_CPU_BACKEND=1)
+else ()
+    target_compile_definitions(Thor PUBLIC THOR_ENABLE_CPU_BACKEND=0)
+    message(STATUS "Thor: CPU backend dependency support disabled")
+endif ()
 
 find_package(CUDAToolkit ${THOR_MIN_CUDA_TOOLKIT_VERSION} REQUIRED)
 find_package(OpenSSL REQUIRED)

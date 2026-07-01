@@ -5,7 +5,7 @@ requires = [
     "numpy>=2.3.4",
     # Stub generation imports thor.physical.numpy_dtypes during wheel builds.
     "ml_dtypes>=0.5.4",
-    "cmake>=3.22",
+    "cmake>=3.28",
     "ninja",
 ]
 build-backend = "thor_build_backend"

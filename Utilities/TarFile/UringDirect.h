@@ -106,6 +106,10 @@ class UringDirect {
 #ifdef THOR_GTEST
     static void testSetIoUringQueueInitResult(std::optional<int> responseCode) { testIoUringQueueInitResult() = responseCode; }
     static void testSetDirectOpenUnavailable(bool unavailable) { testDirectOpenUnavailable() = unavailable; }
+    static void testSetNextIoUringSubmissionByteLimit(std::optional<std::uint32_t> limitBytes) {
+        std::lock_guard<std::mutex> guard(testIoUringSubmissionByteLimitMutex());
+        testNextIoUringSubmissionByteLimit() = limitBytes;
+    }
     static void testResetCompatibilityWarning() { compatibilityWarningEmitted() = false; }
     static void testResetFallbackWorkerBlock() {
         std::lock_guard<std::mutex> guard(testFallbackWorkerBlockMutex());
@@ -314,15 +318,21 @@ class UringDirect {
         if (!sqe)
             return false;
 
-        io_uring_prep_write_fixed(sqe,
-                                  /*fd=*/0,
-                                  /*buf=*/ptr,
-                                  /*nbytes=*/lenBytes,
-                                  /*offset=*/static_cast<off_t>(fileOffsetBytes),
-                                  /*buf_index=*/bufIndex);
+        const std::uint64_t seq = nextSeq();
+        ExactIoRequest req;
+        req.op = ExactIoOp::Write;
+        req.fixedBuffer = true;
+        req.bufIndex = bufIndex;
+        req.ptr = ptr;
+        req.requestedBytes = lenBytes;
+        req.remainingBytes = lenBytes;
+        req.fileOffsetBytes = fileOffsetBytes;
 
-        sqe->flags |= IOSQE_FIXED_FILE;
-        sqe->user_data = nextSeq();
+        auto [it, inserted] = exactIoRequests_.emplace(seq, req);
+        if (!inserted) {
+            throw std::runtime_error("submitWriteFixed: duplicate exact-I/O sequence");
+        }
+        prepareExactIoSqe(sqe, seq, it->second);
         return true;
     }
 
@@ -381,15 +391,21 @@ class UringDirect {
         if (!sqe)
             return false;
 
-        // Fixed file index 0 + fixed buffer index bufIndex with offset.
-        io_uring_prep_read_fixed(sqe,
-                                 /*fd=*/0,  // fixed-file index 0
-                                 /*buf=*/ptr,
-                                 /*nbytes=*/lenBytes,
-                                 /*offset=*/static_cast<off_t>(fileOffsetBytes),
-                                 /*buf_index=*/bufIndex);
-        sqe->flags |= IOSQE_FIXED_FILE;
-        sqe->user_data = nextSeq();
+        const std::uint64_t seq = nextSeq();
+        ExactIoRequest req;
+        req.op = ExactIoOp::Read;
+        req.fixedBuffer = true;
+        req.bufIndex = bufIndex;
+        req.ptr = ptr;
+        req.requestedBytes = lenBytes;
+        req.remainingBytes = lenBytes;
+        req.fileOffsetBytes = fileOffsetBytes;
+
+        auto [it, inserted] = exactIoRequests_.emplace(seq, req);
+        if (!inserted) {
+            throw std::runtime_error("submitReadFixed: duplicate exact-I/O sequence");
+        }
+        prepareExactIoSqe(sqe, seq, it->second);
 
         return true;  // caller batches and calls submit()
     }
@@ -418,13 +434,21 @@ class UringDirect {
         if (!sqe)
             return false;
 
-        io_uring_prep_read(sqe,
-                           /*fd=*/0,
-                           /*buf=*/buf,
-                           /*nbytes=*/lenBytes,
-                           /*offset=*/static_cast<off_t>(fileOffsetBytes));
-        sqe->flags |= IOSQE_FIXED_FILE;
-        sqe->user_data = nextSeq();
+        const std::uint64_t seq = nextSeq();
+        ExactIoRequest req;
+        req.op = ExactIoOp::Read;
+        req.fixedBuffer = false;
+        req.bufIndex = 0;
+        req.ptr = buf;
+        req.requestedBytes = lenBytes;
+        req.remainingBytes = lenBytes;
+        req.fileOffsetBytes = fileOffsetBytes;
+
+        auto [it, inserted] = exactIoRequests_.emplace(seq, req);
+        if (!inserted) {
+            throw std::runtime_error("submitReadCached: duplicate exact-I/O sequence");
+        }
+        prepareExactIoSqe(sqe, seq, it->second);
 
         return true;
     }
@@ -491,7 +515,15 @@ class UringDirect {
         std::vector<Completion> out;
         out.reserve(targetCount);
         while (out.size() < targetCount) {
-            out.push_back(waitCompletionInOrder());
+            Completion completion = waitCompletionInOrder();
+            if (completion.responseCode <= 0) {
+                if (completion.responseCode < 0) {
+                    throw std::runtime_error(std::string("waitCompletionsInOrder: I/O completion failed: ") +
+                                             std::strerror(-completion.responseCode));
+                }
+                throw std::runtime_error("waitCompletionsInOrder: read/write completion made no progress");
+            }
+            out.push_back(completion);
         }
         return out;
     }
@@ -647,29 +679,32 @@ class UringDirect {
         Completion out;
         out.userData = cqe->user_data;
         out.responseCode = cqe->res;
-
         io_uring_cqe_seen(&ring_, cqe);
-        return out;
+        return normalizeIoUringCompletion(out);
     }
 
-    // Blocking: wait until at least one completion is available, then return it.
+    // Blocking: wait until a logical completion is available, then return it.
     Completion waitCompletion() {
         if (!usesIoUring()) {
             return waitFallbackCompletion();
         }
 
-        io_uring_cqe* cqe = nullptr;
-        int responseCode = io_uring_wait_cqe(&ring_, &cqe);
-        if (responseCode < 0) {
-            throw std::runtime_error(std::string("io_uring_wait_cqe failed: ") + std::strerror(-responseCode));
+        for (;;) {
+            io_uring_cqe* cqe = nullptr;
+            int responseCode = io_uring_wait_cqe(&ring_, &cqe);
+            if (responseCode < 0) {
+                throw std::runtime_error(std::string("io_uring_wait_cqe failed: ") + std::strerror(-responseCode));
+            }
+
+            Completion out;
+            out.userData = cqe->user_data;
+            out.responseCode = cqe->res;
+            io_uring_cqe_seen(&ring_, cqe);
+            std::optional<Completion> normalized = normalizeIoUringCompletion(out);
+            if (normalized.has_value()) {
+                return *normalized;
+            }
         }
-
-        Completion out;
-        out.userData = cqe->user_data;
-        out.responseCode = cqe->res;
-
-        io_uring_cqe_seen(&ring_, cqe);
-        return out;
     }
 
     // Drain up to maxCount completions (non-blocking).
@@ -706,6 +741,115 @@ class UringDirect {
     }
 
    private:
+    enum class ExactIoOp { Read, Write };
+
+    struct ExactIoRequest {
+        ExactIoOp op = ExactIoOp::Read;
+        bool fixedBuffer = false;
+        unsigned bufIndex = 0;
+        void* ptr = nullptr;
+        std::uint32_t requestedBytes = 0;
+        std::uint32_t remainingBytes = 0;
+        std::uint32_t submittedBytes = 0;
+        std::uint64_t fileOffsetBytes = 0;
+    };
+
+    void prepareExactIoSqe(io_uring_sqe* sqe, std::uint64_t seq, ExactIoRequest& req) {
+        std::uint32_t bytesToSubmit = req.remainingBytes;
+#ifdef THOR_GTEST
+        bytesToSubmit = limitNextIoUringSubmissionBytesForTest(bytesToSubmit);
+#endif
+        if (bytesToSubmit == 0 || bytesToSubmit > req.remainingBytes) {
+            throw std::runtime_error("prepareExactIoSqe: invalid exact-I/O submission byte count");
+        }
+        req.submittedBytes = bytesToSubmit;
+
+        if (req.op == ExactIoOp::Write) {
+            if (!req.fixedBuffer) {
+                throw std::runtime_error("prepareExactIoSqe: cached writes are not supported");
+            }
+            io_uring_prep_write_fixed(sqe,
+                                      /*fd=*/0,
+                                      /*buf=*/req.ptr,
+                                      /*nbytes=*/bytesToSubmit,
+                                      /*offset=*/static_cast<off_t>(req.fileOffsetBytes),
+                                      /*buf_index=*/req.bufIndex);
+        } else {
+            if (req.fixedBuffer) {
+                io_uring_prep_read_fixed(sqe,
+                                         /*fd=*/0,
+                                         /*buf=*/req.ptr,
+                                         /*nbytes=*/bytesToSubmit,
+                                         /*offset=*/static_cast<off_t>(req.fileOffsetBytes),
+                                         /*buf_index=*/req.bufIndex);
+            } else {
+                io_uring_prep_read(sqe,
+                                   /*fd=*/0,
+                                   /*buf=*/req.ptr,
+                                   /*nbytes=*/bytesToSubmit,
+                                   /*offset=*/static_cast<off_t>(req.fileOffsetBytes));
+            }
+        }
+        sqe->flags |= IOSQE_FIXED_FILE;
+        sqe->user_data = seq;
+    }
+
+    void submitExactIoContinuation(std::uint64_t seq, ExactIoRequest& req) {
+        io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
+        if (!sqe) {
+            submit();
+            sqe = io_uring_get_sqe(&ring_);
+        }
+        if (!sqe) {
+            throw std::runtime_error("UringDirect: unable to queue exact-I/O continuation after short completion");
+        }
+
+        prepareExactIoSqe(sqe, seq, req);
+        submit();
+    }
+
+    std::optional<Completion> normalizeIoUringCompletion(Completion completion) {
+        auto it = exactIoRequests_.find(completion.userData);
+        if (it == exactIoRequests_.end()) {
+            return completion;
+        }
+
+        ExactIoRequest& req = it->second;
+        if (completion.responseCode < 0) {
+            const int e = -completion.responseCode;
+            exactIoRequests_.erase(it);
+            throw std::runtime_error(std::string("UringDirect: exact io_uring request failed: ") + std::strerror(e));
+        }
+        if (completion.responseCode == 0) {
+            const std::uint32_t remaining = req.remainingBytes;
+            exactIoRequests_.erase(it);
+            throw std::runtime_error("UringDirect: io_uring made no progress with " + std::to_string(remaining) +
+                                     " bytes remaining for exact-I/O request");
+        }
+
+        const auto transferred = static_cast<std::uint32_t>(completion.responseCode);
+        if (transferred > req.submittedBytes) {
+            const std::uint32_t submitted = req.submittedBytes;
+            exactIoRequests_.erase(it);
+            throw std::runtime_error("UringDirect: io_uring completion responseCode " + std::to_string(completion.responseCode) +
+                                     " exceeds submitted exact-I/O byte count " + std::to_string(submitted));
+        }
+
+        req.ptr = static_cast<std::uint8_t*>(req.ptr) + transferred;
+        req.fileOffsetBytes += transferred;
+        req.remainingBytes -= transferred;
+
+        if (req.remainingBytes == 0) {
+            Completion out = completion;
+            out.responseCode = static_cast<int>(req.requestedBytes);
+            exactIoRequests_.erase(it);
+            return out;
+        }
+
+        submitExactIoContinuation(completion.userData, req);
+        return std::nullopt;
+    }
+
     void initializeBackend(unsigned queueDepth) {
         if (requestedBackend_ == IoBackend::PreadBuffered) {
             activeBackend_ = IoBackend::PreadBuffered;
@@ -802,8 +946,9 @@ class UringDirect {
     }
 
     void closeRegisteredFile() {
-        if (fileRegistered_ && !usesIoUring() && hasUndeliveredCompletions()) {
-            throw std::runtime_error("closeRegisteredFile: pending pread/pwrite completions must be drained before replacing the file");
+        if (fileRegistered_ && hasUndeliveredCompletions()) {
+            throw std::runtime_error(std::string("closeRegisteredFile: pending ") + activeBackendName() +
+                                     " completions must be drained before replacing the file");
         }
         if (fileRegistered_ && usesIoUring()) {
             int rc = io_uring_unregister_files(&ring_);
@@ -842,7 +987,9 @@ class UringDirect {
 
     bool usesIoUring() const { return activeBackend_ == IoBackend::UringDirect; }
     bool isAutoMode() const { return requestedBackend_ == IoBackend::Auto; }
-    bool hasUndeliveredCompletions() const { return nextIssueSeq_ != nextDeliverSeq_ || !pending_.empty() || hasFallbackCompletionsReady(); }
+    bool hasUndeliveredCompletions() const {
+        return nextIssueSeq_ != nextDeliverSeq_ || !pending_.empty() || !exactIoRequests_.empty() || hasFallbackCompletionsReady();
+    }
 
     static const char* backendName(IoBackend backend) {
         switch (backend) {
@@ -1071,7 +1218,7 @@ class UringDirect {
                 return -errno;
             }
             if (n == 0) {
-                break;
+                return -EIO;
             }
             done += static_cast<std::uint64_t>(n);
         }
@@ -1089,7 +1236,7 @@ class UringDirect {
                 return -errno;
             }
             if (n == 0) {
-                break;
+                return -EIO;
             }
             done += static_cast<std::uint64_t>(n);
         }
@@ -1100,6 +1247,29 @@ class UringDirect {
     static std::optional<int>& testIoUringQueueInitResult() {
         static std::optional<int> responseCode;
         return responseCode;
+    }
+
+    static std::mutex& testIoUringSubmissionByteLimitMutex() {
+        static std::mutex mutex;
+        return mutex;
+    }
+
+    static std::optional<std::uint32_t>& testNextIoUringSubmissionByteLimit() {
+        static std::optional<std::uint32_t> limitBytes;
+        return limitBytes;
+    }
+
+    static std::uint32_t limitNextIoUringSubmissionBytesForTest(std::uint32_t requestedBytes) {
+        std::lock_guard<std::mutex> guard(testIoUringSubmissionByteLimitMutex());
+        if (!testNextIoUringSubmissionByteLimit().has_value()) {
+            return requestedBytes;
+        }
+        const std::uint32_t limitBytes = *testNextIoUringSubmissionByteLimit();
+        if (requestedBytes <= limitBytes) {
+            return requestedBytes;
+        }
+        testNextIoUringSubmissionByteLimit().reset();
+        return limitBytes;
     }
 
     static bool& testDirectOpenUnavailable() {
@@ -1168,6 +1338,7 @@ class UringDirect {
         other.fileRegistered_ = false;
 
         pending_ = std::move(other.pending_);
+        exactIoRequests_ = std::move(other.exactIoRequests_);
         {
             std::lock_guard<std::mutex> lock(other.fallbackMutex_);
             fallbackWork_ = std::move(other.fallbackWork_);
@@ -1199,6 +1370,7 @@ class UringDirect {
     bool fileRegistered_ = false;
 
     std::unordered_map<uint64_t, Completion> pending_;
+    std::unordered_map<uint64_t, ExactIoRequest> exactIoRequests_;
 
     mutable std::mutex fallbackMutex_;
     std::condition_variable fallbackWorkCv_;
