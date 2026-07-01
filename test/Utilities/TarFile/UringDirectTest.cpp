@@ -12,6 +12,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -869,6 +870,64 @@ static void runExplicitPreadBackendAsyncFixedReadWrite(UringDirect::IoBackend ba
 
     UringDirect::testResetFallbackWorkerBlock();
     EXPECT_EQ(std::memcmp(readBuffer.getMemPtr(), writeBuffer.getMemPtr(), kBytes), 0);
+}
+
+
+TEST(UringDirect, RegisterReusableBuffersRejectsReplacementWithInFlightIo) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
+    constexpr uint32_t kAlign = 4096;
+
+    Tensor firstBuffer(cpuPlacement, TensorDescriptor(DataType::UINT8, {kAlign}), kAlign);
+    Tensor replacementBuffer(cpuPlacement, TensorDescriptor(DataType::UINT8, {kAlign}), kAlign);
+    uint8_t* p = firstBuffer.getMemPtr<uint8_t>();
+    ASSERT_NE(p, nullptr);
+    ASSERT_EQ(reinterpret_cast<uintptr_t>(p) % kAlign, 0u);
+    for (uint32_t i = 0; i < kAlign; ++i) {
+        p[i] = static_cast<uint8_t>(i & 0xFFu);
+    }
+
+    std::string filename = makeTmpPrefix("replace_buffers_with_inflight_io");
+    ScopedUnlink cleanup(filename);
+
+    UringDirect::testResetFallbackWorkerBlock();
+    UringDirect uring(/*queueDepth=*/1, UringDirect::IoBackend::PreadBuffered);
+    uring.registerReusableBuffers({firstBuffer.getMemPtr()}, {kAlign});
+    uring.registerDumpFile(filename);
+
+    UringDirect::testSetFallbackWorkerBlockEnabled(true);
+    ASSERT_TRUE(uring.submitWriteFixed(/*bufIndex=*/0,
+                                       /*fileOffsetBytes=*/0,
+                                       /*lenBytes=*/kAlign,
+                                       /*bufOffsetBytes=*/0));
+    EXPECT_EQ(uring.submit(), 1);
+    ASSERT_TRUE(UringDirect::testWaitForFallbackWorkerStartedCount(1, std::chrono::seconds(5)));
+
+    EXPECT_THROW(uring.registerReusableBuffers({replacementBuffer.getMemPtr()}, {kAlign}), std::runtime_error)
+        << "Replacing registered buffers while exact-I/O is in flight can invalidate retry state.";
+
+    UringDirect::testSetFallbackWorkerBlockEnabled(false);
+    auto completions = uring.waitCompletionsInOrder(1);
+    ASSERT_EQ(completions.size(), 1u);
+    EXPECT_EQ(completions[0].responseCode, static_cast<int>(kAlign));
+    EXPECT_EQ(uring.finishDumpedFile(false).responseCode, 0);
+    UringDirect::testResetFallbackWorkerBlock();
+}
+
+TEST(UringDirect, RejectsTransferLengthOutsideCompletionResponseRange) {
+    std::string filename = makeTmpPrefix("reject_huge_cached_read_len");
+    {
+        std::ofstream out(filename, std::ios::binary);
+        ASSERT_TRUE(out.good());
+        out.put('\0');
+    }
+    ScopedUnlink cleanup(filename);
+
+    UringDirect reader(/*queueDepth=*/1, UringDirect::IoBackend::PreadBuffered);
+    reader.registerCachedLoadFile(filename);
+    uint8_t byte = 0;
+    const auto tooLargeForCompletion = static_cast<std::uint32_t>(std::numeric_limits<int>::max()) + 1u;
+    EXPECT_THROW(reader.submitReadCached(&byte, /*fileOffsetBytes=*/0, tooLargeForCompletion), std::runtime_error)
+        << "Completion responseCode is an int, so oversized logical transfers cannot be represented safely.";
 }
 
 TEST(UringDirect, FinishDumpedFileRejectsUndrainedWriteCompletions) {
