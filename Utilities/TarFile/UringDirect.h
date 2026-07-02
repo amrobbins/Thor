@@ -106,6 +106,8 @@ class UringDirect {
 #ifdef THOR_GTEST
     static void testSetIoUringQueueInitResult(std::optional<int> responseCode) { testIoUringQueueInitResult() = responseCode; }
     static void testSetDirectOpenUnavailable(bool unavailable) { testDirectOpenUnavailable() = unavailable; }
+    static void testSetIoUringRegisterBuffersResult(std::optional<int> responseCode) { testIoUringRegisterBuffersResult() = responseCode; }
+    static bool testIsBackendAvailabilityErrno(int e) { return isBackendAvailabilityErrno(e); }
     static void testSetNextIoUringSubmissionByteLimit(std::optional<std::uint32_t> limitBytes) {
         std::lock_guard<std::mutex> guard(testIoUringSubmissionByteLimitMutex());
         testNextIoUringSubmissionByteLimit() = limitBytes;
@@ -197,7 +199,7 @@ class UringDirect {
             return;
         }
 
-        int rc = io_uring_register_buffers(&ring_, iovecs_.data(), static_cast<unsigned>(iovecs_.size()));
+        int rc = ioUringRegisterBuffersForInstance(iovecs_.data(), static_cast<unsigned>(iovecs_.size()));
         if (rc < 0) {
             int e = -rc;
             if (isAutoMode() && isBackendAvailabilityErrno(e)) {
@@ -1040,7 +1042,12 @@ class UringDirect {
     }
 
     static bool isBackendAvailabilityErrno(int e) {
-        return e == EPERM || e == EACCES || e == ENOSYS || e == EINVAL || e == EOPNOTSUPP
+        // ENOMEM from io_uring_register_buffers usually means the kernel could
+        // not pin/register the requested fixed buffers under the runtime's
+        // memlock or pinned-memory budget.  The caller's buffers may already
+        // exist, so this is an io_uring backend usability failure in auto mode,
+        // not a signal that the pread backends cannot continue.
+        return e == EPERM || e == EACCES || e == ENOSYS || e == EINVAL || e == EOPNOTSUPP || e == ENOMEM
 #ifdef ENOTSUP
                || e == ENOTSUP
 #endif
@@ -1061,6 +1068,7 @@ class UringDirect {
                   << "    io_uring_enter, and io_uring_register, or use --security-opt seccomp=unconfined when that is acceptable.\n"
                   << "  Managed cloud training environments may block io_uring through container seccomp,\n"
                   << "    kernel.io_uring_disabled, or provider security policy; those settings are often not configurable by jobs.\n"
+                  << "  Fixed-buffer registration can also fail when the runtime's memlock or pinned-memory budget is too small.\n"
                   << "  For deterministic behavior set THOR_IO_BACKEND=uring_direct, pread_direct, or pread_buffered.\n";
     }
 
@@ -1099,6 +1107,15 @@ class UringDirect {
     // initializeBackend needs to initialize this instance's ring, not a temporary.
     // Keep the test hook centralized by routing through initIoUringRing().
     int ioUringQueueInitForInstance(unsigned queueDepth) { return initIoUringRing(queueDepth); }
+
+    int ioUringRegisterBuffersForInstance(const struct iovec* iovecs, unsigned nrIovecs) {
+#ifdef THOR_GTEST
+        if (testIoUringRegisterBuffersResult().has_value()) {
+            return *testIoUringRegisterBuffersResult();
+        }
+#endif
+        return io_uring_register_buffers(&ring_, iovecs, nrIovecs);
+    }
 
     enum class FallbackOp { Read, Write };
 
@@ -1285,6 +1302,11 @@ class UringDirect {
 
 #ifdef THOR_GTEST
     static std::optional<int>& testIoUringQueueInitResult() {
+        static std::optional<int> responseCode;
+        return responseCode;
+    }
+
+    static std::optional<int>& testIoUringRegisterBuffersResult() {
         static std::optional<int> responseCode;
         return responseCode;
     }

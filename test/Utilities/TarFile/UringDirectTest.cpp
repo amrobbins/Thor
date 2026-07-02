@@ -705,6 +705,7 @@ class ScopedUringDirectCompatibilityTestHooks {
     ~ScopedUringDirectCompatibilityTestHooks() {
         UringDirect::testSetIoUringQueueInitResult(std::nullopt);
         UringDirect::testSetDirectOpenUnavailable(false);
+        UringDirect::testSetIoUringRegisterBuffersResult(std::nullopt);
         UringDirect::testResetFallbackWorkerBlock();
         UringDirect::testResetCompatibilityWarning();
     }
@@ -996,6 +997,43 @@ TEST(UringDirectCompatibility, AutoFallsBackFromUnavailableIoUringToPreadDirectA
     EXPECT_NE(warning.find("Falling back to pread_direct"), std::string::npos);
     EXPECT_NE(warning.find("Docker/dev-container workaround"), std::string::npos);
     EXPECT_NE(warning.find("Managed cloud training environments"), std::string::npos);
+}
+
+TEST(UringDirectCompatibility, CannotAllocateMemoryIsAutoFallbackAvailabilityError) {
+    EXPECT_TRUE(UringDirect::testIsBackendAvailabilityErrno(ENOMEM))
+        << "io_uring fixed-buffer registration can fail with ENOMEM when memlock/pinned-memory limits are too small; "
+           "auto mode should try the pread backends instead of aborting.";
+}
+
+TEST(UringDirectCompatibility, AutoFallsBackFromRegisterBuffersEnomemToPreadDirectAndWarns) {
+    ScopedUringDirectCompatibilityTestHooks hooks(std::nullopt, false);
+
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
+    constexpr uint32_t kAlign = 4096;
+    Tensor buffer(cpuPlacement, TensorDescriptor(DataType::UINT8, {kAlign}), kAlign);
+
+    testing::internal::CaptureStderr();
+    UringDirect uring(64, UringDirect::IoBackend::Auto);
+    std::string initWarning = testing::internal::GetCapturedStderr();
+    if (std::string(uring.activeBackendName()) != "uring_direct") {
+        GTEST_SKIP() << "io_uring unavailable in this runtime; constructor warning was: " << initWarning;
+    }
+
+    UringDirect::testResetCompatibilityWarning();
+    UringDirect::testSetIoUringRegisterBuffersResult(-ENOMEM);
+
+    testing::internal::CaptureStderr();
+    uring.registerReusableBuffers({buffer.getMemPtr()}, {kAlign});
+    std::string warning = testing::internal::GetCapturedStderr();
+
+    EXPECT_STREQ(uring.requestedBackendName(), "auto");
+    EXPECT_STREQ(uring.activeBackendName(), "pread_direct");
+    EXPECT_TRUE(uring.buffersRegistered());
+    EXPECT_EQ(uring.numRegisteredBuffers(), 1u);
+    EXPECT_NE(warning.find("io_uring_register_buffers failed"), std::string::npos);
+    EXPECT_NE(warning.find("Cannot allocate memory"), std::string::npos);
+    EXPECT_NE(warning.find("Falling back to pread_direct"), std::string::npos);
+    EXPECT_NE(warning.find("memlock or pinned-memory budget"), std::string::npos);
 }
 
 TEST(UringDirectCompatibility, AutoFallsBackFromDirectOpenFailureToBufferedPreadAndStillWrites) {
