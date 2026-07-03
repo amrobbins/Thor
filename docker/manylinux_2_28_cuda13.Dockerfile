@@ -78,6 +78,11 @@ RUN /opt/python/cp312-cp312/bin/python -m pip install -U \
       twine \
       nvidia-cudnn-frontend==1.23.0
 
+RUN printf '#include <omp.h>\nint main() { return omp_get_max_threads() < 1; }\n' > /tmp/thor_openmp_smoke.cpp \
+    && g++ -fopenmp /tmp/thor_openmp_smoke.cpp -o /tmp/thor_openmp_smoke \
+    && /tmp/thor_openmp_smoke \
+    && rm -f /tmp/thor_openmp_smoke.cpp /tmp/thor_openmp_smoke
+
 RUN dnf install -y libarchive-devel
 
 RUN dnf install -y ccache
@@ -106,10 +111,10 @@ RUN git config --global --add safe.directory /io
 #  nvidia-cuda-runtime==13.3.29 \
 #  nvidia-cuda-nvrtc==13.3.33 \
 #  nvidia-nvjitlink==13.3.33 \
-#  nvidia-cublas==13.5.1.27 \
-#  nvidia-cusparse==12.8.1.7 \
-#  nvidia-cusolver==12.2.2.18 \
-#  nvidia-cuda-cccl==13.3.3.3.1 \
+#  nvidia-cublas==13.6.0.2 \
+#  nvidia-cusparse==12.8.2.51 \
+#  nvidia-cusolver==12.2.6.9 \
+#  nvidia-cuda-cccl==13.3.3.4.1 \
 #  nvidia-cudnn-cu13==9.23.2.1 \
 #  nvidia-cudnn-frontend==1.25.0
 #export CMAKE_GENERATOR=Ninja

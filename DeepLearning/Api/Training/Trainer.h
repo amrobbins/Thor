@@ -101,6 +101,7 @@ class Trainer {
     [[nodiscard]] uint64_t getCompletedTrainingEpochs() const { return completedTrainingEpochs; }
     [[nodiscard]] double getCompletedTrainingElapsedSeconds() const { return completedTrainingElapsedSeconds; }
     [[nodiscard]] const TrainingModelSelectionScore& getModelSelectionScore() const { return modelSelectionScore; }
+    void clearModelSelectionScoreCallbackLifetimeAnchorForPythonGc() { modelSelectionScore.clearCallbackLifetimeAnchor(); }
 
    private:
     void validateFitOptions(const TrainerFitOptions& options) const;

@@ -9,6 +9,7 @@ import pytest
 
 import thor._bootstrap as bootstrap
 import thor._nvrtc_headers as nvrtc_headers
+import thor._cuda_stack as source_cuda_stack
 import thor._cuda_stack_resolved as resolved_cuda_stack
 
 _BUILD_BACKEND_ROOT = Path(__file__).resolve().parents[2] / "build_backend"
@@ -86,10 +87,13 @@ def test_dynamic_dependencies_freeze_exact_installed_cuda_stack(monkeypatch, tmp
 
 def test_resolved_runtime_dependencies_are_exact_pins():
     pins = resolved_cuda_stack.dependency_specifiers()
+    resolved_distributions = resolved_cuda_stack.CUDA_STACK.distributions
 
-    assert "nvidia-cuda-runtime==13.3.29" in pins
-    assert "nvidia-cublas==13.5.1.27" in pins
-    assert all("==" in pin and ">=" not in pin and "<" not in pin for pin in pins)
+    assert resolved_cuda_stack.CUDA_STACK.cuda_version == source_cuda_stack.CUDA_VERSION
+    assert tuple(dist.name for dist in resolved_distributions) == source_cuda_stack.resolved_distribution_names()
+    assert pins == tuple(f"{dist.name}=={dist.version}" for dist in resolved_distributions)
+    assert all(dist.version for dist in resolved_distributions)
+    assert all(">=" not in pin and "<" not in pin for pin in pins)
 
 
 def test_runtime_bootstrap_requires_exact_resolved_versions():

@@ -380,6 +380,15 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Thor does not use C++20 modules.  With newer CMake releases and GCC 14,
+# automatic C++20 module dependency scanning can inject -fmodules-ts and
+# P1689 dependency flags into ordinary non-module translation units, which is
+# fragile under the manylinux/ccache toolchain and can fail before the real
+# build starts.  Keep module scanning disabled unless Thor intentionally adopts
+# C++ modules.
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
+
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
@@ -662,6 +671,40 @@ function(thor_enable_release_cuda_device_lto target_name)
     )
 endfunction()
 
+function(thor_require_openmp_cxx)
+    if (TARGET OpenMP::OpenMP_CXX)
+        return()
+    endif ()
+
+    find_package(OpenMP QUIET COMPONENTS CXX)
+    if (OpenMP_CXX_FOUND AND TARGET OpenMP::OpenMP_CXX)
+        message(STATUS "Thor: OpenMP CXX = CMake OpenMP::OpenMP_CXX")
+        return()
+    endif ()
+
+    # The PyPI manylinux CUDA build uses GCC through ccache wrappers.  Some
+    # CMake/OpenMP combinations fail to infer OpenMP_CXX_LIB_NAMES even though
+    # the GNU compiler driver can compile and link OpenMP correctly with
+    # -fopenmp.  Do not run a second CMake probe here: the manylinux Dockerfile
+    # already performs an explicit g++ -fopenmp smoke test, and CMake's
+    # try_compile path can fail for the same introspection reasons as
+    # FindOpenMP.  For GNU, make the compiler-driver contract explicit.
+    if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        add_library(OpenMP::OpenMP_CXX INTERFACE IMPORTED)
+        set_target_properties(OpenMP::OpenMP_CXX PROPERTIES
+                INTERFACE_COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CXX>:-fopenmp>"
+                INTERFACE_LINK_OPTIONS "$<HOST_LINK:-fopenmp>"
+        )
+        message(STATUS "Thor: OpenMP CXX = explicit GNU -fopenmp")
+        return()
+    endif ()
+
+    message(FATAL_ERROR
+            "Thor requires C++ OpenMP, but CMake could not find OpenMP::OpenMP_CXX and the compiler is not GNU. "
+            "For the manylinux CUDA image, the Dockerfile validates GNU OpenMP with `g++ -fopenmp` before wheel builds run; "
+            "on AlmaLinux 8 the GNU OpenMP runtime is provided by the libgomp package.")
+endfunction()
+
 # ============================================================
 # Automatic Git versioning
 # ============================================================
@@ -775,7 +818,7 @@ thor_enable_release_no_semantic_interposition(Thor)
 thor_enable_release_cuda_device_lto(Thor)
 
 # OpenMP
-find_package(OpenMP REQUIRED COMPONENTS CXX)
+thor_require_openmp_cxx()
 target_link_libraries(Thor PRIVATE OpenMP::OpenMP_CXX)
 
 # ============================================================
@@ -1028,7 +1071,7 @@ target_link_libraries(Thor PRIVATE
 # interface; CMake rejects source-prefixed install interfaces and an installed
 # consumer should resolve its own CUDA stack.
 foreach (_thor_cuda_include_dir IN LISTS THOR_CUDA_INCLUDE_DIRS)
-    target_include_directories(Thor PUBLIC
+    target_include_directories(Thor SYSTEM PUBLIC
             $<BUILD_INTERFACE:${_thor_cuda_include_dir}>
     )
 endforeach ()
@@ -1249,7 +1292,6 @@ thor_apply_linker_settings(thor_tests)
 thor_enable_release_host_lto(thor_tests)
 thor_enable_release_no_semantic_interposition(thor_tests)
 target_link_libraries(thor_tests PRIVATE Thor GTest::gtest_main ${THOR_CUDA_LINK_LIBRARIES})
-find_package(OpenMP REQUIRED COMPONENTS CXX)
 target_link_libraries(thor_tests PRIVATE OpenMP::OpenMP_CXX)
 target_link_libraries(thor_tests PRIVATE PkgConfig::LIBURING)   # FIXME: I think I can remove this once UringDirect.cpp
 include(GoogleTest)

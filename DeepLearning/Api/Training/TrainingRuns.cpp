@@ -3583,23 +3583,14 @@ void TrainingRuns::evaluateEnsembles(std::vector<TrainingRunResult>& results,
             continue;
         }
 
-        std::optional<uint64_t> evaluationBatchSize;
+        bool hasEvaluationLoader = false;
         for (const EnsembleMemberSpecRef& sourceMember : members) {
-            if (sourceMember.spec == nullptr || sourceMember.spec->trainer == nullptr || sourceMember.spec->trainer->loader == nullptr) {
-                continue;
-            }
-            const uint64_t sourceBatchSize = sourceMember.spec->trainer->loader->getBatchSize();
-            if (!evaluationBatchSize.has_value()) {
-                evaluationBatchSize = sourceBatchSize;
-            } else if (*evaluationBatchSize != sourceBatchSize) {
-                throw std::runtime_error("TrainingRuns ensemble_group '" + groupName +
-                                         "' cannot reuse composed ensemble evaluator across validation populations with different batch_size values. "
-                                         "Expected " +
-                                         std::to_string(*evaluationBatchSize) + ", got " + std::to_string(sourceBatchSize) +
-                                         " for run '" + sourceMember.spec->runName + "'.");
+            if (sourceMember.spec != nullptr && sourceMember.spec->trainer != nullptr && sourceMember.spec->trainer->loader != nullptr) {
+                hasEvaluationLoader = true;
+                break;
             }
         }
-        if (!evaluationBatchSize.has_value()) {
+        if (!hasEvaluationLoader) {
             ensembleIt->second.ensembleTrainingLoss = std::nullopt;
             continue;
         }
@@ -3609,13 +3600,31 @@ void TrainingRuns::evaluateEnsembles(std::vector<TrainingRunResult>& results,
             continue;
         }
 
-        TrainingRunsComposedEvaluatorArtifacts composedArtifacts = loadTrainingRunsComposedEvaluatorArtifacts(
-            members,
-            *evaluationBatchSize,
-            reportOrderForGroup(groupName),
-            "TrainingRuns composed ensemble training-population evaluation for ensemble_group '" + groupName + "'");
-        retainNamedLossesAvailableInArtifacts(ensembleIt->second, composedArtifacts.losses);
-        retainNamedGraphMetricsAvailableInArtifacts(ensembleIt->second, composedArtifacts.metrics);
+        std::optional<TrainingRunsComposedEvaluatorArtifacts> composedArtifactsForCurrentBatchSize;
+        uint64_t currentComposedArtifactsBatchSize = 0;
+        bool retainedReportableArtifacts = false;
+        auto composedArtifactsForBatchSize = [&](uint64_t batchSize) -> TrainingRunsComposedEvaluatorArtifacts& {
+            if (!composedArtifactsForCurrentBatchSize.has_value() || currentComposedArtifactsBatchSize != batchSize) {
+                // A placed composed evaluator owns GPU allocations for a concrete batch shape.  Keep only
+                // the currently needed shape resident so a fold with a different validation population size
+                // releases the previous evaluator before placing the next one.
+                composedArtifactsForCurrentBatchSize.reset();
+                currentComposedArtifactsBatchSize = 0;
+                composedArtifactsForCurrentBatchSize.emplace(loadTrainingRunsComposedEvaluatorArtifacts(
+                    members,
+                    batchSize,
+                    reportOrderForGroup(groupName),
+                    "TrainingRuns composed ensemble training-population evaluation for ensemble_group '" + groupName +
+                        "' batch_size=" + std::to_string(batchSize)));
+                currentComposedArtifactsBatchSize = batchSize;
+            }
+            if (!retainedReportableArtifacts) {
+                retainNamedLossesAvailableInArtifacts(ensembleIt->second, composedArtifactsForCurrentBatchSize->losses);
+                retainNamedGraphMetricsAvailableInArtifacts(ensembleIt->second, composedArtifactsForCurrentBatchSize->metrics);
+                retainedReportableArtifacts = true;
+            }
+            return *composedArtifactsForCurrentBatchSize;
+        };
 
         std::map<std::string, std::vector<std::optional<double>>> sourcePopulationLossesByName;
         std::map<std::string, std::vector<std::optional<double>>> sourcePopulationMetricValuesByName;
@@ -3640,8 +3649,10 @@ void TrainingRuns::evaluateEnsembles(std::vector<TrainingRunResult>& results,
                 continue;
             }
 
+            TrainingRunsComposedEvaluatorArtifacts& sourceArtifacts = composedArtifactsForBatchSize(
+                sourceMember.spec->trainer->loader->getBatchSize());
             ComposedEnsembleEvaluationMetrics sourceMetrics = evaluateComposedEnsembleReportsOnLoader(
-                composedArtifacts, *sourceMember.spec->trainer->loader, ExampleType::VALIDATE);
+                sourceArtifacts, *sourceMember.spec->trainer->loader, ExampleType::VALIDATE);
             // The composed evaluator has already used ensemble member weights to
             // form predictions.  Across source validation splits, combine by
             // evaluated rows so ensemble_train_* is the validation-union report.

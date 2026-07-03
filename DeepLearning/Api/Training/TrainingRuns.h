@@ -114,6 +114,7 @@ class TrainingRuns {
     [[nodiscard]] const std::vector<TrainingRunsEarlyCompletionRule>& getEarlyCompletionRules() const { return earlyCompletionRules; }
     [[nodiscard]] const std::map<std::string, std::vector<std::string>>& getReports() const { return reports; }
     [[nodiscard]] size_t getEffectiveMaxParallelRuns() const;
+    void releaseRunsForPythonGc() { runs.clear(); }
 
    private:
     void validateRunSpecs() const;

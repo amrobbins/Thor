@@ -1963,6 +1963,33 @@ def test_training_runs_early_completion_callback_cycle_is_collectable():
     assert owner_ref() is None
 
 
+def test_training_runs_model_selection_score_callback_cycle_is_collectable():
+
+    class Owner:
+
+        def __init__(self):
+            self.bias = 0.0
+
+            def score(context):
+                return (context["validate"]["loss"] or context["train"]["loss"] or 0.0) + self.bias
+
+            trainer = _make_tiny_regression_trainer(
+                "training_runs_model_selection_score_callback_cycle_collectable",
+                model_selection_score=score,
+            )
+            self.runs = thor.training.TrainingRuns(
+                [("fold_0", trainer, "tiny_ensemble")],
+                failure_policy="continue",
+            )
+
+    owner = Owner()
+    owner_ref = weakref.ref(owner)
+    del owner
+    gc.collect()
+
+    assert owner_ref() is None
+
+
 def test_training_runs_result_status_names_are_exposed():
     assert thor.training.TrainingRunStatus.completed.name == "completed"
     assert thor.training.TrainingRunCompletionReason.early_completed.name == "early_completed"

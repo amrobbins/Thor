@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -26,15 +27,22 @@ struct TrainingModelSelectionContext {
 };
 
 struct TrainingModelSelectionScore {
+    struct CallbackLifetimeAnchor {
+        virtual ~CallbackLifetimeAnchor() = default;
+    };
+
     using ContextScoreFunction = std::function<std::optional<double>(const TrainingModelSelectionContext& context)>;
     using LegacyScoreFunction = std::function<std::optional<double>(std::optional<double> validationLoss,
                                                                    std::optional<double> trainingLoss,
                                                                    uint64_t epoch)>;
 
     ContextScoreFunction scoreFunction{};
+    std::shared_ptr<CallbackLifetimeAnchor> callbackLifetimeAnchor{};
 
     TrainingModelSelectionScore() = default;
     explicit TrainingModelSelectionScore(ContextScoreFunction scoreFunction) : scoreFunction(std::move(scoreFunction)) {}
+    TrainingModelSelectionScore(ContextScoreFunction scoreFunction, std::shared_ptr<CallbackLifetimeAnchor> callbackLifetimeAnchor)
+        : scoreFunction(std::move(scoreFunction)), callbackLifetimeAnchor(std::move(callbackLifetimeAnchor)) {}
     explicit TrainingModelSelectionScore(LegacyScoreFunction scoreFunction) {
         this->scoreFunction = [scoreFunction = std::move(scoreFunction)](const TrainingModelSelectionContext& context) {
             return scoreFunction(context.validationLoss(), context.trainingLoss(), context.epoch);
@@ -76,6 +84,10 @@ struct TrainingModelSelectionScore {
     }
 
     [[nodiscard]] bool isCustom() const { return static_cast<bool>(scoreFunction); }
+    [[nodiscard]] const std::shared_ptr<CallbackLifetimeAnchor>& getCallbackLifetimeAnchor() const {
+        return callbackLifetimeAnchor;
+    }
+    void clearCallbackLifetimeAnchor() { callbackLifetimeAnchor.reset(); }
 };
 
 }  // namespace Thor

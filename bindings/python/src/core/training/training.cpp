@@ -23,6 +23,7 @@
 
 #include "DeepLearning/Api/Loaders/Loader.h"
 #include "DeepLearning/Api/Loaders/LocalBatchLoader.h"
+#include "DeepLearning/Api/Loaders/LocalNamedBatchLoader.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
@@ -38,6 +39,8 @@
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "DeepLearning/Implementation/Tensor/TensorPlacement.h"
 #include "DeepLearning/Implementation/ThorError.h"
+#include "Utilities/Loaders/LocalNamedExampleDatasetWriter.h"
+#include "Utilities/Loaders/LocalNamedExampleLayout.h"
 #include "Utilities/Loaders/NoOpDataProcessor.h"
 #include "Utilities/Loaders/ShardedRawDatasetCreator.h"
 #include "Utilities/Random/FullPeriodRandom.h"
@@ -53,6 +56,7 @@ namespace pybind = Thor::PythonBindings;
 namespace {
 
 using Float32Array = nb::ndarray<const float, nb::numpy, nb::c_contig>;
+using MutableFloat32Array = nb::ndarray<float, nb::numpy, nb::c_contig>;
 using Float16Array = nb::ndarray<const half, nb::numpy, nb::c_contig>;
 using Int64Array = nb::ndarray<const int64_t, nb::numpy, nb::c_contig>;
 
@@ -463,6 +467,174 @@ std::optional<uint64_t> optionalUint64FromPython(nb::object value, const std::st
         return std::nullopt;
     }
     return pybind::castOrTypeError<uint64_t>(value, name, "int or None", false);
+}
+
+ExampleType exampleTypeFromPythonString(const std::string& value, const std::string& argumentName) {
+    if (value == "train" || value == "training") {
+        return ExampleType::TRAIN;
+    }
+    if (value == "validate" || value == "validation") {
+        return ExampleType::VALIDATE;
+    }
+    if (value == "test") {
+        return ExampleType::TEST;
+    }
+    throw nb::value_error((argumentName + " must be one of: 'train', 'validate', 'validation', 'test'").c_str());
+}
+
+std::vector<uint64_t> uint64ShapeFromPython(nb::handle value, const std::string& context) {
+    if (nb::isinstance<nb::str>(value)) {
+        throw nb::type_error((context + " must be an iterable of positive integers, not str").c_str());
+    }
+    std::vector<uint64_t> shape;
+    uint64_t index = 0;
+    for (nb::handle dimObject : pybind::castOrTypeError<nb::iterable>(
+             value, context, "iterable of positive integers", false)) {
+        const uint64_t dim = pybind::castOrTypeError<uint64_t>(
+            dimObject, context + "[" + std::to_string(index) + "]", "positive int", false);
+        if (dim == 0) {
+            throw nb::value_error((context + " dimensions must be positive").c_str());
+        }
+        shape.push_back(dim);
+        ++index;
+    }
+    if (shape.empty()) {
+        throw nb::value_error((context + " must contain at least one dimension").c_str());
+    }
+    return shape;
+}
+
+std::vector<std::pair<std::string, std::vector<uint64_t>>> localNamedTensorShapesFromPython(const nb::dict& tensors,
+                                                                                            const std::string& context) {
+    if (nb::len(tensors) == 0) {
+        throw nb::value_error((context + " tensors must contain at least one tensor").c_str());
+    }
+    std::vector<std::pair<std::string, std::vector<uint64_t>>> out;
+    out.reserve(nb::len(tensors));
+    for (auto item : tensors) {
+        const std::string name = tensorNameFromPythonKey(item.first, context);
+        out.emplace_back(name, uint64ShapeFromPython(item.second, context + "['" + name + "']"));
+    }
+    return out;
+}
+
+nb::list uint64VectorToPythonList(const std::vector<uint64_t>& values) {
+    nb::list out;
+    for (uint64_t value : values) {
+        out.append(nb::int_(value));
+    }
+    return out;
+}
+
+nb::dict localNamedLayoutTensorSpecsToPythonDict(const LocalNamedExampleLayout& layout) {
+    nb::dict out;
+    for (const LocalNamedExampleLayout::TensorSpec& spec : layout.tensors()) {
+        nb::dict specDict;
+        specDict["shape"] = uint64VectorToPythonList(spec.dimensions);
+        specDict["data_type"] = nb::cast(spec.dataType);
+        specDict["offset_bytes"] = spec.offsetBytes;
+        specDict["num_bytes"] = spec.numBytes;
+        out[nb::str(spec.name.c_str())] = std::move(specDict);
+    }
+    return out;
+}
+
+std::vector<std::string> localNamedLayoutTensorNames(const LocalNamedExampleLayout& layout) {
+    std::vector<std::string> names;
+    names.reserve(layout.tensors().size());
+    for (const LocalNamedExampleLayout::TensorSpec& spec : layout.tensors()) {
+        names.push_back(spec.name);
+    }
+    return names;
+}
+
+std::map<std::string, std::vector<uint64_t>> localNamedLayoutTensorShapes(const LocalNamedExampleLayout& layout) {
+    std::map<std::string, std::vector<uint64_t>> shapes;
+    for (const LocalNamedExampleLayout::TensorSpec& spec : layout.tensors()) {
+        shapes.emplace(spec.name, spec.dimensions);
+    }
+    return shapes;
+}
+
+Float32Array requireFloat32NumpyArrayNoCopy(nb::handle value, const std::string& context);
+
+std::map<std::string, LocalNamedExampleDatasetWriter::TensorView> localNamedWriterTensorViewsFromPython(
+    const nb::dict& tensors,
+    const LocalNamedExampleLayout& layout,
+    const std::string& context,
+    std::vector<Float32Array>& ownedArrays) {
+    if (layout.dataType() != ThorImplementation::DataType::FP32) {
+        throw nb::value_error((context + " currently accepts only layouts with data_type=thor.DataType.fp32").c_str());
+    }
+    if (nb::len(tensors) == 0) {
+        throw nb::value_error((context + " tensors must contain at least one tensor").c_str());
+    }
+
+    std::map<std::string, LocalNamedExampleDatasetWriter::TensorView> views;
+    ownedArrays.reserve(nb::len(tensors));
+    for (auto item : tensors) {
+        const std::string name = tensorNameFromPythonKey(item.first, context);
+        const std::string tensorContext = context + "['" + name + "']";
+        Float32Array array = requireFloat32NumpyArrayNoCopy(item.second, tensorContext);
+        std::vector<uint64_t> dimensions;
+        dimensions.reserve(array.ndim());
+        for (size_t i = 0; i < array.ndim(); ++i) {
+            dimensions.push_back(static_cast<uint64_t>(array.shape(i)));
+        }
+        const uint64_t numBytes = static_cast<uint64_t>(array.size() * sizeof(float));
+        ownedArrays.push_back(array);
+        const Float32Array& owned = ownedArrays.back();
+        auto [it, inserted] = views.emplace(
+            name,
+            LocalNamedExampleDatasetWriter::TensorView{
+                ThorImplementation::DataType::FP32,
+                std::move(dimensions),
+                owned.data(),
+                numBytes,
+            });
+        (void)it;
+        if (!inserted) {
+            throw nb::value_error((context + " duplicate tensor name '" + name + "'").c_str());
+        }
+    }
+    return views;
+}
+
+nb::tuple shapeTupleFromUint64Vector(const std::vector<uint64_t>& shape) {
+    nb::list shapeList;
+    for (uint64_t dim : shape) {
+        shapeList.append(nb::int_(dim));
+    }
+    return nb::tuple(shapeList);
+}
+
+nb::object copyFloat32TensorToNumpy(const ThorImplementation::Tensor& tensor, const std::string& context) {
+    if (tensor.getDataType() != ThorImplementation::DataType::FP32) {
+        throw nb::value_error((context + " currently supports only fp32 tensors").c_str());
+    }
+    nb::object numpy = nb::module_::import_("numpy");
+    nb::object arrayObject = numpy.attr("empty")(shapeTupleFromUint64Vector(tensor.getDimensions()), numpy.attr("float32"));
+    MutableFloat32Array array = pybind::castOrTypeError<MutableFloat32Array>(arrayObject, context, "a writable numpy.float32 array", false);
+    std::memcpy(array.data(), tensor.getMemPtr<float>(), tensor.getArraySizeInBytes());
+    return arrayObject;
+}
+
+nb::dict copyLocalNamedBatchToPythonDict(LocalNamedBatchLoader& loader, ExampleType exampleType, uint64_t batchNum) {
+    uint64_t mutableBatchNum = batchNum;
+    Batch batch = loader.getBatch(exampleType, mutableBatchNum);
+    nb::dict out;
+    try {
+        for (const LocalNamedExampleLayout::TensorSpec& spec : loader.getLayout().tensors()) {
+            out[nb::str(spec.name.c_str())] = copyFloat32TensorToNumpy(
+                batch.getTensor(spec.name),
+                "LocalNamedBatchLoader.copy_batch tensor '" + spec.name + "'");
+        }
+    } catch (...) {
+        loader.returnBatchBuffers(exampleType, std::move(batch));
+        throw;
+    }
+    loader.returnBatchBuffers(exampleType, std::move(batch));
+    return out;
 }
 
 struct SharedFloat32NumpyTensor {
@@ -1069,6 +1241,8 @@ TrainingRunsFailurePolicy trainingRunsFailurePolicyFromString(const std::string&
     throw nb::value_error("failure_policy must be one of: 'cancel_siblings', 'continue'");
 }
 
+std::vector<nb::object> callbackRefsFromObject(nb::handle object);
+
 std::map<std::string, size_t> trainingRunsMinSuccessfulModelsFromPython(nb::object minSuccessfulModels) {
     if (minSuccessfulModels.is_none()) {
         return {};
@@ -1173,7 +1347,7 @@ std::map<std::string, std::vector<std::string>> trainingRunsReportsFromPython(nb
 }
 
 std::vector<TrainingRunsSpec> trainingRunsSpecsFromPython(nb::iterable runs) {
-    std::vector<TrainingRunsSpec> specs;
+    std::vector<TrainingRunsSpec> out;
     for (nb::handle item : runs) {
         nb::sequence entry = pybind::castOrTypeError<nb::sequence>(
             item, "TrainingRuns runs entry", "sequence (run_name, trainer[, ensemble_group[, ensemble_weight]])", false);
@@ -1196,9 +1370,9 @@ std::vector<TrainingRunsSpec> trainingRunsSpecsFromPython(nb::iterable runs) {
             spec.ensembleWeight = pybind::castOrTypeError<double>(
                 entry[3], "TrainingRuns runs entry[3]", "float ensemble_weight or None", false);
         }
-        specs.push_back(std::move(spec));
+        out.push_back(std::move(spec));
     }
-    return specs;
+    return out;
 }
 
 void warnPythonRuntimeWarning(const std::string& message) {
@@ -1251,6 +1425,132 @@ std::vector<TrainingRestartPolicy> trainingRestartPoliciesFromPython(nb::object 
 
 nb::object optionalDouble(std::optional<double> value);
 nb::object optionalString(std::optional<std::string> value);
+
+
+class PythonModelSelectionCallbackState : public TrainingModelSelectionScore::CallbackLifetimeAnchor {
+   public:
+    explicit PythonModelSelectionCallbackState(nb::handle callable) : callable(callable.ptr()) {
+        nb::gil_scoped_acquire gil;
+        Py_XINCREF(this->callable);
+    }
+
+    PythonModelSelectionCallbackState(const PythonModelSelectionCallbackState&) = delete;
+    PythonModelSelectionCallbackState& operator=(const PythonModelSelectionCallbackState&) = delete;
+
+    ~PythonModelSelectionCallbackState() override { clear(); }
+
+    nb::handle get() const { return nb::handle(callable); }
+
+    void clear() {
+        if (callable == nullptr) {
+            return;
+        }
+        nb::gil_scoped_acquire gil;
+        PyObject* object = callable;
+        callable = nullptr;
+        Py_DECREF(object);
+    }
+
+   private:
+    PyObject* callable = nullptr;
+};
+
+std::shared_ptr<PythonModelSelectionCallbackState> pythonModelSelectionCallbackState(
+    const TrainingModelSelectionScore& score) {
+    const std::shared_ptr<TrainingModelSelectionScore::CallbackLifetimeAnchor>& anchor = score.getCallbackLifetimeAnchor();
+    if (!anchor) {
+        return nullptr;
+    }
+    return std::dynamic_pointer_cast<PythonModelSelectionCallbackState>(anchor);
+}
+
+int visitPythonModelSelectionCallback(const TrainingModelSelectionScore& score, visitproc visit, void* arg) {
+    std::shared_ptr<PythonModelSelectionCallbackState> state = pythonModelSelectionCallbackState(score);
+    if (state == nullptr) {
+        return 0;
+    }
+    Py_VISIT(state->get().ptr());
+    return 0;
+}
+
+int trainer_tp_traverse(PyObject* self, visitproc visit, void* arg) {
+    Py_VISIT(Py_TYPE(self));
+    if (!nb::inst_ready(self)) {
+        return 0;
+    }
+    Trainer* trainer = nb::inst_ptr<Trainer>(self);
+    if (trainer == nullptr) {
+        return 0;
+    }
+    return visitPythonModelSelectionCallback(trainer->getModelSelectionScore(), visit, arg);
+}
+
+int trainer_tp_clear(PyObject* self) {
+    if (!nb::inst_ready(self)) {
+        return 0;
+    }
+    Trainer* trainer = nb::inst_ptr<Trainer>(self);
+    if (trainer != nullptr) {
+        trainer->clearModelSelectionScoreCallbackLifetimeAnchorForPythonGc();
+    }
+    return 0;
+}
+
+int training_runs_tp_traverse(PyObject* self, visitproc visit, void* arg) {
+    Py_VISIT(Py_TYPE(self));
+    if (!nb::inst_ready(self)) {
+        return 0;
+    }
+    TrainingRuns* trainingRuns = nb::inst_ptr<TrainingRuns>(self);
+    if (trainingRuns == nullptr) {
+        return 0;
+    }
+    for (const TrainingRunsSpec& spec : trainingRuns->getRuns()) {
+        if (spec.trainer == nullptr) {
+            continue;
+        }
+        nb::handle trainerObject = nb::find(spec.trainer);
+        if (trainerObject.is_valid()) {
+            // If a Python Trainer wrapper exists, visit it and let Trainer.tp_traverse
+            // expose the native-held Python callback. Visiting the callback here too
+            // would double-count the same native Python reference in CPython's GC.
+            Py_VISIT(trainerObject.ptr());
+        } else {
+            // A TrainingRuns instance can own a native Trainer after the original
+            // Python Trainer wrapper has gone away. In that case, expose the
+            // model-selection callback directly because releaseRunsForPythonGc()
+            // can clear the native path that owns it.
+            int result = visitPythonModelSelectionCallback(spec.trainer->getModelSelectionScore(), visit, arg);
+            if (result != 0) {
+                return result;
+            }
+        }
+    }
+    return 0;
+}
+
+int training_runs_tp_clear(PyObject* self) {
+    if (!nb::inst_ready(self)) {
+        return 0;
+    }
+    TrainingRuns* trainingRuns = nb::inst_ptr<TrainingRuns>(self);
+    if (trainingRuns != nullptr) {
+        trainingRuns->releaseRunsForPythonGc();
+    }
+    return 0;
+}
+
+PyType_Slot trainer_type_slots[] = {
+    {Py_tp_traverse, reinterpret_cast<void*>(trainer_tp_traverse)},
+    {Py_tp_clear, reinterpret_cast<void*>(trainer_tp_clear)},
+    {0, nullptr},
+};
+
+PyType_Slot training_runs_type_slots[] = {
+    {Py_tp_traverse, reinterpret_cast<void*>(training_runs_tp_traverse)},
+    {Py_tp_clear, reinterpret_cast<void*>(training_runs_tp_clear)},
+    {0, nullptr},
+};
 
 class GilSafePythonObject {
    public:
@@ -1419,39 +1719,44 @@ TrainingModelSelectionScore trainingModelSelectionScoreFromPython(nb::object mod
         throw nb::type_error("model_selection_score must be callable");
     }
 
-    PyObject* callable = modelSelectionScore.ptr();
-    Py_INCREF(callable);
-    auto callback = std::shared_ptr<PyObject>(callable, [](PyObject* object) {
+    auto callbackState = std::make_shared<PythonModelSelectionCallbackState>(modelSelectionScore);
+    std::weak_ptr<PythonModelSelectionCallbackState> weakCallbackState = callbackState;
+
+    TrainingModelSelectionScore::ContextScoreFunction scoreFunction =
+        [weakCallbackState = std::move(weakCallbackState)](const TrainingModelSelectionContext& context) -> std::optional<double> {
+        // Trainer::fit() / TrainingRuns::fit() release the GIL while native training runs.
+        // The model-selection callback can also run from a native TrainingRuns worker thread.
         nb::gil_scoped_acquire acquire;
-        Py_DECREF(object);
-    });
+        std::shared_ptr<PythonModelSelectionCallbackState> callbackState = weakCallbackState.lock();
+        if (callbackState == nullptr || callbackState->get().ptr() == nullptr) {
+            throw std::runtime_error(
+                "Python model-selection callback is no longer alive. This is an internal binding lifetime error: "
+                "the owning Trainer/TrainingRuns object should retain the callback state while the C++ callback is active.");
+        }
+        nb::handle callableObject = callbackState->get();
+        nb::dict contextObject = modelSelectionContextToPythonDict(context);
 
-    return TrainingModelSelectionScore{TrainingModelSelectionScore::ContextScoreFunction(
-        [callback = std::move(callback)](const TrainingModelSelectionContext& context) -> std::optional<double> {
-            // Trainer::fit() / TrainingRuns::fit() release the GIL while native training runs.
-            // The model-selection callback can also run from a native TrainingRuns worker thread.
-            nb::gil_scoped_acquire acquire;
-            nb::dict contextObject = modelSelectionContextToPythonDict(context);
+        PyObject* resultPtr = PyObject_CallFunctionObjArgs(callableObject.ptr(), contextObject.ptr(), nullptr);
+        if (resultPtr == nullptr && PyErr_ExceptionMatches(PyExc_TypeError)) {
+            // Backwards compatibility: pre-context callbacks accepted
+            // (validation_loss, training_loss, epoch). Retry that contract
+            // when the one-argument context call raises TypeError.
+            PyErr_Clear();
+            nb::object validationLoss = optionalDouble(context.validate.loss);
+            nb::object trainingLoss = optionalDouble(context.train.loss);
+            nb::object epoch = nb::cast(context.epoch);
+            resultPtr = PyObject_CallFunctionObjArgs(
+                callableObject.ptr(), validationLoss.ptr(), trainingLoss.ptr(), epoch.ptr(), nullptr);
+        }
+        if (resultPtr == nullptr) {
+            throw nb::python_error();
+        }
 
-            PyObject* resultPtr = PyObject_CallFunctionObjArgs(callback.get(), contextObject.ptr(), nullptr);
-            if (resultPtr == nullptr && PyErr_ExceptionMatches(PyExc_TypeError)) {
-                // Backwards compatibility: pre-context callbacks accepted
-                // (validation_loss, training_loss, epoch). Retry that contract
-                // when the one-argument context call raises TypeError.
-                PyErr_Clear();
-                nb::object validationLoss = optionalDouble(context.validate.loss);
-                nb::object trainingLoss = optionalDouble(context.train.loss);
-                nb::object epoch = nb::cast(context.epoch);
-                resultPtr = PyObject_CallFunctionObjArgs(
-                    callback.get(), validationLoss.ptr(), trainingLoss.ptr(), epoch.ptr(), nullptr);
-            }
-            if (resultPtr == nullptr) {
-                throw nb::python_error();
-            }
+        nb::object result = nb::steal<nb::object>(nb::handle(resultPtr));
+        return modelSelectionScoreFromPythonResult(std::move(result));
+    };
 
-            nb::object result = nb::steal<nb::object>(nb::handle(resultPtr));
-            return modelSelectionScoreFromPythonResult(std::move(result));
-        })};
+    return TrainingModelSelectionScore{std::move(scoreFunction), std::move(callbackState)};
 }
 
 struct TrainingEarlyCompletionPoliciesBinding {
@@ -1952,6 +2257,188 @@ calling this helper.
     local_batch_loader.def("get_num_validate_batches",
                            [](LocalBatchLoader& self) { return self.getNumBatchesPerEpoch(ExampleType::VALIDATE); });
 
+    auto local_named_example_layout = nb::class_<LocalNamedExampleLayout>(training, "LocalNamedExampleLayout");
+    local_named_example_layout.attr("__module__") = "thor.training";
+    local_named_example_layout.def_static(
+        "__new__",
+        [](nb::handle cls, nb::dict tensors, ThorImplementation::DataType dataType) -> std::shared_ptr<LocalNamedExampleLayout> {
+            (void)cls;
+            return std::make_shared<LocalNamedExampleLayout>(
+                LocalNamedExampleLayout::fromTensorShapes(localNamedTensorShapesFromPython(tensors, "LocalNamedExampleLayout"), dataType));
+        },
+        "cls"_a,
+        "tensors"_a,
+        "data_type"_a = ThorImplementation::DataType::FP32,
+        R"nbdoc(
+Define the fixed per-example record layout for a local named example dataset.
+
+``tensors`` maps tensor names to non-batch shapes.  The constructor preserves
+Python dict insertion order when assigning contiguous record offsets.  All
+tensors use the same ``data_type`` in this first local named dataset format.
+        )nbdoc");
+    local_named_example_layout.def(
+        "__init__",
+        [](LocalNamedExampleLayout*, nb::dict, ThorImplementation::DataType) {},
+        "tensors"_a,
+        "data_type"_a = ThorImplementation::DataType::FP32);
+    local_named_example_layout.def_static(
+        "read_manifest",
+        [](nb::object path) { return LocalNamedExampleLayout::readManifest(pathStringFromPython(path, "path")); },
+        "path"_a);
+    local_named_example_layout.def("write_manifest",
+                                   [](const LocalNamedExampleLayout& self, nb::object path) {
+                                       self.writeManifest(pathStringFromPython(path, "path"));
+                                   },
+                                   "path"_a);
+    local_named_example_layout.def("validate", &LocalNamedExampleLayout::validate);
+    local_named_example_layout.def("validate_requested_layout_exact", &LocalNamedExampleLayout::validateRequestedLayoutExact, "requested"_a);
+    local_named_example_layout.def("get_data_type", &LocalNamedExampleLayout::dataType);
+    local_named_example_layout.def("get_record_size_bytes", &LocalNamedExampleLayout::recordSizeBytes);
+    local_named_example_layout.def("get_tensor_names", &localNamedLayoutTensorNames);
+    local_named_example_layout.def("get_tensor_shapes", &localNamedLayoutTensorShapes);
+    local_named_example_layout.def("get_tensor_specs", &localNamedLayoutTensorSpecsToPythonDict);
+
+    auto local_named_example_dataset_writer = nb::class_<LocalNamedExampleDatasetWriter>(training, "LocalNamedExampleDatasetWriter");
+    local_named_example_dataset_writer.attr("__module__") = "thor.training";
+    local_named_example_dataset_writer.def_static(
+        "__new__",
+        [](nb::handle cls,
+           nb::object datasetPath,
+           LocalNamedExampleLayout layout,
+           uint64_t examplesPerShard) -> std::shared_ptr<LocalNamedExampleDatasetWriter> {
+            (void)cls;
+            if (examplesPerShard == 0) {
+                throw nb::value_error("LocalNamedExampleDatasetWriter examples_per_shard must be >= 1");
+            }
+            return std::make_shared<LocalNamedExampleDatasetWriter>(
+                pathStringFromPython(datasetPath, "dataset_path"), std::move(layout), examplesPerShard);
+        },
+        "cls"_a,
+        "dataset_path"_a,
+        "layout"_a,
+        "examples_per_shard"_a = 100000);
+    local_named_example_dataset_writer.def(
+        "__init__",
+        [](LocalNamedExampleDatasetWriter*, nb::object, LocalNamedExampleLayout, uint64_t) {},
+        "dataset_path"_a,
+        "layout"_a,
+        "examples_per_shard"_a = 100000);
+    local_named_example_dataset_writer.def(
+        "write_example",
+        [](LocalNamedExampleDatasetWriter& self,
+           nb::dict tensors,
+           const std::string& split,
+           const std::string& label,
+           const std::string& filename) {
+            std::vector<Float32Array> ownedArrays;
+            std::map<std::string, LocalNamedExampleDatasetWriter::TensorView> views =
+                localNamedWriterTensorViewsFromPython(tensors, self.getLayout(), "LocalNamedExampleDatasetWriter.write_example", ownedArrays);
+            self.writeExample(exampleTypeFromPythonString(split, "split"), views, label, filename);
+        },
+        "tensors"_a,
+        "split"_a = "train",
+        "label"_a = "",
+        "filename"_a = "");
+    local_named_example_dataset_writer.def("close", &LocalNamedExampleDatasetWriter::close);
+    local_named_example_dataset_writer.def("is_closed", &LocalNamedExampleDatasetWriter::isClosed);
+    local_named_example_dataset_writer.def("get_path", [](const LocalNamedExampleDatasetWriter& self) { return self.path().string(); });
+    local_named_example_dataset_writer.def("get_manifest_path", [](const LocalNamedExampleDatasetWriter& self) { return self.manifestPath().string(); });
+    local_named_example_dataset_writer.def("get_layout", &LocalNamedExampleDatasetWriter::getLayout, nb::rv_policy::copy);
+    local_named_example_dataset_writer.def("get_num_examples", [](const LocalNamedExampleDatasetWriter& self) { return self.numExamples(); });
+    local_named_example_dataset_writer.def("get_num_train_examples",
+                                           [](const LocalNamedExampleDatasetWriter& self) { return self.numExamples(ExampleType::TRAIN); });
+    local_named_example_dataset_writer.def("get_num_validate_examples",
+                                           [](const LocalNamedExampleDatasetWriter& self) { return self.numExamples(ExampleType::VALIDATE); });
+    local_named_example_dataset_writer.def("get_num_test_examples",
+                                           [](const LocalNamedExampleDatasetWriter& self) { return self.numExamples(ExampleType::TEST); });
+    local_named_example_dataset_writer.def("__enter__", [](LocalNamedExampleDatasetWriter& self) -> LocalNamedExampleDatasetWriter& { return self; }, nb::rv_policy::reference_internal);
+    local_named_example_dataset_writer.def("__exit__",
+                                           [](LocalNamedExampleDatasetWriter& self, nb::object, nb::object, nb::object) {
+                                               self.close();
+                                               return false;
+                                           });
+
+    auto local_named_batch_loader = nb::class_<LocalNamedBatchLoader, Loader>(training, "LocalNamedBatchLoader");
+    local_named_batch_loader.attr("__module__") = "thor.training";
+    local_named_batch_loader.def_static(
+        "__new__",
+        [](nb::handle cls,
+           nb::object datasetPath,
+           LocalNamedExampleLayout layout,
+           uint64_t batchSize,
+           const std::string& datasetName,
+           uint64_t batchQueueDepth,
+           bool randomizeTrain,
+           nb::object randomSeed) -> std::shared_ptr<LocalNamedBatchLoader> {
+            (void)cls;
+            if (batchSize == 0) {
+                throw nb::value_error("LocalNamedBatchLoader batch_size must be >= 1");
+            }
+            if (batchQueueDepth == 0) {
+                throw nb::value_error("LocalNamedBatchLoader batch_queue_depth must be >= 1");
+            }
+            if (!randomizeTrain && !randomSeed.is_none()) {
+                throw nb::value_error("LocalNamedBatchLoader random_seed requires randomize_train=True");
+            }
+            auto loader = std::make_shared<LocalNamedBatchLoader>(pathStringFromPython(datasetPath, "dataset_path"),
+                                                                  std::move(layout),
+                                                                  batchSize,
+                                                                  batchQueueDepth,
+                                                                  randomizeTrain,
+                                                                  optionalUint64FromPython(std::move(randomSeed), "random_seed"));
+            loader->setDatasetName(datasetName);
+            return loader;
+        },
+        "cls"_a,
+        "dataset_path"_a,
+        "layout"_a,
+        "batch_size"_a,
+        "dataset_name"_a = "local_named_examples",
+        "batch_queue_depth"_a = 32,
+        "randomize_train"_a = true,
+        "random_seed"_a = nb::none(),
+        R"nbdoc(
+Read a local named example dataset written by LocalNamedExampleDatasetWriter.
+
+Each example is read as one contiguous shard record and unpacked into the normal
+named dense batch tensors expected by the network/trainer.
+        )nbdoc");
+    local_named_batch_loader.def(
+        "__init__",
+        [](LocalNamedBatchLoader*, nb::object, LocalNamedExampleLayout, uint64_t, const std::string&, uint64_t, bool, nb::object) {},
+        "dataset_path"_a,
+        "layout"_a,
+        "batch_size"_a,
+        "dataset_name"_a = "local_named_examples",
+        "batch_queue_depth"_a = 32,
+        "randomize_train"_a = true,
+        "random_seed"_a = nb::none());
+    local_named_batch_loader.def("get_dataset_path", [](const LocalNamedBatchLoader& self) { return self.getDatasetPath().string(); });
+    local_named_batch_loader.def("get_layout", &LocalNamedBatchLoader::getLayout, nb::rv_policy::copy);
+    local_named_batch_loader.def("get_tensor_names", [](const LocalNamedBatchLoader& self) { return localNamedLayoutTensorNames(self.getLayout()); });
+    local_named_batch_loader.def("get_tensor_shapes", [](const LocalNamedBatchLoader& self) { return localNamedLayoutTensorShapes(self.getLayout()); });
+    local_named_batch_loader.def("get_record_size_bytes", [](const LocalNamedBatchLoader& self) { return self.getLayout().recordSizeBytes(); });
+    local_named_batch_loader.def("get_num_train_examples", [](LocalNamedBatchLoader& self) { return self.getNumExamples(ExampleType::TRAIN); });
+    local_named_batch_loader.def("get_num_validate_examples", [](LocalNamedBatchLoader& self) { return self.getNumExamples(ExampleType::VALIDATE); });
+    local_named_batch_loader.def("get_num_test_examples", [](LocalNamedBatchLoader& self) { return self.getNumExamples(ExampleType::TEST); });
+    local_named_batch_loader.def("get_num_train_batches", [](LocalNamedBatchLoader& self) { return self.getNumBatchesPerEpoch(ExampleType::TRAIN); });
+    local_named_batch_loader.def("get_num_validate_batches",
+                                 [](LocalNamedBatchLoader& self) { return self.getNumBatchesPerEpoch(ExampleType::VALIDATE); });
+    local_named_batch_loader.def("get_num_test_batches", [](LocalNamedBatchLoader& self) { return self.getNumBatchesPerEpoch(ExampleType::TEST); });
+    local_named_batch_loader.def(
+        "copy_next_batch",
+        [](LocalNamedBatchLoader& self, const std::string& split) {
+            ExampleType exampleType = exampleTypeFromPythonString(split, "split");
+            return copyLocalNamedBatchToPythonDict(self, exampleType, self.getNextBatchNum(exampleType));
+        },
+        "split"_a = "train",
+        R"nbdoc(
+Return a Python-owned copy of the next native batch as a dict of numpy.float32 arrays.
+
+This helper is intended for inspection/tests; trainer execution uses the native
+Loader path and returns queue-owned buffers normally.
+        )nbdoc");
+
     auto trainer_fit_options = nb::class_<TrainerFitOptions>(training, "TrainerFitOptions");
     trainer_fit_options.attr("__module__") = "thor.training";
     trainer_fit_options.def(nb::init<>())
@@ -1959,7 +2446,7 @@ calling this helper.
         .def_rw("check_best_model_every_epochs", &TrainerFitOptions::checkBestModelEveryEpochs)
         .def_rw("first_model_selection_epoch", &TrainerFitOptions::firstModelSelectionEpoch);
 
-    auto trainer = nb::class_<Trainer>(training, "Trainer", nb::dynamic_attr());
+    auto trainer = nb::class_<Trainer>(training, "Trainer", nb::type_slots(trainer_type_slots));
     trainer.attr("__module__") = "thor.training";
     trainer.def_static(
         "__new__",
@@ -1978,6 +2465,7 @@ calling this helper.
            bool save_model_overwrite,
            nb::object model_selection_score) -> nb::object {
             (void)cls;
+            TrainingModelSelectionScore modelSelectionScore = trainingModelSelectionScoreFromPython(std::move(model_selection_score));
             Trainer::Builder builder;
             builder.network(std::move(network))
                 .loader(std::move(loader))
@@ -1988,7 +2476,7 @@ calling this helper.
                 .scalarTensorsToReport(stringSetFromVector(std::move(scalar_tensors_to_report)))
                 .saveModelDirectory(optionalPathStringFromPython(save_model_dir, "save_model_dir"))
                 .saveModelOverwrite(save_model_overwrite)
-                .modelSelectionScore(trainingModelSelectionScoreFromPython(model_selection_score));
+                .modelSelectionScore(std::move(modelSelectionScore));
             if (optimizer != nullptr) {
                 builder.optimizer(std::move(optimizer));
             }
@@ -1999,8 +2487,7 @@ calling this helper.
             if (debug_synchronous) {
                 builder.debugSynchronousExecutor();
             }
-            nb::object object = nb::cast(std::make_shared<Trainer>(builder.build()));
-            return object;
+            return nb::cast(std::make_shared<Trainer>(builder.build()));
         },
         "cls"_a,
         "network"_a,
@@ -2431,7 +2918,7 @@ calling this helper.
         "aggregation"_a = "auto",
         "overwrite"_a = false);
 
-    auto training_runs = nb::class_<TrainingRuns>(training, "TrainingRuns", nb::dynamic_attr());
+    auto training_runs = nb::class_<TrainingRuns>(training, "TrainingRuns", nb::type_slots(training_runs_type_slots));
     training_runs.attr("__module__") = "thor.training";
     training_runs.def_static(
         "__new__",
@@ -2442,14 +2929,13 @@ calling this helper.
            std::optional<size_t> max_parallel_runs,
            nb::object min_successful_models) -> nb::object {
             (void)cls;
-            std::vector<TrainingRunsSpec> specs = trainingRunsSpecsFromPython(runs);
-            auto self = std::make_shared<TrainingRuns>(std::move(specs),
+            std::vector<TrainingRunsSpec> boundRuns = trainingRunsSpecsFromPython(runs);
+            auto self = std::make_shared<TrainingRuns>(std::move(boundRuns),
                                                        trainingRunsFailurePolicyFromString(failure_policy),
                                                        max_summary_logs_per_second,
                                                        max_parallel_runs,
                                                        trainingRunsMinSuccessfulModelsFromPython(min_successful_models));
-            nb::object object = nb::cast(std::move(self));
-            return object;
+            return nb::cast(std::move(self));
         },
         "cls"_a,
         "runs"_a,
