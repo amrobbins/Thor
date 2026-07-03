@@ -12,6 +12,7 @@
 #include <cstring>
 #include <cstdint>
 #include <map>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <set>
@@ -22,6 +23,7 @@
 #include <nlohmann/json.hpp>
 
 #include "DeepLearning/Api/Loaders/Loader.h"
+#include "DeepLearning/Api/Loaders/IndexedLocalNamedBatchLoader.h"
 #include "DeepLearning/Api/Loaders/LocalBatchLoader.h"
 #include "DeepLearning/Api/Loaders/LocalNamedBatchLoader.h"
 #include "DeepLearning/Api/Network/Network.h"
@@ -600,6 +602,48 @@ std::map<std::string, LocalNamedExampleDatasetWriter::TensorView> localNamedWrit
     return views;
 }
 
+std::map<std::string, LocalNamedExampleDatasetWriter::TensorBatchView> localNamedWriterTensorBatchViewsFromPython(
+    const nb::dict& tensors,
+    const LocalNamedExampleLayout& layout,
+    const std::string& context,
+    std::vector<Float32Array>& ownedArrays) {
+    if (layout.dataType() != ThorImplementation::DataType::FP32) {
+        throw nb::value_error((context + " currently accepts only layouts with data_type=thor.DataType.fp32").c_str());
+    }
+    if (nb::len(tensors) == 0) {
+        throw nb::value_error((context + " tensors must contain at least one tensor").c_str());
+    }
+
+    std::map<std::string, LocalNamedExampleDatasetWriter::TensorBatchView> views;
+    ownedArrays.reserve(nb::len(tensors));
+    for (auto item : tensors) {
+        const std::string name = tensorNameFromPythonKey(item.first, context);
+        const std::string tensorContext = context + "['" + name + "']";
+        Float32Array array = requireFloat32NumpyArrayNoCopy(item.second, tensorContext);
+        std::vector<uint64_t> dimensions;
+        dimensions.reserve(array.ndim());
+        for (size_t i = 0; i < array.ndim(); ++i) {
+            dimensions.push_back(static_cast<uint64_t>(array.shape(i)));
+        }
+        const uint64_t numBytes = static_cast<uint64_t>(array.size() * sizeof(float));
+        ownedArrays.push_back(array);
+        const Float32Array& owned = ownedArrays.back();
+        auto [it, inserted] = views.emplace(
+            name,
+            LocalNamedExampleDatasetWriter::TensorBatchView{
+                ThorImplementation::DataType::FP32,
+                std::move(dimensions),
+                owned.data(),
+                numBytes,
+            });
+        (void)it;
+        if (!inserted) {
+            throw nb::value_error((context + " duplicate tensor name '" + name + "'").c_str());
+        }
+    }
+    return views;
+}
+
 nb::tuple shapeTupleFromUint64Vector(const std::vector<uint64_t>& shape) {
     nb::list shapeList;
     for (uint64_t dim : shape) {
@@ -619,6 +663,14 @@ nb::object copyFloat32TensorToNumpy(const ThorImplementation::Tensor& tensor, co
     return arrayObject;
 }
 
+LocalNamedExampleDatasetWriter::StorageMode localNamedStorageModeFromPythonString(const std::string& storageMode) {
+    try {
+        return LocalNamedExampleDatasetWriter::storageModeFromString(storageMode);
+    } catch (const std::runtime_error& e) {
+        throw nb::value_error(e.what());
+    }
+}
+
 nb::dict copyLocalNamedBatchToPythonDict(LocalNamedBatchLoader& loader, ExampleType exampleType, uint64_t batchNum) {
     uint64_t mutableBatchNum = batchNum;
     Batch batch = loader.getBatch(exampleType, mutableBatchNum);
@@ -628,6 +680,24 @@ nb::dict copyLocalNamedBatchToPythonDict(LocalNamedBatchLoader& loader, ExampleT
             out[nb::str(spec.name.c_str())] = copyFloat32TensorToNumpy(
                 batch.getTensor(spec.name),
                 "LocalNamedBatchLoader.copy_batch tensor '" + spec.name + "'");
+        }
+    } catch (...) {
+        loader.returnBatchBuffers(exampleType, std::move(batch));
+        throw;
+    }
+    loader.returnBatchBuffers(exampleType, std::move(batch));
+    return out;
+}
+
+nb::dict copyIndexedLocalNamedBatchToPythonDict(IndexedLocalNamedBatchLoader& loader, ExampleType exampleType, uint64_t batchNum) {
+    uint64_t mutableBatchNum = batchNum;
+    Batch batch = loader.getBatch(exampleType, mutableBatchNum);
+    nb::dict out;
+    try {
+        for (const LocalNamedExampleLayout::TensorSpec& spec : loader.getLayout().tensors()) {
+            out[nb::str(spec.name.c_str())] = copyFloat32TensorToNumpy(
+                batch.getTensor(spec.name),
+                "IndexedLocalNamedBatchLoader.copy_batch tensor '" + spec.name + "'");
         }
     } catch (...) {
         loader.returnBatchBuffers(exampleType, std::move(batch));
@@ -709,7 +779,8 @@ std::map<std::string, SharedFloat32NumpyTensor> makeSharedFloat32NumpyDictTensor
 
 std::vector<uint64_t> uint64IndicesFromPython(nb::object indices,
                                               const std::string& context,
-                                              uint64_t maxExclusive) {
+                                              uint64_t maxExclusive,
+                                              bool allowEmpty = false) {
     nb::object numpy = nb::module_::import_("numpy");
     nb::object sourceObject;
     nb::object arrayObject;
@@ -733,7 +804,7 @@ std::vector<uint64_t> uint64IndicesFromPython(nb::object indices,
     if (array.ndim() != 1) {
         throw nb::value_error((context + " must be one-dimensional").c_str());
     }
-    if (array.shape(0) == 0) {
+    if (array.shape(0) == 0 && !allowEmpty) {
         throw nb::value_error((context + " must contain at least one row index").c_str());
     }
 
@@ -2305,24 +2376,37 @@ tensors use the same ``data_type`` in this first local named dataset format.
         [](nb::handle cls,
            nb::object datasetPath,
            LocalNamedExampleLayout layout,
-           uint64_t examplesPerShard) -> std::shared_ptr<LocalNamedExampleDatasetWriter> {
+           uint64_t examplesPerShard,
+           const std::string& storageMode,
+           nb::object expectedNumExamples,
+           bool preallocate) -> std::shared_ptr<LocalNamedExampleDatasetWriter> {
             (void)cls;
             if (examplesPerShard == 0) {
                 throw nb::value_error("LocalNamedExampleDatasetWriter examples_per_shard must be >= 1");
             }
-            return std::make_shared<LocalNamedExampleDatasetWriter>(
-                pathStringFromPython(datasetPath, "dataset_path"), std::move(layout), examplesPerShard);
+            return std::make_shared<LocalNamedExampleDatasetWriter>(pathStringFromPython(datasetPath, "dataset_path"),
+                                                                    std::move(layout),
+                                                                    examplesPerShard,
+                                                                    localNamedStorageModeFromPythonString(storageMode),
+                                                                    optionalUint64FromPython(expectedNumExamples, "expected_num_examples"),
+                                                                    preallocate);
         },
         "cls"_a,
         "dataset_path"_a,
         "layout"_a,
-        "examples_per_shard"_a = 100000);
+        "examples_per_shard"_a = 100000,
+        "storage_mode"_a = "split",
+        "expected_num_examples"_a = nb::none(),
+        "preallocate"_a = false);
     local_named_example_dataset_writer.def(
         "__init__",
-        [](LocalNamedExampleDatasetWriter*, nb::object, LocalNamedExampleLayout, uint64_t) {},
+        [](LocalNamedExampleDatasetWriter*, nb::object, LocalNamedExampleLayout, uint64_t, const std::string&, nb::object, bool) {},
         "dataset_path"_a,
         "layout"_a,
-        "examples_per_shard"_a = 100000);
+        "examples_per_shard"_a = 100000,
+        "storage_mode"_a = "split",
+        "expected_num_examples"_a = nb::none(),
+        "preallocate"_a = false);
     local_named_example_dataset_writer.def(
         "write_example",
         [](LocalNamedExampleDatasetWriter& self,
@@ -2339,11 +2423,42 @@ tensors use the same ``data_type`` in this first local named dataset format.
         "split"_a = "train",
         "label"_a = "",
         "filename"_a = "");
+    local_named_example_dataset_writer.def(
+        "write_indexed_example",
+        [](LocalNamedExampleDatasetWriter& self, nb::dict tensors, const std::string& label, const std::string& filename) {
+            std::vector<Float32Array> ownedArrays;
+            std::map<std::string, LocalNamedExampleDatasetWriter::TensorView> views =
+                localNamedWriterTensorViewsFromPython(tensors, self.getLayout(), "LocalNamedExampleDatasetWriter.write_indexed_example", ownedArrays);
+            self.writeIndexedExample(views, label, filename);
+        },
+        "tensors"_a,
+        "label"_a = "",
+        "filename"_a = "");
+    local_named_example_dataset_writer.def(
+        "write_indexed_examples",
+        [](LocalNamedExampleDatasetWriter& self, nb::dict tensors) {
+            std::vector<Float32Array> ownedArrays;
+            std::map<std::string, LocalNamedExampleDatasetWriter::TensorBatchView> views =
+                localNamedWriterTensorBatchViewsFromPython(tensors, self.getLayout(), "LocalNamedExampleDatasetWriter.write_indexed_examples", ownedArrays);
+            self.writeIndexedExamples(views);
+        },
+        "tensors"_a);
     local_named_example_dataset_writer.def("close", &LocalNamedExampleDatasetWriter::close);
     local_named_example_dataset_writer.def("is_closed", &LocalNamedExampleDatasetWriter::isClosed);
     local_named_example_dataset_writer.def("get_path", [](const LocalNamedExampleDatasetWriter& self) { return self.path().string(); });
     local_named_example_dataset_writer.def("get_manifest_path", [](const LocalNamedExampleDatasetWriter& self) { return self.manifestPath().string(); });
     local_named_example_dataset_writer.def("get_layout", &LocalNamedExampleDatasetWriter::getLayout, nb::rv_policy::copy);
+    local_named_example_dataset_writer.def("get_storage_mode", [](const LocalNamedExampleDatasetWriter& self) {
+        return std::string(LocalNamedExampleDatasetWriter::storageModeToString(self.getStorageMode()));
+    });
+    local_named_example_dataset_writer.def("get_expected_num_examples", [](const LocalNamedExampleDatasetWriter& self) -> nb::object {
+        std::optional<uint64_t> expected = self.getExpectedNumExamples();
+        if (!expected.has_value()) {
+            return nb::none();
+        }
+        return nb::int_(expected.value());
+    });
+    local_named_example_dataset_writer.def("get_preallocate", &LocalNamedExampleDatasetWriter::getPreallocate);
     local_named_example_dataset_writer.def("get_num_examples", [](const LocalNamedExampleDatasetWriter& self) { return self.numExamples(); });
     local_named_example_dataset_writer.def("get_num_train_examples",
                                            [](const LocalNamedExampleDatasetWriter& self) { return self.numExamples(ExampleType::TRAIN); });
@@ -2438,6 +2553,116 @@ Return a Python-owned copy of the next native batch as a dict of numpy.float32 a
 This helper is intended for inspection/tests; trainer execution uses the native
 Loader path and returns queue-owned buffers normally.
         )nbdoc");
+
+    auto indexed_local_named_batch_loader = nb::class_<IndexedLocalNamedBatchLoader, Loader>(training, "IndexedLocalNamedBatchLoader");
+    indexed_local_named_batch_loader.attr("__module__") = "thor.training";
+    indexed_local_named_batch_loader.def_static(
+        "__new__",
+        [](nb::handle cls,
+           nb::object datasetPath,
+           LocalNamedExampleLayout layout,
+           nb::object trainIndices,
+           nb::object validateIndices,
+           uint64_t batchSize,
+           const std::string& datasetName,
+           bool randomizeTrain,
+           uint64_t batchQueueDepth,
+           nb::object testIndices,
+           nb::object randomSeed) -> std::shared_ptr<IndexedLocalNamedBatchLoader> {
+            (void)cls;
+            if (batchSize == 0) {
+                throw nb::value_error("IndexedLocalNamedBatchLoader batch_size must be >= 1");
+            }
+            if (batchQueueDepth == 0) {
+                throw nb::value_error("IndexedLocalNamedBatchLoader batch_queue_depth must be >= 1");
+            }
+            if (!randomizeTrain && !randomSeed.is_none()) {
+                throw nb::value_error("IndexedLocalNamedBatchLoader random_seed requires randomize_train=True");
+            }
+            constexpr uint64_t maxIndex = std::numeric_limits<uint64_t>::max();
+            std::vector<uint64_t> train = uint64IndicesFromPython(
+                std::move(trainIndices), "IndexedLocalNamedBatchLoader train_indices", maxIndex);
+            std::vector<uint64_t> validate = uint64IndicesFromPython(
+                std::move(validateIndices), "IndexedLocalNamedBatchLoader validate_indices", maxIndex, true);
+            std::optional<std::vector<uint64_t>> test;
+            if (!testIndices.is_none()) {
+                test = uint64IndicesFromPython(
+                    std::move(testIndices), "IndexedLocalNamedBatchLoader test_indices", maxIndex, true);
+            }
+            auto loader = std::make_shared<IndexedLocalNamedBatchLoader>(
+                pathStringFromPython(datasetPath, "dataset_path"),
+                std::move(layout),
+                std::move(train),
+                std::move(validate),
+                std::move(test),
+                batchSize,
+                batchQueueDepth,
+                randomizeTrain,
+                optionalUint64FromPython(std::move(randomSeed), "random_seed"));
+            loader->setDatasetName(datasetName);
+            return loader;
+        },
+        "cls"_a,
+        "dataset_path"_a,
+        "layout"_a,
+        "train_indices"_a,
+        "validate_indices"_a,
+        "batch_size"_a,
+        "dataset_name"_a = "indexed_local_named_examples",
+        "randomize_train"_a = true,
+        "batch_queue_depth"_a = 32,
+        "test_indices"_a = nb::none(),
+        "random_seed"_a = nb::none(),
+        R"nbdoc(
+Read one shared local named example dataset through fold-specific row-index arrays.
+
+The canonical dataset row space is the indexed manifest row order across all
+shards.  ``train_indices``, ``validate_indices``, and optional ``test_indices``
+are logical views over that shared row space, making this the Thor-native drop-in
+shape for IndexedNumpyFloat32DictBatchLoader.
+        )nbdoc");
+    indexed_local_named_batch_loader.def(
+        "__init__",
+        [](IndexedLocalNamedBatchLoader*, nb::object, LocalNamedExampleLayout, nb::object, nb::object, uint64_t, const std::string&, bool, uint64_t, nb::object, nb::object) {},
+        "dataset_path"_a,
+        "layout"_a,
+        "train_indices"_a,
+        "validate_indices"_a,
+        "batch_size"_a,
+        "dataset_name"_a = "indexed_local_named_examples",
+        "randomize_train"_a = true,
+        "batch_queue_depth"_a = 32,
+        "test_indices"_a = nb::none(),
+        "random_seed"_a = nb::none());
+    indexed_local_named_batch_loader.def("get_dataset_path", [](const IndexedLocalNamedBatchLoader& self) { return self.getDatasetPath().string(); });
+    indexed_local_named_batch_loader.def("get_layout", &IndexedLocalNamedBatchLoader::getLayout, nb::rv_policy::copy);
+    indexed_local_named_batch_loader.def("get_tensor_names", [](const IndexedLocalNamedBatchLoader& self) { return localNamedLayoutTensorNames(self.getLayout()); });
+    indexed_local_named_batch_loader.def("get_tensor_shapes", [](const IndexedLocalNamedBatchLoader& self) { return localNamedLayoutTensorShapes(self.getLayout()); });
+    indexed_local_named_batch_loader.def("get_record_size_bytes", [](const IndexedLocalNamedBatchLoader& self) { return self.getLayout().recordSizeBytes(); });
+    indexed_local_named_batch_loader.def("get_num_dataset_examples", &IndexedLocalNamedBatchLoader::getNumDatasetExamples);
+    indexed_local_named_batch_loader.def("get_num_train_examples", [](IndexedLocalNamedBatchLoader& self) { return self.getNumExamples(ExampleType::TRAIN); });
+    indexed_local_named_batch_loader.def("get_num_validate_examples", [](IndexedLocalNamedBatchLoader& self) { return self.getNumExamples(ExampleType::VALIDATE); });
+    indexed_local_named_batch_loader.def("get_num_test_examples", [](IndexedLocalNamedBatchLoader& self) { return self.getNumExamples(ExampleType::TEST); });
+    indexed_local_named_batch_loader.def("get_num_train_batches", [](IndexedLocalNamedBatchLoader& self) { return self.getNumBatchesPerEpoch(ExampleType::TRAIN); });
+    indexed_local_named_batch_loader.def("get_num_validate_batches", [](IndexedLocalNamedBatchLoader& self) { return self.getNumBatchesPerEpoch(ExampleType::VALIDATE); });
+    indexed_local_named_batch_loader.def("get_num_test_batches", [](IndexedLocalNamedBatchLoader& self) { return self.getNumBatchesPerEpoch(ExampleType::TEST); });
+    indexed_local_named_batch_loader.def("get_batch_queue_depth", &IndexedLocalNamedBatchLoader::getBatchQueueDepth);
+    indexed_local_named_batch_loader.def("get_randomize_train", &IndexedLocalNamedBatchLoader::getRandomizeTrain);
+    indexed_local_named_batch_loader.def("get_random_seed", [](const IndexedLocalNamedBatchLoader& self) -> nb::object {
+        std::optional<uint64_t> seed = self.getRandomSeed();
+        if (!seed.has_value()) {
+            return nb::none();
+        }
+        return nb::int_(seed.value());
+    });
+    indexed_local_named_batch_loader.def("has_explicit_test_split", &IndexedLocalNamedBatchLoader::hasExplicitTestSplit);
+    indexed_local_named_batch_loader.def(
+        "copy_next_batch",
+        [](IndexedLocalNamedBatchLoader& self, const std::string& split) {
+            ExampleType exampleType = exampleTypeFromPythonString(split, "split");
+            return copyIndexedLocalNamedBatchToPythonDict(self, exampleType, self.getNextBatchNum(exampleType));
+        },
+        "split"_a = "train");
 
     auto trainer_fit_options = nb::class_<TrainerFitOptions>(training, "TrainerFitOptions");
     trainer_fit_options.attr("__module__") = "thor.training";

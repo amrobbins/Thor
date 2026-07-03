@@ -146,3 +146,19 @@ TEST(LocalNamedBatchLoaderTest, RejectsReturnedBatchMissingTensor) {
 
     std::filesystem::remove_all(datasetPath);
 }
+
+TEST(LocalNamedBatchLoaderTest, RejectsIndexedStorageModeDataset) {
+    const std::filesystem::path datasetPath = makeTempDatasetPath("indexed_dataset_rejected");
+    LocalNamedExampleLayout layout = testLayout();
+
+    LocalNamedExampleDatasetWriter writer(datasetPath, layout, 3, LocalNamedExampleDatasetWriter::StorageMode::INDEXED);
+    vector<float> seasonality{0.0f, 1.0f};
+    vector<float> monotone{10.0f, 11.0f, 12.0f};
+    vector<float> weight{100.0f};
+    writer.writeIndexedExample(exampleViews(seasonality, monotone, weight));
+    writer.close();
+
+    EXPECT_THROW(LocalNamedBatchLoader(datasetPath, layout, 1, 1, false), std::runtime_error);
+
+    std::filesystem::remove_all(datasetPath);
+}

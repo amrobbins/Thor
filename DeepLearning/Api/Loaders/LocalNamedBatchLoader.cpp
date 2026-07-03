@@ -41,6 +41,9 @@ LocalNamedBatchLoader::LocalNamedBatchLoader(std::filesystem::path datasetPath,
     this->batchSize = batchSize;
 
     const std::filesystem::path manifestPath = this->datasetPath / LocalNamedExampleDatasetWriter::MANIFEST_FILENAME;
+    if (LocalNamedExampleDatasetWriter::readStorageMode(manifestPath) == LocalNamedExampleDatasetWriter::StorageMode::INDEXED) {
+        throw std::runtime_error("LocalNamedBatchLoader requires a split local named dataset manifest; use IndexedLocalNamedBatchLoader for indexed datasets.");
+    }
     layout = LocalNamedExampleLayout::readManifest(manifestPath);
     layout.validateRequestedLayoutExact(requestedLayout);
 

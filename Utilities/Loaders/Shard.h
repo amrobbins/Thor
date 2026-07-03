@@ -73,8 +73,17 @@ class Shard {
                      uint64_t maxClassNameChars);
 
     void openShard(std::string filename);
+    void createCompactShard(std::string filename,
+                            uint64_t numTrainExamples,
+                            uint64_t numValidateExamples,
+                            uint64_t numTestExamples,
+                            uint64_t exampleSizeInBytes,
+                            ThorImplementation::DataType dataType,
+                            std::vector<std::string> &allClassesVector,
+                            bool preallocate = false);
     bool isOpen();
     void writeExample(uint8_t *buffer, const std::string &label, const std::string &filename, ExampleType exampleType);
+    void writeExamplesContiguous(uint8_t *buffer, uint64_t numExamples, ExampleType exampleType);
     ShardExampleReadRequest getExampleReadRequest(ExampleType exampleType, uint64_t exampleIndex);
     void loadExample(uint8_t *buffer, std::string &label, std::string &filename, ExampleType exampleType, uint64_t exampleIndex);
     void shrinkToFit();
@@ -104,6 +113,9 @@ class Shard {
     uint64_t compactTrainCount;
     uint64_t compactValidateCount;
     uint64_t compactTestCount;
+    uint64_t compactTrainCapacity;
+    uint64_t compactValidateCapacity;
+    uint64_t compactTestCapacity;
     uint64_t compactTrainBytes;
     uint64_t compactValidateBytes;
     uint64_t compactTestBytes;
@@ -114,7 +126,7 @@ class Shard {
     std::unique_ptr<UringDirect> cachedReader;
 
     void readExamplePayloadCached(uint8_t *buffer, uint64_t fileOffsetBytes);
-    void writeHeader(uint64_t metadataOffsetBytes, uint64_t metadataBytes);
+    void writeHeader(uint64_t metadataOffsetBytes, uint64_t metadataBytes, uint32_t metadataLayout = 0);
     void writeMetadata();
     void readMetadata(uint32_t metadataLayout,
                       uint64_t metadataOffsetBytes,

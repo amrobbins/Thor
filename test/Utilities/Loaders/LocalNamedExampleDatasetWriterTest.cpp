@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -41,6 +42,13 @@ LocalNamedExampleDatasetWriter::TensorView tensorView(vector<float> &values, vec
                                                       .dimensions = std::move(dimensions),
                                                       .data = values.data(),
                                                       .numBytes = values.size() * sizeof(float)};
+}
+
+LocalNamedExampleDatasetWriter::TensorBatchView tensorBatchView(vector<float> &values, vector<uint64_t> dimensions) {
+    return LocalNamedExampleDatasetWriter::TensorBatchView{.dataType = DataType::FP32,
+                                                           .dimensions = std::move(dimensions),
+                                                           .data = values.data(),
+                                                           .numBytes = values.size() * sizeof(float)};
 }
 
 map<string, LocalNamedExampleDatasetWriter::TensorView> exampleViews(vector<float> &seasonality,
@@ -96,6 +104,7 @@ TEST(LocalNamedExampleDatasetWriterTest, WritesManifestAndShardCounts) {
 
     nlohmann::json manifest = readJson(datasetPath / LocalNamedExampleDatasetWriter::MANIFEST_FILENAME);
     EXPECT_EQ(manifest.at("format").get<string>(), LocalNamedExampleLayout::FORMAT);
+    EXPECT_EQ(manifest.at("storage_mode").get<string>(), LocalNamedExampleDatasetWriter::STORAGE_MODE_SPLIT);
     EXPECT_EQ(manifest.at("data_type").get<string>(), "fp32");
     EXPECT_EQ(manifest.at("record_size_bytes").get<uint64_t>(), layout.recordSizeBytes());
     EXPECT_EQ(manifest.at("num_examples").get<uint64_t>(), 4);
@@ -234,5 +243,179 @@ TEST(LocalNamedExampleDatasetWriterTest, RejectsNonEmptyDatasetDirectory) {
     std::ofstream(datasetPath / "stale_file") << "stale";
 
     EXPECT_THROW(LocalNamedExampleDatasetWriter(datasetPath, testLayout(), 8), std::runtime_error);
+    std::filesystem::remove_all(datasetPath);
+}
+
+
+TEST(LocalNamedExampleDatasetWriterTest, WritesIndexedManifestAndGlobalRanges) {
+    const std::filesystem::path datasetPath = makeTempDatasetPath("indexed_manifest");
+    LocalNamedExampleLayout layout = testLayout();
+
+    LocalNamedExampleDatasetWriter writer(datasetPath, layout, 2, LocalNamedExampleDatasetWriter::StorageMode::INDEXED);
+    for (uint64_t i = 0; i < 5; ++i) {
+        vector<float> seasonality{static_cast<float>(i), static_cast<float>(i + 1)};
+        vector<float> monotone{static_cast<float>(i + 10), static_cast<float>(i + 11), static_cast<float>(i + 12)};
+        vector<float> weight{static_cast<float>(i + 100)};
+        writer.writeIndexedExample(exampleViews(seasonality, monotone, weight));
+    }
+    writer.close();
+
+    nlohmann::json manifest = readJson(datasetPath / LocalNamedExampleDatasetWriter::MANIFEST_FILENAME);
+    EXPECT_EQ(manifest.at("storage_mode").get<string>(), LocalNamedExampleDatasetWriter::STORAGE_MODE_INDEXED);
+    EXPECT_EQ(manifest.at("num_examples").get<uint64_t>(), 5);
+    EXPECT_EQ(manifest.at("example_type_counts").at("train").get<uint64_t>(), 5);
+    EXPECT_EQ(manifest.at("example_type_counts").at("validate").get<uint64_t>(), 0);
+    EXPECT_EQ(manifest.at("example_type_counts").at("test").get<uint64_t>(), 0);
+    ASSERT_EQ(manifest.at("shards").size(), 3);
+    EXPECT_EQ(manifest.at("shards").at(0).at("global_start").get<uint64_t>(), 0);
+    EXPECT_EQ(manifest.at("shards").at(0).at("num_examples").get<uint64_t>(), 2);
+    EXPECT_EQ(manifest.at("shards").at(1).at("global_start").get<uint64_t>(), 2);
+    EXPECT_EQ(manifest.at("shards").at(1).at("num_examples").get<uint64_t>(), 2);
+    EXPECT_EQ(manifest.at("shards").at(2).at("global_start").get<uint64_t>(), 4);
+    EXPECT_EQ(manifest.at("shards").at(2).at("num_examples").get<uint64_t>(), 1);
+
+    Shard shard1;
+    shard1.openShard((datasetPath / manifest.at("shards").at(1).at("file").get<string>()).string());
+    EXPECT_EQ(shard1.getNumExamples(ExampleType::TRAIN), 2);
+    EXPECT_EQ(shard1.getNumExamples(ExampleType::VALIDATE), 0);
+    EXPECT_EQ(shard1.getNumExamples(ExampleType::TEST), 0);
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(LocalNamedExampleDatasetWriterTest, RejectsSplitWriteInIndexedMode) {
+    const std::filesystem::path datasetPath = makeTempDatasetPath("split_write_in_indexed_mode");
+    LocalNamedExampleDatasetWriter writer(datasetPath, testLayout(), 8, LocalNamedExampleDatasetWriter::StorageMode::INDEXED);
+
+    vector<float> seasonality{1.0f, 2.0f};
+    vector<float> monotone{10.0f, 11.0f, 12.0f};
+    vector<float> weight{0.5f};
+    EXPECT_THROW(writer.writeExample(ExampleType::TRAIN, exampleViews(seasonality, monotone, weight)), std::runtime_error);
+    writer.close();
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(LocalNamedExampleDatasetWriterTest, RejectsIndexedWriteInSplitMode) {
+    const std::filesystem::path datasetPath = makeTempDatasetPath("indexed_write_in_split_mode");
+    LocalNamedExampleDatasetWriter writer(datasetPath, testLayout(), 8);
+
+    vector<float> seasonality{1.0f, 2.0f};
+    vector<float> monotone{10.0f, 11.0f, 12.0f};
+    vector<float> weight{0.5f};
+    EXPECT_THROW(writer.writeIndexedExample(exampleViews(seasonality, monotone, weight)), std::runtime_error);
+    writer.close();
+    std::filesystem::remove_all(datasetPath);
+}
+
+
+TEST(LocalNamedExampleDatasetWriterTest, WritesIndexedExamplesChunkWithExpectedCountAndCompactShards) {
+    const std::filesystem::path datasetPath = makeTempDatasetPath("indexed_chunked_preallocated");
+    LocalNamedExampleLayout layout = testLayout();
+
+    vector<float> seasonality{0.0f, 1.0f, 10.0f, 11.0f, 20.0f, 21.0f, 30.0f, 31.0f, 40.0f, 41.0f};
+    vector<float> monotone{100.0f, 101.0f, 102.0f,
+                           110.0f, 111.0f, 112.0f,
+                           120.0f, 121.0f, 122.0f,
+                           130.0f, 131.0f, 132.0f,
+                           140.0f, 141.0f, 142.0f};
+    vector<float> weight{1000.0f, 1001.0f, 1002.0f, 1003.0f, 1004.0f};
+    map<string, LocalNamedExampleDatasetWriter::TensorBatchView> batch = {
+        {"seasonality_inputs", tensorBatchView(seasonality, {5, 2})},
+        {"monotone_inputs", tensorBatchView(monotone, {5, 3})},
+        {"daily_weight", tensorBatchView(weight, {5, 1})},
+    };
+
+    LocalNamedExampleDatasetWriter writer(datasetPath,
+                                          layout,
+                                          2,
+                                          LocalNamedExampleDatasetWriter::StorageMode::INDEXED,
+                                          5,
+                                          true);
+    EXPECT_EQ(writer.getExpectedNumExamples().value(), 5);
+    EXPECT_TRUE(writer.getPreallocate());
+    writer.writeIndexedExamples(batch);
+    writer.close();
+
+    nlohmann::json manifest = readJson(datasetPath / LocalNamedExampleDatasetWriter::MANIFEST_FILENAME);
+    EXPECT_EQ(manifest.at("storage_mode").get<string>(), LocalNamedExampleDatasetWriter::STORAGE_MODE_INDEXED);
+    EXPECT_EQ(manifest.at("expected_num_examples").get<uint64_t>(), 5);
+    EXPECT_TRUE(manifest.at("preallocated").get<bool>());
+    ASSERT_EQ(manifest.at("shards").size(), 3);
+    EXPECT_EQ(manifest.at("shards").at(0).at("global_start").get<uint64_t>(), 0);
+    EXPECT_EQ(manifest.at("shards").at(0).at("capacity_examples").get<uint64_t>(), 2);
+    EXPECT_EQ(manifest.at("shards").at(0).at("num_examples").get<uint64_t>(), 2);
+    EXPECT_EQ(manifest.at("shards").at(2).at("capacity_examples").get<uint64_t>(), 1);
+    EXPECT_EQ(manifest.at("shards").at(2).at("num_examples").get<uint64_t>(), 1);
+    EXPECT_EQ(manifest.at("shards").at(2).at("num_bytes").get<uint64_t>(), layout.recordSizeBytes());
+
+    Shard shard0;
+    shard0.openShard((datasetPath / manifest.at("shards").at(0).at("file").get<string>()).string());
+    EXPECT_EQ(shard0.getNumExamples(ExampleType::TRAIN), 2);
+    EXPECT_EQ(shard0.getNumExamples(ExampleType::VALIDATE), 0);
+    EXPECT_EQ(shard0.getNumExamples(ExampleType::TEST), 0);
+
+    vector<uint8_t> record(layout.recordSizeBytes());
+    string label;
+    string filename;
+    shard0.loadExample(record.data(), label, filename, ExampleType::TRAIN, 1);
+    EXPECT_EQ(readFloats(record, layout.tensor("seasonality_inputs").offsetBytes, 2), (vector<float>{10.0f, 11.0f}));
+    EXPECT_EQ(readFloats(record, layout.tensor("monotone_inputs").offsetBytes, 3), (vector<float>{110.0f, 111.0f, 112.0f}));
+    EXPECT_EQ(readFloats(record, layout.tensor("daily_weight").offsetBytes, 1), (vector<float>{1001.0f}));
+
+    Shard shard2;
+    shard2.openShard((datasetPath / manifest.at("shards").at(2).at("file").get<string>()).string());
+    shard2.loadExample(record.data(), label, filename, ExampleType::TRAIN, 0);
+    EXPECT_EQ(readFloats(record, layout.tensor("seasonality_inputs").offsetBytes, 2), (vector<float>{40.0f, 41.0f}));
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(LocalNamedExampleDatasetWriterTest, PreallocateRequiresExpectedNumExamples) {
+    const std::filesystem::path datasetPath = makeTempDatasetPath("preallocate_requires_expected");
+    EXPECT_THROW(LocalNamedExampleDatasetWriter(datasetPath,
+                                                testLayout(),
+                                                8,
+                                                LocalNamedExampleDatasetWriter::StorageMode::INDEXED,
+                                                std::nullopt,
+                                                true),
+                 std::runtime_error);
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(LocalNamedExampleDatasetWriterTest, ExpectedNumExamplesMustBeSatisfiedOnClose) {
+    const std::filesystem::path datasetPath = makeTempDatasetPath("expected_count_close");
+    {
+        LocalNamedExampleDatasetWriter writer(datasetPath,
+                                              testLayout(),
+                                              8,
+                                              LocalNamedExampleDatasetWriter::StorageMode::INDEXED,
+                                              2,
+                                              false);
+
+        vector<float> seasonality{1.0f, 2.0f};
+        vector<float> monotone{10.0f, 11.0f, 12.0f};
+        vector<float> weight{0.5f};
+        writer.writeIndexedExample(exampleViews(seasonality, monotone, weight));
+
+        EXPECT_THROW(writer.close(), std::runtime_error);
+    }
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(LocalNamedExampleDatasetWriterTest, RejectsIndexedExamplesBatchShapeMismatch) {
+    const std::filesystem::path datasetPath = makeTempDatasetPath("indexed_batch_shape_mismatch");
+    LocalNamedExampleDatasetWriter writer(datasetPath, testLayout(), 8, LocalNamedExampleDatasetWriter::StorageMode::INDEXED);
+
+    vector<float> seasonality{0.0f, 1.0f, 10.0f, 11.0f};
+    vector<float> monotone{100.0f, 101.0f, 102.0f, 110.0f, 111.0f, 112.0f};
+    vector<float> weight{1000.0f, 1001.0f};
+    map<string, LocalNamedExampleDatasetWriter::TensorBatchView> batch = {
+        {"seasonality_inputs", tensorBatchView(seasonality, {2, 2})},
+        {"monotone_inputs", tensorBatchView(monotone, {2, 3})},
+        {"daily_weight", tensorBatchView(weight, {1, 2})},
+    };
+
+    EXPECT_THROW(writer.writeIndexedExamples(batch), std::runtime_error);
+    writer.close();
     std::filesystem::remove_all(datasetPath);
 }

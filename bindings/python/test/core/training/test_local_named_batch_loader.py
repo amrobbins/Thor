@@ -89,6 +89,7 @@ def test_local_named_writer_and_loader_round_trip_named_batches(tmp_path):
     writer.write_example(_example(2), split="train")
     writer.write_example(_example(100), split="validate")
 
+    assert writer.get_storage_mode() == "split"
     assert writer.get_num_examples() == 4
     assert writer.get_num_train_examples() == 3
     assert writer.get_num_validate_examples() == 1
@@ -98,6 +99,7 @@ def test_local_named_writer_and_loader_round_trip_named_batches(tmp_path):
 
     manifest = json.loads((dataset_path / "manifest.json").read_text())
     assert manifest["format"] == "thor.local_named_example_dataset.v1"
+    assert manifest["storage_mode"] == "split"
     assert manifest["record_size_bytes"] == layout.get_record_size_bytes()
     assert manifest["num_examples"] == 4
     assert manifest["example_type_counts"] == {"train": 3, "validate": 1, "test": 0}
@@ -207,3 +209,341 @@ def test_local_named_writer_rejects_non_float32_or_non_contiguous_arrays(tmp_pat
 
     with pytest.raises(TypeError, match="C-contiguous numpy.float32"):
         writer.write_example(bad_example, split="train")
+
+
+def test_indexed_local_named_loader_reads_shared_dataset_by_indices(tmp_path):
+    dataset_path = tmp_path / "indexed_named_dataset"
+    layout = _layout()
+
+    writer = thor.training.LocalNamedExampleDatasetWriter(
+        dataset_path, layout, examples_per_shard=2, storage_mode="indexed"
+    )
+    for i in range(5):
+        writer.write_indexed_example(_example(i))
+    writer.close()
+
+    loader = thor.training.IndexedLocalNamedBatchLoader(
+        dataset_path=dataset_path,
+        layout=layout,
+        train_indices=np.asarray([4, 2, 0], dtype=np.int64),
+        validate_indices=np.asarray([1, 3], dtype=np.int64),
+        batch_size=2,
+        batch_queue_depth=2,
+        randomize_train=False,
+    )
+
+    assert loader.get_dataset_name() == "indexed_local_named_examples"
+    assert loader.get_batch_size() == 2
+    assert loader.get_num_dataset_examples() == 5
+    assert loader.get_num_train_examples() == 3
+    assert loader.get_num_validate_examples() == 2
+    assert loader.get_num_test_examples() == 2
+    assert loader.get_num_train_batches() == 2
+    assert loader.get_num_validate_batches() == 1
+    assert loader.get_num_test_batches() == 1
+    assert not loader.has_explicit_test_split()
+    assert loader.get_tensor_shapes() == layout.get_tensor_shapes()
+
+    train_batch = loader.copy_next_batch("train")
+    validate_batch = loader.copy_next_batch("validate")
+    test_batch = loader.copy_next_batch("test")
+
+    np.testing.assert_array_equal(
+        train_batch["seasonality_inputs"],
+        np.asarray([[41.0, 42.0], [21.0, 22.0]], dtype=np.float32),
+    )
+    np.testing.assert_array_equal(
+        train_batch["daily_target"],
+        np.asarray([[46.0, 47.0], [26.0, 27.0]], dtype=np.float32),
+    )
+    np.testing.assert_array_equal(
+        validate_batch["seasonality_inputs"],
+        np.asarray([[11.0, 12.0], [31.0, 32.0]], dtype=np.float32),
+    )
+    np.testing.assert_array_equal(test_batch["seasonality_inputs"], validate_batch["seasonality_inputs"])
+
+
+
+
+def test_indexed_local_named_loader_allows_empty_validate_and_test_indices(tmp_path):
+    dataset_path = tmp_path / "indexed_named_dataset"
+    layout = _layout()
+
+    writer = thor.training.LocalNamedExampleDatasetWriter(
+        dataset_path, layout, examples_per_shard=2, storage_mode="indexed"
+    )
+    for i in range(5):
+        writer.write_indexed_example(_example(i))
+    writer.close()
+
+    empty = np.empty((0,), dtype=np.int64)
+    loader = thor.training.IndexedLocalNamedBatchLoader(
+        dataset_path=dataset_path,
+        layout=layout,
+        train_indices=np.asarray([0, 1, 2], dtype=np.int64),
+        validate_indices=empty,
+        test_indices=empty,
+        batch_size=2,
+        batch_queue_depth=2,
+        randomize_train=False,
+    )
+
+    assert loader.has_explicit_test_split()
+    assert loader.get_num_train_examples() == 3
+    assert loader.get_num_validate_examples() == 0
+    assert loader.get_num_test_examples() == 0
+    assert loader.get_num_train_batches() == 2
+    assert loader.get_num_validate_batches() == 0
+    assert loader.get_num_test_batches() == 0
+
+    train_batch = loader.copy_next_batch("train")
+    np.testing.assert_array_equal(
+        train_batch["seasonality_inputs"],
+        np.asarray([[1.0, 2.0], [11.0, 12.0]], dtype=np.float32),
+    )
+
+    with pytest.raises(RuntimeError, match="empty split"):
+        loader.copy_next_batch("validate")
+
+    with pytest.raises(RuntimeError, match="empty split"):
+        loader.copy_next_batch("test")
+
+
+def test_indexed_local_named_loader_empty_validate_aliases_empty_implicit_test(tmp_path):
+    dataset_path = tmp_path / "indexed_named_dataset"
+    layout = _layout()
+
+    writer = thor.training.LocalNamedExampleDatasetWriter(
+        dataset_path, layout, examples_per_shard=2, storage_mode="indexed"
+    )
+    for i in range(3):
+        writer.write_indexed_example(_example(i))
+    writer.close()
+
+    loader = thor.training.IndexedLocalNamedBatchLoader(
+        dataset_path=dataset_path,
+        layout=layout,
+        train_indices=[0, 1, 2],
+        validate_indices=np.empty((0,), dtype=np.int64),
+        batch_size=2,
+        batch_queue_depth=2,
+        randomize_train=False,
+    )
+
+    assert not loader.has_explicit_test_split()
+    assert loader.get_num_validate_examples() == 0
+    assert loader.get_num_test_examples() == 0
+    assert loader.get_num_validate_batches() == 0
+    assert loader.get_num_test_batches() == 0
+
+
+def test_indexed_local_named_loader_still_rejects_empty_train_indices(tmp_path):
+    dataset_path = tmp_path / "indexed_named_dataset"
+    layout = _layout()
+
+    writer = thor.training.LocalNamedExampleDatasetWriter(
+        dataset_path, layout, examples_per_shard=2, storage_mode="indexed"
+    )
+    writer.write_indexed_example(_example(0))
+    writer.close()
+
+    with pytest.raises(ValueError, match="train_indices"):
+        thor.training.IndexedLocalNamedBatchLoader(
+            dataset_path=dataset_path,
+            layout=layout,
+            train_indices=np.empty((0,), dtype=np.int64),
+            validate_indices=np.empty((0,), dtype=np.int64),
+            batch_size=1,
+            randomize_train=False,
+        )
+
+
+def test_indexed_local_named_loader_supports_explicit_test_indices(tmp_path):
+    dataset_path = tmp_path / "indexed_named_dataset"
+    layout = _layout()
+
+    writer = thor.training.LocalNamedExampleDatasetWriter(
+        dataset_path, layout, examples_per_shard=10, storage_mode="indexed"
+    )
+    for i in range(5):
+        writer.write_indexed_example(_example(i))
+    writer.close()
+
+    loader = thor.training.IndexedLocalNamedBatchLoader(
+        dataset_path,
+        layout,
+        train_indices=[0, 1],
+        validate_indices=[2],
+        test_indices=[4, 3],
+        batch_size=2,
+        batch_queue_depth=2,
+        randomize_train=False,
+    )
+
+    assert loader.has_explicit_test_split()
+    test_batch = loader.copy_next_batch("test")
+    np.testing.assert_array_equal(
+        test_batch["seasonality_inputs"],
+        np.asarray([[41.0, 42.0], [31.0, 32.0]], dtype=np.float32),
+    )
+
+
+def test_indexed_local_named_loader_rejects_out_of_range_indices(tmp_path):
+    dataset_path = tmp_path / "indexed_named_dataset"
+    layout = _layout()
+
+    writer = thor.training.LocalNamedExampleDatasetWriter(
+        dataset_path, layout, examples_per_shard=10, storage_mode="indexed"
+    )
+    writer.write_indexed_example(_example(0))
+    writer.close()
+
+    with pytest.raises(RuntimeError, match="outside dataset row count"):
+        thor.training.IndexedLocalNamedBatchLoader(
+            dataset_path,
+            layout,
+            train_indices=[0, 1],
+            validate_indices=[0],
+            batch_size=2,
+            randomize_train=False,
+        )
+
+
+
+def test_local_named_writer_supports_indexed_storage_mode_manifest(tmp_path):
+    dataset_path = tmp_path / "indexed_named_dataset"
+    layout = _layout()
+
+    writer = thor.training.LocalNamedExampleDatasetWriter(
+        dataset_path, layout, examples_per_shard=2, storage_mode="indexed"
+    )
+    for i in range(5):
+        writer.write_indexed_example(_example(i))
+    assert writer.get_storage_mode() == "indexed"
+    writer.close()
+
+    manifest = json.loads((dataset_path / "manifest.json").read_text())
+    assert manifest["storage_mode"] == "indexed"
+    assert manifest["num_examples"] == 5
+    assert [shard["global_start"] for shard in manifest["shards"]] == [0, 2, 4]
+    assert [shard["num_examples"] for shard in manifest["shards"]] == [2, 2, 1]
+
+
+def test_indexed_local_named_loader_rejects_split_storage_mode_dataset(tmp_path):
+    dataset_path = tmp_path / "split_named_dataset"
+    layout = _layout()
+
+    writer = thor.training.LocalNamedExampleDatasetWriter(dataset_path, layout, examples_per_shard=10)
+    writer.write_example(_example(0), split="train")
+    writer.close()
+
+    with pytest.raises(RuntimeError, match="indexed"):
+        thor.training.IndexedLocalNamedBatchLoader(
+            dataset_path,
+            layout,
+            train_indices=[0],
+            validate_indices=[0],
+            batch_size=1,
+            randomize_train=False,
+        )
+
+
+def test_local_named_batch_loader_rejects_indexed_storage_mode_dataset(tmp_path):
+    dataset_path = tmp_path / "indexed_named_dataset"
+    layout = _layout()
+
+    writer = thor.training.LocalNamedExampleDatasetWriter(
+        dataset_path, layout, examples_per_shard=10, storage_mode="indexed"
+    )
+    writer.write_indexed_example(_example(0))
+    writer.close()
+
+    with pytest.raises(RuntimeError, match="split local named dataset"):
+        thor.training.LocalNamedBatchLoader(dataset_path, layout, batch_size=1)
+
+
+def _chunk(start: int, count: int) -> dict[str, np.ndarray]:
+    examples = [_example(i) for i in range(start, start + count)]
+    return {
+        name: np.stack([example[name] for example in examples], axis=0)
+        for name in examples[0]
+    }
+
+
+def test_local_named_writer_chunked_indexed_examples_with_expected_count_and_preallocation(tmp_path):
+    dataset_path = tmp_path / "indexed_named_dataset"
+    layout = _layout()
+
+    writer = thor.training.LocalNamedExampleDatasetWriter(
+        dataset_path,
+        layout,
+        examples_per_shard=2,
+        storage_mode="indexed",
+        expected_num_examples=5,
+        preallocate=True,
+    )
+    assert writer.get_expected_num_examples() == 5
+    assert writer.get_preallocate()
+    writer.write_indexed_examples(_chunk(0, 3))
+    writer.write_indexed_examples(_chunk(3, 2))
+    writer.close()
+
+    manifest = json.loads((dataset_path / "manifest.json").read_text())
+    assert manifest["storage_mode"] == "indexed"
+    assert manifest["expected_num_examples"] == 5
+    assert manifest["preallocated"] is True
+    assert [shard["global_start"] for shard in manifest["shards"]] == [0, 2, 4]
+    assert [shard["capacity_examples"] for shard in manifest["shards"]] == [2, 2, 1]
+    assert [shard["num_examples"] for shard in manifest["shards"]] == [2, 2, 1]
+
+    loader = thor.training.IndexedLocalNamedBatchLoader(
+        dataset_path,
+        layout,
+        train_indices=[4, 2, 0],
+        validate_indices=[1, 3],
+        batch_size=2,
+        batch_queue_depth=2,
+        randomize_train=False,
+    )
+    batch = loader.copy_next_batch("train")
+    np.testing.assert_array_equal(
+        batch["seasonality_inputs"],
+        np.asarray([[41.0, 42.0], [21.0, 22.0]], dtype=np.float32),
+    )
+
+
+def test_local_named_writer_preallocate_requires_expected_num_examples(tmp_path):
+    with pytest.raises(RuntimeError, match="expected_num_examples"):
+        thor.training.LocalNamedExampleDatasetWriter(
+            tmp_path / "indexed_named_dataset",
+            _layout(),
+            examples_per_shard=10,
+            storage_mode="indexed",
+            preallocate=True,
+        )
+
+
+def test_local_named_writer_expected_num_examples_enforced_on_close(tmp_path):
+    writer = thor.training.LocalNamedExampleDatasetWriter(
+        tmp_path / "indexed_named_dataset",
+        _layout(),
+        examples_per_shard=10,
+        storage_mode="indexed",
+        expected_num_examples=2,
+    )
+    writer.write_indexed_examples(_chunk(0, 1))
+    with pytest.raises(RuntimeError, match="expected_num_examples"):
+        writer.close()
+
+
+def test_local_named_writer_rejects_chunk_shape_mismatch(tmp_path):
+    writer = thor.training.LocalNamedExampleDatasetWriter(
+        tmp_path / "indexed_named_dataset",
+        _layout(),
+        examples_per_shard=10,
+        storage_mode="indexed",
+    )
+    chunk = _chunk(0, 2)
+    chunk["daily_target"] = np.asarray([1.0, 2.0], dtype=np.float32)
+    with pytest.raises(RuntimeError, match="shape"):
+        writer.write_indexed_examples(chunk)

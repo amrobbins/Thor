@@ -4,11 +4,15 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <limits>
 #include <stdexcept>
+
+#include <fcntl.h>
+#include <unistd.h>
 
 using std::mutex;
 using std::string;
@@ -92,6 +96,36 @@ void readRecordVector(std::istream &stream,
     }
 }
 
+uint64_t checkedMul(uint64_t a, uint64_t b, const char *context) {
+    if (a != 0 && b > std::numeric_limits<uint64_t>::max() / a) {
+        throw std::runtime_error(std::string(context) + " overflow.");
+    }
+    return a * b;
+}
+
+uint64_t checkedAdd(uint64_t a, uint64_t b, const char *context) {
+    if (b > std::numeric_limits<uint64_t>::max() - a) {
+        throw std::runtime_error(std::string(context) + " overflow.");
+    }
+    return a + b;
+}
+
+void preallocateFileBytes(const std::string &filename, uint64_t numBytes) {
+    if (numBytes == 0) {
+        return;
+    }
+    const int fd = ::open(filename.c_str(), O_RDWR);
+    if (fd < 0) {
+        throw std::runtime_error("failed to open shard for preallocation '" + filename + "': " + std::strerror(errno));
+    }
+    const int rc = ::posix_fallocate(fd, 0, static_cast<off_t>(numBytes));
+    const int savedErrno = errno;
+    ::close(fd);
+    if (rc != 0) {
+        throw std::runtime_error("failed to preallocate shard '" + filename + "': " + std::strerror(rc == -1 ? savedErrno : rc));
+    }
+}
+
 }  // namespace
 
 Shard::Shard() {
@@ -106,6 +140,9 @@ Shard::Shard() {
     compactTrainCount = 0;
     compactValidateCount = 0;
     compactTestCount = 0;
+    compactTrainCapacity = 0;
+    compactValidateCapacity = 0;
+    compactTestCapacity = 0;
     compactTrainBytes = 0;
     compactValidateBytes = 0;
     compactTestBytes = 0;
@@ -152,6 +189,9 @@ void Shard::createShard(string filename,
     compactTrainCount = 0;
     compactValidateCount = 0;
     compactTestCount = 0;
+    compactTrainCapacity = 0;
+    compactValidateCapacity = 0;
+    compactTestCapacity = 0;
     compactTrainBytes = 0;
     compactValidateBytes = 0;
     compactTestBytes = 0;
@@ -165,6 +205,71 @@ void Shard::createShard(string filename,
     writeHeader(0, 0);
     shardFile.flush();
     THOR_THROW_IF_FALSE(shardFile.good());
+
+    metadataFinalized = false;
+    open = true;
+}
+
+void Shard::createCompactShard(string filename,
+                               uint64_t numTrainExamples,
+                               uint64_t numValidateExamples,
+                               uint64_t numTestExamples,
+                               uint64_t exampleSizeInBytes,
+                               ThorImplementation::DataType dataType,
+                               std::vector<std::string> &allClassesVector,
+                               bool preallocate) {
+    if (shardFile.is_open()) {
+        shardFile.close();
+    }
+    cachedReader.reset();
+
+    THOR_THROW_IF_FALSE(exampleSizeInBytes > 0);
+
+    this->filename = std::move(filename);
+    this->exampleSizeInBytes = exampleSizeInBytes;
+    this->dataType = dataType;
+    this->allClasses = allClassesVector;
+
+    trainExamples.clear();
+    validateExamples.clear();
+    testExamples.clear();
+    compactMetadata = true;
+    compactRecordStrideBytes = exampleSizeInBytes;
+
+    compactTrainCapacity = numTrainExamples;
+    compactValidateCapacity = numValidateExamples;
+    compactTestCapacity = numTestExamples;
+    compactTrainCount = 0;
+    compactValidateCount = 0;
+    compactTestCount = 0;
+
+    compactTrainOffsetBytes = SHARD_HEADER_BYTES;
+    compactTrainBytes = 0;
+    const uint64_t trainCapacityBytes = checkedMul(compactTrainCapacity, exampleSizeInBytes, "Shard compact train capacity");
+    compactValidateOffsetBytes = checkedAdd(compactTrainOffsetBytes, trainCapacityBytes, "Shard compact validate offset");
+    compactValidateBytes = 0;
+    const uint64_t validateCapacityBytes = checkedMul(compactValidateCapacity, exampleSizeInBytes, "Shard compact validate capacity");
+    compactTestOffsetBytes = checkedAdd(compactValidateOffsetBytes, validateCapacityBytes, "Shard compact test offset");
+    compactTestBytes = 0;
+
+    const uint64_t testCapacityBytes = checkedMul(compactTestCapacity, exampleSizeInBytes, "Shard compact test capacity");
+    uint64_t preallocateBytes = checkedAdd(compactTestOffsetBytes, testCapacityBytes, "Shard compact payload capacity");
+    uint64_t metadataReserveBytes = 6 * sizeof(uint64_t);
+    for (const std::string &className : allClasses) {
+        metadataReserveBytes = checkedAdd(metadataReserveBytes, sizeof(uint64_t), "Shard compact metadata reserve");
+        metadataReserveBytes = checkedAdd(metadataReserveBytes, className.size(), "Shard compact metadata reserve");
+    }
+    preallocateBytes = checkedAdd(preallocateBytes, metadataReserveBytes, "Shard compact preallocation size");
+
+    shardFile.open(this->filename, std::ios::binary | std::ios::in | std::ios::out | std::ios::trunc);
+    THOR_THROW_IF_FALSE(shardFile.is_open());
+    writeHeader(0, 0, SHARD_METADATA_LAYOUT_COMPACT);
+    shardFile.flush();
+    THOR_THROW_IF_FALSE(shardFile.good());
+
+    if (preallocate) {
+        preallocateFileBytes(this->filename, preallocateBytes);
+    }
 
     metadataFinalized = false;
     open = true;
@@ -186,6 +291,9 @@ void Shard::openShard(string filename) {
     compactTrainCount = 0;
     compactValidateCount = 0;
     compactTestCount = 0;
+    compactTrainCapacity = 0;
+    compactValidateCapacity = 0;
+    compactTestCapacity = 0;
     compactTrainBytes = 0;
     compactValidateBytes = 0;
     compactTestBytes = 0;
@@ -263,6 +371,53 @@ void Shard::writeExample(uint8_t *buffer, const string &label, const string &fil
     record.label = label;
     record.filename = filename;
     mutableRecordsFor(exampleType).push_back(std::move(record));
+}
+
+void Shard::writeExamplesContiguous(uint8_t *buffer, uint64_t numExamples, ExampleType exampleType) {
+    THOR_THROW_IF_FALSE(buffer != nullptr);
+    THOR_THROW_IF_FALSE(numExamples > 0);
+    THOR_THROW_IF_FALSE(isOpen());
+    THOR_THROW_IF_FALSE(!metadataFinalized);
+    THOR_THROW_IF_FALSE(compactMetadata);
+
+    std::unique_lock<std::mutex> lck(mtx);
+    THOR_THROW_IF_FALSE(shardFile.is_open());
+
+    uint64_t *count = nullptr;
+    uint64_t *bytes = nullptr;
+    uint64_t capacity = 0;
+    uint64_t baseOffsetBytes = 0;
+    if (exampleType == ExampleType::TRAIN) {
+        count = &compactTrainCount;
+        bytes = &compactTrainBytes;
+        capacity = compactTrainCapacity;
+        baseOffsetBytes = compactTrainOffsetBytes;
+    } else if (exampleType == ExampleType::VALIDATE) {
+        count = &compactValidateCount;
+        bytes = &compactValidateBytes;
+        capacity = compactValidateCapacity;
+        baseOffsetBytes = compactValidateOffsetBytes;
+    } else if (exampleType == ExampleType::TEST) {
+        count = &compactTestCount;
+        bytes = &compactTestBytes;
+        capacity = compactTestCapacity;
+        baseOffsetBytes = compactTestOffsetBytes;
+    } else {
+        THOR_UNREACHABLE();
+    }
+
+    THOR_THROW_IF_FALSE(*count <= capacity);
+    THOR_THROW_IF_FALSE(numExamples <= capacity - *count);
+    const uint64_t writeOffsetBytes = checkedAdd(baseOffsetBytes, checkedMul(*count, exampleSizeInBytes, "Shard compact write offset"),
+                                                 "Shard compact write offset");
+    const uint64_t writeBytes = checkedMul(numExamples, exampleSizeInBytes, "Shard compact write bytes");
+
+    shardFile.seekp(static_cast<std::streamoff>(writeOffsetBytes), std::ios::beg);
+    THOR_THROW_IF_FALSE(shardFile.good());
+    writeExact(shardFile, buffer, writeBytes);
+
+    *count += numExamples;
+    *bytes = checkedMul(*count, exampleSizeInBytes, "Shard compact payload bytes");
 }
 
 ShardExampleReadRequest Shard::getExampleReadRequest(ExampleType exampleType, uint64_t exampleIndex) {
@@ -364,19 +519,30 @@ uint64_t Shard::getNumExamples(ExampleType exampleType) {
 
 const std::vector<std::string> &Shard::getAllClasses() { return allClasses; }
 
-void Shard::writeHeader(uint64_t metadataOffsetBytes, uint64_t metadataBytes) {
+void Shard::writeHeader(uint64_t metadataOffsetBytes, uint64_t metadataBytes, uint32_t metadataLayout) {
     shardFile.seekp(0, std::ios::beg);
     THOR_THROW_IF_FALSE(shardFile.good());
+
+    uint64_t trainCount = trainExamples.size();
+    uint64_t validateCount = validateExamples.size();
+    uint64_t testCount = testExamples.size();
+    if (metadataLayout == SHARD_METADATA_LAYOUT_COMPACT) {
+        trainCount = compactTrainCount;
+        validateCount = compactValidateCount;
+        testCount = compactTestCount;
+    } else {
+        THOR_THROW_IF_FALSE(metadataLayout == SHARD_METADATA_LAYOUT_EXPLICIT);
+    }
 
     writeExact(shardFile, SHARD_MAGIC.data(), SHARD_MAGIC.size());
     writeUint32(shardFile, SHARD_FORMAT_VERSION);
     writeUint32(shardFile, SHARD_HEADER_BYTES);
     writeUint64(shardFile, exampleSizeInBytes);
     writeUint32(shardFile, static_cast<uint32_t>(dataType));
-    writeUint32(shardFile, SHARD_METADATA_LAYOUT_EXPLICIT);
-    writeUint64(shardFile, trainExamples.size());
-    writeUint64(shardFile, validateExamples.size());
-    writeUint64(shardFile, testExamples.size());
+    writeUint32(shardFile, metadataLayout);
+    writeUint64(shardFile, trainCount);
+    writeUint64(shardFile, validateCount);
+    writeUint64(shardFile, testCount);
     writeUint64(shardFile, allClasses.size());
     writeUint64(shardFile, metadataOffsetBytes);
     writeUint64(shardFile, metadataBytes);
@@ -386,7 +552,20 @@ void Shard::writeHeader(uint64_t metadataOffsetBytes, uint64_t metadataBytes) {
 }
 
 void Shard::writeMetadata() {
-    shardFile.seekp(0, std::ios::end);
+    uint32_t metadataLayout = SHARD_METADATA_LAYOUT_EXPLICIT;
+    if (compactMetadata) {
+        metadataLayout = SHARD_METADATA_LAYOUT_COMPACT;
+        const uint64_t trainCapacityBytes = checkedMul(compactTrainCapacity, exampleSizeInBytes, "Shard compact metadata offset");
+        const uint64_t validateCapacityBytes = checkedMul(compactValidateCapacity, exampleSizeInBytes, "Shard compact metadata offset");
+        const uint64_t testCapacityBytes = checkedMul(compactTestCapacity, exampleSizeInBytes, "Shard compact metadata offset");
+        const uint64_t payloadCapacityBytes = checkedAdd(checkedAdd(trainCapacityBytes, validateCapacityBytes, "Shard compact metadata offset"),
+                                                        testCapacityBytes,
+                                                        "Shard compact metadata offset");
+        const uint64_t metadataOffsetBytes = checkedAdd(SHARD_HEADER_BYTES, payloadCapacityBytes, "Shard compact metadata offset");
+        shardFile.seekp(static_cast<std::streamoff>(metadataOffsetBytes), std::ios::beg);
+    } else {
+        shardFile.seekp(0, std::ios::end);
+    }
     THOR_THROW_IF_FALSE(shardFile.good());
     const std::streamoff metadataOffset = shardFile.tellp();
     THOR_THROW_IF_FALSE(metadataOffset >= 0);
@@ -394,16 +573,29 @@ void Shard::writeMetadata() {
     for (const std::string &className : allClasses) {
         writeString(shardFile, className);
     }
-    writeRecordVector(shardFile, trainExamples);
-    writeRecordVector(shardFile, validateExamples);
-    writeRecordVector(shardFile, testExamples);
+    if (compactMetadata) {
+        writeUint64(shardFile, compactTrainOffsetBytes);
+        writeUint64(shardFile, compactTrainCount);
+        writeUint64(shardFile, compactValidateOffsetBytes);
+        writeUint64(shardFile, compactValidateCount);
+        writeUint64(shardFile, compactTestOffsetBytes);
+        writeUint64(shardFile, compactTestCount);
+    } else {
+        writeRecordVector(shardFile, trainExamples);
+        writeRecordVector(shardFile, validateExamples);
+        writeRecordVector(shardFile, testExamples);
+    }
 
     const std::streamoff metadataEnd = shardFile.tellp();
     THOR_THROW_IF_FALSE(metadataEnd >= metadataOffset);
     const uint64_t metadataOffsetBytes = static_cast<uint64_t>(metadataOffset);
     const uint64_t metadataBytes = static_cast<uint64_t>(metadataEnd - metadataOffset);
 
-    writeHeader(metadataOffsetBytes, metadataBytes);
+    writeHeader(metadataOffsetBytes, metadataBytes, metadataLayout);
+
+    shardFile.flush();
+    THOR_THROW_IF_FALSE(shardFile.good());
+    std::filesystem::resize_file(filename, metadataOffsetBytes + metadataBytes);
 }
 
 void Shard::readMetadata(uint32_t metadataLayout,
@@ -439,12 +631,15 @@ void Shard::readMetadata(uint32_t metadataLayout,
 
         compactTrainOffsetBytes = readUint64(input);
         compactTrainCount = readUint64(input);
+        compactTrainCapacity = compactTrainCount;
         compactTrainBytes = metadataLayout == SHARD_METADATA_LAYOUT_BYTE_CORPUS ? readUint64(input) : compactTrainCount * exampleSizeInBytes;
         compactValidateOffsetBytes = readUint64(input);
         compactValidateCount = readUint64(input);
+        compactValidateCapacity = compactValidateCount;
         compactValidateBytes = metadataLayout == SHARD_METADATA_LAYOUT_BYTE_CORPUS ? readUint64(input) : compactValidateCount * exampleSizeInBytes;
         compactTestOffsetBytes = readUint64(input);
         compactTestCount = readUint64(input);
+        compactTestCapacity = compactTestCount;
         compactTestBytes = metadataLayout == SHARD_METADATA_LAYOUT_BYTE_CORPUS ? readUint64(input) : compactTestCount * exampleSizeInBytes;
 
         THOR_THROW_IF_FALSE(compactTrainCount == trainCount);
