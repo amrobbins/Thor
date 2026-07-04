@@ -129,6 +129,9 @@ class ScopedEnvVar {
     std::optional<std::string> previous_;
 };
 
+
+bool isReadvBackendName(const std::string &name) { return name.find("readv") != std::string::npos; }
+
 bool isUnavailableExplicitBackend(const IndexedBackendCase &backend, const std::string &message) {
     const std::string envValue(backend.envValue);
     if (envValue == "uring_direct") {
@@ -208,7 +211,7 @@ void exerciseIndexedLoaderWithBackendOrSkip(const IndexedBackendCase &backend) {
                                      std::string(backend.envValue) + ".");
         }
         IndexedLocalNamedBatchAssemblerStats stats = loader.getStatsSnapshot(ExampleType::TRAIN);
-        EXPECT_EQ(stats.resolvedIoBackend, "preadv");
+        EXPECT_TRUE(isReadvBackendName(stats.resolvedIoBackend)) << stats.resolvedIoBackend;
         EXPECT_GE(stats.recordsRequested, 4);
         EXPECT_GE(stats.readBytesSubmitted, 4 * layout.recordSizeBytes());
         EXPECT_DOUBLE_EQ(stats.readAmplification(), 1.0);
@@ -250,8 +253,8 @@ bool waitForReadyBatches(IndexedLocalNamedBatchLoader &loader, ExampleType examp
 
 }  // namespace
 
-TEST(IndexedLocalNamedExampleReaderTest, ExposesLayoutOrdinalsAndUsesPreadvIntoOrdinalDestinations) {
-    const std::filesystem::path datasetPath = makeTempDatasetPath("reader_ordinals_preadv");
+TEST(IndexedLocalNamedExampleReaderTest, ExposesLayoutOrdinalsAndUsesAsyncReadvIntoOrdinalDestinations) {
+    const std::filesystem::path datasetPath = makeTempDatasetPath("reader_ordinals_readv");
     LocalNamedExampleLayout layout = testLayout();
     writeCanonicalDataset(datasetPath, layout);
 
@@ -278,6 +281,7 @@ TEST(IndexedLocalNamedExampleReaderTest, ExposesLayoutOrdinalsAndUsesPreadvIntoO
 
     std::unique_ptr<IndexedLocalNamedExampleReader::Session> session = reader->createSession(4);
     session->loadExampleInto(4, 1, destinations);
+    session->drain();
 
     EXPECT_FLOAT_EQ(seasonality.at(0), -1.0f);
     EXPECT_FLOAT_EQ(seasonality.at(1), -1.0f);
@@ -298,7 +302,54 @@ TEST(IndexedLocalNamedExampleReaderTest, ExposesLayoutOrdinalsAndUsesPreadvIntoO
     EXPECT_EQ(stats.readCallsCompleted, 1);
     EXPECT_EQ(stats.readBytesCompleted, layout.recordSizeBytes());
     ASSERT_EQ(stats.resolvedIoBackends.size(), 1);
-    EXPECT_EQ(stats.resolvedIoBackends.front(), "preadv");
+    EXPECT_TRUE(isReadvBackendName(stats.resolvedIoBackends.front())) << stats.resolvedIoBackends.front();
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(IndexedLocalNamedExampleReaderTest, AsyncReadvDrainsAndReusesIovecSlotsWhenQueueDepthIsSmall) {
+    ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "pread_buffered");
+
+    const std::filesystem::path datasetPath = makeTempDatasetPath("reader_async_readv_queue_depth");
+    LocalNamedExampleLayout layout = testLayout();
+    writeCanonicalDataset(datasetPath, layout);
+
+    std::shared_ptr<IndexedLocalNamedExampleReader> reader = IndexedLocalNamedExampleReader::openDataset(datasetPath, layout);
+
+    std::vector<float> seasonality(10, -1.0f);
+    std::vector<float> monotone(15, -2.0f);
+    std::vector<float> weight(5, -3.0f);
+
+    std::vector<uint8_t *> destinations(reader->getTensorCount(), nullptr);
+    destinations.at(reader->getLayoutTensorOrdinal("seasonality_inputs")) = reinterpret_cast<uint8_t *>(seasonality.data());
+    destinations.at(reader->getLayoutTensorOrdinal("monotone_inputs")) = reinterpret_cast<uint8_t *>(monotone.data());
+    destinations.at(reader->getLayoutTensorOrdinal("daily_weight")) = reinterpret_cast<uint8_t *>(weight.data());
+
+    std::unique_ptr<IndexedLocalNamedExampleReader::Session> session = reader->createSession(2);
+    for (uint64_t slot = 0; slot < 5; ++slot) {
+        session->loadExampleInto(slot, slot, destinations);
+    }
+    session->drain();
+
+    EXPECT_EQ(seasonality, (std::vector<float>{0.0f, 1.0f,
+                                               20.0f, 21.0f,
+                                               40.0f, 41.0f,
+                                               60.0f, 61.0f,
+                                               80.0f, 81.0f}));
+    EXPECT_EQ(monotone, (std::vector<float>{10.0f, 11.0f, 12.0f,
+                                            30.0f, 31.0f, 32.0f,
+                                            50.0f, 51.0f, 52.0f,
+                                            70.0f, 71.0f, 72.0f,
+                                            90.0f, 91.0f, 92.0f}));
+    EXPECT_EQ(weight, (std::vector<float>{100.0f, 120.0f, 140.0f, 160.0f, 180.0f}));
+
+    IndexedLocalNamedExampleReaderSessionStats stats = session->takeStats();
+    EXPECT_EQ(stats.readCallsSubmitted, 5);
+    EXPECT_EQ(stats.readBytesSubmitted, 5 * layout.recordSizeBytes());
+    EXPECT_EQ(stats.readCallsCompleted, 5);
+    EXPECT_EQ(stats.readBytesCompleted, 5 * layout.recordSizeBytes());
+    ASSERT_EQ(stats.resolvedIoBackends.size(), 1);
+    EXPECT_EQ(stats.resolvedIoBackends.front(), "pread_buffered_readv");
 
     std::filesystem::remove_all(datasetPath);
 }
@@ -659,6 +710,17 @@ TEST(IndexedLocalNamedBatchLoaderTest, EmptyValidateAndTestSplitsHaveNoReadyBatc
     std::filesystem::remove_all(datasetPath);
 }
 
+TEST(IndexedLocalNamedBatchAssemblerStatsTest, ReadAmplificationUsesSubmittedLogicalBytes) {
+    IndexedLocalNamedBatchAssemblerStats stats;
+    stats.recordSizeBytes = 24;
+    stats.recordsRequested = 3;
+    stats.logicalRecordBytesRequested = 72;
+    stats.readCallsSubmitted = 2;
+    stats.readBytesSubmitted = 48;
+
+    EXPECT_DOUBLE_EQ(stats.readAmplification(), 1.0);
+}
+
 TEST(IndexedLocalNamedBatchLoaderTest, StatsExposeReadAndBatchCounters) {
     const std::filesystem::path datasetPath = makeTempDatasetPath("stats_counters");
     LocalNamedExampleLayout layout = testLayout();
@@ -701,7 +763,7 @@ TEST(IndexedLocalNamedBatchLoaderTest, StatsExposeReadAndBatchCounters) {
     EXPECT_EQ(stats.batchBuffersReturned, 0);
     EXPECT_GE(stats.currentReadyBatches, 2);
     EXPECT_EQ(stats.targetBatchQueueDepth, 3);
-    EXPECT_EQ(stats.resolvedIoBackend, "preadv");
+    EXPECT_TRUE(isReadvBackendName(stats.resolvedIoBackend)) << stats.resolvedIoBackend;
 
     uint64_t batchNum = 99;
     Batch batch = loader.getBatch(ExampleType::TRAIN, batchNum);

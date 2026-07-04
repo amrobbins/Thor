@@ -53,11 +53,22 @@ struct IndexedLocalNamedBatchAssemblerStats {
     std::string resolvedIoBackend;
 
     double readAmplification() const {
-        if (logicalRecordBytesRequested == 0) {
+        // read_amplification is a physical-read/logical-read ratio.  With the
+        // asynchronous indexed loader, records can be planned before their
+        // reader-session stats have been flushed back into this snapshot, so
+        // logicalRecordBytesRequested can legitimately lead readBytesSubmitted.
+        // Use the logical byte count represented by submitted read calls instead
+        // of the broader planning counter, otherwise a normal prefetch lead makes
+        // a direct 1:1 read path appear to have amplification below 1.0.
+        if (readCallsSubmitted == 0 || recordSizeBytes == 0) {
             return 0.0;
         }
-        return static_cast<double>(readBytesSubmitted) /
-               static_cast<double>(logicalRecordBytesRequested);
+        const double logicalBytesSubmitted =
+            static_cast<double>(readCallsSubmitted) * static_cast<double>(recordSizeBytes);
+        if (logicalBytesSubmitted == 0.0) {
+            return 0.0;
+        }
+        return static_cast<double>(readBytesSubmitted) / logicalBytesSubmitted;
     }
 
     double planningLeadRecords() const {

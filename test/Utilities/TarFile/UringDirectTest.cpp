@@ -706,6 +706,7 @@ class ScopedUringDirectCompatibilityTestHooks {
         UringDirect::testSetIoUringQueueInitResult(std::nullopt);
         UringDirect::testSetDirectOpenUnavailable(false);
         UringDirect::testSetIoUringRegisterBuffersResult(std::nullopt);
+        UringDirect::testSetNextIoUringSubmissionByteLimit(std::nullopt);
         UringDirect::testResetFallbackWorkerBlock();
         UringDirect::testResetCompatibilityWarning();
     }
@@ -929,6 +930,171 @@ TEST(UringDirect, RejectsTransferLengthOutsideCompletionResponseRange) {
     const auto tooLargeForCompletion = static_cast<std::uint32_t>(std::numeric_limits<int>::max()) + 1u;
     EXPECT_THROW(reader.submitReadCached(&byte, /*fileOffsetBytes=*/0, tooLargeForCompletion), std::runtime_error)
         << "Completion responseCode is an int, so oversized logical transfers cannot be represented safely.";
+}
+
+TEST(UringDirect, SubmitReadvCachedScattersContiguousFileRangeWithBufferedFallback) {
+    std::string filename = makeTmpPrefix("readv_cached_scatter_buffered");
+    ScopedUnlink cleanup(filename);
+
+    std::vector<uint8_t> fileBytes(96);
+    for (std::size_t i = 0; i < fileBytes.size(); ++i) {
+        fileBytes[i] = static_cast<uint8_t>((i * 17u + 3u) & 0xFFu);
+    }
+    {
+        std::ofstream out(filename, std::ios::binary);
+        ASSERT_TRUE(out.good());
+        out.write(reinterpret_cast<const char*>(fileBytes.data()), static_cast<std::streamsize>(fileBytes.size()));
+        ASSERT_TRUE(out.good());
+    }
+
+    constexpr std::uint32_t offset = 11;
+    std::vector<uint8_t> first(7, 0);
+    std::vector<uint8_t> second(19, 0);
+    std::vector<uint8_t> third(13, 0);
+
+    iovec iovecs[] = {
+        iovec{first.data(), first.size()},
+        iovec{second.data(), second.size()},
+        iovec{third.data(), third.size()},
+    };
+    constexpr std::uint32_t totalBytes = 7 + 19 + 13;
+
+    UringDirect reader(/*queueDepth=*/2, UringDirect::IoBackend::PreadBuffered);
+    reader.registerCachedLoadFile(filename);
+    ASSERT_TRUE(reader.submitReadvCached(iovecs, 3, /*fileOffsetBytes=*/offset, totalBytes));
+    EXPECT_EQ(reader.submit(), 1);
+
+    auto completions = reader.waitCompletionsInOrder(1);
+    ASSERT_EQ(completions.size(), 1u);
+    EXPECT_EQ(completions[0].responseCode, static_cast<int>(totalBytes));
+
+    EXPECT_TRUE(std::equal(first.begin(), first.end(), fileBytes.begin() + offset));
+    EXPECT_TRUE(std::equal(second.begin(), second.end(), fileBytes.begin() + offset + first.size()));
+    EXPECT_TRUE(std::equal(third.begin(), third.end(), fileBytes.begin() + offset + first.size() + second.size()));
+}
+
+TEST(UringDirect, SubmitReadvCachedBufferedFallbackIsAsyncAndAllowsMultipleInFlight) {
+    std::string filename = makeTmpPrefix("readv_cached_async_buffered");
+    ScopedUnlink cleanup(filename);
+
+    std::vector<uint8_t> fileBytes(128);
+    for (std::size_t i = 0; i < fileBytes.size(); ++i) {
+        fileBytes[i] = static_cast<uint8_t>((i * 29u + 7u) & 0xFFu);
+    }
+    {
+        std::ofstream out(filename, std::ios::binary);
+        ASSERT_TRUE(out.good());
+        out.write(reinterpret_cast<const char*>(fileBytes.data()), static_cast<std::streamsize>(fileBytes.size()));
+        ASSERT_TRUE(out.good());
+    }
+
+    std::vector<uint8_t> a0(8, 0);
+    std::vector<uint8_t> a1(8, 0);
+    std::vector<uint8_t> b0(5, 0);
+    std::vector<uint8_t> b1(11, 0);
+
+    iovec firstRequest[] = {
+        iovec{a0.data(), a0.size()},
+        iovec{a1.data(), a1.size()},
+    };
+    iovec secondRequest[] = {
+        iovec{b0.data(), b0.size()},
+        iovec{b1.data(), b1.size()},
+    };
+
+    UringDirect::testResetFallbackWorkerBlock();
+    UringDirect reader(/*queueDepth=*/2, UringDirect::IoBackend::PreadBuffered);
+    reader.registerCachedLoadFile(filename);
+
+    UringDirect::testSetFallbackWorkerBlockEnabled(true);
+    ASSERT_TRUE(reader.submitReadvCached(firstRequest, 2, /*fileOffsetBytes=*/3, /*totalBytes=*/16));
+    ASSERT_TRUE(reader.submitReadvCached(secondRequest, 2, /*fileOffsetBytes=*/37, /*totalBytes=*/16));
+    EXPECT_EQ(reader.submit(), 2);
+
+    ASSERT_TRUE(UringDirect::testWaitForFallbackWorkerStartedCount(2, std::chrono::seconds(5)));
+    EXPECT_TRUE(reader.pollCompletionsInOrder(2).empty())
+        << "fallback readv completed while test worker hook was still blocked";
+
+    UringDirect::testSetFallbackWorkerBlockEnabled(false);
+    auto completions = reader.waitCompletionsInOrder(2);
+    ASSERT_EQ(completions.size(), 2u);
+    EXPECT_EQ(completions[0].responseCode, 16);
+    EXPECT_EQ(completions[1].responseCode, 16);
+
+    EXPECT_TRUE(std::equal(a0.begin(), a0.end(), fileBytes.begin() + 3));
+    EXPECT_TRUE(std::equal(a1.begin(), a1.end(), fileBytes.begin() + 3 + a0.size()));
+    EXPECT_TRUE(std::equal(b0.begin(), b0.end(), fileBytes.begin() + 37));
+    EXPECT_TRUE(std::equal(b1.begin(), b1.end(), fileBytes.begin() + 37 + b0.size()));
+    UringDirect::testResetFallbackWorkerBlock();
+}
+
+TEST(UringDirect, SubmitReadvCachedRejectsInvalidIovecsAndTotalByteMismatch) {
+    std::string filename = makeTmpPrefix("readv_cached_validation");
+    {
+        std::ofstream out(filename, std::ios::binary);
+        ASSERT_TRUE(out.good());
+        out.write("0123456789abcdef", 16);
+        ASSERT_TRUE(out.good());
+    }
+    ScopedUnlink cleanup(filename);
+
+    UringDirect reader(/*queueDepth=*/1, UringDirect::IoBackend::PreadBuffered);
+    reader.registerCachedLoadFile(filename);
+
+    std::vector<uint8_t> good(4, 0);
+    iovec mismatch[] = {iovec{good.data(), good.size()}};
+    EXPECT_THROW(reader.submitReadvCached(mismatch, 1, /*fileOffsetBytes=*/0, /*totalBytes=*/5), std::runtime_error);
+
+    iovec nullBase[] = {iovec{nullptr, 4}};
+    EXPECT_THROW(reader.submitReadvCached(nullBase, 1, /*fileOffsetBytes=*/0, /*totalBytes=*/4), std::runtime_error);
+
+    iovec zeroLen[] = {iovec{good.data(), 0}};
+    EXPECT_THROW(reader.submitReadvCached(zeroLen, 1, /*fileOffsetBytes=*/0, /*totalBytes=*/4), std::runtime_error);
+}
+
+TEST(UringDirect, SubmitReadvCachedHandlesShortIoUringCompletions) {
+    ScopedUringDirectCompatibilityTestHooks hooks(std::nullopt, false);
+
+    std::string filename = makeTmpPrefix("readv_cached_short_uring");
+    ScopedUnlink cleanup(filename);
+
+    std::vector<uint8_t> fileBytes(128);
+    for (std::size_t i = 0; i < fileBytes.size(); ++i) {
+        fileBytes[i] = static_cast<uint8_t>((i * 13u + 41u) & 0xFFu);
+    }
+    {
+        std::ofstream out(filename, std::ios::binary);
+        ASSERT_TRUE(out.good());
+        out.write(reinterpret_cast<const char*>(fileBytes.data()), static_cast<std::streamsize>(fileBytes.size()));
+        ASSERT_TRUE(out.good());
+    }
+
+    UringDirect reader(/*queueDepth=*/8, UringDirect::IoBackend::Auto);
+    if (std::string(reader.activeBackendName()) != "uring_direct") {
+        GTEST_SKIP() << "io_uring unavailable in this runtime; active backend is " << reader.activeBackendName();
+    }
+    reader.registerCachedLoadFile(filename);
+
+    std::vector<uint8_t> first(9, 0);
+    std::vector<uint8_t> second(17, 0);
+    std::vector<uint8_t> third(6, 0);
+    iovec iovecs[] = {
+        iovec{first.data(), first.size()},
+        iovec{second.data(), second.size()},
+        iovec{third.data(), third.size()},
+    };
+
+    UringDirect::testSetNextIoUringSubmissionByteLimit(11);
+    ASSERT_TRUE(reader.submitReadvCached(iovecs, 3, /*fileOffsetBytes=*/23, /*totalBytes=*/32));
+    EXPECT_GE(reader.submit(), 1);
+
+    auto completions = reader.waitCompletionsInOrder(1);
+    ASSERT_EQ(completions.size(), 1u);
+    EXPECT_EQ(completions[0].responseCode, 32);
+
+    EXPECT_TRUE(std::equal(first.begin(), first.end(), fileBytes.begin() + 23));
+    EXPECT_TRUE(std::equal(second.begin(), second.end(), fileBytes.begin() + 23 + first.size()));
+    EXPECT_TRUE(std::equal(third.begin(), third.end(), fileBytes.begin() + 23 + first.size() + second.size()));
 }
 
 TEST(UringDirect, FinishDumpedFileRejectsUndrainedWriteCompletions) {

@@ -346,12 +346,12 @@ def test_indexed_local_named_loader_exposes_stats(tmp_path):
     assert after["read_bytes_completed"] % record_size == 0
     assert after["records_copied"] == 0
     assert after["record_copy_bytes"] == 0
-    # Direct preadv reads avoid the CPU memcpy fanout stage entirely.
+    # Direct vectorized reads avoid the CPU memcpy fanout stage entirely.
     assert after["record_copy_memcpy_calls"] == 0
     assert after["average_copy_bytes_per_record"] == 0.0
     assert after["average_copy_memcpy_calls_per_record"] == 0.0
     assert after["read_amplification"] == 1.0
-    assert after["resolved_io_backend"] == "preadv"
+    assert "readv" in after["resolved_io_backend"]
     assert after["batches_assembled"] >= 1
     assert after["batches_delivered"] >= 1
     assert after["batch_buffers_returned"] >= 1

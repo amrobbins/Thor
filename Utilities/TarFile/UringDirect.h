@@ -13,6 +13,7 @@
 #include <deque>
 #include <iostream>
 #include <limits>
+#include <climits>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -23,6 +24,7 @@
 
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 class UringDirect {
@@ -453,6 +455,58 @@ class UringDirect {
         return true;
     }
 
+    // Submit an async cached vectored read into ordinary caller-owned memory.
+    //
+    // This is the scatter-read counterpart to submitReadCached(): one contiguous
+    // file range is read into multiple destination spans.  The caller must keep
+    // the iovec array and all referenced destination memory alive and unchanged
+    // until the completion is delivered.  On rare exact-I/O short-completion
+    // retry paths the iovec array may be advanced in-place before completion, so
+    // callers should treat it as owned by this request until the completion is
+    // observed.
+    bool submitReadvCached(iovec* iovecs, unsigned iovCount, std::uint64_t fileOffsetBytes, std::uint32_t totalBytes) {
+        if (!fileRegistered_) {
+            throw std::runtime_error("submitReadvCached: no registered file");
+        }
+        if (iovecs == nullptr) {
+            throw std::runtime_error("submitReadvCached: null iovec array");
+        }
+        if (iovCount == 0) {
+            throw std::runtime_error("submitReadvCached: iovCount is 0");
+        }
+        if (totalBytes == 0) {
+            throw std::runtime_error("submitReadvCached: totalBytes is 0");
+        }
+        validateIovecRange("submitReadvCached", iovecs, iovCount, totalBytes);
+        validateExactIoRange("submitReadvCached", fileOffsetBytes, totalBytes);
+
+        if (!usesIoUring()) {
+            return submitFallbackReadv(iovecs, iovCount, totalBytes, fileOffsetBytes);
+        }
+
+        io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
+        if (!sqe)
+            return false;
+
+        const std::uint64_t seq = nextSeq();
+        ExactIoRequest req;
+        req.op = ExactIoOp::Read;
+        req.fixedBuffer = false;
+        req.vectored = true;
+        req.bufIndex = 0;
+        req.ptr = nullptr;
+        req.iovecs = iovecs;
+        req.iovCount = iovCount;
+        req.firstIov = 0;
+        req.requestedBytes = totalBytes;
+        req.remainingBytes = totalBytes;
+        req.fileOffsetBytes = fileOffsetBytes;
+
+        queueExactIoRequest(sqe, seq, std::move(req), "submitReadvCached");
+
+        return true;
+    }
+
     int submit() {
         if (!usesIoUring()) {
             std::lock_guard<std::mutex> guard(fallbackMutex_);
@@ -745,8 +799,13 @@ class UringDirect {
     struct ExactIoRequest {
         ExactIoOp op = ExactIoOp::Read;
         bool fixedBuffer = false;
+        bool vectored = false;
         unsigned bufIndex = 0;
         void* ptr = nullptr;
+        iovec* iovecs = nullptr;
+        unsigned iovCount = 0;
+        unsigned firstIov = 0;
+        std::vector<iovec> limitedSubmissionIovecs;
         std::uint32_t requestedBytes = 0;
         std::uint32_t remainingBytes = 0;
         std::uint32_t submittedBytes = 0;
@@ -761,6 +820,66 @@ class UringDirect {
         const auto maxOff = static_cast<std::uint64_t>(std::numeric_limits<off_t>::max());
         if (fileOffsetBytes > maxOff || static_cast<std::uint64_t>(lenBytes) > maxOff - fileOffsetBytes) {
             throw std::runtime_error(std::string(caller) + ": file offset range exceeds off_t range");
+        }
+    }
+
+    static void validateIovecRange(const char* caller, const iovec* iovecs, unsigned iovCount, std::uint32_t totalBytes) {
+#ifdef IOV_MAX
+        if (iovCount > static_cast<unsigned>(IOV_MAX)) {
+            throw std::runtime_error(std::string(caller) + ": iovCount exceeds IOV_MAX");
+        }
+#endif
+        std::uint64_t sumBytes = 0;
+        for (unsigned i = 0; i < iovCount; ++i) {
+            if (iovecs[i].iov_base == nullptr) {
+                throw std::runtime_error(std::string(caller) + ": null iov_base at index " + std::to_string(i));
+            }
+            if (iovecs[i].iov_len == 0) {
+                throw std::runtime_error(std::string(caller) + ": zero iov_len at index " + std::to_string(i));
+            }
+            sumBytes += static_cast<std::uint64_t>(iovecs[i].iov_len);
+            if (sumBytes > static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max())) {
+                throw std::runtime_error(std::string(caller) + ": iovec byte count exceeds uint32_t range");
+            }
+        }
+        if (sumBytes != static_cast<std::uint64_t>(totalBytes)) {
+            throw std::runtime_error(std::string(caller) + ": iovec byte count does not match totalBytes");
+        }
+    }
+
+    static void advanceIovecs(iovec* iovecs, unsigned iovCount, unsigned& firstIov, std::uint32_t transferredBytes) {
+        std::uint32_t remaining = transferredBytes;
+        while (remaining > 0) {
+            if (firstIov >= iovCount) {
+                throw std::runtime_error("UringDirect: readv completion exceeded iovec range");
+            }
+
+            iovec& current = iovecs[firstIov];
+            if (remaining < current.iov_len) {
+                current.iov_base = static_cast<std::uint8_t*>(current.iov_base) + remaining;
+                current.iov_len -= remaining;
+                return;
+            }
+
+            remaining -= static_cast<std::uint32_t>(current.iov_len);
+            ++firstIov;
+        }
+    }
+
+    static void buildLimitedSubmissionIovecs(ExactIoRequest& req, std::uint32_t bytesToSubmit) {
+        req.limitedSubmissionIovecs.clear();
+        req.limitedSubmissionIovecs.reserve(req.iovCount - req.firstIov);
+
+        std::uint32_t remaining = bytesToSubmit;
+        for (unsigned i = req.firstIov; i < req.iovCount && remaining > 0; ++i) {
+            const iovec& source = req.iovecs[i];
+            const std::size_t len = std::min<std::size_t>(source.iov_len, remaining);
+            req.limitedSubmissionIovecs.push_back(iovec{source.iov_base, len});
+            remaining -= static_cast<std::uint32_t>(len);
+        }
+
+        if (remaining != 0 || req.limitedSubmissionIovecs.empty()) {
+            throw std::runtime_error("UringDirect: unable to build limited readv submission");
         }
     }
 
@@ -818,6 +937,19 @@ class UringDirect {
                                          /*nbytes=*/bytesToSubmit,
                                          /*offset=*/static_cast<off_t>(req.fileOffsetBytes),
                                          /*buf_index=*/req.bufIndex);
+            } else if (req.vectored) {
+                iovec* submissionIovecs = req.iovecs + req.firstIov;
+                unsigned submissionIovCount = req.iovCount - req.firstIov;
+                if (bytesToSubmit != req.remainingBytes) {
+                    buildLimitedSubmissionIovecs(req, bytesToSubmit);
+                    submissionIovecs = req.limitedSubmissionIovecs.data();
+                    submissionIovCount = static_cast<unsigned>(req.limitedSubmissionIovecs.size());
+                }
+                io_uring_prep_readv(sqe,
+                                    /*fd=*/0,
+                                    /*iovecs=*/submissionIovecs,
+                                    /*nr_vecs=*/submissionIovCount,
+                                    /*offset=*/static_cast<off_t>(req.fileOffsetBytes));
             } else {
                 io_uring_prep_read(sqe,
                                    /*fd=*/0,
@@ -871,7 +1003,11 @@ class UringDirect {
                                      " exceeds submitted exact-I/O byte count " + std::to_string(submitted));
         }
 
-        req.ptr = static_cast<std::uint8_t*>(req.ptr) + transferred;
+        if (req.vectored) {
+            advanceIovecs(req.iovecs, req.iovCount, req.firstIov, transferred);
+        } else {
+            req.ptr = static_cast<std::uint8_t*>(req.ptr) + transferred;
+        }
         req.fileOffsetBytes += transferred;
         req.remainingBytes -= transferred;
 
@@ -1125,6 +1261,9 @@ class UringDirect {
         int fd = -1;
         void* ptr = nullptr;
         std::uint32_t lenBytes = 0;
+        iovec* iovecs = nullptr;
+        unsigned iovCount = 0;
+        bool vectored = false;
         std::uint64_t fileOffsetBytes = 0;
     };
 
@@ -1167,6 +1306,33 @@ class UringDirect {
         req.fd = fd_;
         req.ptr = ptr;
         req.lenBytes = lenBytes;
+        req.fileOffsetBytes = fileOffsetBytes;
+        fallbackWork_.push_back(req);
+        ++fallbackInFlight_;
+        ++fallbackSubmittedSinceLastSubmit_;
+        fallbackWorkCv_.notify_one();
+        return true;
+    }
+
+    bool submitFallbackReadv(iovec* iovecs, unsigned iovCount, std::uint32_t totalBytes, std::uint64_t fileOffsetBytes) {
+        ensureFallbackWorkers();
+
+        std::lock_guard<std::mutex> guard(fallbackMutex_);
+        if (fallbackStop_) {
+            throw std::runtime_error("submitFallbackReadv: fallback worker pool is shutting down");
+        }
+        if (fallbackInFlight_ >= fallbackQueueDepth_) {
+            return false;
+        }
+
+        FallbackRequest req;
+        req.op = FallbackOp::Read;
+        req.completion.userData = nextSeq();
+        req.fd = fd_;
+        req.iovecs = iovecs;
+        req.iovCount = iovCount;
+        req.vectored = true;
+        req.lenBytes = totalBytes;
         req.fileOffsetBytes = fileOffsetBytes;
         fallbackWork_.push_back(req);
         ++fallbackInFlight_;
@@ -1228,7 +1394,11 @@ class UringDirect {
 #endif
 
             if (req.op == FallbackOp::Read) {
-                req.completion.responseCode = preadAll(req.fd, req.ptr, req.lenBytes, req.fileOffsetBytes);
+                if (req.vectored) {
+                    req.completion.responseCode = preadvAll(req.fd, req.iovecs, req.iovCount, req.lenBytes, req.fileOffsetBytes);
+                } else {
+                    req.completion.responseCode = preadAll(req.fd, req.ptr, req.lenBytes, req.fileOffsetBytes);
+                }
             } else {
                 req.completion.responseCode = pwriteAll(req.fd, req.ptr, req.lenBytes, req.fileOffsetBytes);
             }
@@ -1274,6 +1444,35 @@ class UringDirect {
             if (n == 0) {
                 return -EIO;
             }
+            done += static_cast<std::uint64_t>(n);
+        }
+        return static_cast<int>(done);
+    }
+
+    static int preadvAll(int fd, iovec* iovecs, unsigned iovCount, std::uint32_t totalBytes, std::uint64_t fileOffsetBytes) {
+        std::uint64_t done = 0;
+        unsigned firstIov = 0;
+        while (done < totalBytes) {
+            if (firstIov >= iovCount) {
+                return -EIO;
+            }
+            ssize_t n = ::preadv(fd,
+                                 iovecs + firstIov,
+                                 static_cast<int>(iovCount - firstIov),
+                                 static_cast<off_t>(fileOffsetBytes + done));
+            if (n < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                return -errno;
+            }
+            if (n == 0) {
+                return -EIO;
+            }
+            if (static_cast<std::uint64_t>(n) > static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max())) {
+                return -EIO;
+            }
+            advanceIovecs(iovecs, iovCount, firstIov, static_cast<std::uint32_t>(n));
             done += static_cast<std::uint64_t>(n);
         }
         return static_cast<int>(done);
