@@ -64,7 +64,7 @@ uint64_t parsePositiveUint64Env(const char *primaryName, const char *secondaryNa
 uint64_t computeLoadWorkerThreadCount(uint64_t batchSize) {
     const unsigned hardwareThreads = std::thread::hardware_concurrency();
     const uint64_t conservativeHardwareDefault =
-        hardwareThreads == 0 ? uint64_t{4} : std::max<uint64_t>(1, static_cast<uint64_t>(hardwareThreads) / 4);
+        hardwareThreads == 0 ? uint64_t{4} : std::max<uint64_t>(1, static_cast<uint64_t>(hardwareThreads) / 3);
     const uint64_t defaultWorkers = clampUint64(conservativeHardwareDefault, 1, std::min<uint64_t>(batchSize, 4));
     const uint64_t requestedWorkers = parsePositiveUint64Env(
         "THOR_INDEXED_LOCAL_NAMED_LOADER_LOAD_WORKERS", "THOR_INDEXED_LOCAL_NAMED_LOADER_WORKERS", defaultWorkers);
