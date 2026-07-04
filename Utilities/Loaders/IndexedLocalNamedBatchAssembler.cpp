@@ -163,9 +163,7 @@ IndexedLocalNamedBatchAssembler::IndexedLocalNamedBatchAssembler(std::shared_ptr
     THOR_THROW_IF_FALSE(recordSizeBytes == this->layout.recordSizeBytes());
     THOR_THROW_IF_FALSE(this->reader->getTensorCount() == this->layout.tensors().size());
 
-    const uint64_t directReadRequestsPerRecord = std::max<uint64_t>(static_cast<uint64_t>(this->layout.tensors().size()), 1);
-    const uint64_t averageDirectReadSizeBytes = std::max<uint64_t>(recordSizeBytes / directReadRequestsPerRecord, 1);
-    shardReadQueueDepth = computeShardReadQueueDepth(averageDirectReadSizeBytes);
+    shardReadQueueDepth = computeShardReadQueueDepth(recordSizeBytes);
     loadWorkerThreadCount = computeLoadWorkerThreadCount(batchSize);
     loadWorkQueueDepth = computeLoadWorkQueueDepth(batchQueueDepth, loadWorkerThreadCount);
     shardRequestQueueDepth = loadWorkQueueDepth;
@@ -182,12 +180,14 @@ IndexedLocalNamedBatchAssembler::IndexedLocalNamedBatchAssembler(std::shared_ptr
         }
     }
 
+    layoutTensorOrdinals.reserve(this->layout.tensors().size());
     for (const LocalNamedExampleLayout::TensorSpec &spec : this->layout.tensors()) {
         std::vector<uint64_t> dimensions;
         dimensions.reserve(spec.dimensions.size() + 1);
         dimensions.push_back(batchSize);
         dimensions.insert(dimensions.end(), spec.dimensions.begin(), spec.dimensions.end());
         batchTensorDescriptors.emplace(spec.name, TensorDescriptor(spec.dataType, dimensions));
+        layoutTensorOrdinals.push_back(this->reader->getLayoutTensorOrdinal(spec.name));
     }
 
     open();
@@ -439,10 +439,6 @@ void IndexedLocalNamedBatchAssembler::loadWorkerThreadMain(uint64_t workerIndex)
             return true;
         }
 
-        statsRecordsCopied.fetch_add(work.batchState->expectedRecords, std::memory_order_relaxed);
-        statsRecordCopyBytes.fetch_add(saturatedMultiplyUint64(work.batchState->expectedRecords, recordSizeBytes),
-                                       std::memory_order_relaxed);
-
         IndexedLocalNamedCompletedBatch completed;
         completed.batchOrdinal = work.batchOrdinal;
         return completedBatchQueue.push(completed);
@@ -460,7 +456,7 @@ void IndexedLocalNamedBatchAssembler::loadWorkerThreadMain(uint64_t workerIndex)
         THOR_THROW_IF_FALSE(work.slotBegin < work.slotEnd);
         THOR_THROW_IF_FALSE(work.slotEnd <= work.batchState->expectedRecords);
         THOR_THROW_IF_FALSE(work.batchState->globalExampleIndices.size() == work.batchState->expectedRecords);
-        THOR_THROW_IF_FALSE(work.batchState->tensorBasePointers.size() == layout.tensors().size());
+        THOR_THROW_IF_FALSE(work.batchState->tensorBasePointers.size() == reader->getTensorCount());
 
         for (uint64_t slot = work.slotBegin; slot < work.slotEnd; ++slot) {
             session->loadExampleInto(work.batchState->globalExampleIndices.at(slot), slot, work.batchState->tensorBasePointers);
@@ -530,20 +526,29 @@ bool IndexedLocalNamedBatchAssembler::startNextBatch() {
     batchState->batchOrdinal = nextBatchOrdinal++;
     batchState->batchNum = nextBatchNum;
     batchState->expectedRecords = batchSize;
-    batchState->expectedLoadChunks = std::min<uint64_t>(loadWorkerThreadCount, batchSize);
+    batchState->expectedLoadChunks = 1;
     batchState->completedLoadChunks.store(0, std::memory_order_relaxed);
     batchState->loadComplete = false;
-    batchState->tensorBasePointers.reserve(layout.tensors().size());
+    batchState->tensorBasePointers.assign(reader->getTensorCount(), nullptr);
     batchState->globalExampleIndices.reserve(batchSize);
     nextBatchNum = (nextBatchNum + 1) % batchesPerEpoch;
 
-    for (const LocalNamedExampleLayout::TensorSpec &spec : layout.tensors()) {
+    for (uint64_t specIndex = 0; specIndex < layout.tensors().size(); ++specIndex) {
+        const LocalNamedExampleLayout::TensorSpec &spec = layout.tensors().at(specIndex);
         Tensor tensor;
         if (!batchTensorQueues.at(spec.name)->getBufferToLoad(tensor)) {
             return false;
         }
-        batchState->tensorBasePointers.push_back(static_cast<uint8_t *>(tensor.getMemPtr()));
+        const uint64_t readerOrdinal = layoutTensorOrdinals.at(specIndex);
+        THOR_THROW_IF_FALSE(readerOrdinal < batchState->tensorBasePointers.size());
+        THOR_THROW_IF_FALSE(batchState->tensorBasePointers.at(readerOrdinal) == nullptr);
+        batchState->tensorBasePointers.at(readerOrdinal) = static_cast<uint8_t *>(tensor.getMemPtr());
         batchState->tensors.emplace(spec.name, tensor);
+    }
+    for (uint8_t *basePointer : batchState->tensorBasePointers) {
+        if (basePointer == nullptr) {
+            throw std::runtime_error("IndexedLocalNamedBatchAssembler failed to bind every reader tensor ordinal to a batch tensor.");
+        }
     }
 
     uint64_t localRecordsRequested = 0;
@@ -574,23 +579,13 @@ bool IndexedLocalNamedBatchAssembler::startNextBatch() {
         (void)insertIt;
     }
 
-    const uint64_t chunkCount = batchState->expectedLoadChunks;
-    const uint64_t slotsPerChunk = (batchSize + chunkCount - 1) / chunkCount;
-    for (uint64_t chunkIndex = 0; chunkIndex < chunkCount; ++chunkIndex) {
-        const uint64_t slotBegin = chunkIndex * slotsPerChunk;
-        const uint64_t slotEnd = std::min<uint64_t>(batchSize, slotBegin + slotsPerChunk);
-        if (slotBegin >= slotEnd) {
-            break;
-        }
-
-        IndexedLocalNamedBatchLoadWork work;
-        work.batchState = batchState.get();
-        work.batchOrdinal = batchOrdinal;
-        work.slotBegin = slotBegin;
-        work.slotEnd = slotEnd;
-        if (!pushLoadWorkWithDrain(work)) {
-            return false;
-        }
+    IndexedLocalNamedBatchLoadWork work;
+    work.batchState = batchState.get();
+    work.batchOrdinal = batchOrdinal;
+    work.slotBegin = 0;
+    work.slotEnd = batchSize;
+    if (!pushLoadWorkWithDrain(work)) {
+        return false;
     }
     return true;
 }

@@ -1,4 +1,5 @@
 #include "DeepLearning/Api/Loaders/IndexedLocalNamedBatchLoader.h"
+#include "Utilities/Loaders/IndexedLocalNamedExampleReader.h"
 #include "Utilities/Loaders/LocalNamedExampleDatasetWriter.h"
 
 #include "gtest/gtest.h"
@@ -9,6 +10,7 @@
 #include <filesystem>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -36,6 +38,15 @@ LocalNamedExampleLayout testLayout() {
     return LocalNamedExampleLayout::fromTensorShapes(
         vector<std::pair<string, vector<uint64_t>>>{{"seasonality_inputs", {2}}, {"monotone_inputs", {3}}, {"daily_weight", {1}}},
         DataType::FP32);
+}
+
+LocalNamedExampleLayout reorderedEquivalentLayout() {
+    LocalNamedExampleLayout layout = testLayout();
+    return LocalNamedExampleLayout(layout.dataType(),
+                                   layout.recordSizeBytes(),
+                                   vector<LocalNamedExampleLayout::TensorSpec>{layout.tensor("daily_weight"),
+                                                                               layout.tensor("seasonality_inputs"),
+                                                                               layout.tensor("monotone_inputs")});
 }
 
 LocalNamedExampleDatasetWriter::TensorView tensorView(vector<float> &values, vector<uint64_t> dimensions) {
@@ -197,11 +208,11 @@ void exerciseIndexedLoaderWithBackendOrSkip(const IndexedBackendCase &backend) {
                                      std::string(backend.envValue) + ".");
         }
         IndexedLocalNamedBatchAssemblerStats stats = loader.getStatsSnapshot(ExampleType::TRAIN);
-        EXPECT_EQ(stats.resolvedIoBackend, backend.envValue);
+        EXPECT_EQ(stats.resolvedIoBackend, "preadv");
         EXPECT_GE(stats.recordsRequested, 4);
         EXPECT_GE(stats.readBytesSubmitted, 4 * layout.recordSizeBytes());
         EXPECT_DOUBLE_EQ(stats.readAmplification(), 1.0);
-        EXPECT_GE(stats.recordsCopied, 4);
+        EXPECT_EQ(stats.recordsCopied, 0);
         EXPECT_EQ(stats.recordCopyThreadCount, 0);
 
         uint64_t batchNum = 99;
@@ -238,6 +249,86 @@ bool waitForReadyBatches(IndexedLocalNamedBatchLoader &loader, ExampleType examp
 }
 
 }  // namespace
+
+TEST(IndexedLocalNamedExampleReaderTest, ExposesLayoutOrdinalsAndUsesPreadvIntoOrdinalDestinations) {
+    const std::filesystem::path datasetPath = makeTempDatasetPath("reader_ordinals_preadv");
+    LocalNamedExampleLayout layout = testLayout();
+    writeCanonicalDataset(datasetPath, layout);
+
+    std::shared_ptr<IndexedLocalNamedExampleReader> reader = IndexedLocalNamedExampleReader::openDataset(datasetPath, layout);
+    EXPECT_EQ(reader->getTensorCount(), 3);
+    EXPECT_EQ(reader->getLayoutTensorOrdinal("seasonality_inputs"), 0);
+    EXPECT_EQ(reader->getLayoutTensorOrdinal("monotone_inputs"), 1);
+    EXPECT_EQ(reader->getLayoutTensorOrdinal("daily_weight"), 2);
+    EXPECT_THROW(
+        {
+            const uint64_t missingOrdinal = reader->getLayoutTensorOrdinal("missing_tensor");
+            (void)missingOrdinal;
+        },
+        std::runtime_error);
+
+    std::vector<float> seasonality(4, -1.0f);
+    std::vector<float> monotone(6, -2.0f);
+    std::vector<float> weight(2, -3.0f);
+
+    std::vector<uint8_t *> destinations(reader->getTensorCount(), nullptr);
+    destinations.at(reader->getLayoutTensorOrdinal("daily_weight")) = reinterpret_cast<uint8_t *>(weight.data());
+    destinations.at(reader->getLayoutTensorOrdinal("seasonality_inputs")) = reinterpret_cast<uint8_t *>(seasonality.data());
+    destinations.at(reader->getLayoutTensorOrdinal("monotone_inputs")) = reinterpret_cast<uint8_t *>(monotone.data());
+
+    std::unique_ptr<IndexedLocalNamedExampleReader::Session> session = reader->createSession(4);
+    session->loadExampleInto(4, 1, destinations);
+
+    EXPECT_FLOAT_EQ(seasonality.at(0), -1.0f);
+    EXPECT_FLOAT_EQ(seasonality.at(1), -1.0f);
+    EXPECT_FLOAT_EQ(seasonality.at(2), 80.0f);
+    EXPECT_FLOAT_EQ(seasonality.at(3), 81.0f);
+    EXPECT_FLOAT_EQ(monotone.at(0), -2.0f);
+    EXPECT_FLOAT_EQ(monotone.at(1), -2.0f);
+    EXPECT_FLOAT_EQ(monotone.at(2), -2.0f);
+    EXPECT_FLOAT_EQ(monotone.at(3), 90.0f);
+    EXPECT_FLOAT_EQ(monotone.at(4), 91.0f);
+    EXPECT_FLOAT_EQ(monotone.at(5), 92.0f);
+    EXPECT_FLOAT_EQ(weight.at(0), -3.0f);
+    EXPECT_FLOAT_EQ(weight.at(1), 180.0f);
+
+    IndexedLocalNamedExampleReaderSessionStats stats = session->takeStats();
+    EXPECT_EQ(stats.readCallsSubmitted, 1);
+    EXPECT_EQ(stats.readBytesSubmitted, layout.recordSizeBytes());
+    EXPECT_EQ(stats.readCallsCompleted, 1);
+    EXPECT_EQ(stats.readBytesCompleted, layout.recordSizeBytes());
+    ASSERT_EQ(stats.resolvedIoBackends.size(), 1);
+    EXPECT_EQ(stats.resolvedIoBackends.front(), "preadv");
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(IndexedLocalNamedBatchLoaderTest, BindsBatchPointersByReaderOrdinalWhenRequestedLayoutOrderDiffers) {
+    const std::filesystem::path datasetPath = makeTempDatasetPath("requested_layout_reordered");
+    LocalNamedExampleLayout writerLayout = testLayout();
+    writeCanonicalDataset(datasetPath, writerLayout);
+
+    LocalNamedExampleLayout requestedLayout = reorderedEquivalentLayout();
+    IndexedLocalNamedBatchLoader loader(datasetPath,
+                                        requestedLayout,
+                                        {4, 2},
+                                        {1, 3},
+                                        std::nullopt,
+                                        2,
+                                        2,
+                                        false,
+                                        std::nullopt);
+
+    uint64_t batchNum = 99;
+    Batch trainBatch = loader.getBatch(ExampleType::TRAIN, batchNum);
+    EXPECT_EQ(batchNum, 0);
+    expectTensorValues(trainBatch.getTensor("seasonality_inputs"), {80.0f, 81.0f, 40.0f, 41.0f});
+    expectTensorValues(trainBatch.getTensor("monotone_inputs"), {90.0f, 91.0f, 92.0f, 50.0f, 51.0f, 52.0f});
+    expectTensorValues(trainBatch.getTensor("daily_weight"), {180.0f, 140.0f});
+    loader.returnBatchBuffers(ExampleType::TRAIN, std::move(trainBatch));
+
+    std::filesystem::remove_all(datasetPath);
+}
 
 TEST(IndexedLocalNamedBatchLoaderTest, ReadsFoldIndicesFromOneSharedDataset) {
     const std::filesystem::path datasetPath = makeTempDatasetPath("indexed_read");
@@ -594,9 +685,8 @@ TEST(IndexedLocalNamedBatchLoaderTest, StatsExposeReadAndBatchCounters) {
     EXPECT_GE(stats.readBytesSubmitted, 2 * layout.recordSizeBytes());
     EXPECT_GE(stats.readCallsCompleted, 2);
     EXPECT_GE(stats.readBytesCompleted, 2 * layout.recordSizeBytes());
-    EXPECT_GE(stats.recordsCopied, 2);
-    EXPECT_GE(stats.recordCopyBytes, 2 * layout.recordSizeBytes());
-    EXPECT_EQ(stats.recordCopyBytes % layout.recordSizeBytes(), 0);
+    EXPECT_EQ(stats.recordsCopied, 0);
+    EXPECT_EQ(stats.recordCopyBytes, 0);
     EXPECT_EQ(stats.recordCopyMemcpyCalls, 0);
     EXPECT_GE(stats.recordCopyActiveNanoseconds, 0);
     EXPECT_GE(stats.recordCopyPopWaitNanoseconds, 0);
@@ -604,14 +694,14 @@ TEST(IndexedLocalNamedBatchLoaderTest, StatsExposeReadAndBatchCounters) {
     EXPECT_GE(stats.copiedRecordQueuePushWaitNanoseconds, 0);
     EXPECT_EQ(stats.recordBufferPoolCapacity, 0);
     EXPECT_EQ(stats.currentRecordBufferPoolDepth, 0);
-    EXPECT_DOUBLE_EQ(stats.averageCopyBytesPerRecord(), static_cast<double>(layout.recordSizeBytes()));
+    EXPECT_DOUBLE_EQ(stats.averageCopyBytesPerRecord(), 0.0);
     EXPECT_DOUBLE_EQ(stats.averageCopyMemcpyCallsPerRecord(), 0.0);
     EXPECT_GE(stats.batchesAssembled, 2);
     EXPECT_EQ(stats.batchesDelivered, 0);
     EXPECT_EQ(stats.batchBuffersReturned, 0);
     EXPECT_GE(stats.currentReadyBatches, 2);
     EXPECT_EQ(stats.targetBatchQueueDepth, 3);
-    EXPECT_FALSE(stats.resolvedIoBackend.empty());
+    EXPECT_EQ(stats.resolvedIoBackend, "preadv");
 
     uint64_t batchNum = 99;
     Batch batch = loader.getBatch(ExampleType::TRAIN, batchNum);
@@ -742,8 +832,8 @@ TEST(IndexedLocalNamedBatchLoaderPerf, LargeRandomRecordPrefetchSmoke) {
     EXPECT_GE(stats.batchesAssembled, 4);
     EXPECT_GE(stats.readBytesSubmitted, 4 * batchSize * layout.recordSizeBytes());
     EXPECT_DOUBLE_EQ(stats.readAmplification(), 1.0);
-    EXPECT_GE(stats.recordsCopied, 4 * batchSize);
-    EXPECT_GE(stats.recordCopyBytes, 4 * batchSize * layout.recordSizeBytes());
+    EXPECT_EQ(stats.recordsCopied, 0);
+    EXPECT_EQ(stats.recordCopyBytes, 0);
     EXPECT_EQ(stats.recordCopyMemcpyCalls, 0);
     EXPECT_EQ(stats.recordBufferPoolCapacity, 0);
     EXPECT_EQ(stats.recordCopyThreadCount, 0);

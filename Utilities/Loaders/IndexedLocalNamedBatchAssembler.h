@@ -162,6 +162,7 @@ class IndexedLocalNamedBatchAssembler {
     std::string splitName;
     std::map<std::string, ThorImplementation::TensorDescriptor> batchTensorDescriptors;
     std::map<std::string, std::unique_ptr<AsyncTensorQueue>> batchTensorQueues;
+    std::vector<uint64_t> layoutTensorOrdinals;
 
     uint64_t batchSize;
     uint64_t batchQueueDepth;
