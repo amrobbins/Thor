@@ -4,22 +4,34 @@
 
 #include <nlohmann/json.hpp>
 
-#include <algorithm>
-#include <cstring>
 #include <fstream>
+#include <limits>
+#include <map>
 #include <stdexcept>
 #include <utility>
 
-using ThorImplementation::Tensor;
-using ThorImplementation::TensorDescriptor;
-using ThorImplementation::TensorPlacement;
 using json = nlohmann::json;
 
 namespace {
 
-uint64_t batchesFor(uint64_t numExamples, uint64_t batchSize) {
-    THOR_THROW_IF_FALSE(batchSize > 0);
-    return (numExamples + batchSize - 1) / batchSize;
+uint64_t checkedAddUint64(uint64_t left, uint64_t right, const char *context) {
+    if (left > std::numeric_limits<uint64_t>::max() - right) {
+        throw std::runtime_error(std::string(context) + " would overflow uint64_t.");
+    }
+    return left + right;
+}
+
+const char *splitNameForStats(ExampleType exampleType) {
+    if (exampleType == ExampleType::TRAIN) {
+        return "train";
+    }
+    if (exampleType == ExampleType::VALIDATE) {
+        return "validate";
+    }
+    if (exampleType == ExampleType::TEST) {
+        return "test";
+    }
+    return "unknown";
 }
 
 }  // namespace
@@ -49,22 +61,25 @@ IndexedLocalNamedBatchLoader::IndexedLocalNamedBatchLoader(std::filesystem::path
     }
     this->batchSize = batchSize;
 
+    std::vector<uint64_t> resolvedTestIndices;
+    if (explicitTestSplit) {
+        resolvedTestIndices = std::move(testIndices.value());
+    } else {
+        resolvedTestIndices = validateIndices;
+    }
+
     openDataset(requestedLayout);
 
-    initializeSplit(train, std::move(trainIndices), "train", randomizeTrain, seed);
-    initializeSplit(validate, std::move(validateIndices), "validate", false, std::nullopt);
-    if (explicitTestSplit) {
-        initializeSplit(test, std::move(testIndices.value()), "test", false, std::nullopt);
-    } else {
-        initializeSplit(test, validate.indices, "test", false, std::nullopt);
+    if (trainIndices.empty()) {
+        throw std::runtime_error("IndexedLocalNamedBatchLoader train_indices must contain at least one row index.");
     }
+
+    trainAssembler = createAssembler(std::move(trainIndices), "train", randomizeTrain, seed);
+    validateAssembler = createAssembler(std::move(validateIndices), "validate", false, std::nullopt);
+    testAssembler = createAssembler(std::move(resolvedTestIndices), "test", false, std::nullopt);
 }
 
-IndexedLocalNamedBatchLoader::~IndexedLocalNamedBatchLoader() {
-    closeSplitQueues(train);
-    closeSplitQueues(validate);
-    closeSplitQueues(test);
-}
+IndexedLocalNamedBatchLoader::~IndexedLocalNamedBatchLoader() = default;
 
 std::vector<IndexedLocalNamedBatchLoader::IndexedShardManifestEntry> IndexedLocalNamedBatchLoader::readIndexedShardManifestEntries(
     const std::filesystem::path &manifestPath) {
@@ -109,7 +124,8 @@ std::vector<IndexedLocalNamedBatchLoader::IndexedShardManifestEntry> IndexedLoca
         if (entry.globalStart != expectedGlobalStart) {
             throw std::runtime_error("IndexedLocalNamedBatchLoader indexed shard global_start values must be contiguous.");
         }
-        expectedGlobalStart += entry.numExamples;
+        expectedGlobalStart = checkedAddUint64(
+            expectedGlobalStart, entry.numExamples, "IndexedLocalNamedBatchLoader indexed manifest row count");
         entries.push_back(std::move(entry));
     }
 
@@ -122,7 +138,6 @@ std::vector<IndexedLocalNamedBatchLoader::IndexedShardManifestEntry> IndexedLoca
 
     return entries;
 }
-
 
 void IndexedLocalNamedBatchLoader::openDataset(const LocalNamedExampleLayout &requestedLayout) {
     const std::filesystem::path manifestPath = datasetPath / LocalNamedExampleDatasetWriter::MANIFEST_FILENAME;
@@ -151,15 +166,8 @@ void IndexedLocalNamedBatchLoader::openDataset(const LocalNamedExampleLayout &re
         shards.push_back(std::move(shard));
         shardGlobalStarts.push_back(entry.globalStart);
         shardTrainCounts.push_back(entry.numExamples);
-        numDatasetExamples += entry.numExamples;
-    }
-
-    for (const LocalNamedExampleLayout::TensorSpec &spec : layout.tensors()) {
-        std::vector<uint64_t> dimensions;
-        dimensions.reserve(spec.dimensions.size() + 1);
-        dimensions.push_back(batchSize);
-        dimensions.insert(dimensions.end(), spec.dimensions.begin(), spec.dimensions.end());
-        batchTensorDescriptors.emplace(spec.name, TensorDescriptor(spec.dataType, dimensions));
+        numDatasetExamples = checkedAddUint64(
+            numDatasetExamples, entry.numExamples, "IndexedLocalNamedBatchLoader dataset row count");
     }
 }
 
@@ -170,179 +178,108 @@ void IndexedLocalNamedBatchLoader::validateIndex(uint64_t index, const char *spl
     }
 }
 
-void IndexedLocalNamedBatchLoader::initializeSplit(Split &split,
-                                                   std::vector<uint64_t> indices,
-                                                   const char *splitName,
-                                                   bool randomized,
-                                                   std::optional<uint64_t> splitSeed) {
-    if (indices.empty()) {
-        if (std::string(splitName) == "train") {
-            throw std::runtime_error("IndexedLocalNamedBatchLoader train_indices must contain at least one row index.");
-        }
-
-        split.indices = std::move(indices);
-        split.nextBatchNum = 0;
-        return;
-    }
-
+void IndexedLocalNamedBatchLoader::validateIndices(const std::vector<uint64_t> &indices, const char *splitName) const {
     for (uint64_t index : indices) {
         validateIndex(index, splitName);
     }
-    split.indices = std::move(indices);
-    split.nextBatchNum = 0;
-    if (randomized) {
-        split.randomizer = std::make_unique<FullPeriodRandom>(split.indices.size(), false);
-        if (splitSeed.has_value()) {
-            split.randomizer->reseed(splitSeed.value());
-        }
-    }
-    initializeSplitQueues(split);
 }
 
-void IndexedLocalNamedBatchLoader::initializeSplitQueues(Split &split) {
-    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
-    for (const LocalNamedExampleLayout::TensorSpec &spec : layout.tensors()) {
-        auto queue = std::make_unique<AsyncTensorQueue>(batchQueueDepth, batchTensorDescriptors.at(spec.name), cpuPlacement);
-        queue->open();
-        split.queues.emplace(spec.name, std::move(queue));
+std::unique_ptr<IndexedLocalNamedBatchAssembler> IndexedLocalNamedBatchLoader::createAssembler(std::vector<uint64_t> indices,
+                                                                                                const char *splitName,
+                                                                                                bool randomized,
+                                                                                                std::optional<uint64_t> splitSeed) const {
+    if (indices.empty()) {
+        return nullptr;
     }
+    validateIndices(indices, splitName);
+    return std::make_unique<IndexedLocalNamedBatchAssembler>(shards,
+                                                             shardGlobalStarts,
+                                                             shardTrainCounts,
+                                                             layout,
+                                                             std::move(indices),
+                                                             splitName,
+                                                             batchSize,
+                                                             batchQueueDepth,
+                                                             randomized,
+                                                             splitSeed);
 }
 
-void IndexedLocalNamedBatchLoader::closeSplitQueues(Split &split) {
-    for (auto &entry : split.queues) {
-        if (entry.second) {
-            entry.second->close();
-        }
-    }
-    split.queues.clear();
-}
-
-IndexedLocalNamedBatchLoader::Split &IndexedLocalNamedBatchLoader::mutableSplit(ExampleType exampleType) {
+IndexedLocalNamedBatchAssembler *IndexedLocalNamedBatchLoader::assemblerFor(ExampleType exampleType) {
     if (exampleType == ExampleType::TRAIN) {
-        return train;
+        return trainAssembler.get();
     }
     if (exampleType == ExampleType::VALIDATE) {
-        return validate;
+        return validateAssembler.get();
     }
     if (exampleType == ExampleType::TEST) {
-        return test;
+        return testAssembler.get();
     }
     throw std::runtime_error("Unsupported ExampleType");
 }
 
-const IndexedLocalNamedBatchLoader::Split &IndexedLocalNamedBatchLoader::immutableSplit(ExampleType exampleType) const {
+const IndexedLocalNamedBatchAssembler *IndexedLocalNamedBatchLoader::assemblerFor(ExampleType exampleType) const {
     if (exampleType == ExampleType::TRAIN) {
-        return train;
+        return trainAssembler.get();
     }
     if (exampleType == ExampleType::VALIDATE) {
-        return validate;
+        return validateAssembler.get();
     }
     if (exampleType == ExampleType::TEST) {
-        return test;
+        return testAssembler.get();
     }
     throw std::runtime_error("Unsupported ExampleType");
-}
-
-void IndexedLocalNamedBatchLoader::loadGlobalRecord(uint64_t globalExampleIndex, std::vector<uint8_t> &record) {
-    validateIndex(globalExampleIndex, "global");
-    const auto it = std::upper_bound(shardGlobalStarts.begin(), shardGlobalStarts.end(), globalExampleIndex);
-    THOR_THROW_IF_FALSE(it != shardGlobalStarts.begin());
-    const uint64_t shardIndex = static_cast<uint64_t>(std::distance(shardGlobalStarts.begin(), it) - 1);
-    THOR_THROW_IF_FALSE(shardIndex < shards.size());
-    const uint64_t localIndex = globalExampleIndex - shardGlobalStarts.at(shardIndex);
-    THOR_THROW_IF_FALSE(localIndex < shardTrainCounts.at(shardIndex));
-
-    record.resize(layout.recordSizeBytes());
-    std::string label;
-    std::string filename;
-    shards.at(shardIndex)->loadExample(record.data(), label, filename, ExampleType::TRAIN, localIndex);
 }
 
 Batch IndexedLocalNamedBatchLoader::getBatch(ExampleType exampleType, uint64_t &batchNum) {
-    Split &split = mutableSplit(exampleType);
-    const uint64_t batchesPerEpoch = getNumBatchesPerEpoch(exampleType);
-    if (batchesPerEpoch == 0) {
+    IndexedLocalNamedBatchAssembler *assembler = assemblerFor(exampleType);
+    if (assembler == nullptr) {
         throw std::runtime_error("IndexedLocalNamedBatchLoader cannot get a batch from an empty split.");
     }
-    if (batchNum >= batchesPerEpoch) {
-        batchNum = split.nextBatchNum;
-    }
 
-    std::map<std::string, Tensor> loadedTensors;
-    for (const LocalNamedExampleLayout::TensorSpec &spec : layout.tensors()) {
-        Tensor tensor;
-        const bool queueOpen = split.queues.at(spec.name)->getBufferToLoad(tensor);
-        THOR_THROW_IF_FALSE(queueOpen);
-        loadedTensors.emplace(spec.name, tensor);
-    }
-
-    const uint64_t firstExample = batchNum * batchSize;
-    const bool useRandomizer = exampleType == ExampleType::TRAIN && randomizeTrain;
-    std::vector<uint8_t> record;
-    record.reserve(layout.recordSizeBytes());
-    for (uint64_t slot = 0; slot < batchSize; ++slot) {
-        const uint64_t logicalIndex = useRandomizer ? split.randomizer->getRandomNumber() : (firstExample + slot) % split.indices.size();
-        const uint64_t globalExampleIndex = split.indices.at(logicalIndex);
-        loadGlobalRecord(globalExampleIndex, record);
-
-        for (const LocalNamedExampleLayout::TensorSpec &spec : layout.tensors()) {
-            Tensor &tensor = loadedTensors.at(spec.name);
-            std::memcpy(static_cast<uint8_t *>(tensor.getMemPtr()) + spec.numBytes * slot,
-                        record.data() + spec.offsetBytes,
-                        spec.numBytes);
-        }
-    }
-
-    split.nextBatchNum = (batchNum + 1) % batchesPerEpoch;
-
-    for (const LocalNamedExampleLayout::TensorSpec &spec : layout.tensors()) {
-        Tensor &tensor = loadedTensors.at(spec.name);
-        const bool queueOpen = split.queues.at(spec.name)->bufferLoaded(tensor);
-        THOR_THROW_IF_FALSE(queueOpen);
-    }
-    for (const LocalNamedExampleLayout::TensorSpec &spec : layout.tensors()) {
-        Tensor &tensor = loadedTensors.at(spec.name);
-        const bool queueOpen = split.queues.at(spec.name)->getBufferToUnload(tensor);
-        THOR_THROW_IF_FALSE(queueOpen);
-    }
-
-    return batchFromTensorMap(std::move(loadedTensors));
-}
-
-void IndexedLocalNamedBatchLoader::validateReturnedBatchExact(const Split &split, const Batch &batch) const {
-    if (batch.size() != layout.tensors().size()) {
-        throw std::runtime_error("IndexedLocalNamedBatchLoader returned batch has unexpected tensor count.");
-    }
-    for (const LocalNamedExampleLayout::TensorSpec &spec : layout.tensors()) {
-        if (!batch.contains(spec.name)) {
-            throw std::runtime_error("IndexedLocalNamedBatchLoader returned batch is missing tensor '" + spec.name + "'.");
-        }
-        const Tensor &tensor = batch.getTensor(spec.name);
-        if (tensor.getDescriptor() != batchTensorDescriptors.at(spec.name)) {
-            throw std::runtime_error("IndexedLocalNamedBatchLoader returned tensor has wrong descriptor for: " + spec.name);
-        }
-        (void)split.queues.at(spec.name);
-    }
+    std::map<std::string, ThorImplementation::Tensor> tensors;
+    assembler->getBatch(tensors, batchNum);
+    return batchFromTensorMap(std::move(tensors));
 }
 
 void IndexedLocalNamedBatchLoader::returnBatchBuffers(ExampleType exampleType, Batch &&batch) {
-    Split &split = mutableSplit(exampleType);
-    validateReturnedBatchExact(split, batch);
-    for (const LocalNamedExampleLayout::TensorSpec &spec : layout.tensors()) {
-        const bool queueOpen = split.queues.at(spec.name)->bufferUnloaded(batch.getTensor(spec.name));
-        THOR_THROW_IF_FALSE(queueOpen);
+    IndexedLocalNamedBatchAssembler *assembler = assemblerFor(exampleType);
+    if (assembler == nullptr) {
+        throw std::runtime_error("IndexedLocalNamedBatchLoader cannot return buffers to an empty split.");
     }
+
+    std::map<std::string, ThorImplementation::Tensor> tensors =
+        denseTensorMapFromBatchOrThrow(batch, "IndexedLocalNamedBatchLoader returned batch");
+    assembler->returnBuffers(tensors);
 }
 
 uint64_t IndexedLocalNamedBatchLoader::getNumBatchesPerEpoch(ExampleType exampleType) {
-    return batchesFor(immutableSplit(exampleType).indices.size(), batchSize);
+    const IndexedLocalNamedBatchAssembler *assembler = assemblerFor(exampleType);
+    return assembler == nullptr ? 0 : assembler->getNumBatchesPerEpoch();
 }
 
 uint64_t IndexedLocalNamedBatchLoader::getNumExamples(ExampleType exampleType) {
-    return static_cast<uint64_t>(immutableSplit(exampleType).indices.size());
+    const IndexedLocalNamedBatchAssembler *assembler = assemblerFor(exampleType);
+    return assembler == nullptr ? 0 : assembler->getNumExamples();
 }
 
-uint64_t IndexedLocalNamedBatchLoader::getNextBatchNum(ExampleType exampleType) { return immutableSplit(exampleType).nextBatchNum; }
+uint64_t IndexedLocalNamedBatchLoader::getNextBatchNum(ExampleType exampleType) {
+    IndexedLocalNamedBatchAssembler *assembler = assemblerFor(exampleType);
+    return assembler == nullptr ? 0 : assembler->getNextBatchNum();
+}
+
+IndexedLocalNamedBatchAssemblerStats IndexedLocalNamedBatchLoader::getStatsSnapshot(ExampleType exampleType) {
+    IndexedLocalNamedBatchAssembler *assembler = assemblerFor(exampleType);
+    if (assembler != nullptr) {
+        return assembler->getStatsSnapshot();
+    }
+
+    IndexedLocalNamedBatchAssemblerStats stats;
+    stats.splitName = splitNameForStats(exampleType);
+    stats.targetBatchQueueDepth = batchQueueDepth;
+    stats.recordSizeBytes = layout.recordSizeBytes();
+    stats.resolvedIoBackend = "empty";
+    return stats;
+}
 
 const LocalNamedExampleLayout &IndexedLocalNamedBatchLoader::getLayout() const { return layout; }
 

@@ -707,6 +707,46 @@ nb::dict copyIndexedLocalNamedBatchToPythonDict(IndexedLocalNamedBatchLoader& lo
     return out;
 }
 
+nb::dict indexedLocalNamedStatsToPythonDict(const IndexedLocalNamedBatchAssemblerStats& stats) {
+    nb::dict out;
+    out["split"] = nb::str(stats.splitName.c_str());
+    out["records_requested"] = nb::int_(stats.recordsRequested);
+    out["logical_record_bytes_requested"] = nb::int_(stats.logicalRecordBytesRequested);
+    out["read_calls_submitted"] = nb::int_(stats.readCallsSubmitted);
+    out["read_bytes_submitted"] = nb::int_(stats.readBytesSubmitted);
+    out["read_calls_completed"] = nb::int_(stats.readCallsCompleted);
+    out["read_bytes_completed"] = nb::int_(stats.readBytesCompleted);
+    out["records_copied"] = nb::int_(stats.recordsCopied);
+    out["record_copy_bytes"] = nb::int_(stats.recordCopyBytes);
+    out["record_copy_memcpy_calls"] = nb::int_(stats.recordCopyMemcpyCalls);
+    out["record_copy_active_nanoseconds"] = nb::int_(stats.recordCopyActiveNanoseconds);
+    out["record_copy_pop_wait_nanoseconds"] = nb::int_(stats.recordCopyPopWaitNanoseconds);
+    out["completed_record_queue_push_wait_nanoseconds"] = nb::int_(stats.completedRecordQueuePushWaitNanoseconds);
+    out["copied_record_queue_push_wait_nanoseconds"] = nb::int_(stats.copiedRecordQueuePushWaitNanoseconds);
+    out["record_buffer_pool_capacity"] = nb::int_(stats.recordBufferPoolCapacity);
+    out["current_record_buffer_pool_depth"] = nb::int_(stats.currentRecordBufferPoolDepth);
+    out["batches_assembled"] = nb::int_(stats.batchesAssembled);
+    out["batches_delivered"] = nb::int_(stats.batchesDelivered);
+    out["batch_buffers_returned"] = nb::int_(stats.batchBuffersReturned);
+    out["current_ready_batches"] = nb::int_(stats.currentReadyBatches);
+    out["current_pending_batches"] = nb::int_(stats.currentPendingBatches);
+    out["current_completed_record_queue_depth"] = nb::int_(stats.currentCompletedRecordQueueDepth);
+    out["current_copied_record_queue_depth"] = nb::int_(stats.currentCopiedRecordQueueDepth);
+    out["target_batch_queue_depth"] = nb::int_(stats.targetBatchQueueDepth);
+    out["shard_read_queue_depth"] = nb::int_(stats.shardReadQueueDepth);
+    out["shard_request_queue_depth"] = nb::int_(stats.shardRequestQueueDepth);
+    out["completed_record_queue_depth"] = nb::int_(stats.completedRecordQueueDepth);
+    out["record_copy_thread_count"] = nb::int_(stats.recordCopyThreadCount);
+    out["record_size_bytes"] = nb::int_(stats.recordSizeBytes);
+    out["resolved_io_backend"] = nb::str(stats.resolvedIoBackend.c_str());
+    out["read_amplification"] = stats.readAmplification();
+    out["planning_lead_records"] = stats.planningLeadRecords();
+    out["average_copy_nanoseconds_per_record"] = stats.averageCopyNanosecondsPerRecord();
+    out["average_copy_memcpy_calls_per_record"] = stats.averageCopyMemcpyCallsPerRecord();
+    out["average_copy_bytes_per_record"] = stats.averageCopyBytesPerRecord();
+    return out;
+}
+
 struct SharedFloat32NumpyTensor {
     std::optional<Float32Array> array;
     const float* data = nullptr;
@@ -786,6 +826,20 @@ std::vector<uint64_t> uint64IndicesFromPython(nb::object indices,
     nb::object arrayObject;
     try {
         sourceObject = numpy.attr("asarray")(indices);
+
+        // NumPy gives an empty Python list dtype=float64 by default.  Empty
+        // validate/test splits are valid for indexed local named loaders, so do
+        // the empty 1-D check before requiring an integer dtype when allowEmpty
+        // is set.  Non-empty inputs still must be integer arrays.
+        if (allowEmpty) {
+            const int ndim = pybind::castOrTypeError<int>(sourceObject.attr("ndim"), context + " ndim", "int", false);
+            const uint64_t size =
+                pybind::castOrTypeError<uint64_t>(sourceObject.attr("size"), context + " size", "int", false);
+            if (ndim == 1 && size == 0) {
+                return {};
+            }
+        }
+
         const bool isInteger = pybind::castOrTypeError<bool>(
             numpy.attr("issubdtype")(sourceObject.attr("dtype"), numpy.attr("integer")),
             context + " dtype check",
@@ -2656,6 +2710,13 @@ shape for IndexedNumpyFloat32DictBatchLoader.
         return nb::int_(seed.value());
     });
     indexed_local_named_batch_loader.def("has_explicit_test_split", &IndexedLocalNamedBatchLoader::hasExplicitTestSplit);
+    indexed_local_named_batch_loader.def(
+        "get_stats",
+        [](IndexedLocalNamedBatchLoader& self, const std::string& split) {
+            ExampleType exampleType = exampleTypeFromPythonString(split, "split");
+            return indexedLocalNamedStatsToPythonDict(self.getStatsSnapshot(exampleType));
+        },
+        "split"_a = "train");
     indexed_local_named_batch_loader.def(
         "copy_next_batch",
         [](IndexedLocalNamedBatchLoader& self, const std::string& split) {

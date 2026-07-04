@@ -1,15 +1,13 @@
 #pragma once
 
 #include "DeepLearning/Api/Loaders/Loader.h"
+#include "Utilities/Loaders/IndexedLocalNamedBatchAssembler.h"
 #include "Utilities/Loaders/LocalNamedExampleDatasetWriter.h"
 #include "Utilities/Loaders/LocalNamedExampleLayout.h"
 #include "Utilities/Loaders/Shard.h"
-#include "Utilities/Random/FullPeriodRandom.h"
-#include "Utilities/WorkQueue/AsyncTensorQueue.h"
 
 #include <cstdint>
 #include <filesystem>
-#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -55,25 +53,25 @@ class IndexedLocalNamedBatchLoader : public Loader {
     [[nodiscard]] bool getRandomizeTrain() const;
     [[nodiscard]] std::optional<uint64_t> getRandomSeed() const;
     [[nodiscard]] bool hasExplicitTestSplit() const;
+    [[nodiscard]] IndexedLocalNamedBatchAssemblerStats getStatsSnapshot(ExampleType exampleType);
+
+#ifdef THOR_GTEST
+    uint64_t getReadyBatchCountForTesting(ExampleType exampleType) {
+        IndexedLocalNamedBatchAssembler *assembler = assemblerFor(exampleType);
+        return assembler == nullptr ? 0 : assembler->getReadyBatchCountForTesting();
+    }
+#endif
 
    private:
-    struct Split {
-        std::vector<uint64_t> indices;
-        uint64_t nextBatchNum = 0;
-        std::unique_ptr<FullPeriodRandom> randomizer;
-        std::map<std::string, std::unique_ptr<AsyncTensorQueue>> queues;
-    };
-
     std::filesystem::path datasetPath;
     LocalNamedExampleLayout layout;
     std::vector<std::shared_ptr<Shard>> shards;
     std::vector<uint64_t> shardGlobalStarts;
     std::vector<uint64_t> shardTrainCounts;
-    std::map<std::string, ThorImplementation::TensorDescriptor> batchTensorDescriptors;
 
-    Split train;
-    Split validate;
-    Split test;
+    std::unique_ptr<IndexedLocalNamedBatchAssembler> trainAssembler;
+    std::unique_ptr<IndexedLocalNamedBatchAssembler> validateAssembler;
+    std::unique_ptr<IndexedLocalNamedBatchAssembler> testAssembler;
 
     uint64_t numDatasetExamples = 0;
     uint64_t batchQueueDepth = 32;
@@ -89,12 +87,12 @@ class IndexedLocalNamedBatchLoader : public Loader {
 
     static std::vector<IndexedShardManifestEntry> readIndexedShardManifestEntries(const std::filesystem::path &manifestPath);
     void openDataset(const LocalNamedExampleLayout &requestedLayout);
-    void initializeSplit(Split &split, std::vector<uint64_t> indices, const char *splitName, bool randomized, std::optional<uint64_t> splitSeed);
-    void initializeSplitQueues(Split &split);
-    void closeSplitQueues(Split &split);
-    Split &mutableSplit(ExampleType exampleType);
-    const Split &immutableSplit(ExampleType exampleType) const;
     void validateIndex(uint64_t index, const char *splitName) const;
-    void loadGlobalRecord(uint64_t globalExampleIndex, std::vector<uint8_t> &record);
-    void validateReturnedBatchExact(const Split &split, const Batch &batch) const;
+    void validateIndices(const std::vector<uint64_t> &indices, const char *splitName) const;
+    std::unique_ptr<IndexedLocalNamedBatchAssembler> createAssembler(std::vector<uint64_t> indices,
+                                                                     const char *splitName,
+                                                                     bool randomized,
+                                                                     std::optional<uint64_t> splitSeed) const;
+    IndexedLocalNamedBatchAssembler *assemblerFor(ExampleType exampleType);
+    const IndexedLocalNamedBatchAssembler *assemblerFor(ExampleType exampleType) const;
 };

@@ -263,6 +263,107 @@ def test_indexed_local_named_loader_reads_shared_dataset_by_indices(tmp_path):
     np.testing.assert_array_equal(test_batch["seasonality_inputs"], validate_batch["seasonality_inputs"])
 
 
+def test_indexed_local_named_loader_exposes_stats(tmp_path):
+    dataset_path = tmp_path / "indexed_named_dataset"
+    layout = _layout()
+
+    writer = thor.training.LocalNamedExampleDatasetWriter(
+        dataset_path, layout, examples_per_shard=2, storage_mode="indexed"
+    )
+    for i in range(5):
+        writer.write_indexed_example(_example(i))
+    writer.close()
+
+    loader = thor.training.IndexedLocalNamedBatchLoader(
+        dataset_path=dataset_path,
+        layout=layout,
+        train_indices=[0, 1, 2, 3, 4],
+        validate_indices=[],
+        test_indices=[],
+        batch_size=1,
+        batch_queue_depth=2,
+        randomize_train=False,
+    )
+
+    before = loader.get_stats("train")
+    assert before["split"] == "train"
+    assert before["target_batch_queue_depth"] == 2
+    assert before["records_requested"] >= 0
+    assert before["logical_record_bytes_requested"] >= 0
+    assert before["read_calls_submitted"] >= 0
+    assert before["read_bytes_submitted"] >= 0
+    assert before["read_calls_completed"] >= 0
+    assert before["read_bytes_completed"] >= 0
+    assert before["records_copied"] >= 0
+    assert before["record_copy_bytes"] >= 0
+    assert before["record_copy_memcpy_calls"] >= 0
+    assert before["record_copy_active_nanoseconds"] >= 0
+    assert before["record_copy_pop_wait_nanoseconds"] >= 0
+    assert before["completed_record_queue_push_wait_nanoseconds"] >= 0
+    assert before["copied_record_queue_push_wait_nanoseconds"] >= 0
+    # The indexed loader now performs direct slice reads into named batch tensor
+    # memory. There is no staging record-buffer pool in this path.
+    assert before["record_buffer_pool_capacity"] == 0
+    assert before["current_record_buffer_pool_depth"] == 0
+    assert before["batches_assembled"] >= 0
+    assert before["batches_delivered"] == 0
+    assert before["batch_buffers_returned"] == 0
+    assert before["current_ready_batches"] >= 0
+    assert before["current_pending_batches"] >= 0
+    assert before["current_completed_record_queue_depth"] >= 0
+    assert before["current_copied_record_queue_depth"] >= 0
+    assert before["shard_read_queue_depth"] >= 1
+    assert before["shard_request_queue_depth"] >= 1
+    assert before["completed_record_queue_depth"] >= 1
+    # Direct reads eliminated copy-worker threads; shard reader threads load
+    # directly into tensor slots.
+    assert before["record_copy_thread_count"] == 0
+    assert before["record_size_bytes"] == layout.get_record_size_bytes()
+    assert isinstance(before["resolved_io_backend"], str)
+    assert before["read_amplification"] >= 0.0
+    assert before["planning_lead_records"] >= 0.0
+    assert before["average_copy_nanoseconds_per_record"] >= 0.0
+    assert before["average_copy_memcpy_calls_per_record"] >= 0.0
+    assert before["average_copy_bytes_per_record"] >= 0.0
+
+    batch = loader.copy_next_batch("train")
+    np.testing.assert_array_equal(
+        batch["seasonality_inputs"],
+        np.asarray([[1.0, 2.0]], dtype=np.float32),
+    )
+
+    after = loader.get_stats("train")
+    assert after["split"] == "train"
+    record_size = layout.get_record_size_bytes()
+    assert after["records_requested"] >= 1
+    assert after["logical_record_bytes_requested"] >= record_size
+    assert after["logical_record_bytes_requested"] % record_size == 0
+    assert after["read_calls_submitted"] >= 1
+    assert after["read_bytes_submitted"] >= record_size
+    assert after["read_bytes_submitted"] % record_size == 0
+    assert after["read_calls_completed"] >= 1
+    assert after["read_bytes_completed"] >= record_size
+    assert after["read_bytes_completed"] % record_size == 0
+    assert after["records_copied"] >= 1
+    assert after["record_copy_bytes"] >= record_size
+    assert after["record_copy_bytes"] % record_size == 0
+    # Direct reads avoid the CPU memcpy fanout stage entirely.
+    assert after["record_copy_memcpy_calls"] == 0
+    assert after["average_copy_bytes_per_record"] == record_size
+    assert after["average_copy_memcpy_calls_per_record"] == 0.0
+    assert after["read_amplification"] == 1.0
+    assert after["batches_assembled"] >= 1
+    assert after["batches_delivered"] >= 1
+    assert after["batch_buffers_returned"] >= 1
+
+    empty_stats = loader.get_stats("validate")
+    assert empty_stats["split"] == "validate"
+    assert empty_stats["records_requested"] == 0
+    assert empty_stats["target_batch_queue_depth"] == 2
+    assert empty_stats["record_copy_thread_count"] == 0
+    assert empty_stats["record_buffer_pool_capacity"] == 0
+    assert empty_stats["record_size_bytes"] == layout.get_record_size_bytes()
+    assert empty_stats["resolved_io_backend"] == "empty"
 
 
 def test_indexed_local_named_loader_allows_empty_validate_and_test_indices(tmp_path):
@@ -408,6 +509,153 @@ def test_indexed_local_named_loader_rejects_out_of_range_indices(tmp_path):
             randomize_train=False,
         )
 
+
+
+def test_indexed_local_named_loader_randomized_train_seed_is_deterministic(tmp_path):
+    dataset_path = tmp_path / "indexed_named_dataset"
+    layout = _layout()
+
+    writer = thor.training.LocalNamedExampleDatasetWriter(
+        dataset_path, layout, examples_per_shard=2, storage_mode="indexed"
+    )
+    for i in range(5):
+        writer.write_indexed_example(_example(i))
+    writer.close()
+
+    first = thor.training.IndexedLocalNamedBatchLoader(
+        dataset_path,
+        layout,
+        train_indices=[0, 1, 2, 3, 4],
+        validate_indices=[0],
+        batch_size=2,
+        batch_queue_depth=2,
+        randomize_train=True,
+        random_seed=12345,
+    )
+    second = thor.training.IndexedLocalNamedBatchLoader(
+        dataset_path,
+        layout,
+        train_indices=[0, 1, 2, 3, 4],
+        validate_indices=[0],
+        batch_size=2,
+        batch_queue_depth=2,
+        randomize_train=True,
+        random_seed=12345,
+    )
+
+    for _ in range(4):
+        first_batch = first.copy_next_batch("train")
+        second_batch = second.copy_next_batch("train")
+        np.testing.assert_array_equal(first_batch["seasonality_inputs"], second_batch["seasonality_inputs"])
+        np.testing.assert_array_equal(first_batch["daily_target"], second_batch["daily_target"])
+
+
+def test_indexed_local_named_loader_validate_and_test_are_sequential_and_wrap(tmp_path):
+    dataset_path = tmp_path / "indexed_named_dataset"
+    layout = _layout()
+
+    writer = thor.training.LocalNamedExampleDatasetWriter(
+        dataset_path, layout, examples_per_shard=2, storage_mode="indexed"
+    )
+    for i in range(5):
+        writer.write_indexed_example(_example(i))
+    writer.close()
+
+    loader = thor.training.IndexedLocalNamedBatchLoader(
+        dataset_path,
+        layout,
+        train_indices=[4, 3],
+        validate_indices=[1, 3, 4],
+        test_indices=[2, 0, 1],
+        batch_size=2,
+        batch_queue_depth=2,
+        randomize_train=True,
+        random_seed=9876,
+    )
+
+    validate0 = loader.copy_next_batch("validate")
+    validate1 = loader.copy_next_batch("validate")
+    test0 = loader.copy_next_batch("test")
+    test1 = loader.copy_next_batch("test")
+
+    np.testing.assert_array_equal(
+        validate0["seasonality_inputs"],
+        np.asarray([[11.0, 12.0], [31.0, 32.0]], dtype=np.float32),
+    )
+    np.testing.assert_array_equal(
+        validate1["seasonality_inputs"],
+        np.asarray([[41.0, 42.0], [11.0, 12.0]], dtype=np.float32),
+    )
+    np.testing.assert_array_equal(
+        test0["seasonality_inputs"],
+        np.asarray([[21.0, 22.0], [1.0, 2.0]], dtype=np.float32),
+    )
+    np.testing.assert_array_equal(
+        test1["seasonality_inputs"],
+        np.asarray([[11.0, 12.0], [21.0, 22.0]], dtype=np.float32),
+    )
+
+
+def test_indexed_local_named_loader_two_fold_loaders_share_one_dataset(tmp_path):
+    dataset_path = tmp_path / "indexed_named_dataset"
+    layout = _layout()
+
+    writer = thor.training.LocalNamedExampleDatasetWriter(
+        dataset_path, layout, examples_per_shard=2, storage_mode="indexed"
+    )
+    for i in range(5):
+        writer.write_indexed_example(_example(i))
+    writer.close()
+
+    fold_a = thor.training.IndexedLocalNamedBatchLoader(
+        dataset_path, layout, train_indices=[0, 2, 4], validate_indices=[1], batch_size=2, randomize_train=False
+    )
+    fold_b = thor.training.IndexedLocalNamedBatchLoader(
+        dataset_path, layout, train_indices=[1, 3], validate_indices=[0, 4], batch_size=2, randomize_train=False
+    )
+
+    batch_a = fold_a.copy_next_batch("train")
+    batch_b = fold_b.copy_next_batch("train")
+
+    np.testing.assert_array_equal(
+        batch_a["seasonality_inputs"],
+        np.asarray([[1.0, 2.0], [21.0, 22.0]], dtype=np.float32),
+    )
+    np.testing.assert_array_equal(
+        batch_b["seasonality_inputs"],
+        np.asarray([[11.0, 12.0], [31.0, 32.0]], dtype=np.float32),
+    )
+
+
+def test_indexed_local_named_loader_rejects_requested_layout_mismatch(tmp_path):
+    dataset_path = tmp_path / "indexed_named_dataset"
+    layout = _layout()
+
+    writer = thor.training.LocalNamedExampleDatasetWriter(
+        dataset_path, layout, examples_per_shard=2, storage_mode="indexed"
+    )
+    writer.write_indexed_example(_example(0))
+    writer.close()
+
+    wrong_layout = thor.training.LocalNamedExampleLayout(
+        tensors={
+            "seasonality_inputs": [2],
+            "monotone_inputs": [4],
+            "daily_target": [2],
+            "example_weight": [1],
+        },
+        data_type=thor.DataType.fp32,
+    )
+
+    with pytest.raises(RuntimeError, match="record_size_bytes|shape"):
+        thor.training.IndexedLocalNamedBatchLoader(
+            dataset_path,
+            wrong_layout,
+            train_indices=[0],
+            validate_indices=[0],
+            batch_size=1,
+            randomize_train=False,
+        )
 
 
 def test_local_named_writer_supports_indexed_storage_mode_manifest(tmp_path):
