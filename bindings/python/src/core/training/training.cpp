@@ -2670,10 +2670,10 @@ Loader path and returns queue-owned buffers normally.
         R"nbdoc(
 Read one shared local named example dataset through fold-specific row-index arrays.
 
-The canonical dataset row space is the indexed manifest row order across all
-shards.  ``train_indices``, ``validate_indices``, and optional ``test_indices``
-are logical views over that shared row space, making this the Thor-native drop-in
-shape for IndexedNumpyFloat32DictBatchLoader.
+The dataset reader exposes one canonical indexed row space.  ``train_indices``,
+``validate_indices``, and optional ``test_indices`` are logical views over that
+shared row space, making this the Thor-native drop-in shape for
+IndexedNumpyFloat32DictBatchLoader.
         )nbdoc");
     indexed_local_named_batch_loader.def(
         "__init__",

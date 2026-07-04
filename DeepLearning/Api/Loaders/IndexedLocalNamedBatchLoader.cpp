@@ -2,24 +2,11 @@
 
 #include "DeepLearning/Implementation/ThorError.h"
 
-#include <nlohmann/json.hpp>
-
-#include <fstream>
-#include <limits>
 #include <map>
 #include <stdexcept>
 #include <utility>
 
-using json = nlohmann::json;
-
 namespace {
-
-uint64_t checkedAddUint64(uint64_t left, uint64_t right, const char *context) {
-    if (left > std::numeric_limits<uint64_t>::max() - right) {
-        throw std::runtime_error(std::string(context) + " would overflow uint64_t.");
-    }
-    return left + right;
-}
 
 const char *splitNameForStats(ExampleType exampleType) {
     if (exampleType == ExampleType::TRAIN) {
@@ -81,94 +68,10 @@ IndexedLocalNamedBatchLoader::IndexedLocalNamedBatchLoader(std::filesystem::path
 
 IndexedLocalNamedBatchLoader::~IndexedLocalNamedBatchLoader() = default;
 
-std::vector<IndexedLocalNamedBatchLoader::IndexedShardManifestEntry> IndexedLocalNamedBatchLoader::readIndexedShardManifestEntries(
-    const std::filesystem::path &manifestPath) {
-    std::ifstream in(manifestPath, std::ios::binary);
-    if (!in.is_open()) {
-        throw std::runtime_error("IndexedLocalNamedBatchLoader failed to open manifest for reading: " + manifestPath.string());
-    }
-
-    json manifest;
-    in >> manifest;
-    if (!in.good() && !in.eof()) {
-        throw std::runtime_error("IndexedLocalNamedBatchLoader failed while reading manifest: " + manifestPath.string());
-    }
-
-    const LocalNamedExampleDatasetWriter::StorageMode storageMode = LocalNamedExampleDatasetWriter::readStorageMode(manifestPath);
-    if (storageMode != LocalNamedExampleDatasetWriter::StorageMode::INDEXED) {
-        throw std::runtime_error("IndexedLocalNamedBatchLoader requires an indexed local named dataset manifest.");
-    }
-
-    if (!manifest.contains("shards") || !manifest.at("shards").is_array()) {
-        throw std::runtime_error("IndexedLocalNamedBatchLoader manifest shards field must be an array: " + manifestPath.string());
-    }
-
-    std::vector<IndexedShardManifestEntry> entries;
-    entries.reserve(manifest.at("shards").size());
-    uint64_t expectedGlobalStart = 0;
-    for (const json &entryJson : manifest.at("shards")) {
-        if (!entryJson.is_object()) {
-            throw std::runtime_error("IndexedLocalNamedBatchLoader indexed manifest shard entries must be objects.");
-        }
-
-        IndexedShardManifestEntry entry;
-        entry.filename = entryJson.at("file").get<std::string>();
-        entry.globalStart = entryJson.at("global_start").get<uint64_t>();
-        entry.numExamples = entryJson.at("num_examples").get<uint64_t>();
-        if (entry.filename.empty()) {
-            throw std::runtime_error("IndexedLocalNamedBatchLoader manifest contains an empty shard filename.");
-        }
-        if (entry.numExamples == 0) {
-            throw std::runtime_error("IndexedLocalNamedBatchLoader indexed shard entries must contain at least one example.");
-        }
-        if (entry.globalStart != expectedGlobalStart) {
-            throw std::runtime_error("IndexedLocalNamedBatchLoader indexed shard global_start values must be contiguous.");
-        }
-        expectedGlobalStart = checkedAddUint64(
-            expectedGlobalStart, entry.numExamples, "IndexedLocalNamedBatchLoader indexed manifest row count");
-        entries.push_back(std::move(entry));
-    }
-
-    if (entries.empty()) {
-        throw std::runtime_error("IndexedLocalNamedBatchLoader dataset manifest contains no shards: " + manifestPath.string());
-    }
-    if (manifest.contains("num_examples") && manifest.at("num_examples").get<uint64_t>() != expectedGlobalStart) {
-        throw std::runtime_error("IndexedLocalNamedBatchLoader manifest num_examples does not match indexed shard ranges.");
-    }
-
-    return entries;
-}
-
 void IndexedLocalNamedBatchLoader::openDataset(const LocalNamedExampleLayout &requestedLayout) {
-    const std::filesystem::path manifestPath = datasetPath / LocalNamedExampleDatasetWriter::MANIFEST_FILENAME;
-    layout = LocalNamedExampleLayout::readManifest(manifestPath);
-    layout.validateRequestedLayoutExact(requestedLayout);
-
-    const std::vector<IndexedShardManifestEntry> shardEntries = readIndexedShardManifestEntries(manifestPath);
-
-    for (const IndexedShardManifestEntry &entry : shardEntries) {
-        auto shard = std::make_shared<Shard>();
-        shard->openShard((datasetPath / entry.filename).string());
-        if (shard->getExampleSizeInBytes() != layout.recordSizeBytes()) {
-            throw std::runtime_error("IndexedLocalNamedBatchLoader shard record size does not match manifest for shard: " + entry.filename);
-        }
-        if (shard->getDataType() != layout.dataType()) {
-            throw std::runtime_error("IndexedLocalNamedBatchLoader shard dtype does not match manifest for shard: " + entry.filename);
-        }
-        if (shard->getNumExamples(ExampleType::TRAIN) != entry.numExamples) {
-            throw std::runtime_error("IndexedLocalNamedBatchLoader shard TRAIN count does not match indexed manifest for shard: " +
-                                     entry.filename);
-        }
-        if (shard->getNumExamples(ExampleType::VALIDATE) != 0 || shard->getNumExamples(ExampleType::TEST) != 0) {
-            throw std::runtime_error("IndexedLocalNamedBatchLoader indexed shards must not contain validate/test records: " + entry.filename);
-        }
-
-        shards.push_back(std::move(shard));
-        shardGlobalStarts.push_back(entry.globalStart);
-        shardTrainCounts.push_back(entry.numExamples);
-        numDatasetExamples = checkedAddUint64(
-            numDatasetExamples, entry.numExamples, "IndexedLocalNamedBatchLoader dataset row count");
-    }
+    reader = IndexedLocalNamedExampleReader::openDataset(datasetPath, requestedLayout);
+    layout = reader->getLayout();
+    numDatasetExamples = reader->getNumExamples();
 }
 
 void IndexedLocalNamedBatchLoader::validateIndex(uint64_t index, const char *splitName) const {
@@ -192,9 +95,7 @@ std::unique_ptr<IndexedLocalNamedBatchAssembler> IndexedLocalNamedBatchLoader::c
         return nullptr;
     }
     validateIndices(indices, splitName);
-    return std::make_unique<IndexedLocalNamedBatchAssembler>(shards,
-                                                             shardGlobalStarts,
-                                                             shardTrainCounts,
+    return std::make_unique<IndexedLocalNamedBatchAssembler>(reader,
                                                              layout,
                                                              std::move(indices),
                                                              splitName,

@@ -315,8 +315,8 @@ def test_indexed_local_named_loader_exposes_stats(tmp_path):
     assert before["shard_read_queue_depth"] >= 1
     assert before["shard_request_queue_depth"] >= 1
     assert before["completed_record_queue_depth"] >= 1
-    # Direct reads eliminated copy-worker threads; shard reader threads load
-    # directly into tensor slots.
+    # Direct reads eliminated copy-worker threads; loader-owned read workers
+    # load directly into tensor slots.
     assert before["record_copy_thread_count"] == 0
     assert before["record_size_bytes"] == layout.get_record_size_bytes()
     assert isinstance(before["resolved_io_backend"], str)

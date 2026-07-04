@@ -2,9 +2,8 @@
 
 #include "DeepLearning/Api/Loaders/Loader.h"
 #include "Utilities/Loaders/IndexedLocalNamedBatchAssembler.h"
-#include "Utilities/Loaders/LocalNamedExampleDatasetWriter.h"
+#include "Utilities/Loaders/IndexedLocalNamedExampleReader.h"
 #include "Utilities/Loaders/LocalNamedExampleLayout.h"
-#include "Utilities/Loaders/Shard.h"
 
 #include <cstdint>
 #include <filesystem>
@@ -16,8 +15,8 @@
 /**
  * Indexed, Thor-native named batch loader backed by one shared local named example dataset.
  *
- * The dataset's canonical row space is the manifest-declared indexed record order across
- * all shards.  train/validate/test are logical views over that row space, supplied as index
+ * The dataset reader exposes a canonical indexed row space.  train/validate/test are
+ * logical views over that row space, supplied as index
  * arrays.  This is the local named equivalent of IndexedNumpyFloat32DictBatchLoader:
  * fold-specific splits share one physical dataset instead of duplicating records per fold.
  */
@@ -65,9 +64,7 @@ class IndexedLocalNamedBatchLoader : public Loader {
    private:
     std::filesystem::path datasetPath;
     LocalNamedExampleLayout layout;
-    std::vector<std::shared_ptr<Shard>> shards;
-    std::vector<uint64_t> shardGlobalStarts;
-    std::vector<uint64_t> shardTrainCounts;
+    std::shared_ptr<IndexedLocalNamedExampleReader> reader;
 
     std::unique_ptr<IndexedLocalNamedBatchAssembler> trainAssembler;
     std::unique_ptr<IndexedLocalNamedBatchAssembler> validateAssembler;
@@ -79,13 +76,6 @@ class IndexedLocalNamedBatchLoader : public Loader {
     std::optional<uint64_t> seed;
     bool explicitTestSplit = false;
 
-    struct IndexedShardManifestEntry {
-        std::string filename;
-        uint64_t globalStart = 0;
-        uint64_t numExamples = 0;
-    };
-
-    static std::vector<IndexedShardManifestEntry> readIndexedShardManifestEntries(const std::filesystem::path &manifestPath);
     void openDataset(const LocalNamedExampleLayout &requestedLayout);
     void validateIndex(uint64_t index, const char *splitName) const;
     void validateIndices(const std::vector<uint64_t> &indices, const char *splitName) const;
