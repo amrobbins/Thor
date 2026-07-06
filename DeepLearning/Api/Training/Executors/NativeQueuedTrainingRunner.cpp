@@ -1743,12 +1743,10 @@ struct QueuedEpochPhaseWork {
     ExampleType exampleType = ExampleType::TRAIN;
     TrainingEventPhase phase = TrainingEventPhase::TRAIN;
     uint64_t initialBatchNum = 0;
+    uint64_t batchesToRunCount = 0;
     uint64_t batchesPerEpoch = 0;
 
-    [[nodiscard]] uint64_t batchesToRun() const {
-        THOR_THROW_IF_FALSE(initialBatchNum <= batchesPerEpoch);
-        return batchesPerEpoch - initialBatchNum;
-    }
+    [[nodiscard]] uint64_t batchesToRun() const { return batchesToRunCount; }
 };
 
 class NativeQueuedEpochScheduler {
@@ -1819,7 +1817,7 @@ class NativeQueuedEpochScheduler {
                 return;
             }
             const auto scheduleIterationStart = diagnosticNow(collectQueueDiagnostics);
-            uint64_t epochBatchNum = initialEpochBatchNum + batch;
+            const uint64_t epochBatchNum = initialEpochBatchNum + batch;
             const auto optimizerStart = diagnosticNow(collectQueueDiagnostics);
             Optimizer::updateHyperParameters(placedNetwork.get(), currentEpoch, epochBatchNum, batchesPerEpoch);
             const auto optimizerFinish = diagnosticNow(collectQueueDiagnostics);
@@ -1888,7 +1886,8 @@ class NativeQueuedEpochScheduler {
             }
 
             const auto getBatchStart = diagnosticNow(collectQueueDiagnostics);
-            params->batchInput = loader->getBatch(exampleType, epochBatchNum);
+            uint64_t loaderBatchNum = epochBatchNum;
+            params->batchInput = loader->getBatch(exampleType, loaderBatchNum);
             const auto getBatchFinish = diagnosticNow(collectQueueDiagnostics);
             const uint64_t getBatchWaitMicros = collectQueueDiagnostics ? elapsedMicros(getBatchStart, getBatchFinish) : 0;
             if (collectQueueDiagnostics && shouldEmitQueueDiagnostic(batch + 1, getBatchWaitMicros)) {
@@ -2124,6 +2123,9 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     if (!evaluateOnly && request.checkBestModelEveryEpochs == 0 && !request.earlyCompletionPolicies.empty()) {
         throw std::runtime_error("Trainer early_completion_policies require check_best_model_every_epochs > 0.");
     }
+    if (request.maxTrainingBatchesPerEpoch.has_value() && request.maxTrainingBatchesPerEpoch.value() == 0) {
+        throw std::runtime_error("Trainer max_training_batches_per_epoch must be >= 1 or None.");
+    }
 
     TrainingRuntimeConfig runtime = request.runtime;
 
@@ -2239,6 +2241,8 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     const double initialElapsedSeconds = evaluateOnly ? 0.0 : std::max(0.0, request.initialElapsedSeconds);
     uint64_t currentEpoch = evaluateOnly ? 0 : request.initialCompletedEpochs;
     std::map<TrainingEventPhase, WallThroughputEmaState> throughputByPhase;
+    std::array<uint64_t, 4> cappedReportedStepsByPhase{};
+    const bool trainingBatchCapEnabled = !evaluateOnly && request.maxTrainingBatchesPerEpoch.has_value();
     const uint64_t totalRequestedEpochs = currentEpoch + request.epochs;
     auto elapsedSinceRunStart = [&]() {
         const auto now = std::chrono::high_resolution_clock::now();
@@ -2299,14 +2303,29 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
             request.cancellationToken.throwIfCancellationRequested();
             const ExampleType exampleType = phaseSpec.first;
             const TrainingEventPhase phase = phaseSpec.second;
-            uint64_t batchNum = request.loader->getNextBatchNum(exampleType);
-            const uint64_t batchesPerEpoch = request.loader->getNumBatchesPerEpoch(exampleType);
-            if (batchNum > batchesPerEpoch) {
+            const uint64_t loaderBatchNum = request.loader->getNextBatchNum(exampleType);
+            const uint64_t loaderBatchesPerEpoch = request.loader->getNumBatchesPerEpoch(exampleType);
+            if (loaderBatchNum > loaderBatchesPerEpoch) {
                 throw std::runtime_error("Loader returned next batch number beyond batches per epoch for " + phaseName(phase) + ".");
             }
-            phaseWorks.push_back(QueuedEpochPhaseWork{exampleType, phase, batchNum, batchesPerEpoch});
-            initiallyCompletedBatches += batchNum;
-            totalBatchesAcrossPhases += batchesPerEpoch;
+
+            uint64_t publicInitialBatchNum = loaderBatchNum;
+            uint64_t publicBatchesPerEpoch = loaderBatchesPerEpoch;
+            uint64_t batchesToRun = loaderBatchesPerEpoch - loaderBatchNum;
+            if (!evaluateOnly && phase == TrainingEventPhase::TRAIN && request.maxTrainingBatchesPerEpoch.has_value() &&
+                loaderBatchesPerEpoch > request.maxTrainingBatchesPerEpoch.value()) {
+                // A capped public training epoch is a fixed-size work quantum.  It must not end early just because
+                // the underlying loader's full-dataset epoch boundary is reached; loaders already wrap and continue
+                // streaming batches.  Keeping the public epoch at exactly the cap lets phased training express a
+                // stable amount of work per phase even when one full pass over the split is much larger than the cap.
+                batchesToRun = request.maxTrainingBatchesPerEpoch.value();
+                publicInitialBatchNum = 0;
+                publicBatchesPerEpoch = batchesToRun;
+            }
+
+            phaseWorks.push_back(QueuedEpochPhaseWork{exampleType, phase, publicInitialBatchNum, batchesToRun, publicBatchesPerEpoch});
+            initiallyCompletedBatches += publicInitialBatchNum;
+            totalBatchesAcrossPhases += publicBatchesPerEpoch;
         }
 
         std::vector<std::string> scalarTensorNames(runtime.scalarTensorsToReport.begin(), runtime.scalarTensorsToReport.end());
@@ -2467,7 +2486,13 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                         makeBaseSnapshot(completedBatch.phase, cumulativeEpoch, batchSize, completedBatch.batchesInEpoch, state);
                     snapshot.inFlightBatches = completedBatch.inFlightAfterPop;
                     snapshot.stepInEpoch = completedBatch.epochBatchNum + 1;
-                    snapshot.step = (currentEpoch * completedBatch.batchesInEpoch) + snapshot.stepInEpoch;
+                    if (trainingBatchCapEnabled && completedBatch.phase == TrainingEventPhase::TRAIN) {
+                        const size_t phaseIndex = queuedPhaseIndex(completedBatch.phase);
+                        snapshot.step = cappedReportedStepsByPhase[phaseIndex] + 1;
+                        cappedReportedStepsByPhase[phaseIndex] += 1;
+                    } else {
+                        snapshot.step = (currentEpoch * completedBatch.batchesInEpoch) + snapshot.stepInEpoch;
+                    }
                     snapshot.samplesProcessed = snapshot.step * batchSize;
 
                     // Public throughput stats use wall-clock time, not the CUDA

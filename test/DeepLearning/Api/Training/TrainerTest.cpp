@@ -69,6 +69,7 @@ class CapturingExecutor : public TrainingExecutor {
         lastSaveModelOverwrite = request.saveModelOverwrite;
         lastCheckBestModelEveryEpochs = request.checkBestModelEveryEpochs;
         lastFirstModelSelectionEpoch = request.firstModelSelectionEpoch;
+        lastMaxTrainingBatchesPerEpoch = request.maxTrainingBatchesPerEpoch;
         lastInitialCompletedEpochs = request.initialCompletedEpochs;
         if (request.completedTrainingEpochs != nullptr) {
             *request.completedTrainingEpochs = request.initialCompletedEpochs + request.epochs;
@@ -93,6 +94,7 @@ class CapturingExecutor : public TrainingExecutor {
     bool lastSaveModelOverwrite = false;
     uint32_t lastCheckBestModelEveryEpochs = 0;
     uint64_t lastFirstModelSelectionEpoch = 0;
+    std::optional<uint64_t> lastMaxTrainingBatchesPerEpoch{};
     uint64_t lastInitialCompletedEpochs = 0;
     bool lastModelSelectionScoreIsCustom = false;
     std::optional<double> lastModelSelectionScore{};
@@ -188,6 +190,50 @@ TEST(Trainer, FitPassesBestModelCandidateOptionsAsRunParameters) {
     EXPECT_TRUE(executor->lastSaveModelOverwrite);
     EXPECT_EQ(executor->lastCheckBestModelEveryEpochs, 3u);
     EXPECT_EQ(executor->lastFirstModelSelectionEpoch, 7u);
+    EXPECT_FALSE(executor->lastMaxTrainingBatchesPerEpoch.has_value());
+}
+
+TEST(Trainer, FitPassesMaxTrainingBatchesPerEpochAsRunParameter) {
+    auto network = std::make_shared<Network>("trainer-max-training-batches-per-epoch");
+    auto loader = std::make_shared<FakeLoader>();
+    auto executor = std::make_shared<CapturingExecutor>();
+    auto observer = std::make_shared<NullTrainingObserver>();
+
+    Trainer trainer = Trainer::Builder()
+                          .network(network)
+                          .loader(loader)
+                          .executor(executor)
+                          .observer(observer)
+                          .build();
+
+    TrainerFitOptions options;
+    options.epochs = 3;
+    options.maxTrainingBatchesPerEpoch = 500;
+    trainer.fit(options);
+
+    EXPECT_EQ(executor->calls, 1u);
+    ASSERT_TRUE(executor->lastMaxTrainingBatchesPerEpoch.has_value());
+    EXPECT_EQ(executor->lastMaxTrainingBatchesPerEpoch.value(), 500u);
+}
+
+TEST(Trainer, RejectsZeroMaxTrainingBatchesPerEpoch) {
+    auto network = std::make_shared<Network>("trainer-zero-max-training-batches-per-epoch");
+    auto loader = std::make_shared<FakeLoader>();
+    auto executor = std::make_shared<CapturingExecutor>();
+    auto observer = std::make_shared<NullTrainingObserver>();
+
+    Trainer trainer = Trainer::Builder()
+                          .network(network)
+                          .loader(loader)
+                          .executor(executor)
+                          .observer(observer)
+                          .build();
+
+    TrainerFitOptions options;
+    options.maxTrainingBatchesPerEpoch = 0;
+
+    EXPECT_THROW(trainer.fit(options), std::runtime_error);
+    EXPECT_EQ(executor->calls, 0u);
 }
 
 TEST(Trainer, FitPassesCumulativeCompletedEpochsAcrossFitCalls) {

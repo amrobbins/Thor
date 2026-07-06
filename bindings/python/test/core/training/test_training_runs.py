@@ -1691,12 +1691,20 @@ def test_trainer_binding_accepts_first_model_selection_epoch_and_fit_options_cad
     options.epochs = 3
     options.check_best_model_every_epochs = 2
     options.first_model_selection_epoch = 7
+    options.max_training_batches_per_epoch = 500
 
     assert trainer is not None
     assert trainer.completed_training_epochs == 0
     assert options.epochs == 3
     assert options.check_best_model_every_epochs == 2
     assert options.first_model_selection_epoch == 7
+    assert options.max_training_batches_per_epoch == 500
+
+
+def test_trainer_fit_options_default_to_full_training_epoch():
+    options = thor.training.TrainerFitOptions()
+
+    assert options.max_training_batches_per_epoch is None
 
 
 def test_trainer_fit_options_accepts_zero_best_model_candidate_cadence_as_disabled():

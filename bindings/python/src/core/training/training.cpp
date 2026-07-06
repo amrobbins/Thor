@@ -3301,7 +3301,8 @@ IndexedNumpyFloat32DictBatchLoader.
     trainer_fit_options.def(nb::init<>())
         .def_rw("epochs", &TrainerFitOptions::epochs)
         .def_rw("check_best_model_every_epochs", &TrainerFitOptions::checkBestModelEveryEpochs)
-        .def_rw("first_model_selection_epoch", &TrainerFitOptions::firstModelSelectionEpoch);
+        .def_rw("first_model_selection_epoch", &TrainerFitOptions::firstModelSelectionEpoch)
+        .def_rw("max_training_batches_per_epoch", &TrainerFitOptions::maxTrainingBatchesPerEpoch);
 
     auto trainer = nb::class_<Trainer>(training, "Trainer", nb::type_slots(trainer_type_slots));
     trainer.attr("__module__") = "thor.training";
@@ -3396,11 +3397,14 @@ IndexedNumpyFloat32DictBatchLoader.
            uint32_t check_best_model_every_epochs,
            uint64_t first_model_selection_epoch,
            nb::object restart_conditions,
-           nb::object early_completion_policies) -> nb::object {
+           nb::object early_completion_policies,
+           nb::object max_training_batches_per_epoch) -> nb::object {
             TrainerFitOptions options;
             options.epochs = epochs;
             options.checkBestModelEveryEpochs = check_best_model_every_epochs;
             options.firstModelSelectionEpoch = first_model_selection_epoch;
+            options.maxTrainingBatchesPerEpoch = optionalUint64FromPython(std::move(max_training_batches_per_epoch),
+                                                                          "max_training_batches_per_epoch");
             options.restartConditions = trainingRestartPoliciesFromPython(restart_conditions, /*trainerScope=*/true);
             TrainingEarlyCompletionPoliciesBinding earlyPolicies = trainingEarlyCompletionPoliciesFromPython(early_completion_policies);
             options.earlyCompletionPolicies = std::move(earlyPolicies.policies);
@@ -3415,7 +3419,8 @@ IndexedNumpyFloat32DictBatchLoader.
         "check_best_model_every_epochs"_a = 0,
         "first_model_selection_epoch"_a = 0,
         "restart_conditions"_a.none() = nb::none(),
-        "early_completion_policies"_a.none() = nb::none());
+        "early_completion_policies"_a.none() = nb::none(),
+        "max_training_batches_per_epoch"_a.none() = nb::none());
     trainer.def(
         "save_model",
         [](Trainer& self, nb::object directory, bool overwrite, bool save_optimizer_state) {
@@ -3832,11 +3837,14 @@ IndexedNumpyFloat32DictBatchLoader.
            nb::object restart_conditions,
            nb::object early_completion_rules,
            nb::object reports,
-           bool evaluate_training_population) {
+           bool evaluate_training_population,
+           nb::object max_training_batches_per_epoch) {
             TrainerFitOptions options;
             options.epochs = epochs;
             options.checkBestModelEveryEpochs = check_best_model_every_epochs;
             options.firstModelSelectionEpoch = first_model_selection_epoch;
+            options.maxTrainingBatchesPerEpoch = optionalUint64FromPython(std::move(max_training_batches_per_epoch),
+                                                                          "max_training_batches_per_epoch");
             TrainingRunsSessionOptions sessionOptions;
             sessionOptions.restartConditions = trainingRestartPoliciesFromPython(restart_conditions, /*trainerScope=*/false);
             TrainingRunsEarlyCompletionRulesBinding earlyRules = trainingRunsEarlyCompletionRulesFromPython(early_completion_rules);
@@ -3854,7 +3862,8 @@ IndexedNumpyFloat32DictBatchLoader.
         "restart_conditions"_a.none() = nb::none(),
         "early_completion_rules"_a.none() = nb::none(),
         "reports"_a.none() = nb::none(),
-        "evaluate_training_population"_a = true);
+        "evaluate_training_population"_a = true,
+        "max_training_batches_per_epoch"_a.none() = nb::none());
 
     auto gradient_clear_policy = nb::enum_<TrainingStep::GradientClearPolicy>(training, "GradientClearPolicy")
                                      .value("clear_before_step", TrainingStep::GradientClearPolicy::CLEAR_BEFORE_STEP)

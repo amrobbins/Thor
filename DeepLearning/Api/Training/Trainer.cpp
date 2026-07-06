@@ -648,6 +648,7 @@ void Trainer::fitInternal(const TrainerFitOptions& options,
     request.saveModelOverwrite = saveModelOverwrite;
     request.checkBestModelEveryEpochs = options.checkBestModelEveryEpochs;
     request.firstModelSelectionEpoch = options.firstModelSelectionEpoch;
+    request.maxTrainingBatchesPerEpoch = options.maxTrainingBatchesPerEpoch;
     request.initialCompletedEpochs = completedTrainingEpochs;
     request.initialElapsedSeconds = completedTrainingElapsedSeconds;
     request.modelSelectionScore = modelSelectionScore;
@@ -1011,6 +1012,9 @@ void Trainer::validateFitOptions(const TrainerFitOptions& options) const {
     }
     if (options.checkBestModelEveryEpochs == 0 && (!options.earlyCompletionPolicies.empty())) {
         throw std::runtime_error("Trainer::fit early_completion_policies require check_best_model_every_epochs > 0.");
+    }
+    if (options.maxTrainingBatchesPerEpoch.has_value() && options.maxTrainingBatchesPerEpoch.value() == 0) {
+        throw std::runtime_error("Trainer::fit max_training_batches_per_epoch must be >= 1 or None.");
     }
     validateRestartConditions(options.restartConditions);
     validateEarlyCompletionPolicies(options.earlyCompletionPolicies);

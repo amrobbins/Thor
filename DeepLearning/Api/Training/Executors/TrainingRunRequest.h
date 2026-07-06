@@ -60,6 +60,14 @@ struct TrainingRunRequest {
     // metadata still receive/report cumulative epoch numbers.
     uint64_t firstModelSelectionEpoch = 0;
 
+    // Optional cap for the TRAIN phase only. When unset, a training epoch drains
+    // the loader's full training split as before. When set, each public training
+    // epoch consumes at most this many batches and the loader continues from its
+    // current position across later public epochs, so large datasets can span
+    // several public epochs. Validation/evaluation epochs are intentionally not
+    // capped by this option.
+    std::optional<uint64_t> maxTrainingBatchesPerEpoch{};
+
     TrainingModelSelectionScore modelSelectionScore{};
 
     // Checked at the same epoch cadence as best-candidate selection. The
