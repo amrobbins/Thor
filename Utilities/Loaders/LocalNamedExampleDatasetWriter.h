@@ -9,6 +9,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -26,6 +27,30 @@ class LocalNamedExampleDatasetWriter {
 
     struct TensorBatchView {
         ThorImplementation::DataType dataType;
+        std::vector<uint64_t> dimensions;
+        const void *data;
+        uint64_t numBytes;
+    };
+
+    struct WindowedTensorReferenceView {
+        ThorImplementation::DataType keyDataType;
+        ThorImplementation::DataType indexDataType;
+        const void *key;
+        const void *start;
+    };
+
+    struct WindowedTensorReferenceBatchView {
+        ThorImplementation::DataType keyDataType;
+        ThorImplementation::DataType indexDataType;
+        const void *keys;
+        const void *starts;
+        uint64_t count;
+    };
+
+    struct WindowedTensorSourceView {
+        ThorImplementation::DataType dataType;
+        const void *key;
+        int64_t startIndex;
         std::vector<uint64_t> dimensions;
         const void *data;
         uint64_t numBytes;
@@ -55,7 +80,14 @@ class LocalNamedExampleDatasetWriter {
     void writeIndexedExample(const std::map<std::string, TensorView> &tensors,
                              const std::string &label = std::string(),
                              const std::string &filename = std::string());
+    void writeIndexedExample(const std::map<std::string, TensorView> &tensors,
+                             const std::map<std::string, WindowedTensorReferenceView> &windowedTensorReferences,
+                             const std::string &label = std::string(),
+                             const std::string &filename = std::string());
     void writeIndexedExamples(const std::map<std::string, TensorBatchView> &tensors);
+    void writeIndexedExamples(const std::map<std::string, TensorBatchView> &tensors,
+                              const std::map<std::string, WindowedTensorReferenceBatchView> &windowedTensorReferences);
+    void writeWindowedTensorSource(std::string_view tensorName, const WindowedTensorSourceView &source);
     void close();
 
     [[nodiscard]] bool isClosed() const;
@@ -100,6 +132,15 @@ class LocalNamedExampleDatasetWriter {
     std::unique_ptr<Shard> currentShard;
     uint64_t nextShardIndex;
     std::vector<ShardManifestEntry> shardEntries;
+
+    struct WindowedTensorSourceManifestEntry {
+        std::string filename;
+        uint64_t numBytes = 0;
+        std::set<std::string> keyHexValues;
+        std::vector<LocalNamedExampleLayout::WindowedTensorSourceSequence> sequences;
+    };
+
+    std::map<std::string, WindowedTensorSourceManifestEntry> windowedTensorSources;
     uint64_t totalTrainExamples;
     uint64_t totalValidateExamples;
     uint64_t totalTestExamples;
@@ -107,8 +148,18 @@ class LocalNamedExampleDatasetWriter {
     void validateWritable() const;
     void validateTensorMapExact(const std::map<std::string, TensorView> &tensors) const;
     uint64_t validateTensorBatchMapExact(const std::map<std::string, TensorBatchView> &tensors) const;
+    void validateWindowedTensorReferenceMapExact(
+        const std::map<std::string, WindowedTensorReferenceView> &windowedTensorReferences) const;
+    uint64_t validateTensorAndWindowedTensorReferenceBatchMapsExact(
+        const std::map<std::string, TensorBatchView> &tensors,
+        const std::map<std::string, WindowedTensorReferenceBatchView> &windowedTensorReferences) const;
     std::vector<uint8_t> packRecord(const std::map<std::string, TensorView> &tensors) const;
+    std::vector<uint8_t> packRecord(const std::map<std::string, TensorView> &tensors,
+                                    const std::map<std::string, WindowedTensorReferenceView> &windowedTensorReferences) const;
     std::vector<uint8_t> packRecords(const std::map<std::string, TensorBatchView> &tensors, uint64_t count) const;
+    std::vector<uint8_t> packRecords(const std::map<std::string, TensorBatchView> &tensors,
+                                     const std::map<std::string, WindowedTensorReferenceBatchView> &windowedTensorReferences,
+                                     uint64_t count) const;
     uint64_t nextShardCapacity() const;
     void ensureCurrentShard();
     void finalizeCurrentShard();

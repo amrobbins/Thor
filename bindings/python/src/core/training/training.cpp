@@ -60,7 +60,33 @@ namespace {
 using Float32Array = nb::ndarray<const float, nb::numpy, nb::c_contig>;
 using MutableFloat32Array = nb::ndarray<float, nb::numpy, nb::c_contig>;
 using Float16Array = nb::ndarray<const half, nb::numpy, nb::c_contig>;
+using UInt8Array = nb::ndarray<const uint8_t, nb::numpy, nb::c_contig>;
+using MutableUInt8Array = nb::ndarray<uint8_t, nb::numpy, nb::c_contig>;
+using Int32Array = nb::ndarray<const int32_t, nb::numpy, nb::c_contig>;
+using UInt32Array = nb::ndarray<const uint32_t, nb::numpy, nb::c_contig>;
 using Int64Array = nb::ndarray<const int64_t, nb::numpy, nb::c_contig>;
+using UInt64Array = nb::ndarray<const uint64_t, nb::numpy, nb::c_contig>;
+
+struct PythonConstantPad {
+    PythonConstantPad() = default;
+    explicit PythonConstantPad(double value) : value(value) {}
+
+    double value = 0.0;
+};
+
+struct PythonWindowedTensorLayout {
+    std::vector<uint64_t> shape;
+    ThorImplementation::DataType dataType = ThorImplementation::DataType::FP32;
+    ThorImplementation::DataType keyType = ThorImplementation::DataType::UINT64;
+    ThorImplementation::DataType indexType = ThorImplementation::DataType::INT32;
+    double padValue = 0.0;
+    std::optional<std::string> maskName;
+};
+
+struct PythonWindowedTensorChunk {
+    nb::object key;
+    nb::object start;
+};
 
 template <typename ScalarT>
 struct InMemoryNumpySplit {
@@ -508,14 +534,70 @@ std::vector<uint64_t> uint64ShapeFromPython(nb::handle value, const std::string&
 
 std::vector<std::pair<std::string, std::vector<uint64_t>>> localNamedTensorShapesFromPython(const nb::dict& tensors,
                                                                                             const std::string& context) {
-    if (nb::len(tensors) == 0) {
-        throw nb::value_error((context + " tensors must contain at least one tensor").c_str());
-    }
     std::vector<std::pair<std::string, std::vector<uint64_t>>> out;
     out.reserve(nb::len(tensors));
     for (auto item : tensors) {
         const std::string name = tensorNameFromPythonKey(item.first, context);
         out.emplace_back(name, uint64ShapeFromPython(item.second, context + "['" + name + "']"));
+    }
+    return out;
+}
+
+std::optional<std::string> optionalStringFromPython(const nb::object& obj, const std::string& argumentName) {
+    if (obj.is_none()) {
+        return std::nullopt;
+    }
+    std::string value = pybind::castOrTypeError<std::string>(obj, argumentName, "str or None", false);
+    if (value.empty()) {
+        throw nb::value_error((argumentName + " must not be empty").c_str());
+    }
+    return value;
+}
+
+bool dictContainsString(const nb::dict& dict, const std::string& key) {
+    return PyDict_GetItemString(dict.ptr(), key.c_str()) != nullptr;
+}
+
+nb::object dictGetString(const nb::dict& dict, const std::string& key, const std::string& context) {
+    PyObject* item = PyDict_GetItemString(dict.ptr(), key.c_str());
+    if (item == nullptr) {
+        throw nb::value_error((context + " missing key '" + key + "'").c_str());
+    }
+    return nb::borrow<nb::object>(item);
+}
+
+bool pythonHasAttribute(nb::handle obj, const char* name) {
+    return PyObject_HasAttrString(obj.ptr(), name) == 1;
+}
+
+double padValueFromPython(const nb::object& obj, const std::string& argumentName) {
+    if (obj.is_none()) {
+        return 0.0;
+    }
+    PythonConstantPad pad = pybind::castOrTypeError<PythonConstantPad>(obj, argumentName, "thor.training.ConstantPad", false);
+    return pad.value;
+}
+
+std::vector<LocalNamedExampleLayout::WindowedTensorShape> localNamedWindowedTensorShapesFromPython(
+    const nb::object& maybeWindowedTensors,
+    const std::string& context) {
+    if (maybeWindowedTensors.is_none()) {
+        return {};
+    }
+    nb::dict windowedTensors = pybind::castOrTypeError<nb::dict>(maybeWindowedTensors, context + " windowed_tensors", "dict or None", false);
+    std::vector<LocalNamedExampleLayout::WindowedTensorShape> out;
+    out.reserve(nb::len(windowedTensors));
+    for (auto item : windowedTensors) {
+        const std::string name = tensorNameFromPythonKey(item.first, context + " windowed_tensors");
+        PythonWindowedTensorLayout entry = pybind::castOrTypeError<PythonWindowedTensorLayout>(
+            item.second, context + " windowed_tensors['" + name + "']", "thor.training.WindowedTensorLayout", false);
+        out.emplace_back(name,
+                         std::move(entry.shape),
+                         entry.keyType,
+                         entry.indexType,
+                         entry.padValue,
+                         std::move(entry.maskName),
+                         entry.dataType);
     }
     return out;
 }
@@ -543,9 +625,15 @@ nb::dict localNamedLayoutTensorSpecsToPythonDict(const LocalNamedExampleLayout& 
 
 std::vector<std::string> localNamedLayoutTensorNames(const LocalNamedExampleLayout& layout) {
     std::vector<std::string> names;
-    names.reserve(layout.tensors().size());
+    names.reserve(layout.tensors().size() + layout.windowedTensors().size());
     for (const LocalNamedExampleLayout::TensorSpec& spec : layout.tensors()) {
         names.push_back(spec.name);
+    }
+    for (const LocalNamedExampleLayout::WindowedTensorSpec& spec : layout.windowedTensors()) {
+        names.push_back(spec.name);
+        if (spec.maskName.has_value()) {
+            names.push_back(spec.maskName.value());
+        }
     }
     return names;
 }
@@ -555,10 +643,129 @@ std::map<std::string, std::vector<uint64_t>> localNamedLayoutTensorShapes(const 
     for (const LocalNamedExampleLayout::TensorSpec& spec : layout.tensors()) {
         shapes.emplace(spec.name, spec.dimensions);
     }
+    for (const LocalNamedExampleLayout::WindowedTensorSpec& spec : layout.windowedTensors()) {
+        shapes.emplace(spec.name, spec.dimensions);
+        if (spec.maskName.has_value()) {
+            shapes.emplace(spec.maskName.value(), std::vector<uint64_t>{spec.windowLength()});
+        }
+    }
     return shapes;
 }
 
+nb::dict localNamedLayoutWindowedTensorSpecsToPythonDict(const LocalNamedExampleLayout& layout) {
+    nb::dict out;
+    for (const LocalNamedExampleLayout::WindowedTensorSpec& spec : layout.windowedTensors()) {
+        nb::dict specDict;
+        specDict["shape"] = uint64VectorToPythonList(spec.dimensions);
+        specDict["data_type"] = nb::cast(spec.dataType);
+        specDict["key_type"] = nb::cast(spec.keyDataType);
+        specDict["index_type"] = nb::cast(spec.indexDataType);
+        specDict["pad_value"] = spec.padValue;
+        if (spec.maskName.has_value()) {
+            specDict["mask_name"] = nb::str(spec.maskName.value().c_str());
+        } else {
+            specDict["mask_name"] = nb::none();
+        }
+        specDict["reference_offset_bytes"] = spec.referenceOffsetBytes;
+        specDict["reference_num_bytes"] = spec.referenceNumBytes;
+        specDict["num_bytes"] = spec.outputNumBytes();
+        if (spec.sourceFilename.has_value()) {
+            specDict["source_filename"] = nb::str(spec.sourceFilename.value().c_str());
+        } else {
+            specDict["source_filename"] = nb::none();
+        }
+        specDict["source_num_bytes"] = spec.sourceNumBytes;
+        nb::list sequences;
+        for (const LocalNamedExampleLayout::WindowedTensorSourceSequence& sequence : spec.sourceSequences) {
+            nb::dict seq;
+            seq["key_hex"] = nb::str(sequence.keyHex.c_str());
+            seq["start_index"] = sequence.startIndex;
+            seq["end_index_exclusive"] = sequence.endIndexExclusive;
+            seq["offset_bytes"] = sequence.offsetBytes;
+            seq["num_steps"] = sequence.numSteps;
+            seq["num_bytes"] = sequence.numBytes;
+            sequences.append(std::move(seq));
+        }
+        specDict["source_sequences"] = std::move(sequences);
+        out[nb::str(spec.name.c_str())] = std::move(specDict);
+    }
+    return out;
+}
+
 Float32Array requireFloat32NumpyArrayNoCopy(nb::handle value, const std::string& context);
+
+template <typename T>
+std::vector<uint8_t> scalarBytesFromPython(nb::handle value, const std::string& context, const std::string& expected) {
+    T scalar = pybind::castOrTypeError<T>(value, context, expected, true);
+    std::vector<uint8_t> bytes(sizeof(T));
+    std::memcpy(bytes.data(), &scalar, sizeof(T));
+    return bytes;
+}
+
+std::vector<uint8_t> scalarBytesFromPython(nb::handle value, ThorImplementation::DataType dataType, const std::string& context) {
+    switch (dataType) {
+        case ThorImplementation::DataType::INT32:
+            return scalarBytesFromPython<int32_t>(value, context, "int32-compatible integer");
+        case ThorImplementation::DataType::UINT32:
+            return scalarBytesFromPython<uint32_t>(value, context, "uint32-compatible integer");
+        case ThorImplementation::DataType::INT64:
+            return scalarBytesFromPython<int64_t>(value, context, "int64-compatible integer");
+        case ThorImplementation::DataType::UINT64:
+            return scalarBytesFromPython<uint64_t>(value, context, "uint64-compatible integer");
+        default:
+            throw nb::value_error((context + " supports only int32, uint32, int64, or uint64 metadata types").c_str());
+    }
+}
+
+template <typename ArrayT>
+uint64_t requireOneDimensionalCount(const ArrayT& array, const std::string& context) {
+    if (array.ndim() != 1) {
+        throw nb::value_error((context + " must be a 1D C-contiguous numpy array").c_str());
+    }
+    return static_cast<uint64_t>(array.shape(0));
+}
+
+struct TypedArrayPointer {
+    const void* data = nullptr;
+    uint64_t count = 0;
+};
+
+TypedArrayPointer typedOneDimensionalArrayPointer(nb::handle value,
+                                                  ThorImplementation::DataType dataType,
+                                                  const std::string& context,
+                                                  std::vector<Int32Array>& int32Arrays,
+                                                  std::vector<UInt32Array>& uint32Arrays,
+                                                  std::vector<Int64Array>& int64Arrays,
+                                                  std::vector<UInt64Array>& uint64Arrays) {
+    switch (dataType) {
+        case ThorImplementation::DataType::INT32: {
+            Int32Array array = pybind::castOrTypeError<Int32Array>(value, context, "a C-contiguous numpy.int32 array", false);
+            const uint64_t count = requireOneDimensionalCount(array, context);
+            int32Arrays.push_back(array);
+            return TypedArrayPointer{int32Arrays.back().data(), count};
+        }
+        case ThorImplementation::DataType::UINT32: {
+            UInt32Array array = pybind::castOrTypeError<UInt32Array>(value, context, "a C-contiguous numpy.uint32 array", false);
+            const uint64_t count = requireOneDimensionalCount(array, context);
+            uint32Arrays.push_back(array);
+            return TypedArrayPointer{uint32Arrays.back().data(), count};
+        }
+        case ThorImplementation::DataType::INT64: {
+            Int64Array array = pybind::castOrTypeError<Int64Array>(value, context, "a C-contiguous numpy.int64 array", false);
+            const uint64_t count = requireOneDimensionalCount(array, context);
+            int64Arrays.push_back(array);
+            return TypedArrayPointer{int64Arrays.back().data(), count};
+        }
+        case ThorImplementation::DataType::UINT64: {
+            UInt64Array array = pybind::castOrTypeError<UInt64Array>(value, context, "a C-contiguous numpy.uint64 array", false);
+            const uint64_t count = requireOneDimensionalCount(array, context);
+            uint64Arrays.push_back(array);
+            return TypedArrayPointer{uint64Arrays.back().data(), count};
+        }
+        default:
+            throw nb::value_error((context + " supports only int32, uint32, int64, or uint64 metadata arrays").c_str());
+    }
+}
 
 std::map<std::string, LocalNamedExampleDatasetWriter::TensorView> localNamedWriterTensorViewsFromPython(
     const nb::dict& tensors,
@@ -572,12 +779,31 @@ std::map<std::string, LocalNamedExampleDatasetWriter::TensorView> localNamedWrit
         throw nb::value_error((context + " tensors must contain at least one tensor").c_str());
     }
 
-    std::map<std::string, LocalNamedExampleDatasetWriter::TensorView> views;
-    ownedArrays.reserve(nb::len(tensors));
+    std::set<std::string> expectedNames;
+    for (const LocalNamedExampleLayout::TensorSpec& spec : layout.tensors()) {
+        expectedNames.insert(spec.name);
+    }
+    for (const LocalNamedExampleLayout::WindowedTensorSpec& spec : layout.windowedTensors()) {
+        expectedNames.insert(spec.name);
+    }
     for (auto item : tensors) {
         const std::string name = tensorNameFromPythonKey(item.first, context);
+        if (!expectedNames.contains(name)) {
+            throw nb::value_error((context + " unexpected tensor name '" + name + "'").c_str());
+        }
+    }
+
+    std::map<std::string, LocalNamedExampleDatasetWriter::TensorView> views;
+    ownedArrays.reserve(layout.tensors().size());
+    for (const LocalNamedExampleLayout::TensorSpec& spec : layout.tensors()) {
+        const std::string& name = spec.name;
+        if (!dictContainsString(tensors, name)) {
+            throw std::runtime_error(context + " missing tensor '" + name + "'");
+        }
+        nb::object valueObject = dictGetString(tensors, name, context);
+        nb::handle value = valueObject;
         const std::string tensorContext = context + "['" + name + "']";
-        Float32Array array = requireFloat32NumpyArrayNoCopy(item.second, tensorContext);
+        Float32Array array = requireFloat32NumpyArrayNoCopy(value, tensorContext);
         std::vector<uint64_t> dimensions;
         dimensions.reserve(array.ndim());
         for (size_t i = 0; i < array.ndim(); ++i) {
@@ -614,12 +840,31 @@ std::map<std::string, LocalNamedExampleDatasetWriter::TensorBatchView> localName
         throw nb::value_error((context + " tensors must contain at least one tensor").c_str());
     }
 
-    std::map<std::string, LocalNamedExampleDatasetWriter::TensorBatchView> views;
-    ownedArrays.reserve(nb::len(tensors));
+    std::set<std::string> expectedNames;
+    for (const LocalNamedExampleLayout::TensorSpec& spec : layout.tensors()) {
+        expectedNames.insert(spec.name);
+    }
+    for (const LocalNamedExampleLayout::WindowedTensorSpec& spec : layout.windowedTensors()) {
+        expectedNames.insert(spec.name);
+    }
     for (auto item : tensors) {
         const std::string name = tensorNameFromPythonKey(item.first, context);
+        if (!expectedNames.contains(name)) {
+            throw nb::value_error((context + " unexpected tensor name '" + name + "'").c_str());
+        }
+    }
+
+    std::map<std::string, LocalNamedExampleDatasetWriter::TensorBatchView> views;
+    ownedArrays.reserve(layout.tensors().size());
+    for (const LocalNamedExampleLayout::TensorSpec& spec : layout.tensors()) {
+        const std::string& name = spec.name;
+        if (!dictContainsString(tensors, name)) {
+            throw std::runtime_error(context + " missing tensor '" + name + "'");
+        }
+        nb::object valueObject = dictGetString(tensors, name, context);
+        nb::handle value = valueObject;
         const std::string tensorContext = context + "['" + name + "']";
-        Float32Array array = requireFloat32NumpyArrayNoCopy(item.second, tensorContext);
+        Float32Array array = requireFloat32NumpyArrayNoCopy(value, tensorContext);
         std::vector<uint64_t> dimensions;
         dimensions.reserve(array.ndim());
         for (size_t i = 0; i < array.ndim(); ++i) {
@@ -644,6 +889,111 @@ std::map<std::string, LocalNamedExampleDatasetWriter::TensorBatchView> localName
     return views;
 }
 
+std::map<std::string, LocalNamedExampleDatasetWriter::WindowedTensorReferenceView> localNamedWriterWindowedTensorReferenceViewsFromPython(
+    const nb::dict& tensors,
+    const LocalNamedExampleLayout& layout,
+    const std::string& context,
+    std::vector<std::vector<uint8_t>>& ownedScalars) {
+    std::map<std::string, LocalNamedExampleDatasetWriter::WindowedTensorReferenceView> views;
+    ownedScalars.reserve(layout.windowedTensors().size() * 2);
+    for (const LocalNamedExampleLayout::WindowedTensorSpec& spec : layout.windowedTensors()) {
+        if (!dictContainsString(tensors, spec.name)) {
+            throw std::runtime_error(context + " missing windowed tensor reference '" + spec.name + "'");
+        }
+        nb::object chunkObject = dictGetString(tensors, spec.name, context);
+        const std::string chunkContext = context + "['" + spec.name + "']";
+        if (!pythonHasAttribute(chunkObject, "key") || !pythonHasAttribute(chunkObject, "start")) {
+            throw nb::type_error((chunkContext + " must be thor.training.WindowedTensorChunk").c_str());
+        }
+        ownedScalars.push_back(scalarBytesFromPython(chunkObject.attr("key"), spec.keyDataType, chunkContext + ".key"));
+        const uint8_t* keyBytes = ownedScalars.back().data();
+        ownedScalars.push_back(scalarBytesFromPython(chunkObject.attr("start"), spec.indexDataType, chunkContext + ".start"));
+        const uint8_t* startBytes = ownedScalars.back().data();
+        views.emplace(spec.name,
+                      LocalNamedExampleDatasetWriter::WindowedTensorReferenceView{.keyDataType = spec.keyDataType,
+                                                                                  .indexDataType = spec.indexDataType,
+                                                                                  .key = keyBytes,
+                                                                                  .start = startBytes});
+    }
+    return views;
+}
+
+std::map<std::string, LocalNamedExampleDatasetWriter::WindowedTensorReferenceBatchView> localNamedWriterWindowedTensorReferenceBatchViewsFromPython(
+    const nb::dict& tensors,
+    const LocalNamedExampleLayout& layout,
+    const std::string& context,
+    std::vector<Int32Array>& int32Arrays,
+    std::vector<UInt32Array>& uint32Arrays,
+    std::vector<Int64Array>& int64Arrays,
+    std::vector<UInt64Array>& uint64Arrays) {
+    std::map<std::string, LocalNamedExampleDatasetWriter::WindowedTensorReferenceBatchView> views;
+    for (const LocalNamedExampleLayout::WindowedTensorSpec& spec : layout.windowedTensors()) {
+        if (!dictContainsString(tensors, spec.name)) {
+            throw std::runtime_error(context + " missing windowed tensor reference batch '" + spec.name + "'");
+        }
+        nb::object chunkObject = dictGetString(tensors, spec.name, context);
+        const std::string chunkContext = context + "['" + spec.name + "']";
+        if (!pythonHasAttribute(chunkObject, "key") || !pythonHasAttribute(chunkObject, "start")) {
+            throw nb::type_error((chunkContext + " must be thor.training.WindowedTensorChunk").c_str());
+        }
+        TypedArrayPointer keys = typedOneDimensionalArrayPointer(chunkObject.attr("key"),
+                                                                spec.keyDataType,
+                                                                chunkContext + ".key",
+                                                                int32Arrays,
+                                                                uint32Arrays,
+                                                                int64Arrays,
+                                                                uint64Arrays);
+        TypedArrayPointer starts = typedOneDimensionalArrayPointer(chunkObject.attr("start"),
+                                                                  spec.indexDataType,
+                                                                  chunkContext + ".start",
+                                                                  int32Arrays,
+                                                                  uint32Arrays,
+                                                                  int64Arrays,
+                                                                  uint64Arrays);
+        if (keys.count != starts.count) {
+            throw nb::value_error((chunkContext + " key and start arrays must have the same length").c_str());
+        }
+        views.emplace(spec.name,
+                      LocalNamedExampleDatasetWriter::WindowedTensorReferenceBatchView{.keyDataType = spec.keyDataType,
+                                                                                       .indexDataType = spec.indexDataType,
+                                                                                       .keys = keys.data,
+                                                                                       .starts = starts.data,
+                                                                                       .count = keys.count});
+    }
+    return views;
+}
+
+LocalNamedExampleDatasetWriter::WindowedTensorSourceView localNamedWriterWindowedTensorSourceViewFromPython(
+    const LocalNamedExampleLayout& layout,
+    const std::string& tensorName,
+    nb::handle key,
+    int64_t startIndex,
+    nb::handle values,
+    const std::string& context,
+    std::vector<uint8_t>& ownedKey,
+    std::vector<Float32Array>& ownedArrays) {
+    const LocalNamedExampleLayout::WindowedTensorSpec& spec = layout.windowedTensor(tensorName);
+    if (spec.dataType != ThorImplementation::DataType::FP32) {
+        throw nb::value_error((context + " currently accepts only windowed tensors with data_type=thor.DataType.fp32").c_str());
+    }
+    ownedKey = scalarBytesFromPython(key, spec.keyDataType, context + " key");
+    Float32Array array = requireFloat32NumpyArrayNoCopy(values, context + " values");
+    std::vector<uint64_t> dimensions;
+    dimensions.reserve(array.ndim());
+    for (size_t i = 0; i < array.ndim(); ++i) {
+        dimensions.push_back(static_cast<uint64_t>(array.shape(i)));
+    }
+    const uint64_t numBytes = static_cast<uint64_t>(array.size() * sizeof(float));
+    ownedArrays.push_back(array);
+    const Float32Array& owned = ownedArrays.back();
+    return LocalNamedExampleDatasetWriter::WindowedTensorSourceView{.dataType = ThorImplementation::DataType::FP32,
+                                                                    .key = ownedKey.data(),
+                                                                    .startIndex = startIndex,
+                                                                    .dimensions = std::move(dimensions),
+                                                                    .data = owned.data(),
+                                                                    .numBytes = numBytes};
+}
+
 nb::tuple shapeTupleFromUint64Vector(const std::vector<uint64_t>& shape) {
     nb::list shapeList;
     for (uint64_t dim : shape) {
@@ -663,6 +1013,20 @@ nb::object copyFloat32TensorToNumpy(const ThorImplementation::Tensor& tensor, co
     return arrayObject;
 }
 
+nb::object copyTensorToNumpy(const ThorImplementation::Tensor& tensor, const std::string& context) {
+    if (tensor.getDataType() == ThorImplementation::DataType::FP32) {
+        return copyFloat32TensorToNumpy(tensor, context);
+    }
+    if (tensor.getDataType() == ThorImplementation::DataType::UINT8) {
+        nb::object numpy = nb::module_::import_("numpy");
+        nb::object arrayObject = numpy.attr("empty")(shapeTupleFromUint64Vector(tensor.getDimensions()), numpy.attr("uint8"));
+        MutableUInt8Array array = pybind::castOrTypeError<MutableUInt8Array>(arrayObject, context, "a writable numpy.uint8 array", false);
+        std::memcpy(array.data(), tensor.getMemPtr<uint8_t>(), tensor.getArraySizeInBytes());
+        return arrayObject;
+    }
+    throw nb::value_error((context + " currently supports only fp32 and uint8 tensors").c_str());
+}
+
 LocalNamedExampleDatasetWriter::StorageMode localNamedStorageModeFromPythonString(const std::string& storageMode) {
     try {
         return LocalNamedExampleDatasetWriter::storageModeFromString(storageMode);
@@ -677,7 +1041,7 @@ nb::dict copyLocalNamedBatchToPythonDict(LocalNamedBatchLoader& loader, ExampleT
     nb::dict out;
     try {
         for (const LocalNamedExampleLayout::TensorSpec& spec : loader.getLayout().tensors()) {
-            out[nb::str(spec.name.c_str())] = copyFloat32TensorToNumpy(
+            out[nb::str(spec.name.c_str())] = copyTensorToNumpy(
                 batch.getTensor(spec.name),
                 "LocalNamedBatchLoader.copy_batch tensor '" + spec.name + "'");
         }
@@ -695,9 +1059,19 @@ nb::dict copyIndexedLocalNamedBatchToPythonDict(IndexedLocalNamedBatchLoader& lo
     nb::dict out;
     try {
         for (const LocalNamedExampleLayout::TensorSpec& spec : loader.getLayout().tensors()) {
-            out[nb::str(spec.name.c_str())] = copyFloat32TensorToNumpy(
+            out[nb::str(spec.name.c_str())] = copyTensorToNumpy(
                 batch.getTensor(spec.name),
                 "IndexedLocalNamedBatchLoader.copy_batch tensor '" + spec.name + "'");
+        }
+        for (const LocalNamedExampleLayout::WindowedTensorSpec& spec : loader.getLayout().windowedTensors()) {
+            out[nb::str(spec.name.c_str())] = copyTensorToNumpy(
+                batch.getTensor(spec.name),
+                "IndexedLocalNamedBatchLoader.copy_batch tensor '" + spec.name + "'");
+            if (spec.maskName.has_value()) {
+                out[nb::str(spec.maskName.value().c_str())] = copyTensorToNumpy(
+                    batch.getTensor(spec.maskName.value()),
+                    "IndexedLocalNamedBatchLoader.copy_batch tensor '" + spec.maskName.value() + "'");
+            }
         }
     } catch (...) {
         loader.returnBatchBuffers(exampleType, std::move(batch));
@@ -716,6 +1090,8 @@ nb::dict indexedLocalNamedStatsToPythonDict(const IndexedLocalNamedBatchAssemble
     out["read_bytes_submitted"] = nb::int_(stats.readBytesSubmitted);
     out["read_calls_completed"] = nb::int_(stats.readCallsCompleted);
     out["read_bytes_completed"] = nb::int_(stats.readBytesCompleted);
+    out["windowed_source_read_calls"] = nb::int_(stats.windowedSourceReadCalls);
+    out["windowed_source_read_bytes"] = nb::int_(stats.windowedSourceReadBytes);
     out["records_copied"] = nb::int_(stats.recordsCopied);
     out["record_copy_bytes"] = nb::int_(stats.recordCopyBytes);
     out["record_copy_memcpy_calls"] = nb::int_(stats.recordCopyMemcpyCalls);
@@ -739,6 +1115,59 @@ nb::dict indexedLocalNamedStatsToPythonDict(const IndexedLocalNamedBatchAssemble
     out["record_copy_thread_count"] = nb::int_(stats.recordCopyThreadCount);
     out["record_size_bytes"] = nb::int_(stats.recordSizeBytes);
     out["resolved_io_backend"] = nb::str(stats.resolvedIoBackend.c_str());
+    out["load_work_pop_wait_nanoseconds"] = nb::int_(stats.loadWorkPopWaitNanoseconds);
+    out["load_work_pop_calls"] = nb::int_(stats.loadWorkPopCalls);
+    out["load_worker_batches"] = nb::int_(stats.loadWorkerBatches);
+    out["load_worker_active_nanoseconds"] = nb::int_(stats.loadWorkerActiveNanoseconds);
+    out["load_worker_read_submit_nanoseconds"] = nb::int_(stats.loadWorkerReadSubmitNanoseconds);
+    out["load_worker_read_drain_nanoseconds"] = nb::int_(stats.loadWorkerReadDrainNanoseconds);
+    out["load_worker_completed_batch_push_wait_nanoseconds"] = nb::int_(stats.loadWorkerCompletedBatchPushWaitNanoseconds);
+    out["readv_submit_nanoseconds"] = nb::int_(stats.readvSubmitNanoseconds);
+    out["readv_submit_backpressure_count"] = nb::int_(stats.readvSubmitBackpressureCount);
+    out["readv_submit_backpressure_nanoseconds"] = nb::int_(stats.readvSubmitBackpressureNanoseconds);
+    out["readv_completion_wait_calls"] = nb::int_(stats.readvCompletionWaitCalls);
+    out["readv_completion_wait_nanoseconds"] = nb::int_(stats.readvCompletionWaitNanoseconds);
+    out["reader_drain_calls"] = nb::int_(stats.readerDrainCalls);
+    out["reader_drain_nanoseconds"] = nb::int_(stats.readerDrainNanoseconds);
+    out["reader_drain_context_visits"] = nb::int_(stats.readerDrainContextVisits);
+    out["reader_drain_submit_calls"] = nb::int_(stats.readerDrainSubmitCalls);
+    out["reader_drain_submit_nanoseconds"] = nb::int_(stats.readerDrainSubmitNanoseconds);
+    out["reader_drain_wait_loop_nanoseconds"] = nb::int_(stats.readerDrainWaitLoopNanoseconds);
+    out["reader_drain_completion_process_nanoseconds"] = nb::int_(stats.readerDrainCompletionProcessNanoseconds);
+    out["reader_drain_completions"] = nb::int_(stats.readerDrainCompletions);
+    out["reader_drain_max_inflight_reads"] = nb::int_(stats.readerDrainMaxInflightReads);
+    out["reader_shard_context_open_count"] = nb::int_(stats.readerShardContextOpenCount);
+    out["reader_max_open_shard_contexts"] = nb::int_(stats.readerMaxOpenShardContexts);
+    out["reader_load_example_calls"] = nb::int_(stats.readerLoadExampleCalls);
+    out["reader_load_example_nanoseconds"] = nb::int_(stats.readerLoadExampleNanoseconds);
+    out["reader_resolve_shard_nanoseconds"] = nb::int_(stats.readerResolveShardNanoseconds);
+    out["reader_shard_context_lookup_calls"] = nb::int_(stats.readerShardContextLookupCalls);
+    out["reader_shard_context_cache_hits"] = nb::int_(stats.readerShardContextCacheHits);
+    out["reader_shard_context_cache_misses"] = nb::int_(stats.readerShardContextCacheMisses);
+    out["reader_shard_context_lookup_nanoseconds"] = nb::int_(stats.readerShardContextLookupNanoseconds);
+    out["reader_shard_read_request_nanoseconds"] = nb::int_(stats.readerShardReadRequestNanoseconds);
+    out["reader_iovec_slot_acquire_nanoseconds"] = nb::int_(stats.readerIovecSlotAcquireNanoseconds);
+    out["reader_iovec_fill_nanoseconds"] = nb::int_(stats.readerIovecFillNanoseconds);
+    out["reader_readv_submit_call_nanoseconds"] = nb::int_(stats.readerReadvSubmitCallNanoseconds);
+    out["get_batch_calls"] = nb::int_(stats.getBatchCalls);
+    out["get_batch_ready_queue_empty_count"] = nb::int_(stats.getBatchReadyQueueEmptyCount);
+    out["get_batch_immediate_count"] = nb::int_(stats.getBatchImmediateCount);
+    out["get_batch_wait_nanoseconds"] = nb::int_(stats.getBatchWaitNanoseconds);
+    out["get_batch_tensor_unload_wait_nanoseconds"] = nb::int_(stats.getBatchTensorUnloadWaitNanoseconds);
+    out["return_buffer_calls"] = nb::int_(stats.returnBufferCalls);
+    out["return_buffer_wait_nanoseconds"] = nb::int_(stats.returnBufferWaitNanoseconds);
+    out["start_batch_calls"] = nb::int_(stats.startBatchCalls);
+    out["start_batch_tensor_acquire_nanoseconds"] = nb::int_(stats.startBatchTensorAcquireNanoseconds);
+    out["start_batch_planning_nanoseconds"] = nb::int_(stats.startBatchPlanningNanoseconds);
+    out["push_load_work_wait_nanoseconds"] = nb::int_(stats.pushLoadWorkWaitNanoseconds);
+    out["wait_for_completed_batch_calls"] = nb::int_(stats.waitForCompletedBatchCalls);
+    out["wait_for_completed_batch_nanoseconds"] = nb::int_(stats.waitForCompletedBatchNanoseconds);
+    out["publish_completed_batch_calls"] = nb::int_(stats.publishCompletedBatchCalls);
+    out["publish_completed_batch_nanoseconds"] = nb::int_(stats.publishCompletedBatchNanoseconds);
+    out["current_pending_loaded_batches"] = nb::int_(stats.currentPendingLoadedBatches);
+    out["current_pending_unloaded_batches"] = nb::int_(stats.currentPendingUnloadedBatches);
+    out["oldest_pending_batch_age_nanoseconds"] = nb::int_(stats.oldestPendingBatchAgeNanoseconds);
+    out["average_pending_batch_age_nanoseconds"] = nb::int_(stats.averagePendingBatchAgeNanoseconds);
     out["read_amplification"] = stats.readAmplification();
     out["planning_lead_records"] = stats.planningLeadRecords();
     out["average_copy_nanoseconds_per_record"] = stats.averageCopyNanosecondsPerRecord();
@@ -2382,30 +2811,119 @@ calling this helper.
     local_batch_loader.def("get_num_validate_batches",
                            [](LocalBatchLoader& self) { return self.getNumBatchesPerEpoch(ExampleType::VALIDATE); });
 
+    auto constant_pad = nb::class_<PythonConstantPad>(training, "ConstantPad");
+    constant_pad.attr("__module__") = "thor.training";
+    constant_pad.def(nb::init<double>(), "value"_a = 0.0)
+        .def_ro("value", &PythonConstantPad::value);
+
+    auto windowed_tensor_layout = nb::class_<PythonWindowedTensorLayout>(training, "WindowedTensorLayout");
+    windowed_tensor_layout.attr("__module__") = "thor.training";
+    windowed_tensor_layout.def_static(
+        "__new__",
+        [](nb::handle cls,
+           nb::object shape,
+           ThorImplementation::DataType dataType,
+           ThorImplementation::DataType keyType,
+           ThorImplementation::DataType indexType,
+           nb::object pad,
+           nb::object maskName) -> std::shared_ptr<PythonWindowedTensorLayout> {
+            (void)cls;
+            auto out = std::make_shared<PythonWindowedTensorLayout>();
+            out->shape = uint64ShapeFromPython(shape, "WindowedTensorLayout shape");
+            out->dataType = dataType;
+            out->keyType = keyType;
+            out->indexType = indexType;
+            out->padValue = padValueFromPython(pad, "WindowedTensorLayout pad");
+            out->maskName = optionalStringFromPython(maskName, "WindowedTensorLayout mask_name");
+            return out;
+        },
+        "cls"_a,
+        "shape"_a,
+        "data_type"_a = ThorImplementation::DataType::FP32,
+        "key_type"_a = ThorImplementation::DataType::UINT64,
+        "index_type"_a = ThorImplementation::DataType::INT32,
+        "pad"_a = nb::none(),
+        "mask_name"_a = nb::none(),
+        R"nbdoc(
+Describe one local named tensor whose per-example value is materialized from a
+keyed contiguous window source.
+
+The first dimension of ``shape`` is the fixed window length.  The remaining
+dimensions are the per-step source shape.  Examples provide a compact
+``WindowedTensorChunk`` reference instead of dense tensor values.
+        )nbdoc");
+    windowed_tensor_layout.def("__init__",
+                               [](PythonWindowedTensorLayout*,
+                                  nb::object,
+                                  ThorImplementation::DataType,
+                                  ThorImplementation::DataType,
+                                  ThorImplementation::DataType,
+                                  nb::object,
+                                  nb::object) {},
+                               "shape"_a,
+                               "data_type"_a = ThorImplementation::DataType::FP32,
+                               "key_type"_a = ThorImplementation::DataType::UINT64,
+                               "index_type"_a = ThorImplementation::DataType::INT32,
+                               "pad"_a = nb::none(),
+                               "mask_name"_a = nb::none())
+        .def_ro("shape", &PythonWindowedTensorLayout::shape)
+        .def_ro("data_type", &PythonWindowedTensorLayout::dataType)
+        .def_ro("key_type", &PythonWindowedTensorLayout::keyType)
+        .def_ro("index_type", &PythonWindowedTensorLayout::indexType)
+        .def_ro("pad_value", &PythonWindowedTensorLayout::padValue)
+        .def_ro("mask_name", &PythonWindowedTensorLayout::maskName);
+
+    auto windowed_tensor_chunk = nb::class_<PythonWindowedTensorChunk>(training, "WindowedTensorChunk");
+    windowed_tensor_chunk.attr("__module__") = "thor.training";
+    windowed_tensor_chunk.def_static(
+        "__new__",
+        [](nb::handle cls, nb::object key, nb::object start) -> std::shared_ptr<PythonWindowedTensorChunk> {
+            (void)cls;
+            auto out = std::make_shared<PythonWindowedTensorChunk>();
+            out->key = std::move(key);
+            out->start = std::move(start);
+            return out;
+        },
+        "cls"_a,
+        "key"_a,
+        "start"_a);
+    windowed_tensor_chunk.def("__init__", [](PythonWindowedTensorChunk*, nb::object, nb::object) {}, "key"_a, "start"_a)
+        .def_ro("key", &PythonWindowedTensorChunk::key)
+        .def_ro("start", &PythonWindowedTensorChunk::start);
+
     auto local_named_example_layout = nb::class_<LocalNamedExampleLayout>(training, "LocalNamedExampleLayout");
     local_named_example_layout.attr("__module__") = "thor.training";
     local_named_example_layout.def_static(
         "__new__",
-        [](nb::handle cls, nb::dict tensors, ThorImplementation::DataType dataType) -> std::shared_ptr<LocalNamedExampleLayout> {
+        [](nb::handle cls,
+           nb::dict tensors,
+           ThorImplementation::DataType dataType,
+           nb::object windowedTensors) -> std::shared_ptr<LocalNamedExampleLayout> {
             (void)cls;
             return std::make_shared<LocalNamedExampleLayout>(
-                LocalNamedExampleLayout::fromTensorShapes(localNamedTensorShapesFromPython(tensors, "LocalNamedExampleLayout"), dataType));
+                LocalNamedExampleLayout::fromTensorShapes(localNamedTensorShapesFromPython(tensors, "LocalNamedExampleLayout"),
+                                                         localNamedWindowedTensorShapesFromPython(windowedTensors, "LocalNamedExampleLayout"),
+                                                         dataType));
         },
         "cls"_a,
         "tensors"_a,
         "data_type"_a = ThorImplementation::DataType::FP32,
+        "windowed_tensors"_a = nb::none(),
         R"nbdoc(
 Define the fixed per-example record layout for a local named example dataset.
 
 ``tensors`` maps tensor names to non-batch shapes.  The constructor preserves
-Python dict insertion order when assigning contiguous record offsets.  All
-tensors use the same ``data_type`` in this first local named dataset format.
+Python dict insertion order when assigning contiguous record offsets.  Optional
+``windowed_tensors`` maps tensor names to ``WindowedTensorLayout`` objects whose
+per-example record stores only key/start references while source sequences are
+stored separately.
         )nbdoc");
     local_named_example_layout.def(
         "__init__",
-        [](LocalNamedExampleLayout*, nb::dict, ThorImplementation::DataType) {},
+        [](LocalNamedExampleLayout*, nb::dict, ThorImplementation::DataType, nb::object) {},
         "tensors"_a,
-        "data_type"_a = ThorImplementation::DataType::FP32);
+        "data_type"_a = ThorImplementation::DataType::FP32,
+        "windowed_tensors"_a = nb::none());
     local_named_example_layout.def_static(
         "read_manifest",
         [](nb::object path) { return LocalNamedExampleLayout::readManifest(pathStringFromPython(path, "path")); },
@@ -2422,6 +2940,8 @@ tensors use the same ``data_type`` in this first local named dataset format.
     local_named_example_layout.def("get_tensor_names", &localNamedLayoutTensorNames);
     local_named_example_layout.def("get_tensor_shapes", &localNamedLayoutTensorShapes);
     local_named_example_layout.def("get_tensor_specs", &localNamedLayoutTensorSpecsToPythonDict);
+    local_named_example_layout.def("has_windowed_tensors", &LocalNamedExampleLayout::hasWindowedTensors);
+    local_named_example_layout.def("get_windowed_tensor_specs", &localNamedLayoutWindowedTensorSpecsToPythonDict);
 
     auto local_named_example_dataset_writer = nb::class_<LocalNamedExampleDatasetWriter>(training, "LocalNamedExampleDatasetWriter");
     local_named_example_dataset_writer.attr("__module__") = "thor.training";
@@ -2483,7 +3003,15 @@ tensors use the same ``data_type`` in this first local named dataset format.
             std::vector<Float32Array> ownedArrays;
             std::map<std::string, LocalNamedExampleDatasetWriter::TensorView> views =
                 localNamedWriterTensorViewsFromPython(tensors, self.getLayout(), "LocalNamedExampleDatasetWriter.write_indexed_example", ownedArrays);
-            self.writeIndexedExample(views, label, filename);
+            if (self.getLayout().hasWindowedTensors()) {
+                std::vector<std::vector<uint8_t>> ownedScalars;
+                std::map<std::string, LocalNamedExampleDatasetWriter::WindowedTensorReferenceView> windowedRefs =
+                    localNamedWriterWindowedTensorReferenceViewsFromPython(
+                        tensors, self.getLayout(), "LocalNamedExampleDatasetWriter.write_indexed_example", ownedScalars);
+                self.writeIndexedExample(views, windowedRefs, label, filename);
+            } else {
+                self.writeIndexedExample(views, label, filename);
+            }
         },
         "tensors"_a,
         "label"_a = "",
@@ -2494,9 +3022,52 @@ tensors use the same ``data_type`` in this first local named dataset format.
             std::vector<Float32Array> ownedArrays;
             std::map<std::string, LocalNamedExampleDatasetWriter::TensorBatchView> views =
                 localNamedWriterTensorBatchViewsFromPython(tensors, self.getLayout(), "LocalNamedExampleDatasetWriter.write_indexed_examples", ownedArrays);
-            self.writeIndexedExamples(views);
+            if (self.getLayout().hasWindowedTensors()) {
+                std::vector<Int32Array> int32Arrays;
+                std::vector<UInt32Array> uint32Arrays;
+                std::vector<Int64Array> int64Arrays;
+                std::vector<UInt64Array> uint64Arrays;
+                std::map<std::string, LocalNamedExampleDatasetWriter::WindowedTensorReferenceBatchView> windowedRefs =
+                    localNamedWriterWindowedTensorReferenceBatchViewsFromPython(tensors,
+                                                                               self.getLayout(),
+                                                                               "LocalNamedExampleDatasetWriter.write_indexed_examples",
+                                                                               int32Arrays,
+                                                                               uint32Arrays,
+                                                                               int64Arrays,
+                                                                               uint64Arrays);
+                self.writeIndexedExamples(views, windowedRefs);
+            } else {
+                self.writeIndexedExamples(views);
+            }
         },
         "tensors"_a);
+    local_named_example_dataset_writer.def(
+        "write_windowed_tensor_source",
+        [](LocalNamedExampleDatasetWriter& self, const std::string& tensorName, nb::object key, int64_t startIndex, nb::object values) {
+            std::vector<uint8_t> ownedKey;
+            std::vector<Float32Array> ownedArrays;
+            LocalNamedExampleDatasetWriter::WindowedTensorSourceView view = localNamedWriterWindowedTensorSourceViewFromPython(
+                self.getLayout(),
+                tensorName,
+                key,
+                startIndex,
+                values,
+                "LocalNamedExampleDatasetWriter.write_windowed_tensor_source",
+                ownedKey,
+                ownedArrays);
+            self.writeWindowedTensorSource(tensorName, view);
+        },
+        "tensor_name"_a,
+        "key"_a,
+        "start_index"_a,
+        "values"_a,
+        R"nbdoc(
+Write one keyed contiguous source sequence for a windowed tensor.
+
+The source belongs to the windowed tensor named by ``tensor_name``.  ``values``
+must have shape ``[num_steps, *shape[1:]]`` and currently must be a
+C-contiguous numpy.float32 array.
+        )nbdoc");
     local_named_example_dataset_writer.def("close", &LocalNamedExampleDatasetWriter::close);
     local_named_example_dataset_writer.def("is_closed", &LocalNamedExampleDatasetWriter::isClosed);
     local_named_example_dataset_writer.def("get_path", [](const LocalNamedExampleDatasetWriter& self) { return self.path().string(); });

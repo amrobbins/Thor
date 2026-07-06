@@ -325,6 +325,40 @@ def test_indexed_local_named_loader_exposes_stats(tmp_path):
     assert before["average_copy_nanoseconds_per_record"] >= 0.0
     assert before["average_copy_memcpy_calls_per_record"] >= 0.0
     assert before["average_copy_bytes_per_record"] >= 0.0
+    diagnostic_keys = [
+        "get_batch_wait_nanoseconds",
+        "get_batch_tensor_unload_wait_nanoseconds",
+        "load_worker_read_submit_nanoseconds",
+        "load_worker_read_drain_nanoseconds",
+        "readv_completion_wait_nanoseconds",
+        "reader_drain_nanoseconds",
+        "reader_drain_context_visits",
+        "reader_drain_submit_calls",
+        "reader_drain_submit_nanoseconds",
+        "reader_drain_wait_loop_nanoseconds",
+        "reader_drain_completion_process_nanoseconds",
+        "reader_drain_completions",
+        "reader_drain_max_inflight_reads",
+        "reader_load_example_calls",
+        "reader_load_example_nanoseconds",
+        "reader_resolve_shard_nanoseconds",
+        "reader_shard_context_lookup_calls",
+        "reader_shard_context_cache_hits",
+        "reader_shard_context_cache_misses",
+        "reader_shard_context_lookup_nanoseconds",
+        "reader_shard_read_request_nanoseconds",
+        "reader_iovec_slot_acquire_nanoseconds",
+        "reader_iovec_fill_nanoseconds",
+        "reader_readv_submit_call_nanoseconds",
+        "start_batch_tensor_acquire_nanoseconds",
+        "start_batch_planning_nanoseconds",
+        "oldest_pending_batch_age_nanoseconds",
+        "average_pending_batch_age_nanoseconds",
+        "current_pending_loaded_batches",
+        "current_pending_unloaded_batches",
+    ]
+    for key in diagnostic_keys:
+        assert before[key] >= 0
 
     batch = loader.copy_next_batch("train")
     np.testing.assert_array_equal(
@@ -795,3 +829,195 @@ def test_local_named_writer_rejects_chunk_shape_mismatch(tmp_path):
     chunk["daily_target"] = np.asarray([1.0, 2.0], dtype=np.float32)
     with pytest.raises(RuntimeError, match="shape"):
         writer.write_indexed_examples(chunk)
+
+
+def _windowed_layout() -> thor.training.LocalNamedExampleLayout:
+    return thor.training.LocalNamedExampleLayout(
+        tensors={"dense": [1]},
+        windowed_tensors={
+            "history": thor.training.WindowedTensorLayout(
+                shape=[3, 1],
+                data_type=thor.DataType.fp32,
+                key_type=thor.DataType.uint64,
+                index_type=thor.DataType.int32,
+                pad=thor.training.ConstantPad(-1.0),
+                mask_name="history_mask",
+            )
+        },
+        data_type=thor.DataType.fp32,
+    )
+
+
+def test_windowed_local_named_layout_exposes_python_contract():
+    layout = _windowed_layout()
+
+    assert layout.has_windowed_tensors()
+    assert layout.get_tensor_names() == ["dense", "history", "history_mask"]
+    assert layout.get_tensor_shapes() == {
+        "dense": [1],
+        "history": [3, 1],
+        "history_mask": [3],
+    }
+    assert layout.get_record_size_bytes() == 16
+    assert layout.get_windowed_tensor_specs() == {
+        "history": {
+            "shape": [3, 1],
+            "data_type": thor.DataType.fp32,
+            "key_type": thor.DataType.uint64,
+            "index_type": thor.DataType.int32,
+            "pad_value": -1.0,
+            "mask_name": "history_mask",
+            "reference_offset_bytes": 4,
+            "reference_num_bytes": 12,
+            "num_bytes": 12,
+            "source_filename": None,
+            "source_num_bytes": 0,
+            "source_sequences": [],
+        }
+    }
+
+
+def test_indexed_local_named_windowed_tensor_round_trip_from_python(tmp_path):
+    dataset_path = tmp_path / "windowed_named_dataset"
+    layout = _windowed_layout()
+
+    writer = thor.training.LocalNamedExampleDatasetWriter(
+        dataset_path=dataset_path,
+        layout=layout,
+        examples_per_shard=10,
+        storage_mode="indexed",
+    )
+    writer.write_windowed_tensor_source(
+        tensor_name="history",
+        key=7,
+        start_index=10,
+        values=np.asarray([[10.0], [11.0], [12.0], [13.0]], dtype=np.float32),
+    )
+    writer.write_indexed_examples(
+        {
+            "dense": np.asarray([[1.0], [2.0], [3.0]], dtype=np.float32),
+            "history": thor.training.WindowedTensorChunk(
+                key=np.asarray([7, 7, 7], dtype=np.uint64),
+                start=np.asarray([10, 8, 12], dtype=np.int32),
+            ),
+        }
+    )
+    writer.close()
+
+    manifest = json.loads((dataset_path / "manifest.json").read_text())
+    history_manifest = manifest["windowed_tensors"]["history"]
+    assert history_manifest["source_storage"]["file"] == "windowed_tensor_sources/windowed_tensor_000000.bin"
+    assert history_manifest["source_storage"]["sequences"] == [
+        {
+            "key_hex": "0700000000000000",
+            "start_index": 10,
+            "end_index_exclusive": 14,
+            "offset_bytes": 0,
+            "num_steps": 4,
+            "num_bytes": 16,
+        }
+    ]
+
+    loader = thor.training.IndexedLocalNamedBatchLoader(
+        dataset_path=dataset_path,
+        layout=layout,
+        train_indices=[0, 1, 2],
+        validate_indices=[],
+        test_indices=[],
+        batch_size=3,
+        batch_queue_depth=2,
+        randomize_train=False,
+    )
+
+    assert loader.get_tensor_names() == ["dense", "history", "history_mask"]
+    assert loader.get_tensor_shapes() == layout.get_tensor_shapes()
+
+    batch = loader.copy_next_batch("train")
+    np.testing.assert_array_equal(batch["dense"], np.asarray([[1.0], [2.0], [3.0]], dtype=np.float32))
+    np.testing.assert_array_equal(
+        batch["history"],
+        np.asarray(
+            [
+                [[10.0], [11.0], [12.0]],
+                [[-1.0], [-1.0], [10.0]],
+                [[12.0], [13.0], [-1.0]],
+            ],
+            dtype=np.float32,
+        ),
+    )
+    np.testing.assert_array_equal(
+        batch["history_mask"],
+        np.asarray(
+            [
+                [1, 1, 1],
+                [0, 0, 1],
+                [1, 1, 0],
+            ],
+            dtype=np.uint8,
+        ),
+    )
+
+    stats = loader.get_stats("train")
+    assert stats["windowed_source_read_calls"] >= 3
+    assert stats["windowed_source_read_bytes"] >= 24
+
+
+def test_windowed_indexed_writer_accepts_single_example_reference_from_python(tmp_path):
+    dataset_path = tmp_path / "windowed_single_example_dataset"
+    layout = _windowed_layout()
+
+    writer = thor.training.LocalNamedExampleDatasetWriter(
+        dataset_path=dataset_path,
+        layout=layout,
+        examples_per_shard=10,
+        storage_mode="indexed",
+    )
+    writer.write_windowed_tensor_source(
+        "history",
+        key=99,
+        start_index=0,
+        values=np.asarray([[1.0], [2.0], [3.0]], dtype=np.float32),
+    )
+    writer.write_indexed_example(
+        {
+            "dense": np.asarray([123.0], dtype=np.float32),
+            "history": thor.training.WindowedTensorChunk(key=99, start=0),
+        }
+    )
+    writer.close()
+
+    loader = thor.training.IndexedLocalNamedBatchLoader(
+        dataset_path,
+        layout,
+        train_indices=[0],
+        validate_indices=[],
+        test_indices=[],
+        batch_size=1,
+        batch_queue_depth=2,
+        randomize_train=False,
+    )
+
+    batch = loader.copy_next_batch("train")
+    np.testing.assert_array_equal(batch["dense"], np.asarray([[123.0]], dtype=np.float32))
+    np.testing.assert_array_equal(batch["history"], np.asarray([[[1.0], [2.0], [3.0]]], dtype=np.float32))
+    np.testing.assert_array_equal(batch["history_mask"], np.asarray([[1, 1, 1]], dtype=np.uint8))
+
+
+def test_windowed_writer_rejects_wrong_reference_array_dtype_from_python(tmp_path):
+    writer = thor.training.LocalNamedExampleDatasetWriter(
+        dataset_path=tmp_path / "windowed_bad_refs",
+        layout=_windowed_layout(),
+        examples_per_shard=10,
+        storage_mode="indexed",
+    )
+
+    with pytest.raises(TypeError, match="numpy.uint64"):
+        writer.write_indexed_examples(
+            {
+                "dense": np.asarray([[1.0]], dtype=np.float32),
+                "history": thor.training.WindowedTensorChunk(
+                    key=np.asarray([7], dtype=np.int64),
+                    start=np.asarray([0], dtype=np.int32),
+                ),
+            }
+        )

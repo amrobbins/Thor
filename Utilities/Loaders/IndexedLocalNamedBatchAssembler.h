@@ -8,6 +8,7 @@
 #include "Utilities/WorkQueue/AsyncTensorQueue.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <condition_variable>
 #include <exception>
@@ -28,6 +29,8 @@ struct IndexedLocalNamedBatchAssemblerStats {
     uint64_t readBytesSubmitted = 0;
     uint64_t readCallsCompleted = 0;
     uint64_t readBytesCompleted = 0;
+    uint64_t windowedSourceReadCalls = 0;
+    uint64_t windowedSourceReadBytes = 0;
     uint64_t recordsCopied = 0;
     uint64_t recordCopyBytes = 0;
     uint64_t recordCopyMemcpyCalls = 0;
@@ -51,6 +54,60 @@ struct IndexedLocalNamedBatchAssemblerStats {
     uint64_t recordCopyThreadCount = 0;
     uint64_t recordSizeBytes = 0;
     std::string resolvedIoBackend;
+
+    uint64_t loadWorkPopWaitNanoseconds = 0;
+    uint64_t loadWorkPopCalls = 0;
+    uint64_t loadWorkerBatches = 0;
+    uint64_t loadWorkerActiveNanoseconds = 0;
+    uint64_t loadWorkerReadSubmitNanoseconds = 0;
+    uint64_t loadWorkerReadDrainNanoseconds = 0;
+    uint64_t loadWorkerCompletedBatchPushWaitNanoseconds = 0;
+    uint64_t readvSubmitNanoseconds = 0;
+    uint64_t readvSubmitBackpressureCount = 0;
+    uint64_t readvSubmitBackpressureNanoseconds = 0;
+    uint64_t readvCompletionWaitCalls = 0;
+    uint64_t readvCompletionWaitNanoseconds = 0;
+    uint64_t readerDrainCalls = 0;
+    uint64_t readerDrainNanoseconds = 0;
+    uint64_t readerDrainContextVisits = 0;
+    uint64_t readerDrainSubmitCalls = 0;
+    uint64_t readerDrainSubmitNanoseconds = 0;
+    uint64_t readerDrainWaitLoopNanoseconds = 0;
+    uint64_t readerDrainCompletionProcessNanoseconds = 0;
+    uint64_t readerDrainCompletions = 0;
+    uint64_t readerDrainMaxInflightReads = 0;
+    uint64_t readerShardContextOpenCount = 0;
+    uint64_t readerMaxOpenShardContexts = 0;
+    uint64_t readerLoadExampleCalls = 0;
+    uint64_t readerLoadExampleNanoseconds = 0;
+    uint64_t readerResolveShardNanoseconds = 0;
+    uint64_t readerShardContextLookupCalls = 0;
+    uint64_t readerShardContextCacheHits = 0;
+    uint64_t readerShardContextCacheMisses = 0;
+    uint64_t readerShardContextLookupNanoseconds = 0;
+    uint64_t readerShardReadRequestNanoseconds = 0;
+    uint64_t readerIovecSlotAcquireNanoseconds = 0;
+    uint64_t readerIovecFillNanoseconds = 0;
+    uint64_t readerReadvSubmitCallNanoseconds = 0;
+    uint64_t getBatchCalls = 0;
+    uint64_t getBatchReadyQueueEmptyCount = 0;
+    uint64_t getBatchImmediateCount = 0;
+    uint64_t getBatchWaitNanoseconds = 0;
+    uint64_t getBatchTensorUnloadWaitNanoseconds = 0;
+    uint64_t returnBufferCalls = 0;
+    uint64_t returnBufferWaitNanoseconds = 0;
+    uint64_t startBatchCalls = 0;
+    uint64_t startBatchTensorAcquireNanoseconds = 0;
+    uint64_t startBatchPlanningNanoseconds = 0;
+    uint64_t pushLoadWorkWaitNanoseconds = 0;
+    uint64_t waitForCompletedBatchCalls = 0;
+    uint64_t waitForCompletedBatchNanoseconds = 0;
+    uint64_t publishCompletedBatchCalls = 0;
+    uint64_t publishCompletedBatchNanoseconds = 0;
+    uint64_t currentPendingLoadedBatches = 0;
+    uint64_t currentPendingUnloadedBatches = 0;
+    uint64_t oldestPendingBatchAgeNanoseconds = 0;
+    uint64_t averagePendingBatchAgeNanoseconds = 0;
 
     double readAmplification() const {
         // read_amplification is a physical-read/logical-read ratio.  With the
@@ -122,7 +179,11 @@ struct IndexedLocalNamedBatchState {
     bool loadComplete = false;
     std::map<std::string, ThorImplementation::Tensor> tensors;
     std::vector<uint8_t *> tensorBasePointers;
+    std::vector<uint8_t *> windowedTensorBasePointers;
+    std::vector<uint8_t *> windowedMaskBasePointers;
     std::vector<uint64_t> globalExampleIndices;
+    std::chrono::steady_clock::time_point pendingSince;
+    std::chrono::steady_clock::time_point loadedAt;
 };
 
 /**
@@ -174,6 +235,7 @@ class IndexedLocalNamedBatchAssembler {
     std::map<std::string, ThorImplementation::TensorDescriptor> batchTensorDescriptors;
     std::map<std::string, std::unique_ptr<AsyncTensorQueue>> batchTensorQueues;
     std::vector<uint64_t> layoutTensorOrdinals;
+    std::vector<uint64_t> layoutWindowedTensorOrdinals;
 
     uint64_t batchSize;
     uint64_t batchQueueDepth;
@@ -205,6 +267,8 @@ class IndexedLocalNamedBatchAssembler {
     std::atomic<uint64_t> statsReadBytesSubmitted{0};
     std::atomic<uint64_t> statsReadCallsCompleted{0};
     std::atomic<uint64_t> statsReadBytesCompleted{0};
+    std::atomic<uint64_t> statsWindowedSourceReadCalls{0};
+    std::atomic<uint64_t> statsWindowedSourceReadBytes{0};
     std::atomic<uint64_t> statsRecordsCopied{0};
     std::atomic<uint64_t> statsRecordCopyBytes{0};
     std::atomic<uint64_t> statsRecordCopyMemcpyCalls{0};
@@ -215,6 +279,55 @@ class IndexedLocalNamedBatchAssembler {
     std::atomic<uint64_t> statsBatchesAssembled{0};
     std::atomic<uint64_t> statsBatchesDelivered{0};
     std::atomic<uint64_t> statsBatchBuffersReturned{0};
+    std::atomic<uint64_t> statsLoadWorkPopWaitNanoseconds{0};
+    std::atomic<uint64_t> statsLoadWorkPopCalls{0};
+    std::atomic<uint64_t> statsLoadWorkerBatches{0};
+    std::atomic<uint64_t> statsLoadWorkerActiveNanoseconds{0};
+    std::atomic<uint64_t> statsLoadWorkerReadSubmitNanoseconds{0};
+    std::atomic<uint64_t> statsLoadWorkerReadDrainNanoseconds{0};
+    std::atomic<uint64_t> statsLoadWorkerCompletedBatchPushWaitNanoseconds{0};
+    std::atomic<uint64_t> statsReadvSubmitNanoseconds{0};
+    std::atomic<uint64_t> statsReadvSubmitBackpressureCount{0};
+    std::atomic<uint64_t> statsReadvSubmitBackpressureNanoseconds{0};
+    std::atomic<uint64_t> statsReadvCompletionWaitCalls{0};
+    std::atomic<uint64_t> statsReadvCompletionWaitNanoseconds{0};
+    std::atomic<uint64_t> statsReaderDrainCalls{0};
+    std::atomic<uint64_t> statsReaderDrainNanoseconds{0};
+    std::atomic<uint64_t> statsReaderDrainContextVisits{0};
+    std::atomic<uint64_t> statsReaderDrainSubmitCalls{0};
+    std::atomic<uint64_t> statsReaderDrainSubmitNanoseconds{0};
+    std::atomic<uint64_t> statsReaderDrainWaitLoopNanoseconds{0};
+    std::atomic<uint64_t> statsReaderDrainCompletionProcessNanoseconds{0};
+    std::atomic<uint64_t> statsReaderDrainCompletions{0};
+    std::atomic<uint64_t> statsReaderDrainMaxInflightReads{0};
+    std::atomic<uint64_t> statsReaderShardContextOpenCount{0};
+    std::atomic<uint64_t> statsReaderMaxOpenShardContexts{0};
+    std::atomic<uint64_t> statsReaderLoadExampleCalls{0};
+    std::atomic<uint64_t> statsReaderLoadExampleNanoseconds{0};
+    std::atomic<uint64_t> statsReaderResolveShardNanoseconds{0};
+    std::atomic<uint64_t> statsReaderShardContextLookupCalls{0};
+    std::atomic<uint64_t> statsReaderShardContextCacheHits{0};
+    std::atomic<uint64_t> statsReaderShardContextCacheMisses{0};
+    std::atomic<uint64_t> statsReaderShardContextLookupNanoseconds{0};
+    std::atomic<uint64_t> statsReaderShardReadRequestNanoseconds{0};
+    std::atomic<uint64_t> statsReaderIovecSlotAcquireNanoseconds{0};
+    std::atomic<uint64_t> statsReaderIovecFillNanoseconds{0};
+    std::atomic<uint64_t> statsReaderReadvSubmitCallNanoseconds{0};
+    std::atomic<uint64_t> statsGetBatchCalls{0};
+    std::atomic<uint64_t> statsGetBatchReadyQueueEmptyCount{0};
+    std::atomic<uint64_t> statsGetBatchImmediateCount{0};
+    std::atomic<uint64_t> statsGetBatchWaitNanoseconds{0};
+    std::atomic<uint64_t> statsGetBatchTensorUnloadWaitNanoseconds{0};
+    std::atomic<uint64_t> statsReturnBufferCalls{0};
+    std::atomic<uint64_t> statsReturnBufferWaitNanoseconds{0};
+    std::atomic<uint64_t> statsStartBatchCalls{0};
+    std::atomic<uint64_t> statsStartBatchTensorAcquireNanoseconds{0};
+    std::atomic<uint64_t> statsStartBatchPlanningNanoseconds{0};
+    std::atomic<uint64_t> statsPushLoadWorkWaitNanoseconds{0};
+    std::atomic<uint64_t> statsWaitForCompletedBatchCalls{0};
+    std::atomic<uint64_t> statsWaitForCompletedBatchNanoseconds{0};
+    std::atomic<uint64_t> statsPublishCompletedBatchCalls{0};
+    std::atomic<uint64_t> statsPublishCompletedBatchNanoseconds{0};
     mutable std::mutex statsMutex;
     std::string resolvedIoBackend;
 
@@ -243,6 +356,7 @@ class IndexedLocalNamedBatchAssembler {
     bool markBatchLoaded(uint64_t batchOrdinal);
     bool publishCompletedBatches();
     uint64_t pendingBatchCount() const;
+    void fillPendingBatchAgeStats(IndexedLocalNamedBatchAssemblerStats &stats) const;
     uint64_t nextLogicalSplitPosition();
     void validateGlobalIndex(uint64_t index, const char *context) const;
     void validateReturnedTensorMapExact(const std::map<std::string, ThorImplementation::Tensor> &tensors) const;

@@ -18,18 +18,18 @@
 #include <utility>
 #include <vector>
 
-using ThorImplementation::DataType;
-using ThorImplementation::Tensor;
 using std::map;
 using std::string;
 using std::vector;
+using ThorImplementation::DataType;
+using ThorImplementation::Tensor;
 
 namespace {
 
 std::filesystem::path makeTempDatasetPath(const std::string &name) {
     static uint64_t counter = 0;
-    std::filesystem::path path = std::filesystem::temp_directory_path() /
-                                 ("thor_indexed_local_named_batch_loader_" + name + "_" + std::to_string(counter++));
+    std::filesystem::path path =
+        std::filesystem::temp_directory_path() / ("thor_indexed_local_named_batch_loader_" + name + "_" + std::to_string(counter++));
     std::filesystem::remove_all(path);
     return path;
 }
@@ -42,18 +42,16 @@ LocalNamedExampleLayout testLayout() {
 
 LocalNamedExampleLayout reorderedEquivalentLayout() {
     LocalNamedExampleLayout layout = testLayout();
-    return LocalNamedExampleLayout(layout.dataType(),
-                                   layout.recordSizeBytes(),
-                                   vector<LocalNamedExampleLayout::TensorSpec>{layout.tensor("daily_weight"),
-                                                                               layout.tensor("seasonality_inputs"),
-                                                                               layout.tensor("monotone_inputs")});
+    return LocalNamedExampleLayout(
+        layout.dataType(),
+        layout.recordSizeBytes(),
+        vector<LocalNamedExampleLayout::TensorSpec>{
+            layout.tensor("daily_weight"), layout.tensor("seasonality_inputs"), layout.tensor("monotone_inputs")});
 }
 
 LocalNamedExampleDatasetWriter::TensorView tensorView(vector<float> &values, vector<uint64_t> dimensions) {
-    return LocalNamedExampleDatasetWriter::TensorView{.dataType = DataType::FP32,
-                                                      .dimensions = std::move(dimensions),
-                                                      .data = values.data(),
-                                                      .numBytes = values.size() * sizeof(float)};
+    return LocalNamedExampleDatasetWriter::TensorView{
+        .dataType = DataType::FP32, .dimensions = std::move(dimensions), .data = values.data(), .numBytes = values.size() * sizeof(float)};
 }
 
 map<string, LocalNamedExampleDatasetWriter::TensorView> exampleViews(vector<float> &seasonality,
@@ -97,7 +95,6 @@ vector<float> tensorValues(const Tensor &tensor) {
 
 vector<float> seasonalityValues(Batch &batch) { return tensorValues(batch.getTensor("seasonality_inputs")); }
 
-
 struct IndexedBackendCase {
     const char *envValue;
     const char *displayName;
@@ -129,14 +126,38 @@ class ScopedEnvVar {
     std::optional<std::string> previous_;
 };
 
+class ScopedUnsetEnvVar {
+   public:
+    explicit ScopedUnsetEnvVar(std::string name) : name_(std::move(name)) {
+        const char *previous = std::getenv(name_.c_str());
+        if (previous != nullptr) {
+            previous_ = std::string(previous);
+        }
+        unsetenv(name_.c_str());
+    }
+
+    ~ScopedUnsetEnvVar() {
+        if (previous_.has_value()) {
+            setenv(name_.c_str(), previous_->c_str(), 1);
+        } else {
+            unsetenv(name_.c_str());
+        }
+    }
+
+    ScopedUnsetEnvVar(const ScopedUnsetEnvVar &) = delete;
+    ScopedUnsetEnvVar &operator=(const ScopedUnsetEnvVar &) = delete;
+
+   private:
+    std::string name_;
+    std::optional<std::string> previous_;
+};
 
 bool isReadvBackendName(const std::string &name) { return name.find("readv") != std::string::npos; }
 
 bool isUnavailableExplicitBackend(const IndexedBackendCase &backend, const std::string &message) {
     const std::string envValue(backend.envValue);
     if (envValue == "uring_direct") {
-        return message.find("io_uring_queue_init") != std::string::npos ||
-               message.find("io_uring_register_files") != std::string::npos ||
+        return message.find("io_uring_queue_init") != std::string::npos || message.find("io_uring_register_files") != std::string::npos ||
                message.find("io_uring_register_buffers") != std::string::npos ||
                message.find("uring_direct is unavailable") != std::string::npos ||
                message.find("explicit uring_direct") != std::string::npos;
@@ -196,15 +217,8 @@ void exerciseIndexedLoaderWithBackendOrSkip(const IndexedBackendCase &backend) {
     writeCanonicalDataset(datasetPath, layout);
 
     try {
-        IndexedLocalNamedBatchLoader loader(datasetPath,
-                                            layout,
-                                            {4, 2, 0, 3, 1},
-                                            {1, 3},
-                                            vector<uint64_t>{0, 4},
-                                            2,
-                                            3,
-                                            false,
-                                            std::nullopt);
+        IndexedLocalNamedBatchLoader loader(
+            datasetPath, layout, {4, 2, 0, 3, 1}, {1, 3}, vector<uint64_t>{0, 4}, 2, 3, false, std::nullopt);
 
         if (!waitForReadyBatches(loader, ExampleType::TRAIN, 2)) {
             throw std::runtime_error("IndexedLocalNamedBatchLoader did not prefill ready train batches for backend " +
@@ -331,16 +345,10 @@ TEST(IndexedLocalNamedExampleReaderTest, AsyncReadvDrainsAndReusesIovecSlotsWhen
     }
     session->drain();
 
-    EXPECT_EQ(seasonality, (std::vector<float>{0.0f, 1.0f,
-                                               20.0f, 21.0f,
-                                               40.0f, 41.0f,
-                                               60.0f, 61.0f,
-                                               80.0f, 81.0f}));
-    EXPECT_EQ(monotone, (std::vector<float>{10.0f, 11.0f, 12.0f,
-                                            30.0f, 31.0f, 32.0f,
-                                            50.0f, 51.0f, 52.0f,
-                                            70.0f, 71.0f, 72.0f,
-                                            90.0f, 91.0f, 92.0f}));
+    EXPECT_EQ(seasonality, (std::vector<float>{0.0f, 1.0f, 20.0f, 21.0f, 40.0f, 41.0f, 60.0f, 61.0f, 80.0f, 81.0f}));
+    EXPECT_EQ(
+        monotone,
+        (std::vector<float>{10.0f, 11.0f, 12.0f, 30.0f, 31.0f, 32.0f, 50.0f, 51.0f, 52.0f, 70.0f, 71.0f, 72.0f, 90.0f, 91.0f, 92.0f}));
     EXPECT_EQ(weight, (std::vector<float>{100.0f, 120.0f, 140.0f, 160.0f, 180.0f}));
 
     IndexedLocalNamedExampleReaderSessionStats stats = session->takeStats();
@@ -360,15 +368,7 @@ TEST(IndexedLocalNamedBatchLoaderTest, BindsBatchPointersByReaderOrdinalWhenRequ
     writeCanonicalDataset(datasetPath, writerLayout);
 
     LocalNamedExampleLayout requestedLayout = reorderedEquivalentLayout();
-    IndexedLocalNamedBatchLoader loader(datasetPath,
-                                        requestedLayout,
-                                        {4, 2},
-                                        {1, 3},
-                                        std::nullopt,
-                                        2,
-                                        2,
-                                        false,
-                                        std::nullopt);
+    IndexedLocalNamedBatchLoader loader(datasetPath, requestedLayout, {4, 2}, {1, 3}, std::nullopt, 2, 2, false, std::nullopt);
 
     uint64_t batchNum = 99;
     Batch trainBatch = loader.getBatch(ExampleType::TRAIN, batchNum);
@@ -386,15 +386,7 @@ TEST(IndexedLocalNamedBatchLoaderTest, ReadsFoldIndicesFromOneSharedDataset) {
     LocalNamedExampleLayout layout = testLayout();
     writeCanonicalDataset(datasetPath, layout);
 
-    IndexedLocalNamedBatchLoader loader(datasetPath,
-                                        layout,
-                                        {4, 2, 0},
-                                        {1, 3},
-                                        std::nullopt,
-                                        2,
-                                        2,
-                                        false,
-                                        std::nullopt);
+    IndexedLocalNamedBatchLoader loader(datasetPath, layout, {4, 2, 0}, {1, 3}, std::nullopt, 2, 2, false, std::nullopt);
     EXPECT_EQ(loader.getNumDatasetExamples(), 5);
     EXPECT_EQ(loader.getNumExamples(ExampleType::TRAIN), 3);
     EXPECT_EQ(loader.getNumBatchesPerEpoch(ExampleType::TRAIN), 2);
@@ -423,21 +415,12 @@ TEST(IndexedLocalNamedBatchLoaderTest, ReadsFoldIndicesFromOneSharedDataset) {
     std::filesystem::remove_all(datasetPath);
 }
 
-
 TEST(IndexedLocalNamedBatchLoaderTest, SupportsEmptyValidateAndTestIndices) {
     const std::filesystem::path datasetPath = makeTempDatasetPath("empty_validate_test");
     LocalNamedExampleLayout layout = testLayout();
     writeCanonicalDataset(datasetPath, layout);
 
-    IndexedLocalNamedBatchLoader loader(datasetPath,
-                                        layout,
-                                        {0, 1, 2},
-                                        {},
-                                        vector<uint64_t>{},
-                                        2,
-                                        2,
-                                        false,
-                                        std::nullopt);
+    IndexedLocalNamedBatchLoader loader(datasetPath, layout, {0, 1, 2}, {}, vector<uint64_t>{}, 2, 2, false, std::nullopt);
     EXPECT_TRUE(loader.hasExplicitTestSplit());
     EXPECT_EQ(loader.getNumExamples(ExampleType::VALIDATE), 0);
     EXPECT_EQ(loader.getNumExamples(ExampleType::TEST), 0);
@@ -460,15 +443,7 @@ TEST(IndexedLocalNamedBatchLoaderTest, EmptyValidateWithoutExplicitTestYieldsEmp
     LocalNamedExampleLayout layout = testLayout();
     writeCanonicalDataset(datasetPath, layout);
 
-    IndexedLocalNamedBatchLoader loader(datasetPath,
-                                        layout,
-                                        {0, 1, 2},
-                                        {},
-                                        std::nullopt,
-                                        2,
-                                        2,
-                                        false,
-                                        std::nullopt);
+    IndexedLocalNamedBatchLoader loader(datasetPath, layout, {0, 1, 2}, {}, std::nullopt, 2, 2, false, std::nullopt);
     EXPECT_FALSE(loader.hasExplicitTestSplit());
     EXPECT_EQ(loader.getNumExamples(ExampleType::VALIDATE), 0);
     EXPECT_EQ(loader.getNumExamples(ExampleType::TEST), 0);
@@ -483,15 +458,8 @@ TEST(IndexedLocalNamedBatchLoaderTest, RejectsEmptyTrainIndices) {
     LocalNamedExampleLayout layout = testLayout();
     writeCanonicalDataset(datasetPath, layout);
 
-    EXPECT_THROW((IndexedLocalNamedBatchLoader(datasetPath,
-                                               layout,
-                                               vector<uint64_t>{},
-                                               vector<uint64_t>{},
-                                               std::nullopt,
-                                               2,
-                                               2,
-                                               false,
-                                               std::nullopt)),
+    EXPECT_THROW((IndexedLocalNamedBatchLoader(
+                     datasetPath, layout, vector<uint64_t>{}, vector<uint64_t>{}, std::nullopt, 2, 2, false, std::nullopt)),
                  std::runtime_error);
 
     std::filesystem::remove_all(datasetPath);
@@ -502,15 +470,7 @@ TEST(IndexedLocalNamedBatchLoaderTest, SupportsExplicitTestIndices) {
     LocalNamedExampleLayout layout = testLayout();
     writeCanonicalDataset(datasetPath, layout);
 
-    IndexedLocalNamedBatchLoader loader(datasetPath,
-                                        layout,
-                                        {0, 1},
-                                        {2},
-                                        vector<uint64_t>{4, 3},
-                                        2,
-                                        2,
-                                        false,
-                                        std::nullopt);
+    IndexedLocalNamedBatchLoader loader(datasetPath, layout, {0, 1}, {2}, vector<uint64_t>{4, 3}, 2, 2, false, std::nullopt);
     EXPECT_TRUE(loader.hasExplicitTestSplit());
     EXPECT_EQ(loader.getNumExamples(ExampleType::TEST), 2);
 
@@ -533,30 +493,13 @@ TEST(IndexedLocalNamedBatchLoaderTest, RejectsOutOfRangeIndices) {
     std::filesystem::remove_all(datasetPath);
 }
 
-
 TEST(IndexedLocalNamedBatchLoaderTest, DeterministicRandomizedTrainOrderForFixedSeed) {
     const std::filesystem::path datasetPath = makeTempDatasetPath("deterministic_randomized_train");
     LocalNamedExampleLayout layout = testLayout();
     writeCanonicalDataset(datasetPath, layout);
 
-    IndexedLocalNamedBatchLoader first(datasetPath,
-                                       layout,
-                                       {0, 1, 2, 3, 4},
-                                       {0},
-                                       std::nullopt,
-                                       2,
-                                       2,
-                                       true,
-                                       12345);
-    IndexedLocalNamedBatchLoader second(datasetPath,
-                                        layout,
-                                        {0, 1, 2, 3, 4},
-                                        {0},
-                                        std::nullopt,
-                                        2,
-                                        2,
-                                        true,
-                                        12345);
+    IndexedLocalNamedBatchLoader first(datasetPath, layout, {0, 1, 2, 3, 4}, {0}, std::nullopt, 2, 2, true, 12345);
+    IndexedLocalNamedBatchLoader second(datasetPath, layout, {0, 1, 2, 3, 4}, {0}, std::nullopt, 2, 2, true, 12345);
 
     uint64_t firstBatchNum = 0;
     uint64_t secondBatchNum = 0;
@@ -577,15 +520,7 @@ TEST(IndexedLocalNamedBatchLoaderTest, ValidateAndTestSplitsAreSequentialAndWrap
     LocalNamedExampleLayout layout = testLayout();
     writeCanonicalDataset(datasetPath, layout);
 
-    IndexedLocalNamedBatchLoader loader(datasetPath,
-                                        layout,
-                                        {4, 3},
-                                        {1, 3, 4},
-                                        vector<uint64_t>{2, 0, 1},
-                                        2,
-                                        2,
-                                        true,
-                                        9876);
+    IndexedLocalNamedBatchLoader loader(datasetPath, layout, {4, 3}, {1, 3, 4}, vector<uint64_t>{2, 0, 1}, 2, 2, true, 9876);
 
     uint64_t batchNum = 99;
     Batch validate0 = loader.getBatch(ExampleType::VALIDATE, batchNum);
@@ -655,15 +590,7 @@ TEST(IndexedLocalNamedBatchLoaderTest, PrefillsMultipleReadyBatchesAndRecyclesRe
     LocalNamedExampleLayout layout = testLayout();
     writeCanonicalDataset(datasetPath, layout);
 
-    IndexedLocalNamedBatchLoader loader(datasetPath,
-                                        layout,
-                                        {0, 1, 2, 3, 4},
-                                        {0},
-                                        std::nullopt,
-                                        1,
-                                        3,
-                                        false,
-                                        std::nullopt);
+    IndexedLocalNamedBatchLoader loader(datasetPath, layout, {0, 1, 2, 3, 4}, {0}, std::nullopt, 1, 3, false, std::nullopt);
 
     ASSERT_TRUE(waitForReadyBatches(loader, ExampleType::TRAIN, 2));
     EXPECT_LE(loader.getReadyBatchCountForTesting(ExampleType::TRAIN), 3);
@@ -693,15 +620,7 @@ TEST(IndexedLocalNamedBatchLoaderTest, EmptyValidateAndTestSplitsHaveNoReadyBatc
     LocalNamedExampleLayout layout = testLayout();
     writeCanonicalDataset(datasetPath, layout);
 
-    IndexedLocalNamedBatchLoader loader(datasetPath,
-                                        layout,
-                                        {0, 1, 2},
-                                        {},
-                                        vector<uint64_t>{},
-                                        2,
-                                        2,
-                                        false,
-                                        std::nullopt);
+    IndexedLocalNamedBatchLoader loader(datasetPath, layout, {0, 1, 2}, {}, vector<uint64_t>{}, 2, 2, false, std::nullopt);
 
     EXPECT_EQ(loader.getReadyBatchCountForTesting(ExampleType::VALIDATE), 0);
     EXPECT_EQ(loader.getReadyBatchCountForTesting(ExampleType::TEST), 0);
@@ -721,20 +640,55 @@ TEST(IndexedLocalNamedBatchAssemblerStatsTest, ReadAmplificationUsesSubmittedLog
     EXPECT_DOUBLE_EQ(stats.readAmplification(), 1.0);
 }
 
+TEST(IndexedLocalNamedBatchLoaderTest, DefaultShardReadQueueDepthCoversFullBatchForLargeRecords) {
+    ScopedUnsetEnvVar unsetPrimary("THOR_INDEXED_LOCAL_NAMED_LOADER_SHARD_READ_QUEUE_DEPTH");
+    ScopedUnsetEnvVar unsetAlias("THOR_INDEXED_LOCAL_NAMED_READER_SHARD_READ_QUEUE_DEPTH");
+    ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "pread_buffered");
+
+    constexpr uint64_t elementsPerExample = 64 * 1024;  // 256 KiB records, old byte-target depth would be 32.
+    constexpr uint64_t numExamples = 33;
+    constexpr uint64_t batchSize = 33;
+
+    const std::filesystem::path datasetPath = makeTempDatasetPath("default_shard_read_depth_full_batch");
+    LocalNamedExampleLayout layout = largeRecordLayout(elementsPerExample);
+    writeLargeIndexedDataset(datasetPath, layout, numExamples, elementsPerExample, numExamples);
+
+    std::vector<uint64_t> trainIndices;
+    trainIndices.reserve(numExamples);
+    for (uint64_t i = 0; i < numExamples; ++i) {
+        trainIndices.push_back(i);
+    }
+
+    IndexedLocalNamedBatchLoader loader(datasetPath, layout, trainIndices, {}, std::nullopt, batchSize, 1, false, std::nullopt);
+
+    IndexedLocalNamedBatchAssemblerStats stats = loader.getStatsSnapshot(ExampleType::TRAIN);
+    EXPECT_EQ(stats.shardReadQueueDepth, batchSize + 10);
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(IndexedLocalNamedBatchLoaderTest, ShardReadQueueDepthCanBeOverriddenByEnvironment) {
+    ScopedEnvVar scopedDepth("THOR_INDEXED_LOCAL_NAMED_LOADER_SHARD_READ_QUEUE_DEPTH", "7");
+    ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "pread_buffered");
+
+    const std::filesystem::path datasetPath = makeTempDatasetPath("env_shard_read_depth");
+    LocalNamedExampleLayout layout = testLayout();
+    writeCanonicalDataset(datasetPath, layout);
+
+    IndexedLocalNamedBatchLoader loader(datasetPath, layout, {0, 1, 2, 3}, {}, std::nullopt, 4, 1, false, std::nullopt);
+
+    IndexedLocalNamedBatchAssemblerStats stats = loader.getStatsSnapshot(ExampleType::TRAIN);
+    EXPECT_EQ(stats.shardReadQueueDepth, 7);
+
+    std::filesystem::remove_all(datasetPath);
+}
+
 TEST(IndexedLocalNamedBatchLoaderTest, StatsExposeReadAndBatchCounters) {
     const std::filesystem::path datasetPath = makeTempDatasetPath("stats_counters");
     LocalNamedExampleLayout layout = testLayout();
     writeCanonicalDataset(datasetPath, layout);
 
-    IndexedLocalNamedBatchLoader loader(datasetPath,
-                                        layout,
-                                        {0, 1, 2, 3, 4},
-                                        {},
-                                        vector<uint64_t>{},
-                                        1,
-                                        3,
-                                        false,
-                                        std::nullopt);
+    IndexedLocalNamedBatchLoader loader(datasetPath, layout, {0, 1, 2, 3, 4}, {}, vector<uint64_t>{}, 1, 3, false, std::nullopt);
 
     ASSERT_TRUE(waitForReadyBatches(loader, ExampleType::TRAIN, 2));
 
@@ -763,6 +717,36 @@ TEST(IndexedLocalNamedBatchLoaderTest, StatsExposeReadAndBatchCounters) {
     EXPECT_EQ(stats.batchBuffersReturned, 0);
     EXPECT_GE(stats.currentReadyBatches, 2);
     EXPECT_EQ(stats.targetBatchQueueDepth, 3);
+    EXPECT_GE(stats.loadWorkPopCalls, 0);
+    EXPECT_GE(stats.loadWorkerBatches, 0);
+    EXPECT_GE(stats.loadWorkerActiveNanoseconds, 0);
+    EXPECT_GE(stats.loadWorkerReadSubmitNanoseconds, 0);
+    EXPECT_GE(stats.loadWorkerReadDrainNanoseconds, 0);
+    EXPECT_GE(stats.readvSubmitBackpressureCount, 0);
+    EXPECT_GE(stats.readvCompletionWaitCalls, 0);
+    EXPECT_GE(stats.readerDrainCalls, 0);
+    EXPECT_GE(stats.readerDrainContextVisits, 0);
+    EXPECT_GE(stats.readerDrainSubmitCalls, 0);
+    EXPECT_GE(stats.readerDrainSubmitNanoseconds, 0);
+    EXPECT_GE(stats.readerDrainWaitLoopNanoseconds, 0);
+    EXPECT_GE(stats.readerDrainCompletionProcessNanoseconds, 0);
+    EXPECT_GE(stats.readerDrainCompletions, 0);
+    EXPECT_GE(stats.readerDrainMaxInflightReads, 0);
+    EXPECT_GE(stats.readerShardContextOpenCount, 0);
+    EXPECT_GE(stats.readerLoadExampleCalls, 0);
+    EXPECT_GE(stats.readerLoadExampleNanoseconds, 0);
+    EXPECT_GE(stats.readerResolveShardNanoseconds, 0);
+    EXPECT_GE(stats.readerShardContextLookupCalls, 0);
+    EXPECT_GE(stats.readerShardContextCacheHits, 0);
+    EXPECT_GE(stats.readerShardContextCacheMisses, 0);
+    EXPECT_GE(stats.readerShardContextLookupNanoseconds, 0);
+    EXPECT_GE(stats.readerShardReadRequestNanoseconds, 0);
+    EXPECT_GE(stats.readerIovecSlotAcquireNanoseconds, 0);
+    EXPECT_GE(stats.readerIovecFillNanoseconds, 0);
+    EXPECT_GE(stats.readerReadvSubmitCallNanoseconds, 0);
+    EXPECT_GE(stats.startBatchCalls, 0);
+    EXPECT_GE(stats.oldestPendingBatchAgeNanoseconds, 0);
+    EXPECT_GE(stats.averagePendingBatchAgeNanoseconds, 0);
     EXPECT_TRUE(isReadvBackendName(stats.resolvedIoBackend)) << stats.resolvedIoBackend;
 
     uint64_t batchNum = 99;
@@ -772,6 +756,9 @@ TEST(IndexedLocalNamedBatchLoaderTest, StatsExposeReadAndBatchCounters) {
     stats = loader.getStatsSnapshot(ExampleType::TRAIN);
     EXPECT_GE(stats.batchesDelivered, 1);
     EXPECT_GE(stats.batchBuffersReturned, 1);
+    EXPECT_GE(stats.getBatchCalls, 1);
+    EXPECT_GE(stats.returnBufferCalls, 1);
+    EXPECT_GE(stats.getBatchReadyQueueEmptyCount + stats.getBatchImmediateCount, stats.getBatchCalls);
 
     IndexedLocalNamedBatchAssemblerStats validateStats = loader.getStatsSnapshot(ExampleType::VALIDATE);
     EXPECT_EQ(validateStats.splitName, "validate");
@@ -796,7 +783,6 @@ TEST(IndexedLocalNamedBatchLoaderTest, RejectsReturnedBatchMissingTensor) {
 
     std::filesystem::remove_all(datasetPath);
 }
-
 
 TEST(IndexedLocalNamedBatchLoaderTest, RejectsReturnedBatchWithExtraTensor) {
     const std::filesystem::path datasetPath = makeTempDatasetPath("extra_returned_tensor");
@@ -825,7 +811,6 @@ TEST(IndexedLocalNamedBatchLoaderTest, RejectsReturnedBatchWithWrongTensorDescri
 
     std::filesystem::remove_all(datasetPath);
 }
-
 
 TEST(IndexedLocalNamedBatchLoaderTest, RejectsSplitStorageModeDataset) {
     const std::filesystem::path datasetPath = makeTempDatasetPath("split_dataset_rejected");
@@ -903,23 +888,19 @@ TEST(IndexedLocalNamedBatchLoaderPerf, LargeRandomRecordPrefetchSmoke) {
 
     const double elapsedSeconds = std::chrono::duration<double>(ready - start).count();
     const double recordsPerSecond = elapsedSeconds > 0.0 ? static_cast<double>(stats.recordsRequested) / elapsedSeconds : 0.0;
-    const double logicalBytesPerSecond = elapsedSeconds > 0.0 ? static_cast<double>(stats.logicalRecordBytesRequested) / elapsedSeconds : 0.0;
+    const double logicalBytesPerSecond =
+        elapsedSeconds > 0.0 ? static_cast<double>(stats.logicalRecordBytesRequested) / elapsedSeconds : 0.0;
     const double submittedBytesPerSecond = elapsedSeconds > 0.0 ? static_cast<double>(stats.readBytesSubmitted) / elapsedSeconds : 0.0;
 
     std::cerr << "IndexedLocalNamedBatchLoader perf smoke: records_per_second=" << recordsPerSecond
-              << " logical_bytes_per_second=" << logicalBytesPerSecond
-              << " submitted_bytes_per_second=" << submittedBytesPerSecond
-              << " read_amplification=" << stats.readAmplification()
-              << " planning_lead_records=" << stats.planningLeadRecords()
-              << " copy_threads=" << stats.recordCopyThreadCount
-              << " records_copied=" << stats.recordsCopied
-              << " copy_bytes=" << stats.recordCopyBytes
-              << " copy_memcpy_calls=" << stats.recordCopyMemcpyCalls
+              << " logical_bytes_per_second=" << logicalBytesPerSecond << " submitted_bytes_per_second=" << submittedBytesPerSecond
+              << " read_amplification=" << stats.readAmplification() << " planning_lead_records=" << stats.planningLeadRecords()
+              << " copy_threads=" << stats.recordCopyThreadCount << " records_copied=" << stats.recordsCopied
+              << " copy_bytes=" << stats.recordCopyBytes << " copy_memcpy_calls=" << stats.recordCopyMemcpyCalls
               << " avg_copy_ns_per_record=" << stats.averageCopyNanosecondsPerRecord()
               << " avg_copy_calls_per_record=" << stats.averageCopyMemcpyCallsPerRecord()
               << " record_buffer_pool=" << stats.currentRecordBufferPoolDepth << "/" << stats.recordBufferPoolCapacity
-              << " ready_batches=" << stats.currentReadyBatches
-              << " queue_depth=" << stats.targetBatchQueueDepth
+              << " ready_batches=" << stats.currentReadyBatches << " queue_depth=" << stats.targetBatchQueueDepth
               << " resolved_io_backend=" << stats.resolvedIoBackend << std::endl;
 
     uint64_t batchNum = 99;

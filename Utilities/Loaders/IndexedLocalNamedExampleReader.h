@@ -14,6 +14,35 @@ struct IndexedLocalNamedExampleReaderSessionStats {
     uint64_t readBytesSubmitted = 0;
     uint64_t readCallsCompleted = 0;
     uint64_t readBytesCompleted = 0;
+    uint64_t windowedSourceReadCalls = 0;
+    uint64_t windowedSourceReadBytes = 0;
+    uint64_t readvSubmitNanoseconds = 0;
+    uint64_t readvSubmitBackpressureCount = 0;
+    uint64_t readvSubmitBackpressureNanoseconds = 0;
+    uint64_t readvCompletionWaitCalls = 0;
+    uint64_t readvCompletionWaitNanoseconds = 0;
+    uint64_t drainCalls = 0;
+    uint64_t drainNanoseconds = 0;
+    uint64_t drainContextVisits = 0;
+    uint64_t drainSubmitCalls = 0;
+    uint64_t drainSubmitNanoseconds = 0;
+    uint64_t drainWaitLoopNanoseconds = 0;
+    uint64_t drainCompletionProcessNanoseconds = 0;
+    uint64_t drainCompletions = 0;
+    uint64_t drainMaxInflightReads = 0;
+    uint64_t shardContextOpenCount = 0;
+    uint64_t maxOpenShardContexts = 0;
+    uint64_t loadExampleCalls = 0;
+    uint64_t loadExampleNanoseconds = 0;
+    uint64_t resolveShardNanoseconds = 0;
+    uint64_t shardContextLookupCalls = 0;
+    uint64_t shardContextCacheHits = 0;
+    uint64_t shardContextCacheMisses = 0;
+    uint64_t shardContextLookupNanoseconds = 0;
+    uint64_t shardReadRequestNanoseconds = 0;
+    uint64_t iovecSlotAcquireNanoseconds = 0;
+    uint64_t iovecFillNanoseconds = 0;
+    uint64_t readvSubmitCallNanoseconds = 0;
     std::vector<std::string> resolvedIoBackends;
 };
 
@@ -37,6 +66,11 @@ class IndexedLocalNamedExampleReader : public std::enable_shared_from_this<Index
         Session &operator=(Session &&) = delete;
 
         void loadExampleInto(uint64_t globalExampleIndex, uint64_t batchSlot, const std::vector<uint8_t *> &tensorBasePointers);
+        void loadExampleInto(uint64_t globalExampleIndex,
+                             uint64_t batchSlot,
+                             const std::vector<uint8_t *> &tensorBasePointers,
+                             const std::vector<uint8_t *> &windowedTensorBasePointers,
+                             const std::vector<uint8_t *> &windowedMaskBasePointers);
         void drain();
         IndexedLocalNamedExampleReaderSessionStats takeStats();
 
@@ -64,7 +98,9 @@ class IndexedLocalNamedExampleReader : public std::enable_shared_from_this<Index
     [[nodiscard]] uint64_t getNumExamples() const;
     [[nodiscard]] uint64_t getRecordSizeBytes() const;
     [[nodiscard]] uint64_t getTensorCount() const;
+    [[nodiscard]] uint64_t getWindowedTensorCount() const;
     [[nodiscard]] uint64_t getLayoutTensorOrdinal(std::string_view tensorName) const;
+    [[nodiscard]] uint64_t getLayoutWindowedTensorOrdinal(std::string_view tensorName) const;
     void validateGlobalIndex(uint64_t index, const char *context) const;
 
    private:

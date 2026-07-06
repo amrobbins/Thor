@@ -180,3 +180,72 @@ TEST(LocalNamedExampleLayoutTest, ExactLayoutValidationAcceptsDifferentTensorVec
                                        spec("seasonality_inputs", {4}, 0, 16)});
     EXPECT_NO_THROW(manifest.validateRequestedLayoutExact(requested));
 }
+
+TEST(LocalNamedExampleLayoutTest, FromTensorShapesCalculatesWindowedReferenceLayout) {
+    LocalNamedExampleLayout layout = LocalNamedExampleLayout::fromTensorShapes(
+        vector<pair<string, vector<uint64_t>>>{{"dense", {2}}},
+        vector<LocalNamedExampleLayout::WindowedTensorShape>{LocalNamedExampleLayout::WindowedTensorShape(
+            "history", {5, 1}, DataType::UINT64, DataType::INT32, 0.0, string("history_mask"))},
+        DataType::FP32);
+
+    ASSERT_EQ(layout.dataType(), DataType::FP32);
+    ASSERT_EQ(layout.recordSizeBytes(), 8 + 8 + 4);
+    ASSERT_EQ(layout.tensors().size(), 1);
+    ASSERT_EQ(layout.windowedTensors().size(), 1);
+    EXPECT_EQ(layout.tensor("dense").offsetBytes, 0);
+    const LocalNamedExampleLayout::WindowedTensorSpec &history = layout.windowedTensor("history");
+    EXPECT_EQ(history.referenceOffsetBytes, 8);
+    EXPECT_EQ(history.referenceNumBytes, 12);
+    EXPECT_EQ(history.windowLength(), 5);
+    EXPECT_EQ(history.sourceStepDimensions(), vector<uint64_t>({1}));
+    EXPECT_EQ(history.sourceStepNumBytes(), 4);
+    EXPECT_EQ(history.outputNumBytes(), 20);
+    EXPECT_EQ(history.maskName.value(), "history_mask");
+}
+
+TEST(LocalNamedExampleLayoutTest, WindowedJsonRoundTripPreservesLayoutContractAndSourceStorage) {
+    LocalNamedExampleLayout layout = LocalNamedExampleLayout::fromTensorShapes(
+        vector<pair<string, vector<uint64_t>>>{{"dense", {2}}},
+        vector<LocalNamedExampleLayout::WindowedTensorShape>{LocalNamedExampleLayout::WindowedTensorShape(
+            "history", {5, 1}, DataType::UINT64, DataType::INT32, -1.0, string("history_mask"))},
+        DataType::FP32);
+
+    nlohmann::json j = layout.toJson();
+    j["windowed_tensors"]["history"]["source_storage"] = nlohmann::json{
+        {"file", "windowed_tensor_sources/windowed_tensor_000000.bin"},
+        {"num_bytes", 12},
+        {"sequences", nlohmann::json::array({nlohmann::json{{"key_hex", "0100000000000000"},
+                                                              {"start_index", 10},
+                                                              {"end_index_exclusive", 13},
+                                                              {"offset_bytes", 0},
+                                                              {"num_steps", 3},
+                                                              {"num_bytes", 12}}})}};
+
+    LocalNamedExampleLayout parsed = LocalNamedExampleLayout::fromJson(j);
+    layout.validateRequestedLayoutExact(parsed);
+    parsed.validateRequestedLayoutExact(layout);
+    const LocalNamedExampleLayout::WindowedTensorSpec &history = parsed.windowedTensor("history");
+    ASSERT_TRUE(history.sourceFilename.has_value());
+    EXPECT_EQ(history.sourceFilename.value(), "windowed_tensor_sources/windowed_tensor_000000.bin");
+    ASSERT_EQ(history.sourceSequences.size(), 1);
+    EXPECT_EQ(history.sourceSequences.front().keyHex, "0100000000000000");
+    EXPECT_EQ(history.sourceSequences.front().startIndex, 10);
+}
+
+TEST(LocalNamedExampleLayoutTest, RejectsDuplicateWindowedTensorName) {
+    EXPECT_THROW(LocalNamedExampleLayout::fromTensorShapes(
+                     vector<pair<string, vector<uint64_t>>>{{"dense", {2}}},
+                     vector<LocalNamedExampleLayout::WindowedTensorShape>{LocalNamedExampleLayout::WindowedTensorShape(
+                         "dense", {5, 1}, DataType::UINT64, DataType::INT32)},
+                     DataType::FP32),
+                 std::runtime_error);
+}
+
+TEST(LocalNamedExampleLayoutTest, RejectsWindowedMaskNameCollision) {
+    EXPECT_THROW(LocalNamedExampleLayout::fromTensorShapes(
+                     vector<pair<string, vector<uint64_t>>>{{"dense", {2}}},
+                     vector<LocalNamedExampleLayout::WindowedTensorShape>{LocalNamedExampleLayout::WindowedTensorShape(
+                         "history", {5, 1}, DataType::UINT64, DataType::INT32, 0.0, string("dense"))},
+                     DataType::FP32),
+                 std::runtime_error);
+}

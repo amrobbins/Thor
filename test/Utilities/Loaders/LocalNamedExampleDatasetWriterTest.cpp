@@ -419,3 +419,135 @@ TEST(LocalNamedExampleDatasetWriterTest, RejectsIndexedExamplesBatchShapeMismatc
     writer.close();
     std::filesystem::remove_all(datasetPath);
 }
+
+namespace {
+
+LocalNamedExampleLayout windowedTestLayout() {
+    return LocalNamedExampleLayout::fromTensorShapes(
+        vector<std::pair<string, vector<uint64_t>>>{{"dense", {2}}},
+        vector<LocalNamedExampleLayout::WindowedTensorShape>{LocalNamedExampleLayout::WindowedTensorShape(
+            "history", {3, 1}, DataType::UINT64, DataType::INT32, 0.0, string("history_mask"))},
+        DataType::FP32);
+}
+
+}  // namespace
+
+TEST(LocalNamedExampleDatasetWriterTest, WritesWindowedTensorSourceAndReferencesIntoManifestAndRecords) {
+    const std::filesystem::path datasetPath = makeTempDatasetPath("windowed_source_and_refs");
+    LocalNamedExampleLayout layout = windowedTestLayout();
+
+    uint64_t key1 = 101;
+    vector<float> source1{1.0f, 2.0f, 3.0f, 4.0f};
+    uint64_t key2 = 202;
+    vector<float> source2{10.0f, 11.0f, 12.0f};
+
+    vector<float> dense{5.0f, 6.0f, 7.0f, 8.0f};
+    uint64_t keys[2] = {key1, key2};
+    int32_t starts[2] = {11, 20};
+    map<string, LocalNamedExampleDatasetWriter::TensorBatchView> tensors = {{"dense", tensorBatchView(dense, {2, 2})}};
+    map<string, LocalNamedExampleDatasetWriter::WindowedTensorReferenceBatchView> refs = {
+        {"history", LocalNamedExampleDatasetWriter::WindowedTensorReferenceBatchView{.keyDataType = DataType::UINT64,
+                                                                                    .indexDataType = DataType::INT32,
+                                                                                    .keys = keys,
+                                                                                    .starts = starts,
+                                                                                    .count = 2}}};
+
+    LocalNamedExampleDatasetWriter writer(datasetPath, layout, 8, LocalNamedExampleDatasetWriter::StorageMode::INDEXED);
+    writer.writeWindowedTensorSource("history",
+                                     LocalNamedExampleDatasetWriter::WindowedTensorSourceView{.dataType = DataType::FP32,
+                                                                                              .key = &key1,
+                                                                                              .startIndex = 10,
+                                                                                              .dimensions = {4, 1},
+                                                                                              .data = source1.data(),
+                                                                                              .numBytes = source1.size() * sizeof(float)});
+    writer.writeWindowedTensorSource("history",
+                                     LocalNamedExampleDatasetWriter::WindowedTensorSourceView{.dataType = DataType::FP32,
+                                                                                              .key = &key2,
+                                                                                              .startIndex = 20,
+                                                                                              .dimensions = {3, 1},
+                                                                                              .data = source2.data(),
+                                                                                              .numBytes = source2.size() * sizeof(float)});
+    writer.writeIndexedExamples(tensors, refs);
+    writer.close();
+
+    nlohmann::json manifest = readJson(datasetPath / LocalNamedExampleDatasetWriter::MANIFEST_FILENAME);
+    ASSERT_TRUE(manifest.contains("windowed_tensors"));
+    const nlohmann::json &history = manifest.at("windowed_tensors").at("history");
+    EXPECT_EQ(history.at("shape").get<vector<uint64_t>>(), (vector<uint64_t>{3, 1}));
+    EXPECT_EQ(history.at("key_data_type").get<string>(), "uint64");
+    EXPECT_EQ(history.at("index_data_type").get<string>(), "int32");
+    EXPECT_EQ(history.at("reference_offset_bytes").get<uint64_t>(), layout.windowedTensor("history").referenceOffsetBytes);
+    ASSERT_TRUE(history.contains("source_storage"));
+    EXPECT_EQ(history.at("source_storage").at("num_bytes").get<uint64_t>(), (source1.size() + source2.size()) * sizeof(float));
+    ASSERT_EQ(history.at("source_storage").at("sequences").size(), 2);
+    EXPECT_EQ(history.at("source_storage").at("sequences").at(0).at("start_index").get<int64_t>(), 10);
+    EXPECT_EQ(history.at("source_storage").at("sequences").at(0).at("num_steps").get<uint64_t>(), 4);
+    EXPECT_EQ(history.at("source_storage").at("sequences").at(1).at("offset_bytes").get<uint64_t>(), source1.size() * sizeof(float));
+
+    const std::filesystem::path sourcePath = datasetPath / history.at("source_storage").at("file").get<string>();
+    ASSERT_TRUE(std::filesystem::exists(sourcePath));
+    std::ifstream sourceIn(sourcePath, std::ios::binary);
+    vector<float> sourceValues(source1.size() + source2.size());
+    sourceIn.read(reinterpret_cast<char *>(sourceValues.data()), static_cast<std::streamsize>(sourceValues.size() * sizeof(float)));
+    EXPECT_EQ(sourceValues, (vector<float>{1.0f, 2.0f, 3.0f, 4.0f, 10.0f, 11.0f, 12.0f}));
+
+    Shard shard;
+    shard.openShard((datasetPath / manifest.at("shards").at(0).at("file").get<string>()).string());
+    vector<uint8_t> record(layout.recordSizeBytes());
+    string label;
+    string filename;
+    shard.loadExample(record.data(), label, filename, ExampleType::TRAIN, 1);
+    EXPECT_EQ(readFloats(record, layout.tensor("dense").offsetBytes, 2), (vector<float>{7.0f, 8.0f}));
+    uint64_t storedKey = 0;
+    int32_t storedStart = 0;
+    const LocalNamedExampleLayout::WindowedTensorSpec &historySpec = layout.windowedTensor("history");
+    std::memcpy(&storedKey, record.data() + historySpec.referenceOffsetBytes, sizeof(storedKey));
+    std::memcpy(&storedStart, record.data() + historySpec.referenceOffsetBytes + sizeof(storedKey), sizeof(storedStart));
+    EXPECT_EQ(storedKey, key2);
+    EXPECT_EQ(storedStart, 20);
+
+    LocalNamedExampleLayout parsedLayout = LocalNamedExampleLayout::readManifest(datasetPath / LocalNamedExampleDatasetWriter::MANIFEST_FILENAME);
+    layout.validateRequestedLayoutExact(parsedLayout);
+    ASSERT_EQ(parsedLayout.windowedTensor("history").sourceSequences.size(), 2);
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(LocalNamedExampleDatasetWriterTest, RejectsWindowedLayoutInSplitStorageMode) {
+    const std::filesystem::path datasetPath = makeTempDatasetPath("windowed_split_rejected");
+    EXPECT_THROW(LocalNamedExampleDatasetWriter(datasetPath, windowedTestLayout(), 8), std::runtime_error);
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(LocalNamedExampleDatasetWriterTest, RejectsWindowedWriteWithoutReferences) {
+    const std::filesystem::path datasetPath = makeTempDatasetPath("windowed_missing_refs");
+    LocalNamedExampleDatasetWriter writer(datasetPath,
+                                          windowedTestLayout(),
+                                          8,
+                                          LocalNamedExampleDatasetWriter::StorageMode::INDEXED);
+    vector<float> dense{5.0f, 6.0f};
+    map<string, LocalNamedExampleDatasetWriter::TensorBatchView> tensors = {{"dense", tensorBatchView(dense, {1, 2})}};
+    EXPECT_THROW(writer.writeIndexedExamples(tensors), std::runtime_error);
+    writer.close();
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(LocalNamedExampleDatasetWriterTest, RejectsDuplicateWindowedTensorSourceKey) {
+    const std::filesystem::path datasetPath = makeTempDatasetPath("windowed_duplicate_source_key");
+    LocalNamedExampleDatasetWriter writer(datasetPath,
+                                          windowedTestLayout(),
+                                          8,
+                                          LocalNamedExampleDatasetWriter::StorageMode::INDEXED);
+    uint64_t key = 101;
+    vector<float> source{1.0f, 2.0f, 3.0f};
+    LocalNamedExampleDatasetWriter::WindowedTensorSourceView view{.dataType = DataType::FP32,
+                                                                 .key = &key,
+                                                                 .startIndex = 0,
+                                                                 .dimensions = {3, 1},
+                                                                 .data = source.data(),
+                                                                 .numBytes = source.size() * sizeof(float)};
+    writer.writeWindowedTensorSource("history", view);
+    EXPECT_THROW(writer.writeWindowedTensorSource("history", view), std::runtime_error);
+    writer.close();
+    std::filesystem::remove_all(datasetPath);
+}
