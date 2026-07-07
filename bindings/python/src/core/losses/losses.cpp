@@ -11,6 +11,7 @@ void bind_categorical_cross_entropy(nb::module_ &losses);
 void bind_mean_absolute_error(nb::module_ &losses);
 void bind_mean_absolute_percentage_error(nb::module_ &losses);
 void bind_mean_squared_error(nb::module_ &losses);
+void bind_mean_power_error(nb::module_ &losses);
 void bind_smooth_l1_loss(nb::module_ &losses);
 void bind_huber_loss(nb::module_ &losses);
 void bind_soft_target_cross_entropy(nb::module_ &losses);
@@ -61,6 +62,7 @@ void bind_losses(nb::module_ &losses) {
     bind_mean_absolute_error(losses);
     bind_mean_absolute_percentage_error(losses);
     bind_mean_squared_error(losses);
+    bind_mean_power_error(losses);
     bind_smooth_l1_loss(losses);
     bind_huber_loss(losses);
     bind_soft_target_cross_entropy(losses);

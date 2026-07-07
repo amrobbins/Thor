@@ -10,6 +10,7 @@ _CORE_FLAT_LOSSES = [
     "MAE",
     "MAPE",
     "MSE",
+    "MeanPowerError",
     "SmoothL1Loss",
     "HuberLoss",
     "SoftTargetCrossEntropy",
