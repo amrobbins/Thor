@@ -3,6 +3,7 @@
 #include "DeepLearning/Api/Training/Executors/DebugSynchronousTrainingExecutor.h"
 #include "DeepLearning/Api/Training/Executors/LocalTrainingExecutor.h"
 #include "DeepLearning/Api/Training/EarlyCompletionPolicy.h"
+#include "DeepLearning/Api/Training/DeviceDatasetStorage.h"
 #include "DeepLearning/Api/Training/ModelSelectionScore.h"
 #include "DeepLearning/Api/Training/Observers/LineStatsReporter.h"
 #include "DeepLearning/Api/Training/Cancellation/TrainingCancellation.h"
@@ -80,6 +81,7 @@ struct TrainerFitOptions {
     std::optional<uint64_t> maxTrainingBatchesPerEpoch{};
     std::vector<TrainingRestartCondition> restartConditions{};
     std::vector<TrainingEarlyCompletionPolicy> earlyCompletionPolicies{};
+    DeviceDatasetStorage deviceDatasetStorage = DeviceDatasetStorage::BEST_EFFORT;
 };
 
 class PlacedNetwork;

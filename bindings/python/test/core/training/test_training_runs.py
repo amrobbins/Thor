@@ -1707,6 +1707,40 @@ def test_trainer_fit_options_default_to_full_training_epoch():
     assert options.max_training_batches_per_epoch is None
 
 
+def test_trainer_fit_options_default_device_dataset_storage_is_best_effort():
+    options = thor.training.TrainerFitOptions()
+
+    assert options.device_dataset_storage == thor.training.DeviceDatasetStorage.BEST_EFFORT
+
+
+def test_trainer_fit_options_accept_device_dataset_storage_strings_and_enums():
+    options = thor.training.TrainerFitOptions()
+
+    options.device_dataset_storage = "strict"
+    assert options.device_dataset_storage == thor.training.DeviceDatasetStorage.STRICT
+
+    options.device_dataset_storage = thor.training.DeviceDatasetStorage.OFF
+    assert options.device_dataset_storage == thor.training.DeviceDatasetStorage.OFF
+
+
+def test_trainer_fit_accepts_device_dataset_storage_kwarg():
+    trainer = _make_tiny_regression_trainer("training_runs_device_dataset_storage_kwarg")
+
+    result = trainer.fit(epochs=1, device_dataset_storage="off")
+
+    assert result.completed()
+
+
+def test_training_runs_fit_accepts_device_dataset_storage_kwarg():
+    trainer0 = _make_tiny_regression_trainer("training_runs_device_dataset_storage_fold_0")
+    trainer1 = _make_tiny_regression_trainer("training_runs_device_dataset_storage_fold_1")
+    runs = thor.training.TrainingRuns([("fold_0", trainer0), ("fold_1", trainer1)])
+
+    result = runs.fit(epochs=1, device_dataset_storage=thor.training.DeviceDatasetStorage.OFF)
+
+    assert result.all_completed()
+
+
 def test_trainer_fit_options_accepts_zero_best_model_candidate_cadence_as_disabled():
     options = thor.training.TrainerFitOptions()
     options.check_best_model_every_epochs = 0

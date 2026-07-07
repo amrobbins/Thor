@@ -104,6 +104,10 @@ class FullyConnected : public TrainableLayer {
     void resetGraphTraversalState() override;
     bool mustConnectAllInputsToDriveOutput() const override { return !epilogueInputBindings.empty(); }
 
+    DataType getWeightsDataType() const { return weightsDataType; }
+    DataType getComputeDataType() const { return computeDataType; }
+    DataType getOutputDataType() const { return outputDataType; }
+
    protected:
     std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
                                                      std::shared_ptr<ThorImplementation::Layer> drivingLayer,
@@ -142,6 +146,7 @@ class FullyConnected : public TrainableLayer {
                                                                 uint32_t numOutputFeatures,
                                                                 bool preservePrefixDimensions);
     static void verifyFullyConnectedDataType(DataType dataType, const std::string &what);
+    static DataType defaultFullyConnectedComputeDataType(DataType inputDataType, DataType weightsDataType, DataType outputDataType);
     static void verifyFullyConnectedComputeDataType(DataType dataType);
 
     friend class Network;

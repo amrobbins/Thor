@@ -1,5 +1,7 @@
 #pragma once
 
+#include "DeepLearning/Api/Training/DeviceDatasetStorage.h"
+
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -49,6 +51,8 @@ struct TrainingStatsSnapshot {
     // metrics for backwards-compatible reporting.
     std::unordered_map<std::string, double> losses{};
     std::unordered_map<std::string, double> metrics{};
+
+    DeviceDatasetStorageReport deviceDatasetStorage{};
 };
 
 }  // namespace Thor

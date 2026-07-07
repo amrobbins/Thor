@@ -1772,6 +1772,22 @@ LineStatsColorMode lineStatsColorModeFromString(const std::string& value) {
     throw nb::value_error("stats_color must be one of: 'always', 'auto', 'never'");
 }
 
+DeviceDatasetStorage deviceDatasetStorageFromPython(nb::object value, const std::string& argumentName) {
+    DeviceDatasetStorage storage{};
+    if (nb::try_cast<DeviceDatasetStorage>(value, storage, false)) {
+        return storage;
+    }
+    if (nb::isinstance<nb::str>(value)) {
+        const std::string text = pybind::castOrTypeError<std::string>(value, argumentName, "str", false);
+        try {
+            return deviceDatasetStorageFromName(text);
+        } catch (const std::runtime_error& e) {
+            throw nb::value_error(e.what());
+        }
+    }
+    throw nb::type_error((argumentName + " must be a thor.training.DeviceDatasetStorage value or one of: 'best_effort', 'strict', 'off'.").c_str());
+}
+
 TrainingEventPhase trainingEventPhaseFromString(const std::string& value) {
     if (value == "train") {
         return TrainingEventPhase::TRAIN;
@@ -3296,13 +3312,36 @@ IndexedNumpyFloat32DictBatchLoader.
         },
         "split"_a = "train");
 
+    auto device_dataset_storage = nb::enum_<DeviceDatasetStorage>(training, "DeviceDatasetStorage")
+                                      .value("OFF", DeviceDatasetStorage::OFF)
+                                      .value("BEST_EFFORT", DeviceDatasetStorage::BEST_EFFORT)
+                                      .value("STRICT", DeviceDatasetStorage::STRICT);
+    device_dataset_storage.attr("__module__") = "thor.training";
+
+    auto device_dataset_storage_report = nb::class_<DeviceDatasetStorageReport>(training, "DeviceDatasetStorageReport");
+    device_dataset_storage_report.attr("__module__") = "thor.training";
+    device_dataset_storage_report.def_ro("requested", &DeviceDatasetStorageReport::requested);
+    device_dataset_storage_report.def_ro("attempted", &DeviceDatasetStorageReport::attempted);
+    device_dataset_storage_report.def_ro("used", &DeviceDatasetStorageReport::used);
+    device_dataset_storage_report.def_ro("reason", &DeviceDatasetStorageReport::reason);
+    device_dataset_storage_report.def_ro("examples", &DeviceDatasetStorageReport::examples);
+    device_dataset_storage_report.def_ro("required_bytes", &DeviceDatasetStorageReport::requiredBytes);
+    device_dataset_storage_report.def_ro("available_bytes_after_model_placement",
+                                         &DeviceDatasetStorageReport::availableBytesAfterPlacement);
+    device_dataset_storage_report.def_ro("materialization_seconds", &DeviceDatasetStorageReport::materializationSeconds);
+
     auto trainer_fit_options = nb::class_<TrainerFitOptions>(training, "TrainerFitOptions");
     trainer_fit_options.attr("__module__") = "thor.training";
     trainer_fit_options.def(nb::init<>())
         .def_rw("epochs", &TrainerFitOptions::epochs)
         .def_rw("check_best_model_every_epochs", &TrainerFitOptions::checkBestModelEveryEpochs)
         .def_rw("first_model_selection_epoch", &TrainerFitOptions::firstModelSelectionEpoch)
-        .def_rw("max_training_batches_per_epoch", &TrainerFitOptions::maxTrainingBatchesPerEpoch);
+        .def_rw("max_training_batches_per_epoch", &TrainerFitOptions::maxTrainingBatchesPerEpoch)
+        .def_prop_rw("device_dataset_storage",
+                     [](const TrainerFitOptions& self) { return self.deviceDatasetStorage; },
+                     [](TrainerFitOptions& self, nb::object value) {
+                         self.deviceDatasetStorage = deviceDatasetStorageFromPython(std::move(value), "device_dataset_storage");
+                     });
 
     auto trainer = nb::class_<Trainer>(training, "Trainer", nb::type_slots(trainer_type_slots));
     trainer.attr("__module__") = "thor.training";
@@ -3398,13 +3437,15 @@ IndexedNumpyFloat32DictBatchLoader.
            uint64_t first_model_selection_epoch,
            nb::object restart_conditions,
            nb::object early_completion_policies,
-           nb::object max_training_batches_per_epoch) -> nb::object {
+           nb::object max_training_batches_per_epoch,
+           nb::object device_dataset_storage) -> nb::object {
             TrainerFitOptions options;
             options.epochs = epochs;
             options.checkBestModelEveryEpochs = check_best_model_every_epochs;
             options.firstModelSelectionEpoch = first_model_selection_epoch;
             options.maxTrainingBatchesPerEpoch = optionalUint64FromPython(std::move(max_training_batches_per_epoch),
                                                                           "max_training_batches_per_epoch");
+            options.deviceDatasetStorage = deviceDatasetStorageFromPython(std::move(device_dataset_storage), "device_dataset_storage");
             options.restartConditions = trainingRestartPoliciesFromPython(restart_conditions, /*trainerScope=*/true);
             TrainingEarlyCompletionPoliciesBinding earlyPolicies = trainingEarlyCompletionPoliciesFromPython(early_completion_policies);
             options.earlyCompletionPolicies = std::move(earlyPolicies.policies);
@@ -3420,7 +3461,8 @@ IndexedNumpyFloat32DictBatchLoader.
         "first_model_selection_epoch"_a = 0,
         "restart_conditions"_a.none() = nb::none(),
         "early_completion_policies"_a.none() = nb::none(),
-        "max_training_batches_per_epoch"_a.none() = nb::none());
+        "max_training_batches_per_epoch"_a.none() = nb::none(),
+        "device_dataset_storage"_a = "best_effort");
     trainer.def(
         "save_model",
         [](Trainer& self, nb::object directory, bool overwrite, bool save_optimizer_state) {
@@ -3466,6 +3508,7 @@ IndexedNumpyFloat32DictBatchLoader.
     training_stats_snapshot.def_prop_ro("momentum", [](const TrainingStatsSnapshot& self) { return optionalDouble(self.momentum); });
     training_stats_snapshot.def_ro("losses", &TrainingStatsSnapshot::losses);
     training_stats_snapshot.def_ro("metrics", &TrainingStatsSnapshot::metrics);
+    training_stats_snapshot.def_ro("device_dataset_storage", &TrainingStatsSnapshot::deviceDatasetStorage);
 
     auto training_run_status = nb::enum_<TrainingRunStatus>(training, "TrainingRunStatus")
                                    .value("not_started", TrainingRunStatus::NOT_STARTED)
@@ -3838,13 +3881,15 @@ IndexedNumpyFloat32DictBatchLoader.
            nb::object early_completion_rules,
            nb::object reports,
            bool evaluate_training_population,
-           nb::object max_training_batches_per_epoch) {
+           nb::object max_training_batches_per_epoch,
+           nb::object device_dataset_storage) {
             TrainerFitOptions options;
             options.epochs = epochs;
             options.checkBestModelEveryEpochs = check_best_model_every_epochs;
             options.firstModelSelectionEpoch = first_model_selection_epoch;
             options.maxTrainingBatchesPerEpoch = optionalUint64FromPython(std::move(max_training_batches_per_epoch),
                                                                           "max_training_batches_per_epoch");
+            options.deviceDatasetStorage = deviceDatasetStorageFromPython(std::move(device_dataset_storage), "device_dataset_storage");
             TrainingRunsSessionOptions sessionOptions;
             sessionOptions.restartConditions = trainingRestartPoliciesFromPython(restart_conditions, /*trainerScope=*/false);
             TrainingRunsEarlyCompletionRulesBinding earlyRules = trainingRunsEarlyCompletionRulesFromPython(early_completion_rules);
@@ -3863,7 +3908,8 @@ IndexedNumpyFloat32DictBatchLoader.
         "early_completion_rules"_a.none() = nb::none(),
         "reports"_a.none() = nb::none(),
         "evaluate_training_population"_a = true,
-        "max_training_batches_per_epoch"_a.none() = nb::none());
+        "max_training_batches_per_epoch"_a.none() = nb::none(),
+        "device_dataset_storage"_a = "best_effort");
 
     auto gradient_clear_policy = nb::enum_<TrainingStep::GradientClearPolicy>(training, "GradientClearPolicy")
                                      .value("clear_before_step", TrainingStep::GradientClearPolicy::CLEAR_BEFORE_STEP)

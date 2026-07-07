@@ -489,6 +489,7 @@ class IndexedLocalNamedExampleReader::Session::Impl {
    public:
     struct PendingReadRequest {
         bool active = false;
+        bool materializeWindowedTensors = false;
         uint64_t batchSlot = 0;
         std::vector<uint8_t *> windowedTensorBasePointers;
         std::vector<uint8_t *> windowedMaskBasePointers;
@@ -616,6 +617,9 @@ class IndexedLocalNamedExampleReader::Session::Impl {
         if (!request.active) {
             throw std::runtime_error("IndexedLocalNamedExampleReader missing pending request for completed read.");
         }
+        if (!request.materializeWindowedTensors) {
+            return;
+        }
         if (request.windowedTensorBasePointers.size() != reader.windowedReadSpecs.size()) {
             throw std::runtime_error("IndexedLocalNamedExampleReader windowed destination tensor count does not match layout.");
         }
@@ -738,14 +742,20 @@ class IndexedLocalNamedExampleReader::Session::Impl {
                     uint64_t batchSlot,
                     const std::vector<uint8_t *> &tensorBasePointers,
                     const std::vector<uint8_t *> &windowedTensorBasePointers,
-                    const std::vector<uint8_t *> &windowedMaskBasePointers) {
+                    const std::vector<uint8_t *> &windowedMaskBasePointers,
+                    bool materializeWindowedTensors) {
         THOR_THROW_IF_FALSE(owner != nullptr);
         const IndexedLocalNamedExampleReader::Impl &reader = *owner->impl;
         const uint64_t tensorCount = static_cast<uint64_t>(reader.directTensorSpecs.size());
         const uint64_t windowedCount = static_cast<uint64_t>(reader.windowedReadSpecs.size());
         THOR_THROW_IF_FALSE(tensorBasePointers.size() == tensorCount);
-        THOR_THROW_IF_FALSE(windowedTensorBasePointers.size() == windowedCount);
-        THOR_THROW_IF_FALSE(windowedMaskBasePointers.size() == windowedCount);
+        if (materializeWindowedTensors) {
+            THOR_THROW_IF_FALSE(windowedTensorBasePointers.size() == windowedCount);
+            THOR_THROW_IF_FALSE(windowedMaskBasePointers.size() == windowedCount);
+        } else {
+            THOR_THROW_IF_FALSE(windowedTensorBasePointers.empty());
+            THOR_THROW_IF_FALSE(windowedMaskBasePointers.empty());
+        }
 
         const SteadyClock::time_point slotAcquireStart = diagnosticNow();
         if (context.freeIovecSlots.empty()) {
@@ -765,6 +775,7 @@ class IndexedLocalNamedExampleReader::Session::Impl {
         PendingReadRequest &pendingRequest = context.pendingRequests.at(static_cast<size_t>(iovecSlot));
         THOR_THROW_IF_FALSE(!pendingRequest.active);
         pendingRequest.active = true;
+        pendingRequest.materializeWindowedTensors = materializeWindowedTensors;
         pendingRequest.batchSlot = batchSlot;
         pendingRequest.windowedTensorBasePointers = windowedTensorBasePointers;
         pendingRequest.windowedMaskBasePointers = windowedMaskBasePointers;
@@ -940,6 +951,39 @@ void IndexedLocalNamedExampleReader::Session::loadExampleInto(uint64_t globalExa
     loadExampleInto(globalExampleIndex, batchSlot, tensorBasePointers, {}, {});
 }
 
+void IndexedLocalNamedExampleReader::Session::loadDirectExampleInto(uint64_t globalExampleIndex,
+                                                                    uint64_t batchSlot,
+                                                                    const std::vector<uint8_t *> &tensorBasePointers) {
+    THOR_THROW_IF_FALSE(impl != nullptr);
+    THOR_THROW_IF_FALSE(impl->owner != nullptr);
+    const IndexedLocalNamedExampleReader::Impl &reader = *impl->owner->impl;
+    if (tensorBasePointers.size() != reader.directTensorSpecs.size()) {
+        throw std::runtime_error("IndexedLocalNamedExampleReader::Session direct destination tensor count does not match layout tensor count.");
+    }
+
+    const SteadyClock::time_point loadExampleStart = diagnosticNow();
+    impl->stats.loadExampleCalls += 1;
+
+    uint64_t localExampleIndex = 0;
+    const SteadyClock::time_point resolveStart = diagnosticNow();
+    const IndexedLocalNamedExampleReader::Impl::ShardInfo &shardInfo = reader.resolveShard(globalExampleIndex, localExampleIndex);
+    impl->stats.resolveShardNanoseconds += diagnosticElapsedNanoseconds(resolveStart);
+
+    const uint64_t shardIndex = static_cast<uint64_t>(&shardInfo - reader.shards.data());
+    const SteadyClock::time_point contextStart = diagnosticNow();
+    IndexedLocalNamedExampleReader::Session::Impl::IoContext &context = impl->contextFor(shardIndex, shardInfo);
+    impl->stats.shardContextLookupNanoseconds += diagnosticElapsedNanoseconds(contextStart);
+
+    const SteadyClock::time_point requestStart = diagnosticNow();
+    ShardExampleReadRequest request = shardInfo.shard->getExampleReadRequest(ExampleType::TRAIN, localExampleIndex);
+    impl->stats.shardReadRequestNanoseconds += diagnosticElapsedNanoseconds(requestStart);
+    if (request.numBytes != reader.layout.recordSizeBytes()) {
+        throw std::runtime_error("IndexedLocalNamedExampleReader shard read request size does not match layout record size.");
+    }
+    impl->readRecord(context, request.fileOffsetBytes, batchSlot, tensorBasePointers, {}, {}, false);
+    impl->stats.loadExampleNanoseconds += diagnosticElapsedNanoseconds(loadExampleStart);
+}
+
 void IndexedLocalNamedExampleReader::Session::loadExampleInto(uint64_t globalExampleIndex,
                                                               uint64_t batchSlot,
                                                               const std::vector<uint8_t *> &tensorBasePointers,
@@ -984,7 +1028,8 @@ void IndexedLocalNamedExampleReader::Session::loadExampleInto(uint64_t globalExa
                      batchSlot,
                      tensorBasePointers,
                      windowedTensorBasePointers,
-                     windowedMaskBasePointers);
+                     windowedMaskBasePointers,
+                     true);
     impl->stats.loadExampleNanoseconds += diagnosticElapsedNanoseconds(loadExampleStart);
 }
 

@@ -66,6 +66,7 @@ class IndexedLocalNamedExampleReader : public std::enable_shared_from_this<Index
         Session &operator=(Session &&) = delete;
 
         void loadExampleInto(uint64_t globalExampleIndex, uint64_t batchSlot, const std::vector<uint8_t *> &tensorBasePointers);
+        void loadDirectExampleInto(uint64_t globalExampleIndex, uint64_t batchSlot, const std::vector<uint8_t *> &tensorBasePointers);
         void loadExampleInto(uint64_t globalExampleIndex,
                              uint64_t batchSlot,
                              const std::vector<uint8_t *> &tensorBasePointers,

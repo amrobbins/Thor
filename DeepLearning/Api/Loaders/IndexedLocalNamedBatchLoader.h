@@ -45,12 +45,16 @@ class IndexedLocalNamedBatchLoader : public Loader {
     uint64_t getNumExamples(ExampleType exampleType) override;
     uint64_t getNextBatchNum(ExampleType exampleType) override;
 
+    [[nodiscard]] bool supportsDeviceDatasetMaterialization() const override;
+    [[nodiscard]] DeviceDatasetMaterializationView describeDeviceDatasetMaterialization() const override;
+
     [[nodiscard]] const LocalNamedExampleLayout &getLayout() const;
     [[nodiscard]] const std::filesystem::path &getDatasetPath() const;
     [[nodiscard]] uint64_t getNumDatasetExamples() const;
     [[nodiscard]] uint64_t getBatchQueueDepth() const;
     [[nodiscard]] bool getRandomizeTrain() const;
     [[nodiscard]] std::optional<uint64_t> getRandomSeed() const;
+    [[nodiscard]] const std::vector<uint64_t> &getSplitIndices(ExampleType exampleType) const;
     [[nodiscard]] bool hasExplicitTestSplit() const;
     [[nodiscard]] IndexedLocalNamedBatchAssemblerStats getStatsSnapshot(ExampleType exampleType);
 

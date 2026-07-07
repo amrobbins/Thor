@@ -20,6 +20,9 @@ enum class DataType {
     FP8_E4M3 = 22,
     FP8_E5M2 = 23,
     BF16 = 24,
+    // Compute-only dtype token.  TF32 is not a tensor storage format in Thor; it requests
+    // TensorFloat-32 cuBLAS/cuBLASLt compute for FP32 GEMM inputs/outputs.
+    TF32 = 25,
 };
 
 NLOHMANN_JSON_SERIALIZE_ENUM(DataType,
@@ -37,6 +40,7 @@ NLOHMANN_JSON_SERIALIZE_ENUM(DataType,
                                  {DataType::FP32, "fp32"},
                                  {DataType::FP64, "fp64"},
                                  {DataType::BF16, "bf16"},
+                                 {DataType::TF32, "tf32"},
                                  {DataType::FP8_E4M3, "fp8_e4m3"},
                                  {DataType::FP8_E5M2, "fp8_e5m2"},
                              })

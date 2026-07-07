@@ -81,29 +81,31 @@ TEST(LocalNamedBatchLoaderTest, ReadsNamedBatchesFromManifestDataset) {
     LocalNamedExampleLayout layout = testLayout();
     writeDataset(datasetPath, layout);
 
-    LocalNamedBatchLoader loader(datasetPath, layout, 2, 2, false);
-    EXPECT_EQ(loader.getNumExamples(ExampleType::TRAIN), 3);
-    EXPECT_EQ(loader.getNumBatchesPerEpoch(ExampleType::TRAIN), 2);
-    EXPECT_EQ(loader.getNumExamples(ExampleType::VALIDATE), 2);
-    EXPECT_EQ(loader.getNumBatchesPerEpoch(ExampleType::VALIDATE), 1);
-    EXPECT_EQ(loader.getNumExamples(ExampleType::TEST), 0);
-    EXPECT_EQ(loader.getNumBatchesPerEpoch(ExampleType::TEST), 0);
+    {
+        LocalNamedBatchLoader loader(datasetPath, layout, 2, 2, false);
+        EXPECT_EQ(loader.getNumExamples(ExampleType::TRAIN), 3);
+        EXPECT_EQ(loader.getNumBatchesPerEpoch(ExampleType::TRAIN), 2);
+        EXPECT_EQ(loader.getNumExamples(ExampleType::VALIDATE), 2);
+        EXPECT_EQ(loader.getNumBatchesPerEpoch(ExampleType::VALIDATE), 1);
+        EXPECT_EQ(loader.getNumExamples(ExampleType::TEST), 0);
+        EXPECT_EQ(loader.getNumBatchesPerEpoch(ExampleType::TEST), 0);
 
-    uint64_t batchNum = 99;
-    Batch batch = loader.getBatch(ExampleType::TRAIN, batchNum);
-    EXPECT_EQ(batchNum, 0);
-    ASSERT_TRUE(batch.contains("seasonality_inputs"));
-    ASSERT_TRUE(batch.contains("monotone_inputs"));
-    ASSERT_TRUE(batch.contains("daily_weight"));
-    expectTensorValues(batch.getTensor("seasonality_inputs"), {0.0f, 1.0f, 20.0f, 21.0f});
-    expectTensorValues(batch.getTensor("monotone_inputs"), {10.0f, 11.0f, 12.0f, 30.0f, 31.0f, 32.0f});
-    expectTensorValues(batch.getTensor("daily_weight"), {100.0f, 120.0f});
-    loader.returnBatchBuffers(ExampleType::TRAIN, std::move(batch));
+        uint64_t batchNum = 99;
+        Batch batch = loader.getBatch(ExampleType::TRAIN, batchNum);
+        EXPECT_EQ(batchNum, 0);
+        ASSERT_TRUE(batch.contains("seasonality_inputs"));
+        ASSERT_TRUE(batch.contains("monotone_inputs"));
+        ASSERT_TRUE(batch.contains("daily_weight"));
+        expectTensorValues(batch.getTensor("seasonality_inputs"), {0.0f, 1.0f, 20.0f, 21.0f});
+        expectTensorValues(batch.getTensor("monotone_inputs"), {10.0f, 11.0f, 12.0f, 30.0f, 31.0f, 32.0f});
+        expectTensorValues(batch.getTensor("daily_weight"), {100.0f, 120.0f});
+        loader.returnBatchBuffers(ExampleType::TRAIN, std::move(batch));
 
-    Batch validateBatch = loader.getBatch(ExampleType::VALIDATE, batchNum);
-    EXPECT_EQ(batchNum, 0);
-    expectTensorValues(validateBatch.getTensor("seasonality_inputs"), {100.0f, 101.0f, 120.0f, 121.0f});
-    loader.returnBatchBuffers(ExampleType::VALIDATE, std::move(validateBatch));
+        Batch validateBatch = loader.getBatch(ExampleType::VALIDATE, batchNum);
+        EXPECT_EQ(batchNum, 0);
+        expectTensorValues(validateBatch.getTensor("seasonality_inputs"), {100.0f, 101.0f, 120.0f, 121.0f});
+        loader.returnBatchBuffers(ExampleType::VALIDATE, std::move(validateBatch));
+    }
 
     std::filesystem::remove_all(datasetPath);
 }
@@ -126,9 +128,11 @@ TEST(LocalNamedBatchLoaderTest, ThrowsWhenReadingEmptySplit) {
     LocalNamedExampleLayout layout = testLayout();
     writeDataset(datasetPath, layout);
 
-    LocalNamedBatchLoader loader(datasetPath, layout, 2, 2, false);
-    uint64_t batchNum = 0;
-    EXPECT_THROW((void)loader.getBatch(ExampleType::TEST, batchNum), std::runtime_error);
+    {
+        LocalNamedBatchLoader loader(datasetPath, layout, 2, 2, false);
+        uint64_t batchNum = 0;
+        EXPECT_THROW((void)loader.getBatch(ExampleType::TEST, batchNum), std::runtime_error);
+    }
 
     std::filesystem::remove_all(datasetPath);
 }
@@ -138,11 +142,13 @@ TEST(LocalNamedBatchLoaderTest, RejectsReturnedBatchMissingTensor) {
     LocalNamedExampleLayout layout = testLayout();
     writeDataset(datasetPath, layout);
 
-    LocalNamedBatchLoader loader(datasetPath, layout, 2, 2, false);
-    uint64_t batchNum = 0;
-    Batch batch = loader.getBatch(ExampleType::TRAIN, batchNum);
-    batch.values().erase("daily_weight");
-    EXPECT_THROW(loader.returnBatchBuffers(ExampleType::TRAIN, std::move(batch)), std::runtime_error);
+    {
+        LocalNamedBatchLoader loader(datasetPath, layout, 2, 2, false);
+        uint64_t batchNum = 0;
+        Batch batch = loader.getBatch(ExampleType::TRAIN, batchNum);
+        batch.values().erase("daily_weight");
+        EXPECT_THROW(loader.returnBatchBuffers(ExampleType::TRAIN, std::move(batch)), std::runtime_error);
+    }
 
     std::filesystem::remove_all(datasetPath);
 }
@@ -159,6 +165,21 @@ TEST(LocalNamedBatchLoaderTest, RejectsIndexedStorageModeDataset) {
     writer.close();
 
     EXPECT_THROW(LocalNamedBatchLoader(datasetPath, layout, 1, 1, false), std::runtime_error);
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(LocalNamedBatchLoaderTest, DoesNotAdvertiseDeviceDatasetMaterialization) {
+    const std::filesystem::path datasetPath = makeTempDatasetPath("device_materialization_unsupported");
+    LocalNamedExampleLayout layout = testLayout();
+    writeDataset(datasetPath, layout);
+
+    {
+        LocalNamedBatchLoader loader(datasetPath, layout, 2, 2, false);
+        EXPECT_FALSE(loader.supportsDeviceDatasetMaterialization());
+        EXPECT_EQ(loader.getDeviceDatasetMaterializationUnsupportedReason(), "loader_not_materializable");
+        EXPECT_THROW((void)loader.describeDeviceDatasetMaterialization(), std::runtime_error);
+    }
 
     std::filesystem::remove_all(datasetPath);
 }

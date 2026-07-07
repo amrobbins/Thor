@@ -173,7 +173,10 @@ void bind_fully_connected(nb::module_ &m) {
            nb::object epilogue_inputs,
            bool preserve_prefix_dimensions,
            nb::object weights_constraints,
-           nb::object biases_constraints) {
+           nb::object biases_constraints,
+           nb::object weights_data_type,
+           nb::object compute_data_type,
+           nb::object output_data_type) {
             if (numOutputFeatures == 0) {
                 throw nb::value_error("FullyConnected instance: num_output_features must be > 0.");
             }
@@ -193,6 +196,17 @@ void bind_fully_connected(nb::module_ &m) {
                 builder.weightsInitializer(weights_initializer);
             if (biases_initializer != nullptr)
                 builder.biasInitializer(biases_initializer);
+
+            std::optional<DataType> weightsDataType = optionalDataTypeFromPython(weights_data_type, "FullyConnected", "weights_data_type");
+            std::optional<DataType> computeDataType = optionalDataTypeFromPython(compute_data_type, "FullyConnected", "compute_data_type");
+            std::optional<DataType> outputDataType = optionalDataTypeFromPython(output_data_type, "FullyConnected", "output_data_type");
+            if (weightsDataType.has_value())
+                builder.weightsDataType(weightsDataType.value());
+            if (computeDataType.has_value())
+                builder.computeDataType(computeDataType.value());
+            if (outputDataType.has_value())
+                builder.outputDataType(outputDataType.value());
+
             builder.weightsOptimizer(weights_optimizer);
             builder.biasesOptimizer(biases_optimizer);
             applyConstraints(builder, weights_constraints, biases_constraints);
@@ -214,7 +228,10 @@ void bind_fully_connected(nb::module_ &m) {
         "epilogue_inputs"_a.none() = nb::none(),
         "preserve_prefix_dimensions"_a = false,
         "weights_constraints"_a.none() = nb::none(),
-        "biases_constraints"_a.none() = nb::none());
+        "biases_constraints"_a.none() = nb::none(),
+        "weights_data_type"_a.none() = nb::none(),
+        "compute_data_type"_a.none() = nb::none(),
+        "output_data_type"_a.none() = nb::none());
 
     fully_connected.def_static(
         "epilogue_input",
@@ -235,6 +252,10 @@ void bind_fully_connected(nb::module_ &m) {
             Return a named auxiliary tensor input expression for a FullyConnected epilogue.
             Bind the same name to a tensor with the ``epilogue_inputs`` constructor argument.
             )nbdoc");
+
+    fully_connected.def("get_weights_data_type", &FullyConnected::getWeightsDataType);
+    fully_connected.def("get_compute_data_type", &FullyConnected::getComputeDataType);
+    fully_connected.def("get_output_data_type", &FullyConnected::getOutputDataType);
 
     fully_connected.def(
         "get_feature_output",

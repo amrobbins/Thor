@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Api/Training/TrainingProgram.h"
+#include "DeepLearning/Api/Training/DeviceDatasetStorage.h"
 #include "DeepLearning/Api/Training/EarlyCompletionPolicy.h"
 #include "DeepLearning/Api/Training/ModelSelectionScore.h"
 #include "DeepLearning/Api/Training/Observers/LineStatsReporter.h"
@@ -67,6 +68,12 @@ struct TrainingRunRequest {
     // several public epochs. Validation/evaluation epochs are intentionally not
     // capped by this option.
     std::optional<uint64_t> maxTrainingBatchesPerEpoch{};
+
+    // Controls whether FIT may stage a materializable named dataset into device-resident
+    // storage after model placement/workspace reservation. Patch 1 only threads the
+    // public option and telemetry; later patches attach the actual materializer.
+    DeviceDatasetStorage deviceDatasetStorage = DeviceDatasetStorage::BEST_EFFORT;
+    DeviceDatasetStorageReport deviceDatasetStorageReport{};
 
     TrainingModelSelectionScore modelSelectionScore{};
 

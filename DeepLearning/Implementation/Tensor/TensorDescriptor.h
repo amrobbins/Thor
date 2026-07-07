@@ -87,6 +87,8 @@ class TensorDescriptor {
                 return "bool";
             case DataType::BF16:
                 return "bf16";
+            case DataType::TF32:
+                return "tf32";
             case DataType::FP8_E4M3:
                 return "fp8_e4m3";
             case DataType::FP8_E5M2:

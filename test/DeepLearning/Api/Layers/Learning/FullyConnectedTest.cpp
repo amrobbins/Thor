@@ -478,6 +478,29 @@ TEST(FullyConnectedApi, DefaultsToGeluActivationWhenActivationIsOmitted) {
     EXPECT_EQ(j.at("activation").at("layer_type").get<string>(), "gelu");
 }
 
+TEST(FullyConnectedApi, Fp32StorageDefaultsToTf32ComputeUnlessExplicitlyOverridden) {
+    Api::Network network("testNetwork");
+    Api::Tensor featureInput(DataType::FP32, {4});
+
+    Api::FullyConnected defaultFc =
+        Api::FullyConnected::Builder().network(network).featureInput(featureInput).numOutputFeatures(3).hasBias(false).noActivation().build();
+    EXPECT_EQ(defaultFc.getWeightsDataType(), DataType::FP32);
+    EXPECT_EQ(defaultFc.getComputeDataType(), DataType::TF32);
+    EXPECT_EQ(defaultFc.getOutputDataType(), DataType::FP32);
+    EXPECT_EQ(defaultFc.architectureJson().at("compute_data_type").get<DataType>(), DataType::TF32);
+
+    Api::FullyConnected strictFp32Fc = Api::FullyConnected::Builder()
+                                          .network(network)
+                                          .featureInput(featureInput)
+                                          .numOutputFeatures(3)
+                                          .hasBias(false)
+                                          .computeDataType(DataType::FP32)
+                                          .noActivation()
+                                          .build();
+    EXPECT_EQ(strictFp32Fc.getComputeDataType(), DataType::FP32);
+    EXPECT_EQ(strictFp32Fc.architectureJson().at("compute_data_type").get<DataType>(), DataType::FP32);
+}
+
 TEST(FullyConnectedApi, ArchitectureSaveLoadRoundTripPreservesGeluActivationEpilogueParametersAndRuns) {
     constexpr uint32_t batchSize = 2;
     constexpr uint32_t numInputFeatures = 3;

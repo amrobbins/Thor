@@ -213,6 +213,8 @@ class IndexedLocalNamedBatchAssembler {
     uint64_t getNumBatchesPerEpoch() const;
     uint64_t getNumExamples() const;
     uint64_t getNextBatchNum();
+    [[nodiscard]] const std::vector<uint64_t> &getIndices() const { return indices; }
+    [[nodiscard]] bool isRandomized() const { return randomized; }
     IndexedLocalNamedBatchAssemblerStats getStatsSnapshot();
 
 #ifdef THOR_GTEST

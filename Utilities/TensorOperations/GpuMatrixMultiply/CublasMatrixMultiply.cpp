@@ -732,6 +732,8 @@ std::optional<cublasComputeType_t> CublasMatrixMultiply::mapToCublasComputeType(
     switch (dataType) {
         case DataType::FP32:
             return CUBLAS_COMPUTE_32F;
+        case DataType::TF32:
+            return CUBLAS_COMPUTE_32F_FAST_TF32;
         case DataType::FP16:
             return CUBLAS_COMPUTE_32F_FAST_16F;
         case DataType::BF16:
@@ -833,6 +835,8 @@ std::string CublasMatrixMultiply::dataTypeToString(DataType dataType) {
     switch (dataType) {
         case DataType::FP32:
             return "FP32";
+        case DataType::TF32:
+            return "TF32";
         case DataType::BF16:
             return "BF16";
         case DataType::FP16:
@@ -876,7 +880,7 @@ bool CublasMatrixMultiply::hasRequiredExplicitFp8Scales(MatmulDataTypes dataType
 
 std::string CublasMatrixMultiply::unsupportedMatmulDataTypesMessage(MatmulDataTypes dataTypes, const std::string &context) {
     return context + ": unsupported cuBLASLt GEMM data type combination " + dataTypesToString(dataTypes) +
-           ". Supported Thor cuBLASLt matmul/GEMM dtypes are FP32, FP16, BF16, selected INT8 paths, and selected FP8 paths. "
+           ". Supported Thor cuBLASLt matmul/GEMM dtypes are FP32, TF32 compute for FP32 storage, FP16, BF16, selected INT8 paths, and selected FP8 paths. "
            "FP8 input GEMM with FP32 C/D output additionally requires explicit tensorwide FP8 scale pointers.";
 }
 

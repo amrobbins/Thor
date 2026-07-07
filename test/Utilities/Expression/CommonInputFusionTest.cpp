@@ -5,6 +5,28 @@
 
 using namespace ThorImplementation;
 
+
+TEST(EquationCompiler, MatmulExplicitTf32ComputeSurvivesStageSplitAndCompile) {
+    auto x = Expression::input("x", DataType::FP32, DataType::FP32);
+    auto w = Expression::input("w", DataType::FP32, DataType::FP32);
+    auto y = Expression::matmul(x, w, false, false, DataType::TF32, DataType::FP32);
+
+    auto physical = Expression::outputs({{"y", y}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(physical, {DataType::FP32, DataType::FP32});
+
+    auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
+    ASSERT_EQ(stages.size(), 1);
+    ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::Matmul);
+
+    auto compiled = EquationCompiler::compileMatmul(stages[0].expr, stages[0].outputs);
+    ASSERT_NE(compiled, nullptr);
+    EXPECT_EQ(compiled->lhs_dtype, DataType::FP32);
+    EXPECT_EQ(compiled->rhs_dtype, DataType::FP32);
+    EXPECT_EQ(compiled->aux_dtype, DataType::FP32);
+    EXPECT_EQ(compiled->output_dtype, DataType::FP32);
+    EXPECT_EQ(compiled->compute_dtype, DataType::TF32);
+}
+
 TEST(EquationCompiler, SharedInputsBecomeOneFusedStage) {
     auto x = Expression::input("x");
     auto y = Expression::input("y");

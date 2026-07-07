@@ -58,6 +58,8 @@ std::optional<cublasComputeType_t> cublasLtComputeTypeForFullyConnected(DataType
     switch (computeDataType) {
         case DataType::FP32:
             return CUBLAS_COMPUTE_32F;
+        case DataType::TF32:
+            return CUBLAS_COMPUTE_32F_FAST_TF32;
         case DataType::FP16:
             return CUBLAS_COMPUTE_32F_FAST_16F;
         case DataType::BF16:
@@ -262,14 +264,14 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias
                 if (bTensor.getDimensions().size() != 1 || bTensor.getDimensions()[0] != wTensor.getDimensions()[1]) {
                     throw std::runtime_error("FullyConnected biases tensor dimensions are incompatible with the weights tensor.");
                 }
-                if (bTensor.getDataType() != weightsDataType) {
-                    throw std::runtime_error("FullyConnected biases tensor dtype does not match weightsDataType.");
+                if (bTensor.getDataType() != outputDataType) {
+                    throw std::runtime_error("FullyConnected biases tensor dtype must match outputDataType.");
                 }
                 if (bTensor.getPlacement() != placement) {
                     throw std::runtime_error("FullyConnected biases tensor placement does not match the layer placement.");
                 }
 
-                auto b = Expression::input("biases", weightsDataType, weightsDataType);
+                auto b = Expression::input("biases", outputDataType, outputDataType);
 
                 // Broadcast [out_features] over batch.
                 fout = fout + b;
@@ -398,10 +400,19 @@ void FullyConnected::verifyFullyConnectedDataType(DataType dataType, const std::
     }
 }
 
+DataType FullyConnected::defaultFullyConnectedComputeDataType(DataType inputDataType, DataType weightsDataType, DataType outputDataType) {
+    // FP32 storage defaults to TF32 Tensor Core compute.  Users who need strict IEEE-style FP32 GEMM can
+    // explicitly set computeDataType(DataType::FP32).
+    if (inputDataType == DataType::FP32 && weightsDataType == DataType::FP32 && outputDataType == DataType::FP32) {
+        return DataType::TF32;
+    }
+    return inputDataType;
+}
+
 void FullyConnected::verifyFullyConnectedComputeDataType(DataType dataType) {
     if (!cublasLtComputeTypeForFullyConnected(dataType).has_value()) {
         throw std::invalid_argument(
-            "FullyConnected computeDataType must be fp32, fp16, or bf16 for Thor's current cuBLASLt floating GEMM path. Got " +
+            "FullyConnected computeDataType must be fp32, tf32, fp16, or bf16 for Thor's current cuBLASLt floating GEMM path. Got " +
             dataTypeName(dataType) + ".");
     }
 }
@@ -543,10 +554,11 @@ FullyConnected FullyConnected::Builder::build() {
     }
     if (!_weightsDataType.has_value())
         _weightsDataType = _featureInputs[0].getDataType();
-    if (!_computeDataType.has_value())
-        _computeDataType = _featureInputs[0].getDataType();
     if (!_outputDataType.has_value())
         _outputDataType = _featureInputs[0].getDataType();
+    if (!_computeDataType.has_value())
+        _computeDataType = FullyConnected::defaultFullyConnectedComputeDataType(
+            _featureInputs[0].getDataType(), _weightsDataType.value(), _outputDataType.value());
 
     if (!_epilogueInputBindings.empty() && _featureInputs.size() != 1) {
         throw std::invalid_argument("FullyConnected epilogue auxiliary inputs currently require exactly one feature input.");
@@ -589,7 +601,7 @@ FullyConnected FullyConnected::Builder::build() {
         ParameterSpecification::Builder biasesParameterBuilder;
         biasesParameterBuilder.name("biases")
             .shape({fullyConnected.numOutputFeatures})
-            .dtype(fullyConnected.weightsDataType)
+            .dtype(fullyConnected.outputDataType)
             .initializer(biasInitializer)
             .trainable(true);
         if (_biasesOptimizer != nullptr)

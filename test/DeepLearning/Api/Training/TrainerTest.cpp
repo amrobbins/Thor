@@ -1,5 +1,6 @@
 #include "DeepLearning/Api/Training/Trainer.h"
 #include "DeepLearning/Api/Training/Executors/DebugSynchronousTrainingExecutor.h"
+#include "DeepLearning/Api/Training/DeviceDatasetStorageSelection.h"
 #include "DeepLearning/Api/Training/TrainingProgram.h"
 #include "DeepLearning/Api/Training/TrainingPhase.h"
 #include "DeepLearning/Api/Training/TrainingStep.h"
@@ -12,10 +13,13 @@
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
 #include <type_traits>
+#include <utility>
+#include <vector>
 
 using namespace Thor;
 
@@ -52,6 +56,37 @@ class FakeLoader : public Loader {
     }
 };
 
+class MaterializableFakeLoader : public FakeLoader {
+   public:
+    MaterializableFakeLoader() {
+        layout = LocalNamedExampleLayout::fromTensorShapes(
+            std::vector<std::pair<std::string, std::vector<uint64_t>>>{{"features", {2}}},
+            ThorImplementation::DataType::FP32);
+        batchSize = 4;
+    }
+
+    bool supportsDeviceDatasetMaterialization() const override { return true; }
+
+    DeviceDatasetMaterializationView describeDeviceDatasetMaterialization() const override {
+        DeviceDatasetMaterializationView view;
+        view.datasetPath = std::filesystem::temp_directory_path() / "thor-materializable-fake-loader";
+        view.layout = layout;
+        view.numDatasetExamples = 4;
+        view.batchSize = batchSize;
+
+        DeviceDatasetMaterializationSplitView train;
+        train.exampleType = ExampleType::TRAIN;
+        train.splitName = "train";
+        train.indices = {0, 1, 2, 3};
+        train.batchesPerEpoch = 1;
+        view.splits.push_back(std::move(train));
+        return view;
+    }
+
+   private:
+    LocalNamedExampleLayout layout;
+};
+
 class CapturingExecutor : public TrainingExecutor {
    public:
     void fit(const TrainingRunRequest& request, TrainingObserver& observer) override {
@@ -70,6 +105,8 @@ class CapturingExecutor : public TrainingExecutor {
         lastCheckBestModelEveryEpochs = request.checkBestModelEveryEpochs;
         lastFirstModelSelectionEpoch = request.firstModelSelectionEpoch;
         lastMaxTrainingBatchesPerEpoch = request.maxTrainingBatchesPerEpoch;
+        lastDeviceDatasetStorage = request.deviceDatasetStorage;
+        lastDeviceDatasetStorageReport = request.deviceDatasetStorageReport;
         lastInitialCompletedEpochs = request.initialCompletedEpochs;
         if (request.completedTrainingEpochs != nullptr) {
             *request.completedTrainingEpochs = request.initialCompletedEpochs + request.epochs;
@@ -95,6 +132,8 @@ class CapturingExecutor : public TrainingExecutor {
     uint32_t lastCheckBestModelEveryEpochs = 0;
     uint64_t lastFirstModelSelectionEpoch = 0;
     std::optional<uint64_t> lastMaxTrainingBatchesPerEpoch{};
+    DeviceDatasetStorage lastDeviceDatasetStorage = DeviceDatasetStorage::OFF;
+    DeviceDatasetStorageReport lastDeviceDatasetStorageReport{};
     uint64_t lastInitialCompletedEpochs = 0;
     bool lastModelSelectionScoreIsCustom = false;
     std::optional<double> lastModelSelectionScore{};
@@ -214,6 +253,124 @@ TEST(Trainer, FitPassesMaxTrainingBatchesPerEpochAsRunParameter) {
     EXPECT_EQ(executor->calls, 1u);
     ASSERT_TRUE(executor->lastMaxTrainingBatchesPerEpoch.has_value());
     EXPECT_EQ(executor->lastMaxTrainingBatchesPerEpoch.value(), 500u);
+}
+
+TEST(Trainer, FitDefaultsDeviceDatasetStorageToBestEffort) {
+    auto network = std::make_shared<Network>("trainer-device-dataset-storage-default");
+    auto loader = std::make_shared<FakeLoader>();
+    auto executor = std::make_shared<CapturingExecutor>();
+    auto observer = std::make_shared<NullTrainingObserver>();
+
+    Trainer trainer = Trainer::Builder()
+                          .network(network)
+                          .loader(loader)
+                          .executor(executor)
+                          .observer(observer)
+                          .build();
+
+    TrainerFitOptions options;
+    EXPECT_EQ(options.deviceDatasetStorage, DeviceDatasetStorage::BEST_EFFORT);
+    trainer.fit(options);
+
+    EXPECT_EQ(executor->calls, 1u);
+    EXPECT_EQ(executor->lastDeviceDatasetStorage, DeviceDatasetStorage::BEST_EFFORT);
+    EXPECT_EQ(executor->lastDeviceDatasetStorageReport.requested, DeviceDatasetStorage::BEST_EFFORT);
+}
+
+TEST(Trainer, FitPassesDeviceDatasetStorageAsRunParameter) {
+    auto network = std::make_shared<Network>("trainer-device-dataset-storage-strict");
+    auto loader = std::make_shared<FakeLoader>();
+    auto executor = std::make_shared<CapturingExecutor>();
+    auto observer = std::make_shared<NullTrainingObserver>();
+
+    Trainer trainer = Trainer::Builder()
+                          .network(network)
+                          .loader(loader)
+                          .executor(executor)
+                          .observer(observer)
+                          .build();
+
+    TrainerFitOptions options;
+    options.deviceDatasetStorage = DeviceDatasetStorage::STRICT;
+    trainer.fit(options);
+
+    EXPECT_EQ(executor->calls, 1u);
+    EXPECT_EQ(executor->lastDeviceDatasetStorage, DeviceDatasetStorage::STRICT);
+    EXPECT_EQ(executor->lastDeviceDatasetStorageReport.requested, DeviceDatasetStorage::STRICT);
+}
+
+
+TEST(DeviceDatasetStorageSelection, OffReturnsSourceLoaderWithoutAttempt) {
+    auto loader = std::make_shared<FakeLoader>();
+
+    DeviceDatasetStorageSelection selection = selectDeviceDatasetStorageLoader(
+        loader,
+        DeviceDatasetStorage::OFF,
+        ThorImplementation::TensorPlacement(ThorImplementation::TensorPlacement::MemDevices::GPU, 0),
+        2);
+
+    EXPECT_EQ(selection.loader, loader);
+    EXPECT_EQ(selection.report.requested, DeviceDatasetStorage::OFF);
+    EXPECT_FALSE(selection.report.attempted);
+    EXPECT_FALSE(selection.report.used);
+    EXPECT_TRUE(selection.report.reason.empty());
+}
+
+TEST(DeviceDatasetStorageSelection, BestEffortFallsBackForUnsupportedLoader) {
+    auto loader = std::make_shared<FakeLoader>();
+
+    DeviceDatasetStorageSelection selection = selectDeviceDatasetStorageLoader(
+        loader,
+        DeviceDatasetStorage::BEST_EFFORT,
+        ThorImplementation::TensorPlacement(ThorImplementation::TensorPlacement::MemDevices::GPU, 0),
+        2);
+
+    EXPECT_EQ(selection.loader, loader);
+    EXPECT_EQ(selection.report.requested, DeviceDatasetStorage::BEST_EFFORT);
+    EXPECT_TRUE(selection.report.attempted);
+    EXPECT_FALSE(selection.report.used);
+    EXPECT_EQ(selection.report.reason, "loader_not_materializable");
+}
+
+TEST(DeviceDatasetStorageSelection, StrictFailsForUnsupportedLoader) {
+    auto loader = std::make_shared<FakeLoader>();
+
+    EXPECT_THROW((void)selectDeviceDatasetStorageLoader(
+                     loader,
+                     DeviceDatasetStorage::STRICT,
+                     ThorImplementation::TensorPlacement(ThorImplementation::TensorPlacement::MemDevices::GPU, 0),
+                     2),
+                 std::runtime_error);
+}
+
+TEST(DeviceDatasetStorageSelection, BestEffortFallsBackForInsufficientMemoryBeforeOpeningDataset) {
+    auto loader = std::make_shared<MaterializableFakeLoader>();
+
+    DeviceDatasetStorageSelection selection = selectDeviceDatasetStorageLoader(
+        loader,
+        DeviceDatasetStorage::BEST_EFFORT,
+        ThorImplementation::TensorPlacement(ThorImplementation::TensorPlacement::MemDevices::GPU, 0),
+        2,
+        /*availableBytesOverride=*/1);
+
+    EXPECT_EQ(selection.loader, loader);
+    EXPECT_TRUE(selection.report.attempted);
+    EXPECT_FALSE(selection.report.used);
+    EXPECT_EQ(selection.report.reason, "insufficient_device_memory");
+    EXPECT_GT(selection.report.requiredBytes, selection.report.availableBytesAfterPlacement);
+    EXPECT_EQ(selection.report.availableBytesAfterPlacement, 1u);
+}
+
+TEST(DeviceDatasetStorageSelection, StrictFailsForInsufficientMemoryBeforeOpeningDataset) {
+    auto loader = std::make_shared<MaterializableFakeLoader>();
+
+    EXPECT_THROW((void)selectDeviceDatasetStorageLoader(
+                     loader,
+                     DeviceDatasetStorage::STRICT,
+                     ThorImplementation::TensorPlacement(ThorImplementation::TensorPlacement::MemDevices::GPU, 0),
+                     2,
+                     /*availableBytesOverride=*/1),
+                 std::runtime_error);
 }
 
 TEST(Trainer, RejectsZeroMaxTrainingBatchesPerEpoch) {

@@ -1,6 +1,12 @@
+#include "DeepLearning/Api/Loaders/DeviceResidentNamedBatchLoader.h"
+#include "DeepLearning/Api/Loaders/DeviceResidentWindowedNamedBatchLoader.h"
 #include "DeepLearning/Api/Loaders/IndexedLocalNamedBatchLoader.h"
+#include "DeepLearning/Api/Training/DeviceDatasetStorageSelection.h"
 #include "Utilities/Loaders/IndexedLocalNamedExampleReader.h"
 #include "Utilities/Loaders/LocalNamedExampleDatasetWriter.h"
+#include "Utilities/Loaders/NamedDatasetMaterializer.h"
+
+#include "cuda_runtime.h"
 
 #include "gtest/gtest.h"
 
@@ -12,6 +18,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -23,6 +30,7 @@ using std::string;
 using std::vector;
 using ThorImplementation::DataType;
 using ThorImplementation::Tensor;
+using ThorImplementation::TensorPlacement;
 
 namespace {
 
@@ -91,6 +99,56 @@ vector<float> tensorValues(const Tensor &tensor) {
     const uint64_t count = tensor.getDescriptor().getArraySizeInBytes() / sizeof(float);
     const float *actual = tensor.getMemPtr<float>();
     return vector<float>(actual, actual + count);
+}
+
+void requireCudaDevice(const char *reason) {
+    int deviceCount = 0;
+    const cudaError_t status = cudaGetDeviceCount(&deviceCount);
+    if (status != cudaSuccess || deviceCount <= 0) {
+        GTEST_SKIP() << reason;
+    }
+}
+
+vector<float> tensorValuesOnHost(const Tensor &tensor) {
+    if (tensor.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU) {
+        return tensorValues(tensor);
+    }
+    Tensor host(TensorPlacement(TensorPlacement::MemDevices::CPU), tensor.getDescriptor());
+    Stream stream(tensor.getPlacement());
+    host.copyFromAsync(tensor, stream);
+    stream.synchronize();
+    return tensorValues(host);
+}
+
+void expectTensorValuesOnHost(const Tensor &tensor, const vector<float> &expected) {
+    ASSERT_EQ(tensor.getDescriptor().getArraySizeInBytes(), expected.size() * sizeof(float));
+    const vector<float> actual = tensorValuesOnHost(tensor);
+    ASSERT_EQ(actual.size(), expected.size());
+    for (uint64_t i = 0; i < expected.size(); ++i) {
+        EXPECT_FLOAT_EQ(actual.at(i), expected.at(i)) << "i=" << i;
+    }
+}
+
+vector<uint8_t> uint8TensorValuesOnHost(const Tensor &tensor) {
+    Tensor host = tensor;
+    if (tensor.getPlacement().getMemDevice() != TensorPlacement::MemDevices::CPU) {
+        host = Tensor(TensorPlacement(TensorPlacement::MemDevices::CPU), tensor.getDescriptor());
+        Stream stream(tensor.getPlacement());
+        host.copyFromAsync(tensor, stream);
+        stream.synchronize();
+    }
+    const uint64_t count = host.getDescriptor().getArraySizeInBytes();
+    const uint8_t *actual = host.getMemPtr<uint8_t>();
+    return vector<uint8_t>(actual, actual + count);
+}
+
+void expectUint8TensorValuesOnHost(const Tensor &tensor, const vector<uint8_t> &expected) {
+    ASSERT_EQ(tensor.getDescriptor().getArraySizeInBytes(), expected.size());
+    const vector<uint8_t> actual = uint8TensorValuesOnHost(tensor);
+    ASSERT_EQ(actual.size(), expected.size());
+    for (uint64_t i = 0; i < expected.size(); ++i) {
+        EXPECT_EQ(actual.at(i), expected.at(i)) << "i=" << i;
+    }
 }
 
 vector<float> seasonalityValues(Batch &batch) { return tensorValues(batch.getTensor("seasonality_inputs")); }
@@ -189,6 +247,47 @@ float deterministicLargeValue(uint64_t exampleIndex, uint64_t elementIndex) {
 LocalNamedExampleLayout largeRecordLayout(uint64_t fp32Elements) {
     return LocalNamedExampleLayout::fromTensorShapes(vector<std::pair<string, vector<uint64_t>>>{{"large_features", {fp32Elements}}},
                                                      DataType::FP32);
+}
+
+LocalNamedExampleLayout materializerWindowedLayout() {
+    return LocalNamedExampleLayout::fromTensorShapes(
+        vector<std::pair<string, vector<uint64_t>>>{{"dense", {2}}},
+        vector<LocalNamedExampleLayout::WindowedTensorShape>{LocalNamedExampleLayout::WindowedTensorShape(
+            "history", {3, 1}, DataType::UINT64, DataType::INT32, 0.0, string("history_mask"))},
+        DataType::FP32);
+}
+
+void writeWindowedMaterializerDataset(const std::filesystem::path &datasetPath) {
+    LocalNamedExampleLayout layout = materializerWindowedLayout();
+    LocalNamedExampleDatasetWriter writer(datasetPath, layout, 10, LocalNamedExampleDatasetWriter::StorageMode::INDEXED);
+
+    uint64_t key = 7;
+    vector<float> source{10.0f, 11.0f, 12.0f, 13.0f};
+    writer.writeWindowedTensorSource(
+        "history",
+        LocalNamedExampleDatasetWriter::WindowedTensorSourceView{.dataType = DataType::FP32,
+                                                                .key = &key,
+                                                                .startIndex = 10,
+                                                                .dimensions = vector<uint64_t>{4, 1},
+                                                                .data = source.data(),
+                                                                .numBytes = source.size() * sizeof(float)});
+
+    vector<float> dense{1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
+    vector<uint64_t> keys{7, 7, 7};
+    vector<int32_t> starts{10, 8, 12};
+    writer.writeIndexedExamples(
+        {{"dense",
+          LocalNamedExampleDatasetWriter::TensorBatchView{.dataType = DataType::FP32,
+                                                          .dimensions = vector<uint64_t>{3, 2},
+                                                          .data = dense.data(),
+                                                          .numBytes = dense.size() * sizeof(float)}}},
+        {{"history",
+          LocalNamedExampleDatasetWriter::WindowedTensorReferenceBatchView{.keyDataType = DataType::UINT64,
+                                                                          .indexDataType = DataType::INT32,
+                                                                          .keys = keys.data(),
+                                                                          .starts = starts.data(),
+                                                                          .count = 3}}});
+    writer.close();
 }
 
 void writeLargeIndexedDataset(const std::filesystem::path &datasetPath,
@@ -825,6 +924,449 @@ TEST(IndexedLocalNamedBatchLoaderTest, RejectsSplitStorageModeDataset) {
 
     EXPECT_THROW((IndexedLocalNamedBatchLoader(datasetPath, layout, {0}, {0}, std::nullopt, 1, 1, false, std::nullopt)),
                  std::runtime_error);
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+
+TEST(IndexedLocalNamedBatchLoaderTest, DescribesDeviceDatasetMaterializationWithoutConsumingBatches) {
+    const std::filesystem::path datasetPath = makeTempDatasetPath("device_materialization_view");
+    LocalNamedExampleLayout layout = testLayout();
+    writeCanonicalDataset(datasetPath, layout);
+
+    IndexedLocalNamedBatchLoader loader(datasetPath, layout, {4, 2, 0}, {1, 3}, vector<uint64_t>{0, 4}, 2, 2, false, std::nullopt);
+    ASSERT_TRUE(loader.supportsDeviceDatasetMaterialization());
+    EXPECT_EQ(loader.getSplitIndices(ExampleType::TRAIN), (vector<uint64_t>{4, 2, 0}));
+    EXPECT_EQ(loader.getSplitIndices(ExampleType::VALIDATE), (vector<uint64_t>{1, 3}));
+    EXPECT_EQ(loader.getSplitIndices(ExampleType::TEST), (vector<uint64_t>{0, 4}));
+
+    DeviceDatasetMaterializationView view = loader.describeDeviceDatasetMaterialization();
+    EXPECT_EQ(view.datasetPath, datasetPath);
+    EXPECT_NO_THROW(view.layout.validateRequestedLayoutExact(layout));
+    EXPECT_EQ(view.numDatasetExamples, 5);
+    EXPECT_EQ(view.batchSize, 2);
+    ASSERT_EQ(view.splits.size(), 3);
+
+    const DeviceDatasetMaterializationSplitView &train = view.split(ExampleType::TRAIN);
+    EXPECT_EQ(train.splitName, "train");
+    EXPECT_EQ(train.indices, (vector<uint64_t>{4, 2, 0}));
+    EXPECT_EQ(train.numExamples(), 3);
+    EXPECT_EQ(train.batchesPerEpoch, 2);
+    EXPECT_FALSE(train.randomized);
+    EXPECT_FALSE(train.seed.has_value());
+
+    const DeviceDatasetMaterializationSplitView &validate = view.split(ExampleType::VALIDATE);
+    EXPECT_EQ(validate.splitName, "validate");
+    EXPECT_EQ(validate.indices, (vector<uint64_t>{1, 3}));
+    EXPECT_EQ(validate.numExamples(), 2);
+    EXPECT_EQ(validate.batchesPerEpoch, 1);
+    EXPECT_FALSE(validate.randomized);
+    EXPECT_FALSE(validate.seed.has_value());
+
+    const DeviceDatasetMaterializationSplitView &test = view.split(ExampleType::TEST);
+    EXPECT_EQ(test.splitName, "test");
+    EXPECT_EQ(test.indices, (vector<uint64_t>{0, 4}));
+    EXPECT_EQ(test.numExamples(), 2);
+    EXPECT_EQ(test.batchesPerEpoch, 1);
+    EXPECT_FALSE(test.randomized);
+    EXPECT_FALSE(test.seed.has_value());
+
+    uint64_t batchNum = 99;
+    Batch trainBatch = loader.getBatch(ExampleType::TRAIN, batchNum);
+    EXPECT_EQ(batchNum, 0);
+    expectTensorValues(trainBatch.getTensor("seasonality_inputs"), {80.0f, 81.0f, 40.0f, 41.0f});
+    loader.returnBatchBuffers(ExampleType::TRAIN, std::move(trainBatch));
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(IndexedLocalNamedBatchLoaderTest, DeviceDatasetMaterializationViewPreservesRandomizedTrainMetadata) {
+    const std::filesystem::path datasetPath = makeTempDatasetPath("device_materialization_randomized_metadata");
+    LocalNamedExampleLayout layout = testLayout();
+    writeCanonicalDataset(datasetPath, layout);
+
+    IndexedLocalNamedBatchLoader loader(datasetPath, layout, {0, 1, 2, 3, 4}, {}, std::nullopt, 2, 2, true, 12345);
+    DeviceDatasetMaterializationView view = loader.describeDeviceDatasetMaterialization();
+
+    const DeviceDatasetMaterializationSplitView &train = view.split(ExampleType::TRAIN);
+    EXPECT_TRUE(train.randomized);
+    ASSERT_TRUE(train.seed.has_value());
+    EXPECT_EQ(train.seed.value(), 12345);
+    EXPECT_EQ(train.indices, (vector<uint64_t>{0, 1, 2, 3, 4}));
+
+    const DeviceDatasetMaterializationSplitView &validate = view.split(ExampleType::VALIDATE);
+    EXPECT_FALSE(validate.randomized);
+    EXPECT_FALSE(validate.seed.has_value());
+    EXPECT_TRUE(validate.indices.empty());
+    EXPECT_EQ(validate.batchesPerEpoch, 0);
+
+    const DeviceDatasetMaterializationSplitView &test = view.split(ExampleType::TEST);
+    EXPECT_FALSE(test.randomized);
+    EXPECT_FALSE(test.seed.has_value());
+    EXPECT_TRUE(test.indices.empty());
+    EXPECT_EQ(test.batchesPerEpoch, 0);
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+
+TEST(NamedDatasetMaterializerTest, MaterializesDenseIndexedSplitsIntoContiguousCpuSnapshot) {
+    ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "pread_buffered");
+
+    const std::filesystem::path datasetPath = makeTempDatasetPath("materialize_dense_snapshot");
+    LocalNamedExampleLayout layout = testLayout();
+    writeCanonicalDataset(datasetPath, layout);
+
+    IndexedLocalNamedBatchLoader loader(datasetPath, layout, {4, 2, 0}, {1, 3}, vector<uint64_t>{0, 4}, 2, 1, false, std::nullopt);
+    MaterializedNamedDatasetSnapshot snapshot = materializeNamedDatasetSnapshot(loader.describeDeviceDatasetMaterialization(), 2);
+
+    EXPECT_NO_THROW(snapshot.layout.validateRequestedLayoutExact(layout));
+    EXPECT_EQ(snapshot.numDatasetExamples, 5);
+    EXPECT_EQ(snapshot.batchSize, 2);
+    EXPECT_EQ(snapshot.splits.size(), 3);
+    EXPECT_EQ(snapshot.totalExamples(), 7);
+    EXPECT_EQ(snapshot.totalBytes(), 7 * layout.recordSizeBytes());
+    EXPECT_GE(snapshot.materializationSeconds, 0.0);
+
+    const MaterializedNamedSplitSnapshot &train = snapshot.split(ExampleType::TRAIN);
+    EXPECT_EQ(train.splitName, "train");
+    EXPECT_EQ(train.sourceIndices, (vector<uint64_t>{4, 2, 0}));
+    EXPECT_FALSE(train.randomized);
+    EXPECT_FALSE(train.seed.has_value());
+    EXPECT_EQ(train.batchesPerEpoch, 2);
+    expectTensorValues(train.tensor("seasonality_inputs"), {80.0f, 81.0f, 40.0f, 41.0f, 0.0f, 1.0f});
+    expectTensorValues(train.tensor("monotone_inputs"), {90.0f, 91.0f, 92.0f, 50.0f, 51.0f, 52.0f, 10.0f, 11.0f, 12.0f});
+    expectTensorValues(train.tensor("daily_weight"), {180.0f, 140.0f, 100.0f});
+
+    const MaterializedNamedSplitSnapshot &validate = snapshot.split(ExampleType::VALIDATE);
+    EXPECT_EQ(validate.sourceIndices, (vector<uint64_t>{1, 3}));
+    EXPECT_EQ(validate.batchesPerEpoch, 1);
+    expectTensorValues(validate.tensor("seasonality_inputs"), {20.0f, 21.0f, 60.0f, 61.0f});
+
+    const MaterializedNamedSplitSnapshot &test = snapshot.split(ExampleType::TEST);
+    EXPECT_EQ(test.sourceIndices, (vector<uint64_t>{0, 4}));
+    EXPECT_EQ(test.batchesPerEpoch, 1);
+    expectTensorValues(test.tensor("seasonality_inputs"), {0.0f, 1.0f, 80.0f, 81.0f});
+
+    uint64_t batchNum = 99;
+    Batch sourceBatch = loader.getBatch(ExampleType::TRAIN, batchNum);
+    EXPECT_EQ(batchNum, 0);
+    expectTensorValues(sourceBatch.getTensor("seasonality_inputs"), {80.0f, 81.0f, 40.0f, 41.0f});
+    loader.returnBatchBuffers(ExampleType::TRAIN, std::move(sourceBatch));
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(NamedDatasetMaterializerTest, MaterializationDoesNotAdvanceLiveLoaderBatchState) {
+    ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "pread_buffered");
+
+    const std::filesystem::path datasetPath = makeTempDatasetPath("materialize_does_not_consume_loader");
+    LocalNamedExampleLayout layout = testLayout();
+    writeCanonicalDataset(datasetPath, layout);
+
+    IndexedLocalNamedBatchLoader loader(datasetPath, layout, {4, 2, 0}, {1, 3}, std::nullopt, 2, 1, false, std::nullopt);
+    ASSERT_TRUE(waitForReadyBatches(loader, ExampleType::TRAIN, 1));
+    const uint64_t beforeNextBatchNum = loader.getNextBatchNum(ExampleType::TRAIN);
+
+    MaterializedNamedDatasetSnapshot snapshot = materializeNamedDatasetSnapshot(loader.describeDeviceDatasetMaterialization(), 2);
+    EXPECT_EQ(snapshot.split(ExampleType::TRAIN).sourceIndices, (vector<uint64_t>{4, 2, 0}));
+    EXPECT_EQ(loader.getNextBatchNum(ExampleType::TRAIN), beforeNextBatchNum);
+
+    uint64_t batchNum = 99;
+    Batch sourceBatch = loader.getBatch(ExampleType::TRAIN, batchNum);
+    EXPECT_EQ(batchNum, 0);
+    expectTensorValues(sourceBatch.getTensor("seasonality_inputs"), {80.0f, 81.0f, 40.0f, 41.0f});
+    loader.returnBatchBuffers(ExampleType::TRAIN, std::move(sourceBatch));
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(NamedDatasetMaterializerTest, PreservesEmptySplitsWithoutAllocatingZeroSizedTensors) {
+    ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "pread_buffered");
+
+    const std::filesystem::path datasetPath = makeTempDatasetPath("materialize_empty_splits");
+    LocalNamedExampleLayout layout = testLayout();
+    writeCanonicalDataset(datasetPath, layout);
+
+    IndexedLocalNamedBatchLoader loader(datasetPath, layout, {0, 1, 2}, {}, vector<uint64_t>{}, 2, 1, false, std::nullopt);
+    MaterializedNamedDatasetSnapshot snapshot = materializeNamedDatasetSnapshot(loader.describeDeviceDatasetMaterialization(), 2);
+
+    EXPECT_EQ(snapshot.split(ExampleType::TRAIN).numExamples(), 3);
+    EXPECT_FALSE(snapshot.split(ExampleType::TRAIN).tensors.empty());
+    EXPECT_EQ(snapshot.split(ExampleType::VALIDATE).numExamples(), 0);
+    EXPECT_TRUE(snapshot.split(ExampleType::VALIDATE).tensors.empty());
+    EXPECT_EQ(snapshot.split(ExampleType::TEST).numExamples(), 0);
+    EXPECT_TRUE(snapshot.split(ExampleType::TEST).tensors.empty());
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(NamedDatasetMaterializerTest, MaterializesWindowedLayouts) {
+    ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "pread_buffered");
+
+    const std::filesystem::path datasetPath = makeTempDatasetPath("materialize_windowed");
+    LocalNamedExampleLayout layout = materializerWindowedLayout();
+    writeWindowedMaterializerDataset(datasetPath);
+
+    IndexedLocalNamedBatchLoader loader(datasetPath, layout, {0, 1, 2}, {}, vector<uint64_t>{}, 3, 1, false, std::nullopt);
+    NamedDatasetMaterializationSupport support = checkNamedDatasetSnapshotMaterializationSupport(loader.describeDeviceDatasetMaterialization());
+    EXPECT_TRUE(support.supported) << support.reason;
+
+    MaterializedNamedDatasetSnapshot snapshot = materializeNamedDatasetSnapshot(loader.describeDeviceDatasetMaterialization(), 2);
+    const MaterializedNamedSplitSnapshot &train = snapshot.split(ExampleType::TRAIN);
+    expectTensorValues(train.tensor("dense"), {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
+    expectTensorValues(train.tensor("history"), {10.0f, 11.0f, 12.0f, 0.0f, 0.0f, 10.0f, 12.0f, 13.0f, 0.0f});
+    expectUint8TensorValuesOnHost(train.tensor("history_mask"), {1, 1, 1, 0, 0, 1, 1, 1, 0});
+
+    uint64_t batchNum = 99;
+    Batch sourceBatch = loader.getBatch(ExampleType::TRAIN, batchNum);
+    EXPECT_EQ(batchNum, 0);
+    expectTensorValues(sourceBatch.getTensor("history"), {10.0f, 11.0f, 12.0f, 0.0f, 0.0f, 10.0f, 12.0f, 13.0f, 0.0f});
+    loader.returnBatchBuffers(ExampleType::TRAIN, std::move(sourceBatch));
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(DeviceResidentNamedDatasetTest, UploadsDenseSnapshotToGpu) {
+    requireCudaDevice("CUDA device is required for device-resident named dataset tests.");
+    ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "pread_buffered");
+
+    const std::filesystem::path datasetPath = makeTempDatasetPath("device_resident_dataset_upload");
+    LocalNamedExampleLayout layout = testLayout();
+    writeCanonicalDataset(datasetPath, layout);
+
+    IndexedLocalNamedBatchLoader loader(datasetPath, layout, {4, 2, 0}, {1, 3}, vector<uint64_t>{0, 4}, 2, 1, false, std::nullopt);
+    MaterializedNamedDatasetSnapshot snapshot = materializeNamedDatasetSnapshot(loader.describeDeviceDatasetMaterialization(), 2);
+    auto resident = DeviceResidentNamedDataset::fromSnapshot(snapshot, TensorPlacement(TensorPlacement::MemDevices::GPU, 0));
+
+    EXPECT_NO_THROW(resident->getLayout().validateRequestedLayoutExact(layout));
+    EXPECT_EQ(resident->getBatchSize(), 2);
+    EXPECT_EQ(resident->totalExamples(), 7);
+    EXPECT_EQ(resident->totalBytes(), snapshot.totalBytes());
+    EXPECT_GE(resident->getUploadSeconds(), 0.0);
+    EXPECT_EQ(resident->getPlacement(), TensorPlacement(TensorPlacement::MemDevices::GPU, 0));
+
+    const DeviceResidentNamedSplit &train = resident->split(ExampleType::TRAIN);
+    EXPECT_EQ(train.sourceIndices, (vector<uint64_t>{4, 2, 0}));
+    EXPECT_EQ(train.batchesPerEpoch, 2);
+    expectTensorValuesOnHost(train.tensor("seasonality_inputs"), {80.0f, 81.0f, 40.0f, 41.0f, 0.0f, 1.0f});
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(DeviceResidentNamedBatchLoaderTest, WindowedBatchesMatchSourceLoader) {
+    requireCudaDevice("CUDA device is required for device-resident named loader tests.");
+    ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "pread_buffered");
+
+    const std::filesystem::path datasetPath = makeTempDatasetPath("device_resident_loader_windowed");
+    LocalNamedExampleLayout layout = materializerWindowedLayout();
+    writeWindowedMaterializerDataset(datasetPath);
+
+    IndexedLocalNamedBatchLoader sourceLoader(datasetPath, layout, {0, 1, 2}, {}, vector<uint64_t>{}, 2, 1, false, std::nullopt);
+    MaterializedNamedDatasetSnapshot snapshot = materializeNamedDatasetSnapshot(sourceLoader.describeDeviceDatasetMaterialization(), 2);
+    auto resident = DeviceResidentNamedDataset::fromSnapshot(snapshot, TensorPlacement(TensorPlacement::MemDevices::GPU, 0));
+    DeviceResidentNamedBatchLoader deviceLoader(resident, 1);
+
+    uint64_t sourceBatchNum = 99;
+    uint64_t deviceBatchNum = 99;
+    Batch sourceBatch = sourceLoader.getBatch(ExampleType::TRAIN, sourceBatchNum);
+    Batch deviceBatch = deviceLoader.getBatch(ExampleType::TRAIN, deviceBatchNum);
+    EXPECT_EQ(deviceBatchNum, sourceBatchNum);
+    EXPECT_EQ(tensorValuesOnHost(deviceBatch.getTensor("dense")), tensorValues(sourceBatch.getTensor("dense")));
+    EXPECT_EQ(tensorValuesOnHost(deviceBatch.getTensor("history")), tensorValues(sourceBatch.getTensor("history")));
+    EXPECT_EQ(uint8TensorValuesOnHost(deviceBatch.getTensor("history_mask")), uint8TensorValuesOnHost(sourceBatch.getTensor("history_mask")));
+
+    sourceLoader.returnBatchBuffers(ExampleType::TRAIN, std::move(sourceBatch));
+    deviceLoader.returnBatchBuffers(ExampleType::TRAIN, std::move(deviceBatch));
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(DeviceDatasetStorageSelection, BestEffortPrioritizesWindowedFeaturesWhenFullDatasetDoesNotFit) {
+    requireCudaDevice("CUDA device is required for device dataset storage selection tests.");
+    ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "pread_buffered");
+
+    const std::filesystem::path datasetPath = makeTempDatasetPath("device_storage_selects_windowed_hybrid");
+    LocalNamedExampleLayout layout = materializerWindowedLayout();
+    writeWindowedMaterializerDataset(datasetPath);
+
+    auto sourceLoader = std::make_shared<IndexedLocalNamedBatchLoader>(
+        datasetPath, layout, vector<uint64_t>{0, 1, 2}, vector<uint64_t>{}, vector<uint64_t>{}, 2, 1, false, std::nullopt);
+
+    constexpr uint64_t twoGiB = 2ull * 1024ull * 1024ull * 1024ull;
+    Thor::DeviceDatasetStorageSelection selection = Thor::selectDeviceDatasetStorageLoader(
+        sourceLoader,
+        Thor::DeviceDatasetStorage::BEST_EFFORT,
+        TensorPlacement(TensorPlacement::MemDevices::GPU, 0),
+        1,
+        /*availableBytesOverride=*/twoGiB + 92);
+
+    EXPECT_TRUE(selection.report.used);
+    EXPECT_EQ(selection.report.reason, "windowed_features_only");
+    EXPECT_EQ(selection.report.requiredBytes, 91u);
+    EXPECT_NE(selection.loader, sourceLoader);
+    EXPECT_NE(std::dynamic_pointer_cast<DeviceResidentWindowedNamedBatchLoader>(selection.loader), nullptr);
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(DeviceResidentWindowedNamedBatchLoaderTest, UsesDeviceWindowsAndCpuDirectTensors) {
+    requireCudaDevice("CUDA device is required for hybrid windowed device loader tests.");
+    ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "pread_buffered");
+
+    const std::filesystem::path datasetPath = makeTempDatasetPath("device_resident_loader_windowed_hybrid");
+    LocalNamedExampleLayout layout = materializerWindowedLayout();
+    writeWindowedMaterializerDataset(datasetPath);
+
+    IndexedLocalNamedBatchLoader sourceLoader(datasetPath, layout, {0, 1, 2}, {}, vector<uint64_t>{}, 2, 1, false, std::nullopt);
+    DeviceDatasetMaterializationView view = sourceLoader.describeDeviceDatasetMaterialization();
+    MaterializedNamedDatasetSnapshot snapshot = materializeNamedDatasetSnapshot(view, 2);
+    auto resident = DeviceResidentNamedDataset::fromSnapshot(snapshot,
+                                                            TensorPlacement(TensorPlacement::MemDevices::GPU, 0),
+                                                            std::set<string>{"history", "history_mask"});
+    DeviceResidentWindowedNamedBatchLoader deviceLoader(view, resident, 1);
+
+    uint64_t sourceBatchNum = 99;
+    uint64_t deviceBatchNum = 99;
+    Batch sourceBatch = sourceLoader.getBatch(ExampleType::TRAIN, sourceBatchNum);
+    Batch deviceBatch = deviceLoader.getBatch(ExampleType::TRAIN, deviceBatchNum);
+    EXPECT_EQ(deviceBatchNum, sourceBatchNum);
+    EXPECT_EQ(deviceBatch.getTensor("dense").getPlacement().getMemDevice(), TensorPlacement::MemDevices::CPU);
+    EXPECT_EQ(deviceBatch.getTensor("history").getPlacement().getMemDevice(), TensorPlacement::MemDevices::GPU);
+    EXPECT_EQ(tensorValuesOnHost(deviceBatch.getTensor("dense")), tensorValues(sourceBatch.getTensor("dense")));
+    EXPECT_EQ(tensorValuesOnHost(deviceBatch.getTensor("history")), tensorValues(sourceBatch.getTensor("history")));
+    EXPECT_EQ(uint8TensorValuesOnHost(deviceBatch.getTensor("history_mask")), uint8TensorValuesOnHost(sourceBatch.getTensor("history_mask")));
+
+    sourceLoader.returnBatchBuffers(ExampleType::TRAIN, std::move(sourceBatch));
+    deviceLoader.returnBatchBuffers(ExampleType::TRAIN, std::move(deviceBatch));
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(DeviceResidentNamedBatchLoaderTest, SequentialBatchesMatchSourceLoaderAndWrap) {
+    requireCudaDevice("CUDA device is required for device-resident named loader tests.");
+    ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "pread_buffered");
+
+    const std::filesystem::path datasetPath = makeTempDatasetPath("device_resident_loader_sequential");
+    LocalNamedExampleLayout layout = testLayout();
+    writeCanonicalDataset(datasetPath, layout);
+
+    IndexedLocalNamedBatchLoader sourceLoader(datasetPath, layout, {4, 2, 0}, {1, 3}, vector<uint64_t>{0, 4}, 2, 1, false, std::nullopt);
+    MaterializedNamedDatasetSnapshot snapshot = materializeNamedDatasetSnapshot(sourceLoader.describeDeviceDatasetMaterialization(), 2);
+    auto resident = DeviceResidentNamedDataset::fromSnapshot(snapshot, TensorPlacement(TensorPlacement::MemDevices::GPU, 0));
+    DeviceResidentNamedBatchLoader deviceLoader(resident, 2);
+
+    EXPECT_EQ(deviceLoader.getNumExamples(ExampleType::TRAIN), 3);
+    EXPECT_EQ(deviceLoader.getNumBatchesPerEpoch(ExampleType::TRAIN), 2);
+    EXPECT_EQ(deviceLoader.getNextBatchNum(ExampleType::TRAIN), 0);
+
+    uint64_t batchNum = 99;
+    Batch batch0 = deviceLoader.getBatch(ExampleType::TRAIN, batchNum);
+    EXPECT_EQ(batchNum, 0);
+    expectTensorValuesOnHost(batch0.getTensor("seasonality_inputs"), {80.0f, 81.0f, 40.0f, 41.0f});
+    EXPECT_EQ(deviceLoader.getNextBatchNum(ExampleType::TRAIN), 1);
+    deviceLoader.returnBatchBuffers(ExampleType::TRAIN, std::move(batch0));
+
+    Batch batch1 = deviceLoader.getBatch(ExampleType::TRAIN, batchNum);
+    EXPECT_EQ(batchNum, 1);
+    expectTensorValuesOnHost(batch1.getTensor("seasonality_inputs"), {0.0f, 1.0f, 80.0f, 81.0f});
+    EXPECT_EQ(deviceLoader.getNextBatchNum(ExampleType::TRAIN), 0);
+    deviceLoader.returnBatchBuffers(ExampleType::TRAIN, std::move(batch1));
+
+    Batch batch2 = deviceLoader.getBatch(ExampleType::TRAIN, batchNum);
+    EXPECT_EQ(batchNum, 0);
+    expectTensorValuesOnHost(batch2.getTensor("seasonality_inputs"), {40.0f, 41.0f, 0.0f, 1.0f});
+    deviceLoader.returnBatchBuffers(ExampleType::TRAIN, std::move(batch2));
+
+    DeviceResidentNamedBatchLoaderStats stats = deviceLoader.getStatsSnapshot(ExampleType::TRAIN);
+    EXPECT_EQ(stats.splitName, "train");
+    EXPECT_EQ(stats.batchesGathered, 3);
+    EXPECT_EQ(stats.batchesReturned, 3);
+    EXPECT_EQ(stats.currentAvailableBatches, 2);
+    EXPECT_EQ(stats.batchQueueDepth, 2);
+    EXPECT_EQ(stats.residentExamples, 3);
+    EXPECT_EQ(stats.residentBytes, resident->split(ExampleType::TRAIN).totalBytes());
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(DeviceResidentNamedBatchLoaderTest, ValidateAndTestSplitsAreSequentialAndIndependent) {
+    requireCudaDevice("CUDA device is required for device-resident named loader tests.");
+    ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "pread_buffered");
+
+    const std::filesystem::path datasetPath = makeTempDatasetPath("device_resident_loader_splits");
+    LocalNamedExampleLayout layout = testLayout();
+    writeCanonicalDataset(datasetPath, layout);
+
+    IndexedLocalNamedBatchLoader sourceLoader(datasetPath, layout, {4, 3}, {1, 3, 4}, vector<uint64_t>{2, 0, 1}, 2, 1, true, 9876);
+    MaterializedNamedDatasetSnapshot snapshot = materializeNamedDatasetSnapshot(sourceLoader.describeDeviceDatasetMaterialization(), 2);
+    auto resident = DeviceResidentNamedDataset::fromSnapshot(snapshot, TensorPlacement(TensorPlacement::MemDevices::GPU, 0));
+    DeviceResidentNamedBatchLoader deviceLoader(resident, 1);
+
+    uint64_t batchNum = 99;
+    Batch validateBatch0 = deviceLoader.getBatch(ExampleType::VALIDATE, batchNum);
+    EXPECT_EQ(batchNum, 0);
+    expectTensorValuesOnHost(validateBatch0.getTensor("seasonality_inputs"), {20.0f, 21.0f, 60.0f, 61.0f});
+    deviceLoader.returnBatchBuffers(ExampleType::VALIDATE, std::move(validateBatch0));
+
+    Batch testBatch0 = deviceLoader.getBatch(ExampleType::TEST, batchNum);
+    EXPECT_EQ(batchNum, 0);
+    expectTensorValuesOnHost(testBatch0.getTensor("seasonality_inputs"), {40.0f, 41.0f, 0.0f, 1.0f});
+    deviceLoader.returnBatchBuffers(ExampleType::TEST, std::move(testBatch0));
+
+    Batch validateBatch1 = deviceLoader.getBatch(ExampleType::VALIDATE, batchNum);
+    EXPECT_EQ(batchNum, 1);
+    expectTensorValuesOnHost(validateBatch1.getTensor("seasonality_inputs"), {80.0f, 81.0f, 20.0f, 21.0f});
+    deviceLoader.returnBatchBuffers(ExampleType::VALIDATE, std::move(validateBatch1));
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(DeviceResidentNamedBatchLoaderTest, RandomizedTrainOrderMatchesSourceLoaderForFixedSeed) {
+    requireCudaDevice("CUDA device is required for device-resident named loader tests.");
+    ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "pread_buffered");
+
+    const std::filesystem::path datasetPath = makeTempDatasetPath("device_resident_loader_randomized");
+    LocalNamedExampleLayout layout = testLayout();
+    writeCanonicalDataset(datasetPath, layout);
+
+    IndexedLocalNamedBatchLoader sourceLoader(datasetPath, layout, {0, 1, 2, 3, 4}, {0}, std::nullopt, 2, 2, true, 12345);
+    MaterializedNamedDatasetSnapshot snapshot = materializeNamedDatasetSnapshot(sourceLoader.describeDeviceDatasetMaterialization(), 2);
+    auto resident = DeviceResidentNamedDataset::fromSnapshot(snapshot, TensorPlacement(TensorPlacement::MemDevices::GPU, 0));
+    DeviceResidentNamedBatchLoader deviceLoader(resident, 2);
+
+    for (uint64_t i = 0; i < 3; ++i) {
+        uint64_t sourceBatchNum = 99;
+        uint64_t deviceBatchNum = 99;
+        Batch sourceBatch = sourceLoader.getBatch(ExampleType::TRAIN, sourceBatchNum);
+        Batch deviceBatch = deviceLoader.getBatch(ExampleType::TRAIN, deviceBatchNum);
+        EXPECT_EQ(deviceBatchNum, sourceBatchNum);
+        EXPECT_EQ(tensorValuesOnHost(deviceBatch.getTensor("seasonality_inputs")), tensorValues(sourceBatch.getTensor("seasonality_inputs")))
+            << "i=" << i;
+        sourceLoader.returnBatchBuffers(ExampleType::TRAIN, std::move(sourceBatch));
+        deviceLoader.returnBatchBuffers(ExampleType::TRAIN, std::move(deviceBatch));
+    }
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(DeviceResidentNamedBatchLoaderTest, RejectsEmptySplitBatchRequest) {
+    requireCudaDevice("CUDA device is required for device-resident named loader tests.");
+    ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "pread_buffered");
+
+    const std::filesystem::path datasetPath = makeTempDatasetPath("device_resident_loader_empty_split");
+    LocalNamedExampleLayout layout = testLayout();
+    writeCanonicalDataset(datasetPath, layout);
+
+    IndexedLocalNamedBatchLoader sourceLoader(datasetPath, layout, {0, 1, 2}, {}, vector<uint64_t>{}, 2, 1, false, std::nullopt);
+    MaterializedNamedDatasetSnapshot snapshot = materializeNamedDatasetSnapshot(sourceLoader.describeDeviceDatasetMaterialization(), 2);
+    auto resident = DeviceResidentNamedDataset::fromSnapshot(snapshot, TensorPlacement(TensorPlacement::MemDevices::GPU, 0));
+    DeviceResidentNamedBatchLoader deviceLoader(resident, 1);
+
+    EXPECT_EQ(deviceLoader.getNumExamples(ExampleType::VALIDATE), 0);
+    EXPECT_EQ(deviceLoader.getNumBatchesPerEpoch(ExampleType::VALIDATE), 0);
+    uint64_t batchNum = 99;
+    EXPECT_THROW((void)deviceLoader.getBatch(ExampleType::VALIDATE, batchNum), std::runtime_error);
 
     std::filesystem::remove_all(datasetPath);
 }

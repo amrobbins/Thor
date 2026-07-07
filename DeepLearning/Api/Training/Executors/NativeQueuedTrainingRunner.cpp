@@ -8,6 +8,7 @@
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
 #include "DeepLearning/Api/Training/Cancellation/TrainingCancellation.h"
 #include "DeepLearning/Api/Training/ExecutableTrainingPlan.h"
+#include "DeepLearning/Api/Training/DeviceDatasetStorageSelection.h"
 #include "DeepLearning/Api/Training/PhaseGraphConnector.h"
 #include "DeepLearning/Api/Training/TrainingProgram.h"
 #include "DeepLearning/Api/Training/TrainingPhase.h"
@@ -2201,6 +2202,21 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         ExecutableTrainingPlan::compile(*trainingProgram, *placedNetwork, /*resolveEmptyUpdateParametersAsAllTrainable=*/!evaluateOnly);
     ensureNativeQueuedPlanCompatible(plan, *executionNetwork, evaluateOnly);
 
+    std::shared_ptr<Loader> effectiveLoader = request.loader;
+    DeviceDatasetStorageReport deviceDatasetStorageReport = request.deviceDatasetStorageReport;
+    deviceDatasetStorageReport.requested = request.deviceDatasetStorage;
+    if (!evaluateOnly) {
+        const uint64_t deviceDatasetBatchQueueDepth = std::max<uint64_t>(uint64_t{1}, options.maxInFlightBatches);
+        DeviceDatasetStorageSelection deviceDatasetSelection = selectDeviceDatasetStorageLoader(
+            request.loader,
+            request.deviceDatasetStorage,
+            ThorImplementation::TensorPlacement(ThorImplementation::TensorPlacement::MemDevices::GPU,
+                                                placedNetwork->getStampedNetwork(0).getGpuNum()),
+            deviceDatasetBatchQueueDepth);
+        effectiveLoader = std::move(deviceDatasetSelection.loader);
+        deviceDatasetStorageReport = std::move(deviceDatasetSelection.report);
+    }
+
     const bool modelSelectionEnabled = !evaluateOnly && request.checkBestModelEveryEpochs > 0;
     const std::vector<std::string> aggregateLossTensorNames = executionGraph.composedFromTrainingPhases
         ? outputBackedReportableLossNames(*executionNetwork)
@@ -2257,7 +2273,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                                 const std::shared_ptr<QueuedTrainingState>& state) {
         TrainingStatsSnapshot snapshot;
         snapshot.networkName = placedNetwork->getNetworkName();
-        snapshot.datasetName = request.loader->getDatasetName();
+        snapshot.datasetName = effectiveLoader->getDatasetName();
         snapshot.phase = phase;
         snapshot.epoch = epoch;
         snapshot.epochs = totalRequestedEpochs;
@@ -2265,6 +2281,8 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         snapshot.stepsPerEpoch = batchesPerEpoch;
         snapshot.elapsedSeconds = elapsedSinceRunStart();
         snapshot.inFlightBatches = state ? outstandingBatchCount(state) : 0;
+        snapshot.deviceDatasetStorage = deviceDatasetStorageReport;
+        snapshot.deviceDatasetStorage.requested = request.deviceDatasetStorage;
         return snapshot;
     };
 
@@ -2303,8 +2321,8 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
             request.cancellationToken.throwIfCancellationRequested();
             const ExampleType exampleType = phaseSpec.first;
             const TrainingEventPhase phase = phaseSpec.second;
-            const uint64_t loaderBatchNum = request.loader->getNextBatchNum(exampleType);
-            const uint64_t loaderBatchesPerEpoch = request.loader->getNumBatchesPerEpoch(exampleType);
+            const uint64_t loaderBatchNum = effectiveLoader->getNextBatchNum(exampleType);
+            const uint64_t loaderBatchesPerEpoch = effectiveLoader->getNumBatchesPerEpoch(exampleType);
             if (loaderBatchNum > loaderBatchesPerEpoch) {
                 throw std::runtime_error("Loader returned next batch number beyond batches per epoch for " + phaseName(phase) + ".");
             }
@@ -2371,7 +2389,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
 
         emitReadyPhaseLifecycleEvents();
 
-        NativeQueuedEpochScheduler scheduler(placedNetwork, request.loader, plan, options, state, currentEpoch, request.cancellationToken);
+        NativeQueuedEpochScheduler scheduler(placedNetwork, effectiveLoader, plan, options, state, currentEpoch, request.cancellationToken);
         std::thread schedulingThread([scheduler = std::move(scheduler), state, phaseWorks]() mutable {
             try {
                 for (const QueuedEpochPhaseWork& work : phaseWorks) {

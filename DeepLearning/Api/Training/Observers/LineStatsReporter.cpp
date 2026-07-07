@@ -350,6 +350,75 @@ void appendPlainDimKey(LineBuffer& out, const char* key) {
     out.append('=');
 }
 
+bool shouldReportDeviceDatasetStorage(const DeviceDatasetStorageReport& report) {
+    return report.attempted || report.used || !report.reason.empty() || report.examples > 0 || report.requiredBytes > 0 ||
+           report.availableBytesAfterPlacement > 0 || report.materializationSeconds > 0.0;
+}
+
+void appendPlainDeviceDatasetStorage(LineBuffer& out, const DeviceDatasetStorageReport& report) {
+    if (!shouldReportDeviceDatasetStorage(report)) {
+        return;
+    }
+    appendPlainDimKey(out, "device_dataset_storage");
+    out.append("requested=");
+    out.append(deviceDatasetStorageName(report.requested));
+    out.append(",used=");
+    out.append(report.used ? "true" : "false");
+    if (!report.reason.empty()) {
+        out.append(",reason=");
+        out.append(report.reason.c_str());
+    }
+    if (report.examples > 0) {
+        out.append(",examples=");
+        out.append(formatUnsigned(report.examples).c_str());
+    }
+    if (report.requiredBytes > 0) {
+        out.append(",required_bytes=");
+        out.append(formatUnsigned(report.requiredBytes).c_str());
+    }
+    if (report.availableBytesAfterPlacement > 0) {
+        out.append(",available_bytes_after_model_placement=");
+        out.append(formatUnsigned(report.availableBytesAfterPlacement).c_str());
+    }
+    if (report.materializationSeconds > 0.0) {
+        out.append(",materialization_s=");
+        out.append(formatFixedString(report.materializationSeconds, 3).c_str());
+    }
+}
+
+void appendColorDeviceDatasetStorage(LineBuffer& out, const DeviceDatasetStorageReport& report) {
+    if (!shouldReportDeviceDatasetStorage(report)) {
+        return;
+    }
+    appendDimKey(out, "device_dataset_storage");
+    out.append(Ansi::throughput);
+    out.append("requested=");
+    out.append(deviceDatasetStorageName(report.requested));
+    out.append(",used=");
+    out.append(report.used ? "true" : "false");
+    if (!report.reason.empty()) {
+        out.append(",reason=");
+        out.append(report.reason.c_str());
+    }
+    if (report.examples > 0) {
+        out.append(",examples=");
+        out.append(formatUnsigned(report.examples).c_str());
+    }
+    if (report.requiredBytes > 0) {
+        out.append(",required_bytes=");
+        out.append(formatUnsigned(report.requiredBytes).c_str());
+    }
+    if (report.availableBytesAfterPlacement > 0) {
+        out.append(",available_bytes_after_model_placement=");
+        out.append(formatUnsigned(report.availableBytesAfterPlacement).c_str());
+    }
+    if (report.materializationSeconds > 0.0) {
+        out.append(",materialization_s=");
+        out.append(formatFixedString(report.materializationSeconds, 3).c_str());
+    }
+    out.append(Ansi::reset);
+}
+
 constexpr size_t RATE_FIELD_WIDTH = 5;
 constexpr size_t FLOPS_RATE_FIELD_WIDTH = 6;
 
@@ -431,6 +500,7 @@ void appendPlainStatsLine(LineBuffer& out,
 
     appendPlainDimKey(out, "elapsed");
     appendPadded(out, formatElapsedString(stats.elapsedSeconds), 9);
+    appendPlainDeviceDatasetStorage(out, stats.deviceDatasetStorage);
 }
 
 void appendColorStatsLine(LineBuffer& out,
@@ -517,6 +587,7 @@ void appendColorStatsLine(LineBuffer& out,
 
     appendDimKey(out, "elapsed");
     appendStyledPadded(out, Ansi::elapsed, formatElapsedString(stats.elapsedSeconds), 9);
+    appendColorDeviceDatasetStorage(out, stats.deviceDatasetStorage);
 }
 
 }  // namespace

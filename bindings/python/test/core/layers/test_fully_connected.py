@@ -224,3 +224,32 @@ def test_fully_connected_rejects_invalid_weight_constraint():
             activation=None,
             weights_constraints=123,
         )
+
+
+def test_fully_connected_accepts_bf16_storage_compute_with_fp32_output():
+    n = _net()
+    x = _input_tensor(n, 16, thor.DataType.bf16)
+
+    fc = thor.layers.FullyConnected(
+        n,
+        x,
+        8,
+        True,
+        activation=None,
+        weights_data_type=thor.DataType.bf16,
+        compute_data_type=thor.DataType.bf16,
+        output_data_type=thor.DataType.fp32,
+    )
+
+    assert fc.get_feature_output().get_dimensions() == [8]
+    assert fc.get_feature_output().get_data_type() == thor.DataType.fp32
+    assert fc.get_weights_data_type() == thor.DataType.bf16
+    assert fc.get_compute_data_type() == thor.DataType.bf16
+    assert fc.get_output_data_type() == thor.DataType.fp32
+
+    arch = _only_layer_architecture(n, "fully_connected")
+    assert arch["weights_data_type"] == "bf16"
+    assert arch["compute_data_type"] == "bf16"
+    assert arch["output_data_type"] == "fp32"
+    assert arch["parameters"]["weights"]["dtype"] == "bf16"
+    assert arch["parameters"]["biases"]["dtype"] == "fp32"

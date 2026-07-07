@@ -168,6 +168,37 @@ uint64_t IndexedLocalNamedBatchLoader::getNextBatchNum(ExampleType exampleType) 
     return assembler == nullptr ? 0 : assembler->getNextBatchNum();
 }
 
+
+bool IndexedLocalNamedBatchLoader::supportsDeviceDatasetMaterialization() const { return true; }
+
+DeviceDatasetMaterializationView IndexedLocalNamedBatchLoader::describeDeviceDatasetMaterialization() const {
+    DeviceDatasetMaterializationView view;
+    view.datasetPath = datasetPath;
+    view.layout = layout;
+    view.numDatasetExamples = numDatasetExamples;
+    view.batchSize = batchSize;
+    view.splits.reserve(3);
+
+    auto appendSplit = [&](ExampleType exampleType, bool randomized, std::optional<uint64_t> splitSeed) {
+        const IndexedLocalNamedBatchAssembler *assembler = assemblerFor(exampleType);
+        DeviceDatasetMaterializationSplitView split;
+        split.exampleType = exampleType;
+        split.splitName = deviceDatasetMaterializationSplitName(exampleType);
+        split.randomized = randomized;
+        split.seed = splitSeed;
+        if (assembler != nullptr) {
+            split.indices = assembler->getIndices();
+            split.batchesPerEpoch = assembler->getNumBatchesPerEpoch();
+        }
+        view.splits.push_back(std::move(split));
+    };
+
+    appendSplit(ExampleType::TRAIN, randomizeTrain, seed);
+    appendSplit(ExampleType::VALIDATE, false, std::nullopt);
+    appendSplit(ExampleType::TEST, false, std::nullopt);
+    return view;
+}
+
 IndexedLocalNamedBatchAssemblerStats IndexedLocalNamedBatchLoader::getStatsSnapshot(ExampleType exampleType) {
     IndexedLocalNamedBatchAssembler *assembler = assemblerFor(exampleType);
     if (assembler != nullptr) {
@@ -193,5 +224,11 @@ uint64_t IndexedLocalNamedBatchLoader::getBatchQueueDepth() const { return batch
 bool IndexedLocalNamedBatchLoader::getRandomizeTrain() const { return randomizeTrain; }
 
 std::optional<uint64_t> IndexedLocalNamedBatchLoader::getRandomSeed() const { return seed; }
+
+const std::vector<uint64_t> &IndexedLocalNamedBatchLoader::getSplitIndices(ExampleType exampleType) const {
+    static const std::vector<uint64_t> emptyIndices;
+    const IndexedLocalNamedBatchAssembler *assembler = assemblerFor(exampleType);
+    return assembler == nullptr ? emptyIndices : assembler->getIndices();
+}
 
 bool IndexedLocalNamedBatchLoader::hasExplicitTestSplit() const { return explicitTestSplit; }

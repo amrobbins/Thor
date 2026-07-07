@@ -46,6 +46,7 @@ static bool isAttentionBackwardOp(ExprOp op) {
 static bool isReductionComputeOp(ExprOp op) {
     return isCudnnReduceOp(op) || op == ExprOp::RMSNORM || op == ExprOp::ATTENTION || isAttentionBackwardOp(op) || op == ExprOp::ROPE;
 }
+static bool isMatmulOp(ExprOp op) { return op == ExprOp::MATMUL || op == ExprOp::GEMM; }
 static bool isConvolutionOp(ExprOp op) {
     return op == ExprOp::CONV2D || op == ExprOp::CONV3D || op == ExprOp::CONV2D_BACKWARD_DATA ||
            op == ExprOp::CONV2D_BACKWARD_FILTER || op == ExprOp::CONV3D_BACKWARD_DATA || op == ExprOp::CONV3D_BACKWARD_FILTER;
@@ -115,6 +116,10 @@ DataType toSupportedComputeDType(ExprOp op, DataType requested_compute_dtype) {
             default:
                 throw std::runtime_error("Unsupported scan/segmented-reduction dtype in toSupportedComputeDType.");
         }
+    }
+
+    if (isMatmulOp(op) && requested_compute_dtype == DataType::TF32) {
+        return DataType::TF32;
     }
 
     if (!isSupportedFusionFloatingType(requested_compute_dtype)) {

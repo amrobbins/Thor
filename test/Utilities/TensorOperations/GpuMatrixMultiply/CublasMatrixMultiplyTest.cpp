@@ -1899,6 +1899,7 @@ struct ScopedDeviceFp8MatmulScales {
 
 TEST(CublasMatrixMultiply, OperationTypeTableIncludesExpandedFloatAndFp8Combinations) {
     EXPECT_TRUE(isSupportedCublasLtOperationType(CUBLAS_COMPUTE_32F, CUDA_R_32F, CUDA_R_32F, CUDA_R_32F, CUDA_R_32F, CUDA_R_32F));
+    EXPECT_TRUE(isSupportedCublasLtOperationType(CUBLAS_COMPUTE_32F_FAST_TF32, CUDA_R_32F, CUDA_R_32F, CUDA_R_32F, CUDA_R_32F, CUDA_R_32F));
 
     EXPECT_TRUE(isSupportedCublasLtOperationType(CUBLAS_COMPUTE_32F, CUDA_R_32F, CUDA_R_16F, CUDA_R_16F, CUDA_R_16F, CUDA_R_16F));
     EXPECT_TRUE(isSupportedCublasLtOperationType(CUBLAS_COMPUTE_32F, CUDA_R_32F, CUDA_R_16F, CUDA_R_16F, CUDA_R_32F, CUDA_R_32F));

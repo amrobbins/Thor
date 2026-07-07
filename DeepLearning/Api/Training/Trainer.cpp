@@ -649,6 +649,8 @@ void Trainer::fitInternal(const TrainerFitOptions& options,
     request.checkBestModelEveryEpochs = options.checkBestModelEveryEpochs;
     request.firstModelSelectionEpoch = options.firstModelSelectionEpoch;
     request.maxTrainingBatchesPerEpoch = options.maxTrainingBatchesPerEpoch;
+    request.deviceDatasetStorage = options.deviceDatasetStorage;
+    request.deviceDatasetStorageReport.requested = options.deviceDatasetStorage;
     request.initialCompletedEpochs = completedTrainingEpochs;
     request.initialElapsedSeconds = completedTrainingElapsedSeconds;
     request.modelSelectionScore = modelSelectionScore;
@@ -953,6 +955,8 @@ TrainingRunResult Trainer::evaluateTrainingRun(std::string runName,
     request.checkBestModelEveryEpochs = 1;
     request.epochs = 1;
     request.cancellationToken = cancellationToken;
+    request.deviceDatasetStorage = DeviceDatasetStorage::OFF;
+    request.deviceDatasetStorageReport.requested = DeviceDatasetStorage::OFF;
     request.executionMode = TrainingRunExecutionMode::EVALUATE;
     request.evaluationExampleType = exampleType;
     request.evaluationPhase = phase;
