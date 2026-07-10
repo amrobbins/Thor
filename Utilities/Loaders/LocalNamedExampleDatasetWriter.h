@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DeepLearning/Api/Data/DatasetId.h"
 #include "DeepLearning/Implementation/Tensor/DataType.h"
 #include "Utilities/Loaders/LocalNamedExampleLayout.h"
 #include "Utilities/Loaders/Shard.h"
@@ -95,6 +96,7 @@ class LocalNamedExampleDatasetWriter {
     [[nodiscard]] std::filesystem::path manifestPath() const;
     [[nodiscard]] uint64_t numExamples() const;
     [[nodiscard]] uint64_t numExamples(ExampleType exampleType) const;
+    [[nodiscard]] const Thor::DatasetId &getDatasetId() const { return datasetId; }
     [[nodiscard]] const LocalNamedExampleLayout &getLayout() const;
     [[nodiscard]] StorageMode getStorageMode() const;
     [[nodiscard]] std::optional<uint64_t> getExpectedNumExamples() const;
@@ -122,6 +124,7 @@ class LocalNamedExampleDatasetWriter {
     };
 
     std::filesystem::path datasetPath;
+    Thor::DatasetId datasetId;
     LocalNamedExampleLayout layout;
     uint64_t examplesPerShard;
     StorageMode storageMode;

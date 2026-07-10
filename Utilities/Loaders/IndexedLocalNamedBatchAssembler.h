@@ -197,7 +197,7 @@ class IndexedLocalNamedBatchAssembler {
    public:
     IndexedLocalNamedBatchAssembler(std::shared_ptr<IndexedLocalNamedExampleReader> reader,
                                     LocalNamedExampleLayout layout,
-                                    std::vector<uint64_t> indices,
+                                    std::shared_ptr<const std::vector<uint64_t>> indices,
                                     std::string splitName,
                                     uint64_t batchSize,
                                     uint64_t batchQueueDepth,
@@ -213,7 +213,7 @@ class IndexedLocalNamedBatchAssembler {
     uint64_t getNumBatchesPerEpoch() const;
     uint64_t getNumExamples() const;
     uint64_t getNextBatchNum();
-    [[nodiscard]] const std::vector<uint64_t> &getIndices() const { return indices; }
+    [[nodiscard]] const std::vector<uint64_t> &getIndices() const { return *indices; }
     [[nodiscard]] bool isRandomized() const { return randomized; }
     IndexedLocalNamedBatchAssemblerStats getStatsSnapshot();
 
@@ -232,7 +232,7 @@ class IndexedLocalNamedBatchAssembler {
    private:
     std::shared_ptr<IndexedLocalNamedExampleReader> reader;
     LocalNamedExampleLayout layout;
-    std::vector<uint64_t> indices;
+    std::shared_ptr<const std::vector<uint64_t>> indices;
     std::string splitName;
     std::map<std::string, ThorImplementation::TensorDescriptor> batchTensorDescriptors;
     std::map<std::string, std::unique_ptr<AsyncTensorQueue>> batchTensorQueues;

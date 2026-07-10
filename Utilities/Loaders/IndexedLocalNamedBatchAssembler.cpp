@@ -174,7 +174,7 @@ bool shouldEmitStats(uint64_t index) {
 
 IndexedLocalNamedBatchAssembler::IndexedLocalNamedBatchAssembler(std::shared_ptr<IndexedLocalNamedExampleReader> reader,
                                                                  LocalNamedExampleLayout layout,
-                                                                 std::vector<uint64_t> indices,
+                                                                 std::shared_ptr<const std::vector<uint64_t>> indices,
                                                                  std::string splitName,
                                                                  uint64_t batchSize,
                                                                  uint64_t batchQueueDepth,
@@ -190,7 +190,7 @@ IndexedLocalNamedBatchAssembler::IndexedLocalNamedBatchAssembler(std::shared_ptr
       shardRequestQueueDepth(0),
       completedBatchQueueDepth(0),
       recordSizeBytes(this->reader == nullptr ? 0 : this->reader->getRecordSizeBytes()),
-      batchesPerEpoch(batchesFor(this->indices.size(), batchSize)),
+      batchesPerEpoch(batchesFor(this->indices == nullptr ? 0 : this->indices->size(), batchSize)),
       numDatasetExamples(this->reader == nullptr ? 0 : this->reader->getNumExamples()),
       nextBatchNum(0),
       nextLogicalPosition(0),
@@ -203,7 +203,8 @@ IndexedLocalNamedBatchAssembler::IndexedLocalNamedBatchAssembler(std::shared_ptr
       recordCopyThreadCount(0),
       recordBufferPoolDepth(0) {
     THOR_THROW_IF_FALSE(this->reader != nullptr);
-    THOR_THROW_IF_FALSE(!this->indices.empty());
+    THOR_THROW_IF_FALSE(this->indices != nullptr);
+    THOR_THROW_IF_FALSE(!this->indices->empty());
     THOR_THROW_IF_FALSE(batchSize > 0);
     THOR_THROW_IF_FALSE(batchQueueDepth > 0);
     this->layout.validate();
@@ -218,12 +219,12 @@ IndexedLocalNamedBatchAssembler::IndexedLocalNamedBatchAssembler(std::shared_ptr
     shardRequestQueueDepth = loadWorkQueueDepth;
     completedBatchQueueDepth = computeCompletedBatchQueueDepth(batchQueueDepth);
 
-    for (uint64_t index : this->indices) {
+    for (uint64_t index : *this->indices) {
         validateGlobalIndex(index, this->splitName.c_str());
     }
 
     if (randomized) {
-        randomizer = std::make_unique<FullPeriodRandom>(this->indices.size(), false);
+        randomizer = std::make_unique<FullPeriodRandom>(this->indices->size(), false);
         if (seed.has_value()) {
             randomizer->reseed(seed.value());
         }
@@ -587,7 +588,7 @@ uint64_t IndexedLocalNamedBatchAssembler::nextLogicalSplitPosition() {
     }
 
     const uint64_t logicalPosition = nextLogicalPosition;
-    nextLogicalPosition = (nextLogicalPosition + 1) % indices.size();
+    nextLogicalPosition = (nextLogicalPosition + 1) % indices->size();
     return logicalPosition;
 }
 
@@ -908,7 +909,7 @@ bool IndexedLocalNamedBatchAssembler::startNextBatch() {
     const SteadyClock::time_point planningStart = diagnosticNow();
     for (uint64_t slot = 0; slot < batchSize; ++slot) {
         const uint64_t logicalPosition = nextLogicalSplitPosition();
-        const uint64_t globalExampleIndex = indices.at(logicalPosition);
+        const uint64_t globalExampleIndex = indices->at(logicalPosition);
         batchState->globalExampleIndices.push_back(globalExampleIndex);
         localRecordsRequested += 1;
         localLogicalRecordBytesRequested += recordSizeBytes;
@@ -1175,4 +1176,4 @@ void IndexedLocalNamedBatchAssembler::returnBuffers(const std::map<std::string, 
 
 uint64_t IndexedLocalNamedBatchAssembler::getNumBatchesPerEpoch() const { return batchesPerEpoch; }
 
-uint64_t IndexedLocalNamedBatchAssembler::getNumExamples() const { return static_cast<uint64_t>(indices.size()); }
+uint64_t IndexedLocalNamedBatchAssembler::getNumExamples() const { return static_cast<uint64_t>(indices->size()); }

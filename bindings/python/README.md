@@ -19,4 +19,4 @@ Apache License 2.0. See `LICENSE`.
 
 ## Version
 
-`0.0.23`
+`0.0.24`

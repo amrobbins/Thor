@@ -84,6 +84,7 @@ class IndexedLocalNamedExampleReader : public std::enable_shared_from_this<Index
         Session(std::shared_ptr<IndexedLocalNamedExampleReader> reader, uint64_t queueDepth);
     };
 
+    static std::shared_ptr<IndexedLocalNamedExampleReader> openDataset(const std::filesystem::path &datasetPath);
     static std::shared_ptr<IndexedLocalNamedExampleReader> openDataset(const std::filesystem::path &datasetPath,
                                                                        const LocalNamedExampleLayout &requestedLayout);
     ~IndexedLocalNamedExampleReader();

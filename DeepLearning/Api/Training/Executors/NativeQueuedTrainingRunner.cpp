@@ -2,6 +2,7 @@
 
 #include "DeepLearning/Api/Loaders/Batch.h"
 #include "DeepLearning/Api/Loaders/Loader.h"
+#include "DeepLearning/Api/Data/BatchSession.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
@@ -1174,6 +1175,56 @@ std::shared_ptr<TrainingStep> makeSingleNetworkTrainingStep(const std::string& s
                                           enabled);
 }
 
+std::vector<TrainingInputBinding> mergeDatasetInputBindings(
+    const std::vector<TrainingInputBinding>& stepBindings,
+    const std::vector<TrainingInputBinding>& datasetBindings) {
+    std::vector<TrainingInputBinding> merged = stepBindings;
+    std::map<std::string, std::string> batchNameByNetworkInput;
+    for (const TrainingInputBinding& binding : stepBindings) {
+        auto [it, inserted] = batchNameByNetworkInput.emplace(
+            binding.getNetworkInputName(), binding.getBatchInputName());
+        if (!inserted && it->second != binding.getBatchInputName()) {
+            throw std::runtime_error("TrainingStep contains conflicting bindings for NetworkInput '" +
+                                     binding.getNetworkInputName() + "'.");
+        }
+    }
+    for (const TrainingInputBinding& binding : datasetBindings) {
+        auto existing = batchNameByNetworkInput.find(binding.getNetworkInputName());
+        if (existing != batchNameByNetworkInput.end()) {
+            if (existing->second != binding.getBatchInputName()) {
+                throw std::runtime_error(
+                    "TrainingProgram input binding for NetworkInput '" + binding.getNetworkInputName() +
+                    "' conflicts with the Trainer's strict DatasetInputBindings.");
+            }
+            continue;
+        }
+        batchNameByNetworkInput.emplace(binding.getNetworkInputName(), binding.getBatchInputName());
+        merged.push_back(binding);
+    }
+    return merged;
+}
+
+std::shared_ptr<TrainingProgram> programWithDatasetInputBindings(
+    const TrainingProgram& program,
+    const std::vector<TrainingInputBinding>& datasetBindings,
+    bool evaluateOnly) {
+    std::vector<std::shared_ptr<TrainingStep>> steps;
+    steps.reserve(program.getNumSteps());
+    for (uint64_t i = 0; i < program.getNumSteps(); ++i) {
+        const TrainingStep& step = program.getStep(i);
+        steps.push_back(std::make_shared<TrainingStep>(
+            step.getName(),
+            step.getPhases(),
+            evaluateOnly ? nullptr : step.getOptimizer(),
+            evaluateOnly ? std::vector<ParameterReference>{} : step.getUpdateParameters(),
+            step.getRepeatCount(),
+            step.getGradientClearPolicy(),
+            mergeDatasetInputBindings(step.getInputBindings(), datasetBindings),
+            step.isEnabled()));
+    }
+    return std::make_shared<TrainingProgram>(std::move(steps));
+}
+
 std::shared_ptr<TrainingProgram> evaluationOnlyProgramForRequest(const TrainingRunRequest& request) {
     std::vector<std::shared_ptr<TrainingStep>> evaluationSteps;
 
@@ -1181,23 +1232,18 @@ std::shared_ptr<TrainingProgram> evaluationOnlyProgramForRequest(const TrainingR
         if (!request.trainingProgram->isInitialized()) {
             throw std::runtime_error("Trainer execution received an uninitialized TrainingProgram.");
         }
-        evaluationSteps.reserve(request.trainingProgram->getNumSteps());
-        for (uint64_t i = 0; i < request.trainingProgram->getNumSteps(); ++i) {
-            const TrainingStep& step = request.trainingProgram->getStep(i);
-            evaluationSteps.push_back(std::make_shared<TrainingStep>(step.getName(),
-                                                                     step.getPhases(),
-                                                                     /*optimizer=*/nullptr,
-                                                                     std::vector<ParameterReference>{},
-                                                                     step.getRepeatCount(),
-                                                                     step.getGradientClearPolicy(),
-                                                                     step.getInputBindings(),
-                                                                     step.isEnabled()));
-        }
-    } else {
-        evaluationSteps.push_back(makeSingleNetworkTrainingStep(
-            "default", request.network, /*optimizer=*/nullptr, std::vector<ParameterReference>{}));
+        return programWithDatasetInputBindings(
+            *request.trainingProgram, request.datasetInputBindings, /*evaluateOnly=*/true);
     }
 
+    evaluationSteps.push_back(makeSingleNetworkTrainingStep(
+        "default",
+        request.network,
+        /*optimizer=*/nullptr,
+        std::vector<ParameterReference>{},
+        1,
+        TrainingStep::GradientClearPolicy::CLEAR_BEFORE_STEP,
+        request.datasetInputBindings));
     return std::make_shared<TrainingProgram>(std::move(evaluationSteps));
 }
 
@@ -1210,7 +1256,8 @@ std::shared_ptr<TrainingProgram> defaultTrainingProgramForRequest(const Training
         if (!request.trainingProgram->isInitialized()) {
             throw std::runtime_error("Trainer execution received an uninitialized TrainingProgram.");
         }
-        return request.trainingProgram;
+        return programWithDatasetInputBindings(
+            *request.trainingProgram, request.datasetInputBindings, /*evaluateOnly=*/false);
     }
 
     if (request.network->getLossRootTensors().empty()) {
@@ -1229,7 +1276,14 @@ std::shared_ptr<TrainingProgram> defaultTrainingProgramForRequest(const Training
 
     // Leave update_parameters empty on the implicit phase-backed step.  After active phase
     // composition, an empty update set resolves to all trainable parameters in the composed graph.
-    auto defaultStep = makeSingleNetworkTrainingStep("default", request.network, optimizer, std::vector<ParameterReference>{});
+    auto defaultStep = makeSingleNetworkTrainingStep(
+        "default",
+        request.network,
+        optimizer,
+        std::vector<ParameterReference>{},
+        1,
+        TrainingStep::GradientClearPolicy::CLEAR_BEFORE_STEP,
+        request.datasetInputBindings);
     return std::make_shared<TrainingProgram>(std::vector<std::shared_ptr<TrainingStep>>{defaultStep});
 }
 
@@ -1383,6 +1437,31 @@ NativeQueuedExecutionGraph resolveNativeQueuedExecutionGraph(const TrainingRunRe
     result.trainingProgram = std::make_shared<TrainingProgram>(std::vector<std::shared_ptr<TrainingStep>>{executionStep});
     result.composedFromTrainingPhases = true;
     return result;
+}
+
+std::map<std::string, std::optional<ThorImplementation::TensorPlacement>> resolveNetworkInputBatchPlacements(
+    const Loader& loader, const ExecutableTrainingPlan& plan) {
+    std::map<std::string, std::optional<ThorImplementation::TensorPlacement>> placements;
+    for (const StepExecutable& step : plan.getSteps()) {
+        for (const TrainingInputBinding& binding : step.getResolvedInputBindings()) {
+            const std::optional<ThorImplementation::TensorPlacement> placement =
+                loader.getBatchTensorPlacement(binding.getBatchInputName());
+            auto [existing, inserted] = placements.emplace(binding.getNetworkInputName(), placement);
+            if (!inserted && (!existing->second.has_value() || !placement.has_value() || existing->second.value() != placement.value())) {
+                // A NetworkInput reused with unknown or differing source placements
+                // must take the conservative staged path for every step.
+                existing->second = std::nullopt;
+            }
+        }
+    }
+    return placements;
+}
+
+void cancelBatchSession(const std::shared_ptr<Loader>& loader) {
+    if (std::shared_ptr<BatchSession> session =
+            std::dynamic_pointer_cast<BatchSession>(loader)) {
+        session->cancel();
+    }
 }
 
 Batch bindBatchInputs(const StepExecutable& step, const Batch& batchInput) {
@@ -2191,11 +2270,11 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     }
 
     request.cancellationToken.throwIfCancellationRequested();
-    // Native queued training uses the queue slot index as the NetworkInput/NetworkOutput
-    // slot.  Preallocate the whole input/output rings before the first scheduled batch
-    // so OOM or other allocation failures happen during setup rather than in the hot
-    // submit path.
-    placedNetwork->preallocateInputSlots(static_cast<uint32_t>(options.maxInFlightBatches));
+    // Output slots are always network-owned, so allocate them before querying
+    // free memory for device-dataset materialization. Input slots depend on the
+    // effective loader and are configured below: same-GPU device-dataset inputs
+    // copy directly into NetworkInput::featureOutput and must not allocate a
+    // duplicate max_in_flight staging ring.
     placedNetwork->preallocateOutputSlots(static_cast<uint32_t>(options.maxInFlightBatches));
 
     request.cancellationToken.throwIfCancellationRequested();
@@ -2217,6 +2296,13 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         effectiveLoader = std::move(deviceDatasetSelection.loader);
         deviceDatasetStorageReport = std::move(deviceDatasetSelection.report);
     }
+
+    request.cancellationToken.throwIfCancellationRequested();
+    placedNetwork->configureBatchInputPlacements(resolveNetworkInputBatchPlacements(*effectiveLoader, plan));
+    // Host/cross-device inputs retain one staging tensor per queue slot. Fully
+    // device-resident inputs allocate zero NetworkInput slots; queue depth is
+    // provided by the device loader's reusable batch tensor sets instead.
+    placedNetwork->preallocateInputSlots(static_cast<uint32_t>(options.maxInFlightBatches));
 
     const bool modelSelectionEnabled = !evaluateOnly && request.checkBestModelEveryEpochs > 0;
     const std::vector<std::string> aggregateLossTensorNames = executionGraph.composedFromTrainingPhases
@@ -2436,6 +2522,10 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
             state->batchScheduled.notify_all();
             state->batchFinished.notify_all();
             state->batchPopped.notify_all();
+            // A scheduler may be blocked waiting for a session-owned reusable
+            // batch buffer. Cancel the session before joining so cancellation
+            // wakes that wait without depending on another completion callback.
+            cancelBatchSession(effectiveLoader);
             if (schedulingThread.joinable()) {
                 schedulingThread.join();
             }
@@ -2454,6 +2544,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         auto requestExternalCancel = [&]() {
             if (request.cancellationToken.isCancellationRequested()) {
                 requestQueuedTrainingCancellation(state);
+                cancelBatchSession(effectiveLoader);
             }
             if (sigintScope.interrupted()) {
                 {
@@ -2463,6 +2554,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                 }
                 state->batchFinished.notify_all();
                 state->batchPopped.notify_all();
+                cancelBatchSession(effectiveLoader);
             }
         };
 

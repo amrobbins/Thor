@@ -107,6 +107,15 @@ class PlacedNetwork {
     std::vector<uint64_t> getActiveTrainingRawLossOriginalIdsForDebug(uint64_t stampIndex = 0) const;
 
     void extendOutputWritableEvents(uint64_t stampIndex, Event event, std::optional<uint32_t> outputSlotIndex = std::nullopt);
+
+    /**
+     * Configures each physical NetworkInput from the effective loader placement
+     * resolved through the executable plan's batch-input bindings. Same-GPU
+     * inputs use direct device loading and therefore do not allocate a
+     * NetworkInput staging ring. Missing/null placements select staged loading.
+     */
+    void configureBatchInputPlacements(
+        const std::map<std::string, std::optional<ThorImplementation::TensorPlacement>> &placementsByNetworkInput);
     void preallocateInputSlots(uint32_t numSlots);
     void preallocateOutputSlots(uint32_t numSlots);
 

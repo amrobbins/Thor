@@ -1,53 +1,45 @@
 #pragma once
 
+#include "DeepLearning/Api/Data/DatasetId.h"
+#include "DeepLearning/Api/Data/DatasetSchema.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Loaders/LocalNamedExampleLayout.h"
-#include "Utilities/Loaders/Shard.h"
 
 #include <cstdint>
 #include <map>
-#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
-#include <vector>
 
 /**
- * CPU snapshot of a named local dataset split after direct tensors and any
- * assembled windowed tensors/masks have been materialized into one contiguous
- * tensor per logical name.
+ * Canonical CPU snapshot of one immutable named dataset.
  *
- * Tensors have shape [num_examples, *example_shape]. Empty splits intentionally
- * hold no tensors because Thor TensorDescriptor does not permit zero-sized
- * dimensions.
- */
-struct MaterializedNamedSplitSnapshot {
-    ExampleType exampleType = ExampleType::TRAIN;
-    std::string splitName;
-    std::vector<uint64_t> sourceIndices;
-    std::map<std::string, ThorImplementation::Tensor> tensors;
-    bool randomized = false;
-    std::optional<uint64_t> seed{};
-    uint64_t batchesPerEpoch = 0;
-
-    [[nodiscard]] uint64_t numExamples() const { return static_cast<uint64_t>(sourceIndices.size()); }
-    [[nodiscard]] uint64_t totalBytes() const;
-    [[nodiscard]] const ThorImplementation::Tensor &tensor(const std::string &name) const;
-};
-
-/**
- * CPU materialization result used as the staging representation before split
- * tensors are uploaded to a target device.
+ * Every field is stored exactly once in dataset row order with shape
+ * [num_examples, *example_shape]. Fields are keyed by their immutable
+ * DatasetFieldId. No split, batching, randomization, or queue metadata is
+ * permitted in this representation.
  */
 struct MaterializedNamedDatasetSnapshot {
+    MaterializedNamedDatasetSnapshot(Thor::DatasetId datasetId,
+                                     Thor::DatasetSchema schema,
+                                     LocalNamedExampleLayout layout,
+                                     uint64_t numExamples)
+        : datasetId(std::move(datasetId)),
+          schema(std::move(schema)),
+          layout(std::move(layout)),
+          numExamples(numExamples) {}
+
+    Thor::DatasetId datasetId;
+    Thor::DatasetSchema schema;
     LocalNamedExampleLayout layout;
-    uint64_t numDatasetExamples = 0;
-    uint64_t batchSize = 0;
-    std::vector<MaterializedNamedSplitSnapshot> splits;
+    uint64_t numExamples = 0;
+    std::map<Thor::DatasetFieldId, ThorImplementation::Tensor> fields;
     double materializationSeconds = 0.0;
 
-    [[nodiscard]] uint64_t totalExamples() const;
+    [[nodiscard]] uint64_t totalExamples() const { return numExamples; }
     [[nodiscard]] uint64_t totalBytes() const;
-    [[nodiscard]] const MaterializedNamedSplitSnapshot *findSplit(ExampleType exampleType) const;
-    [[nodiscard]] const MaterializedNamedSplitSnapshot &split(ExampleType exampleType) const;
+    [[nodiscard]] bool hasField(Thor::DatasetFieldId id) const;
+    [[nodiscard]] bool hasField(const std::string &name) const;
+    [[nodiscard]] const ThorImplementation::Tensor &field(Thor::DatasetFieldId id) const;
+    [[nodiscard]] const ThorImplementation::Tensor &tensor(const std::string &name) const;
 };

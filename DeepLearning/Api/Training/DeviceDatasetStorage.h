@@ -19,6 +19,10 @@ struct DeviceDatasetStorageReport {
     uint64_t examples = 0;
     uint64_t requiredBytes = 0;
     uint64_t availableBytesAfterPlacement = 0;
+    uint64_t residentBytes = 0;
+    bool residentCacheHit = false;
+    bool residentConstructionJoined = false;
+    bool residentConstructionStarted = false;
     double materializationSeconds = 0.0;
 };
 

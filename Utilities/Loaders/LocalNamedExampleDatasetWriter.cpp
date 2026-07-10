@@ -152,6 +152,7 @@ LocalNamedExampleDatasetWriter::LocalNamedExampleDatasetWriter(std::filesystem::
                                                                std::optional<uint64_t> expectedNumExamples,
                                                                bool preallocate)
     : datasetPath(std::move(datasetPath)),
+      datasetId(Thor::DatasetId::generate()),
       layout(std::move(layout)),
       examplesPerShard(examplesPerShard),
       storageMode(storageMode),
@@ -821,6 +822,7 @@ void LocalNamedExampleDatasetWriter::finalizeCurrentShard() {
 
 void LocalNamedExampleDatasetWriter::writeManifest() const {
     json root = layout.toJson();
+    root["dataset_id"] = datasetId.str();
     root["storage_mode"] = storageModeToString(storageMode);
     root["num_examples"] = numExamples();
     if (expectedNumExamples.has_value()) {

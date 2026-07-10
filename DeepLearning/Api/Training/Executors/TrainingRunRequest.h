@@ -39,6 +39,9 @@ struct TrainingRunRequest {
     std::shared_ptr<Loader> loader = nullptr;
     std::shared_ptr<Optimizer> optimizer = nullptr;
     std::shared_ptr<TrainingProgram> trainingProgram = nullptr;
+    // Strict, dataset-validated bindings compiled by Trainer before any
+    // BatchSession is opened or the Network is placed.
+    std::vector<TrainingInputBinding> datasetInputBindings{};
     TrainingRuntimeConfig runtime{};
     uint32_t epochs = 1;
     std::optional<std::string> saveModelDirectory{};

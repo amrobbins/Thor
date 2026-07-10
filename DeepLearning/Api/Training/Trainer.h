@@ -4,6 +4,7 @@
 #include "DeepLearning/Api/Training/Executors/LocalTrainingExecutor.h"
 #include "DeepLearning/Api/Training/EarlyCompletionPolicy.h"
 #include "DeepLearning/Api/Training/DeviceDatasetStorage.h"
+#include "DeepLearning/Api/Training/DatasetInputBindings.h"
 #include "DeepLearning/Api/Training/ModelSelectionScore.h"
 #include "DeepLearning/Api/Training/Observers/LineStatsReporter.h"
 #include "DeepLearning/Api/Training/Cancellation/TrainingCancellation.h"
@@ -14,7 +15,6 @@
 #include <optional>
 #include <set>
 #include <string>
-#include <set>
 #include <utility>
 #include <vector>
 
@@ -27,6 +27,7 @@ namespace Thor {
 class Network;
 class Optimizer;
 class TrainingRuns;
+class TrainingData;
 
 struct TrainingRestartPolicy {
     std::optional<std::string> runName{};
@@ -98,6 +99,9 @@ class Trainer {
     void releasePlacedNetworkAfterLastFit();
 
     [[nodiscard]] const TrainingRuntimeConfig& getRuntimeConfig() const { return runtimeConfig; }
+    [[nodiscard]] std::shared_ptr<const TrainingData> getTrainingData() const { return trainingData; }
+    [[nodiscard]] const std::vector<TrainingInputBinding>& getDatasetInputBindings() const { return datasetInputBindings; }
+    [[nodiscard]] const std::set<DatasetFieldId>& getRequiredDatasetFieldIds() const { return requiredDatasetFieldIds; }
     [[nodiscard]] std::shared_ptr<Network> getNetwork() const { return network; }
     [[nodiscard]] const std::optional<std::string>& getSaveModelDirectory() const { return saveModelDirectory; }
     [[nodiscard]] bool getSaveModelOverwrite() const { return saveModelOverwrite; }
@@ -111,6 +115,7 @@ class Trainer {
     void validateRestartConditions(const std::vector<TrainingRestartCondition>& conditions) const;
     void validateEarlyCompletionPolicies(const std::vector<TrainingEarlyCompletionPolicy>& policies) const;
     TrainingObserver& effectiveObserver();
+    [[nodiscard]] std::shared_ptr<Loader> openBatchSessionForRun() const;
     void fitInternal(const TrainerFitOptions& options,
                      TrainingObserver& observer,
                      const TrainingCancellationToken& cancellationToken,
@@ -148,7 +153,10 @@ class Trainer {
     friend class TrainingRuns;
 
     std::shared_ptr<Network> network = nullptr;
-    std::shared_ptr<Loader> loader = nullptr;
+    std::shared_ptr<const TrainingData> trainingData = nullptr;
+    std::vector<TrainingInputBinding> datasetInputBindings{};
+    std::set<DatasetFieldId> requiredDatasetFieldIds{};
+    std::shared_ptr<Loader> loader = nullptr;  // Legacy mutable-loader compatibility path.
     std::shared_ptr<Optimizer> optimizer = nullptr;
     std::shared_ptr<TrainingProgram> trainingProgram = nullptr;
     TrainingRuntimeConfig runtimeConfig{};
@@ -171,8 +179,18 @@ class Trainer::Builder {
         return *this;
     }
 
+    Builder& data(std::shared_ptr<const TrainingData> data) {
+        this->trainingData_ = std::move(data);
+        return *this;
+    }
+
     Builder& loader(std::shared_ptr<Loader> loader) {
         this->loader_ = std::move(loader);
+        return *this;
+    }
+
+    Builder& inputBindings(DatasetInputBindings inputBindings) {
+        this->datasetInputBindings_ = std::move(inputBindings);
         return *this;
     }
 
@@ -247,7 +265,9 @@ class Trainer::Builder {
 
    private:
     std::shared_ptr<Network> network_ = nullptr;
+    std::shared_ptr<const TrainingData> trainingData_ = nullptr;
     std::shared_ptr<Loader> loader_ = nullptr;
+    std::optional<DatasetInputBindings> datasetInputBindings_{};
     std::shared_ptr<Optimizer> optimizer_ = nullptr;
     std::shared_ptr<TrainingProgram> trainingProgram_ = nullptr;
     TrainingRuntimeConfig runtimeConfig_{};

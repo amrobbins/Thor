@@ -84,8 +84,11 @@ class NetworkInput : public Layer {
         if (passThroughSource_.has_value()) {
             return 0;
         }
-        // Input has a prefetch buffer in addition to storing the output tensor
-        return 2 * featureOutput.value().getTotalSizeInBytes();
+        // Graph placement owns only the statically connected feature tensor.
+        // Any host/cross-device staging ring is allocated later by the queued
+        // runtime after it knows the effective loader; device-resident inputs
+        // intentionally allocate no NetworkInput staging tensors.
+        return featureOutput.value().getTotalSizeInBytes();
     }
 
    private:

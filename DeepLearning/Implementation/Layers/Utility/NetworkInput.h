@@ -16,7 +16,7 @@ class NetworkInput : public Layer {
    public:
     ~NetworkInput() override {}
 
-    enum class Mode { ExternalLoad, PassThrough };
+    enum class Mode { ExternalLoad, DeviceLoad, PassThrough };
 
     NetworkInput(TensorPlacement networkPlacement,
                  std::optional<DataType> contentDataType,
@@ -59,6 +59,7 @@ class NetworkInput : public Layer {
         THOR_THROW_IF_FALSE(contentDimensions.has_value() == contentDataType.has_value());
         THOR_THROW_IF_FALSE(mode == Mode::ExternalLoad || !aliasSamePlacementInputs);
         THOR_THROW_IF_FALSE(mode == Mode::PassThrough || !passThroughSourceTensor.has_value());
+        THOR_THROW_IF_FALSE(mode != Mode::DeviceLoad || networkPlacement.getMemDevice() == TensorPlacement::MemDevices::GPU);
         this->networkPlacement = networkPlacement;
         this->contentDataType = contentDataType;
         this->contentDimensions = contentDimensions;
@@ -79,13 +80,39 @@ class NetworkInput : public Layer {
         std::vector<Event> events;
         std::set<uint64_t> synchronizedStreamIds;
         appendSynchronizeEvent(events, synchronizedStreamIds, stream);
-        appendSynchronizeEvent(events, synchronizedStreamIds, loadStream);
+        if (!isDeviceLoad()) {
+            appendSynchronizeEvent(events, synchronizedStreamIds, loadStream);
+        }
         return events;
     }
 
-    virtual bool isInput() { return mode == Mode::ExternalLoad; }
+    virtual bool isInput() { return mode != Mode::PassThrough; }
     virtual bool isPassThrough() const { return mode == Mode::PassThrough; }
-    virtual bool requiresBatchInput() const { return mode == Mode::ExternalLoad; }
+    virtual bool isDeviceLoad() const { return mode == Mode::DeviceLoad; }
+    virtual bool requiresBatchInput() const { return mode != Mode::PassThrough; }
+
+    /**
+     * Configures how runtime batch tensors are loaded. Same-GPU batch tensors
+     * use DeviceLoad: the source is copied directly into the statically wired
+     * featureOutput on the processing stream and no NetworkInput staging ring
+     * is retained. All other/unknown placements use the regular staged path.
+     * This must be called before preallocateInputSlots().
+     */
+    virtual void configureBatchInputPlacement(std::optional<TensorPlacement> batchTensorPlacement) {
+        THOR_THROW_IF_FALSE(!isPassThrough());
+        // Reconfiguring after slot allocation or submission could release a
+        // buffer that still has queued users. Make setup ordering an explicit
+        // contract instead of attempting a best-effort mode switch.
+        THOR_THROW_IF_FALSE(inputSlots.empty());
+        const bool directDeviceLoad = batchTensorPlacement.has_value() &&
+                                      batchTensorPlacement.value().getMemDevice() == TensorPlacement::MemDevices::GPU &&
+                                      networkPlacement.getMemDevice() == TensorPlacement::MemDevices::GPU &&
+                                      batchTensorPlacement.value() == networkPlacement;
+        mode = directDeviceLoad ? Mode::DeviceLoad : Mode::ExternalLoad;
+        activeInputSlot = 0;
+    }
+
+    [[nodiscard]] virtual uint32_t getNumInputSlots() const { return static_cast<uint32_t>(inputSlots.size()); }
 
     // Deprecated compatibility flag from the old runtime-alias attempt.  It is intentionally
     // not used to swap tensors in forward(); correct NetworkInput composition is pass-through
@@ -101,7 +128,6 @@ class NetworkInput : public Layer {
             THOR_THROW_IF_FALSE(featureOutput.has_value());
         } else {
             featureOutput = createFeatureOutputTensor();
-            initializeInputSlotZero();
         }
 
         const bool backPropagateThroughInput =
@@ -163,7 +189,15 @@ class NetworkInput : public Layer {
     }
 
     virtual void setActiveInputSlot(uint32_t slotIndex) {
-        if (isPassThrough() || !contentDimensions.has_value()) {
+        if (isPassThrough() || isDeviceLoad() || !contentDimensions.has_value()) {
+            return;
+        }
+        if (inputSlots.empty()) {
+            // Synchronous inference does not preallocate a ring; its default
+            // slot zero is allocated lazily by forward(). Queued callers must
+            // preallocate before selecting any nonzero slot.
+            THOR_THROW_IF_FALSE(slotIndex == 0);
+            activeInputSlot = 0;
             return;
         }
         requireInputSlot(slotIndex);
@@ -172,7 +206,7 @@ class NetworkInput : public Layer {
 
     virtual void preallocateInputSlots(uint32_t numSlots) {
         THOR_THROW_IF_FALSE(numSlots >= 1);
-        if (isPassThrough() || !contentDimensions.has_value()) {
+        if (isPassThrough() || isDeviceLoad() || !contentDimensions.has_value()) {
             return;
         }
         THOR_THROW_IF_FALSE(featureOutput.has_value());
@@ -189,7 +223,7 @@ class NetworkInput : public Layer {
                          bool validationPass,
                          Event copyToSourceTensorFinished,
                          uint32_t batchSize = 0) {
-        if (isPassThrough()) {
+        if (isPassThrough() || isDeviceLoad()) {
             stream.waitEvent(copyToSourceTensorFinished);
         } else {
             loadStream.waitEvent(copyToSourceTensorFinished);
@@ -216,27 +250,44 @@ class NetworkInput : public Layer {
         std::optional<Tensor> downstreamFeatureOutput = featureOutput;
         if (contentDimensions.has_value() && !isPassThrough()) {
             THOR_THROW_IF_FALSE(featureOutput.has_value());
-            THOR_THROW_IF_FALSE(activeInputSlot < inputSlots.size());
-            InputSlot &slot = inputSlots[activeInputSlot];
-            THOR_THROW_IF_FALSE(slot.outputBuffer.has_value());
+            if (isDeviceLoad()) {
+                // Device-resident loader slots already keep each in-flight
+                // batch alive until processing completion. Copy directly from
+                // that same-GPU source into the statically connected feature
+                // tensor; a second NetworkInput-owned staging ring would only
+                // duplicate max_in_flight batch storage.
+                THOR_THROW_IF_FALSE(featureInput.value().getPlacement() == networkPlacement);
+                THOR_THROW_IF_FALSE(networkPlacement.getMemDevice() == TensorPlacement::MemDevices::GPU);
+                featureOutput.value().copyFromAsync(featureInput.value(), stream);
+            } else {
+                if (inputSlots.empty()) {
+                    // Non-queued inference callers do not preallocate slots.
+                    // Preserve that API while keeping queued-training
+                    // allocations out of graph placement.
+                    allocateInputSlots(1);
+                }
+                THOR_THROW_IF_FALSE(activeInputSlot < inputSlots.size());
+                InputSlot &slot = inputSlots[activeInputSlot];
+                THOR_THROW_IF_FALSE(slot.outputBuffer.has_value());
 
-            // Only wait when reusing the same slot-local prefetch buffer.  Other
-            // native-queued slots may upload into their own buffers while this
-            // slot's previous buffer -> featureOutput copy is still pending on
-            // the processing stream.
-            loadStream.waitEvent(slot.outputBufferWritableEvent);
+                // Only wait when reusing the same slot-local prefetch buffer.  Other
+                // native-queued slots may upload into their own buffers while this
+                // slot's previous buffer -> featureOutput copy is still pending on
+                // the processing stream.
+                loadStream.waitEvent(slot.outputBufferWritableEvent);
 
-            // Copy into the slot-local prefetch buffer using the upload stream.
-            slot.outputBuffer.value().copyFromAsync(featureInput.value(), loadStream);
-            loadStream.putEvent(slot.outputBufferLoadedEvent);
-            stream.waitEvent(slot.outputBufferLoadedEvent);
+                // Copy into the slot-local prefetch buffer using the upload stream.
+                slot.outputBuffer.value().copyFromAsync(featureInput.value(), loadStream);
+                loadStream.putEvent(slot.outputBufferLoadedEvent);
+                stream.waitEvent(slot.outputBufferLoadedEvent);
 
-            // Copy from the slot-local prefetch buffer into the connected public
-            // NetworkInput feature tensor.  The public feature tensor remains
-            // single-address/statically connected to downstream layers, so this
-            // ring only removes false dependencies on the staging buffer.
-            featureOutput.value().copyFromAsync(slot.outputBuffer.value(), stream);
-            stream.putEvent(slot.outputBufferWritableEvent);
+                // Copy from the slot-local prefetch buffer into the connected public
+                // NetworkInput feature tensor.  The public feature tensor remains
+                // single-address/statically connected to downstream layers, so this
+                // ring only removes false dependencies on the staging buffer.
+                featureOutput.value().copyFromAsync(slot.outputBuffer.value(), stream);
+                stream.putEvent(slot.outputBufferWritableEvent);
+            }
         }
         if (emitDiagnostics) {
             copyMicros = layerSubmitDiagnosticElapsedMicros(copyStart, layerSubmitDiagnosticNow());
@@ -294,6 +345,7 @@ class NetworkInput : public Layer {
 
     void initializeInputSlotZero() {
         THOR_THROW_IF_FALSE(!isPassThrough());
+        THOR_THROW_IF_FALSE(!isDeviceLoad());
         THOR_THROW_IF_FALSE(featureOutput.has_value() == contentDimensions.has_value());
         if (!contentDimensions.has_value()) {
             return;
@@ -345,6 +397,7 @@ class NetworkInput : public Layer {
 
     void allocateInputSlots(uint32_t numSlots) {
         THOR_THROW_IF_FALSE(!isPassThrough());
+        THOR_THROW_IF_FALSE(!isDeviceLoad());
         THOR_THROW_IF_FALSE(contentDimensions.has_value());
         THOR_THROW_IF_FALSE(featureOutput.has_value());
         THOR_THROW_IF_FALSE(numSlots >= 1);

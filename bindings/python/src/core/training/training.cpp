@@ -22,15 +22,22 @@
 
 #include <nlohmann/json.hpp>
 
+#include "DeepLearning/Api/Data/BatchPolicy.h"
+#include "DeepLearning/Api/Data/BatchSession.h"
+#include "DeepLearning/Api/Data/DatasetSplitManifest.h"
+#include "DeepLearning/Api/Data/LocalNamedDataset.h"
+#include "DeepLearning/Api/Data/TrainingData.h"
 #include "DeepLearning/Api/Loaders/Loader.h"
 #include "DeepLearning/Api/Loaders/IndexedLocalNamedBatchLoader.h"
 #include "DeepLearning/Api/Loaders/LocalBatchLoader.h"
 #include "DeepLearning/Api/Loaders/LocalNamedBatchLoader.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
+#include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
 #include "DeepLearning/Api/Parameter/ParameterReference.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
+#include "DeepLearning/Api/Training/DatasetInputBindings.h"
 #include "DeepLearning/Api/Training/StepExecutable.h"
 #include "DeepLearning/Api/Training/Trainer.h"
 #include "DeepLearning/Api/Training/TrainingInputBinding.h"
@@ -2426,6 +2433,10 @@ void bind_training(nb::module_& training) {
     loader.def("get_dataset_name", &Loader::getDatasetName);
     loader.def("set_dataset_name", &Loader::setDatasetName, "dataset_name"_a);
 
+    auto batch_session = nb::class_<Thor::BatchSession, Loader>(training, "BatchSession");
+    batch_session.attr("__module__") = "thor.data";
+    batch_session.def("cancel", &Thor::BatchSession::cancel);
+
     auto numpy_float32_batch_loader = nb::class_<NumpyFloat32BatchLoader, Loader>(
         training, "NumpyFloat32BatchLoader", nb::is_weak_referenceable());
     numpy_float32_batch_loader.attr("__module__") = "thor.training";
@@ -2959,6 +2970,250 @@ stored separately.
     local_named_example_layout.def("has_windowed_tensors", &LocalNamedExampleLayout::hasWindowedTensors);
     local_named_example_layout.def("get_windowed_tensor_specs", &localNamedLayoutWindowedTensorSpecsToPythonDict);
 
+    auto dataset_id = nb::class_<Thor::DatasetId>(training, "DatasetId");
+    dataset_id.attr("__module__") = "thor.data";
+    dataset_id.def_prop_ro("value", &Thor::DatasetId::str, nb::rv_policy::reference_internal);
+    dataset_id.def("__str__", [](const Thor::DatasetId& self) { return self.str(); });
+    dataset_id.def("__repr__", [](const Thor::DatasetId& self) { return "DatasetId('" + self.str() + "')"; });
+    dataset_id.def("__eq__", [](const Thor::DatasetId& self, const Thor::DatasetId& other) { return self == other; });
+
+    auto dataset_field_kind = nb::enum_<Thor::DatasetFieldKind>(training, "DatasetFieldKind")
+                                  .value("DENSE", Thor::DatasetFieldKind::DENSE)
+                                  .value("WINDOWED", Thor::DatasetFieldKind::WINDOWED)
+                                  .value("WINDOW_MASK", Thor::DatasetFieldKind::WINDOW_MASK);
+    dataset_field_kind.attr("__module__") = "thor.data";
+
+    auto dataset_field = nb::class_<Thor::DatasetField>(training, "DatasetField");
+    dataset_field.attr("__module__") = "thor.data";
+    dataset_field.def_ro("id", &Thor::DatasetField::id);
+    dataset_field.def_ro("name", &Thor::DatasetField::name);
+    dataset_field.def_ro("data_type", &Thor::DatasetField::dataType);
+    dataset_field.def_prop_ro("dtype", [](const Thor::DatasetField& self) { return self.dataType; });
+    dataset_field.def_ro("dimensions", &Thor::DatasetField::dimensions);
+    dataset_field.def_prop_ro("shape", [](const Thor::DatasetField& self) { return self.dimensions; });
+    dataset_field.def_ro("kind", &Thor::DatasetField::kind);
+
+    auto dataset_schema = nb::class_<Thor::DatasetSchema>(training, "DatasetSchema");
+    dataset_schema.attr("__module__") = "thor.data";
+    dataset_schema.def("__len__", &Thor::DatasetSchema::size);
+    dataset_schema.def(
+        "contains",
+        [](const Thor::DatasetSchema& self, const std::string& name) { return self.contains(name); },
+        "name"_a);
+    dataset_schema.def(
+        "field",
+        [](const Thor::DatasetSchema& self, const std::string& name) -> const Thor::DatasetField& {
+            return self.getField(name);
+        },
+        "name"_a,
+        nb::rv_policy::reference_internal);
+    dataset_schema.def(
+        "__getitem__",
+        [](const Thor::DatasetSchema& self, const std::string& name) -> const Thor::DatasetField& {
+            return self.getField(name);
+        },
+        "name"_a,
+        nb::rv_policy::reference_internal);
+    dataset_schema.def_prop_ro("fields", [](const Thor::DatasetSchema& self) { return self.getFields(); });
+    dataset_schema.def_prop_ro("names", [](const Thor::DatasetSchema& self) {
+        std::vector<std::string> names;
+        names.reserve(self.getFields().size());
+        for (const Thor::DatasetField& field : self.getFields()) {
+            names.push_back(field.name);
+        }
+        return names;
+    });
+
+    auto named_dataset = nb::class_<Thor::NamedDataset>(training, "NamedDataset");
+    named_dataset.attr("__module__") = "thor.data";
+    named_dataset.def_prop_ro("id", &Thor::NamedDataset::getId, nb::rv_policy::reference_internal);
+    named_dataset.def_prop_ro("num_examples", &Thor::NamedDataset::getNumExamples);
+    named_dataset.def_prop_ro("schema", &Thor::NamedDataset::getSchema, nb::rv_policy::reference_internal);
+    named_dataset.def(
+        "field",
+        [](const Thor::NamedDataset& self, const std::string& name) -> const Thor::DatasetField& {
+            return self.getField(name);
+        },
+        "name"_a,
+        nb::rv_policy::reference_internal);
+
+    auto local_named_dataset = nb::class_<Thor::LocalNamedDataset, Thor::NamedDataset>(training, "LocalNamedDataset");
+    local_named_dataset.attr("__module__") = "thor.data";
+    local_named_dataset.def_static(
+        "open",
+        [](nb::object datasetPath) {
+            return Thor::LocalNamedDataset::open(pathStringFromPython(datasetPath, "dataset_path"));
+        },
+        "dataset_path"_a);
+    local_named_dataset.def_prop_ro("dataset_path", [](const Thor::LocalNamedDataset& self) { return self.getPath().string(); });
+    local_named_dataset.def("assert_schema", &Thor::LocalNamedDataset::assertSchema, "expected_schema"_a);
+
+    auto example_index_set = nb::class_<Thor::ExampleIndexSet>(training, "ExampleIndexSet");
+    example_index_set.attr("__module__") = "thor.data";
+    example_index_set.def("__len__", &Thor::ExampleIndexSet::size);
+    example_index_set.def(
+        "__getitem__",
+        [](const Thor::ExampleIndexSet& self, int64_t index) {
+            const std::vector<uint64_t>& indices = self.getIndices();
+            int64_t resolved = index;
+            if (resolved < 0) {
+                resolved += static_cast<int64_t>(indices.size());
+            }
+            if (resolved < 0 || static_cast<uint64_t>(resolved) >= indices.size()) {
+                throw nb::index_error();
+            }
+            return indices[static_cast<size_t>(resolved)];
+        },
+        "index"_a);
+    example_index_set.def_prop_ro("indices", [](const Thor::ExampleIndexSet& self) { return self.getIndices(); });
+    example_index_set.def("__eq__", [](const Thor::ExampleIndexSet& self, const Thor::ExampleIndexSet& other) {
+        return self == other;
+    });
+
+    auto dataset_split_manifest = nb::class_<Thor::DatasetSplitManifest>(training, "DatasetSplitManifest");
+    dataset_split_manifest.attr("__module__") = "thor.data";
+    dataset_split_manifest.def_static(
+        "__new__",
+        [](nb::handle cls,
+           std::shared_ptr<Thor::LocalNamedDataset> dataset,
+           nb::object trainIndices,
+           nb::object validateIndices,
+           nb::object testIndices) -> std::shared_ptr<Thor::DatasetSplitManifest> {
+            (void)cls;
+            if (dataset == nullptr) {
+                throw nb::value_error("DatasetSplitManifest dataset must not be None");
+            }
+            constexpr uint64_t maxIndex = std::numeric_limits<uint64_t>::max();
+            std::vector<uint64_t> train = uint64IndicesFromPython(
+                std::move(trainIndices), "DatasetSplitManifest train_indices", maxIndex, true);
+            std::vector<uint64_t> validate = uint64IndicesFromPython(
+                std::move(validateIndices), "DatasetSplitManifest validate_indices", maxIndex, true);
+            std::optional<std::vector<uint64_t>> test;
+            if (!testIndices.is_none()) {
+                test = uint64IndicesFromPython(
+                    std::move(testIndices), "DatasetSplitManifest test_indices", maxIndex, true);
+            }
+            return std::make_shared<Thor::DatasetSplitManifest>(
+                *dataset, std::move(train), std::move(validate), std::move(test));
+        },
+        "cls"_a,
+        "dataset"_a,
+        "train_indices"_a,
+        "validate_indices"_a,
+        "test_indices"_a = nb::none());
+    dataset_split_manifest.def(
+        "__init__",
+        [](Thor::DatasetSplitManifest*, std::shared_ptr<Thor::LocalNamedDataset>, nb::object, nb::object, nb::object) {},
+        "dataset"_a,
+        "train_indices"_a,
+        "validate_indices"_a,
+        "test_indices"_a = nb::none());
+    dataset_split_manifest.def_static(
+        "load",
+        [](nb::object path) { return Thor::DatasetSplitManifest::load(pathStringFromPython(path, "path")); },
+        "path"_a);
+    dataset_split_manifest.def(
+        "save",
+        [](const Thor::DatasetSplitManifest& self, nb::object path) {
+            self.save(pathStringFromPython(path, "path"));
+        },
+        "path"_a);
+    dataset_split_manifest.def(
+        "validate_against",
+        [](const Thor::DatasetSplitManifest& self, const Thor::NamedDataset& dataset) {
+            self.validateAgainst(dataset);
+        },
+        "dataset"_a);
+    dataset_split_manifest.def_prop_ro("dataset_id", &Thor::DatasetSplitManifest::getDatasetId,
+                                       nb::rv_policy::reference_internal);
+    dataset_split_manifest.def_prop_ro("num_examples", &Thor::DatasetSplitManifest::getNumExamples);
+    dataset_split_manifest.def_prop_ro("train", &Thor::DatasetSplitManifest::getTrain,
+                                       nb::rv_policy::reference_internal);
+    dataset_split_manifest.def_prop_ro("validate", &Thor::DatasetSplitManifest::getValidate,
+                                       nb::rv_policy::reference_internal);
+    dataset_split_manifest.def_prop_ro("test", &Thor::DatasetSplitManifest::getTest,
+                                       nb::rv_policy::reference_internal);
+    dataset_split_manifest.def_prop_ro("has_explicit_test_split", &Thor::DatasetSplitManifest::hasExplicitTestSplit);
+    dataset_split_manifest.def_prop_ro("test_aliases_validate", &Thor::DatasetSplitManifest::testAliasesValidate);
+    dataset_split_manifest.def("__eq__", [](const Thor::DatasetSplitManifest& self,
+                                             const Thor::DatasetSplitManifest& other) { return self == other; });
+
+    auto batch_policy = nb::class_<Thor::BatchPolicy>(training, "BatchPolicy");
+    batch_policy.attr("__module__") = "thor.data";
+    batch_policy.def(nb::init<uint64_t, bool, std::optional<uint64_t>>(),
+                     "batch_size"_a,
+                     "randomize_train"_a = true,
+                     "random_seed"_a = nb::none());
+    batch_policy.def_prop_ro("batch_size", &Thor::BatchPolicy::getBatchSize);
+    batch_policy.def_prop_ro("randomize_train", &Thor::BatchPolicy::getRandomizeTrain);
+    batch_policy.def_prop_ro("random_seed", &Thor::BatchPolicy::getRandomSeed);
+
+    auto dataset_input_bindings = nb::class_<Thor::DatasetInputBindings>(training, "DatasetInputBindings");
+    dataset_input_bindings.attr("__module__") = "thor.training";
+    dataset_input_bindings.def(nb::init<>());
+    dataset_input_bindings.def(
+        "bind",
+        [](Thor::DatasetInputBindings& self,
+           const Thor::NetworkInput& networkInput,
+           const Thor::DatasetField& field) -> Thor::DatasetInputBindings& {
+            return self.bind(networkInput, field);
+        },
+        "network_input"_a,
+        "field"_a,
+        nb::rv_policy::reference_internal);
+    dataset_input_bindings.def_static(
+        "by_exact_name",
+        &Thor::DatasetInputBindings::byExactName,
+        "network"_a,
+        "dataset"_a);
+    dataset_input_bindings.def("__len__", &Thor::DatasetInputBindings::size);
+    dataset_input_bindings.def_prop_ro("empty", &Thor::DatasetInputBindings::empty);
+
+    auto training_data = nb::class_<Thor::TrainingData>(training, "TrainingData");
+    training_data.attr("__module__") = "thor.data";
+    training_data.def_static(
+        "__new__",
+        [](nb::handle cls,
+           std::shared_ptr<Thor::NamedDataset> dataset,
+           Thor::DatasetSplitManifest splits,
+           Thor::BatchPolicy batching,
+           std::string datasetName) -> std::shared_ptr<Thor::TrainingData> {
+            (void)cls;
+            if (dataset == nullptr) {
+                throw nb::value_error("TrainingData dataset must not be None");
+            }
+            return std::make_shared<Thor::TrainingData>(
+                std::move(dataset), std::move(splits), std::move(batching), std::move(datasetName));
+        },
+        "cls"_a,
+        "dataset"_a,
+        "splits"_a,
+        "batching"_a,
+        "dataset_name"_a = "indexed_named_examples");
+    training_data.def(
+        "__init__",
+        [](Thor::TrainingData*, std::shared_ptr<Thor::NamedDataset>, Thor::DatasetSplitManifest,
+           Thor::BatchPolicy, std::string) {},
+        "dataset"_a,
+        "splits"_a,
+        "batching"_a,
+        "dataset_name"_a = "indexed_named_examples");
+    training_data.def(
+        "open_session",
+        [](const Thor::TrainingData& self, uint64_t maxInFlightBatches) {
+            return self.openSession(maxInFlightBatches);
+        },
+        "max_in_flight_batches"_a = 32);
+    training_data.def_prop_ro("dataset", [](const Thor::TrainingData& self) {
+        return std::const_pointer_cast<Thor::NamedDataset>(self.getDataset());
+    });
+    training_data.def_prop_ro("splits", &Thor::TrainingData::getSplits,
+                              nb::rv_policy::reference_internal);
+    training_data.def_prop_ro("batching", &Thor::TrainingData::getBatching,
+                              nb::rv_policy::reference_internal);
+    training_data.def_prop_ro("dataset_name", &Thor::TrainingData::getDatasetName,
+                              nb::rv_policy::reference_internal);
+
     auto local_named_example_dataset_writer = nb::class_<LocalNamedExampleDatasetWriter>(training, "LocalNamedExampleDatasetWriter");
     local_named_example_dataset_writer.attr("__module__") = "thor.training";
     local_named_example_dataset_writer.def_static(
@@ -3088,6 +3343,8 @@ C-contiguous numpy.float32 array.
     local_named_example_dataset_writer.def("is_closed", &LocalNamedExampleDatasetWriter::isClosed);
     local_named_example_dataset_writer.def("get_path", [](const LocalNamedExampleDatasetWriter& self) { return self.path().string(); });
     local_named_example_dataset_writer.def("get_manifest_path", [](const LocalNamedExampleDatasetWriter& self) { return self.manifestPath().string(); });
+    local_named_example_dataset_writer.def("get_dataset_id", &LocalNamedExampleDatasetWriter::getDatasetId,
+                                           nb::rv_policy::reference_internal);
     local_named_example_dataset_writer.def("get_layout", &LocalNamedExampleDatasetWriter::getLayout, nb::rv_policy::copy);
     local_named_example_dataset_writer.def("get_storage_mode", [](const LocalNamedExampleDatasetWriter& self) {
         return std::string(LocalNamedExampleDatasetWriter::storageModeToString(self.getStorageMode()));
@@ -3195,8 +3452,101 @@ This helper is intended for inspection/tests; trainer execution uses the native
 Loader path and returns queue-owned buffers normally.
         )nbdoc");
 
-    auto indexed_local_named_batch_loader = nb::class_<IndexedLocalNamedBatchLoader, Loader>(training, "IndexedLocalNamedBatchLoader");
-    indexed_local_named_batch_loader.attr("__module__") = "thor.training";
+    auto indexed_local_named_batch_loader = nb::class_<IndexedLocalNamedBatchLoader, Thor::BatchSession>(training, "IndexedNamedBatchSession");
+    indexed_local_named_batch_loader.attr("__module__") = "thor.data";
+    indexed_local_named_batch_loader.def_static(
+        "__new__",
+        [](nb::handle cls,
+           std::shared_ptr<Thor::LocalNamedDataset> dataset,
+           Thor::DatasetSplitManifest splits,
+           Thor::BatchPolicy batching,
+           const std::string& datasetName,
+           uint64_t batchQueueDepth) -> std::shared_ptr<IndexedLocalNamedBatchLoader> {
+            (void)cls;
+            if (dataset == nullptr) {
+                throw nb::value_error("IndexedLocalNamedBatchLoader dataset must not be None");
+            }
+            auto loader = std::make_shared<IndexedLocalNamedBatchLoader>(
+                std::move(dataset), std::move(splits), std::move(batching), batchQueueDepth);
+            loader->setDatasetName(datasetName);
+            return loader;
+        },
+        "cls"_a,
+        "dataset"_a,
+        "splits"_a,
+        "batching"_a,
+        "dataset_name"_a = "indexed_local_named_examples",
+        "batch_queue_depth"_a = 32,
+        R"nbdoc(
+Read a LocalNamedDataset through an immutable DatasetSplitManifest.
+
+The manifest owns only canonical dataset row membership. Batch size and train
+randomization are supplied separately by BatchPolicy.
+        )nbdoc");
+    indexed_local_named_batch_loader.def_static(
+        "__new__",
+        [](nb::handle cls,
+           std::shared_ptr<Thor::LocalNamedDataset> dataset,
+           nb::object trainIndices,
+           nb::object validateIndices,
+           uint64_t batchSize,
+           const std::string& datasetName,
+           bool randomizeTrain,
+           uint64_t batchQueueDepth,
+           nb::object testIndices,
+           nb::object randomSeed) -> std::shared_ptr<IndexedLocalNamedBatchLoader> {
+            (void)cls;
+            if (dataset == nullptr) {
+                throw nb::value_error("IndexedLocalNamedBatchLoader dataset must not be None");
+            }
+            if (batchSize == 0) {
+                throw nb::value_error("IndexedLocalNamedBatchLoader batch_size must be >= 1");
+            }
+            if (batchQueueDepth == 0) {
+                throw nb::value_error("IndexedLocalNamedBatchLoader batch_queue_depth must be >= 1");
+            }
+            if (!randomizeTrain && !randomSeed.is_none()) {
+                throw nb::value_error("IndexedLocalNamedBatchLoader random_seed requires randomize_train=True");
+            }
+            constexpr uint64_t maxIndex = std::numeric_limits<uint64_t>::max();
+            std::vector<uint64_t> train = uint64IndicesFromPython(
+                std::move(trainIndices), "IndexedLocalNamedBatchLoader train_indices", maxIndex);
+            std::vector<uint64_t> validate = uint64IndicesFromPython(
+                std::move(validateIndices), "IndexedLocalNamedBatchLoader validate_indices", maxIndex, true);
+            std::optional<std::vector<uint64_t>> test;
+            if (!testIndices.is_none()) {
+                test = uint64IndicesFromPython(
+                    std::move(testIndices), "IndexedLocalNamedBatchLoader test_indices", maxIndex, true);
+            }
+            auto loader = std::make_shared<IndexedLocalNamedBatchLoader>(
+                std::move(dataset),
+                std::move(train),
+                std::move(validate),
+                std::move(test),
+                batchSize,
+                batchQueueDepth,
+                randomizeTrain,
+                optionalUint64FromPython(std::move(randomSeed), "random_seed"));
+            loader->setDatasetName(datasetName);
+            return loader;
+        },
+        "cls"_a,
+        "dataset"_a,
+        "train_indices"_a,
+        "validate_indices"_a,
+        "batch_size"_a,
+        "dataset_name"_a = "indexed_local_named_examples",
+        "randomize_train"_a = true,
+        "batch_queue_depth"_a = 32,
+        "test_indices"_a = nb::none(),
+        "random_seed"_a = nb::none(),
+        R"nbdoc(
+Read an immutable LocalNamedDataset through fold-specific row-index arrays.
+
+Multiple loaders constructed from the same dataset object share its canonical
+reader and schema. Split membership, batching, and randomization remain loader
+execution state.
+        )nbdoc");
     indexed_local_named_batch_loader.def_static(
         "__new__",
         [](nb::handle cls,
@@ -3264,6 +3614,27 @@ IndexedNumpyFloat32DictBatchLoader.
         )nbdoc");
     indexed_local_named_batch_loader.def(
         "__init__",
+        [](IndexedLocalNamedBatchLoader*, std::shared_ptr<Thor::LocalNamedDataset>, Thor::DatasetSplitManifest,
+           Thor::BatchPolicy, const std::string&, uint64_t) {},
+        "dataset"_a,
+        "splits"_a,
+        "batching"_a,
+        "dataset_name"_a = "indexed_local_named_examples",
+        "batch_queue_depth"_a = 32);
+    indexed_local_named_batch_loader.def(
+        "__init__",
+        [](IndexedLocalNamedBatchLoader*, std::shared_ptr<Thor::LocalNamedDataset>, nb::object, nb::object, uint64_t, const std::string&, bool, uint64_t, nb::object, nb::object) {},
+        "dataset"_a,
+        "train_indices"_a,
+        "validate_indices"_a,
+        "batch_size"_a,
+        "dataset_name"_a = "indexed_local_named_examples",
+        "randomize_train"_a = true,
+        "batch_queue_depth"_a = 32,
+        "test_indices"_a = nb::none(),
+        "random_seed"_a = nb::none());
+    indexed_local_named_batch_loader.def(
+        "__init__",
         [](IndexedLocalNamedBatchLoader*, nb::object, LocalNamedExampleLayout, nb::object, nb::object, uint64_t, const std::string&, bool, uint64_t, nb::object, nb::object) {},
         "dataset_path"_a,
         "layout"_a,
@@ -3276,6 +3647,12 @@ IndexedNumpyFloat32DictBatchLoader.
         "test_indices"_a = nb::none(),
         "random_seed"_a = nb::none());
     indexed_local_named_batch_loader.def("get_dataset_path", [](const IndexedLocalNamedBatchLoader& self) { return self.getDatasetPath().string(); });
+    indexed_local_named_batch_loader.def("get_dataset", [](const IndexedLocalNamedBatchLoader& self) {
+        std::shared_ptr<const Thor::NamedDataset> dataset = self.getDataset();
+        return std::const_pointer_cast<Thor::NamedDataset>(dataset);
+    });
+    indexed_local_named_batch_loader.def("get_split_manifest", &IndexedLocalNamedBatchLoader::getSplitManifest,
+                                         nb::rv_policy::reference_internal);
     indexed_local_named_batch_loader.def("get_layout", &IndexedLocalNamedBatchLoader::getLayout, nb::rv_policy::copy);
     indexed_local_named_batch_loader.def("get_tensor_names", [](const IndexedLocalNamedBatchLoader& self) { return localNamedLayoutTensorNames(self.getLayout()); });
     indexed_local_named_batch_loader.def("get_tensor_shapes", [](const IndexedLocalNamedBatchLoader& self) { return localNamedLayoutTensorShapes(self.getLayout()); });
@@ -3311,6 +3688,8 @@ IndexedNumpyFloat32DictBatchLoader.
             return copyIndexedLocalNamedBatchToPythonDict(self, exampleType, self.getNextBatchNum(exampleType));
         },
         "split"_a = "train");
+    training.attr("IndexedNamedBatchLoader") = training.attr("IndexedNamedBatchSession");
+    training.attr("IndexedLocalNamedBatchLoader") = training.attr("IndexedNamedBatchSession");
 
     auto device_dataset_storage = nb::enum_<DeviceDatasetStorage>(training, "DeviceDatasetStorage")
                                       .value("OFF", DeviceDatasetStorage::OFF)
@@ -3328,6 +3707,12 @@ IndexedNumpyFloat32DictBatchLoader.
     device_dataset_storage_report.def_ro("required_bytes", &DeviceDatasetStorageReport::requiredBytes);
     device_dataset_storage_report.def_ro("available_bytes_after_model_placement",
                                          &DeviceDatasetStorageReport::availableBytesAfterPlacement);
+    device_dataset_storage_report.def_ro("resident_bytes", &DeviceDatasetStorageReport::residentBytes);
+    device_dataset_storage_report.def_ro("resident_cache_hit", &DeviceDatasetStorageReport::residentCacheHit);
+    device_dataset_storage_report.def_ro("resident_construction_joined",
+                                         &DeviceDatasetStorageReport::residentConstructionJoined);
+    device_dataset_storage_report.def_ro("resident_construction_started",
+                                         &DeviceDatasetStorageReport::residentConstructionStarted);
     device_dataset_storage_report.def_ro("materialization_seconds", &DeviceDatasetStorageReport::materializationSeconds);
 
     auto trainer_fit_options = nb::class_<TrainerFitOptions>(training, "TrainerFitOptions");
@@ -3360,12 +3745,16 @@ IndexedNumpyFloat32DictBatchLoader.
            std::string stats_color,
            nb::object save_model_dir,
            bool save_model_overwrite,
-           nb::object model_selection_score) -> nb::object {
+           nb::object model_selection_score,
+           std::shared_ptr<Thor::TrainingData> data,
+           Thor::DatasetInputBindings* input_bindings) -> nb::object {
             (void)cls;
+            if ((data == nullptr) == (loader == nullptr)) {
+                throw nb::value_error("Trainer requires exactly one of data or loader");
+            }
             TrainingModelSelectionScore modelSelectionScore = trainingModelSelectionScoreFromPython(std::move(model_selection_score));
             Trainer::Builder builder;
             builder.network(std::move(network))
-                .loader(std::move(loader))
                 .statsIntervalSeconds(stats_interval_s)
                 .statsStderrAlso(stats_stderr_also)
                 .statsColorMode(lineStatsColorModeFromString(stats_color))
@@ -3374,6 +3763,14 @@ IndexedNumpyFloat32DictBatchLoader.
                 .saveModelDirectory(optionalPathStringFromPython(save_model_dir, "save_model_dir"))
                 .saveModelOverwrite(save_model_overwrite)
                 .modelSelectionScore(std::move(modelSelectionScore));
+            if (data != nullptr) {
+                builder.data(std::move(data));
+            } else {
+                builder.loader(std::move(loader));
+            }
+            if (input_bindings != nullptr) {
+                builder.inputBindings(*input_bindings);
+            }
             if (optimizer != nullptr) {
                 builder.optimizer(std::move(optimizer));
             }
@@ -3388,7 +3785,7 @@ IndexedNumpyFloat32DictBatchLoader.
         },
         "cls"_a,
         "network"_a,
-        "loader"_a,
+        "loader"_a.none() = nb::none(),
         "optimizer"_a.none() = nb::none(),
         "training_program"_a.none() = nb::none(),
         "debug_synchronous"_a = false,
@@ -3399,7 +3796,9 @@ IndexedNumpyFloat32DictBatchLoader.
         "stats_color"_a = "auto",
         "save_model_dir"_a.none() = nb::none(),
         "save_model_overwrite"_a = false,
-        "model_selection_score"_a.none() = nb::none());
+        "model_selection_score"_a.none() = nb::none(),
+        "data"_a.none() = nb::none(),
+        "input_bindings"_a.none() = nb::none());
     trainer.def(
         "__init__",
         [](Trainer*,
@@ -3415,9 +3814,11 @@ IndexedNumpyFloat32DictBatchLoader.
            std::string,
            nb::object,
            bool,
-           nb::object) {},
+           nb::object,
+           std::shared_ptr<Thor::TrainingData>,
+           Thor::DatasetInputBindings*) {},
         "network"_a,
-        "loader"_a,
+        "loader"_a.none() = nb::none(),
         "optimizer"_a.none() = nb::none(),
         "training_program"_a.none() = nb::none(),
         "debug_synchronous"_a = false,
@@ -3428,7 +3829,9 @@ IndexedNumpyFloat32DictBatchLoader.
         "stats_color"_a = "auto",
         "save_model_dir"_a.none() = nb::none(),
         "save_model_overwrite"_a = false,
-        "model_selection_score"_a.none() = nb::none());
+        "model_selection_score"_a.none() = nb::none(),
+        "data"_a.none() = nb::none(),
+        "input_bindings"_a.none() = nb::none());
     trainer.def(
         "fit",
         [](Trainer& self,

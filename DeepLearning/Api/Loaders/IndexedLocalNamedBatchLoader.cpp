@@ -8,6 +8,27 @@
 
 namespace {
 
+std::shared_ptr<const Thor::LocalNamedDataset> openCompatibleDataset(
+    const std::filesystem::path &datasetPath, const LocalNamedExampleLayout &requestedLayout) {
+    std::shared_ptr<Thor::LocalNamedDataset> dataset = Thor::LocalNamedDataset::open(datasetPath);
+    dataset->assertLayout(requestedLayout);
+    return dataset;
+}
+
+Thor::DatasetSplitManifest makeSplitManifest(
+    const std::shared_ptr<const Thor::LocalNamedDataset> &dataset,
+    std::vector<uint64_t> trainIndices,
+    std::vector<uint64_t> validateIndices,
+    std::optional<std::vector<uint64_t>> testIndices) {
+    if (dataset == nullptr) {
+        throw std::runtime_error("IndexedLocalNamedBatchLoader dataset must not be null.");
+    }
+    return Thor::DatasetSplitManifest(*dataset,
+                                      std::move(trainIndices),
+                                      std::move(validateIndices),
+                                      std::move(testIndices));
+}
+
 const char *splitNameForStats(ExampleType exampleType) {
     if (exampleType == ExampleType::TRAIN) {
         return "train";
@@ -32,47 +53,71 @@ IndexedLocalNamedBatchLoader::IndexedLocalNamedBatchLoader(std::filesystem::path
                                                            uint64_t batchQueueDepth,
                                                            bool randomizeTrain,
                                                            std::optional<uint64_t> seed)
-    : datasetPath(std::move(datasetPath)),
+    : IndexedLocalNamedBatchLoader(openCompatibleDataset(datasetPath, requestedLayout),
+                                   std::move(trainIndices),
+                                   std::move(validateIndices),
+                                   std::move(testIndices),
+                                   batchSize,
+                                   batchQueueDepth,
+                                   randomizeTrain,
+                                   seed) {}
+
+IndexedLocalNamedBatchLoader::IndexedLocalNamedBatchLoader(std::shared_ptr<const Thor::LocalNamedDataset> dataset,
+                                                           std::vector<uint64_t> trainIndices,
+                                                           std::vector<uint64_t> validateIndices,
+                                                           std::optional<std::vector<uint64_t>> testIndices,
+                                                           uint64_t batchSize,
+                                                           uint64_t batchQueueDepth,
+                                                           bool randomizeTrain,
+                                                           std::optional<uint64_t> seed)
+    : IndexedLocalNamedBatchLoader(dataset,
+                                   makeSplitManifest(dataset,
+                                                     std::move(trainIndices),
+                                                     std::move(validateIndices),
+                                                     std::move(testIndices)),
+                                   Thor::BatchPolicy(batchSize, randomizeTrain, seed),
+                                   batchQueueDepth) {}
+
+IndexedLocalNamedBatchLoader::IndexedLocalNamedBatchLoader(std::shared_ptr<const Thor::LocalNamedDataset> dataset,
+                                                           Thor::DatasetSplitManifest splits,
+                                                           Thor::BatchPolicy batching,
+                                                           uint64_t batchQueueDepth,
+                                                           std::set<Thor::DatasetFieldId> requiredFieldIds)
+    : dataset(std::move(dataset)),
+      splitManifest(std::move(splits)),
+      requiredFieldIds(std::move(requiredFieldIds)),
       batchQueueDepth(batchQueueDepth),
-      randomizeTrain(randomizeTrain),
-      seed(seed),
-      explicitTestSplit(testIndices.has_value()) {
-    if (batchSize == 0) {
-        throw std::runtime_error("IndexedLocalNamedBatchLoader batch_size must be >= 1.");
+      randomizeTrain(batching.getRandomizeTrain()),
+      seed(batching.getRandomSeed()) {
+    if (this->dataset == nullptr) {
+        throw std::runtime_error("IndexedLocalNamedBatchLoader dataset must not be null.");
     }
     if (batchQueueDepth == 0) {
         throw std::runtime_error("IndexedLocalNamedBatchLoader batch_queue_depth must be >= 1.");
     }
-    if (!randomizeTrain && seed.has_value()) {
-        throw std::runtime_error("IndexedLocalNamedBatchLoader random_seed requires randomize_train=true.");
+
+    splitManifest.validateAgainst(*this->dataset);
+    if (this->requiredFieldIds.empty()) {
+        for (const Thor::DatasetField& field : this->dataset->getSchema().getFields()) {
+            this->requiredFieldIds.insert(field.id);
+        }
     }
-    this->batchSize = batchSize;
+    for (Thor::DatasetFieldId fieldId : this->requiredFieldIds) {
+        (void)this->dataset->getSchema().getField(fieldId);
+    }
+    this->batchSize = batching.getBatchSize();
+    numDatasetExamples = this->dataset->getNumExamples();
 
-    std::vector<uint64_t> resolvedTestIndices;
-    if (explicitTestSplit) {
-        resolvedTestIndices = std::move(testIndices.value());
-    } else {
-        resolvedTestIndices = validateIndices;
+    if (splitManifest.getTrain().empty()) {
+        throw std::runtime_error("IndexedLocalNamedBatchLoader train partition must contain at least one row index.");
     }
 
-    openDataset(requestedLayout);
-
-    if (trainIndices.empty()) {
-        throw std::runtime_error("IndexedLocalNamedBatchLoader train_indices must contain at least one row index.");
-    }
-
-    trainAssembler = createAssembler(std::move(trainIndices), "train", randomizeTrain, seed);
-    validateAssembler = createAssembler(std::move(validateIndices), "validate", false, std::nullopt);
-    testAssembler = createAssembler(std::move(resolvedTestIndices), "test", false, std::nullopt);
+    trainAssembler = createAssembler(splitManifest.getTrain().getSharedIndices(), "train", randomizeTrain, seed);
+    validateAssembler = createAssembler(splitManifest.getValidate().getSharedIndices(), "validate", false, std::nullopt);
+    testAssembler = createAssembler(splitManifest.getTest().getSharedIndices(), "test", false, std::nullopt);
 }
 
 IndexedLocalNamedBatchLoader::~IndexedLocalNamedBatchLoader() = default;
-
-void IndexedLocalNamedBatchLoader::openDataset(const LocalNamedExampleLayout &requestedLayout) {
-    reader = IndexedLocalNamedExampleReader::openDataset(datasetPath, requestedLayout);
-    layout = reader->getLayout();
-    numDatasetExamples = reader->getNumExamples();
-}
 
 void IndexedLocalNamedBatchLoader::validateIndex(uint64_t index, const char *splitName) const {
     if (index >= numDatasetExamples) {
@@ -87,16 +132,17 @@ void IndexedLocalNamedBatchLoader::validateIndices(const std::vector<uint64_t> &
     }
 }
 
-std::unique_ptr<IndexedLocalNamedBatchAssembler> IndexedLocalNamedBatchLoader::createAssembler(std::vector<uint64_t> indices,
-                                                                                                const char *splitName,
-                                                                                                bool randomized,
-                                                                                                std::optional<uint64_t> splitSeed) const {
-    if (indices.empty()) {
+std::unique_ptr<IndexedLocalNamedBatchAssembler> IndexedLocalNamedBatchLoader::createAssembler(
+    std::shared_ptr<const std::vector<uint64_t>> indices,
+    const char *splitName,
+    bool randomized,
+    std::optional<uint64_t> splitSeed) const {
+    if (indices == nullptr || indices->empty()) {
         return nullptr;
     }
-    validateIndices(indices, splitName);
-    return std::make_unique<IndexedLocalNamedBatchAssembler>(reader,
-                                                             layout,
+    validateIndices(*indices, splitName);
+    return std::make_unique<IndexedLocalNamedBatchAssembler>(dataset->getReader(),
+                                                             dataset->getLayout(),
                                                              std::move(indices),
                                                              splitName,
                                                              batchSize,
@@ -132,6 +178,9 @@ const IndexedLocalNamedBatchAssembler *IndexedLocalNamedBatchLoader::assemblerFo
 }
 
 Batch IndexedLocalNamedBatchLoader::getBatch(ExampleType exampleType, uint64_t &batchNum) {
+    if (cancelled.load(std::memory_order_acquire)) {
+        throw std::runtime_error("IndexedNamedBatchSession has been cancelled.");
+    }
     IndexedLocalNamedBatchAssembler *assembler = assemblerFor(exampleType);
     if (assembler == nullptr) {
         throw std::runtime_error("IndexedLocalNamedBatchLoader cannot get a batch from an empty split.");
@@ -143,6 +192,9 @@ Batch IndexedLocalNamedBatchLoader::getBatch(ExampleType exampleType, uint64_t &
 }
 
 void IndexedLocalNamedBatchLoader::returnBatchBuffers(ExampleType exampleType, Batch &&batch) {
+    if (cancelled.load(std::memory_order_acquire)) {
+        return;
+    }
     IndexedLocalNamedBatchAssembler *assembler = assemblerFor(exampleType);
     if (assembler == nullptr) {
         throw std::runtime_error("IndexedLocalNamedBatchLoader cannot return buffers to an empty split.");
@@ -171,32 +223,14 @@ uint64_t IndexedLocalNamedBatchLoader::getNextBatchNum(ExampleType exampleType) 
 
 bool IndexedLocalNamedBatchLoader::supportsDeviceDatasetMaterialization() const { return true; }
 
-DeviceDatasetMaterializationView IndexedLocalNamedBatchLoader::describeDeviceDatasetMaterialization() const {
-    DeviceDatasetMaterializationView view;
-    view.datasetPath = datasetPath;
-    view.layout = layout;
-    view.numDatasetExamples = numDatasetExamples;
-    view.batchSize = batchSize;
-    view.splits.reserve(3);
+Thor::DatasetMaterializationDescription IndexedLocalNamedBatchLoader::describeDeviceDatasetMaterialization() const {
+    return Thor::DatasetMaterializationDescription(
+        dataset->getPath(), dataset->getId(), dataset->getSchema(), dataset->getLayout(), numDatasetExamples);
+}
 
-    auto appendSplit = [&](ExampleType exampleType, bool randomized, std::optional<uint64_t> splitSeed) {
-        const IndexedLocalNamedBatchAssembler *assembler = assemblerFor(exampleType);
-        DeviceDatasetMaterializationSplitView split;
-        split.exampleType = exampleType;
-        split.splitName = deviceDatasetMaterializationSplitName(exampleType);
-        split.randomized = randomized;
-        split.seed = splitSeed;
-        if (assembler != nullptr) {
-            split.indices = assembler->getIndices();
-            split.batchesPerEpoch = assembler->getNumBatchesPerEpoch();
-        }
-        view.splits.push_back(std::move(split));
-    };
-
-    appendSplit(ExampleType::TRAIN, randomizeTrain, seed);
-    appendSplit(ExampleType::VALIDATE, false, std::nullopt);
-    appendSplit(ExampleType::TEST, false, std::nullopt);
-    return view;
+Thor::DeviceDatasetSessionDescription IndexedLocalNamedBatchLoader::describeDeviceDatasetSession() const {
+    return Thor::DeviceDatasetSessionDescription(
+        splitManifest, Thor::BatchPolicy(batchSize, randomizeTrain, seed), requiredFieldIds);
 }
 
 IndexedLocalNamedBatchAssemblerStats IndexedLocalNamedBatchLoader::getStatsSnapshot(ExampleType exampleType) {
@@ -208,14 +242,14 @@ IndexedLocalNamedBatchAssemblerStats IndexedLocalNamedBatchLoader::getStatsSnaps
     IndexedLocalNamedBatchAssemblerStats stats;
     stats.splitName = splitNameForStats(exampleType);
     stats.targetBatchQueueDepth = batchQueueDepth;
-    stats.recordSizeBytes = layout.recordSizeBytes();
+    stats.recordSizeBytes = dataset->getLayout().recordSizeBytes();
     stats.resolvedIoBackend = "empty";
     return stats;
 }
 
-const LocalNamedExampleLayout &IndexedLocalNamedBatchLoader::getLayout() const { return layout; }
+const LocalNamedExampleLayout &IndexedLocalNamedBatchLoader::getLayout() const { return dataset->getLayout(); }
 
-const std::filesystem::path &IndexedLocalNamedBatchLoader::getDatasetPath() const { return datasetPath; }
+const std::filesystem::path &IndexedLocalNamedBatchLoader::getDatasetPath() const { return dataset->getPath(); }
 
 uint64_t IndexedLocalNamedBatchLoader::getNumDatasetExamples() const { return numDatasetExamples; }
 
@@ -226,9 +260,25 @@ bool IndexedLocalNamedBatchLoader::getRandomizeTrain() const { return randomizeT
 std::optional<uint64_t> IndexedLocalNamedBatchLoader::getRandomSeed() const { return seed; }
 
 const std::vector<uint64_t> &IndexedLocalNamedBatchLoader::getSplitIndices(ExampleType exampleType) const {
-    static const std::vector<uint64_t> emptyIndices;
-    const IndexedLocalNamedBatchAssembler *assembler = assemblerFor(exampleType);
-    return assembler == nullptr ? emptyIndices : assembler->getIndices();
+    if (exampleType == ExampleType::TRAIN) {
+        return splitManifest.getTrain().getIndices();
+    }
+    if (exampleType == ExampleType::VALIDATE) {
+        return splitManifest.getValidate().getIndices();
+    }
+    if (exampleType == ExampleType::TEST) {
+        return splitManifest.getTest().getIndices();
+    }
+    throw std::runtime_error("Unsupported ExampleType");
 }
 
-bool IndexedLocalNamedBatchLoader::hasExplicitTestSplit() const { return explicitTestSplit; }
+bool IndexedLocalNamedBatchLoader::hasExplicitTestSplit() const { return splitManifest.hasExplicitTestSplit(); }
+
+void IndexedLocalNamedBatchLoader::cancel() {
+    if (cancelled.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
+    trainAssembler.reset();
+    validateAssembler.reset();
+    testAssembler.reset();
+}

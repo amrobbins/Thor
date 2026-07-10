@@ -352,7 +352,8 @@ void appendPlainDimKey(LineBuffer& out, const char* key) {
 
 bool shouldReportDeviceDatasetStorage(const DeviceDatasetStorageReport& report) {
     return report.attempted || report.used || !report.reason.empty() || report.examples > 0 || report.requiredBytes > 0 ||
-           report.availableBytesAfterPlacement > 0 || report.materializationSeconds > 0.0;
+           report.availableBytesAfterPlacement > 0 || report.residentBytes > 0 || report.residentCacheHit ||
+           report.residentConstructionJoined || report.residentConstructionStarted || report.materializationSeconds > 0.0;
 }
 
 void appendPlainDeviceDatasetStorage(LineBuffer& out, const DeviceDatasetStorageReport& report) {
@@ -379,6 +380,17 @@ void appendPlainDeviceDatasetStorage(LineBuffer& out, const DeviceDatasetStorage
     if (report.availableBytesAfterPlacement > 0) {
         out.append(",available_bytes_after_model_placement=");
         out.append(formatUnsigned(report.availableBytesAfterPlacement).c_str());
+    }
+    if (report.residentBytes > 0) {
+        out.append(",resident_bytes=");
+        out.append(formatUnsigned(report.residentBytes).c_str());
+    }
+    if (report.residentCacheHit) {
+        out.append(",residency=cache_hit");
+    } else if (report.residentConstructionJoined) {
+        out.append(",residency=joined_construction");
+    } else if (report.residentConstructionStarted) {
+        out.append(",residency=constructed");
     }
     if (report.materializationSeconds > 0.0) {
         out.append(",materialization_s=");
@@ -411,6 +423,17 @@ void appendColorDeviceDatasetStorage(LineBuffer& out, const DeviceDatasetStorage
     if (report.availableBytesAfterPlacement > 0) {
         out.append(",available_bytes_after_model_placement=");
         out.append(formatUnsigned(report.availableBytesAfterPlacement).c_str());
+    }
+    if (report.residentBytes > 0) {
+        out.append(",resident_bytes=");
+        out.append(formatUnsigned(report.residentBytes).c_str());
+    }
+    if (report.residentCacheHit) {
+        out.append(",residency=cache_hit");
+    } else if (report.residentConstructionJoined) {
+        out.append(",residency=joined_construction");
+    } else if (report.residentConstructionStarted) {
+        out.append(",residency=constructed");
     }
     if (report.materializationSeconds > 0.0) {
         out.append(",materialization_s=");

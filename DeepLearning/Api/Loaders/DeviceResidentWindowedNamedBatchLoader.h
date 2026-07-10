@@ -1,11 +1,14 @@
 #pragma once
 
-#include "DeepLearning/Api/Loaders/Loader.h"
+#include "DeepLearning/Api/Loaders/DeviceDatasetMaterialization.h"
+#include "DeepLearning/Api/Data/BatchSession.h"
+#include "DeepLearning/Api/Training/DeviceDatasetResidency.h"
 #include "Utilities/Common/Stream.h"
 #include "Utilities/Loaders/DeviceResidentNamedDataset.h"
 #include "Utilities/Loaders/IndexedLocalNamedExampleReader.h"
 #include "Utilities/Random/FullPeriodRandom.h"
 
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -13,30 +16,35 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
 /**
- * Hybrid loader used when best-effort device dataset storage cannot fit the
- * full materialized dataset but can fit the high-value windowed tensors.
- *
- * Direct dense tensors are loaded from the indexed dataset without materializing
- * window sources. Windowed tensors/masks are gathered from a device-resident
- * assembled window cache. This preserves source split/order semantics while
- * avoiding repeated wide history window reads/assembly/copies.
+ * Hybrid session used when only canonical windowed fields fit on the device.
+ * Direct fields are read from the source dataset while windowed fields are
+ * gathered by canonical dataset row from shared device storage.
  */
-class DeviceResidentWindowedNamedBatchLoader : public Loader {
+class DeviceResidentWindowedNamedBatchSession : public Thor::BatchSession {
    public:
-    DeviceResidentWindowedNamedBatchLoader(DeviceDatasetMaterializationView view,
-                                           std::shared_ptr<DeviceResidentNamedDataset> windowedDataset,
-                                           uint64_t batchQueueDepth = 2,
-                                           uint64_t readerQueueDepth = 32);
-    ~DeviceResidentWindowedNamedBatchLoader() override;
+    DeviceResidentWindowedNamedBatchSession(
+        Thor::DatasetMaterializationDescription datasetDescription,
+        Thor::DeviceDatasetSessionDescription sessionDescription,
+        Thor::DeviceDatasetLease windowedDataset,
+        uint64_t batchQueueDepth = 2,
+        uint64_t readerQueueDepth = 32);
+    DeviceResidentWindowedNamedBatchSession(
+        Thor::DatasetMaterializationDescription datasetDescription,
+        Thor::DeviceDatasetSessionDescription sessionDescription,
+        std::shared_ptr<DeviceResidentNamedDataset> windowedDataset,
+        uint64_t batchQueueDepth = 2,
+        uint64_t readerQueueDepth = 32);
+    ~DeviceResidentWindowedNamedBatchSession() override;
 
-    DeviceResidentWindowedNamedBatchLoader(const DeviceResidentWindowedNamedBatchLoader &) = delete;
-    DeviceResidentWindowedNamedBatchLoader &operator=(const DeviceResidentWindowedNamedBatchLoader &) = delete;
-    DeviceResidentWindowedNamedBatchLoader(DeviceResidentWindowedNamedBatchLoader &&) = delete;
-    DeviceResidentWindowedNamedBatchLoader &operator=(DeviceResidentWindowedNamedBatchLoader &&) = delete;
+    DeviceResidentWindowedNamedBatchSession(const DeviceResidentWindowedNamedBatchSession &) = delete;
+    DeviceResidentWindowedNamedBatchSession &operator=(const DeviceResidentWindowedNamedBatchSession &) = delete;
+    DeviceResidentWindowedNamedBatchSession(DeviceResidentWindowedNamedBatchSession &&) = delete;
+    DeviceResidentWindowedNamedBatchSession &operator=(DeviceResidentWindowedNamedBatchSession &&) = delete;
 
     Batch getBatch(ExampleType exampleType, uint64_t &batchNum) override;
     void returnBatchBuffers(ExampleType exampleType, Batch &&batch) override;
@@ -44,12 +52,28 @@ class DeviceResidentWindowedNamedBatchLoader : public Loader {
     uint64_t getNumBatchesPerEpoch(ExampleType exampleType) override;
     uint64_t getNumExamples(ExampleType exampleType) override;
     uint64_t getNextBatchNum(ExampleType exampleType) override;
+    [[nodiscard]] std::optional<ThorImplementation::TensorPlacement> getBatchTensorPlacement(
+        const std::string &tensorName) const override;
+    [[nodiscard]] std::vector<Event> getSynchronizeEvents() const override;
+    [[nodiscard]] const std::set<Thor::DatasetFieldId>& getRequiredDatasetFieldIds() const override {
+        return requiredFieldIds;
+    }
+    void cancel() override;
 
-    [[nodiscard]] std::shared_ptr<DeviceResidentNamedDataset> getWindowedDeviceDataset() const { return windowedDataset; }
+    [[nodiscard]] const std::shared_ptr<const DeviceResidentNamedDataset> &getWindowedDeviceDataset() const {
+        return windowedDataset.getShared();
+    }
+    [[nodiscard]] uint64_t getBatchQueueDepth() const { return batchQueueDepth; }
+    [[nodiscard]] bool isCancelled() const { return cancelled.load(std::memory_order_acquire); }
 
    private:
     struct SplitRuntime {
-        const DeviceResidentNamedSplit *split = nullptr;
+        ExampleType exampleType = ExampleType::TRAIN;
+        std::string splitName;
+        std::shared_ptr<const std::vector<uint64_t>> sourceIndices;
+        bool randomized = false;
+        std::optional<uint64_t> seed;
+        uint64_t batchesPerEpoch = 0;
         std::deque<std::map<std::string, ThorImplementation::Tensor>> availableBatches;
         ThorImplementation::Tensor rowIndicesHost;
         ThorImplementation::Tensor rowIndicesDevice;
@@ -60,19 +84,32 @@ class DeviceResidentWindowedNamedBatchLoader : public Loader {
         mutable std::mutex mutex;
         std::condition_variable notEmpty;
         Stream gatherStream;
+
+        [[nodiscard]] uint64_t numExamples() const {
+            return sourceIndices == nullptr ? 0 : static_cast<uint64_t>(sourceIndices->size());
+        }
     };
 
-    DeviceDatasetMaterializationView view;
+    Thor::DatasetMaterializationDescription datasetDescription;
+    Thor::DeviceDatasetSessionDescription sessionDescription;
+    std::set<Thor::DatasetFieldId> requiredFieldIds;
     std::shared_ptr<IndexedLocalNamedExampleReader> reader;
-    std::shared_ptr<DeviceResidentNamedDataset> windowedDataset;
+    Thor::DeviceDatasetLease windowedDataset;
     uint64_t batchQueueDepth = 0;
     uint64_t readerQueueDepth = 0;
     std::map<ExampleType, std::unique_ptr<SplitRuntime>> splitRuntimes;
+    std::atomic<bool> cancelled{false};
 
-    void initializeSplit(const DeviceResidentNamedSplit &split);
+    void initializeSplit(ExampleType exampleType,
+                         std::shared_ptr<const std::vector<uint64_t>> sourceIndices,
+                         bool randomized,
+                         std::optional<uint64_t> seed);
     [[nodiscard]] SplitRuntime &runtimeFor(ExampleType exampleType);
     [[nodiscard]] const SplitRuntime &runtimeFor(ExampleType exampleType) const;
     [[nodiscard]] std::map<std::string, ThorImplementation::Tensor> allocateBatchTensorSet() const;
     void fillRowIndexTensor(SplitRuntime &runtime);
     void validateReturnedBatch(const std::map<std::string, ThorImplementation::Tensor> &tensors) const;
 };
+
+// Compatibility alias for the historical loader name.
+using DeviceResidentWindowedNamedBatchLoader = DeviceResidentWindowedNamedBatchSession;

@@ -1,6 +1,7 @@
 #include "DeepLearning/Api/Training/Trainer.h"
 
 #include "DeepLearning/Api/Loaders/Loader.h"
+#include "DeepLearning/Api/Data/TrainingData.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "Utilities/Common/Stream.h"
@@ -70,8 +71,14 @@ Trainer Trainer::Builder::build() const {
     if (network_ == nullptr) {
         throw std::runtime_error("Trainer requires a Network.");
     }
-    if (loader_ == nullptr) {
-        throw std::runtime_error("Trainer requires a Loader.");
+    if (trainingData_ == nullptr && loader_ == nullptr) {
+        throw std::runtime_error("Trainer requires TrainingData or a legacy Loader.");
+    }
+    if (trainingData_ != nullptr && loader_ != nullptr) {
+        throw std::runtime_error("Trainer accepts either TrainingData or a legacy Loader, not both.");
+    }
+    if (datasetInputBindings_.has_value() && trainingData_ == nullptr) {
+        throw std::runtime_error("Trainer DatasetInputBindings require TrainingData; legacy Loader inputs are not schema-bound.");
     }
     if (runtimeConfig_.maxInFlightBatches == 0) {
         throw std::runtime_error("Trainer maxInFlightBatches must be >= 1.");
@@ -83,7 +90,17 @@ Trainer Trainer::Builder::build() const {
 
     Trainer trainer;
     trainer.network = network_;
+    trainer.trainingData = trainingData_;
     trainer.loader = loader_;
+    if (trainingData_ != nullptr) {
+        DatasetInputBindings bindings = datasetInputBindings_.has_value()
+                                            ? datasetInputBindings_.value()
+                                            : DatasetInputBindings::byExactName(*network_, *trainingData_->getDataset());
+        CompiledDatasetInputBindings compiled = bindings.compile(
+            *network_, *trainingData_->getDataset(), trainingData_->getBatching().getBatchSize());
+        trainer.datasetInputBindings = std::move(compiled.trainingInputBindings);
+        trainer.requiredDatasetFieldIds = std::move(compiled.requiredFieldIds);
+    }
     trainer.optimizer = optimizer_;
     trainer.trainingProgram = trainingProgram_;
     trainer.runtimeConfig = runtimeConfig_;
@@ -620,6 +637,18 @@ void Trainer::releasePlacedNetworkAfterLastFit() {
     }
 }
 
+std::shared_ptr<Loader> Trainer::openBatchSessionForRun() const {
+    if (trainingData != nullptr) {
+        return trainingData->openSession(
+            runtimeConfig.maxInFlightBatches,
+            requiredDatasetFieldIds);
+    }
+    if (loader != nullptr) {
+        return loader;
+    }
+    throw std::runtime_error("Trainer has no TrainingData or legacy Loader.");
+}
+
 void Trainer::fitInternal(const TrainerFitOptions& options,
                           TrainingObserver& observer,
                           const TrainingCancellationToken& cancellationToken,
@@ -638,9 +667,10 @@ void Trainer::fitInternal(const TrainerFitOptions& options,
 
     TrainingRunRequest request;
     request.network = network;
-    request.loader = loader;
+    request.loader = openBatchSessionForRun();
     request.optimizer = optimizer;
     request.trainingProgram = trainingProgram;
+    request.datasetInputBindings = datasetInputBindings;
     request.runtime = runtimeConfig;
     request.runtime.scalarTensorsToReport.insert(additionalScalarTensorsToReport.begin(), additionalScalarTensorsToReport.end());
     request.epochs = options.epochs;
@@ -950,6 +980,7 @@ TrainingRunResult Trainer::evaluateTrainingRun(std::string runName,
     request.loader = std::move(evaluationLoader);
     request.optimizer = optimizer;
     request.trainingProgram = trainingProgram;
+    request.datasetInputBindings = datasetInputBindings;
     request.runtime = runtimeConfig;
     request.runtime.scalarTensorsToReport.insert("loss");
     request.checkBestModelEveryEpochs = 1;
@@ -1005,8 +1036,8 @@ void Trainer::validateFitOptions(const TrainerFitOptions& options) const {
     if (network == nullptr) {
         throw std::runtime_error("Trainer::fit requires a Network.");
     }
-    if (loader == nullptr) {
-        throw std::runtime_error("Trainer::fit requires a Loader.");
+    if (trainingData == nullptr && loader == nullptr) {
+        throw std::runtime_error("Trainer::fit requires TrainingData or a legacy Loader.");
     }
     if (executor == nullptr) {
         throw std::runtime_error("Trainer::fit requires a TrainingExecutor.");

@@ -11,17 +11,14 @@ struct NamedDatasetMaterializationSupport {
     std::string reason;
 };
 
-/**
- * Returns whether the CPU snapshot materializer can stage the supplied loader
- * materialization view. It supports direct dense tensors plus assembled
- * windowed tensors/masks without touching the source loader's live batch stream.
- */
+/** Returns whether the canonical dataset can be staged into a CPU snapshot. */
 [[nodiscard]] NamedDatasetMaterializationSupport checkNamedDatasetSnapshotMaterializationSupport(
-    const DeviceDatasetMaterializationView &view);
+    const Thor::DatasetMaterializationDescription &description);
 
 /**
- * Materialize all non-empty splits described by the view into contiguous CPU
- * tensors without touching or advancing the source loader's live batch stream.
+ * Materialize every canonical dataset row exactly once, in source row order,
+ * without touching or advancing any live BatchSession.
  */
-[[nodiscard]] MaterializedNamedDatasetSnapshot materializeNamedDatasetSnapshot(const DeviceDatasetMaterializationView &view,
-                                                                              uint64_t readerQueueDepth = 32);
+[[nodiscard]] MaterializedNamedDatasetSnapshot materializeNamedDatasetSnapshot(
+    const Thor::DatasetMaterializationDescription &description,
+    uint64_t readerQueueDepth = 32);

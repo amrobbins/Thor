@@ -453,6 +453,58 @@ TEST(NetworkInput, SamePlacementInputStillCopiesByDefault) {
     expectAllEqual(capture.readCapture(0), 3.0f);
 }
 
+TEST(NetworkInput, DeviceLoadCopiesDirectlyWithoutAllocatingInputSlots) {
+    if (MachineEvaluator::instance().getNumGpus() == 0) {
+        GTEST_SKIP() << "NetworkInput device-load test requires a GPU";
+    }
+
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    TensorDescriptor descriptor(DataType::FP32, {4});
+    Stream setupStream(0);
+    Tensor deviceBatchTensor = makeFilledGpuTensor(descriptor, 5.0f, setupStream);
+    setupStream.synchronize();
+
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    RuntimeForwardedInputCaptureLayer capture;
+    input.connectToNextLayer(&capture);
+
+    EXPECT_EQ(input.getNumInputSlots(), 0u);
+    input.configureBatchInputPlacement(gpuPlacement);
+    EXPECT_TRUE(input.isDeviceLoad());
+    input.preallocateInputSlots(4);
+    input.setActiveInputSlot(3);
+    EXPECT_EQ(input.getNumInputSlots(), 0u);
+
+    input.forward(deviceBatchTensor, false, 1);
+    capture.synchronize();
+
+    ASSERT_EQ(capture.invocationCount, 1u);
+    ASSERT_EQ(capture.forwardedTensorIds[0], input.getFeatureOutput().value().getTensorId());
+    ASSERT_NE(capture.forwardedTensorIds[0], deviceBatchTensor.getTensorId());
+    EXPECT_EQ(capture.forwardedMemPtrs[0], input.getFeatureOutput().value().getMemPtr<void>());
+    expectAllEqual(capture.readCapture(0), 5.0f);
+}
+
+TEST(NetworkInput, HostBatchPlacementRetainsRequestedStagingRingDepth) {
+    if (MachineEvaluator::instance().getNumGpus() == 0) {
+        GTEST_SKIP() << "NetworkInput staged-load test requires a GPU";
+    }
+
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    TensorDescriptor descriptor(DataType::FP32, {4});
+
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    RuntimeForwardedInputCaptureLayer capture;
+    input.connectToNextLayer(&capture);
+
+    EXPECT_EQ(input.getNumInputSlots(), 0u);
+    input.configureBatchInputPlacement(cpuPlacement);
+    EXPECT_FALSE(input.isDeviceLoad());
+    input.preallocateInputSlots(4);
+    EXPECT_EQ(input.getNumInputSlots(), 4u);
+}
+
 TEST(NetworkInput, PassThroughRejectsDifferentRuntimeTensor) {
     if (MachineEvaluator::instance().getNumGpus() == 0) {
         GTEST_SKIP() << "NetworkInput pass-through validation test requires a GPU";

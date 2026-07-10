@@ -14,7 +14,9 @@
 #include <condition_variable>
 #include <future>
 #include <filesystem>
+#include <map>
 #include <memory>
+#include <optional>
 #include <mutex>
 #include <utility>
 #include <vector>
@@ -219,6 +221,28 @@ TEST(LayerSynchronization, TrainableLayerAlsoCoversGradientUpdateStream) {
     layer.setGradientStream(gradientUpdateStream);
 
     expectSynchronizationEventsCoverStreams(layer, {dataStream0, dataStream1, gradientUpdateStream}, 3);
+}
+
+TEST(LayerSynchronization, PlacedNetworkUsesLoaderPlacementsToElideDeviceInputRings) {
+    if (MachineEvaluator::instance().getNumGpus() == 0)
+        GTEST_SKIP() << "Placed-network input placement test requires a GPU";
+
+    PlacedSynchronizationTarget target = makePlacedSynchronizationTarget("DeviceInputPlacementNetwork");
+    shared_ptr<NetworkInput> input = target.placedNetwork->getStampedNetwork(0).getNamedInput("input");
+    ASSERT_NE(input, nullptr);
+    EXPECT_EQ(input->getNumInputSlots(), 0u);
+
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    target.placedNetwork->configureBatchInputPlacements({{"input", gpuPlacement}});
+    target.placedNetwork->preallocateInputSlots(4);
+    EXPECT_TRUE(input->isDeviceLoad());
+    EXPECT_EQ(input->getNumInputSlots(), 0u);
+
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    target.placedNetwork->configureBatchInputPlacements({{"input", cpuPlacement}});
+    target.placedNetwork->preallocateInputSlots(4);
+    EXPECT_FALSE(input->isDeviceLoad());
+    EXPECT_EQ(input->getNumInputSlots(), 4u);
 }
 
 TEST(LayerSynchronization, NetworkInputIncludesItsUploadStream) {

@@ -8,6 +8,8 @@ from typing import Any, Iterator, Mapping, Sequence
 
 import numpy as np
 
+from .._thor.training import DatasetSplitManifest
+
 
 class StratificationMode(str, Enum):
     """How split units are assigned to strata before sampling."""
@@ -359,6 +361,189 @@ class StratifiedSplitter:
             self._stratify_edges = tuple()
 
         self._units_by_group = {unit.group: unit for unit in self._units}
+
+    @classmethod
+    def _for_dataset(
+        cls,
+        *,
+        dataset: Any,
+        strata: Sequence[Any] | None,
+        groups: Sequence[Any] | None,
+        mode: str | StratificationMode,
+        num_bins: int | None,
+        bucket_labels: Sequence[Any] | None,
+        seed: int | None,
+    ) -> StratifiedSplitter:
+        """Build a splitter whose keys are canonical dataset row ids."""
+
+        num_examples = int(dataset.num_examples)
+        if num_examples <= 0:
+            raise ValueError("dataset must contain at least one example")
+        if strata is not None and len(strata) != num_examples:
+            raise ValueError("strata length must match dataset.num_examples")
+        if groups is not None and len(groups) != num_examples:
+            raise ValueError("groups length must match dataset.num_examples")
+        if bucket_labels is not None and len(bucket_labels) != num_examples:
+            raise ValueError("bucket_labels length must match dataset.num_examples")
+
+        return cls(
+            tuple(range(num_examples)),
+            strata,
+            groups=groups,
+            mode=mode,
+            num_bins=num_bins,
+            bucket_labels=bucket_labels,
+            seed=seed,
+        )
+
+    @classmethod
+    def train_validation_manifest(
+        cls,
+        *,
+        dataset: Any,
+        strata: Sequence[Any] | None = None,
+        validation_fraction: float | None = None,
+        validation_size: int | None = None,
+        groups: Sequence[Any] | None = None,
+        mode: str | StratificationMode = StratificationMode.QUANTILE,
+        num_bins: int | None = None,
+        bucket_labels: Sequence[Any] | None = None,
+        seed: int | None = None,
+    ) -> DatasetSplitManifest:
+        """Create one dataset-bound immutable train/validation manifest."""
+
+        splitter = cls._for_dataset(
+            dataset=dataset,
+            strata=strata,
+            groups=groups,
+            mode=mode,
+            num_bins=num_bins,
+            bucket_labels=bucket_labels,
+            seed=seed,
+        )
+        split = splitter.train_validation_split(
+            validation_fraction=validation_fraction,
+            validation_size=validation_size,
+        )
+        return DatasetSplitManifest(
+            dataset=dataset,
+            train_indices=split.train_keys,
+            validate_indices=split.validate_keys,
+        )
+
+    @classmethod
+    def train_validation_test_manifest(
+        cls,
+        *,
+        dataset: Any,
+        strata: Sequence[Any] | None = None,
+        validation_fraction: float | None = None,
+        validation_size: int | None = None,
+        test_fraction: float | None = None,
+        test_size: int | None = None,
+        groups: Sequence[Any] | None = None,
+        mode: str | StratificationMode = StratificationMode.QUANTILE,
+        num_bins: int | None = None,
+        bucket_labels: Sequence[Any] | None = None,
+        seed: int | None = None,
+    ) -> DatasetSplitManifest:
+        """Create one dataset-bound immutable train/validation/test manifest."""
+
+        splitter = cls._for_dataset(
+            dataset=dataset,
+            strata=strata,
+            groups=groups,
+            mode=mode,
+            num_bins=num_bins,
+            bucket_labels=bucket_labels,
+            seed=seed,
+        )
+        split = splitter.train_validation_test_split(
+            validation_fraction=validation_fraction,
+            validation_size=validation_size,
+            test_fraction=test_fraction,
+            test_size=test_size,
+        )
+        return DatasetSplitManifest(
+            dataset=dataset,
+            train_indices=split.train_keys,
+            validate_indices=split.validate_keys,
+            test_indices=split.test_keys,
+        )
+
+    @classmethod
+    def k_fold_manifests(
+        cls,
+        *,
+        dataset: Any,
+        strata: Sequence[Any] | None = None,
+        k: int,
+        groups: Sequence[Any] | None = None,
+        mode: str | StratificationMode = StratificationMode.QUANTILE,
+        num_bins: int | None = None,
+        bucket_labels: Sequence[Any] | None = None,
+        seed: int | None = None,
+    ) -> tuple[DatasetSplitManifest, ...]:
+        """Create k immutable fold manifests bound to one dataset identity."""
+
+        splitter = cls._for_dataset(
+            dataset=dataset,
+            strata=strata,
+            groups=groups,
+            mode=mode,
+            num_bins=num_bins,
+            bucket_labels=bucket_labels,
+            seed=seed,
+        )
+        return tuple(
+            DatasetSplitManifest(
+                dataset=dataset,
+                train_indices=fold.train_keys,
+                validate_indices=fold.validate_keys,
+            )
+            for fold in splitter.k_fold(k)
+        )
+
+    @classmethod
+    def holdout_plus_k_fold_manifests(
+        cls,
+        *,
+        dataset: Any,
+        strata: Sequence[Any] | None = None,
+        test_fraction: float | None = None,
+        test_size: int | None = None,
+        k: int,
+        groups: Sequence[Any] | None = None,
+        mode: str | StratificationMode = StratificationMode.QUANTILE,
+        num_bins: int | None = None,
+        bucket_labels: Sequence[Any] | None = None,
+        seed: int | None = None,
+    ) -> tuple[DatasetSplitManifest, ...]:
+        """Create k fold manifests sharing one explicit stratified test holdout."""
+
+        splitter = cls._for_dataset(
+            dataset=dataset,
+            strata=strata,
+            groups=groups,
+            mode=mode,
+            num_bins=num_bins,
+            bucket_labels=bucket_labels,
+            seed=seed,
+        )
+        split = splitter.holdout_plus_k_fold(
+            test_fraction=test_fraction,
+            test_size=test_size,
+            k=k,
+        )
+        return tuple(
+            DatasetSplitManifest(
+                dataset=dataset,
+                train_indices=fold.train_keys,
+                validate_indices=fold.validate_keys,
+                test_indices=split.test_keys,
+            )
+            for fold in split.folds
+        )
 
     @property
     def stratify_edges(self) -> tuple[float, ...]:

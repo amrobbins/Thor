@@ -1141,6 +1141,19 @@ void Network::load(const string &directory,
 
 
 
+std::vector<std::shared_ptr<NetworkInput>> Network::getExternalNetworkInputs() const {
+    std::vector<std::shared_ptr<NetworkInput>> inputs;
+    inputs.reserve(allLayersInNetworkList.size());
+    for (const std::shared_ptr<Layer>& layer : allLayersInNetworkList) {
+        std::shared_ptr<NetworkInput> input = std::dynamic_pointer_cast<NetworkInput>(layer);
+        if (input == nullptr || !input->isExternal() || input->hasPassThroughSource()) {
+            continue;
+        }
+        inputs.push_back(std::move(input));
+    }
+    return inputs;
+}
+
 std::vector<std::string> Network::getInferenceNetworkInputNames() {
     // Build the same inference-only graph view used by place(..., inferenceOnly=true).
     // For saved training artifacts this prunes loss roots and label-only inputs, so

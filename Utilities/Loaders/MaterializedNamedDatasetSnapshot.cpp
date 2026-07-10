@@ -1,50 +1,31 @@
 #include "Utilities/Loaders/MaterializedNamedDatasetSnapshot.h"
 
-uint64_t MaterializedNamedSplitSnapshot::totalBytes() const {
+uint64_t MaterializedNamedDatasetSnapshot::totalBytes() const {
     uint64_t total = 0;
-    for (const auto &entry : tensors) {
+    for (const auto &entry : fields) {
         total += entry.second.getDescriptor().getArraySizeInBytes();
     }
     return total;
 }
 
-const ThorImplementation::Tensor &MaterializedNamedSplitSnapshot::tensor(const std::string &name) const {
-    const auto it = tensors.find(name);
-    if (it == tensors.end()) {
-        throw std::runtime_error("Materialized named split snapshot is missing tensor: " + name);
+bool MaterializedNamedDatasetSnapshot::hasField(Thor::DatasetFieldId id) const {
+    return fields.find(id) != fields.end();
+}
+
+bool MaterializedNamedDatasetSnapshot::hasField(const std::string &name) const {
+    return schema.contains(name) && hasField(schema.getField(name).id);
+}
+
+const ThorImplementation::Tensor &MaterializedNamedDatasetSnapshot::field(
+    Thor::DatasetFieldId id) const {
+    const auto it = fields.find(id);
+    if (it == fields.end()) {
+        throw std::runtime_error("Materialized named dataset snapshot is missing field id.");
     }
     return it->second;
 }
 
-uint64_t MaterializedNamedDatasetSnapshot::totalExamples() const {
-    uint64_t total = 0;
-    for (const MaterializedNamedSplitSnapshot &split : splits) {
-        total += split.numExamples();
-    }
-    return total;
-}
-
-uint64_t MaterializedNamedDatasetSnapshot::totalBytes() const {
-    uint64_t total = 0;
-    for (const MaterializedNamedSplitSnapshot &split : splits) {
-        total += split.totalBytes();
-    }
-    return total;
-}
-
-const MaterializedNamedSplitSnapshot *MaterializedNamedDatasetSnapshot::findSplit(ExampleType exampleType) const {
-    for (const MaterializedNamedSplitSnapshot &candidate : splits) {
-        if (candidate.exampleType == exampleType) {
-            return &candidate;
-        }
-    }
-    return nullptr;
-}
-
-const MaterializedNamedSplitSnapshot &MaterializedNamedDatasetSnapshot::split(ExampleType exampleType) const {
-    const MaterializedNamedSplitSnapshot *candidate = findSplit(exampleType);
-    if (candidate == nullptr) {
-        throw std::runtime_error("Materialized named dataset snapshot is missing requested split.");
-    }
-    return *candidate;
+const ThorImplementation::Tensor &MaterializedNamedDatasetSnapshot::tensor(
+    const std::string &name) const {
+    return field(schema.getField(name).id);
 }

@@ -727,6 +727,20 @@ std::vector<uint64_t> PlacedNetwork::getActiveTrainingRawLossOriginalIdsForDebug
     return stampedNetworks[stampIndex].getActiveTrainingRawLossOriginalIdsForDebug();
 }
 
+void PlacedNetwork::configureBatchInputPlacements(
+    const std::map<std::string, std::optional<ThorImplementation::TensorPlacement>> &placementsByNetworkInput) {
+    for (ThorImplementation::StampedNetwork &stampedNetwork : stampedNetworks) {
+        for (const std::shared_ptr<ThorImplementation::NetworkInput> &input : stampedNetwork.getInputs()) {
+            THOR_THROW_IF_FALSE(input != nullptr);
+            if (input->isPassThrough()) {
+                continue;
+            }
+            const auto placement = placementsByNetworkInput.find(input->getName());
+            input->configureBatchInputPlacement(placement == placementsByNetworkInput.end() ? std::nullopt : placement->second);
+        }
+    }
+}
+
 void PlacedNetwork::preallocateInputSlots(uint32_t numSlots) {
     THOR_THROW_IF_FALSE(numSlots >= 1);
     for (ThorImplementation::StampedNetwork& stampedNetwork : stampedNetworks) {

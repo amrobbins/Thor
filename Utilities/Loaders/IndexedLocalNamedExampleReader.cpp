@@ -319,7 +319,7 @@ class IndexedLocalNamedExampleReader::Impl {
     uint64_t numExamples = 0;
 
     static std::unique_ptr<Impl> openDataset(const std::filesystem::path &datasetPath,
-                                             const LocalNamedExampleLayout &requestedLayout) {
+                                             const LocalNamedExampleLayout *requestedLayout) {
         const std::filesystem::path manifestPath = datasetPath / LocalNamedExampleDatasetWriter::MANIFEST_FILENAME;
         std::ifstream in(manifestPath, std::ios::binary);
         if (!in.is_open()) {
@@ -341,7 +341,9 @@ class IndexedLocalNamedExampleReader::Impl {
         auto out = std::unique_ptr<Impl>(new Impl());
         out->datasetPath = datasetPath;
         out->layout = LocalNamedExampleLayout::fromJson(manifest);
-        out->layout.validateRequestedLayoutExact(requestedLayout);
+        if (requestedLayout != nullptr) {
+            out->layout.validateRequestedLayoutExact(*requestedLayout);
+        }
         out->numExamples = manifest.at("num_examples").get<uint64_t>();
 
         const json &shardsJson = manifest.at("shards");
@@ -889,9 +891,14 @@ IndexedLocalNamedExampleReader::IndexedLocalNamedExampleReader(std::unique_ptr<I
 IndexedLocalNamedExampleReader::~IndexedLocalNamedExampleReader() = default;
 
 std::shared_ptr<IndexedLocalNamedExampleReader> IndexedLocalNamedExampleReader::openDataset(
+    const std::filesystem::path &datasetPath) {
+    return std::shared_ptr<IndexedLocalNamedExampleReader>(new IndexedLocalNamedExampleReader(Impl::openDataset(datasetPath, nullptr)));
+}
+
+std::shared_ptr<IndexedLocalNamedExampleReader> IndexedLocalNamedExampleReader::openDataset(
     const std::filesystem::path &datasetPath, const LocalNamedExampleLayout &requestedLayout) {
     return std::shared_ptr<IndexedLocalNamedExampleReader>(
-        new IndexedLocalNamedExampleReader(Impl::openDataset(datasetPath, requestedLayout)));
+        new IndexedLocalNamedExampleReader(Impl::openDataset(datasetPath, &requestedLayout)));
 }
 
 std::unique_ptr<IndexedLocalNamedExampleReader::Session> IndexedLocalNamedExampleReader::createSession(uint64_t queueDepth) {

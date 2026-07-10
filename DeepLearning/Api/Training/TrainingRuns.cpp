@@ -3583,14 +3583,15 @@ void TrainingRuns::evaluateEnsembles(std::vector<TrainingRunResult>& results,
             continue;
         }
 
-        bool hasEvaluationLoader = false;
+        bool hasEvaluationData = false;
         for (const EnsembleMemberSpecRef& sourceMember : members) {
-            if (sourceMember.spec != nullptr && sourceMember.spec->trainer != nullptr && sourceMember.spec->trainer->loader != nullptr) {
-                hasEvaluationLoader = true;
+            if (sourceMember.spec != nullptr && sourceMember.spec->trainer != nullptr &&
+                (sourceMember.spec->trainer->trainingData != nullptr || sourceMember.spec->trainer->loader != nullptr)) {
+                hasEvaluationData = true;
                 break;
             }
         }
-        if (!hasEvaluationLoader) {
+        if (!hasEvaluationData) {
             ensembleIt->second.ensembleTrainingLoss = std::nullopt;
             continue;
         }
@@ -3638,7 +3639,8 @@ void TrainingRuns::evaluateEnsembles(std::vector<TrainingRunResult>& results,
         }
 
         for (const EnsembleMemberSpecRef& sourceMember : members) {
-            if (sourceMember.spec == nullptr || sourceMember.spec->trainer == nullptr || sourceMember.spec->trainer->loader == nullptr) {
+            if (sourceMember.spec == nullptr || sourceMember.spec->trainer == nullptr ||
+                (sourceMember.spec->trainer->trainingData == nullptr && sourceMember.spec->trainer->loader == nullptr)) {
                 sourcePopulationRowWeights.push_back(0.0);
                 for (const TrainingNamedMetricResult& metric : ensembleIt->second.namedMetrics) {
                     sourcePopulationLossesByName[metric.name].push_back(std::nullopt);
@@ -3649,10 +3651,11 @@ void TrainingRuns::evaluateEnsembles(std::vector<TrainingRunResult>& results,
                 continue;
             }
 
+            std::shared_ptr<Loader> sourceSession = sourceMember.spec->trainer->openBatchSessionForRun();
             TrainingRunsComposedEvaluatorArtifacts& sourceArtifacts = composedArtifactsForBatchSize(
-                sourceMember.spec->trainer->loader->getBatchSize());
+                sourceSession->getBatchSize());
             ComposedEnsembleEvaluationMetrics sourceMetrics = evaluateComposedEnsembleReportsOnLoader(
-                sourceArtifacts, *sourceMember.spec->trainer->loader, ExampleType::VALIDATE);
+                sourceArtifacts, *sourceSession, ExampleType::VALIDATE);
             // The composed evaluator has already used ensemble member weights to
             // form predictions.  Across source validation splits, combine by
             // evaluated rows so ensemble_train_* is the validation-union report.

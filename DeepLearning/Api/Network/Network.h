@@ -106,6 +106,7 @@ struct ApiSubgraphCloneResult {
 };
 
 class PlacedNetwork;
+class NetworkInput;
 
 class Executor;
 
@@ -179,6 +180,7 @@ class Network {
     [[nodiscard]] std::vector<std::string> getInferenceNetworkInputNames();
     [[nodiscard]] std::vector<std::string> getInferenceNetworkInputNamesForOutputs(const std::vector<std::string>& outputNames);
     [[nodiscard]] std::vector<std::string> getTrainingOnlyNetworkInputNames();
+    [[nodiscard]] std::vector<std::shared_ptr<NetworkInput>> getExternalNetworkInputs() const;
     [[nodiscard]] std::vector<NetworkLossReference> getReportableLosses();
     [[nodiscard]] std::vector<NetworkMetricReference> getReportableMetrics();
 

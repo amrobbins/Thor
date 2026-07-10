@@ -1,14 +1,19 @@
 #pragma once
 
+#include "DeepLearning/Api/Data/BatchPolicy.h"
+#include "DeepLearning/Api/Data/BatchSession.h"
+#include "DeepLearning/Api/Data/DatasetSplitManifest.h"
+#include "DeepLearning/Api/Data/LocalNamedDataset.h"
 #include "DeepLearning/Api/Loaders/Loader.h"
 #include "Utilities/Loaders/IndexedLocalNamedBatchAssembler.h"
-#include "Utilities/Loaders/IndexedLocalNamedExampleReader.h"
 #include "Utilities/Loaders/LocalNamedExampleLayout.h"
 
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -20,8 +25,24 @@
  * arrays.  This is the local named equivalent of IndexedNumpyFloat32DictBatchLoader:
  * fold-specific splits share one physical dataset instead of duplicating records per fold.
  */
-class IndexedLocalNamedBatchLoader : public Loader {
+class IndexedLocalNamedBatchLoader : public Thor::BatchSession {
    public:
+    IndexedLocalNamedBatchLoader(std::shared_ptr<const Thor::LocalNamedDataset> dataset,
+                                 Thor::DatasetSplitManifest splits,
+                                 Thor::BatchPolicy batching,
+                                 uint64_t batchQueueDepth = 32,
+                                 std::set<Thor::DatasetFieldId> requiredFieldIds = {});
+
+    IndexedLocalNamedBatchLoader(std::shared_ptr<const Thor::LocalNamedDataset> dataset,
+                                 std::vector<uint64_t> trainIndices,
+                                 std::vector<uint64_t> validateIndices,
+                                 std::optional<std::vector<uint64_t>> testIndices,
+                                 uint64_t batchSize,
+                                 uint64_t batchQueueDepth = 32,
+                                 bool randomizeTrain = true,
+                                 std::optional<uint64_t> seed = std::nullopt);
+
+    /** Compatibility adapter. requestedLayout is validation-only. */
     IndexedLocalNamedBatchLoader(std::filesystem::path datasetPath,
                                  LocalNamedExampleLayout requestedLayout,
                                  std::vector<uint64_t> trainIndices,
@@ -46,19 +67,31 @@ class IndexedLocalNamedBatchLoader : public Loader {
     uint64_t getNextBatchNum(ExampleType exampleType) override;
 
     [[nodiscard]] bool supportsDeviceDatasetMaterialization() const override;
-    [[nodiscard]] DeviceDatasetMaterializationView describeDeviceDatasetMaterialization() const override;
+    [[nodiscard]] Thor::DatasetMaterializationDescription describeDeviceDatasetMaterialization() const override;
+    [[nodiscard]] Thor::DeviceDatasetSessionDescription describeDeviceDatasetSession() const override;
+    [[nodiscard]] std::shared_ptr<const Thor::NamedDataset> getNamedDataset() const override { return dataset; }
 
     [[nodiscard]] const LocalNamedExampleLayout &getLayout() const;
     [[nodiscard]] const std::filesystem::path &getDatasetPath() const;
+    [[nodiscard]] const std::shared_ptr<const Thor::LocalNamedDataset> &getDataset() const { return dataset; }
+    [[nodiscard]] const Thor::DatasetSplitManifest &getSplitManifest() const { return splitManifest; }
+    [[nodiscard]] const std::set<Thor::DatasetFieldId>& getRequiredDatasetFieldIds() const override {
+        return requiredFieldIds;
+    }
     [[nodiscard]] uint64_t getNumDatasetExamples() const;
     [[nodiscard]] uint64_t getBatchQueueDepth() const;
     [[nodiscard]] bool getRandomizeTrain() const;
     [[nodiscard]] std::optional<uint64_t> getRandomSeed() const;
     [[nodiscard]] const std::vector<uint64_t> &getSplitIndices(ExampleType exampleType) const;
     [[nodiscard]] bool hasExplicitTestSplit() const;
+    void cancel() override;
     [[nodiscard]] IndexedLocalNamedBatchAssemblerStats getStatsSnapshot(ExampleType exampleType);
 
 #ifdef THOR_GTEST
+    [[nodiscard]] const IndexedLocalNamedExampleReader *getDatasetReaderForTesting() const {
+        return dataset->getReader().get();
+    }
+
     uint64_t getReadyBatchCountForTesting(ExampleType exampleType) {
         IndexedLocalNamedBatchAssembler *assembler = assemblerFor(exampleType);
         return assembler == nullptr ? 0 : assembler->getReadyBatchCountForTesting();
@@ -66,9 +99,9 @@ class IndexedLocalNamedBatchLoader : public Loader {
 #endif
 
    private:
-    std::filesystem::path datasetPath;
-    LocalNamedExampleLayout layout;
-    std::shared_ptr<IndexedLocalNamedExampleReader> reader;
+    std::shared_ptr<const Thor::LocalNamedDataset> dataset;
+    Thor::DatasetSplitManifest splitManifest;
+    std::set<Thor::DatasetFieldId> requiredFieldIds;
 
     std::unique_ptr<IndexedLocalNamedBatchAssembler> trainAssembler;
     std::unique_ptr<IndexedLocalNamedBatchAssembler> validateAssembler;
@@ -78,15 +111,19 @@ class IndexedLocalNamedBatchLoader : public Loader {
     uint64_t batchQueueDepth = 32;
     bool randomizeTrain = true;
     std::optional<uint64_t> seed;
-    bool explicitTestSplit = false;
+    std::atomic<bool> cancelled{false};
 
-    void openDataset(const LocalNamedExampleLayout &requestedLayout);
     void validateIndex(uint64_t index, const char *splitName) const;
     void validateIndices(const std::vector<uint64_t> &indices, const char *splitName) const;
-    std::unique_ptr<IndexedLocalNamedBatchAssembler> createAssembler(std::vector<uint64_t> indices,
-                                                                     const char *splitName,
-                                                                     bool randomized,
-                                                                     std::optional<uint64_t> splitSeed) const;
+    std::unique_ptr<IndexedLocalNamedBatchAssembler> createAssembler(
+        std::shared_ptr<const std::vector<uint64_t>> indices,
+        const char *splitName,
+        bool randomized,
+        std::optional<uint64_t> splitSeed) const;
     IndexedLocalNamedBatchAssembler *assemblerFor(ExampleType exampleType);
     const IndexedLocalNamedBatchAssembler *assemblerFor(ExampleType exampleType) const;
 };
+
+// Canonical names no longer encode the storage backend in the execution object.
+using IndexedNamedBatchSession = IndexedLocalNamedBatchLoader;
+using IndexedNamedBatchLoader = IndexedNamedBatchSession;

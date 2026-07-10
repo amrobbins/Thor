@@ -1,6 +1,11 @@
 #include "DeepLearning/Api/Training/Trainer.h"
+#include "DeepLearning/Api/Data/TrainingData.h"
+#include "DeepLearning/Api/Data/LocalNamedDataset.h"
+#include "Utilities/Loaders/LocalNamedExampleDatasetWriter.h"
 #include "DeepLearning/Api/Training/Executors/DebugSynchronousTrainingExecutor.h"
 #include "DeepLearning/Api/Training/DeviceDatasetStorageSelection.h"
+#include "DeepLearning/Api/Training/DatasetInputBindings.h"
+#include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Training/TrainingProgram.h"
 #include "DeepLearning/Api/Training/TrainingPhase.h"
 #include "DeepLearning/Api/Training/TrainingStep.h"
@@ -15,6 +20,7 @@
 #include <filesystem>
 #include <map>
 #include <memory>
+#include <set>
 #include <optional>
 #include <string>
 #include <type_traits>
@@ -57,34 +63,61 @@ class FakeLoader : public Loader {
 };
 
 class MaterializableFakeLoader : public FakeLoader {
+   private:
+    class FakeNamedDataset final : public NamedDataset {
+       public:
+        FakeNamedDataset()
+            : id(DatasetId::generate()),
+              schema(std::vector<DatasetField>{DatasetField{
+                  .id = 0,
+                  .name = "features",
+                  .dataType = ThorImplementation::DataType::FP32,
+                  .dimensions = {2},
+                  .kind = DatasetFieldKind::DENSE}}) {}
+
+        const DatasetId &getId() const override { return id; }
+        uint64_t getNumExamples() const override { return 4; }
+        const DatasetSchema &getSchema() const override { return schema; }
+        const DatasetField &getField(std::string_view name) const override {
+            return schema.getField(name);
+        }
+
+       private:
+        DatasetId id;
+        DatasetSchema schema;
+    };
+
    public:
-    MaterializableFakeLoader() {
-        layout = LocalNamedExampleLayout::fromTensorShapes(
-            std::vector<std::pair<std::string, std::vector<uint64_t>>>{{"features", {2}}},
-            ThorImplementation::DataType::FP32);
+    MaterializableFakeLoader()
+        : dataset(std::make_shared<FakeNamedDataset>()),
+          layout(LocalNamedExampleLayout::fromTensorShapes(
+              std::vector<std::pair<std::string, std::vector<uint64_t>>>{{"features", {2}}},
+              ThorImplementation::DataType::FP32)),
+          splits(*dataset, {0, 1, 2, 3}, {}, std::nullopt),
+          batching(4, false, std::nullopt) {
         batchSize = 4;
     }
 
     bool supportsDeviceDatasetMaterialization() const override { return true; }
 
-    DeviceDatasetMaterializationView describeDeviceDatasetMaterialization() const override {
-        DeviceDatasetMaterializationView view;
-        view.datasetPath = std::filesystem::temp_directory_path() / "thor-materializable-fake-loader";
-        view.layout = layout;
-        view.numDatasetExamples = 4;
-        view.batchSize = batchSize;
+    DatasetMaterializationDescription describeDeviceDatasetMaterialization() const override {
+        return DatasetMaterializationDescription(
+            std::filesystem::temp_directory_path() / "thor-materializable-fake-loader",
+            dataset->getId(),
+            dataset->getSchema(),
+            layout,
+            dataset->getNumExamples());
+    }
 
-        DeviceDatasetMaterializationSplitView train;
-        train.exampleType = ExampleType::TRAIN;
-        train.splitName = "train";
-        train.indices = {0, 1, 2, 3};
-        train.batchesPerEpoch = 1;
-        view.splits.push_back(std::move(train));
-        return view;
+    DeviceDatasetSessionDescription describeDeviceDatasetSession() const override {
+        return DeviceDatasetSessionDescription(splits, batching);
     }
 
    private:
+    std::shared_ptr<FakeNamedDataset> dataset;
     LocalNamedExampleLayout layout;
+    DatasetSplitManifest splits;
+    BatchPolicy batching;
 };
 
 class CapturingExecutor : public TrainingExecutor {
@@ -95,6 +128,7 @@ class CapturingExecutor : public TrainingExecutor {
         lastNetwork = request.network.get();
         lastMaxInFlightBatches = request.runtime.maxInFlightBatches;
         lastHasTrainingProgram = request.trainingProgram != nullptr;
+        lastDatasetInputBindings = request.datasetInputBindings;
         lastTrainingProgramStepCount = request.trainingProgram != nullptr ? request.trainingProgram->getNumSteps() : 0;
         lastFirstStepEnabled = request.trainingProgram != nullptr && request.trainingProgram->getNumSteps() > 0
                                    ? request.trainingProgram->getStep(0).isEnabled()
@@ -124,6 +158,7 @@ class CapturingExecutor : public TrainingExecutor {
     Network* lastNetwork = nullptr;
     uint64_t lastMaxInFlightBatches = 0;
     bool lastHasTrainingProgram = false;
+    std::vector<TrainingInputBinding> lastDatasetInputBindings{};
     uint64_t lastTrainingProgramStepCount = 0;
     bool lastFirstStepEnabled = false;
     bool lastCancellationRequested = true;
@@ -142,13 +177,171 @@ class CapturingExecutor : public TrainingExecutor {
     uint32_t calls = 0;
 };
 
+class SessionCapturingExecutor : public CapturingExecutor {
+   public:
+    void fit(const TrainingRunRequest& request, TrainingObserver& observer) override {
+        loaders.push_back(request.loader);
+        CapturingExecutor::fit(request, observer);
+    }
+
+    std::vector<std::shared_ptr<Loader>> loaders{};
+};
+
 
 std::filesystem::path uniqueTempPath(const std::string& prefix) {
     return std::filesystem::temp_directory_path() /
            (prefix + "-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
 }
 
+std::shared_ptr<TrainingData> makeTrainingData(const std::filesystem::path& path) {
+    LocalNamedExampleLayout layout = LocalNamedExampleLayout::fromTensorShapes(
+        std::vector<std::pair<std::string, std::vector<uint64_t>>>{{"features", {1}}},
+        ThorImplementation::DataType::FP32);
+    LocalNamedExampleDatasetWriter writer(path, layout, 2, LocalNamedExampleDatasetWriter::StorageMode::INDEXED);
+    for (uint64_t i = 0; i < 4; ++i) {
+        float value = static_cast<float>(i);
+        LocalNamedExampleDatasetWriter::TensorView view{
+            .dataType = ThorImplementation::DataType::FP32,
+            .dimensions = {1},
+            .data = &value,
+            .numBytes = sizeof(value),
+        };
+        writer.writeIndexedExample({{"features", view}});
+    }
+    writer.close();
+    std::shared_ptr<LocalNamedDataset> dataset = LocalNamedDataset::open(path);
+    return std::make_shared<TrainingData>(
+        dataset, DatasetSplitManifest(*dataset, {0, 1, 2}, {3}), BatchPolicy(1, false));
+}
+
 }  // namespace
+
+TEST(Trainer, TrainingDataOpensFreshSessionForEveryFit) {
+    const std::filesystem::path path = uniqueTempPath("thor-trainer-training-data");
+    std::shared_ptr<TrainingData> data = makeTrainingData(path);
+    auto network = std::make_shared<Network>("trainer-training-data");
+    auto executor = std::make_shared<SessionCapturingExecutor>();
+    auto observer = std::make_shared<NullTrainingObserver>();
+
+    Trainer trainer = Trainer::Builder()
+                          .network(network)
+                          .data(data)
+                          .executor(executor)
+                          .observer(observer)
+                          .maxInFlightBatches(3)
+                          .build();
+    EXPECT_EQ(trainer.getTrainingData(), data);
+
+    trainer.fit(1);
+    trainer.fit(1);
+
+    ASSERT_EQ(executor->loaders.size(), 2u);
+    EXPECT_NE(executor->loaders[0].get(), executor->loaders[1].get());
+    EXPECT_NE(std::dynamic_pointer_cast<BatchSession>(executor->loaders[0]), nullptr);
+    EXPECT_NE(std::dynamic_pointer_cast<BatchSession>(executor->loaders[1]), nullptr);
+    executor->loaders.clear();
+    std::filesystem::remove_all(path);
+}
+
+TEST(Trainer, BuilderRejectsAmbiguousDataOwnership) {
+    const std::filesystem::path path = uniqueTempPath("thor-trainer-ambiguous-data");
+    std::shared_ptr<TrainingData> data = makeTrainingData(path);
+    auto network = std::make_shared<Network>("trainer-ambiguous-data");
+    auto loader = std::make_shared<FakeLoader>();
+
+    EXPECT_THROW((Trainer::Builder().network(network).data(data).loader(loader).build()), std::runtime_error);
+    EXPECT_THROW((Trainer::Builder().network(network).build()), std::runtime_error);
+    std::filesystem::remove_all(path);
+}
+
+
+TEST(Trainer, CompilesStrictDatasetInputBindingsBeforeOpeningSession) {
+    const std::filesystem::path path = uniqueTempPath("thor-trainer-dataset-bindings");
+    std::shared_ptr<TrainingData> data = makeTrainingData(path);
+    auto network = std::make_shared<Network>("trainer-dataset-bindings");
+    NetworkInput features = NetworkInput::Builder()
+                                .network(*network)
+                                .name("model_features")
+                                .dimensions({1})
+                                .dataType(ThorImplementation::DataType::FP32)
+                                .build();
+    DatasetInputBindings bindings;
+    bindings.bind(features, data->getDataset()->getField("features"));
+
+    auto executor = std::make_shared<SessionCapturingExecutor>();
+    auto observer = std::make_shared<NullTrainingObserver>();
+    Trainer trainer = Trainer::Builder()
+                          .network(network)
+                          .data(data)
+                          .inputBindings(bindings)
+                          .executor(executor)
+                          .observer(observer)
+                          .build();
+
+    ASSERT_EQ(trainer.getDatasetInputBindings().size(), 1u);
+    EXPECT_EQ(trainer.getRequiredDatasetFieldIds(),
+              (std::set<DatasetFieldId>{data->getDataset()->getField("features").id}));
+
+    trainer.fit(1);
+    ASSERT_EQ(executor->lastDatasetInputBindings.size(), 1u);
+    EXPECT_EQ(executor->lastDatasetInputBindings.front().getNetworkInputName(), "model_features");
+    EXPECT_EQ(executor->lastDatasetInputBindings.front().getBatchInputName(), "features");
+    ASSERT_EQ(executor->loaders.size(), 1u);
+    std::shared_ptr<BatchSession> session =
+        std::dynamic_pointer_cast<BatchSession>(executor->loaders.front());
+    ASSERT_NE(session, nullptr);
+    EXPECT_EQ(session->getRequiredDatasetFieldIds(),
+              trainer.getRequiredDatasetFieldIds());
+    std::filesystem::remove_all(path);
+}
+
+TEST(Trainer, ExactNameAutobindingIsDefaultAndValidationIsEarly) {
+    const std::filesystem::path path = uniqueTempPath("thor-trainer-exact-dataset-bindings");
+    std::shared_ptr<TrainingData> data = makeTrainingData(path);
+
+    auto exactNetwork = std::make_shared<Network>("trainer-exact-bindings");
+    NetworkInput::Builder()
+        .network(*exactNetwork)
+        .name("features")
+        .dimensions({1})
+        .dataType(ThorImplementation::DataType::FP32)
+        .build();
+    EXPECT_NO_THROW((Trainer::Builder().network(exactNetwork).data(data).build()));
+
+    auto renamedNetwork = std::make_shared<Network>("trainer-missing-exact-binding");
+    NetworkInput::Builder()
+        .network(*renamedNetwork)
+        .name("renamed_features")
+        .dimensions({1})
+        .dataType(ThorImplementation::DataType::FP32)
+        .build();
+    EXPECT_THROW((Trainer::Builder().network(renamedNetwork).data(data).build()), std::runtime_error);
+
+    auto dtypeNetwork = std::make_shared<Network>("trainer-dtype-binding");
+    NetworkInput dtypeInput = NetworkInput::Builder()
+                                  .network(*dtypeNetwork)
+                                  .name("features")
+                                  .dimensions({1})
+                                  .dataType(ThorImplementation::DataType::FP16)
+                                  .build();
+    DatasetInputBindings dtypeBindings;
+    dtypeBindings.bind(dtypeInput, data->getDataset()->getField("features"));
+    EXPECT_THROW((Trainer::Builder()
+                      .network(dtypeNetwork)
+                      .data(data)
+                      .inputBindings(dtypeBindings)
+                      .build()),
+                 std::runtime_error);
+
+    auto loader = std::make_shared<FakeLoader>();
+    EXPECT_THROW((Trainer::Builder()
+                      .network(exactNetwork)
+                      .loader(loader)
+                      .inputBindings(DatasetInputBindings{})
+                      .build()),
+                 std::runtime_error);
+    std::filesystem::remove_all(path);
+}
 
 TEST(Trainer, BuilderRetainsSharedNetworkLifetime) {
     auto loader = std::make_shared<FakeLoader>();

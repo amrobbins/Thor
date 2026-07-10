@@ -17,13 +17,10 @@ struct DeviceDatasetStorageSelection {
 
 /**
  * Select the effective loader for a training request under the device dataset
- * storage policy.  OFF always returns the source loader. BEST_EFFORT falls back
- * to the source loader with telemetry on unsupported/OOM/materialization errors.
- * STRICT throws on any failure to create the device-resident loader.
- *
- * availableBytesOverride exists only for deterministic unit tests of the memory
- * decision path; normal callers should leave it unset so CUDA memory is queried
- * after model placement/workspace reservation.
+ * storage policy. Persistent materialization is canonical and split-independent;
+ * the returned BatchSession applies the source session's manifest and batching
+ * policy over that shared row-ordered storage. The Loader-typed return remains
+ * temporarily for compatibility with legacy training entry points.
  */
 [[nodiscard]] DeviceDatasetStorageSelection selectDeviceDatasetStorageLoader(
     const std::shared_ptr<Loader> &sourceLoader,
@@ -32,7 +29,12 @@ struct DeviceDatasetStorageSelection {
     uint64_t batchQueueDepth,
     std::optional<uint64_t> availableBytesOverride = std::nullopt);
 
-[[nodiscard]] uint64_t estimateDeviceResidentNamedDatasetRequiredBytes(const DeviceDatasetMaterializationView &view,
-                                                                       uint64_t batchQueueDepth);
+[[nodiscard]] uint64_t estimateDeviceResidentNamedDatasetRequiredBytes(
+    const DatasetMaterializationDescription &dataset,
+    const DeviceDatasetSessionDescription &session,
+    uint64_t batchQueueDepth);
+
+[[nodiscard]] uint64_t estimateDeviceResidentNamedDatasetStorageBytes(
+    const DatasetMaterializationDescription &dataset);
 
 }  // namespace Thor
