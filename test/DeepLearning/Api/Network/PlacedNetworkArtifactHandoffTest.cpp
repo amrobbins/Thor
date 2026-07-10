@@ -237,7 +237,6 @@ TEST(PlacedNetworkArtifactHandoff, DirectArtifactLoadRestoresCloneSourceMatchedP
 
         PlacedFcGraph destination = placeComposedFcGraph("direct_clone_handoff_destination", phaseNetwork);
         destination.placed->loadMatchingTrainingStateFromArtifact(archiveDir.string(), source.network->getNetworkName());
-        destination.placed->synchronizeDevices();
         Stream destinationStream = destination.physicalFc->getStreams()[0];
 
         std::shared_ptr<Impl::PhysicalParameter> destinationWeights = destination.physicalFc->getParameter("weights");
@@ -290,7 +289,6 @@ TEST(PlacedNetworkArtifactHandoff, CopyMatchingTrainingStateRestoresOptimizerNon
     sourceStream.synchronize();
 
     destination.placed->copyMatchingTrainingStateFrom(*source.placed);
-    destination.placed->synchronizeDevices();
 
     Stream destinationStream = destination.physicalFc->getStreams()[0];
     std::shared_ptr<Impl::PhysicalParameter> destinationWeights = destination.physicalFc->getParameter("weights");
@@ -339,7 +337,6 @@ TEST(PlacedNetworkArtifactHandoff, DirectSameNetworkArtifactLoadRestoresApiLayer
 
         PlacedFcGraph destination = placeNetworkWithSingleFc(network);
         destination.placed->loadTrainingStateFromSameNetworkArtifact(archiveDir.string(), source.network->getNetworkName());
-        destination.placed->synchronizeDevices();
         Stream destinationStream = destination.physicalFc->getStreams()[0];
 
         std::shared_ptr<Impl::PhysicalParameter> destinationWeights = destination.physicalFc->getParameter("weights");

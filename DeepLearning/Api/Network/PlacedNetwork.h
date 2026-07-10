@@ -35,10 +35,22 @@ class PlacedNetwork {
 
     void save(const std::string& directory, bool overwrite, bool saveOptimizerState);
 
-    // Boundary-only correctness guard.  This intentionally is not used in the
-    // per-batch hot path; it drains all CUDA work submitted by this process on
-    // every GPU used by the placed stamps before out-of-band readers copy or
-    // serialize parameter state.
+    /**
+     * Records synchronization events for every physical layer in every stamp.
+     * Synchronizing every returned event guarantees that all work enqueued for
+     * this placed network before the call has completed. Callers must prevent
+     * concurrent batch submission while taking this synchronization snapshot.
+     */
+    std::vector<Event> getSynchronizeEvents() const;
+
+    /**
+     * Waits for all work already enqueued for this placed network without
+     * draining unrelated work on the same CUDA devices.
+     */
+    void synchronize() const;
+
+    // Broad fallback used by exceptional cleanup paths that also own CUDA work
+    // outside the physical layer hierarchy (for example executor callbacks).
     void synchronizeDevices() const;
 
     std::map<std::string, ThorImplementation::Tensor> infer(std::map<std::string, ThorImplementation::Tensor> batchInputs,

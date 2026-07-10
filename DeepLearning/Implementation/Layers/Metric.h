@@ -28,6 +28,14 @@ class Metric : public Layer {
    public:
     Metric() {}
 
+    std::vector<Event> getSynchronizeEvents() override {
+        std::vector<Event> events;
+        std::set<uint64_t> synchronizedStreamIds;
+        appendSynchronizeEvent(events, synchronizedStreamIds, stream);
+        appendSynchronizeEvent(events, synchronizedStreamIds, labelsStream);
+        return events;
+    }
+
     std::optional<Tensor> connectToPreviousLayer(
         Layer *previousLayer, std::optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType) override {
         if (connectionType == (int)ConnectionType::FORWARD) {

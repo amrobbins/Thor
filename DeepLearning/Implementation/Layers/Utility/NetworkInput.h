@@ -75,6 +75,14 @@ class NetworkInput : public Layer {
         }
     }
 
+    std::vector<Event> getSynchronizeEvents() override {
+        std::vector<Event> events;
+        std::set<uint64_t> synchronizedStreamIds;
+        appendSynchronizeEvent(events, synchronizedStreamIds, stream);
+        appendSynchronizeEvent(events, synchronizedStreamIds, loadStream);
+        return events;
+    }
+
     virtual bool isInput() { return mode == Mode::ExternalLoad; }
     virtual bool isPassThrough() const { return mode == Mode::PassThrough; }
     virtual bool requiresBatchInput() const { return mode == Mode::ExternalLoad; }

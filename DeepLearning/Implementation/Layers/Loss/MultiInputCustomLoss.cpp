@@ -118,6 +118,14 @@ const Stream& MultiInputCustomLoss::computeStream() const {
 
 Stream MultiInputCustomLoss::getStream() { return computeStream(); }
 
+vector<Event> MultiInputCustomLoss::getSynchronizeEvents() {
+    vector<Event> events;
+    set<uint64_t> synchronizedStreamIds;
+    for (const Stream& inputStream : inputStreams)
+        appendSynchronizeEvent(events, synchronizedStreamIds, inputStream);
+    return events;
+}
+
 MultiInputCustomLoss::TensorMap MultiInputCustomLoss::buildLossInputs() const {
     TensorMap inputs;
     for (size_t i = 0; i < inputNames.size(); ++i) {

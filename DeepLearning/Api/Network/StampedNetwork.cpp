@@ -5,6 +5,7 @@
 #include "DeepLearning/Implementation/Diagnostics/TrainingDiagnostics.h"
 
 #include <limits>
+#include <iterator>
 #include <stdexcept>
 #include <algorithm>
 #include <optional>
@@ -89,6 +90,28 @@ std::vector<uint64_t> StampedNetwork::getActiveTrainingRawLossOriginalIdsForDebu
     std::sort(result.begin(), result.end());
     result.erase(std::unique(result.begin(), result.end()), result.end());
     return result;
+}
+
+std::vector<Event> StampedNetwork::getSynchronizeEvents() const {
+    std::vector<Event> events = initializationDoneEvents;
+    std::set<const Layer*> visitedLayers;
+
+    auto appendLayerEvents = [&](const auto& layers) {
+        for (const auto& layer : layers) {
+            if (layer == nullptr || !visitedLayers.insert(layer.get()).second)
+                continue;
+            std::vector<Event> layerEvents = layer->getSynchronizeEvents();
+            events.insert(events.end(),
+                          std::make_move_iterator(layerEvents.begin()),
+                          std::make_move_iterator(layerEvents.end()));
+        }
+    };
+
+    appendLayerEvents(inputsShared);
+    appendLayerEvents(outputsShared);
+    appendLayerEvents(trainableLayersShared);
+    appendLayerEvents(otherLayersShared);
+    return events;
 }
 
 
@@ -452,6 +475,7 @@ void StampedNetwork::clear() {
     outputsShared.clear();
     trainableLayersShared.clear();
     otherLayersShared.clear();
+    initializationDoneEvents.clear();
     apiTensorToPhysicalDrivingLayerShared.clear();
     apiLayerToPhysicalLayerShared.clear();
     physicalLayerToApiLayerShared.clear();

@@ -120,6 +120,14 @@ class Loss : public Layer {
 
     ~Loss() override {}
 
+    std::vector<Event> getSynchronizeEvents() override {
+        std::vector<Event> events;
+        std::set<uint64_t> synchronizedStreamIds;
+        appendSynchronizeEvent(events, synchronizedStreamIds, stream);
+        appendSynchronizeEvent(events, synchronizedStreamIds, labelsStream);
+        return events;
+    }
+
     void initialize() override {
         Layer::initialize();
         featureInputReceived = false;

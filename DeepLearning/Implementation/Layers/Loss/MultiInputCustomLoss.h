@@ -41,6 +41,7 @@ class MultiInputCustomLoss : public Loss {
     std::optional<Tensor> getErrorOutput(uint32_t inputIndex) const;
     std::vector<std::optional<Tensor>> getErrorOutputs() const { return errorOutputs; }
     Stream getStream() override;
+    std::vector<Event> getSynchronizeEvents() override;
     void pruneTrainingBackpropPathIfInactive() override;
 
    protected:

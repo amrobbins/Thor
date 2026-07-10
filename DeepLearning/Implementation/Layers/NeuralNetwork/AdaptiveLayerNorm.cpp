@@ -192,6 +192,16 @@ const Stream& AdaptiveLayerNorm::computeStream() const {
     return adaptiveStreams[DATA].value();
 }
 
+vector<Event> AdaptiveLayerNorm::getSynchronizeEvents() {
+    vector<Event> events;
+    set<uint64_t> synchronizedStreamIds;
+    for (const optional<Stream>& adaptiveStream : adaptiveStreams) {
+        if (adaptiveStream.has_value())
+            appendSynchronizeEvent(events, synchronizedStreamIds, adaptiveStream.value());
+    }
+    return events;
+}
+
 optional<Tensor> AdaptiveLayerNorm::createFeatureOutputTensor() {
     THOR_THROW_IF_FALSE(adaptiveFeatureInputs[DATA].has_value());
     return adaptiveFeatureInputs[DATA].value().clone();

@@ -11,6 +11,7 @@
 #include <utility>
 #include <stdexcept>
 #include <set>
+#include <iterator>
 #include <filesystem>
 #include <optional>
 #include <system_error>
@@ -461,6 +462,24 @@ PlacedNetwork::~PlacedNetwork() {
         stampedNetworks[i].clear();
     }
     stampedNetworks.clear();
+}
+
+std::vector<Event> PlacedNetwork::getSynchronizeEvents() const {
+    std::vector<Event> events;
+    for (const ThorImplementation::StampedNetwork& stampedNetwork : stampedNetworks) {
+        std::vector<Event> stampEvents = stampedNetwork.getSynchronizeEvents();
+        events.insert(events.end(),
+                      std::make_move_iterator(stampEvents.begin()),
+                      std::make_move_iterator(stampEvents.end()));
+    }
+    return events;
+}
+
+void PlacedNetwork::synchronize() const {
+    std::vector<Event> events = getSynchronizeEvents();
+    for (Event& event : events) {
+        event.synchronize();
+    }
 }
 
 void PlacedNetwork::synchronizeDevices() const {

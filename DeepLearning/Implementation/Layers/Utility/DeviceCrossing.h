@@ -21,6 +21,14 @@ class DeviceCrossing : public Layer {
         this->outputPlacement = outputPlacement;
     }
 
+    std::vector<Event> getSynchronizeEvents() override {
+        std::vector<Event> events;
+        std::set<uint64_t> synchronizedStreamIds;
+        appendSynchronizeEvent(events, synchronizedStreamIds, stream);
+        appendSynchronizeEvent(events, synchronizedStreamIds, otherDeviceStream);
+        return events;
+    }
+
     std::optional<Tensor> createFeatureOutputTensor() override {
         THOR_THROW_IF_FALSE(!uninitialized);
         THOR_THROW_IF_FALSE(featureInput.has_value());

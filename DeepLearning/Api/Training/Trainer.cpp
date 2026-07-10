@@ -615,7 +615,7 @@ void Trainer::saveModel(const std::string& directory, bool overwrite, bool saveO
 
 void Trainer::releasePlacedNetworkAfterLastFit() {
     if (placedNetworkAfterLastFit != nullptr) {
-        placedNetworkAfterLastFit->synchronizeDevices();
+        placedNetworkAfterLastFit->synchronize();
         placedNetworkAfterLastFit.reset();
     }
 }

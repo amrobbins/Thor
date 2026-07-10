@@ -35,6 +35,7 @@ class SparseCategoricalCrossEntropyWithLogits : public Loss {
     void forward(std::optional<Tensor> inputTensor, bool validationPass, uint32_t batchSize = 0) override;
     void ensureNoDeviceCrossing() override;
     std::string getType() override;
+    std::vector<Event> getSynchronizeEvents() override;
 
    protected:
     void advanceDataIfReady(bool validationPass) override;

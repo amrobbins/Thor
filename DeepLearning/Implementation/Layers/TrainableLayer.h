@@ -272,6 +272,16 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
     uint64_t getStampedId() const { return stampedId; }  // FIXME: Move to layer
     std::optional<Stream> getGradientUpdateStream() const { return gradientUpdateStream; }
 
+    std::vector<Event> getSynchronizeEvents() override {
+        std::vector<Event> events;
+        std::set<uint64_t> synchronizedStreamIds;
+        for (const Stream &stream : streams)
+            appendSynchronizeEvent(events, synchronizedStreamIds, stream);
+        if (gradientUpdateStream.has_value())
+            appendSynchronizeEvent(events, synchronizedStreamIds, gradientUpdateStream.value());
+        return events;
+    }
+
    protected:
     virtual PhysicalParameter::StorageContext buildParameterStorageContext() const {
         std::optional<Tensor> aFeatureInput = getFirstPresentTensor(featureInputs);

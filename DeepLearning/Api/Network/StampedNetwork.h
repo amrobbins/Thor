@@ -95,6 +95,15 @@ class StampedNetwork {
     std::vector<std::shared_ptr<ThorImplementation::NetworkInput>> getInputs() { return inputsShared; }
     std::vector<std::shared_ptr<ThorImplementation::NetworkOutput>> getOutputs() { return outputsShared; }
 
+    /**
+     * Records synchronization events for every physical layer in this stamp.
+     * Synchronizing every returned event guarantees that all work enqueued for
+     * the stamp before this call, including parameter/optimizer initialization,
+     * has completed. Callers must prevent concurrent batch submission while
+     * taking this synchronization snapshot.
+     */
+    std::vector<Event> getSynchronizeEvents() const;
+
     std::vector<std::string> getNamedInputNames() const {
         std::vector<std::string> names;
         names.reserve(inputNamedShared.size());
@@ -216,6 +225,7 @@ class StampedNetwork {
     std::vector<std::shared_ptr<ThorImplementation::NetworkOutput>> outputsShared;
     std::vector<std::shared_ptr<ThorImplementation::TrainableLayer>> trainableLayersShared;
     std::vector<std::shared_ptr<ThorImplementation::Layer>> otherLayersShared;
+    std::vector<Event> initializationDoneEvents;
     std::map<Thor::Tensor, std::shared_ptr<ThorImplementation::Layer>> apiTensorToPhysicalDrivingLayerShared;
     std::map<uint64_t, std::shared_ptr<ThorImplementation::Layer>> apiLayerToPhysicalLayerShared;
     std::map<std::shared_ptr<ThorImplementation::Layer>, uint64_t, StampedNetwork::LayerComparatorShared> physicalLayerToApiLayerShared;

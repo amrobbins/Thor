@@ -43,6 +43,7 @@ class AdaptiveLayerNorm : public Layer {
 
     void forward(std::optional<Tensor> featureInput, bool validationPass, uint32_t batchSize = 0) override;
     void backward(std::optional<Tensor> errorInput, uint32_t batchSize = 0) override;
+    std::vector<Event> getSynchronizeEvents() override;
 
     TensorPlacement getPlacement() override;
     bool isBackPropStub() override;

@@ -281,6 +281,14 @@ class MultiConnectionLayer : public Layer {
     virtual std::vector<std::optional<Layer *>> getNextLayers() { return nextLayers; }
     virtual std::vector<Stream> getStreams() { return streams; }
 
+    std::vector<Event> getSynchronizeEvents() override {
+        std::vector<Event> events;
+        std::set<uint64_t> synchronizedStreamIds;
+        for (const Stream &stream : streams)
+            appendSynchronizeEvent(events, synchronizedStreamIds, stream);
+        return events;
+    }
+
     // compute the fan in for one element of a batch
     uint64_t getFanIn() override { return 1; }
 

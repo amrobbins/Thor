@@ -103,8 +103,9 @@ class ArchiveShardWriterWorker {
             if (state == WriterState::INITIAL) {
                 // Ensure I have the needed stream
                 uint32_t deviceNum = plan[0].tensor.getPlacement().getDeviceNum();
-                // Get existing or put one there if missing:
-                auto [it, inserted] = streams.try_emplace(deviceNum, Stream::getNextDownloadStream(deviceNum));
+                // Archive downloads use worker-owned streams rather than the global download-stream pool.
+                // This prevents a model snapshot from queueing behind unrelated model output/download work.
+                auto [it, inserted] = streams.try_emplace(deviceNum, static_cast<int>(deviceNum));
                 Stream& stream = it->second;
 
                 // set numTailBytes to the tar header length for the first file:
@@ -138,8 +139,9 @@ class ArchiveShardWriterWorker {
 
                 // Ensure I have the needed stream
                 uint32_t deviceNum = plan[i].tensor.getPlacement().getDeviceNum();
-                // Get existing or put one there if missing:
-                auto [it, inserted] = streams.try_emplace(deviceNum, Stream::getNextDownloadStream(deviceNum));
+                // Archive downloads use worker-owned streams rather than the global download-stream pool.
+                // This prevents a model snapshot from queueing behind unrelated model output/download work.
+                auto [it, inserted] = streams.try_emplace(deviceNum, static_cast<int>(deviceNum));
                 Stream& stream = it->second;
 
                 // Wait for done prefetch loadedBuffer from GPU

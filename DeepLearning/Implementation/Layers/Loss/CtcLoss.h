@@ -59,6 +59,7 @@ class CtcLoss : public Loss {
     void forward(std::optional<Tensor> inputTensor, bool validationPass, uint32_t batchSize = 0) override;
     void ensureNoDeviceCrossing() override;
     std::string getType() override;
+    std::vector<Event> getSynchronizeEvents() override;
 
     std::optional<Tensor> getLabelLengthsInput() const { return labelLengthsInput; }
     std::optional<Tensor> getInputLengthsInput() const { return inputLengthsInput; }

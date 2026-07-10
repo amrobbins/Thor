@@ -14,6 +14,15 @@ class NetworkOutput : public Layer {
 
     NetworkOutput(std::optional<TensorPlacement> outputPlacement) : outputPlacement(outputPlacement) {}
 
+    std::vector<Event> getSynchronizeEvents() override {
+        std::vector<Event> events;
+        std::set<uint64_t> synchronizedStreamIds;
+        appendSynchronizeEvent(events, synchronizedStreamIds, stream);
+        if (outputStream.has_value())
+            appendSynchronizeEvent(events, synchronizedStreamIds, outputStream.value());
+        return events;
+    }
+
     void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) override { THOR_UNREACHABLE(); }
 
     std::optional<Tensor> connectToPreviousLayer(

@@ -2159,9 +2159,10 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     if (!evaluateOnly && request.previousPlacedNetwork != nullptr) {
         request.cancellationToken.throwIfCancellationRequested();
         // Copying state from a previously trained placement is a phase/replacement
-        // boundary.  Ensure the source placement's final gradient-update work is
-        // visible before enqueueing parameter and optimizer-state copies.
-        request.previousPlacedNetwork->synchronizeDevices();
+        // boundary. Ensure the source placement's final gradient-update work is
+        // visible before enqueueing parameter and optimizer-state copies, without
+        // draining unrelated models that share its CUDA device.
+        request.previousPlacedNetwork->synchronize();
         if (executionGraph.composedFromTrainingPhases) {
             placedNetwork->copyMatchingTrainingStateFrom(*request.previousPlacedNetwork);
         } else {
@@ -2634,8 +2635,9 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         // configured, callers may immediately reuse, inspect, save, or pass the
         // completed PlacedNetwork into a follow-up phase.  Preserve the pipelined
         // batch path, but drain device work before publishing the final trained
-        // state outside this request.
-        placedNetwork->synchronizeDevices();
+        // state outside this request. This is scoped to the completed model so
+        // unrelated models sharing its CUDA device continue running.
+        placedNetwork->synchronize();
         if (request.completedPlacedNetwork != nullptr) {
             *request.completedPlacedNetwork = placedNetwork;
         }

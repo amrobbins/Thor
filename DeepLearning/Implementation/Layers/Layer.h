@@ -305,6 +305,21 @@ class Layer {
     virtual std::optional<Layer *> getNextLayer() { return nextLayer; }
     virtual Stream getStream() { return stream; }
 
+    /**
+     * Records one host-waitable event on every distinct stream on which this layer may
+     * have enqueued work. Synchronizing every returned event guarantees that all work
+     * enqueued by this layer before this call has completed.
+     *
+     * The guarantee is a snapshot: work enqueued after this method returns is not
+     * covered by the returned events.
+     */
+    virtual std::vector<Event> getSynchronizeEvents() {
+        std::vector<Event> events;
+        std::set<uint64_t> synchronizedStreamIds;
+        appendSynchronizeEvent(events, synchronizedStreamIds, stream);
+        return events;
+    }
+
     static void average(half result_d[], half *sources_d[], int numElements, int numSources, Stream stream) {
         launchAverage(result_d, sources_d, numSources, numElements, stream);
     }
@@ -396,6 +411,16 @@ class Layer {
     }
 
    protected:
+    static void appendSynchronizeEvent(std::vector<Event> &events,
+                                       std::set<uint64_t> &synchronizedStreamIds,
+                                       const Stream &stream) {
+        if (!stream.isInitialized())
+            return;
+        if (!synchronizedStreamIds.insert(stream.getId()).second)
+            return;
+        events.emplace_back(stream.putEvent(false, true));
+    }
+
     std::optional<Tensor> featureInput;
     std::optional<Tensor> featureOutput;
     std::optional<Tensor> errorInput;

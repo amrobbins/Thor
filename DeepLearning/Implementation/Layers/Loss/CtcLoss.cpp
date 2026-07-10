@@ -380,4 +380,14 @@ void CtcLoss::ensureNoDeviceCrossing() {
 
 string CtcLoss::getType() { return "CtcLoss"; }
 
+vector<Event> CtcLoss::getSynchronizeEvents() {
+    vector<Event> events;
+    set<uint64_t> synchronizedStreamIds;
+    appendSynchronizeEvent(events, synchronizedStreamIds, stream);
+    appendSynchronizeEvent(events, synchronizedStreamIds, labelsStream);
+    appendSynchronizeEvent(events, synchronizedStreamIds, labelLengthsStream);
+    appendSynchronizeEvent(events, synchronizedStreamIds, inputLengthsStream);
+    return events;
+}
+
 }  // namespace ThorImplementation

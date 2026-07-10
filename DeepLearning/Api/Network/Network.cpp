@@ -735,9 +735,15 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
                     dynamic_pointer_cast<ThorImplementation::TrainableLayer>(implementationLayer);
                 THOR_THROW_IF_FALSE(implementationTrainableLayer != nullptr);
                 vector<Event> layerEvents = trainableLayer->initialize(implementationTrainableLayer, true, nullptr, std::nullopt);
+                stampedNetwork.initializationDoneEvents.insert(stampedNetwork.initializationDoneEvents.end(),
+                                                               layerEvents.begin(),
+                                                               layerEvents.end());
                 initDoneEvents.insert(initDoneEvents.end(), make_move_iterator(layerEvents.begin()), make_move_iterator(layerEvents.end()));
             } else {
                 vector<Event> layerEvents = layer->initialize(implementationLayer);
+                stampedNetwork.initializationDoneEvents.insert(stampedNetwork.initializationDoneEvents.end(),
+                                                               layerEvents.begin(),
+                                                               layerEvents.end());
                 initDoneEvents.insert(initDoneEvents.end(), make_move_iterator(layerEvents.begin()), make_move_iterator(layerEvents.end()));
             }
         }
@@ -888,21 +894,25 @@ void Network::save(vector<ThorImplementation::StampedNetwork> &stampedNetworks,
                    const bool saveOptimizerState) const {
     thor_file::TarWriter archiveWriter(networkName);
 
-    // This is a boundary operation, not the per-batch hot path.  Drain all CUDA
-    // work submitted by this process on devices used by the placed stamps before
-    // layer serialization starts so parameter/optimizer tensor copies cannot race
-    // the final gradient-update stream work from the last training batch.
-    std::set<uint32_t> stampedGpuNums;
-    for (const ThorImplementation::StampedNetwork& stampedNetwork : stampedNetworks) {
-        stampedGpuNums.insert(stampedNetwork.getGpuNum());
+    // Snapshot only the streams owned by these stamps.  Training snapshot callers
+    // stop batch submission before entering save(), so synchronizing these events
+    // is sufficient to make parameter and optimizer state stable without draining
+    // unrelated models that happen to share the same CUDA device.
+    std::vector<Event> synchronizeEvents;
+    for (ThorImplementation::StampedNetwork& stampedNetwork : stampedNetworks) {
+        std::vector<Event> stampEvents = stampedNetwork.getSynchronizeEvents();
+        synchronizeEvents.insert(synchronizeEvents.end(),
+                                 std::make_move_iterator(stampEvents.begin()),
+                                 std::make_move_iterator(stampEvents.end()));
     }
-    for (uint32_t gpu : stampedGpuNums) {
-        Stream::deviceSynchronize(static_cast<int>(gpu));
+    for (Event& event : synchronizeEvents) {
+        event.synchronize();
     }
 
-    // For the initial implementation, I will just force GPU 0.
-    // I will optimize from there, but I need changes elsewhere first anyway.
-    Stream stream = Stream::getNextDownloadStream(0);
+    // Serialization-specific work must not queue behind unrelated users of the
+    // process-wide download-stream pool. For the initial implementation, state
+    // serialization is still forced through GPU 0.
+    Stream stream(0);
     json modelJson;
     modelJson["layers"] = json::array();
     uint32_t stampIndex = 0;
