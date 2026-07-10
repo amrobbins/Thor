@@ -41,6 +41,31 @@ def test_fully_connected_constructs_defaults_and_output_shape_dtype():
     assert fc_arch["activation"]["layer_type"] == "gelu"
 
 
+def test_fully_connected_fp32_defaults_to_fp32_compute_and_accepts_explicit_tf32():
+    default_network = _net()
+    default_input = _input_tensor(default_network, 32, thor.DataType.fp32)
+    default_fc = thor.layers.FullyConnected(default_network, default_input, 64, False, activation=None)
+
+    assert default_fc.get_weights_data_type() == thor.DataType.fp32
+    assert default_fc.get_compute_data_type() == thor.DataType.fp32
+    assert default_fc.get_output_data_type() == thor.DataType.fp32
+    assert _only_layer_architecture(default_network, "fully_connected")["compute_data_type"] == "fp32"
+
+    tf32_network = thor.Network("test_net_fully_connected_tf32")
+    tf32_input = _input_tensor(tf32_network, 32, thor.DataType.fp32)
+    tf32_fc = thor.layers.FullyConnected(
+        tf32_network,
+        tf32_input,
+        64,
+        False,
+        activation=None,
+        compute_data_type=thor.DataType.tf32,
+    )
+
+    assert tf32_fc.get_compute_data_type() == thor.DataType.tf32
+    assert _only_layer_architecture(tf32_network, "fully_connected")["compute_data_type"] == "tf32"
+
+
 def test_fully_connected_constructs_no_activation_when_none():
     n = _net()
     x = _input_tensor(n, 16, thor.DataType.fp16)

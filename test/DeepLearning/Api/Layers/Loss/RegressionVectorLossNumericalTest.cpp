@@ -1,5 +1,7 @@
+#include "DeepLearning/Api/Layers/Loss/AsymmetricPowerLoss.h"
 #include "DeepLearning/Api/Layers/Loss/BinaryCrossEntropy.h"
 #include "DeepLearning/Api/Layers/Loss/CustomLoss.h"
+#include "DeepLearning/Api/Layers/Loss/ExpectileLoss.h"
 #include "DeepLearning/Api/Layers/Loss/MeanAbsoluteError.h"
 #include "DeepLearning/Api/Layers/Loss/MeanAbsolutePercentageError.h"
 #include "DeepLearning/Api/Layers/Loss/MeanSquaredError.h"
@@ -346,6 +348,36 @@ vector<float> referenceMseRawLoss(const vector<float>& predictions, const vector
     return loss;
 }
 
+vector<float> referenceExpectileRawLoss(const vector<float>& predictions, const vector<float>& labels, float expectile) {
+    THOR_THROW_IF_FALSE(predictions.size() == labels.size());
+    vector<float> loss(predictions.size(), 0.0f);
+    for (size_t i = 0; i < predictions.size(); ++i) {
+        const float error = labels[i] - predictions[i];
+        const float weight = error > 0.0f ? 2.0f * expectile : 2.0f * (1.0f - expectile);
+        loss[i] = weight * error * error;
+    }
+    return loss;
+}
+
+vector<float> referenceAsymmetricPowerRawLoss(const vector<float>& predictions,
+                                               const vector<float>& labels,
+                                               float level,
+                                               float exponent) {
+    THOR_THROW_IF_FALSE(predictions.size() == labels.size());
+    vector<float> loss(predictions.size(), 0.0f);
+    for (size_t i = 0; i < predictions.size(); ++i) {
+        const float error = labels[i] - predictions[i];
+        const float weight = error > 0.0f ? 2.0f * level : 2.0f * (1.0f - level);
+        if (exponent == 1.0f)
+            loss[i] = weight * std::fabs(error);
+        else if (exponent == 2.0f)
+            loss[i] = weight * error * error;
+        else
+            loss[i] = weight * std::pow(std::fabs(error), exponent);
+    }
+    return loss;
+}
+
 vector<float> referenceBceRawLoss(const vector<float>& logits, const vector<float>& labels) {
     THOR_THROW_IF_FALSE(logits.size() == labels.size());
     vector<float> loss(logits.size(), 0.0f);
@@ -494,6 +526,103 @@ TEST(RegressionVectorLossApi, Width100RawMSEForwardAndBackwardMatchNumericalRefe
 
     expectClose(actual.loss, expectedLoss, 1.0e-5f);
     expectClose(actual.predictionGradient, expectedGradient, ThorTest::lossScaleAwareGradientTolerance(1.0e-2f));
+}
+
+TEST(RegressionVectorLossApi, Width100RawExpectileForwardAndBackwardMatchNumericalReference) {
+    constexpr float expectile = 0.9f;
+    const vector<float> predictions = makeQuantilePredictions();
+    const vector<float> labels = makeQuantileLabels();
+
+    RawLossRunResult actual = runCustomBackedRawLossNetwork(
+        "expectile_width_100_gradient_numerical",
+        predictions,
+        labels,
+        [expectile](Api::Network& network, Api::Tensor predictionsTensor, Api::Tensor labelsTensor) {
+            Api::ExpectileLoss loss = Api::ExpectileLoss::Builder()
+                                           .network(network)
+                                           .predictions(predictionsTensor)
+                                           .labels(labelsTensor)
+                                           .expectile(expectile)
+                                           .lossDataType(Api::DataType::FP32)
+                                           .reportsRawLoss()
+                                           .build();
+            return loss.getLoss();
+        });
+
+    vector<float> expectedLoss = referenceExpectileRawLoss(predictions, labels, expectile);
+    vector<float> expectedGradient = finiteDifferenceGradient(
+        predictions,
+        [&](const vector<float>& perturbed) { return sumAsDouble(referenceExpectileRawLoss(perturbed, labels, expectile)); });
+    scaleByLossScalingFactor(expectedGradient);
+
+    expectClose(actual.loss, expectedLoss, 1.0e-5f);
+    expectClose(actual.predictionGradient, expectedGradient, ThorTest::lossScaleAwareGradientTolerance(2.0e-2f));
+}
+
+TEST(RegressionVectorLossApi, Width100CenterExpectileExactlyMatchesMse) {
+    const vector<float> predictions = makePredictions();
+    const vector<float> labels = makeLabels();
+
+    const vector<float> expectileLoss = referenceExpectileRawLoss(predictions, labels, 0.5f);
+    const vector<float> mseLoss = referenceMseRawLoss(predictions, labels);
+    expectClose(expectileLoss, mseLoss, 0.0f);
+}
+
+TEST(RegressionVectorLossApi, Width100RawAsymmetricPowerForwardAndBackwardMatchNumericalReference) {
+    constexpr float level = 0.9f;
+    constexpr float exponent = 1.5f;
+    const vector<float> predictions = makeQuantilePredictions();
+    const vector<float> labels = makeQuantileLabels();
+
+    RawLossRunResult actual = runCustomBackedRawLossNetwork(
+        "asymmetric_power_width_100_gradient_numerical",
+        predictions,
+        labels,
+        [level, exponent](Api::Network& network, Api::Tensor predictionsTensor, Api::Tensor labelsTensor) {
+            Api::AsymmetricPowerLoss loss = Api::AsymmetricPowerLoss::Builder()
+                                                .network(network)
+                                                .predictions(predictionsTensor)
+                                                .labels(labelsTensor)
+                                                .level(level)
+                                                .exponent(exponent)
+                                                .lossDataType(Api::DataType::FP32)
+                                                .reportsRawLoss()
+                                                .build();
+            return loss.getLoss();
+        });
+
+    vector<float> expectedLoss = referenceAsymmetricPowerRawLoss(predictions, labels, level, exponent);
+    vector<float> expectedGradient = finiteDifferenceGradient(
+        predictions,
+        [&](const vector<float>& perturbed) {
+            return sumAsDouble(referenceAsymmetricPowerRawLoss(perturbed, labels, level, exponent));
+        });
+    scaleByLossScalingFactor(expectedGradient);
+
+    expectClose(actual.loss, expectedLoss, 1.0e-5f);
+    expectClose(actual.predictionGradient, expectedGradient, ThorTest::lossScaleAwareGradientTolerance(3.0e-2f));
+}
+
+TEST(RegressionVectorLossApi, Width100CenterAsymmetricPowerExactlyMatchesMeanPowerReference) {
+    constexpr float exponent = 1.5f;
+    const vector<float> predictions = makePredictions();
+    const vector<float> labels = makeLabels();
+
+    const vector<float> asymmetricLoss = referenceAsymmetricPowerRawLoss(predictions, labels, 0.5f, exponent);
+    vector<float> meanPowerLoss(predictions.size(), 0.0f);
+    for (size_t i = 0; i < predictions.size(); ++i)
+        meanPowerLoss[i] = std::pow(std::fabs(predictions[i] - labels[i]), exponent);
+    expectClose(asymmetricLoss, meanPowerLoss, 0.0f);
+}
+
+TEST(RegressionVectorLossApi, Width100ExponentTwoAsymmetricPowerExactlyMatchesExpectileReference) {
+    constexpr float level = 0.1f;
+    const vector<float> predictions = makePredictions();
+    const vector<float> labels = makeLabels();
+
+    const vector<float> asymmetricLoss = referenceAsymmetricPowerRawLoss(predictions, labels, level, 2.0f);
+    const vector<float> expectileLoss = referenceExpectileRawLoss(predictions, labels, level);
+    expectClose(asymmetricLoss, expectileLoss, 0.0f);
 }
 
 TEST(RegressionVectorLossApi, Width100RawBCEForwardAndBackwardMatchNumericalReference) {

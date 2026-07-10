@@ -309,6 +309,13 @@ void bind_fully_connected(nb::module_ &m) {
             Initializer for the weight matrix.
         biases_initializer : thor.initializers.Initializer, default thor.initializers.Glorot()
             Initializer for the bias vector.
+        weights_data_type : thor.DataType or None, default None
+            Storage type for the weight matrix. When omitted, uses the feature input type.
+        compute_data_type : thor.DataType or None, default None
+            Arithmetic type for the matrix multiply. When omitted, uses the feature input type, so
+            FP32 inputs default to strict FP32 compute. Pass ``thor.DataType.tf32`` to opt into TF32.
+        output_data_type : thor.DataType or None, default None
+            Storage type for the layer output. When omitted, uses the feature input type.
         epilogue : thor.physical.Expression or None, default None
             Optional expression applied after the affine transform and activation.
             Build it from ``FullyConnected.epilogue_input()``.

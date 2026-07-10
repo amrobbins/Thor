@@ -401,11 +401,10 @@ void FullyConnected::verifyFullyConnectedDataType(DataType dataType, const std::
 }
 
 DataType FullyConnected::defaultFullyConnectedComputeDataType(DataType inputDataType, DataType weightsDataType, DataType outputDataType) {
-    // FP32 storage defaults to TF32 Tensor Core compute.  Users who need strict IEEE-style FP32 GEMM can
-    // explicitly set computeDataType(DataType::FP32).
-    if (inputDataType == DataType::FP32 && weightsDataType == DataType::FP32 && outputDataType == DataType::FP32) {
-        return DataType::TF32;
-    }
+    // Compute follows the feature-input storage type by default. In particular, FP32 inputs use strict
+    // FP32 compute; callers may explicitly request TF32 Tensor Core compute with computeDataType(DataType::TF32).
+    (void)weightsDataType;
+    (void)outputDataType;
     return inputDataType;
 }
 

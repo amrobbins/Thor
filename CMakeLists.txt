@@ -12,7 +12,7 @@ cmake_minimum_required(VERSION 3.28)
 # wheel/libnvrtc-builtins stack so installed wheels do not require host CUDA
 # headers and local source-tree testing matches wheel runtime behavior.
 option(THOR_USE_PROJECT_VENV "Use project .venv Python when present" ON)
-option(THOR_ENABLE_CPU_BACKEND "Build Thor CPU backend dependency support" ON)
+option(THOR_ENABLE_CPU_BACKEND "Build Thor CPU backend dependency support" OFF)
 option(THOR_CPU_BACKEND_USE_SYSTEM_ONEDNN "Use a system-installed oneDNN/DNNL package instead of FetchContent" OFF)
 
 set(

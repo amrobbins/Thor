@@ -17,6 +17,8 @@ _CORE_FLAT_LOSSES = [
     "KLDivLoss",
     "QuantileLoss",
     "PinballLoss",
+    "ExpectileLoss",
+    "AsymmetricPowerLoss",
 ]
 
 _DOMAIN_LOSSES = {
