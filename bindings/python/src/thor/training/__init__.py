@@ -25,6 +25,7 @@ _DATA_API_NAMES = (
     "TrainingData",
     "WindowedTensorChunk",
     "WindowedTensorLayout",
+    "WindowedTensorSourceLayout",
 )
 for _name in _DATA_API_NAMES:
     globals().pop(_name, None)

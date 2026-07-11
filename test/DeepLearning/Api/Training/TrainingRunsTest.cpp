@@ -1,6 +1,7 @@
 #include "DeepLearning/Api/Training/TrainingRuns.h"
 
-#include "DeepLearning/Api/Loaders/Loader.h"
+#include "DeepLearning/Api/Data/BatchSession.h"
+#include "DeepLearning/Api/Data/TrainingData.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
@@ -31,8 +32,10 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -63,36 +66,91 @@ std::shared_ptr<Network> makeReluMemberNetwork(const std::string& networkName,
     return network;
 }
 
-class FakeLoader : public Loader {
+class FakeBatchSession final : public BatchSession {
    public:
-    FakeLoader() { batchSize = 4; }
-
-    Batch getBatch(ExampleType exampleType, uint64_t& batchNum) override {
-        (void)exampleType;
-        (void)batchNum;
-        return {};
-    }
-
-    void returnBatchBuffers(ExampleType exampleType, Batch&& batch) override {
-        (void)exampleType;
-        (void)batch;
-    }
+    FakeBatchSession() { batchSize = 4; }
 
     uint64_t getNumBatchesPerEpoch(ExampleType exampleType) override {
-        (void)exampleType;
-        return 0;
+        return exampleType == ExampleType::TRAIN ? 1 : 0;
     }
-
     uint64_t getNumExamples(ExampleType exampleType) override {
-        (void)exampleType;
-        return 0;
+        return exampleType == ExampleType::TRAIN ? 1 : 0;
     }
-
     uint64_t getNextBatchNum(ExampleType exampleType) override {
         (void)exampleType;
         return 0;
     }
+
+   private:
+    Batch acquireBatch(ExampleType exampleType, uint64_t& batchNum) override {
+        (void)exampleType;
+        (void)batchNum;
+        return {};
+    }
+    void recycleBatch(ExampleType exampleType, Batch&& batch) override {
+        (void)exampleType;
+        (void)batch;
+    }
 };
+
+class FakeDataset final : public NamedDataset {
+   public:
+    FakeDataset()
+        : id(DatasetId::fromStableMaterial("TrainingRunsTest.FakeDataset")),
+          schema(std::vector<DatasetField>{
+              DatasetField{.id = 1, .name = "features", .dataType = DataType::FP32, .dimensions = {4}},
+              DatasetField{.id = 2, .name = "labels", .dataType = DataType::FP32, .dimensions = {1}},
+              DatasetField{.id = 3, .name = "observed_daily", .dataType = DataType::FP32, .dimensions = {1}},
+              DatasetField{.id = 4, .name = "observed_aggregate", .dataType = DataType::FP32, .dimensions = {1}},
+              DatasetField{.id = 5, .name = "example_weights", .dataType = DataType::FP32, .dimensions = {1}},
+          }) {}
+
+    const DatasetId& getId() const override { return id; }
+    uint64_t getNumExamples() const override { return 1; }
+    const DatasetSchema& getSchema() const override { return schema; }
+    const DatasetField& getField(std::string_view name) const override { return schema.getField(name); }
+
+   protected:
+    std::shared_ptr<BatchSession> openBatchSession(const DatasetSplitManifest& splits,
+                                                   const BatchPolicy& batching,
+                                                   const DatasetAccessPolicy& accessPolicy,
+                                                   uint64_t maxInFlightBatches,
+                                                   const std::set<DatasetFieldId>& requiredFieldIds) const override {
+        (void)splits;
+        (void)batching;
+        (void)accessPolicy;
+        (void)maxInFlightBatches;
+        (void)requiredFieldIds;
+        return std::make_shared<FakeBatchSession>();
+    }
+
+   private:
+    DatasetId id;
+    DatasetSchema schema;
+};
+
+std::shared_ptr<TrainingData> makeFakeTrainingData() {
+    auto dataset = std::make_shared<FakeDataset>();
+    return std::make_shared<TrainingData>(dataset,
+                                          DatasetSplitManifest(*dataset, {0}, {}),
+                                          BatchPolicy(4, false),
+                                          DatasetAccessPolicy{.deviceStorage = DeviceDatasetStorage::OFF},
+                                          "fake_dataset");
+}
+
+std::shared_ptr<TrainingData> makeFakeTestData(bool includeTestPartition) {
+    auto dataset = std::make_shared<FakeDataset>();
+    return std::make_shared<TrainingData>(
+        dataset,
+        DatasetSplitManifest(
+            *dataset,
+            {},
+            {},
+            includeTestPartition ? std::vector<uint64_t>{0} : std::vector<uint64_t>{}),
+        BatchPolicy(4, false),
+        DatasetAccessPolicy{.deviceStorage = DeviceDatasetStorage::OFF},
+        "fake_test_dataset");
+}
 
 class Coordinator {
    public:
@@ -264,7 +322,7 @@ class RestartProgressExecutor : public TrainingExecutor {
 
 std::shared_ptr<Network> makeNetworkWithOutput(const std::string& name, const std::vector<uint64_t>& dimensions) {
     auto network = std::make_shared<Network>(name);
-    NetworkInput::Builder().network(*network).name("features").dimensions({0, 4}).dataType(DataType::FP32).build();
+    NetworkInput::Builder().network(*network).name("features").dimensions({4}).dataType(DataType::FP32).build();
     Tensor outputTensor(DataType::FP32, dimensions);
     NetworkOutput::Builder().network(*network).name("predictions").inputTensor(outputTensor).dataType(DataType::FP32).build();
     return network;
@@ -272,10 +330,10 @@ std::shared_ptr<Network> makeNetworkWithOutput(const std::string& name, const st
 
 std::shared_ptr<Network> makeDemandSignatureNetwork(const std::string& name) {
     auto network = std::make_shared<Network>(name);
-    NetworkInput::Builder().network(*network).name("features").dimensions({0, 4}).dataType(DataType::FP32).build();
-    NetworkInput::Builder().network(*network).name("observed_daily").dimensions({0, 1}).dataType(DataType::FP32).build();
-    NetworkInput::Builder().network(*network).name("observed_aggregate").dimensions({0, 1}).dataType(DataType::FP32).build();
-    NetworkInput::Builder().network(*network).name("example_weights").dimensions({0, 1}).dataType(DataType::FP32).build();
+    NetworkInput::Builder().network(*network).name("features").dimensions({4}).dataType(DataType::FP32).build();
+    NetworkInput::Builder().network(*network).name("observed_daily").dimensions({1}).dataType(DataType::FP32).build();
+    NetworkInput::Builder().network(*network).name("observed_aggregate").dimensions({1}).dataType(DataType::FP32).build();
+    NetworkInput::Builder().network(*network).name("example_weights").dimensions({1}).dataType(DataType::FP32).build();
 
     Tensor outputTensor(DataType::FP32, {0, 1});
     NetworkOutput::Builder().network(*network).name("daily").inputTensor(outputTensor).dataType(DataType::FP32).build();
@@ -402,7 +460,7 @@ std::shared_ptr<Trainer> makeTrainer(std::shared_ptr<Network> network,
                                     bool saveModelOverwrite = false) {
     return std::make_shared<Trainer>(Trainer::Builder()
                                          .network(std::move(network))
-                                         .loader(std::make_shared<FakeLoader>())
+                                         .data(makeFakeTrainingData())
                                          .executor(std::move(executor))
                                          .observer(std::make_shared<NullTrainingObserver>())
                                          .saveModelDirectory(std::move(saveModelDirectory))
@@ -452,7 +510,7 @@ std::shared_ptr<Trainer> makePhaseTrainerForValidation(const std::string& name,
     auto program = std::make_shared<TrainingProgram>(std::vector<std::shared_ptr<TrainingStep>>{step});
 
     return std::make_shared<Trainer>(Trainer::Builder()
-                                         .loader(std::make_shared<FakeLoader>())
+                                         .data(makeFakeTrainingData())
                                          .executor(std::move(executor))
                                          .observer(std::make_shared<NullTrainingObserver>())
                                          .trainingProgram(std::move(program))
@@ -897,6 +955,34 @@ TEST(TrainingRunsResult, SaveEnsembleAllowsPartialSuccessWhenMinimumSatisfied) {
     EXPECT_NO_THROW(loadedEnsemble.load(ensembleDir.string()));
 
     std::filesystem::remove_all(root);
+}
+
+TEST(TrainingRuns, ExternalTestDataRequiresTestButNotTrainPartition) {
+    auto executor = std::make_shared<RestartProgressExecutor>(
+        std::vector<std::vector<double>>{{1.0}});
+    std::shared_ptr<Trainer> trainer = makeTrainer(
+        makeNetworkWithOutput("training-runs-test-data-partitions", {0, 10}), executor);
+    TrainingRuns runs({{"fold_0", trainer}});
+
+    TrainingRunsEvaluationOptions evaluation;
+    evaluation.evaluateTrainingPopulation = false;
+    evaluation.testData = makeFakeTestData(true);
+    EXPECT_TRUE(runs.fit(TrainerFitOptions{.epochs = 1}, evaluation).allCompleted());
+    EXPECT_EQ(executor->calls, 1u);
+}
+
+TEST(TrainingRuns, RejectsExternalTestDataWithEmptyTestPartitionBeforeFit) {
+    auto executor = std::make_shared<RestartProgressExecutor>(
+        std::vector<std::vector<double>>{{1.0}});
+    std::shared_ptr<Trainer> trainer = makeTrainer(
+        makeNetworkWithOutput("training-runs-empty-test-data", {0, 10}), executor);
+    TrainingRuns runs({{"fold_0", trainer}});
+
+    TrainingRunsEvaluationOptions evaluation;
+    evaluation.evaluateTrainingPopulation = false;
+    evaluation.testData = makeFakeTestData(false);
+    EXPECT_THROW((void)runs.fit(TrainerFitOptions{.epochs = 1}, evaluation), std::runtime_error);
+    EXPECT_EQ(executor->calls, 0u);
 }
 
 TEST(TrainingRuns, StartsAllTrainersConcurrentlyAndReturnsCompletedResults) {

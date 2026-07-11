@@ -47,6 +47,18 @@ class DatasetWriter {
         uint64_t count;
     };
 
+    /**
+     * One compact reference formula for a segment appended by writeAffineExamples().
+     * For segment-local row r, start(r) = base + r * stride + fieldOffset.
+     */
+    struct AffineWindowedTensorReferenceView {
+        ThorImplementation::DataType keyDataType;
+        const void *key;
+        int64_t base = 0;
+        int64_t stride = 1;
+        int64_t fieldOffset = 0;
+    };
+
     struct WindowedTensorSourceView {
         ThorImplementation::DataType dataType;
         const void *key;
@@ -77,7 +89,11 @@ class DatasetWriter {
     void writeIndexedExamples(const std::map<std::string, TensorBatchView> &tensors);
     void writeIndexedExamples(const std::map<std::string, TensorBatchView> &tensors,
                               const std::map<std::string, WindowedTensorReferenceBatchView> &windowedTensorReferences);
-    void writeWindowedTensorSource(std::string_view tensorName, const WindowedTensorSourceView &source);
+    void writeAffineExamples(
+        uint64_t count,
+        const std::map<std::string, TensorBatchView> &tensors,
+        const std::map<std::string, AffineWindowedTensorReferenceView> &windowedTensorReferences);
+    void writeWindowSource(std::string_view sourceName, const WindowedTensorSourceView &source);
     void close();
 
     [[nodiscard]] bool isClosed() const;
@@ -119,12 +135,30 @@ class DatasetWriter {
         std::vector<DatasetLayout::WindowedTensorSourceSequence> sequences;
     };
 
-    std::map<std::string, WindowedTensorSourceManifestEntry> windowedTensorSources;
+    std::map<std::string, WindowedTensorSourceManifestEntry> windowSources;
+    struct AffineWindowedTensorReferenceManifestEntry {
+        std::string keyHex;
+        int64_t base = 0;
+        int64_t stride = 1;
+        int64_t fieldOffset = 0;
+    };
+
+    struct AffineWindowReferenceSegment {
+        uint64_t rowStart = 0;
+        uint64_t count = 0;
+        std::map<std::string, AffineWindowedTensorReferenceManifestEntry> references;
+    };
+
+    std::vector<AffineWindowReferenceSegment> affineWindowReferenceSegments;
+
     uint64_t totalExamples;
 
     void validateWritable() const;
     void validateTensorMapExact(const std::map<std::string, TensorView> &tensors) const;
     uint64_t validateTensorBatchMapExact(const std::map<std::string, TensorBatchView> &tensors) const;
+    void validateAffineWindowedTensorReferenceMapExact(
+        const std::map<std::string, AffineWindowedTensorReferenceView> &windowedTensorReferences,
+        uint64_t count) const;
     void validateWindowedTensorReferenceMapExact(
         const std::map<std::string, WindowedTensorReferenceView> &windowedTensorReferences) const;
     uint64_t validateTensorAndWindowedTensorReferenceBatchMapsExact(

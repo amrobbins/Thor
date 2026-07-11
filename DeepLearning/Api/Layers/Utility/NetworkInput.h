@@ -86,7 +86,7 @@ class NetworkInput : public Layer {
         }
         // Graph placement owns only the statically connected feature tensor.
         // Any host/cross-device staging ring is allocated later by the queued
-        // runtime after it knows the effective loader; device-resident inputs
+        // runtime after it knows the effective batch session; device-resident inputs
         // intentionally allocate no NetworkInput staging tensors.
         return featureOutput.value().getTotalSizeInBytes();
     }

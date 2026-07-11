@@ -32,7 +32,8 @@ class DeviceResidentWindowedNamedBatchSession : public Thor::BatchSession {
         Thor::DeviceDatasetSessionDescription sessionDescription,
         Thor::DeviceDatasetLease windowedDataset,
         uint64_t batchQueueDepth = 2,
-        uint64_t readerQueueDepth = 32);
+        uint64_t readerQueueDepth = 32,
+        std::string datasetName = {});
     ~DeviceResidentWindowedNamedBatchSession() override;
 
     DeviceResidentWindowedNamedBatchSession(const DeviceResidentWindowedNamedBatchSession &) = delete;
@@ -40,8 +41,6 @@ class DeviceResidentWindowedNamedBatchSession : public Thor::BatchSession {
     DeviceResidentWindowedNamedBatchSession(DeviceResidentWindowedNamedBatchSession &&) = delete;
     DeviceResidentWindowedNamedBatchSession &operator=(DeviceResidentWindowedNamedBatchSession &&) = delete;
 
-    Batch getBatch(ExampleType exampleType, uint64_t &batchNum) override;
-    void returnBatchBuffers(ExampleType exampleType, Batch &&batch) override;
 
     uint64_t getNumBatchesPerEpoch(ExampleType exampleType) override;
     uint64_t getNumExamples(ExampleType exampleType) override;
@@ -61,10 +60,12 @@ class DeviceResidentWindowedNamedBatchSession : public Thor::BatchSession {
     [[nodiscard]] bool isCancelled() const { return cancelled.load(std::memory_order_acquire); }
 
    private:
+    Batch acquireBatch(ExampleType exampleType, uint64_t &batchNum) override;
+    void recycleBatch(ExampleType exampleType, Batch &&batch) override;
     struct SplitRuntime {
         ExampleType exampleType = ExampleType::TRAIN;
         std::string splitName;
-        std::shared_ptr<const std::vector<uint64_t>> sourceIndices;
+        std::shared_ptr<const Thor::ExampleIndexSet> sourceIndices;
         bool randomized = false;
         std::optional<uint64_t> seed;
         uint64_t batchesPerEpoch = 0;
@@ -95,7 +96,7 @@ class DeviceResidentWindowedNamedBatchSession : public Thor::BatchSession {
     std::atomic<bool> cancelled{false};
 
     void initializeSplit(ExampleType exampleType,
-                         std::shared_ptr<const std::vector<uint64_t>> sourceIndices,
+                         std::shared_ptr<const Thor::ExampleIndexSet> sourceIndices,
                          bool randomized,
                          std::optional<uint64_t> seed);
     [[nodiscard]] SplitRuntime &runtimeFor(ExampleType exampleType);

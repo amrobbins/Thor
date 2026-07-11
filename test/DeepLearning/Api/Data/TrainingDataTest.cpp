@@ -11,10 +11,16 @@
 #include <utility>
 #include <vector>
 
+using Thor::BatchLease;
 using ThorImplementation::DataType;
 using ThorImplementation::Tensor;
 
 namespace {
+
+template <typename T>
+concept HasPublicRelease = requires(T value) { value.release(); };
+
+static_assert(!HasPublicRelease<Thor::BatchLease>);
 
 std::filesystem::path makeDatasetPath(const std::string &name) {
     static uint64_t counter = 0;
@@ -70,15 +76,19 @@ TEST(TrainingData, OpensIndependentSessionsOverOneImmutableRecipe) {
 
     uint64_t firstBatchNum = 99;
     uint64_t secondBatchNum = 99;
-    Batch firstBatch = first->getBatch(ExampleType::TRAIN, firstBatchNum);
-    Batch secondBatch = second->getBatch(ExampleType::TRAIN, secondBatchNum);
+    BatchLease firstBatchLease = first->leaseBatch(ExampleType::TRAIN, firstBatchNum);
+
+    const Batch& firstBatch = firstBatchLease.get();
+    BatchLease secondBatchLease = second->leaseBatch(ExampleType::TRAIN, secondBatchNum);
+
+    const Batch& secondBatch = secondBatchLease.get();
     EXPECT_EQ(firstBatchNum, 0);
     EXPECT_EQ(secondBatchNum, 0);
     EXPECT_EQ(values(firstBatch), (std::vector<float>{0.0f, 1.0f}));
     EXPECT_EQ(values(secondBatch), (std::vector<float>{0.0f, 1.0f}));
 
-    first->returnBatchBuffers(ExampleType::TRAIN, std::move(firstBatch));
-    second->returnBatchBuffers(ExampleType::TRAIN, std::move(secondBatch));
+    firstBatchLease.reset();
+    secondBatchLease.reset();
     std::filesystem::remove_all(path);
 }
 
@@ -95,12 +105,16 @@ TEST(TrainingData, FixedSeedRandomizationIsSessionLocal) {
     for (uint64_t i = 0; i < 4; ++i) {
         uint64_t firstBatchNum = 0;
         uint64_t secondBatchNum = 0;
-        Batch firstBatch = first->getBatch(ExampleType::TRAIN, firstBatchNum);
-        Batch secondBatch = second->getBatch(ExampleType::TRAIN, secondBatchNum);
+        BatchLease firstBatchLease = first->leaseBatch(ExampleType::TRAIN, firstBatchNum);
+
+        const Batch& firstBatch = firstBatchLease.get();
+        BatchLease secondBatchLease = second->leaseBatch(ExampleType::TRAIN, secondBatchNum);
+
+        const Batch& secondBatch = secondBatchLease.get();
         EXPECT_EQ(firstBatchNum, secondBatchNum);
         EXPECT_EQ(values(firstBatch), values(secondBatch));
-        first->returnBatchBuffers(ExampleType::TRAIN, std::move(firstBatch));
-        second->returnBatchBuffers(ExampleType::TRAIN, std::move(secondBatch));
+        firstBatchLease.reset();
+        secondBatchLease.reset();
     }
     std::filesystem::remove_all(path);
 }
@@ -123,27 +137,53 @@ TEST(TrainingData, BatchLeaseReturnsBuffersAndCancellationIsSessionLocal) {
 
     cancelled->cancel();
     uint64_t cancelledBatchNum = 0;
-    EXPECT_THROW(cancelled->getBatch(ExampleType::TRAIN, cancelledBatchNum), std::runtime_error);
+    EXPECT_THROW(cancelled->leaseBatch(ExampleType::TRAIN, cancelledBatchNum), std::runtime_error);
 
     uint64_t survivorBatchNum = 0;
-    Batch batch = survivor->getBatch(ExampleType::TRAIN, survivorBatchNum);
+    BatchLease batchLease = survivor->leaseBatch(ExampleType::TRAIN, survivorBatchNum);
+
+    const Batch& batch = batchLease.get();
     EXPECT_EQ(values(batch), (std::vector<float>{2.0f, 3.0f}));
-    survivor->returnBatchBuffers(ExampleType::TRAIN, std::move(batch));
+    batchLease.reset();
     std::filesystem::remove_all(path);
 }
 
-TEST(TrainingData, RejectsInvalidSessionAndRecipeConfiguration) {
+TEST(TrainingData, AllowsEmptyPartitionsAndEnforcesThemAtOperationBoundaries) {
     const std::filesystem::path path = makeDatasetPath("validation");
+    writeDataset(path);
+    auto dataset = Thor::FileDataset::open(path);
+    Thor::TrainingData data(dataset,
+                            Thor::DatasetSplitManifest(*dataset, {}, {0}, std::vector<uint64_t>{1}),
+                            Thor::BatchPolicy(1, false));
+    EXPECT_THROW((void)data.openSession(0), std::runtime_error);
+    EXPECT_THROW(data.requireNonEmptyPartition(ExampleType::TRAIN, "fit probe"), std::runtime_error);
+    EXPECT_NO_THROW(data.requireNonEmptyPartition(ExampleType::VALIDATE, "validate probe"));
+    EXPECT_NO_THROW(data.requireNonEmptyPartition(ExampleType::TEST, "test probe"));
+
+    std::shared_ptr<Thor::BatchSession> session = data.openSession(1);
+    EXPECT_EQ(session->getNumExamples(ExampleType::TRAIN), 0);
+    EXPECT_EQ(session->getNumExamples(ExampleType::VALIDATE), 1);
+    EXPECT_EQ(session->getNumExamples(ExampleType::TEST), 1);
+    std::filesystem::remove_all(path);
+}
+
+TEST(TrainingData, BatchLeaseKeepsOwningSessionAliveUntilRecycled) {
+    const std::filesystem::path path = makeDatasetPath("lease_owns_session");
     writeDataset(path);
     auto dataset = Thor::FileDataset::open(path);
     Thor::TrainingData data(dataset,
                             Thor::DatasetSplitManifest(*dataset, {0, 1}, {2}),
                             Thor::BatchPolicy(1, false));
-    EXPECT_THROW((void)data.openSession(0), std::runtime_error);
-    EXPECT_THROW((Thor::TrainingData(dataset,
-                                     Thor::DatasetSplitManifest(*dataset, {}, {0}),
-                                     Thor::BatchPolicy(1, false))),
-                 std::runtime_error);
+
+    std::shared_ptr<Thor::BatchSession> session = data.openSession(1);
+    std::weak_ptr<Thor::BatchSession> weakSession = session;
+    uint64_t batchNum = 0;
+    BatchLease lease = session->leaseBatch(ExampleType::TRAIN, batchNum);
+    session.reset();
+    EXPECT_FALSE(weakSession.expired());
+    lease.reset();
+    EXPECT_TRUE(weakSession.expired());
+
     std::filesystem::remove_all(path);
 }
 

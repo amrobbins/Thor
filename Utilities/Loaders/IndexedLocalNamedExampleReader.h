@@ -49,10 +49,10 @@ struct IndexedLocalNamedExampleReaderSessionStats {
 /**
  * Passive storage reader for indexed local named example datasets.
  *
- * The loader/assembler owns batching and worker scheduling.  The reader owns
+ * The batch session/assembler owns batching and worker scheduling.  The reader owns
  * the dataset storage layout, shard resolution, file offsets, and per-worker
  * I/O sessions.  Callers pass final tensor batch destinations; sessions read
- * directly into those destinations without exposing shards to the loader.
+ * directly into those destinations without exposing shards to the batch session.
  */
 class IndexedLocalNamedExampleReader : public std::enable_shared_from_this<IndexedLocalNamedExampleReader> {
    public:

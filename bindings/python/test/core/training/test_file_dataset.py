@@ -109,7 +109,7 @@ def test_dataset_writer_and_dataset_round_trip_indexed_manifest(tmp_path):
     assert writer.is_closed()
 
     manifest = json.loads((dataset_path / "manifest.json").read_text())
-    assert manifest["format"] == "thor.dataset.v2"
+    assert manifest["format"] == "thor.dataset.v1"
     assert "data_type" not in manifest
     assert manifest["storage_mode"] == "indexed"
     assert manifest["record_size_bytes"] == layout.get_record_size_bytes()
@@ -353,11 +353,17 @@ def test_dataset_writer_rejects_chunk_shape_mismatch(tmp_path):
 def _windowed_layout() -> thor.data.DatasetLayout:
     return thor.data.DatasetLayout(
         tensors={"dense": thor.data.TensorLayout([1], thor.DataType.fp32)},
+        window_sources={
+            "history_source": thor.data.WindowedTensorSourceLayout(
+                step_shape=[1],
+                data_type=thor.DataType.fp32,
+                key_type=thor.DataType.uint64,
+            )
+        },
         windowed_tensors={
             "history": thor.data.WindowedTensorLayout(
                 shape=[3, 1],
-                data_type=thor.DataType.fp32,
-                key_type=thor.DataType.uint64,
+                source="history_source",
                 index_type=thor.DataType.int32,
                 pad=thor.data.ConstantPad(-1.0),
                 mask_name="history_mask",
@@ -377,22 +383,31 @@ def test_windowed_dataset_layout_exposes_python_contract():
         "history_mask": [3],
     }
     assert layout.get_record_size_bytes() == 16
+    assert layout.get_window_source_specs() == {
+        "history_source": {
+            "step_shape": [1],
+            "data_type": thor.DataType.fp32,
+            "key_type": thor.DataType.uint64,
+            "step_num_bytes": 4,
+            "source_filename": None,
+            "source_num_bytes": 0,
+            "source_sequences": [],
+        }
+    }
     assert layout.get_windowed_tensor_specs() == {
-        "history":
-            {
-                "shape": [3, 1],
-                "data_type": thor.DataType.fp32,
-                "key_type": thor.DataType.uint64,
-                "index_type": thor.DataType.int32,
-                "pad_value": -1.0,
-                "mask_name": "history_mask",
-                "reference_offset_bytes": 4,
-                "reference_num_bytes": 12,
-                "num_bytes": 12,
-                "source_filename": None,
-                "source_num_bytes": 0,
-                "source_sequences": [],
-            }
+        "history": {
+            "shape": [3, 1],
+            "source": "history_source",
+            "data_type": thor.DataType.fp32,
+            "key_type": thor.DataType.uint64,
+            "index_type": thor.DataType.int32,
+            "pad_value": -1.0,
+            "mask_name": "history_mask",
+            "reference_mode": "indexed",
+            "reference_offset_bytes": 4,
+            "reference_num_bytes": 12,
+            "num_bytes": 12,
+        }
     }
 
 
@@ -420,11 +435,17 @@ def test_windowed_writer_accepts_non_fp32_source_and_dense_dtypes(tmp_path):
     dataset_path = tmp_path / "windowed_uint8"
     layout = thor.data.DatasetLayout(
         tensors={"dense": thor.data.TensorLayout([1], thor.DataType.uint8)},
+        window_sources={
+            "history_source": thor.data.WindowedTensorSourceLayout(
+                step_shape=[1],
+                data_type=thor.DataType.uint8,
+                key_type=thor.DataType.uint64,
+            )
+        },
         windowed_tensors={
             "history": thor.data.WindowedTensorLayout(
                 shape=[3, 1],
-                data_type=thor.DataType.uint8,
-                key_type=thor.DataType.uint64,
+                source="history_source",
                 index_type=thor.DataType.int32,
                 pad=thor.data.ConstantPad(0),
                 mask_name="history_mask",
@@ -436,8 +457,8 @@ def test_windowed_writer_accepts_non_fp32_source_and_dense_dtypes(tmp_path):
         layout=layout,
         examples_per_shard=2,
     )
-    writer.write_windowed_tensor_source(
-        "history",
+    writer.write_window_source(
+        "history_source",
         key=7,
         start_index=0,
         values=np.arange(4, dtype=np.uint8).reshape(4, 1),
@@ -454,7 +475,182 @@ def test_windowed_writer_accepts_non_fp32_source_and_dense_dtypes(tmp_path):
     assert dataset.field("dense").dtype == thor.DataType.uint8
     assert dataset.field("history").dtype == thor.DataType.uint8
     manifest = json.loads((dataset_path / "manifest.json").read_text())
-    assert manifest["windowed_tensors"]["history"]["source_storage"]["num_bytes"] == 4
+    assert manifest["window_sources"]["history_source"]["storage"]["num_bytes"] == 4
+
+
+def test_affine_windowed_dataset_uses_compact_segments_and_zero_record_shards(tmp_path):
+    dataset_path = tmp_path / "affine_window_source"
+    layout = thor.data.DatasetLayout(
+        tensors={},
+        window_sources={
+            "tokens": thor.data.WindowedTensorSourceLayout(
+                step_shape=[],
+                data_type=thor.DataType.uint8,
+                key_type=thor.DataType.uint64,
+            )
+        },
+        windowed_tensors={
+            "examples": thor.data.WindowedTensorLayout(
+                shape=[4],
+                source="tokens",
+                index_type=thor.DataType.int64,
+                reference_mode="affine",
+            ),
+            "labels": thor.data.WindowedTensorLayout(
+                shape=[4],
+                source="tokens",
+                index_type=thor.DataType.int64,
+                reference_mode="affine",
+            ),
+        },
+    )
+    assert layout.get_record_size_bytes() == 0
+    assert layout.get_windowed_tensor_specs()["examples"]["reference_mode"] == "affine"
+    assert layout.get_windowed_tensor_specs()["examples"]["reference_num_bytes"] == 0
+
+    writer = thor.data.DatasetWriter(
+        dataset_path,
+        layout,
+        examples_per_shard=2,
+        expected_num_examples=3,
+        preallocate=True,
+    )
+    writer.write_window_source(
+        "tokens", key=7, start_index=0, values=np.arange(12, dtype=np.uint8))
+    writer.write_affine_examples(
+        count=2,
+        tensors={
+            "examples": thor.data.AffineWindowedTensorChunk(
+                key=7, base=0, stride=2, field_offset=0),
+            "labels": thor.data.AffineWindowedTensorChunk(
+                key=7, base=0, stride=2, field_offset=1),
+        },
+    )
+    writer.write_affine_examples(
+        count=1,
+        tensors={
+            "examples": thor.data.AffineWindowedTensorChunk(
+                key=7, base=4, stride=2, field_offset=0),
+            "labels": thor.data.AffineWindowedTensorChunk(
+                key=7, base=4, stride=2, field_offset=1),
+        },
+    )
+    writer.close()
+
+    manifest = json.loads((dataset_path / "manifest.json").read_text())
+    assert manifest["format"] == "thor.dataset.v1"
+    assert manifest["record_size_bytes"] == 0
+    assert manifest["shards"] == []
+    segments = manifest["affine_window_reference_segments"]
+    assert [segment["row_start"] for segment in segments] == [0]
+    assert [segment["count"] for segment in segments] == [3]
+    source_key_hex = manifest["window_sources"]["tokens"]["storage"]["sequences"][0]["key_hex"]
+    assert segments[0]["references"] == {
+        "examples": {
+            "key_hex": source_key_hex,
+            "base": 0,
+            "stride": 2,
+            "field_offset": 0,
+        },
+        "labels": {
+            "key_hex": source_key_hex,
+            "base": 0,
+            "stride": 2,
+            "field_offset": 1,
+        },
+    }
+    assert thor.data.FileDataset.open(dataset_path).num_examples == 3
+
+
+def test_windowed_dataset_rejects_retired_layout_versions_and_old_v1_shape(tmp_path):
+    dataset_path = tmp_path / "retired_window_layout"
+    layout = thor.data.DatasetLayout(
+        tensors={},
+        window_sources={
+            "tokens": thor.data.WindowedTensorSourceLayout(
+                step_shape=[], data_type=thor.DataType.uint8, key_type=thor.DataType.uint64)
+        },
+        windowed_tensors={
+            "examples": thor.data.WindowedTensorLayout(
+                shape=[4], source="tokens", index_type=thor.DataType.int64)
+        },
+    )
+    writer = thor.data.DatasetWriter(dataset_path, layout, examples_per_shard=2)
+    writer.write_window_source(
+        "tokens", key=7, start_index=0, values=np.arange(8, dtype=np.uint8))
+    writer.write_indexed_examples(
+        {
+            "examples": thor.data.WindowedTensorChunk(
+                key=np.asarray([7], dtype=np.uint64),
+                start=np.asarray([0], dtype=np.int64),
+            )
+        }
+    )
+    writer.close()
+
+    manifest_path = dataset_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    for retired_format in ("thor.dataset.v2", "thor.dataset.v3"):
+        retired = dict(manifest)
+        retired["format"] = retired_format
+        manifest_path.write_text(json.dumps(retired))
+        with pytest.raises(RuntimeError, match="unsupported manifest format"):
+            thor.data.FileDataset.open(dataset_path)
+
+    old_v1 = json.loads(json.dumps(manifest))
+    del old_v1["windowed_tensors"]["examples"]["reference_mode"]
+    manifest_path.write_text(json.dumps(old_v1))
+    with pytest.raises((RuntimeError, KeyError)):
+        thor.data.FileDataset.open(dataset_path)
+
+
+def test_multiple_windowed_fields_share_one_physical_source(tmp_path):
+    dataset_path = tmp_path / "shared_window_source"
+    layout = thor.data.DatasetLayout(
+        tensors={},
+        window_sources={
+            "tokens": thor.data.WindowedTensorSourceLayout(
+                step_shape=[],
+                data_type=thor.DataType.uint8,
+                key_type=thor.DataType.uint64,
+            )
+        },
+        windowed_tensors={
+            "examples": thor.data.WindowedTensorLayout(
+                shape=[4], source="tokens", index_type=thor.DataType.int64),
+            "labels": thor.data.WindowedTensorLayout(
+                shape=[4], source="tokens", index_type=thor.DataType.int64),
+        },
+    )
+    writer = thor.data.DatasetWriter(dataset_path, layout, examples_per_shard=2)
+    writer.write_window_source(
+        "tokens", key=7, start_index=0, values=np.arange(8, dtype=np.uint8))
+    writer.write_indexed_examples(
+        {
+            "examples": thor.data.WindowedTensorChunk(
+                key=np.asarray([7, 7], dtype=np.uint64),
+                start=np.asarray([0, 2], dtype=np.int64),
+            ),
+            "labels": thor.data.WindowedTensorChunk(
+                key=np.asarray([7, 7], dtype=np.uint64),
+                start=np.asarray([1, 3], dtype=np.int64),
+            ),
+        }
+    )
+    writer.close()
+
+    manifest = json.loads((dataset_path / "manifest.json").read_text())
+    assert list(manifest["window_sources"]) == ["tokens"]
+    assert manifest["windowed_tensors"]["examples"]["source"] == "tokens"
+    assert manifest["windowed_tensors"]["labels"]["source"] == "tokens"
+    assert manifest["window_sources"]["tokens"]["storage"]["num_bytes"] == 8
+    assert len(list((dataset_path / "window_sources").glob("*.bin"))) == 1
+
+    dataset = thor.data.FileDataset.open(dataset_path)
+    assert dataset.field("examples").dtype == thor.DataType.uint8
+    assert dataset.field("labels").dtype == thor.DataType.uint8
+    assert dataset.field("examples").dimensions == [4]
+    assert dataset.field("labels").dimensions == [4]
 
 
 def test_dataset_split_manifests_bind_folds_to_one_dataset_and_round_trip(tmp_path):
@@ -507,6 +703,61 @@ def test_dataset_split_manifests_bind_folds_to_one_dataset_and_round_trip(tmp_pa
     )
     assert data.splits == loaded
     assert data.dataset is dataset
+
+
+def test_dataset_split_manifest_persists_compact_strided_ranges(tmp_path):
+    dataset_path = tmp_path / "range_manifest_dataset"
+    writer = thor.data.DatasetWriter(dataset_path, _layout(), examples_per_shard=10)
+    writer.write_indexed_examples(_chunk(0, 10))
+    writer.close()
+    dataset = thor.data.FileDataset.open(dataset_path)
+
+    train = thor.data.ExampleIndexSet.strided(start=0, count=5, stride=2)
+    validate = thor.data.ExampleIndexSet.from_ranges(
+        [thor.data.ExampleIndexRange(start=1, count=3, stride=2)])
+    test = thor.data.ExampleIndexSet.contiguous(start=7, count=3)
+    manifest = thor.data.DatasetSplitManifest(
+        dataset=dataset,
+        train_indices=train,
+        validate_indices=validate,
+        test_indices=test,
+    )
+    manifest_path = tmp_path / "compact_split.json"
+    manifest.save(manifest_path)
+
+    persisted = json.loads(manifest_path.read_text())
+    assert persisted["partitions"]["train"] == {
+        "ranges": [{"start": 0, "count": 5, "stride": 2}]
+    }
+    assert persisted["partitions"]["validate"] == {
+        "ranges": [{"start": 1, "count": 3, "stride": 2}]
+    }
+    assert persisted["partitions"]["test"] == {
+        "ranges": [{"start": 7, "count": 3, "stride": 1}]
+    }
+
+    loaded = thor.data.DatasetSplitManifest.load(manifest_path)
+    assert loaded.train.is_range_backed
+    assert loaded.train.ranges == [thor.data.ExampleIndexRange(start=0, count=5, stride=2)]
+    assert len(loaded.train) == 5
+    assert loaded.train[0] == 0
+    assert loaded.train[-1] == 8
+    assert loaded.train.indices == [0, 2, 4, 6, 8]
+    assert loaded == manifest
+
+
+def test_example_index_range_validates_compact_range_contract():
+    with pytest.raises(ValueError, match="count"):
+        thor.data.ExampleIndexRange(start=0, count=0)
+    with pytest.raises(ValueError, match="stride"):
+        thor.data.ExampleIndexRange(start=0, count=1, stride=0)
+    with pytest.raises(RuntimeError, match="duplicate"):
+        thor.data.ExampleIndexSet.from_ranges(
+            [
+                thor.data.ExampleIndexRange(start=0, count=3, stride=2),
+                thor.data.ExampleIndexRange(start=3, count=2, stride=1),
+            ]
+        )
 
 
 def test_dataset_split_manifest_rejects_wrong_dataset_and_invalid_membership(tmp_path):
@@ -592,11 +843,15 @@ def test_training_data_opens_fresh_opaque_batch_sessions(tmp_path):
 
 
 def test_removed_indexed_session_and_split_writer_apis_are_not_exported():
+    assert not hasattr(thor.training, "Loader")
+    assert not hasattr(thor.data, "Loader")
     for namespace in (thor.data, thor.training):
         assert not hasattr(namespace, "IndexedNamedBatchSession")
         assert not hasattr(namespace, "IndexedNamedBatchLoader")
         assert not hasattr(namespace, "IndexedLocalNamedBatchLoader")
         assert not hasattr(namespace, "LocalNamedBatchLoader")
+        assert not hasattr(namespace, "LocalBatchLoader")
+        assert not hasattr(namespace, "create_sharded_raw_dataset")
 
     for legacy_name in (
         "LocalNamedExampleLayout",
@@ -609,6 +864,9 @@ def test_removed_indexed_session_and_split_writer_apis_are_not_exported():
 
     for data_name in (
         "TensorLayout",
+        "WindowedTensorSourceLayout",
+        "WindowedTensorLayout",
+        "WindowedTensorChunk",
         "DatasetLayout",
         "DatasetWriter",
         "FileDataset",
@@ -619,6 +877,7 @@ def test_removed_indexed_session_and_split_writer_apis_are_not_exported():
 
     writer_type = thor.data.DatasetWriter
     assert not hasattr(writer_type, "write_example")
+    assert not hasattr(writer_type, "write_windowed_tensor_source")
     assert not hasattr(writer_type, "get_storage_mode")
     assert not hasattr(writer_type, "get_num_train_examples")
     assert not hasattr(writer_type, "get_num_validate_examples")

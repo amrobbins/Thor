@@ -4,7 +4,8 @@
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Layers/Learning/CustomLayer.h"
 #include "Utilities/Expression/DynamicExpression.h"
-#include "DeepLearning/Api/Loaders/Loader.h"
+#include "DeepLearning/Api/Data/BatchSession.h"
+#include "DeepLearning/Api/Data/TrainingData.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Training/Observers/TrainingRunsStatsReporter.h"
@@ -1143,7 +1144,7 @@ void TrainingRuns::validateEnsembleArtifactsForFit(const TrainingRunsEvaluationO
     if (!hasEnsembleGroups()) {
         return;
     }
-    if (!evaluationOptions.evaluateTrainingPopulation && evaluationOptions.testLoader == nullptr) {
+    if (!evaluationOptions.evaluateTrainingPopulation && evaluationOptions.testData == nullptr) {
         return;
     }
 
@@ -1163,9 +1164,9 @@ void TrainingRuns::validateEnsembleArtifactsForFit(const TrainingRunsEvaluationO
 
 TrainingRunsResult TrainingRuns::fit(uint32_t epochs) { return fit(TrainerFitOptions{epochs}); }
 
-TrainingRunsResult TrainingRuns::fit(uint32_t epochs, std::shared_ptr<Loader> testLoader) {
+TrainingRunsResult TrainingRuns::fit(uint32_t epochs, std::shared_ptr<const TrainingData> testData) {
     TrainingRunsEvaluationOptions evaluationOptions;
-    evaluationOptions.testLoader = std::move(testLoader);
+    evaluationOptions.testData = std::move(testData);
     return fit(TrainerFitOptions{epochs}, evaluationOptions);
 }
 
@@ -1191,8 +1192,8 @@ TrainingRunsResult TrainingRuns::fit(const TrainerFitOptions& options, const Tra
     validateEarlyCompletionRules();
     validateReportedLosses();
     validateReportedMetrics();
-    if (evaluationOptions.testLoader != nullptr) {
-        validateTestLoader(*evaluationOptions.testLoader);
+    if (evaluationOptions.testData != nullptr) {
+        validateTestData(*evaluationOptions.testData);
     }
     validateEnsembleArtifactsForFit(evaluationOptions);
 
@@ -1404,8 +1405,8 @@ TrainingRunsResult TrainingRuns::fit(const TrainerFitOptions& options, const Tra
     if (evaluationOptions.evaluateTrainingPopulation) {
         evaluateEnsembles(results, ensembleResultsByGroup);
     }
-    if (evaluationOptions.testLoader != nullptr) {
-        evaluateEnsemblesOnTestLoader(results, ensembleResultsByGroup, evaluationOptions.testLoader);
+    if (evaluationOptions.testData != nullptr) {
+        evaluateEnsemblesOnTestData(results, ensembleResultsByGroup, evaluationOptions.testData);
     }
 
     statsReporter->flush();
@@ -3362,14 +3363,16 @@ struct ComposedEnsembleEvaluationMetrics {
     uint64_t rows = 0;
 };
 
-Batch inferenceBatchForInputNames(const std::vector<std::string>& inputNames,
-                                  const Batch& sourceBatch,
-                                  const std::string& missingInputContext);
+Batch inferenceBatchForInputBindings(const std::vector<std::string>& inputNames,
+                                     const std::vector<TrainingInputBinding>& inputBindings,
+                                     const Batch& sourceBatch,
+                                     const std::string& missingInputContext);
 
-ComposedEnsembleEvaluationMetrics evaluateComposedEnsembleReportsOnLoader(
+ComposedEnsembleEvaluationMetrics evaluateComposedEnsembleReportsOnSession(
     const TrainingRunsComposedEvaluatorArtifacts& artifacts,
-    Loader& loader,
-    ExampleType exampleType) {
+    BatchSession& session,
+    ExampleType exampleType,
+    const std::vector<TrainingInputBinding>& inputBindings) {
     ComposedEnsembleEvaluationMetrics metrics;
     if (artifacts.losses.empty() && artifacts.metrics.empty()) {
         return metrics;
@@ -3377,9 +3380,9 @@ ComposedEnsembleEvaluationMetrics evaluateComposedEnsembleReportsOnLoader(
     if (artifacts.placedEvaluator == nullptr) {
         throw std::runtime_error("TrainingRuns composed ensemble evaluator is not placed.");
     }
-    if (loader.getBatchSize() != artifacts.batchSize) {
-        throw std::runtime_error("TrainingRuns composed ensemble evaluation requires loader batch_size=" +
-                                 std::to_string(artifacts.batchSize) + ", got " + std::to_string(loader.getBatchSize()) + ".");
+    if (session.getBatchSize() != artifacts.batchSize) {
+        throw std::runtime_error("TrainingRuns composed ensemble evaluation requires session batch_size=" +
+                                 std::to_string(artifacts.batchSize) + ", got " + std::to_string(session.getBatchSize()) + ".");
     }
 
     std::map<std::string, double> weightedLossSums;
@@ -3396,26 +3399,25 @@ ComposedEnsembleEvaluationMetrics evaluateComposedEnsembleReportsOnLoader(
         weightedMetricRows[metric.metricName] = 0;
     }
 
-    const uint64_t batchesPerEpoch = loader.getNumBatchesPerEpoch(exampleType);
-    // Evaluation reports are full-population reports, independent of any loader
-    // cursor left behind by training/validation.  Request every batch in the
-    // split explicitly so ensemble_train_* covers every fold validation split.
+    const uint64_t batchesPerEpoch = session.getNumBatchesPerEpoch(exampleType);
+    // Evaluation reports are full-population reports. Request every batch in the
+    // split explicitly from this fresh session.
     for (uint64_t batchNum = 0; batchNum < batchesPerEpoch; ++batchNum) {
         uint64_t requestedBatchNum = batchNum;
-        Batch batch = loader.getBatch(exampleType, requestedBatchNum);
+        BatchLease lease = session.leaseBatch(exampleType, requestedBatchNum);
         if (requestedBatchNum != batchNum) {
-            loader.returnBatchBuffers(exampleType, std::move(batch));
-            throw std::runtime_error("TrainingRuns composed ensemble evaluation loader did not return requested batch " +
+            throw std::runtime_error("TrainingRuns composed ensemble evaluation session did not return requested batch " +
                                      std::to_string(batchNum) + " for full-population evaluation.");
         }
-        Batch evaluatorBatch = inferenceBatchForInputNames(artifacts.evaluator.externalInputNames,
-                                                           batch,
-                                                           "TrainingRuns composed ensemble evaluation batch");
+        const Batch& batch = lease.get();
+        Batch evaluatorBatch = inferenceBatchForInputBindings(artifacts.evaluator.externalInputNames,
+                                                              inputBindings,
+                                                              batch,
+                                                              "TrainingRuns composed ensemble evaluation batch");
         const uint64_t rows = batchRowsForEvaluatorInputs(evaluatorBatch,
                                                           artifacts.evaluator.externalInputNames,
                                                           "TrainingRuns composed ensemble evaluation batch");
         if (rows == 0) {
-            loader.returnBatchBuffers(exampleType, std::move(batch));
             continue;
         }
         std::map<std::string, ThorImplementation::Tensor> outputs = artifacts.placedEvaluator->infer(evaluatorBatch);
@@ -3441,7 +3443,6 @@ ComposedEnsembleEvaluationMetrics evaluateComposedEnsembleReportsOnLoader(
         }
         metrics.batches += 1;
         metrics.rows += rows;
-        loader.returnBatchBuffers(exampleType, std::move(batch));
     }
 
     std::vector<std::optional<double>> namedValuesForOverall;
@@ -3534,37 +3535,62 @@ void retainNamedGraphMetricsAvailableInArtifacts(TrainingEnsembleResult& ensembl
 }
 
 
-Batch inferenceBatchForInputNames(const std::vector<std::string>& inputNames,
-                                  const Batch& sourceBatch,
-                                  const std::string& missingInputContext) {
+Batch inferenceBatchForInputBindings(const std::vector<std::string>& inputNames,
+                                     const std::vector<TrainingInputBinding>& inputBindings,
+                                     const Batch& sourceBatch,
+                                     const std::string& missingInputContext) {
+    std::map<std::string, std::string> batchInputByNetworkInput;
+    for (const TrainingInputBinding& binding : inputBindings) {
+        if (!binding.isInitialized()) {
+            throw std::runtime_error(missingInputContext + " received an uninitialized dataset input binding.");
+        }
+        auto [it, inserted] = batchInputByNetworkInput.emplace(
+            binding.getNetworkInputName(), binding.getBatchInputName());
+        if (!inserted && it->second != binding.getBatchInputName()) {
+            throw std::runtime_error(missingInputContext + " received conflicting dataset input bindings for NetworkInput '" +
+                                     binding.getNetworkInputName() + "'.");
+        }
+    }
+
     Batch inferenceBatch;
     for (const std::string& inputName : inputNames) {
-        if (!sourceBatch.contains(inputName)) {
-            throw std::runtime_error(missingInputContext + " is missing inference input '" + inputName + "'.");
+        const auto bindingIt = batchInputByNetworkInput.find(inputName);
+        if (bindingIt == batchInputByNetworkInput.end()) {
+            throw std::runtime_error(missingInputContext + " has no dataset binding for inference input '" + inputName + "'.");
         }
-        const BatchValue& value = sourceBatch.at(inputName);
+        const std::string& batchInputName = bindingIt->second;
+        if (!sourceBatch.contains(batchInputName)) {
+            throw std::runtime_error(missingInputContext + " is missing dataset field '" + batchInputName +
+                                     "' bound to inference input '" + inputName + "'.");
+        }
+        const BatchValue& value = sourceBatch.at(batchInputName);
         if (std::holds_alternative<ThorImplementation::Tensor>(value)) {
             inferenceBatch.insert(inputName, std::get<ThorImplementation::Tensor>(value));
         } else if (std::holds_alternative<ThorImplementation::RaggedTensor>(value)) {
             inferenceBatch.insert(inputName, std::get<ThorImplementation::RaggedTensor>(value));
         } else {
-            throw std::runtime_error(missingInputContext + " input '" + inputName + "' has an unsupported value type.");
+            throw std::runtime_error(missingInputContext + " dataset field '" + batchInputName +
+                                     "' bound to input '" + inputName + "' has an unsupported value type.");
         }
     }
     return inferenceBatch;
+}
+
+bool compiledDatasetInputBindingsEqual(const CompiledDatasetInputBindings& lhs,
+                                       const CompiledDatasetInputBindings& rhs) {
+    return lhs.trainingInputBindings == rhs.trainingInputBindings &&
+           lhs.requiredFieldIds == rhs.requiredFieldIds;
 }
 
 
 }  // namespace
 
 
-void TrainingRuns::validateTestLoader(Loader& loader) const {
-    if (loader.getBatchSize() == 0) {
-        throw std::runtime_error("TrainingRuns test_loader has batch_size=0.");
+void TrainingRuns::validateTestData(const TrainingData& data) const {
+    if (data.getBatching().getBatchSize() == 0) {
+        throw std::runtime_error("TrainingRuns test_data has batch_size=0.");
     }
-    if (loader.getNumBatchesPerEpoch(ExampleType::TEST) == 0) {
-        throw std::runtime_error("TrainingRuns test_loader has no test batches.");
-    }
+    data.requireNonEmptyPartition(ExampleType::TEST, "TrainingRuns test_data");
 }
 
 void TrainingRuns::evaluateEnsembles(std::vector<TrainingRunResult>& results,
@@ -3586,7 +3612,7 @@ void TrainingRuns::evaluateEnsembles(std::vector<TrainingRunResult>& results,
         bool hasEvaluationData = false;
         for (const EnsembleMemberSpecRef& sourceMember : members) {
             if (sourceMember.spec != nullptr && sourceMember.spec->trainer != nullptr &&
-                (sourceMember.spec->trainer->trainingData != nullptr || sourceMember.spec->trainer->loader != nullptr)) {
+                sourceMember.spec->trainer->trainingData != nullptr) {
                 hasEvaluationData = true;
                 break;
             }
@@ -3640,7 +3666,7 @@ void TrainingRuns::evaluateEnsembles(std::vector<TrainingRunResult>& results,
 
         for (const EnsembleMemberSpecRef& sourceMember : members) {
             if (sourceMember.spec == nullptr || sourceMember.spec->trainer == nullptr ||
-                (sourceMember.spec->trainer->trainingData == nullptr && sourceMember.spec->trainer->loader == nullptr)) {
+                sourceMember.spec->trainer->trainingData == nullptr) {
                 sourcePopulationRowWeights.push_back(0.0);
                 for (const TrainingNamedMetricResult& metric : ensembleIt->second.namedMetrics) {
                     sourcePopulationLossesByName[metric.name].push_back(std::nullopt);
@@ -3651,11 +3677,16 @@ void TrainingRuns::evaluateEnsembles(std::vector<TrainingRunResult>& results,
                 continue;
             }
 
-            std::shared_ptr<Loader> sourceSession = sourceMember.spec->trainer->openBatchSessionForRun();
+            const TrainingData& sourceData = *sourceMember.spec->trainer->trainingData;
+            const CompiledDatasetInputBindings sourceBindings =
+                sourceMember.spec->trainer->resolveDatasetInputsForData(sourceData, /*inferenceOnly=*/true);
+            std::shared_ptr<BatchSession> sourceSession = sourceData.openSession(
+                sourceMember.spec->trainer->getRuntimeConfig().maxInFlightBatches,
+                sourceBindings.requiredFieldIds);
             TrainingRunsComposedEvaluatorArtifacts& sourceArtifacts = composedArtifactsForBatchSize(
                 sourceSession->getBatchSize());
-            ComposedEnsembleEvaluationMetrics sourceMetrics = evaluateComposedEnsembleReportsOnLoader(
-                sourceArtifacts, *sourceSession, ExampleType::VALIDATE);
+            ComposedEnsembleEvaluationMetrics sourceMetrics = evaluateComposedEnsembleReportsOnSession(
+                sourceArtifacts, *sourceSession, ExampleType::VALIDATE, sourceBindings.trainingInputBindings);
             // The composed evaluator has already used ensemble member weights to
             // form predictions.  Across source validation splits, combine by
             // evaluated rows so ensemble_train_* is the validation-union report.
@@ -3693,13 +3724,17 @@ struct MemberGraphEvaluationMetrics {
     uint64_t rows = 0;
 };
 
-std::vector<MemberGraphEvaluationMetrics> evaluateMemberGraphReportsOnLoader(
+std::vector<MemberGraphEvaluationMetrics> evaluateMemberGraphReportsOnData(
     const std::vector<EnsembleMemberSpecRef>& members,
+    const std::vector<CompiledDatasetInputBindings>& memberBindings,
     uint64_t batchSize,
     const std::vector<std::string>& requestedReportNames,
-    Loader& loader,
+    const TrainingData& data,
     ExampleType exampleType,
     const std::string& context) {
+    if (memberBindings.size() != members.size()) {
+        throw std::runtime_error(context + " requires one compiled dataset binding set per member.");
+    }
     std::vector<MemberGraphEvaluationMetrics> memberMetrics;
     memberMetrics.reserve(members.size());
     for (size_t memberIndex = 0; memberIndex < members.size(); ++memberIndex) {
@@ -3715,7 +3750,11 @@ std::vector<MemberGraphEvaluationMetrics> evaluateMemberGraphReportsOnLoader(
             requestedReportNames,
             context + " member '" + member.spec->runName + "'");
         if (!artifacts.losses.empty() || !artifacts.metrics.empty()) {
-            ComposedEnsembleEvaluationMetrics metrics = evaluateComposedEnsembleReportsOnLoader(artifacts, loader, exampleType);
+            std::shared_ptr<BatchSession> session = data.openSession(
+                member.spec->trainer->getRuntimeConfig().maxInFlightBatches,
+                memberBindings[memberIndex].requiredFieldIds);
+            ComposedEnsembleEvaluationMetrics metrics = evaluateComposedEnsembleReportsOnSession(
+                artifacts, *session, exampleType, memberBindings[memberIndex].trainingInputBindings);
             result.loss = metrics.overallLoss;
             result.lossValues = std::move(metrics.lossValues);
             result.metricValues = std::move(metrics.metricValues);
@@ -3730,9 +3769,11 @@ std::vector<MemberGraphEvaluationMetrics> evaluateMemberGraphReportsOnLoader(
 void applyGraphEvaluationMemberTestStats(std::vector<TrainingRunResult>& results,
                                          TrainingEnsembleResult& ensemble,
                                          const std::vector<EnsembleMemberSpecRef>& members,
-                                         Loader& testLoader,
+                                         const TrainingData& testData,
                                          const std::vector<MemberGraphEvaluationMetrics>& memberMetrics) {
-    const uint64_t stepsPerEpoch = testLoader.getNumBatchesPerEpoch(ExampleType::TEST);
+    const uint64_t batchSize = testData.getBatching().getBatchSize();
+    const uint64_t testExamples = testData.getSplits().getTest().size();
+    const uint64_t stepsPerEpoch = (testExamples + batchSize - 1) / batchSize;
 
     for (size_t i = 0; i < members.size(); ++i) {
         if (members[i].spec == nullptr || members[i].spec->trainer == nullptr) {
@@ -3751,14 +3792,14 @@ void applyGraphEvaluationMemberTestStats(std::vector<TrainingRunResult>& results
         } else {
             testStats.networkName = members[i].spec->runName;
         }
-        testStats.datasetName = testLoader.getDatasetName();
+        testStats.datasetName = testData.getDatasetName();
         testStats.phase = TrainingEventPhase::TEST;
         testStats.epoch = 1;
         testStats.epochs = 1;
         testStats.step = metrics.batches;
         testStats.stepInEpoch = metrics.batches;
         testStats.stepsPerEpoch = stepsPerEpoch;
-        testStats.batchSize = testLoader.getBatchSize();
+        testStats.batchSize = batchSize;
         testStats.samplesProcessed = metrics.rows;
         testStats.loss = metrics.loss;
         for (const auto& [name, value] : metrics.lossValues) {
@@ -3791,14 +3832,17 @@ void applyGraphEvaluationMemberTestStats(std::vector<TrainingRunResult>& results
     }
 }
 
-void TrainingRuns::evaluateEnsemblesOnTestLoader(std::vector<TrainingRunResult>& results,
-                                                 std::map<std::string, TrainingEnsembleResult>& ensembleResultsByGroup,
-                                                 std::shared_ptr<Loader> testLoader) const {
-    if (testLoader == nullptr || ensembleResultsByGroup.empty()) {
+void TrainingRuns::evaluateEnsemblesOnTestData(
+    std::vector<TrainingRunResult>& results,
+    std::map<std::string, TrainingEnsembleResult>& ensembleResultsByGroup,
+    std::shared_ptr<const TrainingData> testData) const {
+    if (testData == nullptr || ensembleResultsByGroup.empty()) {
         return;
     }
 
-    const std::map<std::string, std::vector<EnsembleMemberSpecRef>> byGroup = completedEnsembleMembersByGroup(runs, results);
+    const uint64_t batchSize = testData->getBatching().getBatchSize();
+    const std::map<std::string, std::vector<EnsembleMemberSpecRef>> byGroup =
+        completedEnsembleMembersByGroup(runs, results);
     for (const auto& [groupName, members] : byGroup) {
         if (members.empty()) {
             continue;
@@ -3815,23 +3859,47 @@ void TrainingRuns::evaluateEnsemblesOnTestLoader(std::vector<TrainingRunResult>&
 
         TrainingRunsComposedEvaluatorArtifacts composedArtifacts = loadTrainingRunsComposedEvaluatorArtifacts(
             members,
-            testLoader->getBatchSize(),
+            batchSize,
             reportOrderForGroup(groupName),
             "TrainingRuns composed ensemble test evaluation for ensemble_group '" + groupName + "'");
         retainNamedLossesAvailableInArtifacts(ensembleIt->second, composedArtifacts.losses);
         retainNamedGraphMetricsAvailableInArtifacts(ensembleIt->second, composedArtifacts.metrics);
-        ComposedEnsembleEvaluationMetrics metrics = evaluateComposedEnsembleReportsOnLoader(
-            composedArtifacts, *testLoader, ExampleType::TEST);
+
+        std::vector<CompiledDatasetInputBindings> memberBindings;
+        memberBindings.reserve(members.size());
+        for (const EnsembleMemberSpecRef& member : members) {
+            if (member.spec == nullptr || member.spec->trainer == nullptr) {
+                throw std::runtime_error(
+                    "TrainingRuns composed ensemble test evaluation requires a trainer for every completed member.");
+            }
+            memberBindings.push_back(
+                member.spec->trainer->resolveDatasetInputsForData(*testData, /*inferenceOnly=*/true));
+        }
+        const CompiledDatasetInputBindings& composedBindings = memberBindings.front();
+        for (size_t memberIndex = 1; memberIndex < memberBindings.size(); ++memberIndex) {
+            if (!compiledDatasetInputBindingsEqual(composedBindings, memberBindings[memberIndex])) {
+                throw std::runtime_error(
+                    "TrainingRuns composed ensemble test evaluation requires every member to resolve the same "
+                    "NetworkInput-to-dataset-field bindings for the shared test_data recipe.");
+            }
+        }
+
+        std::shared_ptr<BatchSession> composedSession = testData->openSession(
+            members.front().spec->trainer->getRuntimeConfig().maxInFlightBatches,
+            composedBindings.requiredFieldIds);
+        ComposedEnsembleEvaluationMetrics metrics = evaluateComposedEnsembleReportsOnSession(
+            composedArtifacts, *composedSession, ExampleType::TEST, composedBindings.trainingInputBindings);
         applyComposedEvaluationMetricsToEnsemble(ensembleIt->second, metrics, /*testPhase=*/true);
 
-        std::vector<MemberGraphEvaluationMetrics> memberMetrics = evaluateMemberGraphReportsOnLoader(
+        std::vector<MemberGraphEvaluationMetrics> memberMetrics = evaluateMemberGraphReportsOnData(
             members,
-            testLoader->getBatchSize(),
+            memberBindings,
+            batchSize,
             reportOrderForGroup(groupName),
-            *testLoader,
+            *testData,
             ExampleType::TEST,
             "TrainingRuns composed ensemble per-member test evaluation for ensemble_group '" + groupName + "'");
-        applyGraphEvaluationMemberTestStats(results, ensembleIt->second, members, *testLoader, memberMetrics);
+        applyGraphEvaluationMemberTestStats(results, ensembleIt->second, members, *testData, memberMetrics);
     }
 }
 

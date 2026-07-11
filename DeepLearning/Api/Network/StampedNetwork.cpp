@@ -216,7 +216,7 @@ void StampedNetwork::initialize(bool initializeWeights, bool copyWeightsFromOthe
 }
 
 // Note that all processing is finished at the end of any input stream of the stamp.
-// Note *input* stream - this is not the case for the loader streams
+// Note *input* stream - this is not the case for the batch-source streams
 Event StampedNetwork::sendBatch(std::map<std::string, Tensor> batchInputs,
                                 std::map<std::string, Tensor> &batchOutputs,
                                 std::map<std::string, Event> &outputReadyEvents,

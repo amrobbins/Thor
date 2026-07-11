@@ -44,11 +44,13 @@ class DeviceResidentNamedBatchSession : public Thor::BatchSession {
         Thor::DeviceDatasetLease dataset,
         Thor::DatasetSplitManifest splits,
         Thor::BatchPolicy batching,
-        uint64_t batchQueueDepth = 2);
+        uint64_t batchQueueDepth = 2,
+        std::string datasetName = {});
     DeviceResidentNamedBatchSession(
         Thor::DeviceDatasetLease dataset,
         Thor::DeviceDatasetSessionDescription session,
-        uint64_t batchQueueDepth = 2);
+        uint64_t batchQueueDepth = 2,
+        std::string datasetName = {});
     ~DeviceResidentNamedBatchSession() override;
 
     DeviceResidentNamedBatchSession(const DeviceResidentNamedBatchSession &) = delete;
@@ -56,8 +58,6 @@ class DeviceResidentNamedBatchSession : public Thor::BatchSession {
     DeviceResidentNamedBatchSession(DeviceResidentNamedBatchSession &&) = delete;
     DeviceResidentNamedBatchSession &operator=(DeviceResidentNamedBatchSession &&) = delete;
 
-    Batch getBatch(ExampleType exampleType, uint64_t &batchNum) override;
-    void returnBatchBuffers(ExampleType exampleType, Batch &&batch) override;
 
     uint64_t getNumBatchesPerEpoch(ExampleType exampleType) override;
     uint64_t getNumExamples(ExampleType exampleType) override;
@@ -78,10 +78,12 @@ class DeviceResidentNamedBatchSession : public Thor::BatchSession {
     [[nodiscard]] DeviceResidentNamedBatchSessionStats getStatsSnapshot(ExampleType exampleType) const;
 
    private:
+    Batch acquireBatch(ExampleType exampleType, uint64_t &batchNum) override;
+    void recycleBatch(ExampleType exampleType, Batch &&batch) override;
     struct SplitRuntime {
         ExampleType exampleType = ExampleType::TRAIN;
         std::string splitName;
-        std::shared_ptr<const std::vector<uint64_t>> sourceIndices;
+        std::shared_ptr<const Thor::ExampleIndexSet> sourceIndices;
         bool randomized = false;
         std::optional<uint64_t> seed;
         uint64_t batchesPerEpoch = 0;
@@ -111,7 +113,7 @@ class DeviceResidentNamedBatchSession : public Thor::BatchSession {
     std::atomic<bool> cancelled{false};
 
     void initializeSplit(ExampleType exampleType,
-                         std::shared_ptr<const std::vector<uint64_t>> sourceIndices,
+                         std::shared_ptr<const Thor::ExampleIndexSet> sourceIndices,
                          bool randomized,
                          std::optional<uint64_t> seed);
     [[nodiscard]] SplitRuntime &runtimeFor(ExampleType exampleType);

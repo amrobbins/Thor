@@ -18,7 +18,7 @@ namespace Thor {
  *
  * This is the only input to CPU/GPU persistent dataset materialization. It
  * deliberately contains no split membership, batch size, randomization,
- * queue depth, or live loader state.
+ * queue depth, or live session state.
  */
 struct DatasetMaterializationDescription {
     DatasetMaterializationDescription(std::filesystem::path datasetPath,

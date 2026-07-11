@@ -249,9 +249,9 @@ def _captured_run_statuses(captured_text: str):
     return statuses
 
 
-def _fit_training_runs_and_capture_text(runs, *, epochs: int, test_loader=None):
+def _fit_training_runs_and_capture_text(runs, *, epochs: int, test_data=None):
     with _NativeOutputTee() as tee:
-        results = runs.fit(epochs=epochs, test_loader=test_loader)
+        results = runs.fit(epochs=epochs, test_data=test_data)
     return results, tee.text()
 
 
@@ -1441,7 +1441,7 @@ def _run_imagenet100_cv5_training_runs(model_builder, *, model_name: str, capfd)
         results, captured_text = _fit_training_runs_and_capture_text(
             runs,
             epochs=IMAGENET100_CV5_EPOCHS,
-            test_loader=test_data.open_session(max_in_flight_batches=IMAGENET100_CV5_MAX_IN_FLIGHT_BATCHES),
+            test_data=test_data,
         )
 
     plain_text = _ANSI_RE.sub("", captured_text)

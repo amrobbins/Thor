@@ -155,7 +155,7 @@ def _fit_runs_and_capture_text(
     capfd,
     *,
     epochs: int,
-    test_loader=None,
+    test_data=None,
     check_best_model_every_epochs=0,
     first_model_selection_epoch=0,
     restart_conditions=None,
@@ -165,15 +165,13 @@ def _fit_runs_and_capture_text(
 ):
     if reports is None:
         reports = getattr(runs, "_test_reports", None)
-    if isinstance(test_loader, thor.data.TrainingData):
-        test_loader = test_loader.open_session()
     _flush_native_stdio_for_capture()
     capfd.readouterr()
     with capfd.disabled():
         with _NativeOutputTee() as tee:
             results = runs.fit(
                 epochs=epochs,
-                test_loader=test_loader,
+                test_data=test_data,
                 check_best_model_every_epochs=check_best_model_every_epochs,
                 first_model_selection_epoch=first_model_selection_epoch,
                 restart_conditions=restart_conditions,
@@ -217,7 +215,7 @@ def _cpu_tensor(values: np.ndarray, dtype: thor.DataType) -> thor.physical.Physi
     return tensor
 
 
-def _regression_one_batch_loader(*, dtype=np.float32):
+def _regression_one_batch_data(*, dtype=np.float32):
     x, y = _regression_arrays(dtype=dtype)
     return make_numpy_pair_training_data(
         x,
@@ -231,7 +229,7 @@ def _regression_one_batch_loader(*, dtype=np.float32):
     )
 
 
-def _regression_with_context_one_batch_loader():
+def _regression_with_context_one_batch_data():
     x, y = _regression_arrays()
     tensors = {
         "examples": x,
@@ -248,15 +246,15 @@ def _regression_with_context_one_batch_loader():
 
 
 def test_numpy_training_data_supports_weakref():
-    loader = _regression_one_batch_loader()
-    loader_ref = weakref.ref(loader)
+    data = _regression_one_batch_data()
+    data_ref = weakref.ref(data)
 
-    assert loader_ref() is loader
-    del loader
+    assert data_ref() is data
+    del data
     gc.collect()
-    assert loader_ref() is None
+    assert data_ref() is None
 
-def _non_finite_regression_one_batch_loader(non_finite_phase: str, *, dtype=np.float32):
+def _non_finite_regression_one_batch_data(non_finite_phase: str, *, dtype=np.float32):
     x, y = _regression_arrays(dtype=dtype)
     train_y = y.copy()
     validate_y = y.copy()
@@ -285,7 +283,7 @@ def _weighted_regression_arrays(*, dtype=np.float32):
     return x, y, np.ascontiguousarray(example_weights, dtype=dtype)
 
 
-def _weighted_regression_one_batch_loader(*, dtype=np.float32):
+def _weighted_regression_one_batch_data(*, dtype=np.float32):
     x, y, example_weights = _weighted_regression_arrays(dtype=dtype)
     tensors = {
         "examples": x,
@@ -321,7 +319,7 @@ def _mae_quantile_regression_arrays(*, dtype=np.float32):
     return np.ascontiguousarray(x, dtype=dtype), np.ascontiguousarray(y, dtype=dtype)
 
 
-def _mae_quantile_regression_one_batch_loader(*, dtype=np.float32):
+def _mae_quantile_regression_one_batch_data(*, dtype=np.float32):
     x, y = _mae_quantile_regression_arrays(dtype=dtype)
     return make_numpy_pair_training_data(
         x,
@@ -394,7 +392,7 @@ def _airfoil_cv3_indices(num_examples: int, *, seed: int = 746):
     return folds, test_indices
 
 
-def _airfoil_loader_from_indices(
+def _airfoil_data_from_indices(
     features: np.ndarray,
     target: np.ndarray,
     *,
@@ -437,7 +435,7 @@ def _categorical_arrays(*, dtype=np.float32):
     return np.ascontiguousarray(x, dtype=dtype), np.ascontiguousarray(y, dtype=dtype)
 
 
-def _categorical_one_batch_loader(*, dtype=np.float32):
+def _categorical_one_batch_data(*, dtype=np.float32):
     x, y = _categorical_arrays(dtype=dtype)
     return make_numpy_pair_training_data(
         x,
@@ -465,7 +463,7 @@ def _categorical_mixed_labels_arrays(*, dtype=np.float32):
     return np.ascontiguousarray(x, dtype=dtype), np.ascontiguousarray(y, dtype=dtype)
 
 
-def _categorical_mixed_labels_one_batch_loader(*, dtype=np.float32):
+def _categorical_mixed_labels_one_batch_data(*, dtype=np.float32):
     x, y = _categorical_mixed_labels_arrays(dtype=dtype)
     return make_numpy_pair_training_data(
         x,
@@ -1192,7 +1190,7 @@ def _make_tiny_categorical_trainer(
 ):
     return thor.training.Trainer(
         _build_tiny_classifier(name),
-        data=_categorical_one_batch_loader(),
+        data=_categorical_one_batch_data(),
         optimizer=thor.optimizers.Sgd(initial_learning_rate=0.01, momentum=0.0),
         stats_interval_s=0.0,
         max_in_flight_batches=2,
@@ -1220,7 +1218,7 @@ def _make_signature_only_trainer(
 ):
     return thor.training.Trainer(
         _build_signature_only_network(name, input_dtype=input_dtype, output_dtype=output_dtype),
-        data=_regression_one_batch_loader(dtype=thor.physical.numpy_dtypes.from_thor(input_dtype)),
+        data=_regression_one_batch_data(dtype=thor.physical.numpy_dtypes.from_thor(input_dtype)),
         save_model_dir=save_model_dir,
         save_model_overwrite=save_model_overwrite,
     )
@@ -1242,7 +1240,7 @@ def _make_tiny_regression_trainer(
         optimizer_obj = thor.optimizers.Sgd(initial_learning_rate=0.01, momentum=0.0) if optimizer else None
     return thor.training.Trainer(
         _build_tiny_regressor(name),
-        data=_regression_one_batch_loader(),
+        data=_regression_one_batch_data(),
         optimizer=optimizer_obj,
         stats_interval_s=0.0,
         max_in_flight_batches=2,
@@ -1262,7 +1260,7 @@ def _make_non_finite_tiny_regression_trainer(
 ):
     return thor.training.Trainer(
         _build_tiny_regressor(name),
-        data=_non_finite_regression_one_batch_loader(non_finite_phase),
+        data=_non_finite_regression_one_batch_data(non_finite_phase),
         optimizer=thor.optimizers.Sgd(initial_learning_rate=1.0e-12, momentum=0.0),
         stats_interval_s=0.0,
         max_in_flight_batches=2,
@@ -1279,7 +1277,7 @@ def _make_tiny_regression_with_label_mean_report_trainer(
 ):
     return thor.training.Trainer(
         _build_tiny_regressor_with_label_mean_report(name),
-        data=_regression_one_batch_loader(),
+        data=_regression_one_batch_data(),
         optimizer=thor.optimizers.Sgd(initial_learning_rate=0.01, momentum=0.0),
         stats_interval_s=0.0,
         max_in_flight_batches=2,
@@ -1295,7 +1293,7 @@ def _make_tiny_regression_with_hidden_metric_report_trainer(
 ):
     return thor.training.Trainer(
         _build_tiny_regressor_with_hidden_metric_report(name),
-        data=_regression_with_context_one_batch_loader(),
+        data=_regression_with_context_one_batch_data(),
         optimizer=thor.optimizers.Sgd(initial_learning_rate=0.01, momentum=0.0),
         stats_interval_s=0.0,
         max_in_flight_batches=2,
@@ -1309,7 +1307,7 @@ def _make_tiny_regression_with_hidden_loss_report_trainer(
 ):
     return thor.training.Trainer(
         _build_tiny_regressor_with_hidden_loss_report(name),
-        data=_regression_one_batch_loader(),
+        data=_regression_one_batch_data(),
         optimizer=thor.optimizers.Sgd(initial_learning_rate=0.01, momentum=0.0),
         stats_interval_s=0.0,
         max_in_flight_batches=2,
@@ -1326,7 +1324,7 @@ def _make_tiny_regression_with_loss_and_hidden_loss_report_trainer(
 ):
     return thor.training.Trainer(
         _build_tiny_regressor_with_loss_and_hidden_loss_report(name),
-        data=_regression_one_batch_loader(),
+        data=_regression_one_batch_data(),
         optimizer=thor.optimizers.Sgd(initial_learning_rate=1.0e-12, momentum=0.0),
         stats_interval_s=0.0,
         max_in_flight_batches=2,
@@ -1345,7 +1343,7 @@ def _make_weighted_tiny_regression_trainer(
 ):
     return thor.training.Trainer(
         _build_weighted_tiny_regressor(name),
-        data=_weighted_regression_one_batch_loader(),
+        data=_weighted_regression_one_batch_data(),
         optimizer=thor.optimizers.Sgd(initial_learning_rate=1.0e-12, momentum=0.0),
         stats_interval_s=0.0,
         max_in_flight_batches=2,
@@ -1364,7 +1362,7 @@ def _make_named_graph_loss_regression_trainer(
 ):
     return thor.training.Trainer(
         _build_named_graph_loss_regressor(name),
-        data=_regression_one_batch_loader(),
+        data=_regression_one_batch_data(),
         optimizer=thor.optimizers.Sgd(initial_learning_rate=1.0e-12, momentum=0.0),
         stats_interval_s=0.0,
         max_in_flight_batches=2,
@@ -1386,7 +1384,7 @@ def _make_two_loss_regression_trainer(
 ):
     return thor.training.Trainer(
         _build_two_loss_regressor(name),
-        data=_regression_one_batch_loader(),
+        data=_regression_one_batch_data(),
         optimizer=thor.optimizers.Sgd(initial_learning_rate=1.0e-12, momentum=0.0),
         stats_interval_s=0.0,
         max_in_flight_batches=2,
@@ -1405,7 +1403,7 @@ def _make_mae_low_high_quantile_regression_trainer(
 ):
     return thor.training.Trainer(
         _build_mae_low_high_quantile_regressor(name),
-        data=_mae_quantile_regression_one_batch_loader(),
+        data=_mae_quantile_regression_one_batch_data(),
         optimizer=thor.optimizers.Sgd(initial_learning_rate=1.0e-12, momentum=0.0),
         stats_interval_s=0.0,
         max_in_flight_batches=2,
@@ -1600,7 +1598,7 @@ def _make_two_phase_trainer_with_inactive_future_reports(name: str):
         ])
 
     return thor.training.Trainer(
-        data=_regression_one_batch_loader(),
+        data=_regression_one_batch_data(),
         training_program=program,
         stats_interval_s=0.0,
         max_in_flight_batches=2,
@@ -2123,7 +2121,7 @@ def test_training_runs_rejects_min_successful_models_non_dict():
         description="opt-in TrainingRuns CUDA integration tests",
     ),
 )
-def test_training_runs_evaluates_saved_adam_model_on_test_loader(capfd, tmp_path):
+def test_training_runs_evaluates_saved_adam_model_on_test_data(capfd, tmp_path):
     trainer = _make_tiny_regression_trainer(
         "training_runs_saved_adam_test_eval",
         optimizer_obj=thor.optimizers.Adam(),
@@ -2136,7 +2134,7 @@ def test_training_runs_evaluates_saved_adam_model_on_test_loader(capfd, tmp_path
         runs,
         capfd,
         epochs=1,
-        test_loader=_regression_one_batch_loader(),
+        test_data=_regression_one_batch_data(),
     )
 
     assert results.all_completed()
@@ -2216,7 +2214,7 @@ def test_training_runs_weighted_mse_example_weights_drives_training_loss(capfd, 
         runs,
         capfd,
         epochs=1,
-        test_loader=_weighted_regression_one_batch_loader(),
+        test_data=_weighted_regression_one_batch_data(),
         reports={
             "weighted_mse_ensemble": ["weighted_mse_loss"]
         },
@@ -2581,11 +2579,11 @@ def test_training_runs_non_finite_train_or_validation_loss_fails_run(non_finite_
 @pytest.mark.cuda
 @pytest.mark.training_integration
 def test_native_queued_failed_fit_releases_numpy_training_data_reference():
-    loader = _non_finite_regression_one_batch_loader("validate")
-    loader_ref = weakref.ref(loader)
+    data = _non_finite_regression_one_batch_data("validate")
+    data_ref = weakref.ref(data)
     trainer = thor.training.Trainer(
         _build_tiny_regressor("native_queued_failed_fit_releases_numpy_training_data_reference"),
-        data=loader,
+        data=data,
         optimizer=thor.optimizers.Sgd(initial_learning_rate=1.0e-12, momentum=0.0),
         stats_interval_s=0.0,
         max_in_flight_batches=2,
@@ -2600,9 +2598,9 @@ def test_native_queued_failed_fit_releases_numpy_training_data_reference():
     del results
     del runs
     del trainer
-    del loader
+    del data
     gc.collect()
-    assert loader_ref() is None
+    assert data_ref() is None
 
 
 @pytest.mark.cuda
@@ -2679,7 +2677,7 @@ def test_training_runs_default_reported_losses_reports_all_graph_losses(capfd, t
         runs,
         capfd,
         epochs=1,
-        test_loader=_regression_one_batch_loader(),
+        test_data=_regression_one_batch_data(),
     )
 
     assert results.all_completed()
@@ -2733,7 +2731,7 @@ def test_training_runs_reported_losses_filter_selects_graph_loss_subset(capfd, t
         runs,
         capfd,
         epochs=1,
-        test_loader=_regression_one_batch_loader(),
+        test_data=_regression_one_batch_data(),
         reports={
             "two_loss_ensemble": ["mae_loss"]
         },
@@ -2792,7 +2790,7 @@ def test_training_runs_reports_mae_plus_low_high_quantile_losses(capfd, tmp_path
         runs,
         capfd,
         epochs=1,
-        test_loader=_mae_quantile_regression_one_batch_loader(),
+        test_data=_mae_quantile_regression_one_batch_data(),
         reports={
             "demand_quantile_ensemble": reported_losses
         },
@@ -2864,7 +2862,7 @@ def test_training_runs_airfoil_cv3_reports_mae_plus_low_high_quantile_losses(cap
     batch_size = 128
 
     def make_fold_trainer(*, fold: dict, run_name: str):
-        loader = _airfoil_loader_from_indices(
+        loader = _airfoil_data_from_indices(
             features,
             target,
             train_indices=fold["train_indices"],
@@ -2908,7 +2906,7 @@ def test_training_runs_airfoil_cv3_reports_mae_plus_low_high_quantile_losses(cap
         max_summary_logs_per_second=AIRFOIL_QUANTILE_SUMMARY_LOGS_PER_SECOND,
     )
 
-    test_loader = _airfoil_loader_from_indices(
+    test_data = _airfoil_data_from_indices(
         features,
         target,
         train_indices=holdout_indices,
@@ -2916,14 +2914,14 @@ def test_training_runs_airfoil_cv3_reports_mae_plus_low_high_quantile_losses(cap
         batch_size=batch_size,
         dataset_name="airfoil_self_noise_cv3_holdout_test",
     )
-    assert test_loader.open_session().get_num_validate_examples() == int(holdout_indices.shape[0])
-    assert test_loader.open_session().get_num_validate_batches() > 1
+    assert test_data.open_session().get_num_validate_examples() == int(holdout_indices.shape[0])
+    assert test_data.open_session().get_num_validate_batches() > 1
 
     results, captured_text = _fit_runs_and_capture_text(
         runs,
         capfd,
         epochs=5,
-        test_loader=test_loader,
+        test_data=test_data,
         reports={
             "airfoil_noise_cv3": reported_losses + reported_metrics,
         },
@@ -3089,7 +3087,7 @@ def test_training_runs_airfoil_cv3_two_phase_pretrain_then_joint_multi_loss_metr
         if store_main_handles:
             programs_by_run[run_name] = program
             second_phases_by_run[run_name] = second_phase
-        loader = _airfoil_loader_from_indices(
+        loader = _airfoil_data_from_indices(
             features,
             target,
             train_indices=train_indices,
@@ -3328,7 +3326,7 @@ def test_training_runs_airfoil_cv3_two_phase_pretrain_then_joint_multi_loss_metr
         np.concatenate([probe_indices_by_run[run_name] for run_name, _, _ in run_specs]),
         dtype=np.int64,
     )
-    test_loader = _airfoil_loader_from_indices(
+    test_data = _airfoil_data_from_indices(
         features,
         target,
         train_indices=ensemble_test_indices,
@@ -3336,14 +3334,14 @@ def test_training_runs_airfoil_cv3_two_phase_pretrain_then_joint_multi_loss_metr
         batch_size=batch_size,
         dataset_name="airfoil_two_phase_cv3_in_distribution_test",
     )
-    assert test_loader.open_session().get_num_validate_examples() == int(ensemble_test_indices.shape[0])
-    assert test_loader.open_session().get_num_validate_batches() == len(run_specs)
+    assert test_data.open_session().get_num_validate_examples() == int(ensemble_test_indices.shape[0])
+    assert test_data.open_session().get_num_validate_batches() == len(run_specs)
     second_runs = make_runs(run_specs)
     second_results, second_text = _fit_runs_and_capture_text(
         second_runs,
         capfd,
         epochs=joint_epochs,
-        test_loader=test_loader,
+        test_data=test_data,
     )
     second_plain_text = _ANSI_RE.sub("", second_text)
     if _expects_color_for_stats_color_mode(AIRFOIL_QUANTILE_STATS_COLOR):
@@ -3503,7 +3501,7 @@ def test_training_runs_airfoil_cv3_two_phase_mae_pretrain_then_mse_head_holdout(
     assert holdout_zero_mse > 0.0
 
     def make_fold_trainer(*, fold: dict, run_name: str):
-        loader = _airfoil_loader_from_indices(
+        loader = _airfoil_data_from_indices(
             features,
             target,
             train_indices=fold["train_indices"],
@@ -3591,7 +3589,7 @@ def test_training_runs_airfoil_cv3_two_phase_mae_pretrain_then_mse_head_holdout(
     for program in programs_by_run.values():
         assert program.get_step(0).get_active_phase_names() == ["mae_pretrain", "mse_finetune"]
 
-    test_loader = _airfoil_loader_from_indices(
+    test_data = _airfoil_data_from_indices(
         features,
         target,
         train_indices=holdout_indices,
@@ -3599,14 +3597,14 @@ def test_training_runs_airfoil_cv3_two_phase_mae_pretrain_then_mse_head_holdout(
         batch_size=batch_size,
         dataset_name="airfoil_mae_then_mse_cv3_holdout_test",
     )
-    assert test_loader.open_session().get_num_validate_examples() == int(holdout_indices.shape[0])
-    assert test_loader.open_session().get_num_validate_batches() > 1
+    assert test_data.open_session().get_num_validate_examples() == int(holdout_indices.shape[0])
+    assert test_data.open_session().get_num_validate_batches() > 1
 
     final_results, final_text = _fit_runs_and_capture_text(
         make_runs(),
         capfd,
         epochs=mse_epochs,
-        test_loader=test_loader,
+        test_data=test_data,
     )
     final_plain_text = _ANSI_RE.sub("", final_text)
     if _expects_color_for_stats_color_mode(AIRFOIL_QUANTILE_STATS_COLOR):
@@ -3737,7 +3735,7 @@ def test_training_runs_graph_loss_does_not_invent_prediction_loss(capfd, tmp_pat
         runs,
         capfd,
         epochs=1,
-        test_loader=_regression_one_batch_loader(),
+        test_data=_regression_one_batch_data(),
     )
 
     assert results.all_completed()
@@ -3794,7 +3792,7 @@ def test_training_runs_composed_evaluator_skips_uncomposed_predictionless_loss(c
         runs,
         capfd,
         epochs=1,
-        test_loader=_regression_one_batch_loader(),
+        test_data=_regression_one_batch_data(),
         reports={
             "mixed_loss_ensemble": ["loss", "hidden_loss"],
         },
@@ -4135,7 +4133,7 @@ def test_trainer_model_selection_score_receives_named_loss_context(tmp_path):
 
     trainer = thor.training.Trainer(
         _build_two_loss_regressor("trainer_model_selection_named_loss_context"),
-        data=_regression_one_batch_loader(),
+        data=_regression_one_batch_data(),
         optimizer=thor.optimizers.Sgd(initial_learning_rate=1.0e-12, momentum=0.0),
         stats_interval_s=0.0,
         max_in_flight_batches=2,
@@ -4579,8 +4577,8 @@ def test_training_runs_fits_two_tiny_trainers_on_one_gpu_and_prefixes_stats(capf
         ],
     )
 
-    test_loader = _regression_one_batch_loader()
-    results, captured_text = _fit_runs_and_capture_text(runs, capfd, epochs=1, test_loader=test_loader)
+    test_data = _regression_one_batch_data()
+    results, captured_text = _fit_runs_and_capture_text(runs, capfd, epochs=1, test_data=test_data)
 
     assert len(results) == 2
     assert results.all_completed()
@@ -4915,7 +4913,7 @@ def test_training_runs_categorical_report_matches_loaded_ensemble_predictions(ca
         runs,
         capfd,
         epochs=1,
-        test_loader=_categorical_mixed_labels_one_batch_loader(),
+        test_data=_categorical_mixed_labels_one_batch_data(),
     )
 
     assert results.all_completed()
@@ -5139,7 +5137,7 @@ def test_training_runs_demand_style_kfold_full_path_saves_loadable_ensemble(capf
         validate_indices=holdout_indices,
         test_indices=holdout_indices,
     )
-    test_loader = thor.data.TrainingData(
+    test_data = thor.data.TrainingData(
         dataset=dataset,
         splits=holdout_manifest,
         batching=thor.data.BatchPolicy(batch_size=2, randomize_train=False),
@@ -5147,7 +5145,7 @@ def test_training_runs_demand_style_kfold_full_path_saves_loadable_ensemble(capf
         device_storage="off",
     )
 
-    results, captured_text = _fit_runs_and_capture_text(runs, capfd, epochs=1, test_loader=test_loader)
+    results, captured_text = _fit_runs_and_capture_text(runs, capfd, epochs=1, test_data=test_data)
 
     assert results.all_completed()
     assert results.has_ensembles

@@ -43,6 +43,18 @@ uint64_t checkedMul(uint64_t left, uint64_t right, const char *context) {
     return left * right;
 }
 
+int64_t checkedAffineStart(int64_t base, int64_t stride, int64_t fieldOffset, uint64_t row, const std::string &name) {
+    const __int128 value = static_cast<__int128>(base) +
+                           static_cast<__int128>(row) * static_cast<__int128>(stride) +
+                           static_cast<__int128>(fieldOffset);
+    if (value < static_cast<__int128>(std::numeric_limits<int64_t>::min()) ||
+        value > static_cast<__int128>(std::numeric_limits<int64_t>::max())) {
+        throw std::runtime_error("IndexedLocalNamedExampleReader affine window reference '" + name +
+                                 "' overflows int64.");
+    }
+    return static_cast<int64_t>(value);
+}
+
 uint64_t runtimeIovMax() {
     const long value = ::sysconf(_SC_IOV_MAX);
     if (value <= 0) {
@@ -300,11 +312,29 @@ class IndexedLocalNamedExampleReader::Impl {
         uint64_t ordinal = 0;
     };
 
+    struct WindowedSourceReadSpec {
+        DatasetLayout::WindowedTensorSourceSpec spec;
+        std::filesystem::path sourcePath;
+        std::map<std::string, DatasetLayout::WindowedTensorSourceSequence> sequenceByKeyHex;
+    };
+
     struct WindowedTensorReadSpec {
         DatasetLayout::WindowedTensorSpec spec;
-        std::filesystem::path sourcePath;
+        uint64_t sourceOrdinal = 0;
         uint64_t referenceBufferOffsetBytes = 0;
-        std::map<std::string, DatasetLayout::WindowedTensorSourceSequence> sequenceByKeyHex;
+    };
+
+    struct AffineWindowReference {
+        std::string keyHex;
+        int64_t base = 0;
+        int64_t stride = 1;
+        int64_t fieldOffset = 0;
+    };
+
+    struct AffineWindowReferenceSegment {
+        uint64_t rowStart = 0;
+        uint64_t count = 0;
+        std::vector<AffineWindowReference> references;
     };
 
     std::filesystem::path datasetPath;
@@ -312,7 +342,9 @@ class IndexedLocalNamedExampleReader::Impl {
     std::vector<ShardInfo> shards;
     std::vector<RecordReadSpan> recordReadSpans;
     std::vector<DatasetLayout::TensorSpec> directTensorSpecs;
+    std::vector<WindowedSourceReadSpec> windowedSourceReadSpecs;
     std::vector<WindowedTensorReadSpec> windowedReadSpecs;
+    std::vector<AffineWindowReferenceSegment> affineWindowReferenceSegments;
     std::map<std::string, uint64_t> tensorOrdinalByName;
     std::map<std::string, uint64_t> windowedTensorOrdinalByName;
     uint64_t totalWindowedReferenceBytes = 0;
@@ -388,16 +420,12 @@ class IndexedLocalNamedExampleReader::Impl {
             }
             expectedGlobalStart = checkedAdd(expectedGlobalStart, info.numExamples, "IndexedLocalNamedExampleReader shard coverage");
         }
-        if (expectedGlobalStart != out->numExamples) {
+        if (out->layout.recordSizeBytes() == 0) {
+            if (!out->shards.empty()) {
+                throw std::runtime_error("IndexedLocalNamedExampleReader zero-record affine datasets must not contain shards.");
+            }
+        } else if (expectedGlobalStart != out->numExamples) {
             throw std::runtime_error("IndexedLocalNamedExampleReader shard coverage does not match manifest num_examples.");
-        }
-
-        const uint64_t recordSpanCount = static_cast<uint64_t>(out->layout.tensors().size() + out->layout.windowedTensors().size());
-        if (recordSpanCount == 0) {
-            throw std::runtime_error("IndexedLocalNamedExampleReader layout must contain at least one stored record span.");
-        }
-        if (recordSpanCount > runtimeIovMax()) {
-            throw std::runtime_error("IndexedLocalNamedExampleReader layout record span count exceeds system IOV_MAX for readv.");
         }
 
         out->directTensorSpecs.reserve(out->layout.tensors().size());
@@ -414,41 +442,116 @@ class IndexedLocalNamedExampleReader::Impl {
             ordinal += 1;
         }
 
-        uint64_t windowedOrdinal = 0;
-        uint64_t referenceBufferOffsetBytes = 0;
-        for (const DatasetLayout::WindowedTensorSpec &spec : out->layout.windowedTensors()) {
-            if (!spec.sourceFilename.has_value()) {
-                throw std::runtime_error("IndexedLocalNamedExampleReader windowed tensor '" + spec.name + "' has no source storage.");
+        std::map<std::string, uint64_t> windowedSourceOrdinalByName;
+        uint64_t sourceOrdinal = 0;
+        for (const DatasetLayout::WindowedTensorSourceSpec &source : out->layout.windowedTensorSources()) {
+            if (!source.sourceFilename.has_value()) {
+                throw std::runtime_error("IndexedLocalNamedExampleReader window source '" + source.name + "' has no storage.");
             }
-            if (spec.sourceSequences.empty()) {
-                throw std::runtime_error("IndexedLocalNamedExampleReader windowed tensor '" + spec.name + "' has no source sequences.");
+            if (source.sourceSequences.empty()) {
+                throw std::runtime_error("IndexedLocalNamedExampleReader window source '" + source.name + "' has no sequences.");
             }
-            WindowedTensorReadSpec readSpec;
-            readSpec.spec = spec;
-            readSpec.sourcePath = datasetPath / spec.sourceFilename.value();
-            readSpec.referenceBufferOffsetBytes = referenceBufferOffsetBytes;
-            for (const DatasetLayout::WindowedTensorSourceSequence &sequence : spec.sourceSequences) {
+            WindowedSourceReadSpec readSpec;
+            readSpec.spec = source;
+            readSpec.sourcePath = datasetPath / source.sourceFilename.value();
+            for (const DatasetLayout::WindowedTensorSourceSequence &sequence : source.sourceSequences) {
                 const auto [sequenceIt, sequenceInserted] = readSpec.sequenceByKeyHex.emplace(sequence.keyHex, sequence);
                 (void)sequenceIt;
                 if (!sequenceInserted) {
-                    throw std::runtime_error("IndexedLocalNamedExampleReader windowed tensor '" + spec.name +
-                                             "' has duplicate source key in manifest.");
+                    throw std::runtime_error("IndexedLocalNamedExampleReader window source '" + source.name +
+                                             "' has duplicate key in manifest.");
                 }
             }
+            windowedSourceOrdinalByName.emplace(source.name, sourceOrdinal++);
+            out->windowedSourceReadSpecs.push_back(std::move(readSpec));
+        }
+
+        uint64_t windowedOrdinal = 0;
+        uint64_t referenceBufferOffsetBytes = 0;
+        for (const DatasetLayout::WindowedTensorSpec &spec : out->layout.windowedTensors()) {
+            const auto sourceIt = windowedSourceOrdinalByName.find(spec.sourceName);
+            if (sourceIt == windowedSourceOrdinalByName.end()) {
+                throw std::runtime_error("IndexedLocalNamedExampleReader windowed tensor '" + spec.name +
+                                         "' references an unknown source.");
+            }
+            WindowedTensorReadSpec readSpec;
+            readSpec.spec = spec;
+            readSpec.sourceOrdinal = sourceIt->second;
+            readSpec.referenceBufferOffsetBytes = referenceBufferOffsetBytes;
             const auto [insertIt, inserted] = out->windowedTensorOrdinalByName.emplace(spec.name, windowedOrdinal);
             (void)insertIt;
             THOR_THROW_IF_FALSE(inserted);
             out->windowedReadSpecs.push_back(std::move(readSpec));
-            out->recordReadSpans.push_back(RecordReadSpan{.kind = RecordReadSpanKind::WindowedReference,
-                                                          .sourceOffsetBytes = spec.referenceOffsetBytes,
-                                                          .numBytes = spec.referenceNumBytes,
-                                                          .ordinal = windowedOrdinal});
-            referenceBufferOffsetBytes = checkedAdd(referenceBufferOffsetBytes,
-                                                    spec.referenceNumBytes,
-                                                    "IndexedLocalNamedExampleReader windowed reference buffer");
+            if (spec.referenceMode == DatasetLayout::WindowedTensorReferenceMode::INDEXED) {
+                out->recordReadSpans.push_back(RecordReadSpan{.kind = RecordReadSpanKind::WindowedReference,
+                                                              .sourceOffsetBytes = spec.referenceOffsetBytes,
+                                                              .numBytes = spec.referenceNumBytes,
+                                                              .ordinal = windowedOrdinal});
+                referenceBufferOffsetBytes = checkedAdd(referenceBufferOffsetBytes,
+                                                         spec.referenceNumBytes,
+                                                         "IndexedLocalNamedExampleReader windowed reference buffer");
+            }
             windowedOrdinal += 1;
         }
         out->totalWindowedReferenceBytes = referenceBufferOffsetBytes;
+
+        if (out->recordReadSpans.size() > runtimeIovMax()) {
+            throw std::runtime_error("IndexedLocalNamedExampleReader layout record span count exceeds system IOV_MAX for readv.");
+        }
+
+        if (out->layout.hasAffineWindowedTensors()) {
+            if (!manifest.contains("affine_window_reference_segments") ||
+                !manifest.at("affine_window_reference_segments").is_array()) {
+                throw std::runtime_error("IndexedLocalNamedExampleReader affine dataset is missing reference segments.");
+            }
+            uint64_t expectedRowStart = 0;
+            for (const json &segmentJson : manifest.at("affine_window_reference_segments")) {
+                AffineWindowReferenceSegment segment;
+                segment.rowStart = segmentJson.at("row_start").get<uint64_t>();
+                segment.count = segmentJson.at("count").get<uint64_t>();
+                if (segment.rowStart != expectedRowStart || segment.count == 0) {
+                    throw std::runtime_error("IndexedLocalNamedExampleReader affine reference segments must be contiguous and non-empty.");
+                }
+                const json &references = segmentJson.at("references");
+                if (!references.is_object() || references.size() != out->windowedReadSpecs.size()) {
+                    throw std::runtime_error("IndexedLocalNamedExampleReader affine segment reference set does not match layout.");
+                }
+                segment.references.reserve(out->windowedReadSpecs.size());
+                for (const WindowedTensorReadSpec &readSpec : out->windowedReadSpecs) {
+                    if (!references.contains(readSpec.spec.name)) {
+                        throw std::runtime_error("IndexedLocalNamedExampleReader affine segment is missing field '" +
+                                                 readSpec.spec.name + "'.");
+                    }
+                    const json &reference = references.at(readSpec.spec.name);
+                    AffineWindowReference parsed{.keyHex = reference.at("key_hex").get<std::string>(),
+                                                 .base = reference.at("base").get<int64_t>(),
+                                                 .stride = reference.at("stride").get<int64_t>(),
+                                                 .fieldOffset = reference.at("field_offset").get<int64_t>()};
+                    if (parsed.stride <= 0) {
+                        throw std::runtime_error("IndexedLocalNamedExampleReader affine reference stride must be >= 1.");
+                    }
+                    (void)checkedAffineStart(parsed.base, parsed.stride, parsed.fieldOffset, 0, readSpec.spec.name);
+                    (void)checkedAffineStart(
+                        parsed.base, parsed.stride, parsed.fieldOffset, segment.count - 1, readSpec.spec.name);
+                    const WindowedSourceReadSpec &source =
+                        out->windowedSourceReadSpecs.at(static_cast<size_t>(readSpec.sourceOrdinal));
+                    if (!source.sequenceByKeyHex.contains(parsed.keyHex)) {
+                        throw std::runtime_error("IndexedLocalNamedExampleReader affine reference key has no source sequence for '" +
+                                                 readSpec.spec.name + "'.");
+                    }
+                    segment.references.push_back(std::move(parsed));
+                }
+                out->affineWindowReferenceSegments.push_back(std::move(segment));
+                expectedRowStart = checkedAdd(expectedRowStart,
+                                              out->affineWindowReferenceSegments.back().count,
+                                              "IndexedLocalNamedExampleReader affine segment coverage");
+            }
+            if (expectedRowStart != out->numExamples) {
+                throw std::runtime_error("IndexedLocalNamedExampleReader affine reference segments do not cover dataset rows.");
+            }
+        } else if (manifest.contains("affine_window_reference_segments")) {
+            throw std::runtime_error("IndexedLocalNamedExampleReader non-affine dataset contains affine reference segments.");
+        }
 
         std::sort(out->recordReadSpans.begin(), out->recordReadSpans.end(), [](const RecordReadSpan &left, const RecordReadSpan &right) {
             if (left.sourceOffsetBytes != right.sourceOffsetBytes) {
@@ -472,6 +575,25 @@ class IndexedLocalNamedExampleReader::Impl {
         }
 
         return out;
+    }
+
+    const AffineWindowReferenceSegment &resolveAffineSegment(uint64_t globalExampleIndex) const {
+        if (globalExampleIndex >= numExamples || affineWindowReferenceSegments.empty()) {
+            throw std::runtime_error("IndexedLocalNamedExampleReader failed to resolve affine dataset row.");
+        }
+        const auto it = std::upper_bound(
+            affineWindowReferenceSegments.begin(),
+            affineWindowReferenceSegments.end(),
+            globalExampleIndex,
+            [](uint64_t index, const AffineWindowReferenceSegment &segment) { return index < segment.rowStart; });
+        if (it == affineWindowReferenceSegments.begin()) {
+            throw std::runtime_error("IndexedLocalNamedExampleReader failed to resolve affine dataset row.");
+        }
+        const AffineWindowReferenceSegment &segment = *(it - 1);
+        if (globalExampleIndex - segment.rowStart >= segment.count) {
+            throw std::runtime_error("IndexedLocalNamedExampleReader affine segment does not cover dataset row.");
+        }
+        return segment;
     }
 
     const ShardInfo &resolveShard(uint64_t globalExampleIndex, uint64_t &localExampleIndex) const {
@@ -499,6 +621,7 @@ class IndexedLocalNamedExampleReader::Session::Impl {
         bool active = false;
         bool materializeWindowedTensors = false;
         uint64_t batchSlot = 0;
+        uint64_t globalExampleIndex = 0;
         std::vector<uint8_t *> windowedTensorBasePointers;
         std::vector<uint8_t *> windowedMaskBasePointers;
     };
@@ -564,7 +687,7 @@ class IndexedLocalNamedExampleReader::Session::Impl {
 
     std::shared_ptr<IndexedLocalNamedExampleReader> owner;
     std::map<uint64_t, IoContext> ioContextsByShardIndex;
-    std::map<uint64_t, SourceFileContext> sourceContextsByWindowedOrdinal;
+    std::map<uint64_t, SourceFileContext> sourceContextsBySourceOrdinal;
     IndexedLocalNamedExampleReaderSessionStats stats;
     std::set<std::string> resolvedIoBackends;
     const uint64_t queueDepth;
@@ -597,83 +720,108 @@ class IndexedLocalNamedExampleReader::Session::Impl {
         return insertIt->second;
     }
 
-    SourceFileContext &sourceContextFor(uint64_t windowedOrdinal) {
-        auto it = sourceContextsByWindowedOrdinal.find(windowedOrdinal);
-        if (it != sourceContextsByWindowedOrdinal.end()) {
+    SourceFileContext &sourceContextFor(uint64_t sourceOrdinal) {
+        auto it = sourceContextsBySourceOrdinal.find(sourceOrdinal);
+        if (it != sourceContextsBySourceOrdinal.end()) {
             return it->second;
         }
         THOR_THROW_IF_FALSE(owner != nullptr);
-        const auto &spec = owner->impl->windowedReadSpecs.at(static_cast<size_t>(windowedOrdinal));
-        const std::string filename = spec.sourcePath.string();
+        const auto &source = owner->impl->windowedSourceReadSpecs.at(static_cast<size_t>(sourceOrdinal));
+        const std::string filename = source.sourcePath.string();
         int fd = ::open(filename.c_str(), O_RDONLY | O_CLOEXEC);
         if (fd < 0) {
-            throw std::runtime_error("IndexedLocalNamedExampleReader failed to open windowed tensor source '" + filename +
+            throw std::runtime_error("IndexedLocalNamedExampleReader failed to open window source '" + filename +
                                      "': " + std::strerror(errno));
         }
-        auto [insertIt, inserted] = sourceContextsByWindowedOrdinal.emplace(windowedOrdinal, SourceFileContext(filename, fd));
+        auto [insertIt, inserted] = sourceContextsBySourceOrdinal.emplace(sourceOrdinal, SourceFileContext(filename, fd));
         THOR_THROW_IF_FALSE(inserted);
         return insertIt->second;
     }
 
-    void materializeWindowedTensors(IoContext &context, uint64_t iovecSlot) {
+    void materializeWindowedTensorsForRow(
+        uint64_t globalExampleIndex,
+        uint64_t batchSlot,
+        const std::vector<uint8_t *> &windowedTensorBasePointers,
+        const std::vector<uint8_t *> &windowedMaskBasePointers,
+        const std::vector<uint8_t> *referenceBuffer) {
         THOR_THROW_IF_FALSE(owner != nullptr);
         const IndexedLocalNamedExampleReader::Impl &reader = *owner->impl;
         if (reader.windowedReadSpecs.empty()) {
             return;
         }
-        PendingReadRequest &request = context.pendingRequests.at(static_cast<size_t>(iovecSlot));
-        if (!request.active) {
-            throw std::runtime_error("IndexedLocalNamedExampleReader missing pending request for completed read.");
-        }
-        if (!request.materializeWindowedTensors) {
-            return;
-        }
-        if (request.windowedTensorBasePointers.size() != reader.windowedReadSpecs.size()) {
+        if (windowedTensorBasePointers.size() != reader.windowedReadSpecs.size()) {
             throw std::runtime_error("IndexedLocalNamedExampleReader windowed destination tensor count does not match layout.");
         }
-        if (request.windowedMaskBasePointers.size() != reader.windowedReadSpecs.size()) {
+        if (windowedMaskBasePointers.size() != reader.windowedReadSpecs.size()) {
             throw std::runtime_error("IndexedLocalNamedExampleReader windowed mask destination count does not match layout.");
         }
 
-        const std::vector<uint8_t> &referenceBuffer = context.windowedReferenceBuffers.at(static_cast<size_t>(iovecSlot));
+        const IndexedLocalNamedExampleReader::Impl::AffineWindowReferenceSegment *affineSegment = nullptr;
+        uint64_t affineSegmentRow = 0;
+        if (reader.layout.hasAffineWindowedTensors()) {
+            affineSegment = &reader.resolveAffineSegment(globalExampleIndex);
+            affineSegmentRow = globalExampleIndex - affineSegment->rowStart;
+        }
+
         for (uint64_t ordinal = 0; ordinal < reader.windowedReadSpecs.size(); ++ordinal) {
             const IndexedLocalNamedExampleReader::Impl::WindowedTensorReadSpec &readSpec =
                 reader.windowedReadSpecs.at(static_cast<size_t>(ordinal));
             const DatasetLayout::WindowedTensorSpec &spec = readSpec.spec;
-            uint8_t *const outputBase = request.windowedTensorBasePointers.at(static_cast<size_t>(ordinal));
+            const IndexedLocalNamedExampleReader::Impl::WindowedSourceReadSpec &sourceReadSpec =
+                reader.windowedSourceReadSpecs.at(static_cast<size_t>(readSpec.sourceOrdinal));
+            uint8_t *const outputBase = windowedTensorBasePointers.at(static_cast<size_t>(ordinal));
             if (outputBase == nullptr) {
                 throw std::runtime_error("IndexedLocalNamedExampleReader received a null windowed tensor destination for: " + spec.name);
             }
-            uint8_t *const maskBase = request.windowedMaskBasePointers.at(static_cast<size_t>(ordinal));
+            uint8_t *const maskBase = windowedMaskBasePointers.at(static_cast<size_t>(ordinal));
             if (spec.maskName.has_value() && maskBase == nullptr) {
                 throw std::runtime_error("IndexedLocalNamedExampleReader received a null windowed mask destination for: " + spec.name);
             }
 
-            const uint8_t *const reference = referenceBuffer.data() + readSpec.referenceBufferOffsetBytes;
-            const std::string keyHex = bytesToHex(reference, spec.keyNumBytes());
-            const int64_t requestedStart = readIndexScalar(reference + spec.keyNumBytes(), spec.indexDataType);
+            std::string keyHex;
+            int64_t requestedStart = 0;
+            if (spec.referenceMode == DatasetLayout::WindowedTensorReferenceMode::INDEXED) {
+                if (referenceBuffer == nullptr ||
+                    readSpec.referenceBufferOffsetBytes + spec.referenceNumBytes > referenceBuffer->size()) {
+                    throw std::runtime_error("IndexedLocalNamedExampleReader indexed window reference buffer is missing or truncated.");
+                }
+                const uint8_t *const reference = referenceBuffer->data() + readSpec.referenceBufferOffsetBytes;
+                keyHex = bytesToHex(reference, spec.keyNumBytes());
+                requestedStart = readIndexScalar(reference + spec.keyNumBytes(), spec.indexDataType);
+            } else {
+                THOR_THROW_IF_FALSE(affineSegment != nullptr);
+                const IndexedLocalNamedExampleReader::Impl::AffineWindowReference &reference =
+                    affineSegment->references.at(static_cast<size_t>(ordinal));
+                keyHex = reference.keyHex;
+                requestedStart = checkedAffineStart(reference.base,
+                                                    reference.stride,
+                                                    reference.fieldOffset,
+                                                    affineSegmentRow,
+                                                    spec.name);
+            }
+
             const uint64_t windowLength = spec.windowLength();
             checkedSignedWindowEnd(requestedStart, windowLength, spec.name);
             const int64_t requestedEnd = requestedStart + static_cast<int64_t>(windowLength);
             const uint64_t stepBytes = spec.sourceStepNumBytes();
             const uint64_t outputSlotBytes = spec.outputNumBytes();
-            uint8_t *const outputSlot = outputBase + checkedMul(request.batchSlot,
+            uint8_t *const outputSlot = outputBase + checkedMul(batchSlot,
                                                                  outputSlotBytes,
                                                                  "IndexedLocalNamedExampleReader windowed tensor batch slot");
             fillConstant(outputSlot, outputSlotBytes, spec.dataType, spec.padValue);
 
             uint8_t *maskSlot = nullptr;
             if (spec.maskName.has_value()) {
-                maskSlot = maskBase + checkedMul(request.batchSlot,
+                maskSlot = maskBase + checkedMul(batchSlot,
                                                  windowLength,
                                                  "IndexedLocalNamedExampleReader windowed mask batch slot");
                 std::memset(maskSlot, 0, static_cast<size_t>(windowLength));
             }
 
-            const auto sequenceIt = readSpec.sequenceByKeyHex.find(keyHex);
-            if (sequenceIt == readSpec.sequenceByKeyHex.end()) {
+            const auto sequenceIt = sourceReadSpec.sequenceByKeyHex.find(keyHex);
+            if (sequenceIt == sourceReadSpec.sequenceByKeyHex.end()) {
                 throw std::runtime_error("IndexedLocalNamedExampleReader windowed tensor '" + spec.name +
-                                         "' reference key has no source sequence.");
+                                         "' reference key has no sequence in source '" + spec.sourceName + "'.");
             }
             const DatasetLayout::WindowedTensorSourceSequence &sequence = sequenceIt->second;
             const int64_t readStart = std::max<int64_t>(requestedStart, sequence.startIndex);
@@ -693,7 +841,7 @@ class IndexedLocalNamedExampleReader::Session::Impl {
                                                           stepBytes,
                                                           "IndexedLocalNamedExampleReader windowed destination offset");
             const uint64_t readBytes = checkedMul(validSteps, stepBytes, "IndexedLocalNamedExampleReader windowed source read bytes");
-            SourceFileContext &sourceContext = sourceContextFor(ordinal);
+            SourceFileContext &sourceContext = sourceContextFor(readSpec.sourceOrdinal);
             preadExact(sourceContext.fd,
                        outputSlot + destinationOffset,
                        readBytes,
@@ -705,6 +853,22 @@ class IndexedLocalNamedExampleReader::Session::Impl {
                 std::memset(maskSlot + padLeftSteps, 1, static_cast<size_t>(validSteps));
             }
         }
+    }
+
+    void materializeWindowedTensors(IoContext &context, uint64_t iovecSlot) {
+        PendingReadRequest &request = context.pendingRequests.at(static_cast<size_t>(iovecSlot));
+        if (!request.active) {
+            throw std::runtime_error("IndexedLocalNamedExampleReader missing pending request for completed read.");
+        }
+        if (!request.materializeWindowedTensors) {
+            return;
+        }
+        const std::vector<uint8_t> &referenceBuffer = context.windowedReferenceBuffers.at(static_cast<size_t>(iovecSlot));
+        materializeWindowedTensorsForRow(request.globalExampleIndex,
+                                         request.batchSlot,
+                                         request.windowedTensorBasePointers,
+                                         request.windowedMaskBasePointers,
+                                         &referenceBuffer);
     }
 
     void drainOne(IoContext &context) {
@@ -747,6 +911,7 @@ class IndexedLocalNamedExampleReader::Session::Impl {
 
     void readRecord(IoContext &context,
                     uint64_t fileOffsetBytes,
+                    uint64_t globalExampleIndex,
                     uint64_t batchSlot,
                     const std::vector<uint8_t *> &tensorBasePointers,
                     const std::vector<uint8_t *> &windowedTensorBasePointers,
@@ -785,6 +950,7 @@ class IndexedLocalNamedExampleReader::Session::Impl {
         pendingRequest.active = true;
         pendingRequest.materializeWindowedTensors = materializeWindowedTensors;
         pendingRequest.batchSlot = batchSlot;
+        pendingRequest.globalExampleIndex = globalExampleIndex;
         pendingRequest.windowedTensorBasePointers = windowedTensorBasePointers;
         pendingRequest.windowedMaskBasePointers = windowedMaskBasePointers;
 
@@ -976,6 +1142,11 @@ void IndexedLocalNamedExampleReader::Session::loadDirectExampleInto(uint64_t glo
 
     const SteadyClock::time_point loadExampleStart = diagnosticNow();
     impl->stats.loadExampleCalls += 1;
+    impl->owner->validateGlobalIndex(globalExampleIndex, "direct load");
+    if (reader.directTensorSpecs.empty()) {
+        impl->stats.loadExampleNanoseconds += diagnosticElapsedNanoseconds(loadExampleStart);
+        return;
+    }
 
     uint64_t localExampleIndex = 0;
     const SteadyClock::time_point resolveStart = diagnosticNow();
@@ -993,7 +1164,7 @@ void IndexedLocalNamedExampleReader::Session::loadDirectExampleInto(uint64_t glo
     if (request.numBytes != reader.layout.recordSizeBytes()) {
         throw std::runtime_error("IndexedLocalNamedExampleReader shard read request size does not match layout record size.");
     }
-    impl->readRecord(context, request.fileOffsetBytes, batchSlot, tensorBasePointers, {}, {}, false);
+    impl->readRecord(context, request.fileOffsetBytes, globalExampleIndex, batchSlot, tensorBasePointers, {}, {}, false);
     impl->stats.loadExampleNanoseconds += diagnosticElapsedNanoseconds(loadExampleStart);
 }
 
@@ -1019,6 +1190,17 @@ void IndexedLocalNamedExampleReader::Session::loadExampleInto(uint64_t globalExa
 
     const SteadyClock::time_point loadExampleStart = diagnosticNow();
     impl->stats.loadExampleCalls += 1;
+    impl->owner->validateGlobalIndex(globalExampleIndex, "load");
+
+    if (reader.recordReadSpans.empty()) {
+        impl->materializeWindowedTensorsForRow(globalExampleIndex,
+                                                batchSlot,
+                                                windowedTensorBasePointers,
+                                                windowedMaskBasePointers,
+                                                nullptr);
+        impl->stats.loadExampleNanoseconds += diagnosticElapsedNanoseconds(loadExampleStart);
+        return;
+    }
 
     uint64_t localExampleIndex = 0;
     const SteadyClock::time_point resolveStart = diagnosticNow();
@@ -1038,6 +1220,7 @@ void IndexedLocalNamedExampleReader::Session::loadExampleInto(uint64_t globalExa
     }
     impl->readRecord(context,
                      request.fileOffsetBytes,
+                     globalExampleIndex,
                      batchSlot,
                      tensorBasePointers,
                      windowedTensorBasePointers,

@@ -5,6 +5,8 @@
 
 #include <chrono>
 #include <filesystem>
+#include <fstream>
+#include <nlohmann/json.hpp>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -57,8 +59,8 @@ TEST(DatasetSplitManifest, BindsMembershipToDatasetAndAliasesDefaultTestPartitio
 
     EXPECT_EQ(manifest.getDatasetId(), dataset.getId());
     EXPECT_EQ(manifest.getNumExamples(), 6u);
-    EXPECT_EQ(manifest.getTrain().getIndices(), (std::vector<uint64_t>{0, 2, 4}));
-    EXPECT_EQ(manifest.getValidate().getIndices(), (std::vector<uint64_t>{1, 3, 5}));
+    EXPECT_EQ(manifest.getTrain().materialize(), (std::vector<uint64_t>{0, 2, 4}));
+    EXPECT_EQ(manifest.getValidate().materialize(), (std::vector<uint64_t>{1, 3, 5}));
     EXPECT_FALSE(manifest.hasExplicitTestSplit());
     EXPECT_TRUE(manifest.testAliasesValidate());
     EXPECT_EQ(&manifest.getValidate(), &manifest.getTest());
@@ -71,7 +73,7 @@ TEST(DatasetSplitManifest, ExplicitTestPartitionHasIndependentImmutableMembershi
     EXPECT_TRUE(manifest.hasExplicitTestSplit());
     EXPECT_FALSE(manifest.testAliasesValidate());
     EXPECT_NE(&manifest.getValidate(), &manifest.getTest());
-    EXPECT_EQ(manifest.getTest().getIndices(), (std::vector<uint64_t>{4, 5}));
+    EXPECT_EQ(manifest.getTest().materialize(), (std::vector<uint64_t>{4, 5}));
 }
 
 TEST(DatasetSplitManifest, RejectsOutOfRangeAndDuplicateMembership) {
@@ -118,7 +120,68 @@ TEST(DatasetSplitManifest, PersistenceRoundTripsExplicitTestMembership) {
     EXPECT_EQ(loaded, original);
     EXPECT_TRUE(loaded.hasExplicitTestSplit());
     EXPECT_FALSE(loaded.testAliasesValidate());
-    EXPECT_EQ(loaded.getTest().getIndices(), (std::vector<uint64_t>{4, 5}));
+    EXPECT_EQ(loaded.getTest().materialize(), (std::vector<uint64_t>{4, 5}));
+}
+
+TEST(DatasetSplitManifest, RangeBackedMembershipProvidesRandomAccessWithoutMaterialization) {
+    Thor::ExampleIndexSet indices(std::vector<Thor::ExampleIndexRange>{
+        Thor::ExampleIndexRange{.start = 10, .count = 3, .stride = 2},
+        Thor::ExampleIndexRange{.start = 20, .count = 2, .stride = 5}});
+
+    EXPECT_TRUE(indices.isRangeBacked());
+    EXPECT_EQ(indices.size(), 5u);
+    EXPECT_EQ(indices.at(0), 10u);
+    EXPECT_EQ(indices.at(2), 14u);
+    EXPECT_EQ(indices.at(3), 20u);
+    EXPECT_EQ(indices.at(4), 25u);
+    EXPECT_EQ(indices.materialize(), (std::vector<uint64_t>{10, 12, 14, 20, 25}));
+}
+
+TEST(DatasetSplitManifest, CompactRangePersistenceRoundTripsWithoutExpandingIndices) {
+    TestNamedDataset dataset(Thor::DatasetId::fromStableMaterial("dataset-ranges"), 100);
+    Thor::DatasetSplitManifest original(
+        dataset,
+        Thor::ExampleIndexSet::strided(0, 20, 2),
+        Thor::ExampleIndexSet::contiguous(40, 10),
+        Thor::ExampleIndexSet(std::vector<Thor::ExampleIndexRange>{
+            Thor::ExampleIndexRange{.start = 60, .count = 5, .stride = 3}}));
+    const std::filesystem::path path = tempManifestPath();
+
+    original.save(path);
+    std::ifstream in(path);
+    const nlohmann::json persisted = nlohmann::json::parse(in);
+    ASSERT_TRUE(persisted.at("partitions").at("train").is_object());
+    ASSERT_TRUE(persisted.at("partitions").at("train").contains("ranges"));
+    EXPECT_EQ(persisted.at("partitions").at("train").at("ranges").size(), 1u);
+
+    Thor::DatasetSplitManifest loaded = Thor::DatasetSplitManifest::load(path);
+    std::filesystem::remove(path);
+    EXPECT_EQ(loaded, original);
+    EXPECT_TRUE(loaded.getTrain().isRangeBacked());
+    EXPECT_TRUE(loaded.getValidate().isRangeBacked());
+    EXPECT_TRUE(loaded.getTest().isRangeBacked());
+}
+
+TEST(DatasetSplitManifest, InterleavedStridedRangesAreAllowedWhenTheirRowsAreDisjoint) {
+    Thor::ExampleIndexSet indices(std::vector<Thor::ExampleIndexRange>{
+        Thor::ExampleIndexRange{.start = 0, .count = 4, .stride = 3},
+        Thor::ExampleIndexRange{.start = 1, .count = 4, .stride = 3},
+        Thor::ExampleIndexRange{.start = 2, .count = 4, .stride = 3}});
+
+    EXPECT_EQ(indices.materialize(), (std::vector<uint64_t>{0, 3, 6, 9, 1, 4, 7, 10, 2, 5, 8, 11}));
+}
+
+TEST(DatasetSplitManifest, RejectsInvalidOrIntersectingStridedRanges) {
+    EXPECT_THROW((Thor::ExampleIndexSet(std::vector<Thor::ExampleIndexRange>{
+                     Thor::ExampleIndexRange{.start = 0, .count = 1, .stride = 0}})),
+                 std::runtime_error);
+    EXPECT_THROW((Thor::ExampleIndexSet(std::vector<Thor::ExampleIndexRange>{
+                     Thor::ExampleIndexRange{.start = 0, .count = 4, .stride = 2},
+                     Thor::ExampleIndexRange{.start = 2, .count = 2, .stride = 4}})),
+                 std::runtime_error);
+    EXPECT_NO_THROW((Thor::ExampleIndexSet(std::vector<Thor::ExampleIndexRange>{
+        Thor::ExampleIndexRange{.start = 0, .count = 3, .stride = 2},
+        Thor::ExampleIndexRange{.start = 3, .count = 2, .stride = 2}})));
 }
 
 TEST(BatchPolicy, ValidatesBatchingWithoutOwningExecutionState) {

@@ -88,7 +88,7 @@ def make_k_fold_run_specs(
 
     The helper is intentionally small: it owns the repetitive fold-to-run-spec
     plumbing, while caller code still owns how a fold becomes a ``Trainer`` and
-    loader. ``make_trainer`` is called once per fold. It may accept any of these
+    TrainingData recipe. ``make_trainer`` is called once per fold. It may accept any of these
     keyword arguments when useful: ``fold``, ``run_name``, ``ensemble_group``,
     ``test_keys``, and ``test_groups``. For simple callables, a single
     positional ``fold`` argument is also supported.

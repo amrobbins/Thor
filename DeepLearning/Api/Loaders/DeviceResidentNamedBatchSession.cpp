@@ -71,8 +71,10 @@ DeviceResidentNamedBatchSession::DeviceResidentNamedBatchSession(
     Thor::DeviceDatasetLease dataset,
     Thor::DatasetSplitManifest splits,
     Thor::BatchPolicy batching,
-    uint64_t batchQueueDepth)
-    : dataset(std::move(dataset)),
+    uint64_t batchQueueDepth,
+    std::string datasetName)
+    : Thor::BatchSession(std::move(datasetName)),
+      dataset(std::move(dataset)),
       splits(std::move(splits)),
       batching(std::move(batching)),
       batchQueueDepth(batchQueueDepth) {
@@ -106,17 +108,17 @@ DeviceResidentNamedBatchSession::DeviceResidentNamedBatchSession(
 
     initializeSplit(
         ExampleType::TRAIN,
-        this->splits.getTrain().getSharedIndices(),
+        this->splits.getSharedTrain(),
         this->batching.getRandomizeTrain(),
         this->batching.getRandomSeed());
     initializeSplit(
         ExampleType::VALIDATE,
-        this->splits.getValidate().getSharedIndices(),
+        this->splits.getSharedValidate(),
         false,
         std::nullopt);
     initializeSplit(
         ExampleType::TEST,
-        this->splits.getTest().getSharedIndices(),
+        this->splits.getSharedTest(),
         false,
         std::nullopt);
 }
@@ -124,12 +126,14 @@ DeviceResidentNamedBatchSession::DeviceResidentNamedBatchSession(
 DeviceResidentNamedBatchSession::DeviceResidentNamedBatchSession(
     Thor::DeviceDatasetLease dataset,
     Thor::DeviceDatasetSessionDescription session,
-    uint64_t batchQueueDepth)
+    uint64_t batchQueueDepth,
+    std::string datasetName)
     : DeviceResidentNamedBatchSession(
           std::move(dataset),
           session.getSplits(),
           session.getBatching(),
-          batchQueueDepth) {
+          batchQueueDepth,
+          std::move(datasetName)) {
     requiredFieldIds = session.getRequiredFieldIds();
     if (requiredFieldIds.empty()) {
         for (const Thor::DatasetField &field : this->dataset->getSchema().getFields()) {
@@ -158,7 +162,7 @@ void DeviceResidentNamedBatchSession::cancel() {
 
 void DeviceResidentNamedBatchSession::initializeSplit(
     ExampleType exampleType,
-    std::shared_ptr<const std::vector<uint64_t>> sourceIndices,
+    std::shared_ptr<const Thor::ExampleIndexSet> sourceIndices,
     bool randomized,
     std::optional<uint64_t> seed) {
     auto runtime = std::make_unique<SplitRuntime>();
@@ -244,13 +248,13 @@ void DeviceResidentNamedBatchSession::fillRowIndexTensor(SplitRuntime &runtime) 
         }
         THOR_THROW_IF_FALSE(logicalPosition < runtime.numExamples());
         const uint64_t sourceRow =
-            runtime.sourceIndices->at(static_cast<size_t>(logicalPosition));
+            runtime.sourceIndices->at(logicalPosition);
         THOR_THROW_IF_FALSE(sourceRow < dataset->getNumExamples());
         rowIndices[slot] = sourceRow;
     }
 }
 
-Batch DeviceResidentNamedBatchSession::getBatch(
+Batch DeviceResidentNamedBatchSession::acquireBatch(
     ExampleType exampleType,
     uint64_t &batchNum) {
     if (cancelled.load(std::memory_order_acquire)) {
@@ -333,7 +337,7 @@ void DeviceResidentNamedBatchSession::validateReturnedBatch(
     }
 }
 
-void DeviceResidentNamedBatchSession::returnBatchBuffers(
+void DeviceResidentNamedBatchSession::recycleBatch(
     ExampleType exampleType,
     Batch &&batch) {
     if (cancelled.load(std::memory_order_acquire)) {

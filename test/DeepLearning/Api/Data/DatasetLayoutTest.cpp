@@ -199,8 +199,10 @@ TEST(DatasetLayoutTest, ExactLayoutValidationAcceptsDifferentTensorVectorOrder) 
 TEST(DatasetLayoutTest, FromTensorShapesCalculatesWindowedReferenceLayout) {
     DatasetLayout layout = DatasetLayout::fromTensorShapes(
         vector<DatasetLayout::TensorShape>{DatasetLayout::TensorShape("dense", {2}, DataType::FP32)},
+        vector<DatasetLayout::WindowedTensorSourceShape>{DatasetLayout::WindowedTensorSourceShape(
+            "history_source", {1}, DataType::FP32, DataType::UINT64)},
         vector<DatasetLayout::WindowedTensorShape>{DatasetLayout::WindowedTensorShape(
-            "history", {5, 1}, DataType::FP32, DataType::UINT64, DataType::INT32, 0.0, string("history_mask"))});
+            "history", {5, 1}, "history_source", DataType::INT32, 0.0, string("history_mask"))});
 
     ASSERT_EQ(layout.recordSizeBytes(), 8 + 8 + 4);
     ASSERT_EQ(layout.tensors().size(), 1);
@@ -219,12 +221,14 @@ TEST(DatasetLayoutTest, FromTensorShapesCalculatesWindowedReferenceLayout) {
 TEST(DatasetLayoutTest, WindowedJsonRoundTripPreservesLayoutContractAndSourceStorage) {
     DatasetLayout layout = DatasetLayout::fromTensorShapes(
         vector<DatasetLayout::TensorShape>{DatasetLayout::TensorShape("dense", {2}, DataType::FP32)},
+        vector<DatasetLayout::WindowedTensorSourceShape>{DatasetLayout::WindowedTensorSourceShape(
+            "history_source", {1}, DataType::FP32, DataType::UINT64)},
         vector<DatasetLayout::WindowedTensorShape>{DatasetLayout::WindowedTensorShape(
-            "history", {5, 1}, DataType::FP32, DataType::UINT64, DataType::INT32, -1.0, string("history_mask"))});
+            "history", {5, 1}, "history_source", DataType::INT32, -1.0, string("history_mask"))});
 
     nlohmann::json j = layout.toJson();
-    j["windowed_tensors"]["history"]["source_storage"] = nlohmann::json{
-        {"file", "windowed_tensor_sources/windowed_tensor_000000.bin"},
+    j["window_sources"]["history_source"]["storage"] = nlohmann::json{
+        {"file", "window_sources/window_source_000000.bin"},
         {"num_bytes", 12},
         {"sequences", nlohmann::json::array({nlohmann::json{{"key_hex", "0100000000000000"},
                                                               {"start_index", 10},
@@ -237,25 +241,103 @@ TEST(DatasetLayoutTest, WindowedJsonRoundTripPreservesLayoutContractAndSourceSto
     layout.validateRequestedLayoutExact(parsed);
     parsed.validateRequestedLayoutExact(layout);
     const DatasetLayout::WindowedTensorSpec &history = parsed.windowedTensor("history");
-    ASSERT_TRUE(history.sourceFilename.has_value());
-    EXPECT_EQ(history.sourceFilename.value(), "windowed_tensor_sources/windowed_tensor_000000.bin");
-    ASSERT_EQ(history.sourceSequences.size(), 1);
-    EXPECT_EQ(history.sourceSequences.front().keyHex, "0100000000000000");
-    EXPECT_EQ(history.sourceSequences.front().startIndex, 10);
+    EXPECT_EQ(history.sourceName, "history_source");
+    const DatasetLayout::WindowedTensorSourceSpec &source = parsed.windowedTensorSource("history_source");
+    ASSERT_TRUE(source.sourceFilename.has_value());
+    EXPECT_EQ(source.sourceFilename.value(), "window_sources/window_source_000000.bin");
+    ASSERT_EQ(source.sourceSequences.size(), 1);
+    EXPECT_EQ(source.sourceSequences.front().keyHex, "0100000000000000");
+    EXPECT_EQ(source.sourceSequences.front().startIndex, 10);
+}
+
+TEST(DatasetLayoutTest, MultipleWindowedTensorsMayShareOneSource) {
+    DatasetLayout layout = DatasetLayout::fromTensorShapes(
+        {},
+        {DatasetLayout::WindowedTensorSourceShape("tokens", {}, DataType::UINT8, DataType::UINT64)},
+        {DatasetLayout::WindowedTensorShape("examples", {8}, "tokens", DataType::INT64),
+         DatasetLayout::WindowedTensorShape("labels", {8}, "tokens", DataType::INT64)});
+
+    ASSERT_EQ(layout.windowedTensorSources().size(), 1);
+    ASSERT_EQ(layout.windowedTensors().size(), 2);
+    EXPECT_EQ(layout.windowedTensor("examples").sourceName, "tokens");
+    EXPECT_EQ(layout.windowedTensor("labels").sourceName, "tokens");
+    EXPECT_EQ(layout.windowedTensor("examples").dataType, DataType::UINT8);
+    EXPECT_EQ(layout.windowedTensor("labels").dataType, DataType::UINT8);
+    EXPECT_EQ(layout.recordSizeBytes(), 32);
 }
 
 TEST(DatasetLayoutTest, RejectsDuplicateWindowedTensorName) {
     EXPECT_THROW(DatasetLayout::fromTensorShapes(
                      vector<DatasetLayout::TensorShape>{DatasetLayout::TensorShape("dense", {2}, DataType::FP32)},
+                     vector<DatasetLayout::WindowedTensorSourceShape>{DatasetLayout::WindowedTensorSourceShape(
+                         "history_source", {1}, DataType::FP32, DataType::UINT64)},
                      vector<DatasetLayout::WindowedTensorShape>{DatasetLayout::WindowedTensorShape(
-                         "dense", {5, 1}, DataType::FP32, DataType::UINT64, DataType::INT32)}),
+                         "dense", {5, 1}, "history_source", DataType::INT32)}),
                  std::runtime_error);
 }
 
 TEST(DatasetLayoutTest, RejectsWindowedMaskNameCollision) {
     EXPECT_THROW(DatasetLayout::fromTensorShapes(
                      vector<DatasetLayout::TensorShape>{DatasetLayout::TensorShape("dense", {2}, DataType::FP32)},
+                     vector<DatasetLayout::WindowedTensorSourceShape>{DatasetLayout::WindowedTensorSourceShape(
+                         "history_source", {1}, DataType::FP32, DataType::UINT64)},
                      vector<DatasetLayout::WindowedTensorShape>{DatasetLayout::WindowedTensorShape(
-                         "history", {5, 1}, DataType::FP32, DataType::UINT64, DataType::INT32, 0.0, string("dense"))}),
+                         "history", {5, 1}, "history_source", DataType::INT32, 0.0, string("dense"))}),
                  std::runtime_error);
+}
+
+TEST(DatasetLayoutTest, AffineWindowReferencesRequireNoPerExampleRecordBytes) {
+    DatasetLayout layout = DatasetLayout::fromTensorShapes(
+        {},
+        {DatasetLayout::WindowedTensorSourceShape("tokens", {}, DataType::UINT8, DataType::UINT64)},
+        {DatasetLayout::WindowedTensorShape("examples",
+                                            {8},
+                                            "tokens",
+                                            DataType::INT64,
+                                            0.0,
+                                            std::nullopt,
+                                            DatasetLayout::WindowedTensorReferenceMode::AFFINE),
+         DatasetLayout::WindowedTensorShape("labels",
+                                            {8},
+                                            "tokens",
+                                            DataType::INT64,
+                                            0.0,
+                                            std::nullopt,
+                                            DatasetLayout::WindowedTensorReferenceMode::AFFINE)});
+
+    EXPECT_EQ(layout.recordSizeBytes(), 0u);
+    EXPECT_TRUE(layout.hasAffineWindowedTensors());
+    EXPECT_FALSE(layout.hasIndexedWindowedTensors());
+    EXPECT_EQ(layout.windowedTensor("examples").referenceNumBytes, 0u);
+    EXPECT_EQ(layout.windowedTensor("labels").referenceOffsetBytes, 0u);
+
+    nlohmann::json persisted = layout.toJson();
+    EXPECT_EQ(persisted.at("format").get<std::string>(), "thor.dataset.v1");
+    EXPECT_EQ(persisted.at("windowed_tensors").at("examples").at("reference_mode").get<std::string>(), "affine");
+    EXPECT_FALSE(persisted.at("windowed_tensors").at("examples").contains("reference_offset_bytes"));
+    EXPECT_FALSE(persisted.at("windowed_tensors").at("examples").contains("reference_num_bytes"));
+    EXPECT_EQ(DatasetLayout::fromJson(persisted).windowedTensor("labels").referenceMode,
+              DatasetLayout::WindowedTensorReferenceMode::AFFINE);
+}
+
+TEST(DatasetLayoutTest, RejectsRetiredWindowDatasetVersions) {
+    nlohmann::json manifest = DatasetLayout::fromTensorShapes(
+        {},
+        {DatasetLayout::WindowedTensorSourceShape("tokens", {}, DataType::UINT8, DataType::UINT64)},
+        {DatasetLayout::WindowedTensorShape("examples",
+                                            {8},
+                                            "tokens",
+                                            DataType::INT64,
+                                            0.0,
+                                            std::nullopt,
+                                            DatasetLayout::WindowedTensorReferenceMode::AFFINE)})
+                                      .toJson();
+    nlohmann::json oldV1 = manifest;
+    oldV1.at("windowed_tensors").at("examples").erase("reference_mode");
+    EXPECT_THROW(DatasetLayout::fromJson(oldV1), std::runtime_error);
+
+    manifest["format"] = "thor.dataset.v2";
+    EXPECT_THROW(DatasetLayout::fromJson(manifest), std::runtime_error);
+    manifest["format"] = "thor.dataset.v3";
+    EXPECT_THROW(DatasetLayout::fromJson(manifest), std::runtime_error);
 }

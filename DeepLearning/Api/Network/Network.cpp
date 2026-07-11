@@ -1304,13 +1304,13 @@ std::vector<std::string> Network::getTrainingOnlyNetworkInputNames() {
         }
 
         bool result = true;
-        for (const std::shared_ptr<Layer>& loader : loadingIt->second) {
-            if (std::dynamic_pointer_cast<NetworkOutput>(loader) != nullptr) {
+        for (const std::shared_ptr<Layer>& consumer : loadingIt->second) {
+            if (std::dynamic_pointer_cast<NetworkOutput>(consumer) != nullptr) {
                 result = false;
                 break;
             }
 
-            std::shared_ptr<MultiInputCustomLoss> multiInputCustomLoss = std::dynamic_pointer_cast<MultiInputCustomLoss>(loader);
+            std::shared_ptr<MultiInputCustomLoss> multiInputCustomLoss = std::dynamic_pointer_cast<MultiInputCustomLoss>(consumer);
             if (multiInputCustomLoss != nullptr) {
                 bool isAuxiliaryLossInput = false;
                 for (const MultiInputCustomLoss::InputSpec& inputSpec : multiInputCustomLoss->getInputs()) {
@@ -1326,7 +1326,7 @@ std::vector<std::string> Network::getTrainingOnlyNetworkInputNames() {
                 continue;
             }
 
-            std::shared_ptr<Loss> loss = std::dynamic_pointer_cast<Loss>(loader);
+            std::shared_ptr<Loss> loss = std::dynamic_pointer_cast<Loss>(consumer);
             if (loss != nullptr) {
                 const int connectionType = loss->getConnectionType(tensor);
                 if (connectionType != static_cast<int>(ThorImplementation::Loss::ConnectionType::LABELS)) {
@@ -1336,7 +1336,7 @@ std::vector<std::string> Network::getTrainingOnlyNetworkInputNames() {
                 continue;
             }
 
-            std::shared_ptr<Metric> metric = std::dynamic_pointer_cast<Metric>(loader);
+            std::shared_ptr<Metric> metric = std::dynamic_pointer_cast<Metric>(consumer);
             if (metric != nullptr) {
                 const int connectionType = metric->getConnectionType(tensor);
                 if (connectionType != static_cast<int>(ThorImplementation::Metric::ConnectionType::LABELS)) {
@@ -1346,7 +1346,7 @@ std::vector<std::string> Network::getTrainingOnlyNetworkInputNames() {
                 continue;
             }
 
-            auto outputsIt = apiLayerToApiOutputTensors.find(loader);
+            auto outputsIt = apiLayerToApiOutputTensors.find(consumer);
             if (outputsIt == apiLayerToApiOutputTensors.end() || outputsIt->second.empty()) {
                 result = false;
                 break;
@@ -2321,7 +2321,7 @@ Network::StatusCode Network::checkForFloatingInputs() {
 }
 
 /**
- * A tensor has a dangling output when nothing is connected to read from it -> No Loader.
+ * A tensor has a dangling output when nothing is connected to read from it -> No consumer.
  */
 Network::StatusCode Network::checkForDanglingOutputs() {
     for (auto it = allTensors.begin(); it != allTensors.end(); ++it) {

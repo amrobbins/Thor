@@ -28,8 +28,6 @@
 #include "DeepLearning/Api/Data/FileDataset.h"
 #include "DeepLearning/Api/Data/TrainingData.h"
 #include "DeepLearning/Api/Data/DatasetAccessPolicy.h"
-#include "DeepLearning/Api/Loaders/Loader.h"
-#include "DeepLearning/Api/Loaders/LocalBatchLoader.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
@@ -49,8 +47,6 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Data/DatasetWriter.h"
 #include "DeepLearning/Api/Data/DatasetLayout.h"
-#include "Utilities/Loaders/NoOpDataProcessor.h"
-#include "Utilities/Loaders/ShardedRawDatasetCreator.h"
 #include "bindings/python/src/core/cast.h"
 #include "bindings/python/src/core/physical/NumpyDTypeMapping.h"
 #include "bindings/python/src/core/training/NumpyDataset.h"
@@ -79,18 +75,31 @@ struct PythonTensorLayout {
     ThorImplementation::DataType dataType = ThorImplementation::DataType::FP32;
 };
 
-struct PythonWindowedTensorLayout {
-    std::vector<uint64_t> shape;
+struct PythonWindowedTensorSourceLayout {
+    std::vector<uint64_t> stepShape;
     ThorImplementation::DataType dataType = ThorImplementation::DataType::FP32;
     ThorImplementation::DataType keyType = ThorImplementation::DataType::UINT64;
+};
+
+struct PythonWindowedTensorLayout {
+    std::vector<uint64_t> shape;
+    std::string source;
     ThorImplementation::DataType indexType = ThorImplementation::DataType::INT32;
     double padValue = 0.0;
     std::optional<std::string> maskName;
+    DatasetLayout::WindowedTensorReferenceMode referenceMode = DatasetLayout::WindowedTensorReferenceMode::INDEXED;
 };
 
 struct PythonWindowedTensorChunk {
     nb::object key;
     nb::object start;
+};
+
+struct PythonAffineWindowedTensorChunk {
+    nb::object key;
+    int64_t base = 0;
+    int64_t stride = 1;
+    int64_t fieldOffset = 0;
 };
 
 std::optional<std::string> optionalPathStringFromPython(const nb::object& obj, const std::string& argumentName) {
@@ -221,6 +230,25 @@ std::vector<uint64_t> uint64ShapeFromPython(nb::handle value, const std::string&
     return shape;
 }
 
+std::vector<uint64_t> uint64OptionalShapeFromPython(nb::handle value, const std::string& context) {
+    if (nb::isinstance<nb::str>(value)) {
+        throw nb::type_error((context + " must be an iterable of positive integers, not str").c_str());
+    }
+    std::vector<uint64_t> shape;
+    uint64_t index = 0;
+    for (nb::handle dimObject : pybind::castOrTypeError<nb::iterable>(
+             value, context, "iterable of positive integers", false)) {
+        const uint64_t dim = pybind::castOrTypeError<uint64_t>(
+            dimObject, context + "[" + std::to_string(index) + "]", "positive int", false);
+        if (dim == 0) {
+            throw nb::value_error((context + " dimensions must be positive").c_str());
+        }
+        shape.push_back(dim);
+        ++index;
+    }
+    return shape;
+}
+
 std::vector<DatasetLayout::TensorShape> datasetTensorShapesFromPython(
     const nb::dict& tensors,
     const std::string& context) {
@@ -262,6 +290,18 @@ bool pythonHasAttribute(nb::handle obj, const char* name) {
     return PyObject_HasAttrString(obj.ptr(), name) == 1;
 }
 
+DatasetLayout::WindowedTensorReferenceMode windowedReferenceModeFromPython(
+    const std::string& value,
+    const std::string& argumentName) {
+    if (value == "indexed") {
+        return DatasetLayout::WindowedTensorReferenceMode::INDEXED;
+    }
+    if (value == "affine") {
+        return DatasetLayout::WindowedTensorReferenceMode::AFFINE;
+    }
+    throw nb::value_error((argumentName + " must be 'indexed' or 'affine'").c_str());
+}
+
 double padValueFromPython(const nb::object& obj, const std::string& argumentName) {
     if (obj.is_none()) {
         return 0.0;
@@ -270,26 +310,52 @@ double padValueFromPython(const nb::object& obj, const std::string& argumentName
     return pad.value;
 }
 
+std::vector<DatasetLayout::WindowedTensorSourceShape> datasetWindowedTensorSourceShapesFromPython(
+    const nb::object& maybeWindowSources,
+    const std::string& context) {
+    if (maybeWindowSources.is_none()) {
+        return {};
+    }
+    nb::dict windowSources = pybind::castOrTypeError<nb::dict>(
+        maybeWindowSources, context + " window_sources", "dict or None", false);
+    std::vector<DatasetLayout::WindowedTensorSourceShape> out;
+    out.reserve(nb::len(windowSources));
+    for (auto item : windowSources) {
+        const std::string name = tensorNameFromPythonKey(item.first, context + " window_sources");
+        PythonWindowedTensorSourceLayout entry = pybind::castOrTypeError<PythonWindowedTensorSourceLayout>(
+            item.second,
+            context + " window_sources['" + name + "']",
+            "thor.data.WindowedTensorSourceLayout",
+            false);
+        out.emplace_back(name, std::move(entry.stepShape), entry.dataType, entry.keyType);
+    }
+    return out;
+}
+
 std::vector<DatasetLayout::WindowedTensorShape> datasetWindowedTensorShapesFromPython(
     const nb::object& maybeWindowedTensors,
     const std::string& context) {
     if (maybeWindowedTensors.is_none()) {
         return {};
     }
-    nb::dict windowedTensors = pybind::castOrTypeError<nb::dict>(maybeWindowedTensors, context + " windowed_tensors", "dict or None", false);
+    nb::dict windowedTensors = pybind::castOrTypeError<nb::dict>(
+        maybeWindowedTensors, context + " windowed_tensors", "dict or None", false);
     std::vector<DatasetLayout::WindowedTensorShape> out;
     out.reserve(nb::len(windowedTensors));
     for (auto item : windowedTensors) {
         const std::string name = tensorNameFromPythonKey(item.first, context + " windowed_tensors");
         PythonWindowedTensorLayout entry = pybind::castOrTypeError<PythonWindowedTensorLayout>(
-            item.second, context + " windowed_tensors['" + name + "']", "thor.data.WindowedTensorLayout", false);
+            item.second,
+            context + " windowed_tensors['" + name + "']",
+            "thor.data.WindowedTensorLayout",
+            false);
         out.emplace_back(name,
                          std::move(entry.shape),
-                         entry.dataType,
-                         entry.keyType,
+                         std::move(entry.source),
                          entry.indexType,
                          entry.padValue,
-                         std::move(entry.maskName));
+                         std::move(entry.maskName),
+                         entry.referenceMode);
     }
     return out;
 }
@@ -344,28 +410,16 @@ std::map<std::string, std::vector<uint64_t>> datasetLayoutTensorShapes(const Dat
     return shapes;
 }
 
-nb::dict datasetLayoutWindowedTensorSpecsToPythonDict(const DatasetLayout& layout) {
+nb::dict datasetLayoutWindowSourceSpecsToPythonDict(const DatasetLayout& layout) {
     nb::dict out;
-    for (const DatasetLayout::WindowedTensorSpec& spec : layout.windowedTensors()) {
+    for (const DatasetLayout::WindowedTensorSourceSpec& spec : layout.windowedTensorSources()) {
         nb::dict specDict;
-        specDict["shape"] = uint64VectorToPythonList(spec.dimensions);
+        specDict["step_shape"] = uint64VectorToPythonList(spec.stepDimensions);
         specDict["data_type"] = nb::cast(spec.dataType);
         specDict["key_type"] = nb::cast(spec.keyDataType);
-        specDict["index_type"] = nb::cast(spec.indexDataType);
-        specDict["pad_value"] = spec.padValue;
-        if (spec.maskName.has_value()) {
-            specDict["mask_name"] = nb::str(spec.maskName.value().c_str());
-        } else {
-            specDict["mask_name"] = nb::none();
-        }
-        specDict["reference_offset_bytes"] = spec.referenceOffsetBytes;
-        specDict["reference_num_bytes"] = spec.referenceNumBytes;
-        specDict["num_bytes"] = spec.outputNumBytes();
-        if (spec.sourceFilename.has_value()) {
-            specDict["source_filename"] = nb::str(spec.sourceFilename.value().c_str());
-        } else {
-            specDict["source_filename"] = nb::none();
-        }
+        specDict["step_num_bytes"] = spec.stepNumBytes();
+        specDict["source_filename"] = spec.sourceFilename.has_value()
+            ? nb::object(nb::str(spec.sourceFilename->c_str())) : nb::object(nb::none());
         specDict["source_num_bytes"] = spec.sourceNumBytes;
         nb::list sequences;
         for (const DatasetLayout::WindowedTensorSourceSequence& sequence : spec.sourceSequences) {
@@ -379,6 +433,28 @@ nb::dict datasetLayoutWindowedTensorSpecsToPythonDict(const DatasetLayout& layou
             sequences.append(std::move(seq));
         }
         specDict["source_sequences"] = std::move(sequences);
+        out[nb::str(spec.name.c_str())] = std::move(specDict);
+    }
+    return out;
+}
+
+nb::dict datasetLayoutWindowedTensorSpecsToPythonDict(const DatasetLayout& layout) {
+    nb::dict out;
+    for (const DatasetLayout::WindowedTensorSpec& spec : layout.windowedTensors()) {
+        nb::dict specDict;
+        specDict["shape"] = uint64VectorToPythonList(spec.dimensions);
+        specDict["source"] = nb::str(spec.sourceName.c_str());
+        specDict["data_type"] = nb::cast(spec.dataType);
+        specDict["key_type"] = nb::cast(spec.keyDataType);
+        specDict["index_type"] = nb::cast(spec.indexDataType);
+        specDict["pad_value"] = spec.padValue;
+        specDict["mask_name"] = spec.maskName.has_value()
+            ? nb::object(nb::str(spec.maskName->c_str())) : nb::object(nb::none());
+        specDict["reference_mode"] = nb::str(
+            spec.referenceMode == DatasetLayout::WindowedTensorReferenceMode::AFFINE ? "affine" : "indexed");
+        specDict["reference_offset_bytes"] = spec.referenceOffsetBytes;
+        specDict["reference_num_bytes"] = spec.referenceNumBytes;
+        specDict["num_bytes"] = spec.outputNumBytes();
         out[nb::str(spec.name.c_str())] = std::move(specDict);
     }
     return out;
@@ -635,16 +711,47 @@ std::map<std::string, DatasetWriter::WindowedTensorReferenceBatchView> datasetWr
     return views;
 }
 
+std::map<std::string, DatasetWriter::AffineWindowedTensorReferenceView>
+datasetWriterAffineWindowedTensorReferenceViewsFromPython(
+    const nb::dict& tensors,
+    const DatasetLayout& layout,
+    const std::string& context,
+    std::vector<std::vector<uint8_t>>& ownedKeys) {
+    std::map<std::string, DatasetWriter::AffineWindowedTensorReferenceView> views;
+    ownedKeys.reserve(layout.windowedTensors().size());
+    for (const DatasetLayout::WindowedTensorSpec& spec : layout.windowedTensors()) {
+        if (!dictContainsString(tensors, spec.name)) {
+            throw std::runtime_error(context + " missing affine window reference '" + spec.name + "'");
+        }
+        nb::object chunkObject = dictGetString(tensors, spec.name, context);
+        const std::string chunkContext = context + "['" + spec.name + "']";
+        if (!pythonHasAttribute(chunkObject, "key") || !pythonHasAttribute(chunkObject, "base") ||
+            !pythonHasAttribute(chunkObject, "stride") || !pythonHasAttribute(chunkObject, "field_offset")) {
+            throw nb::type_error((chunkContext + " must be thor.data.AffineWindowedTensorChunk").c_str());
+        }
+        ownedKeys.push_back(scalarBytesFromPython(chunkObject.attr("key"), spec.keyDataType, chunkContext + ".key"));
+        views.emplace(spec.name,
+                      DatasetWriter::AffineWindowedTensorReferenceView{
+                          .keyDataType = spec.keyDataType,
+                          .key = ownedKeys.back().data(),
+                          .base = pybind::castOrTypeError<int64_t>(chunkObject.attr("base"), chunkContext + ".base", "int", false),
+                          .stride = pybind::castOrTypeError<int64_t>(chunkObject.attr("stride"), chunkContext + ".stride", "int", false),
+                          .fieldOffset = pybind::castOrTypeError<int64_t>(
+                              chunkObject.attr("field_offset"), chunkContext + ".field_offset", "int", false)});
+    }
+    return views;
+}
+
 DatasetWriter::WindowedTensorSourceView datasetWriterWindowedTensorSourceViewFromPython(
     const DatasetLayout& layout,
-    const std::string& tensorName,
+    const std::string& sourceName,
     nb::handle key,
     int64_t startIndex,
     nb::handle values,
     const std::string& context,
     std::vector<uint8_t>& ownedKey,
     std::vector<nb::object>& ownedArrays) {
-    const DatasetLayout::WindowedTensorSpec& spec = layout.windowedTensor(tensorName);
+    const DatasetLayout::WindowedTensorSourceSpec& spec = layout.windowedTensorSource(sourceName);
     ownedKey = scalarBytesFromPython(key, spec.keyDataType, context + " key");
     nb::object owner = nb::borrow<nb::object>(values);
     const pybind::CanonicalNumpyArrayView array =
@@ -659,11 +766,17 @@ DatasetWriter::WindowedTensorSourceView datasetWriterWindowedTensorSourceViewFro
                                                                     .numBytes = numBytes};
 }
 
-std::set<std::string> stringSetFromVector(std::vector<std::string> values) { return std::set<std::string>(values.begin(), values.end()); }
-
-std::unordered_set<std::string> unorderedStringSetFromVector(const std::vector<std::string>& values) {
-    return std::unordered_set<std::string>(values.begin(), values.end());
+Thor::ExampleIndexSet exampleIndexSetFromPython(
+    nb::object value,
+    const std::string& context) {
+    if (nb::isinstance<Thor::ExampleIndexSet>(value)) {
+        return nb::cast<Thor::ExampleIndexSet>(value);
+    }
+    constexpr uint64_t maxIndex = std::numeric_limits<uint64_t>::max();
+    return Thor::ExampleIndexSet(uint64IndicesFromPython(std::move(value), context, maxIndex, true));
 }
+
+std::set<std::string> stringSetFromVector(std::vector<std::string> values) { return std::set<std::string>(values.begin(), values.end()); }
 
 LineStatsColorMode lineStatsColorModeFromString(const std::string& value) {
     if (value == "always") {
@@ -1326,14 +1439,10 @@ nb::object optionalLossFromStats(const std::optional<TrainingStatsSnapshot>& sta
 void bind_training(nb::module_& training) {
     training.doc() = "Thor training program scaffolding";
 
-    auto loader = nb::class_<Loader>(training, "Loader");
-    loader.attr("__module__") = "thor.training";
-    loader.def("get_batch_size", &Loader::getBatchSize);
-    loader.def("get_dataset_name", &Loader::getDatasetName);
-    loader.def("set_dataset_name", &Loader::setDatasetName, "dataset_name"_a);
-
-    auto batch_session = nb::class_<Thor::BatchSession, Loader>(training, "BatchSession");
+    auto batch_session = nb::class_<Thor::BatchSession>(training, "BatchSession");
     batch_session.attr("__module__") = "thor.data";
+    batch_session.def("get_batch_size", &Thor::BatchSession::getBatchSize);
+    batch_session.def("get_dataset_name", &Thor::BatchSession::getDatasetName);
     batch_session.def("cancel", &Thor::BatchSession::cancel);
     batch_session.def("get_num_train_examples",
                       [](Thor::BatchSession &self) { return self.getNumExamples(ExampleType::TRAIN); });
@@ -1347,115 +1456,6 @@ void bind_training(nb::module_& training) {
                       [](Thor::BatchSession &self) { return self.getNumBatchesPerEpoch(ExampleType::VALIDATE); });
     batch_session.def("get_num_test_batches",
                       [](Thor::BatchSession &self) { return self.getNumBatchesPerEpoch(ExampleType::TEST); });
-
-    training.def(
-        "create_sharded_raw_dataset",
-        [](const std::vector<std::string>& source_directories,
-           const std::vector<std::string>& dest_directories,
-           const std::string& base_dataset_file_name,
-           uint64_t example_size_in_bytes,
-           ThorImplementation::DataType data_type,
-           uint32_t max_classes) {
-            if (example_size_in_bytes == 0) {
-                throw nb::value_error("example_size_in_bytes must be > 0");
-            }
-            std::vector<std::shared_ptr<Shard>> shards;
-            ShardedRawDatasetCreator creator(unorderedStringSetFromVector(source_directories),
-                                             unorderedStringSetFromVector(dest_directories),
-                                             base_dataset_file_name,
-                                             max_classes);
-            creator.createDataset(std::make_unique<NoOpDataProcessor>(example_size_in_bytes, data_type), shards);
-            std::vector<std::string> shard_paths;
-            shard_paths.reserve(shards.size());
-            for (const auto& shard : shards) {
-                shard_paths.push_back(shard->getFilename());
-            }
-            return shard_paths;
-        },
-        "source_directories"_a,
-        "dest_directories"_a,
-        "base_dataset_file_name"_a,
-        "example_size_in_bytes"_a,
-        "data_type"_a,
-        "max_classes"_a = 0,
-        R"nbdoc(
-Create Thor shard files from an already preprocessed raw dataset directory.
-
-The source directories must contain train/, validate/, and test/ subdirectories,
-each with one subdirectory per class. Every example file is expected to already
-contain exactly example_size_in_bytes bytes in the target tensor layout and dtype.
-NoOpDataProcessor is used, so image decoding/normalization should happen before
-calling this helper.
-        )nbdoc");
-
-    auto local_batch_loader = nb::class_<LocalBatchLoader, Loader>(training, "LocalBatchLoader");
-    local_batch_loader.attr("__module__") = "thor.training";
-    local_batch_loader.def_static(
-        "__new__",
-        [](nb::handle cls,
-           std::vector<std::string> shard_paths,
-           std::vector<uint64_t> example_shape,
-           ThorImplementation::DataType example_data_type,
-           std::vector<uint64_t> label_shape,
-           ThorImplementation::DataType label_data_type,
-           uint64_t batch_size,
-           const std::string& dataset_name,
-           uint64_t batch_queue_depth) -> std::shared_ptr<LocalBatchLoader> {
-            (void)cls;
-            if (shard_paths.empty()) {
-                throw nb::value_error("LocalBatchLoader requires at least one shard path");
-            }
-            if (example_shape.empty() || label_shape.empty()) {
-                throw nb::value_error("LocalBatchLoader example_shape and label_shape must be non-empty");
-            }
-            if (batch_size == 0) {
-                throw nb::value_error("LocalBatchLoader batch_size must be >= 1");
-            }
-            if (batch_queue_depth == 0) {
-                throw nb::value_error("LocalBatchLoader batch_queue_depth must be >= 1");
-            }
-            auto loader =
-                std::make_shared<LocalBatchLoader>(stringSetFromVector(std::move(shard_paths)),
-                                                   ThorImplementation::TensorDescriptor(example_data_type, std::move(example_shape)),
-                                                   ThorImplementation::TensorDescriptor(label_data_type, std::move(label_shape)),
-                                                   batch_size,
-                                                   batch_queue_depth);
-            loader->setDatasetName(dataset_name);
-            return loader;
-        },
-        "cls"_a,
-        "shard_paths"_a,
-        "example_shape"_a,
-        "example_data_type"_a,
-        "label_shape"_a,
-        "label_data_type"_a,
-        "batch_size"_a,
-        "dataset_name"_a = "local_shards",
-        "batch_queue_depth"_a = 32);
-    local_batch_loader.def(
-        "__init__",
-        [](LocalBatchLoader*,
-           std::vector<std::string>,
-           std::vector<uint64_t>,
-           ThorImplementation::DataType,
-           std::vector<uint64_t>,
-           ThorImplementation::DataType,
-           uint64_t,
-           const std::string&,
-           uint64_t) {},
-        "shard_paths"_a,
-        "example_shape"_a,
-        "example_data_type"_a,
-        "label_shape"_a,
-        "label_data_type"_a,
-        "batch_size"_a,
-        "dataset_name"_a = "local_shards",
-        "batch_queue_depth"_a = 32);
-    local_batch_loader.def("get_num_train_examples", [](LocalBatchLoader& self) { return self.getNumExamples(ExampleType::TRAIN); });
-    local_batch_loader.def("get_num_validate_examples", [](LocalBatchLoader& self) { return self.getNumExamples(ExampleType::VALIDATE); });
-    local_batch_loader.def("get_num_train_batches", [](LocalBatchLoader& self) { return self.getNumBatchesPerEpoch(ExampleType::TRAIN); });
-    local_batch_loader.def("get_num_validate_batches",
-                           [](LocalBatchLoader& self) { return self.getNumBatchesPerEpoch(ExampleType::VALIDATE); });
 
     auto constant_pad = nb::class_<PythonConstantPad>(training, "ConstantPad");
     constant_pad.attr("__module__") = "thor.data";
@@ -1483,62 +1483,99 @@ calling this helper.
         .def_ro("shape", &PythonTensorLayout::shape)
         .def_ro("data_type", &PythonTensorLayout::dataType);
 
+    auto windowed_tensor_source_layout =
+        nb::class_<PythonWindowedTensorSourceLayout>(training, "WindowedTensorSourceLayout");
+    windowed_tensor_source_layout.attr("__module__") = "thor.data";
+    windowed_tensor_source_layout.def_static(
+        "__new__",
+        [](nb::handle cls,
+           nb::object stepShape,
+           ThorImplementation::DataType dataType,
+           ThorImplementation::DataType keyType) -> std::shared_ptr<PythonWindowedTensorSourceLayout> {
+            (void)cls;
+            auto out = std::make_shared<PythonWindowedTensorSourceLayout>();
+            out->stepShape = uint64OptionalShapeFromPython(stepShape, "WindowedTensorSourceLayout step_shape");
+            out->dataType = dataType;
+            out->keyType = keyType;
+            return out;
+        },
+        "cls"_a,
+        "step_shape"_a,
+        "data_type"_a = ThorImplementation::DataType::FP32,
+        "key_type"_a = ThorImplementation::DataType::UINT64,
+        R"nbdoc(
+Describe one immutable named source for windowed dataset fields.
+
+``step_shape`` is the shape of one source step and may be empty for scalar
+sources. Multiple ``WindowedTensorLayout`` fields may reference the same source
+without duplicating its persisted bytes.
+        )nbdoc");
+    windowed_tensor_source_layout.def(
+        "__init__",
+        [](PythonWindowedTensorSourceLayout*, nb::object, ThorImplementation::DataType, ThorImplementation::DataType) {},
+        "step_shape"_a,
+        "data_type"_a = ThorImplementation::DataType::FP32,
+        "key_type"_a = ThorImplementation::DataType::UINT64)
+        .def_ro("step_shape", &PythonWindowedTensorSourceLayout::stepShape)
+        .def_ro("data_type", &PythonWindowedTensorSourceLayout::dataType)
+        .def_ro("key_type", &PythonWindowedTensorSourceLayout::keyType);
+
     auto windowed_tensor_layout = nb::class_<PythonWindowedTensorLayout>(training, "WindowedTensorLayout");
     windowed_tensor_layout.attr("__module__") = "thor.data";
     windowed_tensor_layout.def_static(
         "__new__",
         [](nb::handle cls,
            nb::object shape,
-           ThorImplementation::DataType dataType,
-           ThorImplementation::DataType keyType,
+           std::string source,
            ThorImplementation::DataType indexType,
            nb::object pad,
-           nb::object maskName) -> std::shared_ptr<PythonWindowedTensorLayout> {
+           nb::object maskName,
+           std::string referenceMode) -> std::shared_ptr<PythonWindowedTensorLayout> {
             (void)cls;
+            if (source.empty()) {
+                throw nb::value_error("WindowedTensorLayout source must not be empty");
+            }
             auto out = std::make_shared<PythonWindowedTensorLayout>();
             out->shape = uint64ShapeFromPython(shape, "WindowedTensorLayout shape");
-            out->dataType = dataType;
-            out->keyType = keyType;
+            out->source = std::move(source);
             out->indexType = indexType;
             out->padValue = padValueFromPython(pad, "WindowedTensorLayout pad");
             out->maskName = optionalStringFromPython(maskName, "WindowedTensorLayout mask_name");
+            out->referenceMode = windowedReferenceModeFromPython(referenceMode, "WindowedTensorLayout reference_mode");
             return out;
         },
         "cls"_a,
         "shape"_a,
-        "data_type"_a = ThorImplementation::DataType::FP32,
-        "key_type"_a = ThorImplementation::DataType::UINT64,
+        "source"_a,
         "index_type"_a = ThorImplementation::DataType::INT32,
         "pad"_a = nb::none(),
         "mask_name"_a = nb::none(),
+        "reference_mode"_a = "indexed",
         R"nbdoc(
-Describe one dataset field whose per-example value is materialized from a
-keyed contiguous window source.
+Describe one field materialized as a fixed window over a named source.
 
-The first dimension of ``shape`` is the fixed window length.  The remaining
-dimensions are the per-step source shape.  Examples provide a compact
-``WindowedTensorChunk`` reference instead of dense tensor values.
+The first dimension of ``shape`` is the window length. Its remaining dimensions
+must equal the referenced source's ``step_shape``. ``reference_mode="indexed"``
+uses per-row ``WindowedTensorChunk`` values. ``reference_mode="affine"`` uses
+one ``AffineWindowedTensorChunk`` formula for each appended row segment.
         )nbdoc");
-    windowed_tensor_layout.def("__init__",
-                               [](PythonWindowedTensorLayout*,
-                                  nb::object,
-                                  ThorImplementation::DataType,
-                                  ThorImplementation::DataType,
-                                  ThorImplementation::DataType,
-                                  nb::object,
-                                  nb::object) {},
-                               "shape"_a,
-                               "data_type"_a = ThorImplementation::DataType::FP32,
-                               "key_type"_a = ThorImplementation::DataType::UINT64,
-                               "index_type"_a = ThorImplementation::DataType::INT32,
-                               "pad"_a = nb::none(),
-                               "mask_name"_a = nb::none())
+    windowed_tensor_layout.def(
+        "__init__",
+        [](PythonWindowedTensorLayout*, nb::object, std::string, ThorImplementation::DataType, nb::object, nb::object, std::string) {},
+        "shape"_a,
+        "source"_a,
+        "index_type"_a = ThorImplementation::DataType::INT32,
+        "pad"_a = nb::none(),
+        "mask_name"_a = nb::none(),
+        "reference_mode"_a = "indexed")
         .def_ro("shape", &PythonWindowedTensorLayout::shape)
-        .def_ro("data_type", &PythonWindowedTensorLayout::dataType)
-        .def_ro("key_type", &PythonWindowedTensorLayout::keyType)
+        .def_ro("source", &PythonWindowedTensorLayout::source)
         .def_ro("index_type", &PythonWindowedTensorLayout::indexType)
         .def_ro("pad_value", &PythonWindowedTensorLayout::padValue)
-        .def_ro("mask_name", &PythonWindowedTensorLayout::maskName);
+        .def_ro("mask_name", &PythonWindowedTensorLayout::maskName)
+        .def_prop_ro("reference_mode", [](const PythonWindowedTensorLayout& self) {
+            return self.referenceMode == DatasetLayout::WindowedTensorReferenceMode::AFFINE ? "affine" : "indexed";
+        });
 
     auto windowed_tensor_chunk = nb::class_<PythonWindowedTensorChunk>(training, "WindowedTensorChunk");
     windowed_tensor_chunk.attr("__module__") = "thor.data";
@@ -1558,34 +1595,72 @@ dimensions are the per-step source shape.  Examples provide a compact
         .def_ro("key", &PythonWindowedTensorChunk::key)
         .def_ro("start", &PythonWindowedTensorChunk::start);
 
+    auto affine_windowed_tensor_chunk =
+        nb::class_<PythonAffineWindowedTensorChunk>(training, "AffineWindowedTensorChunk");
+    affine_windowed_tensor_chunk.attr("__module__") = "thor.data";
+    affine_windowed_tensor_chunk.def_static(
+        "__new__",
+        [](nb::handle cls, nb::object key, int64_t base, int64_t stride, int64_t fieldOffset)
+            -> std::shared_ptr<PythonAffineWindowedTensorChunk> {
+            (void)cls;
+            if (stride <= 0) {
+                throw nb::value_error("AffineWindowedTensorChunk stride must be >= 1");
+            }
+            auto out = std::make_shared<PythonAffineWindowedTensorChunk>();
+            out->key = std::move(key);
+            out->base = base;
+            out->stride = stride;
+            out->fieldOffset = fieldOffset;
+            return out;
+        },
+        "cls"_a,
+        "key"_a,
+        "base"_a = 0,
+        "stride"_a = 1,
+        "field_offset"_a = 0);
+    affine_windowed_tensor_chunk.def(
+        "__init__",
+        [](PythonAffineWindowedTensorChunk*, nb::object, int64_t, int64_t, int64_t) {},
+        "key"_a,
+        "base"_a = 0,
+        "stride"_a = 1,
+        "field_offset"_a = 0)
+        .def_ro("key", &PythonAffineWindowedTensorChunk::key)
+        .def_ro("base", &PythonAffineWindowedTensorChunk::base)
+        .def_ro("stride", &PythonAffineWindowedTensorChunk::stride)
+        .def_ro("field_offset", &PythonAffineWindowedTensorChunk::fieldOffset);
+
     auto dataset_layout = nb::class_<DatasetLayout>(training, "DatasetLayout");
     dataset_layout.attr("__module__") = "thor.data";
     dataset_layout.def_static(
         "__new__",
         [](nb::handle cls,
            nb::dict tensors,
+           nb::object windowSources,
            nb::object windowedTensors) -> std::shared_ptr<DatasetLayout> {
             (void)cls;
             return std::make_shared<DatasetLayout>(DatasetLayout::fromTensorShapes(
                 datasetTensorShapesFromPython(tensors, "DatasetLayout tensors"),
+                datasetWindowedTensorSourceShapesFromPython(windowSources, "DatasetLayout"),
                 datasetWindowedTensorShapesFromPython(windowedTensors, "DatasetLayout")));
         },
         "cls"_a,
         "tensors"_a,
+        "window_sources"_a = nb::none(),
         "windowed_tensors"_a = nb::none(),
         R"nbdoc(
 Define a persistent dataset record layout.
 
-``tensors`` maps each dense field name to a ``TensorLayout`` containing that
-field's shape and storage dtype. Optional ``windowed_tensors`` maps field names
-to ``WindowedTensorLayout`` objects whose records store compact key/start
-references while their source sequences are stored separately. There is no
-record-wide dtype: every field owns its dtype.
+``tensors`` maps dense field names to ``TensorLayout``. ``window_sources`` maps
+independent source names to ``WindowedTensorSourceLayout``. ``windowed_tensors``
+maps output field names to ``WindowedTensorLayout`` and may point several fields
+at the same source. Every dense field and every window source owns its dtype.
         )nbdoc");
     dataset_layout.def(
         "__init__",
-        [](DatasetLayout*, nb::dict, nb::object) {},
+        [](DatasetLayout*, nb::dict, nb::object, nb::object) {},
         "tensors"_a,
+        "window_sources"_a = nb::none(),
         "windowed_tensors"_a = nb::none());
     dataset_layout.def_static(
         "read_manifest",
@@ -1603,6 +1678,7 @@ record-wide dtype: every field owns its dtype.
     dataset_layout.def("get_tensor_shapes", &datasetLayoutTensorShapes);
     dataset_layout.def("get_tensor_specs", &datasetLayoutTensorSpecsToPythonDict);
     dataset_layout.def("has_windowed_tensors", &DatasetLayout::hasWindowedTensors);
+    dataset_layout.def("get_window_source_specs", &datasetLayoutWindowSourceSpecsToPythonDict);
     dataset_layout.def("get_windowed_tensor_specs", &datasetLayoutWindowedTensorSpecsToPythonDict);
 
     auto dataset_id = nb::class_<Thor::DatasetId>(training, "DatasetId");
@@ -1685,24 +1761,82 @@ record-wide dtype: every field owns its dtype.
     file_dataset.def_prop_ro("dataset_path", [](const Thor::FileDataset& self) { return self.getPath().string(); });
     file_dataset.def("assert_schema", &Thor::FileDataset::assertSchema, "expected_schema"_a);
 
+    auto example_index_range = nb::class_<Thor::ExampleIndexRange>(training, "ExampleIndexRange");
+    example_index_range.attr("__module__") = "thor.data";
+    example_index_range.def_static(
+        "__new__",
+        [](nb::handle cls, uint64_t start, uint64_t count, uint64_t stride) -> std::shared_ptr<Thor::ExampleIndexRange> {
+            (void)cls;
+            if (count == 0) {
+                throw nb::value_error("ExampleIndexRange count must be >= 1");
+            }
+            if (stride == 0) {
+                throw nb::value_error("ExampleIndexRange stride must be >= 1");
+            }
+            Thor::ExampleIndexRange range{.start = start, .count = count, .stride = stride};
+            (void)range.last();
+            return std::make_shared<Thor::ExampleIndexRange>(std::move(range));
+        },
+        "cls"_a,
+        "start"_a,
+        "count"_a,
+        "stride"_a = 1);
+    example_index_range.def("__init__", [](Thor::ExampleIndexRange*, uint64_t, uint64_t, uint64_t) {},
+                            "start"_a,
+                            "count"_a,
+                            "stride"_a = 1)
+        .def_ro("start", &Thor::ExampleIndexRange::start)
+        .def_ro("count", &Thor::ExampleIndexRange::count)
+        .def_ro("stride", &Thor::ExampleIndexRange::stride)
+        .def("__eq__", [](const Thor::ExampleIndexRange& self, const Thor::ExampleIndexRange& other) {
+            return self == other;
+        });
+
     auto example_index_set = nb::class_<Thor::ExampleIndexSet>(training, "ExampleIndexSet");
     example_index_set.attr("__module__") = "thor.data";
+    example_index_set.def_static(
+        "from_indices",
+        [](nb::object indices) {
+            constexpr uint64_t maxIndex = std::numeric_limits<uint64_t>::max();
+            return Thor::ExampleIndexSet(
+                uint64IndicesFromPython(std::move(indices), "ExampleIndexSet indices", maxIndex, true));
+        },
+        "indices"_a);
+    example_index_set.def_static(
+        "from_ranges",
+        [](nb::iterable ranges) {
+            std::vector<Thor::ExampleIndexRange> values;
+            for (nb::handle range : ranges) {
+                values.push_back(pybind::castOrTypeError<Thor::ExampleIndexRange>(
+                    range, "ExampleIndexSet ranges", "thor.data.ExampleIndexRange", false));
+            }
+            return Thor::ExampleIndexSet(std::move(values));
+        },
+        "ranges"_a);
+    example_index_set.def_static("contiguous", &Thor::ExampleIndexSet::contiguous, "start"_a, "count"_a);
+    example_index_set.def_static("strided", &Thor::ExampleIndexSet::strided, "start"_a, "count"_a, "stride"_a);
     example_index_set.def("__len__", &Thor::ExampleIndexSet::size);
     example_index_set.def(
         "__getitem__",
         [](const Thor::ExampleIndexSet& self, int64_t index) {
-            const std::vector<uint64_t>& indices = self.getIndices();
             int64_t resolved = index;
             if (resolved < 0) {
-                resolved += static_cast<int64_t>(indices.size());
+                if (self.size() > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+                    throw nb::index_error();
+                }
+                resolved += static_cast<int64_t>(self.size());
             }
-            if (resolved < 0 || static_cast<uint64_t>(resolved) >= indices.size()) {
+            if (resolved < 0 || static_cast<uint64_t>(resolved) >= self.size()) {
                 throw nb::index_error();
             }
-            return indices[static_cast<size_t>(resolved)];
+            return self.at(static_cast<uint64_t>(resolved));
         },
         "index"_a);
-    example_index_set.def_prop_ro("indices", [](const Thor::ExampleIndexSet& self) { return self.getIndices(); });
+    example_index_set.def_prop_ro("indices", &Thor::ExampleIndexSet::materialize);
+    example_index_set.def_prop_ro("ranges", [](const Thor::ExampleIndexSet& self) {
+        return self.isRangeBacked() ? self.getRanges() : std::vector<Thor::ExampleIndexRange>{};
+    });
+    example_index_set.def_prop_ro("is_range_backed", &Thor::ExampleIndexSet::isRangeBacked);
     example_index_set.def("__eq__", [](const Thor::ExampleIndexSet& self, const Thor::ExampleIndexSet& other) {
         return self == other;
     });
@@ -1720,15 +1854,14 @@ record-wide dtype: every field owns its dtype.
             if (dataset == nullptr) {
                 throw nb::value_error("DatasetSplitManifest dataset must not be None");
             }
-            constexpr uint64_t maxIndex = std::numeric_limits<uint64_t>::max();
-            std::vector<uint64_t> train = uint64IndicesFromPython(
-                std::move(trainIndices), "DatasetSplitManifest train_indices", maxIndex, true);
-            std::vector<uint64_t> validate = uint64IndicesFromPython(
-                std::move(validateIndices), "DatasetSplitManifest validate_indices", maxIndex, true);
-            std::optional<std::vector<uint64_t>> test;
+            Thor::ExampleIndexSet train = exampleIndexSetFromPython(
+                std::move(trainIndices), "DatasetSplitManifest train_indices");
+            Thor::ExampleIndexSet validate = exampleIndexSetFromPython(
+                std::move(validateIndices), "DatasetSplitManifest validate_indices");
+            std::optional<Thor::ExampleIndexSet> test;
             if (!testIndices.is_none()) {
-                test = uint64IndicesFromPython(
-                    std::move(testIndices), "DatasetSplitManifest test_indices", maxIndex, true);
+                test = exampleIndexSetFromPython(
+                    std::move(testIndices), "DatasetSplitManifest test_indices");
             }
             return std::make_shared<Thor::DatasetSplitManifest>(
                 *dataset, std::move(train), std::move(validate), std::move(test));
@@ -1834,7 +1967,7 @@ record-wide dtype: every field owns its dtype.
         "dataset"_a,
         "splits"_a,
         "batching"_a,
-        "dataset_name"_a = "indexed_named_examples",
+        "dataset_name"_a = "dataset",
         "device_storage"_a = "best_effort");
     training_data.def(
         "__init__",
@@ -1843,7 +1976,7 @@ record-wide dtype: every field owns its dtype.
         "dataset"_a,
         "splits"_a,
         "batching"_a,
-        "dataset_name"_a = "indexed_named_examples",
+        "dataset_name"_a = "dataset",
         "device_storage"_a = "best_effort");
     training_data.def(
         "open_session",
@@ -1943,31 +2076,52 @@ record-wide dtype: every field owns its dtype.
         },
         "tensors"_a);
     dataset_writer.def(
-        "write_windowed_tensor_source",
-        [](DatasetWriter& self, const std::string& tensorName, nb::object key, int64_t startIndex, nb::object values) {
+        "write_affine_examples",
+        [](DatasetWriter& self, uint64_t count, nb::dict tensors) {
+            std::vector<nb::object> ownedArrays;
+            std::map<std::string, DatasetWriter::TensorBatchView> denseViews =
+                datasetWriterTensorBatchViewsFromPython(
+                    tensors, self.getLayout(), "DatasetWriter.write_affine_examples", ownedArrays);
+            std::vector<std::vector<uint8_t>> ownedKeys;
+            std::map<std::string, DatasetWriter::AffineWindowedTensorReferenceView> affineViews =
+                datasetWriterAffineWindowedTensorReferenceViewsFromPython(
+                    tensors, self.getLayout(), "DatasetWriter.write_affine_examples", ownedKeys);
+            self.writeAffineExamples(count, denseViews, affineViews);
+        },
+        "count"_a,
+        "tensors"_a,
+        R"nbdoc(
+Append one compact affine row segment. For each affine window field,
+``start(row) = base + row * stride + field_offset`` within the appended
+segment. Dense tensor values, when present, still use arrays with leading
+dimension ``count``.
+        )nbdoc");
+    dataset_writer.def(
+        "write_window_source",
+        [](DatasetWriter& self, const std::string& sourceName, nb::object key, int64_t startIndex, nb::object values) {
             std::vector<uint8_t> ownedKey;
             std::vector<nb::object> ownedArrays;
             DatasetWriter::WindowedTensorSourceView view = datasetWriterWindowedTensorSourceViewFromPython(
                 self.getLayout(),
-                tensorName,
+                sourceName,
                 key,
                 startIndex,
                 values,
-                "DatasetWriter.write_windowed_tensor_source",
+                "DatasetWriter.write_window_source",
                 ownedKey,
                 ownedArrays);
-            self.writeWindowedTensorSource(tensorName, view);
+            self.writeWindowSource(sourceName, view);
         },
-        "tensor_name"_a,
+        "source_name"_a,
         "key"_a,
         "start_index"_a,
         "values"_a,
         R"nbdoc(
-Write one keyed contiguous source sequence for a windowed tensor.
+Write one keyed contiguous sequence into a named window source.
 
-The source belongs to the windowed tensor named by ``tensor_name``.  ``values``
-must have shape ``[num_steps, *shape[1:]]`` and use the exact canonical
-NumPy/ml_dtypes representation of the windowed tensor's Thor storage dtype.
+``values`` must have shape ``[num_steps, *step_shape]`` and use the exact
+canonical NumPy/ml_dtypes representation of the source's Thor storage dtype.
+Multiple windowed fields may reference the same persisted sequence.
         )nbdoc");
     dataset_writer.def("close", &DatasetWriter::close);
     dataset_writer.def("is_closed", &DatasetWriter::isClosed);
@@ -2040,7 +2194,6 @@ NumPy/ml_dtypes representation of the windowed tensor's Thor storage dtype.
         "__new__",
         [](nb::handle cls,
            std::shared_ptr<Network> network,
-           std::shared_ptr<Loader> loader,
            std::shared_ptr<Optimizer> optimizer,
            nb::object training_program,
            bool debug_synchronous,
@@ -2055,8 +2208,8 @@ NumPy/ml_dtypes representation of the windowed tensor's Thor storage dtype.
            std::shared_ptr<Thor::TrainingData> data,
            Thor::DatasetInputBindings* input_bindings) -> nb::object {
             (void)cls;
-            if ((data == nullptr) == (loader == nullptr)) {
-                throw nb::value_error("Trainer requires exactly one of data or loader");
+            if (data == nullptr) {
+                throw nb::value_error("Trainer requires data");
             }
             TrainingModelSelectionScore modelSelectionScore = trainingModelSelectionScoreFromPython(std::move(model_selection_score));
             Trainer::Builder builder;
@@ -2071,11 +2224,7 @@ NumPy/ml_dtypes representation of the windowed tensor's Thor storage dtype.
                 .saveModelDirectory(optionalPathStringFromPython(save_model_dir, "save_model_dir"))
                 .saveModelOverwrite(save_model_overwrite)
                 .modelSelectionScore(std::move(modelSelectionScore));
-            if (data != nullptr) {
-                builder.data(std::move(data));
-            } else {
-                builder.loader(std::move(loader));
-            }
+            builder.data(std::move(data));
             if (input_bindings != nullptr) {
                 builder.inputBindings(*input_bindings);
             }
@@ -2093,7 +2242,6 @@ NumPy/ml_dtypes representation of the windowed tensor's Thor storage dtype.
         },
         "cls"_a,
         "network"_a.none() = nb::none(),
-        "loader"_a.none() = nb::none(),
         "optimizer"_a.none() = nb::none(),
         "training_program"_a.none() = nb::none(),
         "debug_synchronous"_a = false,
@@ -2111,7 +2259,6 @@ NumPy/ml_dtypes representation of the windowed tensor's Thor storage dtype.
         "__init__",
         [](Trainer*,
            std::shared_ptr<Network>,
-           std::shared_ptr<Loader>,
            std::shared_ptr<Optimizer>,
            nb::object,
            bool,
@@ -2126,7 +2273,6 @@ NumPy/ml_dtypes representation of the windowed tensor's Thor storage dtype.
            std::shared_ptr<Thor::TrainingData>,
            Thor::DatasetInputBindings*) {},
         "network"_a.none() = nb::none(),
-        "loader"_a.none() = nb::none(),
         "optimizer"_a.none() = nb::none(),
         "training_program"_a.none() = nb::none(),
         "debug_synchronous"_a = false,
@@ -2582,7 +2728,7 @@ NumPy/ml_dtypes representation of the windowed tensor's Thor storage dtype.
         "fit",
         [](TrainingRuns& self,
            uint32_t epochs,
-           std::shared_ptr<Loader> test_loader,
+           std::shared_ptr<Thor::TrainingData> test_data,
            uint32_t check_best_model_every_epochs,
            uint64_t first_model_selection_epoch,
            nb::object restart_conditions,
@@ -2601,13 +2747,13 @@ NumPy/ml_dtypes representation of the windowed tensor's Thor storage dtype.
             TrainingRunsEarlyCompletionRulesBinding earlyRules = trainingRunsEarlyCompletionRulesFromPython(early_completion_rules);
             sessionOptions.earlyCompletionRules = std::move(earlyRules.rules);
             sessionOptions.reports = trainingRunsReportsFromPython(reports, self.getRuns());
-            sessionOptions.evaluation.testLoader = std::move(test_loader);
+            sessionOptions.evaluation.testData = std::move(test_data);
             sessionOptions.evaluation.evaluateTrainingPopulation = evaluate_training_population;
             nb::gil_scoped_release release;
             return self.fit(options, sessionOptions);
         },
         "epochs"_a,
-        "test_loader"_a.none() = nb::none(),
+        "test_data"_a.none() = nb::none(),
         "check_best_model_every_epochs"_a = 0,
         "first_model_selection_epoch"_a = 0,
         "restart_conditions"_a.none() = nb::none(),

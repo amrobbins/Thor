@@ -97,8 +97,10 @@ DeviceResidentWindowedNamedBatchSession::DeviceResidentWindowedNamedBatchSession
     Thor::DeviceDatasetSessionDescription sessionDescription,
     Thor::DeviceDatasetLease windowedDataset,
     uint64_t batchQueueDepth,
-    uint64_t readerQueueDepth)
-    : datasetDescription(std::move(datasetDescription)),
+    uint64_t readerQueueDepth,
+    std::string datasetName)
+    : Thor::BatchSession(std::move(datasetName)),
+      datasetDescription(std::move(datasetDescription)),
       sessionDescription(std::move(sessionDescription)),
       windowedDataset(std::move(windowedDataset)),
       batchQueueDepth(batchQueueDepth),
@@ -159,17 +161,17 @@ DeviceResidentWindowedNamedBatchSession::DeviceResidentWindowedNamedBatchSession
 
     initializeSplit(
         ExampleType::TRAIN,
-        splits.getTrain().getSharedIndices(),
+        splits.getSharedTrain(),
         this->sessionDescription.getBatching().getRandomizeTrain(),
         this->sessionDescription.getBatching().getRandomSeed());
     initializeSplit(
         ExampleType::VALIDATE,
-        splits.getValidate().getSharedIndices(),
+        splits.getSharedValidate(),
         false,
         std::nullopt);
     initializeSplit(
         ExampleType::TEST,
-        splits.getTest().getSharedIndices(),
+        splits.getSharedTest(),
         false,
         std::nullopt);
 }
@@ -191,7 +193,7 @@ void DeviceResidentWindowedNamedBatchSession::cancel() {
 
 void DeviceResidentWindowedNamedBatchSession::initializeSplit(
     ExampleType exampleType,
-    std::shared_ptr<const std::vector<uint64_t>> sourceIndices,
+    std::shared_ptr<const Thor::ExampleIndexSet> sourceIndices,
     bool randomized,
     std::optional<uint64_t> seed) {
     auto runtime = std::make_unique<SplitRuntime>();
@@ -281,13 +283,13 @@ void DeviceResidentWindowedNamedBatchSession::fillRowIndexTensor(
         }
         THOR_THROW_IF_FALSE(logicalPosition < runtime.numExamples());
         const uint64_t sourceRow =
-            runtime.sourceIndices->at(static_cast<size_t>(logicalPosition));
+            runtime.sourceIndices->at(logicalPosition);
         THOR_THROW_IF_FALSE(sourceRow < datasetDescription.numExamples);
         rowIndices[slot] = sourceRow;
     }
 }
 
-Batch DeviceResidentWindowedNamedBatchSession::getBatch(
+Batch DeviceResidentWindowedNamedBatchSession::acquireBatch(
     ExampleType exampleType,
     uint64_t &batchNum) {
     if (cancelled.load(std::memory_order_acquire)) {
@@ -386,7 +388,7 @@ void DeviceResidentWindowedNamedBatchSession::validateReturnedBatch(
     }
 }
 
-void DeviceResidentWindowedNamedBatchSession::returnBatchBuffers(
+void DeviceResidentWindowedNamedBatchSession::recycleBatch(
     ExampleType exampleType,
     Batch &&batch) {
     if (cancelled.load(std::memory_order_acquire)) {

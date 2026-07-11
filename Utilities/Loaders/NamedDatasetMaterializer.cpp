@@ -63,15 +63,21 @@ NamedDatasetMaterializationSupport checkNamedDatasetSnapshotMaterializationSuppo
             return NamedDatasetMaterializationSupport{false, "zero_sized_tensor"};
         }
     }
+    for (const DatasetLayout::WindowedTensorSourceSpec &source : description.layout.windowedTensorSources()) {
+        if (source.stepNumBytes() == 0) {
+            return NamedDatasetMaterializationSupport{false, "zero_sized_window_source"};
+        }
+        if (!source.sourceFilename.has_value() || source.sourceFilename->empty()) {
+            return NamedDatasetMaterializationSupport{false, "missing_window_source_storage"};
+        }
+        if (source.sourceSequences.empty()) {
+            return NamedDatasetMaterializationSupport{false, "missing_window_source_sequences"};
+        }
+    }
     for (const DatasetLayout::WindowedTensorSpec &spec : description.layout.windowedTensors()) {
-        if (spec.outputNumBytes() == 0 || spec.referenceNumBytes == 0 || spec.sourceStepNumBytes() == 0) {
+        if (spec.outputNumBytes() == 0 || spec.sourceStepNumBytes() == 0 ||
+            (spec.referenceMode == DatasetLayout::WindowedTensorReferenceMode::INDEXED && spec.referenceNumBytes == 0)) {
             return NamedDatasetMaterializationSupport{false, "zero_sized_windowed_tensor"};
-        }
-        if (!spec.sourceFilename.has_value() || spec.sourceFilename->empty()) {
-            return NamedDatasetMaterializationSupport{false, "missing_windowed_tensor_source"};
-        }
-        if (spec.sourceSequences.empty()) {
-            return NamedDatasetMaterializationSupport{false, "missing_windowed_tensor_sequences"};
         }
     }
     return NamedDatasetMaterializationSupport{true, ""};

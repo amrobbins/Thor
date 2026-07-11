@@ -24,10 +24,10 @@ enum class TrainingRunsFailurePolicy { CONTINUE, CANCEL_SIBLINGS };
 
 
 struct TrainingRunsEvaluationOptions {
-    // Ordinary held-out test loader for post-fit evaluation. For grouped runs,
-    // callers are expected to supply the same logical test set they would attach
-    // to every member; grouped evaluation treats that test population as shared.
-    std::shared_ptr<Loader> testLoader = nullptr;
+    // Immutable held-out test recipe for post-fit evaluation. Every evaluation
+    // opens a fresh BatchSession, so grouped and per-member passes cannot share
+    // mutable cursor or buffer state.
+    std::shared_ptr<const TrainingData> testData = nullptr;
 
     // Diagnostic post-fit pass over each member's validation population. This
     // is reported as the grouped training-population loss, not as held-out test
@@ -100,7 +100,7 @@ class TrainingRuns {
                           std::map<std::string, size_t> minSuccessfulModels = {});
 
     [[nodiscard]] TrainingRunsResult fit(uint32_t epochs);
-    [[nodiscard]] TrainingRunsResult fit(uint32_t epochs, std::shared_ptr<Loader> testLoader);
+    [[nodiscard]] TrainingRunsResult fit(uint32_t epochs, std::shared_ptr<const TrainingData> testData);
     [[nodiscard]] TrainingRunsResult fit(const TrainerFitOptions& options);
     [[nodiscard]] TrainingRunsResult fit(const TrainerFitOptions& options, const TrainingRunsEvaluationOptions& evaluationOptions);
     [[nodiscard]] TrainingRunsResult fit(const TrainerFitOptions& options, const TrainingRunsSessionOptions& sessionOptions);
@@ -138,11 +138,11 @@ class TrainingRuns {
     [[nodiscard]] bool hasEnsembleGroups() const;
     void validateEnsembleArtifactsForFit(const TrainingRunsEvaluationOptions& evaluationOptions) const;
     void validateFitOptions(const TrainerFitOptions& options) const;
-    void validateTestLoader(Loader& loader) const;
+    void validateTestData(const TrainingData& data) const;
     void evaluateEnsembles(std::vector<TrainingRunResult>& results, std::map<std::string, TrainingEnsembleResult>& ensembleResultsByGroup) const;
-    void evaluateEnsemblesOnTestLoader(std::vector<TrainingRunResult>& results,
-                                       std::map<std::string, TrainingEnsembleResult>& ensembleResultsByGroup,
-                                       std::shared_ptr<Loader> testLoader) const;
+    void evaluateEnsemblesOnTestData(std::vector<TrainingRunResult>& results,
+                                     std::map<std::string, TrainingEnsembleResult>& ensembleResultsByGroup,
+                                     std::shared_ptr<const TrainingData> testData) const;
     [[nodiscard]] std::vector<TrainingEnsembleResult> buildEnsembleResults(const std::vector<TrainingRunResult>& results) const;
     [[nodiscard]] std::map<std::string, TrainingEnsembleResult> buildEnsembleResultsByGroup(const std::vector<TrainingRunResult>& results) const;
 

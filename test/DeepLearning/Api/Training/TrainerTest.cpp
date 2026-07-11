@@ -11,7 +11,6 @@
 #include "DeepLearning/Api/Training/TrainingPhase.h"
 #include "DeepLearning/Api/Training/TrainingStep.h"
 
-#include "DeepLearning/Api/Loaders/Loader.h"
 #include "DeepLearning/Api/Network/Network.h"
 
 #include "gtest/gtest.h"
@@ -24,6 +23,7 @@
 #include <set>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -32,36 +32,93 @@ using namespace Thor;
 
 namespace {
 
-class FakeLoader : public Loader {
+class FakeBatchSession final : public BatchSession {
    public:
-    FakeLoader() { batchSize = 4; }
-
-    Batch getBatch(ExampleType exampleType, uint64_t& batchNum) override {
-        (void)exampleType;
-        (void)batchNum;
-        return {};
-    }
-
-    void returnBatchBuffers(ExampleType exampleType, Batch&& batch) override {
-        (void)exampleType;
-        (void)batch;
-    }
+    FakeBatchSession() { batchSize = 1; }
 
     uint64_t getNumBatchesPerEpoch(ExampleType exampleType) override {
-        (void)exampleType;
-        return 0;
+        return exampleType == ExampleType::TRAIN ? 1 : 0;
     }
-
     uint64_t getNumExamples(ExampleType exampleType) override {
-        (void)exampleType;
-        return 0;
+        return exampleType == ExampleType::TRAIN ? 1 : 0;
     }
-
     uint64_t getNextBatchNum(ExampleType exampleType) override {
         (void)exampleType;
         return 0;
     }
+
+   private:
+    Batch acquireBatch(ExampleType exampleType, uint64_t& batchNum) override {
+        (void)exampleType;
+        (void)batchNum;
+        return {};
+    }
+    void recycleBatch(ExampleType exampleType, Batch&& batch) override {
+        (void)exampleType;
+        (void)batch;
+    }
 };
+
+class FakeDataset final : public NamedDataset {
+   public:
+    FakeDataset()
+        : id(DatasetId::fromStableMaterial("TrainerTest.FakeDataset")),
+          schema(std::vector<DatasetField>{DatasetField{.id = 1,
+                                                        .name = "features",
+                                                        .dataType = ThorImplementation::DataType::FP32,
+                                                        .dimensions = {1},
+                                                        .kind = DatasetFieldKind::DENSE}}) {}
+
+    const DatasetId& getId() const override { return id; }
+    uint64_t getNumExamples() const override { return 1; }
+    const DatasetSchema& getSchema() const override { return schema; }
+    const DatasetField& getField(std::string_view name) const override { return schema.getField(name); }
+
+   protected:
+    std::shared_ptr<BatchSession> openBatchSession(const DatasetSplitManifest& splits,
+                                                   const BatchPolicy& batching,
+                                                   const DatasetAccessPolicy& accessPolicy,
+                                                   uint64_t maxInFlightBatches,
+                                                   const std::set<DatasetFieldId>& requiredFieldIds) const override {
+        (void)splits;
+        (void)batching;
+        (void)accessPolicy;
+        (void)maxInFlightBatches;
+        (void)requiredFieldIds;
+        return std::make_shared<FakeBatchSession>();
+    }
+
+   private:
+    DatasetId id;
+    DatasetSchema schema;
+};
+
+std::shared_ptr<TrainingData> makeFakeTrainingData() {
+    auto dataset = std::make_shared<FakeDataset>();
+    return std::make_shared<TrainingData>(dataset,
+                                          DatasetSplitManifest(*dataset, {0}, {}),
+                                          BatchPolicy(1, false),
+                                          DatasetAccessPolicy{.deviceStorage = DeviceDatasetStorage::OFF},
+                                          "fake_dataset");
+}
+
+std::shared_ptr<Network> makeFakePhaseNetwork(const std::string& networkName,
+                                              const std::string& outputName) {
+    auto network = std::make_shared<Network>(networkName);
+    NetworkInput features = NetworkInput::Builder()
+                                .network(*network)
+                                .name("features")
+                                .dimensions({1})
+                                .dataType(ThorImplementation::DataType::FP32)
+                                .build();
+    NetworkOutput::Builder()
+        .network(*network)
+        .name(outputName)
+        .inputTensor(features.getFeatureOutput().value())
+        .dataType(ThorImplementation::DataType::FP32)
+        .build();
+    return network;
+}
 
 class CapturingExecutor : public TrainingExecutor {
    public:
@@ -76,6 +133,12 @@ class CapturingExecutor : public TrainingExecutor {
         lastFirstStepEnabled = request.trainingProgram != nullptr && request.trainingProgram->getNumSteps() > 0
                                    ? request.trainingProgram->getStep(0).isEnabled()
                                    : false;
+        lastFirstPhaseEnabled = false;
+        if (request.trainingProgram != nullptr && request.trainingProgram->getNumSteps() > 0) {
+            const std::vector<std::shared_ptr<TrainingPhase>>& phases =
+                request.trainingProgram->getStep(0).getPhases();
+            lastFirstPhaseEnabled = !phases.empty() && phases.front() != nullptr && phases.front()->isEnabled();
+        }
         lastCancellationRequested = request.cancellationToken.isCancellationRequested();
         lastSaveModelDirectory = request.saveModelDirectory;
         lastSaveModelOverwrite = request.saveModelOverwrite;
@@ -104,6 +167,7 @@ class CapturingExecutor : public TrainingExecutor {
     std::vector<TrainingInputBinding> lastDatasetInputBindings{};
     uint64_t lastTrainingProgramStepCount = 0;
     bool lastFirstStepEnabled = false;
+    bool lastFirstPhaseEnabled = false;
     bool lastCancellationRequested = true;
     std::optional<std::string> lastSaveModelDirectory{};
     bool lastSaveModelOverwrite = false;
@@ -123,11 +187,11 @@ class CapturingExecutor : public TrainingExecutor {
 class SessionCapturingExecutor : public CapturingExecutor {
    public:
     void fit(const TrainingRunRequest& request, TrainingObserver& observer) override {
-        loaders.push_back(request.loader);
+        sessions.push_back(request.batchSession);
         CapturingExecutor::fit(request, observer);
     }
 
-    std::vector<std::shared_ptr<Loader>> loaders{};
+    std::vector<std::shared_ptr<BatchSession>> sessions{};
 };
 
 
@@ -229,25 +293,38 @@ TEST(Trainer, TrainingDataOpensFreshSessionForEveryFit) {
     trainer.fit(1);
     trainer.fit(1);
 
-    ASSERT_EQ(executor->loaders.size(), 2u);
-    EXPECT_NE(executor->loaders[0].get(), executor->loaders[1].get());
-    EXPECT_NE(std::dynamic_pointer_cast<BatchSession>(executor->loaders[0]), nullptr);
-    EXPECT_NE(std::dynamic_pointer_cast<BatchSession>(executor->loaders[1]), nullptr);
-    executor->loaders.clear();
+    ASSERT_EQ(executor->sessions.size(), 2u);
+    EXPECT_NE(executor->sessions[0].get(), executor->sessions[1].get());
+    EXPECT_NE(executor->sessions[0], nullptr);
+    EXPECT_NE(executor->sessions[1], nullptr);
+    executor->sessions.clear();
     std::filesystem::remove_all(path);
 }
 
-TEST(Trainer, BuilderRejectsAmbiguousDataOwnership) {
-    const std::filesystem::path path = uniqueTempPath("thor-trainer-ambiguous-data");
-    std::shared_ptr<TrainingData> data = makeTrainingData(path);
-    auto network = std::make_shared<Network>("trainer-ambiguous-data");
-    auto loader = std::make_shared<FakeLoader>();
-
-    EXPECT_THROW((Trainer::Builder().network(network).data(data).loader(loader).build()), std::runtime_error);
+TEST(Trainer, BuilderRequiresTrainingData) {
+    auto network = std::make_shared<Network>("trainer-requires-data");
     EXPECT_THROW((Trainer::Builder().network(network).build()), std::runtime_error);
-    std::filesystem::remove_all(path);
 }
 
+TEST(Trainer, FitRequiresNonEmptyTrainPartition) {
+    auto dataset = std::make_shared<FakeDataset>();
+    auto data = std::make_shared<TrainingData>(
+        dataset,
+        DatasetSplitManifest(*dataset, {}, {0}),
+        BatchPolicy(1, false),
+        DatasetAccessPolicy{.deviceStorage = DeviceDatasetStorage::OFF},
+        "evaluation_only_data");
+    auto executor = std::make_shared<CapturingExecutor>();
+    Trainer trainer = Trainer::Builder()
+                          .network(std::make_shared<Network>("trainer-empty-train"))
+                          .data(data)
+                          .executor(executor)
+                          .observer(std::make_shared<NullTrainingObserver>())
+                          .build();
+
+    EXPECT_THROW((void)trainer.fit(1), std::runtime_error);
+    EXPECT_EQ(executor->calls, 0u);
+}
 
 TEST(Trainer, CompilesStrictDatasetInputBindingsBeforeOpeningSession) {
     const std::filesystem::path path = uniqueTempPath("thor-trainer-dataset-bindings");
@@ -280,9 +357,8 @@ TEST(Trainer, CompilesStrictDatasetInputBindingsBeforeOpeningSession) {
     ASSERT_EQ(executor->lastDatasetInputBindings.size(), 1u);
     EXPECT_EQ(executor->lastDatasetInputBindings.front().getNetworkInputName(), "model_features");
     EXPECT_EQ(executor->lastDatasetInputBindings.front().getBatchInputName(), "features");
-    ASSERT_EQ(executor->loaders.size(), 1u);
-    std::shared_ptr<BatchSession> session =
-        std::dynamic_pointer_cast<BatchSession>(executor->loaders.front());
+    ASSERT_EQ(executor->sessions.size(), 1u);
+    std::shared_ptr<BatchSession> session = executor->sessions.front();
     ASSERT_NE(session, nullptr);
     EXPECT_EQ(session->getRequiredDatasetFieldIds(),
               trainer.getRequiredDatasetFieldIds());
@@ -327,18 +403,11 @@ TEST(Trainer, ExactNameAutobindingIsDefaultAndValidationIsEarly) {
                       .build()),
                  std::runtime_error);
 
-    auto loader = std::make_shared<FakeLoader>();
-    EXPECT_THROW((Trainer::Builder()
-                      .network(exactNetwork)
-                      .loader(loader)
-                      .inputBindings(DatasetInputBindings{})
-                      .build()),
-                 std::runtime_error);
     std::filesystem::remove_all(path);
 }
 
 TEST(Trainer, BuilderRetainsSharedNetworkLifetime) {
-    auto loader = std::make_shared<FakeLoader>();
+    auto data = makeFakeTrainingData();
     auto executor = std::make_shared<CapturingExecutor>();
     auto observer = std::make_shared<NullTrainingObserver>();
     std::weak_ptr<Network> weakNetwork;
@@ -351,7 +420,7 @@ TEST(Trainer, BuilderRetainsSharedNetworkLifetime) {
         expectedNetwork = network.get();
         trainer = Trainer::Builder()
                       .network(network)
-                      .loader(loader)
+                      .data(data)
                       .executor(executor)
                       .observer(observer)
                       .build();
@@ -367,13 +436,13 @@ TEST(Trainer, BuilderRetainsSharedNetworkLifetime) {
 
 TEST(Trainer, FitPassesEpochsAsRunParameter) {
     auto network = std::make_shared<Network>("trainer-test");
-    auto loader = std::make_shared<FakeLoader>();
+    auto data = makeFakeTrainingData();
     auto executor = std::make_shared<CapturingExecutor>();
     auto observer = std::make_shared<NullTrainingObserver>();
 
     Trainer trainer = Trainer::Builder()
                           .network(network)
-                          .loader(loader)
+                          .data(data)
                           .executor(executor)
                           .observer(observer)
                           .maxInFlightBatches(64)
@@ -391,13 +460,13 @@ TEST(Trainer, FitPassesEpochsAsRunParameter) {
 
 TEST(Trainer, FitPassesBestModelCandidateOptionsAsRunParameters) {
     auto network = std::make_shared<Network>("trainer-best-candidate-options");
-    auto loader = std::make_shared<FakeLoader>();
+    auto data = makeFakeTrainingData();
     auto executor = std::make_shared<CapturingExecutor>();
     auto observer = std::make_shared<NullTrainingObserver>();
 
     Trainer trainer = Trainer::Builder()
                           .network(network)
-                          .loader(loader)
+                          .data(data)
                           .executor(executor)
                           .observer(observer)
                           .saveModelDirectory("/tmp/thor-best-candidate-options")
@@ -421,13 +490,13 @@ TEST(Trainer, FitPassesBestModelCandidateOptionsAsRunParameters) {
 
 TEST(Trainer, FitPassesMaxTrainingBatchesPerEpochAsRunParameter) {
     auto network = std::make_shared<Network>("trainer-max-training-batches-per-epoch");
-    auto loader = std::make_shared<FakeLoader>();
+    auto data = makeFakeTrainingData();
     auto executor = std::make_shared<CapturingExecutor>();
     auto observer = std::make_shared<NullTrainingObserver>();
 
     Trainer trainer = Trainer::Builder()
                           .network(network)
-                          .loader(loader)
+                          .data(data)
                           .executor(executor)
                           .observer(observer)
                           .build();
@@ -490,34 +559,15 @@ TEST(Trainer, TrainingDataPassesStrictDeviceAccessPolicyToRun) {
     std::filesystem::remove_all(path);
 }
 
-TEST(Trainer, LegacyLoaderDoesNotOwnOrRequestDeviceDatasetStorage) {
-    auto network = std::make_shared<Network>("trainer-legacy-loader-device-storage");
-    auto loader = std::make_shared<FakeLoader>();
-    auto executor = std::make_shared<CapturingExecutor>();
-    auto observer = std::make_shared<NullTrainingObserver>();
-
-    Trainer trainer = Trainer::Builder()
-                          .network(network)
-                          .loader(loader)
-                          .executor(executor)
-                          .observer(observer)
-                          .build();
-    trainer.fit(1);
-
-    EXPECT_EQ(executor->lastTrainingData, nullptr);
-    EXPECT_EQ(executor->lastDeviceDatasetStorageReport.requested,
-              DeviceDatasetStorage::OFF);
-}
-
 TEST(Trainer, RejectsZeroMaxTrainingBatchesPerEpoch) {
     auto network = std::make_shared<Network>("trainer-zero-max-training-batches-per-epoch");
-    auto loader = std::make_shared<FakeLoader>();
+    auto data = makeFakeTrainingData();
     auto executor = std::make_shared<CapturingExecutor>();
     auto observer = std::make_shared<NullTrainingObserver>();
 
     Trainer trainer = Trainer::Builder()
                           .network(network)
-                          .loader(loader)
+                          .data(data)
                           .executor(executor)
                           .observer(observer)
                           .build();
@@ -531,13 +581,13 @@ TEST(Trainer, RejectsZeroMaxTrainingBatchesPerEpoch) {
 
 TEST(Trainer, FitPassesCumulativeCompletedEpochsAcrossFitCalls) {
     auto network = std::make_shared<Network>("trainer-cumulative-epochs");
-    auto loader = std::make_shared<FakeLoader>();
+    auto data = makeFakeTrainingData();
     auto executor = std::make_shared<CapturingExecutor>();
     auto observer = std::make_shared<NullTrainingObserver>();
 
     Trainer trainer = Trainer::Builder()
                           .network(network)
-                          .loader(loader)
+                          .data(data)
                           .executor(executor)
                           .observer(observer)
                           .build();
@@ -558,7 +608,7 @@ TEST(Trainer, FitPassesCumulativeCompletedEpochsAcrossFitCalls) {
 
 TEST(Trainer, RejectsExistingSaveModelDirectoryBeforeFitWhenOverwriteIsFalse) {
     auto network = std::make_shared<Network>("trainer-existing-save-dir");
-    auto loader = std::make_shared<FakeLoader>();
+    auto data = makeFakeTrainingData();
     auto executor = std::make_shared<CapturingExecutor>();
     auto observer = std::make_shared<NullTrainingObserver>();
     const std::filesystem::path saveDir = uniqueTempPath("thor-trainer-existing-save-dir");
@@ -566,7 +616,7 @@ TEST(Trainer, RejectsExistingSaveModelDirectoryBeforeFitWhenOverwriteIsFalse) {
 
     Trainer trainer = Trainer::Builder()
                           .network(network)
-                          .loader(loader)
+                          .data(data)
                           .executor(executor)
                           .observer(observer)
                           .saveModelDirectory(saveDir.string())
@@ -580,7 +630,7 @@ TEST(Trainer, RejectsExistingSaveModelDirectoryBeforeFitWhenOverwriteIsFalse) {
 
 TEST(Trainer, FitPassesCustomModelSelectionScoreAsRunParameter) {
     auto network = std::make_shared<Network>("trainer-custom-model-selection-score");
-    auto loader = std::make_shared<FakeLoader>();
+    auto data = makeFakeTrainingData();
     auto executor = std::make_shared<CapturingExecutor>();
     auto observer = std::make_shared<NullTrainingObserver>();
 
@@ -590,7 +640,7 @@ TEST(Trainer, FitPassesCustomModelSelectionScoreAsRunParameter) {
 
     Trainer trainer = Trainer::Builder()
                           .network(network)
-                          .loader(loader)
+                          .data(data)
                           .executor(executor)
                           .observer(observer)
                           .modelSelectionScore(score)
@@ -643,13 +693,13 @@ TEST(Trainer, DefaultModelSelectionScoreUsesValidationLossWhenPresentOtherwiseTr
 
 TEST(Trainer, FitDisablesBestModelCandidateChecksByDefault) {
     auto network = std::make_shared<Network>("trainer-best-candidate-default-disabled");
-    auto loader = std::make_shared<FakeLoader>();
+    auto data = makeFakeTrainingData();
     auto executor = std::make_shared<CapturingExecutor>();
     auto observer = std::make_shared<NullTrainingObserver>();
 
     Trainer trainer = Trainer::Builder()
                           .network(network)
-                          .loader(loader)
+                          .data(data)
                           .executor(executor)
                           .observer(observer)
                           .build();
@@ -663,7 +713,7 @@ TEST(Trainer, FitDisablesBestModelCandidateChecksByDefault) {
 
 TEST(Trainer, FitPassesEarlyCompletionPoliciesAsRunParameters) {
     auto network = std::make_shared<Network>("trainer-early-completion-options");
-    auto loader = std::make_shared<FakeLoader>();
+    auto data = makeFakeTrainingData();
     auto executor = std::make_shared<CapturingExecutor>();
     auto observer = std::make_shared<NullTrainingObserver>();
 
@@ -673,7 +723,7 @@ TEST(Trainer, FitPassesEarlyCompletionPoliciesAsRunParameters) {
 
     Trainer trainer = Trainer::Builder()
                           .network(network)
-                          .loader(loader)
+                          .data(data)
                           .executor(executor)
                           .observer(observer)
                           .build();
@@ -691,12 +741,12 @@ TEST(Trainer, FitPassesEarlyCompletionPoliciesAsRunParameters) {
 
 TEST(Trainer, RejectsEarlyCompletionPolicyWithoutCondition) {
     auto network = std::make_shared<Network>("trainer-early-completion-invalid");
-    auto loader = std::make_shared<FakeLoader>();
+    auto data = makeFakeTrainingData();
     auto executor = std::make_shared<CapturingExecutor>();
 
     Trainer trainer = Trainer::Builder()
                           .network(network)
-                          .loader(loader)
+                          .data(data)
                           .executor(executor)
                           .build();
 
@@ -708,8 +758,8 @@ TEST(Trainer, RejectsEarlyCompletionPolicyWithoutCondition) {
 }
 
 TEST(Trainer, FitPassesTrainingProgramAsRunParameter) {
-    auto network = std::make_shared<Network>("trainer-test");
-    auto loader = std::make_shared<FakeLoader>();
+    auto network = makeFakePhaseNetwork("trainer-test", "phase_output");
+    auto data = makeFakeTrainingData();
     auto executor = std::make_shared<CapturingExecutor>();
     auto observer = std::make_shared<NullTrainingObserver>();
 
@@ -718,7 +768,7 @@ TEST(Trainer, FitPassesTrainingProgramAsRunParameter) {
     auto program = std::make_shared<TrainingProgram>(std::vector<std::shared_ptr<TrainingStep>>{step});
 
     Trainer trainer = Trainer::Builder()
-                          .loader(loader)
+                          .data(data)
                           .trainingProgram(program)
                           .executor(executor)
                           .observer(observer)
@@ -835,24 +885,30 @@ TEST(Trainer, RejectsStandaloneNetworkAlongsidePhaseBackedProgram) {
 
     EXPECT_THROW((Trainer::Builder()
                       .network(network)
-                      .loader(std::make_shared<FakeLoader>())
+                      .data(makeFakeTrainingData())
                       .trainingProgram(program)
                       .build()),
                  std::runtime_error);
 }
 
 TEST(Trainer, FitSeesTrainingProgramMutationsBetweenCalls) {
-    auto network = std::make_shared<Network>("trainer-test");
-    auto loader = std::make_shared<FakeLoader>();
+    auto firstNetwork = makeFakePhaseNetwork("trainer-test-first", "first_output");
+    auto secondNetwork = makeFakePhaseNetwork("trainer-test-second", "second_output");
+    auto data = makeFakeTrainingData();
     auto executor = std::make_shared<CapturingExecutor>();
     auto observer = std::make_shared<NullTrainingObserver>();
 
-    auto phase = std::make_shared<TrainingPhase>("phase", network);
-    auto step = std::make_shared<TrainingStep>("step", std::vector<std::shared_ptr<TrainingPhase>>{phase}, nullptr, std::vector<ParameterReference>{});
+    auto firstPhase = std::make_shared<TrainingPhase>("first", firstNetwork);
+    auto secondPhase = std::make_shared<TrainingPhase>("second", secondNetwork);
+    auto step = std::make_shared<TrainingStep>(
+        "step",
+        std::vector<std::shared_ptr<TrainingPhase>>{firstPhase, secondPhase},
+        nullptr,
+        std::vector<ParameterReference>{});
     auto program = std::make_shared<TrainingProgram>(std::vector<std::shared_ptr<TrainingStep>>{step});
 
     Trainer trainer = Trainer::Builder()
-                          .loader(loader)
+                          .data(data)
                           .trainingProgram(program)
                           .executor(executor)
                           .observer(observer)
@@ -860,20 +916,20 @@ TEST(Trainer, FitSeesTrainingProgramMutationsBetweenCalls) {
 
     trainer.fit(1);
     EXPECT_EQ(executor->calls, 1u);
-    EXPECT_TRUE(executor->lastFirstStepEnabled);
+    EXPECT_TRUE(executor->lastFirstPhaseEnabled);
 
-    step->disable();
+    firstPhase->disable();
     trainer.fit(1);
     EXPECT_EQ(executor->calls, 2u);
-    EXPECT_FALSE(executor->lastFirstStepEnabled);
+    EXPECT_FALSE(executor->lastFirstPhaseEnabled);
 }
 
 TEST(Trainer, RejectsZeroEpochsAtFitTime) {
     auto network = std::make_shared<Network>("trainer-test");
-    auto loader = std::make_shared<FakeLoader>();
+    auto data = makeFakeTrainingData();
     auto executor = std::make_shared<CapturingExecutor>();
 
-    Trainer trainer = Trainer::Builder().network(network).loader(loader).executor(executor).build();
+    Trainer trainer = Trainer::Builder().network(network).data(data).executor(executor).build();
 
     EXPECT_THROW(trainer.fit(0), std::runtime_error);
     EXPECT_EQ(executor->calls, 0u);
@@ -889,11 +945,11 @@ TEST(DebugSynchronousTrainingExecutor, IsPluggableTrainingExecutorBackend) {
 
 TEST(Trainer, BuilderProvidesDebugSynchronousExecutorShortcut) {
     auto network = std::make_shared<Network>("trainer-test");
-    auto loader = std::make_shared<FakeLoader>();
+    auto data = makeFakeTrainingData();
 
     Trainer trainer = Trainer::Builder()
                           .network(network)
-                          .loader(loader)
+                          .data(data)
                           .debugSynchronousExecutor()
                           .build();
 

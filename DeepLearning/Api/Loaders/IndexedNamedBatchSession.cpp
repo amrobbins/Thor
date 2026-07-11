@@ -53,13 +53,10 @@ IndexedNamedBatchSession::IndexedNamedBatchSession(std::shared_ptr<const Thor::F
     this->batchSize = batching.getBatchSize();
     numDatasetExamples = this->dataset->getNumExamples();
 
-    if (splitManifest.getTrain().empty()) {
-        throw std::runtime_error("IndexedNamedBatchSession train partition must contain at least one row index.");
-    }
 
-    trainAssembler = createAssembler(splitManifest.getTrain().getSharedIndices(), "train", randomizeTrain, seed);
-    validateAssembler = createAssembler(splitManifest.getValidate().getSharedIndices(), "validate", false, std::nullopt);
-    testAssembler = createAssembler(splitManifest.getTest().getSharedIndices(), "test", false, std::nullopt);
+    trainAssembler = createAssembler(splitManifest.getSharedTrain(), "train", randomizeTrain, seed);
+    validateAssembler = createAssembler(splitManifest.getSharedValidate(), "validate", false, std::nullopt);
+    testAssembler = createAssembler(splitManifest.getSharedTest(), "test", false, std::nullopt);
 }
 
 IndexedNamedBatchSession::~IndexedNamedBatchSession() = default;
@@ -71,14 +68,20 @@ void IndexedNamedBatchSession::validateIndex(uint64_t index, const char *splitNa
     }
 }
 
-void IndexedNamedBatchSession::validateIndices(const std::vector<uint64_t> &indices, const char *splitName) const {
-    for (uint64_t index : indices) {
-        validateIndex(index, splitName);
+void IndexedNamedBatchSession::validateIndices(const Thor::ExampleIndexSet &indices, const char *splitName) const {
+    if (indices.isRangeBacked()) {
+        for (const Thor::ExampleIndexRange &range : indices.getRanges()) {
+            validateIndex(range.last(), splitName);
+        }
+        return;
+    }
+    for (uint64_t position = 0; position < indices.size(); ++position) {
+        validateIndex(indices.at(position), splitName);
     }
 }
 
 std::unique_ptr<IndexedLocalNamedBatchAssembler> IndexedNamedBatchSession::createAssembler(
-    std::shared_ptr<const std::vector<uint64_t>> indices,
+    std::shared_ptr<const Thor::ExampleIndexSet> indices,
     const char *splitName,
     bool randomized,
     std::optional<uint64_t> splitSeed) const {
@@ -122,7 +125,7 @@ const IndexedLocalNamedBatchAssembler *IndexedNamedBatchSession::assemblerFor(Ex
     throw std::runtime_error("Unsupported ExampleType");
 }
 
-Batch IndexedNamedBatchSession::getBatch(ExampleType exampleType, uint64_t &batchNum) {
+Batch IndexedNamedBatchSession::acquireBatch(ExampleType exampleType, uint64_t &batchNum) {
     if (cancelled.load(std::memory_order_acquire)) {
         throw std::runtime_error("IndexedNamedBatchSession has been cancelled.");
     }
@@ -132,11 +135,11 @@ Batch IndexedNamedBatchSession::getBatch(ExampleType exampleType, uint64_t &batc
     }
 
     std::map<std::string, ThorImplementation::Tensor> tensors;
-    assembler->getBatch(tensors, batchNum);
+    assembler->acquireBatch(tensors, batchNum);
     return batchFromTensorMap(std::move(tensors));
 }
 
-void IndexedNamedBatchSession::returnBatchBuffers(ExampleType exampleType, Batch &&batch) {
+void IndexedNamedBatchSession::recycleBatch(ExampleType exampleType, Batch &&batch) {
     if (cancelled.load(std::memory_order_acquire)) {
         return;
     }
@@ -192,15 +195,15 @@ bool IndexedNamedBatchSession::getRandomizeTrain() const { return randomizeTrain
 
 std::optional<uint64_t> IndexedNamedBatchSession::getRandomSeed() const { return seed; }
 
-const std::vector<uint64_t> &IndexedNamedBatchSession::getSplitIndices(ExampleType exampleType) const {
+const Thor::ExampleIndexSet &IndexedNamedBatchSession::getSplitIndices(ExampleType exampleType) const {
     if (exampleType == ExampleType::TRAIN) {
-        return splitManifest.getTrain().getIndices();
+        return splitManifest.getTrain();
     }
     if (exampleType == ExampleType::VALIDATE) {
-        return splitManifest.getValidate().getIndices();
+        return splitManifest.getValidate();
     }
     if (exampleType == ExampleType::TEST) {
-        return splitManifest.getTest().getIndices();
+        return splitManifest.getTest();
     }
     throw std::runtime_error("Unsupported ExampleType");
 }

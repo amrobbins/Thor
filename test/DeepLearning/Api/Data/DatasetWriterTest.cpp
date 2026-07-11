@@ -9,6 +9,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <optional>
 #include <stdexcept>
@@ -450,8 +451,25 @@ namespace {
 DatasetLayout windowedTestLayout() {
     return DatasetLayout::fromTensorShapes(
         vector<DatasetLayout::TensorShape>{DatasetLayout::TensorShape("dense", {2}, DataType::FP32)},
+        vector<DatasetLayout::WindowedTensorSourceShape>{DatasetLayout::WindowedTensorSourceShape(
+            "history_source", {1}, DataType::FP32, DataType::UINT64)},
         vector<DatasetLayout::WindowedTensorShape>{DatasetLayout::WindowedTensorShape(
-            "history", {3, 1}, DataType::FP32, DataType::UINT64, DataType::INT32, 0.0, string("history_mask"))});
+            "history", {3, 1}, "history_source", DataType::INT32, 0.0, string("history_mask"))});
+}
+
+DatasetLayout affineWindowedTestLayout() {
+    return DatasetLayout::fromTensorShapes(
+        {},
+        vector<DatasetLayout::WindowedTensorSourceShape>{DatasetLayout::WindowedTensorSourceShape(
+            "history_source", {1}, DataType::FP32, DataType::UINT64)},
+        vector<DatasetLayout::WindowedTensorShape>{DatasetLayout::WindowedTensorShape(
+            "history",
+            {3, 1},
+            "history_source",
+            DataType::INT64,
+            0.0,
+            string("history_mask"),
+            DatasetLayout::WindowedTensorReferenceMode::AFFINE)});
 }
 
 }  // namespace
@@ -477,14 +495,14 @@ TEST(DatasetWriterTest, WritesWindowedTensorSourceAndReferencesIntoManifestAndRe
                                                                                     .count = 2}}};
 
     DatasetWriter writer(datasetPath, layout, 8);
-    writer.writeWindowedTensorSource("history",
+    writer.writeWindowSource("history_source",
                                      DatasetWriter::WindowedTensorSourceView{.dataType = DataType::FP32,
                                                                                               .key = &key1,
                                                                                               .startIndex = 10,
                                                                                               .dimensions = {4, 1},
                                                                                               .data = source1.data(),
                                                                                               .numBytes = source1.size() * sizeof(float)});
-    writer.writeWindowedTensorSource("history",
+    writer.writeWindowSource("history_source",
                                      DatasetWriter::WindowedTensorSourceView{.dataType = DataType::FP32,
                                                                                               .key = &key2,
                                                                                               .startIndex = 20,
@@ -498,17 +516,17 @@ TEST(DatasetWriterTest, WritesWindowedTensorSourceAndReferencesIntoManifestAndRe
     ASSERT_TRUE(manifest.contains("windowed_tensors"));
     const nlohmann::json &history = manifest.at("windowed_tensors").at("history");
     EXPECT_EQ(history.at("shape").get<vector<uint64_t>>(), (vector<uint64_t>{3, 1}));
-    EXPECT_EQ(history.at("key_data_type").get<string>(), "uint64");
+    EXPECT_EQ(history.at("source").get<string>(), "history_source");
     EXPECT_EQ(history.at("index_data_type").get<string>(), "int32");
     EXPECT_EQ(history.at("reference_offset_bytes").get<uint64_t>(), layout.windowedTensor("history").referenceOffsetBytes);
-    ASSERT_TRUE(history.contains("source_storage"));
-    EXPECT_EQ(history.at("source_storage").at("num_bytes").get<uint64_t>(), (source1.size() + source2.size()) * sizeof(float));
-    ASSERT_EQ(history.at("source_storage").at("sequences").size(), 2);
-    EXPECT_EQ(history.at("source_storage").at("sequences").at(0).at("start_index").get<int64_t>(), 10);
-    EXPECT_EQ(history.at("source_storage").at("sequences").at(0).at("num_steps").get<uint64_t>(), 4);
-    EXPECT_EQ(history.at("source_storage").at("sequences").at(1).at("offset_bytes").get<uint64_t>(), source1.size() * sizeof(float));
+    const nlohmann::json &sourceStorage = manifest.at("window_sources").at("history_source").at("storage");
+    EXPECT_EQ(sourceStorage.at("num_bytes").get<uint64_t>(), (source1.size() + source2.size()) * sizeof(float));
+    ASSERT_EQ(sourceStorage.at("sequences").size(), 2);
+    EXPECT_EQ(sourceStorage.at("sequences").at(0).at("start_index").get<int64_t>(), 10);
+    EXPECT_EQ(sourceStorage.at("sequences").at(0).at("num_steps").get<uint64_t>(), 4);
+    EXPECT_EQ(sourceStorage.at("sequences").at(1).at("offset_bytes").get<uint64_t>(), source1.size() * sizeof(float));
 
-    const std::filesystem::path sourcePath = datasetPath / history.at("source_storage").at("file").get<string>();
+    const std::filesystem::path sourcePath = datasetPath / sourceStorage.at("file").get<string>();
     ASSERT_TRUE(std::filesystem::exists(sourcePath));
     std::ifstream sourceIn(sourcePath, std::ios::binary);
     vector<float> sourceValues(source1.size() + source2.size());
@@ -532,7 +550,7 @@ TEST(DatasetWriterTest, WritesWindowedTensorSourceAndReferencesIntoManifestAndRe
 
     DatasetLayout parsedLayout = DatasetLayout::readManifest(datasetPath / DatasetWriter::MANIFEST_FILENAME);
     layout.validateRequestedLayoutExact(parsedLayout);
-    ASSERT_EQ(parsedLayout.windowedTensor("history").sourceSequences.size(), 2);
+    ASSERT_EQ(parsedLayout.windowedTensorSource("history_source").sourceSequences.size(), 2);
 
     std::filesystem::remove_all(datasetPath);
 }
@@ -562,8 +580,91 @@ TEST(DatasetWriterTest, RejectsDuplicateWindowedTensorSourceKey) {
                                                                  .dimensions = {3, 1},
                                                                  .data = source.data(),
                                                                  .numBytes = source.size() * sizeof(float)};
-    writer.writeWindowedTensorSource("history", view);
-    EXPECT_THROW(writer.writeWindowedTensorSource("history", view), std::runtime_error);
+    writer.writeWindowSource("history_source", view);
+    EXPECT_THROW(writer.writeWindowSource("history_source", view), std::runtime_error);
+    writer.close();
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(DatasetWriterTest, WritesCompactAffineReferenceSegmentsWithoutIndexedRecords) {
+    const std::filesystem::path datasetPath = makeTempDatasetPath("affine_reference_segments");
+    const DatasetLayout layout = affineWindowedTestLayout();
+    uint64_t key = 101;
+    vector<float> source{1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f};
+
+    DatasetWriter writer(datasetPath, layout, 8, 4);
+    writer.writeWindowSource("history_source",
+                             DatasetWriter::WindowedTensorSourceView{.dataType = DataType::FP32,
+                                                                     .key = &key,
+                                                                     .startIndex = 0,
+                                                                     .dimensions = {9, 1},
+                                                                     .data = source.data(),
+                                                                     .numBytes = source.size() * sizeof(float)});
+    writer.writeAffineExamples(
+        2,
+        {},
+        {{"history",
+          DatasetWriter::AffineWindowedTensorReferenceView{.keyDataType = DataType::UINT64,
+                                                            .key = &key,
+                                                            .base = 1,
+                                                            .stride = 2,
+                                                            .fieldOffset = -1}}});
+    writer.writeAffineExamples(
+        2,
+        {},
+        {{"history",
+          DatasetWriter::AffineWindowedTensorReferenceView{.keyDataType = DataType::UINT64,
+                                                            .key = &key,
+                                                            .base = 5,
+                                                            .stride = 2,
+                                                            .fieldOffset = -1}}});
+    writer.close();
+
+    const nlohmann::json manifest = readJson(datasetPath / DatasetWriter::MANIFEST_FILENAME);
+    EXPECT_EQ(manifest.at("format").get<string>(), "thor.dataset.v1");
+    EXPECT_EQ(manifest.at("record_size_bytes").get<uint64_t>(), 0);
+    EXPECT_EQ(manifest.at("num_examples").get<uint64_t>(), 4);
+    EXPECT_TRUE(manifest.at("shards").empty());
+    ASSERT_EQ(manifest.at("affine_window_reference_segments").size(), 1);
+    const nlohmann::json &segment = manifest.at("affine_window_reference_segments").at(0);
+    EXPECT_EQ(segment.at("row_start").get<uint64_t>(), 0);
+    EXPECT_EQ(segment.at("count").get<uint64_t>(), 4);
+    const nlohmann::json &reference = segment.at("references").at("history");
+    EXPECT_EQ(reference.at("base").get<int64_t>(), 1);
+    EXPECT_EQ(reference.at("stride").get<int64_t>(), 2);
+    EXPECT_EQ(reference.at("field_offset").get<int64_t>(), -1);
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(DatasetWriterTest, RejectsAffineReferenceFormulaOverflowAtEitherEndpoint) {
+    const std::filesystem::path datasetPath = makeTempDatasetPath("affine_reference_overflow");
+    uint64_t key = 101;
+    DatasetWriter writer(datasetPath, affineWindowedTestLayout(), 8);
+
+    EXPECT_THROW(
+        writer.writeAffineExamples(
+            2,
+            {},
+            {{"history",
+              DatasetWriter::AffineWindowedTensorReferenceView{.keyDataType = DataType::UINT64,
+                                                                .key = &key,
+                                                                .base = std::numeric_limits<int64_t>::min(),
+                                                                .stride = 1,
+                                                                .fieldOffset = -1}}}),
+        std::runtime_error);
+    EXPECT_THROW(
+        writer.writeAffineExamples(
+            2,
+            {},
+            {{"history",
+              DatasetWriter::AffineWindowedTensorReferenceView{.keyDataType = DataType::UINT64,
+                                                                .key = &key,
+                                                                .base = std::numeric_limits<int64_t>::max(),
+                                                                .stride = 1,
+                                                                .fieldOffset = 0}}}),
+        std::runtime_error);
+
     writer.close();
     std::filesystem::remove_all(datasetPath);
 }

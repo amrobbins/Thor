@@ -218,7 +218,7 @@ class NetworkInput : public Layer {
 
     // Only called for input endpoints
     // When the source tensor that will be sent to the input is loaded via a stream,
-    // then this version of forward is used which causes the loader stream to wait till copy is finished.
+    // then this version of forward is used which causes the batch-source stream to wait till copy is finished.
     virtual void forward(std::optional<Tensor> featureInput,
                          bool validationPass,
                          Event copyToSourceTensorFinished,
@@ -251,7 +251,7 @@ class NetworkInput : public Layer {
         if (contentDimensions.has_value() && !isPassThrough()) {
             THOR_THROW_IF_FALSE(featureOutput.has_value());
             if (isDeviceLoad()) {
-                // Device-resident loader slots already keep each in-flight
+                // Device-resident session slots already keep each in-flight
                 // batch alive until processing completion. Copy directly from
                 // that same-GPU source into the statically connected feature
                 // tensor; a second NetworkInput-owned staging ring would only

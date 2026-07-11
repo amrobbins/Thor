@@ -97,7 +97,7 @@ void ExecutableTrainingPlan::validateNativeQueuedExecutorCompatible(
     if (step.getRepeatCount() != 1) {
         throw std::runtime_error(
             "NativeQueuedTrainingExecutor currently supports only repeat_count=1. "
-            "Repeated step execution needs a clear contract for whether each repeat consumes a fresh loader batch.");
+            "Repeated step execution needs a clear contract for whether each repeat consumes a fresh session batch.");
     }
     if (step.getGradientClearPolicy() != TrainingStep::GradientClearPolicy::CLEAR_BEFORE_STEP) {
         throw std::runtime_error(

@@ -22,11 +22,32 @@ TrainingData::TrainingData(std::shared_ptr<const NamedDataset> dataset,
         throw std::runtime_error("TrainingData dataset_name must not be empty.");
     }
     this->splits.validateAgainst(*this->dataset);
-    if (this->splits.getTrain().empty()) {
-        throw std::runtime_error("TrainingData train partition must contain at least one row index.");
-    }
 }
 
+
+void TrainingData::requireNonEmptyPartition(ExampleType exampleType, const std::string& context) const {
+    const ExampleIndexSet* partition = nullptr;
+    const char* partitionName = nullptr;
+    switch (exampleType) {
+        case ExampleType::TRAIN:
+            partition = &splits.getTrain();
+            partitionName = "train";
+            break;
+        case ExampleType::VALIDATE:
+            partition = &splits.getValidate();
+            partitionName = "validate";
+            break;
+        case ExampleType::TEST:
+            partition = &splits.getTest();
+            partitionName = "test";
+            break;
+        default:
+            throw std::runtime_error(context + " requires a concrete dataset partition.");
+    }
+    if (partition->empty()) {
+        throw std::runtime_error(context + " requires a non-empty " + partitionName + " partition.");
+    }
+}
 
 std::shared_ptr<BatchSession> TrainingData::openSession(uint64_t maxInFlightBatches) const {
     std::set<DatasetFieldId> allFields;

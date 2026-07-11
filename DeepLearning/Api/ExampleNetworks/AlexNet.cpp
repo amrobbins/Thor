@@ -161,7 +161,6 @@ Network buildAlexNet() {
 
     // All tensors are converted to FP16 at the output of a network input
     // For the ImageNet dataset, the average pixel values are subtracted from each color channel during dataset
-    // creation (in commented out code in ShardedRawDatasetCreatorTest.cpp)
     NetworkInput imagesInput =
         NetworkInput::Builder().network(alexNet).name("examples").dimensions({3, 224, 224}).dataType(DataType::FP16).build();
 

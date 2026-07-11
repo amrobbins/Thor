@@ -109,7 +109,7 @@ class PlacedNetwork {
     void extendOutputWritableEvents(uint64_t stampIndex, Event event, std::optional<uint32_t> outputSlotIndex = std::nullopt);
 
     /**
-     * Configures each physical NetworkInput from the effective loader placement
+     * Configures each physical NetworkInput from the effective batch-session placement
      * resolved through the executable plan's batch-input bindings. Same-GPU
      * inputs use direct device loading and therefore do not allocate a
      * NetworkInput staging ring. Missing/null placements select staged loading.

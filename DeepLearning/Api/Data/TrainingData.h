@@ -23,7 +23,7 @@ class TrainingData {
                  DatasetSplitManifest splits,
                  BatchPolicy batching,
                  DatasetAccessPolicy accessPolicy = {},
-                 std::string datasetName = "indexed_named_examples");
+                 std::string datasetName = "dataset");
 
     [[nodiscard]] std::shared_ptr<BatchSession> openSession(uint64_t maxInFlightBatches = 32) const;
     [[nodiscard]] std::shared_ptr<BatchSession> openSession(
@@ -35,6 +35,8 @@ class TrainingData {
     [[nodiscard]] const BatchPolicy &getBatching() const { return batching; }
     [[nodiscard]] const DatasetAccessPolicy &getAccessPolicy() const { return accessPolicy; }
     [[nodiscard]] const std::string &getDatasetName() const { return datasetName; }
+
+    void requireNonEmptyPartition(ExampleType exampleType, const std::string& context) const;
 
    private:
     std::shared_ptr<const NamedDataset> dataset;

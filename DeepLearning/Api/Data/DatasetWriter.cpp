@@ -64,6 +64,17 @@ uint64_t checkedMul(uint64_t a, uint64_t b, const char *context) {
     return a * b;
 }
 
+int64_t checkedAffineStart(int64_t base, int64_t stride, int64_t fieldOffset, uint64_t row, const std::string &name) {
+    const __int128 value = static_cast<__int128>(base) +
+                           static_cast<__int128>(row) * static_cast<__int128>(stride) +
+                           static_cast<__int128>(fieldOffset);
+    if (value < static_cast<__int128>(std::numeric_limits<int64_t>::min()) ||
+        value > static_cast<__int128>(std::numeric_limits<int64_t>::max())) {
+        throw std::runtime_error("DatasetWriter affine window reference '" + name + "' overflows int64.");
+    }
+    return static_cast<int64_t>(value);
+}
+
 std::string bytesToHex(const void *data, uint64_t numBytes) {
     if (data == nullptr) {
         throw std::runtime_error("DatasetWriter cannot hex encode a null byte pointer.");
@@ -77,13 +88,13 @@ std::string bytesToHex(const void *data, uint64_t numBytes) {
     return out.str();
 }
 
-std::filesystem::path windowedTensorSourceDirectory(const std::filesystem::path &datasetPath) {
-    return datasetPath / "windowed_tensor_sources";
+std::filesystem::path windowSourceDirectory(const std::filesystem::path &datasetPath) {
+    return datasetPath / "window_sources";
 }
 
-std::string makeWindowedTensorSourceFilename(uint64_t ordinal) {
+std::string makeWindowSourceFilename(uint64_t ordinal) {
     std::ostringstream out;
-    out << "windowed_tensor_sources/windowed_tensor_" << std::setw(6) << std::setfill('0') << ordinal << ".bin";
+    out << "window_sources/window_source_" << std::setw(6) << std::setfill('0') << ordinal << ".bin";
     return out.str();
 }
 
@@ -133,10 +144,10 @@ DatasetWriter::DatasetWriter(std::filesystem::path datasetPath,
     }
     ensureEmptyOrCreateDirectory(this->datasetPath);
     uint64_t ordinal = 0;
-    for (const DatasetLayout::WindowedTensorSpec &spec : this->layout.windowedTensors()) {
+    for (const DatasetLayout::WindowedTensorSourceSpec &spec : this->layout.windowedTensorSources()) {
         WindowedTensorSourceManifestEntry entry;
-        entry.filename = makeWindowedTensorSourceFilename(ordinal++);
-        windowedTensorSources.emplace(spec.name, std::move(entry));
+        entry.filename = makeWindowSourceFilename(ordinal++);
+        windowSources.emplace(spec.name, std::move(entry));
     }
 }
 
@@ -163,6 +174,9 @@ void DatasetWriter::writeIndexedExample(const std::map<std::string, TensorView> 
 void DatasetWriter::writeIndexedExample(
     const std::map<std::string, TensorView> &tensors,
     const std::map<std::string, WindowedTensorReferenceView> &windowedTensorReferences) {
+    if (layout.hasAffineWindowedTensors()) {
+        throw std::runtime_error("DatasetWriter affine window layouts require writeAffineExamples.");
+    }
     validateWritable();
     validateTensorMapExact(tensors);
     validateWindowedTensorReferenceMapExact(windowedTensorReferences);
@@ -184,75 +198,178 @@ void DatasetWriter::writeIndexedExamples(const std::map<std::string, TensorBatch
 void DatasetWriter::writeIndexedExamples(
     const std::map<std::string, TensorBatchView> &tensors,
     const std::map<std::string, WindowedTensorReferenceBatchView> &windowedTensorReferences) {
+    if (layout.hasAffineWindowedTensors()) {
+        throw std::runtime_error("DatasetWriter affine window layouts require writeAffineExamples.");
+    }
     validateWritable();
     const uint64_t count = validateTensorAndWindowedTensorReferenceBatchMapsExact(tensors, windowedTensorReferences);
     std::vector<uint8_t> records = packRecords(tensors, windowedTensorReferences, count);
     writePackedIndexedRecords(records.data(), count);
 }
 
-void DatasetWriter::writeWindowedTensorSource(std::string_view tensorName, const WindowedTensorSourceView &source) {
+void DatasetWriter::writeAffineExamples(
+    uint64_t count,
+    const std::map<std::string, TensorBatchView> &tensors,
+    const std::map<std::string, AffineWindowedTensorReferenceView> &windowedTensorReferences) {
     validateWritable();
-    const DatasetLayout::WindowedTensorSpec &spec = layout.windowedTensor(tensorName);
-    auto manifestIt = windowedTensorSources.find(spec.name);
-    if (manifestIt == windowedTensorSources.end()) {
-        throw std::runtime_error("DatasetWriter missing source manifest entry for windowed tensor: " + spec.name);
+    if (!layout.hasAffineWindowedTensors() || layout.hasIndexedWindowedTensors()) {
+        throw std::runtime_error("DatasetWriter writeAffineExamples requires an affine window-reference layout.");
+    }
+    if (count == 0) {
+        throw std::runtime_error("DatasetWriter writeAffineExamples count must be >= 1.");
+    }
+    if (tensors.size() != layout.tensors().size()) {
+        throw std::runtime_error("DatasetWriter affine tensor count does not match layout tensor count.");
+    }
+    for (const DatasetLayout::TensorSpec &spec : layout.tensors()) {
+        const auto it = tensors.find(spec.name);
+        if (it == tensors.end()) {
+            throw std::runtime_error("DatasetWriter missing affine dense tensor: " + spec.name);
+        }
+        const TensorBatchView &view = it->second;
+        if (view.data == nullptr || view.dataType != spec.dataType || view.dimensions.size() != spec.dimensions.size() + 1 ||
+            view.dimensions.front() != count ||
+            std::vector<uint64_t>(view.dimensions.begin() + 1, view.dimensions.end()) != spec.dimensions ||
+            view.numBytes != checkedMul(count, spec.numBytes, "DatasetWriter affine tensor bytes")) {
+            throw std::runtime_error("DatasetWriter affine dense tensor '" + spec.name + "' does not match layout/count.");
+        }
+    }
+    for (const auto &entry : tensors) {
+        (void)layout.tensor(entry.first);
+    }
+    validateAffineWindowedTensorReferenceMapExact(windowedTensorReferences, count);
+
+    const uint64_t rowStart = totalExamples;
+    if (expectedNumExamples.has_value() &&
+        (rowStart > expectedNumExamples.value() || count > expectedNumExamples.value() - rowStart)) {
+        throw std::runtime_error("DatasetWriter affine write would exceed expected_num_examples.");
+    }
+
+    if (layout.recordSizeBytes() != 0) {
+        std::vector<uint8_t> records = packRecords(tensors, count);
+        writePackedIndexedRecords(records.data(), count);
+    } else {
+        totalExamples = checkedAdd(totalExamples, count, "DatasetWriter affine example count");
+    }
+
+    AffineWindowReferenceSegment segment;
+    segment.rowStart = rowStart;
+    segment.count = count;
+    for (const DatasetLayout::WindowedTensorSpec &spec : layout.windowedTensors()) {
+        const AffineWindowedTensorReferenceView &view = windowedTensorReferences.at(spec.name);
+        segment.references.emplace(
+            spec.name,
+            AffineWindowedTensorReferenceManifestEntry{.keyHex = bytesToHex(view.key, spec.keyNumBytes()),
+                                                        .base = view.base,
+                                                        .stride = view.stride,
+                                                        .fieldOffset = view.fieldOffset});
+    }
+    bool coalesced = false;
+    if (!affineWindowReferenceSegments.empty()) {
+        AffineWindowReferenceSegment &previous = affineWindowReferenceSegments.back();
+        bool contiguous = checkedAdd(previous.rowStart,
+                                     previous.count,
+                                     "DatasetWriter affine segment row coverage") == segment.rowStart;
+        bool formulasContinue = contiguous && previous.references.size() == segment.references.size();
+        if (formulasContinue) {
+            for (const auto &[name, current] : segment.references) {
+                const auto previousIt = previous.references.find(name);
+                if (previousIt == previous.references.end()) {
+                    formulasContinue = false;
+                    break;
+                }
+                const AffineWindowedTensorReferenceManifestEntry &prior = previousIt->second;
+                const __int128 expectedBaseValue = static_cast<__int128>(prior.base) +
+                                                   static_cast<__int128>(previous.count) * prior.stride;
+                if (expectedBaseValue < static_cast<__int128>(std::numeric_limits<int64_t>::min()) ||
+                    expectedBaseValue > static_cast<__int128>(std::numeric_limits<int64_t>::max())) {
+                    formulasContinue = false;
+                    break;
+                }
+                const int64_t expectedBase = static_cast<int64_t>(expectedBaseValue);
+                if (current.keyHex != prior.keyHex || current.stride != prior.stride ||
+                    current.fieldOffset != prior.fieldOffset || current.base != expectedBase) {
+                    formulasContinue = false;
+                    break;
+                }
+            }
+        }
+        if (formulasContinue) {
+            previous.count = checkedAdd(previous.count,
+                                        segment.count,
+                                        "DatasetWriter coalesced affine segment count");
+            coalesced = true;
+        }
+    }
+    if (!coalesced) {
+        affineWindowReferenceSegments.push_back(std::move(segment));
+    }
+}
+
+void DatasetWriter::writeWindowSource(std::string_view sourceName, const WindowedTensorSourceView &source) {
+    validateWritable();
+    const DatasetLayout::WindowedTensorSourceSpec &spec = layout.windowedTensorSource(sourceName);
+    auto manifestIt = windowSources.find(spec.name);
+    if (manifestIt == windowSources.end()) {
+        throw std::runtime_error("DatasetWriter missing manifest entry for window source: " + spec.name);
     }
     WindowedTensorSourceManifestEntry &manifestEntry = manifestIt->second;
     if (source.key == nullptr) {
-        throw std::runtime_error("DatasetWriter windowed tensor source '" + spec.name + "' has null key.");
+        throw std::runtime_error("DatasetWriter window source '" + spec.name + "' has null key.");
     }
     if (source.data == nullptr) {
-        throw std::runtime_error("DatasetWriter windowed tensor source '" + spec.name + "' has null data.");
+        throw std::runtime_error("DatasetWriter window source '" + spec.name + "' has null data.");
     }
     if (source.dataType != spec.dataType) {
-        throw std::runtime_error("DatasetWriter windowed tensor source '" + spec.name + "' has wrong dtype.");
+        throw std::runtime_error("DatasetWriter window source '" + spec.name + "' has wrong dtype.");
     }
-    if (source.dimensions.size() != spec.dimensions.size()) {
-        throw std::runtime_error("DatasetWriter windowed tensor source '" + spec.name + "' shape " +
-                                 shapeToString(source.dimensions) + " must be [N, *window_step_shape].");
+    if (source.dimensions.size() != spec.stepDimensions.size() + 1) {
+        throw std::runtime_error("DatasetWriter window source '" + spec.name + "' shape " +
+                                 shapeToString(source.dimensions) + " must be [N, *step_shape].");
     }
     if (source.dimensions.empty() || source.dimensions.front() == 0) {
-        throw std::runtime_error("DatasetWriter windowed tensor source '" + spec.name + "' must contain at least one step.");
+        throw std::runtime_error("DatasetWriter window source '" + spec.name + "' must contain at least one step.");
     }
     std::vector<uint64_t> sourceStepShape(source.dimensions.begin() + 1, source.dimensions.end());
-    if (sourceStepShape != spec.sourceStepDimensions()) {
-        throw std::runtime_error("DatasetWriter windowed tensor source '" + spec.name + "' shape " +
-                                 shapeToString(source.dimensions) + " does not match windowed tensor step shape " +
-                                 shapeToString(spec.sourceStepDimensions()) + ".");
+    if (sourceStepShape != spec.stepDimensions) {
+        throw std::runtime_error("DatasetWriter window source '" + spec.name + "' shape " +
+                                 shapeToString(source.dimensions) + " does not match step shape " +
+                                 shapeToString(spec.stepDimensions) + ".");
     }
     const uint64_t numSteps = source.dimensions.front();
-    const uint64_t expectedBytes = checkedMul(numSteps, spec.sourceStepNumBytes(), "DatasetWriter windowed source bytes");
+    const uint64_t expectedBytes = checkedMul(numSteps, spec.stepNumBytes(), "DatasetWriter window source bytes");
     if (source.numBytes != expectedBytes) {
-        throw std::runtime_error("DatasetWriter windowed tensor source '" + spec.name + "' byte count " +
+        throw std::runtime_error("DatasetWriter window source '" + spec.name + "' byte count " +
                                  std::to_string(source.numBytes) + " does not match expected byte count " +
                                  std::to_string(expectedBytes) + ".");
     }
     checkedIndexBounds(source.startIndex, numSteps, spec.name);
     const std::string keyHex = bytesToHex(source.key, spec.keyNumBytes());
     if (!manifestEntry.keyHexValues.insert(keyHex).second) {
-        throw std::runtime_error("DatasetWriter windowed tensor source '" + spec.name + "' duplicate key.");
+        throw std::runtime_error("DatasetWriter window source '" + spec.name + "' duplicate key.");
     }
 
-    std::filesystem::create_directories(windowedTensorSourceDirectory(datasetPath));
+    std::filesystem::create_directories(windowSourceDirectory(datasetPath));
     const std::filesystem::path sourcePath = datasetPath / manifestEntry.filename;
     std::ofstream out(sourcePath, std::ios::binary | std::ios::app);
     if (!out.is_open()) {
-        throw std::runtime_error("DatasetWriter failed to open windowed tensor source for writing: " + sourcePath.string());
+        throw std::runtime_error("DatasetWriter failed to open window source for writing: " + sourcePath.string());
     }
     out.write(static_cast<const char *>(source.data), static_cast<std::streamsize>(source.numBytes));
     if (!out.good()) {
-        throw std::runtime_error("DatasetWriter failed while writing windowed tensor source: " + sourcePath.string());
+        throw std::runtime_error("DatasetWriter failed while writing window source: " + sourcePath.string());
     }
 
     const uint64_t offsetBytes = manifestEntry.numBytes;
-    manifestEntry.numBytes = checkedAdd(manifestEntry.numBytes, source.numBytes, "DatasetWriter windowed source bytes");
+    manifestEntry.numBytes = checkedAdd(manifestEntry.numBytes, source.numBytes, "DatasetWriter window source bytes");
     const int64_t endIndexExclusive = source.startIndex + static_cast<int64_t>(numSteps);
-    manifestEntry.sequences.push_back(DatasetLayout::WindowedTensorSourceSequence{.keyHex = keyHex,
-                                                                       .startIndex = source.startIndex,
-                                                                       .endIndexExclusive = endIndexExclusive,
-                                                                       .offsetBytes = offsetBytes,
-                                                                       .numSteps = numSteps,
-                                                                       .numBytes = source.numBytes});
+    manifestEntry.sequences.push_back(DatasetLayout::WindowedTensorSourceSequence{
+        .keyHex = keyHex,
+        .startIndex = source.startIndex,
+        .endIndexExclusive = endIndexExclusive,
+        .offsetBytes = offsetBytes,
+        .numSteps = numSteps,
+        .numBytes = source.numBytes});
 }
 
 void DatasetWriter::writePackedIndexedRecords(const uint8_t *records, uint64_t count) {
@@ -282,9 +399,10 @@ void DatasetWriter::writePackedIndexedRecords(const uint8_t *records, uint64_t c
                                                                                          "DatasetWriter chunk offset")),
                                               toWrite,
                                               ExampleType::TRAIN);
-        shardEntries.back().numExamples += toWrite;
-        totalExamples += toWrite;
-        consumed += toWrite;
+        shardEntries.back().numExamples = checkedAdd(
+            shardEntries.back().numExamples, toWrite, "DatasetWriter shard example count");
+        totalExamples = checkedAdd(totalExamples, toWrite, "DatasetWriter total example count");
+        consumed = checkedAdd(consumed, toWrite, "DatasetWriter consumed example count");
     }
 }
 
@@ -408,6 +526,37 @@ uint64_t DatasetWriter::validateTensorBatchMapExact(const std::map<std::string, 
     return count;
 }
 
+void DatasetWriter::validateAffineWindowedTensorReferenceMapExact(
+    const std::map<std::string, AffineWindowedTensorReferenceView> &windowedTensorReferences,
+    uint64_t count) const {
+    if (windowedTensorReferences.size() != layout.windowedTensors().size()) {
+        throw std::runtime_error("DatasetWriter affine window reference count does not match layout.");
+    }
+    for (const DatasetLayout::WindowedTensorSpec &spec : layout.windowedTensors()) {
+        if (spec.referenceMode != DatasetLayout::WindowedTensorReferenceMode::AFFINE) {
+            throw std::runtime_error("DatasetWriter affine write encountered a non-affine field: " + spec.name);
+        }
+        const auto it = windowedTensorReferences.find(spec.name);
+        if (it == windowedTensorReferences.end()) {
+            throw std::runtime_error("DatasetWriter missing affine window reference: " + spec.name);
+        }
+        const AffineWindowedTensorReferenceView &view = it->second;
+        if (view.key == nullptr) {
+            throw std::runtime_error("DatasetWriter affine window reference '" + spec.name + "' has null key.");
+        }
+        if (view.keyDataType != spec.keyDataType) {
+            throw std::runtime_error("DatasetWriter affine window reference '" + spec.name + "' has wrong key dtype.");
+        }
+        if (view.stride <= 0) {
+            throw std::runtime_error("DatasetWriter affine window reference '" + spec.name + "' stride must be >= 1.");
+        }
+        (void)checkedAffineStart(view.base, view.stride, view.fieldOffset, 0, spec.name);
+        (void)checkedAffineStart(view.base, view.stride, view.fieldOffset, count - 1, spec.name);
+    }
+    for (const auto &entry : windowedTensorReferences) {
+        (void)layout.windowedTensor(entry.first);
+    }
+}
 
 void DatasetWriter::validateWindowedTensorReferenceMapExact(
     const std::map<std::string, WindowedTensorReferenceView> &windowedTensorReferences) const {
@@ -545,7 +694,7 @@ std::vector<uint8_t> DatasetWriter::packRecord(const std::map<std::string, Tenso
 }
 
 std::vector<uint8_t> DatasetWriter::packRecords(const std::map<std::string, TensorBatchView> &tensors,
-                                                                 uint64_t count) const {
+                                                        uint64_t count) const {
     std::vector<uint8_t> records(checkedMul(count, layout.recordSizeBytes(), "DatasetWriter packed records"), 0);
     for (uint64_t row = 0; row < count; ++row) {
         uint8_t *record = records.data() + checkedMul(row, layout.recordSizeBytes(), "DatasetWriter record offset");
@@ -660,11 +809,11 @@ void DatasetWriter::writeManifest() const {
     root["preallocated"] = preallocate;
     root["shards"] = json::array();
 
-    if (!windowedTensorSources.empty()) {
-        if (!root.contains("windowed_tensors") || !root.at("windowed_tensors").is_object()) {
-            throw std::runtime_error("DatasetWriter internal error: missing windowed_tensors in layout manifest.");
+    if (!windowSources.empty()) {
+        if (!root.contains("window_sources") || !root.at("window_sources").is_object()) {
+            throw std::runtime_error("DatasetWriter internal error: missing window_sources in layout manifest.");
         }
-        for (const auto &entry : windowedTensorSources) {
+        for (const auto &entry : windowSources) {
             json sourceStorage{{"file", entry.second.filename}, {"num_bytes", entry.second.numBytes}, {"sequences", json::array()}};
             for (const DatasetLayout::WindowedTensorSourceSequence &sequence : entry.second.sequences) {
                 sourceStorage["sequences"].push_back(json{{"key_hex", sequence.keyHex},
@@ -679,11 +828,40 @@ void DatasetWriter::writeManifest() const {
                 std::filesystem::create_directories(sourcePath.parent_path());
                 std::ofstream emptySource(sourcePath, std::ios::binary | std::ios::app);
                 if (!emptySource.is_open()) {
-                    throw std::runtime_error("DatasetWriter failed to create empty windowed tensor source: " +
+                    throw std::runtime_error("DatasetWriter failed to create empty window source: " +
                                              sourcePath.string());
                 }
             }
-            root["windowed_tensors"].at(entry.first)["source_storage"] = std::move(sourceStorage);
+            root["window_sources"].at(entry.first)["storage"] = std::move(sourceStorage);
+        }
+    }
+
+    if (layout.hasAffineWindowedTensors()) {
+        root["affine_window_reference_segments"] = json::array();
+        uint64_t expectedRowStart = 0;
+        for (const AffineWindowReferenceSegment &segment : affineWindowReferenceSegments) {
+            if (segment.rowStart != expectedRowStart || segment.count == 0) {
+                throw std::runtime_error("DatasetWriter affine window-reference segments are not contiguous.");
+            }
+            json references = json::object();
+            for (const auto &entry : segment.references) {
+                const auto sourceIt = windowSources.find(layout.windowedTensor(entry.first).sourceName);
+                if (sourceIt == windowSources.end() ||
+                    sourceIt->second.keyHexValues.find(entry.second.keyHex) == sourceIt->second.keyHexValues.end()) {
+                    throw std::runtime_error("DatasetWriter affine reference for '" + entry.first +
+                                             "' uses a key that was not written to its source.");
+                }
+                references[entry.first] = json{{"key_hex", entry.second.keyHex},
+                                               {"base", entry.second.base},
+                                               {"stride", entry.second.stride},
+                                               {"field_offset", entry.second.fieldOffset}};
+            }
+            root["affine_window_reference_segments"].push_back(
+                json{{"row_start", segment.rowStart}, {"count", segment.count}, {"references", std::move(references)}});
+            expectedRowStart = checkedAdd(expectedRowStart, segment.count, "DatasetWriter affine segment coverage");
+        }
+        if (expectedRowStart != numExamples()) {
+            throw std::runtime_error("DatasetWriter affine window-reference segments do not cover every dataset row.");
         }
     }
 

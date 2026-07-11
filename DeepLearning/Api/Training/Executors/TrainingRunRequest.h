@@ -16,7 +16,6 @@
 #include <utility>
 #include <vector>
 
-class Loader;
 
 namespace Thor {
 
@@ -24,6 +23,7 @@ class Network;
 class Optimizer;
 class PlacedNetwork;
 class TrainingData;
+class BatchSession;
 
 enum class TrainingRunExecutionMode { FIT, EVALUATE };
 
@@ -39,7 +39,7 @@ struct TrainingRunRequest {
     // Present only for standalone-network execution. Explicit TrainingProgram
     // execution owns its model through TrainingPhase networks and leaves this null.
     std::shared_ptr<Network> network = nullptr;
-    std::shared_ptr<Loader> loader = nullptr;
+    std::shared_ptr<BatchSession> batchSession = nullptr;
     std::shared_ptr<Optimizer> optimizer = nullptr;
     std::shared_ptr<TrainingProgram> trainingProgram = nullptr;
     // Strict, dataset-validated bindings compiled by Trainer before any
@@ -68,16 +68,15 @@ struct TrainingRunRequest {
     uint64_t firstModelSelectionEpoch = 0;
 
     // Optional cap for the TRAIN phase only. When unset, a training epoch drains
-    // the loader's full training split as before. When set, each public training
-    // epoch consumes at most this many batches and the loader continues from its
+    // the session's full training split as before. When set, each public training
+    // epoch consumes at most this many batches and the session continues from its
     // current position across later public epochs, so large datasets can span
     // several public epochs. Validation/evaluation epochs are intentionally not
     // capped by this option.
     std::optional<uint64_t> maxTrainingBatchesPerEpoch{};
 
-    // Present only for the immutable TrainingData execution path. The data recipe
-    // owns the device-access policy; legacy mutable Loader requests leave this null
-    // and therefore never trigger dataset materialization.
+    // Present for training execution so the data recipe can own device-access
+    // policy and optionally replace the source session with a resident session.
     std::shared_ptr<const TrainingData> trainingData = nullptr;
     DeviceDatasetStorageReport deviceDatasetStorageReport{};
 

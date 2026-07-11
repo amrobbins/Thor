@@ -5,7 +5,6 @@ import math
 import os
 import re
 import shutil
-import struct
 import subprocess
 import sys
 import tempfile
@@ -40,9 +39,7 @@ BYTE_LM_STRIDE = _env_int("THOR_BYTE_LM_STRIDE", BYTE_LM_CONTEXT_LENGTH)
 BYTE_LM_BATCH_SIZE = _env_int("THOR_BYTE_LM_BATCH_SIZE", 32)
 BYTE_LM_EPOCHS = _env_int("THOR_BYTE_LM_EPOCHS", 1)
 BYTE_LM_MAX_IN_FLIGHT_BATCHES = _env_int("THOR_BYTE_LM_MAX_IN_FLIGHT_BATCHES", 8)
-BYTE_LM_LOADER_QUEUE_DEPTH = int(
-    os.environ.get("THOR_BYTE_LM_LOADER_QUEUE_DEPTH", str(max(32, 2 * BYTE_LM_MAX_IN_FLIGHT_BATCHES)))
-)
+
 BYTE_LM_REQUEST_FULL_DATASET = os.environ.get("THOR_BYTE_LM_TARGET_TEXT_BYTES") == "0"
 BYTE_LM_TRAIN_EXAMPLES = _env_int("THOR_BYTE_LM_TRAIN_EXAMPLES", 0 if BYTE_LM_REQUEST_FULL_DATASET else 131072)
 BYTE_LM_VALIDATE_EXAMPLES = _env_int("THOR_BYTE_LM_VALIDATE_EXAMPLES", 0 if BYTE_LM_REQUEST_FULL_DATASET else 4096)
@@ -78,7 +75,7 @@ BYTE_LM_PARQUET_WORKERS = min(
     BYTE_LM_MAX_PARQUET_WORKERS,
     max(1, _env_int("THOR_BYTE_LM_PARQUET_WORKERS", BYTE_LM_MAX_PARQUET_WORKERS)),
 )
-# Pre-alpha development intentionally keeps cache/shard versions at 1. Delete/rebuild caches when the layout changes.
+# Increment this whenever the canonical byte-LM dataset or split-manifest representation changes.
 BYTE_LM_MANIFEST_VERSION = 1
 
 assert BYTE_LM_STATS_COLOR in {"always", "auto", "never"}
@@ -306,11 +303,6 @@ def _download_parquet_if_missing(index: int, downloads_root: Path) -> Path:
 
 
 
-_SHARD_MAGIC = b"THOR_RAW_SHARD\0\0"
-_SHARD_FORMAT_VERSION = 1
-_SHARD_HEADER_BYTES = 88
-_SHARD_UINT8_DTYPE = 17
-_SHARD_LAYOUT_BYTE_CORPUS = 2
 _DOC_SEPARATOR = b"\n\n"
 _SPLIT_NAMES = ("train", "validate", "test")
 _FULL_DATASET_TRAIN_PCT = 98
@@ -340,16 +332,6 @@ def _hash_split(parts: Sequence[object]) -> str:
 
 def _payload_size(parts: Sequence[object]) -> int:
     return sum(len(part) for part in parts)
-
-
-def _write_u64(stream, value: int):
-    stream.write(struct.pack("<Q", int(value)))
-
-
-def _write_string(stream, value: str):
-    payload = value.encode("utf-8")
-    _write_u64(stream, len(payload))
-    stream.write(payload)
 
 
 def _local_parquet_paths() -> list[Path]:
@@ -392,7 +374,7 @@ def _byte_corpus_num_examples(num_bytes: int, *, context_length: int, stride: in
     return 1 + (num_bytes - context_length - 1) // stride
 
 
-class _ByteCorpusAppendWriter:
+class _ByteCorpusSourceWriter:
     def __init__(self, cache_root: Path, *, num_shards: int, context_length: int, stride: int, stripe_bytes: int):
         if num_shards <= 0:
             raise ValueError("THOR_BYTE_LM_NUM_SHARDS must be >= 1")
@@ -405,23 +387,24 @@ class _ByteCorpusAppendWriter:
         self.stride = stride
         self.stripe_bytes = stripe_bytes
         self.base_shard_index = 0
-        self.shard_root = cache_root / "byte_corpus_shards_v1_uint8_shifted_labels"
-        if self.shard_root.exists():
-            shutil.rmtree(self.shard_root)
-        self.shard_root.mkdir(parents=True, exist_ok=True)
+        self.source_root = cache_root / "byte_corpus_sources_v1_uint8"
+        if self.source_root.exists():
+            shutil.rmtree(self.source_root)
+        self.source_root.mkdir(parents=True, exist_ok=True)
 
         self.files: dict[tuple[str, int], object] = {}
-        self.shard_paths: list[str] = []
+        self.source_paths: list[str] = []
+        self.source_path_by_split_shard: dict[tuple[str, int], Path] = {}
         self.byte_counts = {split: [0 for _ in range(num_shards)] for split in _SPLIT_NAMES}
         self.total_bytes = {split: 0 for split in _SPLIT_NAMES}
 
         for split in _SPLIT_NAMES:
             for shard_index in range(num_shards):
-                shard_path = self.shard_root / f"fineweb_edu_byte_corpus_{split}_{shard_index + 1}_of_{num_shards}.shard"
-                shard_file = shard_path.open("wb", buffering=BYTE_LM_CACHE_IO_BUFFER_BYTES)
-                shard_file.write(b"\0" * _SHARD_HEADER_BYTES)
-                self.files[(split, shard_index)] = shard_file
-                self.shard_paths.append(str(shard_path))
+                source_path = self.source_root / f"fineweb_edu_byte_corpus_{split}_{shard_index + 1}_of_{num_shards}.bin"
+                source_file = source_path.open("wb", buffering=BYTE_LM_CACHE_IO_BUFFER_BYTES)
+                self.files[(split, shard_index)] = source_file
+                self.source_paths.append(str(source_path))
+                self.source_path_by_split_shard[(split, shard_index)] = source_path
 
     def close(self):
         for shard_file in self.files.values():
@@ -476,36 +459,31 @@ class _ByteCorpusAppendWriter:
         self.byte_counts[split][shard_index] += part_bytes
         self.total_bytes[split] += part_bytes
 
-    def finalize(self) -> list[str]:
-        for (file_split, shard_index), shard_file in self.files.items():
-            shard_file.flush()
-            metadata_offset = shard_file.tell()
-            _write_string(shard_file, "sequence")
-            _write_u64(shard_file, self.stride)
-            split_counts: dict[str, int] = {}
-            for split in _SPLIT_NAMES:
-                byte_count = self.byte_counts[split][shard_index] if split == file_split else 0
-                example_count = _byte_corpus_num_examples(
-                    byte_count,
-                    context_length=self.context_length,
-                    stride=self.stride,
+    def source_descriptions(self) -> list[dict]:
+        descriptions = []
+        for split in _SPLIT_NAMES:
+            for shard_index in range(self.num_shards):
+                num_bytes = self.byte_counts[split][shard_index]
+                descriptions.append(
+                    {
+                        "split": split,
+                        "shard_index": shard_index,
+                        "path": str(self.source_path_by_split_shard[(split, shard_index)]),
+                        "num_bytes": num_bytes,
+                        "num_examples": _byte_corpus_num_examples(
+                            num_bytes,
+                            context_length=self.context_length,
+                            stride=self.stride,
+                        ),
+                    }
                 )
-                split_counts[split] = example_count
-                _write_u64(shard_file, _SHARD_HEADER_BYTES)
-                _write_u64(shard_file, example_count)
-                _write_u64(shard_file, byte_count)
-            metadata_end = shard_file.tell()
-            _write_byte_corpus_shard_header(
-                shard_file,
-                record_size=self.context_length + 1,
-                train_count=split_counts["train"],
-                validate_count=split_counts["validate"],
-                test_count=split_counts["test"],
-                metadata_offset=metadata_offset,
-                metadata_bytes=metadata_end - metadata_offset,
-            )
-            shard_file.flush()
-        return self.shard_paths
+        return descriptions
+
+    def finalize(self) -> list[str]:
+        for source_file in self.files.values():
+            source_file.flush()
+        return self.source_paths
+
 
 
 class _ByteCorpusPartWriter:
@@ -681,12 +659,12 @@ def _process_fineweb_parquet_part_worker(args: tuple[int, int, str, str, int, in
     }
 
 
-def _write_fineweb_edu_byte_corpus_shards_parallel(cache_root: Path, parquet_paths: list[Path]) -> dict:
+def _write_fineweb_edu_byte_corpus_sources_parallel(cache_root: Path, parquet_paths: list[Path]) -> dict:
     if not parquet_paths:
         raise RuntimeError("FineWeb-Edu byte-corpus setup found no parquet files")
 
     workers = min(BYTE_LM_PARQUET_WORKERS, len(parquet_paths))
-    part_root = cache_root / "byte_corpus_shards_v1_uint8_shifted_labels.parts"
+    part_root = cache_root / "byte_corpus_sources_v1_uint8.parts"
     if part_root.exists():
         shutil.rmtree(part_root)
     part_root.mkdir(parents=True, exist_ok=True)
@@ -734,7 +712,7 @@ def _write_fineweb_edu_byte_corpus_shards_parallel(cache_root: Path, parquet_pat
                     flush=True,
                 )
 
-        writer = _ByteCorpusAppendWriter(
+        writer = _ByteCorpusSourceWriter(
             cache_root,
             num_shards=BYTE_LM_NUM_SHARDS,
             context_length=BYTE_LM_CONTEXT_LENGTH,
@@ -742,7 +720,7 @@ def _write_fineweb_edu_byte_corpus_shards_parallel(cache_root: Path, parquet_pat
             stripe_bytes=BYTE_LM_SHARD_STRIPE_BYTES,
         )
         try:
-            print("INFO byte_lm_cache: concatenating parquet worker parts into final byte-corpus shards", file=sys.stderr, flush=True)
+            print("INFO byte_lm_cache: concatenating parquet worker parts into immutable byte-corpus sources", file=sys.stderr, flush=True)
             for parquet_file_index in range(1, len(parquet_paths) + 1):
                 result = results[parquet_file_index]
                 for split, shard_index, part_path, byte_count in result["part_paths"]:
@@ -755,7 +733,7 @@ def _write_fineweb_edu_byte_corpus_shards_parallel(cache_root: Path, parquet_pat
                 for split in _SPLIT_NAMES
             ):
                 raise RuntimeError(f"FineWeb-Edu byte-corpus setup produced empty split(s): {writer.total_bytes}")
-            shard_paths = writer.finalize()
+            source_paths = writer.finalize()
         finally:
             writer.close()
     finally:
@@ -775,31 +753,30 @@ def _write_fineweb_edu_byte_corpus_shards_parallel(cache_root: Path, parquet_pat
         flush=True,
     )
     return {
-        "shard_paths": shard_paths,
+        "source_paths": source_paths,
+        "sources": writer.source_descriptions(),
         "train_examples": split_examples["train"],
         "validate_examples": split_examples["validate"],
         "test_examples": split_examples["test"],
         "stream_bytes": {"all": text_bytes_seen, **{split: writer.total_bytes[split] for split in _SPLIT_NAMES}},
         "parquet_files": [str(path) for path in parquet_paths],
         "documents_seen": documents_seen,
-        "compact_shard_format": 1,
         "byte_corpus": True,
-        "shard_stripe_bytes": BYTE_LM_SHARD_STRIPE_BYTES,
-        "append_only_byte_corpus": True,
+        "source_stripe_bytes": BYTE_LM_SHARD_STRIPE_BYTES,
         "parallel_parquet_processing": True,
         "parquet_workers": workers,
     }
 
 
-def _write_fineweb_edu_byte_corpus_shards(cache_root: Path) -> dict:
+def _write_fineweb_edu_byte_corpus_sources(cache_root: Path) -> dict:
     downloads_root = cache_root / "downloads" / "fineweb_edu_sample_100bt"
     parquet_paths = _fineweb_edu_parquet_paths(downloads_root)
 
     if BYTE_LM_FULL_DATASET and len(parquet_paths) > 1:
-        return _write_fineweb_edu_byte_corpus_shards_parallel(cache_root, parquet_paths)
+        return _write_fineweb_edu_byte_corpus_sources_parallel(cache_root, parquet_paths)
 
-    print("INFO byte_lm_cache: writing append-only byte-corpus shards", file=sys.stderr, flush=True)
-    writer = _ByteCorpusAppendWriter(
+    print("INFO byte_lm_cache: writing immutable byte-corpus sources", file=sys.stderr, flush=True)
+    writer = _ByteCorpusSourceWriter(
         cache_root,
         num_shards=BYTE_LM_NUM_SHARDS,
         context_length=BYTE_LM_CONTEXT_LENGTH,
@@ -844,7 +821,7 @@ def _write_fineweb_edu_byte_corpus_shards(cache_root: Path) -> dict:
         if any(_byte_corpus_num_examples(writer.total_bytes[split], context_length=BYTE_LM_CONTEXT_LENGTH, stride=BYTE_LM_STRIDE) <= 0 for split in _SPLIT_NAMES):
             raise RuntimeError(f"FineWeb-Edu byte-corpus setup produced empty split(s): {writer.total_bytes}")
 
-        shard_paths = writer.finalize()
+        source_paths = writer.finalize()
     finally:
         writer.close()
 
@@ -862,53 +839,36 @@ def _write_fineweb_edu_byte_corpus_shards(cache_root: Path) -> dict:
         flush=True,
     )
     return {
-        "shard_paths": shard_paths,
+        "source_paths": source_paths,
+        "sources": writer.source_descriptions(),
         "train_examples": split_examples["train"],
         "validate_examples": split_examples["validate"],
         "test_examples": split_examples["test"],
         "stream_bytes": {"all": text_bytes_seen, **{split: writer.total_bytes[split] for split in _SPLIT_NAMES}},
         "parquet_files": [str(path) for path in parquet_paths],
         "documents_seen": documents_seen,
-        "compact_shard_format": 1,
         "byte_corpus": True,
-        "shard_stripe_bytes": BYTE_LM_SHARD_STRIPE_BYTES,
-        "append_only_byte_corpus": True,
+        "source_stripe_bytes": BYTE_LM_SHARD_STRIPE_BYTES,
     }
 
 
-def _write_byte_corpus_shard_header(
-    stream,
+def _byte_lm_dataset_path(cache_root: Path) -> Path:
+    return cache_root / "fineweb_edu_byte_lm_dataset_v1"
+
+
+def _byte_lm_split_manifest_path(cache_root: Path) -> Path:
+    return cache_root / "fineweb_edu_byte_lm_splits.json"
+
+
+def _byte_lm_base_manifest(
     *,
-    record_size: int,
-    train_count: int,
-    validate_count: int,
-    test_count: int,
-    metadata_offset: int,
-    metadata_bytes: int,
-):
-    header = struct.pack(
-        "<16sIIQIIQQQQQQ",
-        _SHARD_MAGIC,
-        _SHARD_FORMAT_VERSION,
-        _SHARD_HEADER_BYTES,
-        record_size,
-        _SHARD_UINT8_DTYPE,
-        _SHARD_LAYOUT_BYTE_CORPUS,
-        train_count,
-        validate_count,
-        test_count,
-        1,
-        metadata_offset,
-        metadata_bytes,
-    )
-    if len(header) != _SHARD_HEADER_BYTES:
-        raise RuntimeError(f"byte-corpus shard header is {len(header)} bytes; expected {_SHARD_HEADER_BYTES}")
-    stream.seek(0)
-    stream.write(header)
-
-
-
-def _byte_lm_base_manifest(*, shard_paths: list[str], train_examples: int, validate_examples: int, test_examples: int, stream_info: dict) -> dict:
+    dataset_path: Path,
+    split_manifest_path: Path,
+    train_examples: int,
+    validate_examples: int,
+    test_examples: int,
+    stream_info: dict,
+) -> dict:
     return {
         "version": BYTE_LM_MANIFEST_VERSION,
         "dataset": BYTE_LM_DATASET_NAME,
@@ -917,7 +877,6 @@ def _byte_lm_base_manifest(*, shard_paths: list[str], train_examples: int, valid
         "context_length": BYTE_LM_CONTEXT_LENGTH,
         "stride": BYTE_LM_STRIDE,
         "vocab_size": BYTE_LM_VOCAB_SIZE,
-        "record_shape": [BYTE_LM_CONTEXT_LENGTH + 1],
         "example_shape": [BYTE_LM_CONTEXT_LENGTH],
         "label_shape": [BYTE_LM_CONTEXT_LENGTH],
         "example_data_type": "uint8",
@@ -926,12 +885,138 @@ def _byte_lm_base_manifest(*, shard_paths: list[str], train_examples: int, valid
         "validate_examples": validate_examples,
         "test_examples": test_examples,
         "num_shards": BYTE_LM_NUM_SHARDS,
-        "shard_paths": shard_paths,
+        "dataset_path": str(dataset_path),
+        "split_manifest_path": str(split_manifest_path),
+        "shared_window_source": "tokens",
         **stream_info,
     }
 
 
-def _ensure_byte_lm_shards() -> dict:
+def _write_byte_lm_dataset(cache_root: Path, source_info: dict) -> dict:
+    dataset_path = _byte_lm_dataset_path(cache_root)
+    split_manifest_path = _byte_lm_split_manifest_path(cache_root)
+    if dataset_path.exists():
+        shutil.rmtree(dataset_path)
+    split_manifest_path.unlink(missing_ok=True)
+
+    sources = [source for source in source_info["sources"] if int(source["num_examples"]) > 0]
+    total_examples = sum(int(source["num_examples"]) for source in sources)
+    if total_examples <= 0:
+        raise RuntimeError("FineWeb-Edu byte corpus produced no window references")
+
+    layout = thor.data.DatasetLayout(
+        tensors={},
+        window_sources={
+            "tokens": thor.data.WindowedTensorSourceLayout(
+                step_shape=[],
+                data_type=thor.DataType.uint8,
+                key_type=thor.DataType.uint64,
+            )
+        },
+        windowed_tensors={
+            "examples": thor.data.WindowedTensorLayout(
+                shape=[BYTE_LM_CONTEXT_LENGTH],
+                source="tokens",
+                index_type=thor.DataType.int64,
+                reference_mode="affine",
+            ),
+            "labels": thor.data.WindowedTensorLayout(
+                shape=[BYTE_LM_CONTEXT_LENGTH],
+                source="tokens",
+                index_type=thor.DataType.int64,
+                reference_mode="affine",
+            ),
+        },
+    )
+    writer = thor.data.DatasetWriter(
+        dataset_path=dataset_path,
+        layout=layout,
+        examples_per_shard=max(1, math.ceil(total_examples / BYTE_LM_NUM_SHARDS)),
+        expected_num_examples=total_examples,
+        preallocate=True,
+    )
+
+    split_range_parts: dict[str, list[thor.data.ExampleIndexRange]] = {split: [] for split in _SPLIT_NAMES}
+    next_row = 0
+    try:
+        for source_key, source in enumerate(sources, start=1):
+            source_path = Path(source["path"])
+            num_bytes = int(source["num_bytes"])
+            num_examples = int(source["num_examples"])
+            if source_path.stat().st_size != num_bytes:
+                raise RuntimeError(f"byte corpus source size changed before dataset materialization: {source_path}")
+
+            values = np.memmap(source_path, mode="r", dtype=np.uint8, shape=(num_bytes,))
+            try:
+                writer.write_window_source("tokens", key=source_key, start_index=0, values=values)
+            finally:
+                del values
+
+            source_row_start = next_row
+            writer.write_affine_examples(
+                count=num_examples,
+                tensors={
+                    "examples": thor.data.AffineWindowedTensorChunk(
+                        key=source_key,
+                        base=0,
+                        stride=BYTE_LM_STRIDE,
+                        field_offset=0,
+                    ),
+                    "labels": thor.data.AffineWindowedTensorChunk(
+                        key=source_key,
+                        base=0,
+                        stride=BYTE_LM_STRIDE,
+                        field_offset=1,
+                    ),
+                },
+            )
+            next_row += num_examples
+            split_range_parts[source["split"]].append(
+                thor.data.ExampleIndexRange(start=source_row_start, count=num_examples, stride=1)
+            )
+        writer.close()
+    except Exception:
+        raise
+
+    dataset = thor.data.FileDataset.open(dataset_path)
+
+    def combined_indices(split: str) -> thor.data.ExampleIndexSet:
+        return thor.data.ExampleIndexSet.from_ranges(split_range_parts[split])
+
+    train_indices = combined_indices("train")
+    validate_indices = combined_indices("validate")
+    test_indices = combined_indices("test")
+    split_manifest = thor.data.DatasetSplitManifest(
+        dataset=dataset,
+        train_indices=train_indices,
+        validate_indices=validate_indices,
+        test_indices=test_indices,
+    )
+    split_manifest.save(split_manifest_path)
+
+    # The canonical FileDataset now owns one copy of each source. The extraction
+    # files are only staging artifacts and would otherwise duplicate the corpus.
+    source_root = cache_root / "byte_corpus_sources_v1_uint8"
+    shutil.rmtree(source_root, ignore_errors=True)
+
+    ignored_stream_keys = {
+        "source_paths",
+        "sources",
+        "train_examples",
+        "validate_examples",
+        "test_examples",
+    }
+    return _byte_lm_base_manifest(
+        dataset_path=dataset_path,
+        split_manifest_path=split_manifest_path,
+        train_examples=len(train_indices),
+        validate_examples=len(validate_indices),
+        test_examples=len(test_indices),
+        stream_info={key: value for key, value in source_info.items() if key not in ignored_stream_keys},
+    )
+
+
+def _ensure_byte_lm_dataset() -> dict:
     manifest_path = _byte_lm_manifest_path(BYTE_LM_CACHE_DIR)
     if BYTE_LM_REBUILD and BYTE_LM_CACHE_DIR.exists():
         shutil.rmtree(BYTE_LM_CACHE_DIR)
@@ -945,46 +1030,43 @@ def _ensure_byte_lm_shards() -> dict:
             "stride": BYTE_LM_STRIDE,
             "vocab_size": BYTE_LM_VOCAB_SIZE,
             "num_shards": BYTE_LM_NUM_SHARDS,
-            "record_shape": [BYTE_LM_CONTEXT_LENGTH + 1],
             "example_shape": [BYTE_LM_CONTEXT_LENGTH],
             "label_shape": [BYTE_LM_CONTEXT_LENGTH],
-            "compact_shard_format": 1,
             "byte_corpus": True,
+            "shared_window_source": "tokens",
         }
         if all(manifest.get(key) == value for key, value in expected.items()):
-            if all(Path(path).exists() for path in manifest["shard_paths"]):
-                return manifest
+            dataset_path = Path(manifest["dataset_path"])
+            split_manifest_path = Path(manifest["split_manifest_path"])
+            if dataset_path.exists() and split_manifest_path.exists():
+                try:
+                    dataset = thor.data.FileDataset.open(dataset_path)
+                    splits = thor.data.DatasetSplitManifest.load(split_manifest_path)
+                    splits.validate_against(dataset)
+                    return manifest
+                except RuntimeError:
+                    pass
 
     BYTE_LM_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    compact_info = _write_fineweb_edu_byte_corpus_shards(BYTE_LM_CACHE_DIR)
-    shard_paths = sorted(str(Path(path)) for path in compact_info["shard_paths"])
-    for path in shard_paths:
-        assert Path(path).exists(), f"expected shard file {path} to exist"
-
-    manifest = _byte_lm_base_manifest(
-        shard_paths=shard_paths,
-        train_examples=compact_info["train_examples"],
-        validate_examples=compact_info["validate_examples"],
-        test_examples=compact_info["test_examples"],
-        stream_info={key: value for key, value in compact_info.items() if key not in {"shard_paths", "train_examples", "validate_examples", "test_examples"}},
-    )
+    source_info = _write_fineweb_edu_byte_corpus_sources(BYTE_LM_CACHE_DIR)
+    manifest = _write_byte_lm_dataset(BYTE_LM_CACHE_DIR, source_info)
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True))
     return manifest
 
 
-def _byte_lm_loader(*, batch_size: int):
-    manifest = _ensure_byte_lm_shards()
-    loader = thor.training.LocalBatchLoader(
-        manifest["shard_paths"],
-        manifest["example_shape"],
-        thor.DataType.uint8,
-        manifest["label_shape"],
-        thor.DataType.uint8,
-        batch_size=batch_size,
+def _byte_lm_data(*, batch_size: int):
+    manifest = _ensure_byte_lm_dataset()
+    dataset = thor.data.FileDataset.open(Path(manifest["dataset_path"]))
+    splits = thor.data.DatasetSplitManifest.load(Path(manifest["split_manifest_path"]))
+    splits.validate_against(dataset)
+    data = thor.data.TrainingData(
+        dataset=dataset,
+        splits=splits,
+        batching=thor.data.BatchPolicy(batch_size=batch_size, randomize_train=True),
         dataset_name="fineweb_edu_byte_lm_uint8",
-        batch_queue_depth=BYTE_LM_LOADER_QUEUE_DEPTH,
+        device_storage="off",
     )
-    return loader, manifest
+    return data, manifest
 
 
 def _build_byte_transformer_lm(name: str):
@@ -1055,12 +1137,12 @@ def test_queued_trainer_trains_byte_level_transformer_lm_on_fineweb_edu(capfd):
     _flush_native_stdio_for_capture()
     capfd.readouterr()
     with capfd.disabled():
-        loader, manifest = _byte_lm_loader(batch_size=BYTE_LM_BATCH_SIZE)
-        assert loader.get_num_train_examples() > 0
-        assert loader.get_num_validate_examples() > 0
-        assert loader.get_num_train_batches() > 0
-        assert loader.get_num_validate_batches() > 0
-        assert manifest["record_shape"] == [BYTE_LM_CONTEXT_LENGTH + 1]
+        data, manifest = _byte_lm_data(batch_size=BYTE_LM_BATCH_SIZE)
+        assert len(data.splits.train) > 0
+        assert len(data.splits.validate) > 0
+        assert math.ceil(len(data.splits.train) / BYTE_LM_BATCH_SIZE) > 0
+        assert math.ceil(len(data.splits.validate) / BYTE_LM_BATCH_SIZE) > 0
+        assert manifest["shared_window_source"] == "tokens"
         assert manifest["example_shape"] == [BYTE_LM_CONTEXT_LENGTH]
         assert manifest["label_shape"] == [BYTE_LM_CONTEXT_LENGTH]
 
@@ -1074,7 +1156,7 @@ def test_queued_trainer_trains_byte_level_transformer_lm_on_fineweb_edu(capfd):
         )
         trainer = thor.training.Trainer(
             network,
-            loader,
+            data=data,
             optimizer=optimizer,
             debug_synchronous=False,
             stats_interval_s=BYTE_LM_STATS_INTERVAL_S,

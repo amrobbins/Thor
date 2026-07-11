@@ -230,6 +230,7 @@ void applyAcquisitionTelemetry(
 
 DeviceDatasetStorageSelection selectSharedResidencySession(
     const std::shared_ptr<BatchSession> &sourceSession,
+    const std::string &datasetName,
     const std::shared_ptr<const NamedDataset> &namedDataset,
     const DatasetMaterializationDescription &dataset,
     const DeviceDatasetSessionDescription &session,
@@ -279,8 +280,8 @@ DeviceDatasetStorageSelection selectSharedResidencySession(
         auto effectiveSession = std::make_shared<DeviceResidentNamedBatchSession>(
             acquisition.lease,
             session,
-            batchQueueDepth);
-        effectiveSession->setDatasetName(sourceSession->getDatasetName());
+            batchQueueDepth,
+            datasetName);
         report.used = true;
         report.reason.clear();
         report.examples = acquisition.lease->getNumExamples();
@@ -352,8 +353,9 @@ DeviceDatasetStorageSelection selectSharedResidencySession(
                 dataset,
                 session,
                 acquisition.lease,
-                batchQueueDepth);
-        effectiveSession->setDatasetName(sourceSession->getDatasetName());
+                batchQueueDepth,
+                32,
+                datasetName);
         report.used = true;
         report.reason = fullConstructionFailure == nullptr
                             ? "windowed_features_only"
@@ -522,6 +524,7 @@ DeviceDatasetStorageSelection selectDeviceDatasetStorageSession(
 
     return selectSharedResidencySession(
         sourceSession,
+        trainingData.getDatasetName(),
         namedDataset,
         *datasetDescription,
         sessionDescription,

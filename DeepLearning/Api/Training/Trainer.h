@@ -19,7 +19,6 @@
 
 #include "Utilities/Loaders/Shard.h"
 
-class Loader;
 
 namespace Thor {
 
@@ -116,7 +115,8 @@ class Trainer {
     void validateEarlyCompletionPolicies(const std::vector<TrainingEarlyCompletionPolicy>& policies) const;
     TrainingObserver& effectiveObserver();
     [[nodiscard]] CompiledDatasetInputBindings resolveDatasetInputsForCurrentModel() const;
-    [[nodiscard]] std::shared_ptr<Loader> openBatchSessionForRun() const;
+    [[nodiscard]] CompiledDatasetInputBindings resolveDatasetInputsForData(
+        const TrainingData& data, bool inferenceOnly) const;
     void fitInternal(const TrainerFitOptions& options,
                      TrainingObserver& observer,
                      const TrainingCancellationToken& cancellationToken,
@@ -138,14 +138,14 @@ class Trainer {
                                      const std::vector<TrainingEarlyCompletionPolicy>& additionalEarlyCompletionPolicies = {},
                                      const std::set<std::string>& additionalScalarTensorsToReport = {});
     TrainingRunResult evaluateTrainingRun(std::string runName,
-                                          std::shared_ptr<Loader> evaluationLoader,
+                                          std::shared_ptr<const TrainingData> evaluationData,
                                           ExampleType exampleType,
                                           TrainingEventPhase phase,
                                           TrainingObserver& observer,
                                           const TrainingCancellationToken& cancellationToken);
     TrainingRunResult evaluateSavedTrainingRun(std::string runName,
                                                const std::string& modelArtifactDirectory,
-                                               std::shared_ptr<Loader> evaluationLoader,
+                                               std::shared_ptr<const TrainingData> evaluationData,
                                                ExampleType exampleType,
                                                TrainingEventPhase phase,
                                                TrainingObserver& observer,
@@ -157,7 +157,6 @@ class Trainer {
     std::shared_ptr<const TrainingData> trainingData = nullptr;
     std::vector<TrainingInputBinding> datasetInputBindings{};
     std::set<DatasetFieldId> requiredDatasetFieldIds{};
-    std::shared_ptr<Loader> loader = nullptr;  // Legacy mutable-loader compatibility path.
     std::shared_ptr<Optimizer> optimizer = nullptr;
     std::shared_ptr<TrainingProgram> trainingProgram = nullptr;
     TrainingRuntimeConfig runtimeConfig{};
@@ -182,11 +181,6 @@ class Trainer::Builder {
 
     Builder& data(std::shared_ptr<const TrainingData> data) {
         this->trainingData_ = std::move(data);
-        return *this;
-    }
-
-    Builder& loader(std::shared_ptr<Loader> loader) {
-        this->loader_ = std::move(loader);
         return *this;
     }
 
@@ -267,7 +261,6 @@ class Trainer::Builder {
    private:
     std::shared_ptr<Network> network_ = nullptr;
     std::shared_ptr<const TrainingData> trainingData_ = nullptr;
-    std::shared_ptr<Loader> loader_ = nullptr;
     std::optional<DatasetInputBindings> datasetInputBindings_{};
     std::shared_ptr<Optimizer> optimizer_ = nullptr;
     std::shared_ptr<TrainingProgram> trainingProgram_ = nullptr;

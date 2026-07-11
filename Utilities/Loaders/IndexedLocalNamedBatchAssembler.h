@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "DeepLearning/Api/Data/DatasetSplitManifest.h"
 #include "Utilities/Loaders/IndexedLocalNamedExampleReader.h"
 #include "DeepLearning/Api/Data/DatasetLayout.h"
 #include "Utilities/Random/FullPeriodRandom.h"
@@ -111,7 +112,7 @@ struct IndexedLocalNamedBatchAssemblerStats {
 
     double readAmplification() const {
         // read_amplification is a physical-read/logical-read ratio.  With the
-        // asynchronous indexed loader, records can be planned before their
+        // asynchronous indexed assembler, records can be planned before their
         // reader-session stats have been flushed back into this snapshot, so
         // logicalRecordBytesRequested can legitimately lead readBytesSubmitted.
         // Use the logical byte count represented by submitted read calls instead
@@ -191,13 +192,13 @@ struct IndexedLocalNamedBatchState {
  *
  * Owns the per-split async read/prefetch pipeline:
  *   logical split positions -> global row ids -> reader sessions direct-load into
- *   dense named CPU batch tensors -> ready batch queues consumed by getBatch().
+ *   dense named CPU batch tensors -> ready batch queues consumed by acquireBatch().
  */
 class IndexedLocalNamedBatchAssembler {
    public:
     IndexedLocalNamedBatchAssembler(std::shared_ptr<IndexedLocalNamedExampleReader> reader,
                                     DatasetLayout layout,
-                                    std::shared_ptr<const std::vector<uint64_t>> indices,
+                                    std::shared_ptr<const Thor::ExampleIndexSet> indices,
                                     std::string splitName,
                                     uint64_t batchSize,
                                     uint64_t batchQueueDepth,
@@ -213,7 +214,7 @@ class IndexedLocalNamedBatchAssembler {
     uint64_t getNumBatchesPerEpoch() const;
     uint64_t getNumExamples() const;
     uint64_t getNextBatchNum();
-    [[nodiscard]] const std::vector<uint64_t> &getIndices() const { return *indices; }
+    [[nodiscard]] const Thor::ExampleIndexSet &getIndices() const { return *indices; }
     [[nodiscard]] bool isRandomized() const { return randomized; }
     IndexedLocalNamedBatchAssemblerStats getStatsSnapshot();
 
@@ -226,13 +227,13 @@ class IndexedLocalNamedBatchAssembler {
     }
 #endif
 
-    void getBatch(std::map<std::string, ThorImplementation::Tensor> &tensors, uint64_t &batchNum);
+    void acquireBatch(std::map<std::string, ThorImplementation::Tensor> &tensors, uint64_t &batchNum);
     void returnBuffers(const std::map<std::string, ThorImplementation::Tensor> &tensors);
 
    private:
     std::shared_ptr<IndexedLocalNamedExampleReader> reader;
     DatasetLayout layout;
-    std::shared_ptr<const std::vector<uint64_t>> indices;
+    std::shared_ptr<const Thor::ExampleIndexSet> indices;
     std::string splitName;
     std::map<std::string, ThorImplementation::TensorDescriptor> batchTensorDescriptors;
     std::map<std::string, std::unique_ptr<AsyncTensorQueue>> batchTensorQueues;

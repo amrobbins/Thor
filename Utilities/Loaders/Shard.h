@@ -119,7 +119,6 @@ class Shard {
     uint64_t compactTrainBytes;
     uint64_t compactValidateBytes;
     uint64_t compactTestBytes;
-    uint64_t compactRecordStrideBytes;
 
     std::mutex mtx;
     std::mutex cachedReaderMtx;

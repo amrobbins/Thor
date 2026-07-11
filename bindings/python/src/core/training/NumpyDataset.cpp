@@ -53,8 +53,6 @@ class NumpyBatchSession final : public BatchSession {
                       std::set<DatasetFieldId> requiredFieldIds);
     ~NumpyBatchSession() override;
 
-    Batch getBatch(ExampleType exampleType, uint64_t &batchNum) override;
-    void returnBatchBuffers(ExampleType exampleType, Batch &&batch) override;
     uint64_t getNumBatchesPerEpoch(ExampleType exampleType) override;
     uint64_t getNumExamples(ExampleType exampleType) override;
     uint64_t getNextBatchNum(ExampleType exampleType) override;
@@ -62,8 +60,10 @@ class NumpyBatchSession final : public BatchSession {
     void cancel() override;
 
    private:
+    Batch acquireBatch(ExampleType exampleType, uint64_t &batchNum) override;
+    void recycleBatch(ExampleType exampleType, Batch &&batch) override;
     struct SplitState {
-        std::shared_ptr<const std::vector<uint64_t>> indices;
+        std::shared_ptr<const ExampleIndexSet> indices;
         uint64_t nextBatchNum = 0;
         std::unique_ptr<FullPeriodRandom> randomizer;
         std::map<DatasetFieldId, std::unique_ptr<AsyncTensorQueue>> queues;
@@ -260,7 +260,7 @@ void NumpyBatchSession::initializeSplit(SplitState &split,
                                             const ExampleIndexSet &indices,
                                             bool randomized,
                                             std::optional<uint64_t> seed) {
-    split.indices = indices.getSharedIndices();
+    split.indices = std::make_shared<const ExampleIndexSet>(indices);
     if (split.indices->empty()) {
         return;
     }
@@ -318,7 +318,7 @@ const NumpyBatchSession::SplitState &NumpyBatchSession::immutableSplit(ExampleTy
     throw std::runtime_error("Unsupported ExampleType");
 }
 
-Batch NumpyBatchSession::getBatch(ExampleType exampleType, uint64_t &batchNum) {
+Batch NumpyBatchSession::acquireBatch(ExampleType exampleType, uint64_t &batchNum) {
     if (cancelled.load(std::memory_order_acquire)) {
         throw std::runtime_error("NumpyBatchSession has been cancelled.");
     }
@@ -371,7 +371,7 @@ Batch NumpyBatchSession::getBatch(ExampleType exampleType, uint64_t &batchNum) {
     return batch;
 }
 
-void NumpyBatchSession::returnBatchBuffers(ExampleType exampleType, Batch &&batch) {
+void NumpyBatchSession::recycleBatch(ExampleType exampleType, Batch &&batch) {
     if (cancelled.load(std::memory_order_acquire)) {
         return;
     }

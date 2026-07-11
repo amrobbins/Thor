@@ -1,7 +1,6 @@
 #include "DeepLearning/Api/Training/Executors/NativeQueuedTrainingRunner.h"
 
 #include "DeepLearning/Api/Loaders/Batch.h"
-#include "DeepLearning/Api/Loaders/Loader.h"
 #include "DeepLearning/Api/Data/BatchSession.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
@@ -67,7 +66,6 @@ struct ScalarStatSlot {
 
 struct NativeBatchCompletionParams {
     std::shared_ptr<QueuedTrainingState> state;
-    std::shared_ptr<Loader> loader;
     bool completionCallbackLaunched = false;
     bool completionCallbackFinished = false;
     ExampleType exampleType = ExampleType::TRAIN;
@@ -76,7 +74,7 @@ struct NativeBatchCompletionParams {
     uint64_t epochBatchNum = 0;
     uint64_t batchesInEpoch = 0;
     uint64_t slotIndex = 0;
-    Batch batchInput;
+    BatchLease batchLease;
     std::map<std::string, ThorImplementation::Tensor> batchOutput;
     std::vector<ScalarStatSlot> scalarStats;
 };
@@ -1468,9 +1466,8 @@ NativeQueuedExecutionGraph resolveNativeQueuedExecutionGraph(const TrainingRunRe
 }
 
 std::map<std::string, std::optional<ThorImplementation::TensorPlacement>> resolveNetworkInputBatchPlacements(
-    const std::shared_ptr<Loader>& loader, const ExecutableTrainingPlan& plan) {
-    std::shared_ptr<BatchSession> session =
-        std::dynamic_pointer_cast<BatchSession>(loader);
+    const std::shared_ptr<BatchSession>& batchSession, const ExecutableTrainingPlan& plan) {
+    const std::shared_ptr<BatchSession>& session = batchSession;
     std::map<std::string, std::optional<ThorImplementation::TensorPlacement>> placements;
     for (const StepExecutable& step : plan.getSteps()) {
         for (const TrainingInputBinding& binding : step.getResolvedInputBindings()) {
@@ -1489,10 +1486,9 @@ std::map<std::string, std::optional<ThorImplementation::TensorPlacement>> resolv
     return placements;
 }
 
-void cancelBatchSession(const std::shared_ptr<Loader>& loader) {
-    if (std::shared_ptr<BatchSession> session =
-            std::dynamic_pointer_cast<BatchSession>(loader)) {
-        session->cancel();
+void cancelBatchSession(const std::shared_ptr<BatchSession>& batchSession) {
+    if (batchSession != nullptr) {
+        batchSession->cancel();
     }
 }
 
@@ -1529,7 +1525,7 @@ void CUDART_CB completeNativeQueuedBatch(void* data) {
         THOR_THROW_IF_FALSE(params->scalarStats.size() == state->scalarTensorNames.size());
         for (size_t i = 0; i < state->scalarTensorNames.size(); ++i) {
             params->scalarStats[i].value = copyScalarStatTensor(
-                params->batchInput, params->batchOutput, state->scalarTensorNames[i], state->aggregateLossTensorNames);
+                params->batchLease.get(), params->batchOutput, state->scalarTensorNames[i], state->aggregateLossTensorNames);
             params->scalarStats[i].present = true;
         }
 
@@ -1575,7 +1571,7 @@ void CUDART_CB completeNativeQueuedBatch(void* data) {
     } catch (...) {
         // Never let exceptions escape a CUDA host callback: doing so terminates the process.
         // Store the failure and mark the slot ready so the consumer thread can return
-        // loader-owned tensors and rethrow the error through Trainer.fit(...).
+        // batchSession-owned tensors and rethrow the error through Trainer.fit(...).
         std::lock_guard<std::mutex> lock(state->mutex);
         if (state->failure == nullptr) {
             state->failure = std::current_exception();
@@ -1618,7 +1614,7 @@ void waitForBatchDataUnlocked(QueuedTrainingState& state, std::unique_lock<std::
 
 struct BatchPopResult {
     bool hasBatch = false;
-    std::shared_ptr<Loader> loader;
+    BatchLease batchLease;
     ExampleType exampleType = ExampleType::TRAIN;
     TrainingEventPhase phase = TrainingEventPhase::TRAIN;
     uint64_t currentEpoch = 0;
@@ -1629,7 +1625,6 @@ struct BatchPopResult {
     uint64_t poppedInEpoch = 0;
     uint64_t batchesInEpoch = 0;
     std::chrono::high_resolution_clock::time_point completionTime{};
-    Batch batchInput;
     std::vector<ScalarStatSlot> scalarStats;
 };
 
@@ -1649,7 +1644,6 @@ BatchPopResult popBatchData(const std::shared_ptr<QueuedTrainingState>& state) {
 
     BatchPopResult result;
     result.hasBatch = true;
-    result.loader = params.loader;
     result.exampleType = params.exampleType;
     result.phase = slot.phase;
     result.currentEpoch = params.currentEpoch;
@@ -1658,13 +1652,12 @@ BatchPopResult popBatchData(const std::shared_ptr<QueuedTrainingState>& state) {
     result.doneInEpoch = slot.doneInEpochAtComplete;
     result.batchesInEpoch = slot.batchesInEpoch;
     result.completionTime = slot.completionTime;
-    result.batchInput = std::move(params.batchInput);
+    result.batchLease = std::move(params.batchLease);
     result.scalarStats = slot.scalarStats;
 
     params.batchOutput.clear();
     params.completionCallbackLaunched = false;
     params.completionCallbackFinished = false;
-    params.loader.reset();
     params.state.reset();
     for (ScalarStatSlot& scalarStat : slot.scalarStats) {
         scalarStat.present = false;
@@ -1734,7 +1727,7 @@ void releaseQueuedTrainingStateReferencesAfterAbort(const std::shared_ptr<Queued
         return;
     }
 
-    std::vector<std::tuple<std::shared_ptr<Loader>, ExampleType, Batch>> batchesToReturn;
+    std::vector<BatchLease> leasesToRelease;
 
     std::unique_lock<std::mutex> lock(state->mutex);
     if (!submittedWorkDrained && queuedCompletionCallbacksPendingUnlocked(*state)) {
@@ -1750,10 +1743,8 @@ void releaseQueuedTrainingStateReferencesAfterAbort(const std::shared_ptr<Queued
     }
 
     for (NativeBatchCompletionParams& params : state->completionParams) {
-        if (params.loader != nullptr && !params.batchInput.empty()) {
-            batchesToReturn.emplace_back(params.loader, params.exampleType, std::move(params.batchInput));
-        } else {
-            params.batchInput.clear();
+        if (!params.batchLease.empty()) {
+            leasesToRelease.push_back(std::move(params.batchLease));
         }
         params.batchOutput.clear();
         for (ScalarStatSlot& scalarStat : params.scalarStats) {
@@ -1762,7 +1753,6 @@ void releaseQueuedTrainingStateReferencesAfterAbort(const std::shared_ptr<Queued
         }
         params.completionCallbackLaunched = false;
         params.completionCallbackFinished = false;
-        params.loader.reset();
         params.state.reset();
     }
 
@@ -1785,15 +1775,7 @@ void releaseQueuedTrainingStateReferencesAfterAbort(const std::shared_ptr<Queued
     state->inFlightBatches = 0;
     lock.unlock();
 
-    for (auto& [loader, exampleType, batchInput] : batchesToReturn) {
-        try {
-            loader->returnBatchBuffers(exampleType, std::move(batchInput));
-        } catch (...) {
-            // This function runs while an earlier training failure/cancellation is
-            // already being propagated. Do not mask that primary failure during
-            // cleanup; the loader will still be released below.
-        }
-    }
+    leasesToRelease.clear();
     state->batchPopped.notify_all();
 }
 
@@ -1864,14 +1846,14 @@ struct QueuedEpochPhaseWork {
 class NativeQueuedEpochScheduler {
    public:
     NativeQueuedEpochScheduler(std::shared_ptr<PlacedNetwork> placedNetwork,
-                               std::shared_ptr<Loader> loader,
+                               std::shared_ptr<BatchSession> batchSession,
                                const ExecutableTrainingPlan& plan,
                                const NativeQueuedTrainingOptions& options,
                                std::shared_ptr<QueuedTrainingState> state,
                                uint64_t currentEpoch,
                                TrainingCancellationToken cancellationToken)
         : placedNetwork(std::move(placedNetwork)),
-          loader(std::move(loader)),
+          batchSession(std::move(batchSession)),
           plan(plan),
           options(options),
           state(std::move(state)),
@@ -1981,7 +1963,6 @@ class NativeQueuedEpochScheduler {
 
             NativeBatchCompletionParams* params = &state->completionParams[slotIndex];
             params->state = state;
-            params->loader = loader;
             params->exampleType = exampleType;
             params->phase = diagnosticPhase;
             params->completionCallbackLaunched = false;
@@ -1990,20 +1971,20 @@ class NativeQueuedEpochScheduler {
             params->epochBatchNum = epochBatchNum;
             params->batchesInEpoch = batchesPerEpoch;
             params->slotIndex = slotIndex;
-            params->batchInput.clear();
+            params->batchLease.reset();
             params->batchOutput.clear();
             for (ScalarStatSlot& scalarStat : params->scalarStats) {
                 scalarStat.present = false;
                 scalarStat.value = 0.0f;
             }
 
-            const auto getBatchStart = diagnosticNow(collectQueueDiagnostics);
-            uint64_t loaderBatchNum = epochBatchNum;
-            params->batchInput = loader->getBatch(exampleType, loaderBatchNum);
-            const auto getBatchFinish = diagnosticNow(collectQueueDiagnostics);
-            const uint64_t getBatchWaitMicros = collectQueueDiagnostics ? elapsedMicros(getBatchStart, getBatchFinish) : 0;
-            if (collectQueueDiagnostics && shouldEmitQueueDiagnostic(batch + 1, getBatchWaitMicros)) {
-                emitNativeQueueDiagnostic("get_batch_done",
+            const auto acquireBatchStart = diagnosticNow(collectQueueDiagnostics);
+            uint64_t sessionBatchNum = epochBatchNum;
+            params->batchLease = batchSession->leaseBatch(exampleType, sessionBatchNum);
+            const auto acquireBatchFinish = diagnosticNow(collectQueueDiagnostics);
+            const uint64_t acquireBatchWaitMicros = collectQueueDiagnostics ? elapsedMicros(acquireBatchStart, acquireBatchFinish) : 0;
+            if (collectQueueDiagnostics && shouldEmitQueueDiagnostic(batch + 1, acquireBatchWaitMicros)) {
+                emitNativeQueueDiagnostic("acquire_batch_done",
                                           diagnosticPhase,
                                           currentEpoch,
                                           epochBatchNum,
@@ -2011,7 +1992,7 @@ class NativeQueuedEpochScheduler {
                                           inFlightAfterReserve,
                                           initialEpochBatchNum + batch,
                                           batchesPerEpoch,
-                                          getBatchWaitMicros);
+                                          acquireBatchWaitMicros);
             }
 
             const auto submitStart = diagnosticNow(collectQueueDiagnostics);
@@ -2026,7 +2007,7 @@ class NativeQueuedEpochScheduler {
             for (const StepExecutable& step : steps) {
                 for (uint32_t repeat = 0; repeat < step.getRepeatCount(); ++repeat) {
                     const auto bindStart = diagnosticNow(collectQueueDiagnostics);
-                    Batch boundBatchInput = bindBatchInputs(step, params->batchInput);
+                    Batch boundBatchInput = bindBatchInputs(step, params->batchLease.get());
                     const auto bindFinish = diagnosticNow(collectQueueDiagnostics);
                     if (collectQueueDiagnostics) {
                         bindMicros += elapsedMicros(bindStart, bindFinish);
@@ -2187,7 +2168,7 @@ class NativeQueuedEpochScheduler {
                                                         batchesPerEpoch,
                                                         elapsedMicros(optimizerStart, optimizerFinish),
                                                         elapsedMicros(reserveStart, reserveFinish),
-                                                        getBatchWaitMicros,
+                                                        acquireBatchWaitMicros,
                                                         elapsedMicros(submitStart, submitFinish),
                                                         elapsedMicros(completionSetupStart, completionSetupFinish),
                                                         elapsedMicros(scheduleIterationStart, completionSetupFinish));
@@ -2204,7 +2185,7 @@ class NativeQueuedEpochScheduler {
 
    private:
     std::shared_ptr<PlacedNetwork> placedNetwork;
-    std::shared_ptr<Loader> loader;
+    std::shared_ptr<BatchSession> batchSession;
     const ExecutableTrainingPlan& plan;
     NativeQueuedTrainingOptions options;
     std::shared_ptr<QueuedTrainingState> state;
@@ -2224,7 +2205,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     NativeQueuedSigintScope sigintScope;
 
     THOR_THROW_IF_FALSE(request.network != nullptr || request.trainingProgram != nullptr);
-    THOR_THROW_IF_FALSE(request.loader != nullptr);
+    THOR_THROW_IF_FALSE(request.batchSession != nullptr);
     THOR_THROW_IF_FALSE(request.epochs > 0);
     THOR_THROW_IF_FALSE(options.maxInFlightBatches >= 1);
     THOR_THROW_IF_FALSE(request.executionMode == TrainingRunExecutionMode::FIT ||
@@ -2257,7 +2238,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         throw std::runtime_error("Trainer evaluation requires a concrete evaluation phase.");
     }
 
-    const uint64_t batchSize = request.loader->getBatchSize();
+    const uint64_t batchSize = request.batchSession->getBatchSize();
     std::vector<Event> initDoneEvents;
     request.cancellationToken.throwIfCancellationRequested();
     std::shared_ptr<PlacedNetwork> placedNetwork = executionNetwork->place(batchSize, initDoneEvents, /*inferenceOnly=*/evaluateOnly);
@@ -2304,7 +2285,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     request.cancellationToken.throwIfCancellationRequested();
     // Output slots are always network-owned, so allocate them before querying
     // free memory for device-dataset materialization. Input slots depend on the
-    // effective loader and are configured below: same-GPU device-dataset inputs
+    // effective session and are configured below: same-GPU device-dataset inputs
     // copy directly into NetworkInput::featureOutput and must not allocate a
     // duplicate max_in_flight staging ring.
     placedNetwork->preallocateOutputSlots(static_cast<uint32_t>(options.maxInFlightBatches));
@@ -2314,15 +2295,10 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         ExecutableTrainingPlan::compile(*trainingProgram, *placedNetwork, /*resolveEmptyUpdateParametersAsAllTrainable=*/!evaluateOnly);
     ensureNativeQueuedPlanCompatible(plan, *executionNetwork, evaluateOnly);
 
-    std::shared_ptr<Loader> effectiveLoader = request.loader;
+    std::shared_ptr<BatchSession> effectiveSession = request.batchSession;
     DeviceDatasetStorageReport deviceDatasetStorageReport = request.deviceDatasetStorageReport;
     if (!evaluateOnly && request.trainingData != nullptr) {
-        std::shared_ptr<BatchSession> sourceSession =
-            std::dynamic_pointer_cast<BatchSession>(request.loader);
-        if (sourceSession == nullptr) {
-            throw std::runtime_error(
-                "TrainingData execution requires a BatchSession source.");
-        }
+        std::shared_ptr<BatchSession> sourceSession = request.batchSession;
         const uint64_t deviceDatasetBatchQueueDepth =
             std::max<uint64_t>(uint64_t{1}, options.maxInFlightBatches);
         DeviceDatasetStorageSelection deviceDatasetSelection =
@@ -2333,15 +2309,15 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                     ThorImplementation::TensorPlacement::MemDevices::GPU,
                     placedNetwork->getStampedNetwork(0).getGpuNum()),
                 deviceDatasetBatchQueueDepth);
-        effectiveLoader = std::move(deviceDatasetSelection.session);
+        effectiveSession = std::move(deviceDatasetSelection.session);
         deviceDatasetStorageReport = std::move(deviceDatasetSelection.report);
     }
 
     request.cancellationToken.throwIfCancellationRequested();
-    placedNetwork->configureBatchInputPlacements(resolveNetworkInputBatchPlacements(effectiveLoader, plan));
+    placedNetwork->configureBatchInputPlacements(resolveNetworkInputBatchPlacements(effectiveSession, plan));
     // Host/cross-device inputs retain one staging tensor per queue slot. Fully
     // device-resident inputs allocate zero NetworkInput slots; queue depth is
-    // provided by the device loader's reusable batch tensor sets instead.
+    // provided by the device session's reusable batch tensor sets instead.
     placedNetwork->preallocateInputSlots(static_cast<uint32_t>(options.maxInFlightBatches));
 
     const bool modelSelectionEnabled = !evaluateOnly && request.checkBestModelEveryEpochs > 0;
@@ -2400,7 +2376,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                                 const std::shared_ptr<QueuedTrainingState>& state) {
         TrainingStatsSnapshot snapshot;
         snapshot.networkName = placedNetwork->getNetworkName();
-        snapshot.datasetName = effectiveLoader->getDatasetName();
+        snapshot.datasetName = effectiveSession->getDatasetName();
         snapshot.phase = phase;
         snapshot.epoch = epoch;
         snapshot.epochs = totalRequestedEpochs;
@@ -2447,19 +2423,19 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
             request.cancellationToken.throwIfCancellationRequested();
             const ExampleType exampleType = phaseSpec.first;
             const TrainingEventPhase phase = phaseSpec.second;
-            const uint64_t loaderBatchNum = effectiveLoader->getNextBatchNum(exampleType);
-            const uint64_t loaderBatchesPerEpoch = effectiveLoader->getNumBatchesPerEpoch(exampleType);
-            if (loaderBatchNum > loaderBatchesPerEpoch) {
-                throw std::runtime_error("Loader returned next batch number beyond batches per epoch for " + phaseName(phase) + ".");
+            const uint64_t sessionBatchNum = effectiveSession->getNextBatchNum(exampleType);
+            const uint64_t sessionBatchesPerEpoch = effectiveSession->getNumBatchesPerEpoch(exampleType);
+            if (sessionBatchNum > sessionBatchesPerEpoch) {
+                throw std::runtime_error("BatchSession returned next batch number beyond batches per epoch for " + phaseName(phase) + ".");
             }
 
-            uint64_t publicInitialBatchNum = loaderBatchNum;
-            uint64_t publicBatchesPerEpoch = loaderBatchesPerEpoch;
-            uint64_t batchesToRun = loaderBatchesPerEpoch - loaderBatchNum;
+            uint64_t publicInitialBatchNum = sessionBatchNum;
+            uint64_t publicBatchesPerEpoch = sessionBatchesPerEpoch;
+            uint64_t batchesToRun = sessionBatchesPerEpoch - sessionBatchNum;
             if (!evaluateOnly && phase == TrainingEventPhase::TRAIN && request.maxTrainingBatchesPerEpoch.has_value() &&
-                loaderBatchesPerEpoch > request.maxTrainingBatchesPerEpoch.value()) {
+                sessionBatchesPerEpoch > request.maxTrainingBatchesPerEpoch.value()) {
                 // A capped public training epoch is a fixed-size work quantum.  It must not end early just because
-                // the underlying loader's full-dataset epoch boundary is reached; loaders already wrap and continue
+                // the underlying session's full-dataset epoch boundary is reached; sessions already wrap and continue
                 // streaming batches.  Keeping the public epoch at exactly the cap lets phased training express a
                 // stable amount of work per phase even when one full pass over the split is much larger than the cap.
                 batchesToRun = request.maxTrainingBatchesPerEpoch.value();
@@ -2515,7 +2491,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
 
         emitReadyPhaseLifecycleEvents();
 
-        NativeQueuedEpochScheduler scheduler(placedNetwork, effectiveLoader, plan, options, state, currentEpoch, request.cancellationToken);
+        NativeQueuedEpochScheduler scheduler(placedNetwork, effectiveSession, plan, options, state, currentEpoch, request.cancellationToken);
         std::thread schedulingThread([scheduler = std::move(scheduler), state, phaseWorks]() mutable {
             try {
                 for (const QueuedEpochPhaseWork& work : phaseWorks) {
@@ -2564,7 +2540,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
             // A scheduler may be blocked waiting for a session-owned reusable
             // batch buffer. Cancel the session before joining so cancellation
             // wakes that wait without depending on another completion callback.
-            cancelBatchSession(effectiveLoader);
+            cancelBatchSession(effectiveSession);
             if (schedulingThread.joinable()) {
                 schedulingThread.join();
             }
@@ -2583,7 +2559,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         auto requestExternalCancel = [&]() {
             if (request.cancellationToken.isCancellationRequested()) {
                 requestQueuedTrainingCancellation(state);
-                cancelBatchSession(effectiveLoader);
+                cancelBatchSession(effectiveSession);
             }
             if (sigintScope.interrupted()) {
                 {
@@ -2593,7 +2569,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                 }
                 state->batchFinished.notify_all();
                 state->batchPopped.notify_all();
-                cancelBatchSession(effectiveLoader);
+                cancelBatchSession(effectiveSession);
             }
         };
 
@@ -2605,9 +2581,6 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                     break;
                 }
 
-                if (completedBatch.loader != nullptr) {
-                    completedBatch.loader->returnBatchBuffers(completedBatch.exampleType, std::move(completedBatch.batchInput));
-                }
                 if (shouldEmitQueueDiagnostic(completedBatch.poppedInEpoch)) {
                     emitNativeQueueDiagnostic("pop_return",
                                               completedBatch.phase,

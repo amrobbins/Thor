@@ -54,7 +54,7 @@ uint64_t computeDefaultShardReadQueueDepth(uint64_t exampleSizeInBytes, uint64_t
     const uint64_t safeExampleSize = std::max<uint64_t>(exampleSizeInBytes, 1);
     const uint64_t byteTargetDepth = clampUint64(TARGET_READ_BYTES / safeExampleSize, MIN_READS, LEGACY_MAX_READS);
 
-    // The indexed named reader uses one loader worker per batch and the async
+    // The indexed named reader uses one assembler worker per batch and the async
     // readv session owns a bounded pool of reusable iovec arrays per shard.
     // If this queue is smaller than the batch, the worker can exhaust the pool
     // while still in the submit loop and spend most of the batch load time
@@ -174,7 +174,7 @@ bool shouldEmitStats(uint64_t index) {
 
 IndexedLocalNamedBatchAssembler::IndexedLocalNamedBatchAssembler(std::shared_ptr<IndexedLocalNamedExampleReader> reader,
                                                                  DatasetLayout layout,
-                                                                 std::shared_ptr<const std::vector<uint64_t>> indices,
+                                                                 std::shared_ptr<const Thor::ExampleIndexSet> indices,
                                                                  std::string splitName,
                                                                  uint64_t batchSize,
                                                                  uint64_t batchQueueDepth,
@@ -208,7 +208,6 @@ IndexedLocalNamedBatchAssembler::IndexedLocalNamedBatchAssembler(std::shared_ptr
     THOR_THROW_IF_FALSE(batchSize > 0);
     THOR_THROW_IF_FALSE(batchQueueDepth > 0);
     this->layout.validate();
-    THOR_THROW_IF_FALSE(recordSizeBytes > 0);
     THOR_THROW_IF_FALSE(recordSizeBytes == this->layout.recordSizeBytes());
     THOR_THROW_IF_FALSE(this->reader->getTensorCount() == this->layout.tensors().size());
     THOR_THROW_IF_FALSE(this->reader->getWindowedTensorCount() == this->layout.windowedTensors().size());
@@ -219,8 +218,14 @@ IndexedLocalNamedBatchAssembler::IndexedLocalNamedBatchAssembler(std::shared_ptr
     shardRequestQueueDepth = loadWorkQueueDepth;
     completedBatchQueueDepth = computeCompletedBatchQueueDepth(batchQueueDepth);
 
-    for (uint64_t index : *this->indices) {
-        validateGlobalIndex(index, this->splitName.c_str());
+    if (this->indices->isRangeBacked()) {
+        for (const Thor::ExampleIndexRange &range : this->indices->getRanges()) {
+            validateGlobalIndex(range.last(), this->splitName.c_str());
+        }
+    } else {
+        for (uint64_t position = 0; position < this->indices->size(); ++position) {
+            validateGlobalIndex(this->indices->at(position), this->splitName.c_str());
+        }
     }
 
     if (randomized) {
@@ -951,7 +956,7 @@ bool IndexedLocalNamedBatchAssembler::pushLoadWorkWithDrain(const IndexedLocalNa
         }
 
         // Load work is intentionally coarse grained: one queue item covers a
-        // contiguous slot range, and the loader-owned worker does all direct
+        // contiguous slot range, and the assembler-owned worker does all direct
         // reads for that range.  If all workers are busy, yield rather than
         // blocking the assembler away from completed-batch publication.
         std::this_thread::yield();
@@ -1076,7 +1081,7 @@ bool IndexedLocalNamedBatchAssembler::publishCompletedBatches() {
     }
 }
 
-void IndexedLocalNamedBatchAssembler::getBatch(std::map<std::string, Tensor> &tensors, uint64_t &batchNum) {
+void IndexedLocalNamedBatchAssembler::acquireBatch(std::map<std::string, Tensor> &tensors, uint64_t &batchNum) {
     if (batchesPerEpoch == 0) {
         throw std::runtime_error("IndexedLocalNamedBatchAssembler cannot get a batch from an empty split.");
     }

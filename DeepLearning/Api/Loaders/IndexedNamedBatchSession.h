@@ -19,8 +19,8 @@
  * Per-run indexed named batch session backed by one immutable named dataset.
  *
  * The dataset reader exposes a canonical indexed row space.  train/validate/test are
- * logical views over that row space, supplied as index
- * arrays. For the FileDataset backend, fold-specific sessions share one
+ * logical views over that row space, supplied as immutable index sets.
+ * For the FileDataset backend, fold-specific sessions share one
  * physical dataset instead of duplicating records per fold.
  */
 class IndexedNamedBatchSession : public Thor::BatchSession {
@@ -38,8 +38,6 @@ class IndexedNamedBatchSession : public Thor::BatchSession {
     IndexedNamedBatchSession(IndexedNamedBatchSession &&) = delete;
     IndexedNamedBatchSession &operator=(IndexedNamedBatchSession &&) = delete;
 
-    Batch getBatch(ExampleType exampleType, uint64_t &batchNum) override;
-    void returnBatchBuffers(ExampleType exampleType, Batch &&batch) override;
 
     uint64_t getNumBatchesPerEpoch(ExampleType exampleType) override;
     uint64_t getNumExamples(ExampleType exampleType) override;
@@ -55,12 +53,16 @@ class IndexedNamedBatchSession : public Thor::BatchSession {
     [[nodiscard]] uint64_t getBatchQueueDepth() const;
     [[nodiscard]] bool getRandomizeTrain() const;
     [[nodiscard]] std::optional<uint64_t> getRandomSeed() const;
-    [[nodiscard]] const std::vector<uint64_t> &getSplitIndices(ExampleType exampleType) const;
+    [[nodiscard]] const Thor::ExampleIndexSet &getSplitIndices(ExampleType exampleType) const;
     [[nodiscard]] bool hasExplicitTestSplit() const;
     void cancel() override;
     [[nodiscard]] IndexedLocalNamedBatchAssemblerStats getStatsSnapshot(ExampleType exampleType);
 
 #ifdef THOR_GTEST
+    void recycleBatchForTesting(ExampleType exampleType, Batch&& batch) {
+        recycleBatch(exampleType, std::move(batch));
+    }
+
     [[nodiscard]] const IndexedLocalNamedExampleReader *getDatasetReaderForTesting() const {
         return dataset->getReader().get();
     }
@@ -72,6 +74,8 @@ class IndexedNamedBatchSession : public Thor::BatchSession {
 #endif
 
    private:
+    Batch acquireBatch(ExampleType exampleType, uint64_t &batchNum) override;
+    void recycleBatch(ExampleType exampleType, Batch &&batch) override;
     std::shared_ptr<const Thor::FileDataset> dataset;
     Thor::DatasetSplitManifest splitManifest;
     std::set<Thor::DatasetFieldId> requiredFieldIds;
@@ -87,9 +91,9 @@ class IndexedNamedBatchSession : public Thor::BatchSession {
     std::atomic<bool> cancelled{false};
 
     void validateIndex(uint64_t index, const char *splitName) const;
-    void validateIndices(const std::vector<uint64_t> &indices, const char *splitName) const;
+    void validateIndices(const Thor::ExampleIndexSet &indices, const char *splitName) const;
     std::unique_ptr<IndexedLocalNamedBatchAssembler> createAssembler(
-        std::shared_ptr<const std::vector<uint64_t>> indices,
+        std::shared_ptr<const Thor::ExampleIndexSet> indices,
         const char *splitName,
         bool randomized,
         std::optional<uint64_t> splitSeed) const;
