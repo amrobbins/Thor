@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from .._thor.training import BatchPolicy
 from .._thor.training import BatchSession
+from .._thor.training import DatasetAccessPolicy
 from .._thor.training import DatasetField
 from .._thor.training import DatasetFieldKind
 from .._thor.training import DatasetId
 from .._thor.training import DatasetSchema
 from .._thor.training import DatasetSplitManifest
+from .._thor.training import DeviceDatasetStorage
 from .._thor.training import ExampleIndexSet
 from .._thor.training import IndexedNamedBatchLoader
 from .._thor.training import IndexedNamedBatchSession
@@ -29,11 +31,13 @@ from ._split import make_numpy_dict_splits_DEPRECATED
 __all__ = [
     "BatchPolicy",
     "BatchSession",
+    "DatasetAccessPolicy",
     "DatasetField",
     "DatasetFieldKind",
     "DatasetId",
     "DatasetSchema",
     "DatasetSplitManifest",
+    "DeviceDatasetStorage",
     "ExampleIndexSet",
     "IndexedNamedBatchLoader",
     "IndexedNamedBatchSession",

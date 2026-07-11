@@ -1,16 +1,15 @@
 #include "DeepLearning/Api/Training/DeviceDatasetStorageSelection.h"
 
 #include "DeepLearning/Api/Data/NamedDataset.h"
+#include "DeepLearning/Api/Data/LocalNamedDataset.h"
+#include "DeepLearning/Api/Data/TrainingData.h"
 #include "DeepLearning/Api/Loaders/DeviceResidentNamedBatchSession.h"
 #include "DeepLearning/Api/Loaders/DeviceResidentWindowedNamedBatchSession.h"
 #include "DeepLearning/Api/Training/DeviceDatasetResidency.h"
 #include "DeepLearning/Implementation/ThorError.h"
-#include "Utilities/Common/ScopedGpu.h"
 #include "Utilities/Loaders/DeviceResidentNamedDataset.h"
 #include "Utilities/Loaders/MaterializedNamedDatasetSnapshot.h"
 #include "Utilities/Loaders/NamedDatasetMaterializer.h"
-
-#include <cuda_runtime_api.h>
 
 #include <chrono>
 #include <exception>
@@ -24,9 +23,6 @@
 
 namespace Thor {
 namespace {
-
-constexpr uint64_t DEVICE_DATASET_BEST_EFFORT_SLACK_BYTES =
-    2ull * 1024ull * 1024ull * 1024ull;
 
 uint64_t checkedAdd(uint64_t left, uint64_t right, const char *context) {
     if (left > std::numeric_limits<uint64_t>::max() - right) {
@@ -158,20 +154,6 @@ uint64_t estimateDeviceResidentWindowedDatasetRequiredBytes(
         windowedBytesPerExample(dataset.layout));
 }
 
-bool fitsWithSlack(
-    uint64_t requiredBytes,
-    uint64_t availableBytes,
-    DeviceDatasetStorage requested) {
-    if (requested == DeviceDatasetStorage::STRICT) {
-        return requiredBytes <= availableBytes;
-    }
-    if (availableBytes <= DEVICE_DATASET_BEST_EFFORT_SLACK_BYTES) {
-        return false;
-    }
-    return requiredBytes <=
-           availableBytes - DEVICE_DATASET_BEST_EFFORT_SLACK_BYTES;
-}
-
 std::set<std::string> windowedTensorNames(
     const LocalNamedExampleLayout &layout) {
     std::set<std::string> names;
@@ -220,37 +202,14 @@ std::runtime_error strictFailure(const DeviceDatasetStorageReport &report) {
 }
 
 DeviceDatasetStorageSelection fallbackSelection(
-    const std::shared_ptr<Loader> &sourceLoader,
+    const std::shared_ptr<BatchSession> &sourceSession,
     DeviceDatasetStorageReport report,
     DeviceDatasetStorage requested) {
     report.requested = requested;
     if (requested == DeviceDatasetStorage::STRICT) {
         throw strictFailure(report);
     }
-    return DeviceDatasetStorageSelection{sourceLoader, std::move(report)};
-}
-
-std::optional<uint64_t> queryAvailableDeviceBytes(
-    ThorImplementation::TensorPlacement devicePlacement,
-    std::string &failureReason) {
-    if (devicePlacement.getMemDevice() !=
-        ThorImplementation::TensorPlacement::MemDevices::GPU) {
-        failureReason = "invalid_device_placement";
-        return std::nullopt;
-    }
-
-    ScopedGpu scopedGpu(devicePlacement.getDeviceNum());
-    size_t freeBytes = 0;
-    size_t totalBytes = 0;
-    const cudaError_t status = cudaMemGetInfo(&freeBytes, &totalBytes);
-    (void)totalBytes;
-    if (status != cudaSuccess) {
-        failureReason =
-            std::string("device_memory_query_failed:") +
-            cudaGetErrorString(status);
-        return std::nullopt;
-    }
-    return static_cast<uint64_t>(freeBytes);
+    return DeviceDatasetStorageSelection{sourceSession, std::move(report)};
 }
 
 void applyAcquisitionTelemetry(
@@ -269,8 +228,8 @@ void applyAcquisitionTelemetry(
     }
 }
 
-DeviceDatasetStorageSelection selectSharedResidencyLoader(
-    const std::shared_ptr<Loader> &sourceLoader,
+DeviceDatasetStorageSelection selectSharedResidencySession(
+    const std::shared_ptr<BatchSession> &sourceSession,
     const std::shared_ptr<const NamedDataset> &namedDataset,
     const DatasetMaterializationDescription &dataset,
     const DeviceDatasetSessionDescription &session,
@@ -317,11 +276,11 @@ DeviceDatasetStorageSelection selectSharedResidencyLoader(
                         devicePlacement));
             });
         DeviceDatasetResidencyAcquisition acquisition = cache.acquire(request);
-        auto effectiveLoader = std::make_shared<DeviceResidentNamedBatchSession>(
+        auto effectiveSession = std::make_shared<DeviceResidentNamedBatchSession>(
             acquisition.lease,
             session,
             batchQueueDepth);
-        effectiveLoader->setDatasetName(sourceLoader->getDatasetName());
+        effectiveSession->setDatasetName(sourceSession->getDatasetName());
         report.used = true;
         report.reason.clear();
         report.examples = acquisition.lease->getNumExamples();
@@ -333,7 +292,7 @@ DeviceDatasetStorageSelection selectSharedResidencyLoader(
             availableBytesOverride);
         report.materializationSeconds = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - started).count();
-        return DeviceDatasetStorageSelection{effectiveLoader, std::move(report)};
+        return DeviceDatasetStorageSelection{effectiveSession, std::move(report)};
     } catch (const DeviceDatasetResidencyAdmissionError &e) {
         fullAdmissionFailed = true;
         report.reason = "insufficient_device_memory";
@@ -344,7 +303,7 @@ DeviceDatasetStorageSelection selectSharedResidencyLoader(
         if (requested == DeviceDatasetStorage::STRICT) {
             report.materializationSeconds = std::chrono::duration<double>(
                 std::chrono::steady_clock::now() - started).count();
-            return fallbackSelection(sourceLoader, std::move(report), requested);
+            return fallbackSelection(sourceSession, std::move(report), requested);
         }
     } catch (...) {
         fullConstructionFailure = std::current_exception();
@@ -357,7 +316,7 @@ DeviceDatasetStorageSelection selectSharedResidencyLoader(
         if (requested == DeviceDatasetStorage::STRICT || !hasWindowedTensors) {
             report.materializationSeconds = std::chrono::duration<double>(
                 std::chrono::steady_clock::now() - started).count();
-            return fallbackSelection(sourceLoader, std::move(report), requested);
+            return fallbackSelection(sourceSession, std::move(report), requested);
         }
     }
 
@@ -365,7 +324,7 @@ DeviceDatasetStorageSelection selectSharedResidencyLoader(
         report.reason = "insufficient_device_memory";
         report.materializationSeconds = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - started).count();
-        return fallbackSelection(sourceLoader, std::move(report), requested);
+        return fallbackSelection(sourceSession, std::move(report), requested);
     }
 
     try {
@@ -388,13 +347,13 @@ DeviceDatasetStorageSelection selectSharedResidencyLoader(
                         windowNames));
             });
         DeviceDatasetResidencyAcquisition acquisition = cache.acquire(request);
-        auto effectiveLoader =
+        auto effectiveSession =
             std::make_shared<DeviceResidentWindowedNamedBatchSession>(
                 dataset,
                 session,
                 acquisition.lease,
                 batchQueueDepth);
-        effectiveLoader->setDatasetName(sourceLoader->getDatasetName());
+        effectiveSession->setDatasetName(sourceSession->getDatasetName());
         report.used = true;
         report.reason = fullConstructionFailure == nullptr
                             ? "windowed_features_only"
@@ -408,7 +367,7 @@ DeviceDatasetStorageSelection selectSharedResidencyLoader(
             availableBytesOverride);
         report.materializationSeconds = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - started).count();
-        return DeviceDatasetStorageSelection{effectiveLoader, std::move(report)};
+        return DeviceDatasetStorageSelection{effectiveSession, std::move(report)};
     } catch (const DeviceDatasetResidencyAdmissionError &e) {
         report.reason = fullAdmissionFailed
                             ? "insufficient_device_memory_for_full_or_windowed_dataset"
@@ -423,150 +382,9 @@ DeviceDatasetStorageSelection selectSharedResidencyLoader(
     }
     report.materializationSeconds = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - started).count();
-    return fallbackSelection(sourceLoader, std::move(report), requested);
+    return fallbackSelection(sourceSession, std::move(report), requested);
 }
 
-DeviceDatasetStorageSelection selectUnsharedResidencyLoader(
-    const std::shared_ptr<Loader> &sourceLoader,
-    const DatasetMaterializationDescription &dataset,
-    const DeviceDatasetSessionDescription &session,
-    DeviceDatasetStorage requested,
-    ThorImplementation::TensorPlacement devicePlacement,
-    uint64_t batchQueueDepth,
-    uint64_t fullRequiredBytes,
-    uint64_t windowedRequiredBytes,
-    std::optional<uint64_t> availableBytesOverride,
-    DeviceDatasetStorageReport report) {
-    if (availableBytesOverride.has_value()) {
-        report.availableBytesAfterPlacement = availableBytesOverride.value();
-    } else {
-        std::string memoryQueryFailure;
-        std::optional<uint64_t> availableBytes = queryAvailableDeviceBytes(
-            devicePlacement,
-            memoryQueryFailure);
-        if (!availableBytes.has_value()) {
-            report.reason = memoryQueryFailure;
-            return fallbackSelection(sourceLoader, std::move(report), requested);
-        }
-        report.availableBytesAfterPlacement = availableBytes.value();
-    }
-
-    const bool fullFits = fitsWithSlack(
-        fullRequiredBytes,
-        report.availableBytesAfterPlacement,
-        requested);
-    if (!fullFits && requested == DeviceDatasetStorage::STRICT) {
-        report.reason = "insufficient_device_memory";
-        return fallbackSelection(sourceLoader, std::move(report), requested);
-    }
-
-    const bool hasWindowedTensors =
-        dataset.layout.hasWindowedTensors() &&
-        windowedBytesPerExample(dataset.layout) != 0;
-    const bool windowedOnlyFits =
-        hasWindowedTensors &&
-        fitsWithSlack(
-            windowedRequiredBytes,
-            report.availableBytesAfterPlacement,
-            requested);
-
-    if (!fullFits && !windowedOnlyFits) {
-        report.reason = hasWindowedTensors
-                            ? "insufficient_device_memory_for_full_or_windowed_dataset"
-                            : "insufficient_device_memory";
-        return fallbackSelection(sourceLoader, std::move(report), requested);
-    }
-
-    const auto started = std::chrono::steady_clock::now();
-    std::optional<MaterializedNamedDatasetSnapshot> snapshot;
-    try {
-        snapshot.emplace(materializeNamedDatasetSnapshot(dataset));
-    } catch (const std::exception &e) {
-        report.reason =
-            std::string("device_dataset_materialization_failed:") + e.what();
-        report.materializationSeconds = std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - started).count();
-        return fallbackSelection(sourceLoader, std::move(report), requested);
-    }
-
-    std::exception_ptr fullDeviceFailure;
-    if (fullFits) {
-        try {
-            std::shared_ptr<DeviceResidentNamedDataset> resident =
-                DeviceResidentNamedDataset::fromSnapshot(
-                    *snapshot,
-                    devicePlacement);
-            auto effectiveLoader =
-                std::make_shared<DeviceResidentNamedBatchSession>(
-                    resident,
-                    session,
-                    batchQueueDepth);
-            effectiveLoader->setDatasetName(sourceLoader->getDatasetName());
-            report.used = true;
-            report.reason.clear();
-            report.examples = resident->getNumExamples();
-            report.requiredBytes = fullRequiredBytes;
-            report.residentBytes = resident->totalBytes();
-            report.materializationSeconds = std::chrono::duration<double>(
-                std::chrono::steady_clock::now() - started).count();
-            return DeviceDatasetStorageSelection{
-                effectiveLoader,
-                std::move(report)};
-        } catch (...) {
-            fullDeviceFailure = std::current_exception();
-            if (requested == DeviceDatasetStorage::STRICT ||
-                !windowedOnlyFits) {
-                try {
-                    std::rethrow_exception(fullDeviceFailure);
-                } catch (const std::exception &e) {
-                    report.reason =
-                        std::string("device_dataset_materialization_failed:") +
-                        e.what();
-                }
-                report.materializationSeconds = std::chrono::duration<double>(
-                    std::chrono::steady_clock::now() - started).count();
-                return fallbackSelection(
-                    sourceLoader,
-                    std::move(report),
-                    requested);
-            }
-        }
-    }
-
-    try {
-        std::shared_ptr<DeviceResidentNamedDataset> residentWindows =
-            DeviceResidentNamedDataset::fromSnapshot(
-                *snapshot,
-                devicePlacement,
-                windowedTensorNames(dataset.layout));
-        auto effectiveLoader =
-            std::make_shared<DeviceResidentWindowedNamedBatchSession>(
-                dataset,
-                session,
-                residentWindows,
-                batchQueueDepth);
-        effectiveLoader->setDatasetName(sourceLoader->getDatasetName());
-        report.used = true;
-        report.reason =
-            fullDeviceFailure == nullptr
-                ? "windowed_features_only"
-                : "full_dataset_failed_windowed_features_only";
-        report.examples = residentWindows->getNumExamples();
-        report.requiredBytes = windowedRequiredBytes;
-        report.residentBytes = residentWindows->totalBytes();
-        report.materializationSeconds = std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - started).count();
-        return DeviceDatasetStorageSelection{
-            effectiveLoader,
-            std::move(report)};
-    } catch (const std::exception &e) {
-        report.reason =
-            std::string("device_dataset_materialization_failed:") + e.what();
-        report.materializationSeconds = std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - started).count();
-        return fallbackSelection(sourceLoader, std::move(report), requested);
-    }
-}
 
 }  // namespace
 
@@ -589,60 +407,90 @@ uint64_t estimateDeviceResidentNamedDatasetRequiredBytes(
         allBytesPerExample(dataset.layout));
 }
 
-DeviceDatasetStorageSelection selectDeviceDatasetStorageLoader(
-    const std::shared_ptr<Loader> &sourceLoader,
-    DeviceDatasetStorage requested,
+DatasetMaterializationDescription describeDatasetMaterialization(
+    const LocalNamedDataset& dataset) {
+    return DatasetMaterializationDescription(
+        dataset.getPath(),
+        dataset.getId(),
+        dataset.getSchema(),
+        dataset.getLayout(),
+        dataset.getNumExamples());
+}
+
+DatasetMaterializationDescription describeDatasetMaterialization(
+    const TrainingData& trainingData) {
+    std::shared_ptr<const LocalNamedDataset> localDataset =
+        std::dynamic_pointer_cast<const LocalNamedDataset>(trainingData.getDataset());
+    if (localDataset == nullptr) {
+        throw std::runtime_error(
+            "TrainingData dataset backend does not support device materialization.");
+    }
+    return describeDatasetMaterialization(*localDataset);
+}
+
+DeviceDatasetSessionDescription describeDeviceDatasetSession(
+    const DatasetSplitManifest& splits,
+    const BatchPolicy& batching,
+    const std::set<DatasetFieldId>& requiredFieldIds) {
+    return DeviceDatasetSessionDescription(splits, batching, requiredFieldIds);
+}
+
+DeviceDatasetSessionDescription describeDeviceDatasetSession(
+    const TrainingData& trainingData,
+    const std::set<DatasetFieldId>& requiredFieldIds) {
+    return describeDeviceDatasetSession(
+        trainingData.getSplits(),
+        trainingData.getBatching(),
+        requiredFieldIds);
+}
+
+DeviceDatasetStorageSelection selectDeviceDatasetStorageSession(
+    const std::shared_ptr<BatchSession>& sourceSession,
+    const TrainingData& trainingData,
     ThorImplementation::TensorPlacement devicePlacement,
     uint64_t batchQueueDepth,
     std::optional<uint64_t> availableBytesOverride) {
-    THOR_THROW_IF_FALSE(sourceLoader != nullptr);
+    THOR_THROW_IF_FALSE(sourceSession != nullptr);
+    const DeviceDatasetStorage requested =
+        trainingData.getAccessPolicy().deviceStorage;
     DeviceDatasetStorageReport report;
     report.requested = requested;
 
     if (requested == DeviceDatasetStorage::OFF) {
-        return DeviceDatasetStorageSelection{sourceLoader, report};
+        return DeviceDatasetStorageSelection{sourceSession, report};
     }
 
     report.attempted = true;
 
-    if (!sourceLoader->supportsDeviceDatasetMaterialization()) {
-        report.reason =
-            sourceLoader->getDeviceDatasetMaterializationUnsupportedReason();
-        if (report.reason.empty()) {
-            report.reason = "loader_not_materializable";
-        }
-        return fallbackSelection(sourceLoader, std::move(report), requested);
+    std::optional<DatasetMaterializationDescription> datasetDescription;
+    try {
+        datasetDescription.emplace(describeDatasetMaterialization(trainingData));
+    } catch (const std::exception& e) {
+        report.reason = std::string("dataset_not_materializable:") + e.what();
+        return fallbackSelection(sourceSession, std::move(report), requested);
     }
 
-    std::optional<DatasetMaterializationDescription> datasetDescription;
-    std::optional<DeviceDatasetSessionDescription> sessionDescription;
-    try {
-        datasetDescription.emplace(
-            sourceLoader->describeDeviceDatasetMaterialization());
-        sessionDescription.emplace(
-            sourceLoader->describeDeviceDatasetSession());
-    } catch (const std::exception &e) {
-        report.reason =
-            std::string("loader_materialization_description_failed:") + e.what();
-        return fallbackSelection(sourceLoader, std::move(report), requested);
-    }
+    DeviceDatasetSessionDescription sessionDescription =
+        describeDeviceDatasetSession(
+            trainingData,
+            sourceSession->getRequiredDatasetFieldIds());
 
     report.examples = datasetDescription->numExamples;
-    if (sessionDescription->getSplits().getDatasetId() !=
+    if (sessionDescription.getSplits().getDatasetId() !=
             datasetDescription->datasetId ||
-        sessionDescription->getSplits().getNumExamples() !=
+        sessionDescription.getSplits().getNumExamples() !=
             datasetDescription->numExamples) {
         report.reason = "session_dataset_identity_mismatch";
-        return fallbackSelection(sourceLoader, std::move(report), requested);
+        return fallbackSelection(sourceSession, std::move(report), requested);
     }
 
     const NamedDatasetMaterializationSupport support =
         checkNamedDatasetSnapshotMaterializationSupport(*datasetDescription);
     if (!support.supported) {
         report.reason = support.reason.empty()
-                            ? "loader_not_materializable"
+                            ? "dataset_not_materializable"
                             : support.reason;
-        return fallbackSelection(sourceLoader, std::move(report), requested);
+        return fallbackSelection(sourceSession, std::move(report), requested);
     }
 
     uint64_t fullRequiredBytes = 0;
@@ -650,46 +498,33 @@ DeviceDatasetStorageSelection selectDeviceDatasetStorageLoader(
     try {
         fullRequiredBytes = estimateDeviceResidentNamedDatasetRequiredBytes(
             *datasetDescription,
-            *sessionDescription,
+            sessionDescription,
             batchQueueDepth);
         windowedRequiredBytes =
             estimateDeviceResidentWindowedDatasetRequiredBytes(
                 *datasetDescription,
-                *sessionDescription,
+                sessionDescription,
                 batchQueueDepth);
         report.requiredBytes = fullRequiredBytes;
-    } catch (const std::exception &e) {
+    } catch (const std::exception& e) {
         report.reason =
             std::string("device_dataset_size_estimate_failed:") + e.what();
-        return fallbackSelection(sourceLoader, std::move(report), requested);
+        return fallbackSelection(sourceSession, std::move(report), requested);
     }
 
-    std::shared_ptr<const NamedDataset> namedDataset =
-        sourceLoader->getNamedDataset();
-    if (namedDataset != nullptr) {
-        if (namedDataset->getId() != datasetDescription->datasetId ||
-            namedDataset->getNumExamples() != datasetDescription->numExamples) {
-            report.reason = "loader_named_dataset_identity_mismatch";
-            return fallbackSelection(sourceLoader, std::move(report), requested);
-        }
-        return selectSharedResidencyLoader(
-            sourceLoader,
-            namedDataset,
-            *datasetDescription,
-            *sessionDescription,
-            requested,
-            devicePlacement,
-            batchQueueDepth,
-            fullRequiredBytes,
-            windowedRequiredBytes,
-            availableBytesOverride,
-            std::move(report));
+    const std::shared_ptr<const NamedDataset>& namedDataset =
+        trainingData.getDataset();
+    if (namedDataset->getId() != datasetDescription->datasetId ||
+        namedDataset->getNumExamples() != datasetDescription->numExamples) {
+        report.reason = "training_data_dataset_identity_mismatch";
+        return fallbackSelection(sourceSession, std::move(report), requested);
     }
 
-    return selectUnsharedResidencyLoader(
-        sourceLoader,
+    return selectSharedResidencySession(
+        sourceSession,
+        namedDataset,
         *datasetDescription,
-        *sessionDescription,
+        sessionDescription,
         requested,
         devicePlacement,
         batchQueueDepth,

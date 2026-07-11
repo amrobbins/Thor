@@ -18,46 +18,46 @@
 #include <vector>
 
 /**
- * Indexed, Thor-native named batch loader backed by one shared local named example dataset.
+ * Per-run indexed named batch session backed by one immutable named dataset.
  *
  * The dataset reader exposes a canonical indexed row space.  train/validate/test are
  * logical views over that row space, supplied as index
- * arrays.  This is the local named equivalent of IndexedNumpyFloat32DictBatchLoader:
- * fold-specific splits share one physical dataset instead of duplicating records per fold.
+ * arrays. For the LocalNamedDataset backend, fold-specific sessions share one
+ * physical dataset instead of duplicating records per fold.
  */
-class IndexedLocalNamedBatchLoader : public Thor::BatchSession {
+class IndexedNamedBatchSession : public Thor::BatchSession {
    public:
-    IndexedLocalNamedBatchLoader(std::shared_ptr<const Thor::LocalNamedDataset> dataset,
-                                 Thor::DatasetSplitManifest splits,
-                                 Thor::BatchPolicy batching,
-                                 uint64_t batchQueueDepth = 32,
-                                 std::set<Thor::DatasetFieldId> requiredFieldIds = {});
+    IndexedNamedBatchSession(std::shared_ptr<const Thor::LocalNamedDataset> dataset,
+                             Thor::DatasetSplitManifest splits,
+                             Thor::BatchPolicy batching,
+                             uint64_t batchQueueDepth = 32,
+                             std::set<Thor::DatasetFieldId> requiredFieldIds = {});
 
-    IndexedLocalNamedBatchLoader(std::shared_ptr<const Thor::LocalNamedDataset> dataset,
-                                 std::vector<uint64_t> trainIndices,
-                                 std::vector<uint64_t> validateIndices,
-                                 std::optional<std::vector<uint64_t>> testIndices,
-                                 uint64_t batchSize,
-                                 uint64_t batchQueueDepth = 32,
-                                 bool randomizeTrain = true,
-                                 std::optional<uint64_t> seed = std::nullopt);
+    IndexedNamedBatchSession(std::shared_ptr<const Thor::LocalNamedDataset> dataset,
+                             std::vector<uint64_t> trainIndices,
+                             std::vector<uint64_t> validateIndices,
+                             std::optional<std::vector<uint64_t>> testIndices,
+                             uint64_t batchSize,
+                             uint64_t batchQueueDepth = 32,
+                             bool randomizeTrain = true,
+                             std::optional<uint64_t> seed = std::nullopt);
 
     /** Compatibility adapter. requestedLayout is validation-only. */
-    IndexedLocalNamedBatchLoader(std::filesystem::path datasetPath,
-                                 LocalNamedExampleLayout requestedLayout,
-                                 std::vector<uint64_t> trainIndices,
-                                 std::vector<uint64_t> validateIndices,
-                                 std::optional<std::vector<uint64_t>> testIndices,
-                                 uint64_t batchSize,
-                                 uint64_t batchQueueDepth = 32,
-                                 bool randomizeTrain = true,
-                                 std::optional<uint64_t> seed = std::nullopt);
-    ~IndexedLocalNamedBatchLoader() override;
+    IndexedNamedBatchSession(std::filesystem::path datasetPath,
+                             LocalNamedExampleLayout requestedLayout,
+                             std::vector<uint64_t> trainIndices,
+                             std::vector<uint64_t> validateIndices,
+                             std::optional<std::vector<uint64_t>> testIndices,
+                             uint64_t batchSize,
+                             uint64_t batchQueueDepth = 32,
+                             bool randomizeTrain = true,
+                             std::optional<uint64_t> seed = std::nullopt);
+    ~IndexedNamedBatchSession() override;
 
-    IndexedLocalNamedBatchLoader(const IndexedLocalNamedBatchLoader &) = delete;
-    IndexedLocalNamedBatchLoader &operator=(const IndexedLocalNamedBatchLoader &) = delete;
-    IndexedLocalNamedBatchLoader(IndexedLocalNamedBatchLoader &&) = delete;
-    IndexedLocalNamedBatchLoader &operator=(IndexedLocalNamedBatchLoader &&) = delete;
+    IndexedNamedBatchSession(const IndexedNamedBatchSession &) = delete;
+    IndexedNamedBatchSession &operator=(const IndexedNamedBatchSession &) = delete;
+    IndexedNamedBatchSession(IndexedNamedBatchSession &&) = delete;
+    IndexedNamedBatchSession &operator=(IndexedNamedBatchSession &&) = delete;
 
     Batch getBatch(ExampleType exampleType, uint64_t &batchNum) override;
     void returnBatchBuffers(ExampleType exampleType, Batch &&batch) override;
@@ -65,11 +65,6 @@ class IndexedLocalNamedBatchLoader : public Thor::BatchSession {
     uint64_t getNumBatchesPerEpoch(ExampleType exampleType) override;
     uint64_t getNumExamples(ExampleType exampleType) override;
     uint64_t getNextBatchNum(ExampleType exampleType) override;
-
-    [[nodiscard]] bool supportsDeviceDatasetMaterialization() const override;
-    [[nodiscard]] Thor::DatasetMaterializationDescription describeDeviceDatasetMaterialization() const override;
-    [[nodiscard]] Thor::DeviceDatasetSessionDescription describeDeviceDatasetSession() const override;
-    [[nodiscard]] std::shared_ptr<const Thor::NamedDataset> getNamedDataset() const override { return dataset; }
 
     [[nodiscard]] const LocalNamedExampleLayout &getLayout() const;
     [[nodiscard]] const std::filesystem::path &getDatasetPath() const;
@@ -124,6 +119,7 @@ class IndexedLocalNamedBatchLoader : public Thor::BatchSession {
     const IndexedLocalNamedBatchAssembler *assemblerFor(ExampleType exampleType) const;
 };
 
-// Canonical names no longer encode the storage backend in the execution object.
-using IndexedNamedBatchSession = IndexedLocalNamedBatchLoader;
+// Compatibility names retained for one migration release.  The execution
+// object itself is a session and is not named after the local storage backend.
 using IndexedNamedBatchLoader = IndexedNamedBatchSession;
+using IndexedLocalNamedBatchLoader = IndexedNamedBatchSession;

@@ -433,10 +433,6 @@ def _build_opposing_phase_regressor(
     aggregate_loss_active: bool,
     primary_loss_name: str,
 ):
-    # Placeholder owner used for Trainer identity/default settings.  The active
-    # execution graph is composed from the TrainingPhase networks below.
-    network = thor.Network(name)
-
     zero = thor.initializers.UniformRandom(0.0, 0.0)
 
     daily_network = thor.Network(f"{name}_daily_phase")
@@ -524,7 +520,7 @@ def _build_opposing_phase_regressor(
         optimizer=optimizer,
     )
     program = thor.training.TrainingProgram([step])
-    return network, program
+    return program
 
 
 def _download_if_missing(url: str, path: Path) -> None:
@@ -925,7 +921,7 @@ def test_debug_synchronous_trainer_applies_deterministic_one_batch_mse_sgd_updat
 
 
 def test_debug_synchronous_phase_disabled_aggregate_loss_does_not_backpropagate(capfd):
-    network, program = _build_opposing_phase_regressor(
+    program = _build_opposing_phase_regressor(
         "python_integration_dynamic_phase_daily_only_blocks_aggregate_gradient",
         aggregate_enabled=False,
         daily_loss_active=True,
@@ -934,14 +930,13 @@ def test_debug_synchronous_phase_disabled_aggregate_loss_does_not_backpropagate(
     )
 
     # Use two identical train batches in one epoch so the second train line is
-    # the post-update probe.  Do not use a second epoch here: these phase-root
+    # the post-update probe.  Do not use a second epoch here: these phase
     # tests should isolate whether the disabled aggregate loss seeds backward,
     # not loss-layer label lifetime across epochs.
     loader = _opposing_phase_two_train_batch_loader(dtype=np.float32)
 
     trainer = thor.training.Trainer(
-        network,
-        loader,
+        loader=loader,
         training_program=program,
         debug_synchronous=True,
         stats_interval_s=0.0,
@@ -977,7 +972,7 @@ def test_debug_synchronous_phase_disabled_aggregate_loss_does_not_backpropagate(
 
 
 def test_debug_synchronous_aggregate_phase_backpropagates_through_forward_only_daily_phase(capfd):
-    network, program = _build_opposing_phase_regressor(
+    program = _build_opposing_phase_regressor(
         "python_integration_dynamic_phase_aggregate_backprops_through_daily",
         aggregate_enabled=True,
         daily_loss_active=False,
@@ -987,8 +982,7 @@ def test_debug_synchronous_aggregate_phase_backpropagates_through_forward_only_d
     loader = _opposing_phase_two_train_batch_loader(dtype=np.float32)
 
     trainer = thor.training.Trainer(
-        network,
-        loader,
+        loader=loader,
         training_program=program,
         debug_synchronous=True,
         stats_interval_s=0.0,
@@ -1020,7 +1014,7 @@ def test_debug_synchronous_aggregate_phase_backpropagates_through_forward_only_d
 
 
 def test_queued_phase_disabled_aggregate_loss_does_not_backpropagate(capfd):
-    network, program = _build_opposing_phase_regressor(
+    program = _build_opposing_phase_regressor(
         "python_integration_queued_dynamic_phase_daily_only_blocks_aggregate_gradient",
         aggregate_enabled=False,
         daily_loss_active=True,
@@ -1030,8 +1024,7 @@ def test_queued_phase_disabled_aggregate_loss_does_not_backpropagate(capfd):
     loader = _opposing_phase_two_train_batch_loader(dtype=np.float32)
 
     trainer = thor.training.Trainer(
-        network,
-        loader,
+        loader=loader,
         training_program=program,
         debug_synchronous=False,
         stats_interval_s=0.0,
@@ -1063,7 +1056,7 @@ def test_queued_phase_disabled_aggregate_loss_does_not_backpropagate(capfd):
 
 
 def test_queued_aggregate_phase_backpropagates_through_forward_only_daily_phase(capfd):
-    network, program = _build_opposing_phase_regressor(
+    program = _build_opposing_phase_regressor(
         "python_integration_queued_dynamic_phase_aggregate_backprops_through_daily",
         aggregate_enabled=True,
         daily_loss_active=False,
@@ -1073,8 +1066,7 @@ def test_queued_aggregate_phase_backpropagates_through_forward_only_daily_phase(
     loader = _opposing_phase_two_train_batch_loader(dtype=np.float32)
 
     trainer = thor.training.Trainer(
-        network,
-        loader,
+        loader=loader,
         training_program=program,
         debug_synchronous=False,
         stats_interval_s=0.0,
@@ -1104,7 +1096,7 @@ def test_queued_aggregate_phase_backpropagates_through_forward_only_daily_phase(
 
 
 def test_same_trainer_restart_enabled_successful_fit_preserves_state_for_next_fit(capfd):
-    network, program = _build_opposing_phase_regressor(
+    program = _build_opposing_phase_regressor(
         "python_integration_same_trainer_restart_success_preserves_state",
         aggregate_enabled=False,
         daily_loss_active=True,
@@ -1114,8 +1106,7 @@ def test_same_trainer_restart_enabled_successful_fit_preserves_state_for_next_fi
     loader = _opposing_phase_one_batch_loader(batch_size=1, dtype=np.float32)
 
     trainer = thor.training.Trainer(
-        network,
-        loader,
+        loader=loader,
         training_program=program,
         debug_synchronous=True,
         stats_interval_s=0.0,
@@ -1163,7 +1154,7 @@ def test_same_trainer_restart_enabled_successful_fit_preserves_state_for_next_fi
 
 
 def test_same_trainer_fit_recompiles_after_phase_enable_mutation(capfd):
-    network, program = _build_opposing_phase_regressor(
+    program = _build_opposing_phase_regressor(
         "python_integration_same_trainer_recompile_after_phase_enable",
         aggregate_enabled=False,
         daily_loss_active=True,
@@ -1173,8 +1164,7 @@ def test_same_trainer_fit_recompiles_after_phase_enable_mutation(capfd):
     loader = _opposing_phase_two_train_batch_loader(dtype=np.float32)
 
     trainer = thor.training.Trainer(
-        network,
-        loader,
+        loader=loader,
         training_program=program,
         debug_synchronous=True,
         stats_interval_s=0.0,
@@ -1688,8 +1678,7 @@ def test_queued_trainer_fits_iris_fp32_two_input_multi_output_network_with_expli
     ])
 
     trainer = thor.training.Trainer(
-        network,
-        loader,
+        loader=loader,
         training_program=training_program,
         debug_synchronous=False,
         stats_interval_s=0.0,

@@ -23,6 +23,7 @@ namespace Thor {
 class Network;
 class Optimizer;
 class PlacedNetwork;
+class TrainingData;
 
 enum class TrainingRunExecutionMode { FIT, EVALUATE };
 
@@ -35,6 +36,8 @@ struct TrainingRuntimeConfig {
 };
 
 struct TrainingRunRequest {
+    // Present only for standalone-network execution. Explicit TrainingProgram
+    // execution owns its model through TrainingPhase networks and leaves this null.
     std::shared_ptr<Network> network = nullptr;
     std::shared_ptr<Loader> loader = nullptr;
     std::shared_ptr<Optimizer> optimizer = nullptr;
@@ -72,10 +75,10 @@ struct TrainingRunRequest {
     // capped by this option.
     std::optional<uint64_t> maxTrainingBatchesPerEpoch{};
 
-    // Controls whether FIT may stage a materializable named dataset into device-resident
-    // storage after model placement/workspace reservation. Patch 1 only threads the
-    // public option and telemetry; later patches attach the actual materializer.
-    DeviceDatasetStorage deviceDatasetStorage = DeviceDatasetStorage::BEST_EFFORT;
+    // Present only for the immutable TrainingData execution path. The data recipe
+    // owns the device-access policy; legacy mutable Loader requests leave this null
+    // and therefore never trigger dataset materialization.
+    std::shared_ptr<const TrainingData> trainingData = nullptr;
     DeviceDatasetStorageReport deviceDatasetStorageReport{};
 
     TrainingModelSelectionScore modelSelectionScore{};
@@ -95,8 +98,8 @@ struct TrainingRunRequest {
     ExampleType evaluationExampleType = ExampleType::VALIDATE;
     TrainingEventPhase evaluationPhase = TrainingEventPhase::VALIDATE;
 
-    // Trainer.fit(...) creates a fresh PlacedNetwork for each run so phase-root
-    // mutations can recompile against a clean physical graph.  When the same
+    // Trainer.fit(...) creates a fresh PlacedNetwork for each run so phase
+    // activation changes can recompile against a clean physical graph. When the same
     // Trainer is fit again, preserve the trained parameter/optimizer state by
     // copying it from the previous placed network into the fresh placement.
     std::shared_ptr<PlacedNetwork> previousPlacedNetwork = nullptr;

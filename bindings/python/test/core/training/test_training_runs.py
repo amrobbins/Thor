@@ -1518,8 +1518,6 @@ def test_training_runs_reported_losses_keeps_explicit_hidden_loss_output():
 
 
 def _make_two_phase_trainer_with_inactive_future_reports(name: str):
-    base_network = thor.Network(name)
-
     first_network = thor.Network(f"{name}_first_phase")
     first_examples = thor.layers.NetworkInput(first_network, "examples", [2], thor.DataType.fp32)
     first_labels = thor.layers.NetworkInput(first_network, "labels", [1], thor.DataType.fp32)
@@ -1594,8 +1592,7 @@ def _make_two_phase_trainer_with_inactive_future_reports(name: str):
         ])
 
     return thor.training.Trainer(
-        base_network,
-        _regression_one_batch_loader(),
+        loader=_regression_one_batch_loader(),
         training_program=program,
         stats_interval_s=0.0,
         max_in_flight_batches=2,
@@ -1707,38 +1704,11 @@ def test_trainer_fit_options_default_to_full_training_epoch():
     assert options.max_training_batches_per_epoch is None
 
 
-def test_trainer_fit_options_default_device_dataset_storage_is_best_effort():
+def test_device_dataset_storage_is_not_a_fit_option():
     options = thor.training.TrainerFitOptions()
 
-    assert options.device_dataset_storage == thor.training.DeviceDatasetStorage.BEST_EFFORT
-
-
-def test_trainer_fit_options_accept_device_dataset_storage_strings_and_enums():
-    options = thor.training.TrainerFitOptions()
-
-    options.device_dataset_storage = "strict"
-    assert options.device_dataset_storage == thor.training.DeviceDatasetStorage.STRICT
-
-    options.device_dataset_storage = thor.training.DeviceDatasetStorage.OFF
-    assert options.device_dataset_storage == thor.training.DeviceDatasetStorage.OFF
-
-
-def test_trainer_fit_accepts_device_dataset_storage_kwarg():
-    trainer = _make_tiny_regression_trainer("training_runs_device_dataset_storage_kwarg")
-
-    result = trainer.fit(epochs=1, device_dataset_storage="off")
-
-    assert result.completed()
-
-
-def test_training_runs_fit_accepts_device_dataset_storage_kwarg():
-    trainer0 = _make_tiny_regression_trainer("training_runs_device_dataset_storage_fold_0")
-    trainer1 = _make_tiny_regression_trainer("training_runs_device_dataset_storage_fold_1")
-    runs = thor.training.TrainingRuns([("fold_0", trainer0), ("fold_1", trainer1)])
-
-    result = runs.fit(epochs=1, device_dataset_storage=thor.training.DeviceDatasetStorage.OFF)
-
-    assert result.all_completed()
+    assert not hasattr(options, "device_dataset_storage")
+    assert thor.data.DeviceDatasetStorage is thor.training.DeviceDatasetStorage
 
 
 def test_trainer_fit_options_accepts_zero_best_model_candidate_cadence_as_disabled():
@@ -2319,8 +2289,6 @@ def make_loader(seed):
 
 
 def make_network(name):
-    root = thor.Network(name)
-
     daily = thor.Network(f"{name}_daily_phase")
     daily_trend = thor.layers.NetworkInput(daily, "trend_inputs", [2], thor.DataType.fp32)
     daily_seasonality = thor.layers.NetworkInput(daily, "seasonality_inputs", [3], thor.DataType.fp32)
@@ -2480,14 +2448,13 @@ def make_network(name):
         phases=[daily_phase, aggregate_phase],
         optimizer=optimizer,
     )
-    return root, thor.training.TrainingProgram([step]), aggregate_phase
+    return thor.training.TrainingProgram([step]), aggregate_phase
 
 
 def make_trainer(name, seed, model_root):
-    network, program, aggregate_phase = make_network(name)
+    program, aggregate_phase = make_network(name)
     trainer = thor.training.Trainer(
-        network,
-        make_loader(seed),
+        loader=make_loader(seed),
         training_program=program,
         stats_interval_s=0.0,
         max_in_flight_batches=4,
@@ -3119,8 +3086,7 @@ def test_training_runs_airfoil_cv3_two_phase_pretrain_then_joint_multi_loss_metr
         expected_phases = ["point_forecast", "joint_and_quantile"] if enable_second_phase else ["point_forecast"]
         assert program.get_step(0).get_active_phase_names() == expected_phases
         return thor.training.Trainer(
-            network,
-            loader,
+            loader=loader,
             training_program=program,
             stats_interval_s=AIRFOIL_QUANTILE_STATS_INTERVAL_S,
             max_in_flight_batches=1,
@@ -3543,8 +3509,7 @@ def test_training_runs_airfoil_cv3_two_phase_mae_pretrain_then_mse_head_holdout(
         mse_phases_by_run[run_name] = mse_phase
         assert program.get_step(0).get_active_phase_names() == ["mae_pretrain"]
         return thor.training.Trainer(
-            network,
-            loader,
+            loader=loader,
             training_program=program,
             stats_interval_s=AIRFOIL_QUANTILE_STATS_INTERVAL_S,
             max_in_flight_batches=2,

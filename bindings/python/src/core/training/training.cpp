@@ -27,6 +27,7 @@
 #include "DeepLearning/Api/Data/DatasetSplitManifest.h"
 #include "DeepLearning/Api/Data/LocalNamedDataset.h"
 #include "DeepLearning/Api/Data/TrainingData.h"
+#include "DeepLearning/Api/Data/DatasetAccessPolicy.h"
 #include "DeepLearning/Api/Loaders/Loader.h"
 #include "DeepLearning/Api/Loaders/IndexedLocalNamedBatchLoader.h"
 #include "DeepLearning/Api/Loaders/LocalBatchLoader.h"
@@ -1068,16 +1069,16 @@ nb::dict copyIndexedLocalNamedBatchToPythonDict(IndexedLocalNamedBatchLoader& lo
         for (const LocalNamedExampleLayout::TensorSpec& spec : loader.getLayout().tensors()) {
             out[nb::str(spec.name.c_str())] = copyTensorToNumpy(
                 batch.getTensor(spec.name),
-                "IndexedLocalNamedBatchLoader.copy_batch tensor '" + spec.name + "'");
+                "IndexedNamedBatchSession.copy_batch tensor '" + spec.name + "'");
         }
         for (const LocalNamedExampleLayout::WindowedTensorSpec& spec : loader.getLayout().windowedTensors()) {
             out[nb::str(spec.name.c_str())] = copyTensorToNumpy(
                 batch.getTensor(spec.name),
-                "IndexedLocalNamedBatchLoader.copy_batch tensor '" + spec.name + "'");
+                "IndexedNamedBatchSession.copy_batch tensor '" + spec.name + "'");
             if (spec.maskName.has_value()) {
                 out[nb::str(spec.maskName.value().c_str())] = copyTensorToNumpy(
                     batch.getTensor(spec.maskName.value()),
-                    "IndexedLocalNamedBatchLoader.copy_batch tensor '" + spec.maskName.value() + "'");
+                    "IndexedNamedBatchSession.copy_batch tensor '" + spec.maskName.value() + "'");
             }
         }
     } catch (...) {
@@ -1792,7 +1793,7 @@ DeviceDatasetStorage deviceDatasetStorageFromPython(nb::object value, const std:
             throw nb::value_error(e.what());
         }
     }
-    throw nb::type_error((argumentName + " must be a thor.training.DeviceDatasetStorage value or one of: 'best_effort', 'strict', 'off'.").c_str());
+    throw nb::type_error((argumentName + " must be a thor.data.DeviceDatasetStorage value or one of: 'best_effort', 'strict', 'off'.").c_str());
 }
 
 TrainingEventPhase trainingEventPhaseFromString(const std::string& value) {
@@ -3177,27 +3178,37 @@ stored separately.
            std::shared_ptr<Thor::NamedDataset> dataset,
            Thor::DatasetSplitManifest splits,
            Thor::BatchPolicy batching,
-           std::string datasetName) -> std::shared_ptr<Thor::TrainingData> {
+           std::string datasetName,
+           nb::object deviceStorage) -> std::shared_ptr<Thor::TrainingData> {
             (void)cls;
             if (dataset == nullptr) {
                 throw nb::value_error("TrainingData dataset must not be None");
             }
+            Thor::DatasetAccessPolicy accessPolicy{
+                .deviceStorage = deviceDatasetStorageFromPython(
+                    std::move(deviceStorage), "device_storage")};
             return std::make_shared<Thor::TrainingData>(
-                std::move(dataset), std::move(splits), std::move(batching), std::move(datasetName));
+                std::move(dataset),
+                std::move(splits),
+                std::move(batching),
+                accessPolicy,
+                std::move(datasetName));
         },
         "cls"_a,
         "dataset"_a,
         "splits"_a,
         "batching"_a,
-        "dataset_name"_a = "indexed_named_examples");
+        "dataset_name"_a = "indexed_named_examples",
+        "device_storage"_a = "best_effort");
     training_data.def(
         "__init__",
         [](Thor::TrainingData*, std::shared_ptr<Thor::NamedDataset>, Thor::DatasetSplitManifest,
-           Thor::BatchPolicy, std::string) {},
+           Thor::BatchPolicy, std::string, nb::object) {},
         "dataset"_a,
         "splits"_a,
         "batching"_a,
-        "dataset_name"_a = "indexed_named_examples");
+        "dataset_name"_a = "indexed_named_examples",
+        "device_storage"_a = "best_effort");
     training_data.def(
         "open_session",
         [](const Thor::TrainingData& self, uint64_t maxInFlightBatches) {
@@ -3213,6 +3224,11 @@ stored separately.
                               nb::rv_policy::reference_internal);
     training_data.def_prop_ro("dataset_name", &Thor::TrainingData::getDatasetName,
                               nb::rv_policy::reference_internal);
+    training_data.def_prop_ro(
+        "device_storage",
+        [](const Thor::TrainingData& self) {
+            return self.getAccessPolicy().deviceStorage;
+        });
 
     auto local_named_example_dataset_writer = nb::class_<LocalNamedExampleDatasetWriter>(training, "LocalNamedExampleDatasetWriter");
     local_named_example_dataset_writer.attr("__module__") = "thor.training";
@@ -3464,7 +3480,7 @@ Loader path and returns queue-owned buffers normally.
            uint64_t batchQueueDepth) -> std::shared_ptr<IndexedLocalNamedBatchLoader> {
             (void)cls;
             if (dataset == nullptr) {
-                throw nb::value_error("IndexedLocalNamedBatchLoader dataset must not be None");
+                throw nb::value_error("IndexedNamedBatchSession dataset must not be None");
             }
             auto loader = std::make_shared<IndexedLocalNamedBatchLoader>(
                 std::move(dataset), std::move(splits), std::move(batching), batchQueueDepth);
@@ -3475,7 +3491,7 @@ Loader path and returns queue-owned buffers normally.
         "dataset"_a,
         "splits"_a,
         "batching"_a,
-        "dataset_name"_a = "indexed_local_named_examples",
+        "dataset_name"_a = "indexed_named_examples",
         "batch_queue_depth"_a = 32,
         R"nbdoc(
 Read a LocalNamedDataset through an immutable DatasetSplitManifest.
@@ -3497,26 +3513,26 @@ randomization are supplied separately by BatchPolicy.
            nb::object randomSeed) -> std::shared_ptr<IndexedLocalNamedBatchLoader> {
             (void)cls;
             if (dataset == nullptr) {
-                throw nb::value_error("IndexedLocalNamedBatchLoader dataset must not be None");
+                throw nb::value_error("IndexedNamedBatchSession dataset must not be None");
             }
             if (batchSize == 0) {
-                throw nb::value_error("IndexedLocalNamedBatchLoader batch_size must be >= 1");
+                throw nb::value_error("IndexedNamedBatchSession batch_size must be >= 1");
             }
             if (batchQueueDepth == 0) {
-                throw nb::value_error("IndexedLocalNamedBatchLoader batch_queue_depth must be >= 1");
+                throw nb::value_error("IndexedNamedBatchSession batch_queue_depth must be >= 1");
             }
             if (!randomizeTrain && !randomSeed.is_none()) {
-                throw nb::value_error("IndexedLocalNamedBatchLoader random_seed requires randomize_train=True");
+                throw nb::value_error("IndexedNamedBatchSession random_seed requires randomize_train=True");
             }
             constexpr uint64_t maxIndex = std::numeric_limits<uint64_t>::max();
             std::vector<uint64_t> train = uint64IndicesFromPython(
-                std::move(trainIndices), "IndexedLocalNamedBatchLoader train_indices", maxIndex);
+                std::move(trainIndices), "IndexedNamedBatchSession train_indices", maxIndex);
             std::vector<uint64_t> validate = uint64IndicesFromPython(
-                std::move(validateIndices), "IndexedLocalNamedBatchLoader validate_indices", maxIndex, true);
+                std::move(validateIndices), "IndexedNamedBatchSession validate_indices", maxIndex, true);
             std::optional<std::vector<uint64_t>> test;
             if (!testIndices.is_none()) {
                 test = uint64IndicesFromPython(
-                    std::move(testIndices), "IndexedLocalNamedBatchLoader test_indices", maxIndex, true);
+                    std::move(testIndices), "IndexedNamedBatchSession test_indices", maxIndex, true);
             }
             auto loader = std::make_shared<IndexedLocalNamedBatchLoader>(
                 std::move(dataset),
@@ -3535,7 +3551,7 @@ randomization are supplied separately by BatchPolicy.
         "train_indices"_a,
         "validate_indices"_a,
         "batch_size"_a,
-        "dataset_name"_a = "indexed_local_named_examples",
+        "dataset_name"_a = "indexed_named_examples",
         "randomize_train"_a = true,
         "batch_queue_depth"_a = 32,
         "test_indices"_a = nb::none(),
@@ -3562,23 +3578,23 @@ execution state.
            nb::object randomSeed) -> std::shared_ptr<IndexedLocalNamedBatchLoader> {
             (void)cls;
             if (batchSize == 0) {
-                throw nb::value_error("IndexedLocalNamedBatchLoader batch_size must be >= 1");
+                throw nb::value_error("IndexedNamedBatchSession batch_size must be >= 1");
             }
             if (batchQueueDepth == 0) {
-                throw nb::value_error("IndexedLocalNamedBatchLoader batch_queue_depth must be >= 1");
+                throw nb::value_error("IndexedNamedBatchSession batch_queue_depth must be >= 1");
             }
             if (!randomizeTrain && !randomSeed.is_none()) {
-                throw nb::value_error("IndexedLocalNamedBatchLoader random_seed requires randomize_train=True");
+                throw nb::value_error("IndexedNamedBatchSession random_seed requires randomize_train=True");
             }
             constexpr uint64_t maxIndex = std::numeric_limits<uint64_t>::max();
             std::vector<uint64_t> train = uint64IndicesFromPython(
-                std::move(trainIndices), "IndexedLocalNamedBatchLoader train_indices", maxIndex);
+                std::move(trainIndices), "IndexedNamedBatchSession train_indices", maxIndex);
             std::vector<uint64_t> validate = uint64IndicesFromPython(
-                std::move(validateIndices), "IndexedLocalNamedBatchLoader validate_indices", maxIndex, true);
+                std::move(validateIndices), "IndexedNamedBatchSession validate_indices", maxIndex, true);
             std::optional<std::vector<uint64_t>> test;
             if (!testIndices.is_none()) {
                 test = uint64IndicesFromPython(
-                    std::move(testIndices), "IndexedLocalNamedBatchLoader test_indices", maxIndex, true);
+                    std::move(testIndices), "IndexedNamedBatchSession test_indices", maxIndex, true);
             }
             auto loader = std::make_shared<IndexedLocalNamedBatchLoader>(
                 pathStringFromPython(datasetPath, "dataset_path"),
@@ -3599,7 +3615,7 @@ execution state.
         "train_indices"_a,
         "validate_indices"_a,
         "batch_size"_a,
-        "dataset_name"_a = "indexed_local_named_examples",
+        "dataset_name"_a = "indexed_named_examples",
         "randomize_train"_a = true,
         "batch_queue_depth"_a = 32,
         "test_indices"_a = nb::none(),
@@ -3619,7 +3635,7 @@ IndexedNumpyFloat32DictBatchLoader.
         "dataset"_a,
         "splits"_a,
         "batching"_a,
-        "dataset_name"_a = "indexed_local_named_examples",
+        "dataset_name"_a = "indexed_named_examples",
         "batch_queue_depth"_a = 32);
     indexed_local_named_batch_loader.def(
         "__init__",
@@ -3628,7 +3644,7 @@ IndexedNumpyFloat32DictBatchLoader.
         "train_indices"_a,
         "validate_indices"_a,
         "batch_size"_a,
-        "dataset_name"_a = "indexed_local_named_examples",
+        "dataset_name"_a = "indexed_named_examples",
         "randomize_train"_a = true,
         "batch_queue_depth"_a = 32,
         "test_indices"_a = nb::none(),
@@ -3641,7 +3657,7 @@ IndexedNumpyFloat32DictBatchLoader.
         "train_indices"_a,
         "validate_indices"_a,
         "batch_size"_a,
-        "dataset_name"_a = "indexed_local_named_examples",
+        "dataset_name"_a = "indexed_named_examples",
         "randomize_train"_a = true,
         "batch_queue_depth"_a = 32,
         "test_indices"_a = nb::none(),
@@ -3689,13 +3705,23 @@ IndexedNumpyFloat32DictBatchLoader.
         },
         "split"_a = "train");
     training.attr("IndexedNamedBatchLoader") = training.attr("IndexedNamedBatchSession");
-    training.attr("IndexedLocalNamedBatchLoader") = training.attr("IndexedNamedBatchSession");
+    training.attr("IndexedNamedBatchSession") = training.attr("IndexedNamedBatchSession");
 
     auto device_dataset_storage = nb::enum_<DeviceDatasetStorage>(training, "DeviceDatasetStorage")
                                       .value("OFF", DeviceDatasetStorage::OFF)
                                       .value("BEST_EFFORT", DeviceDatasetStorage::BEST_EFFORT)
                                       .value("STRICT", DeviceDatasetStorage::STRICT);
-    device_dataset_storage.attr("__module__") = "thor.training";
+    device_dataset_storage.attr("__module__") = "thor.data";
+
+    auto dataset_access_policy = nb::class_<Thor::DatasetAccessPolicy>(training, "DatasetAccessPolicy");
+    dataset_access_policy.attr("__module__") = "thor.data";
+    dataset_access_policy.def(nb::init<>());
+    dataset_access_policy.def_prop_rw(
+        "device_storage",
+        [](const Thor::DatasetAccessPolicy& self) { return self.deviceStorage; },
+        [](Thor::DatasetAccessPolicy& self, nb::object value) {
+            self.deviceStorage = deviceDatasetStorageFromPython(std::move(value), "device_storage");
+        });
 
     auto device_dataset_storage_report = nb::class_<DeviceDatasetStorageReport>(training, "DeviceDatasetStorageReport");
     device_dataset_storage_report.attr("__module__") = "thor.training";
@@ -3721,12 +3747,7 @@ IndexedNumpyFloat32DictBatchLoader.
         .def_rw("epochs", &TrainerFitOptions::epochs)
         .def_rw("check_best_model_every_epochs", &TrainerFitOptions::checkBestModelEveryEpochs)
         .def_rw("first_model_selection_epoch", &TrainerFitOptions::firstModelSelectionEpoch)
-        .def_rw("max_training_batches_per_epoch", &TrainerFitOptions::maxTrainingBatchesPerEpoch)
-        .def_prop_rw("device_dataset_storage",
-                     [](const TrainerFitOptions& self) { return self.deviceDatasetStorage; },
-                     [](TrainerFitOptions& self, nb::object value) {
-                         self.deviceDatasetStorage = deviceDatasetStorageFromPython(std::move(value), "device_dataset_storage");
-                     });
+        .def_rw("max_training_batches_per_epoch", &TrainerFitOptions::maxTrainingBatchesPerEpoch);
 
     auto trainer = nb::class_<Trainer>(training, "Trainer", nb::type_slots(trainer_type_slots));
     trainer.attr("__module__") = "thor.training";
@@ -3754,8 +3775,10 @@ IndexedNumpyFloat32DictBatchLoader.
             }
             TrainingModelSelectionScore modelSelectionScore = trainingModelSelectionScoreFromPython(std::move(model_selection_score));
             Trainer::Builder builder;
-            builder.network(std::move(network))
-                .statsIntervalSeconds(stats_interval_s)
+            if (network != nullptr) {
+                builder.network(std::move(network));
+            }
+            builder.statsIntervalSeconds(stats_interval_s)
                 .statsStderrAlso(stats_stderr_also)
                 .statsColorMode(lineStatsColorModeFromString(stats_color))
                 .maxInFlightBatches(max_in_flight_batches)
@@ -3784,7 +3807,7 @@ IndexedNumpyFloat32DictBatchLoader.
             return nb::cast(std::make_shared<Trainer>(builder.build()));
         },
         "cls"_a,
-        "network"_a,
+        "network"_a.none() = nb::none(),
         "loader"_a.none() = nb::none(),
         "optimizer"_a.none() = nb::none(),
         "training_program"_a.none() = nb::none(),
@@ -3817,7 +3840,7 @@ IndexedNumpyFloat32DictBatchLoader.
            nb::object,
            std::shared_ptr<Thor::TrainingData>,
            Thor::DatasetInputBindings*) {},
-        "network"_a,
+        "network"_a.none() = nb::none(),
         "loader"_a.none() = nb::none(),
         "optimizer"_a.none() = nb::none(),
         "training_program"_a.none() = nb::none(),
@@ -3840,15 +3863,13 @@ IndexedNumpyFloat32DictBatchLoader.
            uint64_t first_model_selection_epoch,
            nb::object restart_conditions,
            nb::object early_completion_policies,
-           nb::object max_training_batches_per_epoch,
-           nb::object device_dataset_storage) -> nb::object {
+           nb::object max_training_batches_per_epoch) -> nb::object {
             TrainerFitOptions options;
             options.epochs = epochs;
             options.checkBestModelEveryEpochs = check_best_model_every_epochs;
             options.firstModelSelectionEpoch = first_model_selection_epoch;
             options.maxTrainingBatchesPerEpoch = optionalUint64FromPython(std::move(max_training_batches_per_epoch),
                                                                           "max_training_batches_per_epoch");
-            options.deviceDatasetStorage = deviceDatasetStorageFromPython(std::move(device_dataset_storage), "device_dataset_storage");
             options.restartConditions = trainingRestartPoliciesFromPython(restart_conditions, /*trainerScope=*/true);
             TrainingEarlyCompletionPoliciesBinding earlyPolicies = trainingEarlyCompletionPoliciesFromPython(early_completion_policies);
             options.earlyCompletionPolicies = std::move(earlyPolicies.policies);
@@ -3864,8 +3885,7 @@ IndexedNumpyFloat32DictBatchLoader.
         "first_model_selection_epoch"_a = 0,
         "restart_conditions"_a.none() = nb::none(),
         "early_completion_policies"_a.none() = nb::none(),
-        "max_training_batches_per_epoch"_a.none() = nb::none(),
-        "device_dataset_storage"_a = "best_effort");
+        "max_training_batches_per_epoch"_a.none() = nb::none());
     trainer.def(
         "save_model",
         [](Trainer& self, nb::object directory, bool overwrite, bool save_optimizer_state) {
@@ -4284,15 +4304,13 @@ IndexedNumpyFloat32DictBatchLoader.
            nb::object early_completion_rules,
            nb::object reports,
            bool evaluate_training_population,
-           nb::object max_training_batches_per_epoch,
-           nb::object device_dataset_storage) {
+           nb::object max_training_batches_per_epoch) {
             TrainerFitOptions options;
             options.epochs = epochs;
             options.checkBestModelEveryEpochs = check_best_model_every_epochs;
             options.firstModelSelectionEpoch = first_model_selection_epoch;
             options.maxTrainingBatchesPerEpoch = optionalUint64FromPython(std::move(max_training_batches_per_epoch),
                                                                           "max_training_batches_per_epoch");
-            options.deviceDatasetStorage = deviceDatasetStorageFromPython(std::move(device_dataset_storage), "device_dataset_storage");
             TrainingRunsSessionOptions sessionOptions;
             sessionOptions.restartConditions = trainingRestartPoliciesFromPython(restart_conditions, /*trainerScope=*/false);
             TrainingRunsEarlyCompletionRulesBinding earlyRules = trainingRunsEarlyCompletionRulesFromPython(early_completion_rules);
@@ -4311,8 +4329,7 @@ IndexedNumpyFloat32DictBatchLoader.
         "early_completion_rules"_a.none() = nb::none(),
         "reports"_a.none() = nb::none(),
         "evaluate_training_population"_a = true,
-        "max_training_batches_per_epoch"_a.none() = nb::none(),
-        "device_dataset_storage"_a = "best_effort");
+        "max_training_batches_per_epoch"_a.none() = nb::none());
 
     auto gradient_clear_policy = nb::enum_<TrainingStep::GradientClearPolicy>(training, "GradientClearPolicy")
                                      .value("clear_before_step", TrainingStep::GradientClearPolicy::CLEAR_BEFORE_STEP)

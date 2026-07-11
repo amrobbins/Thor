@@ -464,7 +464,7 @@ TEST(TrainingProgramApi, TrainingStepRejectsInvalidPhaseLists) {
 }
 
 TEST(TrainingProgramApi, TrainingStepSerializesPhaseAwareExecutionView) {
-    auto dailyPhase = makePhase("daily_prediction");
+    auto dailyPhase = makePhase("daily_prediction", "input");
     auto aggregatePhase = makePhase("aggregate_prediction", "daily_prediction", "", false, true, true, false);
     auto sgd = Sgd::Builder().initialLearningRate(0.01f).build();
 
@@ -895,7 +895,37 @@ TEST(TrainingProgramApi, TrainingInputBindingsSerializeAndAttachToStep) {
     EXPECT_EQ(bindingJson.at("batch_input_name").get<std::string>(), "z_discriminator");
     EXPECT_EQ(TrainingInputBinding::deserialize(bindingJson), zBinding);
 
-    auto phase = makePhase("discriminator_phase");
+    auto discriminatorNetwork = std::make_shared<Network>("discriminator_phase_network");
+    NetworkInput realImages = NetworkInput::Builder()
+                                  .network(*discriminatorNetwork)
+                                  .name("real_images")
+                                  .dimensions({1})
+                                  .dataType(DataType::FP32)
+                                  .build();
+    NetworkInput z = NetworkInput::Builder()
+                         .network(*discriminatorNetwork)
+                         .name("z")
+                         .dimensions({1})
+                         .dataType(DataType::FP32)
+                         .build();
+    MSE discriminatorLoss = MSE::Builder()
+                                .network(*discriminatorNetwork)
+                                .predictions(realImages.getFeatureOutput().value())
+                                .labels(z.getFeatureOutput().value())
+                                .build();
+    NetworkOutput::Builder()
+        .network(*discriminatorNetwork)
+        .name("discriminator_prediction")
+        .inputTensor(realImages.getFeatureOutput().value())
+        .dataType(DataType::FP32)
+        .build();
+    NetworkOutput::Builder()
+        .network(*discriminatorNetwork)
+        .name("discriminator_loss")
+        .inputTensor(discriminatorLoss.getLoss())
+        .dataType(DataType::FP32)
+        .build();
+    auto phase = std::make_shared<TrainingPhase>("discriminator_phase", discriminatorNetwork);
     TrainingStep step("discriminator",
                       std::vector<std::shared_ptr<TrainingPhase>>{phase},
                       nullptr,
@@ -918,7 +948,7 @@ TEST(TrainingProgramApi, TrainingInputBindingsSerializeAndAttachToStep) {
                               {},
                               1,
                               TrainingStep::GradientClearPolicy::CLEAR_BEFORE_STEP,
-                              {TrainingInputBinding("input", "a"), TrainingInputBinding("input", "b")}),
+                              {TrainingInputBinding("real_images", "a"), TrainingInputBinding("real_images", "b")}),
                  std::runtime_error);
 }
 

@@ -4,6 +4,8 @@
 #include "DeepLearning/Api/Data/TrainingData.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
+#include "DeepLearning/Api/Training/PhaseGraphConnector.h"
+#include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "Utilities/Common/Stream.h"
 #include "Utilities/ComputeTopology/MachineEvaluator.h"
 
@@ -49,6 +51,60 @@ std::optional<std::string> trainedArtifactNetworkName(const std::shared_ptr<Plac
     return std::nullopt;
 }
 
+bool trainingProgramUsesPhases(const std::shared_ptr<TrainingProgram>& program) {
+    if (program == nullptr || !program->isInitialized()) {
+        return false;
+    }
+    for (const std::shared_ptr<TrainingStep>& step : program->getSteps()) {
+        if (step != nullptr && step->isInitialized() && !step->getPhases().empty()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string composedPhaseNetworkName(const TrainingStep& step) {
+    const std::vector<std::shared_ptr<TrainingPhase>>& phases = step.getPhases();
+    if (phases.empty() || phases.front() == nullptr || phases.front()->getNetwork() == nullptr) {
+        throw std::runtime_error("TrainingPhase composition requires at least one phase Network.");
+    }
+    return phases.front()->getNetwork()->getNetworkName() + "_joined_" + step.getName();
+}
+
+std::vector<TrainingInputBinding> activeInputBindingsForStep(const TrainingStep& step, const Network& activeNetwork) {
+    std::set<std::string> activeInputNames;
+    for (const std::shared_ptr<NetworkInput>& input : activeNetwork.getExternalNetworkInputs()) {
+        activeInputNames.insert(input->getName());
+    }
+
+    std::vector<TrainingInputBinding> activeBindings;
+    for (const TrainingInputBinding& binding : step.getInputBindings()) {
+        if (activeInputNames.contains(binding.getNetworkInputName())) {
+            activeBindings.push_back(binding);
+        }
+    }
+    return activeBindings;
+}
+
+ComposedPhaseGraph composeCurrentPhaseGraph(const TrainingProgram& program, bool inferenceOnly) {
+    if (!program.isInitialized()) {
+        throw std::runtime_error("Trainer received an uninitialized TrainingProgram.");
+    }
+    if (program.getNumSteps() != 1) {
+        throw std::runtime_error("TrainingPhase execution currently supports exactly one TrainingStep.");
+    }
+    const TrainingStep& step = program.getStep(0);
+    const std::vector<PhaseGraphNetworkSpec> phaseSpecs = step.getActivePhaseNetworkSpecs();
+    if (phaseSpecs.empty()) {
+        throw std::runtime_error("TrainingPhase execution requires at least one enabled phase.");
+    }
+    PhaseGraphComposeOptions options;
+    options.networkName = composedPhaseNetworkName(step);
+    options.inferenceOnly = inferenceOnly;
+    options.exposePhaseOutputsAsNetworkOutputs = true;
+    return buildComposedPhaseGraphByName(phaseSpecs, options);
+}
+
 std::optional<std::string> selectedTrainingArtifactModelDirectory(const std::optional<std::string>& artifactRoot) {
     if (!artifactRoot.has_value() || artifactRoot->empty()) {
         return std::nullopt;
@@ -68,8 +124,16 @@ std::optional<std::string> selectedTrainingArtifactModelDirectory(const std::opt
 }  // namespace
 
 Trainer Trainer::Builder::build() const {
-    if (network_ == nullptr) {
-        throw std::runtime_error("Trainer requires a Network.");
+    if (trainingProgram_ != nullptr && !trainingProgram_->isInitialized()) {
+        throw std::runtime_error("Trainer received an uninitialized TrainingProgram.");
+    }
+    const bool phaseBacked = trainingProgramUsesPhases(trainingProgram_);
+    if (phaseBacked && network_ != nullptr) {
+        throw std::runtime_error(
+            "Trainer phase-backed execution takes its model from TrainingPhase networks; do not provide network.");
+    }
+    if (!phaseBacked && network_ == nullptr) {
+        throw std::runtime_error("Trainer requires network for single-network execution or a phase-backed TrainingProgram.");
     }
     if (trainingData_ == nullptr && loader_ == nullptr) {
         throw std::runtime_error("Trainer requires TrainingData or a legacy Loader.");
@@ -80,6 +144,11 @@ Trainer Trainer::Builder::build() const {
     if (datasetInputBindings_.has_value() && trainingData_ == nullptr) {
         throw std::runtime_error("Trainer DatasetInputBindings require TrainingData; legacy Loader inputs are not schema-bound.");
     }
+    if (phaseBacked && datasetInputBindings_.has_value()) {
+        throw std::runtime_error(
+            "Trainer phase-backed execution resolves dataset fields from the active phase graph. "
+            "Use TrainingStep input bindings for explicit name remapping.");
+    }
     if (runtimeConfig_.maxInFlightBatches == 0) {
         throw std::runtime_error("Trainer maxInFlightBatches must be >= 1.");
     }
@@ -87,12 +156,11 @@ Trainer Trainer::Builder::build() const {
         throw std::runtime_error("Trainer statsIntervalSeconds must be finite and >= 0.");
     }
 
-
     Trainer trainer;
     trainer.network = network_;
     trainer.trainingData = trainingData_;
     trainer.loader = loader_;
-    if (trainingData_ != nullptr) {
+    if (trainingData_ != nullptr && network_ != nullptr) {
         DatasetInputBindings bindings = datasetInputBindings_.has_value()
                                             ? datasetInputBindings_.value()
                                             : DatasetInputBindings::byExactName(*network_, *trainingData_->getDataset());
@@ -637,11 +705,38 @@ void Trainer::releasePlacedNetworkAfterLastFit() {
     }
 }
 
+CompiledDatasetInputBindings Trainer::resolveDatasetInputsForCurrentModel() const {
+    if (trainingData == nullptr) {
+        return {};
+    }
+    if (network != nullptr) {
+        return CompiledDatasetInputBindings{
+            .trainingInputBindings = datasetInputBindings,
+            .requiredFieldIds = requiredDatasetFieldIds,
+        };
+    }
+    if (!trainingProgramUsesPhases(trainingProgram)) {
+        throw std::runtime_error("Trainer TrainingData execution has no model graph to bind.");
+    }
+
+    ComposedPhaseGraph graph = composeCurrentPhaseGraph(*trainingProgram, /*inferenceOnly=*/false);
+    if (graph.network == nullptr) {
+        throw std::runtime_error("TrainingPhase composition produced a null Network while resolving dataset inputs.");
+    }
+    const TrainingStep& step = trainingProgram->getStep(0);
+    return DatasetInputBindings::compileByName(
+        *graph.network,
+        *trainingData->getDataset(),
+        trainingData->getBatching().getBatchSize(),
+        activeInputBindingsForStep(step, *graph.network));
+}
+
 std::shared_ptr<Loader> Trainer::openBatchSessionForRun() const {
     if (trainingData != nullptr) {
+        const CompiledDatasetInputBindings resolved = resolveDatasetInputsForCurrentModel();
         return trainingData->openSession(
             runtimeConfig.maxInFlightBatches,
-            requiredDatasetFieldIds);
+            resolved.requiredFieldIds);
     }
     if (loader != nullptr) {
         return loader;
@@ -665,12 +760,16 @@ void Trainer::fitInternal(const TrainerFitOptions& options,
     }
     cancellationToken.throwIfCancellationRequested();
 
+    const CompiledDatasetInputBindings resolvedDatasetInputs = resolveDatasetInputsForCurrentModel();
+
     TrainingRunRequest request;
     request.network = network;
-    request.loader = openBatchSessionForRun();
+    request.loader = trainingData != nullptr
+                         ? trainingData->openSession(runtimeConfig.maxInFlightBatches, resolvedDatasetInputs.requiredFieldIds)
+                         : openBatchSessionForRun();
     request.optimizer = optimizer;
     request.trainingProgram = trainingProgram;
-    request.datasetInputBindings = datasetInputBindings;
+    request.datasetInputBindings = resolvedDatasetInputs.trainingInputBindings;
     request.runtime = runtimeConfig;
     request.runtime.scalarTensorsToReport.insert(additionalScalarTensorsToReport.begin(), additionalScalarTensorsToReport.end());
     request.epochs = options.epochs;
@@ -679,8 +778,11 @@ void Trainer::fitInternal(const TrainerFitOptions& options,
     request.checkBestModelEveryEpochs = options.checkBestModelEveryEpochs;
     request.firstModelSelectionEpoch = options.firstModelSelectionEpoch;
     request.maxTrainingBatchesPerEpoch = options.maxTrainingBatchesPerEpoch;
-    request.deviceDatasetStorage = options.deviceDatasetStorage;
-    request.deviceDatasetStorageReport.requested = options.deviceDatasetStorage;
+    request.trainingData = trainingData;
+    request.deviceDatasetStorageReport.requested =
+        trainingData == nullptr
+            ? DeviceDatasetStorage::OFF
+            : trainingData->getAccessPolicy().deviceStorage;
     request.initialCompletedEpochs = completedTrainingEpochs;
     request.initialElapsedSeconds = completedTrainingElapsedSeconds;
     request.modelSelectionScore = modelSelectionScore;
@@ -961,8 +1063,8 @@ TrainingRunResult Trainer::evaluateTrainingRun(std::string runName,
                                                TrainingEventPhase phase,
                                                TrainingObserver& observer,
                                                const TrainingCancellationToken& cancellationToken) {
-    if (network == nullptr) {
-        throw std::runtime_error("Trainer::evaluate requires a Network.");
+    if (network == nullptr && !trainingProgramUsesPhases(trainingProgram)) {
+        throw std::runtime_error("Trainer::evaluate requires a single Network or a phase-backed TrainingProgram.");
     }
     if (evaluationLoader == nullptr) {
         throw std::runtime_error("Trainer::evaluate requires a Loader.");
@@ -986,7 +1088,6 @@ TrainingRunResult Trainer::evaluateTrainingRun(std::string runName,
     request.checkBestModelEveryEpochs = 1;
     request.epochs = 1;
     request.cancellationToken = cancellationToken;
-    request.deviceDatasetStorage = DeviceDatasetStorage::OFF;
     request.deviceDatasetStorageReport.requested = DeviceDatasetStorage::OFF;
     request.executionMode = TrainingRunExecutionMode::EVALUATE;
     request.evaluationExampleType = exampleType;
@@ -1016,14 +1117,21 @@ TrainingRunResult Trainer::evaluateSavedTrainingRun(std::string runName,
                                                     TrainingEventPhase phase,
                                                     TrainingObserver& observer,
                                                     const TrainingCancellationToken& cancellationToken) {
-    if (network == nullptr) {
-        throw std::runtime_error("Trainer::evaluateSavedTrainingRun requires an original Network for artifact loading context.");
+    const std::optional<std::string> artifactNetworkName =
+        lastCompletedArtifactNetworkName.has_value()
+            ? lastCompletedArtifactNetworkName
+            : trainedArtifactNetworkName(placedNetworkAfterLastFit, network);
+    if (!artifactNetworkName.has_value()) {
+        throw std::runtime_error("Trainer::evaluateSavedTrainingRun requires a saved model network name.");
     }
-    auto loadedNetwork = std::make_shared<Network>(network->getNetworkName());
+    auto loadedNetwork = std::make_shared<Network>(*artifactNetworkName);
     loadedNetwork->load(modelArtifactDirectory);
 
     Trainer evaluator = *this;
     evaluator.network = std::move(loadedNetwork);
+    evaluator.trainingProgram.reset();
+    evaluator.datasetInputBindings.clear();
+    evaluator.requiredDatasetFieldIds.clear();
     return evaluator.evaluateTrainingRun(std::move(runName),
                                          std::move(evaluationLoader),
                                          exampleType,
@@ -1033,8 +1141,8 @@ TrainingRunResult Trainer::evaluateSavedTrainingRun(std::string runName,
 }
 
 void Trainer::validateFitOptions(const TrainerFitOptions& options) const {
-    if (network == nullptr) {
-        throw std::runtime_error("Trainer::fit requires a Network.");
+    if (network == nullptr && !trainingProgramUsesPhases(trainingProgram)) {
+        throw std::runtime_error("Trainer::fit requires a single Network or a phase-backed TrainingProgram.");
     }
     if (trainingData == nullptr && loader == nullptr) {
         throw std::runtime_error("Trainer::fit requires TrainingData or a legacy Loader.");

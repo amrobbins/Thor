@@ -444,7 +444,23 @@ def test_training_program_rejects_out_of_range_access_and_unsupported_version():
 
 
 def test_training_input_bindings_are_serialized_and_validated():
-    phase, _, _ = _make_phase("discriminator", input_name="real_images")
+    network = thor.Network("discriminator_phase_network")
+    real_images = thor.layers.NetworkInput(network, "real_images", [1], thor.DataType.fp32)
+    z = thor.layers.NetworkInput(network, "z", [1], thor.DataType.fp32)
+    loss = thor.losses.MSE(
+        network,
+        real_images.get_feature_output(),
+        z.get_feature_output(),
+        thor.DataType.fp32,
+    )
+    thor.layers.NetworkOutput(
+        network,
+        "discriminator_prediction",
+        real_images.get_feature_output(),
+        thor.DataType.fp32,
+    )
+    thor.layers.NetworkOutput(network, "discriminator_loss", loss.get_loss(), thor.DataType.fp32)
+    phase = thor.training.TrainingPhase("discriminator", network=network)
     z_binding = thor.training.TrainingInputBinding("z", "z_discriminator")
 
     assert z_binding.network_input_name == "z"
@@ -474,8 +490,8 @@ def test_training_input_bindings_are_serialized_and_validated():
             "bad",
             phases=[phase],
             input_bindings=[
-                thor.training.TrainingInputBinding("input", "a"),
-                thor.training.TrainingInputBinding("input", "b"),
+                thor.training.TrainingInputBinding("real_images", "a"),
+                thor.training.TrainingInputBinding("real_images", "b"),
             ],
         )
 
@@ -543,15 +559,14 @@ def test_training_program_compile_plans_step_executables_and_resolves_update_par
     assert len(arch["resolved_input_bindings"]) == 2
     assert arch["required_batch_input_names"] == ["labels", "z_generator"]
 
-    bad_input_step = thor.training.TrainingStep(
-        "bad_input",
-        phases=[phase],
-        optimizer=optimizer,
-        update_parameters=[weights],
-        input_bindings=[thor.training.TrainingInputBinding("missing_input", "batch")],
-    )
-    with pytest.raises(RuntimeError, match="unknown NetworkInput"):
-        thor.training.TrainingProgram([bad_input_step]).compile(placed)
+    with pytest.raises(RuntimeError, match="not an external input of any phase"):
+        thor.training.TrainingStep(
+            "bad_input",
+            phases=[phase],
+            optimizer=optimizer,
+            update_parameters=[weights],
+            input_bindings=[thor.training.TrainingInputBinding("missing_input", "batch")],
+        )
 
     foreign_phase, _, _ = _make_phase("foreign_phase")
     bad_loss_step = thor.training.TrainingStep(

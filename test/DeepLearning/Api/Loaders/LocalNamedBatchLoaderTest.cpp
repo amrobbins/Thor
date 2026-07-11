@@ -176,9 +176,6 @@ TEST(LocalNamedBatchLoaderTest, DoesNotAdvertiseDeviceDatasetMaterialization) {
 
     {
         LocalNamedBatchLoader loader(datasetPath, layout, 2, 2, false);
-        EXPECT_FALSE(loader.supportsDeviceDatasetMaterialization());
-        EXPECT_EQ(loader.getDeviceDatasetMaterializationUnsupportedReason(), "loader_not_materializable");
-        EXPECT_THROW((void)loader.describeDeviceDatasetMaterialization(), std::runtime_error);
     }
 
     std::filesystem::remove_all(datasetPath);

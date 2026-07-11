@@ -222,7 +222,7 @@ def test_indexed_local_named_loader_reads_shared_dataset_by_indices(tmp_path):
         writer.write_indexed_example(_example(i))
     writer.close()
 
-    loader = thor.training.IndexedLocalNamedBatchLoader(
+    loader = thor.training.IndexedNamedBatchLoader(
         dataset_path=dataset_path,
         layout=layout,
         train_indices=np.asarray([4, 2, 0], dtype=np.int64),
@@ -232,7 +232,7 @@ def test_indexed_local_named_loader_reads_shared_dataset_by_indices(tmp_path):
         randomize_train=False,
     )
 
-    assert loader.get_dataset_name() == "indexed_local_named_examples"
+    assert loader.get_dataset_name() == "indexed_named_examples"
     assert loader.get_batch_size() == 2
     assert loader.get_num_dataset_examples() == 5
     assert loader.get_num_train_examples() == 3
@@ -296,7 +296,7 @@ def test_local_named_dataset_owns_schema_identity_and_shared_reader(tmp_path):
     assert dataset.schema.field("seasonality_inputs").name == "seasonality_inputs"
     assert dataset.schema["seasonality_inputs"].name == "seasonality_inputs"
 
-    fold_a = thor.training.IndexedLocalNamedBatchLoader(
+    fold_a = thor.training.IndexedNamedBatchLoader(
         dataset=dataset,
         train_indices=[0, 2, 4],
         validate_indices=[1],
@@ -304,7 +304,7 @@ def test_local_named_dataset_owns_schema_identity_and_shared_reader(tmp_path):
         batch_queue_depth=2,
         randomize_train=False,
     )
-    fold_b = thor.training.IndexedLocalNamedBatchLoader(
+    fold_b = thor.training.IndexedNamedBatchLoader(
         dataset=dataset,
         train_indices=[1, 3],
         validate_indices=[0, 4],
@@ -336,7 +336,7 @@ def test_indexed_local_named_loader_exposes_stats(tmp_path):
         writer.write_indexed_example(_example(i))
     writer.close()
 
-    loader = thor.training.IndexedLocalNamedBatchLoader(
+    loader = thor.training.IndexedNamedBatchLoader(
         dataset_path=dataset_path,
         layout=layout,
         train_indices=[0, 1, 2, 3, 4],
@@ -474,7 +474,7 @@ def test_indexed_local_named_loader_allows_empty_validate_and_test_indices(tmp_p
     writer.close()
 
     empty = np.empty((0,), dtype=np.int64)
-    loader = thor.training.IndexedLocalNamedBatchLoader(
+    loader = thor.training.IndexedNamedBatchLoader(
         dataset_path=dataset_path,
         layout=layout,
         train_indices=np.asarray([0, 1, 2], dtype=np.int64),
@@ -517,7 +517,7 @@ def test_indexed_local_named_loader_empty_validate_aliases_empty_implicit_test(t
         writer.write_indexed_example(_example(i))
     writer.close()
 
-    loader = thor.training.IndexedLocalNamedBatchLoader(
+    loader = thor.training.IndexedNamedBatchLoader(
         dataset_path=dataset_path,
         layout=layout,
         train_indices=[0, 1, 2],
@@ -545,7 +545,7 @@ def test_indexed_local_named_loader_still_rejects_empty_train_indices(tmp_path):
     writer.close()
 
     with pytest.raises(ValueError, match="train_indices"):
-        thor.training.IndexedLocalNamedBatchLoader(
+        thor.training.IndexedNamedBatchLoader(
             dataset_path=dataset_path,
             layout=layout,
             train_indices=np.empty((0,), dtype=np.int64),
@@ -566,7 +566,7 @@ def test_indexed_local_named_loader_supports_explicit_test_indices(tmp_path):
         writer.write_indexed_example(_example(i))
     writer.close()
 
-    loader = thor.training.IndexedLocalNamedBatchLoader(
+    loader = thor.training.IndexedNamedBatchLoader(
         dataset_path,
         layout,
         train_indices=[0, 1],
@@ -596,7 +596,7 @@ def test_indexed_local_named_loader_rejects_out_of_range_indices(tmp_path):
     writer.close()
 
     with pytest.raises(RuntimeError, match="outside dataset row count"):
-        thor.training.IndexedLocalNamedBatchLoader(
+        thor.training.IndexedNamedBatchLoader(
             dataset_path,
             layout,
             train_indices=[0, 1],
@@ -618,7 +618,7 @@ def test_indexed_local_named_loader_randomized_train_seed_is_deterministic(tmp_p
         writer.write_indexed_example(_example(i))
     writer.close()
 
-    first = thor.training.IndexedLocalNamedBatchLoader(
+    first = thor.training.IndexedNamedBatchLoader(
         dataset_path,
         layout,
         train_indices=[0, 1, 2, 3, 4],
@@ -628,7 +628,7 @@ def test_indexed_local_named_loader_randomized_train_seed_is_deterministic(tmp_p
         randomize_train=True,
         random_seed=12345,
     )
-    second = thor.training.IndexedLocalNamedBatchLoader(
+    second = thor.training.IndexedNamedBatchLoader(
         dataset_path,
         layout,
         train_indices=[0, 1, 2, 3, 4],
@@ -657,7 +657,7 @@ def test_indexed_local_named_loader_validate_and_test_are_sequential_and_wrap(tm
         writer.write_indexed_example(_example(i))
     writer.close()
 
-    loader = thor.training.IndexedLocalNamedBatchLoader(
+    loader = thor.training.IndexedNamedBatchLoader(
         dataset_path,
         layout,
         train_indices=[4, 3],
@@ -703,10 +703,10 @@ def test_indexed_local_named_loader_two_fold_loaders_share_one_dataset(tmp_path)
         writer.write_indexed_example(_example(i))
     writer.close()
 
-    fold_a = thor.training.IndexedLocalNamedBatchLoader(
+    fold_a = thor.training.IndexedNamedBatchLoader(
         dataset_path, layout, train_indices=[0, 2, 4], validate_indices=[1], batch_size=2, randomize_train=False
     )
-    fold_b = thor.training.IndexedLocalNamedBatchLoader(
+    fold_b = thor.training.IndexedNamedBatchLoader(
         dataset_path, layout, train_indices=[1, 3], validate_indices=[0, 4], batch_size=2, randomize_train=False
     )
 
@@ -744,7 +744,7 @@ def test_indexed_local_named_loader_rejects_requested_layout_mismatch(tmp_path):
     )
 
     with pytest.raises(RuntimeError, match="record_size_bytes|shape"):
-        thor.training.IndexedLocalNamedBatchLoader(
+        thor.training.IndexedNamedBatchLoader(
             dataset_path,
             wrong_layout,
             train_indices=[0],
@@ -782,7 +782,7 @@ def test_indexed_local_named_loader_rejects_split_storage_mode_dataset(tmp_path)
     writer.close()
 
     with pytest.raises(RuntimeError, match="indexed"):
-        thor.training.IndexedLocalNamedBatchLoader(
+        thor.training.IndexedNamedBatchLoader(
             dataset_path,
             layout,
             train_indices=[0],
@@ -840,7 +840,7 @@ def test_local_named_writer_chunked_indexed_examples_with_expected_count_and_pre
     assert [shard["capacity_examples"] for shard in manifest["shards"]] == [2, 2, 1]
     assert [shard["num_examples"] for shard in manifest["shards"]] == [2, 2, 1]
 
-    loader = thor.training.IndexedLocalNamedBatchLoader(
+    loader = thor.training.IndexedNamedBatchLoader(
         dataset_path,
         layout,
         train_indices=[4, 2, 0],
@@ -980,7 +980,7 @@ def test_indexed_local_named_windowed_tensor_round_trip_from_python(tmp_path):
         }
     ]
 
-    loader = thor.training.IndexedLocalNamedBatchLoader(
+    loader = thor.training.IndexedNamedBatchLoader(
         dataset_path=dataset_path,
         layout=layout,
         train_indices=[0, 1, 2],
@@ -1048,7 +1048,7 @@ def test_windowed_indexed_writer_accepts_single_example_reference_from_python(tm
     )
     writer.close()
 
-    loader = thor.training.IndexedLocalNamedBatchLoader(
+    loader = thor.training.IndexedNamedBatchLoader(
         dataset_path,
         layout,
         train_indices=[0],
@@ -1129,7 +1129,7 @@ def test_dataset_split_manifests_bind_folds_to_one_dataset_and_round_trip(tmp_pa
     loaded.validate_against(dataset)
 
     policy = thor.data.BatchPolicy(batch_size=2, randomize_train=False)
-    loader = thor.training.IndexedLocalNamedBatchLoader(
+    loader = thor.training.IndexedNamedBatchLoader(
         dataset=dataset,
         splits=loaded,
         batching=policy,
@@ -1221,7 +1221,7 @@ def test_training_data_opens_independent_named_batch_sessions(tmp_path):
     assert isinstance(first, thor.data.IndexedNamedBatchLoader)
     assert isinstance(first, thor.training.IndexedNamedBatchSession)
     assert isinstance(first, thor.training.IndexedNamedBatchLoader)
-    assert isinstance(first, thor.training.IndexedLocalNamedBatchLoader)
+    assert isinstance(first, thor.training.IndexedNamedBatchLoader)
     assert first.get_dataset_name() == "shared_examples"
     assert second.get_dataset_name() == "shared_examples"
 
@@ -1243,6 +1243,45 @@ def test_training_data_opens_independent_named_batch_sessions(tmp_path):
         np.asarray([[21.0, 22.0], [31.0, 32.0]], dtype=np.float32),
     )
     np.testing.assert_array_equal(repeated_second["seasonality_inputs"], next_first["seasonality_inputs"])
+
+
+def test_training_data_owns_device_access_policy(tmp_path):
+    dataset_path = tmp_path / "training_data_access_policy"
+    writer = thor.training.LocalNamedExampleDatasetWriter(
+        dataset_path, _layout(), examples_per_shard=2, storage_mode="indexed"
+    )
+    for i in range(3):
+        writer.write_indexed_example(_example(i))
+    writer.close()
+
+    dataset = thor.data.LocalNamedDataset.open(dataset_path)
+    splits = thor.data.DatasetSplitManifest(
+        dataset=dataset,
+        train_indices=[0, 1],
+        validate_indices=[2],
+    )
+    batching = thor.data.BatchPolicy(batch_size=1, randomize_train=False)
+
+    default_data = thor.data.TrainingData(
+        dataset=dataset,
+        splits=splits,
+        batching=batching,
+    )
+    strict_data = thor.data.TrainingData(
+        dataset=dataset,
+        splits=splits,
+        batching=batching,
+        device_storage="strict",
+    )
+
+    assert default_data.device_storage == thor.data.DeviceDatasetStorage.BEST_EFFORT
+    assert strict_data.device_storage == thor.data.DeviceDatasetStorage.STRICT
+    assert not hasattr(thor.training.TrainerFitOptions(), "device_dataset_storage")
+
+    policy = thor.data.DatasetAccessPolicy()
+    assert policy.device_storage == thor.data.DeviceDatasetStorage.BEST_EFFORT
+    policy.device_storage = "off"
+    assert policy.device_storage == thor.data.DeviceDatasetStorage.OFF
 
 
 def test_training_data_session_cancellation_is_local(tmp_path):
@@ -1433,3 +1472,69 @@ def test_dataset_input_bindings_allow_graph_level_type_conversion(tmp_path):
         data=data,
         input_bindings=bindings,
     ) is not None
+
+
+def test_phase_training_binds_only_active_dataset_field_subset(tmp_path):
+    dataset, data = _write_binding_dataset(tmp_path)
+
+    daily = thor.Network("phase_subset_daily")
+    daily_features = thor.layers.NetworkInput(daily, "seasonality_inputs", [2], thor.DataType.fp32)
+    daily_labels = thor.layers.NetworkInput(daily, "daily_target", [2], thor.DataType.fp32)
+    daily_prediction = thor.layers.FullyConnected(
+        daily,
+        daily_features.get_feature_output(),
+        2,
+        True,
+        activation=None,
+    ).get_feature_output()
+    daily_loss = thor.losses.MSE(
+        daily,
+        daily_prediction,
+        daily_labels.get_feature_output(),
+        thor.DataType.fp32,
+    )
+    thor.layers.NetworkOutput(daily, "daily_loss", daily_loss.get_loss(), thor.DataType.fp32)
+
+    aggregate = thor.Network("phase_subset_aggregate")
+    aggregate_features = thor.layers.NetworkInput(aggregate, "monotone_inputs", [3], thor.DataType.fp32)
+    aggregate_labels = thor.layers.NetworkInput(aggregate, "daily_target", [2], thor.DataType.fp32)
+    aggregate_prediction = thor.layers.FullyConnected(
+        aggregate,
+        aggregate_features.get_feature_output(),
+        2,
+        True,
+        activation=None,
+    ).get_feature_output()
+    aggregate_loss = thor.losses.MSE(
+        aggregate,
+        aggregate_prediction,
+        aggregate_labels.get_feature_output(),
+        thor.DataType.fp32,
+    )
+    thor.layers.NetworkOutput(aggregate, "aggregate_loss", aggregate_loss.get_loss(), thor.DataType.fp32)
+
+    daily_phase = thor.training.TrainingPhase("daily", network=daily, enabled=True)
+    aggregate_phase = thor.training.TrainingPhase("aggregate", network=aggregate, enabled=False)
+    program = thor.training.TrainingProgram([
+        thor.training.TrainingStep(
+            "daily_then_aggregate",
+            phases=[daily_phase, aggregate_phase],
+            optimizer=thor.optimizers.Sgd(initial_learning_rate=0.01, momentum=0.0),
+        )
+    ])
+    trainer = thor.training.Trainer(
+        data=data,
+        training_program=program,
+        stats_interval_s=0.0,
+        max_in_flight_batches=2,
+        stats_color="never",
+    )
+
+    # The dataset contains fields not consumed by the active daily phase. Only
+    # seasonality_inputs and daily_target are validated and materialized.
+    trainer.fit(epochs=1, max_training_batches_per_epoch=1)
+
+    # Enabling the sibling phase recomposes the model and extends the consumed
+    # subset to monotone_inputs without changing the Trainer.
+    aggregate_phase.enable()
+    trainer.fit(epochs=1, max_training_batches_per_epoch=1)

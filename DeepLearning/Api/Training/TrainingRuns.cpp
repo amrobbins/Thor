@@ -3145,8 +3145,8 @@ TrainingRunsComposedEvaluatorArtifacts loadTrainingRunsComposedEvaluatorArtifact
     artifacts.weights.reserve(members.size());
 
     for (const EnsembleMemberSpecRef& member : members) {
-        if (member.spec == nullptr || member.spec->trainer == nullptr || member.spec->trainer->getNetwork() == nullptr) {
-            throw std::runtime_error(context + " requires a trainer network for every ensemble member.");
+        if (member.spec == nullptr || member.spec->trainer == nullptr) {
+            throw std::runtime_error(context + " requires a trainer for every ensemble member.");
         }
         const std::optional<std::string> artifactDir =
             member.result != nullptr && member.result->savedModelDirectory.has_value()
@@ -3705,7 +3705,7 @@ std::vector<MemberGraphEvaluationMetrics> evaluateMemberGraphReportsOnLoader(
     for (size_t memberIndex = 0; memberIndex < members.size(); ++memberIndex) {
         const EnsembleMemberSpecRef& member = members[memberIndex];
         MemberGraphEvaluationMetrics result;
-        if (member.spec == nullptr || member.spec->trainer == nullptr || member.spec->trainer->getNetwork() == nullptr) {
+        if (member.spec == nullptr || member.spec->trainer == nullptr) {
             memberMetrics.push_back(result);
             continue;
         }
@@ -3735,7 +3735,7 @@ void applyGraphEvaluationMemberTestStats(std::vector<TrainingRunResult>& results
     const uint64_t stepsPerEpoch = testLoader.getNumBatchesPerEpoch(ExampleType::TEST);
 
     for (size_t i = 0; i < members.size(); ++i) {
-        if (members[i].spec == nullptr || members[i].spec->trainer == nullptr || members[i].spec->trainer->getNetwork() == nullptr) {
+        if (members[i].spec == nullptr || members[i].spec->trainer == nullptr) {
             continue;
         }
         const MemberGraphEvaluationMetrics metrics = i < memberMetrics.size() ? memberMetrics[i] : MemberGraphEvaluationMetrics{};
@@ -3744,9 +3744,13 @@ void applyGraphEvaluationMemberTestStats(std::vector<TrainingRunResult>& results
         if (runResult.finalTestStats.has_value()) {
             testStats = *runResult.finalTestStats;
         }
-        testStats.networkName = members[i].result != nullptr && members[i].result->savedModelNetworkName.has_value()
-            ? *members[i].result->savedModelNetworkName
-            : members[i].spec->trainer->getNetwork()->getNetworkName();
+        if (members[i].result != nullptr && members[i].result->savedModelNetworkName.has_value()) {
+            testStats.networkName = *members[i].result->savedModelNetworkName;
+        } else if (members[i].spec->trainer->getNetwork() != nullptr) {
+            testStats.networkName = members[i].spec->trainer->getNetwork()->getNetworkName();
+        } else {
+            testStats.networkName = members[i].spec->runName;
+        }
         testStats.datasetName = testLoader.getDatasetName();
         testStats.phase = TrainingEventPhase::TEST;
         testStats.epoch = 1;

@@ -28,7 +28,7 @@ DeviceDatasetStorage deviceDatasetStorageFromName(std::string_view name) {
     if (name == "strict") {
         return DeviceDatasetStorage::STRICT;
     }
-    throw std::runtime_error("device_dataset_storage must be one of: 'best_effort', 'strict', 'off'.");
+    throw std::runtime_error("device_storage must be one of: 'best_effort', 'strict', 'off'.");
 }
 
 }  // namespace Thor

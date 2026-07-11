@@ -1,40 +1,59 @@
 #pragma once
 
-#include "DeepLearning/Api/Loaders/Loader.h"
+#include "DeepLearning/Api/Data/BatchSession.h"
+#include "DeepLearning/Api/Data/TrainingData.h"
+#include "DeepLearning/Api/Loaders/DeviceDatasetMaterialization.h"
 #include "DeepLearning/Api/Training/DeviceDatasetStorage.h"
 #include "DeepLearning/Implementation/Tensor/TensorPlacement.h"
 
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <set>
 
 namespace Thor {
 
+class LocalNamedDataset;
+
 struct DeviceDatasetStorageSelection {
-    std::shared_ptr<Loader> loader;
+    std::shared_ptr<BatchSession> session;
     DeviceDatasetStorageReport report{};
 };
 
 /**
- * Select the effective loader for a training request under the device dataset
- * storage policy. Persistent materialization is canonical and split-independent;
- * the returned BatchSession applies the source session's manifest and batching
- * policy over that shared row-ordered storage. The Loader-typed return remains
- * temporarily for compatibility with legacy training entry points.
+ * Select the effective per-run session under the immutable TrainingData access
+ * policy. Dataset identity/schema/backend come from TrainingData::dataset;
+ * split membership and batching come from TrainingData itself; only live queue
+ * state and required-field reporting come from sourceSession.
  */
-[[nodiscard]] DeviceDatasetStorageSelection selectDeviceDatasetStorageLoader(
-    const std::shared_ptr<Loader> &sourceLoader,
-    DeviceDatasetStorage requested,
+[[nodiscard]] DeviceDatasetStorageSelection selectDeviceDatasetStorageSession(
+    const std::shared_ptr<BatchSession>& sourceSession,
+    const TrainingData& trainingData,
     ThorImplementation::TensorPlacement devicePlacement,
     uint64_t batchQueueDepth,
     std::optional<uint64_t> availableBytesOverride = std::nullopt);
 
+[[nodiscard]] DatasetMaterializationDescription describeDatasetMaterialization(
+    const LocalNamedDataset& dataset);
+
+[[nodiscard]] DatasetMaterializationDescription describeDatasetMaterialization(
+    const TrainingData& trainingData);
+
+[[nodiscard]] DeviceDatasetSessionDescription describeDeviceDatasetSession(
+    const DatasetSplitManifest& splits,
+    const BatchPolicy& batching,
+    const std::set<DatasetFieldId>& requiredFieldIds = {});
+
+[[nodiscard]] DeviceDatasetSessionDescription describeDeviceDatasetSession(
+    const TrainingData& trainingData,
+    const std::set<DatasetFieldId>& requiredFieldIds = {});
+
 [[nodiscard]] uint64_t estimateDeviceResidentNamedDatasetRequiredBytes(
-    const DatasetMaterializationDescription &dataset,
-    const DeviceDatasetSessionDescription &session,
+    const DatasetMaterializationDescription& dataset,
+    const DeviceDatasetSessionDescription& session,
     uint64_t batchQueueDepth);
 
 [[nodiscard]] uint64_t estimateDeviceResidentNamedDatasetStorageBytes(
-    const DatasetMaterializationDescription &dataset);
+    const DatasetMaterializationDescription& dataset);
 
 }  // namespace Thor

@@ -412,7 +412,6 @@ std::shared_ptr<Trainer> makeTrainer(std::shared_ptr<Network> network,
 
 std::shared_ptr<Trainer> makePhaseTrainerForValidation(const std::string& name,
                                                                     std::shared_ptr<TrainingExecutor> executor) {
-    auto placeholderNetwork = std::make_shared<Network>(name + "_placeholder");
     auto phaseNetwork = std::make_shared<Network>(name + "_phase");
 
     NetworkInput features = NetworkInput::Builder()
@@ -453,7 +452,6 @@ std::shared_ptr<Trainer> makePhaseTrainerForValidation(const std::string& name,
     auto program = std::make_shared<TrainingProgram>(std::vector<std::shared_ptr<TrainingStep>>{step});
 
     return std::make_shared<Trainer>(Trainer::Builder()
-                                         .network(std::move(placeholderNetwork))
                                          .loader(std::make_shared<FakeLoader>())
                                          .executor(std::move(executor))
                                          .observer(std::make_shared<NullTrainingObserver>())

@@ -4,6 +4,7 @@
 #include "DeepLearning/Api/Loaders/Loader.h"
 #include "DeepLearning/Api/Data/BatchSession.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
@@ -1194,7 +1195,7 @@ std::vector<TrainingInputBinding> mergeDatasetInputBindings(
             if (existing->second != binding.getBatchInputName()) {
                 throw std::runtime_error(
                     "TrainingProgram input binding for NetworkInput '" + binding.getNetworkInputName() +
-                    "' conflicts with the Trainer's strict DatasetInputBindings.");
+                    "' conflicts with the Trainer's dataset-resolved binding.");
             }
             continue;
         }
@@ -1202,6 +1203,25 @@ std::vector<TrainingInputBinding> mergeDatasetInputBindings(
         merged.push_back(binding);
     }
     return merged;
+}
+
+
+std::vector<TrainingInputBinding> inputBindingsForNetwork(
+    const std::vector<TrainingInputBinding>& bindings,
+    const Network& network) {
+    std::set<std::string> externalInputNames;
+    for (const std::shared_ptr<NetworkInput>& input : network.getExternalNetworkInputs()) {
+        externalInputNames.insert(input->getName());
+    }
+
+    std::vector<TrainingInputBinding> filtered;
+    filtered.reserve(bindings.size());
+    for (const TrainingInputBinding& binding : bindings) {
+        if (externalInputNames.contains(binding.getNetworkInputName())) {
+            filtered.push_back(binding);
+        }
+    }
+    return filtered;
 }
 
 std::shared_ptr<TrainingProgram> programWithDatasetInputBindings(
@@ -1390,7 +1410,6 @@ std::shared_ptr<Optimizer> optimizerForComposedPhaseGraph(const TrainingRunReque
 NativeQueuedExecutionGraph resolveNativeQueuedExecutionGraph(const TrainingRunRequest& request,
                                                             const std::shared_ptr<TrainingProgram>& requestedProgram,
                                                             bool evaluateOnly) {
-    THOR_THROW_IF_FALSE(request.network != nullptr);
     THOR_THROW_IF_FALSE(requestedProgram != nullptr);
 
     NativeQueuedExecutionGraph result;
@@ -1398,14 +1417,22 @@ NativeQueuedExecutionGraph resolveNativeQueuedExecutionGraph(const TrainingRunRe
     result.trainingProgram = requestedProgram;
 
     if (!trainingProgramHasAnyPhase(*requestedProgram) || isImplicitDefaultSingleNetworkProgram(*requestedProgram, request.network)) {
+        if (request.network == nullptr) {
+            throw std::runtime_error("Single-network Trainer execution requires network.");
+        }
         return result;
     }
 
     validateTrainingPhaseNativeQueuedProgramShape(*requestedProgram);
     const TrainingStep& sourceStep = requestedProgram->getStep(0);
 
+    const std::vector<std::shared_ptr<TrainingPhase>>& sourcePhases = sourceStep.getPhases();
+    if (sourcePhases.empty() || sourcePhases.front() == nullptr || sourcePhases.front()->getNetwork() == nullptr) {
+        throw std::runtime_error("TrainingPhase composition requires at least one phase Network.");
+    }
+
     PhaseGraphComposeOptions composeOptions;
-    composeOptions.networkName = request.network->getNetworkName() + "_active_training_phases";
+    composeOptions.networkName = sourcePhases.front()->getNetwork()->getNetworkName() + "_joined_" + sourceStep.getName();
     composeOptions.inferenceOnly = evaluateOnly;
     composeOptions.exposePhaseOutputsAsNetworkOutputs = true;
 
@@ -1424,14 +1451,15 @@ NativeQueuedExecutionGraph resolveNativeQueuedExecutionGraph(const TrainingRunRe
     }
 
     auto executionPhase = std::make_shared<TrainingPhase>(sourceStep.getName() + "_active_graph", composedGraph.network, true);
-    auto executionStep = std::make_shared<TrainingStep>(sourceStep.getName(),
-                                                        std::vector<std::shared_ptr<TrainingPhase>>{executionPhase},
-                                                        sourceStep.getOptimizer(),
-                                                        std::vector<ParameterReference>{},
-                                                        sourceStep.getRepeatCount(),
-                                                        sourceStep.getGradientClearPolicy(),
-                                                        sourceStep.getInputBindings(),
-                                                        sourceStep.isEnabled());
+    auto executionStep = std::make_shared<TrainingStep>(
+        sourceStep.getName(),
+        std::vector<std::shared_ptr<TrainingPhase>>{executionPhase},
+        sourceStep.getOptimizer(),
+        std::vector<ParameterReference>{},
+        sourceStep.getRepeatCount(),
+        sourceStep.getGradientClearPolicy(),
+        inputBindingsForNetwork(sourceStep.getInputBindings(), *composedGraph.network),
+        sourceStep.isEnabled());
 
     result.network = composedGraph.network;
     result.trainingProgram = std::make_shared<TrainingProgram>(std::vector<std::shared_ptr<TrainingStep>>{executionStep});
@@ -1440,12 +1468,16 @@ NativeQueuedExecutionGraph resolveNativeQueuedExecutionGraph(const TrainingRunRe
 }
 
 std::map<std::string, std::optional<ThorImplementation::TensorPlacement>> resolveNetworkInputBatchPlacements(
-    const Loader& loader, const ExecutableTrainingPlan& plan) {
+    const std::shared_ptr<Loader>& loader, const ExecutableTrainingPlan& plan) {
+    std::shared_ptr<BatchSession> session =
+        std::dynamic_pointer_cast<BatchSession>(loader);
     std::map<std::string, std::optional<ThorImplementation::TensorPlacement>> placements;
     for (const StepExecutable& step : plan.getSteps()) {
         for (const TrainingInputBinding& binding : step.getResolvedInputBindings()) {
             const std::optional<ThorImplementation::TensorPlacement> placement =
-                loader.getBatchTensorPlacement(binding.getBatchInputName());
+                session == nullptr
+                    ? std::nullopt
+                    : session->getBatchTensorPlacement(binding.getBatchInputName());
             auto [existing, inserted] = placements.emplace(binding.getNetworkInputName(), placement);
             if (!inserted && (!existing->second.has_value() || !placement.has_value() || existing->second.value() != placement.value())) {
                 // A NetworkInput reused with unknown or differing source placements
@@ -2191,7 +2223,7 @@ class NativeQueuedEpochScheduler {
 void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver& observer, const NativeQueuedTrainingOptions& options) {
     NativeQueuedSigintScope sigintScope;
 
-    THOR_THROW_IF_FALSE(request.network != nullptr);
+    THOR_THROW_IF_FALSE(request.network != nullptr || request.trainingProgram != nullptr);
     THOR_THROW_IF_FALSE(request.loader != nullptr);
     THOR_THROW_IF_FALSE(request.epochs > 0);
     THOR_THROW_IF_FALSE(options.maxInFlightBatches >= 1);
@@ -2284,21 +2316,29 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
 
     std::shared_ptr<Loader> effectiveLoader = request.loader;
     DeviceDatasetStorageReport deviceDatasetStorageReport = request.deviceDatasetStorageReport;
-    deviceDatasetStorageReport.requested = request.deviceDatasetStorage;
-    if (!evaluateOnly) {
-        const uint64_t deviceDatasetBatchQueueDepth = std::max<uint64_t>(uint64_t{1}, options.maxInFlightBatches);
-        DeviceDatasetStorageSelection deviceDatasetSelection = selectDeviceDatasetStorageLoader(
-            request.loader,
-            request.deviceDatasetStorage,
-            ThorImplementation::TensorPlacement(ThorImplementation::TensorPlacement::MemDevices::GPU,
-                                                placedNetwork->getStampedNetwork(0).getGpuNum()),
-            deviceDatasetBatchQueueDepth);
-        effectiveLoader = std::move(deviceDatasetSelection.loader);
+    if (!evaluateOnly && request.trainingData != nullptr) {
+        std::shared_ptr<BatchSession> sourceSession =
+            std::dynamic_pointer_cast<BatchSession>(request.loader);
+        if (sourceSession == nullptr) {
+            throw std::runtime_error(
+                "TrainingData execution requires a BatchSession source.");
+        }
+        const uint64_t deviceDatasetBatchQueueDepth =
+            std::max<uint64_t>(uint64_t{1}, options.maxInFlightBatches);
+        DeviceDatasetStorageSelection deviceDatasetSelection =
+            selectDeviceDatasetStorageSession(
+                sourceSession,
+                *request.trainingData,
+                ThorImplementation::TensorPlacement(
+                    ThorImplementation::TensorPlacement::MemDevices::GPU,
+                    placedNetwork->getStampedNetwork(0).getGpuNum()),
+                deviceDatasetBatchQueueDepth);
+        effectiveLoader = std::move(deviceDatasetSelection.session);
         deviceDatasetStorageReport = std::move(deviceDatasetSelection.report);
     }
 
     request.cancellationToken.throwIfCancellationRequested();
-    placedNetwork->configureBatchInputPlacements(resolveNetworkInputBatchPlacements(*effectiveLoader, plan));
+    placedNetwork->configureBatchInputPlacements(resolveNetworkInputBatchPlacements(effectiveLoader, plan));
     // Host/cross-device inputs retain one staging tensor per queue slot. Fully
     // device-resident inputs allocate zero NetworkInput slots; queue depth is
     // provided by the device loader's reusable batch tensor sets instead.
@@ -2369,7 +2409,6 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         snapshot.elapsedSeconds = elapsedSinceRunStart();
         snapshot.inFlightBatches = state ? outstandingBatchCount(state) : 0;
         snapshot.deviceDatasetStorage = deviceDatasetStorageReport;
-        snapshot.deviceDatasetStorage.requested = request.deviceDatasetStorage;
         return snapshot;
     };
 

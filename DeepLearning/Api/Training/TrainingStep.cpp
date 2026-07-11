@@ -1,6 +1,7 @@
 #include "DeepLearning/Api/Training/TrainingStep.h"
 
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 
 #include <set>
 #include <stdexcept>
@@ -98,6 +99,13 @@ void TrainingStep::validate() const {
                                      std::to_string(parameter.getParameterizableId()) + " parameter '" + parameter.getParameterName() + "'.");
         }
     }
+    std::set<std::string> phaseExternalInputNames;
+    for (const std::shared_ptr<TrainingPhase>& phase : phases) {
+        for (const std::shared_ptr<NetworkInput>& input : phase->getNetwork()->getExternalNetworkInputs()) {
+            phaseExternalInputNames.insert(input->getName());
+        }
+    }
+
     std::set<std::string> seenNetworkInputNames;
     for (const TrainingInputBinding& inputBinding : inputBindings) {
         if (!inputBinding.isInitialized()) {
@@ -106,6 +114,11 @@ void TrainingStep::validate() const {
         if (!seenNetworkInputNames.insert(inputBinding.getNetworkInputName()).second) {
             throw std::runtime_error("TrainingStep input bindings contain duplicate binding for network input '" +
                                      inputBinding.getNetworkInputName() + "'.");
+        }
+        if (!phaseExternalInputNames.contains(inputBinding.getNetworkInputName())) {
+            throw std::runtime_error("TrainingStep input binding references NetworkInput '" +
+                                     inputBinding.getNetworkInputName() +
+                                     "', which is not an external input of any phase in the step.");
         }
     }
 }

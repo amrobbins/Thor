@@ -3,7 +3,6 @@
 #include "DeepLearning/Api/Training/Executors/DebugSynchronousTrainingExecutor.h"
 #include "DeepLearning/Api/Training/Executors/LocalTrainingExecutor.h"
 #include "DeepLearning/Api/Training/EarlyCompletionPolicy.h"
-#include "DeepLearning/Api/Training/DeviceDatasetStorage.h"
 #include "DeepLearning/Api/Training/DatasetInputBindings.h"
 #include "DeepLearning/Api/Training/ModelSelectionScore.h"
 #include "DeepLearning/Api/Training/Observers/LineStatsReporter.h"
@@ -82,7 +81,6 @@ struct TrainerFitOptions {
     std::optional<uint64_t> maxTrainingBatchesPerEpoch{};
     std::vector<TrainingRestartCondition> restartConditions{};
     std::vector<TrainingEarlyCompletionPolicy> earlyCompletionPolicies{};
-    DeviceDatasetStorage deviceDatasetStorage = DeviceDatasetStorage::BEST_EFFORT;
 };
 
 class PlacedNetwork;
@@ -102,6 +100,8 @@ class Trainer {
     [[nodiscard]] std::shared_ptr<const TrainingData> getTrainingData() const { return trainingData; }
     [[nodiscard]] const std::vector<TrainingInputBinding>& getDatasetInputBindings() const { return datasetInputBindings; }
     [[nodiscard]] const std::set<DatasetFieldId>& getRequiredDatasetFieldIds() const { return requiredDatasetFieldIds; }
+    // Returns the standalone model network. Phase-backed Trainers return null
+    // because their model is the enabled composition of TrainingPhase networks.
     [[nodiscard]] std::shared_ptr<Network> getNetwork() const { return network; }
     [[nodiscard]] const std::optional<std::string>& getSaveModelDirectory() const { return saveModelDirectory; }
     [[nodiscard]] bool getSaveModelOverwrite() const { return saveModelOverwrite; }
@@ -115,6 +115,7 @@ class Trainer {
     void validateRestartConditions(const std::vector<TrainingRestartCondition>& conditions) const;
     void validateEarlyCompletionPolicies(const std::vector<TrainingEarlyCompletionPolicy>& policies) const;
     TrainingObserver& effectiveObserver();
+    [[nodiscard]] CompiledDatasetInputBindings resolveDatasetInputsForCurrentModel() const;
     [[nodiscard]] std::shared_ptr<Loader> openBatchSessionForRun() const;
     void fitInternal(const TrainerFitOptions& options,
                      TrainingObserver& observer,

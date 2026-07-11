@@ -12,7 +12,7 @@ enum class DeviceDatasetStorage { OFF, BEST_EFFORT, STRICT };
 [[nodiscard]] DeviceDatasetStorage deviceDatasetStorageFromName(std::string_view name);
 
 struct DeviceDatasetStorageReport {
-    DeviceDatasetStorage requested = DeviceDatasetStorage::BEST_EFFORT;
+    DeviceDatasetStorage requested = DeviceDatasetStorage::OFF;
     bool attempted = false;
     bool used = false;
     std::string reason{};
