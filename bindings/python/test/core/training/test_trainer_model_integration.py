@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import thor
+from conftest import make_numpy_pair_training_data
 from integration_flags import integration_flag_enabled, integration_skip_reason
 
 RUN_TRAINING_INTEGRATION = integration_flag_enabled("THOR_RUN_TRAINING_INTEGRATION")
@@ -180,8 +181,7 @@ def _linearly_separable_one_batch_loader(*, batch_size: int = 16, dtype=np.float
     y = np.ascontiguousarray(y[order], dtype=dtype)
 
     assert x.shape[0] == batch_size
-    loader_cls = thor.training.NumpyFloat16BatchLoader if dtype == np.float16 else thor.training.NumpyFloat32BatchLoader
-    return loader_cls(
+    return make_numpy_pair_training_data(
         x,
         y,
         x,
@@ -213,8 +213,7 @@ def _axis_separable_one_batch_loader(*, batch_size: int = 4, dtype=np.float32):
     x = np.ascontiguousarray(x, dtype=dtype)
     y = np.ascontiguousarray(y, dtype=dtype)
 
-    loader_cls = thor.training.NumpyFloat16BatchLoader if dtype == np.float16 else thor.training.NumpyFloat32BatchLoader
-    return loader_cls(
+    return make_numpy_pair_training_data(
         x,
         y,
         x,
@@ -245,8 +244,7 @@ def _regression_one_batch_loader(*, batch_size: int = 4, dtype=np.float32):
     x = np.ascontiguousarray(x, dtype=dtype)
     y = np.ascontiguousarray(y, dtype=dtype)
 
-    loader_cls = thor.training.NumpyFloat16BatchLoader if dtype == np.float16 else thor.training.NumpyFloat32BatchLoader
-    return loader_cls(
+    return make_numpy_pair_training_data(
         x,
         y,
         x,
@@ -289,8 +287,7 @@ def _linearly_separable_multi_batch_loader(*, batch_size: int = 4, dtype=np.floa
 
     x = np.ascontiguousarray(x, dtype=dtype)
     y = np.ascontiguousarray(y, dtype=dtype)
-    loader_cls = thor.training.NumpyFloat16BatchLoader if dtype == np.float16 else thor.training.NumpyFloat32BatchLoader
-    return loader_cls(
+    return make_numpy_pair_training_data(
         x,
         y,
         x,
@@ -388,8 +385,7 @@ def _build_zero_initialized_linear_regressor(name: str, *, dtype=thor.DataType.f
 def _opposing_phase_one_batch_loader(*, batch_size: int = 1, dtype=np.float32):
     x = np.ones((batch_size, 1), dtype=np.float32)
     y = np.ones((batch_size, 1), dtype=np.float32)
-    loader_cls = thor.training.NumpyFloat16BatchLoader if dtype == np.float16 else thor.training.NumpyFloat32BatchLoader
-    return loader_cls(
+    return make_numpy_pair_training_data(
         np.ascontiguousarray(x, dtype=dtype),
         np.ascontiguousarray(y, dtype=dtype),
         np.ascontiguousarray(x, dtype=dtype),
@@ -406,8 +402,7 @@ def _opposing_phase_two_train_batch_loader(*, dtype=np.float32):
     y_train = np.ones((2, 1), dtype=np.float32)
     x_validate = np.ones((1, 1), dtype=np.float32)
     y_validate = np.ones((1, 1), dtype=np.float32)
-    loader_cls = thor.training.NumpyFloat16BatchLoader if dtype == np.float16 else thor.training.NumpyFloat32BatchLoader
-    return loader_cls(
+    return make_numpy_pair_training_data(
         np.ascontiguousarray(x_train, dtype=dtype),
         np.ascontiguousarray(y_train, dtype=dtype),
         np.ascontiguousarray(x_validate, dtype=dtype),
@@ -566,8 +561,7 @@ def _load_iris_one_hot(dtype=np.float32):
 
 def _iris_loader(batch_size: int = 16, dtype=np.float32):
     x_train, y_train, x_validate, y_validate = _load_iris_one_hot(dtype=dtype)
-    loader_cls = thor.training.NumpyFloat16BatchLoader if dtype == np.float16 else thor.training.NumpyFloat32BatchLoader
-    return loader_cls(
+    return make_numpy_pair_training_data(
         x_train,
         y_train,
         x_validate,
@@ -852,7 +846,7 @@ def test_debug_synchronous_trainer_reports_deterministic_zero_init_mse_one_batch
 
     trainer = thor.training.Trainer(
         network,
-        loader,
+        data=loader,
         optimizer=optimizer,
         debug_synchronous=True,
         stats_interval_s=0.0,
@@ -890,7 +884,7 @@ def test_debug_synchronous_trainer_applies_deterministic_one_batch_mse_sgd_updat
 
     trainer = thor.training.Trainer(
         network,
-        loader,
+        data=loader,
         optimizer=optimizer,
         debug_synchronous=True,
         stats_interval_s=0.0,
@@ -936,7 +930,7 @@ def test_debug_synchronous_phase_disabled_aggregate_loss_does_not_backpropagate(
     loader = _opposing_phase_two_train_batch_loader(dtype=np.float32)
 
     trainer = thor.training.Trainer(
-        loader=loader,
+        data=loader,
         training_program=program,
         debug_synchronous=True,
         stats_interval_s=0.0,
@@ -982,7 +976,7 @@ def test_debug_synchronous_aggregate_phase_backpropagates_through_forward_only_d
     loader = _opposing_phase_two_train_batch_loader(dtype=np.float32)
 
     trainer = thor.training.Trainer(
-        loader=loader,
+        data=loader,
         training_program=program,
         debug_synchronous=True,
         stats_interval_s=0.0,
@@ -1024,7 +1018,7 @@ def test_queued_phase_disabled_aggregate_loss_does_not_backpropagate(capfd):
     loader = _opposing_phase_two_train_batch_loader(dtype=np.float32)
 
     trainer = thor.training.Trainer(
-        loader=loader,
+        data=loader,
         training_program=program,
         debug_synchronous=False,
         stats_interval_s=0.0,
@@ -1066,7 +1060,7 @@ def test_queued_aggregate_phase_backpropagates_through_forward_only_daily_phase(
     loader = _opposing_phase_two_train_batch_loader(dtype=np.float32)
 
     trainer = thor.training.Trainer(
-        loader=loader,
+        data=loader,
         training_program=program,
         debug_synchronous=False,
         stats_interval_s=0.0,
@@ -1106,7 +1100,7 @@ def test_same_trainer_restart_enabled_successful_fit_preserves_state_for_next_fi
     loader = _opposing_phase_one_batch_loader(batch_size=1, dtype=np.float32)
 
     trainer = thor.training.Trainer(
-        loader=loader,
+        data=loader,
         training_program=program,
         debug_synchronous=True,
         stats_interval_s=0.0,
@@ -1164,7 +1158,7 @@ def test_same_trainer_fit_recompiles_after_phase_enable_mutation(capfd):
     loader = _opposing_phase_two_train_batch_loader(dtype=np.float32)
 
     trainer = thor.training.Trainer(
-        loader=loader,
+        data=loader,
         training_program=program,
         debug_synchronous=True,
         stats_interval_s=0.0,
@@ -1248,7 +1242,7 @@ def test_debug_synchronous_trainer_reduces_deterministic_repeated_batch_mse_loss
 
     trainer = thor.training.Trainer(
         network,
-        loader,
+        data=loader,
         optimizer=optimizer,
         debug_synchronous=True,
         stats_interval_s=0.0,
@@ -1293,7 +1287,7 @@ def test_queued_trainer_reduces_deterministic_repeated_batch_mse_loss_with_sgd(c
 
     trainer = thor.training.Trainer(
         network,
-        loader,
+        data=loader,
         optimizer=optimizer,
         debug_synchronous=False,
         stats_interval_s=0.0,
@@ -1338,7 +1332,7 @@ def test_debug_synchronous_trainer_reports_deterministic_zero_init_categorical_c
 
     trainer = thor.training.Trainer(
         network,
-        loader,
+        data=loader,
         optimizer=optimizer,
         debug_synchronous=True,
         stats_interval_s=0.0,
@@ -1376,7 +1370,7 @@ def test_debug_synchronous_trainer_applies_deterministic_one_batch_sgd_update(ca
 
     trainer = thor.training.Trainer(
         network,
-        loader,
+        data=loader,
         optimizer=optimizer,
         debug_synchronous=True,
         stats_interval_s=0.0,
@@ -1417,7 +1411,7 @@ def test_debug_synchronous_trainer_reduces_deterministic_repeated_batch_loss_wit
 
     trainer = thor.training.Trainer(
         network,
-        loader,
+        data=loader,
         optimizer=optimizer,
         debug_synchronous=True,
         stats_interval_s=0.0,
@@ -1462,7 +1456,7 @@ def test_queued_trainer_reduces_deterministic_repeated_batch_loss_with_sgd(capfd
 
     trainer = thor.training.Trainer(
         network,
-        loader,
+        data=loader,
         optimizer=optimizer,
         debug_synchronous=False,
         stats_interval_s=0.0,
@@ -1503,7 +1497,7 @@ def test_debug_synchronous_trainer_fits_iris_fp32_mlp_with_global_optimizer(capf
 
     trainer = thor.training.Trainer(
         network,
-        loader,
+        data=loader,
         optimizer=optimizer,
         debug_synchronous=True,
         stats_interval_s=0.0,
@@ -1525,7 +1519,7 @@ def test_queued_trainer_fits_iris_fp16_mlp_with_global_optimizer(capfd):
 
     trainer = thor.training.Trainer(
         network,
-        loader,
+        data=loader,
         optimizer=optimizer,
         debug_synchronous=False,
         stats_interval_s=0.0,
@@ -1550,7 +1544,7 @@ def test_debug_synchronous_trainer_fits_iris_fp16_with_per_layer_optimizer_overr
 
     trainer = thor.training.Trainer(
         network,
-        loader,
+        data=loader,
         debug_synchronous=True,
         stats_interval_s=0.0,
         max_in_flight_batches=1,
@@ -1580,7 +1574,7 @@ def test_debug_synchronous_trainer_fits_iris_fp32_deep_mixed_activation_mlp_with
 
     trainer = thor.training.Trainer(
         network,
-        loader,
+        data=loader,
         optimizer=optimizer,
         debug_synchronous=True,
         stats_interval_s=0.0,
@@ -1611,7 +1605,7 @@ def test_queued_trainer_fits_iris_fp32_layer_norm_mlp_with_adamw(capfd):
 
     trainer = thor.training.Trainer(
         network,
-        loader,
+        data=loader,
         optimizer=optimizer,
         debug_synchronous=False,
         stats_interval_s=0.0,
@@ -1641,7 +1635,7 @@ def test_queued_trainer_fits_iris_fp16_deep_mlp_with_nadam(capfd):
 
     trainer = thor.training.Trainer(
         network,
-        loader,
+        data=loader,
         optimizer=optimizer,
         debug_synchronous=False,
         stats_interval_s=0.0,
@@ -1678,7 +1672,7 @@ def test_queued_trainer_fits_iris_fp32_two_input_multi_output_network_with_expli
     ])
 
     trainer = thor.training.Trainer(
-        loader=loader,
+        data=loader,
         training_program=training_program,
         debug_synchronous=False,
         stats_interval_s=0.0,
@@ -1687,8 +1681,8 @@ def test_queued_trainer_fits_iris_fp32_two_input_multi_output_network_with_expli
         stats_color="never",
     )
     stats = _fit_and_capture_stats(trainer, capfd, epochs=30)
-    _assert_phase_batch_count(stats, "train", epochs=30, batches_per_epoch=loader.get_num_train_batches())
-    _assert_phase_batch_count(stats, "validate", epochs=30, batches_per_epoch=loader.get_num_validate_batches())
+    _assert_phase_batch_count(stats, "train", epochs=30, batches_per_epoch=loader.open_session().get_num_train_batches())
+    _assert_phase_batch_count(stats, "validate", epochs=30, batches_per_epoch=loader.open_session().get_num_validate_batches())
     _assert_loss_decreased(
         _phase_epoch_mean_losses(stats, "validate"),
         name="queued Iris FP32 two-input multi-output validate epoch mean",
@@ -1711,7 +1705,7 @@ def test_queued_trainer_fits_iris_fp32_deep_mlp_with_per_layer_optimizer_overrid
 
     trainer = thor.training.Trainer(
         network,
-        loader,
+        data=loader,
         debug_synchronous=False,
         stats_interval_s=0.0,
         max_in_flight_batches=8,
@@ -1740,7 +1734,7 @@ def test_debug_synchronous_trainer_fits_iris_fp32_with_frozen_hidden_layer(capfd
 
     trainer = thor.training.Trainer(
         network,
-        loader,
+        data=loader,
         optimizer=optimizer,
         debug_synchronous=True,
         stats_interval_s=0.0,
@@ -1772,7 +1766,7 @@ def test_queued_trainer_reports_iris_validation_with_extra_non_scalar_outputs(ca
 
     trainer = thor.training.Trainer(
         network,
-        loader,
+        data=loader,
         optimizer=optimizer,
         debug_synchronous=False,
         stats_interval_s=0.0,
@@ -1781,8 +1775,8 @@ def test_queued_trainer_reports_iris_validation_with_extra_non_scalar_outputs(ca
         stats_color="never",
     )
     stats = _fit_and_capture_stats(trainer, capfd, epochs=epochs)
-    _assert_phase_batch_count(stats, "train", epochs=epochs, batches_per_epoch=loader.get_num_train_batches())
-    _assert_phase_batch_count(stats, "validate", epochs=epochs, batches_per_epoch=loader.get_num_validate_batches())
+    _assert_phase_batch_count(stats, "train", epochs=epochs, batches_per_epoch=loader.open_session().get_num_train_batches())
+    _assert_phase_batch_count(stats, "validate", epochs=epochs, batches_per_epoch=loader.open_session().get_num_validate_batches())
     _assert_loss_decreased(
         _phase_epoch_mean_losses(stats, "validate"),
         name="queued Iris FP32 validation with extra non-scalar outputs epoch mean",
@@ -1801,7 +1795,7 @@ def test_queued_trainer_updates_with_materialized_loss_and_prediction_output(cap
 
     trainer = thor.training.Trainer(
         network,
-        loader,
+        data=loader,
         optimizer=optimizer,
         debug_synchronous=False,
         stats_interval_s=0.0,
@@ -1835,7 +1829,7 @@ def test_debug_synchronous_trainer_reduces_loss_on_repeated_single_batch(capfd):
 
     trainer = thor.training.Trainer(
         network,
-        loader,
+        data=loader,
         optimizer=optimizer,
         debug_synchronous=True,
         stats_interval_s=0.0,
@@ -1860,7 +1854,7 @@ def test_queued_trainer_reduces_loss_on_repeated_single_batch(capfd):
 
     trainer = thor.training.Trainer(
         network,
-        loader,
+        data=loader,
         optimizer=optimizer,
         debug_synchronous=False,
         stats_interval_s=0.0,
@@ -1885,7 +1879,7 @@ def test_queued_trainer_reports_fresh_loss_for_each_batch(capfd):
 
     trainer = thor.training.Trainer(
         network,
-        loader,
+        data=loader,
         optimizer=optimizer,
         debug_synchronous=False,
         stats_interval_s=0.0,
@@ -1896,9 +1890,9 @@ def test_queued_trainer_reports_fresh_loss_for_each_batch(capfd):
     stats = _fit_and_capture_stats(trainer, capfd, epochs=8)
     train_stats = [entry for entry in stats if entry["phase"] == "train"]
 
-    assert len(train_stats) == 8 * loader.get_num_train_batches(), train_stats
+    assert len(train_stats) == 8 * loader.open_session().get_num_train_batches(), train_stats
     first_epoch = [entry["loss"] for entry in train_stats if entry["epoch"] == 1]
-    assert len(first_epoch) == loader.get_num_train_batches(), first_epoch
+    assert len(first_epoch) == loader.open_session().get_num_train_batches(), first_epoch
 
     adjacent_repeats = [
         (i, first_epoch[i - 1], first_epoch[i])

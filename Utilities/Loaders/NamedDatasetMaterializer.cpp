@@ -29,19 +29,19 @@ std::vector<uint64_t> prependExampleDimension(uint64_t numExamples,
 }
 
 std::vector<uint64_t> materializedTensorDimensions(uint64_t numExamples,
-                                                   const LocalNamedExampleLayout::TensorSpec &spec) {
+                                                   const DatasetLayout::TensorSpec &spec) {
     return prependExampleDimension(numExamples, spec.dimensions);
 }
 
 std::vector<uint64_t> materializedWindowedTensorDimensions(
     uint64_t numExamples,
-    const LocalNamedExampleLayout::WindowedTensorSpec &spec) {
+    const DatasetLayout::WindowedTensorSpec &spec) {
     return prependExampleDimension(numExamples, spec.dimensions);
 }
 
 std::vector<uint64_t> materializedWindowMaskDimensions(
     uint64_t numExamples,
-    const LocalNamedExampleLayout::WindowedTensorSpec &spec) {
+    const DatasetLayout::WindowedTensorSpec &spec) {
     return prependExampleDimension(numExamples, std::vector<uint64_t>{spec.windowLength()});
 }
 
@@ -58,12 +58,12 @@ NamedDatasetMaterializationSupport checkNamedDatasetSnapshotMaterializationSuppo
     if (description.layout.tensors().empty() && description.layout.windowedTensors().empty()) {
         return NamedDatasetMaterializationSupport{false, "empty_tensor_layout"};
     }
-    for (const LocalNamedExampleLayout::TensorSpec &spec : description.layout.tensors()) {
+    for (const DatasetLayout::TensorSpec &spec : description.layout.tensors()) {
         if (spec.numBytes == 0) {
             return NamedDatasetMaterializationSupport{false, "zero_sized_tensor"};
         }
     }
-    for (const LocalNamedExampleLayout::WindowedTensorSpec &spec : description.layout.windowedTensors()) {
+    for (const DatasetLayout::WindowedTensorSpec &spec : description.layout.windowedTensors()) {
         if (spec.outputNumBytes() == 0 || spec.referenceNumBytes == 0 || spec.sourceStepNumBytes() == 0) {
             return NamedDatasetMaterializationSupport{false, "zero_sized_windowed_tensor"};
         }
@@ -107,7 +107,7 @@ MaterializedNamedDatasetSnapshot materializeNamedDatasetSnapshot(
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
 
     std::vector<uint8_t *> tensorBasePointers(reader->getTensorCount(), nullptr);
-    for (const LocalNamedExampleLayout::TensorSpec &spec : out.layout.tensors()) {
+    for (const DatasetLayout::TensorSpec &spec : out.layout.tensors()) {
         Tensor tensor(
             cpuPlacement,
             TensorDescriptor(spec.dataType, materializedTensorDimensions(out.numExamples, spec)));
@@ -120,7 +120,7 @@ MaterializedNamedDatasetSnapshot materializeNamedDatasetSnapshot(
 
     std::vector<uint8_t *> windowedTensorBasePointers(reader->getWindowedTensorCount(), nullptr);
     std::vector<uint8_t *> windowedMaskBasePointers(reader->getWindowedTensorCount(), nullptr);
-    for (const LocalNamedExampleLayout::WindowedTensorSpec &spec : out.layout.windowedTensors()) {
+    for (const DatasetLayout::WindowedTensorSpec &spec : out.layout.windowedTensors()) {
         Tensor tensor(
             cpuPlacement,
             TensorDescriptor(
@@ -154,7 +154,7 @@ MaterializedNamedDatasetSnapshot materializeNamedDatasetSnapshot(
             throw std::runtime_error(
                 "NamedDatasetMaterializer failed to bind every reader windowed tensor ordinal.");
         }
-        const LocalNamedExampleLayout::WindowedTensorSpec &spec =
+        const DatasetLayout::WindowedTensorSpec &spec =
             out.layout.windowedTensors().at(static_cast<size_t>(ordinal));
         if (spec.maskName.has_value() &&
             windowedMaskBasePointers.at(static_cast<size_t>(ordinal)) == nullptr) {

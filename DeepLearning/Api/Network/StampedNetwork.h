@@ -22,7 +22,6 @@
 namespace Thor {
 class Network;
 class PlacedNetwork;
-class LocalExecutor;
 }  // namespace Thor
 
 namespace ThorImplementation {
@@ -259,7 +258,6 @@ class StampedNetwork {
 
     friend class Thor::Network;
     friend class Thor::PlacedNetwork;
-    friend class Thor::LocalExecutor;
 };
 
 }  // namespace ThorImplementation

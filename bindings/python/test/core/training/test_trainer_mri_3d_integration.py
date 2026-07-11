@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import thor
+from conftest import make_numpy_pair_training_data
 from integration_flags import integration_flag_enabled, integration_skip_reason
 
 RUN_MRI_3D_INTEGRATION = integration_flag_enabled("THOR_RUN_TRAINING_MRI_3D_INTEGRATION")
@@ -426,7 +427,7 @@ def _ensure_mrnet_arrays():
 
 def _mrnet_loader(*, batch_size: int):
     train_examples, train_labels, validate_examples, validate_labels, manifest = _ensure_mrnet_arrays()
-    loader = thor.training.NumpyFloat16BatchLoader(
+    loader = make_numpy_pair_training_data(
         train_examples,
         train_labels,
         validate_examples,
@@ -644,7 +645,7 @@ def _ensure_msd_brain_arrays():
 
 def _msd_brain_loader(*, batch_size: int):
     train_examples, train_labels, validate_examples, validate_labels, manifest = _ensure_msd_brain_arrays()
-    loader = thor.training.NumpyFloat16BatchLoader(
+    loader = make_numpy_pair_training_data(
         train_examples,
         train_labels,
         validate_examples,
@@ -873,10 +874,11 @@ def _run_mrnet_training(capfd):
     capfd.readouterr()
     with capfd.disabled():
         loader, manifest = _mrnet_loader(batch_size=MRNET_BATCH_SIZE)
-        assert manifest["train_examples"] == loader.get_num_train_examples()
-        assert manifest["validate_examples"] == loader.get_num_validate_examples()
-        assert loader.get_num_train_batches() > 0, "MRNet train split unexpectedly has zero batches"
-        assert loader.get_num_validate_batches() > 0, "MRNet validation split unexpectedly has zero batches"
+        session = loader.open_session()
+        assert manifest["train_examples"] == session.get_num_train_examples()
+        assert manifest["validate_examples"] == session.get_num_validate_examples()
+        assert session.get_num_train_batches() > 0, "MRNet train split unexpectedly has zero batches"
+        assert session.get_num_validate_batches() > 0, "MRNet validation split unexpectedly has zero batches"
         assert manifest["example_shape"] == [1, MRNET_DEPTH, MRNET_IMAGE_SIZE, MRNET_IMAGE_SIZE]
         assert manifest["label_shape"] == [len(_MRNET_LABEL_TASKS)]
 
@@ -888,7 +890,7 @@ def _run_mrnet_training(capfd):
         optimizer = thor.optimizers.AdamW(alpha=0.0003, beta1=0.9, beta2=0.999, weight_decay=0.01)
         trainer = thor.training.Trainer(
             network,
-            loader,
+            data=loader,
             optimizer=optimizer,
             debug_synchronous=False,
             stats_interval_s=MRI_3D_STATS_INTERVAL_S,
@@ -905,10 +907,11 @@ def _run_msd_brain_training(capfd):
     capfd.readouterr()
     with capfd.disabled():
         loader, manifest = _msd_brain_loader(batch_size=MSD_BRAIN_BATCH_SIZE)
-        assert manifest["train_examples"] == loader.get_num_train_examples()
-        assert manifest["validate_examples"] == loader.get_num_validate_examples()
-        assert loader.get_num_train_batches() > 0, "MSD BrainTumour train split unexpectedly has zero batches"
-        assert loader.get_num_validate_batches() > 0, "MSD BrainTumour validation split unexpectedly has zero batches"
+        session = loader.open_session()
+        assert manifest["train_examples"] == session.get_num_train_examples()
+        assert manifest["validate_examples"] == session.get_num_validate_examples()
+        assert session.get_num_train_batches() > 0, "MSD BrainTumour train split unexpectedly has zero batches"
+        assert session.get_num_validate_batches() > 0, "MSD BrainTumour validation split unexpectedly has zero batches"
         assert manifest["example_shape"] == [4, MSD_BRAIN_PATCH_SIZE, MSD_BRAIN_PATCH_SIZE, MSD_BRAIN_PATCH_SIZE]
         assert manifest["label_shape"] == [1, MSD_BRAIN_PATCH_SIZE, MSD_BRAIN_PATCH_SIZE, MSD_BRAIN_PATCH_SIZE]
 
@@ -919,7 +922,7 @@ def _run_msd_brain_training(capfd):
         optimizer = thor.optimizers.AdamW(alpha=0.0005, beta1=0.9, beta2=0.999, weight_decay=0.01)
         trainer = thor.training.Trainer(
             network,
-            loader,
+            data=loader,
             optimizer=optimizer,
             debug_synchronous=False,
             stats_interval_s=MRI_3D_STATS_INTERVAL_S,

@@ -1,7 +1,7 @@
 #include "Utilities/Loaders/IndexedLocalNamedExampleReader.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
-#include "Utilities/Loaders/LocalNamedExampleDatasetWriter.h"
+#include "DeepLearning/Api/Data/DatasetWriter.h"
 #include "Utilities/Loaders/Shard.h"
 #include "Utilities/TarFile/UringDirect.h"
 
@@ -301,17 +301,17 @@ class IndexedLocalNamedExampleReader::Impl {
     };
 
     struct WindowedTensorReadSpec {
-        LocalNamedExampleLayout::WindowedTensorSpec spec;
+        DatasetLayout::WindowedTensorSpec spec;
         std::filesystem::path sourcePath;
         uint64_t referenceBufferOffsetBytes = 0;
-        std::map<std::string, LocalNamedExampleLayout::WindowedTensorSourceSequence> sequenceByKeyHex;
+        std::map<std::string, DatasetLayout::WindowedTensorSourceSequence> sequenceByKeyHex;
     };
 
     std::filesystem::path datasetPath;
-    LocalNamedExampleLayout layout;
+    DatasetLayout layout;
     std::vector<ShardInfo> shards;
     std::vector<RecordReadSpan> recordReadSpans;
-    std::vector<LocalNamedExampleLayout::TensorSpec> directTensorSpecs;
+    std::vector<DatasetLayout::TensorSpec> directTensorSpecs;
     std::vector<WindowedTensorReadSpec> windowedReadSpecs;
     std::map<std::string, uint64_t> tensorOrdinalByName;
     std::map<std::string, uint64_t> windowedTensorOrdinalByName;
@@ -319,8 +319,8 @@ class IndexedLocalNamedExampleReader::Impl {
     uint64_t numExamples = 0;
 
     static std::unique_ptr<Impl> openDataset(const std::filesystem::path &datasetPath,
-                                             const LocalNamedExampleLayout *requestedLayout) {
-        const std::filesystem::path manifestPath = datasetPath / LocalNamedExampleDatasetWriter::MANIFEST_FILENAME;
+                                             const DatasetLayout *requestedLayout) {
+        const std::filesystem::path manifestPath = datasetPath / DatasetWriter::MANIFEST_FILENAME;
         std::ifstream in(manifestPath, std::ios::binary);
         if (!in.is_open()) {
             throw std::runtime_error("IndexedLocalNamedExampleReader failed to open manifest: " + manifestPath.string());
@@ -332,15 +332,21 @@ class IndexedLocalNamedExampleReader::Impl {
             throw std::runtime_error("IndexedLocalNamedExampleReader failed while reading manifest: " + manifestPath.string());
         }
 
-        if (!manifest.contains("storage_mode") ||
-            LocalNamedExampleDatasetWriter::storageModeFromString(manifest.at("storage_mode").get<std::string>()) !=
-                LocalNamedExampleDatasetWriter::StorageMode::INDEXED) {
-            throw std::runtime_error("IndexedLocalNamedExampleReader requires an indexed local named example dataset.");
+        if (!manifest.contains("storage_mode")) {
+            throw std::runtime_error(
+                "IndexedLocalNamedExampleReader rejected a legacy split dataset manifest without storage_mode. "
+                "Rewrite the dataset with DatasetWriter and provide splits through DatasetSplitManifest.");
+        }
+        const std::string storageMode = manifest.at("storage_mode").get<std::string>();
+        if (storageMode != DatasetWriter::STORAGE_MODE_INDEXED) {
+            throw std::runtime_error(
+                "IndexedLocalNamedExampleReader rejected legacy dataset storage_mode='" + storageMode +
+                "'. Rewrite the dataset with DatasetWriter and provide splits through DatasetSplitManifest.");
         }
 
         auto out = std::unique_ptr<Impl>(new Impl());
         out->datasetPath = datasetPath;
-        out->layout = LocalNamedExampleLayout::fromJson(manifest);
+        out->layout = DatasetLayout::fromJson(manifest);
         if (requestedLayout != nullptr) {
             out->layout.validateRequestedLayoutExact(*requestedLayout);
         }
@@ -396,7 +402,7 @@ class IndexedLocalNamedExampleReader::Impl {
 
         out->directTensorSpecs.reserve(out->layout.tensors().size());
         uint64_t ordinal = 0;
-        for (const LocalNamedExampleLayout::TensorSpec &spec : out->layout.tensors()) {
+        for (const DatasetLayout::TensorSpec &spec : out->layout.tensors()) {
             const auto [insertIt, inserted] = out->tensorOrdinalByName.emplace(spec.name, ordinal);
             (void)insertIt;
             THOR_THROW_IF_FALSE(inserted);
@@ -410,7 +416,7 @@ class IndexedLocalNamedExampleReader::Impl {
 
         uint64_t windowedOrdinal = 0;
         uint64_t referenceBufferOffsetBytes = 0;
-        for (const LocalNamedExampleLayout::WindowedTensorSpec &spec : out->layout.windowedTensors()) {
+        for (const DatasetLayout::WindowedTensorSpec &spec : out->layout.windowedTensors()) {
             if (!spec.sourceFilename.has_value()) {
                 throw std::runtime_error("IndexedLocalNamedExampleReader windowed tensor '" + spec.name + "' has no source storage.");
             }
@@ -421,7 +427,7 @@ class IndexedLocalNamedExampleReader::Impl {
             readSpec.spec = spec;
             readSpec.sourcePath = datasetPath / spec.sourceFilename.value();
             readSpec.referenceBufferOffsetBytes = referenceBufferOffsetBytes;
-            for (const LocalNamedExampleLayout::WindowedTensorSourceSequence &sequence : spec.sourceSequences) {
+            for (const DatasetLayout::WindowedTensorSourceSequence &sequence : spec.sourceSequences) {
                 const auto [sequenceIt, sequenceInserted] = readSpec.sequenceByKeyHex.emplace(sequence.keyHex, sequence);
                 (void)sequenceIt;
                 if (!sequenceInserted) {
@@ -633,7 +639,7 @@ class IndexedLocalNamedExampleReader::Session::Impl {
         for (uint64_t ordinal = 0; ordinal < reader.windowedReadSpecs.size(); ++ordinal) {
             const IndexedLocalNamedExampleReader::Impl::WindowedTensorReadSpec &readSpec =
                 reader.windowedReadSpecs.at(static_cast<size_t>(ordinal));
-            const LocalNamedExampleLayout::WindowedTensorSpec &spec = readSpec.spec;
+            const DatasetLayout::WindowedTensorSpec &spec = readSpec.spec;
             uint8_t *const outputBase = request.windowedTensorBasePointers.at(static_cast<size_t>(ordinal));
             if (outputBase == nullptr) {
                 throw std::runtime_error("IndexedLocalNamedExampleReader received a null windowed tensor destination for: " + spec.name);
@@ -669,7 +675,7 @@ class IndexedLocalNamedExampleReader::Session::Impl {
                 throw std::runtime_error("IndexedLocalNamedExampleReader windowed tensor '" + spec.name +
                                          "' reference key has no source sequence.");
             }
-            const LocalNamedExampleLayout::WindowedTensorSourceSequence &sequence = sequenceIt->second;
+            const DatasetLayout::WindowedTensorSourceSequence &sequence = sequenceIt->second;
             const int64_t readStart = std::max<int64_t>(requestedStart, sequence.startIndex);
             const int64_t readEnd = std::min<int64_t>(requestedEnd, sequence.endIndexExclusive);
             if (readStart >= readEnd) {
@@ -789,7 +795,7 @@ class IndexedLocalNamedExampleReader::Session::Impl {
         for (uint64_t spanOrdinal = 0; spanOrdinal < reader.recordReadSpans.size(); ++spanOrdinal) {
             const IndexedLocalNamedExampleReader::Impl::RecordReadSpan &span = reader.recordReadSpans.at(static_cast<size_t>(spanOrdinal));
             if (span.kind == IndexedLocalNamedExampleReader::Impl::RecordReadSpanKind::Tensor) {
-                const LocalNamedExampleLayout::TensorSpec &spec = reader.directTensorSpecs.at(static_cast<size_t>(span.ordinal));
+                const DatasetLayout::TensorSpec &spec = reader.directTensorSpecs.at(static_cast<size_t>(span.ordinal));
                 THOR_THROW_IF_FALSE(span.numBytes == spec.numBytes);
                 uint8_t *const basePointer = tensorBasePointers.at(static_cast<size_t>(span.ordinal));
                 if (basePointer == nullptr) {
@@ -896,7 +902,7 @@ std::shared_ptr<IndexedLocalNamedExampleReader> IndexedLocalNamedExampleReader::
 }
 
 std::shared_ptr<IndexedLocalNamedExampleReader> IndexedLocalNamedExampleReader::openDataset(
-    const std::filesystem::path &datasetPath, const LocalNamedExampleLayout &requestedLayout) {
+    const std::filesystem::path &datasetPath, const DatasetLayout &requestedLayout) {
     return std::shared_ptr<IndexedLocalNamedExampleReader>(
         new IndexedLocalNamedExampleReader(Impl::openDataset(datasetPath, &requestedLayout)));
 }
@@ -905,7 +911,7 @@ std::unique_ptr<IndexedLocalNamedExampleReader::Session> IndexedLocalNamedExampl
     return std::unique_ptr<Session>(new Session(shared_from_this(), queueDepth));
 }
 
-const LocalNamedExampleLayout &IndexedLocalNamedExampleReader::getLayout() const { return impl->layout; }
+const DatasetLayout &IndexedLocalNamedExampleReader::getLayout() const { return impl->layout; }
 
 uint64_t IndexedLocalNamedExampleReader::getNumExamples() const { return impl->numExamples; }
 

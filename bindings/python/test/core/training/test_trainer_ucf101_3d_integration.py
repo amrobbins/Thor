@@ -15,6 +15,7 @@ import numpy as np
 import pytest
 import thor
 from integration_flags import integration_flag_enabled, integration_skip_reason
+from dataset_integration_data import open_training_data, save_split_manifest, write_dense_indexed_dataset
 
 RUN_UCF101_3D_INTEGRATION = integration_flag_enabled("THOR_RUN_TRAINING_UCF101_3D_INTEGRATION")
 UCF101_3D_CACHE_DIR = Path(os.environ.get("THOR_UCF101_3D_CACHE_DIR", "/tmp/thor_ucf101_3d_training"))
@@ -42,8 +43,8 @@ UCF101_3D_LEARNING_RATE = float(os.environ.get("THOR_UCF101_3D_LEARNING_RATE", "
 UCF101_3D_MOMENTUM = float(os.environ.get("THOR_UCF101_3D_MOMENTUM", "0.9"))
 UCF101_3D_STATS_COLOR = os.environ.get("THOR_UCF101_3D_STATS_COLOR", "auto").lower()
 assert UCF101_3D_STATS_COLOR in {"always", "auto", "never"}
-# Bump whenever the on-disk raw shard format changes so stale /tmp caches are rebuilt.
-UCF101_3D_MANIFEST_VERSION = 2
+# Bump whenever the indexed dataset or split-manifest cache format changes.
+UCF101_3D_MANIFEST_VERSION = 3
 
 pytestmark = [
     pytest.mark.cuda,
@@ -465,11 +466,15 @@ def _ucf101_manifest_path(cache_root: Path) -> Path:
     return cache_root / f"ucf101_subset_{UCF101_3D_CLIP_FRAMES}x{UCF101_3D_IMAGE_SIZE}_cthw_fp16_manifest.json"
 
 
-def _ucf101_shard_root(cache_root: Path) -> Path:
-    return cache_root / f"ucf101_subset_shards_raw_v2_{UCF101_3D_CLIP_FRAMES}x{UCF101_3D_IMAGE_SIZE}_cthw_fp16"
+def _ucf101_dataset_path(cache_root: Path) -> Path:
+    return cache_root / f"ucf101_subset_indexed_v3_{UCF101_3D_CLIP_FRAMES}x{UCF101_3D_IMAGE_SIZE}_cthw_fp16"
 
 
-def _ucf101_base_manifest(*, shard_paths, class_names, train_examples: int, validate_examples: int, test_examples: int):
+def _ucf101_split_manifest_path(cache_root: Path) -> Path:
+    return cache_root / f"ucf101_subset_split_v3_{UCF101_3D_CLIP_FRAMES}x{UCF101_3D_IMAGE_SIZE}.json"
+
+
+def _ucf101_base_manifest(*, dataset_path: Path, split_manifest_path: Path, class_names, train_examples: int, validate_examples: int, test_examples: int):
     return {
         "version": UCF101_3D_MANIFEST_VERSION,
         "dataset_url": UCF101_3D_DATASET_URL,
@@ -483,7 +488,8 @@ def _ucf101_base_manifest(*, shard_paths, class_names, train_examples: int, vali
         "test_examples": test_examples,
         "example_shape": [3, UCF101_3D_CLIP_FRAMES, UCF101_3D_IMAGE_SIZE, UCF101_3D_IMAGE_SIZE],
         "label_shape": [len(class_names)],
-        "shard_paths": sorted(str(Path(path)) for path in shard_paths),
+        "dataset_path": str(dataset_path),
+        "split_manifest_path": str(split_manifest_path),
         "label_names": list(class_names),
     }
 
@@ -505,46 +511,53 @@ def _read_ucf101_manifest_if_valid(cache_root: Path):
         "max_videos_per_class": UCF101_3D_MAX_VIDEOS_PER_CLASS,
         "example_shape": [3, UCF101_3D_CLIP_FRAMES, UCF101_3D_IMAGE_SIZE, UCF101_3D_IMAGE_SIZE],
     }
-    for key, value in expected.items():
-        if manifest.get(key) != value:
-            return None
-    if not manifest.get("shard_paths") or not manifest.get("label_names"):
+    if any(manifest.get(key) != value for key, value in expected.items()):
+        return None
+    dataset_path = Path(manifest.get("dataset_path", ""))
+    split_manifest_path = Path(manifest.get("split_manifest_path", ""))
+    if not (dataset_path / "manifest.json").exists() or not split_manifest_path.exists() or not manifest.get("label_names"):
         return None
     return manifest
 
 
-def _write_ucf101_split(
-    dataset_root: Path,
-    *,
-    source_split_name: str,
-    dest_split_name: str,
-    class_names: list[str],
-    raw_root: Path,
-    clip_frames: int,
-    image_size: int,
-) -> int:
-    for class_name in class_names:
-        (raw_root / dest_split_name / class_name).mkdir(parents=True, exist_ok=True)
-
-    num_written = 0
-    for class_name in class_names:
+def _ucf101_split_items(dataset_root: Path, *, source_split_name: str, class_names: list[str]):
+    items = []
+    for label, class_name in enumerate(class_names):
         class_dir = dataset_root / source_split_name / class_name
         video_paths = [] if not class_dir.exists() else sorted(
-            path for suffix in ("*.avi", "*.mp4", "*.mov", "*.mkv") for path in class_dir.glob(suffix))
+            path for suffix in ("*.avi", "*.mp4", "*.mov", "*.mkv") for path in class_dir.glob(suffix)
+        )
         if UCF101_3D_MAX_VIDEOS_PER_CLASS > 0:
             video_paths = video_paths[:UCF101_3D_MAX_VIDEOS_PER_CLASS]
-        for video_path in video_paths:
-            clip = _video_to_cthw_fp16(video_path, clip_frames=clip_frames, image_size=image_size)
-            filename = raw_root / dest_split_name / class_name / f"{dest_split_name}_{video_path.stem}.bin"
-            filename.write_bytes(clip.tobytes(order="C"))
-            num_written += 1
-
-    if num_written == 0:
+        items.extend((video_path, label) for video_path in video_paths)
+    if not items:
         raise RuntimeError(f"UCF101 split {source_split_name} produced no usable video examples")
-    return num_written
+    return items
 
 
-def _ensure_ucf101_3d_shards():
+def _ucf101_dataset_chunks(split_items, *, num_classes: int, chunk_size: int = 8):
+    for start in range(0, len(split_items), chunk_size):
+        chunk = split_items[start:start + chunk_size]
+        examples = np.stack(
+            [
+                _video_to_cthw_fp16(
+                    video_path,
+                    clip_frames=UCF101_3D_CLIP_FRAMES,
+                    image_size=UCF101_3D_IMAGE_SIZE,
+                )
+                for video_path, _ in chunk
+            ],
+            axis=0,
+        )
+        labels = np.zeros((len(chunk), num_classes), dtype=np.float16)
+        labels[np.arange(len(chunk)), [label for _, label in chunk]] = np.float16(1.0)
+        yield {
+            "examples": np.ascontiguousarray(examples, dtype=np.float16),
+            "labels": labels,
+        }
+
+
+def _ensure_ucf101_3d_dataset():
     UCF101_3D_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     manifest = _read_ucf101_manifest_if_valid(UCF101_3D_CACHE_DIR)
     if manifest is not None:
@@ -559,90 +572,64 @@ def _ensure_ucf101_3d_shards():
 
     dataset_root = _ensure_ucf101_subset_downloaded(UCF101_3D_CACHE_DIR)
     class_names = _ucf101_class_names(dataset_root)
-    processing_root = UCF101_3D_CACHE_DIR / "processing_tmp"
-    raw_root = processing_root / "raw_cthw_fp16"
-    shard_root = _ucf101_shard_root(UCF101_3D_CACHE_DIR)
-    base_name = f"ucf101_subset_{UCF101_3D_CLIP_FRAMES}x{UCF101_3D_IMAGE_SIZE}_cthw_fp16"
+    train_items = _ucf101_split_items(dataset_root, source_split_name="train", class_names=class_names)
+    validate_items = _ucf101_split_items(dataset_root, source_split_name="val", class_names=class_names)
+    test_items = _ucf101_split_items(dataset_root, source_split_name="test", class_names=class_names)
+    dataset_path = _ucf101_dataset_path(UCF101_3D_CACHE_DIR)
+    split_manifest_path = _ucf101_split_manifest_path(UCF101_3D_CACHE_DIR)
+    if dataset_path.exists():
+        shutil.rmtree(dataset_path)
+    split_manifest_path.unlink(missing_ok=True)
 
-    if processing_root.exists():
-        shutil.rmtree(processing_root)
-    if shard_root.exists():
-        shutil.rmtree(shard_root)
-    processing_root.mkdir(parents=True, exist_ok=True)
-    raw_root.mkdir(parents=True, exist_ok=True)
-    shard_root.mkdir(parents=True, exist_ok=True)
-
-    shard_dest_dirs = []
-    for shard_index in range(UCF101_3D_NUM_SHARDS):
-        dest = shard_root / f"dest_{shard_index:02d}"
-        dest.mkdir(parents=True, exist_ok=True)
-        shard_dest_dirs.append(dest)
-
-    train_count = _write_ucf101_split(
-        dataset_root,
-        source_split_name="train",
-        dest_split_name="train",
-        class_names=class_names,
-        raw_root=raw_root,
-        clip_frames=UCF101_3D_CLIP_FRAMES,
-        image_size=UCF101_3D_IMAGE_SIZE,
+    split_items = (train_items, validate_items, test_items)
+    total_examples = sum(len(items) for items in split_items)
+    dataset = write_dense_indexed_dataset(
+        dataset_path=dataset_path,
+        tensor_shapes={
+            "examples": [3, UCF101_3D_CLIP_FRAMES, UCF101_3D_IMAGE_SIZE, UCF101_3D_IMAGE_SIZE],
+            "labels": [len(class_names)],
+        },
+        data_type=thor.DataType.fp16,
+        chunks=(
+            chunk
+            for items in split_items
+            for chunk in _ucf101_dataset_chunks(items, num_classes=len(class_names))
+        ),
+        expected_num_examples=total_examples,
+        num_shards=UCF101_3D_NUM_SHARDS,
     )
-    validate_count = _write_ucf101_split(
-        dataset_root,
-        source_split_name="val",
-        dest_split_name="validate",
-        class_names=class_names,
-        raw_root=raw_root,
-        clip_frames=UCF101_3D_CLIP_FRAMES,
-        image_size=UCF101_3D_IMAGE_SIZE,
+    train_end = len(train_items)
+    validate_end = train_end + len(validate_items)
+    save_split_manifest(
+        dataset=dataset,
+        path=split_manifest_path,
+        train_indices=np.arange(0, train_end, dtype=np.int64),
+        validate_indices=np.arange(train_end, validate_end, dtype=np.int64),
+        test_indices=np.arange(validate_end, total_examples, dtype=np.int64),
     )
-    test_count = _write_ucf101_split(
-        dataset_root,
-        source_split_name="test",
-        dest_split_name="test",
-        class_names=class_names,
-        raw_root=raw_root,
-        clip_frames=UCF101_3D_CLIP_FRAMES,
-        image_size=UCF101_3D_IMAGE_SIZE,
-    )
-
-    example_size_in_bytes = (
-        3 * UCF101_3D_CLIP_FRAMES * UCF101_3D_IMAGE_SIZE * UCF101_3D_IMAGE_SIZE * np.dtype(np.float16).itemsize)
-    shard_paths = thor.training.create_sharded_raw_dataset(
-        [str(raw_root)],
-        [str(path) for path in shard_dest_dirs],
-        base_name,
-        example_size_in_bytes,
-        thor.DataType.fp16,
-    )
-    shard_paths = sorted(str(Path(path)) for path in shard_paths)
-    for path in shard_paths:
-        assert Path(path).exists(), f"expected shard file {path} to exist"
-
     manifest = _ucf101_base_manifest(
-        shard_paths=shard_paths,
+        dataset_path=dataset_path,
+        split_manifest_path=split_manifest_path,
         class_names=class_names,
-        train_examples=train_count,
-        validate_examples=validate_count,
-        test_examples=test_count,
+        train_examples=len(train_items),
+        validate_examples=len(validate_items),
+        test_examples=len(test_items),
     )
     _ucf101_manifest_path(UCF101_3D_CACHE_DIR).write_text(json.dumps(manifest, indent=2, sort_keys=True))
-    shutil.rmtree(processing_root)
     return manifest
 
 
-def _ucf101_3d_loader(*, batch_size: int):
-    manifest = _ensure_ucf101_3d_shards()
-    loader = thor.training.LocalBatchLoader(
-        manifest["shard_paths"],
-        manifest["example_shape"],
-        thor.DataType.fp16,
-        manifest["label_shape"],
-        thor.DataType.fp16,
+def _ucf101_3d_data(*, batch_size: int):
+    manifest = _ensure_ucf101_3d_dataset()
+    data = open_training_data(
+        dataset_path=Path(manifest["dataset_path"]),
+        split_manifest_path=Path(manifest["split_manifest_path"]),
         batch_size=batch_size,
         dataset_name="ucf101_subset_cthw_fp16_video",
+        randomize_train=True,
+        device_storage="off",
     )
-    return loader, manifest
+    return data, manifest
 
 
 def _serializable_relu(network: thor.Network, x: thor.Tensor) -> thor.Tensor:
@@ -846,11 +833,11 @@ def _run_full_ucf101_3d_model_training(model_builder, *, model_name: str, capfd)
     _flush_native_stdio_for_capture()
     capfd.readouterr()
     with capfd.disabled():
-        loader, manifest = _ucf101_3d_loader(batch_size=UCF101_3D_BATCH_SIZE)
-        assert manifest["train_examples"] == loader.get_num_train_examples()
-        assert manifest["validate_examples"] == loader.get_num_validate_examples()
-        assert loader.get_num_train_batches() > 0, "UCF101 3D train split unexpectedly has zero batches"
-        assert loader.get_num_validate_batches() > 0, "UCF101 3D validation split unexpectedly has zero batches"
+        data, manifest = _ucf101_3d_data(batch_size=UCF101_3D_BATCH_SIZE)
+        assert manifest["train_examples"] == len(data.splits.train)
+        assert manifest["validate_examples"] == len(data.splits.validate)
+        assert len(data.splits.train) >= UCF101_3D_BATCH_SIZE, "UCF101 3D train split unexpectedly has no full batch"
+        assert len(data.splits.validate) >= UCF101_3D_BATCH_SIZE, "UCF101 3D validation split unexpectedly has no full batch"
         assert manifest["num_classes"] == manifest["label_shape"][0]
         assert manifest["example_shape"][1] == UCF101_3D_CLIP_FRAMES
 
@@ -863,7 +850,7 @@ def _run_full_ucf101_3d_model_training(model_builder, *, model_name: str, capfd)
         optimizer = thor.optimizers.Sgd(initial_learning_rate=UCF101_3D_LEARNING_RATE, momentum=UCF101_3D_MOMENTUM)
         trainer = thor.training.Trainer(
             network,
-            loader,
+            data=data,
             optimizer=optimizer,
             debug_synchronous=False,
             stats_interval_s=UCF101_3D_STATS_INTERVAL_S,

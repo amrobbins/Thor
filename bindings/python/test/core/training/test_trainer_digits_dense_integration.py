@@ -16,6 +16,7 @@ import numpy as np
 import pytest
 import thor
 from integration_flags import integration_flag_enabled, integration_skip_reason
+from dataset_integration_data import open_training_data, save_split_manifest, write_dense_indexed_dataset
 
 
 def _digits_dense_network_dtype_from_env(env_name: str, raw_value: str):
@@ -43,8 +44,6 @@ DIGITS_DENSE_URL_BASE = os.environ.get(
 DIGITS_DENSE_BATCH_SIZE = int(os.environ.get("THOR_DIGITS_DENSE_BATCH_SIZE", "1024"))
 DIGITS_DENSE_EPOCHS = int(os.environ.get("THOR_DIGITS_DENSE_EPOCHS", "1"))
 DIGITS_DENSE_MAX_IN_FLIGHT_BATCHES = int(os.environ.get("THOR_DIGITS_DENSE_MAX_IN_FLIGHT_BATCHES", "8"))
-DIGITS_DENSE_LOADER_QUEUE_DEPTH = int(
-    os.environ.get("THOR_DIGITS_DENSE_LOADER_QUEUE_DEPTH", str(max(32, 2 * DIGITS_DENSE_MAX_IN_FLIGHT_BATCHES))))
 DIGITS_DENSE_STATS_INTERVAL_S = float(os.environ.get("THOR_DIGITS_DENSE_STATS_INTERVAL_S", "0.0"))
 DIGITS_DENSE_REBUILD = os.environ.get("THOR_DIGITS_DENSE_REBUILD") == "1"
 DIGITS_DENSE_NUM_SHARDS = int(os.environ.get("THOR_DIGITS_DENSE_NUM_SHARDS", "1"))
@@ -56,9 +55,6 @@ DIGITS_DENSE_CV5_BATCH_SIZE = int(os.environ.get("THOR_DIGITS_DENSE_CV5_BATCH_SI
 DIGITS_DENSE_CV5_EPOCHS = int(os.environ.get("THOR_DIGITS_DENSE_CV5_EPOCHS", "1"))
 DIGITS_DENSE_CV5_MAX_IN_FLIGHT_BATCHES = int(
     os.environ.get("THOR_DIGITS_DENSE_CV5_MAX_IN_FLIGHT_BATCHES", str(DIGITS_DENSE_MAX_IN_FLIGHT_BATCHES)))
-DIGITS_DENSE_CV5_LOADER_QUEUE_DEPTH = int(
-    os.environ.get(
-        "THOR_DIGITS_DENSE_CV5_LOADER_QUEUE_DEPTH", str(max(32, 2 * DIGITS_DENSE_CV5_MAX_IN_FLIGHT_BATCHES))))
 DIGITS_DENSE_CV5_STATS_INTERVAL_S = float(
     os.environ.get("THOR_DIGITS_DENSE_CV5_STATS_INTERVAL_S", str(DIGITS_DENSE_STATS_INTERVAL_S)))
 DIGITS_DENSE_CV5_STATS_COLOR = os.environ.get("THOR_DIGITS_DENSE_CV5_STATS_COLOR", DIGITS_DENSE_STATS_COLOR).lower()
@@ -79,9 +75,9 @@ DIGITS_DENSE_CV5_MODEL_ARTIFACTS_DIR = Path(
         "THOR_DIGITS_DENSE_CV5_MODEL_ARTIFACTS_DIR",
         str(Path(tempfile.gettempdir()) / "thor_digits_dense_training_runs_cv5_model_artifacts"),
     ))
-# Bump whenever the on-disk raw shard format changes so stale /tmp caches are rebuilt.
-DIGITS_DENSE_MANIFEST_VERSION = 2
-DIGITS_DENSE_CV5_MANIFEST_VERSION = 2
+# Bump whenever the indexed dataset or split-manifest cache format changes.
+DIGITS_DENSE_MANIFEST_VERSION = 3
+DIGITS_DENSE_CV5_MANIFEST_VERSION = 3
 DIGITS_DENSE_CV5_HOLDOUT_TEST_FRACTION = 0.10
 DIGITS_IMAGE_HEIGHT = 28
 DIGITS_IMAGE_WIDTH = 28
@@ -307,17 +303,20 @@ def _digits_manifest_path(cache_root: Path) -> Path:
     return cache_root / "mnist_digits_dense_fp16_manifest.json"
 
 
-def _digits_shard_root(cache_root: Path) -> Path:
-    return cache_root / "shards_raw_v2_fp16_flat"
+def _digits_dataset_path(cache_root: Path) -> Path:
+    return cache_root / "mnist_digits_dense_indexed_v3_fp16_flat"
+
+
+def _digits_split_manifest_path(cache_root: Path) -> Path:
+    return cache_root / "mnist_digits_dense_split_v3.json"
 
 
 def _digits_cv5_manifest_path(cache_root: Path) -> Path:
     return cache_root / "mnist_digits_dense_fp16_cv5_manifest.json"
 
 
-def _digits_cv5_shard_root(cache_root: Path) -> Path:
-    return cache_root / "cv5_shards_raw_v2_fp16_flat"
-
+def _digits_cv5_split_manifest_path(cache_root: Path, fold_index: int) -> Path:
+    return cache_root / f"mnist_digits_dense_cv5_fold_{fold_index}_split_v3.json"
 
 def _download_if_missing(url: str, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -374,37 +373,7 @@ def _class_dir(label: int) -> str:
     return f"class_{label}"
 
 
-def _write_digits_split(images: np.ndarray, labels: np.ndarray, *, split_name: str, raw_root: Path) -> int:
-    if images.shape[0] != labels.shape[0]:
-        raise RuntimeError(f"{split_name}: images/labels count mismatch: {images.shape[0]} != {labels.shape[0]}")
-    for label in range(DIGITS_NUM_CLASSES):
-        (raw_root / split_name / _class_dir(label)).mkdir(parents=True, exist_ok=True)
-
-    for index, (image, label) in enumerate(zip(images, labels)):
-        # Keep the examples flat so the benchmark's network body is strictly FullyConnected layers plus activations.
-        flat = image.astype(np.float32).reshape(DIGITS_INPUT_FEATURES) / 255.0
-        packed = np.ascontiguousarray(flat, dtype=np.float16)
-        filename = raw_root / split_name / _class_dir(int(label)) / f"{split_name}_{index:05d}.bin"
-        filename.write_bytes(packed.tobytes(order="C"))
-    return int(images.shape[0])
-
-
-def _mirror_validate_as_test(raw_root: Path):
-    for label in range(DIGITS_NUM_CLASSES):
-        validate_dir = raw_root / "validate" / _class_dir(label)
-        test_dir = raw_root / "test" / _class_dir(label)
-        test_dir.mkdir(parents=True, exist_ok=True)
-        for validate_file in validate_dir.iterdir():
-            if not validate_file.is_file():
-                continue
-            test_file = test_dir / validate_file.name.replace("validate_", "test_", 1)
-            try:
-                os.link(validate_file, test_file)
-            except OSError:
-                shutil.copy2(validate_file, test_file)
-
-
-def _digits_base_manifest(*, shard_paths: list[str], train_examples: int, validate_examples: int) -> dict:
+def _digits_base_manifest(*, dataset_path: Path, split_manifest_path: Path, train_examples: int, validate_examples: int) -> dict:
     return {
         "version": DIGITS_DENSE_MANIFEST_VERSION,
         "dataset": "mnist_digits",
@@ -420,12 +389,13 @@ def _digits_base_manifest(*, shard_paths: list[str], train_examples: int, valida
         "example_shape": [DIGITS_INPUT_FEATURES],
         "image_shape": [1, DIGITS_IMAGE_HEIGHT, DIGITS_IMAGE_WIDTH],
         "label_shape": [DIGITS_NUM_CLASSES],
-        "shard_paths": sorted(str(Path(path)) for path in shard_paths),
+        "dataset_path": str(dataset_path),
+        "split_manifest_path": str(split_manifest_path),
         "label_names": [_class_dir(label) for label in range(DIGITS_NUM_CLASSES)],
     }
 
 
-def _digits_cv5_base_manifest(*, source_examples: int, cv_examples: int, test_examples: int, folds: list[dict]) -> dict:
+def _digits_cv5_base_manifest(*, dataset_path: Path, source_examples: int, cv_examples: int, test_examples: int, folds: list[dict]) -> dict:
     return {
         "version": DIGITS_DENSE_CV5_MANIFEST_VERSION,
         "source_version": DIGITS_DENSE_MANIFEST_VERSION,
@@ -444,6 +414,7 @@ def _digits_cv5_base_manifest(*, source_examples: int, cv_examples: int, test_ex
         "example_shape": [DIGITS_INPUT_FEATURES],
         "image_shape": [1, DIGITS_IMAGE_HEIGHT, DIGITS_IMAGE_WIDTH],
         "label_shape": [DIGITS_NUM_CLASSES],
+        "dataset_path": str(dataset_path),
         "label_names": [_class_dir(label) for label in range(DIGITS_NUM_CLASSES)],
         "folds": folds,
     }
@@ -470,13 +441,11 @@ def _read_digits_manifest_if_valid(cache_root: Path):
         "example_shape": [DIGITS_INPUT_FEATURES],
         "label_shape": [DIGITS_NUM_CLASSES],
     }
-    for key, value in expected.items():
-        if manifest.get(key) != value:
-            return None
-    shard_paths = manifest.get("shard_paths")
-    if not shard_paths:
+    if any(manifest.get(key) != value for key, value in expected.items()):
         return None
-    if not all(Path(path).exists() for path in shard_paths):
+    dataset_path = Path(manifest.get("dataset_path", ""))
+    split_manifest_path = Path(manifest.get("split_manifest_path", ""))
+    if not (dataset_path / "manifest.json").exists() or not split_manifest_path.exists():
         return None
     return manifest
 
@@ -505,33 +474,39 @@ def _read_digits_cv5_manifest_if_valid(cache_root: Path):
         "example_shape": [DIGITS_INPUT_FEATURES],
         "label_shape": [DIGITS_NUM_CLASSES],
     }
-    for key, value in expected.items():
-        if manifest.get(key) != value:
-            return None
+    if any(manifest.get(key) != value for key, value in expected.items()):
+        return None
+    dataset_path = Path(manifest.get("dataset_path", ""))
     folds = manifest.get("folds")
-    if not isinstance(folds, list) or len(folds) != 5:
+    if not (dataset_path / "manifest.json").exists() or not isinstance(folds, list) or len(folds) != 5:
+        return None
+    if any(not Path(fold.get("split_manifest_path", "")).exists() for fold in folds):
         return None
     source_examples = manifest.get("source_examples")
     cv_examples = manifest.get("cv_examples")
     test_examples = manifest.get("test_examples")
-    if not isinstance(source_examples, int) or source_examples <= 0:
-        return None
-    if not isinstance(cv_examples, int) or cv_examples <= 0:
-        return None
-    if not isinstance(test_examples, int) or test_examples <= 0:
+    if not all(isinstance(value, int) and value > 0 for value in (source_examples, cv_examples, test_examples)):
         return None
     if cv_examples + test_examples != source_examples:
         return None
-    for fold in folds:
-        shard_paths = fold.get("shard_paths") if isinstance(fold, dict) else None
-        if not shard_paths or not all(Path(path).exists() for path in shard_paths):
-            return None
-        if fold.get("test_examples") != test_examples:
-            return None
     return manifest
 
 
-def _ensure_digits_dense_shards():
+def _digits_dataset_chunks(images: np.ndarray, labels: np.ndarray, *, chunk_size: int = 4096):
+    if images.shape[0] != labels.shape[0]:
+        raise RuntimeError(f"DIGITS images/labels count mismatch: {images.shape[0]} != {labels.shape[0]}")
+    for start in range(0, int(images.shape[0]), chunk_size):
+        end = min(int(images.shape[0]), start + chunk_size)
+        examples = np.ascontiguousarray(
+            images[start:end].reshape(end - start, DIGITS_INPUT_FEATURES).astype(np.float32) / 255.0,
+            dtype=np.float16,
+        )
+        one_hot = np.zeros((end - start, DIGITS_NUM_CLASSES), dtype=np.float16)
+        one_hot[np.arange(end - start), labels[start:end].astype(np.int64)] = np.float16(1.0)
+        yield {"examples": examples, "labels": one_hot}
+
+
+def _ensure_digits_dense_dataset():
     DIGITS_DENSE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     manifest = _read_digits_manifest_if_valid(DIGITS_DENSE_CACHE_DIR)
     if manifest is not None:
@@ -542,49 +517,41 @@ def _ensure_digits_dense_shards():
     train_labels = _read_idx_labels(downloads["train_labels"])
     validate_images = _read_idx_images(downloads["validate_images"])
     validate_labels = _read_idx_labels(downloads["validate_labels"])
+    dataset_path = _digits_dataset_path(DIGITS_DENSE_CACHE_DIR)
+    split_manifest_path = _digits_split_manifest_path(DIGITS_DENSE_CACHE_DIR)
+    if dataset_path.exists():
+        shutil.rmtree(dataset_path)
+    split_manifest_path.unlink(missing_ok=True)
+    for fold_index in range(5):
+        _digits_cv5_split_manifest_path(DIGITS_DENSE_CACHE_DIR, fold_index).unlink(missing_ok=True)
 
-    processing_root = DIGITS_DENSE_CACHE_DIR / "processing_tmp"
-    raw_root = processing_root / "raw_fp16_flat"
-    shard_root = _digits_shard_root(DIGITS_DENSE_CACHE_DIR)
-    base_name = "mnist_digits_dense_fp16_flat"
-
-    if processing_root.exists():
-        shutil.rmtree(processing_root)
-    if shard_root.exists():
-        shutil.rmtree(shard_root)
-    processing_root.mkdir(parents=True, exist_ok=True)
-    raw_root.mkdir(parents=True, exist_ok=True)
-    shard_root.mkdir(parents=True, exist_ok=True)
-
-    shard_dest_dirs = []
-    for shard_index in range(DIGITS_DENSE_NUM_SHARDS):
-        dest = shard_root / f"dest_{shard_index:02d}"
-        dest.mkdir(parents=True, exist_ok=True)
-        shard_dest_dirs.append(dest)
-
-    train_count = _write_digits_split(train_images, train_labels, split_name="train", raw_root=raw_root)
-    validate_count = _write_digits_split(validate_images, validate_labels, split_name="validate", raw_root=raw_root)
-    _mirror_validate_as_test(raw_root)
-
-    example_size_in_bytes = DIGITS_INPUT_FEATURES * np.dtype(np.float16).itemsize
-    shard_paths = thor.training.create_sharded_raw_dataset(
-        [str(raw_root)],
-        [str(path) for path in shard_dest_dirs],
-        base_name,
-        example_size_in_bytes,
-        thor.DataType.fp16,
+    train_count = int(train_images.shape[0])
+    validate_count = int(validate_images.shape[0])
+    dataset = write_dense_indexed_dataset(
+        dataset_path=dataset_path,
+        tensor_shapes={"examples": [DIGITS_INPUT_FEATURES], "labels": [DIGITS_NUM_CLASSES]},
+        data_type=thor.DataType.fp16,
+        chunks=(
+            chunk
+            for images, labels in ((train_images, train_labels), (validate_images, validate_labels))
+            for chunk in _digits_dataset_chunks(images, labels)
+        ),
+        expected_num_examples=train_count + validate_count,
+        num_shards=DIGITS_DENSE_NUM_SHARDS,
     )
-    shard_paths = sorted(str(Path(path)) for path in shard_paths)
-    for path in shard_paths:
-        assert Path(path).exists(), f"expected shard file {path} to exist"
-
+    save_split_manifest(
+        dataset=dataset,
+        path=split_manifest_path,
+        train_indices=np.arange(0, train_count, dtype=np.int64),
+        validate_indices=np.arange(train_count, train_count + validate_count, dtype=np.int64),
+    )
     manifest = _digits_base_manifest(
-        shard_paths=shard_paths,
+        dataset_path=dataset_path,
+        split_manifest_path=split_manifest_path,
         train_examples=train_count,
         validate_examples=validate_count,
     )
     _digits_manifest_path(DIGITS_DENSE_CACHE_DIR).write_text(json.dumps(manifest, indent=2, sort_keys=True))
-    shutil.rmtree(processing_root)
     return manifest
 
 
@@ -651,39 +618,27 @@ def _stratified_holdout_indices(labels: np.ndarray, *, fraction: float) -> np.nd
     return holdout_indices
 
 
-def _ensure_digits_dense_cv5_shards():
+def _ensure_digits_dense_cv5_manifests():
     DIGITS_DENSE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     manifest = _read_digits_cv5_manifest_if_valid(DIGITS_DENSE_CACHE_DIR)
     if manifest is not None:
         return manifest
 
+    base_manifest = _ensure_digits_dense_dataset()
+    dataset_path = Path(base_manifest["dataset_path"])
+    dataset = thor.data.FileDataset.open(dataset_path)
     downloads = _ensure_mnist_downloads(DIGITS_DENSE_CACHE_DIR)
-    train_images = _read_idx_images(downloads["train_images"])
     train_labels = _read_idx_labels(downloads["train_labels"])
 
-    processing_root = DIGITS_DENSE_CACHE_DIR / "cv5_processing_tmp"
-    raw_root = processing_root / "raw_fp16_flat"
-    shard_root = _digits_cv5_shard_root(DIGITS_DENSE_CACHE_DIR)
-    base_name = "mnist_digits_dense_fp16_cv5"
-
-    if processing_root.exists():
-        shutil.rmtree(processing_root)
-    if shard_root.exists():
-        shutil.rmtree(shard_root)
-    processing_root.mkdir(parents=True, exist_ok=True)
-    raw_root.mkdir(parents=True, exist_ok=True)
-    shard_root.mkdir(parents=True, exist_ok=True)
-
-    all_indices = np.arange(train_labels.shape[0])
+    all_indices = np.arange(train_labels.shape[0], dtype=np.int64)
     holdout_indices = _stratified_holdout_indices(
         train_labels,
         fraction=DIGITS_DENSE_CV5_HOLDOUT_TEST_FRACTION,
-    )
+    ).astype(np.int64, copy=False)
     cv_mask = np.ones(train_labels.shape[0], dtype=bool)
     cv_mask[holdout_indices] = False
     cv_indices = all_indices[cv_mask]
     fold_indices = _stratified_fold_indices(train_labels[cv_indices], num_folds=5)
-    example_size_in_bytes = DIGITS_INPUT_FEATURES * np.dtype(np.float16).itemsize
     folds = []
 
     for fold_index, validate_relative_indices in enumerate(fold_indices):
@@ -691,80 +646,61 @@ def _ensure_digits_dense_cv5_shards():
         fold_cv_train_mask[validate_relative_indices] = False
         train_indices = cv_indices[fold_cv_train_mask]
         validate_indices = cv_indices[validate_relative_indices]
-
-        fold_raw_root = raw_root / f"fold_{fold_index}"
-        fold_shard_root = shard_root / f"fold_{fold_index}"
-        fold_shard_root.mkdir(parents=True, exist_ok=True)
-        shard_dest_dirs = []
-        for shard_index in range(DIGITS_DENSE_NUM_SHARDS):
-            dest = fold_shard_root / f"dest_{shard_index:02d}"
-            dest.mkdir(parents=True, exist_ok=True)
-            shard_dest_dirs.append(dest)
-
-        train_count = _write_digits_split(
-            train_images[train_indices], train_labels[train_indices], split_name="train", raw_root=fold_raw_root)
-        validate_count = _write_digits_split(
-            train_images[validate_indices],
-            train_labels[validate_indices],
-            split_name="validate",
-            raw_root=fold_raw_root)
-        test_count = _write_digits_split(
-            train_images[holdout_indices], train_labels[holdout_indices], split_name="test", raw_root=fold_raw_root)
-
-        shard_paths = thor.training.create_sharded_raw_dataset(
-            [str(fold_raw_root)],
-            [str(path) for path in shard_dest_dirs],
-            f"{base_name}_fold_{fold_index}",
-            example_size_in_bytes,
-            thor.DataType.fp16,
+        split_manifest_path = _digits_cv5_split_manifest_path(DIGITS_DENSE_CACHE_DIR, fold_index)
+        save_split_manifest(
+            dataset=dataset,
+            path=split_manifest_path,
+            train_indices=train_indices,
+            validate_indices=validate_indices,
+            test_indices=holdout_indices,
         )
-        shard_paths = sorted(str(Path(path)) for path in shard_paths)
-        for path in shard_paths:
-            assert Path(path).exists(), f"expected CV shard file {path} to exist"
-
         folds.append(
             {
                 "fold_index": fold_index,
-                "train_examples": train_count,
-                "validate_examples": validate_count,
-                "test_examples": test_count,
-                "shard_paths": shard_paths,
-            })
+                "train_examples": int(train_indices.shape[0]),
+                "validate_examples": int(validate_indices.shape[0]),
+                "test_examples": int(holdout_indices.shape[0]),
+                "split_manifest_path": str(split_manifest_path),
+            }
+        )
 
     manifest = _digits_cv5_base_manifest(
+        dataset_path=dataset_path,
         source_examples=int(train_labels.shape[0]),
         cv_examples=int(cv_indices.shape[0]),
         test_examples=int(holdout_indices.shape[0]),
         folds=folds,
     )
     _digits_cv5_manifest_path(DIGITS_DENSE_CACHE_DIR).write_text(json.dumps(manifest, indent=2, sort_keys=True))
-    shutil.rmtree(processing_root)
     return manifest
 
 
-def _digits_dense_loader_from_manifest(manifest: dict, *, batch_size: int, batch_queue_depth: int, dataset_name: str):
-    loader = thor.training.LocalBatchLoader(
-        manifest["shard_paths"],
-        manifest["example_shape"],
-        thor.DataType.fp16,
-        manifest["label_shape"],
-        thor.DataType.fp16,
+def _digits_dense_data_from_manifest(
+    manifest: dict,
+    *,
+    split_manifest_path: Path,
+    batch_size: int,
+    dataset_name: str,
+):
+    return open_training_data(
+        dataset_path=Path(manifest["dataset_path"]),
+        split_manifest_path=split_manifest_path,
         batch_size=batch_size,
         dataset_name=dataset_name,
-        batch_queue_depth=batch_queue_depth,
+        randomize_train=True,
+        device_storage="off",
     )
-    return loader
 
 
-def _digits_dense_loader(*, batch_size: int):
-    manifest = _ensure_digits_dense_shards()
-    loader = _digits_dense_loader_from_manifest(
+def _digits_dense_data(*, batch_size: int):
+    manifest = _ensure_digits_dense_dataset()
+    data = _digits_dense_data_from_manifest(
         manifest,
+        split_manifest_path=Path(manifest["split_manifest_path"]),
         batch_size=batch_size,
-        batch_queue_depth=DIGITS_DENSE_LOADER_QUEUE_DEPTH,
         dataset_name="mnist_digits_dense_fp16_flat",
     )
-    return loader, manifest
+    return data, manifest
 
 
 def _build_deep_dense_digits_classifier(
@@ -809,11 +745,11 @@ def test_queued_trainer_trains_really_large_deep_fp16_dense_digits_network(capfd
     _flush_native_stdio_for_capture()
     capfd.readouterr()
     with capfd.disabled():
-        loader, manifest = _digits_dense_loader(batch_size=DIGITS_DENSE_BATCH_SIZE)
-        assert manifest["train_examples"] == loader.get_num_train_examples()
-        assert manifest["validate_examples"] == loader.get_num_validate_examples()
-        assert loader.get_num_train_batches() > 0, "DIGITS train split unexpectedly has zero batches"
-        assert loader.get_num_validate_batches() > 0, "DIGITS validate split unexpectedly has zero batches"
+        data, manifest = _digits_dense_data(batch_size=DIGITS_DENSE_BATCH_SIZE)
+        assert manifest["train_examples"] == len(data.splits.train)
+        assert manifest["validate_examples"] == len(data.splits.validate)
+        assert len(data.splits.train) >= DIGITS_DENSE_BATCH_SIZE, "DIGITS train split unexpectedly has no full batch"
+        assert len(data.splits.validate) >= DIGITS_DENSE_BATCH_SIZE, "DIGITS validate split unexpectedly has no full batch"
         assert manifest["num_classes"] == manifest["label_shape"][0]
         assert manifest["example_shape"] == [DIGITS_INPUT_FEATURES]
 
@@ -825,7 +761,7 @@ def test_queued_trainer_trains_really_large_deep_fp16_dense_digits_network(capfd
         optimizer = thor.optimizers.Sgd(initial_learning_rate=0.01, momentum=0.7, decay=0.01)
         trainer = thor.training.Trainer(
             network,
-            loader,
+            data=data,
             optimizer=optimizer,
             debug_synchronous=False,
             stats_interval_s=DIGITS_DENSE_STATS_INTERVAL_S,
@@ -849,7 +785,7 @@ def test_training_runs_digits_dense_five_fold_cross_validation(capfd):
     _flush_native_stdio_for_capture()
     capfd.readouterr()
     with capfd.disabled():
-        cv_manifest = _ensure_digits_dense_cv5_shards()
+        cv_manifest = _ensure_digits_dense_cv5_manifests()
         assert cv_manifest["num_folds"] == 5
         assert len(cv_manifest["folds"]) == 5
         assert cv_manifest["example_shape"] == [DIGITS_INPUT_FEATURES]
@@ -868,24 +804,17 @@ def test_training_runs_digits_dense_five_fold_cross_validation(capfd):
             save_model_dir: Path,
         ):
             fold_index = int(fold["fold_index"])
-            fold_manifest = {
-                **cv_manifest,
-                "shard_paths": fold["shard_paths"],
-                "train_examples": fold["train_examples"],
-                "validate_examples": fold["validate_examples"],
-                "test_examples": fold["test_examples"],
-            }
-            loader = _digits_dense_loader_from_manifest(
-                fold_manifest,
+            data = _digits_dense_data_from_manifest(
+                cv_manifest,
+                split_manifest_path=Path(fold["split_manifest_path"]),
                 batch_size=DIGITS_DENSE_CV5_BATCH_SIZE,
-                batch_queue_depth=DIGITS_DENSE_CV5_LOADER_QUEUE_DEPTH,
                 dataset_name=f"mnist_digits_dense_fp16_cv5_{run_name}",
             )
-            assert fold["train_examples"] == loader.get_num_train_examples()
-            assert fold["validate_examples"] == loader.get_num_validate_examples()
-            assert fold["test_examples"] == cv_manifest["test_examples"]
-            assert loader.get_num_train_batches() > 0
-            assert loader.get_num_validate_batches() > 0
+            assert fold["train_examples"] == len(data.splits.train)
+            assert fold["validate_examples"] == len(data.splits.validate)
+            assert fold["test_examples"] == len(data.splits.test) == cv_manifest["test_examples"]
+            assert len(data.splits.train) >= DIGITS_DENSE_CV5_BATCH_SIZE
+            assert len(data.splits.validate) >= DIGITS_DENSE_CV5_BATCH_SIZE
 
             network = _build_deep_dense_digits_classifier(
                 model_name,
@@ -898,7 +827,7 @@ def test_training_runs_digits_dense_five_fold_cross_validation(capfd):
             optimizer = thor.optimizers.Adam()
             return thor.training.Trainer(
                 network,
-                loader,
+                data=data,
                 optimizer=optimizer,
                 debug_synchronous=False,
                 stats_interval_s=DIGITS_DENSE_CV5_STATS_INTERVAL_S,
@@ -941,23 +870,16 @@ def test_training_runs_digits_dense_five_fold_cross_validation(capfd):
             max_parallel_runs=DIGITS_DENSE_CV5_MAX_PARALLEL_RUNS,
         )
         test_fold = cv_manifest["folds"][0]
-        test_manifest = {
-            **cv_manifest,
-            "shard_paths": test_fold["shard_paths"],
-            "train_examples": test_fold["train_examples"],
-            "validate_examples": test_fold["validate_examples"],
-            "test_examples": test_fold["test_examples"],
-        }
-        test_loader = _digits_dense_loader_from_manifest(
-            test_manifest,
+        test_data = _digits_dense_data_from_manifest(
+            cv_manifest,
+            split_manifest_path=Path(test_fold["split_manifest_path"]),
             batch_size=DIGITS_DENSE_CV5_BATCH_SIZE,
-            batch_queue_depth=DIGITS_DENSE_CV5_LOADER_QUEUE_DEPTH,
             dataset_name="mnist_digits_dense_fp16_cv5_holdout_test",
         )
         results, captured_text = _fit_training_runs_and_capture_text(
             runs,
             epochs=DIGITS_DENSE_CV5_EPOCHS,
-            test_loader=test_loader,
+            test_loader=test_data.open_session(max_in_flight_batches=DIGITS_DENSE_CV5_MAX_IN_FLIGHT_BATCHES),
         )
 
     plain_text = _ANSI_RE.sub("", captured_text)

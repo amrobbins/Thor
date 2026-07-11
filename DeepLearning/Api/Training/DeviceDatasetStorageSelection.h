@@ -13,7 +13,7 @@
 
 namespace Thor {
 
-class LocalNamedDataset;
+class FileDataset;
 
 struct DeviceDatasetStorageSelection {
     std::shared_ptr<BatchSession> session;
@@ -34,7 +34,7 @@ struct DeviceDatasetStorageSelection {
     std::optional<uint64_t> availableBytesOverride = std::nullopt);
 
 [[nodiscard]] DatasetMaterializationDescription describeDatasetMaterialization(
-    const LocalNamedDataset& dataset);
+    const FileDataset& dataset);
 
 [[nodiscard]] DatasetMaterializationDescription describeDatasetMaterialization(
     const TrainingData& trainingData);

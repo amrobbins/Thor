@@ -4,7 +4,7 @@
 #include "DeepLearning/Api/Data/DatasetId.h"
 #include "DeepLearning/Api/Data/DatasetSplitManifest.h"
 #include "DeepLearning/Api/Data/DatasetSchema.h"
-#include "Utilities/Loaders/LocalNamedExampleLayout.h"
+#include "DeepLearning/Api/Data/DatasetLayout.h"
 
 #include <cstdint>
 #include <filesystem>
@@ -24,7 +24,7 @@ struct DatasetMaterializationDescription {
     DatasetMaterializationDescription(std::filesystem::path datasetPath,
                                       DatasetId datasetId,
                                       DatasetSchema schema,
-                                      LocalNamedExampleLayout layout,
+                                      DatasetLayout layout,
                                       uint64_t numExamples)
         : datasetPath(std::move(datasetPath)),
           datasetId(std::move(datasetId)),
@@ -35,7 +35,7 @@ struct DatasetMaterializationDescription {
     std::filesystem::path datasetPath;
     DatasetId datasetId;
     DatasetSchema schema;
-    LocalNamedExampleLayout layout;
+    DatasetLayout layout;
     uint64_t numExamples = 0;
 };
 

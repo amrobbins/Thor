@@ -173,7 +173,7 @@ bool shouldEmitStats(uint64_t index) {
 }  // namespace
 
 IndexedLocalNamedBatchAssembler::IndexedLocalNamedBatchAssembler(std::shared_ptr<IndexedLocalNamedExampleReader> reader,
-                                                                 LocalNamedExampleLayout layout,
+                                                                 DatasetLayout layout,
                                                                  std::shared_ptr<const std::vector<uint64_t>> indices,
                                                                  std::string splitName,
                                                                  uint64_t batchSize,
@@ -231,7 +231,7 @@ IndexedLocalNamedBatchAssembler::IndexedLocalNamedBatchAssembler(std::shared_ptr
     }
 
     layoutTensorOrdinals.reserve(this->layout.tensors().size());
-    for (const LocalNamedExampleLayout::TensorSpec &spec : this->layout.tensors()) {
+    for (const DatasetLayout::TensorSpec &spec : this->layout.tensors()) {
         std::vector<uint64_t> dimensions;
         dimensions.reserve(spec.dimensions.size() + 1);
         dimensions.push_back(batchSize);
@@ -241,7 +241,7 @@ IndexedLocalNamedBatchAssembler::IndexedLocalNamedBatchAssembler(std::shared_ptr
     }
 
     layoutWindowedTensorOrdinals.reserve(this->layout.windowedTensors().size());
-    for (const LocalNamedExampleLayout::WindowedTensorSpec &spec : this->layout.windowedTensors()) {
+    for (const DatasetLayout::WindowedTensorSpec &spec : this->layout.windowedTensors()) {
         std::vector<uint64_t> dimensions;
         dimensions.reserve(spec.dimensions.size() + 1);
         dimensions.push_back(batchSize);
@@ -457,7 +457,7 @@ void IndexedLocalNamedBatchAssembler::emitStatsIfEnabled(const char *event, uint
     const IndexedLocalNamedBatchAssemblerStats stats = getStatsSnapshot();
     std::fprintf(
         stderr,
-        "IndexedLocalNamedBatchLoader stats: event=%s split=%s batch=%lu "
+        "IndexedNamedBatchSession stats: event=%s split=%s batch=%lu "
         "records_requested=%lu logical_bytes_requested=%lu read_calls_submitted=%lu "
         "read_bytes_submitted=%lu read_calls_completed=%lu read_bytes_completed=%lu records_copied=%lu "
         "copy_bytes=%lu copy_memcpy_calls=%lu copy_active_ns=%lu copy_wait_ns=%lu completed_push_wait_ns=%lu "
@@ -842,7 +842,7 @@ bool IndexedLocalNamedBatchAssembler::startNextBatch() {
 
     const SteadyClock::time_point acquireStart = diagnosticNow();
     for (uint64_t specIndex = 0; specIndex < layout.tensors().size(); ++specIndex) {
-        const LocalNamedExampleLayout::TensorSpec &spec = layout.tensors().at(specIndex);
+        const DatasetLayout::TensorSpec &spec = layout.tensors().at(specIndex);
         Tensor tensor;
         if (!batchTensorQueues.at(spec.name)->getBufferToLoad(tensor)) {
             statsStartBatchTensorAcquireNanoseconds.fetch_add(diagnosticElapsedNanoseconds(acquireStart), std::memory_order_relaxed);
@@ -855,7 +855,7 @@ bool IndexedLocalNamedBatchAssembler::startNextBatch() {
         batchState->tensors.emplace(spec.name, tensor);
     }
     for (uint64_t specIndex = 0; specIndex < layout.windowedTensors().size(); ++specIndex) {
-        const LocalNamedExampleLayout::WindowedTensorSpec &spec = layout.windowedTensors().at(specIndex);
+        const DatasetLayout::WindowedTensorSpec &spec = layout.windowedTensors().at(specIndex);
         Tensor tensor;
         if (!batchTensorQueues.at(spec.name)->getBufferToLoad(tensor)) {
             statsStartBatchTensorAcquireNanoseconds.fetch_add(diagnosticElapsedNanoseconds(acquireStart), std::memory_order_relaxed);
@@ -884,7 +884,7 @@ bool IndexedLocalNamedBatchAssembler::startNextBatch() {
         }
     }
     for (uint64_t specIndex = 0; specIndex < layout.windowedTensors().size(); ++specIndex) {
-        const LocalNamedExampleLayout::WindowedTensorSpec &spec = layout.windowedTensors().at(specIndex);
+        const DatasetLayout::WindowedTensorSpec &spec = layout.windowedTensors().at(specIndex);
         const uint64_t readerOrdinal = layoutWindowedTensorOrdinals.at(specIndex);
         if (batchState->windowedTensorBasePointers.at(readerOrdinal) == nullptr) {
             throw std::runtime_error("IndexedLocalNamedBatchAssembler failed to bind every reader windowed tensor ordinal to a batch tensor.");

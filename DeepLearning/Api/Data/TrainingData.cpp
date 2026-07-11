@@ -1,8 +1,5 @@
 #include "DeepLearning/Api/Data/TrainingData.h"
 
-#include "DeepLearning/Api/Loaders/IndexedNamedBatchSession.h"
-#include "DeepLearning/Api/Data/LocalNamedDataset.h"
-
 #include <stdexcept>
 #include <utility>
 
@@ -31,16 +28,6 @@ TrainingData::TrainingData(std::shared_ptr<const NamedDataset> dataset,
 }
 
 
-TrainingData::TrainingData(std::shared_ptr<const NamedDataset> dataset,
-                           DatasetSplitManifest splits,
-                           BatchPolicy batching,
-                           std::string datasetName)
-    : TrainingData(std::move(dataset),
-                   std::move(splits),
-                   std::move(batching),
-                   DatasetAccessPolicy{},
-                   std::move(datasetName)) {}
-
 std::shared_ptr<BatchSession> TrainingData::openSession(uint64_t maxInFlightBatches) const {
     std::set<DatasetFieldId> allFields;
     for (const DatasetField& field : dataset->getSchema().getFields()) {
@@ -58,13 +45,11 @@ std::shared_ptr<BatchSession> TrainingData::openSession(
     for (DatasetFieldId fieldId : requiredFieldIds) {
         (void)dataset->getSchema().getField(fieldId);
     }
-    std::shared_ptr<const LocalNamedDataset> localDataset =
-        std::dynamic_pointer_cast<const LocalNamedDataset>(dataset);
-    if (localDataset == nullptr) {
-        throw std::runtime_error("TrainingData has no BatchSession implementation for this dataset backend.");
+    std::shared_ptr<BatchSession> session = dataset->openBatchSession(
+        splits, batching, accessPolicy, maxInFlightBatches, requiredFieldIds);
+    if (session == nullptr) {
+        throw std::runtime_error("NamedDataset backend returned a null BatchSession.");
     }
-    auto session = std::make_shared<IndexedNamedBatchSession>(
-        localDataset, splits, batching, maxInFlightBatches, requiredFieldIds);
     session->setDatasetName(datasetName);
     return session;
 }

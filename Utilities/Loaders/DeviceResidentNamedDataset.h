@@ -3,7 +3,7 @@
 #include "DeepLearning/Api/Data/DatasetId.h"
 #include "DeepLearning/Api/Data/DatasetSchema.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
-#include "Utilities/Loaders/LocalNamedExampleLayout.h"
+#include "DeepLearning/Api/Data/DatasetLayout.h"
 #include "Utilities/Loaders/MaterializedNamedDatasetSnapshot.h"
 
 #include <cstdint>
@@ -32,7 +32,7 @@ class DeviceResidentNamedDataset {
 
     [[nodiscard]] const Thor::DatasetId &getDatasetId() const { return datasetId; }
     [[nodiscard]] const Thor::DatasetSchema &getSchema() const { return schema; }
-    [[nodiscard]] const LocalNamedExampleLayout &getLayout() const { return layout; }
+    [[nodiscard]] const DatasetLayout &getLayout() const { return layout; }
     [[nodiscard]] uint64_t getNumExamples() const { return numExamples; }
     [[nodiscard]] uint64_t totalExamples() const { return numExamples; }
     [[nodiscard]] ThorImplementation::TensorPlacement getPlacement() const { return placement; }
@@ -46,7 +46,7 @@ class DeviceResidentNamedDataset {
    private:
     DeviceResidentNamedDataset(Thor::DatasetId datasetId,
                                Thor::DatasetSchema schema,
-                               LocalNamedExampleLayout layout,
+                               DatasetLayout layout,
                                uint64_t numExamples,
                                ThorImplementation::TensorPlacement placement)
         : datasetId(std::move(datasetId)),
@@ -57,7 +57,7 @@ class DeviceResidentNamedDataset {
 
     Thor::DatasetId datasetId;
     Thor::DatasetSchema schema;
-    LocalNamedExampleLayout layout;
+    DatasetLayout layout;
     uint64_t numExamples = 0;
     ThorImplementation::TensorPlacement placement;
     std::map<Thor::DatasetFieldId, ThorImplementation::Tensor> fields;

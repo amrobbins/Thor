@@ -30,7 +30,6 @@ class ExecutableTrainingPlan {
 
     // Temporary compatibility gate for direct StampedNetwork execution.  The native queued executor owns queue-ahead
     // scheduling now, but the underlying stamped graph still executes the complete network/loss/update surface.
-    void assertLegacyLocalExecutorCompatible() const;
     void validateNativeQueuedExecutorCompatible(const std::vector<ParameterReference>& allTrainableParameters) const;
 
     [[nodiscard]] nlohmann::json architectureJson() const;

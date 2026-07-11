@@ -16,6 +16,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import thor
+from conftest import make_numpy_pair_training_data, make_numpy_training_data_from_splits
 from integration_flags import integration_flag_enabled, integration_skip_reason
 
 RUN_TRAINING_INTEGRATION = integration_flag_enabled("THOR_RUN_TRAINING_INTEGRATION")
@@ -164,6 +165,8 @@ def _fit_runs_and_capture_text(
 ):
     if reports is None:
         reports = getattr(runs, "_test_reports", None)
+    if isinstance(test_loader, thor.data.TrainingData):
+        test_loader = test_loader.open_session()
     _flush_native_stdio_for_capture()
     capfd.readouterr()
     with capfd.disabled():
@@ -216,8 +219,7 @@ def _cpu_tensor(values: np.ndarray, dtype: thor.DataType) -> thor.physical.Physi
 
 def _regression_one_batch_loader(*, dtype=np.float32):
     x, y = _regression_arrays(dtype=dtype)
-    loader_cls = thor.training.NumpyFloat16BatchLoader if dtype == np.float16 else thor.training.NumpyFloat32BatchLoader
-    return loader_cls(
+    return make_numpy_pair_training_data(
         x,
         y,
         x,
@@ -229,7 +231,23 @@ def _regression_one_batch_loader(*, dtype=np.float32):
     )
 
 
-def test_numpy_float32_batch_loader_supports_weakref():
+def _regression_with_context_one_batch_loader():
+    x, y = _regression_arrays()
+    tensors = {
+        "examples": x,
+        "context": np.ascontiguousarray(x.copy()),
+        "labels": y,
+    }
+    return make_numpy_training_data_from_splits(
+        {name: value.copy() for name, value in tensors.items()},
+        {name: value.copy() for name, value in tensors.items()},
+        batch_size=4,
+        randomize_train=False,
+        dataset_name="training_runs_regression_with_context_one_batch",
+    )
+
+
+def test_numpy_training_data_supports_weakref():
     loader = _regression_one_batch_loader()
     loader_ref = weakref.ref(loader)
 
@@ -249,8 +267,7 @@ def _non_finite_regression_one_batch_loader(non_finite_phase: str, *, dtype=np.f
     else:
         raise ValueError(f"unsupported non_finite_phase: {non_finite_phase}")
 
-    loader_cls = thor.training.NumpyFloat16BatchLoader if dtype == np.float16 else thor.training.NumpyFloat32BatchLoader
-    return loader_cls(
+    return make_numpy_pair_training_data(
         x,
         np.ascontiguousarray(train_y, dtype=dtype),
         x,
@@ -275,16 +292,10 @@ def _weighted_regression_one_batch_loader(*, dtype=np.float32):
         "labels": y,
         "example_weights": example_weights,
     }
-    return thor.training.NumpyFloat32DictBatchLoader(
-        train={
-            name: value.copy() for name, value in tensors.items()
-        },
-        validate={
-            name: value.copy() for name, value in tensors.items()
-        },
-        test={
-            name: value.copy() for name, value in tensors.items()
-        },
+    return make_numpy_training_data_from_splits(
+        {name: value.copy() for name, value in tensors.items()},
+        {name: value.copy() for name, value in tensors.items()},
+        test={name: value.copy() for name, value in tensors.items()},
         batch_size=4,
         dataset_name="training_runs_weighted_regression_one_batch",
         randomize_train=False,
@@ -312,8 +323,7 @@ def _mae_quantile_regression_arrays(*, dtype=np.float32):
 
 def _mae_quantile_regression_one_batch_loader(*, dtype=np.float32):
     x, y = _mae_quantile_regression_arrays(dtype=dtype)
-    loader_cls = thor.training.NumpyFloat16BatchLoader if dtype == np.float16 else thor.training.NumpyFloat32BatchLoader
-    return loader_cls(
+    return make_numpy_pair_training_data(
         x,
         y,
         x,
@@ -393,7 +403,7 @@ def _airfoil_loader_from_indices(
     batch_size: int,
     dataset_name: str,
 ):
-    return thor.training.NumpyFloat32BatchLoader(
+    return make_numpy_pair_training_data(
         np.ascontiguousarray(features[train_indices], dtype=np.float32),
         np.ascontiguousarray(target[train_indices], dtype=np.float32),
         np.ascontiguousarray(features[validate_indices], dtype=np.float32),
@@ -429,8 +439,7 @@ def _categorical_arrays(*, dtype=np.float32):
 
 def _categorical_one_batch_loader(*, dtype=np.float32):
     x, y = _categorical_arrays(dtype=dtype)
-    loader_cls = thor.training.NumpyFloat16BatchLoader if dtype == np.float16 else thor.training.NumpyFloat32BatchLoader
-    return loader_cls(
+    return make_numpy_pair_training_data(
         x,
         y,
         x,
@@ -458,8 +467,7 @@ def _categorical_mixed_labels_arrays(*, dtype=np.float32):
 
 def _categorical_mixed_labels_one_batch_loader(*, dtype=np.float32):
     x, y = _categorical_mixed_labels_arrays(dtype=dtype)
-    loader_cls = thor.training.NumpyFloat16BatchLoader if dtype == np.float16 else thor.training.NumpyFloat32BatchLoader
-    return loader_cls(
+    return make_numpy_pair_training_data(
         x,
         y,
         x,
@@ -1184,7 +1192,7 @@ def _make_tiny_categorical_trainer(
 ):
     return thor.training.Trainer(
         _build_tiny_classifier(name),
-        _categorical_one_batch_loader(),
+        data=_categorical_one_batch_loader(),
         optimizer=thor.optimizers.Sgd(initial_learning_rate=0.01, momentum=0.0),
         stats_interval_s=0.0,
         max_in_flight_batches=2,
@@ -1212,7 +1220,7 @@ def _make_signature_only_trainer(
 ):
     return thor.training.Trainer(
         _build_signature_only_network(name, input_dtype=input_dtype, output_dtype=output_dtype),
-        _regression_one_batch_loader(),
+        data=_regression_one_batch_loader(dtype=thor.physical.numpy_dtypes.from_thor(input_dtype)),
         save_model_dir=save_model_dir,
         save_model_overwrite=save_model_overwrite,
     )
@@ -1234,7 +1242,7 @@ def _make_tiny_regression_trainer(
         optimizer_obj = thor.optimizers.Sgd(initial_learning_rate=0.01, momentum=0.0) if optimizer else None
     return thor.training.Trainer(
         _build_tiny_regressor(name),
-        _regression_one_batch_loader(),
+        data=_regression_one_batch_loader(),
         optimizer=optimizer_obj,
         stats_interval_s=0.0,
         max_in_flight_batches=2,
@@ -1254,7 +1262,7 @@ def _make_non_finite_tiny_regression_trainer(
 ):
     return thor.training.Trainer(
         _build_tiny_regressor(name),
-        _non_finite_regression_one_batch_loader(non_finite_phase),
+        data=_non_finite_regression_one_batch_loader(non_finite_phase),
         optimizer=thor.optimizers.Sgd(initial_learning_rate=1.0e-12, momentum=0.0),
         stats_interval_s=0.0,
         max_in_flight_batches=2,
@@ -1271,7 +1279,7 @@ def _make_tiny_regression_with_label_mean_report_trainer(
 ):
     return thor.training.Trainer(
         _build_tiny_regressor_with_label_mean_report(name),
-        _regression_one_batch_loader(),
+        data=_regression_one_batch_loader(),
         optimizer=thor.optimizers.Sgd(initial_learning_rate=0.01, momentum=0.0),
         stats_interval_s=0.0,
         max_in_flight_batches=2,
@@ -1287,7 +1295,7 @@ def _make_tiny_regression_with_hidden_metric_report_trainer(
 ):
     return thor.training.Trainer(
         _build_tiny_regressor_with_hidden_metric_report(name),
-        _regression_one_batch_loader(),
+        data=_regression_with_context_one_batch_loader(),
         optimizer=thor.optimizers.Sgd(initial_learning_rate=0.01, momentum=0.0),
         stats_interval_s=0.0,
         max_in_flight_batches=2,
@@ -1301,7 +1309,7 @@ def _make_tiny_regression_with_hidden_loss_report_trainer(
 ):
     return thor.training.Trainer(
         _build_tiny_regressor_with_hidden_loss_report(name),
-        _regression_one_batch_loader(),
+        data=_regression_one_batch_loader(),
         optimizer=thor.optimizers.Sgd(initial_learning_rate=0.01, momentum=0.0),
         stats_interval_s=0.0,
         max_in_flight_batches=2,
@@ -1318,7 +1326,7 @@ def _make_tiny_regression_with_loss_and_hidden_loss_report_trainer(
 ):
     return thor.training.Trainer(
         _build_tiny_regressor_with_loss_and_hidden_loss_report(name),
-        _regression_one_batch_loader(),
+        data=_regression_one_batch_loader(),
         optimizer=thor.optimizers.Sgd(initial_learning_rate=1.0e-12, momentum=0.0),
         stats_interval_s=0.0,
         max_in_flight_batches=2,
@@ -1337,7 +1345,7 @@ def _make_weighted_tiny_regression_trainer(
 ):
     return thor.training.Trainer(
         _build_weighted_tiny_regressor(name),
-        _weighted_regression_one_batch_loader(),
+        data=_weighted_regression_one_batch_loader(),
         optimizer=thor.optimizers.Sgd(initial_learning_rate=1.0e-12, momentum=0.0),
         stats_interval_s=0.0,
         max_in_flight_batches=2,
@@ -1356,7 +1364,7 @@ def _make_named_graph_loss_regression_trainer(
 ):
     return thor.training.Trainer(
         _build_named_graph_loss_regressor(name),
-        _regression_one_batch_loader(),
+        data=_regression_one_batch_loader(),
         optimizer=thor.optimizers.Sgd(initial_learning_rate=1.0e-12, momentum=0.0),
         stats_interval_s=0.0,
         max_in_flight_batches=2,
@@ -1378,7 +1386,7 @@ def _make_two_loss_regression_trainer(
 ):
     return thor.training.Trainer(
         _build_two_loss_regressor(name),
-        _regression_one_batch_loader(),
+        data=_regression_one_batch_loader(),
         optimizer=thor.optimizers.Sgd(initial_learning_rate=1.0e-12, momentum=0.0),
         stats_interval_s=0.0,
         max_in_flight_batches=2,
@@ -1397,7 +1405,7 @@ def _make_mae_low_high_quantile_regression_trainer(
 ):
     return thor.training.Trainer(
         _build_mae_low_high_quantile_regressor(name),
-        _mae_quantile_regression_one_batch_loader(),
+        data=_mae_quantile_regression_one_batch_loader(),
         optimizer=thor.optimizers.Sgd(initial_learning_rate=1.0e-12, momentum=0.0),
         stats_interval_s=0.0,
         max_in_flight_batches=2,
@@ -1592,7 +1600,7 @@ def _make_two_phase_trainer_with_inactive_future_reports(name: str):
         ])
 
     return thor.training.Trainer(
-        loader=_regression_one_batch_loader(),
+        data=_regression_one_batch_loader(),
         training_program=program,
         stats_interval_s=0.0,
         max_in_flight_batches=2,
@@ -1708,7 +1716,7 @@ def test_device_dataset_storage_is_not_a_fit_option():
     options = thor.training.TrainerFitOptions()
 
     assert not hasattr(options, "device_dataset_storage")
-    assert thor.data.DeviceDatasetStorage is thor.training.DeviceDatasetStorage
+    assert not hasattr(thor.training, "DeviceDatasetStorage")
 
 
 def test_trainer_fit_options_accepts_zero_best_model_candidate_cadence_as_disabled():
@@ -2278,13 +2286,21 @@ def make_loader(seed):
         "forecast_aggregate_labels": aggregate_labels,
         "example_weights": example_weights,
     }
-    return thor.training.NumpyFloat32DictBatchLoader(
-        train={name: value.copy() for name, value in tensors.items()},
-        validate={name: value.copy() for name, value in tensors.items()},
-        batch_size=8,
+    canonical = {
+        name: np.ascontiguousarray(np.concatenate([value, value], axis=0))
+        for name, value in tensors.items()
+    }
+    dataset = thor.data.NumpyDataset(canonical)
+    return thor.data.TrainingData(
+        dataset=dataset,
+        splits=thor.data.DatasetSplitManifest(
+            dataset=dataset,
+            train_indices=np.arange(0, n, dtype=np.int64),
+            validate_indices=np.arange(n, 2 * n, dtype=np.int64),
+        ),
+        batching=thor.data.BatchPolicy(batch_size=8, randomize_train=False),
         dataset_name=f"weighted_cross_phase_backprop_{seed}",
-        randomize_train=False,
-        batch_queue_depth=4,
+        device_storage="off",
     )
 
 
@@ -2454,7 +2470,7 @@ def make_network(name):
 def make_trainer(name, seed, model_root):
     program, aggregate_phase = make_network(name)
     trainer = thor.training.Trainer(
-        loader=make_loader(seed),
+        data=make_loader(seed),
         training_program=program,
         stats_interval_s=0.0,
         max_in_flight_batches=4,
@@ -2564,12 +2580,12 @@ def test_training_runs_non_finite_train_or_validation_loss_fails_run(non_finite_
 
 @pytest.mark.cuda
 @pytest.mark.training_integration
-def test_native_queued_failed_fit_releases_numpy_loader_reference():
+def test_native_queued_failed_fit_releases_numpy_training_data_reference():
     loader = _non_finite_regression_one_batch_loader("validate")
     loader_ref = weakref.ref(loader)
     trainer = thor.training.Trainer(
-        _build_tiny_regressor("native_queued_failed_fit_releases_numpy_loader_reference"),
-        loader,
+        _build_tiny_regressor("native_queued_failed_fit_releases_numpy_training_data_reference"),
+        data=loader,
         optimizer=thor.optimizers.Sgd(initial_learning_rate=1.0e-12, momentum=0.0),
         stats_interval_s=0.0,
         max_in_flight_batches=2,
@@ -2856,17 +2872,17 @@ def test_training_runs_airfoil_cv3_reports_mae_plus_low_high_quantile_losses(cap
             batch_size=batch_size,
             dataset_name=f"airfoil_self_noise_cv3_{run_name}",
         )
-        assert loader.get_num_train_examples() == int(fold["train_indices"].shape[0])
-        assert loader.get_num_validate_examples() == int(fold["validate_indices"].shape[0])
-        assert loader.get_num_train_examples() > loader.get_num_validate_examples()
-        assert loader.get_num_train_batches() > 1
-        assert loader.get_num_validate_batches() > 1
+        assert loader.open_session().get_num_train_examples() == int(fold["train_indices"].shape[0])
+        assert loader.open_session().get_num_validate_examples() == int(fold["validate_indices"].shape[0])
+        assert loader.open_session().get_num_train_examples() > loader.open_session().get_num_validate_examples()
+        assert loader.open_session().get_num_train_batches() > 1
+        assert loader.open_session().get_num_validate_batches() > 1
         return thor.training.Trainer(
             _build_airfoil_mae_low_high_quantile_regressor(
                 f"airfoil_self_noise_quantile_{run_name}",
                 width=16,
             ),
-            loader,
+            data=loader,
             optimizer=thor.optimizers.Adam(),
             stats_interval_s=AIRFOIL_QUANTILE_STATS_INTERVAL_S,
             max_in_flight_batches=2,
@@ -2900,8 +2916,8 @@ def test_training_runs_airfoil_cv3_reports_mae_plus_low_high_quantile_losses(cap
         batch_size=batch_size,
         dataset_name="airfoil_self_noise_cv3_holdout_test",
     )
-    assert test_loader.get_num_validate_examples() == int(holdout_indices.shape[0])
-    assert test_loader.get_num_validate_batches() > 1
+    assert test_loader.open_session().get_num_validate_examples() == int(holdout_indices.shape[0])
+    assert test_loader.open_session().get_num_validate_batches() > 1
 
     results, captured_text = _fit_runs_and_capture_text(
         runs,
@@ -3081,12 +3097,12 @@ def test_training_runs_airfoil_cv3_two_phase_pretrain_then_joint_multi_loss_metr
             batch_size=batch_size,
             dataset_name=f"{dataset_prefix}_{run_name}",
         )
-        assert loader.get_num_train_batches() == 2
-        assert loader.get_num_validate_batches() == 1
+        assert loader.open_session().get_num_train_batches() == 2
+        assert loader.open_session().get_num_validate_batches() == 1
         expected_phases = ["point_forecast", "joint_and_quantile"] if enable_second_phase else ["point_forecast"]
         assert program.get_step(0).get_active_phase_names() == expected_phases
         return thor.training.Trainer(
-            loader=loader,
+            data=loader,
             training_program=program,
             stats_interval_s=AIRFOIL_QUANTILE_STATS_INTERVAL_S,
             max_in_flight_batches=1,
@@ -3320,8 +3336,8 @@ def test_training_runs_airfoil_cv3_two_phase_pretrain_then_joint_multi_loss_metr
         batch_size=batch_size,
         dataset_name="airfoil_two_phase_cv3_in_distribution_test",
     )
-    assert test_loader.get_num_validate_examples() == int(ensemble_test_indices.shape[0])
-    assert test_loader.get_num_validate_batches() == len(run_specs)
+    assert test_loader.open_session().get_num_validate_examples() == int(ensemble_test_indices.shape[0])
+    assert test_loader.open_session().get_num_validate_batches() == len(run_specs)
     second_runs = make_runs(run_specs)
     second_results, second_text = _fit_runs_and_capture_text(
         second_runs,
@@ -3495,8 +3511,8 @@ def test_training_runs_airfoil_cv3_two_phase_mae_pretrain_then_mse_head_holdout(
             batch_size=batch_size,
             dataset_name=f"airfoil_mae_then_mse_cv3_{run_name}",
         )
-        assert loader.get_num_train_batches() > 1
-        assert loader.get_num_validate_batches() > 1
+        assert loader.open_session().get_num_train_batches() > 1
+        assert loader.open_session().get_num_validate_batches() > 1
         validation_target = target[fold["validate_indices"]]
         validation_zero_mae_by_run[run_name] = float(np.mean(np.abs(validation_target), dtype=np.float32))
         validation_zero_mse_by_run[run_name] = float(
@@ -3509,7 +3525,7 @@ def test_training_runs_airfoil_cv3_two_phase_mae_pretrain_then_mse_head_holdout(
         mse_phases_by_run[run_name] = mse_phase
         assert program.get_step(0).get_active_phase_names() == ["mae_pretrain"]
         return thor.training.Trainer(
-            loader=loader,
+            data=loader,
             training_program=program,
             stats_interval_s=AIRFOIL_QUANTILE_STATS_INTERVAL_S,
             max_in_flight_batches=2,
@@ -3583,8 +3599,8 @@ def test_training_runs_airfoil_cv3_two_phase_mae_pretrain_then_mse_head_holdout(
         batch_size=batch_size,
         dataset_name="airfoil_mae_then_mse_cv3_holdout_test",
     )
-    assert test_loader.get_num_validate_examples() == int(holdout_indices.shape[0])
-    assert test_loader.get_num_validate_batches() > 1
+    assert test_loader.open_session().get_num_validate_examples() == int(holdout_indices.shape[0])
+    assert test_loader.open_session().get_num_validate_batches() > 1
 
     final_results, final_text = _fit_runs_and_capture_text(
         make_runs(),
@@ -4119,7 +4135,7 @@ def test_trainer_model_selection_score_receives_named_loss_context(tmp_path):
 
     trainer = thor.training.Trainer(
         _build_two_loss_regressor("trainer_model_selection_named_loss_context"),
-        _regression_one_batch_loader(),
+        data=_regression_one_batch_loader(),
         optimizer=thor.optimizers.Sgd(initial_learning_rate=1.0e-12, momentum=0.0),
         stats_interval_s=0.0,
         max_in_flight_batches=2,
@@ -4734,7 +4750,7 @@ def test_training_runs_ensemble_train_reports_full_validation_union_once(capfd, 
             np.resize(train_x, (validate_labels.shape[0], train_x.shape[1])),
             dtype=np.float32,
         )
-        return thor.training.NumpyFloat32BatchLoader(
+        return make_numpy_pair_training_data(
             train_x,
             train_y,
             validate_x,
@@ -4748,7 +4764,7 @@ def test_training_runs_ensemble_train_reports_full_validation_union_once(capfd, 
     def make_trainer(name, validate_labels):
         return thor.training.Trainer(
             _build_tiny_regressor_with_label_mean_report(name),
-            make_loader(validate_labels),
+            data=make_loader(validate_labels),
             optimizer=thor.optimizers.Sgd(initial_learning_rate=1.0e-12, momentum=0.0),
             stats_interval_s=0.0,
             max_in_flight_batches=2,
@@ -5014,17 +5030,6 @@ def _demand_end_to_end_arrays():
     }
 
 
-def _fold_split_with_holdout(fold, *, test_keys, test_groups):
-    return thor.data.StratifiedTrainValidationTestSplit(
-        train_keys=fold.train_keys,
-        validate_keys=fold.validate_keys,
-        test_keys=tuple(test_keys),
-        train_groups=fold.train_groups,
-        validate_groups=fold.validate_groups,
-        test_groups=tuple(test_groups),
-    )
-
-
 def _build_demand_end_to_end_network(name: str) -> thor.Network:
     network = thor.Network(name)
     trend = thor.layers.NetworkInput(network, "trend_inputs", [1], thor.DataType.fp32)
@@ -5085,22 +5090,29 @@ def test_training_runs_demand_style_kfold_full_path_saves_loadable_ensemble(capf
         seed=23,
     ).holdout_plus_k_fold(
         test_size=2, k=2)
+    dataset = thor.data.NumpyDataset(tensors)
+
+    def row_indices(selected_groups):
+        selected = set(selected_groups)
+        return np.asarray([index for index, group in enumerate(row_groups) if group in selected], dtype=np.int64)
 
     def make_trainer(*, fold, run_name, test_keys, test_groups):
-        fold_split = _fold_split_with_holdout(fold, test_keys=test_keys, test_groups=test_groups)
-        split_indices = thor.data.make_numpy_dict_split_indices(tensors, split=fold_split, groups=row_groups)
-        loader = thor.training.IndexedNumpyFloat32DictBatchLoader(
-            tensors=tensors,
-            train_indices=split_indices.train,
-            validate_indices=split_indices.validate,
-            test_indices=split_indices.test,
-            batch_size=2,
-            randomize_train=False,
+        manifest = thor.data.DatasetSplitManifest(
+            dataset=dataset,
+            train_indices=row_indices(fold.train_groups),
+            validate_indices=row_indices(fold.validate_groups),
+            test_indices=row_indices(test_groups),
+        )
+        loader = thor.data.TrainingData(
+            dataset=dataset,
+            splits=manifest,
+            batching=thor.data.BatchPolicy(batch_size=2, randomize_train=False),
             dataset_name=f"demand_kfold_{run_name}",
+            device_storage="off",
         )
         return thor.training.Trainer(
             _build_demand_end_to_end_network(f"demand_kfold_network_{run_name}"),
-            loader,
+            data=loader,
             optimizer=thor.optimizers.Sgd(initial_learning_rate=0.01, momentum=0.0),
             stats_interval_s=0.0,
             max_in_flight_batches=2,
@@ -5120,23 +5132,19 @@ def test_training_runs_demand_style_kfold_full_path_saves_loadable_ensemble(capf
             "brand_demand_cv2": 2
         },
     )
-    holdout_split = thor.data.StratifiedTrainValidationTestSplit(
-        train_keys=split.test_keys,
-        validate_keys=split.test_keys,
-        test_keys=split.test_keys,
-        train_groups=split.test_groups,
-        validate_groups=split.test_groups,
-        test_groups=split.test_groups,
+    holdout_indices = row_indices(split.test_groups)
+    holdout_manifest = thor.data.DatasetSplitManifest(
+        dataset=dataset,
+        train_indices=holdout_indices,
+        validate_indices=holdout_indices,
+        test_indices=holdout_indices,
     )
-    holdout_indices = thor.data.make_numpy_dict_split_indices(tensors, split=holdout_split, groups=row_groups)
-    test_loader = thor.training.IndexedNumpyFloat32DictBatchLoader(
-        tensors=tensors,
-        train_indices=holdout_indices.train,
-        validate_indices=holdout_indices.validate,
-        test_indices=holdout_indices.test,
-        batch_size=2,
-        randomize_train=False,
+    test_loader = thor.data.TrainingData(
+        dataset=dataset,
+        splits=holdout_manifest,
+        batching=thor.data.BatchPolicy(batch_size=2, randomize_train=False),
         dataset_name="demand_kfold_holdout",
+        device_storage="off",
     )
 
     results, captured_text = _fit_runs_and_capture_text(runs, capfd, epochs=1, test_loader=test_loader)

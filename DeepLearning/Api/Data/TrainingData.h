@@ -25,12 +25,6 @@ class TrainingData {
                  DatasetAccessPolicy accessPolicy = {},
                  std::string datasetName = "indexed_named_examples");
 
-    /** Compatibility overload retaining the former fourth positional dataset name. */
-    TrainingData(std::shared_ptr<const NamedDataset> dataset,
-                 DatasetSplitManifest splits,
-                 BatchPolicy batching,
-                 std::string datasetName);
-
     [[nodiscard]] std::shared_ptr<BatchSession> openSession(uint64_t maxInFlightBatches = 32) const;
     [[nodiscard]] std::shared_ptr<BatchSession> openSession(
         uint64_t maxInFlightBatches,

@@ -3,7 +3,7 @@
 #include "DeepLearning/Api/Data/DatasetId.h"
 #include "DeepLearning/Api/Data/DatasetSchema.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
-#include "Utilities/Loaders/LocalNamedExampleLayout.h"
+#include "DeepLearning/Api/Data/DatasetLayout.h"
 
 #include <cstdint>
 #include <map>
@@ -22,7 +22,7 @@
 struct MaterializedNamedDatasetSnapshot {
     MaterializedNamedDatasetSnapshot(Thor::DatasetId datasetId,
                                      Thor::DatasetSchema schema,
-                                     LocalNamedExampleLayout layout,
+                                     DatasetLayout layout,
                                      uint64_t numExamples)
         : datasetId(std::move(datasetId)),
           schema(std::move(schema)),
@@ -31,7 +31,7 @@ struct MaterializedNamedDatasetSnapshot {
 
     Thor::DatasetId datasetId;
     Thor::DatasetSchema schema;
-    LocalNamedExampleLayout layout;
+    DatasetLayout layout;
     uint64_t numExamples = 0;
     std::map<Thor::DatasetFieldId, ThorImplementation::Tensor> fields;
     double materializationSeconds = 0.0;

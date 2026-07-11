@@ -1,6 +1,6 @@
 #include "DeepLearning/Api/Data/TrainingData.h"
 #include "DeepLearning/Api/Loaders/IndexedNamedBatchSession.h"
-#include "Utilities/Loaders/LocalNamedExampleDatasetWriter.h"
+#include "DeepLearning/Api/Data/DatasetWriter.h"
 
 #include "gtest/gtest.h"
 
@@ -24,16 +24,16 @@ std::filesystem::path makeDatasetPath(const std::string &name) {
     return path;
 }
 
-LocalNamedExampleLayout layout() {
-    return LocalNamedExampleLayout::fromTensorShapes(
-        std::vector<std::pair<std::string, std::vector<uint64_t>>>{{"features", {1}}}, DataType::FP32);
+DatasetLayout layout() {
+    return DatasetLayout::fromTensorShapes(
+        std::vector<DatasetLayout::TensorShape>{DatasetLayout::TensorShape("features", {1}, DataType::FP32)});
 }
 
 void writeDataset(const std::filesystem::path &path) {
-    LocalNamedExampleDatasetWriter writer(path, layout(), 2, LocalNamedExampleDatasetWriter::StorageMode::INDEXED);
+    DatasetWriter writer(path, layout(), 2);
     for (uint64_t i = 0; i < 6; ++i) {
         float value = static_cast<float>(i);
-        LocalNamedExampleDatasetWriter::TensorView view{
+        DatasetWriter::TensorView view{
             .dataType = DataType::FP32,
             .dimensions = {1},
             .data = &value,
@@ -55,10 +55,11 @@ std::vector<float> values(const Batch &batch) {
 TEST(TrainingData, OpensIndependentSessionsOverOneImmutableRecipe) {
     const std::filesystem::path path = makeDatasetPath("independent_sessions");
     writeDataset(path);
-    auto dataset = Thor::LocalNamedDataset::open(path);
+    auto dataset = Thor::FileDataset::open(path);
     Thor::TrainingData data(dataset,
                             Thor::DatasetSplitManifest(*dataset, {0, 1, 2, 3}, {4, 5}),
                             Thor::BatchPolicy(2, false),
+                            Thor::DatasetAccessPolicy{},
                             "shared_examples");
 
     std::shared_ptr<Thor::BatchSession> first = data.openSession(2);
@@ -84,7 +85,7 @@ TEST(TrainingData, OpensIndependentSessionsOverOneImmutableRecipe) {
 TEST(TrainingData, FixedSeedRandomizationIsSessionLocal) {
     const std::filesystem::path path = makeDatasetPath("randomization");
     writeDataset(path);
-    auto dataset = Thor::LocalNamedDataset::open(path);
+    auto dataset = Thor::FileDataset::open(path);
     Thor::TrainingData data(dataset,
                             Thor::DatasetSplitManifest(*dataset, {0, 1, 2, 3, 4, 5}, {}),
                             Thor::BatchPolicy(2, true, 1234));
@@ -107,7 +108,7 @@ TEST(TrainingData, FixedSeedRandomizationIsSessionLocal) {
 TEST(TrainingData, BatchLeaseReturnsBuffersAndCancellationIsSessionLocal) {
     const std::filesystem::path path = makeDatasetPath("lease_cancel");
     writeDataset(path);
-    auto dataset = Thor::LocalNamedDataset::open(path);
+    auto dataset = Thor::FileDataset::open(path);
     Thor::TrainingData data(dataset,
                             Thor::DatasetSplitManifest(*dataset, {0, 1, 2, 3}, {4, 5}),
                             Thor::BatchPolicy(2, false));
@@ -134,7 +135,7 @@ TEST(TrainingData, BatchLeaseReturnsBuffersAndCancellationIsSessionLocal) {
 TEST(TrainingData, RejectsInvalidSessionAndRecipeConfiguration) {
     const std::filesystem::path path = makeDatasetPath("validation");
     writeDataset(path);
-    auto dataset = Thor::LocalNamedDataset::open(path);
+    auto dataset = Thor::FileDataset::open(path);
     Thor::TrainingData data(dataset,
                             Thor::DatasetSplitManifest(*dataset, {0, 1}, {2}),
                             Thor::BatchPolicy(1, false));
@@ -149,7 +150,7 @@ TEST(TrainingData, RejectsInvalidSessionAndRecipeConfiguration) {
 TEST(TrainingData, OwnsDeviceAccessPolicyIndependentlyOfSessions) {
     const std::filesystem::path path = makeDatasetPath("access_policy");
     writeDataset(path);
-    auto dataset = Thor::LocalNamedDataset::open(path);
+    auto dataset = Thor::FileDataset::open(path);
     Thor::DatasetSplitManifest splits(*dataset, {0, 1, 2, 3}, {4, 5});
     Thor::BatchPolicy batching(2, false);
 

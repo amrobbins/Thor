@@ -29,6 +29,16 @@ class TestNamedDataset final : public Thor::NamedDataset {
     const Thor::DatasetSchema &getSchema() const override { return schema; }
     const Thor::DatasetField &getField(std::string_view name) const override { return schema.getField(name); }
 
+   protected:
+    std::shared_ptr<Thor::BatchSession> openBatchSession(
+        const Thor::DatasetSplitManifest &,
+        const Thor::BatchPolicy &,
+        const Thor::DatasetAccessPolicy &,
+        uint64_t,
+        const std::set<Thor::DatasetFieldId> &) const override {
+        return nullptr;
+    }
+
    private:
     Thor::DatasetId id;
     uint64_t numExamples;

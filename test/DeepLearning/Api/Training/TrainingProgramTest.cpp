@@ -1108,7 +1108,6 @@ TEST(TrainingProgramApi, PlacedNetworkResolvesParameterReferencesAndStepExecutab
     EXPECT_EQ(plan.getTotalStepRepeatsPerIteration(), 3u);
     EXPECT_EQ(plan.getRequiredBatchInputNames(), (std::vector<std::string>{"labels", "z_generator"}));
     EXPECT_EQ(plan.getStep(0).getName(), "generator");
-    EXPECT_THROW(plan.assertLegacyLocalExecutorCompatible(), std::runtime_error);
     EXPECT_THROW(plan.validateNativeQueuedExecutorCompatible(network.getTrainableParameterReferences()), std::runtime_error);
 
     TrainingStep nativeStep("native",
@@ -1122,23 +1121,20 @@ TEST(TrainingProgramApi, PlacedNetworkResolvesParameterReferencesAndStepExecutab
     ExecutableTrainingPlan nativePlan =
         ExecutableTrainingPlan::compile(TrainingProgram(std::vector<std::shared_ptr<TrainingStep>>{nativeStepRef}), *placed);
     EXPECT_NO_THROW(nativePlan.validateNativeQueuedExecutorCompatible(network.getTrainableParameterReferences()));
-    EXPECT_THROW(nativePlan.assertLegacyLocalExecutorCompatible(), std::runtime_error);
 
     TrainingStep perParameterOptimizerStep("per_parameter", std::vector<std::shared_ptr<TrainingPhase>>{generatorPhase}, nullptr, {weights, biases});
     auto perParameterOptimizerStepRef = std::make_shared<TrainingStep>(perParameterOptimizerStep);
     ExecutableTrainingPlan perParameterOptimizerPlan =
         ExecutableTrainingPlan::compile(TrainingProgram(std::vector<std::shared_ptr<TrainingStep>>{perParameterOptimizerStepRef}), *placed);
     EXPECT_EQ(perParameterOptimizerPlan.getStep(0).getOptimizer(), nullptr);
-    EXPECT_NO_THROW(perParameterOptimizerPlan.assertLegacyLocalExecutorCompatible());
     EXPECT_NO_THROW(perParameterOptimizerPlan.validateNativeQueuedExecutorCompatible(network.getTrainableParameterReferences()));
 
-    TrainingStep legacyStep("native_single_step", std::vector<std::shared_ptr<TrainingPhase>>{generatorPhase}, sgd, {weights, biases});
-    auto legacyStepRef = std::make_shared<TrainingStep>(legacyStep);
-    ExecutableTrainingPlan legacyPlan =
-        ExecutableTrainingPlan::compile(TrainingProgram(std::vector<std::shared_ptr<TrainingStep>>{legacyStepRef}), *placed);
-    EXPECT_NO_THROW(legacyPlan.assertLegacyLocalExecutorCompatible());
-    EXPECT_NO_THROW(legacyPlan.validateNativeQueuedExecutorCompatible(network.getTrainableParameterReferences()));
-    nlohmann::json planJson = legacyPlan.architectureJson();
+    TrainingStep singleStep("native_single_step", std::vector<std::shared_ptr<TrainingPhase>>{generatorPhase}, sgd, {weights, biases});
+    auto singleStepRef = std::make_shared<TrainingStep>(singleStep);
+    ExecutableTrainingPlan singleStepPlan =
+        ExecutableTrainingPlan::compile(TrainingProgram(std::vector<std::shared_ptr<TrainingStep>>{singleStepRef}), *placed);
+    EXPECT_NO_THROW(singleStepPlan.validateNativeQueuedExecutorCompatible(network.getTrainableParameterReferences()));
+    nlohmann::json planJson = singleStepPlan.architectureJson();
     EXPECT_EQ(planJson.at("version").get<std::string>(), "1.0.0");
     EXPECT_EQ(planJson.at("step_count").get<uint64_t>(), 1u);
     EXPECT_EQ(planJson.at("total_step_repeats_per_iteration").get<uint64_t>(), 1u);

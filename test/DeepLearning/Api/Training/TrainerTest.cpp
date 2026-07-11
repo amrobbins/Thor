@@ -1,7 +1,7 @@
 #include "DeepLearning/Api/Training/Trainer.h"
 #include "DeepLearning/Api/Data/TrainingData.h"
-#include "DeepLearning/Api/Data/LocalNamedDataset.h"
-#include "Utilities/Loaders/LocalNamedExampleDatasetWriter.h"
+#include "DeepLearning/Api/Data/FileDataset.h"
+#include "DeepLearning/Api/Data/DatasetWriter.h"
 #include "DeepLearning/Api/Training/Executors/DebugSynchronousTrainingExecutor.h"
 #include "DeepLearning/Api/Training/DeviceDatasetStorageSelection.h"
 #include "DeepLearning/Api/Training/DatasetInputBindings.h"
@@ -139,13 +139,13 @@ std::filesystem::path uniqueTempPath(const std::string& prefix) {
 std::shared_ptr<TrainingData> makeTrainingData(
     const std::filesystem::path& path,
     DeviceDatasetStorage deviceStorage = DeviceDatasetStorage::BEST_EFFORT) {
-    LocalNamedExampleLayout layout = LocalNamedExampleLayout::fromTensorShapes(
-        std::vector<std::pair<std::string, std::vector<uint64_t>>>{{"features", {1}}},
-        ThorImplementation::DataType::FP32);
-    LocalNamedExampleDatasetWriter writer(path, layout, 2, LocalNamedExampleDatasetWriter::StorageMode::INDEXED);
+    DatasetLayout layout = DatasetLayout::fromTensorShapes(
+        std::vector<DatasetLayout::TensorShape>{
+            DatasetLayout::TensorShape("features", {1}, ThorImplementation::DataType::FP32)});
+    DatasetWriter writer(path, layout, 2);
     for (uint64_t i = 0; i < 4; ++i) {
         float value = static_cast<float>(i);
-        LocalNamedExampleDatasetWriter::TensorView view{
+        DatasetWriter::TensorView view{
             .dataType = ThorImplementation::DataType::FP32,
             .dimensions = {1},
             .data = &value,
@@ -154,7 +154,7 @@ std::shared_ptr<TrainingData> makeTrainingData(
         writer.writeIndexedExample({{"features", view}});
     }
     writer.close();
-    std::shared_ptr<LocalNamedDataset> dataset = LocalNamedDataset::open(path);
+    std::shared_ptr<FileDataset> dataset = FileDataset::open(path);
     return std::make_shared<TrainingData>(
         dataset,
         DatasetSplitManifest(*dataset, {0, 1, 2}, {3}),
@@ -169,12 +169,16 @@ std::shared_ptr<TrainingData> makePhaseSubsetTrainingData(const std::filesystem:
         {"future_features", {1}},
         {"unused_dataset_field", {1}},
     };
-    LocalNamedExampleLayout layout = LocalNamedExampleLayout::fromTensorShapes(
-        shapes, ThorImplementation::DataType::FP32);
-    LocalNamedExampleDatasetWriter writer(path, layout, 2, LocalNamedExampleDatasetWriter::StorageMode::INDEXED);
+    std::vector<DatasetLayout::TensorShape> tensorShapes;
+    tensorShapes.reserve(shapes.size());
+    for (const auto& [name, dimensions] : shapes) {
+        tensorShapes.emplace_back(name, dimensions, ThorImplementation::DataType::FP32);
+    }
+    DatasetLayout layout = DatasetLayout::fromTensorShapes(tensorShapes);
+    DatasetWriter writer(path, layout, 2);
     for (uint64_t i = 0; i < 4; ++i) {
         float value = static_cast<float>(i);
-        LocalNamedExampleDatasetWriter::TensorView view{
+        DatasetWriter::TensorView view{
             .dataType = ThorImplementation::DataType::FP32,
             .dimensions = {1},
             .data = &value,
@@ -188,7 +192,7 @@ std::shared_ptr<TrainingData> makePhaseSubsetTrainingData(const std::filesystem:
         });
     }
     writer.close();
-    std::shared_ptr<LocalNamedDataset> dataset = LocalNamedDataset::open(path);
+    std::shared_ptr<FileDataset> dataset = FileDataset::open(path);
     return std::make_shared<TrainingData>(
         dataset,
         DatasetSplitManifest(*dataset, {0, 1, 2}, {3}),

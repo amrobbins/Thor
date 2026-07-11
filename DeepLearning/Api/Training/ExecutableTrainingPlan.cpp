@@ -83,37 +83,6 @@ void ExecutableTrainingPlan::validate() const {
     }
 }
 
-void ExecutableTrainingPlan::assertLegacyLocalExecutorCompatible() const {
-    validate();
-
-    if (steps.size() != 1) {
-        throw std::runtime_error(
-            "LocalExecutor-backed Trainer currently supports only a single-step ExecutableTrainingPlan. "
-            "Multi-step TrainingProgram execution needs the native queued training scheduler.");
-    }
-
-    const StepExecutable& step = steps.front();
-    if (step.getRepeatCount() != 1) {
-        throw std::runtime_error(
-            "LocalExecutor-backed Trainer currently supports only repeat_count=1. "
-            "Repeated TrainingStep execution needs the native queued training scheduler.");
-    }
-    if (step.getGradientClearPolicy() != TrainingStep::GradientClearPolicy::CLEAR_BEFORE_STEP) {
-        throw std::runtime_error(
-            "LocalExecutor-backed Trainer currently supports only clear_before_step gradient policy. "
-            "Gradient accumulation needs the native queued training scheduler.");
-    }
-
-    for (const TrainingInputBinding& binding : step.getResolvedInputBindings()) {
-        if (binding.getNetworkInputName() != binding.getBatchInputName()) {
-            throw std::runtime_error(
-                "LocalExecutor-backed Trainer currently requires batch input names to match NetworkInput names. "
-                "TrainingInputBinding remapping needs the native queued training scheduler.");
-        }
-    }
-}
-
-
 void ExecutableTrainingPlan::validateNativeQueuedExecutorCompatible(
     const std::vector<ParameterReference>& allTrainableParameters) const {
     validate();

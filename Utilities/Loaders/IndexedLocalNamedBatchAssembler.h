@@ -2,7 +2,7 @@
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Loaders/IndexedLocalNamedExampleReader.h"
-#include "Utilities/Loaders/LocalNamedExampleLayout.h"
+#include "DeepLearning/Api/Data/DatasetLayout.h"
 #include "Utilities/Random/FullPeriodRandom.h"
 #include "Utilities/WorkQueue/AsyncQueue.h"
 #include "Utilities/WorkQueue/AsyncTensorQueue.h"
@@ -187,7 +187,7 @@ struct IndexedLocalNamedBatchState {
 };
 
 /**
- * Indexed split assembler for IndexedLocalNamedBatchLoader.
+ * Indexed split assembler for IndexedNamedBatchSession.
  *
  * Owns the per-split async read/prefetch pipeline:
  *   logical split positions -> global row ids -> reader sessions direct-load into
@@ -196,7 +196,7 @@ struct IndexedLocalNamedBatchState {
 class IndexedLocalNamedBatchAssembler {
    public:
     IndexedLocalNamedBatchAssembler(std::shared_ptr<IndexedLocalNamedExampleReader> reader,
-                                    LocalNamedExampleLayout layout,
+                                    DatasetLayout layout,
                                     std::shared_ptr<const std::vector<uint64_t>> indices,
                                     std::string splitName,
                                     uint64_t batchSize,
@@ -231,7 +231,7 @@ class IndexedLocalNamedBatchAssembler {
 
    private:
     std::shared_ptr<IndexedLocalNamedExampleReader> reader;
-    LocalNamedExampleLayout layout;
+    DatasetLayout layout;
     std::shared_ptr<const std::vector<uint64_t>> indices;
     std::string splitName;
     std::map<std::string, ThorImplementation::TensorDescriptor> batchTensorDescriptors;

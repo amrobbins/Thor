@@ -269,110 +269,79 @@ def test_splitter_rejects_invalid_inputs():
         splitter.train_validation_split(validation_fraction=0.0)
 
 
-def test_make_numpy_dict_split_indices_partitions_demand_style_arrays_by_group_with_explicit_test_split():
+def test_numpy_dataset_manifest_partitions_demand_style_rows_by_group_with_explicit_test_split():
     product_ids = [f"product_{i}" for i in range(8)]
-    row_groups = []
-    row_keys = []
-    for product_id in product_ids:
-        for date_idx in range(3):
-            row_groups.append(product_id)
-            row_keys.append(f"{product_id}:date_{date_idx}")
-
-    splitter = thor.data.StratifiedSplitter(
-        row_keys,
-        [float(product_id.rsplit("_", 1)[1]) for product_id in row_groups],
+    row_groups = [product_id for product_id in product_ids for _ in range(3)]
+    tensors = {
+        "trend_inputs": np.arange(len(row_groups) * 2, dtype=np.float32).reshape(len(row_groups), 2),
+        "forecast": np.arange(len(row_groups), dtype=np.float32).reshape(len(row_groups), 1),
+    }
+    dataset = thor.data.NumpyDataset({name: np.ascontiguousarray(value) for name, value in tensors.items()})
+    manifest = thor.data.StratifiedSplitter.train_validation_test_manifest(
+        dataset=dataset,
+        strata=[float(product_id.rsplit("_", 1)[1]) for product_id in row_groups],
         groups=row_groups,
+        validation_size=2,
+        test_size=2,
         mode="quantile",
         num_bins=4,
         seed=7,
     )
-    split = splitter.train_validation_test_split(validation_size=2, test_size=2)
 
-    tensors = {
-        "trend_inputs": np.arange(len(row_keys) * 2, dtype=np.float32).reshape(len(row_keys), 2),
-        "seasonality_inputs": np.arange(len(row_keys) * 3, dtype=np.float32).reshape(len(row_keys), 3),
-        "monotone_increasing_inputs": np.arange(len(row_keys), dtype=np.float32).reshape(len(row_keys), 1),
-        "forecast": np.arange(len(row_keys), dtype=np.float32).reshape(len(row_keys), 1),
-        "example_weights": np.ones((len(row_keys), 1), dtype=np.float32),
-    }
-
-    partitions = thor.data.make_numpy_dict_split_indices(tensors, groups=row_groups, split=split)
-
-    assert isinstance(partitions, thor.data.NumpyDictSplitIndices)
-    assert partitions.test is not None
-    assert partitions.train.shape[0] == len(split.train_groups) * 3
-    assert partitions.validate.shape[0] == len(split.validate_groups) * 3
-    assert partitions.test.shape[0] == len(split.test_groups) * 3
-
-    validate_groups = set(split.validate_groups)
-    expected_validate_indices = np.asarray(
-        [idx for idx, group in enumerate(row_groups) if group in validate_groups],
-        dtype=np.int64,
-    )
-    assert np.array_equal(partitions.validate, expected_validate_indices)
-    assert np.array_equal(tensors["forecast"][partitions.validate], tensors["forecast"][expected_validate_indices])
-    assert not partitions.train.flags.writeable
-    assert not partitions.validate.flags.writeable
-    assert not partitions.test.flags.writeable
+    train_groups = {row_groups[index] for index in manifest.train.indices}
+    validate_groups = {row_groups[index] for index in manifest.validate.indices}
+    test_groups = {row_groups[index] for index in manifest.test.indices}
+    assert train_groups.isdisjoint(validate_groups)
+    assert train_groups.isdisjoint(test_groups)
+    assert validate_groups.isdisjoint(test_groups)
+    assert len(manifest.train) + len(manifest.validate) + len(manifest.test) == len(row_groups)
+    assert manifest.dataset_id == dataset.id
     assert not tensors["forecast"].flags.writeable
-    with pytest.raises(ValueError, match="read-only"):
-        partitions.validate[0] = 0
-    with pytest.raises(ValueError, match="read-only"):
-        tensors["forecast"][0, 0] = 0.0
 
 
-def test_make_numpy_dict_split_indices_partitions_by_key_for_plain_train_validation_split():
-    keys = [f"row_{i}" for i in range(6)]
-    splitter = thor.data.StratifiedSplitter(keys, [0, 0, 1, 1, 2, 2], mode="categorical", seed=2)
-    split = splitter.train_validation_split(validation_size=2)
-    tensors = {"x": np.arange(12, dtype=np.float32).reshape(6, 2), "y": np.arange(6, dtype=np.float32).reshape(6, 1)}
+def test_numpy_dataset_manifest_uses_canonical_row_ids_for_plain_train_validation_split():
+    tensors = {
+        "x": np.ascontiguousarray(np.arange(12, dtype=np.float32).reshape(6, 2)),
+        "y": np.ascontiguousarray(np.arange(6, dtype=np.float32).reshape(6, 1)),
+    }
+    dataset = thor.data.NumpyDataset(tensors)
+    manifest = thor.data.StratifiedSplitter.train_validation_manifest(
+        dataset=dataset,
+        strata=[0, 0, 1, 1, 2, 2],
+        validation_size=2,
+        mode="categorical",
+        seed=2,
+    )
 
-    partitions = thor.data.make_numpy_dict_split_indices(tensors, keys=keys, split=split)
-
-    assert partitions.test is None
-    assert partitions.train.shape[0] == len(split.train_keys)
-    assert partitions.validate.shape[0] == len(split.validate_keys)
-    assert not partitions.train.flags.writeable
-    assert not partitions.validate.flags.writeable
-    assert not tensors["x"].flags.writeable
-    assert not tensors["y"].flags.writeable
-    expected_train_indices = np.asarray([idx for idx, key in enumerate(keys) if key in set(split.train_keys)], dtype=np.int64)
-    assert np.array_equal(partitions.train, expected_train_indices)
-    assert np.array_equal(tensors["y"][partitions.train], tensors["y"][expected_train_indices])
+    assert len(manifest.train) == 4
+    assert len(manifest.validate) == 2
+    assert manifest.test_aliases_validate
+    assert set(manifest.train.indices).isdisjoint(manifest.validate.indices)
+    assert set(manifest.train.indices) | set(manifest.validate.indices) == set(range(6))
 
 
-def test_make_numpy_dict_split_indices_rejects_ambiguous_or_mismatched_selectors():
-    splitter = thor.data.StratifiedSplitter(["a", "b", "c"], [0.0, 1.0, 2.0], seed=1)
-    split = splitter.train_validation_split(validation_size=1)
-    tensors = {"x": np.zeros((3, 2), dtype=np.float32)}
+def test_numpy_dataset_and_manifest_reject_mismatched_table_or_selector_lengths():
+    with pytest.raises(ValueError, match="same leading dimension"):
+        thor.data.NumpyDataset(
+            {
+                "x": np.zeros((3, 2), dtype=np.float32),
+                "y": np.zeros((2, 1), dtype=np.float32),
+            }
+        )
 
-    with pytest.raises(ValueError, match="exactly one of keys or groups"):
-        thor.data.make_numpy_dict_split_indices(tensors, split=split)
-    with pytest.raises(ValueError, match="exactly one of keys or groups"):
-        thor.data.make_numpy_dict_split_indices(tensors, keys=["a", "b", "c"], groups=["a", "b", "c"], split=split)
-    with pytest.raises(ValueError, match="keys length must match"):
-        thor.data.make_numpy_dict_split_indices(tensors, keys=["a", "b"], split=split)
-    with pytest.raises(ValueError, match="same leading example dimension"):
-        thor.data.make_numpy_dict_split_indices(
-            {"x": np.zeros((3, 2), dtype=np.float32), "y": np.zeros((2, 1), dtype=np.float32)},
-            keys=["a", "b", "c"],
-            split=split,
+    dataset = thor.data.NumpyDataset({"x": np.zeros((3, 2), dtype=np.float32)})
+    with pytest.raises(ValueError, match="strata length"):
+        thor.data.StratifiedSplitter.train_validation_manifest(
+            dataset=dataset, strata=[0.0, 1.0], validation_size=1
+        )
+    with pytest.raises(ValueError, match="groups length"):
+        thor.data.StratifiedSplitter.train_validation_manifest(
+            dataset=dataset, strata=[0.0, 1.0, 2.0], groups=["a", "b"], validation_size=1
         )
 
 
-def test_make_numpy_dict_splits_deprecated_materializes_copied_arrays_and_old_name_is_removed():
-    keys = ["a", "b", "c", "d"]
-    split = thor.data.StratifiedSplitter(keys, [0, 0, 1, 1], mode="categorical", seed=3).train_validation_split(
-        validation_size=1
-    )
-    tensors = {"x": np.arange(8, dtype=np.float32).reshape(4, 2)}
-
-    assert not hasattr(thor.data, "make_numpy_dict_splits")
-    partitions = thor.data.make_numpy_dict_splits_DEPRECATED(tensors, keys=keys, split=split)
-
-    assert isinstance(partitions, thor.data.NumpyDictSplit)
-    assert partitions.test is None
-    assert partitions.train["x"].shape[0] == len(split.train_keys)
-    assert partitions.validate["x"].shape[0] == len(split.validate_keys)
-    assert not np.shares_memory(partitions.train["x"], tensors["x"])
-    assert not np.shares_memory(partitions.validate["x"], tensors["x"])
+def test_materialized_numpy_split_helpers_are_removed():
+    assert not hasattr(thor.data, "NumpyDictSplit")
+    assert not hasattr(thor.data, "NumpyDictSplitIndices")
+    assert not hasattr(thor.data, "make_numpy_dict_split_indices")
+    assert not hasattr(thor.data, "make_numpy_dict_splits_DEPRECATED")

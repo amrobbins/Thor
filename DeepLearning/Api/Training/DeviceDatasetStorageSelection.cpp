@@ -1,7 +1,7 @@
 #include "DeepLearning/Api/Training/DeviceDatasetStorageSelection.h"
 
 #include "DeepLearning/Api/Data/NamedDataset.h"
-#include "DeepLearning/Api/Data/LocalNamedDataset.h"
+#include "DeepLearning/Api/Data/FileDataset.h"
 #include "DeepLearning/Api/Data/TrainingData.h"
 #include "DeepLearning/Api/Loaders/DeviceResidentNamedBatchSession.h"
 #include "DeepLearning/Api/Loaders/DeviceResidentWindowedNamedBatchSession.h"
@@ -38,9 +38,9 @@ uint64_t checkedMul(uint64_t left, uint64_t right, const char *context) {
     return left * right;
 }
 
-uint64_t directBytesPerExample(const LocalNamedExampleLayout &layout) {
+uint64_t directBytesPerExample(const DatasetLayout &layout) {
     uint64_t bytes = 0;
-    for (const LocalNamedExampleLayout::TensorSpec &spec : layout.tensors()) {
+    for (const DatasetLayout::TensorSpec &spec : layout.tensors()) {
         bytes = checkedAdd(
             bytes,
             spec.numBytes,
@@ -49,9 +49,9 @@ uint64_t directBytesPerExample(const LocalNamedExampleLayout &layout) {
     return bytes;
 }
 
-uint64_t windowedBytesPerExample(const LocalNamedExampleLayout &layout) {
+uint64_t windowedBytesPerExample(const DatasetLayout &layout) {
     uint64_t bytes = 0;
-    for (const LocalNamedExampleLayout::WindowedTensorSpec &spec :
+    for (const DatasetLayout::WindowedTensorSpec &spec :
          layout.windowedTensors()) {
         bytes = checkedAdd(
             bytes,
@@ -67,7 +67,7 @@ uint64_t windowedBytesPerExample(const LocalNamedExampleLayout &layout) {
     return bytes;
 }
 
-uint64_t allBytesPerExample(const LocalNamedExampleLayout &layout) {
+uint64_t allBytesPerExample(const DatasetLayout &layout) {
     return checkedAdd(
         directBytesPerExample(layout),
         windowedBytesPerExample(layout),
@@ -155,9 +155,9 @@ uint64_t estimateDeviceResidentWindowedDatasetRequiredBytes(
 }
 
 std::set<std::string> windowedTensorNames(
-    const LocalNamedExampleLayout &layout) {
+    const DatasetLayout &layout) {
     std::set<std::string> names;
-    for (const LocalNamedExampleLayout::WindowedTensorSpec &spec :
+    for (const DatasetLayout::WindowedTensorSpec &spec :
          layout.windowedTensors()) {
         names.insert(spec.name);
         if (spec.maskName.has_value()) {
@@ -408,7 +408,7 @@ uint64_t estimateDeviceResidentNamedDatasetRequiredBytes(
 }
 
 DatasetMaterializationDescription describeDatasetMaterialization(
-    const LocalNamedDataset& dataset) {
+    const FileDataset& dataset) {
     return DatasetMaterializationDescription(
         dataset.getPath(),
         dataset.getId(),
@@ -419,8 +419,8 @@ DatasetMaterializationDescription describeDatasetMaterialization(
 
 DatasetMaterializationDescription describeDatasetMaterialization(
     const TrainingData& trainingData) {
-    std::shared_ptr<const LocalNamedDataset> localDataset =
-        std::dynamic_pointer_cast<const LocalNamedDataset>(trainingData.getDataset());
+    std::shared_ptr<const FileDataset> localDataset =
+        std::dynamic_pointer_cast<const FileDataset>(trainingData.getDataset());
     if (localDataset == nullptr) {
         throw std::runtime_error(
             "TrainingData dataset backend does not support device materialization.");

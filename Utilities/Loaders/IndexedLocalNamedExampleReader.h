@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Utilities/Loaders/LocalNamedExampleLayout.h"
+#include "DeepLearning/Api/Data/DatasetLayout.h"
 
 #include <cstdint>
 #include <filesystem>
@@ -86,7 +86,7 @@ class IndexedLocalNamedExampleReader : public std::enable_shared_from_this<Index
 
     static std::shared_ptr<IndexedLocalNamedExampleReader> openDataset(const std::filesystem::path &datasetPath);
     static std::shared_ptr<IndexedLocalNamedExampleReader> openDataset(const std::filesystem::path &datasetPath,
-                                                                       const LocalNamedExampleLayout &requestedLayout);
+                                                                       const DatasetLayout &requestedLayout);
     ~IndexedLocalNamedExampleReader();
 
     IndexedLocalNamedExampleReader(const IndexedLocalNamedExampleReader &) = delete;
@@ -96,7 +96,7 @@ class IndexedLocalNamedExampleReader : public std::enable_shared_from_this<Index
 
     std::unique_ptr<Session> createSession(uint64_t queueDepth);
 
-    [[nodiscard]] const LocalNamedExampleLayout &getLayout() const;
+    [[nodiscard]] const DatasetLayout &getLayout() const;
     [[nodiscard]] uint64_t getNumExamples() const;
     [[nodiscard]] uint64_t getRecordSizeBytes() const;
     [[nodiscard]] uint64_t getTensorCount() const;

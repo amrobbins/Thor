@@ -30,6 +30,16 @@ class InMemoryNamedDataset final : public NamedDataset {
         return schema.getField(name);
     }
 
+   protected:
+    std::shared_ptr<BatchSession> openBatchSession(
+        const DatasetSplitManifest &,
+        const BatchPolicy &,
+        const DatasetAccessPolicy &,
+        uint64_t,
+        const std::set<DatasetFieldId> &) const override {
+        return nullptr;
+    }
+
    private:
     DatasetId id;
     DatasetSchema schema;
