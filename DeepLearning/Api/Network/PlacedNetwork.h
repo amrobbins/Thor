@@ -10,9 +10,14 @@
 #include "Utilities/TarFile/TarWriter.h"
 
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
+
+namespace ThorImplementation {
+class DeviceStartupGuard;
+}
 
 namespace Thor {
 
@@ -163,6 +168,14 @@ class PlacedNetwork {
 
     bool hasNetworkInput(const std::string& name);
     std::vector<std::string> getNetworkInputNames(uint64_t stampIndex = 0);
+
+   private:
+    friend class ThorImplementation::DeviceStartupGuard;
+
+    // Opaque implementation-owned lifetime token. It is reset only after this
+    // placement has released its GPU tensors so waiting model startups observe
+    // the actual memory-release boundary.
+    std::shared_ptr<void> deviceModelResidencyLease = nullptr;
 
    protected:
     std::string networkName;

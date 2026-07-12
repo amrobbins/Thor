@@ -4,15 +4,21 @@
 
 #include <chrono>
 #include <future>
+#include <memory>
 #include <optional>
+#include <thread>
+#include <vector>
 
 namespace {
 
 using ThorImplementation::DEVICE_STARTUP_SAFETY_RESERVE_BYTES;
 using ThorImplementation::DeviceStartupGuard;
+using ThorImplementation::DeviceModelResidencyLease;
+using ThorImplementation::DeviceStartupInsufficientMemoryError;
 using ThorImplementation::DeviceStartupSafetyReserveError;
 using ThorImplementation::acquireDeviceStartupGuard;
 using ThorImplementation::enforceDeviceStartupSafetyReserve;
+using ThorImplementation::isDeviceStartupMemoryFailure;
 
 TEST(DeviceStartupCoordinatorTest, SerializesStartupOnTheSameDevice) {
     std::optional<DeviceStartupGuard> first(
@@ -113,6 +119,110 @@ TEST(DeviceStartupCoordinatorTest, GuardReleasesOnScopeExit) {
 
     DeviceStartupGuard next = acquireDeviceStartupGuard(7);
     EXPECT_TRUE(next.ownsLock());
+}
+
+
+TEST(DeviceStartupCoordinatorTest, TracksLoadedModelsUntilResidencyLeaseIsReleased) {
+    DeviceStartupGuard first = acquireDeviceStartupGuard(10);
+    std::shared_ptr<DeviceModelResidencyLease> model =
+        first.completeAndTrackModel(DEVICE_STARTUP_SAFETY_RESERVE_BYTES);
+
+    DeviceStartupGuard waiting = acquireDeviceStartupGuard(10);
+    EXPECT_EQ(waiting.getLoadedModelCount(), 1u);
+
+    std::future<void> release = std::async(
+        std::launch::async,
+        [model = std::move(model)]() mutable {
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+            model.reset();
+        });
+
+    waiting.waitForModelRelease();
+    EXPECT_EQ(waiting.getLoadedModelCount(), 0u);
+    waiting.complete(DEVICE_STARTUP_SAFETY_RESERVE_BYTES);
+    release.get();
+}
+
+TEST(DeviceStartupCoordinatorTest, WaitingStartupRetainsFifoTurnAcrossModelRelease) {
+    DeviceStartupGuard first = acquireDeviceStartupGuard(11);
+    std::shared_ptr<DeviceModelResidencyLease> loaded =
+        first.completeAndTrackModel(DEVICE_STARTUP_SAFETY_RESERVE_BYTES);
+
+    DeviceStartupGuard fourth = acquireDeviceStartupGuard(11);
+
+    std::promise<void> fifthAcquiredPromise;
+    std::shared_future<void> fifthAcquired =
+        fifthAcquiredPromise.get_future().share();
+    std::future<void> fifth = std::async(std::launch::async, [&]() {
+        DeviceStartupGuard guard = acquireDeviceStartupGuard(11);
+        fifthAcquiredPromise.set_value();
+    });
+
+    EXPECT_EQ(fifthAcquired.wait_for(std::chrono::milliseconds(50)),
+              std::future_status::timeout);
+
+    std::future<void> release = std::async(
+        std::launch::async,
+        [loaded = std::move(loaded)]() mutable {
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+            loaded.reset();
+        });
+    fourth.waitForModelRelease();
+    release.get();
+
+    // The fourth startup woke because memory was freed, but still owns the FIFO
+    // startup turn. The fifth cannot attempt placement until the fourth either
+    // succeeds or terminates.
+    EXPECT_EQ(fifthAcquired.wait_for(std::chrono::milliseconds(50)),
+              std::future_status::timeout);
+
+    fourth.complete(DEVICE_STARTUP_SAFETY_RESERVE_BYTES);
+    EXPECT_EQ(fifthAcquired.wait_for(std::chrono::seconds(2)),
+              std::future_status::ready);
+    fifth.get();
+}
+
+TEST(DeviceStartupCoordinatorTest, CanRetryAfterEachLoadedModelRelease) {
+    std::vector<std::shared_ptr<DeviceModelResidencyLease>> loaded;
+    for (int i = 0; i < 3; ++i) {
+        DeviceStartupGuard guard = acquireDeviceStartupGuard(12);
+        loaded.push_back(
+            guard.completeAndTrackModel(
+                DEVICE_STARTUP_SAFETY_RESERVE_BYTES));
+    }
+
+    DeviceStartupGuard fourth = acquireDeviceStartupGuard(12);
+    EXPECT_EQ(fourth.getLoadedModelCount(), 3u);
+
+    for (uint64_t expectedRemaining : {2u, 1u, 0u}) {
+        std::shared_ptr<DeviceModelResidencyLease> released =
+            std::move(loaded.back());
+        loaded.pop_back();
+        std::future<void> release = std::async(
+            std::launch::async,
+            [released = std::move(released)]() mutable {
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(10));
+                released.reset();
+            });
+        fourth.waitForModelRelease();
+        EXPECT_EQ(fourth.getLoadedModelCount(), expectedRemaining);
+        release.get();
+    }
+
+    fourth.complete(DEVICE_STARTUP_SAFETY_RESERVE_BYTES);
+}
+
+TEST(DeviceStartupCoordinatorTest, ClassifiesOnlyMemoryPressureAsRetryable) {
+    EXPECT_TRUE(isDeviceStartupMemoryFailure(std::make_exception_ptr(
+        DeviceStartupInsufficientMemoryError("device startup out of memory"))));
+    EXPECT_TRUE(isDeviceStartupMemoryFailure(std::make_exception_ptr(
+        std::runtime_error("cudaErrorMemoryAllocation while allocating tensor"))));
+    EXPECT_FALSE(isDeviceStartupMemoryFailure(std::make_exception_ptr(
+        std::runtime_error("invalid dataset schema"))));
+    EXPECT_FALSE(isDeviceStartupMemoryFailure(std::make_exception_ptr(
+        std::runtime_error(
+            "device dataset materialization failed required_unused_bytes=1073741824"))));
 }
 
 }  // namespace

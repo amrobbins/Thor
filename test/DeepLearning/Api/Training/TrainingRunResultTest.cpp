@@ -73,10 +73,15 @@ TEST(TrainingRunResult, ClassifiesOutOfMemoryExceptions) {
         TrainingRunResult::fromException("fold_4", makeExceptionPtr(std::runtime_error("CUDA_ERROR_OUT_OF_MEMORY during placement")));
     TrainingRunResult networkMessage =
         TrainingRunResult::fromException("fold_5", makeExceptionPtr(std::logic_error("Error when stamping network, error: GPU OUT OF MEMORY")));
+    TrainingRunResult reserveMessage = TrainingRunResult::fromException(
+        "fold_6",
+        makeExceptionPtr(std::runtime_error(
+            "Device startup out of memory: required GPU memory safety reserve required_unused_bytes=1073741824")));
 
     EXPECT_EQ(badAlloc.status, TrainingRunStatus::OUT_OF_MEMORY);
     EXPECT_EQ(cudaMessage.status, TrainingRunStatus::OUT_OF_MEMORY);
     EXPECT_EQ(networkMessage.status, TrainingRunStatus::OUT_OF_MEMORY);
+    EXPECT_EQ(reserveMessage.status, TrainingRunStatus::OUT_OF_MEMORY);
 }
 
 TEST(TrainingRunResult, ClassifiesOrdinaryExceptionAsFailed) {

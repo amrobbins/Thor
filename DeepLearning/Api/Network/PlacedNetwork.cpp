@@ -462,6 +462,11 @@ PlacedNetwork::~PlacedNetwork() {
         stampedNetworks[i].clear();
     }
     stampedNetworks.clear();
+
+    // Notify the startup coordinator only after all placement-owned GPU tensors
+    // have actually been destroyed. A waiting model may retry immediately after
+    // this reset returns.
+    deviceModelResidencyLease.reset();
 }
 
 std::vector<Event> PlacedNetwork::getSynchronizeEvents() const {

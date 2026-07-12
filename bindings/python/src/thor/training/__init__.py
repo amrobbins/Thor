@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from .._thor.training import DatasetInputBindings
 from .._thor.training import DeviceDatasetStorageReport
 from .._thor.training import EarlyCompletionPolicy

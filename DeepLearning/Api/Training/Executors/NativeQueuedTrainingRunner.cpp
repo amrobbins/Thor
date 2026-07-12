@@ -2200,6 +2200,208 @@ class NativeQueuedEpochScheduler {
     std::vector<Stream> completionStreams;
 };
 
+struct NativeQueuedStartupState {
+    std::shared_ptr<PlacedNetwork> placedNetwork;
+    ExecutableTrainingPlan plan;
+    std::shared_ptr<BatchSession> sourceSession;
+    std::shared_ptr<BatchSession> effectiveSession;
+    DeviceDatasetStorageReport deviceDatasetStorageReport;
+};
+
+void releaseFailedNativeQueuedStartupAttempt(
+    NativeQueuedStartupState& attempt) noexcept {
+    // Session leases may own resident dataset and per-session device tensors.
+    // Release them before the placed graph, then destroy the executable plan
+    // before its physical tensor references become invalid.
+    attempt.effectiveSession.reset();
+    attempt.sourceSession.reset();
+    attempt.plan = ExecutableTrainingPlan{};
+
+    if (attempt.placedNetwork != nullptr) {
+        try {
+            // State restoration can enqueue model-specific copies. Drain those
+            // before destroying the destination placement; do not synchronize
+            // unrelated models sharing the GPU.
+            attempt.placedNetwork->synchronize();
+        } catch (...) {
+            // Preserve the original startup exception. PlacedNetwork teardown is
+            // still RAII-safe and occurs while this startup retains the FIFO turn.
+        }
+        attempt.placedNetwork.reset();
+    }
+}
+
+NativeQueuedStartupState startNativeQueuedTrainingWithMemoryAdmissionRetry(
+    const TrainingRunRequest& request,
+    const NativeQueuedExecutionGraph& executionGraph,
+    bool evaluateOnly,
+    uint64_t batchSize,
+    const NativeQueuedTrainingOptions& options) {
+    constexpr int startupDeviceNum = 0;
+    ThorImplementation::DeviceStartupGuard startupGuard =
+        ThorImplementation::acquireDeviceStartupGuard(startupDeviceNum);
+
+    for (;;) {
+        request.cancellationToken.throwIfCancellationRequested();
+
+        NativeQueuedStartupState attempt;
+        attempt.sourceSession = request.batchSession;
+        attempt.effectiveSession = attempt.sourceSession;
+        attempt.deviceDatasetStorageReport = request.deviceDatasetStorageReport;
+
+        std::exception_ptr startupFailure;
+        try {
+            std::vector<Event> initDoneEvents;
+            attempt.placedNetwork = executionGraph.network->place(
+                batchSize,
+                initDoneEvents,
+                /*inferenceOnly=*/evaluateOnly);
+            THOR_THROW_IF_FALSE(attempt.placedNetwork->getNumStamps() == 1);
+            THOR_THROW_IF_FALSE(
+                attempt.placedNetwork->getStampedNetwork(0).getGpuNum() ==
+                startupDeviceNum);
+            for (Event& event : initDoneEvents) {
+                request.cancellationToken.throwIfCancellationRequested();
+                event.synchronize();
+            }
+
+            if (!evaluateOnly && request.previousPlacedNetwork != nullptr) {
+                request.cancellationToken.throwIfCancellationRequested();
+                // Copying state from a previously trained placement is a
+                // phase/replacement boundary. The retained source placement is
+                // excluded from retryable-sibling accounting below because this
+                // blocked startup itself owns that reference and cannot cause it
+                // to be released while waiting.
+                request.previousPlacedNetwork->synchronize();
+                if (executionGraph.composedFromTrainingPhases) {
+                    attempt.placedNetwork->copyMatchingTrainingStateFrom(
+                        *request.previousPlacedNetwork);
+                } else {
+                    attempt.placedNetwork->copyTrainingStateFrom(
+                        *request.previousPlacedNetwork);
+                }
+            }
+
+            if (!evaluateOnly &&
+                request.previousModelArtifactDirectory.has_value()) {
+                request.cancellationToken.throwIfCancellationRequested();
+                if (!request.previousModelNetworkName.has_value() ||
+                    request.previousModelNetworkName->empty()) {
+                    throw std::runtime_error(
+                        "Trainer artifact handoff requires "
+                        "previousModelNetworkName.");
+                }
+
+                if (executionGraph.composedFromTrainingPhases) {
+                    attempt.placedNetwork->loadMatchingTrainingStateFromArtifact(
+                        request.previousModelArtifactDirectory.value(),
+                        request.previousModelNetworkName.value());
+                } else {
+                    attempt.placedNetwork
+                        ->loadTrainingStateFromSameNetworkArtifact(
+                            request.previousModelArtifactDirectory.value(),
+                            request.previousModelNetworkName.value());
+                }
+            }
+
+            request.cancellationToken.throwIfCancellationRequested();
+            attempt.placedNetwork->preallocateOutputSlots(
+                static_cast<uint32_t>(options.maxInFlightBatches));
+
+            request.cancellationToken.throwIfCancellationRequested();
+            attempt.plan = ExecutableTrainingPlan::compile(
+                *executionGraph.trainingProgram,
+                *attempt.placedNetwork,
+                /*resolveEmptyUpdateParametersAsAllTrainable=*/!evaluateOnly);
+            ensureNativeQueuedPlanCompatible(
+                attempt.plan, *executionGraph.network, evaluateOnly);
+
+            if (!evaluateOnly && request.trainingData != nullptr) {
+                const uint64_t deviceDatasetBatchQueueDepth =
+                    std::max<uint64_t>(
+                        uint64_t{1}, options.maxInFlightBatches);
+                DeviceDatasetStorageSelection deviceDatasetSelection =
+                    selectDeviceDatasetStorageSession(
+                        attempt.sourceSession,
+                        *request.trainingData,
+                        ThorImplementation::TensorPlacement(
+                            ThorImplementation::TensorPlacement::MemDevices::GPU,
+                            attempt.placedNetwork
+                                ->getStampedNetwork(0)
+                                .getGpuNum()),
+                        deviceDatasetBatchQueueDepth);
+                attempt.effectiveSession =
+                    std::move(deviceDatasetSelection.session);
+                attempt.deviceDatasetStorageReport =
+                    std::move(deviceDatasetSelection.report);
+            }
+
+            request.cancellationToken.throwIfCancellationRequested();
+            attempt.placedNetwork->configureBatchInputPlacements(
+                resolveNetworkInputBatchPlacements(
+                    attempt.effectiveSession, attempt.plan));
+            attempt.placedNetwork->preallocateInputSlots(
+                static_cast<uint32_t>(options.maxInFlightBatches));
+
+            try {
+                startupGuard.complete(*attempt.placedNetwork);
+            } catch (
+                const ThorImplementation::DeviceStartupSafetyReserveError&) {
+                const bool canFallbackFromDeviceDataset =
+                    !evaluateOnly &&
+                    request.trainingData != nullptr &&
+                    request.trainingData->getAccessPolicy().deviceStorage ==
+                        DeviceDatasetStorage::BEST_EFFORT &&
+                    attempt.deviceDatasetStorageReport.used &&
+                    attempt.effectiveSession != attempt.sourceSession;
+                if (!canFallbackFromDeviceDataset) {
+                    throw;
+                }
+
+                attempt.effectiveSession = attempt.sourceSession;
+                attempt.deviceDatasetStorageReport.used = false;
+                attempt.deviceDatasetStorageReport.reason =
+                    "startup_safety_reserve_fallback";
+
+                attempt.placedNetwork->configureBatchInputPlacements(
+                    resolveNetworkInputBatchPlacements(
+                        attempt.effectiveSession, attempt.plan));
+                attempt.placedNetwork->preallocateInputSlots(
+                    static_cast<uint32_t>(options.maxInFlightBatches));
+                startupGuard.complete(*attempt.placedNetwork);
+            }
+
+            return attempt;
+        } catch (...) {
+            startupFailure = std::current_exception();
+        }
+
+        // Destroy every allocation from this failed attempt while retaining the
+        // FIFO startup turn. A resident sibling cannot be released concurrently
+        // until waitForModelRelease() atomically releases the coordinator mutex.
+        releaseFailedNativeQueuedStartupAttempt(attempt);
+
+        if (!ThorImplementation::isDeviceStartupMemoryFailure(startupFailure)) {
+            std::rethrow_exception(startupFailure);
+        }
+
+        const Thor::PlacedNetwork* retainedPlacement =
+            request.previousPlacedNetwork.get();
+        if (startupGuard.getRetryableLoadedModelCount(retainedPlacement) == 0) {
+            // No independently running model can free more memory. This model is
+            // genuinely too large for the currently empty admissible GPU state.
+            std::rethrow_exception(startupFailure);
+        }
+
+        startupGuard.waitForModelRelease(
+            [&]() {
+                request.cancellationToken.throwIfCancellationRequested();
+            },
+            retainedPlacement);
+        // Keep the same FIFO turn and retry from a completely fresh placement.
+    }
+}
+
 }  // namespace
 
 void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver& observer, const NativeQueuedTrainingOptions& options) {
@@ -2233,135 +2435,22 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
 
     NativeQueuedExecutionGraph executionGraph = resolveNativeQueuedExecutionGraph(request, requestedTrainingProgram, evaluateOnly);
     std::shared_ptr<Network> executionNetwork = executionGraph.network;
-    std::shared_ptr<TrainingProgram> trainingProgram = executionGraph.trainingProgram;
-
     if (evaluateOnly && request.evaluationPhase == TrainingEventPhase::UNKNOWN) {
         throw std::runtime_error("Trainer evaluation requires a concrete evaluation phase.");
     }
 
     const uint64_t batchSize = request.batchSession->getBatchSize();
 
-    // Network::place() currently targets CUDA device 0. Hold the per-device
-    // startup guard across every persistent allocation made for this run. Once
-    // released, the next model may start while this one is already training,
-    // but it will observe all of this model's steady-state allocations in
-    // cudaMemGetInfo().
-    constexpr int startupDeviceNum = 0;
-    ThorImplementation::DeviceStartupGuard startupGuard =
-        ThorImplementation::acquireDeviceStartupGuard(startupDeviceNum);
-
-    std::vector<Event> initDoneEvents;
-    request.cancellationToken.throwIfCancellationRequested();
-    std::shared_ptr<PlacedNetwork> placedNetwork = executionNetwork->place(batchSize, initDoneEvents, /*inferenceOnly=*/evaluateOnly);
-    THOR_THROW_IF_FALSE(placedNetwork->getNumStamps() == 1);
-    THOR_THROW_IF_FALSE(
-        placedNetwork->getStampedNetwork(0).getGpuNum() == startupDeviceNum);
-    for (size_t i = 0; i < initDoneEvents.size(); ++i) {
-        request.cancellationToken.throwIfCancellationRequested();
-        initDoneEvents[i].synchronize();
-    }
-
-    if (!evaluateOnly && request.previousPlacedNetwork != nullptr) {
-        request.cancellationToken.throwIfCancellationRequested();
-        // Copying state from a previously trained placement is a phase/replacement
-        // boundary. Ensure the source placement's final gradient-update work is
-        // visible before enqueueing parameter and optimizer-state copies, without
-        // draining unrelated models that share its CUDA device.
-        request.previousPlacedNetwork->synchronize();
-        if (executionGraph.composedFromTrainingPhases) {
-            placedNetwork->copyMatchingTrainingStateFrom(*request.previousPlacedNetwork);
-        } else {
-            placedNetwork->copyTrainingStateFrom(*request.previousPlacedNetwork);
-        }
-    }
-
-    if (!evaluateOnly && request.previousModelArtifactDirectory.has_value()) {
-        request.cancellationToken.throwIfCancellationRequested();
-        if (!request.previousModelNetworkName.has_value() || request.previousModelNetworkName->empty()) {
-            throw std::runtime_error("Trainer artifact handoff requires previousModelNetworkName.");
-        }
-
-        // Load tensors directly from the saved artifact into the fresh placement
-        // instead of placing the saved source network.  Non-composed repeated
-        // fits are the same API network and therefore use exact API layer ids.
-        // Composed phase graphs are fresh API networks, so they must prove
-        // identity with clone-source keys and never fall back to order/type/name.
-        if (executionGraph.composedFromTrainingPhases) {
-            placedNetwork->loadMatchingTrainingStateFromArtifact(request.previousModelArtifactDirectory.value(),
-                                                                 request.previousModelNetworkName.value());
-        } else {
-            placedNetwork->loadTrainingStateFromSameNetworkArtifact(request.previousModelArtifactDirectory.value(),
-                                                                    request.previousModelNetworkName.value());
-        }
-    }
-
-    request.cancellationToken.throwIfCancellationRequested();
-    // Output slots are always network-owned, so allocate them before querying
-    // free memory for device-dataset materialization. Input slots depend on the
-    // effective session and are configured below: same-GPU device-dataset inputs
-    // copy directly into NetworkInput::featureOutput and must not allocate a
-    // duplicate max_in_flight staging ring.
-    placedNetwork->preallocateOutputSlots(static_cast<uint32_t>(options.maxInFlightBatches));
-
-    request.cancellationToken.throwIfCancellationRequested();
-    ExecutableTrainingPlan plan =
-        ExecutableTrainingPlan::compile(*trainingProgram, *placedNetwork, /*resolveEmptyUpdateParametersAsAllTrainable=*/!evaluateOnly);
-    ensureNativeQueuedPlanCompatible(plan, *executionNetwork, evaluateOnly);
-
-    std::shared_ptr<BatchSession> sourceSession = request.batchSession;
-    std::shared_ptr<BatchSession> effectiveSession = sourceSession;
-    DeviceDatasetStorageReport deviceDatasetStorageReport = request.deviceDatasetStorageReport;
-    if (!evaluateOnly && request.trainingData != nullptr) {
-        const uint64_t deviceDatasetBatchQueueDepth =
-            std::max<uint64_t>(uint64_t{1}, options.maxInFlightBatches);
-        DeviceDatasetStorageSelection deviceDatasetSelection =
-            selectDeviceDatasetStorageSession(
-                sourceSession,
-                *request.trainingData,
-                ThorImplementation::TensorPlacement(
-                    ThorImplementation::TensorPlacement::MemDevices::GPU,
-                    placedNetwork->getStampedNetwork(0).getGpuNum()),
-                deviceDatasetBatchQueueDepth);
-        effectiveSession = std::move(deviceDatasetSelection.session);
-        deviceDatasetStorageReport = std::move(deviceDatasetSelection.report);
-    }
-
-    request.cancellationToken.throwIfCancellationRequested();
-    placedNetwork->configureBatchInputPlacements(resolveNetworkInputBatchPlacements(effectiveSession, plan));
-    // Host/cross-device inputs retain one staging tensor per queue slot. Fully
-    // device-resident inputs allocate zero NetworkInput slots; queue depth is
-    // provided by the device session's reusable batch tensor sets instead.
-    placedNetwork->preallocateInputSlots(static_cast<uint32_t>(options.maxInFlightBatches));
-
-    // All known persistent model, output, dataset-session, and input staging
-    // allocations now exist. Keep a small reserve for lazy/runtime allocations
-    // before allowing another model to begin startup on this GPU. If a
-    // BEST_EFFORT device dataset caused the final reserve check to fail, release
-    // it and finish startup with the original source session instead.
-    try {
-        startupGuard.complete();
-    } catch (const ThorImplementation::DeviceStartupSafetyReserveError&) {
-        const bool canFallbackFromDeviceDataset =
-            !evaluateOnly &&
-            request.trainingData != nullptr &&
-            request.trainingData->getAccessPolicy().deviceStorage ==
-                DeviceDatasetStorage::BEST_EFFORT &&
-            deviceDatasetStorageReport.used &&
-            effectiveSession != sourceSession;
-        if (!canFallbackFromDeviceDataset) {
-            throw;
-        }
-
-        effectiveSession = sourceSession;
-        deviceDatasetStorageReport.used = false;
-        deviceDatasetStorageReport.reason = "startup_safety_reserve_fallback";
-
-        placedNetwork->configureBatchInputPlacements(
-            resolveNetworkInputBatchPlacements(effectiveSession, plan));
-        placedNetwork->preallocateInputSlots(
-            static_cast<uint32_t>(options.maxInFlightBatches));
-        startupGuard.complete();
-    }
+    NativeQueuedStartupState startup =
+        startNativeQueuedTrainingWithMemoryAdmissionRetry(
+            request, executionGraph, evaluateOnly, batchSize, options);
+    std::shared_ptr<PlacedNetwork> placedNetwork =
+        std::move(startup.placedNetwork);
+    ExecutableTrainingPlan plan = std::move(startup.plan);
+    std::shared_ptr<BatchSession> effectiveSession =
+        std::move(startup.effectiveSession);
+    DeviceDatasetStorageReport deviceDatasetStorageReport =
+        std::move(startup.deviceDatasetStorageReport);
 
     const bool modelSelectionEnabled = !evaluateOnly && request.checkBestModelEveryEpochs > 0;
     const std::vector<std::string> aggregateLossTensorNames = executionGraph.composedFromTrainingPhases

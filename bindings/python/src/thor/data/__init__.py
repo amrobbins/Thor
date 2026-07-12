@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from .._thor.training import AffineWindowedTensorChunk
 from .._thor.training import BatchPolicy
 from .._thor.training import BatchSession

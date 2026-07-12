@@ -55,28 +55,51 @@ std::shared_ptr<PlacedNetwork> placeInferenceNetworkWithSerializedStartup(
     ThorImplementation::DeviceStartupGuard startupGuard =
         ThorImplementation::acquireDeviceStartupGuard(startupDeviceNum);
 
-    std::vector<Event> initDoneEvents;
-    std::shared_ptr<PlacedNetwork> placed = network.place(
-        batchSize,
-        initDoneEvents,
-        /*inferenceOnly=*/true,
-        /*forcedDevices=*/{},
-        /*forcedNumStampsPerGpu=*/0,
-        networkOutputsOnGpu);
-    THOR_THROW_IF_FALSE(placed->getNumStamps() == 1);
-    THOR_THROW_IF_FALSE(
-        placed->getStampedNetwork(0).getGpuNum() == startupDeviceNum);
-    for (Event& event : initDoneEvents) {
-        event.synchronize();
-    }
+    for (;;) {
+        std::shared_ptr<PlacedNetwork> placed;
+        std::exception_ptr startupFailure;
+        try {
+            std::vector<Event> initDoneEvents;
+            placed = network.place(
+                batchSize,
+                initDoneEvents,
+                /*inferenceOnly=*/true,
+                /*forcedDevices=*/{},
+                /*forcedNumStampsPerGpu=*/0,
+                networkOutputsOnGpu);
+            THOR_THROW_IF_FALSE(placed->getNumStamps() == 1);
+            THOR_THROW_IF_FALSE(
+                placed->getStampedNetwork(0).getGpuNum() == startupDeviceNum);
+            for (Event& event : initDoneEvents) {
+                event.synchronize();
+            }
 
-    // Synchronous evaluator inference otherwise allocates NetworkInput slot zero
-    // lazily on the first batch. Make that persistent allocation part of the
-    // serialized startup transaction as well.
-    placed->preallocateOutputSlots(1);
-    placed->preallocateInputSlots(1);
-    startupGuard.complete();
-    return placed;
+            // Synchronous evaluator inference otherwise allocates NetworkInput
+            // slot zero lazily on the first batch. Make that allocation part of
+            // the serialized and memory-admitted startup transaction.
+            placed->preallocateOutputSlots(1);
+            placed->preallocateInputSlots(1);
+            startupGuard.complete(*placed);
+            return placed;
+        } catch (...) {
+            startupFailure = std::current_exception();
+        }
+
+        if (placed != nullptr) {
+            try {
+                placed->synchronize();
+            } catch (...) {
+            }
+            placed.reset();
+        }
+
+        if (!ThorImplementation::isDeviceStartupMemoryFailure(
+                startupFailure) ||
+            startupGuard.getRetryableLoadedModelCount() == 0) {
+            std::rethrow_exception(startupFailure);
+        }
+        startupGuard.waitForModelRelease();
+    }
 }
 
 std::string normalizedOutputPathForCollisionCheck(const std::string& path) {
