@@ -1295,8 +1295,8 @@ TEST(IndexedNamedBatchSessionTest, SupportsEmptyValidateAndTestIndices) {
     EXPECT_EQ(loader.getNumBatchesPerEpoch(ExampleType::TEST), 0);
 
     uint64_t batchNum = 0;
-    EXPECT_THROW(loader.leaseBatch(ExampleType::VALIDATE, batchNum), std::runtime_error);
-    EXPECT_THROW(loader.leaseBatch(ExampleType::TEST, batchNum), std::runtime_error);
+    EXPECT_THROW(static_cast<void>(loader.leaseBatch(ExampleType::VALIDATE, batchNum)), std::runtime_error);
+    EXPECT_THROW(static_cast<void>(loader.leaseBatch(ExampleType::TEST, batchNum)), std::runtime_error);
 
     BatchLease trainBatchLease = loader.leaseBatch(ExampleType::TRAIN, batchNum);
 
@@ -1336,7 +1336,7 @@ TEST(IndexedNamedBatchSessionTest, SupportsEmptyTrainForEvaluationOnlyRecipes) {
     EXPECT_EQ(session.getNumExamples(ExampleType::TEST), 2);
 
     uint64_t batchNum = 0;
-    EXPECT_THROW(session.leaseBatch(ExampleType::TRAIN, batchNum), std::runtime_error);
+    EXPECT_THROW(static_cast<void>(session.leaseBatch(ExampleType::TRAIN, batchNum)), std::runtime_error);
     BatchLease testLease = session.leaseBatch(ExampleType::TEST, batchNum);
     expectTensorValues(testLease.get().getTensor("seasonality_inputs"), {0.0f, 1.0f, 80.0f, 81.0f});
 

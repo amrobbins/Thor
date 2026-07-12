@@ -1,6 +1,7 @@
 #include "Split.h"
 
 #include "Utilities/Common/ScopedGpu.h"
+#include "Utilities/Expression/CudaHelpers.h"
 
 __device__ __forceinline__ void computeSourceIndex(long sourceFlatIndex,
                                                    long sourceIndex[],
@@ -116,10 +117,5 @@ void launchSplit(void *dest[],
                                                                           axisElementsPerDestArray,
                                                                           stridePerSourceDimension,
                                                                           stridePerDestDimension);
-    cudaError_t cudaStatus = cudaGetLastError();
-    if (cudaStatus != cudaSuccess) {
-        printf("%s launch failed: %s\n", __func__, cudaGetErrorString(cudaStatus));
-        fflush(stdout);
-    }
-    THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+    CUDA_CHECK(cudaGetLastError());
 }

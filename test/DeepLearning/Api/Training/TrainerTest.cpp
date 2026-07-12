@@ -303,7 +303,7 @@ TEST(Trainer, TrainingDataOpensFreshSessionForEveryFit) {
 
 TEST(Trainer, BuilderRequiresTrainingData) {
     auto network = std::make_shared<Network>("trainer-requires-data");
-    EXPECT_THROW((Trainer::Builder().network(network).build()), std::runtime_error);
+    EXPECT_THROW(static_cast<void>(Trainer::Builder().network(network).build()), std::runtime_error);
 }
 
 TEST(Trainer, FitRequiresNonEmptyTrainPartition) {
@@ -376,7 +376,7 @@ TEST(Trainer, ExactNameAutobindingIsDefaultAndValidationIsEarly) {
         .dimensions({1})
         .dataType(ThorImplementation::DataType::FP32)
         .build();
-    EXPECT_NO_THROW((Trainer::Builder().network(exactNetwork).data(data).build()));
+    EXPECT_NO_THROW(static_cast<void>(Trainer::Builder().network(exactNetwork).data(data).build()));
 
     auto renamedNetwork = std::make_shared<Network>("trainer-missing-exact-binding");
     NetworkInput::Builder()
@@ -385,7 +385,7 @@ TEST(Trainer, ExactNameAutobindingIsDefaultAndValidationIsEarly) {
         .dimensions({1})
         .dataType(ThorImplementation::DataType::FP32)
         .build();
-    EXPECT_THROW((Trainer::Builder().network(renamedNetwork).data(data).build()), std::runtime_error);
+    EXPECT_THROW(static_cast<void>(Trainer::Builder().network(renamedNetwork).data(data).build()), std::runtime_error);
 
     auto dtypeNetwork = std::make_shared<Network>("trainer-dtype-binding");
     NetworkInput dtypeInput = NetworkInput::Builder()
@@ -396,11 +396,11 @@ TEST(Trainer, ExactNameAutobindingIsDefaultAndValidationIsEarly) {
                                   .build();
     DatasetInputBindings dtypeBindings;
     dtypeBindings.bind(dtypeInput, data->getDataset()->getField("features"));
-    EXPECT_THROW((Trainer::Builder()
-                      .network(dtypeNetwork)
-                      .data(data)
-                      .inputBindings(dtypeBindings)
-                      .build()),
+    EXPECT_THROW(static_cast<void>(Trainer::Builder()
+                                      .network(dtypeNetwork)
+                                      .data(data)
+                                      .inputBindings(dtypeBindings)
+                                      .build()),
                  std::runtime_error);
 
     std::filesystem::remove_all(path);
@@ -883,11 +883,11 @@ TEST(Trainer, RejectsStandaloneNetworkAlongsidePhaseBackedProgram) {
         "step", std::vector<std::shared_ptr<TrainingPhase>>{phase}, nullptr, std::vector<ParameterReference>{});
     auto program = std::make_shared<TrainingProgram>(std::vector<std::shared_ptr<TrainingStep>>{step});
 
-    EXPECT_THROW((Trainer::Builder()
-                      .network(network)
-                      .data(makeFakeTrainingData())
-                      .trainingProgram(program)
-                      .build()),
+    EXPECT_THROW(static_cast<void>(Trainer::Builder()
+                                      .network(network)
+                                      .data(makeFakeTrainingData())
+                                      .trainingProgram(program)
+                                      .build()),
                  std::runtime_error);
 }
 

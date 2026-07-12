@@ -1,6 +1,7 @@
 #include "Concatenate.h"
 
 #include "Utilities/Common/ScopedGpu.h"
+#include "Utilities/Expression/CudaHelpers.h"
 
 __device__ __forceinline__ void computeDestIndex(long destFlatIndex, long destIndex[], int numDimensions, long stridePerDestDimension[]) {
     for (int i = 0; i < numDimensions - 1; ++i) {
@@ -114,10 +115,5 @@ void launchConcatenate(void *dest,
                                                                                 axisElementsPerSourceArray,
                                                                                 stridePerDestDimension,
                                                                                 stridePerSourceDimension);
-    cudaError_t cudaStatus = cudaGetLastError();
-    if (cudaStatus != cudaSuccess) {
-        printf("%s launch failed: %s\n", __func__, cudaGetErrorString(cudaStatus));
-        fflush(stdout);
-    }
-    THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+    CUDA_CHECK(cudaGetLastError());
 }

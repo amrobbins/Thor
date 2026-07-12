@@ -256,6 +256,10 @@ class StampedNetwork {
     uint64_t floatingPointOperationsPerExampleForward;
     uint64_t floatingPointOperationsPerExampleBackward;
 
+   private:
+    void clearImpl(bool propagateCleanupFailure);
+    void clearNoThrow() noexcept;
+
     friend class Thor::Network;
     friend class Thor::PlacedNetwork;
 };

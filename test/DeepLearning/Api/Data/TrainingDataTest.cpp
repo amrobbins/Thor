@@ -132,7 +132,7 @@ TEST(TrainingData, BatchLeaseReturnsBuffersAndCancellationIsSessionLocal) {
 
     cancelled->cancel();
     uint64_t cancelledBatchNum = 0;
-    EXPECT_THROW(cancelled->leaseBatch(ExampleType::TRAIN, cancelledBatchNum), std::runtime_error);
+    EXPECT_THROW(static_cast<void>(cancelled->leaseBatch(ExampleType::TRAIN, cancelledBatchNum)), std::runtime_error);
 
     uint64_t survivorBatchNum = 0;
     BatchLease batchLease = survivor->leaseBatch(ExampleType::TRAIN, survivorBatchNum);

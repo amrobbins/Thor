@@ -237,8 +237,12 @@ def _regression_with_context_one_batch_data():
         "labels": y,
     }
     return make_numpy_training_data_from_splits(
-        {name: value.copy() for name, value in tensors.items()},
-        {name: value.copy() for name, value in tensors.items()},
+        {
+            name: value.copy() for name, value in tensors.items()
+        },
+        {
+            name: value.copy() for name, value in tensors.items()
+        },
         batch_size=4,
         randomize_train=False,
         dataset_name="training_runs_regression_with_context_one_batch",
@@ -253,6 +257,7 @@ def test_numpy_training_data_supports_weakref():
     del data
     gc.collect()
     assert data_ref() is None
+
 
 def _non_finite_regression_one_batch_data(non_finite_phase: str, *, dtype=np.float32):
     x, y = _regression_arrays(dtype=dtype)
@@ -291,9 +296,15 @@ def _weighted_regression_one_batch_data(*, dtype=np.float32):
         "example_weights": example_weights,
     }
     return make_numpy_training_data_from_splits(
-        {name: value.copy() for name, value in tensors.items()},
-        {name: value.copy() for name, value in tensors.items()},
-        test={name: value.copy() for name, value in tensors.items()},
+        {
+            name: value.copy() for name, value in tensors.items()
+        },
+        {
+            name: value.copy() for name, value in tensors.items()
+        },
+        test={
+            name: value.copy() for name, value in tensors.items()
+        },
         batch_size=4,
         dataset_name="training_runs_weighted_regression_one_batch",
         randomize_train=False,
@@ -1434,8 +1445,7 @@ def test_training_runs_default_max_parallel_runs_is_three():
         (
             f"fold_{index}",
             _make_tiny_regression_trainer(f"training_runs_default_max_parallel_runs_{index}"),
-        )
-        for index in range(5)
+        ) for index in range(5)
     ]
     runs = thor.training.TrainingRuns(run_specs)
 
@@ -1448,8 +1458,7 @@ def test_training_runs_explicit_none_max_parallel_runs_means_unbounded():
         (
             f"fold_{index}",
             _make_tiny_regression_trainer(f"training_runs_none_max_parallel_runs_{index}"),
-        )
-        for index in range(5)
+        ) for index in range(5)
     ]
     runs = thor.training.TrainingRuns(run_specs, max_parallel_runs=None)
 
@@ -1463,7 +1472,9 @@ def test_training_runs_fit_accepts_reported_losses():
 
     _assert_training_runs_fit_options_parse(
         runs,
-        reports={"tiny_ensemble": ["loss"]},
+        reports={
+            "tiny_ensemble": ["loss"]
+        },
     )
 
     assert not hasattr(runs, "ensemble_metrics")
@@ -1496,7 +1507,10 @@ def test_training_runs_reported_losses_survive_label_mean_report_metric():
         "training_runs_reported_losses_with_label_mean_report")
     runs = thor.training.TrainingRuns([("fold_0", trainer, "tiny_ensemble")])
 
-    _assert_training_runs_fit_options_parse(runs, reports={"tiny_ensemble": ["loss"]})
+    _assert_training_runs_fit_options_parse(
+        runs, reports={
+            "tiny_ensemble": ["loss"]
+        })
 
 
 def test_training_runs_reported_metrics_discovers_metric_outputs_without_prediction_role():
@@ -1504,7 +1518,10 @@ def test_training_runs_reported_metrics_discovers_metric_outputs_without_predict
         "training_runs_reported_metrics_with_label_mean_report")
     runs = thor.training.TrainingRuns([("fold_0", trainer, "tiny_ensemble")])
 
-    _assert_training_runs_fit_options_parse(runs, reports={"tiny_ensemble": ["true_mean", "prediction_mean"]})
+    _assert_training_runs_fit_options_parse(
+        runs, reports={
+            "tiny_ensemble": ["true_mean", "prediction_mean"]
+        })
 
 
 def test_training_runs_reported_metrics_keeps_explicit_hidden_metric_output():
@@ -1512,7 +1529,10 @@ def test_training_runs_reported_metrics_keeps_explicit_hidden_metric_output():
         "training_runs_reported_metrics_with_hidden_metric_report")
     runs = thor.training.TrainingRuns([("fold_0", trainer, "tiny_ensemble")])
 
-    _assert_training_runs_fit_options_parse(runs, reports={"tiny_ensemble": ["hidden_mean"]})
+    _assert_training_runs_fit_options_parse(
+        runs, reports={
+            "tiny_ensemble": ["hidden_mean"]
+        })
 
 
 def test_training_runs_reported_losses_keeps_explicit_hidden_loss_output():
@@ -1520,7 +1540,10 @@ def test_training_runs_reported_losses_keeps_explicit_hidden_loss_output():
         "training_runs_reported_losses_with_hidden_loss_report")
     runs = thor.training.TrainingRuns([("fold_0", trainer, "tiny_ensemble")])
 
-    _assert_training_runs_fit_options_parse(runs, reports={"tiny_ensemble": ["hidden_loss"]})
+    _assert_training_runs_fit_options_parse(
+        runs, reports={
+            "tiny_ensemble": ["hidden_loss"]
+        })
 
 
 def _make_two_phase_trainer_with_inactive_future_reports(name: str):
@@ -2310,6 +2333,13 @@ def test_training_runs_weighted_mse_example_weights_drives_training_loss(capfd, 
 
 @pytest.mark.cuda
 @pytest.mark.training_integration
+@pytest.mark.skipif(
+    not RUN_TRAINING_INTEGRATION,
+    reason=integration_skip_reason(
+        "THOR_RUN_TRAINING_INTEGRATION",
+        description="opt-in TrainingRuns CUDA integration tests",
+    ),
+)
 def test_training_runs_weighted_cross_phase_backprop_after_phase_enable_does_not_crash():
     # Regression reproducer for the SkuForecaster stage-1 -> stage-2 crash.  The
     # important shape is:
@@ -4043,13 +4073,15 @@ def test_trainer_custom_model_selection_score_controls_saved_candidate(tmp_path)
         model_selection_score=lambda validation_loss,
         training_loss,
         epoch: float(epoch),
-    ).fit(2, check_best_model_every_epochs=1)
+    ).fit(
+        2, check_best_model_every_epochs=1)
 
     _make_tiny_regression_trainer(
         "trainer_custom_model_selection_one_epoch_reference",
         save_model_dir=one_epoch_reference_dir,
         save_model_overwrite=True,
-    ).fit(1, check_best_model_every_epochs=1)
+    ).fit(
+        1, check_best_model_every_epochs=1)
 
     _make_tiny_regression_trainer(
         "trainer_custom_model_selection_two_epoch_reference",
@@ -4058,7 +4090,8 @@ def test_trainer_custom_model_selection_score_controls_saved_candidate(tmp_path)
         model_selection_score=lambda validation_loss,
         training_loss,
         epoch: -float(epoch),
-    ).fit(2, check_best_model_every_epochs=1)
+    ).fit(
+        2, check_best_model_every_epochs=1)
 
     selected_prediction = _prediction_from_saved_tiny_regressor(
         first_epoch_dir, "trainer_custom_model_selection_first_epoch")
@@ -4119,8 +4152,6 @@ def test_trainer_fit_returns_result_and_persists_selection_metadata(tmp_path):
     assert metadata["completion_reason"] == "early_completed"
     assert metadata["check_best_model_every_epochs"] == 1
     assert metadata["first_model_selection_epoch"] == 0
-
-
 
 
 @pytest.mark.cuda
@@ -4211,6 +4242,7 @@ def test_trainer_model_selection_score_receives_named_loss_context(tmp_path):
     assert contexts
     assert contexts[-1]["epoch"] == 1
 
+
 @pytest.mark.cuda
 @pytest.mark.training_integration
 @pytest.mark.skipif(
@@ -4232,19 +4264,22 @@ def test_trainer_model_selection_score_none_skips_candidate_for_epoch(tmp_path):
         model_selection_score=lambda validation_loss,
         training_loss,
         epoch: None if epoch == 1 else float(epoch),
-    ).fit(2, check_best_model_every_epochs=1)
+    ).fit(
+        2, check_best_model_every_epochs=1)
 
     _make_tiny_regression_trainer(
         "trainer_custom_model_selection_none_one_epoch_reference",
         save_model_dir=one_epoch_reference_dir,
         save_model_overwrite=True,
-    ).fit(1, check_best_model_every_epochs=1)
+    ).fit(
+        1, check_best_model_every_epochs=1)
 
     _make_tiny_regression_trainer(
         "trainer_custom_model_selection_none_two_epoch_reference",
         save_model_dir=two_epoch_reference_dir,
         save_model_overwrite=True,
-    ).fit(2, check_best_model_every_epochs=1)
+    ).fit(
+        2, check_best_model_every_epochs=1)
 
     assert result.status == "completed"
     assert result.result == "completed"
@@ -4408,7 +4443,10 @@ def test_trainer_first_model_selection_epoch_is_phase_local_across_fit_calls(tmp
 def test_training_runs_first_model_selection_epoch_is_phase_local_across_fit_calls(tmp_path):
     save_dir = tmp_path / "training_runs_first_model_selection_phase_local"
     early_rule = thor.training.EarlyCompletionRule(
-        lambda current_score, best_score, current_epoch, best_epoch: current_epoch >= 3,
+        lambda current_score,
+        best_score,
+        current_epoch,
+        best_epoch: current_epoch >= 3,
         run_name="fold_0",
     )
     trainer = _make_tiny_regression_trainer(
@@ -4536,7 +4574,10 @@ def test_training_runs_early_completion_stops_early_and_saves_best_candidate(cap
     two_epoch_reference_dir = tmp_path / "two_epoch_reference"
 
     early_rule = thor.training.EarlyCompletionRule(
-        lambda current_score, best_score, current_epoch, best_epoch: current_epoch >= 2,
+        lambda current_score,
+        best_score,
+        current_epoch,
+        best_epoch: current_epoch >= 2,
         run_name="fold_0",
     )
     trainer = _make_tiny_regression_trainer(
@@ -4581,13 +4622,15 @@ def test_training_runs_early_completion_stops_early_and_saves_best_candidate(cap
         "training_runs_early_completion_one_epoch_reference",
         save_model_dir=one_epoch_reference_dir,
         save_model_overwrite=True,
-    ).fit(1, check_best_model_every_epochs=1)
+    ).fit(
+        1, check_best_model_every_epochs=1)
 
     _make_tiny_regression_trainer(
         "training_runs_early_completion_two_epoch_reference",
         save_model_dir=two_epoch_reference_dir,
         save_model_overwrite=True,
-    ).fit(2, check_best_model_every_epochs=1)
+    ).fit(
+        2, check_best_model_every_epochs=1)
 
     selected_prediction = _prediction_from_saved_tiny_regressor(
         early_dir, "training_runs_early_completion_best_candidate", artifact="best")

@@ -13,10 +13,12 @@ namespace {
 
 using ThorImplementation::DEVICE_STARTUP_SAFETY_RESERVE_BYTES;
 using ThorImplementation::DeviceStartupGuard;
+using ThorImplementation::DeviceStartupMemoryFailureDisposition;
 using ThorImplementation::DeviceModelResidencyLease;
 using ThorImplementation::DeviceStartupInsufficientMemoryError;
 using ThorImplementation::DeviceStartupSafetyReserveError;
 using ThorImplementation::acquireDeviceStartupGuard;
+using ThorImplementation::decideDeviceStartupMemoryFailureDisposition;
 using ThorImplementation::enforceDeviceStartupSafetyReserve;
 using ThorImplementation::isDeviceStartupMemoryFailure;
 
@@ -213,11 +215,34 @@ TEST(DeviceStartupCoordinatorTest, CanRetryAfterEachLoadedModelRelease) {
     fourth.complete(DEVICE_STARTUP_SAFETY_RESERVE_BYTES);
 }
 
+TEST(DeviceStartupCoordinatorTest, ChoosesWaitThenOneCleanEmptyRetryThenFailure) {
+    EXPECT_EQ(decideDeviceStartupMemoryFailureDisposition(
+                  3, 3, /*emptyDeviceRetryAlreadyUsed=*/false),
+              DeviceStartupMemoryFailureDisposition::WAIT_FOR_MODEL_RELEASE);
+    EXPECT_EQ(decideDeviceStartupMemoryFailureDisposition(
+                  1, 1, /*emptyDeviceRetryAlreadyUsed=*/true),
+              DeviceStartupMemoryFailureDisposition::WAIT_FOR_MODEL_RELEASE);
+    EXPECT_EQ(decideDeviceStartupMemoryFailureDisposition(
+                  0, 0, /*emptyDeviceRetryAlreadyUsed=*/false),
+              DeviceStartupMemoryFailureDisposition::RETRY_EMPTY_DEVICE_ONCE);
+    EXPECT_EQ(decideDeviceStartupMemoryFailureDisposition(
+                  0, 0, /*emptyDeviceRetryAlreadyUsed=*/true),
+              DeviceStartupMemoryFailureDisposition::FAIL);
+    EXPECT_EQ(decideDeviceStartupMemoryFailureDisposition(
+                  1, 0, /*emptyDeviceRetryAlreadyUsed=*/false),
+              DeviceStartupMemoryFailureDisposition::FAIL);
+}
+
 TEST(DeviceStartupCoordinatorTest, ClassifiesOnlyMemoryPressureAsRetryable) {
     EXPECT_TRUE(isDeviceStartupMemoryFailure(std::make_exception_ptr(
         DeviceStartupInsufficientMemoryError("device startup out of memory"))));
     EXPECT_TRUE(isDeviceStartupMemoryFailure(std::make_exception_ptr(
         std::runtime_error("cudaErrorMemoryAllocation while allocating tensor"))));
+    EXPECT_TRUE(isDeviceStartupMemoryFailure(std::make_exception_ptr(
+        std::runtime_error(
+            "launchConcatenate failed with cudaErrorMemoryAllocation (2): out of memory"))));
+    EXPECT_TRUE(isDeviceStartupMemoryFailure(std::make_exception_ptr(
+        std::runtime_error("launch failed: out of memory"))));
     EXPECT_FALSE(isDeviceStartupMemoryFailure(std::make_exception_ptr(
         std::runtime_error("invalid dataset schema"))));
     EXPECT_FALSE(isDeviceStartupMemoryFailure(std::make_exception_ptr(

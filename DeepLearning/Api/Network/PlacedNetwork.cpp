@@ -459,7 +459,7 @@ void registerOptimizerStateReadRequests(thor_file::TarReader& archiveReader,
 PlacedNetwork::~PlacedNetwork() {
     for (uint32_t i = 0; i < stampedNetworks.size(); ++i) {
         // Calls parentCleanup then cleanUp then clears all the shared pointers:
-        stampedNetworks[i].clear();
+        stampedNetworks[i].clearNoThrow();
     }
     stampedNetworks.clear();
 

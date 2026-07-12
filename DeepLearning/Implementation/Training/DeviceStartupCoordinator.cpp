@@ -2,6 +2,7 @@
 
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "Utilities/Common/ScopedGpu.h"
+#include "Utilities/Expression/CudaHelpers.h"
 
 #include <cuda_runtime_api.h>
 
@@ -67,6 +68,7 @@ std::string lowercaseAscii(std::string value) {
 bool messageLooksLikeStartupMemoryFailure(const std::string& message) {
     const std::string lower = lowercaseAscii(message);
     return lower.find("gpu out of memory") != std::string::npos ||
+           lower.find("launch failed: out of memory") != std::string::npos ||
            lower.find("cudaerrormemoryallocation") != std::string::npos ||
            lower.find("cuda_error_out_of_memory") != std::string::npos ||
            lower.find("cublas_status_alloc_failed") != std::string::npos ||
@@ -301,6 +303,56 @@ void enforceDeviceStartupSafetyReserve(
         message.str(),
         availableBytes,
         DEVICE_STARTUP_SAFETY_RESERVE_BYTES);
+}
+
+DeviceStartupMemoryFailureDisposition
+decideDeviceStartupMemoryFailureDisposition(
+    uint64_t loadedModels,
+    uint64_t retryableLoadedModels,
+    bool emptyDeviceRetryAlreadyUsed) {
+    if (retryableLoadedModels > 0) {
+        return DeviceStartupMemoryFailureDisposition::WAIT_FOR_MODEL_RELEASE;
+    }
+    if (loadedModels == 0 && !emptyDeviceRetryAlreadyUsed) {
+        return DeviceStartupMemoryFailureDisposition::RETRY_EMPTY_DEVICE_ONCE;
+    }
+    return DeviceStartupMemoryFailureDisposition::FAIL;
+}
+
+void clearDeviceStartupCudaErrorState(int deviceNum) noexcept {
+    try {
+        ScopedGpu scopedGpu(deviceNum);
+        (void)cudaGetLastError();
+    } catch (...) {
+        // This is cleanup for a failure path. Preserve the original exception.
+    }
+}
+
+void requireCleanDeviceStartupCudaErrorState(int deviceNum) {
+    ScopedGpu scopedGpu(deviceNum);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void prepareDeviceForEmptyStartupRetry(int deviceNum) {
+    ScopedGpu scopedGpu(deviceNum);
+    const cudaError_t synchronizeStatus = cudaDeviceSynchronize();
+    if (synchronizeStatus != cudaSuccess) {
+        const char* name = cudaGetErrorName(synchronizeStatus);
+        const char* description = cudaGetErrorString(synchronizeStatus);
+        std::ostringstream message;
+        message << "device_startup_empty_retry_synchronize_failed with "
+                << (name != nullptr ? name : "cudaErrorUnknown")
+                << " (" << static_cast<int>(synchronizeStatus) << "): "
+                << (description != nullptr ? description : "<no description>");
+        if (!messageLooksLikeStartupMemoryFailure(message.str())) {
+            throw std::runtime_error(message.str());
+        }
+    }
+
+    // cudaDeviceSynchronize() and the failed startup may both leave the runtime's
+    // per-thread last-error slot populated.  The next attempt must not mistake
+    // that stale error for a failure of its first kernel launch.
+    (void)cudaGetLastError();
 }
 
 bool isDeviceStartupMemoryFailure(std::exception_ptr failure) {

@@ -99,11 +99,11 @@ TEST(DatasetInputBindings, ExactNameAutobindingIsStrictAndComplete) {
 
     DatasetInputBindings bindings = DatasetInputBindings::byExactName(network, *dataset);
     EXPECT_EQ(bindings.size(), 2u);
-    EXPECT_NO_THROW(bindings.compile(network, *dataset, 4));
+    EXPECT_NO_THROW(static_cast<void>(bindings.compile(network, *dataset, 4)));
 
     Network mismatched("missing-exact-name");
     NetworkInput::Builder().network(mismatched).name("renamed_history").dimensions({3, 1}).dataType(DataType::FP32).build();
-    EXPECT_THROW(DatasetInputBindings::byExactName(mismatched, *dataset), std::runtime_error);
+    EXPECT_THROW(static_cast<void>(DatasetInputBindings::byExactName(mismatched, *dataset)), std::runtime_error);
 }
 
 TEST(DatasetInputBindings, RejectsDtypeShapeMissingAndForeignFieldContracts) {
@@ -118,7 +118,7 @@ TEST(DatasetInputBindings, RejectsDtypeShapeMissingAndForeignFieldContracts) {
                                   .build();
     DatasetInputBindings dtypeBindings;
     dtypeBindings.bind(dtypeInput, dataset->getField("history"));
-    EXPECT_THROW(dtypeBindings.compile(dtypeNetwork, *dataset, 4), std::runtime_error);
+    EXPECT_THROW(static_cast<void>(dtypeBindings.compile(dtypeNetwork, *dataset, 4)), std::runtime_error);
 
     Network shapeNetwork("shape-mismatch");
     NetworkInput shapeInput = NetworkInput::Builder()
@@ -129,7 +129,7 @@ TEST(DatasetInputBindings, RejectsDtypeShapeMissingAndForeignFieldContracts) {
                                   .build();
     DatasetInputBindings shapeBindings;
     shapeBindings.bind(shapeInput, dataset->getField("history"));
-    EXPECT_THROW(shapeBindings.compile(shapeNetwork, *dataset, 4), std::runtime_error);
+    EXPECT_THROW(static_cast<void>(shapeBindings.compile(shapeNetwork, *dataset, 4)), std::runtime_error);
 
     Network missingNetwork("missing-binding");
     NetworkInput history = NetworkInput::Builder()
@@ -141,7 +141,7 @@ TEST(DatasetInputBindings, RejectsDtypeShapeMissingAndForeignFieldContracts) {
     NetworkInput::Builder().network(missingNetwork).name("labels").dimensions({1}).dataType(DataType::FP32).build();
     DatasetInputBindings missingBindings;
     missingBindings.bind(history, dataset->getField("history"));
-    EXPECT_THROW(missingBindings.compile(missingNetwork, *dataset, 4), std::runtime_error);
+    EXPECT_THROW(static_cast<void>(missingBindings.compile(missingNetwork, *dataset, 4)), std::runtime_error);
 
     auto otherDataset = std::make_shared<InMemoryNamedDataset>(std::vector<DatasetField>{
         DatasetField{.id = 99,
@@ -158,7 +158,7 @@ TEST(DatasetInputBindings, RejectsDtypeShapeMissingAndForeignFieldContracts) {
                                     .build();
     DatasetInputBindings foreignBindings;
     foreignBindings.bind(foreignInput, otherDataset->getField("history"));
-    EXPECT_THROW(foreignBindings.compile(foreignNetwork, *dataset, 4), std::runtime_error);
+    EXPECT_THROW(static_cast<void>(foreignBindings.compile(foreignNetwork, *dataset, 4)), std::runtime_error);
 }
 
 TEST(DatasetInputBindings, RejectsDuplicateInputsAndFields) {
@@ -212,7 +212,7 @@ TEST(DatasetInputBindings, GraphTypeConversionIsExplicitAndSupported) {
                               .dataType(DataType::FP32)
                               .build();
     bindings.bind(labels, dataset->getField("labels"));
-    EXPECT_NO_THROW(bindings.compile(network, *dataset, 4));
+    EXPECT_NO_THROW(static_cast<void>(bindings.compile(network, *dataset, 4)));
 }
 
 TEST(DatasetInputBindings, ValidatesExplicitBatchDimensionAgainstBatchPolicy) {
@@ -237,8 +237,8 @@ TEST(DatasetInputBindings, ValidatesExplicitBatchDimensionAgainstBatchPolicy) {
     bindings.bind(history, dataset->getField("history"))
         .bind(labels, dataset->getField("labels"));
 
-    EXPECT_NO_THROW(bindings.compile(network, *dataset, 4));
-    EXPECT_THROW(bindings.compile(network, *dataset, 2), std::runtime_error);
+    EXPECT_NO_THROW(static_cast<void>(bindings.compile(network, *dataset, 4)));
+    EXPECT_THROW(static_cast<void>(bindings.compile(network, *dataset, 2)), std::runtime_error);
 }
 
 TEST(DatasetInputBindings, CompileByNameConsumesOnlyNetworkInputSubset) {
@@ -258,5 +258,5 @@ TEST(DatasetInputBindings, CompileByNameRejectsInputMissingFromDataset) {
     Network network("phase-missing-binding");
     NetworkInput::Builder().network(network).name("unknown").dimensions({1}).dataType(DataType::FP32).build();
 
-    EXPECT_THROW(DatasetInputBindings::compileByName(network, *dataset, 4), std::runtime_error);
+    EXPECT_THROW(static_cast<void>(DatasetInputBindings::compileByName(network, *dataset, 4)), std::runtime_error);
 }

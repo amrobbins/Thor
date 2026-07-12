@@ -17,6 +17,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Implementation/Training/DeviceStartupCoordinator.h"
 #include <cstdio>
+#include <exception>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -764,9 +765,21 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
             implementationLayer->initialize();
         }
 
-    } catch (GpuOutOfMemoryError ex) {
-        stampedNetwork.clear();
+    } catch (const GpuOutOfMemoryError&) {
+        // A failed stamp may already own tensors, CUDA handles, and auxiliary
+        // allocations whose release lives in Layer::cleanup(), not solely in
+        // C++ member destructors. Always tear the partial physical graph down
+        // before reporting admission failure.
+        stampedNetwork.clearNoThrow();
         return StatusCode::GPU_OUT_OF_MEMORY;
+    } catch (...) {
+        // CUDA_CHECK-based allocation failures and kernel-launch failures are
+        // std::runtime_error, not GpuOutOfMemoryError. Without this catch, a
+        // partial stamp can escape without Layer::cleanup(), retaining GPU
+        // resources and causing later otherwise-valid models to OOM.
+        const std::exception_ptr originalFailure = std::current_exception();
+        stampedNetwork.clearNoThrow();
+        std::rethrow_exception(originalFailure);
     }
 
     stampedNetworks.push_back(stampedNetwork);

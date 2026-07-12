@@ -58,6 +58,21 @@ class DeviceStartupSafetyReserveError
     uint64_t requiredUnusedBytes;
 };
 
+
+/**
+ * Action to take after a startup attempt fails from GPU memory pressure.
+ *
+ * A loaded sibling may eventually release memory, so the current FIFO startup
+ * keeps its turn and waits.  At an otherwise empty device Thor performs one
+ * clean retry after draining/clearing CUDA state; only a second failure in that
+ * same empty state is terminal.
+ */
+enum class DeviceStartupMemoryFailureDisposition {
+    WAIT_FOR_MODEL_RELEASE,
+    RETRY_EMPTY_DEVICE_ONCE,
+    FAIL,
+};
+
 class DeviceStartupState;
 
 /**
@@ -189,6 +204,27 @@ class DeviceStartupGuard {
 void enforceDeviceStartupSafetyReserve(
     int deviceNum,
     std::optional<uint64_t> availableBytesOverride = std::nullopt);
+
+
+/** Decide whether a memory failure should wait, receive one clean empty-device retry, or fail. */
+[[nodiscard]] DeviceStartupMemoryFailureDisposition
+decideDeviceStartupMemoryFailureDisposition(
+    uint64_t loadedModels,
+    uint64_t retryableLoadedModels,
+    bool emptyDeviceRetryAlreadyUsed);
+
+/** Clear the calling thread's stale CUDA runtime error for this device. */
+void clearDeviceStartupCudaErrorState(int deviceNum) noexcept;
+
+/** Throw a detailed CUDA error if startup left a pending launch/runtime error. */
+void requireCleanDeviceStartupCudaErrorState(int deviceNum);
+
+/**
+ * Drain this process's CUDA work and clear error state before the one allowed
+ * retry on an otherwise empty device. Memory-pressure synchronization errors
+ * are consumed; non-memory CUDA failures remain terminal.
+ */
+void prepareDeviceForEmptyStartupRetry(int deviceNum);
 
 /** Return true only for exceptions that represent GPU startup memory pressure. */
 [[nodiscard]] bool isDeviceStartupMemoryFailure(

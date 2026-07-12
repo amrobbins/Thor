@@ -2240,9 +2240,11 @@ NativeQueuedStartupState startNativeQueuedTrainingWithMemoryAdmissionRetry(
     constexpr int startupDeviceNum = 0;
     ThorImplementation::DeviceStartupGuard startupGuard =
         ThorImplementation::acquireDeviceStartupGuard(startupDeviceNum);
+    bool emptyDeviceRetryAlreadyUsed = false;
 
     for (;;) {
         request.cancellationToken.throwIfCancellationRequested();
+        ThorImplementation::clearDeviceStartupCudaErrorState(startupDeviceNum);
 
         NativeQueuedStartupState attempt;
         attempt.sourceSession = request.batchSession;
@@ -2342,6 +2344,9 @@ NativeQueuedStartupState startNativeQueuedTrainingWithMemoryAdmissionRetry(
                     attempt.effectiveSession, attempt.plan));
             attempt.placedNetwork->preallocateInputSlots(
                 static_cast<uint32_t>(options.maxInFlightBatches));
+            attempt.placedNetwork->synchronize();
+            ThorImplementation::requireCleanDeviceStartupCudaErrorState(
+                startupDeviceNum);
 
             try {
                 startupGuard.complete(*attempt.placedNetwork);
@@ -2368,6 +2373,9 @@ NativeQueuedStartupState startNativeQueuedTrainingWithMemoryAdmissionRetry(
                         attempt.effectiveSession, attempt.plan));
                 attempt.placedNetwork->preallocateInputSlots(
                     static_cast<uint32_t>(options.maxInFlightBatches));
+                attempt.placedNetwork->synchronize();
+                ThorImplementation::requireCleanDeviceStartupCudaErrorState(
+                    startupDeviceNum);
                 startupGuard.complete(*attempt.placedNetwork);
             }
 
@@ -2387,18 +2395,40 @@ NativeQueuedStartupState startNativeQueuedTrainingWithMemoryAdmissionRetry(
 
         const Thor::PlacedNetwork* retainedPlacement =
             request.previousPlacedNetwork.get();
-        if (startupGuard.getRetryableLoadedModelCount(retainedPlacement) == 0) {
-            // No independently running model can free more memory. This model is
-            // genuinely too large for the currently empty admissible GPU state.
-            std::rethrow_exception(startupFailure);
+        const uint64_t loadedModels = startupGuard.getLoadedModelCount();
+        const uint64_t retryableLoadedModels =
+            startupGuard.getRetryableLoadedModelCount(retainedPlacement);
+        const auto disposition =
+            ThorImplementation::decideDeviceStartupMemoryFailureDisposition(
+                loadedModels,
+                retryableLoadedModels,
+                emptyDeviceRetryAlreadyUsed);
+
+        if (disposition == ThorImplementation::
+                               DeviceStartupMemoryFailureDisposition::
+                                   WAIT_FOR_MODEL_RELEASE) {
+            startupGuard.waitForModelRelease(
+                [&]() {
+                    request.cancellationToken.throwIfCancellationRequested();
+                },
+                retainedPlacement);
+            // Keep the same FIFO turn and retry from a completely fresh placement.
+            continue;
         }
 
-        startupGuard.waitForModelRelease(
-            [&]() {
-                request.cancellationToken.throwIfCancellationRequested();
-            },
-            retainedPlacement);
-        // Keep the same FIFO turn and retry from a completely fresh placement.
+        if (disposition == ThorImplementation::
+                               DeviceStartupMemoryFailureDisposition::
+                                   RETRY_EMPTY_DEVICE_ONCE) {
+            emptyDeviceRetryAlreadyUsed = true;
+            ThorImplementation::prepareDeviceForEmptyStartupRetry(
+                startupDeviceNum);
+            request.cancellationToken.throwIfCancellationRequested();
+            continue;
+        }
+
+        // The model failed twice in a clean state with no independently running
+        // placement able to release more memory. It genuinely does not fit.
+        std::rethrow_exception(startupFailure);
     }
 }
 

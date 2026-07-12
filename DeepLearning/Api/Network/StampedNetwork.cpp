@@ -4,6 +4,7 @@
 #include "DeepLearning/Implementation/Layers/Loss.h"
 #include "DeepLearning/Implementation/Diagnostics/TrainingDiagnostics.h"
 
+#include <exception>
 #include <limits>
 #include <iterator>
 #include <stdexcept>
@@ -442,26 +443,32 @@ Event StampedNetwork::sendPhysicalBatch(std::map<std::string, Tensor> batchInput
     return processingFinishedEvent;
 }
 
-void StampedNetwork::clear() {
-    for (uint32_t i = 0; i < inputs.size(); ++i) {
-        inputs[i]->cleanup();
-    }
-    inputs.clear();
+void StampedNetwork::clearImpl(bool propagateCleanupFailure) {
+    std::exception_ptr firstCleanupFailure;
+    auto cleanupLayers = [&](auto& layers) {
+        for (auto* layer : layers) {
+            if (layer == nullptr) {
+                continue;
+            }
+            try {
+                layer->cleanup();
+            } catch (...) {
+                if (firstCleanupFailure == nullptr) {
+                    firstCleanupFailure = std::current_exception();
+                }
+            }
+        }
+        layers.clear();
+    };
 
-    for (uint32_t i = 0; i < outputs.size(); ++i) {
-        outputs[i]->cleanup();
-    }
-    outputs.clear();
-
-    for (uint32_t i = 0; i < trainableLayers.size(); ++i) {
-        trainableLayers[i]->cleanup();
-    }
-    trainableLayers.clear();
-
-    for (uint32_t i = 0; i < otherLayers.size(); ++i) {
-        otherLayers[i]->cleanup();
-    }
-    otherLayers.clear();
+    // Continue through every layer even when CUDA is already reporting an
+    // error. A partial model stamp may own independent raw CUDA allocations in
+    // many cleanup() implementations; stopping at the first exception leaks the
+    // rest of the physical graph.
+    cleanupLayers(inputs);
+    cleanupLayers(outputs);
+    cleanupLayers(trainableLayers);
+    cleanupLayers(otherLayers);
 
     apiTensorToPhysicalDrivingLayer.clear();
     apiLayerToPhysicalLayer.clear();
@@ -483,6 +490,22 @@ void StampedNetwork::clear() {
     inputNamedShared.clear();
     raggedInputNamedShared.clear();
     outputNamedShared.clear();
+
+    if (propagateCleanupFailure && firstCleanupFailure != nullptr) {
+        std::rethrow_exception(firstCleanupFailure);
+    }
+}
+
+void StampedNetwork::clear() { clearImpl(/*propagateCleanupFailure=*/true); }
+
+void StampedNetwork::clearNoThrow() noexcept {
+    try {
+        clearImpl(/*propagateCleanupFailure=*/false);
+    } catch (...) {
+        // clearImpl(false) is designed not to throw, but destruction and failed
+        // startup cleanup must never terminate if a future container/member
+        // cleanup path becomes exceptional.
+    }
 }
 
 void StampedNetwork::preallocateInputSlots(uint32_t numSlots) {

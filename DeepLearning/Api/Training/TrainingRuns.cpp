@@ -54,8 +54,10 @@ std::shared_ptr<PlacedNetwork> placeInferenceNetworkWithSerializedStartup(
     constexpr int startupDeviceNum = 0;
     ThorImplementation::DeviceStartupGuard startupGuard =
         ThorImplementation::acquireDeviceStartupGuard(startupDeviceNum);
+    bool emptyDeviceRetryAlreadyUsed = false;
 
     for (;;) {
+        ThorImplementation::clearDeviceStartupCudaErrorState(startupDeviceNum);
         std::shared_ptr<PlacedNetwork> placed;
         std::exception_ptr startupFailure;
         try {
@@ -79,6 +81,9 @@ std::shared_ptr<PlacedNetwork> placeInferenceNetworkWithSerializedStartup(
             // the serialized and memory-admitted startup transaction.
             placed->preallocateOutputSlots(1);
             placed->preallocateInputSlots(1);
+            placed->synchronize();
+            ThorImplementation::requireCleanDeviceStartupCudaErrorState(
+                startupDeviceNum);
             startupGuard.complete(*placed);
             return placed;
         } catch (...) {
@@ -94,11 +99,33 @@ std::shared_ptr<PlacedNetwork> placeInferenceNetworkWithSerializedStartup(
         }
 
         if (!ThorImplementation::isDeviceStartupMemoryFailure(
-                startupFailure) ||
-            startupGuard.getRetryableLoadedModelCount() == 0) {
+                startupFailure)) {
             std::rethrow_exception(startupFailure);
         }
-        startupGuard.waitForModelRelease();
+
+        const uint64_t loadedModels = startupGuard.getLoadedModelCount();
+        const uint64_t retryableLoadedModels =
+            startupGuard.getRetryableLoadedModelCount();
+        const auto disposition =
+            ThorImplementation::decideDeviceStartupMemoryFailureDisposition(
+                loadedModels,
+                retryableLoadedModels,
+                emptyDeviceRetryAlreadyUsed);
+        if (disposition == ThorImplementation::
+                               DeviceStartupMemoryFailureDisposition::
+                                   WAIT_FOR_MODEL_RELEASE) {
+            startupGuard.waitForModelRelease();
+            continue;
+        }
+        if (disposition == ThorImplementation::
+                               DeviceStartupMemoryFailureDisposition::
+                                   RETRY_EMPTY_DEVICE_ONCE) {
+            emptyDeviceRetryAlreadyUsed = true;
+            ThorImplementation::prepareDeviceForEmptyStartupRetry(
+                startupDeviceNum);
+            continue;
+        }
+        std::rethrow_exception(startupFailure);
     }
 }
 
