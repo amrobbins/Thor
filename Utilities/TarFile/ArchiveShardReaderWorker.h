@@ -1,7 +1,11 @@
 #pragma once
 
 #include "DeepLearning/Implementation/ThorError.h"
+#include <algorithm>
+#include <limits>
 #include <optional>
+#include <sstream>
+#include <vector>
 
 #include "Crc32.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
@@ -21,7 +25,7 @@ enum class ReaderState {
 class ArchiveShardReaderWorker {
    public:
     explicit ArchiveShardReaderWorker(ArchiveReaderContext context)
-        : archiveDirectory(context.archiveDirectory), mtx(context.mtx), errorMessage(context.errorMessage), uringDirect(64) {
+        : archiveDirectory(context.archiveDirectory), mtx(context.mtx), errorMessage(context.errorMessage), uringDirect(64, UringDirect::ioBackendFromEnv("THOR_TAR_READ_IO_BACKEND")) {
         ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
         ThorImplementation::TensorDescriptor descriptor(ThorImplementation::DataType::UINT8, {fiveHundredMBPlusTail});
 
@@ -113,9 +117,8 @@ class ArchiveShardReaderWorker {
                 const uint8_t* payloadPtr = bounceBufferMem[loadedBuffer] + prefixBytesForBuffer[loadedBuffer];
                 uint32_t crc = crc32_ieee(0xFFFFFFFF, payloadPtr, (uint32_t)payloadBytesForBuffer[loadedBuffer]);
                 if (crc != plan[i - 1].expectedCrc) {
-                    std::lock_guard<std::mutex> lg(mtx);
-                    errorMessage = "CRC mismatch in file " + plan[i - 1].pathInTar + " expected " +
-                                   std::to_string(plan[i - 1].expectedCrc) + " actual " + std::to_string(crc);
+                    synchronizeGpuTransfers(gpuTransferDone);
+                    recordCrcMismatch(archiveShardPath, plan[i - 1], crc);
                     return;
                 }
 
@@ -157,9 +160,8 @@ class ArchiveShardReaderWorker {
         const uint8_t* payloadPtr = bounceBufferMem[lastLoadingBuffer] + prefixBytesForBuffer[lastLoadingBuffer];
         uint32_t crc = crc32_ieee(0xFFFFFFFF, payloadPtr, (uint32_t)payloadBytesForBuffer[lastLoadingBuffer]);
         if (crc != plan.back().expectedCrc) {
-            std::lock_guard<std::mutex> lg(mtx);
-            errorMessage = "CRC mismatch in file " + plan.back().pathInTar + " expected " + std::to_string(plan.back().expectedCrc) +
-                           " actual " + std::to_string(crc);
+            synchronizeGpuTransfers(gpuTransferDone);
+            recordCrcMismatch(archiveShardPath, plan.back(), crc);
             return;
         }
 
@@ -206,6 +208,106 @@ class ArchiveShardReaderWorker {
     static uint64_t alignUp4k(uint64_t x) { return (x + fourKBMask) & ~uint64_t(fourKBMask); }
 
    private:
+    static void synchronizeGpuTransfers(std::optional<Event> gpuTransferDone[2]) {
+        for (uint32_t bufferIndex = 0; bufferIndex < 2; ++bufferIndex) {
+            if (gpuTransferDone[bufferIndex].has_value()) {
+                gpuTransferDone[bufferIndex].value().synchronize();
+            }
+        }
+    }
+
+    struct BufferedCrcProbe {
+        std::optional<uint32_t> crc;
+        std::string error;
+    };
+
+    static BufferedCrcProbe computeBufferedPreadCrc(const std::string& archiveShardPath,
+                                                    uint64_t fileOffsetBytes,
+                                                    uint64_t numBytes) {
+        BufferedCrcProbe result;
+        int fd = ::open(archiveShardPath.c_str(), O_RDONLY | O_CLOEXEC);
+        if (fd < 0) {
+            result.error = std::string("open failed: ") + std::strerror(errno);
+            return result;
+        }
+
+        constexpr size_t kProbeChunkBytes = size_t{1} << 20;
+        std::vector<uint8_t> buffer(kProbeChunkBytes);
+        uint64_t bytesDone = 0;
+        uint32_t crc = 0xFFFFFFFF;
+        while (bytesDone < numBytes) {
+            const size_t chunkBytes = static_cast<size_t>(
+                std::min<uint64_t>(numBytes - bytesDone, static_cast<uint64_t>(buffer.size())));
+            const uint64_t absoluteOffset = fileOffsetBytes + bytesDone;
+            if (absoluteOffset > static_cast<uint64_t>(std::numeric_limits<off_t>::max())) {
+                result.error = "file offset exceeds off_t range";
+                ::close(fd);
+                return result;
+            }
+
+            ssize_t response;
+            do {
+                response = ::pread(fd,
+                                   buffer.data(),
+                                   chunkBytes,
+                                   static_cast<off_t>(absoluteOffset));
+            } while (response < 0 && errno == EINTR);
+
+            if (response < 0) {
+                result.error = std::string("pread failed: ") + std::strerror(errno);
+                ::close(fd);
+                return result;
+            }
+            if (response == 0) {
+                result.error = "pread reached EOF after " + std::to_string(bytesDone) +
+                               " of " + std::to_string(numBytes) + " bytes";
+                ::close(fd);
+                return result;
+            }
+
+            crc = crc32_ieee(crc, buffer.data(), static_cast<size_t>(response));
+            bytesDone += static_cast<uint64_t>(response);
+        }
+
+        ::close(fd);
+        result.crc = crc;
+        return result;
+    }
+
+    void recordCrcMismatch(const std::string& archiveShardPath,
+                           const ArchivePlanEntry& entry,
+                           uint32_t ioBackendCrc) {
+        const BufferedCrcProbe buffered =
+            computeBufferedPreadCrc(archiveShardPath, entry.fileOffsetBytes, entry.numBytes);
+
+        std::ostringstream message;
+        message << "CRC mismatch in file " << entry.pathInTar
+                << " expected " << entry.expectedCrc
+                << " actual " << ioBackendCrc
+                << " io_backend=" << uringDirect.activeBackendName()
+                << " archive_shard='" << archiveShardPath << "'"
+                << " file_offset=" << entry.fileOffsetBytes
+                << " size=" << entry.numBytes;
+        if (buffered.crc.has_value()) {
+            message << " buffered_pread_crc=" << buffered.crc.value();
+            if (buffered.crc.value() == entry.expectedCrc) {
+                message << " diagnosis=io_backend_read_corruption";
+            } else if (buffered.crc.value() == ioBackendCrc) {
+                message << " diagnosis=archive_payload_or_index_corruption";
+            } else {
+                message << " diagnosis=three_way_crc_disagreement";
+            }
+        } else {
+            message << " buffered_pread_error='" << buffered.error << "'"
+                    << " diagnosis=buffered_probe_failed";
+        }
+
+        std::lock_guard<std::mutex> lg(mtx);
+        if (errorMessage.empty()) {
+            errorMessage = message.str();
+        }
+    }
+
     // Schedules the disk read for one plan entry into bufferIndex, recording the per-buffer geometry
     // so the consumer knows what slice to upload and where.
     void scheduleReadIntoBuffer(uint32_t bufferIndex,

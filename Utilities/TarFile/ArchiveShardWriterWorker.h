@@ -73,7 +73,7 @@ class ArchiveShardWriterWorker {
         : archiveIndex(context.archiveIndex),
           archiveIndexMutex(context.archiveIndexMutex),
           archiveDirectory(context.archiveDirectory),
-          uringDirect(64) {
+          uringDirect(64, UringDirect::ioBackendFromEnv("THOR_TAR_WRITE_IO_BACKEND")) {
         ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
         ThorImplementation::TensorDescriptor descriptor(ThorImplementation::DataType::UINT8, {fiveHundredMBPlusTail});
         bounceBuffer[0] = ThorImplementation::Tensor(cpuPlacement, descriptor, 4096);
@@ -91,7 +91,9 @@ class ArchiveShardWriterWorker {
         const uint32_t shardNumber = job.shardNumber;
 
         THOR_THROW_IF_FALSE(!plan.empty());
+        const uint64_t plannedTarBytes = computePlannedTarBytes(plan);
         uringDirect.registerDumpFile(archiveShardPath);
+        uringDirect.preallocateDumpFile(plannedTarBytes);
         uint32_t numCompletionsToFinish[2] = {0, 0};
         constexpr uint64_t fourKLeftoverMask = 0xFFF;
 
@@ -276,6 +278,7 @@ class ArchiveShardWriterWorker {
             uringDirect.waitCompletionsInOrder(numCompletionsToFinish[freeBuffer]);
         numCompletionsToFinish[freeBuffer] = 0;
 
+        THOR_THROW_IF_FALSE(dumpedFileOffsetBytes == plannedTarBytes);
         UringDirect::Completion c = uringDirect.finishDumpedFile(false);
         if (c.responseCode != 0)
             throw std::runtime_error("io_uring returned responseCode = " + std::to_string(c.responseCode) + "when writing file " +
@@ -330,6 +333,42 @@ class ArchiveShardWriterWorker {
     }
 
     static uint32_t numFourKAlignedBytes(uint32_t totalBytes) { return totalBytes & fourKBAligned; }
+
+    static uint64_t computePlannedTarBytes(const std::vector<ArchivePlanEntry>& plan) {
+        THOR_THROW_IF_FALSE(!plan.empty());
+
+        uint8_t scratch[thirtyTwoK] = {};
+        uint32_t prefixBytes = createTarSeparator(plan.front().pathInTar,
+                                                  plan.front().numBytes,
+                                                  /*prevFileSize=*/0,
+                                                  /*tailBytesIn=*/0,
+                                                  scratch,
+                                                  thirtyTwoK);
+        uint64_t dumpedBytes = 0;
+
+        for (std::size_t i = 1; i < plan.size(); ++i) {
+            const uint64_t totalBytes = plan[i - 1].numBytes + prefixBytes;
+            const uint64_t alignedBytes = totalBytes & ~uint64_t(fourKBMask);
+            const uint32_t tailBytes = static_cast<uint32_t>(totalBytes - alignedBytes);
+            dumpedBytes += alignedBytes;
+
+            prefixBytes = createTarSeparator(plan[i].pathInTar,
+                                             plan[i].numBytes,
+                                             plan[i - 1].numBytes,
+                                             tailBytes,
+                                             scratch,
+                                             thirtyTwoK);
+        }
+
+        const uint64_t finalTotalBytes = plan.back().numBytes + prefixBytes;
+        const uint64_t finalAlignedBytes = finalTotalBytes & ~uint64_t(fourKBMask);
+        const uint32_t finalTailBytes = static_cast<uint32_t>(finalTotalBytes - finalAlignedBytes);
+        dumpedBytes += finalAlignedBytes;
+        dumpedBytes += appendTarEndOfArchive(plan.back().numBytes, finalTailBytes, scratch, thirtyTwoK);
+
+        THOR_THROW_IF_FALSE((dumpedBytes & uint64_t(fourKBMask)) == 0);
+        return dumpedBytes;
+    }
 
    private:
     ThorImplementation::Tensor bounceBuffer[2];

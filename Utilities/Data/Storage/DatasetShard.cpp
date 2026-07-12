@@ -457,7 +457,7 @@ void DatasetShard::readExamplePayloadCached(uint8_t *buffer, uint64_t fileOffset
 
     std::unique_lock<std::mutex> lck(cachedReaderMtx);
     if (!cachedReader) {
-        cachedReader = std::make_unique<UringDirect>(64);
+        cachedReader = std::make_unique<UringDirect>(64, UringDirect::ioBackendFromEnv("THOR_DATASET_IO_BACKEND"));
         cachedReader->registerCachedLoadFile(this->filename);
     }
 

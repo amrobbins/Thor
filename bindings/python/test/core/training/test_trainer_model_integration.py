@@ -727,19 +727,19 @@ def _build_iris_deep_classifier(
 
 def _build_iris_two_input_multi_output_classifier(name: str, *, dtype=thor.DataType.fp32):
     network = thor.Network(name)
-    examples_left = thor.layers.NetworkInput(network, "examples_left", [4], dtype)
-    examples_right = thor.layers.NetworkInput(network, "examples_right", [4], dtype)
+    model_examples = thor.layers.NetworkInput(network, "model_examples", [4], dtype)
     labels = thor.layers.NetworkInput(network, "labels", [3], dtype)
 
     # Keep this queued-trainer coverage on ordinary branches; Python
     # CustomLayer callables that return expression dicts are now serialized by
     # storing the expression graph they build, but this test does not need that
-    # extra surface area.  Two ordinary branches still exercise explicit
-    # input binding, multiple NetworkInputs, multiple NetworkOutputs, and
-    # multiple declared graph losses in one TrainingStep.
+    # extra surface area. One external feature input fans out to two ordinary
+    # branches, exercising explicit input binding, graph fanout, two
+    # NetworkInputs, multiple NetworkOutputs, and multiple declared graph
+    # losses in one TrainingStep.
     left_hidden = thor.layers.FullyConnected(
         network,
-        examples_left.get_feature_output(),
+        model_examples.get_feature_output(),
         16,
         True,
         activation=thor.activations.Relu(),
@@ -760,7 +760,7 @@ def _build_iris_two_input_multi_output_classifier(name: str, *, dtype=thor.DataT
 
     right_hidden = thor.layers.FullyConnected(
         network,
-        examples_right.get_feature_output(),
+        model_examples.get_feature_output(),
         12,
         True,
         activation=thor.activations.Tanh(),
@@ -1664,8 +1664,7 @@ def test_queued_trainer_fits_iris_fp32_two_input_multi_output_network_with_expli
             phases=[phase],
             optimizer=optimizer,
             input_bindings=[
-                thor.training.TrainingInputBinding("examples_left", "examples"),
-                thor.training.TrainingInputBinding("examples_right", "examples"),
+                thor.training.TrainingInputBinding("model_examples", "examples"),
                 thor.training.TrainingInputBinding("labels", "labels"),
             ],
         )

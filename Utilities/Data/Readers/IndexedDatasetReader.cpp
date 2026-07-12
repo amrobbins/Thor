@@ -637,7 +637,7 @@ class IndexedDatasetReader::Session::Impl {
         uint64_t submittedNotCompleted = 0;
 
         IoContext(uint64_t queueDepth, uint64_t recordSpanCount, uint64_t windowedReferenceBytes)
-            : io(checkedQueueDepthForUring(queueDepth)) {
+            : io(checkedQueueDepthForUring(queueDepth), UringDirect::ioBackendFromEnv("THOR_DATASET_IO_BACKEND")) {
             THOR_THROW_IF_FALSE(queueDepth > 0);
             THOR_THROW_IF_FALSE(recordSpanCount > 0);
             iovecSlots.resize(static_cast<size_t>(queueDepth));

@@ -38,7 +38,7 @@ class UringDirect {
         PreadBuffered,
     };
 
-    explicit UringDirect(unsigned queueDepth = 64, IoBackend backend = ioBackendFromEnv()) : requestedBackend_(backend) {
+    explicit UringDirect(unsigned queueDepth = 64, IoBackend backend = ioBackendFromEnv(nullptr)) : requestedBackend_(backend) {
         fallbackQueueDepth_ = std::max(1u, queueDepth);
         initializeBackend(queueDepth);
     }
@@ -77,8 +77,20 @@ class UringDirect {
         return *this;
     }
 
-    static IoBackend ioBackendFromEnv() {
-        const char* raw = std::getenv("THOR_IO_BACKEND");
+    static IoBackend ioBackendFromEnv(const char* subsystemOverrideEnv = nullptr) {
+        const char* envName = "THOR_IO_BACKEND";
+        const char* raw = nullptr;
+        if (subsystemOverrideEnv != nullptr && *subsystemOverrideEnv != '\0') {
+            raw = std::getenv(subsystemOverrideEnv);
+            if (raw != nullptr && *raw != '\0') {
+                envName = subsystemOverrideEnv;
+            } else {
+                raw = nullptr;
+            }
+        }
+        if (raw == nullptr) {
+            raw = std::getenv("THOR_IO_BACKEND");
+        }
         if (raw == nullptr || *raw == '\0') {
             return IoBackend::Auto;
         }
@@ -96,7 +108,7 @@ class UringDirect {
         if (value == "pread_buffered" || value == "buffered_pread" || value == "pread" || value == "buffered")
             return IoBackend::PreadBuffered;
 
-        throw std::runtime_error("Unsupported THOR_IO_BACKEND='" + std::string(raw) +
+        throw std::runtime_error("Unsupported " + std::string(envName) + "='" + std::string(raw) +
                                  "'. Supported values: auto, uring_direct, pread_direct, pread_buffered.");
     }
 
@@ -106,13 +118,50 @@ class UringDirect {
     IoBackend activeBackend() const { return activeBackend_; }
 
 #ifdef THOR_GTEST
+    enum class TestIoOperation {
+        Any,
+        Read,
+        Write,
+    };
+
     static void testSetIoUringQueueInitResult(std::optional<int> responseCode) { testIoUringQueueInitResult() = responseCode; }
     static void testSetDirectOpenUnavailable(bool unavailable) { testDirectOpenUnavailable() = unavailable; }
     static void testSetIoUringRegisterBuffersResult(std::optional<int> responseCode) { testIoUringRegisterBuffersResult() = responseCode; }
     static bool testIsBackendAvailabilityErrno(int e) { return isBackendAvailabilityErrno(e); }
     static void testSetNextIoUringSubmissionByteLimit(std::optional<std::uint32_t> limitBytes) {
+        testSetNextIoUringSubmissionByteLimitForOperation(limitBytes, TestIoOperation::Any);
+    }
+    static void testSetNextIoUringSubmissionByteLimitForOperation(std::optional<std::uint32_t> limitBytes,
+                                                                  TestIoOperation operation,
+                                                                  std::uint64_t matchingOperationsToSkip = 0) {
         std::lock_guard<std::mutex> guard(testIoUringSubmissionByteLimitMutex());
-        testNextIoUringSubmissionByteLimit() = limitBytes;
+        TestShortIoControl& control = testIoUringSubmissionByteLimitControl();
+        control.limitBytes = limitBytes;
+        control.operation = operation;
+        control.matchingOperationsToSkip = matchingOperationsToSkip;
+        control.hitCount = 0;
+    }
+    static std::uint64_t testGetIoUringSubmissionByteLimitHitCount() {
+        std::lock_guard<std::mutex> guard(testIoUringSubmissionByteLimitMutex());
+        return testIoUringSubmissionByteLimitControl().hitCount;
+    }
+    static void testSetNextIoUringCompletionByteLimitForOperation(std::optional<std::uint32_t> limitBytes,
+                                                                  TestIoOperation operation,
+                                                                  std::uint64_t matchingOperationsToSkip = 0) {
+        std::lock_guard<std::mutex> guard(testIoUringCompletionByteLimitMutex());
+        TestShortIoControl& control = testIoUringCompletionByteLimitControl();
+        control.limitBytes = limitBytes;
+        control.operation = operation;
+        control.matchingOperationsToSkip = matchingOperationsToSkip;
+        control.hitCount = 0;
+    }
+    static std::uint64_t testGetIoUringCompletionByteLimitHitCount() {
+        std::lock_guard<std::mutex> guard(testIoUringCompletionByteLimitMutex());
+        return testIoUringCompletionByteLimitControl().hitCount;
+    }
+    static void testResetIoUringShortIoHooks() {
+        testSetNextIoUringSubmissionByteLimitForOperation(std::nullopt, TestIoOperation::Any);
+        testSetNextIoUringCompletionByteLimitForOperation(std::nullopt, TestIoOperation::Any);
     }
     static void testResetCompatibilityWarning() { compatibilityWarningEmitted() = false; }
     static void testResetFallbackWorkerBlock() {
@@ -283,6 +332,47 @@ class UringDirect {
             }
         }
         fileRegistered_ = true;
+    }
+
+    // Size and allocate a newly registered dump file before asynchronous direct writes begin.
+    //
+    // Concurrent O_DIRECT writes that extend an unallocated file exercise filesystem
+    // allocation and EOF updates on the write-completion path.  The archive writer knows
+    // its exact tar-section size up front, so remove that variable from the asynchronous
+    // path.  posix_fallocate() reserves the extents where supported; ftruncate() is a
+    // compatibility fallback that at least establishes the final EOF before any writes.
+    void preallocateDumpFile(std::uint64_t lengthBytes) {
+        if (!fileRegistered_ || fd_ < 0) {
+            throw std::runtime_error("preallocateDumpFile: no registered/open dump file");
+        }
+        if (lengthBytes == 0) {
+            throw std::runtime_error("preallocateDumpFile: lengthBytes is 0");
+        }
+
+        const auto maxOff = static_cast<std::uint64_t>(std::numeric_limits<off_t>::max());
+        if (lengthBytes > maxOff) {
+            throw std::runtime_error("preallocateDumpFile: length exceeds off_t range");
+        }
+
+        const off_t length = static_cast<off_t>(lengthBytes);
+        const int rc = ::posix_fallocate(fd_, 0, length);
+        if (rc == 0) {
+            return;
+        }
+
+        // Some filesystems do not implement fallocate.  Establishing the final file
+        // length still prevents every async write from racing to extend EOF, although
+        // it does not reserve physical extents.
+        if (rc == EOPNOTSUPP || rc == ENOSYS || rc == EINVAL) {
+            if (::ftruncate(fd_, length) != 0) {
+                const int e = errno;
+                throw std::runtime_error(std::string("preallocateDumpFile: posix_fallocate is unsupported and ftruncate failed: ") +
+                                         std::strerror(e));
+            }
+            return;
+        }
+
+        throw std::runtime_error(std::string("preallocateDumpFile: posix_fallocate failed: ") + std::strerror(rc));
     }
 
     // Submit an async write using:
@@ -796,6 +886,15 @@ class UringDirect {
    private:
     enum class ExactIoOp { Read, Write };
 
+#ifdef THOR_GTEST
+    struct TestShortIoControl {
+        std::optional<std::uint32_t> limitBytes;
+        TestIoOperation operation = TestIoOperation::Any;
+        std::uint64_t matchingOperationsToSkip = 0;
+        std::uint64_t hitCount = 0;
+    };
+#endif
+
     struct ExactIoRequest {
         ExactIoOp op = ExactIoOp::Read;
         bool fixedBuffer = false;
@@ -810,6 +909,9 @@ class UringDirect {
         std::uint32_t remainingBytes = 0;
         std::uint32_t submittedBytes = 0;
         std::uint64_t fileOffsetBytes = 0;
+#ifdef THOR_GTEST
+        std::optional<std::uint32_t> testCompletionByteLimit;
+#endif
     };
 
     static void validateExactIoRange(const char* caller, std::uint64_t fileOffsetBytes, std::uint32_t lenBytes) {
@@ -894,6 +996,9 @@ class UringDirect {
     }
 
     void queueExactIoRequest(io_uring_sqe* sqe, std::uint64_t seq, ExactIoRequest&& req, const char* caller) {
+#ifdef THOR_GTEST
+        assignNextIoUringCompletionByteLimitForTest(req);
+#endif
         auto [it, inserted] = exactIoRequests_.emplace(seq, std::move(req));
         if (!inserted) {
             throw std::runtime_error(std::string(caller) + ": duplicate exact-I/O sequence");
@@ -912,7 +1017,7 @@ class UringDirect {
     void prepareExactIoSqe(io_uring_sqe* sqe, std::uint64_t seq, ExactIoRequest& req) {
         std::uint32_t bytesToSubmit = req.remainingBytes;
 #ifdef THOR_GTEST
-        bytesToSubmit = limitNextIoUringSubmissionBytesForTest(bytesToSubmit);
+        bytesToSubmit = limitNextIoUringSubmissionBytesForTest(req.op, bytesToSubmit);
 #endif
         if (bytesToSubmit == 0 || bytesToSubmit > req.remainingBytes) {
             throw std::runtime_error("prepareExactIoSqe: invalid exact-I/O submission byte count");
@@ -983,6 +1088,9 @@ class UringDirect {
         }
 
         ExactIoRequest& req = it->second;
+#ifdef THOR_GTEST
+        limitIoUringCompletionBytesForTest(req, completion);
+#endif
         if (completion.responseCode < 0) {
             const int e = -completion.responseCode;
             exactIoRequests_.erase(it);
@@ -1515,22 +1623,81 @@ class UringDirect {
         return mutex;
     }
 
-    static std::optional<std::uint32_t>& testNextIoUringSubmissionByteLimit() {
-        static std::optional<std::uint32_t> limitBytes;
-        return limitBytes;
+    static TestShortIoControl& testIoUringSubmissionByteLimitControl() {
+        static TestShortIoControl control;
+        return control;
     }
 
-    static std::uint32_t limitNextIoUringSubmissionBytesForTest(std::uint32_t requestedBytes) {
+    static std::mutex& testIoUringCompletionByteLimitMutex() {
+        static std::mutex mutex;
+        return mutex;
+    }
+
+    static TestShortIoControl& testIoUringCompletionByteLimitControl() {
+        static TestShortIoControl control;
+        return control;
+    }
+
+    static bool testIoOperationMatches(TestIoOperation configuredOperation, ExactIoOp actualOperation) {
+        if (configuredOperation == TestIoOperation::Any) {
+            return true;
+        }
+        if (configuredOperation == TestIoOperation::Read) {
+            return actualOperation == ExactIoOp::Read;
+        }
+        return actualOperation == ExactIoOp::Write;
+    }
+
+    static std::uint32_t limitNextIoUringSubmissionBytesForTest(ExactIoOp operation, std::uint32_t requestedBytes) {
         std::lock_guard<std::mutex> guard(testIoUringSubmissionByteLimitMutex());
-        if (!testNextIoUringSubmissionByteLimit().has_value()) {
+        TestShortIoControl& control = testIoUringSubmissionByteLimitControl();
+        if (!control.limitBytes.has_value() || !testIoOperationMatches(control.operation, operation)) {
             return requestedBytes;
         }
-        const std::uint32_t limitBytes = *testNextIoUringSubmissionByteLimit();
+        const std::uint32_t limitBytes = *control.limitBytes;
         if (requestedBytes <= limitBytes) {
             return requestedBytes;
         }
-        testNextIoUringSubmissionByteLimit().reset();
+        if (control.matchingOperationsToSkip > 0) {
+            --control.matchingOperationsToSkip;
+            return requestedBytes;
+        }
+        control.limitBytes.reset();
+        ++control.hitCount;
         return limitBytes;
+    }
+
+    static void assignNextIoUringCompletionByteLimitForTest(ExactIoRequest& request) {
+        std::lock_guard<std::mutex> guard(testIoUringCompletionByteLimitMutex());
+        TestShortIoControl& control = testIoUringCompletionByteLimitControl();
+        if (!control.limitBytes.has_value() || !testIoOperationMatches(control.operation, request.op)) {
+            return;
+        }
+        if (control.matchingOperationsToSkip > 0) {
+            --control.matchingOperationsToSkip;
+            return;
+        }
+
+        request.testCompletionByteLimit = *control.limitBytes;
+        control.limitBytes.reset();
+    }
+
+    static void limitIoUringCompletionBytesForTest(ExactIoRequest& request, Completion& completion) {
+        if (!request.testCompletionByteLimit.has_value() || completion.responseCode <= 0) {
+            return;
+        }
+
+        const std::uint32_t completedBytes = static_cast<std::uint32_t>(completion.responseCode);
+        const std::uint32_t limitBytes = *request.testCompletionByteLimit;
+        if (completedBytes <= limitBytes || request.submittedBytes <= limitBytes) {
+            request.testCompletionByteLimit.reset();
+            return;
+        }
+
+        completion.responseCode = static_cast<int>(limitBytes);
+        request.testCompletionByteLimit.reset();
+        std::lock_guard<std::mutex> guard(testIoUringCompletionByteLimitMutex());
+        ++testIoUringCompletionByteLimitControl().hitCount;
     }
 
     static bool& testDirectOpenUnavailable() {

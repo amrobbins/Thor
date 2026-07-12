@@ -4,6 +4,8 @@
 #include "Utilities/TarFile/UringDirect.h"
 
 #include <cstdint>
+#include <cstddef>
+#include <array>
 #include <deque>
 #include <cstdlib>
 #include <chrono>
@@ -25,6 +27,36 @@
 namespace fs = std::filesystem;
 using namespace ThorImplementation;
 using namespace std;
+
+class ScopedEnvironmentVariable {
+   public:
+    ScopedEnvironmentVariable(const char* name, const char* value) : name_(name) {
+        const char* previous = std::getenv(name);
+        if (previous != nullptr) {
+            previous_ = previous;
+        }
+        if (value == nullptr) {
+            ::unsetenv(name_.c_str());
+        } else {
+            ::setenv(name_.c_str(), value, /*overwrite=*/1);
+        }
+    }
+
+    ~ScopedEnvironmentVariable() {
+        if (previous_.has_value()) {
+            ::setenv(name_.c_str(), previous_.value().c_str(), /*overwrite=*/1);
+        } else {
+            ::unsetenv(name_.c_str());
+        }
+    }
+
+    ScopedEnvironmentVariable(const ScopedEnvironmentVariable&) = delete;
+    ScopedEnvironmentVariable& operator=(const ScopedEnvironmentVariable&) = delete;
+
+   private:
+    std::string name_;
+    std::optional<std::string> previous_;
+};
 
 static std::string makeTmpPrefix(const std::string& stem) {
     static int counter = 0;
@@ -166,6 +198,35 @@ static void readEntireFileIntoDirect(void* dst, uint64_t bytes, const std::strin
     if (off != bytes) {
         throw std::runtime_error("readEntireFileIntoDirect: short read: " + path + " read=" + std::to_string(off) +
                                  " expected=" + std::to_string(bytes));
+    }
+}
+
+TEST(UringDirect, SubsystemBackendOverrideTakesPrecedenceOverGlobalBackend) {
+    ScopedEnvironmentVariable globalBackend("THOR_IO_BACKEND", "pread_buffered");
+    ScopedEnvironmentVariable datasetBackend("THOR_DATASET_IO_BACKEND", "pread_direct");
+
+    EXPECT_EQ(UringDirect::ioBackendFromEnv(), UringDirect::IoBackend::PreadBuffered);
+    EXPECT_EQ(UringDirect::ioBackendFromEnv("THOR_DATASET_IO_BACKEND"), UringDirect::IoBackend::PreadDirect);
+}
+
+TEST(UringDirect, MissingSubsystemBackendOverrideFallsBackToGlobalBackend) {
+    ScopedEnvironmentVariable globalBackend("THOR_IO_BACKEND", "pread_direct");
+    ScopedEnvironmentVariable tarReadBackend("THOR_TAR_READ_IO_BACKEND", nullptr);
+
+    EXPECT_EQ(UringDirect::ioBackendFromEnv("THOR_TAR_READ_IO_BACKEND"), UringDirect::IoBackend::PreadDirect);
+}
+
+TEST(UringDirect, InvalidSubsystemBackendNamesTheSpecificEnvironmentVariable) {
+    ScopedEnvironmentVariable globalBackend("THOR_IO_BACKEND", "pread_direct");
+    ScopedEnvironmentVariable tarWriteBackend("THOR_TAR_WRITE_IO_BACKEND", "not_a_backend");
+
+    try {
+        (void)UringDirect::ioBackendFromEnv("THOR_TAR_WRITE_IO_BACKEND");
+        FAIL() << "Expected invalid subsystem backend to throw.";
+    } catch (const std::runtime_error& error) {
+        const std::string message = error.what();
+        EXPECT_NE(message.find("THOR_TAR_WRITE_IO_BACKEND"), std::string::npos);
+        EXPECT_NE(message.find("not_a_backend"), std::string::npos);
     }
 }
 
@@ -699,6 +760,7 @@ class ScopedUringDirectCompatibilityTestHooks {
    public:
     ScopedUringDirectCompatibilityTestHooks(std::optional<int> queueInitResult, bool directOpenUnavailable) {
         UringDirect::testResetCompatibilityWarning();
+        UringDirect::testResetIoUringShortIoHooks();
         UringDirect::testSetIoUringQueueInitResult(queueInitResult);
         UringDirect::testSetDirectOpenUnavailable(directOpenUnavailable);
     }
@@ -706,10 +768,19 @@ class ScopedUringDirectCompatibilityTestHooks {
         UringDirect::testSetIoUringQueueInitResult(std::nullopt);
         UringDirect::testSetDirectOpenUnavailable(false);
         UringDirect::testSetIoUringRegisterBuffersResult(std::nullopt);
-        UringDirect::testSetNextIoUringSubmissionByteLimit(std::nullopt);
+        UringDirect::testResetIoUringShortIoHooks();
         UringDirect::testResetFallbackWorkerBlock();
         UringDirect::testResetCompatibilityWarning();
     }
+};
+
+class ScopedUringDirectShortIoHooks {
+   public:
+    ScopedUringDirectShortIoHooks() { UringDirect::testResetIoUringShortIoHooks(); }
+    ~ScopedUringDirectShortIoHooks() { UringDirect::testResetIoUringShortIoHooks(); }
+
+    ScopedUringDirectShortIoHooks(const ScopedUringDirectShortIoHooks&) = delete;
+    ScopedUringDirectShortIoHooks& operator=(const ScopedUringDirectShortIoHooks&) = delete;
 };
 
 static void runExplicitPreadBackendFixedReadWriteRoundTrip(UringDirect::IoBackend backend, const char* expectedBackendName, const std::string& stem) {
@@ -1091,10 +1162,199 @@ TEST(UringDirect, SubmitReadvCachedHandlesShortIoUringCompletions) {
     auto completions = reader.waitCompletionsInOrder(1);
     ASSERT_EQ(completions.size(), 1u);
     EXPECT_EQ(completions[0].responseCode, 32);
+    EXPECT_EQ(UringDirect::testGetIoUringSubmissionByteLimitHitCount(), 1u);
 
     EXPECT_TRUE(std::equal(first.begin(), first.end(), fileBytes.begin() + 23));
     EXPECT_TRUE(std::equal(second.begin(), second.end(), fileBytes.begin() + 23 + first.size()));
     EXPECT_TRUE(std::equal(third.begin(), third.end(), fileBytes.begin() + 23 + first.size() + second.size()));
+}
+
+TEST(UringDirect, FixedWritesHandleInjectedShortCompletionWithLaterRequestsInFlight) {
+    ScopedUringDirectShortIoHooks hooks;
+
+    constexpr uint32_t kOperationCount = 4;
+    constexpr uint32_t kBytesPerOperation = 64 * 4096;
+    constexpr uint64_t kTotalBytes = static_cast<uint64_t>(kOperationCount) * kBytesPerOperation;
+
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
+    TensorDescriptor descriptor(DataType::UINT8, {kBytesPerOperation});
+    std::array<Tensor, kOperationCount> buffers;
+    std::vector<uint8_t> expected(kTotalBytes);
+    for (uint32_t operation = 0; operation < kOperationCount; ++operation) {
+        buffers[operation] = Tensor(cpuPlacement, descriptor, 4096);
+        uint8_t* buffer = buffers[operation].getMemPtr<uint8_t>();
+        ASSERT_NE(buffer, nullptr);
+        for (uint32_t i = 0; i < kBytesPerOperation; ++i) {
+            const uint8_t value = static_cast<uint8_t>((operation * 73u + i * 29u + 17u) & 0xFFu);
+            buffer[i] = value;
+            expected[static_cast<uint64_t>(operation) * kBytesPerOperation + i] = value;
+        }
+    }
+
+    const std::string filename = makeTmpPrefix("fixed_write_injected_short_completion");
+    ScopedUnlink cleanup(filename);
+
+    UringDirect writer(/*queueDepth=*/4, UringDirect::IoBackend::Auto);
+    std::vector<void*> bufferPointers;
+    std::vector<std::size_t> bufferLengths;
+    for (Tensor& buffer : buffers) {
+        bufferPointers.push_back(buffer.getMemPtr());
+        bufferLengths.push_back(kBytesPerOperation);
+    }
+    writer.registerReusableBuffers(bufferPointers, bufferLengths);
+    writer.registerDumpFile(filename);
+    if (std::string(writer.activeBackendName()) != "uring_direct") {
+        GTEST_SKIP() << "io_uring unavailable in this runtime; active backend is " << writer.activeBackendName();
+    }
+
+    // Select the second queued write. Later writes are already in flight when its
+    // first CQE is reported as short, which exercises continuation plus ordered
+    // completion delivery rather than a single isolated request.
+    UringDirect::testSetNextIoUringCompletionByteLimitForOperation(
+        /*limitBytes=*/4096, UringDirect::TestIoOperation::Write, /*matchingOperationsToSkip=*/1);
+
+    for (uint32_t operation = 0; operation < kOperationCount; ++operation) {
+        ASSERT_TRUE(writer.submitWriteFixed(operation,
+                                            static_cast<uint64_t>(operation) * kBytesPerOperation,
+                                            kBytesPerOperation,
+                                            /*bufOffsetBytes=*/0));
+    }
+    EXPECT_GE(writer.submit(), 1);
+
+    const std::vector<UringDirect::Completion> completions = writer.waitCompletionsInOrder(kOperationCount);
+    ASSERT_EQ(completions.size(), kOperationCount);
+    for (const UringDirect::Completion& completion : completions) {
+        EXPECT_EQ(completion.responseCode, static_cast<int>(kBytesPerOperation));
+    }
+    EXPECT_EQ(UringDirect::testGetIoUringCompletionByteLimitHitCount(), 1u);
+
+    EXPECT_EQ(writer.finishDumpedFile(false).responseCode, 0);
+    ASSERT_EQ(fileSizeBytes(filename), kTotalBytes);
+
+    std::vector<uint8_t> actual(kTotalBytes);
+    readEntireFileInto(actual.data(), actual.size(), filename);
+    EXPECT_EQ(actual, expected);
+}
+
+TEST(UringDirect, FixedReadsHandleInjectedShortCompletionWithLaterRequestsInFlight) {
+    ScopedUringDirectShortIoHooks hooks;
+
+    constexpr uint32_t kOperationCount = 4;
+    constexpr uint32_t kBytesPerOperation = 64 * 4096;
+    constexpr uint64_t kTotalBytes = static_cast<uint64_t>(kOperationCount) * kBytesPerOperation;
+
+    const std::string filename = makeTmpPrefix("fixed_read_injected_short_completion");
+    ScopedUnlink cleanup(filename);
+    std::vector<uint8_t> expected(kTotalBytes);
+    for (uint64_t i = 0; i < kTotalBytes; ++i) {
+        expected[i] = static_cast<uint8_t>((i * 31u + (i / kBytesPerOperation) * 47u + 23u) & 0xFFu);
+    }
+    {
+        std::ofstream out(filename, std::ios::binary);
+        ASSERT_TRUE(out.good());
+        out.write(reinterpret_cast<const char*>(expected.data()), static_cast<std::streamsize>(expected.size()));
+        ASSERT_TRUE(out.good());
+    }
+
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
+    TensorDescriptor descriptor(DataType::UINT8, {kBytesPerOperation});
+    std::array<Tensor, kOperationCount> buffers;
+    std::vector<void*> bufferPointers;
+    std::vector<std::size_t> bufferLengths;
+    for (Tensor& buffer : buffers) {
+        buffer = Tensor(cpuPlacement, descriptor, 4096);
+        std::memset(buffer.getMemPtr(), 0xCD, kBytesPerOperation);
+        bufferPointers.push_back(buffer.getMemPtr());
+        bufferLengths.push_back(kBytesPerOperation);
+    }
+
+    UringDirect reader(/*queueDepth=*/4, UringDirect::IoBackend::Auto);
+    reader.registerReusableBuffers(bufferPointers, bufferLengths);
+    reader.registerLoadFile(filename);
+    if (std::string(reader.activeBackendName()) != "uring_direct") {
+        GTEST_SKIP() << "io_uring unavailable in this runtime; active backend is " << reader.activeBackendName();
+    }
+
+    UringDirect::testSetNextIoUringCompletionByteLimitForOperation(
+        /*limitBytes=*/4096, UringDirect::TestIoOperation::Read, /*matchingOperationsToSkip=*/1);
+
+    for (uint32_t operation = 0; operation < kOperationCount; ++operation) {
+        ASSERT_TRUE(reader.submitReadFixed(operation,
+                                           static_cast<uint64_t>(operation) * kBytesPerOperation,
+                                           kBytesPerOperation,
+                                           /*bufOffsetBytes=*/0));
+    }
+    EXPECT_GE(reader.submit(), 1);
+
+    const std::vector<UringDirect::Completion> completions = reader.waitCompletionsInOrder(kOperationCount);
+    ASSERT_EQ(completions.size(), kOperationCount);
+    for (const UringDirect::Completion& completion : completions) {
+        EXPECT_EQ(completion.responseCode, static_cast<int>(kBytesPerOperation));
+    }
+    EXPECT_EQ(UringDirect::testGetIoUringCompletionByteLimitHitCount(), 1u);
+
+    for (uint32_t operation = 0; operation < kOperationCount; ++operation) {
+        const uint8_t* actual = buffers[operation].getMemPtr<uint8_t>();
+        const auto expectedBegin = expected.begin() + static_cast<std::ptrdiff_t>(operation * kBytesPerOperation);
+        EXPECT_TRUE(std::equal(actual, actual + kBytesPerOperation, expectedBegin));
+    }
+}
+
+TEST(UringDirect, FixedReadWritePreservesDataBeyondFourGiBFileOffset) {
+    ScopedUringDirectShortIoHooks hooks;
+
+    constexpr uint32_t kBytes = 4096;
+    constexpr uint64_t kFileOffset = (uint64_t{4} << 30) + 3 * kBytes;
+
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
+    Tensor writeBuffer(cpuPlacement, TensorDescriptor(DataType::UINT8, {kBytes}), 4096);
+    Tensor readBuffer(cpuPlacement, TensorDescriptor(DataType::UINT8, {kBytes}), 4096);
+    uint8_t* writeBytes = writeBuffer.getMemPtr<uint8_t>();
+    uint8_t* readBytes = readBuffer.getMemPtr<uint8_t>();
+    ASSERT_NE(writeBytes, nullptr);
+    ASSERT_NE(readBytes, nullptr);
+    for (uint32_t i = 0; i < kBytes; ++i) {
+        writeBytes[i] = static_cast<uint8_t>((i * 43u + 91u) & 0xFFu);
+        readBytes[i] = 0;
+    }
+
+    const std::string filename = makeTmpPrefix("fixed_io_beyond_four_gib");
+    ScopedUnlink cleanup(filename);
+
+    {
+        UringDirect writer(/*queueDepth=*/4, UringDirect::IoBackend::Auto);
+        writer.registerReusableBuffers({writeBuffer.getMemPtr()}, {kBytes});
+        writer.registerDumpFile(filename);
+        if (std::string(writer.activeBackendName()) != "uring_direct") {
+            GTEST_SKIP() << "io_uring unavailable in this runtime; active backend is " << writer.activeBackendName();
+        }
+
+        ASSERT_TRUE(writer.submitWriteFixed(/*bufIndex=*/0, kFileOffset, kBytes, /*bufOffsetBytes=*/0));
+        EXPECT_GE(writer.submit(), 1);
+        const auto completions = writer.waitCompletionsInOrder(1);
+        ASSERT_EQ(completions.size(), 1u);
+        EXPECT_EQ(completions[0].responseCode, static_cast<int>(kBytes));
+        EXPECT_EQ(writer.finishDumpedFile(false).responseCode, 0);
+    }
+
+    ASSERT_EQ(fileSizeBytes(filename), kFileOffset + kBytes);
+
+    {
+        UringDirect reader(/*queueDepth=*/4, UringDirect::IoBackend::Auto);
+        reader.registerReusableBuffers({readBuffer.getMemPtr()}, {kBytes});
+        reader.registerLoadFile(filename);
+        if (std::string(reader.activeBackendName()) != "uring_direct") {
+            GTEST_SKIP() << "io_uring unavailable in this runtime; active backend is " << reader.activeBackendName();
+        }
+
+        ASSERT_TRUE(reader.submitReadFixed(/*bufIndex=*/0, kFileOffset, kBytes, /*bufOffsetBytes=*/0));
+        EXPECT_GE(reader.submit(), 1);
+        const auto completions = reader.waitCompletionsInOrder(1);
+        ASSERT_EQ(completions.size(), 1u);
+        EXPECT_EQ(completions[0].responseCode, static_cast<int>(kBytes));
+    }
+
+    EXPECT_TRUE(std::equal(writeBytes, writeBytes + kBytes, readBytes));
 }
 
 TEST(UringDirect, FinishDumpedFileRejectsUndrainedWriteCompletions) {

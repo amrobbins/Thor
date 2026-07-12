@@ -56,16 +56,20 @@ class ScopedEnvVar {
     std::optional<std::string> previous_;
 };
 
-class ScopedIoUringSubmissionByteLimit {
+class ScopedIoUringCompletionByteLimit {
    public:
-    explicit ScopedIoUringSubmissionByteLimit(std::optional<std::uint32_t> limitBytes) {
-        UringDirect::testSetNextIoUringSubmissionByteLimit(limitBytes);
+    explicit ScopedIoUringCompletionByteLimit(std::optional<std::uint32_t> limitBytes,
+                                              UringDirect::TestIoOperation operation = UringDirect::TestIoOperation::Any,
+                                              std::uint64_t matchingOperationsToSkip = 0) {
+        UringDirect::testSetNextIoUringCompletionByteLimitForOperation(limitBytes, operation, matchingOperationsToSkip);
     }
 
-    ~ScopedIoUringSubmissionByteLimit() { UringDirect::testSetNextIoUringSubmissionByteLimit(std::nullopt); }
+    ~ScopedIoUringCompletionByteLimit() { UringDirect::testResetIoUringShortIoHooks(); }
 
-    ScopedIoUringSubmissionByteLimit(const ScopedIoUringSubmissionByteLimit&) = delete;
-    ScopedIoUringSubmissionByteLimit& operator=(const ScopedIoUringSubmissionByteLimit&) = delete;
+    std::uint64_t hitCount() const { return UringDirect::testGetIoUringCompletionByteLimitHitCount(); }
+
+    ScopedIoUringCompletionByteLimit(const ScopedIoUringCompletionByteLimit&) = delete;
+    ScopedIoUringCompletionByteLimit& operator=(const ScopedIoUringCompletionByteLimit&) = delete;
 };
 
 std::filesystem::path uniqueTempPath(const std::string& prefix) {
@@ -93,12 +97,14 @@ bool isUnavailableExplicitUringDirect(const BackendCase& backend, const std::str
 
 std::string outputName(uint32_t index) { return "prediction_" + std::to_string(index); }
 
-std::shared_ptr<Network> buildManyOutputMemberNetwork(const std::string& networkName, uint32_t outputCount) {
+std::shared_ptr<Network> buildManyOutputMemberNetwork(const std::string& networkName,
+                                                      uint32_t inputFeatureCount,
+                                                      uint32_t outputCount) {
     auto network = std::make_shared<Network>(networkName);
     NetworkInput input = NetworkInput::Builder()
                              .network(*network)
                              .name("features")
-                             .dimensions({8})
+                             .dimensions({inputFeatureCount})
                              .dataType(DataType::FP32)
                              .build();
 
@@ -126,7 +132,10 @@ std::shared_ptr<Network> buildManyOutputMemberNetwork(const std::string& network
     return network;
 }
 
-TrainingRunsResult makeSavedManyOutputEnsembleMembers(const std::filesystem::path& root, uint32_t memberCount, uint32_t outputCount) {
+TrainingRunsResult makeSavedManyOutputEnsembleMembers(const std::filesystem::path& root,
+                                                       uint32_t memberCount,
+                                                       uint32_t inputFeatureCount,
+                                                       uint32_t outputCount) {
     std::vector<TrainingRunResult> runResults;
     std::vector<TrainingEnsembleMemberResult> members;
     runResults.reserve(memberCount);
@@ -137,7 +146,7 @@ TrainingRunsResult makeSavedManyOutputEnsembleMembers(const std::filesystem::pat
         const std::string networkName = "ensemble_crc_member_" + std::to_string(memberIndex);
         const std::filesystem::path memberDir = root / runName;
         std::filesystem::create_directories(memberDir);
-        buildManyOutputMemberNetwork(networkName, outputCount)->save(memberDir.string(), /*overwrite=*/true);
+        buildManyOutputMemberNetwork(networkName, inputFeatureCount, outputCount)->save(memberDir.string(), /*overwrite=*/true);
         std::ofstream(memberDir / "training_selection_metadata.json") << "{}\n";
 
         TrainingRunResult result = TrainingRunResult::completedResult(
@@ -153,7 +162,7 @@ TrainingRunsResult makeSavedManyOutputEnsembleMembers(const std::filesystem::pat
     ensemble.ensembleGroup = "demand";
     ensemble.minSuccessfulModels = memberCount;
     ensemble.members = std::move(members);
-    ensemble.inputSignature = {TrainingRunInputSignature{"features", {0, 8}, "FP32", true}};
+    ensemble.inputSignature = {TrainingRunInputSignature{"features", {0, inputFeatureCount}, "FP32", true}};
     for (uint32_t i = 0; i < outputCount; ++i) {
         ensemble.outputSignature.push_back(TrainingRunOutputSignature{outputName(i), {0, 1}, "FP32"});
     }
@@ -193,12 +202,14 @@ TEST_P(TrainingRunsEnsembleArtifactIoBackendRegression, DISABLED_SaveEnsembleThe
     // tensors through TarWriter, then an immediate Network::load()->place() scans the archive
     // and reloads those parameter tensors through TarReader.
     constexpr uint32_t kMemberCount = 3;
+    constexpr uint32_t kInputFeatureCount = 8;
     constexpr uint32_t kOutputCount = 192;
     const std::filesystem::path root = uniqueTempPath(std::string("thor-training-runs-ensemble-artifact-crc-") + backend.displayName);
     const std::filesystem::path ensembleDir = root / "ensemble";
 
     try {
-        TrainingRunsResult results = makeSavedManyOutputEnsembleMembers(root, kMemberCount, kOutputCount);
+        TrainingRunsResult results =
+            makeSavedManyOutputEnsembleMembers(root, kMemberCount, kInputFeatureCount, kOutputCount);
         const std::string savedPath = results.saveEnsemble("demand", ensembleDir.string(), "mean", /*overwrite=*/true);
         EXPECT_EQ(savedPath, ensembleDir.string());
 
@@ -223,24 +234,32 @@ TEST_P(TrainingRunsEnsembleArtifactIoBackendRegression, DISABLED_SaveEnsembleThe
 //   --gtest_also_run_disabled_tests
 //   --gtest_filter=TrainingRunsEnsembleArtifactShortIoRegression.DISABLED_*
 TEST(TrainingRunsEnsembleArtifactShortIoRegression, DISABLED_ShortUringWriteDuringSaveEnsembleStillLoadsAndPlaces) {
-    ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "uring_direct");
-
-    // This is the closest regression to the production SKU failure: the saved ensemble
-    // artifact is written through uring_direct, then immediately scanned by Network::load()
-    // and placed for inference. Without exact-I/O handling, a positive short write can be
-    // accepted as a completed archive payload write, and the subsequent load fails later
-    // with a TarReader CRC mismatch.
+    // This is the closest regression to the production SKU failure.  Member artifacts
+    // and the verification read use pread_direct so the only fault-injected phase is
+    // the final ensemble archive write.  The 4096-feature FC weights are 16 KiB each,
+    // guaranteeing that a 4 KiB completion limit represents a real positive short CQE.
     constexpr uint32_t kMemberCount = 3;
-    constexpr uint32_t kOutputCount = 192;
+    constexpr uint32_t kInputFeatureCount = 4096;
+    constexpr uint32_t kOutputCount = 16;
     const std::filesystem::path root = uniqueTempPath("thor-training-runs-ensemble-artifact-short-write");
     const std::filesystem::path ensembleDir = root / "ensemble";
 
     try {
-        TrainingRunsResult results = makeSavedManyOutputEnsembleMembers(root, kMemberCount, kOutputCount);
-        ScopedIoUringSubmissionByteLimit shortFirstIoUringSubmission(/*limitBytes=*/4096);
-        const std::string savedPath = results.saveEnsemble("demand", ensembleDir.string(), "mean", /*overwrite=*/true);
-        EXPECT_EQ(savedPath, ensembleDir.string());
+        ScopedEnvVar memberBackend("THOR_IO_BACKEND", "pread_direct");
+        TrainingRunsResult results =
+            makeSavedManyOutputEnsembleMembers(root, kMemberCount, kInputFeatureCount, kOutputCount);
 
+        {
+            ScopedEnvVar writeBackend("THOR_IO_BACKEND", "uring_direct");
+            ScopedIoUringCompletionByteLimit shortIoUringWrite(/*limitBytes=*/4096,
+                                                               UringDirect::TestIoOperation::Write);
+            const std::string savedPath = results.saveEnsemble("demand", ensembleDir.string(), "mean", /*overwrite=*/true);
+            EXPECT_EQ(savedPath, ensembleDir.string());
+            ASSERT_EQ(shortIoUringWrite.hitCount(), 1u)
+                << "The intended final ensemble archive short-write completion was not exercised.";
+        }
+
+        ScopedEnvVar verificationBackend("THOR_IO_BACKEND", "pread_direct");
         loadAndPlaceSavedEnsemble(ensembleDir);
     } catch (const std::runtime_error& e) {
         std::filesystem::remove_all(root);
@@ -257,24 +276,29 @@ TEST(TrainingRunsEnsembleArtifactShortIoRegression, DISABLED_ShortUringWriteDuri
 }
 
 TEST(TrainingRunsEnsembleArtifactShortIoRegression, DISABLED_ShortUringReadDuringImmediateLoadAndPlaceStillSucceeds) {
-    ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "uring_direct");
-
-    // This covers the complementary production-facing path: the artifact bytes are good,
-    // but a short uring_direct read occurs while Network::load()/place() scans or reads the
-    // archive. The reader must retry the remaining bytes instead of surfacing a false CRC
-    // mismatch from a partial in-memory payload.
+    // This is the complementary reader isolation test.  The complete ensemble artifact
+    // is produced with pread_direct, then only Network::load()/place() uses uring_direct.
+    // A 16 KiB parameter payload guarantees that the injected 4 KiB CQE is truly short.
     constexpr uint32_t kMemberCount = 3;
-    constexpr uint32_t kOutputCount = 192;
+    constexpr uint32_t kInputFeatureCount = 4096;
+    constexpr uint32_t kOutputCount = 16;
     const std::filesystem::path root = uniqueTempPath("thor-training-runs-ensemble-artifact-short-read");
     const std::filesystem::path ensembleDir = root / "ensemble";
 
     try {
-        TrainingRunsResult results = makeSavedManyOutputEnsembleMembers(root, kMemberCount, kOutputCount);
-        const std::string savedPath = results.saveEnsemble("demand", ensembleDir.string(), "mean", /*overwrite=*/true);
-        EXPECT_EQ(savedPath, ensembleDir.string());
+        {
+            ScopedEnvVar writeBackend("THOR_IO_BACKEND", "pread_direct");
+            TrainingRunsResult results =
+                makeSavedManyOutputEnsembleMembers(root, kMemberCount, kInputFeatureCount, kOutputCount);
+            const std::string savedPath = results.saveEnsemble("demand", ensembleDir.string(), "mean", /*overwrite=*/true);
+            EXPECT_EQ(savedPath, ensembleDir.string());
+        }
 
-        ScopedIoUringSubmissionByteLimit shortFirstIoUringSubmission(/*limitBytes=*/4096);
+        ScopedEnvVar readBackend("THOR_IO_BACKEND", "uring_direct");
+        ScopedIoUringCompletionByteLimit shortIoUringRead(/*limitBytes=*/4096, UringDirect::TestIoOperation::Read);
         loadAndPlaceSavedEnsemble(ensembleDir);
+        ASSERT_EQ(shortIoUringRead.hitCount(), 1u)
+            << "The intended immediate ensemble archive short-read completion was not exercised.";
     } catch (const std::runtime_error& e) {
         std::filesystem::remove_all(root);
         if (isUnavailableExplicitUringDirect(BackendCase{"uring_direct", "uring_direct"}, e.what())) {
