@@ -4,7 +4,7 @@
 
 #include <memory>
 
-class IndexedLocalNamedExampleReader;
+class IndexedDatasetReader;
 
 namespace Thor {
 class FileDataset;
@@ -16,7 +16,7 @@ namespace ThorImplementation {
 class FileDatasetRuntimeAccess {
    public:
     [[nodiscard]] static const DatasetLayout &layout(const Thor::FileDataset &dataset);
-    [[nodiscard]] static const std::shared_ptr<IndexedLocalNamedExampleReader> &reader(
+    [[nodiscard]] static const std::shared_ptr<IndexedDatasetReader> &reader(
         const Thor::FileDataset &dataset);
 };
 

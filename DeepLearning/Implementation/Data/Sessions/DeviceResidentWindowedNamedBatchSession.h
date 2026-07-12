@@ -5,7 +5,7 @@
 #include "DeepLearning/Implementation/Data/Residency/DeviceDatasetResidency.h"
 #include "Utilities/Common/Stream.h"
 #include "DeepLearning/Implementation/Data/Residency/DeviceResidentNamedDataset.h"
-#include "Utilities/Loaders/IndexedLocalNamedExampleReader.h"
+#include "Utilities/Data/Readers/IndexedDatasetReader.h"
 #include "Utilities/Random/FullPeriodRandom.h"
 
 #include <atomic>
@@ -73,7 +73,7 @@ class DeviceResidentWindowedNamedBatchSession : public Thor::BatchSession {
         ThorImplementation::Tensor rowIndicesHost;
         ThorImplementation::Tensor rowIndicesDevice;
         std::unique_ptr<FullPeriodRandom> randomizer;
-        std::unique_ptr<IndexedLocalNamedExampleReader::Session> readerSession;
+        std::unique_ptr<IndexedDatasetReader::Session> readerSession;
         uint64_t nextBatchNum = 0;
         uint64_t nextLogicalPosition = 0;
         mutable std::mutex mutex;
@@ -88,7 +88,7 @@ class DeviceResidentWindowedNamedBatchSession : public Thor::BatchSession {
     Thor::DatasetMaterializationDescription datasetDescription;
     Thor::DeviceDatasetSessionDescription sessionDescription;
     std::set<Thor::DatasetFieldId> requiredFieldIds;
-    std::shared_ptr<IndexedLocalNamedExampleReader> reader;
+    std::shared_ptr<IndexedDatasetReader> reader;
     Thor::DeviceDatasetLease windowedDataset;
     uint64_t batchQueueDepth = 0;
     uint64_t readerQueueDepth = 0;

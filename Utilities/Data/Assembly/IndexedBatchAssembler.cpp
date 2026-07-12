@@ -1,4 +1,4 @@
-#include "Utilities/Loaders/IndexedLocalNamedBatchAssembler.h"
+#include "Utilities/Data/Assembly/IndexedBatchAssembler.h"
 
 #include <algorithm>
 #include <chrono>
@@ -54,7 +54,7 @@ uint64_t computeDefaultShardReadQueueDepth(uint64_t exampleSizeInBytes, uint64_t
     const uint64_t safeExampleSize = std::max<uint64_t>(exampleSizeInBytes, 1);
     const uint64_t byteTargetDepth = clampUint64(TARGET_READ_BYTES / safeExampleSize, MIN_READS, LEGACY_MAX_READS);
 
-    // The indexed named reader uses one assembler worker per batch and the async
+    // The indexed dataset reader uses one assembler worker per batch and the async
     // readv session owns a bounded pool of reusable iovec arrays per shard.
     // If this queue is smaller than the batch, the worker can exhaust the pool
     // while still in the submit loop and spend most of the batch load time
@@ -66,7 +66,7 @@ uint64_t computeDefaultShardReadQueueDepth(uint64_t exampleSizeInBytes, uint64_t
 uint64_t computeShardReadQueueDepth(uint64_t exampleSizeInBytes, uint64_t batchSize) {
     const uint64_t defaultDepth = computeDefaultShardReadQueueDepth(exampleSizeInBytes, batchSize);
     return parsePositiveUint64Env(
-        "THOR_INDEXED_LOCAL_NAMED_LOADER_SHARD_READ_QUEUE_DEPTH", "THOR_INDEXED_LOCAL_NAMED_READER_SHARD_READ_QUEUE_DEPTH", defaultDepth);
+        "THOR_INDEXED_DATASET_READER_QUEUE_DEPTH", nullptr, defaultDepth);
 }
 
 uint64_t computeCompletedBatchQueueDepth(uint64_t batchQueueDepth) {
@@ -81,7 +81,7 @@ uint64_t computeLoadWorkerThreadCount(uint64_t batchSize) {
         hardwareThreads == 0 ? uint64_t{4} : std::max<uint64_t>(1, static_cast<uint64_t>(hardwareThreads) / 3);
     const uint64_t defaultWorkers = clampUint64(conservativeHardwareDefault, 1, std::min<uint64_t>(batchSize, 4));
     const uint64_t requestedWorkers =
-        parsePositiveUint64Env("THOR_INDEXED_LOCAL_NAMED_LOADER_LOAD_WORKERS", "THOR_INDEXED_LOCAL_NAMED_LOADER_WORKERS", defaultWorkers);
+        parsePositiveUint64Env("THOR_INDEXED_BATCH_ASSEMBLER_LOAD_WORKERS", nullptr, defaultWorkers);
     return clampUint64(requestedWorkers, 1, batchSize);
 }
 
@@ -103,7 +103,7 @@ using SteadyClock = std::chrono::steady_clock;
 
 bool diagnosticsTimingEnabled() {
     static const bool enabled = [] {
-        const char *specific = std::getenv("THOR_INDEXED_LOCAL_NAMED_LOADER_DIAGNOSTICS");
+        const char *specific = std::getenv("THOR_INDEXED_BATCH_ASSEMBLER_DIAGNOSTICS");
         if (specific != nullptr && specific[0] != '\0') {
             return !(specific[0] == '0' && specific[1] == '\0');
         }
@@ -132,11 +132,11 @@ uint64_t elapsedNanoseconds(SteadyClock::time_point start, SteadyClock::time_poi
 
 bool statsLoggingEnabled() {
     static const bool enabled = [] {
-        const char *specific = std::getenv("THOR_INDEXED_LOCAL_NAMED_LOADER_STATS");
+        const char *specific = std::getenv("THOR_INDEXED_BATCH_ASSEMBLER_STATS");
         if (specific != nullptr && specific[0] != '\0') {
             return !(specific[0] == '0' && specific[1] == '\0');
         }
-        const char *diagnostics = std::getenv("THOR_INDEXED_LOCAL_NAMED_LOADER_DIAGNOSTICS");
+        const char *diagnostics = std::getenv("THOR_INDEXED_BATCH_ASSEMBLER_DIAGNOSTICS");
         if (diagnostics != nullptr && diagnostics[0] != '\0') {
             return !(diagnostics[0] == '0' && diagnostics[1] == '\0');
         }
@@ -148,7 +148,7 @@ bool statsLoggingEnabled() {
 
 uint64_t statsLoggingEvery() {
     static const uint64_t every = [] {
-        const char *value = std::getenv("THOR_INDEXED_LOCAL_NAMED_LOADER_STATS_EVERY");
+        const char *value = std::getenv("THOR_INDEXED_BATCH_ASSEMBLER_STATS_EVERY");
         if (value == nullptr || value[0] == '\0') {
             value = std::getenv("THOR_TRAINING_QUEUE_DIAGNOSTICS_EVERY");
         }
@@ -172,14 +172,15 @@ bool shouldEmitStats(uint64_t index) {
 
 }  // namespace
 
-IndexedLocalNamedBatchAssembler::IndexedLocalNamedBatchAssembler(std::shared_ptr<IndexedLocalNamedExampleReader> reader,
-                                                                 DatasetLayout layout,
-                                                                 std::shared_ptr<const Thor::ExampleIndexSet> indices,
-                                                                 std::string splitName,
-                                                                 uint64_t batchSize,
-                                                                 uint64_t batchQueueDepth,
-                                                                 bool randomized,
-                                                                 std::optional<uint64_t> seed)
+IndexedBatchAssembler::IndexedBatchAssembler(
+    std::shared_ptr<IndexedDatasetReader> reader,
+    DatasetLayout layout,
+    std::shared_ptr<const Thor::ExampleIndexSet> indices,
+    std::string splitName,
+    uint64_t batchSize,
+    uint64_t batchQueueDepth,
+    bool randomized,
+    std::optional<uint64_t> seed)
     : reader(std::move(reader)),
       layout(std::move(layout)),
       indices(std::move(indices)),
@@ -262,17 +263,17 @@ IndexedLocalNamedBatchAssembler::IndexedLocalNamedBatchAssembler(std::shared_ptr
     open();
 }
 
-IndexedLocalNamedBatchAssembler::~IndexedLocalNamedBatchAssembler() { close(); }
+IndexedBatchAssembler::~IndexedBatchAssembler() { close(); }
 
-void IndexedLocalNamedBatchAssembler::open() {
+void IndexedBatchAssembler::open() {
     try {
         THOR_THROW_IF_FALSE(loadWorkerThreads.empty());
         THOR_THROW_IF_FALSE(batchTensorQueues.empty());
 
-        loadWorkQueue.resize(checkedQueueDepth(loadWorkQueueDepth, "IndexedLocalNamedBatchAssembler load work"));
+        loadWorkQueue.resize(checkedQueueDepth(loadWorkQueueDepth, "IndexedBatchAssembler load work"));
         loadWorkQueue.open();
 
-        completedBatchQueue.resize(checkedQueueDepth(completedBatchQueueDepth, "IndexedLocalNamedBatchAssembler completed batch"));
+        completedBatchQueue.resize(checkedQueueDepth(completedBatchQueueDepth, "IndexedBatchAssembler completed batch"));
         completedBatchQueue.open();
 
         TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
@@ -283,20 +284,20 @@ void IndexedLocalNamedBatchAssembler::open() {
             batchTensorQueues.emplace(entry.first, std::move(queue));
         }
 
-        batchNumQueue.resize(checkedQueueDepth(batchQueueDepth, "IndexedLocalNamedBatchAssembler batch number"));
+        batchNumQueue.resize(checkedQueueDepth(batchQueueDepth, "IndexedBatchAssembler batch number"));
         batchNumQueue.open();
 
         for (uint64_t i = 0; i < loadWorkerThreadCount; ++i) {
-            loadWorkerThreads.emplace_back(&IndexedLocalNamedBatchAssembler::loadWorkerThread, this, i);
+            loadWorkerThreads.emplace_back(&IndexedBatchAssembler::loadWorkerThread, this, i);
         }
-        assemblerThread = std::thread(&IndexedLocalNamedBatchAssembler::batchAssemblerThread, this);
+        assemblerThread = std::thread(&IndexedBatchAssembler::batchAssemblerThread, this);
     } catch (...) {
         close();
         throw;
     }
 }
 
-void IndexedLocalNamedBatchAssembler::close() {
+void IndexedBatchAssembler::close() {
     loadWorkQueue.close();
     completedBatchQueue.close();
     for (auto &entry : batchTensorQueues) {
@@ -323,7 +324,7 @@ void IndexedLocalNamedBatchAssembler::close() {
     }
 }
 
-void IndexedLocalNamedBatchAssembler::recordWorkerException(std::exception_ptr exception) {
+void IndexedBatchAssembler::recordWorkerException(std::exception_ptr exception) {
     {
         std::lock_guard<std::mutex> guard(workerExceptionMutex);
         if (workerException == nullptr) {
@@ -341,7 +342,7 @@ void IndexedLocalNamedBatchAssembler::recordWorkerException(std::exception_ptr e
     batchNumQueue.close();
 }
 
-void IndexedLocalNamedBatchAssembler::throwIfWorkerFailed() const {
+void IndexedBatchAssembler::throwIfWorkerFailed() const {
     std::exception_ptr exception;
     {
         std::lock_guard<std::mutex> guard(workerExceptionMutex);
@@ -352,7 +353,7 @@ void IndexedLocalNamedBatchAssembler::throwIfWorkerFailed() const {
     }
 }
 
-void IndexedLocalNamedBatchAssembler::setResolvedIoBackend(const std::string &backendName) {
+void IndexedBatchAssembler::setResolvedIoBackend(const std::string &backendName) {
     std::lock_guard<std::mutex> guard(statsMutex);
     if (resolvedIoBackend == "unresolved" || resolvedIoBackend == backendName) {
         resolvedIoBackend = backendName;
@@ -361,8 +362,8 @@ void IndexedLocalNamedBatchAssembler::setResolvedIoBackend(const std::string &ba
     }
 }
 
-IndexedLocalNamedBatchAssemblerStats IndexedLocalNamedBatchAssembler::getStatsSnapshot() {
-    IndexedLocalNamedBatchAssemblerStats stats;
+IndexedBatchAssemblerStats IndexedBatchAssembler::getStatsSnapshot() {
+    IndexedBatchAssemblerStats stats;
     stats.splitName = splitName;
     stats.recordsRequested = statsRecordsRequested.load(std::memory_order_relaxed);
     stats.logicalRecordBytesRequested = statsLogicalRecordBytesRequested.load(std::memory_order_relaxed);
@@ -454,12 +455,12 @@ IndexedLocalNamedBatchAssemblerStats IndexedLocalNamedBatchAssembler::getStatsSn
     return stats;
 }
 
-void IndexedLocalNamedBatchAssembler::emitStatsIfEnabled(const char *event, uint64_t batchNum) {
+void IndexedBatchAssembler::emitStatsIfEnabled(const char *event, uint64_t batchNum) {
     if (!statsLoggingEnabled()) {
         return;
     }
 
-    const IndexedLocalNamedBatchAssemblerStats stats = getStatsSnapshot();
+    const IndexedBatchAssemblerStats stats = getStatsSnapshot();
     std::fprintf(
         stderr,
         "IndexedNamedBatchSession stats: event=%s split=%s batch=%lu "
@@ -581,12 +582,12 @@ void IndexedLocalNamedBatchAssembler::emitStatsIfEnabled(const char *event, uint
     std::fflush(stderr);
 }
 
-void IndexedLocalNamedBatchAssembler::validateGlobalIndex(uint64_t index, const char *context) const {
+void IndexedBatchAssembler::validateGlobalIndex(uint64_t index, const char *context) const {
     THOR_THROW_IF_FALSE(reader != nullptr);
     reader->validateGlobalIndex(index, context);
 }
 
-uint64_t IndexedLocalNamedBatchAssembler::nextLogicalSplitPosition() {
+uint64_t IndexedBatchAssembler::nextLogicalSplitPosition() {
     if (randomized) {
         THOR_THROW_IF_FALSE(randomizer != nullptr);
         return randomizer->getRandomNumber();
@@ -597,7 +598,7 @@ uint64_t IndexedLocalNamedBatchAssembler::nextLogicalSplitPosition() {
     return logicalPosition;
 }
 
-void IndexedLocalNamedBatchAssembler::loadWorkerThread(uint64_t workerIndex) {
+void IndexedBatchAssembler::loadWorkerThread(uint64_t workerIndex) {
     try {
         loadWorkerThreadMain(workerIndex);
     } catch (...) {
@@ -605,13 +606,13 @@ void IndexedLocalNamedBatchAssembler::loadWorkerThread(uint64_t workerIndex) {
     }
 }
 
-void IndexedLocalNamedBatchAssembler::loadWorkerThreadMain(uint64_t workerIndex) {
+void IndexedBatchAssembler::loadWorkerThreadMain(uint64_t workerIndex) {
     (void)workerIndex;
 
     auto session = reader->createSession(shardReadQueueDepth);
 
     auto flushReaderSessionStats = [&]() {
-        IndexedLocalNamedExampleReaderSessionStats sessionStats = session->takeStats();
+        IndexedDatasetReaderSessionStats sessionStats = session->takeStats();
         if (sessionStats.readCallsSubmitted != 0) {
             statsReadCallsSubmitted.fetch_add(sessionStats.readCallsSubmitted, std::memory_order_relaxed);
             statsReadBytesSubmitted.fetch_add(sessionStats.readBytesSubmitted, std::memory_order_relaxed);
@@ -717,7 +718,7 @@ void IndexedLocalNamedBatchAssembler::loadWorkerThreadMain(uint64_t workerIndex)
         }
     };
 
-    auto markLoadChunkComplete = [&](const IndexedLocalNamedBatchLoadWork &work) -> bool {
+    auto markLoadChunkComplete = [&](const IndexedBatchLoadWork &work) -> bool {
         THOR_THROW_IF_FALSE(work.batchState != nullptr);
         const uint64_t completedChunks = work.batchState->completedLoadChunks.fetch_add(1, std::memory_order_acq_rel) + 1;
         THOR_THROW_IF_FALSE(completedChunks <= work.batchState->expectedLoadChunks);
@@ -725,13 +726,13 @@ void IndexedLocalNamedBatchAssembler::loadWorkerThreadMain(uint64_t workerIndex)
             return true;
         }
 
-        IndexedLocalNamedCompletedBatch completed;
+        IndexedCompletedBatch completed;
         completed.batchOrdinal = work.batchOrdinal;
         return completedBatchQueue.push(completed);
     };
 
     while (true) {
-        IndexedLocalNamedBatchLoadWork work;
+        IndexedBatchLoadWork work;
         const SteadyClock::time_point popStart = diagnosticNow();
         if (!loadWorkQueue.pop(work)) {
             statsLoadWorkPopWaitNanoseconds.fetch_add(diagnosticElapsedNanoseconds(popStart), std::memory_order_relaxed);
@@ -778,7 +779,7 @@ void IndexedLocalNamedBatchAssembler::loadWorkerThreadMain(uint64_t workerIndex)
     }
 }
 
-void IndexedLocalNamedBatchAssembler::batchAssemblerThread() {
+void IndexedBatchAssembler::batchAssemblerThread() {
     try {
         batchAssemblerThreadMain();
     } catch (...) {
@@ -786,7 +787,7 @@ void IndexedLocalNamedBatchAssembler::batchAssemblerThread() {
     }
 }
 
-void IndexedLocalNamedBatchAssembler::batchAssemblerThreadMain() {
+void IndexedBatchAssembler::batchAssemblerThreadMain() {
     while (true) {
         while (pendingBatchCount() < batchQueueDepth) {
             // If there is already in-flight work, never block trying to acquire another
@@ -820,7 +821,7 @@ void IndexedLocalNamedBatchAssembler::batchAssemblerThreadMain() {
     }
 }
 
-bool IndexedLocalNamedBatchAssembler::canStartNextBatchWithoutBlocking() {
+bool IndexedBatchAssembler::canStartNextBatchWithoutBlocking() {
     for (const auto &entry : batchTensorQueues) {
         if (entry.second->isFull()) {
             return false;
@@ -829,9 +830,9 @@ bool IndexedLocalNamedBatchAssembler::canStartNextBatchWithoutBlocking() {
     return true;
 }
 
-bool IndexedLocalNamedBatchAssembler::startNextBatch() {
+bool IndexedBatchAssembler::startNextBatch() {
     statsStartBatchCalls.fetch_add(1, std::memory_order_relaxed);
-    auto batchState = std::make_shared<IndexedLocalNamedBatchState>();
+    auto batchState = std::make_shared<IndexedBatchState>();
     batchState->batchOrdinal = nextBatchOrdinal++;
     batchState->batchNum = nextBatchNum;
     batchState->expectedRecords = batchSize;
@@ -885,17 +886,17 @@ bool IndexedLocalNamedBatchAssembler::startNextBatch() {
     }
     for (uint8_t *basePointer : batchState->tensorBasePointers) {
         if (basePointer == nullptr) {
-            throw std::runtime_error("IndexedLocalNamedBatchAssembler failed to bind every reader tensor ordinal to a batch tensor.");
+            throw std::runtime_error("IndexedBatchAssembler failed to bind every reader tensor ordinal to a batch tensor.");
         }
     }
     for (uint64_t specIndex = 0; specIndex < layout.windowedTensors().size(); ++specIndex) {
         const DatasetLayout::WindowedTensorSpec &spec = layout.windowedTensors().at(specIndex);
         const uint64_t readerOrdinal = layoutWindowedTensorOrdinals.at(specIndex);
         if (batchState->windowedTensorBasePointers.at(readerOrdinal) == nullptr) {
-            throw std::runtime_error("IndexedLocalNamedBatchAssembler failed to bind every reader windowed tensor ordinal to a batch tensor.");
+            throw std::runtime_error("IndexedBatchAssembler failed to bind every reader windowed tensor ordinal to a batch tensor.");
         }
         if (spec.maskName.has_value() && batchState->windowedMaskBasePointers.at(readerOrdinal) == nullptr) {
-            throw std::runtime_error("IndexedLocalNamedBatchAssembler failed to bind every reader windowed mask ordinal to a batch tensor.");
+            throw std::runtime_error("IndexedBatchAssembler failed to bind every reader windowed mask ordinal to a batch tensor.");
         }
     }
     statsStartBatchTensorAcquireNanoseconds.fetch_add(diagnosticElapsedNanoseconds(acquireStart), std::memory_order_relaxed);
@@ -930,7 +931,7 @@ bool IndexedLocalNamedBatchAssembler::startNextBatch() {
         (void)insertIt;
     }
 
-    IndexedLocalNamedBatchLoadWork work;
+    IndexedBatchLoadWork work;
     work.batchState = batchState.get();
     work.batchOrdinal = batchOrdinal;
     work.slotBegin = 0;
@@ -941,7 +942,7 @@ bool IndexedLocalNamedBatchAssembler::startNextBatch() {
     return true;
 }
 
-bool IndexedLocalNamedBatchAssembler::pushLoadWorkWithDrain(const IndexedLocalNamedBatchLoadWork &work) {
+bool IndexedBatchAssembler::pushLoadWorkWithDrain(const IndexedBatchLoadWork &work) {
     THOR_THROW_IF_FALSE(work.batchState != nullptr);
     THOR_THROW_IF_FALSE(work.slotBegin < work.slotEnd);
 
@@ -965,8 +966,8 @@ bool IndexedLocalNamedBatchAssembler::pushLoadWorkWithDrain(const IndexedLocalNa
     return true;
 }
 
-bool IndexedLocalNamedBatchAssembler::waitForCompletedBatch() {
-    IndexedLocalNamedCompletedBatch completed;
+bool IndexedBatchAssembler::waitForCompletedBatch() {
+    IndexedCompletedBatch completed;
     const SteadyClock::time_point waitStart = diagnosticNow();
     statsWaitForCompletedBatchCalls.fetch_add(1, std::memory_order_relaxed);
     if (!completedBatchQueue.pop(completed)) {
@@ -981,14 +982,14 @@ bool IndexedLocalNamedBatchAssembler::waitForCompletedBatch() {
     return true;
 }
 
-void IndexedLocalNamedBatchAssembler::markAvailableCompletedBatches() {
-    IndexedLocalNamedCompletedBatch completed;
+void IndexedBatchAssembler::markAvailableCompletedBatches() {
+    IndexedCompletedBatch completed;
     while (completedBatchQueue.tryPop(completed)) {
         THOR_THROW_IF_FALSE(markBatchLoaded(completed.batchOrdinal));
     }
 }
 
-bool IndexedLocalNamedBatchAssembler::markBatchLoaded(uint64_t batchOrdinal) {
+bool IndexedBatchAssembler::markBatchLoaded(uint64_t batchOrdinal) {
     std::lock_guard<std::mutex> guard(pendingBatchesMutex);
     auto batchIt = pendingBatches.find(batchOrdinal);
     if (batchIt == pendingBatches.end()) {
@@ -1000,12 +1001,12 @@ bool IndexedLocalNamedBatchAssembler::markBatchLoaded(uint64_t batchOrdinal) {
     return true;
 }
 
-uint64_t IndexedLocalNamedBatchAssembler::pendingBatchCount() const {
+uint64_t IndexedBatchAssembler::pendingBatchCount() const {
     std::lock_guard<std::mutex> guard(pendingBatchesMutex);
     return static_cast<uint64_t>(pendingBatches.size());
 }
 
-void IndexedLocalNamedBatchAssembler::fillPendingBatchAgeStats(IndexedLocalNamedBatchAssemblerStats &stats) const {
+void IndexedBatchAssembler::fillPendingBatchAgeStats(IndexedBatchAssemblerStats &stats) const {
     const SteadyClock::time_point now = SteadyClock::now();
     uint64_t pendingLoaded = 0;
     uint64_t pendingUnloaded = 0;
@@ -1016,7 +1017,7 @@ void IndexedLocalNamedBatchAssembler::fillPendingBatchAgeStats(IndexedLocalNamed
     std::lock_guard<std::mutex> guard(pendingBatchesMutex);
     for (const auto &entry : pendingBatches) {
         THOR_THROW_IF_FALSE(entry.second != nullptr);
-        const IndexedLocalNamedBatchState &batch = *entry.second;
+        const IndexedBatchState &batch = *entry.second;
         if (batch.loadComplete) {
             pendingLoaded += 1;
         } else {
@@ -1034,7 +1035,7 @@ void IndexedLocalNamedBatchAssembler::fillPendingBatchAgeStats(IndexedLocalNamed
     stats.averagePendingBatchAgeNanoseconds = ageCount == 0 ? 0 : totalAge / ageCount;
 }
 
-bool IndexedLocalNamedBatchAssembler::publishCompletedBatches() {
+bool IndexedBatchAssembler::publishCompletedBatches() {
     const SteadyClock::time_point publishStart = diagnosticNow();
     statsPublishCompletedBatchCalls.fetch_add(1, std::memory_order_relaxed);
     auto finishPublishTiming = [&]() {
@@ -1043,7 +1044,7 @@ bool IndexedLocalNamedBatchAssembler::publishCompletedBatches() {
     markAvailableCompletedBatches();
     bool publishedAny = false;
     while (true) {
-        std::shared_ptr<IndexedLocalNamedBatchState> batchState;
+        std::shared_ptr<IndexedBatchState> batchState;
         {
             std::lock_guard<std::mutex> mapGuard(pendingBatchesMutex);
             auto batchIt = pendingBatches.find(nextPublishOrdinal);
@@ -1081,9 +1082,9 @@ bool IndexedLocalNamedBatchAssembler::publishCompletedBatches() {
     }
 }
 
-void IndexedLocalNamedBatchAssembler::acquireBatch(std::map<std::string, Tensor> &tensors, uint64_t &batchNum) {
+void IndexedBatchAssembler::acquireBatch(std::map<std::string, Tensor> &tensors, uint64_t &batchNum) {
     if (batchesPerEpoch == 0) {
-        throw std::runtime_error("IndexedLocalNamedBatchAssembler cannot get a batch from an empty split.");
+        throw std::runtime_error("IndexedBatchAssembler cannot get a batch from an empty split.");
     }
 
     std::lock_guard<std::mutex> deliveryGuard(batchDeliveryMutex);
@@ -1124,7 +1125,7 @@ void IndexedLocalNamedBatchAssembler::acquireBatch(std::map<std::string, Tensor>
     }
 }
 
-uint64_t IndexedLocalNamedBatchAssembler::getNextBatchNum() {
+uint64_t IndexedBatchAssembler::getNextBatchNum() {
     std::lock_guard<std::mutex> deliveryGuard(batchDeliveryMutex);
     throwIfWorkerFailed();
     uint64_t batchNum = 0;
@@ -1136,30 +1137,30 @@ uint64_t IndexedLocalNamedBatchAssembler::getNextBatchNum() {
     return batchNum;
 }
 
-void IndexedLocalNamedBatchAssembler::validateReturnedTensorMapExact(const std::map<std::string, Tensor> &tensors) const {
+void IndexedBatchAssembler::validateReturnedTensorMapExact(const std::map<std::string, Tensor> &tensors) const {
     if (tensors.size() != batchTensorDescriptors.size()) {
-        throw std::runtime_error("IndexedLocalNamedBatchAssembler returned tensor count does not match output tensor count.");
+        throw std::runtime_error("IndexedBatchAssembler returned tensor count does not match output tensor count.");
     }
 
     for (const auto &entry : batchTensorDescriptors) {
         const auto it = tensors.find(entry.first);
         if (it == tensors.end()) {
-            throw std::runtime_error("IndexedLocalNamedBatchAssembler missing returned tensor: " + entry.first);
+            throw std::runtime_error("IndexedBatchAssembler missing returned tensor: " + entry.first);
         }
         THOR_THROW_IF_FALSE(it->second.isInitialized());
         if (it->second.getDescriptor() != entry.second) {
-            throw std::runtime_error("IndexedLocalNamedBatchAssembler returned tensor has wrong descriptor for: " + entry.first);
+            throw std::runtime_error("IndexedBatchAssembler returned tensor has wrong descriptor for: " + entry.first);
         }
     }
 
     for (const auto &entry : tensors) {
         if (batchTensorDescriptors.find(entry.first) == batchTensorDescriptors.end()) {
-            throw std::runtime_error("IndexedLocalNamedBatchAssembler returned unexpected tensor: " + entry.first);
+            throw std::runtime_error("IndexedBatchAssembler returned unexpected tensor: " + entry.first);
         }
     }
 }
 
-void IndexedLocalNamedBatchAssembler::returnBuffers(const std::map<std::string, Tensor> &tensors) {
+void IndexedBatchAssembler::returnBuffers(const std::map<std::string, Tensor> &tensors) {
     std::lock_guard<std::mutex> returnGuard(returnBuffersMutex);
     throwIfWorkerFailed();
     validateReturnedTensorMapExact(tensors);
@@ -1179,6 +1180,6 @@ void IndexedLocalNamedBatchAssembler::returnBuffers(const std::map<std::string, 
     }
 }
 
-uint64_t IndexedLocalNamedBatchAssembler::getNumBatchesPerEpoch() const { return batchesPerEpoch; }
+uint64_t IndexedBatchAssembler::getNumBatchesPerEpoch() const { return batchesPerEpoch; }
 
-uint64_t IndexedLocalNamedBatchAssembler::getNumExamples() const { return static_cast<uint64_t>(indices->size()); }
+uint64_t IndexedBatchAssembler::getNumExamples() const { return static_cast<uint64_t>(indices->size()); }

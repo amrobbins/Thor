@@ -71,6 +71,8 @@ TEST(PublicHeaderSurface, GeneratedHeaderListUsesOnlyTheExplicitApiRoot) {
         EXPECT_TRUE(header.starts_with("./DeepLearning/Api/")) << header;
         EXPECT_FALSE(header.starts_with("./DeepLearning/Implementation/")) << header;
         EXPECT_FALSE(header.starts_with("./Utilities/")) << header;
+        EXPECT_EQ(header.find("/Implementation/"), std::string::npos) << header;
+        EXPECT_EQ(header.find("/Utilities/"), std::string::npos) << header;
     }
 
     const std::set<std::string> exported(headers.begin(), headers.end());
@@ -84,10 +86,12 @@ TEST(PublicHeaderSurface, GeneratedHeaderListUsesOnlyTheExplicitApiRoot) {
     EXPECT_FALSE(exported.contains("./DeepLearning/Api/Loaders/DeviceDatasetMaterialization.h"));
     EXPECT_FALSE(exported.contains("./DeepLearning/Api/Training/DeviceDatasetResidency.h"));
     EXPECT_FALSE(exported.contains("./DeepLearning/Api/Training/DeviceDatasetStorageSelection.h"));
-    EXPECT_FALSE(exported.contains("./Utilities/Loaders/Shard.h"));
+    EXPECT_FALSE(exported.contains("./Utilities/Data/Storage/DatasetShard.h"));
+    EXPECT_FALSE(exported.contains("./Utilities/Data/Readers/IndexedDatasetReader.h"));
+    EXPECT_FALSE(exported.contains("./Utilities/Data/Assembly/IndexedBatchAssembler.h"));
 }
 
-TEST(PublicHeaderSurface, PublicHeadersDoNotDependOnLegacyShardStorage) {
+TEST(PublicHeaderSurface, PublicHeadersDoNotDependOnInternalDatasetStorage) {
     const std::filesystem::path sourceRoot = SOURCE_DIR;
     const std::filesystem::path headerListPath = std::filesystem::path(THOR_BUILD_DIR) / "headerlist.txt";
     const std::vector<std::string> headers = readNonEmptyLines(headerListPath);
@@ -96,7 +100,10 @@ TEST(PublicHeaderSurface, PublicHeadersDoNotDependOnLegacyShardStorage) {
         ASSERT_TRUE(header.starts_with("./")) << header;
         const std::filesystem::path headerPath = sourceRoot / header.substr(2);
         const std::string contents = readFile(headerPath);
-        EXPECT_EQ(contents.find("#include \"Utilities/Loaders/Shard.h\""), std::string::npos) << header;
+        EXPECT_EQ(contents.find("#include \"Utilities/Data/Storage/DatasetShard.h\""), std::string::npos) << header;
+        EXPECT_EQ(contents.find("#include \"Utilities/Data/Readers/IndexedDatasetReader.h\""), std::string::npos) << header;
+        EXPECT_EQ(contents.find("#include \"Utilities/Data/Assembly/IndexedBatchAssembler.h\""), std::string::npos) << header;
+        EXPECT_EQ(contents.find("#include \"DeepLearning/Implementation/Data/"), std::string::npos) << header;
     }
 }
 
@@ -111,9 +118,18 @@ TEST(PublicHeaderSurface, DatasetBackendsKeepPhysicalStorageAndResidencyPrivate)
     const std::string fileDataset =
         readFile(sourceRoot / "DeepLearning/Api/Data/FileDataset.h");
     EXPECT_EQ(fileDataset.find("DatasetLayout"), std::string::npos);
-    EXPECT_EQ(fileDataset.find("IndexedLocalNamedExampleReader"), std::string::npos);
+    EXPECT_EQ(fileDataset.find("IndexedDatasetReader"), std::string::npos);
     EXPECT_EQ(fileDataset.find("getLayout"), std::string::npos);
     EXPECT_EQ(fileDataset.find("assertLayout"), std::string::npos);
 
+    const std::string datasetWriter =
+        readFile(sourceRoot / "DeepLearning/Api/Data/DatasetWriter.h");
+    EXPECT_EQ(datasetWriter.find("DatasetShard"), std::string::npos);
+    EXPECT_EQ(datasetWriter.find("Utilities/Data/Storage"), std::string::npos);
+
     EXPECT_FALSE(std::filesystem::exists(sourceRoot / "DeepLearning/Api/Loaders"));
+    EXPECT_FALSE(std::filesystem::exists(sourceRoot / "Utilities/Loaders"));
+    EXPECT_TRUE(std::filesystem::exists(sourceRoot / "Utilities/Data/Readers/IndexedDatasetReader.h"));
+    EXPECT_TRUE(std::filesystem::exists(sourceRoot / "Utilities/Data/Assembly/IndexedBatchAssembler.h"));
+    EXPECT_TRUE(std::filesystem::exists(sourceRoot / "Utilities/Data/Storage/DatasetShard.h"));
 }

@@ -144,6 +144,25 @@ def test_file_dataset_rejects_legacy_split_manifest(tmp_path):
         thor.data.FileDataset.open(dataset_path)
 
 
+def test_file_dataset_rejects_manifest_without_dataset_id(tmp_path):
+    dataset_path = tmp_path / "missing_dataset_id"
+    writer = thor.data.DatasetWriter(
+        dataset_path,
+        _layout(),
+        examples_per_shard=2,
+    )
+    writer.write_indexed_example(_example(0))
+    writer.close()
+
+    manifest_path = dataset_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    del manifest["dataset_id"]
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(RuntimeError, match="missing required dataset_id.*DatasetWriter"):
+        thor.data.FileDataset.open(dataset_path)
+
+
 def test_dataset_writer_supports_independent_field_dtypes(tmp_path):
     dataset_path = tmp_path / "mixed_dtype_dataset"
     layout = thor.data.DatasetLayout(

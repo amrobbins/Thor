@@ -1,5 +1,5 @@
 #include "DeepLearning/Api/Data/DatasetWriter.h"
-#include "Utilities/Loaders/Shard.h"
+#include "Utilities/Data/Storage/DatasetShard.h"
 
 #include "gtest/gtest.h"
 
@@ -119,7 +119,7 @@ TEST(DatasetWriterTest, WritesIndexedManifestAndShardCounts) {
     EXPECT_EQ(manifest.at("shards").at(0).at("num_examples").get<uint64_t>(), 2);
     EXPECT_EQ(manifest.at("shards").at(1).at("num_examples").get<uint64_t>(), 2);
 
-    Shard shard0;
+    DatasetShard shard0;
     shard0.openShard((datasetPath / manifest.at("shards").at(0).at("file").get<string>()).string());
     EXPECT_EQ(shard0.getExampleSizeInBytes(), layout.recordSizeBytes());
     EXPECT_EQ(shard0.getDataType(), DataType::UINT8);
@@ -127,7 +127,7 @@ TEST(DatasetWriterTest, WritesIndexedManifestAndShardCounts) {
     EXPECT_EQ(shard0.getNumExamples(ExampleType::VALIDATE), 0);
     EXPECT_EQ(shard0.getNumExamples(ExampleType::TEST), 0);
 
-    Shard shard1;
+    DatasetShard shard1;
     shard1.openShard((datasetPath / manifest.at("shards").at(1).at("file").get<string>()).string());
     EXPECT_EQ(shard1.getExampleSizeInBytes(), layout.recordSizeBytes());
     EXPECT_EQ(shard1.getDataType(), DataType::UINT8);
@@ -151,7 +151,7 @@ TEST(DatasetWriterTest, PacksNamedTensorSlicesIntoContiguousRecord) {
     writer.close();
 
     nlohmann::json manifest = readJson(datasetPath / DatasetWriter::MANIFEST_FILENAME);
-    Shard shard;
+    DatasetShard shard;
     shard.openShard((datasetPath / manifest.at("shards").at(0).at("file").get<string>()).string());
 
     vector<uint8_t> record(layout.recordSizeBytes());
@@ -203,7 +203,7 @@ TEST(DatasetWriterTest, PacksIndependentFieldDtypesIntoOneByteRecord) {
     EXPECT_EQ(manifest.at("tensors").at("features").at("data_type").get<string>(), "fp16");
     EXPECT_EQ(manifest.at("tensors").at("target").at("data_type").get<string>(), "fp64");
 
-    Shard shard;
+    DatasetShard shard;
     shard.openShard((datasetPath / manifest.at("shards").at(0).at("file").get<string>()).string());
     EXPECT_EQ(shard.getDataType(), DataType::UINT8);
     vector<uint8_t> record(layout.recordSizeBytes());
@@ -328,7 +328,7 @@ TEST(DatasetWriterTest, WritesIndexedManifestAndGlobalRanges) {
     EXPECT_EQ(manifest.at("shards").at(2).at("global_start").get<uint64_t>(), 4);
     EXPECT_EQ(manifest.at("shards").at(2).at("num_examples").get<uint64_t>(), 1);
 
-    Shard shard1;
+    DatasetShard shard1;
     shard1.openShard((datasetPath / manifest.at("shards").at(1).at("file").get<string>()).string());
     EXPECT_EQ(shard1.getNumExamples(ExampleType::TRAIN), 2);
     EXPECT_EQ(shard1.getNumExamples(ExampleType::VALIDATE), 0);
@@ -376,7 +376,7 @@ TEST(DatasetWriterTest, WritesIndexedExamplesChunkWithExpectedCountAndCompactSha
     EXPECT_EQ(manifest.at("shards").at(2).at("num_examples").get<uint64_t>(), 1);
     EXPECT_EQ(manifest.at("shards").at(2).at("num_bytes").get<uint64_t>(), layout.recordSizeBytes());
 
-    Shard shard0;
+    DatasetShard shard0;
     shard0.openShard((datasetPath / manifest.at("shards").at(0).at("file").get<string>()).string());
     EXPECT_EQ(shard0.getNumExamples(ExampleType::TRAIN), 2);
     EXPECT_EQ(shard0.getNumExamples(ExampleType::VALIDATE), 0);
@@ -390,7 +390,7 @@ TEST(DatasetWriterTest, WritesIndexedExamplesChunkWithExpectedCountAndCompactSha
     EXPECT_EQ(readFloats(record, layout.tensor("monotone_inputs").offsetBytes, 3), (vector<float>{110.0f, 111.0f, 112.0f}));
     EXPECT_EQ(readFloats(record, layout.tensor("daily_weight").offsetBytes, 1), (vector<float>{1001.0f}));
 
-    Shard shard2;
+    DatasetShard shard2;
     shard2.openShard((datasetPath / manifest.at("shards").at(2).at("file").get<string>()).string());
     shard2.loadExample(record.data(), label, filename, ExampleType::TRAIN, 0);
     EXPECT_EQ(readFloats(record, layout.tensor("seasonality_inputs").offsetBytes, 2), (vector<float>{40.0f, 41.0f}));
@@ -533,7 +533,7 @@ TEST(DatasetWriterTest, WritesWindowedTensorSourceAndReferencesIntoManifestAndRe
     sourceIn.read(reinterpret_cast<char *>(sourceValues.data()), static_cast<std::streamsize>(sourceValues.size() * sizeof(float)));
     EXPECT_EQ(sourceValues, (vector<float>{1.0f, 2.0f, 3.0f, 4.0f, 10.0f, 11.0f, 12.0f}));
 
-    Shard shard;
+    DatasetShard shard;
     shard.openShard((datasetPath / manifest.at("shards").at(0).at("file").get<string>()).string());
     vector<uint8_t> record(layout.recordSizeBytes());
     string label;

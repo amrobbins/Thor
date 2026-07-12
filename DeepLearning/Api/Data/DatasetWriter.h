@@ -14,8 +14,6 @@
 #include <string_view>
 #include <vector>
 
-class Shard;
-
 class DatasetWriter {
    public:
     struct TensorView {
@@ -124,7 +122,8 @@ class DatasetWriter {
     bool preallocate;
     bool closed;
 
-    std::unique_ptr<Shard> currentShard;
+    class Runtime;
+    std::unique_ptr<Runtime> runtime;
     uint64_t nextShardIndex;
     std::vector<ShardManifestEntry> shardEntries;
 

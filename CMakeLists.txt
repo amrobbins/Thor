@@ -1449,6 +1449,110 @@ add_custom_command(
 add_custom_target(ThorHeader ALL DEPENDS ${CMAKE_BINARY_DIR}/generated/Thor.h)
 add_dependencies(Thor ThorHeader)
 
+# Compile the public umbrella header from an install-shaped include directory.
+# This target deliberately does not inherit Thor's source-tree include path.
+# Thor.h directly exports only THOR_PUBLIC_HEADERS, but many API declarations
+# still have transitive header dependencies elsewhere under DeepLearning and
+# Utilities. Preserve those relative paths in the staged include tree exactly
+# as a real header installation must do; staging a dependency does not make it
+# a top-level Thor.h export.
+set(THOR_INSTALLED_CONSUMER_INCLUDE_DIR
+        "${CMAKE_BINARY_DIR}/installed-public-api-consumer/include")
+set(THOR_INSTALLED_CONSUMER_HEADER_STAMP
+        "${THOR_INSTALLED_CONSUMER_INCLUDE_DIR}/.headers-staged")
+set(THOR_INSTALLED_CONSUMER_STAGE_SCRIPT
+        "${CMAKE_SOURCE_DIR}/test/InstalledConsumer/StageThorHeaders.cmake")
+
+file(GLOB_RECURSE THOR_INSTALLED_CONSUMER_DEPENDENCY_HEADERS CONFIGURE_DEPENDS
+        "${CMAKE_SOURCE_DIR}/DeepLearning/*.h"
+        "${CMAKE_SOURCE_DIR}/Utilities/*.h"
+)
+list(REMOVE_DUPLICATES THOR_INSTALLED_CONSUMER_DEPENDENCY_HEADERS)
+list(SORT THOR_INSTALLED_CONSUMER_DEPENDENCY_HEADERS)
+
+# Header content changes are covered by the direct dependencies below. Keep a
+# separate manifest so adding or removing a header also invalidates the staged
+# tree and removes any stale copied path.
+set(_thor_installed_consumer_dependency_list_contents "")
+foreach (_thor_header IN LISTS THOR_INSTALLED_CONSUMER_DEPENDENCY_HEADERS)
+    file(RELATIVE_PATH _thor_rel_header "${CMAKE_SOURCE_DIR}" "${_thor_header}")
+    string(APPEND _thor_installed_consumer_dependency_list_contents
+            "${_thor_rel_header}\n")
+endforeach ()
+set(THOR_INSTALLED_CONSUMER_DEPENDENCY_LIST
+        "${CMAKE_BINARY_DIR}/installed-public-api-consumer/header-dependencies.txt")
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/installed-public-api-consumer")
+set(_thor_write_installed_consumer_dependency_list TRUE)
+if (EXISTS "${THOR_INSTALLED_CONSUMER_DEPENDENCY_LIST}")
+    file(READ "${THOR_INSTALLED_CONSUMER_DEPENDENCY_LIST}"
+            _thor_existing_installed_consumer_dependency_list)
+    if (_thor_existing_installed_consumer_dependency_list STREQUAL
+            _thor_installed_consumer_dependency_list_contents)
+        set(_thor_write_installed_consumer_dependency_list FALSE)
+    endif ()
+endif ()
+if (_thor_write_installed_consumer_dependency_list)
+    file(WRITE "${THOR_INSTALLED_CONSUMER_DEPENDENCY_LIST}"
+            "${_thor_installed_consumer_dependency_list_contents}")
+endif ()
+
+add_custom_command(
+        OUTPUT ${THOR_INSTALLED_CONSUMER_HEADER_STAMP}
+        COMMAND ${CMAKE_COMMAND}
+                -DTHOR_SOURCE_DIR=${CMAKE_SOURCE_DIR}
+                -DTHOR_DESTINATION_DIR=${THOR_INSTALLED_CONSUMER_INCLUDE_DIR}
+                -DTHOR_GENERATED_HEADER=${CMAKE_BINARY_DIR}/generated/Thor.h
+                -DTHOR_VERSION_HEADER=${CMAKE_BINARY_DIR}/generated/ThorVersion.h
+                -DTHOR_STAMP=${THOR_INSTALLED_CONSUMER_HEADER_STAMP}
+                -P ${THOR_INSTALLED_CONSUMER_STAGE_SCRIPT}
+        DEPENDS
+        ${CMAKE_BINARY_DIR}/generated/Thor.h
+        ${CMAKE_BINARY_DIR}/generated/ThorVersion.h
+        ${THOR_INSTALLED_CONSUMER_DEPENDENCY_HEADERS}
+        ${THOR_INSTALLED_CONSUMER_DEPENDENCY_LIST}
+        ${THOR_INSTALLED_CONSUMER_STAGE_SCRIPT}
+        COMMENT "Staging Thor headers for installed-consumer compile test"
+        VERBATIM
+)
+add_custom_target(ThorInstalledConsumerHeaders ALL
+        DEPENDS ${THOR_INSTALLED_CONSUMER_HEADER_STAMP}
+)
+add_library(thor_installed_public_api_consumer OBJECT
+        test/InstalledConsumer/ThorPublicApiConsumer.cc
+)
+add_dependencies(thor_installed_public_api_consumer ThorInstalledConsumerHeaders)
+target_include_directories(thor_installed_public_api_consumer PRIVATE
+        ${THOR_INSTALLED_CONSUMER_INCLUDE_DIR}
+)
+foreach (_thor_cuda_include_dir IN LISTS THOR_CUDA_INCLUDE_DIRS)
+    target_include_directories(thor_installed_public_api_consumer SYSTEM PRIVATE
+            ${_thor_cuda_include_dir}
+    )
+endforeach ()
+target_link_libraries(thor_installed_public_api_consumer PRIVATE
+        OpenMP::OpenMP_CXX
+        OpenSSL::Crypto
+        LibArchive::LibArchive
+        PkgConfig::LIBURING
+        nlohmann_json::nlohmann_json
+)
+if (THOR_ONEDNN_TARGET)
+    target_link_libraries(thor_installed_public_api_consumer PRIVATE
+            ${THOR_ONEDNN_TARGET}
+    )
+endif ()
+if (ZLIBNG_TARGET)
+    target_link_libraries(thor_installed_public_api_consumer PRIVATE
+            ${ZLIBNG_TARGET}
+    )
+endif ()
+target_compile_definitions(thor_installed_public_api_consumer PRIVATE
+        THOR_ENABLE_CPU_BACKEND=$<BOOL:${THOR_ENABLE_CPU_BACKEND}>
+        $<$<CONFIG:Release>:THOR_RELEASE GDK_NVDIRECT _FILE_OFFSET_BITS=64>
+        $<$<CONFIG:RelWithDebInfo>:THOR_RELEASE GDK_NVDIRECT _FILE_OFFSET_BITS=64>
+        $<$<CONFIG:Debug>:THOR_DEBUG GDK_NVDIRECT _FILE_OFFSET_BITS=64>
+)
+
 
 find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
 

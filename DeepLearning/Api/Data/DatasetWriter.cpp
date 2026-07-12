@@ -1,6 +1,6 @@
 #include "DeepLearning/Api/Data/DatasetWriter.h"
 
-#include "Utilities/Loaders/Shard.h"
+#include "Utilities/Data/Storage/DatasetShard.h"
 
 #include <nlohmann/json.hpp>
 
@@ -110,6 +110,11 @@ void checkedIndexBounds(int64_t startIndex, uint64_t numSteps, const std::string
 
 }  // namespace
 
+class DatasetWriter::Runtime {
+   public:
+    std::unique_ptr<DatasetShard> currentShard;
+};
+
 uint64_t DatasetWriter::ShardManifestEntry::remainingCapacity() const {
     if (numExamples > capacityExamples) {
         throw std::runtime_error("DatasetWriter shard entry exceeded its capacity.");
@@ -133,6 +138,7 @@ DatasetWriter::DatasetWriter(std::filesystem::path datasetPath,
       expectedNumExamples(expectedNumExamples),
       preallocate(preallocate),
       closed(false),
+      runtime(std::make_unique<Runtime>()),
       nextShardIndex(0),
       totalExamples(0) {
     this->layout.validate();
@@ -395,10 +401,11 @@ void DatasetWriter::writePackedIndexedRecords(const uint8_t *records, uint64_t c
             continue;
         }
         const uint64_t toWrite = std::min<uint64_t>(count - consumed, available);
-        currentShard->writeExamplesContiguous(const_cast<uint8_t *>(records + checkedMul(consumed, layout.recordSizeBytes(),
-                                                                                         "DatasetWriter chunk offset")),
-                                              toWrite,
-                                              ExampleType::TRAIN);
+        runtime->currentShard->writeExamplesContiguous(
+            const_cast<uint8_t *>(records + checkedMul(
+                consumed, layout.recordSizeBytes(), "DatasetWriter chunk offset")),
+            toWrite,
+            ExampleType::TRAIN);
         shardEntries.back().numExamples = checkedAdd(
             shardEntries.back().numExamples, toWrite, "DatasetWriter shard example count");
         totalExamples = checkedAdd(totalExamples, toWrite, "DatasetWriter total example count");
@@ -762,7 +769,7 @@ uint64_t DatasetWriter::nextShardCapacity() const {
 }
 
 void DatasetWriter::ensureCurrentShard() {
-    if (currentShard && shardEntries.back().remainingCapacity() > 0) {
+    if (runtime->currentShard && shardEntries.back().remainingCapacity() > 0) {
         return;
     }
 
@@ -779,8 +786,8 @@ void DatasetWriter::ensureCurrentShard() {
     entry.capacityExamples = capacity;
 
     std::vector<std::string> allClasses;
-    currentShard = std::make_unique<Shard>();
-    currentShard->createCompactShard((datasetPath / entry.filename).string(),
+    runtime->currentShard = std::make_unique<DatasetShard>();
+    runtime->currentShard->createCompactShard((datasetPath / entry.filename).string(),
                                      capacity,
                                      0,
                                      0,
@@ -792,9 +799,9 @@ void DatasetWriter::ensureCurrentShard() {
 }
 
 void DatasetWriter::finalizeCurrentShard() {
-    if (currentShard) {
-        currentShard->shrinkToFit();
-        currentShard.reset();
+    if (runtime->currentShard) {
+        runtime->currentShard->shrinkToFit();
+        runtime->currentShard.reset();
     }
 }
 

@@ -144,7 +144,7 @@ DeviceResidentWindowedNamedBatchSession::DeviceResidentWindowedNamedBatchSession
     }
 
     this->batchSize = this->sessionDescription.getBatching().getBatchSize();
-    this->reader = IndexedLocalNamedExampleReader::openDataset(
+    this->reader = IndexedDatasetReader::openDataset(
         this->datasetDescription.datasetPath,
         this->datasetDescription.layout);
     if (this->reader->getNumExamples() != this->datasetDescription.numExamples) {

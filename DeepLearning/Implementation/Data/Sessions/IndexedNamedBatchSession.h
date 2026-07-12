@@ -2,10 +2,10 @@
 
 #include "DeepLearning/Api/Data/BatchPolicy.h"
 #include "DeepLearning/Api/Data/BatchSession.h"
+#include "DeepLearning/Api/Data/DatasetLayout.h"
 #include "DeepLearning/Api/Data/DatasetSplitManifest.h"
 #include "DeepLearning/Api/Data/FileDataset.h"
-#include "Utilities/Loaders/IndexedLocalNamedBatchAssembler.h"
-#include "DeepLearning/Api/Data/DatasetLayout.h"
+#include "Utilities/Data/Assembly/IndexedBatchAssembler.h"
 
 #include <atomic>
 #include <cstdint>
@@ -56,7 +56,7 @@ class IndexedNamedBatchSession : public Thor::BatchSession {
     [[nodiscard]] const Thor::ExampleIndexSet &getSplitIndices(ExampleType exampleType) const;
     [[nodiscard]] bool hasExplicitTestSplit() const;
     void cancel() override;
-    [[nodiscard]] IndexedLocalNamedBatchAssemblerStats getStatsSnapshot(ExampleType exampleType);
+    [[nodiscard]] IndexedBatchAssemblerStats getStatsSnapshot(ExampleType exampleType);
 
 #ifdef THOR_GTEST
     void recycleBatchForTesting(ExampleType exampleType, Batch&& batch) {
@@ -64,7 +64,7 @@ class IndexedNamedBatchSession : public Thor::BatchSession {
     }
 
     uint64_t getReadyBatchCountForTesting(ExampleType exampleType) {
-        IndexedLocalNamedBatchAssembler *assembler = assemblerFor(exampleType);
+        IndexedBatchAssembler *assembler = assemblerFor(exampleType);
         return assembler == nullptr ? 0 : assembler->getReadyBatchCountForTesting();
     }
 #endif
@@ -76,9 +76,9 @@ class IndexedNamedBatchSession : public Thor::BatchSession {
     Thor::DatasetSplitManifest splitManifest;
     std::set<Thor::DatasetFieldId> requiredFieldIds;
 
-    std::unique_ptr<IndexedLocalNamedBatchAssembler> trainAssembler;
-    std::unique_ptr<IndexedLocalNamedBatchAssembler> validateAssembler;
-    std::unique_ptr<IndexedLocalNamedBatchAssembler> testAssembler;
+    std::unique_ptr<IndexedBatchAssembler> trainAssembler;
+    std::unique_ptr<IndexedBatchAssembler> validateAssembler;
+    std::unique_ptr<IndexedBatchAssembler> testAssembler;
 
     uint64_t numDatasetExamples = 0;
     uint64_t batchQueueDepth = 32;
@@ -88,11 +88,11 @@ class IndexedNamedBatchSession : public Thor::BatchSession {
 
     void validateIndex(uint64_t index, const char *splitName) const;
     void validateIndices(const Thor::ExampleIndexSet &indices, const char *splitName) const;
-    std::unique_ptr<IndexedLocalNamedBatchAssembler> createAssembler(
+    std::unique_ptr<IndexedBatchAssembler> createAssembler(
         std::shared_ptr<const Thor::ExampleIndexSet> indices,
         const char *splitName,
         bool randomized,
         std::optional<uint64_t> splitSeed) const;
-    IndexedLocalNamedBatchAssembler *assemblerFor(ExampleType exampleType);
-    const IndexedLocalNamedBatchAssembler *assemblerFor(ExampleType exampleType) const;
+    IndexedBatchAssembler *assemblerFor(ExampleType exampleType);
+    const IndexedBatchAssembler *assemblerFor(ExampleType exampleType) const;
 };

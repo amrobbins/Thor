@@ -64,3 +64,7 @@ __all__ = [
     "StratifiedSplitter",
     "StratifiedTrainValidationTestSplit",
 ]
+
+
+def __dir__() -> list[str]:
+    return sorted(__all__)

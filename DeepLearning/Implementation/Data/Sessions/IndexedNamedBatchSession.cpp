@@ -82,7 +82,7 @@ void IndexedNamedBatchSession::validateIndices(const Thor::ExampleIndexSet &indi
     }
 }
 
-std::unique_ptr<IndexedLocalNamedBatchAssembler> IndexedNamedBatchSession::createAssembler(
+std::unique_ptr<IndexedBatchAssembler> IndexedNamedBatchSession::createAssembler(
     std::shared_ptr<const Thor::ExampleIndexSet> indices,
     const char *splitName,
     bool randomized,
@@ -91,11 +91,11 @@ std::unique_ptr<IndexedLocalNamedBatchAssembler> IndexedNamedBatchSession::creat
         return nullptr;
     }
     validateIndices(*indices, splitName);
-    const std::shared_ptr<IndexedLocalNamedExampleReader> &reader =
+    const std::shared_ptr<IndexedDatasetReader> &reader =
         ThorImplementation::FileDatasetRuntimeAccess::reader(*dataset);
     const DatasetLayout &layout =
         ThorImplementation::FileDatasetRuntimeAccess::layout(*dataset);
-    return std::make_unique<IndexedLocalNamedBatchAssembler>(
+    return std::make_unique<IndexedBatchAssembler>(
         reader,
         layout,
         std::move(indices),
@@ -106,7 +106,7 @@ std::unique_ptr<IndexedLocalNamedBatchAssembler> IndexedNamedBatchSession::creat
         splitSeed);
 }
 
-IndexedLocalNamedBatchAssembler *IndexedNamedBatchSession::assemblerFor(ExampleType exampleType) {
+IndexedBatchAssembler *IndexedNamedBatchSession::assemblerFor(ExampleType exampleType) {
     if (exampleType == ExampleType::TRAIN) {
         return trainAssembler.get();
     }
@@ -119,7 +119,7 @@ IndexedLocalNamedBatchAssembler *IndexedNamedBatchSession::assemblerFor(ExampleT
     throw std::runtime_error("Unsupported ExampleType");
 }
 
-const IndexedLocalNamedBatchAssembler *IndexedNamedBatchSession::assemblerFor(ExampleType exampleType) const {
+const IndexedBatchAssembler *IndexedNamedBatchSession::assemblerFor(ExampleType exampleType) const {
     if (exampleType == ExampleType::TRAIN) {
         return trainAssembler.get();
     }
@@ -136,7 +136,7 @@ Batch IndexedNamedBatchSession::acquireBatch(ExampleType exampleType, uint64_t &
     if (cancelled.load(std::memory_order_acquire)) {
         throw std::runtime_error("IndexedNamedBatchSession has been cancelled.");
     }
-    IndexedLocalNamedBatchAssembler *assembler = assemblerFor(exampleType);
+    IndexedBatchAssembler *assembler = assemblerFor(exampleType);
     if (assembler == nullptr) {
         throw std::runtime_error("IndexedNamedBatchSession cannot get a batch from an empty split.");
     }
@@ -150,7 +150,7 @@ void IndexedNamedBatchSession::recycleBatch(ExampleType exampleType, Batch &&bat
     if (cancelled.load(std::memory_order_acquire)) {
         return;
     }
-    IndexedLocalNamedBatchAssembler *assembler = assemblerFor(exampleType);
+    IndexedBatchAssembler *assembler = assemblerFor(exampleType);
     if (assembler == nullptr) {
         throw std::runtime_error("IndexedNamedBatchSession cannot return buffers to an empty split.");
     }
@@ -161,29 +161,29 @@ void IndexedNamedBatchSession::recycleBatch(ExampleType exampleType, Batch &&bat
 }
 
 uint64_t IndexedNamedBatchSession::getNumBatchesPerEpoch(ExampleType exampleType) {
-    const IndexedLocalNamedBatchAssembler *assembler = assemblerFor(exampleType);
+    const IndexedBatchAssembler *assembler = assemblerFor(exampleType);
     return assembler == nullptr ? 0 : assembler->getNumBatchesPerEpoch();
 }
 
 uint64_t IndexedNamedBatchSession::getNumExamples(ExampleType exampleType) {
-    const IndexedLocalNamedBatchAssembler *assembler = assemblerFor(exampleType);
+    const IndexedBatchAssembler *assembler = assemblerFor(exampleType);
     return assembler == nullptr ? 0 : assembler->getNumExamples();
 }
 
 uint64_t IndexedNamedBatchSession::getNextBatchNum(ExampleType exampleType) {
-    IndexedLocalNamedBatchAssembler *assembler = assemblerFor(exampleType);
+    IndexedBatchAssembler *assembler = assemblerFor(exampleType);
     return assembler == nullptr ? 0 : assembler->getNextBatchNum();
 }
 
 
 
-IndexedLocalNamedBatchAssemblerStats IndexedNamedBatchSession::getStatsSnapshot(ExampleType exampleType) {
-    IndexedLocalNamedBatchAssembler *assembler = assemblerFor(exampleType);
+IndexedBatchAssemblerStats IndexedNamedBatchSession::getStatsSnapshot(ExampleType exampleType) {
+    IndexedBatchAssembler *assembler = assemblerFor(exampleType);
     if (assembler != nullptr) {
         return assembler->getStatsSnapshot();
     }
 
-    IndexedLocalNamedBatchAssemblerStats stats;
+    IndexedBatchAssemblerStats stats;
     stats.splitName = splitNameForStats(exampleType);
     stats.targetBatchQueueDepth = batchQueueDepth;
     stats.recordSizeBytes =

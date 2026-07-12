@@ -9,7 +9,7 @@
 #include <string_view>
 #include <vector>
 
-struct IndexedLocalNamedExampleReaderSessionStats {
+struct IndexedDatasetReaderSessionStats {
     uint64_t readCallsSubmitted = 0;
     uint64_t readBytesSubmitted = 0;
     uint64_t readCallsCompleted = 0;
@@ -47,14 +47,14 @@ struct IndexedLocalNamedExampleReaderSessionStats {
 };
 
 /**
- * Passive storage reader for indexed local named example datasets.
+ * Passive storage reader for an indexed file dataset.
  *
  * The batch session/assembler owns batching and worker scheduling.  The reader owns
  * the dataset storage layout, shard resolution, file offsets, and per-worker
  * I/O sessions.  Callers pass final tensor batch destinations; sessions read
  * directly into those destinations without exposing shards to the batch session.
  */
-class IndexedLocalNamedExampleReader : public std::enable_shared_from_this<IndexedLocalNamedExampleReader> {
+class IndexedDatasetReader : public std::enable_shared_from_this<IndexedDatasetReader> {
    public:
     class Session {
        public:
@@ -73,26 +73,26 @@ class IndexedLocalNamedExampleReader : public std::enable_shared_from_this<Index
                              const std::vector<uint8_t *> &windowedTensorBasePointers,
                              const std::vector<uint8_t *> &windowedMaskBasePointers);
         void drain();
-        IndexedLocalNamedExampleReaderSessionStats takeStats();
+        IndexedDatasetReaderSessionStats takeStats();
 
        private:
-        friend class IndexedLocalNamedExampleReader;
+        friend class IndexedDatasetReader;
 
         class Impl;
         std::unique_ptr<Impl> impl;
 
-        Session(std::shared_ptr<IndexedLocalNamedExampleReader> reader, uint64_t queueDepth);
+        Session(std::shared_ptr<IndexedDatasetReader> reader, uint64_t queueDepth);
     };
 
-    static std::shared_ptr<IndexedLocalNamedExampleReader> openDataset(const std::filesystem::path &datasetPath);
-    static std::shared_ptr<IndexedLocalNamedExampleReader> openDataset(const std::filesystem::path &datasetPath,
+    static std::shared_ptr<IndexedDatasetReader> openDataset(const std::filesystem::path &datasetPath);
+    static std::shared_ptr<IndexedDatasetReader> openDataset(const std::filesystem::path &datasetPath,
                                                                        const DatasetLayout &requestedLayout);
-    ~IndexedLocalNamedExampleReader();
+    ~IndexedDatasetReader();
 
-    IndexedLocalNamedExampleReader(const IndexedLocalNamedExampleReader &) = delete;
-    IndexedLocalNamedExampleReader &operator=(const IndexedLocalNamedExampleReader &) = delete;
-    IndexedLocalNamedExampleReader(IndexedLocalNamedExampleReader &&) = delete;
-    IndexedLocalNamedExampleReader &operator=(IndexedLocalNamedExampleReader &&) = delete;
+    IndexedDatasetReader(const IndexedDatasetReader &) = delete;
+    IndexedDatasetReader &operator=(const IndexedDatasetReader &) = delete;
+    IndexedDatasetReader(IndexedDatasetReader &&) = delete;
+    IndexedDatasetReader &operator=(IndexedDatasetReader &&) = delete;
 
     std::unique_ptr<Session> createSession(uint64_t queueDepth);
 
@@ -109,5 +109,5 @@ class IndexedLocalNamedExampleReader : public std::enable_shared_from_this<Index
     class Impl;
     std::unique_ptr<Impl> impl;
 
-    explicit IndexedLocalNamedExampleReader(std::unique_ptr<Impl> impl);
+    explicit IndexedDatasetReader(std::unique_ptr<Impl> impl);
 };

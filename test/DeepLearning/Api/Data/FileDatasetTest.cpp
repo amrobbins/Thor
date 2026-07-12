@@ -102,3 +102,23 @@ TEST(FileDatasetTest, RejectsLegacyManifestWithoutStorageModeWithMigrationMessag
 
     std::filesystem::remove_all(datasetPath);
 }
+
+TEST(FileDatasetTest, RejectsManifestWithoutDatasetIdWithMigrationMessage) {
+    const std::filesystem::path datasetPath = makeTempDatasetPath("missing_dataset_id");
+    writeIndexedDataset(datasetPath);
+
+    const std::filesystem::path manifestPath = datasetPath / DatasetWriter::MANIFEST_FILENAME;
+    nlohmann::json manifest = readManifest(manifestPath);
+    manifest.erase("dataset_id");
+    writeManifest(manifestPath, manifest);
+
+    try {
+        (void)Thor::FileDataset::open(datasetPath);
+        FAIL() << "Expected manifest identity rejection.";
+    } catch (const std::runtime_error &error) {
+        EXPECT_NE(std::string(error.what()).find("missing required dataset_id"), std::string::npos);
+        EXPECT_NE(std::string(error.what()).find("DatasetWriter"), std::string::npos);
+    }
+
+    std::filesystem::remove_all(datasetPath);
+}

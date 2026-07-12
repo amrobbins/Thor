@@ -1,16 +1,7 @@
 #pragma once
 
-// TODO: Integrate with DALI
-//       https://developer.nvidia.com/DALI
-//       https://github.com/NVIDIA/DALI#compiling-dali-from-source-bare-metal
-//       Will need a C++ api, currently that is experimental. Will need to talk to nVidia.
-
 #include "DeepLearning/Api/Data/ExampleType.h"
-#include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
-#include "Utilities/WorkQueue/AsyncQueue.h"
-#include "Utilities/WorkQueue/WorkQueueUnordered.h"
-
-class UringDirect;
+#include "DeepLearning/Implementation/Tensor/DataType.h"
 
 #include <cstdint>
 #include <fstream>
@@ -19,48 +10,25 @@ class UringDirect;
 #include <string>
 #include <vector>
 
-#include "omp.h"
+class UringDirect;
 
-#include <unistd.h>
-#include <chrono>
-#include <cmath>
-#include <map>
-#include <set>
-#include <thread>
-#include <unordered_map>
-#include <unordered_set>
-#include <utility>
-
-
-
-struct DataElement {
-    ExampleType exampleType;
-    std::string className;
-    std::string fileName;
-
-    uint64_t numDataBytes;
-    std::shared_ptr<uint8_t[]> data;
-
-    ThorImplementation::DataType dataType;
-};
-
-struct ShardExampleReadRequest {
+struct DatasetShardReadRequest {
     uint64_t fileOffsetBytes;
     uint64_t numBytes;
     std::string label;
     std::string filename;
 };
 
-struct ShardExampleRecord {
+struct DatasetShardRecord {
     uint64_t fileOffsetBytes;
     std::string label;
     std::string filename;
 };
 
-class Shard {
+class DatasetShard {
    public:
-    Shard();
-    ~Shard();
+    DatasetShard();
+    ~DatasetShard();
 
     void createShard(std::string filename,
                      uint64_t numTrainExamples,
@@ -84,7 +52,7 @@ class Shard {
     bool isOpen();
     void writeExample(uint8_t *buffer, const std::string &label, const std::string &filename, ExampleType exampleType);
     void writeExamplesContiguous(uint8_t *buffer, uint64_t numExamples, ExampleType exampleType);
-    ShardExampleReadRequest getExampleReadRequest(ExampleType exampleType, uint64_t exampleIndex);
+    DatasetShardReadRequest getExampleReadRequest(ExampleType exampleType, uint64_t exampleIndex);
     void loadExample(uint8_t *buffer, std::string &label, std::string &filename, ExampleType exampleType, uint64_t exampleIndex);
     void shrinkToFit();
     std::string getFilename();
@@ -101,9 +69,9 @@ class Shard {
     bool metadataFinalized;
 
     std::fstream shardFile;
-    std::vector<ShardExampleRecord> trainExamples;
-    std::vector<ShardExampleRecord> validateExamples;
-    std::vector<ShardExampleRecord> testExamples;
+    std::vector<DatasetShardRecord> trainExamples;
+    std::vector<DatasetShardRecord> validateExamples;
+    std::vector<DatasetShardRecord> testExamples;
     std::vector<std::string> allClasses;
 
     bool compactMetadata;
@@ -137,6 +105,6 @@ class Shard {
     uint64_t compactOffsetFor(ExampleType exampleType) const;
     uint64_t compactCountFor(ExampleType exampleType) const;
     uint64_t compactBytesFor(ExampleType exampleType) const;
-    std::vector<ShardExampleRecord> &mutableRecordsFor(ExampleType exampleType);
-    const std::vector<ShardExampleRecord> &recordsFor(ExampleType exampleType) const;
+    std::vector<DatasetShardRecord> &mutableRecordsFor(ExampleType exampleType);
+    const std::vector<DatasetShardRecord> &recordsFor(ExampleType exampleType) const;
 };

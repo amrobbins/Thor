@@ -6,7 +6,7 @@
 #include "DeepLearning/Implementation/Data/Materialization/MaterializedNamedDatasetSnapshot.h"
 #include "DeepLearning/Implementation/Data/Materialization/NamedDatasetMaterializer.h"
 #include "DeepLearning/Implementation/Data/Sessions/IndexedNamedBatchSessionFactory.h"
-#include "Utilities/Loaders/IndexedLocalNamedExampleReader.h"
+#include "Utilities/Data/Readers/IndexedDatasetReader.h"
 
 #include <nlohmann/json.hpp>
 
@@ -62,37 +62,32 @@ DatasetId readIndexedDatasetIdentity(const std::filesystem::path &manifestPath) 
             "FileDataset rejected legacy split dataset storage_mode='" + storageMode +
             "'. Rewrite the dataset with DatasetWriter and provide splits through DatasetSplitManifest.");
     }
-    if (manifest.contains("dataset_id")) {
-        return DatasetId(manifest.at("dataset_id").get<std::string>());
+    if (!manifest.contains("dataset_id")) {
+        throw std::runtime_error(
+            "FileDataset manifest is missing required dataset_id. "
+            "Rewrite or explicitly migrate this pre-identity dataset with DatasetWriter.");
     }
-
-    // Indexed manifests written before persisted dataset identities remain
-    // readable until the explicit manifest-identity cleanup patch. Scope the
-    // compatibility identity to the canonical manifest path so independent
-    // copies cannot alias a residency-cache entry.
-    const std::string stableMaterial =
-        std::filesystem::absolute(manifestPath).lexically_normal().string() + "\n" + manifest.dump();
-    return DatasetId::fromStableMaterial(stableMaterial);
+    return DatasetId(manifest.at("dataset_id").get<std::string>());
 }
 
 }  // namespace
 
 class FileDataset::Runtime {
    public:
-    explicit Runtime(std::shared_ptr<IndexedLocalNamedExampleReader> reader)
+    explicit Runtime(std::shared_ptr<IndexedDatasetReader> reader)
         : reader(std::move(reader)) {
         if (this->reader == nullptr) {
             throw std::runtime_error("FileDataset requires a reader.");
         }
     }
 
-    std::shared_ptr<IndexedLocalNamedExampleReader> reader;
+    std::shared_ptr<IndexedDatasetReader> reader;
 };
 
 std::shared_ptr<FileDataset> FileDataset::open(const std::filesystem::path &datasetPath) {
     const std::filesystem::path manifestPath = datasetPath / DATASET_MANIFEST_FILENAME;
     DatasetId id = readIndexedDatasetIdentity(manifestPath);
-    std::shared_ptr<IndexedLocalNamedExampleReader> reader = IndexedLocalNamedExampleReader::openDataset(datasetPath);
+    std::shared_ptr<IndexedDatasetReader> reader = IndexedDatasetReader::openDataset(datasetPath);
     DatasetSchema schema = schemaFromLayout(reader->getLayout());
     auto runtime = std::make_unique<Runtime>(std::move(reader));
     return std::shared_ptr<FileDataset>(
@@ -163,7 +158,7 @@ const DatasetLayout &FileDatasetRuntimeAccess::layout(const Thor::FileDataset &d
     return dataset.runtime->reader->getLayout();
 }
 
-const std::shared_ptr<IndexedLocalNamedExampleReader> &FileDatasetRuntimeAccess::reader(
+const std::shared_ptr<IndexedDatasetReader> &FileDatasetRuntimeAccess::reader(
     const Thor::FileDataset &dataset) {
     return dataset.runtime->reader;
 }

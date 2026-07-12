@@ -1,7 +1,7 @@
 #include "DeepLearning/Implementation/Data/Materialization/NamedDatasetMaterializer.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
-#include "Utilities/Loaders/IndexedLocalNamedExampleReader.h"
+#include "Utilities/Data/Readers/IndexedDatasetReader.h"
 
 #include <chrono>
 #include <memory>
@@ -104,8 +104,8 @@ MaterializedNamedDatasetSnapshot materializeNamedDatasetSnapshot(
     }
 
     const auto started = std::chrono::steady_clock::now();
-    std::shared_ptr<IndexedLocalNamedExampleReader> reader =
-        IndexedLocalNamedExampleReader::openDataset(description.datasetPath, description.layout);
+    std::shared_ptr<IndexedDatasetReader> reader =
+        IndexedDatasetReader::openDataset(description.datasetPath, description.layout);
     if (reader->getNumExamples() != description.numExamples) {
         throw std::runtime_error(
             "NamedDatasetMaterializer dataset row count changed after the description was created.");
@@ -175,7 +175,7 @@ MaterializedNamedDatasetSnapshot materializeNamedDatasetSnapshot(
         }
     }
 
-    std::unique_ptr<IndexedLocalNamedExampleReader::Session> session =
+    std::unique_ptr<IndexedDatasetReader::Session> session =
         reader->createSession(readerQueueDepth);
     for (uint64_t row = 0; row < out.numExamples; ++row) {
         if (out.layout.hasWindowedTensors()) {

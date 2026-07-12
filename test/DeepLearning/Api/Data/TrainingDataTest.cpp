@@ -1,6 +1,6 @@
-#include "DeepLearning/Api/Data/TrainingData.h"
 #include "DeepLearning/Api/Data/DatasetWriter.h"
 #include "DeepLearning/Api/Data/FileDataset.h"
+#include "DeepLearning/Api/Data/TrainingData.h"
 
 #include "gtest/gtest.h"
 
@@ -22,10 +22,9 @@ concept HasPublicRelease = requires(T value) { value.release(); };
 
 static_assert(!HasPublicRelease<Thor::BatchLease>);
 
-std::filesystem::path makeDatasetPath(const std::string &name) {
+std::filesystem::path makeDatasetPath(const std::string& name) {
     static uint64_t counter = 0;
-    std::filesystem::path path = std::filesystem::temp_directory_path() /
-        ("thor_training_data_" + name + "_" + std::to_string(counter++));
+    std::filesystem::path path = std::filesystem::temp_directory_path() / ("thor_training_data_" + name + "_" + std::to_string(counter++));
     std::filesystem::remove_all(path);
     return path;
 }
@@ -35,7 +34,7 @@ DatasetLayout layout() {
         std::vector<DatasetLayout::TensorShape>{DatasetLayout::TensorShape("features", {1}, DataType::FP32)});
 }
 
-void writeDataset(const std::filesystem::path &path) {
+void writeDataset(const std::filesystem::path& path) {
     DatasetWriter writer(path, layout(), 2);
     for (uint64_t i = 0; i < 6; ++i) {
         float value = static_cast<float>(i);
@@ -50,9 +49,9 @@ void writeDataset(const std::filesystem::path &path) {
     writer.close();
 }
 
-std::vector<float> values(const Batch &batch) {
-    const Tensor &tensor = batch.getTensor("features");
-    const float *data = tensor.getMemPtr<float>();
+std::vector<float> values(const Batch& batch) {
+    const Tensor& tensor = batch.getTensor("features");
+    const float* data = tensor.getMemPtr<float>();
     return {data, data + tensor.getDescriptor().getTotalNumElements()};
 }
 
@@ -96,9 +95,7 @@ TEST(TrainingData, FixedSeedRandomizationIsSessionLocal) {
     const std::filesystem::path path = makeDatasetPath("randomization");
     writeDataset(path);
     auto dataset = Thor::FileDataset::open(path);
-    Thor::TrainingData data(dataset,
-                            Thor::DatasetSplitManifest(*dataset, {0, 1, 2, 3, 4, 5}, {}),
-                            Thor::BatchPolicy(2, true, 1234));
+    Thor::TrainingData data(dataset, Thor::DatasetSplitManifest(*dataset, {0, 1, 2, 3, 4, 5}, {}), Thor::BatchPolicy(2, true, 1234));
 
     auto first = data.openSession(2);
     auto second = data.openSession(2);
@@ -123,9 +120,7 @@ TEST(TrainingData, BatchLeaseReturnsBuffersAndCancellationIsSessionLocal) {
     const std::filesystem::path path = makeDatasetPath("lease_cancel");
     writeDataset(path);
     auto dataset = Thor::FileDataset::open(path);
-    Thor::TrainingData data(dataset,
-                            Thor::DatasetSplitManifest(*dataset, {0, 1, 2, 3}, {4, 5}),
-                            Thor::BatchPolicy(2, false));
+    Thor::TrainingData data(dataset, Thor::DatasetSplitManifest(*dataset, {0, 1, 2, 3}, {4, 5}), Thor::BatchPolicy(2, false));
 
     auto cancelled = data.openSession(1);
     auto survivor = data.openSession(1);
@@ -152,9 +147,7 @@ TEST(TrainingData, AllowsEmptyPartitionsAndEnforcesThemAtOperationBoundaries) {
     const std::filesystem::path path = makeDatasetPath("validation");
     writeDataset(path);
     auto dataset = Thor::FileDataset::open(path);
-    Thor::TrainingData data(dataset,
-                            Thor::DatasetSplitManifest(*dataset, {}, {0}, std::vector<uint64_t>{1}),
-                            Thor::BatchPolicy(1, false));
+    Thor::TrainingData data(dataset, Thor::DatasetSplitManifest(*dataset, {}, {0}, std::vector<uint64_t>{1}), Thor::BatchPolicy(1, false));
     EXPECT_THROW((void)data.openSession(0), std::runtime_error);
     EXPECT_THROW(data.requireNonEmptyPartition(ExampleType::TRAIN, "fit probe"), std::runtime_error);
     EXPECT_NO_THROW(data.requireNonEmptyPartition(ExampleType::VALIDATE, "validate probe"));
@@ -171,9 +164,7 @@ TEST(TrainingData, BatchLeaseKeepsOwningSessionAliveUntilRecycled) {
     const std::filesystem::path path = makeDatasetPath("lease_owns_session");
     writeDataset(path);
     auto dataset = Thor::FileDataset::open(path);
-    Thor::TrainingData data(dataset,
-                            Thor::DatasetSplitManifest(*dataset, {0, 1}, {2}),
-                            Thor::BatchPolicy(1, false));
+    Thor::TrainingData data(dataset, Thor::DatasetSplitManifest(*dataset, {0, 1}, {2}), Thor::BatchPolicy(1, false));
 
     std::shared_ptr<Thor::BatchSession> session = data.openSession(1);
     std::weak_ptr<Thor::BatchSession> weakSession = session;
@@ -196,21 +187,14 @@ TEST(TrainingData, OwnsDeviceAccessPolicyIndependentlyOfSessions) {
 
     Thor::TrainingData defaultData(dataset, splits, batching);
     Thor::TrainingData strictData(
-        dataset,
-        splits,
-        batching,
-        Thor::DatasetAccessPolicy{
-            .deviceStorage = Thor::DeviceDatasetStorage::STRICT});
+        dataset, splits, batching, Thor::DatasetAccessPolicy{.deviceStorage = Thor::DeviceDatasetStorage::STRICT});
 
-    EXPECT_EQ(defaultData.getAccessPolicy().deviceStorage,
-              Thor::DeviceDatasetStorage::BEST_EFFORT);
-    EXPECT_EQ(strictData.getAccessPolicy().deviceStorage,
-              Thor::DeviceDatasetStorage::STRICT);
+    EXPECT_EQ(defaultData.getAccessPolicy().deviceStorage, Thor::DeviceDatasetStorage::BEST_EFFORT);
+    EXPECT_EQ(strictData.getAccessPolicy().deviceStorage, Thor::DeviceDatasetStorage::STRICT);
 
     std::shared_ptr<Thor::BatchSession> first = strictData.openSession(1);
     std::shared_ptr<Thor::BatchSession> second = strictData.openSession(1);
     ASSERT_NE(first, second);
-    EXPECT_EQ(strictData.getAccessPolicy().deviceStorage,
-              Thor::DeviceDatasetStorage::STRICT);
+    EXPECT_EQ(strictData.getAccessPolicy().deviceStorage, Thor::DeviceDatasetStorage::STRICT);
     std::filesystem::remove_all(path);
 }

@@ -8,7 +8,7 @@
 #include "DeepLearning/Implementation/Data/Residency/DeviceDatasetStorageSelection.h"
 #include "DeepLearning/Implementation/Data/Residency/NamedDatasetRuntimeAccess.h"
 #include "DeepLearning/Implementation/Training/DeviceStartupCoordinator.h"
-#include "Utilities/Loaders/IndexedLocalNamedExampleReader.h"
+#include "Utilities/Data/Readers/IndexedDatasetReader.h"
 #include "DeepLearning/Api/Data/DatasetWriter.h"
 #include "DeepLearning/Implementation/Data/Materialization/NamedDatasetMaterializer.h"
 
@@ -929,7 +929,7 @@ void writeLargeIndexedDataset(const std::filesystem::path &datasetPath,
 
 bool waitForReadyBatches(TestIndexedNamedBatchSession &loader, ExampleType exampleType, uint64_t minReady);
 
-void exerciseIndexedLoaderWithBackendOrSkip(const IndexedBackendCase &backend) {
+void exerciseIndexedSessionWithBackendOrSkip(const IndexedBackendCase &backend) {
     ScopedEnvVar scopedBackend("THOR_IO_BACKEND", backend.envValue);
 
     const std::filesystem::path datasetPath = makeTempDatasetPath(std::string("backend_") + backend.displayName);
@@ -944,7 +944,7 @@ void exerciseIndexedLoaderWithBackendOrSkip(const IndexedBackendCase &backend) {
             throw std::runtime_error("TestIndexedNamedBatchSession did not prefill ready train batches for backend " +
                                      std::string(backend.envValue) + ".");
         }
-        IndexedLocalNamedBatchAssemblerStats stats = loader.getStatsSnapshot(ExampleType::TRAIN);
+        IndexedBatchAssemblerStats stats = loader.getStatsSnapshot(ExampleType::TRAIN);
         EXPECT_TRUE(isReadvBackendName(stats.resolvedIoBackend)) << stats.resolvedIoBackend;
         EXPECT_GE(stats.recordsRequested, 4);
         EXPECT_GE(stats.readBytesSubmitted, 4 * layout.recordSizeBytes());
@@ -992,12 +992,12 @@ bool waitForReadyBatches(TestIndexedNamedBatchSession &loader, ExampleType examp
 
 }  // namespace
 
-TEST(IndexedLocalNamedExampleReaderTest, ExposesLayoutOrdinalsAndUsesAsyncReadvIntoOrdinalDestinations) {
+TEST(IndexedDatasetReaderTest, ExposesLayoutOrdinalsAndUsesAsyncReadvIntoOrdinalDestinations) {
     const std::filesystem::path datasetPath = makeTempDatasetPath("reader_ordinals_readv");
     DatasetLayout layout = testLayout();
     writeCanonicalDataset(datasetPath, layout);
 
-    std::shared_ptr<IndexedLocalNamedExampleReader> reader = IndexedLocalNamedExampleReader::openDataset(datasetPath, layout);
+    std::shared_ptr<IndexedDatasetReader> reader = IndexedDatasetReader::openDataset(datasetPath, layout);
     EXPECT_EQ(reader->getTensorCount(), 3);
     EXPECT_EQ(reader->getLayoutTensorOrdinal("seasonality_inputs"), 0);
     EXPECT_EQ(reader->getLayoutTensorOrdinal("monotone_inputs"), 1);
@@ -1018,7 +1018,7 @@ TEST(IndexedLocalNamedExampleReaderTest, ExposesLayoutOrdinalsAndUsesAsyncReadvI
     destinations.at(reader->getLayoutTensorOrdinal("seasonality_inputs")) = reinterpret_cast<uint8_t *>(seasonality.data());
     destinations.at(reader->getLayoutTensorOrdinal("monotone_inputs")) = reinterpret_cast<uint8_t *>(monotone.data());
 
-    std::unique_ptr<IndexedLocalNamedExampleReader::Session> session = reader->createSession(4);
+    std::unique_ptr<IndexedDatasetReader::Session> session = reader->createSession(4);
     session->loadExampleInto(4, 1, destinations);
     session->drain();
 
@@ -1035,7 +1035,7 @@ TEST(IndexedLocalNamedExampleReaderTest, ExposesLayoutOrdinalsAndUsesAsyncReadvI
     EXPECT_FLOAT_EQ(weight.at(0), -3.0f);
     EXPECT_FLOAT_EQ(weight.at(1), 180.0f);
 
-    IndexedLocalNamedExampleReaderSessionStats stats = session->takeStats();
+    IndexedDatasetReaderSessionStats stats = session->takeStats();
     EXPECT_EQ(stats.readCallsSubmitted, 1);
     EXPECT_EQ(stats.readBytesSubmitted, layout.recordSizeBytes());
     EXPECT_EQ(stats.readCallsCompleted, 1);
@@ -1046,14 +1046,14 @@ TEST(IndexedLocalNamedExampleReaderTest, ExposesLayoutOrdinalsAndUsesAsyncReadvI
     std::filesystem::remove_all(datasetPath);
 }
 
-TEST(IndexedLocalNamedExampleReaderTest, MaterializesPureAffineWindowsWithoutIndexedRecords) {
+TEST(IndexedDatasetReaderTest, MaterializesPureAffineWindowsWithoutIndexedRecords) {
     const std::filesystem::path datasetPath = makeTempDatasetPath("reader_affine_windows");
     DatasetLayout layout = affineSharedWindowSourceLayout();
     writeAffineSharedWindowSourceDataset(datasetPath);
 
     EXPECT_EQ(layout.recordSizeBytes(), 0u);
-    std::shared_ptr<IndexedLocalNamedExampleReader> reader =
-        IndexedLocalNamedExampleReader::openDataset(datasetPath, layout);
+    std::shared_ptr<IndexedDatasetReader> reader =
+        IndexedDatasetReader::openDataset(datasetPath, layout);
     EXPECT_EQ(reader->getNumExamples(), 2u);
     EXPECT_EQ(reader->getRecordSizeBytes(), 0u);
 
@@ -1064,14 +1064,14 @@ TEST(IndexedLocalNamedExampleReaderTest, MaterializesPureAffineWindowsWithoutInd
     windowDestinations.at(reader->getLayoutWindowedTensorOrdinal("examples")) = examples.data();
     windowDestinations.at(reader->getLayoutWindowedTensorOrdinal("labels")) = labels.data();
 
-    std::unique_ptr<IndexedLocalNamedExampleReader::Session> session = reader->createSession(2);
+    std::unique_ptr<IndexedDatasetReader::Session> session = reader->createSession(2);
     session->loadExampleInto(0, 0, {}, windowDestinations, maskDestinations);
     session->loadExampleInto(1, 1, {}, windowDestinations, maskDestinations);
     session->drain();
 
     EXPECT_EQ(examples, (vector<uint8_t>{10, 11, 12, 13, 12, 13, 14, 15}));
     EXPECT_EQ(labels, (vector<uint8_t>{11, 12, 13, 14, 13, 14, 15, 16}));
-    IndexedLocalNamedExampleReaderSessionStats stats = session->takeStats();
+    IndexedDatasetReaderSessionStats stats = session->takeStats();
     EXPECT_EQ(stats.readCallsSubmitted, 0u);
     EXPECT_EQ(stats.readBytesSubmitted, 0u);
     EXPECT_EQ(stats.windowedSourceReadCalls, 4u);
@@ -1085,15 +1085,15 @@ TEST(IndexedLocalNamedExampleReaderTest, MaterializesPureAffineWindowsWithoutInd
     std::filesystem::remove_all(datasetPath);
 }
 
-TEST(IndexedLocalNamedExampleReaderTest, ReadsDenseRecordsAndAffineWindowsTogether) {
+TEST(IndexedDatasetReaderTest, ReadsDenseRecordsAndAffineWindowsTogether) {
     ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "pread_buffered");
 
     const std::filesystem::path datasetPath = makeTempDatasetPath("reader_dense_affine_windows");
     DatasetLayout layout = denseAffineWindowLayout();
     writeDenseAffineWindowDataset(datasetPath);
 
-    std::shared_ptr<IndexedLocalNamedExampleReader> reader =
-        IndexedLocalNamedExampleReader::openDataset(datasetPath, layout);
+    std::shared_ptr<IndexedDatasetReader> reader =
+        IndexedDatasetReader::openDataset(datasetPath, layout);
     vector<float> dense(2, 0.0f);
     vector<uint8_t> history(6, 0);
     vector<uint8_t *> denseDestinations(reader->getTensorCount(), nullptr);
@@ -1103,14 +1103,14 @@ TEST(IndexedLocalNamedExampleReaderTest, ReadsDenseRecordsAndAffineWindowsTogeth
     vector<uint8_t *> maskDestinations(reader->getWindowedTensorCount(), nullptr);
     windowDestinations.at(reader->getLayoutWindowedTensorOrdinal("history")) = history.data();
 
-    std::unique_ptr<IndexedLocalNamedExampleReader::Session> session = reader->createSession(2);
+    std::unique_ptr<IndexedDatasetReader::Session> session = reader->createSession(2);
     session->loadExampleInto(0, 0, denseDestinations, windowDestinations, maskDestinations);
     session->loadExampleInto(1, 1, denseDestinations, windowDestinations, maskDestinations);
     session->drain();
 
     EXPECT_EQ(dense, (vector<float>{1.5f, 2.5f}));
     EXPECT_EQ(history, (vector<uint8_t>{20, 21, 22, 22, 23, 24}));
-    IndexedLocalNamedExampleReaderSessionStats stats = session->takeStats();
+    IndexedDatasetReaderSessionStats stats = session->takeStats();
     EXPECT_EQ(stats.readCallsSubmitted, 2u);
     EXPECT_EQ(stats.readBytesSubmitted, 2u * layout.recordSizeBytes());
     EXPECT_EQ(stats.windowedSourceReadCalls, 2u);
@@ -1123,7 +1123,7 @@ TEST(IndexedLocalNamedExampleReaderTest, ReadsDenseRecordsAndAffineWindowsTogeth
     std::filesystem::remove_all(datasetPath);
 }
 
-TEST(IndexedLocalNamedExampleReaderTest, RejectsAffineMetadataWhoseFirstRowOverflows) {
+TEST(IndexedDatasetReaderTest, RejectsAffineMetadataWhoseFirstRowOverflows) {
     const std::filesystem::path datasetPath = makeTempDatasetPath("reader_affine_first_row_overflow");
     DatasetLayout layout = affineSharedWindowSourceLayout();
     writeAffineSharedWindowSourceDataset(datasetPath);
@@ -1141,18 +1141,18 @@ TEST(IndexedLocalNamedExampleReaderTest, RejectsAffineMetadataWhoseFirstRowOverf
     out << manifest.dump(2) << '\n';
     out.close();
 
-    EXPECT_THROW(IndexedLocalNamedExampleReader::openDataset(datasetPath, layout), std::runtime_error);
+    EXPECT_THROW(IndexedDatasetReader::openDataset(datasetPath, layout), std::runtime_error);
     std::filesystem::remove_all(datasetPath);
 }
 
-TEST(IndexedLocalNamedExampleReaderTest, AsyncReadvDrainsAndReusesIovecSlotsWhenQueueDepthIsSmall) {
+TEST(IndexedDatasetReaderTest, AsyncReadvDrainsAndReusesIovecSlotsWhenQueueDepthIsSmall) {
     ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "pread_buffered");
 
     const std::filesystem::path datasetPath = makeTempDatasetPath("reader_async_readv_queue_depth");
     DatasetLayout layout = testLayout();
     writeCanonicalDataset(datasetPath, layout);
 
-    std::shared_ptr<IndexedLocalNamedExampleReader> reader = IndexedLocalNamedExampleReader::openDataset(datasetPath, layout);
+    std::shared_ptr<IndexedDatasetReader> reader = IndexedDatasetReader::openDataset(datasetPath, layout);
 
     std::vector<float> seasonality(10, -1.0f);
     std::vector<float> monotone(15, -2.0f);
@@ -1163,7 +1163,7 @@ TEST(IndexedLocalNamedExampleReaderTest, AsyncReadvDrainsAndReusesIovecSlotsWhen
     destinations.at(reader->getLayoutTensorOrdinal("monotone_inputs")) = reinterpret_cast<uint8_t *>(monotone.data());
     destinations.at(reader->getLayoutTensorOrdinal("daily_weight")) = reinterpret_cast<uint8_t *>(weight.data());
 
-    std::unique_ptr<IndexedLocalNamedExampleReader::Session> session = reader->createSession(2);
+    std::unique_ptr<IndexedDatasetReader::Session> session = reader->createSession(2);
     for (uint64_t slot = 0; slot < 5; ++slot) {
         session->loadExampleInto(slot, slot, destinations);
     }
@@ -1175,7 +1175,7 @@ TEST(IndexedLocalNamedExampleReaderTest, AsyncReadvDrainsAndReusesIovecSlotsWhen
         (std::vector<float>{10.0f, 11.0f, 12.0f, 30.0f, 31.0f, 32.0f, 50.0f, 51.0f, 52.0f, 70.0f, 71.0f, 72.0f, 90.0f, 91.0f, 92.0f}));
     EXPECT_EQ(weight, (std::vector<float>{100.0f, 120.0f, 140.0f, 160.0f, 180.0f}));
 
-    IndexedLocalNamedExampleReaderSessionStats stats = session->takeStats();
+    IndexedDatasetReaderSessionStats stats = session->takeStats();
     EXPECT_EQ(stats.readCallsSubmitted, 5);
     EXPECT_EQ(stats.readBytesSubmitted, 5 * layout.recordSizeBytes());
     EXPECT_EQ(stats.readCallsCompleted, 5);
@@ -1614,8 +1614,8 @@ TEST(IndexedNamedBatchSessionTest, EmptyValidateAndTestSplitsHaveNoReadyBatches)
     std::filesystem::remove_all(datasetPath);
 }
 
-TEST(IndexedLocalNamedBatchAssemblerStatsTest, ReadAmplificationUsesSubmittedLogicalBytes) {
-    IndexedLocalNamedBatchAssemblerStats stats;
+TEST(IndexedBatchAssemblerStatsTest, ReadAmplificationUsesSubmittedLogicalBytes) {
+    IndexedBatchAssemblerStats stats;
     stats.recordSizeBytes = 24;
     stats.recordsRequested = 3;
     stats.logicalRecordBytesRequested = 72;
@@ -1626,8 +1626,7 @@ TEST(IndexedLocalNamedBatchAssemblerStatsTest, ReadAmplificationUsesSubmittedLog
 }
 
 TEST(IndexedNamedBatchSessionTest, DefaultShardReadQueueDepthCoversFullBatchForLargeRecords) {
-    ScopedUnsetEnvVar unsetPrimary("THOR_INDEXED_LOCAL_NAMED_LOADER_SHARD_READ_QUEUE_DEPTH");
-    ScopedUnsetEnvVar unsetAlias("THOR_INDEXED_LOCAL_NAMED_READER_SHARD_READ_QUEUE_DEPTH");
+    ScopedUnsetEnvVar unsetQueueDepth("THOR_INDEXED_DATASET_READER_QUEUE_DEPTH");
     ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "pread_buffered");
 
     constexpr uint64_t elementsPerExample = 64 * 1024;  // 256 KiB records, old byte-target depth would be 32.
@@ -1646,14 +1645,14 @@ TEST(IndexedNamedBatchSessionTest, DefaultShardReadQueueDepthCoversFullBatchForL
 
     TestIndexedNamedBatchSession loader(datasetPath, layout, trainIndices, {}, std::nullopt, batchSize, 1, false, std::nullopt);
 
-    IndexedLocalNamedBatchAssemblerStats stats = loader.getStatsSnapshot(ExampleType::TRAIN);
+    IndexedBatchAssemblerStats stats = loader.getStatsSnapshot(ExampleType::TRAIN);
     EXPECT_EQ(stats.shardReadQueueDepth, batchSize + 10);
 
     std::filesystem::remove_all(datasetPath);
 }
 
 TEST(IndexedNamedBatchSessionTest, ShardReadQueueDepthCanBeOverriddenByEnvironment) {
-    ScopedEnvVar scopedDepth("THOR_INDEXED_LOCAL_NAMED_LOADER_SHARD_READ_QUEUE_DEPTH", "7");
+    ScopedEnvVar scopedDepth("THOR_INDEXED_DATASET_READER_QUEUE_DEPTH", "7");
     ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "pread_buffered");
 
     const std::filesystem::path datasetPath = makeTempDatasetPath("env_shard_read_depth");
@@ -1662,7 +1661,7 @@ TEST(IndexedNamedBatchSessionTest, ShardReadQueueDepthCanBeOverriddenByEnvironme
 
     TestIndexedNamedBatchSession loader(datasetPath, layout, {0, 1, 2, 3}, {}, std::nullopt, 4, 1, false, std::nullopt);
 
-    IndexedLocalNamedBatchAssemblerStats stats = loader.getStatsSnapshot(ExampleType::TRAIN);
+    IndexedBatchAssemblerStats stats = loader.getStatsSnapshot(ExampleType::TRAIN);
     EXPECT_EQ(stats.shardReadQueueDepth, 7);
 
     std::filesystem::remove_all(datasetPath);
@@ -1677,7 +1676,7 @@ TEST(IndexedNamedBatchSessionTest, StatsExposeReadAndBatchCounters) {
 
     ASSERT_TRUE(waitForReadyBatches(loader, ExampleType::TRAIN, 2));
 
-    IndexedLocalNamedBatchAssemblerStats stats = loader.getStatsSnapshot(ExampleType::TRAIN);
+    IndexedBatchAssemblerStats stats = loader.getStatsSnapshot(ExampleType::TRAIN);
     EXPECT_EQ(stats.splitName, "train");
     EXPECT_GE(stats.recordsRequested, 2);
     EXPECT_GE(stats.logicalRecordBytesRequested, 2 * layout.recordSizeBytes());
@@ -1747,7 +1746,7 @@ TEST(IndexedNamedBatchSessionTest, StatsExposeReadAndBatchCounters) {
     EXPECT_GE(stats.returnBufferCalls, 1);
     EXPECT_GE(stats.getBatchReadyQueueEmptyCount + stats.getBatchImmediateCount, stats.getBatchCalls);
 
-    IndexedLocalNamedBatchAssemblerStats validateStats = loader.getStatsSnapshot(ExampleType::VALIDATE);
+    IndexedBatchAssemblerStats validateStats = loader.getStatsSnapshot(ExampleType::VALIDATE);
     EXPECT_EQ(validateStats.splitName, "validate");
     EXPECT_EQ(validateStats.recordsRequested, 0);
     EXPECT_EQ(validateStats.targetBatchQueueDepth, 3);
@@ -3120,7 +3119,7 @@ TEST(DeviceResidentNamedBatchSessionTest, RejectsEmptySplitBatchRequest) {
 class IndexedNamedBatchSessionBackendRegressionTest : public ::testing::TestWithParam<IndexedBackendCase> {};
 
 TEST_P(IndexedNamedBatchSessionBackendRegressionTest, ExplicitBackendReadsIndexedDatasetAndReportsBackend) {
-    exerciseIndexedLoaderWithBackendOrSkip(GetParam());
+    exerciseIndexedSessionWithBackendOrSkip(GetParam());
 }
 
 INSTANTIATE_TEST_SUITE_P(ExplicitBackends,
@@ -3133,9 +3132,9 @@ INSTANTIATE_TEST_SUITE_P(ExplicitBackends,
                          });
 
 TEST(IndexedNamedBatchSessionPerf, LargeRandomRecordPrefetchSmoke) {
-    const char *enabled = std::getenv("THOR_INDEXED_LOCAL_NAMED_LOADER_PERF_TEST");
+    const char *enabled = std::getenv("THOR_INDEXED_BATCH_ASSEMBLER_PERF_TEST");
     if (enabled == nullptr || enabled[0] == '\0' || (enabled[0] == '0' && enabled[1] == '\0')) {
-        GTEST_SKIP() << "Set THOR_INDEXED_LOCAL_NAMED_LOADER_PERF_TEST=1 to run the indexed loader large-record smoke test.";
+        GTEST_SKIP() << "Set THOR_INDEXED_BATCH_ASSEMBLER_PERF_TEST=1 to run the indexed batch assembler large-record smoke test.";
     }
 
     constexpr uint64_t elementsPerExample = 32 * 1024;  // 128 KiB records.
@@ -3161,7 +3160,7 @@ TEST(IndexedNamedBatchSessionPerf, LargeRandomRecordPrefetchSmoke) {
 
     ASSERT_TRUE(waitForReadyBatches(loader, ExampleType::TRAIN, 4));
     const auto ready = std::chrono::steady_clock::now();
-    IndexedLocalNamedBatchAssemblerStats stats = loader.getStatsSnapshot(ExampleType::TRAIN);
+    IndexedBatchAssemblerStats stats = loader.getStatsSnapshot(ExampleType::TRAIN);
 
     EXPECT_GE(stats.currentReadyBatches, 4);
     EXPECT_GE(stats.batchesAssembled, 4);
