@@ -1301,6 +1301,7 @@ gtest_discover_tests(thor_tests)
 target_compile_definitions(thor_tests PRIVATE
         THOR_GTEST
         SOURCE_DIR="$<SHELL_PATH:${CMAKE_SOURCE_DIR}>"
+        THOR_BUILD_DIR="$<SHELL_PATH:${CMAKE_BINARY_DIR}>"
 )
 
 target_compile_options(thor_tests PRIVATE
@@ -1392,10 +1393,23 @@ set_target_properties(createMasterHeader PROPERTIES
 # C++/CUDA source file.  Keeping headerlist.txt as a configure-time file avoids
 # rewriting generated/Thor.h after ordinary .cpp/.cu edits, which otherwise
 # causes broad rebuilds of files that include Thor.h.
-file(GLOB_RECURSE THOR_PUBLIC_HEADERS CONFIGURE_DEPENDS
-        "${CMAKE_SOURCE_DIR}/DeepLearning/*.h"
-        "${CMAKE_SOURCE_DIR}/Utilities/*.h"
+# The generated umbrella header is rooted exclusively in Thor's supported
+# application-facing API tree. Implementation and Utilities headers may still
+# be transitively required by individual API headers until their PIMPL/internal
+# migrations are complete, but merely adding an internal header must never make
+# it a top-level Thor.h export.
+set(THOR_PUBLIC_HEADER_ROOTS
+        "${CMAKE_SOURCE_DIR}/DeepLearning/Api"
 )
+
+set(THOR_PUBLIC_HEADERS "")
+foreach (_thor_public_header_root IN LISTS THOR_PUBLIC_HEADER_ROOTS)
+    file(GLOB_RECURSE _thor_public_root_headers CONFIGURE_DEPENDS
+            "${_thor_public_header_root}/*.h"
+    )
+    list(APPEND THOR_PUBLIC_HEADERS ${_thor_public_root_headers})
+endforeach ()
+list(REMOVE_DUPLICATES THOR_PUBLIC_HEADERS)
 
 set(_thor_headerlist_entries "")
 foreach (_thor_header IN LISTS THOR_PUBLIC_HEADERS)

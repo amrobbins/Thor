@@ -1,12 +1,11 @@
 #pragma once
 
-#include "DeepLearning/Api/Data/BatchPolicy.h"
-#include "DeepLearning/Api/Data/DatasetSplitManifest.h"
-#include "DeepLearning/Api/Loaders/DeviceDatasetMaterialization.h"
+#include "DeepLearning/Implementation/Data/Materialization/DeviceDatasetMaterialization.h"
 #include "DeepLearning/Api/Data/BatchSession.h"
-#include "DeepLearning/Api/Training/DeviceDatasetResidency.h"
+#include "DeepLearning/Implementation/Data/Residency/DeviceDatasetResidency.h"
 #include "Utilities/Common/Stream.h"
-#include "Utilities/Loaders/DeviceResidentNamedDataset.h"
+#include "DeepLearning/Implementation/Data/Residency/DeviceResidentNamedDataset.h"
+#include "Utilities/Loaders/IndexedLocalNamedExampleReader.h"
 #include "Utilities/Random/FullPeriodRandom.h"
 
 #include <atomic>
@@ -21,42 +20,26 @@
 #include <string>
 #include <vector>
 
-struct DeviceResidentNamedBatchSessionStats {
-    std::string splitName;
-    uint64_t batchesGathered = 0;
-    uint64_t batchesReturned = 0;
-    uint64_t currentAvailableBatches = 0;
-    uint64_t batchQueueDepth = 0;
-    uint64_t residentExamples = 0;
-    uint64_t residentBytes = 0;
-};
-
 /**
- * Mutable batch session over one canonical DeviceResidentNamedDataset.
- *
- * Split membership, cursors, randomization, row-index tensors and reusable
- * batch buffers are session-owned. Persistent field storage remains shared and
- * split-independent in DeviceResidentNamedDataset.
+ * Hybrid session used when only canonical windowed fields fit on the device.
+ * Direct fields are read from the source dataset while windowed fields are
+ * gathered by canonical dataset row from shared device storage.
  */
-class DeviceResidentNamedBatchSession : public Thor::BatchSession {
+class DeviceResidentWindowedNamedBatchSession : public Thor::BatchSession {
    public:
-    DeviceResidentNamedBatchSession(
-        Thor::DeviceDatasetLease dataset,
-        Thor::DatasetSplitManifest splits,
-        Thor::BatchPolicy batching,
+    DeviceResidentWindowedNamedBatchSession(
+        Thor::DatasetMaterializationDescription datasetDescription,
+        Thor::DeviceDatasetSessionDescription sessionDescription,
+        Thor::DeviceDatasetLease windowedDataset,
         uint64_t batchQueueDepth = 2,
+        uint64_t readerQueueDepth = 32,
         std::string datasetName = {});
-    DeviceResidentNamedBatchSession(
-        Thor::DeviceDatasetLease dataset,
-        Thor::DeviceDatasetSessionDescription session,
-        uint64_t batchQueueDepth = 2,
-        std::string datasetName = {});
-    ~DeviceResidentNamedBatchSession() override;
+    ~DeviceResidentWindowedNamedBatchSession() override;
 
-    DeviceResidentNamedBatchSession(const DeviceResidentNamedBatchSession &) = delete;
-    DeviceResidentNamedBatchSession &operator=(const DeviceResidentNamedBatchSession &) = delete;
-    DeviceResidentNamedBatchSession(DeviceResidentNamedBatchSession &&) = delete;
-    DeviceResidentNamedBatchSession &operator=(DeviceResidentNamedBatchSession &&) = delete;
+    DeviceResidentWindowedNamedBatchSession(const DeviceResidentWindowedNamedBatchSession &) = delete;
+    DeviceResidentWindowedNamedBatchSession &operator=(const DeviceResidentWindowedNamedBatchSession &) = delete;
+    DeviceResidentWindowedNamedBatchSession(DeviceResidentWindowedNamedBatchSession &&) = delete;
+    DeviceResidentWindowedNamedBatchSession &operator=(DeviceResidentWindowedNamedBatchSession &&) = delete;
 
 
     uint64_t getNumBatchesPerEpoch(ExampleType exampleType) override;
@@ -70,12 +53,11 @@ class DeviceResidentNamedBatchSession : public Thor::BatchSession {
     }
     void cancel() override;
 
-    [[nodiscard]] const std::shared_ptr<const DeviceResidentNamedDataset> &getDeviceDataset() const { return dataset.getShared(); }
-    [[nodiscard]] const Thor::DatasetSplitManifest &getSplitManifest() const { return splits; }
-    [[nodiscard]] const Thor::BatchPolicy &getBatchPolicy() const { return batching; }
+    [[nodiscard]] const std::shared_ptr<const DeviceResidentNamedDataset> &getWindowedDeviceDataset() const {
+        return windowedDataset.getShared();
+    }
     [[nodiscard]] uint64_t getBatchQueueDepth() const { return batchQueueDepth; }
     [[nodiscard]] bool isCancelled() const { return cancelled.load(std::memory_order_acquire); }
-    [[nodiscard]] DeviceResidentNamedBatchSessionStats getStatsSnapshot(ExampleType exampleType) const;
 
    private:
     Batch acquireBatch(ExampleType exampleType, uint64_t &batchNum) override;
@@ -91,10 +73,9 @@ class DeviceResidentNamedBatchSession : public Thor::BatchSession {
         ThorImplementation::Tensor rowIndicesHost;
         ThorImplementation::Tensor rowIndicesDevice;
         std::unique_ptr<FullPeriodRandom> randomizer;
+        std::unique_ptr<IndexedLocalNamedExampleReader::Session> readerSession;
         uint64_t nextBatchNum = 0;
         uint64_t nextLogicalPosition = 0;
-        uint64_t batchesGathered = 0;
-        uint64_t batchesReturned = 0;
         mutable std::mutex mutex;
         std::condition_variable notEmpty;
         Stream gatherStream;
@@ -104,11 +85,13 @@ class DeviceResidentNamedBatchSession : public Thor::BatchSession {
         }
     };
 
-    Thor::DeviceDatasetLease dataset;
-    Thor::DatasetSplitManifest splits;
-    Thor::BatchPolicy batching;
+    Thor::DatasetMaterializationDescription datasetDescription;
+    Thor::DeviceDatasetSessionDescription sessionDescription;
     std::set<Thor::DatasetFieldId> requiredFieldIds;
+    std::shared_ptr<IndexedLocalNamedExampleReader> reader;
+    Thor::DeviceDatasetLease windowedDataset;
     uint64_t batchQueueDepth = 0;
+    uint64_t readerQueueDepth = 0;
     std::map<ExampleType, std::unique_ptr<SplitRuntime>> splitRuntimes;
     std::atomic<bool> cancelled{false};
 
@@ -119,6 +102,6 @@ class DeviceResidentNamedBatchSession : public Thor::BatchSession {
     [[nodiscard]] SplitRuntime &runtimeFor(ExampleType exampleType);
     [[nodiscard]] const SplitRuntime &runtimeFor(ExampleType exampleType) const;
     [[nodiscard]] std::map<std::string, ThorImplementation::Tensor> allocateBatchTensorSet() const;
-    void validateReturnedBatch(const std::map<std::string, ThorImplementation::Tensor> &tensors) const;
     void fillRowIndexTensor(SplitRuntime &runtime);
+    void validateReturnedBatch(const std::map<std::string, ThorImplementation::Tensor> &tensors) const;
 };

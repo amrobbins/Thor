@@ -5,6 +5,7 @@
 //       https://github.com/NVIDIA/DALI#compiling-dali-from-source-bare-metal
 //       Will need a C++ api, currently that is experimental. Will need to talk to nVidia.
 
+#include "DeepLearning/Api/Data/ExampleType.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "Utilities/WorkQueue/AsyncQueue.h"
 #include "Utilities/WorkQueue/WorkQueueUnordered.h"
@@ -31,7 +32,6 @@ class UringDirect;
 #include <utility>
 
 
-enum class ExampleType { TRAIN = 3, VALIDATE, TEST };
 
 struct DataElement {
     ExampleType exampleType;

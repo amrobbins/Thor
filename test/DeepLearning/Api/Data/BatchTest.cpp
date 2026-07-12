@@ -1,4 +1,4 @@
-#include "DeepLearning/Api/Loaders/Batch.h"
+#include "DeepLearning/Api/Data/Batch.h"
 
 #include "gtest/gtest.h"
 

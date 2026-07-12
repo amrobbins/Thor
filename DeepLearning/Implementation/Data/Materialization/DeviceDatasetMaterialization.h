@@ -13,6 +13,8 @@
 
 namespace Thor {
 
+enum class DatasetMaterializationSource { FILE_DATASET, MEMORY };
+
 /**
  * Canonical, split-independent description of one immutable named dataset.
  *
@@ -25,18 +27,22 @@ struct DatasetMaterializationDescription {
                                       DatasetId datasetId,
                                       DatasetSchema schema,
                                       DatasetLayout layout,
-                                      uint64_t numExamples)
+                                      uint64_t numExamples,
+                                      DatasetMaterializationSource source =
+                                          DatasetMaterializationSource::FILE_DATASET)
         : datasetPath(std::move(datasetPath)),
           datasetId(std::move(datasetId)),
           schema(std::move(schema)),
           layout(std::move(layout)),
-          numExamples(numExamples) {}
+          numExamples(numExamples),
+          source(source) {}
 
     std::filesystem::path datasetPath;
     DatasetId datasetId;
     DatasetSchema schema;
     DatasetLayout layout;
     uint64_t numExamples = 0;
+    DatasetMaterializationSource source = DatasetMaterializationSource::FILE_DATASET;
 };
 
 /**

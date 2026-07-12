@@ -1,4 +1,4 @@
-#include "Utilities/Loaders/NamedDatasetMaterializer.h"
+#include "DeepLearning/Implementation/Data/Materialization/NamedDatasetMaterializer.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Loaders/IndexedLocalNamedExampleReader.h"
@@ -49,7 +49,8 @@ std::vector<uint64_t> materializedWindowMaskDimensions(
 
 NamedDatasetMaterializationSupport checkNamedDatasetSnapshotMaterializationSupport(
     const Thor::DatasetMaterializationDescription &description) {
-    if (description.datasetPath.empty()) {
+    if (description.source == Thor::DatasetMaterializationSource::FILE_DATASET &&
+        description.datasetPath.empty()) {
         return NamedDatasetMaterializationSupport{false, "missing_dataset_path"};
     }
     if (description.numExamples == 0) {
@@ -95,6 +96,11 @@ MaterializedNamedDatasetSnapshot materializeNamedDatasetSnapshot(
     if (!support.supported) {
         throw std::runtime_error(
             "NamedDatasetMaterializer cannot materialize dataset snapshot: " + support.reason);
+    }
+
+    if (description.source != Thor::DatasetMaterializationSource::FILE_DATASET) {
+        throw std::runtime_error(
+            "NamedDatasetMaterializer requires the owning dataset backend to materialize an in-memory dataset.");
     }
 
     const auto started = std::chrono::steady_clock::now();

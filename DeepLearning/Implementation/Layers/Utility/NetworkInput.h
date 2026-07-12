@@ -96,19 +96,31 @@ class NetworkInput : public Layer {
      * use DeviceLoad: the source is copied directly into the statically wired
      * featureOutput on the processing stream and no NetworkInput staging ring
      * is retained. All other/unknown placements use the regular staged path.
-     * This must be called before preallocateInputSlots().
+     * Initial configuration must precede preallocateInputSlots(). Repeating the
+     * same configuration is harmless, and DeviceLoad may switch to staged loading
+     * before submission because it has no allocated input slots.
      */
     virtual void configureBatchInputPlacement(std::optional<TensorPlacement> batchTensorPlacement) {
         THOR_THROW_IF_FALSE(!isPassThrough());
-        // Reconfiguring after slot allocation or submission could release a
-        // buffer that still has queued users. Make setup ordering an explicit
-        // contract instead of attempting a best-effort mode switch.
-        THOR_THROW_IF_FALSE(inputSlots.empty());
         const bool directDeviceLoad = batchTensorPlacement.has_value() &&
                                       batchTensorPlacement.value().getMemDevice() == TensorPlacement::MemDevices::GPU &&
                                       networkPlacement.getMemDevice() == TensorPlacement::MemDevices::GPU &&
                                       batchTensorPlacement.value() == networkPlacement;
-        mode = directDeviceLoad ? Mode::DeviceLoad : Mode::ExternalLoad;
+        const Mode requestedMode = directDeviceLoad ? Mode::DeviceLoad : Mode::ExternalLoad;
+
+        // Setup may be repeated with the same mode after slots have been
+        // allocated. This is needed when BEST_EFFORT device-dataset startup
+        // falls back to the source session: already-staged inputs remain
+        // ExternalLoad, while direct inputs (which have no slots) switch to
+        // ExternalLoad and allocate their rings. A real mode change after slot
+        // allocation is still forbidden because queued users could reference
+        // those buffers.
+        if (!inputSlots.empty()) {
+            THOR_THROW_IF_FALSE(mode == requestedMode);
+            return;
+        }
+
+        mode = requestedMode;
         activeInputSlot = 0;
     }
 

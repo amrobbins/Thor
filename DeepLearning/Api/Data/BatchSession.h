@@ -1,9 +1,9 @@
 #pragma once
 
+#include "DeepLearning/Api/Data/Batch.h"
 #include "DeepLearning/Api/Data/DatasetSchema.h"
-#include "DeepLearning/Api/Loaders/Batch.h"
+#include "DeepLearning/Api/Data/ExampleType.h"
 #include "Utilities/Common/Event.h"
-#include "Utilities/Loaders/Shard.h"
 
 #include <cstdint>
 #include <memory>

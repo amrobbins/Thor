@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DeepLearning/Api/Data/ExampleType.h"
 #include "DeepLearning/Api/Training/Executors/DebugSynchronousTrainingExecutor.h"
 #include "DeepLearning/Api/Training/Executors/LocalTrainingExecutor.h"
 #include "DeepLearning/Api/Training/EarlyCompletionPolicy.h"
@@ -16,9 +17,6 @@
 #include <string>
 #include <utility>
 #include <vector>
-
-#include "Utilities/Loaders/Shard.h"
-
 
 namespace Thor {
 

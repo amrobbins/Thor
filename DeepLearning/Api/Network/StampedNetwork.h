@@ -6,7 +6,7 @@
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
-#include "DeepLearning/Api/Loaders/Batch.h"
+#include "DeepLearning/Api/Data/Batch.h"
 #include "DeepLearning/Implementation/Tensor/RaggedTensorDescriptor.h"
 #include "Utilities/Common/Event.h"
 

@@ -1,6 +1,8 @@
-#include "DeepLearning/Api/Loaders/IndexedNamedBatchSession.h"
+#include "DeepLearning/Implementation/Data/Sessions/IndexedNamedBatchSession.h"
+#include "DeepLearning/Implementation/Data/Sessions/IndexedNamedBatchSessionFactory.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
+#include "DeepLearning/Implementation/Data/FileDatasetRuntimeAccess.h"
 
 #include <map>
 #include <stdexcept>
@@ -89,14 +91,19 @@ std::unique_ptr<IndexedLocalNamedBatchAssembler> IndexedNamedBatchSession::creat
         return nullptr;
     }
     validateIndices(*indices, splitName);
-    return std::make_unique<IndexedLocalNamedBatchAssembler>(dataset->getReader(),
-                                                             dataset->getLayout(),
-                                                             std::move(indices),
-                                                             splitName,
-                                                             batchSize,
-                                                             batchQueueDepth,
-                                                             randomized,
-                                                             splitSeed);
+    const std::shared_ptr<IndexedLocalNamedExampleReader> &reader =
+        ThorImplementation::FileDatasetRuntimeAccess::reader(*dataset);
+    const DatasetLayout &layout =
+        ThorImplementation::FileDatasetRuntimeAccess::layout(*dataset);
+    return std::make_unique<IndexedLocalNamedBatchAssembler>(
+        reader,
+        layout,
+        std::move(indices),
+        splitName,
+        batchSize,
+        batchQueueDepth,
+        randomized,
+        splitSeed);
 }
 
 IndexedLocalNamedBatchAssembler *IndexedNamedBatchSession::assemblerFor(ExampleType exampleType) {
@@ -179,13 +186,15 @@ IndexedLocalNamedBatchAssemblerStats IndexedNamedBatchSession::getStatsSnapshot(
     IndexedLocalNamedBatchAssemblerStats stats;
     stats.splitName = splitNameForStats(exampleType);
     stats.targetBatchQueueDepth = batchQueueDepth;
-    stats.recordSizeBytes = dataset->getLayout().recordSizeBytes();
+    stats.recordSizeBytes =
+        ThorImplementation::FileDatasetRuntimeAccess::layout(*dataset).recordSizeBytes();
     stats.resolvedIoBackend = "empty";
     return stats;
 }
 
-const DatasetLayout &IndexedNamedBatchSession::getLayout() const { return dataset->getLayout(); }
-
+const DatasetLayout &IndexedNamedBatchSession::getLayout() const {
+    return ThorImplementation::FileDatasetRuntimeAccess::layout(*dataset);
+}
 
 uint64_t IndexedNamedBatchSession::getNumDatasetExamples() const { return numDatasetExamples; }
 
@@ -218,3 +227,17 @@ void IndexedNamedBatchSession::cancel() {
     validateAssembler.reset();
     testAssembler.reset();
 }
+
+namespace ThorImplementation {
+
+std::shared_ptr<Thor::BatchSession> openIndexedNamedBatchSession(
+    std::shared_ptr<const Thor::FileDataset> dataset,
+    const Thor::DatasetSplitManifest &splits,
+    const Thor::BatchPolicy &batching,
+    uint64_t maxInFlightBatches,
+    const std::set<Thor::DatasetFieldId> &requiredFieldIds) {
+    return std::make_shared<IndexedNamedBatchSession>(
+        std::move(dataset), splits, batching, maxInFlightBatches, requiredFieldIds);
+}
+
+}  // namespace ThorImplementation

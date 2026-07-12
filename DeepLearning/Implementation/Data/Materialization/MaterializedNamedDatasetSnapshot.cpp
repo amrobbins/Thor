@@ -1,4 +1,4 @@
-#include "Utilities/Loaders/MaterializedNamedDatasetSnapshot.h"
+#include "DeepLearning/Implementation/Data/Materialization/MaterializedNamedDatasetSnapshot.h"
 
 uint64_t MaterializedNamedDatasetSnapshot::totalBytes() const {
     uint64_t total = 0;

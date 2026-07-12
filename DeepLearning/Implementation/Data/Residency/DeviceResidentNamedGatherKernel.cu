@@ -1,4 +1,4 @@
-#include "Utilities/Loaders/DeviceResidentNamedGatherKernel.h"
+#include "DeepLearning/Implementation/Data/Residency/DeviceResidentNamedGatherKernel.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Expression/CudaHelpers.h"

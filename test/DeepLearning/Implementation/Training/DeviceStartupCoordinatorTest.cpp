@@ -1,0 +1,118 @@
+#include "DeepLearning/Implementation/Training/DeviceStartupCoordinator.h"
+
+#include <gtest/gtest.h>
+
+#include <chrono>
+#include <future>
+#include <optional>
+
+namespace {
+
+using ThorImplementation::DEVICE_STARTUP_SAFETY_RESERVE_BYTES;
+using ThorImplementation::DeviceStartupGuard;
+using ThorImplementation::DeviceStartupSafetyReserveError;
+using ThorImplementation::acquireDeviceStartupGuard;
+using ThorImplementation::enforceDeviceStartupSafetyReserve;
+
+TEST(DeviceStartupCoordinatorTest, SerializesStartupOnTheSameDevice) {
+    std::optional<DeviceStartupGuard> first(
+        acquireDeviceStartupGuard(0));
+
+    std::promise<void> secondAttemptedPromise;
+    std::shared_future<void> secondAttempted =
+        secondAttemptedPromise.get_future().share();
+    std::promise<void> secondAcquiredPromise;
+    std::shared_future<void> secondAcquired =
+        secondAcquiredPromise.get_future().share();
+
+    std::future<void> second = std::async(std::launch::async, [&]() {
+        secondAttemptedPromise.set_value();
+        DeviceStartupGuard guard = acquireDeviceStartupGuard(0);
+        secondAcquiredPromise.set_value();
+    });
+
+    const std::future_status attemptedStatus =
+        secondAttempted.wait_for(std::chrono::seconds(2));
+    if (attemptedStatus != std::future_status::ready) {
+        first.reset();
+        second.wait();
+        FAIL() << "Second startup thread did not begin its lock attempt.";
+        return;
+    }
+    EXPECT_EQ(secondAcquired.wait_for(std::chrono::milliseconds(50)),
+              std::future_status::timeout);
+
+    first.reset();
+    EXPECT_EQ(secondAcquired.wait_for(std::chrono::seconds(2)),
+              std::future_status::ready);
+    second.get();
+}
+
+TEST(DeviceStartupCoordinatorTest, DifferentDevicesDoNotBlockEachOther) {
+    std::optional<DeviceStartupGuard> first(
+        acquireDeviceStartupGuard(0));
+
+    std::future<bool> second = std::async(std::launch::async, []() {
+        DeviceStartupGuard guard = acquireDeviceStartupGuard(1);
+        return guard.ownsLock();
+    });
+
+    const std::future_status status =
+        second.wait_for(std::chrono::seconds(2));
+    first.reset();
+    EXPECT_EQ(status, std::future_status::ready);
+    EXPECT_TRUE(second.get());
+}
+
+TEST(DeviceStartupCoordinatorTest, CompleteChecksReserveBeforeUnlocking) {
+    std::optional<DeviceStartupGuard> first(
+        acquireDeviceStartupGuard(8));
+
+    EXPECT_THROW(first->complete(DEVICE_STARTUP_SAFETY_RESERVE_BYTES - 1),
+                 DeviceStartupSafetyReserveError);
+    ASSERT_TRUE(first->ownsLock());
+
+    std::promise<void> secondAcquiredPromise;
+    std::shared_future<void> secondAcquired =
+        secondAcquiredPromise.get_future().share();
+    std::future<void> second = std::async(std::launch::async, [&]() {
+        DeviceStartupGuard guard = acquireDeviceStartupGuard(8);
+        secondAcquiredPromise.set_value();
+    });
+
+    EXPECT_EQ(secondAcquired.wait_for(std::chrono::milliseconds(50)),
+              std::future_status::timeout);
+    first.reset();
+    EXPECT_EQ(secondAcquired.wait_for(std::chrono::seconds(2)),
+              std::future_status::ready);
+    second.get();
+}
+
+TEST(DeviceStartupCoordinatorTest, CompleteReleasesAfterSuccessfulReserveCheck) {
+    DeviceStartupGuard first = acquireDeviceStartupGuard(9);
+    first.complete(DEVICE_STARTUP_SAFETY_RESERVE_BYTES);
+    EXPECT_FALSE(first.ownsLock());
+
+    DeviceStartupGuard second = acquireDeviceStartupGuard(9);
+    EXPECT_TRUE(second.ownsLock());
+}
+
+TEST(DeviceStartupCoordinatorTest, EnforcesOneGiBSafetyReserveBoundary) {
+    EXPECT_NO_THROW(enforceDeviceStartupSafetyReserve(
+        0, DEVICE_STARTUP_SAFETY_RESERVE_BYTES));
+    EXPECT_THROW(enforceDeviceStartupSafetyReserve(
+                     0, DEVICE_STARTUP_SAFETY_RESERVE_BYTES - 1),
+                 DeviceStartupSafetyReserveError);
+}
+
+TEST(DeviceStartupCoordinatorTest, GuardReleasesOnScopeExit) {
+    {
+        DeviceStartupGuard guard = acquireDeviceStartupGuard(7);
+        ASSERT_TRUE(guard.ownsLock());
+    }
+
+    DeviceStartupGuard next = acquireDeviceStartupGuard(7);
+    EXPECT_TRUE(next.ownsLock());
+}
+
+}  // namespace

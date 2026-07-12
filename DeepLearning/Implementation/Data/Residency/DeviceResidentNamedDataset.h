@@ -4,7 +4,7 @@
 #include "DeepLearning/Api/Data/DatasetSchema.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "DeepLearning/Api/Data/DatasetLayout.h"
-#include "Utilities/Loaders/MaterializedNamedDatasetSnapshot.h"
+#include "DeepLearning/Implementation/Data/Materialization/MaterializedNamedDatasetSnapshot.h"
 
 #include <cstdint>
 #include <map>

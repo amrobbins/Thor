@@ -3,7 +3,7 @@
 
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/StampedNetwork.h"
-#include "DeepLearning/Api/Loaders/Batch.h"
+#include "DeepLearning/Api/Data/Batch.h"
 #include "DeepLearning/Api/Parameter/BoundParameter.h"
 #include "DeepLearning/Api/Parameter/ParameterReference.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"

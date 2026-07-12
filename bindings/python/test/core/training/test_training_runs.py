@@ -1717,6 +1717,67 @@ def test_device_dataset_storage_is_not_a_fit_option():
     assert not hasattr(thor.training, "DeviceDatasetStorage")
 
 
+@pytest.mark.cuda
+@pytest.mark.parametrize(
+    "device_storage, expected_requested, expected_attempted",
+    [
+        (None, thor.data.DeviceDatasetStorage.BEST_EFFORT, True),
+        ("best_effort", thor.data.DeviceDatasetStorage.BEST_EFFORT, True),
+        ("strict", thor.data.DeviceDatasetStorage.STRICT, True),
+        ("off", thor.data.DeviceDatasetStorage.OFF, False),
+    ],
+)
+def test_numpy_dataset_device_residency_transparently_follows_training_data_policy(
+    device_storage,
+    expected_requested,
+    expected_attempted,
+):
+    x, y = _regression_arrays()
+    canonical = {
+        "examples": np.ascontiguousarray(np.concatenate([x, x], axis=0)),
+        "labels": np.ascontiguousarray(np.concatenate([y, y], axis=0)),
+    }
+    dataset = thor.data.NumpyDataset(canonical)
+    data_kwargs = {}
+    if device_storage is not None:
+        data_kwargs["device_storage"] = device_storage
+    data = thor.data.TrainingData(
+        dataset=dataset,
+        splits=thor.data.DatasetSplitManifest(
+            dataset=dataset,
+            train_indices=np.arange(0, 4, dtype=np.int64),
+            validate_indices=np.arange(4, 8, dtype=np.int64),
+        ),
+        batching=thor.data.BatchPolicy(batch_size=4, randomize_train=False),
+        dataset_name=f"numpy_device_residency_{device_storage or 'default'}",
+        **data_kwargs,
+    )
+    trainer = thor.training.Trainer(
+        _build_tiny_regressor(f"numpy_device_residency_{device_storage or 'default'}"),
+        data=data,
+        optimizer=thor.optimizers.Sgd(initial_learning_rate=0.01, momentum=0.0),
+        stats_interval_s=0.0,
+        max_in_flight_batches=2,
+        scalar_tensors_to_report=["loss"],
+        stats_color="never",
+    )
+
+    result = trainer.fit(1, check_best_model_every_epochs=0)
+    report = result.final_training_stats.device_dataset_storage
+
+    assert report.requested == expected_requested
+    assert report.attempted is expected_attempted
+    assert report.used is expected_attempted
+    if expected_attempted:
+        assert report.reason == ""
+        assert report.examples == 8
+        assert report.resident_bytes == 8 * (2 + 1) * np.dtype(np.float32).itemsize
+        assert report.required_bytes >= report.resident_bytes
+        assert report.materialization_seconds >= 0.0
+    else:
+        assert report.resident_bytes == 0
+
+
 def test_trainer_fit_options_accepts_zero_best_model_candidate_cadence_as_disabled():
     options = thor.training.TrainerFitOptions()
     options.check_best_model_every_epochs = 0

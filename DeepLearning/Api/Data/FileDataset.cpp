@@ -1,7 +1,11 @@
 #include "DeepLearning/Api/Data/FileDataset.h"
 
 #include "DeepLearning/Api/Data/DatasetWriter.h"
-#include "DeepLearning/Api/Loaders/IndexedNamedBatchSession.h"
+#include "DeepLearning/Implementation/Data/FileDatasetRuntimeAccess.h"
+#include "DeepLearning/Implementation/Data/Materialization/DeviceDatasetMaterialization.h"
+#include "DeepLearning/Implementation/Data/Materialization/MaterializedNamedDatasetSnapshot.h"
+#include "DeepLearning/Implementation/Data/Materialization/NamedDatasetMaterializer.h"
+#include "DeepLearning/Implementation/Data/Sessions/IndexedNamedBatchSessionFactory.h"
 #include "Utilities/Loaders/IndexedLocalNamedExampleReader.h"
 
 #include <nlohmann/json.hpp>
@@ -73,37 +77,49 @@ DatasetId readIndexedDatasetIdentity(const std::filesystem::path &manifestPath) 
 
 }  // namespace
 
+class FileDataset::Runtime {
+   public:
+    explicit Runtime(std::shared_ptr<IndexedLocalNamedExampleReader> reader)
+        : reader(std::move(reader)) {
+        if (this->reader == nullptr) {
+            throw std::runtime_error("FileDataset requires a reader.");
+        }
+    }
+
+    std::shared_ptr<IndexedLocalNamedExampleReader> reader;
+};
+
 std::shared_ptr<FileDataset> FileDataset::open(const std::filesystem::path &datasetPath) {
     const std::filesystem::path manifestPath = datasetPath / DATASET_MANIFEST_FILENAME;
     DatasetId id = readIndexedDatasetIdentity(manifestPath);
     std::shared_ptr<IndexedLocalNamedExampleReader> reader = IndexedLocalNamedExampleReader::openDataset(datasetPath);
     DatasetSchema schema = schemaFromLayout(reader->getLayout());
+    auto runtime = std::make_unique<Runtime>(std::move(reader));
     return std::shared_ptr<FileDataset>(
-        new FileDataset(datasetPath, std::move(id), std::move(schema), std::move(reader)));
+        new FileDataset(datasetPath, std::move(id), std::move(schema), std::move(runtime)));
 }
 
 FileDataset::FileDataset(std::filesystem::path datasetPath,
                          DatasetId id,
                          DatasetSchema schema,
-                         std::shared_ptr<IndexedLocalNamedExampleReader> reader)
-    : datasetPath(std::move(datasetPath)), id(std::move(id)), schema(std::move(schema)), reader(std::move(reader)) {
-    if (this->reader == nullptr) {
-        throw std::runtime_error("FileDataset requires a reader.");
+                         std::unique_ptr<Runtime> runtime)
+    : datasetPath(std::move(datasetPath)),
+      id(std::move(id)),
+      schema(std::move(schema)),
+      runtime(std::move(runtime)) {
+    if (this->runtime == nullptr) {
+        throw std::runtime_error("FileDataset requires runtime state.");
     }
 }
 
-uint64_t FileDataset::getNumExamples() const { return reader->getNumExamples(); }
+FileDataset::~FileDataset() = default;
 
-const DatasetLayout &FileDataset::getLayout() const { return reader->getLayout(); }
+uint64_t FileDataset::getNumExamples() const { return runtime->reader->getNumExamples(); }
 
 void FileDataset::assertSchema(const DatasetSchema &expectedSchema) const {
     if (schema != expectedSchema) {
         throw std::runtime_error("FileDataset schema does not match the expected schema.");
     }
-}
-
-void FileDataset::assertLayout(const DatasetLayout &expectedLayout) const {
-    getLayout().validateRequestedLayoutExact(expectedLayout);
 }
 
 std::shared_ptr<BatchSession> FileDataset::openBatchSession(
@@ -117,8 +133,39 @@ std::shared_ptr<BatchSession> FileDataset::openBatchSession(
     if (self == nullptr) {
         throw std::runtime_error("FileDataset must be owned by std::shared_ptr before opening a session.");
     }
-    return std::make_shared<IndexedNamedBatchSession>(
+    return ThorImplementation::openIndexedNamedBatchSession(
         std::move(self), splits, batching, maxInFlightBatches, requiredFieldIds);
 }
 
+std::unique_ptr<DatasetMaterializationDescription>
+FileDataset::describeMaterializationForRuntime() const {
+    return std::make_unique<DatasetMaterializationDescription>(
+        datasetPath,
+        id,
+        schema,
+        runtime->reader->getLayout(),
+        getNumExamples(),
+        DatasetMaterializationSource::FILE_DATASET);
+}
+
+MaterializedNamedDatasetSnapshot FileDataset::materializeSnapshotForRuntime(
+    uint64_t readerQueueDepth) const {
+    std::unique_ptr<DatasetMaterializationDescription> description =
+        describeMaterializationForRuntime();
+    return materializeNamedDatasetSnapshot(*description, readerQueueDepth);
+}
+
 }  // namespace Thor
+
+namespace ThorImplementation {
+
+const DatasetLayout &FileDatasetRuntimeAccess::layout(const Thor::FileDataset &dataset) {
+    return dataset.runtime->reader->getLayout();
+}
+
+const std::shared_ptr<IndexedLocalNamedExampleReader> &FileDatasetRuntimeAccess::reader(
+    const Thor::FileDataset &dataset) {
+    return dataset.runtime->reader;
+}
+
+}  // namespace ThorImplementation

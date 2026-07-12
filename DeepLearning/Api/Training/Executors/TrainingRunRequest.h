@@ -1,12 +1,12 @@
 #pragma once
 
+#include "DeepLearning/Api/Data/ExampleType.h"
 #include "DeepLearning/Api/Training/TrainingProgram.h"
 #include "DeepLearning/Api/Training/DeviceDatasetStorage.h"
 #include "DeepLearning/Api/Training/EarlyCompletionPolicy.h"
 #include "DeepLearning/Api/Training/ModelSelectionScore.h"
 #include "DeepLearning/Api/Training/Observers/LineStatsReporter.h"
 #include "DeepLearning/Api/Training/Cancellation/TrainingCancellation.h"
-#include "Utilities/Loaders/Shard.h"
 
 #include <cstdint>
 #include <memory>
@@ -15,7 +15,6 @@
 #include <string>
 #include <utility>
 #include <vector>
-
 
 namespace Thor {
 

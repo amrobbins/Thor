@@ -12,6 +12,8 @@
 #include "DeepLearning/Api/Training/Observers/TrainingStatsSink.h"
 #include "DeepLearning/Api/Training/PhaseGraphConnector.h"
 #include "DeepLearning/Api/Training/TrainingProgram.h"
+#include "DeepLearning/Implementation/Training/DeviceStartupCoordinator.h"
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include <algorithm>
 #include <atomic>
@@ -44,6 +46,38 @@ namespace {
 
 constexpr int ENSEMBLE_MANIFEST_FIRST_ARTIFACT_VERSION = 1;
 constexpr int ENSEMBLE_MANIFEST_CURRENT_ARTIFACT_VERSION = ENSEMBLE_MANIFEST_FIRST_ARTIFACT_VERSION;
+
+std::shared_ptr<PlacedNetwork> placeInferenceNetworkWithSerializedStartup(
+    Network& network,
+    uint32_t batchSize,
+    bool networkOutputsOnGpu = false) {
+    constexpr int startupDeviceNum = 0;
+    ThorImplementation::DeviceStartupGuard startupGuard =
+        ThorImplementation::acquireDeviceStartupGuard(startupDeviceNum);
+
+    std::vector<Event> initDoneEvents;
+    std::shared_ptr<PlacedNetwork> placed = network.place(
+        batchSize,
+        initDoneEvents,
+        /*inferenceOnly=*/true,
+        /*forcedDevices=*/{},
+        /*forcedNumStampsPerGpu=*/0,
+        networkOutputsOnGpu);
+    THOR_THROW_IF_FALSE(placed->getNumStamps() == 1);
+    THOR_THROW_IF_FALSE(
+        placed->getStampedNetwork(0).getGpuNum() == startupDeviceNum);
+    for (Event& event : initDoneEvents) {
+        event.synchronize();
+    }
+
+    // Synchronous evaluator inference otherwise allocates NetworkInput slot zero
+    // lazily on the first batch. Make that persistent allocation part of the
+    // serialized startup transaction as well.
+    placed->preallocateOutputSlots(1);
+    placed->preallocateInputSlots(1);
+    startupGuard.complete();
+    return placed;
+}
 
 std::string normalizedOutputPathForCollisionCheck(const std::string& path) {
     std::filesystem::path outputPath(path);
@@ -2812,14 +2846,10 @@ void saveEnsembleNetworkArtifact(const TrainingEnsembleResult& ensembleResult,
             outputNames,
             deployableInputNames,
             safeNetworkNameForSavedEnsemble(ensembleResult.ensembleGroup));
-        std::vector<Event> initDoneEvents;
-        std::shared_ptr<PlacedNetwork> placed = singleMemberEnsembleNetwork->place(
-            /*batchSize=*/1,
-            initDoneEvents,
-            /*inferenceOnly=*/true,
-            /*forcedDevices=*/{},
-            /*forcedNumStampsPerGpu=*/0,
-            /*networkOutputsOnGpu=*/false);
+        std::shared_ptr<PlacedNetwork> placed =
+            placeInferenceNetworkWithSerializedStartup(
+                *singleMemberEnsembleNetwork,
+                /*batchSize=*/1);
         placed->save(artifactDirectory.string(), overwriteNetworkArchive, /*saveOptimizerState=*/false);
         return;
     }
@@ -2831,14 +2861,10 @@ void saveEnsembleNetworkArtifact(const TrainingEnsembleResult& ensembleResult,
         /*exposeAveragedOutputsAsNetworkOutputs=*/true,
         safeNetworkNameForSavedEnsemble(ensembleResult.ensembleGroup),
         std::optional<std::vector<std::string>>{deployableInputNames});
-    std::vector<Event> initDoneEvents;
-    std::shared_ptr<PlacedNetwork> placed = evaluator.network->place(
-        /*batchSize=*/1,
-        initDoneEvents,
-        /*inferenceOnly=*/true,
-        /*forcedDevices=*/{},
-        /*forcedNumStampsPerGpu=*/0,
-        /*networkOutputsOnGpu=*/false);
+    std::shared_ptr<PlacedNetwork> placed =
+        placeInferenceNetworkWithSerializedStartup(
+            *evaluator.network,
+            /*batchSize=*/1);
     placed->save(artifactDirectory.string(), overwriteNetworkArchive, /*saveOptimizerState=*/false);
 }
 
@@ -3275,16 +3301,9 @@ TrainingRunsComposedEvaluatorArtifacts loadTrainingRunsComposedEvaluatorArtifact
     if (artifacts.losses.empty() && artifacts.metrics.empty()) {
         return artifacts;
     }
-    std::vector<Event> initDoneEvents;
-    artifacts.placedEvaluator = artifacts.evaluator.network->place(static_cast<uint32_t>(batchSize),
-                                                                   initDoneEvents,
-                                                                   /*inferenceOnly=*/true,
-                                                                   /*forcedDevices=*/{},
-                                                                   /*forcedNumStampsPerGpu=*/0,
-                                                                   /*networkOutputsOnGpu=*/false);
-    for (Event& event : initDoneEvents) {
-        event.synchronize();
-    }
+    artifacts.placedEvaluator = placeInferenceNetworkWithSerializedStartup(
+        *artifacts.evaluator.network,
+        static_cast<uint32_t>(batchSize));
     return artifacts;
 }
 

@@ -1,6 +1,6 @@
 #include "DeepLearning/Api/Data/TrainingData.h"
-#include "DeepLearning/Api/Loaders/IndexedNamedBatchSession.h"
 #include "DeepLearning/Api/Data/DatasetWriter.h"
+#include "DeepLearning/Api/Data/FileDataset.h"
 
 #include "gtest/gtest.h"
 

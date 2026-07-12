@@ -1,13 +1,16 @@
-#include "DeepLearning/Api/Loaders/DeviceResidentNamedBatchSession.h"
+#include "DeepLearning/Implementation/Data/FileDatasetRuntimeAccess.h"
+#include "DeepLearning/Implementation/Data/Sessions/DeviceResidentNamedBatchSession.h"
 #include "DeepLearning/Api/Data/FileDataset.h"
 #include "DeepLearning/Api/Data/TrainingData.h"
-#include "DeepLearning/Api/Loaders/DeviceResidentWindowedNamedBatchSession.h"
-#include "DeepLearning/Api/Loaders/IndexedNamedBatchSession.h"
-#include "DeepLearning/Api/Training/DeviceDatasetResidency.h"
-#include "DeepLearning/Api/Training/DeviceDatasetStorageSelection.h"
+#include "DeepLearning/Implementation/Data/Sessions/DeviceResidentWindowedNamedBatchSession.h"
+#include "DeepLearning/Implementation/Data/Sessions/IndexedNamedBatchSession.h"
+#include "DeepLearning/Implementation/Data/Residency/DeviceDatasetResidency.h"
+#include "DeepLearning/Implementation/Data/Residency/DeviceDatasetStorageSelection.h"
+#include "DeepLearning/Implementation/Data/Residency/NamedDatasetRuntimeAccess.h"
+#include "DeepLearning/Implementation/Training/DeviceStartupCoordinator.h"
 #include "Utilities/Loaders/IndexedLocalNamedExampleReader.h"
 #include "DeepLearning/Api/Data/DatasetWriter.h"
-#include "Utilities/Loaders/NamedDatasetMaterializer.h"
+#include "DeepLearning/Implementation/Data/Materialization/NamedDatasetMaterializer.h"
 
 #include "cuda_runtime.h"
 
@@ -19,6 +22,7 @@
 #include <functional>
 #include <future>
 #include <cstdint>
+#include <cstring>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
@@ -185,7 +189,8 @@ IndexedSessionArguments indexedSessionArguments(
     bool randomizeTrain,
     std::optional<uint64_t> seed) {
     std::shared_ptr<Thor::FileDataset> dataset = Thor::FileDataset::open(datasetPath);
-    dataset->assertLayout(expectedLayout);
+    ThorImplementation::FileDatasetRuntimeAccess::layout(*dataset)
+        .validateRequestedLayoutExact(expectedLayout);
     return indexedSessionArguments(
         std::move(dataset),
         std::move(trainIndices),
@@ -333,6 +338,145 @@ class TestDeviceResidentWindowedNamedBatchSession : public DeviceResidentWindowe
     }
 
     std::shared_ptr<BatchSession> testSharedOwnership;
+};
+
+class MetadataOnlyBatchSession final : public BatchSession {
+   public:
+    MetadataOnlyBatchSession(
+        Thor::DatasetSplitManifest splits,
+        Thor::BatchPolicy batching,
+        std::set<Thor::DatasetFieldId> requiredFieldIds)
+        : splits(std::move(splits)),
+          requiredFieldIds(std::move(requiredFieldIds)) {
+        batchSize = batching.getBatchSize();
+    }
+
+    uint64_t getNumBatchesPerEpoch(ExampleType exampleType) override {
+        const uint64_t examples = getNumExamples(exampleType);
+        return examples == 0 ? 0 : (examples + batchSize - 1) / batchSize;
+    }
+
+    uint64_t getNumExamples(ExampleType exampleType) override {
+        if (exampleType == ExampleType::TRAIN) {
+            return splits.getTrain().size();
+        }
+        if (exampleType == ExampleType::VALIDATE) {
+            return splits.getValidate().size();
+        }
+        if (exampleType == ExampleType::TEST) {
+            return splits.getTest().size();
+        }
+        throw std::runtime_error("Unsupported ExampleType");
+    }
+
+    uint64_t getNextBatchNum(ExampleType) override { return 0; }
+
+    const std::set<Thor::DatasetFieldId> &getRequiredDatasetFieldIds() const override {
+        return requiredFieldIds;
+    }
+
+   private:
+    Batch acquireBatch(ExampleType, uint64_t &) override {
+        throw std::runtime_error(
+            "MetadataOnlyBatchSession does not provide host batches.");
+    }
+
+    void recycleBatch(ExampleType, Batch &&) override {}
+
+    Thor::DatasetSplitManifest splits;
+    std::set<Thor::DatasetFieldId> requiredFieldIds;
+};
+
+class DenseMemoryDatasetForTest final : public Thor::NamedDataset {
+   public:
+    DenseMemoryDatasetForTest()
+        : id(Thor::DatasetId::generate()),
+          schema(std::vector<Thor::DatasetField>{
+              Thor::DatasetField{
+                  .id = 1,
+                  .name = "features",
+                  .dataType = DataType::FP32,
+                  .dimensions = {2},
+                  .kind = Thor::DatasetFieldKind::DENSE},
+              Thor::DatasetField{
+                  .id = 2,
+                  .name = "labels",
+                  .dataType = DataType::FP32,
+                  .dimensions = {1},
+                  .kind = Thor::DatasetFieldKind::DENSE}}),
+          layout(DatasetLayout::fromTensorShapes(
+              std::vector<DatasetLayout::TensorShape>{
+                  DatasetLayout::TensorShape("features", {2}, DataType::FP32),
+                  DatasetLayout::TensorShape("labels", {1}, DataType::FP32)})),
+          features{1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f},
+          labels{10.0f, 20.0f, 30.0f} {}
+
+    const Thor::DatasetId &getId() const override { return id; }
+    uint64_t getNumExamples() const override { return 3; }
+    const Thor::DatasetSchema &getSchema() const override { return schema; }
+    const Thor::DatasetField &getField(std::string_view name) const override {
+        return schema.getField(name);
+    }
+
+   private:
+    std::shared_ptr<BatchSession> openBatchSession(
+        const Thor::DatasetSplitManifest &splits,
+        const Thor::BatchPolicy &batching,
+        const Thor::DatasetAccessPolicy &,
+        uint64_t,
+        const std::set<Thor::DatasetFieldId> &requiredFieldIds) const override {
+        return std::make_shared<MetadataOnlyBatchSession>(
+            splits,
+            batching,
+            requiredFieldIds);
+    }
+
+    std::unique_ptr<Thor::DatasetMaterializationDescription>
+    describeMaterializationForRuntime() const override {
+        return std::make_unique<Thor::DatasetMaterializationDescription>(
+            std::filesystem::path{},
+            id,
+            schema,
+            layout,
+            getNumExamples(),
+            Thor::DatasetMaterializationSource::MEMORY);
+    }
+
+    MaterializedNamedDatasetSnapshot materializeSnapshotForRuntime(
+        uint64_t readerQueueDepth) const override {
+        if (readerQueueDepth == 0) {
+            throw std::runtime_error("reader queue depth must be positive");
+        }
+        MaterializedNamedDatasetSnapshot snapshot(
+            id,
+            schema,
+            layout,
+            getNumExamples());
+        TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+        Tensor featureTensor(
+            cpuPlacement,
+            ThorImplementation::TensorDescriptor(DataType::FP32, {3, 2}));
+        Tensor labelTensor(
+            cpuPlacement,
+            ThorImplementation::TensorDescriptor(DataType::FP32, {3, 1}));
+        std::memcpy(
+            featureTensor.getMemPtr<void>(),
+            features.data(),
+            features.size() * sizeof(float));
+        std::memcpy(
+            labelTensor.getMemPtr<void>(),
+            labels.data(),
+            labels.size() * sizeof(float));
+        snapshot.fields.emplace(1, std::move(featureTensor));
+        snapshot.fields.emplace(2, std::move(labelTensor));
+        return snapshot;
+    }
+
+    Thor::DatasetId id;
+    Thor::DatasetSchema schema;
+    DatasetLayout layout;
+    std::vector<float> features;
+    std::vector<float> labels;
 };
 
 void expectTensorValues(const Tensor &tensor, const vector<float> &expected) {
@@ -1355,7 +1499,9 @@ TEST(IndexedNamedBatchSessionTest, TwoFoldSessionsCanShareOneDatasetWithDifferen
 
     EXPECT_EQ(foldA.getDataset().get(), dataset.get());
     EXPECT_EQ(foldB.getDataset().get(), dataset.get());
-    EXPECT_EQ(foldA.getDatasetReaderForTesting(), foldB.getDatasetReaderForTesting());
+    EXPECT_EQ(
+        ThorImplementation::FileDatasetRuntimeAccess::reader(*foldA.getDataset()).get(),
+        ThorImplementation::FileDatasetRuntimeAccess::reader(*foldB.getDataset()).get());
 
     uint64_t batchNumA = 0;
     uint64_t batchNumB = 0;
@@ -1687,6 +1833,9 @@ TEST(IndexedNamedBatchSessionTest, DescribesCanonicalDatasetAndSeparateSessionWi
     Thor::DatasetMaterializationDescription datasetDescription =
         materializationDescription(loader);
     EXPECT_EQ(datasetDescription.datasetPath, datasetPath);
+    EXPECT_EQ(
+        datasetDescription.source,
+        Thor::DatasetMaterializationSource::FILE_DATASET);
     EXPECT_EQ(datasetDescription.datasetId, loader.getDataset()->getId());
     EXPECT_NO_THROW(datasetDescription.layout.validateRequestedLayoutExact(layout));
     EXPECT_EQ(datasetDescription.numExamples, 5);
@@ -2116,9 +2265,11 @@ TEST(DeviceDatasetResidencyCacheTest, ConcurrentAcquisitionsShareOneUploadAndRes
             residentBytes,
             residentBytes,
             Thor::DeviceDatasetStorage::STRICT,
-            residentBytes * 4,
+            ThorImplementation::DEVICE_STARTUP_SAFETY_RESERVE_BYTES +
+                residentBytes * 4,
             construct);
-        return dataset->getDeviceDatasetResidencyCache().acquire(request);
+        return ThorImplementation::NamedDatasetRuntimeAccess::residencyCache(*dataset)
+            .acquire(request);
     };
 
     std::future<Thor::DeviceDatasetResidencyAcquisition> first =
@@ -2127,7 +2278,7 @@ TEST(DeviceDatasetResidencyCacheTest, ConcurrentAcquisitionsShareOneUploadAndRes
     std::future<Thor::DeviceDatasetResidencyAcquisition> second =
         std::async(std::launch::async, acquire);
     const bool followerJoined = waitForCondition([&]() {
-        return dataset->getDeviceDatasetResidencyCache()
+        return ThorImplementation::NamedDatasetRuntimeAccess::residencyCache(*dataset)
                    .getTelemetry()
                    .constructionJoins == 1;
     });
@@ -2144,7 +2295,7 @@ TEST(DeviceDatasetResidencyCacheTest, ConcurrentAcquisitionsShareOneUploadAndRes
         secondAcquisition.lease.getShared().get());
 
     const Thor::DeviceDatasetResidencyTelemetry cacheTelemetry =
-        dataset->getDeviceDatasetResidencyCache().getTelemetry();
+        ThorImplementation::NamedDatasetRuntimeAccess::residencyCache(*dataset).getTelemetry();
     EXPECT_EQ(cacheTelemetry.constructionStarts, 1u);
     EXPECT_EQ(cacheTelemetry.constructionJoins, 1u);
     EXPECT_EQ(cacheTelemetry.successfulConstructions, 1u);
@@ -2164,7 +2315,7 @@ TEST(DeviceDatasetResidencyCacheTest, ConcurrentAcquisitionsShareOneUploadAndRes
     EXPECT_FALSE(weakResident.expired());
     secondAcquisition.lease = Thor::DeviceDatasetLease();
     EXPECT_TRUE(weakResident.expired());
-    dataset->getDeviceDatasetResidencyCache().clearExpired();
+    ThorImplementation::NamedDatasetRuntimeAccess::residencyCache(*dataset).clearExpired();
     EXPECT_EQ(
         Thor::getDeviceDatasetMemoryReservationTelemetryForTesting(0)
             .activeCommittedBytes,
@@ -2203,11 +2354,13 @@ TEST(DeviceDatasetResidencyCacheTest, DifferentGpuDevicesReceiveSeparateReplicas
             residentBytes,
             residentBytes,
             Thor::DeviceDatasetStorage::STRICT,
-            residentBytes * 4,
+            ThorImplementation::DEVICE_STARTUP_SAFETY_RESERVE_BYTES +
+                residentBytes * 4,
             [&, placement]() -> std::shared_ptr<const DeviceResidentNamedDataset> {
                 return DeviceResidentNamedDataset::fromSnapshot(snapshot, placement);
             });
-        return dataset->getDeviceDatasetResidencyCache().acquire(request);
+        return ThorImplementation::NamedDatasetRuntimeAccess::residencyCache(*dataset)
+            .acquire(request);
     };
 
     Thor::DeviceDatasetResidencyAcquisition gpu0 = acquireOn(0);
@@ -2216,7 +2369,9 @@ TEST(DeviceDatasetResidencyCacheTest, DifferentGpuDevicesReceiveSeparateReplicas
     EXPECT_EQ(gpu0.lease->getPlacement(), TensorPlacement(TensorPlacement::MemDevices::GPU, 0));
     EXPECT_EQ(gpu1.lease->getPlacement(), TensorPlacement(TensorPlacement::MemDevices::GPU, 1));
     EXPECT_EQ(
-        dataset->getDeviceDatasetResidencyCache().getTelemetry().constructionStarts,
+        ThorImplementation::NamedDatasetRuntimeAccess::residencyCache(*dataset)
+            .getTelemetry()
+            .constructionStarts,
         2u);
 
     std::filesystem::remove_all(datasetPath);
@@ -2255,14 +2410,16 @@ TEST(DeviceDatasetResidencyCacheTest, FailedConstructionWakesWaitersAndDoesNotPo
             residentBytes,
             residentBytes,
             Thor::DeviceDatasetStorage::BEST_EFFORT,
-            2ull * 1024ull * 1024ull * 1024ull + residentBytes + 1,
+            ThorImplementation::DEVICE_STARTUP_SAFETY_RESERVE_BYTES +
+                residentBytes + 1,
             [&]() -> std::shared_ptr<const DeviceResidentNamedDataset> {
                 failedBuildCount.fetch_add(1, std::memory_order_relaxed);
                 constructionStartedPromise.set_value();
                 releaseFailure.wait();
                 throw std::runtime_error("intentional shared residency failure");
             });
-        return dataset->getDeviceDatasetResidencyCache().acquire(request);
+        return ThorImplementation::NamedDatasetRuntimeAccess::residencyCache(*dataset)
+            .acquire(request);
     };
 
     std::future<Thor::DeviceDatasetResidencyAcquisition> first =
@@ -2271,7 +2428,7 @@ TEST(DeviceDatasetResidencyCacheTest, FailedConstructionWakesWaitersAndDoesNotPo
     std::future<Thor::DeviceDatasetResidencyAcquisition> second =
         std::async(std::launch::async, failingAcquire);
     const bool followerJoined = waitForCondition([&]() {
-        return dataset->getDeviceDatasetResidencyCache()
+        return ThorImplementation::NamedDatasetRuntimeAccess::residencyCache(*dataset)
                    .getTelemetry()
                    .constructionJoins == 1;
     });
@@ -2300,17 +2457,18 @@ TEST(DeviceDatasetResidencyCacheTest, FailedConstructionWakesWaitersAndDoesNotPo
         residentBytes,
         residentBytes,
         Thor::DeviceDatasetStorage::STRICT,
-        residentBytes * 4,
+        ThorImplementation::DEVICE_STARTUP_SAFETY_RESERVE_BYTES +
+            residentBytes * 4,
         [&]() -> std::shared_ptr<const DeviceResidentNamedDataset> {
             return DeviceResidentNamedDataset::fromSnapshot(snapshot, placement);
         });
     Thor::DeviceDatasetResidencyAcquisition retry =
-        dataset->getDeviceDatasetResidencyCache().acquire(retryRequest);
+        ThorImplementation::NamedDatasetRuntimeAccess::residencyCache(*dataset).acquire(retryRequest);
     EXPECT_TRUE(retry.startedConstruction);
     EXPECT_TRUE(retry.lease);
 
     const Thor::DeviceDatasetResidencyTelemetry telemetry =
-        dataset->getDeviceDatasetResidencyCache().getTelemetry();
+        ThorImplementation::NamedDatasetRuntimeAccess::residencyCache(*dataset).getTelemetry();
     EXPECT_EQ(telemetry.constructionStarts, 2u);
     EXPECT_EQ(telemetry.failedConstructions, 1u);
     EXPECT_EQ(telemetry.successfulConstructions, 1u);
@@ -2358,13 +2516,15 @@ TEST(DeviceDatasetResidencyCacheTest, DifferentDatasetsCannotReserveTheSameOverr
             residentBytes,
             residentBytes,
             Thor::DeviceDatasetStorage::STRICT,
-            residentBytes,
+            ThorImplementation::DEVICE_STARTUP_SAFETY_RESERVE_BYTES +
+                residentBytes,
             [&]() -> std::shared_ptr<const DeviceResidentNamedDataset> {
                 firstReservedPromise.set_value();
                 releaseFirst.wait();
                 return DeviceResidentNamedDataset::fromSnapshot(firstSnapshot, placement);
             });
-        return firstDataset->getDeviceDatasetResidencyCache().acquire(request);
+        return ThorImplementation::NamedDatasetRuntimeAccess::residencyCache(*firstDataset)
+            .acquire(request);
     };
     std::future<Thor::DeviceDatasetResidencyAcquisition> first =
         std::async(std::launch::async, firstAcquire);
@@ -2378,12 +2538,14 @@ TEST(DeviceDatasetResidencyCacheTest, DifferentDatasetsCannotReserveTheSameOverr
         residentBytes,
         residentBytes,
         Thor::DeviceDatasetStorage::STRICT,
-        residentBytes,
+        ThorImplementation::DEVICE_STARTUP_SAFETY_RESERVE_BYTES +
+            residentBytes,
         [&]() -> std::shared_ptr<const DeviceResidentNamedDataset> {
             return DeviceResidentNamedDataset::fromSnapshot(secondSnapshot, placement);
         });
     EXPECT_THROW(
-        (void)secondDataset->getDeviceDatasetResidencyCache().acquire(secondRequest),
+        (void)ThorImplementation::NamedDatasetRuntimeAccess::residencyCache(*secondDataset)
+            .acquire(secondRequest),
         Thor::DeviceDatasetResidencyAdmissionError);
 
     const Thor::DeviceDatasetMemoryReservationTelemetry whileReserved =
@@ -2398,6 +2560,82 @@ TEST(DeviceDatasetResidencyCacheTest, DifferentDatasetsCannotReserveTheSameOverr
 
     std::filesystem::remove_all(firstPath);
     std::filesystem::remove_all(secondPath);
+}
+
+TEST(DeviceDatasetStorageSelection, DenseMemoryDatasetUsesSharedResidencyPath) {
+    requireCudaDevice("CUDA device is required for in-memory dataset residency tests.");
+    Thor::resetDeviceDatasetMemoryReservationsForTesting();
+
+    auto dataset = std::make_shared<DenseMemoryDatasetForTest>();
+    Thor::TrainingData data(
+        dataset,
+        Thor::DatasetSplitManifest(
+            *dataset,
+            std::vector<uint64_t>{2, 0},
+            std::vector<uint64_t>{1},
+            std::nullopt),
+        Thor::BatchPolicy(2, false, std::nullopt),
+        Thor::DatasetAccessPolicy{
+            .deviceStorage = Thor::DeviceDatasetStorage::STRICT},
+        "dense_memory_dataset");
+    std::shared_ptr<BatchSession> sourceSession = data.openSession(1);
+
+    Thor::DatasetMaterializationDescription description =
+        Thor::describeDatasetMaterialization(data);
+    EXPECT_EQ(
+        description.source,
+        Thor::DatasetMaterializationSource::MEMORY);
+    EXPECT_TRUE(description.datasetPath.empty());
+    EXPECT_TRUE(
+        checkNamedDatasetSnapshotMaterializationSupport(description).supported);
+
+    constexpr uint64_t ampleBytes =
+        ThorImplementation::DEVICE_STARTUP_SAFETY_RESERVE_BYTES +
+        (1ull << 20);
+    Thor::DeviceDatasetStorageSelection selection =
+        Thor::selectDeviceDatasetStorageSession(
+            sourceSession,
+            data,
+            TensorPlacement(TensorPlacement::MemDevices::GPU, 0),
+            1,
+            ampleBytes);
+
+    auto residentSession =
+        std::dynamic_pointer_cast<DeviceResidentNamedBatchSession>(
+            selection.session);
+    ASSERT_NE(residentSession, nullptr);
+    EXPECT_TRUE(selection.report.attempted);
+    EXPECT_TRUE(selection.report.used);
+    EXPECT_TRUE(selection.report.reason.empty());
+    EXPECT_EQ(selection.report.examples, 3u);
+    EXPECT_EQ(selection.report.residentBytes, 3u * 3u * sizeof(float));
+    EXPECT_TRUE(selection.report.residentConstructionStarted);
+    EXPECT_EQ(selection.session->getDatasetName(), "dense_memory_dataset");
+
+    uint64_t batchNum = 99;
+    BatchLease batchLease = selection.session->leaseBatch(
+        ExampleType::TRAIN,
+        batchNum);
+    EXPECT_EQ(batchNum, 0u);
+    expectTensorValuesOnHost(
+        batchLease.get().getTensor("features"),
+        {5.0f, 6.0f, 1.0f, 2.0f});
+    expectTensorValuesOnHost(
+        batchLease.get().getTensor("labels"),
+        {30.0f, 10.0f});
+
+    std::shared_ptr<BatchSession> secondSourceSession = data.openSession(1);
+    Thor::DeviceDatasetStorageSelection secondSelection =
+        Thor::selectDeviceDatasetStorageSession(
+            secondSourceSession,
+            data,
+            TensorPlacement(TensorPlacement::MemDevices::GPU, 0),
+            1,
+            ampleBytes);
+    EXPECT_TRUE(secondSelection.report.used);
+    EXPECT_TRUE(secondSelection.report.residentCacheHit);
+    EXPECT_FALSE(secondSelection.report.residentConstructionStarted);
+    EXPECT_EQ(secondSelection.report.residentBytes, selection.report.residentBytes);
 }
 
 TEST(DeviceDatasetStorageSelection, FoldSessionsReuseSharedResidentDataset) {
@@ -2415,7 +2653,9 @@ TEST(DeviceDatasetStorageSelection, FoldSessionsReuseSharedResidentDataset) {
     auto secondSource = std::make_shared<TestIndexedNamedBatchSession>(
         dataset, vector<uint64_t>{0, 2, 3, 4}, vector<uint64_t>{1}, std::nullopt,
         2, 1, false, std::nullopt);
-    constexpr uint64_t ampleBytes = 1ull << 30;
+    constexpr uint64_t ampleBytes =
+        ThorImplementation::DEVICE_STARTUP_SAFETY_RESERVE_BYTES +
+        (1ull << 20);
 
     Thor::DeviceDatasetStorageSelection first =
         selectDeviceStorage(
@@ -2449,7 +2689,9 @@ TEST(DeviceDatasetStorageSelection, FoldSessionsReuseSharedResidentDataset) {
         firstSession->getDeviceDataset().get(),
         secondSession->getDeviceDataset().get());
     EXPECT_EQ(
-        dataset->getDeviceDatasetResidencyCache().getTelemetry().constructionStarts,
+        ThorImplementation::NamedDatasetRuntimeAccess::residencyCache(*dataset)
+            .getTelemetry()
+            .constructionStarts,
         1u);
 
     first.session.reset();
@@ -2542,14 +2784,15 @@ TEST(DeviceDatasetStorageSelection, BestEffortPrioritizesWindowedFeaturesWhenFul
         false,
         std::nullopt);
 
-    constexpr uint64_t twoGiB = 2ull * 1024ull * 1024ull * 1024ull;
+    const uint64_t availableBytes =
+        ThorImplementation::DEVICE_STARTUP_SAFETY_RESERVE_BYTES + 92;
     Thor::DeviceDatasetStorageSelection selection =
         selectDeviceStorage(
             sourceSession,
             Thor::DeviceDatasetStorage::BEST_EFFORT,
             TensorPlacement(TensorPlacement::MemDevices::GPU, 0),
             1,
-            /*availableBytesOverride=*/twoGiB + 92);
+            /*availableBytesOverride=*/availableBytes);
 
     EXPECT_TRUE(selection.report.used);
     EXPECT_EQ(selection.report.reason, "windowed_features_only");

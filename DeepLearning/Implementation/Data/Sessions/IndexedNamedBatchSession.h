@@ -63,10 +63,6 @@ class IndexedNamedBatchSession : public Thor::BatchSession {
         recycleBatch(exampleType, std::move(batch));
     }
 
-    [[nodiscard]] const IndexedLocalNamedExampleReader *getDatasetReaderForTesting() const {
-        return dataset->getReader().get();
-    }
-
     uint64_t getReadyBatchCountForTesting(ExampleType exampleType) {
         IndexedLocalNamedBatchAssembler *assembler = assemblerFor(exampleType);
         return assembler == nullptr ? 0 : assembler->getReadyBatchCountForTesting();

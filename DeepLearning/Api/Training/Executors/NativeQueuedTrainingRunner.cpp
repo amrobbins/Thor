@@ -1,6 +1,6 @@
 #include "DeepLearning/Api/Training/Executors/NativeQueuedTrainingRunner.h"
 
-#include "DeepLearning/Api/Loaders/Batch.h"
+#include "DeepLearning/Api/Data/Batch.h"
 #include "DeepLearning/Api/Data/BatchSession.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
@@ -9,13 +9,14 @@
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
 #include "DeepLearning/Api/Training/Cancellation/TrainingCancellation.h"
 #include "DeepLearning/Api/Training/ExecutableTrainingPlan.h"
-#include "DeepLearning/Api/Training/DeviceDatasetStorageSelection.h"
+#include "DeepLearning/Implementation/Data/Residency/DeviceDatasetStorageSelection.h"
 #include "DeepLearning/Api/Training/PhaseGraphConnector.h"
 #include "DeepLearning/Api/Training/TrainingProgram.h"
 #include "DeepLearning/Api/Training/TrainingPhase.h"
 #include "DeepLearning/Implementation/Layers/LayerSubmitDiagnostics.h"
 #include "DeepLearning/Implementation/Diagnostics/TrainingDiagnostics.h"
 #include "DeepLearning/Implementation/ThorError.h"
+#include "DeepLearning/Implementation/Training/DeviceStartupCoordinator.h"
 #include "Utilities/Common/ScopedGpu.h"
 
 #include <cuda_runtime_api.h>
@@ -2239,10 +2240,22 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     }
 
     const uint64_t batchSize = request.batchSession->getBatchSize();
+
+    // Network::place() currently targets CUDA device 0. Hold the per-device
+    // startup guard across every persistent allocation made for this run. Once
+    // released, the next model may start while this one is already training,
+    // but it will observe all of this model's steady-state allocations in
+    // cudaMemGetInfo().
+    constexpr int startupDeviceNum = 0;
+    ThorImplementation::DeviceStartupGuard startupGuard =
+        ThorImplementation::acquireDeviceStartupGuard(startupDeviceNum);
+
     std::vector<Event> initDoneEvents;
     request.cancellationToken.throwIfCancellationRequested();
     std::shared_ptr<PlacedNetwork> placedNetwork = executionNetwork->place(batchSize, initDoneEvents, /*inferenceOnly=*/evaluateOnly);
     THOR_THROW_IF_FALSE(placedNetwork->getNumStamps() == 1);
+    THOR_THROW_IF_FALSE(
+        placedNetwork->getStampedNetwork(0).getGpuNum() == startupDeviceNum);
     for (size_t i = 0; i < initDoneEvents.size(); ++i) {
         request.cancellationToken.throwIfCancellationRequested();
         initDoneEvents[i].synchronize();
@@ -2295,10 +2308,10 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         ExecutableTrainingPlan::compile(*trainingProgram, *placedNetwork, /*resolveEmptyUpdateParametersAsAllTrainable=*/!evaluateOnly);
     ensureNativeQueuedPlanCompatible(plan, *executionNetwork, evaluateOnly);
 
-    std::shared_ptr<BatchSession> effectiveSession = request.batchSession;
+    std::shared_ptr<BatchSession> sourceSession = request.batchSession;
+    std::shared_ptr<BatchSession> effectiveSession = sourceSession;
     DeviceDatasetStorageReport deviceDatasetStorageReport = request.deviceDatasetStorageReport;
     if (!evaluateOnly && request.trainingData != nullptr) {
-        std::shared_ptr<BatchSession> sourceSession = request.batchSession;
         const uint64_t deviceDatasetBatchQueueDepth =
             std::max<uint64_t>(uint64_t{1}, options.maxInFlightBatches);
         DeviceDatasetStorageSelection deviceDatasetSelection =
@@ -2319,6 +2332,36 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     // device-resident inputs allocate zero NetworkInput slots; queue depth is
     // provided by the device session's reusable batch tensor sets instead.
     placedNetwork->preallocateInputSlots(static_cast<uint32_t>(options.maxInFlightBatches));
+
+    // All known persistent model, output, dataset-session, and input staging
+    // allocations now exist. Keep a small reserve for lazy/runtime allocations
+    // before allowing another model to begin startup on this GPU. If a
+    // BEST_EFFORT device dataset caused the final reserve check to fail, release
+    // it and finish startup with the original source session instead.
+    try {
+        startupGuard.complete();
+    } catch (const ThorImplementation::DeviceStartupSafetyReserveError&) {
+        const bool canFallbackFromDeviceDataset =
+            !evaluateOnly &&
+            request.trainingData != nullptr &&
+            request.trainingData->getAccessPolicy().deviceStorage ==
+                DeviceDatasetStorage::BEST_EFFORT &&
+            deviceDatasetStorageReport.used &&
+            effectiveSession != sourceSession;
+        if (!canFallbackFromDeviceDataset) {
+            throw;
+        }
+
+        effectiveSession = sourceSession;
+        deviceDatasetStorageReport.used = false;
+        deviceDatasetStorageReport.reason = "startup_safety_reserve_fallback";
+
+        placedNetwork->configureBatchInputPlacements(
+            resolveNetworkInputBatchPlacements(effectiveSession, plan));
+        placedNetwork->preallocateInputSlots(
+            static_cast<uint32_t>(options.maxInFlightBatches));
+        startupGuard.complete();
+    }
 
     const bool modelSelectionEnabled = !evaluateOnly && request.checkBestModelEveryEpochs > 0;
     const std::vector<std::string> aggregateLossTensorNames = executionGraph.composedFromTrainingPhases

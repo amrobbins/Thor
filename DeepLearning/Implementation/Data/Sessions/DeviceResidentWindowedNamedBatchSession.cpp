@@ -1,7 +1,7 @@
-#include "DeepLearning/Api/Loaders/DeviceResidentNamedBatchSession.h"
+#include "DeepLearning/Implementation/Data/Sessions/DeviceResidentWindowedNamedBatchSession.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
-#include "Utilities/Loaders/DeviceResidentNamedGatherKernel.h"
+#include "DeepLearning/Implementation/Data/Residency/DeviceResidentNamedGatherKernel.h"
 
 #include <stdexcept>
 #include <utility>
@@ -17,6 +17,7 @@ struct BatchTensorSpec {
     std::string name;
     DataType dataType = DataType::FP32;
     std::vector<uint64_t> exampleDimensions;
+    TensorPlacement placement;
 };
 
 uint64_t batchesFor(uint64_t numExamples, uint64_t batchSize) {
@@ -47,109 +48,139 @@ std::vector<uint64_t> batchDimensionsFor(
     return dimensions;
 }
 
-std::vector<BatchTensorSpec> batchTensorSpecsFor(const DatasetLayout &layout) {
+std::vector<BatchTensorSpec> batchTensorSpecsFor(
+    const DatasetLayout &layout,
+    TensorPlacement windowPlacement) {
     std::vector<BatchTensorSpec> specs;
     specs.reserve(layout.tensors().size() + layout.windowedTensors().size() * 2);
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     for (const DatasetLayout::TensorSpec &spec : layout.tensors()) {
-        specs.push_back(BatchTensorSpec{spec.name, spec.dataType, spec.dimensions});
+        specs.push_back(BatchTensorSpec{
+            spec.name,
+            spec.dataType,
+            spec.dimensions,
+            cpuPlacement});
     }
     for (const DatasetLayout::WindowedTensorSpec &spec : layout.windowedTensors()) {
-        specs.push_back(BatchTensorSpec{spec.name, spec.dataType, spec.dimensions});
+        specs.push_back(BatchTensorSpec{
+            spec.name,
+            spec.dataType,
+            spec.dimensions,
+            windowPlacement});
         if (spec.maskName.has_value()) {
             specs.push_back(BatchTensorSpec{
                 spec.maskName.value(),
                 DataType::UINT8,
-                std::vector<uint64_t>{spec.windowLength()}});
+                std::vector<uint64_t>{spec.windowLength()},
+                windowPlacement});
         }
     }
     return specs;
 }
 
+std::vector<std::string> windowedTensorNames(
+    const DatasetLayout &layout) {
+    std::vector<std::string> names;
+    for (const DatasetLayout::WindowedTensorSpec &spec : layout.windowedTensors()) {
+        names.push_back(spec.name);
+        if (spec.maskName.has_value()) {
+            names.push_back(spec.maskName.value());
+        }
+    }
+    return names;
+}
+
 }  // namespace
 
-DeviceResidentNamedBatchSession::DeviceResidentNamedBatchSession(
-    Thor::DeviceDatasetLease dataset,
-    Thor::DatasetSplitManifest splits,
-    Thor::BatchPolicy batching,
+DeviceResidentWindowedNamedBatchSession::DeviceResidentWindowedNamedBatchSession(
+    Thor::DatasetMaterializationDescription datasetDescription,
+    Thor::DeviceDatasetSessionDescription sessionDescription,
+    Thor::DeviceDatasetLease windowedDataset,
     uint64_t batchQueueDepth,
+    uint64_t readerQueueDepth,
     std::string datasetName)
     : Thor::BatchSession(std::move(datasetName)),
-      dataset(std::move(dataset)),
-      splits(std::move(splits)),
-      batching(std::move(batching)),
-      batchQueueDepth(batchQueueDepth) {
-    if (!this->dataset) {
-        throw std::runtime_error("DeviceResidentNamedBatchSession requires a dataset.");
+      datasetDescription(std::move(datasetDescription)),
+      sessionDescription(std::move(sessionDescription)),
+      windowedDataset(std::move(windowedDataset)),
+      batchQueueDepth(batchQueueDepth),
+      readerQueueDepth(readerQueueDepth) {
+    if (!this->windowedDataset) {
+        throw std::runtime_error(
+            "DeviceResidentWindowedNamedBatchSession requires a windowed device dataset.");
+    }
+    if (!this->datasetDescription.layout.hasWindowedTensors()) {
+        throw std::runtime_error(
+            "DeviceResidentWindowedNamedBatchSession requires at least one windowed tensor.");
     }
     if (batchQueueDepth == 0) {
         throw std::runtime_error(
-            "DeviceResidentNamedBatchSession batch_queue_depth must be >= 1.");
+            "DeviceResidentWindowedNamedBatchSession batch_queue_depth must be >= 1.");
     }
-    if (this->splits.getDatasetId() != this->dataset->getDatasetId()) {
+    if (readerQueueDepth == 0) {
         throw std::runtime_error(
-            "DeviceResidentNamedBatchSession split manifest belongs to a different dataset.");
+            "DeviceResidentWindowedNamedBatchSession reader_queue_depth must be >= 1.");
     }
-    if (this->splits.getNumExamples() != this->dataset->getNumExamples()) {
+    if (this->windowedDataset->getDatasetId() != this->datasetDescription.datasetId ||
+        this->windowedDataset->getNumExamples() != this->datasetDescription.numExamples) {
         throw std::runtime_error(
-            "DeviceResidentNamedBatchSession split manifest row count does not match resident dataset.");
+            "DeviceResidentWindowedNamedBatchSession resident dataset does not match source dataset description.");
+    }
+    const Thor::DatasetSplitManifest &splits = this->sessionDescription.getSplits();
+    if (splits.getDatasetId() != this->datasetDescription.datasetId ||
+        splits.getNumExamples() != this->datasetDescription.numExamples) {
+        throw std::runtime_error(
+            "DeviceResidentWindowedNamedBatchSession split manifest does not match source dataset.");
     }
 
-    this->batchSize = this->batching.getBatchSize();
-    for (const Thor::DatasetField &field : this->dataset->getSchema().getFields()) {
-        requiredFieldIds.insert(field.id);
+    requiredFieldIds = this->sessionDescription.getRequiredFieldIds();
+    if (requiredFieldIds.empty()) {
+        for (const Thor::DatasetField &field : this->datasetDescription.schema.getFields()) {
+            requiredFieldIds.insert(field.id);
+        }
     }
-    for (const BatchTensorSpec &spec : batchTensorSpecsFor(this->dataset->getLayout())) {
-        if (!this->dataset->hasTensor(spec.name)) {
+    for (Thor::DatasetFieldId fieldId : requiredFieldIds) {
+        (void)this->datasetDescription.schema.getField(fieldId);
+    }
+
+    this->batchSize = this->sessionDescription.getBatching().getBatchSize();
+    this->reader = IndexedLocalNamedExampleReader::openDataset(
+        this->datasetDescription.datasetPath,
+        this->datasetDescription.layout);
+    if (this->reader->getNumExamples() != this->datasetDescription.numExamples) {
+        throw std::runtime_error(
+            "DeviceResidentWindowedNamedBatchSession source dataset row count changed.");
+    }
+    for (const std::string &name : windowedTensorNames(this->datasetDescription.layout)) {
+        if (!this->windowedDataset->hasTensor(name)) {
             throw std::runtime_error(
-                "DeviceResidentNamedBatchSession resident dataset is missing tensor '" +
-                spec.name + "'.");
+                "DeviceResidentWindowedNamedBatchSession resident dataset is missing tensor '" +
+                name + "'.");
         }
     }
 
     initializeSplit(
         ExampleType::TRAIN,
-        this->splits.getSharedTrain(),
-        this->batching.getRandomizeTrain(),
-        this->batching.getRandomSeed());
+        splits.getSharedTrain(),
+        this->sessionDescription.getBatching().getRandomizeTrain(),
+        this->sessionDescription.getBatching().getRandomSeed());
     initializeSplit(
         ExampleType::VALIDATE,
-        this->splits.getSharedValidate(),
+        splits.getSharedValidate(),
         false,
         std::nullopt);
     initializeSplit(
         ExampleType::TEST,
-        this->splits.getSharedTest(),
+        splits.getSharedTest(),
         false,
         std::nullopt);
 }
 
-DeviceResidentNamedBatchSession::DeviceResidentNamedBatchSession(
-    Thor::DeviceDatasetLease dataset,
-    Thor::DeviceDatasetSessionDescription session,
-    uint64_t batchQueueDepth,
-    std::string datasetName)
-    : DeviceResidentNamedBatchSession(
-          std::move(dataset),
-          session.getSplits(),
-          session.getBatching(),
-          batchQueueDepth,
-          std::move(datasetName)) {
-    requiredFieldIds = session.getRequiredFieldIds();
-    if (requiredFieldIds.empty()) {
-        for (const Thor::DatasetField &field : this->dataset->getSchema().getFields()) {
-            requiredFieldIds.insert(field.id);
-        }
-    }
-    for (Thor::DatasetFieldId fieldId : requiredFieldIds) {
-        (void)this->dataset->getSchema().getField(fieldId);
-    }
-}
-
-DeviceResidentNamedBatchSession::~DeviceResidentNamedBatchSession() {
+DeviceResidentWindowedNamedBatchSession::~DeviceResidentWindowedNamedBatchSession() {
     cancel();
 }
 
-void DeviceResidentNamedBatchSession::cancel() {
+void DeviceResidentWindowedNamedBatchSession::cancel() {
     if (cancelled.exchange(true, std::memory_order_acq_rel)) {
         return;
     }
@@ -160,7 +191,7 @@ void DeviceResidentNamedBatchSession::cancel() {
     }
 }
 
-void DeviceResidentNamedBatchSession::initializeSplit(
+void DeviceResidentWindowedNamedBatchSession::initializeSplit(
     ExampleType exampleType,
     std::shared_ptr<const Thor::ExampleIndexSet> sourceIndices,
     bool randomized,
@@ -172,15 +203,16 @@ void DeviceResidentNamedBatchSession::initializeSplit(
     runtime->randomized = randomized;
     runtime->seed = seed;
     runtime->batchesPerEpoch = batchesFor(runtime->numExamples(), batchSize);
-    runtime->gatherStream = Stream(dataset->getPlacement());
+    runtime->gatherStream = Stream(windowedDataset->getPlacement());
 
     if (runtime->numExamples() != 0) {
         runtime->rowIndicesHost = Tensor(
             TensorPlacement(TensorPlacement::MemDevices::CPU),
             TensorDescriptor(DataType::UINT64, {batchSize}));
         runtime->rowIndicesDevice = Tensor(
-            dataset->getPlacement(),
+            windowedDataset->getPlacement(),
             TensorDescriptor(DataType::UINT64, {batchSize}));
+        runtime->readerSession = reader->createSession(readerQueueDepth);
         if (runtime->randomized) {
             runtime->randomizer =
                 std::make_unique<FullPeriodRandom>(runtime->numExamples(), false);
@@ -199,13 +231,15 @@ void DeviceResidentNamedBatchSession::initializeSplit(
 }
 
 std::map<std::string, Tensor>
-DeviceResidentNamedBatchSession::allocateBatchTensorSet() const {
+DeviceResidentWindowedNamedBatchSession::allocateBatchTensorSet() const {
     std::map<std::string, Tensor> tensors;
-    for (const BatchTensorSpec &spec : batchTensorSpecsFor(dataset->getLayout())) {
+    for (const BatchTensorSpec &spec : batchTensorSpecsFor(
+             datasetDescription.layout,
+             windowedDataset->getPlacement())) {
         tensors.emplace(
             spec.name,
             Tensor(
-                dataset->getPlacement(),
+                spec.placement,
                 TensorDescriptor(
                     spec.dataType,
                     batchDimensionsFor(spec.exampleDimensions, batchSize))));
@@ -213,27 +247,28 @@ DeviceResidentNamedBatchSession::allocateBatchTensorSet() const {
     return tensors;
 }
 
-DeviceResidentNamedBatchSession::SplitRuntime &
-DeviceResidentNamedBatchSession::runtimeFor(ExampleType exampleType) {
+DeviceResidentWindowedNamedBatchSession::SplitRuntime &
+DeviceResidentWindowedNamedBatchSession::runtimeFor(ExampleType exampleType) {
     const auto found = splitRuntimes.find(exampleType);
     if (found == splitRuntimes.end() || found->second == nullptr) {
         throw std::runtime_error(
-            "DeviceResidentNamedBatchSession does not contain requested split.");
+            "DeviceResidentWindowedNamedBatchSession does not contain requested split.");
     }
     return *found->second;
 }
 
-const DeviceResidentNamedBatchSession::SplitRuntime &
-DeviceResidentNamedBatchSession::runtimeFor(ExampleType exampleType) const {
+const DeviceResidentWindowedNamedBatchSession::SplitRuntime &
+DeviceResidentWindowedNamedBatchSession::runtimeFor(ExampleType exampleType) const {
     const auto found = splitRuntimes.find(exampleType);
     if (found == splitRuntimes.end() || found->second == nullptr) {
         throw std::runtime_error(
-            "DeviceResidentNamedBatchSession does not contain requested split.");
+            "DeviceResidentWindowedNamedBatchSession does not contain requested split.");
     }
     return *found->second;
 }
 
-void DeviceResidentNamedBatchSession::fillRowIndexTensor(SplitRuntime &runtime) {
+void DeviceResidentWindowedNamedBatchSession::fillRowIndexTensor(
+    SplitRuntime &runtime) {
     THOR_THROW_IF_FALSE(runtime.numExamples() > 0);
     uint64_t *rowIndices = runtime.rowIndicesHost.getMemPtr<uint64_t>();
     for (uint64_t slot = 0; slot < batchSize; ++slot) {
@@ -249,28 +284,28 @@ void DeviceResidentNamedBatchSession::fillRowIndexTensor(SplitRuntime &runtime) 
         THOR_THROW_IF_FALSE(logicalPosition < runtime.numExamples());
         const uint64_t sourceRow =
             runtime.sourceIndices->at(logicalPosition);
-        THOR_THROW_IF_FALSE(sourceRow < dataset->getNumExamples());
+        THOR_THROW_IF_FALSE(sourceRow < datasetDescription.numExamples);
         rowIndices[slot] = sourceRow;
     }
 }
 
-Batch DeviceResidentNamedBatchSession::acquireBatch(
+Batch DeviceResidentWindowedNamedBatchSession::acquireBatch(
     ExampleType exampleType,
     uint64_t &batchNum) {
     if (cancelled.load(std::memory_order_acquire)) {
-        throw std::runtime_error("DeviceResidentNamedBatchSession has been cancelled.");
+        throw std::runtime_error("DeviceResidentWindowedNamedBatchSession has been cancelled.");
     }
     SplitRuntime &runtime = runtimeFor(exampleType);
     std::unique_lock<std::mutex> lock(runtime.mutex);
     if (runtime.numExamples() == 0) {
         throw std::runtime_error(
-            "DeviceResidentNamedBatchSession cannot get a batch from an empty split.");
+            "DeviceResidentWindowedNamedBatchSession cannot get a batch from an empty split.");
     }
     runtime.notEmpty.wait(lock, [&] {
         return cancelled.load(std::memory_order_acquire) || !runtime.availableBatches.empty();
     });
     if (cancelled.load(std::memory_order_acquire)) {
-        throw std::runtime_error("DeviceResidentNamedBatchSession has been cancelled.");
+        throw std::runtime_error("DeviceResidentWindowedNamedBatchSession has been cancelled.");
     }
 
     std::map<std::string, Tensor> tensors =
@@ -281,13 +316,29 @@ Batch DeviceResidentNamedBatchSession::acquireBatch(
     runtime.nextBatchNum =
         (runtime.nextBatchNum + 1) % runtime.batchesPerEpoch;
     fillRowIndexTensor(runtime);
+
+    std::vector<uint8_t *> directPointers(reader->getTensorCount(), nullptr);
+    for (const DatasetLayout::TensorSpec &spec : datasetDescription.layout.tensors()) {
+        const uint64_t ordinal = reader->getLayoutTensorOrdinal(spec.name);
+        directPointers.at(static_cast<size_t>(ordinal)) =
+            static_cast<uint8_t *>(tensors.at(spec.name).getMemPtr());
+    }
+    const uint64_t *sourceRows = runtime.rowIndicesHost.getMemPtr<uint64_t>();
+    THOR_THROW_IF_FALSE(runtime.readerSession != nullptr);
+    for (uint64_t slot = 0; slot < batchSize; ++slot) {
+        runtime.readerSession->loadDirectExampleInto(
+            sourceRows[slot],
+            slot,
+            directPointers);
+    }
+    runtime.readerSession->drain();
+
     runtime.rowIndicesDevice.copyFromAsync(
         runtime.rowIndicesHost,
         runtime.gatherStream);
-
-    for (const BatchTensorSpec &spec : batchTensorSpecsFor(dataset->getLayout())) {
-        Tensor &destination = tensors.at(spec.name);
-        const Tensor &source = dataset->tensor(spec.name);
+    for (const std::string &name : windowedTensorNames(datasetDescription.layout)) {
+        Tensor &destination = tensors.at(name);
+        const Tensor &source = windowedDataset->tensor(name);
         launchDeviceResidentNamedGatherKernel(
             source,
             destination,
@@ -295,49 +346,49 @@ Batch DeviceResidentNamedBatchSession::acquireBatch(
             runtime.gatherStream);
     }
     runtime.gatherStream.synchronize();
-    runtime.batchesGathered += 1;
 
     return batchFromTensorMap(std::move(tensors));
 }
 
-void DeviceResidentNamedBatchSession::validateReturnedBatch(
+void DeviceResidentWindowedNamedBatchSession::validateReturnedBatch(
     const std::map<std::string, Tensor> &tensors) const {
-    const std::vector<BatchTensorSpec> specs =
-        batchTensorSpecsFor(dataset->getLayout());
+    const std::vector<BatchTensorSpec> specs = batchTensorSpecsFor(
+        datasetDescription.layout,
+        windowedDataset->getPlacement());
     if (tensors.size() != specs.size()) {
         throw std::runtime_error(
-            "DeviceResidentNamedBatchSession returned batch has wrong tensor count.");
+            "DeviceResidentWindowedNamedBatchSession returned batch has wrong tensor count.");
     }
     for (const BatchTensorSpec &spec : specs) {
         const auto found = tensors.find(spec.name);
         if (found == tensors.end()) {
             throw std::runtime_error(
-                "DeviceResidentNamedBatchSession returned batch is missing tensor '" +
+                "DeviceResidentWindowedNamedBatchSession returned batch is missing tensor '" +
                 spec.name + "'.");
         }
         const Tensor &tensor = found->second;
         if (!tensor.isInitialized()) {
             throw std::runtime_error(
-                "DeviceResidentNamedBatchSession returned batch contains uninitialized tensor '" +
+                "DeviceResidentWindowedNamedBatchSession returned batch contains uninitialized tensor '" +
                 spec.name + "'.");
         }
-        if (tensor.getPlacement() != dataset->getPlacement()) {
+        if (tensor.getPlacement() != spec.placement) {
             throw std::runtime_error(
-                "DeviceResidentNamedBatchSession returned batch tensor '" +
-                spec.name + "' is not on the resident dataset placement.");
+                "DeviceResidentWindowedNamedBatchSession returned batch tensor '" +
+                spec.name + "' is on the wrong placement.");
         }
         const TensorDescriptor expected(
             spec.dataType,
             batchDimensionsFor(spec.exampleDimensions, batchSize));
         if (tensor.getDescriptor() != expected) {
             throw std::runtime_error(
-                "DeviceResidentNamedBatchSession returned batch tensor '" +
+                "DeviceResidentWindowedNamedBatchSession returned batch tensor '" +
                 spec.name + "' has the wrong descriptor.");
         }
     }
 }
 
-void DeviceResidentNamedBatchSession::recycleBatch(
+void DeviceResidentWindowedNamedBatchSession::recycleBatch(
     ExampleType exampleType,
     Batch &&batch) {
     if (cancelled.load(std::memory_order_acquire)) {
@@ -346,27 +397,26 @@ void DeviceResidentNamedBatchSession::recycleBatch(
     SplitRuntime &runtime = runtimeFor(exampleType);
     std::map<std::string, Tensor> tensors = denseTensorMapFromBatchOrThrow(
         batch,
-        "DeviceResidentNamedBatchSession returned batch");
+        "DeviceResidentWindowedNamedBatchSession returned batch");
     validateReturnedBatch(tensors);
     {
         std::lock_guard<std::mutex> guard(runtime.mutex);
         runtime.availableBatches.push_back(std::move(tensors));
-        runtime.batchesReturned += 1;
     }
     runtime.notEmpty.notify_one();
 }
 
-uint64_t DeviceResidentNamedBatchSession::getNumBatchesPerEpoch(
+uint64_t DeviceResidentWindowedNamedBatchSession::getNumBatchesPerEpoch(
     ExampleType exampleType) {
     return runtimeFor(exampleType).batchesPerEpoch;
 }
 
-uint64_t DeviceResidentNamedBatchSession::getNumExamples(
+uint64_t DeviceResidentWindowedNamedBatchSession::getNumExamples(
     ExampleType exampleType) {
     return runtimeFor(exampleType).numExamples();
 }
 
-uint64_t DeviceResidentNamedBatchSession::getNextBatchNum(
+uint64_t DeviceResidentWindowedNamedBatchSession::getNextBatchNum(
     ExampleType exampleType) {
     SplitRuntime &runtime = runtimeFor(exampleType);
     std::lock_guard<std::mutex> guard(runtime.mutex);
@@ -374,15 +424,19 @@ uint64_t DeviceResidentNamedBatchSession::getNextBatchNum(
 }
 
 std::optional<TensorPlacement>
-DeviceResidentNamedBatchSession::getBatchTensorPlacement(
+DeviceResidentWindowedNamedBatchSession::getBatchTensorPlacement(
     const std::string &tensorName) const {
-    if (dataset->hasTensor(tensorName)) {
-        return dataset->getPlacement();
+    for (const BatchTensorSpec &spec : batchTensorSpecsFor(
+             datasetDescription.layout,
+             windowedDataset->getPlacement())) {
+        if (spec.name == tensorName) {
+            return spec.placement;
+        }
     }
     return std::nullopt;
 }
 
-std::vector<Event> DeviceResidentNamedBatchSession::getSynchronizeEvents() const {
+std::vector<Event> DeviceResidentWindowedNamedBatchSession::getSynchronizeEvents() const {
     std::vector<Event> events;
     events.reserve(splitRuntimes.size());
     for (const auto &entry : splitRuntimes) {
@@ -393,19 +447,4 @@ std::vector<Event> DeviceResidentNamedBatchSession::getSynchronizeEvents() const
         events.push_back(entry.second->gatherStream.putEvent(false, true));
     }
     return events;
-}
-
-DeviceResidentNamedBatchSessionStats
-DeviceResidentNamedBatchSession::getStatsSnapshot(ExampleType exampleType) const {
-    const SplitRuntime &runtime = runtimeFor(exampleType);
-    std::lock_guard<std::mutex> guard(runtime.mutex);
-    DeviceResidentNamedBatchSessionStats stats;
-    stats.splitName = runtime.splitName;
-    stats.residentExamples = dataset->getNumExamples();
-    stats.residentBytes = dataset->totalBytes();
-    stats.batchesGathered = runtime.batchesGathered;
-    stats.batchesReturned = runtime.batchesReturned;
-    stats.currentAvailableBatches = runtime.availableBatches.size();
-    stats.batchQueueDepth = batchQueueDepth;
-    return stats;
 }

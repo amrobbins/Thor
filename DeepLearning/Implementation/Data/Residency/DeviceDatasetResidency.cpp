@@ -1,7 +1,8 @@
-#include "DeepLearning/Api/Training/DeviceDatasetResidency.h"
+#include "DeepLearning/Implementation/Data/Residency/DeviceDatasetResidency.h"
 
+#include "DeepLearning/Implementation/Training/DeviceStartupCoordinator.h"
 #include "Utilities/Common/ScopedGpu.h"
-#include "Utilities/Loaders/DeviceResidentNamedDataset.h"
+#include "DeepLearning/Implementation/Data/Residency/DeviceResidentNamedDataset.h"
 
 #include <cuda_runtime_api.h>
 
@@ -15,9 +16,6 @@
 
 namespace Thor {
 namespace {
-
-constexpr uint64_t DEVICE_DATASET_BEST_EFFORT_SLACK_BYTES =
-    2ull * 1024ull * 1024ull * 1024ull;
 
 struct CommittedAllocation {
     std::weak_ptr<const DeviceResidentNamedDataset> resident;
@@ -78,15 +76,23 @@ class DeviceDatasetMemoryReservationManager {
         const uint64_t effectiveAvailable =
             unavailable >= rawAvailable ? 0 : rawAvailable - unavailable;
 
-        if (!fitsWithSlack(
+        if (!fitsWithSafetyReserve(
                 request.requiredBytes,
-                effectiveAvailable,
-                request.storagePolicy)) {
+                effectiveAvailable)) {
             state.reservationFailures += 1;
+            const uint64_t usableBytes =
+                effectiveAvailable <=
+                        ThorImplementation::DEVICE_STARTUP_SAFETY_RESERVE_BYTES
+                    ? 0
+                    : effectiveAvailable -
+                          ThorImplementation::DEVICE_STARTUP_SAFETY_RESERVE_BYTES;
             std::ostringstream message;
             message << "Insufficient device memory for device dataset residency"
                     << " required_bytes=" << request.requiredBytes
-                    << " available_bytes=" << effectiveAvailable;
+                    << " available_bytes=" << effectiveAvailable
+                    << " safety_reserve_bytes="
+                    << ThorImplementation::DEVICE_STARTUP_SAFETY_RESERVE_BYTES
+                    << " usable_bytes_after_reserve=" << usableBytes;
             throw DeviceDatasetResidencyAdmissionError(
                 message.str(), request.requiredBytes, effectiveAvailable);
         }
@@ -152,17 +158,18 @@ class DeviceDatasetMemoryReservationManager {
         return left + right;
     }
 
-    static bool fitsWithSlack(uint64_t requiredBytes,
-                              uint64_t availableBytes,
-                              DeviceDatasetStorage policy) {
-        if (policy == DeviceDatasetStorage::STRICT) {
-            return requiredBytes <= availableBytes;
-        }
-        if (availableBytes <= DEVICE_DATASET_BEST_EFFORT_SLACK_BYTES) {
+    static bool fitsWithSafetyReserve(uint64_t requiredBytes,
+                                      uint64_t availableBytes) {
+        // STRICT controls whether selection may fall back to the source
+        // session; it does not permit consuming Thor's process-wide startup
+        // safety reserve.
+        if (availableBytes <=
+            ThorImplementation::DEVICE_STARTUP_SAFETY_RESERVE_BYTES) {
             return false;
         }
         return requiredBytes <=
-               availableBytes - DEVICE_DATASET_BEST_EFFORT_SLACK_BYTES;
+               availableBytes -
+                   ThorImplementation::DEVICE_STARTUP_SAFETY_RESERVE_BYTES;
     }
 
     static uint64_t queryAvailableBytes(int deviceNum) {

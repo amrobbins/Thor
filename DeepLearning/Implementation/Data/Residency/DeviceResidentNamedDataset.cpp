@@ -1,4 +1,4 @@
-#include "Utilities/Loaders/DeviceResidentNamedDataset.h"
+#include "DeepLearning/Implementation/Data/Residency/DeviceResidentNamedDataset.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Common/Stream.h"

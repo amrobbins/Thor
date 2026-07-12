@@ -3,7 +3,7 @@
 #include "DeepLearning/Api/Data/FileDataset.h"
 #include "DeepLearning/Api/Data/DatasetWriter.h"
 #include "DeepLearning/Api/Training/Executors/DebugSynchronousTrainingExecutor.h"
-#include "DeepLearning/Api/Training/DeviceDatasetStorageSelection.h"
+#include "DeepLearning/Implementation/Data/Residency/DeviceDatasetStorageSelection.h"
 #include "DeepLearning/Api/Training/DatasetInputBindings.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"

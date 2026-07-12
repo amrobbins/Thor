@@ -9,7 +9,10 @@
 #include "DeepLearning/Api/Data/BatchSession.h"
 #include "DeepLearning/Api/Data/DatasetAccessPolicy.h"
 #include "DeepLearning/Api/Data/DatasetSplitManifest.h"
+#include "DeepLearning/Api/Data/DatasetLayout.h"
 #include "DeepLearning/Api/Data/NamedDataset.h"
+#include "DeepLearning/Implementation/Data/Materialization/DeviceDatasetMaterialization.h"
+#include "DeepLearning/Implementation/Data/Materialization/MaterializedNamedDatasetSnapshot.h"
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "DeepLearning/Implementation/Tensor/TensorPlacement.h"
@@ -19,8 +22,10 @@
 #include "bindings/python/src/core/physical/NumpyDTypeMapping.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <map>
 #include <memory>
 #include <optional>
@@ -97,6 +102,11 @@ class NumpyDataset final : public NamedDataset {
     const NumpyFieldStorage &storage(DatasetFieldId id) const { return storageById.at(id); }
 
    private:
+    [[nodiscard]] std::unique_ptr<DatasetMaterializationDescription>
+    describeMaterializationForRuntime() const override;
+    [[nodiscard]] MaterializedNamedDatasetSnapshot
+    materializeSnapshotForRuntime(uint64_t readerQueueDepth) const override;
+
     std::shared_ptr<BatchSession> openBatchSession(const DatasetSplitManifest &splits,
                                                    const BatchPolicy &batching,
                                                    const DatasetAccessPolicy &accessPolicy,
@@ -106,6 +116,7 @@ class NumpyDataset final : public NamedDataset {
     DatasetId id;
     uint64_t numExamples = 0;
     std::optional<DatasetSchema> schema;
+    DatasetLayout layout;
     std::map<DatasetFieldId, NumpyFieldStorage> storageById;
 };
 
@@ -127,6 +138,8 @@ NumpyDataset::NumpyDataset(nb::dict tensors)
     nb::object ndarrayType = numpy.attr("ndarray");
     std::vector<DatasetField> fields;
     fields.reserve(nb::len(tensors));
+    std::vector<DatasetLayout::TensorShape> tensorShapes;
+    tensorShapes.reserve(nb::len(tensors));
     bool haveNumExamples = false;
     DatasetFieldId nextFieldId = 1;
 
@@ -182,10 +195,12 @@ NumpyDataset::NumpyDataset(nb::dict tensors)
                                   .data = reinterpret_cast<const uint8_t *>(array.data),
                                   .bytesPerExample = elementsPerExample * elementBytes};
         storageById.emplace(nextFieldId, std::move(storage));
+        tensorShapes.emplace_back(name, field.dimensions, dataType);
         fields.push_back(std::move(field));
         ++nextFieldId;
     }
     schema.emplace(std::move(fields));
+    layout = DatasetLayout::fromTensorShapes(tensorShapes);
 }
 
 NumpyDataset::~NumpyDataset() {
@@ -202,6 +217,54 @@ NumpyDataset::~NumpyDataset() {
         (void)storage.owner.release();
     }
     storageById.clear();
+}
+
+std::unique_ptr<DatasetMaterializationDescription>
+NumpyDataset::describeMaterializationForRuntime() const {
+    return std::make_unique<DatasetMaterializationDescription>(
+        std::filesystem::path{},
+        id,
+        *schema,
+        layout,
+        numExamples,
+        DatasetMaterializationSource::MEMORY);
+}
+
+MaterializedNamedDatasetSnapshot NumpyDataset::materializeSnapshotForRuntime(
+    uint64_t readerQueueDepth) const {
+    if (readerQueueDepth == 0) {
+        throw std::runtime_error(
+            "NumpyDataset materialization reader_queue_depth must be >= 1.");
+    }
+
+    const auto started = std::chrono::steady_clock::now();
+    MaterializedNamedDatasetSnapshot snapshot(id, *schema, layout, numExamples);
+    ThorImplementation::TensorPlacement cpuPlacement(
+        ThorImplementation::TensorPlacement::MemDevices::CPU);
+
+    for (const DatasetField &field : schema->getFields()) {
+        const NumpyFieldStorage &source = storage(field.id);
+        std::vector<uint64_t> dimensions;
+        dimensions.reserve(field.dimensions.size() + 1);
+        dimensions.push_back(numExamples);
+        dimensions.insert(
+            dimensions.end(), field.dimensions.begin(), field.dimensions.end());
+        ThorImplementation::Tensor tensor(
+            cpuPlacement,
+            ThorImplementation::TensorDescriptor(field.dataType, dimensions));
+        const uint64_t expectedBytes = tensor.getArraySizeInBytes();
+        if (source.bytesPerExample != expectedBytes / numExamples) {
+            throw std::runtime_error(
+                "NumpyDataset field storage changed after dataset construction: " +
+                field.name);
+        }
+        std::memcpy(tensor.getMemPtr<void>(), source.data, expectedBytes);
+        snapshot.fields.emplace(field.id, std::move(tensor));
+    }
+
+    snapshot.materializationSeconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - started).count();
+    return snapshot;
 }
 
 std::shared_ptr<BatchSession> NumpyDataset::openBatchSession(
@@ -430,9 +493,11 @@ Create an immutable in-memory dataset over one canonical table of NumPy arrays.
 
 Each field must be a C-contiguous ndarray using the canonical NumPy or
 ml_dtypes representation of a storable Thor dtype. All fields share one leading
-example dimension. Thor marks the arrays read-only and
-retains them for the dataset lifetime. Split membership and batching belong to
-DatasetSplitManifest and TrainingData.
+example dimension. Thor marks the arrays read-only and retains them for the
+dataset lifetime; callers must not mutate the underlying allocations through
+other aliases. Split membership and batching belong to DatasetSplitManifest and
+TrainingData. Device residency is selected transparently by
+TrainingData.device_storage; best_effort is the default.
         )nbdoc");
     numpyDataset.def("__init__", [](NumpyDataset *, nb::dict) {}, "tensors"_a);
 }

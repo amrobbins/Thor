@@ -485,6 +485,51 @@ TEST(NetworkInput, DeviceLoadCopiesDirectlyWithoutAllocatingInputSlots) {
     expectAllEqual(capture.readCapture(0), 5.0f);
 }
 
+TEST(NetworkInput, DeviceLoadCanFallBackToHostStagingBeforeSubmission) {
+    if (MachineEvaluator::instance().getNumGpus() == 0) {
+        GTEST_SKIP() << "NetworkInput device-load fallback test requires a GPU";
+    }
+
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    TensorDescriptor descriptor(DataType::FP32, {4});
+
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    RuntimeForwardedInputCaptureLayer capture;
+    input.connectToNextLayer(&capture);
+
+    input.configureBatchInputPlacement(gpuPlacement);
+    input.preallocateInputSlots(4);
+    ASSERT_TRUE(input.isDeviceLoad());
+    ASSERT_EQ(input.getNumInputSlots(), 0u);
+
+    input.configureBatchInputPlacement(cpuPlacement);
+    input.preallocateInputSlots(4);
+    EXPECT_FALSE(input.isDeviceLoad());
+    EXPECT_EQ(input.getNumInputSlots(), 4u);
+}
+
+TEST(NetworkInput, RepeatedPlacementConfigurationIsIdempotentButModeChangeWithSlotsIsRejected) {
+    if (MachineEvaluator::instance().getNumGpus() == 0) {
+        GTEST_SKIP() << "NetworkInput placement reconfiguration test requires a GPU";
+    }
+
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    TensorDescriptor descriptor(DataType::FP32, {4});
+
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    RuntimeForwardedInputCaptureLayer capture;
+    input.connectToNextLayer(&capture);
+
+    input.configureBatchInputPlacement(cpuPlacement);
+    input.preallocateInputSlots(4);
+    ASSERT_EQ(input.getNumInputSlots(), 4u);
+
+    EXPECT_NO_THROW(input.configureBatchInputPlacement(cpuPlacement));
+    EXPECT_THROW(input.configureBatchInputPlacement(gpuPlacement), std::logic_error);
+}
+
 TEST(NetworkInput, HostBatchPlacementRetainsRequestedStagingRingDepth) {
     if (MachineEvaluator::instance().getNumGpus() == 0) {
         GTEST_SKIP() << "NetworkInput staged-load test requires a GPU";

@@ -1,15 +1,20 @@
-#include "DeepLearning/Api/Training/DeviceDatasetStorageSelection.h"
+#include "DeepLearning/Implementation/Data/Residency/DeviceDatasetStorageSelection.h"
+
+#include "DeepLearning/Implementation/Training/DeviceStartupCoordinator.h"
+#include "DeepLearning/Implementation/Data/FileDatasetRuntimeAccess.h"
+#include "DeepLearning/Implementation/Data/Residency/NamedDatasetRuntimeAccess.h"
 
 #include "DeepLearning/Api/Data/NamedDataset.h"
 #include "DeepLearning/Api/Data/FileDataset.h"
 #include "DeepLearning/Api/Data/TrainingData.h"
-#include "DeepLearning/Api/Loaders/DeviceResidentNamedBatchSession.h"
-#include "DeepLearning/Api/Loaders/DeviceResidentWindowedNamedBatchSession.h"
-#include "DeepLearning/Api/Training/DeviceDatasetResidency.h"
+#include "DeepLearning/Implementation/Data/Sessions/DeviceResidentNamedBatchSession.h"
+#include "DeepLearning/Implementation/Data/Sessions/DeviceResidentWindowedNamedBatchSession.h"
+#include "DeepLearning/Implementation/Data/Residency/DeviceDatasetResidency.h"
 #include "DeepLearning/Implementation/ThorError.h"
-#include "Utilities/Loaders/DeviceResidentNamedDataset.h"
-#include "Utilities/Loaders/MaterializedNamedDatasetSnapshot.h"
-#include "Utilities/Loaders/NamedDatasetMaterializer.h"
+#include "DeepLearning/Implementation/Data/Residency/DeviceResidentNamedDataset.h"
+#include "DeepLearning/Implementation/Data/Materialization/MaterializedNamedDatasetSnapshot.h"
+#include "DeepLearning/Implementation/Data/Materialization/NamedDatasetMaterializer.h"
+#include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 
 #include <chrono>
 #include <exception>
@@ -20,6 +25,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace Thor {
 namespace {
@@ -185,6 +191,52 @@ std::set<DatasetFieldId> fieldIdsForNames(
     return ids;
 }
 
+MaterializedNamedDatasetSnapshot materializeCanonicalSnapshot(
+    const std::shared_ptr<const NamedDataset> &dataset,
+    const DatasetMaterializationDescription &description) {
+    MaterializedNamedDatasetSnapshot snapshot =
+        ThorImplementation::NamedDatasetRuntimeAccess::materializeSnapshot(*dataset);
+    if (snapshot.datasetId != description.datasetId) {
+        throw std::runtime_error(
+            "NamedDataset materialization returned the wrong dataset identity.");
+    }
+    if (snapshot.numExamples != description.numExamples) {
+        throw std::runtime_error(
+            "NamedDataset materialization returned the wrong example count.");
+    }
+    if (snapshot.schema != description.schema) {
+        throw std::runtime_error(
+            "NamedDataset materialization returned the wrong schema.");
+    }
+    snapshot.layout.validateRequestedLayoutExact(description.layout);
+    if (snapshot.fields.size() != description.schema.size()) {
+        throw std::runtime_error(
+            "NamedDataset materialization returned an unexpected field count.");
+    }
+    for (const DatasetField &field : description.schema.getFields()) {
+        if (!snapshot.hasField(field.id)) {
+            throw std::runtime_error(
+                "NamedDataset materialization omitted field '" + field.name + "'.");
+        }
+        std::vector<uint64_t> expectedDimensions;
+        expectedDimensions.reserve(field.dimensions.size() + 1);
+        expectedDimensions.push_back(description.numExamples);
+        expectedDimensions.insert(
+            expectedDimensions.end(),
+            field.dimensions.begin(),
+            field.dimensions.end());
+        const ThorImplementation::TensorDescriptor expectedDescriptor(
+            field.dataType,
+            expectedDimensions);
+        if (snapshot.field(field.id).getDescriptor() != expectedDescriptor) {
+            throw std::runtime_error(
+                "NamedDataset materialization returned the wrong tensor descriptor for field '" +
+                field.name + "'.");
+        }
+    }
+    return snapshot;
+}
+
 std::runtime_error strictFailure(const DeviceDatasetStorageReport &report) {
     std::ostringstream out;
     out << "device_dataset_storage=strict could not materialize device-resident dataset";
@@ -198,6 +250,8 @@ std::runtime_error strictFailure(const DeviceDatasetStorageReport &report) {
         out << " available_bytes_after_model_placement="
             << report.availableBytesAfterPlacement;
     }
+    out << " required_unused_bytes="
+        << ThorImplementation::DEVICE_STARTUP_SAFETY_RESERVE_BYTES;
     return std::runtime_error(out.str());
 }
 
@@ -242,7 +296,7 @@ DeviceDatasetStorageSelection selectSharedResidencySession(
     std::optional<uint64_t> availableBytesOverride,
     DeviceDatasetStorageReport report) {
     DeviceDatasetResidencyCache &cache =
-        namedDataset->getDeviceDatasetResidencyCache();
+        ThorImplementation::NamedDatasetRuntimeAccess::residencyCache(*namedDataset);
     const auto started = std::chrono::steady_clock::now();
     const uint64_t fullResidentBytes =
         estimateDeviceResidentNamedDatasetStorageBytes(dataset);
@@ -268,9 +322,9 @@ DeviceDatasetStorageSelection selectSharedResidencySession(
             fullRequiredBytes,
             requested,
             availableBytesOverride,
-            [&dataset, devicePlacement]() {
+            [namedDataset, dataset, devicePlacement]() {
                 MaterializedNamedDatasetSnapshot snapshot =
-                    materializeNamedDatasetSnapshot(dataset);
+                    materializeCanonicalSnapshot(namedDataset, dataset);
                 return std::shared_ptr<const DeviceResidentNamedDataset>(
                     DeviceResidentNamedDataset::fromSnapshot(
                         snapshot,
@@ -338,9 +392,9 @@ DeviceDatasetStorageSelection selectSharedResidencySession(
             windowedRequiredBytes,
             requested,
             availableBytesOverride,
-            [&dataset, devicePlacement, &windowNames]() {
+            [namedDataset, dataset, devicePlacement, windowNames]() {
                 MaterializedNamedDatasetSnapshot snapshot =
-                    materializeNamedDatasetSnapshot(dataset);
+                    materializeCanonicalSnapshot(namedDataset, dataset);
                 return std::shared_ptr<const DeviceResidentNamedDataset>(
                     DeviceResidentNamedDataset::fromSnapshot(
                         snapshot,
@@ -415,19 +469,20 @@ DatasetMaterializationDescription describeDatasetMaterialization(
         dataset.getPath(),
         dataset.getId(),
         dataset.getSchema(),
-        dataset.getLayout(),
+        ThorImplementation::FileDatasetRuntimeAccess::layout(dataset),
         dataset.getNumExamples());
 }
 
 DatasetMaterializationDescription describeDatasetMaterialization(
     const TrainingData& trainingData) {
-    std::shared_ptr<const FileDataset> localDataset =
-        std::dynamic_pointer_cast<const FileDataset>(trainingData.getDataset());
-    if (localDataset == nullptr) {
+    std::unique_ptr<DatasetMaterializationDescription> description =
+        ThorImplementation::NamedDatasetRuntimeAccess::describeMaterialization(
+            *trainingData.getDataset());
+    if (description == nullptr) {
         throw std::runtime_error(
             "TrainingData dataset backend does not support device materialization.");
     }
-    return describeDatasetMaterialization(*localDataset);
+    return std::move(*description);
 }
 
 DeviceDatasetSessionDescription describeDeviceDatasetSession(

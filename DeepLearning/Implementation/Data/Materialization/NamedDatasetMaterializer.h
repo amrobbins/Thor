@@ -1,7 +1,7 @@
 #pragma once
 
-#include "DeepLearning/Api/Loaders/DeviceDatasetMaterialization.h"
-#include "Utilities/Loaders/MaterializedNamedDatasetSnapshot.h"
+#include "DeepLearning/Implementation/Data/Materialization/DeviceDatasetMaterialization.h"
+#include "DeepLearning/Implementation/Data/Materialization/MaterializedNamedDatasetSnapshot.h"
 
 #include <cstdint>
 #include <string>
@@ -16,8 +16,9 @@ struct NamedDatasetMaterializationSupport {
     const Thor::DatasetMaterializationDescription &description);
 
 /**
- * Materialize every canonical dataset row exactly once, in source row order,
- * without touching or advancing any live BatchSession.
+ * Materialize every row of a FILE_DATASET exactly once, in source row order,
+ * without touching or advancing any live BatchSession. In-memory backends
+ * materialize through their owning NamedDataset implementation instead.
  */
 [[nodiscard]] MaterializedNamedDatasetSnapshot materializeNamedDatasetSnapshot(
     const Thor::DatasetMaterializationDescription &description,

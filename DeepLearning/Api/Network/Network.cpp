@@ -15,6 +15,7 @@
 #include "DeepLearning/Api/Parameter/ParameterSpecification.h"
 #include "DeepLearning/Api/Parameter/Parameterizable.h"
 #include "DeepLearning/Implementation/ThorError.h"
+#include "DeepLearning/Implementation/Training/DeviceStartupCoordinator.h"
 #include <cstdio>
 #include <fstream>
 #include <functional>
@@ -632,10 +633,17 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
     stampedNetwork.bytesRequired = firstInstanceBytes;
     stampedNetwork.batchSize = batchSize;
 
-    // Leave 100MB of headroom
+    // Preserve the same 1 GiB safety reserve used by serialized model
+    // startup. This is only the early model-placement check; the complete
+    // startup transaction checks again after output, dataset-session, and input
+    // staging allocations have also been created.
     // FIXME: need to determine if this is the not the first instance and use shared weights and shared weights mem requirements
-    if (MachineEvaluator::instance().getFreeMemBytes(gpuNum) < firstInstanceBytes + 100000000)
+    const uint64_t freeMemBytes = MachineEvaluator::instance().getFreeMemBytes(gpuNum);
+    if (freeMemBytes <= ThorImplementation::DEVICE_STARTUP_SAFETY_RESERVE_BYTES ||
+        firstInstanceBytes >
+            freeMemBytes - ThorImplementation::DEVICE_STARTUP_SAFETY_RESERVE_BYTES) {
         return StatusCode::GPU_OUT_OF_MEMORY;
+    }
 
     // 1. Stamp (i.e. construct) all layers
     // 2. At the moment, I connect the layers upon stamping them, I think I should change that and stamp everything first,

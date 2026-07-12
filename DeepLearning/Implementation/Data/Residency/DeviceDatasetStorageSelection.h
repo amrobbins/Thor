@@ -2,7 +2,7 @@
 
 #include "DeepLearning/Api/Data/BatchSession.h"
 #include "DeepLearning/Api/Data/TrainingData.h"
-#include "DeepLearning/Api/Loaders/DeviceDatasetMaterialization.h"
+#include "DeepLearning/Implementation/Data/Materialization/DeviceDatasetMaterialization.h"
 #include "DeepLearning/Api/Training/DeviceDatasetStorage.h"
 #include "DeepLearning/Implementation/Tensor/TensorPlacement.h"
 
