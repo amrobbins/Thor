@@ -2,6 +2,8 @@
 
 #include "Utilities/TarFile/ArchiveShardWriterWorker.h"
 
+#include <algorithm>
+
 #include "Crc32.h"
 #include "Crc32c.h"
 
@@ -249,8 +251,9 @@ string TarWriter::createArchive(filesystem::path archiveDirectory, bool overwrit
 
     // Start the thread pool with writer workers, wait for it to finish running.
     ArchiveWorkerJobContext workerContext(archiveIndex, archiveIndexMutex, archiveDirectory);
+    const uint32_t writerCount = std::min<uint32_t>(3, static_cast<uint32_t>(archiveShardCreationPlan.size()));
     ThreadPool<ArchiveShardWriterWorker, ArchiveShardPlan, ArchiveWorkerJobContext> archiveWriterThreadPool(
-        archiveShardCreationPlan, workerContext, 3);
+        archiveShardCreationPlan, workerContext, writerCount);
     archiveWriterThreadPool.wait();
 
     uint32_t num_shards = archiveShardCreationPlan.size();

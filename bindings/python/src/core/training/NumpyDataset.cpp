@@ -497,7 +497,7 @@ example dimension. Thor marks the arrays read-only and retains them for the
 dataset lifetime; callers must not mutate the underlying allocations through
 other aliases. Split membership and batching belong to DatasetSplitManifest and
 TrainingData. Device residency is selected transparently by
-TrainingData.device_storage; best_effort is the default.
+TrainingData.device_storage; off is the Python binding default.
         )nbdoc");
     numpyDataset.def("__init__", [](NumpyDataset *, nb::dict) {}, "tensors"_a);
 }

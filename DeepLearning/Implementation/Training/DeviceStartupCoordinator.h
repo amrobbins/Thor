@@ -74,6 +74,46 @@ enum class DeviceStartupMemoryFailureDisposition {
 };
 
 class DeviceStartupState;
+class DeviceStartupGuard;
+
+/**
+ * A FIFO device-startup ticket that has been assigned but is not yet serving.
+ *
+ * Reservation is intentionally nonblocking with respect to the active startup
+ * transaction. TrainingRuns uses this split phase to assign tickets in run
+ * declaration order without holding its ordering mutex while a model waits for
+ * GPU memory.
+ */
+class DeviceStartupReservation {
+   public:
+    DeviceStartupReservation(const DeviceStartupReservation&) = delete;
+    DeviceStartupReservation& operator=(
+        const DeviceStartupReservation&) = delete;
+
+    DeviceStartupReservation(DeviceStartupReservation&& other) noexcept;
+    DeviceStartupReservation& operator=(
+        DeviceStartupReservation&& other) noexcept;
+
+    ~DeviceStartupReservation();
+
+    /** Wait until this reserved FIFO ticket is serving and acquire its guard. */
+    [[nodiscard]] DeviceStartupGuard acquire();
+
+   private:
+    friend DeviceStartupReservation reserveDeviceStartupTurn(int deviceNum);
+
+    DeviceStartupReservation(
+        int deviceNum,
+        std::shared_ptr<DeviceStartupState> state,
+        uint64_t ticket);
+
+    void abandon() noexcept;
+
+    int deviceNum = -1;
+    std::shared_ptr<DeviceStartupState> state;
+    uint64_t ticket = 0;
+    bool active = false;
+};
 
 /**
  * Lifetime token for one successfully started, GPU-resident PlacedNetwork.
@@ -171,6 +211,7 @@ class DeviceStartupGuard {
         const Thor::PlacedNetwork* retainedPlacement = nullptr);
 
    private:
+    friend class DeviceStartupReservation;
     friend DeviceStartupGuard acquireDeviceStartupGuard(int deviceNum);
 
     DeviceStartupGuard(
@@ -190,7 +231,13 @@ class DeviceStartupGuard {
     std::unique_lock<std::mutex> lock;
 };
 
-/** Acquire the next FIFO startup turn for one CUDA device. */
+/**
+ * Reserve the next FIFO startup ticket without waiting for the current startup
+ * transaction to finish.
+ */
+[[nodiscard]] DeviceStartupReservation reserveDeviceStartupTurn(int deviceNum);
+
+/** Reserve and then acquire the next FIFO startup turn for one CUDA device. */
 [[nodiscard]] DeviceStartupGuard acquireDeviceStartupGuard(int deviceNum);
 
 /** Query CUDA free memory for one device. */

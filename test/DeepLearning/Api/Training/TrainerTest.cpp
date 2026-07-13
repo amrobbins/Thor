@@ -194,6 +194,25 @@ class SessionCapturingExecutor : public CapturingExecutor {
     std::vector<std::shared_ptr<BatchSession>> sessions{};
 };
 
+class RetrySessionFactoryCapturingExecutor : public CapturingExecutor {
+   public:
+    void fit(const TrainingRunRequest& request,
+             TrainingObserver& observer) override {
+        initialSession = request.batchSession;
+        hasFactory = static_cast<bool>(request.batchSessionFactory);
+        if (request.batchSessionFactory) {
+            retrySession1 = request.batchSessionFactory();
+            retrySession2 = request.batchSessionFactory();
+        }
+        CapturingExecutor::fit(request, observer);
+    }
+
+    bool hasFactory = false;
+    std::shared_ptr<BatchSession> initialSession;
+    std::shared_ptr<BatchSession> retrySession1;
+    std::shared_ptr<BatchSession> retrySession2;
+};
+
 
 std::filesystem::path uniqueTempPath(const std::string& prefix) {
     return std::filesystem::temp_directory_path() /
@@ -298,6 +317,41 @@ TEST(Trainer, TrainingDataOpensFreshSessionForEveryFit) {
     EXPECT_NE(executor->sessions[0], nullptr);
     EXPECT_NE(executor->sessions[1], nullptr);
     executor->sessions.clear();
+    std::filesystem::remove_all(path);
+}
+
+TEST(Trainer, FitSuppliesFreshBatchSessionFactoryForStartupRetry) {
+    const std::filesystem::path path =
+        uniqueTempPath("thor-trainer-startup-retry-session");
+    std::shared_ptr<TrainingData> data = makeTrainingData(path);
+    auto executor =
+        std::make_shared<RetrySessionFactoryCapturingExecutor>();
+
+    Trainer trainer = Trainer::Builder()
+                          .network(std::make_shared<Network>(
+                              "trainer-startup-retry-session"))
+                          .data(data)
+                          .executor(executor)
+                          .observer(std::make_shared<NullTrainingObserver>())
+                          .maxInFlightBatches(3)
+                          .build();
+
+    trainer.fit(1);
+
+    EXPECT_TRUE(executor->hasFactory);
+    ASSERT_NE(executor->initialSession, nullptr);
+    ASSERT_NE(executor->retrySession1, nullptr);
+    ASSERT_NE(executor->retrySession2, nullptr);
+    EXPECT_NE(executor->initialSession.get(), executor->retrySession1.get());
+    EXPECT_NE(executor->retrySession1.get(), executor->retrySession2.get());
+    EXPECT_EQ(executor->initialSession->getBatchSize(),
+              executor->retrySession1->getBatchSize());
+    EXPECT_EQ(executor->retrySession1->getBatchSize(),
+              executor->retrySession2->getBatchSize());
+
+    executor->initialSession.reset();
+    executor->retrySession1.reset();
+    executor->retrySession2.reset();
     std::filesystem::remove_all(path);
 }
 

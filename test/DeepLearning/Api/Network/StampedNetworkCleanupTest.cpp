@@ -2,6 +2,7 @@
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Network/StampedNetwork.h"
 #include "DeepLearning/Implementation/Layers/Layer.h"
+#include "DeepLearning/Implementation/Training/DeviceStartupCoordinator.h"
 
 #include <gtest/gtest.h>
 
@@ -39,6 +40,8 @@ class CleanupProbeLayer final : public ThorImplementation::Layer {
             throw std::runtime_error("intentional cleanup failure");
         }
     }
+
+    std::vector<Event> getSynchronizeEvents() override { return {}; }
 
    protected:
     void infer(std::optional<ThorImplementation::Tensor>,
@@ -88,6 +91,50 @@ TEST(StampedNetworkCleanupTest, PlacedNetworkDestructorContinuesAndSuppressesCle
     });
     EXPECT_TRUE(firstCleaned);
     EXPECT_TRUE(secondCleaned);
+}
+
+TEST(StampedNetworkCleanupTest, ExplicitReleaseFreesResidencyWhileSharedAliasSurvives) {
+    bool cleaned = false;
+    auto layer = std::make_shared<CleanupProbeLayer>(cleaned, false);
+
+    TestStampedNetwork stamped;
+    stamped.addOtherLayer(layer);
+    std::vector<ThorImplementation::StampedNetwork> stamps{stamped};
+    Thor::Network network("explicit_release_test_network");
+    auto placed = std::make_shared<Thor::PlacedNetwork>(
+        "explicit_release_test_network", network, stamps);
+    std::shared_ptr<Thor::PlacedNetwork> survivingAlias = placed;
+
+    {
+        ThorImplementation::DeviceStartupGuard startup =
+            ThorImplementation::acquireDeviceStartupGuard(17);
+        startup.complete(
+            *placed,
+            ThorImplementation::DEVICE_STARTUP_SAFETY_RESERVE_BYTES);
+    }
+    {
+        ThorImplementation::DeviceStartupGuard inspect =
+            ThorImplementation::acquireDeviceStartupGuard(17);
+        EXPECT_EQ(inspect.getLoadedModelCount(), 1u);
+        inspect.complete(
+            ThorImplementation::DEVICE_STARTUP_SAFETY_RESERVE_BYTES);
+    }
+
+    EXPECT_NO_THROW(placed->releaseGpuResources());
+    EXPECT_TRUE(cleaned);
+    EXPECT_EQ(placed->getNumStamps(), 0u);
+    EXPECT_EQ(survivingAlias->getNumStamps(), 0u);
+
+    {
+        ThorImplementation::DeviceStartupGuard inspect =
+            ThorImplementation::acquireDeviceStartupGuard(17);
+        EXPECT_EQ(inspect.getLoadedModelCount(), 0u);
+        inspect.complete(
+            ThorImplementation::DEVICE_STARTUP_SAFETY_RESERVE_BYTES);
+    }
+
+    // Idempotent even while another shared owner remains alive.
+    EXPECT_NO_THROW(survivingAlias->releaseGpuResources());
 }
 
 }  // namespace

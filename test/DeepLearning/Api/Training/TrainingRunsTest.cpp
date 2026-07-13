@@ -260,6 +260,52 @@ class CoordinatedExecutor : public TrainingExecutor {
 };
 
 
+class StartupOrderRecorder {
+   public:
+    void record(size_t runIndex) {
+        std::lock_guard<std::mutex> lock(mutex);
+        order.push_back(runIndex);
+    }
+
+    [[nodiscard]] std::vector<size_t> snapshot() const {
+        std::lock_guard<std::mutex> lock(mutex);
+        return order;
+    }
+
+   private:
+    mutable std::mutex mutex;
+    std::vector<size_t> order;
+};
+
+class OrderedStartupExecutor : public TrainingExecutor {
+   public:
+    OrderedStartupExecutor(size_t runIndex,
+                           std::chrono::milliseconds delay,
+                           std::shared_ptr<StartupOrderRecorder> recorder)
+        : runIndex(runIndex), delay(delay), recorder(std::move(recorder)) {}
+
+    void fit(const TrainingRunRequest& request,
+             TrainingObserver& observer) override {
+        std::this_thread::sleep_for(delay);
+        if (!request.initialDeviceStartupSequencer) {
+            throw std::runtime_error(
+                "TrainingRuns did not provide an initial device startup "
+                "sequencer.");
+        }
+        request.initialDeviceStartupSequencer([&]() {
+            recorder->record(runIndex);
+        });
+        observer.onTrainingEvent(
+            TrainingEvent::statsUpdated(makeStats(runIndex + 1)));
+    }
+
+   private:
+    size_t runIndex;
+    std::chrono::milliseconds delay;
+    std::shared_ptr<StartupOrderRecorder> recorder;
+};
+
+
 class RestartProgressExecutor : public TrainingExecutor {
    public:
     explicit RestartProgressExecutor(std::vector<std::vector<double>> attemptEpochLosses, bool writeLatestArtifact = false)
@@ -1025,6 +1071,44 @@ TEST(TrainingRuns, StartsAllTrainersConcurrentlyAndReturnsCompletedResults) {
     EXPECT_EQ((*result)["fold_1"].finalTrainingStats->step, 5u);
     EXPECT_EQ(executor0->calls, 1u);
     EXPECT_EQ(executor1->calls, 1u);
+}
+
+
+TEST(TrainingRuns, InitialDeviceStartupTurnsFollowRunDeclarationOrder) {
+    constexpr size_t numRuns = 5;
+    auto recorder = std::make_shared<StartupOrderRecorder>();
+    std::vector<TrainingRunsSpec> specs;
+    specs.reserve(numRuns);
+
+    for (size_t i = 0; i < numRuns; ++i) {
+        // Later runs reach the sequencing hook first. The recorded acquisition
+        // order must still follow the TrainingRuns declaration order.
+        const auto delay =
+            std::chrono::milliseconds((numRuns - i - 1) * 10);
+        auto executor = std::make_shared<OrderedStartupExecutor>(
+            i, delay, recorder);
+        auto network = std::make_shared<Network>(
+            "training-runs-startup-order-" + std::to_string(i));
+        specs.emplace_back(
+            "fold_" + std::to_string(i),
+            makeTrainer(network, executor));
+    }
+
+    TrainingRuns runs(
+        std::move(specs),
+        TrainingRunsFailurePolicy::CONTINUE,
+        2.0,
+        numRuns);
+    TrainingRunsEvaluationOptions evaluation;
+    evaluation.evaluateTrainingPopulation = false;
+
+    TrainingRunsResult result =
+        runs.fit(TrainerFitOptions{.epochs = 1}, evaluation);
+
+    EXPECT_TRUE(result.allCompleted());
+    EXPECT_EQ(
+        recorder->snapshot(),
+        (std::vector<size_t>{0, 1, 2, 3, 4}));
 }
 
 

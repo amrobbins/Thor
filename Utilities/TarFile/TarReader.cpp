@@ -1,6 +1,8 @@
 #include "Utilities/TarFile/TarReader.h"
 #include "Utilities/TarFile/ArchiveShardReaderWorker.h"
 
+#include <algorithm>
+
 using namespace std;
 using json = nlohmann::json;
 
@@ -338,7 +340,9 @@ void TarReader::executeReadRequests() {
 
     ArchiveReaderContext context(archiveDirectory, errorMessage, mtx);
 
-    ThreadPool<ArchiveShardReaderWorker, ArchiveShardPlan, ArchiveReaderContext> archiveReaderThreadPool(readPlan, context, 3);
+    const uint32_t readerCount = std::min<uint32_t>(3, static_cast<uint32_t>(readPlan.size()));
+    ThreadPool<ArchiveShardReaderWorker, ArchiveShardPlan, ArchiveReaderContext> archiveReaderThreadPool(
+        readPlan, context, readerCount);
     archiveReaderThreadPool.wait();
 
     // Check for any errors, throw runtime error when present.

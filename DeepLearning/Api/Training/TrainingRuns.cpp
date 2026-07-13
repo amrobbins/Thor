@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <chrono>
 #include <condition_variable>
 #include <cstring>
 #include <exception>
@@ -46,6 +47,80 @@ namespace {
 
 constexpr int ENSEMBLE_MANIFEST_FIRST_ARTIFACT_VERSION = 1;
 constexpr int ENSEMBLE_MANIFEST_CURRENT_ARTIFACT_VERSION = ENSEMBLE_MANIFEST_FIRST_ARTIFACT_VERSION;
+
+class InitialDeviceStartupOrder {
+   public:
+    explicit InitialDeviceStartupOrder(size_t numRuns)
+        : slots(numRuns, SlotState::WAITING) {}
+
+    void reserveInRunOrder(
+        size_t runIndex,
+        const TrainingCancellationToken& cancellationToken,
+        const std::function<void()>& reserveStartupTurn) {
+        THOR_THROW_IF_FALSE(runIndex < slots.size());
+        THOR_THROW_IF_FALSE(static_cast<bool>(reserveStartupTurn));
+
+        std::unique_lock<std::mutex> lock(mutex);
+        if (slots[runIndex] != SlotState::WAITING) {
+            // Restart attempts from a run whose initial startup was already
+            // ordered participate in the coordinator's ordinary FIFO order.
+            lock.unlock();
+            reserveStartupTurn();
+            return;
+        }
+
+        while (nextRunIndex != runIndex) {
+            cancellationToken.throwIfCancellationRequested();
+            changed.wait_for(lock, std::chrono::milliseconds(50));
+        }
+        cancellationToken.throwIfCancellationRequested();
+
+        try {
+            // Reserve the coordinator ticket while declaration order is
+            // serialized, but do not wait for that ticket here. Waiting while
+            // holding this mutex can deadlock completed runs that need abandon()
+            // to return before releasing their resident placements.
+            reserveStartupTurn();
+            slots[runIndex] = SlotState::ACQUIRED;
+        } catch (...) {
+            slots[runIndex] = SlotState::ABANDONED;
+            advanceUnlocked();
+            lock.unlock();
+            changed.notify_all();
+            throw;
+        }
+
+        advanceUnlocked();
+        lock.unlock();
+        changed.notify_all();
+    }
+
+    void abandon(size_t runIndex) noexcept {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (runIndex >= slots.size() ||
+            slots[runIndex] != SlotState::WAITING) {
+            return;
+        }
+        slots[runIndex] = SlotState::ABANDONED;
+        advanceUnlocked();
+        changed.notify_all();
+    }
+
+   private:
+    enum class SlotState { WAITING, ACQUIRED, ABANDONED };
+
+    void advanceUnlocked() {
+        while (nextRunIndex < slots.size() &&
+               slots[nextRunIndex] != SlotState::WAITING) {
+            ++nextRunIndex;
+        }
+    }
+
+    std::mutex mutex;
+    std::condition_variable changed;
+    std::vector<SlotState> slots;
+    size_t nextRunIndex = 0;
+};
 
 std::shared_ptr<PlacedNetwork> placeInferenceNetworkWithSerializedStartup(
     Network& network,
@@ -1313,6 +1388,8 @@ TrainingRunsResult TrainingRuns::fit(const TrainerFitOptions& options, const Tra
     std::vector<bool> workerFinished(runs.size(), false);
     std::vector<bool> workerJoined(runs.size(), false);
     std::atomic_bool cancellationRequestedByFailure{false};
+    auto initialDeviceStartupOrder =
+        std::make_shared<InitialDeviceStartupOrder>(runs.size());
 
     auto launchWorker = [&](size_t i) {
         workerStarted[i] = true;
@@ -1325,6 +1402,7 @@ TrainingRunsResult TrainingRuns::fit(const TrainerFitOptions& options, const Tra
                                   &schedulingChanged,
                                   &workerFinished,
                                   &cancellationRequestedByFailure,
+                                  initialDeviceStartupOrder,
                                   statsReporter,
                                   i]() {
             TrainingRunResult result;
@@ -1340,19 +1418,38 @@ TrainingRunsResult TrainingRuns::fit(const TrainerFitOptions& options, const Tra
             statsReporter->markRunStarting(runs[i].runName);
 
             try {
-                TrainingStatsSinkObserver observer(statsReporter, runs[i].runName);
+                // The reporter is shared by every active run. A per-run Trainer
+                // flush must not wait for that global queue to become empty while
+                // sibling runs are still producing stats; doing so delays fit()
+                // return, terminal status publication, and GPU residency release.
+                // TrainingRuns flushes the shared reporter after all workers join.
+                TrainingStatsSinkObserver observer(
+                    statsReporter, runs[i].runName, /*flushSinkOnFlush=*/false);
                 const std::vector<std::string> reportedScalarTensorNames = reportedScalarTensorNamesForSpec(runs[i]);
                 const std::set<std::string> additionalScalarTensorsToReport(reportedScalarTensorNames.begin(), reportedScalarTensorNames.end());
+                const TrainingCancellationToken cancellationToken =
+                    cancellationSource.token();
+                const InitialDeviceStartupSequencer startupSequencer =
+                    [initialDeviceStartupOrder, i, cancellationToken](
+                        const std::function<void()>& reserveStartupTurn) {
+                        initialDeviceStartupOrder->reserveInRunOrder(
+                            i, cancellationToken, reserveStartupTurn);
+                    };
                 result = runs[i].trainer->fitTrainingRun(runs[i].runName,
                                                           options,
                                                           observer,
-                                                          cancellationSource.token(),
+                                                          cancellationToken,
                                                           restartConditionsForRun(runs[i]),
                                                           earlyCompletionPoliciesForRun(runs[i]),
-                                                          additionalScalarTensorsToReport);
+                                                          additionalScalarTensorsToReport,
+                                                          startupSequencer);
             } catch (...) {
                 result = TrainingRunResult::fromException(runs[i].runName, std::current_exception());
             }
+            // A non-native executor may never consume the sequencing hook, and
+            // validation may fail before the native runner reaches startup. Do
+            // not let either case block all later run indices.
+            initialDeviceStartupOrder->abandon(i);
             result.ensembleGroup = runs[i].ensembleGroup;
             result.ensembleWeight = runs[i].ensembleWeight;
             if (!result.savedModelDirectory.has_value()) {

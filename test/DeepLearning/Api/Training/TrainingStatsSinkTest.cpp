@@ -169,6 +169,23 @@ TEST(TrainingStatsSinkObserver, ForwardsTrainingEventsAsStructuredStatsEvents) {
     EXPECT_TRUE(sink->closed);
 }
 
+
+TEST(TrainingStatsSinkObserver, CanSuppressSharedSinkFlushForConcurrentRunObservers) {
+    auto sink = std::make_shared<CapturingStatsSink>();
+    TrainingStatsSinkObserver observer(sink, "fold_0", /*flushSinkOnFlush=*/false);
+
+    observer.onTrainingEvent(TrainingEvent::statsUpdated(makeStats()));
+    observer.flush();
+
+    ASSERT_EQ(sink->events.size(), 1u);
+    EXPECT_FALSE(sink->flushed);
+
+    // The owner of the shared sink still performs the aggregate flush once all
+    // concurrent producers have stopped.
+    sink->flush();
+    EXPECT_TRUE(sink->flushed);
+}
+
 TEST(TrainingStatsSinkObserver, IgnoresNullSink) {
     TrainingStatsSinkObserver observer(nullptr, "fold_2");
 

@@ -1968,7 +1968,7 @@ at the same source. Every dense field and every window source owns its dtype.
         "splits"_a,
         "batching"_a,
         "dataset_name"_a = "dataset",
-        "device_storage"_a = "best_effort");
+        "device_storage"_a = "off");
     training_data.def(
         "__init__",
         [](Thor::TrainingData*, std::shared_ptr<Thor::NamedDataset>, Thor::DatasetSplitManifest,
@@ -1977,7 +1977,7 @@ at the same source. Every dense field and every window source owns its dtype.
         "splits"_a,
         "batching"_a,
         "dataset_name"_a = "dataset",
-        "device_storage"_a = "best_effort");
+        "device_storage"_a = "off");
     training_data.def(
         "open_session",
         [](const Thor::TrainingData& self, uint64_t maxInFlightBatches) {

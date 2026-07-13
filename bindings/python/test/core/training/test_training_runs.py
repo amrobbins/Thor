@@ -1744,7 +1744,7 @@ def test_device_dataset_storage_is_not_a_fit_option():
 @pytest.mark.parametrize(
     "device_storage, expected_requested, expected_attempted",
     [
-        (None, thor.data.DeviceDatasetStorage.BEST_EFFORT, True),
+        (None, thor.data.DeviceDatasetStorage.OFF, False),
         ("best_effort", thor.data.DeviceDatasetStorage.BEST_EFFORT, True),
         ("strict", thor.data.DeviceDatasetStorage.STRICT, True),
         ("off", thor.data.DeviceDatasetStorage.OFF, False),
@@ -4136,7 +4136,7 @@ def test_trainer_fit_returns_result_and_persists_selection_metadata(tmp_path):
     assert result.best_epoch == 1
     assert result.best_score == pytest.approx(1.0)
     assert save_dir.exists()
-    assert _training_artifact_latest_dir(save_dir).exists()
+    assert not _training_artifact_latest_dir(save_dir).exists()
     assert _training_artifact_best_dir(save_dir).exists()
 
     metadata = _training_selection_metadata(save_dir)
@@ -4415,7 +4415,7 @@ def test_trainer_first_model_selection_epoch_is_phase_local_across_fit_calls(tmp
     assert second_result.best_score == pytest.approx(5.0)
     assert trainer.completed_training_epochs == 5
     assert save_dir.exists()
-    assert _training_artifact_latest_dir(save_dir).exists()
+    assert not _training_artifact_latest_dir(save_dir).exists()
     assert _training_artifact_best_dir(save_dir).exists()
 
     metadata = _training_selection_metadata(save_dir)
@@ -4498,7 +4498,7 @@ def test_training_runs_first_model_selection_epoch_is_phase_local_across_fit_cal
     assert second_result.best_score == pytest.approx(5.0)
     assert trainer.completed_training_epochs == 5
     assert save_dir.exists()
-    assert _training_artifact_latest_dir(save_dir).exists()
+    assert not _training_artifact_latest_dir(save_dir).exists()
     assert _training_artifact_best_dir(save_dir).exists()
 
     metadata = _training_selection_metadata(save_dir)
@@ -4609,7 +4609,7 @@ def test_training_runs_early_completion_stops_early_and_saves_best_candidate(cap
     assert result.final_training_stats.epoch == 2
     assert result.final_training_stats.epochs == 50
     assert early_dir.exists()
-    assert _training_artifact_latest_dir(early_dir).exists()
+    assert not _training_artifact_latest_dir(early_dir).exists()
     assert _training_artifact_best_dir(early_dir).exists()
 
     plain_text = _ANSI_RE.sub("", captured_text)
@@ -4634,16 +4634,13 @@ def test_training_runs_early_completion_stops_early_and_saves_best_candidate(cap
 
     selected_prediction = _prediction_from_saved_tiny_regressor(
         early_dir, "training_runs_early_completion_best_candidate", artifact="best")
-    latest_prediction = _prediction_from_saved_tiny_regressor(
-        early_dir, "training_runs_early_completion_best_candidate", artifact="latest")
     one_epoch_prediction = _prediction_from_saved_tiny_regressor(
         one_epoch_reference_dir, "training_runs_early_completion_one_epoch_reference")
     two_epoch_prediction = _prediction_from_saved_tiny_regressor(
         two_epoch_reference_dir, "training_runs_early_completion_two_epoch_reference")
 
     assert np.allclose(selected_prediction, one_epoch_prediction, atol=1e-6)
-    assert np.allclose(latest_prediction, two_epoch_prediction, atol=1e-6)
-    assert not np.allclose(selected_prediction, latest_prediction, atol=1e-7)
+    assert not np.allclose(selected_prediction, two_epoch_prediction, atol=1e-7)
 
 
 @pytest.mark.cuda

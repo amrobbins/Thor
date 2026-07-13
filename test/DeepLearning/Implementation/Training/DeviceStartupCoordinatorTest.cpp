@@ -13,6 +13,7 @@ namespace {
 
 using ThorImplementation::DEVICE_STARTUP_SAFETY_RESERVE_BYTES;
 using ThorImplementation::DeviceStartupGuard;
+using ThorImplementation::DeviceStartupReservation;
 using ThorImplementation::DeviceStartupMemoryFailureDisposition;
 using ThorImplementation::DeviceModelResidencyLease;
 using ThorImplementation::DeviceStartupInsufficientMemoryError;
@@ -21,6 +22,7 @@ using ThorImplementation::acquireDeviceStartupGuard;
 using ThorImplementation::decideDeviceStartupMemoryFailureDisposition;
 using ThorImplementation::enforceDeviceStartupSafetyReserve;
 using ThorImplementation::isDeviceStartupMemoryFailure;
+using ThorImplementation::reserveDeviceStartupTurn;
 
 TEST(DeviceStartupCoordinatorTest, SerializesStartupOnTheSameDevice) {
     std::optional<DeviceStartupGuard> first(
@@ -54,6 +56,60 @@ TEST(DeviceStartupCoordinatorTest, SerializesStartupOnTheSameDevice) {
     EXPECT_EQ(secondAcquired.wait_for(std::chrono::seconds(2)),
               std::future_status::ready);
     second.get();
+}
+
+TEST(DeviceStartupCoordinatorTest, ReservationDoesNotWaitForActiveStartupTurn) {
+    DeviceStartupGuard first = acquireDeviceStartupGuard(13);
+
+    std::promise<void> reservedPromise;
+    std::shared_future<void> reserved = reservedPromise.get_future().share();
+    std::promise<void> acquiredPromise;
+    std::shared_future<void> acquired = acquiredPromise.get_future().share();
+
+    std::future<void> second = std::async(std::launch::async, [&]() {
+        DeviceStartupReservation reservation = reserveDeviceStartupTurn(13);
+        reservedPromise.set_value();
+        DeviceStartupGuard guard = reservation.acquire();
+        acquiredPromise.set_value();
+        guard.complete(DEVICE_STARTUP_SAFETY_RESERVE_BYTES);
+    });
+
+    EXPECT_EQ(reserved.wait_for(std::chrono::seconds(2)),
+              std::future_status::ready);
+    EXPECT_EQ(acquired.wait_for(std::chrono::milliseconds(50)),
+              std::future_status::timeout);
+
+    first.complete(DEVICE_STARTUP_SAFETY_RESERVE_BYTES);
+    EXPECT_EQ(acquired.wait_for(std::chrono::seconds(2)),
+              std::future_status::ready);
+    second.get();
+}
+
+TEST(DeviceStartupCoordinatorTest, AbandonedReservationDoesNotStrandLaterTurns) {
+    DeviceStartupReservation firstReservation = reserveDeviceStartupTurn(14);
+    {
+        // Ticket one is abandoned while ticket zero is still only reserved.
+        // Releasing ticket zero must skip the abandoned ticket and wake ticket
+        // two rather than leaving the FIFO permanently blocked.
+        DeviceStartupReservation abandoned = reserveDeviceStartupTurn(14);
+    }
+
+    DeviceStartupGuard first = firstReservation.acquire();
+    std::promise<void> thirdAcquiredPromise;
+    std::shared_future<void> thirdAcquired =
+        thirdAcquiredPromise.get_future().share();
+    std::future<void> third = std::async(std::launch::async, [&]() {
+        DeviceStartupGuard guard = acquireDeviceStartupGuard(14);
+        thirdAcquiredPromise.set_value();
+        guard.complete(DEVICE_STARTUP_SAFETY_RESERVE_BYTES);
+    });
+
+    EXPECT_EQ(thirdAcquired.wait_for(std::chrono::milliseconds(50)),
+              std::future_status::timeout);
+    first.complete(DEVICE_STARTUP_SAFETY_RESERVE_BYTES);
+    EXPECT_EQ(thirdAcquired.wait_for(std::chrono::seconds(2)),
+              std::future_status::ready);
+    third.get();
 }
 
 TEST(DeviceStartupCoordinatorTest, DifferentDevicesDoNotBlockEachOther) {

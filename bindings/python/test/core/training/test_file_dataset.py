@@ -934,7 +934,7 @@ def test_training_data_owns_device_access_policy(tmp_path):
         device_storage="strict",
     )
 
-    assert default_data.device_storage == thor.data.DeviceDatasetStorage.BEST_EFFORT
+    assert default_data.device_storage == thor.data.DeviceDatasetStorage.OFF
     assert strict_data.device_storage == thor.data.DeviceDatasetStorage.STRICT
     assert not hasattr(thor.training.TrainerFitOptions(), "device_dataset_storage")
 

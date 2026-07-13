@@ -6,8 +6,6 @@
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Training/PhaseGraphConnector.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
-#include "Utilities/Common/Stream.h"
-#include "Utilities/ComputeTopology/MachineEvaluator.h"
 
 #include <algorithm>
 #include <cmath>
@@ -26,13 +24,6 @@
 namespace Thor {
 
 namespace {
-
-void synchronizeAllCudaDevicesForTrainingBoundary() {
-    const uint32_t numGpus = MachineEvaluator::instance().getNumGpus();
-    for (uint32_t gpu = 0; gpu < numGpus; ++gpu) {
-        Stream::deviceSynchronize(static_cast<int>(gpu));
-    }
-}
 
 std::optional<std::string> trainedArtifactNetworkName(const std::shared_ptr<PlacedNetwork>& placedNetwork,
                                                        const std::shared_ptr<Network>& fallbackNetwork) {
@@ -653,7 +644,15 @@ TrainingRunResult Trainer::fit(const TrainerFitOptions& options) {
     TrainingObserver& observer = effectiveObserver();
     ResultCapturingTrainingObserver capturingObserver(observer);
     try {
-        fitWithRestartConditions(options, capturingObserver, TrainingCancellationToken{}, {}, {}, "trainer");
+        fitWithRestartConditions(
+            options,
+            capturingObserver,
+            TrainingCancellationToken{},
+            {},
+            {},
+            "trainer",
+            {},
+            {});
         capturingObserver.flush();
         return TrainingRunResult::completedResult("trainer",
                                                   capturingObserver.finalTrainingStats,
@@ -693,7 +692,11 @@ void Trainer::saveModel(const std::string& directory, bool overwrite, bool saveO
 
 void Trainer::releasePlacedNetworkAfterLastFit() {
     if (placedNetworkAfterLastFit != nullptr) {
-        placedNetworkAfterLastFit->synchronize();
+        // Releasing only this shared_ptr is not a residency boundary: executor,
+        // observer, or diagnostic aliases may still own the PlacedNetwork. Tear
+        // down the physical graph explicitly so the next phase observes the
+        // memory release immediately and the coordinator wakes its FIFO waiter.
+        placedNetworkAfterLastFit->releaseGpuResources();
         placedNetworkAfterLastFit.reset();
     }
 }
@@ -734,7 +737,8 @@ void Trainer::fitInternal(const TrainerFitOptions& options,
                           TrainingObserver& observer,
                           const TrainingCancellationToken& cancellationToken,
                           const std::vector<TrainingEarlyCompletionPolicy>& additionalEarlyCompletionPolicies,
-                          const std::set<std::string>& additionalScalarTensorsToReport) {
+                          const std::set<std::string>& additionalScalarTensorsToReport,
+                          const InitialDeviceStartupSequencer& initialDeviceStartupSequencer) {
     validateFitOptions(options);
     std::vector<TrainingEarlyCompletionPolicy> combinedEarlyCompletionPolicies = options.earlyCompletionPolicies;
     combinedEarlyCompletionPolicies.insert(combinedEarlyCompletionPolicies.end(),
@@ -751,8 +755,17 @@ void Trainer::fitInternal(const TrainerFitOptions& options,
     TrainingRunRequest request;
     request.network = network;
     trainingData->requireNonEmptyPartition(ExampleType::TRAIN, "Trainer::fit");
-    request.batchSession = trainingData->openSession(
-        runtimeConfig.maxInFlightBatches, resolvedDatasetInputs.requiredFieldIds);
+    const uint64_t sessionMaxInFlightBatches = runtimeConfig.maxInFlightBatches;
+    const std::set<DatasetFieldId> requiredDatasetFieldIds =
+        resolvedDatasetInputs.requiredFieldIds;
+    request.batchSessionFactory =
+        [trainingData = trainingData,
+         sessionMaxInFlightBatches,
+         requiredDatasetFieldIds]() {
+            return trainingData->openSession(
+                sessionMaxInFlightBatches, requiredDatasetFieldIds);
+        };
+    request.batchSession = request.batchSessionFactory();
     request.optimizer = optimizer;
     request.trainingProgram = trainingProgram;
     request.datasetInputBindings = resolvedDatasetInputs.trainingInputBindings;
@@ -771,6 +784,7 @@ void Trainer::fitInternal(const TrainerFitOptions& options,
     request.modelSelectionScore = modelSelectionScore;
     request.earlyCompletionPolicies = std::move(combinedEarlyCompletionPolicies);
     request.cancellationToken = cancellationToken;
+    request.initialDeviceStartupSequencer = initialDeviceStartupSequencer;
     request.executionMode = TrainingRunExecutionMode::FIT;
 
     if (lastCompletedArtifactDirectory.has_value() && lastCompletedArtifactNetworkName.has_value()) {
@@ -810,7 +824,8 @@ void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
                                        const std::vector<TrainingRestartCondition>& additionalRestartConditions,
                                        const std::vector<TrainingEarlyCompletionPolicy>& additionalEarlyCompletionPolicies,
                                        const std::string& runNameForMessages,
-                                       const std::set<std::string>& additionalScalarTensorsToReport) {
+                                       const std::set<std::string>& additionalScalarTensorsToReport,
+                                       const InitialDeviceStartupSequencer& initialDeviceStartupSequencer) {
     std::vector<TrainingRestartCondition> combinedConditions = options.restartConditions;
     combinedConditions.insert(combinedConditions.end(), additionalRestartConditions.begin(), additionalRestartConditions.end());
     validateRestartConditions(combinedConditions);
@@ -831,7 +846,12 @@ void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
     };
 
     if (combinedConditions.empty()) {
-        fitInternal(options, observer, cancellationToken, additionalEarlyCompletionPolicies, additionalScalarTensorsToReport);
+        fitInternal(options,
+                    observer,
+                    cancellationToken,
+                    additionalEarlyCompletionPolicies,
+                    additionalScalarTensorsToReport,
+                    initialDeviceStartupSequencer);
         return;
     }
 
@@ -899,8 +919,16 @@ void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
             attemptTrainer.placedNetworkAfterLastFit.reset();
         }
         RestartAttemptObserver attemptObserver(observer, activeConditions(), attempt, phaseInitialCompletedEpochs);
+        const InitialDeviceStartupSequencer startupSequencerForAttempt =
+            attempt == 1 ? initialDeviceStartupSequencer
+                         : InitialDeviceStartupSequencer{};
         try {
-            attemptTrainer.fitInternal(options, attemptObserver, cancellationToken, additionalEarlyCompletionPolicies, additionalScalarTensorsToReport);
+            attemptTrainer.fitInternal(options,
+                                       attemptObserver,
+                                       cancellationToken,
+                                       additionalEarlyCompletionPolicies,
+                                       additionalScalarTensorsToReport,
+                                       startupSequencerForAttempt);
             placedNetworkAfterLastFit = attemptTrainer.placedNetworkAfterLastFit;
             lastCompletedArtifactDirectory = attemptTrainer.lastCompletedArtifactDirectory;
             lastCompletedArtifactNetworkName = attemptTrainer.lastCompletedArtifactNetworkName;
@@ -917,11 +945,9 @@ void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
 
             state->failedAttempts.push_back(e.progress());
             if (state->failedAttempts.size() <= state->condition->maxRestarts) {
-                // Restart/retry is a semantic boundary. The failed attempt may have
-                // pending optimizer work on gradient-update streams even after the
-                // stats event that requested the restart, so drain this process's
-                // CUDA context before discarding the attempt and placing a fresh one.
-                synchronizeAllCudaDevicesForTrainingBoundary();
+                // The native runner drains the failed attempt's own streams and
+                // callbacks while unwinding. Do not stall unrelated models with a
+                // process-wide/device-wide synchronization at this boundary.
                 // A restart means the current model attempt is discarded. The next
                 // attempt starts again from the phase-initial state captured before
                 // this fit call: a freshly initialized model for phase 1, the selected
@@ -938,11 +964,9 @@ void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
             attemptObserver.flush();
             nonFiniteLossFailedAttempts.push_back(e.what());
             if (nonFiniteLossFailedAttempts.size() <= nonFiniteLossMaxRestarts) {
-                // Restart/retry is a semantic boundary. The failed attempt may have
-                // pending optimizer work on gradient-update streams even after the
-                // stats event that requested the restart, so drain this process's
-                // CUDA context before discarding the attempt and placing a fresh one.
-                synchronizeAllCudaDevicesForTrainingBoundary();
+                // The native runner drains the failed attempt's own streams and
+                // callbacks while unwinding. Do not stall unrelated models with a
+                // process-wide/device-wide synchronization at this boundary.
                 // A restart means the current model attempt is discarded. The next
                 // attempt starts again from the phase-initial state captured before
                 // this fit call: a freshly initialized model for phase 1, the selected
@@ -982,7 +1006,8 @@ TrainingRunResult Trainer::fitTrainingRun(std::string runName,
                                           const TrainingCancellationToken& cancellationToken,
                                           const std::vector<TrainingRestartCondition>& additionalRestartConditions,
                                           const std::vector<TrainingEarlyCompletionPolicy>& additionalEarlyCompletionPolicies,
-                                          const std::set<std::string>& additionalScalarTensorsToReport) {
+                                          const std::set<std::string>& additionalScalarTensorsToReport,
+                                          const InitialDeviceStartupSequencer& initialDeviceStartupSequencer) {
     ResultCapturingTrainingObserver capturingObserver(observer);
     try {
         fitWithRestartConditions(options,
@@ -991,7 +1016,8 @@ TrainingRunResult Trainer::fitTrainingRun(std::string runName,
                                  additionalRestartConditions,
                                  additionalEarlyCompletionPolicies,
                                  runName,
-                                 additionalScalarTensorsToReport);
+                                 additionalScalarTensorsToReport,
+                                 initialDeviceStartupSequencer);
         capturingObserver.flush();
         return TrainingRunResult::completedResult(std::move(runName),
                                                   capturingObserver.finalTrainingStats,
@@ -1066,8 +1092,17 @@ TrainingRunResult Trainer::evaluateTrainingRun(std::string runName,
     ResultCapturingTrainingObserver capturingObserver(observer);
     TrainingRunRequest request;
     request.network = network;
-    request.batchSession = evaluationData->openSession(
-        runtimeConfig.maxInFlightBatches, resolvedDatasetInputs.requiredFieldIds);
+    const uint64_t sessionMaxInFlightBatches = runtimeConfig.maxInFlightBatches;
+    const std::set<DatasetFieldId> requiredDatasetFieldIds =
+        resolvedDatasetInputs.requiredFieldIds;
+    request.batchSessionFactory =
+        [evaluationData = std::move(evaluationData),
+         sessionMaxInFlightBatches,
+         requiredDatasetFieldIds]() {
+            return evaluationData->openSession(
+                sessionMaxInFlightBatches, requiredDatasetFieldIds);
+        };
+    request.batchSession = request.batchSessionFactory();
     request.optimizer = optimizer;
     request.trainingProgram = trainingProgram;
     request.datasetInputBindings = resolvedDatasetInputs.trainingInputBindings;

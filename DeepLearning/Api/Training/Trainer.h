@@ -119,14 +119,16 @@ class Trainer {
                      TrainingObserver& observer,
                      const TrainingCancellationToken& cancellationToken,
                      const std::vector<TrainingEarlyCompletionPolicy>& additionalEarlyCompletionPolicies = {},
-                     const std::set<std::string>& additionalScalarTensorsToReport = {});
+                     const std::set<std::string>& additionalScalarTensorsToReport = {},
+                     const InitialDeviceStartupSequencer& initialDeviceStartupSequencer = {});
     void fitWithRestartConditions(const TrainerFitOptions& options,
                                   TrainingObserver& observer,
                                   const TrainingCancellationToken& cancellationToken,
                                   const std::vector<TrainingRestartCondition>& additionalRestartConditions,
                                   const std::vector<TrainingEarlyCompletionPolicy>& additionalEarlyCompletionPolicies,
                                   const std::string& runNameForMessages,
-                                  const std::set<std::string>& additionalScalarTensorsToReport = {});
+                                  const std::set<std::string>& additionalScalarTensorsToReport = {},
+                                  const InitialDeviceStartupSequencer& initialDeviceStartupSequencer = {});
     void executeRequest(const TrainingRunRequest& request, TrainingObserver& observer);
     TrainingRunResult fitTrainingRun(std::string runName,
                                      const TrainerFitOptions& options,
@@ -134,7 +136,8 @@ class Trainer {
                                      const TrainingCancellationToken& cancellationToken,
                                      const std::vector<TrainingRestartCondition>& additionalRestartConditions = {},
                                      const std::vector<TrainingEarlyCompletionPolicy>& additionalEarlyCompletionPolicies = {},
-                                     const std::set<std::string>& additionalScalarTensorsToReport = {});
+                                     const std::set<std::string>& additionalScalarTensorsToReport = {},
+                                     const InitialDeviceStartupSequencer& initialDeviceStartupSequencer = {});
     TrainingRunResult evaluateTrainingRun(std::string runName,
                                           std::shared_ptr<const TrainingData> evaluationData,
                                           ExampleType exampleType,

@@ -26,8 +26,10 @@ class NullTrainingStatsSink : public TrainingStatsSink {
 
 class TrainingStatsSinkObserver : public TrainingObserver {
    public:
-    explicit TrainingStatsSinkObserver(std::shared_ptr<TrainingStatsSink> sink, std::string runName = {})
-        : sink(std::move(sink)), runName(std::move(runName)) {}
+    explicit TrainingStatsSinkObserver(std::shared_ptr<TrainingStatsSink> sink,
+                                       std::string runName = {},
+                                       bool flushSinkOnFlush = true)
+        : sink(std::move(sink)), runName(std::move(runName)), flushSinkOnFlush(flushSinkOnFlush) {}
 
     void onTrainingEvent(const TrainingEvent& event) override {
         if (sink == nullptr) {
@@ -37,7 +39,7 @@ class TrainingStatsSinkObserver : public TrainingObserver {
     }
 
     void flush() override {
-        if (sink != nullptr) {
+        if (sink != nullptr && flushSinkOnFlush) {
             sink->flush();
         }
     }
@@ -51,6 +53,7 @@ class TrainingStatsSinkObserver : public TrainingObserver {
    private:
     std::shared_ptr<TrainingStatsSink> sink{};
     std::string runName{};
+    bool flushSinkOnFlush = true;
 };
 
 }  // namespace Thor

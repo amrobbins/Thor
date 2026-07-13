@@ -9,6 +9,7 @@
 #include "DeepLearning/Api/Training/Cancellation/TrainingCancellation.h"
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <set>
@@ -34,11 +35,25 @@ struct TrainingRuntimeConfig {
     std::set<std::string> scalarTensorsToReport = {"loss", "accuracy"};
 };
 
+// The callback reserves a FIFO device-startup ticket and must not wait for the
+// ticket to become active. The native runner performs that blocking acquisition
+// only after the run-order sequencer has released its own mutex.
+using InitialDeviceStartupSequencer =
+    std::function<void(const std::function<void()>& reserveStartupTurn)>;
+
 struct TrainingRunRequest {
     // Present only for standalone-network execution. Explicit TrainingProgram
     // execution owns its model through TrainingPhase networks and leaves this null.
     std::shared_ptr<Network> network = nullptr;
     std::shared_ptr<BatchSession> batchSession = nullptr;
+
+    // Opens a fresh mutable session when a startup attempt has already begun
+    // consuming/cancelling the current session and must be retried after GPU
+    // memory is released. Trainer supplies this for normal fit/evaluate paths;
+    // direct executor callers that omit it can still retry failures that occur
+    // before the first batch is acquired.
+    std::function<std::shared_ptr<BatchSession>()> batchSessionFactory{};
+
     std::shared_ptr<Optimizer> optimizer = nullptr;
     std::shared_ptr<TrainingProgram> trainingProgram = nullptr;
     // Strict, dataset-validated bindings compiled by Trainer before any
@@ -88,6 +103,13 @@ struct TrainingRunRequest {
     std::vector<TrainingEarlyCompletionPolicy> earlyCompletionPolicies{};
 
     TrainingCancellationToken cancellationToken{};
+
+    // TrainingRuns uses this one-shot sequencing hook to assign initial GPU
+    // startup turns in run declaration order without serializing dataset/model
+    // preparation. The native executor invokes acquireStartupTurn exactly once
+    // immediately before obtaining the device startup guard. Standalone fits and
+    // non-native executors leave this empty.
+    InitialDeviceStartupSequencer initialDeviceStartupSequencer{};
 
     // FIT preserves the normal train+validate epoch sequence.  EVALUATE reuses the
     // same placed-network/native-queued machinery for one or more forward-only

@@ -7,11 +7,13 @@
 #include <cuda_runtime_api.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cctype>
 #include <map>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -22,8 +24,9 @@ class DeviceStartupState {
    public:
     std::mutex mutex;
     std::condition_variable changed;
-    uint64_t nextTicket = 0;
+    std::atomic<uint64_t> nextTicket{0};
     uint64_t servingTicket = 0;
+    std::set<uint64_t> abandonedTickets;
     uint64_t loadedModels = 0;
     uint64_t modelReleaseGeneration = 0;
 };
@@ -56,6 +59,12 @@ class DeviceStartupCoordinator {
     std::map<int, std::shared_ptr<DeviceStartupState>> deviceStates;
 };
 
+void advanceServingTicketPastAbandoned(DeviceStartupState& state) {
+    while (state.abandonedTickets.erase(state.servingTicket) != 0) {
+        state.servingTicket += 1;
+    }
+}
+
 std::string lowercaseAscii(std::string value) {
     std::transform(
         value.begin(),
@@ -79,6 +88,82 @@ bool messageLooksLikeStartupMemoryFailure(const std::string& message) {
 }
 
 }  // namespace
+
+DeviceStartupReservation::DeviceStartupReservation(
+    int deviceNum,
+    std::shared_ptr<DeviceStartupState> state,
+    uint64_t ticket)
+    : deviceNum(deviceNum),
+      state(std::move(state)),
+      ticket(ticket),
+      active(true) {}
+
+DeviceStartupReservation::DeviceStartupReservation(
+    DeviceStartupReservation&& other) noexcept
+    : deviceNum(other.deviceNum),
+      state(std::move(other.state)),
+      ticket(other.ticket),
+      active(other.active) {
+    other.deviceNum = -1;
+    other.ticket = 0;
+    other.active = false;
+}
+
+DeviceStartupReservation& DeviceStartupReservation::operator=(
+    DeviceStartupReservation&& other) noexcept {
+    if (this == &other) {
+        return *this;
+    }
+    abandon();
+    deviceNum = other.deviceNum;
+    state = std::move(other.state);
+    ticket = other.ticket;
+    active = other.active;
+    other.deviceNum = -1;
+    other.ticket = 0;
+    other.active = false;
+    return *this;
+}
+
+DeviceStartupReservation::~DeviceStartupReservation() { abandon(); }
+
+void DeviceStartupReservation::abandon() noexcept {
+    if (!active) {
+        return;
+    }
+    if (state == nullptr) {
+        std::terminate();
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        if (ticket < state->servingTicket ||
+            !state->abandonedTickets.insert(ticket).second) {
+            std::terminate();
+        }
+        if (ticket == state->servingTicket) {
+            state->servingTicket += 1;
+            advanceServingTicketPastAbandoned(*state);
+        }
+        active = false;
+    }
+    state->changed.notify_all();
+}
+
+DeviceStartupGuard DeviceStartupReservation::acquire() {
+    if (!active || state == nullptr) {
+        throw std::logic_error(
+            "Device startup reservation has already been consumed.");
+    }
+
+    std::unique_lock<std::mutex> lock(state->mutex);
+    state->changed.wait(lock, [&]() {
+        return state->servingTicket == ticket;
+    });
+    active = false;
+    return DeviceStartupGuard(
+        deviceNum, std::move(state), ticket, std::move(lock));
+}
 
 DeviceModelResidencyLease::DeviceModelResidencyLease(
     std::shared_ptr<DeviceStartupState> state)
@@ -154,6 +239,7 @@ void DeviceStartupGuard::releaseTurn() noexcept {
     }
 
     state->servingTicket += 1;
+    advanceServingTicketPastAbandoned(*state);
     ownsTurn = false;
     lock.unlock();
     state->changed.notify_all();
@@ -255,16 +341,17 @@ void DeviceStartupGuard::waitForModelRelease(
     }
 }
 
-DeviceStartupGuard acquireDeviceStartupGuard(int deviceNum) {
+DeviceStartupReservation reserveDeviceStartupTurn(int deviceNum) {
     std::shared_ptr<DeviceStartupState> state =
         DeviceStartupCoordinator::instance().stateForDevice(deviceNum);
-    std::unique_lock<std::mutex> lock(state->mutex);
-    const uint64_t ticket = state->nextTicket++;
-    state->changed.wait(lock, [&]() {
-        return state->servingTicket == ticket;
-    });
-    return DeviceStartupGuard(
-        deviceNum, std::move(state), ticket, std::move(lock));
+    const uint64_t ticket =
+        state->nextTicket.fetch_add(1, std::memory_order_relaxed);
+    return DeviceStartupReservation(
+        deviceNum, std::move(state), ticket);
+}
+
+DeviceStartupGuard acquireDeviceStartupGuard(int deviceNum) {
+    return reserveDeviceStartupTurn(deviceNum).acquire();
 }
 
 uint64_t queryDeviceStartupAvailableBytes(int deviceNum) {

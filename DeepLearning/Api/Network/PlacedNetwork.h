@@ -54,8 +54,19 @@ class PlacedNetwork {
      */
     void synchronize() const;
 
-    // Broad fallback used by exceptional cleanup paths that also own CUDA work
-    // outside the physical layer hierarchy (for example executor callbacks).
+    /**
+     * Deterministically release this placement's physical GPU graph and its
+     * startup-residency lease while the PlacedNetwork object may still have
+     * other shared owners. The operation is idempotent.
+     *
+     * Callers must prevent concurrent submission. Work already submitted by
+     * this placement is synchronized without draining unrelated device work.
+     */
+    void releaseGpuResources();
+
+    // Broad fallback retained for explicit callers that truly require a
+    // device-wide barrier, including work outside the physical layer hierarchy.
+    // Training startup/retry cleanup does not use it.
     void synchronizeDevices() const;
 
     std::map<std::string, ThorImplementation::Tensor> infer(std::map<std::string, ThorImplementation::Tensor> batchInputs,

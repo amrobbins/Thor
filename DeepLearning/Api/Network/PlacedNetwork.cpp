@@ -9,6 +9,7 @@
 #include "Utilities/TarFile/TarReader.h"
 
 #include <utility>
+#include <exception>
 #include <stdexcept>
 #include <set>
 #include <iterator>
@@ -484,6 +485,40 @@ void PlacedNetwork::synchronize() const {
     std::vector<Event> events = getSynchronizeEvents();
     for (Event& event : events) {
         event.synchronize();
+    }
+}
+
+void PlacedNetwork::releaseGpuResources() {
+    if (stampedNetworks.empty()) {
+        // A second release is a no-op. Resetting an already-empty lease also
+        // makes partially constructed/test placements deterministic.
+        deviceModelResidencyLease.reset();
+        return;
+    }
+
+    // Do not use cudaDeviceSynchronize here. Every physical layer exposes the
+    // streams/events owned by this placement, so unrelated models on the same
+    // device can continue running while this placement drains.
+    synchronize();
+
+    std::exception_ptr firstCleanupFailure;
+    for (ThorImplementation::StampedNetwork& stampedNetwork : stampedNetworks) {
+        try {
+            stampedNetwork.clear();
+        } catch (...) {
+            if (firstCleanupFailure == nullptr) {
+                firstCleanupFailure = std::current_exception();
+            }
+        }
+    }
+    stampedNetworks.clear();
+
+    // Wake a capacity waiter only after every placement-owned stamp has been
+    // torn down. This is independent of the PlacedNetwork shared_ptr count.
+    deviceModelResidencyLease.reset();
+
+    if (firstCleanupFailure != nullptr) {
+        std::rethrow_exception(firstCleanupFailure);
     }
 }
 
