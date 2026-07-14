@@ -1,6 +1,8 @@
 #pragma once
 
 #include "DeepLearning/Api/Data/Batch.h"
+#include "DeepLearning/Api/Data/BatchFieldSource.h"
+#include "DeepLearning/Api/Data/BatchSourceResource.h"
 #include "DeepLearning/Api/Data/DatasetSchema.h"
 #include "DeepLearning/Api/Data/ExampleType.h"
 #include "Utilities/Common/Event.h"
@@ -38,6 +40,14 @@ class BatchLease {
     [[nodiscard]] const Batch &get() const;
     [[nodiscard]] bool empty() const { return session == nullptr; }
     void reset() noexcept;
+
+    /**
+     * Releases session-owned batch source resources after every NetworkInput
+     * submission has been enqueued. Resources backing retainedFields stay
+     * leased until normal BatchLease destruction (for example CPU input fields
+     * that are read later as training statistics).
+     */
+    void releaseSourceResourcesExcept(const std::set<std::string>& retainedFields = {});
 
    private:
     BatchLease(std::shared_ptr<BatchSession> session,
@@ -97,11 +107,35 @@ class BatchSession : public std::enable_shared_from_this<BatchSession> {
         return std::nullopt;
     }
 
+    /**
+     * Describes whether a named batch field is returned as a materialized
+     * tensor or as a device reference.  Existing sessions inherit the
+     * materialized-tensor behavior from getBatchTensorPlacement().
+     */
+    [[nodiscard]] virtual BatchFieldSourceDescription getBatchFieldSourceDescription(
+        const std::string& fieldName) const {
+        return BatchFieldSourceDescription::materialized(getBatchTensorPlacement(fieldName));
+    }
+
     virtual void cancel() {}
 
    protected:
     BatchSession() = default;
     explicit BatchSession(std::string datasetName) : datasetName(std::move(datasetName)) {}
+
+    void addBatchSourceResource(
+        Batch& batch,
+        std::set<std::string> fieldNames,
+        BatchSourceOwner owner) const {
+        batch.addSourceResource(std::move(fieldNames), std::move(owner));
+    }
+
+    void setBatchRecycleToken(Batch& batch, std::shared_ptr<void> token) const {
+        batch.setRecycleToken(std::move(token));
+    }
+    [[nodiscard]] std::shared_ptr<void> takeBatchRecycleToken(Batch& batch) const {
+        return batch.takeRecycleToken();
+    }
 
     uint64_t batchSize = 0;
 

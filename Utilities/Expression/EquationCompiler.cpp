@@ -2176,11 +2176,12 @@ shared_ptr<CompiledMatmul> EquationCompiler::compileMatmul(const PhysicalExpress
     if (supports_fp8_matmul_plan(supported_lhs_dtype, supported_rhs_dtype, raw_supported_aux_dtype, node.output_dtype.value())) {
         compiled_aux_dtype = raw_supported_aux_dtype;
     } else if (!supports_regular_matmul_plan(supported_lhs_dtype, supported_rhs_dtype, node.output_dtype.value())) {
-        // Preserve the old safe behavior for combinations cublasLt does not directly expose as mixed A/B types:
-        // cast both matrix inputs and the optional addend to the resolved output dtype so A/B/C/D form a regular plan.
-        compiled_lhs_dtype = node.output_dtype.value();
-        compiled_rhs_dtype = node.output_dtype.value();
-        compiled_aux_dtype = node.output_dtype.value();
+        throw std::runtime_error(
+            "Matmul requested an unsupported operand/output dtype combination and Thor will not implicitly convert matrix "
+            "operands. Add an explicit expression conversion or choose a directly supported plan. lhs=" +
+            TensorDescriptor::getElementTypeName(lhs_input.input_tensor_dtype.value()) + ", rhs=" +
+            TensorDescriptor::getElementTypeName(rhs_input.input_tensor_dtype.value()) + ", output=" +
+            TensorDescriptor::getElementTypeName(node.output_dtype.value()) + ".");
     }
 
     double alpha_scale = node.alpha_fp;
@@ -2469,7 +2470,7 @@ shared_ptr<CompiledAttentionBackward> EquationCompiler::compileAttentionBackward
     const ExprNode& q = validate_local_input(node.lhs, "q");
     const ExprNode& k = validate_local_input(node.rhs, "k");
     const ExprNode& v = validate_local_input(node.aux, "v");
-    (void)validate_local_input(node.alpha_node, "dO");
+    const ExprNode& dO = validate_local_input(node.alpha_node, "dO");
     if (node.attention_use_bias) {
         if (node.beta_node == UINT32_MAX) {
             throw std::runtime_error("Attention-backward node marked as using bias but is missing the bias input.");
@@ -2518,8 +2519,14 @@ shared_ptr<CompiledAttentionBackward> EquationCompiler::compileAttentionBackward
     if (node.compute_dtype.value() != DataType::FP32) {
         throw std::runtime_error("cuDNN attention-backward expression stages require FP32 compute dtype.");
     }
-    if (!q.output_dtype.has_value() || !k.output_dtype.has_value() || !v.output_dtype.has_value()) {
-        throw std::runtime_error("Attention-backward local inputs must have resolved output dtypes.");
+    const DataType q_dtype = q.input_tensor_dtype.value();
+    const DataType k_dtype = k.input_tensor_dtype.value();
+    const DataType v_dtype = v.input_tensor_dtype.value();
+    const DataType dO_dtype = dO.input_tensor_dtype.value();
+    if (!isFp16OrBf16AttentionTensorDType(q_dtype) || q_dtype != k_dtype || q_dtype != v_dtype || q_dtype != dO_dtype) {
+        throw std::runtime_error(
+            "attention backward requires q/k/v/dO to use the same FP16 or BF16 dtype; insert explicit cast() nodes outside "
+            "attention instead of relying on hidden attention-stage conversion.");
     }
 
     auto compiled = make_shared<CompiledAttentionBackward>();
@@ -2539,9 +2546,9 @@ shared_ptr<CompiledAttentionBackward> EquationCompiler::compileAttentionBackward
     compiled->paged_kv_max_sequence_length = node.attention_paged_kv_max_sequence_length;
     compiled->dropout_probability = node.attention_dropout_probability;
     compiled->compute_dtype = node.compute_dtype.value();
-    compiled->dQ_dtype = q.output_dtype.value();
-    compiled->dK_dtype = k.output_dtype.value();
-    compiled->dV_dtype = v.output_dtype.value();
+    compiled->dQ_dtype = q_dtype;
+    compiled->dK_dtype = k_dtype;
+    compiled->dV_dtype = v_dtype;
     return compiled;
 }
 

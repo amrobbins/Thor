@@ -6428,17 +6428,24 @@ std::shared_ptr<StampedConvolution> FusedEquation::stampConvolution(const std::s
     if (!compiledStage) {
         throw std::runtime_error("stampConvolution requires non-null compiled stage.");
     }
+    if (input.getDataType() != compiledStage->input_dtype) {
+        throw std::runtime_error(
+            "Convolution input tensor dtype does not match the compiled convolution input dtype. "
+            "Thor will not implicitly convert convolution operands during stamping.");
+    }
+    if (filter.getDataType() != compiledStage->filter_dtype) {
+        throw std::runtime_error(
+            "Convolution filter tensor dtype does not match the compiled convolution filter dtype. "
+            "Thor will not implicitly convert convolution parameters during stamping.");
+    }
 
-    Tensor adaptedInput = adaptMatmulInputDTypeIfNeeded(input, compiledStage->input_dtype, stream);
-    Tensor adaptedFilter = adaptMatmulInputDTypeIfNeeded(filter, compiledStage->filter_dtype, stream);
-
-    const std::vector<std::vector<uint64_t>> stage_input_dims = {adaptedInput.getDimensions(), adaptedFilter.getDimensions()};
+    const std::vector<std::vector<uint64_t>> stage_input_dims = {input.getDimensions(), filter.getDimensions()};
     const std::vector<uint64_t> output_dims = resolveConvolutionOutputDimsFromInputs(*compiledStage, stage_input_dims);
 
     Tensor output;
     if (preallocatedOutput.has_value()) {
         output = preallocatedOutput.value();
-        if (output.getPlacement() != adaptedInput.getPlacement()) {
+        if (output.getPlacement() != input.getPlacement()) {
             throw std::runtime_error("Preallocated convolution output tensor placement does not match input placement.");
         }
         if (output.getDescriptor().getDataType() != compiledStage->output_dtype) {
@@ -6450,18 +6457,18 @@ std::shared_ptr<StampedConvolution> FusedEquation::stampConvolution(const std::s
         }
     } else {
         TensorDescriptor outputDescriptor(compiledStage->output_dtype, output_dims);
-        output = Tensor(adaptedInput.getPlacement(), outputDescriptor);
+        output = Tensor(input.getPlacement(), outputDescriptor);
     }
 
-    std::shared_ptr<BuiltConvolution> built = StampedEquation::buildConvolution(
-        compiledStage, adaptedInput, adaptedFilter, output, stream, adaptedInput.getPlacement().getDeviceNum());
+    std::shared_ptr<BuiltConvolution> built =
+        StampedEquation::buildConvolution(compiledStage, input, filter, output, stream, input.getPlacement().getDeviceNum());
 
     std::optional<Tensor> workspace = std::nullopt;
     if (built->workspace_bytes > 0) {
-        workspace = Tensor(adaptedInput.getPlacement(), TensorDescriptor(DataType::UINT8, {built->workspace_bytes}));
+        workspace = Tensor(input.getPlacement(), TensorDescriptor(DataType::UINT8, {built->workspace_bytes}));
     }
 
-    return std::make_shared<StampedConvolution>(compiledStage, built, adaptedInput, adaptedFilter, output, stream, workspace);
+    return std::make_shared<StampedConvolution>(compiledStage, built, input, filter, output, stream, workspace);
 }
 
 std::shared_ptr<StampedConvolutionBackward> FusedEquation::stampConvolutionBackward(
@@ -6473,17 +6480,24 @@ std::shared_ptr<StampedConvolutionBackward> FusedEquation::stampConvolutionBackw
     if (!compiledStage) {
         throw std::runtime_error("stampConvolutionBackward requires non-null compiled stage.");
     }
+    if (input.getDataType() != compiledStage->input_dtype) {
+        throw std::runtime_error(
+            "Convolution-backward input tensor dtype does not match the compiled input dtype. "
+            "Thor will not implicitly convert convolution operands during stamping.");
+    }
+    if (grad_output.getDataType() != compiledStage->grad_output_dtype) {
+        throw std::runtime_error(
+            "Convolution-backward gradient tensor dtype does not match the compiled gradient dtype. "
+            "Thor will not implicitly convert convolution operands during stamping.");
+    }
 
-    Tensor adaptedInput = adaptMatmulInputDTypeIfNeeded(input, compiledStage->input_dtype, stream);
-    Tensor adaptedGradOutput = adaptMatmulInputDTypeIfNeeded(grad_output, compiledStage->grad_output_dtype, stream);
-
-    const std::vector<std::vector<uint64_t>> stage_input_dims = {adaptedInput.getDimensions(), adaptedGradOutput.getDimensions()};
+    const std::vector<std::vector<uint64_t>> stage_input_dims = {input.getDimensions(), grad_output.getDimensions()};
     const std::vector<uint64_t> output_dims = resolveConvolutionBackwardOutputDimsFromInputs(*compiledStage, stage_input_dims);
 
     Tensor output;
     if (preallocatedOutput.has_value()) {
         output = preallocatedOutput.value();
-        if (output.getPlacement() != adaptedInput.getPlacement()) {
+        if (output.getPlacement() != input.getPlacement()) {
             throw std::runtime_error("Preallocated convolution-backward output tensor placement does not match input placement.");
         }
         if (output.getDescriptor().getDataType() != compiledStage->output_dtype) {
@@ -6495,18 +6509,18 @@ std::shared_ptr<StampedConvolutionBackward> FusedEquation::stampConvolutionBackw
         }
     } else {
         TensorDescriptor outputDescriptor(compiledStage->output_dtype, output_dims);
-        output = Tensor(adaptedInput.getPlacement(), outputDescriptor);
+        output = Tensor(input.getPlacement(), outputDescriptor);
     }
 
     std::shared_ptr<BuiltConvolution> built = StampedEquation::buildConvolutionBackward(
-        compiledStage, adaptedInput, adaptedGradOutput, output, stream, adaptedInput.getPlacement().getDeviceNum());
+        compiledStage, input, grad_output, output, stream, input.getPlacement().getDeviceNum());
 
     std::optional<Tensor> workspace = std::nullopt;
     if (built->workspace_bytes > 0) {
-        workspace = Tensor(adaptedInput.getPlacement(), TensorDescriptor(DataType::UINT8, {built->workspace_bytes}));
+        workspace = Tensor(input.getPlacement(), TensorDescriptor(DataType::UINT8, {built->workspace_bytes}));
     }
 
-    return std::make_shared<StampedConvolutionBackward>(compiledStage, built, adaptedInput, adaptedGradOutput, output, stream, workspace);
+    return std::make_shared<StampedConvolutionBackward>(compiledStage, built, input, grad_output, output, stream, workspace);
 }
 
 std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<CompiledMatmul>& compiledStage,
@@ -6527,12 +6541,20 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
         throw std::runtime_error("stampMatmul(lhs, rhs, ...) called for a non-matmul stage.");
     }
 
-    Tensor adaptedLhs = adaptMatmulInputDTypeIfNeeded(lhs, compiledStage->lhs_dtype, stream);
-    Tensor adaptedRhs = adaptMatmulInputDTypeIfNeeded(rhs, compiledStage->rhs_dtype, stream);
+    if (lhs.getDataType() != compiledStage->lhs_dtype) {
+        throw std::runtime_error(
+            "Matmul lhs tensor dtype does not match the compiled lhs dtype. "
+            "Thor will not implicitly convert matmul operands during stamping.");
+    }
+    if (rhs.getDataType() != compiledStage->rhs_dtype) {
+        throw std::runtime_error(
+            "Matmul rhs tensor dtype does not match the compiled rhs dtype. "
+            "Thor will not implicitly convert matmul operands or parameter storage during stamping.");
+    }
 
     std::vector<std::vector<uint64_t>> stage_input_dims(2);
-    stage_input_dims[0] = adaptedLhs.getDimensions();
-    stage_input_dims[1] = adaptedRhs.getDimensions();
+    stage_input_dims[0] = lhs.getDimensions();
+    stage_input_dims[1] = rhs.getDimensions();
 
     auto assign_scale_dims = [&](uint32_t slot, const std::optional<RuntimeInputValue>& input, const char* label) {
         if (slot == UINT32_MAX) {
@@ -6564,7 +6586,7 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
     Tensor output;
     if (preallocatedOutput.has_value()) {
         output = preallocatedOutput.value();
-        if (output.getPlacement() != adaptedLhs.getPlacement()) {
+        if (output.getPlacement() != lhs.getPlacement()) {
             throw std::runtime_error("Preallocated matmul output tensor placement does not match the input placement.");
         }
         if (output.getDescriptor().getDataType() != compiledStage->output_dtype) {
@@ -6575,7 +6597,7 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
         }
     } else {
         TensorDescriptor outputDescriptor(compiledStage->output_dtype, output_dims);
-        output = Tensor(adaptedLhs.getPlacement(), outputDescriptor);
+        output = Tensor(lhs.getPlacement(), outputDescriptor);
     }
 
     std::optional<Tensor> bgrad_output = std::nullopt;
@@ -6586,7 +6608,7 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
         const std::vector<uint64_t> bgrad_dims{output_dims[1]};
         if (preallocatedBgradOutput.has_value()) {
             bgrad_output = preallocatedBgradOutput.value();
-            if (bgrad_output->getPlacement() != adaptedLhs.getPlacement()) {
+            if (bgrad_output->getPlacement() != lhs.getPlacement()) {
                 throw std::runtime_error("Preallocated matmul bias-gradient output tensor placement does not match the input placement.");
             }
             if (bgrad_output->getDescriptor().getDataType() != compiledStage->bgrad_output_dtype.value()) {
@@ -6596,29 +6618,29 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
                 throw std::runtime_error("Preallocated matmul bias-gradient output tensor dimensions are incompatible with the output shape.");
             }
         } else {
-            bgrad_output = Tensor(adaptedLhs.getPlacement(), TensorDescriptor(compiledStage->bgrad_output_dtype.value(), bgrad_dims));
+            bgrad_output = Tensor(lhs.getPlacement(), TensorDescriptor(compiledStage->bgrad_output_dtype.value(), bgrad_dims));
         }
     }
 
     std::shared_ptr<BuiltMatmul> built = StampedEquation::buildMatmul(compiledStage,
-                                                                      adaptedLhs,
-                                                                      adaptedRhs,
+                                                                      lhs,
+                                                                      rhs,
                                                                       std::nullopt,
                                                                       output,
-                                                                      adaptedLhs.getPlacement().getDeviceNum(),
+                                                                      lhs.getPlacement().getDeviceNum(),
                                                                       epilogue_aux,
                                                                       bgrad_output);
 
     std::optional<Tensor> workspace = std::nullopt;
     if (built->workspace_bytes > 0) {
         TensorDescriptor workspaceDescriptor(DataType::UINT8, {built->workspace_bytes});
-        workspace = Tensor(adaptedLhs.getPlacement(), workspaceDescriptor);
+        workspace = Tensor(lhs.getPlacement(), workspaceDescriptor);
     }
 
     return make_shared<StampedMatmul>(compiledStage,
                                       built,
-                                      adaptedLhs,
-                                      adaptedRhs,
+                                      lhs,
+                                      rhs,
                                       std::nullopt,
                                       output,
                                       stream,
@@ -6654,19 +6676,31 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
         throw std::runtime_error("stampMatmul(lhs, rhs, addend, ...) called for a non-gemm stage.");
     }
 
-    Tensor adaptedLhs = adaptMatmulInputDTypeIfNeeded(lhs, compiledStage->lhs_dtype, stream);
-    Tensor adaptedRhs = adaptMatmulInputDTypeIfNeeded(rhs, compiledStage->rhs_dtype, stream);
+    if (lhs.getDataType() != compiledStage->lhs_dtype) {
+        throw std::runtime_error(
+            "GEMM lhs tensor dtype does not match the compiled lhs dtype. "
+            "Thor will not implicitly convert matmul operands during stamping.");
+    }
+    if (rhs.getDataType() != compiledStage->rhs_dtype) {
+        throw std::runtime_error(
+            "GEMM rhs tensor dtype does not match the compiled rhs dtype. "
+            "Thor will not implicitly convert matmul operands or parameter storage during stamping.");
+    }
     const bool use_bias_epilogue = addend.getDimensions().size() == 1;
     if (use_bias_epilogue && addend.getDataType() != compiledStage->output_dtype) {
         throw std::runtime_error(
             "GEMM bias epilogue requires the bias tensor dtype to match the matmul output dtype; Thor will not insert an implicit conversion for a cuBLASLt bias epilogue.");
     }
-    Tensor adaptedAddend = use_bias_epilogue ? addend : adaptMatmulInputDTypeIfNeeded(addend, compiledStage->aux_dtype, stream);
+    if (!use_bias_epilogue && addend.getDataType() != compiledStage->aux_dtype) {
+        throw std::runtime_error(
+            "GEMM addend tensor dtype does not match the compiled auxiliary dtype. "
+            "Thor will not implicitly convert GEMM operands during stamping.");
+    }
 
     std::vector<std::vector<uint64_t>> stage_input_dims(3);
-    stage_input_dims[0] = adaptedLhs.getDimensions();
-    stage_input_dims[1] = adaptedRhs.getDimensions();
-    stage_input_dims[2] = adaptedAddend.getDimensions();
+    stage_input_dims[0] = lhs.getDimensions();
+    stage_input_dims[1] = rhs.getDimensions();
+    stage_input_dims[2] = addend.getDimensions();
 
     auto assign_scale_dims = [&](uint32_t slot, const std::optional<RuntimeInputValue>& input, const char* label) {
         if (slot == UINT32_MAX) {
@@ -6698,7 +6732,7 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
     Tensor output;
     if (preallocatedOutput.has_value()) {
         output = preallocatedOutput.value();
-        if (output.getPlacement() != adaptedLhs.getPlacement()) {
+        if (output.getPlacement() != lhs.getPlacement()) {
             throw std::runtime_error("Preallocated gemm output tensor placement does not match the input placement.");
         }
         if (output.getDescriptor().getDataType() != compiledStage->output_dtype) {
@@ -6709,7 +6743,7 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
         }
     } else {
         TensorDescriptor outputDescriptor(compiledStage->output_dtype, output_dims);
-        output = Tensor(adaptedLhs.getPlacement(), outputDescriptor);
+        output = Tensor(lhs.getPlacement(), outputDescriptor);
     }
 
     std::optional<Tensor> bgrad_output = std::nullopt;
@@ -6720,7 +6754,7 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
         const std::vector<uint64_t> bgrad_dims{output_dims[1]};
         if (preallocatedBgradOutput.has_value()) {
             bgrad_output = preallocatedBgradOutput.value();
-            if (bgrad_output->getPlacement() != adaptedLhs.getPlacement()) {
+            if (bgrad_output->getPlacement() != lhs.getPlacement()) {
                 throw std::runtime_error("Preallocated GEMM bias-gradient output tensor placement does not match the input placement.");
             }
             if (bgrad_output->getDescriptor().getDataType() != compiledStage->bgrad_output_dtype.value()) {
@@ -6730,23 +6764,23 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
                 throw std::runtime_error("Preallocated GEMM bias-gradient output tensor dimensions are incompatible with the output shape.");
             }
         } else {
-            bgrad_output = Tensor(adaptedLhs.getPlacement(), TensorDescriptor(compiledStage->bgrad_output_dtype.value(), bgrad_dims));
+            bgrad_output = Tensor(lhs.getPlacement(), TensorDescriptor(compiledStage->bgrad_output_dtype.value(), bgrad_dims));
         }
     }
 
     std::shared_ptr<BuiltMatmul> built = StampedEquation::buildMatmul(compiledStage,
-                                                                      adaptedLhs,
-                                                                      adaptedRhs,
-                                                                      std::optional<Tensor>(adaptedAddend),
+                                                                      lhs,
+                                                                      rhs,
+                                                                      std::optional<Tensor>(addend),
                                                                       output,
-                                                                      adaptedLhs.getPlacement().getDeviceNum(),
+                                                                      lhs.getPlacement().getDeviceNum(),
                                                                       epilogue_aux,
                                                                       bgrad_output);
 
     std::optional<Tensor> workspace = std::nullopt;
     if (built->workspace_bytes > 0) {
         TensorDescriptor workspaceDescriptor(DataType::UINT8, {built->workspace_bytes});
-        workspace = Tensor(adaptedLhs.getPlacement(), workspaceDescriptor);
+        workspace = Tensor(lhs.getPlacement(), workspaceDescriptor);
     }
 
     std::optional<Tensor> alpha_device_scratch = std::nullopt;
@@ -6756,8 +6790,8 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
     const bool any_tensor_backed_scale = optionalRuntimeInputIsTensorLike(alpha_input) || optionalRuntimeInputIsTensorLike(beta_input);
     if (any_tensor_backed_scale) {
         TensorDescriptor scalarDescriptor(DataType::FP32, {1});
-        alpha_device_scratch = Tensor(adaptedLhs.getPlacement(), scalarDescriptor);
-        beta_device_scratch = Tensor(adaptedLhs.getPlacement(), scalarDescriptor);
+        alpha_device_scratch = Tensor(lhs.getPlacement(), scalarDescriptor);
+        beta_device_scratch = Tensor(lhs.getPlacement(), scalarDescriptor);
         const TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
         alpha_host_scratch = Tensor(cpuPlacement, scalarDescriptor);
         beta_host_scratch = Tensor(cpuPlacement, scalarDescriptor);
@@ -6765,9 +6799,9 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
 
     return make_shared<StampedMatmul>(compiledStage,
                                       built,
-                                      adaptedLhs,
-                                      adaptedRhs,
-                                      std::optional<Tensor>(adaptedAddend),
+                                      lhs,
+                                      rhs,
+                                      std::optional<Tensor>(addend),
                                       output,
                                       stream,
                                       workspace,
@@ -6811,20 +6845,23 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
         throw std::runtime_error("stampAttention requires non-null compiled stage.");
     }
 
-    Tensor adaptedQ = adaptMatmulInputDTypeIfNeeded(q, compiledStage->output_dtype, stream);
-    Tensor adaptedK = adaptMatmulInputDTypeIfNeeded(k, compiledStage->output_dtype, stream);
-    Tensor adaptedV = adaptMatmulInputDTypeIfNeeded(v, compiledStage->output_dtype, stream);
-    std::optional<Tensor> adaptedBias = std::nullopt;
+    if (q.getDataType() != compiledStage->output_dtype || k.getDataType() != compiledStage->output_dtype ||
+        v.getDataType() != compiledStage->output_dtype) {
+        throw std::runtime_error(
+            "Attention q/k/v tensor dtypes must match the compiled attention output dtype exactly. "
+            "Thor will not implicitly convert attention operands during stamping.");
+    }
+    std::optional<Tensor> boundBias = std::nullopt;
     if (compiledStage->use_bias) {
         if (!bias.has_value()) {
             throw std::runtime_error("stampAttention requires an additive bias tensor for this compiled stage.");
         }
-        adaptedBias = bias.value();
+        boundBias = bias.value();
     }
 
-    std::vector<std::vector<uint64_t>> stage_input_dims{adaptedQ.getDimensions(), adaptedK.getDimensions(), adaptedV.getDimensions()};
-    if (compiledStage->use_bias && adaptedBias.has_value()) {
-        stage_input_dims.push_back(adaptedBias->getDimensions());
+    std::vector<std::vector<uint64_t>> stage_input_dims{q.getDimensions(), k.getDimensions(), v.getDimensions()};
+    if (compiledStage->use_bias && boundBias.has_value()) {
+        stage_input_dims.push_back(boundBias->getDimensions());
     }
     if (compiledStage->use_padding_mask) {
         if (!seq_len_q.has_value() || !seq_len_kv.has_value()) {
@@ -6869,14 +6906,14 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
         stage_input_dims.push_back(amax_o->getDimensions());
     }
     const std::vector<uint64_t> output_dims = resolveAttentionOutputDimsFromInputs(*compiledStage, stage_input_dims);
-    const AttentionTensorLogicalDims qLogical = logicalAttentionDims(adaptedQ.getDimensions(), compiledStage->q_layout, "q");
-    const AttentionTensorLogicalDims kLogical = logicalAttentionDims(adaptedK.getDimensions(), compiledStage->k_layout, "k");
-    const AttentionTensorLogicalDims vLogical = logicalAttentionDims(adaptedV.getDimensions(), compiledStage->v_layout, "v");
+    const AttentionTensorLogicalDims qLogical = logicalAttentionDims(q.getDimensions(), compiledStage->q_layout, "q");
+    const AttentionTensorLogicalDims kLogical = logicalAttentionDims(k.getDimensions(), compiledStage->k_layout, "k");
+    const AttentionTensorLogicalDims vLogical = logicalAttentionDims(v.getDimensions(), compiledStage->v_layout, "v");
 
     Tensor output;
     if (preallocatedOutput.has_value()) {
         output = preallocatedOutput.value();
-        if (output.getPlacement() != adaptedQ.getPlacement()) {
+        if (output.getPlacement() != q.getPlacement()) {
             throw std::runtime_error("Preallocated attention output tensor placement does not match the input placement.");
         }
         if (output.getDescriptor().getDataType() != compiledStage->output_dtype) {
@@ -6887,7 +6924,7 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
         }
     } else {
         TensorDescriptor outputDescriptor(compiledStage->output_dtype, output_dims);
-        output = Tensor(adaptedQ.getPlacement(), outputDescriptor);
+        output = Tensor(q.getPlacement(), outputDescriptor);
     }
 
     if (compiledStage->use_padding_mask) {
@@ -6895,7 +6932,7 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
             if (!tensor.has_value()) {
                 throw std::runtime_error(std::string("Attention padding-mask missing ") + label + " tensor.");
             }
-            if (tensor->getPlacement() != adaptedQ.getPlacement()) {
+            if (tensor->getPlacement() != q.getPlacement()) {
                 throw std::runtime_error(std::string("Attention padding-mask ") + label + " placement must match q.");
             }
             if (tensor->getDataType() != DataType::INT32) {
@@ -6913,7 +6950,7 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
             if (!tensor.has_value()) {
                 throw std::runtime_error(std::string("Attention ragged missing ") + label + " tensor.");
             }
-            if (tensor->getPlacement() != adaptedQ.getPlacement()) {
+            if (tensor->getPlacement() != q.getPlacement()) {
                 throw std::runtime_error(std::string("Attention ragged ") + label + " placement must match q.");
             }
             if (tensor->getDataType() != DataType::INT32) {
@@ -6931,7 +6968,7 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
             if (!tensor.has_value()) {
                 throw std::runtime_error(std::string("Attention paged KV missing ") + label + " tensor.");
             }
-            if (tensor->getPlacement() != adaptedQ.getPlacement()) {
+            if (tensor->getPlacement() != q.getPlacement()) {
                 throw std::runtime_error(std::string("Attention paged KV ") + label + " placement must match q.");
             }
             if (tensor->getDataType() != DataType::INT32) {
@@ -6956,7 +6993,7 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
             if (!tensor.has_value()) {
                 throw std::runtime_error(std::string("Attention dropout missing ") + label + " tensor.");
             }
-            if (tensor->getPlacement() != adaptedQ.getPlacement()) {
+            if (tensor->getPlacement() != q.getPlacement()) {
                 throw std::runtime_error(std::string("Attention dropout ") + label + " placement must match q.");
             }
             if (tensor->getDataType() != DataType::INT64) {
@@ -6974,7 +7011,7 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
             if (!tensor.has_value()) {
                 throw std::runtime_error(std::string("Attention FP8 missing ") + label + " tensor.");
             }
-            if (tensor->getPlacement() != adaptedQ.getPlacement()) {
+            if (tensor->getPlacement() != q.getPlacement()) {
                 throw std::runtime_error(std::string("Attention FP8 ") + label + " placement must match q.");
             }
             if (tensor->getDataType() != DataType::FP32) {
@@ -6995,13 +7032,13 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
     }
 
     // Build and validate the cuDNN descriptor during stamping so shape/layout errors fail before execution.
-    (void)compiledStage->descriptorFor(adaptedQ, adaptedK, adaptedV, output);
-    if (compiledStage->use_bias && adaptedBias.has_value()) {
-        if (!isAllowedAttentionBiasDims(adaptedBias->getDimensions(), qLogical.batch, qLogical.heads, qLogical.sequence_length, kLogical.sequence_length)) {
+    (void)compiledStage->descriptorFor(q, k, v, output);
+    if (compiledStage->use_bias && boundBias.has_value()) {
+        if (!isAllowedAttentionBiasDims(boundBias->getDimensions(), qLogical.batch, qLogical.heads, qLogical.sequence_length, kLogical.sequence_length)) {
             throw std::runtime_error("Attention additive bias must have shape " +
                                      attentionBiasShapeDescription(qLogical.batch, qLogical.heads, qLogical.sequence_length, kLogical.sequence_length) + ".");
         }
-        if (adaptedBias->getDataType() != compiledStage->compute_dtype) {
+        if (boundBias->getDataType() != compiledStage->compute_dtype) {
             throw std::runtime_error(
                 "Attention additive bias dtype must match attention compute dtype; Thor does not insert hidden bias dtype conversions for "
                 "cuDNN attention.");
@@ -7014,10 +7051,10 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
     }
 
     return make_shared<StampedAttention>(compiledStage,
-                                         adaptedQ,
-                                         adaptedK,
-                                         adaptedV,
-                                         adaptedBias,
+                                         q,
+                                         k,
+                                         v,
+                                         boundBias,
                                          seq_len_q,
                                          seq_len_kv,
                                          q_ragged_offsets,
@@ -7059,24 +7096,31 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
         throw std::runtime_error("stampAttentionBackward requires non-null compiled stage.");
     }
 
-    Tensor adaptedQ = adaptMatmulInputDTypeIfNeeded(q, compiledStage->dQ_dtype, stream);
-    Tensor adaptedK = adaptMatmulInputDTypeIfNeeded(k, compiledStage->dK_dtype, stream);
-    Tensor adaptedV = adaptMatmulInputDTypeIfNeeded(v, compiledStage->dV_dtype, stream);
-    std::optional<Tensor> adaptedBias = std::nullopt;
+    if (q.getDataType() != compiledStage->dQ_dtype || k.getDataType() != compiledStage->dK_dtype ||
+        v.getDataType() != compiledStage->dV_dtype) {
+        throw std::runtime_error(
+            "Attention-backward q/k/v tensor dtypes must match the compiled gradient dtypes exactly. "
+            "Thor will not implicitly convert attention operands during stamping.");
+    }
+    if (dO.getDataType() != q.getDataType()) {
+        throw std::runtime_error(
+            "Attention-backward dO dtype must match q/k/v for the current cuDNN path. "
+            "Thor will not implicitly convert attention gradients during stamping.");
+    }
+    std::optional<Tensor> boundBias = std::nullopt;
     if (compiledStage->use_bias) {
         if (!bias.has_value()) {
             throw std::runtime_error("stampAttentionBackward requires an additive bias tensor for this compiled stage.");
         }
-        adaptedBias = bias.value();
+        boundBias = bias.value();
     }
-    Tensor adaptedDO = adaptMatmulInputDTypeIfNeeded(dO, dO.getDataType(), stream);
 
     std::vector<std::vector<uint64_t>> stage_input_dims{
-        adaptedQ.getDimensions(), adaptedK.getDimensions(), adaptedV.getDimensions(), adaptedDO.getDimensions()};
+        q.getDimensions(), k.getDimensions(), v.getDimensions(), dO.getDimensions()};
     std::vector<std::vector<uint64_t>> forward_input_dims{stage_input_dims[0], stage_input_dims[1], stage_input_dims[2]};
     if (compiledStage->use_bias) {
-        forward_input_dims.push_back(adaptedBias->getDimensions());
-        stage_input_dims.push_back(adaptedBias->getDimensions());
+        forward_input_dims.push_back(boundBias->getDimensions());
+        stage_input_dims.push_back(boundBias->getDimensions());
     }
     if (compiledStage->use_padding_mask) {
         if (!seq_len_q.has_value() || !seq_len_kv.has_value()) {
@@ -7106,17 +7150,17 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
         stage_input_dims.push_back(dropout_offset->getDimensions());
     }
     const std::vector<uint64_t> o_dims = resolveAttentionOutputDimsFromInputs(
-        makeForwardAttentionView(*compiledStage, adaptedDO.getDataType(), ".stats_forward"), forward_input_dims);
-    const AttentionTensorLogicalDims qLogical = logicalAttentionDims(adaptedQ.getDimensions(), compiledStage->q_layout, "q");
-    const AttentionTensorLogicalDims kLogical = logicalAttentionDims(adaptedK.getDimensions(), compiledStage->k_layout, "k");
-    if (adaptedDO.getDimensions() != o_dims) {
+        makeForwardAttentionView(*compiledStage, dO.getDataType(), ".stats_forward"), forward_input_dims);
+    const AttentionTensorLogicalDims qLogical = logicalAttentionDims(q.getDimensions(), compiledStage->q_layout, "q");
+    const AttentionTensorLogicalDims kLogical = logicalAttentionDims(k.getDimensions(), compiledStage->k_layout, "k");
+    if (dO.getDimensions() != o_dims) {
         throw std::runtime_error("Attention-backward dO dimensions do not match the corresponding forward attention output shape.");
     }
 
     auto make_or_validate_output = [&](size_t idx, DataType dtype, const std::vector<uint64_t>& dims, const char* label) {
         if (idx < preallocatedOutputs.size() && preallocatedOutputs[idx].has_value()) {
             Tensor out = preallocatedOutputs[idx].value();
-            if (out.getPlacement() != adaptedQ.getPlacement()) {
+            if (out.getPlacement() != q.getPlacement()) {
                 throw std::runtime_error(std::string("Preallocated attention-backward ") + label +
                                          " placement does not match q placement.");
             }
@@ -7128,19 +7172,19 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
             }
             return out;
         }
-        return Tensor(adaptedQ.getPlacement(), TensorDescriptor(dtype, dims));
+        return Tensor(q.getPlacement(), TensorDescriptor(dtype, dims));
     };
 
-    Tensor dQ = make_or_validate_output(0, compiledStage->dQ_dtype, adaptedQ.getDimensions(), "dQ");
-    Tensor dK = make_or_validate_output(1, compiledStage->dK_dtype, adaptedK.getDimensions(), "dK");
-    Tensor dV = make_or_validate_output(2, compiledStage->dV_dtype, adaptedV.getDimensions(), "dV");
-    Tensor oScratch(adaptedQ.getPlacement(), TensorDescriptor(adaptedDO.getDataType(), o_dims));
-    Tensor stats(adaptedQ.getPlacement(),
+    Tensor dQ = make_or_validate_output(0, compiledStage->dQ_dtype, q.getDimensions(), "dQ");
+    Tensor dK = make_or_validate_output(1, compiledStage->dK_dtype, k.getDimensions(), "dK");
+    Tensor dV = make_or_validate_output(2, compiledStage->dV_dtype, v.getDimensions(), "dV");
+    Tensor oScratch(q.getPlacement(), TensorDescriptor(dO.getDataType(), o_dims));
+    Tensor stats(q.getPlacement(),
                  TensorDescriptor(DataType::FP32, {qLogical.batch, qLogical.heads, qLogical.sequence_length, 1}));
     const std::vector<uint64_t> denseBiasDims{qLogical.batch, qLogical.heads, qLogical.sequence_length, kLogical.sequence_length};
     std::optional<Tensor> dBiasScratch = std::nullopt;
     if (compiledStage->use_bias) {
-        dBiasScratch = make_or_validate_output(3, adaptedQ.getDataType(), denseBiasDims, "dBias");
+        dBiasScratch = make_or_validate_output(3, q.getDataType(), denseBiasDims, "dBias");
     }
 
     if (compiledStage->use_padding_mask) {
@@ -7148,7 +7192,7 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
             if (!tensor.has_value()) {
                 throw std::runtime_error(std::string("Attention-backward padding-mask missing ") + label + " tensor.");
             }
-            if (tensor->getPlacement() != adaptedQ.getPlacement()) {
+            if (tensor->getPlacement() != q.getPlacement()) {
                 throw std::runtime_error(std::string("Attention-backward padding-mask ") + label + " placement must match q.");
             }
             if (tensor->getDataType() != DataType::INT32) {
@@ -7166,7 +7210,7 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
             if (!tensor.has_value()) {
                 throw std::runtime_error(std::string("Attention-backward ragged missing ") + label + " tensor.");
             }
-            if (tensor->getPlacement() != adaptedQ.getPlacement()) {
+            if (tensor->getPlacement() != q.getPlacement()) {
                 throw std::runtime_error(std::string("Attention-backward ragged ") + label + " placement must match q.");
             }
             if (tensor->getDataType() != DataType::INT32) {
@@ -7184,7 +7228,7 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
             if (!tensor.has_value()) {
                 throw std::runtime_error(std::string("Attention-backward dropout missing ") + label + " tensor.");
             }
-            if (tensor->getPlacement() != adaptedQ.getPlacement()) {
+            if (tensor->getPlacement() != q.getPlacement()) {
                 throw std::runtime_error(std::string("Attention-backward dropout ") + label + " placement must match q.");
             }
             if (tensor->getDataType() != DataType::INT64) {
@@ -7198,9 +7242,9 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
         validate_dropout_scalar(dropout_offset, "offset");
     }
 
-    (void)compiledStage->descriptorFor(adaptedQ, adaptedK, adaptedV, oScratch);
-    if (compiledStage->use_bias && adaptedBias.has_value()) {
-        if (!isAllowedAttentionBiasDims(adaptedBias->getDimensions(),
+    (void)compiledStage->descriptorFor(q, k, v, oScratch);
+    if (compiledStage->use_bias && boundBias.has_value()) {
+        if (!isAllowedAttentionBiasDims(boundBias->getDimensions(),
                                         qLogical.batch,
                                         qLogical.heads,
                                         qLogical.sequence_length,
@@ -7211,24 +7255,24 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
                 "; sequence-broadcast bias is materialized to dense by production autodiff before cuDNN backward, and dense "
                 "dBias is explicitly reduced afterward.");
         }
-        if (adaptedBias->getDataType() != compiledStage->compute_dtype) {
+        if (boundBias->getDataType() != compiledStage->compute_dtype) {
             throw std::runtime_error(
                 "Attention-backward additive bias dtype must match attention compute dtype; Thor does not insert hidden bias dtype "
                 "conversions for cuDNN attention.");
         }
     }
     return make_shared<StampedAttentionBackward>(compiledStage,
-                                                 adaptedQ,
-                                                 adaptedK,
-                                                 adaptedV,
-                                                 adaptedBias,
+                                                 q,
+                                                 k,
+                                                 v,
+                                                 boundBias,
                                                  seq_len_q,
                                                  seq_len_kv,
                                                  q_ragged_offsets,
                                                  kv_ragged_offsets,
                                                  dropout_seed,
                                                  dropout_offset,
-                                                 adaptedDO,
+                                                 dO,
                                                  dQ,
                                                  dK,
                                                  dV,

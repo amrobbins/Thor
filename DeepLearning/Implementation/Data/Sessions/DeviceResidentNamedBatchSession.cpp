@@ -147,6 +147,23 @@ DeviceResidentNamedBatchSession::DeviceResidentNamedBatchSession(
 
 DeviceResidentNamedBatchSession::~DeviceResidentNamedBatchSession() {
     cancel();
+    // Pending batch tensors may still be read by NetworkInput D2D copies. Keep
+    // those allocations alive until every source-consumed event has completed.
+    for (auto &entry : splitRuntimes) {
+        if (entry.second == nullptr) {
+            continue;
+        }
+        try {
+            std::lock_guard<std::mutex> guard(entry.second->mutex);
+            for (SplitRuntime::PendingBatch &pending : entry.second->pendingBatches) {
+                for (Event &event : pending.consumedEvents) {
+                    event.synchronize();
+                }
+            }
+        } catch (...) {
+            // Destructors must not throw while a CUDA context is already failing.
+        }
+    }
 }
 
 void DeviceResidentNamedBatchSession::cancel() {
@@ -267,15 +284,34 @@ Batch DeviceResidentNamedBatchSession::acquireBatch(
             "DeviceResidentNamedBatchSession cannot get a batch from an empty split.");
     }
     runtime.notEmpty.wait(lock, [&] {
-        return cancelled.load(std::memory_order_acquire) || !runtime.availableBatches.empty();
+        return cancelled.load(std::memory_order_acquire) ||
+               !runtime.availableBatches.empty() ||
+               !runtime.pendingBatches.empty();
     });
     if (cancelled.load(std::memory_order_acquire)) {
         throw std::runtime_error("DeviceResidentNamedBatchSession has been cancelled.");
     }
 
-    std::map<std::string, Tensor> tensors =
-        std::move(runtime.availableBatches.front());
-    runtime.availableBatches.pop_front();
+    std::map<std::string, Tensor> tensors;
+    if (!runtime.availableBatches.empty()) {
+        tensors = std::move(runtime.availableBatches.front());
+        runtime.availableBatches.pop_front();
+    } else {
+        THOR_THROW_IF_FALSE(!runtime.pendingBatches.empty());
+        SplitRuntime::PendingBatch pending = std::move(runtime.pendingBatches.front());
+        runtime.pendingBatches.pop_front();
+        lock.unlock();
+        for (Event &event : pending.consumedEvents) {
+            event.synchronize();
+        }
+        lock.lock();
+        tensors = std::move(pending.tensors);
+    }
+
+    if (cancelled.load(std::memory_order_acquire)) {
+        runtime.availableBatches.push_front(std::move(tensors));
+        throw std::runtime_error("DeviceResidentNamedBatchSession has been cancelled.");
+    }
 
     batchNum = runtime.nextBatchNum;
     runtime.nextBatchNum =
@@ -297,7 +333,37 @@ Batch DeviceResidentNamedBatchSession::acquireBatch(
     runtime.gatherStream.synchronize();
     runtime.batchesGathered += 1;
 
-    return batchFromTensorMap(std::move(tensors));
+    auto sourceTensors =
+        std::make_shared<std::map<std::string, Tensor>>(std::move(tensors));
+    Batch batch = batchFromTensorMap(*sourceTensors);
+    std::set<std::string> fieldNames;
+    for (const auto &[name, tensor] : *sourceTensors) {
+        (void)tensor;
+        fieldNames.insert(name);
+    }
+
+    std::shared_ptr<DeviceResidentNamedBatchSession> sharedSelf =
+        std::dynamic_pointer_cast<DeviceResidentNamedBatchSession>(shared_from_this());
+    THOR_THROW_IF_FALSE(sharedSelf != nullptr);
+    std::weak_ptr<DeviceResidentNamedBatchSession> weakSelf = sharedSelf;
+    Thor::BatchSourceOwner sourceOwner(
+        [weakSelf, exampleType, sourceTensors](std::vector<Event> consumedEvents) mutable {
+            if (std::shared_ptr<DeviceResidentNamedBatchSession> session = weakSelf.lock()) {
+                session->releaseBatchTensorSet(
+                    exampleType,
+                    std::move(sourceTensors),
+                    std::move(consumedEvents));
+                return;
+            }
+            try {
+                for (Event &event : consumedEvents) {
+                    event.synchronize();
+                }
+            } catch (...) {
+            }
+        });
+    addBatchSourceResource(batch, std::move(fieldNames), std::move(sourceOwner));
+    return batch;
 }
 
 void DeviceResidentNamedBatchSession::validateReturnedBatch(
@@ -337,9 +403,77 @@ void DeviceResidentNamedBatchSession::validateReturnedBatch(
     }
 }
 
+void DeviceResidentNamedBatchSession::releaseBatchTensorSet(
+    ExampleType exampleType,
+    std::shared_ptr<std::map<std::string, Tensor>> tensors,
+    std::vector<Event> consumedEvents) noexcept {
+    if (tensors == nullptr) {
+        return;
+    }
+    auto found = splitRuntimes.find(exampleType);
+    if (found == splitRuntimes.end() || found->second == nullptr) {
+        try {
+            for (Event &event : consumedEvents) {
+                event.synchronize();
+            }
+        } catch (...) {
+        }
+        return;
+    }
+
+    SplitRuntime &runtime = *found->second;
+    if (cancelled.load(std::memory_order_acquire)) {
+        try {
+            for (Event &event : consumedEvents) {
+                event.synchronize();
+            }
+        } catch (...) {
+        }
+        return;
+    }
+
+    try {
+        std::lock_guard<std::mutex> guard(runtime.mutex);
+        if (consumedEvents.empty()) {
+            runtime.availableBatches.push_back(*tensors);
+        } else {
+            runtime.pendingBatches.push_back(
+                SplitRuntime::PendingBatch{
+                    *tensors,
+                    consumedEvents});
+        }
+        runtime.batchesReturned += 1;
+        runtime.notEmpty.notify_one();
+        return;
+    } catch (...) {
+    }
+
+    // Queue allocation failed. Keep the source tensor handles alive until all
+    // asynchronous D2D reads complete before allowing this callback to return.
+    try {
+        for (Event &event : consumedEvents) {
+            event.synchronize();
+        }
+    } catch (...) {
+    }
+}
+
 void DeviceResidentNamedBatchSession::recycleBatch(
     ExampleType exampleType,
     Batch &&batch) {
+    if (batch.ownsSourceResourceLifecycle()) {
+        THOR_THROW_IF_FALSE(batch.allFieldsHaveSourceReferences());
+        std::map<std::string, Tensor> tensors = denseTensorMapFromBatchOrThrow(
+            batch,
+            "DeviceResidentNamedBatchSession returned source-tracked batch");
+        validateReturnedBatch(tensors);
+        // Clearing seals an owner that a manual caller did not release after
+        // submission. Batch copies do not own this lifecycle and therefore
+        // continue through the ordinary exact validation/recycle path below.
+        batch.clear();
+        return;
+    }
+
     if (cancelled.load(std::memory_order_acquire)) {
         return;
     }
@@ -391,6 +525,13 @@ std::vector<Event> DeviceResidentNamedBatchSession::getSynchronizeEvents() const
         }
         std::lock_guard<std::mutex> guard(entry.second->mutex);
         events.push_back(entry.second->gatherStream.putEvent(false, true));
+        for (const SplitRuntime::PendingBatch &pending :
+             entry.second->pendingBatches) {
+            events.insert(
+                events.end(),
+                pending.consumedEvents.begin(),
+                pending.consumedEvents.end());
+        }
     }
     return events;
 }

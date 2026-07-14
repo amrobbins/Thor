@@ -20,10 +20,16 @@
 #include <string>
 #include <vector>
 
+struct DeviceResidentWindowedSelectionSlot;
+struct DeviceResidentWindowedDirectSlot;
+struct DeviceResidentWindowedPendingSelection;
+struct DeviceResidentWindowedPendingDirect;
+
 /**
- * Hybrid session used when only canonical windowed fields fit on the device.
- * Direct fields are read from the source dataset while windowed fields are
- * gathered by canonical dataset row from shared device storage.
+ * Compact file-backed device session. Windowed fields are always resident and
+ * returned as DeviceBatchReferences. Direct fields are also references when
+ * their compact record ranges were admitted; otherwise they remain CPU-backed
+ * tensors, preserving the hybrid fallback path.
  */
 class DeviceResidentWindowedNamedBatchSession : public Thor::BatchSession {
    public:
@@ -41,12 +47,13 @@ class DeviceResidentWindowedNamedBatchSession : public Thor::BatchSession {
     DeviceResidentWindowedNamedBatchSession(DeviceResidentWindowedNamedBatchSession &&) = delete;
     DeviceResidentWindowedNamedBatchSession &operator=(DeviceResidentWindowedNamedBatchSession &&) = delete;
 
-
     uint64_t getNumBatchesPerEpoch(ExampleType exampleType) override;
     uint64_t getNumExamples(ExampleType exampleType) override;
     uint64_t getNextBatchNum(ExampleType exampleType) override;
     [[nodiscard]] std::optional<ThorImplementation::TensorPlacement> getBatchTensorPlacement(
         const std::string &tensorName) const override;
+    [[nodiscard]] Thor::BatchFieldSourceDescription getBatchFieldSourceDescription(
+        const std::string &fieldName) const override;
     [[nodiscard]] std::vector<Event> getSynchronizeEvents() const override;
     [[nodiscard]] const std::set<Thor::DatasetFieldId>& getRequiredDatasetFieldIds() const override {
         return requiredFieldIds;
@@ -62,6 +69,7 @@ class DeviceResidentWindowedNamedBatchSession : public Thor::BatchSession {
    private:
     Batch acquireBatch(ExampleType exampleType, uint64_t &batchNum) override;
     void recycleBatch(ExampleType exampleType, Batch &&batch) override;
+
     struct SplitRuntime {
         ExampleType exampleType = ExampleType::TRAIN;
         std::string splitName;
@@ -69,16 +77,18 @@ class DeviceResidentWindowedNamedBatchSession : public Thor::BatchSession {
         bool randomized = false;
         std::optional<uint64_t> seed;
         uint64_t batchesPerEpoch = 0;
-        std::deque<std::map<std::string, ThorImplementation::Tensor>> availableBatches;
-        ThorImplementation::Tensor rowIndicesHost;
-        ThorImplementation::Tensor rowIndicesDevice;
+        std::deque<std::shared_ptr<DeviceResidentWindowedSelectionSlot>> availableSelections;
+        std::deque<std::shared_ptr<DeviceResidentWindowedDirectSlot>> availableDirectSlots;
+        std::deque<DeviceResidentWindowedPendingSelection> pendingSelections;
+        std::deque<DeviceResidentWindowedPendingDirect> pendingDirectSlots;
         std::unique_ptr<FullPeriodRandom> randomizer;
         std::unique_ptr<IndexedDatasetReader::Session> readerSession;
         uint64_t nextBatchNum = 0;
         uint64_t nextLogicalPosition = 0;
         mutable std::mutex mutex;
+        std::mutex readerMutex;
         std::condition_variable notEmpty;
-        Stream gatherStream;
+        Stream selectionUploadStream;
 
         [[nodiscard]] uint64_t numExamples() const {
             return sourceIndices == nullptr ? 0 : static_cast<uint64_t>(sourceIndices->size());
@@ -88,6 +98,8 @@ class DeviceResidentWindowedNamedBatchSession : public Thor::BatchSession {
     Thor::DatasetMaterializationDescription datasetDescription;
     Thor::DeviceDatasetSessionDescription sessionDescription;
     std::set<Thor::DatasetFieldId> requiredFieldIds;
+    std::set<std::string> directFieldNames;
+    std::set<std::string> residentFieldNames;
     std::shared_ptr<IndexedDatasetReader> reader;
     Thor::DeviceDatasetLease windowedDataset;
     uint64_t batchQueueDepth = 0;
@@ -101,7 +113,21 @@ class DeviceResidentWindowedNamedBatchSession : public Thor::BatchSession {
                          std::optional<uint64_t> seed);
     [[nodiscard]] SplitRuntime &runtimeFor(ExampleType exampleType);
     [[nodiscard]] const SplitRuntime &runtimeFor(ExampleType exampleType) const;
-    [[nodiscard]] std::map<std::string, ThorImplementation::Tensor> allocateBatchTensorSet() const;
-    void fillRowIndexTensor(SplitRuntime &runtime);
-    void validateReturnedBatch(const std::map<std::string, ThorImplementation::Tensor> &tensors) const;
+    [[nodiscard]] std::map<std::string, ThorImplementation::Tensor> allocateDirectTensorSet() const;
+    [[nodiscard]] std::shared_ptr<DeviceResidentWindowedSelectionSlot> allocateSelectionSlot(
+        uint64_t slotIndex) const;
+    [[nodiscard]] std::shared_ptr<DeviceResidentWindowedDirectSlot> allocateDirectSlot(
+        uint64_t slotIndex) const;
+    void fillRowIndexTensor(
+        SplitRuntime &runtime,
+        DeviceResidentWindowedSelectionSlot &selectionSlot);
+    void validateReturnedBatch(const Batch &batch) const;
+    void releaseSelectionSlot(
+        ExampleType exampleType,
+        std::shared_ptr<DeviceResidentWindowedSelectionSlot> selectionSlot,
+        std::vector<Event> consumedEvents) noexcept;
+    void releaseDirectSlot(
+        ExampleType exampleType,
+        std::shared_ptr<DeviceResidentWindowedDirectSlot> directSlot,
+        std::vector<Event> consumedEvents) noexcept;
 };

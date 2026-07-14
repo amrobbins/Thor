@@ -940,6 +940,13 @@ void Attention::Builder::verifyConfig() const {
         throw std::invalid_argument("Attention computeDataType must currently be fp32 for cuDNN SDPA training. Got " +
                                     dtypeName(computeDType) + ".");
     }
+    if (inputDType != weightsDType || inputDType != outputDType) {
+        throw std::invalid_argument(
+            "Attention requires feature/context inputs, projection weights, and attention output storage to use the same "
+            "FP16 or BF16 dtype for the current execution path. Thor will not insert hidden conversions between attention "
+            "operands. input=" +
+            dtypeName(inputDType) + ", weights=" + dtypeName(weightsDType) + ", output=" + dtypeName(outputDType) + ".");
+    }
 
     const auto maskKind = _maskKind.value_or(ThorImplementation::AttentionMaskKind::None);
     const bool useAlibi = _useAlibiMask.value_or(false);

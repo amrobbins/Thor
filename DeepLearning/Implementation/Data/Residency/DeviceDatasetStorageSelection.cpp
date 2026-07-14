@@ -141,23 +141,39 @@ uint64_t estimateRequiredBytesForPerExampleBytes(
         "Device dataset required bytes");
 }
 
+uint64_t compactRequiredBytes(
+    uint64_t residentBytes,
+    const DeviceDatasetSessionDescription &session,
+    uint64_t batchQueueDepth);
+
 uint64_t estimateDeviceResidentWindowedDatasetStorageBytes(
     const DatasetMaterializationDescription &dataset) {
-    return checkedMul(
-        dataset.numExamples,
-        windowedBytesPerExample(dataset.layout),
-        "Device dataset canonical windowed storage bytes");
+    std::set<std::string> names;
+    for (const DatasetLayout::WindowedTensorSpec &spec : dataset.layout.windowedTensors()) {
+        names.insert(spec.name);
+        if (spec.maskName.has_value()) {
+            names.insert(spec.maskName.value());
+        }
+    }
+    return DeviceResidentNamedDataset::estimateCompactFileDatasetBytes(
+        dataset,
+        names);
 }
 
 uint64_t estimateDeviceResidentWindowedDatasetRequiredBytes(
     const DatasetMaterializationDescription &dataset,
     const DeviceDatasetSessionDescription &session,
     uint64_t batchQueueDepth) {
-    return estimateRequiredBytesForPerExampleBytes(
-        dataset,
+    return compactRequiredBytes(
+        estimateDeviceResidentWindowedDatasetStorageBytes(dataset),
         session,
-        batchQueueDepth,
-        windowedBytesPerExample(dataset.layout));
+        batchQueueDepth);
+}
+
+bool usesCompactWindowedResidency(
+    const DatasetMaterializationDescription &dataset) {
+    return dataset.source == DatasetMaterializationSource::FILE_DATASET &&
+           dataset.layout.hasWindowedTensors();
 }
 
 std::set<std::string> windowedTensorNames(
@@ -171,6 +187,52 @@ std::set<std::string> windowedTensorNames(
         }
     }
     return names;
+}
+
+std::set<std::string> directTensorNames(const DatasetLayout &layout) {
+    std::set<std::string> names;
+    for (const DatasetLayout::TensorSpec &spec : layout.tensors()) {
+        names.insert(spec.name);
+    }
+    return names;
+}
+
+std::set<std::string> allCompactFieldNames(const DatasetLayout &layout) {
+    std::set<std::string> names = windowedTensorNames(layout);
+    const std::set<std::string> directNames = directTensorNames(layout);
+    names.insert(directNames.begin(), directNames.end());
+    return names;
+}
+
+uint64_t compactSelectionRingBytes(
+    const DeviceDatasetSessionDescription &session,
+    uint64_t batchQueueDepth) {
+    if (batchQueueDepth == 0) {
+        throw std::runtime_error(
+            "Device dataset batch_queue_depth must be >= 1.");
+    }
+    const uint64_t selectionBytesPerSlot = checkedMul(
+        session.getBatching().getBatchSize(),
+        static_cast<uint64_t>(sizeof(uint64_t)),
+        "Device dataset selection row-index bytes");
+    const uint64_t selectionSlotCount = checkedMul(
+        nonEmptySplitCount(session.getSplits()),
+        batchQueueDepth,
+        "Device dataset selection slot count");
+    return checkedMul(
+        selectionSlotCount,
+        selectionBytesPerSlot,
+        "Device dataset selection-ring bytes");
+}
+
+uint64_t compactRequiredBytes(
+    uint64_t residentBytes,
+    const DeviceDatasetSessionDescription &session,
+    uint64_t batchQueueDepth) {
+    return checkedAdd(
+        residentBytes,
+        compactSelectionRingBytes(session, batchQueueDepth),
+        "Device dataset compact reference required bytes");
 }
 
 std::set<DatasetFieldId> allFieldIds(const DatasetSchema &schema) {
@@ -291,35 +353,163 @@ DeviceDatasetStorageSelection selectSharedResidencySession(
     DeviceDatasetStorage requested,
     ThorImplementation::TensorPlacement devicePlacement,
     uint64_t batchQueueDepth,
-    uint64_t fullRequiredBytes,
-    uint64_t windowedRequiredBytes,
+    uint64_t requiredBytes,
     std::optional<uint64_t> availableBytesOverride,
     DeviceDatasetStorageReport report) {
     DeviceDatasetResidencyCache &cache =
         ThorImplementation::NamedDatasetRuntimeAccess::residencyCache(*namedDataset);
     const auto started = std::chrono::steady_clock::now();
-    const uint64_t fullResidentBytes =
+    const bool compactWindowedResidency = usesCompactWindowedResidency(dataset);
+    const std::set<std::string> windowNames =
+        compactWindowedResidency ? windowedTensorNames(dataset.layout)
+                                 : std::set<std::string>{};
+
+    // File-backed windowed datasets must never enter the expanded canonical
+    // full-dataset path. Other materializable datasets, including memory-backed
+    // datasets and file datasets without windows, retain canonical shared
+    // residency.
+    if (compactWindowedResidency) {
+        const std::set<std::string> allNames = allCompactFieldNames(dataset.layout);
+        const uint64_t windowResidentBytes =
+            DeviceResidentNamedDataset::estimateCompactFileDatasetBytes(
+                dataset,
+                windowNames);
+        const uint64_t windowRequiredBytes = compactRequiredBytes(
+            windowResidentBytes,
+            session,
+            batchQueueDepth);
+        const uint64_t fullResidentBytes =
+            DeviceResidentNamedDataset::estimateCompactFileDatasetBytes(
+                dataset,
+                allNames);
+        const uint64_t fullRequiredBytes = compactRequiredBytes(
+            fullResidentBytes,
+            session,
+            batchQueueDepth);
+
+        struct CompactAttemptFailure {
+            std::string reason;
+            uint64_t availableBytes = 0;
+        };
+
+        auto attemptCompactResidency =
+            [&](const std::set<std::string> &fieldNames,
+                uint64_t residentBytes,
+                uint64_t attemptRequiredBytes,
+                const char *successReason,
+                CompactAttemptFailure &failure)
+                -> std::optional<DeviceDatasetStorageSelection> {
+            const std::set<DatasetFieldId> fields =
+                fieldIdsForNames(dataset.schema, fieldNames);
+            try {
+                DeviceDatasetResidencyRequest request(
+                    dataset.datasetId,
+                    dataset.numExamples,
+                    devicePlacement,
+                    fields,
+                    residentBytes,
+                    attemptRequiredBytes,
+                    requested,
+                    availableBytesOverride,
+                    [dataset, devicePlacement, fieldNames]() {
+                        return std::shared_ptr<const DeviceResidentNamedDataset>(
+                            DeviceResidentNamedDataset::fromCompactFileDataset(
+                                dataset,
+                                devicePlacement,
+                                fieldNames));
+                    });
+                DeviceDatasetResidencyAcquisition acquisition = cache.acquire(request);
+                auto effectiveSession =
+                    std::make_shared<DeviceResidentWindowedNamedBatchSession>(
+                        dataset,
+                        session,
+                        acquisition.lease,
+                        batchQueueDepth,
+                        32,
+                        datasetName);
+                report.used = true;
+                report.reason = successReason;
+                report.examples = acquisition.lease->getNumExamples();
+                report.requiredBytes = attemptRequiredBytes;
+                applyAcquisitionTelemetry(
+                    report,
+                    acquisition,
+                    residentBytes,
+                    availableBytesOverride);
+                report.materializationSeconds = std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - started).count();
+                return DeviceDatasetStorageSelection{
+                    effectiveSession,
+                    std::move(report)};
+            } catch (const DeviceDatasetResidencyAdmissionError &e) {
+                failure.reason = "insufficient_device_memory";
+                failure.availableBytes = availableBytesOverride.has_value()
+                                             ? availableBytesOverride.value()
+                                             : e.getAvailableBytes();
+            } catch (const std::exception &e) {
+                failure.reason =
+                    std::string("device_dataset_materialization_failed:") + e.what();
+            }
+            return std::nullopt;
+        };
+
+        // Prefer full compact residency when it fits. If the direct record
+        // ranges add too much memory (notably for affine-only windows), retry
+        // with all windowed fields resident and direct fields CPU-backed.
+        CompactAttemptFailure fullFailure;
+        if (allNames != windowNames) {
+            if (std::optional<DeviceDatasetStorageSelection> full =
+                    attemptCompactResidency(
+                        allNames,
+                        fullResidentBytes,
+                        fullRequiredBytes,
+                        "compact_file_residency",
+                        fullFailure);
+                full.has_value()) {
+                return std::move(full.value());
+            }
+        }
+
+        CompactAttemptFailure windowFailure;
+        const char *windowSuccessReason =
+            allNames == windowNames
+                ? "compact_file_residency"
+                : "compact_windowed_residency";
+        if (std::optional<DeviceDatasetStorageSelection> windowed =
+                attemptCompactResidency(
+                    windowNames,
+                    windowResidentBytes,
+                    windowRequiredBytes,
+                    windowSuccessReason,
+                    windowFailure);
+            windowed.has_value()) {
+            return std::move(windowed.value());
+        }
+
+        report.reason = windowFailure.reason.empty()
+                            ? "device_dataset_materialization_failed"
+                            : windowFailure.reason;
+        if (report.reason == "insufficient_device_memory") {
+            report.reason = "insufficient_device_memory_for_windowed_dataset";
+        }
+        report.requiredBytes = windowRequiredBytes;
+        report.availableBytesAfterPlacement = windowFailure.availableBytes;
+        report.materializationSeconds = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - started).count();
+        return fallbackSelection(sourceSession, std::move(report), requested);
+    }
+
+    const uint64_t residentBytes =
         estimateDeviceResidentNamedDatasetStorageBytes(dataset);
     const std::set<DatasetFieldId> fullFields = allFieldIds(dataset.schema);
-    const std::set<std::string> windowNames = windowedTensorNames(dataset.layout);
-    const bool hasWindowedTensors = !windowNames.empty();
-    const uint64_t windowedResidentBytes = hasWindowedTensors
-                                               ? estimateDeviceResidentWindowedDatasetStorageBytes(dataset)
-                                               : 0;
-    const std::set<DatasetFieldId> windowFields = hasWindowedTensors
-                                                      ? fieldIdsForNames(dataset.schema, windowNames)
-                                                      : std::set<DatasetFieldId>{};
-
-    std::exception_ptr fullConstructionFailure;
-    bool fullAdmissionFailed = false;
     try {
         DeviceDatasetResidencyRequest request(
             dataset.datasetId,
             dataset.numExamples,
             devicePlacement,
             fullFields,
-            fullResidentBytes,
-            fullRequiredBytes,
+            residentBytes,
+            requiredBytes,
             requested,
             availableBytesOverride,
             [namedDataset, dataset, devicePlacement]() {
@@ -339,99 +529,21 @@ DeviceDatasetStorageSelection selectSharedResidencySession(
         report.used = true;
         report.reason.clear();
         report.examples = acquisition.lease->getNumExamples();
-        report.requiredBytes = fullRequiredBytes;
+        report.requiredBytes = requiredBytes;
         applyAcquisitionTelemetry(
             report,
             acquisition,
-            fullResidentBytes,
+            residentBytes,
             availableBytesOverride);
         report.materializationSeconds = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - started).count();
         return DeviceDatasetStorageSelection{effectiveSession, std::move(report)};
     } catch (const DeviceDatasetResidencyAdmissionError &e) {
-        fullAdmissionFailed = true;
         report.reason = "insufficient_device_memory";
-        report.requiredBytes = fullRequiredBytes;
+        report.requiredBytes = requiredBytes;
         report.availableBytesAfterPlacement = availableBytesOverride.has_value()
-                                                        ? availableBytesOverride.value()
-                                                        : e.getAvailableBytes();
-        if (requested == DeviceDatasetStorage::STRICT) {
-            report.materializationSeconds = std::chrono::duration<double>(
-                std::chrono::steady_clock::now() - started).count();
-            return fallbackSelection(sourceSession, std::move(report), requested);
-        }
-    } catch (...) {
-        fullConstructionFailure = std::current_exception();
-        try {
-            std::rethrow_exception(fullConstructionFailure);
-        } catch (const std::exception &e) {
-            report.reason =
-                std::string("device_dataset_materialization_failed:") + e.what();
-        }
-        if (requested == DeviceDatasetStorage::STRICT || !hasWindowedTensors) {
-            report.materializationSeconds = std::chrono::duration<double>(
-                std::chrono::steady_clock::now() - started).count();
-            return fallbackSelection(sourceSession, std::move(report), requested);
-        }
-    }
-
-    if (!hasWindowedTensors) {
-        report.reason = "insufficient_device_memory";
-        report.materializationSeconds = std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - started).count();
-        return fallbackSelection(sourceSession, std::move(report), requested);
-    }
-
-    try {
-        DeviceDatasetResidencyRequest request(
-            dataset.datasetId,
-            dataset.numExamples,
-            devicePlacement,
-            windowFields,
-            windowedResidentBytes,
-            windowedRequiredBytes,
-            requested,
-            availableBytesOverride,
-            [namedDataset, dataset, devicePlacement, windowNames]() {
-                MaterializedNamedDatasetSnapshot snapshot =
-                    materializeCanonicalSnapshot(namedDataset, dataset);
-                return std::shared_ptr<const DeviceResidentNamedDataset>(
-                    DeviceResidentNamedDataset::fromSnapshot(
-                        snapshot,
-                        devicePlacement,
-                        windowNames));
-            });
-        DeviceDatasetResidencyAcquisition acquisition = cache.acquire(request);
-        auto effectiveSession =
-            std::make_shared<DeviceResidentWindowedNamedBatchSession>(
-                dataset,
-                session,
-                acquisition.lease,
-                batchQueueDepth,
-                32,
-                datasetName);
-        report.used = true;
-        report.reason = fullConstructionFailure == nullptr
-                            ? "windowed_features_only"
-                            : "full_dataset_failed_windowed_features_only";
-        report.examples = acquisition.lease->getNumExamples();
-        report.requiredBytes = windowedRequiredBytes;
-        applyAcquisitionTelemetry(
-            report,
-            acquisition,
-            windowedResidentBytes,
-            availableBytesOverride);
-        report.materializationSeconds = std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - started).count();
-        return DeviceDatasetStorageSelection{effectiveSession, std::move(report)};
-    } catch (const DeviceDatasetResidencyAdmissionError &e) {
-        report.reason = fullAdmissionFailed
-                            ? "insufficient_device_memory_for_full_or_windowed_dataset"
-                            : "insufficient_device_memory_for_windowed_dataset";
-        report.requiredBytes = windowedRequiredBytes;
-        report.availableBytesAfterPlacement = availableBytesOverride.has_value()
-                                                        ? availableBytesOverride.value()
-                                                        : e.getAvailableBytes();
+                                                    ? availableBytesOverride.value()
+                                                    : e.getAvailableBytes();
     } catch (const std::exception &e) {
         report.reason =
             std::string("device_dataset_materialization_failed:") + e.what();
@@ -446,6 +558,9 @@ DeviceDatasetStorageSelection selectSharedResidencySession(
 
 uint64_t estimateDeviceResidentNamedDatasetStorageBytes(
     const DatasetMaterializationDescription &dataset) {
+    if (usesCompactWindowedResidency(dataset)) {
+        return estimateDeviceResidentWindowedDatasetStorageBytes(dataset);
+    }
     return checkedMul(
         dataset.numExamples,
         allBytesPerExample(dataset.layout),
@@ -456,6 +571,12 @@ uint64_t estimateDeviceResidentNamedDatasetRequiredBytes(
     const DatasetMaterializationDescription &dataset,
     const DeviceDatasetSessionDescription &session,
     uint64_t batchQueueDepth) {
+    if (usesCompactWindowedResidency(dataset)) {
+        return estimateDeviceResidentWindowedDatasetRequiredBytes(
+            dataset,
+            session,
+            batchQueueDepth);
+    }
     return estimateRequiredBytesForPerExampleBytes(
         dataset,
         session,
@@ -550,19 +671,13 @@ DeviceDatasetStorageSelection selectDeviceDatasetStorageSession(
         return fallbackSelection(sourceSession, std::move(report), requested);
     }
 
-    uint64_t fullRequiredBytes = 0;
-    uint64_t windowedRequiredBytes = 0;
+    uint64_t requiredBytes = 0;
     try {
-        fullRequiredBytes = estimateDeviceResidentNamedDatasetRequiredBytes(
+        requiredBytes = estimateDeviceResidentNamedDatasetRequiredBytes(
             *datasetDescription,
             sessionDescription,
             batchQueueDepth);
-        windowedRequiredBytes =
-            estimateDeviceResidentWindowedDatasetRequiredBytes(
-                *datasetDescription,
-                sessionDescription,
-                batchQueueDepth);
-        report.requiredBytes = fullRequiredBytes;
+        report.requiredBytes = requiredBytes;
     } catch (const std::exception& e) {
         report.reason =
             std::string("device_dataset_size_estimate_failed:") + e.what();
@@ -586,8 +701,7 @@ DeviceDatasetStorageSelection selectDeviceDatasetStorageSession(
         requested,
         devicePlacement,
         batchQueueDepth,
-        fullRequiredBytes,
-        windowedRequiredBytes,
+        requiredBytes,
         availableBytesOverride,
         std::move(report));
 }

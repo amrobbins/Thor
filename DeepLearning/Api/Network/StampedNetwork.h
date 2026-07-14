@@ -7,6 +7,7 @@
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 #include "DeepLearning/Api/Data/Batch.h"
+#include "DeepLearning/Api/Data/BatchSourceResource.h"
 #include "DeepLearning/Implementation/Tensor/RaggedTensorDescriptor.h"
 #include "Utilities/Common/Event.h"
 
@@ -15,6 +16,7 @@
 #include <cstdint>
 #include <map>
 #include <string>
+#include <variant>
 
 #include "DeepLearning/Api/Parameter/Parameterizable.h"
 #include "DeepLearning/Implementation/Parameter/Parameterizable.h"
@@ -25,6 +27,11 @@ class PlacedNetwork;
 }  // namespace Thor
 
 namespace ThorImplementation {
+
+struct PhysicalBatchInput {
+    std::variant<Tensor, Thor::DeviceBatchReference> value;
+    std::optional<Thor::BatchSourceReference> sourceReference;
+};
 
 struct BatchSubmissionTiming {
     uint64_t activeObjectiveRootsMicros = 0;
@@ -205,7 +212,7 @@ class StampedNetwork {
                     BatchSubmissionTiming* submitTiming = nullptr,
                     std::optional<uint32_t> outputSlotIndex = std::nullopt);
 
-    Event sendPhysicalBatch(std::map<std::string, Tensor> batchInputs,
+    Event sendPhysicalBatch(std::map<std::string, PhysicalBatchInput> batchInputs,
                             const std::map<std::string, Event>& inputReadyEvents,
                             std::map<std::string, Tensor> &batchOutputs,
                             std::map<std::string, Event> &outputReadyEvents,

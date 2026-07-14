@@ -4,6 +4,7 @@
 #include <condition_variable>
 #include <future>
 #include <memory>
+#include <atomic>
 #include <mutex>
 #include <utility>
 #include <vector>
@@ -133,6 +134,48 @@ void expectAllEqual(const vector<float> &values, float expected) {
         ASSERT_EQ(values[i], expected) << "Mismatch at index " << i;
     }
 }
+
+
+class CopyTensorDeviceBatchMaterializer : public Thor::DeviceBatchMaterializer {
+   public:
+    explicit CopyTensorDeviceBatchMaterializer(Tensor source) : source(std::move(source)) {}
+
+    TensorDescriptor getOutputDescriptor() const override { return source.getDescriptor(); }
+    TensorPlacement getOutputPlacement() const override { return source.getPlacement(); }
+
+    void enqueueMaterialization(Tensor& destination, Stream& destinationStream) const override {
+        ++enqueueCount;
+        destination.copyFromAsync(source, destinationStream);
+    }
+
+    uint32_t getEnqueueCount() const { return enqueueCount.load(); }
+
+   private:
+    Tensor source;
+    mutable std::atomic<uint32_t> enqueueCount{0};
+};
+
+class GatedCopyTensorDeviceBatchMaterializer : public Thor::DeviceBatchMaterializer {
+   public:
+    GatedCopyTensorDeviceBatchMaterializer(
+        Tensor source,
+        shared_ptr<HostGate> sourceReadGate)
+        : source(std::move(source)), sourceReadGate(std::move(sourceReadGate)) {}
+
+    TensorDescriptor getOutputDescriptor() const override { return source.getDescriptor(); }
+    TensorPlacement getOutputPlacement() const override { return source.getPlacement(); }
+
+    void enqueueMaterialization(Tensor& destination, Stream& destinationStream) const override {
+        destinationStream.enqueueHostFunction(
+            &waitForHostGate,
+            std::make_unique<WaitForHostGateArgs>(sourceReadGate));
+        destination.copyFromAsync(source, destinationStream);
+    }
+
+   private:
+    Tensor source;
+    shared_ptr<HostGate> sourceReadGate;
+};
 
 }  // namespace
 
@@ -583,4 +626,255 @@ TEST(NetworkInput, PassThroughRejectsDescriptorOrPlacementMismatch) {
 
     EXPECT_ANY_THROW(NetworkInput(gpuPlacement, DataType::FP32, descriptor.getDimensions(), NetworkInput::Mode::PassThrough, cpuSource));
     EXPECT_ANY_THROW(NetworkInput(gpuPlacement, DataType::FP32, descriptor.getDimensions(), NetworkInput::Mode::PassThrough, gpuWrongShape));
+}
+
+
+TEST(NetworkInput, DeviceReferenceUsesReferenceRingAndMaterializesDirectlyIntoFeatureOutput) {
+    if (MachineEvaluator::instance().getNumGpus() == 0) {
+        GTEST_SKIP() << "NetworkInput device-reference test requires a GPU";
+    }
+
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    TensorDescriptor descriptor(DataType::FP32, {4});
+    Stream setupStream(0);
+    Tensor firstSource = makeFilledGpuTensor(descriptor, 11.0f, setupStream);
+    Tensor secondSource = makeFilledGpuTensor(descriptor, 22.0f, setupStream);
+    Tensor replacementSource = makeFilledGpuTensor(descriptor, 33.0f, setupStream);
+    setupStream.synchronize();
+
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    RuntimeForwardedInputCaptureLayer capture;
+    input.connectToNextLayer(&capture);
+
+    input.configureBatchInputSource(Thor::BatchFieldSourceDescription::deviceReference(gpuPlacement));
+    EXPECT_TRUE(input.isDeviceReferenceLoad());
+    input.preallocateInputSlots(3);
+    EXPECT_EQ(input.getNumInputSlots(), 3u);
+
+    auto firstMaterializer = std::make_shared<CopyTensorDeviceBatchMaterializer>(firstSource);
+    std::weak_ptr<CopyTensorDeviceBatchMaterializer> firstWeak = firstMaterializer;
+    Thor::DeviceBatchReference firstReference(firstMaterializer, 1);
+    input.setActiveInputSlot(2);
+    input.forward(firstReference, false, 1);
+    capture.synchronize();
+    EXPECT_EQ(firstMaterializer->getEnqueueCount(), 1u);
+    expectAllEqual(capture.readCapture(0), 11.0f);
+
+    // The selected ring slot owns the queued reference after the caller drops
+    // its handles. A different slot must not release it.
+    firstReference = Thor::DeviceBatchReference();
+    firstMaterializer.reset();
+    EXPECT_FALSE(firstWeak.expired());
+
+    auto secondMaterializer = std::make_shared<CopyTensorDeviceBatchMaterializer>(secondSource);
+    Thor::DeviceBatchReference secondReference(secondMaterializer, 1);
+    input.setActiveInputSlot(1);
+    input.forward(secondReference, false, 1);
+    capture.synchronize();
+    EXPECT_FALSE(firstWeak.expired());
+    expectAllEqual(capture.readCapture(1), 22.0f);
+
+    // Reusing slot two replaces its prior reference after the queue slot has
+    // become available, releasing the old materializer without any tensor ring.
+    auto replacementMaterializer = std::make_shared<CopyTensorDeviceBatchMaterializer>(replacementSource);
+    Thor::DeviceBatchReference replacementReference(replacementMaterializer, 1);
+    input.setActiveInputSlot(2);
+    input.forward(replacementReference, false, 1);
+    capture.synchronize();
+    EXPECT_TRUE(firstWeak.expired());
+    expectAllEqual(capture.readCapture(2), 33.0f);
+
+    ASSERT_TRUE(input.getFeatureOutput().has_value());
+    EXPECT_EQ(capture.forwardedTensorIds[0], input.getFeatureOutput().value().getTensorId());
+    EXPECT_EQ(capture.forwardedMemPtrs[0], input.getFeatureOutput().value().getMemPtr<void>());
+}
+
+TEST(NetworkInput, DeviceReferenceConfigurationRejectsMaterializedTensorSubmission) {
+    if (MachineEvaluator::instance().getNumGpus() == 0) {
+        GTEST_SKIP() << "NetworkInput device-reference validation test requires a GPU";
+    }
+
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    TensorDescriptor descriptor(DataType::FP32, {4});
+    Stream setupStream(0);
+    Tensor tensor = makeFilledGpuTensor(descriptor, 1.0f, setupStream);
+    setupStream.synchronize();
+
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    RuntimeForwardedInputCaptureLayer capture;
+    input.connectToNextLayer(&capture);
+    input.configureBatchInputSource(Thor::BatchFieldSourceDescription::deviceReference(gpuPlacement));
+    input.preallocateInputSlots(2);
+
+    EXPECT_ANY_THROW(input.forward(tensor, false, 1));
+}
+
+TEST(NetworkInput, DirectSourceIsConsumedBeforeDownstreamProcessingCompletes) {
+    if (MachineEvaluator::instance().getNumGpus() == 0) {
+        GTEST_SKIP() << "NetworkInput source-consumption test requires a GPU";
+    }
+
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    TensorDescriptor descriptor(DataType::FP32, {4});
+    Tensor cpuSource(cpuPlacement, descriptor);
+    float* values = cpuSource.getMemPtr<float>();
+    for (uint32_t i = 0; i < 4; ++i) {
+        values[i] = 7.0f;
+    }
+
+    auto downstreamGate = make_shared<HostGate>();
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    DelayedConnectedInputCaptureLayer capture(downstreamGate);
+    input.connectToNextLayer(&capture);
+    input.configureBatchInputSource(
+        Thor::BatchFieldSourceDescription::materialized(cpuPlacement));
+    input.preallocateInputSlots(1);
+
+    vector<Event> consumedEvents;
+    Thor::BatchSourceOwner sourceOwner(
+        [&](vector<Event> events) { consumedEvents = std::move(events); });
+    Thor::BatchSourceReference sourceReference = sourceOwner.getReference();
+
+    input.forward(cpuSource, false, 1, sourceReference);
+    sourceOwner.release();
+    ASSERT_EQ(consumedEvents.size(), 1u);
+
+    auto waitForConsumption = async(launch::async, [event = consumedEvents.front()]() mutable {
+        event.synchronize();
+    });
+    if (waitForConsumption.wait_for(chrono::seconds(2)) != future_status::ready) {
+        releaseHostGate(downstreamGate);
+        waitForConsumption.get();
+        FAIL() << "Direct source remained leased until downstream processing completed";
+    }
+    waitForConsumption.get();
+
+    // The downstream stream is still blocked, proving the source-consumed
+    // event marks only the CPU source -> NetworkInput staging copy.
+    {
+        lock_guard<mutex> guard(downstreamGate->mtx);
+        EXPECT_FALSE(downstreamGate->released);
+    }
+    releaseHostGate(downstreamGate);
+    capture.synchronize();
+    expectAllEqual(capture.readCapture(0), 7.0f);
+}
+
+TEST(NetworkInput, ReferenceSourceIsConsumedBeforeDownstreamProcessingCompletes) {
+    if (MachineEvaluator::instance().getNumGpus() == 0) {
+        GTEST_SKIP() << "NetworkInput reference-consumption test requires a GPU";
+    }
+
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    TensorDescriptor descriptor(DataType::FP32, {4});
+    Stream setupStream(0);
+    Tensor source = makeFilledGpuTensor(descriptor, 9.0f, setupStream);
+    setupStream.synchronize();
+
+    auto downstreamGate = make_shared<HostGate>();
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    DelayedConnectedInputCaptureLayer capture(downstreamGate);
+    input.connectToNextLayer(&capture);
+    input.configureBatchInputSource(
+        Thor::BatchFieldSourceDescription::deviceReference(gpuPlacement));
+    input.preallocateInputSlots(1);
+
+    vector<Event> consumedEvents;
+    Thor::BatchSourceOwner sourceOwner(
+        [&](vector<Event> events) { consumedEvents = std::move(events); });
+    Thor::BatchSourceReference sourceReference = sourceOwner.getReference();
+    auto materializer = std::make_shared<CopyTensorDeviceBatchMaterializer>(source);
+    Thor::DeviceBatchReference reference(materializer, 1);
+
+    input.forward(reference, false, 1, sourceReference);
+    sourceOwner.release();
+    ASSERT_EQ(consumedEvents.size(), 1u);
+
+    auto waitForConsumption = async(launch::async, [event = consumedEvents.front()]() mutable {
+        event.synchronize();
+    });
+    if (waitForConsumption.wait_for(chrono::seconds(2)) != future_status::ready) {
+        releaseHostGate(downstreamGate);
+        waitForConsumption.get();
+        FAIL() << "Reference selection remained leased until downstream processing completed";
+    }
+    waitForConsumption.get();
+
+    {
+        lock_guard<mutex> guard(downstreamGate->mtx);
+        EXPECT_FALSE(downstreamGate->released);
+    }
+    releaseHostGate(downstreamGate);
+    capture.synchronize();
+    expectAllEqual(capture.readCapture(0), 9.0f);
+}
+
+
+TEST(NetworkInput, SharedReferenceSourceWaitsForEveryInputMaterialization) {
+    if (MachineEvaluator::instance().getNumGpus() == 0) {
+        GTEST_SKIP() << "NetworkInput shared-source consumption test requires a GPU";
+    }
+
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    TensorDescriptor descriptor(DataType::FP32, {4});
+    Stream setupStream(0);
+    Tensor source = makeFilledGpuTensor(descriptor, 13.0f, setupStream);
+    setupStream.synchronize();
+
+    NetworkInput fastInput(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    RuntimeForwardedInputCaptureLayer fastCapture;
+    fastInput.connectToNextLayer(&fastCapture);
+    fastInput.configureBatchInputSource(
+        Thor::BatchFieldSourceDescription::deviceReference(gpuPlacement));
+    fastInput.preallocateInputSlots(1);
+
+    NetworkInput gatedInput(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    RuntimeForwardedInputCaptureLayer gatedCapture;
+    gatedInput.connectToNextLayer(&gatedCapture);
+    gatedInput.configureBatchInputSource(
+        Thor::BatchFieldSourceDescription::deviceReference(gpuPlacement));
+    gatedInput.preallocateInputSlots(1);
+
+    vector<Event> consumedEvents;
+    Thor::BatchSourceOwner sourceOwner(
+        [&](vector<Event> events) { consumedEvents = std::move(events); });
+    Thor::BatchSourceReference sourceReference = sourceOwner.getReference();
+
+    auto fastMaterializer = std::make_shared<CopyTensorDeviceBatchMaterializer>(source);
+    auto sourceReadGate = make_shared<HostGate>();
+    auto gatedMaterializer = std::make_shared<GatedCopyTensorDeviceBatchMaterializer>(
+        source,
+        sourceReadGate);
+
+    fastInput.forward(
+        Thor::DeviceBatchReference(fastMaterializer, 1),
+        false,
+        1,
+        sourceReference);
+    gatedInput.forward(
+        Thor::DeviceBatchReference(gatedMaterializer, 1),
+        false,
+        1,
+        sourceReference);
+    sourceOwner.release();
+
+    ASSERT_EQ(consumedEvents.size(), 2u);
+    auto fastConsumed = async(launch::async, [event = consumedEvents[0]]() mutable {
+        event.synchronize();
+    });
+    EXPECT_EQ(fastConsumed.wait_for(chrono::seconds(2)), future_status::ready);
+    fastConsumed.get();
+
+    auto gatedConsumed = async(launch::async, [event = consumedEvents[1]]() mutable {
+        event.synchronize();
+    });
+    EXPECT_EQ(gatedConsumed.wait_for(chrono::milliseconds(50)), future_status::timeout)
+        << "Shared source was reported reusable before every NetworkInput consumed it";
+
+    releaseHostGate(sourceReadGate);
+    EXPECT_EQ(gatedConsumed.wait_for(chrono::seconds(2)), future_status::ready);
+    gatedConsumed.get();
+    fastCapture.synchronize();
+    gatedCapture.synchronize();
 }

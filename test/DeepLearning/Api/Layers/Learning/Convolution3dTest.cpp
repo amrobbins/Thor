@@ -9,12 +9,14 @@
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
 #include "test/DeepLearning/Api/Helpers/GradientRivet.h"
 
+#include "cuda_bf16.h"
 #include "cuda_fp16.h"
 #include "gtest/gtest.h"
 
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -54,6 +56,12 @@ void writeCpuTensor(Impl::Tensor& tensor, const vector<float>& values) {
                 ptr[i] = __float2half(values[i]);
             break;
         }
+        case DataType::BF16: {
+            auto* ptr = static_cast<__nv_bfloat16*>(tensor.getMemPtr());
+            for (uint64_t i = 0; i < values.size(); ++i)
+                ptr[i] = __float2bfloat16(values[i]);
+            break;
+        }
         case DataType::FP32: {
             auto* ptr = static_cast<float*>(tensor.getMemPtr());
             for (uint64_t i = 0; i < values.size(); ++i)
@@ -76,6 +84,12 @@ vector<float> readCpuTensor(const Impl::Tensor& tensor) {
                 values[i] = __half2float(ptr[i]);
             break;
         }
+        case DataType::BF16: {
+            const auto* ptr = static_cast<const __nv_bfloat16*>(tensor.getMemPtr());
+            for (uint64_t i = 0; i < values.size(); ++i)
+                values[i] = __bfloat162float(ptr[i]);
+            break;
+        }
         case DataType::FP32: {
             const auto* ptr = static_cast<const float*>(tensor.getMemPtr());
             for (uint64_t i = 0; i < values.size(); ++i)
@@ -95,6 +109,13 @@ Impl::Tensor copyTensorToCpu(const Impl::Tensor& tensor, Stream& stream) {
     Event copied = stream.putEvent();
     copied.synchronize();
     return cpuTensor;
+}
+
+vector<uint8_t> readTensorBytes(const Impl::Tensor& tensor, Stream& stream) {
+    Impl::Tensor cpuTensor = copyTensorToCpu(tensor, stream);
+    vector<uint8_t> bytes(cpuTensor.getArraySizeInBytes());
+    std::memcpy(bytes.data(), cpuTensor.getMemPtr(), bytes.size());
+    return bytes;
 }
 
 void expectAllClose(
@@ -409,6 +430,95 @@ std::shared_ptr<LayerT> findOnlyLayerOfType(Api::Network& network) {
 }
 
 }  // namespace
+
+
+TEST(Convolution3dApi, PlacedSaveLoadRoundTripRestoresBf16FilterBytesAndExecution) {
+    constexpr uint32_t batchSize = 2;
+    const vector<float> inputValues = {
+        1.0f, -2.0f, 0.5f, 3.0f, -0.25f, 4.0f, 2.0f, -1.0f,
+        0.75f, 1.5f, -3.0f, 0.25f, 2.5f, -0.5f, 1.0f, -4.0f,
+    };
+    const vector<float> weightValues = {-1.25f};
+    const vector<float> biasValues = {0.75f};
+    const string networkName = "conv3d_bf16_parameter_round_trip";
+    filesystem::path archiveDir = makeUniqueTestArchiveDir(networkName);
+
+    try {
+        Api::Network network(networkName);
+        Api::NetworkInput input = Api::NetworkInput::Builder()
+                                      .network(network)
+                                      .name("input")
+                                      .dimensions({1, 2, 2, 2})
+                                      .dataType(DataType::BF16)
+                                      .build();
+        Api::Convolution3d conv = Api::Convolution3d::Builder()
+                                      .network(network)
+                                      .featureInput(input.getFeatureOutput().value())
+                                      .numOutputChannels(1)
+                                      .filterDepth(1)
+                                      .filterHeight(1)
+                                      .filterWidth(1)
+                                      .depthPadding(0)
+                                      .verticalPadding(0)
+                                      .horizontalPadding(0)
+                                      .hasBias(true)
+                                      .noActivation()
+                                      .build();
+        Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                        .network(network)
+                                        .name("output")
+                                        .inputTensor(conv.getFeatureOutput().value())
+                                        .dataType(DataType::BF16)
+                                        .build();
+
+        PlacedConvolution3dFixture source = placeSingleConvolution3dNetwork(network, input, output, conv, batchSize, true);
+        Stream sourceStream = source.physicalConvolution->getStreams()[0];
+        auto sourceWeights = source.physicalConvolution->getParameter("weights");
+        auto sourceBiases = source.physicalConvolution->getParameter("biases");
+        setParameterTensor(sourceWeights, weightValues, sourceStream);
+        setParameterTensor(sourceBiases, biasValues, sourceStream);
+        sourceStream.synchronize();
+        ASSERT_EQ(sourceWeights->getStorage()->getDataType(), DataType::BF16);
+        ASSERT_EQ(sourceBiases->getStorage()->getDataType(), DataType::BF16);
+        const vector<uint8_t> sourceWeightBytes = readTensorBytes(sourceWeights->getStorage().value(), sourceStream);
+        const vector<uint8_t> sourceBiasBytes = readTensorBytes(sourceBiases->getStorage().value(), sourceStream);
+
+        Impl::Tensor featureInHost(cpuPlacement, Impl::TensorDescriptor(DataType::BF16, {batchSize, 1, 2, 2, 2}));
+        writeCpuTensor(featureInHost, inputValues);
+        const vector<float> sourceOutput = runForward(*source.physicalInput, *source.physicalOutput, featureInHost, batchSize);
+        source.placedNetwork->save(archiveDir.string(), true, false);
+
+        Api::Network loadedNetwork(networkName);
+        loadedNetwork.load(archiveDir.string());
+        auto loadedInput = findOnlyLayerOfType<Api::NetworkInput>(loadedNetwork);
+        auto loadedConv = findOnlyLayerOfType<Api::Convolution3d>(loadedNetwork);
+        auto loadedOutput = findOnlyLayerOfType<Api::NetworkOutput>(loadedNetwork);
+        ASSERT_NE(loadedInput, nullptr);
+        ASSERT_NE(loadedConv, nullptr);
+        ASSERT_NE(loadedOutput, nullptr);
+        const json loadedArchitecture = loadedConv->architectureJson();
+        EXPECT_EQ(loadedArchitecture.at("parameters").at("weights").at("dtype").get<DataType>(), DataType::BF16);
+        EXPECT_EQ(loadedArchitecture.at("parameters").at("biases").at("dtype").get<DataType>(), DataType::BF16);
+
+        PlacedConvolution3dFixture loaded =
+            placeSingleConvolution3dNetwork(loadedNetwork, *loadedInput, *loadedOutput, *loadedConv, batchSize, true);
+        Stream loadedStream = loaded.physicalConvolution->getStreams()[0];
+        auto loadedWeights = loaded.physicalConvolution->getParameter("weights");
+        auto loadedBiases = loaded.physicalConvolution->getParameter("biases");
+        ASSERT_EQ(loadedWeights->getStorage()->getDataType(), DataType::BF16);
+        ASSERT_EQ(loadedBiases->getStorage()->getDataType(), DataType::BF16);
+        EXPECT_EQ(readTensorBytes(loadedWeights->getStorage().value(), loadedStream), sourceWeightBytes);
+        EXPECT_EQ(readTensorBytes(loadedBiases->getStorage().value(), loadedStream), sourceBiasBytes);
+
+        const vector<float> loadedOutputValues =
+            runForward(*loaded.physicalInput, *loaded.physicalOutput, featureInHost, batchSize);
+        expectAllClose(loadedOutputValues, sourceOutput, 3e-2f, 3e-2f, "loaded BF16 convolution3d");
+    } catch (...) {
+        filesystem::remove_all(archiveDir);
+        throw;
+    }
+    filesystem::remove_all(archiveDir);
+}
 
 TEST(Convolution3dApi, DefaultsToGeluAndExplicitNoActivationShape) {
     Api::Network defaultNetwork("conv3dDefaults");

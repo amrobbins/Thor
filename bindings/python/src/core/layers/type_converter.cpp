@@ -5,6 +5,8 @@
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 
+#include <optional>
+
 namespace nb = nanobind;
 using namespace nb::literals;
 using namespace std;
@@ -37,5 +39,14 @@ void bind_type_converter(nb::module_ &m) {
                 The network that the layer should be added to.
             new_data_type : thor.DataType
                 Data type of the output tensor (e.g. thor.DataType.fp16).
-            )nbdoc");
+            )nbdoc")
+        .def(
+            "get_feature_output",
+            [](TypeConverter &self) -> Tensor {
+                std::optional<Tensor> feature_output = self.getFeatureOutput();
+                return feature_output.value();
+            },
+            R"nbdoc(
+Return the converted output tensor produced by this layer.
+)nbdoc");
 }

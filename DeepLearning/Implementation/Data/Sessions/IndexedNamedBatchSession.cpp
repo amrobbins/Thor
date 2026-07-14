@@ -59,9 +59,10 @@ IndexedNamedBatchSession::IndexedNamedBatchSession(std::shared_ptr<const Thor::F
     trainAssembler = createAssembler(splitManifest.getSharedTrain(), "train", randomizeTrain, seed);
     validateAssembler = createAssembler(splitManifest.getSharedValidate(), "validate", false, std::nullopt);
     testAssembler = createAssembler(splitManifest.getSharedTest(), "test", false, std::nullopt);
+    recyclerThread = std::thread(&IndexedNamedBatchSession::recyclerMain, this);
 }
 
-IndexedNamedBatchSession::~IndexedNamedBatchSession() = default;
+IndexedNamedBatchSession::~IndexedNamedBatchSession() { cancel(); }
 
 void IndexedNamedBatchSession::validateIndex(uint64_t index, const char *splitName) const {
     if (index >= numDatasetExamples) {
@@ -136,6 +137,7 @@ Batch IndexedNamedBatchSession::acquireBatch(ExampleType exampleType, uint64_t &
     if (cancelled.load(std::memory_order_acquire)) {
         throw std::runtime_error("IndexedNamedBatchSession has been cancelled.");
     }
+    throwIfRecyclerFailed();
     IndexedBatchAssembler *assembler = assemblerFor(exampleType);
     if (assembler == nullptr) {
         throw std::runtime_error("IndexedNamedBatchSession cannot get a batch from an empty split.");
@@ -143,13 +145,61 @@ Batch IndexedNamedBatchSession::acquireBatch(ExampleType exampleType, uint64_t &
 
     std::map<std::string, ThorImplementation::Tensor> tensors;
     assembler->acquireBatch(tensors, batchNum);
-    return batchFromTensorMap(std::move(tensors));
+    auto sourceTensors = std::make_shared<std::map<std::string, ThorImplementation::Tensor>>(
+        std::move(tensors));
+    Batch batch = batchFromTensorMap(*sourceTensors);
+
+    std::set<std::string> fieldNames;
+    for (const auto &[name, tensor] : *sourceTensors) {
+        (void)tensor;
+        fieldNames.insert(name);
+    }
+
+    std::shared_ptr<IndexedNamedBatchSession> sharedSelf =
+        std::dynamic_pointer_cast<IndexedNamedBatchSession>(shared_from_this());
+    THOR_THROW_IF_FALSE(sharedSelf != nullptr);
+    std::weak_ptr<IndexedNamedBatchSession> weakSelf = sharedSelf;
+    Thor::BatchSourceOwner sourceOwner(
+        [weakSelf, exampleType, sourceTensors](std::vector<Event> consumedEvents) mutable {
+            if (std::shared_ptr<IndexedNamedBatchSession> session = weakSelf.lock()) {
+                session->enqueueReturnedBuffers(
+                    exampleType,
+                    std::move(sourceTensors),
+                    std::move(consumedEvents));
+                return;
+            }
+            // A session normally remains alive through BatchLease ownership. If
+            // teardown has already broken that relationship, still keep host
+            // buffers alive until all asynchronous input copies have completed.
+            try {
+                for (Event &event : consumedEvents) {
+                    event.synchronize();
+                }
+            } catch (...) {
+            }
+        });
+    addBatchSourceResource(batch, std::move(fieldNames), std::move(sourceOwner));
+    return batch;
 }
 
 void IndexedNamedBatchSession::recycleBatch(ExampleType exampleType, Batch &&batch) {
+    if (batch.ownsSourceResourceLifecycle()) {
+        // The source owner, rather than BatchLease destruction, returns the
+        // assembler buffers after every NetworkInput upload has consumed them.
+        // Batch copies retain source references but do not own this lifecycle,
+        // so malformed copies continue through the exact legacy validation path.
+        THOR_THROW_IF_FALSE(batch.allFieldsHaveSourceReferences());
+        (void)denseTensorMapFromBatchOrThrow(
+            batch,
+            "IndexedNamedBatchSession returned source-tracked batch");
+        batch.clear();
+        return;
+    }
+
     if (cancelled.load(std::memory_order_acquire)) {
         return;
     }
+    throwIfRecyclerFailed();
     IndexedBatchAssembler *assembler = assemblerFor(exampleType);
     if (assembler == nullptr) {
         throw std::runtime_error("IndexedNamedBatchSession cannot return buffers to an empty split.");
@@ -178,6 +228,7 @@ uint64_t IndexedNamedBatchSession::getNextBatchNum(ExampleType exampleType) {
 
 
 IndexedBatchAssemblerStats IndexedNamedBatchSession::getStatsSnapshot(ExampleType exampleType) {
+    throwIfRecyclerFailed();
     IndexedBatchAssembler *assembler = assemblerFor(exampleType);
     if (assembler != nullptr) {
         return assembler->getStatsSnapshot();
@@ -219,10 +270,120 @@ const Thor::ExampleIndexSet &IndexedNamedBatchSession::getSplitIndices(ExampleTy
 
 bool IndexedNamedBatchSession::hasExplicitTestSplit() const { return splitManifest.hasExplicitTestSplit(); }
 
+void IndexedNamedBatchSession::enqueueReturnedBuffers(
+    ExampleType exampleType,
+    std::shared_ptr<std::map<std::string, ThorImplementation::Tensor>> tensors,
+    std::vector<Event> consumedEvents) noexcept {
+    if (tensors == nullptr) {
+        return;
+    }
+
+    // A manually released batch, or any batch that was never submitted to a
+    // NetworkInput, has no asynchronous source consumers. Return those buffers
+    // synchronously so the observable assembler counters and ready-buffer pool
+    // preserve their historical immediate-after-reset behavior.
+    if (consumedEvents.empty()) {
+        std::lock_guard<std::mutex> guard(recyclerMutex);
+        if (recyclerStopping || cancelled.load(std::memory_order_acquire)) {
+            return;
+        }
+        try {
+            IndexedBatchAssembler *assembler = assemblerFor(exampleType);
+            if (assembler != nullptr) {
+                assembler->returnBuffers(*tensors);
+            }
+        } catch (...) {
+            if (recyclerFailure == nullptr) {
+                recyclerFailure = std::current_exception();
+            }
+        }
+        return;
+    }
+
+    try {
+        std::lock_guard<std::mutex> guard(recyclerMutex);
+        if (!recyclerStopping) {
+            pendingReturnedBuffers.push_back(PendingReturnedBuffers{
+                exampleType,
+                tensors,
+                consumedEvents});
+            recyclerNotEmpty.notify_one();
+            return;
+        }
+    } catch (...) {
+    }
+
+    // The recycler is already shutting down. Do not destroy host source
+    // tensors until outstanding asynchronous copies have stopped reading them.
+    try {
+        for (Event &event : consumedEvents) {
+            event.synchronize();
+        }
+    } catch (...) {
+    }
+}
+
+void IndexedNamedBatchSession::recyclerMain() noexcept {
+    while (true) {
+        PendingReturnedBuffers pending;
+        {
+            std::unique_lock<std::mutex> lock(recyclerMutex);
+            recyclerNotEmpty.wait(lock, [&] {
+                return recyclerStopping || !pendingReturnedBuffers.empty();
+            });
+            if (pendingReturnedBuffers.empty()) {
+                return;
+            }
+            pending = std::move(pendingReturnedBuffers.front());
+            pendingReturnedBuffers.pop_front();
+        }
+
+        try {
+            for (Event &event : pending.consumedEvents) {
+                event.synchronize();
+            }
+            if (!cancelled.load(std::memory_order_acquire)) {
+                IndexedBatchAssembler *assembler = assemblerFor(pending.exampleType);
+                if (assembler != nullptr) {
+                    assembler->returnBuffers(*pending.tensors);
+                }
+            }
+        } catch (...) {
+            std::lock_guard<std::mutex> guard(recyclerMutex);
+            if (recyclerFailure == nullptr) {
+                recyclerFailure = std::current_exception();
+            }
+        }
+    }
+}
+
+void IndexedNamedBatchSession::stopRecycler() noexcept {
+    {
+        std::lock_guard<std::mutex> guard(recyclerMutex);
+        recyclerStopping = true;
+    }
+    recyclerNotEmpty.notify_all();
+    if (recyclerThread.joinable()) {
+        recyclerThread.join();
+    }
+}
+
+void IndexedNamedBatchSession::throwIfRecyclerFailed() const {
+    std::exception_ptr failure;
+    {
+        std::lock_guard<std::mutex> guard(recyclerMutex);
+        failure = recyclerFailure;
+    }
+    if (failure != nullptr) {
+        std::rethrow_exception(failure);
+    }
+}
+
 void IndexedNamedBatchSession::cancel() {
     if (cancelled.exchange(true, std::memory_order_acq_rel)) {
         return;
     }
+    stopRecycler();
     trainAssembler.reset();
     validateAssembler.reset();
     testAssembler.reset();

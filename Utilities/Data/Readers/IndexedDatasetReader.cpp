@@ -3,6 +3,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Data/DatasetWriter.h"
 #include "Utilities/Data/Storage/DatasetShard.h"
+#include "Utilities/Common/LowPrecisionFloat.h"
 #include "Utilities/TarFile/UringDirect.h"
 
 #include <nlohmann/json.hpp>
@@ -233,6 +234,18 @@ void fillConstant(uint8_t *destination, uint64_t numBytes, ThorImplementation::D
         case ThorImplementation::DataType::UINT64:
             fillTyped<uint64_t>(destination, count, value);
             return;
+        case ThorImplementation::DataType::FP16:
+            fillTyped<uint16_t>(destination, count, ThorLowPrecision::doubleToFp16Bits(value));
+            return;
+        case ThorImplementation::DataType::BF16:
+            fillTyped<uint16_t>(destination, count, ThorLowPrecision::doubleToBf16Bits(value));
+            return;
+        case ThorImplementation::DataType::FP8_E4M3:
+            fillTyped<uint8_t>(destination, count, ThorLowPrecision::doubleToFp8E4M3Bits(value));
+            return;
+        case ThorImplementation::DataType::FP8_E5M2:
+            fillTyped<uint8_t>(destination, count, ThorLowPrecision::doubleToFp8E5M2Bits(value));
+            return;
         case ThorImplementation::DataType::FP32:
             fillTyped<float>(destination, count, value);
             return;
@@ -242,8 +255,7 @@ void fillConstant(uint8_t *destination, uint64_t numBytes, ThorImplementation::D
         default:
             break;
     }
-    throw std::runtime_error(
-        "IndexedDatasetReader non-zero window padding currently supports only whole-byte scalar CPU types except fp16/bf16/fp8.");
+    throw std::runtime_error("IndexedDatasetReader unsupported non-zero window padding data type.");
 }
 
 void checkedSignedWindowEnd(int64_t start, uint64_t length, const std::string &name) {

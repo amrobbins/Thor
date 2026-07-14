@@ -767,18 +767,30 @@ std::vector<uint64_t> PlacedNetwork::getActiveTrainingRawLossOriginalIdsForDebug
     return stampedNetworks[stampIndex].getActiveTrainingRawLossOriginalIdsForDebug();
 }
 
-void PlacedNetwork::configureBatchInputPlacements(
-    const std::map<std::string, std::optional<ThorImplementation::TensorPlacement>> &placementsByNetworkInput) {
+void PlacedNetwork::configureBatchInputSources(
+    const std::map<std::string, BatchFieldSourceDescription> &sourcesByNetworkInput) {
     for (ThorImplementation::StampedNetwork &stampedNetwork : stampedNetworks) {
         for (const std::shared_ptr<ThorImplementation::NetworkInput> &input : stampedNetwork.getInputs()) {
             THOR_THROW_IF_FALSE(input != nullptr);
             if (input->isPassThrough()) {
                 continue;
             }
-            const auto placement = placementsByNetworkInput.find(input->getName());
-            input->configureBatchInputPlacement(placement == placementsByNetworkInput.end() ? std::nullopt : placement->second);
+            const auto source = sourcesByNetworkInput.find(input->getName());
+            input->configureBatchInputSource(
+                source == sourcesByNetworkInput.end()
+                    ? BatchFieldSourceDescription::materialized()
+                    : source->second);
         }
     }
+}
+
+void PlacedNetwork::configureBatchInputPlacements(
+    const std::map<std::string, std::optional<ThorImplementation::TensorPlacement>> &placementsByNetworkInput) {
+    std::map<std::string, BatchFieldSourceDescription> sources;
+    for (const auto& [inputName, placement] : placementsByNetworkInput) {
+        sources.emplace(inputName, BatchFieldSourceDescription::materialized(placement));
+    }
+    configureBatchInputSources(sources);
 }
 
 void PlacedNetwork::preallocateInputSlots(uint32_t numSlots) {

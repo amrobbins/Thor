@@ -8,11 +8,17 @@
 #include "Utilities/Data/Assembly/IndexedBatchAssembler.h"
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
+#include <exception>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
 /**
@@ -86,6 +92,19 @@ class IndexedNamedBatchSession : public Thor::BatchSession {
     std::optional<uint64_t> seed;
     std::atomic<bool> cancelled{false};
 
+    struct PendingReturnedBuffers {
+        ExampleType exampleType = ExampleType::TRAIN;
+        std::shared_ptr<std::map<std::string, ThorImplementation::Tensor>> tensors;
+        std::vector<Event> consumedEvents;
+    };
+
+    mutable std::mutex recyclerMutex;
+    std::condition_variable recyclerNotEmpty;
+    std::deque<PendingReturnedBuffers> pendingReturnedBuffers;
+    std::thread recyclerThread;
+    bool recyclerStopping = false;
+    std::exception_ptr recyclerFailure;
+
     void validateIndex(uint64_t index, const char *splitName) const;
     void validateIndices(const Thor::ExampleIndexSet &indices, const char *splitName) const;
     std::unique_ptr<IndexedBatchAssembler> createAssembler(
@@ -95,4 +114,11 @@ class IndexedNamedBatchSession : public Thor::BatchSession {
         std::optional<uint64_t> splitSeed) const;
     IndexedBatchAssembler *assemblerFor(ExampleType exampleType);
     const IndexedBatchAssembler *assemblerFor(ExampleType exampleType) const;
+    void enqueueReturnedBuffers(
+        ExampleType exampleType,
+        std::shared_ptr<std::map<std::string, ThorImplementation::Tensor>> tensors,
+        std::vector<Event> consumedEvents) noexcept;
+    void recyclerMain() noexcept;
+    void stopRecycler() noexcept;
+    void throwIfRecyclerFailed() const;
 };

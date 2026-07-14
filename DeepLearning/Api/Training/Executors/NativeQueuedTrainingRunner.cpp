@@ -65,6 +65,12 @@ struct ScalarStatSlot {
     float value = 0.0f;
 };
 
+enum class ScalarStatSource {
+    UNRESOLVED,
+    INPUT,
+    OUTPUT
+};
+
 struct NativeBatchCompletionParams {
     std::shared_ptr<QueuedTrainingState> state;
     bool completionCallbackLaunched = false;
@@ -78,6 +84,7 @@ struct NativeBatchCompletionParams {
     BatchLease batchLease;
     std::map<std::string, ThorImplementation::Tensor> batchOutput;
     std::vector<ScalarStatSlot> scalarStats;
+    std::vector<ScalarStatSource> scalarStatSources;
 };
 
 struct QueuedBatchSlot {
@@ -111,6 +118,9 @@ struct QueuedTrainingState {
         }
         for (NativeBatchCompletionParams& params : completionParams) {
             params.scalarStats.resize(this->scalarTensorNames.size());
+            params.scalarStatSources.resize(
+                this->scalarTensorNames.size(),
+                ScalarStatSource::UNRESOLVED);
         }
     }
 
@@ -324,30 +334,50 @@ float copyAggregateLossStatTensor(const std::map<std::string, ThorImplementation
     return static_cast<float>(sum);
 }
 
-float copyScalarStatTensor(const Batch& batchInput,
-                           const std::map<std::string, ThorImplementation::Tensor>& batchOutput,
-                           const std::string& tensorName,
-                           const std::vector<std::string>& aggregateLossTensorNames) {
-    ThorImplementation::Tensor copyFromTensor;
-    auto outputIt = batchOutput.find(tensorName);
-    if (batchInput.contains(tensorName)) {
-        copyFromTensor = batchInput.getTensor(tensorName);
-    } else if (tensorName == "loss" && !aggregateLossTensorNames.empty()) {
-        return copyAggregateLossStatTensor(batchOutput, aggregateLossTensorNames);
-    } else if (outputIt != batchOutput.end()) {
-        copyFromTensor = outputIt->second;
-    } else if (tensorName == "loss") {
-        return copyAggregateLossStatTensor(batchOutput, aggregateLossTensorNames);
-    } else {
-        throw std::runtime_error("Requested training stat tensor '" + tensorName + "' was not present in batch inputs or outputs.");
-    }
-
-    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+float copyCpuScalarTensor(const ThorImplementation::Tensor& copyFromTensor) {
+    ThorImplementation::TensorPlacement cpuPlacement(
+        ThorImplementation::TensorPlacement::MemDevices::CPU);
     THOR_THROW_IF_FALSE(copyFromTensor.getPlacement() == cpuPlacement);
-    THOR_THROW_IF_FALSE(copyFromTensor.getDescriptor().getArraySizeInBytes() >= sizeof(float));
+    THOR_THROW_IF_FALSE(
+        copyFromTensor.getDescriptor().getArraySizeInBytes() >= sizeof(float));
     float value = 0.0f;
     std::memcpy(&value, copyFromTensor.getMemPtr(), sizeof(float));
     return value;
+}
+
+float copyInputScalarStatTensor(
+    const Batch& batchInput,
+    const std::string& tensorName) {
+    if (!batchInput.contains(tensorName)) {
+        throw std::runtime_error(
+            "Requested input training stat tensor '" + tensorName +
+            "' was not present in batch inputs.");
+    }
+    if (!batchInput.isTensor(tensorName)) {
+        throw std::runtime_error(
+            "Requested input training stat tensor '" + tensorName +
+            "' is not a materialized dense tensor.");
+    }
+    return copyCpuScalarTensor(batchInput.getTensor(tensorName));
+}
+
+float copyOutputScalarStatTensor(
+    const std::map<std::string, ThorImplementation::Tensor>& batchOutput,
+    const std::string& tensorName,
+    const std::vector<std::string>& aggregateLossTensorNames) {
+    auto outputIt = batchOutput.find(tensorName);
+    if (tensorName == "loss" && !aggregateLossTensorNames.empty()) {
+        return copyAggregateLossStatTensor(batchOutput, aggregateLossTensorNames);
+    }
+    if (outputIt != batchOutput.end()) {
+        return copyCpuScalarTensor(outputIt->second);
+    }
+    if (tensorName == "loss") {
+        return copyAggregateLossStatTensor(batchOutput, aggregateLossTensorNames);
+    }
+    throw std::runtime_error(
+        "Requested output training stat tensor '" + tensorName +
+        "' was not present in batch outputs.");
 }
 
 std::string phaseName(TrainingEventPhase phase) {
@@ -1472,25 +1502,45 @@ NativeQueuedExecutionGraph resolveNativeQueuedExecutionGraph(const TrainingRunRe
     return result;
 }
 
-std::map<std::string, std::optional<ThorImplementation::TensorPlacement>> resolveNetworkInputBatchPlacements(
+std::map<std::string, BatchFieldSourceDescription> resolveNetworkInputBatchSources(
     const std::shared_ptr<BatchSession>& batchSession, const ExecutableTrainingPlan& plan) {
     const std::shared_ptr<BatchSession>& session = batchSession;
-    std::map<std::string, std::optional<ThorImplementation::TensorPlacement>> placements;
+    std::map<std::string, BatchFieldSourceDescription> sources;
     for (const StepExecutable& step : plan.getSteps()) {
         for (const TrainingInputBinding& binding : step.getResolvedInputBindings()) {
-            const std::optional<ThorImplementation::TensorPlacement> placement =
+            const BatchFieldSourceDescription source =
                 session == nullptr
-                    ? std::nullopt
-                    : session->getBatchTensorPlacement(binding.getBatchInputName());
-            auto [existing, inserted] = placements.emplace(binding.getNetworkInputName(), placement);
-            if (!inserted && (!existing->second.has_value() || !placement.has_value() || existing->second.value() != placement.value())) {
-                // A NetworkInput reused with unknown or differing source placements
-                // must take the conservative staged path for every step.
-                existing->second = std::nullopt;
+                    ? BatchFieldSourceDescription::materialized()
+                    : session->getBatchFieldSourceDescription(binding.getBatchInputName());
+            auto [existing, inserted] = sources.emplace(binding.getNetworkInputName(), source);
+            if (inserted) {
+                continue;
+            }
+
+            if (existing->second.kind != source.kind) {
+                throw std::runtime_error(
+                    "NetworkInput '" + binding.getNetworkInputName() +
+                    "' is bound to both materialized-tensor and device-reference batch fields across training steps.");
+            }
+
+            if (source.kind == BatchFieldSourceKind::MATERIALIZED_TENSOR) {
+                if (!existing->second.placement.has_value() || !source.placement.has_value() ||
+                    existing->second.placement.value() != source.placement.value()) {
+                    // Differing or unknown materialized placements use the
+                    // conservative host-staged path for every step.
+                    existing->second.placement = std::nullopt;
+                }
+            } else {
+                if (!existing->second.placement.has_value() || !source.placement.has_value() ||
+                    existing->second.placement.value() != source.placement.value()) {
+                    throw std::runtime_error(
+                        "NetworkInput '" + binding.getNetworkInputName() +
+                        "' is bound to device-reference fields with differing destination placements.");
+                }
             }
         }
     }
-    return placements;
+    return sources;
 }
 
 void cancelBatchSession(const std::shared_ptr<BatchSession>& batchSession) {
@@ -1511,8 +1561,17 @@ Batch bindBatchInputs(const StepExecutable& step, const Batch& batchInput) {
             bound.insert(binding.getNetworkInputName(), std::get<ThorImplementation::Tensor>(value));
         } else if (std::holds_alternative<ThorImplementation::RaggedTensor>(value)) {
             bound.insert(binding.getNetworkInputName(), std::get<ThorImplementation::RaggedTensor>(value));
+        } else if (std::holds_alternative<DeviceBatchReference>(value)) {
+            bound.insert(binding.getNetworkInputName(), std::get<DeviceBatchReference>(value));
         } else {
             THOR_UNREACHABLE();
+        }
+        const std::optional<BatchSourceReference> sourceReference =
+            batchInput.getSourceReference(binding.getBatchInputName());
+        if (sourceReference.has_value()) {
+            bound.setSourceReference(
+                binding.getNetworkInputName(),
+                sourceReference.value());
         }
     }
     return bound;
@@ -1530,10 +1589,40 @@ void CUDART_CB completeNativeQueuedBatch(void* data) {
 
     try {
         THOR_THROW_IF_FALSE(params->scalarStats.size() == state->scalarTensorNames.size());
+        THOR_THROW_IF_FALSE(
+            params->scalarStatSources.size() == state->scalarTensorNames.size());
         for (size_t i = 0; i < state->scalarTensorNames.size(); ++i) {
-            params->scalarStats[i].value = copyScalarStatTensor(
-                params->batchLease.get(), params->batchOutput, state->scalarTensorNames[i], state->aggregateLossTensorNames);
+            if (params->scalarStats[i].present) {
+                continue;
+            }
+            const std::string& tensorName = state->scalarTensorNames[i];
+            if (params->scalarStatSources[i] == ScalarStatSource::INPUT) {
+                THOR_THROW_IF_FALSE(!params->batchLease.empty());
+                params->scalarStats[i].value = copyInputScalarStatTensor(
+                    params->batchLease.get(),
+                    tensorName);
+            } else if (params->scalarStatSources[i] == ScalarStatSource::OUTPUT) {
+                params->scalarStats[i].value = copyOutputScalarStatTensor(
+                    params->batchOutput,
+                    tensorName,
+                    state->aggregateLossTensorNames);
+            } else {
+                throw std::runtime_error(
+                    "Training stat tensor '" + tensorName +
+                    "' did not resolve to an input or output source.");
+            }
             params->scalarStats[i].present = true;
+        }
+
+        // A retained device input statistic was the only reason a fully
+        // source-tracked BatchLease could survive until this callback. Once
+        // the statistic has been copied, release the source owner and session
+        // lease without waiting for the consumer thread to pop the completed
+        // network slot.
+        if (!params->batchLease.empty() &&
+            params->batchLease.get().allFieldsHaveSourceReferences()) {
+            params->batchLease.releaseSourceResourcesExcept();
+            params->batchLease.reset();
         }
 
         uint64_t inFlightAtComplete = 0;
@@ -1674,6 +1763,9 @@ BatchPopResult popBatchData(const std::shared_ptr<QueuedTrainingState>& state) {
         scalarStat.present = false;
         scalarStat.value = 0.0f;
     }
+    for (ScalarStatSource& scalarStatSource : params.scalarStatSources) {
+        scalarStatSource = ScalarStatSource::UNRESOLVED;
+    }
     QueuedPhaseProgress& progress = phaseProgress(*state, slot.phase);
     progress.poppedBatches += 1;
     result.poppedInEpoch = progress.poppedBatches;
@@ -1757,6 +1849,9 @@ void releaseQueuedTrainingStateReferencesAfterAbort(const std::shared_ptr<Queued
         for (ScalarStatSlot& scalarStat : params.scalarStats) {
             scalarStat.present = false;
             scalarStat.value = 0.0f;
+        }
+        for (ScalarStatSource& scalarStatSource : params.scalarStatSources) {
+            scalarStatSource = ScalarStatSource::UNRESOLVED;
         }
         params.completionCallbackLaunched = false;
         params.completionCallbackFinished = false;
@@ -1983,6 +2078,9 @@ class NativeQueuedEpochScheduler {
                 scalarStat.present = false;
                 scalarStat.value = 0.0f;
             }
+            for (ScalarStatSource& scalarStatSource : params->scalarStatSources) {
+                scalarStatSource = ScalarStatSource::UNRESOLVED;
+            }
 
             const auto acquireBatchStart = diagnosticNow(collectQueueDiagnostics);
             uint64_t sessionBatchNum = epochBatchNum;
@@ -2073,6 +2171,53 @@ class NativeQueuedEpochScheduler {
                 }
             }
             const auto submitFinish = diagnosticNow(collectQueueDiagnostics);
+
+            // Every NetworkInput has now recorded the stream point after which
+            // it no longer reads its session-owned source. Snapshot CPU input
+            // statistics now, before those source slots are released; output
+            // statistics remain deferred until the normal completion callback.
+            THOR_THROW_IF_FALSE(params->scalarStats.size() == state->scalarTensorNames.size());
+            THOR_THROW_IF_FALSE(
+                params->scalarStatSources.size() == state->scalarTensorNames.size());
+            const bool fullySourceTracked =
+                params->batchLease.get().allFieldsHaveSourceReferences();
+            std::set<std::string> retainedSourceFields;
+            for (size_t i = 0; i < state->scalarTensorNames.size(); ++i) {
+                const std::string& scalarTensorName = state->scalarTensorNames[i];
+                if (!params->batchLease.get().contains(scalarTensorName)) {
+                    params->scalarStatSources[i] = ScalarStatSource::OUTPUT;
+                    continue;
+                }
+
+                params->scalarStatSources[i] = ScalarStatSource::INPUT;
+                if (!params->batchLease.get().isTensor(scalarTensorName)) {
+                    throw std::runtime_error(
+                        "Requested input training stat tensor '" + scalarTensorName +
+                        "' is not a materialized dense tensor.");
+                }
+                const ThorImplementation::Tensor& inputStatTensor =
+                    params->batchLease.get().getTensor(scalarTensorName);
+                if (inputStatTensor.getPlacement().getMemDevice() ==
+                    ThorImplementation::TensorPlacement::MemDevices::CPU) {
+                    params->scalarStats[i].value = copyInputScalarStatTensor(
+                        params->batchLease.get(),
+                        scalarTensorName);
+                    params->scalarStats[i].present = true;
+                } else {
+                    // Device-backed materialized input statistics are copied in
+                    // the normal completion callback. Retain only the source
+                    // resource containing that field until then.
+                    retainedSourceFields.insert(scalarTensorName);
+                }
+            }
+            params->batchLease.releaseSourceResourcesExcept(retainedSourceFields);
+            if (fullySourceTracked && retainedSourceFields.empty()) {
+                // NetworkInput rings now own any queued tensor/reference values,
+                // and source owners hold the reusable buffers until their actual
+                // read events complete. Forward/backward and output completion no
+                // longer require the dataset Batch or its session lease.
+                params->batchLease.reset();
+            }
 
             const auto completionSetupStart = diagnosticNow(collectQueueDiagnostics);
             // Keep CPU stats/output completion off the stamp's input stream.  The input stream
@@ -2703,8 +2848,8 @@ NativeQueuedStartupState startNativeQueuedTrainingWithMemoryAdmissionRetry(
             }
 
             request.cancellationToken.throwIfCancellationRequested();
-            attempt.placedNetwork->configureBatchInputPlacements(
-                resolveNetworkInputBatchPlacements(
+            attempt.placedNetwork->configureBatchInputSources(
+                resolveNetworkInputBatchSources(
                     attempt.effectiveSession, *attempt.plan));
             attempt.placedNetwork->preallocateInputSlots(
                 static_cast<uint32_t>(options.maxInFlightBatches));

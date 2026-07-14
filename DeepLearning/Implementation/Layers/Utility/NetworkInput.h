@@ -4,6 +4,9 @@
 #include <utility>
 #include <vector>
 #include "DeepLearning/Implementation/ThorError.h"
+#include "DeepLearning/Api/Data/BatchFieldSource.h"
+#include "DeepLearning/Api/Data/DeviceBatchReference.h"
+#include "DeepLearning/Api/Data/BatchSourceResource.h"
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "DeepLearning/Implementation/Layers/LayerSubmitDiagnostics.h"
@@ -16,7 +19,7 @@ class NetworkInput : public Layer {
    public:
     ~NetworkInput() override {}
 
-    enum class Mode { ExternalLoad, DeviceLoad, PassThrough };
+    enum class Mode { ExternalLoad, DeviceLoad, DeviceReference, PassThrough };
 
     NetworkInput(TensorPlacement networkPlacement,
                  std::optional<DataType> contentDataType,
@@ -59,7 +62,8 @@ class NetworkInput : public Layer {
         THOR_THROW_IF_FALSE(contentDimensions.has_value() == contentDataType.has_value());
         THOR_THROW_IF_FALSE(mode == Mode::ExternalLoad || !aliasSamePlacementInputs);
         THOR_THROW_IF_FALSE(mode == Mode::PassThrough || !passThroughSourceTensor.has_value());
-        THOR_THROW_IF_FALSE(mode != Mode::DeviceLoad || networkPlacement.getMemDevice() == TensorPlacement::MemDevices::GPU);
+        THOR_THROW_IF_FALSE((mode != Mode::DeviceLoad && mode != Mode::DeviceReference) ||
+                            networkPlacement.getMemDevice() == TensorPlacement::MemDevices::GPU);
         this->networkPlacement = networkPlacement;
         this->contentDataType = contentDataType;
         this->contentDimensions = contentDimensions;
@@ -80,7 +84,7 @@ class NetworkInput : public Layer {
         std::vector<Event> events;
         std::set<uint64_t> synchronizedStreamIds;
         appendSynchronizeEvent(events, synchronizedStreamIds, stream);
-        if (!isDeviceLoad()) {
+        if (!isDeviceLoad() && !isDeviceReferenceLoad()) {
             appendSynchronizeEvent(events, synchronizedStreamIds, loadStream);
         }
         return events;
@@ -89,32 +93,38 @@ class NetworkInput : public Layer {
     virtual bool isInput() { return mode != Mode::PassThrough; }
     virtual bool isPassThrough() const { return mode == Mode::PassThrough; }
     virtual bool isDeviceLoad() const { return mode == Mode::DeviceLoad; }
+    virtual bool isDeviceReferenceLoad() const { return mode == Mode::DeviceReference; }
     virtual bool requiresBatchInput() const { return mode != Mode::PassThrough; }
 
     /**
-     * Configures how runtime batch tensors are loaded. Same-GPU batch tensors
-     * use DeviceLoad: the source is copied directly into the statically wired
-     * featureOutput on the processing stream and no NetworkInput staging ring
-     * is retained. All other/unknown placements use the regular staged path.
-     * Initial configuration must precede preallocateInputSlots(). Repeating the
-     * same configuration is harmless, and DeviceLoad may switch to staged loading
-     * before submission because it has no allocated input slots.
+     * Configures how runtime batch values are loaded. Same-GPU materialized
+     * tensors use DeviceLoad and copy directly into featureOutput. Device
+     * references use a ring of small reference descriptors whose materializers
+     * write directly into featureOutput. Other or unknown tensor placements use
+     * the regular full-tensor staging ring. Initial configuration must precede
+     * preallocateInputSlots().
      */
-    virtual void configureBatchInputPlacement(std::optional<TensorPlacement> batchTensorPlacement) {
+    virtual void configureBatchInputSource(const Thor::BatchFieldSourceDescription& source) {
         THOR_THROW_IF_FALSE(!isPassThrough());
-        const bool directDeviceLoad = batchTensorPlacement.has_value() &&
-                                      batchTensorPlacement.value().getMemDevice() == TensorPlacement::MemDevices::GPU &&
-                                      networkPlacement.getMemDevice() == TensorPlacement::MemDevices::GPU &&
-                                      batchTensorPlacement.value() == networkPlacement;
-        const Mode requestedMode = directDeviceLoad ? Mode::DeviceLoad : Mode::ExternalLoad;
+
+        Mode requestedMode = Mode::ExternalLoad;
+        if (source.kind == Thor::BatchFieldSourceKind::DEVICE_REFERENCE) {
+            THOR_THROW_IF_FALSE(source.placement.has_value());
+            THOR_THROW_IF_FALSE(source.placement.value().getMemDevice() == TensorPlacement::MemDevices::GPU);
+            THOR_THROW_IF_FALSE(networkPlacement.getMemDevice() == TensorPlacement::MemDevices::GPU);
+            THOR_THROW_IF_FALSE(source.placement.value() == networkPlacement);
+            requestedMode = Mode::DeviceReference;
+        } else {
+            const bool directDeviceLoad = source.placement.has_value() &&
+                                          source.placement.value().getMemDevice() == TensorPlacement::MemDevices::GPU &&
+                                          networkPlacement.getMemDevice() == TensorPlacement::MemDevices::GPU &&
+                                          source.placement.value() == networkPlacement;
+            requestedMode = directDeviceLoad ? Mode::DeviceLoad : Mode::ExternalLoad;
+        }
 
         // Setup may be repeated with the same mode after slots have been
-        // allocated. This is needed when BEST_EFFORT device-dataset startup
-        // falls back to the source session: already-staged inputs remain
-        // ExternalLoad, while direct inputs (which have no slots) switch to
-        // ExternalLoad and allocate their rings. A real mode change after slot
-        // allocation is still forbidden because queued users could reference
-        // those buffers.
+        // allocated. A real mode change after slot allocation is forbidden
+        // because queued users may still own those slot payloads.
         if (!inputSlots.empty()) {
             THOR_THROW_IF_FALSE(mode == requestedMode);
             return;
@@ -122,6 +132,10 @@ class NetworkInput : public Layer {
 
         mode = requestedMode;
         activeInputSlot = 0;
+    }
+
+    virtual void configureBatchInputPlacement(std::optional<TensorPlacement> batchTensorPlacement) {
+        configureBatchInputSource(Thor::BatchFieldSourceDescription::materialized(batchTensorPlacement));
     }
 
     [[nodiscard]] virtual uint32_t getNumInputSlots() const { return static_cast<uint32_t>(inputSlots.size()); }
@@ -235,22 +249,49 @@ class NetworkInput : public Layer {
                          bool validationPass,
                          Event copyToSourceTensorFinished,
                          uint32_t batchSize = 0) {
+        forward(
+            featureInput,
+            validationPass,
+            copyToSourceTensorFinished,
+            batchSize,
+            std::nullopt);
+    }
+
+    virtual void forward(
+        std::optional<Tensor> featureInput,
+        bool validationPass,
+        Event copyToSourceTensorFinished,
+        uint32_t batchSize,
+        std::optional<Thor::BatchSourceReference> sourceReference) {
         if (isPassThrough() || isDeviceLoad()) {
             stream.waitEvent(copyToSourceTensorFinished);
         } else {
             loadStream.waitEvent(copyToSourceTensorFinished);
         }
-        forward(featureInput, validationPass, batchSize);
+        forward(
+            featureInput,
+            validationPass,
+            batchSize,
+            std::move(sourceReference));
     }
 
     // Only called for input endpoints
     // This version of forward expects that the memory in featureInput has already been populated before forward is called.
     void forward(std::optional<Tensor> featureInput, bool validationPass, uint32_t batchSize = 0) override {
+        forward(featureInput, validationPass, batchSize, std::nullopt);
+    }
+
+    virtual void forward(
+        std::optional<Tensor> featureInput,
+        bool validationPass,
+        uint32_t batchSize,
+        std::optional<Thor::BatchSourceReference> sourceReference) {
         const bool emitDiagnostics = layerSubmitDiagnosticsActive();
         const auto totalStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
         if (isPassThrough()) {
             validateOptionalForwardTensorMatchesPassThrough(featureInput);
         } else {
+            THOR_THROW_IF_FALSE(!isDeviceReferenceLoad());
             THOR_THROW_IF_FALSE(contentDimensions.has_value() == featureInput.has_value());
 
             if (contentDimensions.has_value())
@@ -263,14 +304,16 @@ class NetworkInput : public Layer {
         if (contentDimensions.has_value() && !isPassThrough()) {
             THOR_THROW_IF_FALSE(featureOutput.has_value());
             if (isDeviceLoad()) {
-                // Device-resident session slots already keep each in-flight
-                // batch alive until processing completion. Copy directly from
-                // that same-GPU source into the statically connected feature
-                // tensor; a second NetworkInput-owned staging ring would only
-                // duplicate max_in_flight batch storage.
+                // Same-GPU materialized inputs copy directly into the statically
+                // connected feature tensor. The source-resource event recorded
+                // immediately after this copy lets its session slot recycle
+                // independently of downstream network completion.
                 THOR_THROW_IF_FALSE(featureInput.value().getPlacement() == networkPlacement);
                 THOR_THROW_IF_FALSE(networkPlacement.getMemDevice() == TensorPlacement::MemDevices::GPU);
                 featureOutput.value().copyFromAsync(featureInput.value(), stream);
+                if (sourceReference.has_value()) {
+                    sourceReference->recordConsumption(stream);
+                }
             } else {
                 if (inputSlots.empty()) {
                     // Non-queued inference callers do not preallocate slots.
@@ -290,6 +333,9 @@ class NetworkInput : public Layer {
 
                 // Copy into the slot-local prefetch buffer using the upload stream.
                 slot.outputBuffer.value().copyFromAsync(featureInput.value(), loadStream);
+                if (sourceReference.has_value()) {
+                    sourceReference->recordConsumption(loadStream);
+                }
                 loadStream.putEvent(slot.outputBufferLoadedEvent);
                 stream.waitEvent(slot.outputBufferLoadedEvent);
 
@@ -300,6 +346,9 @@ class NetworkInput : public Layer {
                 featureOutput.value().copyFromAsync(slot.outputBuffer.value(), stream);
                 stream.putEvent(slot.outputBufferWritableEvent);
             }
+        }
+        if (!contentDimensions.has_value() && sourceReference.has_value()) {
+            sourceReference->recordConsumption(stream);
         }
         if (emitDiagnostics) {
             copyMicros = layerSubmitDiagnosticElapsedMicros(copyStart, layerSubmitDiagnosticNow());
@@ -332,6 +381,83 @@ class NetworkInput : public Layer {
         }
     }
 
+
+    // Only called for input endpoints configured for reference-valued batch fields.
+    // The small reference value is retained in the selected NetworkInput ring slot;
+    // its materializer writes directly into the statically connected featureOutput.
+    virtual void forward(const Thor::DeviceBatchReference& deviceBatchReference,
+                         bool validationPass,
+                         uint32_t batchSize = 0) {
+        forward(
+            deviceBatchReference,
+            validationPass,
+            batchSize,
+            std::nullopt);
+    }
+
+    virtual void forward(
+        const Thor::DeviceBatchReference& deviceBatchReference,
+        bool validationPass,
+        uint32_t batchSize,
+        std::optional<Thor::BatchSourceReference> sourceReference) {
+        THOR_THROW_IF_FALSE(isDeviceReferenceLoad());
+        THOR_THROW_IF_FALSE(deviceBatchReference.isInitialized());
+        THOR_THROW_IF_FALSE(contentDimensions.has_value());
+        THOR_THROW_IF_FALSE(featureOutput.has_value());
+        THOR_THROW_IF_FALSE(deviceBatchReference.getOutputDescriptor() == featureOutput.value().getDescriptor());
+        THOR_THROW_IF_FALSE(deviceBatchReference.getOutputPlacement() == networkPlacement);
+        if (batchSize == 0) {
+            batchSize = deviceBatchReference.getBatchSize();
+        }
+        THOR_THROW_IF_FALSE(batchSize == deviceBatchReference.getBatchSize());
+
+        const bool emitDiagnostics = layerSubmitDiagnosticsActive();
+        const auto totalStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
+        const auto materializeStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
+
+        if (inputSlots.empty()) {
+            // Synchronous callers retain the existing lazy slot-zero behavior.
+            allocateInputSlots(1);
+        }
+        THOR_THROW_IF_FALSE(activeInputSlot < inputSlots.size());
+        InputSlot& slot = inputSlots[activeInputSlot];
+        THOR_THROW_IF_FALSE(!slot.outputBuffer.has_value());
+        slot.deviceBatchReference = deviceBatchReference;
+        slot.deviceBatchReference.value().enqueueMaterialization(featureOutput.value(), stream);
+        if (sourceReference.has_value()) {
+            sourceReference->recordConsumption(stream);
+        }
+
+        const uint64_t materializeMicros =
+            emitDiagnostics ? layerSubmitDiagnosticElapsedMicros(materializeStart, layerSubmitDiagnosticNow()) : 0;
+
+        if (!nextLayer.has_value()) {
+            if (emitDiagnostics) {
+                emitLayerSubmitDiagnostic(
+                    "network_input_forward_reference",
+                    layerSubmitDiagnosticLabel("NetworkInput", getId(), getName()),
+                    getId(),
+                    layerSubmitDiagnosticElapsedMicros(totalStart, layerSubmitDiagnosticNow()),
+                    {{"materialize_us", materializeMicros}, {"downstream_us", 0}, {"has_content", 1UL}});
+            }
+            return;
+        }
+
+        const auto downstreamStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
+        nextLayer.value()->forward(featureOutput, validationPass, batchSize);
+        const uint64_t downstreamMicros =
+            emitDiagnostics ? layerSubmitDiagnosticElapsedMicros(downstreamStart, layerSubmitDiagnosticNow()) : 0;
+
+        if (emitDiagnostics) {
+            emitLayerSubmitDiagnostic(
+                "network_input_forward_reference",
+                layerSubmitDiagnosticLabel("NetworkInput", getId(), getName()),
+                getId(),
+                layerSubmitDiagnosticElapsedMicros(totalStart, layerSubmitDiagnosticNow()),
+                {{"materialize_us", materializeMicros}, {"downstream_us", downstreamMicros}, {"has_content", 1UL}});
+        }
+    }
+
     void backward(std::optional<Tensor> incomingErrorInput, uint32_t batchSize = 0) override {
         if (!isPassThrough()) {
             return;
@@ -351,6 +477,7 @@ class NetworkInput : public Layer {
    protected:
     struct InputSlot {
         std::optional<Tensor> outputBuffer;
+        std::optional<Thor::DeviceBatchReference> deviceBatchReference;
         Event outputBufferLoadedEvent;
         Event outputBufferWritableEvent;
     };
@@ -364,11 +491,17 @@ class NetworkInput : public Layer {
         }
         THOR_THROW_IF_FALSE(inputSlots.empty());
         InputSlot slot;
-        slot.outputBuffer = createFeatureOutputTensor();
-        // Pre-initialize and record the slot-local events so the hot path never
-        // allocates Events and first use can wait on already-complete events.
-        loadStream.putEvent(slot.outputBufferLoadedEvent);
-        loadStream.putEvent(slot.outputBufferWritableEvent);
+        if (isDeviceReferenceLoad()) {
+            // The slot retains only the small type-erased reference.  Its
+            // materializer writes directly into featureOutput on stream.
+            slot.outputBuffer = std::nullopt;
+        } else {
+            slot.outputBuffer = createFeatureOutputTensor();
+            // Pre-initialize and record the slot-local events so the hot path never
+            // allocates Events and first use can wait on already-complete events.
+            loadStream.putEvent(slot.outputBufferLoadedEvent);
+            loadStream.putEvent(slot.outputBufferWritableEvent);
+        }
         inputSlots.push_back(slot);
     }
 
@@ -420,10 +553,14 @@ class NetworkInput : public Layer {
 
         while (inputSlots.size() < numSlots) {
             InputSlot slot;
-            slot.outputBuffer = createFeatureOutputTensor();
-            // Eagerly allocate/reuse-initialize the events as well as the tensor.
-            loadStream.putEvent(slot.outputBufferLoadedEvent);
-            loadStream.putEvent(slot.outputBufferWritableEvent);
+            if (isDeviceReferenceLoad()) {
+                slot.outputBuffer = std::nullopt;
+            } else {
+                slot.outputBuffer = createFeatureOutputTensor();
+                // Eagerly allocate/reuse-initialize the events as well as the tensor.
+                loadStream.putEvent(slot.outputBufferLoadedEvent);
+                loadStream.putEvent(slot.outputBufferWritableEvent);
+            }
             inputSlots.push_back(slot);
         }
     }

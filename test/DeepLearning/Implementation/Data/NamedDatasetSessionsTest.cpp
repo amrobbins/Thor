@@ -9,8 +9,13 @@
 #include "DeepLearning/Implementation/Data/Residency/NamedDatasetRuntimeAccess.h"
 #include "DeepLearning/Implementation/Training/DeviceStartupCoordinator.h"
 #include "Utilities/Data/Readers/IndexedDatasetReader.h"
+#include "Utilities/Common/LowPrecisionFloat.h"
 #include "DeepLearning/Api/Data/DatasetWriter.h"
 #include "DeepLearning/Implementation/Data/Materialization/NamedDatasetMaterializer.h"
+#include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
+#include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
+#include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Network/PlacedNetwork.h"
 
 #include "cuda_runtime.h"
 
@@ -581,6 +586,14 @@ vector<float> tensorValuesOnHost(const Tensor &tensor) {
     return tensorValues(host);
 }
 
+Tensor materializeDeviceBatchReference(const Thor::DeviceBatchReference &reference) {
+    Tensor destination(reference.getOutputPlacement(), reference.getOutputDescriptor());
+    Stream stream(reference.getOutputPlacement());
+    reference.enqueueMaterialization(destination, stream);
+    stream.synchronize();
+    return destination;
+}
+
 void expectTensorValuesOnHost(const Tensor &tensor, const vector<float> &expected) {
     ASSERT_EQ(tensor.getDescriptor().getArraySizeInBytes(), expected.size() * sizeof(float));
     const vector<float> actual = tensorValuesOnHost(tensor);
@@ -599,7 +612,7 @@ vector<uint8_t> uint8TensorValuesOnHost(const Tensor &tensor) {
         stream.synchronize();
     }
     const uint64_t count = host.getDescriptor().getArraySizeInBytes();
-    const uint8_t *actual = host.getMemPtr<uint8_t>();
+    const uint8_t *actual = reinterpret_cast<const uint8_t *>(host.getMemPtr<void>());
     return vector<uint8_t>(actual, actual + count);
 }
 
@@ -750,6 +763,90 @@ void writeWindowedMaterializerDataset(const std::filesystem::path &datasetPath) 
                                                                           .starts = starts.data(),
                                                                           .count = 3}}});
     writer.close();
+}
+
+
+DatasetLayout lowPrecisionPaddingLayout() {
+    return DatasetLayout::fromTensorShapes(
+        {},
+        {DatasetLayout::WindowedTensorSourceShape("fp16_source", {}, DataType::FP16, DataType::UINT64),
+         DatasetLayout::WindowedTensorSourceShape("bf16_source", {}, DataType::BF16, DataType::UINT64),
+         DatasetLayout::WindowedTensorSourceShape("fp8_e4m3_source", {}, DataType::FP8_E4M3, DataType::UINT64),
+         DatasetLayout::WindowedTensorSourceShape("fp8_e5m2_source", {}, DataType::FP8_E5M2, DataType::UINT64)},
+        {DatasetLayout::WindowedTensorShape("fp16_window", {3}, "fp16_source", DataType::INT64, 1.5),
+         DatasetLayout::WindowedTensorShape("bf16_window", {3}, "bf16_source", DataType::INT64, -2.25),
+         DatasetLayout::WindowedTensorShape("fp8_e4m3_window", {3}, "fp8_e4m3_source", DataType::INT64, 1.5),
+         DatasetLayout::WindowedTensorShape("fp8_e5m2_window", {3}, "fp8_e5m2_source", DataType::INT64, -2.25)});
+}
+
+void writeLowPrecisionPaddingDataset(const std::filesystem::path &datasetPath) {
+    DatasetLayout layout = lowPrecisionPaddingLayout();
+    DatasetWriter writer(datasetPath, layout, 1);
+
+    const uint64_t sourceKey = 73;
+    const uint16_t fp16Source = 0x4000u;   // 2.0
+    const uint16_t bf16Source = 0x4040u;   // 3.0
+    const uint8_t fp8E4m3Source = 0x48u;   // 4.0
+    const uint8_t fp8E5m2Source = 0x45u;   // 5.0
+    writer.writeWindowSource(
+        "fp16_source",
+        DatasetWriter::WindowedTensorSourceView{.dataType = DataType::FP16,
+                                                 .key = &sourceKey,
+                                                 .startIndex = 0,
+                                                 .dimensions = {1},
+                                                 .data = &fp16Source,
+                                                 .numBytes = sizeof(fp16Source)});
+    writer.writeWindowSource(
+        "bf16_source",
+        DatasetWriter::WindowedTensorSourceView{.dataType = DataType::BF16,
+                                                 .key = &sourceKey,
+                                                 .startIndex = 0,
+                                                 .dimensions = {1},
+                                                 .data = &bf16Source,
+                                                 .numBytes = sizeof(bf16Source)});
+    writer.writeWindowSource(
+        "fp8_e4m3_source",
+        DatasetWriter::WindowedTensorSourceView{.dataType = DataType::FP8_E4M3,
+                                                 .key = &sourceKey,
+                                                 .startIndex = 0,
+                                                 .dimensions = {1},
+                                                 .data = &fp8E4m3Source,
+                                                 .numBytes = sizeof(fp8E4m3Source)});
+    writer.writeWindowSource(
+        "fp8_e5m2_source",
+        DatasetWriter::WindowedTensorSourceView{.dataType = DataType::FP8_E5M2,
+                                                 .key = &sourceKey,
+                                                 .startIndex = 0,
+                                                 .dimensions = {1},
+                                                 .data = &fp8E5m2Source,
+                                                 .numBytes = sizeof(fp8E5m2Source)});
+
+    const vector<uint64_t> keys{sourceKey};
+    const vector<int64_t> starts{-1};
+    map<string, DatasetWriter::WindowedTensorReferenceBatchView> references;
+    for (const string &name : {string("fp16_window"),
+                               string("bf16_window"),
+                               string("fp8_e4m3_window"),
+                               string("fp8_e5m2_window")}) {
+        references.emplace(
+            name,
+            DatasetWriter::WindowedTensorReferenceBatchView{.keyDataType = DataType::UINT64,
+                                                              .indexDataType = DataType::INT64,
+                                                              .keys = keys.data(),
+                                                              .starts = starts.data(),
+                                                              .count = 1});
+    }
+    writer.writeIndexedExamples({}, references);
+    writer.close();
+}
+
+const map<string, vector<uint8_t>> &lowPrecisionPaddedBytes() {
+    static const map<string, vector<uint8_t>> expected{
+        {"fp16_window", {0x00u, 0x3eu, 0x00u, 0x40u, 0x00u, 0x3eu}},
+        {"bf16_window", {0x10u, 0xc0u, 0x40u, 0x40u, 0x10u, 0xc0u}},
+        {"fp8_e4m3_window", {0x3cu, 0x48u, 0x3cu}},
+        {"fp8_e5m2_window", {0xc0u, 0x45u, 0xc0u}}};
+    return expected;
 }
 
 
@@ -1043,6 +1140,63 @@ TEST(IndexedDatasetReaderTest, ExposesLayoutOrdinalsAndUsesAsyncReadvIntoOrdinal
     ASSERT_EQ(stats.resolvedIoBackends.size(), 1);
     EXPECT_TRUE(isReadvBackendName(stats.resolvedIoBackends.front())) << stats.resolvedIoBackends.front();
 
+    std::filesystem::remove_all(datasetPath);
+}
+
+
+TEST(LowPrecisionFloatEncodingTest, ConvertsFloatUsingRoundToNearestEvenAndCudaFiniteFp8Saturation) {
+    EXPECT_EQ(ThorLowPrecision::floatToFp16Bits(1.5f), 0x3e00u);
+    EXPECT_EQ(ThorLowPrecision::floatToFp16Bits(65519.0f), 0x7bffu);
+    EXPECT_EQ(ThorLowPrecision::floatToFp16Bits(65520.0f), 0x7c00u);
+    EXPECT_EQ(ThorLowPrecision::floatToBf16Bits(-2.25f), 0xc010u);
+
+    EXPECT_EQ(ThorLowPrecision::floatToFp8E4M3Bits(1.5f), 0x3cu);
+    EXPECT_EQ(ThorLowPrecision::floatToFp8E4M3Bits(448.0f), 0x7eu);
+    EXPECT_EQ(ThorLowPrecision::floatToFp8E4M3Bits(500.0f), 0x7eu);
+    EXPECT_EQ(ThorLowPrecision::floatToFp8E5M2Bits(-2.25f), 0xc0u);
+    EXPECT_EQ(ThorLowPrecision::floatToFp8E5M2Bits(60000.0f), 0x7bu);
+}
+
+TEST(LowPrecisionFloatEncodingTest, ConvertsDoubleUsingRoundToNearestEvenAndCudaFiniteFp8Saturation) {
+    EXPECT_EQ(ThorLowPrecision::doubleToFp16Bits(1.5), 0x3e00u);
+    EXPECT_EQ(ThorLowPrecision::doubleToFp16Bits(65519.0), 0x7bffu);
+    EXPECT_EQ(ThorLowPrecision::doubleToFp16Bits(65520.0), 0x7c00u);
+    EXPECT_EQ(ThorLowPrecision::doubleToBf16Bits(-2.25), 0xc010u);
+
+    EXPECT_EQ(ThorLowPrecision::doubleToFp8E4M3Bits(1.5), 0x3cu);
+    EXPECT_EQ(ThorLowPrecision::doubleToFp8E4M3Bits(448.0), 0x7eu);
+    EXPECT_EQ(ThorLowPrecision::doubleToFp8E4M3Bits(500.0), 0x7eu);
+    EXPECT_EQ(ThorLowPrecision::doubleToFp8E5M2Bits(-2.25), 0xc0u);
+    EXPECT_EQ(ThorLowPrecision::doubleToFp8E5M2Bits(60000.0), 0x7bu);
+}
+
+TEST(IndexedDatasetReaderTest, SupportsNonZeroLowPrecisionWindowPadding) {
+    ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "pread_buffered");
+    const std::filesystem::path datasetPath =
+        makeTempDatasetPath("reader_low_precision_nonzero_padding");
+    DatasetLayout layout = lowPrecisionPaddingLayout();
+    writeLowPrecisionPaddingDataset(datasetPath);
+
+    std::shared_ptr<IndexedDatasetReader> reader =
+        IndexedDatasetReader::openDataset(datasetPath, layout);
+    map<string, uint64_t> storage;
+    vector<uint8_t *> windowDestinations(reader->getWindowedTensorCount(), nullptr);
+    vector<uint8_t *> maskDestinations(reader->getWindowedTensorCount(), nullptr);
+    for (const auto &[name, expected] : lowPrecisionPaddedBytes()) {
+        ASSERT_LE(expected.size(), sizeof(uint64_t));
+        storage.emplace(name, 0);
+        windowDestinations.at(reader->getLayoutWindowedTensorOrdinal(name)) =
+            reinterpret_cast<uint8_t *>(&storage.at(name));
+    }
+
+    std::unique_ptr<IndexedDatasetReader::Session> session = reader->createSession(1);
+    session->loadExampleInto(0, 0, {}, windowDestinations, maskDestinations);
+    session->drain();
+
+    for (const auto &[name, expected] : lowPrecisionPaddedBytes()) {
+        const uint8_t *actualBytes = reinterpret_cast<const uint8_t *>(&storage.at(name));
+        EXPECT_EQ(vector<uint8_t>(actualBytes, actualBytes + expected.size()), expected) << name;
+    }
     std::filesystem::remove_all(datasetPath);
 }
 
@@ -1597,6 +1751,54 @@ TEST(IndexedNamedBatchSessionTest, PrefillsMultipleReadyBatchesAndRecyclesReturn
     expectTensorValues(recycled.getTensor("seasonality_inputs"), {20.0f, 21.0f});
     recycledLease.reset();
 
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(IndexedNamedBatchSessionTest, SourceBuffersRecycleBeforeWholeBatchLeaseCompletes) {
+    const std::filesystem::path datasetPath =
+        makeTempDatasetPath("indexed_early_source_recycle");
+    DatasetLayout layout = testLayout();
+    writeCanonicalDataset(datasetPath, layout);
+
+    auto session = std::make_shared<TestIndexedNamedBatchSession>(
+        datasetPath,
+        layout,
+        vector<uint64_t>{0, 1, 2, 3},
+        vector<uint64_t>{},
+        vector<uint64_t>{},
+        2,
+        1,
+        false,
+        std::nullopt);
+
+    uint64_t firstBatchNum = 99;
+    BatchLease firstLease = session->leaseBatch(ExampleType::TRAIN, firstBatchNum);
+    ASSERT_TRUE(firstLease.get().allFieldsHaveSourceReferences());
+
+    // No physical consumer is registered in this unit test. Sealing the source
+    // owner therefore lets the recycler return the CPU tensor set immediately,
+    // while the original logical BatchLease intentionally remains alive.
+    firstLease.releaseSourceResourcesExcept();
+
+    auto nextLeaseFuture = std::async(std::launch::async, [session] {
+        uint64_t secondBatchNum = 99;
+        BatchLease lease = session->leaseBatch(ExampleType::TRAIN, secondBatchNum);
+        return std::make_pair(secondBatchNum, std::move(lease));
+    });
+    ASSERT_EQ(
+        nextLeaseFuture.wait_for(std::chrono::seconds(2)),
+        std::future_status::ready)
+        << "Indexed CPU buffers remained tied to whole-batch completion";
+
+    auto [secondBatchNum, secondLease] = nextLeaseFuture.get();
+    EXPECT_EQ(firstBatchNum, 0u);
+    EXPECT_EQ(secondBatchNum, 1u);
+    EXPECT_FALSE(firstLease.empty());
+    EXPECT_FALSE(secondLease.empty());
+
+    secondLease.reset();
+    firstLease.reset();
+    session.reset();
     std::filesystem::remove_all(datasetPath);
 }
 
@@ -2764,11 +2966,11 @@ TEST(DeviceResidentNamedBatchSessionTest, WindowedBatchesMatchSourceSession) {
     std::filesystem::remove_all(datasetPath);
 }
 
-TEST(DeviceDatasetStorageSelection, BestEffortPrioritizesWindowedFeaturesWhenFullDatasetDoesNotFit) {
+TEST(DeviceDatasetStorageSelection, BestEffortUsesFullCompactStorageWhenItFits) {
     requireCudaDevice("CUDA device is required for device dataset storage selection tests.");
     ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "pread_buffered");
 
-    const std::filesystem::path datasetPath = makeTempDatasetPath("device_storage_selects_windowed_hybrid");
+    const std::filesystem::path datasetPath = makeTempDatasetPath("device_storage_selects_full_compact");
     DatasetLayout layout = materializerWindowedLayout();
     writeWindowedMaterializerDataset(datasetPath);
 
@@ -2783,8 +2985,22 @@ TEST(DeviceDatasetStorageSelection, BestEffortPrioritizesWindowedFeaturesWhenFul
         false,
         std::nullopt);
 
+    const Thor::DatasetMaterializationDescription datasetDescription =
+        materializationDescription(*sourceSession);
+    const Thor::DeviceDatasetSessionDescription sessionDescription =
+        deviceSessionDescription(*sourceSession);
+    EXPECT_EQ(
+        Thor::estimateDeviceResidentNamedDatasetStorageBytes(datasetDescription),
+        108u);
+    EXPECT_EQ(
+        Thor::estimateDeviceResidentNamedDatasetRequiredBytes(
+            datasetDescription,
+            sessionDescription,
+            1),
+        124u);
+
     const uint64_t availableBytes =
-        ThorImplementation::DEVICE_STARTUP_SAFETY_RESERVE_BYTES + 92;
+        ThorImplementation::DEVICE_STARTUP_SAFETY_RESERVE_BYTES + 124;
     Thor::DeviceDatasetStorageSelection selection =
         selectDeviceStorage(
             sourceSession,
@@ -2794,21 +3010,42 @@ TEST(DeviceDatasetStorageSelection, BestEffortPrioritizesWindowedFeaturesWhenFul
             /*availableBytesOverride=*/availableBytes);
 
     EXPECT_TRUE(selection.report.used);
-    EXPECT_EQ(selection.report.reason, "windowed_features_only");
-    EXPECT_EQ(selection.report.requiredBytes, 91u);
+    EXPECT_EQ(selection.report.reason, "compact_file_residency");
+    EXPECT_EQ(selection.report.requiredBytes, 124u);
+    EXPECT_EQ(selection.report.residentBytes, 108u);
     EXPECT_EQ(selection.report.examples, 3u);
     EXPECT_NE(selection.session, sourceSession);
-    EXPECT_NE(
+    auto residentSession =
         std::dynamic_pointer_cast<DeviceResidentWindowedNamedBatchSession>(
-            selection.session),
-        nullptr);
+            selection.session);
+    ASSERT_NE(residentSession, nullptr);
+    const std::shared_ptr<const DeviceResidentNamedDataset> &resident =
+        residentSession->getWindowedDeviceDataset();
+    ASSERT_NE(resident, nullptr);
+    EXPECT_TRUE(resident->usesCompactFileStorage());
+    EXPECT_EQ(resident->compactRecordBytes(), 60u);
+    EXPECT_EQ(resident->compactSourceBytes(), 16u);
+    EXPECT_EQ(resident->compactMetadataBytes(), 32u);
+    EXPECT_EQ(resident->totalBytes(), 108u);
+    EXPECT_TRUE(resident->hasCompactDirectField("dense"));
+    EXPECT_TRUE(resident->hasCompactWindowField("history"));
+    EXPECT_TRUE(resident->hasCompactWindowField("history_mask"));
+    EXPECT_FALSE(resident->hasTensor("history"));
+    EXPECT_FALSE(resident->hasTensor("history_mask"));
     EXPECT_NE(std::dynamic_pointer_cast<Thor::BatchSession>(selection.session), nullptr);
     EXPECT_EQ(selection.session->getDatasetName(), "dataset");
+
+    uint64_t batchNum = 99;
+    BatchLease compactLease = selection.session->leaseBatch(ExampleType::TRAIN, batchNum);
+    EXPECT_TRUE(compactLease.get().isDeviceBatchReference("dense"));
+    EXPECT_TRUE(compactLease.get().isDeviceBatchReference("history"));
+    EXPECT_TRUE(compactLease.get().isDeviceBatchReference("history_mask"));
+    compactLease.reset();
 
     std::filesystem::remove_all(datasetPath);
 }
 
-TEST(DeviceResidentWindowedNamedBatchSessionTest, UsesCanonicalDeviceWindowsAndCpuDirectTensors) {
+TEST(DeviceResidentWindowedNamedBatchSessionTest, ReturnsCompactDeviceWindowReferencesAndCpuDirectTensors) {
     requireCudaDevice("CUDA device is required for hybrid windowed device loader tests.");
     ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "pread_buffered");
 
@@ -2828,13 +3065,16 @@ TEST(DeviceResidentWindowedNamedBatchSessionTest, UsesCanonicalDeviceWindowsAndC
         std::nullopt);
     Thor::DatasetMaterializationDescription datasetDescription =
         materializationDescription(sourceSession);
-    MaterializedNamedDatasetSnapshot snapshot = materializeNamedDatasetSnapshot(
+    auto resident = DeviceResidentNamedDataset::fromCompactFileDataset(
         datasetDescription,
-        2);
-    auto resident = DeviceResidentNamedDataset::fromSnapshot(
-        snapshot,
         TensorPlacement(TensorPlacement::MemDevices::GPU, 0),
         std::set<string>{"history", "history_mask"});
+    EXPECT_TRUE(resident->usesCompactFileStorage());
+    EXPECT_EQ(resident->compactRecordBytes(), 60u);
+    EXPECT_EQ(resident->compactSourceBytes(), 16u);
+    EXPECT_EQ(resident->compactMetadataBytes(), 32u);
+    EXPECT_EQ(resident->totalBytes(), 108u);
+    EXPECT_FALSE(resident->hasTensor("history"));
     TestDeviceResidentWindowedNamedBatchSession deviceSession(
         datasetDescription,
         deviceSessionDescription(sourceSession),
@@ -2845,43 +3085,522 @@ TEST(DeviceResidentWindowedNamedBatchSessionTest, UsesCanonicalDeviceWindowsAndC
     EXPECT_EQ(
         deviceSession.getBatchTensorPlacement("dense").value().getMemDevice(),
         TensorPlacement::MemDevices::CPU);
-    ASSERT_TRUE(deviceSession.getBatchTensorPlacement("history").has_value());
-    EXPECT_EQ(
-        deviceSession.getBatchTensorPlacement("history").value(),
-        TensorPlacement(TensorPlacement::MemDevices::GPU, 0));
-    ASSERT_TRUE(deviceSession.getBatchTensorPlacement("history_mask").has_value());
-    EXPECT_EQ(
-        deviceSession.getBatchTensorPlacement("history_mask").value(),
-        TensorPlacement(TensorPlacement::MemDevices::GPU, 0));
+    EXPECT_FALSE(deviceSession.getBatchTensorPlacement("history").has_value());
+    EXPECT_FALSE(deviceSession.getBatchTensorPlacement("history_mask").has_value());
     EXPECT_FALSE(deviceSession.getBatchTensorPlacement("missing").has_value());
+
+    const Thor::BatchFieldSourceDescription denseSource =
+        deviceSession.getBatchFieldSourceDescription("dense");
+    EXPECT_EQ(denseSource.kind, Thor::BatchFieldSourceKind::MATERIALIZED_TENSOR);
+    ASSERT_TRUE(denseSource.placement.has_value());
+    EXPECT_EQ(denseSource.placement->getMemDevice(), TensorPlacement::MemDevices::CPU);
+
+    const Thor::BatchFieldSourceDescription historySource =
+        deviceSession.getBatchFieldSourceDescription("history");
+    EXPECT_EQ(historySource.kind, Thor::BatchFieldSourceKind::DEVICE_REFERENCE);
+    ASSERT_TRUE(historySource.placement.has_value());
+    EXPECT_EQ(
+        historySource.placement.value(),
+        TensorPlacement(TensorPlacement::MemDevices::GPU, 0));
 
     uint64_t sourceBatchNum = 99;
     uint64_t deviceBatchNum = 99;
     BatchLease sourceBatchLease = sourceSession.leaseBatch(ExampleType::TRAIN, sourceBatchNum);
-
-    const Batch& sourceBatch = sourceBatchLease.get();
     BatchLease deviceBatchLease = deviceSession.leaseBatch(ExampleType::TRAIN, deviceBatchNum);
 
+    const Batch& sourceBatch = sourceBatchLease.get();
     const Batch& deviceBatch = deviceBatchLease.get();
     EXPECT_EQ(deviceBatchNum, sourceBatchNum);
-    EXPECT_EQ(
-        deviceBatch.getTensor("dense").getPlacement().getMemDevice(),
-        TensorPlacement::MemDevices::CPU);
-    EXPECT_EQ(
-        deviceBatch.getTensor("history").getPlacement().getMemDevice(),
-        TensorPlacement::MemDevices::GPU);
+    EXPECT_TRUE(deviceBatch.isTensor("dense"));
+    EXPECT_TRUE(deviceBatch.isDeviceBatchReference("history"));
+    EXPECT_TRUE(deviceBatch.isDeviceBatchReference("history_mask"));
     EXPECT_EQ(
         tensorValuesOnHost(deviceBatch.getTensor("dense")),
         tensorValues(sourceBatch.getTensor("dense")));
+
+    Tensor materializedHistory = materializeDeviceBatchReference(
+        deviceBatch.getDeviceBatchReference("history"));
+    Tensor materializedMask = materializeDeviceBatchReference(
+        deviceBatch.getDeviceBatchReference("history_mask"));
     EXPECT_EQ(
-        tensorValuesOnHost(deviceBatch.getTensor("history")),
+        tensorValuesOnHost(materializedHistory),
         tensorValues(sourceBatch.getTensor("history")));
     EXPECT_EQ(
-        uint8TensorValuesOnHost(deviceBatch.getTensor("history_mask")),
+        uint8TensorValuesOnHost(materializedMask),
         uint8TensorValuesOnHost(sourceBatch.getTensor("history_mask")));
 
     sourceBatchLease.reset();
     deviceBatchLease.reset();
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(DeviceResidentWindowedNamedBatchSessionTest, FullCompactResidencyReturnsDirectAndWindowReferences) {
+    requireCudaDevice("CUDA device is required for full compact device loader tests.");
+    ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "pread_buffered");
+
+    const std::filesystem::path datasetPath =
+        makeTempDatasetPath("device_resident_loader_full_compact");
+    DatasetLayout layout = materializerWindowedLayout();
+    writeWindowedMaterializerDataset(datasetPath);
+
+    TestIndexedNamedBatchSession sourceSession(
+        datasetPath,
+        layout,
+        {2, 0, 1},
+        {},
+        vector<uint64_t>{},
+        2,
+        1,
+        false,
+        std::nullopt);
+    Thor::DatasetMaterializationDescription datasetDescription =
+        materializationDescription(sourceSession);
+    auto resident = DeviceResidentNamedDataset::fromCompactFileDataset(
+        datasetDescription,
+        TensorPlacement(TensorPlacement::MemDevices::GPU, 0),
+        std::set<string>{"dense", "history", "history_mask"});
+
+    EXPECT_TRUE(resident->usesCompactFileStorage());
+    EXPECT_TRUE(resident->hasCompactDirectField("dense"));
+    EXPECT_TRUE(resident->hasCompactWindowField("history"));
+    EXPECT_TRUE(resident->hasCompactWindowField("history_mask"));
+    EXPECT_EQ(resident->compactRecordBytes(), 60u);
+    EXPECT_EQ(resident->totalBytes(), 108u);
+
+    TestDeviceResidentWindowedNamedBatchSession deviceSession(
+        datasetDescription,
+        deviceSessionDescription(sourceSession),
+        resident,
+        1,
+        0);
+
+    EXPECT_FALSE(deviceSession.getBatchTensorPlacement("dense").has_value());
+    EXPECT_EQ(
+        deviceSession.getBatchFieldSourceDescription("dense").kind,
+        Thor::BatchFieldSourceKind::DEVICE_REFERENCE);
+
+    uint64_t sourceBatchNum = 99;
+    uint64_t deviceBatchNum = 99;
+    BatchLease sourceBatchLease = sourceSession.leaseBatch(ExampleType::TRAIN, sourceBatchNum);
+    BatchLease deviceBatchLease = deviceSession.leaseBatch(ExampleType::TRAIN, deviceBatchNum);
+    ASSERT_EQ(deviceBatchNum, sourceBatchNum);
+
+    const Batch &sourceBatch = sourceBatchLease.get();
+    const Batch &deviceBatch = deviceBatchLease.get();
+    EXPECT_TRUE(deviceBatch.isDeviceBatchReference("dense"));
+    EXPECT_TRUE(deviceBatch.isDeviceBatchReference("history"));
+    EXPECT_TRUE(deviceBatch.isDeviceBatchReference("history_mask"));
+
+    Tensor dense = materializeDeviceBatchReference(
+        deviceBatch.getDeviceBatchReference("dense"));
+    Tensor history = materializeDeviceBatchReference(
+        deviceBatch.getDeviceBatchReference("history"));
+    Tensor historyMask = materializeDeviceBatchReference(
+        deviceBatch.getDeviceBatchReference("history_mask"));
+    EXPECT_EQ(
+        tensorValuesOnHost(dense),
+        tensorValues(sourceBatch.getTensor("dense")));
+    EXPECT_EQ(
+        tensorValuesOnHost(history),
+        tensorValues(sourceBatch.getTensor("history")));
+    EXPECT_EQ(
+        uint8TensorValuesOnHost(historyMask),
+        uint8TensorValuesOnHost(sourceBatch.getTensor("history_mask")));
+
+    sourceBatchLease.reset();
+    deviceBatchLease.reset();
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(DeviceDatasetStorageSelection, WindowResidencyFallsBackToHybridWhenDirectRecordsDoNotFit) {
+    requireCudaDevice("CUDA device is required for prioritized compact residency tests.");
+    ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "pread_buffered");
+    Thor::resetDeviceDatasetMemoryReservationsForTesting();
+
+    const std::filesystem::path datasetPath =
+        makeTempDatasetPath("device_storage_prioritizes_affine_windows");
+    DatasetLayout layout = denseAffineWindowLayout();
+    writeDenseAffineWindowDataset(datasetPath);
+
+    auto sourceSession = std::make_shared<TestIndexedNamedBatchSession>(
+        datasetPath,
+        layout,
+        vector<uint64_t>{0, 1},
+        vector<uint64_t>{},
+        vector<uint64_t>{},
+        2,
+        1,
+        false,
+        std::nullopt);
+    const Thor::DatasetMaterializationDescription description =
+        materializationDescription(*sourceSession);
+    const uint64_t windowResidentBytes =
+        DeviceResidentNamedDataset::estimateCompactFileDatasetBytes(
+            description,
+            std::set<string>{"history"});
+    const uint64_t fullResidentBytes =
+        DeviceResidentNamedDataset::estimateCompactFileDatasetBytes(
+            description,
+            std::set<string>{"dense", "history"});
+    ASSERT_GT(fullResidentBytes, windowResidentBytes);
+    const uint64_t selectionBytes = 2u * sizeof(uint64_t);
+    const uint64_t windowRequiredBytes = windowResidentBytes + selectionBytes;
+    const uint64_t fullRequiredBytes = fullResidentBytes + selectionBytes;
+    ASSERT_GT(fullRequiredBytes, windowRequiredBytes);
+
+    Thor::DeviceDatasetStorageSelection selection = selectDeviceStorage(
+        sourceSession,
+        Thor::DeviceDatasetStorage::BEST_EFFORT,
+        TensorPlacement(TensorPlacement::MemDevices::GPU, 0),
+        1,
+        ThorImplementation::DEVICE_STARTUP_SAFETY_RESERVE_BYTES +
+            windowRequiredBytes);
+
+    EXPECT_TRUE(selection.report.used);
+    EXPECT_EQ(selection.report.reason, "compact_windowed_residency");
+    EXPECT_EQ(selection.report.residentBytes, windowResidentBytes);
+    EXPECT_EQ(selection.report.requiredBytes, windowRequiredBytes);
+    auto residentSession =
+        std::dynamic_pointer_cast<DeviceResidentWindowedNamedBatchSession>(
+            selection.session);
+    ASSERT_NE(residentSession, nullptr);
+    const std::shared_ptr<const DeviceResidentNamedDataset> &resident =
+        residentSession->getWindowedDeviceDataset();
+    ASSERT_NE(resident, nullptr);
+    EXPECT_TRUE(resident->hasCompactWindowField("history"));
+    EXPECT_FALSE(resident->hasCompactDirectField("dense"));
+    EXPECT_EQ(
+        selection.session->getBatchFieldSourceDescription("dense").kind,
+        Thor::BatchFieldSourceKind::MATERIALIZED_TENSOR);
+    EXPECT_EQ(
+        selection.session->getBatchFieldSourceDescription("history").kind,
+        Thor::BatchFieldSourceKind::DEVICE_REFERENCE);
+
+    uint64_t batchNum = 99;
+    BatchLease lease = selection.session->leaseBatch(ExampleType::TRAIN, batchNum);
+    EXPECT_TRUE(lease.get().isTensor("dense"));
+    EXPECT_TRUE(lease.get().isDeviceBatchReference("history"));
+    lease.reset();
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(DeviceResidentWindowedNamedBatchSessionTest, CompactAffineReferencesMatchSourceReader) {
+    requireCudaDevice("CUDA device is required for compact affine window tests.");
+    ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "pread_buffered");
+
+    const std::filesystem::path datasetPath =
+        makeTempDatasetPath("device_resident_loader_compact_affine");
+    DatasetLayout layout = affineSharedWindowSourceLayout();
+    writeAffineSharedWindowSourceDataset(datasetPath);
+
+    TestIndexedNamedBatchSession sourceSession(
+        datasetPath,
+        layout,
+        {1, 0},
+        {},
+        vector<uint64_t>{},
+        2,
+        1,
+        false,
+        std::nullopt);
+    Thor::DatasetMaterializationDescription datasetDescription =
+        materializationDescription(sourceSession);
+    auto resident = DeviceResidentNamedDataset::fromCompactFileDataset(
+        datasetDescription,
+        TensorPlacement(TensorPlacement::MemDevices::GPU, 0),
+        std::set<string>{"examples", "labels"});
+
+    EXPECT_TRUE(resident->usesCompactFileStorage());
+    EXPECT_EQ(resident->compactRecordBytes(), 0u);
+    EXPECT_EQ(resident->compactSourceBytes(), 7u);
+    EXPECT_EQ(resident->compactMetadataBytes(), 32u + 2u * 48u);
+    EXPECT_EQ(resident->totalBytes(), 135u);
+
+    TestDeviceResidentWindowedNamedBatchSession deviceSession(
+        datasetDescription,
+        deviceSessionDescription(sourceSession),
+        resident,
+        1);
+
+    uint64_t sourceBatchNum = 99;
+    uint64_t deviceBatchNum = 99;
+    BatchLease sourceBatchLease = sourceSession.leaseBatch(ExampleType::TRAIN, sourceBatchNum);
+    BatchLease deviceBatchLease = deviceSession.leaseBatch(ExampleType::TRAIN, deviceBatchNum);
+    ASSERT_EQ(deviceBatchNum, sourceBatchNum);
+
+    const Batch &sourceBatch = sourceBatchLease.get();
+    const Batch &deviceBatch = deviceBatchLease.get();
+    Tensor examples = materializeDeviceBatchReference(
+        deviceBatch.getDeviceBatchReference("examples"));
+    Tensor labels = materializeDeviceBatchReference(
+        deviceBatch.getDeviceBatchReference("labels"));
+    EXPECT_EQ(
+        uint8TensorValuesOnHost(examples),
+        uint8TensorValuesOnHost(sourceBatch.getTensor("examples")));
+    EXPECT_EQ(
+        uint8TensorValuesOnHost(labels),
+        uint8TensorValuesOnHost(sourceBatch.getTensor("labels")));
+
+    sourceBatchLease.reset();
+    deviceBatchLease.reset();
+    std::filesystem::remove_all(datasetPath);
+}
+
+
+TEST(DeviceResidentWindowedNamedBatchSessionTest, CompactMaterializationSupportsNonZeroLowPrecisionPadding) {
+    requireCudaDevice("CUDA device is required for low-precision compact padding tests.");
+    ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "pread_buffered");
+
+    const std::filesystem::path datasetPath =
+        makeTempDatasetPath("compact_low_precision_nonzero_padding");
+    DatasetLayout layout = lowPrecisionPaddingLayout();
+    writeLowPrecisionPaddingDataset(datasetPath);
+
+    TestIndexedNamedBatchSession sourceSession(
+        datasetPath,
+        layout,
+        {0},
+        {},
+        vector<uint64_t>{},
+        1,
+        1,
+        false,
+        std::nullopt);
+    Thor::DatasetMaterializationDescription datasetDescription =
+        materializationDescription(sourceSession);
+    std::set<string> fieldNames;
+    for (const auto &[name, expected] : lowPrecisionPaddedBytes()) {
+        (void)expected;
+        fieldNames.insert(name);
+    }
+    auto resident = DeviceResidentNamedDataset::fromCompactFileDataset(
+        datasetDescription,
+        TensorPlacement(TensorPlacement::MemDevices::GPU, 0),
+        fieldNames);
+    TestDeviceResidentWindowedNamedBatchSession deviceSession(
+        datasetDescription,
+        deviceSessionDescription(sourceSession),
+        resident,
+        1,
+        0);
+
+    uint64_t sourceBatchNum = 99;
+    uint64_t deviceBatchNum = 99;
+    BatchLease sourceLease = sourceSession.leaseBatch(ExampleType::TRAIN, sourceBatchNum);
+    BatchLease deviceLease = deviceSession.leaseBatch(ExampleType::TRAIN, deviceBatchNum);
+    ASSERT_EQ(sourceBatchNum, deviceBatchNum);
+
+    for (const auto &[name, expected] : lowPrecisionPaddedBytes()) {
+        ASSERT_TRUE(deviceLease.get().isDeviceBatchReference(name)) << name;
+        Tensor materialized = materializeDeviceBatchReference(
+            deviceLease.get().getDeviceBatchReference(name));
+        EXPECT_EQ(uint8TensorValuesOnHost(sourceLease.get().getTensor(name)), expected) << name;
+        EXPECT_EQ(uint8TensorValuesOnHost(materialized), expected) << name;
+    }
+
+    sourceLease.reset();
+    deviceLease.reset();
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(DeviceResidentWindowedNamedBatchSessionTest, MixedReferenceBatchSubmitsThroughPlacedNetwork) {
+    requireCudaDevice("CUDA device is required for hybrid windowed device loader tests.");
+    ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "pread_buffered");
+
+    constexpr uint32_t batchSize = 2;
+    const std::filesystem::path datasetPath = makeTempDatasetPath("device_resident_loader_reference_network_submission");
+    DatasetLayout layout = materializerWindowedLayout();
+    writeWindowedMaterializerDataset(datasetPath);
+
+    TestIndexedNamedBatchSession sourceSession(
+        datasetPath,
+        layout,
+        {2, 0, 1},
+        {},
+        vector<uint64_t>{},
+        batchSize,
+        1,
+        false,
+        std::nullopt);
+    Thor::DatasetMaterializationDescription datasetDescription =
+        materializationDescription(sourceSession);
+    auto resident = DeviceResidentNamedDataset::fromCompactFileDataset(
+        datasetDescription,
+        TensorPlacement(TensorPlacement::MemDevices::GPU, 0),
+        std::set<string>{"history", "history_mask"});
+    TestDeviceResidentWindowedNamedBatchSession deviceSession(
+        datasetDescription,
+        deviceSessionDescription(sourceSession),
+        resident,
+        2);
+
+    Thor::Network network("hybrid_reference_batch_submission");
+    Thor::NetworkInput denseInput = Thor::NetworkInput::Builder()
+                                        .network(network)
+                                        .name("dense")
+                                        .dimensions({2})
+                                        .dataType(DataType::FP32)
+                                        .build();
+    Thor::NetworkInput historyInput = Thor::NetworkInput::Builder()
+                                          .network(network)
+                                          .name("history")
+                                          .dimensions({3, 1})
+                                          .dataType(DataType::FP32)
+                                          .build();
+    Thor::NetworkOutput::Builder()
+        .network(network)
+        .name("dense_output")
+        .inputTensor(denseInput.getFeatureOutput().value())
+        .dataType(DataType::FP32)
+        .build();
+    Thor::NetworkOutput::Builder()
+        .network(network)
+        .name("history_output")
+        .inputTensor(historyInput.getFeatureOutput().value())
+        .dataType(DataType::FP32)
+        .build();
+
+    std::vector<Event> initializationDone;
+    std::shared_ptr<Thor::PlacedNetwork> placed = network.place(
+        batchSize,
+        initializationDone,
+        /*inferenceOnly=*/true,
+        std::vector<int32_t>{0},
+        /*forcedNumStampsPerGpu=*/1);
+    ASSERT_NE(placed, nullptr);
+    for (Event &event : initializationDone) {
+        event.synchronize();
+    }
+    placed->configureBatchInputSources({
+        {"dense", deviceSession.getBatchFieldSourceDescription("dense")},
+        {"history", deviceSession.getBatchFieldSourceDescription("history")},
+    });
+    placed->preallocateInputSlots(2);
+    placed->preallocateOutputSlots(2);
+    placed->synchronize();
+
+    uint64_t batchNum = 99;
+    BatchLease lease = deviceSession.leaseBatch(ExampleType::TRAIN, batchNum);
+    Batch boundBatch;
+    boundBatch.insert("dense", lease.get().getTensor("dense"));
+    boundBatch.insert("history", lease.get().getDeviceBatchReference("history"));
+    boundBatch.setSourceReference(
+        "dense",
+        lease.get().getSourceReference("dense").value());
+    boundBatch.setSourceReference(
+        "history",
+        lease.get().getSourceReference("history").value());
+
+    std::map<std::string, Tensor> outputs;
+    std::map<std::string, Event> outputReadyEvents;
+    Event done = placed->submitBatch(
+        0,
+        boundBatch,
+        outputs,
+        outputReadyEvents,
+        /*isInferenceOnly=*/true,
+        /*reusableProcessingFinishedEvent=*/nullptr,
+        /*waitForOutputsOnProcessingStream=*/true,
+        /*submitTiming=*/nullptr,
+        /*outputSlotIndex=*/1);
+    // Both NetworkInputs have now recorded their final source-read points, so
+    // the session can recycle direct and selection slots before the rest of the
+    // inference graph and output downloads finish.
+    lease.releaseSourceResourcesExcept();
+    done.synchronize();
+    outputReadyEvents.at("dense_output").synchronize();
+    outputReadyEvents.at("history_output").synchronize();
+
+    EXPECT_EQ(
+        tensorValuesOnHost(outputs.at("dense_output")),
+        (vector<float>{5.0f, 6.0f, 1.0f, 2.0f}));
+    EXPECT_EQ(
+        tensorValuesOnHost(outputs.at("history_output")),
+        (vector<float>{12.0f, 13.0f, 0.0f, 10.0f, 11.0f, 12.0f}));
+
+    lease.reset();
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(DeviceResidentWindowedNamedBatchSessionTest, SelectionRingKeepsQueuedReferenceBatchesIndependentAndReusable) {
+    requireCudaDevice("CUDA device is required for hybrid windowed device loader tests.");
+    ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "pread_buffered");
+
+    const std::filesystem::path datasetPath = makeTempDatasetPath("device_resident_loader_reference_selection_ring");
+    DatasetLayout layout = materializerWindowedLayout();
+    writeWindowedMaterializerDataset(datasetPath);
+
+    TestIndexedNamedBatchSession sourceSession(
+        datasetPath,
+        layout,
+        {2, 0, 1},
+        {},
+        vector<uint64_t>{},
+        2,
+        1,
+        false,
+        std::nullopt);
+    Thor::DatasetMaterializationDescription datasetDescription =
+        materializationDescription(sourceSession);
+    auto resident = DeviceResidentNamedDataset::fromCompactFileDataset(
+        datasetDescription,
+        TensorPlacement(TensorPlacement::MemDevices::GPU, 0),
+        std::set<string>{"history", "history_mask"});
+    TestDeviceResidentWindowedNamedBatchSession deviceSession(
+        datasetDescription,
+        deviceSessionDescription(sourceSession),
+        resident,
+        2);
+
+    uint64_t firstBatchNum = 99;
+    uint64_t secondBatchNum = 99;
+    BatchLease firstLease = deviceSession.leaseBatch(ExampleType::TRAIN, firstBatchNum);
+    BatchLease secondLease = deviceSession.leaseBatch(ExampleType::TRAIN, secondBatchNum);
+
+    Tensor firstHistory = materializeDeviceBatchReference(
+        firstLease.get().getDeviceBatchReference("history"));
+    Tensor secondHistory = materializeDeviceBatchReference(
+        secondLease.get().getDeviceBatchReference("history"));
+    Tensor firstMask = materializeDeviceBatchReference(
+        firstLease.get().getDeviceBatchReference("history_mask"));
+    Tensor secondMask = materializeDeviceBatchReference(
+        secondLease.get().getDeviceBatchReference("history_mask"));
+
+    EXPECT_EQ(firstBatchNum, 0u);
+    EXPECT_EQ(secondBatchNum, 1u);
+    EXPECT_EQ(
+        tensorValuesOnHost(firstLease.get().getTensor("dense")),
+        (vector<float>{5.0f, 6.0f, 1.0f, 2.0f}));
+    EXPECT_EQ(
+        tensorValuesOnHost(secondLease.get().getTensor("dense")),
+        (vector<float>{3.0f, 4.0f, 5.0f, 6.0f}));
+    EXPECT_EQ(
+        tensorValuesOnHost(firstHistory),
+        (vector<float>{12.0f, 13.0f, 0.0f, 10.0f, 11.0f, 12.0f}));
+    EXPECT_EQ(
+        tensorValuesOnHost(secondHistory),
+        (vector<float>{0.0f, 0.0f, 10.0f, 12.0f, 13.0f, 0.0f}));
+    EXPECT_EQ(
+        uint8TensorValuesOnHost(firstMask),
+        (vector<uint8_t>{1, 1, 0, 1, 1, 1}));
+    EXPECT_EQ(
+        uint8TensorValuesOnHost(secondMask),
+        (vector<uint8_t>{0, 0, 1, 1, 1, 0}));
+
+    firstLease.reset();
+    secondLease.reset();
+
+    uint64_t reusedBatchNum = 99;
+    BatchLease reusedLease = deviceSession.leaseBatch(ExampleType::TRAIN, reusedBatchNum);
+    Tensor reusedHistory = materializeDeviceBatchReference(
+        reusedLease.get().getDeviceBatchReference("history"));
+    EXPECT_EQ(reusedBatchNum, 0u);
+    EXPECT_EQ(
+        tensorValuesOnHost(reusedHistory),
+        (vector<float>{10.0f, 11.0f, 12.0f, 0.0f, 0.0f, 10.0f}));
+    reusedLease.reset();
 
     std::filesystem::remove_all(datasetPath);
 }
@@ -3303,6 +4022,66 @@ TEST(DeviceResidentNamedBatchSessionTest, ThreeFoldSessionsShareResidentStorageA
     std::filesystem::remove_all(datasetPath);
 }
 
+TEST(DeviceResidentNamedBatchSessionTest, SourceBatchTensorsRecycleBeforeWholeBatchLeaseCompletes) {
+    requireCudaDevice("CUDA device is required for device batch source-recycling tests.");
+    ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "pread_buffered");
+
+    const std::filesystem::path datasetPath =
+        makeTempDatasetPath("canonical_device_early_source_recycle");
+    const DatasetLayout layout = testLayout();
+    writeCanonicalDataset(datasetPath, layout);
+    std::shared_ptr<Thor::FileDataset> dataset = Thor::FileDataset::open(datasetPath);
+
+    TestIndexedNamedBatchSession source(
+        dataset,
+        vector<uint64_t>{0, 1, 2, 3},
+        vector<uint64_t>{},
+        vector<uint64_t>{},
+        2,
+        1,
+        false,
+        std::nullopt);
+    MaterializedNamedDatasetSnapshot snapshot = materializeNamedDatasetSnapshot(
+        materializationDescription(source),
+        2);
+    std::shared_ptr<DeviceResidentNamedDataset> resident =
+        DeviceResidentNamedDataset::fromSnapshot(
+            snapshot,
+            TensorPlacement(TensorPlacement::MemDevices::GPU, 0));
+
+    auto session = std::make_shared<DeviceResidentNamedBatchSession>(
+        Thor::DeviceDatasetLease(resident),
+        Thor::DatasetSplitManifest(*dataset, {0, 1, 2, 3}, {}, vector<uint64_t>{}),
+        Thor::BatchPolicy(2, false),
+        1);
+
+    uint64_t firstBatchNum = 99;
+    BatchLease firstLease = session->leaseBatch(ExampleType::TRAIN, firstBatchNum);
+    ASSERT_TRUE(firstLease.get().allFieldsHaveSourceReferences());
+    firstLease.releaseSourceResourcesExcept();
+
+    auto nextLeaseFuture = std::async(std::launch::async, [session] {
+        uint64_t secondBatchNum = 99;
+        BatchLease lease = session->leaseBatch(ExampleType::TRAIN, secondBatchNum);
+        return std::make_pair(secondBatchNum, std::move(lease));
+    });
+    ASSERT_EQ(
+        nextLeaseFuture.wait_for(std::chrono::seconds(2)),
+        std::future_status::ready)
+        << "Canonical GPU batch tensors remained tied to whole-batch completion";
+
+    auto [secondBatchNum, secondLease] = nextLeaseFuture.get();
+    EXPECT_EQ(firstBatchNum, 0u);
+    EXPECT_EQ(secondBatchNum, 1u);
+    EXPECT_FALSE(firstLease.empty());
+    EXPECT_FALSE(secondLease.empty());
+
+    secondLease.reset();
+    firstLease.reset();
+    session.reset();
+    std::filesystem::remove_all(datasetPath);
+}
+
 TEST(DeviceResidentNamedBatchSessionTest, CancellationUnblocksOnlyTheCancelledSession) {
     requireCudaDevice("CUDA device is required for device batch session cancellation tests.");
     ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "pread_buffered");
@@ -3372,5 +4151,67 @@ TEST(DeviceResidentNamedBatchSessionTest, CancellationUnblocksOnlyTheCancelledSe
 
     // Returning an already borrowed batch after cancellation is intentionally a no-op.
     heldBatchLease.reset();
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(DeviceResidentWindowedNamedBatchSessionTest, SourceSlotsRecycleBeforeWholeBatchLeaseCompletes) {
+    requireCudaDevice("CUDA device is required for hybrid windowed device loader tests.");
+    ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "pread_buffered");
+
+    const std::filesystem::path datasetPath =
+        makeTempDatasetPath("device_resident_loader_early_source_recycle");
+    DatasetLayout layout = materializerWindowedLayout();
+    writeWindowedMaterializerDataset(datasetPath);
+
+    TestIndexedNamedBatchSession sourceSession(
+        datasetPath,
+        layout,
+        {2, 0, 1},
+        {},
+        vector<uint64_t>{},
+        2,
+        1,
+        false,
+        std::nullopt);
+    Thor::DatasetMaterializationDescription datasetDescription =
+        materializationDescription(sourceSession);
+    auto resident = DeviceResidentNamedDataset::fromCompactFileDataset(
+        datasetDescription,
+        TensorPlacement(TensorPlacement::MemDevices::GPU, 0),
+        std::set<string>{"history", "history_mask"});
+    auto deviceSession = std::make_shared<TestDeviceResidentWindowedNamedBatchSession>(
+        datasetDescription,
+        deviceSessionDescription(sourceSession),
+        resident,
+        1);
+
+    uint64_t firstBatchNum = 99;
+    BatchLease firstLease = deviceSession->leaseBatch(ExampleType::TRAIN, firstBatchNum);
+    ASSERT_FALSE(firstLease.empty());
+
+    // No physical consumer is registered in this test. Releasing after the
+    // hypothetical submission therefore returns direct storage immediately and
+    // returns selection storage once its row-index upload event is complete.
+    firstLease.releaseSourceResourcesExcept();
+
+    auto nextLeaseFuture = std::async(std::launch::async, [&] {
+        uint64_t secondBatchNum = 99;
+        BatchLease lease = deviceSession->leaseBatch(ExampleType::TRAIN, secondBatchNum);
+        return std::make_pair(secondBatchNum, std::move(lease));
+    });
+    ASSERT_EQ(
+        nextLeaseFuture.wait_for(std::chrono::seconds(2)),
+        std::future_status::ready)
+        << "Source slots remained tied to whole-batch BatchLease completion";
+
+    auto [secondBatchNum, secondLease] = nextLeaseFuture.get();
+    EXPECT_EQ(firstBatchNum, 0u);
+    EXPECT_EQ(secondBatchNum, 1u);
+    EXPECT_FALSE(firstLease.empty());
+    EXPECT_FALSE(secondLease.empty());
+
+    secondLease.reset();
+    firstLease.reset();
+    deviceSession.reset();
     std::filesystem::remove_all(datasetPath);
 }

@@ -3474,6 +3474,9 @@ uint64_t batchRowsForEvaluatorInputs(const Batch& batch, const std::vector<std::
     if (std::holds_alternative<ThorImplementation::RaggedTensor>(value)) {
         return std::get<ThorImplementation::RaggedTensor>(value).getBatchSize();
     }
+    if (std::holds_alternative<DeviceBatchReference>(value)) {
+        return std::get<DeviceBatchReference>(value).getBatchSize();
+    }
     throw std::runtime_error(context + " evaluator input '" + inputName + "' has an unsupported value type.");
 }
 
@@ -3734,9 +3737,16 @@ Batch inferenceBatchForInputBindings(const std::vector<std::string>& inputNames,
             inferenceBatch.insert(inputName, std::get<ThorImplementation::Tensor>(value));
         } else if (std::holds_alternative<ThorImplementation::RaggedTensor>(value)) {
             inferenceBatch.insert(inputName, std::get<ThorImplementation::RaggedTensor>(value));
+        } else if (std::holds_alternative<DeviceBatchReference>(value)) {
+            inferenceBatch.insert(inputName, std::get<DeviceBatchReference>(value));
         } else {
             throw std::runtime_error(missingInputContext + " dataset field '" + batchInputName +
                                      "' bound to input '" + inputName + "' has an unsupported value type.");
+        }
+        const std::optional<BatchSourceReference> sourceReference =
+            sourceBatch.getSourceReference(batchInputName);
+        if (sourceReference.has_value()) {
+            inferenceBatch.setSourceReference(inputName, sourceReference.value());
         }
     }
     return inferenceBatch;

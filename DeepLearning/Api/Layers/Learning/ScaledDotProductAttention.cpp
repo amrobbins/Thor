@@ -727,9 +727,17 @@ void ScaledDotProductAttention::Builder::verifyConfig() const {
         if (outputDType != _queryInput->getDataType()) {
             throw std::invalid_argument("ScaledDotProductAttention experimental FP8 forward outputDataType must match the fp8 query/key/value dtype.");
         }
-    } else if (!isAttentionStorageDType(outputDType)) {
-        throw std::invalid_argument("ScaledDotProductAttention outputDataType must be fp16 or bf16 for the current cuDNN training path. Got " +
-                                    dtypeName(outputDType) + ".");
+    } else {
+        if (!isAttentionStorageDType(outputDType)) {
+            throw std::invalid_argument("ScaledDotProductAttention outputDataType must be fp16 or bf16 for the current cuDNN training path. Got " +
+                                        dtypeName(outputDType) + ".");
+        }
+        if (outputDType != _queryInput->getDataType()) {
+            throw std::invalid_argument(
+                "ScaledDotProductAttention query/key/value and output tensors must use the same FP16 or BF16 dtype. "
+                "Thor will not insert hidden attention-stage conversions. input=" +
+                dtypeName(_queryInput->getDataType()) + ", output=" + dtypeName(outputDType) + ".");
+        }
     }
 
     const auto maskKind = _maskKind.value_or(ThorImplementation::AttentionMaskKind::None);

@@ -12,6 +12,7 @@
 #include "test/DeepLearning/Api/Helpers/GradientRivet.h"
 
 #include <regex>
+#include "cuda_bf16.h"
 #include "cuda_fp16.h"
 #include "gtest/gtest.h"
 
@@ -19,6 +20,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -60,6 +62,12 @@ void writeCpuTensor(Impl::Tensor& tensor, const vector<float>& values) {
                 ptr[i] = __float2half(values[i]);
             break;
         }
+        case DataType::BF16: {
+            auto* ptr = static_cast<__nv_bfloat16*>(tensor.getMemPtr());
+            for (uint64_t i = 0; i < values.size(); ++i)
+                ptr[i] = __float2bfloat16(values[i]);
+            break;
+        }
         case DataType::FP32: {
             auto* ptr = static_cast<float*>(tensor.getMemPtr());
             for (uint64_t i = 0; i < values.size(); ++i)
@@ -82,6 +90,12 @@ vector<float> readCpuTensor(const Impl::Tensor& tensor) {
                 values[i] = __half2float(ptr[i]);
             break;
         }
+        case DataType::BF16: {
+            const auto* ptr = static_cast<const __nv_bfloat16*>(tensor.getMemPtr());
+            for (uint64_t i = 0; i < values.size(); ++i)
+                values[i] = __bfloat162float(ptr[i]);
+            break;
+        }
         case DataType::FP32: {
             const auto* ptr = static_cast<const float*>(tensor.getMemPtr());
             for (uint64_t i = 0; i < values.size(); ++i)
@@ -101,6 +115,13 @@ Impl::Tensor copyTensorToCpu(const Impl::Tensor& tensor, Stream& stream) {
     Event copied = stream.putEvent();
     copied.synchronize();
     return cpuTensor;
+}
+
+vector<uint8_t> readTensorBytes(const Impl::Tensor& tensor, Stream& stream) {
+    Impl::Tensor cpuTensor = copyTensorToCpu(tensor, stream);
+    vector<uint8_t> bytes(cpuTensor.getArraySizeInBytes());
+    std::memcpy(bytes.data(), cpuTensor.getMemPtr(), bytes.size());
+    return bytes;
 }
 
 void expectAllClose(
@@ -387,8 +408,11 @@ vector<float> applyCublasLtGeluThenTestEpilogue(const vector<float>& values) {
 
 TEST(FullyConnectedApi, BuilderCreatesParameterSpecsOutputsAndConnectionTypes) {
     Api::Network network("testNetwork");
-    Api::Tensor featureInput0(DataType::FP16, {4});
-    Api::Tensor featureInput1(DataType::FP16, {4});
+    // Keep this topology/metadata test on a directly supported dtype plan. Mixed
+    // operand rejection is covered separately by
+    // BuilderRejectsUnsupportedMixedInputAndWeightDtypesInsteadOfFallingBack.
+    Api::Tensor featureInput0(DataType::FP32, {4});
+    Api::Tensor featureInput1(DataType::FP32, {4});
 
     Api::FullyConnected fc = Api::FullyConnected::Builder()
                                  .network(network)
@@ -433,7 +457,9 @@ TEST(FullyConnectedApi, StampsAsPhysicalCustomLayerAndAllocatesParameters) {
     constexpr uint32_t batchSize = 4;
     Api::Network network("testNetwork");
 
-    Api::NetworkInput input = Api::NetworkInput::Builder().network(network).name("input").dimensions({5}).dataType(DataType::FP16).build();
+    // This test verifies stamping and parameter allocation, not implicit dtype
+    // adaptation. Use the same FP32 storage dtype for the input and weights.
+    Api::NetworkInput input = Api::NetworkInput::Builder().network(network).name("input").dimensions({5}).dataType(DataType::FP32).build();
     Api::FullyConnected fc = Api::FullyConnected::Builder()
                                  .network(network)
                                  .featureInput(input.getFeatureOutput().value())
@@ -655,6 +681,97 @@ TEST(FullyConnectedApi, PlacedSaveLoadRoundTripRestoresParameterStorageAndRuns) 
         const vector<float> expected =
             fullyConnectedReference(inputValues, weightValues, biasValues, batchSize, numInputFeatures, numOutputFeatures, true);
         expectAllClose(actual, expected, 2e-4f, 2e-4f, "loaded FC restored parameter output");
+    } catch (...) {
+        std::filesystem::remove_all(archiveDir);
+        throw;
+    }
+    std::filesystem::remove_all(archiveDir);
+}
+
+TEST(FullyConnectedApi, PlacedSaveLoadRoundTripRestoresBf16WeightBytesAndExecution) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint32_t numInputFeatures = 3;
+    constexpr uint32_t numOutputFeatures = 2;
+
+    const vector<float> inputValues = {2.0f, -1.0f, 0.25f, -0.5f, 1.5f, 3.0f};
+    const vector<float> weightValues = {0.25f, -0.5f, 1.25f, 0.75f, -1.5f, 2.0f};
+    const vector<float> biasValues = {0.5f, -1.0f};
+
+    const std::string networkName = "fc_bf16_state_round_trip";
+    std::filesystem::path archiveDir = makeUniqueTestArchiveDir(networkName);
+
+    try {
+        Api::Network network(networkName);
+        Api::NetworkInput input = Api::NetworkInput::Builder()
+                                      .network(network)
+                                      .name("input")
+                                      .dimensions({numInputFeatures})
+                                      .dataType(DataType::BF16)
+                                      .build();
+        Api::FullyConnected fc = Api::FullyConnected::Builder()
+                                     .network(network)
+                                     .featureInput(input.getFeatureOutput().value())
+                                     .numOutputFeatures(numOutputFeatures)
+                                     .hasBias(true)
+                                     .weightsDataType(DataType::BF16)
+                                     .computeDataType(DataType::BF16)
+                                     .outputDataType(DataType::FP32)
+                                     .noActivation()
+                                     .build();
+        Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                        .network(network)
+                                        .name("output")
+                                        .inputTensor(fc.getFeatureOutput().value())
+                                        .dataType(DataType::FP32)
+                                        .build();
+
+        PlacedFullyConnectedFixture fixture = placeSingleFullyConnectedNetwork(network, input, output, fc, batchSize, true);
+        Stream stream = fixture.physicalFc->getStreams()[0];
+        std::shared_ptr<Impl::PhysicalParameter> sourceWeights = fixture.physicalFc->getParameter("weights");
+        std::shared_ptr<Impl::PhysicalParameter> sourceBiases = fixture.physicalFc->getParameter("biases");
+        setParameterTensor(sourceWeights, weightValues, stream);
+        setParameterTensor(sourceBiases, biasValues, stream);
+        stream.synchronize();
+
+        const vector<uint8_t> sourceWeightBytes = readTensorBytes(sourceWeights->getStorage().value(), stream);
+        const vector<uint8_t> sourceBiasBytes = readTensorBytes(sourceBiases->getStorage().value(), stream);
+
+        Impl::Tensor featureInHost(cpuPlacement, Impl::TensorDescriptor(DataType::BF16, {batchSize, numInputFeatures}));
+        writeCpuTensor(featureInHost, inputValues);
+        const vector<float> expected =
+            fullyConnectedReference(inputValues, weightValues, biasValues, batchSize, numInputFeatures, numOutputFeatures, true);
+        const vector<float> sourceOutput = runForward(*fixture.physicalInput, *fixture.physicalOutput, featureInHost, batchSize);
+        expectAllClose(sourceOutput, expected, 6e-2f, 6e-2f, "source FC BF16 parameter output");
+
+        fixture.placedNetwork->save(archiveDir.string(), true, false);
+
+        Api::Network loadedNetwork(networkName);
+        loadedNetwork.load(archiveDir.string());
+        std::shared_ptr<Api::NetworkInput> loadedInput = findOnlyLayerOfType<Api::NetworkInput>(loadedNetwork);
+        std::shared_ptr<Api::FullyConnected> loadedFc = findOnlyLayerOfType<Api::FullyConnected>(loadedNetwork);
+        std::shared_ptr<Api::NetworkOutput> loadedOutput = findOnlyLayerOfType<Api::NetworkOutput>(loadedNetwork);
+        ASSERT_NE(loadedInput, nullptr);
+        ASSERT_NE(loadedFc, nullptr);
+        ASSERT_NE(loadedOutput, nullptr);
+        EXPECT_EQ(loadedInput->getFeatureOutput()->getDataType(), DataType::BF16);
+        EXPECT_EQ(loadedFc->getWeightsDataType(), DataType::BF16);
+        EXPECT_EQ(loadedFc->getComputeDataType(), DataType::BF16);
+        EXPECT_EQ(loadedFc->getOutputDataType(), DataType::FP32);
+
+        PlacedFullyConnectedFixture loadedFixture =
+            placeSingleFullyConnectedNetwork(loadedNetwork, *loadedInput, *loadedOutput, *loadedFc, batchSize, true);
+        Stream loadedStream = loadedFixture.physicalFc->getStreams()[0];
+        std::shared_ptr<Impl::PhysicalParameter> loadedWeights = loadedFixture.physicalFc->getParameter("weights");
+        std::shared_ptr<Impl::PhysicalParameter> loadedBiases = loadedFixture.physicalFc->getParameter("biases");
+        ASSERT_EQ(loadedWeights->getStorage()->getDataType(), DataType::BF16);
+        ASSERT_EQ(loadedBiases->getStorage()->getDataType(), DataType::FP32);
+        EXPECT_EQ(readTensorBytes(loadedWeights->getStorage().value(), loadedStream), sourceWeightBytes);
+        EXPECT_EQ(readTensorBytes(loadedBiases->getStorage().value(), loadedStream), sourceBiasBytes);
+
+        const vector<float> actual =
+            runForward(*loadedFixture.physicalInput, *loadedFixture.physicalOutput, featureInHost, batchSize);
+        expectAllClose(actual, sourceOutput, 6e-2f, 6e-2f, "loaded FC BF16 round-trip output");
+        expectAllClose(actual, expected, 6e-2f, 6e-2f, "loaded FC BF16 restored parameter output");
     } catch (...) {
         std::filesystem::remove_all(archiveDir);
         throw;
@@ -945,6 +1062,32 @@ TEST(FullyConnectedApi, ForwardHonorsExplicitInputWeightComputeAndOutputDtypes) 
     const vector<float> expected =
         fullyConnectedReference(inputValues, weightValues, {}, batchSize, numInputFeatures, numOutputFeatures, false);
     expectAllClose(actual, expected, 3e-2f, 3e-2f);
+}
+
+TEST(FullyConnectedApi, BuilderRejectsUnsupportedMixedInputAndWeightDtypesInsteadOfFallingBack) {
+    constexpr uint32_t numInputFeatures = 3;
+    constexpr uint32_t numOutputFeatures = 2;
+
+    Api::Network network("fc_rejects_implicit_matmul_operand_conversion");
+    Api::NetworkInput input = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("input")
+                                  .dimensions({numInputFeatures})
+                                  .dataType(DataType::FP32)
+                                  .build();
+
+    EXPECT_THROW(
+        (void)Api::FullyConnected::Builder()
+            .network(network)
+            .featureInput(input.getFeatureOutput().value())
+            .numOutputFeatures(numOutputFeatures)
+            .hasBias(false)
+            .weightsDataType(DataType::BF16)
+            .computeDataType(DataType::BF16)
+            .outputDataType(DataType::FP32)
+            .noActivation()
+            .build(),
+        std::invalid_argument);
 }
 
 TEST(FullyConnectedApi, BackwardNumericalWithSgdUpdate) {

@@ -4,6 +4,7 @@
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/StampedNetwork.h"
 #include "DeepLearning/Api/Data/Batch.h"
+#include "DeepLearning/Api/Data/BatchFieldSource.h"
 #include "DeepLearning/Api/Parameter/BoundParameter.h"
 #include "DeepLearning/Api/Parameter/ParameterReference.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
@@ -125,11 +126,14 @@ class PlacedNetwork {
     void extendOutputWritableEvents(uint64_t stampIndex, Event event, std::optional<uint32_t> outputSlotIndex = std::nullopt);
 
     /**
-     * Configures each physical NetworkInput from the effective batch-session placement
-     * resolved through the executable plan's batch-input bindings. Same-GPU
-     * inputs use direct device loading and therefore do not allocate a
-     * NetworkInput staging ring. Missing/null placements select staged loading.
+     * Configures each physical NetworkInput from the effective batch-session
+     * value kind resolved through the executable plan's input bindings.
+     * Same-GPU materialized tensors use direct device loading. Device references
+     * use a staging ring of reference descriptors and materialize directly into
+     * featureOutput. Unknown/materialized placements use tensor staging.
      */
+    void configureBatchInputSources(
+        const std::map<std::string, BatchFieldSourceDescription> &sourcesByNetworkInput);
     void configureBatchInputPlacements(
         const std::map<std::string, std::optional<ThorImplementation::TensorPlacement>> &placementsByNetworkInput);
     void preallocateInputSlots(uint32_t numSlots);

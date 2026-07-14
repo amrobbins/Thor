@@ -15,6 +15,11 @@ def test_type_converter_constructs_with_network_input_tensor():
     assert tc is not None
     assert isinstance(tc, thor.layers.TypeConverter)
 
+    y = tc.get_feature_output()
+    assert isinstance(y, thor.Tensor)
+    assert y.get_data_type() == thor.DataType.fp16
+    assert y.get_dimensions() == x.get_dimensions()
+
 
 def test_type_converter_rejects_wrong_types_and_arity():
     n = _net()

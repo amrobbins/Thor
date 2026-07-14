@@ -266,8 +266,12 @@ Event StampedNetwork::sendBatch(std::map<std::string, Tensor> batchInputs,
         THOR_THROW_IF_FALSE(batchInputs.count(inputName) == 1);
     }
     const auto unwrapFinish = timingNow(submitTiming);
+    std::map<std::string, PhysicalBatchInput> physicalBatchInputs;
+    for (auto& [name, tensor] : batchInputs) {
+        THOR_THROW_IF_FALSE(physicalBatchInputs.emplace(name, PhysicalBatchInput{std::move(tensor), std::nullopt}).second);
+    }
     BatchSubmissionTiming localTiming;
-    Event processingFinishedEvent = sendPhysicalBatch(std::move(batchInputs),
+    Event processingFinishedEvent = sendPhysicalBatch(std::move(physicalBatchInputs),
                                                        inputReadyEvents,
                                                        batchOutputs,
                                                        outputReadyEvents,
@@ -292,7 +296,7 @@ Event StampedNetwork::sendBatch(const Batch& batchInputs,
                                 bool waitForOutputsOnProcessingStream,
                                 BatchSubmissionTiming* submitTiming,
                                 std::optional<uint32_t> outputSlotIndex) {
-    std::map<std::string, Tensor> physicalBatchInputs;
+    std::map<std::string, PhysicalBatchInput> physicalBatchInputs;
     std::optional<uint32_t> batchSize;
     const auto unwrapStart = timingNow(submitTiming);
 
@@ -306,12 +310,17 @@ Event StampedNetwork::sendBatch(const Batch& batchInputs,
     };
 
     for (const auto& [name, value] : batchInputs.values()) {
+        const std::optional<Thor::BatchSourceReference> sourceReference =
+            batchInputs.getSourceReference(name);
         if (std::holds_alternative<Tensor>(value)) {
             Tensor inputTensor = std::get<Tensor>(value);
             const std::vector<uint64_t> dimensions = inputTensor.getDescriptor().getDimensions();
             THOR_THROW_IF_FALSE(!dimensions.empty());
             requireConsistentBatchSize(dimensions[0]);
-            THOR_THROW_IF_FALSE(physicalBatchInputs.emplace(name, inputTensor).second);
+            THOR_THROW_IF_FALSE(
+                physicalBatchInputs.emplace(
+                    name,
+                    PhysicalBatchInput{inputTensor, sourceReference}).second);
         } else if (std::holds_alternative<RaggedTensor>(value)) {
             auto raggedIt = raggedInputNamed.find(name);
             THOR_THROW_IF_FALSE(raggedIt != raggedInputNamed.end());
@@ -319,8 +328,21 @@ Event StampedNetwork::sendBatch(const Batch& batchInputs,
             RaggedTensor raggedTensor = std::get<RaggedTensor>(value);
             THOR_THROW_IF_FALSE(raggedTensor.getDescriptor() == binding.descriptor);
             requireConsistentBatchSize(raggedTensor.getBatchSize());
-            THOR_THROW_IF_FALSE(physicalBatchInputs.emplace(binding.valuesInputName, raggedTensor.getValues()).second);
-            THOR_THROW_IF_FALSE(physicalBatchInputs.emplace(binding.offsetsInputName, raggedTensor.getOffsets()).second);
+            THOR_THROW_IF_FALSE(
+                physicalBatchInputs.emplace(
+                    binding.valuesInputName,
+                    PhysicalBatchInput{raggedTensor.getValues(), sourceReference}).second);
+            THOR_THROW_IF_FALSE(
+                physicalBatchInputs.emplace(
+                    binding.offsetsInputName,
+                    PhysicalBatchInput{raggedTensor.getOffsets(), sourceReference}).second);
+        } else if (std::holds_alternative<Thor::DeviceBatchReference>(value)) {
+            Thor::DeviceBatchReference reference = std::get<Thor::DeviceBatchReference>(value);
+            requireConsistentBatchSize(reference.getBatchSize());
+            THOR_THROW_IF_FALSE(
+                physicalBatchInputs.emplace(
+                    name,
+                    PhysicalBatchInput{std::move(reference), sourceReference}).second);
         } else {
             THOR_UNREACHABLE();
         }
@@ -347,7 +369,7 @@ Event StampedNetwork::sendBatch(const Batch& batchInputs,
     return processingFinishedEvent;
 }
 
-Event StampedNetwork::sendPhysicalBatch(std::map<std::string, Tensor> batchInputs,
+Event StampedNetwork::sendPhysicalBatch(std::map<std::string, PhysicalBatchInput> batchInputs,
                                         const std::map<std::string, Event>& inputReadyEvents,
                                         std::map<std::string, Tensor> &batchOutputs,
                                         std::map<std::string, Event> &outputReadyEvents,
@@ -373,12 +395,32 @@ Event StampedNetwork::sendPhysicalBatch(std::map<std::string, Tensor> batchInput
     for (uint32_t i = 0; i < inputs.size(); ++i) {
         auto it = batchInputs.find(inputs[i]->getName());
         THOR_THROW_IF_FALSE(it != batchInputs.end());
-        Tensor inputTensor = it->second;
         const auto readyIt = inputReadyEvents.find(inputs[i]->getName());
-        if (readyIt != inputReadyEvents.end()) {
-            inputs[i]->forward(inputTensor, isInferenceOnly, readyIt->second, batchSize);
+        if (std::holds_alternative<Tensor>(it->second.value)) {
+            Tensor inputTensor = std::get<Tensor>(it->second.value);
+            if (readyIt != inputReadyEvents.end()) {
+                inputs[i]->forward(
+                    inputTensor,
+                    isInferenceOnly,
+                    readyIt->second,
+                    batchSize,
+                    it->second.sourceReference);
+            } else {
+                inputs[i]->forward(
+                    inputTensor,
+                    isInferenceOnly,
+                    batchSize,
+                    it->second.sourceReference);
+            }
+        } else if (std::holds_alternative<Thor::DeviceBatchReference>(it->second.value)) {
+            THOR_THROW_IF_FALSE(readyIt == inputReadyEvents.end());
+            inputs[i]->forward(
+                std::get<Thor::DeviceBatchReference>(it->second.value),
+                isInferenceOnly,
+                batchSize,
+                it->second.sourceReference);
         } else {
-            inputs[i]->forward(inputTensor, isInferenceOnly, batchSize);
+            THOR_UNREACHABLE();
         }
     }
     const auto inputForwardFinish = timingNow(submitTiming);

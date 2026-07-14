@@ -39,6 +39,14 @@ const Batch &BatchLease::get() const {
     return batch;
 }
 
+void BatchLease::releaseSourceResourcesExcept(
+    const std::set<std::string>& retainedFields) {
+    if (session == nullptr) {
+        throw std::runtime_error("BatchLease is empty.");
+    }
+    batch.releaseSourceResourcesExcept(retainedFields);
+}
+
 void BatchLease::reset() noexcept {
     if (session != nullptr) {
         try {

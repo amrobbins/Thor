@@ -103,17 +103,12 @@ ThorImplementation::CublasMatrixMultiply::MatmulDataTypes cublasLtMatmulDataType
         return directDataTypes;
     }
 
-    // This mirrors EquationCompiler's safe fallback: when cuBLASLt does not expose the requested mixed A/B plan,
-    // the expression path can cast the matrix inputs into the resolved output dtype before the matmul stage.
-    const MatmulDataTypes outputDataTypes{outputDataType, outputDataType, outputDataType, outputDataType, computeDataType};
-    if (isSupportedCublasLtMatmulDataTypesForFullyConnected(outputDataTypes)) {
-        return outputDataTypes;
-    }
-
-    throw std::invalid_argument("FullyConnected requested dtype plan is unsupported by Thor's cuBLASLt matmul path. input=" +
-                                fullyConnectedDataTypeName(inputDataType) + ", weights=" + fullyConnectedDataTypeName(weightsDataType) +
-                                ", compute=" + fullyConnectedDataTypeName(computeDataType) +
-                                ", output=" + fullyConnectedDataTypeName(outputDataType) + ".");
+    throw std::invalid_argument(
+        "FullyConnected requested dtype plan is unsupported by Thor's cuBLASLt matmul path and Thor will not implicitly "
+        "convert either operand. Add an explicit network conversion or choose a directly supported plan. input=" +
+        fullyConnectedDataTypeName(inputDataType) + ", weights=" + fullyConnectedDataTypeName(weightsDataType) +
+        ", compute=" + fullyConnectedDataTypeName(computeDataType) + ", output=" +
+        fullyConnectedDataTypeName(outputDataType) + ".");
 }
 
 ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias,

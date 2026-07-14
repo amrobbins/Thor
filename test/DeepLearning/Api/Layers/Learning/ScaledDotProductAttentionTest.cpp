@@ -51,6 +51,19 @@ TEST(AttentionApi, BuildsGqaAttentionWithAdditiveBias) {
     EXPECT_EQ(attention.getOutput("output").getDimensions(), (std::vector<uint64_t>{4, 8, 32}));
 }
 
+TEST(AttentionApi, SdpaRejectsOutputStorageDtypeMismatchInsteadOfDeferringToCompiler) {
+    Api::Network network("attention_api_sdpa_rejects_output_storage_dtype_mismatch");
+    Api::NetworkInput q =
+        Api::NetworkInput::Builder().network(network).name("q").dimensions({4, 8, 32}).dataType(DataType::BF16).build();
+
+    EXPECT_THROW(Api::ScaledDotProductAttention::Builder()
+                     .network(network)
+                     .selfInput(q.getFeatureOutput().value())
+                     .outputDataType(DataType::FP16)
+                     .build(),
+                 std::invalid_argument);
+}
+
 TEST(AttentionApi, RejectsInvalidQueryKeyHeadDimMismatch) {
     Api::Network network("attention_api_rejects_invalid_query_key_head_dim_mismatch");
     Api::NetworkInput q = Api::NetworkInput::Builder().network(network).name("q").dimensions({4, 8, 32}).dataType(DataType::FP16).build();

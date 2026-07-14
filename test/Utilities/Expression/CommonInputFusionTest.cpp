@@ -27,6 +27,21 @@ TEST(EquationCompiler, MatmulExplicitTf32ComputeSurvivesStageSplitAndCompile) {
     EXPECT_EQ(compiled->compute_dtype, DataType::TF32);
 }
 
+TEST(EquationCompiler, MatmulRejectsImplicitMixedOperandDtypeFallback) {
+    auto x = Expression::input("x", DataType::FP32, DataType::FP32);
+    auto w = Expression::input("w", DataType::BF16, DataType::BF16);
+    auto y = Expression::matmul(x, w, false, false, DataType::BF16, DataType::FP32);
+
+    auto physical = Expression::outputs({{"y", y}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(physical, {DataType::FP32, DataType::BF16});
+
+    auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
+    ASSERT_EQ(stages.size(), 1);
+    ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::Matmul);
+
+    EXPECT_THROW((void)EquationCompiler::compileMatmul(stages[0].expr, stages[0].outputs), std::runtime_error);
+}
+
 TEST(EquationCompiler, SharedInputsBecomeOneFusedStage) {
     auto x = Expression::input("x");
     auto y = Expression::input("y");

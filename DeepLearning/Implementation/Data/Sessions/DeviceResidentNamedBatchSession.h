@@ -86,8 +86,14 @@ class DeviceResidentNamedBatchSession : public Thor::BatchSession {
         std::shared_ptr<const Thor::ExampleIndexSet> sourceIndices;
         bool randomized = false;
         std::optional<uint64_t> seed;
+        struct PendingBatch {
+            std::map<std::string, ThorImplementation::Tensor> tensors;
+            std::vector<Event> consumedEvents;
+        };
+
         uint64_t batchesPerEpoch = 0;
         std::deque<std::map<std::string, ThorImplementation::Tensor>> availableBatches;
+        std::deque<PendingBatch> pendingBatches;
         ThorImplementation::Tensor rowIndicesHost;
         ThorImplementation::Tensor rowIndicesDevice;
         std::unique_ptr<FullPeriodRandom> randomizer;
@@ -121,4 +127,8 @@ class DeviceResidentNamedBatchSession : public Thor::BatchSession {
     [[nodiscard]] std::map<std::string, ThorImplementation::Tensor> allocateBatchTensorSet() const;
     void validateReturnedBatch(const std::map<std::string, ThorImplementation::Tensor> &tensors) const;
     void fillRowIndexTensor(SplitRuntime &runtime);
+    void releaseBatchTensorSet(
+        ExampleType exampleType,
+        std::shared_ptr<std::map<std::string, ThorImplementation::Tensor>> tensors,
+        std::vector<Event> consumedEvents) noexcept;
 };

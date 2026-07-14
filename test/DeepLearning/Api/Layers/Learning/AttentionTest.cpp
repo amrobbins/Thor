@@ -12,8 +12,11 @@
 #include "gtest/gtest.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
+#include <filesystem>
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -110,6 +113,21 @@ vector<float> readCpuTensor(const Impl::Tensor& tensor) {
     return values;
 }
 
+Impl::Tensor copyTensorToCpu(const Impl::Tensor& tensor, Stream& stream) {
+    Impl::Tensor cpuTensor = tensor.clone(cpuPlacement);
+    cpuTensor.copyFromAsync(tensor, stream);
+    Event copied = stream.putEvent();
+    copied.synchronize();
+    return cpuTensor;
+}
+
+vector<uint8_t> readTensorBytes(const Impl::Tensor& tensor, Stream& stream) {
+    Impl::Tensor cpuTensor = copyTensorToCpu(tensor, stream);
+    vector<uint8_t> bytes(cpuTensor.getArraySizeInBytes());
+    std::memcpy(bytes.data(), cpuTensor.getMemPtr(), bytes.size());
+    return bytes;
+}
+
 void expectAllClose(const vector<float>& actual, const vector<float>& expected, float atol = 6e-2f, float rtol = 6e-2f) {
     ASSERT_EQ(actual.size(), expected.size());
     for (uint64_t i = 0; i < actual.size(); ++i) {
@@ -201,6 +219,37 @@ vector<float> runForward(Impl::NetworkInput& physicalInput,
     Event featureOutReadyEvent = physicalOutput.getOutputReadyEvent();
     featureOutReadyEvent.synchronize();
     return readCpuTensor(physicalOutput.getFeatureOutput().value());
+}
+
+std::filesystem::path makeUniqueTestArchiveDir(const std::string& testName) {
+    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    std::filesystem::path dir = std::filesystem::temp_directory_path() / (testName + "_" + std::to_string(now));
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    return dir;
+}
+
+template <typename LayerT>
+std::shared_ptr<LayerT> findOnlyLayerOfType(Api::Network& network) {
+    std::shared_ptr<LayerT> found;
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < network.getNumLayers(); ++i) {
+        std::shared_ptr<LayerT> candidate = std::dynamic_pointer_cast<LayerT>(network.getLayer(i));
+        if (candidate != nullptr) {
+            found = candidate;
+            ++count;
+        }
+    }
+    EXPECT_EQ(count, 1u);
+    return found;
+}
+
+vector<float> scaledIdentity(uint32_t width, float scale) {
+    vector<float> values(static_cast<uint64_t>(width) * width, 0.0f);
+    for (uint32_t i = 0; i < width; ++i) {
+        values[static_cast<uint64_t>(i) * width + i] = scale;
+    }
+    return values;
 }
 
 vector<float> runForwardWithMetadata(Impl::NetworkInput& physicalInput,
@@ -1077,6 +1126,30 @@ TEST(AttentionApi, ArchitectureJsonAndDeserializePreserveReleaseCriticalOptions)
     EXPECT_DOUBLE_EQ(restoredRope.attention_factor.value(), rope.attention_factor.value());
     EXPECT_EQ(restoredRope.long_rope_short_factors, rope.long_rope_short_factors);
     EXPECT_EQ(restoredRope.long_rope_long_factors, rope.long_rope_long_factors);
+}
+
+TEST(AttentionApi, RejectsProjectionStorageDtypeMismatchInsteadOfDeferringToExpressionCompilation) {
+    Api::Network network("attention_api_rejects_projection_storage_dtype_mismatch");
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("tokens").dimensions({8, 64}).dataType(DataType::BF16).build();
+
+    EXPECT_THROW(Api::Attention::Builder()
+                     .network(network)
+                     .featureInput(input.getFeatureOutput().value())
+                     .numHeads(4)
+                     .weightsDataType(DataType::FP16)
+                     .outputDataType(DataType::BF16)
+                     .build(),
+                 std::invalid_argument);
+
+    EXPECT_THROW(Api::Attention::Builder()
+                     .network(network)
+                     .featureInput(input.getFeatureOutput().value())
+                     .numHeads(4)
+                     .weightsDataType(DataType::BF16)
+                     .outputDataType(DataType::FP16)
+                     .build(),
+                 std::invalid_argument);
 }
 
 TEST(AttentionApi, RejectsInvalidHeadConfiguration) {
@@ -2087,6 +2160,129 @@ TEST(AttentionApi, ForwardBf16MhaWithBiasMatchesFullCpuReference) {
     c.dataType = DataType::BF16;
 
     runAttentionApiReferenceCase("attention_api_forward_bf16_mha_with_bias_matches_full_cpu_reference", c, 1.8e-1f, 1.8e-1f);
+}
+
+TEST(AttentionApi, PlacedSaveLoadRoundTripRestoresBf16ProjectionBytesAndExecution) {
+    constexpr uint32_t batchSize = 1;
+    constexpr uint32_t sequenceLength = 2;
+    constexpr uint32_t featureWidth = 16;
+    const string networkName = "attention_bf16_parameter_round_trip";
+    const filesystem::path archiveDir = makeUniqueTestArchiveDir(networkName);
+
+    vector<float> inputValues(static_cast<uint64_t>(batchSize) * sequenceLength * featureWidth);
+    for (uint64_t i = 0; i < inputValues.size(); ++i) {
+        inputValues[i] = static_cast<float>(static_cast<int>(i % 13) - 6) * 0.125f;
+    }
+
+    const vector<string> parameterNames = {
+        "query_weights",
+        "key_weights",
+        "value_weights",
+        "output_weights",
+        "query_bias",
+        "key_bias",
+        "value_bias",
+        "output_bias",
+    };
+    const vector<vector<float>> parameterValues = {
+        scaledIdentity(featureWidth, 0.5f),
+        scaledIdentity(featureWidth, 0.75f),
+        scaledIdentity(featureWidth, 1.25f),
+        scaledIdentity(featureWidth, 0.8f),
+        vector<float>(featureWidth, 0.03125f),
+        vector<float>(featureWidth, -0.046875f),
+        vector<float>(featureWidth, 0.0625f),
+        vector<float>(featureWidth, -0.015625f),
+    };
+
+    try {
+        Api::Network network(networkName);
+        Api::NetworkInput input = Api::NetworkInput::Builder()
+                                      .network(network)
+                                      .name("tokens")
+                                      .dimensions({sequenceLength, featureWidth})
+                                      .dataType(DataType::BF16)
+                                      .build();
+        Api::Attention attention = Api::Attention::Builder()
+                                       .network(network)
+                                       .featureInput(input.getFeatureOutput().value())
+                                       .numHeads(1)
+                                       .headDim(featureWidth)
+                                       .valueDim(featureWidth)
+                                       .outputFeatures(featureWidth)
+                                       .hasBias(true)
+                                       .weightsDataType(DataType::BF16)
+                                       .computeDataType(DataType::FP32)
+                                       .outputDataType(DataType::BF16)
+                                       .build();
+        Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                        .network(network)
+                                        .name("output")
+                                        .inputTensor(attention.getFeatureOutput().value())
+                                        .dataType(DataType::BF16)
+                                        .build();
+
+        PlacedAttentionFixture source =
+            placeSingleAttentionNetwork(network, input, output, attention, batchSize, true);
+        Stream sourceStream = source.physicalAttention->getStreams()[0];
+        vector<vector<uint8_t>> sourceParameterBytes;
+        sourceParameterBytes.reserve(parameterNames.size());
+        for (uint64_t i = 0; i < parameterNames.size(); ++i) {
+            auto parameter = source.physicalAttention->getParameter(parameterNames[i]);
+            ASSERT_NE(parameter, nullptr);
+            ASSERT_TRUE(parameter->getStorage().has_value());
+            ASSERT_EQ(parameter->getStorage()->getDataType(), DataType::BF16);
+            setParameterTensor(parameter, parameterValues[i], sourceStream);
+        }
+        sourceStream.synchronize();
+        for (const string& parameterName : parameterNames) {
+            auto parameter = source.physicalAttention->getParameter(parameterName);
+            sourceParameterBytes.push_back(readTensorBytes(parameter->getStorage().value(), sourceStream));
+        }
+
+        Impl::Tensor featureInHost(
+            cpuPlacement, Impl::TensorDescriptor(DataType::BF16, {batchSize, sequenceLength, featureWidth}));
+        writeCpuTensor(featureInHost, inputValues);
+        const vector<float> sourceOutput =
+            runForward(*source.physicalInput, *source.physicalOutput, featureInHost, batchSize);
+        EXPECT_TRUE(std::any_of(sourceOutput.begin(), sourceOutput.end(), [](float value) { return std::fabs(value) > 1.0e-3f; }));
+        source.placedNetwork->save(archiveDir.string(), true, false);
+
+        Api::Network loadedNetwork(networkName);
+        loadedNetwork.load(archiveDir.string());
+        auto loadedInput = findOnlyLayerOfType<Api::NetworkInput>(loadedNetwork);
+        auto loadedAttention = findOnlyLayerOfType<Api::Attention>(loadedNetwork);
+        auto loadedOutput = findOnlyLayerOfType<Api::NetworkOutput>(loadedNetwork);
+        ASSERT_NE(loadedInput, nullptr);
+        ASSERT_NE(loadedAttention, nullptr);
+        ASSERT_NE(loadedOutput, nullptr);
+
+        const nlohmann::json loadedArchitecture = loadedAttention->architectureJson();
+        EXPECT_EQ(loadedArchitecture.at("weights_data_type").get<DataType>(), DataType::BF16);
+        EXPECT_EQ(loadedArchitecture.at("output_data_type").get<DataType>(), DataType::BF16);
+        for (const string& parameterName : parameterNames) {
+            EXPECT_EQ(loadedArchitecture.at("parameters").at(parameterName).at("dtype").get<DataType>(), DataType::BF16);
+        }
+
+        PlacedAttentionFixture loaded =
+            placeSingleAttentionNetwork(loadedNetwork, *loadedInput, *loadedOutput, *loadedAttention, batchSize, true);
+        Stream loadedStream = loaded.physicalAttention->getStreams()[0];
+        for (uint64_t i = 0; i < parameterNames.size(); ++i) {
+            auto parameter = loaded.physicalAttention->getParameter(parameterNames[i]);
+            ASSERT_NE(parameter, nullptr);
+            ASSERT_TRUE(parameter->getStorage().has_value());
+            ASSERT_EQ(parameter->getStorage()->getDataType(), DataType::BF16);
+            EXPECT_EQ(readTensorBytes(parameter->getStorage().value(), loadedStream), sourceParameterBytes[i]);
+        }
+
+        const vector<float> loadedOutputValues =
+            runForward(*loaded.physicalInput, *loaded.physicalOutput, featureInHost, batchSize);
+        expectAllClose(loadedOutputValues, sourceOutput, 2e-2f, 2e-2f);
+    } catch (...) {
+        filesystem::remove_all(archiveDir);
+        throw;
+    }
+    filesystem::remove_all(archiveDir);
 }
 
 TEST(AttentionApi, ForwardCausalBottomRightNoBiasMatchesFullCpuReference) {
