@@ -734,3 +734,18 @@ def test_abs_forward_numerical(dtype: thor.DataType):
 
     assert got.shape == expected.shape
     _assert_close(got, expected, dtype)
+
+
+@pytest.mark.cuda
+def test_bf16_log1p_preserves_values_above_fp16_range():
+    dtype = thor.DataType.bf16
+    storage_dtype = _numpy_storage_dtype(dtype)
+    x_np = np.array([65536.0, 70000.0, 100000.0, 1.0e6, 1.0e8], dtype=np.float32).astype(storage_dtype)
+
+    x = ex.input("x")
+    got = _run_expr(ex.log1p(x), ["x"], x_np, dtype=dtype)
+    expected = np.log1p(x_np.astype(np.float32)).astype(storage_dtype)
+
+    assert got.dtype == storage_dtype
+    assert np.isfinite(got.astype(np.float32)).all()
+    np.testing.assert_allclose(got.astype(np.float32), expected.astype(np.float32), rtol=2e-2, atol=2e-2)

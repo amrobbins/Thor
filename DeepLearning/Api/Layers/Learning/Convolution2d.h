@@ -14,8 +14,6 @@
 #include "DeepLearning/Api/Layers/Utility/TypeConverter.h"
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2d.h"
 #include "Utilities/Exceptions.h"
-#include "Utilities/TensorOperations/GpuConvolution/ConvolutionKernelRequirement.h"
-#include "Utilities/TensorOperations/GpuConvolution/GpuConvolution.h"
 #include <optional>
 #include <set>
 #include <string>

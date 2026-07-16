@@ -9,7 +9,7 @@ namespace Thor {
 void NetworkOutput::buildSupportLayersAndAddToNetwork() {
     Tensor currentFeatureInput = featureInput.value();
 
-    // Force the input tensor to this type of layer to be FP16
+    // An explicit NetworkOutput dtype override is represented by an explicit TypeConverter layer.
     if (featureInput.value().getDataType() != dataType) {
         currentFeatureInput =
             TypeConverter::Builder().network(*network).featureInput(currentFeatureInput).newDataType(dataType).build().getFeatureOutput().value();

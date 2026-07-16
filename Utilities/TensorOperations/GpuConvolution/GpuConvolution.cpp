@@ -1,4 +1,6 @@
 #include <optional>
+#include <stdexcept>
+#include <string>
 #include "Utilities/TensorOperations/GpuConvolution/GpuConvolution.h"
 #include "DeepLearning/Implementation/ThorError.h"
 
@@ -8,6 +10,20 @@ using namespace std;
 const float GpuConvolution::ALPHA_NO_SCALE = 1.0f;
 const float GpuConvolution::BETA_CLEAR = 0.0f;
 const float GpuConvolution::BETA_ACCUMULATE = 1.0f;
+
+namespace {
+
+void requireLegacyFp16Tensor(const Tensor& tensor, const char* role) {
+    const DataType dtype = tensor.getDescriptor().getDataType();
+    if (dtype != DataType::FP16) {
+        throw runtime_error(string("Legacy GpuConvolution requires FP16 ") + role +
+                            " tensors because its cached cuDNN descriptors are FP16-only; received " +
+                            TensorDescriptor::getElementTypeName(dtype) +
+                            ". Use the current Convolution2d expression-graph path for BF16 or other dtypes.");
+    }
+}
+
+}  // namespace
 
 // Finds the optimal forward kernel for the convolution operation given the parameters
 void GpuConvolution::chooseOptimalKernelForward(ConvolutionKernelRequirement convolutionKernelRequirement, Stream stream) {
@@ -368,6 +384,12 @@ void GpuConvolution::convolutionForward(ConvolutionKernelRequirement convolution
                                         Stream stream) {
     THOR_THROW_IF_FALSE(dataInput.getPlacement() == weights.getPlacement());
     THOR_THROW_IF_FALSE(dataInput.getPlacement() == dataOutput.getPlacement());
+    requireLegacyFp16Tensor(dataInput, "input");
+    requireLegacyFp16Tensor(weights, "weight");
+    requireLegacyFp16Tensor(dataOutput, "output");
+    if (biases.has_value()) {
+        requireLegacyFp16Tensor(biases.value(), "bias");
+    }
 
     auto maybeOptimalKernel = GpuConvolution::instance().optimalForwardKernels.get(convolutionKernelRequirement);
     THOR_THROW_IF_FALSE(maybeOptimalKernel.has_value());
@@ -430,6 +452,9 @@ void GpuConvolution::convolutionBackwardData(ConvolutionKernelRequirement convol
                                              Stream stream) {
     THOR_THROW_IF_FALSE(errorInput.getPlacement() == weights.getPlacement());
     THOR_THROW_IF_FALSE(errorInput.getPlacement() == errorOutput.getPlacement());
+    requireLegacyFp16Tensor(errorInput, "incoming-gradient");
+    requireLegacyFp16Tensor(weights, "weight");
+    requireLegacyFp16Tensor(errorOutput, "outgoing-gradient");
 
     auto maybeOptimalKernel = GpuConvolution::instance().optimalBackwardDataKernels.get(convolutionKernelRequirement);
     THOR_THROW_IF_FALSE(maybeOptimalKernel.has_value());
@@ -475,6 +500,9 @@ void GpuConvolution::convolutionBackwardFilter(ConvolutionKernelRequirement conv
                                                bool accumulateGradient) {
     THOR_THROW_IF_FALSE(dataInput.getPlacement() == errorInput.getPlacement());
     THOR_THROW_IF_FALSE(dataInput.getPlacement() == weightsGradient.getPlacement());
+    requireLegacyFp16Tensor(dataInput, "input");
+    requireLegacyFp16Tensor(errorInput, "incoming-gradient");
+    requireLegacyFp16Tensor(weightsGradient, "weight-gradient");
 
     auto maybeOptimalKernel = GpuConvolution::instance().optimalBackwardFilterKernels.get(convolutionKernelRequirement);
     THOR_THROW_IF_FALSE(maybeOptimalKernel.has_value());
@@ -514,6 +542,9 @@ void GpuConvolution::convolutionBackwardBias(ConvolutionKernelRequirement convol
                                              std::optional<Tensor> workspace,
                                              Stream stream,
                                              bool accumulateGradient) {
+    requireLegacyFp16Tensor(errorInput, "incoming-gradient");
+    requireLegacyFp16Tensor(biasesGradient, "bias-gradient");
+
     if (useCudnnBackwardBias) {
         cudnnStatus_t cudnnStatus;
         cudnnStatus = cudnnConvolutionBackwardBias(stream.getCudnnHandle(),

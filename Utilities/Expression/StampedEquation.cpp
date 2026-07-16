@@ -1027,9 +1027,33 @@ void StampedEquation::runOn(Stream& run_stream, const std::unordered_map<std::st
     EquationRunner::run(compiledEquation, overridden_inputs, outputs, run_stream);
 }
 
-StampedReduction::StampedReduction(
-    std::shared_ptr<BuiltReduction> built, const Tensor& input, const Tensor& output, const Stream& stream, std::optional<Tensor> workspace)
-    : built_reduction(built), input(input), output(output), workspace(workspace), stream(stream) {
+static void refreshCudnnSingleInputStageAdapter(const Tensor& source_input, Tensor& input, Stream& run_stream) {
+    if (source_input.getPlacement() != input.getPlacement() || source_input.getDimensions() != input.getDimensions()) {
+        throw std::runtime_error("cuDNN stage dtype adapter must preserve the source tensor placement and dimensions.");
+    }
+
+    if (source_input.getTensorId() == input.getTensorId()) {
+        if (source_input.getDataType() != input.getDataType()) {
+            throw std::runtime_error("Aliased cuDNN stage input cannot have mismatched source and operation dtypes.");
+        }
+        return;
+    }
+
+    input.copyFromAsync(source_input, run_stream);
+}
+
+StampedReduction::StampedReduction(std::shared_ptr<BuiltReduction> built,
+                                   const Tensor& source_input,
+                                   const Tensor& input,
+                                   const Tensor& output,
+                                   const Stream& stream,
+                                   std::optional<Tensor> workspace)
+    : built_reduction(std::move(built)),
+      source_input(source_input),
+      input(input),
+      output(output),
+      workspace(workspace),
+      stream(stream) {
     if (built_reduction->workspace_bytes != 0) {
         THOR_THROW_IF_FALSE(workspace.has_value());
         THOR_THROW_IF_FALSE(workspace.value().getArraySizeInBytes() >= built_reduction->workspace_bytes);
@@ -1041,6 +1065,8 @@ StampedReduction::StampedReduction(
 void StampedReduction::run() { runOn(stream); }
 
 void StampedReduction::runOn(Stream& run_stream) const {
+    refreshCudnnSingleInputStageAdapter(source_input, input, run_stream);
+
     if (built_reduction->identity_reduction) {
         Tensor output_view = output;
         output_view.copyFromAsync(input, run_stream);
@@ -1068,12 +1094,14 @@ void StampedReduction::runOn(Stream& run_stream) const {
 }
 
 StampedArgMinMax::StampedArgMinMax(std::shared_ptr<BuiltReduction> built,
+                                   const Tensor& source_input,
                                    const Tensor& input,
                                    const Tensor& output,
                                    const Tensor& reduction_value_output,
                                    const Stream& stream,
                                    std::optional<Tensor> workspace)
-    : built_reduction(built),
+    : built_reduction(std::move(built)),
+      source_input(source_input),
       input(input),
       output(output),
       reduction_value_output(reduction_value_output),
@@ -1091,6 +1119,8 @@ StampedArgMinMax::StampedArgMinMax(std::shared_ptr<BuiltReduction> built,
 void StampedArgMinMax::run() { runOn(stream); }
 
 void StampedArgMinMax::runOn(Stream& run_stream) const {
+    refreshCudnnSingleInputStageAdapter(source_input, input, run_stream);
+
     // std::cerr << "[REDUCE_MINMAX_BW] input dtype=" << TensorDescriptor::getElementTypeName(input.getDataType())
     //           << " built.input_dtype=" << TensorDescriptor::getElementTypeName(built_reduction->key.input_dtype)
     //           << " built.output_dtype=" << TensorDescriptor::getElementTypeName(built_reduction->key.output_dtype)
@@ -1329,10 +1359,16 @@ void StampedScan::runOn(Stream& run_stream) const {
 
 StampedSoftmax::StampedSoftmax(std::shared_ptr<CompiledSoftmax> compiled,
                                std::shared_ptr<BuiltSoftmax> built,
+                               const Tensor& source_input,
                                const Tensor& input,
                                const Tensor& output,
                                const Stream& stream)
-    : compiled_softmax(std::move(compiled)), built_softmax(std::move(built)), input(input), output(output), stream(stream) {
+    : compiled_softmax(std::move(compiled)),
+      built_softmax(std::move(built)),
+      source_input(source_input),
+      input(input),
+      output(output),
+      stream(stream) {
     if (!compiled_softmax || !built_softmax) {
         throw std::runtime_error("StampedSoftmax requires compiled and built softmax payloads.");
     }
@@ -1343,6 +1379,8 @@ StampedSoftmax::StampedSoftmax(std::shared_ptr<CompiledSoftmax> compiled,
 void StampedSoftmax::run() { runOn(stream); }
 
 void StampedSoftmax::runOn(Stream& run_stream) const {
+    refreshCudnnSingleInputStageAdapter(source_input, input, run_stream);
+
     CUDNN_CHECK(cudnnSoftmaxForward(run_stream.getCudnnHandle(),
                                     built_softmax->key.algorithm,
                                     built_softmax->key.mode,
@@ -1953,6 +1991,7 @@ void StampedScanMinMaxBackward::runOn(Stream& run_stream) {
 }
 
 StampedReduceMinMaxBackward::StampedReduceMinMaxBackward(std::shared_ptr<BuiltReduction> built,
+                                                         const Tensor& source_input,
                                                          const Tensor& input,
                                                          const Tensor& grad_output,
                                                          const Tensor& output,
@@ -1960,7 +1999,8 @@ StampedReduceMinMaxBackward::StampedReduceMinMaxBackward(std::shared_ptr<BuiltRe
                                                          const Tensor& reduction_value_output,
                                                          const Stream& stream,
                                                          std::optional<Tensor> workspace)
-    : built_reduction(built),
+    : built_reduction(std::move(built)),
+      source_input(source_input),
       input(input),
       grad_output(grad_output),
       output(output),
@@ -1980,6 +2020,8 @@ StampedReduceMinMaxBackward::StampedReduceMinMaxBackward(std::shared_ptr<BuiltRe
 void StampedReduceMinMaxBackward::run() { runOn(stream); }
 
 void StampedReduceMinMaxBackward::runOn(Stream& run_stream) {
+    refreshCudnnSingleInputStageAdapter(source_input, input, run_stream);
+
     // std::cerr << "[REDUCE_MINMAX_BW] input dtype=" << TensorDescriptor::getElementTypeName(input.getDataType())
     //           << " built.input_dtype=" << TensorDescriptor::getElementTypeName(built_reduction->key.input_dtype)
     //           << " built.output_dtype=" << TensorDescriptor::getElementTypeName(built_reduction->key.output_dtype)

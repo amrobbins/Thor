@@ -35,6 +35,10 @@ namespace ThorImplementation {
  *
  * The singleton object is accessed as GpuConvolution::instance().convolutionForward(...)
  *
+ * This is the legacy FP16-only convolution utility. Current API Convolution2d layers lower through
+ * cuDNN Frontend expression graphs and support their declared tensor dtypes directly. This class
+ * rejects non-FP16 tensors instead of interpreting BF16 or other storage through FP16 descriptors.
+ *
  * Note: By having the member functions be non-static, they cannot be called unless the constructor has already been called.
  *       Member variables should be non-static so that they are only initialized upon creation of the singleton instance.
  */

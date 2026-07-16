@@ -1861,32 +1861,23 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::makeSingle
     return requested;
 }
 
-static Tensor adaptReductionInputDTypeIfNeeded(const Tensor& input,
-                                               DataType expected_input_dtype,
-                                               ExprOp reduction_op,
-                                               const Stream& stream) {
+static Tensor allocateCudnnSingleInputStageDTypeAdapterIfNeeded(const Tensor& input,
+                                                                 DataType expected_input_dtype,
+                                                                 ExprOp op) {
     if (input.getDataType() == expected_input_dtype) {
         return input;
     }
 
-    if (toSupportedInputDType(reduction_op, input.getDataType()) != expected_input_dtype) {
-        throw std::runtime_error("Input dtype does not match compiled reduction input dtype.");
+    if (toSupportedInputDType(op, input.getDataType()) != expected_input_dtype) {
+        throw std::runtime_error("Runtime input dtype does not match the compiled cuDNN stage dtype policy.");
     }
 
+    // Do not enqueue the conversion while stamping. A staged input may be produced by an
+    // earlier execution stage and therefore does not contain its runtime value yet. The
+    // stamped cuDNN operation owns this adapter tensor and refreshes it immediately before
+    // each execution on the caller's run stream.
     TensorDescriptor castDescriptor(expected_input_dtype, input.getDimensions());
-    Tensor castInput(input.getPlacement(), castDescriptor);
-    castInput.copyFromAsync(input, stream);
-    return castInput;
-}
-
-static Tensor adaptMatmulInputDTypeIfNeeded(const Tensor& input, DataType expected_input_dtype, const Stream& stream) {
-    if (input.getDataType() == expected_input_dtype) {
-        return input;
-    }
-    TensorDescriptor castDescriptor(expected_input_dtype, input.getDimensions());
-    Tensor castInput(input.getPlacement(), castDescriptor);
-    castInput.copyFromAsync(input, stream);
-    return castInput;
+    return Tensor(input.getPlacement(), castDescriptor);
 }
 
 static bool dimsResolveToSingleElement(const std::vector<uint64_t>& dims) {
@@ -6225,7 +6216,7 @@ std::shared_ptr<StampedReduction> FusedEquation::stampReduction(const std::share
     if (!compiledReduction)
         throw std::runtime_error("Tried to stamp reduction on a non-reduction FusedEquation.");
 
-    Tensor adaptedInput = adaptReductionInputDTypeIfNeeded(input, compiledReduction->input_dtype, compiledReduction->op, stream);
+    Tensor adaptedInput = allocateCudnnSingleInputStageDTypeAdapterIfNeeded(input, compiledReduction->input_dtype, compiledReduction->op);
 
     std::shared_ptr<BuiltReduction> built = StampedEquation::buildReduction(compiledReduction, adaptedInput, stream.getGpuNum());
 
@@ -6266,7 +6257,7 @@ std::shared_ptr<StampedReduction> FusedEquation::stampReduction(const std::share
         output = Tensor(adaptedInput.getPlacement(), outputDescriptor);
     }
 
-    return make_shared<StampedReduction>(std::move(built), adaptedInput, output, stream, workspace);
+    return make_shared<StampedReduction>(std::move(built), input, adaptedInput, output, stream, workspace);
 }
 
 std::shared_ptr<StampedArgMinMax> FusedEquation::stampArgMinMax(const std::shared_ptr<CompiledArgMinMax>& compiledStage,
@@ -6284,7 +6275,7 @@ std::shared_ptr<StampedArgMinMax> FusedEquation::stampArgMinMax(const std::share
     if (!compiledStage) {
         throw std::runtime_error("stampArgMinMax requires non-null compiled stage.");
     }
-    Tensor adaptedInput = adaptReductionInputDTypeIfNeeded(input, compiledStage->input_dtype, compiledStage->op, stream);
+    Tensor adaptedInput = allocateCudnnSingleInputStageDTypeAdapterIfNeeded(input, compiledStage->input_dtype, compiledStage->op);
 
     const ExprOp reduce_op = compiledStage->op == ExprOp::REDUCE_ARGMIN ? ExprOp::REDUCE_MIN : ExprOp::REDUCE_MAX;
     std::shared_ptr<BuiltReduction> built = StampedEquation::buildReduction(reduce_op,
@@ -6340,7 +6331,8 @@ std::shared_ptr<StampedArgMinMax> FusedEquation::stampArgMinMax(const std::share
     TensorDescriptor reductionValueDescriptor(built->key.output_dtype, unsqueezed_output_dims);
     Tensor reductionValueOutput(adaptedInput.getPlacement(), reductionValueDescriptor);
 
-    return make_shared<StampedArgMinMax>(std::move(built), adaptedInput, output, reductionValueOutput, stream, workspace);
+    return make_shared<StampedArgMinMax>(
+        std::move(built), input, adaptedInput, output, reductionValueOutput, stream, workspace);
 }
 
 std::shared_ptr<StampedSoftmax> FusedEquation::stampSoftmax(const std::shared_ptr<CompiledSoftmax>& compiledStage,
@@ -6352,7 +6344,7 @@ std::shared_ptr<StampedSoftmax> FusedEquation::stampSoftmax(const std::shared_pt
         throw std::runtime_error("stampSoftmax requires non-null compiled stage.");
     }
 
-    Tensor adaptedInput = adaptReductionInputDTypeIfNeeded(input, compiledStage->input_dtype, ExprOp::SOFTMAX, stream);
+    Tensor adaptedInput = allocateCudnnSingleInputStageDTypeAdapterIfNeeded(input, compiledStage->input_dtype, ExprOp::SOFTMAX);
 
     const std::vector<uint64_t> resolved_output_dimensions = adaptedInput.getDimensions();
     std::vector<uint64_t> output_dimensions = resolved_output_dimensions;
@@ -6380,7 +6372,7 @@ std::shared_ptr<StampedSoftmax> FusedEquation::stampSoftmax(const std::shared_pt
     }
 
     std::shared_ptr<BuiltSoftmax> built = StampedEquation::buildSoftmax(compiledStage, adaptedInput, output, stream.getGpuNum());
-    return make_shared<StampedSoftmax>(compiledStage, std::move(built), adaptedInput, output, stream);
+    return make_shared<StampedSoftmax>(compiledStage, std::move(built), input, adaptedInput, output, stream);
 }
 
 std::shared_ptr<StampedRmsNorm> FusedEquation::stampRmsNorm(const std::shared_ptr<CompiledRmsNorm>& compiledStage,
@@ -6392,8 +6384,19 @@ std::shared_ptr<StampedRmsNorm> FusedEquation::stampRmsNorm(const std::shared_pt
         throw std::runtime_error("stampRmsNorm requires non-null compiled stage.");
     }
 
-    Tensor adaptedInput = adaptMatmulInputDTypeIfNeeded(input, compiledStage->input_dtype, stream);
-    Tensor adaptedScale = adaptMatmulInputDTypeIfNeeded(scale, compiledStage->scale_dtype, stream);
+    if (input.getDataType() != compiledStage->input_dtype) {
+        throw std::runtime_error(
+            "RMSNorm input tensor dtype does not match the compiled RMSNorm input dtype. "
+            "Thor will not implicitly convert RMSNorm activations during stamping.");
+    }
+    if (scale.getDataType() != compiledStage->scale_dtype) {
+        throw std::runtime_error(
+            "RMSNorm scale tensor dtype does not match the compiled RMSNorm scale dtype. "
+            "Thor will not implicitly convert RMSNorm parameters during stamping.");
+    }
+
+    const Tensor& adaptedInput = input;
+    const Tensor& adaptedScale = scale;
     ExprNode rmsNormNode{};
     rmsNormNode.op = ExprOp::RMSNORM;
     rmsNormNode.rms_norm_normalized_feature_count = compiledStage->normalized_feature_count;
@@ -7298,11 +7301,10 @@ std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBac
         throw std::runtime_error("stampReduceMinMaxBackward requires non-null compiled stage.");
     }
 
-    Tensor adaptedInput =
-        adaptReductionInputDTypeIfNeeded(input,
-                                         compiledStage->input_dtype,
-                                         compiledStage->op == ExprOp::REDUCE_MIN_BACKWARD ? ExprOp::REDUCE_MIN : ExprOp::REDUCE_MAX,
-                                         stream);
+    Tensor adaptedInput = allocateCudnnSingleInputStageDTypeAdapterIfNeeded(
+        input,
+        compiledStage->input_dtype,
+        compiledStage->op == ExprOp::REDUCE_MIN_BACKWARD ? ExprOp::REDUCE_MIN : ExprOp::REDUCE_MAX);
 
     if (grad_output.getDataType() != compiledStage->grad_output_dtype) {
         throw std::runtime_error("Grad-output dtype does not match compiled reduce-min/max-backward grad-output dtype.");
@@ -7359,7 +7361,7 @@ std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBac
     }
 
     return make_shared<StampedReduceMinMaxBackward>(
-        std::move(built), adaptedInput, grad_output, output, indices, reductionValueOutput, stream, workspace);
+        std::move(built), input, adaptedInput, grad_output, output, indices, reductionValueOutput, stream, workspace);
 }
 
 

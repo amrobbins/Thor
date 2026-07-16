@@ -74,8 +74,6 @@ static bool isPassthroughViewOp(ExprOp op) {
 
 static bool isBooleanOutputOp(ExprOp op) { return isComparisonOp(op) || isLogicalOp(op); }
 
-static bool isCudnnSingleInputStageOp(ExprOp op) { return isCudnnReduceOp(op) || isCudnnSoftmaxOp(op); }
-
 static bool isSupportedCudnnReductionOutputDType(DataType dtype) {
     switch (dtype) {
         case DataType::FP16:
@@ -194,22 +192,44 @@ DataType toSupportedInputDType(ExprOp op, DataType dtype) {
         throw std::runtime_error("Unsupported dtype in toSupportedInputDType.");
     }
 
-    if (isCudnnSingleInputStageOp(op)) {
+    if (isCudnnReduceOp(op)) {
         switch (dtype) {
             case DataType::FP16:
             case DataType::FP32:
                 return dtype;
+            case DataType::BF16:
+                // Thor's staged reduction path currently uses deprecated cudnnReduceTensor.
+                // That API documents HALF/INT8-to-FLOAT mixed reductions, but not BF16.
+                // Stage BF16 in FP32 so the compatibility conversion cannot overflow values
+                // that are representable in BF16 but not FP16.
+                return DataType::FP32;
             case DataType::FP8_E4M3:
             case DataType::FP8_E5M2:
-            case DataType::BF16:
+                // FP8 reduction is not natively supported by this path. FP16 is an allowed
+                // compute promotion because it strictly increases FP8 representability.
                 return DataType::FP16;
             default:
-                throw std::runtime_error("Unhandled cuDNN single-input stage dtype conversion, from: " +
+                throw std::runtime_error("Unhandled cuDNN reduction input dtype conversion, from: " +
                                          TensorDescriptor::getElementTypeName(dtype));
         }
-    } else {
-        return dtype;
     }
+
+    if (isCudnnSoftmaxOp(op)) {
+        switch (dtype) {
+            case DataType::FP16:
+            case DataType::BF16:
+            case DataType::FP32:
+                return dtype;
+            case DataType::FP8_E4M3:
+            case DataType::FP8_E5M2:
+                return DataType::FP16;
+            default:
+                throw std::runtime_error("Unhandled cuDNN softmax input dtype conversion, from: " +
+                                         TensorDescriptor::getElementTypeName(dtype));
+        }
+    }
+
+    return dtype;
 }
 
 DataType promoteTensorValueDTypes(DataType a, DataType b) {
@@ -779,6 +799,24 @@ static void propagateMaterializedOutputComputeDTypes(PhysicalExpression& expr,
         } else if (node.op == ExprOp::CAST) {
             // Cast is an explicit dtype-conversion boundary. Do not force the
             // source expression to compute in the destination dtype.
+        } else if (isCudnnReduceOp(node.op)) {
+            // A reduction's FP32 compute policy belongs to the reduction stage only.
+            // The materialized producer still needs to honor its own compute policy:
+            // for example, an FP32 trunk assembled from an FP16 and an FP32 branch
+            // must evaluate the FP16 branch in FP32 before materialization.  Seed the
+            // producer with its already-resolved compute dtype rather than propagating
+            // the reduction's mandatory FP32 compute dtype.  This preserves BF16
+            // producers as BF16 while still widening genuinely FP32 producer graphs.
+            if (node.lhs >= expr.nodes.size()) {
+                throw std::runtime_error(
+                    "Reduction parent node index out of range in propagateMaterializedOutputComputeDTypes.");
+            }
+            const ExprNode& producer = expr.nodes[node.lhs];
+            if (producer.compute_dtype.has_value()) {
+                seedRequiredComputeDType(required_compute_dtype[node.lhs], producer.compute_dtype.value());
+            } else if (producer.output_dtype.has_value()) {
+                seedRequiredComputeDType(required_compute_dtype[node.lhs], producer.output_dtype.value());
+            }
         } else if (node.op == ExprOp::WHERE) {
             // Do not propagate the selected value compute dtype into the boolean condition.
             // Only floating-value branches should be widened by a materialized where output.

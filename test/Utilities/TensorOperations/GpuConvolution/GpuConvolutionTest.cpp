@@ -66,6 +66,30 @@ float backwardDataTolerance(const ConvolutionKernelRequirement &convolutionKerne
 
 }  // namespace
 
+TEST(GpuConvolution, LegacyUtilityRejectsBf16InsteadOfInterpretingItAsFp16) {
+    Stream stream(0);
+    ConvolutionKernelRequirement requirement(MachineEvaluator::instance().getGpuType(0),
+                                             1,
+                                             1,
+                                             1,
+                                             1,
+                                             0,
+                                             0,
+                                             1,
+                                             1,
+                                             1,
+                                             1,
+                                             1);
+
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    Tensor errorInput(gpuPlacement, TensorDescriptor(DataType::BF16, {1, 1, 1, 1}));
+    Tensor biasGradient(gpuPlacement, TensorDescriptor(DataType::BF16, {1}));
+
+    EXPECT_THROW(
+        GpuConvolution::instance().convolutionBackwardBias(requirement, errorInput, biasGradient, std::nullopt, stream, false),
+        std::runtime_error);
+}
+
 TEST(GpuConvolution, ConvolutionBackwardBiasProducesCorrectResult) {
     Stream stream(0);
 

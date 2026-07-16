@@ -1335,3 +1335,24 @@ def test_compile_backward_reduce_min_preallocated_output_wrong_shape_raises(dtyp
                 out_name: wrong_out
             },
         )
+
+
+@pytest.mark.cuda
+def test_bf16_reduction_compatibility_promotes_to_fp32_not_fp16():
+    dtype = thor.DataType.bf16
+    storage_dtype = _numpy_storage_dtype(dtype)
+    x_np = np.array(
+        [
+            [65536.0, 70000.0, 100000.0, 3.0],
+            [1.0e6, 1.0e8, 4.0, 5.0],
+        ],
+        dtype=np.float32,
+    ).astype(storage_dtype)
+
+    x = ex.input("x")
+    got = _run_staged_expr(ex.reduce_max(x + 0.0, axis=1, squeeze=True), ["x"], x_np, dtype=dtype)
+    expected = np.max(x_np.astype(np.float32), axis=1).astype(np.float32)
+
+    assert got.dtype == np.float32
+    assert np.isfinite(got).all()
+    np.testing.assert_allclose(got, expected, rtol=1e-5, atol=1e-5)

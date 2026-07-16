@@ -5,6 +5,7 @@
 #include "DeepLearning/Implementation/Layers/Utility/Concatenate.h"
 #include "DeepLearning/Implementation/Layers/Utility/DeviceCrossing.h"
 #include "DeepLearning/Implementation/Layers/Utility/Extract.h"
+#include "DeepLearning/Implementation/Layers/Utility/FiniteCheck.h"
 #include "DeepLearning/Implementation/Layers/Utility/Flatten.h"
 #include "DeepLearning/Implementation/Layers/Utility/Map.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
@@ -23,6 +24,7 @@
 #include "cuda_runtime.h"
 #include "gtest/gtest.h"
 
+#include <limits>
 #include <set>
 #include <string>
 #include <utility>
@@ -1619,3 +1621,105 @@ TEST(Extract, Extracts) {
 TEST(Extract, ExtractsFp32ForwardAndBackward) { expectExtractForwardAndBackwardForDType<float>(); }
 
 TEST(Extract, ExtractsBf16ForwardAndBackward) { expectExtractForwardAndBackwardForDType<__nv_bfloat16>(); }
+
+TEST(FiniteCheck, ForwardReportsCpuNonFiniteValues) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorDescriptor descriptor(DataType::FP32, {2, 4});
+    Tensor sourceCpu(cpuPlacement, descriptor);
+
+    vector<shared_ptr<Layer>> layers;
+    layers.push_back(make_shared<NetworkInput>(sourceCpu));
+    layers.push_back(make_shared<NoOpLayer>());
+    layers.push_back(make_shared<FiniteCheck>("after_projection", 10001, 9001, true, true, true, 4));
+    layers.push_back(make_shared<BackpropDescriptorSinkLayer>());
+    LayerTestHelper::connectAndInitializeNetwork(layers);
+
+    auto finiteCheck = dynamic_pointer_cast<FiniteCheck>(layers[2]);
+    ASSERT_NE(finiteCheck, nullptr);
+    ASSERT_TRUE(finiteCheck->getFeatureInput().has_value());
+    Tensor checkedTensor = finiteCheck->getFeatureInput().value();
+    float *values = checkedTensor.getMemPtr<float>();
+    values[0] = 1.0f;
+    values[1] = std::numeric_limits<float>::quiet_NaN();
+    values[2] = std::numeric_limits<float>::infinity();
+    values[3] = -std::numeric_limits<float>::infinity();
+    values[4] = 5.0f;
+    values[5] = 6.0f;
+    values[6] = 7.0f;
+    values[7] = 8.0f;
+
+    try {
+        finiteCheck->forward(checkedTensor, false, 2);
+        FAIL() << "Expected FiniteCheck to throw";
+    } catch (const std::runtime_error &error) {
+        const string message = error.what();
+        EXPECT_NE(message.find("FiniteCheck detected non-finite values"), string::npos);
+        EXPECT_NE(message.find("label=\"after_projection\""), string::npos);
+        EXPECT_NE(message.find("direction=forward"), string::npos);
+        EXPECT_NE(message.find("dtype=fp32"), string::npos);
+        EXPECT_NE(message.find("shape=[2, 4]"), string::npos);
+        EXPECT_NE(message.find("non_finite=3"), string::npos);
+        EXPECT_NE(message.find("nan=1"), string::npos);
+        EXPECT_NE(message.find("positive_infinity=1"), string::npos);
+        EXPECT_NE(message.find("negative_infinity=1"), string::npos);
+        EXPECT_NE(message.find("flat_index=1"), string::npos);
+        EXPECT_NE(message.find("index=[0, 1]"), string::npos);
+    }
+
+    LayerTestHelper::tearDownNetwork(layers);
+}
+
+TEST(FiniteCheck, BackwardAliasesAndReportsGpuGradient) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    TensorDescriptor descriptor(DataType::FP32, {2, 4});
+    Tensor sourceGpu(gpuPlacement, descriptor);
+
+    vector<shared_ptr<Layer>> layers;
+    layers.push_back(make_shared<NetworkInput>(sourceGpu));
+    layers.push_back(make_shared<NoOpLayer>());
+    layers.push_back(make_shared<FiniteCheck>("projection_gradient", 10002, 9002, true, true, true, 4));
+    layers.push_back(make_shared<BackpropDescriptorSinkLayer>());
+    LayerTestHelper::connectNetwork(layers);
+
+    auto upstream = dynamic_pointer_cast<NoOpLayer>(layers[1]);
+    auto finiteCheck = dynamic_pointer_cast<FiniteCheck>(layers[2]);
+    auto sink = dynamic_pointer_cast<BackpropDescriptorSinkLayer>(layers[3]);
+    ASSERT_NE(upstream, nullptr);
+    ASSERT_NE(finiteCheck, nullptr);
+    ASSERT_NE(sink, nullptr);
+    ASSERT_TRUE(finiteCheck->getErrorInput().has_value());
+    ASSERT_TRUE(finiteCheck->getErrorOutput().has_value());
+    ASSERT_TRUE(upstream->getErrorInput().has_value());
+    ASSERT_TRUE(sink->getErrorOutput().has_value());
+    EXPECT_EQ(finiteCheck->getErrorInput().value().getMemPtr(), finiteCheck->getErrorOutput().value().getMemPtr());
+    EXPECT_EQ(upstream->getErrorInput().value().getMemPtr(), sink->getErrorOutput().value().getMemPtr());
+
+    LayerTestHelper::initializeNetwork(layers);
+
+    Tensor gradientCpu(cpuPlacement, descriptor);
+    float *gradientValues = gradientCpu.getMemPtr<float>();
+    for (uint32_t i = 0; i < 8; ++i)
+        gradientValues[i] = static_cast<float>(i + 1);
+    gradientValues[6] = std::numeric_limits<float>::quiet_NaN();
+
+    Tensor incomingGradient = sink->getErrorOutput().value();
+    incomingGradient.copyFromAsync(gradientCpu, finiteCheck->getStream());
+
+    try {
+        finiteCheck->backward(incomingGradient, 2);
+        FAIL() << "Expected FiniteCheck backward to throw";
+    } catch (const std::runtime_error &error) {
+        const string message = error.what();
+        EXPECT_NE(message.find("label=\"projection_gradient\""), string::npos);
+        EXPECT_NE(message.find("direction=backward"), string::npos);
+        EXPECT_NE(message.find("tensor_role=incoming_gradient"), string::npos);
+        EXPECT_NE(message.find("dtype=fp32"), string::npos);
+        EXPECT_NE(message.find("non_finite=1"), string::npos);
+        EXPECT_NE(message.find("nan=1"), string::npos);
+        EXPECT_NE(message.find("flat_index=6"), string::npos);
+        EXPECT_NE(message.find("index=[1, 2]"), string::npos);
+    }
+
+    LayerTestHelper::tearDownNetwork(layers);
+}

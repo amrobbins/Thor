@@ -481,12 +481,17 @@ class StampedReduction {
 
     Tensor getOutputTensor() const { return output; }
 
-    StampedReduction(
-        std::shared_ptr<BuiltReduction> built, const Tensor& input, const Tensor& output, const Stream& stream, std::optional<Tensor> workspace);
+    StampedReduction(std::shared_ptr<BuiltReduction> built,
+                     const Tensor& source_input,
+                     const Tensor& input,
+                     const Tensor& output,
+                     const Stream& stream,
+                     std::optional<Tensor> workspace);
 
    private:
     const std::shared_ptr<BuiltReduction> built_reduction;
-    const Tensor input;
+    const Tensor source_input;
+    mutable Tensor input;
     Tensor output;
     const std::optional<Tensor> workspace;
     Stream stream;
@@ -507,6 +512,7 @@ class StampedArgMinMax {
     Tensor getOutputTensor() const { return output; }
 
     StampedArgMinMax(std::shared_ptr<BuiltReduction> built,
+                     const Tensor& source_input,
                      const Tensor& input,
                      const Tensor& output,
                      const Tensor& reduction_value_output,
@@ -515,7 +521,8 @@ class StampedArgMinMax {
 
    private:
     const std::shared_ptr<BuiltReduction> built_reduction;
-    const Tensor input;
+    const Tensor source_input;
+    mutable Tensor input;
     Tensor output;
     const Tensor reduction_value_output;
     const std::optional<Tensor> workspace;
@@ -601,6 +608,7 @@ class StampedSoftmax {
 
     StampedSoftmax(std::shared_ptr<CompiledSoftmax> compiled,
                    std::shared_ptr<BuiltSoftmax> built,
+                   const Tensor& source_input,
                    const Tensor& input,
                    const Tensor& output,
                    const Stream& stream);
@@ -608,7 +616,8 @@ class StampedSoftmax {
    private:
     const std::shared_ptr<CompiledSoftmax> compiled_softmax;
     const std::shared_ptr<BuiltSoftmax> built_softmax;
-    const Tensor input;
+    const Tensor source_input;
+    mutable Tensor input;
     Tensor output;
     Stream stream;
 
@@ -949,6 +958,7 @@ class StampedReduceMinMaxBackward {
     Tensor getOutputTensor() const { return output; }
 
     StampedReduceMinMaxBackward(std::shared_ptr<BuiltReduction> built,
+                                const Tensor& source_input,
                                 const Tensor& input,
                                 const Tensor& grad_output,
                                 const Tensor& output,
@@ -959,7 +969,8 @@ class StampedReduceMinMaxBackward {
 
    private:
     const std::shared_ptr<BuiltReduction> built_reduction;
-    const Tensor input;
+    const Tensor source_input;
+    mutable Tensor input;
     const Tensor grad_output;
     Tensor output;
     const Tensor indices;

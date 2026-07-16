@@ -729,8 +729,6 @@ static void emitRequiredHeaders(const PhysicalExpression& expr, std::ostringstre
                 need_fp16 = true;
                 break;
             case DataType::BF16:
-                // BF16 special-function lowering casts through FP16 for CUDA half/half2 intrinsics.
-                need_fp16 = true;
                 need_bf16 = true;
                 break;
             case DataType::FP8_E4M3:
@@ -1526,8 +1524,10 @@ static std::string emitUnaryComputeExpr(ExprOp op, const std::string& x, DataTyp
             if (compute_dtype == DataType::FP32) {
                 return "expm1f(" + x + ")";
             }
-            const std::string x_h = castScalarExpr(x, compute_dtype, DataType::FP16);
-            return castScalarExpr("half(expm1f(float(" + x_h + ")))", DataType::FP16, compute_dtype);
+            if (compute_dtype == DataType::FP16) {
+                return "half(expm1f(float(" + x + ")))";
+            }
+            return castScalarExpr("expm1f(" + x_f + ")", DataType::FP32, compute_dtype);
         }
         case ExprOp::EXP2:
             return castScalarExpr("exp2f(" + x_f + ")", DataType::FP32, compute_dtype);
@@ -1539,8 +1539,10 @@ static std::string emitUnaryComputeExpr(ExprOp op, const std::string& x, DataTyp
             if (compute_dtype == DataType::FP32) {
                 return "log1pf(" + x + ")";
             }
-            const std::string x_h = castScalarExpr(x, compute_dtype, DataType::FP16);
-            return castScalarExpr("half(log1pf(float(" + x_h + ")))", DataType::FP16, compute_dtype);
+            if (compute_dtype == DataType::FP16) {
+                return "half(log1pf(float(" + x + ")))";
+            }
+            return castScalarExpr("log1pf(" + x_f + ")", DataType::FP32, compute_dtype);
         }
         case ExprOp::LOG2:
             return castScalarExpr("log2f(" + x_f + ")", DataType::FP32, compute_dtype);
@@ -1552,15 +1554,19 @@ static std::string emitUnaryComputeExpr(ExprOp op, const std::string& x, DataTyp
             if (compute_dtype == DataType::FP32) {
                 return "tanhf(" + x + ")";
             }
-            const std::string x_h = castScalarExpr(x, compute_dtype, DataType::FP16);
-            return castScalarExpr("htanh(" + x_h + ")", DataType::FP16, compute_dtype);
+            if (compute_dtype == DataType::FP16) {
+                return "htanh(" + x + ")";
+            }
+            return castScalarExpr("tanhf(" + x_f + ")", DataType::FP32, compute_dtype);
         }
         case ExprOp::NORMCDF: {
             if (compute_dtype == DataType::FP32) {
                 return "normcdff(" + x + ")";
             }
-            const std::string x_h = castScalarExpr(x, compute_dtype, DataType::FP16);
-            return castScalarExpr("half(normcdff(float(" + x_h + ")))", DataType::FP16, compute_dtype);
+            if (compute_dtype == DataType::FP16) {
+                return "half(normcdff(float(" + x + ")))";
+            }
+            return castScalarExpr("normcdff(" + x_f + ")", DataType::FP32, compute_dtype);
         }
         case ExprOp::LOGICAL_NOT:
             if (compute_dtype == DataType::BOOLEAN) {
@@ -3873,15 +3879,14 @@ static std::string emitVector2Log10(const std::string& x, DataType dtype) { retu
 static std::string emitVector2Sqrt(const std::string& x, DataType dtype) { return "h2sqrt(" + x + ")"; }
 static std::string emitVector2SpecialUnary(const std::string& fn, const std::string& x, DataType dtype) {
     if (dtype == DataType::BF16) {
-        return "__floats2bfloat162_rn(" + fn + "(float(half(float(" + x + ".x)))), " + fn + "(float(half(float(" + x + ".y)))))";
+        return "__floats2bfloat162_rn(" + fn + "(float(" + x + ".x)), " + fn + "(float(" + x + ".y)))";
     }
     return "__floats2half2_rn(" + fn + "(float(half(" + x + ".x))), " + fn + "(float(half(" + x + ".y))))";
 }
 
 static std::string emitVector2Half2Tanh(const std::string& x, DataType dtype) {
     if (dtype == DataType::BF16) {
-        const std::string x_half2 = "__float22half2_rn(__bfloat1622float2(" + x + "))";
-        return "__float22bfloat162_rn(__half22float2(h2tanh(" + x_half2 + ")))";
+        return "__floats2bfloat162_rn(tanhf(float(" + x + ".x)), tanhf(float(" + x + ".y)))";
     }
 
     return "h2tanh(" + x + ")";

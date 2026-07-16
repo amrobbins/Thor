@@ -5267,24 +5267,6 @@ static bool regionSupportsTiledTransposeMaterialization(const PhysicalExpression
     return true;
 }
 
-static void forceReductionProducerOutputDTypeIfNeeded(PhysicalExpression& expr, uint32_t producer_idx) {
-    if (producer_idx >= expr.nodes.size()) {
-        throw std::runtime_error("forceReductionProducerOutputDTypeIfNeeded producer_idx out of range.");
-    }
-
-    ExprNode& producer = expr.nodes[producer_idx];
-    if (!producer.output_dtype.has_value()) {
-        throw std::runtime_error("Reduction producer missing resolved output_dtype.");
-    }
-
-    const DataType output_dtype = producer.output_dtype.value();
-    if (output_dtype == DataType::FP16 || output_dtype == DataType::FP32) {
-        return;
-    }
-
-    producer.output_dtype = DataType::FP16;
-}
-
 static bool isStorageAliasOp(ExprOp op) { return op == ExprOp::RESHAPE || op == ExprOp::STRIDED_VIEW; }
 
 static bool reshapeAliasPreservesDType(const PhysicalExpression& expr, uint32_t reshape_idx) {
@@ -5952,15 +5934,12 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 return;
             }
 
-            auto ensureBoundaryParentEmitted = [&](uint32_t parent_idx, const char* label, bool force_supported_reduction_input_dtype) {
+            auto ensureBoundaryParentEmitted = [&](uint32_t parent_idx, const char* label) {
                 if (parent_idx >= expr.nodes.size()) {
                     throw std::runtime_error(std::string("Stage-boundary ") + label + " out of range.");
                 }
                 const ExprNode& parent = expr.nodes[parent_idx];
                 if (parent.op != ExprOp::INPUT || inputRequiresMaterialization(parent)) {
-                    if (force_supported_reduction_input_dtype) {
-                        forceReductionProducerOutputDTypeIfNeeded(expr, parent_idx);
-                    }
                     emitForDependency(parent_idx);
                 }
             };
@@ -5994,71 +5973,71 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             }
 
             if (!grouped_rope_roots.contains(lhs_dependency_idx)) {
-                ensureBoundaryParentEmitted(lhs_dependency_idx, "lhs", isCudnnReduceOp(root.op));
+                ensureBoundaryParentEmitted(lhs_dependency_idx, "lhs");
             }
             if (isReduceMinMaxBackwardOp(root.op) || isScanMinMaxBackwardOp(root.op) || isMatmulOp(root.op) || isEmbeddingLookupOp(root.op) ||
                 root.op == ExprOp::SEGMENTED_SCAN || isSegmentedReduceOp(root.op) || isAttentionOp(root.op) || isAttentionBackwardOp(root.op) ||
                 isConvolutionOp(root.op)) {
                 if (!grouped_rope_roots.contains(rhs_dependency_idx)) {
-                    ensureBoundaryParentEmitted(rhs_dependency_idx, "rhs", false);
+                    ensureBoundaryParentEmitted(rhs_dependency_idx, "rhs");
                 }
             }
             if (isAttentionOp(root.op) || isAttentionBackwardOp(root.op)) {
-                ensureBoundaryParentEmitted(root.aux, "aux", false);
+                ensureBoundaryParentEmitted(root.aux, "aux");
             }
             if (root.op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD || root.op == ExprOp::SEGMENTED_SCAN_MAX_BACKWARD) {
-                ensureBoundaryParentEmitted(root.aux, "offsets", false);
+                ensureBoundaryParentEmitted(root.aux, "offsets");
             }
             if (root.op == ExprOp::ATTENTION && root.attention_use_bias) {
-                ensureBoundaryParentEmitted(root.alpha_node, "bias", false);
+                ensureBoundaryParentEmitted(root.alpha_node, "bias");
             }
             if (root.op == ExprOp::ATTENTION && root.attention_use_padding_mask) {
-                ensureBoundaryParentEmitted(root.attention_seq_len_q_node, "q_seq_len", false);
-                ensureBoundaryParentEmitted(root.attention_seq_len_kv_node, "kv_seq_len", false);
+                ensureBoundaryParentEmitted(root.attention_seq_len_q_node, "q_seq_len");
+                ensureBoundaryParentEmitted(root.attention_seq_len_kv_node, "kv_seq_len");
             }
             if (root.op == ExprOp::ATTENTION && root.attention_use_ragged_offsets) {
-                ensureBoundaryParentEmitted(root.attention_ragged_offset_q_node, "q_ragged_offsets", false);
-                ensureBoundaryParentEmitted(root.attention_ragged_offset_kv_node, "kv_ragged_offsets", false);
+                ensureBoundaryParentEmitted(root.attention_ragged_offset_q_node, "q_ragged_offsets");
+                ensureBoundaryParentEmitted(root.attention_ragged_offset_kv_node, "kv_ragged_offsets");
             }
             if (root.op == ExprOp::ATTENTION && root.attention_dropout_probability > 0.0f) {
-                ensureBoundaryParentEmitted(root.attention_dropout_seed_node, "dropout_seed", false);
-                ensureBoundaryParentEmitted(root.attention_dropout_offset_node, "dropout_offset", false);
+                ensureBoundaryParentEmitted(root.attention_dropout_seed_node, "dropout_seed");
+                ensureBoundaryParentEmitted(root.attention_dropout_offset_node, "dropout_offset");
             }
             if (root.op == ExprOp::ATTENTION && root.attention_use_fp8_forward_scaling) {
-                ensureBoundaryParentEmitted(root.attention_descale_q_node, "descale_q", false);
-                ensureBoundaryParentEmitted(root.attention_descale_k_node, "descale_k", false);
-                ensureBoundaryParentEmitted(root.attention_descale_v_node, "descale_v", false);
-                ensureBoundaryParentEmitted(root.attention_descale_s_node, "descale_s", false);
-                ensureBoundaryParentEmitted(root.attention_scale_s_node, "scale_s", false);
-                ensureBoundaryParentEmitted(root.attention_scale_o_node, "scale_o", false);
-                ensureBoundaryParentEmitted(root.attention_amax_s_node, "amax_s", false);
-                ensureBoundaryParentEmitted(root.attention_amax_o_node, "amax_o", false);
+                ensureBoundaryParentEmitted(root.attention_descale_q_node, "descale_q");
+                ensureBoundaryParentEmitted(root.attention_descale_k_node, "descale_k");
+                ensureBoundaryParentEmitted(root.attention_descale_v_node, "descale_v");
+                ensureBoundaryParentEmitted(root.attention_descale_s_node, "descale_s");
+                ensureBoundaryParentEmitted(root.attention_scale_s_node, "scale_s");
+                ensureBoundaryParentEmitted(root.attention_scale_o_node, "scale_o");
+                ensureBoundaryParentEmitted(root.attention_amax_s_node, "amax_s");
+                ensureBoundaryParentEmitted(root.attention_amax_o_node, "amax_o");
             }
             if (isAttentionBackwardOp(root.op)) {
-                ensureBoundaryParentEmitted(root.alpha_node, "dO", false);
+                ensureBoundaryParentEmitted(root.alpha_node, "dO");
                 if (root.attention_use_bias) {
-                    ensureBoundaryParentEmitted(root.beta_node, "bias", false);
+                    ensureBoundaryParentEmitted(root.beta_node, "bias");
                 }
                 if (root.attention_use_padding_mask) {
-                    ensureBoundaryParentEmitted(root.attention_seq_len_q_node, "q_seq_len", false);
-                    ensureBoundaryParentEmitted(root.attention_seq_len_kv_node, "kv_seq_len", false);
+                    ensureBoundaryParentEmitted(root.attention_seq_len_q_node, "q_seq_len");
+                    ensureBoundaryParentEmitted(root.attention_seq_len_kv_node, "kv_seq_len");
                 }
                 if (root.attention_use_ragged_offsets) {
-                    ensureBoundaryParentEmitted(root.attention_ragged_offset_q_node, "q_ragged_offsets", false);
-                    ensureBoundaryParentEmitted(root.attention_ragged_offset_kv_node, "kv_ragged_offsets", false);
+                    ensureBoundaryParentEmitted(root.attention_ragged_offset_q_node, "q_ragged_offsets");
+                    ensureBoundaryParentEmitted(root.attention_ragged_offset_kv_node, "kv_ragged_offsets");
                 }
                 if (root.attention_dropout_probability > 0.0f) {
-                    ensureBoundaryParentEmitted(root.attention_dropout_seed_node, "dropout_seed", false);
-                    ensureBoundaryParentEmitted(root.attention_dropout_offset_node, "dropout_offset", false);
+                    ensureBoundaryParentEmitted(root.attention_dropout_seed_node, "dropout_seed");
+                    ensureBoundaryParentEmitted(root.attention_dropout_offset_node, "dropout_offset");
                 }
             }
             if (root.op == ExprOp::GEMM) {
-                ensureBoundaryParentEmitted(root.aux, "aux", false);
+                ensureBoundaryParentEmitted(root.aux, "aux");
                 ensureScaleDependencyEmitted(root.alpha_node, "alpha");
                 ensureScaleDependencyEmitted(root.beta_node, "beta");
             }
             if (isMatmulOp(root.op) && root.matmul_epilogue_aux != UINT32_MAX) {
-                ensureBoundaryParentEmitted(root.matmul_epilogue_aux, "backward epilogue aux", false);
+                ensureBoundaryParentEmitted(root.matmul_epilogue_aux, "backward epilogue aux");
             }
 
             if (isScanOp(root.op)) {
@@ -6333,15 +6312,12 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 continue;
             }
 
-            auto ensureBoundaryParentEmitted = [&](uint32_t parent_idx, const char* label, bool force_supported_reduction_input_dtype) {
+            auto ensureBoundaryParentEmitted = [&](uint32_t parent_idx, const char* label) {
                 if (parent_idx >= expr.nodes.size()) {
                     throw std::runtime_error(std::string("Stage-boundary ") + label + " out of range.");
                 }
                 const ExprNode& parent = expr.nodes[parent_idx];
                 if (parent.op != ExprOp::INPUT || inputRequiresMaterialization(parent)) {
-                    if (force_supported_reduction_input_dtype) {
-                        forceReductionProducerOutputDTypeIfNeeded(expr, parent_idx);
-                    }
                     emitForDependency(parent_idx);
                 }
             };
@@ -6375,71 +6351,71 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             }
 
             if (!grouped_rope_roots.contains(lhs_dependency_idx)) {
-                ensureBoundaryParentEmitted(lhs_dependency_idx, "lhs", isCudnnReduceOp(root.op));
+                ensureBoundaryParentEmitted(lhs_dependency_idx, "lhs");
             }
             if (isReduceMinMaxBackwardOp(root.op) || isScanMinMaxBackwardOp(root.op) || isMatmulOp(root.op) || isEmbeddingLookupOp(root.op) ||
                 root.op == ExprOp::SEGMENTED_SCAN || isSegmentedReduceOp(root.op) || isAttentionOp(root.op) || isAttentionBackwardOp(root.op) ||
                 isConvolutionOp(root.op)) {
                 if (!grouped_rope_roots.contains(rhs_dependency_idx)) {
-                    ensureBoundaryParentEmitted(rhs_dependency_idx, "rhs", false);
+                    ensureBoundaryParentEmitted(rhs_dependency_idx, "rhs");
                 }
             }
             if (isAttentionOp(root.op) || isAttentionBackwardOp(root.op)) {
-                ensureBoundaryParentEmitted(root.aux, "aux", false);
+                ensureBoundaryParentEmitted(root.aux, "aux");
             }
             if (root.op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD || root.op == ExprOp::SEGMENTED_SCAN_MAX_BACKWARD) {
-                ensureBoundaryParentEmitted(root.aux, "offsets", false);
+                ensureBoundaryParentEmitted(root.aux, "offsets");
             }
             if (root.op == ExprOp::ATTENTION && root.attention_use_bias) {
-                ensureBoundaryParentEmitted(root.alpha_node, "bias", false);
+                ensureBoundaryParentEmitted(root.alpha_node, "bias");
             }
             if (root.op == ExprOp::ATTENTION && root.attention_use_padding_mask) {
-                ensureBoundaryParentEmitted(root.attention_seq_len_q_node, "q_seq_len", false);
-                ensureBoundaryParentEmitted(root.attention_seq_len_kv_node, "kv_seq_len", false);
+                ensureBoundaryParentEmitted(root.attention_seq_len_q_node, "q_seq_len");
+                ensureBoundaryParentEmitted(root.attention_seq_len_kv_node, "kv_seq_len");
             }
             if (root.op == ExprOp::ATTENTION && root.attention_use_ragged_offsets) {
-                ensureBoundaryParentEmitted(root.attention_ragged_offset_q_node, "q_ragged_offsets", false);
-                ensureBoundaryParentEmitted(root.attention_ragged_offset_kv_node, "kv_ragged_offsets", false);
+                ensureBoundaryParentEmitted(root.attention_ragged_offset_q_node, "q_ragged_offsets");
+                ensureBoundaryParentEmitted(root.attention_ragged_offset_kv_node, "kv_ragged_offsets");
             }
             if (root.op == ExprOp::ATTENTION && root.attention_dropout_probability > 0.0f) {
-                ensureBoundaryParentEmitted(root.attention_dropout_seed_node, "dropout_seed", false);
-                ensureBoundaryParentEmitted(root.attention_dropout_offset_node, "dropout_offset", false);
+                ensureBoundaryParentEmitted(root.attention_dropout_seed_node, "dropout_seed");
+                ensureBoundaryParentEmitted(root.attention_dropout_offset_node, "dropout_offset");
             }
             if (root.op == ExprOp::ATTENTION && root.attention_use_fp8_forward_scaling) {
-                ensureBoundaryParentEmitted(root.attention_descale_q_node, "descale_q", false);
-                ensureBoundaryParentEmitted(root.attention_descale_k_node, "descale_k", false);
-                ensureBoundaryParentEmitted(root.attention_descale_v_node, "descale_v", false);
-                ensureBoundaryParentEmitted(root.attention_descale_s_node, "descale_s", false);
-                ensureBoundaryParentEmitted(root.attention_scale_s_node, "scale_s", false);
-                ensureBoundaryParentEmitted(root.attention_scale_o_node, "scale_o", false);
-                ensureBoundaryParentEmitted(root.attention_amax_s_node, "amax_s", false);
-                ensureBoundaryParentEmitted(root.attention_amax_o_node, "amax_o", false);
+                ensureBoundaryParentEmitted(root.attention_descale_q_node, "descale_q");
+                ensureBoundaryParentEmitted(root.attention_descale_k_node, "descale_k");
+                ensureBoundaryParentEmitted(root.attention_descale_v_node, "descale_v");
+                ensureBoundaryParentEmitted(root.attention_descale_s_node, "descale_s");
+                ensureBoundaryParentEmitted(root.attention_scale_s_node, "scale_s");
+                ensureBoundaryParentEmitted(root.attention_scale_o_node, "scale_o");
+                ensureBoundaryParentEmitted(root.attention_amax_s_node, "amax_s");
+                ensureBoundaryParentEmitted(root.attention_amax_o_node, "amax_o");
             }
             if (isAttentionBackwardOp(root.op)) {
-                ensureBoundaryParentEmitted(root.alpha_node, "dO", false);
+                ensureBoundaryParentEmitted(root.alpha_node, "dO");
                 if (root.attention_use_bias) {
-                    ensureBoundaryParentEmitted(root.beta_node, "bias", false);
+                    ensureBoundaryParentEmitted(root.beta_node, "bias");
                 }
                 if (root.attention_use_padding_mask) {
-                    ensureBoundaryParentEmitted(root.attention_seq_len_q_node, "q_seq_len", false);
-                    ensureBoundaryParentEmitted(root.attention_seq_len_kv_node, "kv_seq_len", false);
+                    ensureBoundaryParentEmitted(root.attention_seq_len_q_node, "q_seq_len");
+                    ensureBoundaryParentEmitted(root.attention_seq_len_kv_node, "kv_seq_len");
                 }
                 if (root.attention_use_ragged_offsets) {
-                    ensureBoundaryParentEmitted(root.attention_ragged_offset_q_node, "q_ragged_offsets", false);
-                    ensureBoundaryParentEmitted(root.attention_ragged_offset_kv_node, "kv_ragged_offsets", false);
+                    ensureBoundaryParentEmitted(root.attention_ragged_offset_q_node, "q_ragged_offsets");
+                    ensureBoundaryParentEmitted(root.attention_ragged_offset_kv_node, "kv_ragged_offsets");
                 }
                 if (root.attention_dropout_probability > 0.0f) {
-                    ensureBoundaryParentEmitted(root.attention_dropout_seed_node, "dropout_seed", false);
-                    ensureBoundaryParentEmitted(root.attention_dropout_offset_node, "dropout_offset", false);
+                    ensureBoundaryParentEmitted(root.attention_dropout_seed_node, "dropout_seed");
+                    ensureBoundaryParentEmitted(root.attention_dropout_offset_node, "dropout_offset");
                 }
             }
             if (root.op == ExprOp::GEMM) {
-                ensureBoundaryParentEmitted(root.aux, "aux", false);
+                ensureBoundaryParentEmitted(root.aux, "aux");
                 ensureScaleDependencyEmitted(root.alpha_node, "alpha");
                 ensureScaleDependencyEmitted(root.beta_node, "beta");
             }
             if (isMatmulOp(root.op) && root.matmul_epilogue_aux != UINT32_MAX) {
-                ensureBoundaryParentEmitted(root.matmul_epilogue_aux, "backward epilogue aux", false);
+                ensureBoundaryParentEmitted(root.matmul_epilogue_aux, "backward epilogue aux");
             }
 
             if (isScanOp(root.op)) {

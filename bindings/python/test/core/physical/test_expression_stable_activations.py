@@ -416,3 +416,24 @@ def test_cudnn_log_softmax_expression_matches_stable_numpy_for_extreme_fp32_inpu
 
     assert np.isfinite(got).all()
     np.testing.assert_allclose(got, expected, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.cuda
+def test_cudnn_softmax_preserves_bf16_values_above_fp16_range():
+    dtype = thor.DataType.bf16
+    storage_dtype = _numpy_storage_dtype(dtype)
+    x_np = np.array(
+        [
+            [100000.0, 99900.0, 0.0, -100000.0],
+            [1000000.0, 999000.0, 100.0, -100.0],
+        ],
+        dtype=np.float32,
+    ).astype(storage_dtype)
+
+    x = ex.input("x")
+    got = _run_expr(ex.softmax(x), {"x": (x_np, dtype)})
+    expected = _softmax_np(x_np.astype(np.float32)).astype(storage_dtype)
+
+    assert got.dtype == storage_dtype
+    assert np.isfinite(got.astype(np.float32)).all()
+    np.testing.assert_allclose(got.astype(np.float32), expected.astype(np.float32), rtol=2e-2, atol=2e-2)
