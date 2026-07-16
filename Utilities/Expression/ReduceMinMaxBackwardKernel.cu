@@ -10,6 +10,8 @@
 #include <stdexcept>
 #include <vector>
 
+#include "Utilities/Common/LowPrecisionFloat.h"
+
 namespace ThorImplementation {
 namespace {
 
@@ -78,7 +80,7 @@ __device__ inline __nv_bfloat16 reduceBwFromFloat<__nv_bfloat16>(float v) {
 
 template <>
 __device__ inline __nv_fp8_e4m3 reduceBwFromFloat<__nv_fp8_e4m3>(float v) {
-    return __nv_fp8_e4m3(__float2half_rn(v));
+    return ThorLowPrecision::toFp8E4M3Satfinite(v);
 }
 
 template <>

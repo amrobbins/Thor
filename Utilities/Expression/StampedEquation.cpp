@@ -3701,6 +3701,13 @@ std::shared_ptr<BuiltReduction> StampedEquation::buildReduction(ExprOp op,
                                                                 bool output_indices,
                                                                 const Tensor& input,
                                                                 int device_num) {
+    if (output_dtype != DataType::FP32) {
+        throw std::runtime_error("Thor reduction stages require FP32 value output.");
+    }
+    if (compute_dtype != DataType::FP32) {
+        throw std::runtime_error("Thor reduction stages require FP32 compute.");
+    }
+
     const std::vector<uint64_t> input_dims = input.getDimensions();
 
     ReductionCacheKey key(

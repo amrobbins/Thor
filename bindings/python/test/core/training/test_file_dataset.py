@@ -933,13 +933,25 @@ def test_training_data_owns_device_access_policy(tmp_path):
         batching=batching,
         device_storage="strict",
     )
+    strict_windowed_only_data = thor.data.TrainingData(
+        dataset=dataset,
+        splits=splits,
+        batching=batching,
+        device_storage="strict-windowed-only",
+    )
 
     assert default_data.device_storage == thor.data.DeviceDatasetStorage.OFF
     assert strict_data.device_storage == thor.data.DeviceDatasetStorage.STRICT
+    assert (
+        strict_windowed_only_data.device_storage
+        == thor.data.DeviceDatasetStorage.STRICT_WINDOWED_ONLY
+    )
     assert not hasattr(thor.training.TrainerFitOptions(), "device_dataset_storage")
 
     policy = thor.data.DatasetAccessPolicy()
     assert policy.device_storage == thor.data.DeviceDatasetStorage.BEST_EFFORT
+    policy.device_storage = "strict_windowed_only"
+    assert policy.device_storage == thor.data.DeviceDatasetStorage.STRICT_WINDOWED_ONLY
     policy.device_storage = "off"
     assert policy.device_storage == thor.data.DeviceDatasetStorage.OFF
 

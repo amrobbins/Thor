@@ -6,7 +6,17 @@
 
 namespace Thor {
 
-enum class DeviceDatasetStorage { OFF, BEST_EFFORT, STRICT };
+enum class DeviceDatasetStorage {
+    OFF,
+    BEST_EFFORT,
+    STRICT,
+    /**
+     * Require compact residency for the windowed fields of a file-backed
+     * windowed dataset. Direct fields remain source-backed even when they
+     * could also fit on the device.
+     */
+    STRICT_WINDOWED_ONLY
+};
 
 [[nodiscard]] const char* deviceDatasetStorageName(DeviceDatasetStorage storage);
 [[nodiscard]] DeviceDatasetStorage deviceDatasetStorageFromName(std::string_view name);

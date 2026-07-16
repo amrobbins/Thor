@@ -718,6 +718,23 @@ static void emitCudaFp16Header(std::ostringstream& ss) {
     ss << "#include <cuda_fp16.h>\n";
 }
 
+static void emitFp8E4M3SatfiniteHelpers(std::ostringstream& ss) {
+    ss << R"(
+__device__ __forceinline__ __nv_fp8_e4m3 thor_to_fp8_e4m3_satfinite(float value) {
+  __nv_fp8_e4m3 result;
+  result.__x = __nv_cvt_float_to_fp8(value, __NV_SATFINITE, __NV_E4M3);
+  return result;
+}
+
+__device__ __forceinline__ __nv_fp8x2_e4m3 thor_to_fp8x2_e4m3_satfinite(float2 value) {
+  __nv_fp8x2_e4m3 result;
+  result.__x = __nv_cvt_float2_to_fp8x2(value, __NV_SATFINITE, __NV_E4M3);
+  return result;
+}
+
+)";
+}
+
 static void emitRequiredHeaders(const PhysicalExpression& expr, std::ostringstream& ss) {
     bool need_fp16 = false;
     bool need_bf16 = false;
@@ -761,6 +778,7 @@ static void emitRequiredHeaders(const PhysicalExpression& expr, std::ostringstre
     }
     if (need_fp8) {
         ss << "#include <cuda_fp8.h>\n";
+        emitFp8E4M3SatfiniteHelpers(ss);
     }
     // CUDA 13.3 NVRTC bundled headers do not expose the legacy top-level
     // <math_functions.h> header.  NVRTC/libdevice still provide the device
@@ -1392,15 +1410,15 @@ static std::string castScalarExpr(const std::string& expr, DataType src_dtype, D
         case DataType::FP8_E4M3:
             switch (src_dtype) {
                 case DataType::FP32:
-                    return "__nv_fp8_e4m3(" + expr + ")";
+                    return "thor_to_fp8_e4m3_satfinite(" + expr + ")";
                 case DataType::FP16:
-                    return "__nv_fp8_e4m3(float(" + expr + "))";
+                    return "thor_to_fp8_e4m3_satfinite(float(" + expr + "))";
                 case DataType::BF16:
-                    return "__nv_fp8_e4m3(float(" + expr + "))";
+                    return "thor_to_fp8_e4m3_satfinite(float(" + expr + "))";
                 case DataType::FP8_E4M3:
                     return expr;
                 case DataType::FP8_E5M2:
-                    return "__nv_fp8_e4m3(float(" + expr + "))";
+                    return "thor_to_fp8_e4m3_satfinite(float(" + expr + "))";
                 default:
                     break;
             }
@@ -3518,7 +3536,7 @@ static std::string vector_storage_conversion(const std::string& storage_dtype_ve
     } else if (storage_dtype_vector == "__nv_bfloat162") {
         return variable;
     } else if (storage_dtype_vector == "__nv_fp8x2_e4m3") {
-        return "__nv_fp8x2_e4m3(" + variable + ")";
+        return "thor_to_fp8x2_e4m3_satfinite(__half22float2(" + variable + "))";
     } else if (storage_dtype_vector == "__nv_fp8x2_e5m2") {
         return "__nv_fp8x2_e5m2(" + variable + ")";
     }
@@ -3557,7 +3575,7 @@ static std::string float2_storage_conversion(const std::string& storage_dtype_ve
     } else if (storage_dtype_vector == "__nv_bfloat162") {
         return "__float22bfloat162_rn(" + variable + ")";
     } else if (storage_dtype_vector == "__nv_fp8x2_e4m3") {
-        return "__nv_fp8x2_e4m3(__float22half2_rn(" + variable + "))";
+        return "thor_to_fp8x2_e4m3_satfinite(" + variable + ")";
     } else if (storage_dtype_vector == "__nv_fp8x2_e5m2") {
         return "__nv_fp8x2_e5m2(__float22half2_rn(" + variable + "))";
     }
@@ -4907,6 +4925,7 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
         packs_per_thread = 8;
         emitCudaFp16Header(ss);
         ss << "#include <cuda_fp8.h>\n";
+        emitFp8E4M3SatfiniteHelpers(ss);
     } else if (dtype == DataType::FP8_E5M2) {
         compute_dtype = "half";
         compute_dtype_vector = "half2";
@@ -5366,6 +5385,7 @@ static std::string emitVector2SpecializedBroadcast(const CompiledExecutionStage&
         storage_dtype_vector = "__nv_fp8x2_e4m3";
         emitCudaFp16Header(ss);
         ss << "#include <cuda_fp8.h>\n";
+        emitFp8E4M3SatfiniteHelpers(ss);
     } else if (dtype == DataType::FP8_E5M2) {
         compute_dtype = "half";
         compute_dtype_vector = "half2";

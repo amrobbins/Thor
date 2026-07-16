@@ -804,7 +804,11 @@ DeviceDatasetStorage deviceDatasetStorageFromPython(nb::object value, const std:
             throw nb::value_error(e.what());
         }
     }
-    throw nb::type_error((argumentName + " must be a thor.data.DeviceDatasetStorage value or one of: 'best_effort', 'strict', 'off'.").c_str());
+    throw nb::type_error(
+        (argumentName +
+         " must be a thor.data.DeviceDatasetStorage value or one of: "
+         "'best_effort', 'strict', 'strict_windowed_only', 'off'.")
+            .c_str());
 }
 
 TrainingEventPhase trainingEventPhaseFromString(const std::string& value) {
@@ -2149,7 +2153,9 @@ Multiple windowed fields may reference the same persisted sequence.
     auto device_dataset_storage = nb::enum_<DeviceDatasetStorage>(training, "DeviceDatasetStorage")
                                       .value("OFF", DeviceDatasetStorage::OFF)
                                       .value("BEST_EFFORT", DeviceDatasetStorage::BEST_EFFORT)
-                                      .value("STRICT", DeviceDatasetStorage::STRICT);
+                                      .value("STRICT", DeviceDatasetStorage::STRICT)
+                                      .value("STRICT_WINDOWED_ONLY",
+                                             DeviceDatasetStorage::STRICT_WINDOWED_ONLY);
     device_dataset_storage.attr("__module__") = "thor.data";
 
     auto dataset_access_policy = nb::class_<Thor::DatasetAccessPolicy>(training, "DatasetAccessPolicy");

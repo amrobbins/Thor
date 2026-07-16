@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <type_traits>
 
+#include "Utilities/Common/LowPrecisionFloat.h"
 #include "Utilities/Expression/CudaHelpers.h"
 
 namespace ThorImplementation {
@@ -74,7 +75,7 @@ __device__ inline __nv_bfloat16 transposeFromFloat<__nv_bfloat16>(float v) {
 
 template <>
 __device__ inline __nv_fp8_e4m3 transposeFromFloat<__nv_fp8_e4m3>(float v) {
-    return __nv_fp8_e4m3(__float2half_rn(v));
+    return ThorLowPrecision::toFp8E4M3Satfinite(v);
 }
 
 template <>

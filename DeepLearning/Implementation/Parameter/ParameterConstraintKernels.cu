@@ -2,6 +2,7 @@
 
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Implementation/Tensor/DataType.h"
+#include "Utilities/Common/LowPrecisionFloat.h"
 #include "Utilities/Common/ScopedGpu.h"
 
 #include <cuda_bf16.h>
@@ -50,7 +51,7 @@ __device__ double scalarValue<__nv_fp8_e4m3>(__nv_fp8_e4m3 value) {
 
 template <>
 __device__ __nv_fp8_e4m3 scalarToStorage<__nv_fp8_e4m3>(double value) {
-    return __nv_fp8_e4m3(static_cast<float>(value));
+    return ThorLowPrecision::toFp8E4M3Satfinite(value);
 }
 
 template <>

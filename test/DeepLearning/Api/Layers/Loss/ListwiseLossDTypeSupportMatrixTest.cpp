@@ -41,7 +41,7 @@ void buildListwiseSoftmaxCrossEntropy(Api::DataType predictionsDType,
     if (mask.has_value())
         builder.mask(mask.value());
     Api::ListwiseSoftmaxCrossEntropyLoss loss = builder.build();
-    (void)loss;
+    EXPECT_EQ(loss.getLoss().getDataType(), lossDType);
 }
 
 void buildListNet(Api::DataType predictionsDType,
@@ -61,7 +61,7 @@ void buildListNet(Api::DataType predictionsDType,
     if (mask.has_value())
         builder.mask(mask.value());
     Api::ListNetLoss loss = builder.build();
-    (void)loss;
+    EXPECT_EQ(loss.getLoss().getDataType(), lossDType);
 }
 
 void expectBothListwiseLossesAccept(Api::DataType predictionsDType,

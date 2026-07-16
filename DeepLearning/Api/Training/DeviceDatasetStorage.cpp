@@ -13,6 +13,8 @@ const char* deviceDatasetStorageName(DeviceDatasetStorage storage) {
             return "best_effort";
         case DeviceDatasetStorage::STRICT:
             return "strict";
+        case DeviceDatasetStorage::STRICT_WINDOWED_ONLY:
+            return "strict_windowed_only";
         default:
             return "unknown";
     }
@@ -28,7 +30,14 @@ DeviceDatasetStorage deviceDatasetStorageFromName(std::string_view name) {
     if (name == "strict") {
         return DeviceDatasetStorage::STRICT;
     }
-    throw std::runtime_error("device_storage must be one of: 'best_effort', 'strict', 'off'.");
+    if (name == "strict_windowed_only" ||
+        name == "strict-windowed-only" ||
+        name == "strictWindowedOnly") {
+        return DeviceDatasetStorage::STRICT_WINDOWED_ONLY;
+    }
+    throw std::runtime_error(
+        "device_storage must be one of: 'best_effort', 'strict', "
+        "'strict_windowed_only', 'off'.");
 }
 
 }  // namespace Thor

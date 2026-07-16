@@ -160,9 +160,9 @@ class DeviceDatasetMemoryReservationManager {
 
     static bool fitsWithSafetyReserve(uint64_t requiredBytes,
                                       uint64_t availableBytes) {
-        // STRICT controls whether selection may fall back to the source
-        // session; it does not permit consuming Thor's process-wide startup
-        // safety reserve.
+        // Strict storage policies control whether selection may fall back
+        // to the source session; they do not permit consuming Thor's
+        // process-wide startup safety reserve.
         if (availableBytes <=
             ThorImplementation::DEVICE_STARTUP_SAFETY_RESERVE_BYTES) {
             return false;

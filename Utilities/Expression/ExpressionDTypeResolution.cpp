@@ -74,16 +74,6 @@ static bool isPassthroughViewOp(ExprOp op) {
 
 static bool isBooleanOutputOp(ExprOp op) { return isComparisonOp(op) || isLogicalOp(op); }
 
-static bool isSupportedCudnnReductionOutputDType(DataType dtype) {
-    switch (dtype) {
-        case DataType::FP16:
-        case DataType::FP32:
-            return true;
-        default:
-            return false;
-    }
-}
-
 DataType toSupportedComputeDType(ExprOp op, DataType requested_compute_dtype) {
     if (isComparisonOp(op) || isLogicalOp(op) || isWhereOp(op)) {
         if (requested_compute_dtype == DataType::BOOLEAN || requested_compute_dtype == DataType::UINT8) {
@@ -640,13 +630,10 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
         if (node.op == ExprOp::REDUCE_ARGMIN || node.op == ExprOp::REDUCE_ARGMAX)
             return DataType::UINT32;
 
-        // cuDNN reductions compute in the promoted reduction compute dtype.  Some low-precision
-        // public gradient dtypes still need a final fused conversion stage because cuDNN ReduceTensor
-        // does not accept every Thor floating output dtype.  Preserve the single-stage reduction path
-        // only for materialized output dtypes that cuDNN supports directly, e.g. FP16 bias gradients.
-        if (node.output_dtype.has_value() && isSupportedCudnnReductionOutputDType(node.output_dtype.value())) {
-            return node.output_dtype.value();
-        }
+        // cuDNN reduction stages have a fixed floating-point contract: compute and
+        // materialize in FP32.  Do not reinterpret an explicitly requested low-precision
+        // node output as part of the reduction itself.  Callers that want FP16/BF16/FP8
+        // storage must add an explicit cast after the reduction boundary.
         return DataType::FP32;
     }
 

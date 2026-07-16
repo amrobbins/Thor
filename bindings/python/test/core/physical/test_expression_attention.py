@@ -6590,7 +6590,11 @@ def test_attention_compile_backward_dbias_with_broadcast_additive_bias_shapes_ma
     assert bwd_eq.output_shapes(inputs_gpu) == {
         "bias_grad": list(bias_shape)
     }
-    expected_stage_kinds = ["AttentionBackward"] if bias_shape == (2, 4, 64, 64) else ["AttentionBackward", "Reduction"]
+    expected_stage_kinds = (
+        ["AttentionBackward"]
+        if bias_shape == (2, 4, 64, 64)
+        else ["AttentionBackward", "Reduction", "FusedKernel"]
+    )
     assert bwd_eq._debug_stage_kinds(inputs_gpu) == expected_stage_kinds
     stamped = bwd_eq.stamp(inputs_gpu, stream)
     stamped.run()
@@ -6651,7 +6655,11 @@ def test_attention_compile_backward_qkv_and_dbias_with_broadcast_additive_bias_s
         "v_grad": [2, 2, 64, 64],
         "bias_grad": list(bias_shape),
     }
-    expected_stage_kinds = ["AttentionBackward"] if bias_shape == (2, 4, 64, 64) else ["AttentionBackward", "Reduction"]
+    expected_stage_kinds = (
+        ["AttentionBackward"]
+        if bias_shape == (2, 4, 64, 64)
+        else ["AttentionBackward", "Reduction", "FusedKernel"]
+    )
     assert bwd_eq._debug_stage_kinds(inputs_gpu) == expected_stage_kinds
     stamped = bwd_eq.stamp(inputs_gpu, stream)
     stamped.run()

@@ -1,6 +1,7 @@
 #include "TypeConverter.h"
 #include "Utilities/Expression/CudaHelpers.h"
 #include "DeepLearning/Implementation/ThorError.h"
+#include "Utilities/Common/LowPrecisionFloat.h"
 
 using namespace ThorImplementation;
 using namespace std;
@@ -14,9 +15,9 @@ struct Converter<__nv_fp8_e4m3, __nv_fp8_e5m2> {
     inline __nv_fp8_e5m2 operator()(__nv_fp8_e4m3 x) const { return __nv_fp8_e5m2(static_cast<float>(x)); }
 };
 
-template <>
-struct Converter<__nv_fp8_e5m2, __nv_fp8_e4m3> {
-    inline __nv_fp8_e4m3 operator()(__nv_fp8_e5m2 x) const { return __nv_fp8_e4m3(static_cast<float>(x)); }
+template <typename FROM_TYPE>
+struct Converter<FROM_TYPE, __nv_fp8_e4m3> {
+    inline __nv_fp8_e4m3 operator()(FROM_TYPE x) const { return ThorLowPrecision::toFp8E4M3Satfinite(x); }
 };
 
 void TypeConverter::convertType(void *source,

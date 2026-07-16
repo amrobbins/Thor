@@ -124,6 +124,13 @@ def _run_staged_expr(
     return out_host.numpy().copy()
 
 
+def test_reduce_sum_rejects_low_precision_output_dtype():
+    x = ex.input("x")
+
+    with pytest.raises(RuntimeError, match="reduction outputs are always thor.DataType.fp32"):
+        ex.reduce_sum(x, axis=0, output_dtype=thor.DataType.fp16)
+
+
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
 def test_reduce_sum_staged_with_prologue_and_epilogue(dtype: thor.DataType):

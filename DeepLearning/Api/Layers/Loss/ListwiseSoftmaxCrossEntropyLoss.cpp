@@ -33,7 +33,9 @@ ThorImplementation::DynamicExpression makeListwiseSoftmaxCrossEntropyLossExpress
     ThorImplementation::Expression perDocumentLoss = -(effectiveLabels * logProbabilities);
     if (useMask)
         perDocumentLoss = Common::zeroPaddedDocuments(perDocumentLoss, validMask);
-    ThorImplementation::Expression perListLoss = perDocumentLoss.reduce_sum({1}, {}, DataType::FP32).withOutputDType(lossDataType);
+    ThorImplementation::Expression perListLoss = perDocumentLoss.reduce_sum({1}, {}, DataType::FP32);
+    if (lossDataType != DataType::FP32)
+        perListLoss = perListLoss.cast(lossDataType);
 
     ThorImplementation::ExpressionDefinition definition =
         ThorImplementation::ExpressionDefinition::fromOutputs(ThorImplementation::Expression::outputs({{Common::kLossName, perListLoss}}));

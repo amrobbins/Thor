@@ -178,6 +178,22 @@ TEST(TrainingData, BatchLeaseKeepsOwningSessionAliveUntilRecycled) {
     std::filesystem::remove_all(path);
 }
 
+TEST(DeviceDatasetStorage, StrictWindowedOnlyNamesRoundTrip) {
+    EXPECT_STREQ(
+        Thor::deviceDatasetStorageName(
+            Thor::DeviceDatasetStorage::STRICT_WINDOWED_ONLY),
+        "strict_windowed_only");
+    EXPECT_EQ(
+        Thor::deviceDatasetStorageFromName("strict_windowed_only"),
+        Thor::DeviceDatasetStorage::STRICT_WINDOWED_ONLY);
+    EXPECT_EQ(
+        Thor::deviceDatasetStorageFromName("strict-windowed-only"),
+        Thor::DeviceDatasetStorage::STRICT_WINDOWED_ONLY);
+    EXPECT_EQ(
+        Thor::deviceDatasetStorageFromName("strictWindowedOnly"),
+        Thor::DeviceDatasetStorage::STRICT_WINDOWED_ONLY);
+}
+
 TEST(TrainingData, OwnsDeviceAccessPolicyIndependentlyOfSessions) {
     const std::filesystem::path path = makeDatasetPath("access_policy");
     writeDataset(path);
@@ -188,9 +204,18 @@ TEST(TrainingData, OwnsDeviceAccessPolicyIndependentlyOfSessions) {
     Thor::TrainingData defaultData(dataset, splits, batching);
     Thor::TrainingData strictData(
         dataset, splits, batching, Thor::DatasetAccessPolicy{.deviceStorage = Thor::DeviceDatasetStorage::STRICT});
+    Thor::TrainingData strictWindowedOnlyData(
+        dataset,
+        splits,
+        batching,
+        Thor::DatasetAccessPolicy{
+            .deviceStorage = Thor::DeviceDatasetStorage::STRICT_WINDOWED_ONLY});
 
     EXPECT_EQ(defaultData.getAccessPolicy().deviceStorage, Thor::DeviceDatasetStorage::BEST_EFFORT);
     EXPECT_EQ(strictData.getAccessPolicy().deviceStorage, Thor::DeviceDatasetStorage::STRICT);
+    EXPECT_EQ(
+        strictWindowedOnlyData.getAccessPolicy().deviceStorage,
+        Thor::DeviceDatasetStorage::STRICT_WINDOWED_ONLY);
 
     std::shared_ptr<Thor::BatchSession> first = strictData.openSession(1);
     std::shared_ptr<Thor::BatchSession> second = strictData.openSession(1);

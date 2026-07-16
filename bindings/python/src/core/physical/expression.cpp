@@ -1855,10 +1855,12 @@ thor.physical.Expression
         return DataType::FP32;
     };
 
-    auto parse_reduction_output_dtype = [](std::string_view op_name, std::optional<DataType> compute_dtype) -> std::optional<DataType> {
-        // if (compute_dtype.has_value() && compute_dtype.value() != DataType::FP32) {
-        //     throw std::runtime_error(std::string(op_name) + ": currently only supports output_dtype=thor.DataType.fp32");
-        // }
+    auto parse_reduction_output_dtype =
+        [](std::string_view op_name, std::optional<DataType> output_dtype) -> std::optional<DataType> {
+        if (output_dtype.has_value() && output_dtype.value() != DataType::FP32) {
+            throw std::runtime_error(std::string(op_name) +
+                                     ": reduction outputs are always thor.DataType.fp32; cast the result explicitly afterward");
+        }
         return DataType::FP32;
     };
 
@@ -1882,7 +1884,7 @@ Args:
     compute_dtype: thor.DataType: default thor.DataType.fp32
         The data type used during compute. Currently only fp32 is supported for this operation.
     output_dtype: thor.DataType: default thor.DataType.fp32
-        The data type that is written back to memory. Currently only fp32 is supported for this operation.
+        Reduction stages always materialize fp32, regardless of input dtype. Add an explicit cast after the reduction to narrow it.
 )doc";
 
     static constexpr std::string_view kArgReductionDocTemplate = R"doc(

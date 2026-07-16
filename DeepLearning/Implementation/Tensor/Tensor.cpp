@@ -1,4 +1,5 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "Utilities/Common/LowPrecisionFloat.h"
 #include <cmath>
 #include <limits>
 #include <optional>
@@ -1214,7 +1215,7 @@ inline __nv_bfloat16 castCpuTensorValue<__nv_bfloat16>(double value) {
 
 template <>
 inline __nv_fp8_e4m3 castCpuTensorValue<__nv_fp8_e4m3>(double value) {
-    return __nv_fp8_e4m3(static_cast<float>(value));
+    return ThorLowPrecision::toFp8E4M3Satfinite(value);
 }
 
 template <>

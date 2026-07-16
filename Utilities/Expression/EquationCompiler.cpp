@@ -1593,6 +1593,12 @@ shared_ptr<CompiledReduction> EquationCompiler::compileReduction(const PhysicalE
     if (!node.output_dtype.has_value()) {
         throw std::runtime_error("Reduction node missing resolved output_dtype.");
     }
+    if (node.output_dtype.value() != DataType::FP32) {
+        throw std::runtime_error("Floating-point reduction stages must materialize FP32 output; add an explicit cast afterward.");
+    }
+    if (!node.compute_dtype.has_value() || node.compute_dtype.value() != DataType::FP32) {
+        throw std::runtime_error("Floating-point reduction stages must compute in FP32.");
+    }
 
     const DataType supported_input_dtype = toSupportedInputDType(node.op, input_node.input_tensor_dtype.value());
 

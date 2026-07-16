@@ -299,9 +299,16 @@ MaterializedNamedDatasetSnapshot materializeCanonicalSnapshot(
     return snapshot;
 }
 
+bool isStrictDeviceDatasetStorage(DeviceDatasetStorage storage) {
+    return storage == DeviceDatasetStorage::STRICT ||
+           storage == DeviceDatasetStorage::STRICT_WINDOWED_ONLY;
+}
+
 std::runtime_error strictFailure(const DeviceDatasetStorageReport &report) {
     std::ostringstream out;
-    out << "device_dataset_storage=strict could not materialize device-resident dataset";
+    out << "device_dataset_storage="
+        << deviceDatasetStorageName(report.requested)
+        << " could not materialize device-resident dataset";
     if (!report.reason.empty()) {
         out << ": " << report.reason;
     }
@@ -322,7 +329,7 @@ DeviceDatasetStorageSelection fallbackSelection(
     DeviceDatasetStorageReport report,
     DeviceDatasetStorage requested) {
     report.requested = requested;
-    if (requested == DeviceDatasetStorage::STRICT) {
+    if (isStrictDeviceDatasetStorage(requested)) {
         throw strictFailure(report);
     }
     return DeviceDatasetStorageSelection{sourceSession, std::move(report)};
@@ -360,6 +367,8 @@ DeviceDatasetStorageSelection selectSharedResidencySession(
         ThorImplementation::NamedDatasetRuntimeAccess::residencyCache(*namedDataset);
     const auto started = std::chrono::steady_clock::now();
     const bool compactWindowedResidency = usesCompactWindowedResidency(dataset);
+    const bool strictWindowedOnly =
+        requested == DeviceDatasetStorage::STRICT_WINDOWED_ONLY;
     const std::set<std::string> windowNames =
         compactWindowedResidency ? windowedTensorNames(dataset.layout)
                                  : std::set<std::string>{};
@@ -457,7 +466,7 @@ DeviceDatasetStorageSelection selectSharedResidencySession(
         // ranges add too much memory (notably for affine-only windows), retry
         // with all windowed fields resident and direct fields CPU-backed.
         CompactAttemptFailure fullFailure;
-        if (allNames != windowNames) {
+        if (!strictWindowedOnly && allNames != windowNames) {
             if (std::optional<DeviceDatasetStorageSelection> full =
                     attemptCompactResidency(
                         allNames,
@@ -472,9 +481,9 @@ DeviceDatasetStorageSelection selectSharedResidencySession(
 
         CompactAttemptFailure windowFailure;
         const char *windowSuccessReason =
-            allNames == windowNames
-                ? "compact_file_residency"
-                : "compact_windowed_residency";
+            strictWindowedOnly || allNames != windowNames
+                ? "compact_windowed_residency"
+                : "compact_file_residency";
         if (std::optional<DeviceDatasetStorageSelection> windowed =
                 attemptCompactResidency(
                     windowNames,
@@ -654,6 +663,13 @@ DeviceDatasetStorageSelection selectDeviceDatasetStorageSession(
             sourceSession->getRequiredDatasetFieldIds());
 
     report.examples = datasetDescription->numExamples;
+    if (requested == DeviceDatasetStorage::STRICT_WINDOWED_ONLY &&
+        !usesCompactWindowedResidency(*datasetDescription)) {
+        report.reason =
+            "strict_windowed_only_requires_file_backed_windowed_dataset";
+        return fallbackSelection(sourceSession, std::move(report), requested);
+    }
+
     if (sessionDescription.getSplits().getDatasetId() !=
             datasetDescription->datasetId ||
         sessionDescription.getSplits().getNumExamples() !=

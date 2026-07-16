@@ -406,13 +406,20 @@ def test_gemm_vector_bias_backward_reduces_to_bias_shape_numerical(dtype: thor.D
     # A rank-1 GEMM bias addend must reduce the upstream [batch, out] gradient back
     # to [out], not broadcast a [out] zero tensor up to [batch, out]. This guards the
     # preallocated-output shape failure seen in the FC optimizer tests.
-    assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["Reduction"]
+    expected_stage_kinds = ["Reduction"]
+    if dtype == thor.DataType.fp16:
+        # Reductions materialize FP32 by contract. Preserve the public FP16
+        # gradient dtype with an explicit terminal conversion stage.
+        expected_stage_kinds.append("FusedKernel")
+    assert bwd_eq._debug_stage_kinds(inputs_gpu) == expected_stage_kinds
 
     stamped = bwd_eq.stamp(inputs_gpu, stream)
     stamped.run()
 
-    got_bias_grad = _copy_to_host(stamped.output("bias_grad"), dtype, stream)
-    assert list(stamped.output("bias_grad").dimensions) == [4]
+    bias_grad = stamped.output("bias_grad")
+    assert bias_grad.dtype == dtype
+    got_bias_grad = _copy_to_host(bias_grad, dtype, stream)
+    assert list(bias_grad.dimensions) == [4]
     _assert_close(got_bias_grad, _cast_reference_to_storage_dtype(expected_bias_grad, dtype), dtype)
 
 

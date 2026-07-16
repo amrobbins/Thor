@@ -336,6 +336,7 @@ static bool isStageBoundaryLikeBackwardOutputOp(ExprOp op) {
         case ExprOp::MATMUL:
         case ExprOp::GEMM:
         case ExprOp::REDUCE_SUM:
+        case ExprOp::REDUCE_PROD:
         case ExprOp::REDUCE_AVG:
         case ExprOp::REDUCE_NORM1:
         case ExprOp::REDUCE_NORM2:
@@ -365,6 +366,22 @@ static bool isStageBoundaryLikeBackwardOutputOp(ExprOp op) {
         default:
             return false;
     }
+}
+
+static bool stageBoundaryMaterializesRequestedDType(const ExprNode& node, DataType requested_dtype) {
+    if (!isStageBoundaryLikeBackwardOutputOp(node.op)) {
+        return false;
+    }
+
+    if (isCudnnReduceOp(node.op) && node.op != ExprOp::REDUCE_ARGMIN && node.op != ExprOp::REDUCE_ARGMAX) {
+        // Floating reduction nodes may still carry the caller's pre-resolution
+        // output_dtype request in the autodiff graph, but dtype resolution and the
+        // compiled reduction stage deliberately materialize FP32.  A low-precision
+        // public gradient therefore needs the explicit terminal conversion below.
+        return requested_dtype == DataType::FP32;
+    }
+
+    return node.output_dtype.has_value() && node.output_dtype.value() == requested_dtype;
 }
 
 std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& expr, const std::vector<std::string>& wrt_names) {
@@ -4292,9 +4309,8 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
         bool terminal_already_forces_dtype = false;
         if (grad_dtype.has_value()) {
             const ExprNode& terminal_node = builder.node(terminal_grad);
-            terminal_already_forces_dtype = terminal_node.output_dtype.has_value() &&
-                                           terminal_node.output_dtype.value() == grad_dtype.value() &&
-                                           isStageBoundaryLikeBackwardOutputOp(terminal_node.op);
+            terminal_already_forces_dtype =
+                stageBoundaryMaterializesRequestedDType(terminal_node, grad_dtype.value());
         }
         if (grad_dtype.has_value() && !terminal_already_forces_dtype) {
             uint32_t zero_like;

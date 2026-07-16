@@ -207,6 +207,54 @@ TEST(EquationCompiler, RmsNormConsumesPrecedingPointwiseStageWithoutAbsorbingIt)
     EXPECT_EQ(compiled->fused_activation, CudnnRmsNormFusedActivation::NONE);
 }
 
+TEST(ExpressionDTypeResolution, CudnnValueReductionAlwaysMaterializesFp32) {
+    auto x = Expression::input("x", DataType::FP16, DataType::FP16);
+    auto sum = x.reduce_sum({1}, {}).withOutputDType(DataType::FP16);
+
+    auto physical = Expression::outputs({{"sum", sum}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(physical, {DataType::FP16});
+
+    const ExprNode& reduction = physical.expr->nodes.at(physical.outputs.at(0).node_idx);
+    ASSERT_EQ(reduction.op, ExprOp::REDUCE_SUM);
+    ASSERT_TRUE(reduction.output_dtype.has_value());
+    EXPECT_EQ(reduction.output_dtype.value(), DataType::FP32);
+    ASSERT_TRUE(reduction.compute_dtype.has_value());
+    EXPECT_EQ(reduction.compute_dtype.value(), DataType::FP32);
+
+    auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
+    ASSERT_EQ(stages.size(), 1);
+    ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::Reduction);
+
+    auto compiled = EquationCompiler::compileReduction(stages[0].expr);
+    ASSERT_NE(compiled, nullptr);
+    EXPECT_EQ(compiled->input_dtype, DataType::FP16);
+    EXPECT_EQ(compiled->output_dtype, DataType::FP32);
+    EXPECT_EQ(compiled->compute_dtype, DataType::FP32);
+}
+
+TEST(EquationCompiler, ExplicitCastAfterReductionControlsLowPrecisionStorage) {
+    auto x = Expression::input("x", DataType::FP16, DataType::FP16);
+    auto y = x.reduce_sum({1}, {}).cast(DataType::FP16);
+
+    auto physical = Expression::outputs({{"y", y}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(physical, {DataType::FP16});
+    auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
+
+    ASSERT_EQ(stages.size(), 2);
+    ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::Reduction);
+    ASSERT_EQ(stages[1].kind, PhysicalExecutionStage::Kind::FusedKernel);
+
+    auto compiled_reduction = EquationCompiler::compileReduction(stages[0].expr);
+    ASSERT_NE(compiled_reduction, nullptr);
+    EXPECT_EQ(compiled_reduction->output_dtype, DataType::FP32);
+
+    ASSERT_EQ(stages[1].outputs.size(), 1);
+    const ExprNode& cast_output = stages[1].expr.nodes.at(stages[1].outputs[0].local_node_idx);
+    EXPECT_EQ(cast_output.op, ExprOp::CAST);
+    ASSERT_TRUE(cast_output.output_dtype.has_value());
+    EXPECT_EQ(cast_output.output_dtype.value(), DataType::FP16);
+}
+
 TEST(ExpressionDTypeResolution, CudnnReductionPromotesBf16ToFp32WithoutNarrowingThroughFp16) {
     EXPECT_EQ(toSupportedInputDType(ExprOp::REDUCE_SUM, DataType::BF16), DataType::FP32);
     EXPECT_EQ(toSupportedInputDType(ExprOp::REDUCE_MAX, DataType::BF16), DataType::FP32);
@@ -329,4 +377,20 @@ TEST(CudaSourceEmitter, Bf16SpecialFunctionsNeverNarrowThroughFp16) {
     EXPECT_NE(source.find("normcdff(float("), std::string::npos);
     EXPECT_EQ(source.find("float(half(float("), std::string::npos);
     EXPECT_EQ(source.find("__float22half2_rn(__bfloat1622float2"), std::string::npos);
+}
+
+TEST(CudaSourceEmitter, Fp8E4M3CastsUseExplicitSatfiniteIntrinsics) {
+    auto x = Expression::input("x", DataType::FP32, DataType::FP32);
+    auto y = x.cast(DataType::FP8_E4M3);
+
+    auto physical = Expression::outputs({{"y", y}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(physical, {DataType::FP32});
+    auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
+
+    ASSERT_EQ(stages.size(), 1);
+    ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::FusedKernel);
+    const std::string source = CudaSourceEmitter::emitFlat(stages[0], "fp8_e4m3_satfinite_cast");
+
+    EXPECT_NE(source.find("__nv_cvt_float_to_fp8(value, __NV_SATFINITE, __NV_E4M3)"), std::string::npos);
+    EXPECT_NE(source.find("thor_to_fp8_e4m3_satfinite("), std::string::npos);
 }
