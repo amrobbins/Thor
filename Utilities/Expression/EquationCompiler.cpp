@@ -1459,7 +1459,7 @@ vector<char> EquationCompiler::compileToLtoIr(const string& src, const string& k
 
     string arch = "--gpu-architecture=compute_" + to_string(sig.sm_major) + to_string(sig.sm_minor);
 
-    vector<string> option_strings = {arch, "-dlto", "--std=c++20", "-fmad=true"};
+    vector<string> option_strings = {arch, "-dlto", "--std=c++23", "-fmad=true"};
 
     const string bundled_headers_dir = getNvrtcBundledHeadersDir();
     if (!bundled_headers_dir.empty()) {

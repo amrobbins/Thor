@@ -74,7 +74,7 @@ install(TARGETS Thor
 add_dependencies(_thor thor_py_pkg_sync thor_py_nvrtc_headers)
 
 target_link_libraries(_thor PRIVATE Thor)
-target_compile_features(_thor PRIVATE cxx_std_20)
+target_compile_features(_thor PRIVATE cxx_std_23)
 
 if (COMMAND thor_apply_linker_settings)
     thor_apply_linker_settings(_thor)

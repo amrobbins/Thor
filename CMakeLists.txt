@@ -177,6 +177,78 @@ if (THOR_CUDA_STACK STREQUAL "python")
 endif ()
 
 # ============================================================
+# C++23 host compiler bootstrap
+# ============================================================
+# CUDA 13.3 requires a C++23-capable host compiler for nvcc's C++23 mode.
+# On Ubuntu 24.04 the system default may still be GCC 13 even when GCC 14 is
+# installed side by side. Prefer the versioned GCC 14 toolchain for a clean
+# build unless the caller selected compilers explicitly through CMake or the
+# standard CC/CXX environment variables.
+option(
+        THOR_AUTO_SELECT_GCC14
+        "Automatically select gcc-14/g++-14 when no host compiler was explicitly requested"
+        ON
+)
+
+set(_thor_c_compiler_was_explicit OFF)
+if ((DEFINED CMAKE_C_COMPILER AND NOT "${CMAKE_C_COMPILER}" STREQUAL "")
+        OR (DEFINED ENV{CC} AND NOT "$ENV{CC}" STREQUAL ""))
+    set(_thor_c_compiler_was_explicit ON)
+endif ()
+
+set(_thor_cxx_compiler_was_explicit OFF)
+if ((DEFINED CMAKE_CXX_COMPILER AND NOT "${CMAKE_CXX_COMPILER}" STREQUAL "")
+        OR (DEFINED ENV{CXX} AND NOT "$ENV{CXX}" STREQUAL ""))
+    set(_thor_cxx_compiler_was_explicit ON)
+endif ()
+
+if (THOR_AUTO_SELECT_GCC14 AND NOT _thor_c_compiler_was_explicit)
+    find_program(_thor_gcc14 NAMES gcc-14 NO_CACHE)
+    if (_thor_gcc14)
+        set(CMAKE_C_COMPILER "${_thor_gcc14}" CACHE FILEPATH "C compiler for Thor" FORCE)
+    endif ()
+endif ()
+
+if (THOR_AUTO_SELECT_GCC14 AND NOT _thor_cxx_compiler_was_explicit)
+    find_program(_thor_gxx14 NAMES g++-14 NO_CACHE)
+    if (_thor_gxx14)
+        set(CMAKE_CXX_COMPILER "${_thor_gxx14}" CACHE FILEPATH "C++ compiler for Thor" FORCE)
+    endif ()
+endif ()
+
+# nvcc does not automatically inherit CMake's C++ compiler selection. Pin its
+# host compiler to the selected C++ compiler unless the caller explicitly set
+# CMAKE_CUDA_HOST_COMPILER or CUDAHOSTCXX. This must happen before project()
+# enables the CUDA language.
+if ((NOT DEFINED CMAKE_CUDA_HOST_COMPILER OR "${CMAKE_CUDA_HOST_COMPILER}" STREQUAL "")
+        AND (NOT DEFINED ENV{CUDAHOSTCXX} OR "$ENV{CUDAHOSTCXX}" STREQUAL ""))
+    if (DEFINED CMAKE_CXX_COMPILER AND NOT "${CMAKE_CXX_COMPILER}" STREQUAL "")
+        set(
+                CMAKE_CUDA_HOST_COMPILER
+                "${CMAKE_CXX_COMPILER}"
+                CACHE FILEPATH
+                "Host C++ compiler used by nvcc for Thor"
+                FORCE
+        )
+    elseif (DEFINED ENV{CXX} AND NOT "$ENV{CXX}" STREQUAL "")
+        if (IS_ABSOLUTE "$ENV{CXX}")
+            set(_thor_cuda_host_cxx "$ENV{CXX}")
+        else ()
+            find_program(_thor_cuda_host_cxx NAMES "$ENV{CXX}")
+        endif ()
+        if (_thor_cuda_host_cxx)
+            set(
+                    CMAKE_CUDA_HOST_COMPILER
+                    "${_thor_cuda_host_cxx}"
+                    CACHE FILEPATH
+                    "Host C++ compiler used by nvcc for Thor"
+                    FORCE
+            )
+        endif ()
+    endif ()
+endif ()
+
+# ============================================================
 # CUDA compiler bootstrap
 # ============================================================
 # CUDA 13.x no longer supports some older default probe architectures, and
@@ -302,6 +374,40 @@ set(THOR_VERSION_NUMERIC "${CMAKE_MATCH_0}")  # "0.1.1"
 # 3) Use numeric for CMake's project version
 project(Thor VERSION ${THOR_VERSION_NUMERIC} LANGUAGES C CXX CUDA)
 
+# NVIDIA's CUDA C++23 support requires a sufficiently new host compiler. Fail
+# during configuration rather than allowing nvcc to ignore --std=c++23 and
+# later report misleading syntax errors from CUDA translation units.
+function(thor_require_cxx23_host_compiler compiler_role compiler_id compiler_version compiler_path)
+    if (compiler_id STREQUAL "GNU" AND compiler_version VERSION_LESS 14.0)
+        message(FATAL_ERROR
+                "Thor requires GCC 14+ for ${compiler_role} C++23 compilation, but found "
+                "GNU ${compiler_version} at ${compiler_path}. Install gcc-14/g++-14 or pass "
+                "-DCMAKE_CXX_COMPILER=/path/to/g++-14 and "
+                "-DCMAKE_CUDA_HOST_COMPILER=/path/to/g++-14.")
+    elseif (compiler_id MATCHES "^(Clang|AppleClang)$" AND compiler_version VERSION_LESS 18.0)
+        message(FATAL_ERROR
+                "Thor requires Clang 18+ for ${compiler_role} C++23 compilation, but found "
+                "${compiler_id} ${compiler_version} at ${compiler_path}.")
+    elseif (compiler_id STREQUAL "NVHPC" AND compiler_version VERSION_LESS 24.3)
+        message(FATAL_ERROR
+                "Thor requires NVHPC 24.3+ for ${compiler_role} C++23 compilation, but found "
+                "NVHPC ${compiler_version} at ${compiler_path}.")
+    endif ()
+endfunction()
+
+if (CMAKE_CUDA_COMPILER_ID STREQUAL "NVIDIA")
+    thor_require_cxx23_host_compiler(
+            "CUDA host"
+            "${CMAKE_CUDA_HOST_COMPILER_ID}"
+            "${CMAKE_CUDA_HOST_COMPILER_VERSION}"
+            "${CMAKE_CUDA_HOST_COMPILER}"
+    )
+endif ()
+
+message(STATUS "Thor: host C compiler = ${CMAKE_C_COMPILER}")
+message(STATUS "Thor: host C++ compiler = ${CMAKE_CXX_COMPILER} (${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION})")
+message(STATUS "Thor: CUDA host compiler = ${CMAKE_CUDA_HOST_COMPILER} (${CMAKE_CUDA_HOST_COMPILER_ID} ${CMAKE_CUDA_HOST_COMPILER_VERSION})")
+
 
 # ============================================================
 # Thor Python selection
@@ -325,8 +431,8 @@ set(CMAKE_CUDA_COMPILER_LAUNCHER ccache)
 # ============================================================
 # CUDA 13.3 / CompileIQ settings
 # ============================================================
-set(THOR_CUDA_CXX_STANDARD 20 CACHE STRING "C++ dialect used for CUDA translation units and NVRTC generated kernels")
-set_property(CACHE THOR_CUDA_CXX_STANDARD PROPERTY STRINGS 20)
+set(THOR_CUDA_CXX_STANDARD 23 CACHE STRING "C++ dialect used for CUDA translation units and NVRTC generated kernels")
+set_property(CACHE THOR_CUDA_CXX_STANDARD PROPERTY STRINGS 23)
 
 set(
         THOR_CUDA_COMPILEIQ_ACF
@@ -337,8 +443,25 @@ set(
 
 if (CMAKE_CUDA_COMPILER_VERSION VERSION_LESS THOR_MIN_CUDA_TOOLKIT_VERSION)
     message(FATAL_ERROR
-            "Thor now requires CUDA ${THOR_MIN_CUDA_TOOLKIT_VERSION}+ for CUDA 13.3 libraries, C++20 CUDA, and CompileIQ ACF support. "
+            "Thor now requires CUDA ${THOR_MIN_CUDA_TOOLKIT_VERSION}+ for CUDA 13.3 libraries, C++23 CUDA, and CompileIQ ACF support. "
             "Detected CUDA compiler ${CMAKE_CUDA_COMPILER_VERSION} at ${CMAKE_CUDA_COMPILER}.")
+endif ()
+
+# CMake 3.28 through 3.31 recognize CUDA_STANDARD 23 as a valid standard, but
+# their NVIDIA compiler table stops at CUDA C++20. This is independent of the
+# nvcc host compiler: GCC 14 makes nvcc accept --std=c++23, while this
+# conditional mapping makes affected CMake versions emit the flag. Keep the
+# mapping until the active CMake version supplies it itself.
+if (CMAKE_CUDA_COMPILER_ID STREQUAL "NVIDIA")
+    if (NOT DEFINED CMAKE_CUDA23_STANDARD_COMPILE_OPTION)
+        set(CMAKE_CUDA23_STANDARD_COMPILE_OPTION "-std=c++23")
+    endif ()
+    if (NOT DEFINED CMAKE_CUDA23_EXTENSION_COMPILE_OPTION)
+        set(CMAKE_CUDA23_EXTENSION_COMPILE_OPTION "-std=c++23")
+    endif ()
+    if (NOT DEFINED CMAKE_CUDA_STANDARD_LATEST OR CMAKE_CUDA_STANDARD_LATEST LESS 23)
+        set(CMAKE_CUDA_STANDARD_LATEST 23)
+    endif ()
 endif ()
 
 if (THOR_CUDA_STACK STREQUAL "python")
@@ -378,11 +501,11 @@ endif ()
 # ============================================================
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Thor does not use C++20 modules.  With newer CMake releases and GCC 14,
-# automatic C++20 module dependency scanning can inject -fmodules-ts and
+# Thor does not use C++ modules.  With newer CMake releases and GCC 14,
+# automatic module dependency scanning can inject -fmodules-ts and
 # P1689 dependency flags into ordinary non-module translation units, which is
 # fragile under the manylinux/ccache toolchain and can fail before the real
 # build starts.  Keep module scanning disabled unless Thor intentionally adopts
@@ -782,7 +905,7 @@ file(GLOB_RECURSE THOR_SOURCES CONFIGURE_DEPENDS
 #add_library(Thor STATIC ${THOR_SOURCES})
 add_library(Thor SHARED ${THOR_SOURCES})
 set_target_properties(Thor PROPERTIES
-        CXX_STANDARD 20
+        CXX_STANDARD 23
         CUDA_STANDARD ${THOR_CUDA_CXX_STANDARD}
         BUILD_RPATH "\$ORIGIN"
         INSTALL_RPATH "\$ORIGIN"
@@ -798,6 +921,8 @@ target_include_directories(Thor
         $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/generated>
         $<INSTALL_INTERFACE:include>
 )
+
+target_compile_features(Thor PUBLIC cxx_std_23)
 
 # ============================================================
 # Compiler and linker flags (replacing Makefile logic)
