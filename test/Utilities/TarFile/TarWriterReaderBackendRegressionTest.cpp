@@ -546,10 +546,20 @@ TEST(TarWriterReaderProductionGeometryRegression, DISABLED_UringWriterPreservesO
 }
 
 TEST(TarWriterReaderShortIoRegression, ShortMiddleUringWriteSubmissionPublishesValidSingleShardArchive) {
+#ifdef NDEBUG
+    GTEST_SKIP()
+        << "The archive-level io_uring short-I/O fault injection is only "
+           "supported in Debug builds.";
+#endif
     runFaultInjectedSingleShardRoundTrip(TarShortIoFault::ShortWriteSubmission);
 }
 
 TEST(TarWriterReaderShortIoRegression, ShortMiddleUringReadSubmissionLoadsValidSingleShardArchive) {
+#ifdef NDEBUG
+    GTEST_SKIP()
+        << "The archive-level io_uring short-I/O fault injection is only "
+           "supported in Debug builds.";
+#endif
     runFaultInjectedSingleShardRoundTrip(TarShortIoFault::ShortReadSubmission);
 }
 
