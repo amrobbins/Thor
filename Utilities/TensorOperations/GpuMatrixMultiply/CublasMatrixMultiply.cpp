@@ -1268,58 +1268,70 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
 
     cublasLtMatmulPreference_t searchPreferences;
     CHECK_CUBLAS(cublasLtMatmulPreferenceCreate(&searchPreferences));
-
     CHECK_CUBLAS(cublasLtMatmulPreferenceInit(searchPreferences));
 
-    // cublasLtMatmulPreferenceAttributes_t attribute = CUBLASLT_MATMUL_PREF_IMPL_MASK;
-    // cublasLtNumericalImplFlags_t computeType = CUBLASLT_NUMERICAL_IMPL_FLAGS_ACCUMULATOR_TYPE_MASK |
-    // CUBLASLT_NUMERICAL_IMPL_FLAGS_ACCUMULATOR_32F; CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(searchPreferences, attribute,
+    // This API never supplies a workspace to cublasLtMatmul, so make the
+    // zero-workspace requirement explicit in the heuristic query.
+    const uint64_t maxWorkspaceSizeInBytes = 0;
+    CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(searchPreferences,
+                                                       CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                                                       &maxWorkspaceSizeInBytes,
+                                                       sizeof(maxWorkspaceSizeInBytes)));
 
-    int returnedAlgoCount;
-    vector<cublasLtMatmulHeuristicResult_t> results(30);
-    CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(stream.getCublasLtHandle(),
-                                                operationDesc,
-                                                ADesc,
-                                                BDesc,
-                                                CDesc,
-                                                DDesc,
-                                                searchPreferences,
-                                                30,
-                                                results.data(),
-                                                &returnedAlgoCount));
+    auto launchFirstUsableAlgorithm = [&](const vector<cublasLtMatmulHeuristicResult_t> &results) {
+        for (const cublasLtMatmulHeuristicResult_t &heuristicResult : results) {
+            // NVIDIA documents the remaining fields as invalid unless state is SUCCESS.
+            if (heuristicResult.state != CUBLAS_STATUS_SUCCESS) {
+                continue;
+            }
 
-    results.resize(returnedAlgoCount);
+            // Zero-wave algorithms have caused sporadic runtime failures in this codebase.
+            // Apply the same exclusion to every heuristic pass, including the large fallback.
+            if (!(heuristicResult.wavesCount > 0.0f) || heuristicResult.workspaceSize != 0) {
+                continue;
+            }
 
-    // Algorithms aren't guaranteed to run, so find the first one that does and then return.
-    bool kernelLaunchedSuccessfully = false;
-    for (int i = 0; i < returnedAlgoCount && !kernelLaunchedSuccessfully; ++i) {
-        // have seen kernels that say wavesCount == 0 that sporadically fail.
-        if (!(results[i].wavesCount > 0.0f))
-            continue;
-        cublasStatus_t cublasStatus = cublasLtMatmul(stream.getCublasLtHandle(),
-                                                     operationDesc,
-                                                     alpha,
-                                                     ltA,
-                                                     ADesc,
-                                                     ltB,
-                                                     BDesc,
-                                                     beta,
-                                                     C.getMemPtr(),
-                                                     CDesc,
-                                                     D.getMemPtr(),
-                                                     DDesc,
-                                                     &(results[i].algo),
-                                                     nullptr,
-                                                     0,
-                                                     stream);
-        if (cublasStatus == CUBLAS_STATUS_SUCCESS) {
-            kernelLaunchedSuccessfully = true;
-            CublasMatrixMultiply::instance().knownHeuristicAlgorithms.put(cublasKernelRequirement, results[i].algo);
+            cublasLtMatmulHeuristicResult_t checkedResult{};
+            const cublasStatus_t checkStatus = cublasLtMatmulAlgoCheck(stream.getCublasLtHandle(),
+                                                                       operationDesc,
+                                                                       ADesc,
+                                                                       BDesc,
+                                                                       CDesc,
+                                                                       DDesc,
+                                                                       &heuristicResult.algo,
+                                                                       &checkedResult);
+            if (checkStatus != CUBLAS_STATUS_SUCCESS || checkedResult.state != CUBLAS_STATUS_SUCCESS ||
+                !(checkedResult.wavesCount > 0.0f) || checkedResult.workspaceSize != 0) {
+                continue;
+            }
+
+            const cublasStatus_t launchStatus = cublasLtMatmul(stream.getCublasLtHandle(),
+                                                               operationDesc,
+                                                               alpha,
+                                                               ltA,
+                                                               ADesc,
+                                                               ltB,
+                                                               BDesc,
+                                                               beta,
+                                                               C.getMemPtr(),
+                                                               CDesc,
+                                                               D.getMemPtr(),
+                                                               DDesc,
+                                                               &heuristicResult.algo,
+                                                               nullptr,
+                                                               0,
+                                                               stream);
+            if (launchStatus == CUBLAS_STATUS_SUCCESS) {
+                CublasMatrixMultiply::instance().knownHeuristicAlgorithms.put(cublasKernelRequirement, heuristicResult.algo);
+                return true;
+            }
         }
-    }
+        return false;
+    };
 
-    if (!kernelLaunchedSuccessfully) {
-        results = vector<cublasLtMatmulHeuristicResult_t>(10000);
+    auto getHeuristicResults = [&](int requestedAlgorithmCount) {
+        int returnedAlgorithmCount = 0;
+        vector<cublasLtMatmulHeuristicResult_t> results(requestedAlgorithmCount);
         CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(stream.getCublasLtHandle(),
                                                     operationDesc,
                                                     ADesc,
@@ -1327,40 +1339,28 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
                                                     CDesc,
                                                     DDesc,
                                                     searchPreferences,
-                                                    10000,
+                                                    requestedAlgorithmCount,
                                                     results.data(),
-                                                    &returnedAlgoCount));
+                                                    &returnedAlgorithmCount));
+        results.resize(returnedAlgorithmCount);
+        return results;
+    };
 
-        results.resize(returnedAlgoCount);
-
-        for (int i = 0; i < returnedAlgoCount && !kernelLaunchedSuccessfully; ++i) {
-            cublasStatus_t cublasStatus = cublasLtMatmul(stream.getCublasLtHandle(),
-                                                         operationDesc,
-                                                         alpha,
-                                                         ltA,
-                                                         ADesc,
-                                                         ltB,
-                                                         BDesc,
-                                                         beta,
-                                                         C.getMemPtr(),
-                                                         CDesc,
-                                                         D.getMemPtr(),
-                                                         DDesc,
-                                                         &(results[i].algo),
-                                                         nullptr,
-                                                         0,
-                                                         stream);
-            if (cublasStatus == CUBLAS_STATUS_SUCCESS) {
-                kernelLaunchedSuccessfully = true;
-                // FIXME: may need an algo per gpu
-                // FIXME: add their top N heuristic kernels to the set of optimal candidates, will need to change CublasKernel to take
-                // algorithm in constructor
-                CublasMatrixMultiply::instance().knownHeuristicAlgorithms.put(cublasKernelRequirement, results[i].algo);
-            }
-        }
+    bool kernelLaunchedSuccessfully = launchFirstUsableAlgorithm(getHeuristicResults(30));
+    if (!kernelLaunchedSuccessfully) {
+        kernelLaunchedSuccessfully = launchFirstUsableAlgorithm(getHeuristicResults(10000));
     }
 
-    THOR_THROW_IF_FALSE(kernelLaunchedSuccessfully);
+    if (!kernelLaunchedSuccessfully) {
+        CHECK_CUBLAS(cublasLtMatmulPreferenceDestroy(searchPreferences));
+        CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(DDesc));
+        CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(CDesc));
+        CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(BDesc));
+        CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(ADesc));
+        CHECK_CUBLAS(cublasLtMatmulDescDestroy(operationDesc));
+        throw std::runtime_error(
+            "CublasMatrixMultiply::gemmUsingHeuristicKernelChoice could not find a valid zero-workspace cuBLASLt algorithm.");
+    }
 
     CHECK_CUBLAS(cublasLtMatmulPreferenceDestroy(searchPreferences));
     CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(DDesc));

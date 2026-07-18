@@ -11,6 +11,7 @@
 #include <functional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <cuda_bf16.h>
@@ -162,7 +163,7 @@ TEST(CublasMatrixMultiply, ChooseOptimalMatrixMultiplyKernelWorksFP32) {
         C_d.copyFromAsync(C, stream);
         stream.synchronize();
 
-        std::thread cpuWorker(matrixMultiplyCpu,
+        std::jthread cpuWorker(matrixMultiplyCpu,
                               (float *)A.getMemPtr(),
                               (float *)B.getMemPtr(),
                               (float *)C.getMemPtr(),
@@ -360,7 +361,7 @@ TEST(CublasMatrixMultiply, ChooseOptimalMatrixMultiplyKernelWorksFP16) {
         C_d.copyFromAsync(C, stream);
         stream.synchronize();
 
-        std::thread cpuWorker(matrixMultiplyCpuHalf,
+        std::jthread cpuWorker(matrixMultiplyCpuHalf,
                               (half *)A.getMemPtr(),
                               (half *)B.getMemPtr(),
                               (half *)C.getMemPtr(),
@@ -516,7 +517,7 @@ TEST(CublasMatrixMultiply, HeuristicMatrixMultiplyKernelWorksFP32) {
         C_d.copyFromAsync(C, stream);
         stream.synchronize();
 
-        std::thread cpuWorker(matrixMultiplyCpu,
+        std::jthread cpuWorker(matrixMultiplyCpu,
                               (float *)A.getMemPtr(),
                               (float *)B.getMemPtr(),
                               (float *)C.getMemPtr(),
@@ -680,7 +681,7 @@ TEST(CublasMatrixMultiply, HeuristicMatrixMultiplyKernelWorksFP16) {
         C_d.copyFromAsync(C, stream);
         stream.synchronize();
 
-        std::thread cpuWorker(matrixMultiplyCpuHalf,
+        std::jthread cpuWorker(matrixMultiplyCpuHalf,
                               (half *)A.getMemPtr(),
                               (half *)B.getMemPtr(),
                               (half *)C.getMemPtr(),
@@ -923,7 +924,7 @@ TEST(CublasMatrixMultiply, ChooseOptimalGemmKernelWorksFP32) {
             D_d.copyFromAsync(D, stream);
         stream.synchronize();
 
-        std::thread cpuWorker(gemmCpuFp32,
+        std::jthread cpuWorker(gemmCpuFp32,
                               (float *)A.getMemPtr(),
                               (float *)B.getMemPtr(),
                               (float *)C.getMemPtr(),
@@ -1177,7 +1178,7 @@ TEST(CublasMatrixMultiply, ChooseOptimalGemmKernelWorksFP16) {
             D_d.copyFromAsync(D, stream);
         stream.synchronize();
 
-        std::thread cpuWorker(gemmCpuFp16,
+        std::jthread cpuWorker(gemmCpuFp16,
                               (half *)A.getMemPtr(),
                               (half *)B.getMemPtr(),
                               (half *)C.getMemPtr(),
@@ -1398,7 +1399,7 @@ TEST(CublasMatrixMultiply, HeuristicGemmKernelWorksFP32) {
             D_d.copyFromAsync(D, stream);
         stream.synchronize();
 
-        std::thread cpuWorker(gemmCpuFp32,
+        std::jthread cpuWorker(gemmCpuFp32,
                               (float *)A.getMemPtr(),
                               (float *)B.getMemPtr(),
                               (float *)C.getMemPtr(),
@@ -1618,7 +1619,7 @@ TEST(CublasMatrixMultiply, HeuristicGemmKernelWorksFP16) {
             D_d.copyFromAsync(D, stream);
         stream.synchronize();
 
-        std::thread cpuWorker(gemmCpuFp16,
+        std::jthread cpuWorker(gemmCpuFp16,
                               (half *)A.getMemPtr(),
                               (half *)B.getMemPtr(),
                               (half *)C.getMemPtr(),

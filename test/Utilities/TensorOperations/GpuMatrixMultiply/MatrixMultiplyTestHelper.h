@@ -198,9 +198,9 @@ inline void matrixMultiplyCpu(float *A,
     }
 
     if (transposeA)
-        delete A;
+        delete[] A;
     if (transposeB)
-        delete B;
+        delete[] B;
 }
 
 inline void matrixMultiplyCpuHalf(half *A,
@@ -266,9 +266,9 @@ inline void matrixMultiplyCpuHalf(half *A,
     }
 
     if (transposeA)
-        delete A;
+        delete[] A;
     if (transposeB)
-        delete B;
+        delete[] B;
 }
 
 inline void matrixSubtractCpu(float *A, float *B, float *C, uint32_t rows, uint32_t cols) {
@@ -398,11 +398,11 @@ inline void gemmCpuFp32(float *A,
     }
 
     if (transposeA)
-        delete A;
+        delete[] A;
     if (transposeB)
-        delete B;
+        delete[] B;
     if (transposeC)
-        delete C;
+        delete[] C;
 }
 
 inline void gemmCpuFp16(half *A,
@@ -477,9 +477,9 @@ inline void gemmCpuFp16(half *A,
     }
 
     if (transposeA)
-        delete A;
+        delete[] A;
     if (transposeB)
-        delete B;
+        delete[] B;
     if (transposeC)
-        delete C;
+        delete[] C;
 }
