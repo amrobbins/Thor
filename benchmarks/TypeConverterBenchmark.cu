@@ -88,10 +88,10 @@ struct Options {
         256ULL * 1024,
         512ULL * 1024,
         2ULL * 1024 * 1024,
-        //8ULL * 1024 * 1024,
-        //32ULL * 1024 * 1024,
-        //128ULL * 1024 * 1024,
-        //256ULL * 1024 * 1024,
+        8ULL * 1024 * 1024,
+        32ULL * 1024 * 1024,
+        128ULL * 1024 * 1024,
+        256ULL * 1024 * 1024,
     };
     std::vector<BenchmarkMode> modes = {BenchmarkMode::OUT_OF_PLACE};
     int samples = 7;
@@ -117,16 +117,7 @@ struct DeviceBuffer {
         other.bytes = 0;
     }
 
-    DeviceBuffer &operator=(DeviceBuffer &&other) noexcept {
-        if (this != &other) {
-            release();
-            pointer = other.pointer;
-            bytes = other.bytes;
-            other.pointer = nullptr;
-            other.bytes = 0;
-        }
-        return *this;
-    }
+    DeviceBuffer &operator=(DeviceBuffer &&) = delete;
 
     ~DeviceBuffer() { release(); }
 
@@ -214,9 +205,7 @@ DataType parseDataType(std::string_view name) {
     throw std::invalid_argument("unknown data type '" + std::string(name) + "'");
 }
 
-std::string_view modeName(BenchmarkMode mode) {
-    return mode == BenchmarkMode::OUT_OF_PLACE ? "out_of_place" : "in_place";
-}
+std::string_view modeName(BenchmarkMode mode) { return mode == BenchmarkMode::OUT_OF_PLACE ? "out_of_place" : "in_place"; }
 
 std::uint64_t parseUnsigned(std::string_view text, std::string_view optionName) {
     if (text.empty())
@@ -283,29 +272,28 @@ std::string optionValue(std::string_view argument, std::string_view option) {
 }
 
 void printHelp(const char *program) {
-    std::cout
-        << "Usage: " << program << " [options]\n\n"
-        << "Benchmarks Thor TypeConverter GPU conversions over a logarithmic tensor-size sweep.\n"
-        << "Each timed sample rotates through disjoint, 256-byte-aligned tensor slots. Before\n"
-        << "timing, a GPU kernel reads and writes an eviction buffer sized from the device's\n"
-        << "reported L2 capacity, so repeated samples do not measure cache-resident inputs.\n\n"
-        << "Options:\n"
-        << "  --gpu=N                       GPU device index (default: 0)\n"
-        << "  --suite=common|ml|all         Pair set when --pair is absent (default: common)\n"
-        << "  --pair=SOURCE:DEST            Benchmark an explicit pair; may be repeated\n"
-        << "  --sizes=N[,N...]              Element counts; K/M/G suffixes are binary\n"
-        << "  --mode=out-of-place|in-place|both\n"
-        << "  --samples=N                   Timed samples per case (default: 7)\n"
-        << "  --target-traffic-mib=N        Desired logical read+write bytes per sample\n"
-        << "  --max-working-set-mib=N       Maximum conversion buffers per case (default: 4096)\n"
-        << "  --safety-reserve-mib=N        Leave this much currently free GPU memory unused\n"
-        << "  --max-launches=N              Maximum launches inside one timed sample\n"
-        << "  --l2-eviction-factor=N        Eviction bytes / reported L2 bytes (default: 4)\n"
-        << "  --csv=PATH                    Write CSV to PATH instead of stdout\n"
-        << "  --no-verify                   Skip sampled output validation\n"
-        << "  --list-types                  Print accepted type names\n"
-        << "  --help                        Show this message\n\n"
-        << "Default sizes: 2K,8K,32K,128K,512K,2M,8M,32M,128M,256M elements.\n";
+    std::cout << "Usage: " << program << " [options]\n\n"
+              << "Benchmarks Thor TypeConverter GPU conversions over a logarithmic tensor-size sweep.\n"
+              << "Each timed sample rotates through disjoint, 256-byte-aligned tensor slots. Before\n"
+              << "timing, a GPU kernel reads and writes an eviction buffer sized from the device's\n"
+              << "reported L2 capacity, so repeated samples do not measure cache-resident inputs.\n\n"
+              << "Options:\n"
+              << "  --gpu=N                       GPU device index (default: 0)\n"
+              << "  --suite=common|ml|all         Pair set when --pair is absent (default: common)\n"
+              << "  --pair=SOURCE:DEST            Benchmark an explicit pair; may be repeated\n"
+              << "  --sizes=N[,N...]              Element counts; K/M/G suffixes are binary\n"
+              << "  --mode=out-of-place|in-place|both\n"
+              << "  --samples=N                   Timed samples per case (default: 7)\n"
+              << "  --target-traffic-mib=N        Desired logical read+write bytes per sample\n"
+              << "  --max-working-set-mib=N       Maximum conversion buffers per case (default: 4096)\n"
+              << "  --safety-reserve-mib=N        Leave this much currently free GPU memory unused\n"
+              << "  --max-launches=N              Maximum launches inside one timed sample\n"
+              << "  --l2-eviction-factor=N        Eviction bytes / reported L2 bytes (default: 4)\n"
+              << "  --csv=PATH                    Write CSV to PATH instead of stdout\n"
+              << "  --no-verify                   Skip sampled output validation\n"
+              << "  --list-types                  Print accepted type names\n"
+              << "  --help                        Show this message\n\n"
+              << "Default sizes: 2K,8K,32K,128K,512K,2M,8M,32M,128M,256M elements.\n";
 }
 
 void printTypes() {
@@ -394,26 +382,13 @@ Options parseOptions(int argc, char **argv) {
 
 std::vector<TypePair> commonPairs() {
     return {
-        {DataType::FP32, DataType::FP16},
-        {DataType::FP16, DataType::FP32},
-        {DataType::FP32, DataType::BF16},
-        {DataType::BF16, DataType::FP32},
-        {DataType::FP16, DataType::BF16},
-        {DataType::BF16, DataType::FP16},
-        {DataType::FP32, DataType::FP8_E4M3},
-        {DataType::FP8_E4M3, DataType::FP32},
-        {DataType::BF16, DataType::FP8_E4M3},
-        {DataType::FP8_E4M3, DataType::BF16},
-        {DataType::FP16, DataType::FP8_E4M3},
-        {DataType::FP8_E4M3, DataType::FP16},
-        {DataType::FP32, DataType::FP64},
-        {DataType::FP64, DataType::FP32},
-        {DataType::INT32, DataType::FP32},
-        {DataType::FP32, DataType::INT32},
-        {DataType::UINT8, DataType::FP32},
-        {DataType::FP32, DataType::UINT8},
-        {DataType::BOOLEAN, DataType::FP32},
-        {DataType::FP32, DataType::BOOLEAN},
+        {DataType::FP32, DataType::FP16},     {DataType::FP16, DataType::FP32},     {DataType::FP32, DataType::BF16},
+        {DataType::BF16, DataType::FP32},     {DataType::FP16, DataType::BF16},     {DataType::BF16, DataType::FP16},
+        {DataType::FP32, DataType::FP8_E4M3}, {DataType::FP8_E4M3, DataType::FP32}, {DataType::BF16, DataType::FP8_E4M3},
+        {DataType::FP8_E4M3, DataType::BF16}, {DataType::FP16, DataType::FP8_E4M3}, {DataType::FP8_E4M3, DataType::FP16},
+        {DataType::FP32, DataType::FP64},     {DataType::FP64, DataType::FP32},     {DataType::INT32, DataType::FP32},
+        {DataType::FP32, DataType::INT32},    {DataType::UINT8, DataType::FP32},    {DataType::FP32, DataType::UINT8},
+        {DataType::BOOLEAN, DataType::FP32},  {DataType::FP32, DataType::BOOLEAN},
     };
 }
 
@@ -576,11 +551,8 @@ std::size_t computeEvictionBytes(std::size_t l2Bytes, double factor) {
     return alignUp(std::max<std::size_t>(64 * MiB, static_cast<std::size_t>(std::ceil(scaled))), SLOT_ALIGNMENT_BYTES);
 }
 
-BenchmarkPlan makePlan(TypePair pair,
-                       BenchmarkMode mode,
-                       std::uint64_t elements,
-                       const Options &options,
-                       std::size_t conversionMemoryBudgetBytes) {
+BenchmarkPlan makePlan(
+    TypePair pair, BenchmarkMode mode, std::uint64_t elements, const Options &options, std::size_t conversionMemoryBudgetBytes) {
     const std::size_t sourceBytes = checkedMultiply(static_cast<std::size_t>(elements), typeInfo(pair.source).elementBytes, "source bytes");
     const std::size_t destinationBytes =
         checkedMultiply(static_cast<std::size_t>(elements), typeInfo(pair.destination).elementBytes, "destination bytes");
@@ -592,15 +564,13 @@ BenchmarkPlan makePlan(TypePair pair,
         throw std::invalid_argument("element count exceeds TypeConverter's long numElements range");
 
     const std::size_t logicalBytesPerLaunch = checkedAdd(sourceBytes, destinationBytes, "logical bytes per launch");
-    const std::uint64_t desiredForTraffic =
-        static_cast<std::uint64_t>(options.targetTrafficBytes / logicalBytesPerLaunch) +
-        static_cast<std::uint64_t>(options.targetTrafficBytes % logicalBytesPerLaunch != 0);
+    const std::uint64_t desiredForTraffic = static_cast<std::uint64_t>(options.targetTrafficBytes / logicalBytesPerLaunch) +
+                                            static_cast<std::uint64_t>(options.targetTrafficBytes % logicalBytesPerLaunch != 0);
     std::uint64_t desiredLaunches = std::max<std::uint64_t>(1, desiredForTraffic);
     desiredLaunches = std::min(desiredLaunches, options.maxLaunchesPerSample);
 
-    const std::size_t physicalBytesPerLaunch = mode == BenchmarkMode::OUT_OF_PLACE
-                                                   ? checkedAdd(sourceStride, destinationStride, "physical bytes per launch")
-                                                   : inPlaceStride;
+    const std::size_t physicalBytesPerLaunch =
+        mode == BenchmarkMode::OUT_OF_PLACE ? checkedAdd(sourceStride, destinationStride, "physical bytes per launch") : inPlaceStride;
     const std::uint64_t launchesByMemory = conversionMemoryBudgetBytes / physicalBytesPerLaunch;
     const std::uint64_t launches = std::min(desiredLaunches, launchesByMemory);
     if (launches == 0)
@@ -630,7 +600,8 @@ void launchConversion(const TypePair pair,
     if (mode == BenchmarkMode::OUT_OF_PLACE) {
         auto *sourcePointer = static_cast<std::byte *>(source.get()) + slot * plan.sourceStrideBytes;
         auto *destinationPointer = static_cast<std::byte *>(destination.get()) + slot * plan.destinationStrideBytes;
-        TypeConverter::convertType(sourcePointer, destinationPointer, pair.source, pair.destination, static_cast<long>(elements), stream, gpu);
+        TypeConverter::convertType(
+            sourcePointer, destinationPointer, pair.source, pair.destination, static_cast<long>(elements), stream, gpu);
     } else {
         auto *pointer = static_cast<std::byte *>(inPlace.get()) + slot * plan.inPlaceStrideBytes;
         TypeConverter::convertType(pointer, pointer, pair.source, pair.destination, static_cast<long>(elements), stream, gpu);
@@ -660,8 +631,8 @@ void verifyFirstSlot(TypePair pair,
                      DeviceBuffer &inPlace,
                      cudaStream_t stream) {
     const std::uint64_t checkedElements = std::min<std::uint64_t>(elements, 16);
-    const std::size_t destinationBytes = checkedMultiply(
-        static_cast<std::size_t>(checkedElements), typeInfo(pair.destination).elementBytes, "verification bytes");
+    const std::size_t destinationBytes =
+        checkedMultiply(static_cast<std::size_t>(checkedElements), typeInfo(pair.destination).elementBytes, "verification bytes");
     std::vector<std::byte> host(destinationBytes);
     const void *devicePointer = mode == BenchmarkMode::OUT_OF_PLACE ? destination.get() : inPlace.get();
     CUDA_CHECK(cudaMemcpyAsync(host.data(), devicePointer, destinationBytes, cudaMemcpyDeviceToHost, stream));
@@ -669,14 +640,13 @@ void verifyFirstSlot(TypePair pair,
 
     for (std::uint64_t i = 0; i < checkedElements; ++i) {
         const double actual = std::stod(TensorDescriptor::getValueAsString(host.data(), i, pair.destination));
-        const double sourceValue = pair.source == DataType::BOOLEAN
-                                       ? static_cast<double>(benchmarkNumericValue(i) != 0)
-                                       : static_cast<double>(benchmarkNumericValue(i));
+        const double sourceValue = pair.source == DataType::BOOLEAN ? static_cast<double>(benchmarkNumericValue(i) != 0)
+                                                                    : static_cast<double>(benchmarkNumericValue(i));
         const double expected = pair.destination == DataType::BOOLEAN ? static_cast<double>(sourceValue != 0.0) : sourceValue;
         if (actual != expected) {
             std::ostringstream message;
-            message << "verification failed for " << typeInfo(pair.source).name << " -> " << typeInfo(pair.destination).name << " at element "
-                    << i << ": expected " << expected << ", got " << actual;
+            message << "verification failed for " << typeInfo(pair.source).name << " -> " << typeInfo(pair.destination).name
+                    << " at element " << i << ": expected " << expected << ", got " << actual;
             throw std::runtime_error(message.str());
         }
     }
@@ -769,16 +739,13 @@ void writeCsvHeader(std::ostream &output) {
               "effective_gbps,input_gbps,output_gbps,working_set_bytes,l2_bytes,eviction_bytes\n";
 }
 
-void writeCsvRow(std::ostream &output,
-                 const BenchmarkResult &result,
-                 const Options &options,
-                 std::size_t l2Bytes,
-                 std::size_t evictionBytes) {
+void writeCsvRow(
+    std::ostream &output, const BenchmarkResult &result, const Options &options, std::size_t l2Bytes, std::size_t evictionBytes) {
     output << typeInfo(result.pair.source).name << ',' << typeInfo(result.pair.destination).name << ',' << modeName(result.mode) << ','
            << result.elements << ',' << result.plan.sourceBytesPerLaunch << ',' << result.plan.destinationBytesPerLaunch << ','
            << (result.plan.sourceBytesPerLaunch + result.plan.destinationBytesPerLaunch) << ',' << result.plan.launchesPerSample << ','
-           << options.samples << ',' << std::fixed << std::setprecision(6) << result.medianUsPerLaunch << ',' << result.p10UsPerLaunch << ','
-           << result.p90UsPerLaunch << ',' << result.medianNsPerElement << ',' << result.effectiveGbPerSecond << ','
+           << options.samples << ',' << std::fixed << std::setprecision(6) << result.medianUsPerLaunch << ',' << result.p10UsPerLaunch
+           << ',' << result.p90UsPerLaunch << ',' << result.medianNsPerElement << ',' << result.effectiveGbPerSecond << ','
            << result.inputGbPerSecond << ',' << result.outputGbPerSecond << ',' << result.plan.workingSetBytes << ',' << l2Bytes << ','
            << evictionBytes << '\n';
     output.flush();
@@ -845,7 +812,8 @@ int main(int argc, char **argv) {
 
         std::cerr << "GPU: " << properties.name << " (device " << options.gpu << ")\n"
                   << "Reported L2: " << formatBytes(l2Bytes) << "\n"
-                  << "L2 eviction buffer: " << formatBytes(evictionBytes) << " (" << options.l2EvictionFactor << "x reported L2, minimum 64 MiB)\n"
+                  << "L2 eviction buffer: " << formatBytes(evictionBytes) << " (" << options.l2EvictionFactor
+                  << "x reported L2, minimum 64 MiB)\n"
                   << "GPU memory: " << formatBytes(freeBytes) << " free / " << formatBytes(totalBytes) << " total\n"
                   << "Conversion-buffer budget: " << formatBytes(conversionMemoryBudgetBytes) << "\n"
                   << "Pairs: " << pairs.size() << ", sizes: " << options.elementCounts.size() << ", modes: " << options.modes.size()
@@ -859,14 +827,14 @@ int main(int argc, char **argv) {
             for (const BenchmarkMode mode : options.modes) {
                 for (const std::uint64_t elements : options.elementCounts) {
                     try {
-                        const BenchmarkResult result = benchmarkCase(
-                            pair, mode, elements, options, conversionMemoryBudgetBytes, evictionBuffer, stream);
+                        const BenchmarkResult result =
+                            benchmarkCase(pair, mode, elements, options, conversionMemoryBudgetBytes, evictionBuffer, stream);
                         writeCsvRow(*csv, result, options, l2Bytes, evictionBytes);
                         ++completed;
                         std::cerr << '[' << completed + skipped << '/' << totalCases << "] " << typeInfo(pair.source).name << " -> "
-                                  << typeInfo(pair.destination).name << ' ' << modeName(mode) << " elements=" << elements << " median="
-                                  << std::fixed << std::setprecision(3) << result.medianUsPerLaunch << " us, " << result.effectiveGbPerSecond
-                                  << " GB/s\n";
+                                  << typeInfo(pair.destination).name << ' ' << modeName(mode) << " elements=" << elements
+                                  << " median=" << std::fixed << std::setprecision(3) << result.medianUsPerLaunch << " us, "
+                                  << result.effectiveGbPerSecond << " GB/s\n";
                     } catch (const std::runtime_error &error) {
                         const std::string message = error.what();
                         if (message.find("exceeds the available conversion-buffer memory budget") == std::string::npos)
