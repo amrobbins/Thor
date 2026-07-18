@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <deque>
 #include <future>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <unordered_map>
@@ -184,14 +185,6 @@ class Stream : private ReferenceCounted {
 
     uint64_t getId() const { return getReferenceCountedId(); }
 
-    // To allow for parallelization while limiting the amount of streams created, gradient update operations all share
-    // a fixed size pool of gradientUpdateStreams
-    // The thought here is that this is ok because they all branch off data streams and then re-synchronize to a data stream,
-    // so this cannot cause deadlock. If data streams were assigned this same way, deadlock would be possible - so that is not done.
-    static Stream getNextGradientUpdateStream(uint32_t deviceNum);
-    static Stream getMostRecentGradientUpdateStream(uint32_t deviceNum);
-    static void setMaxNumGradientUpdateStreams(uint32_t numGradientUpdateStreams);
-
     static Stream getNextUploadStream(uint32_t deviceNum);
     static void setMaxNumUploadStreams(uint32_t numGradientUpdateStreams);
 
@@ -232,4 +225,32 @@ class Stream : private ReferenceCounted {
     static int numCublasLtHandles;
 
     std::mutex *mtx;
+};
+
+/**
+ * A lazily allocated, owner-scoped pool for gradient-update streams.
+ *
+ * Each placed model owns one pool per GPU. All physical stamps for that model
+ * on the GPU share the pool. The first three requests allocate distinct
+ * streams; subsequent requests reuse those streams
+ * round-robin. Keeping the pool owner-scoped prevents optimizer work from one
+ * model from adding ordering dependencies to another concurrently executing
+ * model.
+ */
+class GradientUpdateStreamPool {
+   public:
+    static constexpr uint32_t MAX_STREAMS = 3;
+
+    explicit GradientUpdateStreamPool(uint32_t deviceNum) : deviceNum(deviceNum) {}
+
+    Stream getNext();
+
+    uint32_t getDeviceNum() const { return deviceNum; }
+    uint32_t getNumAllocatedStreams() const;
+
+   private:
+    const uint32_t deviceNum;
+    mutable std::mutex mtx;
+    std::deque<Stream> streams;
+    uint32_t nextStreamIndex = 0;
 };

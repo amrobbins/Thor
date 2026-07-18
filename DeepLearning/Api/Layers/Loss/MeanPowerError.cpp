@@ -1,5 +1,6 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
+#include "DeepLearning/Implementation/Layers/Loss/RegressionLossDType.h"
 #include "DeepLearning/Api/Layers/Loss/MeanPowerError.h"
 
 #include "DeepLearning/Api/Layers/Loss/MultiInputCustomLoss.h"
@@ -29,24 +30,11 @@ void validateExponent(float exponent) {
 }
 
 void validateLabelsDType(DataType dtype) {
-    switch (dtype) {
-        case DataType::BOOLEAN:
-        case DataType::UINT8:
-        case DataType::UINT16:
-        case DataType::UINT32:
-        case DataType::FP16:
-        case DataType::FP32:
-            return;
-        default:
-            throw runtime_error("Unsupported MeanPowerError label dtype: " + ThorImplementation::TensorDescriptor::getElementTypeName(dtype));
-    }
+    ThorImplementation::RegressionLossDType::validateLabelsDType("MeanPowerError", dtype);
 }
 
 void validatePredictionsDType(DataType dtype) {
-    if (dtype != DataType::FP16 && dtype != DataType::FP32) {
-        throw runtime_error("Unsupported MeanPowerError predictions dtype: " +
-                            ThorImplementation::TensorDescriptor::getElementTypeName(dtype));
-    }
+    ThorImplementation::RegressionLossDType::validatePredictionsDType("MeanPowerError", dtype);
 }
 
 void validateExampleWeights(Tensor predictions, Tensor labels, std::optional<Tensor> exampleWeights) {
@@ -55,9 +43,7 @@ void validateExampleWeights(Tensor predictions, Tensor labels, std::optional<Ten
     if (exampleWeights.value() == predictions || exampleWeights.value() == labels)
         throw runtime_error("MeanPowerError example_weights tensor must be distinct from predictions and labels.");
     const DataType dtype = exampleWeights.value().getDataType();
-    if (dtype != DataType::FP16 && dtype != DataType::FP32)
-        throw runtime_error("Unsupported MeanPowerError example_weights dtype: " +
-                            ThorImplementation::TensorDescriptor::getElementTypeName(dtype));
+    ThorImplementation::RegressionLossDType::validateExampleWeightDType("MeanPowerError", dtype);
     const vector<uint64_t>& dims = exampleWeights.value().getDimensions();
     if (dims != vector<uint64_t>{1} && dims != predictions.getDimensions()) {
         throw runtime_error("MeanPowerError example_weights dimensions must be [1] for per-example weights or match predictions dimensions.");
@@ -144,6 +130,7 @@ ThorImplementation::DynamicExpression makeWeightedMeanPowerGradientExpression(fl
 }  // namespace
 
 void MeanPowerError::buildSupportLayersAndAddToNetwork() {
+    ThorImplementation::RegressionLossDType::validateLossDType("MeanPowerError", lossDataType);
     validateExponent(exponent);
     validatePredictionsDType(predictionsTensor.getDataType());
     validateLabelsDType(labelsTensor.getDataType());

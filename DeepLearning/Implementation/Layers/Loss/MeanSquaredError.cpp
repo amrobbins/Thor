@@ -1,5 +1,7 @@
 #include "DeepLearning/Implementation/Layers/Loss/MeanSquaredError.h"
 
+#include "DeepLearning/Implementation/Layers/Loss/RegressionLossDType.h"
+
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "Utilities/Expression/Expression.h"
@@ -20,23 +22,11 @@ constexpr const char* kLossName = "loss";
 constexpr const char* kGradientName = "predictions_grad";
 
 void validateLabelsDType(DataType dtype) {
-    switch (dtype) {
-        case DataType::BOOLEAN:
-        case DataType::UINT8:
-        case DataType::UINT16:
-        case DataType::UINT32:
-        case DataType::FP16:
-        case DataType::FP32:
-            return;
-        default:
-            throw runtime_error("Unsupported MeanSquaredError label dtype: " + TensorDescriptor::getElementTypeName(dtype));
-    }
+    RegressionLossDType::validateLabelsDType("MeanSquaredError", dtype);
 }
 
 void validatePredictionsDType(DataType dtype) {
-    if (dtype != DataType::FP16 && dtype != DataType::FP32) {
-        throw runtime_error("Unsupported MeanSquaredError predictions dtype: " + TensorDescriptor::getElementTypeName(dtype));
-    }
+    RegressionLossDType::validatePredictionsDType("MeanSquaredError", dtype);
 }
 
 void validateDynamicInputs(const DynamicExpression::TensorMap& inputs) {
@@ -74,7 +64,9 @@ MeanSquaredError::MeanSquaredError(DataType lossDataType)
                  kLabelsName,
                  kLossName,
                  kGradientName,
-                 lossDataType) {}
+                 lossDataType) {
+    RegressionLossDType::validateLossDType("MeanSquaredError", lossDataType);
+}
 
 void MeanSquaredError::compileImpl() {
     THOR_THROW_IF_FALSE(featureInput.has_value());
@@ -95,11 +87,10 @@ DynamicExpression MeanSquaredError::makeForwardExpression(DataType lossDataType)
                                             Stream& stream) -> DynamicExpressionBuild {
                                  validateDynamicInputs(inputs);
 
-                                 const DataType predictionDType = inputs.at(kPredictionsName).getDescriptor().getDataType();
-                                 Expression predictions = Expression::input(kPredictionsName, predictionDType, predictionDType);
-                                 Expression labels = Expression::input(kLabelsName, predictionDType, predictionDType);
-                                 Expression diff = (predictions - labels).withDTypes(predictionDType, predictionDType);
-                                 Expression loss = (diff * diff).withDTypes(predictionDType, lossDataType);
+                                 Expression predictions = Expression::input(kPredictionsName, DataType::FP32, DataType::FP32);
+                                 Expression labels = Expression::input(kLabelsName, DataType::FP32, DataType::FP32);
+                                 Expression diff = predictions - labels;
+                                 Expression loss = (diff * diff).withOutputDType(lossDataType);
                                  return compileOutputs(Expression::outputs({{kLossName, loss}}), inputs, outputs, stream);
                              });
 }
@@ -113,11 +104,11 @@ DynamicExpression MeanSquaredError::makeGradientExpression() {
                                  validateDynamicInputs(inputs);
 
                                  const DataType predictionDType = inputs.at(kPredictionsName).getDescriptor().getDataType();
-                                 Expression predictions = Expression::input(kPredictionsName, predictionDType, predictionDType);
-                                 Expression labels = Expression::input(kLabelsName, predictionDType, predictionDType);
-                                 Expression diff = (predictions - labels).withDTypes(predictionDType, predictionDType);
-                                 Expression scale = Expression(2.0f * Loss::getLossScalingFactor()).withDTypes(predictionDType, predictionDType);
-                                 Expression grad = (diff * scale).withDTypes(predictionDType, predictionDType);
+                                 Expression predictions = Expression::input(kPredictionsName, DataType::FP32, DataType::FP32);
+                                 Expression labels = Expression::input(kLabelsName, DataType::FP32, DataType::FP32);
+                                 Expression diff = predictions - labels;
+                                 Expression scale(2.0f * Loss::getLossScalingFactor());
+                                 Expression grad = (diff * scale).withOutputDType(predictionDType);
                                  return compileOutputs(Expression::outputs({{kGradientName, grad}}), inputs, outputs, stream);
                              });
 }

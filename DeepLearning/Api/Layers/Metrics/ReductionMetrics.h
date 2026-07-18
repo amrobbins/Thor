@@ -3,6 +3,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Layers/Metrics/Metric.h"
+#include "DeepLearning/Implementation/Layers/Metrics/ReductionMetricDType.h"
 #include "DeepLearning/Implementation/Layers/Metrics/ReductionMetrics.h"
 
 #include <memory>
@@ -12,11 +13,6 @@
 #include <vector>
 
 namespace Thor {
-namespace MetricDetail {
-
-inline bool isSupportedValueDType(DataType dtype) { return dtype == DataType::FP16 || dtype == DataType::FP32; }
-
-}  // namespace MetricDetail
 
 class UnaryReductionMetric : public Metric {
    public:
@@ -38,7 +34,7 @@ class UnaryReductionMetric : public Metric {
         THOR_THROW_IF_FALSE(network != nullptr);
         THOR_THROW_IF_FALSE(values.isInitialized());
         THOR_THROW_IF_FALSE(!values.getDimensions().empty());
-        THOR_THROW_IF_FALSE(MetricDetail::isSupportedValueDType(values.getDataType()));
+        ThorImplementation::ReductionMetricDType::validateValueDType(getLayerType(), "values", values.getDataType());
 
         featureInput = std::move(values);
         metricTensor = Tensor(DataType::FP32, {1});
@@ -98,7 +94,8 @@ class ApiName::Builder {                                                        
         THOR_THROW_IF_FALSE(!this->_values.has_value());                                                              \
         THOR_THROW_IF_FALSE(values.isInitialized());                                                                  \
         THOR_THROW_IF_FALSE(!values.getDimensions().empty());                                                         \
-        THOR_THROW_IF_FALSE(MetricDetail::isSupportedValueDType(values.getDataType()));                               \
+        ThorImplementation::ReductionMetricDType::validateValueDType(                                     \
+            #ApiName, "values", values.getDataType());                                                               \
         this->_values = std::move(values);                                                                            \
         return *this;                                                                                                 \
     }                                                                                                                 \
@@ -155,8 +152,10 @@ class WeightedMean::Builder {
         THOR_THROW_IF_FALSE(_values.value() != _weights.value());
         THOR_THROW_IF_FALSE(!_values.value().getDimensions().empty());
         THOR_THROW_IF_FALSE(_values.value().getDimensions() == _weights.value().getDimensions());
-        THOR_THROW_IF_FALSE(MetricDetail::isSupportedValueDType(_values.value().getDataType()));
-        THOR_THROW_IF_FALSE(MetricDetail::isSupportedValueDType(_weights.value().getDataType()));
+        ThorImplementation::ReductionMetricDType::validateValueDType(
+            "WeightedMean", "values", _values.value().getDataType());
+        ThorImplementation::ReductionMetricDType::validateValueDType(
+            "WeightedMean", "weights", _weights.value().getDataType());
 
         WeightedMean metric;
         metric.featureInput = _values.value();
@@ -177,7 +176,8 @@ class WeightedMean::Builder {
         THOR_THROW_IF_FALSE(!this->_values.has_value());
         THOR_THROW_IF_FALSE(values.isInitialized());
         THOR_THROW_IF_FALSE(!values.getDimensions().empty());
-        THOR_THROW_IF_FALSE(MetricDetail::isSupportedValueDType(values.getDataType()));
+        ThorImplementation::ReductionMetricDType::validateValueDType(
+            "WeightedMean", "values", values.getDataType());
         this->_values = std::move(values);
         return *this;
     }
@@ -186,7 +186,8 @@ class WeightedMean::Builder {
         THOR_THROW_IF_FALSE(!this->_weights.has_value());
         THOR_THROW_IF_FALSE(weights.isInitialized());
         THOR_THROW_IF_FALSE(!weights.getDimensions().empty());
-        THOR_THROW_IF_FALSE(MetricDetail::isSupportedValueDType(weights.getDataType()));
+        ThorImplementation::ReductionMetricDType::validateValueDType(
+            "WeightedMean", "weights", weights.getDataType());
         this->_weights = std::move(weights);
         return *this;
     }

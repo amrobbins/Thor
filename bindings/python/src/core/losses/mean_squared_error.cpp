@@ -8,6 +8,8 @@
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 
+#include "bindings/python/src/core/losses/regression_loss_dtype.h"
+
 namespace nb = nanobind;
 using namespace nb::literals;
 using namespace std;
@@ -28,9 +30,7 @@ void maybeSetExampleWeights(MSE::Builder& builder,
         return;
     if (example_weights.value() == predictions || example_weights.value() == labels)
         throw nb::value_error("MSE instance: example_weights must be distinct from predictions and labels.");
-    DataType dtype = example_weights.value().getDataType();
-    if (dtype != DataType::FP16 && dtype != DataType::FP32)
-        throw nb::value_error("MSE instance: example_weights must be fp16 or fp32.");
+    ThorPython::RegressionLossDType::validateExampleWeights("MSE instance", example_weights.value());
     const std::vector<uint64_t>& dims = example_weights.value().getDimensions();
     if (dims != std::vector<uint64_t>{1} && dims != predictions.getDimensions()) {
         string error_message = "MSE instance: example_weights dimensions must be [1] for per-example weights or match predictions. "
@@ -58,11 +58,15 @@ void bind_mean_squared_error(nb::module_ &losses) {
            bool reportsElementwiseLoss,
            std::optional<float> loss_weight,
            std::optional<Tensor> example_weights) {
+            const string loss_name = "MSE instance";
+            ThorPython::RegressionLossDType::validatePredictions(loss_name, predictions);
+            ThorPython::RegressionLossDType::validateLabels(loss_name, labels);
+            const DataType effectiveLossDataType =
+                ThorPython::RegressionLossDType::effectiveLossDType(loss_name, predictions.getDataType(), loss_data_type);
+
             MSE::Builder builder;
 
-            builder.network(network).predictions(predictions).labels(labels);
-            if (loss_data_type.has_value())
-                builder.lossDataType(loss_data_type.value());
+            builder.network(network).predictions(predictions).labels(labels).lossDataType(effectiveLossDataType);
             builder.lossWeight(loss_weight.value_or(1.0f));
             maybeSetExampleWeights(builder, predictions, labels, example_weights);
 
@@ -97,7 +101,7 @@ Parameters
 network : thor.Network
 predictions : thor.Tensor
 labels : thor.Tensor
-loss_data_type : thor.DataType | None, default same data type as predictions
+loss_data_type : thor.DataType | None, default fp16 for fp16 predictions, otherwise fp32
 reports_elementwise_loss : Optional[bool], default None
     If True, report elementwise loss.
     When reports_batch_loss and reports_elementwise_loss are None, defaults to batch loss.

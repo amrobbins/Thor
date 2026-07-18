@@ -1,5 +1,6 @@
 #pragma once
 #include "DeepLearning/Implementation/ThorError.h"
+#include "DeepLearning/Implementation/Layers/Loss/RegressionLossDType.h"
 
 #include "DeepLearning/Api/Layers/Loss/CustomLoss.h"
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
@@ -76,8 +77,8 @@ class QuantileLoss::Builder {
         if (!_lossShape.has_value())
             _lossShape = LossShape::BATCH;
         if (!_lossDataType.has_value())
-            _lossDataType = _predictions.value().getDataType();
-        THOR_THROW_IF_FALSE(_lossDataType.value() == DataType::FP16 || _lossDataType.value() == DataType::FP32);
+            _lossDataType = ThorImplementation::RegressionLossDType::defaultLossDType(_predictions.value().getDataType());
+        ThorImplementation::RegressionLossDType::validateLossDType("QuantileLoss", _lossDataType.value());
 
         float quantile = _quantile.value_or(0.5f);
         THOR_THROW_IF_FALSE(quantile > 0.0f && quantile < 1.0f);
@@ -166,7 +167,7 @@ class QuantileLoss::Builder {
 
     virtual QuantileLoss::Builder &lossDataType(DataType _lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
-        THOR_THROW_IF_FALSE(_lossDataType == DataType::FP16 || _lossDataType == DataType::FP32);
+        ThorImplementation::RegressionLossDType::validateLossDType("QuantileLoss", _lossDataType);
         this->_lossDataType = _lossDataType;
         return *this;
     }

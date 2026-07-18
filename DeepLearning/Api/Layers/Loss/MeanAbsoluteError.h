@@ -1,5 +1,6 @@
 #pragma once
 #include "DeepLearning/Implementation/ThorError.h"
+#include "DeepLearning/Implementation/Layers/Loss/RegressionLossDType.h"
 
 #include "DeepLearning/Api/Layers/Loss/CustomLoss.h"
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
@@ -75,7 +76,8 @@ class MAE::Builder {
         if (!_lossShape.has_value())
             _lossShape = LossShape::BATCH;
         if (!_lossDataType.has_value())
-            _lossDataType = _predictions.value().getDataType();
+            _lossDataType = ThorImplementation::RegressionLossDType::defaultLossDType(_predictions.value().getDataType());
+        ThorImplementation::RegressionLossDType::validateLossDType("MAE", _lossDataType.value());
         MAE meanAbsoluteError;
         meanAbsoluteError.predictionsTensor = _predictions.value();
         meanAbsoluteError.labelsTensor = _labels.value();
@@ -152,6 +154,7 @@ class MAE::Builder {
 
     virtual MAE::Builder &lossDataType(DataType _lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
+        ThorImplementation::RegressionLossDType::validateLossDType("MAE", _lossDataType);
         this->_lossDataType = _lossDataType;
         return *this;
     }

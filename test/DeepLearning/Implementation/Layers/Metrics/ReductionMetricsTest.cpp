@@ -8,6 +8,8 @@
 
 #include "gtest/gtest.h"
 
+#include <cuda_bf16.h>
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -66,6 +68,53 @@ void expectUnaryReductionMetricComputes(ExpectedFn expectedFn) {
     LayerTestHelper::tearDownNetwork(layers);
 }
 
+void expectBf16MeanComputesExpectedValue() {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+
+    const vector<uint64_t> dimensions{7, 5};
+    TensorDescriptor descriptor(DataType::BF16, dimensions);
+
+    Tensor valuesCpu(cpuPlacement, descriptor);
+    Tensor valuesGpu(gpuPlacement, descriptor);
+
+    __nv_bfloat16* values = static_cast<__nv_bfloat16*>(valuesCpu.getMemPtr());
+    double expectedTotal = 0.0;
+    for (uint32_t i = 0; i < valuesCpu.getTotalNumElements(); ++i) {
+        values[i] = __nv_bfloat16(static_cast<float>(int(i) - 13) * 0.25f);
+        expectedTotal += static_cast<float>(values[i]);
+    }
+
+    vector<shared_ptr<Layer>> layers;
+    shared_ptr<NetworkInput> valuesInput = make_shared<NetworkInput>(valuesGpu);
+    layers.push_back(valuesInput);
+    shared_ptr<NoOpLayer> noOpLayer = make_shared<NoOpLayer>();
+    layers.push_back(noOpLayer);
+    shared_ptr<Mean> metric = make_shared<Mean>();
+    layers.push_back(metric);
+    shared_ptr<NetworkOutput> metricOutput = make_shared<NetworkOutput>(gpuPlacement);
+    layers.push_back(metricOutput);
+
+    LayerTestHelper::connectTwoLayers(valuesInput, noOpLayer);
+    LayerTestHelper::connectTwoLayers(noOpLayer, metric, 0, static_cast<int>(Metric::ConnectionType::FORWARD));
+    LayerTestHelper::connectTwoLayers(metric, metricOutput, static_cast<int>(Metric::ConnectionType::METRIC));
+    LayerTestHelper::initializeNetwork(layers);
+
+    ASSERT_TRUE(metric->getFeatureOutput().has_value());
+    ASSERT_EQ(metric->getFeatureOutput()->getDescriptor().getDataType(), DataType::FP32);
+
+    valuesInput->forward(valuesCpu, false);
+
+    Tensor metricCpu = metricOutput->getFeatureOutput().value().clone(cpuPlacement);
+    metricCpu.copyFromAsync(metricOutput->getFeatureOutput().value(), valuesInput->getStream());
+    valuesInput->getStream().synchronize();
+
+    const float expected = static_cast<float>(expectedTotal / static_cast<double>(valuesCpu.getTotalNumElements()));
+    ASSERT_LT(std::abs(expected - *static_cast<float*>(metricCpu.getMemPtr())), 0.0001f);
+
+    LayerTestHelper::tearDownNetwork(layers);
+}
+
 float expectedMean(const Tensor& valuesCpu) {
     const float* values = static_cast<const float*>(valuesCpu.getMemPtr());
     double total = 0.0;
@@ -101,6 +150,8 @@ float expectedMax(const Tensor& valuesCpu) {
 }  // namespace
 
 TEST(ReductionMetrics, MeanComputesExpectedValue) { expectUnaryReductionMetricComputes<Mean>(expectedMean); }
+
+TEST(ReductionMetrics, MeanComputesExpectedValueForBf16Input) { expectBf16MeanComputesExpectedValue(); }
 
 TEST(ReductionMetrics, SumComputesExpectedValue) { expectUnaryReductionMetricComputes<Sum>(expectedSum); }
 

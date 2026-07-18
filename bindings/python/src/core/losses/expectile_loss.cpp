@@ -7,6 +7,8 @@
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 
+#include "bindings/python/src/core/losses/regression_loss_dtype.h"
+
 namespace nb = nanobind;
 using namespace nb::literals;
 using namespace std;
@@ -47,9 +49,7 @@ void maybeSetExampleWeights(ExpectileLoss::Builder& builder,
         return;
     if (example_weights.value() == predictions || example_weights.value() == labels)
         throw nb::value_error("ExpectileLoss instance: example_weights must be distinct from predictions and labels.");
-    DataType dtype = example_weights.value().getDataType();
-    if (dtype != DataType::FP16 && dtype != DataType::FP32)
-        throw nb::value_error("ExpectileLoss instance: example_weights must be fp16 or fp32.");
+    ThorPython::RegressionLossDType::validateExampleWeights("ExpectileLoss instance", example_weights.value());
     const std::vector<uint64_t>& dims = example_weights.value().getDimensions();
     if (dims != std::vector<uint64_t>{1} && dims != predictions.getDimensions()) {
         string error_message =
@@ -78,6 +78,8 @@ void bind_expectile_loss(nb::module_& losses) {
            std::optional<float> loss_weight,
            std::optional<Tensor> example_weights) {
             const string loss_name = "ExpectileLoss instance";
+            ThorPython::RegressionLossDType::validatePredictions(loss_name, predictions);
+            ThorPython::RegressionLossDType::validateLabels(loss_name, labels);
             if (predictions.getDimensions().size() != 1) {
                 string error_message = loss_name + ": predictions must be a 1 dimensional tensor but predictions is " +
                                        predictions.getDescriptorString();
@@ -92,11 +94,8 @@ void bind_expectile_loss(nb::module_& losses) {
                 string error_message = loss_name + ": expectile must be greater than zero and less than one";
                 throw nb::value_error(error_message.c_str());
             }
-            DataType effectiveLossDataType = loss_data_type.value_or(predictions.getDataType());
-            if (effectiveLossDataType != DataType::FP16 && effectiveLossDataType != DataType::FP32) {
-                string error_message = loss_name + ": loss_data_type must be fp16 or fp32";
-                throw nb::value_error(error_message.c_str());
-            }
+            const DataType effectiveLossDataType =
+                ThorPython::RegressionLossDType::effectiveLossDType(loss_name, predictions.getDataType(), loss_data_type);
             validateReportedLossShape(reported_loss_shape, loss_name);
 
             ExpectileLoss::Builder builder;

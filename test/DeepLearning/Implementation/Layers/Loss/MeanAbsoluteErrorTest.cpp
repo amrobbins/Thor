@@ -8,7 +8,6 @@
 #include <math.h>
 #include <stdio.h>
 #include <unistd.h>
-#include <unordered_set>
 #include "cuda.h"
 #include "cuda_fp16.h"
 #include "cuda_runtime.h"
@@ -58,9 +57,9 @@ TEST(MeanAbsoluteError, ComputesCorrectResult_BatchLoss_FP16) {
         for (uint32_t i = 0; i < elementLossCpu.getTotalNumElements(); i++) {
             predictions[i] = ((rand() % 1500) / 999.0f);
             labels[i] = ((rand() % 1500) / 999.0f);
-            half val = predictions[i] - labels[i];
-            elementLoss[i] = fabs((float)val);
-            elementLossGradient[i] = sgn(val) * Loss::getLossScalingFactor();
+            const float diff = static_cast<float>(predictions[i]) - static_cast<float>(labels[i]);
+            elementLoss[i] = fabsf(diff);
+            elementLossGradient[i] = sgn(diff) * Loss::getLossScalingFactor();
         }
 
         vector<shared_ptr<Layer>> layers;
@@ -137,7 +136,7 @@ TEST(MeanAbsoluteError, ComputesCorrectResult_BatchLoss_FP16) {
             labelsStream.synchronize();
             half *elementLossGradientGpu_h_mem = (half *)elementLossGradientGpu_h.getMemPtr();
             for (uint32_t i = 0; i < elementLossCpu.getTotalNumElements(); ++i) {
-                if (elementLoss[i] != elementLossGpu_h_mem[i])
+                if (elementLossGradient[i] != elementLossGradientGpu_h_mem[i])
                     printf("gradient %d (%ld, %ld)  %f vs %f   %f  %f  %f\n",
                            i,
                            dimensions[0],
@@ -184,9 +183,9 @@ TEST(MeanAbsoluteError, ComputesCorrectResult_BatchLoss_FP16_FP32Labels) {
         for (uint32_t i = 0; i < elementLossCpu.getTotalNumElements(); i++) {
             predictions[i] = ((rand() % 1500) / 999.0f);
             labels[i] = ((rand() % 1500) / 999.0f);
-            half val = predictions[i] - (half)labels[i];
-            elementLoss[i] = fabs((float)val);
-            elementLossGradient[i] = sgn(val) * Loss::getLossScalingFactor();
+            const float diff = static_cast<float>(predictions[i]) - labels[i];
+            elementLoss[i] = fabsf(diff);
+            elementLossGradient[i] = sgn(diff) * Loss::getLossScalingFactor();
         }
 
         vector<shared_ptr<Layer>> layers;
@@ -264,7 +263,7 @@ TEST(MeanAbsoluteError, ComputesCorrectResult_BatchLoss_FP16_FP32Labels) {
             labelsStream.synchronize();
             half *elementLossGradientGpu_h_mem = (half *)elementLossGradientGpu_h.getMemPtr();
             for (uint32_t i = 0; i < elementLossCpu.getTotalNumElements(); ++i) {
-                if (elementLoss[i] != elementLossGpu_h_mem[i])
+                if (elementLossGradient[i] != elementLossGradientGpu_h_mem[i])
                     printf("gradient %d (%ld, %ld)  %f vs %f   %f  %f  %f\n",
                            i,
                            dimensions[0],
@@ -308,15 +307,12 @@ TEST(MeanAbsoluteError, ComputesCorrectResult_BatchLoss_FP16PredictionsGradient_
         half *predictions = (half *)predictionsCpu.getMemPtr();
         float *elementLoss = (float *)elementLossCpu.getMemPtr();
         half *elementLossGradient = (half *)elementLossGradientCpu.getMemPtr();
-        unordered_set<uint32_t> skipGradientCheckBecauseSgnExactlyZero;
         for (uint32_t i = 0; i < elementLossCpu.getTotalNumElements(); i++) {
             predictions[i] = ((rand() % 1500) / 999.0f);
             labels[i] = ((rand() % 1500) / 999.0f);
-            half val = predictions[i] - (half)labels[i];
-            elementLoss[i] = fabs((float)val);
-            elementLossGradient[i] = sgn(val) * Loss::getLossScalingFactor();
-            if (sgn(val) == 0.0)
-                skipGradientCheckBecauseSgnExactlyZero.insert(i);
+            const float diff = static_cast<float>(predictions[i]) - labels[i];
+            elementLoss[i] = fabsf(diff);
+            elementLossGradient[i] = sgn(diff) * Loss::getLossScalingFactor();
         }
 
         vector<shared_ptr<Layer>> layers;
@@ -394,8 +390,6 @@ TEST(MeanAbsoluteError, ComputesCorrectResult_BatchLoss_FP16PredictionsGradient_
             labelsStream.synchronize();
             half *elementLossGradientGpu_h_mem = (half *)elementLossGradientGpu_h.getMemPtr();
             for (uint32_t i = 0; i < elementLossCpu.getTotalNumElements(); ++i) {
-                if (skipGradientCheckBecauseSgnExactlyZero.count(i) == 1)
-                    continue;
                 if (elementLossGradient[i] != elementLossGradientGpu_h_mem[i])
                     printf("gradient %d (%ld, %ld)  %f vs %f   %f  %f  %f\n",
                            i,
@@ -522,7 +516,7 @@ TEST(MeanAbsoluteError, ComputesCorrectResult_BatchLoss_FP32) {
             labelsStream.synchronize();
             float *elementLossGradientGpu_h_mem = (float *)elementLossGradientGpu_h.getMemPtr();
             for (uint32_t i = 0; i < elementLossCpu.getTotalNumElements(); ++i) {
-                if (elementLoss[i] != elementLossGpu_h_mem[i])
+                if (elementLossGradient[i] != elementLossGradientGpu_h_mem[i])
                     printf("gradient %d (%ld, %ld)  %f vs %f   %f  %f  %f\n",
                            i,
                            dimensions[0],
@@ -648,7 +642,7 @@ TEST(MeanAbsoluteError, ComputesCorrectResult_BatchLoss_FP32_FP16Labels) {
             labelsStream.synchronize();
             float *elementLossGradientGpu_h_mem = (float *)elementLossGradientGpu_h.getMemPtr();
             for (uint32_t i = 0; i < elementLossCpu.getTotalNumElements(); ++i) {
-                if (elementLoss[i] != elementLossGpu_h_mem[i])
+                if (elementLossGradient[i] != elementLossGradientGpu_h_mem[i])
                     printf("gradient %d (%ld, %ld)  %f vs %f   %f  %f  %f\n",
                            i,
                            dimensions[0],

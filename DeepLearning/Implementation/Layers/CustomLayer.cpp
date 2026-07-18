@@ -280,8 +280,6 @@ CustomLayer::CustomLayer(DynamicExpression expr,
         param->informExpressionBased();
         addParameter(param);  // verifies parameter name uniqueness
     }
-
-    attachGradientUpdateStream();
 }
 
 void CustomLayer::validatePortNames(const std::vector<std::string>& names, const std::string& what) {
@@ -1080,6 +1078,12 @@ PhysicalParameter::StorageContext CustomLayer::buildParameterStorageContext() co
 }
 
 PreparedDynamicExpression::TensorMap CustomLayer::buildForwardInputs(uint32_t applicationIndex) {
+    // Output metadata inference can prepare parameter storage and compile optimizer
+    // expressions while graph connections are still being formed, before compileImpl().
+    // Network-owned layers already have their model pool installed before connection;
+    // standalone implementation layers lazily create their own owner-scoped pool here.
+    attachGradientUpdateStream();
+
     PreparedDynamicExpression::TensorMap inputs;
 
     for (uint32_t inputPort = 0; inputPort < inputNames.size(); ++inputPort) {

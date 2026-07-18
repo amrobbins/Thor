@@ -262,6 +262,7 @@ class Network {
                                     std::vector<Event> &initDoneEvents,
                                     uint32_t batchSize,
                                     std::vector<ThorImplementation::StampedNetwork> &stampedNetworks,
+                                    const std::shared_ptr<GradientUpdateStreamPool>& gradientUpdateStreamPool,
                                     const bool inferenceOnly,
                                     bool networkOutputsOnGpu = false);
 

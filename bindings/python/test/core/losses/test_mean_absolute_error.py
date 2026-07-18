@@ -132,7 +132,7 @@ def test_mae_rejects_bad_example_weights():
     with pytest.raises(ValueError, match=r"example_weights must be distinct"):
         thor.losses.MAE(n, preds, labels, example_weights=labels)
 
-    with pytest.raises(ValueError, match=r"example_weights must be fp16 or fp32"):
+    with pytest.raises(ValueError, match=r"example_weights must use fp8_e4m3"):
         thor.losses.MAE(n, preds, labels, example_weights=_tensor_1d(1, thor.DataType.uint32))
 
     with pytest.raises(ValueError, match=r"example_weights dimensions must be \[1\]"):

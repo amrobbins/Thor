@@ -20,6 +20,8 @@ void ApiName::deserialize(const json& j, Network* network) {                    
     nlohmann::json valuesJson = j["values"].get<nlohmann::json>();                                        \
     uint64_t originalTensorId = valuesJson.at("id").get<uint64_t>();                                      \
     Tensor values = network->getApiTensorByOriginalId(originalTensorId);                                   \
+    ThorImplementation::ReductionMetricDType::validateValueDType(                                        \
+        #ApiName, "values", values.getDataType());                                                                   \
     Tensor metricTensor = Tensor::deserialize(j.at("metric").get<nlohmann::json>());                      \
                                                                                                            \
     ApiName metric;                                                                                        \
@@ -60,6 +62,13 @@ void WeightedMean::deserialize(const json& j, Network* network) {
     nlohmann::json weightsJson = j["weights"].get<nlohmann::json>();
     originalTensorId = weightsJson.at("id").get<uint64_t>();
     Tensor weights = network->getApiTensorByOriginalId(originalTensorId);
+
+    ThorImplementation::ReductionMetricDType::validateValueDType(
+        "WeightedMean", "values", values.getDataType());
+    ThorImplementation::ReductionMetricDType::validateValueDType(
+        "WeightedMean", "weights", weights.getDataType());
+    if (values.getDimensions() != weights.getDimensions())
+        throw runtime_error("WeightedMean values and weights dimensions must match during deserialization.");
 
     Tensor metricTensor = Tensor::deserialize(j.at("metric").get<nlohmann::json>());
 

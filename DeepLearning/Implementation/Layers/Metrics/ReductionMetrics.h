@@ -2,6 +2,7 @@
 
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Implementation/Layers/Metrics/CustomMetric.h"
+#include "DeepLearning/Implementation/Layers/Metrics/ReductionMetricDType.h"
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/Expression.h"
 #include "Utilities/Expression/FusedEquation.h"
@@ -17,7 +18,6 @@
 namespace ThorImplementation {
 namespace ReductionMetricDetail {
 
-inline bool isSupportedValueDType(DataType dtype) { return dtype == DataType::FP16 || dtype == DataType::FP32; }
 
 inline std::vector<uint64_t> allAxes(uint64_t rank) {
     std::vector<uint64_t> axes;
@@ -66,7 +66,7 @@ inline DynamicExpression makeUnaryReductionExpression(ExprOp op) {
                                  const std::vector<uint64_t> valueDims = valuesTensor.getDescriptor().getDimensions();
                                  const DataType valueDType = valuesTensor.getDescriptor().getDataType();
                                  THOR_THROW_IF_FALSE(!valueDims.empty());
-                                 THOR_THROW_IF_FALSE(isSupportedValueDType(valueDType));
+                                 ReductionMetricDType::validateValueDType("reduction metric", "values", valueDType);
 
                                  const std::vector<uint64_t> reductionAxes = allAxes(valueDims.size());
                                  const std::vector<uint64_t> squeezeAxes = squeezeAllButOneAxis(valueDims.size());
@@ -104,8 +104,8 @@ inline DynamicExpression makeWeightedMeanExpression() {
                                  const DataType weightDType = weightsTensor.getDescriptor().getDataType();
                                  THOR_THROW_IF_FALSE(!valueDims.empty());
                                  THOR_THROW_IF_FALSE(valueDims == weightDims);
-                                 THOR_THROW_IF_FALSE(isSupportedValueDType(valueDType));
-                                 THOR_THROW_IF_FALSE(isSupportedValueDType(weightDType));
+                                 ReductionMetricDType::validateValueDType("WeightedMean", "values", valueDType);
+                                 ReductionMetricDType::validateValueDType("WeightedMean", "weights", weightDType);
 
                                  const std::vector<uint64_t> reductionAxes = allAxes(valueDims.size());
                                  const std::vector<uint64_t> squeezeAxes = squeezeAllButOneAxis(valueDims.size());
@@ -154,7 +154,8 @@ class UnaryReductionMetric : public CustomMetric {
         THOR_THROW_IF_FALSE(featureInput.value().isInitialized());
         THOR_THROW_IF_FALSE(featureInput.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
         THOR_THROW_IF_FALSE(!featureInput.value().getDescriptor().getDimensions().empty());
-        THOR_THROW_IF_FALSE(isSupportedValueDType(featureInput.value().getDescriptor().getDataType()));
+        ReductionMetricDType::validateValueDType(
+            "reduction metric", "values", featureInput.value().getDescriptor().getDataType());
     }
 };
 
@@ -216,8 +217,10 @@ class WeightedMean : public CustomMetric {
         THOR_THROW_IF_FALSE(featureInput.value().getPlacement() == labelsInput.value().getPlacement());
         THOR_THROW_IF_FALSE(!featureInput.value().getDescriptor().getDimensions().empty());
         THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDimensions() == labelsInput.value().getDescriptor().getDimensions());
-        THOR_THROW_IF_FALSE(ReductionMetricDetail::isSupportedValueDType(featureInput.value().getDescriptor().getDataType()));
-        THOR_THROW_IF_FALSE(ReductionMetricDetail::isSupportedValueDType(labelsInput.value().getDescriptor().getDataType()));
+        ReductionMetricDType::validateValueDType(
+            "WeightedMean", "values", featureInput.value().getDescriptor().getDataType());
+        ReductionMetricDType::validateValueDType(
+            "WeightedMean", "weights", labelsInput.value().getDescriptor().getDataType());
     }
 };
 

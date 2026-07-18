@@ -74,6 +74,7 @@ class TrainingRunsStatsReporter : public TrainingStatsSink {
         PhaseLossState trainingLoss{};
         PhaseLossState validationLoss{};
         std::optional<TrainingRunResult> terminalResult{};
+        bool validationStatsPendingEmission = false;
         bool dirty = false;
     };
 

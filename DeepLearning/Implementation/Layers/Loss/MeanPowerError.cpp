@@ -1,5 +1,7 @@
 #include "DeepLearning/Implementation/Layers/Loss/MeanPowerError.h"
 
+#include "DeepLearning/Implementation/Layers/Loss/RegressionLossDType.h"
+
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "Utilities/Expression/Expression.h"
@@ -21,23 +23,11 @@ constexpr const char* kLossName = "loss";
 constexpr const char* kGradientName = "predictions_grad";
 
 void validateLabelsDType(DataType dtype) {
-    switch (dtype) {
-        case DataType::BOOLEAN:
-        case DataType::UINT8:
-        case DataType::UINT16:
-        case DataType::UINT32:
-        case DataType::FP16:
-        case DataType::FP32:
-            return;
-        default:
-            throw runtime_error("Unsupported MeanPowerError label dtype: " + TensorDescriptor::getElementTypeName(dtype));
-    }
+    RegressionLossDType::validateLabelsDType("MeanPowerError", dtype);
 }
 
 void validatePredictionsDType(DataType dtype) {
-    if (dtype != DataType::FP16 && dtype != DataType::FP32) {
-        throw runtime_error("Unsupported MeanPowerError predictions dtype: " + TensorDescriptor::getElementTypeName(dtype));
-    }
+    RegressionLossDType::validatePredictionsDType("MeanPowerError", dtype);
 }
 
 void validateDynamicInputs(const DynamicExpression::TensorMap& inputs) {
@@ -66,11 +56,11 @@ DynamicExpressionBuild compileOutputs(const Outputs& outputs,
     };
 }
 
-Expression signOf(const Expression& diff, DataType dtype) {
-    Expression zero = Expression(0.0).withDTypes(dtype, dtype);
-    Expression positive = Expression(1.0).withDTypes(dtype, dtype);
-    Expression negative = Expression(-1.0).withDTypes(dtype, dtype);
-    return Expression::where(diff > zero, positive, Expression::where(diff < zero, negative, zero)).withDTypes(dtype, dtype);
+Expression signOf(const Expression& diff) {
+    Expression zero(0.0);
+    Expression positive(1.0);
+    Expression negative(-1.0);
+    return Expression::where(diff > zero, positive, Expression::where(diff < zero, negative, zero));
 }
 
 }  // namespace
@@ -84,6 +74,7 @@ MeanPowerError::MeanPowerError(DataType lossDataType, float exponent)
                  kGradientName,
                  lossDataType),
       exponent(exponent) {
+    RegressionLossDType::validateLossDType("MeanPowerError", lossDataType);
     validateExponent(exponent);
 }
 
@@ -114,21 +105,20 @@ DynamicExpression MeanPowerError::makeForwardExpression(float exponent, DataType
                                                       Stream& stream) -> DynamicExpressionBuild {
                                  validateDynamicInputs(inputs);
 
-                                 const DataType predictionDType = inputs.at(kPredictionsName).getDescriptor().getDataType();
-                                 Expression predictions = Expression::input(kPredictionsName, predictionDType, predictionDType);
-                                 Expression labels = Expression::input(kLabelsName, predictionDType, predictionDType);
-                                 Expression diff = (predictions - labels).withDTypes(predictionDType, predictionDType);
+                                 Expression predictions = Expression::input(kPredictionsName, DataType::FP32, DataType::FP32);
+                                 Expression labels = Expression::input(kLabelsName, DataType::FP32, DataType::FP32);
+                                 Expression diff = predictions - labels;
                                  Expression loss = [&]() -> Expression {
                                      if (exponent == 1.0f) {
-                                         return diff.abs().withDTypes(predictionDType, lossDataType);
+                                         return diff.abs().withOutputDType(lossDataType);
                                      }
                                      if (exponent == 2.0f) {
-                                         return (diff * diff).withDTypes(predictionDType, lossDataType);
+                                         return (diff * diff).withOutputDType(lossDataType);
                                      }
 
-                                     Expression absDiff = diff.abs().withDTypes(predictionDType, predictionDType);
-                                     Expression exponentExpr = Expression(exponent).withDTypes(predictionDType, predictionDType);
-                                     return absDiff.pow(exponentExpr).withDTypes(predictionDType, lossDataType);
+                                     Expression absDiff = diff.abs();
+                                     Expression exponentExpr(exponent);
+                                     return absDiff.pow(exponentExpr).withOutputDType(lossDataType);
                                  }();
                                  return compileOutputs(Expression::outputs({{kLossName, loss}}), inputs, outputs, stream);
                              });
@@ -144,20 +134,19 @@ DynamicExpression MeanPowerError::makeGradientExpression(float exponent) {
                                  validateDynamicInputs(inputs);
 
                                  const DataType predictionDType = inputs.at(kPredictionsName).getDescriptor().getDataType();
-                                 Expression predictions = Expression::input(kPredictionsName, predictionDType, predictionDType);
-                                 Expression labels = Expression::input(kLabelsName, predictionDType, predictionDType);
-                                 Expression diff = (predictions - labels).withDTypes(predictionDType, predictionDType);
-                                 Expression absDiff = diff.abs().withDTypes(predictionDType, predictionDType);
-                                 Expression sign = signOf(diff, predictionDType);
-                                 Expression scale = Expression(exponent * Loss::getLossScalingFactor()).withDTypes(predictionDType,
-                                                                                                                    predictionDType);
+                                 Expression predictions = Expression::input(kPredictionsName, DataType::FP32, DataType::FP32);
+                                 Expression labels = Expression::input(kLabelsName, DataType::FP32, DataType::FP32);
+                                 Expression diff = predictions - labels;
+                                 Expression absDiff = diff.abs();
+                                 Expression sign = signOf(diff);
+                                 Expression scale(exponent * Loss::getLossScalingFactor());
                                  Expression grad = [&]() -> Expression {
                                      if (exponent == 1.0f) {
-                                         return (sign * scale).withDTypes(predictionDType, predictionDType);
+                                         return (sign * scale).withOutputDType(predictionDType);
                                      }
 
-                                     Expression power = Expression(exponent - 1.0f).withDTypes(predictionDType, predictionDType);
-                                     return (sign * absDiff.pow(power) * scale).withDTypes(predictionDType, predictionDType);
+                                     Expression power(exponent - 1.0f);
+                                     return (sign * absDiff.pow(power) * scale).withOutputDType(predictionDType);
                                  }();
                                  return compileOutputs(Expression::outputs({{kGradientName, grad}}), inputs, outputs, stream);
                              });

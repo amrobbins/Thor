@@ -523,6 +523,7 @@ void StampedNetwork::clearImpl(bool propagateCleanupFailure) {
     inputsShared.clear();
     outputsShared.clear();
     trainableLayersShared.clear();
+    gradientUpdateStreamPool.reset();
     otherLayersShared.clear();
     initializationDoneEvents.clear();
     apiTensorToPhysicalDrivingLayerShared.clear();

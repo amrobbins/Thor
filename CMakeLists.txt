@@ -1444,6 +1444,24 @@ target_compile_options(thor_embedding_sparse_backward_profile PRIVATE
         $<$<CONFIG:Debug>:-O0 -ggdb>
 )
 
+add_executable(thor_type_converter_benchmark EXCLUDE_FROM_ALL
+        benchmarks/TypeConverterBenchmark.cu
+)
+thor_apply_linker_settings(thor_type_converter_benchmark)
+# This target contains a CUDA translation unit. Do not apply Thor's host-only IPO
+# helper here because target-wide IPO would also enable CUDA device LTO without
+# the matching device-link configuration.
+thor_enable_release_no_semantic_interposition(thor_type_converter_benchmark)
+target_link_libraries(thor_type_converter_benchmark PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
+target_link_libraries(thor_type_converter_benchmark PRIVATE OpenMP::OpenMP_CXX)
+target_link_libraries(thor_type_converter_benchmark PRIVATE PkgConfig::LIBURING)
+target_compile_options(thor_type_converter_benchmark PRIVATE
+        $<$<CONFIG:Release>:-O3>
+        $<$<CONFIG:RelWithDebInfo>:-O3>
+        $<$<CONFIG:Debug>:-O0>
+        $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Debug>>:-G>
+)
+
 # ============================================================
 # Install & Export for find_package()
 # ============================================================

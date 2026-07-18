@@ -60,6 +60,7 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
         THOR_THROW_IF_FALSE(aFeatureInput.value().getPlacement() == placement);
 
         refreshNumBackwardConnectionsFromCurrentErrorInputs();
+        attachGradientUpdateStream();
     }
 
     void replaceErrorInput(std::optional<Tensor> oldErrorInput, std::optional<Tensor> newErrorInput) override {
@@ -272,6 +273,23 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
     uint64_t getStampedId() const { return stampedId; }  // FIXME: Move to layer
     std::optional<Stream> getGradientUpdateStream() const { return gradientUpdateStream; }
 
+    void setGradientUpdateStreamPool(const std::shared_ptr<GradientUpdateStreamPool>& streamPool) {
+        THOR_THROW_IF_FALSE(streamPool != nullptr);
+        THOR_THROW_IF_FALSE(streamPool->getDeviceNum() == static_cast<uint32_t>(placement.getDeviceNum()));
+
+        if (gradientUpdateStreamPool != nullptr) {
+            THOR_THROW_IF_FALSE(gradientUpdateStreamPool == streamPool);
+        } else {
+            THOR_THROW_IF_FALSE(!gradientUpdateStream.has_value());
+            gradientUpdateStreamPool = streamPool;
+        }
+
+        // CustomLayer can prepare parameter storage and optimizer expressions
+        // while graph connections are being formed, before compileImpl().
+        // Attach immediately once model ownership is known.
+        attachGradientUpdateStream();
+    }
+
     std::vector<Event> getSynchronizeEvents() override {
         std::vector<Event> events;
         std::set<uint64_t> synchronizedStreamIds;
@@ -300,18 +318,34 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
     void attachGradientUpdateStream() {
         if (gradientUpdateStream.has_value())
             return;
-        for (const auto &parameter : parameters) {
-            if (!parameter->isTrainable())
-                continue;
-            if (!gradientUpdateStream.has_value()) {
-                gradientUpdateStream = Stream::getNextGradientUpdateStream(placement.getDeviceNum());
+
+        if (isInferenceOnly())
+            return;
+
+        bool hasTrainingEnabledParameter = false;
+        for (const auto& parameter : parameters) {
+            if (parameter->isTrainingEnabled()) {
+                hasTrainingEnabledParameter = true;
                 break;
             }
         }
+        if (!hasTrainingEnabledParameter)
+            return;
+
+        // Network placement installs one shared pool on every trainable layer in
+        // the physical model. Direct implementation-layer tests may compile a
+        // layer outside a StampedNetwork; give those standalone layers their own
+        // owner-scoped pool as well.
+        if (gradientUpdateStreamPool == nullptr) {
+            gradientUpdateStreamPool =
+                std::make_shared<GradientUpdateStreamPool>(static_cast<uint32_t>(placement.getDeviceNum()));
+        }
+        gradientUpdateStream = gradientUpdateStreamPool->getNext();
     }
 
    protected:
     std::vector<Stream> uniqueDataStreams;
+    std::shared_ptr<GradientUpdateStreamPool> gradientUpdateStreamPool;
     std::optional<Stream> gradientUpdateStream;
     std::vector<Event> errorOutHasBeenComputedEvents;
     std::optional<Event> weightsAreUpToDateEvent;

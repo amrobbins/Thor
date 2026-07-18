@@ -3,7 +3,9 @@
 
 #include "gtest/gtest.h"
 
+#include <array>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -12,6 +14,27 @@ using namespace Thor;
 using json = nlohmann::json;
 
 namespace {
+
+constexpr std::array<DataType, 5> supportedReductionMetricDTypes{
+    DataType::FP8_E4M3,
+    DataType::FP8_E5M2,
+    DataType::FP16,
+    DataType::BF16,
+    DataType::FP32,
+};
+
+template <typename MetricT>
+void expectUnaryMetricSupportsDType(DataType dtype, const string& metricName) {
+    Network network(metricName + "_supports_" + ThorImplementation::TensorDescriptor::getElementTypeName(dtype));
+    Tensor values(dtype, {3});
+
+    typename MetricT::Builder builder;
+    MetricT metric = builder.network(network).values(values).build();
+
+    ASSERT_TRUE(metric.isInitialized());
+    ASSERT_EQ(metric.getValues().getDataType(), dtype);
+    ASSERT_EQ(metric.getMetric().getDataType(), DataType::FP32);
+}
 
 template <typename MetricT>
 void expectUnaryMetricBuildsAndSerializes(const string& expectedLayerType) {
@@ -78,6 +101,52 @@ TEST(ReductionMetricApi, WeightedMeanBuildsAndSerializes) {
     ASSERT_TRUE(metricJson.contains("metric"));
     ASSERT_FALSE(metricJson.contains("labels"));
     ASSERT_FALSE(metricJson.contains("predictions"));
+}
+
+TEST(ReductionMetricApi, UnaryMetricsSupportThorFloatingStorageDTypes) {
+    for (DataType dtype : supportedReductionMetricDTypes) {
+        expectUnaryMetricSupportsDType<Mean>(dtype, "mean");
+        expectUnaryMetricSupportsDType<Sum>(dtype, "sum");
+        expectUnaryMetricSupportsDType<Min>(dtype, "min");
+        expectUnaryMetricSupportsDType<Max>(dtype, "max");
+    }
+}
+
+TEST(ReductionMetricApi, UnaryMetricsRejectUnsupportedStorageDTypes) {
+    for (DataType dtype : {DataType::FP64, DataType::INT32, DataType::BOOLEAN}) {
+        Network network("mean_rejects_" + ThorImplementation::TensorDescriptor::getElementTypeName(dtype));
+        Tensor values(dtype, {3});
+        EXPECT_THROW(Mean::Builder().network(network).values(values).build(), std::runtime_error);
+    }
+}
+
+TEST(ReductionMetricApi, WeightedMeanSupportsThorFloatingStorageDTypes) {
+    for (DataType dtype : supportedReductionMetricDTypes) {
+        Network network("weighted_mean_supports_" + ThorImplementation::TensorDescriptor::getElementTypeName(dtype));
+        Tensor values(dtype, {3});
+        Tensor weights(dtype, {3});
+
+        WeightedMean metric = WeightedMean::Builder().network(network).values(values).weights(weights).build();
+
+        ASSERT_TRUE(metric.isInitialized());
+        ASSERT_EQ(metric.getValues().getDataType(), dtype);
+        ASSERT_EQ(metric.getWeights().getDataType(), dtype);
+        ASSERT_EQ(metric.getMetric().getDataType(), DataType::FP32);
+    }
+}
+
+TEST(ReductionMetricApi, WeightedMeanRejectsUnsupportedStorageDTypes) {
+    Network valuesNetwork("weighted_mean_rejects_fp64_values");
+    Tensor fp64Values(DataType::FP64, {3});
+    Tensor fp32Weights(DataType::FP32, {3});
+    EXPECT_THROW(WeightedMean::Builder().network(valuesNetwork).values(fp64Values).weights(fp32Weights).build(),
+                 std::runtime_error);
+
+    Network weightsNetwork("weighted_mean_rejects_int_weights");
+    Tensor fp32Values(DataType::FP32, {3});
+    Tensor intWeights(DataType::INT32, {3});
+    EXPECT_THROW(WeightedMean::Builder().network(weightsNetwork).values(fp32Values).weights(intWeights).build(),
+                 std::runtime_error);
 }
 
 TEST(ReductionMetricApi, WeightedMeanRejectsShapeMismatch) {

@@ -650,6 +650,7 @@ void TrainingRunsStatsReporter::processEvent(const ReporterEvent& event) {
                 case TrainingEventPhase::VALIDATE:
                     state.latestValidationStats = event.stats;
                     updateSmoothedLossState(state.validationLoss, event.stats.stats);
+                    state.validationStatsPendingEmission = true;
                     break;
                 case TrainingEventPhase::TEST:
                     state.latestTestStats = event.stats;
@@ -665,6 +666,15 @@ void TrainingRunsStatsReporter::processEvent(const ReporterEvent& event) {
             dirty = true;
             break;
         case ReporterEventType::RUN_FINISHED: {
+            // Do not let a terminal event coalesce away the final running row that
+            // first exposes validation loss. Tiny runs can enqueue validation stats
+            // and RUN_FINISHED within one summary-rate-limit interval, so publish
+            // that pending train+validate snapshot before switching to terminal
+            // status. This also keeps the row based on the latest training progress.
+            if (state.status == DisplayStatus::RUNNING && state.validationStatsPendingEmission) {
+                maybeEmitSummary(std::chrono::steady_clock::now(), true);
+            }
+
             TrainingRunResult result = event.result;
             if (!result.ensembleGroup.has_value() && state.config.ensembleGroup.has_value()) {
                 result.ensembleGroup = state.config.ensembleGroup;
@@ -1132,6 +1142,7 @@ bool TrainingRunsStatsReporter::anyDirtyLocked() const {
 void TrainingRunsStatsReporter::clearDirtyLocked() {
     dirty = false;
     for (RunState& state : runStates) {
+        state.validationStatsPendingEmission = false;
         state.dirty = false;
     }
 }

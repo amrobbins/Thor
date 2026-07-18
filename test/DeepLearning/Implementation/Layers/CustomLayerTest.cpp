@@ -292,7 +292,7 @@ class FixedVectorParameter : public PhysicalParameter {
 
         Stream initStream = gradientUpdateStream.has_value()
                                 ? gradientUpdateStream.value()
-                                : Stream::getMostRecentGradientUpdateStream(primary.getPlacement().getDeviceNum());
+                                : Stream(primary.getPlacement());
         storage.value().copyFromAsync(init_h, initStream);
         Event ready = initStream.putEvent();
         ready.synchronize();

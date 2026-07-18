@@ -253,6 +253,49 @@ TEST(TrainingRunsStatsReporter, ValidationStatsUpdateValidationLossWithoutReplac
     EXPECT_FALSE(hasTokenWithValue(line, "step", "115")) << line;
 }
 
+TEST(TrainingRunsStatsReporter, TerminalEventDoesNotCoalesceAwayPendingValidationSummary) {
+    std::FILE* out = std::tmpfile();
+    TrainingRunsStatsReporter reporter(out, LineStatsColorMode::NEVER, 1.0);
+    reporter.configureRun("fold_0", TrainingRunsStatsReporter::RunConfig{0.0, std::string("tiny_ensemble"), 1.0});
+
+    TrainingStatsSnapshot trainStats = makeStats(TrainingEventPhase::TRAIN, 2.0);
+    trainStats.epoch = 1;
+    trainStats.epochs = 1;
+    trainStats.step = 1;
+    trainStats.stepInEpoch = 1;
+    trainStats.stepsPerEpoch = 1;
+    trainStats.inFlightBatches = 1;
+
+    TrainingStatsSnapshot validateStats = makeStats(TrainingEventPhase::VALIDATE, 1.9208);
+    validateStats.epoch = 1;
+    validateStats.epochs = 1;
+    validateStats.step = 1;
+    validateStats.stepInEpoch = 1;
+    validateStats.stepsPerEpoch = 1;
+    validateStats.inFlightBatches = 0;
+
+    reporter.markRunStarting("fold_0");
+    reporter.onStatsEvent(TrainingStatsEvent::fromTrainingEvent(TrainingEvent::statsUpdated(trainStats), "fold_0"));
+    reporter.flush();
+
+    // These events intentionally arrive inside the reporter's one-second rate-limit
+    // window. The validation snapshot must still be emitted as a running row before
+    // RUN_FINISHED changes the row to terminal status.
+    reporter.onStatsEvent(TrainingStatsEvent::fromTrainingEvent(TrainingEvent::statsUpdated(validateStats), "fold_0"));
+    TrainingRunResult result = TrainingRunResult::completedResult("fold_0", trainStats, validateStats);
+    reporter.markRunFinished(result);
+    reporter.close();
+
+    const std::string output = readAndCloseFile(out);
+    const std::string runningValidationLine =
+        findLineWithAll(output, {"INFO runs[fold_0|tiny_ensemble]:", "epoch=", "train_loss=", "validate_loss="});
+    ASSERT_FALSE(runningValidationLine.empty()) << output;
+    EXPECT_TRUE(hasTokenWithValue(runningValidationLine, "epoch", "1/1")) << runningValidationLine;
+    EXPECT_TRUE(hasTokenWithValue(runningValidationLine, "batch", "1/1")) << runningValidationLine;
+    EXPECT_TRUE(hasTokenWithValue(runningValidationLine, "step", "1")) << runningValidationLine;
+    EXPECT_EQ(runningValidationLine.find("status=completed"), std::string::npos) << runningValidationLine;
+}
+
 TEST(TrainingRunsStatsReporter, RunningSummaryPreservesConfiguredReportOrder) {
     std::FILE* out = std::tmpfile();
     TrainingRunsStatsReporter reporter(out, LineStatsColorMode::NEVER, 0.0);

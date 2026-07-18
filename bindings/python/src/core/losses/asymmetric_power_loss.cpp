@@ -10,6 +10,8 @@
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 
+#include "bindings/python/src/core/losses/regression_loss_dtype.h"
+
 namespace nb = nanobind;
 using namespace nb::literals;
 using namespace std;
@@ -50,9 +52,7 @@ void maybeSetExampleWeights(AsymmetricPowerLoss::Builder& builder,
         return;
     if (example_weights.value() == predictions || example_weights.value() == labels)
         throw nb::value_error("AsymmetricPowerLoss instance: example_weights must be distinct from predictions and labels.");
-    DataType dtype = example_weights.value().getDataType();
-    if (dtype != DataType::FP16 && dtype != DataType::FP32)
-        throw nb::value_error("AsymmetricPowerLoss instance: example_weights must be fp16 or fp32.");
+    ThorPython::RegressionLossDType::validateExampleWeights("AsymmetricPowerLoss instance", example_weights.value());
     const std::vector<uint64_t>& dims = example_weights.value().getDimensions();
     if (dims != std::vector<uint64_t>{1} && dims != predictions.getDimensions()) {
         string error_message =
@@ -82,6 +82,8 @@ void bind_asymmetric_power_loss(nb::module_& losses) {
            std::optional<float> loss_weight,
            std::optional<Tensor> example_weights) {
             const string loss_name = "AsymmetricPowerLoss instance";
+            ThorPython::RegressionLossDType::validatePredictions(loss_name, predictions);
+            ThorPython::RegressionLossDType::validateLabels(loss_name, labels);
             if (predictions.getDimensions().size() != 1) {
                 string error_message = loss_name + ": predictions must be a 1 dimensional tensor but predictions is " +
                                        predictions.getDescriptorString();
@@ -100,11 +102,8 @@ void bind_asymmetric_power_loss(nb::module_& losses) {
                 throw nb::value_error(
                     "AsymmetricPowerLoss instance: exponent must be finite and greater than or equal to 1.0.");
             }
-            DataType effectiveLossDataType = loss_data_type.value_or(predictions.getDataType());
-            if (effectiveLossDataType != DataType::FP16 && effectiveLossDataType != DataType::FP32) {
-                string error_message = loss_name + ": loss_data_type must be fp16 or fp32";
-                throw nb::value_error(error_message.c_str());
-            }
+            const DataType effectiveLossDataType =
+                ThorPython::RegressionLossDType::effectiveLossDType(loss_name, predictions.getDataType(), loss_data_type);
             validateReportedLossShape(reported_loss_shape, loss_name);
 
             AsymmetricPowerLoss::Builder builder;

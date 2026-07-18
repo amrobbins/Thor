@@ -9,15 +9,36 @@ int Stream::numCudnnHandles = 0;
 int Stream::numCublasHandles = 0;
 int Stream::numCublasLtHandles = 0;
 
+Stream GradientUpdateStreamPool::getNext() {
+    unique_lock<mutex> lck(mtx);
+
+    uint32_t numGpus = MachineEvaluator::instance().getNumGpus();
+    if (deviceNum >= numGpus) {
+        printf("Error: trying to get a gradient-update stream for gpu %d but there are only %d gpus\n", deviceNum, numGpus);
+        fflush(stdout);
+        THOR_THROW_IF_FALSE(deviceNum < numGpus);
+    }
+
+    if (streams.size() < MAX_STREAMS) {
+        streams.emplace_back(deviceNum);
+        return streams.back();
+    }
+
+    Stream stream = streams[nextStreamIndex];
+    nextStreamIndex = (nextStreamIndex + 1) % MAX_STREAMS;
+    return stream;
+}
+
+uint32_t GradientUpdateStreamPool::getNumAllocatedStreams() const {
+    unique_lock<mutex> lck(mtx);
+    return static_cast<uint32_t>(streams.size());
+}
+
 // Note: These are global because destroying a stream when static members are destroyed seems to be a problem.
 // Also Note: I would rather be able to use unlimited streams to avoid potential false dependencies in very large very branched networks
 //            But I need to support whatever hardware limitation that may exist, so I have the ability to set lower limits on the number
 //            of streams that are in place. I don't do this for forward/backward (i.e. data) streams because false dependencies along
 //            the execution graph could result in deadlock.
-vector<deque<Stream>> gradientUpdateStreams;
-mutex gradientUpdateStreamMutex;
-uint32_t maxNumGradientUpdateStreams = 8;
-
 vector<deque<Stream>> uploadStreams;
 mutex uploadStreamMutex;
 uint32_t maxNumUploadStreams = 4;
@@ -25,66 +46,6 @@ uint32_t maxNumUploadStreams = 4;
 vector<deque<Stream>> downloadStreams;
 mutex downloadStreamMutex;
 uint32_t maxNumDownloadStreams = 4;
-
-// To allow for parallelization while limiting the amount of streams created, gradient update operations all share
-// a fixed size pool of gradientUpdateStreams
-Stream Stream::getNextGradientUpdateStream(uint32_t deviceNum) {
-    unique_lock<mutex> lck(gradientUpdateStreamMutex);
-
-    uint32_t numGpus = MachineEvaluator::instance().getNumGpus();
-    if (deviceNum >= numGpus) {
-        printf("Error: trying to get a stream for gpu %d but there are only %d gpus\n", deviceNum, numGpus);
-        fflush(stdout);
-        THOR_THROW_IF_FALSE(deviceNum < numGpus);
-    }
-
-    THOR_THROW_IF_FALSE(maxNumGradientUpdateStreams > 0);
-
-    while (gradientUpdateStreams.size() < numGpus)
-        gradientUpdateStreams.emplace_back();
-
-    // I never delete streams since they may be in use. Only ever add new ones.
-    if (gradientUpdateStreams[deviceNum].size() < maxNumGradientUpdateStreams) {
-        gradientUpdateStreams[deviceNum].emplace_front(deviceNum);
-        gradientUpdateStreams[deviceNum].front().informIsStatic();
-    }
-
-    Stream stream = gradientUpdateStreams[deviceNum].front();
-    gradientUpdateStreams[deviceNum].pop_front();
-    gradientUpdateStreams[deviceNum].push_back(stream);
-    return stream;
-}
-
-// When you need one for maybe a single use and do not want to advance the round-robin sequence.
-Stream Stream::getMostRecentGradientUpdateStream(uint32_t deviceNum) {
-    unique_lock<mutex> lck(gradientUpdateStreamMutex);
-
-    uint32_t numGpus = MachineEvaluator::instance().getNumGpus();
-    if (deviceNum >= numGpus) {
-        printf("Error: trying to get a stream for gpu %d but there are only %d gpus\n", deviceNum, numGpus);
-        fflush(stdout);
-        THOR_THROW_IF_FALSE(deviceNum < numGpus);
-    }
-
-    THOR_THROW_IF_FALSE(maxNumGradientUpdateStreams > 0);
-
-    while (gradientUpdateStreams.size() < numGpus)
-        gradientUpdateStreams.emplace_back();
-
-    if (gradientUpdateStreams[deviceNum].empty()) {
-        gradientUpdateStreams[deviceNum].emplace_front(deviceNum);
-        gradientUpdateStreams[deviceNum].front().informIsStatic();
-    }
-
-    Stream stream = gradientUpdateStreams[deviceNum].front();
-    return stream;
-}
-
-void Stream::setMaxNumGradientUpdateStreams(uint32_t numGradientUpdateStreams) {
-    unique_lock<mutex> lck(gradientUpdateStreamMutex);
-
-    maxNumGradientUpdateStreams = numGradientUpdateStreams;
-}
 
 Stream Stream::getNextUploadStream(uint32_t deviceNum) {
     unique_lock<mutex> lck(uploadStreamMutex);

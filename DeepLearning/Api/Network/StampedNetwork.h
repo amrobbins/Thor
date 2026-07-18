@@ -10,6 +10,7 @@
 #include "DeepLearning/Api/Data/BatchSourceResource.h"
 #include "DeepLearning/Implementation/Tensor/RaggedTensorDescriptor.h"
 #include "Utilities/Common/Event.h"
+#include "Utilities/Common/Stream.h"
 
 #include <vector>
 #include <optional>
@@ -230,6 +231,7 @@ class StampedNetwork {
     std::vector<std::shared_ptr<ThorImplementation::NetworkInput>> inputsShared;
     std::vector<std::shared_ptr<ThorImplementation::NetworkOutput>> outputsShared;
     std::vector<std::shared_ptr<ThorImplementation::TrainableLayer>> trainableLayersShared;
+    std::shared_ptr<GradientUpdateStreamPool> gradientUpdateStreamPool;
     std::vector<std::shared_ptr<ThorImplementation::Layer>> otherLayersShared;
     std::vector<Event> initializationDoneEvents;
     std::map<Thor::Tensor, std::shared_ptr<ThorImplementation::Layer>> apiTensorToPhysicalDrivingLayerShared;

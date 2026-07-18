@@ -620,6 +620,7 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
                                           vector<Event> &initDoneEvents,
                                           uint32_t batchSize,
                                           vector<ThorImplementation::StampedNetwork> &stampedNetworks,
+                                          const shared_ptr<GradientUpdateStreamPool>& gradientUpdateStreamPool,
                                           const bool inferenceOnly,
                                           bool networkOutputsOnGpu) {
     ThorImplementation::StampedNetwork stampedNetwork;
@@ -650,6 +651,9 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
     // 2. At the moment, I connect the layers upon stamping them, I think I should change that and stamp everything first,
     //    then for the next phase, connect them
     stampedNetwork.clear();
+    THOR_THROW_IF_FALSE(gradientUpdateStreamPool != nullptr);
+    THOR_THROW_IF_FALSE(gradientUpdateStreamPool->getDeviceNum() == gpuNum);
+    stampedNetwork.gradientUpdateStreamPool = gradientUpdateStreamPool;
     try {
         // FIXME: need to throw GPU_OUT_OF_MEMORY when stamping and run out of memory
 
@@ -697,6 +701,9 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
         }
 
         // 3. Now that all layers have been constructed and connected, compile all layers.
+        // Trainable layers already have this model's lazy three-stream pool;
+        // training-enabled layers request their stream during stamping because
+        // CustomLayer may prepare optimizer expressions during connection.
         //
         // Some physical layers are inserted by stamping and do not have a corresponding API layer.
         // TensorFanout is the important case: it can fuse or prune a single live backward edge during
@@ -863,6 +870,12 @@ shared_ptr<PlacedNetwork> Network::place(uint32_t batchSize,
     }
 
     vector<ThorImplementation::StampedNetwork> stampedNetworks;
+    vector<shared_ptr<GradientUpdateStreamPool>> gradientUpdateStreamPools;
+    gradientUpdateStreamPools.reserve(devices.size());
+    for (int32_t device : devices) {
+        THOR_THROW_IF_FALSE(device >= 0);
+        gradientUpdateStreamPools.push_back(std::make_shared<GradientUpdateStreamPool>(static_cast<uint32_t>(device)));
+    }
 
     // FIXME: pull preOptimize into initialize
     for (uint32_t i = 0; i < devices.size(); ++i) {
@@ -871,7 +884,13 @@ shared_ptr<PlacedNetwork> Network::place(uint32_t batchSize,
     for (uint32_t i = 0; i < devices.size(); ++i) {
         for (uint32_t j = 0; j < numStampsPerDevice[i]; ++j) {
             // FIXME: need to propagate inferenceOnly from here through to the API layer to the implementation layer
-            StatusCode statusCode = stampNetwork(devices[i], initDoneEvents, batchSize, stampedNetworks, inferenceOnly, networkOutputsOnGpu);
+            StatusCode statusCode = stampNetwork(devices[i],
+                                                 initDoneEvents,
+                                                 batchSize,
+                                                 stampedNetworks,
+                                                 gradientUpdateStreamPools[i],
+                                                 inferenceOnly,
+                                                 networkOutputsOnGpu);
             if (statusCode != StatusCode::SUCCESS)
                 throw logic_error("Error when stamping network, error: " + statusCodeToString(statusCode));
         }
@@ -2901,6 +2920,11 @@ void Network::stampLayer(Tensor inputTensor,
         }
     } else {
         implementationLayer = layer->stamp(placement, physicalDrivingLayer, apiDrivingLayer, inputTensor, inferenceOnly);
+        shared_ptr<ThorImplementation::TrainableLayer> implementationTrainableLayer =
+            dynamic_pointer_cast<ThorImplementation::TrainableLayer>(implementationLayer);
+        if (implementationTrainableLayer != nullptr) {
+            implementationTrainableLayer->setGradientUpdateStreamPool(stampedNetwork.gradientUpdateStreamPool);
+        }
         stampedNetwork.apiLayerToPhysicalLayerShared[layer->getId()] = implementationLayer;
         stampedNetwork.apiLayerToPhysicalLayer[layer->getId()] = implementationLayer.get();
         stampedNetwork.physicalLayerToApiLayerShared[implementationLayer] = layer->getId();

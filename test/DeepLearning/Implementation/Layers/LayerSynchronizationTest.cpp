@@ -106,6 +106,69 @@ struct PlacedSynchronizationTarget {
     Stream modelStream;
 };
 
+struct PlacedGradientStreamTarget {
+    shared_ptr<Thor::PlacedNetwork> placedNetwork;
+    vector<Stream> gradientUpdateStreams;
+};
+
+PlacedGradientStreamTarget makePlacedGradientStreamTarget(const string& networkName, uint32_t numTrainableLayers) {
+    THOR_THROW_IF_FALSE(numTrainableLayers >= 1);
+
+    Thor::Network network(networkName);
+    Thor::NetworkInput input = Thor::NetworkInput::Builder()
+                                   .network(network)
+                                   .name("input")
+                                   .dimensions({4})
+                                   .dataType(DataType::FP32)
+                                   .build();
+
+    Thor::Tensor latest = input.getFeatureOutput().value();
+    vector<uint64_t> fullyConnectedLayerIds;
+    fullyConnectedLayerIds.reserve(numTrainableLayers);
+    for (uint32_t i = 0; i < numTrainableLayers; ++i) {
+        Thor::FullyConnected fullyConnected = Thor::FullyConnected::Builder()
+                                                   .network(network)
+                                                   .featureInput(latest)
+                                                   .numOutputFeatures(4)
+                                                   .hasBias(false)
+                                                   .computeDataType(DataType::FP32)
+                                                   .outputDataType(DataType::FP32)
+                                                   .noActivation()
+                                                   .build();
+        latest = fullyConnected.getFeatureOutput().value();
+        fullyConnectedLayerIds.push_back(fullyConnected.getId());
+    }
+
+    Thor::NetworkOutput::Builder()
+        .network(network)
+        .name("output")
+        .inputTensor(latest)
+        .dataType(DataType::FP32)
+        .build();
+    Thor::Sgd::Builder().network(network).initialLearningRate(0.01f).decay(0.0f).momentum(0.0f).build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<Thor::PlacedNetwork> placedNetwork = network.place(2,
+                                                                   initDoneEvents,
+                                                                   /*inferenceOnly=*/false,
+                                                                   vector<int32_t>{0},
+                                                                   /*forcedNumStampsPerGpu=*/1);
+    for (Event& event : initDoneEvents)
+        event.synchronize();
+
+    vector<Stream> gradientUpdateStreams;
+    gradientUpdateStreams.reserve(fullyConnectedLayerIds.size());
+    for (uint64_t fullyConnectedLayerId : fullyConnectedLayerIds) {
+        shared_ptr<TrainableLayer> physicalLayer = dynamic_pointer_cast<TrainableLayer>(
+            placedNetwork->getStampedNetwork(0).getPhysicalLayerFromApiLayer(fullyConnectedLayerId));
+        THOR_THROW_IF_FALSE(physicalLayer != nullptr);
+        THOR_THROW_IF_FALSE(physicalLayer->getGradientUpdateStream().has_value());
+        gradientUpdateStreams.push_back(physicalLayer->getGradientUpdateStream().value());
+    }
+
+    return {placedNetwork, std::move(gradientUpdateStreams)};
+}
+
 PlacedSynchronizationTarget makePlacedSynchronizationTarget(const string &networkName) {
     Thor::Network network(networkName);
     Thor::NetworkInput input = Thor::NetworkInput::Builder()
@@ -221,6 +284,32 @@ TEST(LayerSynchronization, TrainableLayerAlsoCoversGradientUpdateStream) {
     layer.setGradientStream(gradientUpdateStream);
 
     expectSynchronizationEventsCoverStreams(layer, {dataStream0, dataStream1, gradientUpdateStream}, 3);
+}
+
+TEST(LayerSynchronization, PlacedModelsOwnIndependentThreeStreamGradientUpdatePools) {
+    if (MachineEvaluator::instance().getNumGpus() == 0)
+        GTEST_SKIP() << "Placed-network gradient stream-pool test requires a GPU";
+
+    PlacedGradientStreamTarget firstModel = makePlacedGradientStreamTarget("GradientStreamModelA", 5);
+    PlacedGradientStreamTarget secondModel = makePlacedGradientStreamTarget("GradientStreamModelB", 5);
+
+    ASSERT_EQ(firstModel.gradientUpdateStreams.size(), 5u);
+    ASSERT_EQ(secondModel.gradientUpdateStreams.size(), 5u);
+
+    for (const vector<Stream>* modelStreams : {&firstModel.gradientUpdateStreams, &secondModel.gradientUpdateStreams}) {
+        EXPECT_NE((*modelStreams)[0].getId(), (*modelStreams)[1].getId());
+        EXPECT_NE((*modelStreams)[0].getId(), (*modelStreams)[2].getId());
+        EXPECT_NE((*modelStreams)[1].getId(), (*modelStreams)[2].getId());
+        EXPECT_EQ((*modelStreams)[3].getId(), (*modelStreams)[0].getId());
+        EXPECT_EQ((*modelStreams)[4].getId(), (*modelStreams)[1].getId());
+    }
+
+    for (uint32_t firstIndex = 0; firstIndex < GradientUpdateStreamPool::MAX_STREAMS; ++firstIndex) {
+        for (uint32_t secondIndex = 0; secondIndex < GradientUpdateStreamPool::MAX_STREAMS; ++secondIndex) {
+            EXPECT_NE(firstModel.gradientUpdateStreams[firstIndex].getId(),
+                      secondModel.gradientUpdateStreams[secondIndex].getId());
+        }
+    }
 }
 
 TEST(LayerSynchronization, PlacedNetworkUsesLoaderPlacementsToElideDeviceInputRings) {
