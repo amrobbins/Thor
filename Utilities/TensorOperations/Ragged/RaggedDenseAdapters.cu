@@ -98,6 +98,9 @@ void validateOffsetsForDense(const Tensor& dense, const Tensor& offsets, const T
     if (!isRowPartitionOffsetDTypeSupported(offsets.getDataType())) {
         throw std::invalid_argument("ragged dense adapter offsets dtype must be UINT32 or UINT64.");
     }
+    if (!canonicalRowPartitionOffsetCanRepresent(offsets.getDataType(), values.getDimensions()[0])) {
+        throw std::invalid_argument("ragged dense adapter offsets dtype cannot represent max_total_values.");
+    }
     const uint64_t batch_size = dense.getDimensions()[0];
     if (offsets.getDimensions()[0] != checkedAdd(batch_size, 1, "ragged dense adapter offsets element count")) {
         throw std::invalid_argument("ragged dense adapter offsets must have shape [B + 1].");
@@ -147,7 +150,67 @@ void validateRaggedToDense(const RaggedTensor& ragged, const Tensor& dense) {
     }
 }
 
-__device__ __forceinline__ uint64_t minU64(uint64_t a, uint64_t b) { return a < b ? a : b; }
+void validateValidationErrorBits(const Tensor& validation_error_bits, const TensorPlacement& placement) {
+    requireDenseContiguousGpuTensor(validation_error_bits, "ragged dense adapter validation_error_bits");
+    if (validation_error_bits.getPlacement() != placement) {
+        throw std::invalid_argument("ragged dense adapter validation_error_bits placement must match adapter tensors.");
+    }
+    if (validation_error_bits.getDataType() != DataType::UINT32 || validation_error_bits.getTotalNumElements() != 1) {
+        throw std::invalid_argument("ragged dense adapter validation_error_bits must be a UINT32 scalar tensor.");
+    }
+}
+
+template <typename OffsetT>
+__global__ void validateDenseAdapterOffsetsKernel(const OffsetT* offsets,
+                                                  uint32_t* validation_error_bits,
+                                                  uint64_t batch_size,
+                                                  uint64_t max_length,
+                                                  uint64_t max_total_values) {
+    const uint64_t row = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (row == 0 && static_cast<uint64_t>(offsets[0]) != 0) {
+        atomicOr(validation_error_bits, static_cast<uint32_t>(ROW_PARTITION_OFFSETS_MUST_START_AT_ZERO));
+    }
+    if (row >= batch_size) {
+        return;
+    }
+
+    const uint64_t begin = static_cast<uint64_t>(offsets[row]);
+    const uint64_t end = static_cast<uint64_t>(offsets[row + 1]);
+    if (end < begin) {
+        atomicOr(validation_error_bits, static_cast<uint32_t>(ROW_PARTITION_OFFSETS_MUST_BE_MONOTONIC));
+        return;
+    }
+    if (begin > max_total_values || end > max_total_values) {
+        atomicOr(validation_error_bits, static_cast<uint32_t>(ROW_PARTITION_OFFSETS_EXCEED_CAPACITY));
+        return;
+    }
+    if (end - begin > max_length) {
+        atomicOr(validation_error_bits, static_cast<uint32_t>(ROW_PARTITION_ROW_LENGTH_EXCEEDS_MAX));
+    }
+}
+
+template <typename OffsetT>
+void launchValidateDenseAdapterOffsets(const Tensor& offsets,
+                                       Tensor& validation_error_bits,
+                                       uint64_t batch_size,
+                                       uint64_t max_length,
+                                       uint64_t max_total_values,
+                                       Stream& stream) {
+    validation_error_bits.fill(0.0, stream);
+    constexpr uint32_t threads = 256;
+    const uint64_t blocks64 = std::max<uint64_t>(1, (batch_size + threads - 1) / threads);
+    if (blocks64 > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+        throw std::invalid_argument("ragged dense adapter validation grid exceeds CUDA gridDim.x limit.");
+    }
+    validateDenseAdapterOffsetsKernel<OffsetT><<<static_cast<uint32_t>(blocks64), threads, 0, stream.getStream()>>>(
+        offsets.getMemPtr<OffsetT>(),
+        validation_error_bits.getMemPtr<uint32_t>(),
+        batch_size,
+        max_length,
+        max_total_values);
+    CUDA_CHECK(cudaGetLastError());
+}
+
 
 template <typename OffsetT>
 __global__ void denseToRaggedValuesKernel(const uint8_t* dense,
@@ -155,8 +218,11 @@ __global__ void denseToRaggedValuesKernel(const uint8_t* dense,
                                           const OffsetT* offsets,
                                           uint64_t batch_size,
                                           uint64_t max_length,
-                                          uint64_t max_total_values,
-                                          uint64_t bytes_per_value) {
+                                          uint64_t bytes_per_value,
+                                          const uint32_t* validation_error_bits) {
+    if (*validation_error_bits != ROW_PARTITION_VALID) {
+        return;
+    }
     const uint64_t row = blockIdx.x;
     if (row >= batch_size) {
         return;
@@ -164,13 +230,11 @@ __global__ void denseToRaggedValuesKernel(const uint8_t* dense,
 
     const uint64_t begin = static_cast<uint64_t>(offsets[row]);
     const uint64_t raw_end = static_cast<uint64_t>(offsets[row + 1]);
-    if (raw_end <= begin || begin >= max_total_values) {
+    if (raw_end <= begin) {
         return;
     }
 
-    uint64_t row_values = raw_end - begin;
-    row_values = minU64(row_values, max_length);
-    row_values = minU64(row_values, max_total_values - begin);
+    const uint64_t row_values = raw_end - begin;
     const uint64_t row_bytes = row_values * bytes_per_value;
     const uint64_t dense_row_byte_offset = row * max_length * bytes_per_value;
     const uint64_t values_byte_offset = begin * bytes_per_value;
@@ -186,8 +250,11 @@ __global__ void raggedToDenseValuesKernel(const uint8_t* values,
                                           const OffsetT* offsets,
                                           uint64_t batch_size,
                                           uint64_t max_length,
-                                          uint64_t max_total_values,
-                                          uint64_t bytes_per_value) {
+                                          uint64_t bytes_per_value,
+                                          const uint32_t* validation_error_bits) {
+    if (*validation_error_bits != ROW_PARTITION_VALID) {
+        return;
+    }
     const uint64_t row = blockIdx.x;
     if (row >= batch_size) {
         return;
@@ -195,13 +262,11 @@ __global__ void raggedToDenseValuesKernel(const uint8_t* values,
 
     const uint64_t begin = static_cast<uint64_t>(offsets[row]);
     const uint64_t raw_end = static_cast<uint64_t>(offsets[row + 1]);
-    if (raw_end <= begin || begin >= max_total_values) {
+    if (raw_end <= begin) {
         return;
     }
 
-    uint64_t row_values = raw_end - begin;
-    row_values = minU64(row_values, max_length);
-    row_values = minU64(row_values, max_total_values - begin);
+    const uint64_t row_values = raw_end - begin;
     const uint64_t row_bytes = row_values * bytes_per_value;
     const uint64_t dense_row_byte_offset = row * max_length * bytes_per_value;
     const uint64_t values_byte_offset = begin * bytes_per_value;
@@ -217,8 +282,8 @@ void launchDenseToRaggedValues(const Tensor& dense,
                                const Tensor& offsets,
                                uint64_t batch_size,
                                uint64_t max_length,
-                               uint64_t max_total_values,
                                uint64_t bytes_per_value,
+                               Tensor& validation_error_bits,
                                Stream& stream) {
     if (batch_size == 0) {
         return;
@@ -233,8 +298,8 @@ void launchDenseToRaggedValues(const Tensor& dense,
         offsets.getMemPtr<OffsetT>(),
         batch_size,
         max_length,
-        max_total_values,
-        bytes_per_value);
+        bytes_per_value,
+        validation_error_bits.getMemPtr<uint32_t>());
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -243,6 +308,7 @@ void launchRaggedToDenseValues(const RaggedTensor& ragged,
                                Tensor& dense,
                                uint64_t max_length,
                                uint64_t bytes_per_value,
+                               Tensor& validation_error_bits,
                                Stream& stream) {
     const uint64_t batch_size = ragged.getBatchSize();
     if (batch_size == 0) {
@@ -260,39 +326,10 @@ void launchRaggedToDenseValues(const RaggedTensor& ragged,
         offsets.getMemPtr<OffsetT>(),
         batch_size,
         max_length,
-        ragged.getMaxTotalValues(),
-        bytes_per_value);
+        bytes_per_value,
+        validation_error_bits.getMemPtr<uint32_t>());
     CUDA_CHECK(cudaGetLastError());
 }
-
-struct LaunchDenseToRaggedFn {
-    const Tensor& dense;
-    Tensor& values;
-    const Tensor& offsets;
-    uint64_t batch_size;
-    uint64_t max_length;
-    uint64_t max_total_values;
-    uint64_t bytes_per_value;
-    Stream& stream;
-
-    template <typename OffsetT>
-    void operator()() const {
-        launchDenseToRaggedValues<OffsetT>(dense, values, offsets, batch_size, max_length, max_total_values, bytes_per_value, stream);
-    }
-};
-
-struct LaunchRaggedToDenseFn {
-    const RaggedTensor& ragged;
-    Tensor& dense;
-    uint64_t max_length;
-    uint64_t bytes_per_value;
-    Stream& stream;
-
-    template <typename OffsetT>
-    void operator()() const {
-        launchRaggedToDenseValues<OffsetT>(ragged, dense, max_length, bytes_per_value, stream);
-    }
-};
 
 uint64_t bytesPerValue(const Tensor& dense) {
     return checkedMul(trailingElementsFromDense(dense), elementSizeBytes(dense.getDataType()), "ragged dense adapter bytes_per_value");
@@ -332,6 +369,7 @@ RaggedTensor raggedFromDense(const RaggedFromDenseWithLengthsPlan& plan,
                              const Tensor& lengths,
                              Tensor& values,
                              Tensor& offsets,
+                             Tensor& validation_error_bits,
                              Stream& stream) {
     validateLengthsForDense(dense, lengths, values, offsets);
     if (dense.getPlacement() != plan.placement || dense.getDataType() != plan.valuesDataType ||
@@ -340,6 +378,7 @@ RaggedTensor raggedFromDense(const RaggedFromDenseWithLengthsPlan& plan,
         trailingElementsFromDense(dense) != plan.elementsPerValue || elementSizeBytes(dense.getDataType()) != plan.valueElementSizeBytes) {
         throw std::invalid_argument("raggedFromDense tensors do not match prepared plan.");
     }
+    validateValidationErrorBits(validation_error_bits, plan.placement);
     if (plan.tempStorageBytes > 0) {
         requireTempStorage(temp_storage, plan.placement, plan.tempStorageBytes);
     }
@@ -351,13 +390,24 @@ RaggedTensor raggedFromDense(const RaggedFromDenseWithLengthsPlan& plan,
     offsets_plan.temp_storage_bytes = plan.tempStorageBytes;
     rowPartitionLengthsToOffsets(offsets_plan, temp_storage, lengths, offsets, stream);
 
+    switch (offsets.getDataType()) {
+        case DataType::UINT32:
+            launchValidateDenseAdapterOffsets<uint32_t>(offsets, validation_error_bits, plan.batchSize, plan.maxLength, plan.maxTotalValues, stream);
+            break;
+        case DataType::UINT64:
+            launchValidateDenseAdapterOffsets<uint64_t>(offsets, validation_error_bits, plan.batchSize, plan.maxLength, plan.maxTotalValues, stream);
+            break;
+        default:
+            throw std::invalid_argument("raggedFromDense offsets dtype must be UINT32 or UINT64.");
+    }
+
     const uint64_t bytes_per_value = checkedMul(plan.elementsPerValue, plan.valueElementSizeBytes, "raggedFromDense bytes_per_value");
     switch (offsets.getDataType()) {
         case DataType::UINT32:
-            launchDenseToRaggedValues<uint32_t>(dense, values, offsets, plan.batchSize, plan.maxLength, plan.maxTotalValues, bytes_per_value, stream);
+            launchDenseToRaggedValues<uint32_t>(dense, values, offsets, plan.batchSize, plan.maxLength, bytes_per_value, validation_error_bits, stream);
             break;
         case DataType::UINT64:
-            launchDenseToRaggedValues<uint64_t>(dense, values, offsets, plan.batchSize, plan.maxLength, plan.maxTotalValues, bytes_per_value, stream);
+            launchDenseToRaggedValues<uint64_t>(dense, values, offsets, plan.batchSize, plan.maxLength, bytes_per_value, validation_error_bits, stream);
             break;
         default:
             throw std::invalid_argument("raggedFromDense offsets dtype must be UINT32 or UINT64.");
@@ -371,28 +421,36 @@ RaggedTensor raggedFromDense(const Tensor& temp_storage,
                              const Tensor& lengths,
                              Tensor& values,
                              Tensor& offsets,
+                             Tensor& validation_error_bits,
                              Stream& stream) {
     RaggedFromDenseWithLengthsPlan plan = prepareRaggedFromDenseWithLengths(dense, lengths, values, offsets);
     if (temp_storage_bytes < plan.tempStorageBytes) {
         throw std::invalid_argument("raggedFromDense temp_storage_bytes is smaller than the prepared requirement.");
     }
     plan.tempStorageBytes = temp_storage_bytes;
-    return raggedFromDense(plan, temp_storage, dense, lengths, values, offsets, stream);
+    return raggedFromDense(plan, temp_storage, dense, lengths, values, offsets, validation_error_bits, stream);
 }
 
-RaggedTensor raggedFromDense(const Tensor& dense, const Tensor& offsets, Tensor& values, Stream& stream) {
+RaggedTensor raggedFromDense(const Tensor& dense,
+                             const Tensor& offsets,
+                             Tensor& values,
+                             Tensor& validation_error_bits,
+                             Stream& stream) {
     validateOffsetsForDense(dense, offsets, values);
     const uint64_t batch_size = dense.getDimensions()[0];
     const uint64_t max_length = dense.getDimensions()[1];
     const uint64_t max_total_values = values.getDimensions()[0];
     const uint64_t bytes_per_value = bytesPerValue(dense);
+    validateValidationErrorBits(validation_error_bits, dense.getPlacement());
 
     switch (offsets.getDataType()) {
         case DataType::UINT32:
-            launchDenseToRaggedValues<uint32_t>(dense, values, offsets, batch_size, max_length, max_total_values, bytes_per_value, stream);
+            launchValidateDenseAdapterOffsets<uint32_t>(offsets, validation_error_bits, batch_size, max_length, max_total_values, stream);
+            launchDenseToRaggedValues<uint32_t>(dense, values, offsets, batch_size, max_length, bytes_per_value, validation_error_bits, stream);
             break;
         case DataType::UINT64:
-            launchDenseToRaggedValues<uint64_t>(dense, values, offsets, batch_size, max_length, max_total_values, bytes_per_value, stream);
+            launchValidateDenseAdapterOffsets<uint64_t>(offsets, validation_error_bits, batch_size, max_length, max_total_values, stream);
+            launchDenseToRaggedValues<uint64_t>(dense, values, offsets, batch_size, max_length, bytes_per_value, validation_error_bits, stream);
             break;
         default:
             throw std::invalid_argument("raggedFromDense offsets dtype must be UINT32 or UINT64.");
@@ -400,8 +458,13 @@ RaggedTensor raggedFromDense(const Tensor& dense, const Tensor& offsets, Tensor&
     return RaggedTensor(values, offsets);
 }
 
-void raggedToDense(const RaggedTensor& ragged, Tensor& dense, double padding_value, Stream& stream) {
+void raggedToDense(const RaggedTensor& ragged,
+                   Tensor& dense,
+                   double padding_value,
+                   Tensor& validation_error_bits,
+                   Stream& stream) {
     validateRaggedToDense(ragged, dense);
+    validateValidationErrorBits(validation_error_bits, dense.getPlacement());
     dense.fill(padding_value, stream);
 
     const uint64_t max_length = dense.getDimensions()[1];
@@ -409,10 +472,12 @@ void raggedToDense(const RaggedTensor& ragged, Tensor& dense, double padding_val
 
     switch (ragged.getOffsetsDataType()) {
         case DataType::UINT32:
-            launchRaggedToDenseValues<uint32_t>(ragged, dense, max_length, bytes_per_value, stream);
+            launchValidateDenseAdapterOffsets<uint32_t>(ragged.getOffsets(), validation_error_bits, ragged.getBatchSize(), max_length, ragged.getMaxTotalValues(), stream);
+            launchRaggedToDenseValues<uint32_t>(ragged, dense, max_length, bytes_per_value, validation_error_bits, stream);
             break;
         case DataType::UINT64:
-            launchRaggedToDenseValues<uint64_t>(ragged, dense, max_length, bytes_per_value, stream);
+            launchValidateDenseAdapterOffsets<uint64_t>(ragged.getOffsets(), validation_error_bits, ragged.getBatchSize(), max_length, ragged.getMaxTotalValues(), stream);
+            launchRaggedToDenseValues<uint64_t>(ragged, dense, max_length, bytes_per_value, validation_error_bits, stream);
             break;
         default:
             throw std::invalid_argument("raggedToDense offsets dtype must be UINT32 or UINT64.");

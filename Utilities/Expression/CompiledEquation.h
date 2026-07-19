@@ -65,6 +65,9 @@ struct CompiledEquation {
     uint32_t tiled_transpose_pack_scalars = 1;
     bool uses_uint32_numel_arg = false;
     bool uses_uint32_tiled_transpose_index_math = true;
+    // True only for explicitly marked ragged valuewise kernels. Such kernels
+    // compute logical numel from offsets[B] on device and use a grid-stride loop.
+    bool uses_device_runtime_extent = false;
 
     // Debug/test metadata for the tiled logical-transpose consumer auto-swizzle path.
     // These are intentionally not consulted by the runtime launcher; they let tests

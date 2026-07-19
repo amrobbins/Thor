@@ -4,6 +4,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
+#include "Utilities/Expression/CudaHelpers.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 #include "DeepLearning/Implementation/Layers/Loss.h"
 
@@ -96,9 +97,7 @@ class TensorFanout : public MultiConnectionLayer {
         TensorPlacement placement = featureInputs[0].value().getPlacement();
         THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
         ScopedGpu scopedGpu(featureInputs[0].value().getPlacement().getDeviceNum());
-        cudaError_t cudaStatus;
-        cudaStatus = cudaMalloc(&errorInputArray_d, numPresentTensors(errorInputs) * sizeof(void *));
-        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+        CUDA_CHECK(cudaMalloc(&errorInputArray_d, numPresentTensors(errorInputs) * sizeof(void *)));
 
         if (numPresentTensors(errorInputs) > 0) {
             void **errorInputArray = new void *[numPresentTensors(errorInputs)];
@@ -110,9 +109,7 @@ class TensorFanout : public MultiConnectionLayer {
                     ++j;
                 }
             }
-            cudaStatus =
-                cudaMemcpy(errorInputArray_d, errorInputArray, numPresentTensors(errorInputs) * sizeof(void *), cudaMemcpyHostToDevice);
-            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+            CUDA_CHECK(cudaMemcpy(errorInputArray_d, errorInputArray, numPresentTensors(errorInputs) * sizeof(void *), cudaMemcpyHostToDevice));
             delete[] errorInputArray;
         }
 
@@ -210,9 +207,7 @@ class TensorFanout : public MultiConnectionLayer {
                     ++j;
                 }
             }
-            cudaError_t cudaStatus =
-                cudaMemcpy(errorInputArray_d, errorInputArray, presentErrorInputCount * sizeof(void *), cudaMemcpyHostToDevice);
-            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+            CUDA_CHECK(cudaMemcpy(errorInputArray_d, errorInputArray, presentErrorInputCount * sizeof(void *), cudaMemcpyHostToDevice));
             delete[] errorInputArray;
         }
     }
@@ -225,8 +220,7 @@ class TensorFanout : public MultiConnectionLayer {
         THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
         ScopedGpu scopedGpu(featureInputs[0].value().getPlacement().getDeviceNum());
         if (errorInputArray_d != nullptr) {
-            cudaError_t cudaStatus = cudaFree(errorInputArray_d);
-            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+            CUDA_CHECK(cudaFree(errorInputArray_d));
         }
         errorInputArray_d = nullptr;
     }

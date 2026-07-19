@@ -1,4 +1,5 @@
 #include "DeepLearning/Api/Layers/Learning/ScaledDotProductAttention.h"
+#include "Utilities/TensorOperations/Ragged/RowPartitionDTypePolicy.h"
 
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/FusedEquation.h"
@@ -593,7 +594,7 @@ ThorImplementation::DynamicExpression makeAttentionExpression(bool useBias,
             };
             auto normalizeRaggedOffsets = [&](const char* name) {
                 Tensor offsets = inputs.at(name);
-                if (offsets.getDataType() != DataType::INT32) {
+                if (!ThorImplementation::isCudnnRaggedOffsetDataType(offsets.getDataType())) {
                     throw std::runtime_error(std::string("ScaledDotProductAttention ") + name + " dtype must be INT32.");
                 }
                 if (offsets.getTotalNumElements() < batch + 1) {

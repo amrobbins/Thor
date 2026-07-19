@@ -259,7 +259,17 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
     const uint64_t launch_numel = (max_numel + static_cast<uint64_t>(compiledEquation->elements_per_thread) - 1ULL) /
                                   static_cast<uint64_t>(compiledEquation->elements_per_thread);
     uint32_t block = static_cast<uint32_t>(std::min<uint64_t>(launch_numel, 256ULL));
-    uint32_t grid = static_cast<uint32_t>((launch_numel + block - 1ULL) / block);
+    const uint64_t grid64 = (launch_numel + block - 1ULL) / block;
+    uint32_t grid;
+    if (compiledEquation->uses_device_runtime_extent) {
+        // The kernel reads offsets[B] and uses a grid-stride loop. Keep launch
+        // overhead independent of reserved ragged capacity without a host readback.
+        constexpr uint64_t MAX_RAGGED_VALUEWISE_GRID_BLOCKS = 256;
+        grid = static_cast<uint32_t>(std::min(grid64, MAX_RAGGED_VALUEWISE_GRID_BLOCKS));
+    } else {
+        // Preserve the existing dense launch behavior exactly.
+        grid = static_cast<uint32_t>(grid64);
+    }
 
     CU_CHECK(cuLaunchKernel(compiledEquation->kernel, grid, 1, 1, block, 1, 1, 0, stream, args.data(), nullptr));
 }

@@ -4,6 +4,7 @@
 #include "DeepLearning/Api/Tensor/Tensor.h"
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Implementation/Tensor/RaggedTensorDescriptor.h"
+#include "Utilities/TensorOperations/Ragged/RowPartitionDTypePolicy.h"
 
 #include <nlohmann/json.hpp>
 
@@ -24,7 +25,7 @@ class RaggedTensor {
                  const std::vector<uint64_t> &trailingDimensions,
                  uint64_t batchSize,
                  uint64_t maxTotalValues,
-                 DataType offsetsDataType = DataType::UINT32);
+                 DataType offsetsDataType = ThorImplementation::kDefaultRowPartitionOffsetDataType);
 
     bool isInitialized() const { return initialized; }
 

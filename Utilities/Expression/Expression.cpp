@@ -372,6 +372,8 @@ std::string exprOpExternalName(ExprOp op) {
             return "segmented_reduce_min";
         case ExprOp::SEGMENTED_REDUCE_MAX:
             return "segmented_reduce_max";
+        case ExprOp::RAGGED_VALUEWISE_EXTENT:
+            return "ragged_valuewise_extent";
         default:
             throw std::runtime_error("Unknown ExprOp.");
     }
@@ -504,6 +506,7 @@ ExprOp exprOpFromExternalName(const std::string& op) {
         {"segmented_reduce_sum", ExprOp::SEGMENTED_REDUCE_SUM},
         {"segmented_reduce_min", ExprOp::SEGMENTED_REDUCE_MIN},
         {"segmented_reduce_max", ExprOp::SEGMENTED_REDUCE_MAX},
+        {"ragged_valuewise_extent", ExprOp::RAGGED_VALUEWISE_EXTENT},
     };
 
     auto it = lookup.find(op);
@@ -685,6 +688,9 @@ json exprNodeToJson(const ExprNode& node) {
     j["scan_mode"] = scanModeToString(node.scan_mode);
     j["scan_axis"] = node.scan_axis;
     j["scan_reverse"] = node.scan_reverse;
+    j["ragged_runtime_batch_size"] = node.ragged_runtime_batch_size;
+    j["ragged_runtime_max_active_values"] = node.ragged_runtime_max_active_values;
+    j["ragged_runtime_elements_per_value"] = node.ragged_runtime_elements_per_value;
     setOptionalDTypeJson(j, "input_tensor_dtype", node.input_tensor_dtype);
     setOptionalDTypeJson(j, "output_dtype", node.output_dtype);
     setOptionalDTypeJson(j, "compute_dtype", node.compute_dtype);
@@ -796,6 +802,9 @@ ExprNode exprNodeFromJson(const json& j) {
     node.scan_mode = scanModeFromString(j.value("scan_mode", std::string("exclusive")));
     node.scan_axis = j.value("scan_axis", UINT64_MAX);
     node.scan_reverse = j.value("scan_reverse", false);
+    node.ragged_runtime_batch_size = j.value("ragged_runtime_batch_size", uint64_t{0});
+    node.ragged_runtime_max_active_values = j.value("ragged_runtime_max_active_values", uint64_t{0});
+    node.ragged_runtime_elements_per_value = j.value("ragged_runtime_elements_per_value", uint64_t{1});
     parseOptionalDTypeField(j, "input_tensor_dtype", node.input_tensor_dtype);
     parseOptionalDTypeField(j, "output_dtype", node.output_dtype);
     parseOptionalDTypeField(j, "compute_dtype", node.compute_dtype);
@@ -1038,6 +1047,8 @@ std::string opName(ExprOp op) {
             return "SEGMENTED_REDUCE_MIN";
         case ExprOp::SEGMENTED_REDUCE_MAX:
             return "SEGMENTED_REDUCE_MAX";
+        case ExprOp::RAGGED_VALUEWISE_EXTENT:
+            return "RAGGED_VALUEWISE_EXTENT";
         case ExprOp::RMSNORM:
             return "RMSNORM";
         case ExprOp::ATTENTION:
@@ -1302,6 +1313,7 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
         case ExprOp::MATMUL:
         case ExprOp::RMSNORM:
         case ExprOp::EMBEDDING_LOOKUP:
+        case ExprOp::RAGGED_VALUEWISE_EXTENT:
         case ExprOp::CONV2D:
         case ExprOp::CONV2D_BACKWARD_DATA:
         case ExprOp::CONV2D_BACKWARD_FILTER:
@@ -1330,6 +1342,10 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
             } else if (n.op == ExprOp::EMBEDDING_LOOKUP) {
                 out += ";padding=";
                 out += n.embedding_has_padding_index ? std::to_string(n.embedding_padding_index) : std::string("none");
+            } else if (n.op == ExprOp::RAGGED_VALUEWISE_EXTENT) {
+                out += ";batch=" + std::to_string(n.ragged_runtime_batch_size);
+                out += ";maxActive=" + std::to_string(n.ragged_runtime_max_active_values);
+                out += ";elementsPerValue=" + std::to_string(n.ragged_runtime_elements_per_value);
             } else if (n.op == ExprOp::CONV2D || n.op == ExprOp::CONV2D_BACKWARD_DATA || n.op == ExprOp::CONV2D_BACKWARD_FILTER ||
                        n.op == ExprOp::CONV3D || n.op == ExprOp::CONV3D_BACKWARD_DATA || n.op == ExprOp::CONV3D_BACKWARD_FILTER) {
                 if (n.op == ExprOp::CONV3D || n.op == ExprOp::CONV3D_BACKWARD_DATA || n.op == ExprOp::CONV3D_BACKWARD_FILTER) {
@@ -2177,6 +2193,7 @@ bool Expression::isBinaryOp(const ExprOp op) {
         case ExprOp::SEGMENTED_REDUCE_SUM:
         case ExprOp::SEGMENTED_REDUCE_MIN:
         case ExprOp::SEGMENTED_REDUCE_MAX:
+        case ExprOp::RAGGED_VALUEWISE_EXTENT:
         case ExprOp::CONV2D:
         case ExprOp::CONV2D_BACKWARD_DATA:
         case ExprOp::CONV2D_BACKWARD_FILTER:
@@ -3494,6 +3511,30 @@ Expression Expression::segmentedReduceMin(const Expression& input, const Express
 
 Expression Expression::segmentedReduceMax(const Expression& input, const Expression& offsets) {
     return binaryOp(input, offsets, ExprOp::SEGMENTED_REDUCE_MAX);
+}
+
+Expression Expression::withRaggedRuntimeExtent(const Expression& offsets,
+                                               uint64_t batch_size,
+                                               uint64_t max_active_values,
+                                               uint64_t elements_per_value) const {
+    if (batch_size + 1 <= batch_size) {
+        throw std::invalid_argument("Expression::withRaggedRuntimeExtent batch size overflows offsets element count.");
+    }
+    if (max_active_values == 0 || elements_per_value == 0) {
+        throw std::invalid_argument("Expression::withRaggedRuntimeExtent requires non-zero maximum extent metadata.");
+    }
+    PhysicalExpression offsets_expr = offsets.expression();
+    const ExprNode& offsets_node = offsets_expr.nodes.at(offsets_expr.output_node);
+    if (offsets_node.op != ExprOp::INPUT) {
+        throw std::invalid_argument("Expression::withRaggedRuntimeExtent currently requires offsets to be a direct input expression.");
+    }
+
+    Expression out = binaryOp(*this, offsets, ExprOp::RAGGED_VALUEWISE_EXTENT);
+    ExprNode& node = out.expr->nodes.at(out.nodeIndex);
+    node.ragged_runtime_batch_size = batch_size;
+    node.ragged_runtime_max_active_values = max_active_values;
+    node.ragged_runtime_elements_per_value = elements_per_value;
+    return out;
 }
 
 std::pair<Expression, Expression> Expression::scanWithIndices(ScanOp op, int64_t axis, bool inclusive) const {

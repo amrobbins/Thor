@@ -1,4 +1,5 @@
 #include "Utilities/TensorOperations/GpuAttention/CudnnAttention.h"
+#include "Utilities/TensorOperations/Ragged/RowPartitionDTypePolicy.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Common/ScopedGpu.h"
@@ -387,7 +388,7 @@ void requireSeqLenMatchesDescriptor(const Tensor& seq_len, const CudnnAttentionD
 
 void requireRaggedOffsetMatchesDescriptor(const Tensor& offset, const CudnnAttentionDescriptor& descriptor, string_view name) {
     requireInitialized(offset, name);
-    if (offset.getDataType() != DataType::INT32) {
+    if (!isCudnnRaggedOffsetDataType(offset.getDataType())) {
         throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' dtype mismatch. Expected INT32, got " +
                                TensorDescriptor::getElementTypeName(offset.getDataType()));
     }

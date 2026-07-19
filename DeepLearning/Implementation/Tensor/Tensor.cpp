@@ -1,6 +1,7 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Common/LowPrecisionFloat.h"
 #include <cmath>
+#include <exception>
 #include <limits>
 #include <optional>
 
@@ -142,10 +143,24 @@ Tensor &Tensor::operator=(const Tensor &other) {
     return *this;
 }
 
-Tensor::~Tensor() {
-    bool shouldDestroy = ReferenceCounted::removeReference();
-    if (shouldDestroy)
-        destroy();
+Tensor::~Tensor() noexcept {
+    try {
+        const bool shouldDestroy = ReferenceCounted::removeReference();
+        if (shouldDestroy) {
+            destroy();
+        }
+    } catch (const std::exception& error) {
+        // Destructors are implicitly noexcept. Letting a CUDA cleanup failure escape
+        // here calls std::terminate and masks the operation error that caused the
+        // cleanup failure (for example, an asynchronous kernel failure reported by
+        // cudaFree). Explicit operations and assignments still report destroy()
+        // failures normally; destructor cleanup can only preserve and report them.
+        fprintf(stderr, "Tensor destructor cleanup failed: %s\n", error.what());
+        fflush(stderr);
+    } catch (...) {
+        fprintf(stderr, "Tensor destructor cleanup failed with an unknown exception.\n");
+        fflush(stderr);
+    }
 }
 
 bool Tensor::operator==(const Tensor &other) const {
@@ -325,27 +340,28 @@ void Tensor::destroy() {
     }
 
     if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
+        void *memory = backingMemory->mem;
+        backingMemory->mem = nullptr;
+
         if (backingMemory->cpuMemPinnedViaCudaHostRegister) {
-            cudaHostUnregister(backingMemory->mem);
-            free(backingMemory->mem);
             backingMemory->cpuMemPinnedViaCudaHostRegister = false;
-            backingMemory->mem = nullptr;
-        } else {
-            cudaError_t cudaStatus = cudaFreeHost(backingMemory->mem);
-            backingMemory->mem = nullptr;
-            if (cudaStatus != cudaSuccess) {
-                printf("cuda status %d\n", cudaStatus);
-                fflush(stdout);
+            try {
+                CUDA_CHECK(cudaHostUnregister(memory));
+            } catch (...) {
+                free(memory);
+                throw;
             }
-            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+            free(memory);
+        } else {
+            CUDA_CHECK(cudaFreeHost(memory));
         }
 
     } else if (placement.getMemDevice() == TensorPlacement::MemDevices::GPU) {
         ScopedGpu scopedGpu(getPlacement().getDeviceNum());
 
-        cudaError_t cudaStatus = cudaFree(backingMemory->mem);
+        void *memory = backingMemory->mem;
         backingMemory->mem = nullptr;
-        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+        CUDA_CHECK(cudaFree(memory));
     } else {
         THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::CPU ||
                             placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
@@ -772,9 +788,8 @@ void Tensor::downloadSection(Tensor &source, Stream &stream, uint64_t sourceOffs
 
     uint8_t *destMemBytes = static_cast<uint8_t *>(getMemPtr<void>());
     uint8_t *sourceMemBytes = static_cast<uint8_t *>(source.getMemPtr<void>());
-    cudaError_t cudaStatus =
-        cudaMemcpyAsync(destMemBytes + destOffset, sourceMemBytes + sourceOffset, sizeBytes, cudaMemcpyDeviceToHost, stream.getStream());
-    THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+    CUDA_CHECK(
+        cudaMemcpyAsync(destMemBytes + destOffset, sourceMemBytes + sourceOffset, sizeBytes, cudaMemcpyDeviceToHost, stream.getStream()));
 }
 
 void Tensor::uploadSection(Tensor &dest, Stream &stream, uint64_t sourceOffset, uint64_t destOffset, uint64_t sizeBytes) {
@@ -790,9 +805,8 @@ void Tensor::uploadSection(Tensor &dest, Stream &stream, uint64_t sourceOffset, 
 
     uint8_t *sourceMemBytes = static_cast<uint8_t *>(getMemPtr<void>());
     uint8_t *destMemBytes = static_cast<uint8_t *>(dest.getMemPtr<void>());
-    cudaError_t cudaStatus =
-        cudaMemcpyAsync(destMemBytes + destOffset, sourceMemBytes + sourceOffset, sizeBytes, cudaMemcpyHostToDevice, stream.getStream());
-    THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+    CUDA_CHECK(
+        cudaMemcpyAsync(destMemBytes + destOffset, sourceMemBytes + sourceOffset, sizeBytes, cudaMemcpyHostToDevice, stream.getStream()));
 }
 
 // If the tensor changes datatypes such that the size changes, then stream must be on the device with the larger tensor size.
@@ -1026,7 +1040,6 @@ void Tensor::copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSo
         return;
     }
 
-    cudaError_t cudaStatus;
     THOR_THROW_IF_FALSE(copyStream.isInitialized());
 
     // must have the same number of elements
@@ -1112,9 +1125,8 @@ void Tensor::copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSo
         ScopedGpu scopedGpu(0);  // CPU local stream belongs to gpu 0
 
         if (sourceDescriptor.getDataType() == destDescriptor.getDataType()) {
-            cudaStatus =
-                cudaMemcpyAsync(destMem, sourceMem, sourceDescriptor.getArraySizeInBytes(), cudaMemcpyHostToHost, copyStream.getStream());
-            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+            CUDA_CHECK(
+                cudaMemcpyAsync(destMem, sourceMem, sourceDescriptor.getArraySizeInBytes(), cudaMemcpyHostToHost, copyStream.getStream()));
         } else {
             // Convert between data types on cpu.
             // Note that this may be an in-place conversion
@@ -1130,16 +1142,14 @@ void Tensor::copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSo
                placement.getMemDevice() == TensorPlacement::MemDevices::GPU) {
         ScopedGpu scopedGpu(destDeviceNum);
 
-        cudaStatus =
-            cudaMemcpyAsync(destMem, sourceMem, sourceDescriptor.getArraySizeInBytes(), cudaMemcpyHostToDevice, copyStream.getStream());
-        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+        CUDA_CHECK(
+            cudaMemcpyAsync(destMem, sourceMem, sourceDescriptor.getArraySizeInBytes(), cudaMemcpyHostToDevice, copyStream.getStream()));
     } else if (source.placement.getMemDevice() == TensorPlacement::MemDevices::GPU &&
                placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
         ScopedGpu scopedGpu(sourceDeviceNum);
 
-        cudaStatus =
-            cudaMemcpyAsync(destMem, sourceMem, sourceDescriptor.getArraySizeInBytes(), cudaMemcpyDeviceToHost, copyStream.getStream());
-        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+        CUDA_CHECK(
+            cudaMemcpyAsync(destMem, sourceMem, sourceDescriptor.getArraySizeInBytes(), cudaMemcpyDeviceToHost, copyStream.getStream()));
     } else if (source.placement.getMemDevice() == TensorPlacement::MemDevices::GPU &&
                placement.getMemDevice() == TensorPlacement::MemDevices::GPU) {
         if (destDeviceNum == sourceDeviceNum) {
@@ -1147,9 +1157,8 @@ void Tensor::copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSo
             ScopedGpu scopedGpu(destDeviceNum);
 
             if (sourceDescriptor.getDataType() == destDescriptor.getDataType()) {
-                cudaStatus = cudaMemcpyAsync(
-                    destMem, sourceMem, sourceDescriptor.getArraySizeInBytes(), cudaMemcpyDeviceToDevice, copyStream.getStream());
-                THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+                CUDA_CHECK(cudaMemcpyAsync(
+                    destMem, sourceMem, sourceDescriptor.getArraySizeInBytes(), cudaMemcpyDeviceToDevice, copyStream.getStream()));
             } else {
                 // Convert between data types on device.
                 // Note that this may be an in-place conversion
@@ -1165,9 +1174,8 @@ void Tensor::copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSo
             // Cross device copy
             ScopedGpu scopedGpu(destDeviceNum);
 
-            cudaStatus = cudaMemcpyPeerAsync(
-                destMem, destDeviceNum, sourceMem, sourceDeviceNum, sourceDescriptor.getArraySizeInBytes(), copyStream.getStream());
-            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+            CUDA_CHECK(cudaMemcpyPeerAsync(
+                destMem, destDeviceNum, sourceMem, sourceDeviceNum, sourceDescriptor.getArraySizeInBytes(), copyStream.getStream()));
         }
     } else {
         THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::CPU ||
@@ -1333,9 +1341,7 @@ void Tensor::memsetAsync(Stream stream, int8_t value, uint64_t numElements) {
         }
 
         ScopedGpu scopedGpu(placement.getDeviceNum());
-        cudaError_t cudaStatus;
-        cudaStatus = cudaMemsetAsync(getBaseMemPtr(), value, numBytes, stream);
-        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+        CUDA_CHECK(cudaMemsetAsync(getBaseMemPtr(), value, numBytes, stream));
     } else {
         std::unique_ptr<HostFunctionArgsBase> args(new MemsetArgs(*this, value, numElements));
         stream.enqueueHostFunction(callMemsetOnTensor, std::move(args));

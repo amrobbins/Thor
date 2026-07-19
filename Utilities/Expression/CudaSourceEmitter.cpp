@@ -2,6 +2,7 @@
 #include <optional>
 #include "Utilities/Expression/EquationCompiler.h"
 #include "Utilities/Expression/ExpressionDTypeResolution.h"
+#include "Utilities/TensorOperations/Ragged/RowPartitionDTypePolicy.h"
 
 #include <algorithm>
 #include <functional>
@@ -977,8 +978,145 @@ static std::optional<DataType> getVectorizedStageStorageDTypeImpl(const Physical
     return stage_dtype;
 }
 
+struct RaggedValuewiseExtentEmissionSpec {
+    uint32_t offsets_input_slot = UINT32_MAX;
+    uint32_t offsets_node_idx = UINT32_MAX;
+    DataType offsets_dtype = DataType::UINT32;
+    uint64_t batch_size = 0;
+    uint64_t max_active_values = 0;
+    uint64_t elements_per_value = 1;
+};
+
+static bool nodeDependsOnRaggedExtent(const PhysicalExpression& expr,
+                                      uint32_t node_idx,
+                                      std::vector<int8_t>& memo) {
+    if (node_idx >= expr.nodes.size()) {
+        throw runtime_error("ragged valuewise extent dependency walk encountered an invalid node index.");
+    }
+    if (memo[node_idx] >= 0) {
+        return memo[node_idx] != 0;
+    }
+
+    const ExprNode& node = expr.nodes[node_idx];
+    if (node.op == ExprOp::RAGGED_VALUEWISE_EXTENT) {
+        memo[node_idx] = 1;
+        return true;
+    }
+
+    auto parent_depends = [&](uint32_t parent_idx) {
+        return parent_idx != UINT32_MAX && nodeDependsOnRaggedExtent(expr, parent_idx, memo);
+    };
+    bool depends = parent_depends(node.lhs) || parent_depends(node.rhs) || parent_depends(node.aux) ||
+                   parent_depends(node.alpha_node) || parent_depends(node.beta_node) ||
+                   parent_depends(node.matmul_epilogue_aux) || parent_depends(node.attention_seq_len_q_node) ||
+                   parent_depends(node.attention_seq_len_kv_node) || parent_depends(node.attention_ragged_offset_q_node) ||
+                   parent_depends(node.attention_ragged_offset_kv_node) || parent_depends(node.attention_page_table_k_node) ||
+                   parent_depends(node.attention_page_table_v_node) || parent_depends(node.attention_dropout_seed_node) ||
+                   parent_depends(node.attention_dropout_offset_node);
+    if (!depends && node.op == ExprOp::CUDA_KERNEL_OUTPUT) {
+        for (uint32_t input_node : node.cuda_kernel_input_nodes) {
+            depends = parent_depends(input_node);
+            if (depends) {
+                break;
+            }
+        }
+    }
+    memo[node_idx] = depends ? 1 : 0;
+    return depends;
+}
+
+static void validateRaggedExtentStageIsolation(const PhysicalExecutionStage& stage,
+                                               const RaggedValuewiseExtentEmissionSpec& spec) {
+    std::vector<int8_t> memo(stage.expr.nodes.size(), -1);
+    for (const CompiledStageOutput& output : stage.outputs) {
+        if (!nodeDependsOnRaggedExtent(stage.expr, output.local_node_idx, memo)) {
+            throw runtime_error(
+                "one fused kernel cannot mix ragged-runtime-extent outputs with ordinary dense outputs; materialize them in separate stages.");
+        }
+    }
+
+    auto is_offsets_input_node = [&](uint32_t node_idx) {
+        if (node_idx == UINT32_MAX || node_idx >= stage.expr.nodes.size()) {
+            return false;
+        }
+        const ExprNode& candidate = stage.expr.nodes[node_idx];
+        return candidate.op == ExprOp::INPUT && candidate.input_slot == spec.offsets_input_slot;
+    };
+
+    for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
+        if (is_offsets_input_node(node_idx)) {
+            continue;
+        }
+        const ExprNode& node = stage.expr.nodes[node_idx];
+        const bool marker_uses_offsets = node.op == ExprOp::RAGGED_VALUEWISE_EXTENT && is_offsets_input_node(node.rhs);
+        if (marker_uses_offsets) {
+            continue;
+        }
+        auto references_offsets = [&](uint32_t parent_idx) { return is_offsets_input_node(parent_idx); };
+        bool offsets_are_value_data = references_offsets(node.lhs) || references_offsets(node.rhs) || references_offsets(node.aux) ||
+                                      references_offsets(node.alpha_node) || references_offsets(node.beta_node) ||
+                                      references_offsets(node.matmul_epilogue_aux) || references_offsets(node.attention_seq_len_q_node) ||
+                                      references_offsets(node.attention_seq_len_kv_node) || references_offsets(node.attention_ragged_offset_q_node) ||
+                                      references_offsets(node.attention_ragged_offset_kv_node) || references_offsets(node.attention_page_table_k_node) ||
+                                      references_offsets(node.attention_page_table_v_node) || references_offsets(node.attention_dropout_seed_node) ||
+                                      references_offsets(node.attention_dropout_offset_node);
+        if (!offsets_are_value_data && node.op == ExprOp::CUDA_KERNEL_OUTPUT) {
+            offsets_are_value_data = std::any_of(node.cuda_kernel_input_nodes.begin(),
+                                                 node.cuda_kernel_input_nodes.end(),
+                                                 references_offsets);
+        }
+        if (offsets_are_value_data) {
+            throw runtime_error(
+                "ragged runtime extent offsets are launch metadata and cannot also participate in fused value computation.");
+        }
+    }
+}
+
+static std::optional<RaggedValuewiseExtentEmissionSpec> findRaggedValuewiseExtentSpec(const PhysicalExpression& expr) {
+    std::optional<RaggedValuewiseExtentEmissionSpec> result = std::nullopt;
+    for (const ExprNode& node : expr.nodes) {
+        if (node.op != ExprOp::RAGGED_VALUEWISE_EXTENT) {
+            continue;
+        }
+        if (node.lhs >= expr.nodes.size() || node.rhs >= expr.nodes.size()) {
+            throw runtime_error("ragged valuewise extent node has invalid values or offsets input.");
+        }
+        const ExprNode& offsets_node = expr.nodes[node.rhs];
+        if (offsets_node.op != ExprOp::INPUT || offsets_node.input_slot >= expr.inputs.size() ||
+            expr.inputs[offsets_node.input_slot].kind != NamedInput::Kind::Tensor) {
+            throw runtime_error("ragged valuewise extent offsets must be a direct tensor input.");
+        }
+        const DataType offsets_dtype = requireNodeInputTensorDType(offsets_node);
+        if (!isCanonicalRowPartitionOffsetDataType(offsets_dtype)) {
+            throw runtime_error("ragged valuewise extent offsets dtype must be UINT32 or UINT64.");
+        }
+        if (node.ragged_runtime_max_active_values == 0 || node.ragged_runtime_elements_per_value == 0) {
+            throw runtime_error("ragged valuewise extent metadata must be non-zero.");
+        }
+
+        RaggedValuewiseExtentEmissionSpec candidate;
+        candidate.offsets_input_slot = offsets_node.input_slot;
+        candidate.offsets_node_idx = node.rhs;
+        candidate.offsets_dtype = offsets_dtype;
+        candidate.batch_size = node.ragged_runtime_batch_size;
+        candidate.max_active_values = node.ragged_runtime_max_active_values;
+        candidate.elements_per_value = node.ragged_runtime_elements_per_value;
+        if (result.has_value() &&
+            (result->offsets_input_slot != candidate.offsets_input_slot || result->offsets_dtype != candidate.offsets_dtype ||
+             result->batch_size != candidate.batch_size || result->max_active_values != candidate.max_active_values ||
+             result->elements_per_value != candidate.elements_per_value)) {
+            throw runtime_error("one fused kernel cannot combine different ragged runtime extents.");
+        }
+        result = candidate;
+    }
+    return result;
+}
+
 std::optional<DataType> CudaSourceEmitter::getVectorizedStageStorageDType(const PhysicalExecutionStage& stage) {
     if (stage.kind != PhysicalExecutionStage::Kind::FusedKernel) {
+        return std::nullopt;
+    }
+    if (findRaggedValuewiseExtentSpec(stage.expr).has_value()) {
         return std::nullopt;
     }
     return getVectorizedStageStorageDTypeImpl(stage.expr, collectInputSlotDTypes(stage.expr), collectOutputDTypes(stage));
@@ -986,6 +1124,9 @@ std::optional<DataType> CudaSourceEmitter::getVectorizedStageStorageDType(const 
 
 std::optional<DataType> CudaSourceEmitter::getVectorizedStageStorageDType(const CompiledExecutionStage& stage) {
     if (stage.kind != CompiledExecutionStage::Kind::FusedKernel) {
+        return std::nullopt;
+    }
+    if (findRaggedValuewiseExtentSpec(stage.expr).has_value()) {
         return std::nullopt;
     }
     return getVectorizedStageStorageDTypeImpl(stage.expr, collectInputSlotDTypes(stage.expr), collectOutputDTypes(stage));
@@ -1233,6 +1374,9 @@ static uint32_t flatScalarElementsPerThreadImpl(const std::vector<DataType>& inp
 
 uint32_t CudaSourceEmitter::flatElementsPerThread(const PhysicalExecutionStage& stage) {
     if (stage.kind != PhysicalExecutionStage::Kind::FusedKernel) {
+        return 1;
+    }
+    if (findRaggedValuewiseExtentSpec(stage.expr).has_value()) {
         return 1;
     }
     if (stageHasTransposedMaterializedOutput(stage.outputs)) {
@@ -1762,6 +1906,7 @@ static bool tryGetEmitterAliasSource(const PhysicalExpression& expr, uint32_t no
         case ExprOp::RESHAPE:
         case ExprOp::UNSQUEEZE:
         case ExprOp::SQUEEZE:
+        case ExprOp::RAGGED_VALUEWISE_EXTENT:
             source_idx = n.lhs;
             return true;
         case ExprOp::ADD:
@@ -5256,8 +5401,10 @@ static std::string emitWideScalarFlat(const PhysicalExecutionStage& stage,
     std::ostringstream ss;
     emitRequiredHeaders(stage.expr, ss);
 
-    // CUDA vector builtins are available to NVRTC without <vector_types.h>;
-    // CUDA 13.3 bundled headers do not include that legacy top-level header.
+    // Keep the public kernel ABI scalar-typed. Runtime tensors may be storage aliases whose
+    // element offset does not preserve the wider chunk alignment. The aligned/full-chunk path
+    // below retains the existing vector memory operations for ordinary dense tensors, while
+    // the scalar path handles aliases and the final partial chunk without undefined accesses.
     ss << "extern \"C\" __global__\n";
     ss << "void " << kernel_name << "(";
 
@@ -5270,7 +5417,7 @@ static std::string emitWideScalarFlat(const PhysicalExecutionStage& stage,
         if (stage.expr.inputs[i].kind == NamedInput::Kind::RuntimeScalarFp32) {
             ss << scalarStorageType(input_dtypes[i]) << " in" << i;
         } else {
-            ss << "const " << input_chunk_types[i] << "* in" << i;
+            ss << "const " << scalarStorageType(input_dtypes[i]) << "* in" << i;
         }
     }
 
@@ -5279,7 +5426,7 @@ static std::string emitWideScalarFlat(const PhysicalExecutionStage& stage,
             ss << ", ";
         }
         first_arg = false;
-        ss << output_chunk_types[i] << "* out" << i;
+        ss << scalarStorageType(output_dtypes[i]) << "* out" << i;
     }
 
     if (!first_arg) {
@@ -5293,16 +5440,43 @@ static std::string emitWideScalarFlat(const PhysicalExecutionStage& stage,
        << emitUnsignedLiteral(static_cast<uint64_t>(elements_per_thread), use_uint32_index_math) << ";\n";
     ss << "  if (base >= numel) return;\n\n";
 
+    ss << "  const bool full_chunk = base + "
+       << emitUnsignedLiteral(static_cast<uint64_t>(elements_per_thread), use_uint32_index_math) << " <= numel;\n";
+    ss << "  const bool chunk_aligned = ";
+    bool emitted_alignment_term = false;
+    auto emit_alignment_term = [&](const std::string& pointer_expr, uint64_t alignment) {
+        if (emitted_alignment_term) {
+            ss << " && ";
+        }
+        emitted_alignment_term = true;
+        ss << "((reinterpret_cast<unsigned long long>(" << pointer_expr << ") & " << (alignment - 1ULL) << "ULL) == 0ULL)";
+    };
+    for (uint32_t i = 0; i < input_dtypes.size(); ++i) {
+        if (stage.expr.inputs[i].kind != NamedInput::Kind::Tensor) {
+            continue;
+        }
+        emit_alignment_term("in" + std::to_string(i), dataTypeStorageBytes(input_dtypes[i]) * elements_per_thread);
+    }
+    for (uint32_t i = 0; i < output_dtypes.size(); ++i) {
+        emit_alignment_term("out" + std::to_string(i), dataTypeStorageBytes(output_dtypes[i]) * elements_per_thread);
+    }
+    if (!emitted_alignment_term) {
+        ss << "true";
+    }
+    ss << ";\n\n";
+
+    ss << "  if (full_chunk && chunk_aligned) {\n";
     bool emitted_any_tensor_chunk = false;
     for (uint32_t i = 0; i < input_dtypes.size(); ++i) {
         if (stage.expr.inputs[i].kind != NamedInput::Kind::Tensor) {
             continue;
         }
         emitted_any_tensor_chunk = true;
-        ss << "  const " << input_chunk_types[i] << " in" << i << "_chunk = in" << i << "[idx];\n";
+        ss << "    const " << input_chunk_types[i] << " in" << i << "_chunk = *reinterpret_cast<const "
+           << input_chunk_types[i] << "*>(in" << i << " + base);\n";
         if (!(input_chunk_types[i] == "float4" && input_dtypes[i] == DataType::FP32)) {
-            ss << "  const " << scalarStorageType(input_dtypes[i]) << "* in" << i << "_chunk_data = reinterpret_cast<const "
-               << scalarStorageType(input_dtypes[i]) << "*>(&in" << i << "_chunk);\n";
+            ss << "    const " << scalarStorageType(input_dtypes[i]) << "* in" << i
+               << "_chunk_data = reinterpret_cast<const " << scalarStorageType(input_dtypes[i]) << "*>(&in" << i << "_chunk);\n";
         }
     }
     if (emitted_any_tensor_chunk) {
@@ -5310,10 +5484,10 @@ static std::string emitWideScalarFlat(const PhysicalExecutionStage& stage,
     }
 
     for (uint32_t out_idx = 0; out_idx < stage.outputs.size(); ++out_idx) {
-        ss << "  " << output_chunk_types[out_idx] << " out" << out_idx << "_chunk;\n";
+        ss << "    " << output_chunk_types[out_idx] << " out" << out_idx << "_chunk;\n";
         if (!(output_chunk_types[out_idx] == "float4" && output_dtypes[out_idx] == DataType::FP32)) {
-            ss << "  " << scalarStorageType(output_dtypes[out_idx]) << "* out" << out_idx << "_chunk_data = reinterpret_cast<"
-               << scalarStorageType(output_dtypes[out_idx]) << "*>(&out" << out_idx << "_chunk);\n";
+            ss << "    " << scalarStorageType(output_dtypes[out_idx]) << "* out" << out_idx
+               << "_chunk_data = reinterpret_cast<" << scalarStorageType(output_dtypes[out_idx]) << "*>(&out" << out_idx << "_chunk);\n";
         }
     }
     if (!stage.outputs.empty()) {
@@ -5321,14 +5495,21 @@ static std::string emitWideScalarFlat(const PhysicalExecutionStage& stage,
     }
 
     for (uint32_t lane = 0; lane < elements_per_thread; ++lane) {
-        const std::string suffix = "_l" + std::to_string(lane);
+        const std::string suffix = "_fast_l" + std::to_string(lane);
         const std::string lane_idx_expr = "base + " + emitUnsignedLiteral(static_cast<uint64_t>(lane), use_uint32_index_math);
 
         for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
             if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
                 continue;
             }
-            emitScalarNodeSuffixed(ss, stage.expr, node_idx, lane_idx_expr, suffix, "  ", std::to_string(lane), elements_per_thread);
+            emitScalarNodeSuffixed(ss,
+                                   stage.expr,
+                                   node_idx,
+                                   lane_idx_expr,
+                                   suffix,
+                                   "    ",
+                                   std::to_string(lane),
+                                   elements_per_thread);
         }
 
         ss << "\n";
@@ -5340,14 +5521,40 @@ static std::string emitWideScalarFlat(const PhysicalExecutionStage& stage,
                                          output_dtype,
                                          lane,
                                          emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, suffix),
-                                         "  ",
+                                         "    ",
                                          "out" + std::to_string(out_idx) + "_chunk_data");
         }
         ss << "\n";
     }
 
     for (uint32_t out_idx = 0; out_idx < stage.outputs.size(); ++out_idx) {
-        ss << "  out" << out_idx << "[idx] = out" << out_idx << "_chunk;\n";
+        ss << "    *reinterpret_cast<" << output_chunk_types[out_idx] << "*>(out" << out_idx << " + base) = out" << out_idx
+           << "_chunk;\n";
+    }
+    ss << "    return;\n";
+    ss << "  }\n\n";
+
+    // Unaligned aliases and the final partial chunk use naturally aligned scalar accesses.
+    for (uint32_t lane = 0; lane < elements_per_thread; ++lane) {
+        const std::string suffix = "_scalar_l" + std::to_string(lane);
+        const std::string lane_idx_expr = "base + " + emitUnsignedLiteral(static_cast<uint64_t>(lane), use_uint32_index_math);
+        ss << "  const " << index_type << " lane_idx_" << lane << " = " << lane_idx_expr << ";\n";
+        ss << "  if (lane_idx_" << lane << " < numel) {\n";
+
+        for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
+            if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
+                continue;
+            }
+            emitScalarNodeSuffixed(ss, stage.expr, node_idx, "lane_idx_" + std::to_string(lane), suffix, "    ");
+        }
+
+        for (uint32_t out_idx = 0; out_idx < stage.outputs.size(); ++out_idx) {
+            const CompiledStageOutput& output = stage.outputs[out_idx];
+            const DataType output_dtype = requireNodeOutputDType(stage.expr.nodes[output.local_node_idx]);
+            ss << "    out" << out_idx << "[lane_idx_" << lane << "] = "
+               << emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, suffix) << ";\n";
+        }
+        ss << "  }\n";
     }
 
     ss << "}\n";
@@ -6191,6 +6398,14 @@ std::string CudaSourceEmitter::emitFlat(const PhysicalExecutionStage& stage, con
         throw runtime_error("Fused stage has no outputs.");
     }
 
+    const std::optional<RaggedValuewiseExtentEmissionSpec> ragged_extent = findRaggedValuewiseExtentSpec(stage.expr);
+    if (ragged_extent.has_value()) {
+        validateRaggedExtentStageIsolation(stage, ragged_extent.value());
+    }
+    if (ragged_extent.has_value() && stageHasTransposedMaterializedOutput(stage.outputs)) {
+        throw runtime_error("ragged runtime extent is not supported with transposed materialized outputs.");
+    }
+
     if (stageHasTransposedMaterializedOutput(stage.outputs)) {
         return emitTiledTransposeMaterializedFused(stage, kernel_name, use_uint32_index_math);
     }
@@ -6241,22 +6456,45 @@ std::string CudaSourceEmitter::emitFlat(const PhysicalExecutionStage& stage, con
     const std::string index_type = emittedIndexType(use_uint32_index_math);
     ss << index_type << " numel) {";
 
-    ss << "  " << index_type << " idx = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";";
-    ss << "  if (idx >= numel) return;";
+    std::string scalar_indent = "  ";
+    if (ragged_extent.has_value()) {
+        const auto& extent = ragged_extent.value();
+        ss << "  const unsigned long long active_values_raw = static_cast<unsigned long long>(in" << extent.offsets_input_slot << "["
+           << extent.batch_size << "ULL]);\n";
+        ss << "  const unsigned long long active_values = active_values_raw < " << extent.max_active_values
+           << "ULL ? active_values_raw : " << extent.max_active_values << "ULL;\n";
+        ss << "  const unsigned long long runtime_numel_u64 = active_values * " << extent.elements_per_value << "ULL;\n";
+        ss << "  const " << index_type << " runtime_numel = static_cast<" << index_type
+           << ">(runtime_numel_u64 < static_cast<unsigned long long>(numel) ? runtime_numel_u64 : static_cast<unsigned long long>(numel));\n";
+        ss << "  " << index_type << " idx = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";\n";
+        ss << "  const " << index_type << " grid_stride = static_cast<" << index_type
+           << ">(blockDim.x) * static_cast<" << index_type << ">(gridDim.x);\n";
+        ss << "  for (; idx < runtime_numel; idx += grid_stride) {\n";
+        scalar_indent = "    ";
+    } else {
+        ss << "  " << index_type << " idx = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";";
+        ss << "  if (idx >= numel) return;";
+    }
 
     const std::unordered_set<uint32_t> index_aware_skip_nodes = collectIndexAwareInputNodesToSkipForFlatOutput(stage.expr, stage.outputs);
     for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
-        if (index_aware_skip_nodes.contains(node_idx) || !shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
+        const ExprNode& node = stage.expr.nodes[node_idx];
+        const bool is_extent_offsets_input = ragged_extent.has_value() && node.op == ExprOp::INPUT &&
+                                             node.input_slot == ragged_extent->offsets_input_slot;
+        if (is_extent_offsets_input || index_aware_skip_nodes.contains(node_idx) || !shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
             continue;
         }
-        emitScalarNode(ss, stage.expr, node_idx, /*broadcast_support=*/false, "  ");
+        emitScalarNode(ss, stage.expr, node_idx, /*broadcast_support=*/false, scalar_indent);
     }
 
-    ss << "";
     for (uint32_t out_idx = 0; out_idx < stage.outputs.size(); ++out_idx) {
         const CompiledStageOutput& output = stage.outputs[out_idx];
         const DataType output_dtype = requireNodeOutputDType(stage.expr.nodes[output.local_node_idx]);
-        ss << "  out" << out_idx << "[idx] = " << emitResolvedScalarValueExpr(stage.expr, output.local_node_idx, output_dtype) << ";";
+        ss << scalar_indent << "out" << out_idx << "[idx] = "
+           << emitResolvedScalarValueExpr(stage.expr, output.local_node_idx, output_dtype) << ";";
+    }
+    if (ragged_extent.has_value()) {
+        ss << "  }\n";
     }
 
     ss << "}";

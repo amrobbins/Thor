@@ -11,6 +11,7 @@
 #include "DeepLearning/Implementation/Layers/MultiConnectionLayer.h"
 #include "Utilities/TensorOperations/Misc/Concatenate.h"
 #include "Utilities/TensorOperations/Misc/Split.h"
+#include "Utilities/Expression/CudaHelpers.h"
 
 namespace ThorImplementation {
 
@@ -93,21 +94,18 @@ class Concatenate : public MultiConnectionLayer {
         THOR_THROW_IF_FALSE(featureInputs[0].has_value());
         THOR_THROW_IF_FALSE(featureInputs[0].value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
         ScopedGpu scopedGpu(featureInputs[0].value().getPlacement().getDeviceNum());
-        cudaError_t cudaStatus;
         int numSplitTensors = featureInputs.size();
 
-        cudaStatus = cudaMalloc(reinterpret_cast<void **>(&splitTensorFeatureInputMemoriesArray_d), numSplitTensors * sizeof(void *));
-        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void **>(&splitTensorFeatureInputMemoriesArray_d), numSplitTensors * sizeof(void *)));
         void **splitTensorFeatureInputMemoriesArray = new void *[numSplitTensors];
         for (int i = 0; i < numSplitTensors; ++i) {
             THOR_THROW_IF_FALSE(featureInputs[i].has_value());
             splitTensorFeatureInputMemoriesArray[i] = featureInputs[i].value().getMemPtr();
         }
-        cudaStatus = cudaMemcpy(splitTensorFeatureInputMemoriesArray_d,
+        CUDA_CHECK(cudaMemcpy(splitTensorFeatureInputMemoriesArray_d,
                                 splitTensorFeatureInputMemoriesArray,
                                 numSplitTensors * sizeof(void *),
-                                cudaMemcpyHostToDevice);
-        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+                                cudaMemcpyHostToDevice));
         delete[] splitTensorFeatureInputMemoriesArray;
 
         if (errorInputs[0].has_value()) {
@@ -118,8 +116,7 @@ class Concatenate : public MultiConnectionLayer {
             // one entry per original feature input.  Missing upstream error outputs are
             // routed into throwaway tensors and then not propagated further.
             discardedErrorOutputs.resize(numSplitTensors);
-            cudaStatus = cudaMalloc(reinterpret_cast<void **>(&splitTensorErrorOutputMemoriesArray_d), numSplitTensors * sizeof(void *));
-            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+            CUDA_CHECK(cudaMalloc(reinterpret_cast<void **>(&splitTensorErrorOutputMemoriesArray_d), numSplitTensors * sizeof(void *)));
             void **splitTensorErrorOutputMemoriesArray = new void *[numSplitTensors];
             for (int i = 0; i < numSplitTensors; ++i) {
                 if (errorOutputs[i].has_value()) {
@@ -130,22 +127,18 @@ class Concatenate : public MultiConnectionLayer {
                     splitTensorErrorOutputMemoriesArray[i] = discardedErrorOutputs[i].value().getMemPtr();
                 }
             }
-            cudaStatus = cudaMemcpy(splitTensorErrorOutputMemoriesArray_d,
+            CUDA_CHECK(cudaMemcpy(splitTensorErrorOutputMemoriesArray_d,
                                     splitTensorErrorOutputMemoriesArray,
                                     numSplitTensors * sizeof(void *),
-                                    cudaMemcpyHostToDevice);
-            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+                                    cudaMemcpyHostToDevice));
             delete[] splitTensorErrorOutputMemoriesArray;
         }
 
         long *axisElementsPerSplitTensor = new long[numSplitTensors];
         for (int i = 0; i < numSplitTensors; ++i)
             axisElementsPerSplitTensor[i] = featureInputs[i].value().getDescriptor().getDimensions()[axis];
-        cudaStatus = cudaMalloc(&axisElementsPerSplitTensor_d, numSplitTensors * sizeof(long));
-        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
-        cudaStatus =
-            cudaMemcpy(axisElementsPerSplitTensor_d, axisElementsPerSplitTensor, numSplitTensors * sizeof(long), cudaMemcpyHostToDevice);
-        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+        CUDA_CHECK(cudaMalloc(&axisElementsPerSplitTensor_d, numSplitTensors * sizeof(long)));
+        CUDA_CHECK(cudaMemcpy(axisElementsPerSplitTensor_d, axisElementsPerSplitTensor, numSplitTensors * sizeof(long), cudaMemcpyHostToDevice));
 
         unsigned int numDimensions = featureInputs[0].value().getDescriptor().getDimensions().size();
         long *stridePerSplitTensorDimension = new long[numDimensions * numSplitTensors];
@@ -155,13 +148,11 @@ class Concatenate : public MultiConnectionLayer {
                 stridePerSplitTensorDimension[t * numDimensions + d] = stridePerSplitTensorDimension[t * numDimensions + (d + 1)] *
                                                                        featureInputs[t].value().getDescriptor().getDimensions()[d + 1];
         }
-        cudaStatus = cudaMalloc(&stridePerSplitTensorDimension_d, numDimensions * numSplitTensors * sizeof(long));
-        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
-        cudaStatus = cudaMemcpy(stridePerSplitTensorDimension_d,
+        CUDA_CHECK(cudaMalloc(&stridePerSplitTensorDimension_d, numDimensions * numSplitTensors * sizeof(long)));
+        CUDA_CHECK(cudaMemcpy(stridePerSplitTensorDimension_d,
                                 stridePerSplitTensorDimension,
                                 numDimensions * numSplitTensors * sizeof(long),
-                                cudaMemcpyHostToDevice);
-        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+                                cudaMemcpyHostToDevice));
 
         delete[] stridePerSplitTensorDimension;
         delete[] axisElementsPerSplitTensor;
@@ -171,13 +162,11 @@ class Concatenate : public MultiConnectionLayer {
         stridePerPackedTensorDimension[outputDimensions.size() - 1] = 1;
         for (int i = (int)outputDimensions.size() - 2; i >= 0; --i)
             stridePerPackedTensorDimension[i] = outputDimensions[i + 1] * stridePerPackedTensorDimension[i + 1];
-        cudaStatus = cudaMalloc(&stridePerPackedTensorDimension_d, outputDimensions.size() * sizeof(unsigned long));
-        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
-        cudaStatus = cudaMemcpy(stridePerPackedTensorDimension_d,
+        CUDA_CHECK(cudaMalloc(&stridePerPackedTensorDimension_d, outputDimensions.size() * sizeof(unsigned long)));
+        CUDA_CHECK(cudaMemcpy(stridePerPackedTensorDimension_d,
                                 stridePerPackedTensorDimension,
                                 outputDimensions.size() * sizeof(unsigned long),
-                                cudaMemcpyHostToDevice);
-        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+                                cudaMemcpyHostToDevice));
         delete[] stridePerPackedTensorDimension;
 
         for (unsigned int i = 0; i < featureInputs.size(); ++i)
@@ -250,35 +239,29 @@ class Concatenate : public MultiConnectionLayer {
     }
 
     void cleanup() override {
-        cudaError_t cudaStatus;
         THOR_THROW_IF_FALSE(featureInputs[0].has_value());
         TensorPlacement placement = featureInputs[0].value().getPlacement();
         THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
         ScopedGpu scopedGpu(featureInputs[0].value().getPlacement().getDeviceNum());
         if (splitTensorFeatureInputMemoriesArray_d != nullptr) {
-            cudaStatus = cudaFree(splitTensorFeatureInputMemoriesArray_d);
-            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+            CUDA_CHECK(cudaFree(splitTensorFeatureInputMemoriesArray_d));
             splitTensorFeatureInputMemoriesArray_d = nullptr;
         }
         if (splitTensorErrorOutputMemoriesArray_d != nullptr) {
-            cudaStatus = cudaFree(splitTensorErrorOutputMemoriesArray_d);
-            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+            CUDA_CHECK(cudaFree(splitTensorErrorOutputMemoriesArray_d));
             splitTensorErrorOutputMemoriesArray_d = nullptr;
         }
         discardedErrorOutputs.clear();
         if (axisElementsPerSplitTensor_d != nullptr) {
-            cudaStatus = cudaFree(axisElementsPerSplitTensor_d);
-            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+            CUDA_CHECK(cudaFree(axisElementsPerSplitTensor_d));
             axisElementsPerSplitTensor_d = nullptr;
         }
         if (stridePerPackedTensorDimension_d != nullptr) {
-            cudaStatus = cudaFree(stridePerPackedTensorDimension_d);
-            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+            CUDA_CHECK(cudaFree(stridePerPackedTensorDimension_d));
             stridePerPackedTensorDimension_d = nullptr;
         }
         if (stridePerSplitTensorDimension_d != nullptr) {
-            cudaStatus = cudaFree(stridePerSplitTensorDimension_d);
-            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+            CUDA_CHECK(cudaFree(stridePerSplitTensorDimension_d));
             stridePerSplitTensorDimension_d = nullptr;
         }
     }
@@ -357,12 +340,11 @@ class Concatenate : public MultiConnectionLayer {
             refreshArgs->splitTensorFeatureInputMemories[i] = featureInputs[i].value().getMemPtr();
         }
 
-        cudaError_t cudaStatus = cudaMemcpyAsync(splitTensorFeatureInputMemoriesArray_d,
+        CUDA_CHECK(cudaMemcpyAsync(splitTensorFeatureInputMemoriesArray_d,
                                                  refreshArgs->splitTensorFeatureInputMemories.data(),
                                                  numSplitTensors * sizeof(void *),
                                                  cudaMemcpyHostToDevice,
-                                                 stream);
-        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+                                                 stream));
         stream.enqueueHostFunction(&releaseFeatureInputMemoryArrayRefresh, std::move(refreshArgs));
     }
 

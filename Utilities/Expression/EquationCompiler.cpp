@@ -3,6 +3,7 @@
 #include "Utilities/Expression/ExpressionDTypeResolution.h"
 #include "Utilities/Expression/FusedEquation.h"
 #include "Utilities/TensorOperations/Cub/CubDevicePrimitives.h"
+#include "Utilities/TensorOperations/Ragged/RowPartitionDTypePolicy.h"
 
 #include "CudaSourceEmitter.h"
 
@@ -286,6 +287,9 @@ struct StageNodeKey {
     std::vector<uint64_t> view_dims;
     std::vector<uint64_t> view_strides;
     uint64_t view_element_offset = 0;
+    uint64_t ragged_runtime_batch_size = 0;
+    uint64_t ragged_runtime_max_active_values = 0;
+    uint64_t ragged_runtime_elements_per_value = 1;
 
     bool operator==(const StageNodeKey& other) const = default;
 };
@@ -359,6 +363,11 @@ struct StageNodeKeyHash {
         for (uint64_t stride : k.view_strides)
             hashCombine(h, std::hash<uint64_t>{}(stride));
         hashCombine(h, std::hash<uint64_t>{}(k.view_element_offset));
+        if (k.op == ExprOp::RAGGED_VALUEWISE_EXTENT) {
+            hashCombine(h, std::hash<uint64_t>{}(k.ragged_runtime_batch_size));
+            hashCombine(h, std::hash<uint64_t>{}(k.ragged_runtime_max_active_values));
+            hashCombine(h, std::hash<uint64_t>{}(k.ragged_runtime_elements_per_value));
+        }
         return h;
     }
 };
@@ -424,6 +433,11 @@ static StageNodeKey makeStageNodeKey(const ExprNode& n) {
     key.rope_allow_in_place_materialization = n.rope_allow_in_place_materialization;
     key.attention_use_bias = n.attention_use_bias;
     key.attention_dropout_probability_bits = scalarBits(n.attention_dropout_probability);
+    if (n.op == ExprOp::RAGGED_VALUEWISE_EXTENT) {
+        key.ragged_runtime_batch_size = n.ragged_runtime_batch_size;
+        key.ragged_runtime_max_active_values = n.ragged_runtime_max_active_values;
+        key.ragged_runtime_elements_per_value = n.ragged_runtime_elements_per_value;
+    }
 
     switch (n.op) {
         case ExprOp::INPUT:
@@ -640,6 +654,49 @@ static bool isStageBoundaryOp(ExprOp op) {
            op == ExprOp::STRIDED_VIEW || op == ExprOp::CUDA_KERNEL_OUTPUT;
 }
 
+static void validateRaggedRuntimeExtentConsumers(const PhysicalExpression& expr) {
+    std::vector<bool> depends_on_ragged_extent(expr.nodes.size(), false);
+    for (uint32_t node_idx = 0; node_idx < expr.nodes.size(); ++node_idx) {
+        const ExprNode& node = expr.nodes[node_idx];
+        if (node.op == ExprOp::RAGGED_VALUEWISE_EXTENT) {
+            depends_on_ragged_extent[node_idx] = true;
+            continue;
+        }
+
+        auto parent_depends = [&](uint32_t parent_idx) {
+            if (parent_idx == UINT32_MAX) {
+                return false;
+            }
+            if (parent_idx >= depends_on_ragged_extent.size()) {
+                throw std::runtime_error("ragged runtime extent consumer references an out-of-range parent node.");
+            }
+            return static_cast<bool>(depends_on_ragged_extent[parent_idx]);
+        };
+        bool depends = parent_depends(node.lhs) || parent_depends(node.rhs) || parent_depends(node.aux) ||
+                       parent_depends(node.alpha_node) || parent_depends(node.beta_node) ||
+                       parent_depends(node.matmul_epilogue_aux) || parent_depends(node.attention_seq_len_q_node) ||
+                       parent_depends(node.attention_seq_len_kv_node) || parent_depends(node.attention_ragged_offset_q_node) ||
+                       parent_depends(node.attention_ragged_offset_kv_node) || parent_depends(node.attention_page_table_k_node) ||
+                       parent_depends(node.attention_page_table_v_node) || parent_depends(node.attention_dropout_seed_node) ||
+                       parent_depends(node.attention_dropout_offset_node);
+        if (node.op == ExprOp::CUDA_KERNEL_OUTPUT) {
+            for (uint32_t input_node : node.cuda_kernel_input_nodes) {
+                depends = depends || parent_depends(input_node);
+            }
+        }
+        depends_on_ragged_extent[node_idx] = depends;
+        if (!depends) {
+            continue;
+        }
+
+        if (isStageBoundaryOp(node.op) || node.op == ExprOp::ROPE || node.op == ExprOp::TRANSPOSE ||
+            node.op == ExprOp::TAKE_ALONG_AXIS) {
+            throw std::runtime_error(
+                "an expression carrying ragged runtime extent reached an unsupported operation; use an explicit ragged operation or adapter.");
+        }
+    }
+}
+
 static uint32_t peelExplicitTransposeChain(const PhysicalExpression& expr, uint32_t node_idx, bool& transpose_toggled) {
     transpose_toggled = false;
     uint32_t current = node_idx;
@@ -820,6 +877,8 @@ static const char* fusedOpTag(ExprOp op) {
             return "LNOT";
         case ExprOp::CAST:
             return "CAST";
+        case ExprOp::RAGGED_VALUEWISE_EXTENT:
+            return "RAGGED_EXTENT";
         case ExprOp::WHERE:
             return "WHERE";
         case ExprOp::NEG:
@@ -1323,6 +1382,13 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
         return s;
     }
 
+    if (node.op == ExprOp::RAGGED_VALUEWISE_EXTENT) {
+        return std::string(fusedOpTag(node.op)) + "(" + lhs + "," + rhs + ",batch=" +
+               std::to_string(node.ragged_runtime_batch_size) + ",maxActive=" +
+               std::to_string(node.ragged_runtime_max_active_values) + ",elementsPerValue=" +
+               std::to_string(node.ragged_runtime_elements_per_value) + ")";
+    }
+
     if (isCommutativeStageOp(node.op) && rhs < lhs) {
         std::string s = std::string(fusedOpTag(node.op)) + "(" + rhs + "," + lhs + ")";
         appendNodeDTypeSignature(s, node);
@@ -1494,6 +1560,12 @@ vector<char> EquationCompiler::compileToLtoIr(const string& src, const string& k
     return ltoir;
 }
 
+static bool expressionUsesDeviceRaggedRuntimeExtent(const PhysicalExpression& expr) {
+    return std::any_of(expr.nodes.begin(), expr.nodes.end(), [](const ExprNode& node) {
+        return node.op == ExprOp::RAGGED_VALUEWISE_EXTENT;
+    });
+}
+
 shared_ptr<CompiledEquation> EquationCompiler::compileFusedStage(const PhysicalExecutionStage& stage,
                                                                  const EquationSignature& sig,
                                                                  bool use_uint32_index_math) {
@@ -1519,11 +1591,17 @@ shared_ptr<CompiledEquation> EquationCompiler::compileFusedStage(const PhysicalE
     const std::vector<DataType> input_dtypes = collectCompiledInputDTypes(stage.expr);
     const std::vector<DataType> output_dtypes = collectCompiledOutputDTypes(stage);
 
+    const bool uses_device_ragged_runtime_extent = expressionUsesDeviceRaggedRuntimeExtent(stage.expr);
+
     // RoPE/index-aware fused stages need runtime output dimensions to compute logical
-    // coordinates. They are always launched through the specialized-broadcast path,
-    // even when the tensor shapes happen to be identical, so do not try to build a
-    // dimensionless flat kernel during the shape-independent compile phase.
+    // coordinates. They are always launched through the specialized-broadcast path.
+    // Ragged runtime extent is deliberately limited to ordinary flat valuewise kernels
+    // in this stabilization chunk; unsupported combinations reject rather than silently
+    // processing padded capacity.
     if (expressionHasIndexAwareOps(stage.expr)) {
+        if (uses_device_ragged_runtime_extent) {
+            throw std::runtime_error("ragged runtime extent is not supported with index-aware fused operations.");
+        }
         auto compiled = std::make_shared<CompiledEquation>();
         compiled->key = key;
         compiled->kernel_name = "fused_kernel";
@@ -1535,6 +1613,7 @@ shared_ptr<CompiledEquation> EquationCompiler::compileFusedStage(const PhysicalE
         compiled->launch_kind = CompiledEquation::LaunchKind::BroadcastGrouped;
         compiled->elements_per_thread = 1;
         compiled->uses_uint32_numel_arg = false;
+        compiled->uses_device_runtime_extent = uses_device_ragged_runtime_extent;
         cacheInsert(key, compiled);
         return compiled;
     }
@@ -1555,6 +1634,7 @@ shared_ptr<CompiledEquation> EquationCompiler::compileFusedStage(const PhysicalE
         compiled->elements_per_thread = CudaSourceEmitter::flatElementsPerThread(stage);
         compiled->uses_uint32_numel_arg = use_uint32_index_math;
     }
+    compiled->uses_device_runtime_extent = uses_device_ragged_runtime_extent;
 
     cacheInsert(key, compiled);
     return compiled;
@@ -2311,7 +2391,8 @@ shared_ptr<CompiledAttention> EquationCompiler::compileAttention(const PhysicalE
         }
         const ExprNode& q_offsets = validate_local_input(node.attention_ragged_offset_q_node, "q_ragged_offsets");
         const ExprNode& kv_offsets = validate_local_input(node.attention_ragged_offset_kv_node, "kv_ragged_offsets");
-        if (q_offsets.input_tensor_dtype.value() != DataType::INT32 || kv_offsets.input_tensor_dtype.value() != DataType::INT32) {
+        if (!isCudnnRaggedOffsetDataType(q_offsets.input_tensor_dtype.value()) ||
+            !isCudnnRaggedOffsetDataType(kv_offsets.input_tensor_dtype.value())) {
             throw std::runtime_error("Attention ragged offset inputs must be INT32 tensors.");
         }
     }
@@ -2499,7 +2580,8 @@ shared_ptr<CompiledAttentionBackward> EquationCompiler::compileAttentionBackward
         }
         const ExprNode& q_offsets = validate_local_input(node.attention_ragged_offset_q_node, "q_ragged_offsets");
         const ExprNode& kv_offsets = validate_local_input(node.attention_ragged_offset_kv_node, "kv_ragged_offsets");
-        if (q_offsets.input_tensor_dtype.value() != DataType::INT32 || kv_offsets.input_tensor_dtype.value() != DataType::INT32) {
+        if (!isCudnnRaggedOffsetDataType(q_offsets.input_tensor_dtype.value()) ||
+            !isCudnnRaggedOffsetDataType(kv_offsets.input_tensor_dtype.value())) {
             throw std::runtime_error("Attention-backward ragged offset inputs must be INT32 tensors.");
         }
     }
@@ -5510,6 +5592,7 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             throw std::runtime_error("PhysicalOutputs contains output node_idx out of range.");
         }
     }
+    validateRaggedRuntimeExtentConsumers(expr);
 
     const std::vector<uint32_t> node_use_counts = computeNodeUseCounts(expr);
 
@@ -6750,6 +6833,10 @@ shared_ptr<CompiledEquation> EquationCompiler::compileSpecializedBroadcastStage(
     }
     if (groups.empty()) {
         throw std::runtime_error("compileSpecializedBroadcastStage requires at least one broadcast group.");
+    }
+    if (expressionUsesDeviceRaggedRuntimeExtent(stage.expr)) {
+        throw std::runtime_error(
+            "ragged runtime extent is not supported by specialized broadcast kernels; ragged valuewise operands must have identical capacity shapes.");
     }
 
     ensureCudaContextCurrent(sig.device_num);

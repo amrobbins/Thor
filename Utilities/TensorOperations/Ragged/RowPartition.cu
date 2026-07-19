@@ -302,7 +302,7 @@ struct ValidateOffsetsFn {
 
 }  // namespace
 
-bool isRowPartitionOffsetDTypeSupported(DataType dtype) { return dtype == DataType::UINT32 || dtype == DataType::UINT64; }
+bool isRowPartitionOffsetDTypeSupported(DataType dtype) { return isCanonicalRowPartitionOffsetDataType(dtype); }
 
 RowPartitionLengthsToOffsetsPlan prepareRowPartitionLengthsToOffsets(const Tensor& lengths,
                                                                     const Tensor& offsets,

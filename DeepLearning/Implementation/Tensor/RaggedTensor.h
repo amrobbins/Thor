@@ -41,7 +41,8 @@ class RaggedTensor {
     }
 
     Tensor getActiveValueCount() const;
-    RaggedRuntimeExtent getRuntimeExtent(uint64_t elementsPerValue = 1) const;
+    RaggedRuntimeExtent getRuntimeExtent() const;
+    RaggedRuntimeExtent getRuntimeExtent(uint64_t elementsPerValue) const;
 
     bool operator==(const RaggedTensor &rhs) const { return values == rhs.values && offsets == rhs.offsets; }
     bool operator!=(const RaggedTensor &rhs) const { return !(*this == rhs); }

@@ -137,6 +137,7 @@ enum class ExprOp : uint16_t {
     SEGMENTED_REDUCE_SUM,
     SEGMENTED_REDUCE_MIN,
     SEGMENTED_REDUCE_MAX,
+    RAGGED_VALUEWISE_EXTENT,
 };
 
 enum class RotaryScalingKind : uint8_t {
@@ -320,6 +321,11 @@ struct ExprNode {
     ScanMode scan_mode = ScanMode::Exclusive;
     uint64_t scan_axis = UINT64_MAX;  // UINT64_MAX means final axis.
     bool scan_reverse = false;
+
+    // RAGGED_VALUEWISE_EXTENT metadata. rhs is the canonical offsets tensor.
+    uint64_t ragged_runtime_batch_size = 0;
+    uint64_t ragged_runtime_max_active_values = 0;
+    uint64_t ragged_runtime_elements_per_value = 1;
 
     // For INPUT / RUNTIME_SCALAR nodes only: actual dtype of the bound runtime value.
     std::optional<DataType> input_tensor_dtype = std::nullopt;
@@ -658,6 +664,10 @@ class Expression {
     [[nodiscard]] static Expression segmentedReduceSum(const Expression& input, const Expression& offsets);
     [[nodiscard]] static Expression segmentedReduceMin(const Expression& input, const Expression& offsets);
     [[nodiscard]] static Expression segmentedReduceMax(const Expression& input, const Expression& offsets);
+    [[nodiscard]] Expression withRaggedRuntimeExtent(const Expression& offsets,
+                                                     uint64_t batch_size,
+                                                     uint64_t max_active_values,
+                                                     uint64_t elements_per_value) const;
     [[nodiscard]] std::pair<Expression, Expression> scanWithIndices(ScanOp op, int64_t axis = -1, bool inclusive = true) const;
     [[nodiscard]] std::pair<Expression, Expression> segmentedScanWithIndices(const Expression& offsets,
                                                                              ScanOp op,

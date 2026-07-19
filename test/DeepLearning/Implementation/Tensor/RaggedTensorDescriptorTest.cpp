@@ -3,6 +3,7 @@
 
 #include "gtest/gtest.h"
 
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -40,6 +41,12 @@ TEST(RaggedTensorDescriptor, RejectsInvalidOffsetTypes) {
 TEST(RaggedTensorDescriptor, RejectsInvalidCapacityAndTrailingDimensions) {
     EXPECT_THROW((RowPartitionDescriptor(2, 0, DataType::UINT32)), logic_error);
     EXPECT_THROW((RaggedTensorDescriptor(DataType::FP32, {8, 0}, 2, 5, DataType::UINT32)), logic_error);
+}
+
+TEST(RaggedTensorDescriptor, RejectsCapacityThatCanonicalOffsetDTypeCannotRepresent) {
+    const uint64_t exceeds_uint32 = static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) + 1ULL;
+    EXPECT_THROW((RowPartitionDescriptor(2, exceeds_uint32, DataType::UINT32)), logic_error);
+    EXPECT_NO_THROW((RowPartitionDescriptor(2, exceeds_uint32, DataType::UINT64)));
 }
 
 TEST(RaggedTensorDescriptor, RejectsValuesCapacityMismatch) {

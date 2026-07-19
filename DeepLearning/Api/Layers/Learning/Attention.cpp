@@ -1,5 +1,6 @@
 
 #include "DeepLearning/Api/Layers/Learning/Attention.h"
+#include "Utilities/TensorOperations/Ragged/RowPartitionDTypePolicy.h"
 
 #include "DeepLearning/Api/Initializers/Glorot.h"
 #include "DeepLearning/Api/Parameter/ParameterSpecification.h"
@@ -617,7 +618,7 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
 
             auto normalizeRaggedOffsets = [&](const char* inputName) -> Tensor {
                 Tensor offsets = inputs.at(inputName);
-                if (offsets.getDataType() != DataType::INT32) {
+                if (!ThorImplementation::isCudnnRaggedOffsetDataType(offsets.getDataType())) {
                     throw std::runtime_error(std::string("Attention ") + inputName + " dtype must be INT32.");
                 }
                 if (offsets.getTotalNumElements() < batch + 1) {

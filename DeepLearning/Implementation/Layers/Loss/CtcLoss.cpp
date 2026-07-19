@@ -1,4 +1,5 @@
 #include "DeepLearning/Implementation/Layers/Loss/CtcLoss.h"
+#include "Utilities/TensorOperations/Ragged/RowPartitionDTypePolicy.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Common/ScopedGpu.h"
@@ -171,8 +172,8 @@ void CtcLoss::validateConnectedDescriptors() {
     THOR_THROW_IF_FALSE(inputLengthsInput.value().getPlacement() == featureInput.value().getPlacement());
 
     THOR_THROW_IF_FALSE(labelsInput.value().getDescriptor().getDataType() == DataType::INT32);
-    THOR_THROW_IF_FALSE(labelLengthsInput.value().getDescriptor().getDataType() == DataType::INT32);
-    THOR_THROW_IF_FALSE(inputLengthsInput.value().getDescriptor().getDataType() == DataType::INT32);
+    THOR_THROW_IF_FALSE(isCudnnCtcLengthDataType(labelLengthsInput.value().getDescriptor().getDataType()));
+    THOR_THROW_IF_FALSE(isCudnnCtcLengthDataType(inputLengthsInput.value().getDescriptor().getDataType()));
     THOR_THROW_IF_FALSE(isPaddedLabelsMatrix(labelsInput.value(), ctcBatchSize, maxLabelLength));
     THOR_THROW_IF_FALSE(isBatchLengthVector(labelLengthsInput.value(), ctcBatchSize));
     THOR_THROW_IF_FALSE(isBatchLengthVector(inputLengthsInput.value(), ctcBatchSize));

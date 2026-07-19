@@ -7,6 +7,7 @@
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "Utilities/TensorOperations/Misc/Concatenate.h"
 #include "Utilities/TensorOperations/Misc/Split.h"
+#include "Utilities/Expression/CudaHelpers.h"
 
 namespace ThorImplementation {
 
@@ -89,37 +90,32 @@ class Split : public MultiConnectionLayer {
 
         THOR_THROW_IF_FALSE(featureInputs[0].value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
         ScopedGpu scopedGpu(featureInputs[0].value().getPlacement().getDeviceNum());
-        cudaError_t cudaStatus;
         int numSplitTensors = featureOutputs.size();
         THOR_THROW_IF_FALSE(errorInputs.size() == featureOutputs.size());
 
         uint32_t numPresentErrorInputs = numPresentTensors(errorInputs);
         THOR_THROW_IF_FALSE(numPresentErrorInputs == errorInputs.size() || numPresentErrorInputs == 0);
 
-        cudaStatus = cudaMalloc(reinterpret_cast<void **>(&splitTensorFeatureOutputMemoriesArray_d), numSplitTensors * sizeof(void *));
-        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void **>(&splitTensorFeatureOutputMemoriesArray_d), numSplitTensors * sizeof(void *)));
         void **splitTensorFeatureOutputMemoriesArray = new void *[numSplitTensors];
         for (int i = 0; i < numSplitTensors; ++i)
             splitTensorFeatureOutputMemoriesArray[i] = featureOutputs[i].value().getMemPtr();
-        cudaStatus = cudaMemcpy(splitTensorFeatureOutputMemoriesArray_d,
+        CUDA_CHECK(cudaMemcpy(splitTensorFeatureOutputMemoriesArray_d,
                                 splitTensorFeatureOutputMemoriesArray,
                                 numSplitTensors * sizeof(void *),
-                                cudaMemcpyHostToDevice);
-        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+                                cudaMemcpyHostToDevice));
         delete[] splitTensorFeatureOutputMemoriesArray;
 
         if (numPresentErrorInputs > 0) {
-            cudaStatus = cudaMalloc(reinterpret_cast<void **>(&splitTensorErrorInputMemoriesArray_d), numSplitTensors * sizeof(void *));
-            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+            CUDA_CHECK(cudaMalloc(reinterpret_cast<void **>(&splitTensorErrorInputMemoriesArray_d), numSplitTensors * sizeof(void *)));
             void **splitTensorErrorInputMemoriesArray = new void *[numSplitTensors];
             for (int i = 0; i < numSplitTensors; ++i) {
                 splitTensorErrorInputMemoriesArray[i] = errorInputs[i].value().getMemPtr();
             }
-            cudaStatus = cudaMemcpy(splitTensorErrorInputMemoriesArray_d,
+            CUDA_CHECK(cudaMemcpy(splitTensorErrorInputMemoriesArray_d,
                                     splitTensorErrorInputMemoriesArray,
                                     numSplitTensors * sizeof(void *),
-                                    cudaMemcpyHostToDevice);
-            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+                                    cudaMemcpyHostToDevice));
             delete[] splitTensorErrorInputMemoriesArray;
         } else {
             for (uint32_t i = 0; i < errorOutputs.size(); ++i) {
@@ -132,11 +128,8 @@ class Split : public MultiConnectionLayer {
         long *axisElementsPerSplitTensor = new long[numSplitTensors];
         for (int i = 0; i < numSplitTensors; ++i)
             axisElementsPerSplitTensor[i] = axisElements[i];
-        cudaStatus = cudaMalloc(&axisElementsPerSplitTensor_d, numSplitTensors * sizeof(long));
-        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
-        cudaStatus =
-            cudaMemcpy(axisElementsPerSplitTensor_d, axisElementsPerSplitTensor, numSplitTensors * sizeof(long), cudaMemcpyHostToDevice);
-        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+        CUDA_CHECK(cudaMalloc(&axisElementsPerSplitTensor_d, numSplitTensors * sizeof(long)));
+        CUDA_CHECK(cudaMemcpy(axisElementsPerSplitTensor_d, axisElementsPerSplitTensor, numSplitTensors * sizeof(long), cudaMemcpyHostToDevice));
 
         unsigned int numDimensions = featureInputs.front().value().getDescriptor().getDimensions().size();
         long *stridePerSplitTensorDimension = new long[numDimensions * numSplitTensors];
@@ -146,13 +139,11 @@ class Split : public MultiConnectionLayer {
                 stridePerSplitTensorDimension[t * numDimensions + d] = stridePerSplitTensorDimension[t * numDimensions + (d + 1)] *
                                                                        featureOutputs[t].value().getDescriptor().getDimensions()[d + 1];
         }
-        cudaStatus = cudaMalloc(&stridePerSplitTensorDimension_d, numDimensions * numSplitTensors * sizeof(long));
-        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
-        cudaStatus = cudaMemcpy(stridePerSplitTensorDimension_d,
+        CUDA_CHECK(cudaMalloc(&stridePerSplitTensorDimension_d, numDimensions * numSplitTensors * sizeof(long)));
+        CUDA_CHECK(cudaMemcpy(stridePerSplitTensorDimension_d,
                                 stridePerSplitTensorDimension,
                                 numDimensions * numSplitTensors * sizeof(long),
-                                cudaMemcpyHostToDevice);
-        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+                                cudaMemcpyHostToDevice));
 
         delete[] stridePerSplitTensorDimension;
         delete[] axisElementsPerSplitTensor;
@@ -161,13 +152,11 @@ class Split : public MultiConnectionLayer {
         stridePerPackedTensorDimension[inputDimensions.size() - 1] = 1;
         for (int i = (int)inputDimensions.size() - 2; i >= 0; --i)
             stridePerPackedTensorDimension[i] = inputDimensions[i + 1] * stridePerPackedTensorDimension[i + 1];
-        cudaStatus = cudaMalloc(&stridePerPackedTensorDimension_d, inputDimensions.size() * sizeof(unsigned long));
-        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
-        cudaStatus = cudaMemcpy(stridePerPackedTensorDimension_d,
+        CUDA_CHECK(cudaMalloc(&stridePerPackedTensorDimension_d, inputDimensions.size() * sizeof(unsigned long)));
+        CUDA_CHECK(cudaMemcpy(stridePerPackedTensorDimension_d,
                                 stridePerPackedTensorDimension,
                                 inputDimensions.size() * sizeof(unsigned long),
-                                cudaMemcpyHostToDevice);
-        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+                                cudaMemcpyHostToDevice));
         delete[] stridePerPackedTensorDimension;
     }
 
@@ -238,33 +227,27 @@ class Split : public MultiConnectionLayer {
     }
 
     void cleanup() override {
-        cudaError_t cudaStatus;
         TensorPlacement placement = featureInputs[0].value().getPlacement();
         THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
         ScopedGpu scopedGpu(featureInputs[0].value().getPlacement().getDeviceNum());
         if (splitTensorFeatureOutputMemoriesArray_d != nullptr) {
-            cudaStatus = cudaFree(splitTensorFeatureOutputMemoriesArray_d);
-            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+            CUDA_CHECK(cudaFree(splitTensorFeatureOutputMemoriesArray_d));
             splitTensorFeatureOutputMemoriesArray_d = nullptr;
         }
         if (splitTensorErrorInputMemoriesArray_d != nullptr) {
-            cudaStatus = cudaFree(splitTensorErrorInputMemoriesArray_d);
-            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+            CUDA_CHECK(cudaFree(splitTensorErrorInputMemoriesArray_d));
             splitTensorErrorInputMemoriesArray_d = nullptr;
         }
         if (axisElementsPerSplitTensor_d != nullptr) {
-            cudaStatus = cudaFree(axisElementsPerSplitTensor_d);
-            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+            CUDA_CHECK(cudaFree(axisElementsPerSplitTensor_d));
             axisElementsPerSplitTensor_d = nullptr;
         }
         if (stridePerPackedTensorDimension_d != nullptr) {
-            cudaStatus = cudaFree(stridePerPackedTensorDimension_d);
-            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+            CUDA_CHECK(cudaFree(stridePerPackedTensorDimension_d));
             stridePerPackedTensorDimension_d = nullptr;
         }
         if (stridePerSplitTensorDimension_d != nullptr) {
-            cudaStatus = cudaFree(stridePerSplitTensorDimension_d);
-            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+            CUDA_CHECK(cudaFree(stridePerSplitTensorDimension_d));
             stridePerSplitTensorDimension_d = nullptr;
         }
     }

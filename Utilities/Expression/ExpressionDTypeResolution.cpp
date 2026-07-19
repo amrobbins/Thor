@@ -1,5 +1,6 @@
 #include <optional>
 #include "Utilities/Expression/ExpressionDTypeResolution.h"
+#include "Utilities/TensorOperations/Ragged/RowPartitionDTypePolicy.h"
 
 #include <stdexcept>
 
@@ -69,7 +70,7 @@ static bool isCastOp(ExprOp op) { return op == ExprOp::CAST; }
 
 static bool isPassthroughViewOp(ExprOp op) {
     return op == ExprOp::STRIDED_VIEW || op == ExprOp::RESHAPE || op == ExprOp::TRANSPOSE || op == ExprOp::UNSQUEEZE ||
-           op == ExprOp::SQUEEZE;
+           op == ExprOp::SQUEEZE || op == ExprOp::RAGGED_VALUEWISE_EXTENT;
 }
 
 static bool isBooleanOutputOp(ExprOp op) { return isComparisonOp(op) || isLogicalOp(op); }
@@ -350,6 +351,18 @@ static DataType resolveNodeLogicalInputDType(const ExprNode& node,
         return resolved_output_dtypes[node.lhs];
     }
 
+    if (node.op == ExprOp::RAGGED_VALUEWISE_EXTENT) {
+        if (node.lhs >= resolved_output_dtypes.size() || node.rhs >= resolved_output_dtypes.size()) {
+            throw std::runtime_error("ragged valuewise extent node has parent index out of range in resolveNodeLogicalInputDType.");
+        }
+        const DataType offsets_dtype = resolved_output_dtypes[node.rhs];
+        if (!isCanonicalRowPartitionOffsetDataType(offsets_dtype)) {
+            throw std::runtime_error("ragged valuewise extent offsets must have UINT32 or UINT64 dtype, received: " +
+                                     TensorDescriptor::getElementTypeName(offsets_dtype));
+        }
+        return resolved_output_dtypes[node.lhs];
+    }
+
     if (node.op == ExprOp::TAKE_ALONG_AXIS) {
         if (node.lhs >= resolved_output_dtypes.size() || node.rhs >= resolved_output_dtypes.size()) {
             throw std::runtime_error("take_along_axis node has parent index out of range in resolveNodeLogicalInputDType.");
@@ -367,7 +380,7 @@ static DataType resolveNodeLogicalInputDType(const ExprNode& node,
             throw std::runtime_error("segmented_scan node has parent index out of range in resolveNodeLogicalInputDType.");
         }
         const DataType offsets_dtype = resolved_output_dtypes[node.rhs];
-        if (offsets_dtype != DataType::UINT32 && offsets_dtype != DataType::UINT64) {
+        if (!isCanonicalRowPartitionOffsetDataType(offsets_dtype)) {
             throw std::runtime_error("segmented_scan offsets must have UINT32 or UINT64 dtype, received: " +
                                      TensorDescriptor::getElementTypeName(offsets_dtype));
         }
@@ -379,7 +392,7 @@ static DataType resolveNodeLogicalInputDType(const ExprNode& node,
             throw std::runtime_error("segmented-reduction node has parent index out of range in resolveNodeLogicalInputDType.");
         }
         const DataType offsets_dtype = resolved_output_dtypes[node.rhs];
-        if (offsets_dtype != DataType::UINT32 && offsets_dtype != DataType::UINT64) {
+        if (!isCanonicalRowPartitionOffsetDataType(offsets_dtype)) {
             throw std::runtime_error("segmented-reduction offsets must have UINT32 or UINT64 dtype, received: " +
                                      TensorDescriptor::getElementTypeName(offsets_dtype));
         }
@@ -397,7 +410,7 @@ static DataType resolveNodeLogicalInputDType(const ExprNode& node,
                 throw std::runtime_error("segmented scan min/max backward offsets node has index out of range in resolveNodeLogicalInputDType.");
             }
             const DataType offsets_dtype = resolved_output_dtypes[node.aux];
-            if (offsets_dtype != DataType::UINT32 && offsets_dtype != DataType::UINT64) {
+            if (!isCanonicalRowPartitionOffsetDataType(offsets_dtype)) {
                 throw std::runtime_error("segmented scan min/max backward offsets must have UINT32 or UINT64 dtype, received: " +
                                          TensorDescriptor::getElementTypeName(offsets_dtype));
             }
@@ -541,6 +554,18 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
         return node.output_dtype.value();
     }
 
+    if (node.op == ExprOp::RAGGED_VALUEWISE_EXTENT) {
+        if (node.lhs >= resolved_output_dtypes.size() || node.rhs >= resolved_output_dtypes.size()) {
+            throw std::runtime_error("ragged valuewise extent node has parent index out of range in resolveNodeOutputDType.");
+        }
+        const DataType offsets_dtype = resolved_output_dtypes[node.rhs];
+        if (!isCanonicalRowPartitionOffsetDataType(offsets_dtype)) {
+            throw std::runtime_error("ragged valuewise extent offsets must have UINT32 or UINT64 dtype, received: " +
+                                     TensorDescriptor::getElementTypeName(offsets_dtype));
+        }
+        return node.output_dtype.has_value() ? node.output_dtype.value() : resolved_output_dtypes[node.lhs];
+    }
+
     if (node.op == ExprOp::TAKE_ALONG_AXIS) {
         if (node.lhs >= resolved_output_dtypes.size() || node.rhs >= resolved_output_dtypes.size()) {
             throw std::runtime_error("take_along_axis node has parent index out of range in resolveNodeOutputDType.");
@@ -571,7 +596,7 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
                 throw std::runtime_error("segmented_scan offsets node has index out of range in resolveNodeOutputDType.");
             }
             const DataType offsets_dtype = resolved_output_dtypes[node.rhs];
-            if (offsets_dtype != DataType::UINT32 && offsets_dtype != DataType::UINT64) {
+            if (!isCanonicalRowPartitionOffsetDataType(offsets_dtype)) {
                 throw std::runtime_error("segmented_scan offsets must have UINT32 or UINT64 dtype, received: " +
                                          TensorDescriptor::getElementTypeName(offsets_dtype));
             }
@@ -591,7 +616,7 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
             throw std::runtime_error("segmented-reduction node has parent index out of range in resolveNodeOutputDType.");
         }
         const DataType offsets_dtype = resolved_output_dtypes[node.rhs];
-        if (offsets_dtype != DataType::UINT32 && offsets_dtype != DataType::UINT64) {
+        if (!isCanonicalRowPartitionOffsetDataType(offsets_dtype)) {
             throw std::runtime_error("segmented-reduction offsets must have UINT32 or UINT64 dtype, received: " +
                                      TensorDescriptor::getElementTypeName(offsets_dtype));
         }
@@ -614,7 +639,7 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
                 throw std::runtime_error("segmented scan min/max backward offsets node has index out of range in resolveNodeOutputDType.");
             }
             const DataType offsets_dtype = resolved_output_dtypes[node.aux];
-            if (offsets_dtype != DataType::UINT32 && offsets_dtype != DataType::UINT64) {
+            if (!isCanonicalRowPartitionOffsetDataType(offsets_dtype)) {
                 throw std::runtime_error("segmented scan min/max backward offsets must have UINT32 or UINT64 dtype, received: " +
                                          TensorDescriptor::getElementTypeName(offsets_dtype));
             }
@@ -809,6 +834,10 @@ static void propagateMaterializedOutputComputeDTypes(PhysicalExpression& expr,
             // Only floating-value branches should be widened by a materialized where output.
             propagate_to_floating_parent(node.rhs);
             propagate_to_floating_parent(node.aux);
+        } else if (node.op == ExprOp::RAGGED_VALUEWISE_EXTENT) {
+            // The offsets operand controls launch extent only. It is structural
+            // metadata and never participates in value dtype propagation.
+            propagate_to_parent(node.lhs);
         } else if (isSegmentedReduceOp(node.op)) {
             // Segment offsets are structural metadata; reduction compute dtype
             // propagates only through values.

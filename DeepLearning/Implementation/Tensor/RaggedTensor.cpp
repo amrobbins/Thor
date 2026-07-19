@@ -2,6 +2,9 @@
 
 #include "Utilities/TensorOperations/Ragged/RuntimeExtent.h"
 
+#include <limits>
+#include <stdexcept>
+
 namespace ThorImplementation {
 
 RaggedTensor::RaggedTensor(Tensor values, Tensor offsets) : values(values), offsets(offsets) {
@@ -26,6 +29,19 @@ RaggedTensor::RaggedTensor(Tensor values, Tensor offsets) : values(values), offs
 Tensor RaggedTensor::getActiveValueCount() const {
     THOR_THROW_IF_FALSE(initialized);
     return rowPartitionActiveValueCount(offsets, getBatchSize());
+}
+
+
+RaggedRuntimeExtent RaggedTensor::getRuntimeExtent() const {
+    THOR_THROW_IF_FALSE(initialized);
+    uint64_t elements_per_value = 1;
+    for (uint64_t dim : descriptor.getTrailingDimensions()) {
+        if (dim != 0 && elements_per_value > std::numeric_limits<uint64_t>::max() / dim) {
+            throw std::overflow_error("RaggedTensor trailing dimensions overflow uint64_t elementsPerValue.");
+        }
+        elements_per_value *= dim;
+    }
+    return getRuntimeExtent(elements_per_value);
 }
 
 RaggedRuntimeExtent RaggedTensor::getRuntimeExtent(uint64_t elementsPerValue) const {

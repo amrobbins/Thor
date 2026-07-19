@@ -3,6 +3,7 @@
 #include "DeepLearning/Implementation/Tensor/DataType.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "DeepLearning/Implementation/Tensor/TensorPlacement.h"
+#include "Utilities/TensorOperations/Ragged/RowPartitionDTypePolicy.h"
 #include "Utilities/Common/Stream.h"
 
 #include <cstddef>
@@ -15,11 +16,12 @@ enum RowPartitionValidationErrorBits : uint32_t {
     ROW_PARTITION_OFFSETS_MUST_START_AT_ZERO = 1U << 0U,
     ROW_PARTITION_OFFSETS_MUST_BE_MONOTONIC = 1U << 1U,
     ROW_PARTITION_OFFSETS_EXCEED_CAPACITY = 1U << 2U,
+    ROW_PARTITION_ROW_LENGTH_EXCEEDS_MAX = 1U << 3U,
 };
 
 struct RowPartitionLengthsToOffsetsPlan {
     TensorPlacement placement;
-    DataType dtype = DataType::UINT32;
+    DataType dtype = kDefaultRowPartitionOffsetDataType;
     uint64_t batch_size = 0;
     size_t temp_storage_bytes = 0;
 };

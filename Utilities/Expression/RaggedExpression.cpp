@@ -30,6 +30,7 @@ RaggedExpression::RaggedExpression(Expression values, Expression offsets, Ragged
     : values(std::move(values)), offsets(std::move(offsets)), descriptor(std::move(descriptor)) {
     validateDescriptor(this->descriptor);
     runtimeExtent = makeRuntimeExtent(this->offsets, this->descriptor);
+    executionValues = markExecutionValues(this->values, this->offsets, this->descriptor);
     initialized = true;
 }
 
@@ -48,6 +49,7 @@ RaggedExpression::RaggedExpression(Expression values,
     if (runtimeExtent.elementsPerValue != elementsPerValue(this->descriptor)) {
         throw std::invalid_argument("RaggedExpression runtime extent elementsPerValue must match descriptor trailing dimensions.");
     }
+    executionValues = markExecutionValues(this->values, this->offsets, this->descriptor);
     initialized = true;
 }
 
@@ -72,7 +74,7 @@ RaggedExpression RaggedExpression::input(const std::string& values_name,
 
 const Expression& RaggedExpression::getValues() const {
     validateInitialized("getValues");
-    return values;
+    return executionValues;
 }
 
 const Expression& RaggedExpression::getOffsets() const {
@@ -92,7 +94,7 @@ const RaggedExpressionRuntimeExtent& RaggedExpression::getRuntimeExtent() const 
 
 std::set<std::string> RaggedExpression::getInputNames() const {
     validateInitialized("getInputNames");
-    std::set<std::string> names = values.getInputNames();
+    std::set<std::string> names = executionValues.getInputNames();
     const std::set<std::string> metadata_names = getMetadataInputNames();
     names.insert(metadata_names.begin(), metadata_names.end());
     return names;
@@ -309,6 +311,13 @@ RaggedExpressionRuntimeExtent RaggedExpression::makeRuntimeExtent(const Expressi
     extent.maxActiveValues = descriptor.getMaxTotalValues();
     extent.elementsPerValue = elementsPerValue(descriptor);
     return extent;
+}
+
+Expression RaggedExpression::markExecutionValues(const Expression& values,
+                                                 const Expression& offsets,
+                                                 const RaggedTensorDescriptor& descriptor) {
+    return values.withRaggedRuntimeExtent(
+        offsets, descriptor.getBatchSize(), descriptor.getMaxTotalValues(), elementsPerValue(descriptor));
 }
 
 uint64_t RaggedExpression::elementsPerValue(const RaggedTensorDescriptor& descriptor) {

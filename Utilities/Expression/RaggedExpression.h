@@ -79,7 +79,11 @@ class RaggedExpression {
     [[nodiscard]] RaggedExpression segment_log_softmax() const;
 
    private:
+    // `values` is the unwrapped value graph used to compose ragged operations.
+    // `executionValues` is an identity marker carrying the device-side logical extent
+    // and is the expression exposed for materialization/execution.
     Expression values = Expression::constantScalar(0.0);
+    Expression executionValues = Expression::constantScalar(0.0);
     Expression offsets = Expression::constantScalar(0.0);
     RaggedTensorDescriptor descriptor;
     RaggedExpressionRuntimeExtent runtimeExtent;
@@ -98,6 +102,9 @@ class RaggedExpression {
     void validateScalarValues(const char* caller) const;
     static void validateDescriptor(const RaggedTensorDescriptor& descriptor);
     static RaggedExpressionRuntimeExtent makeRuntimeExtent(const Expression& offsets, const RaggedTensorDescriptor& descriptor);
+    static Expression markExecutionValues(const Expression& values,
+                                          const Expression& offsets,
+                                          const RaggedTensorDescriptor& descriptor);
     static uint64_t elementsPerValue(const RaggedTensorDescriptor& descriptor);
     static RaggedTensorDescriptor descriptorWithValuesDataType(const RaggedTensorDescriptor& descriptor, DataType values_dtype);
     static RaggedTensorDescriptor descriptorWithValuesDescriptor(const RaggedTensorDescriptor& descriptor,

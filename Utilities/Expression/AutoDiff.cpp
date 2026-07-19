@@ -437,6 +437,10 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
             case ExprOp::MAX_GRAD_RIGHT:
                 reaches[i] = reaches.at(node.lhs) || reaches.at(node.rhs);
                 break;
+            case ExprOp::RAGGED_VALUEWISE_EXTENT:
+                // Offsets are structural launch metadata and are never differentiable.
+                reaches[i] = reaches.at(node.lhs);
+                break;
             case ExprOp::TAKE_ALONG_AXIS:
                 reaches[i] = reaches.at(node.lhs);
                 break;
@@ -636,6 +640,7 @@ class BackwardGraphBuilder {
                 return n.fill_dims;
             case ExprOp::NEG:
             case ExprOp::CAST:
+            case ExprOp::RAGGED_VALUEWISE_EXTENT:
             case ExprOp::SCAN:
             case ExprOp::SEGMENTED_SCAN:
                 return tryInferKnownGradientDims(n.lhs);
@@ -2448,6 +2453,7 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
             case ExprOp::NORMCDF:
             case ExprOp::LOGICAL_NOT:
             case ExprOp::CAST:
+            case ExprOp::RAGGED_VALUEWISE_EXTENT:
             case ExprOp::ROPE:
             case ExprOp::SOFTMAX:
                 node_dims[i] = node_dims[node.lhs];
@@ -2847,6 +2853,26 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
     }
 
     const std::vector<std::string> normalized_wrt = normalizeWrtNames(forward_expr, wrt_names);
+    std::unordered_set<std::string> ragged_metadata_input_names;
+    for (const ExprNode& node : forward_expr.nodes) {
+        if (node.op != ExprOp::RAGGED_VALUEWISE_EXTENT) {
+            continue;
+        }
+        if (node.rhs >= forward_expr.nodes.size()) {
+            throw std::runtime_error("Ragged valuewise extent has an invalid offsets node during autodiff.");
+        }
+        const ExprNode& offsets_node = forward_expr.nodes[node.rhs];
+        if (offsets_node.op != ExprOp::INPUT || offsets_node.input_slot >= forward_expr.inputs.size()) {
+            throw std::runtime_error("Ragged valuewise extent offsets must remain a direct metadata input during autodiff.");
+        }
+        ragged_metadata_input_names.insert(forward_expr.inputs[offsets_node.input_slot].name);
+    }
+    for (const std::string& name : normalized_wrt) {
+        if (ragged_metadata_input_names.contains(name)) {
+            throw std::runtime_error("Ragged row-partition offsets are metadata and are not differentiable: " + name);
+        }
+    }
+
     const std::vector<std::vector<uint64_t>> forward_node_dims = inferForwardNodeDims(forward_expr, forward_input_dims);
     const bool has_forward_dims = !forward_node_dims.empty();
     const std::vector<bool> node_reaches_requested_inputs = computeNodeReachesRequestedInputs(forward_expr, normalized_wrt);
@@ -3018,6 +3044,13 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
             case ExprOp::RUNTIME_SCALAR:
             case ExprOp::TENSOR_RUNTIME_SCALAR:
             case ExprOp::SCALAR_FP:
+                break;
+
+            case ExprOp::RAGGED_VALUEWISE_EXTENT:
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    throw std::runtime_error(
+                        "Ragged valuewise autodiff is not implemented yet; offsets are metadata and cannot receive gradients.");
+                }
                 break;
 
             case ExprOp::ADD:

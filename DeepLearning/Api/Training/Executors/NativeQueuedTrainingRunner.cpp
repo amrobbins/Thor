@@ -18,6 +18,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Implementation/Training/DeviceStartupCoordinator.h"
 #include "Utilities/Common/ScopedGpu.h"
+#include "Utilities/Expression/CudaHelpers.h"
 
 #include <cuda_runtime_api.h>
 
@@ -2246,14 +2247,15 @@ class NativeQueuedEpochScheduler {
                 params->completionCallbackLaunched = true;
                 params->completionCallbackFinished = false;
             }
-            cudaError_t cudaStatus = cudaLaunchHostFunc(completionStream, completeNativeQueuedBatch, params);
-            const auto hostFuncFinish = diagnosticNow(collectQueueDiagnostics);
-            if (cudaStatus != cudaSuccess) {
+            try {
+                CUDA_CHECK(cudaLaunchHostFunc(completionStream, completeNativeQueuedBatch, params));
+            } catch (...) {
                 std::lock_guard<std::mutex> lock(state->mutex);
                 params->completionCallbackLaunched = false;
                 params->completionCallbackFinished = false;
-                THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+                throw;
             }
+            const auto hostFuncFinish = diagnosticNow(collectQueueDiagnostics);
             if (collectQueueDiagnostics && shouldEmitQueueDiagnostic(batch + 1)) {
                 emitNativeQueueDiagnostic("submit",
                                           diagnosticPhase,

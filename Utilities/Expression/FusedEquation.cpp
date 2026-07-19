@@ -10,6 +10,7 @@
 #include "Utilities/Expression/Expression.h"
 #include "Utilities/Expression/ExpressionDTypeResolution.h"
 #include "Utilities/Expression/StampedEquation.h"
+#include "Utilities/TensorOperations/Ragged/RowPartitionDTypePolicy.h"
 
 #include <cuda_runtime.h>
 
@@ -1075,6 +1076,31 @@ static std::vector<uint64_t> thorAttentionDims(AttentionTensorLayout layout,
     }
 }
 
+static uint64_t numelFromDims(const std::vector<uint64_t>& dims);
+
+static std::vector<uint64_t> inferRaggedValuewiseExtentDims(const ExprNode& node,
+                                                               const std::vector<uint64_t>& values_dims,
+                                                               const std::vector<uint64_t>& offsets_dims) {
+    if (node.ragged_runtime_max_active_values == 0 || node.ragged_runtime_elements_per_value == 0) {
+        throw std::runtime_error("ragged valuewise extent metadata must be non-zero.");
+    }
+    if (node.ragged_runtime_batch_size == std::numeric_limits<uint64_t>::max()) {
+        throw std::runtime_error("ragged valuewise extent batch size overflows offsets element count.");
+    }
+    if (offsets_dims != std::vector<uint64_t>{node.ragged_runtime_batch_size + 1}) {
+        throw std::runtime_error("ragged valuewise extent offsets must have shape [B + 1].");
+    }
+    uint64_t expected_numel = node.ragged_runtime_max_active_values;
+    if (node.ragged_runtime_elements_per_value > std::numeric_limits<uint64_t>::max() / expected_numel) {
+        throw std::runtime_error("ragged valuewise extent maximum element count overflows uint64_t.");
+    }
+    expected_numel *= node.ragged_runtime_elements_per_value;
+    if (numelFromDims(values_dims) != expected_numel) {
+        throw std::runtime_error("ragged valuewise extent metadata does not match values capacity.");
+    }
+    return values_dims;
+}
+
 static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization(
     const PhysicalExpression& expr, const std::unordered_map<uint32_t, RuntimeInputValue>& root_values) {
     std::vector<std::vector<uint64_t>> node_dims(expr.nodes.size());
@@ -1098,6 +1124,9 @@ static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization
                 break;
             case ExprOp::FILL:
                 node_dims[i] = node.fill_dims;
+                break;
+            case ExprOp::RAGGED_VALUEWISE_EXTENT:
+                node_dims[i] = inferRaggedValuewiseExtentDims(node, node_dims.at(node.lhs), node_dims.at(node.rhs));
                 break;
             case ExprOp::ADD:
             case ExprOp::SUB:
@@ -2968,6 +2997,9 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDims(const Physical
             case ExprOp::FILL:
                 node_dims[i] = node.fill_dims;
                 break;
+            case ExprOp::RAGGED_VALUEWISE_EXTENT:
+                node_dims[i] = inferRaggedValuewiseExtentDims(node, node_dims.at(node.lhs), node_dims.at(node.rhs));
+                break;
             case ExprOp::ADD:
             case ExprOp::SUB:
             case ExprOp::MUL:
@@ -3304,6 +3336,7 @@ static uint64_t perElementSemanticFlops(ExprOp op) {
         case ExprOp::TENSOR_RUNTIME_SCALAR:
         case ExprOp::SCALAR_FP:
         case ExprOp::FILL:
+        case ExprOp::RAGGED_VALUEWISE_EXTENT:
         case ExprOp::RESHAPE:
         case ExprOp::STRIDED_VIEW:
         case ExprOp::STRIDED_VIEW_BACKWARD:
@@ -3343,6 +3376,9 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDimsForReachable(co
                 break;
             case ExprOp::FILL:
                 node_dims[i] = node.fill_dims;
+                break;
+            case ExprOp::RAGGED_VALUEWISE_EXTENT:
+                node_dims[i] = inferRaggedValuewiseExtentDims(node, node_dims.at(node.lhs), node_dims.at(node.rhs));
                 break;
             case ExprOp::ADD:
             case ExprOp::SUB:
@@ -3572,6 +3608,7 @@ static uint64_t computeFusedStageFlops(const PhysicalExpression& expr,
             case ExprOp::TENSOR_RUNTIME_SCALAR:
             case ExprOp::SCALAR_FP:
             case ExprOp::FILL:
+            case ExprOp::RAGGED_VALUEWISE_EXTENT:
             case ExprOp::RESHAPE:
             case ExprOp::STRIDED_VIEW:
             case ExprOp::STRIDED_VIEW_BACKWARD:
@@ -4465,6 +4502,9 @@ static std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>> collectEffe
             return {};
         case ExprOp::FILL:
             return {};
+        case ExprOp::RAGGED_VALUEWISE_EXTENT:
+            // Offsets are launch metadata, not a broadcast operand.
+            return collectEffectiveInputDimsForNode(expr, node_dims, node.lhs);
         case ExprOp::TRANSPOSE: {
             auto result = collectEffectiveInputDimsForNode(expr, node_dims, node.lhs);
             // A non-terminal transpose is evaluated by the index-aware fused emitter.
@@ -6956,7 +6996,7 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
             if (tensor->getPlacement() != q.getPlacement()) {
                 throw std::runtime_error(std::string("Attention ragged ") + label + " placement must match q.");
             }
-            if (tensor->getDataType() != DataType::INT32) {
+            if (!isCudnnRaggedOffsetDataType(tensor->getDataType())) {
                 throw std::runtime_error(std::string("Attention ragged ") + label + " dtype must be INT32.");
             }
             if (tensor->getDimensions() != std::vector<uint64_t>{qLogical.batch + 1}) {
@@ -7216,7 +7256,7 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
             if (tensor->getPlacement() != q.getPlacement()) {
                 throw std::runtime_error(std::string("Attention-backward ragged ") + label + " placement must match q.");
             }
-            if (tensor->getDataType() != DataType::INT32) {
+            if (!isCudnnRaggedOffsetDataType(tensor->getDataType())) {
                 throw std::runtime_error(std::string("Attention-backward ragged ") + label + " dtype must be INT32.");
             }
             if (tensor->getDimensions() != std::vector<uint64_t>{qLogical.batch + 1}) {

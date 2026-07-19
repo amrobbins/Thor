@@ -6,6 +6,7 @@
 #include "DeepLearning/Api/Layers/Loss/LossShaper.h"
 #include "DeepLearning/Implementation/Layers/Loss/CtcLoss.h"
 #include "Utilities/TensorOperations/Loss/CtcLoss.h"
+#include "Utilities/TensorOperations/Ragged/RowPartitionDTypePolicy.h"
 
 #include <optional>
 #include <vector>
@@ -125,7 +126,7 @@ class CtcLoss::Builder {
 
     CtcLoss::Builder& labelLengths(Tensor labelLengths) {
         THOR_THROW_IF_FALSE(!this->_labelLengths.has_value());
-        THOR_THROW_IF_FALSE(labelLengths.getDataType() == DataType::INT32);
+        THOR_THROW_IF_FALSE(ThorImplementation::isCudnnCtcLengthDataType(labelLengths.getDataType()));
         THOR_THROW_IF_FALSE(labelLengths.getDimensions() == std::vector<uint64_t>{1});
         this->_labelLengths = labelLengths;
         return *this;
@@ -133,7 +134,7 @@ class CtcLoss::Builder {
 
     CtcLoss::Builder& inputLengths(Tensor inputLengths) {
         THOR_THROW_IF_FALSE(!this->_inputLengths.has_value());
-        THOR_THROW_IF_FALSE(inputLengths.getDataType() == DataType::INT32);
+        THOR_THROW_IF_FALSE(ThorImplementation::isCudnnCtcLengthDataType(inputLengths.getDataType()));
         THOR_THROW_IF_FALSE(inputLengths.getDimensions() == std::vector<uint64_t>{1});
         this->_inputLengths = inputLengths;
         return *this;

@@ -1,8 +1,11 @@
+#include "DeepLearning/Implementation/Tensor/RaggedTensor.h"
 #include "Utilities/TensorOperations/Ragged/RowPartition.h"
 #include "Utilities/TensorOperations/Ragged/RuntimeExtent.h"
 
 #include "cuda_runtime.h"
 #include "gtest/gtest.h"
+
+#include <limits>
 
 #include <algorithm>
 #include <cstdint>
@@ -131,6 +134,20 @@ TEST(RowPartition, ActiveValueCountAliasesLastOffsetWithoutCopy) {
     EXPECT_EQ(hostValue, 5U);
 }
 
+
+TEST(RowPartition, CanonicalAndBackendOffsetDTypePoliciesAreExplicitlyDistinct) {
+    EXPECT_EQ(kDefaultRowPartitionOffsetDataType, DataType::UINT32);
+    EXPECT_TRUE(isCanonicalRowPartitionOffsetDataType(DataType::UINT32));
+    EXPECT_TRUE(isCanonicalRowPartitionOffsetDataType(DataType::UINT64));
+    EXPECT_FALSE(isCanonicalRowPartitionOffsetDataType(DataType::INT32));
+    EXPECT_TRUE(canonicalRowPartitionOffsetCanRepresent(DataType::UINT32, std::numeric_limits<uint32_t>::max()));
+    EXPECT_FALSE(canonicalRowPartitionOffsetCanRepresent(
+        DataType::UINT32, static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) + 1ULL));
+    EXPECT_TRUE(isCudnnRaggedOffsetDataType(DataType::INT32));
+    EXPECT_FALSE(isCudnnRaggedOffsetDataType(DataType::UINT32));
+    EXPECT_TRUE(isCudnnCtcLengthDataType(DataType::INT32));
+}
+
 TEST(RowPartition, RuntimeExtentBuildsFromOffsetsWithStaticCapacityAndTrailingElements) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
@@ -144,6 +161,21 @@ TEST(RowPartition, RuntimeExtentBuildsFromOffsetsWithStaticCapacityAndTrailingEl
     EXPECT_EQ(extent.elementsPerValue, 7ULL);
     EXPECT_EQ(extent.maxLaunchElements(), 63ULL);
     EXPECT_EQ(extent.maxGridDimX(16), 4U);
+}
+
+TEST(RowPartition, RaggedTensorRuntimeExtentDerivesTrailingElementsPerValue) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor values(gpuPlacement, TensorDescriptor(DataType::FP32, {9, 3, 4}));
+    Tensor offsets = makeGpuVector<uint32_t>({0U, 2U, 5U}, stream);
+    RaggedTensor ragged(values, offsets);
+
+    const RaggedRuntimeExtent extent = ragged.getRuntimeExtent();
+    EXPECT_EQ(extent.maxActiveValues, 9ULL);
+    EXPECT_EQ(extent.elementsPerValue, 12ULL);
+    EXPECT_EQ(extent.maxLaunchElements(), 108ULL);
+    EXPECT_EQ(extent.activeValueCount.getMemPtr<uint32_t>(), offsets.getMemPtr<uint32_t>() + 2);
 }
 
 TEST(RowPartition, RuntimeExtentRejectsInvalidStaticCapacityAndElementsPerValue) {

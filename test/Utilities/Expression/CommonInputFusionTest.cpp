@@ -2,7 +2,12 @@
 #include "Utilities/Expression/EquationCompiler.h"
 
 #include "Utilities/Expression/ExpressionDTypeResolution.h"
+#include "Utilities/Expression/RaggedExpression.h"
 #include "gtest/gtest.h"
+
+#include <cstdint>
+#include <optional>
+#include <string>
 
 using namespace ThorImplementation;
 
@@ -393,4 +398,118 @@ TEST(CudaSourceEmitter, Fp8E4M3CastsUseExplicitSatfiniteIntrinsics) {
 
     EXPECT_NE(source.find("__nv_cvt_float_to_fp8(value, __NV_SATFINITE, __NV_E4M3)"), std::string::npos);
     EXPECT_NE(source.find("thor_to_fp8_e4m3_satfinite("), std::string::npos);
+}
+
+
+TEST(CudaSourceEmitter, DenseValuewiseKernelDoesNotUseRaggedRuntimeExtentPath) {
+    auto x = Expression::input("x", DataType::FP32, DataType::FP32);
+    auto y = x.abs() + Expression::constantScalar(1.0);
+
+    auto physical = Expression::outputs({{"y", y}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(physical, {DataType::FP32});
+    auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
+
+    ASSERT_EQ(stages.size(), 1U);
+    ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::FusedKernel);
+    const std::optional<DataType> vectorized_dtype = CudaSourceEmitter::getVectorizedStageStorageDType(stages[0]);
+    EXPECT_FALSE(vectorized_dtype.has_value());
+    EXPECT_EQ(CudaSourceEmitter::flatElementsPerThread(stages[0]), 4U);
+
+    const std::string source = CudaSourceEmitter::emitFlat(stages[0], "dense_valuewise_regression");
+    EXPECT_EQ(source.find("active_values_raw"), std::string::npos);
+    EXPECT_EQ(source.find("runtime_numel_u64"), std::string::npos);
+    EXPECT_EQ(source.find("grid_stride"), std::string::npos);
+}
+
+TEST(CudaSourceEmitter, WideScalarFlatPreservesAlignedFastPathAndHandlesUnalignedAliasesAndTailsScalarly) {
+    auto x = Expression::input("x", DataType::FP32, DataType::FP32);
+    auto y = x.abs() + Expression::constantScalar(1.0);
+
+    auto physical = Expression::outputs({{"y", y}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(physical, {DataType::FP32});
+    auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
+
+    ASSERT_EQ(stages.size(), 1U);
+    ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::FusedKernel);
+    ASSERT_EQ(CudaSourceEmitter::flatElementsPerThread(stages[0]), 4U);
+
+    const std::string source = CudaSourceEmitter::emitFlat(stages[0], "wide_scalar_alignment_guard");
+    EXPECT_NE(source.find("const float* in0"), std::string::npos);
+    EXPECT_NE(source.find("float* out0"), std::string::npos);
+    EXPECT_NE(source.find("if (full_chunk && chunk_aligned)"), std::string::npos);
+    EXPECT_NE(source.find("*reinterpret_cast<const float4*>(in0 + base)"), std::string::npos);
+    EXPECT_NE(source.find("*reinterpret_cast<float4*>(out0 + base)"), std::string::npos);
+    EXPECT_NE(source.find("in0[lane_idx_0]"), std::string::npos);
+    EXPECT_NE(source.find("out0[lane_idx_0]"), std::string::npos);
+}
+
+TEST(CudaSourceEmitter, RaggedValuewiseKernelReadsOffsetsBatchElementOnDevice) {
+    const RaggedTensorDescriptor descriptor(DataType::FP32, {}, 4, 12, DataType::UINT32);
+    const RaggedExpression ragged = RaggedExpression::input("x", descriptor);
+    auto physical = Expression::outputs({{"y", ragged.relu().getValues()}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(physical, {DataType::FP32, DataType::UINT32});
+    auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
+
+    ASSERT_EQ(stages.size(), 1U);
+    ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::FusedKernel);
+    EXPECT_FALSE(CudaSourceEmitter::getVectorizedStageStorageDType(stages[0]).has_value());
+    EXPECT_EQ(CudaSourceEmitter::flatElementsPerThread(stages[0]), 1U);
+
+    uint32_t offsets_input_slot = UINT32_MAX;
+    for (uint32_t slot = 0; slot < stages[0].expr.inputs.size(); ++slot) {
+        if (stages[0].expr.inputs[slot].name == "x.offsets") {
+            offsets_input_slot = slot;
+            break;
+        }
+    }
+    ASSERT_NE(offsets_input_slot, UINT32_MAX);
+
+    const std::string source = CudaSourceEmitter::emitFlat(stages[0], "ragged_valuewise_extent");
+    const std::string active_count_load =
+        "active_values_raw = static_cast<unsigned long long>(in" + std::to_string(offsets_input_slot) + "[4ULL])";
+    EXPECT_NE(source.find(active_count_load), std::string::npos);
+    EXPECT_NE(source.find("runtime_numel_u64 = active_values * 1ULL"), std::string::npos);
+    EXPECT_NE(source.find("for (; idx < runtime_numel; idx += grid_stride)"), std::string::npos);
+}
+
+TEST(CudaSourceEmitter, RaggedExtentRejectsMixedDenseOutputInOneFusedKernel) {
+    const RaggedTensorDescriptor descriptor(DataType::FP32, {}, 4, 12, DataType::UINT32);
+    const RaggedExpression ragged = RaggedExpression::input("x", descriptor);
+    auto physical = Expression::outputs({
+        {"ragged", ragged.relu().getValues()},
+        {"dense", Expression::input("x.values", DataType::FP32, DataType::FP32) + Expression::constantScalar(1.0)},
+    }).physicalOutputs();
+    resolveOutputsDTypesInPlace(physical, {DataType::FP32, DataType::UINT32});
+    auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
+
+    ASSERT_EQ(stages.size(), 1U);
+    ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::FusedKernel);
+    EXPECT_THROW((void)CudaSourceEmitter::emitFlat(stages[0], "mixed_ragged_dense_extent"), std::runtime_error);
+}
+
+TEST(EquationCompiler, RaggedExtentRejectsImplicitDenseReductionFallback) {
+    const RaggedTensorDescriptor descriptor(DataType::FP32, {}, 4, 12, DataType::UINT32);
+    const RaggedExpression ragged = RaggedExpression::input("x", descriptor);
+    const PhysicalOutputs outputs =
+        Expression::outputs({{"invalid", ragged.getValues().reduce_sum({0}, {}, DataType::FP32)}}).physicalOutputs();
+
+    EXPECT_THROW((void)EquationCompiler::splitAtReductionBoundaries(outputs), std::runtime_error);
+}
+
+TEST(CudaSourceEmitter, MultipleRaggedOutputsSharingOffsetsCanFuseTogether) {
+    const RaggedTensorDescriptor descriptor(DataType::FP32, {}, 4, 12, DataType::UINT32);
+    const RaggedExpression ragged = RaggedExpression::input("x", descriptor);
+    auto physical = Expression::outputs({
+        {"relu", ragged.relu().getValues()},
+        {"abs", ragged.abs().getValues()},
+    }).physicalOutputs();
+    resolveOutputsDTypesInPlace(physical, {DataType::FP32, DataType::UINT32});
+    auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
+
+    ASSERT_EQ(stages.size(), 1U);
+    ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::FusedKernel);
+    EXPECT_NO_THROW({
+        const std::string source = CudaSourceEmitter::emitFlat(stages[0], "shared_ragged_extent_outputs");
+        EXPECT_NE(source.find("active_values_raw"), std::string::npos);
+    });
 }

@@ -16,6 +16,7 @@
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "DeepLearning/Implementation/Tensor/TensorPlacement.h"
 #include "Utilities/Common/ScopedGpu.h"
+#include "Utilities/Expression/CudaHelpers.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -103,13 +104,12 @@ void copyFromAsyncPythonConvenience(PhysicalTensor &dest, const PhysicalTensor &
             temporary.copyFromAsync(source, stream);
 
             ScopedGpu scopedGpu(sourceDeviceNum);
-            cudaError_t cudaStatus = cudaMemcpyPeerAsync(dest.getMemPtr<void>(),
+            CUDA_CHECK(cudaMemcpyPeerAsync(dest.getMemPtr<void>(),
                                                          destDeviceNum,
                                                          temporary.getMemPtr<void>(),
                                                          sourceDeviceNum,
                                                          destDescriptor.getArraySizeInBytes(),
-                                                         stream.getStream());
-            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+                                                         stream.getStream()));
 
             keepPhysicalTensorsAliveUntilStreamCompletes(stream, {temporary});
             return;
