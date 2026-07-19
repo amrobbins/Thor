@@ -7,37 +7,7 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Common/Stream.h"
 
-// The CUB dtype policy is shared across all supported CUB primitives:
-// 64-bit data/index types are off by default to control template-instantiation
-// and package size, while FP8 data/key types are on by default so Thor CI can
-// validate the empirically supported CUB surface.
-//
-// The original radix-sort-specific macros are still accepted as aliases when
-// they are supplied by a build configuration. Prefer the general THOR_CUB_*
-// names for new code.
-#ifndef THOR_CUB_ENABLE_64BIT_TYPES
-#ifdef THOR_CUB_RADIX_SORT_ENABLE_64BIT_KEYS
-#define THOR_CUB_ENABLE_64BIT_TYPES THOR_CUB_RADIX_SORT_ENABLE_64BIT_KEYS
-#else
-#define THOR_CUB_ENABLE_64BIT_TYPES 0
-#endif
-#endif
-
-#ifndef THOR_CUB_ENABLE_FP8_TYPES
-#ifdef THOR_CUB_RADIX_SORT_ENABLE_FP8_KEYS
-#define THOR_CUB_ENABLE_FP8_TYPES THOR_CUB_RADIX_SORT_ENABLE_FP8_KEYS
-#else
-#define THOR_CUB_ENABLE_FP8_TYPES 1
-#endif
-#endif
-
-#ifndef THOR_CUB_RADIX_SORT_ENABLE_64BIT_KEYS
-#define THOR_CUB_RADIX_SORT_ENABLE_64BIT_KEYS THOR_CUB_ENABLE_64BIT_TYPES
-#endif
-
-#ifndef THOR_CUB_RADIX_SORT_ENABLE_FP8_KEYS
-#define THOR_CUB_RADIX_SORT_ENABLE_FP8_KEYS THOR_CUB_ENABLE_FP8_TYPES
-#endif
+#include "Utilities/TensorOperations/Cub/CubDataTypePolicy.h"
 
 namespace ThorImplementation {
 

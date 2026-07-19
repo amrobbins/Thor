@@ -1405,7 +1405,7 @@ target_compile_definitions(Thor PRIVATE
 )
 
 
-file(GLOB_RECURSE TEST_SOURCES "${CMAKE_SOURCE_DIR}/test/*.cpp")
+file(GLOB_RECURSE TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/test/*.cpp")
 add_executable(thor_tests ${TEST_SOURCES})
 thor_apply_linker_settings(thor_tests)
 thor_enable_release_host_lto(thor_tests)
