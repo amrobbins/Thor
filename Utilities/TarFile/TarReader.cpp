@@ -2,6 +2,7 @@
 #include "Utilities/TarFile/ArchiveShardReaderWorker.h"
 
 #include <algorithm>
+#include <limits>
 
 using namespace std;
 using json = nlohmann::json;
@@ -243,11 +244,16 @@ void TarReader::scan() {
         if (!shardList.is_array()) {
             throw std::runtime_error("files[" + pathInArchive + "] is not an array");
         }
+        require(!shardList.empty(), "file has no payload entries: " + pathInArchive);
+
+        vector<EntryInfo>& fileEntries = archiveIndex[pathInArchive];
+        fileEntries.reserve(shardList.size());
 
         for (const json& entryInfoJ : shardList) {
             require(entryInfoJ.is_object(), "file info must be an object for: " + pathInArchive);
-            require(entryInfoJ.contains("archive_shard"), "missing 'shard' for: " + pathInArchive);
+            require(entryInfoJ.contains("archive_shard"), "missing 'archive_shard' for: " + pathInArchive);
             require(entryInfoJ.contains("file_data_offset"), "missing 'file_data_offset' for: " + pathInArchive);
+            require(entryInfoJ.contains("tensor_data_offset"), "missing 'tensor_data_offset' for: " + pathInArchive);
             require(entryInfoJ.contains("size"), "missing 'size' for: " + pathInArchive);
             require(entryInfoJ.contains("crc"), "missing 'crc' for: " + pathInArchive);
 
@@ -260,14 +266,37 @@ void TarReader::scan() {
 
             require(entryInfo.archiveShard < numShards, "entry refers to invalid shard for: " + pathInArchive);
 
-            const string& shardPath = archiveDirectory / shardFilenames[entryInfo.archiveShard];
+            const string shardPath = archiveDirectory / shardFilenames[entryInfo.archiveShard];
             const uint64_t shardSize = static_cast<uint64_t>(fs::file_size(shardPath));
 
-            require(entryInfo.fileDataOffset < shardSize, "data_offset beyond shard size for: " + pathInArchive);
-            require(entryInfo.fileDataOffset + entryInfo.size <= shardSize, "data read would exceed shard size for: " + pathInArchive);
+            require(entryInfo.fileDataOffset <= shardSize, "data_offset beyond shard size for: " + pathInArchive);
+            require(entryInfo.size <= shardSize - entryInfo.fileDataOffset,
+                    "data read would exceed shard size for: " + pathInArchive);
 
-            require(!archiveIndex.contains(pathInArchive), "file path duplicated in archive: " + pathInArchive);
-            archiveIndex[pathInArchive].emplace_back(entryInfo);
+            fileEntries.emplace_back(entryInfo);
+        }
+
+        // Archive shards are written in parallel, so fragments of one logical file
+        // can be appended to the shared index in any order.  Normalize by logical
+        // tensor offset, then verify that the fragments reconstruct exactly one
+        // contiguous byte range without gaps, overlap, or integer overflow.
+        sort(fileEntries.begin(), fileEntries.end(), [](const EntryInfo& lhs, const EntryInfo& rhs) {
+            if (lhs.tensorDataOffset != rhs.tensorDataOffset)
+                return lhs.tensorDataOffset < rhs.tensorDataOffset;
+            if (lhs.archiveShard != rhs.archiveShard)
+                return lhs.archiveShard < rhs.archiveShard;
+            return lhs.fileDataOffset < rhs.fileDataOffset;
+        });
+
+        uint64_t expectedTensorOffset = 0;
+        for (const EntryInfo& entryInfo : fileEntries) {
+            require(entryInfo.tensorDataOffset == expectedTensorOffset,
+                    "file fragments have a gap or overlap for: " + pathInArchive +
+                        " expected tensor_data_offset=" + to_string(expectedTensorOffset) +
+                        " actual=" + to_string(entryInfo.tensorDataOffset));
+            require(entryInfo.size <= numeric_limits<uint64_t>::max() - expectedTensorOffset,
+                    "file size overflows uint64 for: " + pathInArchive);
+            expectedTensorOffset += entryInfo.size;
         }
     }
 }
@@ -283,12 +312,11 @@ uint64_t TarReader::getFileSize(const std::string& pathInTar) const {
     require(containsFile(cleanedPathInTar),
             "Archive " + archiveName + " at " + archiveDirectory.string() + " does not contain file " + pathInTar +
                 " but a read was requested of it.");
-    vector<EntryInfo> fileEnties = archiveIndex.find(cleanedPathInTar)->second;
-    uint64_t numBytes = 0;
-    for (EntryInfo entryInfo : fileEnties) {
-        numBytes += entryInfo.size;
-    }
-    return numBytes;
+
+    const vector<EntryInfo>& fileEntries = archiveIndex.find(cleanedPathInTar)->second;
+    require(!fileEntries.empty(), "file has no payload entries: " + cleanedPathInTar);
+    const EntryInfo& lastEntry = fileEntries.back();
+    return lastEntry.tensorDataOffset + lastEntry.size;
 }
 
 void TarReader::registerReadRequest(const string& pathInTar, ThorImplementation::Tensor& destTensor) {
@@ -301,10 +329,19 @@ void TarReader::registerReadRequest(const string& pathInTar, ThorImplementation:
             throw runtime_error("tar entry not found: " + cleanedPathInTar);
     }
 
-    // Iterate over all file shards and register a read request to the archive shard containing each file shard
+    // Iterate over all file shards and register a read request to the archive shard containing each file shard.
     const vector<EntryInfo>& shardEntries = it->second;
+    const uint64_t destinationSizeBytes = destTensor.getArraySizeInBytes();
+    const uint64_t logicalFileSizeBytes = getFileSize(cleanedPathInTar);
+    require(logicalFileSizeBytes <= destinationSizeBytes,
+            "destination tensor is too small for file " + cleanedPathInTar +
+                ": required=" + to_string(logicalFileSizeBytes) +
+                " available=" + to_string(destinationSizeBytes));
 
     for (const EntryInfo& entry : shardEntries) {
+        require(entry.tensorDataOffset <= destinationSizeBytes &&
+                    entry.size <= destinationSizeBytes - entry.tensorDataOffset,
+                "file fragment exceeds destination tensor for: " + cleanedPathInTar);
         // // Get or create if does not already exist:
         // auto [fileIt, inserted] = readPlan.try_emplace(entry.archiveShard, ArchiveShardPlan(shardPaths[entry.archiveShard]));
         // ArchiveShardPlan& shardPlan = fileIt->second;

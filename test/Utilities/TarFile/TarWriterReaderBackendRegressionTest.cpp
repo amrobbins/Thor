@@ -419,6 +419,54 @@ TEST_P(TarWriterReaderBackendRegression, DISABLED_PreservesModelArtifactPayloadC
                                      /*archiveShardSizeLimitBytes=*/512'000'000ULL);
 }
 
+TEST(TarWriterReaderFileShardingRegression, PreservesOneLogicalFileAcrossPayloadFragments) {
+    requireCudaDeviceOrSkip();
+    ScopedEnvVar globalBackend("THOR_IO_BACKEND", "pread_buffered");
+    ScopedEnvVar writerBackend("THOR_TAR_WRITE_IO_BACKEND", "pread_buffered");
+    ScopedEnvVar readerBackend("THOR_TAR_READ_IO_BACKEND", "pread_buffered");
+    ScopedDirectory archiveDir(uniqueTempDir("thor_tar_file_sharding_regression"));
+
+    constexpr uint64_t kPayloadBytes = 2'500'123ULL;
+    constexpr uint64_t kFileShardBytes = 1'000'000ULL;
+    constexpr uint64_t kArchiveShardBytes = 1'100'000ULL;
+    constexpr uint32_t kSeed = 2718;
+    const std::string archiveName = "file_sharding_regression";
+    const std::string logicalPath = "layer0_weights_parameter_weights.gds";
+
+    Tensor source = makeGpuUint8Tensor(kPayloadBytes, kSeed);
+    thor_file::TarWriter writer(archiveName, kArchiveShardBytes, kFileShardBytes);
+    writer.addArchiveFile(logicalPath, source);
+    writer.createArchive(archiveDir.path(), /*overwriteIfExists=*/true);
+
+    thor_file::TarReader reader(archiveName, archiveDir.path());
+    const auto entriesByPath = reader.getArchiveEntries();
+    const auto entryIt = entriesByPath.find(logicalPath);
+    ASSERT_NE(entryIt, entriesByPath.end());
+    ASSERT_EQ(entryIt->second.size(), 3u);
+    EXPECT_EQ(entriesByPath.find(logicalPath + "/shard0"), entriesByPath.end());
+    EXPECT_EQ(reader.getFileSize(logicalPath), kPayloadBytes);
+
+    const std::vector<thor_file::EntryInfo>& entries = entryIt->second;
+    EXPECT_EQ(entries[0].tensorDataOffset, 0u);
+    EXPECT_EQ(entries[0].size, kFileShardBytes);
+    EXPECT_EQ(entries[1].tensorDataOffset, kFileShardBytes);
+    EXPECT_EQ(entries[1].size, kFileShardBytes);
+    EXPECT_EQ(entries[2].tensorDataOffset, 2 * kFileShardBytes);
+    EXPECT_EQ(entries[2].size, kPayloadBytes - 2 * kFileShardBytes);
+
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    Tensor loaded(gpuPlacement, TensorDescriptor(DataType::UINT8, {kPayloadBytes}));
+    reader.registerReadRequest(logicalPath, loaded);
+    reader.executeReadRequests();
+
+    const std::vector<uint8_t> actual = copyGpuTensorToCpuBytes(loaded);
+    ASSERT_EQ(actual.size(), kPayloadBytes);
+    expectDeterministicBytes(actual.data(), actual.size(), kSeed, logicalPath);
+
+    Tensor undersized(gpuPlacement, TensorDescriptor(DataType::UINT8, {kPayloadBytes - 1}));
+    EXPECT_THROW(reader.registerReadRequest(logicalPath, undersized), std::runtime_error);
+}
+
 TEST(TarWriterReaderDiagnostics, CrcMismatchReportsIndependentBufferedPreadClassification) {
     requireCudaDeviceOrSkip();
     ScopedEnvVar globalBackend("THOR_IO_BACKEND", "pread_buffered");

@@ -161,37 +161,35 @@ void TarWriter::addArchiveFile(const string& pathInTar, const ThorImplementation
         return;
     }
 
-    // The file will be sharded in the archive, so its path will be taken to be a directory containing numbered shards in the archive.
-    // Ensure the directory prefix ends with '/'
-    std::string dir = cleanedPathInTar;
-    if (!dir.empty() && dir.back() != '/')
-        dir.push_back('/');
-
+    // Split a large logical file into payload fragments.  Every fragment keeps the
+    // original logical path so the archive index presents one file with multiple
+    // tensor ranges.  ArchivePlanEntry::numBytes is payload size only; tar header
+    // and 512-byte padding are accounted for separately in the archive-shard plan.
     size_t shardOffset = 0;
-    size_t fileShardNum = 0;
     while (shardOffset < fileSize) {
         const size_t remainingBytes = fileSize - shardOffset;
-        const size_t thisShardNumBytes = usualFileSize((remainingBytes > MAX_FILE_SHARD_BYTES) ? MAX_FILE_SHARD_BYTES : remainingBytes);
+        const size_t payloadBytes = std::min<size_t>(remainingBytes, MAX_FILE_SHARD_BYTES);
+        const uint64_t plannedTarBytes = usualFileSize(payloadBytes);
 
-        // Start a new archive shard when necessary
+        // Start a new archive shard when necessary.
         if (archiveShardCreationPlan.empty() ||
-            archiveShardCreationPlan.back().totalBytes + thisShardNumBytes > ARCHIVE_SHARD_PAYLOAD_LIMIT) {
+            archiveShardCreationPlan.back().totalBytes + plannedTarBytes > ARCHIVE_SHARD_PAYLOAD_LIMIT) {
             uint32_t nextShardIndex = archiveShardCreationPlan.size();
             string archiveShardPath = archiveShardTempPath(archiveName, nextShardIndex);
             archiveShardCreationPlan.emplace_back(archiveShardPath);
         }
 
-        // Place the file shard in the archive shard's plan
-        // FIXME: I need file shard tests, it is not right yet
-        std::string fileShardPath = dir + "shard" + std::to_string(fileShardNum);
         ArchivePlanEntry shardPlan = {
-            .tensor = tensor, .tensorOffsetBytes = shardOffset, .numBytes = thisShardNumBytes, .pathInTar = fileShardPath};
+            .tensor = tensor,
+            .tensorOffsetBytes = shardOffset,
+            .numBytes = payloadBytes,
+            .pathInTar = cleanedPathInTar,
+        };
         archiveShardCreationPlan.back().entries.push_back(shardPlan);
-        archiveShardCreationPlan.back().totalBytes += thisShardNumBytes;
+        archiveShardCreationPlan.back().totalBytes += plannedTarBytes;
         archiveShardCreationPlan.back().shardNumber = archiveShardCreationPlan.size() - 1;
 
-        shardOffset += thisShardNumBytes;
-        ++fileShardNum;
+        shardOffset += payloadBytes;
     }
 }
 
