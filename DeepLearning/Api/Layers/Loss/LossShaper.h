@@ -5,9 +5,8 @@
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Implementation/Layers/Loss/LossShaper.h"
 #include "DeepLearning/Implementation/Layers/Utility/Reshape.h"
-#include "Utilities/TensorOperations/Misc/BatchReduce.h"
+#include "Utilities/TensorOperations/Cub/CubReduction.h"
 #include <optional>
-#include <limits>
 
 namespace Thor {
 
@@ -71,36 +70,37 @@ class LossShaper : public Layer {
     }
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
+        THOR_THROW_IF_FALSE(batchSize > 0);
         std::vector<uint64_t> implementationInputLossDimensions = createRepresentativeImplementationDimensions(lossInput.getDimensions());
+        implementationInputLossDimensions[0] = batchSize;
         std::vector<uint64_t> implementationOutputLossDimensions =
             getImplementationOutputDimensions(implementationInputLossDimensions, outputLossType);
-        bool reduceBatchDim = implementationInputLossDimensions[0] != 1 && implementationOutputLossDimensions[0] == 1;
-        const uint64_t inputLossDim = flattenedNonBatchDim(implementationInputLossDimensions);
-        const uint64_t outputLossDim = implementationOutputLossDimensions.size() > 1 ? implementationOutputLossDimensions[1] : 1;
-        bool reduceLossDim = inputLossDim != 1 && outputLossDim == 1;
 
         if (implementationInputLossDimensions == implementationOutputLossDimensions)
             return 0;
 
-        THOR_THROW_IF_FALSE(implementationInputLossDimensions[0] <= std::numeric_limits<uint32_t>::max());
-        THOR_THROW_IF_FALSE(inputLossDim <= std::numeric_limits<uint32_t>::max());
-        const uint32_t representativeBatch = static_cast<uint32_t>(implementationInputLossDimensions[0]);
-        const uint32_t flattenedLossDim32 = static_cast<uint32_t>(inputLossDim);
+        std::vector<uint32_t> axes;
+        float outputScale = 1.0f;
+        if (outputLossType == ThorImplementation::LossShaper::OutputLossType::BATCH) {
+            axes = {0, 1};
+            outputScale = 1.0f / static_cast<float>(batchSize);
+        } else if (outputLossType == ThorImplementation::LossShaper::OutputLossType::CLASSWISE) {
+            axes = {0};
+            outputScale = 1.0f / static_cast<float>(batchSize);
+        } else if (outputLossType == ThorImplementation::LossShaper::OutputLossType::ELEMENTWISE) {
+            axes = {1};
+        } else {
+            THOR_UNREACHABLE();
+        }
 
-        int deviceNum = tensorPlacement.getDeviceNum();
-        uint64_t workspaceSizeInBytes;
-        workspaceSizeInBytes = ThorImplementation::BatchReduce(representativeBatch,
-                                                               representativeBatch,
-                                                               flattenedLossDim32,
-                                                               reduceBatchDim,
-                                                               reduceLossDim,
-                                                               lossInput.getDataType(),
-                                                               lossInput.getDataType(),
-                                                               // I just need any stream, so get one that is exists anyway.
-                                                               Stream::getNextUploadStream(deviceNum))
-                                   .getWorkspaceSizeInBytes();
-
-        return lossOutput.getTotalSizeInBytes() + workspaceSizeInBytes;
+        const std::vector<uint64_t> reductionInputDimensions = {
+            implementationInputLossDimensions.front(), flattenedNonBatchDim(implementationInputLossDimensions)};
+        const ThorImplementation::TensorDescriptor inputDescriptor(lossInput.getDataType(), reductionInputDimensions);
+        const ThorImplementation::TensorDescriptor outputDescriptor(lossOutput.getDataType(), implementationOutputLossDimensions);
+        ThorImplementation::CubReduction reduction(
+            ThorImplementation::CubReductionOp::Sum, axes, lossOutput.getDataType(), outputScale);
+        Stream queryStream = Stream::getNextUploadStream(tensorPlacement.getDeviceNum());
+        return outputDescriptor.getArraySizeInBytes() + reduction.queryWorkspaceSizeInBytes(inputDescriptor, queryStream);
     }
 
     static std::vector<uint64_t> getImplementationOutputDimensions(std::vector<uint64_t> implementationInputLossDimensions,

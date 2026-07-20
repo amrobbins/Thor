@@ -47,10 +47,10 @@ TEST(ComputeBinaryAccuracy, computesCorrectly21) {
         predictions_d.copyFromAsync(predictions_h, stream);
         labels_d.copyFromAsync(labels_h, stream);
 
-        shared_ptr<BatchReduce> batchReduce = createBinaryAccuracyBatchReduce(batchSize, stream);
+        auto reduction = createBinaryAccuracyReduction(workspace_d, accuracy_d, batchSize, stream);
 
         launchComputeBinaryAccuracy<half, uint8_t>(
-            accuracy_d, (half *)predictions_d.getMemPtr(), (uint8_t *)labels_d.getMemPtr(), workspace_d, batchSize, batchReduce, stream);
+            accuracy_d, (half *)predictions_d.getMemPtr(), (uint8_t *)labels_d.getMemPtr(), workspace_d, batchSize, reduction, stream);
 
         accuracy_gpu_h.copyFromAsync(accuracy_d, stream);
         stream.synchronize();
@@ -98,10 +98,10 @@ TEST(ComputeBinaryAccuracy, computesCorrectly22) {
         predictions_d.copyFromAsync(predictions_h, stream);
         labels_d.copyFromAsync(labels_h, stream);
 
-        shared_ptr<BatchReduce> batchReduce = createBinaryAccuracyBatchReduce(batchSize, stream);
+        auto reduction = createBinaryAccuracyReduction(workspace_d, accuracy_d, batchSize, stream);
 
         launchComputeBinaryAccuracy<half, half>(
-            accuracy_d, (half *)predictions_d.getMemPtr(), (half *)labels_d.getMemPtr(), workspace_d, batchSize, batchReduce, stream);
+            accuracy_d, (half *)predictions_d.getMemPtr(), (half *)labels_d.getMemPtr(), workspace_d, batchSize, reduction, stream);
 
         accuracy_gpu_h.copyFromAsync(accuracy_d, stream);
         stream.synchronize();
@@ -149,10 +149,10 @@ TEST(ComputeBinaryAccuracy, computesCorrectly24) {
         predictions_d.copyFromAsync(predictions_h, stream);
         labels_d.copyFromAsync(labels_h, stream);
 
-        shared_ptr<BatchReduce> batchReduce = createBinaryAccuracyBatchReduce(batchSize, stream);
+        auto reduction = createBinaryAccuracyReduction(workspace_d, accuracy_d, batchSize, stream);
 
         launchComputeBinaryAccuracy<half, float>(
-            accuracy_d, (half *)predictions_d.getMemPtr(), (float *)labels_d.getMemPtr(), workspace_d, batchSize, batchReduce, stream);
+            accuracy_d, (half *)predictions_d.getMemPtr(), (float *)labels_d.getMemPtr(), workspace_d, batchSize, reduction, stream);
 
         accuracy_gpu_h.copyFromAsync(accuracy_d, stream);
         stream.synchronize();
@@ -199,10 +199,10 @@ TEST(ComputeBinaryAccuracy, computesCorrectly41) {
         predictions_d.copyFromAsync(predictions_h, stream);
         labels_d.copyFromAsync(labels_h, stream);
 
-        shared_ptr<BatchReduce> batchReduce = createBinaryAccuracyBatchReduce(batchSize, stream);
+        auto reduction = createBinaryAccuracyReduction(workspace_d, accuracy_d, batchSize, stream);
 
         launchComputeBinaryAccuracy<float, int8_t>(
-            accuracy_d, (float *)predictions_d.getMemPtr(), (int8_t *)labels_d.getMemPtr(), workspace_d, batchSize, batchReduce, stream);
+            accuracy_d, (float *)predictions_d.getMemPtr(), (int8_t *)labels_d.getMemPtr(), workspace_d, batchSize, reduction, stream);
 
         accuracy_gpu_h.copyFromAsync(accuracy_d, stream);
         stream.synchronize();
@@ -249,10 +249,10 @@ TEST(ComputeBinaryAccuracy, computesCorrectly42) {
         predictions_d.copyFromAsync(predictions_h, stream);
         labels_d.copyFromAsync(labels_h, stream);
 
-        shared_ptr<BatchReduce> batchReduce = createBinaryAccuracyBatchReduce(batchSize, stream);
+        auto reduction = createBinaryAccuracyReduction(workspace_d, accuracy_d, batchSize, stream);
 
         launchComputeBinaryAccuracy<float, half>(
-            accuracy_d, (float *)predictions_d.getMemPtr(), (half *)labels_d.getMemPtr(), workspace_d, batchSize, batchReduce, stream);
+            accuracy_d, (float *)predictions_d.getMemPtr(), (half *)labels_d.getMemPtr(), workspace_d, batchSize, reduction, stream);
 
         accuracy_gpu_h.copyFromAsync(accuracy_d, stream);
         stream.synchronize();
@@ -299,10 +299,10 @@ TEST(ComputeBinaryAccuracy, computesCorrectly44) {
         predictions_d.copyFromAsync(predictions_h, stream);
         labels_d.copyFromAsync(labels_h, stream);
 
-        shared_ptr<BatchReduce> batchReduce = createBinaryAccuracyBatchReduce(batchSize, stream);
+        auto reduction = createBinaryAccuracyReduction(workspace_d, accuracy_d, batchSize, stream);
 
         launchComputeBinaryAccuracy<float, uint32_t>(
-            accuracy_d, (float *)predictions_d.getMemPtr(), (uint32_t *)labels_d.getMemPtr(), workspace_d, batchSize, batchReduce, stream);
+            accuracy_d, (float *)predictions_d.getMemPtr(), (uint32_t *)labels_d.getMemPtr(), workspace_d, batchSize, reduction, stream);
 
         accuracy_gpu_h.copyFromAsync(accuracy_d, stream);
         stream.synchronize();

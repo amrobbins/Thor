@@ -225,3 +225,45 @@ TEST(LossShaper, NumericalClassWiseFp32) {
         LayerTestHelper::tearDownNetwork(layers);
     }
 }
+
+TEST(LossShaper, NumericalClassWiseRankThreeUsesFlattenedNonBatchLayout) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    const vector<uint64_t> inputDimensions = {3, 2, 2};
+    const vector<uint64_t> outputDimensions = {1, 4};
+
+    Tensor inputCpu(cpuPlacement, TensorDescriptor(DataType::FP32, inputDimensions));
+    float* input = inputCpu.getMemPtr<float>();
+    for (uint32_t i = 0; i < inputCpu.getTotalNumElements(); ++i) {
+        input[i] = static_cast<float>(i + 1);
+    }
+
+    vector<shared_ptr<Layer>> layers;
+    auto lossInput = make_shared<NetworkInput>(gpuPlacement, DataType::FP32, inputDimensions);
+    layers.push_back(lossInput);
+    auto lossShaper = make_shared<LossShaper>(LossShaper::OutputLossType::CLASSWISE);
+    layers.push_back(lossShaper);
+    auto lossOutput = make_shared<NetworkOutput>(gpuPlacement);
+    layers.push_back(lossOutput);
+
+    LayerTestHelper::connectTwoLayers(lossInput, lossShaper);
+    LayerTestHelper::connectTwoLayers(lossShaper, lossOutput);
+    LayerTestHelper::initializeNetwork(layers);
+
+    ASSERT_EQ(lossOutput->getFeatureOutput().value().getDimensions(), outputDimensions);
+
+    lossInput->forward(inputCpu, false);
+    Stream stream = lossInput->getStream();
+    stream.waitEvent(lossOutput->getOutputReadyEvent());
+    Tensor outputCpu(cpuPlacement, TensorDescriptor(DataType::FP32, outputDimensions));
+    outputCpu.copyFromAsync(lossOutput->getFeatureOutput().value(), stream);
+    stream.synchronize();
+
+    const float* output = outputCpu.getMemPtr<float>();
+    const float expected[] = {5.0f, 6.0f, 7.0f, 8.0f};
+    for (uint32_t i = 0; i < 4; ++i) {
+        EXPECT_FLOAT_EQ(output[i], expected[i]);
+    }
+
+    LayerTestHelper::tearDownNetwork(layers);
+}

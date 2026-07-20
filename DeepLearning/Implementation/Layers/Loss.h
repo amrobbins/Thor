@@ -15,16 +15,19 @@ namespace ThorImplementation {
  * Loss layers do not connect an errorInput from the next layer, so they are a point at which
  * back propagation will terminate if connected at the output to a back-propagable layer.
  *
- * Loss layers compute the loss element wise:
- *   For categorical losses, this is one loss per batch item per class
- *   For numerical losses, this is one loss per batch item per output (usually numerical losses have just one output though)
- * When this is not the final form of the desired loss for reporting purposes, a LossShaper is attached to the output of the loss layer.
- * The loss shaper can report loss in the following ways:
- *   For categorical losses:
- *     1. batchLoss (a single scalar)
- *     2. classwise loss (a scalar for each class)
- *   For numerical losses:
- *     1. batchLoss (a single scalar per output)
+ * Loss layers compute loss elementwise:
+ *   For categorical losses, this is one loss per batch item per class.
+ *   For numerical losses, this is one loss per batch item per output.
+ *
+ * When a reduced form is needed for reporting, a LossShaper interprets a row-major loss tensor
+ * [B, D1, ..., Dn] as the zero-copy flattened view [B, C], where C = D1 * ... * Dn, and reports:
+ *   1. BATCH: one scalar [1, 1], equal to the sum of all losses divided by B.
+ *   2. CLASSWISE: [1, C], with each flattened non-batch position averaged over B.
+ *   3. ELEMENTWISE: [B, 1], with all C losses summed independently for each batch item.
+ *   4. RAW: the unchanged elementwise loss tensor.
+ *
+ * Consequently, BATCH is the mean across the batch of each example's summed loss; it is not the
+ * mean across every scalar element unless C == 1.
  *
  * featureInput: The predictions
  *   For categorical losses, the predictions should represent a probability distribution (i.e. they sum to 1.0), this is achieved

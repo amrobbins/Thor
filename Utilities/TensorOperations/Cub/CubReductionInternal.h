@@ -6,83 +6,117 @@
 
 namespace ThorImplementation::CubReductionInternal {
 
-size_t querySumReductionBytes(const Tensor& input,
-                              Tensor& output,
+size_t querySumReductionBytes(DataType input_dtype,
+                              const void* input,
+                              uint64_t input_elements,
+                              DataType output_dtype,
+                              void* output,
                               const CubReductionGeometry& geometry,
+                              float output_scale,
                               const Stream& stream);
 void launchSumReduction(const Tensor& temp_storage,
                         size_t temp_storage_bytes,
                         const Tensor& input,
                         Tensor& output,
                         const CubReductionGeometry& geometry,
+                        float output_scale,
                         Stream& stream);
 
-size_t queryProductReductionBytes(const Tensor& input,
-                                  Tensor& output,
-                                  const CubReductionGeometry& geometry,
-                                  const Stream& stream);
-void launchProductReduction(const Tensor& temp_storage,
-                            size_t temp_storage_bytes,
-                            const Tensor& input,
-                            Tensor& output,
-                            const CubReductionGeometry& geometry,
-                            Stream& stream);
-
-size_t queryMeanReductionBytes(const Tensor& input,
-                               Tensor& output,
-                               const CubReductionGeometry& geometry,
-                               const Stream& stream);
-void launchMeanReduction(const Tensor& temp_storage,
-                         size_t temp_storage_bytes,
-                         const Tensor& input,
-                         Tensor& output,
-                         const CubReductionGeometry& geometry,
-                         Stream& stream);
-
-size_t queryL1NormReductionBytes(const Tensor& input,
-                                 Tensor& output,
-                                 const CubReductionGeometry& geometry,
-                                 const Stream& stream);
-void launchL1NormReduction(const Tensor& temp_storage,
-                           size_t temp_storage_bytes,
-                           const Tensor& input,
-                           Tensor& output,
-                           const CubReductionGeometry& geometry,
-                           Stream& stream);
-
-size_t queryL2NormReductionBytes(const Tensor& input,
-                                 Tensor& output,
-                                 const CubReductionGeometry& geometry,
-                                 const Stream& stream);
-void launchL2NormReduction(const Tensor& temp_storage,
-                           size_t temp_storage_bytes,
-                           const Tensor& input,
-                           Tensor& output,
-                           const CubReductionGeometry& geometry,
-                           Stream& stream);
-
-size_t queryMinReductionBytes(const Tensor& input,
-                              Tensor& output,
+size_t queryProductReductionBytes(DataType input_dtype,
+                              const void* input,
+                              uint64_t input_elements,
+                              DataType output_dtype,
+                              void* output,
                               const CubReductionGeometry& geometry,
+                              float output_scale,
+                              const Stream& stream);
+void launchProductReduction(const Tensor& temp_storage,
+                        size_t temp_storage_bytes,
+                        const Tensor& input,
+                        Tensor& output,
+                        const CubReductionGeometry& geometry,
+                        float output_scale,
+                        Stream& stream);
+
+size_t queryMeanReductionBytes(DataType input_dtype,
+                              const void* input,
+                              uint64_t input_elements,
+                              DataType output_dtype,
+                              void* output,
+                              const CubReductionGeometry& geometry,
+                              float output_scale,
+                              const Stream& stream);
+void launchMeanReduction(const Tensor& temp_storage,
+                        size_t temp_storage_bytes,
+                        const Tensor& input,
+                        Tensor& output,
+                        const CubReductionGeometry& geometry,
+                        float output_scale,
+                        Stream& stream);
+
+size_t queryL1NormReductionBytes(DataType input_dtype,
+                              const void* input,
+                              uint64_t input_elements,
+                              DataType output_dtype,
+                              void* output,
+                              const CubReductionGeometry& geometry,
+                              float output_scale,
+                              const Stream& stream);
+void launchL1NormReduction(const Tensor& temp_storage,
+                        size_t temp_storage_bytes,
+                        const Tensor& input,
+                        Tensor& output,
+                        const CubReductionGeometry& geometry,
+                        float output_scale,
+                        Stream& stream);
+
+size_t queryL2NormReductionBytes(DataType input_dtype,
+                              const void* input,
+                              uint64_t input_elements,
+                              DataType output_dtype,
+                              void* output,
+                              const CubReductionGeometry& geometry,
+                              float output_scale,
+                              const Stream& stream);
+void launchL2NormReduction(const Tensor& temp_storage,
+                        size_t temp_storage_bytes,
+                        const Tensor& input,
+                        Tensor& output,
+                        const CubReductionGeometry& geometry,
+                        float output_scale,
+                        Stream& stream);
+
+size_t queryMinReductionBytes(DataType input_dtype,
+                              const void* input,
+                              uint64_t input_elements,
+                              DataType output_dtype,
+                              void* output,
+                              const CubReductionGeometry& geometry,
+                              float output_scale,
                               const Stream& stream);
 void launchMinReduction(const Tensor& temp_storage,
                         size_t temp_storage_bytes,
                         const Tensor& input,
                         Tensor& output,
                         const CubReductionGeometry& geometry,
+                        float output_scale,
                         Stream& stream);
 
-size_t queryMaxReductionBytes(const Tensor& input,
-                              Tensor& output,
+size_t queryMaxReductionBytes(DataType input_dtype,
+                              const void* input,
+                              uint64_t input_elements,
+                              DataType output_dtype,
+                              void* output,
                               const CubReductionGeometry& geometry,
+                              float output_scale,
                               const Stream& stream);
 void launchMaxReduction(const Tensor& temp_storage,
                         size_t temp_storage_bytes,
                         const Tensor& input,
                         Tensor& output,
                         const CubReductionGeometry& geometry,
+                        float output_scale,
                         Stream& stream);
-
 
 size_t queryOffsetSegmentedReductionBytes(CubReductionOp op,
                                           const Tensor& input,

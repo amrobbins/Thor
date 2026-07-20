@@ -157,17 +157,22 @@ struct FinalizeAndStoreRuntimeFp32 {
     void* output;
     DataType output_dtype;
     OutputFinalizeT finalize;
+    float output_scale;
 
     template <typename IndexT>
     __host__ __device__ void operator()(IndexT index, float value) const {
-        storeFp32AsRuntimeDType(output, output_dtype, static_cast<uint64_t>(index), finalize(value));
+        storeFp32AsRuntimeDType(
+            output, output_dtype, static_cast<uint64_t>(index), finalize(value) * output_scale);
     }
 };
 
 template <typename OutputFinalizeT>
-auto makeRuntimeFp32OutputIterator(void* output, DataType output_dtype, OutputFinalizeT output_finalize) {
-    return cuda::make_tabulate_output_iterator(
-        FinalizeAndStoreRuntimeFp32<OutputFinalizeT>{output, output_dtype, output_finalize});
+auto makeRuntimeFp32OutputIterator(void* output,
+                                   DataType output_dtype,
+                                   OutputFinalizeT output_finalize,
+                                   float output_scale = 1.0f) {
+    return cuda::make_tabulate_output_iterator(FinalizeAndStoreRuntimeFp32<OutputFinalizeT>{
+        output, output_dtype, output_finalize, output_scale});
 }
 
 template <typename InputT, typename InputTransformT>
@@ -200,23 +205,26 @@ auto makeContiguousFp32Iterator(const InputT* input, InputTransformT input_trans
 }
 
 template <typename InputT, typename InputTransformT>
-auto makeStridedFp32Iterator(const Tensor& input,
+auto makeStridedFp32Iterator(const InputT* input,
                              const CubReductionGeometry& geometry,
                              InputTransformT input_transform) {
     return thrust::make_transform_iterator(
         thrust::counting_iterator<int64_t>(0),
         LogicalAxesToFp32<InputT, InputTransformT>{
-            input.getMemPtr<InputT>(), geometry.reduction_size, geometry.device_indexing, input_transform});
+            input, geometry.reduction_size, geometry.device_indexing, input_transform});
 }
 
 template <typename InputT, typename ReductionOpT, typename InputTransformT, typename OutputFinalizeT>
-size_t queryReductionBytesForInput(const Tensor& input,
-                                   Tensor& output,
+size_t queryReductionBytesForInput(const InputT* input,
+                                   uint64_t input_elements,
+                                   void* output,
+                                   DataType output_dtype,
                                    const CubReductionGeometry& geometry,
                                    ReductionOpT reduction_op,
                                    float init,
                                    InputTransformT input_transform,
                                    OutputFinalizeT output_finalize,
+                                   float output_scale,
                                    cudaStream_t stream) {
     using AccumulatorT =
         std::decay_t<decltype(std::declval<ReductionOpT>()(std::declval<float>(), std::declval<float>()))>;
@@ -228,23 +236,23 @@ size_t queryReductionBytesForInput(const Tensor& input,
 
     size_t queried_bytes = 0;
     auto output_iterator =
-        makeRuntimeFp32OutputIterator(output.getMemPtr<void>(), output.getDataType(), output_finalize);
+        makeRuntimeFp32OutputIterator(output, output_dtype, output_finalize, output_scale);
     const ConvertAndTransformInputToFp32<InputT, InputTransformT> device_input_transform{input_transform};
 
     switch (geometry.path) {
         case CubReductionPath::DeviceTransformReduce:
             CUDA_CHECK(cub::DeviceReduce::TransformReduce(nullptr,
                                                           queried_bytes,
-                                                          input.getMemPtr<InputT>(),
+                                                          input,
                                                           output_iterator,
-                                                          static_cast<int64_t>(input.getTotalNumElements()),
+                                                          static_cast<int64_t>(input_elements),
                                                           reduction_op,
                                                           device_input_transform,
                                                           init,
                                                           stream));
             break;
         case CubReductionPath::ContiguousFixedSegment: {
-            auto input_iterator = makeContiguousFp32Iterator(input.getMemPtr<InputT>(), input_transform);
+            auto input_iterator = makeContiguousFp32Iterator(input, input_transform);
             CUDA_CHECK(cub::DeviceSegmentedReduce::Reduce(nullptr,
                                                           queried_bytes,
                                                           input_iterator,
@@ -286,6 +294,7 @@ void launchReductionForInput(const Tensor& temp_storage,
                              float init,
                              InputTransformT input_transform,
                              OutputFinalizeT output_finalize,
+                             float output_scale,
                              cudaStream_t stream) {
     using AccumulatorT =
         std::decay_t<decltype(std::declval<ReductionOpT>()(std::declval<float>(), std::declval<float>()))>;
@@ -294,7 +303,7 @@ void launchReductionForInput(const Tensor& temp_storage,
     void* temp_storage_ptr =
         const_cast<void*>(static_cast<const void*>(temp_storage.getMemPtr<void>()));
     auto output_iterator =
-        makeRuntimeFp32OutputIterator(output.getMemPtr<void>(), output.getDataType(), output_finalize);
+        makeRuntimeFp32OutputIterator(output.getMemPtr<void>(), output.getDataType(), output_finalize, output_scale);
     const ConvertAndTransformInputToFp32<InputT, InputTransformT> device_input_transform{input_transform};
 
     switch (geometry.path) {
@@ -323,7 +332,7 @@ void launchReductionForInput(const Tensor& temp_storage,
             break;
         }
         case CubReductionPath::StridedFixedSegment: {
-            auto input_iterator = makeStridedFp32Iterator<InputT>(input, geometry, input_transform);
+            auto input_iterator = makeStridedFp32Iterator<InputT>(input.getMemPtr<InputT>(), geometry, input_transform);
             CUDA_CHECK(cub::DeviceSegmentedReduce::Reduce(temp_storage_ptr,
                                                           temp_storage_bytes,
                                                           input_iterator,
@@ -341,25 +350,32 @@ void launchReductionForInput(const Tensor& temp_storage,
 }
 
 template <typename ReductionOpT, typename InputTransformT, typename OutputFinalizeT>
-size_t queryOperationReductionBytes(const Tensor& input,
-                                    Tensor& output,
+size_t queryOperationReductionBytes(DataType input_dtype,
+                                    const void* input,
+                                    uint64_t input_elements,
+                                    DataType output_dtype,
+                                    void* output,
                                     const CubReductionGeometry& geometry,
                                     ReductionOpT reduction_op,
                                     float init,
                                     InputTransformT input_transform,
                                     OutputFinalizeT output_finalize,
+                                    float output_scale,
                                     const Stream& stream) {
     auto dispatch_input = [&]<typename InputT>() -> size_t {
-        return queryReductionBytesForInput<InputT>(input,
+        return queryReductionBytesForInput<InputT>(static_cast<const InputT*>(input),
+                                                   input_elements,
                                                    output,
+                                                   output_dtype,
                                                    geometry,
                                                    reduction_op,
                                                    init,
                                                    input_transform,
                                                    output_finalize,
+                                                   output_scale,
                                                    stream.getStream());
     };
-    return dispatchReductionInputDType(input.getDataType(), dispatch_input);
+    return dispatchReductionInputDType(input_dtype, dispatch_input);
 }
 
 template <typename ReductionOpT, typename InputTransformT, typename OutputFinalizeT>
@@ -372,6 +388,7 @@ void launchOperationReduction(const Tensor& temp_storage,
                               float init,
                               InputTransformT input_transform,
                               OutputFinalizeT output_finalize,
+                              float output_scale,
                               Stream& stream) {
     auto dispatch_input = [&]<typename InputT>() -> void {
         launchReductionForInput<InputT>(temp_storage,
@@ -383,6 +400,7 @@ void launchOperationReduction(const Tensor& temp_storage,
                                         init,
                                         input_transform,
                                         output_finalize,
+                                        output_scale,
                                         stream.getStream());
     };
     dispatchReductionInputDType(input.getDataType(), dispatch_input);

@@ -1,7 +1,6 @@
 #pragma once
 
 #include "Utilities/Common/Stream.h"
-#include "Utilities/TensorOperations/Misc/BatchReduce.h"
 
 #include <cuda.h>
 #include <cuda_fp16.h>

@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <vector>
@@ -139,4 +140,45 @@ TEST(CubReduction, RuntimeOutputIteratorSupportsEveryConfiguredOutputDtype) {
         EXPECT_EQ(stamped->getOutputDataType(), output_dtype);
         expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), {6.0f});
     }
+}
+
+TEST(CubReduction, AppliesRuntimeOutputScaleInFp32) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor input = makeGpuTensor({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {2, 3}, stream);
+    CubReduction reduction(CubReductionOp::Sum, 0, DataType::FP32, 0.25f);
+    std::shared_ptr<StampedCubReduction> stamped = reduction.stamp(input, stream);
+
+    EXPECT_FLOAT_EQ(reduction.getOutputScale(), 0.25f);
+    EXPECT_FLOAT_EQ(stamped->getOutputScale(), 0.25f);
+    stamped->run();
+    stream.synchronize();
+
+    expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), {1.25f, 1.75f, 2.25f});
+}
+
+TEST(CubReduction, QueryOnlyWorkspaceMatchesStampedWorkspace) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor input = makeGpuTensor({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {2, 3}, stream, DataType::BF16);
+    CubReduction reduction(CubReductionOp::Sum, 0, DataType::FP32, 0.5f);
+
+    const size_t queried = reduction.queryWorkspaceSizeInBytes(input.getDescriptor(), stream);
+    std::shared_ptr<StampedCubReduction> stamped = reduction.stamp(input, stream);
+    EXPECT_EQ(queried, stamped->getWorkspaceSizeInBytes());
+}
+
+TEST(CubReduction, RejectsNonFiniteOutputScale) {
+    EXPECT_THROW(static_cast<void>(CubReduction(CubReductionOp::Sum,
+                                                0,
+                                                DataType::FP32,
+                                                std::numeric_limits<float>::infinity())),
+                 std::invalid_argument);
+    EXPECT_THROW(static_cast<void>(CubReduction(CubReductionOp::Sum,
+                                                0,
+                                                DataType::FP32,
+                                                std::numeric_limits<float>::quiet_NaN())),
+                 std::invalid_argument);
 }

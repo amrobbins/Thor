@@ -5,17 +5,25 @@
 
 namespace ThorImplementation::CubReductionInternal {
 
-size_t queryL1NormReductionBytes(const Tensor& input,
-                                  Tensor& output,
+size_t queryL1NormReductionBytes(DataType input_dtype,
+                                  const void* input,
+                                  uint64_t input_elements,
+                                  DataType output_dtype,
+                                  void* output,
                                   const CubReductionGeometry& geometry,
+                                  float output_scale,
                                   const Stream& stream) {
-    return queryOperationReductionBytes(input,
+    return queryOperationReductionBytes(input_dtype,
+                                        input,
+                                        input_elements,
+                                        output_dtype,
                                         output,
                                         geometry,
                                         cuda::std::plus<float>{},
                                         0.0f,
                                         AbsoluteValueFp32{},
                                         IdentityFp32{},
+                                        output_scale,
                                         stream);
 }
 
@@ -24,6 +32,7 @@ void launchL1NormReduction(const Tensor& temp_storage,
                             const Tensor& input,
                             Tensor& output,
                             const CubReductionGeometry& geometry,
+                            float output_scale,
                             Stream& stream) {
     launchOperationReduction(temp_storage,
                              temp_storage_bytes,
@@ -34,6 +43,7 @@ void launchL1NormReduction(const Tensor& temp_storage,
                              0.0f,
                              AbsoluteValueFp32{},
                              IdentityFp32{},
+                             output_scale,
                              stream);
 }
 

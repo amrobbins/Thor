@@ -4,7 +4,6 @@
 #include "DeepLearning/Implementation/Layers/Loss.h"
 #include "DeepLearning/Implementation/Layers/Loss/LossWeight.h"
 #include "Utilities/TensorOperations/Loss/CrossEntropyLoss.h"
-#include "Utilities/TensorOperations/Misc/BatchReduce.h"
 
 #include <cudnn_ops.h>
 #include <memory>

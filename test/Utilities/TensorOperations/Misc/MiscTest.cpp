@@ -1,4 +1,3 @@
-#include "Utilities/TensorOperations/Misc/BatchReduce.h"
 #include "Utilities/TensorOperations/Misc/ComputeBinaryAccuracy.h"
 #include "Utilities/TensorOperations/Misc/ComputeCategoricalAccuracy.h"
 #include "Utilities/TensorOperations/Misc/Concatenate.h"

@@ -104,19 +104,25 @@ class StampedCubSegmentedReduction;
  * applying the operation-specific input transform and reduction operator. Accumulation therefore always occurs in
  * FP32. Operation-specific output finalization, such as mean division or the final square root for L2 norm, also
  * occurs in FP32 before the configured storage conversion. The output storage dtype defaults to the input storage
- * dtype and may be overridden explicitly.
+ * dtype and may be overridden explicitly. A finite runtime output scale, defaulting to one, is applied in FP32 after
+ * operation-specific finalization and before the single storage conversion.
  */
 class CubReduction {
    public:
-    CubReduction(CubReductionOp op, uint32_t axis, std::optional<DataType> output_dtype = std::nullopt);
+    CubReduction(CubReductionOp op,
+                 uint32_t axis,
+                 std::optional<DataType> output_dtype = std::nullopt,
+                 float output_scale = 1.0f);
     CubReduction(CubReductionOp op,
                  std::vector<uint32_t> axes,
-                 std::optional<DataType> output_dtype = std::nullopt);
+                 std::optional<DataType> output_dtype = std::nullopt,
+                 float output_scale = 1.0f);
 
     [[nodiscard]] CubReductionOp getOperation() const { return op; }
     [[nodiscard]] uint32_t getAxis() const { return axes.front(); }
     [[nodiscard]] const std::vector<uint32_t>& getAxes() const { return axes; }
     [[nodiscard]] std::optional<DataType> getConfiguredOutputDataType() const { return output_dtype; }
+    [[nodiscard]] float getOutputScale() const { return output_scale; }
     [[nodiscard]] DataType resolveOutputDataType(DataType input_dtype) const;
 
     /**
@@ -138,6 +144,10 @@ class CubReduction {
                                                                           uint64_t output_index,
                                                                           uint64_t reduction_index);
 
+    /** Queries CUB temporary storage without allocating input, output, or workspace tensors. */
+    [[nodiscard]] size_t queryWorkspaceSizeInBytes(const TensorDescriptor& input_descriptor,
+                                                   const Stream& stream) const;
+
     [[nodiscard]] std::shared_ptr<StampedCubReduction> stamp(const Tensor& input, const Stream& stream) const;
     [[nodiscard]] std::shared_ptr<StampedCubReduction> stamp(const Tensor& input,
                                                              const Tensor& preallocated_output,
@@ -152,6 +162,7 @@ class CubReduction {
                                                                       const Stream& stream) const;
 
     std::optional<DataType> output_dtype;
+    float output_scale;
 };
 
 /**
@@ -333,6 +344,7 @@ class StampedCubReduction {
     void runOn(Stream& run_stream) const;
 
     [[nodiscard]] uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
+    [[nodiscard]] Tensor getInputTensor() const { return input; }
     [[nodiscard]] Tensor getOutputTensor() const { return output; }
     [[nodiscard]] CubReductionOp getOperation() const { return op; }
     [[nodiscard]] CubReductionPath getPath() const { return geometry.path; }
@@ -341,6 +353,7 @@ class StampedCubReduction {
     [[nodiscard]] DataType getAccumulatorDataType() const { return DataType::FP32; }
     [[nodiscard]] const CubReductionGeometry& getGeometry() const { return geometry; }
     [[nodiscard]] size_t getWorkspaceSizeInBytes() const { return temp_storage_bytes; }
+    [[nodiscard]] float getOutputScale() const { return output_scale; }
 
    private:
     friend class CubReduction;
@@ -352,6 +365,7 @@ class StampedCubReduction {
                         size_t temp_storage_bytes,
                         const Tensor& temp_storage,
                         std::optional<Tensor> indexing_metadata,
+                        float output_scale,
                         const Stream& stream);
 
     CubReductionOp op;
@@ -361,6 +375,7 @@ class StampedCubReduction {
     const size_t temp_storage_bytes;
     Tensor temp_storage;
     std::optional<Tensor> indexing_metadata;
+    const float output_scale;
     Stream stream;
 };
 

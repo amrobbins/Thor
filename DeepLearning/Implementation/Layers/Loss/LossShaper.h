@@ -2,7 +2,7 @@
 
 #include <optional>
 #include "DeepLearning/Implementation/Layers/Layer.h"
-#include "Utilities/TensorOperations/Misc/BatchReduce.h"
+#include "Utilities/TensorOperations/Cub/CubReduction.h"
 
 #include <nlohmann/json.hpp>
 
@@ -12,14 +12,13 @@ namespace ThorImplementation {
 
 /**
  * b: batch dimension
- * c: class dimension (categorical) or output number dimension (numerical)
+ * c: the row-major flattening of every non-batch loss dimension
  *
- * Input loss is always raw loss with dimensions [b][c]
+ * Input loss may have dimensions [b][d0]...[dn]. Reduction treats it as a zero-copy [b][c] view.
  *
- * Batch [b][c] -> [1]
- * Classwise [b][c] -> [c]
- * Elementwise [b][c] -> [b]
- * Raw [b][c] -> [b][c]
+ * Batch: sum each item's c losses, then average those sums across b -> [1]
+ * Classwise: average each flattened loss position across b -> [c]
+ * Elementwise: sum each item's c losses -> [b]
  */
 class LossShaper : public Layer {
    public:
@@ -42,7 +41,7 @@ class LossShaper : public Layer {
     bool uninitialized;
 
     OutputLossType outputLossType;
-    std::shared_ptr<BatchReduce> batchReduce;
+    std::shared_ptr<StampedCubReduction> reduction;
 };
 
 NLOHMANN_JSON_SERIALIZE_ENUM(LossShaper::OutputLossType,

@@ -41,13 +41,14 @@ indices; the backend is not selectable. `StampedReduction`, `StampedArgMinMax`, 
 `StampedReduceMinMaxBackward` bind those plans to concrete tensors. Min/max backward retains Thor's scatter kernel
 after CUB computes the winning local indices.
 
-The test `ExpressionReductionArchitecture.DenseExpressionSourcesDoNotUseCudnnReductionApis` prevents the retired
-cuDNN reduction descriptors, workspace queries, and execution API from being reintroduced under `Utilities/Expression`.
+The test `ExpressionReductionArchitecture.ActiveSourcesDoNotUseCudnnReductionApis` prevents the retired cuDNN
+reduction descriptors, workspace queries, and execution API from being reintroduced anywhere in active Thor sources.
 The source guard `ExpressionReductionArchitecture.GeneralReductionsAreCentralizedUnderCubReduction` scans Thor's
 `Utilities`, `DeepLearning`, and `bindings` sources for direct general-purpose CUB value or arg reductions. The obsolete
 standalone `CubDeviceReduce*` and `CubDeviceSegmentedReduce*` primitive wrappers were removed after all value and
 offset-segmented callers moved to the central utility. `FlatScatterAddKernel` still uses CUB ReduceByKey,
 which is a keyed grouping primitive rather than a tensor-axis reduction and therefore remains separate.
 
-The older standalone `Utilities/TensorOperations/Misc/BatchReduce` class is intentionally outside this expression
-architecture and may continue to use cuDNN until it is migrated separately.
+Loss shaping uses central CUB sums with an explicit FP32 output scale: batch and classwise losses divide only by the
+batch size, while elementwise losses sum non-batch elements without normalization. Binary accuracy uses the same
+scaled-sum facility. The obsolete `BatchReduce` class has been removed.

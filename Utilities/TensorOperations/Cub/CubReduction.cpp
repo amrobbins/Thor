@@ -7,6 +7,7 @@
 #include "Utilities/TensorOperations/Cub/CubReductionInternal.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -311,25 +312,36 @@ void requireSupportedOperation(CubReductionOp op) {
 }
 
 size_t queryReductionBytes(CubReductionOp op,
-                           const Tensor& input,
-                           Tensor& output,
+                           DataType input_dtype,
+                           const void* input,
+                           uint64_t input_elements,
+                           DataType output_dtype,
+                           void* output,
                            const CubReductionGeometry& geometry,
+                           float output_scale,
                            const Stream& stream) {
     switch (op) {
         case CubReductionOp::Sum:
-            return CubReductionInternal::querySumReductionBytes(input, output, geometry, stream);
+            return CubReductionInternal::querySumReductionBytes(
+                input_dtype, input, input_elements, output_dtype, output, geometry, output_scale, stream);
         case CubReductionOp::Product:
-            return CubReductionInternal::queryProductReductionBytes(input, output, geometry, stream);
+            return CubReductionInternal::queryProductReductionBytes(
+                input_dtype, input, input_elements, output_dtype, output, geometry, output_scale, stream);
         case CubReductionOp::Mean:
-            return CubReductionInternal::queryMeanReductionBytes(input, output, geometry, stream);
+            return CubReductionInternal::queryMeanReductionBytes(
+                input_dtype, input, input_elements, output_dtype, output, geometry, output_scale, stream);
         case CubReductionOp::L1Norm:
-            return CubReductionInternal::queryL1NormReductionBytes(input, output, geometry, stream);
+            return CubReductionInternal::queryL1NormReductionBytes(
+                input_dtype, input, input_elements, output_dtype, output, geometry, output_scale, stream);
         case CubReductionOp::L2Norm:
-            return CubReductionInternal::queryL2NormReductionBytes(input, output, geometry, stream);
+            return CubReductionInternal::queryL2NormReductionBytes(
+                input_dtype, input, input_elements, output_dtype, output, geometry, output_scale, stream);
         case CubReductionOp::Min:
-            return CubReductionInternal::queryMinReductionBytes(input, output, geometry, stream);
+            return CubReductionInternal::queryMinReductionBytes(
+                input_dtype, input, input_elements, output_dtype, output, geometry, output_scale, stream);
         case CubReductionOp::Max:
-            return CubReductionInternal::queryMaxReductionBytes(input, output, geometry, stream);
+            return CubReductionInternal::queryMaxReductionBytes(
+                input_dtype, input, input_elements, output_dtype, output, geometry, output_scale, stream);
     }
     throw std::invalid_argument("Unsupported CUB tensor reduction operation.");
 }
@@ -340,35 +352,36 @@ void launchReduction(CubReductionOp op,
                      const Tensor& input,
                      Tensor& output,
                      const CubReductionGeometry& geometry,
+                     float output_scale,
                      Stream& stream) {
     switch (op) {
         case CubReductionOp::Sum:
             CubReductionInternal::launchSumReduction(
-                temp_storage, temp_storage_bytes, input, output, geometry, stream);
+                temp_storage, temp_storage_bytes, input, output, geometry, output_scale, stream);
             return;
         case CubReductionOp::Product:
             CubReductionInternal::launchProductReduction(
-                temp_storage, temp_storage_bytes, input, output, geometry, stream);
+                temp_storage, temp_storage_bytes, input, output, geometry, output_scale, stream);
             return;
         case CubReductionOp::Mean:
             CubReductionInternal::launchMeanReduction(
-                temp_storage, temp_storage_bytes, input, output, geometry, stream);
+                temp_storage, temp_storage_bytes, input, output, geometry, output_scale, stream);
             return;
         case CubReductionOp::L1Norm:
             CubReductionInternal::launchL1NormReduction(
-                temp_storage, temp_storage_bytes, input, output, geometry, stream);
+                temp_storage, temp_storage_bytes, input, output, geometry, output_scale, stream);
             return;
         case CubReductionOp::L2Norm:
             CubReductionInternal::launchL2NormReduction(
-                temp_storage, temp_storage_bytes, input, output, geometry, stream);
+                temp_storage, temp_storage_bytes, input, output, geometry, output_scale, stream);
             return;
         case CubReductionOp::Min:
             CubReductionInternal::launchMinReduction(
-                temp_storage, temp_storage_bytes, input, output, geometry, stream);
+                temp_storage, temp_storage_bytes, input, output, geometry, output_scale, stream);
             return;
         case CubReductionOp::Max:
             CubReductionInternal::launchMaxReduction(
-                temp_storage, temp_storage_bytes, input, output, geometry, stream);
+                temp_storage, temp_storage_bytes, input, output, geometry, output_scale, stream);
             return;
     }
     throw std::invalid_argument("Unsupported CUB tensor reduction operation.");
@@ -414,13 +427,17 @@ void launchArgReduction(CubArgReductionOp op,
 
 }  // namespace
 
-CubReduction::CubReduction(CubReductionOp op, uint32_t axis, std::optional<DataType> output_dtype)
-    : CubReduction(op, std::vector<uint32_t>{axis}, output_dtype) {}
+CubReduction::CubReduction(CubReductionOp op,
+                           uint32_t axis,
+                           std::optional<DataType> output_dtype,
+                           float output_scale)
+    : CubReduction(op, std::vector<uint32_t>{axis}, output_dtype, output_scale) {}
 
 CubReduction::CubReduction(CubReductionOp op,
                            std::vector<uint32_t> axes,
-                           std::optional<DataType> output_dtype)
-    : op(op), axes(std::move(axes)), output_dtype(output_dtype) {
+                           std::optional<DataType> output_dtype,
+                           float output_scale)
+    : op(op), axes(std::move(axes)), output_dtype(output_dtype), output_scale(output_scale) {
     requireSupportedOperation(op);
     if (this->axes.empty()) {
         throw std::invalid_argument("CUB tensor reduction requires at least one reduction axis.");
@@ -433,6 +450,9 @@ CubReduction::CubReduction(CubReductionOp op,
     if (output_dtype.has_value()) {
         requireSupportedFloatingStorageDType(output_dtype.value(), "output");
     }
+    if (!std::isfinite(output_scale)) {
+        throw std::invalid_argument("CUB tensor reduction output scale must be finite.");
+    }
 }
 
 DataType CubReduction::resolveOutputDataType(DataType input_dtype) const {
@@ -440,6 +460,23 @@ DataType CubReduction::resolveOutputDataType(DataType input_dtype) const {
     const DataType resolved = output_dtype.value_or(input_dtype);
     requireSupportedFloatingStorageDType(resolved, "output");
     return resolved;
+}
+
+size_t CubReduction::queryWorkspaceSizeInBytes(const TensorDescriptor& input_descriptor,
+                                               const Stream& stream) const {
+    requireSupportedFloatingStorageDType(input_descriptor.getDataType(), "input");
+    const CubReductionGeometry geometry = analyzeGeometry(input_descriptor.getDimensions(), axes);
+    const DataType resolved_output_dtype = resolveOutputDataType(input_descriptor.getDataType());
+    ScopedGpu scoped_gpu(stream.getGpuNum());
+    return queryReductionBytes(op,
+                               input_descriptor.getDataType(),
+                               nullptr,
+                               input_descriptor.getTotalNumElements(),
+                               resolved_output_dtype,
+                               nullptr,
+                               geometry,
+                               output_scale,
+                               stream);
 }
 
 float CubReduction::getFp32EmptyReductionValue(CubReductionOp op) {
@@ -624,7 +661,15 @@ std::shared_ptr<StampedCubReduction> CubReduction::stampValidated(const Tensor& 
     std::optional<Tensor> indexing_metadata =
         stampDeviceIndexingMetadata(stamped_geometry, input.getPlacement(), stream);
     Tensor mutable_output = output;
-    const size_t temp_storage_bytes = queryReductionBytes(op, input, mutable_output, stamped_geometry, stream);
+    const size_t temp_storage_bytes = queryReductionBytes(op,
+                                                          input.getDataType(),
+                                                          input.getMemPtr<void>(),
+                                                          input.getTotalNumElements(),
+                                                          mutable_output.getDataType(),
+                                                          mutable_output.getMemPtr<void>(),
+                                                          stamped_geometry,
+                                                          output_scale,
+                                                          stream);
     Tensor temp_storage(input.getPlacement(), TensorDescriptor(DataType::UINT8, {static_cast<uint64_t>(temp_storage_bytes)}));
 
     return std::shared_ptr<StampedCubReduction>(new StampedCubReduction(op,
@@ -634,6 +679,7 @@ std::shared_ptr<StampedCubReduction> CubReduction::stampValidated(const Tensor& 
                                                                         temp_storage_bytes,
                                                                         temp_storage,
                                                                         std::move(indexing_metadata),
+                                                                        output_scale,
                                                                         stream));
 }
 
@@ -948,6 +994,7 @@ StampedCubReduction::StampedCubReduction(CubReductionOp op,
                                          size_t temp_storage_bytes,
                                          const Tensor& temp_storage,
                                          std::optional<Tensor> indexing_metadata,
+                                         float output_scale,
                                          const Stream& stream)
     : op(op),
       geometry(std::move(geometry)),
@@ -956,6 +1003,7 @@ StampedCubReduction::StampedCubReduction(CubReductionOp op,
       temp_storage_bytes(temp_storage_bytes),
       temp_storage(temp_storage),
       indexing_metadata(std::move(indexing_metadata)),
+      output_scale(output_scale),
       stream(stream) {
     requireTempStorage(this->temp_storage, input.getPlacement(), temp_storage_bytes);
 }
@@ -965,7 +1013,7 @@ void StampedCubReduction::run() { runOn(stream); }
 void StampedCubReduction::runOn(Stream& run_stream) const {
     requireCompatibleStream(input, run_stream);
     ScopedGpu scoped_gpu(run_stream.getGpuNum());
-    launchReduction(op, temp_storage, temp_storage_bytes, input, output, geometry, run_stream);
+    launchReduction(op, temp_storage, temp_storage_bytes, input, output, geometry, output_scale, run_stream);
 }
 
 }  // namespace ThorImplementation
