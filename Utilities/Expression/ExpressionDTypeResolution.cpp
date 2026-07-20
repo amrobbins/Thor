@@ -63,7 +63,8 @@ static bool isWhereOp(ExprOp op) { return op == ExprOp::WHERE; }
 
 static bool isScanOp(ExprOp op) { return op == ExprOp::SCAN || op == ExprOp::SEGMENTED_SCAN; }
 static bool isSegmentedReduceOp(ExprOp op) {
-    return op == ExprOp::SEGMENTED_REDUCE_SUM || op == ExprOp::SEGMENTED_REDUCE_MIN || op == ExprOp::SEGMENTED_REDUCE_MAX;
+    return op == ExprOp::SEGMENTED_REDUCE_SUM || op == ExprOp::SEGMENTED_REDUCE_MIN ||
+           op == ExprOp::SEGMENTED_REDUCE_MAX || op == ExprOp::SEGMENTED_REDUCE_MEAN;
 }
 
 static bool isCastOp(ExprOp op) { return op == ExprOp::CAST; }

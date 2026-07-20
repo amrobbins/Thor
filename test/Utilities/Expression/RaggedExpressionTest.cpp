@@ -284,10 +284,12 @@ TEST(RaggedExpression, SegmentReductionsBuildDensePerRowOutputsForScalarValues) 
     const Expression sum = ragged.segment_sum();
     const Expression min = ragged.segment_min();
     const Expression max = ragged.segment_max();
+    const Expression mean = ragged.segment_mean();
 
     EXPECT_EQ(outputNode(sum).op, ExprOp::SEGMENTED_REDUCE_SUM);
     EXPECT_EQ(outputNode(min).op, ExprOp::SEGMENTED_REDUCE_MIN);
     EXPECT_EQ(outputNode(max).op, ExprOp::SEGMENTED_REDUCE_MAX);
+    EXPECT_EQ(outputNode(mean).op, ExprOp::SEGMENTED_REDUCE_MEAN);
 }
 
 TEST(RaggedExpression, SegmentReductionsRejectNonScalarRaggedValuesCleanly) {
@@ -299,12 +301,25 @@ TEST(RaggedExpression, SegmentReductionsRejectNonScalarRaggedValuesCleanly) {
     EXPECT_THROW((void)ragged.segment_softmax(), std::invalid_argument);
 }
 
-TEST(RaggedExpression, SegmentMeanBuildsMaskedDensePerRowAverageForScalarValues) {
+TEST(RaggedExpression, SegmentMeanBuildsOneDirectSegmentedReductionForScalarValues) {
     const RaggedExpression ragged = RaggedExpression::input("x", makeDescriptor(DataType::FP32, {}, 3, 9));
 
     const Expression mean = ragged.segment_mean();
+    const PhysicalExpression physical = mean.expression();
 
-    EXPECT_EQ(outputNode(mean).op, ExprOp::WHERE);
+    ASSERT_EQ(physical.nodes.size(), 3U);
+    const ExprNode& mean_node = physical.nodes.at(physical.output_node);
+    EXPECT_EQ(mean_node.op, ExprOp::SEGMENTED_REDUCE_MEAN);
+    EXPECT_EQ(physical.nodes.at(mean_node.lhs).op, ExprOp::INPUT);
+    EXPECT_EQ(physical.nodes.at(mean_node.rhs).op, ExprOp::INPUT);
+}
+
+TEST(RaggedExpression, SegmentMeanAcceptsFp8BecauseCentralCubMeanAccumulatesInFp32) {
+    const RaggedExpression e4m3 = RaggedExpression::input("e4m3", makeDescriptor(DataType::FP8_E4M3, {}, 3, 9));
+    const RaggedExpression e5m2 = RaggedExpression::input("e5m2", makeDescriptor(DataType::FP8_E5M2, {}, 3, 9));
+
+    EXPECT_EQ(outputNode(e4m3.segment_mean()).op, ExprOp::SEGMENTED_REDUCE_MEAN);
+    EXPECT_EQ(outputNode(e5m2.segment_mean()).op, ExprOp::SEGMENTED_REDUCE_MEAN);
 }
 
 TEST(RaggedExpression, SegmentSoftmaxPreservesOffsetsAndRuntimeExtentForScalarValues) {

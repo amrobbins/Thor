@@ -29,8 +29,10 @@ local flattened indices: NaNs propagate, and the lowest logical index wins equal
 
 ## Offset-segmented path
 
-`CubSegmentedReduction` owns ragged sum, mean, min, and max. Segment offsets are validated while stamping, and empty
-segments use the explicit identities defined by `CubReduction::getFp32EmptyReductionValue()`.
+`CubSegmentedReduction` owns ragged sum, mean, min, and max. `RaggedExpression::segment_mean()` emits the direct
+segmented-mean stage, so FP32 accumulation, division by row length, empty-row handling, and output conversion happen in
+one CUB operation without materializing row lengths or segmented sums. Segment offsets are validated while stamping,
+and empty segments use the explicit identities defined by `CubReduction::getFp32EmptyReductionValue()`.
 
 ## Expression integration
 

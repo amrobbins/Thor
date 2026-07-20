@@ -1130,6 +1130,9 @@ StampedSegmentedReduction::StampedSegmentedReduction(std::shared_ptr<CompiledSeg
         case ExprOp::SEGMENTED_REDUCE_MAX:
             cub_op = CubReductionOp::Max;
             break;
+        case ExprOp::SEGMENTED_REDUCE_MEAN:
+            cub_op = CubReductionOp::Mean;
+            break;
         default:
             throw std::runtime_error("Unsupported segmented-reduction op.");
     }

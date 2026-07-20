@@ -372,6 +372,8 @@ std::string exprOpExternalName(ExprOp op) {
             return "segmented_reduce_min";
         case ExprOp::SEGMENTED_REDUCE_MAX:
             return "segmented_reduce_max";
+        case ExprOp::SEGMENTED_REDUCE_MEAN:
+            return "segmented_reduce_mean";
         case ExprOp::RAGGED_VALUEWISE_EXTENT:
             return "ragged_valuewise_extent";
         default:
@@ -506,6 +508,7 @@ ExprOp exprOpFromExternalName(const std::string& op) {
         {"segmented_reduce_sum", ExprOp::SEGMENTED_REDUCE_SUM},
         {"segmented_reduce_min", ExprOp::SEGMENTED_REDUCE_MIN},
         {"segmented_reduce_max", ExprOp::SEGMENTED_REDUCE_MAX},
+        {"segmented_reduce_mean", ExprOp::SEGMENTED_REDUCE_MEAN},
         {"ragged_valuewise_extent", ExprOp::RAGGED_VALUEWISE_EXTENT},
     };
 
@@ -1047,6 +1050,8 @@ std::string opName(ExprOp op) {
             return "SEGMENTED_REDUCE_MIN";
         case ExprOp::SEGMENTED_REDUCE_MAX:
             return "SEGMENTED_REDUCE_MAX";
+        case ExprOp::SEGMENTED_REDUCE_MEAN:
+            return "SEGMENTED_REDUCE_MEAN";
         case ExprOp::RAGGED_VALUEWISE_EXTENT:
             return "RAGGED_VALUEWISE_EXTENT";
         case ExprOp::RMSNORM:
@@ -2193,6 +2198,7 @@ bool Expression::isBinaryOp(const ExprOp op) {
         case ExprOp::SEGMENTED_REDUCE_SUM:
         case ExprOp::SEGMENTED_REDUCE_MIN:
         case ExprOp::SEGMENTED_REDUCE_MAX:
+        case ExprOp::SEGMENTED_REDUCE_MEAN:
         case ExprOp::RAGGED_VALUEWISE_EXTENT:
         case ExprOp::CONV2D:
         case ExprOp::CONV2D_BACKWARD_DATA:
@@ -3500,6 +3506,7 @@ Expression Expression::segmentedScan(const Expression& input, const Expression& 
 Expression Expression::segmentedReduceSum(const Expression& offsets) const { return segmentedReduceSum(*this, offsets); }
 Expression Expression::segmentedReduceMin(const Expression& offsets) const { return segmentedReduceMin(*this, offsets); }
 Expression Expression::segmentedReduceMax(const Expression& offsets) const { return segmentedReduceMax(*this, offsets); }
+Expression Expression::segmentedReduceMean(const Expression& offsets) const { return segmentedReduceMean(*this, offsets); }
 
 Expression Expression::segmentedReduceSum(const Expression& input, const Expression& offsets) {
     return binaryOp(input, offsets, ExprOp::SEGMENTED_REDUCE_SUM);
@@ -3511,6 +3518,10 @@ Expression Expression::segmentedReduceMin(const Expression& input, const Express
 
 Expression Expression::segmentedReduceMax(const Expression& input, const Expression& offsets) {
     return binaryOp(input, offsets, ExprOp::SEGMENTED_REDUCE_MAX);
+}
+
+Expression Expression::segmentedReduceMean(const Expression& input, const Expression& offsets) {
+    return binaryOp(input, offsets, ExprOp::SEGMENTED_REDUCE_MEAN);
 }
 
 Expression Expression::withRaggedRuntimeExtent(const Expression& offsets,

@@ -345,6 +345,7 @@ static bool isStageBoundaryLikeBackwardOutputOp(ExprOp op) {
         case ExprOp::SEGMENTED_REDUCE_SUM:
         case ExprOp::SEGMENTED_REDUCE_MIN:
         case ExprOp::SEGMENTED_REDUCE_MAX:
+        case ExprOp::SEGMENTED_REDUCE_MEAN:
         case ExprOp::REDUCE_MIN:
         case ExprOp::REDUCE_MAX:
         case ExprOp::SOFTMAX:
@@ -506,6 +507,7 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
             case ExprOp::SEGMENTED_REDUCE_SUM:
             case ExprOp::SEGMENTED_REDUCE_MIN:
             case ExprOp::SEGMENTED_REDUCE_MAX:
+            case ExprOp::SEGMENTED_REDUCE_MEAN:
                 reaches[i] = reaches.at(node.lhs);
                 break;
             case ExprOp::MATMUL:
@@ -2516,7 +2518,8 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
                 break;
             case ExprOp::SEGMENTED_REDUCE_SUM:
             case ExprOp::SEGMENTED_REDUCE_MIN:
-            case ExprOp::SEGMENTED_REDUCE_MAX: {
+            case ExprOp::SEGMENTED_REDUCE_MAX:
+            case ExprOp::SEGMENTED_REDUCE_MEAN: {
                 const std::vector<uint64_t>& values_dims = node_dims[node.lhs];
                 const std::vector<uint64_t>& offsets_dims = node_dims[node.rhs];
                 if (values_dims.size() != 1 || offsets_dims.size() != 1 || offsets_dims[0] == 0) {
@@ -4181,6 +4184,7 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
             case ExprOp::SEGMENTED_REDUCE_SUM:
             case ExprOp::SEGMENTED_REDUCE_MIN:
             case ExprOp::SEGMENTED_REDUCE_MAX:
+            case ExprOp::SEGMENTED_REDUCE_MEAN:
                 throw std::runtime_error("Thor expressions autodiff for segmented ragged reductions is deferred to the ragged autodiff chunk.");
 
             case ExprOp::SCAN:

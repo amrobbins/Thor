@@ -176,6 +176,8 @@ Expression RaggedExpression::segment_mean() const {
     validateScalarValues("segment_mean");
 
     switch (descriptor.getValuesDataType()) {
+        case DataType::FP8_E4M3:
+        case DataType::FP8_E5M2:
         case DataType::FP16:
         case DataType::BF16:
         case DataType::FP32:
@@ -185,13 +187,7 @@ Expression RaggedExpression::segment_mean() const {
             throw std::invalid_argument("RaggedExpression::segment_mean requires floating-point ragged values.");
     }
 
-    const uint64_t batch_size = descriptor.getBatchSize();
-    const Expression offsets_values_dtype = offsets.cast(descriptor.getValuesDataType());
-    const Expression start_offsets = offsets_values_dtype.stridedView({batch_size}, {1}, 0);
-    const Expression end_offsets = offsets_values_dtype.stridedView({batch_size}, {1}, 1);
-    const Expression lengths = end_offsets - start_offsets;
-    const Expression sums = segment_sum();
-    return Expression::where(lengths.greaterThan(Expression::constantScalar(0.0)), sums / lengths, Expression::constantScalar(0.0));
+    return values.segmentedReduceMean(offsets);
 }
 
 RaggedExpression RaggedExpression::segment_softmax() const {

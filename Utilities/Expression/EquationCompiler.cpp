@@ -631,7 +631,8 @@ static bool isScanMinMaxBackwardOp(ExprOp op) {
 }
 static bool isScanOp(ExprOp op) { return op == ExprOp::SCAN || op == ExprOp::SEGMENTED_SCAN; }
 static bool isSegmentedReduceOp(ExprOp op) {
-    return op == ExprOp::SEGMENTED_REDUCE_SUM || op == ExprOp::SEGMENTED_REDUCE_MIN || op == ExprOp::SEGMENTED_REDUCE_MAX;
+    return op == ExprOp::SEGMENTED_REDUCE_SUM || op == ExprOp::SEGMENTED_REDUCE_MIN ||
+           op == ExprOp::SEGMENTED_REDUCE_MAX || op == ExprOp::SEGMENTED_REDUCE_MEAN;
 }
 static bool isRmsNormOp(ExprOp op) { return op == ExprOp::RMSNORM; }
 static bool isEmbeddingLookupOp(ExprOp op) { return op == ExprOp::EMBEDDING_LOOKUP; }
@@ -1027,6 +1028,8 @@ static const char* fusedOpTag(ExprOp op) {
             return "SEG_REDUCE_MIN";
         case ExprOp::SEGMENTED_REDUCE_MAX:
             return "SEG_REDUCE_MAX";
+        case ExprOp::SEGMENTED_REDUCE_MEAN:
+            return "SEG_REDUCE_MEAN";
         case ExprOp::RMSNORM:
             return "RMSNORM";
         case ExprOp::EMBEDDING_LOOKUP:
@@ -1768,6 +1771,7 @@ shared_ptr<CompiledSegmentedReduction> EquationCompiler::compileSegmentedReducti
         case ExprOp::SEGMENTED_REDUCE_SUM:
         case ExprOp::SEGMENTED_REDUCE_MIN:
         case ExprOp::SEGMENTED_REDUCE_MAX:
+        case ExprOp::SEGMENTED_REDUCE_MEAN:
             break;
         default:
             throw std::runtime_error("Unsupported segmented-reduction op.");

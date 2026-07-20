@@ -3704,6 +3704,7 @@ static uint64_t computeFusedStageFlops(const PhysicalExpression& expr,
             case ExprOp::SEGMENTED_REDUCE_SUM:
             case ExprOp::SEGMENTED_REDUCE_MIN:
             case ExprOp::SEGMENTED_REDUCE_MAX:
+            case ExprOp::SEGMENTED_REDUCE_MEAN:
             case ExprOp::EMBEDDING_LOOKUP:
             case ExprOp::SOFTMAX:
             case ExprOp::ATTENTION:
@@ -3942,12 +3943,22 @@ static uint64_t computeStageFlops(const CompiledExecutionStage& stage, const std
                 throw std::runtime_error("ArgMinMax stage missing payload while computing FLOPs.");
             return computeArgMinMaxStageFlops(*stage.arg_minmax, stage_input_dims);
 
-        case CompiledExecutionStage::Kind::SegmentedReduction:
-            if (!stage.segmented_reduction)
+        case CompiledExecutionStage::Kind::SegmentedReduction: {
+            if (!stage.segmented_reduction) {
                 throw std::runtime_error("SegmentedReduction stage missing payload while computing FLOPs.");
-            if (stage_input_dims.empty())
+            }
+            if (stage_input_dims.empty()) {
                 throw std::runtime_error("SegmentedReduction stage missing input dims while computing FLOPs.");
-            return numelFromDims(stage_input_dims[0]);
+            }
+            uint64_t flops = numelFromDims(stage_input_dims[0]);
+            if (stage.segmented_reduction->op == ExprOp::SEGMENTED_REDUCE_MEAN) {
+                if (stage_input_dims.size() != 2 || stage_input_dims[1].size() != 1 || stage_input_dims[1][0] == 0) {
+                    throw std::runtime_error("Segmented mean stage requires a non-empty rank-1 offsets shape while computing FLOPs.");
+                }
+                flops = checkedAddU64(flops, stage_input_dims[1][0] - 1, "computeSegmentedMeanStageFlops");
+            }
+            return flops;
+        }
 
         case CompiledExecutionStage::Kind::Scan:
             if (stage_input_dims.empty())

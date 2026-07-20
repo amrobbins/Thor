@@ -138,6 +138,7 @@ enum class ExprOp : uint16_t {
     SEGMENTED_REDUCE_MIN,
     SEGMENTED_REDUCE_MAX,
     RAGGED_VALUEWISE_EXTENT,
+    SEGMENTED_REDUCE_MEAN,
 };
 
 enum class RotaryScalingKind : uint8_t {
@@ -641,9 +642,11 @@ class Expression {
     [[nodiscard]] Expression segmentedReduceSum(const Expression& offsets) const;
     [[nodiscard]] Expression segmentedReduceMin(const Expression& offsets) const;
     [[nodiscard]] Expression segmentedReduceMax(const Expression& offsets) const;
+    [[nodiscard]] Expression segmentedReduceMean(const Expression& offsets) const;
     [[nodiscard]] static Expression segmentedReduceSum(const Expression& input, const Expression& offsets);
     [[nodiscard]] static Expression segmentedReduceMin(const Expression& input, const Expression& offsets);
     [[nodiscard]] static Expression segmentedReduceMax(const Expression& input, const Expression& offsets);
+    [[nodiscard]] static Expression segmentedReduceMean(const Expression& input, const Expression& offsets);
     [[nodiscard]] Expression withRaggedRuntimeExtent(const Expression& offsets,
                                                      uint64_t batch_size,
                                                      uint64_t max_active_values,
