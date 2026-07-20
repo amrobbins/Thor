@@ -45,7 +45,7 @@ static bool isAttentionBackwardOp(ExprOp op) {
 }
 
 static bool isReductionComputeOp(ExprOp op) {
-    return isCudnnReduceOp(op) || op == ExprOp::RMSNORM || op == ExprOp::ATTENTION || isAttentionBackwardOp(op) || op == ExprOp::ROPE;
+    return isReductionOp(op) || op == ExprOp::RMSNORM || op == ExprOp::ATTENTION || isAttentionBackwardOp(op) || op == ExprOp::ROPE;
 }
 static bool isMatmulOp(ExprOp op) { return op == ExprOp::MATMUL || op == ExprOp::GEMM; }
 static bool isConvolutionOp(ExprOp op) {
@@ -93,7 +93,7 @@ DataType toSupportedComputeDType(ExprOp op, DataType requested_compute_dtype) {
         throw std::runtime_error("Unsupported passthrough dtype in toSupportedComputeDType.");
     }
 
-    if (isScanOp(op) || isSegmentedReduceOp(op)) {
+    if (isScanOp(op)) {
         switch (requested_compute_dtype) {
             case DataType::UINT32:
             case DataType::UINT64:
@@ -103,7 +103,21 @@ DataType toSupportedComputeDType(ExprOp op, DataType requested_compute_dtype) {
             case DataType::FP64:
                 return requested_compute_dtype;
             default:
-                throw std::runtime_error("Unsupported scan/segmented-reduction dtype in toSupportedComputeDType.");
+                throw std::runtime_error("Unsupported scan dtype in toSupportedComputeDType.");
+        }
+    }
+
+    if (isSegmentedReduceOp(op)) {
+        switch (requested_compute_dtype) {
+            case DataType::FP8_E4M3:
+            case DataType::FP8_E5M2:
+            case DataType::FP16:
+            case DataType::BF16:
+            case DataType::FP32:
+            case DataType::FP64:
+                return requested_compute_dtype;
+            default:
+                throw std::runtime_error("Unsupported segmented-reduction dtype in toSupportedComputeDType.");
         }
     }
 
@@ -183,29 +197,14 @@ DataType toSupportedInputDType(ExprOp op, DataType dtype) {
         throw std::runtime_error("Unsupported dtype in toSupportedInputDType.");
     }
 
-    if (isCudnnReduceOp(op)) {
-        switch (dtype) {
-            case DataType::FP16:
-            case DataType::FP32:
-                return dtype;
-            case DataType::BF16:
-                // Thor's staged reduction path currently uses deprecated cudnnReduceTensor.
-                // That API documents HALF/INT8-to-FLOAT mixed reductions, but not BF16.
-                // Stage BF16 in FP32 so the compatibility conversion cannot overflow values
-                // that are representable in BF16 but not FP16.
-                return DataType::FP32;
-            case DataType::FP8_E4M3:
-            case DataType::FP8_E5M2:
-                // FP8 reduction is not natively supported by this path. FP16 is an allowed
-                // compute promotion because it strictly increases FP8 representability.
-                return DataType::FP16;
-            default:
-                throw std::runtime_error("Unhandled cuDNN reduction input dtype conversion, from: " +
-                                         TensorDescriptor::getElementTypeName(dtype));
-        }
+    if (isReductionOp(op)) {
+        // Dense reductions consume their materialized storage dtype directly. FP32 conversion, accumulation, and
+        // finalization happen inside the central CUB iterators, so dtype resolution must not insert a compatibility
+        // tensor at the reduction boundary.
+        return dtype;
     }
 
-    if (isCudnnSoftmaxOp(op)) {
+    if (isSoftmaxOp(op)) {
         switch (dtype) {
             case DataType::FP16:
             case DataType::BF16:
@@ -651,11 +650,11 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
         return grad_dtype;
     }
 
-    if (isCudnnReduceOp(node.op)) {
+    if (isReductionOp(node.op)) {
         if (node.op == ExprOp::REDUCE_ARGMIN || node.op == ExprOp::REDUCE_ARGMAX)
             return DataType::UINT32;
 
-        // cuDNN reduction stages have a fixed floating-point contract: compute and
+        // Dense floating-point reduction stages have a fixed contract: compute and
         // materialize in FP32.  Do not reinterpret an explicitly requested low-precision
         // node output as part of the reduction itself.  Callers that want FP16/BF16/FP8
         // storage must add an explicit cast after the reduction boundary.
@@ -811,7 +810,7 @@ static void propagateMaterializedOutputComputeDTypes(PhysicalExpression& expr,
         } else if (node.op == ExprOp::CAST) {
             // Cast is an explicit dtype-conversion boundary. Do not force the
             // source expression to compute in the destination dtype.
-        } else if (isCudnnReduceOp(node.op)) {
+        } else if (isReductionOp(node.op)) {
             // A reduction's FP32 compute policy belongs to the reduction stage only.
             // The materialized producer still needs to honor its own compute policy:
             // for example, an FP32 trunk assembled from an FP16 and an FP32 branch

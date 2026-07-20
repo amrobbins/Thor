@@ -1274,6 +1274,43 @@ def test_compile_backward_reduce_min_numerical(dtype: thor.DataType):
 
 
 @pytest.mark.cuda
+def test_compile_backward_reduce_min_tie_uses_first_logical_index():
+    dtype = thor.DataType.fp32
+    x = ex.input("x")
+    loss = ex.reduce_min(x, axis=1, squeeze=[1])
+
+    fwd_eq = ex.compile(loss, device_num=0)
+    bwd_eq = fwd_eq.compile_backward(["x"])
+
+    x_np = np.array(
+        [
+            [1.0, 1.0, 3.0, 1.0],
+            [-2.0, 4.0, -2.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    expected = np.array(
+        [
+            [1.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+
+    stream = Stream(gpu_num=0)
+    stamped = bwd_eq.stamp({"x": _host_to_gpu(x_np, dtype, stream)}, stream)
+    stamped.run()
+
+    out_gpu = stamped.output("x_grad")
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
+    out_host.copy_from_async(out_gpu, stream)
+    stream.synchronize()
+    got = out_host.numpy().copy()
+
+    np.testing.assert_array_equal(got, expected)
+
+
+@pytest.mark.cuda
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
 def test_compile_backward_reduce_min_explicit_upstream_numerical(dtype: thor.DataType):
     x = ex.input("x")
@@ -3166,7 +3203,7 @@ def test_reduce_sum_fp8_e4m3_input_adapts_and_runs_numerical():
 
 
 @pytest.mark.cuda
-def test_reduce_argmin_bf16_input_adapts_and_runs_numerical():
+def test_reduce_argmin_bf16_input_runs_directly_through_cub_numerical():
     input_dtype = thor.DataType.bf16
     output_dtype = thor.DataType.uint32
 

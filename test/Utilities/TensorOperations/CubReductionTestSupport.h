@@ -27,8 +27,14 @@ Tensor makeGpuTensor(const std::vector<float>& values,
                      const std::vector<uint64_t>& dimensions,
                      Stream& stream,
                      DataType dtype = DataType::FP32);
+Tensor makeGpuUnsignedTensor(const std::vector<uint64_t>& values,
+                             const std::vector<uint64_t>& dimensions,
+                             Stream& stream,
+                             DataType dtype = DataType::UINT32);
+void overwriteGpuUnsignedTensor(Tensor& gpu, const std::vector<uint64_t>& values, Stream& stream);
 
 std::vector<float> copyGpuTensorAsFloat(const Tensor& gpu, Stream& stream);
+std::vector<uint64_t> copyGpuTensorAsUnsigned(const Tensor& gpu, Stream& stream);
 
 void expectFloatVectorNear(const std::vector<float>& actual,
                            const std::vector<float>& expected,

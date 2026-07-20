@@ -200,36 +200,16 @@ struct RotaryPositionEmbeddingOptions {
     bool allow_in_place_materialization = false;
 };
 
-inline bool isCudnnReduceOp(ExprOp op) {
+inline bool isValueReductionOp(ExprOp op) {
     return op == ExprOp::REDUCE_SUM || op == ExprOp::REDUCE_PROD || op == ExprOp::REDUCE_MIN || op == ExprOp::REDUCE_MAX ||
-           op == ExprOp::REDUCE_ARGMIN || op == ExprOp::REDUCE_ARGMAX || op == ExprOp::REDUCE_AVG || op == ExprOp::REDUCE_NORM1 ||
-           op == ExprOp::REDUCE_NORM2;
+           op == ExprOp::REDUCE_AVG || op == ExprOp::REDUCE_NORM1 || op == ExprOp::REDUCE_NORM2;
 }
 
-inline bool isCudnnSoftmaxOp(ExprOp op) { return op == ExprOp::SOFTMAX; }
-
-inline cudnnReduceTensorOp_t toCudnnReduceOp(ExprOp op) {
-    switch (op) {
-        case ExprOp::REDUCE_SUM:
-            return CUDNN_REDUCE_TENSOR_ADD;
-        case ExprOp::REDUCE_PROD:
-            return CUDNN_REDUCE_TENSOR_MUL;
-        case ExprOp::REDUCE_MIN:
-        case ExprOp::REDUCE_ARGMIN:
-            return CUDNN_REDUCE_TENSOR_MIN;
-        case ExprOp::REDUCE_MAX:
-        case ExprOp::REDUCE_ARGMAX:
-            return CUDNN_REDUCE_TENSOR_MAX;
-        case ExprOp::REDUCE_AVG:
-            return CUDNN_REDUCE_TENSOR_AVG;
-        case ExprOp::REDUCE_NORM1:
-            return CUDNN_REDUCE_TENSOR_NORM1;
-        case ExprOp::REDUCE_NORM2:
-            return CUDNN_REDUCE_TENSOR_NORM2;
-        default:
-            throw;
-    }
+inline bool isReductionOp(ExprOp op) {
+    return isValueReductionOp(op) || op == ExprOp::REDUCE_ARGMIN || op == ExprOp::REDUCE_ARGMAX;
 }
+
+inline bool isSoftmaxOp(ExprOp op) { return op == ExprOp::SOFTMAX; }
 
 struct ExprNode {
     ExprOp op;

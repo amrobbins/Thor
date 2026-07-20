@@ -373,7 +373,7 @@ static bool stageBoundaryMaterializesRequestedDType(const ExprNode& node, DataTy
         return false;
     }
 
-    if (isCudnnReduceOp(node.op) && node.op != ExprOp::REDUCE_ARGMIN && node.op != ExprOp::REDUCE_ARGMAX) {
+    if (isValueReductionOp(node.op)) {
         // Floating reduction nodes may still carry the caller's pre-resolution
         // output_dtype request in the autodiff graph, but dtype resolution and the
         // compiled reduction stage deliberately materialize FP32.  A low-precision

@@ -41,7 +41,6 @@ TEST(CubReductionGeometry, RejectsInvalidSingleAxisGeometry) {
     EXPECT_THROW(static_cast<void>(CubReduction::analyzeGeometry({2, 0, 3}, 1)), std::invalid_argument);
 }
 
-
 TEST(CubReductionGeometry, SelectsBestMultiAxisPathAndShapes) {
     const CubReductionGeometry all_axes = CubReduction::analyzeGeometry({2, 3, 4}, std::vector<uint32_t>{0, 1, 2});
     EXPECT_EQ(all_axes.path, CubReductionPath::DeviceTransformReduce);
@@ -91,15 +90,30 @@ TEST(CubReductionGeometry, RejectsInvalidMultiAxisGeometry) {
                  std::invalid_argument);
     EXPECT_THROW(static_cast<void>(CubReduction::analyzeGeometry({2, 0, 3}, std::vector<uint32_t>{0, 2})),
                  std::invalid_argument);
-    EXPECT_THROW(static_cast<void>(CubReduction::analyzeGeometry({1, 1, 1, 1, 1, 1, 1, 1, 1},
-                                                                  std::vector<uint32_t>{0})),
-                 std::invalid_argument);
     EXPECT_THROW(static_cast<void>(CubReduction(CubReductionOp::Sum, std::vector<uint32_t>{})),
                  std::invalid_argument);
     EXPECT_THROW(static_cast<void>(CubReduction(CubReductionOp::Sum, std::vector<uint32_t>{0, 0})),
                  std::invalid_argument);
     EXPECT_THROW(static_cast<void>(CubReduction(CubReductionOp::Sum, std::vector<uint32_t>{1, 0})),
                  std::invalid_argument);
+}
+
+TEST(CubReductionGeometry, SupportsRankBeyondFormerCudnnDescriptorLimit) {
+    const std::vector<uint64_t> dimensions{2, 1, 2, 1, 2, 1, 2, 1, 2};
+    const std::vector<uint32_t> axes{0, 2, 4, 6};
+    const CubReductionGeometry geometry = CubReduction::analyzeGeometry(dimensions, axes);
+
+    EXPECT_EQ(geometry.rank, 9U);
+    EXPECT_EQ(geometry.path, CubReductionPath::StridedFixedSegment);
+    EXPECT_EQ(geometry.input_elements, 32U);
+    EXPECT_EQ(geometry.reduction_size, 16U);
+    EXPECT_EQ(geometry.output_elements, 2U);
+    EXPECT_EQ(geometry.output_dimensions, (std::vector<uint64_t>{1, 1, 1, 1, 1, 1, 1, 1, 2}));
+    EXPECT_EQ(geometry.indexing.input_strides.size(), dimensions.size());
+    EXPECT_EQ(geometry.indexing.reduced_axes, axes);
+
+    EXPECT_EQ(CubReduction::mapLogicalReductionIndexToPhysicalIndex(geometry, 0, 15), 30U);
+    EXPECT_EQ(CubReduction::mapLogicalReductionIndexToPhysicalIndex(geometry, 1, 15), 31U);
 }
 
 TEST(CubReductionGeometry, LogicalIndexMappingIsBijectiveAndMatchesRowMajorCoordinates) {

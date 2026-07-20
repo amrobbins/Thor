@@ -212,7 +212,7 @@ TEST(EquationCompiler, RmsNormConsumesPrecedingPointwiseStageWithoutAbsorbingIt)
     EXPECT_EQ(compiled->fused_activation, CudnnRmsNormFusedActivation::NONE);
 }
 
-TEST(ExpressionDTypeResolution, CudnnValueReductionAlwaysMaterializesFp32) {
+TEST(ExpressionDTypeResolution, DenseValueReductionAlwaysMaterializesFp32) {
     auto x = Expression::input("x", DataType::FP16, DataType::FP16);
     auto sum = x.reduce_sum({1}, {}).withOutputDType(DataType::FP16);
 
@@ -260,13 +260,34 @@ TEST(EquationCompiler, ExplicitCastAfterReductionControlsLowPrecisionStorage) {
     EXPECT_EQ(cast_output.output_dtype.value(), DataType::FP16);
 }
 
-TEST(ExpressionDTypeResolution, CudnnReductionPromotesBf16ToFp32WithoutNarrowingThroughFp16) {
-    EXPECT_EQ(toSupportedInputDType(ExprOp::REDUCE_SUM, DataType::BF16), DataType::FP32);
-    EXPECT_EQ(toSupportedInputDType(ExprOp::REDUCE_MAX, DataType::BF16), DataType::FP32);
-    EXPECT_EQ(toSupportedInputDType(ExprOp::REDUCE_ARGMAX, DataType::BF16), DataType::FP32);
+TEST(ExpressionDTypeResolution, DenseValueAndArgReductionsPreserveInputStorageDtypes) {
+    EXPECT_EQ(toSupportedInputDType(ExprOp::REDUCE_SUM, DataType::BF16), DataType::BF16);
+    EXPECT_EQ(toSupportedInputDType(ExprOp::REDUCE_MAX, DataType::BF16), DataType::BF16);
+    EXPECT_EQ(toSupportedInputDType(ExprOp::REDUCE_SUM, DataType::FP8_E4M3), DataType::FP8_E4M3);
+    EXPECT_EQ(toSupportedInputDType(ExprOp::REDUCE_SUM, DataType::FP8_E5M2), DataType::FP8_E5M2);
 
-    EXPECT_EQ(toSupportedInputDType(ExprOp::REDUCE_SUM, DataType::FP8_E4M3), DataType::FP16);
-    EXPECT_EQ(toSupportedInputDType(ExprOp::REDUCE_SUM, DataType::FP8_E5M2), DataType::FP16);
+    EXPECT_EQ(toSupportedInputDType(ExprOp::REDUCE_ARGMAX, DataType::BF16), DataType::BF16);
+    EXPECT_EQ(toSupportedInputDType(ExprOp::REDUCE_ARGMIN, DataType::FP8_E4M3), DataType::FP8_E4M3);
+    EXPECT_EQ(toSupportedInputDType(ExprOp::REDUCE_ARGMAX, DataType::FP8_E5M2), DataType::FP8_E5M2);
+}
+
+TEST(EquationCompiler, Bf16AndFp8ArgReductionsPreserveCompiledInputStorageDtype) {
+    for (const DataType dtype : {DataType::BF16, DataType::FP8_E4M3, DataType::FP8_E5M2}) {
+        auto x = Expression::input("x", dtype, dtype);
+        auto y = x.argmin({1}, {1});
+
+        auto physical = Expression::outputs({{"y", y}}).physicalOutputs();
+        resolveOutputsDTypesInPlace(physical, {dtype});
+        auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
+
+        ASSERT_EQ(stages.size(), 1);
+        ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::ArgMinMax);
+        auto compiled = EquationCompiler::compileArgMinMax(stages[0].expr);
+        ASSERT_NE(compiled, nullptr);
+        EXPECT_EQ(compiled->input_dtype, dtype);
+        EXPECT_EQ(compiled->output_dtype, DataType::UINT32);
+        EXPECT_EQ(compiled->compute_dtype, DataType::FP32);
+    }
 }
 
 TEST(ExpressionDTypeResolution, CudnnSoftmaxPreservesBf16AndOnlyPromotesFp8) {
@@ -277,7 +298,7 @@ TEST(ExpressionDTypeResolution, CudnnSoftmaxPreservesBf16AndOnlyPromotesFp8) {
     EXPECT_EQ(toSupportedInputDType(ExprOp::SOFTMAX, DataType::FP8_E5M2), DataType::FP16);
 }
 
-TEST(EquationCompiler, Bf16ReductionCompatibilityDoesNotRewriteProducerStorageDtype) {
+TEST(EquationCompiler, Bf16ReductionPreservesProducerAndReductionInputStorageDtype) {
     auto x = Expression::input("x", DataType::BF16, DataType::BF16);
     auto trunk = x + 1.0;
     auto outputs = Expression::outputs({
@@ -311,7 +332,7 @@ TEST(EquationCompiler, Bf16ReductionCompatibilityDoesNotRewriteProducerStorageDt
 
     auto compiled_reduction = EquationCompiler::compileReduction(stages[1].expr);
     ASSERT_NE(compiled_reduction, nullptr);
-    EXPECT_EQ(compiled_reduction->input_dtype, DataType::FP32);
+    EXPECT_EQ(compiled_reduction->input_dtype, DataType::BF16);
     EXPECT_EQ(compiled_reduction->output_dtype, DataType::FP32);
 }
 

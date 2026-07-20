@@ -240,7 +240,6 @@ void expectSortKeysDescendingFloatingDType(const std::vector<float>& input_value
     expectFloatVectorNear(copyGpuVectorAsFloat<KeyT>(keys_out, stream), expected_values, atol);
 }
 
-
 template <typename T>
 void expectRunLengthEncodeFloatingDType(const std::vector<float>& input_values,
                                         const std::vector<float>& expected_unique,
@@ -323,82 +322,6 @@ void expectSegmentedExclusiveScanFloatingDType(const std::vector<float>& input_v
     stream.synchronize();
 
     expectFloatVectorNear(copyGpuVectorAsFloat<T>(output, stream), expected_values, atol);
-}
-
-template <typename T>
-void expectSegmentedReduceFloatingDType(const std::vector<float>& input_values,
-                                        const std::vector<uint32_t>& offsets_values,
-                                        const std::vector<float>& expected_sums,
-                                        const std::vector<float>& expected_maxima,
-                                        float atol) {
-    REQUIRE_CUDA_DEVICE();
-    Stream stream(0);
-
-    std::vector<T> typed_input;
-    typed_input.reserve(input_values.size());
-    for (float value : input_values) {
-        typed_input.emplace_back(value);
-    }
-
-    Tensor input = makeGpuVector<T>(typed_input, stream);
-    Tensor offsets = makeGpuVector<uint32_t>(offsets_values, stream);
-    Tensor sum_output(gpuPlacement, TensorDescriptor(dtypeFor<T>(), {static_cast<uint64_t>(offsets_values.size() - 1)}));
-    Tensor max_output(gpuPlacement, TensorDescriptor(dtypeFor<T>(), {static_cast<uint64_t>(offsets_values.size() - 1)}));
-
-    const CubDeviceSegmentedReduceSumPlan sum_plan =
-        prepareCubDeviceSegmentedReduceSum(input, sum_output, offsets, input_values.size(), offsets_values.size() - 1);
-    const CubDeviceSegmentedReduceMaxPlan max_plan =
-        prepareCubDeviceSegmentedReduceMax(input, max_output, offsets, input_values.size(), offsets_values.size() - 1);
-    const CubTemporaryStoragePlan workspace_plan = cubMaxTemporaryStoragePlan(
-        {cubTemporaryStoragePlan(gpuPlacement, sum_plan.temp_storage_bytes),
-         cubTemporaryStoragePlan(gpuPlacement, max_plan.temp_storage_bytes)});
-    Tensor temp = allocateCubTemporaryStorage(workspace_plan);
-
-    cubDeviceSegmentedReduceSum(sum_plan, temp, input, sum_output, offsets, stream);
-    cubDeviceSegmentedReduceMax(max_plan, temp, input, max_output, offsets, stream);
-    stream.synchronize();
-
-    expectFloatVectorNear(copyGpuVectorAsFloat<T>(sum_output, stream), expected_sums, atol);
-    expectFloatVectorNear(copyGpuVectorAsFloat<T>(max_output, stream), expected_maxima, atol);
-}
-
-template <typename T>
-void expectDeviceReduceFloatingDType(const std::vector<float>& input_values,
-                                     float expected_sum,
-                                     float expected_max,
-                                     float expected_min,
-                                     float atol) {
-    REQUIRE_CUDA_DEVICE();
-    Stream stream(0);
-
-    std::vector<T> typed_input;
-    typed_input.reserve(input_values.size());
-    for (float value : input_values) {
-        typed_input.emplace_back(value);
-    }
-
-    Tensor input = makeGpuVector<T>(typed_input, stream);
-    Tensor sum_output(gpuPlacement, TensorDescriptor(dtypeFor<T>(), {1}));
-    Tensor max_output(gpuPlacement, TensorDescriptor(dtypeFor<T>(), {1}));
-    Tensor min_output(gpuPlacement, TensorDescriptor(dtypeFor<T>(), {1}));
-
-    const CubDeviceReduceSumPlan sum_plan = prepareCubDeviceReduceSum(input, sum_output, input_values.size());
-    const CubDeviceReduceMaxPlan max_plan = prepareCubDeviceReduceMax(input, max_output, input_values.size());
-    const CubDeviceReduceMinPlan min_plan = prepareCubDeviceReduceMin(input, min_output, input_values.size());
-    const CubTemporaryStoragePlan workspace_plan = cubMaxTemporaryStoragePlan(
-        {cubTemporaryStoragePlan(gpuPlacement, sum_plan.temp_storage_bytes),
-         cubTemporaryStoragePlan(gpuPlacement, max_plan.temp_storage_bytes),
-         cubTemporaryStoragePlan(gpuPlacement, min_plan.temp_storage_bytes)});
-    Tensor temp = allocateCubTemporaryStorage(workspace_plan);
-
-    cubDeviceReduceSum(sum_plan, temp, input, sum_output, stream);
-    cubDeviceReduceMax(max_plan, temp, input, max_output, stream);
-    cubDeviceReduceMin(min_plan, temp, input, min_output, stream);
-    stream.synchronize();
-
-    expectFloatVectorNear(copyGpuVectorAsFloat<T>(sum_output, stream), {expected_sum}, atol);
-    expectFloatVectorNear(copyGpuVectorAsFloat<T>(max_output, stream), {expected_max}, atol);
-    expectFloatVectorNear(copyGpuVectorAsFloat<T>(min_output, stream), {expected_min}, atol);
 }
 
 template <typename T>
@@ -535,30 +458,6 @@ TEST(CubDevicePrimitives, DTypeSupportPolicyMatchesFeatureDefines) {
     EXPECT_FALSE(isCubExclusiveSumDTypeSupported(DataType::FP8_E4M3));
     EXPECT_FALSE(isCubExclusiveSumDTypeSupported(DataType::FP8_E5M2));
 
-    EXPECT_TRUE(isCubReduceSumDTypeSupported(DataType::UINT32));
-    EXPECT_FALSE(isCubReduceSumDTypeSupported(DataType::INT32));
-    EXPECT_TRUE(isCubReduceSumDTypeSupported(DataType::FP16));
-    EXPECT_TRUE(isCubReduceSumDTypeSupported(DataType::BF16));
-    EXPECT_TRUE(isCubReduceSumDTypeSupported(DataType::FP32));
-    EXPECT_FALSE(isCubReduceSumDTypeSupported(DataType::FP8_E4M3));
-    EXPECT_FALSE(isCubReduceSumDTypeSupported(DataType::FP8_E5M2));
-
-    EXPECT_TRUE(isCubReduceMaxDTypeSupported(DataType::UINT32));
-    EXPECT_FALSE(isCubReduceMaxDTypeSupported(DataType::INT32));
-    EXPECT_TRUE(isCubReduceMaxDTypeSupported(DataType::FP16));
-    EXPECT_TRUE(isCubReduceMaxDTypeSupported(DataType::BF16));
-    EXPECT_TRUE(isCubReduceMaxDTypeSupported(DataType::FP32));
-    EXPECT_FALSE(isCubReduceMaxDTypeSupported(DataType::FP8_E4M3));
-    EXPECT_FALSE(isCubReduceMaxDTypeSupported(DataType::FP8_E5M2));
-
-    EXPECT_TRUE(isCubReduceMinDTypeSupported(DataType::UINT32));
-    EXPECT_FALSE(isCubReduceMinDTypeSupported(DataType::INT32));
-    EXPECT_TRUE(isCubReduceMinDTypeSupported(DataType::FP16));
-    EXPECT_TRUE(isCubReduceMinDTypeSupported(DataType::BF16));
-    EXPECT_TRUE(isCubReduceMinDTypeSupported(DataType::FP32));
-    EXPECT_FALSE(isCubReduceMinDTypeSupported(DataType::FP8_E4M3));
-    EXPECT_FALSE(isCubReduceMinDTypeSupported(DataType::FP8_E5M2));
-
     EXPECT_TRUE(isCubSegmentedExclusiveSumDTypeSupported(DataType::UINT32));
     EXPECT_FALSE(isCubSegmentedExclusiveSumDTypeSupported(DataType::INT32));
     EXPECT_TRUE(isCubSegmentedExclusiveSumDTypeSupported(DataType::FP16));
@@ -566,22 +465,6 @@ TEST(CubDevicePrimitives, DTypeSupportPolicyMatchesFeatureDefines) {
     EXPECT_TRUE(isCubSegmentedExclusiveSumDTypeSupported(DataType::FP32));
     EXPECT_FALSE(isCubSegmentedExclusiveSumDTypeSupported(DataType::FP8_E4M3));
     EXPECT_FALSE(isCubSegmentedExclusiveSumDTypeSupported(DataType::FP8_E5M2));
-
-    EXPECT_TRUE(isCubSegmentedReduceSumDTypeSupported(DataType::UINT32));
-    EXPECT_FALSE(isCubSegmentedReduceSumDTypeSupported(DataType::INT32));
-    EXPECT_TRUE(isCubSegmentedReduceSumDTypeSupported(DataType::FP16));
-    EXPECT_TRUE(isCubSegmentedReduceSumDTypeSupported(DataType::BF16));
-    EXPECT_TRUE(isCubSegmentedReduceSumDTypeSupported(DataType::FP32));
-    EXPECT_FALSE(isCubSegmentedReduceSumDTypeSupported(DataType::FP8_E4M3));
-    EXPECT_FALSE(isCubSegmentedReduceSumDTypeSupported(DataType::FP8_E5M2));
-
-    EXPECT_TRUE(isCubSegmentedReduceMaxDTypeSupported(DataType::UINT32));
-    EXPECT_FALSE(isCubSegmentedReduceMaxDTypeSupported(DataType::INT32));
-    EXPECT_TRUE(isCubSegmentedReduceMaxDTypeSupported(DataType::FP16));
-    EXPECT_TRUE(isCubSegmentedReduceMaxDTypeSupported(DataType::BF16));
-    EXPECT_TRUE(isCubSegmentedReduceMaxDTypeSupported(DataType::FP32));
-    EXPECT_FALSE(isCubSegmentedReduceMaxDTypeSupported(DataType::FP8_E4M3));
-    EXPECT_FALSE(isCubSegmentedReduceMaxDTypeSupported(DataType::FP8_E5M2));
 
     EXPECT_TRUE(isCubSegmentOffsetDTypeSupported(DataType::UINT32));
     EXPECT_FALSE(isCubSegmentOffsetDTypeSupported(DataType::INT32));
@@ -607,24 +490,9 @@ TEST(CubDevicePrimitives, DTypeSupportPolicyMatchesFeatureDefines) {
     EXPECT_TRUE(isCubExclusiveSumDTypeSupported(DataType::UINT64));
     EXPECT_FALSE(isCubExclusiveSumDTypeSupported(DataType::INT64));
     EXPECT_TRUE(isCubExclusiveSumDTypeSupported(DataType::FP64));
-    EXPECT_TRUE(isCubReduceSumDTypeSupported(DataType::UINT64));
-    EXPECT_FALSE(isCubReduceSumDTypeSupported(DataType::INT64));
-    EXPECT_TRUE(isCubReduceSumDTypeSupported(DataType::FP64));
-    EXPECT_TRUE(isCubReduceMaxDTypeSupported(DataType::UINT64));
-    EXPECT_FALSE(isCubReduceMaxDTypeSupported(DataType::INT64));
-    EXPECT_TRUE(isCubReduceMaxDTypeSupported(DataType::FP64));
-    EXPECT_TRUE(isCubReduceMinDTypeSupported(DataType::UINT64));
-    EXPECT_FALSE(isCubReduceMinDTypeSupported(DataType::INT64));
-    EXPECT_TRUE(isCubReduceMinDTypeSupported(DataType::FP64));
     EXPECT_TRUE(isCubSegmentedExclusiveSumDTypeSupported(DataType::UINT64));
     EXPECT_FALSE(isCubSegmentedExclusiveSumDTypeSupported(DataType::INT64));
     EXPECT_TRUE(isCubSegmentedExclusiveSumDTypeSupported(DataType::FP64));
-    EXPECT_TRUE(isCubSegmentedReduceSumDTypeSupported(DataType::UINT64));
-    EXPECT_FALSE(isCubSegmentedReduceSumDTypeSupported(DataType::INT64));
-    EXPECT_TRUE(isCubSegmentedReduceSumDTypeSupported(DataType::FP64));
-    EXPECT_TRUE(isCubSegmentedReduceMaxDTypeSupported(DataType::UINT64));
-    EXPECT_FALSE(isCubSegmentedReduceMaxDTypeSupported(DataType::INT64));
-    EXPECT_TRUE(isCubSegmentedReduceMaxDTypeSupported(DataType::FP64));
     EXPECT_TRUE(isCubSegmentOffsetDTypeSupported(DataType::UINT64));
     EXPECT_FALSE(isCubSegmentOffsetDTypeSupported(DataType::INT64));
 #else
@@ -645,24 +513,9 @@ TEST(CubDevicePrimitives, DTypeSupportPolicyMatchesFeatureDefines) {
     EXPECT_FALSE(isCubExclusiveSumDTypeSupported(DataType::UINT64));
     EXPECT_FALSE(isCubExclusiveSumDTypeSupported(DataType::INT64));
     EXPECT_FALSE(isCubExclusiveSumDTypeSupported(DataType::FP64));
-    EXPECT_FALSE(isCubReduceSumDTypeSupported(DataType::UINT64));
-    EXPECT_FALSE(isCubReduceSumDTypeSupported(DataType::INT64));
-    EXPECT_FALSE(isCubReduceSumDTypeSupported(DataType::FP64));
-    EXPECT_FALSE(isCubReduceMaxDTypeSupported(DataType::UINT64));
-    EXPECT_FALSE(isCubReduceMaxDTypeSupported(DataType::INT64));
-    EXPECT_FALSE(isCubReduceMaxDTypeSupported(DataType::FP64));
-    EXPECT_FALSE(isCubReduceMinDTypeSupported(DataType::UINT64));
-    EXPECT_FALSE(isCubReduceMinDTypeSupported(DataType::INT64));
-    EXPECT_FALSE(isCubReduceMinDTypeSupported(DataType::FP64));
     EXPECT_FALSE(isCubSegmentedExclusiveSumDTypeSupported(DataType::UINT64));
     EXPECT_FALSE(isCubSegmentedExclusiveSumDTypeSupported(DataType::INT64));
     EXPECT_FALSE(isCubSegmentedExclusiveSumDTypeSupported(DataType::FP64));
-    EXPECT_FALSE(isCubSegmentedReduceSumDTypeSupported(DataType::UINT64));
-    EXPECT_FALSE(isCubSegmentedReduceSumDTypeSupported(DataType::INT64));
-    EXPECT_FALSE(isCubSegmentedReduceSumDTypeSupported(DataType::FP64));
-    EXPECT_FALSE(isCubSegmentedReduceMaxDTypeSupported(DataType::UINT64));
-    EXPECT_FALSE(isCubSegmentedReduceMaxDTypeSupported(DataType::INT64));
-    EXPECT_FALSE(isCubSegmentedReduceMaxDTypeSupported(DataType::FP64));
     EXPECT_FALSE(isCubSegmentOffsetDTypeSupported(DataType::UINT64));
     EXPECT_FALSE(isCubSegmentOffsetDTypeSupported(DataType::INT64));
 #endif
@@ -756,7 +609,6 @@ TEST(CubDevicePrimitives, SortPairsDescendingFloatKeysCarriesUint32Values) {
     EXPECT_EQ(copyGpuVector<float>(keys_out, stream), (std::vector<float>{3.0f, 3.0f, 2.0f, 0.25f, -1.0f}));
     EXPECT_EQ(copyGpuVector<uint32_t>(values_out, stream), (std::vector<uint32_t>{11U, 13U, 14U, 10U, 12U}));
 }
-
 
 #if THOR_CUB_ENABLE_64BIT_TYPES
 TEST(CubDevicePrimitives, SortPairsDescendingFloatKeysCarriesUint64IndexValuesWhen64BitEnabled) {
@@ -1259,108 +1111,9 @@ TEST(CubDevicePrimitives, SegmentedSortRejectsUint64OffsetsWhen64BitDisabled) {
 }
 #endif
 
-TEST(CubDevicePrimitives, DeviceReduceSumMaxAndMinUseSingleOutput) {
-    REQUIRE_CUDA_DEVICE();
-    Stream stream(0);
-
-    Tensor input = makeGpuVector<uint32_t>({8U, 1U, 7U, 5U}, stream);
-    Tensor sum_output(gpuPlacement, TensorDescriptor(DataType::UINT32, {1}));
-    Tensor max_output(gpuPlacement, TensorDescriptor(DataType::UINT32, {1}));
-    Tensor min_output(gpuPlacement, TensorDescriptor(DataType::UINT32, {1}));
-
-    const CubDeviceReduceSumPlan sum_plan = prepareCubDeviceReduceSum(input, sum_output, 4);
-    const CubDeviceReduceMaxPlan max_plan = prepareCubDeviceReduceMax(input, max_output, 4);
-    const CubDeviceReduceMinPlan min_plan = prepareCubDeviceReduceMin(input, min_output, 4);
-    Tensor temp = allocateCubTemporaryStorage(cubMaxTemporaryStoragePlan(
-        {cubTemporaryStoragePlan(gpuPlacement, sum_plan.temp_storage_bytes),
-         cubTemporaryStoragePlan(gpuPlacement, max_plan.temp_storage_bytes),
-         cubTemporaryStoragePlan(gpuPlacement, min_plan.temp_storage_bytes)}));
-
-    cubDeviceReduceSum(sum_plan, temp, input, sum_output, stream);
-    cubDeviceReduceMax(max_plan, temp, input, max_output, stream);
-    cubDeviceReduceMin(min_plan, temp, input, min_output, stream);
-    stream.synchronize();
-
-    EXPECT_EQ(copyGpuVector<uint32_t>(sum_output, stream), (std::vector<uint32_t>{21U}));
-    EXPECT_EQ(copyGpuVector<uint32_t>(max_output, stream), (std::vector<uint32_t>{8U}));
-    EXPECT_EQ(copyGpuVector<uint32_t>(min_output, stream), (std::vector<uint32_t>{1U}));
-}
-
-TEST(CubDevicePrimitives, DeviceReduceSupportsFp16AndBf16Values) {
-    expectDeviceReduceFloatingDType<__half>({1.0f, -2.0f, 3.0f, 0.5f}, 2.5f, 3.0f, -2.0f, 0.0f);
-    expectDeviceReduceFloatingDType<__nv_bfloat16>({1.0f, -2.0f, 3.0f, 0.5f}, 2.5f, 3.0f, -2.0f, 0.01f);
-}
-
-TEST(CubDevicePrimitives, DeviceReduceRejectsUnsupportedDTypesAndMismatches) {
-    REQUIRE_CUDA_DEVICE();
-    Stream stream(0);
-
-    Tensor signed_input = makeGpuVector<int32_t>({1, 2, 3}, stream);
-    Tensor signed_output(gpuPlacement, TensorDescriptor(DataType::INT32, {1}));
-    EXPECT_THROW((void)prepareCubDeviceReduceSum(signed_input, signed_output, 3), std::invalid_argument);
-    EXPECT_THROW((void)prepareCubDeviceReduceMax(signed_input, signed_output, 3), std::invalid_argument);
-    EXPECT_THROW((void)prepareCubDeviceReduceMin(signed_input, signed_output, 3), std::invalid_argument);
-
-    Tensor input = makeGpuVector<uint32_t>({1U, 2U, 3U}, stream);
-    Tensor fp_output(gpuPlacement, TensorDescriptor(DataType::FP32, {1}));
-    EXPECT_THROW((void)prepareCubDeviceReduceSum(input, fp_output, 3), std::invalid_argument);
-    EXPECT_THROW((void)prepareCubDeviceReduceMax(input, fp_output, 3), std::invalid_argument);
-    EXPECT_THROW((void)prepareCubDeviceReduceMin(input, fp_output, 3), std::invalid_argument);
-
-
-    Tensor output(gpuPlacement, TensorDescriptor(DataType::UINT32, {1}));
-    EXPECT_THROW((void)prepareCubDeviceReduceSum(input, output, 0), std::invalid_argument);
-    EXPECT_THROW((void)prepareCubDeviceReduceMax(input, output, 0), std::invalid_argument);
-    EXPECT_THROW((void)prepareCubDeviceReduceMin(input, output, 0), std::invalid_argument);
-
-    Tensor fp8_input = makeGpuVector<__nv_fp8_e4m3>({__nv_fp8_e4m3(1.0f), __nv_fp8_e4m3(2.0f)}, stream);
-    Tensor fp8_output(gpuPlacement, TensorDescriptor(DataType::FP8_E4M3, {1}));
-    EXPECT_THROW((void)prepareCubDeviceReduceSum(fp8_input, fp8_output, 2), std::invalid_argument);
-    EXPECT_THROW((void)prepareCubDeviceReduceMax(fp8_input, fp8_output, 2), std::invalid_argument);
-    EXPECT_THROW((void)prepareCubDeviceReduceMin(fp8_input, fp8_output, 2), std::invalid_argument);
-}
-
 #if THOR_CUB_ENABLE_64BIT_TYPES
-TEST(CubDevicePrimitives, DeviceReduceSupports64BitTypesWhenEnabled) {
-    REQUIRE_CUDA_DEVICE();
-    Stream stream(0);
-
-    Tensor uint_input = makeGpuVector<uint64_t>({9ULL, 2ULL, 5ULL}, stream);
-    Tensor uint_sum(gpuPlacement, TensorDescriptor(DataType::UINT64, {1}));
-    Tensor uint_max(gpuPlacement, TensorDescriptor(DataType::UINT64, {1}));
-    Tensor uint_min(gpuPlacement, TensorDescriptor(DataType::UINT64, {1}));
-
-    const CubDeviceReduceSumPlan sum_plan = prepareCubDeviceReduceSum(uint_input, uint_sum, 3);
-    const CubDeviceReduceMaxPlan max_plan = prepareCubDeviceReduceMax(uint_input, uint_max, 3);
-    const CubDeviceReduceMinPlan min_plan = prepareCubDeviceReduceMin(uint_input, uint_min, 3);
-    Tensor temp = allocateCubTemporaryStorage(cubMaxTemporaryStoragePlan(
-        {cubTemporaryStoragePlan(gpuPlacement, sum_plan.temp_storage_bytes),
-         cubTemporaryStoragePlan(gpuPlacement, max_plan.temp_storage_bytes),
-         cubTemporaryStoragePlan(gpuPlacement, min_plan.temp_storage_bytes)}));
-
-    cubDeviceReduceSum(sum_plan, temp, uint_input, uint_sum, stream);
-    cubDeviceReduceMax(max_plan, temp, uint_input, uint_max, stream);
-    cubDeviceReduceMin(min_plan, temp, uint_input, uint_min, stream);
-    stream.synchronize();
-
-    EXPECT_EQ(copyGpuVector<uint64_t>(uint_sum, stream), (std::vector<uint64_t>{16ULL}));
-    EXPECT_EQ(copyGpuVector<uint64_t>(uint_max, stream), (std::vector<uint64_t>{9ULL}));
-    EXPECT_EQ(copyGpuVector<uint64_t>(uint_min, stream), (std::vector<uint64_t>{2ULL}));
-}
 #else
-TEST(CubDevicePrimitives, DeviceReduceRejects64BitTypesWhenDisabled) {
-    REQUIRE_CUDA_DEVICE();
-    Stream stream(0);
-
-    Tensor input = makeGpuVector<uint64_t>({9ULL, 2ULL, 5ULL}, stream);
-    Tensor output(gpuPlacement, TensorDescriptor(DataType::UINT64, {1}));
-
-    EXPECT_THROW((void)prepareCubDeviceReduceSum(input, output, 3), std::invalid_argument);
-    EXPECT_THROW((void)prepareCubDeviceReduceMax(input, output, 3), std::invalid_argument);
-    EXPECT_THROW((void)prepareCubDeviceReduceMin(input, output, 3), std::invalid_argument);
-}
 #endif
-
 
 TEST(CubDevicePrimitives, DeviceFindLowerAndUpperBoundUseAscendingRange) {
     REQUIRE_CUDA_DEVICE();
@@ -1768,95 +1521,6 @@ TEST(CubDevicePrimitives, SegmentedScanSupportsRaggedReverseDirection) {
     EXPECT_EQ(copyGpuVector<uint32_t>(exclusive_out, stream), (std::vector<uint32_t>{5U, 3U, 0U, 18U, 13U, 7U, 0U}));
 }
 
-TEST(CubDevicePrimitives, SegmentedReduceSumAndMaxUseContiguousOffsets) {
-    REQUIRE_CUDA_DEVICE();
-    Stream stream(0);
-
-    Tensor input = makeGpuVector<uint32_t>({8U, 6U, 7U, 5U, 3U, 2U, 9U}, stream);
-    Tensor offsets = makeGpuVector<uint32_t>({0U, 2U, 5U, 7U}, stream);
-    Tensor sum_output(gpuPlacement, TensorDescriptor(DataType::UINT32, {3}));
-    Tensor max_output(gpuPlacement, TensorDescriptor(DataType::UINT32, {3}));
-
-    const CubDeviceSegmentedReduceSumPlan sum_plan = prepareCubDeviceSegmentedReduceSum(input, sum_output, offsets, 7, 3);
-    const CubDeviceSegmentedReduceMaxPlan max_plan = prepareCubDeviceSegmentedReduceMax(input, max_output, offsets, 7, 3);
-    const CubTemporaryStoragePlan workspace_plan = cubMaxTemporaryStoragePlan(
-        {cubTemporaryStoragePlan(gpuPlacement, sum_plan.temp_storage_bytes),
-         cubTemporaryStoragePlan(gpuPlacement, max_plan.temp_storage_bytes)});
-    Tensor temp = allocateCubTemporaryStorage(workspace_plan);
-
-    cubDeviceSegmentedReduceSum(sum_plan, temp, input, sum_output, offsets, stream);
-    cubDeviceSegmentedReduceMax(max_plan, temp, input, max_output, offsets, stream);
-    stream.synchronize();
-
-    EXPECT_EQ(copyGpuVector<uint32_t>(sum_output, stream), (std::vector<uint32_t>{14U, 15U, 11U}));
-    EXPECT_EQ(copyGpuVector<uint32_t>(max_output, stream), (std::vector<uint32_t>{8U, 7U, 9U}));
-}
-
-TEST(CubDevicePrimitives, SegmentedReduceAllowsEmptySegments) {
-    REQUIRE_CUDA_DEVICE();
-    Stream stream(0);
-
-    Tensor input = makeGpuVector<uint32_t>({8U, 6U, 7U, 5U, 3U, 2U, 9U}, stream);
-    Tensor offsets = makeGpuVector<uint32_t>({0U, 3U, 3U, 7U}, stream);
-    Tensor sum_output(gpuPlacement, TensorDescriptor(DataType::UINT32, {3}));
-    Tensor max_output(gpuPlacement, TensorDescriptor(DataType::UINT32, {3}));
-
-    const CubDeviceSegmentedReduceSumPlan sum_plan = prepareCubDeviceSegmentedReduceSum(input, sum_output, offsets, 7, 3);
-    const CubDeviceSegmentedReduceMaxPlan max_plan = prepareCubDeviceSegmentedReduceMax(input, max_output, offsets, 7, 3);
-    const CubTemporaryStoragePlan workspace_plan = cubMaxTemporaryStoragePlan(
-        {cubTemporaryStoragePlan(gpuPlacement, sum_plan.temp_storage_bytes),
-         cubTemporaryStoragePlan(gpuPlacement, max_plan.temp_storage_bytes)});
-    Tensor temp = allocateCubTemporaryStorage(workspace_plan);
-
-    cubDeviceSegmentedReduceSum(sum_plan, temp, input, sum_output, offsets, stream);
-    cubDeviceSegmentedReduceMax(max_plan, temp, input, max_output, offsets, stream);
-    stream.synchronize();
-
-    EXPECT_EQ(copyGpuVector<uint32_t>(sum_output, stream), (std::vector<uint32_t>{21U, 0U, 19U}));
-    EXPECT_EQ(copyGpuVector<uint32_t>(max_output, stream), (std::vector<uint32_t>{8U, 0U, 9U}));
-}
-
-TEST(CubDevicePrimitives, SegmentedReduceSupportsFp16AndBf16Values) {
-    expectSegmentedReduceFloatingDType<__half>(
-        {1.0f, 2.0f, -0.5f, 3.0f, 4.0f}, {0U, 3U, 5U}, {2.5f, 7.0f}, {2.0f, 4.0f}, 0.0f);
-    expectSegmentedReduceFloatingDType<__nv_bfloat16>(
-        {1.0f, 2.0f, -0.5f, 3.0f, 4.0f}, {0U, 3U, 5U}, {2.5f, 7.0f}, {2.0f, 4.0f}, 0.01f);
-}
-
-TEST(CubDevicePrimitives, SegmentedReduceRejectsUnsupportedDTypesAndMismatches) {
-    REQUIRE_CUDA_DEVICE();
-    Stream stream(0);
-
-    Tensor signed_input = makeGpuVector<int32_t>({1, 2, 3}, stream);
-    Tensor signed_output(gpuPlacement, TensorDescriptor(DataType::INT32, {1}));
-    Tensor offsets = makeGpuVector<uint32_t>({0U, 3U}, stream);
-    EXPECT_THROW((void)prepareCubDeviceSegmentedReduceSum(signed_input, signed_output, offsets, 3, 1), std::invalid_argument);
-    EXPECT_THROW((void)prepareCubDeviceSegmentedReduceMax(signed_input, signed_output, offsets, 3, 1), std::invalid_argument);
-
-    Tensor input = makeGpuVector<uint32_t>({1U, 2U, 3U}, stream);
-    Tensor fp_output(gpuPlacement, TensorDescriptor(DataType::FP32, {1}));
-    EXPECT_THROW((void)prepareCubDeviceSegmentedReduceSum(input, fp_output, offsets, 3, 1), std::invalid_argument);
-    EXPECT_THROW((void)prepareCubDeviceSegmentedReduceMax(input, fp_output, offsets, 3, 1), std::invalid_argument);
-
-    Tensor signed_offsets = makeGpuVector<int32_t>({0, 3}, stream);
-    Tensor output(gpuPlacement, TensorDescriptor(DataType::UINT32, {1}));
-    EXPECT_THROW((void)prepareCubDeviceSegmentedReduceSum(input, output, signed_offsets, 3, 1), std::invalid_argument);
-    EXPECT_THROW((void)prepareCubDeviceSegmentedReduceMax(input, output, signed_offsets, 3, 1), std::invalid_argument);
-
-    Tensor too_small_output(gpuPlacement, TensorDescriptor(DataType::UINT32, {1}));
-    Tensor two_segment_offsets = makeGpuVector<uint32_t>({0U, 1U, 3U}, stream);
-    EXPECT_THROW((void)prepareCubDeviceSegmentedReduceSum(input, too_small_output, two_segment_offsets, 3, 2),
-                 std::invalid_argument);
-    EXPECT_THROW((void)prepareCubDeviceSegmentedReduceMax(input, too_small_output, two_segment_offsets, 3, 2),
-                 std::invalid_argument);
-
-    Tensor fp8_input = makeGpuVector<__nv_fp8_e4m3>({__nv_fp8_e4m3(1.0f), __nv_fp8_e4m3(2.0f)}, stream);
-    Tensor fp8_output(gpuPlacement, TensorDescriptor(DataType::FP8_E4M3, {1}));
-    Tensor fp8_offsets = makeGpuVector<uint32_t>({0U, 2U}, stream);
-    EXPECT_THROW((void)prepareCubDeviceSegmentedReduceSum(fp8_input, fp8_output, fp8_offsets, 2, 1), std::invalid_argument);
-    EXPECT_THROW((void)prepareCubDeviceSegmentedReduceMax(fp8_input, fp8_output, fp8_offsets, 2, 1), std::invalid_argument);
-}
-
 TEST(CubDevicePrimitives, SegmentedExclusiveScanRejectsUnsupportedDTypesAndMismatches) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
@@ -1910,7 +1574,6 @@ TEST(CubDevicePrimitives, RunLengthEncodeUint32RowsAndExclusiveScanCounts) {
     const auto offsets = copyGpuVector<uint32_t>(offsets_out, stream);
     EXPECT_EQ(std::vector<uint32_t>(offsets.begin(), offsets.begin() + 3), (std::vector<uint32_t>{0U, 3U, 5U}));
 }
-
 
 TEST(CubDevicePrimitives, RunLengthEncodeSupportsFp16AndBf16Values) {
     expectRunLengthEncodeFloatingDType<__half>({1.0f, 1.0f, -2.0f, 4.0f, 4.0f}, {1.0f, -2.0f, 4.0f}, {2U, 1U, 2U});
@@ -1974,26 +1637,6 @@ TEST(CubDevicePrimitives, RunLengthEncodeAndExclusiveScanSupport64BitTypesWhenEn
     stream.synchronize();
     EXPECT_EQ(copyGpuVector<uint64_t>(segmented_scan_output, stream), (std::vector<uint64_t>{0ULL, 1ULL, 0ULL, 3ULL}));
 
-    Tensor segmented_reduce_input = makeGpuVector<uint64_t>({7ULL, 2ULL, 3ULL, 4ULL}, stream);
-    Tensor segmented_reduce_offsets = makeGpuVector<uint64_t>({0ULL, 2ULL, 4ULL}, stream);
-    Tensor segmented_reduce_sum_output(gpuPlacement, TensorDescriptor(DataType::UINT64, {2}));
-    Tensor segmented_reduce_max_output(gpuPlacement, TensorDescriptor(DataType::UINT64, {2}));
-    const CubDeviceSegmentedReduceSumPlan segmented_reduce_sum_plan =
-        prepareCubDeviceSegmentedReduceSum(segmented_reduce_input, segmented_reduce_sum_output, segmented_reduce_offsets, 4, 2);
-    const CubDeviceSegmentedReduceMaxPlan segmented_reduce_max_plan =
-        prepareCubDeviceSegmentedReduceMax(segmented_reduce_input, segmented_reduce_max_output, segmented_reduce_offsets, 4, 2);
-    const CubTemporaryStoragePlan segmented_reduce_workspace_plan = cubMaxTemporaryStoragePlan(
-        {cubTemporaryStoragePlan(gpuPlacement, segmented_reduce_sum_plan.temp_storage_bytes),
-         cubTemporaryStoragePlan(gpuPlacement, segmented_reduce_max_plan.temp_storage_bytes)});
-    Tensor segmented_reduce_temp = allocateCubTemporaryStorage(segmented_reduce_workspace_plan);
-    cubDeviceSegmentedReduceSum(
-        segmented_reduce_sum_plan, segmented_reduce_temp, segmented_reduce_input, segmented_reduce_sum_output, segmented_reduce_offsets, stream);
-    cubDeviceSegmentedReduceMax(
-        segmented_reduce_max_plan, segmented_reduce_temp, segmented_reduce_input, segmented_reduce_max_output, segmented_reduce_offsets, stream);
-    stream.synchronize();
-    EXPECT_EQ(copyGpuVector<uint64_t>(segmented_reduce_sum_output, stream), (std::vector<uint64_t>{9ULL, 7ULL}));
-    EXPECT_EQ(copyGpuVector<uint64_t>(segmented_reduce_max_output, stream), (std::vector<uint64_t>{7ULL, 4ULL}));
-
     Tensor topk_keys_in = makeGpuVector<uint64_t>({7ULL, 2ULL, 9ULL, 4ULL}, stream);
     Tensor topk_keys_out(gpuPlacement, TensorDescriptor(DataType::UINT64, {2}));
     const CubDeviceTopKKeysPlan topk_plan = prepareCubDeviceTopKKeys(topk_keys_in, topk_keys_out, 4, 2);
@@ -2054,9 +1697,6 @@ TEST(CubDevicePrimitives, RunLengthEncodeAndExclusiveScanReject64BitTypesWhenDis
     Tensor offsets = makeGpuVector<uint32_t>({0U, 3U}, stream);
     EXPECT_THROW((void)prepareCubDeviceSegmentedExclusiveSum(input, scan_output, offsets, 3, 1), std::invalid_argument);
 
-    Tensor reduce_output(gpuPlacement, TensorDescriptor(DataType::UINT64, {1}));
-    EXPECT_THROW((void)prepareCubDeviceSegmentedReduceSum(input, reduce_output, offsets, 3, 1), std::invalid_argument);
-    EXPECT_THROW((void)prepareCubDeviceSegmentedReduceMax(input, reduce_output, offsets, 3, 1), std::invalid_argument);
 }
 #endif
 
@@ -2098,13 +1738,8 @@ TEST(CubDevicePrimitives, PreparedPlansCanShareOnePreallocatedWorkspace) {
     Tensor rle_counts_out(gpuPlacement, TensorDescriptor(DataType::UINT32, {4}));
     Tensor rle_num_runs_out(gpuPlacement, TensorDescriptor(DataType::UINT32, {1}));
     Tensor offsets_out(gpuPlacement, TensorDescriptor(DataType::UINT32, {4}));
-    Tensor reduce_sum_out(gpuPlacement, TensorDescriptor(DataType::UINT32, {1}));
-    Tensor reduce_max_out(gpuPlacement, TensorDescriptor(DataType::UINT32, {1}));
-    Tensor reduce_min_out(gpuPlacement, TensorDescriptor(DataType::UINT32, {1}));
     Tensor segmented_offsets = makeGpuVector<uint32_t>({0U, 2U, 4U}, stream);
     Tensor segmented_scan_out(gpuPlacement, TensorDescriptor(DataType::UINT32, {4}));
-    Tensor segmented_reduce_sum_out(gpuPlacement, TensorDescriptor(DataType::UINT32, {2}));
-    Tensor segmented_reduce_max_out(gpuPlacement, TensorDescriptor(DataType::UINT32, {2}));
     Tensor topk_keys_out(gpuPlacement, TensorDescriptor(DataType::UINT32, {2}));
     Tensor segmented_topk_keys_out(gpuPlacement, TensorDescriptor(DataType::UINT32, {2}));
     Tensor select_flags = makeGpuVector<bool>({false, true, true, false}, stream);
@@ -2119,16 +1754,9 @@ TEST(CubDevicePrimitives, PreparedPlansCanShareOnePreallocatedWorkspace) {
         prepareCubDeviceRadixSortPairs(keys_in, keys_out, values_in, values_out, 4, CubSortOrder::Ascending);
     const CubDeviceRunLengthEncodePlan rle_plan =
         prepareCubDeviceRunLengthEncode(keys_out, rle_unique_out, rle_counts_out, rle_num_runs_out, 4);
-    const CubDeviceReduceSumPlan reduce_sum_plan = prepareCubDeviceReduceSum(keys_in, reduce_sum_out, 4);
-    const CubDeviceReduceMaxPlan reduce_max_plan = prepareCubDeviceReduceMax(keys_in, reduce_max_out, 4);
-    const CubDeviceReduceMinPlan reduce_min_plan = prepareCubDeviceReduceMin(keys_in, reduce_min_out, 4);
     const CubDeviceExclusiveSumPlan scan_plan = prepareCubDeviceExclusiveSum(rle_counts_out, offsets_out, 3);
     const CubDeviceSegmentedExclusiveSumPlan segmented_scan_plan =
         prepareCubDeviceSegmentedExclusiveSum(keys_out, segmented_scan_out, segmented_offsets, 4, 2);
-    const CubDeviceSegmentedReduceSumPlan segmented_reduce_sum_plan =
-        prepareCubDeviceSegmentedReduceSum(keys_out, segmented_reduce_sum_out, segmented_offsets, 4, 2);
-    const CubDeviceSegmentedReduceMaxPlan segmented_reduce_max_plan =
-        prepareCubDeviceSegmentedReduceMax(keys_out, segmented_reduce_max_out, segmented_offsets, 4, 2);
     const CubDeviceTopKKeysPlan topk_plan = prepareCubDeviceTopKKeys(keys_in, topk_keys_out, 4, 2);
     const CubDeviceSegmentedTopKKeysPlan segmented_topk_plan = prepareCubDeviceSegmentedTopKKeys(keys_in, segmented_topk_keys_out, 2, 2, 1);
     const CubDeviceSelectFlaggedPlan select_plan = prepareCubDeviceSelectFlagged(keys_in, select_flags, select_out, select_count, 4);
@@ -2138,16 +1766,9 @@ TEST(CubDevicePrimitives, PreparedPlansCanShareOnePreallocatedWorkspace) {
 
     const CubTemporaryStoragePlan sort_workspace_plan = cubTemporaryStoragePlan(gpuPlacement, sort_plan.temp_storage_bytes);
     const CubTemporaryStoragePlan rle_workspace_plan = cubTemporaryStoragePlan(gpuPlacement, rle_plan.temp_storage_bytes);
-    const CubTemporaryStoragePlan reduce_sum_workspace_plan = cubTemporaryStoragePlan(gpuPlacement, reduce_sum_plan.temp_storage_bytes);
-    const CubTemporaryStoragePlan reduce_max_workspace_plan = cubTemporaryStoragePlan(gpuPlacement, reduce_max_plan.temp_storage_bytes);
-    const CubTemporaryStoragePlan reduce_min_workspace_plan = cubTemporaryStoragePlan(gpuPlacement, reduce_min_plan.temp_storage_bytes);
     const CubTemporaryStoragePlan scan_workspace_plan = cubTemporaryStoragePlan(gpuPlacement, scan_plan.temp_storage_bytes);
     const CubTemporaryStoragePlan segmented_scan_workspace_plan =
         cubTemporaryStoragePlan(gpuPlacement, segmented_scan_plan.temp_storage_bytes);
-    const CubTemporaryStoragePlan segmented_reduce_sum_workspace_plan =
-        cubTemporaryStoragePlan(gpuPlacement, segmented_reduce_sum_plan.temp_storage_bytes);
-    const CubTemporaryStoragePlan segmented_reduce_max_workspace_plan =
-        cubTemporaryStoragePlan(gpuPlacement, segmented_reduce_max_plan.temp_storage_bytes);
     const CubTemporaryStoragePlan topk_workspace_plan = cubTemporaryStoragePlan(gpuPlacement, topk_plan.temp_storage_bytes);
     const CubTemporaryStoragePlan segmented_topk_workspace_plan = cubTemporaryStoragePlan(gpuPlacement, segmented_topk_plan.temp_storage_bytes);
     const CubTemporaryStoragePlan select_workspace_plan = cubTemporaryStoragePlan(gpuPlacement, select_plan.temp_storage_bytes);
@@ -2157,13 +1778,8 @@ TEST(CubDevicePrimitives, PreparedPlansCanShareOnePreallocatedWorkspace) {
     const CubTemporaryStoragePlan workspace_plan = cubMaxTemporaryStoragePlan(
         {sort_workspace_plan,
          rle_workspace_plan,
-         reduce_sum_workspace_plan,
-         reduce_max_workspace_plan,
-         reduce_min_workspace_plan,
          scan_workspace_plan,
          segmented_scan_workspace_plan,
-         segmented_reduce_sum_workspace_plan,
-         segmented_reduce_max_workspace_plan,
          topk_workspace_plan,
          segmented_topk_workspace_plan,
          select_workspace_plan,
@@ -2174,15 +1790,8 @@ TEST(CubDevicePrimitives, PreparedPlansCanShareOnePreallocatedWorkspace) {
 
     cubDeviceRadixSortPairs(sort_plan, workspace, keys_in, keys_out, values_in, values_out, stream);
     cubDeviceRunLengthEncode(rle_plan, workspace, keys_out, rle_unique_out, rle_counts_out, rle_num_runs_out, stream);
-    cubDeviceReduceSum(reduce_sum_plan, workspace, keys_in, reduce_sum_out, stream);
-    cubDeviceReduceMax(reduce_max_plan, workspace, keys_in, reduce_max_out, stream);
-    cubDeviceReduceMin(reduce_min_plan, workspace, keys_in, reduce_min_out, stream);
     cubDeviceExclusiveSum(scan_plan, workspace, rle_counts_out, offsets_out, stream);
     cubDeviceSegmentedExclusiveSum(segmented_scan_plan, workspace, keys_out, segmented_scan_out, segmented_offsets, stream);
-    cubDeviceSegmentedReduceSum(
-        segmented_reduce_sum_plan, workspace, keys_out, segmented_reduce_sum_out, segmented_offsets, stream);
-    cubDeviceSegmentedReduceMax(
-        segmented_reduce_max_plan, workspace, keys_out, segmented_reduce_max_out, segmented_offsets, stream);
     cubDeviceTopKKeys(topk_plan, workspace, keys_in, topk_keys_out, stream);
     cubDeviceSegmentedTopKKeys(segmented_topk_plan, workspace, keys_in, segmented_topk_keys_out, stream);
     cubDeviceSelectFlagged(select_plan, workspace, keys_in, select_flags, select_out, select_count, stream);
@@ -2198,12 +1807,7 @@ TEST(CubDevicePrimitives, PreparedPlansCanShareOnePreallocatedWorkspace) {
     const auto unique = copyGpuVector<uint32_t>(rle_unique_out, stream);
     const auto counts = copyGpuVector<uint32_t>(rle_counts_out, stream);
     const auto offsets = copyGpuVector<uint32_t>(offsets_out, stream);
-    const auto reduce_sum = copyGpuVector<uint32_t>(reduce_sum_out, stream);
-    const auto reduce_max = copyGpuVector<uint32_t>(reduce_max_out, stream);
-    const auto reduce_min = copyGpuVector<uint32_t>(reduce_min_out, stream);
     const auto segmented_scan = copyGpuVector<uint32_t>(segmented_scan_out, stream);
-    const auto segmented_reduce_sum = copyGpuVector<uint32_t>(segmented_reduce_sum_out, stream);
-    const auto segmented_reduce_max = copyGpuVector<uint32_t>(segmented_reduce_max_out, stream);
     auto topk_keys = copyGpuVector<uint32_t>(topk_keys_out, stream);
     const auto segmented_topk_keys = copyGpuVector<uint32_t>(segmented_topk_keys_out, stream);
     const auto select_count_values = copyGpuVector<uint32_t>(select_count, stream);
@@ -2214,13 +1818,8 @@ TEST(CubDevicePrimitives, PreparedPlansCanShareOnePreallocatedWorkspace) {
     std::sort(topk_keys.begin(), topk_keys.end(), std::greater<uint32_t>());
     EXPECT_EQ(std::vector<uint32_t>(unique.begin(), unique.begin() + 3), (std::vector<uint32_t>{1U, 3U, 4U}));
     EXPECT_EQ(std::vector<uint32_t>(counts.begin(), counts.begin() + 3), (std::vector<uint32_t>{2U, 1U, 1U}));
-    EXPECT_EQ(reduce_sum, (std::vector<uint32_t>{9U}));
-    EXPECT_EQ(reduce_max, (std::vector<uint32_t>{4U}));
-    EXPECT_EQ(reduce_min, (std::vector<uint32_t>{1U}));
     EXPECT_EQ(std::vector<uint32_t>(offsets.begin(), offsets.begin() + 3), (std::vector<uint32_t>{0U, 2U, 3U}));
     EXPECT_EQ(segmented_scan, (std::vector<uint32_t>{0U, 1U, 0U, 3U}));
-    EXPECT_EQ(segmented_reduce_sum, (std::vector<uint32_t>{2U, 7U}));
-    EXPECT_EQ(segmented_reduce_max, (std::vector<uint32_t>{1U, 4U}));
     EXPECT_EQ(topk_keys, (std::vector<uint32_t>{4U, 3U}));
     EXPECT_EQ(segmented_topk_keys, (std::vector<uint32_t>{4U, 3U}));
     EXPECT_EQ(select_count_values, (std::vector<uint32_t>{2U}));

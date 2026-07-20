@@ -32,48 +32,16 @@ cmake --build .
 #### Run tests
 
 from Thor/build:  
-./thor_tests    
+
+cmake --build . --target check  
+-- or --  
+cmake --build . --target check-cpp  
+-- or --  
+cmake --build . --target check-python  
 -- or --  
 ./thor_tests --gtest_filter=FullyConnectedTest.*  
 -- or --  
-./thor_tests --gtest_filter=FullyConnectedTest.SerializeProducesExpectedJson
-
-## DEPRECATED: Set up Ubuntu 22.04 machine and build:
-
-Cuda of at least 12 is supported. If your machine does not have cuda12, cudnn9 and oneAPI set up, then you can do it this way:
-
-```shell
-git clone https://github.com/amrobbins/Thor.git
-```
-
-```shell
-bash Thor/MachineSetup/install_nvidia_driver.sh
-sudo reboot
-```
-
-```shell
-bash Thor/MachineSetup/install_cuda.sh
-sudo reboot
-```
-
-```shell
-bash Thor/MachineSetup/install_cudnn.sh
-bash Thor/MachineSetup/install_oneAPI.sh
-sudo reboot
-```
-
-If you have cuda12 and cudnn9 already, but don't have oneAPI:
-
-```shell
-bash Thor/MachineSetup/install_oneAPI.sh
-sudo reboot
-```
-
-Now that the machine is set up:
-
-```shell
-bash Thor/MachineSetup/install_dependencies.sh
-cd Thor
-bash MachineSetup/install_google_test.sh
-make -j all
-```
+./thor_tests --gtest_filter=FullyConnectedTest.SerializeProducesExpectedJson  
+-- or --  
+source ../.venv/bin/activate  
+pytest ...

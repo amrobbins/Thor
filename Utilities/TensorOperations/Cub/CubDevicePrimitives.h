@@ -158,27 +158,6 @@ struct CubDeviceArgScanPlan {
     size_t temp_storage_bytes = 0;
 };
 
-struct CubDeviceReduceSumPlan {
-    TensorPlacement placement;
-    DataType dtype = DataType::UINT32;
-    uint64_t num_items = 0;
-    size_t temp_storage_bytes = 0;
-};
-
-struct CubDeviceReduceMaxPlan {
-    TensorPlacement placement;
-    DataType dtype = DataType::UINT32;
-    uint64_t num_items = 0;
-    size_t temp_storage_bytes = 0;
-};
-
-struct CubDeviceReduceMinPlan {
-    TensorPlacement placement;
-    DataType dtype = DataType::UINT32;
-    uint64_t num_items = 0;
-    size_t temp_storage_bytes = 0;
-};
-
 struct CubDeviceSegmentedExclusiveSumPlan {
     TensorPlacement placement;
     DataType dtype = DataType::UINT32;
@@ -263,33 +242,6 @@ struct CubDeviceSegmentedArgScanPlan {
     size_t temp_storage_bytes = 0;
 };
 
-struct CubDeviceSegmentedReduceSumPlan {
-    TensorPlacement placement;
-    DataType dtype = DataType::UINT32;
-    DataType offset_dtype = DataType::UINT32;
-    uint64_t num_items = 0;
-    uint64_t num_segments = 0;
-    size_t temp_storage_bytes = 0;
-};
-
-struct CubDeviceSegmentedReduceMaxPlan {
-    TensorPlacement placement;
-    DataType dtype = DataType::UINT32;
-    DataType offset_dtype = DataType::UINT32;
-    uint64_t num_items = 0;
-    uint64_t num_segments = 0;
-    size_t temp_storage_bytes = 0;
-};
-
-struct CubDeviceSegmentedReduceMinPlan {
-    TensorPlacement placement;
-    DataType dtype = DataType::UINT32;
-    DataType offset_dtype = DataType::UINT32;
-    uint64_t num_items = 0;
-    uint64_t num_segments = 0;
-    size_t temp_storage_bytes = 0;
-};
-
 struct CubDeviceSegmentedRadixSortKeysPlan {
     TensorPlacement placement;
     DataType key_dtype = DataType::UINT8;
@@ -326,13 +278,7 @@ struct CubDeviceSegmentedRadixSortPairsPlan {
 [[nodiscard]] bool isCubRunLengthEncodeDTypeSupported(DataType dtype);
 [[nodiscard]] bool isCubExclusiveSumDTypeSupported(DataType dtype);
 [[nodiscard]] bool isCubScanDTypeSupported(DataType dtype);
-[[nodiscard]] bool isCubReduceSumDTypeSupported(DataType dtype);
-[[nodiscard]] bool isCubReduceMaxDTypeSupported(DataType dtype);
-[[nodiscard]] bool isCubReduceMinDTypeSupported(DataType dtype);
 [[nodiscard]] bool isCubSegmentedExclusiveSumDTypeSupported(DataType dtype);
-[[nodiscard]] bool isCubSegmentedReduceSumDTypeSupported(DataType dtype);
-[[nodiscard]] bool isCubSegmentedReduceMaxDTypeSupported(DataType dtype);
-[[nodiscard]] bool isCubSegmentedReduceMinDTypeSupported(DataType dtype);
 [[nodiscard]] bool isCubSegmentOffsetDTypeSupported(DataType dtype);
 
 [[nodiscard]] CubTemporaryStoragePlan cubTemporaryStoragePlan(const TensorPlacement& placement, size_t bytes);
@@ -931,93 +877,6 @@ void cubDeviceSegmentedArgScan(const CubDeviceSegmentedArgScanPlan& plan,
                                const Tensor& segment_offsets,
                                Stream& stream);
 
-[[nodiscard]] CubDeviceSegmentedReduceSumPlan prepareCubDeviceSegmentedReduceSum(
-    const Tensor& input,
-    const Tensor& output,
-    const Tensor& segment_offsets,
-    uint64_t num_items,
-    uint64_t num_segments);
-
-[[nodiscard]] size_t cubDeviceSegmentedReduceSumTempBytes(const Tensor& input,
-                                                          const Tensor& output,
-                                                          const Tensor& segment_offsets,
-                                                          uint64_t num_items,
-                                                          uint64_t num_segments);
-
-void cubDeviceSegmentedReduceSum(const CubDeviceSegmentedReduceSumPlan& plan,
-                                 const Tensor& temp_storage,
-                                 const Tensor& input,
-                                 Tensor& output,
-                                 const Tensor& segment_offsets,
-                                 Stream& stream);
-
-void cubDeviceSegmentedReduceSum(const Tensor& temp_storage,
-                                 size_t temp_storage_bytes,
-                                 const Tensor& input,
-                                 Tensor& output,
-                                 const Tensor& segment_offsets,
-                                 uint64_t num_items,
-                                 uint64_t num_segments,
-                                 Stream& stream);
-
-[[nodiscard]] CubDeviceSegmentedReduceMaxPlan prepareCubDeviceSegmentedReduceMax(
-    const Tensor& input,
-    const Tensor& output,
-    const Tensor& segment_offsets,
-    uint64_t num_items,
-    uint64_t num_segments);
-
-[[nodiscard]] size_t cubDeviceSegmentedReduceMaxTempBytes(const Tensor& input,
-                                                          const Tensor& output,
-                                                          const Tensor& segment_offsets,
-                                                          uint64_t num_items,
-                                                          uint64_t num_segments);
-
-void cubDeviceSegmentedReduceMax(const CubDeviceSegmentedReduceMaxPlan& plan,
-                                 const Tensor& temp_storage,
-                                 const Tensor& input,
-                                 Tensor& output,
-                                 const Tensor& segment_offsets,
-                                 Stream& stream);
-
-void cubDeviceSegmentedReduceMax(const Tensor& temp_storage,
-                                 size_t temp_storage_bytes,
-                                 const Tensor& input,
-                                 Tensor& output,
-                                 const Tensor& segment_offsets,
-                                 uint64_t num_items,
-                                 uint64_t num_segments,
-                                 Stream& stream);
-
-[[nodiscard]] CubDeviceSegmentedReduceMinPlan prepareCubDeviceSegmentedReduceMin(
-    const Tensor& input,
-    const Tensor& output,
-    const Tensor& segment_offsets,
-    uint64_t num_items,
-    uint64_t num_segments);
-
-[[nodiscard]] size_t cubDeviceSegmentedReduceMinTempBytes(const Tensor& input,
-                                                          const Tensor& output,
-                                                          const Tensor& segment_offsets,
-                                                          uint64_t num_items,
-                                                          uint64_t num_segments);
-
-void cubDeviceSegmentedReduceMin(const CubDeviceSegmentedReduceMinPlan& plan,
-                                 const Tensor& temp_storage,
-                                 const Tensor& input,
-                                 Tensor& output,
-                                 const Tensor& segment_offsets,
-                                 Stream& stream);
-
-void cubDeviceSegmentedReduceMin(const Tensor& temp_storage,
-                                 size_t temp_storage_bytes,
-                                 const Tensor& input,
-                                 Tensor& output,
-                                 const Tensor& segment_offsets,
-                                 uint64_t num_items,
-                                 uint64_t num_segments,
-                                 Stream& stream);
-
 [[nodiscard]] CubDeviceRunLengthEncodePlan prepareCubDeviceRunLengthEncode(const Tensor& input,
                                                                            const Tensor& unique_out,
                                                                            const Tensor& counts_out,
@@ -1046,69 +905,6 @@ void cubDeviceRunLengthEncode(const Tensor& temp_storage,
                               Tensor& num_runs_out,
                               uint64_t num_items,
                               Stream& stream);
-
-[[nodiscard]] CubDeviceReduceSumPlan prepareCubDeviceReduceSum(const Tensor& input,
-                                                               const Tensor& output,
-                                                               uint64_t num_items);
-
-[[nodiscard]] size_t cubDeviceReduceSumTempBytes(const Tensor& input,
-                                                 const Tensor& output,
-                                                 uint64_t num_items);
-
-void cubDeviceReduceSum(const CubDeviceReduceSumPlan& plan,
-                        const Tensor& temp_storage,
-                        const Tensor& input,
-                        Tensor& output,
-                        Stream& stream);
-
-void cubDeviceReduceSum(const Tensor& temp_storage,
-                        size_t temp_storage_bytes,
-                        const Tensor& input,
-                        Tensor& output,
-                        uint64_t num_items,
-                        Stream& stream);
-
-[[nodiscard]] CubDeviceReduceMaxPlan prepareCubDeviceReduceMax(const Tensor& input,
-                                                               const Tensor& output,
-                                                               uint64_t num_items);
-
-[[nodiscard]] size_t cubDeviceReduceMaxTempBytes(const Tensor& input,
-                                                 const Tensor& output,
-                                                 uint64_t num_items);
-
-void cubDeviceReduceMax(const CubDeviceReduceMaxPlan& plan,
-                        const Tensor& temp_storage,
-                        const Tensor& input,
-                        Tensor& output,
-                        Stream& stream);
-
-void cubDeviceReduceMax(const Tensor& temp_storage,
-                        size_t temp_storage_bytes,
-                        const Tensor& input,
-                        Tensor& output,
-                        uint64_t num_items,
-                        Stream& stream);
-
-[[nodiscard]] CubDeviceReduceMinPlan prepareCubDeviceReduceMin(const Tensor& input,
-                                                               const Tensor& output,
-                                                               uint64_t num_items);
-
-[[nodiscard]] size_t cubDeviceReduceMinTempBytes(const Tensor& input,
-                                                 const Tensor& output,
-                                                 uint64_t num_items);
-
-void cubDeviceReduceMin(const CubDeviceReduceMinPlan& plan,
-                        const Tensor& temp_storage,
-                        const Tensor& input,
-                        Tensor& output,
-                        Stream& stream);
-
-void cubDeviceReduceMin(const Tensor& temp_storage,
-                        size_t temp_storage_bytes,
-                        const Tensor& input,
-                        Tensor& output,
-                        uint64_t num_items,
-                        Stream& stream);
 
 [[nodiscard]] CubDeviceExclusiveSumPlan prepareCubDeviceExclusiveSum(const Tensor& input,
                                                                      const Tensor& output,

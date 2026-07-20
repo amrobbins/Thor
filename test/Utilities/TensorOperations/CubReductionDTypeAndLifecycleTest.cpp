@@ -87,7 +87,7 @@ TEST(CubReduction, ValidatesPreallocatedOutputContract) {
     Tensor wrong_dtype(gpuPlacement, TensorDescriptor(DataType::BF16, {2, 1}));
     EXPECT_THROW(static_cast<void>(reduction.stamp(input, wrong_dtype, stream)), std::invalid_argument);
 
-    Tensor wrong_shape(gpuPlacement, TensorDescriptor(DataType::FP32, {1, 2}));
+    Tensor wrong_shape(gpuPlacement, TensorDescriptor(DataType::FP32, {1, 3}));
     EXPECT_THROW(static_cast<void>(reduction.stamp(input, wrong_shape, stream)), std::invalid_argument);
 
     Tensor scalar = makeGpuTensor({1.0f}, {1}, stream, DataType::BF16);

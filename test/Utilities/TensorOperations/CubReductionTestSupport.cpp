@@ -6,6 +6,7 @@
 
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 
@@ -63,6 +64,30 @@ void storeCpuValues(Tensor& cpu, DataType dtype, const std::vector<float>& value
 #endif
         default:
             throw std::invalid_argument("Unsupported CUB reduction test storage dtype.");
+    }
+}
+
+void storeCpuUnsignedValues(Tensor& cpu, const std::vector<uint64_t>& values) {
+    switch (cpu.getDataType()) {
+        case DataType::UINT32: {
+            uint32_t* typed = cpu.getMemPtr<uint32_t>();
+            for (size_t i = 0; i < values.size(); ++i) {
+                if (values[i] > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+                    throw std::invalid_argument("Test UINT32 value is out of range.");
+                }
+                typed[i] = static_cast<uint32_t>(values[i]);
+            }
+            return;
+        }
+        case DataType::UINT64: {
+            uint64_t* typed = cpu.getMemPtr<uint64_t>();
+            for (size_t i = 0; i < values.size(); ++i) {
+                typed[i] = values[i];
+            }
+            return;
+        }
+        default:
+            throw std::invalid_argument("CUB reduction test offsets must use UINT32 or UINT64.");
     }
 }
 
@@ -147,11 +172,64 @@ Tensor makeGpuTensor(const std::vector<float>& values,
     return gpu;
 }
 
+Tensor makeGpuUnsignedTensor(const std::vector<uint64_t>& values,
+                             const std::vector<uint64_t>& dimensions,
+                             Stream& stream,
+                             DataType dtype) {
+    TensorDescriptor descriptor(dtype, dimensions);
+    if (descriptor.getTotalNumElements() != values.size()) {
+        throw std::invalid_argument("Test unsigned tensor value count does not match dimensions.");
+    }
+    Tensor cpu(cpuPlacement, descriptor);
+    storeCpuUnsignedValues(cpu, values);
+    Tensor gpu(gpuPlacement, descriptor);
+    gpu.copyFromAsync(cpu, stream);
+    stream.synchronize();
+    return gpu;
+}
+
+void overwriteGpuUnsignedTensor(Tensor& gpu, const std::vector<uint64_t>& values, Stream& stream) {
+    if (gpu.getTotalNumElements() != values.size()) {
+        throw std::invalid_argument("Replacement unsigned value count does not match tensor size.");
+    }
+    Tensor cpu(cpuPlacement, gpu.getDescriptor());
+    storeCpuUnsignedValues(cpu, values);
+    gpu.copyFromAsync(cpu, stream);
+    stream.synchronize();
+}
+
 std::vector<float> copyGpuTensorAsFloat(const Tensor& gpu, Stream& stream) {
     Tensor cpu = gpu.clone(cpuPlacement);
     cpu.copyFromAsync(gpu, stream);
     stream.synchronize();
     return readCpuValues(cpu);
+}
+
+std::vector<uint64_t> copyGpuTensorAsUnsigned(const Tensor& gpu, Stream& stream) {
+    Tensor cpu = gpu.clone(cpuPlacement);
+    cpu.copyFromAsync(gpu, stream);
+    stream.synchronize();
+
+    const size_t num_elements = cpu.getTotalNumElements();
+    std::vector<uint64_t> values(num_elements);
+    switch (cpu.getDataType()) {
+        case DataType::UINT32: {
+            const uint32_t* typed = cpu.getMemPtr<uint32_t>();
+            for (size_t i = 0; i < num_elements; ++i) {
+                values[i] = typed[i];
+            }
+            return values;
+        }
+        case DataType::UINT64: {
+            const uint64_t* typed = cpu.getMemPtr<uint64_t>();
+            for (size_t i = 0; i < num_elements; ++i) {
+                values[i] = typed[i];
+            }
+            return values;
+        }
+        default:
+            throw std::invalid_argument("CUB reduction test expected UINT32 or UINT64 output.");
+    }
 }
 
 void expectFloatVectorNear(const std::vector<float>& actual,

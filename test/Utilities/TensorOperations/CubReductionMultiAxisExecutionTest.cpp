@@ -69,7 +69,7 @@ TEST(CubReduction, MultiAxisAllAxesUsesDeviceTransformReduce) {
     expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), {6.5f});
 }
 
-TEST(CubReduction, PreallocatedOutputAcceptsKeepDimensionOrSqueezedShape) {
+TEST(CubReduction, PreallocatedOutputAcceptsAnySingletonEquivalentShape) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
     Tensor input = makeGpuTensor({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f,
@@ -80,19 +80,24 @@ TEST(CubReduction, PreallocatedOutputAcceptsKeepDimensionOrSqueezedShape) {
 
     Tensor keep_dimensions(gpuPlacement, TensorDescriptor(DataType::FP32, {1, 3, 1}));
     Tensor squeezed(gpuPlacement, TensorDescriptor(DataType::FP32, {3}));
-    Tensor wrong_shape(gpuPlacement, TensorDescriptor(DataType::FP32, {3, 1}));
+    Tensor alternate_singletons(gpuPlacement, TensorDescriptor(DataType::FP32, {3, 1}));
+    Tensor wrong_shape(gpuPlacement, TensorDescriptor(DataType::FP32, {1, 1, 3, 2}));
 
     std::shared_ptr<StampedCubReduction> keep_stamped = reduction.stamp(input, keep_dimensions, stream);
     std::shared_ptr<StampedCubReduction> squeezed_stamped = reduction.stamp(input, squeezed, stream);
+    std::shared_ptr<StampedCubReduction> alternate_stamped = reduction.stamp(input, alternate_singletons, stream);
     EXPECT_EQ(keep_stamped->getOutputTensor().getDimensions(), (std::vector<uint64_t>{1, 3, 1}));
     EXPECT_EQ(squeezed_stamped->getOutputTensor().getDimensions(), (std::vector<uint64_t>{3}));
+    EXPECT_EQ(alternate_stamped->getOutputTensor().getDimensions(), (std::vector<uint64_t>{3, 1}));
     EXPECT_THROW(static_cast<void>(reduction.stamp(input, wrong_shape, stream)), std::invalid_argument);
 
     keep_stamped->run();
     squeezed_stamped->run();
+    alternate_stamped->run();
     stream.synchronize();
     expectFloatVectorNear(copyGpuTensorAsFloat(keep_dimensions, stream), {18.0f, 26.0f, 34.0f});
     expectFloatVectorNear(copyGpuTensorAsFloat(squeezed, stream), {18.0f, 26.0f, 34.0f});
+    expectFloatVectorNear(copyGpuTensorAsFloat(alternate_singletons, stream), {18.0f, 26.0f, 34.0f});
 }
 
 TEST(CubReduction, SqueezedScalarOutputUsesOneElementShape) {
@@ -107,4 +112,21 @@ TEST(CubReduction, SqueezedScalarOutputUsesOneElementShape) {
     stamped->run();
     stream.synchronize();
     expectFloatVectorNear(copyGpuTensorAsFloat(scalar_output, stream), {24.0f});
+}
+
+TEST(CubReduction, RankNineStridedReductionUsesStampedDynamicMetadata) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    std::vector<float> values(32);
+    for (uint64_t i = 0; i < values.size(); ++i) {
+        values[i] = static_cast<float>(i);
+    }
+    Tensor input = makeGpuTensor(values, {2, 1, 2, 1, 2, 1, 2, 1, 2}, stream);
+    std::shared_ptr<StampedCubReduction> stamped =
+        CubReduction(CubReductionOp::Sum, std::vector<uint32_t>{0, 2, 4, 6}, DataType::FP32).stamp(input, stream);
+    EXPECT_EQ(stamped->getPath(), CubReductionPath::StridedFixedSegment);
+    EXPECT_EQ(stamped->getGeometry().rank, 9U);
+    stamped->run();
+    stream.synchronize();
+    expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), {240.0f, 256.0f});
 }

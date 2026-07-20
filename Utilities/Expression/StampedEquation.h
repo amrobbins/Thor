@@ -26,6 +26,8 @@
 #include "Utilities/TensorOperations/DeepLearning/CudnnRmsNorm.h"
 #include "Utilities/TensorOperations/Embedding/EmbeddingKernels.h"
 #include "Utilities/TensorOperations/Cub/CubDevicePrimitives.h"
+#include "Utilities/Expression/ReduceMinMaxBackwardKernel.h"
+#include "Utilities/TensorOperations/Cub/CubReduction.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 
 namespace cudnn_frontend {
@@ -38,6 +40,11 @@ namespace ThorImplementation {
 
 class StampedExecutionPlan;
 
+enum class ReductionResultKind : uint8_t {
+    Value = 0,
+    Indices = 1,
+};
+
 struct ReductionCacheKey {
     const ExprOp op;
     const std::vector<uint64_t> input_dims;
@@ -46,7 +53,7 @@ struct ReductionCacheKey {
     const DataType input_dtype;
     const DataType compute_dtype;
     const DataType output_dtype;
-    const bool output_indices;
+    const ReductionResultKind result_kind;
     const int device_num;
 
     bool operator==(const ReductionCacheKey& other) const = default;
@@ -58,7 +65,7 @@ struct ReductionCacheKey {
                       DataType input_dtype,
                       DataType output_dtype,
                       DataType compute_dtype,
-                      bool output_indices,
+                      ReductionResultKind result_kind,
                       int device_num)
         : op(op),
           input_dims(std::move(input_dims)),
@@ -67,7 +74,7 @@ struct ReductionCacheKey {
           input_dtype(input_dtype),
           compute_dtype(compute_dtype),
           output_dtype(output_dtype),
-          output_indices(output_indices),
+          result_kind(result_kind),
           device_num(device_num) {
         if (this->reduction_axes.empty()) {
             this->reduction_axes.resize(this->input_dims.size());
@@ -83,25 +90,13 @@ struct ReductionCacheKey {
 
 struct BuiltReduction {
     ReductionCacheKey key;
-
-    cudnnTensorDescriptor_t a_desc = nullptr;
-    cudnnTensorDescriptor_t c_desc = nullptr;
-    cudnnReduceTensorDescriptor_t reduce_desc = nullptr;
-
-    size_t workspace_bytes = 0;
-    size_t indices_bytes = 0;
-    bool identity_reduction = false;
+    std::optional<CubReductionOp> value_op = std::nullopt;
+    std::optional<CubArgReductionOp> arg_op = std::nullopt;
+    std::optional<CubReductionGeometry> geometry = std::nullopt;
 
     explicit BuiltReduction(ReductionCacheKey key) : key(std::move(key)) {}
 
-    ~BuiltReduction() {
-        if (a_desc)
-            cudnnDestroyTensorDescriptor(a_desc);
-        if (c_desc)
-            cudnnDestroyTensorDescriptor(c_desc);
-        if (reduce_desc)
-            cudnnDestroyReduceTensorDescriptor(reduce_desc);
-    }
+    ~BuiltReduction() = default;
 
     BuiltReduction(const BuiltReduction&) = delete;
     BuiltReduction& operator=(const BuiltReduction&) = delete;
@@ -402,7 +397,7 @@ class StampedEquation {
                                                           DataType input_dtype,
                                                           DataType output_dtype,
                                                           DataType compute_dtype,
-                                                          bool output_indices,
+                                                          ReductionResultKind result_kind,
                                                           const Tensor& input,
                                                           int device_num);
 
@@ -482,24 +477,15 @@ class StampedReduction {
     Tensor getOutputTensor() const { return output; }
 
     StampedReduction(std::shared_ptr<BuiltReduction> built,
-                     const Tensor& source_input,
                      const Tensor& input,
                      const Tensor& output,
-                     const Stream& stream,
-                     std::optional<Tensor> workspace);
+                     const Stream& stream);
 
    private:
     const std::shared_ptr<BuiltReduction> built_reduction;
-    const Tensor source_input;
-    mutable Tensor input;
     Tensor output;
-    const std::optional<Tensor> workspace;
+    std::shared_ptr<StampedCubReduction> cub_reduction;
     Stream stream;
-
-    const float alpha_1 = 1.0f;
-    const float beta_0 = 0.0f;
-    const void* alpha = &alpha_1;
-    const void* beta = &beta_0;
 };
 
 class StampedArgMinMax {
@@ -512,26 +498,15 @@ class StampedArgMinMax {
     Tensor getOutputTensor() const { return output; }
 
     StampedArgMinMax(std::shared_ptr<BuiltReduction> built,
-                     const Tensor& source_input,
                      const Tensor& input,
                      const Tensor& output,
-                     const Tensor& reduction_value_output,
-                     const Stream& stream,
-                     std::optional<Tensor> workspace);
+                     const Stream& stream);
 
    private:
     const std::shared_ptr<BuiltReduction> built_reduction;
-    const Tensor source_input;
-    mutable Tensor input;
     Tensor output;
-    const Tensor reduction_value_output;
-    const std::optional<Tensor> workspace;
+    std::shared_ptr<StampedCubArgReduction> cub_arg_reduction;
     Stream stream;
-
-    const float alpha_1 = 1.0f;
-    const float beta_0 = 0.0f;
-    const void* alpha = &alpha_1;
-    const void* beta = &beta_0;
 };
 
 class StampedSegmentedReduction {
@@ -551,14 +526,9 @@ class StampedSegmentedReduction {
 
    private:
     const std::shared_ptr<CompiledSegmentedReduction> compiled_segmented_reduction;
-    const Tensor input;
     mutable Tensor output;
-    const Tensor segment_offsets;
-    Tensor temp_storage;
+    std::shared_ptr<StampedCubSegmentedReduction> cub_segmented_reduction;
     Stream stream;
-    CubDeviceSegmentedReduceSumPlan sum_plan;
-    CubDeviceSegmentedReduceMinPlan min_plan;
-    CubDeviceSegmentedReduceMaxPlan max_plan;
 };
 
 class StampedScan {
@@ -958,30 +928,21 @@ class StampedReduceMinMaxBackward {
     Tensor getOutputTensor() const { return output; }
 
     StampedReduceMinMaxBackward(std::shared_ptr<BuiltReduction> built,
-                                const Tensor& source_input,
                                 const Tensor& input,
                                 const Tensor& grad_output,
                                 const Tensor& output,
                                 const Tensor& indices,
-                                const Tensor& reduction_value_output,
-                                const Stream& stream,
-                                std::optional<Tensor> workspace);
+                                const Stream& stream);
 
    private:
     const std::shared_ptr<BuiltReduction> built_reduction;
-    const Tensor source_input;
-    mutable Tensor input;
+    const Tensor input;
     const Tensor grad_output;
     Tensor output;
     const Tensor indices;
-    const Tensor reduction_value_output;
-    const std::optional<Tensor> workspace;
+    std::shared_ptr<StampedCubArgReduction> cub_arg_reduction;
+    ReduceMinMaxBackwardScatterPlan scatter_plan;
     Stream stream;
-
-    const float alpha_1 = 1.0f;
-    const float beta_0 = 0.0f;
-    const void* alpha = &alpha_1;
-    const void* beta = &beta_0;
 };
 
 
@@ -1459,7 +1420,7 @@ struct hash<ThorImplementation::ReductionCacheKey> {
         hashCombine(h, hash<ThorImplementation::DataType>{}(k.input_dtype));
         hashCombine(h, hash<ThorImplementation::DataType>{}(k.compute_dtype));
         hashCombine(h, hash<ThorImplementation::DataType>{}(k.output_dtype));
-        hashCombine(h, hash<bool>{}(k.output_indices));
+        hashCombine(h, hash<uint8_t>{}(static_cast<uint8_t>(k.result_kind)));
         hashCombine(h, hash<int>{}(k.device_num));
         return h;
     }

@@ -181,7 +181,7 @@ template <typename InputT, typename InputTransformT>
 struct LogicalAxesToFp32 {
     const InputT* input;
     uint64_t reduction_size;
-    CubReductionIndexing indexing;
+    CubReductionDeviceIndexing indexing;
     InputTransformT transform;
 
     __host__ __device__ float operator()(int64_t logical_index) const {
@@ -206,7 +206,7 @@ auto makeStridedFp32Iterator(const Tensor& input,
     return thrust::make_transform_iterator(
         thrust::counting_iterator<int64_t>(0),
         LogicalAxesToFp32<InputT, InputTransformT>{
-            input.getMemPtr<InputT>(), geometry.reduction_size, geometry.indexing, input_transform});
+            input.getMemPtr<InputT>(), geometry.reduction_size, geometry.device_indexing, input_transform});
 }
 
 template <typename InputT, typename ReductionOpT, typename InputTransformT, typename OutputFinalizeT>
@@ -269,6 +269,8 @@ size_t queryReductionBytesForInput(const Tensor& input,
                                                           stream));
             break;
         }
+        case CubReductionPath::OffsetSegmented:
+            throw std::logic_error("Dense CUB reduction received offset-segmented geometry.");
     }
 
     return std::max<size_t>(queried_bytes, 1);
@@ -333,6 +335,8 @@ void launchReductionForInput(const Tensor& temp_storage,
                                                           stream));
             break;
         }
+        case CubReductionPath::OffsetSegmented:
+            throw std::logic_error("Dense CUB reduction received offset-segmented geometry.");
     }
 }
 

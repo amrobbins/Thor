@@ -3,6 +3,7 @@
 #include "Utilities/Expression/ExpressionDTypeResolution.h"
 #include "Utilities/Expression/FusedEquation.h"
 #include "Utilities/TensorOperations/Cub/CubDevicePrimitives.h"
+#include "Utilities/TensorOperations/Cub/CubReduction.h"
 #include "Utilities/TensorOperations/Ragged/RowPartitionDTypePolicy.h"
 
 #include "CudaSourceEmitter.h"
@@ -628,7 +629,6 @@ static bool isScanMinMaxBackwardOp(ExprOp op) {
     return op == ExprOp::SCAN_MIN_BACKWARD || op == ExprOp::SCAN_MAX_BACKWARD ||
            op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD || op == ExprOp::SEGMENTED_SCAN_MAX_BACKWARD;
 }
-static bool isSoftmaxOp(ExprOp op) { return op == ExprOp::SOFTMAX; }
 static bool isScanOp(ExprOp op) { return op == ExprOp::SCAN || op == ExprOp::SEGMENTED_SCAN; }
 static bool isSegmentedReduceOp(ExprOp op) {
     return op == ExprOp::SEGMENTED_REDUCE_SUM || op == ExprOp::SEGMENTED_REDUCE_MIN || op == ExprOp::SEGMENTED_REDUCE_MAX;
@@ -649,7 +649,7 @@ static bool expressionHasIndexAwareOps(const PhysicalExpression& expr) {
 static bool isTransposeOp(ExprOp op) { return op == ExprOp::TRANSPOSE; }
 
 static bool isStageBoundaryOp(ExprOp op) {
-    return isCudnnReduceOp(op) || isSoftmaxOp(op) || isScanOp(op) || isSegmentedReduceOp(op) || isRmsNormOp(op) || isMatmulOp(op) || isAttentionOp(op) ||
+    return isReductionOp(op) || isSoftmaxOp(op) || isScanOp(op) || isSegmentedReduceOp(op) || isRmsNormOp(op) || isMatmulOp(op) || isAttentionOp(op) ||
            isAttentionBackwardOp(op) || isConvolutionOp(op) || isReduceMinMaxBackwardOp(op) || isScanMinMaxBackwardOp(op) || isEmbeddingLookupOp(op) ||
            op == ExprOp::STRIDED_VIEW || op == ExprOp::CUDA_KERNEL_OUTPUT;
 }
@@ -1650,7 +1650,7 @@ shared_ptr<CompiledReduction> EquationCompiler::compileReduction(const PhysicalE
     }
 
     const ExprNode& node = expr.nodes[expr.output_node];
-    if (!isCudnnReduceOp(node.op) || isArgMinMaxOp(node.op)) {
+    if (!isValueReductionOp(node.op)) {
         throw std::runtime_error("Reduction stage output node is not a supported value reduction op.");
     }
 
@@ -1753,29 +1753,21 @@ shared_ptr<CompiledSegmentedReduction> EquationCompiler::compileSegmentedReducti
     if (!node.output_dtype.has_value()) {
         throw std::runtime_error("Segmented-reduction node missing resolved output_dtype.");
     }
-    if (!isCubSegmentOffsetDTypeSupported(offsets_node.input_tensor_dtype.value())) {
-        throw std::runtime_error("Expression segmented-reduction offsets dtype is not supported by CUB.");
+    if (!CubSegmentedReduction::isOffsetDataTypeSupported(offsets_node.input_tensor_dtype.value())) {
+        throw std::runtime_error("Expression segmented-reduction offsets dtype is not supported by the central CUB reducer.");
     }
 
     const DataType input_dtype = input_node.input_tensor_dtype.value();
     if (input_dtype != node.output_dtype.value()) {
         throw std::runtime_error("Expression segmented-reduction currently requires input/output dtypes to match.");
     }
+    if (!CubSegmentedReduction::isInputDataTypeSupported(input_dtype)) {
+        throw std::runtime_error("Expression segmented-reduction input dtype is not supported by the central CUB reducer.");
+    }
     switch (node.op) {
         case ExprOp::SEGMENTED_REDUCE_SUM:
-            if (!isCubSegmentedReduceSumDTypeSupported(input_dtype)) {
-                throw std::runtime_error("Expression segmented reduce-sum dtype is not supported by CUB.");
-            }
-            break;
         case ExprOp::SEGMENTED_REDUCE_MIN:
-            if (!isCubSegmentedReduceMinDTypeSupported(input_dtype)) {
-                throw std::runtime_error("Expression segmented reduce-min dtype is not supported by CUB.");
-            }
-            break;
         case ExprOp::SEGMENTED_REDUCE_MAX:
-            if (!isCubSegmentedReduceMaxDTypeSupported(input_dtype)) {
-                throw std::runtime_error("Expression segmented reduce-max dtype is not supported by CUB.");
-            }
             break;
         default:
             throw std::runtime_error("Unsupported segmented-reduction op.");
@@ -2820,13 +2812,12 @@ shared_ptr<CompiledReduceMinMaxBackward> EquationCompiler::compileReduceMinMaxBa
         throw std::runtime_error("ReduceMinMaxBackward node missing resolved output_dtype.");
     }
 
-    const ExprOp reduce_op = node.op == ExprOp::REDUCE_MIN_BACKWARD ? ExprOp::REDUCE_MIN : ExprOp::REDUCE_MAX;
-    const DataType supported_input_dtype = toSupportedInputDType(reduce_op, input_node.input_tensor_dtype.value());
+    const DataType input_dtype = toSupportedInputDType(node.op, input_node.input_tensor_dtype.value());
 
     return make_shared<CompiledReduceMinMaxBackward>(node.op,
                                                      node.reduction_axes,
                                                      node.squeeze_axes,
-                                                     supported_input_dtype,
+                                                     input_dtype,
                                                      grad_node.input_tensor_dtype.value(),
                                                      node.output_dtype.value(),
                                                      node.compute_dtype);
@@ -3393,7 +3384,7 @@ static PhysicalExecutionStage buildReductionStage(const PhysicalExpression& expr
                                                   const std::string& output_name,
                                                   const std::unordered_map<uint32_t, uint32_t>& node_output_value_id) {
     const ExprNode& node = expr.nodes[node_idx];
-    if (!isCudnnReduceOp(node.op)) {
+    if (!isReductionOp(node.op)) {
         throw std::runtime_error("buildReductionStage called on non-reduction node.");
     }
 
@@ -3439,11 +3430,9 @@ static PhysicalExecutionStage buildReductionStage(const PhysicalExpression& expr
     input_node.op = ExprOp::INPUT;
     input_node.input_slot = 0;
 
-    // This local INPUT node represents the already-materialized value produced by
-    // the parent expression feeding the reduction. Reductions may need a narrower
-    // supported library input dtype than the logical parent value dtype, so record
-    // the normalized input dtype here and let stamp-time adapt the concrete tensor
-    // if needed.
+    // This local INPUT node represents the already-materialized value produced by the parent expression feeding the
+    // reduction. Dense value and arg reductions consume that storage dtype directly; FP32 conversion happens lazily
+    // inside the central CUB reduction iterator rather than through a materialized compatibility tensor.
     input_node.input_tensor_dtype = supported_input_dtype;
     input_node.output_dtype = supported_input_dtype;
     input_node.compute_dtype = defaultComputeDType(supported_input_dtype);

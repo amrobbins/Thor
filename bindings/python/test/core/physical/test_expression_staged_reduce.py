@@ -1363,3 +1363,43 @@ def test_bf16_reduction_compatibility_promotes_to_fp32_not_fp16():
     assert got.dtype == np.float32
     assert np.isfinite(got).all()
     np.testing.assert_allclose(got, expected, rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.cuda
+def test_argmin_staged_propagates_nan_and_uses_first_logical_index_for_ties():
+    dtype = thor.DataType.fp32
+    x = ex.input("x")
+    expr = ex.argmin(x, axis=1, squeeze=True)
+
+    x_np = np.array(
+        [
+            [1.0, 1.0, 3.0, 1.0],
+            [np.nan, 0.0, np.nan, -4.0],
+        ],
+        dtype=np.float32,
+    )
+    expected = np.array([0, 0], dtype=np.uint32)
+
+    got = _run_staged_expr(expr, ["x"], x_np, dtype=dtype)
+
+    np.testing.assert_array_equal(got, expected)
+
+
+@pytest.mark.cuda
+def test_argmax_staged_propagates_nan_and_uses_first_logical_index_for_ties():
+    dtype = thor.DataType.fp32
+    x = ex.input("x")
+    expr = ex.argmax(x, axis=1, squeeze=True)
+
+    x_np = np.array(
+        [
+            [5.0, 5.0, 3.0, 5.0],
+            [-1.0, np.nan, np.nan, 8.0],
+        ],
+        dtype=np.float32,
+    )
+    expected = np.array([0, 1], dtype=np.uint32)
+
+    got = _run_staged_expr(expr, ["x"], x_np, dtype=dtype)
+
+    np.testing.assert_array_equal(got, expected)

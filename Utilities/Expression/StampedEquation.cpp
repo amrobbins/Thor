@@ -1027,14 +1027,14 @@ void StampedEquation::runOn(Stream& run_stream, const std::unordered_map<std::st
     EquationRunner::run(compiledEquation, overridden_inputs, outputs, run_stream);
 }
 
-static void refreshCudnnSingleInputStageAdapter(const Tensor& source_input, Tensor& input, Stream& run_stream) {
+static void refreshCudnnSoftmaxInputAdapter(const Tensor& source_input, Tensor& input, Stream& run_stream) {
     if (source_input.getPlacement() != input.getPlacement() || source_input.getDimensions() != input.getDimensions()) {
-        throw std::runtime_error("cuDNN stage dtype adapter must preserve the source tensor placement and dimensions.");
+        throw std::runtime_error("cuDNN softmax input adapter must preserve the source tensor placement and dimensions.");
     }
 
     if (source_input.getTensorId() == input.getTensorId()) {
         if (source_input.getDataType() != input.getDataType()) {
-            throw std::runtime_error("Aliased cuDNN stage input cannot have mismatched source and operation dtypes.");
+            throw std::runtime_error("Aliased cuDNN softmax input cannot have mismatched source and operation dtypes.");
         }
         return;
     }
@@ -1043,109 +1043,65 @@ static void refreshCudnnSingleInputStageAdapter(const Tensor& source_input, Tens
 }
 
 StampedReduction::StampedReduction(std::shared_ptr<BuiltReduction> built,
-                                   const Tensor& source_input,
                                    const Tensor& input,
                                    const Tensor& output,
-                                   const Stream& stream,
-                                   std::optional<Tensor> workspace)
-    : built_reduction(std::move(built)),
-      source_input(source_input),
-      input(input),
-      output(output),
-      workspace(workspace),
-      stream(stream) {
-    if (built_reduction->workspace_bytes != 0) {
-        THOR_THROW_IF_FALSE(workspace.has_value());
-        THOR_THROW_IF_FALSE(workspace.value().getArraySizeInBytes() >= built_reduction->workspace_bytes);
-    }
+                                   const Stream& stream)
+    : built_reduction(std::move(built)), output(output), stream(stream) {
+    THOR_THROW_IF_FALSE(built_reduction->key.result_kind == ReductionResultKind::Value);
+    THOR_THROW_IF_FALSE(built_reduction->value_op.has_value());
+    THOR_THROW_IF_FALSE(built_reduction->geometry.has_value());
     THOR_THROW_IF_FALSE(input.getDataType() == built_reduction->key.input_dtype);
     THOR_THROW_IF_FALSE(output.getDataType() == built_reduction->key.output_dtype);
+
+    std::vector<uint32_t> axes;
+    axes.reserve(built_reduction->key.reduction_axes.size());
+    for (uint64_t axis : built_reduction->key.reduction_axes) {
+        THOR_THROW_IF_FALSE(axis <= UINT32_MAX);
+        axes.push_back(static_cast<uint32_t>(axis));
+    }
+    cub_reduction = CubReduction(built_reduction->value_op.value(), std::move(axes), output.getDataType())
+                        .stamp(input, output, stream);
+    THOR_THROW_IF_FALSE(cub_reduction->getGeometry().path == built_reduction->geometry->path);
 }
 
 void StampedReduction::run() { runOn(stream); }
 
 void StampedReduction::runOn(Stream& run_stream) const {
-    refreshCudnnSingleInputStageAdapter(source_input, input, run_stream);
-
-    if (built_reduction->identity_reduction) {
-        Tensor output_view = output;
-        output_view.copyFromAsync(input, run_stream);
-        return;
-    }
-
-    void* workspace_ptr = nullptr;
-    if (built_reduction->workspace_bytes > 0) {
-        THOR_THROW_IF_FALSE(workspace.has_value());
-        workspace_ptr = (void*)workspace.value().getMemPtr();
-    }
-
-    CUDNN_CHECK(cudnnReduceTensor(run_stream.getCudnnHandle(),
-                                  built_reduction->reduce_desc,
-                                  nullptr,
-                                  0,
-                                  workspace_ptr,
-                                  built_reduction->workspace_bytes,
-                                  alpha,
-                                  built_reduction->a_desc,
-                                  input.getMemPtr(),
-                                  beta,
-                                  built_reduction->c_desc,
-                                  (void*)output.getMemPtr()));
+    THOR_THROW_IF_FALSE(cub_reduction != nullptr);
+    cub_reduction->runOn(run_stream);
 }
 
 StampedArgMinMax::StampedArgMinMax(std::shared_ptr<BuiltReduction> built,
-                                   const Tensor& source_input,
                                    const Tensor& input,
                                    const Tensor& output,
-                                   const Tensor& reduction_value_output,
-                                   const Stream& stream,
-                                   std::optional<Tensor> workspace)
-    : built_reduction(std::move(built)),
-      source_input(source_input),
-      input(input),
-      output(output),
-      reduction_value_output(reduction_value_output),
-      workspace(workspace),
-      stream(stream) {
-    if (!built_reduction->key.output_indices) {
-        throw std::runtime_error("StampedArgMinMax requires a BuiltReduction configured for indices.");
+                                   const Stream& stream)
+    : built_reduction(std::move(built)), output(output), stream(stream) {
+    if (built_reduction->key.result_kind != ReductionResultKind::Indices || !built_reduction->arg_op.has_value()
+        || !built_reduction->geometry.has_value()) {
+        throw std::runtime_error("StampedArgMinMax requires an index-producing reduction plan.");
     }
-    if (built_reduction->workspace_bytes != 0) {
-        THOR_THROW_IF_FALSE(workspace.has_value());
-        THOR_THROW_IF_FALSE(workspace.value().getArraySizeInBytes() >= built_reduction->workspace_bytes);
+
+    std::vector<uint32_t> axes;
+    axes.reserve(built_reduction->key.reduction_axes.size());
+    for (uint64_t axis : built_reduction->key.reduction_axes) {
+        THOR_THROW_IF_FALSE(axis <= UINT32_MAX);
+        axes.push_back(static_cast<uint32_t>(axis));
     }
+
+    CubArgReductionOutputOptions outputs;
+    outputs.produce_value = false;
+    outputs.produce_index = true;
+    outputs.index_output_dtype = output.getDataType();
+    cub_arg_reduction = CubArgReduction(built_reduction->arg_op.value(), std::move(axes), outputs)
+                            .stamp(input, std::nullopt, output, stream);
+    THOR_THROW_IF_FALSE(cub_arg_reduction->getGeometry().path == built_reduction->geometry->path);
 }
 
 void StampedArgMinMax::run() { runOn(stream); }
 
 void StampedArgMinMax::runOn(Stream& run_stream) const {
-    refreshCudnnSingleInputStageAdapter(source_input, input, run_stream);
-
-    // std::cerr << "[REDUCE_MINMAX_BW] input dtype=" << TensorDescriptor::getElementTypeName(input.getDataType())
-    //           << " built.input_dtype=" << TensorDescriptor::getElementTypeName(built_reduction->key.input_dtype)
-    //           << " built.output_dtype=" << TensorDescriptor::getElementTypeName(built_reduction->key.output_dtype)
-    //           << " built.compute_dtype=" << TensorDescriptor::getElementTypeName(built_reduction->key.compute_dtype)
-    //           << " reduction_value_output dtype=" << TensorDescriptor::getElementTypeName(reduction_value_output.getDataType())
-    //           << std::endl;
-
-    void* workspace_ptr = nullptr;
-    if (built_reduction->workspace_bytes > 0) {
-        THOR_THROW_IF_FALSE(workspace.has_value());
-        workspace_ptr = (void*)workspace.value().getMemPtr();
-    }
-
-    CUDNN_CHECK(cudnnReduceTensor(run_stream.getCudnnHandle(),
-                                  built_reduction->reduce_desc,
-                                  (void*)output.getMemPtr(),
-                                  built_reduction->indices_bytes,
-                                  workspace_ptr,
-                                  built_reduction->workspace_bytes,
-                                  alpha,
-                                  built_reduction->a_desc,
-                                  input.getMemPtr(),
-                                  beta,
-                                  built_reduction->c_desc,
-                                  (void*)reduction_value_output.getMemPtr()));
+    THOR_THROW_IF_FALSE(cub_arg_reduction != nullptr);
+    cub_arg_reduction->runOn(run_stream);
 }
 
 StampedSegmentedReduction::StampedSegmentedReduction(std::shared_ptr<CompiledSegmentedReduction> compiled,
@@ -1153,67 +1109,41 @@ StampedSegmentedReduction::StampedSegmentedReduction(std::shared_ptr<CompiledSeg
                                                      const Tensor& output,
                                                      const Tensor& segment_offsets,
                                                      const Stream& stream)
-    : compiled_segmented_reduction(std::move(compiled)), input(input), output(output), segment_offsets(segment_offsets), stream(stream) {
+    : compiled_segmented_reduction(std::move(compiled)), output(output), stream(stream) {
     if (!compiled_segmented_reduction) {
         throw std::runtime_error("StampedSegmentedReduction requires a compiled segmented reduction descriptor.");
     }
-    if (input.getDataType() != compiled_segmented_reduction->input_dtype ||
-        output.getDataType() != compiled_segmented_reduction->output_dtype ||
-        segment_offsets.getDataType() != compiled_segmented_reduction->offset_dtype) {
+    if (input.getDataType() != compiled_segmented_reduction->input_dtype
+        || output.getDataType() != compiled_segmented_reduction->output_dtype
+        || segment_offsets.getDataType() != compiled_segmented_reduction->offset_dtype) {
         throw std::runtime_error("Segmented-reduction tensor dtypes do not match the compiled descriptor.");
     }
-    if (input.getPlacement() != output.getPlacement() || input.getPlacement() != segment_offsets.getPlacement()) {
-        throw std::runtime_error("Segmented-reduction input, output, and offsets must share one GPU placement.");
-    }
-    if (input.getDimensions().size() != 1) {
-        throw std::runtime_error("Segmented-reduction expression currently supports rank-1 scalar ragged values only.");
-    }
-    const std::vector<uint64_t> offset_dims = segment_offsets.getDimensions();
-    if (offset_dims.size() != 1 || offset_dims[0] == 0) {
-        throw std::runtime_error("Segmented-reduction offsets must be a non-empty rank-1 tensor of shape [num_segments + 1].");
-    }
-    const uint64_t num_items = input.getTotalNumElements();
-    const uint64_t num_segments = offset_dims[0] - 1;
-    if (output.getDimensions() != std::vector<uint64_t>{num_segments}) {
-        throw std::runtime_error("Segmented-reduction output must have shape [num_segments].");
-    }
 
-    size_t temp_storage_bytes = 1;
+    CubReductionOp cub_op;
     switch (compiled_segmented_reduction->op) {
         case ExprOp::SEGMENTED_REDUCE_SUM:
-            sum_plan = prepareCubDeviceSegmentedReduceSum(input, output, segment_offsets, num_items, num_segments);
-            temp_storage_bytes = sum_plan.temp_storage_bytes;
+            cub_op = CubReductionOp::Sum;
             break;
         case ExprOp::SEGMENTED_REDUCE_MIN:
-            min_plan = prepareCubDeviceSegmentedReduceMin(input, output, segment_offsets, num_items, num_segments);
-            temp_storage_bytes = min_plan.temp_storage_bytes;
+            cub_op = CubReductionOp::Min;
             break;
         case ExprOp::SEGMENTED_REDUCE_MAX:
-            max_plan = prepareCubDeviceSegmentedReduceMax(input, output, segment_offsets, num_items, num_segments);
-            temp_storage_bytes = max_plan.temp_storage_bytes;
+            cub_op = CubReductionOp::Max;
             break;
         default:
             throw std::runtime_error("Unsupported segmented-reduction op.");
     }
-    temp_storage = Tensor(input.getPlacement(), TensorDescriptor(DataType::UINT8, {std::max<size_t>(temp_storage_bytes, 1)}));
+
+    cub_segmented_reduction =
+        CubSegmentedReduction(cub_op, output.getDataType()).stamp(input, output, segment_offsets, stream);
+    THOR_THROW_IF_FALSE(cub_segmented_reduction->getPath() == CubReductionPath::OffsetSegmented);
 }
 
 void StampedSegmentedReduction::run() { runOn(stream); }
 
 void StampedSegmentedReduction::runOn(Stream& run_stream) const {
-    switch (compiled_segmented_reduction->op) {
-        case ExprOp::SEGMENTED_REDUCE_SUM:
-            cubDeviceSegmentedReduceSum(sum_plan, temp_storage, input, output, segment_offsets, run_stream);
-            break;
-        case ExprOp::SEGMENTED_REDUCE_MIN:
-            cubDeviceSegmentedReduceMin(min_plan, temp_storage, input, output, segment_offsets, run_stream);
-            break;
-        case ExprOp::SEGMENTED_REDUCE_MAX:
-            cubDeviceSegmentedReduceMax(max_plan, temp_storage, input, output, segment_offsets, run_stream);
-            break;
-        default:
-            throw std::runtime_error("Unsupported segmented-reduction op.");
-    }
+    THOR_THROW_IF_FALSE(cub_segmented_reduction != nullptr);
+    cub_segmented_reduction->runOn(run_stream);
 }
 
 StampedScan::StampedScan(std::shared_ptr<CompiledScan> compiled,
@@ -1379,7 +1309,7 @@ StampedSoftmax::StampedSoftmax(std::shared_ptr<CompiledSoftmax> compiled,
 void StampedSoftmax::run() { runOn(stream); }
 
 void StampedSoftmax::runOn(Stream& run_stream) const {
-    refreshCudnnSingleInputStageAdapter(source_input, input, run_stream);
+    refreshCudnnSoftmaxInputAdapter(source_input, input, run_stream);
 
     CUDNN_CHECK(cudnnSoftmaxForward(run_stream.getCudnnHandle(),
                                     built_softmax->key.algorithm,
@@ -1991,75 +1921,61 @@ void StampedScanMinMaxBackward::runOn(Stream& run_stream) {
 }
 
 StampedReduceMinMaxBackward::StampedReduceMinMaxBackward(std::shared_ptr<BuiltReduction> built,
-                                                         const Tensor& source_input,
                                                          const Tensor& input,
                                                          const Tensor& grad_output,
                                                          const Tensor& output,
                                                          const Tensor& indices,
-                                                         const Tensor& reduction_value_output,
-                                                         const Stream& stream,
-                                                         std::optional<Tensor> workspace)
+                                                         const Stream& stream)
     : built_reduction(std::move(built)),
-      source_input(source_input),
       input(input),
       grad_output(grad_output),
       output(output),
       indices(indices),
-      reduction_value_output(reduction_value_output),
-      workspace(workspace),
       stream(stream) {
-    if (!built_reduction->key.output_indices) {
-        throw std::runtime_error("StampedReduceMinMaxBackward requires a BuiltReduction configured for indices.");
+    if (built_reduction->key.result_kind != ReductionResultKind::Indices || !built_reduction->arg_op.has_value()
+        || !built_reduction->geometry.has_value()) {
+        throw std::runtime_error("StampedReduceMinMaxBackward requires an index-producing reduction plan.");
     }
-    if (built_reduction->workspace_bytes != 0) {
-        THOR_THROW_IF_FALSE(workspace.has_value());
-        THOR_THROW_IF_FALSE(workspace.value().getArraySizeInBytes() >= built_reduction->workspace_bytes);
+    if (indices.getDataType() != DataType::UINT32) {
+        throw std::runtime_error("StampedReduceMinMaxBackward requires UINT32 local winner indices.");
     }
+
+    std::vector<uint32_t> axes;
+    axes.reserve(built_reduction->key.reduction_axes.size());
+    for (uint64_t axis : built_reduction->key.reduction_axes) {
+        THOR_THROW_IF_FALSE(axis <= UINT32_MAX);
+        axes.push_back(static_cast<uint32_t>(axis));
+    }
+
+    CubArgReductionOutputOptions outputs;
+    outputs.produce_value = false;
+    outputs.produce_index = true;
+    outputs.index_output_dtype = DataType::UINT32;
+    cub_arg_reduction = CubArgReduction(built_reduction->arg_op.value(), std::move(axes), outputs)
+                            .stamp(input, std::nullopt, indices, stream);
+    THOR_THROW_IF_FALSE(cub_arg_reduction->getGeometry().path == built_reduction->geometry->path);
+    scatter_plan = prepareReduceMinMaxBackwardScatter(input.getDimensions(),
+                                                       built_reduction->key.reduction_axes,
+                                                       built_reduction->key.squeeze_axes,
+                                                       input.getPlacement(),
+                                                       stream);
 }
 
 void StampedReduceMinMaxBackward::run() { runOn(stream); }
 
 void StampedReduceMinMaxBackward::runOn(Stream& run_stream) {
-    refreshCudnnSingleInputStageAdapter(source_input, input, run_stream);
-
-    // std::cerr << "[REDUCE_MINMAX_BW] input dtype=" << TensorDescriptor::getElementTypeName(input.getDataType())
-    //           << " built.input_dtype=" << TensorDescriptor::getElementTypeName(built_reduction->key.input_dtype)
-    //           << " built.output_dtype=" << TensorDescriptor::getElementTypeName(built_reduction->key.output_dtype)
-    //           << " built.compute_dtype=" << TensorDescriptor::getElementTypeName(built_reduction->key.compute_dtype)
-    //           << " indices dtype=" << TensorDescriptor::getElementTypeName(indices.getDataType())
-    //           << " reduction_value_output dtype=" << TensorDescriptor::getElementTypeName(reduction_value_output.getDataType())
-    //           << std::endl;
-
-    void* workspace_ptr = nullptr;
-    if (built_reduction->workspace_bytes > 0) {
-        THOR_THROW_IF_FALSE(workspace.has_value());
-        workspace_ptr = (void*)workspace.value().getMemPtr();
-    }
-
-    CUDNN_CHECK(cudnnReduceTensor(run_stream.getCudnnHandle(),
-                                  built_reduction->reduce_desc,
-                                  (void*)indices.getMemPtr(),
-                                  built_reduction->indices_bytes,
-                                  workspace_ptr,
-                                  built_reduction->workspace_bytes,
-                                  alpha,
-                                  built_reduction->a_desc,
-                                  input.getMemPtr(),
-                                  beta,
-                                  built_reduction->c_desc,
-                                  (void*)reduction_value_output.getMemPtr()));
+    THOR_THROW_IF_FALSE(cub_arg_reduction != nullptr);
+    cub_arg_reduction->runOn(run_stream);
 
     output.memsetAsync(run_stream, 0);
 
     launchReduceMinMaxBackwardScatter(grad_output.getMemPtr(),
                                       static_cast<const uint32_t*>(indices.getMemPtr()),
                                       (void*)output.getMemPtr(),
-                                      input.getDimensions(),
-                                      built_reduction->key.reduction_axes,
-                                      built_reduction->key.squeeze_axes,
+                                      scatter_plan,
                                       grad_output.getDataType(),
                                       output.getDataType(),
-                                      run_stream);
+                                      run_stream.getStream());
 }
 
 static uint64_t conditionalPredicateNumel(const Tensor& predicate) {
@@ -2505,7 +2421,7 @@ static shared_ptr<BuiltMatmul> cacheLookup(const MatmulCacheKey& key) {
     return nullptr;
 }
 
-static cudnnDataType_t toCudnnDataType(DataType dtype) {
+static cudnnDataType_t toCudnnSoftmaxDataType(DataType dtype) {
     switch (dtype) {
         case DataType::FP32:
             return CUDNN_DATA_FLOAT;
@@ -2523,31 +2439,56 @@ static cudnnDataType_t toCudnnDataType(DataType dtype) {
             return CUDNN_DATA_FP8_E5M2;
 
         default:
-            throw std::runtime_error("toCudnnDataType: unsupported DataType value " + std::to_string(static_cast<int>(dtype)));
+            throw std::runtime_error("toCudnnSoftmaxDataType: unsupported DataType value " + std::to_string(static_cast<int>(dtype)));
     }
 }
 
-static cudnnReduceTensorOp_t toCudnnReduceTensorOp(ExprOp op) {
+static CubReductionOp toCubReductionOp(ExprOp op) {
     switch (op) {
         case ExprOp::REDUCE_SUM:
-            return CUDNN_REDUCE_TENSOR_ADD;
+            return CubReductionOp::Sum;
         case ExprOp::REDUCE_PROD:
-            return CUDNN_REDUCE_TENSOR_MUL;
+            return CubReductionOp::Product;
+        case ExprOp::REDUCE_MIN:
+            return CubReductionOp::Min;
+        case ExprOp::REDUCE_MAX:
+            return CubReductionOp::Max;
+        case ExprOp::REDUCE_AVG:
+            return CubReductionOp::Mean;
+        case ExprOp::REDUCE_NORM1:
+            return CubReductionOp::L1Norm;
+        case ExprOp::REDUCE_NORM2:
+            return CubReductionOp::L2Norm;
+        default:
+            throw std::runtime_error("ExprOp is not a supported CUB value reduction op.");
+    }
+}
+
+static CubArgReductionOp toCubArgReductionOp(ExprOp op) {
+    switch (op) {
         case ExprOp::REDUCE_MIN:
         case ExprOp::REDUCE_ARGMIN:
-            return CUDNN_REDUCE_TENSOR_MIN;
+        case ExprOp::REDUCE_MIN_BACKWARD:
+            return CubArgReductionOp::ArgMin;
         case ExprOp::REDUCE_MAX:
         case ExprOp::REDUCE_ARGMAX:
-            return CUDNN_REDUCE_TENSOR_MAX;
-        case ExprOp::REDUCE_AVG:
-            return CUDNN_REDUCE_TENSOR_AVG;
-        case ExprOp::REDUCE_NORM1:
-            return CUDNN_REDUCE_TENSOR_NORM1;
-        case ExprOp::REDUCE_NORM2:
-            return CUDNN_REDUCE_TENSOR_NORM2;
+        case ExprOp::REDUCE_MAX_BACKWARD:
+            return CubArgReductionOp::ArgMax;
         default:
-            throw std::runtime_error("ExprOp is not a supported cuDNN reduction op.");
+            throw std::runtime_error("ExprOp is not a supported CUB arg reduction op.");
     }
+}
+
+static std::vector<uint32_t> narrowReductionAxes(const std::vector<uint64_t>& axes) {
+    std::vector<uint32_t> narrowed;
+    narrowed.reserve(axes.size());
+    for (uint64_t axis : axes) {
+        if (axis > UINT32_MAX) {
+            throw std::runtime_error("Reduction axis exceeds UINT32_MAX.");
+        }
+        narrowed.push_back(static_cast<uint32_t>(axis));
+    }
+    return narrowed;
 }
 
 std::vector<uint64_t> StampedEquation::computeReductionOutputDims(const std::vector<uint64_t>& input_dims,
@@ -2607,11 +2548,11 @@ std::vector<uint64_t> StampedEquation::computeReductionOutputDims(const std::vec
     return squeezed;
 }
 
-static cudnnTensorDescriptor_t createCudnnTensorDescriptor(std::vector<uint64_t> dims, DataType dtype) {
+static cudnnTensorDescriptor_t createCudnnSoftmaxTensorDescriptor(std::vector<uint64_t> dims, DataType dtype) {
     while (dims.size() < 4)
         dims.push_back(1);
     if (dims.size() > 8)
-        throw std::runtime_error("cuDNN reduction only supports rank <= 8.");
+        throw std::runtime_error("cuDNN softmax tensor descriptors support rank <= 8.");
 
     std::vector<int> cudnn_dims(dims.begin(), dims.end());
     std::vector<int> strides(cudnn_dims.size());
@@ -2622,41 +2563,8 @@ static cudnnTensorDescriptor_t createCudnnTensorDescriptor(std::vector<uint64_t>
     cudnnTensorDescriptor_t desc;
     CUDNN_CHECK(cudnnCreateTensorDescriptor(&desc));
     CUDNN_CHECK(
-        cudnnSetTensorNdDescriptor(desc, toCudnnDataType(dtype), static_cast<int>(cudnn_dims.size()), cudnn_dims.data(), strides.data()));
+        cudnnSetTensorNdDescriptor(desc, toCudnnSoftmaxDataType(dtype), static_cast<int>(cudnn_dims.size()), cudnn_dims.data(), strides.data()));
     return desc;
-}
-
-static std::vector<uint64_t> paddedCudnnReductionDims(std::vector<uint64_t> dims) {
-    while (dims.size() < 4)
-        dims.push_back(1);
-    if (dims.size() > 8)
-        throw std::runtime_error("cuDNN reduction only supports rank <= 8.");
-    return dims;
-}
-
-static bool hasCudnnReductionDimension(const std::vector<uint64_t>& input_dims, const std::vector<uint64_t>& output_dims) {
-    const std::vector<uint64_t> padded_input = paddedCudnnReductionDims(input_dims);
-    const std::vector<uint64_t> padded_output = paddedCudnnReductionDims(output_dims);
-    if (padded_input.size() != padded_output.size())
-        return true;
-    for (size_t i = 0; i < padded_input.size(); ++i) {
-        if (padded_input[i] != padded_output[i])
-            return true;
-    }
-    return false;
-}
-
-static bool singletonReductionCanReuseInputValue(ExprOp op) {
-    switch (op) {
-        case ExprOp::REDUCE_SUM:
-        case ExprOp::REDUCE_PROD:
-        case ExprOp::REDUCE_MIN:
-        case ExprOp::REDUCE_MAX:
-        case ExprOp::REDUCE_AVG:
-            return true;
-        default:
-            return false;
-    }
 }
 
 static fe::DataType_t toFrontendDataType(DataType dtype) {
@@ -3152,38 +3060,6 @@ static void executeFrontendConvolutionGraph(const BuiltConvolution& built,
     if (!status.is_good()) {
         throw std::runtime_error(std::string("Failed to execute autotuned cuDNN Frontend ") + op_name + " graph: " + status.get_message());
     }
-}
-
-static cudnnReduceTensorDescriptor_t createCudnnReduceDescriptor(ExprOp op, DataType compute_dtype, bool output_indices) {
-    cudnnReduceTensorDescriptor_t desc;
-    CUDNN_CHECK(cudnnCreateReduceTensorDescriptor(&desc));
-    CUDNN_CHECK(cudnnSetReduceTensorDescriptor(desc,
-                                               toCudnnReduceTensorOp(op),
-                                               toCudnnDataType(compute_dtype),
-                                               CUDNN_PROPAGATE_NAN,
-                                               output_indices ? CUDNN_REDUCE_TENSOR_FLATTENED_INDICES : CUDNN_REDUCE_TENSOR_NO_INDICES,
-                                               CUDNN_32BIT_INDICES));
-    return desc;
-}
-
-static size_t getReductionWorkspaceSize(int device_num,
-                                        cudnnReduceTensorDescriptor_t reduce_desc,
-                                        cudnnTensorDescriptor_t a_desc,
-                                        cudnnTensorDescriptor_t c_desc) {
-    Stream stream(device_num);
-    size_t workspace_bytes = 0;
-    CUDNN_CHECK(cudnnGetReductionWorkspaceSize(stream.getCudnnHandle(), reduce_desc, a_desc, c_desc, &workspace_bytes));
-    return workspace_bytes;
-}
-
-static size_t getReductionIndicesSize(int device_num,
-                                      cudnnReduceTensorDescriptor_t reduce_desc,
-                                      cudnnTensorDescriptor_t a_desc,
-                                      cudnnTensorDescriptor_t c_desc) {
-    Stream stream(device_num);
-    size_t indices_bytes = 0;
-    CUDNN_CHECK(cudnnGetReductionIndicesSize(stream.getCudnnHandle(), reduce_desc, a_desc, c_desc, &indices_bytes));
-    return indices_bytes;
 }
 
 static CublasMatrixMultiply::EpilogueFusion toCublasEpilogueFusion(MatmulEpilogue epilogue) {
@@ -3687,7 +3563,7 @@ std::shared_ptr<BuiltReduction> StampedEquation::buildReduction(const std::share
                           compiled_reduction->input_dtype,
                           compiled_reduction->output_dtype,
                           compiled_reduction->compute_dtype,
-                          /*output_indices=*/false,
+                          ReductionResultKind::Value,
                           input,
                           device_num);
 }
@@ -3698,7 +3574,7 @@ std::shared_ptr<BuiltReduction> StampedEquation::buildReduction(ExprOp op,
                                                                 DataType input_dtype,
                                                                 DataType output_dtype,
                                                                 DataType compute_dtype,
-                                                                bool output_indices,
+                                                                ReductionResultKind result_kind,
                                                                 const Tensor& input,
                                                                 int device_num) {
     if (output_dtype != DataType::FP32) {
@@ -3711,38 +3587,30 @@ std::shared_ptr<BuiltReduction> StampedEquation::buildReduction(ExprOp op,
     const std::vector<uint64_t> input_dims = input.getDimensions();
 
     ReductionCacheKey key(
-        op, input_dims, reduction_axes, squeeze_axes, input_dtype, output_dtype, compute_dtype, output_indices, device_num);
+        op, input_dims, reduction_axes, squeeze_axes, input_dtype, output_dtype, compute_dtype, result_kind, device_num);
 
     std::shared_ptr<BuiltReduction> hit = cacheLookup(key);
     if (hit)
         return hit;
 
     auto built = std::make_shared<BuiltReduction>(key);
-
-    const std::vector<uint64_t> output_dims = computeReductionOutputDims(input_dims,
-                                                                         built->key.reduction_axes,
-                                                                         /*squeeze_axes=*/{});
-
-    // cuDNN rejects reductions where every reduced dimension already has extent 1
-    // because the padded source and destination descriptors are identical. For
-    // singleton sum/prod/min/max/avg value reductions, the result is just the input
-    // value, with only dtype conversion and optional squeeze/reshape at the Tensor
-    // view level. Norm reductions are intentionally excluded because norm1/norm2
-    // over a singleton is abs(x), not x.
-    built->identity_reduction = !built->key.output_indices && singletonReductionCanReuseInputValue(built->key.op) &&
-                                !hasCudnnReductionDimension(input_dims, output_dims);
-    if (built->identity_reduction) {
-        builtReductionCache.put(key, built);
-        return built;
+    if (input.getDataType() != built->key.input_dtype) {
+        throw std::runtime_error("Reduction input tensor dtype does not match the compiled input dtype.");
     }
 
-    built->a_desc = createCudnnTensorDescriptor(input_dims, built->key.input_dtype);
-    built->reduce_desc = createCudnnReduceDescriptor(built->key.op, built->key.compute_dtype, built->key.output_indices);
-    built->c_desc = createCudnnTensorDescriptor(output_dims, built->key.output_dtype);
+    const std::vector<uint32_t> axes = narrowReductionAxes(built->key.reduction_axes);
+    built->geometry = CubReduction::analyzeGeometry(input_dims, axes);
 
-    built->workspace_bytes = getReductionWorkspaceSize(device_num, built->reduce_desc, built->a_desc, built->c_desc);
-    if (built->key.output_indices) {
-        built->indices_bytes = getReductionIndicesSize(device_num, built->reduce_desc, built->a_desc, built->c_desc);
+    switch (built->key.result_kind) {
+        case ReductionResultKind::Value:
+            if (!isValueReductionOp(built->key.op)) {
+                throw std::runtime_error("Value-reduction planning received a non-value reduction op.");
+            }
+            built->value_op = toCubReductionOp(built->key.op);
+            break;
+        case ReductionResultKind::Indices:
+            built->arg_op = toCubArgReductionOp(built->key.op);
+            break;
     }
 
     builtReductionCache.put(key, built);
@@ -3780,8 +3648,8 @@ std::shared_ptr<BuiltSoftmax> StampedEquation::buildSoftmax(const std::shared_pt
         return hit;
 
     auto built = std::make_shared<BuiltSoftmax>(key);
-    built->x_desc = createCudnnTensorDescriptor(input.getDimensions(), built->key.input_dtype);
-    built->y_desc = createCudnnTensorDescriptor(output.getDimensions(), built->key.output_dtype);
+    built->x_desc = createCudnnSoftmaxTensorDescriptor(input.getDimensions(), built->key.input_dtype);
+    built->y_desc = createCudnnSoftmaxTensorDescriptor(output.getDimensions(), built->key.output_dtype);
 
     builtSoftmaxCache.put(key, built);
     return built;

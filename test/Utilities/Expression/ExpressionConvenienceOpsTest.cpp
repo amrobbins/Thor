@@ -2392,6 +2392,35 @@ TEST(ExpressionConvenienceOps, DenseReshapeAliasRejectsNonDenseStridedSourceView
     EXPECT_THROW(eq.run({{"x", storage}}, y, stream), std::runtime_error);
 }
 
+TEST(ExpressionConvenienceOps, DenseValueReductionsExecuteThroughTheCentralReductionUtility) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor input = makeGpuTensor({2, 3}, {-2.0f, 1.0f, 3.0f, 4.0f, -1.0f, 2.0f}, stream);
+    auto x = Expression::input("x");
+    auto expression_outputs = Expression::outputs({
+        {"sum", x.reduce_sum({1}, {1})},
+        {"product", x.reduce_prod({1}, {1})},
+        {"minimum", x.reduce_min({1}, {1})},
+        {"maximum", x.reduce_max({1}, {1})},
+        {"mean", x.reduce_mean({1}, {1})},
+        {"norm1", x.reduce_norm1({1}, {1})},
+        {"norm2", x.reduce_norm2({1}, {1})},
+    });
+
+    FusedEquation equation = FusedEquation::compile(expression_outputs.physicalOutputs(), 0);
+    StampedExecutionPlan plan = equation.stamp({{"x", input}}, stream);
+    plan.run();
+
+    expectNear(copyToCpuValues(plan.output("sum"), stream), {2.0f, 5.0f});
+    expectNear(copyToCpuValues(plan.output("product"), stream), {-6.0f, -8.0f});
+    expectNear(copyToCpuValues(plan.output("minimum"), stream), {-2.0f, -1.0f});
+    expectNear(copyToCpuValues(plan.output("maximum"), stream), {3.0f, 4.0f});
+    expectNear(copyToCpuValues(plan.output("mean"), stream), {2.0f / 3.0f, 5.0f / 3.0f});
+    expectNear(copyToCpuValues(plan.output("norm1"), stream), {6.0f, 7.0f});
+    expectNear(copyToCpuValues(plan.output("norm2"), stream), {std::sqrt(14.0f), std::sqrt(21.0f)});
+}
+
 TEST(NewtonSchulzOrthogonalization, RejectsInvalidOptions) {
     auto x = Expression::input("x");
     EXPECT_THROW((void)newtonSchulzOrthogonalize(x, 0, 4), std::logic_error);

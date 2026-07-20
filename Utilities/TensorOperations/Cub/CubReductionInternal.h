@@ -83,4 +83,48 @@ void launchMaxReduction(const Tensor& temp_storage,
                         const CubReductionGeometry& geometry,
                         Stream& stream);
 
+
+size_t queryOffsetSegmentedReductionBytes(CubReductionOp op,
+                                          const Tensor& input,
+                                          Tensor& output,
+                                          const Tensor& segment_offsets,
+                                          uint64_t num_items,
+                                          uint64_t num_segments,
+                                          const Stream& stream);
+void launchOffsetSegmentedReduction(CubReductionOp op,
+                                    const Tensor& temp_storage,
+                                    size_t temp_storage_bytes,
+                                    const Tensor& input,
+                                    Tensor& output,
+                                    const Tensor& segment_offsets,
+                                    uint64_t num_items,
+                                    uint64_t num_segments,
+                                    Stream& stream);
+
+size_t queryArgMinReductionBytes(const Tensor& input,
+                                 Tensor* value_output,
+                                 Tensor* index_output,
+                                 const CubReductionGeometry& geometry,
+                                 const Stream& stream);
+void launchArgMinReduction(const Tensor& temp_storage,
+                           size_t temp_storage_bytes,
+                           const Tensor& input,
+                           Tensor* value_output,
+                           Tensor* index_output,
+                           const CubReductionGeometry& geometry,
+                           Stream& stream);
+
+size_t queryArgMaxReductionBytes(const Tensor& input,
+                                 Tensor* value_output,
+                                 Tensor* index_output,
+                                 const CubReductionGeometry& geometry,
+                                 const Stream& stream);
+void launchArgMaxReduction(const Tensor& temp_storage,
+                           size_t temp_storage_bytes,
+                           const Tensor& input,
+                           Tensor* value_output,
+                           Tensor* index_output,
+                           const CubReductionGeometry& geometry,
+                           Stream& stream);
+
 }  // namespace ThorImplementation::CubReductionInternal

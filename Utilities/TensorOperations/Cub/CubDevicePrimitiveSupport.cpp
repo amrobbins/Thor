@@ -391,46 +391,6 @@ void validateRle(const Tensor& input, const Tensor& unique_out, const Tensor& co
     }
 }
 
-namespace {
-
-void validateDeviceReduceCommon(const Tensor& input, const Tensor& output, uint64_t num_items, const char* op_name) {
-    requireDenseContiguousGpuTensor(input, "input");
-    requireDenseContiguousGpuTensor(output, "output");
-    requireSameGpuPlacement(input, output, "input", "output");
-    requireStorageForNumItems(input, "input", num_items);
-    requireStorageForNumItems(output, "output", 1);
-    if (num_items == 0) {
-        throw std::invalid_argument(std::string("CUB device ") + op_name + " requires num_items to be nonzero.");
-    }
-    if (input.getDataType() != output.getDataType()) {
-        throw std::invalid_argument(std::string("CUB device ") + op_name + " input/output dtypes must match.");
-    }
-    static_cast<void>(checkedCubNumItems(num_items));
-}
-
-}  // namespace
-
-void validateDeviceReduceSum(const Tensor& input, const Tensor& output, uint64_t num_items) {
-    validateDeviceReduceCommon(input, output, num_items, "reduce-sum");
-    if (!isCubReduceSumDTypeSupported(input.getDataType())) {
-        throw std::invalid_argument("Unsupported CUB device reduce-sum dtype " + dtypeName(input.getDataType()) + ".");
-    }
-}
-
-void validateDeviceReduceMax(const Tensor& input, const Tensor& output, uint64_t num_items) {
-    validateDeviceReduceCommon(input, output, num_items, "reduce-max");
-    if (!isCubReduceMaxDTypeSupported(input.getDataType())) {
-        throw std::invalid_argument("Unsupported CUB device reduce-max dtype " + dtypeName(input.getDataType()) + ".");
-    }
-}
-
-void validateDeviceReduceMin(const Tensor& input, const Tensor& output, uint64_t num_items) {
-    validateDeviceReduceCommon(input, output, num_items, "reduce-min");
-    if (!isCubReduceMinDTypeSupported(input.getDataType())) {
-        throw std::invalid_argument("Unsupported CUB device reduce-min dtype " + dtypeName(input.getDataType()) + ".");
-    }
-}
-
 void validateExclusiveSum(const Tensor& input, const Tensor& output, uint64_t num_items) {
     requireDenseContiguousGpuTensor(input, "input");
     requireDenseContiguousGpuTensor(output, "output");
@@ -462,60 +422,6 @@ void validateSegmentedExclusiveSum(const Tensor& input,
         throw std::invalid_argument("Unsupported CUB segmented exclusive-sum dtype " + dtypeName(input.getDataType()) + ".");
     }
     validateSegmentOffsets(input, segment_offsets, num_items, num_segments, "input");
-}
-
-namespace {
-
-void validateSegmentedReduceCommon(const Tensor& input,
-                                   const Tensor& output,
-                                   const Tensor& segment_offsets,
-                                   uint64_t num_items,
-                                   uint64_t num_segments,
-                                   const char* op_name) {
-    requireDenseContiguousGpuTensor(input, "input");
-    requireDenseContiguousGpuTensor(output, "output");
-    requireSameGpuPlacement(input, output, "input", "output");
-    requireStorageForNumItems(input, "input", num_items);
-    requireStorageForNumItems(output, "output", num_segments);
-    if (input.getDataType() != output.getDataType()) {
-        throw std::invalid_argument(std::string("CUB segmented ") + op_name + " input/output dtypes must match.");
-    }
-    validateSegmentOffsets(input, segment_offsets, num_items, num_segments, "input");
-}
-
-}  // namespace
-
-void validateSegmentedReduceSum(const Tensor& input,
-                                const Tensor& output,
-                                const Tensor& segment_offsets,
-                                uint64_t num_items,
-                                uint64_t num_segments) {
-    validateSegmentedReduceCommon(input, output, segment_offsets, num_items, num_segments, "reduce-sum");
-    if (!isCubSegmentedReduceSumDTypeSupported(input.getDataType())) {
-        throw std::invalid_argument("Unsupported CUB segmented reduce-sum dtype " + dtypeName(input.getDataType()) + ".");
-    }
-}
-
-void validateSegmentedReduceMax(const Tensor& input,
-                                const Tensor& output,
-                                const Tensor& segment_offsets,
-                                uint64_t num_items,
-                                uint64_t num_segments) {
-    validateSegmentedReduceCommon(input, output, segment_offsets, num_items, num_segments, "reduce-max");
-    if (!isCubSegmentedReduceMaxDTypeSupported(input.getDataType())) {
-        throw std::invalid_argument("Unsupported CUB segmented reduce-max dtype " + dtypeName(input.getDataType()) + ".");
-    }
-}
-
-void validateSegmentedReduceMin(const Tensor& input,
-                                const Tensor& output,
-                                const Tensor& segment_offsets,
-                                uint64_t num_items,
-                                uint64_t num_segments) {
-    validateSegmentedReduceCommon(input, output, segment_offsets, num_items, num_segments, "reduce-min");
-    if (!isCubSegmentedReduceMinDTypeSupported(input.getDataType())) {
-        throw std::invalid_argument("Unsupported CUB segmented reduce-min dtype " + dtypeName(input.getDataType()) + ".");
-    }
 }
 
 }  // namespace ThorImplementation::CubDevicePrimitiveSupport
@@ -683,18 +589,7 @@ bool isCubExclusiveSumDTypeSupported(DataType dtype) {
 
 bool isCubScanDTypeSupported(DataType dtype) { return isCubExclusiveSumDTypeSupported(dtype); }
 
-bool isCubReduceSumDTypeSupported(DataType dtype) { return isCubExclusiveSumDTypeSupported(dtype); }
-
-bool isCubReduceMaxDTypeSupported(DataType dtype) { return isCubExclusiveSumDTypeSupported(dtype); }
-
-bool isCubReduceMinDTypeSupported(DataType dtype) { return isCubExclusiveSumDTypeSupported(dtype); }
-
 bool isCubSegmentedExclusiveSumDTypeSupported(DataType dtype) { return isCubExclusiveSumDTypeSupported(dtype); }
-
-bool isCubSegmentedReduceSumDTypeSupported(DataType dtype) { return isCubExclusiveSumDTypeSupported(dtype); }
-
-bool isCubSegmentedReduceMaxDTypeSupported(DataType dtype) { return isCubExclusiveSumDTypeSupported(dtype); }
-bool isCubSegmentedReduceMinDTypeSupported(DataType dtype) { return isCubExclusiveSumDTypeSupported(dtype); }
 
 bool isCubSegmentOffsetDTypeSupported(DataType dtype) {
     switch (dtype) {
