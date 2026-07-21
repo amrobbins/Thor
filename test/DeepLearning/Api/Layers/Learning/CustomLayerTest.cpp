@@ -2,6 +2,7 @@
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
+#include "DeepLearning/Api/Training/PhaseGraphConnector.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
@@ -13,6 +14,7 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -99,6 +101,110 @@ Impl::DynamicExpression makeSerializableAffineExpression() {
     return Impl::DynamicExpression::fromExpressionDefinition(definition);
 }
 
+Impl::DynamicExpression makeRuntimeOnlyAffineExpression() {
+    return Impl::DynamicExpression(
+        {"x"},
+        {"y"},
+        [](const Impl::DynamicExpression::TensorMap& inputs,
+           const Impl::DynamicExpression::TensorMap& outputs,
+           Stream& stream) -> Impl::DynamicExpressionBuild {
+            Impl::Expression x = Impl::Expression::input("x", DataType::FP32, DataType::FP32);
+            Impl::Expression y = x + 1.0f;
+            Impl::Outputs expressionOutputs = Impl::Expression::outputs({{"y", y}});
+            return Impl::DynamicExpressionBuild{
+                .equation = std::make_shared<Impl::FusedEquation>(
+                    Impl::FusedEquation::compile(expressionOutputs.physicalOutputs(), stream.getGpuNum())),
+                .stamp_inputs = inputs,
+                .tensor_scalar_inputs = {},
+                .preallocated_outputs = outputs,
+                .requested_output_shapes = {},
+                .pre_forward_hook = {},
+                .serialized_definition = nullptr,
+            };
+        });
+}
+
+Impl::DynamicExpression makeBatchLiteralTailExpression() {
+    return Impl::DynamicExpression(
+        {"sequence"},
+        {"tail"},
+        [](const Impl::DynamicExpression::TensorMap& inputs,
+           const Impl::DynamicExpression::TensorMap& outputs,
+           Stream& stream) -> Impl::DynamicExpressionBuild {
+            const Impl::Tensor& sequenceTensor = inputs.at("sequence");
+            const vector<uint64_t> dimensions = sequenceTensor.getDimensions();
+            if (dimensions.size() != 3 || dimensions[1] < 3)
+                throw runtime_error("Tail expression expects [batch, sequence>=3, channels].");
+            const vector<uint64_t> strides = sequenceTensor.getStridesElements();
+            Impl::Expression sequence = Impl::Expression::input("sequence");
+            Impl::Expression tail = sequence.stridedView(
+                {dimensions[0], 3, dimensions[2]}, strides, (dimensions[1] - 3) * strides[1]);
+            Impl::ExpressionDefinition definition =
+                Impl::ExpressionDefinition::fromOutputs(Impl::Expression::outputs({{"tail", tail}}));
+            auto serializedDefinition = std::make_shared<Impl::ExpressionDefinition>(std::move(definition));
+            return Impl::DynamicExpressionBuild{
+                .equation = std::make_shared<Impl::FusedEquation>(
+                    Impl::FusedEquation::compile(serializedDefinition->outputs, stream.getGpuNum())),
+                .stamp_inputs = inputs,
+                .tensor_scalar_inputs = {},
+                .preallocated_outputs = outputs,
+                .requested_output_shapes = {},
+                .pre_forward_hook = {},
+                .serialized_definition = serializedDefinition,
+            };
+        });
+}
+
+Impl::DynamicExpression makeBatchProductReshapeExpression() {
+    return Impl::DynamicExpression(
+        {"x"},
+        {"y"},
+        [](const Impl::DynamicExpression::TensorMap& inputs,
+           const Impl::DynamicExpression::TensorMap& outputs,
+           Stream& stream) -> Impl::DynamicExpressionBuild {
+            const vector<uint64_t> dimensions = inputs.at("x").getDimensions();
+            if (dimensions.size() != 3)
+                throw runtime_error("Batch-product reshape expression expects [batch, sequence, channels].");
+
+            Impl::Expression x = Impl::Expression::input("x");
+            Impl::Expression flat = x.reshape({dimensions[0] * dimensions[1], dimensions[2]});
+            Impl::Expression y = flat.reshape(dimensions);
+            Impl::ExpressionDefinition definition =
+                Impl::ExpressionDefinition::fromOutputs(Impl::Expression::outputs({{"y", y}}));
+            auto serializedDefinition = std::make_shared<Impl::ExpressionDefinition>(std::move(definition));
+            return Impl::DynamicExpressionBuild{
+                .equation = std::make_shared<Impl::FusedEquation>(
+                    Impl::FusedEquation::compile(serializedDefinition->outputs, stream.getGpuNum())),
+                .stamp_inputs = inputs,
+                .tensor_scalar_inputs = {},
+                .preallocated_outputs = outputs,
+                .requested_output_shapes = {},
+                .pre_forward_hook = {},
+                .serialized_definition = serializedDefinition,
+            };
+        });
+}
+
+bool jsonContainsArrayField(const nlohmann::json& value,
+                            const std::string& field,
+                            const std::vector<uint64_t>& expected) {
+    if (value.is_object()) {
+        auto fieldIt = value.find(field);
+        if (fieldIt != value.end() && fieldIt->is_array() && fieldIt->get<std::vector<uint64_t>>() == expected)
+            return true;
+        for (auto it = value.begin(); it != value.end(); ++it) {
+            if (jsonContainsArrayField(it.value(), field, expected))
+                return true;
+        }
+    } else if (value.is_array()) {
+        for (const auto& child : value) {
+            if (jsonContainsArrayField(child, field, expected))
+                return true;
+        }
+    }
+    return false;
+}
+
 struct PlacedCustomLayerFixture {
     std::shared_ptr<Api::PlacedNetwork> placedNetwork;
     ThorImplementation::StampedNetwork* stampedNetwork = nullptr;
@@ -144,6 +250,28 @@ vector<float> runForward(Impl::NetworkInput& physicalInput,
 }
 
 }  // namespace
+
+TEST(CustomLayerApi, RuntimeOnlyExpressionIsRejectedDuringConstruction) {
+    Api::Network network("custom_layer_runtime_only_rejected");
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("input").dimensions({3}).dataType(DataType::FP32).build();
+
+    try {
+        (void)Api::CustomLayer::Builder()
+            .network(network)
+            .expression(makeRuntimeOnlyAffineExpression())
+            .inputNames({"x"})
+            .outputNames({"y"})
+            .inputInterface({{"x", input.getFeatureOutput().value()}})
+            .build();
+        FAIL() << "Expected non-serializable CustomLayer construction to fail.";
+    } catch (const std::runtime_error& error) {
+        const std::string message = error.what();
+        EXPECT_NE(message.find("CustomLayer construction rejected"), std::string::npos);
+        EXPECT_NE(message.find("did not provide an ExpressionDefinition"), std::string::npos);
+    }
+    EXPECT_EQ(network.getNumLayers(), 1u);
+}
 
 TEST(CustomLayerApi, SerializableExpressionDefinitionSaveLoadRoundTripPreservesExpressionAndRuns) {
     constexpr uint32_t batchSize = 2;
@@ -214,4 +342,121 @@ TEST(CustomLayerApi, SerializableExpressionDefinitionSaveLoadRoundTripPreservesE
         throw;
     }
     std::filesystem::remove_all(archiveDir);
+}
+
+
+TEST(CustomLayerApi, BatchProductReshapeIsGeneralizedWithInferDimension) {
+    constexpr uint32_t batchSize = 4;
+    constexpr uint32_t sequence = 5;
+    constexpr uint32_t channels = 2;
+    auto phaseNetwork = std::make_shared<Api::Network>("custom_layer_batch_product_reshape_phase");
+    Api::NetworkInput input = Api::NetworkInput::Builder()
+                                  .network(*phaseNetwork)
+                                  .name("x")
+                                  .dimensions({sequence, channels})
+                                  .dataType(DataType::FP32)
+                                  .build();
+    Api::CustomLayer reshape = Api::CustomLayer::Builder()
+                                   .network(*phaseNetwork)
+                                   .expression(makeBatchProductReshapeExpression())
+                                   .inputNames({"x"})
+                                   .outputNames({"y"})
+                                   .inputInterface({{"x", input.getFeatureOutput().value()}})
+                                   .build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(*phaseNetwork)
+                                    .name("y")
+                                    .inputTensor(reshape.getOutput("y"))
+                                    .dataType(DataType::FP32)
+                                    .build();
+
+    const nlohmann::json customArchitecture = reshape.architectureJson();
+    ASSERT_TRUE(jsonContainsArrayField(
+        customArchitecture.at("expression"),
+        "reshape_dims",
+        {std::numeric_limits<uint64_t>::max(), channels}));
+    ASSERT_TRUE(jsonContainsArrayField(
+        customArchitecture.at("expression"),
+        "reshape_dims",
+        {std::numeric_limits<uint64_t>::max(), sequence, channels}));
+
+    Api::ComposedPhaseGraph composed = Api::buildComposedPhaseGraphByName(
+        {{"phase", phaseNetwork, true}},
+        Api::PhaseGraphComposeOptions{"custom_layer_batch_product_reshape_composed"});
+    ASSERT_NE(composed.network, nullptr);
+
+    std::shared_ptr<Api::NetworkInput> composedInput = findOnlyLayerOfType<Api::NetworkInput>(*composed.network);
+    std::shared_ptr<Api::CustomLayer> composedReshape = findOnlyLayerOfType<Api::CustomLayer>(*composed.network);
+    std::shared_ptr<Api::NetworkOutput> composedOutput = findOnlyLayerOfType<Api::NetworkOutput>(*composed.network);
+    ASSERT_NE(composedInput, nullptr);
+    ASSERT_NE(composedReshape, nullptr);
+    ASSERT_NE(composedOutput, nullptr);
+
+    PlacedCustomLayerFixture fixture = placeSingleCustomLayerNetwork(
+        *composed.network, *composedInput, *composedOutput, *composedReshape, batchSize, true);
+    Impl::Tensor featureInHost(cpuPlacement, Impl::TensorDescriptor(DataType::FP32, {batchSize, sequence, channels}));
+    vector<float> values(batchSize * sequence * channels);
+    for (uint64_t i = 0; i < values.size(); ++i)
+        values[i] = static_cast<float>(i) - 7.0f;
+    writeCpuTensor(featureInHost, values);
+
+    expectAllClose(runForward(*fixture.physicalInput, *fixture.physicalOutput, featureInHost, batchSize), values);
+}
+
+TEST(CustomLayerApi, BatchLiteralShapeIsGeneralizedBeforePhaseCompositionAtRuntimeBatchFour) {
+    constexpr uint32_t batchSize = 4;
+    auto phaseNetwork = std::make_shared<Api::Network>("custom_layer_batch_literal_phase");
+    Api::NetworkInput input = Api::NetworkInput::Builder()
+                                  .network(*phaseNetwork)
+                                  .name("sequence")
+                                  .dimensions({6, 2})
+                                  .dataType(DataType::FP32)
+                                  .build();
+    Api::CustomLayer tail = Api::CustomLayer::Builder()
+                                .network(*phaseNetwork)
+                                .expression(makeBatchLiteralTailExpression())
+                                .inputNames({"sequence"})
+                                .outputNames({"tail"})
+                                .inputInterface({{"sequence", input.getFeatureOutput().value()}})
+                                .build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(*phaseNetwork)
+                                    .name("tail")
+                                    .inputTensor(tail.getOutput("tail"))
+                                    .dataType(DataType::FP32)
+                                    .build();
+
+    // API output inference probes physical batches 1 and 2, then phase composition
+    // serializes a generalized definition rather than retaining either concrete probe.
+    const nlohmann::json customArchitecture = tail.architectureJson();
+    ASSERT_TRUE(jsonContainsArrayField(customArchitecture.at("expression"), "view_dims", {0, 3, 2}));
+
+    Api::ComposedPhaseGraph composed = Api::buildComposedPhaseGraphByName(
+        {{"phase", phaseNetwork, true}},
+        Api::PhaseGraphComposeOptions{"custom_layer_batch_literal_composed"});
+    ASSERT_NE(composed.network, nullptr);
+
+    std::shared_ptr<Api::NetworkInput> composedInput = findOnlyLayerOfType<Api::NetworkInput>(*composed.network);
+    std::shared_ptr<Api::CustomLayer> composedTail = findOnlyLayerOfType<Api::CustomLayer>(*composed.network);
+    std::shared_ptr<Api::NetworkOutput> composedOutput = findOnlyLayerOfType<Api::NetworkOutput>(*composed.network);
+    ASSERT_NE(composedInput, nullptr);
+    ASSERT_NE(composedTail, nullptr);
+    ASSERT_NE(composedOutput, nullptr);
+
+    PlacedCustomLayerFixture fixture = placeSingleCustomLayerNetwork(
+        *composed.network, *composedInput, *composedOutput, *composedTail, batchSize, true);
+    Impl::Tensor featureInHost(cpuPlacement, Impl::TensorDescriptor(DataType::FP32, {batchSize, 6, 2}));
+    vector<float> values(batchSize * 6 * 2);
+    for (uint64_t i = 0; i < values.size(); ++i)
+        values[i] = static_cast<float>(i);
+    writeCpuTensor(featureInHost, values);
+
+    vector<float> expected;
+    expected.reserve(batchSize * 3 * 2);
+    for (uint64_t batch = 0; batch < batchSize; ++batch) {
+        const uint64_t base = batch * 6 * 2;
+        for (uint64_t i = 3 * 2; i < 6 * 2; ++i)
+            expected.push_back(values[base + i]);
+    }
+    expectAllClose(runForward(*fixture.physicalInput, *fixture.physicalOutput, featureInHost, batchSize), expected);
 }

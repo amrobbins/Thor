@@ -1322,12 +1322,25 @@ struct StampedExecutionStage {
     }
 };
 
+// A caller-provided final output is part of the public execution contract. If the
+// expression terminates in a storage alias rather than an executable stage, the
+// plan materializes that alias after all stages complete and exposes destination
+// through output(name).
+struct StampedOutputMaterialization {
+    Tensor source;
+    Tensor destination;
+};
+
 class StampedExecutionPlan {
    public:
     StampedExecutionPlan(std::vector<StampedExecutionStage> steps,
                          std::unordered_map<std::string, Tensor> final_outputs,
-                         const Stream& stream)
-        : steps(std::move(steps)), final_outputs(std::move(final_outputs)), stream(stream) {}
+                         const Stream& stream,
+                         std::vector<StampedOutputMaterialization> output_materializations = {})
+        : steps(std::move(steps)),
+          final_outputs(std::move(final_outputs)),
+          stream(stream),
+          output_materializations(std::move(output_materializations)) {}
 
     void run();
     void run(const std::unordered_map<std::string, float>& runtime_scalars);
@@ -1395,9 +1408,12 @@ class StampedExecutionPlan {
     std::unordered_map<std::string, Tensor> getFinalOutputs() const { return final_outputs; }
 
    private:
+    void materializeOutputsOn(Stream& run_stream) const;
+
     const std::vector<StampedExecutionStage> steps;
     std::unordered_map<std::string, Tensor> final_outputs;
     Stream stream;
+    std::vector<StampedOutputMaterialization> output_materializations;
 };
 
 }  // namespace ThorImplementation

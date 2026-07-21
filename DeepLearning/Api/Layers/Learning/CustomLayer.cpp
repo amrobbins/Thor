@@ -1,14 +1,15 @@
-#include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Layers/Learning/CustomLayer.h"
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include <algorithm>
+#include <limits>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
 
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
-#include <optional>
 
 using namespace std;
 using json = nlohmann::json;
@@ -17,15 +18,13 @@ using DynamicExpression = ThorImplementation::DynamicExpression;
 using DataType = ThorImplementation::DataType;
 using PhysicalTensor = ThorImplementation::Tensor;
 using PhysicalTensorMap = std::unordered_map<std::string, PhysicalTensor>;
-using CompiledOutputs = ThorImplementation::CompiledOutputs;
-using CompiledStageOutput = ThorImplementation::CompiledStageOutput;
 
 namespace {
 
-PhysicalTensor makeFakePlacedTensor(const Thor::Tensor& apiTensor) {
+PhysicalTensor makeFakePlacedTensor(const Thor::Tensor& apiTensor, uint64_t batchSize) {
     std::vector<uint64_t> fakeDims;
     fakeDims.reserve(apiTensor.getDimensions().size() + 1);
-    fakeDims.push_back(1);
+    fakeDims.push_back(batchSize);
     for (uint64_t dim : apiTensor.getDimensions()) {
         fakeDims.push_back(dim);
     }
@@ -35,12 +34,116 @@ PhysicalTensor makeFakePlacedTensor(const Thor::Tensor& apiTensor) {
     return PhysicalTensor(placement, descriptor);
 }
 
-Thor::Tensor logicalTensorFromFakeOutput(const std::vector<uint64_t>& fakeOutputDims, DataType dtype) {
-    std::vector<uint64_t> logicalDims;
-    if (!fakeOutputDims.empty()) {
-        logicalDims.assign(fakeOutputDims.begin() + 1, fakeOutputDims.end());
+Thor::Tensor logicalTensorFromFakeOutput(const std::vector<uint64_t>& fakeOutputDims, DataType dtype, uint64_t expectedBatchSize) {
+    if (fakeOutputDims.empty() || fakeOutputDims.front() != expectedBatchSize) {
+        throw std::runtime_error("CustomLayer expression output must preserve the physical batch dimension. Expected batch " +
+                                 std::to_string(expectedBatchSize) + ", got " +
+                                 (fakeOutputDims.empty() ? std::string("<no batch dimension>") : std::to_string(fakeOutputDims.front())) + ".");
     }
-    return Thor::Tensor(dtype, logicalDims);
+    return Thor::Tensor(dtype, std::vector<uint64_t>(fakeOutputDims.begin() + 1, fakeOutputDims.end()));
+}
+
+bool isSymbolicShapeField(const std::string& key) {
+    return key == "reshape_dims" || key == "view_dims";
+}
+
+bool generalizeBatchDependentJson(json& result,
+                                  const json& batchOne,
+                                  const json& batchTwo,
+                                  const std::string& path,
+                                  std::string& rejectionReason) {
+    if (batchOne.type() != batchTwo.type()) {
+        rejectionReason = path + " changed JSON type between batch-1 and batch-2 builds.";
+        return false;
+    }
+
+    if (batchOne.is_object()) {
+        if (batchOne.size() != batchTwo.size()) {
+            rejectionReason = path + " changed object fields between batch-1 and batch-2 builds.";
+            return false;
+        }
+        for (auto it = batchOne.begin(); it != batchOne.end(); ++it) {
+            if (!batchTwo.contains(it.key())) {
+                rejectionReason = path + " lost field '" + it.key() + "' in the batch-2 build.";
+                return false;
+            }
+            if (it.key() == "canonical_hash") {
+                result[it.key()] = "";
+                continue;
+            }
+            if (isSymbolicShapeField(it.key()) && it.value().is_array()) {
+                const json& oneArray = it.value();
+                const json& twoArray = batchTwo.at(it.key());
+                if (!twoArray.is_array() || oneArray.size() != twoArray.size()) {
+                    rejectionReason = path + "." + it.key() + " changed rank between batch-1 and batch-2 builds.";
+                    return false;
+                }
+
+                std::vector<size_t> changedIndices;
+                for (size_t i = 0; i < oneArray.size(); ++i) {
+                    if (oneArray[i] != twoArray[i])
+                        changedIndices.push_back(i);
+                }
+
+                result[it.key()] = oneArray;
+                if (changedIndices.empty())
+                    continue;
+
+                if (changedIndices.size() == 1) {
+                    const size_t changedIndex = changedIndices.front();
+                    const json& oneDimension = oneArray[changedIndex];
+                    const json& twoDimension = twoArray[changedIndex];
+                    if (oneDimension.is_number_unsigned() && twoDimension.is_number_unsigned()) {
+                        if (it.key() == "reshape_dims") {
+                            // COPY_DIM is relative to the reshape's immediate source axis, which may already be flattened.
+                            // A varying reshape dimension is instead reconstructed from source numel and the remaining fixed
+                            // dimensions. This handles both [batch, sequence, hidden] -> [batch * sequence, hidden] and the
+                            // inverse reshape without treating the synthetic batch value as a literal.
+                            // FusedEquation validation below recompiles this generalized definition against both probes, so
+                            // this rewrite is accepted only when it preserves the original shape for batch 1 and batch 2.
+                            result[it.key()][changedIndex] = std::numeric_limits<uint64_t>::max();
+                            continue;
+                        }
+                        if (changedIndex == 0 && oneDimension.get<uint64_t>() == 1 && twoDimension.get<uint64_t>() == 2) {
+                            // Expression COPY_DIM is the internal symbolic reference to the source dimension at this axis.
+                            // This is valid for a strided view preserving CustomLayer's leading physical batch dimension.
+                            result[it.key()][changedIndex] = 0;
+                            continue;
+                        }
+                    }
+                }
+
+                const size_t firstChangedIndex = changedIndices.front();
+                rejectionReason = path + "." + it.key() + "[" + std::to_string(firstChangedIndex) +
+                                  "] changed in a way Thor cannot serialize symbolically. A strided view may only copy the "
+                                  "leading placement-batch dimension automatically, and a reshape may additionally infer one "
+                                  "batch-derived dimension from its source numel.";
+                return false;
+            }
+            if (!generalizeBatchDependentJson(result[it.key()], it.value(), batchTwo.at(it.key()), path + "." + it.key(), rejectionReason))
+                return false;
+        }
+        return true;
+    }
+
+    if (batchOne.is_array()) {
+        if (batchOne.size() != batchTwo.size()) {
+            rejectionReason = path + " changed array length between batch-1 and batch-2 builds.";
+            return false;
+        }
+        for (size_t i = 0; i < batchOne.size(); ++i) {
+            if (!generalizeBatchDependentJson(result[i], batchOne[i], batchTwo[i], path + "[" + std::to_string(i) + "]", rejectionReason))
+                return false;
+        }
+        return true;
+    }
+
+    if (batchOne != batchTwo) {
+        rejectionReason = path + " captured a concrete batch-dependent value (batch-1=" + batchOne.dump() +
+                          ", batch-2=" + batchTwo.dump() + ").";
+        return false;
+    }
+    return true;
 }
 
 }  // namespace
@@ -58,6 +161,21 @@ CustomLayer::CustomLayer(DynamicExpression expr,
                          const std::vector<TensorMap>& inputInterfaces,
                          const std::vector<TensorMap>& outputInterfaces,
                          std::vector<std::shared_ptr<ParameterSpecification>> parameters)
+    : CustomLayer(std::move(expr),
+                  std::move(inputNames),
+                  std::move(outputNames),
+                  inputInterfaces,
+                  outputInterfaces,
+                  std::move(parameters),
+                  SerializationContract::REQUIRE_EXPRESSION_DEFINITION) {}
+
+CustomLayer::CustomLayer(DynamicExpression expr,
+                         std::vector<std::string> inputNames,
+                         std::vector<std::string> outputNames,
+                         const std::vector<TensorMap>& inputInterfaces,
+                         const std::vector<TensorMap>& outputInterfaces,
+                         std::vector<std::shared_ptr<ParameterSpecification>> parameters,
+                         SerializationContract serializationContract)
     : TrainableLayer(std::move(parameters)), expr(std::move(expr)) {
     if (inputNames.empty())
         inputNames = this->expr.getExpectedInputNames();
@@ -111,10 +229,41 @@ CustomLayer::CustomLayer(DynamicExpression expr,
     }
 
     assignInputInterfaces(inputInterfaces);
-    if (outputInterfaces.empty())
+    if (outputInterfaces.empty()) {
         materializeOutputInterfacesFromInputInterfaces();
-    else
+    } else {
+        // Explicit logical output descriptors decouple API output-shape construction from physical expression construction.
+        // The physical builder is still probed below before the layer is accepted, so serialization failures cannot surface after training.
         assignOutputInterfaces(outputInterfaces);
+    }
+
+    const TensorMap& referenceOutputInterface = this->outputInterfaces.front();
+    for (const std::string& name : this->outputNames) {
+        const Tensor& referenceTensor = referenceOutputInterface.at(name);
+        for (uint32_t interfaceIndex = 1; interfaceIndex < this->outputInterfaces.size(); ++interfaceIndex) {
+            const Tensor& tensor = this->outputInterfaces[interfaceIndex].at(name);
+            if (tensor.getDataType() != referenceTensor.getDataType() || tensor.getDimensions() != referenceTensor.getDimensions()) {
+                std::ostringstream oss;
+                oss << "CustomLayer output tensor '" << name << "' must have the same logical shape and dtype across all output "
+                    << "interfaces. Interface 0 has " << referenceTensor.getDescriptorString() << ", but interface " << interfaceIndex
+                    << " has " << tensor.getDescriptorString() << ".";
+                throw runtime_error(oss.str());
+            }
+        }
+    }
+
+    if (serializationContract == SerializationContract::REQUIRE_EXPRESSION_DEFINITION) {
+        analyzeSerializableExpression(referenceInterface);
+        if (serializableExpressionDefinition == nullptr) {
+            throw runtime_error(
+                "CustomLayer construction rejected because Thor could not derive a verified batch-polymorphic symbolic "
+                "ExpressionDefinition. A CustomLayer must be serializable before it can be added to a model. " +
+                (serializationRejectionReason.empty() ? std::string("No serializable expression definition was supplied.")
+                                                      : serializationRejectionReason) +
+                " Use a native declarative layer, or return an explicitly serializable symbolic expression definition.");
+        }
+    }
+
     initialized = true;
 }
 
@@ -264,14 +413,16 @@ void CustomLayer::assignInputInterfaces(const std::vector<TensorMap>& inputInter
     }
 }
 
-CustomLayer::TensorMap CustomLayer::inferOutputInterfaceFromInputInterface(const TensorMap& inputInterface) const {
+CustomLayer::SerializationProbe CustomLayer::buildExpressionForBatch(const TensorMap& inputInterface,
+                                                                       uint64_t batchSize,
+                                                                       const TensorMap* outputInterface) const {
     PhysicalTensorMap fakeFeatureInputs;
     for (const auto& [name, apiTensor] : inputInterface) {
-        fakeFeatureInputs.emplace(name, makeFakePlacedTensor(apiTensor));
+        fakeFeatureInputs.emplace(name, makeFakePlacedTensor(apiTensor, batchSize));
     }
 
     ThorImplementation::PhysicalParameter::StorageContext fakeStorageContext(fakeFeatureInputs);
-    PhysicalTensorMap fakeParameterTensors;
+    PhysicalTensorMap fakeAllInputs = fakeFeatureInputs;
     for (const auto& apiParameter : parameters) {
         std::shared_ptr<ThorImplementation::PhysicalParameter> physicalParameter = apiParameter->stamp();
         physicalParameter->compileStorage(fakeStorageContext);
@@ -279,46 +430,221 @@ CustomLayer::TensorMap CustomLayer::inferOutputInterfaceFromInputInterface(const
         if (!storage.has_value()) {
             throw std::runtime_error("CustomLayer failed to infer parameter storage for '" + apiParameter->getName() + "'.");
         }
-        fakeParameterTensors.emplace(apiParameter->getName(), storage.value());
+        const bool inserted = fakeAllInputs.emplace(apiParameter->getName(), storage.value()).second;
+        if (!inserted) {
+            throw std::runtime_error("CustomLayer Parameter name '" + apiParameter->getName() +
+                                     "' conflicts with a feature input name.");
+        }
     }
 
-    PhysicalTensorMap fakeAllInputs = fakeFeatureInputs;
-    for (const auto& [name, tensor] : fakeParameterTensors) {
-        auto [it, inserted] = fakeAllInputs.emplace(name, tensor);
-        if (!inserted) {
-            throw std::runtime_error("CustomLayer Parameter name '" + name + "' conflicts with a feature input name.");
+    PhysicalTensorMap fakeOutputs;
+    if (outputInterface != nullptr) {
+        for (const auto& [name, apiTensor] : *outputInterface) {
+            fakeOutputs.emplace(name, makeFakePlacedTensor(apiTensor, batchSize));
         }
     }
 
     Stream fakeStream(0, Stream::Priority::REGULAR);
-    ThorImplementation::DynamicExpressionBuild build = expr.build(fakeAllInputs, {}, fakeStream);
+    ThorImplementation::DynamicExpressionBuild build = expr.build(fakeAllInputs, fakeOutputs, fakeStream);
+    return SerializationProbe{std::move(build), std::move(fakeAllInputs), std::move(fakeOutputs)};
+}
 
-    std::unordered_map<std::string, std::vector<uint64_t>> fakeOutputShapes =
-        build.equation->getOutputShapes(build.stamp_inputs, build.tensor_scalar_inputs);
-    std::shared_ptr<CompiledOutputs> compiledOutputs = build.equation->compileForInputs(build.stamp_inputs, {}, build.tensor_scalar_inputs);
+CustomLayer::TensorMap CustomLayer::inferOutputInterfaceFromInputInterface(const TensorMap& inputInterface) {
+    const SerializationProbe batchOne = buildExpressionForBatch(inputInterface, 1, nullptr);
+    const SerializationProbe batchTwo = buildExpressionForBatch(inputInterface, 2, nullptr);
 
-    // Final CustomLayer outputs can be storage aliases such as strided_view/reshape
-    // of an input tensor. Alias-only outputs do not appear in any execution
-    // stage's materialized output list, so inferring dtypes by scanning stages
-    // misses pure metadata/view outputs.  Ask the equation for final output
-    // dtypes instead; that path follows value aliases back to their source
-    // tensors and preserves integral passthrough dtypes such as uint32 token ids.
-    const std::unordered_map<std::string, DataType> fakeOutputDTypes = build.equation->getOutputDataTypes(build.stamp_inputs);
+    const auto batchOneShapes =
+        batchOne.build.equation->getOutputShapes(batchOne.build.stamp_inputs, batchOne.build.tensor_scalar_inputs);
+    const auto batchTwoShapes =
+        batchTwo.build.equation->getOutputShapes(batchTwo.build.stamp_inputs, batchTwo.build.tensor_scalar_inputs);
+    const auto batchOneDTypes = batchOne.build.equation->getOutputDataTypes(batchOne.build.stamp_inputs);
+    const auto batchTwoDTypes = batchTwo.build.equation->getOutputDataTypes(batchTwo.build.stamp_inputs);
 
     TensorMap inferredOutputs;
-    for (const CompiledStageOutput& finalOutput : compiledOutputs->final_outputs) {
-        auto shapeIt = fakeOutputShapes.find(finalOutput.name);
-        if (shapeIt == fakeOutputShapes.end()) {
-            throw std::runtime_error("CustomLayer failed to infer output shape for '" + finalOutput.name + "'.");
+    for (const std::string& outputName : outputNames) {
+        auto shapeOneIt = batchOneShapes.find(outputName);
+        auto shapeTwoIt = batchTwoShapes.find(outputName);
+        auto dtypeOneIt = batchOneDTypes.find(outputName);
+        auto dtypeTwoIt = batchTwoDTypes.find(outputName);
+        if (shapeOneIt == batchOneShapes.end() || shapeTwoIt == batchTwoShapes.end()) {
+            throw std::runtime_error("CustomLayer failed to infer output shape for '" + outputName + "'.");
         }
-        auto dtypeIt = fakeOutputDTypes.find(finalOutput.name);
-        if (dtypeIt == fakeOutputDTypes.end()) {
-            throw std::runtime_error("CustomLayer failed to infer output dtype for '" + finalOutput.name + "'.");
+        if (dtypeOneIt == batchOneDTypes.end() || dtypeTwoIt == batchTwoDTypes.end()) {
+            throw std::runtime_error("CustomLayer failed to infer output dtype for '" + outputName + "'.");
         }
-        inferredOutputs.emplace(finalOutput.name, logicalTensorFromFakeOutput(shapeIt->second, dtypeIt->second));
+        if (dtypeOneIt->second != dtypeTwoIt->second) {
+            throw std::runtime_error("CustomLayer output dtype for '" + outputName +
+                                     "' changed between batch-1 and batch-2 shape inference.");
+        }
+
+        Thor::Tensor one = logicalTensorFromFakeOutput(shapeOneIt->second, dtypeOneIt->second, 1);
+        Thor::Tensor two = logicalTensorFromFakeOutput(shapeTwoIt->second, dtypeTwoIt->second, 2);
+        if (one.getDimensions() != two.getDimensions()) {
+            throw std::runtime_error("CustomLayer logical output shape for '" + outputName +
+                                     "' depends on the synthetic physical batch size. Batch-1 inferred " +
+                                     one.getDescriptorString() + ", batch-2 inferred " + two.getDescriptorString() + ".");
+        }
+        inferredOutputs.emplace(outputName, std::move(one));
     }
 
     return inferredOutputs;
+}
+
+void CustomLayer::analyzeSerializableExpression(const TensorMap& inputInterface) const {
+    serializationAnalysisPerformed = true;
+    serializableExpressionDefinition.reset();
+    serializationRejectionReason.clear();
+
+    try {
+        THOR_THROW_IF_FALSE(!outputInterfaces.empty());
+        const TensorMap& outputInterface = outputInterfaces.front();
+        const SerializationProbe batchOne = buildExpressionForBatch(inputInterface, 1, &outputInterface);
+        const SerializationProbe batchTwo = buildExpressionForBatch(inputInterface, 2, &outputInterface);
+        analyzeSerializableExpression(batchOne, batchTwo);
+    } catch (const std::exception& error) {
+        serializableExpressionDefinition.reset();
+        serializationRejectionReason = "batch-polymorphism probe failed: " + std::string(error.what());
+    }
+}
+
+void CustomLayer::analyzeSerializableExpression(const SerializationProbe& batchOne,
+                                                const SerializationProbe& batchTwo) const {
+    serializationAnalysisPerformed = true;
+    serializableExpressionDefinition.reset();
+    serializationRejectionReason.clear();
+
+    auto validatePureSerializableBuild = [&](const SerializationProbe& probe, uint64_t batchSize) -> bool {
+        const ThorImplementation::DynamicExpressionBuild& build = probe.build;
+        if (!build.tensor_scalar_inputs.empty()) {
+            serializationRejectionReason =
+                "the batch-" + std::to_string(batchSize) +
+                " builder uses tensor-backed runtime scalars, which an ExpressionDefinition alone cannot reconstruct";
+            return false;
+        }
+        if (!build.requested_output_shapes.empty()) {
+            serializationRejectionReason =
+                "the batch-" + std::to_string(batchSize) +
+                " builder supplies runtime output-shape overrides, which an ExpressionDefinition alone cannot reconstruct";
+            return false;
+        }
+        if (build.pre_forward_hook) {
+            serializationRejectionReason =
+                "the batch-" + std::to_string(batchSize) +
+                " builder installs a pre-forward callback, which cannot be serialized as an ExpressionDefinition";
+            return false;
+        }
+        for (const auto& [name, actual] : build.stamp_inputs) {
+            auto source = probe.sourceInputs.find(name);
+            if (source == probe.sourceInputs.end() || actual != source->second) {
+                serializationRejectionReason =
+                    "the batch-" + std::to_string(batchSize) + " builder remaps or synthesizes tensor input '" + name +
+                    "'; saved CustomLayer expressions must bind declared inputs directly";
+                return false;
+            }
+        }
+        for (const auto& [name, actual] : build.preallocated_outputs) {
+            auto source = probe.sourceOutputs.find(name);
+            if (source == probe.sourceOutputs.end() || actual != source->second) {
+                serializationRejectionReason =
+                    "the batch-" + std::to_string(batchSize) + " builder remaps or synthesizes preallocated output '" + name +
+                    "'; saved CustomLayer expressions must bind caller-provided outputs directly";
+                return false;
+            }
+        }
+
+        const auto actualShapes = build.equation->getOutputShapes(build.stamp_inputs, build.tensor_scalar_inputs);
+        const auto actualDTypes = build.equation->getOutputDataTypes(build.stamp_inputs);
+        const TensorMap& declaredOutputs = outputInterfaces.front();
+        for (const std::string& outputName : outputNames) {
+            auto declared = declaredOutputs.find(outputName);
+            auto actualShape = actualShapes.find(outputName);
+            auto actualDType = actualDTypes.find(outputName);
+            if (declared == declaredOutputs.end() || actualShape == actualShapes.end() || actualDType == actualDTypes.end()) {
+                serializationRejectionReason =
+                    "the batch-" + std::to_string(batchSize) + " builder did not produce declared output '" + outputName + "'";
+                return false;
+            }
+            std::vector<uint64_t> expectedDimensions{batchSize};
+            const std::vector<uint64_t>& logicalDimensions = declared->second.getDimensions();
+            expectedDimensions.insert(expectedDimensions.end(), logicalDimensions.begin(), logicalDimensions.end());
+            if (actualShape->second != expectedDimensions || actualDType->second != declared->second.getDataType()) {
+                serializationRejectionReason =
+                    "the batch-" + std::to_string(batchSize) + " builder output '" + outputName +
+                    "' does not match its logical TensorSpec after adding the placement batch dimension";
+                return false;
+            }
+        }
+        return true;
+    };
+
+    if (!validatePureSerializableBuild(batchOne, 1) || !validatePureSerializableBuild(batchTwo, 2))
+        return;
+
+    if (batchOne.build.serialized_definition == nullptr || batchTwo.build.serialized_definition == nullptr) {
+        serializationRejectionReason =
+            "the builder did not provide an ExpressionDefinition for both batch-polymorphism probes";
+        return;
+    }
+
+    auto validateDefinitionAgainstProbes = [&](const ThorImplementation::ExpressionDefinition& definition) {
+        auto validateProbe = [&](const SerializationProbe& probe, uint64_t batchSize) {
+            const ThorImplementation::DynamicExpressionBuild& original = probe.build;
+            ThorImplementation::FusedEquation serializedEquation = ThorImplementation::FusedEquation::compile(definition.outputs, 0);
+            const auto serializedShapes = serializedEquation.getOutputShapes(original.stamp_inputs, original.tensor_scalar_inputs);
+            const auto originalShapes = original.equation->getOutputShapes(original.stamp_inputs, original.tensor_scalar_inputs);
+            const auto serializedDTypes = serializedEquation.getOutputDataTypes(original.stamp_inputs);
+            const auto originalDTypes = original.equation->getOutputDataTypes(original.stamp_inputs);
+            for (const std::string& outputName : outputNames) {
+                if (!serializedShapes.contains(outputName) || !originalShapes.contains(outputName) ||
+                    serializedShapes.at(outputName) != originalShapes.at(outputName) ||
+                    !serializedDTypes.contains(outputName) || !originalDTypes.contains(outputName) ||
+                    serializedDTypes.at(outputName) != originalDTypes.at(outputName)) {
+                    throw std::runtime_error("serialized expression changed output '" + outputName +
+                                             "' for batch " + std::to_string(batchSize));
+                }
+            }
+        };
+        validateProbe(batchOne, 1);
+        validateProbe(batchTwo, 2);
+    };
+
+    const json batchOneJson = batchOne.build.serialized_definition->architectureJson();
+    const json batchTwoJson = batchTwo.build.serialized_definition->architectureJson();
+    if (batchOneJson == batchTwoJson) {
+        try {
+            ThorImplementation::ExpressionDefinition definition = *batchOne.build.serialized_definition;
+            definition.validate();
+            validateDefinitionAgainstProbes(definition);
+            serializableExpressionDefinition =
+                std::make_shared<ThorImplementation::ExpressionDefinition>(std::move(definition));
+        } catch (const std::exception& error) {
+            serializationRejectionReason = error.what();
+        }
+        return;
+    }
+    if ((batchOneJson.contains("cuda_kernels") && !batchOneJson.at("cuda_kernels").empty()) ||
+        (batchTwoJson.contains("cuda_kernels") && !batchTwoJson.at("cuda_kernels").empty())) {
+        serializationRejectionReason =
+            "batch-dependent CUDA-kernel expressions require an explicitly supplied symbolic ExpressionDefinition; "
+            "Thor will not rewrite a signed CUDA expression during batch-polymorphism analysis";
+        return;
+    }
+
+    json generalized = batchOneJson;
+    std::string rejectionReason;
+    if (!generalizeBatchDependentJson(generalized, batchOneJson, batchTwoJson, "expression", rejectionReason)) {
+        serializationRejectionReason = std::move(rejectionReason);
+        return;
+    }
+
+    try {
+        ThorImplementation::ExpressionDefinition definition = ThorImplementation::ExpressionDefinition::deserialize(generalized);
+        definition.validate();
+        validateDefinitionAgainstProbes(definition);
+        serializableExpressionDefinition = std::make_shared<ThorImplementation::ExpressionDefinition>(std::move(definition));
+    } catch (const std::exception& error) {
+        serializationRejectionReason = error.what();
+    }
 }
 
 void CustomLayer::materializeOutputInterfacesFromInputInterfaces() {
@@ -542,13 +868,35 @@ std::shared_ptr<ThorImplementation::Layer> CustomLayer::stamp(ThorImplementation
         physicalParameters.push_back(parameter->stamp());
     }
 
+    std::vector<ThorImplementation::CustomLayer::DeclaredOutputDescriptor> declaredOutputDescriptors;
+    declaredOutputDescriptors.reserve(outputNames.size());
+    const TensorMap& outputInterface = outputInterfaces.front();
+    for (const std::string& outputName : outputNames) {
+        const Tensor& outputTensor = outputInterface.at(outputName);
+        declaredOutputDescriptors.push_back(
+            ThorImplementation::CustomLayer::DeclaredOutputDescriptor{outputTensor.getDataType(), outputTensor.getDimensions()});
+    }
+
     auto physicalLayer = std::make_shared<ThorImplementation::CustomLayer>(
-        expr, inputNames, outputNames, placement, physicalParameters, inferenceOnly, Layer::getId());
+        expr,
+        inputNames,
+        outputNames,
+        placement,
+        physicalParameters,
+        inferenceOnly,
+        Layer::getId(),
+        std::move(declaredOutputDescriptors));
     physicalLayer->setLayerName(getLayerType());
     return physicalLayer;
 }
 
 json CustomLayer::architectureJson() const {
+    if (!serializationAnalysisPerformed || serializableExpressionDefinition == nullptr) {
+        throw logic_error(
+            "CustomLayer serialization invariant violated: generic CustomLayer instances must have a verified symbolic "
+            "ExpressionDefinition before they are added to a model.");
+    }
+
     json j;
     j["factory"] = Layer::Factory::Learning.value();
     j["version"] = "1.0.0";
@@ -580,13 +928,7 @@ json CustomLayer::architectureJson() const {
             j["parameters"][parameter->getName()] = parameter->architectureJson();
     }
 
-    auto serializedDefinition = expr.getSerializedDefinition();
-    if (serializedDefinition == nullptr) {
-        throw runtime_error(
-            "CustomLayer expression is not serializable. Construct it from a ThorImplementation::ExpressionDefinition or "
-            "DynamicExpression::fromExpressionDefinition(...). Arbitrary DynamicExpression builders cannot be saved.");
-    }
-    j["expression"] = serializedDefinition->architectureJson();
+    j["expression"] = serializableExpressionDefinition->architectureJson();
 
     return j;
 }
@@ -625,23 +967,14 @@ void CustomLayer::deserialize(std::shared_ptr<thor_file::TarReader>& archiveRead
         outputInterfaces.push_back(std::move(outputInterface));
     }
 
+    const json& parametersJson = j.at("parameters");
+    if (!parametersJson.is_object()) {
+        throw runtime_error("CustomLayer parameters must be an object keyed by parameter name.");
+    }
     std::vector<std::shared_ptr<ParameterSpecification>> parameters;
-    if (j.contains("parameters")) {
-        const json& parametersJson = j.at("parameters");
-        if (parametersJson.is_object()) {
-            for (auto it = parametersJson.begin(); it != parametersJson.end(); ++it) {
-                ParameterSpecification parameter = ParameterSpecification::deserialize(it.value(), archiveReader);
-                parameters.push_back(std::make_shared<ParameterSpecification>(std::move(parameter)));
-            }
-        } else if (parametersJson.is_array()) {
-            // Backward-compatible with the transitional CustomLayer schema.
-            for (const json& parameterJson : parametersJson) {
-                ParameterSpecification parameter = ParameterSpecification::deserialize(parameterJson, archiveReader);
-                parameters.push_back(std::make_shared<ParameterSpecification>(std::move(parameter)));
-            }
-        } else {
-            throw runtime_error("CustomLayer parameters must be an object keyed by parameter name.");
-        }
+    for (auto it = parametersJson.begin(); it != parametersJson.end(); ++it) {
+        ParameterSpecification parameter = ParameterSpecification::deserialize(it.value(), archiveReader);
+        parameters.push_back(std::make_shared<ParameterSpecification>(std::move(parameter)));
     }
 
     CustomLayer customLayer(DynamicExpression::fromExpressionDefinition(expressionDefinition),

@@ -1,4 +1,6 @@
+import gc
 import json
+import weakref
 
 import numpy as np
 import pytest
@@ -1032,7 +1034,7 @@ def test_python_custom_layer_uint32_strided_view_can_infer_outputs():
         def build(self, context: thor.layers.CustomLayerBuildContext) -> dict[str, thor.physical.Expression]:
             packed_tensor = context.input_tensor("packed")
             packed_dims = packed_tensor.get_dimensions()
-            assert packed_dims == [1, 9]
+            assert packed_dims in ([1, 9], [2, 9])
             packed = context.input("packed", output_dtype=thor.DataType.uint32, compute_dtype=thor.DataType.uint32)
             return {
                 "head": packed.strided_view([packed_dims[0], 4], [packed_dims[1], 1], 0),
@@ -1044,6 +1046,193 @@ def test_python_custom_layer_uint32_strided_view_can_infer_outputs():
     assert split["tail"].get_dimensions() == [4]
     assert split["head"].get_data_type() == thor.DataType.uint32
     assert split["tail"].get_data_type() == thor.DataType.uint32
+
+
+def test_python_custom_layer_output_specs_are_logical_and_batch_free():
+    network = thor.Network("custom-layer-logical-output-specs")
+    x = thor.layers.NetworkInput(network, "x", [6, 2], thor.DataType.fp32).get_feature_output()
+    seen_specs: list[list[int]] = []
+    seen_physical_shapes: list[list[int]] = []
+
+    class TailWindow(thor.layers.CustomLayer):
+        def __init__(self, network: thor.Network, sequence: thor.Tensor):
+            super().__init__(network=network, inputs={"sequence": sequence}, output_names=["feature_output"])
+
+        def output_specs(self, context: thor.layers.CustomLayerSpecContext) -> dict[str, thor.layers.TensorSpec]:
+            sequence = context.input_spec("sequence")
+            seen_specs.append(list(sequence.shape))
+            return {
+                "feature_output": thor.layers.TensorSpec(shape=[3, sequence.shape[1]], dtype=sequence.dtype),
+            }
+
+        def build(self, context: thor.layers.CustomLayerBuildContext) -> dict[str, thor.physical.Expression]:
+            dimensions = context.input_tensor("sequence").get_dimensions()
+            seen_physical_shapes.append(list(dimensions))
+            batch_size, sequence_steps, channels = dimensions
+            return {
+                "feature_output": context.input("sequence").strided_view(
+                    [batch_size, 3, channels],
+                    [sequence_steps * channels, channels, 1],
+                    (sequence_steps - 3) * channels,
+                )
+            }
+
+    tail = TailWindow(network, x)
+    assert tail["feature_output"].get_dimensions() == [3, 2]
+    assert seen_specs == [[6, 2]]
+    assert seen_physical_shapes == [[1, 6, 2], [2, 6, 2]]
+
+
+def _find_expression_nodes_with_field(value: object, field: str) -> list[dict[str, object]]:
+    found: list[dict[str, object]] = []
+    if isinstance(value, dict):
+        if field in value:
+            found.append(value)
+        for child in value.values():
+            found.extend(_find_expression_nodes_with_field(child, field))
+    elif isinstance(value, list):
+        for child in value:
+            found.extend(_find_expression_nodes_with_field(child, field))
+    return found
+
+
+@pytest.mark.cuda
+def test_python_custom_layer_batch_dependent_view_is_symbolically_serialized_and_reloaded(tmp_path):
+    network_name = "custom-layer-batch-polymorphic-view-round-trip"
+    network = thor.Network(network_name)
+    x = thor.layers.NetworkInput(network, "x", [6, 2], thor.DataType.fp32).get_feature_output()
+
+    class TailWindow(thor.layers.CustomLayer):
+        def __init__(self, network: thor.Network, sequence: thor.Tensor):
+            super().__init__(network=network, inputs={"sequence": sequence}, output_names=["feature_output"])
+
+        def build(self, context: thor.layers.CustomLayerBuildContext) -> dict[str, thor.physical.Expression]:
+            batch_size, sequence_steps, channels = context.input_tensor("sequence").get_dimensions()
+            return {
+                "feature_output": context.input("sequence").strided_view(
+                    [batch_size, 3, channels],
+                    [sequence_steps * channels, channels, 1],
+                    (sequence_steps - 3) * channels,
+                )
+            }
+
+    tail = TailWindow(network, x)
+    thor.layers.NetworkOutput(network, "tail", tail["feature_output"], thor.DataType.fp32)
+
+    architecture = json.loads(network.get_architecture_json())
+    custom_layer = next(layer for layer in architecture["layers"] if layer["layer_type"] == "custom_layer")
+    view_nodes = _find_expression_nodes_with_field(custom_layer["expression"], "view_dims")
+    assert any(node["view_dims"] == [0, 3, 2] for node in view_nodes)
+
+    save_dir = tmp_path / "batch_polymorphic_tail"
+    network.save(str(save_dir), overwrite=False)
+    tail_ref = weakref.ref(tail)
+    del tail
+    del x
+    del network
+    gc.collect()
+    assert tail_ref() is None
+
+    loaded = thor.Network(network_name)
+    loaded.load(str(save_dir))
+    placed = _place_for_custom_layer_test(loaded, batch_size=4, inference_only=True)
+    values = np.arange(4 * 6 * 2, dtype=np.float32).reshape(4, 6, 2)
+    outputs = placed.infer({"x": _cpu_tensor_from_numpy(values, thor.DataType.fp32)})
+    np.testing.assert_array_equal(np.array(outputs["tail"].numpy(), copy=True), values[:, -3:, :])
+
+
+def test_python_custom_layer_rejects_fixed_inference_batch_definition_during_construction():
+    network = thor.Network("custom-layer-fixed-batch-definition-rejected")
+    x = thor.layers.NetworkInput(network, "x", [6, 2], thor.DataType.fp32).get_feature_output()
+
+    def output_specs(context: thor.layers.CustomLayerSpecContext) -> dict[str, thor.layers.TensorSpec]:
+        sequence = context.input_spec("sequence")
+        return {"feature_output": thor.layers.TensorSpec([3, sequence.shape[1]], sequence.dtype)}
+
+    def build(context: thor.layers.CustomLayerBuildContext) -> dict[str, thor.physical.Expression]:
+        _, sequence_steps, channels = context.input_tensor("sequence").get_dimensions()
+        return {
+            "feature_output": context.input("sequence").strided_view(
+                [1, 3, channels],
+                [sequence_steps * channels, channels, 1],
+                (sequence_steps - 3) * channels,
+            )
+        }
+
+    with pytest.raises(RuntimeError, match="CustomLayer construction rejected.*batch-2.*logical TensorSpec"):
+        thor.layers.CustomLayer(
+            network=network,
+            inputs={"sequence": x},
+            output_names=["feature_output"],
+            output_specs=output_specs,
+            build=build,
+        )
+
+
+def test_python_custom_layer_without_serializable_definition_is_rejected_during_construction():
+    network = thor.Network("custom-layer-requires-serializable-definition")
+    x = thor.layers.NetworkInput(network, "x", [6], thor.DataType.fp32).get_feature_output()
+
+    def output_specs(context: thor.layers.CustomLayerSpecContext) -> dict[str, thor.layers.TensorSpec]:
+        spec = context.input_spec("feature_input")
+        return {"feature_output": thor.layers.TensorSpec(spec.shape, spec.dtype)}
+
+    def build(context: thor.layers.CustomLayerBuildContext) -> thor.physical.DynamicExpressionBuild:
+        expression_outputs = thor.physical.Expression.outputs({
+            "feature_output": context.input("feature_input") + 1.0,
+        })
+        return thor.physical.DynamicExpressionBuild(
+            equation=expression_outputs.compile(context.device_num),
+            stamp_inputs=context.inputs,
+            tensor_scalar_inputs={},
+            preallocated_outputs=context.outputs,
+            requested_output_shapes={},
+        )
+
+    with pytest.raises(RuntimeError, match="CustomLayer construction rejected.*did not provide an ExpressionDefinition"):
+        thor.layers.CustomLayer(network=network, inputs=x, build=build, output_specs=output_specs)
+
+
+@pytest.mark.cuda
+def test_temporary_python_custom_layer_strided_view_uses_placement_batch_size():
+    network = thor.Network("temporary-custom-layer-strided-view-runtime-batch")
+    x = thor.layers.NetworkInput(network, "x", [6, 2], thor.DataType.fp32).get_feature_output()
+    build_input_shapes: list[list[int]] = []
+
+    class TailWindow(thor.layers.CustomLayer):
+        def __init__(self, network: thor.Network, sequence: thor.Tensor):
+            super().__init__(network=network, inputs={"sequence": sequence}, output_names=["feature_output"])
+
+        def build(self, context: thor.layers.CustomLayerBuildContext) -> dict[str, thor.physical.Expression]:
+            dimensions = context.input_tensor("sequence").get_dimensions()
+            build_input_shapes.append(list(dimensions))
+            batch_size, sequence_steps, channels = dimensions
+            sequence = context.input("sequence")
+            return {
+                "feature_output": sequence.strided_view(
+                    [batch_size, 3, channels],
+                    [sequence_steps * channels, channels, 1],
+                    (sequence_steps - 3) * channels,
+                )
+            }
+
+    # Match common graph-building code that keeps only the output tensor. The Network
+    # must retain the Python CustomLayer owner so build(context) can be called again
+    # with placement-time dimensions instead of reusing the batch-1 inference shape.
+    tail = TailWindow(network, x)["feature_output"]
+    gc.collect()
+    assert tail.get_dimensions() == [3, 2]
+
+    thor.layers.NetworkOutput(network, "tail", tail, thor.DataType.fp32)
+    placed = _place_for_custom_layer_test(network, batch_size=4, inference_only=True)
+
+    values = np.arange(4 * 6 * 2, dtype=np.float32).reshape(4, 6, 2)
+    outputs = placed.infer({"x": _cpu_tensor_from_numpy(values, thor.DataType.fp32)})
+    actual = np.array(outputs["tail"].numpy(), copy=True)
+    np.testing.assert_array_equal(actual, values[:, -3:, :])
+
+    assert [1, 6, 2] in build_input_shapes
+    assert [4, 6, 2] in build_input_shapes
 
 
 @pytest.mark.cuda
@@ -1145,8 +1334,8 @@ def test_python_custom_layer_direct_construction_places_with_named_inputs_and_pa
     assert placed.get_num_stamps() >= 1
     assert storage_context_input_names
     assert all(names == ["lhs", "rhs"] for names in storage_context_input_names)
-    assert {tuple(record["lhs"]) for record in storage_context_input_dims} == {(1, 5), (3, 5)}
-    assert {tuple(record["rhs"]) for record in storage_context_input_dims} == {(1, 5), (3, 5)}
+    assert {tuple(record["lhs"]) for record in storage_context_input_dims} == {(1, 5), (2, 5), (3, 5)}
+    assert {tuple(record["rhs"]) for record in storage_context_input_dims} == {(1, 5), (2, 5), (3, 5)}
 
     assert build_contexts
     assert any(ctx["input_dims"] == {
@@ -1221,3 +1410,9 @@ def test_python_custom_layer_tokenwise_linear_preserves_sequence_axis():
 
     assert layer["feature_output"].get_dimensions() == [5, 7]
     assert layer["feature_output"].get_data_type() == thor.DataType.fp16
+
+    architecture = json.loads(network.get_architecture_json())
+    custom_layer = next(layer_json for layer_json in architecture["layers"] if layer_json["layer_type"] == "custom_layer")
+    reshape_nodes = _find_expression_nodes_with_field(custom_layer["expression"], "reshape_dims")
+    assert any(node["reshape_dims"] == [thor.physical.INFER_DIM, 11] for node in reshape_nodes)
+    assert any(node["reshape_dims"] == [thor.physical.INFER_DIM, 5, 7] for node in reshape_nodes)

@@ -5485,7 +5485,14 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
 
 std::unordered_map<std::string, DataType> FusedEquation::getOutputDataTypes(
     const std::unordered_map<std::string, Tensor>& inputs) const {
-    std::unordered_map<uint32_t, RuntimeInputValue> root_values = bindRootInputsForCompilation(inputs);
+    return getOutputDataTypes(inputs, {});
+}
+
+std::unordered_map<std::string, DataType> FusedEquation::getOutputDataTypes(
+    const std::unordered_map<std::string, Tensor>& inputs,
+    const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs) const {
+    std::unordered_map<uint32_t, RuntimeInputValue> root_values =
+        bindRootInputsForCompilation(inputs, {}, tensor_scalar_inputs);
     std::shared_ptr<CompiledOutputs> compiled_outputs = compileForRootValues(root_values);
 
     if (root_values.empty()) {
@@ -8788,15 +8795,41 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
 
     std::unordered_map<std::string, Tensor> finalOutputsByName;
     finalOutputsByName.reserve(compiled_outputs->final_outputs.size());
+    std::vector<StampedOutputMaterialization> outputMaterializations;
+    outputMaterializations.reserve(compiled_outputs->final_outputs.size());
     for (const CompiledStageOutput& final_output : compiled_outputs->final_outputs) {
         auto it = values.find(final_output.value_id);
         if (it == values.end()) {
             throw std::runtime_error("Missing final output tensor for output: " + final_output.name);
         }
-        finalOutputsByName.emplace(final_output.name, runtimeInputTensor(it->second));
+
+        Tensor produced = runtimeInputTensor(it->second);
+        auto destinationIt = preallocated_outputs.find(final_output.name);
+        if (destinationIt != preallocated_outputs.end() && produced != destinationIt->second) {
+            const Tensor& destination = destinationIt->second;
+            if (produced.getDescriptor() != destination.getDescriptor()) {
+                throw std::runtime_error("Preallocated final output descriptor does not match expression output for '" +
+                                         final_output.name + "'. Produced " + produced.getDescriptor().toString() +
+                                         ", destination " + destination.getDescriptor().toString() + ".");
+            }
+            if (produced.getPlacement() != destination.getPlacement()) {
+                throw std::runtime_error("Preallocated final output placement does not match expression output for '" +
+                                         final_output.name + "'.");
+            }
+            const bool alreadyAliasesDestination =
+                produced.getMemPtr<void>() == destination.getMemPtr<void>() &&
+                produced.getStridesElements() == destination.getStridesElements();
+            if (!alreadyAliasesDestination) {
+                outputMaterializations.push_back(StampedOutputMaterialization{produced, destination});
+            }
+            finalOutputsByName.emplace(final_output.name, destination);
+        } else {
+            finalOutputsByName.emplace(final_output.name, produced);
+        }
     }
 
-    return StampedExecutionPlan(std::move(stampedStages), std::move(finalOutputsByName), stream);
+    return StampedExecutionPlan(
+        std::move(stampedStages), std::move(finalOutputsByName), stream, std::move(outputMaterializations));
 }
 
 void FusedEquation::run(const Tensor& input, Tensor& output, Stream& stream) const {

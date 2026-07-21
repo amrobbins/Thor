@@ -41,12 +41,18 @@ def test_top_level_api_is_curated():
         "MinMaxParameterConstraint",
         "PlacedNetwork",
         "StatusCode",
+        "TensorSpec",
         "_thor",
         "Path",
         "ctypes",
         "os",
     ]:
         assert not hasattr(thor, leaked_name)
+
+
+def test_custom_layer_tensor_spec_is_namespaced_under_layers():
+    assert "TensorSpec" in dir(thor.layers)
+    assert not hasattr(thor, "TensorSpec")
 
 
 def test_parameter_and_constraint_namespaces_export_public_types():

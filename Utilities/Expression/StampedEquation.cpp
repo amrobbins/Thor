@@ -7,6 +7,7 @@
 #include "Utilities/Expression/MatmulScalarKernel.h"
 #include "Utilities/Expression/ReduceMinMaxBackwardKernel.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
+#include "Utilities/TensorOperations/Copy/StridedCopy.h"
 
 #include <cudnn_frontend.h>
 
@@ -2243,6 +2244,13 @@ std::unordered_set<std::string> StampedExecutionPlan::runtimeScalarNames() const
     return names;
 }
 
+void StampedExecutionPlan::materializeOutputsOn(Stream& run_stream) const {
+    for (const StampedOutputMaterialization& materialization : output_materializations) {
+        Tensor destination = materialization.destination;
+        materializeTensorViewAsync(materialization.source, destination, run_stream);
+    }
+}
+
 void StampedExecutionPlan::runSequentialOn(Stream& run_stream) const { runSequentialOn(run_stream, {}); }
 
 void StampedExecutionPlan::runSequentialOn(Stream& run_stream, const std::unordered_map<std::string, float>& runtime_scalars) const {
@@ -2277,12 +2285,15 @@ void StampedExecutionPlan::runSequentialOn(Stream& run_stream, const std::unorde
             throw std::runtime_error("Unexpected runtime scalar override for stamped execution plan: " + name);
         }
     }
+
+    materializeOutputsOn(run_stream);
 }
 
 void StampedExecutionPlan::run() { run({}); }
 
 void StampedExecutionPlan::run(const std::unordered_map<std::string, float>& runtime_scalars) {
     if (steps.empty()) {
+        materializeOutputsOn(stream);
         return;
     }
 
@@ -2391,6 +2402,8 @@ void StampedExecutionPlan::run(const std::unordered_map<std::string, float>& run
             stream.waitEvent(helper_stream.putEvent());
         }
     }
+
+    materializeOutputsOn(stream);
 }
 
 // static unordered_map<ReductionCacheKey, shared_ptr<BuiltReduction>> builtReductionCache;

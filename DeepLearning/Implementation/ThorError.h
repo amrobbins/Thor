@@ -15,6 +15,13 @@ namespace ThorImplementation::ThorError {
     throw std::logic_error(message.str());
 }
 
+[[noreturn]] inline void throwLogicError(const std::string &detail, const char *file, int line, const char *function) {
+    std::ostringstream message;
+    message << "Thor error: " << detail << " at " << file << ':' << line << " in " << function << "(). Thor version "
+            << THOR_VERSION << " (" << THOR_GIT_VERSION << ")";
+    throw std::logic_error(message.str());
+}
+
 [[noreturn]] inline void throwUnreachable(const char *file, int line, const char *function) {
     std::ostringstream message;
     message << "Thor reached code that should be unreachable at " << file << ':' << line << " in " << function << "(). Thor version "
@@ -31,5 +38,8 @@ inline void check(bool condition, const char *conditionText, const char *file, i
 
 #define THOR_THROW_IF_FALSE(...) \
     ::ThorImplementation::ThorError::check(static_cast<bool>((__VA_ARGS__)), #__VA_ARGS__, __FILE__, __LINE__, __func__)
+
+#define THOR_THROW_LOGIC_ERROR(...) \
+    ::ThorImplementation::ThorError::throwLogicError((__VA_ARGS__), __FILE__, __LINE__, __func__)
 
 #define THOR_UNREACHABLE() ::ThorImplementation::ThorError::throwUnreachable(__FILE__, __LINE__, __func__)

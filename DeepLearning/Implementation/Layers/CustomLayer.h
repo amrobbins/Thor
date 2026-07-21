@@ -18,6 +18,11 @@
 namespace ThorImplementation {
 class CustomLayer : public TrainableLayer {
    public:
+    struct DeclaredOutputDescriptor {
+        DataType dataType;
+        std::vector<uint64_t> featureDimensions;
+    };
+
     ~CustomLayer() override = default;
 
     // Backward-compatible single-input single-output form.
@@ -45,6 +50,15 @@ class CustomLayer : public TrainableLayer {
                 const std::vector<std::shared_ptr<PhysicalParameter>>& parameters,
                 bool inferenceOnly,
                 int64_t stampedId = -1);
+
+    CustomLayer(DynamicExpression expr,
+                std::vector<std::string> inputNames,
+                std::vector<std::string> outputNames,
+                const TensorPlacement& placement,
+                const std::vector<std::shared_ptr<PhysicalParameter>>& parameters,
+                bool inferenceOnly,
+                int64_t stampedId,
+                std::vector<DeclaredOutputDescriptor> declaredOutputDescriptors);
 
     // TrainableLayer
     void forward(std::optional<Tensor> featureInput, bool validationPass, uint32_t batchSize = 0) override;
@@ -210,6 +224,7 @@ class CustomLayer : public TrainableLayer {
     DynamicExpression layerDefinitionExpression;
     std::vector<std::string> inputNames;
     std::vector<std::string> outputNames;
+    std::vector<DeclaredOutputDescriptor> declaredOutputDescriptors;
 
     std::string customLayerName = "UnnamedType";
 

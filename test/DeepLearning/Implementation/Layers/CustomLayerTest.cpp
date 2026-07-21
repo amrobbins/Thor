@@ -318,6 +318,35 @@ DynamicExpression buildSingleInputSingleOutputExpression(const TensorPlacement& 
     });
 }
 
+DynamicExpression buildTailSliceExpression(const TensorPlacement& placement) {
+    return DynamicExpression(
+        {"x"},
+        {"y"},
+        [placement](const DynamicExpression::TensorMap& inputs,
+                    const DynamicExpression::TensorMap& outputs,
+                    Stream& stream) -> DynamicExpressionBuild {
+            const Tensor& input = inputs.at("x");
+            const std::vector<uint64_t> dims = input.getDimensions();
+            if (dims.size() != 3 || dims[1] < 3) {
+                throw std::runtime_error("buildTailSliceExpression expects [batch, sequence>=3, channels].");
+            }
+            const std::vector<uint64_t> strides = input.getStridesElements();
+            auto x = Expression::input("x");
+            auto y = x.stridedView({dims[0], 3, dims[2]}, strides, (dims[1] - 3) * strides[1]);
+            auto expressionOutputs = Expression::outputs({{"y", y}});
+            auto definition = std::make_shared<ExpressionDefinition>(ExpressionDefinition::fromOutputs(expressionOutputs));
+            return DynamicExpressionBuild{
+                .equation = std::make_shared<FusedEquation>(FusedEquation::compile(definition->outputs, placement.getDeviceNum())),
+                .stamp_inputs = inputs,
+                .tensor_scalar_inputs = {},
+                .preallocated_outputs = outputs,
+                .requested_output_shapes = {},
+                .pre_forward_hook = {},
+                .serialized_definition = definition,
+            };
+        });
+}
+
 DynamicExpression buildTwoInputTwoOutputExpression(const TensorPlacement& placement) {
     return DynamicExpression([placement](const DynamicExpression::TensorMap& inputs,
                                          const DynamicExpression::TensorMap& outputs,
@@ -497,6 +526,76 @@ TEST(CustomLayer, SingleInputSingleOutputForwardCompatibility) {
     expectAllClose(actual, expected);
 
     cleanupLayers({&input, &custom, &sink});
+}
+
+TEST(SliceImplementation, TerminalAliasMaterializesDenseForwardOutputAndScattersBackwardGradient) {
+    const uint64_t batchSize = 4;
+    const uint64_t sequenceSteps = 6;
+    const uint64_t channels = 2;
+
+    TensorDescriptor inputDescriptor(DataType::FP32, {batchSize, sequenceSteps, channels});
+    Tensor featureIn_h(cpuPlacement, inputDescriptor);
+    std::vector<float> inputValues(batchSize * sequenceSteps * channels);
+    for (uint64_t i = 0; i < inputValues.size(); ++i)
+        inputValues[i] = static_cast<float>(i);
+    writeCpuTensor(featureIn_h, inputValues);
+
+    NetworkInput input(gpuPlacement, DataType::FP32, inputDescriptor.getDimensions());
+    GradientRivet gradientRivet;
+    CountingPassthrough bridge;
+    CustomLayer custom(buildTailSliceExpression(gpuPlacement),
+                       {"x"},
+                       {"y"},
+                       gpuPlacement,
+                       {},
+                       false,
+                       7001,
+                       {{DataType::FP32, {3, channels}}});
+    CountingPassthrough sink;
+
+    input.connectToNextLayer(&gradientRivet);
+    gradientRivet.connectToNextLayer(&bridge);
+    bridge.connectToNextLayer(&custom);
+    custom.connectToNextLayer(&sink);
+    compileAndInitialize({&input, &gradientRivet, &bridge, &custom, &sink});
+
+    input.forward(featureIn_h, false, batchSize);
+    ASSERT_EQ(sink.forwardCalls, 1);
+    ASSERT_TRUE(sink.getFeatureInput().has_value());
+    Tensor output_h = copyTensorToCpu(sink.getFeatureInput().value(), custom.getStreams()[0]);
+
+    std::vector<float> expectedForward;
+    for (uint64_t batch = 0; batch < batchSize; ++batch) {
+        const uint64_t batchOffset = batch * sequenceSteps * channels;
+        for (uint64_t i = (sequenceSteps - 3) * channels; i < sequenceSteps * channels; ++i)
+            expectedForward.push_back(inputValues[batchOffset + i]);
+    }
+    expectAllClose(readCpuTensor(output_h), expectedForward);
+
+    TensorDescriptor outputDescriptor(DataType::FP32, {batchSize, 3, channels});
+    Tensor gradOut_h(cpuPlacement, outputDescriptor);
+    std::vector<float> outputGradient(batchSize * 3 * channels);
+    for (uint64_t i = 0; i < outputGradient.size(); ++i)
+        outputGradient[i] = static_cast<float>(i + 1);
+    writeCpuTensor(gradOut_h, outputGradient);
+    sink.getErrorOutput().value().copyFromAsync(gradOut_h, custom.getStreams()[0]);
+    custom.getStreams()[0].synchronize();
+
+    sink.backward(sink.getErrorOutput(), batchSize);
+    ASSERT_EQ(bridge.backwardCalls, 1);
+    ASSERT_TRUE(custom.getErrorOutputs()[0].has_value());
+    Tensor inputGradient_h = copyTensorToCpu(custom.getErrorOutputs()[0].value(), custom.getStreams()[0]);
+
+    std::vector<float> expectedBackward(batchSize * sequenceSteps * channels, 0.0f);
+    for (uint64_t batch = 0; batch < batchSize; ++batch) {
+        const uint64_t sourceOffset = batch * 3 * channels;
+        const uint64_t destinationOffset = batch * sequenceSteps * channels + (sequenceSteps - 3) * channels;
+        for (uint64_t i = 0; i < 3 * channels; ++i)
+            expectedBackward[destinationOffset + i] = outputGradient[sourceOffset + i];
+    }
+    expectAllClose(readCpuTensor(inputGradient_h), expectedBackward);
+
+    cleanupLayers({&input, &gradientRivet, &bridge, &custom, &sink});
 }
 
 TEST(CustomLayer, SingleInputTrainableParameterFusesGradientIntoSgdUpdate) {

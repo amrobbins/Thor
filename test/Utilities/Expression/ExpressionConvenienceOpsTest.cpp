@@ -2351,6 +2351,30 @@ TEST(ExpressionConvenienceOps, BackwardReshapesPublicOutputAdjointToInternalMulS
                 -40.0f, 5.25f, 154.0f, -115.0f});
 }
 
+TEST(ExpressionConvenienceOps, TerminalStridedViewMaterializesIntoCallerProvidedDenseOutput) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor storage = makeGpuTensor({2, 6, 2},
+                                   {0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f, 11.0f,
+                                    12.0f, 13.0f, 14.0f, 15.0f, 16.0f, 17.0f, 18.0f, 19.0f, 20.0f, 21.0f, 22.0f, 23.0f},
+                                   stream);
+
+    auto x = Expression::input("x");
+    auto tail = x.stridedView({2, 3, 2}, {12, 2, 1}, 6);
+    auto expressionOutputs = Expression::outputs({{"y", tail}});
+    FusedEquation equation = FusedEquation::compile(expressionOutputs.physicalOutputs(), 0);
+
+    Tensor denseOutput(gpuPlacement, TensorDescriptor(DataType::FP32, {2, 3, 2}));
+    StampedExecutionPlan plan = equation.stamp({{"x", storage}}, stream, {}, {{"y", denseOutput}});
+    EXPECT_EQ(plan.output("y"), denseOutput);
+    plan.run();
+
+    expectNear(copyToCpuValues(denseOutput, stream),
+               {6.0f, 7.0f, 8.0f, 9.0f, 10.0f, 11.0f,
+                18.0f, 19.0f, 20.0f, 21.0f, 22.0f, 23.0f});
+}
+
 TEST(ExpressionConvenienceOps, StridedViewBackwardScattersToDenseSourceGradient) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);

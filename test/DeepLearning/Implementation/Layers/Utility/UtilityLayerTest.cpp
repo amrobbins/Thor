@@ -1151,9 +1151,9 @@ TEST(Concatenate, Concatenates) {
 
         for (unsigned int i = 0; i < partsGpu.size(); ++i)
             layers.push_back(make_shared<NetworkInput>(partsGpu[i]));
-        layers.push_back(make_shared<Concatenate>(axis));
+        layers.push_back(make_shared<Concatenate>(axis, numSplitTensors));
         for (unsigned int i = 0; i < layers.size() - 1; ++i)
-            layers[i]->connectToNextLayer(layers.back().get());
+            layers[i]->connectToNextLayer(layers.back().get(), 0, static_cast<int>(i));
         layers.push_back(make_shared<NoOpLayer>());
         layers[layers.size() - 2]->connectToNextLayer(layers.back().get());
         layers.push_back(make_shared<NetworkOutput>(gpuPlacement));

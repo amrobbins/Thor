@@ -7,14 +7,13 @@
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 #include "Utilities/Expression/DynamicExpression.h"
 
-
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
-#include <optional>
 
 namespace Thor {
 class CustomLayer : public TrainableLayer {
@@ -62,6 +61,19 @@ class CustomLayer : public TrainableLayer {
     std::string getLayerType() const override { return "CustomLayer"; }
 
    protected:
+    enum class SerializationContract {
+        REQUIRE_EXPRESSION_DEFINITION,
+        LAYER_PROVIDES_OWN_ARCHITECTURE,
+    };
+
+    CustomLayer(ThorImplementation::DynamicExpression expr,
+                std::vector<std::string> inputNames,
+                std::vector<std::string> outputNames,
+                const std::vector<TensorMap>& inputInterfaces,
+                const std::vector<TensorMap>& outputInterfaces,
+                std::vector<std::shared_ptr<ParameterSpecification>> parameters,
+                SerializationContract serializationContract);
+
     std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
                                                      std::shared_ptr<ThorImplementation::Layer> drivingLayer,
                                                      std::shared_ptr<Thor::Layer> drivingApiLayer,
@@ -101,12 +113,26 @@ class CustomLayer : public TrainableLayer {
                                        const std::string& what);
     static std::string joinNames(const std::set<std::string>& names);
     static bool interfaceMatches(const TensorMap& subset, const TensorMap& superset);
+    struct SerializationProbe {
+        ThorImplementation::DynamicExpressionBuild build;
+        ThorImplementation::DynamicExpression::TensorMap sourceInputs;
+        ThorImplementation::DynamicExpression::TensorMap sourceOutputs;
+    };
+
     void materializeOutputInterfacesFromInputInterfaces();
-    TensorMap inferOutputInterfaceFromInputInterface(const TensorMap& inputInterface) const;
+    TensorMap inferOutputInterfaceFromInputInterface(const TensorMap& inputInterface);
+    SerializationProbe buildExpressionForBatch(const TensorMap& inputInterface,
+                                               uint64_t batchSize,
+                                               const TensorMap* outputInterface) const;
+    void analyzeSerializableExpression(const TensorMap& inputInterface) const;
+    void analyzeSerializableExpression(const SerializationProbe& batchOne, const SerializationProbe& batchTwo) const;
     uint32_t encodeInputConnection(uint32_t interfaceIndex, uint32_t inputPortIndex) const;
     uint32_t encodeOutputConnection(uint32_t interfaceIndex, uint32_t outputPortIndex) const;
 
     ThorImplementation::DynamicExpression expr;
+    mutable std::shared_ptr<const ThorImplementation::ExpressionDefinition> serializableExpressionDefinition;
+    mutable std::string serializationRejectionReason;
+    mutable bool serializationAnalysisPerformed = false;
     std::vector<std::string> inputNames;
     std::vector<std::string> outputNames;
 

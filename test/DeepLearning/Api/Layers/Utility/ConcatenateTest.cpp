@@ -103,6 +103,26 @@ TEST(UtilityApiLayers, ConcatenateBuilds) {
     ASSERT_FALSE(concatenate < *clone);
 }
 
+TEST(UtilityApiLayers, ConcatenateConnectionTypesPreserveBuilderInputOrder) {
+    Network network("concatenate_connection_types");
+    Tensor first(DataType::FP32, {3, 2});
+    Tensor second(DataType::FP32, {3, 1});
+    Tensor third(DataType::FP32, {3, 4});
+
+    Concatenate concatenate = Concatenate::Builder()
+                                  .network(network)
+                                  .featureInput(first)
+                                  .featureInput(second)
+                                  .featureInput(third)
+                                  .concatenationAxis(1)
+                                  .build();
+
+    EXPECT_EQ(concatenate.getConnectionType(first), 0);
+    EXPECT_EQ(concatenate.getConnectionType(second), 1);
+    EXPECT_EQ(concatenate.getConnectionType(third), 2);
+    EXPECT_EQ(concatenate.getConnectionType(concatenate.getFeatureOutput().value()), 0);
+}
+
 TEST(UtilityApiLayers, ConcatenateSerializeDeserialize) {
     srand(time(nullptr));
 
@@ -291,4 +311,137 @@ TEST(UtilityApiLayers, ConcatenateSerializeDeserialize) {
         EXPECT_EQ(inputLayers[t]->getFeatureOutput().value(), stampedConcatenate->getFeatureInputs()[t].value());
     }
     ASSERT_EQ(stampedConcatenate->getFeatureOutputs()[0].value(), stampedOutput->getFeatureInput().value());
+}
+
+TEST(UtilityApiLayers, ConcatenateRejectsMismatchedLogicalShapesWithActionableError) {
+    Network network("concatenateShapeValidation");
+
+    Tensor first(DataType::FP32, {100, 16});
+    Tensor second(DataType::FP32, {99, 8});
+
+    try {
+        (void)Concatenate::Builder()
+            .network(network)
+            .featureInput(first)
+            .featureInput(second)
+            .concatenationAxis(1)
+            .build();
+        FAIL() << "Expected Concatenate shape validation to fail.";
+    } catch (const std::logic_error &error) {
+        const std::string message = error.what();
+        EXPECT_NE(message.find("Concatenate API input shape mismatch"), std::string::npos);
+        EXPECT_NE(message.find("input[1]"), std::string::npos);
+        EXPECT_NE(message.find("logical dimension 0"), std::string::npos);
+        EXPECT_NE(message.find("concatenation_axis=1"), std::string::npos);
+        EXPECT_NE(message.find("expected_dimension=100"), std::string::npos);
+        EXPECT_NE(message.find("actual_dimension=99"), std::string::npos);
+        EXPECT_NE(message.find("input_shapes={input[0]=[100,16], input[1]=[99,8]}"), std::string::npos);
+        EXPECT_NE(message.find("Check sequence/window lengths"), std::string::npos);
+    }
+}
+
+namespace {
+
+class TestableImplementationConcatenate : public ThorImplementation::Concatenate {
+   public:
+    TestableImplementationConcatenate(unsigned int axis, uint32_t expectedNumInputs)
+        : ThorImplementation::Concatenate(axis, expectedNumInputs) {}
+
+    void setFeatureInputsForTest(const std::vector<ThorImplementation::Tensor> &inputs) {
+        featureInputs.clear();
+        for (const ThorImplementation::Tensor &input : inputs)
+            featureInputs.emplace_back(input);
+    }
+};
+
+class NoOpImplementationLayer : public ThorImplementation::Layer {
+   protected:
+    void infer(std::optional<ThorImplementation::Tensor> inputTensor,
+               std::optional<ThorImplementation::Tensor> outputTensor,
+               Stream stream) override {
+        (void)inputTensor;
+        (void)outputTensor;
+        (void)stream;
+    }
+
+    void backProp(std::optional<ThorImplementation::Tensor> dataIn,
+                  std::optional<ThorImplementation::Tensor> errorIn,
+                  std::optional<ThorImplementation::Tensor> errorOut,
+                  Stream stream) override {
+        (void)dataIn;
+        (void)errorIn;
+        (void)errorOut;
+        (void)stream;
+    }
+};
+
+}  // namespace
+
+TEST(UtilityImplementationLayers, ConcatenateRejectsMissingDistinctPortMetadata) {
+    ThorImplementation::TensorPlacement placement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::Tensor first(
+        placement, ThorImplementation::TensorDescriptor(ThorImplementation::DataType::FP32, {4, 3, 2}));
+    ThorImplementation::Tensor second(
+        placement, ThorImplementation::TensorDescriptor(ThorImplementation::DataType::FP32, {4, 3, 1}));
+    NoOpImplementationLayer firstDriver;
+    NoOpImplementationLayer secondDriver;
+    Stream stream;
+
+    TestableImplementationConcatenate concatenate(2, 2);
+    concatenate.connectToPreviousLayer(&firstDriver, first, stream, false, 0);
+    EXPECT_THROW(concatenate.connectToPreviousLayer(&secondDriver, second, stream, false, 0), std::logic_error);
+}
+
+TEST(UtilityImplementationLayers, ConcatenateStoresInputsByDeclaredPortInsteadOfConnectionArrivalOrder) {
+    ThorImplementation::TensorPlacement placement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::Tensor first(
+        placement, ThorImplementation::TensorDescriptor(ThorImplementation::DataType::FP32, {4, 3, 2}));
+    ThorImplementation::Tensor second(
+        placement, ThorImplementation::TensorDescriptor(ThorImplementation::DataType::FP32, {4, 3, 1}));
+    NoOpImplementationLayer firstDriver;
+    NoOpImplementationLayer secondDriver;
+    Stream stream;
+
+    TestableImplementationConcatenate concatenate(2, 2);
+    concatenate.connectToPreviousLayer(&secondDriver, second, stream, false, 1);
+    concatenate.connectToPreviousLayer(&firstDriver, first, stream, false, 0);
+
+    const std::vector<std::optional<ThorImplementation::Tensor>> connectedInputs = concatenate.getFeatureInputs();
+    ASSERT_EQ(connectedInputs.size(), 2u);
+    ASSERT_TRUE(connectedInputs[0].has_value());
+    ASSERT_TRUE(connectedInputs[1].has_value());
+    EXPECT_EQ(connectedInputs[0].value(), first);
+    EXPECT_EQ(connectedInputs[1].value(), second);
+
+    const std::optional<ThorImplementation::Tensor> output = concatenate.createFeatureOutputTensor();
+    ASSERT_TRUE(output.has_value());
+    EXPECT_EQ(output->getDimensions(), (std::vector<uint64_t>{4, 3, 3}));
+}
+
+TEST(UtilityImplementationLayers, ConcatenateReportsAllPhysicalShapesAndMismatchedDimension) {
+    ThorImplementation::TensorPlacement placement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::Tensor first(
+        placement, ThorImplementation::TensorDescriptor(ThorImplementation::DataType::FP32, {1024, 100, 32}));
+    ThorImplementation::Tensor second(
+        placement, ThorImplementation::TensorDescriptor(ThorImplementation::DataType::FP32, {1024, 99, 16}));
+
+    TestableImplementationConcatenate concatenate(2, 2);
+    concatenate.setName("tide_temporal_decoder_concat");
+    concatenate.setFeatureInputsForTest({first, second});
+
+    try {
+        (void)concatenate.createFeatureOutputTensor();
+        FAIL() << "Expected Concatenate physical shape validation to fail.";
+    } catch (const std::logic_error &error) {
+        const std::string message = error.what();
+        EXPECT_NE(message.find("Concatenate input shape mismatch"), std::string::npos);
+        EXPECT_NE(message.find("input[1]"), std::string::npos);
+        EXPECT_NE(message.find("physical dimension 1"), std::string::npos);
+        EXPECT_NE(message.find("physical_concatenation_axis=2"), std::string::npos);
+        EXPECT_NE(message.find("expected_dimension=100"), std::string::npos);
+        EXPECT_NE(message.find("actual_dimension=99"), std::string::npos);
+        EXPECT_NE(message.find("input_shapes={input[0]=[1024,100,32], input[1]=[1024,99,16]}"), std::string::npos);
+        EXPECT_NE(message.find("name='tide_temporal_decoder_concat'"), std::string::npos);
+        EXPECT_NE(message.find("implementation axis includes the batch dimension"), std::string::npos);
+    }
 }

@@ -5,13 +5,13 @@
 #include <nanobind/stl/vector.h>
 
 #include <memory>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
-#include <optional>
 
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
 #include "DeepLearning/Api/Layers/Learning/CustomLayer.h"
@@ -73,6 +73,36 @@ class GilSafePythonObject {
 struct OrderedApiTensorMap {
     std::vector<std::string> names;
     TensorMap tensors;
+};
+
+struct CustomLayerTensorSpec {
+    CustomLayerTensorSpec() = default;
+    CustomLayerTensorSpec(std::vector<uint64_t> shape, DataType dtype) : shape(std::move(shape)), dtype(dtype) {}
+
+    std::vector<uint64_t> shape;
+    DataType dtype = DataType::FP32;
+};
+
+class CustomLayerSpecContext {
+   public:
+    explicit CustomLayerSpecContext(const OrderedApiTensorMap& inputs) {
+        for (const std::string& name : inputs.names) {
+            const Tensor& tensor = inputs.tensors.at(name);
+            inputSpecs.emplace(name, CustomLayerTensorSpec{tensor.getDimensions(), tensor.getDataType()});
+        }
+    }
+
+    CustomLayerTensorSpec inputSpec(const std::string& name) const {
+        auto it = inputSpecs.find(name);
+        if (it == inputSpecs.end())
+            throw std::runtime_error("CustomLayerSpecContext has no input named '" + name + "'.");
+        return it->second;
+    }
+
+    const std::unordered_map<std::string, CustomLayerTensorSpec>& inputs() const { return inputSpecs; }
+
+   private:
+    std::unordered_map<std::string, CustomLayerTensorSpec> inputSpecs;
 };
 
 OrderedApiTensorMap apiTensorMapFromPythonDict(nb::dict mapping, const std::string& what) {
@@ -139,6 +169,47 @@ std::vector<std::string> normalizeOutputNames(nb::object outputNamesObj, const O
     }
 
     return names;
+}
+
+std::optional<TensorMap> outputInterfaceFromSpecs(nb::object specsObj,
+                                                  const OrderedApiTensorMap& inputs,
+                                                  const std::vector<std::string>& outputNames) {
+    if (specsObj.is_none())
+        return std::nullopt;
+
+    nb::object resolved = specsObj;
+    if (nb::isinstance<nb::callable>(resolved)) {
+        CustomLayerSpecContext context(inputs);
+        resolved = nb::borrow<nb::callable>(resolved)(nb::cast(context));
+    }
+    if (resolved.is_none())
+        return std::nullopt;
+    if (!nb::isinstance<nb::dict>(resolved)) {
+        pybind::raiseCastTypeError("CustomLayer output_specs return value", "dict[str, thor.layers.TensorSpec] or None", resolved);
+    }
+
+    nb::dict mapping = pybind::castOrTypeError<nb::dict>(
+        resolved, "CustomLayer output_specs return value", "dict[str, thor.layers.TensorSpec]", false);
+    std::set<std::string> expected(outputNames.begin(), outputNames.end());
+    std::set<std::string> actual;
+    TensorMap outputs;
+    for (auto item : mapping) {
+        std::string name = pybind::castOrTypeError<std::string>(item.first, "CustomLayer output_specs key", "str", false);
+        CustomLayerTensorSpec spec = pybind::castOrTypeError<CustomLayerTensorSpec>(
+            item.second, "CustomLayer output_specs value", "thor.layers.TensorSpec", false);
+        if (!Tensor::dataTypeValid(spec.dtype))
+            throw nb::value_error("CustomLayer TensorSpec.dtype is invalid.");
+        for (uint64_t dimension : spec.shape) {
+            if (dimension == 0)
+                throw nb::value_error("CustomLayer TensorSpec.shape dimensions must be greater than zero.");
+        }
+        actual.insert(name);
+        outputs.emplace(name, Tensor(spec.dtype, spec.shape));
+    }
+    if (actual != expected) {
+        throw std::runtime_error("CustomLayer output_specs names must exactly match output_names.");
+    }
+    return outputs;
 }
 
 std::vector<std::shared_ptr<ParameterSpecification>> parametersFromPythonObject(nb::object obj) {
@@ -570,6 +641,17 @@ DynamicExpression makeDynamicExpressionFromSelf(nb::handle selfHandle,
 }  // namespace
 
 void bind_custom_layer(nb::module_& layers) {
+    auto tensorSpec = nb::class_<CustomLayerTensorSpec>(layers, "TensorSpec");
+    tensorSpec.attr("__module__") = "thor.layers";
+    tensorSpec.def(nb::init<std::vector<uint64_t>, DataType>(), "shape"_a, "dtype"_a);
+    tensorSpec.def_rw("shape", &CustomLayerTensorSpec::shape);
+    tensorSpec.def_rw("dtype", &CustomLayerTensorSpec::dtype);
+
+    auto specContext = nb::class_<CustomLayerSpecContext>(layers, "CustomLayerSpecContext");
+    specContext.attr("__module__") = "thor.layers";
+    specContext.def("input_spec", &CustomLayerSpecContext::inputSpec, "name"_a);
+    specContext.def_prop_ro("inputs", &CustomLayerSpecContext::inputs, nb::rv_policy::reference_internal);
+
     auto context = nb::class_<CustomLayerBuildContext>(layers, "CustomLayerBuildContext");
     context.attr("__module__") = "thor.layers";
     context.def_prop_ro("inputs", &CustomLayerBuildContext::inputs, nb::rv_policy::reference_internal);
@@ -606,16 +688,24 @@ void bind_custom_layer(nb::module_& layers) {
            nb::object buildObj,
            nb::object parametersObj,
            std::shared_ptr<Optimizer> optimizer,
-           std::shared_ptr<Activation> activation) {
+           std::shared_ptr<Activation> activation,
+           nb::object outputSpecsObj) {
             OrderedApiTensorMap inputs = normalizeInputs(inputsObj);
             CustomLayer* self = nb::inst_ptr<CustomLayer>(pySelf.ptr());
 
             std::vector<std::string> outputNames = normalizeOutputNames(outputNamesObj, inputs);
 
             nb::object pySelfObj;
-            if (parametersObj.is_none() || buildObj.is_none()) {
+            if (parametersObj.is_none() || buildObj.is_none() || outputSpecsObj.is_none()) {
                 pySelfObj = nb::borrow<nb::object>(pySelf);
             }
+
+            nb::object resolvedOutputSpecs = outputSpecsObj;
+            if (resolvedOutputSpecs.is_none() && pySelfObj.is_valid()) {
+                resolvedOutputSpecs = pySelfObj.attr("output_specs")(nb::cast(CustomLayerSpecContext(inputs)));
+            }
+            std::optional<TensorMap> declaredOutputInterface =
+                outputInterfaceFromSpecs(resolvedOutputSpecs, inputs, outputNames);
 
             std::vector<std::shared_ptr<ParameterSpecification>> parameters;
             if (parametersObj.is_none()) {
@@ -669,6 +759,10 @@ void bind_custom_layer(nb::module_& layers) {
                 .inputInterface(inputs.tensors)
                 .parameters(parameters);
 
+            if (declaredOutputInterface.has_value()) {
+                builder.outputInterface(declaredOutputInterface.value());
+            }
+
             if (optimizer != nullptr) {
                 builder.optimizer(std::move(optimizer));
             }
@@ -684,20 +778,26 @@ void bind_custom_layer(nb::module_& layers) {
         "parameters"_a.none() = nb::none(),
         "optimizer"_a.none() = nb::none(),
         "activation"_a.none() = nb::none(),
+        "output_specs"_a.none() = nb::none(),
+        nb::keep_alive<2, 1>(),
         R"nbdoc(
 Python-facing CustomLayer.
 
 The C++ API layer owns the CustomLayer construction logic, including named input/output
 interfaces and logical output tensor inference. Python can use it either directly by
-passing build=... and parameters=..., or by subclassing and overriding parameters()
-and build(context).
+passing build=..., output_specs=..., and parameters=..., or by subclassing and overriding
+output_specs(context), parameters(), and build(context).
 
 The build argument may be either a Python callable or a thor.physical.DynamicExpression.
-A DynamicExpression created from an ExpressionDefinition, including
-CudaKernelExpression.as_dynamic_expression(), preserves its serialized definition and
-can therefore be saved with the network. Arbitrary Python callables remain runtime
-builders and are not serializable unless their result is packaged as a serializable
-DynamicExpression first.
+When output_specs is supplied, API output-shape construction uses only logical, batch-free
+TensorSpec values. Before the layer is accepted into the model, Thor probes the physical
+builder to require a pure tensor expression whose ExpressionDefinition is identical across
+batch probes or can be safely generalized to internal symbolic dimensions. Builders with
+pre-forward callbacks, runtime scalar bindings, or other non-declarative state are rejected
+during CustomLayer construction; generic Python CustomLayer instances are never runtime-only.
+CudaKernelExpression.as_dynamic_expression() remains serializable when its signed
+ExpressionDefinition is already batch-polymorphic. Terminal storage aliases such as
+strided_view are materialized generically into the layer's dense public output tensor.
 
 Convenience forms:
 - inputs=<thor.Tensor> defaults to {"feature_input": tensor}
@@ -706,6 +806,7 @@ Convenience forms:
         )nbdoc");
 
     custom_layer.def("parameters", [](nb::handle) { return nb::list(); });
+    custom_layer.def("output_specs", [](nb::handle, const CustomLayerSpecContext&) { return nb::none(); }, "context"_a);
     custom_layer.def(
         "build",
         [](nb::handle, const CustomLayerBuildContext&) -> nb::dict {

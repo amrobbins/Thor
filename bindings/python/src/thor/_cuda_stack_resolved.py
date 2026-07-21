@@ -55,7 +55,7 @@ CUDA_STACK = CudaStack(
         CudaDistribution("nvidia-cusparse", "12.8.2.51"),
         CudaDistribution("nvidia-cusolver", "12.2.6.9"),
         CudaDistribution("nvidia-cuda-cccl", "13.3.3.4.1"),
-        CudaDistribution("nvidia-cudnn-cu13", "9.24.0.43"),
+        CudaDistribution("nvidia-cudnn-cu13", "9.25.0.15"),
         CudaDistribution("nvidia-cudnn-frontend", "1.26.0"),
     ),
     includes=(

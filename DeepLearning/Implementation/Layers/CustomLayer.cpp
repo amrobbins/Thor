@@ -238,12 +238,43 @@ CustomLayer::CustomLayer(DynamicExpression expr,
                          const std::vector<std::shared_ptr<PhysicalParameter>>& parameters,
                          bool inferenceOnly,
                          int64_t stampedId)
+    : CustomLayer(std::move(expr),
+                  std::move(inputNames),
+                  std::move(outputNames),
+                  placement,
+                  parameters,
+                  inferenceOnly,
+                  stampedId,
+                  {}) {}
+
+CustomLayer::CustomLayer(DynamicExpression expr,
+                         std::vector<std::string> inputNames,
+                         std::vector<std::string> outputNames,
+                         const TensorPlacement& placement,
+                         const std::vector<std::shared_ptr<PhysicalParameter>>& parameters,
+                         bool inferenceOnly,
+                         int64_t stampedId,
+                         std::vector<DeclaredOutputDescriptor> declaredOutputDescriptors)
     : TrainableLayer(placement, inferenceOnly, stampedId),
       layerDefinitionExpression(std::move(expr)),
       inputNames(std::move(inputNames)),
-      outputNames(std::move(outputNames)) {
+      outputNames(std::move(outputNames)),
+      declaredOutputDescriptors(std::move(declaredOutputDescriptors)) {
     validatePortNames(this->inputNames, "input");
     validatePortNames(this->outputNames, "output");
+
+    if (!this->declaredOutputDescriptors.empty() && this->declaredOutputDescriptors.size() != this->outputNames.size()) {
+        throw runtime_error("CustomLayer declared output descriptor count must match the number of output ports.");
+    }
+    for (uint32_t outputPort = 0; outputPort < this->declaredOutputDescriptors.size(); ++outputPort) {
+        const auto& descriptor = this->declaredOutputDescriptors[outputPort];
+        for (uint64_t dimension : descriptor.featureDimensions) {
+            if (dimension == 0) {
+                throw runtime_error("CustomLayer declared output dimensions must be non-zero for output port '" +
+                                    this->outputNames[outputPort] + "'.");
+            }
+        }
+    }
 
     for (uint32_t i = 0; i < this->inputNames.size(); ++i) {
         const auto [it, inserted] = inputNameToPort.emplace(this->inputNames[i], i);
@@ -1302,6 +1333,42 @@ std::optional<Tensor> CustomLayer::inferFeatureOutputTensor(uint32_t application
     }
     requireApplicationInputInterfaceConnected(applicationIndex);
 
+    if (!declaredOutputDescriptors.empty()) {
+        std::optional<uint64_t> batchSize;
+        for (uint32_t inputPort = 0; inputPort < inputNames.size(); ++inputPort) {
+            const uint32_t flat = inputFlatIndex(applicationIndex, inputPort);
+            if (flat >= featureInputs.size() || !featureInputs[flat].has_value()) {
+                throw runtime_error("CustomLayer missing connected feature input for port '" + inputNames[inputPort] + "'.");
+            }
+
+            const std::vector<uint64_t>& inputDimensions = featureInputs[flat].value().getDescriptor().getDimensions();
+            if (inputDimensions.empty()) {
+                throw runtime_error("CustomLayer feature input port '" + inputNames[inputPort] +
+                                    "' has no physical batch dimension.");
+            }
+            if (!batchSize.has_value()) {
+                batchSize = inputDimensions.front();
+            } else if (batchSize.value() != inputDimensions.front()) {
+                throw runtime_error("CustomLayer feature inputs disagree on physical batch size for application " +
+                                    std::to_string(applicationIndex) + ". Port '" + inputNames.front() + "' has batch " +
+                                    std::to_string(batchSize.value()) + ", while port '" + inputNames[inputPort] + "' has batch " +
+                                    std::to_string(inputDimensions.front()) + ".");
+            }
+        }
+
+        if (!batchSize.has_value() || batchSize.value() == 0) {
+            throw runtime_error("CustomLayer requires a non-zero physical batch size to construct output tensors.");
+        }
+
+        const DeclaredOutputDescriptor& declared = declaredOutputDescriptors[outputPortIndex];
+        std::vector<uint64_t> physicalDimensions;
+        physicalDimensions.reserve(declared.featureDimensions.size() + 1);
+        physicalDimensions.push_back(batchSize.value());
+        physicalDimensions.insert(
+            physicalDimensions.end(), declared.featureDimensions.begin(), declared.featureDimensions.end());
+        return Tensor(placement, TensorDescriptor(declared.dataType, physicalDimensions));
+    }
+
     PreparedDynamicExpression::TensorMap discoveredOutputs;
     PreparedDynamicExpression prepared =
         layerDefinitionExpression.prepare(buildForwardInputs(applicationIndex), discoveredOutputs, computeStream(applicationIndex));
@@ -1384,6 +1451,31 @@ void CustomLayer::compileImpl() {
             layerDefinitionExpression.prepare(app.forwardInputsByName, app.forwardOutputsByName, computeStream(applicationIndex)));
         app.forwardPreRunHook = app.forwardPrepared->preForwardHook();
         validatePreparedExpressionInputs(*app.forwardPrepared);
+
+        const auto inferredOutputShapes = app.forwardPrepared->equation().getOutputShapes(
+            app.forwardPrepared->stampInputs(), app.forwardPrepared->tensorScalarInputs());
+        const auto inferredOutputDataTypes = app.forwardPrepared->equation().getOutputDataTypes(
+            app.forwardPrepared->stampInputs(), app.forwardPrepared->tensorScalarInputs());
+        for (const std::string& outputName : outputNames) {
+            const auto actualOutputIt = app.forwardOutputsByName.find(outputName);
+            const auto shapeIt = inferredOutputShapes.find(outputName);
+            const auto dataTypeIt = inferredOutputDataTypes.find(outputName);
+            if (actualOutputIt == app.forwardOutputsByName.end() || shapeIt == inferredOutputShapes.end() ||
+                dataTypeIt == inferredOutputDataTypes.end()) {
+                throw runtime_error("CustomLayer failed to validate the declared physical output for port '" + outputName + "'.");
+            }
+
+            const TensorDescriptor inferredDescriptor(dataTypeIt->second, shapeIt->second);
+            const TensorDescriptor& declaredDescriptor = actualOutputIt->second.getDescriptor();
+            if (inferredDescriptor != declaredDescriptor) {
+                throw runtime_error("CustomLayer expression output descriptor does not match the API-declared output for port '" +
+                                    outputName + "' in application " + std::to_string(applicationIndex) + ". Expression inferred " +
+                                    inferredDescriptor.toString() + ", but the runtime output tensor is " +
+                                    declaredDescriptor.toString() +
+                                    ". Python CustomLayer build(context) implementations must derive batch-dependent shapes from the "
+                                    "placement-time context rather than retaining the batch-1 tensor used for API shape inference.");
+            }
+        }
 
         if (!compiledParameterInitializers) {
             std::unordered_set<std::string> parameterNames;
@@ -2329,7 +2421,8 @@ void CustomLayer::computeFeatureOut(uint32_t connectionNumber) {
         }
     }
     const auto runStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
-    applications[decoded.applicationIndex].forwardStamped->run();
+    ApplicationState& application = applications[decoded.applicationIndex];
+    application.forwardStamped->run();
     if (emitDiagnostics) {
         runMicros = layerSubmitDiagnosticElapsedMicros(runStart, layerSubmitDiagnosticNow());
         emitLayerSubmitDiagnostic("custom_forward_compute",
