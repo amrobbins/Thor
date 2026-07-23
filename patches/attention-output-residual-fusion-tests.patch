@@ -1,0 +1,109 @@
+diff --git a/test/DeepLearning/Api/Layers/Learning/AttentionTest.cpp b/test/DeepLearning/Api/Layers/Learning/AttentionTest.cpp
+index 324303b..4636931 100644
+--- a/test/DeepLearning/Api/Layers/Learning/AttentionTest.cpp
++++ b/test/DeepLearning/Api/Layers/Learning/AttentionTest.cpp
+@@ -2422,3 +2422,103 @@ TEST(AttentionApi, ForwardRopeDynamicNtkInterleavedMhaMatchesFullCpuReference) {
+ 
+     runAttentionApiReferenceCase("attention_api_forward_rope_dynamic_ntk_interleaved_mha_matches_full_cpu_reference", c, 1.6e-1f, 1.6e-1f);
+ }
++
++TEST(AttentionApi, OutputResidualIsPartOfTheAttentionExpressionAndPreservesPublicShape) {
++    Api::Network network("attention_output_residual");
++    Api::NetworkInput featureInput = Api::NetworkInput::Builder()
++                                         .network(network)
++                                         .name("features")
++                                         .dimensions({5, 8})
++                                         .dataType(DataType::BF16)
++                                         .build();
++    Api::NetworkInput residualInput = Api::NetworkInput::Builder()
++                                          .network(network)
++                                          .name("residual")
++                                          .dimensions({5, 8})
++                                          .dataType(DataType::BF16)
++                                          .build();
++
++    Api::Attention attention = Api::Attention::Builder()
++                                   .network(network)
++                                   .featureInput(featureInput.getFeatureOutput().value())
++                                   .outputResidualInput(residualInput.getFeatureOutput().value())
++                                   .numHeads(2)
++                                   .headDim(4)
++                                   .valueDim(4)
++                                   .outputFeatures(8)
++                                   .weightsDataType(DataType::BF16)
++                                   .computeDataType(DataType::FP32)
++                                   .outputDataType(DataType::BF16)
++                                   .build();
++
++    ASSERT_TRUE(attention.getUseOutputResidual());
++    ASSERT_TRUE(attention.getOutputResidualInput().has_value());
++    ASSERT_TRUE(attention.getFeatureOutput().has_value());
++    EXPECT_EQ(attention.getFeatureOutput()->getDimensions(), (std::vector<uint64_t>{5, 8}));
++    EXPECT_EQ(attention.getFeatureOutput()->getDataType(), DataType::BF16);
++
++    nlohmann::json architecture = attention.architectureJson();
++    EXPECT_TRUE(architecture.at("use_output_residual").get<bool>());
++    EXPECT_EQ(architecture.at("output_residual_input").at("dimensions").get<std::vector<uint64_t>>(),
++              (std::vector<uint64_t>{5, 8}));
++}
++
++TEST(AttentionApi, OutputResidualTrainingGraphPlacesForSelfAndCrossAttention) {
++    for (bool useCrossAttention : {false, true}) {
++        Api::Network network(useCrossAttention ? "cross_attention_output_residual" : "self_attention_output_residual");
++        Api::NetworkInput queryInput = Api::NetworkInput::Builder()
++                                           .network(network)
++                                           .name("query")
++                                           .dimensions({5, 8})
++                                           .dataType(DataType::BF16)
++                                           .build();
++        std::optional<Api::NetworkInput> contextInput;
++        if (useCrossAttention) {
++            contextInput = Api::NetworkInput::Builder()
++                               .network(network)
++                               .name("context")
++                               .dimensions({7, 8})
++                               .dataType(DataType::BF16)
++                               .build();
++        }
++        Api::NetworkInput residualInput = Api::NetworkInput::Builder()
++                                              .network(network)
++                                              .name("residual")
++                                              .dimensions({5, 8})
++                                              .dataType(DataType::BF16)
++                                              .build();
++
++        Api::Attention::Builder builder;
++        builder.network(network)
++            .featureInput(queryInput.getFeatureOutput().value())
++            .outputResidualInput(residualInput.getFeatureOutput().value())
++            .numHeads(2)
++            .headDim(4)
++            .valueDim(4)
++            .outputFeatures(8)
++            .weightsDataType(DataType::BF16)
++            .computeDataType(DataType::FP32)
++            .outputDataType(DataType::BF16);
++        if (contextInput.has_value()) {
++            builder.contextInput(contextInput->getFeatureOutput().value());
++        }
++        Api::Attention attention = builder.build();
++        Api::NetworkOutput::Builder()
++            .network(network)
++            .name("output")
++            .inputTensor(attention.getFeatureOutput().value())
++            .dataType(DataType::BF16)
++            .build();
++
++        std::vector<Event> initDoneEvents;
++        std::shared_ptr<Api::PlacedNetwork> placed = network.place(4, initDoneEvents, false);
++        synchronizeEvents(initDoneEvents);
++        ASSERT_NE(placed, nullptr);
++        Impl::StampedNetwork& stamped = placed->getStampedNetwork(0);
++        std::shared_ptr<Impl::CustomLayer> physicalAttention =
++            std::dynamic_pointer_cast<Impl::CustomLayer>(stamped.getPhysicalLayerFromApiLayer(attention.getId()));
++        ASSERT_NE(physicalAttention, nullptr);
++        ASSERT_TRUE(physicalAttention->getFeatureOutput().has_value());
++        EXPECT_EQ(physicalAttention->getFeatureOutput()->getDimensions(),
++                  (std::vector<uint64_t>{4, 5, 8}));
++    }
++}
