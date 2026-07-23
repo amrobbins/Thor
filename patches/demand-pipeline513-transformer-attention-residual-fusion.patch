@@ -1,0 +1,125 @@
+diff --git a/cart_demand_forecasting/forecasters/deep_learning/sku_patch_transformer_forecaster.py b/cart_demand_forecasting/forecasters/deep_learning/sku_patch_transformer_forecaster.py
+index 0000000..0000000 100644
+--- a/cart_demand_forecasting/forecasters/deep_learning/sku_patch_transformer_forecaster.py
++++ b/cart_demand_forecasting/forecasters/deep_learning/sku_patch_transformer_forecaster.py
+@@ -32,33 +32,6 @@ _GLOBAL_CONTEXT_WINDOW_NAMES = frozenset(
+     })
+ 
+ 
+-class _TransformerResidualAdd(thor.layers.CustomLayer):
+-    """Explicit residual addition for attention outputs.
+-
+-    FullyConnected feed-forward and central-head residuals use Thor epilogues.
+-    Attention does not currently expose an epilogue, so its residual is kept as
+-    one explicit expression layer rather than introducing a hidden conversion.
+-    """
+-
+-    def __init__(self, network: thor.Network, lhs: thor.Tensor, rhs: thor.Tensor):
+-        if lhs.get_dimensions() != rhs.get_dimensions():
+-            raise ValueError(
+-                "Transformer residual tensors must have matching dimensions; "
+-                f"lhs={lhs.get_dimensions()} rhs={rhs.get_dimensions()}.")
+-        if lhs.get_data_type() != rhs.get_data_type():
+-            raise ValueError(
+-                "Transformer residual tensors must have matching data types; "
+-                f"lhs={lhs.get_data_type()} rhs={rhs.get_data_type()}.")
+-        super().__init__(
+-            network=network,
+-            inputs={"lhs": lhs, "rhs": rhs},
+-            output_names=["feature_output"],
+-        )
+-
+-    def build(self, context: thor.layers.CustomLayerBuildContext) -> dict[str, thor.physical.Expression]:
+-        return {"feature_output": context.input("lhs") + context.input("rhs")}
+-
+-
+ class _LearnedFuturePositionEmbedding(thor.layers.CustomLayer):
+@@ -387,10 +360,23 @@ class SkuPatchTransformerForecaster(SkuForecaster):
+             query_input: thor.Tensor,
+             *,
+             context_input: thor.Tensor | None = None,
++            residual: thor.Tensor,
+             use_rope: bool = False) -> thor.Tensor:
++        expected_dimensions = [
++            int(query_input.get_dimensions()[0]),
++            self.transformer_model_width,
++        ]
++        if residual.get_dimensions() != expected_dimensions:
++            raise ValueError(
++                "Transformer attention residual dimensions must match the attention output; "
++                f"expected={expected_dimensions} got={residual.get_dimensions()}.")
++        if residual.get_data_type() != thor.DataType.bf16:
++            raise ValueError(
++                "Transformer attention residual must use BF16 storage; "
++                f"got={residual.get_data_type()}.")
+         return thor.layers.Attention(
+             network,
+             query_input,
+@@ -409,6 +395,7 @@ class SkuPatchTransformerForecaster(SkuForecaster):
+             dropout_probability=self.transformer_attention_dropout,
+             context_input=context_input,
++            output_residual_input=residual,
+         ).get_feature_output()
+@@ -441,15 +428,11 @@ class SkuPatchTransformerForecaster(SkuForecaster):
+     def _encoder_block(self, network: thor.Network, feature_input: thor.Tensor) -> thor.Tensor:
+         attention_input = self._rms_norm(network, feature_input)
+-        attention_output = self._attention(
++        state = self._attention(
+             network,
+             attention_input,
++            residual=feature_input,
+             use_rope=self.transformer_use_history_rope,
+         )
+-        state = _TransformerResidualAdd(
+-            network,
+-            feature_input,
+-            attention_output,
+-        )["feature_output"]
+         return self._feed_forward_block(network, state)
+@@ -459,27 +442,19 @@ class SkuPatchTransformerForecaster(SkuForecaster):
+             history_memory: thor.Tensor) -> thor.Tensor:
+         self_attention_input = self._rms_norm(network, future_input)
+-        self_attention_output = self._attention(
++        state = self._attention(
+             network,
+             self_attention_input,
++            residual=future_input,
+             use_rope=False,
+         )
+-        state = _TransformerResidualAdd(
+-            network,
+-            future_input,
+-            self_attention_output,
+-        )["feature_output"]
+ 
+         cross_attention_input = self._rms_norm(network, state)
+-        cross_attention_output = self._attention(
++        state = self._attention(
+             network,
+             cross_attention_input,
+             context_input=history_memory,
++            residual=state,
+             use_rope=False,
+         )
+-        state = _TransformerResidualAdd(
+-            network,
+-            state,
+-            cross_attention_output,
+-        )["feature_output"]
+         return self._feed_forward_block(network, state)
+diff --git a/cart_demand_forecasting/tests/forecasters/test_sku_patch_transformer_forecaster.py b/cart_demand_forecasting/tests/forecasters/test_sku_patch_transformer_forecaster.py
+index 0000000..0000000 100644
+--- a/cart_demand_forecasting/tests/forecasters/test_sku_patch_transformer_forecaster.py
++++ b/cart_demand_forecasting/tests/forecasters/test_sku_patch_transformer_forecaster.py
+@@ -83,6 +83,12 @@ def test_patch_transformer_builds_patch_encoder_and_future_query_decoder() -> No
+         forecaster.transformer_encoder_blocks
+         + 2 * forecaster.transformer_decoder_blocks
+     )
++    assert all(layer["use_output_residual"] for layer in attention_layers)
++    assert all(
++        layer["output_residual_input"]["dimensions"]
++        == layer["feature_output"]["dimensions"]
++        for layer in attention_layers
++    )
+ 
+     cross_attention_layers = [
