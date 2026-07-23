@@ -1,0 +1,270 @@
+diff --git a/DeepLearning/Api/Layers/Learning/Attention.h b/DeepLearning/Api/Layers/Learning/Attention.h
+index 27c2d70..b8f4a11 100644
+--- a/DeepLearning/Api/Layers/Learning/Attention.h
++++ b/DeepLearning/Api/Layers/Learning/Attention.h
+@@ -60,6 +60,7 @@ class Attention : public CustomLayer {
+                std::optional<Tensor> queryRaggedOffsetsInput,
+                std::optional<Tensor> keyValueRaggedOffsetsInput,
++               std::optional<Tensor> outputResidualInput,
+                DataType weightsDataType,
+                DataType computeDataType,
+                DataType outputDataType)
+@@ -95,6 +96,7 @@ class Attention : public CustomLayer {
+           keyValueSequenceLengthsInput(std::move(keyValueSequenceLengthsInput)),
+           queryRaggedOffsetsInput(std::move(queryRaggedOffsetsInput)),
+           keyValueRaggedOffsetsInput(std::move(keyValueRaggedOffsetsInput)),
++          outputResidualInput(std::move(outputResidualInput)),
+           weightsDataType(weightsDataType),
+           computeDataType(computeDataType),
+           outputDataType(outputDataType) {}
+@@ -143,6 +145,8 @@ class Attention : public CustomLayer {
+     std::optional<Tensor> getQueryRaggedOffsetsInput() const { return queryRaggedOffsetsInput; }
+     std::optional<Tensor> getKeyValueRaggedOffsetsInput() const { return keyValueRaggedOffsetsInput; }
++    std::optional<Tensor> getOutputResidualInput() const { return outputResidualInput; }
++    bool getUseOutputResidual() const { return outputResidualInput.has_value(); }
+     bool getUseSequenceLengths() const { return querySequenceLengthsInput.has_value(); }
+     bool getUseRaggedOffsets() const { return queryRaggedOffsetsInput.has_value(); }
+@@ -173,6 +177,7 @@ class Attention : public CustomLayer {
+     std::optional<Tensor> keyValueSequenceLengthsInput;
+     std::optional<Tensor> queryRaggedOffsetsInput;
+     std::optional<Tensor> keyValueRaggedOffsetsInput;
++    std::optional<Tensor> outputResidualInput;
+     DataType weightsDataType;
+     DataType computeDataType;
+     DataType outputDataType;
+@@ -326,6 +331,12 @@ class Attention::Builder {
+         return *this;
+     }
+ 
++    virtual Attention::Builder& outputResidualInput(Tensor input) {
++        THOR_THROW_IF_FALSE(!this->_outputResidualInput.has_value());
++        this->_outputResidualInput = input;
++        return *this;
++    }
++
+     virtual Attention::Builder& useRope(bool value = true) {
+         THOR_THROW_IF_FALSE(!this->_useRope.has_value());
+         this->_useRope = value;
+@@ -408,6 +419,7 @@ class Attention::Builder {
+     std::optional<Tensor> _keyValueSequenceLengthsInput;
+     std::optional<Tensor> _queryRaggedOffsetsInput;
+     std::optional<Tensor> _keyValueRaggedOffsetsInput;
++    std::optional<Tensor> _outputResidualInput;
+     std::optional<bool> _useRope;
+     std::optional<bool> _ropeInPlace;
+     std::optional<ThorImplementation::RotaryPositionEmbeddingOptions> _ropeOptions;
+diff --git a/DeepLearning/Api/Layers/Learning/Attention.cpp b/DeepLearning/Api/Layers/Learning/Attention.cpp
+index 971b703..fb3377a 100644
+--- a/DeepLearning/Api/Layers/Learning/Attention.cpp
++++ b/DeepLearning/Api/Layers/Learning/Attention.cpp
+@@ -29,6 +29,7 @@ constexpr const char* kAttentionQuerySequenceLengthsInputName = "query_sequence_lengths";
+ constexpr const char* kAttentionKeyValueSequenceLengthsInputName = "key_value_sequence_lengths";
+ constexpr const char* kAttentionQueryRaggedOffsetsInputName = "query_ragged_offsets";
+ constexpr const char* kAttentionKeyValueRaggedOffsetsInputName = "key_value_ragged_offsets";
++constexpr const char* kAttentionOutputResidualInputName = "output_residual_input";
+ constexpr const char* kAttentionDropoutSeedInputName = "__attention_dropout_seed";
+ constexpr const char* kAttentionDropoutOffsetInputName = "__attention_dropout_offset";
+@@ -116,7 +117,11 @@ void requireScoreBiasInput(const Thor::Tensor& tensor,
+     }
+ }
+ 
+-std::vector<std::string> publicAttentionInputNames(bool useContextInput, bool useScoreBias, bool useSequenceLengths, bool useRaggedOffsets) {
++std::vector<std::string> publicAttentionInputNames(bool useContextInput,
++                                                   bool useScoreBias,
++                                                   bool useSequenceLengths,
++                                                   bool useRaggedOffsets,
++                                                   bool useOutputResidual) {
+     std::vector<std::string> names{kAttentionFeatureInputName};
+@@ -133,6 +138,9 @@ std::vector<std::string> publicAttentionInputNames(bool useContextInput, bool us
+         names.push_back(kAttentionQueryRaggedOffsetsInputName);
+         names.push_back(kAttentionKeyValueRaggedOffsetsInputName);
+     }
++    if (useOutputResidual) {
++        names.push_back(kAttentionOutputResidualInputName);
++    }
+     return names;
+ }
+@@ -142,7 +150,8 @@ Thor::CustomLayer::TensorMap publicAttentionInputInterface(const Thor::Tensor& f
+                                                             const std::optional<Thor::Tensor>& keyValueSequenceLengthsInput,
+                                                             const std::optional<Thor::Tensor>& queryRaggedOffsetsInput,
+-                                                            const std::optional<Thor::Tensor>& keyValueRaggedOffsetsInput) {
++                                                            const std::optional<Thor::Tensor>& keyValueRaggedOffsetsInput,
++                                                            const std::optional<Thor::Tensor>& outputResidualInput) {
+@@ -157,6 +166,9 @@ Thor::CustomLayer::TensorMap publicAttentionInputInterface(const Thor::Tensor& f
+         inputInterface[kAttentionQueryRaggedOffsetsInputName] = queryRaggedOffsetsInput.value();
+         inputInterface[kAttentionKeyValueRaggedOffsetsInputName] = keyValueRaggedOffsetsInput.value();
+     }
++    if (outputResidualInput.has_value()) {
++        inputInterface[kAttentionOutputResidualInputName] = outputResidualInput.value();
++    }
+     return inputInterface;
+ }
+@@ -414,6 +426,7 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySeq
+                                                                bool useScoreBias,
+                                                                bool useSequenceLengths,
+                                                                bool useRaggedOffsets,
++                                                               bool useOutputResidual,
+                                                                DataType inputDType,
+@@ -471,6 +484,9 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySeq
+             expectedInputs.push_back(kAttentionKeyValueRaggedOffsetsInputName);
+         }
++        if (useOutputResidual) {
++            expectedInputs.push_back(kAttentionOutputResidualInputName);
++        }
+         expectedInputs.push_back("qkv_weights");
+@@ -495,6 +511,9 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySeq
+             expectedInputs.push_back(kAttentionKeyValueRaggedOffsetsInputName);
+         }
++        if (useOutputResidual) {
++            expectedInputs.push_back(kAttentionOutputResidualInputName);
++        }
+         expectedInputs.push_back("query_weights");
+@@ -539,6 +558,7 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySeq
+          useScoreBias,
+          useSequenceLengths,
+          useRaggedOffsets,
++         useOutputResidual,
+          inputDType,
+@@ -625,6 +645,19 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySeq
+                 scoreBiasInput = std::move(scoreBias);
+             }
++
++            std::optional<Tensor> outputResidualInput;
++            if (useOutputResidual) {
++                Tensor residual = inputs.at(kAttentionOutputResidualInputName);
++                if (residual.getDimensions() != std::vector<uint64_t>{batch, querySequenceLength, outputFeatures}) {
++                    throw std::runtime_error(
++                        "Attention runtime output_residual_input must be [batch, query_sequence, output_features].");
++                }
++                if (residual.getDataType() != outputDType) {
++                    throw std::runtime_error("Attention runtime output_residual_input dtype must match outputDataType.");
++                }
++                outputResidualInput = std::move(residual);
++            }
+@@ -875,6 +908,12 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySeq
+             if (hasBias) {
+                 out = out + Expression::input("output_bias", weightsDType, weightsDType);
+             }
++            if (useOutputResidual) {
++                Expression residual = Expression::input(kAttentionOutputResidualInputName, outputDType, outputDType)
++                                          .reshape({batch * querySequenceLength, outputFeatures});
++                out = out + residual;
++            }
+             out = out.reshape({batch, querySequenceLength, outputFeatures}).withOutputDType(outputDType);
+@@ -891,6 +930,9 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySeq
+                 stampInputs[kAttentionKeyValueRaggedOffsetsInputName] = keyValueRaggedOffsets.value();
+             }
++            if (useOutputResidual) {
++                stampInputs[kAttentionOutputResidualInputName] = outputResidualInput.value();
++            }
+@@ -1000,6 +1042,18 @@ void Attention::Builder::verifyConfig() const {
+     const DataType outputDType = _outputDataType.value_or(inputDType);
+     const DataType computeDType = _computeDataType.value_or(DataType::FP32);
++    if (_outputResidualInput.has_value()) {
++        const std::vector<uint64_t> queryDims = _featureInput->getDimensions();
++        const std::vector<uint64_t> expectedDims{queryDims.at(0), _outputFeatures.value()};
++        if (_outputResidualInput->getDimensions() != expectedDims) {
++            throw std::invalid_argument(
++                "Attention outputResidualInput dimensions must match [query_sequence, output_features].");
++        }
++        if (_outputResidualInput->getDataType() != outputDType) {
++            throw std::invalid_argument("Attention outputResidualInput dtype must match outputDataType.");
++        }
++    }
+@@ -1104,6 +1158,7 @@ Attention Attention::Builder::build() {
+     const bool useScoreBias = _scoreBiasInput.has_value();
+     const bool useSequenceLengths = _querySequenceLengthsInput.has_value();
+     const bool useRaggedOffsets = _queryRaggedOffsetsInput.has_value();
++    const bool useOutputResidual = _outputResidualInput.has_value();
+@@ -1158,6 +1213,7 @@ Attention Attention::Builder::build() {
+                                              useScoreBias,
+                                              useSequenceLengths,
+                                              useRaggedOffsets,
++                                             useOutputResidual,
+@@ -1165,14 +1221,18 @@ Attention Attention::Builder::build() {
+-                    publicAttentionInputNames(_contextInput.has_value(), useScoreBias, useSequenceLengths, useRaggedOffsets),
++                    publicAttentionInputNames(
++                        _contextInput.has_value(), useScoreBias, useSequenceLengths, useRaggedOffsets, useOutputResidual),
+                     {publicAttentionInputInterface(_featureInput.value(),
+                                                    _contextInput,
+                                                    _scoreBiasInput,
+                                                    _querySequenceLengthsInput,
+                                                    _keyValueSequenceLengthsInput,
+                                                    _queryRaggedOffsetsInput,
+-                                                   _keyValueRaggedOffsetsInput)},
++                                                   _keyValueRaggedOffsetsInput,
++                                                   _outputResidualInput)},
+@@ -1202,6 +1262,7 @@ Attention Attention::Builder::build() {
+                     _queryRaggedOffsetsInput,
+                     _keyValueRaggedOffsetsInput,
++                    _outputResidualInput,
+                     _weightsDataType.value(),
+@@ -1241,6 +1302,7 @@ json Attention::architectureJson() const {
+     j["use_ragged_offsets"] = queryRaggedOffsetsInput.has_value();
++    j["use_output_residual"] = outputResidualInput.has_value();
+@@ -1268,6 +1330,9 @@ json Attention::architectureJson() const {
+         j["key_value_ragged_offsets_input"] = keyValueRaggedOffsetsInput.value().architectureJson();
+     }
++    if (outputResidualInput.has_value()) {
++        j["output_residual_input"] = outputResidualInput.value().architectureJson();
++    }
+@@ -1301,6 +1366,14 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
+         scoreBiasInput = network->getApiTensorByOriginalId(j.at("score_bias_input").at("id").get<uint64_t>());
+     }
++    std::optional<Tensor> outputResidualInput = std::nullopt;
++    if (j.value("use_output_residual", false) || j.contains("output_residual_input")) {
++        if (!j.contains("output_residual_input")) {
++            throw std::runtime_error("Attention deserialize missing output_residual_input.");
++        }
++        outputResidualInput = network->getApiTensorByOriginalId(j.at("output_residual_input").at("id").get<uint64_t>());
++    }
+@@ -1424,6 +1497,7 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
+     const bool useRaggedOffsets = queryRaggedOffsetsInput.has_value();
++    const bool useOutputResidual = outputResidualInput.has_value();
+@@ -1450,6 +1524,7 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
+                                              useScoreBias,
+                                              useSequenceLengths,
+                                              useRaggedOffsets,
++                                             useOutputResidual,
+@@ -1457,14 +1532,18 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
+-                    publicAttentionInputNames(contextInput.has_value(), useScoreBias, useSequenceLengths, useRaggedOffsets),
++                    publicAttentionInputNames(
++                        contextInput.has_value(), useScoreBias, useSequenceLengths, useRaggedOffsets, useOutputResidual),
+                     {publicAttentionInputInterface(featureInput,
+                                                    contextInput,
+                                                    scoreBiasInput,
+                                                    querySequenceLengthsInput,
+                                                    keyValueSequenceLengthsInput,
+                                                    queryRaggedOffsetsInput,
+-                                                   keyValueRaggedOffsetsInput)},
++                                                   keyValueRaggedOffsetsInput,
++                                                   outputResidualInput)},
+@@ -1494,6 +1573,7 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
+                     queryRaggedOffsetsInput,
+                     keyValueRaggedOffsetsInput,
++                    outputResidualInput,
+                     weightsDataType,
+diff --git a/bindings/python/src/core/layers/attention.cpp b/bindings/python/src/core/layers/attention.cpp
+index 3a24ded..83dfaae 100644
+--- a/bindings/python/src/core/layers/attention.cpp
++++ b/bindings/python/src/core/layers/attention.cpp
+@@ -157,7 +157,8 @@ void bind_attention(nb::module_& layers) {
+             std::optional<Tensor> keyValueRaggedOffsets,
+             std::optional<Tensor> contextInput,
+-            std::optional<Tensor> scoreBiasInput) {
++            std::optional<Tensor> scoreBiasInput,
++            std::optional<Tensor> outputResidualInput) {
+@@ -198,6 +199,9 @@ void bind_attention(nb::module_& layers) {
+                 builder.scoreBiasInput(scoreBiasInput.value());
+             }
++            if (outputResidualInput.has_value()) {
++                builder.outputResidualInput(outputResidualInput.value());
++            }
+@@ -318,6 +322,7 @@ void bind_attention(nb::module_& layers) {
+         "context_input"_a.none() = nb::none(),
+         "score_bias_input"_a.none() = nb::none(),
++        "output_residual_input"_a.none() = nb::none(),
+         R"nbdoc(
+@@ -365,6 +370,7 @@ void bind_attention(nb::module_& layers) {
+     attention.def("get_use_ragged_offsets", &Attention::getUseRaggedOffsets);
++    attention.def("get_use_output_residual", &Attention::getUseOutputResidual);
