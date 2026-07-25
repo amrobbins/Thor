@@ -296,75 +296,112 @@ TEST(TrainingRunsStatsReporter, TerminalEventDoesNotCoalesceAwayPendingValidatio
     EXPECT_EQ(runningValidationLine.find("status=completed"), std::string::npos) << runningValidationLine;
 }
 
-TEST(TrainingRunsStatsReporter, RunningSummaryPreservesConfiguredReportOrder) {
+TEST(TrainingRunsStatsReporter, RunningSummaryReportsTrainAndValidateMetricsInConfiguredPairs) {
     std::FILE* out = std::tmpfile();
     TrainingRunsStatsReporter reporter(out, LineStatsColorMode::NEVER, 0.0);
     reporter.configureRun("fold_0",
                           TrainingRunsStatsReporter::RunConfig{0.0,
                                                                std::string("sku_demand_cv5"),
                                                                1.0,
-                                                               {"daily_true",
+                                                               {"daily_central_loss",
+                                                                "daily_true",
                                                                 "daily_pred",
-                                                                "agg_true",
-                                                                "agg_pred",
-                                                                "daily_upper",
-                                                                "agg_upper"}});
+                                                                "daily_lower",
+                                                                "daily_upper"}});
 
-    TrainingStatsSnapshot stats = makeStats(TrainingEventPhase::TRAIN, 0.50);
-    stats.metrics["daily_upper"] = 7.60;
-    stats.metrics["daily_pred"] = 4.96;
-    stats.metrics["daily_true"] = 5.57;
-    stats.metrics["agg_upper"] = 297.60;
-    stats.metrics["agg_true"] = 280.07;
-    stats.metrics["agg_pred"] = 259.65;
+    TrainingStatsSnapshot trainStats = makeStats(TrainingEventPhase::TRAIN, 0.50);
+    trainStats.metrics["daily_central_loss"] = 12.50;
+    trainStats.metrics["daily_true"] = 5.57;
+    trainStats.metrics["daily_pred"] = 4.96;
+    trainStats.metrics["daily_lower"] = 3.20;
+    trainStats.metrics["daily_upper"] = 7.60;
+    trainStats.metrics["daily_quantile_low_loss"] = 99.0;
+
+    TrainingStatsSnapshot validateStats = makeStats(TrainingEventPhase::VALIDATE, 0.40);
+    validateStats.metrics["daily_central_loss"] = 13.75;
+    validateStats.metrics["daily_true"] = 5.80;
+    validateStats.metrics["daily_pred"] = 5.10;
+    validateStats.metrics["daily_lower"] = 3.40;
+    validateStats.metrics["daily_upper"] = 7.90;
+    validateStats.metrics["daily_quantile_low_loss"] = 101.0;
 
     reporter.markRunStarting("fold_0");
-    reporter.onStatsEvent(TrainingStatsEvent::fromTrainingEvent(TrainingEvent::statsUpdated(stats), "fold_0"));
+    reporter.onStatsEvent(TrainingStatsEvent::fromTrainingEvent(TrainingEvent::statsUpdated(trainStats), "fold_0"));
+    reporter.onStatsEvent(TrainingStatsEvent::fromTrainingEvent(TrainingEvent::statsUpdated(validateStats), "fold_0"));
     reporter.close();
 
     const std::string output = readAndCloseFile(out);
-    const std::string line = findLineWithAll(output, {"INFO runs[fold_0|sku_demand_cv5]:", "daily_true=", "agg_upper="});
+    const std::string line = findLineWithAll(output,
+                                             {"INFO runs[fold_0|sku_demand_cv5]:",
+                                              "train_daily_central_loss=",
+                                              "validate_daily_upper="});
     ASSERT_FALSE(line.empty()) << output;
-    EXPECT_TRUE(tokensAppearInOrder(line, {"daily_true=", "daily_pred=", "agg_true=", "agg_pred=", "daily_upper=", "agg_upper="}))
+    EXPECT_TRUE(tokensAppearInOrder(line,
+                                    {"train_daily_central_loss=",
+                                     "validate_daily_central_loss=",
+                                     "train_daily_true=",
+                                     "validate_daily_true=",
+                                     "train_daily_pred=",
+                                     "validate_daily_pred=",
+                                     "train_daily_lower=",
+                                     "validate_daily_lower=",
+                                     "train_daily_upper=",
+                                     "validate_daily_upper="}))
         << line;
+    EXPECT_EQ(line.find("daily_quantile_low_loss="), std::string::npos) << line;
 }
 
-TEST(TrainingRunsStatsReporter, FinalReportPreservesConfiguredReportOrder) {
+TEST(TrainingRunsStatsReporter, FinalReportKeepsTrainAndValidateMetricsPairedByConfiguredOrder) {
     std::FILE* out = std::tmpfile();
     TrainingRunsStatsReporter reporter(out, LineStatsColorMode::NEVER, 0.0);
     reporter.configureRun("completed_fold",
                           TrainingRunsStatsReporter::RunConfig{0.0,
                                                                std::string("sku_demand_cv5"),
                                                                1.0,
-                                                               {"daily_true",
-                                                                "daily_pred",
+                                                               {"agg_central_loss",
                                                                 "agg_true",
                                                                 "agg_pred",
-                                                                "daily_upper",
+                                                                "agg_lower",
                                                                 "agg_upper"}});
 
     TrainingStatsSnapshot trainStats = makeStats(TrainingEventPhase::TRAIN, 0.50);
-    trainStats.metrics["daily_upper"] = 7.60;
-    trainStats.metrics["daily_pred"] = 4.96;
-    trainStats.metrics["daily_true"] = 5.57;
-    trainStats.metrics["agg_upper"] = 297.60;
+    trainStats.metrics["agg_central_loss"] = 42.0;
     trainStats.metrics["agg_true"] = 280.07;
     trainStats.metrics["agg_pred"] = 259.65;
-    TrainingRunResult completed = TrainingRunResult::completedResult("completed_fold", trainStats, std::nullopt, std::nullopt);
+    trainStats.metrics["agg_lower"] = 220.10;
+    trainStats.metrics["agg_upper"] = 297.60;
+
+    TrainingStatsSnapshot validateStats = makeStats(TrainingEventPhase::VALIDATE, 0.40);
+    validateStats.metrics["agg_central_loss"] = 45.0;
+    validateStats.metrics["agg_true"] = 281.00;
+    validateStats.metrics["agg_pred"] = 260.00;
+    validateStats.metrics["agg_lower"] = 221.00;
+    validateStats.metrics["agg_upper"] = 299.00;
+
+    TrainingRunResult completed = TrainingRunResult::completedResult(
+        "completed_fold", trainStats, validateStats, std::nullopt);
     completed.ensembleGroup = "sku_demand_cv5";
 
     reporter.emitFinalReport(std::vector<TrainingRunResult>{completed});
     reporter.close();
 
     const std::string output = readAndCloseFile(out);
-    const std::string line = findLineWithAll(output, {"INFO runs[completed_fold|sku_demand_cv5]:", "train_daily_true=", "train_agg_upper="});
+    const std::string line = findLineWithAll(output,
+                                             {"INFO runs[completed_fold|sku_demand_cv5]:",
+                                              "train_agg_central_loss=",
+                                              "validate_agg_upper="});
     ASSERT_FALSE(line.empty()) << output;
-    EXPECT_TRUE(tokensAppearInOrder(line, {"train_daily_true=",
-                                           "train_daily_pred=",
-                                           "train_agg_true=",
-                                           "train_agg_pred=",
-                                           "train_daily_upper=",
-                                           "train_agg_upper="}))
+    EXPECT_TRUE(tokensAppearInOrder(line,
+                                    {"train_agg_central_loss=",
+                                     "validate_agg_central_loss=",
+                                     "train_agg_true=",
+                                     "validate_agg_true=",
+                                     "train_agg_pred=",
+                                     "validate_agg_pred=",
+                                     "train_agg_lower=",
+                                     "validate_agg_lower=",
+                                     "train_agg_upper=",
+                                     "validate_agg_upper="}))
         << line;
 }
 

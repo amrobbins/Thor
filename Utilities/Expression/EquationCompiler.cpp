@@ -2251,6 +2251,38 @@ shared_ptr<CompiledMatmul> EquationCompiler::compileMatmul(const PhysicalExpress
         return false;
     };
 
+    auto describe_stage_input = [&](const ExprNode& input_node, const char* role) {
+        std::ostringstream out;
+        out << role << "={";
+        if (input_node.input_slot < expr.inputs.size()) {
+            out << "name='" << expr.inputs[input_node.input_slot].name << "',slot=" << input_node.input_slot;
+        } else {
+            out << "name='<invalid>',slot=" << input_node.input_slot;
+        }
+        out << ",storage=" << TensorDescriptor::getElementTypeName(input_node.input_tensor_dtype.value());
+        if (input_node.output_dtype.has_value()) {
+            out << ",logical=" << TensorDescriptor::getElementTypeName(input_node.output_dtype.value());
+        }
+        if (input_node.compute_dtype.has_value()) {
+            out << ",compute=" << TensorDescriptor::getElementTypeName(input_node.compute_dtype.value());
+        }
+        out << "}";
+        return out.str();
+    };
+
+    auto output_names = [&]() {
+        std::ostringstream out;
+        out << "[";
+        for (size_t i = 0; i < outputs.size(); ++i) {
+            if (i != 0) {
+                out << ",";
+            }
+            out << "'" << outputs[i].name << "'";
+        }
+        out << "]";
+        return out.str();
+    };
+
     DataType compiled_lhs_dtype = supported_lhs_dtype;
     DataType compiled_rhs_dtype = supported_rhs_dtype;
     DataType compiled_aux_dtype = node.output_dtype.value();
@@ -2260,10 +2292,13 @@ shared_ptr<CompiledMatmul> EquationCompiler::compileMatmul(const PhysicalExpress
     } else if (!supports_regular_matmul_plan(supported_lhs_dtype, supported_rhs_dtype, node.output_dtype.value())) {
         throw std::runtime_error(
             "Matmul requested an unsupported operand/output dtype combination and Thor will not implicitly convert matrix "
-            "operands. Add an explicit expression conversion or choose a directly supported plan. lhs=" +
-            TensorDescriptor::getElementTypeName(lhs_input.input_tensor_dtype.value()) + ", rhs=" +
-            TensorDescriptor::getElementTypeName(rhs_input.input_tensor_dtype.value()) + ", output=" +
-            TensorDescriptor::getElementTypeName(node.output_dtype.value()) + ".");
+            "operands. Add an explicit expression conversion or choose a directly supported plan. op=" + opName(node.op) +
+            ", stage_outputs=" + output_names() + ", " + describe_stage_input(lhs_input, "lhs") + ", " +
+            describe_stage_input(rhs_input, "rhs") + ", output=" +
+            TensorDescriptor::getElementTypeName(node.output_dtype.value()) + ", compute=" +
+            (node.compute_dtype.has_value() ? TensorDescriptor::getElementTypeName(node.compute_dtype.value()) : std::string("<unset>")) +
+            ", transpose_lhs=" + std::string(node.transpose_lhs ? "true" : "false") + ", transpose_rhs=" +
+            std::string(node.transpose_rhs ? "true" : "false") + ".");
     }
 
     double alpha_scale = node.alpha_fp;
@@ -4284,13 +4319,20 @@ static PhysicalExecutionStage buildMatmulStage(const PhysicalExpression& expr,
         const ExprNode& parent = expr.nodes[parent_idx];
         std::optional<DataType> actual_input_dtype = std::nullopt;
 
+        std::string input_name;
         auto out_it = node_output_value_id.find(parent_idx);
         if (out_it != node_output_value_id.end()) {
             input_value_ids.push_back(out_it->second);
             actual_input_dtype = parent.output_dtype;
+            input_name = inputNameForSlot(local_slot) + ":value" + std::to_string(out_it->second) + ":" +
+                         opName(parent.op) + ":node" + std::to_string(parent_idx);
         } else if (parent.op == ExprOp::INPUT) {
             input_value_ids.push_back(parent.input_slot);
             actual_input_dtype = parent.input_tensor_dtype;
+            if (parent.input_slot >= expr.inputs.size()) {
+                throw std::runtime_error("Matmul/gemm root input slot is out of range.");
+            }
+            input_name = inputNameForSlot(local_slot) + ":root:" + expr.inputs[parent.input_slot].name;
         } else {
             throw std::runtime_error("Missing value id for matmul/gemm input.");
         }
@@ -4302,7 +4344,9 @@ static PhysicalExecutionStage buildMatmulStage(const PhysicalExpression& expr,
             throw std::runtime_error("Matmul/gemm parent node missing resolved actual input dtype.");
         }
 
-        stage_expr.inputs.push_back(NamedInput{inputNameForSlot(local_slot), local_slot, NamedInput::Kind::Tensor});
+        stage_expr.inputs.push_back(NamedInput{input_name.empty() ? inputNameForSlot(local_slot) : input_name,
+                                                local_slot,
+                                                NamedInput::Kind::Tensor});
 
         ExprNode input_node;
         input_node.op = ExprOp::INPUT;

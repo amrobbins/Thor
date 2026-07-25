@@ -4,6 +4,7 @@
 
 #include "DeepLearning/Api/Initializers/Initializer.h"
 #include "DeepLearning/Api/Layers/Learning/CustomLayer.h"
+#include "DeepLearning/Api/Layers/Learning/LayerEpilogue.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
@@ -37,6 +38,8 @@ class Attention : public CustomLayer {
               const std::vector<TensorMap>& inputInterfaces,
               const std::vector<TensorMap>& outputInterfaces,
               std::vector<std::shared_ptr<ParameterSpecification>> parameters,
+              std::optional<ThorImplementation::Expression> epilogue,
+              std::vector<std::pair<std::string, Tensor>> epilogueInputBindings,
               uint32_t numHeads,
               uint32_t numKeyValueHeads,
               uint32_t headDim,
@@ -87,6 +90,8 @@ class Attention : public CustomLayer {
           dropoutProbability(dropoutProbability),
           dropoutSeed(dropoutSeed),
           dropoutOffset(dropoutOffset),
+          epilogue(std::move(epilogue)),
+          epilogueInputBindings(std::move(epilogueInputBindings)),
           contextInput(std::move(contextInput)),
           scoreBiasInput(std::move(scoreBiasInput)),
           querySequenceLengthsInput(std::move(querySequenceLengthsInput)),
@@ -112,6 +117,61 @@ class Attention : public CustomLayer {
                              ThorImplementation::StampedNetwork& stampedNetwork) const override;
     static void deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader, const nlohmann::json& j, Network* network);
     nlohmann::json architectureJson() const override;
+
+    static const char* epilogueInputName() { return "__attention_epilogue_input"; }
+    static const char* epilogueOutputName() { return "__attention_epilogue_output"; }
+
+    [[nodiscard]] static ThorImplementation::Expression epilogueInput(
+        std::optional<ThorImplementation::DataType> computeDType = std::nullopt,
+        std::optional<ThorImplementation::DataType> outputDType = std::nullopt) {
+        return LayerEpilogue::input(epilogueInputName(), computeDType, outputDType);
+    }
+
+    [[nodiscard]] static ThorImplementation::Expression epilogueAuxInput(
+        const std::string& inputName,
+        std::optional<ThorImplementation::DataType> computeDType = std::nullopt,
+        std::optional<ThorImplementation::DataType> outputDType = std::nullopt) {
+        validateEpilogueAuxInputName(inputName);
+        return LayerEpilogue::input(inputName, computeDType, outputDType);
+    }
+
+    [[nodiscard]] static ThorImplementation::ExpressionDefinition makeEpilogueDefinition(
+        const ThorImplementation::Expression& expression,
+        const std::vector<std::string>& auxiliaryInputNames = {}) {
+        ThorImplementation::ExpressionDefinition definition =
+            LayerEpilogue::makeDefinition(expression, epilogueInputName(), auxiliaryInputNames, epilogueOutputName(), "Attention");
+        validateEpilogueShapePreserving(definition);
+        return definition;
+    }
+
+    static void validateEpilogueExpression(const ThorImplementation::Expression& expression,
+                                           const std::vector<std::string>& auxiliaryInputNames = {}) {
+        ThorImplementation::ExpressionDefinition definition =
+            LayerEpilogue::makeDefinition(expression, epilogueInputName(), auxiliaryInputNames, epilogueOutputName(), "Attention");
+        validateEpilogueShapePreserving(definition);
+    }
+
+    static void validateEpilogueDefinition(const ThorImplementation::ExpressionDefinition& definition,
+                                           const std::vector<std::string>& auxiliaryInputNames = {}) {
+        LayerEpilogue::validateDefinition(definition, epilogueInputName(), auxiliaryInputNames, epilogueOutputName(), "Attention");
+        validateEpilogueShapePreserving(definition);
+    }
+
+    [[nodiscard]] static ThorImplementation::Expression epilogueExpressionFromDefinition(
+        const ThorImplementation::ExpressionDefinition& definition,
+        const std::vector<std::string>& auxiliaryInputNames = {}) {
+        validateEpilogueDefinition(definition, auxiliaryInputNames);
+        return LayerEpilogue::expressionFromDefinition(
+            definition, epilogueInputName(), auxiliaryInputNames, epilogueOutputName(), "Attention");
+    }
+
+    [[nodiscard]] static ThorImplementation::Expression applyEpilogue(const ThorImplementation::Expression& input,
+                                                                      const ThorImplementation::Expression& epilogue) {
+        return LayerEpilogue::apply(input, epilogue, epilogueInputName());
+    }
+
+    static void validateEpilogueAuxInputName(const std::string& inputName);
+    static void validateEpilogueShapePreserving(const ThorImplementation::ExpressionDefinition& definition);
 
     uint32_t getNumHeads() const { return numHeads; }
     uint32_t getNumKeyValueHeads() const { return numKeyValueHeads; }
@@ -146,6 +206,8 @@ class Attention : public CustomLayer {
     DataType getWeightsDataType() const { return weightsDataType; }
     DataType getComputeDataType() const { return computeDataType; }
     DataType getOutputDataType() const { return outputDataType; }
+    bool hasEpilogue() const { return epilogue.has_value(); }
+    const std::vector<std::pair<std::string, Tensor>>& getEpilogueInputBindings() const { return epilogueInputBindings; }
 
    private:
     uint32_t numHeads;
@@ -165,6 +227,9 @@ class Attention : public CustomLayer {
     float dropoutProbability;
     int64_t dropoutSeed;
     int64_t dropoutOffset;
+    const std::optional<ThorImplementation::Expression> epilogue;
+    std::vector<std::pair<std::string, Tensor>> epilogueInputBindings;
+    mutable std::optional<ThorImplementation::ExpressionDefinition> serializableEpilogue;
     std::optional<Tensor> contextInput;
     std::optional<Tensor> scoreBiasInput;
     std::optional<Tensor> querySequenceLengthsInput;
@@ -361,6 +426,29 @@ class Attention::Builder {
         return *this;
     }
 
+    virtual Attention::Builder& epilogue(const ThorImplementation::Expression& expression) {
+        THOR_THROW_IF_FALSE(!this->_epilogue.has_value());
+        Attention::validateEpilogueExpression(expression, epilogueAuxInputNames());
+        _epilogue = expression;
+        return *this;
+    }
+
+    virtual Attention::Builder& epilogueInput(const std::string& inputName, Tensor tensor) {
+        Attention::validateEpilogueAuxInputName(inputName);
+        THOR_THROW_IF_FALSE(tensor.isInitialized());
+        for (const auto& [existingName, existingTensor] : _epilogueInputBindings) {
+            (void)existingTensor;
+            if (existingName == inputName) {
+                throw std::invalid_argument("Attention epilogue input name is duplicated: " + inputName + ".");
+            }
+        }
+        _epilogueInputBindings.emplace_back(inputName, tensor);
+        if (_epilogue.has_value()) {
+            Attention::validateEpilogueExpression(_epilogue.value(), epilogueAuxInputNames());
+        }
+        return *this;
+    }
+
     virtual Attention::Builder& weightsInitializer(std::shared_ptr<Initializer> initializer) {
         THOR_THROW_IF_FALSE(this->_weightsInitializer == nullptr);
         this->_weightsInitializer = std::move(initializer);
@@ -410,9 +498,21 @@ class Attention::Builder {
     std::optional<DataType> _weightsDataType;
     std::optional<DataType> _computeDataType;
     std::optional<DataType> _outputDataType;
+    std::optional<ThorImplementation::Expression> _epilogue;
+    std::vector<std::pair<std::string, Tensor>> _epilogueInputBindings;
     std::shared_ptr<Initializer> _weightsInitializer;
     std::shared_ptr<Initializer> _biasInitializer;
     std::shared_ptr<Optimizer> _optimizer;
+
+    std::vector<std::string> epilogueAuxInputNames() const {
+        std::vector<std::string> names;
+        names.reserve(_epilogueInputBindings.size());
+        for (const auto& [name, tensor] : _epilogueInputBindings) {
+            (void)tensor;
+            names.push_back(name);
+        }
+        return names;
+    }
 };
 
 }  // namespace Thor

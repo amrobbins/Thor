@@ -221,6 +221,17 @@ void setFp8AmaxPointerIfPresent(cublasLtMatmulDesc_t operationDesc, cublasLtMatm
 
 bool usesFp8ColumnMajorLtPath(const OperationType &operationType) { return isCublasLtFp8OperationType(operationType); }
 
+bool cublasLtAlgorithmSupportsOutOfPlaceResult(const cublasLtMatmulAlgo_t &algorithm) {
+    int32_t supportsOutOfPlace = 0;
+    size_t sizeWritten = 0;
+    const cublasStatus_t status = cublasLtMatmulAlgoCapGetAttribute(&algorithm,
+                                                                    CUBLASLT_ALGO_CAP_OUT_OF_PLACE_RESULT_SUPPORT,
+                                                                    &supportsOutOfPlace,
+                                                                    sizeof(supportsOutOfPlace),
+                                                                    &sizeWritten);
+    return status == CUBLAS_STATUS_SUCCESS && sizeWritten == sizeof(supportsOutOfPlace) && supportsOutOfPlace != 0;
+}
+
 uint64_t cudaDataTypeSizeInBytes(cudaDataType_t dataType) {
     switch (dataType) {
         case CUDA_R_32F:
@@ -1203,12 +1214,17 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
 
     const void *ltA = usesFp8ColumnMajorLtPath(operationType) ? B.getMemPtr() : A.getMemPtr();
     const void *ltB = usesFp8ColumnMajorLtPath(operationType) ? A.getMemPtr() : B.getMemPtr();
+    const bool requiresOutOfPlaceResult = C.getMemPtr() != D.getMemPtr();
+
+    auto algorithmSupportsCurrentResultPlacement = [&](const cublasLtMatmulAlgo_t &algorithm) {
+        return !requiresOutOfPlaceResult || cublasLtAlgorithmSupportsOutOfPlaceResult(algorithm);
+    };
 
     // If there is already a known kernel, use it. Otherwise, a heuristic search will be performed and the kernel remembered.
     if (auto optimalKernel = CublasMatrixMultiply::instance().optimalKernels.get(cublasKernelRequirement); optimalKernel.has_value()) {
         cublasLtMatmulAlgo_t algorithm = optimalKernel->getAlgorithm(stream.getGpuNum());
-
-        CHECK_CUBLAS(cublasLtMatmul(stream.getCublasLtHandle(),
+        if (algorithmSupportsCurrentResultPlacement(algorithm)) {
+            CHECK_CUBLAS(cublasLtMatmul(stream.getCublasLtHandle(),
                                     operationDesc,
                                     alpha,
                                     ltA,
@@ -1225,18 +1241,21 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
                                     0,
                                     stream));
 
-        CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(DDesc));
-        CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(CDesc));
-        CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(BDesc));
-        CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(ADesc));
-        CHECK_CUBLAS(cublasLtMatmulDescDestroy(operationDesc));
+            CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(DDesc));
+            CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(CDesc));
+            CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(BDesc));
+            CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(ADesc));
+            CHECK_CUBLAS(cublasLtMatmulDescDestroy(operationDesc));
 
-        return;
-    } else if (auto heuristicAlgorithm = CublasMatrixMultiply::instance().knownHeuristicAlgorithms.get(cublasKernelRequirement);
-               heuristicAlgorithm.has_value()) {
+            return;
+        }
+    }
+
+    if (auto heuristicAlgorithm = CublasMatrixMultiply::instance().knownHeuristicAlgorithms.get(cublasKernelRequirement);
+        heuristicAlgorithm.has_value()) {
         cublasLtMatmulAlgo_t algorithm = *heuristicAlgorithm;
-
-        CHECK_CUBLAS(cublasLtMatmul(stream.getCublasLtHandle(),
+        if (algorithmSupportsCurrentResultPlacement(algorithm)) {
+            CHECK_CUBLAS(cublasLtMatmul(stream.getCublasLtHandle(),
                                     operationDesc,
                                     alpha,
                                     ltA,
@@ -1253,17 +1272,14 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
                                     0,
                                     stream));
 
-        CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(DDesc));
+            CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(DDesc));
+            CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(CDesc));
+            CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(BDesc));
+            CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(ADesc));
+            CHECK_CUBLAS(cublasLtMatmulDescDestroy(operationDesc));
 
-        CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(CDesc));
-
-        CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(BDesc));
-
-        CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(ADesc));
-
-        CHECK_CUBLAS(cublasLtMatmulDescDestroy(operationDesc));
-
-        return;
+            return;
+        }
     }
 
     cublasLtMatmulPreference_t searchPreferences;
@@ -1288,6 +1304,9 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
             // Zero-wave algorithms have caused sporadic runtime failures in this codebase.
             // Apply the same exclusion to every heuristic pass, including the large fallback.
             if (!(heuristicResult.wavesCount > 0.0f) || heuristicResult.workspaceSize != 0) {
+                continue;
+            }
+            if (!algorithmSupportsCurrentResultPlacement(heuristicResult.algo)) {
                 continue;
             }
 
@@ -2132,6 +2151,11 @@ static std::vector<LtMeasuredMatmulAlgorithm> cublasLtGetVerifiedHeuristicContes
     candidates.reserve(static_cast<size_t>(returnedAlgoCount));
     for (int i = 0; i < returnedAlgoCount; ++i) {
         if (results[i].state != CUBLAS_STATUS_SUCCESS || !(results[i].wavesCount > 0.0f)) {
+            continue;
+        }
+        // These plans may be executed with a separate addend C and output D.
+        // Keep only algorithms that are valid for both in-place and out-of-place launches.
+        if (!cublasLtAlgorithmSupportsOutOfPlaceResult(results[i].algo)) {
             continue;
         }
         const uint64_t candidateWorkspaceBytes = static_cast<uint64_t>(results[i].workspaceSize);
@@ -3191,6 +3215,11 @@ vector<CublasKernel> CublasMatrixMultiply::getHeuristicGemmKernels(const int32_t
         if (rawResults[i].state != CUBLAS_STATUS_SUCCESS) {
             continue;
         }
+        // CublasKernelRequirement does not encode whether C and D alias.
+        // Kernels cached from this search must therefore be safe for both C == D and C != D.
+        if (!cublasLtAlgorithmSupportsOutOfPlaceResult(rawResults[i].algo)) {
+            continue;
+        }
 
         // It would be nice if cublasLt only returned algos that are supported by the GPU, but that is not the case.
         cublasLtMatmulHeuristicResult_t result;
@@ -4041,7 +4070,7 @@ void CublasMatrixMultiply::getSupportedCublasAlgorithms(const OperationType &ope
                                               operationType.DDataType,
                                               allSupportedAlgorithmIds[i],
                                               &algo);
-        if (cublasStatus == CUBLAS_STATUS_SUCCESS) {
+        if (cublasStatus == CUBLAS_STATUS_SUCCESS && cublasLtAlgorithmSupportsOutOfPlaceResult(algo)) {
             supportedAlgorithms.push_back(algo);
             supportedAlgorithmIds.push_back(allSupportedAlgorithmIds[i]);
         }

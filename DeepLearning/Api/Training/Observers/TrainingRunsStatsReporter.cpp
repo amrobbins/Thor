@@ -27,12 +27,6 @@ const char* terminalStatusName(const TrainingRunResult& result) { return result.
 
 enum class PadAlignment { LEFT, RIGHT };
 
-std::string formatFixedString(double value, int precision) {
-    char buffer[64];
-    std::snprintf(buffer, sizeof(buffer), "%.*f", precision, value);
-    return std::string(buffer);
-}
-
 std::string formatScientificString(double value, int precision) {
     char buffer[64];
     std::snprintf(buffer, sizeof(buffer), "%.*e", precision, value);
@@ -147,7 +141,6 @@ constexpr const char* bold = "\x1b[1m";
 constexpr const char* key = "\x1b[38;5;235m";
 constexpr const char* label = "\x1b[38;5;235m";
 constexpr const char* progress = "\x1b[38;5;21m";
-constexpr const char* loss = "\x1b[1;38;5;0m";
 constexpr const char* accuracy = "\x1b[38;5;22m";
 constexpr const char* learningRate = "\x1b[38;5;53m";
 constexpr const char* throughput = "\x1b[1;38;2;140;84;0m";
@@ -227,43 +220,63 @@ bool shouldSuppressMetricColumnName(const std::string& name) {
            name == "first_model_selection_epoch";
 }
 
-std::vector<std::pair<std::string, double>> orderedMetricColumns(
-    const std::unordered_map<std::string, double>& metrics,
+std::vector<std::string> orderedMetricNames(
+    const std::unordered_map<std::string, double>* trainingMetrics,
+    const std::unordered_map<std::string, double>* validationMetrics,
+    const std::unordered_map<std::string, double>* testMetrics,
     const std::vector<std::string>& reportOrder) {
-    std::vector<std::pair<std::string, double>> ordered;
-    ordered.reserve(metrics.size());
+    auto metricExists = [&](const std::string& name) {
+        return (trainingMetrics != nullptr && trainingMetrics->count(name) != 0) ||
+               (validationMetrics != nullptr && validationMetrics->count(name) != 0) ||
+               (testMetrics != nullptr && testMetrics->count(name) != 0);
+    };
+
+    std::vector<std::string> ordered;
     std::set<std::string> emitted;
-
     for (const std::string& name : reportOrder) {
-        if (shouldSuppressMetricColumnName(name)) {
+        if (shouldSuppressMetricColumnName(name) || !metricExists(name) || !emitted.insert(name).second) {
             continue;
         }
-        const auto it = metrics.find(name);
-        if (it == metrics.end()) {
-            continue;
-        }
-        ordered.emplace_back(it->first, it->second);
-        emitted.insert(it->first);
+        ordered.push_back(name);
     }
 
-    std::vector<std::pair<std::string, double>> remaining;
-    remaining.reserve(metrics.size());
-    for (const auto& [name, value] : metrics) {
-        if (shouldSuppressMetricColumnName(name) || emitted.count(name) != 0) {
-            continue;
-        }
-        remaining.emplace_back(name, value);
+    if (!reportOrder.empty()) {
+        return ordered;
     }
-    std::sort(remaining.begin(), remaining.end(), [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
+
+    std::set<std::string> remaining;
+    auto collectRemaining = [&](const std::unordered_map<std::string, double>* metrics) {
+        if (metrics == nullptr) {
+            return;
+        }
+        for (const auto& [name, value] : *metrics) {
+            (void)value;
+            if (!shouldSuppressMetricColumnName(name)) {
+                remaining.insert(name);
+            }
+        }
+    };
+    collectRemaining(trainingMetrics);
+    collectRemaining(validationMetrics);
+    collectRemaining(testMetrics);
     ordered.insert(ordered.end(), remaining.begin(), remaining.end());
     return ordered;
 }
+
+void appendPhasePairedMetricColumns(std::string& line,
+                                    const TrainingStatsSnapshot* trainingStats,
+                                    const TrainingStatsSnapshot* validationStats,
+                                    const TrainingStatsSnapshot* testStats,
+                                    bool useColor,
+                                    const std::vector<std::string>& reportOrder);
 
 std::string formatRunsStatsLineBase(const TrainingStatsSnapshot& stats,
                                     std::string_view runLabel,
                                     size_t runPrefixWidth,
                                     std::optional<double> trainLoss,
                                     std::optional<double> validateLoss,
+                                    const TrainingStatsSnapshot* trainingMetricStats,
+                                    const TrainingStatsSnapshot* validationMetricStats,
                                     bool useColor,
                                     const std::vector<std::string>& reportOrder,
                                     const char* trainLossStyle,
@@ -297,10 +310,8 @@ std::string formatRunsStatsLineBase(const TrainingStatsSnapshot& stats,
         appendSummaryDimKey(line, "lr", useColor);
         appendStyledPadded(line, formatScientificString(stats.learningRate.value(), 3), 9, SummaryAnsi::learningRate, useColor);
     }
-    for (const auto& metric : orderedMetricColumns(stats.metrics, reportOrder)) {
-        appendSummaryDimKey(line, metric.first.c_str(), useColor);
-        appendStyledPadded(line, formatFixedString(metric.second, 6), 9, SummaryAnsi::loss, useColor);
-    }
+    appendPhasePairedMetricColumns(
+        line, trainingMetricStats, validationMetricStats, nullptr, useColor, reportOrder);
 
     if (stats.samplesPerSecond > 0.0) {
         appendSummaryDimKey(line, "samples/s", useColor);
@@ -344,6 +355,51 @@ constexpr const char* testLoss = "\x1b[1;38;5;129m";
 constexpr const char* accuracy = "\x1b[38;5;22m";
 }  // namespace FinalReportAnsi
 
+void appendPhaseMetricColumn(std::string& line,
+                             const char* phasePrefix,
+                             const std::string& name,
+                             double value,
+                             bool useColor,
+                             const char* valueStyle) {
+    char buffer[192];
+    const bool looksLikeAccuracy = name.find("accuracy") != std::string::npos;
+    std::snprintf(buffer, sizeof(buffer), "%s_%s=%.*f", phasePrefix, name.c_str(), looksLikeAccuracy ? 4 : 6, value);
+    line += " ";
+    line += styledText(buffer, looksLikeAccuracy ? FinalReportAnsi::accuracy : valueStyle, useColor);
+}
+
+void appendPhasePairedMetricColumns(std::string& line,
+                                    const TrainingStatsSnapshot* trainingStats,
+                                    const TrainingStatsSnapshot* validationStats,
+                                    const TrainingStatsSnapshot* testStats,
+                                    bool useColor,
+                                    const std::vector<std::string>& reportOrder) {
+    const auto* trainingMetrics = trainingStats == nullptr ? nullptr : &trainingStats->metrics;
+    const auto* validationMetrics = validationStats == nullptr ? nullptr : &validationStats->metrics;
+    const auto* testMetrics = testStats == nullptr ? nullptr : &testStats->metrics;
+
+    for (const std::string& name : orderedMetricNames(trainingMetrics, validationMetrics, testMetrics, reportOrder)) {
+        if (trainingMetrics != nullptr) {
+            const auto it = trainingMetrics->find(name);
+            if (it != trainingMetrics->end()) {
+                appendPhaseMetricColumn(line, "train", name, it->second, useColor, FinalReportAnsi::trainLoss);
+            }
+        }
+        if (validationMetrics != nullptr) {
+            const auto it = validationMetrics->find(name);
+            if (it != validationMetrics->end()) {
+                appendPhaseMetricColumn(line, "validate", name, it->second, useColor, FinalReportAnsi::validateLoss);
+            }
+        }
+        if (testMetrics != nullptr) {
+            const auto it = testMetrics->find(name);
+            if (it != testMetrics->end()) {
+                appendPhaseMetricColumn(line, "test", name, it->second, useColor, FinalReportAnsi::testLoss);
+            }
+        }
+    }
+}
+
 void appendPhaseLossColumns(std::string& line,
                             std::optional<double> trainLoss,
                             std::optional<double> validateLoss,
@@ -366,25 +422,6 @@ void appendPhaseLossColumns(std::string& line,
         line += styledText(buffer, validateLossStyle, useColor);
     } else {
         line.append(VALIDATE_LOSS_FIELD_WIDTH, ' ');
-    }
-}
-
-void appendFinalPhaseMetricColumns(std::string& line,
-                                   const std::optional<TrainingStatsSnapshot>& stats,
-                                   const char* phasePrefix,
-                                   bool useColor,
-                                   const std::vector<std::string>& reportOrder) {
-    if (!stats.has_value()) {
-        return;
-    }
-
-
-    for (const auto& [name, value] : orderedMetricColumns(stats->metrics, reportOrder)) {
-        char buffer[160];
-        const bool looksLikeAccuracy = name.find("accuracy") != std::string::npos;
-        std::snprintf(buffer, sizeof(buffer), "%s_%s=%.*f", phasePrefix, name.c_str(), looksLikeAccuracy ? 4 : 6, value);
-        line += " ";
-        line += styledText(buffer, looksLikeAccuracy ? FinalReportAnsi::accuracy : FinalReportAnsi::testLoss, useColor);
     }
 }
 
@@ -830,11 +867,17 @@ void TrainingRunsStatsReporter::writeRunLineLocked(const RunState& state, size_t
         // forward-only validation throughput as if it were training throughput.
         const TrainingStatsEvent& progressEvent = state.latestTrainingStats.has_value() ? state.latestTrainingStats.value()
                                                                                          : state.latestStats.value();
+        const TrainingStatsSnapshot* trainingMetricStats =
+            state.latestTrainingStats.has_value() ? &state.latestTrainingStats->stats : nullptr;
+        const TrainingStatsSnapshot* validationMetricStats =
+            state.latestValidationStats.has_value() ? &state.latestValidationStats->stats : nullptr;
         std::string line = formatRunsStatsLineBase(progressEvent.stats,
                                                   formatRunLabel(state.runName, state.config.ensembleGroup),
                                                   runPrefixWidth,
                                                   displayedLossFromState(state.trainingLoss),
                                                   displayedLossFromState(state.validationLoss),
+                                                  trainingMetricStats,
+                                                  validationMetricStats,
                                                   shouldUseColorLocked(),
                                                   state.config.reportOrder,
                                                   FinalReportAnsi::trainLoss,
@@ -908,9 +951,13 @@ void TrainingRunsStatsReporter::writeResultLineLocked(const TrainingRunResult& r
         line += " ";
         line += styled(buffer, FinalReportAnsi::testLoss, useColor);
     }
-    appendFinalPhaseMetricColumns(line, result.finalTrainingStats, "train", useColor, reportOrder);
-    appendFinalPhaseMetricColumns(line, result.finalValidationStats, "validate", useColor, reportOrder);
-    appendFinalPhaseMetricColumns(line, result.finalTestStats, "test", useColor, reportOrder);
+    appendPhasePairedMetricColumns(
+        line,
+        result.finalTrainingStats.has_value() ? &*result.finalTrainingStats : nullptr,
+        result.finalValidationStats.has_value() ? &*result.finalValidationStats : nullptr,
+        result.finalTestStats.has_value() ? &*result.finalTestStats : nullptr,
+        useColor,
+        reportOrder);
     if (result.earlyCompleted()) {
         if (result.completedEpoch.has_value()) {
             line += " completed_epoch=" + std::to_string(result.completedEpoch.value());

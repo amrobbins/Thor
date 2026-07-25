@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "Utilities/Expression/ExpressionDTypeResolution.h"
 #include "Utilities/Expression/StampedEquation.h"
 
 namespace ThorImplementation {
@@ -326,6 +327,70 @@ std::optional<DataType> preferredGradValueDType(const ExprNode& forward_node) {
     return std::nullopt;
 }
 
+std::optional<DataType> materializedForwardOperandDType(const PhysicalExpression& forward_expr,
+                                                            uint32_t node_idx,
+                                                            std::unordered_set<uint32_t>& visiting) {
+    if (node_idx >= forward_expr.nodes.size()) {
+        throw std::runtime_error("Matmul autodiff materialized-dtype query index out of range.");
+    }
+    if (!visiting.insert(node_idx).second) {
+        throw std::runtime_error("Matmul autodiff materialized-dtype query encountered a cycle.");
+    }
+
+    const ExprNode& node = forward_expr.nodes.at(node_idx);
+    std::optional<DataType> dtype;
+    switch (node.op) {
+        case ExprOp::INPUT:
+            // INPUT may deliberately expose a promoted logical value dtype while
+            // remaining backed by lower-precision parameter storage.  cuBLASLt
+            // consumes the storage dtype, so autodiff must make the same distinction.
+            dtype = node.input_tensor_dtype.has_value() ? node.input_tensor_dtype : node.output_dtype;
+            break;
+        case ExprOp::RESHAPE:
+        case ExprOp::STRIDED_VIEW:
+        case ExprOp::TRANSPOSE:
+        case ExprOp::UNSQUEEZE:
+        case ExprOp::SQUEEZE:
+            dtype = materializedForwardOperandDType(forward_expr, node.lhs, visiting);
+            break;
+        case ExprOp::CAST:
+            dtype = node.output_dtype;
+            break;
+        default:
+            // Non-alias producers cross a stage boundary in their declared output dtype.
+            dtype = node.output_dtype;
+            break;
+    }
+
+    visiting.erase(node_idx);
+    return dtype;
+}
+
+std::optional<DataType> materializedForwardOperandDType(const PhysicalExpression& forward_expr, uint32_t node_idx) {
+    std::unordered_set<uint32_t> visiting;
+    return materializedForwardOperandDType(forward_expr, node_idx, visiting);
+}
+
+std::optional<DataType> matmulLowPrecisionOperandDType(const PhysicalExpression& forward_expr,
+                                                        const ExprNode& matmul_node) {
+    if (matmul_node.op != ExprOp::MATMUL && matmul_node.op != ExprOp::GEMM) {
+        throw std::invalid_argument("matmulLowPrecisionOperandDType requires a MATMUL or GEMM node.");
+    }
+    if (matmul_node.lhs >= forward_expr.nodes.size() || matmul_node.rhs >= forward_expr.nodes.size()) {
+        throw std::runtime_error("Matmul autodiff encountered an invalid matrix operand node index.");
+    }
+
+    const std::optional<DataType> lhs_dtype = materializedForwardOperandDType(forward_expr, matmul_node.lhs);
+    const std::optional<DataType> rhs_dtype = materializedForwardOperandDType(forward_expr, matmul_node.rhs);
+    if (!lhs_dtype.has_value() || !rhs_dtype.has_value() || lhs_dtype.value() != rhs_dtype.value()) {
+        return std::nullopt;
+    }
+    if (lhs_dtype.value() != DataType::BF16 && lhs_dtype.value() != DataType::FP16) {
+        return std::nullopt;
+    }
+    return lhs_dtype.value();
+}
+
 static bool isAttentionBackwardOp(ExprOp op) {
     return op == ExprOp::ATTENTION_BACKWARD_Q || op == ExprOp::ATTENTION_BACKWARD_K || op == ExprOp::ATTENTION_BACKWARD_V ||
            op == ExprOp::ATTENTION_BACKWARD_BIAS;
@@ -574,6 +639,9 @@ class BackwardGraphBuilder {
         node.op = ExprOp::INPUT;
         node.input_slot = grad_expr.getOrCreateInputSlot(name);
         if (as_type.has_value()) {
+            // For synthetic backward inputs, as_type is the actual runtime tensor
+            // dtype, not merely a logical expression preference.
+            node.input_tensor_dtype = as_type.value();
             node.output_dtype = as_type.value();
         }
         return push(std::move(node));
@@ -614,6 +682,11 @@ class BackwardGraphBuilder {
             throw std::runtime_error("BackwardGraphBuilder node query index out of range.");
         }
         return grad_expr.nodes.at(node_idx);
+    }
+
+    std::optional<DataType> tryInferValueDType(uint32_t node_idx) const {
+        std::unordered_set<uint32_t> visiting;
+        return tryInferValueDTypeImpl(node_idx, visiting);
     }
 
     std::optional<std::vector<uint64_t>> tryInferKnownGradientDims(uint32_t node_idx) const {
@@ -1004,6 +1077,22 @@ class BackwardGraphBuilder {
         if (lhs_node.output_dtype.has_value() && lhs_node.output_dtype.value() == dtype) {
             return lhs;
         }
+        ExprNode node{};
+        node.op = ExprOp::CAST;
+        node.lhs = lhs;
+        node.output_dtype = dtype;
+        return push(std::move(node));
+    }
+
+    uint32_t materializeMatmulOperandCast(uint32_t lhs, DataType dtype) {
+        if (isKnownMaterializedAs(lhs, dtype)) {
+            return lhs;
+        }
+
+        // Do not use cast() here: a synthetic input can carry a logical
+        // output_dtype inherited from the forward node while its bound tensor is
+        // actually FP32.  The explicit CAST stage is the storage conversion that
+        // makes the subsequent cuBLASLt operand genuinely BF16/FP16.
         ExprNode node{};
         node.op = ExprOp::CAST;
         node.lhs = lhs;
@@ -1779,6 +1868,150 @@ class BackwardGraphBuilder {
     PhysicalExpression takeExpression() { return std::move(grad_expr); }
 
    private:
+    bool isKnownMaterializedAs(uint32_t node_idx, DataType dtype) const {
+        if (node_idx >= grad_expr.nodes.size()) {
+            throw std::runtime_error("BackwardGraphBuilder materialized-dtype query index out of range.");
+        }
+
+        const ExprNode& node = grad_expr.nodes.at(node_idx);
+        switch (node.op) {
+            case ExprOp::INPUT:
+                return node.input_tensor_dtype.has_value() && node.input_tensor_dtype.value() == dtype;
+            case ExprOp::RESHAPE:
+            case ExprOp::STRIDED_VIEW:
+            case ExprOp::UNSQUEEZE:
+            case ExprOp::SQUEEZE:
+                return isKnownMaterializedAs(node.lhs, dtype);
+            case ExprOp::CAST:
+                return node.output_dtype.has_value() && node.output_dtype.value() == dtype;
+            default:
+                // A non-alias producer feeding a matmul is emitted as its own
+                // materialized stage by the execution planner.
+                return node.output_dtype.has_value() && node.output_dtype.value() == dtype;
+        }
+    }
+
+    std::optional<DataType> tryInferValueDTypeImpl(uint32_t node_idx, std::unordered_set<uint32_t>& visiting) const {
+        if (node_idx >= grad_expr.nodes.size()) {
+            throw std::runtime_error("BackwardGraphBuilder dtype inference node index out of range.");
+        }
+        if (!visiting.insert(node_idx).second) {
+            throw std::runtime_error("BackwardGraphBuilder dtype inference encountered a cycle.");
+        }
+
+        const ExprNode& n = grad_expr.nodes.at(node_idx);
+        if (n.output_dtype.has_value()) {
+            visiting.erase(node_idx);
+            return n.output_dtype;
+        }
+
+        auto is_scalar_like = [&](uint32_t child) {
+            if (child == UINT32_MAX || child >= grad_expr.nodes.size()) {
+                return false;
+            }
+            const ExprOp child_op = grad_expr.nodes.at(child).op;
+            return child_op == ExprOp::SCALAR_FP || child_op == ExprOp::RUNTIME_SCALAR ||
+                   child_op == ExprOp::TENSOR_RUNTIME_SCALAR;
+        };
+        auto infer_child = [&](uint32_t child) -> std::optional<DataType> {
+            if (child == UINT32_MAX) {
+                return std::nullopt;
+            }
+            return tryInferValueDTypeImpl(child, visiting);
+        };
+        auto infer_binary = [&]() -> std::optional<DataType> {
+            // Expression dtype resolution deliberately excludes scalar operands from
+            // tensor-value promotion. Mirror that rule here so multiplying a BF16
+            // gradient by a numeric constant does not make it look FP32.
+            const bool lhs_scalar = is_scalar_like(n.lhs);
+            const bool rhs_scalar = is_scalar_like(n.rhs);
+            if (lhs_scalar && rhs_scalar) {
+                return DataType::FP32;
+            }
+            if (lhs_scalar) {
+                return infer_child(n.rhs);
+            }
+            if (rhs_scalar) {
+                return infer_child(n.lhs);
+            }
+
+            const std::optional<DataType> lhs_dtype = infer_child(n.lhs);
+            const std::optional<DataType> rhs_dtype = infer_child(n.rhs);
+            if (!lhs_dtype.has_value() || !rhs_dtype.has_value()) {
+                return std::nullopt;
+            }
+            return promoteTensorValueDTypes(lhs_dtype.value(), rhs_dtype.value());
+        };
+
+        std::optional<DataType> result;
+        switch (n.op) {
+            case ExprOp::SCALAR_FP:
+            case ExprOp::FILL:
+                result = DataType::FP32;
+                break;
+            case ExprOp::ADD:
+            case ExprOp::SUB:
+            case ExprOp::MUL:
+            case ExprOp::DIV:
+            case ExprOp::POW:
+            case ExprOp::MIN:
+            case ExprOp::MAX:
+            case ExprOp::MIN_GRAD_LEFT:
+            case ExprOp::MIN_GRAD_RIGHT:
+            case ExprOp::MAX_GRAD_LEFT:
+            case ExprOp::MAX_GRAD_RIGHT:
+                result = infer_binary();
+                break;
+            case ExprOp::WHERE: {
+                const bool true_scalar = is_scalar_like(n.rhs);
+                const bool false_scalar = is_scalar_like(n.aux);
+                if (true_scalar && false_scalar) {
+                    result = DataType::FP32;
+                } else if (true_scalar) {
+                    result = infer_child(n.aux);
+                } else if (false_scalar) {
+                    result = infer_child(n.rhs);
+                } else {
+                    const std::optional<DataType> true_dtype = infer_child(n.rhs);
+                    const std::optional<DataType> false_dtype = infer_child(n.aux);
+                    if (true_dtype.has_value() && false_dtype.has_value()) {
+                        result = promoteTensorValueDTypes(true_dtype.value(), false_dtype.value());
+                    }
+                }
+                break;
+            }
+            case ExprOp::MATMUL:
+            case ExprOp::GEMM: {
+                const std::optional<DataType> lhs_dtype = infer_child(n.lhs);
+                const std::optional<DataType> rhs_dtype = infer_child(n.rhs);
+                if (lhs_dtype.has_value() && rhs_dtype.has_value()) {
+                    result = promoteTensorValueDTypes(lhs_dtype.value(), rhs_dtype.value());
+                    if (n.op == ExprOp::GEMM && n.aux != UINT32_MAX && !is_scalar_like(n.aux)) {
+                        const std::optional<DataType> aux_dtype = infer_child(n.aux);
+                        if (aux_dtype.has_value()) {
+                            result = promoteTensorValueDTypes(result.value(), aux_dtype.value());
+                        }
+                    }
+                }
+                break;
+            }
+            case ExprOp::CAST:
+            case ExprOp::INPUT:
+            case ExprOp::RUNTIME_SCALAR:
+            case ExprOp::TENSOR_RUNTIME_SCALAR:
+                // These nodes require an explicit output dtype for build-time inference.
+                break;
+            default:
+                if (Expression::isUnaryOp(n.op)) {
+                    result = infer_child(n.lhs);
+                }
+                break;
+        }
+
+        visiting.erase(node_idx);
+        return result;
+    }
+
     uint32_t push(ExprNode node) {
         const uint32_t idx = static_cast<uint32_t>(grad_expr.nodes.size());
         grad_expr.nodes.push_back(std::move(node));
@@ -2840,6 +3073,7 @@ static std::string dbgDims(const std::vector<uint64_t>& dims) {
 PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                                          const std::vector<std::string>& wrt_names,
                                          const std::optional<std::unordered_map<std::string, std::string>>& upstream_input_names_by_output,
+                                         const std::optional<std::unordered_map<std::string, DataType>>& upstream_input_dtypes_by_output,
                                          const std::optional<std::unordered_map<std::string, uint32_t>>& upstream_node_indices_by_output,
                                          const std::optional<std::unordered_map<std::string, std::vector<uint64_t>>>& forward_input_dims,
                                          bool accumulate_grad_outputs,
@@ -2920,7 +3154,17 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
             if (output_seed == UINT32_MAX && upstream_input_names_by_output.has_value()) {
                 auto upstream_it = upstream_input_names_by_output->find(forward_output.name);
                 if (upstream_it != upstream_input_names_by_output->end()) {
-                    output_seed = builder.input(upstream_it->second);
+                    std::optional<DataType> upstream_dtype;
+                    if (upstream_input_dtypes_by_output.has_value()) {
+                        auto dtype_it = upstream_input_dtypes_by_output->find(forward_output.name);
+                        if (dtype_it == upstream_input_dtypes_by_output->end()) {
+                            throw std::runtime_error(
+                                "buildBackwardOutputs received an upstream gradient input without its runtime dtype for output: " +
+                                forward_output.name);
+                        }
+                        upstream_dtype = dtype_it->second;
+                    }
+                    output_seed = builder.input(upstream_it->second, upstream_dtype);
                 }
             }
 
@@ -3840,22 +4084,44 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
             case ExprOp::MATMUL: {
                 uint32_t grad_like_output = shapeGradLikeNodeOutput(grad, static_cast<uint32_t>(node_idx), node_dims);
                 grad_like_output = builder.applyForwardMatmulEpilogueBackward(node, grad_like_output);
+                uint32_t matrix_grad_like_output = grad_like_output;
+                std::optional<DataType> low_precision_operand_dtype;
+                if (node_reaches_requested_inputs.at(node.lhs) || node_reaches_requested_inputs.at(node.rhs)) {
+                    low_precision_operand_dtype = matmulLowPrecisionOperandDType(forward_expr, node);
+                    if (low_precision_operand_dtype.has_value()) {
+                        // cuBLASLt requires the two regular dense matrix operands to have the same
+                        // FP16/BF16 dtype.  The upstream gradient can still be an untyped synthetic
+                        // CustomLayer input while this graph is built and only resolve to FP32 during
+                        // stamping.  Always establish the low-precision matrix-operand boundary here.
+                        // The helper elides the conversion only when the producer is known to be
+                        // materially in that dtype; this one result is shared by dL/dlhs and dL/drhs.
+                        matrix_grad_like_output =
+                            builder.materializeMatmulOperandCast(grad_like_output, low_precision_operand_dtype.value());
+                    }
+                }
                 const std::vector<uint64_t> lhs_dims = has_forward_dims ? forward_node_dims.at(node.lhs) : std::vector<uint64_t>{};
                 const std::vector<uint64_t> rhs_dims = has_forward_dims ? forward_node_dims.at(node.rhs) : std::vector<uint64_t>{};
                 const auto lhs_grad_dtype = preferredGradValueDType(forward_expr.nodes.at(node.lhs));
                 const auto rhs_grad_dtype = preferredGradValueDType(forward_expr.nodes.at(node.rhs));
 
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    const uint32_t rhs = builder.cloneForward(node.rhs);
+                    uint32_t rhs = builder.cloneForward(node.rhs);
+                    if (low_precision_operand_dtype.has_value()) {
+                        // A forward operand may be backed by BF16/FP16 storage while deliberately
+                        // exposing an FP32 logical value.  Reusing that logical value as a backward
+                        // matrix operand requires an explicit down-conversion, independently of the
+                        // upstream-gradient conversion above.
+                        rhs = builder.cast(rhs, low_precision_operand_dtype.value());
+                    }
                     uint32_t lhs_grad = UINT32_MAX;
                     if (!node.transpose_lhs && !node.transpose_rhs) {
-                        lhs_grad = builder.matmul(grad_like_output, rhs, false, true, lhs_grad_dtype, node.compute_dtype);
+                        lhs_grad = builder.matmul(matrix_grad_like_output, rhs, false, true, lhs_grad_dtype, node.compute_dtype);
                     } else if (!node.transpose_lhs && node.transpose_rhs) {
-                        lhs_grad = builder.matmul(grad_like_output, rhs, false, false, lhs_grad_dtype, node.compute_dtype);
+                        lhs_grad = builder.matmul(matrix_grad_like_output, rhs, false, false, lhs_grad_dtype, node.compute_dtype);
                     } else if (node.transpose_lhs && !node.transpose_rhs) {
-                        lhs_grad = builder.matmul(rhs, grad_like_output, false, true, lhs_grad_dtype, node.compute_dtype);
+                        lhs_grad = builder.matmul(rhs, matrix_grad_like_output, false, true, lhs_grad_dtype, node.compute_dtype);
                     } else {
-                        lhs_grad = builder.matmul(rhs, grad_like_output, true, true, lhs_grad_dtype, node.compute_dtype);
+                        lhs_grad = builder.matmul(rhs, matrix_grad_like_output, true, true, lhs_grad_dtype, node.compute_dtype);
                     }
 
                     lhs_grad = builder.buildScaledByGemmFactor(node.alpha_node, node.alpha_fp, lhs_grad);
@@ -3863,16 +4129,19 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                 }
 
                 if (node_reaches_requested_inputs.at(node.rhs)) {
-                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    uint32_t lhs = builder.cloneForward(node.lhs);
+                    if (low_precision_operand_dtype.has_value()) {
+                        lhs = builder.cast(lhs, low_precision_operand_dtype.value());
+                    }
                     uint32_t rhs_grad = UINT32_MAX;
                     if (!node.transpose_lhs && !node.transpose_rhs) {
-                        rhs_grad = builder.matmul(lhs, grad_like_output, true, false, rhs_grad_dtype, node.compute_dtype);
+                        rhs_grad = builder.matmul(lhs, matrix_grad_like_output, true, false, rhs_grad_dtype, node.compute_dtype);
                     } else if (!node.transpose_lhs && node.transpose_rhs) {
-                        rhs_grad = builder.matmul(grad_like_output, lhs, true, false, rhs_grad_dtype, node.compute_dtype);
+                        rhs_grad = builder.matmul(matrix_grad_like_output, lhs, true, false, rhs_grad_dtype, node.compute_dtype);
                     } else if (node.transpose_lhs && !node.transpose_rhs) {
-                        rhs_grad = builder.matmul(lhs, grad_like_output, false, false, rhs_grad_dtype, node.compute_dtype);
+                        rhs_grad = builder.matmul(lhs, matrix_grad_like_output, false, false, rhs_grad_dtype, node.compute_dtype);
                     } else {
-                        rhs_grad = builder.matmul(grad_like_output, lhs, true, true, rhs_grad_dtype, node.compute_dtype);
+                        rhs_grad = builder.matmul(matrix_grad_like_output, lhs, true, true, rhs_grad_dtype, node.compute_dtype);
                     }
 
                     rhs_grad = builder.buildScaledByGemmFactor(node.alpha_node, node.alpha_fp, rhs_grad);
@@ -3952,6 +4221,21 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
             case ExprOp::GEMM: {
                 uint32_t grad_like_output = shapeGradLikeNodeOutput(grad, static_cast<uint32_t>(node_idx), node_dims);
                 grad_like_output = builder.applyForwardMatmulEpilogueBackward(node, grad_like_output);
+                uint32_t matrix_grad_like_output = grad_like_output;
+                std::optional<DataType> low_precision_operand_dtype;
+                if (node_reaches_requested_inputs.at(node.lhs) || node_reaches_requested_inputs.at(node.rhs)) {
+                    low_precision_operand_dtype = matmulLowPrecisionOperandDType(forward_expr, node);
+                    if (low_precision_operand_dtype.has_value()) {
+                        // cuBLASLt requires the two regular dense matrix operands to have the same
+                        // FP16/BF16 dtype.  The upstream gradient can still be an untyped synthetic
+                        // CustomLayer input while this graph is built and only resolve to FP32 during
+                        // stamping.  Always establish the low-precision matrix-operand boundary here.
+                        // The helper elides the conversion only when the producer is known to be
+                        // materially in that dtype; this one result is shared by dL/dlhs and dL/drhs.
+                        matrix_grad_like_output =
+                            builder.materializeMatmulOperandCast(grad_like_output, low_precision_operand_dtype.value());
+                    }
+                }
                 const std::vector<uint64_t> lhs_dims = has_forward_dims ? forward_node_dims.at(node.lhs) : std::vector<uint64_t>{};
                 const std::vector<uint64_t> rhs_dims = has_forward_dims ? forward_node_dims.at(node.rhs) : std::vector<uint64_t>{};
                 const std::vector<uint64_t> aux_dims = has_forward_dims ? forward_node_dims.at(node.aux) : std::vector<uint64_t>{};
@@ -3969,16 +4253,19 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                 }
 
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    const uint32_t rhs = builder.cloneForward(node.rhs);
+                    uint32_t rhs = builder.cloneForward(node.rhs);
+                    if (low_precision_operand_dtype.has_value()) {
+                        rhs = builder.cast(rhs, low_precision_operand_dtype.value());
+                    }
                     uint32_t lhs_grad = UINT32_MAX;
                     if (!node.transpose_lhs && !node.transpose_rhs) {
-                        lhs_grad = builder.matmul(grad_like_output, rhs, false, true, lhs_grad_dtype, node.compute_dtype);
+                        lhs_grad = builder.matmul(matrix_grad_like_output, rhs, false, true, lhs_grad_dtype, node.compute_dtype);
                     } else if (!node.transpose_lhs && node.transpose_rhs) {
-                        lhs_grad = builder.matmul(grad_like_output, rhs, false, false, lhs_grad_dtype, node.compute_dtype);
+                        lhs_grad = builder.matmul(matrix_grad_like_output, rhs, false, false, lhs_grad_dtype, node.compute_dtype);
                     } else if (node.transpose_lhs && !node.transpose_rhs) {
-                        lhs_grad = builder.matmul(rhs, grad_like_output, false, true, lhs_grad_dtype, node.compute_dtype);
+                        lhs_grad = builder.matmul(rhs, matrix_grad_like_output, false, true, lhs_grad_dtype, node.compute_dtype);
                     } else {
-                        lhs_grad = builder.matmul(rhs, grad_like_output, true, true, lhs_grad_dtype, node.compute_dtype);
+                        lhs_grad = builder.matmul(rhs, matrix_grad_like_output, true, true, lhs_grad_dtype, node.compute_dtype);
                     }
 
                     lhs_grad = builder.buildScaledByGemmFactor(node.alpha_node, node.alpha_fp, lhs_grad);
@@ -3986,16 +4273,19 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                 }
 
                 if (node_reaches_requested_inputs.at(node.rhs)) {
-                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    uint32_t lhs = builder.cloneForward(node.lhs);
+                    if (low_precision_operand_dtype.has_value()) {
+                        lhs = builder.cast(lhs, low_precision_operand_dtype.value());
+                    }
                     uint32_t rhs_grad = UINT32_MAX;
                     if (!node.transpose_lhs && !node.transpose_rhs) {
-                        rhs_grad = builder.matmul(lhs, grad_like_output, true, false, rhs_grad_dtype, node.compute_dtype);
+                        rhs_grad = builder.matmul(lhs, matrix_grad_like_output, true, false, rhs_grad_dtype, node.compute_dtype);
                     } else if (!node.transpose_lhs && node.transpose_rhs) {
-                        rhs_grad = builder.matmul(grad_like_output, lhs, true, false, rhs_grad_dtype, node.compute_dtype);
+                        rhs_grad = builder.matmul(matrix_grad_like_output, lhs, true, false, rhs_grad_dtype, node.compute_dtype);
                     } else if (node.transpose_lhs && !node.transpose_rhs) {
-                        rhs_grad = builder.matmul(lhs, grad_like_output, false, false, rhs_grad_dtype, node.compute_dtype);
+                        rhs_grad = builder.matmul(lhs, matrix_grad_like_output, false, false, rhs_grad_dtype, node.compute_dtype);
                     } else {
-                        rhs_grad = builder.matmul(grad_like_output, lhs, true, true, rhs_grad_dtype, node.compute_dtype);
+                        rhs_grad = builder.matmul(matrix_grad_like_output, lhs, true, true, rhs_grad_dtype, node.compute_dtype);
                     }
 
                     rhs_grad = builder.buildScaledByGemmFactor(node.alpha_node, node.alpha_fp, rhs_grad);
@@ -4394,6 +4684,7 @@ PhysicalOutputs buildBackwardOutputs(const PhysicalOutputs& forward_outputs,
                                     wrt_names,
                                     normalizeUpstreamInputNamesByOutput(forward_outputs, upstream_input_name),
                                     std::nullopt,
+                                    std::nullopt,
                                     forward_input_dims,
                                     accumulate_grad_outputs);
 }
@@ -4406,6 +4697,22 @@ PhysicalOutputs buildBackwardOutputs(const PhysicalOutputs& forward_outputs,
     return buildBackwardOutputsImpl(forward_outputs,
                                     wrt_names,
                                     normalizeUpstreamInputNamesByOutput(forward_outputs, upstream_input_names_by_output),
+                                    std::nullopt,
+                                    std::nullopt,
+                                    forward_input_dims,
+                                    accumulate_grad_outputs);
+}
+
+PhysicalOutputs buildBackwardOutputs(const PhysicalOutputs& forward_outputs,
+                                     const std::vector<std::string>& wrt_names,
+                                     const std::unordered_map<std::string, std::string>& upstream_input_names_by_output,
+                                     const std::unordered_map<std::string, DataType>& upstream_input_dtypes_by_output,
+                                     const std::optional<std::unordered_map<std::string, std::vector<uint64_t>>>& forward_input_dims,
+                                     bool accumulate_grad_outputs) {
+    return buildBackwardOutputsImpl(forward_outputs,
+                                    wrt_names,
+                                    normalizeUpstreamInputNamesByOutput(forward_outputs, upstream_input_names_by_output),
+                                    upstream_input_dtypes_by_output,
                                     std::nullopt,
                                     forward_input_dims,
                                     accumulate_grad_outputs);
@@ -4420,6 +4727,7 @@ PhysicalOutputs buildBackwardOutputs(const PhysicalOutputs& forward_outputs,
     return buildBackwardOutputsImpl(forward_outputs,
                                     wrt_names,
                                     normalizeUpstreamInputNamesByOutput(forward_outputs, upstream_input_names_by_output),
+                                    std::nullopt,
                                     normalizeUpstreamNodeIndicesByOutput(forward_outputs, upstream_node_indices_by_output),
                                     forward_input_dims,
                                     accumulate_grad_outputs);
@@ -4434,6 +4742,7 @@ PhysicalOutputs buildDeferredShapeBackwardOutputsTemplate(const PhysicalOutputs&
                                     normalizeUpstreamInputNamesByOutput(forward_outputs, upstream_input_name),
                                     std::nullopt,
                                     std::nullopt,
+                                    std::nullopt,
                                     accumulate_grad_outputs,
                                     true);
 }
@@ -4446,6 +4755,7 @@ PhysicalOutputs buildDeferredShapeBackwardOutputsTemplate(
     return buildBackwardOutputsImpl(forward_outputs,
                                     wrt_names,
                                     normalizeUpstreamInputNamesByOutput(forward_outputs, upstream_input_names_by_output),
+                                    std::nullopt,
                                     std::nullopt,
                                     std::nullopt,
                                     accumulate_grad_outputs,

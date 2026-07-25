@@ -1722,7 +1722,63 @@ static bool tryMatchScaledAddendPattern(const PhysicalExpression& expr,
     return false;
 }
 
+static std::optional<DataType> materializedDTypeForGemmOperand(const PhysicalExpression& expr, uint32_t node_idx) {
+    if (node_idx >= expr.nodes.size()) {
+        return std::nullopt;
+    }
+
+    const ExprNode& node = expr.nodes[node_idx];
+    if (node.op == ExprOp::INPUT || node.op == ExprOp::RUNTIME_SCALAR || node.op == ExprOp::TENSOR_RUNTIME_SCALAR) {
+        // INPUT nodes may intentionally expose a promoted logical output dtype while
+        // remaining backed by lower-precision runtime storage.  Generic fused kernels
+        // can perform that load conversion, but cuBLASLt consumes the materialized
+        // tensor directly and therefore sees input_tensor_dtype.
+        return node.input_tensor_dtype.has_value() ? node.input_tensor_dtype : node.output_dtype;
+    }
+
+    return node.output_dtype;
+}
+
+static bool gemmLoweringHasCompatibleRegularAddendDType(const PhysicalExpression& dtype_resolved_expr,
+                                                        uint32_t add_or_sub_node_idx,
+                                                        const ScaledMatmulPattern& matmul,
+                                                        const ScaledAddendPattern& addend) {
+    if (add_or_sub_node_idx >= dtype_resolved_expr.nodes.size()) {
+        return false;
+    }
+
+    const ExprNode& add_or_sub_node = dtype_resolved_expr.nodes[add_or_sub_node_idx];
+    const std::optional<DataType> lhs_dtype = materializedDTypeForGemmOperand(dtype_resolved_expr, matmul.lhs_idx);
+    const std::optional<DataType> rhs_dtype = materializedDTypeForGemmOperand(dtype_resolved_expr, matmul.rhs_idx);
+    const std::optional<DataType> addend_dtype = materializedDTypeForGemmOperand(dtype_resolved_expr, addend.node_idx);
+    const ExprNode& addend_node = dtype_resolved_expr.nodes[addend.node_idx];
+    if (!lhs_dtype.has_value() || !rhs_dtype.has_value() || !addend_dtype.has_value() ||
+        !addend_node.output_dtype.has_value() || !add_or_sub_node.output_dtype.has_value()) {
+        return false;
+    }
+
+    const bool fp8_operands = lhs_dtype.value() == DataType::FP8_E4M3 || lhs_dtype.value() == DataType::FP8_E5M2 ||
+                              rhs_dtype.value() == DataType::FP8_E4M3 || rhs_dtype.value() == DataType::FP8_E5M2;
+    if (fp8_operands) {
+        // FP8 cuBLASLt plans intentionally support a broader C/D dtype surface.  The
+        // existing compiler support-table validation remains authoritative for them.
+        return true;
+    }
+
+    // Thor's regular FP32/FP16/BF16 cuBLASLt GEMM plans require C and D to share
+    // one materialized dtype.  Also require the addend's logical value dtype to
+    // match that storage dtype.  A direct optimizer weight input is commonly stored
+    // as BF16/FP16 but intentionally exposed as FP32 for pointwise update arithmetic;
+    // absorbing that promoted value into GEMM loses the explicit conversion boundary
+    // and can make the staged compiler plan C as FP32 while stamping binds the original
+    // low-precision tensor.  Leave such expressions as MATMUL plus a fused pointwise
+    // stage, where the existing input load conversion is explicit and well-defined.
+    return addend_dtype.value() == addend_node.output_dtype.value() &&
+           addend_dtype.value() == add_or_sub_node.output_dtype.value();
+}
+
 static bool tryBuildGemmLoweringPattern(const PhysicalExpression& expr,
+                                        const PhysicalExpression& dtype_resolved_expr,
                                         uint32_t node_idx,
                                         const std::vector<std::vector<uint64_t>>& node_dims,
                                         GemmLoweringPattern& out) {
@@ -1750,6 +1806,9 @@ static bool tryBuildGemmLoweringPattern(const PhysicalExpression& expr,
 
         ScaledAddendPattern addend;
         if (!tryMatchScaledAddendPattern(expr, addend_candidate, node_dims, matmul_dims, addend)) {
+            return false;
+        }
+        if (!gemmLoweringHasCompatibleRegularAddendDType(dtype_resolved_expr, node_idx, matmul, addend)) {
             return false;
         }
         if (addend.is_bias_vector) {
@@ -1812,17 +1871,24 @@ static bool tryBuildGemmLoweringPattern(const PhysicalExpression& expr,
     return false;
 }
 
-static void optimizeExpressionGemmPatternsInPlace(PhysicalExpression& expr,
-                                                  const std::unordered_map<uint32_t, RuntimeInputValue>& root_values) {
+static void optimizeExpressionGemmPatternsInPlace(
+    PhysicalExpression& expr,
+    const std::unordered_map<uint32_t, RuntimeInputValue>& root_values,
+    const PhysicalExpression* dtype_resolved_expr = nullptr) {
     if (expr.nodes.empty() || !expressionHasPotentialGemmLoweringPattern(expr)) {
         return;
+    }
+
+    const PhysicalExpression& dtype_view = dtype_resolved_expr != nullptr ? *dtype_resolved_expr : expr;
+    if (dtype_view.nodes.size() != expr.nodes.size()) {
+        throw std::runtime_error("GEMM lowering dtype view does not match the expression node topology.");
     }
 
     std::vector<std::vector<uint64_t>> node_dims = inferExpressionNodeDimsForOptimization(expr, root_values);
 
     for (uint32_t node_idx = 0; node_idx < expr.nodes.size(); ++node_idx) {
         GemmLoweringPattern pattern;
-        if (!tryBuildGemmLoweringPattern(expr, node_idx, node_dims, pattern)) {
+        if (!tryBuildGemmLoweringPattern(expr, dtype_view, node_idx, node_dims, pattern)) {
             continue;
         }
 
@@ -5608,12 +5674,36 @@ PhysicalOutputs FusedEquation::buildShapeSpecializedOutputs(const std::unordered
     // Lower any shape-valid matmul+add/sub patterns to GEMM before building backward.
     // This makes operator-lowered forward expressions follow the same backward path
     // as explicit GEMM expressions, preserving alpha/beta handling consistently.
-    optimizeExpressionGemmPatternsInPlace(*resolved_forward_outputs.expr, root_values);
+    optimizeExpressionGemmPatternsInPlace(*resolved_forward_outputs.expr, root_values, resolved_forward_outputs.expr.get());
 
     if (backward_config->upstream_input_names_by_output.has_value()) {
+        std::unordered_map<std::string, DataType> upstream_input_dtypes_by_output;
+        upstream_input_dtypes_by_output.reserve(backward_config->upstream_input_names_by_output->size());
+        for (const auto& [output_name, upstream_input_name] : backward_config->upstream_input_names_by_output.value()) {
+            bool found_upstream_input = false;
+            for (const NamedInput& root_input : root_inputs) {
+                if (root_input.name != upstream_input_name) {
+                    continue;
+                }
+                auto value_it = root_values.find(root_input.slot);
+                if (value_it == root_values.end()) {
+                    throw std::runtime_error("Missing bound upstream gradient input while rebuilding backward expression: " +
+                                             upstream_input_name);
+                }
+                upstream_input_dtypes_by_output.emplace(output_name, runtimeInputDType(value_it->second));
+                found_upstream_input = true;
+                break;
+            }
+            if (!found_upstream_input) {
+                throw std::runtime_error("Backward equation root inputs do not contain upstream gradient input: " +
+                                         upstream_input_name);
+            }
+        }
+
         return buildBackwardOutputs(resolved_forward_outputs,
                                     backward_config->wrt_names,
                                     backward_config->upstream_input_names_by_output.value(),
+                                    upstream_input_dtypes_by_output,
                                     forward_input_dims,
                                     backward_config->accumulate_grad_outputs);
     }
@@ -5692,7 +5782,16 @@ std::shared_ptr<CompiledOutputs> FusedEquation::compileForRootValues(
     // GEMM optimization pass again on the full multi-output backward graph can force unrelated output
     // branches through one global shape-inference walk.
     if (!backward_config.has_value()) {
-        optimizeExpressionGemmPatternsInPlace(*resolved_outputs.expr, root_values);
+        // GEMM lowering must distinguish a node's logical value dtype from the
+        // materialized dtype of a direct runtime input.  Resolve a parallel dtype
+        // view rather than the expression being rewritten: resolving the original
+        // first would populate pointwise compute dtypes on ADD/SUB nodes and hide an
+        // explicitly requested MATMUL compute mode such as TF32 during lowering.
+        PhysicalOutputs dtype_resolved_outputs = resolved_outputs;
+        dtype_resolved_outputs.expr = std::make_shared<PhysicalExpression>(*resolved_outputs.expr);
+        resolveOutputsDTypesInPlace(dtype_resolved_outputs, dtype_cache_key.root_input_dtypes);
+        optimizeExpressionGemmPatternsInPlace(
+            *resolved_outputs.expr, root_values, dtype_resolved_outputs.expr.get());
     }
 
     resolveOutputsDTypesInPlace(resolved_outputs, dtype_cache_key.root_input_dtypes);

@@ -126,8 +126,18 @@ void bind_activations(nb::module_ &activations) {
     activation.def(
         "add_to_network",
         [](Activation& self, Network& network, Tensor featureInput, const nb::object& epilogue, const nb::object& epilogueInputs) {
+            std::optional<ThorImplementation::Expression> parsedEpilogue = activationEpilogueFromPython(epilogue);
+            std::vector<std::pair<std::string, Tensor>> parsedEpilogueInputs = activationEpilogueInputsFromPython(epilogueInputs);
+
+            // Preserve virtual dispatch to shape-changing standalone activations
+            // when no epilogue was requested. Calling the generic four-argument
+            // overload unconditionally would clone the input shape and, for GLU
+            // variants, incorrectly report the unsplit logical feature width.
+            if (!parsedEpilogue.has_value() && parsedEpilogueInputs.empty()) {
+                return self.addToNetwork(featureInput, &network);
+            }
             return self.addToNetwork(
-                featureInput, &network, activationEpilogueFromPython(epilogue), activationEpilogueInputsFromPython(epilogueInputs));
+                featureInput, &network, std::move(parsedEpilogue), std::move(parsedEpilogueInputs));
         },
         "network"_a,
         "feature_input"_a,

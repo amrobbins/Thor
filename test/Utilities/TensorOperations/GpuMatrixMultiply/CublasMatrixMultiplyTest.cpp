@@ -8,6 +8,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <stdexcept>
 #include <string>
@@ -1469,6 +1470,44 @@ TEST(CublasMatrixMultiply, HeuristicGemmKernelWorksFP32) {
     }
 }
 
+TEST(CublasMatrixMultiply, HeuristicGemmCandidatesSupportOutOfPlaceResultsFP16) {
+    ScopedGpu scopedGpu(0);
+
+    auto kernels = CublasMatrixMultiply::instance().getHeuristicGemmKernels(
+        64,
+        0,
+        256,
+        256,
+        256,
+        256,
+        false,
+        false,
+        false,
+        256,
+        256,
+        256,
+        256,
+        0,
+        0.0f,
+        CublasMatrixMultiply::MatmulDataTypes::same(DataType::FP16),
+        CublasMatrixMultiply::Fp8MatmulScales::none());
+
+    ASSERT_FALSE(kernels.empty());
+    for (CublasKernel &kernel : kernels) {
+        cublasLtMatmulAlgo_t algorithm = kernel.getAlgorithm(0);
+        int32_t supportsOutOfPlace = 0;
+        size_t sizeWritten = 0;
+        ASSERT_EQ(cublasLtMatmulAlgoCapGetAttribute(&algorithm,
+                                                    CUBLASLT_ALGO_CAP_OUT_OF_PLACE_RESULT_SUPPORT,
+                                                    &supportsOutOfPlace,
+                                                    sizeof(supportsOutOfPlace),
+                                                    &sizeWritten),
+                  CUBLAS_STATUS_SUCCESS);
+        EXPECT_EQ(sizeWritten, sizeof(supportsOutOfPlace));
+        EXPECT_NE(supportsOutOfPlace, 0);
+    }
+}
+
 TEST(CublasMatrixMultiply, HeuristicGemmKernelWorksFP16) {
     srand(time(nullptr));
 
@@ -1637,6 +1676,28 @@ TEST(CublasMatrixMultiply, HeuristicGemmKernelWorksFP16) {
                               transposeC,
                               alpha,
                               beta);
+
+        SCOPED_TRACE(::testing::Message() << "rowsA=" << rowsA << " colsA=" << colsA << " rowsB=" << rowsB
+                                          << " colsB=" << colsB << " ldA=" << ldA << " ldB=" << ldB << " ldC=" << ldC
+                                          << " ldD=" << ldD << " transposeA=" << transposeA << " transposeB=" << transposeB
+                                          << " CDInPlace=" << CDInPlace);
+        if (std::getenv("THOR_TEST_LOG_CUBLAS_CASES") != nullptr) {
+            fprintf(stderr,
+                    "HeuristicGemmKernelWorksFP16 rowsA=%lu colsA=%lu rowsB=%lu colsB=%lu ldA=%lu ldB=%lu ldC=%lu "
+                    "ldD=%lu transposeA=%d transposeB=%d CDInPlace=%d\n",
+                    rowsA,
+                    colsA,
+                    rowsB,
+                    colsB,
+                    ldA,
+                    ldB,
+                    ldC,
+                    ldD,
+                    static_cast<int>(transposeA),
+                    static_cast<int>(transposeB),
+                    static_cast<int>(CDInPlace));
+            fflush(stderr);
+        }
 
         CublasMatrixMultiply::instance().gemmUsingHeuristicKernelChoice(A_d,
                                                                         B_d,

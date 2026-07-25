@@ -18,6 +18,7 @@
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 #include "Utilities/Expression/DynamicExpression.h"
+#include "bindings/python/src/core/cast.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -26,6 +27,7 @@ using namespace Thor;
 using DataType = ThorImplementation::DataType;
 using AttentionMaskKind = ThorImplementation::AttentionMaskKind;
 using RotaryScalingKind = ThorImplementation::RotaryScalingKind;
+namespace pybind = Thor::PythonBindings;
 
 namespace {
 
@@ -103,6 +105,54 @@ bool attentionUsesPackedQkvProjection(const Attention& self) {
     }
 }
 
+std::optional<DataType> optionalDataTypeFromPython(const nb::object& obj,
+                                                   const char* functionName,
+                                                   const char* argumentName) {
+    if (obj.is_none()) {
+        return std::nullopt;
+    }
+    return pybind::castArgument<DataType>(obj, functionName, argumentName, "thor.DataType or None", false);
+}
+
+ThorImplementation::Expression makePythonEpilogueInput(const nb::object& outputDTypeObj, const nb::object& computeDTypeObj) {
+    std::optional<DataType> outputDType = optionalDataTypeFromPython(outputDTypeObj, "Attention.epilogue_input", "output_dtype");
+    std::optional<DataType> computeDType = optionalDataTypeFromPython(computeDTypeObj, "Attention.epilogue_input", "compute_dtype");
+    return Attention::epilogueInput(computeDType, outputDType);
+}
+
+ThorImplementation::Expression makePythonEpilogueAuxInput(const std::string& inputName,
+                                                          const nb::object& outputDTypeObj,
+                                                          const nb::object& computeDTypeObj) {
+    std::optional<DataType> outputDType = optionalDataTypeFromPython(outputDTypeObj, "Attention.epilogue_aux_input", "output_dtype");
+    std::optional<DataType> computeDType = optionalDataTypeFromPython(computeDTypeObj, "Attention.epilogue_aux_input", "compute_dtype");
+    return Attention::epilogueAuxInput(inputName, computeDType, outputDType);
+}
+
+void applyPythonEpilogueInputs(Attention::Builder& builder, const nb::object& epilogueInputs) {
+    if (epilogueInputs.is_none()) {
+        return;
+    }
+    nb::dict inputsDict = pybind::castOrTypeError<nb::dict>(
+        epilogueInputs, "Attention() argument 'epilogue_inputs'", "dict[str, thor.Tensor] or None", false);
+    size_t index = 0;
+    for (auto item : inputsDict) {
+        const std::string keyContext = "Attention() argument 'epilogue_inputs' key[" + std::to_string(index) + "]";
+        std::string name = pybind::castOrTypeError<std::string>(item.first, keyContext, "str", false);
+        const std::string valueContext = "Attention() argument 'epilogue_inputs'[" + name + "]";
+        Tensor tensor = pybind::castOrTypeError<Tensor>(item.second, valueContext, "thor.Tensor", false);
+        builder.epilogueInput(name, tensor);
+        ++index;
+    }
+}
+
+void applyPythonEpilogue(Attention::Builder& builder, const nb::object& epilogue) {
+    if (epilogue.is_none()) {
+        return;
+    }
+    builder.epilogue(pybind::castArgument<ThorImplementation::Expression>(
+        epilogue, "Attention", "epilogue", "thor.physical.Expression or None", false));
+}
+
 }  // namespace
 
 void bind_attention(nb::module_& layers) {
@@ -155,7 +205,9 @@ void bind_attention(nb::module_& layers) {
            std::optional<Tensor> query_ragged_offsets,
            std::optional<Tensor> key_value_ragged_offsets,
            std::optional<Tensor> context_input,
-           std::optional<Tensor> score_bias_input) {
+           std::optional<Tensor> score_bias_input,
+           nb::object epilogue,
+           nb::object epilogue_inputs) {
             if (num_heads == 0) {
                 throw nb::value_error("Attention instance: num_heads must be > 0.");
             }
@@ -196,6 +248,8 @@ void bind_attention(nb::module_& layers) {
             if (score_bias_input.has_value()) {
                 builder.scoreBiasInput(score_bias_input.value());
             }
+            applyPythonEpilogueInputs(builder, epilogue_inputs);
+            applyPythonEpilogue(builder, epilogue);
 
             if (query_sequence_lengths.has_value()) {
                 builder.querySequenceLengthsInput(query_sequence_lengths.value());
@@ -317,6 +371,8 @@ void bind_attention(nb::module_& layers) {
         "key_value_ragged_offsets"_a.none() = nb::none(),
         "context_input"_a.none() = nb::none(),
         "score_bias_input"_a.none() = nb::none(),
+        "epilogue"_a.none() = nb::none(),
+        "epilogue_inputs"_a.none() = nb::none(),
         R"nbdoc(
 Public transformer attention layer built from learned Q/K/V/O projections and the
 cuDNN scaled-dot-product attention stage.
@@ -350,6 +406,9 @@ Supported features for FP16/BF16:
   supports sequence broadcast.  Backward materializes sequence-broadcast bias to
   dense score space before cuDNN backward, then reduces dBias back to the public
   bias shape.  Ragged + additive-bias backward is rejected.
+* Output-projection epilogues support the primary projected output plus named
+  auxiliary tensors. Auxiliary tensors must already match the public Attention
+  output shape, storage dtype, and placement; Thor does not insert conversions.
 * Dropout uses cuDNN Philox attention dropout.  ``dropout_probability`` must be in
   ``[0, 1)``.  Thor advances the runtime dropout offset by ``B * Hq * Sq * Skv``.
 * Padding masks use ``query_sequence_lengths`` and ``key_value_sequence_lengths``
@@ -365,6 +424,21 @@ Important combination rules:
 * This layer does not expose paged KV cache; use the physical expression SDPA API
   for the low-level inference-only paged-KV path.
 )nbdoc");
+
+    attention.def_static(
+        "epilogue_input",
+        &makePythonEpilogueInput,
+        "output_dtype"_a.none() = nb::none(),
+        "compute_dtype"_a.none() = nb::none(),
+        R"nbdoc(Return the primary output-projection input expression expected by an Attention epilogue.)nbdoc");
+
+    attention.def_static(
+        "epilogue_aux_input",
+        &makePythonEpilogueAuxInput,
+        "name"_a,
+        "output_dtype"_a.none() = nb::none(),
+        "compute_dtype"_a.none() = nb::none(),
+        R"nbdoc(Return a named auxiliary tensor input expression for an Attention epilogue.)nbdoc");
 
     attention.def("get_feature_output", [](Attention& self) -> Tensor { return self.getOutput("feature_output"); });
     attention.def("get_num_heads", &Attention::getNumHeads);
@@ -400,6 +474,16 @@ Important combination rules:
     attention.def("get_weights_data_type", &Attention::getWeightsDataType);
     attention.def("get_compute_data_type", &Attention::getComputeDataType);
     attention.def("get_output_data_type", &Attention::getOutputDataType);
+    attention.def("get_has_epilogue", &Attention::hasEpilogue);
+    attention.def("get_epilogue_input_names", [](Attention& self) {
+        std::vector<std::string> names;
+        names.reserve(self.getEpilogueInputBindings().size());
+        for (const auto& [name, tensor] : self.getEpilogueInputBindings()) {
+            (void)tensor;
+            names.push_back(name);
+        }
+        return names;
+    });
 
     attention.def("_debug_uses_packed_qkv_projection", &attentionUsesPackedQkvProjection);
     attention.def("_debug_qkv_projection_mode",

@@ -4,8 +4,8 @@
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasKernel.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasKernelRequirement.h"
 
-#include "Utilities/Cache/LruCache.h"
 #include <optional>
+#include "Utilities/Cache/LruCache.h"
 #include "Utilities/Common/ScopedGpu.h"
 #include "Utilities/Common/Stream.h"
 #include "Utilities/ComputeTopology/MachineEvaluator.h"
@@ -58,7 +58,6 @@ class CublasMatrixMultiply {
     virtual ~CublasMatrixMultiply() {}
 
     struct MatmulDataTypes {
-
         DataType A;
         DataType B;
         DataType C;
@@ -68,8 +67,7 @@ class CublasMatrixMultiply {
         MatmulDataTypes(DataType A, DataType B, DataType C, DataType D)
             : A(A), B(B), C(C), D(D), compute(defaultComputeDataType(A, B, C, D)) {}
 
-        MatmulDataTypes(DataType A, DataType B, DataType C, DataType D, DataType compute)
-            : A(A), B(B), C(C), D(D), compute(compute) {}
+        MatmulDataTypes(DataType A, DataType B, DataType C, DataType D, DataType compute) : A(A), B(B), C(C), D(D), compute(compute) {}
 
         static DataType defaultComputeDataType(DataType A, DataType B, DataType C, DataType D) {
             if (A == DataType::INT8 && B == DataType::INT8 && C == DataType::INT8 && D == DataType::INT8) {
@@ -114,8 +112,8 @@ class CublasMatrixMultiply {
         LtMatmulPlan() = default;
         ~LtMatmulPlan();
 
-        LtMatmulPlan(const LtMatmulPlan&) = delete;
-        LtMatmulPlan& operator=(const LtMatmulPlan&) = delete;
+        LtMatmulPlan(const LtMatmulPlan &) = delete;
+        LtMatmulPlan &operator=(const LtMatmulPlan &) = delete;
 
         cublasLtMatmulDesc_t operationDesc(CublasScalarPointerMode pointerMode) const {
             return (pointerMode == CublasScalarPointerMode::Device) ? operation_desc_device : operation_desc_host;
@@ -142,7 +140,6 @@ class CublasMatrixMultiply {
                                          CublasScalarPointerMode pointerMode,
                                          std::optional<Tensor> workspace) const;
     };
-
 
     // fills C as C = A * B, where A, B and C are all matrices whose memory is allocated on the GPU that will be performing the computation.
     //
@@ -380,40 +377,41 @@ class CublasMatrixMultiply {
                                         Stream stream,
                                         CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host);
 
-    std::optional<LtMatmulAlgorithmSelection> selectGemmWithEpilogueAlgorithm(int gpuNum,
-                                                                                const int32_t A_rows,
-                                                                                const int32_t A_cols,
-                                                                                const int32_t B_rows,
-                                                                                const int32_t B_cols,
-                                                                                const int32_t ld_A,
-                                                                                const int32_t ld_B,
-                                                                                const int32_t ld_C,
-                                                                                const int32_t ld_D,
-                                                                                bool transposeA,
-                                                                                bool transposeB,
-                                                                                const MatmulDataTypes dataTypes,
-                                                                                EpilogueFusion epilogue,
-                                                                                bool hasAddend,
-                                                                                bool addendIsBiasVector,
-                                                                                std::optional<uint64_t> maxWorkspaceSizeInBytes = std::nullopt);
+    std::optional<LtMatmulAlgorithmSelection> selectGemmWithEpilogueAlgorithm(
+        int gpuNum,
+        const int32_t A_rows,
+        const int32_t A_cols,
+        const int32_t B_rows,
+        const int32_t B_cols,
+        const int32_t ld_A,
+        const int32_t ld_B,
+        const int32_t ld_C,
+        const int32_t ld_D,
+        bool transposeA,
+        bool transposeB,
+        const MatmulDataTypes dataTypes,
+        EpilogueFusion epilogue,
+        bool hasAddend,
+        bool addendIsBiasVector,
+        std::optional<uint64_t> maxWorkspaceSizeInBytes = std::nullopt);
 
     std::shared_ptr<LtMatmulPlan> buildGemmWithEpiloguePlan(int gpuNum,
-                                                              const int32_t A_rows,
-                                                              const int32_t A_cols,
-                                                              const int32_t B_rows,
-                                                              const int32_t B_cols,
-                                                              const int32_t ld_A,
-                                                              const int32_t ld_B,
-                                                              const int32_t ld_C,
-                                                              const int32_t ld_D,
-                                                              bool transposeA,
-                                                              bool transposeB,
-                                                              const MatmulDataTypes dataTypes,
-                                                              EpilogueFusion epilogue,
-                                                              std::optional<Tensor> addend,
-                                                              bool addendIsBiasVector,
-                                                              std::optional<LtMatmulAlgorithmSelection> selectedAlgorithm = std::nullopt,
-                                                              std::optional<uint64_t> maxWorkspaceSizeInBytes = std::nullopt);
+                                                            const int32_t A_rows,
+                                                            const int32_t A_cols,
+                                                            const int32_t B_rows,
+                                                            const int32_t B_cols,
+                                                            const int32_t ld_A,
+                                                            const int32_t ld_B,
+                                                            const int32_t ld_C,
+                                                            const int32_t ld_D,
+                                                            bool transposeA,
+                                                            bool transposeB,
+                                                            const MatmulDataTypes dataTypes,
+                                                            EpilogueFusion epilogue,
+                                                            std::optional<Tensor> addend,
+                                                            bool addendIsBiasVector,
+                                                            std::optional<LtMatmulAlgorithmSelection> selectedAlgorithm = std::nullopt,
+                                                            std::optional<uint64_t> maxWorkspaceSizeInBytes = std::nullopt);
 
     void runGemmWithEpiloguePlan(Tensor A,
                                  Tensor B,
@@ -424,62 +422,64 @@ class CublasMatrixMultiply {
                                  Stream stream,
                                  CublasScalarPointerMode pointerMode,
                                  std::optional<Tensor> workspace,
-                                 const std::shared_ptr<LtMatmulPlan>& plan,
+                                 const std::shared_ptr<LtMatmulPlan> &plan,
                                  bool addendIsBiasVector);
 
     uint64_t getGemmWithEpilogueWorkspaceSizeInBytes(int gpuNum,
-                                                      const int32_t A_rows,
-                                                      const int32_t A_cols,
-                                                      const int32_t B_rows,
-                                                      const int32_t B_cols,
-                                                      const int32_t ld_A,
-                                                      const int32_t ld_B,
-                                                      const int32_t ld_C,
-                                                      const int32_t ld_D,
-                                                      bool transposeA,
-                                                      bool transposeB,
-                                                      const MatmulDataTypes dataTypes,
-                                                      EpilogueFusion epilogue,
-                                                      bool hasAddend,
-                                                      bool addendIsBiasVector,
-                                                      bool &kernelWillRunOnGpu);
+                                                     const int32_t A_rows,
+                                                     const int32_t A_cols,
+                                                     const int32_t B_rows,
+                                                     const int32_t B_cols,
+                                                     const int32_t ld_A,
+                                                     const int32_t ld_B,
+                                                     const int32_t ld_C,
+                                                     const int32_t ld_D,
+                                                     bool transposeA,
+                                                     bool transposeB,
+                                                     const MatmulDataTypes dataTypes,
+                                                     EpilogueFusion epilogue,
+                                                     bool hasAddend,
+                                                     bool addendIsBiasVector,
+                                                     bool &kernelWillRunOnGpu);
 
-    std::optional<LtMatmulAlgorithmSelection> selectGemmWithBackwardEpilogueAlgorithm(int gpuNum,
-                                                                                         const int32_t A_rows,
-                                                                                         const int32_t A_cols,
-                                                                                         const int32_t B_rows,
-                                                                                         const int32_t B_cols,
-                                                                                         const int32_t ld_A,
-                                                                                         const int32_t ld_B,
-                                                                                         const int32_t ld_C,
-                                                                                         const int32_t ld_D,
-                                                                                         bool transposeA,
-                                                                                         bool transposeB,
-                                                                                         const MatmulDataTypes dataTypes,
-                                                                                         BackwardEpilogueFusion epilogue,
-                                                                                         bool hasAddend,
-                                                                                         bool hasBiasGradient,
-                                                                                         int64_t epilogueAuxLd,
-                                                                                         std::optional<uint64_t> maxWorkspaceSizeInBytes = std::nullopt);
+    std::optional<LtMatmulAlgorithmSelection> selectGemmWithBackwardEpilogueAlgorithm(
+        int gpuNum,
+        const int32_t A_rows,
+        const int32_t A_cols,
+        const int32_t B_rows,
+        const int32_t B_cols,
+        const int32_t ld_A,
+        const int32_t ld_B,
+        const int32_t ld_C,
+        const int32_t ld_D,
+        bool transposeA,
+        bool transposeB,
+        const MatmulDataTypes dataTypes,
+        BackwardEpilogueFusion epilogue,
+        bool hasAddend,
+        bool hasBiasGradient,
+        int64_t epilogueAuxLd,
+        std::optional<uint64_t> maxWorkspaceSizeInBytes = std::nullopt);
 
-    std::shared_ptr<LtMatmulPlan> buildGemmWithBackwardEpiloguePlan(int gpuNum,
-                                                                      const int32_t A_rows,
-                                                                      const int32_t A_cols,
-                                                                      const int32_t B_rows,
-                                                                      const int32_t B_cols,
-                                                                      const int32_t ld_A,
-                                                                      const int32_t ld_B,
-                                                                      const int32_t ld_C,
-                                                                      const int32_t ld_D,
-                                                                      bool transposeA,
-                                                                      bool transposeB,
-                                                                      const MatmulDataTypes dataTypes,
-                                                                      BackwardEpilogueFusion epilogue,
-                                                                      bool hasAddend,
-                                                                      Tensor epilogueAux,
-                                                                      std::optional<Tensor> biasGradient,
-                                                                      std::optional<LtMatmulAlgorithmSelection> selectedAlgorithm = std::nullopt,
-                                                                      std::optional<uint64_t> maxWorkspaceSizeInBytes = std::nullopt);
+    std::shared_ptr<LtMatmulPlan> buildGemmWithBackwardEpiloguePlan(
+        int gpuNum,
+        const int32_t A_rows,
+        const int32_t A_cols,
+        const int32_t B_rows,
+        const int32_t B_cols,
+        const int32_t ld_A,
+        const int32_t ld_B,
+        const int32_t ld_C,
+        const int32_t ld_D,
+        bool transposeA,
+        bool transposeB,
+        const MatmulDataTypes dataTypes,
+        BackwardEpilogueFusion epilogue,
+        bool hasAddend,
+        Tensor epilogueAux,
+        std::optional<Tensor> biasGradient,
+        std::optional<LtMatmulAlgorithmSelection> selectedAlgorithm = std::nullopt,
+        std::optional<uint64_t> maxWorkspaceSizeInBytes = std::nullopt);
 
     void runGemmWithBackwardEpiloguePlan(Tensor A,
                                          Tensor B,
@@ -491,25 +491,25 @@ class CublasMatrixMultiply {
                                          Stream stream,
                                          CublasScalarPointerMode pointerMode,
                                          std::optional<Tensor> workspace,
-                                         const std::shared_ptr<LtMatmulPlan>& plan);
+                                         const std::shared_ptr<LtMatmulPlan> &plan);
 
     uint64_t getGemmWithBackwardEpilogueWorkspaceSizeInBytes(int gpuNum,
-                                                              const int32_t A_rows,
-                                                              const int32_t A_cols,
-                                                              const int32_t B_rows,
-                                                              const int32_t B_cols,
-                                                              const int32_t ld_A,
-                                                              const int32_t ld_B,
-                                                              const int32_t ld_C,
-                                                              const int32_t ld_D,
-                                                              bool transposeA,
-                                                              bool transposeB,
-                                                              const MatmulDataTypes dataTypes,
-                                                              BackwardEpilogueFusion epilogue,
-                                                              bool hasAddend,
-                                                              bool hasBiasGradient,
-                                                              int64_t epilogueAuxLd,
-                                                              bool &kernelWillRunOnGpu);
+                                                             const int32_t A_rows,
+                                                             const int32_t A_cols,
+                                                             const int32_t B_rows,
+                                                             const int32_t B_cols,
+                                                             const int32_t ld_A,
+                                                             const int32_t ld_B,
+                                                             const int32_t ld_C,
+                                                             const int32_t ld_D,
+                                                             bool transposeA,
+                                                             bool transposeB,
+                                                             const MatmulDataTypes dataTypes,
+                                                             BackwardEpilogueFusion epilogue,
+                                                             bool hasAddend,
+                                                             bool hasBiasGradient,
+                                                             int64_t epilogueAuxLd,
+                                                             bool &kernelWillRunOnGpu);
 
     // Non-hot-path legacy/debug API: this helper may construct cuBLASLt descriptors/layouts and run
     // heuristic selection in the call path. Stamped/layer code must use a prebuilt LtMatmulPlan instead.
@@ -866,7 +866,6 @@ class CublasMatrixMultiply {
             gpuNum, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, ldD, transposeA, transposeB, false, ABCDataType, kernelWillRunOnGpu);
     }
 
-
     CublasKernel getCachedGemmKernel(int gpuNum,
                                      int rowsA,
                                      int colsA,
@@ -1049,6 +1048,7 @@ class CublasMatrixMultiply {
     int getSwizzleMaxValue(cublasLtMatmulAlgo_t algo);
     int getCustomKernelOptionMaxValue(cublasLtMatmulAlgo_t algo);
 
+   public:
     std::vector<CublasKernel> getHeuristicGemmKernels(const int32_t numChoices,
                                                       const int gpuNum,
                                                       const int32_t A_rows,
@@ -1069,6 +1069,7 @@ class CublasMatrixMultiply {
                                                       const MatmulDataTypes dataTypes,
                                                       const Fp8MatmulScales fp8Scales);
 
+   private:
     inline std::vector<CublasKernel> getHeuristicMatrixMultiplyKernels(int numChoices,
                                                                        int gpuNum,
                                                                        int rowsA,

@@ -5,6 +5,7 @@
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
 
 #include <optional>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -55,6 +56,18 @@ class GatedLinearUnitActivation : public Activation {
         return activationOutput;
     }
 
+    Tensor addToNetwork(
+        Tensor inputTensor,
+        Network* network,
+        std::optional<ThorImplementation::Expression> epilogueExpression,
+        std::vector<std::pair<std::string, Tensor>> epilogueInputBindingsValue = {}) override {
+        if (epilogueExpression.has_value() || !epilogueInputBindingsValue.empty()) {
+            throw std::invalid_argument(
+                "Standalone gated linear unit activations do not currently support activation epilogues.");
+        }
+        return addToNetwork(inputTensor, network);
+    }
+
    public:
     static Tensor outputTensorForInput(const Tensor& input) {
         return Tensor(input.getDataType(), outputDimensionsForInput(input.getDimensions()));
@@ -78,11 +91,7 @@ class GatedLinearUnitActivation : public Activation {
                                                      std::shared_ptr<ThorImplementation::Layer> drivingLayer,
                                                      std::shared_ptr<Thor::Layer> drivingApiLayer,
                                                      Thor::Tensor connectingApiTensor,
-                                                     const bool inferenceOnly) const override {
-        (void)drivingLayer;
-        (void)drivingApiLayer;
-        return stampExpressionBackedActivation(placement, connectingApiTensor, inferenceOnly);
-    }
+                                                     const bool inferenceOnly) const override;
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         (void)tensorPlacement;

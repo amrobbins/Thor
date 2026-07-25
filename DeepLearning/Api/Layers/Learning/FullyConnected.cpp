@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <optional>
 #include <set>
+#include <sstream>
 
 using namespace std;
 using json = nlohmann::json;
@@ -111,7 +112,57 @@ ThorImplementation::CublasMatrixMultiply::MatmulDataTypes cublasLtMatmulDataType
         fullyConnectedDataTypeName(outputDataType) + ".");
 }
 
-ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias,
+std::string dimensionsString(const std::vector<uint64_t>& dimensions) {
+    std::ostringstream out;
+    out << "[";
+    for (size_t i = 0; i < dimensions.size(); ++i) {
+        if (i != 0)
+            out << ", ";
+        out << dimensions[i];
+    }
+    out << "]";
+    return out.str();
+}
+
+struct ExpressionInputDataTypes {
+    std::optional<DataType> computeDataType;
+    std::optional<DataType> outputDataType;
+};
+
+ExpressionInputDataTypes expressionInputDataTypes(const ThorImplementation::Expression& expression,
+                                                   const std::string& inputName) {
+    const ThorImplementation::PhysicalExpression physicalExpression = expression.expression();
+    std::optional<ExpressionInputDataTypes> resolved;
+
+    for (const ThorImplementation::ExprNode& node : physicalExpression.nodes) {
+        if (node.op != ThorImplementation::ExprOp::INPUT) {
+            continue;
+        }
+        if (node.input_slot >= physicalExpression.inputs.size()) {
+            throw std::runtime_error("FullyConnected epilogue input node has an invalid input slot.");
+        }
+        if (physicalExpression.inputs[node.input_slot].name != inputName) {
+            continue;
+        }
+
+        const ExpressionInputDataTypes candidate{node.compute_dtype, node.output_dtype};
+        if (resolved.has_value() &&
+            (resolved->computeDataType != candidate.computeDataType ||
+             resolved->outputDataType != candidate.outputDataType)) {
+            throw std::runtime_error("FullyConnected epilogue input '" + inputName +
+                                     "' is used with inconsistent dtype annotations.");
+        }
+        resolved = candidate;
+    }
+
+    if (!resolved.has_value()) {
+        throw std::runtime_error("FullyConnected epilogue expression does not contain expected input '" + inputName + "'.");
+    }
+    return resolved.value();
+}
+
+ThorImplementation::DynamicExpression buildFullyConnectedExpression(uint64_t apiLayerId,
+                                                                    bool hasBias,
                                                                     bool preserveInputPrefixDimensions,
                                                                     ThorImplementation::TensorPlacement placement,
                                                                     DataType weightsDataType,
@@ -144,7 +195,8 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias
     return DynamicExpression(
         std::move(expectedInputNames),
         {"feature_output"},
-        [hasBias,
+        [apiLayerId,
+         hasBias,
          preserveInputPrefixDimensions,
          placement,
          weightsDataType,
@@ -230,7 +282,13 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias
                 throw std::runtime_error("FullyConnected logical feature input tensor dimensions must be non-zero.");
             }
             if (logicalFeatureInputDimensions[1] != wTensor.getDimensions()[0]) {
-                throw std::runtime_error("FullyConnected input feature count does not match weights rows.");
+                throw std::runtime_error(
+                    "FullyConnected#" + std::to_string(apiLayerId) +
+                    " input feature count does not match weights rows: preserveInputPrefixDimensions=" +
+                    std::string(preserveInputPrefixDimensions ? "true" : "false") +
+                    ", physical_input_dimensions=" + dimensionsString(originalFeatureInputDimensions) +
+                    ", logical_matmul_input_dimensions=" + dimensionsString(logicalFeatureInputDimensions) +
+                    ", weights_dimensions=" + dimensionsString(wTensor.getDimensions()) + ".");
             }
             if (outputs.contains("feature_output")) {
                 const Tensor& featureOutputTensor = outputs.at("feature_output");
@@ -277,17 +335,14 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias
             }
 
             const std::vector<uint64_t> matmulOutputDimensions = {logicalFeatureInputDimensions[0], wTensor.getDimensions()[1]};
-            if (epilogue.has_value() && runtimeFeatureOutputDimensions != matmulOutputDimensions) {
-                // Apply epilogues in the public output shape.  This keeps tokenwise FullyConnected epilogue
-                // inputs/output shaped [batch, ...prefix, out_features] instead of exposing the folded matmul batch.
-                fout = fout.reshape(runtimeFeatureOutputDimensions);
-            }
             for (const std::string& auxInputName : epilogueAuxInputNames) {
                 const Tensor& auxTensor = inputs.at(auxInputName);
                 const std::vector<uint64_t>& expectedAuxShape = epilogue.has_value() ? runtimeFeatureOutputDimensions : matmulOutputDimensions;
                 if (auxTensor.getDimensions() != expectedAuxShape) {
                     throw std::runtime_error("FullyConnected epilogue auxiliary input '" + auxInputName +
-                                             "' shape must match the fully connected feature output shape.");
+                                             "' shape must match the fully connected feature output shape. expected=" +
+                                             dimensionsString(expectedAuxShape) + ", actual=" +
+                                             dimensionsString(auxTensor.getDimensions()) + ".");
                 }
                 if (auxTensor.getDataType() != outputDataType) {
                     throw std::runtime_error("FullyConnected epilogue auxiliary input '" + auxInputName +
@@ -298,10 +353,27 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias
                 }
             }
             if (epilogue.has_value()) {
-                fout = FullyConnected::applyEpilogue(fout, epilogue.value());
+                // Keep the entire epilogue in the folded matmul geometry.  In training, applying a rank-3
+                // residual epilogue after first reshaping the primary result to [B, ...prefix, O] causes the
+                // same upstream gradient tensor to participate in both the public rank-3 domain and the
+                // folded [B*prefix, O] domain in one backward fused equation.  The fused layout planner
+                // cannot assign one broadcast layout to that input.  Flatten each public-shape auxiliary
+                // epilogue input instead, apply the epilogue at [B*prefix, O], and restore the public shape
+                // only once after the epilogue.
+                Expression effectiveEpilogue = epilogue.value();
+                if (runtimeFeatureOutputDimensions != matmulOutputDimensions) {
+                    for (const std::string& auxInputName : epilogueAuxInputNames) {
+                        const ExpressionInputDataTypes inputDataTypes = expressionInputDataTypes(effectiveEpilogue, auxInputName);
+                        Expression flattenedAuxInput =
+                            Expression::input(auxInputName, inputDataTypes.computeDataType, inputDataTypes.outputDataType)
+                                .reshape(matmulOutputDimensions);
+                        effectiveEpilogue = effectiveEpilogue.substituteInput(auxInputName, flattenedAuxInput);
+                    }
+                }
+                fout = FullyConnected::applyEpilogue(fout, effectiveEpilogue);
             }
 
-            if (!epilogue.has_value() && runtimeFeatureOutputDimensions != matmulOutputDimensions) {
+            if (runtimeFeatureOutputDimensions != matmulOutputDimensions) {
                 fout = fout.reshape(runtimeFeatureOutputDimensions);
             }
 
@@ -720,6 +792,7 @@ std::shared_ptr<ThorImplementation::Layer> FullyConnected::stamp(ThorImplementat
     // Note: Network notices when a layer has already been stamped and only adds a connection; it does not re-stamp the layer.
     std::shared_ptr<ThorImplementation::CustomLayer> physicalFullyConnected = std::make_shared<ThorImplementation::CustomLayer>(
         buildFullyConnectedExpression(
+            getId(),
             hasBias,
             preserveInputPrefixDimensions,
             placement,

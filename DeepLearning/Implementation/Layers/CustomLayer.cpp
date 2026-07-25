@@ -652,10 +652,31 @@ PhysicalOutputs CustomLayer::buildBackwardOutputsForApplication(uint32_t applica
         forwardInputDims[name] = tensor.getDimensions();
     }
 
+    std::unordered_map<std::string, DataType> upstreamInputDTypesByOutput;
+    upstreamInputDTypesByOutput.reserve(app.upstreamInputNamesByOutput.size() + app.fusedCustomLossGradientsByOutput.size());
+    for (const auto& [outputName, upstreamInputName] : app.upstreamInputNamesByOutput) {
+        (void)upstreamInputName;
+        auto outputPortIt = outputNameToPort.find(outputName);
+        if (outputPortIt == outputNameToPort.end()) {
+            throw runtime_error("CustomLayer backward dtype discovery found unknown output name: " + outputName);
+        }
+        const uint32_t flat = outputFlatIndex(applicationIndex, outputPortIt->second);
+        if (flat >= errorInputs.size() || !errorInputs[flat].has_value()) {
+            throw runtime_error("CustomLayer backward dtype discovery expected a connected incoming gradient for output: " + outputName);
+        }
+        upstreamInputDTypesByOutput.emplace(outputName, errorInputs[flat].value().getDataType());
+    }
+    for (const auto& [outputName, fused] : app.fusedCustomLossGradientsByOutput) {
+        // CustomLoss validates that its gradient tensor has the same descriptor as
+        // predictions, so the prediction dtype is the exact synthetic seed dtype.
+        upstreamInputDTypesByOutput.emplace(outputName, fused.predictionsTensor.getDataType());
+    }
+
     if (app.fusedCustomLossGradientsByOutput.empty()) {
         return buildBackwardOutputs(app.forwardPrepared->equation().physicalOutputs(),
                                     wrtNames,
                                     app.upstreamInputNamesByOutput,
+                                    upstreamInputDTypesByOutput,
                                     forwardInputDims,
                                     accumulateGradOutputs);
     }
@@ -683,6 +704,7 @@ PhysicalOutputs CustomLayer::buildBackwardOutputsForApplication(uint32_t applica
     PhysicalOutputs seededBackwardOutputs = buildBackwardOutputs(forwardOutputs,
                                                                  wrtNames,
                                                                  upstreamInputNamesByOutput,
+                                                                 upstreamInputDTypesByOutput,
                                                                  forwardInputDims,
                                                                  accumulateGradOutputs);
     if (!seededBackwardOutputs.expr) {

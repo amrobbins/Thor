@@ -524,3 +524,199 @@ def test_attention_score_bias_rejects_invalid_shape_dtype_and_decode_masks():
             score_bias_input=good_score_bias,
             mask_kind="causal_bottom_right",
         )
+
+
+def _residual_epilogue(dtype=thor.DataType.bf16):
+    attention_output = thor.layers.Attention.epilogue_input(
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+    residual = thor.layers.Attention.epilogue_aux_input(
+        "residual",
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+    return attention_output + residual
+
+
+def test_attention_python_binding_builds_self_attention_residual_epilogue():
+    n = _net("test_attention_python_self_residual_epilogue")
+    x = _input_tensor(n, "tokens", [5, 8], thor.DataType.bf16)
+    residual = _input_tensor(n, "residual", [5, 8], thor.DataType.bf16)
+
+    attention = thor.layers.Attention(
+        n,
+        x,
+        2,
+        head_dim=4,
+        weights_data_type=thor.DataType.bf16,
+        compute_data_type=thor.DataType.fp32,
+        output_data_type=thor.DataType.bf16,
+        epilogue=_residual_epilogue(),
+        epilogue_inputs={"residual": residual},
+    )
+
+    assert attention.get_has_epilogue()
+    assert attention.get_epilogue_input_names() == ["residual"]
+    assert attention.get_feature_output().get_dimensions() == [5, 8]
+    assert attention.get_feature_output().get_data_type() == thor.DataType.bf16
+
+    arch = _only_layer_architecture(n, "attention")
+    assert arch["epilogue"] is not None
+    assert set(arch["epilogue"]["expected_input_names"]) == {
+        "__attention_epilogue_input",
+        "residual",
+    }
+    assert len(arch["epilogue_inputs"]) == 1
+    assert arch["epilogue_inputs"][0]["name"] == "residual"
+    assert arch["epilogue_inputs"][0]["tensor"]["dimensions"] == [5, 8]
+
+
+def test_attention_python_binding_builds_cross_attention_residual_epilogue():
+    n = _net("test_attention_python_cross_residual_epilogue")
+    query = _input_tensor(n, "query", [5, 8], thor.DataType.bf16)
+    context = _input_tensor(n, "context", [7, 12], thor.DataType.bf16)
+    residual = _input_tensor(n, "residual", [5, 8], thor.DataType.bf16)
+
+    attention = thor.layers.Attention(
+        n,
+        query,
+        2,
+        context_input=context,
+        num_key_value_heads=1,
+        head_dim=4,
+        value_dim=4,
+        output_features=8,
+        weights_data_type=thor.DataType.bf16,
+        compute_data_type=thor.DataType.fp32,
+        output_data_type=thor.DataType.bf16,
+        epilogue=_residual_epilogue(),
+        epilogue_inputs={"residual": residual},
+    )
+
+    assert attention.get_use_cross_attention()
+    assert attention.get_has_epilogue()
+    assert attention.get_epilogue_input_names() == ["residual"]
+    assert attention.get_feature_output().get_dimensions() == [5, 8]
+
+
+def test_attention_python_binding_rejects_invalid_residual_epilogue_bindings():
+    n = _net("test_attention_python_rejects_invalid_residual_epilogue_bindings")
+    x = _input_tensor(n, "tokens", [5, 8], thor.DataType.bf16)
+    residual = _input_tensor(n, "residual", [5, 8], thor.DataType.bf16)
+    bad_shape = _input_tensor(n, "bad_shape", [4, 8], thor.DataType.bf16)
+    bad_dtype = _input_tensor(n, "bad_dtype", [5, 8], thor.DataType.fp32)
+
+    with pytest.raises((RuntimeError, ValueError), match="input mismatch"):
+        thor.layers.Attention(
+            n,
+            x,
+            2,
+            head_dim=4,
+            output_data_type=thor.DataType.bf16,
+            epilogue=_residual_epilogue(),
+        )
+
+    with pytest.raises((RuntimeError, ValueError), match="shape must match"):
+        thor.layers.Attention(
+            n,
+            x,
+            2,
+            head_dim=4,
+            output_data_type=thor.DataType.bf16,
+            epilogue=_residual_epilogue(),
+            epilogue_inputs={"residual": bad_shape},
+        )
+
+    with pytest.raises((RuntimeError, ValueError), match="dtype must match"):
+        thor.layers.Attention(
+            n,
+            x,
+            2,
+            head_dim=4,
+            output_data_type=thor.DataType.bf16,
+            epilogue=_residual_epilogue(),
+            epilogue_inputs={"residual": bad_dtype},
+        )
+
+    wrong_storage_annotation = (
+        thor.layers.Attention.epilogue_input(
+            output_dtype=thor.DataType.bf16,
+            compute_dtype=thor.DataType.fp32,
+        )
+        + thor.layers.Attention.epilogue_aux_input(
+            "residual",
+            output_dtype=thor.DataType.fp16,
+            compute_dtype=thor.DataType.fp32,
+        )
+    )
+    with pytest.raises((RuntimeError, ValueError), match="output dtype annotation"):
+        thor.layers.Attention(
+            n,
+            x,
+            2,
+            head_dim=4,
+            output_data_type=thor.DataType.bf16,
+            epilogue=wrong_storage_annotation,
+            epilogue_inputs={"residual": residual},
+        )
+
+    primary_only = thor.layers.Attention.epilogue_input(
+        output_dtype=thor.DataType.bf16,
+        compute_dtype=thor.DataType.fp32,
+    )
+    with pytest.raises((RuntimeError, ValueError), match="input mismatch"):
+        thor.layers.Attention(
+            n,
+            x,
+            2,
+            head_dim=4,
+            output_data_type=thor.DataType.bf16,
+            epilogue=primary_only,
+            epilogue_inputs={"residual": residual},
+        )
+
+    residual_only = thor.layers.Attention.epilogue_aux_input(
+        "residual",
+        output_dtype=thor.DataType.bf16,
+        compute_dtype=thor.DataType.fp32,
+    )
+    with pytest.raises((RuntimeError, ValueError), match="must include tensor input"):
+        thor.layers.Attention(
+            n,
+            x,
+            2,
+            head_dim=4,
+            output_data_type=thor.DataType.bf16,
+            epilogue=residual_only,
+            epilogue_inputs={"residual": residual},
+        )
+
+    with pytest.raises((RuntimeError, ValueError), match="reserved"):
+        thor.layers.Attention.epilogue_aux_input("feature_input")
+
+    shape_changing = thor.layers.Attention.epilogue_input(
+        output_dtype=thor.DataType.bf16,
+        compute_dtype=thor.DataType.fp32,
+    ).reshape([1])
+    with pytest.raises((RuntimeError, ValueError), match="preserve the output projection shape"):
+        thor.layers.Attention(
+            n,
+            x,
+            2,
+            head_dim=4,
+            output_data_type=thor.DataType.bf16,
+            epilogue=shape_changing,
+        )
+
+
+def test_attention_python_binding_without_epilogue_is_unchanged():
+    n = _net("test_attention_python_without_epilogue_is_unchanged")
+    x = _input_tensor(n, "tokens", [5, 8], thor.DataType.bf16)
+    attention = thor.layers.Attention(n, x, 2, head_dim=4)
+
+    assert not attention.get_has_epilogue()
+    assert attention.get_epilogue_input_names() == []
+    arch = _only_layer_architecture(n, "attention")
+    assert arch["epilogue"] is None
+    assert arch["epilogue_inputs"] == []

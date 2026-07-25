@@ -5319,6 +5319,11 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
                     ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
                        << emitVector2Normcdf(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
                     break;
+                case ExprOp::CAST:
+                    // getVectorizedStageStorageDTypeImpl only selects this packed path
+                    // when all tensor inputs, node outputs, and materialized outputs
+                    // share dtype.  CAST is therefore a same-dtype no-op here.
+                    [[fallthrough]];
                 case ExprOp::RESHAPE:
                 case ExprOp::UNSQUEEZE:
                 case ExprOp::SQUEEZE:
@@ -5875,6 +5880,13 @@ static std::string emitVector2SpecializedBroadcast(const CompiledExecutionStage&
                     ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
                        << emitVector2Normcdf(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
                     break;
+                case ExprOp::CAST:
+                    // getVectorizedStageStorageDTypeImpl only selects this packed
+                    // specialized-broadcast path when every tensor input, node
+                    // output, and materialized output has the same dtype. CAST is
+                    // therefore a same-dtype alias here; real storage conversions
+                    // are emitted by the scalar/mixed-dtype path instead.
+                    [[fallthrough]];
                 case ExprOp::RESHAPE:
                 case ExprOp::UNSQUEEZE:
                 case ExprOp::SQUEEZE:

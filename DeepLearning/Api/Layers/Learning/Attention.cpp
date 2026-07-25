@@ -12,6 +12,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <set>
 #include <stdexcept>
 #include <utility>
 
@@ -114,7 +115,11 @@ void requireScoreBiasInput(const Thor::Tensor& tensor,
     }
 }
 
-std::vector<std::string> publicAttentionInputNames(bool useContextInput, bool useScoreBias, bool useSequenceLengths, bool useRaggedOffsets) {
+std::vector<std::string> publicAttentionInputNames(bool useContextInput,
+                                                   bool useScoreBias,
+                                                   bool useSequenceLengths,
+                                                   bool useRaggedOffsets,
+                                                   const std::vector<std::string>& epilogueAuxInputNames) {
     std::vector<std::string> names{kAttentionFeatureInputName};
     if (useContextInput) {
         names.push_back(kAttentionContextInputName);
@@ -130,6 +135,7 @@ std::vector<std::string> publicAttentionInputNames(bool useContextInput, bool us
         names.push_back(kAttentionQueryRaggedOffsetsInputName);
         names.push_back(kAttentionKeyValueRaggedOffsetsInputName);
     }
+    names.insert(names.end(), epilogueAuxInputNames.begin(), epilogueAuxInputNames.end());
     return names;
 }
 
@@ -139,7 +145,8 @@ Thor::CustomLayer::TensorMap publicAttentionInputInterface(const Thor::Tensor& f
                                                            const std::optional<Thor::Tensor>& querySequenceLengthsInput,
                                                            const std::optional<Thor::Tensor>& keyValueSequenceLengthsInput,
                                                            const std::optional<Thor::Tensor>& queryRaggedOffsetsInput,
-                                                           const std::optional<Thor::Tensor>& keyValueRaggedOffsetsInput) {
+                                                           const std::optional<Thor::Tensor>& keyValueRaggedOffsetsInput,
+                                                           const std::vector<std::pair<std::string, Thor::Tensor>>& epilogueInputBindings) {
     Thor::CustomLayer::TensorMap inputInterface{{kAttentionFeatureInputName, featureInput}};
     if (contextInput.has_value()) {
         inputInterface[kAttentionContextInputName] = contextInput.value();
@@ -154,6 +161,9 @@ Thor::CustomLayer::TensorMap publicAttentionInputInterface(const Thor::Tensor& f
     if (queryRaggedOffsetsInput.has_value()) {
         inputInterface[kAttentionQueryRaggedOffsetsInputName] = queryRaggedOffsetsInput.value();
         inputInterface[kAttentionKeyValueRaggedOffsetsInputName] = keyValueRaggedOffsetsInput.value();
+    }
+    for (const auto& [name, tensor] : epilogueInputBindings) {
+        inputInterface[name] = tensor;
     }
     return inputInterface;
 }
@@ -385,6 +395,44 @@ ThorImplementation::RotaryPositionEmbeddingOptions ropeOptionsFromJson(const jso
     return opts;
 }
 
+struct AttentionEpilogueInputDataTypes {
+    std::optional<DataType> computeDataType;
+    std::optional<DataType> outputDataType;
+};
+
+AttentionEpilogueInputDataTypes attentionEpilogueInputDataTypes(
+    const ThorImplementation::Expression& expression,
+    const std::string& inputName) {
+    const ThorImplementation::PhysicalExpression physicalExpression = expression.expression();
+    std::optional<AttentionEpilogueInputDataTypes> resolved;
+
+    for (const ThorImplementation::ExprNode& node : physicalExpression.nodes) {
+        if (node.op != ThorImplementation::ExprOp::INPUT) {
+            continue;
+        }
+        if (node.input_slot >= physicalExpression.inputs.size()) {
+            throw std::runtime_error("Attention epilogue input node has an invalid input slot.");
+        }
+        if (physicalExpression.inputs[node.input_slot].name != inputName) {
+            continue;
+        }
+
+        const AttentionEpilogueInputDataTypes candidate{node.compute_dtype, node.output_dtype};
+        if (resolved.has_value() &&
+            (resolved->computeDataType != candidate.computeDataType ||
+             resolved->outputDataType != candidate.outputDataType)) {
+            throw std::runtime_error("Attention epilogue input '" + inputName +
+                                     "' is used with inconsistent dtype annotations.");
+        }
+        resolved = candidate;
+    }
+
+    if (!resolved.has_value()) {
+        throw std::runtime_error("Attention epilogue expression does not contain expected input '" + inputName + "'.");
+    }
+    return resolved.value();
+}
+
 ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequenceLength,
                                                               uint64_t keyValueSequenceLength,
                                                               uint64_t queryInputFeatures,
@@ -413,7 +461,9 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
                                                               DataType inputDType,
                                                               DataType weightsDType,
                                                               DataType computeDType,
-                                                              DataType outputDType) {
+                                                              DataType outputDType,
+                                                              std::optional<ThorImplementation::Expression> epilogue,
+                                                              std::vector<std::string> epilogueAuxInputNames) {
     using ThorImplementation::AttentionOptions;
     using ThorImplementation::AttentionTensorLayout;
     using ThorImplementation::DynamicExpression;
@@ -474,6 +524,7 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
             expectedInputs.push_back("output_bias");
         }
     }
+    expectedInputs.insert(expectedInputs.end(), epilogueAuxInputNames.begin(), epilogueAuxInputNames.end());
 
     return DynamicExpression(
         expectedInputs,
@@ -507,7 +558,9 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
          inputDType,
          weightsDType,
          computeDType,
-         outputDType](const DynamicExpression::TensorMap& inputs,
+         outputDType,
+         epilogue,
+         epilogueAuxInputNames = std::move(epilogueAuxInputNames)](const DynamicExpression::TensorMap& inputs,
                       const DynamicExpression::TensorMap& outputs,
                       Stream& stream) -> DynamicExpressionBuild {
             (void)stream;
@@ -521,6 +574,24 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
             if (batch == 0 || queryInputDims[1] != querySequenceLength || queryInputDims[2] != queryInputFeatures) {
                 throw std::runtime_error("Attention runtime feature input shape does not match the API query shape.");
             }
+            if (featureInput.getDataType() != inputDType) {
+                throw std::runtime_error("Attention runtime feature input dtype does not match the API input dtype.");
+            }
+
+            const std::vector<uint64_t> runtimeFeatureOutputDimensions = {batch, querySequenceLength, outputFeatures};
+            if (outputs.contains("feature_output")) {
+                const Tensor& featureOutput = outputs.at("feature_output");
+                if (featureOutput.getDimensions() != runtimeFeatureOutputDimensions) {
+                    throw std::runtime_error(
+                        "Attention runtime feature output shape must remain [batch, query_sequence, output_features].");
+                }
+                if (featureOutput.getDataType() != outputDType) {
+                    throw std::runtime_error("Attention runtime feature output dtype must match outputDataType.");
+                }
+                if (featureOutput.getPlacement() != featureInput.getPlacement()) {
+                    throw std::runtime_error("Attention runtime feature output placement must match the feature input placement.");
+                }
+            }
 
             Tensor contextInput = useContextInput ? inputs.at(kAttentionContextInputName) : featureInput;
             const auto contextInputDims = contextInput.getDimensions();
@@ -533,6 +604,22 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
             }
             if (contextInput.getDataType() != inputDType) {
                 throw std::runtime_error("Attention runtime context input dtype must match feature input dtype.");
+            }
+
+            for (const std::string& auxInputName : epilogueAuxInputNames) {
+                const Tensor& auxTensor = inputs.at(auxInputName);
+                if (auxTensor.getDimensions() != std::vector<uint64_t>{batch, querySequenceLength, outputFeatures}) {
+                    throw std::runtime_error("Attention epilogue auxiliary input '" + auxInputName +
+                                             "' shape must match [batch, query_sequence, output_features].");
+                }
+                if (auxTensor.getDataType() != outputDType) {
+                    throw std::runtime_error("Attention epilogue auxiliary input '" + auxInputName +
+                                             "' dtype must match outputDataType.");
+                }
+                if (auxTensor.getPlacement() != featureInput.getPlacement()) {
+                    throw std::runtime_error("Attention epilogue auxiliary input '" + auxInputName +
+                                             "' placement must match the attention feature input placement.");
+                }
             }
 
             std::optional<Tensor> scoreBiasInput;
@@ -825,12 +912,36 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
                 }
                 return Expression::scaledDotProductAttention(q, k, v, options).withOutputDType(outputDType);
             }();
+            const std::vector<uint64_t> foldedOutputDimensions = {batch * querySequenceLength, outputFeatures};
             Expression merged = attn.reshape({batch * querySequenceLength, checkedMul(numHeads, valueDim, "merged head width")});
             Expression out = Expression::matmul(merged, ow, false, false, computeDType, outputDType);
             if (hasBias) {
                 out = out + Expression::input("output_bias", weightsDType, weightsDType);
             }
-            out = out.reshape({batch, querySequenceLength, outputFeatures}).withOutputDType(outputDType);
+            if (epilogue.has_value()) {
+                // Attention exposes [B, Q, O], while the output projection is physically [B*Q, O].
+                // Apply pointwise epilogues in the projection geometry so matmul + residual can lower
+                // to the existing GEMM beta-add path with no materialized projection result or separate
+                // elementwise launch. Restore the public rank only after the epilogue, exactly as the
+                // prefix-preserving FullyConnected path does. Shape-changing epilogues are rejected.
+                Expression effectiveEpilogue = epilogue.value();
+                for (const std::string& auxInputName : epilogueAuxInputNames) {
+                    const AttentionEpilogueInputDataTypes inputDataTypes =
+                        attentionEpilogueInputDataTypes(effectiveEpilogue, auxInputName);
+                    Expression flattenedAuxInput =
+                        Expression::input(auxInputName, inputDataTypes.computeDataType, inputDataTypes.outputDataType)
+                            .reshape(foldedOutputDimensions);
+                    effectiveEpilogue = effectiveEpilogue.substituteInput(auxInputName, flattenedAuxInput);
+                }
+                out = Thor::Attention::applyEpilogue(out, effectiveEpilogue);
+            }
+            out = out.reshape({batch, querySequenceLength, outputFeatures});
+            if (!epilogue.has_value()) {
+                // Preserve the historical non-epilogue expression exactly. Epilogue expressions must resolve
+                // to the declared storage dtype on their own; do not hide an incompatible epilogue result
+                // behind an implicit final output conversion.
+                out = out.withOutputDType(outputDType);
+            }
 
             auto expressionOutputs = Expression::outputs({{"feature_output", out}});
 
@@ -856,8 +967,18 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
                 preForwardHook = [dropoutState](Stream& runStream) { dropoutState->uploadForForward(runStream); };
             }
 
+            auto equation = std::make_shared<FusedEquation>(FusedEquation::compile(expressionOutputs.physicalOutputs(), stream.getGpuNum()));
+            const auto inferredOutputShapes = equation->getOutputShapes(stampInputs, tensorScalarInputs);
+            const auto inferredOutputDataTypes = equation->getOutputDataTypes(stampInputs, tensorScalarInputs);
+            if (inferredOutputShapes.at("feature_output") != runtimeFeatureOutputDimensions) {
+                throw std::runtime_error("Attention epilogue must preserve the feature output shape.");
+            }
+            if (inferredOutputDataTypes.at("feature_output") != outputDType) {
+                throw std::runtime_error("Attention epilogue must preserve the feature output dtype.");
+            }
+
             return DynamicExpressionBuild{
-                std::make_shared<FusedEquation>(FusedEquation::compile(expressionOutputs.physicalOutputs(), stream.getGpuNum())),
+                std::move(equation),
                 stampInputs,
                 std::move(tensorScalarInputs),
                 outputs,
@@ -870,6 +991,101 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
 }  // namespace
 
 namespace Thor {
+
+void Attention::validateEpilogueShapePreserving(const ThorImplementation::ExpressionDefinition& definition) {
+    using ThorImplementation::ExprOp;
+    if (definition.outputs.expr == nullptr) {
+        throw std::invalid_argument("Attention epilogue expression must have a backing expression graph.");
+    }
+
+    for (const ThorImplementation::ExprNode& node : definition.outputs.expr->nodes) {
+        switch (node.op) {
+            case ExprOp::FILL:
+            case ExprOp::RESHAPE:
+            case ExprOp::STRIDED_VIEW:
+            case ExprOp::STRIDED_VIEW_BACKWARD:
+            case ExprOp::UNSQUEEZE:
+            case ExprOp::SQUEEZE:
+            case ExprOp::TRANSPOSE:
+            case ExprOp::TAKE_ALONG_AXIS:
+            case ExprOp::MATMUL:
+            case ExprOp::GEMM:
+            case ExprOp::CONV2D:
+            case ExprOp::CONV2D_BACKWARD_DATA:
+            case ExprOp::CONV2D_BACKWARD_FILTER:
+            case ExprOp::CONV3D:
+            case ExprOp::CONV3D_BACKWARD_DATA:
+            case ExprOp::CONV3D_BACKWARD_FILTER:
+            case ExprOp::REDUCE_SUM:
+            case ExprOp::REDUCE_PROD:
+            case ExprOp::REDUCE_MIN:
+            case ExprOp::REDUCE_MAX:
+            case ExprOp::REDUCE_ARGMIN:
+            case ExprOp::REDUCE_ARGMAX:
+            case ExprOp::REDUCE_MIN_BACKWARD:
+            case ExprOp::REDUCE_MAX_BACKWARD:
+            case ExprOp::SCAN_MIN_BACKWARD:
+            case ExprOp::SCAN_MAX_BACKWARD:
+            case ExprOp::SEGMENTED_SCAN_MIN_BACKWARD:
+            case ExprOp::SEGMENTED_SCAN_MAX_BACKWARD:
+            case ExprOp::REDUCE_AVG:
+            case ExprOp::REDUCE_NORM1:
+            case ExprOp::REDUCE_NORM2:
+            case ExprOp::SCAN:
+            case ExprOp::ATTENTION:
+            case ExprOp::ATTENTION_BACKWARD_Q:
+            case ExprOp::ATTENTION_BACKWARD_K:
+            case ExprOp::ATTENTION_BACKWARD_V:
+            case ExprOp::ATTENTION_BACKWARD_BIAS:
+            case ExprOp::EMBEDDING_LOOKUP:
+            case ExprOp::CUDA_KERNEL_OUTPUT:
+            case ExprOp::SEGMENTED_SCAN:
+            case ExprOp::SEGMENTED_REDUCE_SUM:
+            case ExprOp::SEGMENTED_REDUCE_MIN:
+            case ExprOp::SEGMENTED_REDUCE_MAX:
+            case ExprOp::RAGGED_VALUEWISE_EXTENT:
+            case ExprOp::SEGMENTED_REDUCE_MEAN:
+                throw std::invalid_argument(
+                    "Attention epilogue must preserve the output projection shape; shape-changing operations are not supported.");
+            default:
+                break;
+        }
+    }
+}
+
+void Attention::validateEpilogueAuxInputName(const std::string& inputName) {
+    if (inputName.empty()) {
+        throw std::invalid_argument("Attention epilogue auxiliary input name cannot be empty.");
+    }
+    if (inputName.rfind("__", 0) == 0) {
+        throw std::invalid_argument("Attention epilogue auxiliary input names cannot start with __: " + inputName + ".");
+    }
+    static const std::set<std::string> reservedNames = {
+        kAttentionFeatureInputName,
+        kAttentionContextInputName,
+        kAttentionScoreBiasInputName,
+        kAttentionQuerySequenceLengthsInputName,
+        kAttentionKeyValueSequenceLengthsInputName,
+        kAttentionQueryRaggedOffsetsInputName,
+        kAttentionKeyValueRaggedOffsetsInputName,
+        "feature_output",
+        "qkv_weights",
+        "query_weights",
+        "key_weights",
+        "value_weights",
+        "output_weights",
+        "qkv_bias",
+        "query_bias",
+        "key_bias",
+        "value_bias",
+        "output_bias",
+        epilogueInputName(),
+        epilogueOutputName(),
+    };
+    if (reservedNames.contains(inputName)) {
+        throw std::invalid_argument("Attention epilogue auxiliary input name is reserved: " + inputName + ".");
+    }
+}
 
 void Attention::Builder::verifyConfig() const {
     if (!_network.has_value()) {
@@ -993,6 +1209,46 @@ void Attention::Builder::verifyConfig() const {
                 "Attention bottom-right/decode masks cannot currently be combined with scoreBiasInput in cuDNN SDPA.");
         }
     }
+
+    if (_epilogue.has_value()) {
+        const std::vector<std::string> auxiliaryInputNames = epilogueAuxInputNames();
+        Attention::validateEpilogueExpression(_epilogue.value(), auxiliaryInputNames);
+
+        auto validateExpressionInputDTypes = [&](const std::string& inputName) {
+            const AttentionEpilogueInputDataTypes inputDataTypes =
+                attentionEpilogueInputDataTypes(_epilogue.value(), inputName);
+            if (inputDataTypes.outputDataType.has_value() && inputDataTypes.outputDataType.value() != outputDType) {
+                throw std::invalid_argument("Attention epilogue input '" + inputName +
+                                            "' output dtype annotation must match outputDataType.");
+            }
+            if (inputDataTypes.computeDataType.has_value() && inputDataTypes.computeDataType.value() != computeDType) {
+                throw std::invalid_argument("Attention epilogue input '" + inputName +
+                                            "' compute dtype annotation must match computeDataType.");
+            }
+        };
+        validateExpressionInputDTypes(Attention::epilogueInputName());
+        for (const std::string& inputName : auxiliaryInputNames) {
+            validateExpressionInputDTypes(inputName);
+        }
+    } else if (!_epilogueInputBindings.empty()) {
+        throw std::invalid_argument("Attention epilogue_inputs were provided without an epilogue expression.");
+    }
+    const std::vector<uint64_t> expectedEpilogueInputDims = {
+        _featureInput->getDimensions().at(0),
+        _outputFeatures.value_or(static_cast<uint32_t>(_featureInput->getDimensions().at(1))),
+    };
+    for (const auto& [name, tensor] : _epilogueInputBindings) {
+        Attention::validateEpilogueAuxInputName(name);
+        if (!tensor.isInitialized()) {
+            throw std::invalid_argument("Attention epilogue input '" + name + "' is not initialized.");
+        }
+        if (tensor.getDataType() != outputDType) {
+            throw std::invalid_argument("Attention epilogue input '" + name + "' dtype must match outputDataType.");
+        }
+        if (tensor.getDimensions() != expectedEpilogueInputDims) {
+            throw std::invalid_argument("Attention epilogue input '" + name + "' shape must match feature output shape.");
+        }
+    }
 }
 
 Attention Attention::Builder::build() {
@@ -1082,6 +1338,7 @@ Attention Attention::Builder::build() {
     const bool useSequenceLengths = _querySequenceLengthsInput.has_value();
     const bool useRaggedOffsets = _queryRaggedOffsetsInput.has_value();
     const bool usePackedQkvProjection = usePackedQkvProjectionForLayer(_useRope.value(), _contextInput.has_value());
+    const std::vector<std::string> epilogueAuxNames = epilogueAuxInputNames();
 
     std::vector<std::shared_ptr<ParameterSpecification>> parameters;
     if (usePackedQkvProjection) {
@@ -1138,17 +1395,23 @@ Attention Attention::Builder::build() {
                                             _featureInput->getDataType(),
                                             _weightsDataType.value(),
                                             _computeDataType.value(),
-                                            _outputDataType.value()),
-                    publicAttentionInputNames(_contextInput.has_value(), useScoreBias, useSequenceLengths, useRaggedOffsets),
+                                            _outputDataType.value(),
+                                            _epilogue,
+                                            epilogueAuxNames),
+                    publicAttentionInputNames(
+                        _contextInput.has_value(), useScoreBias, useSequenceLengths, useRaggedOffsets, epilogueAuxNames),
                     {publicAttentionInputInterface(_featureInput.value(),
                                                    _contextInput,
                                                    _scoreBiasInput,
                                                    _querySequenceLengthsInput,
                                                    _keyValueSequenceLengthsInput,
                                                    _queryRaggedOffsetsInput,
-                                                   _keyValueRaggedOffsetsInput)},
+                                                   _keyValueRaggedOffsetsInput,
+                                                   _epilogueInputBindings)},
                     {{{"feature_output", output}}},
                     std::move(parameters),
+                    _epilogue,
+                    _epilogueInputBindings,
                     _numHeads.value(),
                     _numKeyValueHeads.value(),
                     _headDim.value(),
@@ -1212,6 +1475,26 @@ json Attention::architectureJson() const {
     j["weights_data_type"] = weightsDataType;
     j["compute_data_type"] = computeDataType;
     j["output_data_type"] = outputDataType;
+    if (epilogue.has_value()) {
+        if (!serializableEpilogue.has_value()) {
+            std::vector<std::string> auxiliaryInputNames;
+            auxiliaryInputNames.reserve(epilogueInputBindings.size());
+            for (const auto& [name, tensor] : epilogueInputBindings) {
+                (void)tensor;
+                auxiliaryInputNames.push_back(name);
+            }
+            serializableEpilogue = makeEpilogueDefinition(epilogue.value(), auxiliaryInputNames);
+        }
+        j["epilogue"] = serializableEpilogue.value().architectureJson();
+    } else {
+        j["epilogue"] = nullptr;
+    }
+
+    json epilogueInputs = json::array();
+    for (const auto& [name, tensor] : epilogueInputBindings) {
+        epilogueInputs.push_back(json{{"name", name}, {"tensor", tensor.architectureJson()}});
+    }
+    j["epilogue_inputs"] = std::move(epilogueInputs);
 
     const std::optional<Tensor> input = getFeatureInput();
     const std::optional<Tensor> output = getFeatureOutput();
@@ -1270,6 +1553,44 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
             throw std::runtime_error("Attention deserialize missing score_bias_input.");
         }
         scoreBiasInput = network->getApiTensorByOriginalId(j.at("score_bias_input").at("id").get<uint64_t>());
+    }
+
+    std::vector<std::pair<std::string, Tensor>> epilogueInputBindings;
+    std::vector<std::string> epilogueAuxInputNames;
+    if (j.contains("epilogue_inputs")) {
+        if (!j.at("epilogue_inputs").is_array()) {
+            throw std::runtime_error("Attention epilogue_inputs must be an array.");
+        }
+        std::set<std::string> seenEpilogueInputNames;
+        for (const json& epilogueInputJson : j.at("epilogue_inputs")) {
+            if (!epilogueInputJson.is_object() || !epilogueInputJson.contains("name") || !epilogueInputJson.contains("tensor")) {
+                throw std::runtime_error("Attention epilogue_inputs entries must contain name and tensor fields.");
+            }
+            const std::string inputName = epilogueInputJson.at("name").get<std::string>();
+            validateEpilogueAuxInputName(inputName);
+            if (!seenEpilogueInputNames.insert(inputName).second) {
+                throw std::runtime_error("Attention serialized epilogue input name is duplicated: " + inputName + ".");
+            }
+            const json& tensorJson = epilogueInputJson.at("tensor");
+            if (!tensorJson.is_object() || !tensorJson.contains("id")) {
+                throw std::runtime_error("Attention serialized epilogue input tensor metadata is invalid.");
+            }
+            const uint64_t originalTensorId = tensorJson.at("id").get<uint64_t>();
+            epilogueInputBindings.emplace_back(inputName, network->getApiTensorByOriginalId(originalTensorId));
+            epilogueAuxInputNames.push_back(inputName);
+        }
+    }
+
+    std::optional<ThorImplementation::Expression> epilogue = std::nullopt;
+    if (j.contains("epilogue") && !j.at("epilogue").is_null()) {
+        if (!j.at("epilogue").is_object()) {
+            throw std::runtime_error("Attention epilogue metadata must be an object or null.");
+        }
+        ThorImplementation::ExpressionDefinition epilogueDefinition =
+            ThorImplementation::ExpressionDefinition::deserialize(j.at("epilogue"));
+        epilogue = epilogueExpressionFromDefinition(epilogueDefinition, epilogueAuxInputNames);
+    } else if (!epilogueInputBindings.empty()) {
+        throw std::runtime_error("Attention serialized epilogue_inputs require a non-null epilogue expression.");
     }
     Tensor featureOutput = Tensor::deserialize(j.at("feature_output"), archiveReader.get());
 
@@ -1340,6 +1661,40 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
     const DataType weightsDataType = j.at("weights_data_type").get<DataType>();
     const DataType computeDataType = j.at("compute_data_type").get<DataType>();
     const DataType outputDataType = j.at("output_data_type").get<DataType>();
+    if (epilogue.has_value()) {
+        auto validateSerializedExpressionInputDTypes = [&](const std::string& inputName) {
+            const AttentionEpilogueInputDataTypes inputDataTypes =
+                attentionEpilogueInputDataTypes(epilogue.value(), inputName);
+            if (inputDataTypes.outputDataType.has_value() && inputDataTypes.outputDataType.value() != outputDataType) {
+                throw std::runtime_error("Attention serialized epilogue input '" + inputName +
+                                         "' output dtype annotation does not match output_data_type.");
+            }
+            if (inputDataTypes.computeDataType.has_value() && inputDataTypes.computeDataType.value() != computeDataType) {
+                throw std::runtime_error("Attention serialized epilogue input '" + inputName +
+                                         "' compute dtype annotation does not match compute_data_type.");
+            }
+        };
+        validateSerializedExpressionInputDTypes(Attention::epilogueInputName());
+        for (const std::string& inputName : epilogueAuxInputNames) {
+            validateSerializedExpressionInputDTypes(inputName);
+        }
+    }
+    if (featureOutput.getDimensions() != std::vector<uint64_t>{querySequenceLength, outputFeatures}) {
+        throw std::runtime_error("Attention serialized feature_output shape does not match query sequence and output features.");
+    }
+    if (featureOutput.getDataType() != outputDataType) {
+        throw std::runtime_error("Attention serialized feature_output dtype does not match output_data_type.");
+    }
+    for (const auto& [name, tensor] : epilogueInputBindings) {
+        if (tensor.getDimensions() != featureOutput.getDimensions()) {
+            throw std::runtime_error("Attention serialized epilogue input '" + name +
+                                     "' shape does not match the feature output shape.");
+        }
+        if (tensor.getDataType() != outputDataType) {
+            throw std::runtime_error("Attention serialized epilogue input '" + name +
+                                     "' dtype does not match output_data_type.");
+        }
+    }
     if (scoreBiasInput.has_value()) {
         requireScoreBiasInput(scoreBiasInput.value(), numHeads, querySequenceLength, keyValueSequenceLength, computeDataType);
         if (maskKind == ThorImplementation::AttentionMaskKind::CausalBottomRight ||
@@ -1422,17 +1777,23 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
                                             featureInput.getDataType(),
                                             weightsDataType,
                                             computeDataType,
-                                            outputDataType),
-                    publicAttentionInputNames(contextInput.has_value(), useScoreBias, useSequenceLengths, useRaggedOffsets),
+                                            outputDataType,
+                                            epilogue,
+                                            epilogueAuxInputNames),
+                    publicAttentionInputNames(
+                        contextInput.has_value(), useScoreBias, useSequenceLengths, useRaggedOffsets, epilogueAuxInputNames),
                     {publicAttentionInputInterface(featureInput,
                                                    contextInput,
                                                    scoreBiasInput,
                                                    querySequenceLengthsInput,
                                                    keyValueSequenceLengthsInput,
                                                    queryRaggedOffsetsInput,
-                                                   keyValueRaggedOffsetsInput)},
+                                                   keyValueRaggedOffsetsInput,
+                                                   epilogueInputBindings)},
                     {{{"feature_output", featureOutput}}},
                     std::move(parameters),
+                    epilogue,
+                    epilogueInputBindings,
                     numHeads,
                     numKeyValueHeads,
                     headDim,

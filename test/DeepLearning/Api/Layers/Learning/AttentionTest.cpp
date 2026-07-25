@@ -1,11 +1,13 @@
 #include "DeepLearning/Api/Layers/Learning/Attention.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
+#include "DeepLearning/Api/Optimizers/Sgd.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
+#include "test/DeepLearning/Api/Helpers/GradientRivet.h"
 
 #include <cuda_bf16.h>
 #include "cuda_fp16.h"
@@ -19,9 +21,12 @@
 #include <filesystem>
 #include <limits>
 #include <memory>
+#include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <unordered_map>
 #include <vector>
 
 using namespace std;
@@ -947,6 +952,280 @@ void runAttentionApiReferenceCase(const std::string& networkName, const Attentio
     runAttentionApiReferenceCaseWithInputs(networkName, c, makeAttentionReferenceInputs(c), atol, rtol);
 }
 
+vector<float> deterministicValues(uint64_t count, float scale, float phase) {
+    vector<float> values(count);
+    for (uint64_t i = 0; i < count; ++i) {
+        values[i] = scale * std::sin((static_cast<float>(i) + 1.0f) * (0.17f + phase));
+    }
+    return values;
+}
+
+float deterministicParameterPhase(const string& parameterName) {
+    uint32_t accumulator = 0;
+    for (unsigned char c : parameterName) {
+        accumulator = accumulator * 131U + c;
+    }
+    return 0.001f * static_cast<float>(1U + accumulator % 251U);
+}
+
+struct ResidualAttentionTrainingResult {
+    vector<float> output;
+    vector<float> queryGradient;
+    optional<vector<float>> contextGradient;
+    optional<vector<float>> residualGradient;
+    unordered_map<string, vector<float>> parametersAfter;
+    vector<float> residualValues;
+    vector<float> upstreamGradient;
+};
+
+ResidualAttentionTrainingResult runResidualAttentionTrainingCase(const string& networkName, bool fused, bool crossAttention) {
+    auto require = [](bool condition, const string& message) {
+        if (!condition) {
+            throw runtime_error(message);
+        }
+    };
+
+    constexpr uint32_t batchSize = 2;
+    constexpr uint32_t querySequenceLength = 3;
+    constexpr uint32_t keyValueSequenceLength = 4;
+    constexpr uint32_t queryFeatures = 8;
+    constexpr uint32_t contextFeatures = 12;
+    constexpr uint32_t outputFeatures = 8;
+    constexpr uint32_t numHeads = 2;
+    constexpr uint32_t numKeyValueHeads = 1;
+    constexpr uint32_t headDim = 8;
+    constexpr uint32_t valueDim = 8;
+    constexpr float learningRate = 0.01f;
+    const DataType dataType = DataType::BF16;
+
+    const vector<float> queryValues = deterministicValues(
+        static_cast<uint64_t>(batchSize) * querySequenceLength * queryFeatures, 0.25f, 0.03f);
+    const vector<float> contextValues = deterministicValues(
+        static_cast<uint64_t>(batchSize) * keyValueSequenceLength * contextFeatures, 0.20f, 0.11f);
+    const vector<float> residualValues = deterministicValues(
+        static_cast<uint64_t>(batchSize) * querySequenceLength * outputFeatures, 0.15f, 0.19f);
+    const vector<float> upstreamGradient = deterministicValues(
+        static_cast<uint64_t>(batchSize) * querySequenceLength * outputFeatures, 0.10f, 0.29f);
+
+    shared_ptr<Api::Sgd> sgd = Api::Sgd::Builder().initialLearningRate(learningRate).decay(0.0f).momentum(0.0f).build();
+
+    Api::Network network(networkName);
+    Api::NetworkInput query = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("query")
+                                  .dimensions({querySequenceLength, queryFeatures})
+                                  .dataType(dataType)
+                                  .build();
+    optional<Api::NetworkInput> context;
+    if (crossAttention) {
+        context = Api::NetworkInput::Builder()
+                      .network(network)
+                      .name("context")
+                      .dimensions({keyValueSequenceLength, contextFeatures})
+                      .dataType(dataType)
+                      .build();
+    }
+    Api::NetworkInput residual = Api::NetworkInput::Builder()
+                                     .network(network)
+                                     .name("residual")
+                                     .dimensions({querySequenceLength, outputFeatures})
+                                     .dataType(dataType)
+                                     .build();
+
+    Api::GradientRivet queryRivet = Api::GradientRivet::Builder().network(network).tensor(query.getFeatureOutput().value()).build();
+    optional<Api::GradientRivet> contextRivet;
+    if (crossAttention) {
+        contextRivet = Api::GradientRivet::Builder().network(network).tensor(context->getFeatureOutput().value()).build();
+    }
+    Api::GradientRivet residualRivet =
+        Api::GradientRivet::Builder().network(network).tensor(residual.getFeatureOutput().value()).build();
+
+    Api::Attention::Builder builder;
+    builder.network(network)
+        .featureInput(queryRivet.getFeatureOutput().value())
+        .numHeads(numHeads)
+        .numKeyValueHeads(numKeyValueHeads)
+        .headDim(headDim)
+        .valueDim(valueDim)
+        .outputFeatures(outputFeatures)
+        .hasBias(false)
+        .weightsDataType(dataType)
+        .computeDataType(DataType::FP32)
+        .outputDataType(dataType)
+        .optimizer(sgd);
+    if (crossAttention) {
+        builder.contextInput(contextRivet->getFeatureOutput().value());
+    }
+    if (fused) {
+        Impl::Expression attentionOutput = Api::Attention::epilogueInput(DataType::FP32, dataType);
+        Impl::Expression residualInput = Api::Attention::epilogueAuxInput("residual", DataType::FP32, dataType);
+        builder.epilogueInput("residual", residualRivet.getFeatureOutput().value()).epilogue(attentionOutput + residualInput);
+    }
+    Api::Attention attention = builder.build();
+
+    optional<Api::CustomLayer> residualAdd;
+    Api::Tensor transformerOutput = attention.getFeatureOutput().value();
+    if (!fused) {
+        Impl::Expression attentionInput = Impl::Expression::input("attention", DataType::FP32, dataType);
+        Impl::Expression residualInput = Impl::Expression::input("residual", DataType::FP32, dataType);
+        Impl::ExpressionDefinition definition =
+            Impl::ExpressionDefinition::fromOutputs(Impl::Expression::outputs({{"output", attentionInput + residualInput}}));
+        residualAdd.emplace(Api::CustomLayer::Builder()
+                                .network(network)
+                                .expression(Impl::DynamicExpression::fromExpressionDefinition(definition))
+                                .inputNames({"attention", "residual"})
+                                .outputNames({"output"})
+                                .inputInterface({{"attention", transformerOutput},
+                                                 {"residual", residualRivet.getFeatureOutput().value()}})
+                                .build());
+        transformerOutput = residualAdd->getOutput("output");
+    }
+
+    Api::GradientRivet outputRivet =
+        Api::GradientRivet::Builder().network(network).tensor(transformerOutput).build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(outputRivet.getFeatureOutput().value())
+                                    .dataType(dataType)
+                                    .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<Api::PlacedNetwork> placedNetwork = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/false);
+    synchronizeEvents(initDoneEvents);
+    Impl::StampedNetwork& stampedNetwork = placedNetwork->getStampedNetwork(0);
+    auto physicalQuery = dynamic_pointer_cast<Impl::NetworkInput>(stampedNetwork.getPhysicalLayerFromApiLayer(query.getId()));
+    auto physicalContext = crossAttention
+                               ? dynamic_pointer_cast<Impl::NetworkInput>(stampedNetwork.getPhysicalLayerFromApiLayer(context->getId()))
+                               : nullptr;
+    auto physicalResidual =
+        dynamic_pointer_cast<Impl::NetworkInput>(stampedNetwork.getPhysicalLayerFromApiLayer(residual.getId()));
+    auto physicalOutput = dynamic_pointer_cast<Impl::NetworkOutput>(stampedNetwork.getPhysicalLayerFromApiLayer(output.getId()));
+    auto physicalAttention = dynamic_pointer_cast<Impl::CustomLayer>(stampedNetwork.getPhysicalLayerFromApiLayer(attention.getId()));
+    auto physicalResidualAdd = !fused
+                                   ? dynamic_pointer_cast<Impl::CustomLayer>(
+                                         stampedNetwork.getPhysicalLayerFromApiLayer(residualAdd->getId()))
+                                   : nullptr;
+    require(physicalQuery != nullptr, "Residual attention test failed to place query NetworkInput.");
+    require(physicalOutput != nullptr, "Residual attention test failed to place NetworkOutput.");
+    require(physicalAttention != nullptr, "Residual attention test failed to place Attention.");
+    if (crossAttention) require(physicalContext != nullptr, "Residual attention test failed to place context NetworkInput.");
+    require(physicalResidual != nullptr, "Residual attention test failed to place residual NetworkInput.");
+    if (!fused) require(physicalResidualAdd != nullptr, "Residual attention test failed to place unfused residual add.");
+
+    Stream stream = physicalAttention->getStreams()[0];
+    require(physicalAttention->getGradientUpdateStream().has_value(),
+            "Residual attention training test requires a gradient update stream.");
+    Stream gradientStream = physicalAttention->getGradientUpdateStream().value();
+
+    for (const string& parameterName : physicalAttention->listParameters()) {
+        const shared_ptr<Impl::PhysicalParameter> parameter = physicalAttention->getParameter(parameterName);
+        require(parameter != nullptr, "Residual attention test encountered a null parameter.");
+        require(parameter->getStorage().has_value(), "Residual attention test parameter has no storage.");
+        const uint64_t count = tensorNumel(parameter->getStorage().value());
+        vector<float> values = deterministicValues(count, 0.04f, deterministicParameterPhase(parameterName));
+        setParameterTensor(parameter, values, stream);
+    }
+    stream.synchronize();
+
+    Impl::Tensor queryHost(cpuPlacement, Impl::TensorDescriptor(dataType, {batchSize, querySequenceLength, queryFeatures}));
+    writeCpuTensor(queryHost, queryValues);
+    physicalQuery->forward(queryHost, false, batchSize);
+    optional<Impl::Tensor> contextHost;
+    if (crossAttention) {
+        contextHost.emplace(cpuPlacement,
+                            Impl::TensorDescriptor(dataType, {batchSize, keyValueSequenceLength, contextFeatures}));
+        writeCpuTensor(contextHost.value(), contextValues);
+        physicalContext->forward(contextHost.value(), false, batchSize);
+    }
+    Impl::Tensor residualHost(cpuPlacement,
+                              Impl::TensorDescriptor(dataType, {batchSize, querySequenceLength, outputFeatures}));
+    writeCpuTensor(residualHost, residualValues);
+    physicalResidual->forward(residualHost, false, batchSize);
+    physicalOutput->getOutputReadyEvent().synchronize();
+
+    ResidualAttentionTrainingResult result;
+    result.output = readCpuTensor(physicalOutput->getFeatureOutput().value());
+    result.residualValues = residualValues;
+    result.upstreamGradient = upstreamGradient;
+
+    Impl::CustomLayer* physicalTerminal = fused ? physicalAttention.get() : physicalResidualAdd.get();
+    Stream terminalStream = physicalTerminal->getStreams()[0];
+    require(physicalTerminal->getErrorInputs().size() == 1U,
+            "Residual attention test expected exactly one downstream error input.");
+    require(physicalTerminal->getErrorInputs().front().has_value(),
+            "Residual attention test downstream error input was not allocated.");
+    const size_t expectedAttentionErrorOutputs = crossAttention ? (fused ? 3U : 2U) : (fused ? 2U : 1U);
+    require(physicalAttention->getErrorOutputs().size() == expectedAttentionErrorOutputs,
+            "Residual attention test produced an unexpected number of Attention upstream gradients.");
+    for (const optional<Impl::Tensor>& errorOutput : physicalAttention->getErrorOutputs()) {
+        require(errorOutput.has_value(), "Residual attention test Attention upstream gradient was not allocated.");
+    }
+    if (!fused) {
+        require(physicalResidualAdd->getErrorOutputs().size() == 2U,
+                "Unfused residual add must produce Attention and residual gradients.");
+        for (const optional<Impl::Tensor>& errorOutput : physicalResidualAdd->getErrorOutputs()) {
+            require(errorOutput.has_value(), "Unfused residual add upstream gradient was not allocated.");
+        }
+    }
+
+    Impl::Tensor errorInput = physicalTerminal->getErrorInputs().front().value();
+    Impl::Tensor errorInputHost = errorInput.clone(cpuPlacement);
+    writeCpuTensor(errorInputHost, upstreamGradient);
+    errorInput.copyFromAsync(errorInputHost, terminalStream);
+    physicalTerminal->backward(errorInput, batchSize);
+
+    result.queryGradient = readCpuTensor(copyTensorToCpu(physicalAttention->getErrorOutputs().at(0).value(), stream));
+    size_t nextErrorOutput = 1;
+    if (crossAttention) {
+        result.contextGradient =
+            readCpuTensor(copyTensorToCpu(physicalAttention->getErrorOutputs().at(nextErrorOutput++).value(), stream));
+    }
+    result.residualGradient = fused
+                                  ? readCpuTensor(copyTensorToCpu(
+                                        physicalAttention->getErrorOutputs().at(nextErrorOutput).value(), stream))
+                                  : readCpuTensor(copyTensorToCpu(
+                                        physicalResidualAdd->getErrorOutputs().at(1).value(), terminalStream));
+
+    for (const string& parameterName : physicalAttention->listParameters()) {
+        result.parametersAfter.emplace(
+            parameterName,
+            readCpuTensor(copyTensorToCpu(physicalAttention->getParameter(parameterName)->getStorage().value(), gradientStream)));
+    }
+    stream.synchronize();
+    gradientStream.synchronize();
+    return result;
+}
+
+void expectResidualAttentionTrainingMatchesUnfused(bool crossAttention) {
+    const string kind = crossAttention ? "cross" : "self";
+    ResidualAttentionTrainingResult unfused =
+        runResidualAttentionTrainingCase("attention_api_unfused_" + kind + "_training_reference", false, crossAttention);
+    ResidualAttentionTrainingResult fused =
+        runResidualAttentionTrainingCase("attention_api_fused_" + kind + "_training_reference", true, crossAttention);
+
+    ASSERT_EQ(fused.output.size(), unfused.output.size());
+    expectAllClose(fused.output, unfused.output, 1.8e-1f, 1.8e-1f);
+    expectAllClose(fused.queryGradient, unfused.queryGradient, 1.8e-1f, 1.8e-1f);
+
+    if (crossAttention) {
+        ASSERT_TRUE(fused.contextGradient.has_value());
+        ASSERT_TRUE(unfused.contextGradient.has_value());
+        expectAllClose(fused.contextGradient.value(), unfused.contextGradient.value(), 1.8e-1f, 1.8e-1f);
+    }
+
+    ASSERT_TRUE(fused.residualGradient.has_value());
+    ASSERT_TRUE(unfused.residualGradient.has_value());
+    expectAllClose(fused.residualGradient.value(), unfused.residualGradient.value(), 1.8e-1f, 1.8e-1f);
+    expectAllClose(fused.residualGradient.value(), fused.upstreamGradient, 1.8e-1f, 1.8e-1f);
+
+    ASSERT_EQ(fused.parametersAfter.size(), unfused.parametersAfter.size());
+    for (const auto& [parameterName, fusedValues] : fused.parametersAfter) {
+        ASSERT_TRUE(unfused.parametersAfter.contains(parameterName));
+        expectAllClose(fusedValues, unfused.parametersAfter.at(parameterName), 1.8e-1f, 1.8e-1f);
+    }
+}
+
 }  // namespace
 
 TEST(AttentionApi, BuildsComposedCausalSelfAttention) {
@@ -968,6 +1247,326 @@ TEST(AttentionApi, BuildsComposedCausalSelfAttention) {
     EXPECT_EQ(attention.getValueDim(), 16U);
     EXPECT_EQ(attention.getOutputFeatures(), 64U);
     EXPECT_EQ(attention.getMaskKind(), Impl::AttentionMaskKind::CausalTopLeft);
+    EXPECT_FALSE(attention.hasEpilogue());
+    EXPECT_TRUE(attention.getEpilogueInputBindings().empty());
+    EXPECT_TRUE(attention.architectureJson().at("epilogue").is_null());
+    EXPECT_TRUE(attention.architectureJson().at("epilogue_inputs").empty());
+}
+
+TEST(AttentionApi, DeserializeAcceptsPreEpilogueVersionOneMetadata) {
+    Api::Network network("attention_api_deserialize_accepts_pre_epilogue_v1_metadata");
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("tokens").dimensions({5, 8}).dataType(DataType::BF16).build();
+    Api::Attention attention = Api::Attention::Builder()
+                                   .network(network)
+                                   .featureInput(input.getFeatureOutput().value())
+                                   .numHeads(2)
+                                   .headDim(4)
+                                   .weightsDataType(DataType::BF16)
+                                   .computeDataType(DataType::FP32)
+                                   .outputDataType(DataType::BF16)
+                                   .build();
+
+    nlohmann::json legacyArchitecture = attention.architectureJson();
+    legacyArchitecture.erase("epilogue");
+    legacyArchitecture.erase("epilogue_inputs");
+
+    const uint32_t previousTrainableLayerCount = network.getNumTrainableLayers();
+    std::shared_ptr<thor_file::TarReader> archiveReader;
+    Api::Attention::deserialize(archiveReader, legacyArchitecture, &network);
+    ASSERT_EQ(network.getNumTrainableLayers(), previousTrainableLayerCount + 1);
+    auto restored = std::dynamic_pointer_cast<Api::Attention>(network.getTrainableLayer(previousTrainableLayerCount));
+    ASSERT_NE(restored, nullptr);
+    EXPECT_FALSE(restored->hasEpilogue());
+    EXPECT_TRUE(restored->getEpilogueInputBindings().empty());
+    EXPECT_EQ(restored->getInputNames(), (std::vector<std::string>{"feature_input"}));
+}
+
+TEST(AttentionApi, BuildsSelfAttentionWithResidualAddEpilogue) {
+    Api::Network network("attention_api_builds_self_attention_with_residual_add_epilogue");
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("tokens").dimensions({5, 8}).dataType(DataType::BF16).build();
+    Api::NetworkInput residual =
+        Api::NetworkInput::Builder().network(network).name("residual").dimensions({5, 8}).dataType(DataType::BF16).build();
+
+    Impl::Expression attentionOutput = Api::Attention::epilogueInput(DataType::FP32, DataType::BF16);
+    Impl::Expression residualInput = Api::Attention::epilogueAuxInput("residual", DataType::FP32, DataType::BF16);
+    Api::Attention attention = Api::Attention::Builder()
+                                   .network(network)
+                                   .featureInput(input.getFeatureOutput().value())
+                                   .numHeads(2)
+                                   .headDim(4)
+                                   .weightsDataType(DataType::BF16)
+                                   .computeDataType(DataType::FP32)
+                                   .outputDataType(DataType::BF16)
+                                   .epilogueInput("residual", residual.getFeatureOutput().value())
+                                   .epilogue(attentionOutput + residualInput)
+                                   .build();
+
+    EXPECT_TRUE(attention.hasEpilogue());
+    EXPECT_EQ(attention.getInputNames(), (std::vector<std::string>{"feature_input", "residual"}));
+    ASSERT_EQ(attention.getEpilogueInputBindings().size(), 1U);
+    EXPECT_EQ(attention.getEpilogueInputBindings().front().first, "residual");
+    EXPECT_EQ(attention.getEpilogueInputBindings().front().second.getOriginalId(), residual.getFeatureOutput()->getOriginalId());
+    EXPECT_EQ(attention.getFeatureOutput()->getDimensions(), (std::vector<uint64_t>{5, 8}));
+    EXPECT_EQ(attention.getFeatureOutput()->getDataType(), DataType::BF16);
+}
+
+TEST(AttentionApi, BuildsCrossAttentionWithResidualAddEpilogue) {
+    Api::Network network("attention_api_builds_cross_attention_with_residual_add_epilogue");
+    Api::NetworkInput query =
+        Api::NetworkInput::Builder().network(network).name("query").dimensions({5, 8}).dataType(DataType::BF16).build();
+    Api::NetworkInput context =
+        Api::NetworkInput::Builder().network(network).name("context").dimensions({7, 12}).dataType(DataType::BF16).build();
+    Api::NetworkInput residual =
+        Api::NetworkInput::Builder().network(network).name("residual").dimensions({5, 8}).dataType(DataType::BF16).build();
+
+    Impl::Expression attentionOutput = Api::Attention::epilogueInput(DataType::FP32, DataType::BF16);
+    Impl::Expression residualInput = Api::Attention::epilogueAuxInput("residual", DataType::FP32, DataType::BF16);
+    Api::Attention attention = Api::Attention::Builder()
+                                   .network(network)
+                                   .featureInput(query.getFeatureOutput().value())
+                                   .contextInput(context.getFeatureOutput().value())
+                                   .numHeads(2)
+                                   .numKeyValueHeads(1)
+                                   .headDim(4)
+                                   .valueDim(4)
+                                   .outputFeatures(8)
+                                   .weightsDataType(DataType::BF16)
+                                   .computeDataType(DataType::FP32)
+                                   .outputDataType(DataType::BF16)
+                                   .epilogueInput("residual", residual.getFeatureOutput().value())
+                                   .epilogue(attentionOutput + residualInput)
+                                   .build();
+
+    EXPECT_TRUE(attention.getUseCrossAttention());
+    EXPECT_TRUE(attention.hasEpilogue());
+    EXPECT_EQ(attention.getInputNames(), (std::vector<std::string>{"feature_input", "context_input", "residual"}));
+    ASSERT_EQ(attention.getEpilogueInputBindings().size(), 1U);
+    EXPECT_EQ(attention.getEpilogueInputBindings().front().first, "residual");
+    EXPECT_EQ(attention.getFeatureOutput()->getDimensions(), (std::vector<uint64_t>{5, 8}));
+    EXPECT_EQ(attention.getFeatureOutput()->getDataType(), DataType::BF16);
+}
+
+TEST(AttentionApi, SelfAttentionResidualEpilogueDeserializeRoundTrip) {
+    Api::Network network("attention_api_self_residual_epilogue_deserialize_round_trip");
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("tokens").dimensions({5, 8}).dataType(DataType::BF16).build();
+    Api::NetworkInput residual =
+        Api::NetworkInput::Builder().network(network).name("residual").dimensions({5, 8}).dataType(DataType::BF16).build();
+
+    Impl::Expression attentionOutput = Api::Attention::epilogueInput(DataType::FP32, DataType::BF16);
+    Impl::Expression residualInput = Api::Attention::epilogueAuxInput("residual", DataType::FP32, DataType::BF16);
+    Api::Attention attention = Api::Attention::Builder()
+                                   .network(network)
+                                   .featureInput(input.getFeatureOutput().value())
+                                   .numHeads(2)
+                                   .headDim(4)
+                                   .weightsDataType(DataType::BF16)
+                                   .computeDataType(DataType::FP32)
+                                   .outputDataType(DataType::BF16)
+                                   .epilogueInput("residual", residual.getFeatureOutput().value())
+                                   .epilogue(attentionOutput + residualInput)
+                                   .build();
+
+    const uint32_t previousTrainableLayerCount = network.getNumTrainableLayers();
+    std::shared_ptr<thor_file::TarReader> archiveReader;
+    Api::Attention::deserialize(archiveReader, attention.architectureJson(), &network);
+    ASSERT_EQ(network.getNumTrainableLayers(), previousTrainableLayerCount + 1);
+    auto restored = std::dynamic_pointer_cast<Api::Attention>(network.getTrainableLayer(previousTrainableLayerCount));
+    ASSERT_NE(restored, nullptr);
+    EXPECT_FALSE(restored->getUseCrossAttention());
+    EXPECT_TRUE(restored->hasEpilogue());
+    ASSERT_EQ(restored->getEpilogueInputBindings().size(), 1U);
+    EXPECT_EQ(restored->getEpilogueInputBindings().front().first, "residual");
+    EXPECT_EQ(restored->getEpilogueInputBindings().front().second.getOriginalId(),
+              residual.getFeatureOutput()->getOriginalId());
+}
+
+TEST(AttentionApi, ResidualEpilogueArchitectureJsonAndDeserializeRoundTrip) {
+    Api::Network network("attention_api_residual_epilogue_architecture_round_trip");
+    Api::NetworkInput query =
+        Api::NetworkInput::Builder().network(network).name("query").dimensions({5, 8}).dataType(DataType::BF16).build();
+    Api::NetworkInput context =
+        Api::NetworkInput::Builder().network(network).name("context").dimensions({7, 8}).dataType(DataType::BF16).build();
+    Api::NetworkInput residual =
+        Api::NetworkInput::Builder().network(network).name("residual").dimensions({5, 8}).dataType(DataType::BF16).build();
+
+    Impl::Expression attentionOutput = Api::Attention::epilogueInput(DataType::FP32, DataType::BF16);
+    Impl::Expression residualInput = Api::Attention::epilogueAuxInput("residual", DataType::FP32, DataType::BF16);
+    Api::Attention attention = Api::Attention::Builder()
+                                   .network(network)
+                                   .featureInput(query.getFeatureOutput().value())
+                                   .contextInput(context.getFeatureOutput().value())
+                                   .numHeads(2)
+                                   .headDim(4)
+                                   .weightsDataType(DataType::BF16)
+                                   .computeDataType(DataType::FP32)
+                                   .outputDataType(DataType::BF16)
+                                   .epilogueInput("residual", residual.getFeatureOutput().value())
+                                   .epilogue(attentionOutput + residualInput)
+                                   .build();
+
+    const nlohmann::json arch = attention.architectureJson();
+    ASSERT_TRUE(arch.contains("epilogue"));
+    ASSERT_FALSE(arch.at("epilogue").is_null());
+    const std::vector<std::string> serializedEpilogueInputNames =
+        arch.at("epilogue").at("expected_input_names").get<std::vector<std::string>>();
+    const std::set<std::string> serializedEpilogueInputs(
+        serializedEpilogueInputNames.begin(), serializedEpilogueInputNames.end());
+    EXPECT_EQ(serializedEpilogueInputs,
+              (std::set<std::string>{Api::Attention::epilogueInputName(), "residual"}));
+    ASSERT_TRUE(arch.contains("epilogue_inputs"));
+    ASSERT_EQ(arch.at("epilogue_inputs").size(), 1U);
+    EXPECT_EQ(arch.at("epilogue_inputs").at(0).at("name").get<std::string>(), "residual");
+    EXPECT_EQ(arch.at("epilogue_inputs").at(0).at("tensor").at("id").get<uint64_t>(),
+              residual.getFeatureOutput()->getOriginalId());
+
+    const uint32_t previousTrainableLayerCount = network.getNumTrainableLayers();
+    std::shared_ptr<thor_file::TarReader> archiveReader;
+    Api::Attention::deserialize(archiveReader, arch, &network);
+    ASSERT_EQ(network.getNumTrainableLayers(), previousTrainableLayerCount + 1);
+    auto restored = std::dynamic_pointer_cast<Api::Attention>(network.getTrainableLayer(previousTrainableLayerCount));
+    ASSERT_NE(restored, nullptr);
+    EXPECT_TRUE(restored->hasEpilogue());
+    EXPECT_TRUE(restored->getUseCrossAttention());
+    ASSERT_EQ(restored->getEpilogueInputBindings().size(), 1U);
+    EXPECT_EQ(restored->getEpilogueInputBindings().front().first, "residual");
+    EXPECT_EQ(restored->getEpilogueInputBindings().front().second.getOriginalId(),
+              residual.getFeatureOutput()->getOriginalId());
+    EXPECT_FALSE(restored->architectureJson().at("epilogue").is_null());
+}
+
+TEST(AttentionApi, RejectsInvalidResidualEpilogueBindings) {
+    Api::Network network("attention_api_rejects_invalid_residual_epilogue_bindings");
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("tokens").dimensions({5, 8}).dataType(DataType::BF16).build();
+    Api::NetworkInput residual =
+        Api::NetworkInput::Builder().network(network).name("residual").dimensions({5, 8}).dataType(DataType::BF16).build();
+    Api::NetworkInput badShape =
+        Api::NetworkInput::Builder().network(network).name("bad_shape").dimensions({4, 8}).dataType(DataType::BF16).build();
+    Api::NetworkInput badDtype =
+        Api::NetworkInput::Builder().network(network).name("bad_dtype").dimensions({5, 8}).dataType(DataType::FP32).build();
+
+    Impl::Expression attentionOutput = Api::Attention::epilogueInput(DataType::FP32, DataType::BF16);
+    Impl::Expression residualInput = Api::Attention::epilogueAuxInput("residual", DataType::FP32, DataType::BF16);
+
+    EXPECT_THROW(Api::Attention::Builder()
+                     .network(network)
+                     .featureInput(input.getFeatureOutput().value())
+                     .numHeads(2)
+                     .headDim(4)
+                     .outputDataType(DataType::BF16)
+                     .epilogue(attentionOutput + residualInput),
+                 std::invalid_argument);
+
+    EXPECT_THROW(Api::Attention::Builder()
+                     .network(network)
+                     .featureInput(input.getFeatureOutput().value())
+                     .numHeads(2)
+                     .headDim(4)
+                     .outputDataType(DataType::BF16)
+                     .epilogueInput("residual", residual.getFeatureOutput().value())
+                     .epilogue(residualInput),
+                 std::invalid_argument);
+
+    EXPECT_THROW(Api::Attention::Builder()
+                     .network(network)
+                     .featureInput(input.getFeatureOutput().value())
+                     .numHeads(2)
+                     .headDim(4)
+                     .outputDataType(DataType::BF16)
+                     .epilogueInput("residual", badShape.getFeatureOutput().value())
+                     .epilogue(attentionOutput + residualInput)
+                     .build(),
+                 std::invalid_argument);
+
+    EXPECT_THROW(Api::Attention::Builder()
+                     .network(network)
+                     .featureInput(input.getFeatureOutput().value())
+                     .numHeads(2)
+                     .headDim(4)
+                     .outputDataType(DataType::BF16)
+                     .epilogueInput("residual", badDtype.getFeatureOutput().value())
+                     .epilogue(attentionOutput + residualInput)
+                     .build(),
+                 std::invalid_argument);
+
+    Impl::Expression wrongResidualStorageAnnotation =
+        Api::Attention::epilogueAuxInput("residual", DataType::FP32, DataType::FP16);
+    EXPECT_THROW(Api::Attention::Builder()
+                     .network(network)
+                     .featureInput(input.getFeatureOutput().value())
+                     .numHeads(2)
+                     .headDim(4)
+                     .outputDataType(DataType::BF16)
+                     .epilogueInput("residual", residual.getFeatureOutput().value())
+                     .epilogue(attentionOutput + wrongResidualStorageAnnotation)
+                     .build(),
+                 std::invalid_argument);
+
+    Api::Attention::Builder duplicateBuilder;
+    duplicateBuilder.network(network)
+        .featureInput(input.getFeatureOutput().value())
+        .numHeads(2)
+        .headDim(4)
+        .epilogueInput("residual", residual.getFeatureOutput().value());
+    EXPECT_THROW(duplicateBuilder.epilogueInput("residual", residual.getFeatureOutput().value()), std::invalid_argument);
+
+    EXPECT_THROW(static_cast<void>(
+                     Api::Attention::epilogueAuxInput("feature_input", DataType::FP32, DataType::BF16)),
+                 std::invalid_argument);
+
+    EXPECT_THROW(Api::Attention::Builder()
+                     .network(network)
+                     .featureInput(input.getFeatureOutput().value())
+                     .numHeads(2)
+                     .headDim(4)
+                     .outputDataType(DataType::BF16)
+                     .epilogue(attentionOutput.reshape({1})),
+                 std::invalid_argument);
+}
+
+TEST(AttentionApi, DeserializeRejectsInvalidResidualEpilogueMetadata) {
+    Api::Network network("attention_api_deserialize_rejects_invalid_residual_epilogue_metadata");
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("tokens").dimensions({5, 8}).dataType(DataType::BF16).build();
+    Api::NetworkInput residual =
+        Api::NetworkInput::Builder().network(network).name("residual").dimensions({5, 8}).dataType(DataType::BF16).build();
+    Impl::Expression attentionOutput = Api::Attention::epilogueInput(DataType::FP32, DataType::BF16);
+    Impl::Expression residualInput = Api::Attention::epilogueAuxInput("residual", DataType::FP32, DataType::BF16);
+    Api::Attention attention = Api::Attention::Builder()
+                                   .network(network)
+                                   .featureInput(input.getFeatureOutput().value())
+                                   .numHeads(2)
+                                   .headDim(4)
+                                   .weightsDataType(DataType::BF16)
+                                   .computeDataType(DataType::FP32)
+                                   .outputDataType(DataType::BF16)
+                                   .epilogueInput("residual", residual.getFeatureOutput().value())
+                                   .epilogue(attentionOutput + residualInput)
+                                   .build();
+
+    std::shared_ptr<thor_file::TarReader> archiveReader;
+    nlohmann::json missingExpression = attention.architectureJson();
+    missingExpression["epilogue"] = nullptr;
+    EXPECT_THROW(Api::Attention::deserialize(archiveReader, missingExpression, &network), std::runtime_error);
+
+    nlohmann::json duplicateBinding = attention.architectureJson();
+    duplicateBinding["epilogue_inputs"].push_back(duplicateBinding["epilogue_inputs"].at(0));
+    EXPECT_THROW(Api::Attention::deserialize(archiveReader, duplicateBinding, &network), std::runtime_error);
+
+    nlohmann::json missingBinding = attention.architectureJson();
+    missingBinding["epilogue_inputs"] = nlohmann::json::array();
+    EXPECT_THROW(Api::Attention::deserialize(archiveReader, missingBinding, &network), std::invalid_argument);
+}
+
+TEST(AttentionApi, ResidualEpilogueForwardBackwardMatchesUnfusedSelfAttention) {
+    expectResidualAttentionTrainingMatchesUnfused(false);
+}
+
+TEST(AttentionApi, ResidualEpilogueForwardBackwardMatchesUnfusedCrossAttention) {
+    expectResidualAttentionTrainingMatchesUnfused(true);
 }
 
 TEST(AttentionApi, BuildsComposedGqaAttentionWithExplicitDimsBiasAndRope) {

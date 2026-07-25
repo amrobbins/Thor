@@ -23,6 +23,7 @@
 #include <cstring>
 #include <filesystem>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -107,6 +108,26 @@ vector<float> readCpuTensor(const Impl::Tensor& tensor) {
             break;
     }
     return values;
+}
+
+float roundToDataType(float value, DataType dataType) {
+    switch (dataType) {
+        case DataType::FP16:
+            return __half2float(__float2half(value));
+        case DataType::BF16:
+            return __bfloat162float(__float2bfloat16(value));
+        case DataType::FP32:
+            return value;
+        default:
+            throw std::invalid_argument("Unsupported dtype in roundToDataType test helper.");
+    }
+}
+
+vector<float> roundToDataType(const vector<float>& values, DataType dataType) {
+    vector<float> rounded(values.size());
+    for (uint64_t i = 0; i < values.size(); ++i)
+        rounded[i] = roundToDataType(values[i], dataType);
+    return rounded;
 }
 
 Impl::Tensor copyTensorToCpu(const Impl::Tensor& tensor, Stream& stream) {
@@ -1068,22 +1089,43 @@ TEST(FullyConnectedApi, BuilderRejectsUnsupportedMixedInputAndWeightDtypesInstea
     constexpr uint32_t numInputFeatures = 3;
     constexpr uint32_t numOutputFeatures = 2;
 
-    Api::Network network("fc_rejects_implicit_matmul_operand_conversion");
-    Api::NetworkInput input = Api::NetworkInput::Builder()
-                                  .network(network)
-                                  .name("input")
-                                  .dimensions({numInputFeatures})
-                                  .dataType(DataType::FP32)
-                                  .build();
+    Api::Network fp32InputNetwork("fc_rejects_fp32_input_bf16_weights");
+    Api::NetworkInput fp32Input = Api::NetworkInput::Builder()
+                                      .network(fp32InputNetwork)
+                                      .name("input")
+                                      .dimensions({numInputFeatures})
+                                      .dataType(DataType::FP32)
+                                      .build();
 
     EXPECT_THROW(
         (void)Api::FullyConnected::Builder()
-            .network(network)
-            .featureInput(input.getFeatureOutput().value())
+            .network(fp32InputNetwork)
+            .featureInput(fp32Input.getFeatureOutput().value())
             .numOutputFeatures(numOutputFeatures)
             .hasBias(false)
             .weightsDataType(DataType::BF16)
-            .computeDataType(DataType::BF16)
+            .computeDataType(DataType::FP32)
+            .outputDataType(DataType::FP32)
+            .noActivation()
+            .build(),
+        std::invalid_argument);
+
+    Api::Network bf16InputNetwork("fc_rejects_bf16_input_fp32_weights");
+    Api::NetworkInput bf16Input = Api::NetworkInput::Builder()
+                                      .network(bf16InputNetwork)
+                                      .name("input")
+                                      .dimensions({numInputFeatures})
+                                      .dataType(DataType::BF16)
+                                      .build();
+
+    EXPECT_THROW(
+        (void)Api::FullyConnected::Builder()
+            .network(bf16InputNetwork)
+            .featureInput(bf16Input.getFeatureOutput().value())
+            .numOutputFeatures(numOutputFeatures)
+            .hasBias(false)
+            .weightsDataType(DataType::FP32)
+            .computeDataType(DataType::FP32)
             .outputDataType(DataType::FP32)
             .noActivation()
             .build(),
@@ -1173,6 +1215,305 @@ TEST(FullyConnectedApi, BackwardNumericalWithSgdUpdate) {
     expectAllClose(readCpuTensor(errorOutputHost), expectedErrorOutput, 1e-5f, 1e-5f, "error out");
     expectAllClose(readCpuTensor(weightsAfterHost), expectedWeightsAfter, 1e-5f, 1e-5f, "weights after");
     expectAllClose(readCpuTensor(biasesAfterHost), expectedBiasesAfter, 1e-5f, 1e-5f, "biases after");
+}
+
+void runLowPrecisionInputsFp32OutputSgd(DataType operandDataType) {
+    constexpr uint32_t batchSize = 4;
+    constexpr uint32_t numInputFeatures = 3;
+    constexpr uint32_t numOutputFeatures = 2;
+    constexpr float learningRate = 0.1f;
+
+    const vector<float> inputValues = {
+        1.0f, -2.0f, 0.5f,
+        3.0f, -1.5f, 2.0f,
+        -0.25f, 1.25f, -3.0f,
+        0.75f, -0.5f, 1.5f,
+    };
+    const vector<float> weightValues = {
+        0.5f, -1.0f,
+        2.0f, -0.25f,
+        0.75f, 1.5f,
+    };
+    const vector<float> biasValues = {0.25f, -0.5f};
+    const vector<float> errorInputValues = {
+        0.1234f, -0.5678f,
+        0.2345f, 1.2345f,
+        -0.3456f, 0.7891f,
+        0.4567f, -0.1123f,
+    };
+
+    Api::Network network(operandDataType == DataType::BF16 ? "fcBf16InputsFp32OutputSgd" : "fcFp16InputsFp32OutputSgd");
+    Api::NetworkInput input = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("input")
+                                  .dimensions({numInputFeatures})
+                                  .dataType(operandDataType)
+                                  .build();
+    Api::GradientRivet inputRivet =
+        Api::GradientRivet::Builder().network(network).tensor(input.getFeatureOutput().value()).build();
+    Api::FullyConnected fc = Api::FullyConnected::Builder()
+                                 .network(network)
+                                 .featureInput(inputRivet.getFeatureOutput().value())
+                                 .numOutputFeatures(numOutputFeatures)
+                                 .hasBias(true)
+                                 .weightsDataType(operandDataType)
+                                 .computeDataType(DataType::FP32)
+                                 .outputDataType(DataType::FP32)
+                                 .noActivation()
+                                 .build();
+    Api::GradientRivet outputRivet =
+        Api::GradientRivet::Builder().network(network).tensor(fc.getFeatureOutput().value()).build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(outputRivet.getFeatureOutput().value())
+                                    .dataType(DataType::FP32)
+                                    .build();
+    shared_ptr<Api::Sgd> sgd =
+        Api::Sgd::Builder().network(network).initialLearningRate(learningRate).decay(0.0f).momentum(0.0f).build();
+    (void)sgd;
+
+    PlacedFullyConnectedFixture fixture = placeSingleFullyConnectedNetwork(network, input, output, fc, batchSize, false);
+    ASSERT_NE(fixture.physicalFc->getParameter("weights"), nullptr);
+    ASSERT_NE(fixture.physicalFc->getParameter("biases"), nullptr);
+    ASSERT_TRUE(fixture.physicalFc->getParameter("weights")->getStorage().has_value());
+    ASSERT_TRUE(fixture.physicalFc->getParameter("biases")->getStorage().has_value());
+    ASSERT_NE(fixture.physicalFc->getParameter("weights")->getOptimizer(), nullptr);
+    ASSERT_NE(fixture.physicalFc->getParameter("biases")->getOptimizer(), nullptr);
+    ASSERT_TRUE(fixture.physicalOutput->getFeatureOutput().has_value());
+    ASSERT_EQ(fixture.physicalFc->getErrorInputs().size(), 1u);
+    ASSERT_TRUE(fixture.physicalFc->getErrorInputs()[0].has_value());
+    ASSERT_EQ(fixture.physicalFc->getErrorOutputs().size(), 1u);
+    ASSERT_TRUE(fixture.physicalFc->getErrorOutputs()[0].has_value());
+    ASSERT_EQ(fixture.physicalFc->getParameter("weights")->getStorage().value().getDataType(), operandDataType);
+    ASSERT_EQ(fixture.physicalFc->getParameter("biases")->getStorage().value().getDataType(), DataType::FP32);
+    ASSERT_EQ(fixture.physicalOutput->getFeatureOutput().value().getDataType(), DataType::FP32);
+    ASSERT_EQ(fixture.physicalFc->getErrorInputs()[0].value().getDataType(), DataType::FP32);
+    ASSERT_EQ(fixture.physicalFc->getErrorOutputs()[0].value().getDataType(), operandDataType);
+
+    Stream stream = fixture.physicalFc->getStreams()[0];
+    setParameterTensor(fixture.physicalFc->getParameter("weights"), weightValues, stream);
+    setParameterTensor(fixture.physicalFc->getParameter("biases"), biasValues, stream);
+    stream.synchronize();
+
+    Impl::Tensor featureInHost(cpuPlacement, Impl::TensorDescriptor(operandDataType, {batchSize, numInputFeatures}));
+    writeCpuTensor(featureInHost, inputValues);
+    const vector<float> actualForward = runForward(*fixture.physicalInput, *fixture.physicalOutput, featureInHost, batchSize);
+
+    Impl::Tensor errorInput = fixture.physicalFc->getErrorInputs()[0].value();
+    Impl::Tensor errorInputHost = errorInput.clone(cpuPlacement);
+    writeCpuTensor(errorInputHost, errorInputValues);
+    errorInput.copyFromAsync(errorInputHost, stream);
+    fixture.physicalFc->backward(errorInput, batchSize);
+
+    ASSERT_TRUE(fixture.physicalFc->getGradientUpdateStream().has_value());
+    Stream gradientStream = fixture.physicalFc->getGradientUpdateStream().value();
+    Impl::Tensor errorOutputHost = copyTensorToCpu(fixture.physicalFc->getErrorOutputs()[0].value(), stream);
+    Impl::Tensor weightsAfterHost =
+        copyTensorToCpu(fixture.physicalFc->getParameter("weights")->getStorage().value(), gradientStream);
+    Impl::Tensor biasesAfterHost =
+        copyTensorToCpu(fixture.physicalFc->getParameter("biases")->getStorage().value(), gradientStream);
+    stream.synchronize();
+    gradientStream.synchronize();
+
+    const vector<float> effectiveInputs = roundToDataType(inputValues, operandDataType);
+    const vector<float> effectiveWeights = roundToDataType(weightValues, operandDataType);
+    const vector<float> effectiveMatrixGradient = roundToDataType(errorInputValues, operandDataType);
+
+    const vector<float> expectedForward = fullyConnectedReference(
+        effectiveInputs, effectiveWeights, biasValues, batchSize, numInputFeatures, numOutputFeatures, true);
+    const vector<float> expectedErrorOutput = roundToDataType(
+        fullyConnectedBackwardErrorReference(
+            effectiveMatrixGradient, effectiveWeights, batchSize, numInputFeatures, numOutputFeatures),
+        operandDataType);
+    const vector<float> expectedWeightGradient = roundToDataType(
+        fullyConnectedWeightGradReference(
+            effectiveInputs, effectiveMatrixGradient, batchSize, numInputFeatures, numOutputFeatures),
+        operandDataType);
+    const vector<float> expectedBiasGradient =
+        fullyConnectedBiasGradReference(errorInputValues, batchSize, numOutputFeatures);
+    const vector<float> expectedWeightsAfter = roundToDataType(
+        sgdUpdatedReference(effectiveWeights, expectedWeightGradient, batchSize, learningRate), operandDataType);
+    const vector<float> expectedBiasesAfter =
+        sgdUpdatedReference(biasValues, expectedBiasGradient, batchSize, learningRate);
+
+    const float tolerance = operandDataType == DataType::BF16 ? 4e-2f : 8e-3f;
+    expectAllClose(actualForward, expectedForward, tolerance, tolerance, "low-precision/fp32 feature out");
+    expectAllClose(readCpuTensor(errorOutputHost), expectedErrorOutput, tolerance, tolerance,
+                   "low-precision/fp32 error out");
+    expectAllClose(readCpuTensor(weightsAfterHost), expectedWeightsAfter, tolerance, tolerance,
+                   "low-precision/fp32 weights after SGD");
+    expectAllClose(readCpuTensor(biasesAfterHost), expectedBiasesAfter, 2e-4f, 2e-4f,
+                   "low-precision/fp32 biases after SGD");
+
+    EXPECT_FALSE(fixture.physicalFc->getParameter("weights")->getOptimizer()->getWeightsGradient().has_value());
+    EXPECT_FALSE(fixture.physicalFc->getParameter("biases")->getOptimizer()->getWeightsGradient().has_value());
+}
+
+TEST(FullyConnectedApi, Bf16InputsAndWeightsFp32OutputTrainWithSgd) {
+    runLowPrecisionInputsFp32OutputSgd(DataType::BF16);
+}
+
+TEST(FullyConnectedApi, Fp16InputsAndWeightsFp32OutputTrainWithSgd) {
+    runLowPrecisionInputsFp32OutputSgd(DataType::FP16);
+}
+
+TEST(FullyConnectedApi, Bf16InputsAndWeightsFp32OutputTrainWithAdamAndFp32State) {
+    constexpr uint32_t batchSize = 3;
+    constexpr uint32_t numInputFeatures = 4;
+    constexpr uint32_t numOutputFeatures = 3;
+    constexpr float alpha = 0.001f;
+    constexpr float beta1 = 0.9f;
+    constexpr float beta2 = 0.999f;
+    constexpr float epsilon = 1e-7f;
+
+    const vector<float> inputValues = {
+        1.0f, -2.0f, 0.5f, 0.25f,
+        3.0f, -1.5f, 2.0f, -0.75f,
+        -0.25f, 1.25f, -3.0f, 0.5f,
+    };
+    const vector<float> initialWeightValues = {
+        0.25f, -0.5f, 0.75f,
+        1.0f, -0.25f, 0.5f,
+        -0.75f, 0.25f, -0.5f,
+        0.5f, 1.0f, -0.25f,
+    };
+    const vector<float> initialBiasValues = {0.125f, -0.25f, 0.5f};
+    const vector<float> errorInputValues = {
+        0.1234f, -0.5678f, 1.2345f,
+        -0.2345f, 0.7891f, -1.1123f,
+        0.4567f, 0.3456f, -0.6789f,
+    };
+
+    shared_ptr<Api::Adam> weightsAdam =
+        Api::Adam::Builder().alpha(alpha).beta1(beta1).beta2(beta2).epsilon(epsilon).build();
+    shared_ptr<Api::Adam> biasesAdam =
+        Api::Adam::Builder().alpha(alpha).beta1(beta1).beta2(beta2).epsilon(epsilon).build();
+
+    Api::Network network("fcBf16InputsFp32OutputAdam");
+    Api::NetworkInput input = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("input")
+                                  .dimensions({numInputFeatures})
+                                  .dataType(DataType::BF16)
+                                  .build();
+    Api::GradientRivet inputRivet =
+        Api::GradientRivet::Builder().network(network).tensor(input.getFeatureOutput().value()).build();
+    Api::FullyConnected fc = Api::FullyConnected::Builder()
+                                 .network(network)
+                                 .featureInput(inputRivet.getFeatureOutput().value())
+                                 .numOutputFeatures(numOutputFeatures)
+                                 .hasBias(true)
+                                 .weightsDataType(DataType::BF16)
+                                 .computeDataType(DataType::FP32)
+                                 .outputDataType(DataType::FP32)
+                                 .weightsOptimizer(weightsAdam)
+                                 .biasesOptimizer(biasesAdam)
+                                 .noActivation()
+                                 .build();
+    Api::GradientRivet outputRivet =
+        Api::GradientRivet::Builder().network(network).tensor(fc.getFeatureOutput().value()).build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(outputRivet.getFeatureOutput().value())
+                                    .dataType(DataType::FP32)
+                                    .build();
+
+    PlacedFullyConnectedFixture fixture = placeSingleFullyConnectedNetwork(network, input, output, fc, batchSize, false);
+    ASSERT_NE(fixture.physicalFc->getParameter("weights"), nullptr);
+    ASSERT_NE(fixture.physicalFc->getParameter("biases"), nullptr);
+    ASSERT_NE(fixture.physicalFc->getParameter("weights")->getOptimizer(), nullptr);
+    ASSERT_NE(fixture.physicalFc->getParameter("biases")->getOptimizer(), nullptr);
+    ASSERT_EQ(fixture.physicalFc->getErrorInputs().size(), 1u);
+    ASSERT_TRUE(fixture.physicalFc->getErrorInputs()[0].has_value());
+    ASSERT_EQ(fixture.physicalFc->getErrorOutputs().size(), 1u);
+    ASSERT_TRUE(fixture.physicalFc->getErrorOutputs()[0].has_value());
+    ASSERT_EQ(fixture.physicalFc->getErrorInputs()[0].value().getDataType(), DataType::FP32);
+    ASSERT_EQ(fixture.physicalFc->getErrorOutputs()[0].value().getDataType(), DataType::BF16);
+    Stream stream = fixture.physicalFc->getStreams()[0];
+    setParameterTensor(fixture.physicalFc->getParameter("weights"), initialWeightValues, stream);
+    setParameterTensor(fixture.physicalFc->getParameter("biases"), initialBiasValues, stream);
+    stream.synchronize();
+
+    Impl::Tensor featureInHost(cpuPlacement, Impl::TensorDescriptor(DataType::BF16, {batchSize, numInputFeatures}));
+    writeCpuTensor(featureInHost, inputValues);
+    const vector<float> actualForward = runForward(*fixture.physicalInput, *fixture.physicalOutput, featureInHost, batchSize);
+
+    Impl::Tensor errorInput = fixture.physicalFc->getErrorInputs()[0].value();
+    Impl::Tensor errorInputHost = errorInput.clone(cpuPlacement);
+    writeCpuTensor(errorInputHost, errorInputValues);
+    errorInput.copyFromAsync(errorInputHost, stream);
+    fixture.physicalFc->backward(errorInput, batchSize);
+
+    ASSERT_TRUE(fixture.physicalFc->getGradientUpdateStream().has_value());
+    Stream gradientStream = fixture.physicalFc->getGradientUpdateStream().value();
+    shared_ptr<Impl::Optimizer> physicalWeightsAdam = fixture.physicalFc->getParameter("weights")->getOptimizer();
+    shared_ptr<Impl::Optimizer> physicalBiasesAdam = fixture.physicalFc->getParameter("biases")->getOptimizer();
+    Impl::Tensor weightsAfterHost =
+        copyTensorToCpu(fixture.physicalFc->getParameter("weights")->getStorage().value(), gradientStream);
+    Impl::Tensor biasesAfterHost =
+        copyTensorToCpu(fixture.physicalFc->getParameter("biases")->getStorage().value(), gradientStream);
+    Impl::Tensor weightsMHost = copyTensorToCpu(physicalWeightsAdam->getOptimizerParameterTensor("m"), gradientStream);
+    Impl::Tensor weightsVHost = copyTensorToCpu(physicalWeightsAdam->getOptimizerParameterTensor("v"), gradientStream);
+    Impl::Tensor biasesMHost = copyTensorToCpu(physicalBiasesAdam->getOptimizerParameterTensor("m"), gradientStream);
+    Impl::Tensor biasesVHost = copyTensorToCpu(physicalBiasesAdam->getOptimizerParameterTensor("v"), gradientStream);
+    stream.synchronize();
+    gradientStream.synchronize();
+
+    EXPECT_EQ(physicalWeightsAdam->getOptimizerParameterTensor("m").getDataType(), DataType::FP32);
+    EXPECT_EQ(physicalWeightsAdam->getOptimizerParameterTensor("v").getDataType(), DataType::FP32);
+    EXPECT_EQ(physicalBiasesAdam->getOptimizerParameterTensor("m").getDataType(), DataType::FP32);
+    EXPECT_EQ(physicalBiasesAdam->getOptimizerParameterTensor("v").getDataType(), DataType::FP32);
+
+    const vector<float> effectiveInputs = roundToDataType(inputValues, DataType::BF16);
+    const vector<float> effectiveWeights = roundToDataType(initialWeightValues, DataType::BF16);
+    const vector<float> effectiveMatrixGradient = roundToDataType(errorInputValues, DataType::BF16);
+    const vector<float> expectedForward = fullyConnectedReference(
+        effectiveInputs, effectiveWeights, initialBiasValues, batchSize, numInputFeatures, numOutputFeatures, true);
+    const vector<float> rawWeightGradient = roundToDataType(
+        fullyConnectedWeightGradReference(
+            effectiveInputs, effectiveMatrixGradient, batchSize, numInputFeatures, numOutputFeatures),
+        DataType::BF16);
+    const vector<float> rawBiasGradient =
+        fullyConnectedBiasGradReference(errorInputValues, batchSize, numOutputFeatures);
+
+    const float scale = 1.0f / (static_cast<float>(batchSize) * Impl::Loss::getLossScalingFactor());
+    const float alphaT = alpha * std::sqrt(1.0f - beta2) / (1.0f - beta1);
+    vector<float> expectedWeightsM(rawWeightGradient.size());
+    vector<float> expectedWeightsV(rawWeightGradient.size());
+    vector<float> expectedWeightsAfter(rawWeightGradient.size());
+    for (uint64_t i = 0; i < rawWeightGradient.size(); ++i) {
+        const float g = rawWeightGradient[i] * scale;
+        expectedWeightsM[i] = (1.0f - beta1) * g;
+        expectedWeightsV[i] = (1.0f - beta2) * g * g;
+        expectedWeightsAfter[i] = roundToDataType(
+            effectiveWeights[i] - alphaT * expectedWeightsM[i] / (std::sqrt(expectedWeightsV[i]) + epsilon),
+            DataType::BF16);
+    }
+    vector<float> expectedBiasesM(rawBiasGradient.size());
+    vector<float> expectedBiasesV(rawBiasGradient.size());
+    vector<float> expectedBiasesAfter(rawBiasGradient.size());
+    for (uint64_t i = 0; i < rawBiasGradient.size(); ++i) {
+        const float g = rawBiasGradient[i] * scale;
+        expectedBiasesM[i] = (1.0f - beta1) * g;
+        expectedBiasesV[i] = (1.0f - beta2) * g * g;
+        expectedBiasesAfter[i] =
+            initialBiasValues[i] - alphaT * expectedBiasesM[i] / (std::sqrt(expectedBiasesV[i]) + epsilon);
+    }
+
+    expectAllClose(actualForward, expectedForward, 4e-2f, 4e-2f, "bf16/fp32 Adam feature out");
+    expectAllClose(readCpuTensor(weightsMHost), expectedWeightsM, 4e-3f, 4e-3f, "bf16/fp32 Adam weights m");
+    expectAllClose(readCpuTensor(weightsVHost), expectedWeightsV, 4e-3f, 4e-3f, "bf16/fp32 Adam weights v");
+    expectAllClose(readCpuTensor(weightsAfterHost), expectedWeightsAfter, 4e-2f, 4e-2f,
+                   "bf16/fp32 Adam weights after");
+    expectAllClose(readCpuTensor(biasesMHost), expectedBiasesM, 2e-4f, 2e-4f, "bf16/fp32 Adam biases m");
+    expectAllClose(readCpuTensor(biasesVHost), expectedBiasesV, 2e-4f, 2e-4f, "bf16/fp32 Adam biases v");
+    expectAllClose(readCpuTensor(biasesAfterHost), expectedBiasesAfter, 2e-4f, 2e-4f,
+                   "bf16/fp32 Adam biases after");
+
+    EXPECT_FALSE(physicalWeightsAdam->getWeightsGradient().has_value());
+    EXPECT_FALSE(physicalBiasesAdam->getWeightsGradient().has_value());
 }
 
 void runFullyConnectedAdamThreePasses(bool hasBias) {
@@ -1551,3 +1892,143 @@ TEST(FullyConnectedApi, MultiInputEpilogueRunsForwardBackwardResidualAddAndUpdat
     expectAllClose(readCpuTensor(weightsAfterHost), expectedWeightsAfter, 8e-2f, 8e-2f,
                    "fully connected residual epilogue weights after");
 }
+
+TEST(FullyConnectedApi, PrefixPreservingRank3ResidualEpiloguePlacesAndKeepsPublicShape) {
+    constexpr uint32_t batchSize = 3;
+    constexpr uint64_t sequenceLength = 100;
+    constexpr uint64_t numInputFeatures = 128;
+    constexpr uint64_t numOutputFeatures = 1;
+    const DataType dataType = DataType::BF16;
+
+    Api::Network network("prefixPreservingRank3ResidualEpilogue");
+    Api::NetworkInput input = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("input")
+                                  .dimensions({sequenceLength, numInputFeatures})
+                                  .dataType(dataType)
+                                  .build();
+    Api::NetworkInput residual = Api::NetworkInput::Builder()
+                                     .network(network)
+                                     .name("residual")
+                                     .dimensions({sequenceLength, numOutputFeatures})
+                                     .dataType(dataType)
+                                     .build();
+
+    Impl::Expression projected = Api::FullyConnected::epilogueInput(DataType::FP32, dataType);
+    Impl::Expression residualInput = Api::FullyConnected::epilogueAuxInput("residual", DataType::FP32, dataType);
+    Api::FullyConnected fc = Api::FullyConnected::Builder()
+                                 .network(network)
+                                 .featureInput(input.getFeatureOutput().value())
+                                 .numOutputFeatures(numOutputFeatures)
+                                 .preserveInputPrefixDimensions(true)
+                                 .hasBias(true)
+                                 .weightsDataType(dataType)
+                                 .computeDataType(DataType::FP32)
+                                 .outputDataType(dataType)
+                                 .noActivation()
+                                 .epilogueInput("residual", residual.getFeatureOutput().value())
+                                 .epilogue(projected + residualInput)
+                                 .build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(fc.getFeatureOutput().value())
+                                    .dataType(dataType)
+                                    .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<Api::PlacedNetwork> placedNetwork;
+    ASSERT_NO_THROW(placedNetwork = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/true));
+    synchronizeEvents(initDoneEvents);
+    ASSERT_NE(placedNetwork, nullptr);
+
+    Impl::StampedNetwork& stampedNetwork = placedNetwork->getStampedNetwork(0);
+    auto physicalFc = dynamic_pointer_cast<Impl::CustomLayer>(stampedNetwork.getPhysicalLayerFromApiLayer(fc.getId()));
+    auto physicalOutput =
+        dynamic_pointer_cast<Impl::NetworkOutput>(stampedNetwork.getPhysicalLayerFromApiLayer(output.getId()));
+    ASSERT_NE(physicalFc, nullptr);
+    ASSERT_NE(physicalOutput, nullptr);
+    ASSERT_TRUE(physicalOutput->getFeatureOutput().has_value());
+    EXPECT_EQ(physicalOutput->getFeatureOutput()->getDimensions(),
+              (vector<uint64_t>{batchSize, sequenceLength, numOutputFeatures}));
+}
+
+TEST(FullyConnectedApi, PrefixPreservingRank3ResidualEpilogueTrainingBuildsFoldedBackward) {
+    constexpr uint32_t batchSize = 3;
+    constexpr uint64_t sequenceLength = 53;
+    constexpr uint64_t numInputFeatures = 256;
+    constexpr uint64_t numOutputFeatures = 128;
+    const DataType dataType = DataType::BF16;
+
+    shared_ptr<Api::Sgd> optimizer =
+        Api::Sgd::Builder().initialLearningRate(0.01f).decay(0.0f).momentum(0.0f).build();
+
+    Api::Network network("prefixPreservingRank3ResidualEpilogueTraining");
+    Api::NetworkInput input = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("input")
+                                  .dimensions({sequenceLength, numInputFeatures})
+                                  .dataType(dataType)
+                                  .build();
+    Api::NetworkInput residual = Api::NetworkInput::Builder()
+                                     .network(network)
+                                     .name("residual")
+                                     .dimensions({sequenceLength, numOutputFeatures})
+                                     .dataType(dataType)
+                                     .build();
+    Api::GradientRivet inputRivet =
+        Api::GradientRivet::Builder().network(network).tensor(input.getFeatureOutput().value()).build();
+    Api::GradientRivet residualRivet =
+        Api::GradientRivet::Builder().network(network).tensor(residual.getFeatureOutput().value()).build();
+
+    Impl::Expression projected = Api::FullyConnected::epilogueInput(DataType::FP32, dataType);
+    Impl::Expression residualInput = Api::FullyConnected::epilogueAuxInput("residual", DataType::FP32, dataType);
+    Api::FullyConnected fc = Api::FullyConnected::Builder()
+                                 .network(network)
+                                 .featureInput(inputRivet.getFeatureOutput().value())
+                                 .numOutputFeatures(numOutputFeatures)
+                                 .preserveInputPrefixDimensions(true)
+                                 .hasBias(true)
+                                 .weightsDataType(dataType)
+                                 .computeDataType(DataType::FP32)
+                                 .outputDataType(dataType)
+                                 .weightsOptimizer(optimizer)
+                                 .biasesOptimizer(optimizer)
+                                 .noActivation()
+                                 .epilogueInput("residual", residualRivet.getFeatureOutput().value())
+                                 .epilogue(projected + residualInput)
+                                 .build();
+    Api::GradientRivet outputRivet =
+        Api::GradientRivet::Builder().network(network).tensor(fc.getFeatureOutput().value()).build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(outputRivet.getFeatureOutput().value())
+                                    .dataType(dataType)
+                                    .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<Api::PlacedNetwork> placedNetwork;
+    ASSERT_NO_THROW(placedNetwork = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/false));
+    synchronizeEvents(initDoneEvents);
+    ASSERT_NE(placedNetwork, nullptr);
+
+    Impl::StampedNetwork& stampedNetwork = placedNetwork->getStampedNetwork(0);
+    auto physicalFc = dynamic_pointer_cast<Impl::CustomLayer>(stampedNetwork.getPhysicalLayerFromApiLayer(fc.getId()));
+    auto physicalOutput =
+        dynamic_pointer_cast<Impl::NetworkOutput>(stampedNetwork.getPhysicalLayerFromApiLayer(output.getId()));
+    ASSERT_NE(physicalFc, nullptr);
+    ASSERT_NE(physicalOutput, nullptr);
+    ASSERT_TRUE(physicalOutput->getFeatureOutput().has_value());
+    EXPECT_EQ(physicalOutput->getFeatureOutput()->getDimensions(),
+              (vector<uint64_t>{batchSize, sequenceLength, numOutputFeatures}));
+
+    ASSERT_EQ(physicalFc->getErrorOutputs().size(), 2u);
+    ASSERT_TRUE(physicalFc->getErrorOutputs()[0].has_value());
+    ASSERT_TRUE(physicalFc->getErrorOutputs()[1].has_value());
+    EXPECT_EQ(physicalFc->getErrorOutputs()[0]->getDimensions(),
+              (vector<uint64_t>{batchSize, sequenceLength, numInputFeatures}));
+    EXPECT_EQ(physicalFc->getErrorOutputs()[1]->getDimensions(),
+              (vector<uint64_t>{batchSize, sequenceLength, numOutputFeatures}));
+}
+
