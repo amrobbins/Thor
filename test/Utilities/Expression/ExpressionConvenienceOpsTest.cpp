@@ -1862,6 +1862,23 @@ TEST(ExpressionGammaFunctionOps, PrimitiveGammaFunctionOpsLowerToUnaryExpression
     }
 }
 
+
+TEST(ExpressionAutoDiffShapeSpecialization, RuntimeScalarsDoNotRequireTensorDimensions) {
+    Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
+    Expression scale = Expression::tensorRuntimeScalar("scale", DataType::FP32, DataType::FP32);
+    PhysicalOutputs forward = Expression::outputs({{"y", x * scale}}).physicalOutputs();
+
+    const std::unordered_map<std::string, std::vector<uint64_t>> forwardInputDims = {
+        {"x", {2, 3}},
+    };
+
+    EXPECT_NO_THROW((void)buildBackwardOutputs(
+        forward,
+        {"x"},
+        std::nullopt,
+        forwardInputDims));
+}
+
 TEST(ExpressionGammaFunctionOps, GammaFunctionOpsStayInSingleFusedStage) {
     auto x = Expression::input("x");
     auto y = x.tgamma() + x.lgamma() + x.digamma();

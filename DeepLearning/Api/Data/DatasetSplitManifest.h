@@ -5,8 +5,10 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace Thor {
@@ -60,13 +62,18 @@ class ExampleIndexSet {
 };
 
 /**
- * Immutable train/validate/test membership bound to one immutable NamedDataset.
+ * Immutable train/named-validation/test membership bound to one immutable
+ * NamedDataset.
  *
- * The manifest contains only canonical row ids. It intentionally contains no
- * batching, randomization, queue, placement, or tensor state.
+ * getValidate() preserves the historical single-validation API and returns the
+ * population selected by getDefaultValidationName().  Additional populations
+ * are available through getValidation(name).  The manifest contains only
+ * canonical row ids; batching and mutable cursor state remain outside it.
  */
 class DatasetSplitManifest {
    public:
+    using ValidationIndexSets = std::map<std::string, ExampleIndexSet>;
+
     DatasetSplitManifest(const NamedDataset &dataset,
                          std::vector<uint64_t> trainIndices,
                          std::vector<uint64_t> validateIndices,
@@ -75,6 +82,11 @@ class DatasetSplitManifest {
                          ExampleIndexSet trainIndices,
                          ExampleIndexSet validateIndices,
                          std::optional<ExampleIndexSet> testIndices = std::nullopt);
+    DatasetSplitManifest(const NamedDataset &dataset,
+                         ExampleIndexSet trainIndices,
+                         ValidationIndexSets validationIndices,
+                         std::string defaultValidationName,
+                         std::optional<ExampleIndexSet> testIndices = std::nullopt);
 
     [[nodiscard]] static DatasetSplitManifest load(const std::filesystem::path &path);
     void save(const std::filesystem::path &path) const;
@@ -82,13 +94,20 @@ class DatasetSplitManifest {
     [[nodiscard]] const DatasetId &getDatasetId() const { return datasetId; }
     [[nodiscard]] uint64_t getNumExamples() const { return numExamples; }
     [[nodiscard]] const ExampleIndexSet &getTrain() const { return *train; }
-    [[nodiscard]] const ExampleIndexSet &getValidate() const { return *validate; }
+    [[nodiscard]] const ExampleIndexSet &getValidate() const { return getValidation(defaultValidationName); }
+    [[nodiscard]] const ExampleIndexSet &getValidation(const std::string &name) const;
     [[nodiscard]] const ExampleIndexSet &getTest() const { return *test; }
     [[nodiscard]] const std::shared_ptr<const ExampleIndexSet> &getSharedTrain() const { return train; }
-    [[nodiscard]] const std::shared_ptr<const ExampleIndexSet> &getSharedValidate() const { return validate; }
+    [[nodiscard]] const std::shared_ptr<const ExampleIndexSet> &getSharedValidate() const {
+        return getSharedValidation(defaultValidationName);
+    }
+    [[nodiscard]] const std::shared_ptr<const ExampleIndexSet> &getSharedValidation(const std::string &name) const;
     [[nodiscard]] const std::shared_ptr<const ExampleIndexSet> &getSharedTest() const { return test; }
+    [[nodiscard]] std::vector<std::string> getValidationNames() const;
+    [[nodiscard]] const std::string &getDefaultValidationName() const { return defaultValidationName; }
+    [[nodiscard]] DatasetSplitManifest withDefaultValidation(std::string name) const;
     [[nodiscard]] bool hasExplicitTestSplit() const { return explicitTestSplit; }
-    [[nodiscard]] bool testAliasesValidate() const { return test == validate; }
+    [[nodiscard]] bool testAliasesValidate() const { return !explicitTestSplit; }
 
     void validateAgainst(const NamedDataset &dataset) const;
 
@@ -99,19 +118,22 @@ class DatasetSplitManifest {
     DatasetSplitManifest(DatasetId datasetId,
                          uint64_t numExamples,
                          ExampleIndexSet trainIndices,
-                         ExampleIndexSet validateIndices,
+                         ValidationIndexSets validationIndices,
+                         std::string defaultValidationName,
                          std::optional<ExampleIndexSet> testIndices);
 
     DatasetId datasetId;
     uint64_t numExamples;
     std::shared_ptr<const ExampleIndexSet> train;
-    std::shared_ptr<const ExampleIndexSet> validate;
+    std::map<std::string, std::shared_ptr<const ExampleIndexSet>> validations;
+    std::string defaultValidationName;
     std::shared_ptr<const ExampleIndexSet> test;
     bool explicitTestSplit;
 
     static std::shared_ptr<const ExampleIndexSet> makeIndexSet(ExampleIndexSet indices,
                                                                uint64_t numExamples,
-                                                               const char *partitionName);
+                                                               const std::string &partitionName);
+    static void validateValidationName(const std::string &name);
 };
 
 }  // namespace Thor

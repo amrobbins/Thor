@@ -463,6 +463,10 @@ void appendPlainStatsLine(LineBuffer& out,
 
     appendPlainDimKey(out, "phase");
     appendPadded(out, trainingPhaseName(stats.phase), 8, PadAlignment::LEFT);
+    if (stats.phase == TrainingEventPhase::VALIDATE && !stats.validationPopulation.empty()) {
+        appendPlainDimKey(out, "population");
+        out.append(stats.validationPopulation.c_str());
+    }
 
     if (stats.epochs > 0) {
         appendPlainDimKey(out, "epoch");
@@ -550,6 +554,10 @@ void appendColorStatsLine(LineBuffer& out,
 
     appendDimKey(out, "phase");
     appendPhaseValue(out, stats.phase);
+    if (stats.phase == TrainingEventPhase::VALIDATE && !stats.validationPopulation.empty()) {
+        appendDimKey(out, "population");
+        out.append(stats.validationPopulation.c_str());
+    }
 
     if (stats.epochs > 0) {
         appendDimKey(out, "epoch");

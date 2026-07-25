@@ -2,8 +2,10 @@
 
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -20,7 +22,17 @@ struct TrainingModelSelectionContext {
     uint64_t epoch = 0;
     TrainingModelSelectionPhaseStats train{};
     TrainingModelSelectionPhaseStats validate{};
+    std::map<std::string, TrainingModelSelectionPhaseStats> validations{};
+    std::string defaultValidationPopulation{"validate"};
     TrainingModelSelectionPhaseStats test{};
+
+    [[nodiscard]] const TrainingModelSelectionPhaseStats& validation(const std::string& name) const {
+        const auto it = validations.find(name);
+        if (it == validations.end()) {
+            throw std::out_of_range("TrainingModelSelectionContext has no validation population named '" + name + "'.");
+        }
+        return it->second;
+    }
 
     [[nodiscard]] std::optional<double> trainingLoss() const { return train.loss; }
     [[nodiscard]] std::optional<double> validationLoss() const { return validate.loss; }

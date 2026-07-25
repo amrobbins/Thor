@@ -4252,6 +4252,69 @@ def test_trainer_model_selection_score_receives_named_loss_context(tmp_path):
         description="opt-in TrainingRuns CUDA integration tests",
     ),
 )
+def test_trainer_model_selection_score_receives_named_validation_populations(tmp_path):
+    base_data = _regression_one_batch_data()
+    named_data = thor.data.TrainingData(
+        dataset=base_data.dataset,
+        splits=thor.data.DatasetSplitManifest(
+            dataset=base_data.dataset,
+            train_indices=np.array([0, 1], dtype=np.int64),
+            validation_indices={
+                "seen_sku": np.array([2, 3], dtype=np.int64),
+                "unseen_sku": np.array([4, 5, 6, 7], dtype=np.int64),
+            },
+            default_validation="unseen_sku",
+        ),
+        batching=thor.data.BatchPolicy(batch_size=2, randomize_train=False),
+        dataset_name="training_runs_named_validation_populations",
+        device_storage="off",
+    )
+    contexts = []
+
+    def score(context):
+        contexts.append(context)
+        assert context["default_validation_population"] == "unseen_sku"
+        assert set(context["validations"]) == {"seen_sku", "unseen_sku"}
+        assert context["validate"] == context["validations"]["unseen_sku"]
+        seen_loss = context["validations"]["seen_sku"]["losses"]["mse_loss"]
+        unseen_loss = context["validations"]["unseen_sku"]["losses"]["mse_loss"]
+        return 0.8 * seen_loss + 0.2 * unseen_loss
+
+    trainer = thor.training.Trainer(
+        _build_two_loss_regressor("trainer_named_validation_populations"),
+        data=named_data,
+        optimizer=thor.optimizers.Sgd(initial_learning_rate=1.0e-12, momentum=0.0),
+        stats_interval_s=0.0,
+        max_in_flight_batches=2,
+        scalar_tensors_to_report=[],
+        stats_color="never",
+        save_model_dir=tmp_path / "named_validation_populations",
+        save_model_overwrite=True,
+        model_selection_score=score,
+    )
+
+    result = trainer.fit(1, check_best_model_every_epochs=1)
+
+    assert result.best_score is not None
+    assert contexts
+    assert contexts[-1]["epoch"] == 1
+    assert result.final_validation_stats.validation_population == "unseen_sku"
+    assert result.final_validation_stats.is_default_validation_population
+    assert set(result.final_validation_stats_by_population) == {
+        "seen_sku",
+        "unseen_sku",
+    }
+
+
+@pytest.mark.cuda
+@pytest.mark.training_integration
+@pytest.mark.skipif(
+    not RUN_TRAINING_INTEGRATION,
+    reason=integration_skip_reason(
+        "THOR_RUN_TRAINING_INTEGRATION",
+        description="opt-in TrainingRuns CUDA integration tests",
+    ),
+)
 def test_trainer_model_selection_score_none_skips_candidate_for_epoch(tmp_path):
     save_dir = tmp_path / "custom_score_none_skips_epoch"
     one_epoch_reference_dir = tmp_path / "custom_score_none_one_epoch_reference"

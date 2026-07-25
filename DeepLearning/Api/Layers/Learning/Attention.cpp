@@ -731,7 +731,6 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
             if (useScoreBias) {
                 scoreBiasExpr = Expression::input(kAttentionScoreBiasInputName, computeDType, computeDType);
             }
-            Expression ow = Expression::input("output_weights", weightsDType, weightsDType);
 
             struct ProjectedQkv {
                 Expression q;
@@ -825,18 +824,20 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
             options.use_alibi_mask = useAlibiMask;
             options.compute_dtype = computeDType;
             options.output_dtype = outputDType;
-            options.dropout_probability = dropoutProbability;
             if (attentionScale.has_value()) {
                 options.attention_scale = static_cast<float>(attentionScale.value());
             }
 
-            Expression attn = [&]() {
+            auto buildSdpa = [&](bool enableDropout) -> Expression {
+                AttentionOptions activeOptions = options;
+                activeOptions.dropout_probability = enableDropout ? dropoutProbability : 0.0f;
+
                 if (useRaggedOffsets) {
                     Expression qSeqLenExpr = Expression::input(kAttentionQuerySequenceLengthsInputName, DataType::INT32, DataType::INT32);
                     Expression kvSeqLenExpr = Expression::input(kAttentionKeyValueSequenceLengthsInputName, DataType::INT32, DataType::INT32);
                     Expression qRaggedOffsetsExpr = Expression::input(kAttentionQueryRaggedOffsetsInputName, DataType::INT32, DataType::INT32);
                     Expression kvRaggedOffsetsExpr = Expression::input(kAttentionKeyValueRaggedOffsetsInputName, DataType::INT32, DataType::INT32);
-                    if (dropoutProbability > 0.0f) {
+                    if (enableDropout) {
                         Expression dropoutSeedExpr = Expression::tensorRuntimeScalar(kAttentionDropoutSeedInputName, DataType::INT64, DataType::INT64);
                         Expression dropoutOffsetExpr = Expression::tensorRuntimeScalar(kAttentionDropoutOffsetInputName, DataType::INT64, DataType::INT64);
                         if (scoreBiasExpr.has_value()) {
@@ -850,100 +851,129 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
                                                                                kvRaggedOffsetsExpr,
                                                                                dropoutSeedExpr,
                                                                                dropoutOffsetExpr,
-                                                                               options)
+                                                                               activeOptions)
                                 .withOutputDType(outputDType);
                         }
-                        return Expression::scaledDotProductAttentionRagged(
-                                   q,
-                                   k,
-                                   v,
-                                   qSeqLenExpr,
-                                   kvSeqLenExpr,
-                                   qRaggedOffsetsExpr,
-                                   kvRaggedOffsetsExpr,
-                                   dropoutSeedExpr,
-                                   dropoutOffsetExpr,
-                                   options)
+                        return Expression::scaledDotProductAttentionRagged(q,
+                                                                           k,
+                                                                           v,
+                                                                           qSeqLenExpr,
+                                                                           kvSeqLenExpr,
+                                                                           qRaggedOffsetsExpr,
+                                                                           kvRaggedOffsetsExpr,
+                                                                           dropoutSeedExpr,
+                                                                           dropoutOffsetExpr,
+                                                                           activeOptions)
                             .withOutputDType(outputDType);
                     }
                     if (scoreBiasExpr.has_value()) {
-                        return Expression::scaledDotProductAttentionRagged(
-                                   q, k, v, scoreBiasExpr.value(), qSeqLenExpr, kvSeqLenExpr, qRaggedOffsetsExpr, kvRaggedOffsetsExpr, options)
+                        return Expression::scaledDotProductAttentionRagged(q,
+                                                                           k,
+                                                                           v,
+                                                                           scoreBiasExpr.value(),
+                                                                           qSeqLenExpr,
+                                                                           kvSeqLenExpr,
+                                                                           qRaggedOffsetsExpr,
+                                                                           kvRaggedOffsetsExpr,
+                                                                           activeOptions)
                             .withOutputDType(outputDType);
                     }
                     return Expression::scaledDotProductAttentionRagged(
-                               q, k, v, qSeqLenExpr, kvSeqLenExpr, qRaggedOffsetsExpr, kvRaggedOffsetsExpr, options)
+                               q, k, v, qSeqLenExpr, kvSeqLenExpr, qRaggedOffsetsExpr, kvRaggedOffsetsExpr, activeOptions)
                         .withOutputDType(outputDType);
                 }
                 if (useSequenceLengths) {
                     Expression qSeqLenExpr = Expression::input(kAttentionQuerySequenceLengthsInputName, DataType::INT32, DataType::INT32);
                     Expression kvSeqLenExpr = Expression::input(kAttentionKeyValueSequenceLengthsInputName, DataType::INT32, DataType::INT32);
-                    if (dropoutProbability > 0.0f) {
+                    if (enableDropout) {
                         Expression dropoutSeedExpr = Expression::tensorRuntimeScalar(kAttentionDropoutSeedInputName, DataType::INT64, DataType::INT64);
                         Expression dropoutOffsetExpr = Expression::tensorRuntimeScalar(kAttentionDropoutOffsetInputName, DataType::INT64, DataType::INT64);
                         if (scoreBiasExpr.has_value()) {
-                            return Expression::scaledDotProductAttention(
-                                       q, k, v, scoreBiasExpr.value(), qSeqLenExpr, kvSeqLenExpr, dropoutSeedExpr, dropoutOffsetExpr, options)
+                            return Expression::scaledDotProductAttention(q,
+                                                                         k,
+                                                                         v,
+                                                                         scoreBiasExpr.value(),
+                                                                         qSeqLenExpr,
+                                                                         kvSeqLenExpr,
+                                                                         dropoutSeedExpr,
+                                                                         dropoutOffsetExpr,
+                                                                         activeOptions)
                                 .withOutputDType(outputDType);
                         }
                         return Expression::scaledDotProductAttention(
-                                   q, k, v, qSeqLenExpr, kvSeqLenExpr, dropoutSeedExpr, dropoutOffsetExpr, options)
+                                   q, k, v, qSeqLenExpr, kvSeqLenExpr, dropoutSeedExpr, dropoutOffsetExpr, activeOptions)
                             .withOutputDType(outputDType);
                     }
                     if (scoreBiasExpr.has_value()) {
-                        return Expression::scaledDotProductAttention(q, k, v, scoreBiasExpr.value(), qSeqLenExpr, kvSeqLenExpr, options)
+                        return Expression::scaledDotProductAttention(
+                                   q, k, v, scoreBiasExpr.value(), qSeqLenExpr, kvSeqLenExpr, activeOptions)
                             .withOutputDType(outputDType);
                     }
-                    return Expression::scaledDotProductAttention(q, k, v, qSeqLenExpr, kvSeqLenExpr, options).withOutputDType(outputDType);
+                    return Expression::scaledDotProductAttention(q, k, v, qSeqLenExpr, kvSeqLenExpr, activeOptions)
+                        .withOutputDType(outputDType);
                 }
-                if (dropoutProbability > 0.0f) {
+                if (enableDropout) {
                     Expression dropoutSeedExpr = Expression::tensorRuntimeScalar(kAttentionDropoutSeedInputName, DataType::INT64, DataType::INT64);
                     Expression dropoutOffsetExpr = Expression::tensorRuntimeScalar(kAttentionDropoutOffsetInputName, DataType::INT64, DataType::INT64);
                     if (scoreBiasExpr.has_value()) {
-                        return Expression::scaledDotProductAttentionWithDropout(q, k, v, scoreBiasExpr.value(), dropoutSeedExpr, dropoutOffsetExpr, options)
+                        return Expression::scaledDotProductAttentionWithDropout(
+                                   q, k, v, scoreBiasExpr.value(), dropoutSeedExpr, dropoutOffsetExpr, activeOptions)
                             .withOutputDType(outputDType);
                     }
                     return Expression::scaledDotProductAttentionWithDropout(
-                               q, k, v, dropoutSeedExpr, dropoutOffsetExpr, options)
+                               q, k, v, dropoutSeedExpr, dropoutOffsetExpr, activeOptions)
                         .withOutputDType(outputDType);
                 }
                 if (scoreBiasExpr.has_value()) {
-                    return Expression::scaledDotProductAttention(q, k, v, scoreBiasExpr.value(), options).withOutputDType(outputDType);
+                    return Expression::scaledDotProductAttention(q, k, v, scoreBiasExpr.value(), activeOptions)
+                        .withOutputDType(outputDType);
                 }
-                return Expression::scaledDotProductAttention(q, k, v, options).withOutputDType(outputDType);
-            }();
-            const std::vector<uint64_t> foldedOutputDimensions = {batch * querySequenceLength, outputFeatures};
-            Expression merged = attn.reshape({batch * querySequenceLength, checkedMul(numHeads, valueDim, "merged head width")});
-            Expression out = Expression::matmul(merged, ow, false, false, computeDType, outputDType);
-            if (hasBias) {
-                out = out + Expression::input("output_bias", weightsDType, weightsDType);
-            }
-            if (epilogue.has_value()) {
-                // Attention exposes [B, Q, O], while the output projection is physically [B*Q, O].
-                // Apply pointwise epilogues in the projection geometry so matmul + residual can lower
-                // to the existing GEMM beta-add path with no materialized projection result or separate
-                // elementwise launch. Restore the public rank only after the epilogue, exactly as the
-                // prefix-preserving FullyConnected path does. Shape-changing epilogues are rejected.
-                Expression effectiveEpilogue = epilogue.value();
-                for (const std::string& auxInputName : epilogueAuxInputNames) {
-                    const AttentionEpilogueInputDataTypes inputDataTypes =
-                        attentionEpilogueInputDataTypes(effectiveEpilogue, auxInputName);
-                    Expression flattenedAuxInput =
-                        Expression::input(auxInputName, inputDataTypes.computeDataType, inputDataTypes.outputDataType)
-                            .reshape(foldedOutputDimensions);
-                    effectiveEpilogue = effectiveEpilogue.substituteInput(auxInputName, flattenedAuxInput);
-                }
-                out = Thor::Attention::applyEpilogue(out, effectiveEpilogue);
-            }
-            out = out.reshape({batch, querySequenceLength, outputFeatures});
-            if (!epilogue.has_value()) {
-                // Preserve the historical non-epilogue expression exactly. Epilogue expressions must resolve
-                // to the declared storage dtype on their own; do not hide an incompatible epilogue result
-                // behind an implicit final output conversion.
-                out = out.withOutputDType(outputDType);
-            }
+                return Expression::scaledDotProductAttention(q, k, v, activeOptions).withOutputDType(outputDType);
+            };
 
-            auto expressionOutputs = Expression::outputs({{"feature_output", out}});
+            const std::vector<uint64_t> foldedOutputDimensions = {batch * querySequenceLength, outputFeatures};
+            auto buildProjectedOutput = [&](Expression attn) -> Expression {
+                Expression merged = attn.reshape({batch * querySequenceLength, checkedMul(numHeads, valueDim, "merged head width")});
+                Expression outputWeights = Expression::input("output_weights", weightsDType, weightsDType);
+                Expression out = Expression::matmul(merged, outputWeights, false, false, computeDType, outputDType);
+                if (hasBias) {
+                    out = out + Expression::input("output_bias", weightsDType, weightsDType);
+                }
+                if (epilogue.has_value()) {
+                    // Attention exposes [B, Q, O], while the output projection is physically [B*Q, O].
+                    // Apply pointwise epilogues in the projection geometry so matmul + residual can lower
+                    // to the existing GEMM beta-add path with no materialized projection result or separate
+                    // elementwise launch. Restore the public rank only after the epilogue, exactly as the
+                    // prefix-preserving FullyConnected path does. Shape-changing epilogues are rejected.
+                    Expression effectiveEpilogue = epilogue.value();
+                    for (const std::string& auxInputName : epilogueAuxInputNames) {
+                        const AttentionEpilogueInputDataTypes inputDataTypes =
+                            attentionEpilogueInputDataTypes(effectiveEpilogue, auxInputName);
+                        Expression flattenedAuxInput =
+                            Expression::input(auxInputName, inputDataTypes.computeDataType, inputDataTypes.outputDataType)
+                                .reshape(foldedOutputDimensions);
+                        effectiveEpilogue = effectiveEpilogue.substituteInput(auxInputName, flattenedAuxInput);
+                    }
+                    out = Thor::Attention::applyEpilogue(out, effectiveEpilogue);
+                }
+                out = out.reshape({batch, querySequenceLength, outputFeatures});
+                if (!epilogue.has_value()) {
+                    // Preserve the historical non-epilogue expression exactly. Epilogue expressions must resolve
+                    // to the declared storage dtype on their own; do not hide an incompatible epilogue result
+                    // behind an implicit final output conversion.
+                    out = out.withOutputDType(outputDType);
+                }
+                return out;
+            };
+
+            auto expressionOutputs = Expression::outputs({{"feature_output", buildProjectedOutput(buildSdpa(dropoutProbability > 0.0f))}});
+            std::shared_ptr<FusedEquation> validationEquation;
+            if (dropoutProbability > 0.0f) {
+                auto validationExpressionOutputs =
+                    Expression::outputs({{"feature_output", buildProjectedOutput(buildSdpa(false))}});
+                validationEquation = std::make_shared<FusedEquation>(
+                    FusedEquation::compile(validationExpressionOutputs.physicalOutputs(), stream.getGpuNum()));
+            }
 
             DynamicExpression::TensorMap stampInputs = inputs;
             if (useScoreBias) {
@@ -976,8 +1006,16 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
             if (inferredOutputDataTypes.at("feature_output") != outputDType) {
                 throw std::runtime_error("Attention epilogue must preserve the feature output dtype.");
             }
+            if (validationEquation) {
+                const auto validationOutputShapes = validationEquation->getOutputShapes(stampInputs);
+                const auto validationOutputDataTypes = validationEquation->getOutputDataTypes(stampInputs);
+                if (validationOutputShapes.at("feature_output") != runtimeFeatureOutputDimensions ||
+                    validationOutputDataTypes.at("feature_output") != outputDType) {
+                    throw std::runtime_error("Attention validation expression must preserve the feature output descriptor.");
+                }
+            }
 
-            return DynamicExpressionBuild{
+            DynamicExpressionBuild build{
                 std::move(equation),
                 stampInputs,
                 std::move(tensorScalarInputs),
@@ -985,6 +1023,8 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
                 {},
                 std::move(preForwardHook),
             };
+            build.validation_equation = std::move(validationEquation);
+            return build;
         });
 }
 

@@ -731,6 +731,32 @@ TEST(Trainer, ModelSelectionScoreCanUseContextNamedValidationLossesAndMetrics) {
     EXPECT_DOUBLE_EQ(selectedScore.value(), 5.05);
 }
 
+TEST(Trainer, ModelSelectionScoreCanCombineNamedValidationPopulations) {
+    TrainingModelSelectionContext context;
+    context.epoch = 7;
+    context.defaultValidationPopulation = "unseen_sku";
+
+    TrainingModelSelectionPhaseStats seen;
+    seen.losses["daily_central_loss"] = 2.0;
+    TrainingModelSelectionPhaseStats unseen;
+    unseen.losses["daily_central_loss"] = 5.0;
+    context.validations.emplace("seen_sku", seen);
+    context.validations.emplace("unseen_sku", unseen);
+    context.validate = unseen;
+
+    TrainingModelSelectionScore score(TrainingModelSelectionScore::ContextScoreFunction(
+        [](const TrainingModelSelectionContext& selection) -> std::optional<double> {
+            return 0.8 * selection.validation("seen_sku").losses.at("daily_central_loss") +
+                   0.2 * selection.validation("unseen_sku").losses.at("daily_central_loss");
+        }));
+
+    const std::optional<double> selectedScore = score.evaluate(context);
+    ASSERT_TRUE(selectedScore.has_value());
+    EXPECT_DOUBLE_EQ(selectedScore.value(), 2.6);
+    EXPECT_EQ(context.validate.losses.at("daily_central_loss"), 5.0);
+    EXPECT_THROW((void)context.validation("missing"), std::out_of_range);
+}
+
 TEST(Trainer, DefaultModelSelectionScoreUsesValidationLossWhenPresentOtherwiseTrainingLoss) {
     TrainingModelSelectionScore score;
 

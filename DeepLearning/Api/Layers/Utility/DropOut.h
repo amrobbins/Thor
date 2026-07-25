@@ -30,19 +30,26 @@ class DropOut : public Layer {
                                                      std::shared_ptr<Thor::Layer> drivingApiLayer,
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
-        (void)inferenceOnly;
         THOR_THROW_IF_FALSE(initialized);
         THOR_THROW_IF_FALSE(connectingApiTensor == getFeatureInput().value());
 
-        std::shared_ptr<ThorImplementation::DropOut> dropOut = std::make_shared<ThorImplementation::DropOut>(dropProportion, true);
-        return dropOut;
+        // An inference-only placement never applies dropout.  A zero-rate layer is
+        // also stamped as a metadata-only identity so it can remain in the API
+        // graph without allocating tensors or launching kernels.
+        return std::make_shared<ThorImplementation::DropOut>(dropProportion, !inferenceOnly);
     }
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
+        if (dropProportion == 0.0f)
+            return 0;
         THOR_THROW_IF_FALSE(tensorPlacement.getMemDevice() == ThorImplementation::TensorPlacement::MemDevices::GPU);
-        uint32_t gpuNum = tensorPlacement.getDeviceNum();
-        cudnnHandle_t cudnnHandle = ThorImplementation::CudnnHelper::getCudnnHandle(gpuNum);
-        uint64_t randomStateSize = ThorImplementation::DropOut::getRandomStateSizeInBytes(cudnnHandle);
+        const ThorImplementation::DataType dataType = featureInput.value().getDataType();
+        uint64_t randomStateSize = 0;
+        if (!ThorImplementation::DropOut::usesNativeKernel(dataType)) {
+            uint32_t gpuNum = tensorPlacement.getDeviceNum();
+            cudnnHandle_t cudnnHandle = ThorImplementation::CudnnHelper::getCudnnHandle(gpuNum);
+            randomStateSize = ThorImplementation::DropOut::getRandomStateSizeInBytes(cudnnHandle);
+        }
 
         uint64_t featureOutputSize = featureOutput.value().getTotalSizeInBytes();
         uint64_t errorOutputSize = featureInput.value().getTotalSizeInBytes();
@@ -58,6 +65,8 @@ class DropOut : public Layer {
         featureInputDimensionsWithBatchSize.push_back(batchSize);
         for (uint32_t i = 0; i < featureInput.value().getDimensions().size(); ++i)
             featureInputDimensionsWithBatchSize.push_back(featureInput.value().getDimensions()[i]);
+        if (ThorImplementation::DropOut::usesNativeKernel(dataType))
+            return ThorImplementation::DropOut::getNativeReserveSpaceSizeInBytes(featureInputDimensionsWithBatchSize);
         return ThorImplementation::DropOut::getReservedSpaceSizeInBytes(featureInputDimensionsWithBatchSize, dataType);
     }
 

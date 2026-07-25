@@ -12,6 +12,7 @@
 #include <exception>
 #include <iomanip>
 #include <limits>
+#include <map>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -182,7 +183,16 @@ class ResultCapturingTrainingObserver : public TrainingObserver {
             if (event.stats.phase == TrainingEventPhase::TRAIN) {
                 finalTrainingStats = trainingLoss.update(event.stats);
             } else if (event.stats.phase == TrainingEventPhase::VALIDATE) {
-                finalValidationStats = validationLoss.update(event.stats);
+                const std::string population = event.stats.validationPopulation.empty()
+                                                   ? std::string("validate")
+                                                   : event.stats.validationPopulation;
+                TrainingStatsSnapshot populationStats =
+                    validationLossByPopulation[population].update(event.stats);
+                finalValidationStatsByPopulation[population] = populationStats;
+                if (event.stats.validationPopulation.empty() ||
+                    event.stats.isDefaultValidationPopulation) {
+                    finalValidationStats = std::move(populationStats);
+                }
             } else if (event.stats.phase == TrainingEventPhase::TEST) {
                 finalTestStats = testLoss.update(event.stats);
             }
@@ -204,6 +214,7 @@ class ResultCapturingTrainingObserver : public TrainingObserver {
 
     std::optional<TrainingStatsSnapshot> finalTrainingStats{};
     std::optional<TrainingStatsSnapshot> finalValidationStats{};
+    std::map<std::string, TrainingStatsSnapshot> finalValidationStatsByPopulation{};
     std::optional<TrainingStatsSnapshot> finalTestStats{};
     TrainingRunCompletionReason completionReason = TrainingRunCompletionReason::COMPLETED;
     std::optional<uint64_t> completedEpoch{};
@@ -294,7 +305,7 @@ class ResultCapturingTrainingObserver : public TrainingObserver {
 
     TrainingObserver& inner;
     FinalEpochStatsAccumulator trainingLoss{};
-    FinalEpochStatsAccumulator validationLoss{};
+    std::map<std::string, FinalEpochStatsAccumulator> validationLossByPopulation{};
     FinalEpochStatsAccumulator testLoss{};
 };
 
@@ -415,6 +426,10 @@ std::string nonFiniteLossMessage(const TrainingStatsSnapshot& stats, const std::
     if (!lossName.empty() && lossName != "loss") {
         out << " '" << lossName << "'";
     }
+    if (stats.phase == TrainingEventPhase::VALIDATE &&
+        !stats.validationPopulation.empty()) {
+        out << " for population '" << stats.validationPopulation << "'";
+    }
     out << " detected at epoch " << stats.epoch;
     if (stats.stepInEpoch > 0) {
         out << " step " << stats.stepInEpoch;
@@ -467,7 +482,9 @@ class RestartAttemptObserver : public TrainingObserver {
         if (event.type == TrainingEventType::STATS) {
             if (event.stats.phase == TrainingEventPhase::TRAIN) {
                 finalTrainingStats = trainingLoss.update(event.stats);
-            } else if (event.stats.phase == TrainingEventPhase::VALIDATE) {
+            } else if (event.stats.phase == TrainingEventPhase::VALIDATE &&
+                       (event.stats.validationPopulation.empty() ||
+                        event.stats.isDefaultValidationPopulation)) {
                 finalValidationStats = validationLoss.update(event.stats);
             } else if (event.stats.phase == TrainingEventPhase::TEST) {
                 finalTestStats = testLoss.update(event.stats);
@@ -663,7 +680,8 @@ TrainingRunResult Trainer::fit(const TrainerFitOptions& options) {
                                                   capturingObserver.bestEpoch,
                                                   capturingObserver.bestScore,
                                                   saveModelDirectory,
-                                                  trainedArtifactNetworkName(placedNetworkAfterLastFit, network));
+                                                  trainedArtifactNetworkName(placedNetworkAfterLastFit, network),
+                                                  capturingObserver.finalValidationStatsByPopulation);
     } catch (const TrainingNonFiniteLossDetected& e) {
         capturingObserver.flush();
         TrainingRunResult result;
@@ -671,6 +689,8 @@ TrainingRunResult Trainer::fit(const TrainerFitOptions& options) {
         result.status = TrainingRunStatus::FAILED;
         result.finalTrainingStats = capturingObserver.finalTrainingStats;
         result.finalValidationStats = capturingObserver.finalValidationStats;
+        result.finalValidationStatsByPopulation =
+            capturingObserver.finalValidationStatsByPopulation;
         result.finalTestStats = capturingObserver.finalTestStats;
         result.savedModelDirectory = saveModelDirectory;
         result.savedModelNetworkName = trainedArtifactNetworkName(placedNetworkAfterLastFit, network);
@@ -766,6 +786,19 @@ void Trainer::fitInternal(const TrainerFitOptions& options,
                 sessionMaxInFlightBatches, requiredDatasetFieldIds);
         };
     request.batchSession = request.batchSessionFactory();
+    request.defaultValidationPopulation = trainingData->getSplits().getDefaultValidationName();
+    for (const std::string& validationName : trainingData->getSplits().getValidationNames()) {
+        if (validationName == request.defaultValidationPopulation) {
+            continue;
+        }
+        NamedValidationSession namedValidation;
+        namedValidation.name = validationName;
+        namedValidation.batchSession = trainingData->openValidationSession(
+            validationName,
+            sessionMaxInFlightBatches,
+            requiredDatasetFieldIds);
+        request.additionalValidationSessions.push_back(std::move(namedValidation));
+    }
     request.optimizer = optimizer;
     request.trainingProgram = trainingProgram;
     request.datasetInputBindings = resolvedDatasetInputs.trainingInputBindings;
@@ -1028,7 +1061,8 @@ TrainingRunResult Trainer::fitTrainingRun(std::string runName,
                                                   capturingObserver.bestEpoch,
                                                   capturingObserver.bestScore,
                                                   saveModelDirectory,
-                                                  trainedArtifactNetworkName(placedNetworkAfterLastFit, network));
+                                                  trainedArtifactNetworkName(placedNetworkAfterLastFit, network),
+                                                  capturingObserver.finalValidationStatsByPopulation);
     } catch (const TrainingRestartConditionExceeded& e) {
         capturingObserver.flush();
         TrainingRunResult result;
@@ -1036,6 +1070,8 @@ TrainingRunResult Trainer::fitTrainingRun(std::string runName,
         result.status = TrainingRunStatus::FAILED;
         result.finalTrainingStats = capturingObserver.finalTrainingStats;
         result.finalValidationStats = capturingObserver.finalValidationStats;
+        result.finalValidationStatsByPopulation =
+            capturingObserver.finalValidationStatsByPopulation;
         result.finalTestStats = capturingObserver.finalTestStats;
         result.savedModelDirectory = saveModelDirectory;
         result.savedModelNetworkName = trainedArtifactNetworkName(placedNetworkAfterLastFit, network);
@@ -1048,6 +1084,8 @@ TrainingRunResult Trainer::fitTrainingRun(std::string runName,
         result.status = TrainingRunStatus::FAILED;
         result.finalTrainingStats = capturingObserver.finalTrainingStats;
         result.finalValidationStats = capturingObserver.finalValidationStats;
+        result.finalValidationStatsByPopulation =
+            capturingObserver.finalValidationStatsByPopulation;
         result.finalTestStats = capturingObserver.finalTestStats;
         result.savedModelDirectory = saveModelDirectory;
         result.savedModelNetworkName = trainedArtifactNetworkName(placedNetworkAfterLastFit, network);
@@ -1062,7 +1100,8 @@ TrainingRunResult Trainer::fitTrainingRun(std::string runName,
             capturingObserver.finalValidationStats,
             capturingObserver.finalTestStats,
             saveModelDirectory,
-            trainedArtifactNetworkName(placedNetworkAfterLastFit, network));
+            trainedArtifactNetworkName(placedNetworkAfterLastFit, network),
+            capturingObserver.finalValidationStatsByPopulation);
     }
 }
 
@@ -1120,7 +1159,17 @@ TrainingRunResult Trainer::evaluateTrainingRun(std::string runName,
         executeRequest(request, capturingObserver);
         capturingObserver.flush();
         return TrainingRunResult::completedResult(
-            std::move(runName), capturingObserver.finalTrainingStats, capturingObserver.finalValidationStats, capturingObserver.finalTestStats);
+            std::move(runName),
+            capturingObserver.finalTrainingStats,
+            capturingObserver.finalValidationStats,
+            capturingObserver.finalTestStats,
+            TrainingRunCompletionReason::COMPLETED,
+            {},
+            {},
+            {},
+            {},
+            {},
+            capturingObserver.finalValidationStatsByPopulation);
     } catch (...) {
         capturingObserver.flush();
         return TrainingRunResult::fromException(
@@ -1128,7 +1177,10 @@ TrainingRunResult Trainer::evaluateTrainingRun(std::string runName,
             std::current_exception(),
             capturingObserver.finalTrainingStats,
             capturingObserver.finalValidationStats,
-            capturingObserver.finalTestStats);
+            capturingObserver.finalTestStats,
+            {},
+            {},
+            capturingObserver.finalValidationStatsByPopulation);
     }
 }
 

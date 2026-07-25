@@ -133,6 +133,7 @@ struct TrainingRunResult {
     std::optional<std::string> savedModelNetworkName{};
     std::optional<TrainingStatsSnapshot> finalTrainingStats{};
     std::optional<TrainingStatsSnapshot> finalValidationStats{};
+    std::map<std::string, TrainingStatsSnapshot> finalValidationStatsByPopulation{};
     std::optional<TrainingStatsSnapshot> finalTestStats{};
     TrainingRunExceptionSummary exception{};
 
@@ -182,7 +183,9 @@ struct TrainingRunResult {
                                                            std::optional<uint64_t> bestEpoch = {},
                                                            std::optional<double> bestScore = {},
                                                            std::optional<std::string> savedModelDirectory = {},
-                                                           std::optional<std::string> savedModelNetworkName = {}) {
+                                                           std::optional<std::string> savedModelNetworkName = {},
+                                                           std::map<std::string, TrainingStatsSnapshot>
+                                                               finalValidationStatsByPopulation = {}) {
         TrainingRunResult result;
         result.runName = std::move(runName);
         result.status = TrainingRunStatus::COMPLETED;
@@ -194,6 +197,7 @@ struct TrainingRunResult {
         result.savedModelNetworkName = std::move(savedModelNetworkName);
         result.finalTrainingStats = std::move(finalTrainingStats);
         result.finalValidationStats = std::move(finalValidationStats);
+        result.finalValidationStatsByPopulation = std::move(finalValidationStatsByPopulation);
         result.finalTestStats = std::move(finalTestStats);
         return result;
     }
@@ -204,12 +208,15 @@ struct TrainingRunResult {
                                                          std::optional<TrainingStatsSnapshot> finalValidationStats = {},
                                                          std::optional<TrainingStatsSnapshot> finalTestStats = {},
                                                          std::optional<std::string> savedModelDirectory = {},
-                                                         std::optional<std::string> savedModelNetworkName = {}) {
+                                                         std::optional<std::string> savedModelNetworkName = {},
+                                                         std::map<std::string, TrainingStatsSnapshot>
+                                                             finalValidationStatsByPopulation = {}) {
         TrainingRunResult result;
         result.runName = std::move(runName);
         result.status = classifyTrainingRunException(exception);
         result.finalTrainingStats = std::move(finalTrainingStats);
         result.finalValidationStats = std::move(finalValidationStats);
+        result.finalValidationStatsByPopulation = std::move(finalValidationStatsByPopulation);
         result.finalTestStats = std::move(finalTestStats);
         result.savedModelDirectory = std::move(savedModelDirectory);
         result.savedModelNetworkName = std::move(savedModelNetworkName);

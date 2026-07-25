@@ -70,9 +70,11 @@ class TrainingRunsStatsReporter : public TrainingStatsSink {
         std::optional<TrainingStatsEvent> latestStats{};
         std::optional<TrainingStatsEvent> latestTrainingStats{};
         std::optional<TrainingStatsEvent> latestValidationStats{};
+        std::unordered_map<std::string, TrainingStatsEvent> latestNamedValidationStats{};
         std::optional<TrainingStatsEvent> latestTestStats{};
         PhaseLossState trainingLoss{};
         PhaseLossState validationLoss{};
+        std::unordered_map<std::string, PhaseLossState> namedValidationLosses{};
         std::optional<TrainingRunResult> terminalResult{};
         bool validationStatsPendingEmission = false;
         bool dirty = false;

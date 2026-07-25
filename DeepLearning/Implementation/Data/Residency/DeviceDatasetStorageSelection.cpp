@@ -637,7 +637,24 @@ DeviceDatasetStorageSelection selectDeviceDatasetStorageSession(
     ThorImplementation::TensorPlacement devicePlacement,
     uint64_t batchQueueDepth,
     std::optional<uint64_t> availableBytesOverride) {
+    return selectDeviceDatasetStorageSession(
+        sourceSession,
+        trainingData,
+        trainingData.getSplits(),
+        devicePlacement,
+        batchQueueDepth,
+        availableBytesOverride);
+}
+
+DeviceDatasetStorageSelection selectDeviceDatasetStorageSession(
+    const std::shared_ptr<BatchSession>& sourceSession,
+    const TrainingData& trainingData,
+    const DatasetSplitManifest& sessionSplits,
+    ThorImplementation::TensorPlacement devicePlacement,
+    uint64_t batchQueueDepth,
+    std::optional<uint64_t> availableBytesOverride) {
     THOR_THROW_IF_FALSE(sourceSession != nullptr);
+    sessionSplits.validateAgainst(*trainingData.getDataset());
     const DeviceDatasetStorage requested =
         trainingData.getAccessPolicy().deviceStorage;
     DeviceDatasetStorageReport report;
@@ -659,7 +676,8 @@ DeviceDatasetStorageSelection selectDeviceDatasetStorageSession(
 
     DeviceDatasetSessionDescription sessionDescription =
         describeDeviceDatasetSession(
-            trainingData,
+            sessionSplits,
+            trainingData.getBatching(),
             sourceSession->getRequiredDatasetFieldIds());
 
     report.examples = datasetDescription->numExamples;
@@ -708,9 +726,13 @@ DeviceDatasetStorageSelection selectDeviceDatasetStorageSession(
         return fallbackSelection(sourceSession, std::move(report), requested);
     }
 
+    std::string datasetName = sourceSession->getDatasetName();
+    if (datasetName.empty()) {
+        datasetName = trainingData.getDatasetName();
+    }
     return selectSharedResidencySession(
         sourceSession,
-        trainingData.getDatasetName(),
+        datasetName,
         namedDataset,
         *datasetDescription,
         sessionDescription,

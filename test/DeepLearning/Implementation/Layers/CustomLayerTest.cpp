@@ -318,6 +318,26 @@ DynamicExpression buildSingleInputSingleOutputExpression(const TensorPlacement& 
     });
 }
 
+DynamicExpression buildValidationAlternateExpression(const TensorPlacement& placement) {
+    return DynamicExpression([placement](const DynamicExpression::TensorMap& inputs,
+                                         const DynamicExpression::TensorMap& outputs,
+                                         Stream& stream) -> DynamicExpressionBuild {
+        (void)stream;
+        auto x = Expression::input("feature_input");
+        auto trainingOutputs = Expression::outputs({{"feature_output", x + 1.0f}});
+        auto validationOutputs = Expression::outputs({{"feature_output", x + 10.0f}});
+        DynamicExpressionBuild build{
+            std::make_shared<FusedEquation>(FusedEquation::compile(trainingOutputs.physicalOutputs(), placement.getDeviceNum())),
+            inputs,
+            {},
+            outputs,
+            {}};
+        build.validation_equation =
+            std::make_shared<FusedEquation>(FusedEquation::compile(validationOutputs.physicalOutputs(), placement.getDeviceNum()));
+        return build;
+    });
+}
+
 DynamicExpression buildTailSliceExpression(const TensorPlacement& placement) {
     return DynamicExpression(
         {"x"},
@@ -524,6 +544,61 @@ TEST(CustomLayer, SingleInputSingleOutputForwardCompatibility) {
     const std::vector<float> actual = readCpuTensor(result_h);
     const std::vector<float> expected{2.5f, 3.5f, 4.5f, -2.5f, 2.0f, 8.5f};
     expectAllClose(actual, expected);
+
+    cleanupLayers({&input, &custom, &sink});
+}
+
+
+TEST(CustomLayer, ValidationForwardUsesAlternateExpression) {
+    const uint64_t batchSize = 2;
+    const uint64_t features = 3;
+
+    TensorDescriptor descriptor(DataType::FP32, {batchSize, features});
+    Tensor featureIn_h(cpuPlacement, descriptor);
+    writeCpuTensor(featureIn_h, {1.0f, 2.0f, 3.0f, -4.0f, 0.5f, 7.0f});
+
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    CustomLayer custom(buildValidationAlternateExpression(gpuPlacement), gpuPlacement, {}, false);
+    CountingPassthrough sink;
+
+    input.connectToNextLayer(&custom);
+    custom.connectToNextLayer(&sink);
+    compileAndInitialize({&input, &custom, &sink});
+
+    input.forward(featureIn_h, false, batchSize);
+    ASSERT_TRUE(sink.getFeatureInput().has_value());
+    Tensor trainingResult_h = copyTensorToCpu(sink.getFeatureInput().value(), custom.getStreams()[0]);
+    expectAllClose(readCpuTensor(trainingResult_h), {2.0f, 3.0f, 4.0f, -3.0f, 1.5f, 8.0f});
+
+    input.forward(featureIn_h, true, batchSize);
+    ASSERT_TRUE(sink.getFeatureInput().has_value());
+    Tensor validationResult_h = copyTensorToCpu(sink.getFeatureInput().value(), custom.getStreams()[0]);
+    expectAllClose(readCpuTensor(validationResult_h), {11.0f, 12.0f, 13.0f, 6.0f, 10.5f, 17.0f});
+
+    EXPECT_EQ(sink.forwardCalls, 2);
+    cleanupLayers({&input, &custom, &sink});
+}
+
+TEST(CustomLayer, InferenceOnlyUsesValidationAlternateExpression) {
+    const uint64_t batchSize = 1;
+    const uint64_t features = 2;
+
+    TensorDescriptor descriptor(DataType::FP32, {batchSize, features});
+    Tensor featureIn_h(cpuPlacement, descriptor);
+    writeCpuTensor(featureIn_h, {2.0f, -3.0f});
+
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    CustomLayer custom(buildValidationAlternateExpression(gpuPlacement), gpuPlacement, {}, true);
+    CountingPassthrough sink;
+
+    input.connectToNextLayer(&custom);
+    custom.connectToNextLayer(&sink);
+    compileAndInitialize({&input, &custom, &sink});
+
+    input.forward(featureIn_h, false, batchSize);
+    ASSERT_TRUE(sink.getFeatureInput().has_value());
+    Tensor result_h = copyTensorToCpu(sink.getFeatureInput().value(), custom.getStreams()[0]);
+    expectAllClose(readCpuTensor(result_h), {12.0f, 7.0f});
 
     cleanupLayers({&input, &custom, &sink});
 }

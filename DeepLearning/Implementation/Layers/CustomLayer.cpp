@@ -1472,12 +1472,21 @@ void CustomLayer::compileImpl() {
         app.forwardPrepared = std::make_shared<PreparedDynamicExpression>(
             layerDefinitionExpression.prepare(app.forwardInputsByName, app.forwardOutputsByName, computeStream(applicationIndex)));
         app.forwardPreRunHook = app.forwardPrepared->preForwardHook();
+        app.validationForwardPreRunHook = app.forwardPrepared->validationPreForwardHook();
         validatePreparedExpressionInputs(*app.forwardPrepared);
 
         const auto inferredOutputShapes = app.forwardPrepared->equation().getOutputShapes(
             app.forwardPrepared->stampInputs(), app.forwardPrepared->tensorScalarInputs());
         const auto inferredOutputDataTypes = app.forwardPrepared->equation().getOutputDataTypes(
             app.forwardPrepared->stampInputs(), app.forwardPrepared->tensorScalarInputs());
+        std::unordered_map<std::string, std::vector<uint64_t>> validationOutputShapes;
+        std::unordered_map<std::string, DataType> validationOutputDataTypes;
+        if (app.forwardPrepared->hasValidationForward()) {
+            validationOutputShapes = app.forwardPrepared->validationEquation().getOutputShapes(
+                app.forwardPrepared->stampInputs(), app.forwardPrepared->validationTensorScalarInputs());
+            validationOutputDataTypes = app.forwardPrepared->validationEquation().getOutputDataTypes(
+                app.forwardPrepared->stampInputs(), app.forwardPrepared->validationTensorScalarInputs());
+        }
         for (const std::string& outputName : outputNames) {
             const auto actualOutputIt = app.forwardOutputsByName.find(outputName);
             const auto shapeIt = inferredOutputShapes.find(outputName);
@@ -1496,6 +1505,20 @@ void CustomLayer::compileImpl() {
                                     declaredDescriptor.toString() +
                                     ". Python CustomLayer build(context) implementations must derive batch-dependent shapes from the "
                                     "placement-time context rather than retaining the batch-1 tensor used for API shape inference.");
+            }
+            if (app.forwardPrepared->hasValidationForward()) {
+                const auto validationShapeIt = validationOutputShapes.find(outputName);
+                const auto validationDataTypeIt = validationOutputDataTypes.find(outputName);
+                if (validationShapeIt == validationOutputShapes.end() || validationDataTypeIt == validationOutputDataTypes.end()) {
+                    throw runtime_error("CustomLayer validation expression did not produce declared output port '" + outputName + "'.");
+                }
+                const TensorDescriptor validationDescriptor(validationDataTypeIt->second, validationShapeIt->second);
+                if (validationDescriptor != declaredDescriptor) {
+                    throw runtime_error("CustomLayer validation expression output descriptor does not match the API-declared output for port '" +
+                                        outputName + "' in application " + std::to_string(applicationIndex) + ". Validation expression inferred " +
+                                        validationDescriptor.toString() + ", but the runtime output tensor is " +
+                                        declaredDescriptor.toString() + ".");
+                }
             }
         }
 
@@ -1518,6 +1541,12 @@ void CustomLayer::compileImpl() {
 
         app.forwardStamped = std::make_shared<StampedExecutionPlan>(app.forwardPrepared->stamp(app.forwardOutputsByName));
         validateStampedOutputNames(*app.forwardStamped, outputNames, "forward");
+        app.validationForwardStamped = nullptr;
+        if (app.forwardPrepared->hasValidationForward()) {
+            app.validationForwardStamped =
+                std::make_shared<StampedExecutionPlan>(app.forwardPrepared->stampValidation(app.forwardOutputsByName));
+            validateStampedOutputNames(*app.validationForwardStamped, outputNames, "validation forward");
+        }
 
         app.backwardErrorStamped = nullptr;
         app.backwardWeightsClearStamped = nullptr;
@@ -2045,7 +2074,7 @@ void CustomLayer::forward(std::optional<Tensor> featureInput, bool validationPas
             }
         }
         const auto computeStart = emitLayerDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
-        computeFeatureOut(inputFlatIndex(applicationIndex, 0));
+        computeFeatureOutForPass(inputFlatIndex(applicationIndex, 0), validationPass);
         if (emitLayerDiagnostics) {
             computeMicros = layerSubmitDiagnosticElapsedMicros(computeStart, layerSubmitDiagnosticNow());
         }
@@ -2427,6 +2456,10 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
 }
 
 void CustomLayer::computeFeatureOut(uint32_t connectionNumber) {
+    computeFeatureOutForPass(connectionNumber, false);
+}
+
+void CustomLayer::computeFeatureOutForPass(uint32_t connectionNumber, bool validationPass) {
     const bool emitDiagnostics = layerSubmitDiagnosticsActive();
     const auto totalStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
     uint64_t preRunHookMicros = 0;
@@ -2435,16 +2468,24 @@ void CustomLayer::computeFeatureOut(uint32_t connectionNumber) {
     if (decoded.applicationIndex >= applications.size() || !applications[decoded.applicationIndex].forwardStamped) {
         throw runtime_error("CustomLayer::computeFeatureOut requires a stamped forward plan.");
     }
-    if (applications[decoded.applicationIndex].forwardPreRunHook) {
+
+    ApplicationState& application = applications[decoded.applicationIndex];
+    const bool useValidationForward =
+        (validationPass || isInferenceOnly()) && application.validationForwardStamped != nullptr;
+    const std::function<void(Stream&)>& preRunHook =
+        useValidationForward ? application.validationForwardPreRunHook : application.forwardPreRunHook;
+    StampedExecutionPlan& executionPlan =
+        useValidationForward ? *application.validationForwardStamped : *application.forwardStamped;
+
+    if (preRunHook) {
         const auto preRunStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
-        applications[decoded.applicationIndex].forwardPreRunHook(computeStream(decoded.applicationIndex));
+        preRunHook(computeStream(decoded.applicationIndex));
         if (emitDiagnostics) {
             preRunHookMicros = layerSubmitDiagnosticElapsedMicros(preRunStart, layerSubmitDiagnosticNow());
         }
     }
     const auto runStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
-    ApplicationState& application = applications[decoded.applicationIndex];
-    application.forwardStamped->run();
+    executionPlan.run();
     if (emitDiagnostics) {
         runMicros = layerSubmitDiagnosticElapsedMicros(runStart, layerSubmitDiagnosticNow());
         emitLayerSubmitDiagnostic("custom_forward_compute",
@@ -2453,10 +2494,11 @@ void CustomLayer::computeFeatureOut(uint32_t connectionNumber) {
                                   layerSubmitDiagnosticElapsedMicros(totalStart, layerSubmitDiagnosticNow()),
                                   {{"app", decoded.applicationIndex},
                                    {"connection", connectionNumber},
+                                   {"validation_plan", useValidationForward ? 1UL : 0UL},
                                    {"prerun_us", preRunHookMicros},
                                    {"run_us", runMicros},
-                                   {"has_prerun", applications[decoded.applicationIndex].forwardPreRunHook ? 1UL : 0UL},
-                                   {"flops", applications[decoded.applicationIndex].forwardStamped->flopCount()}});
+                                   {"has_prerun", preRunHook ? 1UL : 0UL},
+                                   {"flops", executionPlan.flopCount()}});
     }
 }
 

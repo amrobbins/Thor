@@ -43,6 +43,19 @@ TEST(UtilityApiLayers, DropOutReservedSpaceEstimateUsesFeatureInputDataType) {
     }
 }
 
+
+TEST(UtilityApiLayers, Bfloat16DropOutUsesOneByteKeepMaskPerElement) {
+    Network network("bfloat16_dropout_native_keep_mask");
+    const uint32_t batchSize = 7;
+    const vector<uint64_t> dimensions = {3, 5};
+
+    Tensor featureInput(DataType::BF16, dimensions);
+    DropOut dropOut = DropOut::Builder().network(network).featureInput(featureInput).dropProportion(0.25f).build();
+
+    TestableDropOut testableDropOut(dropOut);
+    EXPECT_EQ(testableDropOut.reservedStateSizeInBytes(batchSize), batchSize * 3 * 5);
+}
+
 TEST(UtilityApiLayers, DropOutBuilds) {
     srand(time(nullptr));
 

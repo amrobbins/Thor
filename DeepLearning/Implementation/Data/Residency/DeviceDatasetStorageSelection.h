@@ -33,6 +33,19 @@ struct DeviceDatasetStorageSelection {
     uint64_t batchQueueDepth,
     std::optional<uint64_t> availableBytesOverride = std::nullopt);
 
+/**
+ * Select device storage for a session whose split view differs from the
+ * TrainingData default (for example, a named validation population). Dataset,
+ * batching, access policy, and storage ownership still come from TrainingData.
+ */
+[[nodiscard]] DeviceDatasetStorageSelection selectDeviceDatasetStorageSession(
+    const std::shared_ptr<BatchSession>& sourceSession,
+    const TrainingData& trainingData,
+    const DatasetSplitManifest& sessionSplits,
+    ThorImplementation::TensorPlacement devicePlacement,
+    uint64_t batchQueueDepth,
+    std::optional<uint64_t> availableBytesOverride = std::nullopt);
+
 [[nodiscard]] DatasetMaterializationDescription describeDatasetMaterialization(
     const FileDataset& dataset);
 

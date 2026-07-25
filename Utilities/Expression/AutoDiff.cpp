@@ -2566,6 +2566,16 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
 
     std::unordered_map<uint32_t, std::vector<uint64_t>> input_dims_by_slot;
     for (const NamedInput& input : forward_expr.inputs) {
+        // Runtime scalars have no tensor shape to specialize. Callers provide
+        // concrete dimensions only for ordinary tensor inputs; requiring a
+        // dimension-map entry for a runtime scalar incorrectly rejects valid
+        // differentiable graphs such as SDPA dropout seed/offset inputs.
+        if (input.kind == NamedInput::Kind::RuntimeScalarFp32 ||
+            input.kind == NamedInput::Kind::TensorRuntimeScalar) {
+            input_dims_by_slot[input.slot] = {};
+            continue;
+        }
+
         auto it = forward_input_dims->find(input.name);
         if (it == forward_input_dims->end()) {
             throw std::runtime_error("Missing forward input dimensions for autodiff shape specialization input: " + input.name);

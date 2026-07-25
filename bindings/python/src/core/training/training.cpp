@@ -1289,10 +1289,16 @@ nb::dict modelSelectionContextToPythonDict(const TrainingModelSelectionContext& 
 
     nb::dict train = modelSelectionPhaseStatsToPythonDict(context.train);
     nb::dict validate = modelSelectionPhaseStatsToPythonDict(context.validate);
+    nb::dict validations;
+    for (const auto& [name, stats] : context.validations) {
+        validations[nb::str(name.c_str())] = modelSelectionPhaseStatsToPythonDict(stats);
+    }
     nb::dict test = modelSelectionPhaseStatsToPythonDict(context.test);
     out["train"] = train;
     out["validate"] = validate;
     out["validation"] = validate;
+    out["validations"] = validations;
+    out["default_validation_population"] = context.defaultValidationPopulation;
     out["test"] = test;
     return out;
 }
@@ -1853,35 +1859,100 @@ at the same source. Every dense field and every window source owns its dtype.
            std::shared_ptr<Thor::NamedDataset> dataset,
            nb::object trainIndices,
            nb::object validateIndices,
-           nb::object testIndices) -> std::shared_ptr<Thor::DatasetSplitManifest> {
+           nb::object testIndices,
+           nb::object validationIndices,
+           nb::object defaultValidation) -> std::shared_ptr<Thor::DatasetSplitManifest> {
             (void)cls;
             if (dataset == nullptr) {
                 throw nb::value_error("DatasetSplitManifest dataset must not be None");
             }
             Thor::ExampleIndexSet train = exampleIndexSetFromPython(
                 std::move(trainIndices), "DatasetSplitManifest train_indices");
-            Thor::ExampleIndexSet validate = exampleIndexSetFromPython(
-                std::move(validateIndices), "DatasetSplitManifest validate_indices");
             std::optional<Thor::ExampleIndexSet> test;
             if (!testIndices.is_none()) {
                 test = exampleIndexSetFromPython(
                     std::move(testIndices), "DatasetSplitManifest test_indices");
             }
+
+            if (!validationIndices.is_none()) {
+                if (!validateIndices.is_none()) {
+                    throw nb::value_error(
+                        "DatasetSplitManifest accepts either validate_indices or validation_indices, not both");
+                }
+                if (!nb::isinstance<nb::dict>(validationIndices)) {
+                    throw nb::type_error("DatasetSplitManifest validation_indices must be a dict");
+                }
+                Thor::DatasetSplitManifest::ValidationIndexSets validations;
+                nb::dict validationDict = nb::cast<nb::dict>(validationIndices);
+                for (auto [key, value] : validationDict) {
+                    std::string name = pybind::castOrTypeError<std::string>(
+                        nb::borrow<nb::object>(key),
+                        "DatasetSplitManifest validation population name",
+                        "str",
+                        false);
+                    validations.emplace(
+                        name,
+                        exampleIndexSetFromPython(
+                            nb::borrow<nb::object>(value),
+                            "DatasetSplitManifest validation_indices['" + name + "']"));
+                }
+                std::string defaultName;
+                if (defaultValidation.is_none()) {
+                    if (validations.size() != 1) {
+                        throw nb::value_error(
+                            "DatasetSplitManifest default_validation is required when validation_indices contains multiple populations");
+                    }
+                    defaultName = validations.begin()->first;
+                } else {
+                    defaultName = pybind::castOrTypeError<std::string>(
+                        defaultValidation,
+                        "DatasetSplitManifest default_validation",
+                        "str",
+                        false);
+                }
+                return std::make_shared<Thor::DatasetSplitManifest>(
+                    *dataset,
+                    std::move(train),
+                    std::move(validations),
+                    std::move(defaultName),
+                    std::move(test));
+            }
+
+            if (validateIndices.is_none()) {
+                throw nb::value_error(
+                    "DatasetSplitManifest requires validate_indices or validation_indices");
+            }
+            if (!defaultValidation.is_none()) {
+                throw nb::value_error(
+                    "DatasetSplitManifest default_validation is only valid with validation_indices");
+            }
+            Thor::ExampleIndexSet validate = exampleIndexSetFromPython(
+                std::move(validateIndices), "DatasetSplitManifest validate_indices");
             return std::make_shared<Thor::DatasetSplitManifest>(
                 *dataset, std::move(train), std::move(validate), std::move(test));
         },
         "cls"_a,
         "dataset"_a,
         "train_indices"_a,
-        "validate_indices"_a,
-        "test_indices"_a = nb::none());
+        "validate_indices"_a.none() = nb::none(),
+        "test_indices"_a.none() = nb::none(),
+        "validation_indices"_a.none() = nb::none(),
+        "default_validation"_a.none() = nb::none());
     dataset_split_manifest.def(
         "__init__",
-        [](Thor::DatasetSplitManifest*, std::shared_ptr<Thor::NamedDataset>, nb::object, nb::object, nb::object) {},
+        [](Thor::DatasetSplitManifest*,
+           std::shared_ptr<Thor::NamedDataset>,
+           nb::object,
+           nb::object,
+           nb::object,
+           nb::object,
+           nb::object) {},
         "dataset"_a,
         "train_indices"_a,
-        "validate_indices"_a,
-        "test_indices"_a = nb::none());
+        "validate_indices"_a.none() = nb::none(),
+        "test_indices"_a.none() = nb::none(),
+        "validation_indices"_a.none() = nb::none(),
+        "default_validation"_a.none() = nb::none());
     dataset_split_manifest.def_static(
         "load",
         [](nb::object path) { return Thor::DatasetSplitManifest::load(pathStringFromPython(path, "path")); },
@@ -1905,6 +1976,13 @@ at the same source. Every dense field and every window source owns its dtype.
                                        nb::rv_policy::reference_internal);
     dataset_split_manifest.def_prop_ro("validate", &Thor::DatasetSplitManifest::getValidate,
                                        nb::rv_policy::reference_internal);
+    dataset_split_manifest.def_prop_ro("default_validation", &Thor::DatasetSplitManifest::getDefaultValidationName);
+    dataset_split_manifest.def_prop_ro("validation_names", &Thor::DatasetSplitManifest::getValidationNames);
+    dataset_split_manifest.def(
+        "validation",
+        &Thor::DatasetSplitManifest::getValidation,
+        "name"_a,
+        nb::rv_policy::reference_internal);
     dataset_split_manifest.def_prop_ro("test", &Thor::DatasetSplitManifest::getTest,
                                        nb::rv_policy::reference_internal);
     dataset_split_manifest.def_prop_ro("has_explicit_test_split", &Thor::DatasetSplitManifest::hasExplicitTestSplit);
@@ -1987,6 +2065,16 @@ at the same source. Every dense field and every window source owns its dtype.
         [](const Thor::TrainingData& self, uint64_t maxInFlightBatches) {
             return self.openSession(maxInFlightBatches);
         },
+        "max_in_flight_batches"_a = 32);
+    training_data.def(
+        "open_validation_session",
+        [](const Thor::TrainingData& self,
+           const std::string& validationPopulation,
+           uint64_t maxInFlightBatches) {
+            return self.openValidationSession(
+                validationPopulation, maxInFlightBatches);
+        },
+        "validation_population"_a,
         "max_in_flight_batches"_a = 32);
     training_data.def_prop_ro("dataset", [](const Thor::TrainingData& self) {
         return std::const_pointer_cast<Thor::NamedDataset>(self.getDataset());
@@ -2348,6 +2436,8 @@ Multiple windowed fields may reference the same persisted sequence.
     training_stats_snapshot.def_ro("network_name", &TrainingStatsSnapshot::networkName);
     training_stats_snapshot.def_ro("dataset_name", &TrainingStatsSnapshot::datasetName);
     training_stats_snapshot.def_ro("phase", &TrainingStatsSnapshot::phase);
+    training_stats_snapshot.def_ro("validation_population", &TrainingStatsSnapshot::validationPopulation);
+    training_stats_snapshot.def_ro("is_default_validation_population", &TrainingStatsSnapshot::isDefaultValidationPopulation);
     training_stats_snapshot.def_ro("epoch", &TrainingStatsSnapshot::epoch);
     training_stats_snapshot.def_ro("epochs", &TrainingStatsSnapshot::epochs);
     training_stats_snapshot.def_ro("step", &TrainingStatsSnapshot::step);
@@ -2426,6 +2516,15 @@ Multiple windowed fields may reference the same persisted sequence.
     training_run_result.def_prop_ro("exception_message", [](const TrainingRunResult& self) { return self.exception.message; });
     training_run_result.def_prop_ro("final_training_stats", [](const TrainingRunResult& self) { return self.finalTrainingStats; });
     training_run_result.def_prop_ro("final_validation_stats", [](const TrainingRunResult& self) { return self.finalValidationStats; });
+    training_run_result.def_prop_ro(
+        "final_validation_stats_by_population",
+        [](const TrainingRunResult& self) {
+            nb::dict out;
+            for (const auto& [name, stats] : self.finalValidationStatsByPopulation) {
+                out[nb::str(name.c_str())] = nb::cast(stats);
+            }
+            return out;
+        });
     training_run_result.def_prop_ro("final_test_stats", [](const TrainingRunResult& self) { return self.finalTestStats; });
     training_run_result.def_prop_ro("final_training_loss",
                                     [](const TrainingRunResult& self) { return optionalLossFromStats(self.finalTrainingStats); });

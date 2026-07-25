@@ -814,20 +814,39 @@ class EpochLossAccumulator {
         if (snapshot.phase == TrainingEventPhase::TRAIN) {
             train.update(snapshot);
         } else if (snapshot.phase == TrainingEventPhase::VALIDATE) {
-            validate.update(snapshot);
+            const std::string population = snapshot.validationPopulation.empty()
+                                               ? std::string("validate")
+                                               : snapshot.validationPopulation;
+            validations[population].update(snapshot);
         } else if (snapshot.phase == TrainingEventPhase::TEST) {
             test.update(snapshot);
         }
     }
 
-    [[nodiscard]] std::optional<double> trainLoss() const { return train.snapshot().loss; }
-    [[nodiscard]] std::optional<double> validationLoss() const { return validate.snapshot().loss; }
+    void ensureValidationPopulation(const std::string& population) {
+        validations.try_emplace(population);
+    }
 
-    [[nodiscard]] TrainingModelSelectionContext modelSelectionContext(uint64_t epoch) const {
+    [[nodiscard]] std::optional<double> trainLoss() const { return train.snapshot().loss; }
+    [[nodiscard]] std::optional<double> validationLoss(const std::string& defaultPopulation) const {
+        const auto it = validations.find(defaultPopulation);
+        return it == validations.end() ? std::optional<double>{} : it->second.snapshot().loss;
+    }
+
+    [[nodiscard]] TrainingModelSelectionContext modelSelectionContext(
+        uint64_t epoch,
+        const std::string& defaultPopulation) const {
         TrainingModelSelectionContext context;
         context.epoch = epoch;
         context.train = train.snapshot();
-        context.validate = validate.snapshot();
+        context.defaultValidationPopulation = defaultPopulation;
+        for (const auto& [name, accumulator] : validations) {
+            context.validations.emplace(name, accumulator.snapshot());
+        }
+        const auto defaultIt = context.validations.find(defaultPopulation);
+        if (defaultIt != context.validations.end()) {
+            context.validate = defaultIt->second;
+        }
         context.test = test.snapshot();
         return context;
     }
@@ -887,7 +906,7 @@ class EpochLossAccumulator {
     };
 
     PhaseAccumulator train{};
-    PhaseAccumulator validate{};
+    std::map<std::string, PhaseAccumulator> validations{};
     PhaseAccumulator test{};
 };
 
@@ -2650,6 +2669,7 @@ struct NativeQueuedStartupState {
     std::shared_ptr<const ExecutableTrainingPlan> plan;
     std::shared_ptr<BatchSession> sourceSession;
     std::shared_ptr<BatchSession> effectiveSession;
+    std::vector<NamedValidationSession> additionalValidationSessions;
     DeviceDatasetStorageReport deviceDatasetStorageReport;
     std::optional<NativeQueuedEpochExecution> firstEpochExecution;
 };
@@ -2661,6 +2681,10 @@ void releaseFailedNativeQueuedStartupAttempt(
     // Session leases may own resident dataset and per-session device tensors.
     // Release them before the placed graph, then destroy the executable plan
     // before its physical tensor references become invalid.
+    for (NamedValidationSession& validation : attempt.additionalValidationSessions) {
+        validation.batchSession.reset();
+    }
+    attempt.additionalValidationSessions.clear();
     attempt.effectiveSession.reset();
     attempt.sourceSession.reset();
     attempt.plan.reset();
@@ -2751,6 +2775,7 @@ NativeQueuedStartupState startNativeQueuedTrainingWithMemoryAdmissionRetry(
         NativeQueuedStartupState attempt;
         attempt.sourceSession = nextSourceSession;
         attempt.effectiveSession = attempt.sourceSession;
+        attempt.additionalValidationSessions = request.additionalValidationSessions;
         attempt.deviceDatasetStorageReport = request.deviceDatasetStorageReport;
 
         std::exception_ptr startupFailure;
@@ -2843,6 +2868,52 @@ NativeQueuedStartupState startNativeQueuedTrainingWithMemoryAdmissionRetry(
                     std::move(deviceDatasetSelection.session);
                 attempt.deviceDatasetStorageReport =
                     std::move(deviceDatasetSelection.report);
+
+                // Named validation sessions share the same immutable dataset
+                // allocation. Select equivalent resident sessions so every
+                // validation population uses the same input-source contract as
+                // the default train/validate session.
+                if (attempt.effectiveSession != attempt.sourceSession) {
+                    bool namedValidationResidencyFallback = false;
+                    std::string namedValidationFallbackReason;
+                    for (NamedValidationSession& validation : attempt.additionalValidationSessions) {
+                        const std::shared_ptr<BatchSession> sourceValidationSession =
+                            validation.batchSession;
+                        DeviceDatasetStorageSelection validationSelection =
+                            selectDeviceDatasetStorageSession(
+                                sourceValidationSession,
+                                *request.trainingData,
+                                request.trainingData->getSplits().withDefaultValidation(
+                                    validation.name),
+                                ThorImplementation::TensorPlacement(
+                                    ThorImplementation::TensorPlacement::MemDevices::GPU,
+                                    attempt.placedNetwork->getStampedNetwork(0).getGpuNum()),
+                                deviceDatasetBatchQueueDepth);
+                        if (validationSelection.session == sourceValidationSession) {
+                            namedValidationResidencyFallback = true;
+                            namedValidationFallbackReason =
+                                validationSelection.report.reason.empty()
+                                    ? std::string("named_validation_residency_unavailable")
+                                    : validationSelection.report.reason;
+                            break;
+                        }
+                        validation.batchSession =
+                            std::move(validationSelection.session);
+                    }
+                    if (namedValidationResidencyFallback) {
+                        // A placed network has one batch-input source contract.
+                        // BEST_EFFORT therefore falls the entire run back to the
+                        // source backend if any named validation population cannot
+                        // obtain the same resident-session class as the default.
+                        attempt.effectiveSession = attempt.sourceSession;
+                        attempt.additionalValidationSessions =
+                            request.additionalValidationSessions;
+                        attempt.deviceDatasetStorageReport.used = false;
+                        attempt.deviceDatasetStorageReport.reason =
+                            "named_validation_population_fallback:" +
+                            namedValidationFallbackReason;
+                    }
+                }
             } else if (forceSourceSession) {
                 attempt.deviceDatasetStorageReport.used = false;
                 attempt.deviceDatasetStorageReport.reason =
@@ -3009,6 +3080,27 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     if (request.maxTrainingBatchesPerEpoch.has_value() && request.maxTrainingBatchesPerEpoch.value() == 0) {
         throw std::runtime_error("Trainer max_training_batches_per_epoch must be >= 1 or None.");
     }
+    if (request.defaultValidationPopulation.empty()) {
+        throw std::runtime_error("TrainingRunRequest default validation population must not be empty.");
+    }
+    std::set<std::string> validationPopulationNames{request.defaultValidationPopulation};
+    for (const NamedValidationSession& validation : request.additionalValidationSessions) {
+        if (validation.name.empty()) {
+            throw std::runtime_error("TrainingRunRequest validation population names must not be empty.");
+        }
+        if (!validationPopulationNames.insert(validation.name).second) {
+            throw std::runtime_error("TrainingRunRequest contains duplicate validation population '" +
+                                     validation.name + "'.");
+        }
+        if (validation.batchSession == nullptr) {
+            throw std::runtime_error("TrainingRunRequest validation population '" + validation.name +
+                                     "' has a null BatchSession.");
+        }
+        if (validation.batchSession->getBatchSize() != request.batchSession->getBatchSize()) {
+            throw std::runtime_error("TrainingRunRequest validation population '" + validation.name +
+                                     "' uses a different batch size.");
+        }
+    }
 
     TrainingRuntimeConfig runtime = request.runtime;
 
@@ -3096,10 +3188,15 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     THOR_THROW_IF_FALSE(plan != nullptr);
     std::shared_ptr<BatchSession> effectiveSession =
         std::move(startup.effectiveSession);
+    std::vector<NamedValidationSession> additionalValidationSessions =
+        std::move(startup.additionalValidationSessions);
     DeviceDatasetStorageReport deviceDatasetStorageReport =
         std::move(startup.deviceDatasetStorageReport);
     std::optional<NativeQueuedEpochExecution> firstEpochExecution =
         std::move(startup.firstEpochExecution);
+    TrainingRunRequest namedValidationEvaluationRequest = request;
+    namedValidationEvaluationRequest.evaluationExampleType = ExampleType::VALIDATE;
+    namedValidationEvaluationRequest.evaluationPhase = TrainingEventPhase::VALIDATE;
     PendingNativeQueuedEpochExecutionGuard pendingFirstEpochGuard(
         firstEpochExecution,
         effectiveSession,
@@ -3121,6 +3218,14 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         evaluateOnly ? 0.0 : std::max(0.0, request.initialElapsedSeconds);
     std::map<TrainingEventPhase, WallThroughputEmaState> throughputByPhase;
     std::array<uint64_t, 4> cappedReportedStepsByPhase{};
+    auto cancelAdditionalValidationSessions = [&]() {
+        for (NamedValidationSession& validation : additionalValidationSessions) {
+            cancelBatchSession(validation.batchSession);
+        }
+    };
+    const bool namedValidationPopulationMetadataEnabled =
+        request.defaultValidationPopulation != "validate" ||
+        !additionalValidationSessions.empty();
     const bool trainingBatchCapEnabled = !evaluateOnly && request.maxTrainingBatchesPerEpoch.has_value();
     const uint64_t totalRequestedEpochs = currentEpoch + request.epochs;
     auto elapsedSinceRunStart = [&]() {
@@ -3138,6 +3243,11 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         snapshot.networkName = placedNetwork->getNetworkName();
         snapshot.datasetName = effectiveSession->getDatasetName();
         snapshot.phase = phase;
+        if (phase == TrainingEventPhase::VALIDATE &&
+            namedValidationPopulationMetadataEnabled) {
+            snapshot.validationPopulation = request.defaultValidationPopulation;
+            snapshot.isDefaultValidationPopulation = true;
+        }
         snapshot.epoch = epoch;
         snapshot.epochs = totalRequestedEpochs;
         snapshot.batchSize = batchSize;
@@ -3179,6 +3289,10 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     for (uint32_t epochOffset = 0; epochOffset < request.epochs; ++epochOffset) {
         const uint64_t cumulativeEpoch = currentEpoch + 1;
         EpochLossAccumulator epochLosses;
+        epochLosses.ensureValidationPopulation(request.defaultValidationPopulation);
+        for (const NamedValidationSession& validation : additionalValidationSessions) {
+            epochLosses.ensureValidationPopulation(validation.name);
+        }
 
         NativeQueuedEpochExecution epochExecution;
         if (epochOffset == 0) {
@@ -3245,6 +3359,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
             if (request.cancellationToken.isCancellationRequested()) {
                 requestQueuedTrainingCancellation(state);
                 cancelBatchSession(effectiveSession);
+                cancelAdditionalValidationSessions();
             }
             if (sigintScope.interrupted()) {
                 {
@@ -3255,6 +3370,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                 state->batchFinished.notify_all();
                 state->batchPopped.notify_all();
                 cancelBatchSession(effectiveSession);
+                cancelAdditionalValidationSessions();
             }
         };
 
@@ -3342,12 +3458,145 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
             throw;
         }
 
+        // Evaluate every non-default validation population against the exact
+        // same placed checkpoint before model-selection scoring. Each population
+        // owns an independent session/cursor but shares the dataset and model.
+        for (NamedValidationSession& validation : additionalValidationSessions) {
+            request.cancellationToken.throwIfCancellationRequested();
+            if (validation.batchSession == nullptr) {
+                throw std::runtime_error("Named validation population '" + validation.name +
+                                         "' has a null BatchSession.");
+            }
+
+            NativeQueuedEpochExecution validationExecution =
+                launchNativeQueuedEpochExecution(
+                    namedValidationEvaluationRequest,
+                    placedNetwork,
+                    validation.batchSession,
+                    plan,
+                    options,
+                    scalarTensorNames,
+                    aggregateLossTensorNames,
+                    currentEpoch,
+                    /*evaluateOnly=*/true);
+            std::shared_ptr<QueuedTrainingState> validationState =
+                validationExecution.state;
+            const uint64_t validationBatches =
+                validation.batchSession->getNumBatchesPerEpoch(
+                    ExampleType::VALIDATE);
+
+            TrainingStatsSnapshot validationStarted = makeBaseSnapshot(
+                TrainingEventPhase::VALIDATE,
+                cumulativeEpoch,
+                batchSize,
+                validationBatches,
+                validationState);
+            validationStarted.datasetName =
+                validation.batchSession->getDatasetName();
+            validationStarted.validationPopulation = validation.name;
+            validationStarted.isDefaultValidationPopulation = false;
+            emitTrainingEvent(
+                observer,
+                TrainingEvent::epochStarted(std::move(validationStarted)));
+
+            WallThroughputEmaState validationThroughput;
+            auto cancelNamedValidation = [&](std::exception_ptr failure) {
+                (void)abortNativeQueuedEpochExecution(
+                    validationExecution,
+                    validation.batchSession,
+                    placedNetwork,
+                    failure,
+                    placedNetwork->getStampedNetwork(0).getGpuNum());
+            };
+
+            try {
+                while (true) {
+                    if (request.cancellationToken.isCancellationRequested()) {
+                        requestQueuedTrainingCancellation(validationState);
+                        cancelBatchSession(validation.batchSession);
+                    }
+                    if (sigintScope.interrupted()) {
+                        {
+                            std::lock_guard<std::mutex> lock(validationState->mutex);
+                            validationState->cancelRequested = true;
+                            validationState->interruptRequested = true;
+                        }
+                        validationState->batchFinished.notify_all();
+                        validationState->batchPopped.notify_all();
+                        cancelBatchSession(validation.batchSession);
+                    }
+                    BatchPopResult completedBatch =
+                        popBatchData(validationState);
+                    if (!completedBatch.hasBatch) {
+                        break;
+                    }
+
+                    TrainingStatsSnapshot snapshot = makeBaseSnapshot(
+                        TrainingEventPhase::VALIDATE,
+                        cumulativeEpoch,
+                        batchSize,
+                        completedBatch.batchesInEpoch,
+                        validationState);
+                    snapshot.datasetName =
+                        validation.batchSession->getDatasetName();
+                    snapshot.validationPopulation = validation.name;
+                    snapshot.isDefaultValidationPopulation = false;
+                    snapshot.inFlightBatches =
+                        completedBatch.inFlightAfterPop;
+                    snapshot.stepInEpoch =
+                        completedBatch.epochBatchNum + 1;
+                    snapshot.step =
+                        (currentEpoch * completedBatch.batchesInEpoch) +
+                        snapshot.stepInEpoch;
+                    snapshot.samplesProcessed = snapshot.step * batchSize;
+                    updateWallThroughputRates(
+                        snapshot,
+                        validationThroughput,
+                        snapshot.step,
+                        batchSize,
+                        forwardFlopsPerBatch);
+                    assignScalarStatsToSnapshot(
+                        snapshot,
+                        validationState->scalarTensorNames,
+                        completedBatch.scalarStats,
+                        validationState->aggregateLossTensorNames);
+                    epochLosses.update(snapshot);
+                    emitTrainingEvent(
+                        observer,
+                        TrainingEvent::statsUpdated(std::move(snapshot)));
+                }
+                if (validationExecution.schedulingThread.joinable()) {
+                    validationExecution.schedulingThread.join();
+                }
+                throwIfQueuedTrainingStateFailed(validationState);
+            } catch (...) {
+                cancelNamedValidation(std::current_exception());
+                throw;
+            }
+
+            TrainingStatsSnapshot validationFinished = makeBaseSnapshot(
+                TrainingEventPhase::VALIDATE,
+                cumulativeEpoch,
+                batchSize,
+                validationBatches,
+                validationState);
+            validationFinished.datasetName =
+                validation.batchSession->getDatasetName();
+            validationFinished.validationPopulation = validation.name;
+            validationFinished.isDefaultValidationPopulation = false;
+            emitTrainingEvent(
+                observer,
+                TrainingEvent::epochFinished(std::move(validationFinished)));
+        }
+
         bool earlyCompletionRequested = false;
         const uint64_t phaseLocalEpoch = cumulativeEpoch - request.initialCompletedEpochs;
         const bool modelSelectionEligible = modelSelectionEnabled && phaseLocalEpoch >= firstModelSelectionEpoch &&
                                             ((phaseLocalEpoch - firstModelSelectionEpoch) % request.checkBestModelEveryEpochs == 0);
         if (modelSelectionEligible) {
-            const TrainingModelSelectionContext currentSelectionContext = epochLosses.modelSelectionContext(cumulativeEpoch);
+            const TrainingModelSelectionContext currentSelectionContext =
+                epochLosses.modelSelectionContext(
+                    cumulativeEpoch, request.defaultValidationPopulation);
             const std::optional<double> currentScore = request.modelSelectionScore.evaluate(currentSelectionContext);
             latestModelSelectionScore = currentScore;
             trainingArtifacts.maybeSnapshotBestCandidate(*placedNetwork, cumulativeEpoch, currentScore);
@@ -3364,8 +3613,9 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         }
 
         latestTrainingLoss = epochLosses.trainLoss();
-        latestValidationLoss = epochLosses.validationLoss();
-        latestEpochSelectionContext = epochLosses.modelSelectionContext(cumulativeEpoch);
+        latestValidationLoss = epochLosses.validationLoss(request.defaultValidationPopulation);
+        latestEpochSelectionContext = epochLosses.modelSelectionContext(
+            cumulativeEpoch, request.defaultValidationPopulation);
         latestEpochSelectionContextValid = true;
         currentEpoch += 1;
         if (earlyCompletionRequested) {

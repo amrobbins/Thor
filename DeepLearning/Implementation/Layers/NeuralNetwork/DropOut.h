@@ -4,6 +4,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
+#include "DeepLearning/Implementation/Layers/NeuralNetwork/DropOutKernel.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
 namespace ThorImplementation {
@@ -25,6 +26,20 @@ class DropOut : public Layer {
 
     void setTrainingMode(bool training) { this->training = training; }
 
+    void forward(std::optional<Tensor> featureInput, bool validationPass, uint32_t batchSize = 0) override {
+        // Dropout is active only for gradient-training passes.  Validation and
+        // inference must observe the deterministic, unmasked network.
+        const bool previousApplyDropout = applyDropoutThisForward;
+        applyDropoutThisForward = training && !validationPass && probabilityOfDroppingOut > 0.0f;
+        try {
+            Layer::forward(featureInput, validationPass, batchSize);
+        } catch (...) {
+            applyDropoutThisForward = previousApplyDropout;
+            throw;
+        }
+        applyDropoutThisForward = previousApplyDropout;
+    }
+
     DropOut(float probabilityOfDroppingOut, bool training) {
         THOR_THROW_IF_FALSE(probabilityOfDroppingOut >= 0.0f);
         THOR_THROW_IF_FALSE(probabilityOfDroppingOut <= 1.0f);
@@ -34,9 +49,35 @@ class DropOut : public Layer {
         randomSeed = Tensor::Tensor::getThreadIdHash64(rd());
     }
 
+    std::optional<Tensor> createFeatureOutputTensor() override {
+        THOR_THROW_IF_FALSE(featureInput.has_value());
+        if (!training || probabilityOfDroppingOut == 0.0f) {
+            // Preserve a distinct logical API tensor while aliasing the physical
+            // feature storage.  Downstream layers therefore receive the input
+            // directly and no dense output allocation or copy is required.
+            return featureInput.value();
+        }
+        return Layer::createFeatureOutputTensor();
+    }
+
+    void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) override {
+        Layer::connectToNextLayer(nextLayer, driverConnectionType, loaderConnectionType);
+        if (!training || probabilityOfDroppingOut == 0.0f)
+            fuseBackwardIdentityAlias();
+    }
+
     void seed(uint64_t seed) {
         THOR_THROW_IF_FALSE(!compiled);
         this->randomSeed = seed;
+    }
+
+    static bool usesNativeKernel(DataType dataType) { return dataType == DataType::BF16; }
+
+    static size_t getNativeReserveSpaceSizeInBytes(const std::vector<unsigned long> &featureInputDimensions) {
+        size_t numElements = 1;
+        for (unsigned long dimension : featureInputDimensions)
+            numElements *= dimension;
+        return numElements * sizeof(uint8_t);
     }
 
     static size_t getReservedSpaceSizeInBytes(std::vector<unsigned long> featureInputDimensions, DataType dataType) {
@@ -60,65 +101,87 @@ class DropOut : public Layer {
     void compileImpl() override {
         Layer::compileImpl();
 
-        cudnnStatus_t cudnnStatus;
+        if (!training || probabilityOfDroppingOut == 0.0f)
+            return;
 
-        // The random state may not change between calls of cudnnDropoutForward(...) and cudnnDropoutBackward(...),
-        // so this dropout layer can only be used for 1 input/output pair.
+        // The random state or keep mask may not change between a training
+        // forward and its matching backward, so a DropOut instance supports one
+        // active input/output pair at a time.
         THOR_THROW_IF_FALSE(featureInput.has_value());
 
         ScopedGpu scopedGpu(featureInput.value().getPlacement().getDeviceNum());
 
+        const DataType dataType = featureInput.value().getDescriptor().getDataType();
+        if (usesNativeKernel(dataType)) {
+            reserveSpaceBytes =
+                getNativeReserveSpaceSizeInBytes(featureInput.value().getDescriptor().getDimensions());
+            reserveSpace =
+                Tensor(featureInput.value().getPlacement(), TensorDescriptor(DataType::UINT8, {reserveSpaceBytes}));
+            return;
+        }
+
+        cudnnStatus_t cudnnStatus;
         randomStateBytes = getRandomStateSizeInBytes(stream.getCudnnHandle());
         randomState = Tensor(featureInput.value().getPlacement(), TensorDescriptor(DataType::UINT8, {randomStateBytes}));
 
         cudnnStatus = cudnnCreateDropoutDescriptor(&dropoutDescriptor);
         THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
-        cudnnTensorDescriptor = createCudnnTensorDescriptor(featureInput.value().getDescriptor().getDimensions(),
-                                                            featureInput.value().getDescriptor().getDataType());
-        reserveSpaceBytes = getReservedSpaceSizeInBytes(featureInput.value().getDescriptor().getDimensions(),
-                                                        featureInput.value().getDescriptor().getDataType());
+        cudnnTensorDescriptor = createCudnnTensorDescriptor(featureInput.value().getDescriptor().getDimensions(), dataType);
+        reserveSpaceBytes =
+            getReservedSpaceSizeInBytes(featureInput.value().getDescriptor().getDimensions(), dataType);
         reserveSpace = Tensor(featureInput.value().getPlacement(), TensorDescriptor(DataType::UINT8, {reserveSpaceBytes}));
 
-        mtx.lock();
+        std::lock_guard<std::mutex> lock(mtx);
         cudnnStatus = cudnnSetDropoutDescriptor(
             dropoutDescriptor, stream.getCudnnHandle(), probabilityOfDroppingOut, randomState.getMemPtr(), randomStateBytes, randomSeed);
         THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
-
-        mtx.unlock();
     }
 
-    void cleanup() {
-        if (compiled) {
-            cudnnStatus_t cudnnStatus;
-
-            cudnnStatus = cudnnDestroyDropoutDescriptor(dropoutDescriptor);
+    void cleanup() override {
+        if (dropoutDescriptor != nullptr) {
+            cudnnStatus_t cudnnStatus = cudnnDestroyDropoutDescriptor(dropoutDescriptor);
             THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
-            cudnnStatus = cudnnDestroyTensorDescriptor(cudnnTensorDescriptor);
-            THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
+            dropoutDescriptor = nullptr;
         }
-        compiled = false;
+        if (cudnnTensorDescriptor != nullptr) {
+            cudnnStatus_t cudnnStatus = cudnnDestroyTensorDescriptor(cudnnTensorDescriptor);
+            THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
+            cudnnTensorDescriptor = nullptr;
+        }
+        Layer::cleanup();
     }
 
     void infer(std::optional<Tensor> inputTensor, std::optional<Tensor> outputTensor, Stream stream) override {
         THOR_THROW_IF_FALSE(inputTensor.has_value());
         THOR_THROW_IF_FALSE(outputTensor.has_value());
 
-        if (training) {
+        if (applyDropoutThisForward) {
             THOR_THROW_IF_FALSE(inputTensor.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
             ScopedGpu scopedGpu(inputTensor.value().getPlacement().getDeviceNum());
 
-            cudnnStatus_t cudnnStatus;
-            cudnnStatus = cudnnDropoutForward(stream.getCudnnHandle(),
-                                              dropoutDescriptor,
-                                              cudnnTensorDescriptor,
-                                              inputTensor.value().getMemPtr(),
-                                              cudnnTensorDescriptor,
-                                              outputTensor.value().getMemPtr(),
-                                              reserveSpace.getMemPtr(),
-                                              reserveSpaceBytes);
-            THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
-        } else {
+            const DataType dataType = inputTensor.value().getDescriptor().getDataType();
+            if (usesNativeKernel(dataType)) {
+                launchBfloat16DropOutForward(inputTensor.value().getMemPtr(),
+                                             outputTensor.value().getMemPtr(),
+                                             static_cast<uint8_t *>(reserveSpace.getMemPtr()),
+                                             inputTensor.value().getTotalNumElements(),
+                                             probabilityOfDroppingOut,
+                                             randomSeed,
+                                             nativeForwardSequence++,
+                                             stream);
+            } else {
+                const cudnnStatus_t cudnnStatus = cudnnDropoutForward(stream.getCudnnHandle(),
+                                                                     dropoutDescriptor,
+                                                                     cudnnTensorDescriptor,
+                                                                     inputTensor.value().getMemPtr(),
+                                                                     cudnnTensorDescriptor,
+                                                                     outputTensor.value().getMemPtr(),
+                                                                     reserveSpace.getMemPtr(),
+                                                                     reserveSpaceBytes);
+                THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
+            }
+        } else if (outputTensor.value() != inputTensor.value()) {
             outputTensor.value().copyFromAsync(inputTensor.value(), stream);
         }
     }
@@ -129,19 +192,33 @@ class DropOut : public Layer {
         THOR_THROW_IF_FALSE(errorIn.has_value());
         THOR_THROW_IF_FALSE(training);
 
+        if (probabilityOfDroppingOut == 0.0f) {
+            THOR_THROW_IF_FALSE(errorOut.value() == errorIn.value());
+            return;
+        }
+
         THOR_THROW_IF_FALSE(errorIn.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
         ScopedGpu scopedGpu(errorIn.value().getPlacement().getDeviceNum());
 
-        cudnnStatus_t cudnnStatus;
-        cudnnStatus = cudnnDropoutBackward(stream.getCudnnHandle(),
-                                           dropoutDescriptor,
-                                           cudnnTensorDescriptor,
-                                           errorIn.value().getMemPtr(),
-                                           cudnnTensorDescriptor,
-                                           errorOut.value().getMemPtr(),
-                                           reserveSpace.getMemPtr(),
-                                           reserveSpaceBytes);
-        THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        const DataType dataType = errorIn.value().getDescriptor().getDataType();
+        if (usesNativeKernel(dataType)) {
+            launchBfloat16DropOutBackward(errorIn.value().getMemPtr(),
+                                          errorOut.value().getMemPtr(),
+                                          static_cast<const uint8_t *>(reserveSpace.getMemPtr()),
+                                          errorIn.value().getTotalNumElements(),
+                                          probabilityOfDroppingOut,
+                                          stream);
+        } else {
+            const cudnnStatus_t cudnnStatus = cudnnDropoutBackward(stream.getCudnnHandle(),
+                                                                  dropoutDescriptor,
+                                                                  cudnnTensorDescriptor,
+                                                                  errorIn.value().getMemPtr(),
+                                                                  cudnnTensorDescriptor,
+                                                                  errorOut.value().getMemPtr(),
+                                                                  reserveSpace.getMemPtr(),
+                                                                  reserveSpaceBytes);
+            THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        }
     }
 
     bool isTrainingMode() { return training; }
@@ -149,11 +226,21 @@ class DropOut : public Layer {
     float getDropOutRate() const { return probabilityOfDroppingOut; }
 
    private:
+    void fuseBackwardIdentityAlias() {
+        if (!errorInput.has_value() || !errorOutput.has_value())
+            return;
+        if (previousLayer.has_value())
+            previousLayer.value()->replaceErrorInput(errorOutput, errorInput);
+        errorOutput = errorInput;
+    }
+
     float probabilityOfDroppingOut;
     bool training;
+    bool applyDropoutThisForward = false;
 
     static std::mutex mtx;
-    static uint64_t randomSeed;
+    uint64_t randomSeed = 0;
+    uint64_t nativeForwardSequence = 0;
 
     Tensor randomState;
     size_t randomStateBytes;

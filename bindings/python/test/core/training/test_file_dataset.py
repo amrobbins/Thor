@@ -748,7 +748,8 @@ def test_dataset_split_manifest_persists_compact_strided_ranges(tmp_path):
     assert persisted["partitions"]["train"] == {
         "ranges": [{"start": 0, "count": 5, "stride": 2}]
     }
-    assert persisted["partitions"]["validate"] == {
+    assert persisted["default_validation"] == "validate"
+    assert persisted["partitions"]["validations"]["validate"] == {
         "ranges": [{"start": 1, "count": 3, "stride": 2}]
     }
     assert persisted["partitions"]["test"] == {
@@ -763,6 +764,58 @@ def test_dataset_split_manifest_persists_compact_strided_ranges(tmp_path):
     assert loaded.train[-1] == 8
     assert loaded.train.indices == [0, 2, 4, 6, 8]
     assert loaded == manifest
+
+
+
+def test_dataset_split_manifest_supports_named_validation_populations(tmp_path):
+    dataset_path = tmp_path / "named_validation_dataset"
+    writer = thor.data.DatasetWriter(dataset_path, _layout(), examples_per_shard=10)
+    writer.write_indexed_examples(_chunk(0, 10))
+    writer.close()
+    dataset = thor.data.FileDataset.open(dataset_path)
+
+    manifest = thor.data.DatasetSplitManifest(
+        dataset=dataset,
+        train_indices=[0, 1, 2, 3],
+        validation_indices={
+            "seen_sku": [4, 5, 6],
+            "unseen_sku": [7, 8, 9],
+        },
+        default_validation="unseen_sku",
+    )
+
+    assert manifest.validation_names == ["seen_sku", "unseen_sku"]
+    assert manifest.default_validation == "unseen_sku"
+    assert manifest.validate.indices == [7, 8, 9]
+    assert manifest.validation("seen_sku").indices == [4, 5, 6]
+    assert manifest.test_aliases_validate
+
+    path = tmp_path / "named_validation_manifest.json"
+    manifest.save(path)
+    loaded = thor.data.DatasetSplitManifest.load(path)
+    assert loaded == manifest
+    assert loaded.default_validation == "unseen_sku"
+    assert loaded.validation("seen_sku").indices == [4, 5, 6]
+
+    data = thor.data.TrainingData(
+        dataset=dataset,
+        splits=loaded,
+        batching=thor.data.BatchPolicy(batch_size=2, randomize_train=False),
+        device_storage="off",
+    )
+    seen_session = data.open_validation_session("seen_sku")
+    unseen_session = data.open_validation_session("unseen_sku")
+    assert seen_session.get_num_validate_examples() == 3
+    assert unseen_session.get_num_validate_examples() == 3
+
+    with pytest.raises(ValueError, match="either validate_indices or validation_indices"):
+        thor.data.DatasetSplitManifest(
+            dataset=dataset,
+            train_indices=[0],
+            validate_indices=[1],
+            validation_indices={"other": [2]},
+            default_validation="other",
+        )
 
 
 def test_example_index_range_validates_compact_range_contract():

@@ -52,6 +52,39 @@ TEST(TrainingRunResult, CompletedResultCarriesRunNameAndFinalStats) {
     EXPECT_DOUBLE_EQ(*result.finalValidationStats->loss, 1.5);
 }
 
+TEST(TrainingRunResult, CarriesFinalStatsForEveryValidationPopulation) {
+    TrainingStatsSnapshot unseen;
+    unseen.phase = TrainingEventPhase::VALIDATE;
+    unseen.validationPopulation = "unseen_sku";
+    unseen.isDefaultValidationPopulation = true;
+    unseen.loss = 1.5;
+    TrainingStatsSnapshot seen;
+    seen.phase = TrainingEventPhase::VALIDATE;
+    seen.validationPopulation = "seen_sku";
+    seen.loss = 1.25;
+
+    TrainingRunResult result = TrainingRunResult::completedResult(
+        "fold_0",
+        {},
+        unseen,
+        {},
+        TrainingRunCompletionReason::COMPLETED,
+        {},
+        {},
+        {},
+        {},
+        {},
+        {{"seen_sku", seen}, {"unseen_sku", unseen}});
+
+    ASSERT_EQ(result.finalValidationStatsByPopulation.size(), 2u);
+    EXPECT_DOUBLE_EQ(
+        *result.finalValidationStatsByPopulation.at("seen_sku").loss,
+        1.25);
+    EXPECT_DOUBLE_EQ(
+        *result.finalValidationStatsByPopulation.at("unseen_sku").loss,
+        1.5);
+}
+
 TEST(TrainingRunResult, ClassifiesCancellationAndInterruptExceptions) {
     TrainingRunResult cancelled = TrainingRunResult::fromException("fold_1", makeExceptionPtr(TrainingCancelled("cancelled by sibling")));
     TrainingRunResult interrupted = TrainingRunResult::fromException("fold_2", makeExceptionPtr(TrainingInterrupted("ctrl-c")));

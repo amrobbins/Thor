@@ -24,7 +24,6 @@ TrainingData::TrainingData(std::shared_ptr<const NamedDataset> dataset,
     this->splits.validateAgainst(*this->dataset);
 }
 
-
 void TrainingData::requireNonEmptyPartition(ExampleType exampleType, const std::string& context) const {
     const ExampleIndexSet* partition = nullptr;
     const char* partitionName = nullptr;
@@ -72,6 +71,37 @@ std::shared_ptr<BatchSession> TrainingData::openSession(
         throw std::runtime_error("NamedDataset backend returned a null BatchSession.");
     }
     session->setDatasetName(datasetName);
+    return session;
+}
+
+std::shared_ptr<BatchSession> TrainingData::openValidationSession(
+    const std::string& validationPopulation,
+    uint64_t maxInFlightBatches) const {
+    std::set<DatasetFieldId> allFields;
+    for (const DatasetField& field : dataset->getSchema().getFields()) {
+        allFields.insert(field.id);
+    }
+    return openValidationSession(validationPopulation, maxInFlightBatches, allFields);
+}
+
+std::shared_ptr<BatchSession> TrainingData::openValidationSession(
+    const std::string& validationPopulation,
+    uint64_t maxInFlightBatches,
+    const std::set<DatasetFieldId>& requiredFieldIds) const {
+    if (maxInFlightBatches == 0) {
+        throw std::runtime_error("TrainingData max_in_flight_batches must be >= 1.");
+    }
+    (void)splits.getValidation(validationPopulation);
+    for (DatasetFieldId fieldId : requiredFieldIds) {
+        (void)dataset->getSchema().getField(fieldId);
+    }
+    DatasetSplitManifest selectedSplits = splits.withDefaultValidation(validationPopulation);
+    std::shared_ptr<BatchSession> session = dataset->openBatchSession(
+        selectedSplits, batching, accessPolicy, maxInFlightBatches, requiredFieldIds);
+    if (session == nullptr) {
+        throw std::runtime_error("NamedDataset backend returned a null BatchSession.");
+    }
+    session->setDatasetName(datasetName + ":validation:" + validationPopulation);
     return session;
 }
 

@@ -29,6 +29,13 @@ class TrainingData {
     [[nodiscard]] std::shared_ptr<BatchSession> openSession(
         uint64_t maxInFlightBatches,
         const std::set<DatasetFieldId>& requiredFieldIds) const;
+    [[nodiscard]] std::shared_ptr<BatchSession> openValidationSession(
+        const std::string& validationPopulation,
+        uint64_t maxInFlightBatches = 32) const;
+    [[nodiscard]] std::shared_ptr<BatchSession> openValidationSession(
+        const std::string& validationPopulation,
+        uint64_t maxInFlightBatches,
+        const std::set<DatasetFieldId>& requiredFieldIds) const;
 
     [[nodiscard]] const std::shared_ptr<const NamedDataset> &getDataset() const { return dataset; }
     [[nodiscard]] const DatasetSplitManifest &getSplits() const { return splits; }

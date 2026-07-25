@@ -17,6 +17,9 @@ struct TrainingStatsSnapshot {
     std::string networkName{};
     std::string datasetName{};
     TrainingEventPhase phase = TrainingEventPhase::UNKNOWN;
+    // Set for VALIDATE events. Empty preserves legacy unnamed validation.
+    std::string validationPopulation{};
+    bool isDefaultValidationPopulation = false;
 
     uint64_t epoch = 0;
     uint64_t epochs = 0;

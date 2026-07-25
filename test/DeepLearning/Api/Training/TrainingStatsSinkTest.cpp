@@ -253,6 +253,52 @@ TEST(TrainingRunsStatsReporter, ValidationStatsUpdateValidationLossWithoutReplac
     EXPECT_FALSE(hasTokenWithValue(line, "step", "115")) << line;
 }
 
+TEST(TrainingRunsStatsReporter, ReportsAdditionalNamedValidationPopulationsWithoutDuplicatingDefault) {
+    std::FILE* out = std::tmpfile();
+    TrainingRunsStatsReporter reporter(out, LineStatsColorMode::NEVER, 0.0);
+    reporter.configureRun(
+        "fold_0",
+        TrainingRunsStatsReporter::RunConfig{
+            0.0,
+            std::string("sku_demand_cv5"),
+            1.0,
+            {"daily_central_loss"}});
+
+    TrainingStatsSnapshot trainStats = makeStats(TrainingEventPhase::TRAIN, 3.0);
+    trainStats.metrics["daily_central_loss"] = 30.0;
+
+    TrainingStatsSnapshot unseenStats = makeStats(TrainingEventPhase::VALIDATE, 5.0);
+    unseenStats.validationPopulation = "unseen_sku";
+    unseenStats.isDefaultValidationPopulation = true;
+    unseenStats.metrics["daily_central_loss"] = 50.0;
+
+    TrainingStatsSnapshot seenStats = makeStats(TrainingEventPhase::VALIDATE, 2.0);
+    seenStats.validationPopulation = "seen_sku";
+    seenStats.metrics["daily_central_loss"] = 20.0;
+
+    reporter.markRunStarting("fold_0");
+    reporter.onStatsEvent(
+        TrainingStatsEvent::fromTrainingEvent(
+            TrainingEvent::statsUpdated(trainStats), "fold_0"));
+    reporter.onStatsEvent(
+        TrainingStatsEvent::fromTrainingEvent(
+            TrainingEvent::statsUpdated(unseenStats), "fold_0"));
+    reporter.onStatsEvent(
+        TrainingStatsEvent::fromTrainingEvent(
+            TrainingEvent::statsUpdated(seenStats), "fold_0"));
+    reporter.close();
+
+    const std::string output = readAndCloseFile(out);
+    const std::string line = findLineWithAll(
+        output,
+        {"INFO runs[fold_0|sku_demand_cv5]:",
+         "validate_loss=",
+         "validate_seen_sku_loss=",
+         "validate_seen_sku_daily_central_loss="});
+    ASSERT_FALSE(line.empty()) << output;
+    EXPECT_EQ(line.find("validate_unseen_sku_loss="), std::string::npos) << line;
+}
+
 TEST(TrainingRunsStatsReporter, TerminalEventDoesNotCoalesceAwayPendingValidationSummary) {
     std::FILE* out = std::tmpfile();
     TrainingRunsStatsReporter reporter(out, LineStatsColorMode::NEVER, 1.0);

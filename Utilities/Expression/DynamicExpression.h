@@ -30,6 +30,16 @@ struct DynamicExpressionBuild {
     std::function<void(Stream&)> pre_forward_hook;
     std::shared_ptr<const ExpressionDefinition> serialized_definition = nullptr;
 
+    // Optional forward-only alternate used for validation and inference. It shares
+    // the ordinary tensor inputs, preallocated outputs, and requested output
+    // shapes, but may use a different compiled equation and runtime scalar
+    // bindings. Backward is always compiled from `equation`, never from this
+    // alternate. Attention uses this to compile SDPA with dropout for training and
+    // SDPA without dropout for validation/inference.
+    std::shared_ptr<FusedEquation> validation_equation = nullptr;
+    TensorScalarMap validation_tensor_scalar_inputs;
+    std::function<void(Stream&)> validation_pre_forward_hook;
+
 };
 
 class PreparedDynamicExpression {
@@ -46,9 +56,43 @@ class PreparedDynamicExpression {
         validateTensorMap(build_.stamp_inputs, stream_, true, "stamp input");
         validateTensorScalarMap(build_.tensor_scalar_inputs, stream_, "tensor scalar input");
         validateTensorMap(build_.preallocated_outputs, stream_, false, "preallocated output");
+        validateTensorScalarMap(build_.validation_tensor_scalar_inputs, stream_, "validation tensor scalar input");
+        if (!build_.validation_equation && !build_.validation_tensor_scalar_inputs.empty()) {
+            throw std::invalid_argument(
+                "PreparedDynamicExpression validation tensor scalar inputs require a validation equation.");
+        }
     }
 
     [[nodiscard]] StampedExecutionPlan stamp() const { return stamp({}, {}); }
+
+    [[nodiscard]] bool hasValidationForward() const { return build_.validation_equation != nullptr; }
+
+    [[nodiscard]] StampedExecutionPlan stampValidation() const { return stampValidation({}, {}); }
+
+    [[nodiscard]] StampedExecutionPlan stampValidation(
+        const TensorMap& preallocated_outputs_override,
+        const ShapeMap& requested_output_shapes_override = {}) const {
+        if (!build_.validation_equation) {
+            throw std::logic_error("PreparedDynamicExpression has no validation forward equation.");
+        }
+        validateTensorMap(preallocated_outputs_override, stream_, false, "validation preallocated output override");
+
+        TensorMap final_preallocated_outputs = build_.preallocated_outputs;
+        for (const auto& [name, tensor] : preallocated_outputs_override) {
+            final_preallocated_outputs[name] = tensor;
+        }
+
+        ShapeMap final_requested_output_shapes = build_.requested_output_shapes;
+        for (const auto& [name, shape] : requested_output_shapes_override) {
+            final_requested_output_shapes[name] = shape;
+        }
+
+        return build_.validation_equation->stamp(build_.stamp_inputs,
+                                                 stream_,
+                                                 build_.validation_tensor_scalar_inputs,
+                                                 final_preallocated_outputs,
+                                                 final_requested_output_shapes);
+    }
 
     [[nodiscard]] StampedExecutionPlan stamp(const TensorMap& preallocated_outputs_override,
                                              const ShapeMap& requested_output_shapes_override = {}) const {
@@ -158,6 +202,21 @@ class PreparedDynamicExpression {
     [[nodiscard]] const ShapeMap& requestedOutputShapes() const { return build_.requested_output_shapes; }
 
     [[nodiscard]] const std::function<void(Stream&)>& preForwardHook() const { return build_.pre_forward_hook; }
+
+    [[nodiscard]] const std::function<void(Stream&)>& validationPreForwardHook() const {
+        return build_.validation_pre_forward_hook;
+    }
+
+    [[nodiscard]] const FusedEquation& validationEquation() const {
+        if (!build_.validation_equation) {
+            throw std::logic_error("PreparedDynamicExpression has no validation forward equation.");
+        }
+        return *build_.validation_equation;
+    }
+
+    [[nodiscard]] const TensorScalarMap& validationTensorScalarInputs() const {
+        return build_.validation_tensor_scalar_inputs;
+    }
 
     [[nodiscard]] FusedEquation::ParameterFanOverrideMap getParameterFanOverrides(
         const std::unordered_set<std::string>& parameter_names) const {
@@ -506,6 +565,18 @@ class DynamicExpression {
         }
 
         const std::set<std::string> built_output_names = vectorToSet(build.equation->getOutputNames());
+        if (build.validation_equation) {
+            const std::set<std::string> validation_output_names =
+                vectorToSet(build.validation_equation->getOutputNames());
+            if (validation_output_names != built_output_names) {
+                throw std::invalid_argument(
+                    "DynamicExpression validation equation outputs {" + joinNames(validation_output_names) +
+                    "} do not match training equation outputs {" + joinNames(built_output_names) + "}.");
+            }
+        } else if (!build.validation_tensor_scalar_inputs.empty() || build.validation_pre_forward_hook) {
+            throw std::invalid_argument(
+                "DynamicExpression validation bindings/hooks require a validation equation.");
+        }
         const std::set<std::string> requested_output_names = tensorMapKeys(requested_outputs);
         const std::set<std::string> preallocated_output_names = tensorMapKeys(build.preallocated_outputs);
         const std::set<std::string> requested_output_shape_names = shapeMapKeys(build.requested_output_shapes);

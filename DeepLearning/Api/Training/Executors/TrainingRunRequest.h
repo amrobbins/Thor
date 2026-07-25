@@ -41,6 +41,11 @@ struct TrainingRuntimeConfig {
 using InitialDeviceStartupSequencer =
     std::function<void(const std::function<void()>& reserveStartupTurn)>;
 
+struct NamedValidationSession {
+    std::string name{};
+    std::shared_ptr<BatchSession> batchSession = nullptr;
+};
+
 struct TrainingRunRequest {
     // Present only for standalone-network execution. Explicit TrainingProgram
     // execution owns its model through TrainingPhase networks and leaves this null.
@@ -53,6 +58,11 @@ struct TrainingRunRequest {
     // direct executor callers that omit it can still retry failures that occur
     // before the first batch is acquired.
     std::function<std::shared_ptr<BatchSession>()> batchSessionFactory{};
+
+    // Additional named validation populations are evaluated forward-only after
+    // the default validation pass and before model-selection scoring.
+    std::string defaultValidationPopulation{"validate"};
+    std::vector<NamedValidationSession> additionalValidationSessions{};
 
     std::shared_ptr<Optimizer> optimizer = nullptr;
     std::shared_ptr<TrainingProgram> trainingProgram = nullptr;

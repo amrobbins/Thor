@@ -123,6 +123,118 @@ TEST(DatasetSplitManifest, PersistenceRoundTripsExplicitTestMembership) {
     EXPECT_EQ(loaded.getTest().materialize(), (std::vector<uint64_t>{4, 5}));
 }
 
+
+TEST(DatasetSplitManifest, SupportsNamedValidationPopulationsAndDefaultSelection) {
+    TestNamedDataset dataset(Thor::DatasetId::fromStableMaterial("dataset-named-validation"), 10);
+    Thor::DatasetSplitManifest manifest(
+        dataset,
+        Thor::ExampleIndexSet(std::vector<uint64_t>{0, 1, 2, 3}),
+        Thor::DatasetSplitManifest::ValidationIndexSets{
+            {"seen_sku", Thor::ExampleIndexSet(std::vector<uint64_t>{4, 5, 6})},
+            {"unseen_sku", Thor::ExampleIndexSet(std::vector<uint64_t>{7, 8, 9})}},
+        "unseen_sku");
+
+    EXPECT_EQ(manifest.getValidationNames(), (std::vector<std::string>{"seen_sku", "unseen_sku"}));
+    EXPECT_EQ(manifest.getDefaultValidationName(), "unseen_sku");
+    EXPECT_EQ(manifest.getValidate().materialize(), (std::vector<uint64_t>{7, 8, 9}));
+    EXPECT_EQ(manifest.getValidation("seen_sku").materialize(), (std::vector<uint64_t>{4, 5, 6}));
+    EXPECT_EQ(&manifest.getValidate(), &manifest.getTest());
+
+    Thor::DatasetSplitManifest seenDefault = manifest.withDefaultValidation("seen_sku");
+    EXPECT_EQ(seenDefault.getDefaultValidationName(), "seen_sku");
+    EXPECT_EQ(seenDefault.getValidate().materialize(), (std::vector<uint64_t>{4, 5, 6}));
+    EXPECT_EQ(&seenDefault.getValidate(), &seenDefault.getTest());
+    EXPECT_EQ(manifest.getDefaultValidationName(), "unseen_sku");
+
+    Thor::DatasetSplitManifest explicitTest(
+        dataset,
+        Thor::ExampleIndexSet(std::vector<uint64_t>{0, 1}),
+        Thor::DatasetSplitManifest::ValidationIndexSets{
+            {"seen_sku", Thor::ExampleIndexSet(std::vector<uint64_t>{2, 3})},
+            {"unseen_sku", Thor::ExampleIndexSet(std::vector<uint64_t>{4, 5})}},
+        "unseen_sku",
+        Thor::ExampleIndexSet(std::vector<uint64_t>{6, 7}));
+    Thor::DatasetSplitManifest explicitSeen =
+        explicitTest.withDefaultValidation("seen_sku");
+    EXPECT_TRUE(explicitSeen.hasExplicitTestSplit());
+    EXPECT_EQ(explicitSeen.getTest().materialize(),
+              (std::vector<uint64_t>{6, 7}));
+}
+
+TEST(DatasetSplitManifest, NamedValidationPersistenceRoundTrips) {
+    TestNamedDataset dataset(Thor::DatasetId::fromStableMaterial("dataset-named-validation-persist"), 12);
+    Thor::DatasetSplitManifest original(
+        dataset,
+        Thor::ExampleIndexSet::contiguous(0, 6),
+        Thor::DatasetSplitManifest::ValidationIndexSets{
+            {"seen_sku", Thor::ExampleIndexSet::contiguous(6, 3)},
+            {"unseen_sku", Thor::ExampleIndexSet::contiguous(9, 3)}},
+        "unseen_sku");
+    const std::filesystem::path path = tempManifestPath();
+
+    original.save(path);
+    std::ifstream in(path);
+    const nlohmann::json persisted = nlohmann::json::parse(in);
+    EXPECT_EQ(persisted.at("format"), "thor.dataset_split_manifest.v2");
+    EXPECT_EQ(persisted.at("default_validation"), "unseen_sku");
+    EXPECT_TRUE(persisted.at("partitions").at("validations").contains("seen_sku"));
+    EXPECT_TRUE(persisted.at("partitions").at("validations").contains("unseen_sku"));
+
+    Thor::DatasetSplitManifest loaded = Thor::DatasetSplitManifest::load(path);
+    std::filesystem::remove(path);
+    EXPECT_EQ(loaded, original);
+    EXPECT_TRUE(loaded.testAliasesValidate());
+    EXPECT_EQ(&loaded.getValidation("unseen_sku"), &loaded.getTest());
+}
+
+TEST(DatasetSplitManifest, LoadsLegacyV1AsSingleValidatePopulation) {
+    const Thor::DatasetId datasetId = Thor::DatasetId::fromStableMaterial("legacy-v1");
+    const std::filesystem::path path = tempManifestPath();
+    nlohmann::json legacy = {
+        {"format", "thor.dataset_split_manifest.v1"},
+        {"dataset_id", datasetId.str()},
+        {"num_examples", 4},
+        {"partitions",
+         {{"train", std::vector<uint64_t>{0, 1}},
+          {"validate", std::vector<uint64_t>{2, 3}},
+          {"test", {{"alias", "validate"}}}}}};
+    std::ofstream(path) << legacy.dump(2) << '\n';
+
+    Thor::DatasetSplitManifest loaded = Thor::DatasetSplitManifest::load(path);
+    std::filesystem::remove(path);
+    EXPECT_EQ(loaded.getDefaultValidationName(), "validate");
+    EXPECT_EQ(loaded.getValidationNames(), (std::vector<std::string>{"validate"}));
+    EXPECT_EQ(loaded.getValidate().materialize(), (std::vector<uint64_t>{2, 3}));
+    EXPECT_TRUE(loaded.testAliasesValidate());
+}
+
+TEST(DatasetSplitManifest, RejectsInvalidNamedValidationConfiguration) {
+    TestNamedDataset dataset(Thor::DatasetId::fromStableMaterial("dataset-invalid-validation"), 4);
+    EXPECT_THROW(
+        (Thor::DatasetSplitManifest(
+            dataset,
+            Thor::ExampleIndexSet(std::vector<uint64_t>{0}),
+            Thor::DatasetSplitManifest::ValidationIndexSets{},
+            "validate")),
+        std::runtime_error);
+    EXPECT_THROW(
+        (Thor::DatasetSplitManifest(
+            dataset,
+            Thor::ExampleIndexSet(std::vector<uint64_t>{0}),
+            Thor::DatasetSplitManifest::ValidationIndexSets{
+                {"seen_sku", Thor::ExampleIndexSet(std::vector<uint64_t>{1})}},
+            "unseen_sku")),
+        std::runtime_error);
+    EXPECT_THROW(
+        (Thor::DatasetSplitManifest(
+            dataset,
+            Thor::ExampleIndexSet(std::vector<uint64_t>{0}),
+            Thor::DatasetSplitManifest::ValidationIndexSets{
+                {"bad name", Thor::ExampleIndexSet(std::vector<uint64_t>{1})}},
+            "bad name")),
+        std::runtime_error);
+}
+
 TEST(DatasetSplitManifest, RangeBackedMembershipProvidesRandomAccessWithoutMaterialization) {
     Thor::ExampleIndexSet indices(std::vector<Thor::ExampleIndexRange>{
         Thor::ExampleIndexRange{.start = 10, .count = 3, .stride = 2},

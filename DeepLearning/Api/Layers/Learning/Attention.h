@@ -343,6 +343,8 @@ class Attention::Builder {
         return *this;
     }
 
+    // SDPA attention-probability dropout. Applied only during training;
+    // validation and inference execute a separately compiled no-dropout SDPA plan.
     virtual Attention::Builder& dropoutProbability(float value) {
         THOR_THROW_IF_FALSE(!this->_dropoutProbability.has_value());
         this->_dropoutProbability = value;

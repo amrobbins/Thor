@@ -141,6 +141,7 @@ class CustomLayer : public TrainableLayer {
 
         std::shared_ptr<PreparedDynamicExpression> forwardPrepared;
         std::shared_ptr<StampedExecutionPlan> forwardStamped;
+        std::shared_ptr<StampedExecutionPlan> validationForwardStamped;
         std::shared_ptr<StampedExecutionPlan> backwardErrorStamped;
         std::shared_ptr<StampedExecutionPlan> backwardWeightsClearStamped;
         std::shared_ptr<StampedExecutionPlan> backwardWeightsAccumulateStamped;
@@ -155,6 +156,7 @@ class CustomLayer : public TrainableLayer {
         std::unordered_map<std::string, Tensor> backwardAdditionalInputsByName;
         std::unordered_map<std::string, Tensor> backwardInputGradOutputsByName;
         std::function<void(Stream&)> forwardPreRunHook;
+        std::function<void(Stream&)> validationForwardPreRunHook;
     };
 
     struct DecodedConnection {
@@ -215,6 +217,7 @@ class CustomLayer : public TrainableLayer {
     void validatePreparedExpressionInputs(const PreparedDynamicExpression& prepared);
     void validateStampedOutputNames(const StampedExecutionPlan& stamped, const std::vector<std::string>& expectedNames, const char* phase);
     void synchronizeComputeStreamForForwardInputs(uint32_t applicationIndex);
+    void computeFeatureOutForPass(uint32_t connectionNumber, bool validationPass);
     std::string diagnosticLabel();
 
     std::string errorInputNameForOutput(uint32_t outputPortIndex) const;

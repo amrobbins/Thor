@@ -685,8 +685,16 @@ void TrainingRunsStatsReporter::processEvent(const ReporterEvent& event) {
                     updateSmoothedLossState(state.trainingLoss, event.stats.stats);
                     break;
                 case TrainingEventPhase::VALIDATE:
-                    state.latestValidationStats = event.stats;
-                    updateSmoothedLossState(state.validationLoss, event.stats.stats);
+                    if (event.stats.stats.validationPopulation.empty() ||
+                        event.stats.stats.isDefaultValidationPopulation) {
+                        state.latestValidationStats = event.stats;
+                        updateSmoothedLossState(state.validationLoss, event.stats.stats);
+                    } else {
+                        state.latestNamedValidationStats[event.stats.stats.validationPopulation] = event.stats;
+                        updateSmoothedLossState(
+                            state.namedValidationLosses[event.stats.stats.validationPopulation],
+                            event.stats.stats);
+                    }
                     state.validationStatsPendingEmission = true;
                     break;
                 case TrainingEventPhase::TEST:
@@ -882,6 +890,48 @@ void TrainingRunsStatsReporter::writeRunLineLocked(const RunState& state, size_t
                                                   state.config.reportOrder,
                                                   FinalReportAnsi::trainLoss,
                                                   FinalReportAnsi::validateLoss);
+        std::vector<std::string> populationNames;
+        populationNames.reserve(state.namedValidationLosses.size());
+        for (const auto& [name, lossState] : state.namedValidationLosses) {
+            (void)lossState;
+            populationNames.push_back(name);
+        }
+        std::sort(populationNames.begin(), populationNames.end());
+        for (const std::string& population : populationNames) {
+            const std::optional<double> loss = displayedLossFromState(
+                state.namedValidationLosses.at(population));
+            if (loss.has_value()) {
+                char buffer[192];
+                std::snprintf(buffer,
+                              sizeof(buffer),
+                              "validate_%s_loss=%.6f",
+                              population.c_str(),
+                              loss.value());
+                line += " ";
+                line += styled(buffer,
+                               FinalReportAnsi::validateLoss,
+                               shouldUseColorLocked());
+            }
+            const auto statsIt = state.latestNamedValidationStats.find(population);
+            if (statsIt == state.latestNamedValidationStats.end()) {
+                continue;
+            }
+            const auto* metrics = &statsIt->second.stats.metrics;
+            for (const std::string& metricName :
+                 orderedMetricNames(nullptr, metrics, nullptr, state.config.reportOrder)) {
+                const auto metricIt = metrics->find(metricName);
+                if (metricIt != metrics->end()) {
+                    const std::string phasePrefix = "validate_" + population;
+                    appendPhaseMetricColumn(
+                        line,
+                        phasePrefix.c_str(),
+                        metricName,
+                        metricIt->second,
+                        shouldUseColorLocked(),
+                        FinalReportAnsi::validateLoss);
+                }
+            }
+        }
         emitLineLocked(line);
         return;
     }
@@ -958,6 +1008,43 @@ void TrainingRunsStatsReporter::writeResultLineLocked(const TrainingRunResult& r
         result.finalTestStats.has_value() ? &*result.finalTestStats : nullptr,
         useColor,
         reportOrder);
+    const std::string defaultPopulation =
+        result.finalValidationStats.has_value() &&
+                !result.finalValidationStats->validationPopulation.empty()
+            ? result.finalValidationStats->validationPopulation
+            : std::string("validate");
+    for (const auto& [population, stats] :
+         result.finalValidationStatsByPopulation) {
+        if ((!defaultPopulation.empty() && population == defaultPopulation) ||
+            stats.isDefaultValidationPopulation) {
+            continue;
+        }
+        if (stats.loss.has_value()) {
+            char buffer[192];
+            std::snprintf(buffer,
+                          sizeof(buffer),
+                          "validate_%s_loss=%.6f",
+                          population.c_str(),
+                          stats.loss.value());
+            line += " ";
+            line += styled(buffer, FinalReportAnsi::validateLoss, useColor);
+        }
+        const auto* metrics = &stats.metrics;
+        for (const std::string& metricName :
+             orderedMetricNames(nullptr, metrics, nullptr, reportOrder)) {
+            const auto metricIt = metrics->find(metricName);
+            if (metricIt != metrics->end()) {
+                const std::string phasePrefix = "validate_" + population;
+                appendPhaseMetricColumn(
+                    line,
+                    phasePrefix.c_str(),
+                    metricName,
+                    metricIt->second,
+                    useColor,
+                    FinalReportAnsi::validateLoss);
+            }
+        }
+    }
     if (result.earlyCompleted()) {
         if (result.completedEpoch.has_value()) {
             line += " completed_epoch=" + std::to_string(result.completedEpoch.value());

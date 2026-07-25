@@ -219,8 +219,9 @@ PlacedAttentionFixture placeSingleAttentionNetwork(Api::Network& network,
 vector<float> runForward(Impl::NetworkInput& physicalInput,
                          Impl::NetworkOutput& physicalOutput,
                          Impl::Tensor& featureInHost,
-                         uint32_t batchSize) {
-    physicalInput.forward(featureInHost, false, batchSize);
+                         uint32_t batchSize,
+                         bool validationPass = false) {
+    physicalInput.forward(featureInHost, validationPass, batchSize);
     Event featureOutReadyEvent = physicalOutput.getOutputReadyEvent();
     featureOutReadyEvent.synchronize();
     return readCpuTensor(physicalOutput.getFeatureOutput().value());
@@ -2466,7 +2467,11 @@ TEST(AttentionApi, ForwardWithRaggedOffsetsDropoutAndRopeAdvancesPhiloxOffset) {
                                         .dataType(c.dataType)
                                         .build();
 
-        PlacedAttentionFixture fixture = placeSingleAttentionNetwork(network, input, output, attention, c.batchSize, true);
+        // This is a forward-only test, but dropout must execute through a
+        // training-capable placement. Freeze the projection parameters so the
+        // network does not require an optimizer merely to exercise that path.
+        network.freezeTraining();
+        PlacedAttentionFixture fixture = placeSingleAttentionNetwork(network, input, output, attention, c.batchSize, false);
         auto physicalSequenceLengthsInput =
             dynamic_pointer_cast<Impl::NetworkInput>(fixture.stampedNetwork->getPhysicalLayerFromApiLayer(sequenceLengths.getId()));
         auto physicalRaggedOffsetsInput =
@@ -2518,6 +2523,101 @@ TEST(AttentionApi, ForwardWithRaggedOffsetsDropoutAndRopeAdvancesPhiloxOffset) {
     // Guard the test fixture: if these controls are numerically identical, the equality checks above would not
     // prove that offset advancement is observable for this configuration.
     expectNotAllClose(initialOffsetControl[0], advancedOffsetControl[0], 1.0e-3f, 1.0e-3f);
+}
+
+TEST(AttentionApi, DropoutIsTrainingOnlyForValidationAndInference) {
+    AttentionReferenceCase c;
+    c.batchSize = 2;
+    c.sequenceLength = 4;
+    c.numHeads = 2;
+    c.numKeyValueHeads = 2;
+    c.headDim = 16;
+    c.valueDim = 16;
+    c.inputFeatures = 32;
+    c.outputFeatures = 32;
+    c.hasBias = false;
+    c.useRope = false;
+    c.maskKind = Impl::AttentionMaskKind::None;
+    c.attentionScale = 0.25f;
+    c.dataType = DataType::FP16;
+
+    const AttentionReferenceInputs referenceInputs = makeAttentionReferenceInputs(c);
+    Impl::Tensor featureInHost(cpuPlacement, Impl::TensorDescriptor(c.dataType, {c.batchSize, c.sequenceLength, c.inputFeatures}));
+    writeCpuTensor(featureInHost, referenceInputs.featureInput);
+
+    auto runLayer = [&](const string& networkName,
+                        float dropoutProbability,
+                        bool inferenceOnly,
+                        bool validationPass,
+                        uint32_t forwardCount) {
+        Api::Network network(networkName);
+        Api::NetworkInput input = Api::NetworkInput::Builder()
+                                      .network(network)
+                                      .name("tokens")
+                                      .dimensions({c.sequenceLength, c.inputFeatures})
+                                      .dataType(c.dataType)
+                                      .build();
+        Api::Attention::Builder builder;
+        builder.network(network)
+            .featureInput(input.getFeatureOutput().value())
+            .numHeads(c.numHeads)
+            .numKeyValueHeads(c.numKeyValueHeads)
+            .headDim(c.headDim)
+            .valueDim(c.valueDim)
+            .outputFeatures(c.outputFeatures)
+            .hasBias(c.hasBias)
+            .weightsDataType(c.dataType)
+            .computeDataType(DataType::FP32)
+            .outputDataType(c.dataType)
+            .attentionScale(c.attentionScale);
+        if (dropoutProbability > 0.0f) {
+            builder.dropout(dropoutProbability, 1234, 5678);
+        }
+        Api::Attention attention = builder.build();
+        Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                        .network(network)
+                                        .name("output")
+                                        .inputTensor(attention.getOutput("feature_output"))
+                                        .dataType(c.dataType)
+                                        .build();
+
+        if (!inferenceOnly) {
+            // Validation and training-mode forward are exercised without a
+            // backward/update step. Keep the training-capable graph while
+            // explicitly freezing Attention's projection parameters.
+            network.freezeTraining();
+        }
+        PlacedAttentionFixture fixture =
+            placeSingleAttentionNetwork(network, input, output, attention, c.batchSize, inferenceOnly);
+        Stream stream = fixture.physicalAttention->getStreams()[0];
+        setAttentionParameters(fixture.physicalAttention, referenceInputs, c, stream);
+
+        vector<vector<float>> results;
+        for (uint32_t i = 0; i < forwardCount; ++i) {
+            results.push_back(runForward(
+                *fixture.physicalInput, *fixture.physicalOutput, featureInHost, c.batchSize, validationPass));
+        }
+        return results;
+    };
+
+    const vector<vector<float>> validationRuns =
+        runLayer("attention_dropout_validation_bypass", 0.5f, false, true, 2);
+    const vector<vector<float>> inferenceRuns =
+        runLayer("attention_dropout_inference_bypass", 0.5f, true, false, 1);
+    const vector<vector<float>> noDropoutControl =
+        runLayer("attention_dropout_zero_control", 0.0f, true, false, 1);
+    const vector<vector<float>> trainingRuns =
+        runLayer("attention_dropout_training_enabled", 0.5f, false, false, 1);
+
+    ASSERT_EQ(validationRuns.size(), 2u);
+    ASSERT_EQ(inferenceRuns.size(), 1u);
+    ASSERT_EQ(noDropoutControl.size(), 1u);
+    ASSERT_EQ(trainingRuns.size(), 1u);
+
+    expectAllClose(validationRuns[0], validationRuns[1], 1.0e-3f, 1.0e-3f);
+    expectAllClose(validationRuns[0], inferenceRuns[0], 1.0e-3f, 1.0e-3f);
+    expectAllClose(validationRuns[0], noDropoutControl[0], 1.0e-3f, 1.0e-3f);
+    expectNotAllClose(trainingRuns[0], noDropoutControl[0], 1.0e-3f, 1.0e-3f);
 }
 
 TEST(AttentionApi, ForwardUniformAttentionMatchesBshdProjectionLayoutReference) {

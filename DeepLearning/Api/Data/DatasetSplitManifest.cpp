@@ -3,6 +3,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <limits>
 #include <numeric>
@@ -15,7 +16,8 @@ namespace Thor {
 namespace {
 
 using nlohmann::json;
-constexpr const char *FORMAT = "thor.dataset_split_manifest.v1";
+constexpr const char *FORMAT_V1 = "thor.dataset_split_manifest.v1";
+constexpr const char *FORMAT_V2 = "thor.dataset_split_manifest.v2";
 
 uint64_t checkedAdd(uint64_t left, uint64_t right, const char *context) {
     if (left > std::numeric_limits<uint64_t>::max() - right) {
@@ -252,7 +254,7 @@ bool ExampleIndexSet::operator==(const ExampleIndexSet &rhs) const {
 
 std::shared_ptr<const ExampleIndexSet> DatasetSplitManifest::makeIndexSet(ExampleIndexSet indices,
                                                                           uint64_t numExamples,
-                                                                          const char *partitionName) {
+                                                                          const std::string &partitionName) {
     if (indices.isRangeBacked()) {
         for (const ExampleIndexRange &range : indices.getRanges()) {
             if (range.last() >= numExamples) {
@@ -293,27 +295,103 @@ DatasetSplitManifest::DatasetSplitManifest(const NamedDataset &dataset,
                                            ExampleIndexSet trainIndices,
                                            ExampleIndexSet validateIndices,
                                            std::optional<ExampleIndexSet> testIndices)
+    : DatasetSplitManifest(dataset,
+                           std::move(trainIndices),
+                           ValidationIndexSets{{"validate", std::move(validateIndices)}},
+                           "validate",
+                           std::move(testIndices)) {}
+
+DatasetSplitManifest::DatasetSplitManifest(const NamedDataset &dataset,
+                                           ExampleIndexSet trainIndices,
+                                           ValidationIndexSets validationIndices,
+                                           std::string defaultValidationName,
+                                           std::optional<ExampleIndexSet> testIndices)
     : DatasetSplitManifest(dataset.getId(),
                            dataset.getNumExamples(),
                            std::move(trainIndices),
-                           std::move(validateIndices),
+                           std::move(validationIndices),
+                           std::move(defaultValidationName),
                            std::move(testIndices)) {}
+
+void DatasetSplitManifest::validateValidationName(const std::string &name) {
+    if (name.empty()) {
+        throw std::runtime_error("DatasetSplitManifest validation population names must not be empty.");
+    }
+    if (name == "train" || name == "test") {
+        throw std::runtime_error("DatasetSplitManifest validation population name '" + name +
+                                 "' is reserved.");
+    }
+    for (const unsigned char c : name) {
+        if (!(std::isalnum(c) || c == '_' || c == '-' || c == '.')) {
+            throw std::runtime_error("DatasetSplitManifest validation population name '" + name +
+                                     "' contains unsupported characters.");
+        }
+    }
+}
 
 DatasetSplitManifest::DatasetSplitManifest(DatasetId datasetId,
                                            uint64_t numExamples,
                                            ExampleIndexSet trainIndices,
-                                           ExampleIndexSet validateIndices,
+                                           ValidationIndexSets validationIndices,
+                                           std::string defaultValidationName,
                                            std::optional<ExampleIndexSet> testIndices)
     : datasetId(std::move(datasetId)),
       numExamples(numExamples),
       train(makeIndexSet(std::move(trainIndices), numExamples, "train partition")),
-      validate(makeIndexSet(std::move(validateIndices), numExamples, "validate partition")),
+      defaultValidationName(std::move(defaultValidationName)),
       explicitTestSplit(testIndices.has_value()) {
+    if (validationIndices.empty()) {
+        throw std::runtime_error("DatasetSplitManifest requires at least one validation population.");
+    }
+    for (auto &[name, indices] : validationIndices) {
+        validateValidationName(name);
+        validations.emplace(
+            name,
+            makeIndexSet(std::move(indices), numExamples, "validation population '" + name + "'"));
+    }
+    if (validations.count(this->defaultValidationName) == 0) {
+        throw std::runtime_error("DatasetSplitManifest default validation population '" +
+                                 this->defaultValidationName + "' does not exist.");
+    }
+
     if (explicitTestSplit) {
         test = makeIndexSet(std::move(testIndices.value()), numExamples, "test partition");
     } else {
-        test = validate;
+        test = getSharedValidation(this->defaultValidationName);
     }
+}
+
+const ExampleIndexSet &DatasetSplitManifest::getValidation(const std::string &name) const {
+    return *getSharedValidation(name);
+}
+
+const std::shared_ptr<const ExampleIndexSet> &DatasetSplitManifest::getSharedValidation(const std::string &name) const {
+    const auto it = validations.find(name);
+    if (it == validations.end()) {
+        throw std::out_of_range("DatasetSplitManifest has no validation population named '" + name + "'.");
+    }
+    return it->second;
+}
+
+std::vector<std::string> DatasetSplitManifest::getValidationNames() const {
+    std::vector<std::string> names;
+    names.reserve(validations.size());
+    for (const auto &[name, indices] : validations) {
+        (void)indices;
+        names.push_back(name);
+    }
+    return names;
+}
+
+DatasetSplitManifest DatasetSplitManifest::withDefaultValidation(std::string name) const {
+    const std::shared_ptr<const ExampleIndexSet>& selectedValidation =
+        getSharedValidation(name);
+    DatasetSplitManifest selected = *this;
+    selected.defaultValidationName = std::move(name);
+    if (!selected.explicitTestSplit) {
+        selected.test = selectedValidation;
+    }
+    return selected;
 }
 
 void DatasetSplitManifest::validateAgainst(const NamedDataset &dataset) const {
@@ -326,14 +404,19 @@ void DatasetSplitManifest::validateAgainst(const NamedDataset &dataset) const {
 }
 
 void DatasetSplitManifest::save(const std::filesystem::path &path) const {
+    json validationsJson = json::object();
+    for (const auto &[name, indices] : validations) {
+        validationsJson[name] = indexSetToJson(*indices);
+    }
     json manifest = {
-        {"format", FORMAT},
+        {"format", FORMAT_V2},
         {"dataset_id", datasetId.str()},
         {"num_examples", numExamples},
+        {"default_validation", defaultValidationName},
         {"partitions",
          {{"train", indexSetToJson(*train)},
-          {"validate", indexSetToJson(*validate)},
-          {"test", explicitTestSplit ? indexSetToJson(*test) : json{{"alias", "validate"}}}}},
+          {"validations", std::move(validationsJson)},
+          {"test", explicitTestSplit ? indexSetToJson(*test) : json{{"alias", "default_validation"}}}}},
     };
 
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
@@ -357,7 +440,8 @@ DatasetSplitManifest DatasetSplitManifest::load(const std::filesystem::path &pat
     if (!in.good() && !in.eof()) {
         throw std::runtime_error("DatasetSplitManifest failed while reading: " + path.string());
     }
-    if (manifest.value("format", std::string()) != FORMAT) {
+    const std::string format = manifest.value("format", std::string());
+    if (format != FORMAT_V1 && format != FORMAT_V2) {
         throw std::runtime_error("DatasetSplitManifest has an unsupported format.");
     }
 
@@ -365,7 +449,23 @@ DatasetSplitManifest DatasetSplitManifest::load(const std::filesystem::path &pat
     const uint64_t numExamples = manifest.at("num_examples").get<uint64_t>();
     const json &partitions = manifest.at("partitions");
     ExampleIndexSet trainIndices = readIndexSet(partitions, "train");
-    ExampleIndexSet validateIndices = readIndexSet(partitions, "validate");
+
+    ValidationIndexSets validationIndices;
+    std::string defaultValidationName;
+    if (format == FORMAT_V1) {
+        validationIndices.emplace("validate", readIndexSet(partitions, "validate"));
+        defaultValidationName = "validate";
+    } else {
+        defaultValidationName = manifest.at("default_validation").get<std::string>();
+        if (!partitions.contains("validations") || !partitions.at("validations").is_object()) {
+            throw std::runtime_error("DatasetSplitManifest is missing named validation populations.");
+        }
+        for (const auto &[name, value] : partitions.at("validations").items()) {
+            json wrapped = json::object();
+            wrapped[name] = value;
+            validationIndices.emplace(name, readIndexSet(wrapped, name.c_str()));
+        }
+    }
 
     std::optional<ExampleIndexSet> testIndices;
     if (!partitions.contains("test")) {
@@ -373,8 +473,10 @@ DatasetSplitManifest DatasetSplitManifest::load(const std::filesystem::path &pat
     }
     const json &test = partitions.at("test");
     if (test.is_object() && test.contains("alias")) {
-        if (test.value("alias", std::string()) != "validate") {
-            throw std::runtime_error("DatasetSplitManifest test alias must reference validate.");
+        const std::string alias = test.value("alias", std::string());
+        if ((format == FORMAT_V1 && alias != "validate") ||
+            (format == FORMAT_V2 && alias != "default_validation")) {
+            throw std::runtime_error("DatasetSplitManifest test alias is invalid.");
         }
     } else {
         json wrapped = json::object();
@@ -385,13 +487,24 @@ DatasetSplitManifest DatasetSplitManifest::load(const std::filesystem::path &pat
     return DatasetSplitManifest(std::move(datasetId),
                                 numExamples,
                                 std::move(trainIndices),
-                                std::move(validateIndices),
+                                std::move(validationIndices),
+                                std::move(defaultValidationName),
                                 std::move(testIndices));
 }
 
 bool DatasetSplitManifest::operator==(const DatasetSplitManifest &rhs) const {
-    return datasetId == rhs.datasetId && numExamples == rhs.numExamples && *train == *rhs.train &&
-           *validate == *rhs.validate && *test == *rhs.test && explicitTestSplit == rhs.explicitTestSplit;
+    if (datasetId != rhs.datasetId || numExamples != rhs.numExamples || *train != *rhs.train ||
+        defaultValidationName != rhs.defaultValidationName || explicitTestSplit != rhs.explicitTestSplit ||
+        *test != *rhs.test || validations.size() != rhs.validations.size()) {
+        return false;
+    }
+    for (const auto &[name, indices] : validations) {
+        const auto rhsIt = rhs.validations.find(name);
+        if (rhsIt == rhs.validations.end() || *indices != *rhsIt->second) {
+            return false;
+        }
+    }
+    return true;
 }
 
 }  // namespace Thor
