@@ -5,6 +5,7 @@
 #include "DeepLearning/Api/Initializers/Initializer.h"
 #include "DeepLearning/Api/Layers/Learning/CustomLayer.h"
 #include "DeepLearning/Api/Layers/Learning/LayerEpilogue.h"
+#include "DeepLearning/Api/Layers/TrainingDropoutControllable.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
@@ -28,7 +29,7 @@ namespace Thor {
 // Internally this layer performs per-token Q/K/V projections, optional RoPE on Q/K, cuDNN-backed SDPA, head merge,
 // and a per-token output projection.  It intentionally does not manage paged KV caches; that path remains frozen at
 // the expression level for inference validation.
-class Attention : public CustomLayer {
+class Attention : public CustomLayer, public TrainingDropoutControllable {
    public:
     class Builder;
     friend class Builder;
@@ -208,6 +209,17 @@ class Attention : public CustomLayer {
     DataType getOutputDataType() const { return outputDataType; }
     bool hasEpilogue() const { return epilogue.has_value(); }
     const std::vector<std::pair<std::string, Tensor>>& getEpilogueInputBindings() const { return epilogueInputBindings; }
+
+   protected:
+    std::shared_ptr<ThorImplementation::CustomLayer> createPhysicalLayer(
+        ThorImplementation::DynamicExpression expression,
+        std::vector<std::string> physicalInputNames,
+        std::vector<std::string> physicalOutputNames,
+        ThorImplementation::TensorPlacement placement,
+        const std::vector<std::shared_ptr<ThorImplementation::PhysicalParameter>>& physicalParameters,
+        bool inferenceOnly,
+        int64_t stampedId,
+        std::vector<ThorImplementation::CustomLayer::DeclaredOutputDescriptor> declaredOutputDescriptors) const override;
 
    private:
     uint32_t numHeads;

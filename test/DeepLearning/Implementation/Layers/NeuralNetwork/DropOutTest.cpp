@@ -175,7 +175,7 @@ TEST(DropOut, ValidationBypassesDropOut) {
 
     vector<shared_ptr<Layer>> layers;
     layers.push_back(make_shared<NetworkInput>(sourceGpu));
-    auto dropOutLayer = make_shared<DropOut>(1.0f, true);
+    auto dropOutLayer = make_shared<DropOut>(0.5f, true);
     layers.push_back(dropOutLayer);
     layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
@@ -436,6 +436,74 @@ TEST(DropOut, Bfloat16TrainingForwardBackward) {
         const float expected = __bfloat162float(destMem[i]) == 0.0f ? 0.0f : 2.0f;
         EXPECT_FLOAT_EQ(__bfloat162float(errorOutputMem[i]), expected);
     }
+
+    LayerTestHelper::tearDownNetwork(layers);
+}
+
+TEST(DropOut, TrainingDropoutControlUsesIdentityForwardAndBackwardWithoutChangingConfiguredRate) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    TensorDescriptor descriptor(DataType::FP16, {2, 3});
+    Tensor sourceCpu(cpuPlacement, descriptor);
+    Tensor sourceGpu(gpuPlacement, descriptor);
+    Tensor destCpu(cpuPlacement, descriptor);
+
+    half* sourceMem = static_cast<half*>(sourceCpu.getMemPtr());
+    for (int i = 0; i < 6; ++i) {
+        sourceMem[i] = static_cast<float>(i + 1);
+    }
+
+    vector<shared_ptr<Layer>> layers;
+    layers.push_back(make_shared<NetworkInput>(sourceGpu));
+    layers.push_back(make_shared<NoOpLayer>());
+    auto dropOutLayer = make_shared<DropOut>(0.5f, true);
+    layers.push_back(dropOutLayer);
+    layers.push_back(make_shared<NoOpLayer>());
+    layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
+
+    Stream stream = layers.front()->getStream();
+    LayerTestHelper::connectAndInitializeNetwork(layers);
+
+    ASSERT_FLOAT_EQ(dropOutLayer->getDropOutRate(), 0.5f);
+    ASSERT_TRUE(dropOutLayer->isTrainingDropoutEnabled());
+    ASSERT_NE(dropOutLayer->getFeatureOutput().value(), dropOutLayer->getFeatureInput().value());
+    ASSERT_NE(dropOutLayer->getErrorOutput().value(), dropOutLayer->getErrorInput().value());
+
+    dropOutLayer->setTrainingDropoutEnabled(false);
+    ASSERT_FALSE(dropOutLayer->isTrainingDropoutEnabled());
+
+    layers.front()->forward(sourceCpu, false);
+    stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
+    destCpu.copyFromAsync(dynamic_pointer_cast<NetworkOutput>(layers.back())->getFeatureOutput().value(), stream);
+    stream.synchronize();
+
+    half* destMem = static_cast<half*>(destCpu.getMemPtr());
+    for (int i = 0; i < 6; ++i) {
+        EXPECT_EQ(static_cast<float>(destMem[i]), static_cast<float>(sourceMem[i]));
+    }
+
+    Tensor errorInput = dropOutLayer->getErrorInput().value();
+    Tensor errorOutput = dropOutLayer->getErrorOutput().value();
+    Tensor errorInputCpu(cpuPlacement, errorInput.getDescriptor());
+    Tensor errorOutputCpu(cpuPlacement, errorOutput.getDescriptor());
+    half* errorInputMem = static_cast<half*>(errorInputCpu.getMemPtr());
+    for (int i = 0; i < 6; ++i) {
+        errorInputMem[i] = static_cast<float>(10 + i);
+    }
+
+    errorInput.copyFromAsync(errorInputCpu, stream);
+    dropOutLayer->backward(errorInput);
+    errorOutputCpu.copyFromAsync(errorOutput, stream);
+    stream.synchronize();
+
+    half* errorOutputMem = static_cast<half*>(errorOutputCpu.getMemPtr());
+    for (int i = 0; i < 6; ++i) {
+        EXPECT_EQ(static_cast<float>(errorOutputMem[i]), static_cast<float>(errorInputMem[i]));
+    }
+
+    dropOutLayer->setTrainingDropoutEnabled(true);
+    ASSERT_TRUE(dropOutLayer->isTrainingDropoutEnabled());
+    ASSERT_FLOAT_EQ(dropOutLayer->getDropOutRate(), 0.5f);
 
     LayerTestHelper::tearDownNetwork(layers);
 }

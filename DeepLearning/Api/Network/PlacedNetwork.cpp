@@ -488,6 +488,36 @@ void PlacedNetwork::synchronize() const {
     }
 }
 
+void PlacedNetwork::setTrainingDropoutEnabled(bool enabled) {
+    // The physical layers record the execution choice used by each forward so
+    // matching backward plans remain exact. Drain existing work before changing
+    // the mode used by subsequent submissions.
+    synchronize();
+    for (ThorImplementation::StampedNetwork& stampedNetwork : stampedNetworks) {
+        stampedNetwork.setTrainingDropoutEnabled(enabled);
+    }
+}
+
+bool PlacedNetwork::isTrainingDropoutEnabled() const {
+    for (const ThorImplementation::StampedNetwork& stampedNetwork : stampedNetworks) {
+        if (!stampedNetwork.isTrainingDropoutEnabled()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+uint32_t PlacedNetwork::getNumTrainingDropoutControllableLayers() const {
+    if (stampedNetworks.empty()) {
+        return 0;
+    }
+    const uint32_t count = stampedNetworks.front().getNumTrainingDropoutControllableLayers();
+    for (const ThorImplementation::StampedNetwork& stampedNetwork : stampedNetworks) {
+        THOR_THROW_IF_FALSE(stampedNetwork.getNumTrainingDropoutControllableLayers() == count);
+    }
+    return count;
+}
+
 void PlacedNetwork::releaseGpuResources() {
     if (stampedNetworks.empty()) {
         // A second release is a no-op. Resetting an already-empty lease also

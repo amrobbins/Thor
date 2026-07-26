@@ -313,3 +313,50 @@ def test_dynamic_expression_empty_inputs_raises():
 
     with pytest.raises(ValueError, match="at least one input tensor"):
         dyn.stamp({}, {}, stream)
+
+
+@pytest.mark.cuda
+def test_dynamic_expression_execution_variants_are_generic_and_deterministic():
+    gpu_num = 0
+    stream = Stream(gpu_num=gpu_num)
+
+    x_init = np.array([[2.0, -3.0]], dtype=thor.physical.numpy_dtypes.fp32)
+    _, x_gpu = _copy_numpy_to_gpu(x_init, thor.DataType.fp32, gpu_num, stream)
+
+    def builder(inputs, outputs, stream):
+        del outputs, stream
+        x = ex.input("x")
+        primary = ex.compile(ex.outputs({"out": x + 1.0}), device_num=gpu_num)
+        squared = ex.compile(ex.outputs({"out": x * x}), device_num=gpu_num)
+        evaluation = ex.compile(ex.outputs({"out": x + 10.0}), device_num=gpu_num)
+        return DynamicExpressionBuild(
+            equation=primary,
+            stamp_inputs=inputs,
+            execution_variants={
+                9: thor.physical.DynamicExpressionVariant(
+                    equation=evaluation,
+                    supports_backward=False,
+                ),
+                3: thor.physical.DynamicExpressionVariant(
+                    equation=squared,
+                    supports_backward=True,
+                ),
+            },
+            evaluation_variant_id=9,
+        )
+
+    prepared = DynamicExpression(builder).prepare({"x": x_gpu}, {}, stream)
+
+    assert prepared.has_execution_variant(0) is True
+    assert prepared.has_execution_variant(3) is True
+    assert prepared.has_execution_variant(8) is False
+    assert prepared.execution_variant_ids() == [0, 3, 9]
+    assert prepared.evaluation_variant_id() == 9
+    assert prepared.execution_variant_supports_backward(0) is True
+    assert prepared.execution_variant_supports_backward(3) is True
+    assert prepared.execution_variant_supports_backward(9) is False
+
+    stamped = prepared.stamp_execution_variant(3)
+    stamped.run()
+    result = _copy_gpu_to_cpu_numpy(stamped.output("out"), thor.DataType.fp32, stream)
+    np.testing.assert_allclose(result, np.array([[4.0, 9.0]], dtype=np.float32))

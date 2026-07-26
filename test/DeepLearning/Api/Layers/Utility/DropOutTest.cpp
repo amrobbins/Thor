@@ -240,3 +240,58 @@ TEST(UtilityApiLayers, DropOutSerializeDeserialize) {
 
     ASSERT_EQ(stampedDropOut->getDropOutRate(), dropProportion);
 }
+
+TEST(UtilityApiLayers, NetworkAndPlacedNetworkControlTrainingDropoutWithoutSerializingRuntimePolicy) {
+    Network network("dropout_runtime_training_control");
+    NetworkInput input = NetworkInput::Builder()
+                             .network(network)
+                             .name("input")
+                             .dimensions({4})
+                             .dataType(DataType::FP16)
+                             .build();
+    DropOut dropOut = DropOut::Builder()
+                          .network(network)
+                          .featureInput(input.getFeatureOutput().value())
+                          .dropProportion(0.5f)
+                          .build();
+    NetworkOutput output = NetworkOutput::Builder()
+                               .network(network)
+                               .name("output")
+                               .inputTensor(dropOut.getFeatureOutput().value())
+                               .dataType(DataType::FP16)
+                               .build();
+    (void)output;
+
+    ASSERT_TRUE(dropOut.isTrainingDropoutEnabled());
+    ASSERT_EQ(network.getNumTrainingDropoutControllableLayers(), 1U);
+    ASSERT_TRUE(network.isTrainingDropoutEnabled());
+
+    network.setTrainingDropoutEnabled(false);
+    ASSERT_FALSE(dropOut.isTrainingDropoutEnabled());
+    ASSERT_FALSE(network.isTrainingDropoutEnabled());
+
+    const json architecture = dropOut.architectureJson();
+    ASSERT_FALSE(architecture.contains("training_dropout_enabled"));
+
+    vector<Event> initDoneEvents;
+    shared_ptr<PlacedNetwork> placedNetwork = network.place(/*batchSize=*/2, initDoneEvents, /*inferenceOnly=*/false);
+    ASSERT_NE(placedNetwork, nullptr);
+    for (Event& event : initDoneEvents) {
+        event.synchronize();
+    }
+
+    ASSERT_EQ(placedNetwork->getNumTrainingDropoutControllableLayers(), 1U);
+    ASSERT_FALSE(placedNetwork->isTrainingDropoutEnabled());
+    auto physicalDropOut = dynamic_pointer_cast<ThorImplementation::DropOut>(
+        placedNetwork->getStampedNetwork(0).getPhysicalLayerFromApiLayer(dropOut.getId()));
+    ASSERT_NE(physicalDropOut, nullptr);
+    ASSERT_FALSE(physicalDropOut->isTrainingDropoutEnabled());
+
+    placedNetwork->setTrainingDropoutEnabled(true);
+    ASSERT_TRUE(placedNetwork->isTrainingDropoutEnabled());
+    ASSERT_TRUE(physicalDropOut->isTrainingDropoutEnabled());
+
+    // The API graph remains an independently configurable template for future
+    // placements; changing a placed network does not rewrite it.
+    ASSERT_FALSE(network.isTrainingDropoutEnabled());
+}

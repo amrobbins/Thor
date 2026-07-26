@@ -459,6 +459,11 @@ Important combination rules:
     attention.def("get_use_alibi_mask", &Attention::getUseAlibiMask);
     attention.def("get_attention_scale", &Attention::getAttentionScale);
     attention.def("get_dropout_probability", &Attention::getDropoutProbability);
+    attention.def("set_training_dropout_enabled",
+                  [](Attention& layer, bool enabled) { layer.setTrainingDropoutEnabled(enabled); },
+                  "enabled"_a);
+    attention.def("is_training_dropout_enabled",
+                  [](const Attention& layer) { return layer.isTrainingDropoutEnabled(); });
     attention.def("get_dropout_seed", &Attention::getDropoutSeed);
     attention.def("get_dropout_offset", &Attention::getDropoutOffset);
     attention.def("get_use_cross_attention", &Attention::getUseCrossAttention);

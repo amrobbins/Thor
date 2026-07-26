@@ -55,6 +55,14 @@ class PlacedNetwork {
      */
     void synchronize() const;
 
+    // Changes transient training execution policy without changing configured
+    // dropout rates or serialized architecture. This synchronizes all work
+    // already submitted by the placement before switching modes. Callers must
+    // prevent concurrent batch submission while this method executes.
+    void setTrainingDropoutEnabled(bool enabled);
+    [[nodiscard]] bool isTrainingDropoutEnabled() const;
+    [[nodiscard]] uint32_t getNumTrainingDropoutControllableLayers() const;
+
     /**
      * Deterministically release this placement's physical GPU graph and its
      * startup-residency lease while the PlacedNetwork object may still have

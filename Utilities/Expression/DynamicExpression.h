@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -17,6 +19,18 @@
 
 namespace ThorImplementation {
 
+using DynamicExpressionVariantId = uint32_t;
+inline constexpr DynamicExpressionVariantId kPrimaryDynamicExpressionVariant = 0;
+
+struct DynamicExpressionVariant {
+    using TensorScalarMap = std::unordered_map<std::string, TensorScalarBinding>;
+
+    std::shared_ptr<FusedEquation> equation;
+    TensorScalarMap tensor_scalar_inputs;
+    std::function<void(Stream&)> pre_forward_hook;
+    bool supports_backward = false;
+};
+
 struct DynamicExpressionBuild {
     using TensorMap = std::unordered_map<std::string, Tensor>;
     using TensorScalarMap = std::unordered_map<std::string, TensorScalarBinding>;
@@ -30,16 +44,12 @@ struct DynamicExpressionBuild {
     std::function<void(Stream&)> pre_forward_hook;
     std::shared_ptr<const ExpressionDefinition> serialized_definition = nullptr;
 
-    // Optional forward-only alternate used for validation and inference. It shares
-    // the ordinary tensor inputs, preallocated outputs, and requested output
-    // shapes, but may use a different compiled equation and runtime scalar
-    // bindings. Backward is always compiled from `equation`, never from this
-    // alternate. Attention uses this to compile SDPA with dropout for training and
-    // SDPA without dropout for validation/inference.
-    std::shared_ptr<FusedEquation> validation_equation = nullptr;
-    TensorScalarMap validation_tensor_scalar_inputs;
-    std::function<void(Stream&)> validation_pre_forward_hook;
-
+    // Optional alternate execution variants. Variants share the primary tensor
+    // inputs, preallocated outputs, and requested output shapes, but may provide a
+    // different equation, runtime scalar bindings, and pre-forward hook. Variant
+    // zero is reserved for the primary fields above.
+    std::unordered_map<DynamicExpressionVariantId, DynamicExpressionVariant> execution_variants;
+    std::optional<DynamicExpressionVariantId> evaluation_variant_id;
 };
 
 class PreparedDynamicExpression {
@@ -56,26 +66,68 @@ class PreparedDynamicExpression {
         validateTensorMap(build_.stamp_inputs, stream_, true, "stamp input");
         validateTensorScalarMap(build_.tensor_scalar_inputs, stream_, "tensor scalar input");
         validateTensorMap(build_.preallocated_outputs, stream_, false, "preallocated output");
-        validateTensorScalarMap(build_.validation_tensor_scalar_inputs, stream_, "validation tensor scalar input");
-        if (!build_.validation_equation && !build_.validation_tensor_scalar_inputs.empty()) {
-            throw std::invalid_argument(
-                "PreparedDynamicExpression validation tensor scalar inputs require a validation equation.");
+        for (const auto& [variant_id, variant] : build_.execution_variants) {
+            if (variant_id == kPrimaryDynamicExpressionVariant) {
+                throw std::invalid_argument("PreparedDynamicExpression execution variant zero is reserved for the primary equation.");
+            }
+            if (!variant.equation) {
+                throw std::invalid_argument("PreparedDynamicExpression execution variant " + std::to_string(variant_id) +
+                                            " requires a non-null equation.");
+            }
+            validateTensorScalarMap(
+                variant.tensor_scalar_inputs, stream_, "execution variant " + std::to_string(variant_id) + " tensor scalar input");
+        }
+        if (build_.evaluation_variant_id.has_value() &&
+            !build_.execution_variants.contains(build_.evaluation_variant_id.value())) {
+            throw std::invalid_argument("PreparedDynamicExpression evaluation variant " +
+                                        std::to_string(build_.evaluation_variant_id.value()) + " is not defined.");
         }
     }
 
     [[nodiscard]] StampedExecutionPlan stamp() const { return stamp({}, {}); }
 
-    [[nodiscard]] bool hasValidationForward() const { return build_.validation_equation != nullptr; }
+    [[nodiscard]] bool hasExecutionVariant(DynamicExpressionVariantId variant_id) const {
+        return variant_id == kPrimaryDynamicExpressionVariant || build_.execution_variants.contains(variant_id);
+    }
 
-    [[nodiscard]] StampedExecutionPlan stampValidation() const { return stampValidation({}, {}); }
+    [[nodiscard]] std::vector<DynamicExpressionVariantId> executionVariantIds() const {
+        std::vector<DynamicExpressionVariantId> ids;
+        ids.reserve(build_.execution_variants.size() + 1);
+        ids.push_back(kPrimaryDynamicExpressionVariant);
 
-    [[nodiscard]] StampedExecutionPlan stampValidation(
+        std::vector<DynamicExpressionVariantId> alternate_ids;
+        alternate_ids.reserve(build_.execution_variants.size());
+        for (const auto& [variant_id, _] : build_.execution_variants) {
+            alternate_ids.push_back(variant_id);
+        }
+        std::sort(alternate_ids.begin(), alternate_ids.end());
+        ids.insert(ids.end(), alternate_ids.begin(), alternate_ids.end());
+        return ids;
+    }
+
+    [[nodiscard]] std::optional<DynamicExpressionVariantId> evaluationVariantId() const {
+        return build_.evaluation_variant_id;
+    }
+
+    [[nodiscard]] bool executionVariantSupportsBackward(DynamicExpressionVariantId variant_id) const {
+        if (variant_id == kPrimaryDynamicExpressionVariant) {
+            return true;
+        }
+        return executionVariant(variant_id).supports_backward;
+    }
+
+    [[nodiscard]] StampedExecutionPlan stampExecutionVariant(DynamicExpressionVariantId variant_id) const {
+        return stampExecutionVariant(variant_id, {}, {});
+    }
+
+    [[nodiscard]] StampedExecutionPlan stampExecutionVariant(
+        DynamicExpressionVariantId variant_id,
         const TensorMap& preallocated_outputs_override,
         const ShapeMap& requested_output_shapes_override = {}) const {
-        if (!build_.validation_equation) {
-            throw std::logic_error("PreparedDynamicExpression has no validation forward equation.");
-        }
-        validateTensorMap(preallocated_outputs_override, stream_, false, "validation preallocated output override");
+        validateTensorMap(preallocated_outputs_override,
+                          stream_,
+                          false,
+                          "execution variant " + std::to_string(variant_id) + " preallocated output override");
 
         TensorMap final_preallocated_outputs = build_.preallocated_outputs;
         for (const auto& [name, tensor] : preallocated_outputs_override) {
@@ -87,11 +139,11 @@ class PreparedDynamicExpression {
             final_requested_output_shapes[name] = shape;
         }
 
-        return build_.validation_equation->stamp(build_.stamp_inputs,
-                                                 stream_,
-                                                 build_.validation_tensor_scalar_inputs,
-                                                 final_preallocated_outputs,
-                                                 final_requested_output_shapes);
+        return equationForVariant(variant_id).stamp(build_.stamp_inputs,
+                                                    stream_,
+                                                    tensorScalarInputsForVariant(variant_id),
+                                                    final_preallocated_outputs,
+                                                    final_requested_output_shapes);
     }
 
     [[nodiscard]] StampedExecutionPlan stamp(const TensorMap& preallocated_outputs_override,
@@ -191,31 +243,41 @@ class PreparedDynamicExpression {
             .stamp();
     }
 
-    [[nodiscard]] const FusedEquation& equation() const { return *build_.equation; }
+    [[nodiscard]] const FusedEquation& equation() const { return equationForVariant(kPrimaryDynamicExpressionVariant); }
+
+    [[nodiscard]] const FusedEquation& equationForVariant(DynamicExpressionVariantId variant_id) const {
+        if (variant_id == kPrimaryDynamicExpressionVariant) {
+            return *build_.equation;
+        }
+        return *executionVariant(variant_id).equation;
+    }
 
     [[nodiscard]] const TensorMap& stampInputs() const { return build_.stamp_inputs; }
 
-    [[nodiscard]] const TensorScalarMap& tensorScalarInputs() const { return build_.tensor_scalar_inputs; }
+    [[nodiscard]] const TensorScalarMap& tensorScalarInputs() const {
+        return tensorScalarInputsForVariant(kPrimaryDynamicExpressionVariant);
+    }
+
+    [[nodiscard]] const TensorScalarMap& tensorScalarInputsForVariant(DynamicExpressionVariantId variant_id) const {
+        if (variant_id == kPrimaryDynamicExpressionVariant) {
+            return build_.tensor_scalar_inputs;
+        }
+        return executionVariant(variant_id).tensor_scalar_inputs;
+    }
 
     [[nodiscard]] const TensorMap& preallocatedOutputs() const { return build_.preallocated_outputs; }
 
     [[nodiscard]] const ShapeMap& requestedOutputShapes() const { return build_.requested_output_shapes; }
 
-    [[nodiscard]] const std::function<void(Stream&)>& preForwardHook() const { return build_.pre_forward_hook; }
-
-    [[nodiscard]] const std::function<void(Stream&)>& validationPreForwardHook() const {
-        return build_.validation_pre_forward_hook;
+    [[nodiscard]] const std::function<void(Stream&)>& preForwardHook() const {
+        return preForwardHookForVariant(kPrimaryDynamicExpressionVariant);
     }
 
-    [[nodiscard]] const FusedEquation& validationEquation() const {
-        if (!build_.validation_equation) {
-            throw std::logic_error("PreparedDynamicExpression has no validation forward equation.");
+    [[nodiscard]] const std::function<void(Stream&)>& preForwardHookForVariant(DynamicExpressionVariantId variant_id) const {
+        if (variant_id == kPrimaryDynamicExpressionVariant) {
+            return build_.pre_forward_hook;
         }
-        return *build_.validation_equation;
-    }
-
-    [[nodiscard]] const TensorScalarMap& validationTensorScalarInputs() const {
-        return build_.validation_tensor_scalar_inputs;
+        return executionVariant(variant_id).pre_forward_hook;
     }
 
     [[nodiscard]] FusedEquation::ParameterFanOverrideMap getParameterFanOverrides(
@@ -225,6 +287,14 @@ class PreparedDynamicExpression {
     }
 
    private:
+    [[nodiscard]] const DynamicExpressionVariant& executionVariant(DynamicExpressionVariantId variant_id) const {
+        auto it = build_.execution_variants.find(variant_id);
+        if (it == build_.execution_variants.end()) {
+            throw std::logic_error("PreparedDynamicExpression has no execution variant " + std::to_string(variant_id) + ".");
+        }
+        return it->second;
+    }
+
     static void validateTensorMap(const TensorMap& tensors, const Stream& stream, bool require_non_empty, const std::string& what) {
         if (require_non_empty && tensors.empty()) {
             throw std::invalid_argument("PreparedDynamicExpression requires at least one " + what + ".");
@@ -565,17 +635,25 @@ class DynamicExpression {
         }
 
         const std::set<std::string> built_output_names = vectorToSet(build.equation->getOutputNames());
-        if (build.validation_equation) {
-            const std::set<std::string> validation_output_names =
-                vectorToSet(build.validation_equation->getOutputNames());
-            if (validation_output_names != built_output_names) {
-                throw std::invalid_argument(
-                    "DynamicExpression validation equation outputs {" + joinNames(validation_output_names) +
-                    "} do not match training equation outputs {" + joinNames(built_output_names) + "}.");
+        for (const auto& [variant_id, variant] : build.execution_variants) {
+            if (variant_id == kPrimaryDynamicExpressionVariant) {
+                throw std::invalid_argument("DynamicExpression execution variant zero is reserved for the primary equation.");
             }
-        } else if (!build.validation_tensor_scalar_inputs.empty() || build.validation_pre_forward_hook) {
-            throw std::invalid_argument(
-                "DynamicExpression validation bindings/hooks require a validation equation.");
+            if (!variant.equation) {
+                throw std::invalid_argument("DynamicExpression execution variant " + std::to_string(variant_id) +
+                                            " has no equation.");
+            }
+            const std::set<std::string> variant_output_names = vectorToSet(variant.equation->getOutputNames());
+            if (variant_output_names != built_output_names) {
+                throw std::invalid_argument("DynamicExpression execution variant " + std::to_string(variant_id) + " outputs {" +
+                                            joinNames(variant_output_names) + "} do not match primary equation outputs {" +
+                                            joinNames(built_output_names) + "}.");
+            }
+        }
+        if (build.evaluation_variant_id.has_value() &&
+            !build.execution_variants.contains(build.evaluation_variant_id.value())) {
+            throw std::invalid_argument("DynamicExpression evaluation variant " +
+                                        std::to_string(build.evaluation_variant_id.value()) + " is not defined.");
         }
         const std::set<std::string> requested_output_names = tensorMapKeys(requested_outputs);
         const std::set<std::string> preallocated_output_names = tensorMapKeys(build.preallocated_outputs);

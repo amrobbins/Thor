@@ -46,6 +46,8 @@ using RotaryScalingKind = ThorImplementation::RotaryScalingKind;
 using RotaryPositionEmbeddingOptions = ThorImplementation::RotaryPositionEmbeddingOptions;
 using PreparedDynamicExpression = ThorImplementation::PreparedDynamicExpression;
 using DynamicExpressionBuild = ThorImplementation::DynamicExpressionBuild;
+using DynamicExpressionVariant = ThorImplementation::DynamicExpressionVariant;
+using DynamicExpressionVariantId = ThorImplementation::DynamicExpressionVariantId;
 using CudaKernelExpression = ThorImplementation::CudaKernelExpression;
 using CudaKernelSourceInspection = ThorImplementation::CudaKernelSourceInspection;
 using CudaKernelOutOfBandKeys = ThorImplementation::CudaKernelOutOfBandKeys;
@@ -2803,6 +2805,36 @@ direct packed-QKV attention-backward outputs.
 }
 
 void bind_dynamic_expression(nb::module_& physical) {
+    auto dynamic_expression_variant = nb::class_<DynamicExpressionVariant>(physical, "DynamicExpressionVariant");
+    dynamic_expression_variant.attr("__module__") = "thor.physical";
+    dynamic_expression_variant.def(
+        "__init__",
+        [](DynamicExpressionVariant* self,
+           const std::shared_ptr<FusedEquation>& equation,
+           const DynamicTensorScalarMap& tensor_scalar_inputs,
+           bool supports_backward) {
+            new (self) DynamicExpressionVariant{
+                .equation = equation,
+                .tensor_scalar_inputs = tensor_scalar_inputs,
+                .pre_forward_hook = {},
+                .supports_backward = supports_backward,
+            };
+        },
+        "equation"_a,
+        "tensor_scalar_inputs"_a = DynamicTensorScalarMap{},
+        "supports_backward"_a = false,
+        R"nbdoc(
+Describe an alternate dynamic-expression execution variant.
+
+Variants share the primary build's tensor inputs and output bindings while
+providing their own equation and tensor-scalar runtime bindings. Set
+``supports_backward`` only when the variant's exact forward equation may be
+used for training and differentiated by ``CustomLayer``.
+)nbdoc");
+    dynamic_expression_variant.def_rw("equation", &DynamicExpressionVariant::equation);
+    dynamic_expression_variant.def_rw("tensor_scalar_inputs", &DynamicExpressionVariant::tensor_scalar_inputs);
+    dynamic_expression_variant.def_rw("supports_backward", &DynamicExpressionVariant::supports_backward);
+
     auto dynamic_expression_build = nb::class_<DynamicExpressionBuild>(physical, "DynamicExpressionBuild");
     dynamic_expression_build.attr("__module__") = "thor.physical";
 
@@ -2814,7 +2846,9 @@ void bind_dynamic_expression(nb::module_& physical) {
            const DynamicTensorScalarMap& tensor_scalar_inputs,
            const DynamicTensorMap& preallocated_outputs,
            const DynamicShapeMap& requested_output_shapes,
-           std::shared_ptr<const ExpressionDefinition> serialized_definition) {
+           std::shared_ptr<const ExpressionDefinition> serialized_definition,
+           const std::unordered_map<DynamicExpressionVariantId, DynamicExpressionVariant>& execution_variants,
+           std::optional<DynamicExpressionVariantId> evaluation_variant_id) {
             new (self) DynamicExpressionBuild{
                 .equation = equation,
                 .stamp_inputs = stamp_inputs,
@@ -2823,6 +2857,8 @@ void bind_dynamic_expression(nb::module_& physical) {
                 .requested_output_shapes = requested_output_shapes,
                 .pre_forward_hook = {},
                 .serialized_definition = std::move(serialized_definition),
+                .execution_variants = execution_variants,
+                .evaluation_variant_id = evaluation_variant_id,
             };
         },
         "equation"_a,
@@ -2831,6 +2867,8 @@ void bind_dynamic_expression(nb::module_& physical) {
         "preallocated_outputs"_a = DynamicTensorMap{},
         "requested_output_shapes"_a = DynamicShapeMap{},
         "serialized_definition"_a = nullptr,
+        "execution_variants"_a = std::unordered_map<DynamicExpressionVariantId, DynamicExpressionVariant>{},
+        "evaluation_variant_id"_a = std::nullopt,
         R"nbdoc(
 Describe a prepared dynamic-expression build result.
 
@@ -2849,6 +2887,10 @@ requested_output_shapes : dict[str, list[int]], optional
 serialized_definition : thor.physical.ExpressionDefinition, optional
     Serializable expression graph matching ``equation``. Provide this when an
     arbitrary dynamic builder should also support architecture serialization.
+execution_variants : dict[int, thor.physical.DynamicExpressionVariant], optional
+    Alternate execution variants keyed by nonzero opaque IDs.
+evaluation_variant_id : int, optional
+    Variant selected for validation and inference passes.
 )nbdoc");
 
     dynamic_expression_build.def_rw("equation", &DynamicExpressionBuild::equation);
@@ -2857,6 +2899,8 @@ serialized_definition : thor.physical.ExpressionDefinition, optional
     dynamic_expression_build.def_rw("preallocated_outputs", &DynamicExpressionBuild::preallocated_outputs);
     dynamic_expression_build.def_rw("requested_output_shapes", &DynamicExpressionBuild::requested_output_shapes);
     dynamic_expression_build.def_rw("serialized_definition", &DynamicExpressionBuild::serialized_definition);
+    dynamic_expression_build.def_rw("execution_variants", &DynamicExpressionBuild::execution_variants);
+    dynamic_expression_build.def_rw("evaluation_variant_id", &DynamicExpressionBuild::evaluation_variant_id);
 
     auto prepared_dynamic_expression = nb::class_<PreparedDynamicExpression>(physical, "PreparedDynamicExpression");
     prepared_dynamic_expression.attr("__module__") = "thor.physical";
@@ -2877,6 +2921,29 @@ preallocated outputs captured in the DynamicExpressionBuild.
 Stamp the prepared dynamic expression, overriding default preallocated outputs
 and/or requested output shapes for this stamp.
 )nbdoc");
+
+    prepared_dynamic_expression.def("has_execution_variant",
+                                    &PreparedDynamicExpression::hasExecutionVariant,
+                                    "variant_id"_a,
+                                    R"nbdoc(Return whether the requested execution variant is defined.)nbdoc");
+    prepared_dynamic_expression.def("execution_variant_ids",
+                                    &PreparedDynamicExpression::executionVariantIds,
+                                    R"nbdoc(Return the primary and alternate execution-variant IDs.)nbdoc");
+    prepared_dynamic_expression.def("evaluation_variant_id",
+                                    &PreparedDynamicExpression::evaluationVariantId,
+                                    R"nbdoc(Return the configured evaluation execution-variant ID, if any.)nbdoc");
+    prepared_dynamic_expression.def("execution_variant_supports_backward",
+                                    &PreparedDynamicExpression::executionVariantSupportsBackward,
+                                    "variant_id"_a,
+                                    R"nbdoc(Return whether the variant may be used for matching forward/backward training.)nbdoc");
+    prepared_dynamic_expression.def(
+        "stamp_execution_variant",
+        nb::overload_cast<DynamicExpressionVariantId, const DynamicTensorMap&, const DynamicShapeMap&>(
+            &PreparedDynamicExpression::stampExecutionVariant, nb::const_),
+        "variant_id"_a,
+        "preallocated_outputs_override"_a = DynamicTensorMap{},
+        "requested_output_shapes_override"_a = DynamicShapeMap{},
+        R"nbdoc(Stamp a specific primary or alternate execution variant.)nbdoc");
 
     prepared_dynamic_expression.def(
         "compile_backward",

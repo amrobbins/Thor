@@ -2,6 +2,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Layers/Layer.h"
+#include "DeepLearning/Api/Layers/TrainingDropoutControllable.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/DropOut.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
@@ -10,7 +11,7 @@
 
 namespace Thor {
 
-class DropOut : public Layer {
+class DropOut : public Layer, public TrainingDropoutControllable {
    public:
     class Builder;
     ~DropOut() override {}
@@ -36,7 +37,8 @@ class DropOut : public Layer {
         // An inference-only placement never applies dropout.  A zero-rate layer is
         // also stamped as a metadata-only identity so it can remain in the API
         // graph without allocating tensors or launching kernels.
-        return std::make_shared<ThorImplementation::DropOut>(dropProportion, !inferenceOnly);
+        return std::make_shared<ThorImplementation::DropOut>(
+            dropProportion, !inferenceOnly, isTrainingDropoutEnabled());
     }
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {

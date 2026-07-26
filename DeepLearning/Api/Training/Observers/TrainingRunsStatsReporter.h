@@ -55,12 +55,12 @@ class TrainingRunsStatsReporter : public TrainingStatsSink {
         TrainingRunResult result{};
     };
 
-    struct PhaseLossState {
+    struct SmoothedScalarState {
         uint64_t currentEpoch = 0;
-        double currentEpochLossSum = 0.0;
-        uint64_t currentEpochLossCount = 0;
-        std::optional<double> previousEpochLoss{};
-        std::optional<double> displayedLoss{};
+        double currentEpochValueSum = 0.0;
+        uint64_t currentEpochValueCount = 0;
+        std::optional<double> previousEpochValue{};
+        std::optional<double> displayedValue{};
     };
 
     struct RunState {
@@ -69,12 +69,15 @@ class TrainingRunsStatsReporter : public TrainingStatsSink {
         DisplayStatus status = DisplayStatus::NOT_STARTED;
         std::optional<TrainingStatsEvent> latestStats{};
         std::optional<TrainingStatsEvent> latestTrainingStats{};
-        std::optional<TrainingStatsEvent> latestValidationStats{};
-        std::unordered_map<std::string, TrainingStatsEvent> latestNamedValidationStats{};
         std::optional<TrainingStatsEvent> latestTestStats{};
-        PhaseLossState trainingLoss{};
-        PhaseLossState validationLoss{};
-        std::unordered_map<std::string, PhaseLossState> namedValidationLosses{};
+        SmoothedScalarState trainingLoss{};
+        SmoothedScalarState validationLoss{};
+        std::unordered_map<std::string, SmoothedScalarState> trainingMetrics{};
+        std::unordered_map<std::string, SmoothedScalarState> validationMetrics{};
+        std::unordered_map<std::string, SmoothedScalarState> namedValidationLosses{};
+        std::unordered_map<
+            std::string,
+            std::unordered_map<std::string, SmoothedScalarState>> namedValidationMetrics{};
         std::optional<TrainingRunResult> terminalResult{};
         bool validationStatsPendingEmission = false;
         bool dirty = false;
@@ -83,8 +86,15 @@ class TrainingRunsStatsReporter : public TrainingStatsSink {
     void enqueueEvent(ReporterEvent event);
     void workerLoop() noexcept;
     void processEvent(const ReporterEvent& event);
-    static void updateSmoothedLossState(PhaseLossState& lossState, const TrainingStatsSnapshot& stats);
-    static std::optional<double> displayedLossFromState(const PhaseLossState& lossState);
+    static void updateSmoothedScalarState(SmoothedScalarState& scalarState,
+                                          const TrainingStatsSnapshot& stats,
+                                          double value);
+    static void updateSmoothedLossState(SmoothedScalarState& lossState, const TrainingStatsSnapshot& stats);
+    static void updateSmoothedMetricStates(std::unordered_map<std::string, SmoothedScalarState>& metricStates,
+                                           const TrainingStatsSnapshot& stats);
+    static std::optional<double> displayedValueFromState(const SmoothedScalarState& scalarState);
+    static std::unordered_map<std::string, double> displayedMetricValues(
+        const std::unordered_map<std::string, SmoothedScalarState>& metricStates);
     RunState& stateForRun(const std::string& runName);
     void maybeEmitSummary(std::chrono::steady_clock::time_point now, bool force = false);
     void emitSummaryLocked(std::chrono::steady_clock::time_point now);

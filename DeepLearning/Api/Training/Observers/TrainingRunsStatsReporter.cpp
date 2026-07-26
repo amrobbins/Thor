@@ -282,6 +282,14 @@ std::vector<std::string> orderedMetricNames(
     return ordered;
 }
 
+void appendPhasePairedMetricColumnsFromMaps(
+    std::string& line,
+    const std::unordered_map<std::string, double>* trainingMetrics,
+    const std::unordered_map<std::string, double>* validationMetrics,
+    const std::unordered_map<std::string, double>* testMetrics,
+    bool useColor,
+    const std::vector<std::string>& reportOrder);
+
 void appendPhasePairedMetricColumns(std::string& line,
                                     const TrainingStatsSnapshot* trainingStats,
                                     const TrainingStatsSnapshot* validationStats,
@@ -294,8 +302,8 @@ std::string formatRunsStatsLineBase(const TrainingStatsSnapshot& stats,
                                     size_t runPrefixWidth,
                                     std::optional<double> trainLoss,
                                     std::optional<double> validateLoss,
-                                    const TrainingStatsSnapshot* trainingMetricStats,
-                                    const TrainingStatsSnapshot* validationMetricStats,
+                                    const std::unordered_map<std::string, double>* trainingMetrics,
+                                    const std::unordered_map<std::string, double>* validationMetrics,
                                     bool useColor,
                                     const std::vector<std::string>& reportOrder,
                                     const char* trainLossStyle,
@@ -329,8 +337,8 @@ std::string formatRunsStatsLineBase(const TrainingStatsSnapshot& stats,
         appendSummaryDimKey(line, "lr", useColor);
         appendStyledPadded(line, formatScientificString(stats.learningRate.value(), 3), 9, SummaryAnsi::learningRate, useColor);
     }
-    appendPhasePairedMetricColumns(
-        line, trainingMetricStats, validationMetricStats, nullptr, useColor, reportOrder);
+    appendPhasePairedMetricColumnsFromMaps(
+        line, trainingMetrics, validationMetrics, nullptr, useColor, reportOrder);
 
     if (stats.samplesPerSecond > 0.0) {
         appendSummaryDimKey(line, "samples/s", useColor);
@@ -387,16 +395,13 @@ void appendPhaseMetricColumn(std::string& line,
     line += styledText(buffer, looksLikeAccuracy ? FinalReportAnsi::accuracy : valueStyle, useColor);
 }
 
-void appendPhasePairedMetricColumns(std::string& line,
-                                    const TrainingStatsSnapshot* trainingStats,
-                                    const TrainingStatsSnapshot* validationStats,
-                                    const TrainingStatsSnapshot* testStats,
-                                    bool useColor,
-                                    const std::vector<std::string>& reportOrder) {
-    const auto* trainingMetrics = trainingStats == nullptr ? nullptr : &trainingStats->metrics;
-    const auto* validationMetrics = validationStats == nullptr ? nullptr : &validationStats->metrics;
-    const auto* testMetrics = testStats == nullptr ? nullptr : &testStats->metrics;
-
+void appendPhasePairedMetricColumnsFromMaps(
+    std::string& line,
+    const std::unordered_map<std::string, double>* trainingMetrics,
+    const std::unordered_map<std::string, double>* validationMetrics,
+    const std::unordered_map<std::string, double>* testMetrics,
+    bool useColor,
+    const std::vector<std::string>& reportOrder) {
     for (const std::string& name : orderedMetricNames(trainingMetrics, validationMetrics, testMetrics, reportOrder)) {
         if (trainingMetrics != nullptr) {
             const auto it = trainingMetrics->find(name);
@@ -417,6 +422,19 @@ void appendPhasePairedMetricColumns(std::string& line,
             }
         }
     }
+}
+
+void appendPhasePairedMetricColumns(std::string& line,
+                                    const TrainingStatsSnapshot* trainingStats,
+                                    const TrainingStatsSnapshot* validationStats,
+                                    const TrainingStatsSnapshot* testStats,
+                                    bool useColor,
+                                    const std::vector<std::string>& reportOrder) {
+    const auto* trainingMetrics = trainingStats == nullptr ? nullptr : &trainingStats->metrics;
+    const auto* validationMetrics = validationStats == nullptr ? nullptr : &validationStats->metrics;
+    const auto* testMetrics = testStats == nullptr ? nullptr : &testStats->metrics;
+    appendPhasePairedMetricColumnsFromMaps(
+        line, trainingMetrics, validationMetrics, testMetrics, useColor, reportOrder);
 }
 
 void appendPhaseLossColumns(std::string& line,
@@ -702,16 +720,19 @@ void TrainingRunsStatsReporter::processEvent(const ReporterEvent& event) {
                 case TrainingEventPhase::TRAIN:
                     state.latestTrainingStats = event.stats;
                     updateSmoothedLossState(state.trainingLoss, event.stats.stats);
+                    updateSmoothedMetricStates(state.trainingMetrics, event.stats.stats);
                     break;
                 case TrainingEventPhase::VALIDATE:
                     if (event.stats.stats.validationPopulation.empty() ||
                         event.stats.stats.isDefaultValidationPopulation) {
-                        state.latestValidationStats = event.stats;
                         updateSmoothedLossState(state.validationLoss, event.stats.stats);
+                        updateSmoothedMetricStates(state.validationMetrics, event.stats.stats);
                     } else {
-                        state.latestNamedValidationStats[event.stats.stats.validationPopulation] = event.stats;
                         updateSmoothedLossState(
                             state.namedValidationLosses[event.stats.stats.validationPopulation],
+                            event.stats.stats);
+                        updateSmoothedMetricStates(
+                            state.namedValidationMetrics[event.stats.stats.validationPopulation],
                             event.stats.stats);
                     }
                     state.validationStatsPendingEmission = true;
@@ -753,43 +774,76 @@ void TrainingRunsStatsReporter::processEvent(const ReporterEvent& event) {
     }
 }
 
-void TrainingRunsStatsReporter::updateSmoothedLossState(PhaseLossState& lossState, const TrainingStatsSnapshot& stats) {
-    if (!stats.loss.has_value()) {
-        return;
-    }
-
-    if (lossState.currentEpoch != stats.epoch) {
-        if (lossState.currentEpoch != 0 && lossState.currentEpochLossCount > 0) {
-            lossState.previousEpochLoss = lossState.currentEpochLossSum / static_cast<double>(lossState.currentEpochLossCount);
+void TrainingRunsStatsReporter::updateSmoothedScalarState(SmoothedScalarState& scalarState,
+                                                           const TrainingStatsSnapshot& stats,
+                                                           double value) {
+    if (scalarState.currentEpoch != stats.epoch) {
+        if (scalarState.currentEpoch != 0 && scalarState.currentEpochValueCount > 0) {
+            scalarState.previousEpochValue =
+                scalarState.currentEpochValueSum / static_cast<double>(scalarState.currentEpochValueCount);
         }
-        lossState.currentEpoch = stats.epoch;
-        lossState.currentEpochLossSum = 0.0;
-        lossState.currentEpochLossCount = 0;
+        scalarState.currentEpoch = stats.epoch;
+        scalarState.currentEpochValueSum = 0.0;
+        scalarState.currentEpochValueCount = 0;
     }
 
-    lossState.currentEpochLossSum += stats.loss.value();
-    lossState.currentEpochLossCount += 1;
+    scalarState.currentEpochValueSum += value;
+    scalarState.currentEpochValueCount += 1;
 
-    const double currentEpochLoss = lossState.currentEpochLossSum / static_cast<double>(lossState.currentEpochLossCount);
-    if (!lossState.previousEpochLoss.has_value()) {
-        // In the first observed epoch for this phase there is no previous epoch to stabilize against,
-        // so report the running average of the current epoch.
-        lossState.displayedLoss = currentEpochLoss;
+    const double currentEpochValue =
+        scalarState.currentEpochValueSum / static_cast<double>(scalarState.currentEpochValueCount);
+    if (!scalarState.previousEpochValue.has_value()) {
+        // In the first observed epoch for this scalar there is no previous epoch
+        // to stabilize against, so report the running average of the current epoch.
+        scalarState.displayedValue = currentEpochValue;
         return;
     }
 
     double progress = 1.0;
     if (stats.stepsPerEpoch > 0) {
-        const uint64_t effectiveStepInEpoch = stats.stepInEpoch > 0 ? stats.stepInEpoch : lossState.currentEpochLossCount;
-        progress = static_cast<double>(effectiveStepInEpoch) / static_cast<double>(stats.stepsPerEpoch);
+        const uint64_t effectiveStepInEpoch =
+            stats.stepInEpoch > 0 ? stats.stepInEpoch : scalarState.currentEpochValueCount;
+        progress = static_cast<double>(effectiveStepInEpoch) /
+                   static_cast<double>(stats.stepsPerEpoch);
         progress = std::clamp(progress, 0.0, 1.0);
     }
 
-    lossState.displayedLoss = (lossState.previousEpochLoss.value() + currentEpochLoss * progress) / (1.0 + progress);
+    scalarState.displayedValue =
+        (scalarState.previousEpochValue.value() + currentEpochValue * progress) /
+        (1.0 + progress);
 }
 
-std::optional<double> TrainingRunsStatsReporter::displayedLossFromState(const PhaseLossState& lossState) {
-    return lossState.displayedLoss;
+void TrainingRunsStatsReporter::updateSmoothedLossState(SmoothedScalarState& lossState,
+                                                         const TrainingStatsSnapshot& stats) {
+    if (stats.loss.has_value()) {
+        updateSmoothedScalarState(lossState, stats, stats.loss.value());
+    }
+}
+
+void TrainingRunsStatsReporter::updateSmoothedMetricStates(
+    std::unordered_map<std::string, SmoothedScalarState>& metricStates,
+    const TrainingStatsSnapshot& stats) {
+    for (const auto& [name, value] : stats.metrics) {
+        updateSmoothedScalarState(metricStates[name], stats, value);
+    }
+}
+
+std::optional<double> TrainingRunsStatsReporter::displayedValueFromState(
+    const SmoothedScalarState& scalarState) {
+    return scalarState.displayedValue;
+}
+
+std::unordered_map<std::string, double> TrainingRunsStatsReporter::displayedMetricValues(
+    const std::unordered_map<std::string, SmoothedScalarState>& metricStates) {
+    std::unordered_map<std::string, double> values;
+    values.reserve(metricStates.size());
+    for (const auto& [name, state] : metricStates) {
+        const std::optional<double> value = displayedValueFromState(state);
+        if (value.has_value()) {
+            values.emplace(name, value.value());
+        }
+    }
+    return values;
 }
 
 TrainingRunsStatsReporter::RunState& TrainingRunsStatsReporter::stateForRun(const std::string& runName) {
@@ -894,31 +948,36 @@ void TrainingRunsStatsReporter::writeRunLineLocked(const RunState& state, size_t
         // forward-only validation throughput as if it were training throughput.
         const TrainingStatsEvent& progressEvent = state.latestTrainingStats.has_value() ? state.latestTrainingStats.value()
                                                                                          : state.latestStats.value();
-        const TrainingStatsSnapshot* trainingMetricStats =
-            state.latestTrainingStats.has_value() ? &state.latestTrainingStats->stats : nullptr;
-        const TrainingStatsSnapshot* validationMetricStats =
-            state.latestValidationStats.has_value() ? &state.latestValidationStats->stats : nullptr;
+        const std::unordered_map<std::string, double> trainingMetrics =
+            displayedMetricValues(state.trainingMetrics);
+        const std::unordered_map<std::string, double> validationMetrics =
+            displayedMetricValues(state.validationMetrics);
         std::string line = formatRunsStatsLineBase(progressEvent.stats,
                                                   formatRunLabel(state.runName, state.config.ensembleGroup),
                                                   runPrefixWidth,
-                                                  displayedLossFromState(state.trainingLoss),
-                                                  displayedLossFromState(state.validationLoss),
-                                                  trainingMetricStats,
-                                                  validationMetricStats,
+                                                  displayedValueFromState(state.trainingLoss),
+                                                  displayedValueFromState(state.validationLoss),
+                                                  trainingMetrics.empty() ? nullptr : &trainingMetrics,
+                                                  validationMetrics.empty() ? nullptr : &validationMetrics,
                                                   shouldUseColorLocked(),
                                                   state.config.reportOrder,
                                                   FinalReportAnsi::trainLoss,
                                                   FinalReportAnsi::validateLoss);
-        std::vector<std::string> populationNames;
-        populationNames.reserve(state.namedValidationLosses.size());
+        std::set<std::string> populationNames;
         for (const auto& [name, lossState] : state.namedValidationLosses) {
             (void)lossState;
-            populationNames.push_back(name);
+            populationNames.insert(name);
         }
-        std::sort(populationNames.begin(), populationNames.end());
+        for (const auto& [name, metricStates] : state.namedValidationMetrics) {
+            (void)metricStates;
+            populationNames.insert(name);
+        }
         for (const std::string& population : populationNames) {
-            const std::optional<double> loss = displayedLossFromState(
-                state.namedValidationLosses.at(population));
+            const auto lossIt = state.namedValidationLosses.find(population);
+            const std::optional<double> loss =
+                lossIt == state.namedValidationLosses.end()
+                    ? std::nullopt
+                    : displayedValueFromState(lossIt->second);
             if (loss.has_value()) {
                 char buffer[192];
                 std::snprintf(buffer,
@@ -931,15 +990,16 @@ void TrainingRunsStatsReporter::writeRunLineLocked(const RunState& state, size_t
                                FinalReportAnsi::validateLoss,
                                shouldUseColorLocked());
             }
-            const auto statsIt = state.latestNamedValidationStats.find(population);
-            if (statsIt == state.latestNamedValidationStats.end()) {
+            const auto metricStatesIt = state.namedValidationMetrics.find(population);
+            if (metricStatesIt == state.namedValidationMetrics.end()) {
                 continue;
             }
-            const auto* metrics = &statsIt->second.stats.metrics;
+            const std::unordered_map<std::string, double> metrics =
+                displayedMetricValues(metricStatesIt->second);
             for (const std::string& metricName :
-                 orderedMetricNames(nullptr, metrics, nullptr, state.config.reportOrder)) {
-                const auto metricIt = metrics->find(metricName);
-                if (metricIt != metrics->end()) {
+                 orderedMetricNames(nullptr, &metrics, nullptr, state.config.reportOrder)) {
+                const auto metricIt = metrics.find(metricName);
+                if (metricIt != metrics.end()) {
                     const std::string phasePrefix = "validate_" + population;
                     appendPhaseMetricColumn(
                         line,
@@ -968,7 +1028,7 @@ void TrainingRunsStatsReporter::writeRunLineLocked(const RunState& state, size_t
 void TrainingRunsStatsReporter::appendPhaseLossColumnsLocked(std::string& line, const RunState& state) {
     const bool useColor = shouldUseColorLocked();
 
-    const std::optional<double> trainLoss = displayedLossFromState(state.trainingLoss);
+    const std::optional<double> trainLoss = displayedValueFromState(state.trainingLoss);
     if (trainLoss.has_value()) {
         char buffer[64];
         std::snprintf(buffer, sizeof(buffer), "train_loss=%.6f", trainLoss.value());
@@ -978,7 +1038,7 @@ void TrainingRunsStatsReporter::appendPhaseLossColumnsLocked(std::string& line, 
         line.append(TRAIN_LOSS_FIELD_WIDTH, ' ');
     }
 
-    const std::optional<double> validateLoss = displayedLossFromState(state.validationLoss);
+    const std::optional<double> validateLoss = displayedValueFromState(state.validationLoss);
     if (validateLoss.has_value()) {
         char buffer[64];
         std::snprintf(buffer, sizeof(buffer), "validate_loss=%.6f", validateLoss.value());

@@ -58,5 +58,10 @@ void bind_drop_out(nb::module_ &m) {
             R"nbdoc(
             Return the output tensor produced by this layer.
             )nbdoc")
-        .def("get_drop_proportion", &DropOut::getDropProportion);
+        .def("get_drop_proportion", &DropOut::getDropProportion)
+        .def("set_training_dropout_enabled",
+             [](DropOut& layer, bool enabled) { layer.setTrainingDropoutEnabled(enabled); },
+             "enabled"_a)
+        .def("is_training_dropout_enabled",
+             [](const DropOut& layer) { return layer.isTrainingDropoutEnabled(); });
 }

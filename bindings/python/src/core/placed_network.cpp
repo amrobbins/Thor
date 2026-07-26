@@ -19,6 +19,17 @@ void bind_placed_network(nb::module_ &thor) {
     placed_network.def("save", &PlacedNetwork::save, "directory"_a, "overwrite"_a = false, "save_optimizer_state"_a = false);
 
     placed_network.def("get_num_stamps", &PlacedNetwork::getNumStamps);
+    placed_network.def("set_training_dropout_enabled",
+                       &PlacedNetwork::setTrainingDropoutEnabled,
+                       "enabled"_a,
+                       R"nbdoc(
+Drain work already submitted by this placement, then enable or disable training-time dropout
+for all controllable physical layers. Configured dropout probabilities are unchanged. Callers
+must not submit batches concurrently with this operation.
+)nbdoc");
+    placed_network.def("is_training_dropout_enabled", &PlacedNetwork::isTrainingDropoutEnabled);
+    placed_network.def("get_num_training_dropout_controllable_layers",
+                       &PlacedNetwork::getNumTrainingDropoutControllableLayers);
 
     placed_network.def(
         "infer",

@@ -66,3 +66,22 @@ def test_dropout_rejects_wrong_types_and_arity():
 
     with pytest.raises(TypeError):
         thor.layers.DropOut(n, x, "0.5")
+
+
+def test_dropout_training_control_is_transient_and_network_wide():
+    n = _net()
+    x = _tensor_1d(4, thor.DataType.fp32)
+    layer = thor.layers.DropOut(n, x, 0.25)
+
+    assert layer.is_training_dropout_enabled() is True
+    assert n.get_num_training_dropout_controllable_layers() == 1
+    assert n.is_training_dropout_enabled() is True
+
+    n.set_training_dropout_enabled(False)
+    assert layer.is_training_dropout_enabled() is False
+    assert n.is_training_dropout_enabled() is False
+    assert "training_dropout_enabled" not in n.get_architecture_json()
+
+    layer.set_training_dropout_enabled(True)
+    assert layer.is_training_dropout_enabled() is True
+    assert n.is_training_dropout_enabled() is True

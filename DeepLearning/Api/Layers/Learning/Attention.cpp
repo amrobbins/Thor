@@ -1,5 +1,6 @@
 
 #include "DeepLearning/Api/Layers/Learning/Attention.h"
+#include "DeepLearning/Implementation/Layers/NeuralNetwork/Attention.h"
 #include "Utilities/TensorOperations/Ragged/RowPartitionDTypePolicy.h"
 
 #include "DeepLearning/Api/Initializers/Glorot.h"
@@ -30,6 +31,7 @@ constexpr const char* kAttentionQueryRaggedOffsetsInputName = "query_ragged_offs
 constexpr const char* kAttentionKeyValueRaggedOffsetsInputName = "key_value_ragged_offsets";
 constexpr const char* kAttentionDropoutSeedInputName = "__attention_dropout_seed";
 constexpr const char* kAttentionDropoutOffsetInputName = "__attention_dropout_offset";
+constexpr ThorImplementation::DynamicExpressionVariantId kAttentionEvaluationVariant = 1;
 
 std::string dtypeName(DataType dtype) {
     switch (dtype) {
@@ -468,6 +470,7 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
     using ThorImplementation::AttentionTensorLayout;
     using ThorImplementation::DynamicExpression;
     using ThorImplementation::DynamicExpressionBuild;
+    using ThorImplementation::DynamicExpressionVariant;
     using ThorImplementation::Expression;
     using ThorImplementation::FusedEquation;
     using ThorImplementation::Tensor;
@@ -967,11 +970,11 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
             };
 
             auto expressionOutputs = Expression::outputs({{"feature_output", buildProjectedOutput(buildSdpa(dropoutProbability > 0.0f))}});
-            std::shared_ptr<FusedEquation> validationEquation;
+            std::shared_ptr<FusedEquation> evaluationEquation;
             if (dropoutProbability > 0.0f) {
                 auto validationExpressionOutputs =
                     Expression::outputs({{"feature_output", buildProjectedOutput(buildSdpa(false))}});
-                validationEquation = std::make_shared<FusedEquation>(
+                evaluationEquation = std::make_shared<FusedEquation>(
                     FusedEquation::compile(validationExpressionOutputs.physicalOutputs(), stream.getGpuNum()));
             }
 
@@ -1006,12 +1009,12 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
             if (inferredOutputDataTypes.at("feature_output") != outputDType) {
                 throw std::runtime_error("Attention epilogue must preserve the feature output dtype.");
             }
-            if (validationEquation) {
-                const auto validationOutputShapes = validationEquation->getOutputShapes(stampInputs);
-                const auto validationOutputDataTypes = validationEquation->getOutputDataTypes(stampInputs);
-                if (validationOutputShapes.at("feature_output") != runtimeFeatureOutputDimensions ||
-                    validationOutputDataTypes.at("feature_output") != outputDType) {
-                    throw std::runtime_error("Attention validation expression must preserve the feature output descriptor.");
+            if (evaluationEquation) {
+                const auto evaluationOutputShapes = evaluationEquation->getOutputShapes(stampInputs);
+                const auto evaluationOutputDataTypes = evaluationEquation->getOutputDataTypes(stampInputs);
+                if (evaluationOutputShapes.at("feature_output") != runtimeFeatureOutputDimensions ||
+                    evaluationOutputDataTypes.at("feature_output") != outputDType) {
+                    throw std::runtime_error("Attention evaluation expression must preserve the feature output descriptor.");
                 }
             }
 
@@ -1023,7 +1026,17 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
                 {},
                 std::move(preForwardHook),
             };
-            build.validation_equation = std::move(validationEquation);
+            if (evaluationEquation) {
+                build.execution_variants.emplace(
+                    kAttentionEvaluationVariant,
+                    DynamicExpressionVariant{
+                        .equation = std::move(evaluationEquation),
+                        .tensor_scalar_inputs = {},
+                        .pre_forward_hook = {},
+                        .supports_backward = true,
+                    });
+                build.evaluation_variant_id = kAttentionEvaluationVariant;
+            }
             return build;
         });
 }
@@ -1031,6 +1044,31 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
 }  // namespace
 
 namespace Thor {
+
+std::shared_ptr<ThorImplementation::CustomLayer> Attention::createPhysicalLayer(
+    ThorImplementation::DynamicExpression expression,
+    std::vector<std::string> physicalInputNames,
+    std::vector<std::string> physicalOutputNames,
+    ThorImplementation::TensorPlacement placement,
+    const std::vector<std::shared_ptr<ThorImplementation::PhysicalParameter>>& physicalParameters,
+    bool inferenceOnly,
+    int64_t stampedId,
+    std::vector<ThorImplementation::CustomLayer::DeclaredOutputDescriptor> declaredOutputDescriptors) const {
+    const std::optional<ThorImplementation::DynamicExpressionVariantId> deterministicTrainingVariant =
+        dropoutProbability > 0.0f
+            ? std::optional<ThorImplementation::DynamicExpressionVariantId>(kAttentionEvaluationVariant)
+            : std::nullopt;
+    return std::make_shared<ThorImplementation::Attention>(std::move(expression),
+                                                            std::move(physicalInputNames),
+                                                            std::move(physicalOutputNames),
+                                                            placement,
+                                                            physicalParameters,
+                                                            inferenceOnly,
+                                                            stampedId,
+                                                            std::move(declaredOutputDescriptors),
+                                                            deterministicTrainingVariant,
+                                                            isTrainingDropoutEnabled());
+}
 
 void Attention::validateEpilogueShapePreserving(const ThorImplementation::ExpressionDefinition& definition) {
     using ThorImplementation::ExprOp;

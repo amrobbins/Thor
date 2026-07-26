@@ -80,6 +80,16 @@ class CustomLayer : public TrainableLayer {
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override;
 
+    virtual std::shared_ptr<ThorImplementation::CustomLayer> createPhysicalLayer(
+        ThorImplementation::DynamicExpression expression,
+        std::vector<std::string> physicalInputNames,
+        std::vector<std::string> physicalOutputNames,
+        ThorImplementation::TensorPlacement placement,
+        const std::vector<std::shared_ptr<ThorImplementation::PhysicalParameter>>& physicalParameters,
+        bool inferenceOnly,
+        int64_t stampedId,
+        std::vector<ThorImplementation::CustomLayer::DeclaredOutputDescriptor> declaredOutputDescriptors) const;
+
     void compile(std::shared_ptr<ThorImplementation::Layer> physicalLayer) override { physicalLayer->compile(); }
 
     std::vector<Event> initialize(std::shared_ptr<ThorImplementation::TrainableLayer> layer,

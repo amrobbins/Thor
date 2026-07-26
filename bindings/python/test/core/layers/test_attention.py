@@ -720,3 +720,28 @@ def test_attention_python_binding_without_epilogue_is_unchanged():
     arch = _only_layer_architecture(n, "attention")
     assert arch["epilogue"] is None
     assert arch["epilogue_inputs"] == []
+
+
+def test_attention_exposes_transient_training_dropout_control():
+    n = _net("test_net_attention_training_dropout_control")
+    x = _input_tensor(n, "tokens", [4, 32], thor.DataType.fp16)
+    attention = thor.layers.Attention(
+        n,
+        x,
+        2,
+        head_dim=16,
+        dropout_probability=0.25,
+        dropout_seed=1234,
+        dropout_offset=5678,
+    )
+
+    assert attention.is_training_dropout_enabled() is True
+    assert n.get_num_training_dropout_controllable_layers() == 1
+
+    attention.set_training_dropout_enabled(False)
+    assert attention.is_training_dropout_enabled() is False
+    assert n.is_training_dropout_enabled() is False
+
+    architecture = _only_layer_architecture(n, "attention")
+    assert architecture["dropout_probability"] == pytest.approx(0.25)
+    assert "training_dropout_enabled" not in architecture

@@ -397,6 +397,79 @@ TEST(TrainingRunsStatsReporter, RunningSummaryReportsTrainAndValidateMetricsInCo
     EXPECT_EQ(line.find("daily_quantile_low_loss="), std::string::npos) << line;
 }
 
+TEST(TrainingRunsStatsReporter, RunningSummarySmoothsScalarMetricsLikePhaseLosses) {
+    std::FILE* out = std::tmpfile();
+    TrainingRunsStatsReporter reporter(out, LineStatsColorMode::NEVER, 0.0);
+    reporter.configureRun(
+        "fold_0",
+        TrainingRunsStatsReporter::RunConfig{
+            0.0,
+            std::string("sku_demand_cv5"),
+            1.0,
+            {"daily_central_loss"}});
+
+    auto makeEpochStats = [](TrainingEventPhase phase,
+                             uint64_t epoch,
+                             uint64_t stepInEpoch,
+                             uint64_t stepsPerEpoch,
+                             double loss,
+                             double metric) {
+        TrainingStatsSnapshot stats = makeStats(phase, loss);
+        stats.epoch = epoch;
+        stats.stepInEpoch = stepInEpoch;
+        stats.stepsPerEpoch = stepsPerEpoch;
+        stats.metrics["daily_central_loss"] = metric;
+        return stats;
+    };
+
+    TrainingStatsSnapshot trainEpoch1Batch1 =
+        makeEpochStats(TrainingEventPhase::TRAIN, 1, 1, 2, 10.0, 100.0);
+    TrainingStatsSnapshot trainEpoch1Batch2 =
+        makeEpochStats(TrainingEventPhase::TRAIN, 1, 2, 2, 14.0, 140.0);
+    TrainingStatsSnapshot validateEpoch1 =
+        makeEpochStats(TrainingEventPhase::VALIDATE, 1, 1, 1, 20.0, 200.0);
+    TrainingStatsSnapshot namedValidateEpoch1 =
+        makeEpochStats(TrainingEventPhase::VALIDATE, 1, 1, 1, 30.0, 300.0);
+    namedValidateEpoch1.validationPopulation = "seen_sku";
+
+    TrainingStatsSnapshot trainEpoch2Batch1 =
+        makeEpochStats(TrainingEventPhase::TRAIN, 2, 1, 2, 100.0, 1000.0);
+    TrainingStatsSnapshot validateEpoch2 =
+        makeEpochStats(TrainingEventPhase::VALIDATE, 2, 1, 1, 80.0, 800.0);
+    TrainingStatsSnapshot namedValidateEpoch2 =
+        makeEpochStats(TrainingEventPhase::VALIDATE, 2, 1, 1, 90.0, 900.0);
+    namedValidateEpoch2.validationPopulation = "seen_sku";
+
+    reporter.markRunStarting("fold_0");
+    for (const TrainingStatsSnapshot* stats : {&trainEpoch1Batch1,
+                                               &trainEpoch1Batch2,
+                                               &validateEpoch1,
+                                               &namedValidateEpoch1,
+                                               &trainEpoch2Batch1,
+                                               &validateEpoch2,
+                                               &namedValidateEpoch2}) {
+        reporter.onStatsEvent(
+            TrainingStatsEvent::fromTrainingEvent(
+                TrainingEvent::statsUpdated(*stats), "fold_0"));
+    }
+    reporter.close();
+
+    const std::string output = readAndCloseFile(out);
+    // The overall loss and named metric use the exact same smoothing rule:
+    // previous epoch mean blended with the current epoch running mean according
+    // to current-epoch progress. These values intentionally differ sharply from
+    // the latest batch values (100/1000, 80/800, and 90/900).
+    EXPECT_TRUE(hasLineWithAll(output,
+                               {"INFO runs[fold_0|sku_demand_cv5]:",
+                                "train_loss=41.333333",
+                                "validate_loss=50.000000",
+                                "train_daily_central_loss=413.333333",
+                                "validate_daily_central_loss=500.000000",
+                                "validate_seen_sku_loss=60.000000",
+                                "validate_seen_sku_daily_central_loss=600.000000"}))
+        << output;
+}
+
 TEST(TrainingRunsStatsReporter, FinalReportKeepsTrainAndValidateMetricsPairedByConfiguredOrder) {
     std::FILE* out = std::tmpfile();
     TrainingRunsStatsReporter reporter(out, LineStatsColorMode::NEVER, 0.0);

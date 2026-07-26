@@ -174,6 +174,18 @@ pending marker and overwritten with the final save-time keys when save() runs.
     network.def("get_default_optimizer", &Network::getDefaultOptimizer);
     network.def("freeze_training", &Network::freezeTraining);
     network.def("unfreeze_training", &Network::unfreezeTraining);
+    network.def("set_training_dropout_enabled",
+                &Network::setTrainingDropoutEnabled,
+                "enabled"_a,
+                R"nbdoc(
+Set transient training-time dropout policy for every controllable layer in this API network.
+
+This does not change configured dropout probabilities and is not serialized. Validation and
+inference remain deterministic. The setting is copied into subsequently placed physical layers.
+)nbdoc");
+    network.def("is_training_dropout_enabled", &Network::isTrainingDropoutEnabled);
+    network.def("get_num_training_dropout_controllable_layers",
+                &Network::getNumTrainingDropoutControllableLayers);
     network.def("get_trainable_parameter_references", &Network::getTrainableParameterReferences, "training_enabled_only"_a = true);
 
     network.def(

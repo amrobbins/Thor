@@ -979,7 +979,11 @@ struct ResidualAttentionTrainingResult {
     vector<float> upstreamGradient;
 };
 
-ResidualAttentionTrainingResult runResidualAttentionTrainingCase(const string& networkName, bool fused, bool crossAttention) {
+ResidualAttentionTrainingResult runResidualAttentionTrainingCase(const string& networkName,
+                                                                 bool fused,
+                                                                 bool crossAttention,
+                                                                 float dropoutProbability = 0.0f,
+                                                                 bool trainingDropoutEnabled = true) {
     auto require = [](bool condition, const string& message) {
         if (!condition) {
             throw runtime_error(message);
@@ -1057,6 +1061,9 @@ ResidualAttentionTrainingResult runResidualAttentionTrainingCase(const string& n
     if (crossAttention) {
         builder.contextInput(contextRivet->getFeatureOutput().value());
     }
+    if (dropoutProbability > 0.0f) {
+        builder.dropout(dropoutProbability, 1234, 5678);
+    }
     if (fused) {
         Impl::Expression attentionOutput = Api::Attention::epilogueInput(DataType::FP32, dataType);
         Impl::Expression residualInput = Api::Attention::epilogueAuxInput("residual", DataType::FP32, dataType);
@@ -1094,6 +1101,11 @@ ResidualAttentionTrainingResult runResidualAttentionTrainingCase(const string& n
     vector<Event> initDoneEvents;
     shared_ptr<Api::PlacedNetwork> placedNetwork = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/false);
     synchronizeEvents(initDoneEvents);
+    placedNetwork->setTrainingDropoutEnabled(trainingDropoutEnabled);
+    require(placedNetwork->getNumTrainingDropoutControllableLayers() == 1,
+            "Residual attention test expected one training-dropout-controllable physical layer.");
+    require(placedNetwork->isTrainingDropoutEnabled() == trainingDropoutEnabled,
+            "Residual attention test observed the wrong placed training-dropout policy.");
     Impl::StampedNetwork& stampedNetwork = placedNetwork->getStampedNetwork(0);
     auto physicalQuery = dynamic_pointer_cast<Impl::NetworkInput>(stampedNetwork.getPhysicalLayerFromApiLayer(query.getId()));
     auto physicalContext = crossAttention
@@ -1568,6 +1580,29 @@ TEST(AttentionApi, ResidualEpilogueForwardBackwardMatchesUnfusedSelfAttention) {
 
 TEST(AttentionApi, ResidualEpilogueForwardBackwardMatchesUnfusedCrossAttention) {
     expectResidualAttentionTrainingMatchesUnfused(true);
+}
+
+TEST(AttentionApi, DisabledTrainingDropoutUsesDeterministicForwardAndMatchingBackwardVariant) {
+    const ResidualAttentionTrainingResult noDropout =
+        runResidualAttentionTrainingCase("attention_api_training_dropout_disabled_control",
+                                         /*fused=*/true,
+                                         /*crossAttention=*/false,
+                                         /*dropoutProbability=*/0.0f,
+                                         /*trainingDropoutEnabled=*/true);
+    const ResidualAttentionTrainingResult configuredButDisabled =
+        runResidualAttentionTrainingCase("attention_api_training_dropout_configured_but_disabled",
+                                         /*fused=*/true,
+                                         /*crossAttention=*/false,
+                                         /*dropoutProbability=*/0.5f,
+                                         /*trainingDropoutEnabled=*/false);
+
+    expectAllClose(configuredButDisabled.output, noDropout.output, 1.8e-1f, 1.8e-1f);
+    expectAllClose(configuredButDisabled.queryGradient, noDropout.queryGradient, 1.8e-1f, 1.8e-1f);
+    ASSERT_EQ(configuredButDisabled.parametersAfter.size(), noDropout.parametersAfter.size());
+    for (const auto& [parameterName, configuredValues] : configuredButDisabled.parametersAfter) {
+        ASSERT_TRUE(noDropout.parametersAfter.contains(parameterName));
+        expectAllClose(configuredValues, noDropout.parametersAfter.at(parameterName), 1.8e-1f, 1.8e-1f);
+    }
 }
 
 TEST(AttentionApi, BuildsComposedGqaAttentionWithExplicitDimsBiasAndRope) {

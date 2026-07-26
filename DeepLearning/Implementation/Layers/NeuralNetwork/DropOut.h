@@ -4,6 +4,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
+#include "DeepLearning/Implementation/Layers/TrainingDropoutControllable.h"
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/DropOutKernel.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
@@ -20,31 +21,42 @@ namespace ThorImplementation {
  * support both training and inference modes
  */
 
-class DropOut : public Layer {
+class DropOut : public Layer, public TrainingDropoutControllable {
    public:
     ~DropOut() override {}
 
     void setTrainingMode(bool training) { this->training = training; }
 
+    void setTrainingDropoutEnabled(bool enabled) override { trainingDropoutEnabled = enabled; }
+    [[nodiscard]] bool isTrainingDropoutEnabled() const override { return trainingDropoutEnabled; }
+
     void forward(std::optional<Tensor> featureInput, bool validationPass, uint32_t batchSize = 0) override {
-        // Dropout is active only for gradient-training passes.  Validation and
-        // inference must observe the deterministic, unmasked network.
+        // Dropout is active only for gradient-training passes. Validation and
+        // inference must observe the deterministic, unmasked network. Capture
+        // the exact decision for the matching backward pass so a later control
+        // change cannot pair an identity forward with a masked backward.
         const bool previousApplyDropout = applyDropoutThisForward;
-        applyDropoutThisForward = training && !validationPass && probabilityOfDroppingOut > 0.0f;
+        const bool applyDropout =
+            training && trainingDropoutEnabled && !validationPass && probabilityOfDroppingOut > 0.0f;
+        applyDropoutThisForward = applyDropout;
         try {
             Layer::forward(featureInput, validationPass, batchSize);
         } catch (...) {
             applyDropoutThisForward = previousApplyDropout;
             throw;
         }
+        if (training && !validationPass) {
+            applyDropoutForBackward = applyDropout;
+        }
         applyDropoutThisForward = previousApplyDropout;
     }
 
-    DropOut(float probabilityOfDroppingOut, bool training) {
+    DropOut(float probabilityOfDroppingOut, bool training, bool trainingDropoutEnabled = true) {
         THOR_THROW_IF_FALSE(probabilityOfDroppingOut >= 0.0f);
         THOR_THROW_IF_FALSE(probabilityOfDroppingOut <= 1.0f);
         this->probabilityOfDroppingOut = probabilityOfDroppingOut;
         this->training = training;
+        this->trainingDropoutEnabled = trainingDropoutEnabled;
         std::random_device rd;
         randomSeed = Tensor::Tensor::getThreadIdHash64(rd());
     }
@@ -187,13 +199,25 @@ class DropOut : public Layer {
     }
 
     void backProp(std::optional<Tensor> dataIn, std::optional<Tensor> errorIn, std::optional<Tensor> errorOut, Stream stream) override {
-        if (!errorOut.has_value())
+        if (!errorOut.has_value()) {
+            applyDropoutForBackward = false;
             return;
+        }
         THOR_THROW_IF_FALSE(errorIn.has_value());
         THOR_THROW_IF_FALSE(training);
 
         if (probabilityOfDroppingOut == 0.0f) {
             THOR_THROW_IF_FALSE(errorOut.value() == errorIn.value());
+            applyDropoutForBackward = false;
+            return;
+        }
+
+        const bool applyDropout = applyDropoutForBackward;
+        applyDropoutForBackward = false;
+        if (!applyDropout) {
+            if (errorOut.value() != errorIn.value()) {
+                errorOut.value().copyFromAsync(errorIn.value(), stream);
+            }
             return;
         }
 
@@ -236,7 +260,9 @@ class DropOut : public Layer {
 
     float probabilityOfDroppingOut;
     bool training;
+    bool trainingDropoutEnabled = true;
     bool applyDropoutThisForward = false;
+    bool applyDropoutForBackward = false;
 
     static std::mutex mtx;
     uint64_t randomSeed = 0;

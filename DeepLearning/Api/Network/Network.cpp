@@ -1,4 +1,5 @@
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Layers/TrainingDropoutControllable.h"
 #include "Utilities/Expression/CudaKernelSecurity.h"
 #include <optional>
 #include <algorithm>
@@ -2824,6 +2825,37 @@ std::vector<BoundParameter> Network::resolveParameterReferences(PlacedNetwork* p
         result.push_back(resolveParameterReference(placedNetwork, parameterReference));
     }
     return result;
+}
+
+void Network::setTrainingDropoutEnabled(bool enabled) {
+    for (const std::shared_ptr<Layer>& layer : allLayersInNetworkList) {
+        std::shared_ptr<TrainingDropoutControllable> controllable =
+            std::dynamic_pointer_cast<TrainingDropoutControllable>(layer);
+        if (controllable != nullptr) {
+            controllable->setTrainingDropoutEnabled(enabled);
+        }
+    }
+}
+
+bool Network::isTrainingDropoutEnabled() const {
+    for (const std::shared_ptr<Layer>& layer : allLayersInNetworkList) {
+        std::shared_ptr<TrainingDropoutControllable> controllable =
+            std::dynamic_pointer_cast<TrainingDropoutControllable>(layer);
+        if (controllable != nullptr && !controllable->isTrainingDropoutEnabled()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+uint32_t Network::getNumTrainingDropoutControllableLayers() const {
+    uint32_t count = 0;
+    for (const std::shared_ptr<Layer>& layer : allLayersInNetworkList) {
+        if (std::dynamic_pointer_cast<TrainingDropoutControllable>(layer) != nullptr) {
+            ++count;
+        }
+    }
+    return count;
 }
 
 void Network::freezeTraining() {

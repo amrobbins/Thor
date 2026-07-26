@@ -877,17 +877,35 @@ std::shared_ptr<ThorImplementation::Layer> CustomLayer::stamp(ThorImplementation
             ThorImplementation::CustomLayer::DeclaredOutputDescriptor{outputTensor.getDataType(), outputTensor.getDimensions()});
     }
 
-    auto physicalLayer = std::make_shared<ThorImplementation::CustomLayer>(
-        expr,
-        inputNames,
-        outputNames,
-        placement,
-        physicalParameters,
-        inferenceOnly,
-        Layer::getId(),
-        std::move(declaredOutputDescriptors));
+    auto physicalLayer = createPhysicalLayer(expr,
+                                             inputNames,
+                                             outputNames,
+                                             placement,
+                                             physicalParameters,
+                                             inferenceOnly,
+                                             Layer::getId(),
+                                             std::move(declaredOutputDescriptors));
     physicalLayer->setLayerName(getLayerType());
     return physicalLayer;
+}
+
+std::shared_ptr<ThorImplementation::CustomLayer> CustomLayer::createPhysicalLayer(
+    ThorImplementation::DynamicExpression expression,
+    std::vector<std::string> physicalInputNames,
+    std::vector<std::string> physicalOutputNames,
+    ThorImplementation::TensorPlacement placement,
+    const std::vector<std::shared_ptr<ThorImplementation::PhysicalParameter>>& physicalParameters,
+    bool inferenceOnly,
+    int64_t stampedId,
+    std::vector<ThorImplementation::CustomLayer::DeclaredOutputDescriptor> declaredOutputDescriptors) const {
+    return std::make_shared<ThorImplementation::CustomLayer>(std::move(expression),
+                                                              std::move(physicalInputNames),
+                                                              std::move(physicalOutputNames),
+                                                              placement,
+                                                              physicalParameters,
+                                                              inferenceOnly,
+                                                              stampedId,
+                                                              std::move(declaredOutputDescriptors));
 }
 
 json CustomLayer::architectureJson() const {

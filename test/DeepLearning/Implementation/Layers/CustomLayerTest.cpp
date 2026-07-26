@@ -160,7 +160,6 @@ std::vector<float> applySgdReferenceUpdate(std::vector<float> weights,
     return weights;
 }
 
-
 struct AdamDenseReferenceState {
     std::vector<float> weights;
     std::vector<float> m;
@@ -168,9 +167,7 @@ struct AdamDenseReferenceState {
     float t = 0.0f;
 };
 
-std::vector<float> featureWiseScaleGradient(const std::vector<float>& input,
-                                            const std::vector<float>& outputGradient,
-                                            uint64_t features) {
+std::vector<float> featureWiseScaleGradient(const std::vector<float>& input, const std::vector<float>& outputGradient, uint64_t features) {
     requireSameSize(input, outputGradient, "featureWiseScaleGradient flat input/gradient");
     std::vector<float> gradient(features, 0.0f);
     for (uint64_t i = 0; i < input.size(); ++i) {
@@ -290,9 +287,7 @@ class FixedVectorParameter : public PhysicalParameter {
         Tensor init_h(cpuPlacement, TensorDescriptor(primary.getDataType(), {static_cast<unsigned long>(initialValues.size())}));
         writeCpuTensor(init_h, initialValues);
 
-        Stream initStream = gradientUpdateStream.has_value()
-                                ? gradientUpdateStream.value()
-                                : Stream(primary.getPlacement());
+        Stream initStream = gradientUpdateStream.has_value() ? gradientUpdateStream.value() : Stream(primary.getPlacement());
         storage.value().copyFromAsync(init_h, initStream);
         Event ready = initStream.putEvent();
         ready.synchronize();
@@ -300,6 +295,13 @@ class FixedVectorParameter : public PhysicalParameter {
 
    private:
     std::vector<float> initialValues;
+};
+
+class VariantSelectableCustomLayer : public CustomLayer {
+   public:
+    using CustomLayer::CustomLayer;
+
+    void selectTrainingVariant(DynamicExpressionVariantId variantId) { setActiveTrainingExecutionVariant(variantId); }
 };
 
 DynamicExpression buildSingleInputSingleOutputExpression(const TensorPlacement& placement) {
@@ -318,7 +320,7 @@ DynamicExpression buildSingleInputSingleOutputExpression(const TensorPlacement& 
     });
 }
 
-DynamicExpression buildValidationAlternateExpression(const TensorPlacement& placement) {
+DynamicExpression buildEvaluationVariantExpression(const TensorPlacement& placement) {
     return DynamicExpression([placement](const DynamicExpression::TensorMap& inputs,
                                          const DynamicExpression::TensorMap& outputs,
                                          Stream& stream) -> DynamicExpressionBuild {
@@ -332,8 +334,43 @@ DynamicExpression buildValidationAlternateExpression(const TensorPlacement& plac
             {},
             outputs,
             {}};
-        build.validation_equation =
-            std::make_shared<FusedEquation>(FusedEquation::compile(validationOutputs.physicalOutputs(), placement.getDeviceNum()));
+        constexpr DynamicExpressionVariantId evaluationVariant = 1;
+        build.execution_variants.emplace(evaluationVariant,
+                                         DynamicExpressionVariant{
+                                             .equation = std::make_shared<FusedEquation>(
+                                                 FusedEquation::compile(validationOutputs.physicalOutputs(), placement.getDeviceNum())),
+                                             .tensor_scalar_inputs = {},
+                                             .pre_forward_hook = {},
+                                             .supports_backward = false,
+                                         });
+        build.evaluation_variant_id = evaluationVariant;
+        return build;
+    });
+}
+
+DynamicExpression buildBackwardCapableVariantExpression(const TensorPlacement& placement) {
+    return DynamicExpression([placement](const DynamicExpression::TensorMap& inputs,
+                                         const DynamicExpression::TensorMap& outputs,
+                                         Stream& stream) -> DynamicExpressionBuild {
+        (void)stream;
+        auto x = Expression::input("feature_input");
+        auto primaryOutputs = Expression::outputs({{"feature_output", x * 2.0f}});
+        auto alternateOutputs = Expression::outputs({{"feature_output", x * x}});
+        DynamicExpressionBuild build{
+            std::make_shared<FusedEquation>(FusedEquation::compile(primaryOutputs.physicalOutputs(), placement.getDeviceNum())),
+            inputs,
+            {},
+            outputs,
+            {}};
+        constexpr DynamicExpressionVariantId alternateVariant = 7;
+        build.execution_variants.emplace(alternateVariant,
+                                         DynamicExpressionVariant{
+                                             .equation = std::make_shared<FusedEquation>(
+                                                 FusedEquation::compile(alternateOutputs.physicalOutputs(), placement.getDeviceNum())),
+                                             .tensor_scalar_inputs = {},
+                                             .pre_forward_hook = {},
+                                             .supports_backward = true,
+                                         });
         return build;
     });
 }
@@ -444,6 +481,34 @@ DynamicExpression buildSingleInputScaleExpression(const TensorPlacement& placeme
     });
 }
 
+DynamicExpression buildSingleInputScaleVariantExpression(const TensorPlacement& placement) {
+    return DynamicExpression([placement](const DynamicExpression::TensorMap& inputs,
+                                         const DynamicExpression::TensorMap& outputs,
+                                         Stream& stream) -> DynamicExpressionBuild {
+        (void)stream;
+        auto x = Expression::input("x");
+        auto scale = Expression::input("scale");
+        auto primaryOutputs = Expression::outputs({{"out", x * scale}});
+        auto alternateOutputs = Expression::outputs({{"out", x * scale * scale}});
+        DynamicExpressionBuild build{
+            std::make_shared<FusedEquation>(FusedEquation::compile(primaryOutputs.physicalOutputs(), placement.getDeviceNum())),
+            inputs,
+            {},
+            outputs,
+            {}};
+        constexpr DynamicExpressionVariantId alternateVariant = 7;
+        build.execution_variants.emplace(alternateVariant,
+                                         DynamicExpressionVariant{
+                                             .equation = std::make_shared<FusedEquation>(
+                                                 FusedEquation::compile(alternateOutputs.physicalOutputs(), placement.getDeviceNum())),
+                                             .tensor_scalar_inputs = {},
+                                             .pre_forward_hook = {},
+                                             .supports_backward = true,
+                                         });
+        return build;
+    });
+}
+
 DynamicExpression buildSquaredErrorLossExpression(const TensorPlacement& placement) {
     return DynamicExpression([placement](const DynamicExpression::TensorMap& inputs,
                                          const DynamicExpression::TensorMap& outputs,
@@ -548,8 +613,7 @@ TEST(CustomLayer, SingleInputSingleOutputForwardCompatibility) {
     cleanupLayers({&input, &custom, &sink});
 }
 
-
-TEST(CustomLayer, ValidationForwardUsesAlternateExpression) {
+TEST(CustomLayer, ValidationForwardUsesEvaluationVariant) {
     const uint64_t batchSize = 2;
     const uint64_t features = 3;
 
@@ -558,7 +622,7 @@ TEST(CustomLayer, ValidationForwardUsesAlternateExpression) {
     writeCpuTensor(featureIn_h, {1.0f, 2.0f, 3.0f, -4.0f, 0.5f, 7.0f});
 
     NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
-    CustomLayer custom(buildValidationAlternateExpression(gpuPlacement), gpuPlacement, {}, false);
+    CustomLayer custom(buildEvaluationVariantExpression(gpuPlacement), gpuPlacement, {}, false);
     CountingPassthrough sink;
 
     input.connectToNextLayer(&custom);
@@ -579,7 +643,7 @@ TEST(CustomLayer, ValidationForwardUsesAlternateExpression) {
     cleanupLayers({&input, &custom, &sink});
 }
 
-TEST(CustomLayer, InferenceOnlyUsesValidationAlternateExpression) {
+TEST(CustomLayer, InferenceOnlyUsesEvaluationVariant) {
     const uint64_t batchSize = 1;
     const uint64_t features = 2;
 
@@ -588,7 +652,7 @@ TEST(CustomLayer, InferenceOnlyUsesValidationAlternateExpression) {
     writeCpuTensor(featureIn_h, {2.0f, -3.0f});
 
     NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
-    CustomLayer custom(buildValidationAlternateExpression(gpuPlacement), gpuPlacement, {}, true);
+    CustomLayer custom(buildEvaluationVariantExpression(gpuPlacement), gpuPlacement, {}, true);
     CountingPassthrough sink;
 
     input.connectToNextLayer(&custom);
@@ -601,6 +665,140 @@ TEST(CustomLayer, InferenceOnlyUsesValidationAlternateExpression) {
     expectAllClose(readCpuTensor(result_h), {12.0f, 7.0f});
 
     cleanupLayers({&input, &custom, &sink});
+}
+
+TEST(CustomLayer, BackwardCapableExecutionVariantUsesMatchingForwardAndBackwardPlans) {
+    const uint64_t batchSize = 1;
+    const uint64_t features = 2;
+    constexpr DynamicExpressionVariantId alternateVariant = 7;
+
+    TensorDescriptor descriptor(DataType::FP32, {batchSize, features});
+    Tensor featureIn_h(cpuPlacement, descriptor);
+    writeCpuTensor(featureIn_h, {2.0f, -3.0f});
+
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    GradientRivet gradientRivet;
+    CountingPassthrough bridge;
+    VariantSelectableCustomLayer custom(buildBackwardCapableVariantExpression(gpuPlacement), gpuPlacement, {}, false);
+    CountingPassthrough sink;
+
+    input.connectToNextLayer(&gradientRivet);
+    gradientRivet.connectToNextLayer(&bridge);
+    bridge.connectToNextLayer(&custom);
+    custom.connectToNextLayer(&sink);
+    compileAndInitialize({&input, &gradientRivet, &bridge, &custom, &sink});
+
+    custom.selectTrainingVariant(alternateVariant);
+    input.forward(featureIn_h, false, batchSize);
+
+    ASSERT_TRUE(sink.getFeatureInput().has_value());
+    Tensor alternateResult_h = copyTensorToCpu(sink.getFeatureInput().value(), custom.getStreams()[0]);
+    expectAllClose(readCpuTensor(alternateResult_h), {4.0f, 9.0f});
+
+    EXPECT_THROW(custom.selectTrainingVariant(kPrimaryDynamicExpressionVariant), std::runtime_error)
+        << "An execution variant may not change after forward until the pass has drained.";
+
+    Tensor gradOut_h(cpuPlacement, descriptor);
+    writeCpuTensor(gradOut_h, {1.0f, 2.0f});
+    sink.getErrorOutput().value().copyFromAsync(gradOut_h, custom.getStreams()[0]);
+    custom.getStreams()[0].synchronize();
+
+    sink.backward(sink.getErrorOutput(), batchSize);
+    ASSERT_EQ(bridge.backwardCalls, 1);
+    ASSERT_TRUE(custom.getErrorOutputs()[0].has_value());
+    Tensor alternateInputGradient_h = copyTensorToCpu(custom.getErrorOutputs()[0].value(), custom.getStreams()[0]);
+    expectAllClose(readCpuTensor(alternateInputGradient_h), {4.0f, -12.0f});
+
+    custom.selectTrainingVariant(kPrimaryDynamicExpressionVariant);
+    input.forward(featureIn_h, false, batchSize);
+
+    ASSERT_TRUE(sink.getFeatureInput().has_value());
+    Tensor primaryResult_h = copyTensorToCpu(sink.getFeatureInput().value(), custom.getStreams()[0]);
+    expectAllClose(readCpuTensor(primaryResult_h), {4.0f, -6.0f});
+
+    writeCpuTensor(gradOut_h, {1.0f, 2.0f});
+    sink.getErrorOutput().value().copyFromAsync(gradOut_h, custom.getStreams()[0]);
+    custom.getStreams()[0].synchronize();
+
+    sink.backward(sink.getErrorOutput(), batchSize);
+    ASSERT_EQ(bridge.backwardCalls, 2);
+    Tensor primaryInputGradient_h = copyTensorToCpu(custom.getErrorOutputs()[0].value(), custom.getStreams()[0]);
+    expectAllClose(readCpuTensor(primaryInputGradient_h), {2.0f, 4.0f});
+
+    cleanupLayers({&input, &gradientRivet, &bridge, &custom, &sink});
+}
+
+TEST(CustomLayer, ForwardOnlyExecutionVariantCannotBeSelectedForTraining) {
+    const uint64_t batchSize = 1;
+    const uint64_t features = 2;
+    constexpr DynamicExpressionVariantId evaluationVariant = 1;
+
+    TensorDescriptor descriptor(DataType::FP32, {batchSize, features});
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    VariantSelectableCustomLayer custom(buildEvaluationVariantExpression(gpuPlacement), gpuPlacement, {}, false);
+    CountingPassthrough sink;
+
+    input.connectToNextLayer(&custom);
+    custom.connectToNextLayer(&sink);
+    compileAndInitialize({&input, &custom, &sink});
+
+    EXPECT_THROW(custom.selectTrainingVariant(evaluationVariant), std::runtime_error);
+
+    cleanupLayers({&input, &custom, &sink});
+}
+
+TEST(CustomLayer, BackwardCapableExecutionVariantUsesMatchingFusedOptimizerPlan) {
+    const uint64_t batchSize = 2;
+    const uint64_t features = 2;
+    constexpr DynamicExpressionVariantId alternateVariant = 7;
+    constexpr float learningRate = 0.25f;
+
+    TensorDescriptor descriptor(DataType::FP32, {batchSize, features});
+    Tensor featureIn_h(cpuPlacement, descriptor);
+    const std::vector<float> featureIn{1.0f, 2.0f, 3.0f, 4.0f};
+    writeCpuTensor(featureIn_h, featureIn);
+
+    const std::vector<float> initialScale{2.0f, 3.0f};
+    auto scale = std::make_shared<FixedVectorParameter>("scale", initialScale, true);
+    scale->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(9905, learningRate, 0.0f, 0.0f, false)));
+
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    GradientRivet gradientRivet;
+    CountingPassthrough bridge;
+    VariantSelectableCustomLayer custom(buildSingleInputScaleVariantExpression(gpuPlacement), {"x"}, {"out"}, gpuPlacement, {scale}, false);
+    CountingPassthrough sink;
+
+    input.connectToNextLayer(&gradientRivet);
+    gradientRivet.connectToNextLayer(&bridge);
+    bridge.connectToNextLayer(&custom);
+    custom.connectToNextLayer(&sink);
+    compileAndInitialize({&input, &gradientRivet, &bridge, &custom, &sink});
+
+    custom.selectTrainingVariant(alternateVariant);
+    input.forward(featureIn_h, false, batchSize);
+
+    ASSERT_TRUE(sink.getFeatureInput().has_value());
+    Tensor result_h = copyTensorToCpu(sink.getFeatureInput().value(), custom.getStreams()[0]);
+    expectAllClose(readCpuTensor(result_h), {4.0f, 18.0f, 12.0f, 36.0f});
+
+    Tensor gradOut_h(cpuPlacement, descriptor);
+    const std::vector<float> outputGradient{1.0f, 1.0f, 1.0f, 1.0f};
+    writeCpuTensor(gradOut_h, outputGradient);
+    sink.getErrorOutput().value().copyFromAsync(gradOut_h, custom.getStreams()[0]);
+    custom.getStreams()[0].synchronize();
+
+    sink.backward(sink.getErrorOutput(), batchSize);
+
+    Tensor inputGradient_h = copyTensorToCpu(custom.getErrorOutputs()[0].value(), custom.getStreams()[0]);
+    expectAllClose(readCpuTensor(inputGradient_h), {4.0f, 9.0f, 4.0f, 9.0f});
+
+    ASSERT_TRUE(custom.getGradientUpdateStream().has_value());
+    Stream stream = custom.getGradientUpdateStream().value();
+    Tensor scaleWeights_h = copyTensorToCpu(scale->getStorage().value(), stream);
+    const std::vector<float> expectedScaleGradient{16.0f, 36.0f};
+    expectAllClose(readCpuTensor(scaleWeights_h), applySgdReferenceUpdate(initialScale, expectedScaleGradient, learningRate, batchSize));
+
+    cleanupLayers({&input, &gradientRivet, &bridge, &custom, &sink});
 }
 
 TEST(SliceImplementation, TerminalAliasMaterializesDenseForwardOutputAndScattersBackwardGradient) {
@@ -618,14 +816,8 @@ TEST(SliceImplementation, TerminalAliasMaterializesDenseForwardOutputAndScatters
     NetworkInput input(gpuPlacement, DataType::FP32, inputDescriptor.getDimensions());
     GradientRivet gradientRivet;
     CountingPassthrough bridge;
-    CustomLayer custom(buildTailSliceExpression(gpuPlacement),
-                       {"x"},
-                       {"y"},
-                       gpuPlacement,
-                       {},
-                       false,
-                       7001,
-                       {{DataType::FP32, {3, channels}}});
+    CustomLayer custom(
+        buildTailSliceExpression(gpuPlacement), {"x"}, {"y"}, gpuPlacement, {}, false, 7001, {{DataType::FP32, {3, channels}}});
     CountingPassthrough sink;
 
     input.connectToNextLayer(&gradientRivet);
@@ -722,15 +914,13 @@ TEST(CustomLayer, SingleInputTrainableParameterFusesGradientIntoSgdUpdate) {
     Tensor xGrad_h = copyTensorToCpu(custom.getErrorOutputs()[0].value(), custom.getStreams()[0]);
     Tensor scaleWeights_h = copyTensorToCpu(scale->getStorage().value(), gradientUpdateStream);
 
-    const std::vector<float> expectedScaleGrad = featureWiseScaleGradient({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f},
-                                                                         {1.0f, 0.0f, -1.0f, 2.0f, 1.0f, 0.5f},
-                                                                         features);
+    const std::vector<float> expectedScaleGrad =
+        featureWiseScaleGradient({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {1.0f, 0.0f, -1.0f, 2.0f, 1.0f, 0.5f}, features);
     expectAllClose(readCpuTensor(xGrad_h), {2.0f, 0.0f, -4.0f, 4.0f, 3.0f, 2.0f});
     expectAllClose(readCpuTensor(scaleWeights_h), applySgdReferenceUpdate(initialScale, expectedScaleGrad, learningRate, batchSize));
 
     cleanupLayers({&input, &gradientRivet, &bridge, &custom, &sink});
 }
-
 
 TEST(CustomLayer, SingleInputTrainableParameterFusesGradientIntoAdamUpdateAcrossPasses) {
     const uint64_t batchSize = 2;
@@ -985,10 +1175,9 @@ TEST(CustomLayer, CustomLossGradientFusionFeedsFusedSgdOptimizerUpdateNumericall
     cleanupLayers({&input, &labelsInput, &gradientRivet, &bridge, &custom, &loss, &lossSink});
 }
 
-void expectFusedSgdOptimizerAppliesConstraintInsideFusedUpdateNumerically(
-    std::shared_ptr<ParameterConstraint> constraint,
-    const std::vector<float>& labelValues,
-    const std::function<float(float)>& projectValue) {
+void expectFusedSgdOptimizerAppliesConstraintInsideFusedUpdateNumerically(std::shared_ptr<ParameterConstraint> constraint,
+                                                                          const std::vector<float>& labelValues,
+                                                                          const std::function<float(float)>& projectValue) {
     const uint64_t batchSize = 2;
     const uint64_t features = 3;
     const float learningRate = 1.0f;
@@ -1079,10 +1268,9 @@ TEST(CustomLayer, FusedSgdOptimizerAppliesNonNegativeConstraintInsideFusedUpdate
 }
 
 TEST(CustomLayer, FusedSgdOptimizerAppliesNonPositiveConstraintInsideFusedUpdateNumerically) {
-    expectFusedSgdOptimizerAppliesConstraintInsideFusedUpdateNumerically(
-        std::make_shared<NonPositiveParameterConstraint>(),
-        std::vector<float>({10.0f, 10.0f, 10.0f, 10.0f, 10.0f, 10.0f}),
-        [](float value) { return std::min(value, 0.0f); });
+    expectFusedSgdOptimizerAppliesConstraintInsideFusedUpdateNumerically(std::make_shared<NonPositiveParameterConstraint>(),
+                                                                         std::vector<float>({10.0f, 10.0f, 10.0f, 10.0f, 10.0f, 10.0f}),
+                                                                         [](float value) { return std::min(value, 0.0f); });
 }
 
 TEST(CustomLayer, FusedSgdOptimizerAppliesMinConstraintInsideFusedUpdateNumerically) {
@@ -1093,10 +1281,9 @@ TEST(CustomLayer, FusedSgdOptimizerAppliesMinConstraintInsideFusedUpdateNumerica
 }
 
 TEST(CustomLayer, FusedSgdOptimizerAppliesMaxConstraintInsideFusedUpdateNumerically) {
-    expectFusedSgdOptimizerAppliesConstraintInsideFusedUpdateNumerically(
-        std::make_shared<MaxParameterConstraint>(0.75),
-        std::vector<float>({10.0f, 10.0f, 10.0f, 10.0f, 10.0f, 10.0f}),
-        [](float value) { return std::min(value, 0.75f); });
+    expectFusedSgdOptimizerAppliesConstraintInsideFusedUpdateNumerically(std::make_shared<MaxParameterConstraint>(0.75),
+                                                                         std::vector<float>({10.0f, 10.0f, 10.0f, 10.0f, 10.0f, 10.0f}),
+                                                                         [](float value) { return std::min(value, 0.75f); });
 }
 
 TEST(CustomLayer, FusedSgdOptimizerAppliesMinMaxConstraintInsideFusedUpdateNumerically) {
@@ -1355,10 +1542,8 @@ TEST(CustomLayer, MultipleApplicationsDoNotUseSingleApplicationOptimizerFusion) 
     // Combined raw dScale = {2*0.5 + (-1)*1.5, 3*(-2) + 4*0.25} = {-0.5, -5.0}.
     const std::vector<float> expectedScaleGrad{-0.5f, -5.0f};
     expectAllClose(readCpuTensor(scaleGrad_h), expectedScaleGrad, 3e-5f, 3e-5f);
-    expectAllClose(readCpuTensor(scaleWeights_h),
-                   applySgdReferenceUpdate(initialScale, expectedScaleGrad, learningRate, 2 * batchSize),
-                   3e-5f,
-                   3e-5f);
+    expectAllClose(
+        readCpuTensor(scaleWeights_h), applySgdReferenceUpdate(initialScale, expectedScaleGrad, learningRate, 2 * batchSize), 3e-5f, 3e-5f);
 
     cleanupLayers({&inputA, &inputB, &gradientRivetA, &gradientRivetB, &bridgeA, &bridgeB, &custom, &sinkA, &sinkB});
 }
@@ -1459,16 +1644,8 @@ TEST(CustomLayer, MultiInputInferenceOnlyForwardCycleResetsStateWithoutBackward)
         expectAllClose(readCpuTensor(diff_h), expectedDiff);
     };
 
-    runPass(lhsPass1_h,
-            rhsPass1_h,
-            {11.0f, 22.0f, 33.0f, 5.0f, 7.0f, 9.0f},
-            {-9.0f, -18.0f, -27.0f, 3.0f, 3.0f, 3.0f},
-            1);
-    runPass(lhsPass2_h,
-            rhsPass2_h,
-            {4.0f, 2.0f, 0.0f, 6.0f, 5.0f, 4.0f},
-            {-6.0f, -6.0f, -6.0f, 10.0f, 13.0f, 16.0f},
-            2);
+    runPass(lhsPass1_h, rhsPass1_h, {11.0f, 22.0f, 33.0f, 5.0f, 7.0f, 9.0f}, {-9.0f, -18.0f, -27.0f, 3.0f, 3.0f, 3.0f}, 1);
+    runPass(lhsPass2_h, rhsPass2_h, {4.0f, 2.0f, 0.0f, 6.0f, 5.0f, 4.0f}, {-6.0f, -6.0f, -6.0f, 10.0f, 13.0f, 16.0f}, 2);
 
     cleanupLayers({&lhsIn, &rhsIn, &lhsBridge, &rhsBridge, &custom, &sumSink, &diffSink});
 }

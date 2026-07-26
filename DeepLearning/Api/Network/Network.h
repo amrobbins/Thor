@@ -177,6 +177,11 @@ class Network {
     std::vector<Tensor> getRawLossTensorsForTrainingRoots(const std::vector<Tensor>& lossRoots) const;
     void freezeTraining();
     void unfreezeTraining();
+    // Set transient training-time dropout policy on the logical API graph.
+    // The policy is used by future placements and is not serialized.
+    void setTrainingDropoutEnabled(bool enabled);
+    [[nodiscard]] bool isTrainingDropoutEnabled() const;
+    [[nodiscard]] uint32_t getNumTrainingDropoutControllableLayers() const;
     [[nodiscard]] std::vector<std::string> getInferenceNetworkInputNames();
     [[nodiscard]] std::vector<std::string> getInferenceNetworkInputNamesForOutputs(const std::vector<std::string>& outputNames);
     [[nodiscard]] std::vector<std::string> getTrainingOnlyNetworkInputNames();

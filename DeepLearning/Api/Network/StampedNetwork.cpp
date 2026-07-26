@@ -2,6 +2,7 @@
 #include "DeepLearning/Api/Network/StampedNetwork.h"
 #include "DeepLearning/Implementation/Layers/TrainableLayer.h"
 #include "DeepLearning/Implementation/Layers/Loss.h"
+#include "DeepLearning/Implementation/Layers/TrainingDropoutControllable.h"
 #include "DeepLearning/Implementation/Diagnostics/TrainingDiagnostics.h"
 
 #include <exception>
@@ -78,6 +79,40 @@ void StampedNetwork::setActiveTrainingLossRoots(const std::vector<Thor::Tensor>&
             physicalLoss->pruneTrainingBackpropPathIfInactive();
         }
     }
+}
+
+void StampedNetwork::setTrainingDropoutEnabled(bool enabled) {
+    for (const auto& [apiLayerId, physicalLayer] : apiLayerToPhysicalLayerShared) {
+        (void)apiLayerId;
+        std::shared_ptr<TrainingDropoutControllable> controllable =
+            std::dynamic_pointer_cast<TrainingDropoutControllable>(physicalLayer);
+        if (controllable != nullptr) {
+            controllable->setTrainingDropoutEnabled(enabled);
+        }
+    }
+}
+
+bool StampedNetwork::isTrainingDropoutEnabled() const {
+    for (const auto& [apiLayerId, physicalLayer] : apiLayerToPhysicalLayerShared) {
+        (void)apiLayerId;
+        std::shared_ptr<TrainingDropoutControllable> controllable =
+            std::dynamic_pointer_cast<TrainingDropoutControllable>(physicalLayer);
+        if (controllable != nullptr && !controllable->isTrainingDropoutEnabled()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+uint32_t StampedNetwork::getNumTrainingDropoutControllableLayers() const {
+    uint32_t count = 0;
+    for (const auto& [apiLayerId, physicalLayer] : apiLayerToPhysicalLayerShared) {
+        (void)apiLayerId;
+        if (std::dynamic_pointer_cast<TrainingDropoutControllable>(physicalLayer) != nullptr) {
+            ++count;
+        }
+    }
+    return count;
 }
 
 std::vector<uint64_t> StampedNetwork::getActiveTrainingRawLossOriginalIdsForDebug() const {

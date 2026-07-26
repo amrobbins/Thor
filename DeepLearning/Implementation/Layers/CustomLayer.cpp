@@ -468,6 +468,7 @@ void CustomLayer::clearForwardArrivalBookkeeping(uint32_t applicationIndex) {
     app.allForwardInputTensorIds.clear();
     app.stillWaitingForForwardInputTensorIds.clear();
     app.forwardRanThisPass = false;
+    app.forwardVariantThisPass.reset();
 
     for (uint32_t inputPort = 0; inputPort < inputNames.size(); ++inputPort) {
         const uint32_t flat = inputFlatIndex(applicationIndex, inputPort);
@@ -531,24 +532,104 @@ bool CustomLayer::applicationHasAnyDownstreamBackprop(uint32_t applicationIndex)
     return false;
 }
 
+CustomLayer::StampedExecutionVariant& CustomLayer::stampedVariant(uint32_t applicationIndex,
+                                                                  DynamicExpressionVariantId variantId) {
+    if (applicationIndex >= applications.size()) {
+        throw runtime_error("CustomLayer execution variant requested for an invalid application index.");
+    }
+    auto it = applications[applicationIndex].stampedVariants.find(variantId);
+    if (it == applications[applicationIndex].stampedVariants.end()) {
+        throw runtime_error("CustomLayer application " + std::to_string(applicationIndex) +
+                            " has no stamped execution variant " + std::to_string(variantId) + ".");
+    }
+    return it->second;
+}
+
+const CustomLayer::StampedExecutionVariant& CustomLayer::stampedVariant(uint32_t applicationIndex,
+                                                                        DynamicExpressionVariantId variantId) const {
+    if (applicationIndex >= applications.size()) {
+        throw runtime_error("CustomLayer execution variant requested for an invalid application index.");
+    }
+    auto it = applications[applicationIndex].stampedVariants.find(variantId);
+    if (it == applications[applicationIndex].stampedVariants.end()) {
+        throw runtime_error("CustomLayer application " + std::to_string(applicationIndex) +
+                            " has no stamped execution variant " + std::to_string(variantId) + ".");
+    }
+    return it->second;
+}
+
+CustomLayer::StampedExecutionVariant& CustomLayer::backwardVariantForApplication(uint32_t applicationIndex) {
+    ApplicationState& app = applications.at(applicationIndex);
+    if (!app.forwardVariantThisPass.has_value()) {
+        throw runtime_error("CustomLayer backward requires a forward execution variant for the current pass.");
+    }
+    StampedExecutionVariant& variant = stampedVariant(applicationIndex, app.forwardVariantThisPass.value());
+    if (!variant.supportsBackward) {
+        throw runtime_error("CustomLayer execution variant " + std::to_string(app.forwardVariantThisPass.value()) +
+                            " does not support backward execution.");
+    }
+    return variant;
+}
+
+const CustomLayer::StampedExecutionVariant& CustomLayer::backwardVariantForApplication(uint32_t applicationIndex) const {
+    const ApplicationState& app = applications.at(applicationIndex);
+    if (!app.forwardVariantThisPass.has_value()) {
+        throw runtime_error("CustomLayer backward requires a forward execution variant for the current pass.");
+    }
+    const StampedExecutionVariant& variant = stampedVariant(applicationIndex, app.forwardVariantThisPass.value());
+    if (!variant.supportsBackward) {
+        throw runtime_error("CustomLayer execution variant " + std::to_string(app.forwardVariantThisPass.value()) +
+                            " does not support backward execution.");
+    }
+    return variant;
+}
+
+void CustomLayer::setActiveTrainingExecutionVariant(DynamicExpressionVariantId variantId) {
+    if (isCompiled() && !isStartOfForward) {
+        // Forward-only validation/inference clears each application's recorded
+        // variant without running backward. Permit a stage-boundary switch in
+        // that drained state, but reject any training forward that still owns a
+        // matching backward pass.
+        const bool trainingForwardAwaitingBackward =
+            std::any_of(applications.begin(), applications.end(), [](const ApplicationState& app) {
+                return app.forwardVariantThisPass.has_value();
+            });
+        if (trainingForwardAwaitingBackward) {
+            throw runtime_error("CustomLayer training execution variant may only change between drained execution passes.");
+        }
+    }
+
+    if (isCompiled()) {
+        for (uint32_t applicationIndex = 0; applicationIndex < applications.size(); ++applicationIndex) {
+            const StampedExecutionVariant& variant = stampedVariant(applicationIndex, variantId);
+            if (!variant.supportsBackward) {
+                throw runtime_error("CustomLayer execution variant " + std::to_string(variantId) +
+                                    " does not support training backward execution.");
+            }
+        }
+    }
+
+    activeTrainingVariantId = variantId;
+}
+
 void CustomLayer::recordEffectiveParameterBatchSizeForApplication(uint32_t applicationIndex, uint32_t batchSize) {
     if (applicationIndex >= applications.size()) {
         return;
     }
 
-    const ApplicationState& app = applications[applicationIndex];
+    const StampedExecutionVariant& variant = backwardVariantForApplication(applicationIndex);
     if (trainingUpdateDiagnosticsEnabled()) {
         std::fprintf(stderr,
                      "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u record_effective_batch batch=%u active_parameters=%s fused_parameters=%s before=%s\n",
                      diagnosticLabel().c_str(),
                      applicationIndex,
                      batchSize,
-                     joinNames(app.activeParameterTargetNames).c_str(),
-                     joinNames(app.optimizerUpdateFusedParameterNames).c_str(),
+                     joinNames(variant.activeParameterTargetNames).c_str(),
+                     joinNames(variant.optimizerUpdateFusedParameterNames).c_str(),
                      joinNames(effectiveBatchSizeByParameterName).c_str());
     }
-    for (const std::string& parameterName : app.activeParameterTargetNames) {
-        if (app.optimizerUpdateFusedParameterNames.contains(parameterName)) {
+    for (const std::string& parameterName : variant.activeParameterTargetNames) {
+        if (variant.optimizerUpdateFusedParameterNames.contains(parameterName)) {
             continue;
         }
         effectiveBatchSizeByParameterName[parameterName] += batchSize;
@@ -643,6 +724,7 @@ bool CustomLayer::unregisterFusedCustomLossGradient(const Tensor& predictions) {
 }
 
 PhysicalOutputs CustomLayer::buildBackwardOutputsForApplication(uint32_t applicationIndex,
+                                                                DynamicExpressionVariantId variantId,
                                                                 const std::vector<std::string>& wrtNames,
                                                                 bool accumulateGradOutputs) {
     ApplicationState& app = applications[applicationIndex];
@@ -673,7 +755,7 @@ PhysicalOutputs CustomLayer::buildBackwardOutputsForApplication(uint32_t applica
     }
 
     if (app.fusedCustomLossGradientsByOutput.empty()) {
-        return buildBackwardOutputs(app.forwardPrepared->equation().physicalOutputs(),
+        return buildBackwardOutputs(app.forwardPrepared->equationForVariant(variantId).physicalOutputs(),
                                     wrtNames,
                                     app.upstreamInputNamesByOutput,
                                     upstreamInputDTypesByOutput,
@@ -681,7 +763,7 @@ PhysicalOutputs CustomLayer::buildBackwardOutputsForApplication(uint32_t applica
                                     accumulateGradOutputs);
     }
 
-    const PhysicalOutputs& forwardOutputs = app.forwardPrepared->equation().physicalOutputs();
+    const PhysicalOutputs& forwardOutputs = app.forwardPrepared->equationForVariant(variantId).physicalOutputs();
     if (!forwardOutputs.expr) {
         throw runtime_error("CustomLayer fused CustomLoss backward requires non-null forward expression.");
     }
@@ -933,6 +1015,7 @@ PhysicalOutputs CustomLayer::buildBackwardOutputsForApplication(uint32_t applica
 
 std::shared_ptr<StampedExecutionPlan> CustomLayer::stampBackwardForApplication(
     uint32_t applicationIndex,
+    DynamicExpressionVariantId variantId,
     const std::vector<std::string>& wrtNames,
     bool accumulateGradOutputs,
     const PreparedDynamicExpression::TensorMap& preallocatedGradOutputs,
@@ -942,7 +1025,7 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::stampBackwardForApplication(
         return nullptr;
     }
 
-    PhysicalOutputs backwardOutputs = buildBackwardOutputsForApplication(applicationIndex, wrtNames, accumulateGradOutputs);
+    PhysicalOutputs backwardOutputs = buildBackwardOutputsForApplication(applicationIndex, variantId, wrtNames, accumulateGradOutputs);
     FusedEquation backwardEquation = FusedEquation::compile(backwardOutputs, placement.getDeviceNum());
 
     PreparedDynamicExpression::TensorMap stampInputs = app.forwardInputsByName;
@@ -961,11 +1044,13 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::stampBackwardForApplication(
     }
 
     return std::make_shared<StampedExecutionPlan>(
-        backwardEquation.stamp(stampInputs, runStream, app.forwardPrepared->tensorScalarInputs(), preallocatedGradOutputs));
+        backwardEquation.stamp(
+            stampInputs, runStream, app.forwardPrepared->tensorScalarInputsForVariant(variantId), preallocatedGradOutputs));
 }
 
 std::shared_ptr<StampedExecutionPlan> CustomLayer::buildFusedOptimizerUpdatePlan(
     uint32_t applicationIndex,
+    DynamicExpressionVariantId variantId,
     const std::vector<std::string>& fusedParameterTargets,
     const std::unordered_map<std::string, Tensor>& optimizerUpdateInputs) {
     if (fusedParameterTargets.empty()) {
@@ -976,10 +1061,12 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::buildFusedOptimizerUpdatePlan
     }
 
     ApplicationState& app = applications[applicationIndex];
-    app.fusedOptimizerRuntimeScalarBindings.clear();
-    app.fusedOptimizerRuntimeScalars.clear();
+    StampedExecutionVariant& variant = stampedVariant(applicationIndex, variantId);
+    variant.fusedOptimizerRuntimeScalarBindings.clear();
+    variant.fusedOptimizerRuntimeScalars.clear();
 
-    PhysicalOutputs backwardOutputs = buildBackwardOutputsForApplication(applicationIndex, fusedParameterTargets, false);
+    PhysicalOutputs backwardOutputs =
+        buildBackwardOutputsForApplication(applicationIndex, variantId, fusedParameterTargets, false);
 
     std::unordered_map<std::string, Expression> gradientsByParameter;
     for (const NamedOutput& output : backwardOutputs.outputs) {
@@ -1025,7 +1112,7 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::buildFusedOptimizerUpdatePlan
         }
 
         const std::string prefix = optimizerFusionNamePrefix(parameterName);
-        app.fusedOptimizerRuntimeScalarBindings.push_back({parameterName, optimizer, prefix});
+        variant.fusedOptimizerRuntimeScalarBindings.push_back({parameterName, optimizer, prefix});
 
         // Do not call denseUpdateRuntimeScalars(...) while building/stamping the fused
         // optimizer update. Several optimizers, including Adam-family optimizers,
@@ -1072,8 +1159,8 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::buildFusedOptimizerUpdatePlan
         fusedUpdateEquation.stamp(filteredStampInputs, gradientUpdateStream.value(), {}, preallocatedOutputs));
 }
 
-const std::unordered_map<std::string, float>& CustomLayer::updateFusedOptimizerRuntimeScalars(uint32_t applicationIndex,
-                                                                                              uint32_t batchSize) {
+const std::unordered_map<std::string, float>& CustomLayer::updateFusedOptimizerRuntimeScalars(
+    uint32_t applicationIndex, DynamicExpressionVariantId variantId, uint32_t batchSize) {
     if (batchSize == 0) {
         throw runtime_error("CustomLayer fused optimizer update requires a non-zero batch size.");
     }
@@ -1081,22 +1168,22 @@ const std::unordered_map<std::string, float>& CustomLayer::updateFusedOptimizerR
         throw runtime_error("CustomLayer fused optimizer update requested for an invalid application index.");
     }
 
-    ApplicationState& app = applications[applicationIndex];
-    for (const FusedOptimizerRuntimeScalarBinding& binding : app.fusedOptimizerRuntimeScalarBindings) {
+    StampedExecutionVariant& variant = stampedVariant(applicationIndex, variantId);
+    for (const FusedOptimizerRuntimeScalarBinding& binding : variant.fusedOptimizerRuntimeScalarBindings) {
         if (binding.optimizer == nullptr) {
             throw runtime_error("CustomLayer fused optimizer update lost optimizer for parameter '" + binding.parameterName + "'.");
         }
 
         auto scalars = binding.optimizer->denseUpdateRuntimeScalars(batchSize, binding.namePrefix);
-        app.fusedOptimizerRuntimeScalars.reserve(app.fusedOptimizerRuntimeScalars.size() + scalars.size());
+        variant.fusedOptimizerRuntimeScalars.reserve(variant.fusedOptimizerRuntimeScalars.size() + scalars.size());
         for (const auto& [name, value] : scalars) {
-            auto [it, inserted] = app.fusedOptimizerRuntimeScalars.emplace(name, value);
+            auto [it, inserted] = variant.fusedOptimizerRuntimeScalars.emplace(name, value);
             if (!inserted) {
                 it->second = value;
             }
         }
     }
-    return app.fusedOptimizerRuntimeScalars;
+    return variant.fusedOptimizerRuntimeScalars;
 }
 
 void CustomLayer::initialize() {
@@ -1471,53 +1558,33 @@ void CustomLayer::compileImpl() {
 
         app.forwardPrepared = std::make_shared<PreparedDynamicExpression>(
             layerDefinitionExpression.prepare(app.forwardInputsByName, app.forwardOutputsByName, computeStream(applicationIndex)));
-        app.forwardPreRunHook = app.forwardPrepared->preForwardHook();
-        app.validationForwardPreRunHook = app.forwardPrepared->validationPreForwardHook();
         validatePreparedExpressionInputs(*app.forwardPrepared);
 
-        const auto inferredOutputShapes = app.forwardPrepared->equation().getOutputShapes(
-            app.forwardPrepared->stampInputs(), app.forwardPrepared->tensorScalarInputs());
-        const auto inferredOutputDataTypes = app.forwardPrepared->equation().getOutputDataTypes(
-            app.forwardPrepared->stampInputs(), app.forwardPrepared->tensorScalarInputs());
-        std::unordered_map<std::string, std::vector<uint64_t>> validationOutputShapes;
-        std::unordered_map<std::string, DataType> validationOutputDataTypes;
-        if (app.forwardPrepared->hasValidationForward()) {
-            validationOutputShapes = app.forwardPrepared->validationEquation().getOutputShapes(
-                app.forwardPrepared->stampInputs(), app.forwardPrepared->validationTensorScalarInputs());
-            validationOutputDataTypes = app.forwardPrepared->validationEquation().getOutputDataTypes(
-                app.forwardPrepared->stampInputs(), app.forwardPrepared->validationTensorScalarInputs());
-        }
-        for (const std::string& outputName : outputNames) {
-            const auto actualOutputIt = app.forwardOutputsByName.find(outputName);
-            const auto shapeIt = inferredOutputShapes.find(outputName);
-            const auto dataTypeIt = inferredOutputDataTypes.find(outputName);
-            if (actualOutputIt == app.forwardOutputsByName.end() || shapeIt == inferredOutputShapes.end() ||
-                dataTypeIt == inferredOutputDataTypes.end()) {
-                throw runtime_error("CustomLayer failed to validate the declared physical output for port '" + outputName + "'.");
-            }
-
-            const TensorDescriptor inferredDescriptor(dataTypeIt->second, shapeIt->second);
-            const TensorDescriptor& declaredDescriptor = actualOutputIt->second.getDescriptor();
-            if (inferredDescriptor != declaredDescriptor) {
-                throw runtime_error("CustomLayer expression output descriptor does not match the API-declared output for port '" +
-                                    outputName + "' in application " + std::to_string(applicationIndex) + ". Expression inferred " +
-                                    inferredDescriptor.toString() + ", but the runtime output tensor is " +
-                                    declaredDescriptor.toString() +
-                                    ". Python CustomLayer build(context) implementations must derive batch-dependent shapes from the "
-                                    "placement-time context rather than retaining the batch-1 tensor used for API shape inference.");
-            }
-            if (app.forwardPrepared->hasValidationForward()) {
-                const auto validationShapeIt = validationOutputShapes.find(outputName);
-                const auto validationDataTypeIt = validationOutputDataTypes.find(outputName);
-                if (validationShapeIt == validationOutputShapes.end() || validationDataTypeIt == validationOutputDataTypes.end()) {
-                    throw runtime_error("CustomLayer validation expression did not produce declared output port '" + outputName + "'.");
+        for (DynamicExpressionVariantId variantId : app.forwardPrepared->executionVariantIds()) {
+            const auto inferredOutputShapes = app.forwardPrepared->equationForVariant(variantId).getOutputShapes(
+                app.forwardPrepared->stampInputs(), app.forwardPrepared->tensorScalarInputsForVariant(variantId));
+            const auto inferredOutputDataTypes = app.forwardPrepared->equationForVariant(variantId).getOutputDataTypes(
+                app.forwardPrepared->stampInputs(), app.forwardPrepared->tensorScalarInputsForVariant(variantId));
+            for (const std::string& outputName : outputNames) {
+                const auto actualOutputIt = app.forwardOutputsByName.find(outputName);
+                const auto shapeIt = inferredOutputShapes.find(outputName);
+                const auto dataTypeIt = inferredOutputDataTypes.find(outputName);
+                if (actualOutputIt == app.forwardOutputsByName.end() || shapeIt == inferredOutputShapes.end() ||
+                    dataTypeIt == inferredOutputDataTypes.end()) {
+                    throw runtime_error("CustomLayer execution variant " + std::to_string(variantId) +
+                                        " failed to validate the declared physical output for port '" + outputName + "'.");
                 }
-                const TensorDescriptor validationDescriptor(validationDataTypeIt->second, validationShapeIt->second);
-                if (validationDescriptor != declaredDescriptor) {
-                    throw runtime_error("CustomLayer validation expression output descriptor does not match the API-declared output for port '" +
-                                        outputName + "' in application " + std::to_string(applicationIndex) + ". Validation expression inferred " +
-                                        validationDescriptor.toString() + ", but the runtime output tensor is " +
-                                        declaredDescriptor.toString() + ".");
+
+                const TensorDescriptor inferredDescriptor(dataTypeIt->second, shapeIt->second);
+                const TensorDescriptor& declaredDescriptor = actualOutputIt->second.getDescriptor();
+                if (inferredDescriptor != declaredDescriptor) {
+                    throw runtime_error("CustomLayer execution variant " + std::to_string(variantId) +
+                                        " output descriptor does not match the API-declared output for port '" + outputName +
+                                        "' in application " + std::to_string(applicationIndex) + ". Variant inferred " +
+                                        inferredDescriptor.toString() + ", but the runtime output tensor is " +
+                                        declaredDescriptor.toString() +
+                                        ". Python CustomLayer build(context) implementations must derive batch-dependent shapes from the "
+                                        "placement-time context rather than retaining the batch-1 tensor used for API shape inference.");
                 }
             }
         }
@@ -1539,29 +1606,30 @@ void CustomLayer::compileImpl() {
             compiledParameterInitializers = true;
         }
 
-        app.forwardStamped = std::make_shared<StampedExecutionPlan>(app.forwardPrepared->stamp(app.forwardOutputsByName));
-        validateStampedOutputNames(*app.forwardStamped, outputNames, "forward");
-        app.validationForwardStamped = nullptr;
-        if (app.forwardPrepared->hasValidationForward()) {
-            app.validationForwardStamped =
-                std::make_shared<StampedExecutionPlan>(app.forwardPrepared->stampValidation(app.forwardOutputsByName));
-            validateStampedOutputNames(*app.validationForwardStamped, outputNames, "validation forward");
+        app.stampedVariants.clear();
+        app.evaluationVariantId = app.forwardPrepared->evaluationVariantId();
+        app.forwardVariantThisPass.reset();
+        for (DynamicExpressionVariantId variantId : app.forwardPrepared->executionVariantIds()) {
+            StampedExecutionVariant variant;
+            variant.forward = std::make_shared<StampedExecutionPlan>(
+                app.forwardPrepared->stampExecutionVariant(variantId, app.forwardOutputsByName));
+            variant.preForwardHook = app.forwardPrepared->preForwardHookForVariant(variantId);
+            variant.supportsBackward = app.forwardPrepared->executionVariantSupportsBackward(variantId);
+            validateStampedOutputNames(*variant.forward, outputNames, "forward execution variant");
+            app.stampedVariants.emplace(variantId, std::move(variant));
+        }
+        const StampedExecutionVariant& activeTrainingVariant = stampedVariant(applicationIndex, activeTrainingVariantId);
+        if (!activeTrainingVariant.supportsBackward && !isInferenceOnly()) {
+            throw runtime_error("CustomLayer active training execution variant " +
+                                std::to_string(activeTrainingVariantId) + " does not support backward execution.");
         }
 
-        app.backwardErrorStamped = nullptr;
-        app.backwardWeightsClearStamped = nullptr;
-        app.backwardWeightsAccumulateStamped = nullptr;
-        app.backwardWeightsFusedOptimizerUpdateStamped = nullptr;
-        app.optimizerUpdateFusedParameterNames.clear();
-        app.fusedOptimizerRuntimeScalarBindings.clear();
-        app.fusedOptimizerRuntimeScalars.clear();
         app.backwardAdditionalInputsByName.clear();
         app.backwardInputGradOutputsByName.clear();
         app.expectedBackwardErrorInputTensorIds.clear();
         app.upstreamInputNamesByOutput.clear();
         app.fusedCustomLossGradientsByOutput.clear();
         app.upstreamOutputNames.clear();
-        app.activeParameterTargetNames.clear();
         app.backwardGradientPatternCompiled = false;
 
         if (isInferenceOnly() || isBackPropStub()) {
@@ -1571,11 +1639,6 @@ void CustomLayer::compileImpl() {
 
         if (!applicationHasAnyDownstreamBackprop(applicationIndex)) {
             pruneUpstreamErrorOutputsForApplication(applicationIndex);
-            app.backwardErrorStamped = nullptr;
-            app.backwardWeightsClearStamped = nullptr;
-            app.backwardWeightsAccumulateStamped = nullptr;
-            app.backwardWeightsFusedOptimizerUpdateStamped = nullptr;
-            app.optimizerUpdateFusedParameterNames.clear();
             app.backwardAdditionalInputsByName.clear();
             app.backwardInputGradOutputsByName.clear();
             app.backwardGradientPatternCompiled = true;
@@ -1621,14 +1684,6 @@ void CustomLayer::compileImpl() {
         }
         app.backwardInputGradOutputsByName = buildBackwardInputGradOutputs(applicationIndex);
 
-        if (!inputTargets.empty() && !app.backwardAdditionalInputsByName.empty()) {
-            app.backwardErrorStamped = stampBackwardForApplication(applicationIndex,
-                                                                   inputTargets,
-                                                                   false,
-                                                                   app.backwardInputGradOutputsByName,
-                                                                   computeStream(applicationIndex));
-        }
-
         std::vector<std::string> allTrainableParameterTargets;
         for (auto& parameter : parameters) {
             if (parameter->isTrainingEnabled()) {
@@ -1636,137 +1691,137 @@ void CustomLayer::compileImpl() {
             }
         }
 
-        std::vector<std::string> activeParameterTargets = app.forwardPrepared->equation().filterTensorInputNamesReachableFromOutputs(
-            allTrainableParameterTargets, app.upstreamOutputNames);
-        if (activeParameterTargets.empty() && !allTrainableParameterTargets.empty() && !app.upstreamOutputNames.empty()) {
-            // The reachability filter is an optimization for reducing the set of
-            // parameter-gradient targets. It must not be allowed to turn a live
-            // backward path into a silent no-op optimizer update. Some expression
-            // lowerings can hide parameter reachability behind internal nodes that
-            // are not visible to the generic filter; in that case, conservatively
-            // stamp all trainable parameter gradients and let autodiff produce zeros
-            // for any truly-unreachable parameter.
-            activeParameterTargets = allTrainableParameterTargets;
-        }
-        app.activeParameterTargetNames = std::unordered_set<std::string>(activeParameterTargets.begin(), activeParameterTargets.end());
+        for (DynamicExpressionVariantId variantId : app.forwardPrepared->executionVariantIds()) {
+            StampedExecutionVariant& variant = stampedVariant(applicationIndex, variantId);
+            if (!variant.supportsBackward) {
+                continue;
+            }
 
-        if (trainingUpdateDiagnosticsEnabled()) {
-            std::fprintf(stderr,
-                         "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u compile_backward downstream=%d fused_loss=%d backward_additional_inputs=%zu upstream_outputs=%s all_trainable=%s active_trainable=%s gradient_update_stream=%d\n",
-                         diagnosticLabel().c_str(),
-                         applicationIndex,
-                         applicationHasAnyDownstreamBackprop(applicationIndex) ? 1 : 0,
-                         applicationHasFusedCustomLossGradient(applicationIndex) ? 1 : 0,
-                         app.backwardAdditionalInputsByName.size(),
-                         joinNames(app.upstreamOutputNames).c_str(),
-                         joinNames(allTrainableParameterTargets).c_str(),
-                         joinNames(app.activeParameterTargetNames).c_str(),
-                         gradientUpdateStream.has_value() ? 1 : 0);
-        }
+            if (!inputTargets.empty() && !app.backwardAdditionalInputsByName.empty()) {
+                variant.backwardError = stampBackwardForApplication(applicationIndex,
+                                                                    variantId,
+                                                                    inputTargets,
+                                                                    false,
+                                                                    app.backwardInputGradOutputsByName,
+                                                                    computeStream(applicationIndex));
+            }
 
-        std::vector<std::string> fusedParameterTargets;
-        if (canFuseOptimizerUpdatesForApplication(applicationIndex)) {
-            for (const std::string& parameterName : activeParameterTargets) {
-                for (const auto& parameter : parameters) {
-                    if (parameter->getName() == parameterName && parameter->isTrainingEnabled() && parameter->hasOptimizer() &&
-                        parameter->getOptimizer()->supportsDenseUpdateFusion()) {
-                        fusedParameterTargets.push_back(parameterName);
-                        app.optimizerUpdateFusedParameterNames.insert(parameterName);
-                        break;
+            std::vector<std::string> activeParameterTargets =
+                app.forwardPrepared->equationForVariant(variantId).filterTensorInputNamesReachableFromOutputs(
+                    allTrainableParameterTargets, app.upstreamOutputNames);
+            if (activeParameterTargets.empty() && !allTrainableParameterTargets.empty() && !app.upstreamOutputNames.empty()) {
+                // The reachability filter is an optimization for reducing the set of
+                // parameter-gradient targets. It must not be allowed to turn a live
+                // backward path into a silent no-op optimizer update. Some expression
+                // lowerings can hide parameter reachability behind internal nodes that
+                // are not visible to the generic filter; in that case, conservatively
+                // stamp all trainable parameter gradients and let autodiff produce zeros
+                // for any truly-unreachable parameter.
+                activeParameterTargets = allTrainableParameterTargets;
+            }
+            variant.activeParameterTargetNames =
+                std::unordered_set<std::string>(activeParameterTargets.begin(), activeParameterTargets.end());
+
+            if (trainingUpdateDiagnosticsEnabled()) {
+                std::fprintf(stderr,
+                             "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u variant=%u compile_backward downstream=%d fused_loss=%d backward_additional_inputs=%zu upstream_outputs=%s all_trainable=%s active_trainable=%s gradient_update_stream=%d\n",
+                             diagnosticLabel().c_str(),
+                             applicationIndex,
+                             variantId,
+                             applicationHasAnyDownstreamBackprop(applicationIndex) ? 1 : 0,
+                             applicationHasFusedCustomLossGradient(applicationIndex) ? 1 : 0,
+                             app.backwardAdditionalInputsByName.size(),
+                             joinNames(app.upstreamOutputNames).c_str(),
+                             joinNames(allTrainableParameterTargets).c_str(),
+                             joinNames(variant.activeParameterTargetNames).c_str(),
+                             gradientUpdateStream.has_value() ? 1 : 0);
+            }
+
+            std::vector<std::string> fusedParameterTargets;
+            if (canFuseOptimizerUpdatesForApplication(applicationIndex)) {
+                for (const std::string& parameterName : activeParameterTargets) {
+                    for (const auto& parameter : parameters) {
+                        if (parameter->getName() == parameterName && parameter->isTrainingEnabled() && parameter->hasOptimizer() &&
+                            parameter->getOptimizer()->supportsDenseUpdateFusion()) {
+                            fusedParameterTargets.push_back(parameterName);
+                            variant.optimizerUpdateFusedParameterNames.insert(parameterName);
+                            break;
+                        }
                     }
                 }
             }
-        }
 
-        std::vector<std::string> allMaterializedParameterTargets;
-        std::vector<std::string> activeMaterializedParameterTargets;
-        PreparedDynamicExpression::TensorMap allMaterializedParameterPreallocatedOutputs;
-        PreparedDynamicExpression::TensorMap activeMaterializedParameterPreallocatedOutputs;
-        std::unordered_map<std::string, Tensor> parameterStorageByName;
+            std::vector<std::string> allMaterializedParameterTargets;
+            std::vector<std::string> activeMaterializedParameterTargets;
+            PreparedDynamicExpression::TensorMap allMaterializedParameterPreallocatedOutputs;
+            PreparedDynamicExpression::TensorMap activeMaterializedParameterPreallocatedOutputs;
+            std::unordered_map<std::string, Tensor> parameterStorageByName;
 
-        for (auto& parameter : parameters) {
-            if (!parameter->isTrainingEnabled()) {
-                continue;
+            for (auto& parameter : parameters) {
+                if (!parameter->isTrainingEnabled()) {
+                    continue;
+                }
+
+                THOR_THROW_IF_FALSE(parameter->hasOptimizer());
+                const shared_ptr<Optimizer>& parameterOptimizer = parameter->getOptimizer();
+                THOR_THROW_IF_FALSE(parameterOptimizer != nullptr);
+                THOR_THROW_IF_FALSE(parameter->getStorage().has_value());
+                parameterStorageByName[parameter->getName()] = parameter->getStorage().value();
+
+                if (variant.optimizerUpdateFusedParameterNames.contains(parameter->getName())) {
+                    continue;
+                }
+
+                THOR_THROW_IF_FALSE(parameterOptimizer->getWeightsGradient().has_value());
+                const std::string gradName = parameter->getName() + "_grad";
+                Tensor gradientTensor = parameterOptimizer->getWeightsGradient().value();
+                allMaterializedParameterTargets.push_back(parameter->getName());
+                allMaterializedParameterPreallocatedOutputs[gradName] = gradientTensor;
+                if (variant.activeParameterTargetNames.contains(parameter->getName())) {
+                    activeMaterializedParameterTargets.push_back(parameter->getName());
+                    activeMaterializedParameterPreallocatedOutputs[gradName] = gradientTensor;
+                }
             }
 
-            THOR_THROW_IF_FALSE(parameter->hasOptimizer());
-            const shared_ptr<Optimizer>& parameterOptimizer = parameter->getOptimizer();
-            THOR_THROW_IF_FALSE(parameterOptimizer != nullptr);
-            THOR_THROW_IF_FALSE(parameter->getStorage().has_value());
-            parameterStorageByName[parameter->getName()] = parameter->getStorage().value();
-
-            if (app.optimizerUpdateFusedParameterNames.contains(parameter->getName())) {
-                continue;
+            if (trainingUpdateDiagnosticsEnabled()) {
+                std::fprintf(stderr,
+                             "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u variant=%u compile_parameter_targets fused=%s all_materialized=%s active_materialized=%s materialized_preallocated_outputs=%zu active_preallocated_outputs=%zu\n",
+                             diagnosticLabel().c_str(),
+                             applicationIndex,
+                             variantId,
+                             joinNames(fusedParameterTargets).c_str(),
+                             joinNames(allMaterializedParameterTargets).c_str(),
+                             joinNames(activeMaterializedParameterTargets).c_str(),
+                             allMaterializedParameterPreallocatedOutputs.size(),
+                             activeMaterializedParameterPreallocatedOutputs.size());
             }
 
-            THOR_THROW_IF_FALSE(parameterOptimizer->getWeightsGradient().has_value());
-            const std::string gradName = parameter->getName() + "_grad";
-            Tensor gradientTensor = parameterOptimizer->getWeightsGradient().value();
-            allMaterializedParameterTargets.push_back(parameter->getName());
-            allMaterializedParameterPreallocatedOutputs[gradName] = gradientTensor;
-            if (app.activeParameterTargetNames.contains(parameter->getName())) {
-                activeMaterializedParameterTargets.push_back(parameter->getName());
-                activeMaterializedParameterPreallocatedOutputs[gradName] = gradientTensor;
-            }
-        }
+            if (!allTrainableParameterTargets.empty() && !app.backwardAdditionalInputsByName.empty()) {
+                THOR_THROW_IF_FALSE(gradientUpdateStream.has_value());
 
-        if (trainingUpdateDiagnosticsEnabled()) {
-            std::fprintf(stderr,
-                         "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u compile_parameter_targets fused=%s all_materialized=%s active_materialized=%s materialized_preallocated_outputs=%zu active_preallocated_outputs=%zu\n",
-                         diagnosticLabel().c_str(),
-                         applicationIndex,
-                         joinNames(fusedParameterTargets).c_str(),
-                         joinNames(allMaterializedParameterTargets).c_str(),
-                         joinNames(activeMaterializedParameterTargets).c_str(),
-                         allMaterializedParameterPreallocatedOutputs.size(),
-                         activeMaterializedParameterPreallocatedOutputs.size());
-        }
+                if (!fusedParameterTargets.empty()) {
+                    variant.backwardWeightsFusedOptimizerUpdate =
+                        buildFusedOptimizerUpdatePlan(applicationIndex, variantId, fusedParameterTargets, parameterStorageByName);
+                }
 
-        if (!allTrainableParameterTargets.empty() && !app.backwardAdditionalInputsByName.empty()) {
-            THOR_THROW_IF_FALSE(gradientUpdateStream.has_value());
-
-            if (!fusedParameterTargets.empty()) {
-                app.backwardWeightsFusedOptimizerUpdateStamped =
-                    buildFusedOptimizerUpdatePlan(applicationIndex, fusedParameterTargets, parameterStorageByName);
-            }
-
-            if (!allMaterializedParameterTargets.empty()) {
-                // Every application with downstream backprop gets a clear-first stamp that writes every materialized
-                // gradient buffer. Parameters handled by backwardWeightsFusedOptimizerUpdateStamped intentionally
-                // skip this dense gradient write/read round trip.
-                if (applicationHasFusedCustomLossGradient(applicationIndex)) {
-                    app.backwardWeightsClearStamped = stampBackwardForApplication(applicationIndex,
-                                                                                  allMaterializedParameterTargets,
-                                                                                  false,
-                                                                                  allMaterializedParameterPreallocatedOutputs,
-                                                                                  gradientUpdateStream.value());
+                if (!allMaterializedParameterTargets.empty()) {
+                    // Every backward-capable execution variant gets a clear-first stamp that writes every
+                    // materialized gradient buffer. Parameters handled by the fused optimizer stamp intentionally
+                    // skip this dense gradient write/read round trip.
+                    variant.backwardWeightsClear = stampBackwardForApplication(applicationIndex,
+                                                                               variantId,
+                                                                               allMaterializedParameterTargets,
+                                                                               false,
+                                                                               allMaterializedParameterPreallocatedOutputs,
+                                                                               gradientUpdateStream.value());
 
                     if (!activeMaterializedParameterTargets.empty()) {
-                        app.backwardWeightsAccumulateStamped = stampBackwardForApplication(applicationIndex,
-                                                                                           activeMaterializedParameterTargets,
-                                                                                           true,
-                                                                                           activeMaterializedParameterPreallocatedOutputs,
-                                                                                           gradientUpdateStream.value());
-                    }
-                } else {
-                    // Build the parameter-gradient stamps through the same per-application
-                    // path used by input gradients and fused CustomLoss gradients.  Some
-                    // layer-specific autodiff rules, notably RMSNorm, require concrete
-                    // forward input dimensions.  PreparedDynamicExpression::stampBackward()
-                    // rebuilds the backward equation without those shape facts, so it cannot
-                    // safely stamp parameter gradients for shape-specialized ops.
-                    app.backwardWeightsClearStamped = stampBackwardForApplication(applicationIndex,
-                                                                                  allMaterializedParameterTargets,
-                                                                                  false,
-                                                                                  allMaterializedParameterPreallocatedOutputs,
-                                                                                  gradientUpdateStream.value());
-
-                    if (!activeMaterializedParameterTargets.empty()) {
-                        app.backwardWeightsAccumulateStamped = stampBackwardForApplication(applicationIndex,
-                                                                                           activeMaterializedParameterTargets,
-                                                                                           true,
-                                                                                           activeMaterializedParameterPreallocatedOutputs,
-                                                                                           gradientUpdateStream.value());
+                        variant.backwardWeightsAccumulate = stampBackwardForApplication(applicationIndex,
+                                                                                        variantId,
+                                                                                        activeMaterializedParameterTargets,
+                                                                                        true,
+                                                                                        activeMaterializedParameterPreallocatedOutputs,
+                                                                                        gradientUpdateStream.value());
                     }
                 }
             }
@@ -1776,16 +1831,20 @@ void CustomLayer::compileImpl() {
     if (trainingUpdateDiagnosticsEnabled()) {
         for (uint32_t applicationIndex = 0; applicationIndex < applications.size(); ++applicationIndex) {
             const ApplicationState& app = applications[applicationIndex];
-            std::fprintf(stderr,
-                         "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u compiled_stamps backward_error=%d weights_clear=%d weights_accumulate=%d fused_update=%d expected_backward_errors=%zu num_backward_applications=%u\n",
-                         diagnosticLabel().c_str(),
-                         applicationIndex,
-                         app.backwardErrorStamped != nullptr ? 1 : 0,
-                         app.backwardWeightsClearStamped != nullptr ? 1 : 0,
-                         app.backwardWeightsAccumulateStamped != nullptr ? 1 : 0,
-                         app.backwardWeightsFusedOptimizerUpdateStamped != nullptr ? 1 : 0,
-                         app.expectedBackwardErrorInputTensorIds.size(),
-                         numBackwardApplications);
+            for (const auto& [variantId, variant] : app.stampedVariants) {
+                std::fprintf(stderr,
+                             "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u variant=%u compiled_stamps backward_supported=%d backward_error=%d weights_clear=%d weights_accumulate=%d fused_update=%d expected_backward_errors=%zu num_backward_applications=%u\n",
+                             diagnosticLabel().c_str(),
+                             applicationIndex,
+                             variantId,
+                             variant.supportsBackward ? 1 : 0,
+                             variant.backwardError != nullptr ? 1 : 0,
+                             variant.backwardWeightsClear != nullptr ? 1 : 0,
+                             variant.backwardWeightsAccumulate != nullptr ? 1 : 0,
+                             variant.backwardWeightsFusedOptimizerUpdate != nullptr ? 1 : 0,
+                             app.expectedBackwardErrorInputTensorIds.size(),
+                             numBackwardApplications);
+            }
         }
     }
 
@@ -2201,17 +2260,21 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
             continue;
         }
 
+        StampedExecutionVariant& variant = backwardVariantForApplication(applicationIndex);
+        const DynamicExpressionVariantId variantId = app.forwardVariantThisPass.value();
+
         if (trainingUpdateDiagnosticsEnabled()) {
             std::fprintf(stderr,
-                         "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u backward_ready batch=%u active_parameters=%s backward_error_stamp=%d weights_clear_stamp=%d weights_accumulate_stamp=%d fused_update_stamp=%d\n",
+                         "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u variant=%u backward_ready batch=%u active_parameters=%s backward_error_stamp=%d weights_clear_stamp=%d weights_accumulate_stamp=%d fused_update_stamp=%d\n",
                          diagnosticLabel().c_str(),
                          applicationIndex,
+                         variantId,
                          batchSize,
-                         joinNames(app.activeParameterTargetNames).c_str(),
-                         app.backwardErrorStamped != nullptr ? 1 : 0,
-                         app.backwardWeightsClearStamped != nullptr ? 1 : 0,
-                         app.backwardWeightsAccumulateStamped != nullptr ? 1 : 0,
-                         app.backwardWeightsFusedOptimizerUpdateStamped != nullptr ? 1 : 0);
+                         joinNames(variant.activeParameterTargetNames).c_str(),
+                         variant.backwardError != nullptr ? 1 : 0,
+                         variant.backwardWeightsClear != nullptr ? 1 : 0,
+                         variant.backwardWeightsAccumulate != nullptr ? 1 : 0,
+                         variant.backwardWeightsFusedOptimizerUpdate != nullptr ? 1 : 0);
         }
 
         const bool emitLayerDiagnostics = layerSubmitDiagnosticsActive();
@@ -2237,7 +2300,7 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
         }
 
         std::optional<Event> errorOutHasBeenComputedEvent = std::nullopt;
-        if (app.backwardErrorStamped != nullptr) {
+        if (variant.backwardError != nullptr) {
             const auto errorComputeStart = emitLayerDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
             errorOutHasBeenComputedEvent = computeErrorOut(inputFlatIndex(applicationIndex, 0));
             if (emitLayerDiagnostics) {
@@ -2256,7 +2319,7 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
             }
         }
         if (gradientUpdateStream.has_value() && errorOutHasBeenComputedEvent.has_value() &&
-            app.backwardWeightsFusedOptimizerUpdateStamped != nullptr) {
+            variant.backwardWeightsFusedOptimizerUpdate != nullptr) {
             // Fused optimizer stamps update parameter storage directly, so they must preserve the same
             // ordering as the legacy materialized path: upstream input-gradient computation reads old
             // weights before the optimizer overwrites them.
@@ -2343,10 +2406,15 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
             std::set<std::string> fusedUpdateParameterNames;
             const auto fusedParameterScanStart = emitApplyDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
             for (const ApplicationState& app : applications) {
-                if (app.backwardRanThisPass && !app.optimizerUpdateFusedParameterNames.empty()) {
+                if (!app.backwardRanThisPass || !app.forwardVariantThisPass.has_value()) {
+                    continue;
+                }
+                const StampedExecutionVariant& variant =
+                    app.stampedVariants.at(app.forwardVariantThisPass.value());
+                if (!variant.optimizerUpdateFusedParameterNames.empty()) {
                     anyWeightsUpdated = true;
-                    fusedUpdateParameterNames.insert(app.optimizerUpdateFusedParameterNames.begin(),
-                                                     app.optimizerUpdateFusedParameterNames.end());
+                    fusedUpdateParameterNames.insert(variant.optimizerUpdateFusedParameterNames.begin(),
+                                                     variant.optimizerUpdateFusedParameterNames.end());
                 }
             }
             if (emitApplyDiagnostics) {
@@ -2465,17 +2533,25 @@ void CustomLayer::computeFeatureOutForPass(uint32_t connectionNumber, bool valid
     uint64_t preRunHookMicros = 0;
     uint64_t runMicros = 0;
     DecodedConnection decoded = decodeInputConnectionType(static_cast<int>(connectionNumber));
-    if (decoded.applicationIndex >= applications.size() || !applications[decoded.applicationIndex].forwardStamped) {
+    if (decoded.applicationIndex >= applications.size()) {
         throw runtime_error("CustomLayer::computeFeatureOut requires a stamped forward plan.");
     }
 
     ApplicationState& application = applications[decoded.applicationIndex];
-    const bool useValidationForward =
-        (validationPass || isInferenceOnly()) && application.validationForwardStamped != nullptr;
-    const std::function<void(Stream&)>& preRunHook =
-        useValidationForward ? application.validationForwardPreRunHook : application.forwardPreRunHook;
-    StampedExecutionPlan& executionPlan =
-        useValidationForward ? *application.validationForwardStamped : *application.forwardStamped;
+    DynamicExpressionVariantId variantId = activeTrainingVariantId;
+    const bool useEvaluationVariant =
+        (validationPass || isInferenceOnly()) && application.evaluationVariantId.has_value();
+    if (useEvaluationVariant) {
+        variantId = application.evaluationVariantId.value();
+    }
+    StampedExecutionVariant& variant = stampedVariant(decoded.applicationIndex, variantId);
+    if (variant.forward == nullptr) {
+        throw runtime_error("CustomLayer::computeFeatureOut requires a stamped forward plan for execution variant " +
+                            std::to_string(variantId) + ".");
+    }
+    application.forwardVariantThisPass = variantId;
+    const std::function<void(Stream&)>& preRunHook = variant.preForwardHook;
+    StampedExecutionPlan& executionPlan = *variant.forward;
 
     if (preRunHook) {
         const auto preRunStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
@@ -2494,7 +2570,8 @@ void CustomLayer::computeFeatureOutForPass(uint32_t connectionNumber, bool valid
                                   layerSubmitDiagnosticElapsedMicros(totalStart, layerSubmitDiagnosticNow()),
                                   {{"app", decoded.applicationIndex},
                                    {"connection", connectionNumber},
-                                   {"validation_plan", useValidationForward ? 1UL : 0UL},
+                                   {"variant", variantId},
+                                   {"evaluation_variant", useEvaluationVariant ? 1UL : 0UL},
                                    {"prerun_us", preRunHookMicros},
                                    {"run_us", runMicros},
                                    {"has_prerun", preRunHook ? 1UL : 0UL},
@@ -2508,7 +2585,11 @@ std::optional<Event> CustomLayer::computeErrorOut(uint32_t connectionNumber) {
     uint64_t runMicros = 0;
     uint64_t eventMicros = 0;
     DecodedConnection decoded = decodeInputConnectionType(static_cast<int>(connectionNumber));
-    if (decoded.applicationIndex >= applications.size() || applications[decoded.applicationIndex].backwardErrorStamped == nullptr) {
+    if (decoded.applicationIndex >= applications.size()) {
+        return std::nullopt;
+    }
+    StampedExecutionVariant& variant = backwardVariantForApplication(decoded.applicationIndex);
+    if (variant.backwardError == nullptr) {
         if (emitDiagnostics) {
             emitLayerSubmitDiagnostic("custom_backward_error_skip",
                                       diagnosticLabel(),
@@ -2519,7 +2600,7 @@ std::optional<Event> CustomLayer::computeErrorOut(uint32_t connectionNumber) {
         return std::nullopt;
     }
     const auto runStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
-    applications[decoded.applicationIndex].backwardErrorStamped->run();
+    variant.backwardError->run();
     if (emitDiagnostics) {
         runMicros = layerSubmitDiagnosticElapsedMicros(runStart, layerSubmitDiagnosticNow());
     }
@@ -2535,7 +2616,7 @@ std::optional<Event> CustomLayer::computeErrorOut(uint32_t connectionNumber) {
                                    {"connection", connectionNumber},
                                    {"run_us", runMicros},
                                    {"put_event_us", eventMicros},
-                                   {"flops", applications[decoded.applicationIndex].backwardErrorStamped->flopCount()}});
+                                   {"flops", variant.backwardError->flopCount()}});
     }
     return readyEvent;
 }
@@ -2548,25 +2629,28 @@ void CustomLayer::accumulateWeightsGradientForApplication(uint32_t applicationIn
         return;
     }
     ApplicationState& app = applications[applicationIndex];
+    StampedExecutionVariant& variant = backwardVariantForApplication(applicationIndex);
+    const DynamicExpressionVariantId variantId = app.forwardVariantThisPass.value();
 
-    // backwardWeightsClearStamped is an overwrite-mode backward-gradient stamp, not a zero-only
+    // backwardWeightsClear is an overwrite-mode backward-gradient stamp, not a zero-only
     // memset.  It computes this application's materialized parameter gradient and writes it into
     // the dense gradient buffer.  Therefore the first materialized application in a backward pass
     // must run the clear stamp instead of the accumulate stamp; running both for the same
     // application double-counts the gradient.  Later applications use the accumulate stamp to add
     // their contribution to the buffer established by the first application.
-    const bool ranMaterializedOverwrite = clearGradientFirst && app.backwardWeightsClearStamped != nullptr;
+    const bool ranMaterializedOverwrite = clearGradientFirst && variant.backwardWeightsClear != nullptr;
     if (trainingUpdateDiagnosticsEnabled()) {
         std::fprintf(stderr,
-                     "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u accumulate batch=%u clear_first=%d run_clear=%d run_accumulate=%d run_fused_update=%d active_parameters=%s\n",
+                     "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u variant=%u accumulate batch=%u clear_first=%d run_clear=%d run_accumulate=%d run_fused_update=%d active_parameters=%s\n",
                      diagnosticLabel().c_str(),
                      applicationIndex,
+                     variantId,
                      batchSize,
                      clearGradientFirst ? 1 : 0,
                      ranMaterializedOverwrite ? 1 : 0,
-                     (!ranMaterializedOverwrite && app.backwardWeightsAccumulateStamped != nullptr) ? 1 : 0,
-                     app.backwardWeightsFusedOptimizerUpdateStamped != nullptr ? 1 : 0,
-                     joinNames(app.activeParameterTargetNames).c_str());
+                     (!ranMaterializedOverwrite && variant.backwardWeightsAccumulate != nullptr) ? 1 : 0,
+                     variant.backwardWeightsFusedOptimizerUpdate != nullptr ? 1 : 0,
+                     joinNames(variant.activeParameterTargetNames).c_str());
     }
     const bool emitDiagnostics = layerSubmitDiagnosticsActive();
     const auto totalStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
@@ -2575,23 +2659,23 @@ void CustomLayer::accumulateWeightsGradientForApplication(uint32_t applicationIn
     uint64_t accumulateMicros = 0;
     if (ranMaterializedOverwrite) {
         const auto clearStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
-        app.backwardWeightsClearStamped->run();
+        variant.backwardWeightsClear->run();
         if (emitDiagnostics) {
             clearMicros = layerSubmitDiagnosticElapsedMicros(clearStart, layerSubmitDiagnosticNow());
         }
     }
 
-    if (app.backwardWeightsFusedOptimizerUpdateStamped != nullptr) {
+    if (variant.backwardWeightsFusedOptimizerUpdate != nullptr) {
         const auto fusedStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
-        app.backwardWeightsFusedOptimizerUpdateStamped->run(updateFusedOptimizerRuntimeScalars(applicationIndex, batchSize));
+        variant.backwardWeightsFusedOptimizerUpdate->run(updateFusedOptimizerRuntimeScalars(applicationIndex, variantId, batchSize));
         if (emitDiagnostics) {
             fusedUpdateMicros = layerSubmitDiagnosticElapsedMicros(fusedStart, layerSubmitDiagnosticNow());
         }
     }
 
-    if (!ranMaterializedOverwrite && app.backwardWeightsAccumulateStamped != nullptr) {
+    if (!ranMaterializedOverwrite && variant.backwardWeightsAccumulate != nullptr) {
         const auto accumulateStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
-        app.backwardWeightsAccumulateStamped->run();
+        variant.backwardWeightsAccumulate->run();
         if (emitDiagnostics) {
             accumulateMicros = layerSubmitDiagnosticElapsedMicros(accumulateStart, layerSubmitDiagnosticNow());
         }
@@ -2602,14 +2686,15 @@ void CustomLayer::accumulateWeightsGradientForApplication(uint32_t applicationIn
                                   getId(),
                                   layerSubmitDiagnosticElapsedMicros(totalStart, layerSubmitDiagnosticNow()),
                                   {{"app", applicationIndex},
+                                   {"variant", variantId},
                                    {"batch", batchSize},
                                    {"clear_first", clearGradientFirst ? 1UL : 0UL},
                                    {"clear_us", clearMicros},
                                    {"fused_update_us", fusedUpdateMicros},
                                    {"accumulate_us", accumulateMicros},
-                                   {"has_clear", app.backwardWeightsClearStamped != nullptr ? 1UL : 0UL},
-                                   {"has_fused_update", app.backwardWeightsFusedOptimizerUpdateStamped != nullptr ? 1UL : 0UL},
-                                   {"has_accumulate", app.backwardWeightsAccumulateStamped != nullptr ? 1UL : 0UL}});
+                                   {"has_clear", variant.backwardWeightsClear != nullptr ? 1UL : 0UL},
+                                   {"has_fused_update", variant.backwardWeightsFusedOptimizerUpdate != nullptr ? 1UL : 0UL},
+                                   {"has_accumulate", variant.backwardWeightsAccumulate != nullptr ? 1UL : 0UL}});
     }
 }
 
@@ -2621,8 +2706,9 @@ void CustomLayer::accumulateWeightsGradient(uint32_t connectionNumber, bool clea
 uint64_t CustomLayer::flopCountForward() {
     uint64_t flops = 0;
     for (const ApplicationState& app : applications) {
-        if (app.forwardStamped != nullptr) {
-            flops += app.forwardStamped->flopCount();
+        auto it = app.stampedVariants.find(kPrimaryDynamicExpressionVariant);
+        if (it != app.stampedVariants.end() && it->second.forward != nullptr) {
+            flops += it->second.forward->flopCount();
         }
     }
     return flops;
@@ -2631,14 +2717,19 @@ uint64_t CustomLayer::flopCountForward() {
 uint64_t CustomLayer::flopCountBackward() {
     uint64_t flops = 0;
     for (const ApplicationState& app : applications) {
-        if (app.backwardErrorStamped != nullptr) {
-            flops += app.backwardErrorStamped->flopCount();
+        auto it = app.stampedVariants.find(kPrimaryDynamicExpressionVariant);
+        if (it == app.stampedVariants.end()) {
+            continue;
         }
-        if (app.backwardWeightsAccumulateStamped != nullptr) {
-            flops += app.backwardWeightsAccumulateStamped->flopCount();
+        const StampedExecutionVariant& variant = it->second;
+        if (variant.backwardError != nullptr) {
+            flops += variant.backwardError->flopCount();
         }
-        if (app.backwardWeightsFusedOptimizerUpdateStamped != nullptr) {
-            flops += app.backwardWeightsFusedOptimizerUpdateStamped->flopCount();
+        if (variant.backwardWeightsAccumulate != nullptr) {
+            flops += variant.backwardWeightsAccumulate->flopCount();
+        }
+        if (variant.backwardWeightsFusedOptimizerUpdate != nullptr) {
+            flops += variant.backwardWeightsFusedOptimizerUpdate->flopCount();
         }
     }
     return flops;

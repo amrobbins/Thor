@@ -105,6 +105,10 @@ class CustomLayer : public TrainableLayer {
     void compileImpl() override;
     PhysicalParameter::StorageContext buildParameterStorageContext() const override;
     void pruneUpstreamErrorOutputsForApplication(uint32_t applicationIndex);
+    void setActiveTrainingExecutionVariant(DynamicExpressionVariantId variantId);
+    [[nodiscard]] DynamicExpressionVariantId getActiveTrainingExecutionVariant() const {
+        return activeTrainingVariantId;
+    }
 
    private:
     struct FusedCustomLossGradient {
@@ -123,6 +127,22 @@ class CustomLayer : public TrainableLayer {
         std::string namePrefix;
     };
 
+    struct StampedExecutionVariant {
+        std::shared_ptr<StampedExecutionPlan> forward;
+        std::shared_ptr<StampedExecutionPlan> backwardError;
+        std::shared_ptr<StampedExecutionPlan> backwardWeightsClear;
+        std::shared_ptr<StampedExecutionPlan> backwardWeightsAccumulate;
+        std::shared_ptr<StampedExecutionPlan> backwardWeightsFusedOptimizerUpdate;
+
+        std::unordered_set<std::string> optimizerUpdateFusedParameterNames;
+        std::unordered_set<std::string> activeParameterTargetNames;
+        std::vector<FusedOptimizerRuntimeScalarBinding> fusedOptimizerRuntimeScalarBindings;
+        std::unordered_map<std::string, float> fusedOptimizerRuntimeScalars;
+
+        std::function<void(Stream&)> preForwardHook;
+        bool supportsBackward = false;
+    };
+
     struct ApplicationState {
         std::set<unsigned long> allForwardInputTensorIds;
         std::set<unsigned long> stillWaitingForForwardInputTensorIds;
@@ -137,26 +157,16 @@ class CustomLayer : public TrainableLayer {
         std::unordered_map<std::string, std::string> upstreamInputNamesByOutput;
         std::unordered_map<std::string, FusedCustomLossGradient> fusedCustomLossGradientsByOutput;
         std::unordered_set<std::string> upstreamOutputNames;
-        std::unordered_set<std::string> activeParameterTargetNames;
 
         std::shared_ptr<PreparedDynamicExpression> forwardPrepared;
-        std::shared_ptr<StampedExecutionPlan> forwardStamped;
-        std::shared_ptr<StampedExecutionPlan> validationForwardStamped;
-        std::shared_ptr<StampedExecutionPlan> backwardErrorStamped;
-        std::shared_ptr<StampedExecutionPlan> backwardWeightsClearStamped;
-        std::shared_ptr<StampedExecutionPlan> backwardWeightsAccumulateStamped;
-        std::shared_ptr<StampedExecutionPlan> backwardWeightsFusedOptimizerUpdateStamped;
-
-        std::unordered_set<std::string> optimizerUpdateFusedParameterNames;
-        std::vector<FusedOptimizerRuntimeScalarBinding> fusedOptimizerRuntimeScalarBindings;
-        std::unordered_map<std::string, float> fusedOptimizerRuntimeScalars;
+        std::unordered_map<DynamicExpressionVariantId, StampedExecutionVariant> stampedVariants;
+        std::optional<DynamicExpressionVariantId> evaluationVariantId;
+        std::optional<DynamicExpressionVariantId> forwardVariantThisPass;
 
         std::unordered_map<std::string, Tensor> forwardInputsByName;
         std::unordered_map<std::string, Tensor> forwardOutputsByName;
         std::unordered_map<std::string, Tensor> backwardAdditionalInputsByName;
         std::unordered_map<std::string, Tensor> backwardInputGradOutputsByName;
-        std::function<void(Stream&)> forwardPreRunHook;
-        std::function<void(Stream&)> validationForwardPreRunHook;
     };
 
     struct DecodedConnection {
@@ -191,20 +201,28 @@ class CustomLayer : public TrainableLayer {
     void recordEffectiveParameterBatchSizeForApplication(uint32_t applicationIndex, uint32_t batchSize);
     bool canFuseOptimizerUpdatesForApplication(uint32_t applicationIndex) const;
     bool applicationHasFusedCustomLossGradient(uint32_t applicationIndex) const;
+    StampedExecutionVariant& stampedVariant(uint32_t applicationIndex, DynamicExpressionVariantId variantId);
+    const StampedExecutionVariant& stampedVariant(uint32_t applicationIndex, DynamicExpressionVariantId variantId) const;
+    StampedExecutionVariant& backwardVariantForApplication(uint32_t applicationIndex);
+    const StampedExecutionVariant& backwardVariantForApplication(uint32_t applicationIndex) const;
     PhysicalOutputs buildBackwardOutputsForApplication(uint32_t applicationIndex,
+                                                       DynamicExpressionVariantId variantId,
                                                        const std::vector<std::string>& wrtNames,
                                                        bool accumulateGradOutputs);
     std::shared_ptr<StampedExecutionPlan> stampBackwardForApplication(
         uint32_t applicationIndex,
+        DynamicExpressionVariantId variantId,
         const std::vector<std::string>& wrtNames,
         bool accumulateGradOutputs,
         const PreparedDynamicExpression::TensorMap& preallocatedGradOutputs,
         Stream& runStream);
     std::shared_ptr<StampedExecutionPlan> buildFusedOptimizerUpdatePlan(
         uint32_t applicationIndex,
+        DynamicExpressionVariantId variantId,
         const std::vector<std::string>& fusedParameterTargets,
         const std::unordered_map<std::string, Tensor>& optimizerUpdateInputs);
-    const std::unordered_map<std::string, float>& updateFusedOptimizerRuntimeScalars(uint32_t applicationIndex, uint32_t batchSize);
+    const std::unordered_map<std::string, float>& updateFusedOptimizerRuntimeScalars(
+        uint32_t applicationIndex, DynamicExpressionVariantId variantId, uint32_t batchSize);
     void accumulateWeightsGradientForApplication(uint32_t applicationIndex, bool clearGradientFirst, uint32_t batchSize);
     uint64_t batchSizeForFlopEstimate() const;
 
@@ -230,6 +248,7 @@ class CustomLayer : public TrainableLayer {
     std::vector<DeclaredOutputDescriptor> declaredOutputDescriptors;
 
     std::string customLayerName = "UnnamedType";
+    DynamicExpressionVariantId activeTrainingVariantId = kPrimaryDynamicExpressionVariant;
 
     bool clearGradientFirstThisBackwardPass = false;
     uint32_t numBackwardApplications = 0;
