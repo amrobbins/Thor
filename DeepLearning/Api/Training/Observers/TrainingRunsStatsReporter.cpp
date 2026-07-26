@@ -216,8 +216,27 @@ void appendPhaseLossColumns(std::string& line,
 
 bool shouldSuppressMetricColumnName(const std::string& name) {
     return name.empty() || name == "loss" || name == "learning_rate" || name == "learningRate" || name == "lr" ||
-           name == "momentum" || name == "completed_epoch" || name == "best_epoch" || name == "best_score" ||
-           name == "first_model_selection_epoch";
+           name == "momentum" || name == "completed_epoch" || name == "selected_epoch" || name == "best_epoch" ||
+           name == "best_score" || name == "latest_score" || name == "first_model_selection_epoch";
+}
+
+TrainingStatsSnapshot modelSelectionPhaseSnapshot(const TrainingModelSelectionPhaseStats& phaseStats,
+                                                   TrainingEventPhase phase,
+                                                   uint64_t epoch,
+                                                   std::string validationPopulation = {},
+                                                   bool isDefaultValidationPopulation = false) {
+    TrainingStatsSnapshot snapshot;
+    snapshot.phase = phase;
+    snapshot.epoch = epoch;
+    snapshot.validationPopulation = std::move(validationPopulation);
+    snapshot.isDefaultValidationPopulation = isDefaultValidationPopulation;
+    snapshot.loss = phaseStats.loss;
+    snapshot.losses = phaseStats.losses;
+    snapshot.metrics = phaseStats.metrics;
+    for (const auto& [name, value] : phaseStats.losses) {
+        snapshot.metrics.try_emplace(name, value);
+    }
+    return snapshot;
 }
 
 std::vector<std::string> orderedMetricNames(
@@ -989,34 +1008,74 @@ void TrainingRunsStatsReporter::writeResultLineLocked(const TrainingRunResult& r
         line.append(RUN_PROGRESS_FIELDS_WIDTH - terminalStatusWidth, ' ');
     }
 
+    const bool selectedBestCandidate =
+        result.selectedEpoch.has_value() && result.bestEpoch.has_value() &&
+        result.selectedEpoch.value() == result.bestEpoch.value() &&
+        result.bestModelSelectionContext.has_value() &&
+        result.bestModelSelectionContext->epoch == result.bestEpoch.value();
+
+    std::optional<TrainingStatsSnapshot> selectedTrainingStats{};
+    std::optional<TrainingStatsSnapshot> selectedValidationStats{};
+    std::optional<TrainingStatsSnapshot> selectedTestStats{};
+    std::map<std::string, TrainingStatsSnapshot> selectedValidationStatsByPopulation{};
+    if (selectedBestCandidate) {
+        const TrainingModelSelectionContext& context = result.bestModelSelectionContext.value();
+        selectedTrainingStats = modelSelectionPhaseSnapshot(context.train, TrainingEventPhase::TRAIN, context.epoch);
+        selectedValidationStats = modelSelectionPhaseSnapshot(
+            context.validate,
+            TrainingEventPhase::VALIDATE,
+            context.epoch,
+            context.defaultValidationPopulation,
+            true);
+        selectedTestStats = modelSelectionPhaseSnapshot(context.test, TrainingEventPhase::TEST, context.epoch);
+        for (const auto& [population, stats] : context.validations) {
+            selectedValidationStatsByPopulation.emplace(
+                population,
+                modelSelectionPhaseSnapshot(stats,
+                                            TrainingEventPhase::VALIDATE,
+                                            context.epoch,
+                                            population,
+                                            population == context.defaultValidationPopulation));
+        }
+    }
+
+    const TrainingStatsSnapshot* reportedTrainingStats = selectedBestCandidate
+        ? &selectedTrainingStats.value()
+        : (result.finalTrainingStats.has_value() ? &result.finalTrainingStats.value() : nullptr);
+    const TrainingStatsSnapshot* reportedValidationStats = selectedBestCandidate
+        ? &selectedValidationStats.value()
+        : (result.finalValidationStats.has_value() ? &result.finalValidationStats.value() : nullptr);
+    const TrainingStatsSnapshot* reportedTestStats = selectedBestCandidate
+        ? &selectedTestStats.value()
+        : (result.finalTestStats.has_value() ? &result.finalTestStats.value() : nullptr);
+    const std::map<std::string, TrainingStatsSnapshot>& reportedValidationStatsByPopulation =
+        selectedBestCandidate ? selectedValidationStatsByPopulation : result.finalValidationStatsByPopulation;
+
     appendPhaseLossColumns(line,
-                           result.finalTrainingStats.has_value() ? result.finalTrainingStats->loss : std::optional<double>{},
-                           result.finalValidationStats.has_value() ? result.finalValidationStats->loss : std::optional<double>{},
+                           reportedTrainingStats == nullptr ? std::optional<double>{} : reportedTrainingStats->loss,
+                           reportedValidationStats == nullptr ? std::optional<double>{} : reportedValidationStats->loss,
                            useColor,
                            FinalReportAnsi::trainLoss,
                            FinalReportAnsi::validateLoss);
-    if (result.finalTestStats.has_value() && result.finalTestStats->loss.has_value()) {
+    if (reportedTestStats != nullptr && reportedTestStats->loss.has_value()) {
         char buffer[64];
-        std::snprintf(buffer, sizeof(buffer), "test_loss=%.6f", result.finalTestStats->loss.value());
+        std::snprintf(buffer, sizeof(buffer), "test_loss=%.6f", reportedTestStats->loss.value());
         line += " ";
         line += styled(buffer, FinalReportAnsi::testLoss, useColor);
     }
     appendPhasePairedMetricColumns(
         line,
-        result.finalTrainingStats.has_value() ? &*result.finalTrainingStats : nullptr,
-        result.finalValidationStats.has_value() ? &*result.finalValidationStats : nullptr,
-        result.finalTestStats.has_value() ? &*result.finalTestStats : nullptr,
+        reportedTrainingStats,
+        reportedValidationStats,
+        reportedTestStats,
         useColor,
         reportOrder);
     const std::string defaultPopulation =
-        result.finalValidationStats.has_value() &&
-                !result.finalValidationStats->validationPopulation.empty()
-            ? result.finalValidationStats->validationPopulation
+        reportedValidationStats != nullptr && !reportedValidationStats->validationPopulation.empty()
+            ? reportedValidationStats->validationPopulation
             : std::string("validate");
-    for (const auto& [population, stats] :
-         result.finalValidationStatsByPopulation) {
-        if ((!defaultPopulation.empty() && population == defaultPopulation) ||
-            stats.isDefaultValidationPopulation) {
+    for (const auto& [population, stats] : reportedValidationStatsByPopulation) {
+        if ((!defaultPopulation.empty() && population == defaultPopulation) || stats.isDefaultValidationPopulation) {
             continue;
         }
         if (stats.loss.has_value()) {
@@ -1030,8 +1089,7 @@ void TrainingRunsStatsReporter::writeResultLineLocked(const TrainingRunResult& r
             line += styled(buffer, FinalReportAnsi::validateLoss, useColor);
         }
         const auto* metrics = &stats.metrics;
-        for (const std::string& metricName :
-             orderedMetricNames(nullptr, metrics, nullptr, reportOrder)) {
+        for (const std::string& metricName : orderedMetricNames(nullptr, metrics, nullptr, reportOrder)) {
             const auto metricIt = metrics->find(metricName);
             if (metricIt != metrics->end()) {
                 const std::string phasePrefix = "validate_" + population;
@@ -1045,19 +1103,49 @@ void TrainingRunsStatsReporter::writeResultLineLocked(const TrainingRunResult& r
             }
         }
     }
-    if (result.earlyCompleted()) {
-        if (result.completedEpoch.has_value()) {
-            line += " completed_epoch=" + std::to_string(result.completedEpoch.value());
-        }
-        if (result.bestEpoch.has_value()) {
-            line += " best_epoch=" + std::to_string(result.bestEpoch.value());
-        }
-        if (result.bestScore.has_value()) {
+
+    if (selectedBestCandidate && result.completedEpoch.has_value() &&
+        result.selectedEpoch.value() != result.completedEpoch.value()) {
+        if (result.finalTrainingStats.has_value() && result.finalTrainingStats->loss.has_value()) {
             char buffer[64];
-            std::snprintf(buffer, sizeof(buffer), "best_score=%.6f", result.bestScore.value());
+            std::snprintf(buffer, sizeof(buffer), "latest_train_loss=%.6f", result.finalTrainingStats->loss.value());
+            line += " ";
+            line += styled(buffer, FinalReportAnsi::trainLoss, useColor);
+        }
+        if (result.finalValidationStats.has_value() && result.finalValidationStats->loss.has_value()) {
+            char buffer[64];
+            std::snprintf(buffer, sizeof(buffer), "latest_validate_loss=%.6f", result.finalValidationStats->loss.value());
             line += " ";
             line += styled(buffer, FinalReportAnsi::validateLoss, useColor);
         }
+    }
+
+    const TrainingStatsSnapshot* reportedEpochStats = reportedValidationStats != nullptr
+        ? reportedValidationStats
+        : (reportedTrainingStats != nullptr ? reportedTrainingStats : reportedTestStats);
+    if (reportedEpochStats != nullptr && reportedEpochStats->epoch > 0) {
+        line += " metrics_epoch=" + std::to_string(reportedEpochStats->epoch);
+    }
+    if (result.completedEpoch.has_value()) {
+        line += " completed_epoch=" + std::to_string(result.completedEpoch.value());
+    }
+    if (result.selectedEpoch.has_value()) {
+        line += " selected_epoch=" + std::to_string(result.selectedEpoch.value());
+    }
+    if (result.bestEpoch.has_value()) {
+        line += " best_epoch=" + std::to_string(result.bestEpoch.value());
+    }
+    if (result.bestScore.has_value()) {
+        char buffer[64];
+        std::snprintf(buffer, sizeof(buffer), "best_score=%.6f", result.bestScore.value());
+        line += " ";
+        line += styled(buffer, FinalReportAnsi::validateLoss, useColor);
+    }
+    if (result.latestScore.has_value()) {
+        char buffer[64];
+        std::snprintf(buffer, sizeof(buffer), "latest_score=%.6f", result.latestScore.value());
+        line += " ";
+        line += styled(buffer, FinalReportAnsi::validateLoss, useColor);
     }
     if (!result.exception.message.empty()) {
         line += " message=\"" + result.exception.message + "\"";

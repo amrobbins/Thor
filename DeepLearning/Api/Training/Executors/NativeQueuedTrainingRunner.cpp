@@ -929,30 +929,35 @@ class TrainingArtifactManager {
         : saveModelDirectory(std::move(saveModelDirectory)), overwrite(overwrite) {}
 
     ~TrainingArtifactManager() {
-        if (bestCandidateDirectory.has_value()) {
+        if (bestCandidate.has_value() && bestCandidate->directory.has_value()) {
             std::error_code errorCode;
-            std::filesystem::remove_all(bestCandidateDirectory.value(), errorCode);
+            std::filesystem::remove_all(bestCandidate->directory.value(), errorCode);
         }
     }
 
     [[nodiscard]] bool enabled() const { return saveModelDirectory.has_value(); }
 
-    void maybeSnapshotBestCandidate(PlacedNetwork& placedNetwork, uint64_t epoch, std::optional<double> score) {
+    void maybeSnapshotBestCandidate(PlacedNetwork& placedNetwork,
+                                    const TrainingModelSelectionContext& context,
+                                    std::optional<double> score) {
         if (!score.has_value() || !std::isfinite(score.value())) {
             return;
         }
-        if (bestScore.has_value() && score.value() >= bestScore.value()) {
+        if (bestCandidate.has_value() && score.value() >= bestCandidate->score) {
             return;
         }
 
-        bestScore = score.value();
-        bestEpoch = epoch;
+        BestCandidate nextCandidate;
+        nextCandidate.epoch = context.epoch;
+        nextCandidate.score = score.value();
+        nextCandidate.context = context;
         if (!enabled()) {
+            bestCandidate = std::move(nextCandidate);
             return;
         }
 
-        const std::filesystem::path newCandidate = uniqueCandidateDirectory(epoch);
-        const std::filesystem::path tmpCandidate = uniqueTemporaryDirectory(epoch);
+        const std::filesystem::path newCandidate = uniqueCandidateDirectory(context.epoch);
+        const std::filesystem::path tmpCandidate = uniqueTemporaryDirectory(context.epoch);
         removePathIfExists(tmpCandidate);
         removePathIfExists(newCandidate);
 
@@ -965,10 +970,11 @@ class TrainingArtifactManager {
             throw;
         }
 
-        if (bestCandidateDirectory.has_value()) {
-            removePathIfExists(bestCandidateDirectory.value());
+        if (bestCandidate.has_value() && bestCandidate->directory.has_value()) {
+            removePathIfExists(bestCandidate->directory.value());
         }
-        bestCandidateDirectory = newCandidate;
+        nextCandidate.directory = newCandidate;
+        bestCandidate = std::move(nextCandidate);
     }
 
     void finalize(PlacedNetwork& placedNetwork,
@@ -977,7 +983,7 @@ class TrainingArtifactManager {
         if (!enabled()) {
             return;
         }
-        if (!persistLatestArtifact && !bestCandidateDirectory.has_value()) {
+        if (!persistLatestArtifact && !hasBestCandidateArtifact()) {
             throw std::runtime_error(
                 "Training artifact finalization requires either a latest artifact or a persisted best candidate.");
         }
@@ -1004,11 +1010,11 @@ class TrainingArtifactManager {
                 std::filesystem::rename(latestTemporaryDirectory, latestDirectory);
             }
 
-            if (bestCandidateDirectory.has_value()) {
+            if (hasBestCandidateArtifact()) {
                 const std::filesystem::path bestDirectory = finalTemporaryDirectory / "best";
                 removePathIfExists(bestDirectory);
-                std::filesystem::rename(bestCandidateDirectory.value(), bestDirectory);
-                bestCandidateDirectory.reset();
+                std::filesystem::rename(bestCandidate->directory.value(), bestDirectory);
+                bestCandidate->directory.reset();
             }
 
             writeSelectionMetadata(finalTemporaryDirectory, metadata);
@@ -1021,9 +1027,18 @@ class TrainingArtifactManager {
         }
     }
 
-    [[nodiscard]] std::optional<double> getBestScore() const { return bestScore; }
-    [[nodiscard]] std::optional<uint64_t> getBestEpoch() const { return bestEpoch; }
-    [[nodiscard]] bool hasBestCandidateArtifact() const { return bestCandidateDirectory.has_value(); }
+    [[nodiscard]] std::optional<double> getBestScore() const {
+        return bestCandidate.has_value() ? std::optional<double>(bestCandidate->score) : std::nullopt;
+    }
+    [[nodiscard]] std::optional<uint64_t> getBestEpoch() const {
+        return bestCandidate.has_value() ? std::optional<uint64_t>(bestCandidate->epoch) : std::nullopt;
+    }
+    [[nodiscard]] std::optional<TrainingModelSelectionContext> getBestModelSelectionContext() const {
+        return bestCandidate.has_value() ? std::optional<TrainingModelSelectionContext>(bestCandidate->context) : std::nullopt;
+    }
+    [[nodiscard]] bool hasBestCandidateArtifact() const {
+        return bestCandidate.has_value() && bestCandidate->directory.has_value();
+    }
 
    private:
     static void removePathIfExists(const std::filesystem::path& path) {
@@ -1190,11 +1205,16 @@ class TrainingArtifactManager {
         }
     }
 
+    struct BestCandidate {
+        uint64_t epoch = 0;
+        double score = 0.0;
+        TrainingModelSelectionContext context{};
+        std::optional<std::filesystem::path> directory{};
+    };
+
     std::optional<std::string> saveModelDirectory{};
     bool overwrite = false;
-    std::optional<double> bestScore{};
-    std::optional<uint64_t> bestEpoch{};
-    std::optional<std::filesystem::path> bestCandidateDirectory{};
+    std::optional<BestCandidate> bestCandidate{};
 };
 
 void ensureNativeQueuedPlanCompatible(const ExecutableTrainingPlan& plan, const Network& network, bool evaluateOnly) {
@@ -3599,7 +3619,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                     cumulativeEpoch, request.defaultValidationPopulation);
             const std::optional<double> currentScore = request.modelSelectionScore.evaluate(currentSelectionContext);
             latestModelSelectionScore = currentScore;
-            trainingArtifacts.maybeSnapshotBestCandidate(*placedNetwork, cumulativeEpoch, currentScore);
+            trainingArtifacts.maybeSnapshotBestCandidate(*placedNetwork, currentSelectionContext, currentScore);
             const std::optional<double> bestScore = trainingArtifacts.getBestScore();
             const std::optional<uint64_t> bestCumulativeEpoch = trainingArtifacts.getBestEpoch();
             if (currentScore.has_value() && std::isfinite(currentScore.value()) && bestScore.has_value() && bestCumulativeEpoch.has_value()) {
@@ -3646,8 +3666,9 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         }
         const std::optional<double> finalScore = request.modelSelectionScore.evaluate(finalSelectionContext);
         latestModelSelectionScore = finalScore;
-        trainingArtifacts.maybeSnapshotBestCandidate(*placedNetwork, finalCompletedEpoch, finalScore);
+        trainingArtifacts.maybeSnapshotBestCandidate(*placedNetwork, finalSelectionContext, finalScore);
     }
+    std::optional<uint64_t> selectedModelEpoch{};
     if (!evaluateOnly) {
         TrainingSelectionMetadata selectionMetadata;
         selectionMetadata.bestEpoch = trainingArtifacts.getBestEpoch();
@@ -3670,6 +3691,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         // full completed epoch.
         const std::optional<uint64_t> selectedArtifactEpoch =
             trainingArtifacts.hasBestCandidateArtifact() ? trainingArtifacts.getBestEpoch() : std::nullopt;
+        selectedModelEpoch = selectedArtifactEpoch.value_or(finalCompletedEpoch);
 
         const bool persistLatestArtifact =
             request.earlyCompletionPolicies.empty() || !trainingArtifacts.hasBestCandidateArtifact();
@@ -3701,6 +3723,12 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     TrainingStatsSnapshot finishedStats = makeBaseSnapshot(TrainingEventPhase::UNKNOWN, currentEpoch, batchSize, 0, nullptr);
     finishedStats.metrics["completed_epoch"] = static_cast<double>(finalCompletedEpoch);
     finishedStats.metrics["first_model_selection_epoch"] = static_cast<double>(request.firstModelSelectionEpoch);
+    if (selectedModelEpoch.has_value()) {
+        finishedStats.metrics["selected_epoch"] = static_cast<double>(selectedModelEpoch.value());
+    }
+    if (latestModelSelectionScore.has_value() && std::isfinite(latestModelSelectionScore.value())) {
+        finishedStats.metrics["latest_score"] = latestModelSelectionScore.value();
+    }
     if (trainingArtifacts.getBestEpoch().has_value()) {
         finishedStats.metrics["best_epoch"] = static_cast<double>(trainingArtifacts.getBestEpoch().value());
     }
@@ -3708,7 +3736,9 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         finishedStats.metrics["best_score"] = trainingArtifacts.getBestScore().value();
     }
     emitTrainingEvent(observer,
-                      TrainingEvent::runFinished(std::move(finishedStats), finalCompletionReason));
+                      TrainingEvent::runFinished(std::move(finishedStats),
+                                                 finalCompletionReason,
+                                                 trainingArtifacts.getBestModelSelectionContext()));
 }
 
 }  // namespace Thor

@@ -2498,8 +2498,17 @@ Multiple windowed fields may reference the same persisted sequence.
     training_run_result.def_prop_ro("completion_reason_enum", [](const TrainingRunResult& self) { return self.completionReason; });
     training_run_result.def_prop_ro("early_completed", &TrainingRunResult::earlyCompleted);
     training_run_result.def_prop_ro("completed_epoch", [](const TrainingRunResult& self) { return optionalUint64(self.completedEpoch); });
+    training_run_result.def_prop_ro("selected_epoch", [](const TrainingRunResult& self) { return optionalUint64(self.selectedEpoch); });
     training_run_result.def_prop_ro("best_epoch", [](const TrainingRunResult& self) { return optionalUint64(self.bestEpoch); });
     training_run_result.def_prop_ro("best_score", [](const TrainingRunResult& self) { return optionalDouble(self.bestScore); });
+    training_run_result.def_prop_ro("latest_score", [](const TrainingRunResult& self) { return optionalDouble(self.latestScore); });
+    training_run_result.def_prop_ro("selected_score", [](const TrainingRunResult& self) { return optionalDouble(self.selectedScore()); });
+    training_run_result.def_prop_ro("best_model_selection", [](const TrainingRunResult& self) -> nb::object {
+        if (!self.bestModelSelectionContext.has_value()) {
+            return nb::none();
+        }
+        return modelSelectionContextToPythonDict(self.bestModelSelectionContext.value());
+    });
     training_run_result.def_prop_ro("saved_model_dir", [](const TrainingRunResult& self) -> nb::object {
         if (!self.savedModelDirectory.has_value()) {
             return nb::none();

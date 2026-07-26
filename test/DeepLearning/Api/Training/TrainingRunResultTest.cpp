@@ -85,6 +85,23 @@ TEST(TrainingRunResult, CarriesFinalStatsForEveryValidationPopulation) {
         1.5);
 }
 
+TEST(TrainingRunResult, SelectedScoreFollowsTheSelectedModelEpoch) {
+    TrainingRunResult selectedBest = TrainingRunResult::completedResult("fold_0");
+    selectedBest.completedEpoch = 8;
+    selectedBest.selectedEpoch = 3;
+    selectedBest.bestEpoch = 3;
+    selectedBest.bestScore = 0.25;
+    selectedBest.latestScore = 0.75;
+
+    ASSERT_TRUE(selectedBest.selectedScore().has_value());
+    EXPECT_DOUBLE_EQ(selectedBest.selectedScore().value(), 0.25);
+
+    TrainingRunResult selectedLatest = selectedBest;
+    selectedLatest.selectedEpoch = 8;
+    ASSERT_TRUE(selectedLatest.selectedScore().has_value());
+    EXPECT_DOUBLE_EQ(selectedLatest.selectedScore().value(), 0.75);
+}
+
 TEST(TrainingRunResult, ClassifiesCancellationAndInterruptExceptions) {
     TrainingRunResult cancelled = TrainingRunResult::fromException("fold_1", makeExceptionPtr(TrainingCancelled("cancelled by sibling")));
     TrainingRunResult interrupted = TrainingRunResult::fromException("fold_2", makeExceptionPtr(TrainingInterrupted("ctrl-c")));

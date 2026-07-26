@@ -35,6 +35,7 @@ namespace {
 struct HostGate {
     mutex mtx;
     condition_variable cv;
+    bool entered = false;
     bool released = false;
 };
 
@@ -46,7 +47,14 @@ struct WaitForHostGateArgs : public HostFunctionArgsBase {
 void waitForHostGate(void *rawArgs) {
     auto *args = static_cast<WaitForHostGateArgs *>(rawArgs);
     unique_lock<mutex> lock(args->gate->mtx);
+    args->gate->entered = true;
+    args->gate->cv.notify_all();
     args->gate->cv.wait(lock, [&] { return args->gate->released; });
+}
+
+bool waitForHostGateToEnter(const shared_ptr<HostGate> &gate, chrono::milliseconds timeout) {
+    unique_lock<mutex> lock(gate->mtx);
+    return gate->cv.wait_for(lock, timeout, [&] { return gate->entered; });
 }
 
 void releaseHostGate(const shared_ptr<HostGate> &gate) {
@@ -357,6 +365,15 @@ TEST(LayerSynchronization, PlacedNetworkSynchronizeWaitsForModelStreamsWithoutDr
     auto modelGate = make_shared<HostGate>();
     auto unrelatedGate = make_shared<HostGate>();
     target.modelStream.enqueueHostFunction(&waitForHostGate, make_unique<WaitForHostGateArgs>(modelGate));
+
+    // Host functions in independent CUDA streams have undefined execution
+    // order and may be serialized. Ensure the model callback is already the
+    // active blocked callback before adding unrelated work, otherwise CUDA is
+    // permitted to start the unrelated callback first and the test would
+    // accidentally test callback scheduling rather than synchronization scope.
+    ASSERT_TRUE(waitForHostGateToEnter(modelGate, chrono::seconds(10)))
+        << "model-stream host gate did not begin execution";
+
     unrelatedStream.enqueueHostFunction(&waitForHostGate, make_unique<WaitForHostGateArgs>(unrelatedGate));
 
     auto synchronizeFuture = async(launch::async, [&] { target.placedNetwork->synchronize(); });

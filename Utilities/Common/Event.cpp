@@ -52,6 +52,7 @@ bool Event::usesBlockingSync() const {
 void Event::synchronize() {
     THOR_THROW_IF_FALSE(!uninitialized());
 
+    ScopedGpu scopedGpu(gpuNum);
     CUDA_CHECK(cudaEventSynchronize(*this));
 }
 

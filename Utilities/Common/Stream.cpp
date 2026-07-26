@@ -1,5 +1,6 @@
 #include <optional>
 #include "Utilities/Common/Stream.h"
+#include "Utilities/Common/HostFunctionCleanupQueue.h"
 #include "Utilities/Expression/CudaHelpers.h"
 #include "DeepLearning/Implementation/ThorError.h"
 
@@ -113,16 +114,6 @@ void Stream::setMaxNumDownloadStreams(uint32_t numDownloadStreams) {
     maxNumDownloadStreams = numDownloadStreams;
 }
 
-void cleanUpHostFunctionArgs(Stream stream, unique_ptr<HostFunctionArgsBase> &&args) {
-    stream.synchronize();
-    // Now args go out of scope and is deleted
-}
-
-void Stream::launchCleanUpHostFunctionArgs(unique_ptr<HostFunctionArgsBase> &&args) {
-    ThreadJoinQueue::instance().push(thread(&cleanUpHostFunctionArgs, *this, std::move(args)));
-    THOR_THROW_IF_FALSE(args == nullptr);
-}
-
 void Stream::waitEvent(Event event) const {
     THOR_THROW_IF_FALSE(!uninitialized());
 
@@ -134,7 +125,13 @@ void Stream::waitEvent(Event event) const {
 void Stream::synchronize() const {
     THOR_THROW_IF_FALSE(!uninitialized());
 
-    CUDA_CHECK(cudaStreamSynchronize(cudaStream));
+    // cudaStreamSynchronize follows the process-wide CUDA scheduling policy
+    // and may busy-spin. A blocking event preserves stream completion
+    // semantics while putting this genuine host wait to sleep.
+    Event completionEvent = putEvent(
+        /*enableTiming=*/false,
+        /*expectingHostToWaitOnThisOne=*/true);
+    completionEvent.synchronize();
 }
 
 void Stream::deviceSynchronize(int gpuNum) {
@@ -143,8 +140,12 @@ void Stream::deviceSynchronize(int gpuNum) {
 }
 
 void Stream::enqueueHostFunction(cudaHostFn_t function, std::unique_ptr<HostFunctionArgsBase> &&args) {
+    THOR_THROW_IF_FALSE(function != nullptr);
+    THOR_THROW_IF_FALSE(args != nullptr);
+
     CUDA_CHECK(cudaLaunchHostFunc(*this, function, args.get()));
-    launchCleanUpHostFunctionArgs(std::move(args));
+    HostFunctionCleanupQueue::instance().push(*this, std::move(args));
+    THOR_THROW_IF_FALSE(args == nullptr);
 }
 
 void Stream::construct(int gpuNum, Priority priority) {

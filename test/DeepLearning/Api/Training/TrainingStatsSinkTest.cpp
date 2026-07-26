@@ -498,15 +498,29 @@ TEST(TrainingRunsStatsReporter, EarlyCompletedRunResultReportsCompletionMetadata
     TrainingRunsStatsReporter reporter(out, LineStatsColorMode::NEVER, 0.0);
     reporter.configureRun("early_fold", TrainingRunsStatsReporter::RunConfig{0.0});
 
+    TrainingStatsSnapshot finalTrainingStats = makeStats(TrainingEventPhase::TRAIN, 0.50);
+    finalTrainingStats.metrics["daily_central_loss"] = 0.55;
+    TrainingStatsSnapshot finalValidationStats = makeStats(TrainingEventPhase::VALIDATE, 0.40);
+    finalValidationStats.metrics["daily_central_loss"] = 0.45;
     TrainingRunResult result = TrainingRunResult::completedResult(
         "early_fold",
-        makeStats(TrainingEventPhase::TRAIN, 0.50),
-        makeStats(TrainingEventPhase::VALIDATE, 0.40),
+        finalTrainingStats,
+        finalValidationStats,
         {},
         TrainingRunCompletionReason::EARLY_COMPLETED,
         2,
         1,
         0.125);
+    result.selectedEpoch = 1;
+    result.latestScore = 0.45;
+    TrainingModelSelectionContext bestContext;
+    bestContext.epoch = 1;
+    bestContext.train.loss = 0.25;
+    bestContext.train.losses["daily_central_loss"] = 0.30;
+    bestContext.validate.loss = 0.20;
+    bestContext.validate.losses["daily_central_loss"] = 0.125;
+    bestContext.validations["validate"] = bestContext.validate;
+    result.bestModelSelectionContext = bestContext;
 
     reporter.markRunStarting("early_fold");
     reporter.markRunFinished(result);
@@ -517,9 +531,18 @@ TEST(TrainingRunsStatsReporter, EarlyCompletedRunResultReportsCompletionMetadata
                                {"INFO runs[early_fold]:",
                                 "status=completed",
                                 "result=early_completed",
+                                "train_loss=0.250000",
+                                "validate_loss=0.200000",
+                                "train_daily_central_loss=0.300000",
+                                "validate_daily_central_loss=0.125000",
+                                "latest_train_loss=0.500000",
+                                "latest_validate_loss=0.400000",
+                                "metrics_epoch=1",
                                 "completed_epoch=2",
+                                "selected_epoch=1",
                                 "best_epoch=1",
-                                "best_score=0.125000"}))
+                                "best_score=0.125000",
+                                "latest_score=0.450000"}))
         << output;
 }
 

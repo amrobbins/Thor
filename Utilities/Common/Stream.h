@@ -6,7 +6,7 @@
 #include "ScopedGpu.h"
 #include <optional>
 #include "Utilities/Common/ReferenceCounted.h"
-#include "Utilities/Common/ThreadJoinQueue.h"
+#include "Utilities/Common/HostFunctionArgs.h"
 #include "Utilities/ComputeTopology/MachineEvaluator.h"
 
 #include <cudnn.h>
@@ -17,21 +17,11 @@
 
 #include <stdio.h>
 #include <deque>
-#include <future>
 #include <memory>
 #include <mutex>
-#include <thread>
 #include <unordered_map>
 
 #define DEBUG_REF_COUNTS
-
-// The following struct is defined to be a base class of the struct that will hold the args to the function that is enqueued.
-// The reason for this is that it declares a virtual method so that I can use a dynamic cast to ensure everything is correct.
-// Also on the enqueued thread I can't call any cuda function, so I can't delete a tensor for example, so this base class
-// allows the parameters to be deleted on another thread.
-struct HostFunctionArgsBase {
-    virtual ~HostFunctionArgsBase() {}
-};
 
 /**
  * A reference counted container for cudaStream_t.
@@ -93,6 +83,7 @@ class Stream : private ReferenceCounted {
             event = Event(gpuNum, enableTiming, expectingHostToWaitOnThisOne);
         } else {
             THOR_THROW_IF_FALSE(event.getGpuNum() == gpuNum);
+            THOR_THROW_IF_FALSE(event.usesBlockingSync() == expectingHostToWaitOnThisOne);
         }
         event.record(*this);
     }
@@ -190,8 +181,6 @@ class Stream : private ReferenceCounted {
 
     static Stream getNextDownloadStream(uint32_t deviceNum);
     static void setMaxNumDownloadStreams(uint32_t numGradientUpdateStreams);
-
-    void launchCleanUpHostFunctionArgs(std::unique_ptr<HostFunctionArgsBase> &&args);
 
    private:
     void construct(int gpuNum, Priority priority);

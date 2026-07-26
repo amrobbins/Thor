@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Api/Training/Events/TrainingStatsSnapshot.h"
+#include "DeepLearning/Api/Training/ModelSelectionScore.h"
 
 #include <optional>
 #include <string>
@@ -14,25 +15,32 @@ struct TrainingEvent {
     TrainingEventType type = TrainingEventType::STATS;
     TrainingStatsSnapshot stats{};
     std::string message{};
+    std::optional<TrainingModelSelectionContext> bestModelSelectionContext{};
 
     static TrainingEvent runStarted(TrainingStatsSnapshot stats = {}, std::string message = {}) {
-        return TrainingEvent{TrainingEventType::RUN_STARTED, std::move(stats), std::move(message)};
+        return TrainingEvent{TrainingEventType::RUN_STARTED, std::move(stats), std::move(message), {}};
     }
 
     static TrainingEvent epochStarted(TrainingStatsSnapshot stats = {}, std::string message = {}) {
-        return TrainingEvent{TrainingEventType::EPOCH_STARTED, std::move(stats), std::move(message)};
+        return TrainingEvent{TrainingEventType::EPOCH_STARTED, std::move(stats), std::move(message), {}};
     }
 
     static TrainingEvent statsUpdated(TrainingStatsSnapshot stats, std::string message = {}) {
-        return TrainingEvent{TrainingEventType::STATS, std::move(stats), std::move(message)};
+        return TrainingEvent{TrainingEventType::STATS, std::move(stats), std::move(message), {}};
     }
 
     static TrainingEvent epochFinished(TrainingStatsSnapshot stats = {}, std::string message = {}) {
-        return TrainingEvent{TrainingEventType::EPOCH_FINISHED, std::move(stats), std::move(message)};
+        return TrainingEvent{TrainingEventType::EPOCH_FINISHED, std::move(stats), std::move(message), {}};
     }
 
-    static TrainingEvent runFinished(TrainingStatsSnapshot stats = {}, std::string message = {}) {
-        return TrainingEvent{TrainingEventType::RUN_FINISHED, std::move(stats), std::move(message)};
+    static TrainingEvent runFinished(
+        TrainingStatsSnapshot stats = {},
+        std::string message = {},
+        std::optional<TrainingModelSelectionContext> bestModelSelectionContext = {}) {
+        return TrainingEvent{TrainingEventType::RUN_FINISHED,
+                             std::move(stats),
+                             std::move(message),
+                             std::move(bestModelSelectionContext)};
     }
 };
 

@@ -2,6 +2,7 @@
 
 #include "DeepLearning/Api/Training/Cancellation/TrainingCancellation.h"
 #include "DeepLearning/Api/Training/Events/TrainingStatsSnapshot.h"
+#include "DeepLearning/Api/Training/ModelSelectionScore.h"
 
 #include <algorithm>
 #include <cctype>
@@ -127,8 +128,11 @@ struct TrainingRunResult {
     TrainingRunStatus status = TrainingRunStatus::NOT_STARTED;
     TrainingRunCompletionReason completionReason = TrainingRunCompletionReason::COMPLETED;
     std::optional<uint64_t> completedEpoch{};
+    std::optional<uint64_t> selectedEpoch{};
     std::optional<uint64_t> bestEpoch{};
     std::optional<double> bestScore{};
+    std::optional<double> latestScore{};
+    std::optional<TrainingModelSelectionContext> bestModelSelectionContext{};
     std::optional<std::string> savedModelDirectory{};
     std::optional<std::string> savedModelNetworkName{};
     std::optional<TrainingStatsSnapshot> finalTrainingStats{};
@@ -151,6 +155,14 @@ struct TrainingRunResult {
         return status == TrainingRunStatus::FAILED || status == TrainingRunStatus::OUT_OF_MEMORY || status == TrainingRunStatus::INTERRUPTED;
     }
     [[nodiscard]] bool cancelled() const { return status == TrainingRunStatus::CANCELLED; }
+
+    [[nodiscard]] std::optional<double> selectedScore() const {
+        if (selectedEpoch.has_value() && bestEpoch.has_value() &&
+            selectedEpoch.value() == bestEpoch.value() && bestScore.has_value()) {
+            return bestScore;
+        }
+        return latestScore;
+    }
 
     [[nodiscard]] const std::optional<TrainingStatsSnapshot>& finalStatsForPhase(TrainingEventPhase phase) const {
         switch (phase) {
@@ -185,14 +197,21 @@ struct TrainingRunResult {
                                                            std::optional<std::string> savedModelDirectory = {},
                                                            std::optional<std::string> savedModelNetworkName = {},
                                                            std::map<std::string, TrainingStatsSnapshot>
-                                                               finalValidationStatsByPopulation = {}) {
+                                                               finalValidationStatsByPopulation = {},
+                                                           std::optional<uint64_t> selectedEpoch = {},
+                                                           std::optional<double> latestScore = {},
+                                                           std::optional<TrainingModelSelectionContext>
+                                                               bestModelSelectionContext = {}) {
         TrainingRunResult result;
         result.runName = std::move(runName);
         result.status = TrainingRunStatus::COMPLETED;
         result.completionReason = completionReason;
         result.completedEpoch = completedEpoch;
+        result.selectedEpoch = selectedEpoch;
         result.bestEpoch = bestEpoch;
         result.bestScore = bestScore;
+        result.latestScore = latestScore;
+        result.bestModelSelectionContext = std::move(bestModelSelectionContext);
         result.savedModelDirectory = std::move(savedModelDirectory);
         result.savedModelNetworkName = std::move(savedModelNetworkName);
         result.finalTrainingStats = std::move(finalTrainingStats);

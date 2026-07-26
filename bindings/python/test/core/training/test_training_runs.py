@@ -4667,8 +4667,12 @@ def test_training_runs_early_completion_stops_early_and_saves_best_candidate(cap
     assert result.result == "early_completed"
     assert result.early_completed is True
     assert result.completed_epoch == 2
+    assert result.selected_epoch == 1
     assert result.best_epoch == 1
     assert result.best_score == pytest.approx(1.0)
+    assert result.latest_score == pytest.approx(2.0)
+    assert result.selected_score == pytest.approx(1.0)
+    assert result.best_model_selection["epoch"] == 1
     assert result.final_training_stats.epoch == 2
     assert result.final_training_stats.epochs == 50
     assert early_dir.exists()
@@ -4677,7 +4681,7 @@ def test_training_runs_early_completion_stops_early_and_saves_best_candidate(cap
 
     plain_text = _ANSI_RE.sub("", captured_text)
     assert re.search(
-        r"INFO runs\[fold_0\]:.*status=completed.*result=early_completed.*completed_epoch=2.*best_epoch=1.*best_score=1\.000000",
+        r"INFO runs\[fold_0\]:.*status=completed.*result=early_completed.*completed_epoch=2.*selected_epoch=1.*best_epoch=1.*best_score=1\.000000.*latest_score=2\.000000",
         plain_text,
     )
 

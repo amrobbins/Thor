@@ -205,6 +205,9 @@ class ResultCapturingTrainingObserver : public TrainingObserver {
             }
             bestEpoch = uintMetric(event.stats, "best_epoch");
             bestScore = doubleMetric(event.stats, "best_score");
+            selectedEpoch = uintMetric(event.stats, "selected_epoch");
+            latestScore = doubleMetric(event.stats, "latest_score");
+            bestModelSelectionContext = event.bestModelSelectionContext;
         }
         inner.onTrainingEvent(event);
     }
@@ -218,8 +221,11 @@ class ResultCapturingTrainingObserver : public TrainingObserver {
     std::optional<TrainingStatsSnapshot> finalTestStats{};
     TrainingRunCompletionReason completionReason = TrainingRunCompletionReason::COMPLETED;
     std::optional<uint64_t> completedEpoch{};
+    std::optional<uint64_t> selectedEpoch{};
     std::optional<uint64_t> bestEpoch{};
     std::optional<double> bestScore{};
+    std::optional<double> latestScore{};
+    std::optional<TrainingModelSelectionContext> bestModelSelectionContext{};
 
    private:
     static std::optional<double> doubleMetric(const TrainingStatsSnapshot& stats, const std::string& name) {
@@ -681,7 +687,10 @@ TrainingRunResult Trainer::fit(const TrainerFitOptions& options) {
                                                   capturingObserver.bestScore,
                                                   saveModelDirectory,
                                                   trainedArtifactNetworkName(placedNetworkAfterLastFit, network),
-                                                  capturingObserver.finalValidationStatsByPopulation);
+                                                  capturingObserver.finalValidationStatsByPopulation,
+                                                  capturingObserver.selectedEpoch,
+                                                  capturingObserver.latestScore,
+                                                  capturingObserver.bestModelSelectionContext);
     } catch (const TrainingNonFiniteLossDetected& e) {
         capturingObserver.flush();
         TrainingRunResult result;
@@ -1062,7 +1071,10 @@ TrainingRunResult Trainer::fitTrainingRun(std::string runName,
                                                   capturingObserver.bestScore,
                                                   saveModelDirectory,
                                                   trainedArtifactNetworkName(placedNetworkAfterLastFit, network),
-                                                  capturingObserver.finalValidationStatsByPopulation);
+                                                  capturingObserver.finalValidationStatsByPopulation,
+                                                  capturingObserver.selectedEpoch,
+                                                  capturingObserver.latestScore,
+                                                  capturingObserver.bestModelSelectionContext);
     } catch (const TrainingRestartConditionExceeded& e) {
         capturingObserver.flush();
         TrainingRunResult result;
