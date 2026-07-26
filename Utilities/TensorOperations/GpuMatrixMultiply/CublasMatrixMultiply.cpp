@@ -2364,7 +2364,9 @@ static std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> cublasLtS
                                                setBiasPointer,
                                                setAuxPointer);
             }
-            stopEvents[candidateIndex].push_back(stream.putEvent(true));
+            stopEvents[candidateIndex].push_back(stream.putEvent(
+                /*enableTiming=*/true,
+                /*expectingHostToWaitOnThisOne=*/true));
             if (status != CUBLAS_STATUS_SUCCESS) {
                 candidates[candidateIndex].errorFlag = true;
             }
@@ -2416,7 +2418,9 @@ static std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> cublasLtS
                                                setBiasPointer,
                                                setAuxPointer);
             }
-            stopEvents[candidateIndex].push_back(stream.putEvent(true));
+            stopEvents[candidateIndex].push_back(stream.putEvent(
+                /*enableTiming=*/true,
+                /*expectingHostToWaitOnThisOne=*/true));
             if (status != CUBLAS_STATUS_SUCCESS) {
                 candidates[candidateIndex].errorFlag = true;
             }
@@ -3807,7 +3811,9 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
             workspaceInstance = 0;
     }
 
-    Event stopEvent = stream.putEvent(true);
+    Event stopEvent = stream.putEvent(
+        /*enableTiming=*/true,
+        /*expectingHostToWaitOnThisOne=*/true);
     elapsedTime = stopEvent.synchronizeAndReportElapsedTimeInMilliseconds(startEvent);
     double kernelExecutionTimeMilliseconds = elapsedTime / 5.0;
     int kernelsToExecute = maxl(5, 12.0 / kernelExecutionTimeMilliseconds);
@@ -3835,7 +3841,9 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
                 workspaceInstance = 0;
         }
 
-        Event stopEvent = stream.putEvent(true);
+        Event stopEvent = stream.putEvent(
+            /*enableTiming=*/true,
+            /*expectingHostToWaitOnThisOne=*/true);
         elapsedTime += stopEvent.synchronizeAndReportElapsedTimeInMilliseconds(startEvent);
     }
 
@@ -3891,7 +3899,9 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
             workspaceInstance += 1;
             if (workspaceInstance >= numWorkspaceInstances)
                 workspaceInstance = 0;
-            stopEvents[kernelIndex].push_back(stream.putEvent(true));
+            stopEvents[kernelIndex].push_back(stream.putEvent(
+                /*enableTiming=*/true,
+                /*expectingHostToWaitOnThisOne=*/true));
             if (cublasStatus != CUBLAS_STATUS_SUCCESS)
                 kernels[kernelIndex].setErrorFlag();
         }
@@ -3955,7 +3965,9 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
             workspaceInstance += 1;
             if (workspaceInstance >= numWorkspaceInstances)
                 workspaceInstance = 0;
-            stopEvents[kernelIndex].push_back(stream.putEvent(true));
+            stopEvents[kernelIndex].push_back(stream.putEvent(
+                /*enableTiming=*/true,
+                /*expectingHostToWaitOnThisOne=*/true));
 
             if (cublasStatus != CUBLAS_STATUS_SUCCESS) {
                 kernels[kernelIndex].setErrorFlag();
@@ -4024,7 +4036,9 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
 
     Event optimizationEndEvent;
     if (printResults) {
-        optimizationEndEvent = stream.putEvent(true);
+        optimizationEndEvent = stream.putEvent(
+            /*enableTiming=*/true,
+            /*expectingHostToWaitOnThisOne=*/true);
         float optimizationTimeMillis = optimizationEndEvent.synchronizeAndReportElapsedTimeInMilliseconds(optimizationStartEvent);
         printf("\nOverall optimization time %0.1fms\n", optimizationTimeMillis);
     }

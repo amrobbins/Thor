@@ -44,6 +44,11 @@ int32_t Event::getGpuNum() const {
 
 bool Event::isInitialized() const { return initialized(); }
 
+bool Event::usesBlockingSync() const {
+    THOR_THROW_IF_FALSE(!uninitialized());
+    return blockingSync;
+}
+
 void Event::synchronize() {
     THOR_THROW_IF_FALSE(!uninitialized());
 
@@ -69,6 +74,7 @@ void Event::construct(int32_t gpuNum, bool enableTiming, bool expectingHostToWai
     ScopedGpu scopedGpu(gpuNum);
 
     this->gpuNum = gpuNum;
+    blockingSync = expectingHostToWaitOnThisOne;
 
     uint32_t flags = 0;
     if (!enableTiming)
@@ -84,6 +90,7 @@ void Event::copyFrom(const Event &other) {
 
     gpuNum = other.gpuNum;
     cudaEvent = other.cudaEvent;
+    blockingSync = other.blockingSync;
 }
 
 void Event::destroy() {

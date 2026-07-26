@@ -24,6 +24,7 @@ class FiniteCheck : public Layer {
     static void deserialize(const nlohmann::json &j, Network *network);
 
     const std::string &getTensorLabel() const { return tensorLabel; }
+    bool getEnabled() const { return enabled; }
     bool getCheckForward() const { return checkForward; }
     bool getCheckBackward() const { return checkBackward; }
     bool getFailOnNonFinite() const { return failOnNonFinite; }
@@ -41,6 +42,7 @@ class FiniteCheck : public Layer {
 
    private:
     std::string tensorLabel;
+    bool enabled = true;
     bool checkForward = true;
     bool checkBackward = true;
     bool failOnNonFinite = true;
@@ -54,6 +56,7 @@ class FiniteCheck::Builder {
     Builder &network(Network &network);
     Builder &featureInput(Tensor featureInput);
     Builder &tensorLabel(std::string tensorLabel);
+    Builder &enabled(bool enabled);
     Builder &checkForward(bool checkForward);
     Builder &checkBackward(bool checkBackward);
     Builder &failOnNonFinite(bool failOnNonFinite);
@@ -63,6 +66,7 @@ class FiniteCheck::Builder {
     std::optional<Network *> _network;
     std::optional<Tensor> _featureInput;
     std::string _tensorLabel;
+    bool _enabled = true;
     bool _checkForward = true;
     bool _checkBackward = true;
     bool _failOnNonFinite = true;

@@ -1630,7 +1630,7 @@ TEST(FiniteCheck, ForwardReportsCpuNonFiniteValues) {
     vector<shared_ptr<Layer>> layers;
     layers.push_back(make_shared<NetworkInput>(sourceCpu));
     layers.push_back(make_shared<NoOpLayer>());
-    layers.push_back(make_shared<FiniteCheck>("after_projection", 10001, 9001, true, true, true, 4));
+    layers.push_back(make_shared<FiniteCheck>("after_projection", 10001, 9001, true, true, true, 4, true));
     layers.push_back(make_shared<BackpropDescriptorSinkLayer>());
     LayerTestHelper::connectAndInitializeNetwork(layers);
 
@@ -1669,6 +1669,35 @@ TEST(FiniteCheck, ForwardReportsCpuNonFiniteValues) {
     LayerTestHelper::tearDownNetwork(layers);
 }
 
+TEST(FiniteCheck, DisabledLayerPassesNonFiniteValuesWithoutChecking) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorDescriptor descriptor(DataType::FP32, {2, 4});
+    Tensor sourceCpu(cpuPlacement, descriptor);
+
+    vector<shared_ptr<Layer>> layers;
+    layers.push_back(make_shared<NetworkInput>(sourceCpu));
+    layers.push_back(make_shared<NoOpLayer>());
+    layers.push_back(make_shared<FiniteCheck>("disabled_check", 10003, 9003, true, true, true, 4, false));
+    layers.push_back(make_shared<BackpropDescriptorSinkLayer>());
+    LayerTestHelper::connectAndInitializeNetwork(layers);
+
+    auto finiteCheck = dynamic_pointer_cast<FiniteCheck>(layers[2]);
+    ASSERT_NE(finiteCheck, nullptr);
+    ASSERT_TRUE(finiteCheck->getFeatureInput().has_value());
+    ASSERT_TRUE(finiteCheck->getFeatureOutput().has_value());
+    EXPECT_EQ(finiteCheck->getFeatureInput().value().getMemPtr(), finiteCheck->getFeatureOutput().value().getMemPtr());
+
+    Tensor checkedTensor = finiteCheck->getFeatureInput().value();
+    float *values = checkedTensor.getMemPtr<float>();
+    values[0] = std::numeric_limits<float>::quiet_NaN();
+    values[1] = std::numeric_limits<float>::infinity();
+    values[2] = -std::numeric_limits<float>::infinity();
+
+    EXPECT_NO_THROW(finiteCheck->forward(checkedTensor, false, 2));
+
+    LayerTestHelper::tearDownNetwork(layers);
+}
+
 TEST(FiniteCheck, BackwardAliasesAndReportsGpuGradient) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
@@ -1678,7 +1707,7 @@ TEST(FiniteCheck, BackwardAliasesAndReportsGpuGradient) {
     vector<shared_ptr<Layer>> layers;
     layers.push_back(make_shared<NetworkInput>(sourceGpu));
     layers.push_back(make_shared<NoOpLayer>());
-    layers.push_back(make_shared<FiniteCheck>("projection_gradient", 10002, 9002, true, true, true, 4));
+    layers.push_back(make_shared<FiniteCheck>("projection_gradient", 10002, 9002, true, true, true, 4, true));
     layers.push_back(make_shared<BackpropDescriptorSinkLayer>());
     LayerTestHelper::connectNetwork(layers);
 

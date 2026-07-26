@@ -23,7 +23,14 @@ class BatchSourceResourceState {
         }
         // Serialize sealing with event creation so releaseProducer() can never
         // miss a consumer that has already begun registering its final read.
-        consumedEvents.push_back(consumingStream.putEvent());
+        //
+        // Session recyclers wait for this event from a host thread before
+        // returning the reusable source storage. Create it with
+        // cudaEventBlockingSync so that wait sleeps instead of actively polling
+        // the GPU.
+        consumedEvents.push_back(consumingStream.putEvent(
+            /*enableTiming=*/false,
+            /*expectingHostToWaitOnThisOne=*/true));
     }
 
     void releaseProducer() {

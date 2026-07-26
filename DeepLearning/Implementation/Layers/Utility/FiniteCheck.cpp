@@ -101,11 +101,13 @@ FiniteCheck::FiniteCheck(std::string tensorLabel,
                          bool checkForward,
                          bool checkBackward,
                          bool failOnNonFinite,
-                         uint32_t maxReportedIndices)
+                         uint32_t maxReportedIndices,
+                         bool enabled)
     : tensorLabel(std::move(tensorLabel)),
       apiTensorId(apiTensorId),
       originalApiTensorId(originalApiTensorId),
       checkForward(checkForward),
+      enabled(enabled),
       checkBackward(checkBackward),
       failOnNonFinite(failOnNonFinite),
       maxReportedIndices(maxReportedIndices) {
@@ -150,6 +152,8 @@ void FiniteCheck::compileImpl() {
     Layer::compileImpl();
     THOR_THROW_IF_FALSE(featureInput.has_value());
 
+    if (!enabled)
+        return;
     if (TensorDescriptor::isIntegralType(featureInput.value().getDataType()))
         return;
     if (featureInput.value().getPlacement().getMemDevice() != TensorPlacement::MemDevices::GPU)
@@ -174,6 +178,8 @@ void FiniteCheck::cleanup() {
 
 void FiniteCheck::infer(std::optional<Tensor> inputTensor, std::optional<Tensor> outputTensor, Stream stream) {
     (void)outputTensor;
+    if (!enabled)
+        return;
     if (checkForward && inputTensor.has_value())
         checkTensor(inputTensor.value(), "forward", "activation", stream);
 }
@@ -184,6 +190,8 @@ void FiniteCheck::backProp(std::optional<Tensor> dataIn,
                            Stream stream) {
     (void)dataIn;
     (void)errorOut;
+    if (!enabled)
+        return;
     if (checkBackward && errorIn.has_value())
         checkTensor(errorIn.value(), "backward", "incoming_gradient", stream);
 }

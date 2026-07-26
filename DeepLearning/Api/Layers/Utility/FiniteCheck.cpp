@@ -2,14 +2,39 @@
 
 #include "DeepLearning/Implementation/ThorError.h"
 
+#include <iostream>
+#include <mutex>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <utility>
 
 using json = nlohmann::json;
 using namespace std;
 
 namespace Thor {
+namespace {
+
+std::mutex finiteCheckWarningMutex;
+std::unordered_set<uint64_t> warnedFiniteCheckLayerIds;
+
+void warnIfEnabled(const FiniteCheck &finiteCheck) {
+    if (!finiteCheck.getEnabled())
+        return;
+
+    std::lock_guard<std::mutex> lock(finiteCheckWarningMutex);
+    if (!warnedFiniteCheckLayerIds.insert(finiteCheck.getId()).second)
+        return;
+
+    std::cerr << "Thor warning: FiniteCheck layer is enabled"
+              << " label=\"" << (finiteCheck.getTensorLabel().empty() ? "<unnamed>" : finiteCheck.getTensorLabel()) << '"'
+              << " api_layer_id=" << finiteCheck.getId()
+              << ". FiniteCheck is intended for diagnostic runs and will hurt performance because it synchronizes execution. "
+                 "Disable it for performance runs."
+              << std::endl;
+}
+
+}  // namespace
 
 FiniteCheck::FiniteCheck() = default;
 FiniteCheck::~FiniteCheck() = default;
@@ -27,18 +52,23 @@ shared_ptr<ThorImplementation::Layer> FiniteCheck::stamp(ThorImplementation::Ten
     THOR_THROW_IF_FALSE(featureInput.has_value());
     THOR_THROW_IF_FALSE(connectingApiTensor == featureInput.value());
 
+    warnIfEnabled(*this);
+
     return make_shared<ThorImplementation::FiniteCheck>(tensorLabel,
                                                          featureInput.value().getId(),
                                                          featureInput.value().getOriginalId(),
                                                          checkForward,
                                                          checkBackward,
                                                          failOnNonFinite,
-                                                         maxReportedIndices);
+                                                         maxReportedIndices,
+                                                         enabled);
 }
 
 uint64_t FiniteCheck::getFirstInstanceMemRequirementInBytes(uint32_t batchSize,
                                                             ThorImplementation::TensorPlacement tensorPlacement) const {
     (void)batchSize;
+    if (!enabled)
+        return 0;
     if (!featureInput.has_value() || ThorImplementation::TensorDescriptor::isIntegralType(featureInput.value().getDataType()) ||
         tensorPlacement.getMemDevice() != ThorImplementation::TensorPlacement::MemDevices::GPU) {
         return 0;
@@ -58,6 +88,7 @@ json FiniteCheck::architectureJson() const {
     j["feature_input"] = featureInput.value().architectureJson();
     j["feature_output"] = featureOutput.value().architectureJson();
     j["tensor_label"] = tensorLabel;
+    j["enabled"] = enabled;
     j["check_forward"] = checkForward;
     j["check_backward"] = checkBackward;
     j["fail_on_non_finite"] = failOnNonFinite;
@@ -80,6 +111,7 @@ void FiniteCheck::deserialize(const json &j, Network *network) {
     finiteCheck.featureInput = featureInput;
     finiteCheck.featureOutput = featureOutput;
     finiteCheck.tensorLabel = j.value("tensor_label", string{});
+    finiteCheck.enabled = j.value("enabled", true);
     finiteCheck.checkForward = j.value("check_forward", true);
     finiteCheck.checkBackward = j.value("check_backward", true);
     finiteCheck.failOnNonFinite = j.value("fail_on_non_finite", true);
@@ -107,6 +139,7 @@ FiniteCheck FiniteCheck::Builder::build() {
     finiteCheck.featureInput = _featureInput.value();
     finiteCheck.featureOutput = _featureInput.value().clone();
     finiteCheck.tensorLabel = std::move(_tensorLabel);
+    finiteCheck.enabled = _enabled;
     finiteCheck.checkForward = _checkForward;
     finiteCheck.checkBackward = _checkBackward;
     finiteCheck.failOnNonFinite = _failOnNonFinite;
@@ -131,6 +164,11 @@ FiniteCheck::Builder &FiniteCheck::Builder::featureInput(Tensor featureInput) {
 
 FiniteCheck::Builder &FiniteCheck::Builder::tensorLabel(string tensorLabel) {
     _tensorLabel = std::move(tensorLabel);
+    return *this;
+}
+
+FiniteCheck::Builder &FiniteCheck::Builder::enabled(bool enabled) {
+    _enabled = enabled;
     return *this;
 }
 

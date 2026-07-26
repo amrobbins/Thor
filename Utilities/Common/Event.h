@@ -37,6 +37,10 @@ class Event : private ReferenceCounted {
 
     bool isInitialized() const;
 
+    // True when the CUDA event was created with cudaEventBlockingSync for a
+    // host thread that will call synchronize().
+    [[nodiscard]] bool usesBlockingSync() const;
+
     void synchronize();
 
     float synchronizeAndReportElapsedTimeInMilliseconds(Event startEvent);
@@ -46,6 +50,7 @@ class Event : private ReferenceCounted {
    private:
     int32_t gpuNum;
     cudaEvent_t cudaEvent;
+    bool blockingSync = false;
 
     void construct(int32_t gpuNum, bool enableTiming, bool expectingHostToWaitOnThisOne);
 

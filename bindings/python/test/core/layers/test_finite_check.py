@@ -27,6 +27,7 @@ def test_finite_check_constructs_and_serializes_policy():
         network,
         source.get_feature_output(),
         tensor_label="after_encoder",
+        enabled=False,
         check_forward=True,
         check_backward=False,
         fail_on_non_finite=False,
@@ -37,6 +38,7 @@ def test_finite_check_constructs_and_serializes_policy():
     assert check.get_feature_output() != source.get_feature_output()
     assert check.get_feature_output().get_dimensions() == [4]
     assert check.get_tensor_label() == "after_encoder"
+    assert check.get_enabled() is False
     assert check.get_check_forward() is True
     assert check.get_check_backward() is False
     assert check.get_fail_on_non_finite() is False
@@ -44,6 +46,7 @@ def test_finite_check_constructs_and_serializes_policy():
 
     architecture = _finite_check_architecture(network)
     assert architecture["tensor_label"] == "after_encoder"
+    assert architecture["enabled"] is False
     assert architecture["check_forward"] is True
     assert architecture["check_backward"] is False
     assert architecture["fail_on_non_finite"] is False
@@ -117,3 +120,42 @@ def test_finite_check_forward_reports_dtype_counts_and_indices():
     assert "negative_infinity=1" in message
     assert "flat_index=" in message
     assert "index=[" in message
+
+
+@pytest.mark.cuda
+def test_disabled_finite_check_passes_non_finite_values_unchanged(capfd):
+    network = thor.Network("finite_check_disabled")
+    source = thor.layers.NetworkInput(network, "input", [4], thor.DataType.fp32)
+    check = thor.layers.FiniteCheck(
+        network,
+        source.get_feature_output(),
+        tensor_label="disabled_check",
+        enabled=False,
+    )
+    thor.layers.NetworkOutput(network, "output", check.get_feature_output(), thor.DataType.fp32)
+
+    values = np.array([[np.nan, np.inf, -np.inf, 4.0]], dtype=np.float32)
+    placed = network.place(1, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
+    assert "FiniteCheck layer is enabled" not in capfd.readouterr().err
+    outputs = placed.infer({"input": _cpu_tensor(values, thor.DataType.fp32)})
+    np.testing.assert_array_equal(np.array(outputs["output"].numpy(), copy=True), values)
+
+
+@pytest.mark.cuda
+def test_enabled_finite_check_warns_when_stamped(capfd):
+    network = thor.Network("finite_check_warning")
+    source = thor.layers.NetworkInput(network, "input", [4], thor.DataType.fp32)
+    check = thor.layers.FiniteCheck(
+        network,
+        source.get_feature_output(),
+        tensor_label="warning_check",
+        enabled=True,
+    )
+    thor.layers.NetworkOutput(network, "output", check.get_feature_output(), thor.DataType.fp32)
+
+    network.place(1, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
+    warning = capfd.readouterr().err
+    assert "Thor warning: FiniteCheck layer is enabled" in warning
+    assert 'label="warning_check"' in warning
+    assert "intended for diagnostic runs" in warning
+    assert "will hurt performance" in warning

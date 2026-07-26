@@ -17,7 +17,8 @@ class FiniteCheck : public Layer {
                 bool checkForward,
                 bool checkBackward,
                 bool failOnNonFinite,
-                uint32_t maxReportedIndices);
+                uint32_t maxReportedIndices,
+                bool enabled);
     ~FiniteCheck() override;
 
     std::optional<Tensor> createFeatureOutputTensor() override;
@@ -47,6 +48,7 @@ class FiniteCheck : public Layer {
     uint64_t apiTensorId;
     uint64_t originalApiTensorId;
     bool checkForward;
+    bool enabled;
     bool checkBackward;
     bool failOnNonFinite;
     uint32_t maxReportedIndices;

@@ -209,3 +209,21 @@ TEST(Batch, ReportsWhetherEveryFieldHasTrackedSourceStorage) {
     Batch movedBatch = std::move(batch);
     EXPECT_TRUE(movedBatch.ownsSourceResourceLifecycle());
 }
+
+TEST(BatchSourceResource, ConsumptionEventsUseBlockingSynchronizationForHostRecycling) {
+    Stream stream(0);
+    std::vector<Event> releasedEvents;
+
+    Thor::BatchSourceOwner owner(
+        [&](std::vector<Event> events) {
+            releasedEvents = std::move(events);
+        });
+    Thor::BatchSourceReference reference = owner.getReference();
+
+    reference.recordConsumption(stream);
+    owner.release();
+
+    ASSERT_EQ(releasedEvents.size(), 1u);
+    EXPECT_TRUE(releasedEvents.front().usesBlockingSync());
+    releasedEvents.front().synchronize();
+}

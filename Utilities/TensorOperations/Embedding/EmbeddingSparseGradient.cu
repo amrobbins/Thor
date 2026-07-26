@@ -2424,7 +2424,10 @@ EmbeddingSparseGradientProfileResult profilePreparedEmbeddingSparseGradient(Prep
     result.scanTempBytes = prepared.scanTempBytes;
 
     Event totalStart(prepared.deviceNum, /*enableTiming=*/true);
-    Event totalEnd(prepared.deviceNum, /*enableTiming=*/true);
+    Event totalEnd(
+        prepared.deviceNum,
+        /*enableTiming=*/true,
+        /*expectingHostToWaitOnThisOne=*/true);
     totalStart.record(stream);
     launchPreparedEmbeddingSparseGradientViaGraph(prepared, indices, upstreamGradient, outputGradient, stream);
     totalEnd.record(stream);
@@ -2464,7 +2467,10 @@ EmbeddingSparseGradientProfileResult profilePreparedEmbeddingSparseGradientWithS
     result.scanTempBytes = prepared.scanTempBytes;
 
     Event totalStart(prepared.deviceNum, /*enableTiming=*/true);
-    Event totalEnd(prepared.deviceNum, /*enableTiming=*/true);
+    Event totalEnd(
+        prepared.deviceNum,
+        /*enableTiming=*/true,
+        /*expectingHostToWaitOnThisOne=*/true);
     totalStart.record(stream);
     uploadPreparedEmbeddingSparseGradientSparseRowUpdateRuntimeScalars(prepared, runtimeScalars, stream);
     launchPreparedEmbeddingSparseGradientViaGraph(prepared, indices, upstreamGradient, outputGradient, stream);

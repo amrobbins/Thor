@@ -29,7 +29,8 @@ void bind_finite_check(nb::module_ &m) {
            bool check_forward,
            bool check_backward,
            bool fail_on_non_finite,
-           uint32_t max_reported_indices) {
+           uint32_t max_reported_indices,
+           bool enabled) {
             if (!check_forward && !check_backward)
                 throw nb::value_error("FiniteCheck must check forward, backward, or both.");
             if (max_reported_indices > ThorImplementation::FINITE_CHECK_MAX_REPORTED_INDICES)
@@ -39,6 +40,7 @@ void bind_finite_check(nb::module_ &m) {
             FiniteCheck built = builder.network(network)
                                     .featureInput(feature_input)
                                     .tensorLabel(std::move(tensor_label))
+                                    .enabled(enabled)
                                     .checkForward(check_forward)
                                     .checkBackward(check_backward)
                                     .failOnNonFinite(fail_on_non_finite)
@@ -53,8 +55,13 @@ void bind_finite_check(nb::module_ &m) {
         "check_backward"_a = true,
         "fail_on_non_finite"_a = true,
         "max_reported_indices"_a = 8,
+        "enabled"_a = true,
         R"nbdoc(
 Create and attach a zero-copy finite-value diagnostic layer.
+
+Set ``enabled=False`` to leave the layer in the model as a zero-copy no-op. A
+disabled FiniteCheck allocates no diagnostic workspace, launches no check, and
+does not synchronize execution.
 
 The forward activation and, when a backward path exists, the incoming gradient
 are checked for NaN and infinity values. The layer aliases its input storage in
@@ -67,7 +74,8 @@ and multidimensional indices. ``fail_on_non_finite=True`` raises immediately;
 
 FiniteCheck is intentionally a debugging barrier. GPU checks synchronize the
 layer stream so that a host-visible report or exception is deterministic, and
-therefore should not be left in performance runs.
+therefore should not be left enabled in performance runs. Thor emits a warning
+when an enabled FiniteCheck is first stamped.
 )nbdoc");
 
     finite_check.def(
@@ -75,6 +83,7 @@ therefore should not be left in performance runs.
         [](FiniteCheck &self) -> Tensor { return self.getFeatureOutput().value(); },
         R"nbdoc(Return the logical output tensor produced by this layer.)nbdoc");
     finite_check.def("get_tensor_label", &FiniteCheck::getTensorLabel);
+    finite_check.def("get_enabled", &FiniteCheck::getEnabled);
     finite_check.def("get_check_forward", &FiniteCheck::getCheckForward);
     finite_check.def("get_check_backward", &FiniteCheck::getCheckBackward);
     finite_check.def("get_fail_on_non_finite", &FiniteCheck::getFailOnNonFinite);

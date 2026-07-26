@@ -22,6 +22,7 @@ TEST(UtilityApiLayers, FiniteCheckBuildsAsLogicalIdentity) {
                                   .network(network)
                                   .featureInput(featureInput)
                                   .tensorLabel("after_projection")
+                                  .enabled(false)
                                   .checkForward(true)
                                   .checkBackward(false)
                                   .failOnNonFinite(false)
@@ -36,6 +37,7 @@ TEST(UtilityApiLayers, FiniteCheckBuildsAsLogicalIdentity) {
     EXPECT_EQ(finiteCheck.getFeatureOutput().value().getDataType(), DataType::BF16);
     EXPECT_EQ(finiteCheck.getFeatureOutput().value().getDimensions(), (vector<uint64_t>{3, 5}));
     EXPECT_EQ(finiteCheck.getTensorLabel(), "after_projection");
+    EXPECT_FALSE(finiteCheck.getEnabled());
     EXPECT_TRUE(finiteCheck.getCheckForward());
     EXPECT_FALSE(finiteCheck.getCheckBackward());
     EXPECT_FALSE(finiteCheck.getFailOnNonFinite());
@@ -74,6 +76,7 @@ TEST(UtilityApiLayers, FiniteCheckArchitecturePersistsDiagnosticPolicy) {
                                   .network(network)
                                   .featureInput(input.getFeatureOutput().value())
                                   .tensorLabel("encoder_output")
+                                  .enabled(false)
                                   .checkForward(true)
                                   .checkBackward(true)
                                   .failOnNonFinite(true)
@@ -89,6 +92,7 @@ TEST(UtilityApiLayers, FiniteCheckArchitecturePersistsDiagnosticPolicy) {
     const json architecture = finiteCheck.architectureJson();
     EXPECT_EQ(architecture.at("layer_type").get<string>(), "finite_check");
     EXPECT_EQ(architecture.at("tensor_label").get<string>(), "encoder_output");
+    EXPECT_FALSE(architecture.at("enabled").get<bool>());
     EXPECT_TRUE(architecture.at("check_forward").get<bool>());
     EXPECT_TRUE(architecture.at("check_backward").get<bool>());
     EXPECT_TRUE(architecture.at("fail_on_non_finite").get<bool>());
