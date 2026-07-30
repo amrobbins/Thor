@@ -136,7 +136,7 @@ vector<Event> RMSprop::initialize(shared_ptr<ThorImplementation::Optimizer> phys
         THOR_THROW_IF_FALSE(sisterPhysicalRMSprop != nullptr);
         THOR_THROW_IF_FALSE(sisterPhysicalRMSprop->getParameter("square_average")->getStorage().has_value());
         squareAverage.copyFromAsync(sisterPhysicalRMSprop->getParameter("square_average")->getStorage().value(), stream);
-    } else if (squareAverageFile.has_value()) {
+    } else if (squareAverageFile.has_value() && !shouldInitializeStateAsNew()) {
         THOR_THROW_IF_FALSE(archiveReader != nullptr);
         archiveReader->registerReadRequest(squareAverageFile.value(), squareAverage);
 

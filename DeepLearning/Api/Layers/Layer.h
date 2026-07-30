@@ -82,6 +82,19 @@ class Layer {
         return 0;
     }
 
+    // Optional semantic port names used only for graph diagnostics. Layers with
+    // named/multi-port interfaces should override these; generic layers still get
+    // an actionable numeric port index from Network's graph indexes.
+    [[nodiscard]] virtual std::optional<std::string> getInputPortName(const Tensor& inputTensor) const {
+        (void)inputTensor;
+        return std::nullopt;
+    }
+
+    [[nodiscard]] virtual std::optional<std::string> getOutputPortName(const Tensor& outputTensor) const {
+        (void)outputTensor;
+        return std::nullopt;
+    }
+
     virtual std::vector<Tensor> getAllOutputTensors() const { return {getFeatureOutput().value()}; }
 
     virtual std::shared_ptr<Layer> clone() const = 0;

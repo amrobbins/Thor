@@ -44,6 +44,21 @@ class CustomLoss : public Loss {
     const std::string& getGradientName() const { return gradientName; }
     const ThorImplementation::DynamicExpression& getLossExpression() const { return lossExpression; }
     const ThorImplementation::DynamicExpression& getGradientExpression() const { return gradientExpression; }
+    [[nodiscard]] std::optional<std::string> getInputPortName(const Tensor& inputTensor) const override {
+        if (predictionsTensor.isInitialized() && inputTensor == predictionsTensor) {
+            return predictionsName;
+        }
+        if (labelsTensor.isInitialized() && inputTensor == labelsTensor) {
+            return labelsName;
+        }
+        return Loss::getInputPortName(inputTensor);
+    }
+    [[nodiscard]] std::optional<std::string> getOutputPortName(const Tensor& outputTensor) const override {
+        if (lossShaperInput.isInitialized() && outputTensor == lossShaperInput) {
+            return lossName;
+        }
+        return Loss::getOutputPortName(outputTensor);
+    }
 
     nlohmann::json architectureJson() const override;
     static void deserialize(const nlohmann::json& j, Network* network);
@@ -55,7 +70,7 @@ class CustomLoss : public Loss {
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override;
 
-    virtual bool isMultiLayer() const { return lossShape != LossShape::RAW; }
+    virtual bool isMultiLayer() const { return lossShape != LossShape::RAW && lossShape != LossShape::NONE; }
     virtual void buildSupportLayersAndAddToNetwork();
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override;
@@ -148,6 +163,7 @@ class CustomLoss::Builder {
         } else {
             customLoss.lossShaperInput = customLoss.lossTensor;
             customLoss.addToNetwork(_network.value());
+            customLoss.finalizeLossReporting();
         }
 
         return customLoss;
@@ -236,15 +252,21 @@ class CustomLoss::Builder {
         return *this;
     }
 
-    virtual CustomLoss::Builder& reportsElementwiseLoss() {
+    virtual CustomLoss::Builder& reportsPerExampleLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
-        _lossShape = LossShape::ELEMENTWISE;
+        _lossShape = LossShape::PER_EXAMPLE;
         return *this;
     }
 
-    virtual CustomLoss::Builder& reportsClasswiseLoss() {
+    virtual CustomLoss::Builder& reportsPerOutputLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
-        _lossShape = LossShape::CLASSWISE;
+        _lossShape = LossShape::PER_OUTPUT;
+        return *this;
+    }
+
+    virtual CustomLoss::Builder& reportsNoLoss() {
+        THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
+        _lossShape = LossShape::NONE;
         return *this;
     }
 

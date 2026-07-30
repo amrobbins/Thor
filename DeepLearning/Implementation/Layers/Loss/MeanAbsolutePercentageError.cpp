@@ -5,6 +5,7 @@
 #include "Utilities/TensorOperations/Loss/MeanAbsolutePercentageError.h"
 
 #include <chrono>
+#include <limits>
 #include <thread>
 
 #include "DeepLearning/Implementation/ThorError.h"
@@ -24,7 +25,8 @@ void MeanAbsolutePercentageError::compileImpl() {
     THOR_THROW_IF_FALSE(featureInput.has_value());
     THOR_THROW_IF_FALSE(featureOutput.has_value());
     THOR_THROW_IF_FALSE(featureInput.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDimensions().size() == 2);
+    const vector<uint64_t>& featureInputDimensions = featureInput.value().getDescriptor().getDimensions();
+    THOR_THROW_IF_FALSE(featureInputDimensions.size() >= 2);
 
     if (!isInferenceOnly()) {
         THOR_THROW_IF_FALSE(errorOutput.has_value());
@@ -39,15 +41,24 @@ void MeanAbsolutePercentageError::compileImpl() {
         THOR_THROW_IF_FALSE(labelsInput.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
         THOR_THROW_IF_FALSE(labelsInput.value().getPlacement().getDeviceNum() == featureInput.value().getPlacement().getDeviceNum());
 
-        vector<uint64_t> labelDimensions = labelsInput.value().getDescriptor().getDimensions();
-        vector<uint64_t> featureInputDimensions = featureInput.value().getDescriptor().getDimensions();
+        const vector<uint64_t>& labelDimensions = labelsInput.value().getDescriptor().getDimensions();
         THOR_THROW_IF_FALSE(featureInputDimensions == labelDimensions);
 
         errorOutputCudnnTensorDescriptor =
             createCudnnTensorDescriptor(errorOutput.value().getDescriptor().getDimensions(), errorOutput.value().getDescriptor().getDataType());
     }
 
-    batchSize = featureInput.value().getDescriptor().getDimensions()[0];
+    THOR_THROW_IF_FALSE(featureInputDimensions[0] > 0);
+    THOR_THROW_IF_FALSE(featureInputDimensions[0] <= numeric_limits<uint32_t>::max());
+    batchSize = static_cast<uint32_t>(featureInputDimensions[0]);
+
+    const uint64_t totalElements = featureInput.value().getTotalNumElements();
+    THOR_THROW_IF_FALSE(totalElements % batchSize == 0);
+    const uint64_t predictionsPerExample = totalElements / batchSize;
+    THOR_THROW_IF_FALSE(predictionsPerExample > 0);
+    THOR_THROW_IF_FALSE(predictionsPerExample <= numeric_limits<uint32_t>::max());
+    THOR_THROW_IF_FALSE(totalElements <= numeric_limits<uint32_t>::max());
+    numPredictionsPerExample = static_cast<uint32_t>(predictionsPerExample);
 }
 
 void MeanAbsolutePercentageError::infer(std::optional<Tensor> predictions, std::optional<Tensor> elementLoss, Stream stream) {
@@ -124,7 +135,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP16Predi
                                                             featureInput.value().getMemPtr(),
                                                             featureOutput.value().getMemPtr(),
                                                             isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                            featureOutput.value().getDescriptor().getDimensions()[1],
+                                                            numPredictionsPerExample,
                                                             batchSize,
                                                             !isInferenceOnly(),
                                                             stream,
@@ -135,7 +146,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP16Predi
                                                              featureInput.value().getMemPtr(),
                                                              featureOutput.value().getMemPtr(),
                                                              isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                             featureOutput.value().getDescriptor().getDimensions()[1],
+                                                             numPredictionsPerExample,
                                                              batchSize,
                                                              !isInferenceOnly(),
                                                              stream,
@@ -146,7 +157,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP16Predi
                                                                featureInput.value().getMemPtr(),
                                                                featureOutput.value().getMemPtr(),
                                                                isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                               featureOutput.value().getDescriptor().getDimensions()[1],
+                                                               numPredictionsPerExample,
                                                                batchSize,
                                                                !isInferenceOnly(),
                                                                stream,
@@ -157,7 +168,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP16Predi
                                                                 featureInput.value().getMemPtr(),
                                                                 featureOutput.value().getMemPtr(),
                                                                 isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                                featureOutput.value().getDescriptor().getDimensions()[1],
+                                                                numPredictionsPerExample,
                                                                 batchSize,
                                                                 !isInferenceOnly(),
                                                                 stream,
@@ -168,7 +179,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP16Predi
                                                                 featureInput.value().getMemPtr(),
                                                                 featureOutput.value().getMemPtr(),
                                                                 isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                                featureOutput.value().getDescriptor().getDimensions()[1],
+                                                                numPredictionsPerExample,
                                                                 batchSize,
                                                                 !isInferenceOnly(),
                                                                 stream,
@@ -179,7 +190,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP16Predi
                                                             featureInput.value().getMemPtr(),
                                                             featureOutput.value().getMemPtr(),
                                                             isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                            featureOutput.value().getDescriptor().getDimensions()[1],
+                                                            numPredictionsPerExample,
                                                             batchSize,
                                                             !isInferenceOnly(),
                                                             stream,
@@ -199,7 +210,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP16Predi
                                                              featureInput.value().getMemPtr(),
                                                              featureOutput.value().getMemPtr(),
                                                              isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                             featureOutput.value().getDescriptor().getDimensions()[1],
+                                                             numPredictionsPerExample,
                                                              batchSize,
                                                              !isInferenceOnly(),
                                                              stream,
@@ -210,7 +221,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP16Predi
                                                               featureInput.value().getMemPtr(),
                                                               featureOutput.value().getMemPtr(),
                                                               isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                              featureOutput.value().getDescriptor().getDimensions()[1],
+                                                              numPredictionsPerExample,
                                                               batchSize,
                                                               !isInferenceOnly(),
                                                               stream,
@@ -221,7 +232,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP16Predi
                                                                 featureInput.value().getMemPtr(),
                                                                 featureOutput.value().getMemPtr(),
                                                                 isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                                featureOutput.value().getDescriptor().getDimensions()[1],
+                                                                numPredictionsPerExample,
                                                                 batchSize,
                                                                 !isInferenceOnly(),
                                                                 stream,
@@ -232,7 +243,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP16Predi
                                                                  featureInput.value().getMemPtr(),
                                                                  featureOutput.value().getMemPtr(),
                                                                  isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                                 featureOutput.value().getDescriptor().getDimensions()[1],
+                                                                 numPredictionsPerExample,
                                                                  batchSize,
                                                                  !isInferenceOnly(),
                                                                  stream,
@@ -243,7 +254,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP16Predi
                                                                  featureInput.value().getMemPtr(),
                                                                  featureOutput.value().getMemPtr(),
                                                                  isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                                 featureOutput.value().getDescriptor().getDimensions()[1],
+                                                                 numPredictionsPerExample,
                                                                  batchSize,
                                                                  !isInferenceOnly(),
                                                                  stream,
@@ -254,7 +265,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP16Predi
                                                              featureInput.value().getMemPtr(),
                                                              featureOutput.value().getMemPtr(),
                                                              isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                             featureOutput.value().getDescriptor().getDimensions()[1],
+                                                             numPredictionsPerExample,
                                                              batchSize,
                                                              !isInferenceOnly(),
                                                              stream,
@@ -274,7 +285,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP32Predi
                                                              featureInput.value().getMemPtr(),
                                                              featureOutput.value().getMemPtr(),
                                                              isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                             featureOutput.value().getDescriptor().getDimensions()[1],
+                                                             numPredictionsPerExample,
                                                              batchSize,
                                                              !isInferenceOnly(),
                                                              stream,
@@ -285,7 +296,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP32Predi
                                                               featureInput.value().getMemPtr(),
                                                               featureOutput.value().getMemPtr(),
                                                               isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                              featureOutput.value().getDescriptor().getDimensions()[1],
+                                                              numPredictionsPerExample,
                                                               batchSize,
                                                               !isInferenceOnly(),
                                                               stream,
@@ -296,7 +307,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP32Predi
                                                                 featureInput.value().getMemPtr(),
                                                                 featureOutput.value().getMemPtr(),
                                                                 isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                                featureOutput.value().getDescriptor().getDimensions()[1],
+                                                                numPredictionsPerExample,
                                                                 batchSize,
                                                                 !isInferenceOnly(),
                                                                 stream,
@@ -307,7 +318,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP32Predi
                                                                  featureInput.value().getMemPtr(),
                                                                  featureOutput.value().getMemPtr(),
                                                                  isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                                 featureOutput.value().getDescriptor().getDimensions()[1],
+                                                                 numPredictionsPerExample,
                                                                  batchSize,
                                                                  !isInferenceOnly(),
                                                                  stream,
@@ -318,7 +329,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP32Predi
                                                                  featureInput.value().getMemPtr(),
                                                                  featureOutput.value().getMemPtr(),
                                                                  isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                                 featureOutput.value().getDescriptor().getDimensions()[1],
+                                                                 numPredictionsPerExample,
                                                                  batchSize,
                                                                  !isInferenceOnly(),
                                                                  stream,
@@ -329,7 +340,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP32Predi
                                                              featureInput.value().getMemPtr(),
                                                              featureOutput.value().getMemPtr(),
                                                              isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                             featureOutput.value().getDescriptor().getDimensions()[1],
+                                                             numPredictionsPerExample,
                                                              batchSize,
                                                              !isInferenceOnly(),
                                                              stream,
@@ -349,7 +360,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP32Predi
                                                               featureInput.value().getMemPtr(),
                                                               featureOutput.value().getMemPtr(),
                                                               isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                              featureOutput.value().getDescriptor().getDimensions()[1],
+                                                              numPredictionsPerExample,
                                                               batchSize,
                                                               !isInferenceOnly(),
                                                               stream,
@@ -360,7 +371,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP32Predi
                                                                featureInput.value().getMemPtr(),
                                                                featureOutput.value().getMemPtr(),
                                                                isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                               featureOutput.value().getDescriptor().getDimensions()[1],
+                                                               numPredictionsPerExample,
                                                                batchSize,
                                                                !isInferenceOnly(),
                                                                stream,
@@ -371,7 +382,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP32Predi
                                                                  featureInput.value().getMemPtr(),
                                                                  featureOutput.value().getMemPtr(),
                                                                  isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                                 featureOutput.value().getDescriptor().getDimensions()[1],
+                                                                 numPredictionsPerExample,
                                                                  batchSize,
                                                                  !isInferenceOnly(),
                                                                  stream,
@@ -382,7 +393,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP32Predi
                                                                   featureInput.value().getMemPtr(),
                                                                   featureOutput.value().getMemPtr(),
                                                                   isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                                  featureOutput.value().getDescriptor().getDimensions()[1],
+                                                                  numPredictionsPerExample,
                                                                   batchSize,
                                                                   !isInferenceOnly(),
                                                                   stream,
@@ -393,7 +404,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP32Predi
                                                                   featureInput.value().getMemPtr(),
                                                                   featureOutput.value().getMemPtr(),
                                                                   isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                                  featureOutput.value().getDescriptor().getDimensions()[1],
+                                                                  numPredictionsPerExample,
                                                                   batchSize,
                                                                   !isInferenceOnly(),
                                                                   stream,
@@ -404,7 +415,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP32Predi
                                                               featureInput.value().getMemPtr(),
                                                               featureOutput.value().getMemPtr(),
                                                               isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                              featureOutput.value().getDescriptor().getDimensions()[1],
+                                                              numPredictionsPerExample,
                                                               batchSize,
                                                               !isInferenceOnly(),
                                                               stream,

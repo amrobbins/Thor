@@ -83,7 +83,7 @@ def _ctc_reference(logits: np.ndarray, labels: np.ndarray, label_lengths: np.nda
 
 
 def _reduce_loss(raw: np.ndarray, reported_loss_shape: thor.losses.LossShape) -> np.ndarray:
-    if reported_loss_shape in (thor.losses.LossShape.raw, thor.losses.LossShape.elementwise):
+    if reported_loss_shape in (thor.losses.LossShape.raw, thor.losses.LossShape.per_example):
         return raw.astype(np.float32)
     if reported_loss_shape == thor.losses.LossShape.batch:
         return np.array([[np.sum(raw) / raw.shape[0]]], dtype=np.float32)
@@ -140,7 +140,7 @@ def test_ctc_loss_constructs_with_raw_shape_loss_weight_and_skip_oob_mode():
     assert loss.oob_gradient_mode == thor.losses.CTCOobGradientMode.skip
 
 
-@pytest.mark.parametrize("shape", [thor.losses.LossShape.batch, thor.losses.LossShape.elementwise, thor.losses.LossShape.raw])
+@pytest.mark.parametrize("shape", [thor.losses.LossShape.batch, thor.losses.LossShape.per_example, thor.losses.LossShape.raw])
 def test_ctc_loss_reported_loss_shape_variants_construct(shape):
     n = _net(f"test_net_ctc_loss_shape_{shape}")
     loss = thor.losses.CTCLoss(
@@ -155,9 +155,9 @@ def test_ctc_loss_reported_loss_shape_variants_construct(shape):
     assert isinstance(loss, thor.losses.CTCLoss)
 
 
-def test_ctc_loss_rejects_classwise_reported_loss_shape():
+def test_ctc_loss_rejects_per_output_reported_loss_shape():
     n = _net()
-    with pytest.raises(ValueError, match=r"reported_loss_shape must be batch, elementwise, or raw"):
+    with pytest.raises(ValueError, match=r"reported_loss_shape must be batch, per_example, or raw"):
         thor.losses.CTCLoss(
             n,
             _tensor([4, 3], _FP32),
@@ -165,7 +165,7 @@ def test_ctc_loss_rejects_classwise_reported_loss_shape():
             _tensor([1], _INT32),
             _tensor([1], _INT32),
             None,
-            thor.losses.LossShape.classwise,
+            thor.losses.LossShape.per_output,
         )
 
 
@@ -216,7 +216,7 @@ def test_ctc_loss_rejects_label_length_greater_than_time_and_duplicate_tensors()
 @pytest.mark.cuda
 @pytest.mark.parametrize(
     "reported_loss_shape",
-    [thor.losses.LossShape.raw, thor.losses.LossShape.elementwise, thor.losses.LossShape.batch],
+    [thor.losses.LossShape.raw, thor.losses.LossShape.per_example, thor.losses.LossShape.batch],
 )
 def test_ctc_loss_python_api_forward_matches_cpu_reference(reported_loss_shape):
     logits = np.array(
@@ -444,7 +444,7 @@ def _finite_difference_ctc_gradient(
 def test_ctc_loss_python_api_forward_numerical_cases(case):
     for reported_loss_shape in (
         thor.losses.LossShape.raw,
-        thor.losses.LossShape.elementwise,
+        thor.losses.LossShape.per_example,
         thor.losses.LossShape.batch,
     ):
         actual = _run_python_ctc_forward(

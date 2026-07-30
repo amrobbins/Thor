@@ -19,7 +19,7 @@ Lamb::Lamb(uint64_t originalId) : Optimizer(originalId) {}
 shared_ptr<ThorImplementation::Optimizer> Lamb::stamp(shared_ptr<ThorImplementation::TrainableLayer> trainableLayer) {
     (void)trainableLayer;
     auto physicalLamb = make_shared<ThorImplementation::Lamb>(getId(), alpha, beta1, beta2, epsilon, weightDecay, trustRatioEpsilon);
-    physicalLamb->setT(t);
+    physicalLamb->setT(shouldInitializeStateAsNew() ? 0.0f : t);
     return physicalLamb;
 }
 
@@ -194,7 +194,7 @@ vector<Event> Lamb::initialize(shared_ptr<ThorImplementation::Optimizer> physica
         THOR_THROW_IF_FALSE(sisterPhysicalLamb->getParameter("v")->getStorage().has_value());
         m.copyFromAsync(sisterPhysicalLamb->getParameter("m")->getStorage().value(), stream);
         v.copyFromAsync(sisterPhysicalLamb->getParameter("v")->getStorage().value(), stream);
-    } else if (mFile.has_value()) {
+    } else if (mFile.has_value() && !shouldInitializeStateAsNew()) {
         THOR_THROW_IF_FALSE(vFile.has_value());
         THOR_THROW_IF_FALSE(archiveReader != nullptr);
         archiveReader->registerReadRequest(mFile.value(), m);

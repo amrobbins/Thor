@@ -52,7 +52,7 @@ class CtcLoss : public Loss {
             return ThorImplementation::CtcLoss::LABEL_LENGTHS_CONNECTION_TYPE;
         if (connectingTensor == inputLengthsTensor)
             return ThorImplementation::CtcLoss::INPUT_LENGTHS_CONNECTION_TYPE;
-        if (connectingTensor == lossTensor)
+        if (connectingTensor == getRawLoss())
             return 0;
         throw std::runtime_error("Tensor is not connected to this CtcLoss.");
     }
@@ -146,9 +146,15 @@ class CtcLoss::Builder {
         return *this;
     }
 
-    CtcLoss::Builder& reportsElementwiseLoss() {
+    CtcLoss::Builder& reportsPerExampleLoss() {
         THOR_THROW_IF_FALSE(!_lossShape.has_value());
-        _lossShape = LossShape::ELEMENTWISE;
+        _lossShape = LossShape::PER_EXAMPLE;
+        return *this;
+    }
+
+    CtcLoss::Builder& reportsNoLoss() {
+        THOR_THROW_IF_FALSE(!_lossShape.has_value());
+        _lossShape = LossShape::NONE;
         return *this;
     }
 
@@ -213,8 +219,8 @@ class CtcLoss::Builder {
 
         if (!_lossShape.has_value())
             _lossShape = LossShape::BATCH;
-        THOR_THROW_IF_FALSE(_lossShape.value() == LossShape::BATCH || _lossShape.value() == LossShape::ELEMENTWISE ||
-                            _lossShape.value() == LossShape::RAW);
+        THOR_THROW_IF_FALSE(_lossShape.value() == LossShape::NONE || _lossShape.value() == LossShape::BATCH ||
+                            _lossShape.value() == LossShape::PER_EXAMPLE || _lossShape.value() == LossShape::RAW);
 
         if (!_lossDataType.has_value())
             _lossDataType = DataType::FP32;

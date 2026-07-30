@@ -97,6 +97,12 @@ A Network that contains layers. FIXME.
     network.def("get_network_name", &Network::getNetworkName);
     network.def("get_num_trainable_layers", &Network::getNumTrainableLayers);
     network.def("status_code_to_string", &Network::statusCodeToString, "status_code"_a);
+    network.def("get_last_graph_validation_error", &Network::getLastGraphValidationError,
+                R"nbdoc(
+Return the detailed diagnostic from the most recent failed graph validation.
+
+Returns an empty string when no validation failure has been recorded.
+)nbdoc");
 
     network.def("get_architecture_json", &Network::architectureJsonString);
     network.def("save", nb::overload_cast<const std::string &, bool>(&Network::save), "directory"_a, "overwrite"_a = false);
@@ -174,6 +180,16 @@ pending marker and overwritten with the final save-time keys when save() runs.
     network.def("get_default_optimizer", &Network::getDefaultOptimizer);
     network.def("freeze_training", &Network::freezeTraining);
     network.def("unfreeze_training", &Network::unfreezeTraining);
+    network.def("reset_optimizers",
+                &Network::resetOptimizers,
+                R"nbdoc(
+Request fresh optimizer state for the next successfully completed training phase.
+
+Learned parameter values are preserved. Adam moments, momentum/accumulator tensors,
+and optimizer runtime counters are initialized as they are for a newly placed network.
+If the training attempt fails and is retried, the retry also starts with fresh optimizer
+state. The request is consumed only after a training phase completes successfully.
+)nbdoc");
     network.def("set_training_dropout_enabled",
                 &Network::setTrainingDropoutEnabled,
                 "enabled"_a,

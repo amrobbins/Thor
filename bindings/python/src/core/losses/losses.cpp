@@ -50,11 +50,18 @@ void bind_losses(nb::module_ &losses) {
     loss.attr("LabelType") = label_type;
 
     auto loss_shape = nb::enum_<Loss::LossShape>(losses, "LossShape")
+                          .value("none", Loss::LossShape::NONE)
                           .value("batch", Loss::LossShape::BATCH)
-                          .value("classwise", Loss::LossShape::CLASSWISE)
-                          .value("elementwise", Loss::LossShape::ELEMENTWISE)
+                          .value("per_example", Loss::LossShape::PER_EXAMPLE)
+                          .value("per_output", Loss::LossShape::PER_OUTPUT)
                           .value("raw", Loss::LossShape::RAW);
     loss_shape.attr("__module__") = "thor.losses";
+    loss_shape.attr("__doc__") = R"nbdoc(
+Controls only the reported loss tensor shape. ``none`` disables the user-facing
+loss report while retaining the raw training objective. ``per_example`` sums
+all non-batch loss values independently for each example. ``per_output`` averages
+over the batch while preserving every non-batch loss dimension.
+)nbdoc";
     // loss_shape.attr("__qualname__") = "Loss.LossShape";
     loss.attr("LossShape") = loss_shape;
 

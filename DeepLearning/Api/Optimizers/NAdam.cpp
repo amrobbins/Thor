@@ -19,7 +19,7 @@ NAdam::NAdam(uint64_t originalId) : Optimizer(originalId) {}
 shared_ptr<ThorImplementation::Optimizer> NAdam::stamp(shared_ptr<ThorImplementation::TrainableLayer> trainableLayer) {
     (void)trainableLayer;
     auto physicalNAdam = make_shared<ThorImplementation::NAdam>(getId(), alpha, beta1, beta2, epsilon);
-    physicalNAdam->setT(t);
+    physicalNAdam->setT(shouldInitializeStateAsNew() ? 0.0f : t);
     return physicalNAdam;
 }
 
@@ -170,7 +170,7 @@ vector<Event> NAdam::initialize(shared_ptr<ThorImplementation::Optimizer> physic
         THOR_THROW_IF_FALSE(sisterPhysicalNAdam->getParameter("v")->getStorage().has_value());
         m.copyFromAsync(sisterPhysicalNAdam->getParameter("m")->getStorage().value(), stream);
         v.copyFromAsync(sisterPhysicalNAdam->getParameter("v")->getStorage().value(), stream);
-    } else if (mFile.has_value()) {
+    } else if (mFile.has_value() && !shouldInitializeStateAsNew()) {
         THOR_THROW_IF_FALSE(vFile.has_value());
         THOR_THROW_IF_FALSE(archiveReader != nullptr);
         archiveReader->registerReadRequest(mFile.value(), m);

@@ -60,9 +60,9 @@ class BinaryCrossEntropy::Builder {
 
         std::vector<uint64_t> predictionDimensions = _predictions.value().getDimensions();
         std::vector<uint64_t> labelDimensions = _labels.value().getDimensions();
-        // API layer does not have a batch dimension. Allow vector-valued BCE for multi-output/multi-label heads.
-        THOR_THROW_IF_FALSE(predictionDimensions.size() == 1);
-        THOR_THROW_IF_FALSE(labelDimensions.size() == 1);
+        // API tensors omit the physical batch dimension. BCE is pointwise, so every
+        // nonempty per-example tensor shape is valid when labels match exactly.
+        THOR_THROW_IF_FALSE(!predictionDimensions.empty());
         THOR_THROW_IF_FALSE(predictionDimensions == labelDimensions);
 
         BinaryCrossEntropy binaryCrossEntropy;
@@ -76,7 +76,9 @@ class BinaryCrossEntropy::Builder {
 
         binaryCrossEntropy.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
 
-        THOR_THROW_IF_FALSE(_lossShape.value() == LossShape::BATCH || _lossShape.value() == LossShape::ELEMENTWISE);
+        THOR_THROW_IF_FALSE(_lossShape.value() == LossShape::NONE || _lossShape.value() == LossShape::BATCH ||
+                            _lossShape.value() == LossShape::PER_EXAMPLE || _lossShape.value() == LossShape::PER_OUTPUT ||
+                            _lossShape.value() == LossShape::RAW);
         binaryCrossEntropy.lossShape = _lossShape.value();
         binaryCrossEntropy.initialized = true;
         binaryCrossEntropy.network = _network.value();
@@ -84,7 +86,7 @@ class BinaryCrossEntropy::Builder {
         if (binaryCrossEntropy.rawLossAddedToNetwork) {
             // Legacy/deserialization-only path: build the single raw BCE layer itself. New public BCE construction
             // builds a raw CustomLoss support layer instead.
-            THOR_THROW_IF_FALSE(binaryCrossEntropy.lossShape == LossShape::ELEMENTWISE);
+            THOR_THROW_IF_FALSE(binaryCrossEntropy.lossShape == LossShape::PER_EXAMPLE);
             binaryCrossEntropy.lossTensor = Tensor(_lossDataType.value(), predictionDimensions);
             binaryCrossEntropy.lossShaperInput = binaryCrossEntropy.lossTensor;
             binaryCrossEntropy.addToNetwork(_network.value());
@@ -103,21 +105,21 @@ class BinaryCrossEntropy::Builder {
 
     virtual BinaryCrossEntropy::Builder &predictions(Tensor _predictions) {
         THOR_THROW_IF_FALSE(!this->_predictions.has_value());
-        THOR_THROW_IF_FALSE(_predictions.getDimensions().size() == 1);
+        THOR_THROW_IF_FALSE(!_predictions.getDimensions().empty());
         this->_predictions = _predictions;
         return *this;
     }
 
     virtual BinaryCrossEntropy::Builder &labels(Tensor _labels) {
         THOR_THROW_IF_FALSE(!this->_labels.has_value());
-        THOR_THROW_IF_FALSE(_labels.getDimensions().size() == 1);
+        THOR_THROW_IF_FALSE(!_labels.getDimensions().empty());
         this->_labels = _labels;
         return *this;
     }
 
     /**
-     * Reports loss to the user as a single scalar that represents the total loss of the batch.
-     * Note that is only for reporting, this setting does not affect the form of loss used in the math to train the network.
+     * Reports one scalar equal to the sum of all non-batch loss values averaged over the batch.
+     * Note that this setting affects reporting only, not the loss used to train the network.
      */
     virtual BinaryCrossEntropy::Builder &reportsBatchLoss() {
         THOR_THROW_IF_FALSE(!_lossShape.has_value());
@@ -126,12 +128,41 @@ class BinaryCrossEntropy::Builder {
     }
 
     /**
-     * Reports loss to the user as a scalar per class per example in the batch.
-     * Note that is only for reporting, this setting does not affect the form of loss used in the math to train the network.
+     * Reports one scalar per example by summing every non-batch loss dimension.
+     * Note that this setting affects reporting only, not the loss used to train the network.
      */
-    virtual BinaryCrossEntropy::Builder &reportsElementwiseLoss() {
+    virtual BinaryCrossEntropy::Builder &reportsPerExampleLoss() {
         THOR_THROW_IF_FALSE(!_lossShape.has_value());
-        _lossShape = LossShape::ELEMENTWISE;
+        _lossShape = LossShape::PER_EXAMPLE;
+        return *this;
+    }
+
+    /**
+     * Reports the loss averaged over the batch while preserving every non-batch loss dimension.
+     * Note that this setting affects reporting only, not the loss used to train the network.
+     */
+    virtual BinaryCrossEntropy::Builder &reportsPerOutputLoss() {
+        THOR_THROW_IF_FALSE(!_lossShape.has_value());
+        _lossShape = LossShape::PER_OUTPUT;
+        return *this;
+    }
+
+    /**
+     * Does not expose a reported loss tensor. The raw loss remains available internally as the training objective.
+     */
+    virtual BinaryCrossEntropy::Builder &reportsNoLoss() {
+        THOR_THROW_IF_FALSE(!_lossShape.has_value());
+        _lossShape = LossShape::NONE;
+        return *this;
+    }
+
+    /**
+     * Reports the unreduced pointwise loss tensor.
+     * Note that this setting affects reporting only, not the loss used to train the network.
+     */
+    virtual BinaryCrossEntropy::Builder &reportsRawLoss() {
+        THOR_THROW_IF_FALSE(!_lossShape.has_value());
+        _lossShape = LossShape::RAW;
         return *this;
     }
 

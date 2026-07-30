@@ -70,7 +70,7 @@ WassersteinGANLossNetworkParts addWassersteinGANLosses(Network& network) {
                                               .network(network)
                                               .realScores(realScores.getFeatureOutput().value())
                                               .fakeScores(fakeScoresForCritic.getFeatureOutput().value())
-                                              .reportsElementwiseLoss()
+                                              .reportsPerExampleLoss()
                                               .lossDataType(DataType::FP32)
                                               .build();
     consumeLoss(network, "wasserstein_gan_critic_loss", criticLoss.getLoss());
@@ -118,7 +118,7 @@ TEST(WassersteinGANLossSerialization, PublicArchitectureJsonIncludesRoundTripFie
     const json criticJson = losses.criticLoss.architectureJson();
     EXPECT_EQ(criticJson.at("factory").get<string>(), Layer::Factory::Loss.value());
     EXPECT_EQ(criticJson.at("layer_type").get<string>(), "wasserstein_gan_critic_loss");
-    EXPECT_EQ(criticJson.at("loss_shape").get<Loss::LossShape>(), Loss::LossShape::ELEMENTWISE);
+    EXPECT_EQ(criticJson.at("loss_shape").get<Loss::LossShape>(), Loss::LossShape::PER_EXAMPLE);
     EXPECT_EQ(criticJson.at("loss_data_type").get<DataType>(), DataType::FP32);
     expectTensorJsonMatches(criticJson.at("real_scores_tensor"), losses.criticLoss.getRealScores());
     expectTensorJsonMatches(criticJson.at("fake_scores_tensor"), losses.criticLoss.getFakeScores());
@@ -127,7 +127,7 @@ TEST(WassersteinGANLossSerialization, PublicArchitectureJsonIncludesRoundTripFie
     const json generatorJson = losses.generatorLoss.architectureJson();
     EXPECT_EQ(generatorJson.at("factory").get<string>(), Layer::Factory::Loss.value());
     EXPECT_EQ(generatorJson.at("layer_type").get<string>(), "wasserstein_gan_generator_loss");
-    EXPECT_EQ(generatorJson.at("loss_shape").get<Loss::LossShape>(), Loss::LossShape::CLASSWISE);
+    EXPECT_EQ(generatorJson.at("loss_shape").get<Loss::LossShape>(), Loss::LossShape::PER_OUTPUT);
     EXPECT_EQ(generatorJson.at("loss_data_type").get<DataType>(), DataType::FP32);
     expectTensorJsonMatches(generatorJson.at("fake_scores_tensor"), losses.generatorLoss.getFakeScores());
     expectTensorJsonMatches(generatorJson.at("loss_tensor"), losses.generatorLoss.getLoss());

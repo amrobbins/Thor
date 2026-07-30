@@ -1,4 +1,5 @@
 #include "DeepLearning/Api/Layers/Loss/ListwiseLossCommon.h"
+#include "DeepLearning/Api/Layers/Utility/Stub.h"
 
 #include "DeepLearning/Api/Layers/Loss/CustomLoss.h"
 #include "DeepLearning/Api/Layers/Loss/LossShaper.h"
@@ -137,16 +138,20 @@ Tensor buildRawListwiseLoss(Network& network,
 }
 
 Tensor shapeRawListwiseLoss(Network& network, Tensor rawLoss, Loss::LossShape lossShape) {
+    if (lossShape == Loss::LossShape::NONE) {
+        Stub::Builder().network(network).inputTensor(rawLoss).build();
+        return rawLoss;
+    }
     if (lossShape == Loss::LossShape::BATCH) {
         LossShaper lossShaper = LossShaper::Builder().network(network).lossInput(rawLoss).reportsBatchLoss().build();
         return lossShaper.getLossOutput();
     }
-    if (lossShape == Loss::LossShape::ELEMENTWISE) {
-        LossShaper lossShaper = LossShaper::Builder().network(network).lossInput(rawLoss).reportsElementwiseLoss().build();
+    if (lossShape == Loss::LossShape::PER_EXAMPLE) {
+        LossShaper lossShaper = LossShaper::Builder().network(network).lossInput(rawLoss).reportsPerExampleLoss().build();
         return lossShaper.getLossOutput();
     }
-    if (lossShape == Loss::LossShape::CLASSWISE) {
-        LossShaper lossShaper = LossShaper::Builder().network(network).lossInput(rawLoss).reportsClasswiseLoss().build();
+    if (lossShape == Loss::LossShape::PER_OUTPUT) {
+        LossShaper lossShaper = LossShaper::Builder().network(network).lossInput(rawLoss).reportsPerOutputLoss().build();
         return lossShaper.getLossOutput();
     }
 

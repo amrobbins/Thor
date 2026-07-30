@@ -248,7 +248,7 @@ TEST(CategoricalCrossEntropy, ComputesCorrectElementWiseResult_oneHotLabels) {
         if (inferenceOnly)
             crossEntropy->setConstructForInferenceOnly(true);
         layers.push_back(crossEntropy);
-        shared_ptr<LossShaper> lossShaper = make_shared<LossShaper>(LossShaper::OutputLossType::ELEMENTWISE);
+        shared_ptr<LossShaper> lossShaper = make_shared<LossShaper>(LossShaper::OutputLossType::PER_EXAMPLE);
         layers.push_back(lossShaper);
         shared_ptr<NetworkOutput> lossOutput = make_shared<NetworkOutput>(gpuPlacement);
         layers.push_back(lossOutput);

@@ -8,6 +8,7 @@
 
 #include <optional>
 #include <stdexcept>
+#include <vector>
 
 namespace Thor {
 
@@ -72,13 +73,18 @@ class BinaryFocalLoss::Builder {
         THOR_THROW_IF_FALSE(_predictions.has_value());
         THOR_THROW_IF_FALSE(_labels.has_value());
         THOR_THROW_IF_FALSE(_predictions.value() != _labels.value());
-        THOR_THROW_IF_FALSE(_predictions.value().getDimensions().size() == 1 && _predictions.value().getDimensions()[0] == 1);
-        THOR_THROW_IF_FALSE(_labels.value().getDimensions().size() == 1 && _labels.value().getDimensions()[0] == 1);
+        const std::vector<uint64_t> predictionDimensions = _predictions.value().getDimensions();
+        const std::vector<uint64_t> labelDimensions = _labels.value().getDimensions();
+        // API tensors omit the physical batch dimension. Binary focal loss is pointwise,
+        // so every nonempty per-example tensor shape is valid when labels match exactly.
+        THOR_THROW_IF_FALSE(!predictionDimensions.empty());
+        THOR_THROW_IF_FALSE(predictionDimensions[0] > 0);
+        THOR_THROW_IF_FALSE(predictionDimensions == labelDimensions);
 
         if (!_lossShape.has_value())
             _lossShape = LossShape::BATCH;
-        THOR_THROW_IF_FALSE(_lossShape.value() == LossShape::BATCH || _lossShape.value() == LossShape::ELEMENTWISE ||
-                            _lossShape.value() == LossShape::RAW);
+        THOR_THROW_IF_FALSE(_lossShape.value() == LossShape::NONE || _lossShape.value() == LossShape::BATCH ||
+                            _lossShape.value() == LossShape::PER_EXAMPLE || _lossShape.value() == LossShape::RAW);
         if (!_lossDataType.has_value())
             _lossDataType = _predictions.value().getDataType();
         THOR_THROW_IF_FALSE(_lossDataType.value() == DataType::FP16 || _lossDataType.value() == DataType::FP32);
@@ -113,14 +119,16 @@ class BinaryFocalLoss::Builder {
 
     virtual BinaryFocalLoss::Builder &predictions(Tensor _predictions) {
         THOR_THROW_IF_FALSE(!this->_predictions.has_value());
-        THOR_THROW_IF_FALSE(_predictions.getDimensions().size() == 1 && _predictions.getDimensions()[0] == 1);
+        THOR_THROW_IF_FALSE(!_predictions.getDimensions().empty());
+        THOR_THROW_IF_FALSE(_predictions.getDimensions()[0] > 0);
         this->_predictions = _predictions;
         return *this;
     }
 
     virtual BinaryFocalLoss::Builder &labels(Tensor _labels) {
         THOR_THROW_IF_FALSE(!this->_labels.has_value());
-        THOR_THROW_IF_FALSE(_labels.getDimensions().size() == 1 && _labels.getDimensions()[0] == 1);
+        THOR_THROW_IF_FALSE(!_labels.getDimensions().empty());
+        THOR_THROW_IF_FALSE(_labels.getDimensions()[0] > 0);
         this->_labels = _labels;
         return *this;
     }
@@ -145,9 +153,15 @@ class BinaryFocalLoss::Builder {
         return *this;
     }
 
-    virtual BinaryFocalLoss::Builder &reportsElementwiseLoss() {
+    virtual BinaryFocalLoss::Builder &reportsPerExampleLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
-        _lossShape = LossShape::ELEMENTWISE;
+        _lossShape = LossShape::PER_EXAMPLE;
+        return *this;
+    }
+
+    virtual BinaryFocalLoss::Builder &reportsNoLoss() {
+        THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
+        _lossShape = LossShape::NONE;
         return *this;
     }
 

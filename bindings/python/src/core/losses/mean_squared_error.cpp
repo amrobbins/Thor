@@ -22,6 +22,30 @@ using LabelType = Loss::LabelType;
 
 namespace {
 
+void validateReportedLossShape(LossShape reported_loss_shape, const string& loss_name) {
+    if (reported_loss_shape != LossShape::NONE && reported_loss_shape != LossShape::BATCH && reported_loss_shape != LossShape::PER_EXAMPLE &&
+        reported_loss_shape != LossShape::PER_OUTPUT && reported_loss_shape != LossShape::RAW) {
+        string error_message =
+            "Invalid value " + to_string((int)reported_loss_shape) + " passed for enum reported_loss_shape to " + loss_name + ".";
+        throw nb::value_error(error_message.c_str());
+    }
+}
+
+void setReportedLossShape(MSE::Builder& builder, LossShape reported_loss_shape) {
+    if (reported_loss_shape == LossShape::NONE) {
+        builder.reportsNoLoss();
+    } else if (reported_loss_shape == LossShape::BATCH) {
+        builder.reportsBatchLoss();
+    } else if (reported_loss_shape == LossShape::PER_EXAMPLE) {
+        builder.reportsPerExampleLoss();
+    } else if (reported_loss_shape == LossShape::PER_OUTPUT) {
+        builder.reportsPerOutputLoss();
+    } else {
+        THOR_THROW_IF_FALSE(reported_loss_shape == LossShape::RAW);
+        builder.reportsRawLoss();
+    }
+}
+
 void maybeSetExampleWeights(MSE::Builder& builder,
                             Tensor predictions,
                             Tensor labels,
@@ -55,7 +79,7 @@ void bind_mean_squared_error(nb::module_ &losses) {
            Tensor predictions,
            Tensor labels,
            std::optional<DataType> loss_data_type,
-           bool reportsElementwiseLoss,
+           LossShape reported_loss_shape,
            std::optional<float> loss_weight,
            std::optional<Tensor> example_weights) {
             const string loss_name = "MSE instance";
@@ -63,6 +87,7 @@ void bind_mean_squared_error(nb::module_ &losses) {
             ThorPython::RegressionLossDType::validateLabels(loss_name, labels);
             const DataType effectiveLossDataType =
                 ThorPython::RegressionLossDType::effectiveLossDType(loss_name, predictions.getDataType(), loss_data_type);
+            validateReportedLossShape(reported_loss_shape, loss_name);
 
             MSE::Builder builder;
 
@@ -76,8 +101,7 @@ void bind_mean_squared_error(nb::module_ &losses) {
                 throw nb::value_error(error_message.c_str());
             }
 
-            if (reportsElementwiseLoss)
-                builder.reportsElementwiseLoss();
+            setReportedLossShape(builder, reported_loss_shape);
 
             MSE built = builder.build();
 
@@ -87,7 +111,7 @@ void bind_mean_squared_error(nb::module_ &losses) {
         "predictions"_a,
         "labels"_a,
         "loss_data_type"_a.none() = nb::none(),
-        "reportsElementwiseLoss"_a = false,
+        "reported_loss_shape"_a = LossShape::BATCH,
         nb::kw_only(),
         "loss_weight"_a.none() = nb::none(),
         "example_weights"_a.none() = nb::none(),
@@ -102,18 +126,14 @@ network : thor.Network
 predictions : thor.Tensor
 labels : thor.Tensor
 loss_data_type : thor.DataType | None, default fp16 for fp16 predictions, otherwise fp32
-reports_elementwise_loss : Optional[bool], default None
-    If True, report elementwise loss.
-    When reports_batch_loss and reports_elementwise_loss are None, defaults to batch loss.
+reported_loss_shape : thor.losses.LossShape, default thor.losses.LossShape.batch
+    Controls the reported loss tensor:
 
-Notes
------
-Loss reductions available, meant to aid in hand analysis of a data set:
-
- * Batch [b][...] -> [1] - default
- * Elementwise [b][...] -> [b]
-
-So you could send a single batch and check the loss per example using Elementwise.
+    * ``none`` does not expose a reportable loss tensor; the raw loss remains the training objective.
+    * ``batch`` averages over the batch after summing all non-batch values.
+    * ``per_example`` sums all non-batch values independently for each example.
+    * ``per_output`` averages over the batch and preserves every non-batch dimension.
+    * ``raw`` reports the unreduced pointwise loss.
 
 )nbdoc";
 }

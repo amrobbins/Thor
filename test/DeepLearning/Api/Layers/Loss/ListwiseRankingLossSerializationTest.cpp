@@ -69,7 +69,7 @@ ListwiseRankingLossNetworkParts addListwiseRankingLosses(Network& network) {
                                   .labels(labels.getFeatureOutput().value())
                                   .scoreTemperature(0.75f)
                                   .labelTemperature(0.5f)
-                                  .reportsElementwiseLoss()
+                                  .reportsPerExampleLoss()
                                   .lossDataType(DataType::FP32)
                                   .build();
     consumeLoss(network, "list_net_loss", listNetLoss.getLoss());
@@ -131,7 +131,7 @@ TEST(ListwiseRankingLossSerialization, PublicArchitectureJsonIncludesRoundTripFi
     const json listNetJson = losses.listNetLoss.architectureJson();
     EXPECT_EQ(listNetJson.at("factory").get<string>(), Layer::Factory::Loss.value());
     EXPECT_EQ(listNetJson.at("layer_type").get<string>(), "list_net_loss");
-    EXPECT_EQ(listNetJson.at("loss_shape").get<Loss::LossShape>(), Loss::LossShape::ELEMENTWISE);
+    EXPECT_EQ(listNetJson.at("loss_shape").get<Loss::LossShape>(), Loss::LossShape::PER_EXAMPLE);
     EXPECT_EQ(listNetJson.at("loss_data_type").get<DataType>(), DataType::FP32);
     EXPECT_FLOAT_EQ(listNetJson.at("score_temperature").get<float>(), 0.75f);
     EXPECT_FLOAT_EQ(listNetJson.at("label_temperature").get<float>(), 0.5f);

@@ -184,6 +184,20 @@ class CapturingExecutor : public TrainingExecutor {
     uint32_t calls = 0;
 };
 
+class FailOnceCapturingExecutor : public CapturingExecutor {
+   public:
+    void fit(const TrainingRunRequest& request, TrainingObserver& observer) override {
+        if (failNextCall) {
+            failNextCall = false;
+            calls += 1;
+            throw std::runtime_error("intentional training failure");
+        }
+        CapturingExecutor::fit(request, observer);
+    }
+
+    bool failNextCall = true;
+};
+
 class SessionCapturingExecutor : public CapturingExecutor {
    public:
     void fit(const TrainingRunRequest& request, TrainingObserver& observer) override {
@@ -1002,6 +1016,73 @@ TEST(Trainer, FitSeesTrainingProgramMutationsBetweenCalls) {
     trainer.fit(1);
     EXPECT_EQ(executor->calls, 2u);
     EXPECT_FALSE(executor->lastFirstPhaseEnabled);
+}
+
+TEST(Trainer, SuccessfulFitConsumesPendingOptimizerReset) {
+    auto network = std::make_shared<Network>("trainer-reset-optimizers-success");
+    auto executor = std::make_shared<CapturingExecutor>();
+    Trainer trainer = Trainer::Builder()
+                          .network(network)
+                          .data(makeFakeTrainingData())
+                          .executor(executor)
+                          .observer(std::make_shared<NullTrainingObserver>())
+                          .build();
+
+    network->resetOptimizers();
+    EXPECT_TRUE(network->isOptimizerResetPending());
+
+    trainer.fit(1);
+
+    EXPECT_FALSE(network->isOptimizerResetPending());
+    EXPECT_EQ(executor->calls, 1u);
+}
+
+TEST(Trainer, FailedFitLeavesOptimizerResetPendingForRetry) {
+    auto network = std::make_shared<Network>("trainer-reset-optimizers-retry");
+    auto executor = std::make_shared<FailOnceCapturingExecutor>();
+    Trainer trainer = Trainer::Builder()
+                          .network(network)
+                          .data(makeFakeTrainingData())
+                          .executor(executor)
+                          .observer(std::make_shared<NullTrainingObserver>())
+                          .build();
+
+    network->resetOptimizers();
+    EXPECT_THROW((void)trainer.fit(1), std::runtime_error);
+    EXPECT_TRUE(network->isOptimizerResetPending());
+
+    trainer.fit(1);
+
+    EXPECT_FALSE(network->isOptimizerResetPending());
+    EXPECT_EQ(executor->calls, 2u);
+}
+
+TEST(Trainer, SuccessfulPhaseBackedFitConsumesPendingOptimizerResetOnPhaseNetwork) {
+    auto firstNetwork = makeFakePhaseNetwork("trainer-reset-first-phase", "first_output");
+    auto secondNetwork = makeFakePhaseNetwork("trainer-reset-second-phase", "second_output");
+    auto firstPhase = std::make_shared<TrainingPhase>("first", firstNetwork);
+    auto secondPhase = std::make_shared<TrainingPhase>("second", secondNetwork);
+    auto step = std::make_shared<TrainingStep>(
+        "step",
+        std::vector<std::shared_ptr<TrainingPhase>>{firstPhase, secondPhase},
+        nullptr,
+        std::vector<ParameterReference>{});
+    auto program = std::make_shared<TrainingProgram>(std::vector<std::shared_ptr<TrainingStep>>{step});
+    auto executor = std::make_shared<CapturingExecutor>();
+    Trainer trainer = Trainer::Builder()
+                          .data(makeFakeTrainingData())
+                          .trainingProgram(program)
+                          .executor(executor)
+                          .observer(std::make_shared<NullTrainingObserver>())
+                          .build();
+
+    secondNetwork->resetOptimizers();
+    EXPECT_TRUE(secondNetwork->isOptimizerResetPending());
+
+    trainer.fit(1);
+
+    EXPECT_FALSE(secondNetwork->isOptimizerResetPending());
+    EXPECT_EQ(executor->calls, 1u);
 }
 
 TEST(Trainer, RejectsZeroEpochsAtFitTime) {

@@ -166,15 +166,21 @@ class ListNetLoss::Builder {
         return *this;
     }
 
-    virtual ListNetLoss::Builder &reportsElementwiseLoss() {
+    virtual ListNetLoss::Builder &reportsPerExampleLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
-        _lossShape = LossShape::ELEMENTWISE;
+        _lossShape = LossShape::PER_EXAMPLE;
         return *this;
     }
 
     virtual ListNetLoss::Builder &reportsPerOutputLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
-        _lossShape = LossShape::CLASSWISE;
+        _lossShape = LossShape::PER_OUTPUT;
+        return *this;
+    }
+
+    virtual ListNetLoss::Builder &reportsNoLoss() {
+        THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
+        _lossShape = LossShape::NONE;
         return *this;
     }
 

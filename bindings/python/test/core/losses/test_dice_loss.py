@@ -41,9 +41,9 @@ def _dice_reference(predictions: np.ndarray, labels: np.ndarray, smooth: float) 
 def _reduce_loss(raw: np.ndarray, reported_loss_shape: thor.losses.LossShape) -> np.ndarray:
     if reported_loss_shape == thor.losses.LossShape.raw:
         return raw
-    if reported_loss_shape == thor.losses.LossShape.elementwise:
+    if reported_loss_shape == thor.losses.LossShape.per_example:
         return np.sum(raw, axis=1, keepdims=True).astype(np.float32)
-    if reported_loss_shape == thor.losses.LossShape.classwise:
+    if reported_loss_shape == thor.losses.LossShape.per_output:
         return (np.sum(raw, axis=0, keepdims=True) / raw.shape[0]).astype(np.float32)
     if reported_loss_shape == thor.losses.LossShape.batch:
         return np.array([[np.sum(raw) / raw.shape[0]]], dtype=np.float32)
@@ -103,7 +103,7 @@ def test_dice_loss_constructs_multidimensional_probabilities():
     assert loss.smooth == pytest.approx(0.25)
 
 
-@pytest.mark.parametrize("shape", ["batch", "classwise", "elementwise", "raw"])
+@pytest.mark.parametrize("shape", ["batch", "per_output", "per_example", "raw"])
 def test_dice_loss_reported_loss_shape_variants_construct(shape):
     n = _net()
     preds = _tensor([2, 3, 4])
@@ -136,8 +136,8 @@ def test_dice_loss_rejects_bad_params():
     "reported_loss_shape",
     [
         thor.losses.LossShape.raw,
-        thor.losses.LossShape.elementwise,
-        thor.losses.LossShape.classwise,
+        thor.losses.LossShape.per_example,
+        thor.losses.LossShape.per_output,
         thor.losses.LossShape.batch,
     ],
 )

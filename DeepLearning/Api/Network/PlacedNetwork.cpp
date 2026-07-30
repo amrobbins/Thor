@@ -878,11 +878,12 @@ void PlacedNetwork::copyTrainingStateFrom(PlacedNetwork& source) {
             Stream copyStream = Stream::getNextUploadStream(destinationStorage.getPlacement().getDeviceNum());
             copyTensorState(destinationStorage, sourceParameter->getStorage().value(), copyStream, description);
 
-            if (destinationParameter->hasOptimizer() && sourceParameter->hasOptimizer()) {
+            if (!network.shouldInitializeOptimizerAsNew(parameterReference.getParameterizableId()) &&
+                destinationParameter->hasOptimizer() && sourceParameter->hasOptimizer()) {
                 copyOptimizerState(*destinationParameter->getOptimizer(),
-                                         *sourceParameter->getOptimizer(),
-                                         copyStream,
-                                         description);
+                                   *sourceParameter->getOptimizer(),
+                                   copyStream,
+                                   description);
             }
             copyStreams.push_back(copyStream);
         }
@@ -959,11 +960,12 @@ void PlacedNetwork::copyMatchingTrainingStateFrom(PlacedNetwork& source) {
             Stream copyStream = Stream::getNextUploadStream(destinationStorage.getPlacement().getDeviceNum());
             copyTensorState(destinationStorage, sourceParameter->getStorage().value(), copyStream, description);
 
-            if (destinationParameter->hasOptimizer() && sourceParameter->hasOptimizer()) {
+            if (!network.shouldInitializeOptimizerAsNew(destinationReference.getParameterizableId()) &&
+                destinationParameter->hasOptimizer() && sourceParameter->hasOptimizer()) {
                 copyOptimizerState(*destinationParameter->getOptimizer(),
-                                         *sourceParameter->getOptimizer(),
-                                         copyStream,
-                                         description);
+                                   *sourceParameter->getOptimizer(),
+                                   copyStream,
+                                   description);
             }
             copyStreams.push_back(copyStream);
         }
@@ -1033,7 +1035,8 @@ void PlacedNetwork::loadTrainingStateFromSameNetworkArtifact(const std::string& 
                                                    description);
             ++registeredStateLoads;
 
-            if (destinationParameter->hasOptimizer()) {
+            if (!network.shouldInitializeOptimizerAsNew(destinationReference.getParameterizableId()) &&
+                destinationParameter->hasOptimizer()) {
                 registerOptimizerStateReadRequests(*archiveReader,
                                                    sourceIt->second.optimizerJson,
                                                    *destinationParameter->getOptimizer(),
@@ -1105,7 +1108,8 @@ void PlacedNetwork::loadMatchingTrainingStateFromArtifact(const std::string& art
                                                    description);
             ++registeredStateLoads;
 
-            if (destinationParameter->hasOptimizer()) {
+            if (!network.shouldInitializeOptimizerAsNew(destinationReference.getParameterizableId()) &&
+                destinationParameter->hasOptimizer()) {
                 registerOptimizerStateReadRequests(*archiveReader,
                                                    sourceIt->second.optimizerJson,
                                                    *destinationParameter->getOptimizer(),

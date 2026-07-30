@@ -19,7 +19,7 @@ ASGD::ASGD(uint64_t originalId) : Optimizer(originalId) {}
 shared_ptr<ThorImplementation::Optimizer> ASGD::stamp(shared_ptr<ThorImplementation::TrainableLayer> trainableLayer) {
     (void)trainableLayer;
     auto physicalASGD = make_shared<ThorImplementation::ASGD>(getId(), alpha, lambd, power, t0, weightDecay);
-    physicalASGD->setT(t);
+    physicalASGD->setT(shouldInitializeStateAsNew() ? 0.0f : t);
     return physicalASGD;
 }
 
@@ -169,7 +169,7 @@ vector<Event> ASGD::initialize(shared_ptr<ThorImplementation::Optimizer> physica
         THOR_THROW_IF_FALSE(sisterPhysicalASGD != nullptr);
         THOR_THROW_IF_FALSE(sisterPhysicalASGD->getParameter("averaged_weights")->getStorage().has_value());
         averagedWeights.copyFromAsync(sisterPhysicalASGD->getParameter("averaged_weights")->getStorage().value(), stream);
-    } else if (averagedWeightsFile.has_value()) {
+    } else if (averagedWeightsFile.has_value() && !shouldInitializeStateAsNew()) {
         THOR_THROW_IF_FALSE(archiveReader != nullptr);
         archiveReader->registerReadRequest(averagedWeightsFile.value(), averagedWeights);
 

@@ -39,6 +39,13 @@ class NetworkInput : public Layer {
 
     std::string getLayerType() const override { return "NetworkInput"; }
 
+    [[nodiscard]] std::optional<std::string> getOutputPortName(const Tensor& outputTensor) const override {
+        if (featureOutput.has_value() && outputTensor == featureOutput.value()) {
+            return "output";
+        }
+        return std::nullopt;
+    }
+
     nlohmann::json architectureJson() const override;
     static void deserialize(const nlohmann::json &j, Network *network);
 

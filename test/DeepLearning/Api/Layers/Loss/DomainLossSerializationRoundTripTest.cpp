@@ -114,8 +114,8 @@ DomainLossFixture addAllNewDomainLosses(Network& network) {
     DomainLossFixture fixture;
 
     {
-        auto predictions = fp32Input(network, "binary_focal_predictions", {1});
-        auto labels = fp32Input(network, "binary_focal_labels", {1});
+        auto predictions = fp32Input(network, "binary_focal_predictions", {4});
+        auto labels = fp32Input(network, "binary_focal_labels", {4});
         BinaryFocalLoss loss = BinaryFocalLoss::Builder()
                                    .network(network)
                                    .predictions(predictions.getFeatureOutput().value())
@@ -151,7 +151,7 @@ DomainLossFixture addAllNewDomainLosses(Network& network) {
                             .predictions(predictions.getFeatureOutput().value())
                             .labels(labels.getFeatureOutput().value())
                             .smooth(0.375f)
-                            .reportsElementwiseLoss()
+                            .reportsPerExampleLoss()
                             .lossDataType(DataType::FP32)
                             .lossWeight(1.375f)
                             .build();
@@ -226,7 +226,7 @@ DomainLossFixture addAllNewDomainLosses(Network& network) {
                             .predictions(predictions.getFeatureOutput().value())
                             .labels(labels.getFeatureOutput().value())
                             .eps(3.0e-5f)
-                            .reportsElementwiseLoss()
+                            .reportsPerExampleLoss()
                             .lossDataType(DataType::FP32)
                             .lossWeight(2.0f)
                             .build();
@@ -269,7 +269,7 @@ DomainLossFixture addAllNewDomainLosses(Network& network) {
                                .target(target.getFeatureOutput().value())
                                .power(1.7f)
                                .eps(2.0e-4f)
-                               .reportsElementwiseLoss()
+                               .reportsPerExampleLoss()
                                .lossDataType(DataType::FP32)
                                .lossWeight(2.375f)
                                .build();
@@ -341,7 +341,7 @@ DomainLossFixture addAllNewDomainLosses(Network& network) {
                                           .fakeScores(fakeScores.getFeatureOutput().value())
                                           .realTarget(0.9f)
                                           .fakeTarget(0.1f)
-                                          .reportsElementwiseLoss()
+                                          .reportsPerExampleLoss()
                                           .lossDataType(DataType::FP32)
                                           .lossWeight(3.0f)
                                           .build();
@@ -377,7 +377,7 @@ DomainLossFixture addAllNewDomainLosses(Network& network) {
         WassersteinGANGeneratorLoss loss = WassersteinGANGeneratorLoss::Builder()
                                                .network(network)
                                                .fakeScores(fakeScores.getFeatureOutput().value())
-                                               .reportsElementwiseLoss()
+                                               .reportsPerExampleLoss()
                                                .lossDataType(DataType::FP32)
                                                .lossWeight(3.375f)
                                                .build();
@@ -457,7 +457,7 @@ DomainLossFixture addAllNewDomainLosses(Network& network) {
                                        .target(target.getFeatureOutput().value())
                                        .margin(0.125f)
                                        .eps(4.0e-5f)
-                                       .reportsElementwiseLoss()
+                                       .reportsPerExampleLoss()
                                        .lossDataType(DataType::FP32)
                                        .lossWeight(4.0f)
                                        .build();
@@ -512,7 +512,7 @@ DomainLossFixture addAllNewDomainLosses(Network& network) {
                                                    .labels(labels.getFeatureOutput().value())
                                                    .mask(mask.getFeatureOutput().value())
                                                    .temperature(0.5625f)
-                                                   .reportsElementwiseLoss()
+                                                   .reportsPerExampleLoss()
                                                    .lossDataType(DataType::FP32)
                                                    .lossWeight(4.375f)
                                                    .build();

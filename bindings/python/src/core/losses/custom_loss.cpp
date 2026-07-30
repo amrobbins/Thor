@@ -50,14 +50,17 @@ void bind_custom_loss(nb::module_& losses) {
                 .lossWeight(loss_weight.value_or(1.0f));
 
             switch (reported_loss_shape) {
+                case Loss::LossShape::NONE:
+                    builder.reportsNoLoss();
+                    break;
                 case Loss::LossShape::BATCH:
                     builder.reportsBatchLoss();
                     break;
-                case Loss::LossShape::ELEMENTWISE:
-                    builder.reportsElementwiseLoss();
+                case Loss::LossShape::PER_EXAMPLE:
+                    builder.reportsPerExampleLoss();
                     break;
-                case Loss::LossShape::CLASSWISE:
-                    builder.reportsClasswiseLoss();
+                case Loss::LossShape::PER_OUTPUT:
+                    builder.reportsPerOutputLoss();
                     break;
                 case Loss::LossShape::RAW:
                     builder.reportsRawLoss();
@@ -108,6 +111,7 @@ predictions : thor.Tensor
 labels : thor.Tensor
 loss_data_type : thor.DataType, default thor.DataType.FP32
 reported_loss_shape : thor.losses.Loss.LossShape, default LossShape.batch
+    Use ``LossShape.none`` to keep the raw training objective without exposing a report tensor.
 predictions_name : str, default "predictions"
 labels_name : str, default "labels"
 loss_name : str, default "loss"

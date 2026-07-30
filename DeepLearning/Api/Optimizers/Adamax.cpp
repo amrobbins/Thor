@@ -19,7 +19,7 @@ Adamax::Adamax(uint64_t originalId) : Optimizer(originalId) {}
 shared_ptr<ThorImplementation::Optimizer> Adamax::stamp(shared_ptr<ThorImplementation::TrainableLayer> trainableLayer) {
     (void)trainableLayer;
     auto physicalAdamax = make_shared<ThorImplementation::Adamax>(getId(), alpha, beta1, beta2, epsilon);
-    physicalAdamax->setT(t);
+    physicalAdamax->setT(shouldInitializeStateAsNew() ? 0.0f : t);
     return physicalAdamax;
 }
 
@@ -170,7 +170,7 @@ vector<Event> Adamax::initialize(shared_ptr<ThorImplementation::Optimizer> physi
         THOR_THROW_IF_FALSE(sisterPhysicalAdamax->getParameter("u")->getStorage().has_value());
         m.copyFromAsync(sisterPhysicalAdamax->getParameter("m")->getStorage().value(), stream);
         u.copyFromAsync(sisterPhysicalAdamax->getParameter("u")->getStorage().value(), stream);
-    } else if (mFile.has_value()) {
+    } else if (mFile.has_value() && !shouldInitializeStateAsNew()) {
         THOR_THROW_IF_FALSE(uFile.has_value());
         THOR_THROW_IF_FALSE(archiveReader != nullptr);
         archiveReader->registerReadRequest(mFile.value(), m);

@@ -74,8 +74,7 @@ class WassersteinGANGeneratorLoss::Builder {
     virtual WassersteinGANGeneratorLoss build() {
         THOR_THROW_IF_FALSE(_network.has_value());
         THOR_THROW_IF_FALSE(_fakeScores.has_value());
-        THOR_THROW_IF_FALSE(_fakeScores.value().getDimensions().size() == 1);
-        THOR_THROW_IF_FALSE(_fakeScores.value().getDimensions()[0] > 0);
+        THOR_THROW_IF_FALSE(!_fakeScores.value().getDimensions().empty());
 
         if (!_lossShape.has_value())
             _lossShape = LossShape::BATCH;
@@ -116,15 +115,21 @@ class WassersteinGANGeneratorLoss::Builder {
         return *this;
     }
 
-    virtual WassersteinGANGeneratorLoss::Builder &reportsElementwiseLoss() {
+    virtual WassersteinGANGeneratorLoss::Builder &reportsPerExampleLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
-        _lossShape = LossShape::ELEMENTWISE;
+        _lossShape = LossShape::PER_EXAMPLE;
         return *this;
     }
 
     virtual WassersteinGANGeneratorLoss::Builder &reportsPerOutputLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
-        _lossShape = LossShape::CLASSWISE;
+        _lossShape = LossShape::PER_OUTPUT;
+        return *this;
+    }
+
+    virtual WassersteinGANGeneratorLoss::Builder &reportsNoLoss() {
+        THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
+        _lossShape = LossShape::NONE;
         return *this;
     }
 

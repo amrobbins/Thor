@@ -7,45 +7,35 @@
 using namespace ThorImplementation;
 using namespace std;
 
-namespace {
-
-uint64_t flattenedLossDim(const vector<uint64_t>& inputDimensions) {
+vector<uint32_t> LossShaper::getReductionAxes(const vector<uint64_t>& inputDimensions,
+                                               OutputLossType outputLossType) {
     THOR_THROW_IF_FALSE(inputDimensions.size() >= 2);
-    uint64_t result = 1;
-    for (size_t i = 1; i < inputDimensions.size(); ++i) {
-        THOR_THROW_IF_FALSE(inputDimensions[i] > 0);
-        result *= inputDimensions[i];
-    }
-    return result;
-}
 
-vector<uint64_t> flattenedReductionInputDimensions(const vector<uint64_t>& inputDimensions) {
-    THOR_THROW_IF_FALSE(inputDimensions.size() >= 2);
-    return {inputDimensions.front(), flattenedLossDim(inputDimensions)};
-}
-
-vector<uint32_t> reductionAxes(LossShaper::OutputLossType outputLossType) {
-    if (outputLossType == LossShaper::OutputLossType::BATCH) {
-        return {0, 1};
+    if (outputLossType == OutputLossType::BATCH) {
+        vector<uint32_t> axes(inputDimensions.size());
+        for (uint32_t axis = 0; axis < axes.size(); ++axis)
+            axes[axis] = axis;
+        return axes;
     }
-    if (outputLossType == LossShaper::OutputLossType::CLASSWISE) {
+    if (outputLossType == OutputLossType::PER_OUTPUT)
         return {0};
-    }
-    if (outputLossType == LossShaper::OutputLossType::ELEMENTWISE) {
-        return {1};
+    if (outputLossType == OutputLossType::PER_EXAMPLE) {
+        vector<uint32_t> axes(inputDimensions.size() - 1);
+        for (uint32_t axis = 1; axis < inputDimensions.size(); ++axis)
+            axes[axis - 1] = axis;
+        return axes;
     }
     THOR_UNREACHABLE();
 }
 
-float reductionOutputScale(const vector<uint64_t>& inputDimensions,
-                           LossShaper::OutputLossType outputLossType) {
-    if (outputLossType == LossShaper::OutputLossType::ELEMENTWISE) {
+float LossShaper::getReductionOutputScale(const vector<uint64_t>& inputDimensions,
+                                          OutputLossType outputLossType) {
+    THOR_THROW_IF_FALSE(inputDimensions.size() >= 2);
+    THOR_THROW_IF_FALSE(inputDimensions.front() > 0);
+    if (outputLossType == OutputLossType::PER_EXAMPLE)
         return 1.0f;
-    }
     return 1.0f / static_cast<float>(inputDimensions.front());
 }
-
-}  // namespace
 
 LossShaper::LossShaper(OutputLossType outputLossType) {
     this->outputLossType = outputLossType;
@@ -80,13 +70,11 @@ void LossShaper::compileImpl() {
         // There is no ErrorInput to connect to the previous layer, so this is a nop
     } else {
         const vector<uint64_t> inputDimensions = featureInput.value().getDimensions();
-        Tensor reductionInput = featureInput.value();
-        reductionInput.reshape(flattenedReductionInputDimensions(inputDimensions));
         CubReduction cubReduction(CubReductionOp::Sum,
-                                  reductionAxes(outputLossType),
+                                  getReductionAxes(inputDimensions, outputLossType),
                                   featureOutput.value().getDataType(),
-                                  reductionOutputScale(inputDimensions, outputLossType));
-        reduction = cubReduction.stamp(reductionInput, featureOutput.value(), stream);
+                                  getReductionOutputScale(inputDimensions, outputLossType));
+        reduction = cubReduction.stamp(featureInput.value(), featureOutput.value(), stream);
     }
 
     uninitialized = false;
@@ -117,16 +105,16 @@ void LossShaper::backProp(std::optional<Tensor> dataIn, std::optional<Tensor> er
 
 vector<uint64_t> LossShaper::getOutputDimensions(vector<uint64_t> inputDimensions, OutputLossType outputLossType) {
     THOR_THROW_IF_FALSE(inputDimensions.size() >= 2);
-    const uint64_t classDimSize = flattenedLossDim(inputDimensions);
 
     if (outputLossType == OutputLossType::BATCH) {
-        // Sum all non-batch losses and average those per-item sums across the batch.
+        // Sum all non-batch losses and average those per-example sums across the batch.
         return {1, 1};
-    } else if (outputLossType == OutputLossType::CLASSWISE) {
-        // Average each flattened non-batch loss position across the batch.
-        return {1, classDimSize};
-    } else if (outputLossType == OutputLossType::ELEMENTWISE) {
-        // Sum all flattened non-batch losses independently for each batch item.
+    } else if (outputLossType == OutputLossType::PER_OUTPUT) {
+        // Average across the batch while preserving the complete per-example loss layout.
+        inputDimensions[0] = 1;
+        return inputDimensions;
+    } else if (outputLossType == OutputLossType::PER_EXAMPLE) {
+        // Sum all non-batch losses independently for each batch item.
         return {inputDimensions[0], 1};
     } else {
         THOR_UNREACHABLE();

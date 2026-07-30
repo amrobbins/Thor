@@ -289,6 +289,39 @@ TEST(AdamWApi, InitializeFirstStampZerosMomentParameters) {
     expectAllClose(copyGpuFp32TensorToValues(v, stream), {0.0f, 0.0f, 0.0f, 0.0f});
 }
 
+TEST(AdamWApi, InitializeAsNewIgnoresSerializedStateAndResetsTime) {
+    Stream stream(gpuPlacement);
+
+    std::shared_ptr<Api::AdamW> savedAdamW = Api::AdamW::Builder().build();
+    json stateJson = savedAdamW->architectureJson();
+    stateJson["t"] = 12.0f;
+    stateJson["m_tensor"] = "missing_adamw_m.gds";
+    stateJson["v_tensor"] = "missing_adamw_v.gds";
+
+    std::shared_ptr<thor_file::TarReader> archiveReader;
+    std::shared_ptr<Api::Optimizer> optimizer = Api::Optimizer::deserialize(archiveReader, stateJson, nullptr);
+    std::shared_ptr<Api::AdamW> adamw = std::dynamic_pointer_cast<Api::AdamW>(optimizer);
+    ASSERT_NE(adamw, nullptr);
+    adamw->initializeStateAsNew();
+
+    Impl::Tensor weights(gpuPlacement, Impl::TensorDescriptor(DataType::FP32, {2, 2}));
+    std::shared_ptr<Impl::AdamW> physicalAdamW = stampCompileAdamW(*adamw, weights, stream);
+    ASSERT_NE(physicalAdamW, nullptr);
+    EXPECT_FLOAT_EQ(physicalAdamW->getT(), 0.0f);
+
+    Impl::Tensor m = requireOptimizerStorage(physicalAdamW, "m");
+    Impl::Tensor v = requireOptimizerStorage(physicalAdamW, "v");
+    copyValuesToGpuFp32Tensor(m, {1.0f, 2.0f, 3.0f, 4.0f}, stream);
+    copyValuesToGpuFp32Tensor(v, {5.0f, 6.0f, 7.0f, 8.0f}, stream);
+
+    std::vector<Event> initEvents = adamw->initialize(physicalAdamW, /*isFirstStamp=*/true, nullptr, std::nullopt);
+    synchronizeEvents(std::move(initEvents));
+    stream.synchronize();
+
+    expectAllClose(copyGpuFp32TensorToValues(m, stream), {0.0f, 0.0f, 0.0f, 0.0f}, 0.0f, 0.0f);
+    expectAllClose(copyGpuFp32TensorToValues(v, stream), {0.0f, 0.0f, 0.0f, 0.0f}, 0.0f, 0.0f);
+}
+
 TEST(AdamWApi, InitializeNonFirstStampCopiesMomentParametersFromSisterOptimizer) {
     Stream stream(gpuPlacement);
 

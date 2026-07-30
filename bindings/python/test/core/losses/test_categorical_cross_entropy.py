@@ -161,7 +161,7 @@ def test_sparse_categorical_cross_entropy_rejects_float_labels():
     ],
 )
 def test_categorical_cross_entropy_reported_loss_shape_variants_construct(loss_cls, labels, args):
-    for shape in ["batch", "classwise", "elementwise", "raw"]:
+    for shape in ["batch", "per_output", "per_example", "raw"]:
         n = _net()
         preds = _tensor_1d(5, thor.DataType.fp32)
         loss_shape = getattr(thor.losses.LossShape, shape)

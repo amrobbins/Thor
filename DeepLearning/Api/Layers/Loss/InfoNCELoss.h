@@ -132,15 +132,21 @@ class InfoNCELoss::Builder {
         return *this;
     }
 
-    virtual InfoNCELoss::Builder &reportsElementwiseLoss() {
+    virtual InfoNCELoss::Builder &reportsPerExampleLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
-        _lossShape = LossShape::ELEMENTWISE;
+        _lossShape = LossShape::PER_EXAMPLE;
         return *this;
     }
 
     virtual InfoNCELoss::Builder &reportsPerOutputLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
-        _lossShape = LossShape::CLASSWISE;
+        _lossShape = LossShape::PER_OUTPUT;
+        return *this;
+    }
+
+    virtual InfoNCELoss::Builder &reportsNoLoss() {
+        THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
+        _lossShape = LossShape::NONE;
         return *this;
     }
 

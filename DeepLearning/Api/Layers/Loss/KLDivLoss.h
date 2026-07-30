@@ -116,15 +116,21 @@ class KLDivLoss::Builder {
         return *this;
     }
 
-    virtual KLDivLoss::Builder &reportsElementwiseLoss() {
+    virtual KLDivLoss::Builder &reportsPerExampleLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
-        _lossShape = LossShape::ELEMENTWISE;
+        _lossShape = LossShape::PER_EXAMPLE;
         return *this;
     }
 
     virtual KLDivLoss::Builder &reportsPerOutputLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
-        _lossShape = LossShape::CLASSWISE;
+        _lossShape = LossShape::PER_OUTPUT;
+        return *this;
+    }
+
+    virtual KLDivLoss::Builder &reportsNoLoss() {
+        THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
+        _lossShape = LossShape::NONE;
         return *this;
     }
 

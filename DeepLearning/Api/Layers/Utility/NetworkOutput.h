@@ -25,6 +25,13 @@ class NetworkOutput : public Layer {
 
     std::string getLayerType() const override { return "NetworkOutput"; }
 
+    [[nodiscard]] std::optional<std::string> getInputPortName(const Tensor& inputTensor) const override {
+        if (featureInput.has_value() && inputTensor == featureInput.value()) {
+            return "input";
+        }
+        return std::nullopt;
+    }
+
     virtual bool isMultiLayer() const {
         THOR_THROW_IF_FALSE(featureInput.has_value());
         return featureInput.value().getDataType() != dataType;

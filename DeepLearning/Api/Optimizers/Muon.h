@@ -21,6 +21,8 @@ class Muon : public Optimizer {
     ~Muon() override = default;
 
     std::shared_ptr<ThorImplementation::Optimizer> stamp(std::shared_ptr<ThorImplementation::TrainableLayer> trainableLayer) override;
+    void initializeStateAsNew() override;
+    void clearInitializeStateAsNew() override;
     std::vector<Event> initialize(std::shared_ptr<ThorImplementation::Optimizer> physicalOptimizer,
                                   bool isFirstStamp,
                                   std::shared_ptr<ThorImplementation::Optimizer> physicalSisterOptimizer,

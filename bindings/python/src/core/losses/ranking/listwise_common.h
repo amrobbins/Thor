@@ -22,8 +22,8 @@ inline bool isListwiseMaskDType(DataType dtype) {
 }
 
 inline void validateReportedLossShape(LossShape reportedLossShape, const std::string& lossName) {
-    if (reportedLossShape != LossShape::BATCH && reportedLossShape != LossShape::CLASSWISE &&
-        reportedLossShape != LossShape::ELEMENTWISE && reportedLossShape != LossShape::RAW) {
+    if (reportedLossShape != LossShape::NONE && reportedLossShape != LossShape::BATCH && reportedLossShape != LossShape::PER_OUTPUT &&
+        reportedLossShape != LossShape::PER_EXAMPLE && reportedLossShape != LossShape::RAW) {
         std::string errorMessage =
             "Invalid value " + std::to_string(static_cast<int>(reportedLossShape)) + " passed for enum reported_loss_shape to " + lossName + ".";
         throw nb::value_error(errorMessage.c_str());
@@ -32,12 +32,14 @@ inline void validateReportedLossShape(LossShape reportedLossShape, const std::st
 
 template <typename Builder>
 inline void setReportedLossShape(Builder& builder, LossShape reportedLossShape) {
-    if (reportedLossShape == LossShape::BATCH) {
+    if (reportedLossShape == LossShape::NONE) {
+        builder.reportsNoLoss();
+    } else if (reportedLossShape == LossShape::BATCH) {
         builder.reportsBatchLoss();
-    } else if (reportedLossShape == LossShape::CLASSWISE) {
+    } else if (reportedLossShape == LossShape::PER_OUTPUT) {
         builder.reportsPerOutputLoss();
-    } else if (reportedLossShape == LossShape::ELEMENTWISE) {
-        builder.reportsElementwiseLoss();
+    } else if (reportedLossShape == LossShape::PER_EXAMPLE) {
+        builder.reportsPerExampleLoss();
     } else {
         validateReportedLossShape(reportedLossShape, "loss");
         builder.reportsRawLoss();

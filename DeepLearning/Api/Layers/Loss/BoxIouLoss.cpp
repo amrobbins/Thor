@@ -49,8 +49,8 @@ void BoxIouLoss::populateAndAdd(BoxIouLoss& loss,
     validateBoxDType("predictions", predictions.getDataType());
     validateBoxDType("labels", labels.getDataType());
     THOR_THROW_IF_FALSE(lossDataType == DataType::FP16 || lossDataType == DataType::FP32);
-    THOR_THROW_IF_FALSE(lossShape == LossShape::BATCH || lossShape == LossShape::CLASSWISE ||
-                        lossShape == LossShape::ELEMENTWISE || lossShape == LossShape::RAW);
+    THOR_THROW_IF_FALSE(lossShape == LossShape::NONE || lossShape == LossShape::BATCH || lossShape == LossShape::PER_OUTPUT ||
+                        lossShape == LossShape::PER_EXAMPLE || lossShape == LossShape::RAW);
     THOR_THROW_IF_FALSE(eps > 0.0f);
     lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
 
@@ -88,19 +88,7 @@ void BoxIouLoss::buildSupportLayersAndAddToNetwork() {
 
     lossShaperInput = rawLoss->getLoss();
 
-    if (lossShape == LossShape::BATCH) {
-        LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(lossShaperInput).reportsBatchLoss().build();
-        lossTensor = lossShaper.getLossOutput();
-    } else if (lossShape == LossShape::ELEMENTWISE) {
-        LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(lossShaperInput).reportsElementwiseLoss().build();
-        lossTensor = lossShaper.getLossOutput();
-    } else if (lossShape == LossShape::CLASSWISE) {
-        LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(lossShaperInput).reportsClasswiseLoss().build();
-        lossTensor = lossShaper.getLossOutput();
-    } else {
-        THOR_THROW_IF_FALSE(lossShape == LossShape::RAW);
-        lossTensor = lossShaperInput;
-    }
+    finalizeLossReporting();
 }
 
 json BoxIouLoss::architectureJson() const {

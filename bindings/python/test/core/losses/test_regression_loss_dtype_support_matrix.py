@@ -11,19 +11,19 @@ def _loss_builders():
         (
             "MSE",
             lambda n, p, y, loss_dtype=None, weights=None: thor.losses.MSE(
-                n, p, y, loss_dtype, False, example_weights=weights
+                n, p, y, loss_dtype, thor.losses.LossShape.batch, example_weights=weights
             ),
         ),
         (
             "MAE",
             lambda n, p, y, loss_dtype=None, weights=None: thor.losses.MAE(
-                n, p, y, loss_dtype, False, example_weights=weights
+                n, p, y, loss_dtype, thor.losses.LossShape.batch, example_weights=weights
             ),
         ),
         (
             "MeanPowerError",
             lambda n, p, y, loss_dtype=None, weights=None: thor.losses.MeanPowerError(
-                n, p, y, 1.5, loss_dtype, False, example_weights=weights
+                n, p, y, 1.5, loss_dtype, thor.losses.LossShape.batch, example_weights=weights
             ),
         ),
         (

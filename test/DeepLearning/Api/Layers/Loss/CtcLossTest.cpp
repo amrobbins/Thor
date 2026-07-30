@@ -146,8 +146,8 @@ TEST(CtcLossApiLayer, ReportsBatchLossThroughLossShaper) {
     EXPECT_EQ(shaperJson.at("loss_shape").get<Impl::LossShaper::OutputLossType>(), Impl::LossShaper::OutputLossType::BATCH);
 }
 
-TEST(CtcLossApiLayer, ReportsElementwiseLossThroughLossShaper) {
-    Api::Network network("ctc_elementwise_api");
+TEST(CtcLossApiLayer, ReportsPerExampleLossThroughLossShaper) {
+    Api::Network network("ctc_per_example_api");
     CtcApiInputs tensors = makeInputs(network);
 
     Api::CtcLoss loss = Api::CtcLoss::Builder()
@@ -156,7 +156,7 @@ TEST(CtcLossApiLayer, ReportsElementwiseLossThroughLossShaper) {
                             .labels(tensors.labels.getFeatureOutput().value())
                             .labelLengths(tensors.labelLengths.getFeatureOutput().value())
                             .inputLengths(tensors.inputLengths.getFeatureOutput().value())
-                            .reportsElementwiseLoss()
+                            .reportsPerExampleLoss()
                             .build();
 
     EXPECT_EQ(loss.getLoss().getDimensions(), vector<uint64_t>{1});
@@ -164,7 +164,7 @@ TEST(CtcLossApiLayer, ReportsElementwiseLossThroughLossShaper) {
     EXPECT_EQ(countLayersOfType(architecture, "ctc_loss"), 1u);
     EXPECT_EQ(countLayersOfType(architecture, "loss_shaper"), 1u);
     const json& shaperJson = findOnlyLayerOfType(architecture, "loss_shaper");
-    EXPECT_EQ(shaperJson.at("loss_shape").get<Impl::LossShaper::OutputLossType>(), Impl::LossShaper::OutputLossType::ELEMENTWISE);
+    EXPECT_EQ(shaperJson.at("loss_shape").get<Impl::LossShaper::OutputLossType>(), Impl::LossShaper::OutputLossType::PER_EXAMPLE);
 }
 
 TEST(CtcLossApiLayer, RejectsUnsupportedPublicApiContracts) {

@@ -88,7 +88,7 @@ BoxLossNetworkParts addBoxLosses(Network& network) {
                             .predictions(giouPredictions.getFeatureOutput().value())
                             .labels(giouLabels.getFeatureOutput().value())
                             .eps(2.0e-6f)
-                            .reportsElementwiseLoss()
+                            .reportsPerExampleLoss()
                             .lossDataType(DataType::FP32)
                             .build();
     consumeLoss(network, "giou_loss", giouLoss.getLoss());
@@ -153,14 +153,14 @@ TEST(BoxIouLossSerialization, PublicArchitectureJsonIncludesRoundTripFields) {
                       losses.iouLoss.getLoss());
     expectBoxLossJson(losses.giouLoss.architectureJson(),
                       "giou_loss",
-                      Loss::LossShape::ELEMENTWISE,
+                      Loss::LossShape::PER_EXAMPLE,
                       2.0e-6f,
                       losses.giouLoss.getPredictions(),
                       losses.giouLoss.getLabels(),
                       losses.giouLoss.getLoss());
     expectBoxLossJson(losses.diouLoss.architectureJson(),
                       "diou_loss",
-                      Loss::LossShape::CLASSWISE,
+                      Loss::LossShape::PER_OUTPUT,
                       3.0e-6f,
                       losses.diouLoss.getPredictions(),
                       losses.diouLoss.getLabels(),

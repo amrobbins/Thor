@@ -35,7 +35,7 @@
 //         if (shape == 0) {
 //             meanAbsolutePercentageErrorBuilder.reportsBatchLoss();
 //         } else if (shape == 1) {
-//             meanAbsolutePercentageErrorBuilder.reportsElementwiseLoss();
+//             meanAbsolutePercentageErrorBuilder.reportsPerExampleLoss();
 //         } else if (shape == 2) {
 //             meanAbsolutePercentageErrorBuilder.reportsPerOutputLoss();
 //         } else if (shape == 3) {
@@ -44,7 +44,7 @@
 //             assert(false);
 //         }
 //         vector<uint64_t> batchDimensions = {1};
-//         vector<uint64_t> elementwiseDimensions = {1};
+//         vector<uint64_t> perExampleDimensions = {1};
 //         vector<uint64_t> perOutputDimensions = {dimensions[0]};
 //         vector<uint64_t> rawLossDimensions = dimensions;
 //
@@ -68,7 +68,7 @@
 //         if (shape == 0) {
 //             ASSERT_EQ(actualLoss.value().getDimensions(), batchDimensions);
 //         } else if (shape == 1) {
-//             ASSERT_EQ(actualLoss.value().getDimensions(), elementwiseDimensions);
+//             ASSERT_EQ(actualLoss.value().getDimensions(), perExampleDimensions);
 //         } else if (shape == 2) {
 //             ASSERT_EQ(actualLoss.value().getDimensions(), perOutputDimensions);
 //         } else if (shape == 3) {
@@ -97,7 +97,7 @@
 //         if (shape == 0) {
 //             ASSERT_EQ(cloneLoss.value().getDimensions(), batchDimensions);
 //         } else if (shape == 1) {
-//             ASSERT_EQ(cloneLoss.value().getDimensions(), elementwiseDimensions);
+//             ASSERT_EQ(cloneLoss.value().getDimensions(), perExampleDimensions);
 //         } else if (shape == 2) {
 //             ASSERT_EQ(cloneLoss.value().getDimensions(), perOutputDimensions);
 //         } else if (shape == 3) {
@@ -154,7 +154,7 @@
 //     else if (lossShape == 1)
 //         meanAbsolutePercentageErrorBuilder.reportsPerOutputLoss();
 //     else if (lossShape == 2)
-//         meanAbsolutePercentageErrorBuilder.reportsElementwiseLoss();
+//         meanAbsolutePercentageErrorBuilder.reportsPerExampleLoss();
 //     else
 //         meanAbsolutePercentageErrorBuilder.reportsRawLoss();
 //

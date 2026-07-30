@@ -1,6 +1,7 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/optional.h>
 #include <optional>
+#include <vector>
 
 #include "DeepLearning/Api/Layers/Loss/BinaryFocalLoss.h"
 #include "DeepLearning/Api/Network/Network.h"
@@ -17,7 +18,8 @@ using LossShape = Loss::LossShape;
 
 namespace {
 void validateReportedLossShape(LossShape reported_loss_shape, const string &loss_name) {
-    if (reported_loss_shape != LossShape::BATCH && reported_loss_shape != LossShape::ELEMENTWISE && reported_loss_shape != LossShape::RAW) {
+    if (reported_loss_shape != LossShape::NONE && reported_loss_shape != LossShape::BATCH &&
+        reported_loss_shape != LossShape::PER_EXAMPLE && reported_loss_shape != LossShape::RAW) {
         string error_message =
             "Invalid value " + to_string((int)reported_loss_shape) + " passed for enum reported_loss_shape to " + loss_name + ".";
         throw nb::value_error(error_message.c_str());
@@ -25,10 +27,12 @@ void validateReportedLossShape(LossShape reported_loss_shape, const string &loss
 }
 
 void setReportedLossShape(BinaryFocalLoss::Builder &builder, LossShape reported_loss_shape) {
-    if (reported_loss_shape == LossShape::BATCH) {
+    if (reported_loss_shape == LossShape::NONE) {
+        builder.reportsNoLoss();
+    } else if (reported_loss_shape == LossShape::BATCH) {
         builder.reportsBatchLoss();
-    } else if (reported_loss_shape == LossShape::ELEMENTWISE) {
-        builder.reportsElementwiseLoss();
+    } else if (reported_loss_shape == LossShape::PER_EXAMPLE) {
+        builder.reportsPerExampleLoss();
     } else {
         THOR_THROW_IF_FALSE(reported_loss_shape == LossShape::RAW);
         builder.reportsRawLoss();
@@ -47,14 +51,17 @@ void validateBinaryFocalLossArguments(const string &loss_name,
                                       float alpha,
                                       optional<DataType> loss_data_type,
                                       LossShape reported_loss_shape) {
-    if (predictions.getDimensions().size() != 1 || predictions.getDimensions()[0] != 1) {
-        string error_message = loss_name + ": predictions must be a 1 dimensional logits tensor of size one but predictions is " +
-                               predictions.getDescriptorString();
-        throw nb::value_error(error_message.c_str());
+    const vector<uint64_t> prediction_dimensions = predictions.getDimensions();
+    const vector<uint64_t> label_dimensions = labels.getDimensions();
+    if (prediction_dimensions.empty() || prediction_dimensions[0] == 0) {
+        throw nb::value_error((loss_name + ": predictions must have at least one nonempty per-example dimension").c_str());
     }
-    if (labels.getDimensions().size() != 1 || labels.getDimensions()[0] != 1) {
-        string error_message = loss_name + ": labels must be a 1 dimensional tensor of size one but labels is " +
-                               labels.getDescriptorString();
+    if (label_dimensions.empty() || label_dimensions[0] == 0) {
+        throw nb::value_error((loss_name + ": labels must have at least one nonempty per-example dimension").c_str());
+    }
+    if (prediction_dimensions != label_dimensions) {
+        string error_message = loss_name + ": predictions and labels dimensions must match. predictions tensor is " +
+                               predictions.getDescriptorString() + " and labels tensor is " + labels.getDescriptorString();
         throw nb::value_error(error_message.c_str());
     }
     if (predictions.getDataType() != DataType::FP16 && predictions.getDataType() != DataType::FP32) {
@@ -131,8 +138,10 @@ void bind_binary_focal_loss(nb::module_ &losses) {
     binary_focal_loss.attr("__doc__") = R"nbdoc(
 Binary focal loss from logits.
 
-The predictions tensor contains one unnormalized logit per example and the labels tensor contains
-binary targets. The raw loss is:
+The predictions tensor contains a nonempty per-example tensor of independent unnormalized binary
+logits, and the labels tensor contains matching binary targets. A shape of [1] is the standard
+binary-classification case; wider or higher-rank tensors support multi-output, multilabel, and dense
+prediction objectives. The raw loss is applied pointwise:
 
     alpha_t * (1 - p_t) ** gamma * BCEWithLogits(logit, target)
 

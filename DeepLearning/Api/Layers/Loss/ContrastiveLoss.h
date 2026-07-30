@@ -70,7 +70,7 @@ class ContrastiveLoss::Builder {
         THOR_THROW_IF_FALSE(_predictions.has_value());
         THOR_THROW_IF_FALSE(_labels.has_value());
         THOR_THROW_IF_FALSE(_predictions.value() != _labels.value());
-        THOR_THROW_IF_FALSE(_predictions.value().getDimensions().size() == 1);
+        THOR_THROW_IF_FALSE(!_predictions.value().getDimensions().empty());
         THOR_THROW_IF_FALSE(_predictions.value().getDimensions() == _labels.value().getDimensions());
 
         if (!_lossShape.has_value())
@@ -131,15 +131,21 @@ class ContrastiveLoss::Builder {
         return *this;
     }
 
-    virtual ContrastiveLoss::Builder &reportsElementwiseLoss() {
+    virtual ContrastiveLoss::Builder &reportsPerExampleLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
-        _lossShape = LossShape::ELEMENTWISE;
+        _lossShape = LossShape::PER_EXAMPLE;
         return *this;
     }
 
     virtual ContrastiveLoss::Builder &reportsPerOutputLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
-        _lossShape = LossShape::CLASSWISE;
+        _lossShape = LossShape::PER_OUTPUT;
+        return *this;
+    }
+
+    virtual ContrastiveLoss::Builder &reportsNoLoss() {
+        THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
+        _lossShape = LossShape::NONE;
         return *this;
     }
 

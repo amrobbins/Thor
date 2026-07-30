@@ -155,7 +155,8 @@ vector<Event> Adadelta::initialize(shared_ptr<ThorImplementation::Optimizer> phy
         gradientSquareAverage.copyFromAsync(
             sisterPhysicalAdadelta->getParameter("gradient_square_average")->getStorage().value(), stream);
         updateSquareAverage.copyFromAsync(sisterPhysicalAdadelta->getParameter("update_square_average")->getStorage().value(), stream);
-    } else if (gradientSquareAverageFile.has_value() || updateSquareAverageFile.has_value()) {
+    } else if ((gradientSquareAverageFile.has_value() || updateSquareAverageFile.has_value()) &&
+               !shouldInitializeStateAsNew()) {
         THOR_THROW_IF_FALSE(archiveReader != nullptr);
         THOR_THROW_IF_FALSE(gradientSquareAverageFile.has_value());
         THOR_THROW_IF_FALSE(updateSquareAverageFile.has_value());

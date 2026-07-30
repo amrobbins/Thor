@@ -38,7 +38,7 @@
 //         if (shape == 0) {
 //             meanSquaredErrorBuilder.reportsBatchLoss();
 //         } else if (shape == 1) {
-//             meanSquaredErrorBuilder.reportsElementwiseLoss();
+//             meanSquaredErrorBuilder.reportsPerExampleLoss();
 //         } else if (shape == 2) {
 //             meanSquaredErrorBuilder.reportsPerOutputLoss();
 //         } else if (shape == 3) {
@@ -47,7 +47,7 @@
 //             assert(false);
 //         }
 //         vector<uint64_t> batchDimensions = {1};
-//         vector<uint64_t> elementwiseDimensions = {1};
+//         vector<uint64_t> perExampleDimensions = {1};
 //         vector<uint64_t> perOutputDimensions = {dimensions[0]};
 //         vector<uint64_t> rawLossDimensions = dimensions;
 //
@@ -76,7 +76,7 @@
 //         if (shape == 0) {
 //             ASSERT_EQ(actualLoss.value().getDimensions(), batchDimensions);
 //         } else if (shape == 1) {
-//             ASSERT_EQ(actualLoss.value().getDimensions(), elementwiseDimensions);
+//             ASSERT_EQ(actualLoss.value().getDimensions(), perExampleDimensions);
 //         } else if (shape == 2) {
 //             ASSERT_EQ(actualLoss.value().getDimensions(), perOutputDimensions);
 //         } else if (shape == 3) {
@@ -105,7 +105,7 @@
 //         if (shape == 0) {
 //             ASSERT_EQ(cloneLoss.value().getDimensions(), batchDimensions);
 //         } else if (shape == 1) {
-//             ASSERT_EQ(cloneLoss.value().getDimensions(), elementwiseDimensions);
+//             ASSERT_EQ(cloneLoss.value().getDimensions(), perExampleDimensions);
 //         } else if (shape == 2) {
 //             ASSERT_EQ(cloneLoss.value().getDimensions(), perOutputDimensions);
 //         } else if (shape == 3) {
@@ -161,7 +161,7 @@
 //     else if (lossShape == 1)
 //         meanSquaredErrorBuilder.reportsPerOutputLoss();
 //     else if (lossShape == 2)
-//         meanSquaredErrorBuilder.reportsElementwiseLoss();
+//         meanSquaredErrorBuilder.reportsPerExampleLoss();
 //     else
 //         meanSquaredErrorBuilder.reportsRawLoss();
 //

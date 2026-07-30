@@ -64,6 +64,10 @@ struct NetworkLossReference {
     std::string predictionOutputName{};
     std::string targetInputName{};
     std::optional<std::string> weightInputName{};
+    // Canonically sorted external NetworkInput boundary of the exposed loss
+    // report in the training graph. This includes labels, weights, thresholds,
+    // masks, and any other auxiliary inputs required by custom loss wiring.
+    std::vector<std::string> requiredInputNames{};
     std::string lossLayerType{};
     double lossWeight = 1.0;
     std::optional<double> quantile{};
@@ -76,10 +80,14 @@ struct NetworkMetricReference {
     std::string predictionOutputName{};
     // Label input used by label-aware metrics such as Accuracy/LossMetric.
     std::optional<std::string> targetInputName{};
-    // Input source used by source-only metrics such as Mean(labels).  Metrics are
-    // still discovered from their NetworkOutput; this field exists only so the
-    // composed evaluator can remap external inputs when re-evaluating them.
+    // Input source used by simple source-only metrics such as Mean(labels).
+    // More complex input-derived sources may have no single semantic remap point;
+    // requiredInputNames still records their external dependency boundary.
     std::optional<std::string> inputSourceName{};
+    // Canonically sorted external NetworkInput boundary of the exposed metric
+    // report in the training graph. This is the authoritative dependency contract
+    // used by composed evaluators; the fields above identify semantic remap points.
+    std::vector<std::string> requiredInputNames{};
     std::string metricLayerType{};
 };
 
@@ -122,10 +130,20 @@ class Network {
         DEADLOCK_CYCLE
     };
 
+    struct GraphValidationIssue {
+        StatusCode status = StatusCode::SUCCESS;
+        std::string summary{};
+        std::string detail{};
+    };
+
     Network(std::string networkName) : networkName(networkName), frozen(false) {}
     virtual ~Network() = default;
 
     virtual std::string statusCodeToString(StatusCode statusCode);
+    // evaluateGraph() records one structured issue containing all problems found
+    // by the failing validation pass. A successful validation clears it.
+    [[nodiscard]] std::optional<GraphValidationIssue> getLastGraphValidationIssue() const { return lastGraphValidationIssue; }
+    [[nodiscard]] std::string getLastGraphValidationError() const;
 
     virtual std::shared_ptr<PlacedNetwork> place(uint32_t batchSize,
                                                  std::vector<Event> &initDoneEvents,
@@ -173,17 +191,29 @@ class Network {
     std::shared_ptr<Optimizer> getDefaultOptimizer();
     void setDefaultOptimizer(std::shared_ptr<Optimizer> optimizer);
     bool allTrainingEnabledParametersHaveOptimizers() const;
+    // Returns the direct raw output of every physical loss layer. Reporting
+    // tensors are observational and are not training roots.
     std::vector<Tensor> getLossRootTensors() const;
     std::vector<Tensor> getRawLossTensorsForTrainingRoots(const std::vector<Tensor>& lossRoots) const;
     void freezeTraining();
     void unfreezeTraining();
+    // Preserve learned parameters, but make the next successfully completed
+    // training phase initialize optimizer state exactly like a first placement.
+    // Failed attempts and retries leave this one-shot request pending.
+    void resetOptimizers();
+    [[nodiscard]] bool isOptimizerResetPending() const { return optimizerResetPending; }
+    [[nodiscard]] bool shouldInitializeOptimizerAsNew(uint64_t parameterizableId) const {
+        return optimizerResetPending || optimizerResetLayerIds.contains(parameterizableId);
+    }
     // Set transient training-time dropout policy on the logical API graph.
     // The policy is used by future placements and is not serialized.
     void setTrainingDropoutEnabled(bool enabled);
     [[nodiscard]] bool isTrainingDropoutEnabled() const;
     [[nodiscard]] uint32_t getNumTrainingDropoutControllableLayers() const;
     [[nodiscard]] std::vector<std::string> getInferenceNetworkInputNames();
-    [[nodiscard]] std::vector<std::string> getInferenceNetworkInputNamesForOutputs(const std::vector<std::string>& outputNames);
+    [[nodiscard]] std::vector<std::string> getRequiredNetworkInputNamesForOutputs(
+        const std::vector<std::string>& outputNames,
+        bool inferenceOnly);
     [[nodiscard]] std::vector<std::string> getTrainingOnlyNetworkInputNames();
     [[nodiscard]] std::vector<std::shared_ptr<NetworkInput>> getExternalNetworkInputs() const;
     [[nodiscard]] std::vector<NetworkLossReference> getReportableLosses();
@@ -203,10 +233,10 @@ class Network {
     Tensor resolveApiTensorByOriginalId(uint64_t originalId) const;
     Tensor getApiTensorByOriginalId(uint64_t originalId);
 
-    ApiSubgraphCloneResult cloneInferenceSubgraphInto(const Network& sourceNetwork,
-                                                       const std::vector<std::string>& outputNames,
-                                                       const ApiTensorRemap& initialRemap,
-                                                       const ApiSubgraphCloneOptions& options = ApiSubgraphCloneOptions{});
+    ApiSubgraphCloneResult cloneSubgraphInto(const Network& sourceNetwork,
+                                              const std::vector<std::string>& outputNames,
+                                              const ApiTensorRemap& initialRemap,
+                                              const ApiSubgraphCloneOptions& options = ApiSubgraphCloneOptions{});
 
     void registerRaggedNetworkInput(const std::string& name,
                                     const RaggedTensor& raggedTensor,
@@ -217,9 +247,14 @@ class Network {
    protected:
     virtual StatusCode connect(bool inferenceOnly);
     void attachOptimizerToLayers(bool replaceIfExisting);
+    void markOptimizersToInitializeAsNew();
+    void clearOptimizersInitializeAsNew();
+    void consumeOptimizerReset();
 
    private:
     static const bool DEBUG_STAMP = false;
+
+    friend class Trainer;
 
     struct LayerComparator {
         bool operator()(const std::shared_ptr<Layer> &lhs, const std::shared_ptr<Layer> &rhs) const { return *lhs < *rhs; }
@@ -254,6 +289,8 @@ class Network {
     std::map<std::string, RaggedNetworkInputRecord> raggedNetworkInputs;
 
     std::shared_ptr<Optimizer> defaultOptimizer;
+    bool optimizerResetPending = false;
+    std::set<uint64_t> optimizerResetLayerIds;
 
     uint64_t computeFirstInstanceMemRequirements(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement);
     uint64_t computeNonFirstInstanceMemRequirements(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement);
@@ -307,12 +344,19 @@ class Network {
     void addToNetwork(Initializer *initializer);
     void addToNetwork(Optimizer *optimizer);
 
-    std::string networkName;
+    void setGraphValidationIssue(StatusCode status, std::string summary, std::string detail);
+    [[nodiscard]] std::string graphValidationFailureMessage(StatusCode status) const;
+    [[nodiscard]] std::string describeGraphTensor(const Tensor& tensor) const;
+    [[nodiscard]] std::string describeGraphLayer(const std::shared_ptr<Layer>& layer) const;
+    [[nodiscard]] std::string describeGraphInputPort(const std::shared_ptr<Layer>& layer, const Tensor& tensor) const;
+    [[nodiscard]] std::string describeGraphOutputPort(const std::shared_ptr<Layer>& layer, const Tensor& tensor) const;
 
-    bool terminatesWithoutHitting(Tensor tensor, std::shared_ptr<Layer> layer);
+    std::string networkName;
 
     bool frozen;
     bool loadedFromArchive = false;
+    bool graphValidationInferenceOnly = false;
+    std::optional<GraphValidationIssue> lastGraphValidationIssue;
 
     bool allowUnsafeLoadedCudaKernelSourceCompilation_ = false;
     std::string trustedLoadedCudaKernelPublicKey_;

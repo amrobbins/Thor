@@ -79,8 +79,7 @@ class HingeGANDiscriminatorLoss::Builder {
         THOR_THROW_IF_FALSE(_realScores.has_value());
         THOR_THROW_IF_FALSE(_fakeScores.has_value());
         THOR_THROW_IF_FALSE(_realScores.value() != _fakeScores.value());
-        THOR_THROW_IF_FALSE(_realScores.value().getDimensions().size() == 1);
-        THOR_THROW_IF_FALSE(_realScores.value().getDimensions()[0] > 0);
+        THOR_THROW_IF_FALSE(!_realScores.value().getDimensions().empty());
         THOR_THROW_IF_FALSE(_realScores.value().getDimensions() == _fakeScores.value().getDimensions());
 
         if (!_lossShape.has_value())
@@ -130,15 +129,21 @@ class HingeGANDiscriminatorLoss::Builder {
         return *this;
     }
 
-    virtual HingeGANDiscriminatorLoss::Builder &reportsElementwiseLoss() {
+    virtual HingeGANDiscriminatorLoss::Builder &reportsPerExampleLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
-        _lossShape = LossShape::ELEMENTWISE;
+        _lossShape = LossShape::PER_EXAMPLE;
         return *this;
     }
 
     virtual HingeGANDiscriminatorLoss::Builder &reportsPerOutputLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
-        _lossShape = LossShape::CLASSWISE;
+        _lossShape = LossShape::PER_OUTPUT;
+        return *this;
+    }
+
+    virtual HingeGANDiscriminatorLoss::Builder &reportsNoLoss() {
+        THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
+        _lossShape = LossShape::NONE;
         return *this;
     }
 

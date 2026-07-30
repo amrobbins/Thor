@@ -59,6 +59,8 @@ class CustomLayer : public TrainableLayer {
     void informThatInputConnectionMade(Tensor inputTensor) override;
     void resetGraphTraversalState() override;
     std::string getLayerType() const override { return "CustomLayer"; }
+    [[nodiscard]] std::optional<std::string> getInputPortName(const Tensor& inputTensor) const override;
+    [[nodiscard]] std::optional<std::string> getOutputPortName(const Tensor& outputTensor) const override;
 
    protected:
     enum class SerializationContract {

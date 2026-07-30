@@ -14,7 +14,7 @@ Adam::Adam(uint64_t originalId) : Optimizer(originalId) {}
 
 shared_ptr<ThorImplementation::Optimizer> Adam::stamp(shared_ptr<ThorImplementation::TrainableLayer> trainableLayer) {
     auto physicalAdam = make_shared<ThorImplementation::Adam>(getId(), alpha, beta1, beta2, epsilon, amsgrad);
-    physicalAdam->setT(t);
+    physicalAdam->setT(shouldInitializeStateAsNew() ? 0.0f : t);
     return physicalAdam;
 }
 
@@ -231,7 +231,7 @@ vector<Event> Adam::initialize(shared_ptr<ThorImplementation::Optimizer> physica
             THOR_THROW_IF_FALSE(sisterPhysicalAdam->getParameter("vhat")->getStorage().has_value());
             vhat->copyFromAsync(sisterPhysicalAdam->getParameter("vhat")->getStorage().value(), stream);
         }
-    } else if (mFile.has_value()) {
+    } else if (mFile.has_value() && !shouldInitializeStateAsNew()) {
         THOR_THROW_IF_FALSE(vFile.has_value());
         THOR_THROW_IF_FALSE(archiveReader != nullptr);
         archiveReader->registerReadRequest(mFile.value(), m);

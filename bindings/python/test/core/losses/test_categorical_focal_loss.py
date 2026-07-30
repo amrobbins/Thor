@@ -42,11 +42,11 @@ def _categorical_focal_reference(logits: np.ndarray, labels: np.ndarray, gamma: 
 def _reduce_loss(raw: np.ndarray, reported_loss_shape: thor.losses.LossShape) -> np.ndarray:
     if reported_loss_shape == thor.losses.LossShape.raw:
         return raw
-    if reported_loss_shape == thor.losses.LossShape.elementwise:
+    if reported_loss_shape == thor.losses.LossShape.per_example:
         return np.sum(raw, axis=1, keepdims=True)
 
     batch_size = raw.shape[0]
-    if reported_loss_shape == thor.losses.LossShape.classwise:
+    if reported_loss_shape == thor.losses.LossShape.per_output:
         return (np.sum(raw, axis=0, keepdims=True) / batch_size).astype(np.float32)
     if reported_loss_shape == thor.losses.LossShape.batch:
         return np.array([[np.sum(raw) / batch_size]], dtype=np.float32)
@@ -111,14 +111,14 @@ def test_categorical_focal_loss_constructs_custom_values():
         1.5,
         0.75,
         thor.DataType.fp32,
-        thor.losses.LossShape.elementwise,
+        thor.losses.LossShape.per_example,
     )
     assert isinstance(loss, thor.losses.classification.CategoricalFocalLoss)
     assert loss.gamma == pytest.approx(1.5)
     assert loss.alpha == pytest.approx(0.75)
 
 
-@pytest.mark.parametrize("shape", ["batch", "classwise", "elementwise", "raw"])
+@pytest.mark.parametrize("shape", ["batch", "per_output", "per_example", "raw"])
 def test_categorical_focal_loss_reported_loss_shape_variants_construct(shape):
     n = _net()
     preds = _tensor_1d(3)
@@ -167,8 +167,8 @@ def test_categorical_focal_loss_rejects_bad_shapes_and_dtypes():
     "reported_loss_shape",
     [
         thor.losses.LossShape.raw,
-        thor.losses.LossShape.elementwise,
-        thor.losses.LossShape.classwise,
+        thor.losses.LossShape.per_example,
+        thor.losses.LossShape.per_output,
         thor.losses.LossShape.batch,
     ],
 )

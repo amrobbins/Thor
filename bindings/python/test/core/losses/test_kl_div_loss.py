@@ -38,13 +38,13 @@ def _kl_div_reference(logits: np.ndarray, labels: np.ndarray) -> np.ndarray:
 def _reduce_loss(raw: np.ndarray, reported_loss_shape: thor.losses.LossShape) -> np.ndarray:
     if reported_loss_shape == thor.losses.LossShape.raw:
         return raw
-    if reported_loss_shape == thor.losses.LossShape.elementwise:
+    if reported_loss_shape == thor.losses.LossShape.per_example:
         return np.sum(raw, axis=1, keepdims=True)
 
     # LossShaper averages over the batch dimension whenever that dimension is
     # reduced. It sums over the feature/class dimension.
     batch_size = raw.shape[0]
-    if reported_loss_shape == thor.losses.LossShape.classwise:
+    if reported_loss_shape == thor.losses.LossShape.per_output:
         return (np.sum(raw, axis=0, keepdims=True) / batch_size).astype(np.float32)
     if reported_loss_shape == thor.losses.LossShape.batch:
         return np.array([[np.sum(raw) / batch_size]], dtype=np.float32)
@@ -101,12 +101,12 @@ def test_kl_div_loss_constructs_with_loss_dtype_and_shape():
         preds,
         labels,
         thor.DataType.fp32,
-        thor.losses.LossShape.elementwise,
+        thor.losses.LossShape.per_example,
     )
     assert isinstance(loss, thor.losses.KLDivLoss)
 
 
-@pytest.mark.parametrize("shape", ["batch", "classwise", "elementwise", "raw"])
+@pytest.mark.parametrize("shape", ["batch", "per_output", "per_example", "raw"])
 def test_kl_div_loss_reported_loss_shape_variants_construct(shape):
     n = _net()
     preds = _tensor_1d(3)
@@ -157,8 +157,8 @@ def test_kl_div_loss_rejects_invalid_loss_data_type():
     "reported_loss_shape",
     [
         thor.losses.LossShape.raw,
-        thor.losses.LossShape.elementwise,
-        thor.losses.LossShape.classwise,
+        thor.losses.LossShape.per_example,
+        thor.losses.LossShape.per_output,
         thor.losses.LossShape.batch,
     ],
 )

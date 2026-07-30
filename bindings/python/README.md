@@ -16,7 +16,3 @@ This package is **pre-alpha**.
 ## License
 
 Apache License 2.0. See `LICENSE`.
-
-## Version
-
-`0.0.29`

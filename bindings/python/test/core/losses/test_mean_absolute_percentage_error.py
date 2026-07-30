@@ -41,12 +41,12 @@ def test_mape_constructs_with_loss_data_type():
         preds,
         labels,
         thor.DataType.fp32,  # explicitly override builder.lossDataType(...)
-        False,
+        thor.losses.LossShape.batch,
     )
     assert isinstance(loss, thor.losses.MAPE)
 
 
-def test_mape_constructs_reports_elementwise():
+def test_mape_constructs_reports_per_example():
     n = _net()
     preds = _tensor_1d(1, thor.DataType.fp32)
     labels = _tensor_1d(1, thor.DataType.fp32)
@@ -56,9 +56,28 @@ def test_mape_constructs_reports_elementwise():
         preds,
         labels,
         None,
-        True,
+        thor.losses.LossShape.per_example,
     )
     assert isinstance(loss, thor.losses.MAPE)
+
+
+@pytest.mark.parametrize(
+    "reported_loss_shape, expected_dimensions",
+    [
+        (thor.losses.LossShape.batch, [1]),
+        (thor.losses.LossShape.per_example, [1]),
+        (thor.losses.LossShape.per_output, [2, 3, 4]),
+        (thor.losses.LossShape.raw, [2, 3, 4]),
+    ],
+)
+def test_mape_constructs_multidimensional_predictions_and_labels(reported_loss_shape, expected_dimensions):
+    n = _net()
+    predictions = thor.Tensor([2, 3, 4], thor.DataType.fp32)
+    labels = thor.Tensor([2, 3, 4], thor.DataType.fp32)
+
+    loss = thor.losses.MAPE(n, predictions, labels, reported_loss_shape=reported_loss_shape)
+
+    assert loss.get_loss().get_dimensions() == expected_dimensions
 
 
 def test_mape_rejects_mismatched_label_dimensions():
@@ -98,4 +117,4 @@ def test_mape_rejects_wrong_arity():
         thor.losses.MAPE(n, preds)  # missing labels
 
     with pytest.raises(TypeError):
-        thor.losses.MAPE(n, preds, labels, None, False, 123, 456)  # extra arg
+        thor.losses.MAPE(n, preds, labels, None, thor.losses.LossShape.batch, 123, 456)  # extra arg

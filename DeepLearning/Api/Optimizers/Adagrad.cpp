@@ -124,7 +124,7 @@ vector<Event> Adagrad::initialize(shared_ptr<ThorImplementation::Optimizer> phys
         THOR_THROW_IF_FALSE(sisterPhysicalAdagrad != nullptr);
         THOR_THROW_IF_FALSE(sisterPhysicalAdagrad->getParameter("accumulator")->getStorage().has_value());
         accumulator.copyFromAsync(sisterPhysicalAdagrad->getParameter("accumulator")->getStorage().value(), stream);
-    } else if (accumulatorFile.has_value()) {
+    } else if (accumulatorFile.has_value() && !shouldInitializeStateAsNew()) {
         THOR_THROW_IF_FALSE(archiveReader != nullptr);
         archiveReader->registerReadRequest(accumulatorFile.value(), accumulator);
 

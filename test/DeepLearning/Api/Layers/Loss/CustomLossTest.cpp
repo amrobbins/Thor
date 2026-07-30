@@ -3,6 +3,7 @@
 #include "DeepLearning/Api/Layers/Loss/LossShaper.h"
 #include "DeepLearning/Api/Layers/Loss/MeanAbsoluteError.h"
 #include "DeepLearning/Api/Layers/Loss/MeanSquaredError.h"
+#include "DeepLearning/Api/Layers/Loss/MultiInputCustomLoss.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/Expression.h"
@@ -110,6 +111,44 @@ TEST(CustomLossApi, BuildsAndSerializesExpressionBackedRawLoss) {
     ASSERT_TRUE(lossJson.contains("gradient_expression"));
 }
 
+TEST(CustomLossApi, NoReportingKeepsRawLossButGetLossThrows) {
+    Network network("custom_loss_no_report");
+    Tensor predictions(DataType::FP32, {3});
+    Tensor labels(DataType::FP32, {3});
+
+    CustomLoss customLoss = CustomLoss::Builder()
+                                .network(network)
+                                .lossExpression(makeSerializableSquaredErrorLossExpression())
+                                .gradientExpression(makeSerializableSquaredErrorGradientExpression())
+                                .predictions(predictions)
+                                .labels(labels)
+                                .reportsNoLoss()
+                                .build();
+
+    EXPECT_FALSE(customLoss.reportsLoss());
+    EXPECT_EQ(customLoss.getRawLoss().getDimensions(), vector<uint64_t>({3}));
+    EXPECT_THROW((void)customLoss.getLoss(), std::runtime_error);
+}
+
+TEST(MultiInputCustomLossApi, NoReportingSerializesPhysicalLossAsRaw) {
+    Network network("multi_input_custom_loss_no_report");
+    Tensor predictions(DataType::FP32, {3});
+    Tensor labels(DataType::FP32, {3});
+
+    MultiInputCustomLoss customLoss = MultiInputCustomLoss::Builder()
+                                          .network(network)
+                                          .lossExpression(makeSerializableSquaredErrorLossExpression())
+                                          .gradientExpression(makeSerializableSquaredErrorGradientExpression())
+                                          .input("predictions", predictions, "predictions_grad")
+                                          .auxiliaryInput("labels", labels)
+                                          .reportsNoLoss()
+                                          .build();
+
+    EXPECT_FALSE(customLoss.reportsLoss());
+    EXPECT_THROW((void)customLoss.getLoss(), std::runtime_error);
+    EXPECT_EQ(customLoss.architectureJson().at("loss_shape").get<Loss::LossShape>(), Loss::LossShape::RAW);
+}
+
 TEST(CustomLossApi, BuilderInfersNonDefaultExpressionNames) {
     Network network("custom_loss_infers_names");
     Tensor predictions(DataType::FP32, {5});
@@ -173,7 +212,7 @@ TEST(BinaryCrossEntropyApi, PublicBuilderBacksRawLossWithCustomLoss) {
                                  .network(network)
                                  .predictions(predictions)
                                  .labels(labels)
-                                 .reportsElementwiseLoss()
+                                 .reportsRawLoss()
                                  .lossDataType(DataType::FP32)
                                  .build();
 

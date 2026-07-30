@@ -32,6 +32,20 @@ shared_ptr<ThorImplementation::Optimizer> Muon::stamp(shared_ptr<ThorImplementat
                                                  fallbackOptimizer->stamp(nullptr));
 }
 
+void Muon::initializeStateAsNew() {
+    Optimizer::initializeStateAsNew();
+    if (fallbackOptimizer != nullptr) {
+        fallbackOptimizer->initializeStateAsNew();
+    }
+}
+
+void Muon::clearInitializeStateAsNew() {
+    Optimizer::clearInitializeStateAsNew();
+    if (fallbackOptimizer != nullptr) {
+        fallbackOptimizer->clearInitializeStateAsNew();
+    }
+}
+
 void Muon::setAlpha(float newAlpha, PlacedNetwork* placedNetwork) {
     THOR_THROW_IF_FALSE(newAlpha > 0.0f);
     alpha = newAlpha;
@@ -210,7 +224,7 @@ vector<Event> Muon::initialize(shared_ptr<ThorImplementation::Optimizer> physica
             stream.waitEvent(sisterOptimizerLoadedEvent.value());
         THOR_THROW_IF_FALSE(sisterSelected->getParameter("momentum")->getStorage().has_value());
         momentum.copyFromAsync(sisterSelected->getParameter("momentum")->getStorage().value(), stream);
-    } else if (momentumFile.has_value()) {
+    } else if (momentumFile.has_value() && !shouldInitializeStateAsNew()) {
         THOR_THROW_IF_FALSE(archiveReader != nullptr);
         archiveReader->registerReadRequest(momentumFile.value(), momentum);
         archiveReader = nullptr;

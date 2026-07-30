@@ -43,11 +43,11 @@ def _reduce_loss(raw: np.ndarray, reported_loss_shape: thor.losses.LossShape) ->
     raw = raw.astype(np.float32)
     if reported_loss_shape == thor.losses.LossShape.raw:
         return raw.reshape(raw.shape[0], 1)
-    if reported_loss_shape == thor.losses.LossShape.elementwise:
+    if reported_loss_shape == thor.losses.LossShape.per_example:
         return raw.reshape(raw.shape[0], 1)
 
     batch_size = raw.shape[0]
-    if reported_loss_shape == thor.losses.LossShape.classwise:
+    if reported_loss_shape == thor.losses.LossShape.per_output:
         return np.array([[np.sum(raw) / batch_size]], dtype=np.float32)
     if reported_loss_shape == thor.losses.LossShape.batch:
         return np.array([[np.sum(raw) / batch_size]], dtype=np.float32)
@@ -117,13 +117,13 @@ def test_listwise_softmax_cross_entropy_loss_constructs_with_temperature_loss_dt
         labels,
         0.25,
         thor.DataType.fp32,
-        thor.losses.LossShape.elementwise,
+        thor.losses.LossShape.per_example,
     )
     assert isinstance(loss, thor.losses.ranking.ListwiseSoftmaxCrossEntropyLoss)
     assert loss.temperature == pytest.approx(0.25)
 
 
-@pytest.mark.parametrize("shape", ["batch", "classwise", "elementwise", "raw"])
+@pytest.mark.parametrize("shape", ["batch", "per_output", "per_example", "raw"])
 def test_listwise_softmax_cross_entropy_loss_reported_loss_shape_variants_construct(shape):
     n = _net()
     preds = _tensor_1d(3)
@@ -197,8 +197,8 @@ def test_listwise_softmax_cross_entropy_loss_rejects_invalid_dtypes():
     "reported_loss_shape",
     [
         thor.losses.LossShape.raw,
-        thor.losses.LossShape.elementwise,
-        thor.losses.LossShape.classwise,
+        thor.losses.LossShape.per_example,
+        thor.losses.LossShape.per_output,
         thor.losses.LossShape.batch,
     ],
 )

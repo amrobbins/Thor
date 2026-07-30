@@ -722,6 +722,44 @@ Tensor CustomLayer::getOutput(const std::string& outputName, uint32_t interfaceI
     return found->second;
 }
 
+optional<string> CustomLayer::getInputPortName(const Tensor& inputTensor) const {
+    auto foundBindings = inputBindingsByTensorOriginalId.find(inputTensor.getOriginalId());
+    if (foundBindings == inputBindingsByTensorOriginalId.end() || foundBindings->second.empty()) {
+        return nullopt;
+    }
+
+    ostringstream name;
+    for (uint32_t i = 0; i < foundBindings->second.size(); ++i) {
+        if (i != 0) {
+            name << ", ";
+        }
+        const InputBinding& binding = foundBindings->second[i];
+        name << binding.inputName;
+        if (inputInterfaces.size() > 1) {
+            name << "@interface" << binding.interfaceIndex;
+        }
+    }
+    return name.str();
+}
+
+optional<string> CustomLayer::getOutputPortName(const Tensor& outputTensor) const {
+    for (uint32_t interfaceIndex = 0; interfaceIndex < outputInterfaces.size(); ++interfaceIndex) {
+        const TensorMap& outputInterface = outputInterfaces[interfaceIndex];
+        for (const string& outputName : outputNames) {
+            auto found = outputInterface.find(outputName);
+            if (found == outputInterface.end() || found->second != outputTensor) {
+                continue;
+            }
+
+            if (outputInterfaces.size() == 1) {
+                return outputName;
+            }
+            return outputName + "@interface" + to_string(interfaceIndex);
+        }
+    }
+    return nullopt;
+}
+
 CustomLayer::TensorMap CustomLayer::getOutputInterface(const TensorMap& inputInterface) const {
     validateInterfaceNames(inputInterface, inputNames, "input");
 

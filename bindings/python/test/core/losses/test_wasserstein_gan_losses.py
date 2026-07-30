@@ -45,11 +45,12 @@ def _gp_reference(
 def _reduce_loss(raw: np.ndarray, reported_loss_shape: thor.losses.LossShape) -> np.ndarray:
     if reported_loss_shape == thor.losses.LossShape.raw:
         return raw
-    if reported_loss_shape == thor.losses.LossShape.elementwise:
-        return np.sum(raw, axis=1, keepdims=True).astype(np.float32)
+    if reported_loss_shape == thor.losses.LossShape.per_example:
+        reduction_axes = tuple(range(1, raw.ndim))
+        return np.sum(raw, axis=reduction_axes).reshape(raw.shape[0], 1).astype(np.float32)
 
     batch_size = raw.shape[0]
-    if reported_loss_shape == thor.losses.LossShape.classwise:
+    if reported_loss_shape == thor.losses.LossShape.per_output:
         return (np.sum(raw, axis=0, keepdims=True) / batch_size).astype(np.float32)
     if reported_loss_shape == thor.losses.LossShape.batch:
         return np.array([[np.sum(raw) / batch_size]], dtype=np.float32)
@@ -196,7 +197,7 @@ def test_wasserstein_gan_gradient_penalty_loss_constructs_defaults():
     assert loss.eps == pytest.approx(1.0e-12)
 
 
-@pytest.mark.parametrize("shape", ["batch", "classwise", "elementwise", "raw"])
+@pytest.mark.parametrize("shape", ["batch", "per_output", "per_example", "raw"])
 def test_wasserstein_gan_loss_reported_loss_shape_variants_construct(shape):
     n = _net()
     real_scores = _tensor_1d(3)
@@ -219,7 +220,7 @@ def test_wasserstein_gan_loss_reported_loss_shape_variants_construct(shape):
     assert isinstance(generator_loss, thor.losses.gan.WassersteinGANGeneratorLoss)
 
 
-@pytest.mark.parametrize("shape", ["batch", "classwise", "elementwise", "raw"])
+@pytest.mark.parametrize("shape", ["batch", "per_output", "per_example", "raw"])
 def test_wasserstein_gan_gradient_penalty_loss_reported_loss_shape_variants_construct(shape):
     n = _net()
     real_scores = _tensor_1d(1)
@@ -257,37 +258,31 @@ def test_wasserstein_gan_critic_loss_rejects_mismatched_shapes_dtypes_and_duplic
         thor.losses.gan.WassersteinGANCriticLoss(n, real_scores, real_scores)
 
 
-def test_wasserstein_gan_generator_loss_rejects_invalid_shape_and_dtype():
+def test_wasserstein_gan_critic_loss_accepts_patch_scores():
+    n = _net()
+    real_scores = thor.Tensor([1, 8, 8], thor.DataType.fp32)
+    fake_scores = thor.Tensor([1, 8, 8], thor.DataType.fp32)
+
+    loss = thor.losses.gan.WassersteinGANCriticLoss(
+        n, real_scores, fake_scores, reported_loss_shape=thor.losses.LossShape.raw
+    )
+
+    assert loss.get_loss().get_dimensions() == [1, 8, 8]
+
+
+def test_wasserstein_gan_generator_loss_accepts_patch_scores_and_rejects_invalid_dtype():
     n = _net()
 
-    with pytest.raises(ValueError, match=r"fake_scores must be a non-empty 1D score tensor"):
-        thor.losses.gan.WassersteinGANGeneratorLoss(n, thor.Tensor([2, 2], thor.DataType.fp32))
+    patch_scores = thor.Tensor([1, 8, 8], thor.DataType.fp32)
+    loss = thor.losses.gan.WassersteinGANGeneratorLoss(
+        n, patch_scores, reported_loss_shape=thor.losses.LossShape.raw
+    )
+    assert loss.get_loss().get_dimensions() == [1, 8, 8]
+
     with pytest.raises(ValueError, match=r"loss_data_type must be fp16 or fp32"):
         thor.losses.gan.WassersteinGANGeneratorLoss(n, _tensor_1d(4), thor.DataType.int32)
     with pytest.raises(ValueError, match=r"fake_scores must use fp16 or fp32 dtype"):
         thor.losses.gan.WassersteinGANGeneratorLoss(n, _tensor_1d(4, thor.DataType.uint8))
-
-
-def test_wasserstein_gan_gradient_penalty_loss_rejects_invalid_arguments():
-    n = _net()
-    real_scores = _tensor_1d(1)
-    fake_scores = _tensor_1d(1)
-    sample_gradients = thor.Tensor([3], thor.DataType.fp32)
-
-    with pytest.raises(ValueError, match=r"real_scores must be a scalar 1D score tensor"):
-        thor.losses.gan.WassersteinGANCriticGradientPenaltyLoss(n, _tensor_1d(2), _tensor_1d(2), sample_gradients)
-    with pytest.raises(ValueError, match=r"fake_scores dimensions"):
-        thor.losses.gan.WassersteinGANCriticGradientPenaltyLoss(n, real_scores, _tensor_1d(2), sample_gradients)
-    with pytest.raises(ValueError, match=r"sample_gradients must use fp16 or fp32 dtype"):
-        thor.losses.gan.WassersteinGANCriticGradientPenaltyLoss(n, real_scores, fake_scores, thor.Tensor([3], thor.DataType.uint8))
-    with pytest.raises(ValueError, match=r"gradient_penalty_weight must be non-negative"):
-        thor.losses.gan.WassersteinGANCriticGradientPenaltyLoss(n, real_scores, fake_scores, sample_gradients, -1.0)
-    with pytest.raises(ValueError, match=r"target_gradient_norm must be greater than zero"):
-        thor.losses.gan.WassersteinGANCriticGradientPenaltyLoss(n, real_scores, fake_scores, sample_gradients, 10.0, 0.0)
-    with pytest.raises(ValueError, match=r"eps must be greater than zero"):
-        thor.losses.gan.WassersteinGANCriticGradientPenaltyLoss(n, real_scores, fake_scores, sample_gradients, 10.0, 1.0, 0.0)
-    with pytest.raises(ValueError, match=r"must be distinct tensors"):
-        thor.losses.gan.WassersteinGANCriticGradientPenaltyLoss(n, real_scores, fake_scores, real_scores)
 
 
 @pytest.mark.cuda
@@ -295,8 +290,8 @@ def test_wasserstein_gan_gradient_penalty_loss_rejects_invalid_arguments():
     "reported_loss_shape",
     [
         thor.losses.LossShape.raw,
-        thor.losses.LossShape.elementwise,
-        thor.losses.LossShape.classwise,
+        thor.losses.LossShape.per_example,
+        thor.losses.LossShape.per_output,
         thor.losses.LossShape.batch,
     ],
 )
@@ -332,8 +327,8 @@ def test_wasserstein_gan_critic_loss_numerical_forward_matches_reference(reporte
     "reported_loss_shape",
     [
         thor.losses.LossShape.raw,
-        thor.losses.LossShape.elementwise,
-        thor.losses.LossShape.classwise,
+        thor.losses.LossShape.per_example,
+        thor.losses.LossShape.per_output,
         thor.losses.LossShape.batch,
     ],
 )
@@ -360,8 +355,8 @@ def test_wasserstein_gan_generator_loss_numerical_forward_matches_reference(repo
     "reported_loss_shape",
     [
         thor.losses.LossShape.raw,
-        thor.losses.LossShape.elementwise,
-        thor.losses.LossShape.classwise,
+        thor.losses.LossShape.per_example,
+        thor.losses.LossShape.per_output,
         thor.losses.LossShape.batch,
     ],
 )

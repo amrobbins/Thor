@@ -20,6 +20,7 @@
 #include <system_error>
 #include <utility>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace Thor {
@@ -53,6 +54,34 @@ bool trainingProgramUsesPhases(const std::shared_ptr<TrainingProgram>& program) 
         }
     }
     return false;
+}
+
+std::vector<std::shared_ptr<Network>> pendingOptimizerResetNetworks(
+    const std::shared_ptr<Network>& network,
+    const std::shared_ptr<TrainingProgram>& trainingProgram) {
+    std::vector<std::shared_ptr<Network>> pending;
+    std::unordered_set<Network*> seen;
+    auto addIfPending = [&](const std::shared_ptr<Network>& candidate) {
+        if (candidate != nullptr && candidate->isOptimizerResetPending() &&
+            seen.insert(candidate.get()).second) {
+            pending.push_back(candidate);
+        }
+    };
+
+    addIfPending(network);
+    if (trainingProgram != nullptr && trainingProgram->isInitialized()) {
+        for (const std::shared_ptr<TrainingStep>& step : trainingProgram->getSteps()) {
+            if (step == nullptr || !step->isInitialized() || !step->isEnabled()) {
+                continue;
+            }
+            for (const std::shared_ptr<TrainingPhase>& phase : step->getPhases()) {
+                if (phase != nullptr && phase->isInitialized() && phase->isEnabled()) {
+                    addIfPending(phase->getNetwork());
+                }
+            }
+        }
+    }
+    return pending;
 }
 
 std::string composedPhaseNetworkName(const TrainingStep& step) {
@@ -780,6 +809,8 @@ void Trainer::fitInternal(const TrainerFitOptions& options,
     cancellationToken.throwIfCancellationRequested();
 
     const CompiledDatasetInputBindings resolvedDatasetInputs = resolveDatasetInputsForCurrentModel();
+    const std::vector<std::shared_ptr<Network>> optimizerResetNetworks =
+        pendingOptimizerResetNetworks(network, trainingProgram);
 
     TrainingRunRequest request;
     request.network = network;
@@ -846,6 +877,13 @@ void Trainer::fitInternal(const TrainerFitOptions& options,
     request.completedTrainingElapsedSeconds = &completedTrainingElapsedSeconds;
 
     executeRequest(request, observer);
+
+    // Consume the request only after the complete training attempt succeeds.
+    // Exceptions and restart requests leave it pending so the retry also starts
+    // with fresh optimizer state.
+    for (const std::shared_ptr<Network>& resetNetwork : optimizerResetNetworks) {
+        resetNetwork->consumeOptimizerReset();
+    }
 
     if (saveModelDirectory.has_value()) {
         lastCompletedArtifactDirectory = selectedTrainingArtifactModelDirectory(saveModelDirectory);

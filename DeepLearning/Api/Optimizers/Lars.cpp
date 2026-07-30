@@ -173,7 +173,7 @@ vector<Event> Lars::initialize(shared_ptr<ThorImplementation::Optimizer> physica
         THOR_THROW_IF_FALSE(sisterPhysicalLars != nullptr);
         THOR_THROW_IF_FALSE(sisterPhysicalLars->getParameter("velocity")->getStorage().has_value());
         velocity.copyFromAsync(sisterPhysicalLars->getParameter("velocity")->getStorage().value(), stream);
-    } else if (velocityFile.has_value()) {
+    } else if (velocityFile.has_value() && !shouldInitializeStateAsNew()) {
         THOR_THROW_IF_FALSE(archiveReader != nullptr);
         archiveReader->registerReadRequest(velocityFile.value(), velocity);
 

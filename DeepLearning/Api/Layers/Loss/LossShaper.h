@@ -28,19 +28,32 @@ class LossShaper : public Layer {
     std::optional<Tensor> getFeatureInput() const override { return getLossInput(); }
     std::optional<Tensor> getFeatureOutput() const override { return getLossOutput(); }
 
+    [[nodiscard]] std::optional<std::string> getInputPortName(const Tensor& inputTensor) const override {
+        if (lossInput.isInitialized() && inputTensor == lossInput) {
+            return "raw_loss";
+        }
+        return std::nullopt;
+    }
+
+    [[nodiscard]] std::optional<std::string> getOutputPortName(const Tensor& outputTensor) const override {
+        if (!lossOutput.isInitialized() || outputTensor != lossOutput) {
+            return std::nullopt;
+        }
+        switch (outputLossType) {
+            case ThorImplementation::LossShaper::OutputLossType::BATCH:
+                return "batch_loss";
+            case ThorImplementation::LossShaper::OutputLossType::PER_EXAMPLE:
+                return "per_example_loss";
+            case ThorImplementation::LossShaper::OutputLossType::PER_OUTPUT:
+                return "per_output_loss";
+        }
+        THOR_UNREACHABLE();
+    }
+
     nlohmann::json architectureJson() const override;
     static void deserialize(const nlohmann::json &j, Network *network);
 
    protected:
-    static uint64_t flattenedNonBatchDim(const std::vector<uint64_t>& implementationInputLossDimensions) {
-        THOR_THROW_IF_FALSE(implementationInputLossDimensions.size() >= 2);
-        uint64_t result = 1;
-        for (uint32_t i = 1; i < implementationInputLossDimensions.size(); ++i) {
-            THOR_THROW_IF_FALSE(implementationInputLossDimensions[i] > 0);
-            result *= implementationInputLossDimensions[i];
-        }
-        return result;
-    }
 
     std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
                                                      std::shared_ptr<ThorImplementation::Layer> drivingLayer,
@@ -57,7 +70,6 @@ class LossShaper : public Layer {
 
         if (implementationInputLossDimensions == implementationOutputLossDimensions) {
             // In this case we need a nop, so just place a reshape with the same shape, this carries no compute cost or memory cost.
-            std::vector<uint64_t> implementationDimensions;
             // Tell reshape to match the batch size:
             implementationOutputLossDimensions[0] = 0;
             std::shared_ptr<ThorImplementation::Reshape> nopReshape =
@@ -79,23 +91,12 @@ class LossShaper : public Layer {
         if (implementationInputLossDimensions == implementationOutputLossDimensions)
             return 0;
 
-        std::vector<uint32_t> axes;
-        float outputScale = 1.0f;
-        if (outputLossType == ThorImplementation::LossShaper::OutputLossType::BATCH) {
-            axes = {0, 1};
-            outputScale = 1.0f / static_cast<float>(batchSize);
-        } else if (outputLossType == ThorImplementation::LossShaper::OutputLossType::CLASSWISE) {
-            axes = {0};
-            outputScale = 1.0f / static_cast<float>(batchSize);
-        } else if (outputLossType == ThorImplementation::LossShaper::OutputLossType::ELEMENTWISE) {
-            axes = {1};
-        } else {
-            THOR_UNREACHABLE();
-        }
+        const std::vector<uint32_t> axes =
+            ThorImplementation::LossShaper::getReductionAxes(implementationInputLossDimensions, outputLossType);
+        const float outputScale =
+            ThorImplementation::LossShaper::getReductionOutputScale(implementationInputLossDimensions, outputLossType);
 
-        const std::vector<uint64_t> reductionInputDimensions = {
-            implementationInputLossDimensions.front(), flattenedNonBatchDim(implementationInputLossDimensions)};
-        const ThorImplementation::TensorDescriptor inputDescriptor(lossInput.getDataType(), reductionInputDimensions);
+        const ThorImplementation::TensorDescriptor inputDescriptor(lossInput.getDataType(), implementationInputLossDimensions);
         const ThorImplementation::TensorDescriptor outputDescriptor(lossOutput.getDataType(), implementationOutputLossDimensions);
         ThorImplementation::CubReduction reduction(
             ThorImplementation::CubReductionOp::Sum, axes, lossOutput.getDataType(), outputScale);
@@ -120,6 +121,8 @@ class LossShaper : public Layer {
         return implementationInputLossDimensions;
     }
 
+    // PER_OUTPUT reduces only the implementation batch axis and preserves every API-visible
+    // loss dimension. BATCH and PER_EXAMPLE each report a scalar API feature shape [1].
     static std::vector<uint64_t> getApiOutputDimensions(std::vector<uint64_t> apiInputLossDimensions,
                                                         ThorImplementation::LossShaper::OutputLossType outputLossType) {
         // The API layer does not have a batch dimension, so a stand in batch dimension is added
@@ -129,9 +132,11 @@ class LossShaper : public Layer {
         std::vector<uint64_t> implementationOutputLossDimensions =
             getImplementationOutputDimensions(implementationInputLossDimensions, outputLossType);
 
-        THOR_THROW_IF_FALSE(implementationOutputLossDimensions.size() == 2);
-        std::vector<uint64_t> apiOutputLossDimensions(1, implementationOutputLossDimensions[1]);
-        return apiOutputLossDimensions;
+        THOR_THROW_IF_FALSE(!implementationOutputLossDimensions.empty());
+        implementationOutputLossDimensions.erase(implementationOutputLossDimensions.begin());
+        if (implementationOutputLossDimensions.empty())
+            implementationOutputLossDimensions.push_back(1);
+        return implementationOutputLossDimensions;
     }
 
     Tensor lossInput;
@@ -146,8 +151,8 @@ class LossShaper::Builder {
         THOR_THROW_IF_FALSE(!_lossInput.value().getDimensions().empty());
         THOR_THROW_IF_FALSE(_outputLossType.has_value());
         THOR_THROW_IF_FALSE(_outputLossType.value() == ThorImplementation::LossShaper::OutputLossType::BATCH ||
-               _outputLossType.value() == ThorImplementation::LossShaper::OutputLossType::CLASSWISE ||
-               _outputLossType.value() == ThorImplementation::LossShaper::OutputLossType::ELEMENTWISE);
+               _outputLossType.value() == ThorImplementation::LossShaper::OutputLossType::PER_OUTPUT ||
+               _outputLossType.value() == ThorImplementation::LossShaper::OutputLossType::PER_EXAMPLE);
 
         LossShaper lossShaper;
         lossShaper.lossInput = _lossInput.value();
@@ -194,15 +199,15 @@ class LossShaper::Builder {
         return *this;
     }
 
-    virtual LossShaper::Builder &reportsClasswiseLoss() {
+    virtual LossShaper::Builder &reportsPerOutputLoss() {
         THOR_THROW_IF_FALSE(!_outputLossType.has_value());
-        _outputLossType = ThorImplementation::LossShaper::OutputLossType::CLASSWISE;
+        _outputLossType = ThorImplementation::LossShaper::OutputLossType::PER_OUTPUT;
         return *this;
     }
 
-    virtual LossShaper::Builder &reportsElementwiseLoss() {
+    virtual LossShaper::Builder &reportsPerExampleLoss() {
         THOR_THROW_IF_FALSE(!_outputLossType.has_value());
-        _outputLossType = ThorImplementation::LossShaper::OutputLossType::ELEMENTWISE;
+        _outputLossType = ThorImplementation::LossShaper::OutputLossType::PER_EXAMPLE;
         return *this;
     }
 

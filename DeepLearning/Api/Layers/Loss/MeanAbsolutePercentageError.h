@@ -70,15 +70,13 @@ class MAPE::Builder {
         THOR_THROW_IF_FALSE(_predictions.has_value());
         THOR_THROW_IF_FALSE(_labels.has_value());
         THOR_THROW_IF_FALSE(_predictions.value() != _labels.value());
-        THOR_THROW_IF_FALSE(_predictions.value().getDimensions().size() == 1);
+        THOR_THROW_IF_FALSE(!_predictions.value().getDimensions().empty());
         THOR_THROW_IF_FALSE(_predictions.value().getDimensions() == _labels.value().getDimensions());
 
         if (!_lossShape.has_value())
             _lossShape = LossShape::BATCH;
         if (!_lossDataType.has_value())
             _lossDataType = _predictions.value().getDataType();
-        uint32_t batchSize = _predictions.value().getDimensions()[0];
-
         MAPE meanAbsolutePercentageError;
         meanAbsolutePercentageError.predictionsTensor = _predictions.value();
         meanAbsolutePercentageError.labelsTensor = _labels.value();
@@ -93,7 +91,7 @@ class MAPE::Builder {
             meanAbsolutePercentageError.buildSupportLayersAndAddToNetwork();
         } else {
             // lossTensor is the one that comes directly out of MAPE, that may be replaced by a loss shaper.
-            meanAbsolutePercentageError.lossTensor = Tensor(_lossDataType.value(), {batchSize});
+            meanAbsolutePercentageError.lossTensor = Tensor(_lossDataType.value(), _predictions.value().getDimensions());
             meanAbsolutePercentageError.lossShaperInput = meanAbsolutePercentageError.lossTensor;
             meanAbsolutePercentageError.addToNetwork(_network.value());
         }
@@ -127,15 +125,21 @@ class MAPE::Builder {
         return *this;
     }
 
-    virtual MAPE::Builder &reportsElementwiseLoss() {
+    virtual MAPE::Builder &reportsPerExampleLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
-        _lossShape = LossShape::ELEMENTWISE;
+        _lossShape = LossShape::PER_EXAMPLE;
         return *this;
     }
 
     virtual MAPE::Builder &reportsPerOutputLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
-        _lossShape = LossShape::CLASSWISE;
+        _lossShape = LossShape::PER_OUTPUT;
+        return *this;
+    }
+
+    virtual MAPE::Builder &reportsNoLoss() {
+        THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
+        _lossShape = LossShape::NONE;
         return *this;
     }
 

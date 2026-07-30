@@ -273,7 +273,7 @@ int MultiInputCustomLoss::getConnectionType(Tensor connectingTensor) const {
         if (connectingTensor == inputs[i].tensor)
             return static_cast<int>(i);
     }
-    if (connectingTensor == lossTensor)
+    if (connectingTensor == getRawLoss())
         return 0;
     throw runtime_error("Tensor is not connected to this MultiInputCustomLoss.");
 }
@@ -326,19 +326,7 @@ void MultiInputCustomLoss::buildSupportLayersAndAddToNetwork() {
     MultiInputCustomLoss rawLoss = builder.build();
     lossShaperInput = rawLoss.getLoss();
 
-    if (lossShape == LossShape::BATCH) {
-        LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(lossShaperInput).reportsBatchLoss().build();
-        lossTensor = lossShaper.getLossOutput();
-    } else if (lossShape == LossShape::ELEMENTWISE) {
-        LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(lossShaperInput).reportsElementwiseLoss().build();
-        lossTensor = lossShaper.getLossOutput();
-    } else if (lossShape == LossShape::CLASSWISE) {
-        LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(lossShaperInput).reportsClasswiseLoss().build();
-        lossTensor = lossShaper.getLossOutput();
-    } else {
-        THOR_THROW_IF_FALSE(lossShape == LossShape::RAW);
-        lossTensor = lossShaperInput;
-    }
+    finalizeLossReporting();
 }
 
 uint64_t MultiInputCustomLoss::getFirstInstanceMemRequirementInBytes(uint32_t batchSize,
@@ -360,7 +348,9 @@ json MultiInputCustomLoss::architectureJson() const {
     j["version"] = getLayerVersion();
     j["layer_type"] = "multi_input_custom_loss";
     j["layer_name"] = string("layer") + to_string(getId());
-    j["loss_shape"] = lossShape;
+    // Only physical raw-loss layers are serialized. Reporting layers (or the
+    // internal Stub used by NONE) are serialized as their own graph layers.
+    j["loss_shape"] = LossShape::RAW;
     j["loss_data_type"] = lossDataType;
     j["loss_name"] = lossName;
     ThorImplementation::addLossWeightToJson(j, lossWeight);

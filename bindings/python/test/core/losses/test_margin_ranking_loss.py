@@ -30,11 +30,11 @@ def _margin_ranking_reference(input1: np.ndarray, input2: np.ndarray, target: np
 def _reduce_loss(raw: np.ndarray, reported_loss_shape: thor.losses.LossShape) -> np.ndarray:
     if reported_loss_shape == thor.losses.LossShape.raw:
         return raw
-    if reported_loss_shape == thor.losses.LossShape.elementwise:
+    if reported_loss_shape == thor.losses.LossShape.per_example:
         return np.sum(raw, axis=1, keepdims=True)
 
     batch_size = raw.shape[0]
-    if reported_loss_shape == thor.losses.LossShape.classwise:
+    if reported_loss_shape == thor.losses.LossShape.per_output:
         return (np.sum(raw, axis=0, keepdims=True) / batch_size).astype(np.float32)
     if reported_loss_shape == thor.losses.LossShape.batch:
         return np.array([[np.sum(raw) / batch_size]], dtype=np.float32)
@@ -107,13 +107,13 @@ def test_margin_ranking_loss_constructs_with_margin_loss_dtype_and_shape():
         target,
         0.25,
         thor.DataType.fp32,
-        thor.losses.LossShape.elementwise,
+        thor.losses.LossShape.per_example,
     )
     assert isinstance(loss, thor.losses.ranking.MarginRankingLoss)
     assert loss.margin == pytest.approx(0.25)
 
 
-@pytest.mark.parametrize("shape", ["batch", "classwise", "elementwise", "raw"])
+@pytest.mark.parametrize("shape", ["batch", "per_output", "per_example", "raw"])
 def test_margin_ranking_loss_reported_loss_shape_variants_construct(shape):
     n = _net()
     input1 = _tensor_1d(3)
@@ -170,8 +170,8 @@ def test_margin_ranking_loss_rejects_invalid_dtypes_and_duplicate_tensors():
     "reported_loss_shape",
     [
         thor.losses.LossShape.raw,
-        thor.losses.LossShape.elementwise,
-        thor.losses.LossShape.classwise,
+        thor.losses.LossShape.per_example,
+        thor.losses.LossShape.per_output,
         thor.losses.LossShape.batch,
     ],
 )

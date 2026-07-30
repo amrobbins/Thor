@@ -29,13 +29,13 @@ def _huber_reference(predictions: np.ndarray, labels: np.ndarray, delta: float) 
 def _reduce_loss(raw: np.ndarray, reported_loss_shape: thor.losses.LossShape) -> np.ndarray:
     if reported_loss_shape == thor.losses.LossShape.raw:
         return raw
-    if reported_loss_shape == thor.losses.LossShape.elementwise:
+    if reported_loss_shape == thor.losses.LossShape.per_example:
         return np.sum(raw, axis=1, keepdims=True)
 
     # LossShaper averages over the batch dimension whenever that dimension is
     # reduced. It sums over the feature/class dimension.
     batch_size = raw.shape[0]
-    if reported_loss_shape == thor.losses.LossShape.classwise:
+    if reported_loss_shape == thor.losses.LossShape.per_output:
         return (np.sum(raw, axis=0, keepdims=True) / batch_size).astype(np.float32)
     if reported_loss_shape == thor.losses.LossShape.batch:
         return np.array([[np.sum(raw) / batch_size]], dtype=np.float32)
@@ -96,13 +96,13 @@ def test_huber_loss_constructs_with_delta_loss_dtype_and_shape():
         labels,
         2.0,
         thor.DataType.fp32,
-        thor.losses.LossShape.elementwise,
+        thor.losses.LossShape.per_example,
     )
     assert isinstance(loss, thor.losses.HuberLoss)
     assert loss.delta == pytest.approx(2.0)
 
 
-@pytest.mark.parametrize("shape", ["batch", "classwise", "elementwise", "raw"])
+@pytest.mark.parametrize("shape", ["batch", "per_output", "per_example", "raw"])
 def test_huber_loss_reported_loss_shape_variants_construct(shape):
     n = _net()
     preds = _tensor_1d(3)
@@ -130,13 +130,13 @@ def test_huber_loss_rejects_mismatched_labels():
         thor.losses.HuberLoss(n, preds, labels)
 
 
-def test_huber_loss_rejects_predictions_not_1d():
+def test_huber_loss_constructs_multidimensional_outputs():
     n = _net()
-    preds = thor.Tensor([1, 1], thor.DataType.fp32)
-    labels = thor.Tensor([1, 1], thor.DataType.fp32)
+    preds = thor.Tensor([2, 3, 4], thor.DataType.fp32)
+    labels = thor.Tensor([2, 3, 4], thor.DataType.fp32)
 
-    with pytest.raises(ValueError, match=r"predictions must be a 1 dimensional tensor"):
-        thor.losses.HuberLoss(n, preds, labels)
+    loss = thor.losses.HuberLoss(n, preds, labels, reported_loss_shape=thor.losses.LossShape.raw)
+    assert loss.get_loss().get_dimensions() == [2, 3, 4]
 
 
 def test_huber_loss_rejects_invalid_loss_data_type():
@@ -153,8 +153,8 @@ def test_huber_loss_rejects_invalid_loss_data_type():
     "reported_loss_shape",
     [
         thor.losses.LossShape.raw,
-        thor.losses.LossShape.elementwise,
-        thor.losses.LossShape.classwise,
+        thor.losses.LossShape.per_example,
+        thor.losses.LossShape.per_output,
         thor.losses.LossShape.batch,
     ],
 )

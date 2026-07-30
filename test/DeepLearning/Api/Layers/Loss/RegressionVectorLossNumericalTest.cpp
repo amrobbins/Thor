@@ -636,7 +636,7 @@ TEST(RegressionVectorLossApi, Width100RawBCEForwardAndBackwardMatchNumericalRefe
                                                .predictions(predictionsTensor)
                                                .labels(labelsTensor)
                                                .lossDataType(Api::DataType::FP32)
-                                               .reportsElementwiseLoss()
+                                               .reportsRawLoss()
                                                .build();
             return loss.getLoss();
         });

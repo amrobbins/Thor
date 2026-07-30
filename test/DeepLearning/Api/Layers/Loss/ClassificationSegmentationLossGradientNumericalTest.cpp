@@ -340,6 +340,40 @@ TEST(BinaryFocalLossApi, NumericalRawLossAndBackwardGradientMatchReference) {
     expectClose(actual.predictionGradient, expectedGradient, ThorTest::lossScaleAwareGradientTolerance(1.0e-2f));
 }
 
+TEST(BinaryFocalLossApi, VectorNumericalRawLossAndBackwardGradientMatchReference) {
+    const vector<uint64_t> featureDims = {4};
+    const vector<float> predictions = {-2.0f, -0.25f, 0.0f, 1.5f, 0.75f, -1.25f, 2.0f, -0.5f};
+    const vector<float> labels = {0.0f, 1.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 0.0f};
+    const float gamma = 1.5f;
+    const float alpha = 0.35f;
+
+    RawCustomLossRunResult actual = runRawCustomLossNetwork(
+        "binary_focal_loss_vector_gradient_numerical",
+        featureDims,
+        predictions,
+        labels,
+        [=](Api::Network& network, Api::Tensor predictionsTensor, Api::Tensor labelsTensor) {
+            Api::BinaryFocalLoss loss = Api::BinaryFocalLoss::Builder()
+                                            .network(network)
+                                            .predictions(predictionsTensor)
+                                            .labels(labelsTensor)
+                                            .focusingParameter(gamma)
+                                            .alpha(alpha)
+                                            .lossDataType(Api::DataType::FP32)
+                                            .reportsRawLoss()
+                                            .build();
+            return loss.getLoss();
+        });
+
+    vector<float> expectedLoss = referenceBinaryFocalRawLoss(predictions, labels, gamma, alpha);
+    vector<float> expectedGradient = finiteDifferenceGradient(
+        predictions, [&](const vector<float>& perturbed) { return sumAsDouble(referenceBinaryFocalRawLoss(perturbed, labels, gamma, alpha)); });
+    scaleByLossScalingFactor(expectedGradient);
+
+    expectClose(actual.loss, expectedLoss, 1.0e-5f);
+    expectClose(actual.predictionGradient, expectedGradient, ThorTest::lossScaleAwareGradientTolerance(1.0e-2f));
+}
+
 TEST(CategoricalFocalLossApi, NumericalRawLossAndBackwardGradientMatchReference) {
     const uint32_t numClasses = 3;
     const vector<uint64_t> featureDims = {numClasses};

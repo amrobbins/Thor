@@ -85,7 +85,7 @@ class GaussianNLLLoss::Builder {
         THOR_THROW_IF_FALSE(_predictions.value() != _labels.value());
         THOR_THROW_IF_FALSE(_predictions.value() != _variance.value());
         THOR_THROW_IF_FALSE(_labels.value() != _variance.value());
-        THOR_THROW_IF_FALSE(_predictions.value().getDimensions().size() == 1);
+        THOR_THROW_IF_FALSE(!_predictions.value().getDimensions().empty());
         THOR_THROW_IF_FALSE(_predictions.value().getDimensions() == _labels.value().getDimensions());
         THOR_THROW_IF_FALSE(_predictions.value().getDimensions() == _variance.value().getDimensions());
 
@@ -166,15 +166,21 @@ class GaussianNLLLoss::Builder {
         return *this;
     }
 
-    virtual GaussianNLLLoss::Builder &reportsElementwiseLoss() {
+    virtual GaussianNLLLoss::Builder &reportsPerExampleLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
-        _lossShape = LossShape::ELEMENTWISE;
+        _lossShape = LossShape::PER_EXAMPLE;
         return *this;
     }
 
     virtual GaussianNLLLoss::Builder &reportsPerOutputLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
-        _lossShape = LossShape::CLASSWISE;
+        _lossShape = LossShape::PER_OUTPUT;
+        return *this;
+    }
+
+    virtual GaussianNLLLoss::Builder &reportsNoLoss() {
+        THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
+        _lossShape = LossShape::NONE;
         return *this;
     }
 

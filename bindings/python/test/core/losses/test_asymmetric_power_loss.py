@@ -29,11 +29,11 @@ def _reference(predictions: np.ndarray, labels: np.ndarray, level: float, expone
 def _reduce_loss(raw: np.ndarray, reported_loss_shape: thor.losses.LossShape) -> np.ndarray:
     if reported_loss_shape == thor.losses.LossShape.raw:
         return raw
-    if reported_loss_shape == thor.losses.LossShape.elementwise:
+    if reported_loss_shape == thor.losses.LossShape.per_example:
         return np.sum(raw, axis=1, keepdims=True)
 
     batch_size = raw.shape[0]
-    if reported_loss_shape == thor.losses.LossShape.classwise:
+    if reported_loss_shape == thor.losses.LossShape.per_output:
         return (np.sum(raw, axis=0, keepdims=True) / batch_size).astype(np.float32)
     if reported_loss_shape == thor.losses.LossShape.batch:
         return np.array([[np.sum(raw) / batch_size]], dtype=np.float32)
@@ -133,14 +133,17 @@ def test_asymmetric_power_loss_rejects_invalid_inputs():
     n = _net()
     with pytest.raises(ValueError, match=r"labels dimensions [\s\S]* must match predictions dimensions"):
         thor.losses.AsymmetricPowerLoss(n, _tensor_1d(2), _tensor_1d(3))
-    with pytest.raises(ValueError, match=r"predictions must be a 1 dimensional tensor"):
-        thor.losses.AsymmetricPowerLoss(
-            n,
-            thor.Tensor([1, 1], thor.DataType.fp32),
-            thor.Tensor([1, 1], thor.DataType.fp32),
-        )
     with pytest.raises(ValueError, match=r"loss_data_type must be fp16 or fp32"):
         thor.losses.AsymmetricPowerLoss(n, _tensor_1d(1), _tensor_1d(1), 0.5, 1.5, thor.DataType.int32)
+
+
+def test_asymmetric_power_loss_constructs_multidimensional_outputs():
+    n = _net()
+    predictions = thor.Tensor([2, 3, 4], thor.DataType.fp32)
+    labels = thor.Tensor([2, 3, 4], thor.DataType.fp32)
+
+    loss = thor.losses.AsymmetricPowerLoss(n, predictions, labels, reported_loss_shape=thor.losses.LossShape.raw)
+    assert loss.get_loss().get_dimensions() == [2, 3, 4]
 
 
 @pytest.mark.cuda
@@ -148,8 +151,8 @@ def test_asymmetric_power_loss_rejects_invalid_inputs():
     "reported_loss_shape",
     [
         thor.losses.LossShape.raw,
-        thor.losses.LossShape.elementwise,
-        thor.losses.LossShape.classwise,
+        thor.losses.LossShape.per_example,
+        thor.losses.LossShape.per_output,
         thor.losses.LossShape.batch,
     ],
 )

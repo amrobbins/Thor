@@ -6,10 +6,12 @@
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Layers/Activations/Relu.h"
+#include "DeepLearning/Api/Layers/Learning/CustomLayer.h"
 #include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
 #include "DeepLearning/Api/Layers/Loss/MeanAbsoluteError.h"
 #include "DeepLearning/Api/Layers/Loss/MeanSquaredError.h"
 #include "DeepLearning/Api/Layers/Loss/QuantileLoss.h"
+#include "DeepLearning/Api/Layers/Metrics/WeightedMean.h"
 #include "DeepLearning/Api/Training/Events/TrainingEvent.h"
 #include "DeepLearning/Api/Training/TrainingPhase.h"
 #include "DeepLearning/Api/Training/TrainingProgram.h"
@@ -17,6 +19,7 @@
 #include "DeepLearning/Api/Optimizers/Sgd.h"
 #include "DeepLearning/Api/Training/Executors/TrainingExecutor.h"
 #include "DeepLearning/Api/Training/Observers/TrainingObserver.h"
+#include "Utilities/Expression/DynamicExpression.h"
 
 #include "gtest/gtest.h"
 
@@ -103,6 +106,9 @@ class FakeDataset final : public NamedDataset {
               DatasetField{.id = 3, .name = "observed_daily", .dataType = DataType::FP32, .dimensions = {1}},
               DatasetField{.id = 4, .name = "observed_aggregate", .dataType = DataType::FP32, .dimensions = {1}},
               DatasetField{.id = 5, .name = "example_weights", .dataType = DataType::FP32, .dimensions = {1}},
+              DatasetField{.id = 6, .name = "actual", .dataType = DataType::FP32, .dimensions = {4}},
+              DatasetField{.id = 7, .name = "peak_threshold", .dataType = DataType::FP32, .dimensions = {4}},
+              DatasetField{.id = 8, .name = "alternate_threshold", .dataType = DataType::FP32, .dimensions = {4}},
           }) {}
 
     const DatasetId& getId() const override { return id; }
@@ -467,6 +473,122 @@ std::shared_ptr<Network> makeDemandPredictionOnlyNetwork(const std::string& name
     return network;
 }
 
+std::shared_ptr<Network> makeAuxiliaryMetricNetwork(const std::string& name, const std::string& selectedThresholdInputName) {
+    auto network = std::make_shared<Network>(name);
+    NetworkInput features =
+        NetworkInput::Builder().network(*network).name("features").dimensions({4}).dataType(DataType::FP32).build();
+    NetworkInput actual =
+        NetworkInput::Builder().network(*network).name("actual").dimensions({4}).dataType(DataType::FP32).build();
+    NetworkInput peakThreshold =
+        NetworkInput::Builder().network(*network).name("peak_threshold").dimensions({4}).dataType(DataType::FP32).build();
+    NetworkInput alternateThreshold = NetworkInput::Builder()
+                                          .network(*network)
+                                          .name("alternate_threshold")
+                                          .dimensions({4})
+                                          .dataType(DataType::FP32)
+                                          .build();
+
+    std::shared_ptr<Activation> prediction =
+        Relu::Builder().network(*network).featureInput(features.getFeatureOutput().value()).build();
+    const Tensor selectedThreshold = selectedThresholdInputName == "peak_threshold"
+                                         ? peakThreshold.getFeatureOutput().value()
+                                         : alternateThreshold.getFeatureOutput().value();
+
+    ThorImplementation::Expression actualExpression =
+        ThorImplementation::Expression::input("actual", ThorImplementation::DataType::FP32, ThorImplementation::DataType::FP32);
+    ThorImplementation::Expression thresholdExpression =
+        ThorImplementation::Expression::input("threshold", ThorImplementation::DataType::FP32, ThorImplementation::DataType::FP32);
+    ThorImplementation::ExpressionDefinition maskDefinition = ThorImplementation::ExpressionDefinition::fromOutputs(
+        ThorImplementation::Expression::outputs(
+            {{"mask", actualExpression.greaterEqual(thresholdExpression).cast(ThorImplementation::DataType::FP32)}}));
+    CustomLayer mask = CustomLayer::Builder()
+                           .network(*network)
+                           .expression(ThorImplementation::DynamicExpression::fromExpressionDefinition(maskDefinition))
+                           .inputNames({"actual", "threshold"})
+                           .outputNames({"mask"})
+                           .inputInterface({{"actual", actual.getFeatureOutput().value()}, {"threshold", selectedThreshold}})
+                           .build();
+    WeightedMean peakMean = WeightedMean::Builder()
+                                .network(*network)
+                                .values(prediction->getFeatureOutput().value())
+                                .weights(mask.getOutput("mask"))
+                                .build();
+
+    NetworkOutput::Builder().network(*network).name("prediction").inputTensor(prediction->getFeatureOutput().value()).build();
+    NetworkOutput::Builder().network(*network).name("peak_mean").inputTensor(peakMean.getMetric()).build();
+    // Keep both candidate auxiliary inputs in the public signature so the test
+    // isolates report-subgraph wiring rather than whole-network input names.
+    NetworkOutput::Builder()
+        .network(*network)
+        .name("peak_threshold_debug")
+        .inputTensor(peakThreshold.getFeatureOutput().value())
+        .build();
+    NetworkOutput::Builder()
+        .network(*network)
+        .name("alternate_threshold_debug")
+        .inputTensor(alternateThreshold.getFeatureOutput().value())
+        .build();
+    return network;
+}
+
+std::shared_ptr<Network> makeAuxiliaryLossNetwork(const std::string& name, const std::string& selectedThresholdInputName) {
+    auto network = std::make_shared<Network>(name);
+    NetworkInput features =
+        NetworkInput::Builder().network(*network).name("features").dimensions({4}).dataType(DataType::FP32).build();
+    NetworkInput actual =
+        NetworkInput::Builder().network(*network).name("actual").dimensions({4}).dataType(DataType::FP32).build();
+    NetworkInput peakThreshold =
+        NetworkInput::Builder().network(*network).name("peak_threshold").dimensions({4}).dataType(DataType::FP32).build();
+    NetworkInput alternateThreshold = NetworkInput::Builder()
+                                          .network(*network)
+                                          .name("alternate_threshold")
+                                          .dimensions({4})
+                                          .dataType(DataType::FP32)
+                                          .build();
+
+    std::shared_ptr<Activation> prediction =
+        Relu::Builder().network(*network).featureInput(features.getFeatureOutput().value()).build();
+    const Tensor selectedThreshold = selectedThresholdInputName == "peak_threshold"
+                                         ? peakThreshold.getFeatureOutput().value()
+                                         : alternateThreshold.getFeatureOutput().value();
+
+    ThorImplementation::Expression actualExpression =
+        ThorImplementation::Expression::input("actual", ThorImplementation::DataType::FP32, ThorImplementation::DataType::FP32);
+    ThorImplementation::Expression thresholdExpression =
+        ThorImplementation::Expression::input("threshold", ThorImplementation::DataType::FP32, ThorImplementation::DataType::FP32);
+    ThorImplementation::ExpressionDefinition maskDefinition = ThorImplementation::ExpressionDefinition::fromOutputs(
+        ThorImplementation::Expression::outputs(
+            {{"mask", actualExpression.greaterEqual(thresholdExpression).cast(ThorImplementation::DataType::FP32)}}));
+    CustomLayer mask = CustomLayer::Builder()
+                           .network(*network)
+                           .expression(ThorImplementation::DynamicExpression::fromExpressionDefinition(maskDefinition))
+                           .inputNames({"actual", "threshold"})
+                           .outputNames({"mask"})
+                           .inputInterface({{"actual", actual.getFeatureOutput().value()}, {"threshold", selectedThreshold}})
+                           .build();
+    MSE peakLoss = MSE::Builder()
+                       .network(*network)
+                       .predictions(prediction->getFeatureOutput().value())
+                       .labels(actual.getFeatureOutput().value())
+                       .exampleWeights(mask.getOutput("mask"))
+                       .reportsBatchLoss()
+                       .build();
+
+    NetworkOutput::Builder().network(*network).name("prediction").inputTensor(prediction->getFeatureOutput().value()).build();
+    NetworkOutput::Builder().network(*network).name("peak_mse").inputTensor(peakLoss.getLoss()).build();
+    NetworkOutput::Builder()
+        .network(*network)
+        .name("peak_threshold_debug")
+        .inputTensor(peakThreshold.getFeatureOutput().value())
+        .build();
+    NetworkOutput::Builder()
+        .network(*network)
+        .name("alternate_threshold_debug")
+        .inputTensor(alternateThreshold.getFeatureOutput().value())
+        .build();
+    return network;
+}
+
 std::shared_ptr<Network> makeAmbiguousDailyLossNetwork(const std::string& name) {
     auto network = std::make_shared<Network>(name);
     NetworkInput features = NetworkInput::Builder().network(*network).name("features").dimensions({4}).dataType(DataType::FP32).build();
@@ -791,6 +913,79 @@ TEST(TrainingRuns, ReportedLossFilterControlsNamedGraphLossesInResults) {
     ASSERT_EQ(ensemble.namedMetrics.size(), 2u);
     EXPECT_EQ(ensemble.namedMetrics[0].name, "daily_loss");
     EXPECT_EQ(ensemble.namedMetrics[1].name, "p90_loss");
+}
+
+TEST(TrainingRuns, ComposesGraphMetricsWithAuxiliaryInputs) {
+    auto network0 = makeAuxiliaryMetricNetwork("training-runs-aux-metric-compose-0", "peak_threshold");
+    auto network1 = makeAuxiliaryMetricNetwork("training-runs-aux-metric-compose-1", "peak_threshold");
+    auto coordinator = std::make_shared<Coordinator>(2);
+    auto executor0 = std::make_shared<CoordinatedExecutor>(coordinator, FakeExecutorBehavior::COMPLETE_AFTER_RELEASE);
+    auto executor1 = std::make_shared<CoordinatedExecutor>(coordinator, FakeExecutorBehavior::COMPLETE_AFTER_RELEASE);
+    std::shared_ptr<Trainer> trainer0 = makeTrainer(network0, executor0);
+    std::shared_ptr<Trainer> trainer1 = makeTrainer(network1, executor1);
+
+    TrainingRuns runs({TrainingRunsSpec{"fold_0", trainer0, "demand"}, TrainingRunsSpec{"fold_1", trainer1, "demand"}});
+    TrainingRunsSessionOptions sessionOptions;
+    sessionOptions.reports = {{"demand", {"peak_mean"}}};
+    sessionOptions.evaluation.evaluateTrainingPopulation = false;
+
+    std::optional<TrainingRunsResult> result;
+    std::exception_ptr exception;
+    std::thread fitThread([&]() {
+        try {
+            result = runs.fit(TrainerFitOptions{1}, sessionOptions);
+        } catch (...) {
+            exception = std::current_exception();
+        }
+    });
+
+    ASSERT_TRUE(coordinator->waitForAllStarted());
+    coordinator->releaseAll();
+    fitThread.join();
+    rethrowIfSet(exception);
+
+    ASSERT_TRUE(result.has_value());
+    const TrainingEnsembleResult& ensemble = result->ensemble("demand");
+    ASSERT_EQ(ensemble.namedGraphMetrics.size(), 1u);
+    EXPECT_EQ(ensemble.namedGraphMetrics.front().name, "peak_mean");
+}
+
+TEST(TrainingRuns, RejectsGraphMetricsWithDifferentAuxiliaryInputBoundaries) {
+    auto network0 = makeAuxiliaryMetricNetwork("training-runs-aux-metric-0", "peak_threshold");
+    auto network1 = makeAuxiliaryMetricNetwork("training-runs-aux-metric-1", "alternate_threshold");
+    auto executor0 = std::make_shared<RestartProgressExecutor>(std::vector<std::vector<double>>{{1.0}});
+    auto executor1 = std::make_shared<RestartProgressExecutor>(std::vector<std::vector<double>>{{1.0}});
+    std::shared_ptr<Trainer> trainer0 = makeTrainer(network0, executor0);
+    std::shared_ptr<Trainer> trainer1 = makeTrainer(network1, executor1);
+
+    TrainingRuns runs({TrainingRunsSpec{"fold_0", trainer0, "demand"},
+                       TrainingRunsSpec{"fold_1", trainer1, "demand"}});
+    TrainingRunsSessionOptions sessionOptions;
+    sessionOptions.reports = {{"demand", {"peak_mean"}}};
+    sessionOptions.evaluation.evaluateTrainingPopulation = false;
+
+    EXPECT_THROW((void)runs.fit(TrainerFitOptions{1}, sessionOptions), std::runtime_error);
+    EXPECT_EQ(executor0->calls, 0u);
+    EXPECT_EQ(executor1->calls, 0u);
+}
+
+TEST(TrainingRuns, RejectsGraphLossesWithDifferentAuxiliaryInputBoundaries) {
+    auto network0 = makeAuxiliaryLossNetwork("training-runs-aux-loss-0", "peak_threshold");
+    auto network1 = makeAuxiliaryLossNetwork("training-runs-aux-loss-1", "alternate_threshold");
+    auto executor0 = std::make_shared<RestartProgressExecutor>(std::vector<std::vector<double>>{{1.0}});
+    auto executor1 = std::make_shared<RestartProgressExecutor>(std::vector<std::vector<double>>{{1.0}});
+    std::shared_ptr<Trainer> trainer0 = makeTrainer(network0, executor0);
+    std::shared_ptr<Trainer> trainer1 = makeTrainer(network1, executor1);
+
+    TrainingRuns runs({TrainingRunsSpec{"fold_0", trainer0, "demand"},
+                       TrainingRunsSpec{"fold_1", trainer1, "demand"}});
+    TrainingRunsSessionOptions sessionOptions;
+    sessionOptions.reports = {{"demand", {"peak_mse"}}};
+    sessionOptions.evaluation.evaluateTrainingPopulation = false;
+
+    EXPECT_THROW((void)runs.fit(TrainerFitOptions{1}, sessionOptions), std::runtime_error);
+    EXPECT_EQ(executor0->calls, 0u);
+    EXPECT_EQ(executor1->calls, 0u);
 }
 
 TEST(TrainingRuns, PredictionOnlyEnsembleHasNoGraphLossMetrics) {

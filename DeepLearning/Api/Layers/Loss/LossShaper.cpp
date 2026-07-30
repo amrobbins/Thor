@@ -7,7 +7,7 @@ namespace Thor {
 
 json LossShaper::architectureJson() const {
     // The thing that is deserialized must be just the base layers, any helper layers
-    // are themselves deserialized. So loss_shape set to LossShape::ELEMENTWISE
+    // are themselves deserialized. So loss_shape set to LossShape::PER_EXAMPLE
 
     json j;
     j["factory"] = Layer::Factory::Loss.value();

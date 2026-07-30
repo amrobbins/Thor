@@ -37,7 +37,8 @@ class MeanAbsolutePercentageError : public Loss {
     void launchMeanAbsolutePercentageErrorWithFP32PredictionsAndFP16Loss();
     void launchMeanAbsolutePercentageErrorWithFP32PredictionsAndFP32Loss();
 
-    unsigned int batchSize;
+    uint32_t batchSize;
+    uint32_t numPredictionsPerExample;
     cudnnTensorDescriptor_t errorOutputCudnnTensorDescriptor;
 
     float epsilon;

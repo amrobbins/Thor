@@ -51,6 +51,28 @@ class MultiInputCustomLoss : public Loss {
     Tensor getLabels() const override;
     std::optional<Tensor> getFeatureInput() const override;
     int getConnectionType(Tensor connectingTensor) const override;
+    [[nodiscard]] std::optional<std::string> getInputPortName(const Tensor& inputTensor) const override {
+        std::string names;
+        for (const InputSpec& input : inputs) {
+            if (input.tensor != inputTensor) {
+                continue;
+            }
+            if (!names.empty()) {
+                names += ", ";
+            }
+            names += input.name;
+        }
+        if (!names.empty()) {
+            return names;
+        }
+        return Loss::getInputPortName(inputTensor);
+    }
+    [[nodiscard]] std::optional<std::string> getOutputPortName(const Tensor& outputTensor) const override {
+        if (lossShaperInput.isInitialized() && outputTensor == lossShaperInput) {
+            return lossName;
+        }
+        return Loss::getOutputPortName(outputTensor);
+    }
 
     nlohmann::json architectureJson() const override;
     static void deserialize(const nlohmann::json& j, Network* network);
@@ -62,7 +84,7 @@ class MultiInputCustomLoss : public Loss {
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override;
 
-    virtual bool isMultiLayer() const { return lossShape != LossShape::RAW; }
+    virtual bool isMultiLayer() const { return lossShape != LossShape::RAW && lossShape != LossShape::NONE; }
     virtual void buildSupportLayersAndAddToNetwork();
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override;
@@ -123,6 +145,7 @@ class MultiInputCustomLoss::Builder {
         } else {
             customLoss.lossShaperInput = customLoss.lossTensor;
             customLoss.addToNetwork(_network.value());
+            customLoss.finalizeLossReporting();
         }
 
         return customLoss;
@@ -192,15 +215,21 @@ class MultiInputCustomLoss::Builder {
         return *this;
     }
 
-    virtual MultiInputCustomLoss::Builder& reportsElementwiseLoss() {
+    virtual MultiInputCustomLoss::Builder& reportsPerExampleLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
-        _lossShape = LossShape::ELEMENTWISE;
+        _lossShape = LossShape::PER_EXAMPLE;
         return *this;
     }
 
     virtual MultiInputCustomLoss::Builder& reportsPerOutputLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
-        _lossShape = LossShape::CLASSWISE;
+        _lossShape = LossShape::PER_OUTPUT;
+        return *this;
+    }
+
+    virtual MultiInputCustomLoss::Builder& reportsNoLoss() {
+        THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
+        _lossShape = LossShape::NONE;
         return *this;
     }
 

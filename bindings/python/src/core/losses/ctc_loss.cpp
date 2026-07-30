@@ -36,8 +36,9 @@ string dimsToString(const vector<uint64_t>& dims) {
 }
 
 void validateReportedLossShape(LossShape reportedLossShape, const string& lossName) {
-    if (reportedLossShape != LossShape::BATCH && reportedLossShape != LossShape::ELEMENTWISE && reportedLossShape != LossShape::RAW) {
-        string errorMessage = lossName + ": reported_loss_shape must be batch, elementwise, or raw for CTCLoss";
+    if (reportedLossShape != LossShape::NONE && reportedLossShape != LossShape::BATCH &&
+        reportedLossShape != LossShape::PER_EXAMPLE && reportedLossShape != LossShape::RAW) {
+        string errorMessage = lossName + ": reported_loss_shape must be batch, per_example, or raw for CTCLoss";
         throw nb::value_error(errorMessage.c_str());
     }
 }
@@ -106,10 +107,12 @@ void validateCtcLossArguments(const string& lossName,
 }
 
 void setReportedLossShape(CtcLoss::Builder& builder, LossShape reportedLossShape) {
-    if (reportedLossShape == LossShape::BATCH) {
+    if (reportedLossShape == LossShape::NONE) {
+        builder.reportsNoLoss();
+    } else if (reportedLossShape == LossShape::BATCH) {
         builder.reportsBatchLoss();
-    } else if (reportedLossShape == LossShape::ELEMENTWISE) {
-        builder.reportsElementwiseLoss();
+    } else if (reportedLossShape == LossShape::PER_EXAMPLE) {
+        builder.reportsPerExampleLoss();
     } else {
         THOR_THROW_IF_FALSE(reportedLossShape == LossShape::RAW);
         builder.reportsRawLoss();
@@ -196,7 +199,7 @@ input_lengths : thor.Tensor
 loss_data_type : thor.DataType | None, default thor.DataType.fp32
     CTCLoss v1 supports fp32 only.
 reported_loss_shape : thor.losses.LossShape, default batch
-    CTCLoss supports batch, elementwise, and raw reporting. Classwise reporting is rejected.
+    CTCLoss supports batch, per-example, and raw reporting. Per-output reporting is rejected.
 oob_gradient_mode : thor.losses.CTCOobGradientMode, default zero
     Controls cuDNN out-of-bounds gradient handling for impossible samples.
 loss_weight : float | None, keyword-only, default None

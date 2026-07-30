@@ -12,6 +12,33 @@ using namespace std;
 using namespace Thor;
 
 using DataType = ThorImplementation::DataType;
+using LossShape = Loss::LossShape;
+
+namespace {
+void validateReportedLossShape(LossShape reported_loss_shape, const string& loss_name) {
+    if (reported_loss_shape != LossShape::NONE && reported_loss_shape != LossShape::BATCH && reported_loss_shape != LossShape::PER_EXAMPLE &&
+        reported_loss_shape != LossShape::PER_OUTPUT && reported_loss_shape != LossShape::RAW) {
+        string error_message =
+            "Invalid value " + to_string((int)reported_loss_shape) + " passed for enum reported_loss_shape to " + loss_name + ".";
+        throw nb::value_error(error_message.c_str());
+    }
+}
+
+void setReportedLossShape(BinaryCrossEntropy::Builder& builder, LossShape reported_loss_shape) {
+    if (reported_loss_shape == LossShape::NONE) {
+        builder.reportsNoLoss();
+    } else if (reported_loss_shape == LossShape::BATCH) {
+        builder.reportsBatchLoss();
+    } else if (reported_loss_shape == LossShape::PER_EXAMPLE) {
+        builder.reportsPerExampleLoss();
+    } else if (reported_loss_shape == LossShape::PER_OUTPUT) {
+        builder.reportsPerOutputLoss();
+    } else {
+        THOR_THROW_IF_FALSE(reported_loss_shape == LossShape::RAW);
+        builder.reportsRawLoss();
+    }
+}
+}  // namespace
 
 void bind_binary_cross_entropy(nb::module_ &losses) {
     auto binary_cross_entropy = nb::class_<BinaryCrossEntropy, Loss>(losses, "BinaryCrossEntropy");
@@ -24,16 +51,16 @@ void bind_binary_cross_entropy(nb::module_ &losses) {
            Tensor predictions,
            Tensor labels,
            DataType loss_data_type,
-           bool reportsElementwiseLoss,
+           LossShape reported_loss_shape,
            std::optional<float> loss_weight) {
-            if (predictions.getDimensions().size() != 1) {
+            if (predictions.getDimensions().empty()) {
                 string error_message =
-                    "BinaryCrossEntropy instance: predictions must be a 1 dimensional tensor but predictions is " +
+                    "BinaryCrossEntropy instance: predictions must have at least one per-example dimension but predictions is " +
                     predictions.getDescriptorString();
                 throw nb::value_error(error_message.c_str());
             }
-            if (labels.getDimensions().size() != 1) {
-                string error_message = "BinaryCrossEntropy instance: labels must be a 1 dimensional tensor but labels is " +
+            if (labels.getDimensions().empty()) {
+                string error_message = "BinaryCrossEntropy instance: labels must have at least one per-example dimension but labels is " +
                                        labels.getDescriptorString();
                 throw nb::value_error(error_message.c_str());
             }
@@ -42,6 +69,7 @@ void bind_binary_cross_entropy(nb::module_ &losses) {
                                        predictions.getDescriptorString() + "; labels tensor is " + labels.getDescriptorString() + ".";
                 throw nb::value_error(error_message.c_str());
             }
+            validateReportedLossShape(reported_loss_shape, "BinaryCrossEntropy instance");
             if (loss_data_type != DataType::FP16 && loss_data_type != DataType::FP32) {
                 string error_message = "BinaryCrossEntropy instance: loss_data_type must be fp16 or fp32";
                 throw nb::value_error(error_message.c_str());
@@ -51,8 +79,7 @@ void bind_binary_cross_entropy(nb::module_ &losses) {
             builder.network(network).predictions(predictions).labels(labels).lossDataType(loss_data_type)
                 .lossWeight(loss_weight.value_or(1.0f));
 
-            if (reportsElementwiseLoss)
-                builder.reportsElementwiseLoss();
+            setReportedLossShape(builder, reported_loss_shape);
 
             BinaryCrossEntropy built = builder.build();
 
@@ -62,15 +89,7 @@ void bind_binary_cross_entropy(nb::module_ &losses) {
         "predictions"_a,
         "labels"_a,
         "loss_data_type"_a = DataType::FP32,
-        "reports_elementwise_loss"_a = false,
-        // nb::sig("def __init__(self, "
-        //         "network: thor.Network, "
-        //         "predictions: thor.Tensor, "
-        //         "labels: thor.Tensor, "
-        //         "reports_batch_loss: bool | None = None, "
-        //         "reports_elementwise_loss: bool | None = None, "
-        //         "loss_data_type: thor.DataType = thor.DataType.fp32"
-        //         ") -> None"),
+        "reported_loss_shape"_a = LossShape::BATCH,
         nb::kw_only(),
         "loss_weight"_a.none() = nb::none(),
         R"nbdoc(Construct a Binary Cross Entropy loss.)nbdoc");
@@ -83,22 +102,17 @@ Parameters
 network : thor.Network
 predictions : thor.Tensor
 labels : thor.Tensor
-reports_batch_loss : Optional[bool], default None
-    If True, report a single batch-aggregated loss.
-    When reports_batch_loss and reports_elementwise_loss are None, defaults to batch loss.
-reports_elementwise_loss : Optional[bool], default None
-    If True, report elementwise loss.
-    When reports_batch_loss and reports_elementwise_loss are None, defaults to batch loss.
-loss_data_type : thor.DataType, default thor.DataType.FP32
+loss_data_type : thor.DataType, default thor.DataType.fp32
+reported_loss_shape : thor.losses.LossShape, default thor.losses.LossShape.batch
+    Controls the reported loss tensor:
 
-Loss reductions available, meant to aid in hand analysis of a data set:
+    * ``none`` does not expose a reportable loss tensor; the raw loss remains the training objective.
+    * ``batch`` averages over the batch after summing all non-batch values.
+    * ``per_example`` sums all non-batch values independently for each example.
+    * ``per_output`` averages over the batch and preserves every non-batch dimension.
+    * ``raw`` reports the unreduced pointwise loss.
 
- * Batch [b][1] -> [1] - default
- * Elementwise [b][1] -> [b]
-
-So you could send a single batch and check the loss per example using Elementwise.
-If you want to see loss per category (categories 1, 0 in this case) it may be more
-convenient to get that using SparseCategoricalCrossEntropy with
-2 classes and reported_loss_shape=Loss.LossShape.classwise.
+If you want to inspect mutually exclusive binary categories, it may be more convenient
+to use SparseCategoricalCrossEntropy with two classes.
 )nbdoc";
 }

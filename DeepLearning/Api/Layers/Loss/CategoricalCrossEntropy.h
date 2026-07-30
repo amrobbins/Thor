@@ -126,8 +126,8 @@ class CategoricalCrossEntropy::Builder {
      * Reports loss to the user as a single scalar that represents the total loss of the batch.
      * Note that is only for reporting, this setting does not affect the form of loss used in the math to train the network.
      * Batch [b][c] -> [1]
-     * Classwise [b][c] -> [c]
-     * Elementwise [b][c] -> [b]
+     * Per-output [b][c] -> [c]
+     * Per-example [b][c] -> [b]
      * Raw [b][c] -> [b][c]
      */
     virtual CategoricalCrossEntropy::Builder &reportsBatchLoss() {
@@ -137,16 +137,16 @@ class CategoricalCrossEntropy::Builder {
     }
 
     /**
-     * Reports loss to the user as a scalar per class that indicates the loss attributed to that class across the batch.
+     * Reports loss to the user as one value per output position, averaged across the batch.
      * Note that is only for reporting, this setting does not affect the form of loss used in the math to train the network.
      * Batch [b][c] -> [1]
-     * Classwise [b][c] -> [c]
-     * Elementwise [b][c] -> [b]
+     * Per-output [b][c] -> [c]
+     * Per-example [b][c] -> [b]
      * Raw [b][c] -> [b][c]
      */
-    virtual CategoricalCrossEntropy::Builder &reportsClasswiseLoss() {
+    virtual CategoricalCrossEntropy::Builder &reportsPerOutputLoss() {
         THOR_THROW_IF_FALSE(!_lossShape.has_value());
-        _lossShape = LossShape::CLASSWISE;
+        _lossShape = LossShape::PER_OUTPUT;
         return *this;
     }
 
@@ -154,21 +154,30 @@ class CategoricalCrossEntropy::Builder {
      * Reports loss to the user as a scalar per example in the batch.
      * Note that is only for reporting, this setting does not affect the form of loss used in the math to train the network.
      * Batch [b][c] -> [1]
-     * Classwise [b][c] -> [c]
-     * Elementwise [b][c] -> [b]
+     * Per-output [b][c] -> [c]
+     * Per-example [b][c] -> [b]
      * Raw [b][c] -> [b][c]
      */
-    virtual CategoricalCrossEntropy::Builder &reportsElementwiseLoss() {
+    virtual CategoricalCrossEntropy::Builder &reportsPerExampleLoss() {
         THOR_THROW_IF_FALSE(!_lossShape.has_value());
-        _lossShape = LossShape::ELEMENTWISE;
+        _lossShape = LossShape::PER_EXAMPLE;
+        return *this;
+    }
+
+    /**
+     * Does not expose a reported loss tensor. The raw loss remains available internally as the training objective.
+     */
+    virtual CategoricalCrossEntropy::Builder &reportsNoLoss() {
+        THOR_THROW_IF_FALSE(!_lossShape.has_value());
+        _lossShape = LossShape::NONE;
         return *this;
     }
 
     /**
      * Reports loss to the user in its raw form: one scalar per class per example in the batch.
      * Batch [b][c] -> [1]
-     * Classwise [b][c] -> [c]
-     * Elementwise [b][c] -> [b]
+     * Per-output [b][c] -> [c]
+     * Per-example [b][c] -> [b]
      * Raw [b][c] -> [b][c]
      */
     virtual CategoricalCrossEntropy::Builder &reportsRawLoss() {
@@ -270,8 +279,9 @@ class CategoricalCrossEntropy::Builder {
 
         if (!_lossShape.has_value())
             _lossShape = LossShape::BATCH;
-        THOR_THROW_IF_FALSE(_lossShape.value() == LossShape::BATCH || _lossShape.value() == LossShape::CLASSWISE ||
-                            _lossShape.value() == LossShape::ELEMENTWISE || _lossShape.value() == LossShape::RAW);
+        THOR_THROW_IF_FALSE(_lossShape.value() == LossShape::NONE || _lossShape.value() == LossShape::BATCH ||
+                            _lossShape.value() == LossShape::PER_OUTPUT || _lossShape.value() == LossShape::PER_EXAMPLE ||
+                            _lossShape.value() == LossShape::RAW);
         categoricalCrossEntropy.lossShape = _lossShape.value();
         categoricalCrossEntropy.labelType = labelType;
         categoricalCrossEntropy.initialized = true;
@@ -387,13 +397,18 @@ class SparseCategoricalCrossEntropy::Builder : public CategoricalCrossEntropy::B
         return *this;
     }
 
-    virtual SparseCategoricalCrossEntropy::Builder &reportsClasswiseLoss() {
-        CategoricalCrossEntropy::Builder::reportsClasswiseLoss();
+    virtual SparseCategoricalCrossEntropy::Builder &reportsPerOutputLoss() {
+        CategoricalCrossEntropy::Builder::reportsPerOutputLoss();
         return *this;
     }
 
-    virtual SparseCategoricalCrossEntropy::Builder &reportsElementwiseLoss() {
-        CategoricalCrossEntropy::Builder::reportsElementwiseLoss();
+    virtual SparseCategoricalCrossEntropy::Builder &reportsPerExampleLoss() {
+        CategoricalCrossEntropy::Builder::reportsPerExampleLoss();
+        return *this;
+    }
+
+    virtual SparseCategoricalCrossEntropy::Builder &reportsNoLoss() {
+        CategoricalCrossEntropy::Builder::reportsNoLoss();
         return *this;
     }
 

@@ -6,23 +6,24 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cstdint>
 #include <memory>
+#include <stdexcept>
+#include <string>
+#include <vector>
 
 namespace ThorImplementation {
 
 /**
- * b: batch dimension
- * c: the row-major flattening of every non-batch loss dimension
+ * Input loss has implementation dimensions [b][d0]...[dn].
  *
- * Input loss may have dimensions [b][d0]...[dn]. Reduction treats it as a zero-copy [b][c] view.
- *
- * Batch: sum each item's c losses, then average those sums across b -> [1]
- * Classwise: average each flattened loss position across b -> [c]
- * Elementwise: sum each item's c losses -> [b]
+ * BATCH: sum every non-batch loss value, then average those per-example sums across b -> [1]
+ * PER_OUTPUT: average across b while preserving every non-batch loss axis -> [d0]...[dn]
+ * PER_EXAMPLE: sum every non-batch loss value independently for each example -> [b]
  */
 class LossShaper : public Layer {
    public:
-    enum class OutputLossType { BATCH = 1107, CLASSWISE, ELEMENTWISE };
+    enum class OutputLossType { BATCH, PER_EXAMPLE, PER_OUTPUT };
 
     LossShaper(OutputLossType outputLossType);
     ~LossShaper() override;
@@ -35,6 +36,10 @@ class LossShaper : public Layer {
 
     std::string getType() override;
 
+    static std::vector<uint32_t> getReductionAxes(const std::vector<uint64_t>& inputDimensions,
+                                                   OutputLossType outputLossType);
+    static float getReductionOutputScale(const std::vector<uint64_t>& inputDimensions,
+                                         OutputLossType outputLossType);
     static std::vector<uint64_t> getOutputDimensions(std::vector<uint64_t> inputDimensions, OutputLossType outputLossType);
 
    private:
@@ -44,11 +49,33 @@ class LossShaper : public Layer {
     std::shared_ptr<StampedCubReduction> reduction;
 };
 
-NLOHMANN_JSON_SERIALIZE_ENUM(LossShaper::OutputLossType,
-                             {
-                                 {LossShaper::OutputLossType::BATCH, "batch"},
-                                 {LossShaper::OutputLossType::ELEMENTWISE, "elementwise"},
-                                 {LossShaper::OutputLossType::CLASSWISE, "classwise"},
-                             })
+inline void to_json(nlohmann::json &j, const LossShaper::OutputLossType &outputLossType) {
+    switch (outputLossType) {
+        case LossShaper::OutputLossType::BATCH:
+            j = "batch";
+            return;
+        case LossShaper::OutputLossType::PER_OUTPUT:
+            j = "per_output";
+            return;
+        case LossShaper::OutputLossType::PER_EXAMPLE:
+            j = "per_example";
+            return;
+    }
+    throw std::invalid_argument("Unsupported OutputLossType enum value.");
+}
+
+inline void from_json(const nlohmann::json &j, LossShaper::OutputLossType &outputLossType) {
+    const std::string serializedOutputLossType = j.get<std::string>();
+    if (serializedOutputLossType == "batch") {
+        outputLossType = LossShaper::OutputLossType::BATCH;
+    } else if (serializedOutputLossType == "per_output") {
+        outputLossType = LossShaper::OutputLossType::PER_OUTPUT;
+    } else if (serializedOutputLossType == "per_example") {
+        outputLossType = LossShaper::OutputLossType::PER_EXAMPLE;
+    } else {
+        throw std::invalid_argument("Unsupported output loss type '" + serializedOutputLossType +
+                                    "'. Expected batch, per_example, or per_output.");
+    }
+}
 
 }  // namespace ThorImplementation

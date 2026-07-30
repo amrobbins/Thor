@@ -97,7 +97,7 @@
 //     }
 // }
 //
-// TEST(BinaryCrossEntropy, ElementwiseLossBuilds) {
+// TEST(BinaryCrossEntropy, PerExampleLossBuilds) {
 //     srand(time(nullptr));
 //
 //     for (uint32_t t = 0; t < 10; ++t) {
@@ -122,7 +122,7 @@
 //         BinaryCrossEntropy::Builder crossEntropyBuilder = BinaryCrossEntropy::Builder()
 //                                                               .network(network)
 //                                                               .predictions(predictions)
-//                                                               .reportsElementwiseLoss()
+//                                                               .reportsPerExampleLoss()
 //                                                               .lossDataType(lossDataType)
 //                                                               .labels(labels);
 //         BinaryCrossEntropy crossEntropy = crossEntropyBuilder.build();
@@ -211,7 +211,7 @@
 //     if (lossShape == 0)
 //         binaryCrossEntropyBuilder.reportsBatchLoss();
 //     else
-//         binaryCrossEntropyBuilder.reportsElementwiseLoss();
+//         binaryCrossEntropyBuilder.reportsPerExampleLoss();
 //
 //     BinaryCrossEntropy binaryCrossEntropy = binaryCrossEntropyBuilder.build();
 //

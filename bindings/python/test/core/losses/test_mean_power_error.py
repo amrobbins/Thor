@@ -46,13 +46,13 @@ def test_mean_power_error_constructs_with_loss_data_type():
         labels,
         1.25,
         thor.DataType.fp32,
-        False,
+        thor.losses.LossShape.batch,
     )
     assert isinstance(loss, thor.losses.MeanPowerError)
     assert loss.exponent == pytest.approx(1.25)
 
 
-def test_mean_power_error_constructs_reports_elementwise():
+def test_mean_power_error_constructs_reports_per_example():
     n = _net()
     preds = _tensor_1d(1, thor.DataType.fp32)
     labels = _tensor_1d(1, thor.DataType.fp32)
@@ -63,9 +63,27 @@ def test_mean_power_error_constructs_reports_elementwise():
         labels,
         1.5,
         None,
-        True,
+        thor.losses.LossShape.per_example,
     )
     assert isinstance(loss, thor.losses.MeanPowerError)
+
+
+@pytest.mark.parametrize(
+    "reported_loss_shape, expected_dimensions",
+    [
+        (thor.losses.LossShape.batch, [1]),
+        (thor.losses.LossShape.per_example, [1]),
+        (thor.losses.LossShape.per_output, [2, 3, 4]),
+        (thor.losses.LossShape.raw, [2, 3, 4]),
+    ],
+)
+def test_mean_power_error_constructs_all_reported_loss_shapes(reported_loss_shape, expected_dimensions):
+    n = _net()
+    preds = thor.Tensor([2, 3, 4], thor.DataType.fp32)
+    labels = thor.Tensor([2, 3, 4], thor.DataType.fp32)
+
+    loss = thor.losses.MeanPowerError(n, preds, labels, reported_loss_shape=reported_loss_shape)
+    assert loss.get_loss().get_dimensions() == expected_dimensions
 
 
 def test_mean_power_error_rejects_bad_exponents():

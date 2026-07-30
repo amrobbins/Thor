@@ -38,7 +38,7 @@ class BoxIouLoss : public Loss {
         if (connectingTensor == predictionsTensor) {
             return static_cast<int>(ThorImplementation::Loss::ConnectionType::FORWARD_BACKWARD);
         }
-        if (connectingTensor == lossTensor) {
+        if (connectingTensor == getRawLoss()) {
             return 0;
         }
         THOR_UNREACHABLE();
@@ -144,15 +144,21 @@ class BoxIouLossBuilderCommon {
         return static_cast<DerivedBuilder&>(*this);
     }
 
-    DerivedBuilder& reportsElementwiseLoss() {
+    DerivedBuilder& reportsPerExampleLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
-        _lossShape = Loss::LossShape::ELEMENTWISE;
+        _lossShape = Loss::LossShape::PER_EXAMPLE;
         return static_cast<DerivedBuilder&>(*this);
     }
 
     DerivedBuilder& reportsPerOutputLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
-        _lossShape = Loss::LossShape::CLASSWISE;
+        _lossShape = Loss::LossShape::PER_OUTPUT;
+        return static_cast<DerivedBuilder&>(*this);
+    }
+
+    DerivedBuilder& reportsNoLoss() {
+        THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
+        _lossShape = Loss::LossShape::NONE;
         return static_cast<DerivedBuilder&>(*this);
     }
 

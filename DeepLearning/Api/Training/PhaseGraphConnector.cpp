@@ -297,7 +297,7 @@ ComposedPhaseGraph buildComposedPhaseGraphByName(const vector<PhaseGraphNetworkS
         cloneOptions.namePrefix = phase.spec.phaseName + "/";
         cloneOptions.inferenceOnly = options.inferenceOnly;
         cloneOptions.cloneTrainableParameters = true;
-        ApiSubgraphCloneResult cloneResult = graph.network->cloneInferenceSubgraphInto(*phase.spec.network, phaseOutputNames, remap, cloneOptions);
+        ApiSubgraphCloneResult cloneResult = graph.network->cloneSubgraphInto(*phase.spec.network, phaseOutputNames, remap, cloneOptions);
 
         for (const shared_ptr<NetworkOutput>& output : phase.outputs) {
             const string outputName = output->getName();

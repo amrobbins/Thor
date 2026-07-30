@@ -32,7 +32,7 @@ def _binary_focal_reference(logits: np.ndarray, labels: np.ndarray, gamma: float
 def _reduce_loss(raw: np.ndarray, reported_loss_shape: thor.losses.LossShape) -> np.ndarray:
     if reported_loss_shape == thor.losses.LossShape.raw:
         return raw
-    if reported_loss_shape == thor.losses.LossShape.elementwise:
+    if reported_loss_shape == thor.losses.LossShape.per_example:
         return np.sum(raw, axis=1, keepdims=True)
     if reported_loss_shape == thor.losses.LossShape.batch:
         return np.array([[np.sum(raw) / raw.shape[0]]], dtype=np.float32)
@@ -49,8 +49,11 @@ def _run_binary_focal_loss_network(
     shape_name = str(reported_loss_shape).split(".")[-1]
     n = thor.Network(f"test_net_binary_focal_loss_numerical_{shape_name}")
     dtype = thor.DataType.fp32
-    predictions_input = thor.layers.NetworkInput(n, "predictions", [1], dtype)
-    labels_input = thor.layers.NetworkInput(n, "labels", [1], dtype)
+    assert predictions.ndim == 2
+    assert labels.shape == predictions.shape
+    output_width = predictions.shape[1]
+    predictions_input = thor.layers.NetworkInput(n, "predictions", [output_width], dtype)
+    labels_input = thor.layers.NetworkInput(n, "labels", [output_width], dtype)
     loss = thor.losses.classification.BinaryFocalLoss(
         n,
         predictions_input.get_feature_output(),
@@ -73,10 +76,11 @@ def _run_binary_focal_loss_network(
     return np.array(outputs["loss"].numpy(), copy=True)
 
 
-def test_binary_focal_loss_constructs_defaults():
+@pytest.mark.parametrize("width", [1, 100])
+def test_binary_focal_loss_constructs_defaults(width):
     n = _net()
-    preds = _tensor_1d(1)
-    labels = _tensor_1d(1)
+    preds = _tensor_1d(width)
+    labels = _tensor_1d(width)
 
     loss = thor.losses.classification.BinaryFocalLoss(n, preds, labels)
     assert isinstance(loss, thor.losses.classification.BinaryFocalLoss)
@@ -96,14 +100,14 @@ def test_binary_focal_loss_constructs_custom_values():
         1.5,
         0.75,
         thor.DataType.fp32,
-        thor.losses.LossShape.elementwise,
+        thor.losses.LossShape.per_example,
     )
     assert isinstance(loss, thor.losses.classification.BinaryFocalLoss)
     assert loss.gamma == pytest.approx(1.5)
     assert loss.alpha == pytest.approx(0.75)
 
 
-@pytest.mark.parametrize("shape", ["batch", "elementwise", "raw"])
+@pytest.mark.parametrize("shape", ["batch", "per_example", "raw"])
 def test_binary_focal_loss_reported_loss_shape_variants_construct(shape):
     n = _net()
     preds = _tensor_1d(1)
@@ -113,13 +117,13 @@ def test_binary_focal_loss_reported_loss_shape_variants_construct(shape):
     assert isinstance(loss, thor.losses.classification.BinaryFocalLoss)
 
 
-def test_binary_focal_loss_rejects_classwise_shape():
+def test_binary_focal_loss_rejects_per_output_shape():
     n = _net()
     preds = _tensor_1d(1)
     labels = _tensor_1d(1)
 
     with pytest.raises(ValueError, match=r"Invalid value .* reported_loss_shape"):
-        thor.losses.classification.BinaryFocalLoss(n, preds, labels, 2.0, 0.25, None, thor.losses.LossShape.classwise)
+        thor.losses.classification.BinaryFocalLoss(n, preds, labels, 2.0, 0.25, None, thor.losses.LossShape.per_output)
 
 
 def test_binary_focal_loss_rejects_invalid_gamma_alpha_and_dtype():
@@ -137,13 +141,29 @@ def test_binary_focal_loss_rejects_invalid_gamma_alpha_and_dtype():
         thor.losses.classification.BinaryFocalLoss(n, preds, labels, 2.0, 0.25, thor.DataType.int32)
 
 
+def test_binary_focal_loss_constructs_multidimensional_outputs():
+    n = _net()
+    predictions = thor.Tensor([2, 3, 4], thor.DataType.fp32)
+    labels = thor.Tensor([2, 3, 4], thor.DataType.fp32)
+
+    loss = thor.losses.classification.BinaryFocalLoss(
+        n,
+        predictions,
+        labels,
+        reported_loss_shape=thor.losses.LossShape.raw,
+    )
+    assert loss.get_loss().get_dimensions() == [2, 3, 4]
+
+
 def test_binary_focal_loss_rejects_bad_shapes_and_dtypes():
     n = _net()
     labels = _tensor_1d(1)
 
-    with pytest.raises(ValueError, match=r"predictions must be a 1 dimensional logits tensor of size one"):
-        thor.losses.classification.BinaryFocalLoss(n, _tensor_1d(2), labels)
-    with pytest.raises(ValueError, match=r"labels must be a 1 dimensional tensor of size one"):
+    with pytest.raises(ValueError, match=r"predictions must have at least one nonempty per-example dimension"):
+        thor.losses.classification.BinaryFocalLoss(n, thor.Tensor([0], thor.DataType.fp32), labels)
+    with pytest.raises(ValueError, match=r"labels must have at least one nonempty per-example dimension"):
+        thor.losses.classification.BinaryFocalLoss(n, _tensor_1d(1), thor.Tensor([0], thor.DataType.fp32))
+    with pytest.raises(ValueError, match=r"predictions and labels dimensions must match"):
         thor.losses.classification.BinaryFocalLoss(n, _tensor_1d(1), _tensor_1d(2))
     with pytest.raises(ValueError, match=r"predictions must use fp16 or fp32 dtype"):
         thor.losses.classification.BinaryFocalLoss(n, _tensor_1d(1, thor.DataType.uint8), labels)
@@ -154,7 +174,7 @@ def test_binary_focal_loss_rejects_bad_shapes_and_dtypes():
     "reported_loss_shape",
     [
         thor.losses.LossShape.raw,
-        thor.losses.LossShape.elementwise,
+        thor.losses.LossShape.per_example,
         thor.losses.LossShape.batch,
     ],
 )
@@ -163,6 +183,40 @@ def test_binary_focal_loss_numerical_forward_matches_reference(reported_loss_sha
     alpha = 0.25
     predictions = np.array([[-2.0], [-0.25], [0.0], [1.5]], dtype=np.float32)
     labels = np.array([[0.0], [1.0], [0.0], [1.0]], dtype=np.float32)
+
+    raw_expected = _binary_focal_reference(predictions, labels, gamma, alpha)
+    expected = _reduce_loss(raw_expected, reported_loss_shape)
+    actual = _run_binary_focal_loss_network(predictions, labels, gamma, alpha, reported_loss_shape)
+
+    np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize(
+    "reported_loss_shape",
+    [
+        thor.losses.LossShape.raw,
+        thor.losses.LossShape.per_example,
+        thor.losses.LossShape.batch,
+    ],
+)
+def test_binary_focal_loss_vector_numerical_forward_matches_reference(reported_loss_shape):
+    gamma = 1.5
+    alpha = 0.35
+    predictions = np.array(
+        [
+            [-2.0, -0.25, 0.0, 1.5],
+            [0.75, -1.25, 2.0, -0.5],
+        ],
+        dtype=np.float32,
+    )
+    labels = np.array(
+        [
+            [0.0, 1.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
 
     raw_expected = _binary_focal_reference(predictions, labels, gamma, alpha)
     expected = _reduce_loss(raw_expected, reported_loss_shape)

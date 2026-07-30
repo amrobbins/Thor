@@ -81,7 +81,7 @@ TEST(LossShaper, NumericalBatchFp16) {
     }
 }
 
-TEST(LossShaper, NumericalElementWiseFp32) {
+TEST(LossShaper, NumericalPerExampleFp32) {
     srand(time(NULL));
 
     for (uint32_t i = 0; i < 10; ++i) {
@@ -96,16 +96,16 @@ TEST(LossShaper, NumericalElementWiseFp32) {
         const DataType dataType = DataType::FP32;
 
         Tensor rawLossCpu(cpuPlacement, TensorDescriptor(dataType, dimensions));
-        Tensor elementwiseLossCpu(cpuPlacement, TensorDescriptor(dataType, reducedDimensions));
+        Tensor perExampleLossCpu(cpuPlacement, TensorDescriptor(dataType, reducedDimensions));
 
         float *rawLossCpuMem = (float *)rawLossCpu.getMemPtr();
-        float *elementwiseLossCpuMem = (float *)elementwiseLossCpu.getMemPtr();
+        float *perExampleLossCpuMem = (float *)perExampleLossCpu.getMemPtr();
         for (uint32_t b = 0; b < dimensions[0]; ++b) {
-            elementwiseLossCpuMem[b] = 0.0f;
+            perExampleLossCpuMem[b] = 0.0f;
             for (uint32_t c = 0; c < dimensions[1]; ++c) {
                 float val = (rand() % 1000) / 250.0f;
                 rawLossCpuMem[b * dimensions[1] + c] = val;
-                elementwiseLossCpuMem[b] += val;
+                perExampleLossCpuMem[b] += val;
             }
         }
 
@@ -114,7 +114,7 @@ TEST(LossShaper, NumericalElementWiseFp32) {
         layers.push_back(lossInput);
         shared_ptr<NoOpLayer> noOpLayer1 = make_shared<NoOpLayer>();
         layers.push_back(noOpLayer1);
-        shared_ptr<LossShaper> lossShaper = make_shared<LossShaper>(LossShaper::OutputLossType::ELEMENTWISE);
+        shared_ptr<LossShaper> lossShaper = make_shared<LossShaper>(LossShaper::OutputLossType::PER_EXAMPLE);
         layers.push_back(lossShaper);
         shared_ptr<NoOpLayer> noOpLayer2 = make_shared<NoOpLayer>();
         layers.push_back(noOpLayer2);
@@ -135,17 +135,17 @@ TEST(LossShaper, NumericalElementWiseFp32) {
 
         // Network is runnable here
         lossInput->forward(rawLossCpu, false);
-        Tensor elementwiseLossGpu_h(cpuPlacement, TensorDescriptor(dataType, reducedDimensions));
+        Tensor perExampleLossGpu_h(cpuPlacement, TensorDescriptor(dataType, reducedDimensions));
         stream.waitEvent(lossOutput->getOutputReadyEvent());
-        elementwiseLossGpu_h.copyFromAsync(lossOutput->getFeatureOutput().value(), stream);
+        perExampleLossGpu_h.copyFromAsync(lossOutput->getFeatureOutput().value(), stream);
 
         stream.waitEvent(lossOutput->getOutputReadyEvent());
         stream.synchronize();
 
         float thresh = 0.01f;
-        float *elementwiseLossGpuMem_h = ((float *)elementwiseLossGpu_h.getMemPtr());
+        float *perExampleLossGpuMem_h = ((float *)perExampleLossGpu_h.getMemPtr());
         for (uint32_t e = 0; e < dimensions[0]; ++e) {
-            float diff = elementwiseLossCpuMem[e] - elementwiseLossGpuMem_h[e];
+            float diff = perExampleLossCpuMem[e] - perExampleLossGpuMem_h[e];
             ASSERT_LT(abs(diff), thresh);
         }
 
@@ -153,7 +153,7 @@ TEST(LossShaper, NumericalElementWiseFp32) {
     }
 }
 
-TEST(LossShaper, NumericalClassWiseFp32) {
+TEST(LossShaper, NumericalPerOutputFp32) {
     srand(time(NULL));
 
     for (uint32_t i = 0; i < 10; ++i) {
@@ -168,18 +168,18 @@ TEST(LossShaper, NumericalClassWiseFp32) {
         const DataType dataType = DataType::FP32;
 
         Tensor rawLossCpu(cpuPlacement, TensorDescriptor(dataType, dimensions));
-        Tensor classwiseLossCpu(cpuPlacement, TensorDescriptor(dataType, reducedDimensions));
+        Tensor perOutputLossCpu(cpuPlacement, TensorDescriptor(dataType, reducedDimensions));
 
         float *rawLossCpuMem = (float *)rawLossCpu.getMemPtr();
-        float *classwiseLossCpuMem = (float *)classwiseLossCpu.getMemPtr();
+        float *perOutputLossCpuMem = (float *)perOutputLossCpu.getMemPtr();
         for (uint32_t c = 0; c < dimensions[1]; ++c) {
-            classwiseLossCpuMem[c] = 0.0f;
+            perOutputLossCpuMem[c] = 0.0f;
             for (uint32_t b = 0; b < dimensions[0]; ++b) {
                 float val = (rand() % 1000) / 250.0f;
                 rawLossCpuMem[b * dimensions[1] + c] = val;
-                classwiseLossCpuMem[c] += val;
+                perOutputLossCpuMem[c] += val;
             }
-            classwiseLossCpuMem[c] /= dimensions[0];
+            perOutputLossCpuMem[c] /= dimensions[0];
         }
 
         vector<shared_ptr<Layer>> layers;
@@ -187,7 +187,7 @@ TEST(LossShaper, NumericalClassWiseFp32) {
         layers.push_back(lossInput);
         shared_ptr<NoOpLayer> noOpLayer1 = make_shared<NoOpLayer>();
         layers.push_back(noOpLayer1);
-        shared_ptr<LossShaper> lossShaper = make_shared<LossShaper>(LossShaper::OutputLossType::CLASSWISE);
+        shared_ptr<LossShaper> lossShaper = make_shared<LossShaper>(LossShaper::OutputLossType::PER_OUTPUT);
         layers.push_back(lossShaper);
         shared_ptr<NoOpLayer> noOpLayer2 = make_shared<NoOpLayer>();
         layers.push_back(noOpLayer2);
@@ -208,17 +208,17 @@ TEST(LossShaper, NumericalClassWiseFp32) {
 
         // Network is runnable here
         lossInput->forward(rawLossCpu, false);
-        Tensor classwiseLossGpu_h(cpuPlacement, TensorDescriptor(dataType, reducedDimensions));
+        Tensor perOutputLossGpu_h(cpuPlacement, TensorDescriptor(dataType, reducedDimensions));
         stream.waitEvent(lossOutput->getOutputReadyEvent());
-        classwiseLossGpu_h.copyFromAsync(lossOutput->getFeatureOutput().value(), stream);
+        perOutputLossGpu_h.copyFromAsync(lossOutput->getFeatureOutput().value(), stream);
 
         stream.waitEvent(lossOutput->getOutputReadyEvent());
         stream.synchronize();
 
         float thresh = 0.01f;
-        float *classwiseLossGpuMem_h = ((float *)classwiseLossGpu_h.getMemPtr());
+        float *perOutputLossGpuMem_h = ((float *)perOutputLossGpu_h.getMemPtr());
         for (uint32_t c = 0; c < dimensions[1]; ++c) {
-            float diff = classwiseLossCpuMem[c] - classwiseLossGpuMem_h[c];
+            float diff = perOutputLossCpuMem[c] - perOutputLossGpuMem_h[c];
             ASSERT_LT(abs(diff), thresh);
         }
 
@@ -226,11 +226,11 @@ TEST(LossShaper, NumericalClassWiseFp32) {
     }
 }
 
-TEST(LossShaper, NumericalClassWiseRankThreeUsesFlattenedNonBatchLayout) {
+TEST(LossShaper, NumericalPerOutputRankThreePreservesNonBatchLayout) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
     const vector<uint64_t> inputDimensions = {3, 2, 2};
-    const vector<uint64_t> outputDimensions = {1, 4};
+    const vector<uint64_t> outputDimensions = {1, 2, 2};
 
     Tensor inputCpu(cpuPlacement, TensorDescriptor(DataType::FP32, inputDimensions));
     float* input = inputCpu.getMemPtr<float>();
@@ -241,7 +241,7 @@ TEST(LossShaper, NumericalClassWiseRankThreeUsesFlattenedNonBatchLayout) {
     vector<shared_ptr<Layer>> layers;
     auto lossInput = make_shared<NetworkInput>(gpuPlacement, DataType::FP32, inputDimensions);
     layers.push_back(lossInput);
-    auto lossShaper = make_shared<LossShaper>(LossShaper::OutputLossType::CLASSWISE);
+    auto lossShaper = make_shared<LossShaper>(LossShaper::OutputLossType::PER_OUTPUT);
     layers.push_back(lossShaper);
     auto lossOutput = make_shared<NetworkOutput>(gpuPlacement);
     layers.push_back(lossOutput);

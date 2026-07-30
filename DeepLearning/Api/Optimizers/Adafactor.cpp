@@ -195,7 +195,8 @@ vector<Event> Adafactor::initialize(shared_ptr<ThorImplementation::Optimizer> ph
             THOR_THROW_IF_FALSE(sisterSelected->getParameter("column_second_moment")->getStorage().has_value());
             rowSecondMoment.copyFromAsync(sisterSelected->getParameter("row_second_moment")->getStorage().value(), stream);
             columnSecondMoment.copyFromAsync(sisterSelected->getParameter("column_second_moment")->getStorage().value(), stream);
-        } else if (rowSecondMomentFile.has_value() || columnSecondMomentFile.has_value()) {
+        } else if ((rowSecondMomentFile.has_value() || columnSecondMomentFile.has_value()) &&
+                   !shouldInitializeStateAsNew()) {
             THOR_THROW_IF_FALSE(archiveReader != nullptr);
             THOR_THROW_IF_FALSE(rowSecondMomentFile.has_value());
             THOR_THROW_IF_FALSE(columnSecondMomentFile.has_value());
@@ -224,7 +225,7 @@ vector<Event> Adafactor::initialize(shared_ptr<ThorImplementation::Optimizer> ph
                 stream.waitEvent(sisterOptimizerLoadedEvent.value());
             THOR_THROW_IF_FALSE(sisterSelected->getParameter("second_moment")->getStorage().has_value());
             secondMoment.copyFromAsync(sisterSelected->getParameter("second_moment")->getStorage().value(), stream);
-        } else if (secondMomentFile.has_value()) {
+        } else if (secondMomentFile.has_value() && !shouldInitializeStateAsNew()) {
             THOR_THROW_IF_FALSE(archiveReader != nullptr);
             archiveReader->registerReadRequest(secondMomentFile.value(), secondMoment);
 

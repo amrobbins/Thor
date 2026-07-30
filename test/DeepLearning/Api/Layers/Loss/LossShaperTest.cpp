@@ -1,277 +1,90 @@
-// #include "DeepLearning/Api/Layers/Loss/LossShaper.h"
-// #include "DeepLearning/Api/Network/Network.h"
-// #include "DeepLearning/Api/Network/PlacedNetwork.h"
-// #include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
-//
-// #include "gtest/gtest.h"
-//
-// #include <stdio.h>
-// #include <memory>
-//
-// using namespace Thor;
-// using namespace std;
-// using json = nlohmann::json;
-//
-// TEST(LossShaper, Builds) {
-//     srand(time(nullptr));
-//
-//     for (uint32_t i = 0; i < 10; ++i) {
-//         Network network("testNetwork");
-//
-//         vector<uint64_t> dimensions;
-//         dimensions.push_back(2 + (rand() % 1000));
-//         DataType dataType = rand() % 2 ? DataType::FP32 : DataType::FP16;
-//         Tensor lossInput(dataType, dimensions);
-//
-//         LossShaper::Builder lossShaperBuilder = LossShaper::Builder().network(network).lossInput(lossInput);
-//
-//         uint32_t shape = rand() % 3;
-//         ThorImplementation::LossShaper::OutputLossType outputLossType;
-//         if (shape == 0) {
-//             outputLossType = ThorImplementation::LossShaper::OutputLossType::BATCH;
-//             lossShaperBuilder.reportsBatchLoss();
-//         } else if (shape == 1) {
-//             outputLossType = ThorImplementation::LossShaper::OutputLossType::CLASSWISE;
-//             lossShaperBuilder.reportsClasswiseLoss();
-//         } else if (shape == 2) {
-//             outputLossType = ThorImplementation::LossShaper::OutputLossType::ELEMENTWISE;
-//             lossShaperBuilder.reportsElementwiseLoss();
-//         } else {
-//             assert(false);
-//         }
-//         vector<uint64_t> batchDimensions = {1};
-//         vector<uint64_t> classwiseDimensions = {dimensions[0]};
-//         vector<uint64_t> elementwiseDimensions = {1};
-//
-//         LossShaper lossShaper = lossShaperBuilder.build();
-//
-//         ASSERT_TRUE(lossShaper.isInitialized());
-//
-//         std::optional<Tensor> actualLossInput = lossShaper.getLossInput();
-//         ASSERT_TRUE(actualLossInput.has_value());
-//         ASSERT_EQ(actualLossInput.value().getDataType(), dataType);
-//         ASSERT_EQ(actualLossInput.value().getDimensions(), dimensions);
-//
-//         std::optional<Tensor> actualLossOutput = lossShaper.getLossOutput();
-//         ASSERT_TRUE(actualLossOutput.has_value());
-//         ASSERT_EQ(actualLossOutput.value().getDataType(), dataType);
-//         if (outputLossType == ThorImplementation::LossShaper::OutputLossType::BATCH) {
-//             ASSERT_EQ(actualLossOutput.value().getDimensions(), batchDimensions);
-//         } else if (outputLossType == ThorImplementation::LossShaper::OutputLossType::CLASSWISE) {
-//             ASSERT_EQ(actualLossOutput.value().getDimensions(), classwiseDimensions);
-//         } else {
-//             assert(outputLossType == ThorImplementation::LossShaper::OutputLossType::ELEMENTWISE);
-//             ASSERT_EQ(actualLossOutput.value().getDimensions(), elementwiseDimensions);
-//         }
-//
-//         ASSERT_FALSE(actualLossInput.value() == actualLossOutput.value());
-//
-//         ASSERT_TRUE(lossShaper.getLossInput() == lossShaper.getFeatureInput());
-//         ASSERT_TRUE(lossShaper.getLossOutput() == lossShaper.getFeatureOutput());
-//
-//         shared_ptr<Layer> cloneLayer = lossShaper.clone();
-//         LossShaper *clone = dynamic_cast<LossShaper *>(cloneLayer.get());
-//         assert(clone != nullptr);
-//
-//         ASSERT_TRUE(lossShaper.isInitialized());
-//
-//         std::optional<Tensor> cloneLossInput = clone->getLossInput();
-//         ASSERT_TRUE(cloneLossInput.has_value());
-//         ASSERT_EQ(cloneLossInput.value().getDataType(), dataType);
-//         ASSERT_EQ(cloneLossInput.value().getDimensions(), dimensions);
-//
-//         std::optional<Tensor> cloneLossOutput = clone->getLossOutput();
-//         ASSERT_TRUE(cloneLossOutput.has_value());
-//         ASSERT_EQ(cloneLossOutput.value().getDataType(), dataType);
-//         if (outputLossType == ThorImplementation::LossShaper::OutputLossType::BATCH) {
-//             ASSERT_EQ(cloneLossOutput.value().getDimensions(), batchDimensions);
-//         } else if (outputLossType == ThorImplementation::LossShaper::OutputLossType::CLASSWISE) {
-//             ASSERT_EQ(cloneLossOutput.value().getDimensions(), classwiseDimensions);
-//         } else if (outputLossType == ThorImplementation::LossShaper::OutputLossType::ELEMENTWISE) {
-//             ASSERT_EQ(cloneLossOutput.value().getDimensions(), elementwiseDimensions);
-//         }
-//
-//         ASSERT_FALSE(cloneLossInput.value() == cloneLossOutput.value());
-//
-//         ASSERT_TRUE(clone->getLossInput() == clone->getFeatureInput());
-//         ASSERT_TRUE(clone->getLossOutput() == clone->getFeatureOutput());
-//
-//         ASSERT_EQ(lossShaper.getId(), clone->getId());
-//         ASSERT_GT(lossShaper.getId(), 1u);
-//
-//         ASSERT_TRUE(lossShaper == *clone);
-//         ASSERT_FALSE(lossShaper != *clone);
-//         ASSERT_FALSE(lossShaper > *clone);
-//         ASSERT_FALSE(lossShaper < *clone);
-//     }
-// }
-//
-// TEST(LossShaper, SerializeDeserialize) {
-//     srand(time(nullptr));
-//
-//     Network initialNetwork("initialNetwork");
-//     DataType dataType = rand() % 2 ? DataType::FP16 : DataType::FP32;
-//     uint64_t numClasses = (rand() % 100) + 1;
-//     vector<uint64_t> inputDimensions = {numClasses};
-//
-//     NetworkInput networkInput =
-//         NetworkInput::Builder().network(initialNetwork).name("testInput").dimensions(inputDimensions).dataType(dataType).build();
-//
-//     LossShaper::Builder lossShaperBuilder = LossShaper::Builder().network(initialNetwork).lossInput(networkInput.getFeatureOutput());
-//
-//     vector<uint64_t> outputDimensions;
-//     uint32_t outputLossType = rand() % 3;
-//     if (outputLossType == 0) {
-//         lossShaperBuilder.reportsBatchLoss();
-//         outputDimensions = {1UL};
-//     } else if (outputLossType == 1) {
-//         lossShaperBuilder.reportsClasswiseLoss();
-//         outputDimensions = inputDimensions;
-//     } else {
-//         lossShaperBuilder.reportsElementwiseLoss();
-//         outputDimensions = {1UL};
-//     }
-//     LossShaper lossShaper = lossShaperBuilder.build();
-//
-//     NetworkOutput networkOutput = NetworkOutput::Builder()
-//                                       .network(initialNetwork)
-//                                       .name("testOutput")
-//                                       .inputTensor(lossShaper.getFeatureOutput())
-//                                       .dataType(dataType)
-//                                       .build();
-//
-//     ASSERT_TRUE(lossShaper.isInitialized());
-//
-//     Tensor featureInput = lossShaper.getFeatureInput();
-//     Tensor featureOutput = lossShaper.getFeatureOutput();
-//     assert(featureInput == networkInput.getFeatureOutput());
-//
-//     ASSERT_TRUE(lossShaper.getFeatureOutput().has_value());
-//     ASSERT_EQ(lossShaper.getFeatureOutput().value(), featureOutput);
-//
-//     ASSERT_TRUE(lossShaper.getFeatureInput().has_value());
-//     assert(lossShaper.getFeatureInput().value() == featureInput);
-//
-//     ASSERT_EQ(featureInput.getDataType(), dataType);
-//     ASSERT_EQ(featureInput.getDimensions(), inputDimensions);
-//
-//     ASSERT_EQ(featureOutput.getDataType(), dataType);
-//     ASSERT_EQ(featureOutput.getDimensions(), outputDimensions);
-//
-//     // Now stamp the network and test serialization
-//     Stream stream(0);
-//     uint32_t batchSize = 1 + (rand() % 16);
-//     vector<Event> initDoneEvents;
-//     shared_ptr<PlacedNetwork> initialPlacedNetwork = initialNetwork.place(batchSize, initDoneEvents);
-//     ASSERT_TRUE(initialPlacedNetwork != nullptr);
-//     for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
-//         stream.waitEvent(initDoneEvents[i]);
-//     }
-//     initDoneEvents.clear();
-//
-//     // Fetch the layer from the network
-//     ASSERT_EQ(initialPlacedNetwork->getNumStamps(), 1UL);
-//     ThorImplementation::StampedNetwork &stampedNetwork = initialPlacedNetwork->getStampedNetwork(0);
-//
-//     thor_file::TarWriter archiveWriter("testModel");
-//
-//     json lossShaperJ = lossShaper.serialize(archiveWriter, stream);
-//     json networkInputJ = networkInput.serialize(archiveWriter, stream);
-//     json networkOutputJ = networkOutput.serialize(archiveWriter, stream);
-//
-//     // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
-//     Layer *layer = &lossShaper;
-//     json fromLayerJ = layer->serialize(archiveWriter, stream);
-//     ASSERT_EQ(lossShaperJ, fromLayerJ);
-//
-//     // printf("%s\n", networkInputJ.dump(4).c_str());
-//     // printf("%s\n", lossShaperJ.dump(4).c_str());
-//     // printf("%s\n", networkOutputJ.dump(4).c_str());
-//
-//     ASSERT_EQ(lossShaperJ["factory"], "loss");
-//     ASSERT_EQ(lossShaperJ["version"], "1.0.0");
-//     ASSERT_EQ(lossShaperJ["layer_type"], "loss_shaper");
-//
-//     ASSERT_EQ(lossShaperJ.at("loss_shape").get<Loss::LossShape>() == Loss::LossShape::BATCH, outputLossType == 0);
-//     ASSERT_EQ(lossShaperJ.at("loss_shape").get<Loss::LossShape>() == Loss::LossShape::CLASSWISE, outputLossType == 1);
-//     ASSERT_EQ(lossShaperJ.at("loss_shape").get<Loss::LossShape>() == Loss::LossShape::ELEMENTWISE, outputLossType == 2);
-//
-//     EXPECT_TRUE(lossShaperJ.contains("loss_input"));
-//     EXPECT_TRUE(lossShaperJ.contains("loss_output"));
-//     EXPECT_TRUE(lossShaperJ.contains("loss_shape"));
-//
-//     const json &lossInput = lossShaperJ.at("loss_input");
-//     ASSERT_TRUE(lossInput.is_object());
-//     ASSERT_TRUE(lossInput.at("data_type").is_string());
-//     string dataTypeString = dataType == DataType::FP16 ? "fp16" : "fp32";
-//     EXPECT_EQ(lossInput.at("data_type").get<string>(), dataTypeString);
-//     ASSERT_TRUE(lossInput.at("dimensions").is_array());
-//     ASSERT_EQ(lossInput.at("dimensions").get<vector<uint64_t>>(), inputDimensions);
-//     ASSERT_TRUE(lossInput.at("id").is_number_integer());
-//
-//     const auto &lossOutput = lossShaperJ.at("loss_output");
-//     ASSERT_TRUE(lossOutput.is_object());
-//     ASSERT_TRUE(lossOutput.at("data_type").is_string());
-//     EXPECT_EQ(lossOutput.at("data_type").get<string>(), dataTypeString);
-//     ASSERT_TRUE(lossOutput.at("dimensions").is_array());
-//     ASSERT_EQ(lossOutput.at("dimensions").get<vector<uint64_t>>(), outputDimensions);
-//     ASSERT_TRUE(lossOutput.at("id").is_number_integer());
-//
-//     ////////////////////////////
-//     // Deserialize
-//     ////////////////////////////
-//     // Verify that the layer gets added to the network and that its weights are set to the correct values
-//     Network newNetwork("newNetwork");
-//
-//     // Write a dummy file with data into the archive since none of the layers wrote anything into it (no weights)
-//     ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
-//     ThorImplementation::TensorDescriptor descriptor(ThorImplementation::DataType::UINT8, {4});
-//     ThorImplementation::Tensor dummyData(cpuPlacement, descriptor);
-//     archiveWriter.addArchiveFile("dummy", dummyData);
-//
-//     archiveWriter.createArchive("/tmp/", true);
-//     shared_ptr<thor_file::TarReader> archiveReader = make_shared<thor_file::TarReader>("testModel", "/tmp/");
-//
-//     Layer::deserialize(archiveReader, networkInputJ, &newNetwork);
-//     Layer::deserialize(archiveReader, lossShaperJ, &newNetwork);
-//     Layer::deserialize(archiveReader, networkOutputJ, &newNetwork);
-//
-//     batchSize = 1 + (rand() % 16);
-//     shared_ptr<PlacedNetwork> newPlacedNetwork = newNetwork.place(batchSize, initDoneEvents);
-//     ASSERT_TRUE(newPlacedNetwork != nullptr);
-//     for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
-//         stream.waitEvent(initDoneEvents[i]);
-//     }
-//     initDoneEvents.clear();
-//
-//     ASSERT_EQ(newPlacedNetwork->getNumStamps(), 1UL);
-//     ThorImplementation::StampedNetwork &newStamp = newPlacedNetwork->getStampedNetwork(0);
-//
-//     vector<shared_ptr<ThorImplementation::Layer>> otherLayers = newStamp.getOtherLayers();
-//     ASSERT_EQ(otherLayers.size(), 1U);
-//     shared_ptr<ThorImplementation::LossShaper> stampedLossShaper;
-//     stampedLossShaper = dynamic_pointer_cast<ThorImplementation::LossShaper>(otherLayers[0]);
-//     ASSERT_NE(stampedLossShaper, nullptr);
-//
-//     vector<shared_ptr<ThorImplementation::NetworkInput>> inputLayers = newStamp.getInputs();
-//     ASSERT_EQ(inputLayers.size(), 1U);
-//     shared_ptr<ThorImplementation::NetworkInput> stampedInput = dynamic_pointer_cast<ThorImplementation::NetworkInput>(inputLayers[0]);
-//     ASSERT_NE(inputLayers[0], nullptr);
-//
-//     vector<shared_ptr<ThorImplementation::NetworkOutput>> outputLayers = newStamp.getOutputs();
-//     ASSERT_EQ(outputLayers.size(), 1U);
-//     shared_ptr<ThorImplementation::NetworkOutput> stampedOutput =
-//     dynamic_pointer_cast<ThorImplementation::NetworkOutput>(outputLayers[0]); ASSERT_NE(outputLayers[0], nullptr);
-//
-//     ASSERT_TRUE(stampedInput->getFeatureOutput().has_value());
-//     ASSERT_TRUE(stampedLossShaper->getFeatureOutput().has_value());
-//     ASSERT_TRUE(stampedOutput->getFeatureOutput().has_value());
-//     ASSERT_EQ(stampedInput->getFeatureOutput().value(), stampedLossShaper->getFeatureInput().value());
-//     ASSERT_EQ(stampedLossShaper->getFeatureOutput().value(), stampedOutput->getFeatureInput().value());
-//
-//     ASSERT_EQ(stampedInput->getFeatureOutput().value(), stampedLossShaper->getFeatureInput().value());
-//     ASSERT_EQ(stampedLossShaper->getFeatureOutput().value(), stampedOutput->getFeatureInput().value());
-//
-//     filesystem::remove("/tmp/testModel.thor.tar");
-// }
-#include <optional>
+#include "DeepLearning/Api/Layers/Loss/LossShaper.h"
+#include "DeepLearning/Api/Tensor/Tensor.h"
+#include "DeepLearning/Implementation/Layers/Loss/LossShaper.h"
+
+#include "gtest/gtest.h"
+
+#include <cstdint>
+#include <stdexcept>
+#include <vector>
+
+namespace Api = Thor;
+namespace Impl = ThorImplementation;
+
+TEST(LossShaperShapeContract, ApiPerOutputReportingPreservesEveryNonBatchDimension) {
+    Api::Tensor rawLoss(Api::DataType::FP32, {2, 3, 4});
+
+    Api::LossShaper batch = Api::LossShaper::Builder().lossInput(rawLoss).reportsBatchLoss().construct();
+    Api::LossShaper perExample = Api::LossShaper::Builder().lossInput(rawLoss).reportsPerExampleLoss().construct();
+    Api::LossShaper perOutput = Api::LossShaper::Builder().lossInput(rawLoss).reportsPerOutputLoss().construct();
+
+    EXPECT_EQ(batch.getLossOutput().getDimensions(), std::vector<uint64_t>({1}));
+    EXPECT_EQ(perExample.getLossOutput().getDimensions(), std::vector<uint64_t>({1}));
+    EXPECT_EQ(perOutput.getLossOutput().getDimensions(), std::vector<uint64_t>({2, 3, 4}));
+}
+
+TEST(LossShaperShapeContract, ImplementationDimensionsMatchReductionSemantics) {
+    const std::vector<uint64_t> rawLossDimensions = {5, 2, 3, 4};
+
+    EXPECT_EQ(Impl::LossShaper::getOutputDimensions(rawLossDimensions, Impl::LossShaper::OutputLossType::BATCH),
+              std::vector<uint64_t>({1, 1}));
+    EXPECT_EQ(Impl::LossShaper::getOutputDimensions(rawLossDimensions, Impl::LossShaper::OutputLossType::PER_EXAMPLE),
+              std::vector<uint64_t>({5, 1}));
+    EXPECT_EQ(Impl::LossShaper::getOutputDimensions(rawLossDimensions, Impl::LossShaper::OutputLossType::PER_OUTPUT),
+              std::vector<uint64_t>({1, 2, 3, 4}));
+}
+
+TEST(LossShaperShapeContract, CubReductionPlansUseOriginalTensorAxes) {
+    const std::vector<uint64_t> rawLossDimensions = {5, 2, 3, 4};
+
+    EXPECT_EQ(Impl::LossShaper::getReductionAxes(rawLossDimensions, Impl::LossShaper::OutputLossType::BATCH),
+              std::vector<uint32_t>({0, 1, 2, 3}));
+    EXPECT_EQ(Impl::LossShaper::getReductionAxes(rawLossDimensions, Impl::LossShaper::OutputLossType::PER_EXAMPLE),
+              std::vector<uint32_t>({1, 2, 3}));
+    EXPECT_EQ(Impl::LossShaper::getReductionAxes(rawLossDimensions, Impl::LossShaper::OutputLossType::PER_OUTPUT),
+              std::vector<uint32_t>({0}));
+
+    EXPECT_FLOAT_EQ(Impl::LossShaper::getReductionOutputScale(rawLossDimensions,
+                                                               Impl::LossShaper::OutputLossType::BATCH),
+                    0.2f);
+    EXPECT_FLOAT_EQ(Impl::LossShaper::getReductionOutputScale(rawLossDimensions,
+                                                               Impl::LossShaper::OutputLossType::PER_EXAMPLE),
+                    1.0f);
+    EXPECT_FLOAT_EQ(Impl::LossShaper::getReductionOutputScale(rawLossDimensions,
+                                                               Impl::LossShaper::OutputLossType::PER_OUTPUT),
+                    0.2f);
+}
+
+TEST(LossShaperShapeContract, SerializesOnlyCanonicalShapeNames) {
+    nlohmann::json apiNone = Api::Loss::LossShape::NONE;
+    nlohmann::json apiPerExample = Api::Loss::LossShape::PER_EXAMPLE;
+    nlohmann::json apiPerOutput = Api::Loss::LossShape::PER_OUTPUT;
+    nlohmann::json implPerExample = Impl::LossShaper::OutputLossType::PER_EXAMPLE;
+    nlohmann::json implPerOutput = Impl::LossShaper::OutputLossType::PER_OUTPUT;
+
+    EXPECT_EQ(apiNone, "none");
+    EXPECT_EQ(apiPerExample, "per_example");
+    EXPECT_EQ(apiPerOutput, "per_output");
+    EXPECT_EQ(implPerExample, "per_example");
+    EXPECT_EQ(implPerOutput, "per_output");
+
+    EXPECT_EQ(apiNone.get<Api::Loss::LossShape>(), Api::Loss::LossShape::NONE);
+    EXPECT_EQ(apiPerExample.get<Api::Loss::LossShape>(), Api::Loss::LossShape::PER_EXAMPLE);
+    EXPECT_EQ(apiPerOutput.get<Api::Loss::LossShape>(), Api::Loss::LossShape::PER_OUTPUT);
+    EXPECT_EQ(implPerExample.get<Impl::LossShaper::OutputLossType>(), Impl::LossShaper::OutputLossType::PER_EXAMPLE);
+    EXPECT_EQ(implPerOutput.get<Impl::LossShaper::OutputLossType>(), Impl::LossShaper::OutputLossType::PER_OUTPUT);
+}
+
+TEST(LossShaperShapeContract, RejectsRemovedSerializedShapeNames) {
+    EXPECT_THROW(nlohmann::json("elementwise").get<Api::Loss::LossShape>(), std::invalid_argument);
+    EXPECT_THROW(nlohmann::json("classwise").get<Api::Loss::LossShape>(), std::invalid_argument);
+    EXPECT_THROW(nlohmann::json("elementwise").get<Impl::LossShaper::OutputLossType>(), std::invalid_argument);
+    EXPECT_THROW(nlohmann::json("classwise").get<Impl::LossShaper::OutputLossType>(), std::invalid_argument);
+}
+
+TEST(LossShaperShapeContract, VectorPerOutputReportingRetainsExistingShape) {
+    Api::Tensor rawLoss(Api::DataType::FP32, {100});
+    Api::LossShaper perOutput = Api::LossShaper::Builder().lossInput(rawLoss).reportsPerOutputLoss().construct();
+
+    EXPECT_EQ(perOutput.getLossOutput().getDimensions(), std::vector<uint64_t>({100}));
+}

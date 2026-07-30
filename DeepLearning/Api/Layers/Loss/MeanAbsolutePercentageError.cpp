@@ -17,23 +17,7 @@ void MAPE::buildSupportLayersAndAddToNetwork() {
 
     lossShaperInput = meanAbsolutePercentageError.getLoss();
 
-    if (lossShape == LossShape::BATCH) {
-        LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(lossShaperInput).reportsBatchLoss().build();
-        // Replace the output on the compound layer to be the output of the last stage
-        // i.e. tunnel the actual input to actual output of the compound layer,
-        // Network uses single layers, user uses compound layer.
-        lossTensor = lossShaper.getLossOutput();
-    } else if (lossShape == LossShape::ELEMENTWISE) {
-        LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(lossShaperInput).reportsElementwiseLoss().build();
-        lossTensor = lossShaper.getLossOutput();
-    } else if (lossShape == LossShape::CLASSWISE) {
-        LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(lossShaperInput).reportsClasswiseLoss().build();
-        lossTensor = lossShaper.getLossOutput();
-    } else {
-        // No loss shaper needed
-        THOR_THROW_IF_FALSE(lossShape == LossShape::RAW);
-        lossTensor = lossShaperInput;
-    }
+    finalizeLossReporting();
 }
 
 json MAPE::architectureJson() const {

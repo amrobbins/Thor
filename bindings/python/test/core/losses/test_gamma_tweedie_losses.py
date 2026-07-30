@@ -25,11 +25,11 @@ def _cpu_tensor(values: np.ndarray, dtype: thor.DataType) -> thor.physical.Physi
 def _reduce_loss(raw: np.ndarray, reported_loss_shape: thor.losses.LossShape) -> np.ndarray:
     if reported_loss_shape == thor.losses.LossShape.raw:
         return raw
-    if reported_loss_shape == thor.losses.LossShape.elementwise:
+    if reported_loss_shape == thor.losses.LossShape.per_example:
         return np.sum(raw, axis=1, keepdims=True)
 
     batch_size = raw.shape[0]
-    if reported_loss_shape == thor.losses.LossShape.classwise:
+    if reported_loss_shape == thor.losses.LossShape.per_output:
         return (np.sum(raw, axis=0, keepdims=True) / batch_size).astype(np.float32)
     if reported_loss_shape == thor.losses.LossShape.batch:
         return np.array([[np.sum(raw) / batch_size]], dtype=np.float32)
@@ -152,7 +152,7 @@ def test_gamma_nll_loss_constructs_with_options_loss_dtype_and_shape():
         labels,
         1.0e-5,
         thor.DataType.fp32,
-        thor.losses.LossShape.elementwise,
+        thor.losses.LossShape.per_example,
     )
     assert isinstance(loss, thor.losses.distribution.GammaNLLLoss)
     assert loss.eps == pytest.approx(1.0e-5)
@@ -181,7 +181,7 @@ def test_tweedie_loss_constructs_with_options_loss_dtype_and_shape():
         2.0,
         1.0e-5,
         thor.DataType.fp32,
-        thor.losses.LossShape.elementwise,
+        thor.losses.LossShape.per_example,
     )
     assert isinstance(loss, thor.losses.distribution.TweedieLoss)
     assert loss.power == pytest.approx(2.0)
@@ -189,7 +189,7 @@ def test_tweedie_loss_constructs_with_options_loss_dtype_and_shape():
 
 
 @pytest.mark.parametrize("loss_class", [thor.losses.distribution.GammaNLLLoss, thor.losses.distribution.TweedieLoss])
-@pytest.mark.parametrize("shape", ["batch", "classwise", "elementwise", "raw"])
+@pytest.mark.parametrize("shape", ["batch", "per_output", "per_example", "raw"])
 def test_gamma_tweedie_loss_reported_loss_shape_variants_construct(loss_class, shape):
     n = _net(f"test_net_{loss_class.__name__}_{shape}")
     preds = _tensor_1d(3)
@@ -214,13 +214,13 @@ def test_gamma_tweedie_loss_rejects_mismatched_labels(loss_class):
 
 
 @pytest.mark.parametrize("loss_class", [thor.losses.distribution.GammaNLLLoss, thor.losses.distribution.TweedieLoss])
-def test_gamma_tweedie_loss_rejects_predictions_not_1d(loss_class):
-    n = _net(f"test_net_{loss_class.__name__}_not_1d")
-    preds = thor.Tensor([1, 1], thor.DataType.fp32)
-    labels = thor.Tensor([1, 1], thor.DataType.fp32)
+def test_gamma_tweedie_loss_accepts_multidimensional_predictions(loss_class):
+    n = _net(f"test_net_{loss_class.__name__}_multidimensional")
+    preds = thor.Tensor([2, 3, 4], thor.DataType.fp32)
+    labels = thor.Tensor([2, 3, 4], thor.DataType.fp32)
 
-    with pytest.raises(ValueError, match=r"predictions must be a 1 dimensional mean tensor"):
-        loss_class(n, preds, labels)
+    loss = loss_class(n, preds, labels, reported_loss_shape=thor.losses.LossShape.raw)
+    assert loss.get_loss().get_dimensions() == [2, 3, 4]
 
 
 @pytest.mark.parametrize("loss_class", [thor.losses.distribution.GammaNLLLoss, thor.losses.distribution.TweedieLoss])
@@ -273,8 +273,8 @@ def test_tweedie_loss_rejects_non_finite_power():
     "reported_loss_shape",
     [
         thor.losses.LossShape.raw,
-        thor.losses.LossShape.elementwise,
-        thor.losses.LossShape.classwise,
+        thor.losses.LossShape.per_example,
+        thor.losses.LossShape.per_output,
         thor.losses.LossShape.batch,
     ],
 )
@@ -307,8 +307,8 @@ def test_gamma_nll_loss_numerical_forward_matches_reference(reported_loss_shape)
     "reported_loss_shape",
     [
         thor.losses.LossShape.raw,
-        thor.losses.LossShape.elementwise,
-        thor.losses.LossShape.classwise,
+        thor.losses.LossShape.per_example,
+        thor.losses.LossShape.per_output,
         thor.losses.LossShape.batch,
     ],
 )
@@ -348,7 +348,7 @@ def test_gamma_nll_loss_save_load_round_trip_serializes_support_layers(tmp_path)
         labels_input.get_feature_output(),
         1.0e-5,
         dtype,
-        thor.losses.LossShape.elementwise,
+        thor.losses.LossShape.per_example,
     )
     thor.layers.NetworkOutput(n, "loss", loss.get_loss(), dtype)
 
@@ -377,7 +377,7 @@ def test_tweedie_loss_save_load_round_trip_serializes_support_layers(tmp_path):
         1.5,
         1.0e-5,
         dtype,
-        thor.losses.LossShape.elementwise,
+        thor.losses.LossShape.per_example,
     )
     thor.layers.NetworkOutput(n, "loss", loss.get_loss(), dtype)
 

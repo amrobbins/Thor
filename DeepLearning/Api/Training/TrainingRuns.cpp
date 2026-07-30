@@ -606,6 +606,19 @@ void appendNameIfMissing(std::vector<std::string>& names, const std::string& nam
     }
 }
 
+std::string inputNameBoundaryDescription(const std::vector<std::string>& names) {
+    std::ostringstream out;
+    out << "[";
+    for (size_t i = 0; i < names.size(); ++i) {
+        if (i != 0) {
+            out << ",";
+        }
+        out << "'" << names[i] << "'";
+    }
+    out << "]";
+    return out.str();
+}
+
 struct SavedNetworkArtifactRef {
     std::filesystem::path directory;
     std::string networkName;
@@ -736,6 +749,7 @@ struct ResolvedEnsembleLoss {
     std::string predictionOutputName{};
     std::string targetInputName{};
     std::optional<std::string> weightInputName{};
+    std::vector<std::string> requiredInputNames{};
     std::string lossType{};
     double lossWeight = 1.0;
     std::optional<double> quantile{};
@@ -746,6 +760,7 @@ struct ResolvedEnsembleMetric {
     std::string predictionOutputName{};
     std::optional<std::string> targetInputName{};
     std::optional<std::string> inputSourceName{};
+    std::vector<std::string> requiredInputNames{};
     std::string metricType{};
 };
 
@@ -772,6 +787,9 @@ bool trainingRunsReportableLossesCompatible(const NetworkLossReference& lhs, con
     if (lhs.weightInputName != rhs.weightInputName) {
         return false;
     }
+    if (lhs.requiredInputNames != rhs.requiredInputNames) {
+        return false;
+    }
     if (lhs.lossLayerType != rhs.lossLayerType) {
         return false;
     }
@@ -794,6 +812,7 @@ std::string trainingRunsReportableLossDescription(const NetworkLossReference& re
     if (reference.quantile.has_value()) {
         out << ", quantile=" << *reference.quantile;
     }
+    out << ", required_input_names=" << inputNameBoundaryDescription(reference.requiredInputNames);
     out << ", loss_layer_type='" << reference.lossLayerType << "'";
     out << ", loss_weight=" << reference.lossWeight;
     return out.str();
@@ -866,6 +885,7 @@ std::vector<ResolvedEnsembleLoss> resolveTrainingRunsReportedLosses(
         loss.predictionOutputName = reference.predictionOutputName;
         loss.targetInputName = reference.targetInputName;
         loss.weightInputName = reference.weightInputName;
+        loss.requiredInputNames = reference.requiredInputNames;
         loss.lossType = reference.lossLayerType;
         loss.lossWeight = reference.lossWeight;
         loss.quantile = reference.quantile;
@@ -877,7 +897,7 @@ std::vector<ResolvedEnsembleLoss> resolveTrainingRunsReportedLosses(
 bool trainingRunsReportableMetricsCompatible(const NetworkMetricReference& lhs, const NetworkMetricReference& rhs) {
     return lhs.metricName == rhs.metricName && lhs.predictionOutputName == rhs.predictionOutputName &&
            lhs.targetInputName == rhs.targetInputName && lhs.inputSourceName == rhs.inputSourceName &&
-           lhs.metricLayerType == rhs.metricLayerType;
+           lhs.requiredInputNames == rhs.requiredInputNames && lhs.metricLayerType == rhs.metricLayerType;
 }
 
 std::string trainingRunsReportableMetricDescription(const NetworkMetricReference& reference) {
@@ -892,6 +912,7 @@ std::string trainingRunsReportableMetricDescription(const NetworkMetricReference
     if (reference.inputSourceName.has_value()) {
         out << ", input_source_name='" << *reference.inputSourceName << "'";
     }
+    out << ", required_input_names=" << inputNameBoundaryDescription(reference.requiredInputNames);
     out << ", metric_layer_type='" << reference.metricLayerType << "'";
     return out.str();
 }
@@ -962,6 +983,7 @@ std::vector<ResolvedEnsembleMetric> resolveTrainingRunsReportedMetrics(
         metric.predictionOutputName = reference.predictionOutputName;
         metric.targetInputName = reference.targetInputName;
         metric.inputSourceName = reference.inputSourceName;
+        metric.requiredInputNames = reference.requiredInputNames;
         metric.metricType = reference.metricLayerType;
         resolved.push_back(std::move(metric));
     }
@@ -978,6 +1000,10 @@ bool trainingRunsLossCanParticipateInComposedEvaluation(const ResolvedEnsembleLo
 }
 
 bool trainingRunsMetricCanParticipateInComposedEvaluation(const ResolvedEnsembleMetric& metric) {
+    // A composed metric must have an explicit semantic cut point: either an
+    // ensemble-averaged prediction or a direct source input. The required input
+    // boundary supplies auxiliary values but must not by itself authorize cloning
+    // an arbitrary hidden member subgraph from the reference model.
     return !metric.predictionOutputName.empty() || metric.inputSourceName.has_value();
 }
 
@@ -2153,6 +2179,7 @@ void TrainingRuns::validateReportedLosses() const {
                 reference.predictionOutputName = resolved.predictionOutputName;
                 reference.targetInputName = resolved.targetInputName;
                 reference.weightInputName = resolved.weightInputName;
+                reference.requiredInputNames = resolved.requiredInputNames;
                 reference.lossLayerType = resolved.lossType;
                 reference.lossWeight = resolved.lossWeight;
                 reference.quantile = resolved.quantile;
@@ -2161,6 +2188,7 @@ void TrainingRuns::validateReportedLosses() const {
                 memberReference.predictionOutputName = memberResolvedIt->predictionOutputName;
                 memberReference.targetInputName = memberResolvedIt->targetInputName;
                 memberReference.weightInputName = memberResolvedIt->weightInputName;
+                memberReference.requiredInputNames = memberResolvedIt->requiredInputNames;
                 memberReference.lossLayerType = memberResolvedIt->lossType;
                 memberReference.lossWeight = memberResolvedIt->lossWeight;
                 memberReference.quantile = memberResolvedIt->quantile;
@@ -2341,12 +2369,14 @@ void TrainingRuns::validateReportedMetrics() const {
                 reference.predictionOutputName = resolved.predictionOutputName;
                 reference.targetInputName = resolved.targetInputName;
                 reference.inputSourceName = resolved.inputSourceName;
+                reference.requiredInputNames = resolved.requiredInputNames;
                 reference.metricLayerType = resolved.metricType;
                 NetworkMetricReference memberReference;
                 memberReference.metricName = memberResolvedIt->metricName;
                 memberReference.predictionOutputName = memberResolvedIt->predictionOutputName;
                 memberReference.targetInputName = memberResolvedIt->targetInputName;
                 memberReference.inputSourceName = memberResolvedIt->inputSourceName;
+                memberReference.requiredInputNames = memberResolvedIt->requiredInputNames;
                 memberReference.metricLayerType = memberResolvedIt->metricType;
                 if (!trainingRunsReportableMetricsCompatible(reference, memberReference)) {
                     throw std::runtime_error(memberContext + " resolved graph metric '" + resolved.metricName +
@@ -2771,7 +2801,8 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
 
     std::vector<std::string> memberCloneInputNames = referenceInputNames;
     if (!requireExactSharedInferenceInputSet) {
-        memberCloneInputNames = referenceMember.getInferenceNetworkInputNamesForOutputs(outputNames);
+        memberCloneInputNames =
+            referenceMember.getRequiredNetworkInputNamesForOutputs(outputNames, /*inferenceOnly=*/true);
         for (const std::string& inputName : memberCloneInputNames) {
             if (referenceInputNameSet.count(inputName) == 0) {
                 throw std::runtime_error("TrainingRuns composed ensemble evaluator internal error: clone input '" + inputName +
@@ -2832,7 +2863,7 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
 
         ApiSubgraphCloneOptions cloneOptions;
         cloneOptions.namePrefix = trainingRunsMemberScopedName(memberIndex, "");
-        ApiSubgraphCloneResult cloneResult = evaluator.network->cloneInferenceSubgraphInto(memberNetwork, outputNames, remap, cloneOptions);
+        ApiSubgraphCloneResult cloneResult = evaluator.network->cloneSubgraphInto(memberNetwork, outputNames, remap, cloneOptions);
         evaluator.memberOutputTensorsByName[memberIndex] = std::move(cloneResult.outputTensorsByName);
     }
 
@@ -2920,7 +2951,7 @@ std::shared_ptr<Network> buildSingleMemberEnsembleNetworkArtifact(Network& membe
 
     ApiSubgraphCloneOptions cloneOptions;
     cloneOptions.inferenceOnly = true;
-    ApiSubgraphCloneResult cloneResult = ensembleNetwork->cloneInferenceSubgraphInto(memberNetwork, outputNames, remap, cloneOptions);
+    ApiSubgraphCloneResult cloneResult = ensembleNetwork->cloneSubgraphInto(memberNetwork, outputNames, remap, cloneOptions);
 
     std::set<std::string> seenOutputNames;
     for (const std::string& outputName : outputNames) {
@@ -2981,7 +3012,8 @@ void saveEnsembleNetworkArtifact(const TrainingEnsembleResult& ensembleResult,
         throw std::runtime_error("TrainingRunsResult.save_ensemble could not determine any deployable prediction output names for ensemble group '" +
                                  ensembleResult.ensembleGroup + "'.");
     }
-    const std::vector<std::string> deployableInputNames = memberNetworks.front()->getInferenceNetworkInputNamesForOutputs(outputNames);
+    const std::vector<std::string> deployableInputNames =
+        memberNetworks.front()->getRequiredNetworkInputNamesForOutputs(outputNames, /*inferenceOnly=*/true);
     if (deployableInputNames.empty()) {
         throw std::runtime_error("TrainingRunsResult.save_ensemble could not determine any deployable input names for ensemble group '" +
                                  ensembleResult.ensembleGroup + "'.");
@@ -3025,6 +3057,28 @@ std::optional<Tensor> existingTrainingRunsEvaluatorInputTensorForGraphInput(
     return existingIt->second;
 }
 
+void mapTrainingRunsEvaluatorRequiredGraphInputs(
+    const TrainingRunsComposedEnsembleEvaluator& evaluator,
+    Network& referenceMember,
+    const std::map<std::string, std::shared_ptr<NetworkInput>>& referenceInputsByName,
+    const std::vector<std::string>& requiredInputNames,
+    ApiTensorRemap& remap,
+    const std::string& context) {
+    for (const std::string& inputName : requiredInputNames) {
+        std::shared_ptr<NetworkInput> sourceInput =
+            requiredApiNetworkInputByName(referenceMember, referenceInputsByName, inputName, context);
+        const Tensor sourceTensor = sourceInput->getFeatureOutput().value();
+        if (remap.contains(sourceTensor)) {
+            continue;
+        }
+        std::optional<Tensor> evaluatorInput = existingTrainingRunsEvaluatorInputTensorForGraphInput(evaluator, inputName);
+        if (!evaluatorInput.has_value()) {
+            throw std::runtime_error(context + " did not build required graph input '" + inputName + "'.");
+        }
+        remap.map(sourceTensor, *evaluatorInput);
+    }
+}
+
 Tensor cloneTrainingRunsEvaluatorLossFromReference(TrainingRunsComposedEnsembleEvaluator& evaluator,
                                                   Network& referenceMember,
                                                   const std::map<std::string, std::shared_ptr<NetworkInput>>& referenceInputsByName,
@@ -3065,10 +3119,18 @@ Tensor cloneTrainingRunsEvaluatorLossFromReference(TrainingRunsComposedEnsembleE
         remap.map(weightInput->getFeatureOutput().value(), *exampleWeights);
     }
 
+    mapTrainingRunsEvaluatorRequiredGraphInputs(
+        evaluator,
+        referenceMember,
+        referenceInputsByName,
+        loss.requiredInputNames,
+        remap,
+        "TrainingRuns composed ensemble evaluator reported loss '" + loss.lossName + "'");
+
     ApiSubgraphCloneOptions cloneOptions;
     cloneOptions.namePrefix = "reported_loss/" + loss.lossName + "/";
     cloneOptions.inferenceOnly = false;
-    ApiSubgraphCloneResult cloneResult = evaluator.network->cloneInferenceSubgraphInto(referenceMember, {loss.lossName}, remap, cloneOptions);
+    ApiSubgraphCloneResult cloneResult = evaluator.network->cloneSubgraphInto(referenceMember, {loss.lossName}, remap, cloneOptions);
     auto lossIt = cloneResult.outputTensorsByName.find(loss.lossName);
     if (lossIt == cloneResult.outputTensorsByName.end()) {
         throw std::runtime_error("TrainingRuns composed ensemble evaluator did not clone loss output '" + loss.lossName + "'.");
@@ -3129,10 +3191,18 @@ Tensor cloneTrainingRunsEvaluatorMetricFromReference(TrainingRunsComposedEnsembl
         remap.map(labelInput->getFeatureOutput().value(), *labels);
     }
 
+    mapTrainingRunsEvaluatorRequiredGraphInputs(
+        evaluator,
+        referenceMember,
+        referenceInputsByName,
+        metric.requiredInputNames,
+        remap,
+        "TrainingRuns composed ensemble evaluator reported metric '" + metric.metricName + "'");
+
     ApiSubgraphCloneOptions cloneOptions;
     cloneOptions.namePrefix = "reported_metric/" + metric.metricName + "/";
     cloneOptions.inferenceOnly = false;
-    ApiSubgraphCloneResult cloneResult = evaluator.network->cloneInferenceSubgraphInto(referenceMember, {metric.metricName}, remap, cloneOptions);
+    ApiSubgraphCloneResult cloneResult = evaluator.network->cloneSubgraphInto(referenceMember, {metric.metricName}, remap, cloneOptions);
     auto metricIt = cloneResult.outputTensorsByName.find(metric.metricName);
     if (metricIt == cloneResult.outputTensorsByName.end()) {
         throw std::runtime_error("TrainingRuns composed ensemble evaluator did not clone metric output '" + metric.metricName + "'.");
@@ -3172,19 +3242,17 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
     // that the requested reports consume.
     std::vector<std::string> sharedInputNames = outputNames.empty()
         ? std::vector<std::string>{}
-        : referenceMember.getInferenceNetworkInputNamesForOutputs(outputNames);
+        : referenceMember.getRequiredNetworkInputNamesForOutputs(
+              outputNames,
+              /*inferenceOnly=*/true);
     for (const ResolvedEnsembleLoss& loss : losses) {
-        appendNameIfMissing(sharedInputNames, loss.targetInputName);
-        if (loss.weightInputName.has_value()) {
-            appendNameIfMissing(sharedInputNames, *loss.weightInputName);
+        for (const std::string& inputName : loss.requiredInputNames) {
+            appendNameIfMissing(sharedInputNames, inputName);
         }
     }
     for (const ResolvedEnsembleMetric& metric : metrics) {
-        if (metric.targetInputName.has_value()) {
-            appendNameIfMissing(sharedInputNames, *metric.targetInputName);
-        }
-        if (metric.inputSourceName.has_value()) {
-            appendNameIfMissing(sharedInputNames, *metric.inputSourceName);
+        for (const std::string& inputName : metric.requiredInputNames) {
+            appendNameIfMissing(sharedInputNames, inputName);
         }
     }
 
@@ -3270,10 +3338,10 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
                 continue;
             }
         } else if (metric.predictionOutputName.empty()) {
-            // The user explicitly exposed this metric in the source network, so it
-            // remains reportable for that network.  This composed evaluator has no
-            // tensor that can be remapped to the metric's source, so the metric is
-            // not part of this composition.
+            // Without an averaged prediction or direct source input there is no
+            // safe semantic cut point. Do not clone an arbitrary hidden member
+            // subgraph from the reference model merely because its external input
+            // boundary can be discovered.
             continue;
         }
 
@@ -3389,6 +3457,7 @@ TrainingRunsComposedEvaluatorArtifacts loadTrainingRunsComposedEvaluatorArtifact
             reference.predictionOutputName = referenceLoss.predictionOutputName;
             reference.targetInputName = referenceLoss.targetInputName;
             reference.weightInputName = referenceLoss.weightInputName;
+            reference.requiredInputNames = referenceLoss.requiredInputNames;
             reference.lossLayerType = referenceLoss.lossType;
             reference.lossWeight = referenceLoss.lossWeight;
             reference.quantile = referenceLoss.quantile;
@@ -3397,6 +3466,7 @@ TrainingRunsComposedEvaluatorArtifacts loadTrainingRunsComposedEvaluatorArtifact
             memberReference.predictionOutputName = memberLossIt->predictionOutputName;
             memberReference.targetInputName = memberLossIt->targetInputName;
             memberReference.weightInputName = memberLossIt->weightInputName;
+            memberReference.requiredInputNames = memberLossIt->requiredInputNames;
             memberReference.lossLayerType = memberLossIt->lossType;
             memberReference.lossWeight = memberLossIt->lossWeight;
             memberReference.quantile = memberLossIt->quantile;
@@ -3426,12 +3496,14 @@ TrainingRunsComposedEvaluatorArtifacts loadTrainingRunsComposedEvaluatorArtifact
             reference.predictionOutputName = referenceMetric.predictionOutputName;
             reference.targetInputName = referenceMetric.targetInputName;
             reference.inputSourceName = referenceMetric.inputSourceName;
+            reference.requiredInputNames = referenceMetric.requiredInputNames;
             reference.metricLayerType = referenceMetric.metricType;
             NetworkMetricReference memberReference;
             memberReference.metricName = memberMetricIt->metricName;
             memberReference.predictionOutputName = memberMetricIt->predictionOutputName;
             memberReference.targetInputName = memberMetricIt->targetInputName;
             memberReference.inputSourceName = memberMetricIt->inputSourceName;
+            memberReference.requiredInputNames = memberMetricIt->requiredInputNames;
             memberReference.metricLayerType = memberMetricIt->metricType;
             if (!trainingRunsReportableMetricsCompatible(reference, memberReference)) {
                 throw std::runtime_error(context + " member " + std::to_string(memberIndex) +

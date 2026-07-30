@@ -36,11 +36,12 @@ def _generator_reference(fake_scores: np.ndarray) -> np.ndarray:
 def _reduce_loss(raw: np.ndarray, reported_loss_shape: thor.losses.LossShape) -> np.ndarray:
     if reported_loss_shape == thor.losses.LossShape.raw:
         return raw
-    if reported_loss_shape == thor.losses.LossShape.elementwise:
-        return np.sum(raw, axis=1, keepdims=True).astype(np.float32)
+    if reported_loss_shape == thor.losses.LossShape.per_example:
+        reduction_axes = tuple(range(1, raw.ndim))
+        return np.sum(raw, axis=reduction_axes).reshape(raw.shape[0], 1).astype(np.float32)
 
     batch_size = raw.shape[0]
-    if reported_loss_shape == thor.losses.LossShape.classwise:
+    if reported_loss_shape == thor.losses.LossShape.per_output:
         return (np.sum(raw, axis=0, keepdims=True) / batch_size).astype(np.float32)
     if reported_loss_shape == thor.losses.LossShape.batch:
         return np.array([[np.sum(raw) / batch_size]], dtype=np.float32)
@@ -141,7 +142,7 @@ def test_hinge_gan_losses_construct_with_loss_dtype_and_shape():
         real_scores,
         fake_scores,
         thor.DataType.fp32,
-        thor.losses.LossShape.elementwise,
+        thor.losses.LossShape.per_example,
     )
     g_loss = thor.losses.gan.HingeGANGeneratorLoss(
         n,
@@ -153,7 +154,7 @@ def test_hinge_gan_losses_construct_with_loss_dtype_and_shape():
     assert isinstance(g_loss, thor.losses.gan.HingeGANGeneratorLoss)
 
 
-@pytest.mark.parametrize("shape", ["batch", "classwise", "elementwise", "raw"])
+@pytest.mark.parametrize("shape", ["batch", "per_output", "per_example", "raw"])
 def test_hinge_gan_loss_reported_loss_shape_variants_construct(shape):
     n = _net()
     real_scores = _tensor_1d(3)
@@ -193,11 +194,27 @@ def test_hinge_gan_discriminator_loss_rejects_mismatched_shapes_dtypes_and_dupli
         thor.losses.gan.HingeGANDiscriminatorLoss(n, real_scores, real_scores)
 
 
-def test_hinge_gan_generator_loss_rejects_invalid_shape_and_dtype():
+def test_hinge_gan_discriminator_loss_accepts_patch_scores():
+    n = _net()
+    real_scores = thor.Tensor([1, 8, 8], thor.DataType.fp32)
+    fake_scores = thor.Tensor([1, 8, 8], thor.DataType.fp32)
+
+    loss = thor.losses.gan.HingeGANDiscriminatorLoss(
+        n, real_scores, fake_scores, reported_loss_shape=thor.losses.LossShape.raw
+    )
+
+    assert loss.get_loss().get_dimensions() == [1, 8, 8]
+
+
+def test_hinge_gan_generator_loss_accepts_patch_scores_and_rejects_invalid_dtype():
     n = _net()
 
-    with pytest.raises(ValueError, match=r"fake_scores must be a non-empty 1D score tensor"):
-        thor.losses.gan.HingeGANGeneratorLoss(n, thor.Tensor([2, 2], thor.DataType.fp32))
+    patch_scores = thor.Tensor([1, 8, 8], thor.DataType.fp32)
+    loss = thor.losses.gan.HingeGANGeneratorLoss(
+        n, patch_scores, reported_loss_shape=thor.losses.LossShape.raw
+    )
+    assert loss.get_loss().get_dimensions() == [1, 8, 8]
+
     with pytest.raises(ValueError, match=r"loss_data_type must be fp16 or fp32"):
         thor.losses.gan.HingeGANGeneratorLoss(n, _tensor_1d(4), thor.DataType.int32)
     with pytest.raises(ValueError, match=r"fake_scores must use fp16 or fp32 dtype"):
@@ -209,8 +226,8 @@ def test_hinge_gan_generator_loss_rejects_invalid_shape_and_dtype():
     "reported_loss_shape",
     [
         thor.losses.LossShape.raw,
-        thor.losses.LossShape.elementwise,
-        thor.losses.LossShape.classwise,
+        thor.losses.LossShape.per_example,
+        thor.losses.LossShape.per_output,
         thor.losses.LossShape.batch,
     ],
 )
@@ -246,8 +263,35 @@ def test_hinge_gan_discriminator_loss_numerical_forward_matches_reference(report
     "reported_loss_shape",
     [
         thor.losses.LossShape.raw,
-        thor.losses.LossShape.elementwise,
-        thor.losses.LossShape.classwise,
+        thor.losses.LossShape.per_example,
+        thor.losses.LossShape.per_output,
+        thor.losses.LossShape.batch,
+    ],
+)
+def test_hinge_gan_generator_multidimensional_cub_reductions_match_reference(reported_loss_shape):
+    fake_scores = np.array(
+        [
+            [[[1.0, -2.0], [3.0, -4.0]]],
+            [[[-0.5, 1.5], [-2.5, 3.5]]],
+            [[[2.0, 4.0], [-1.0, -3.0]]],
+        ],
+        dtype=np.float32,
+    )
+
+    raw_expected = _generator_reference(fake_scores)
+    expected = _reduce_loss(raw_expected, reported_loss_shape)
+    actual = _run_generator_loss_network(fake_scores, reported_loss_shape)
+
+    np.testing.assert_allclose(actual, expected, rtol=2e-5, atol=2e-6)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize(
+    "reported_loss_shape",
+    [
+        thor.losses.LossShape.raw,
+        thor.losses.LossShape.per_example,
+        thor.losses.LossShape.per_output,
         thor.losses.LossShape.batch,
     ],
 )

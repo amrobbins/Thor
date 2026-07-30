@@ -83,11 +83,11 @@ def _reduce_loss(raw: np.ndarray, reported_loss_shape: thor.losses.LossShape) ->
         raw = raw.reshape(raw.shape[0], 1)
     if reported_loss_shape == thor.losses.LossShape.raw:
         return raw.astype(np.float32)
-    if reported_loss_shape == thor.losses.LossShape.elementwise:
+    if reported_loss_shape == thor.losses.LossShape.per_example:
         return np.sum(raw, axis=1, keepdims=True).astype(np.float32)
 
     batch_size = raw.shape[0]
-    if reported_loss_shape == thor.losses.LossShape.classwise:
+    if reported_loss_shape == thor.losses.LossShape.per_output:
         return (np.sum(raw, axis=0, keepdims=True) / batch_size).astype(np.float32)
     if reported_loss_shape == thor.losses.LossShape.batch:
         return np.array([[np.sum(raw) / batch_size]], dtype=np.float32)
@@ -153,14 +153,14 @@ def test_box_iou_loss_constructs_with_box_format_eps_loss_dtype_and_shape(_, los
         "xyxy",
         1.0e-5,
         thor.DataType.fp32,
-        thor.losses.LossShape.elementwise,
+        thor.losses.LossShape.per_example,
     )
     assert isinstance(loss, loss_cls)
     assert loss.box_format == "xyxy"
     assert loss.eps == pytest.approx(1.0e-5)
 
 
-@pytest.mark.parametrize("shape", ["batch", "classwise", "elementwise", "raw"])
+@pytest.mark.parametrize("shape", ["batch", "per_output", "per_example", "raw"])
 @pytest.mark.parametrize("_, loss_cls", _LOSS_CLASSES)
 def test_box_iou_loss_reported_loss_shape_variants_construct(shape, _, loss_cls):
     n = _net()
@@ -198,8 +198,8 @@ def test_box_iou_loss_rejects_invalid_shapes_dtype_format_eps_and_duplicate_tens
     "reported_loss_shape",
     [
         thor.losses.LossShape.raw,
-        thor.losses.LossShape.elementwise,
-        thor.losses.LossShape.classwise,
+        thor.losses.LossShape.per_example,
+        thor.losses.LossShape.per_output,
         thor.losses.LossShape.batch,
     ],
 )

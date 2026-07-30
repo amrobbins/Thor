@@ -74,6 +74,13 @@ class Optimizer {
 
     uint64_t getOriginalId() const { return originalId; }
 
+    // Internal placement policy. Network::resetOptimizers() marks every optimizer
+    // in the logical graph so a fresh placement ignores serialized optimizer
+    // tensors and starts runtime counters from their first-placement values.
+    virtual void initializeStateAsNew() { initializeStateAsNew_ = true; }
+    virtual void clearInitializeStateAsNew() { initializeStateAsNew_ = false; }
+    [[nodiscard]] bool shouldInitializeStateAsNew() const { return initializeStateAsNew_; }
+
     virtual std::shared_ptr<Optimizer> clone() const = 0;
 
    protected:
@@ -84,6 +91,8 @@ class Optimizer {
     void addToNetwork(Network *network);
 
     uint64_t originalId;
+
+    bool initializeStateAsNew_ = false;
 
     // gpuNum -> stampedId -> *optimizer
     // So there is one optimizer per layer, shared by all stamps of the network

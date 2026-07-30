@@ -2,6 +2,7 @@
 #include "DeepLearning/Implementation/Layers/MultiConnectionLayer.h"
 #include "DeepLearning/Implementation/Layers/TrainableLayer.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
+#include "test/DeepLearning/Implementation/Layers/LayerSynchronizationTestKernels.h"
 
 #include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
@@ -362,38 +363,36 @@ TEST(LayerSynchronization, PlacedNetworkSynchronizeWaitsForModelStreamsWithoutDr
     PlacedSynchronizationTarget target = makePlacedSynchronizationTarget("LayerSynchronizationBoundaryNetwork");
     Stream unrelatedStream(0);
 
-    auto modelGate = make_shared<HostGate>();
-    auto unrelatedGate = make_shared<HostGate>();
-    target.modelStream.enqueueHostFunction(&waitForHostGate, make_unique<WaitForHostGateArgs>(modelGate));
+    // Use GPU-side stream-memory-operation gates rather than blocking
+    // cudaLaunchHostFunc callbacks or spinning kernels. Host callbacks can be
+    // serialized across streams, while spinning kernels can occupy resources
+    // required by the stream that releases them.
+    ThorImplementation::Test::DeviceStreamGate modelGate(0);
+    ThorImplementation::Test::DeviceStreamGate unrelatedGate(0);
+    modelGate.enqueue(target.modelStream);
+    unrelatedGate.enqueue(unrelatedStream);
 
-    // Host functions in independent CUDA streams have undefined execution
-    // order and may be serialized. Ensure the model callback is already the
-    // active blocked callback before adding unrelated work, otherwise CUDA is
-    // permitted to start the unrelated callback first and the test would
-    // accidentally test callback scheduling rather than synchronization scope.
-    ASSERT_TRUE(waitForHostGateToEnter(modelGate, chrono::seconds(10)))
-        << "model-stream host gate did not begin execution";
-
-    unrelatedStream.enqueueHostFunction(&waitForHostGate, make_unique<WaitForHostGateArgs>(unrelatedGate));
+    ASSERT_FALSE(modelGate.isComplete());
+    ASSERT_FALSE(unrelatedGate.isComplete());
 
     auto synchronizeFuture = async(launch::async, [&] { target.placedNetwork->synchronize(); });
-    vector<shared_ptr<HostGate>> gates{modelGate, unrelatedGate};
-    ReleaseAllGates releaseAll(gates);
 
     EXPECT_EQ(synchronizeFuture.wait_for(chrono::milliseconds(100)), future_status::timeout)
         << "placed-network synchronization must wait for previously enqueued model work";
 
-    releaseHostGate(modelGate);
+    modelGate.release();
     future_status afterModelRelease = synchronizeFuture.wait_for(chrono::seconds(10));
     EXPECT_EQ(afterModelRelease, future_status::ready)
         << "placed-network synchronization must not drain unrelated streams on the same CUDA device";
     if (afterModelRelease != future_status::ready) {
-        releaseHostGate(unrelatedGate);
+        unrelatedGate.release();
         ASSERT_EQ(synchronizeFuture.wait_for(chrono::seconds(10)), future_status::ready);
     }
     EXPECT_NO_THROW(synchronizeFuture.get());
 
-    releaseHostGate(unrelatedGate);
+    EXPECT_FALSE(unrelatedGate.isComplete())
+        << "the unrelated GPU-side gate must still be pending after placed-network synchronization";
+    unrelatedGate.release();
     unrelatedStream.synchronize();
 }
 

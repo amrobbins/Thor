@@ -38,11 +38,11 @@ def _poisson_nll_reference(predictions: np.ndarray, labels: np.ndarray, log_inpu
 def _reduce_loss(raw: np.ndarray, reported_loss_shape: thor.losses.LossShape) -> np.ndarray:
     if reported_loss_shape == thor.losses.LossShape.raw:
         return raw
-    if reported_loss_shape == thor.losses.LossShape.elementwise:
+    if reported_loss_shape == thor.losses.LossShape.per_example:
         return np.sum(raw, axis=1, keepdims=True)
 
     batch_size = raw.shape[0]
-    if reported_loss_shape == thor.losses.LossShape.classwise:
+    if reported_loss_shape == thor.losses.LossShape.per_output:
         return (np.sum(raw, axis=0, keepdims=True) / batch_size).astype(np.float32)
     if reported_loss_shape == thor.losses.LossShape.batch:
         return np.array([[np.sum(raw) / batch_size]], dtype=np.float32)
@@ -111,7 +111,7 @@ def test_poisson_nll_loss_constructs_with_options_loss_dtype_and_shape():
         True,
         1.0e-5,
         thor.DataType.fp32,
-        thor.losses.LossShape.elementwise,
+        thor.losses.LossShape.per_example,
     )
     assert isinstance(loss, thor.losses.distribution.PoissonNLLLoss)
     assert loss.log_input is False
@@ -119,7 +119,7 @@ def test_poisson_nll_loss_constructs_with_options_loss_dtype_and_shape():
     assert loss.eps == pytest.approx(1.0e-5)
 
 
-@pytest.mark.parametrize("shape", ["batch", "classwise", "elementwise", "raw"])
+@pytest.mark.parametrize("shape", ["batch", "per_output", "per_example", "raw"])
 def test_poisson_nll_loss_reported_loss_shape_variants_construct(shape):
     n = _net()
     preds = _tensor_1d(3)
@@ -138,13 +138,15 @@ def test_poisson_nll_loss_rejects_mismatched_labels():
         thor.losses.distribution.PoissonNLLLoss(n, preds, labels)
 
 
-def test_poisson_nll_loss_rejects_predictions_not_1d():
+def test_poisson_nll_loss_accepts_multidimensional_predictions():
     n = _net()
-    preds = thor.Tensor([1, 1], thor.DataType.fp32)
-    labels = thor.Tensor([1, 1], thor.DataType.fp32)
+    preds = thor.Tensor([2, 3, 4], thor.DataType.fp32)
+    labels = thor.Tensor([2, 3, 4], thor.DataType.fp32)
 
-    with pytest.raises(ValueError, match=r"predictions must be a 1 dimensional tensor"):
-        thor.losses.distribution.PoissonNLLLoss(n, preds, labels)
+    loss = thor.losses.distribution.PoissonNLLLoss(
+        n, preds, labels, reported_loss_shape=thor.losses.LossShape.raw
+    )
+    assert loss.get_loss().get_dimensions() == [2, 3, 4]
 
 
 def test_poisson_nll_loss_rejects_integer_predictions():
@@ -179,8 +181,8 @@ def test_poisson_nll_loss_rejects_non_positive_eps():
     "reported_loss_shape",
     [
         thor.losses.LossShape.raw,
-        thor.losses.LossShape.elementwise,
-        thor.losses.LossShape.classwise,
+        thor.losses.LossShape.per_example,
+        thor.losses.LossShape.per_output,
         thor.losses.LossShape.batch,
     ],
 )
@@ -232,7 +234,7 @@ def test_poisson_nll_loss_save_load_round_trip_serializes_support_layers(tmp_pat
         True,
         1.0e-5,
         dtype,
-        thor.losses.LossShape.elementwise,
+        thor.losses.LossShape.per_example,
     )
     thor.layers.NetworkOutput(n, "loss", loss.get_loss(), dtype)
 

@@ -19,15 +19,15 @@ namespace ThorImplementation {
  *   For categorical losses, this is one loss per batch item per class.
  *   For numerical losses, this is one loss per batch item per output.
  *
- * When a reduced form is needed for reporting, a LossShaper interprets a row-major loss tensor
- * [B, D1, ..., Dn] as the zero-copy flattened view [B, C], where C = D1 * ... * Dn, and reports:
+ * When a reduced form is needed for reporting, LossShaper reduces the original row-major loss tensor
+ * [B, D1, ..., Dn] directly with CUB and reports:
  *   1. BATCH: one scalar [1, 1], equal to the sum of all losses divided by B.
- *   2. CLASSWISE: [1, C], with each flattened non-batch position averaged over B.
- *   3. ELEMENTWISE: [B, 1], with all C losses summed independently for each batch item.
- *   4. RAW: the unchanged elementwise loss tensor.
+ *   2. PER_OUTPUT: [1, D1, ..., Dn], with each output position averaged over B.
+ *   3. PER_EXAMPLE: [B, 1], with all non-batch losses summed independently per example.
+ *   4. RAW: the unchanged loss tensor [B, D1, ..., Dn].
  *
  * Consequently, BATCH is the mean across the batch of each example's summed loss; it is not the
- * mean across every scalar element unless C == 1.
+ * mean across every scalar element unless each example has one loss value.
  *
  * featureInput: The predictions
  *   For categorical losses, the predictions should represent a probability distribution (i.e. they sum to 1.0), this is achieved
@@ -262,13 +262,12 @@ class Loss : public Layer {
         }
 
         if (emitDiagnostics) {
-            emitLayerSubmitDiagnostic("loss_backward",
-                                      layerSubmitDiagnosticLabel("Loss", getId(), getName()),
-                                      getId(),
-                                      layerSubmitDiagnosticElapsedMicros(totalStart, layerSubmitDiagnosticNow()),
-                                      {{"backprop_us", backPropMicros},
-                                       {"labels_wait_us", labelsWaitMicros},
-                                       {"upstream_us", upstreamMicros}});
+            emitLayerSubmitDiagnostic(
+                "loss_backward",
+                layerSubmitDiagnosticLabel("Loss", getId(), getName()),
+                getId(),
+                layerSubmitDiagnosticElapsedMicros(totalStart, layerSubmitDiagnosticNow()),
+                {{"backprop_us", backPropMicros}, {"labels_wait_us", labelsWaitMicros}, {"upstream_us", upstreamMicros}});
         }
     }
 
@@ -292,7 +291,8 @@ class Loss : public Layer {
 
     void setTrainingActive(bool active) {
         if (active && trainingBackpropPathPruned) {
-            throw std::logic_error("Cannot reactivate a loss after its inactive training backprop path was pruned for this placed network.");
+            throw std::logic_error(
+                "Cannot reactivate a loss after its inactive training backprop path was pruned for this placed network.");
         }
         trainingActive = active;
     }
@@ -305,9 +305,7 @@ class Loss : public Layer {
     // backprop topology.  This hook lets that utility layer invalidate the loss-side
     // fused state before the loss compiles, so the loss materializes its ordinary
     // gradient tensor instead of leaving an unpopulated errorOutput in the graph.
-    virtual void notifyFusedGradientUnregisteredFromDrivingLayer(const Tensor& predictions) {
-        (void)predictions;
-    }
+    virtual void notifyFusedGradientUnregisteredFromDrivingLayer(const Tensor &predictions) { (void)predictions; }
 
     virtual void pruneTrainingBackpropPathIfInactive() {
         if (trainingActive || trainingBackpropPathPruned || isInferenceOnly() || !errorOutput.has_value()) {
@@ -321,7 +319,7 @@ class Loss : public Layer {
 
     enum class ConnectionType { FORWARD_BACKWARD = 4289, LABELS };
 
-    enum class LossType { BATCH = (int)ConnectionType::LABELS + 1027, CLASSWISE, ELEMENTWISE, RAW };
+    enum class LossType { BATCH, PER_EXAMPLE, PER_OUTPUT, RAW };
 
     static float getLossScalingFactor() { return lossScalingFactor; }
 
@@ -330,7 +328,7 @@ class Loss : public Layer {
     DataType lossDataType;
 
     // FIXME: only const for now for convenience
-    static constexpr float lossScalingFactor = 32;
+    static constexpr float lossScalingFactor = 1.0f;
     Stream labelsStream;
 
     bool featureInputReceived;

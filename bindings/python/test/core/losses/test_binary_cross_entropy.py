@@ -45,7 +45,7 @@ def test_binary_cross_entropy_constructs_fp16():
     assert isinstance(loss, thor.losses.BinaryCrossEntropy)
 
 
-def test_binary_cross_entropy_constructs_reports_elementwise():
+def test_binary_cross_entropy_constructs_reports_per_example():
     n = _net()
     preds = _tensor_1d(1, thor.DataType.fp32)
     labels = _tensor_1d(1, thor.DataType.fp32)
@@ -55,27 +55,27 @@ def test_binary_cross_entropy_constructs_reports_elementwise():
         preds,
         labels,
         thor.DataType.fp32,
-        True,
+        thor.losses.LossShape.per_example,
     )
     assert isinstance(loss, thor.losses.BinaryCrossEntropy)
 
 
-def test_binary_cross_entropy_rejects_predictions_not_1d():
+@pytest.mark.parametrize(
+    "reported_loss_shape, expected_dimensions",
+    [
+        (thor.losses.LossShape.batch, [1]),
+        (thor.losses.LossShape.per_example, [1]),
+        (thor.losses.LossShape.per_output, [2, 3, 4]),
+        (thor.losses.LossShape.raw, [2, 3, 4]),
+    ],
+)
+def test_binary_cross_entropy_constructs_multidimensional_outputs(reported_loss_shape, expected_dimensions):
     n = _net()
-    labels = _tensor_1d(1, thor.DataType.fp32)
+    preds = thor.Tensor([2, 3, 4], thor.DataType.fp32)
+    labels = thor.Tensor([2, 3, 4], thor.DataType.fp32)
 
-    preds = thor.Tensor([1, 1], thor.DataType.fp32)
-    with pytest.raises(ValueError, match=r"predictions must be a 1 dimensional tensor"):
-        thor.losses.BinaryCrossEntropy(n, preds, labels)
-
-
-def test_binary_cross_entropy_rejects_labels_not_1d():
-    n = _net()
-    preds = _tensor_1d(1, thor.DataType.fp32)
-
-    labels = thor.Tensor([1, 1], thor.DataType.fp32)
-    with pytest.raises(ValueError, match=r"labels must be a 1 dimensional tensor"):
-        thor.losses.BinaryCrossEntropy(n, preds, labels)
+    loss = thor.losses.BinaryCrossEntropy(n, preds, labels, reported_loss_shape=reported_loss_shape)
+    assert loss.get_loss().get_dimensions() == expected_dimensions
 
 
 def test_binary_cross_entropy_rejects_mismatched_label_dimensions():
@@ -125,4 +125,4 @@ def test_binary_cross_entropy_rejects_wrong_arity():
         thor.losses.BinaryCrossEntropy(n, preds)  # missing labels
 
     with pytest.raises(TypeError):
-        thor.losses.BinaryCrossEntropy(n, preds, labels, thor.DataType.fp32, False, 123, 456)  # extra arg
+        thor.losses.BinaryCrossEntropy(n, preds, labels, thor.DataType.fp32, thor.losses.LossShape.batch, 123, 456)  # extra arg

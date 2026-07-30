@@ -17,8 +17,8 @@ using LossShape = Loss::LossShape;
 
 namespace {
 void validateReportedLossShape(LossShape reported_loss_shape, const string &loss_name) {
-    if (reported_loss_shape != LossShape::BATCH && reported_loss_shape != LossShape::CLASSWISE &&
-        reported_loss_shape != LossShape::ELEMENTWISE && reported_loss_shape != LossShape::RAW) {
+    if (reported_loss_shape != LossShape::NONE && reported_loss_shape != LossShape::BATCH && reported_loss_shape != LossShape::PER_OUTPUT &&
+        reported_loss_shape != LossShape::PER_EXAMPLE && reported_loss_shape != LossShape::RAW) {
         string error_message =
             "Invalid value " + to_string((int)reported_loss_shape) + " passed for enum reported_loss_shape to " + loss_name + ".";
         throw nb::value_error(error_message.c_str());
@@ -26,12 +26,14 @@ void validateReportedLossShape(LossShape reported_loss_shape, const string &loss
 }
 
 void setReportedLossShape(FocalTverskyLoss::Builder &builder, LossShape reported_loss_shape) {
-    if (reported_loss_shape == LossShape::BATCH) {
+    if (reported_loss_shape == LossShape::NONE) {
+        builder.reportsNoLoss();
+    } else if (reported_loss_shape == LossShape::BATCH) {
         builder.reportsBatchLoss();
-    } else if (reported_loss_shape == LossShape::CLASSWISE) {
+    } else if (reported_loss_shape == LossShape::PER_OUTPUT) {
         builder.reportsPerOutputLoss();
-    } else if (reported_loss_shape == LossShape::ELEMENTWISE) {
-        builder.reportsElementwiseLoss();
+    } else if (reported_loss_shape == LossShape::PER_EXAMPLE) {
+        builder.reportsPerExampleLoss();
     } else {
         THOR_THROW_IF_FALSE(reported_loss_shape == LossShape::RAW);
         builder.reportsRawLoss();

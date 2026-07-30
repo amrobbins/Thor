@@ -61,8 +61,7 @@ ThorImplementation::DynamicExpression makeWassersteinGANCriticGradientExpression
 
 void WassersteinGANCriticLoss::buildSupportLayersAndAddToNetwork() {
     validateWassersteinGANCriticDTypes(realScoresTensor.getDataType(), fakeScoresTensor.getDataType());
-    THOR_THROW_IF_FALSE(realScoresTensor.getDimensions().size() == 1);
-    THOR_THROW_IF_FALSE(realScoresTensor.getDimensions()[0] > 0);
+    THOR_THROW_IF_FALSE(!realScoresTensor.getDimensions().empty());
     THOR_THROW_IF_FALSE(realScoresTensor.getDimensions() == fakeScoresTensor.getDimensions());
 
     MultiInputCustomLoss rawWassersteinGANCriticLoss = MultiInputCustomLoss::Builder()
@@ -80,19 +79,7 @@ void WassersteinGANCriticLoss::buildSupportLayersAndAddToNetwork() {
 
     lossShaperInput = rawWassersteinGANCriticLoss.getLoss();
 
-    if (lossShape == LossShape::BATCH) {
-        LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(lossShaperInput).reportsBatchLoss().build();
-        lossTensor = lossShaper.getLossOutput();
-    } else if (lossShape == LossShape::ELEMENTWISE) {
-        LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(lossShaperInput).reportsElementwiseLoss().build();
-        lossTensor = lossShaper.getLossOutput();
-    } else if (lossShape == LossShape::CLASSWISE) {
-        LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(lossShaperInput).reportsClasswiseLoss().build();
-        lossTensor = lossShaper.getLossOutput();
-    } else {
-        THOR_THROW_IF_FALSE(lossShape == LossShape::RAW);
-        lossTensor = lossShaperInput;
-    }
+    finalizeLossReporting();
 }
 
 json WassersteinGANCriticLoss::architectureJson() const {

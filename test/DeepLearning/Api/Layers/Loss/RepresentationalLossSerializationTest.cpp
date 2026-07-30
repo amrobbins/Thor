@@ -81,7 +81,7 @@ RepresentationalLossNetworkParts addRepresentationalLosses(Network& network) {
                                           .predictions(contrastivePredictions.getFeatureOutput().value())
                                           .labels(contrastiveLabels.getFeatureOutput().value())
                                           .margin(1.75f)
-                                          .reportsElementwiseLoss()
+                                          .reportsPerExampleLoss()
                                           .lossDataType(DataType::FP32)
                                           .build();
     consumeLoss(network, "contrastive_loss", contrastiveLoss.getLoss());
@@ -137,7 +137,7 @@ RepresentationalLossNetworkParts addRepresentationalLosses(Network& network) {
                                               .input2(rankingInput2.getFeatureOutput().value())
                                               .target(rankingTarget.getFeatureOutput().value())
                                               .margin(0.5f)
-                                              .reportsElementwiseLoss()
+                                              .reportsPerExampleLoss()
                                               .lossDataType(DataType::FP32)
                                               .build();
     consumeLoss(network, "margin_ranking_loss", marginRankingLoss.getLoss());
@@ -160,7 +160,7 @@ TEST(RepresentationalLossSerialization, PublicArchitectureJsonIncludesRoundTripF
     const json contrastiveJson = losses.contrastiveLoss.architectureJson();
     EXPECT_EQ(contrastiveJson.at("factory").get<string>(), Layer::Factory::Loss.value());
     EXPECT_EQ(contrastiveJson.at("layer_type").get<string>(), "contrastive_loss");
-    EXPECT_EQ(contrastiveJson.at("loss_shape").get<Loss::LossShape>(), Loss::LossShape::ELEMENTWISE);
+    EXPECT_EQ(contrastiveJson.at("loss_shape").get<Loss::LossShape>(), Loss::LossShape::PER_EXAMPLE);
     EXPECT_EQ(contrastiveJson.at("loss_data_type").get<DataType>(), DataType::FP32);
     EXPECT_FLOAT_EQ(contrastiveJson.at("margin").get<float>(), 1.75f);
     expectTensorJsonMatches(contrastiveJson.at("predictions_tensor"), losses.contrastiveLoss.getPredictions());
@@ -170,7 +170,7 @@ TEST(RepresentationalLossSerialization, PublicArchitectureJsonIncludesRoundTripF
     const json infoNCEJson = losses.infoNCELoss.architectureJson();
     EXPECT_EQ(infoNCEJson.at("factory").get<string>(), Layer::Factory::Loss.value());
     EXPECT_EQ(infoNCEJson.at("layer_type").get<string>(), "info_nce_loss");
-    EXPECT_EQ(infoNCEJson.at("loss_shape").get<Loss::LossShape>(), Loss::LossShape::CLASSWISE);
+    EXPECT_EQ(infoNCEJson.at("loss_shape").get<Loss::LossShape>(), Loss::LossShape::PER_OUTPUT);
     EXPECT_EQ(infoNCEJson.at("loss_data_type").get<DataType>(), DataType::FP32);
     EXPECT_FLOAT_EQ(infoNCEJson.at("temperature").get<float>(), 0.375f);
     expectTensorJsonMatches(infoNCEJson.at("predictions_tensor"), losses.infoNCELoss.getPredictions());
@@ -204,7 +204,7 @@ TEST(RepresentationalLossSerialization, PublicArchitectureJsonIncludesRoundTripF
     const json rankingJson = losses.marginRankingLoss.architectureJson();
     EXPECT_EQ(rankingJson.at("factory").get<string>(), Layer::Factory::Loss.value());
     EXPECT_EQ(rankingJson.at("layer_type").get<string>(), "margin_ranking_loss");
-    EXPECT_EQ(rankingJson.at("loss_shape").get<Loss::LossShape>(), Loss::LossShape::ELEMENTWISE);
+    EXPECT_EQ(rankingJson.at("loss_shape").get<Loss::LossShape>(), Loss::LossShape::PER_EXAMPLE);
     EXPECT_EQ(rankingJson.at("loss_data_type").get<DataType>(), DataType::FP32);
     EXPECT_FLOAT_EQ(rankingJson.at("margin").get<float>(), 0.5f);
     expectTensorJsonMatches(rankingJson.at("input1_tensor"), losses.marginRankingLoss.getInput1());

@@ -18,7 +18,13 @@ Sgd::Sgd(uint64_t originalId) : Optimizer(originalId) {}
 
 shared_ptr<ThorImplementation::Optimizer> Sgd::stamp(shared_ptr<ThorImplementation::TrainableLayer> trainableLayer) {
     (void)trainableLayer;
-    return make_shared<ThorImplementation::Sgd>(getId(), initialLearningRate, decay, momentum, useNesterovMomentum, startResumeEpoch);
+    return make_shared<ThorImplementation::Sgd>(
+        getId(),
+        initialLearningRate,
+        decay,
+        momentum,
+        useNesterovMomentum,
+        shouldInitializeStateAsNew() ? 0 : startResumeEpoch);
 }
 
 void Sgd::setConstantLearningRate(float newCurrentLearningRate, PlacedNetwork *placedNetwork) {

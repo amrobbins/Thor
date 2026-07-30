@@ -1,10 +1,40 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
+#include "DeepLearning/Api/Layers/Loss/LossShaper.h"
+#include "DeepLearning/Api/Layers/Utility/Stub.h"
 
 using namespace std;
 using json = nlohmann::json;
 
 namespace Thor {
+
+void Loss::finalizeLossReporting() {
+    THOR_THROW_IF_FALSE(network != nullptr);
+    THOR_THROW_IF_FALSE(lossShaperInput.isInitialized());
+
+    if (lossShape == LossShape::NONE) {
+        // The raw loss remains the training root, but NONE intentionally exposes no
+        // user-facing report tensor. Stub the forward output so graph validation does
+        // not mistake the backward root for an accidental dangling output.
+        lossTensor = lossShaperInput;
+        Stub::Builder().network(*network).inputTensor(lossShaperInput).build();
+    } else if (lossShape == LossShape::BATCH) {
+        LossShaper lossShaper =
+            LossShaper::Builder().network(*network).lossInput(lossShaperInput).reportsBatchLoss().build();
+        lossTensor = lossShaper.getLossOutput();
+    } else if (lossShape == LossShape::PER_EXAMPLE) {
+        LossShaper lossShaper =
+            LossShaper::Builder().network(*network).lossInput(lossShaperInput).reportsPerExampleLoss().build();
+        lossTensor = lossShaper.getLossOutput();
+    } else if (lossShape == LossShape::PER_OUTPUT) {
+        LossShaper lossShaper =
+            LossShaper::Builder().network(*network).lossInput(lossShaperInput).reportsPerOutputLoss().build();
+        lossTensor = lossShaper.getLossOutput();
+    } else {
+        THOR_THROW_IF_FALSE(lossShape == LossShape::RAW);
+        lossTensor = lossShaperInput;
+    }
+}
 
 json Loss::architectureJson() const {
     json j;

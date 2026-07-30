@@ -106,7 +106,7 @@
 //     }
 // }
 //
-// TEST(CategoricalCrossEntropy, OneHotLabelsClasswiseLossBuilds) {
+// TEST(CategoricalCrossEntropy, OneHotLabelsPerOutputLossBuilds) {
 //     srand(time(nullptr));
 //
 //     for (uint32_t t = 0; t < 10; ++t) {
@@ -136,7 +136,7 @@
 //         CategoricalCrossEntropy::Builder crossEntropyBuilder = CategoricalCrossEntropy::Builder()
 //                                                                    .network(network)
 //                                                                    .predictions(predictions)
-//                                                                    .reportsClasswiseLoss()
+//                                                                    .reportsPerOutputLoss()
 //                                                                    .receivesOneHotLabels()
 //                                                                    .lossDataType(lossDataType)
 //                                                                    .labels(labels);
@@ -200,7 +200,7 @@
 //     }
 // }
 //
-// TEST(CategoricalCrossEntropy, OneHotLabelsElementwiseLossBuilds) {
+// TEST(CategoricalCrossEntropy, OneHotLabelsPerExampleLossBuilds) {
 //     srand(time(nullptr));
 //
 //     for (uint32_t t = 0; t < 10; ++t) {
@@ -230,7 +230,7 @@
 //         CategoricalCrossEntropy::Builder crossEntropyBuilder = CategoricalCrossEntropy::Builder()
 //                                                                    .network(network)
 //                                                                    .predictions(predictions)
-//                                                                    .reportsElementwiseLoss()
+//                                                                    .reportsPerExampleLoss()
 //                                                                    .receivesOneHotLabels()
 //                                                                    .lossDataType(lossDataType)
 //                                                                    .labels(labels);
@@ -440,10 +440,10 @@
 //         categoricalCrossEntropyBuilder.reportsBatchLoss();
 //         lossDimensions = {1UL};
 //     } else if (lossShape == 1) {
-//         categoricalCrossEntropyBuilder.reportsClasswiseLoss();
+//         categoricalCrossEntropyBuilder.reportsPerOutputLoss();
 //         lossDimensions = {numClasses};
 //     } else if (lossShape == 2) {
-//         categoricalCrossEntropyBuilder.reportsElementwiseLoss();
+//         categoricalCrossEntropyBuilder.reportsPerExampleLoss();
 //         lossDimensions = {1UL};
 //     } else {
 //         categoricalCrossEntropyBuilder.reportsRawLoss();

@@ -1405,7 +1405,10 @@ target_compile_definitions(Thor PRIVATE
 )
 
 
-file(GLOB_RECURSE TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/test/*.cpp")
+file(GLOB_RECURSE TEST_SOURCES CONFIGURE_DEPENDS
+        "${CMAKE_SOURCE_DIR}/test/*.cpp"
+        "${CMAKE_SOURCE_DIR}/test/*.cu"
+)
 add_executable(thor_tests ${TEST_SOURCES})
 thor_apply_linker_settings(thor_tests)
 thor_enable_release_host_lto(thor_tests)
@@ -1424,9 +1427,12 @@ target_compile_definitions(thor_tests PRIVATE
 )
 
 target_compile_options(thor_tests PRIVATE
-        $<$<CONFIG:Release>:-O3>
-        $<$<CONFIG:RelWithDebInfo>:-O3>
-        $<$<CONFIG:Debug>:-O0 -ggdb>
+        $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:-O3>
+        $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Release>>:-O3>
+        $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:RelWithDebInfo>>:-O3>
+        $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:RelWithDebInfo>>:-O3>
+        "$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Debug>>:-O0;-ggdb>"
+        "$<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Debug>>:-O0;-g>"
 )
 
 add_executable(thor_embedding_sparse_backward_profile EXCLUDE_FROM_ALL
