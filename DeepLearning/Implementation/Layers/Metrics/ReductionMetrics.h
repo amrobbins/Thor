@@ -7,6 +7,7 @@
 #include "Utilities/Expression/Expression.h"
 #include "Utilities/Expression/FusedEquation.h"
 
+#include <limits>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -37,23 +38,42 @@ inline std::vector<uint64_t> squeezeAllButOneAxis(uint64_t rank) {
     return axes;
 }
 
-inline Expression reduce(Expression values, ExprOp op, const std::vector<uint64_t>& reductionAxes, const std::vector<uint64_t>& squeezeAxes) {
+inline Expression reduceValidValues(Expression values,
+                                    Expression validity,
+                                    ExprOp op,
+                                    const std::vector<uint64_t>& valueDimensions,
+                                    const std::vector<uint64_t>& reductionAxes,
+                                    const std::vector<uint64_t>& squeezeAxes) {
     switch (op) {
-        case ExprOp::REDUCE_AVG:
-            return values.reduce_mean(reductionAxes, squeezeAxes, DataType::FP32);
+        case ExprOp::REDUCE_AVG: {
+            uint64_t elementsPerExample = 1;
+            for (size_t axis = 1; axis < valueDimensions.size(); ++axis)
+                elementsPerExample *= valueDimensions[axis];
+            Expression numerator = (values * validity).reduce_sum(reductionAxes, squeezeAxes, DataType::FP32);
+            Expression validExamples = validity.reduce_sum(reductionAxes, squeezeAxes, DataType::FP32);
+            return numerator / (validExamples * Expression::constantScalar(static_cast<double>(elementsPerExample)));
+        }
         case ExprOp::REDUCE_SUM:
-            return values.reduce_sum(reductionAxes, squeezeAxes, DataType::FP32);
-        case ExprOp::REDUCE_MIN:
-            return values.reduce_min(reductionAxes, squeezeAxes, DataType::FP32);
-        case ExprOp::REDUCE_MAX:
-            return values.reduce_max(reductionAxes, squeezeAxes, DataType::FP32);
+            return (values * validity).reduce_sum(reductionAxes, squeezeAxes, DataType::FP32);
+        case ExprOp::REDUCE_MIN: {
+            Expression selected = Expression::where(validity > Expression(0.0),
+                                                    values,
+                                                    Expression(std::numeric_limits<float>::max()));
+            return selected.reduce_min(reductionAxes, squeezeAxes, DataType::FP32);
+        }
+        case ExprOp::REDUCE_MAX: {
+            Expression selected = Expression::where(validity > Expression(0.0),
+                                                    values,
+                                                    Expression(std::numeric_limits<float>::lowest()));
+            return selected.reduce_max(reductionAxes, squeezeAxes, DataType::FP32);
+        }
         default:
             throw std::invalid_argument("Unsupported reduction metric op.");
     }
 }
 
 inline DynamicExpression makeUnaryReductionExpression(ExprOp op) {
-    return DynamicExpression({"values"},
+    return DynamicExpression({"values", Thor::BATCH_VALIDITY_MASK_NAME},
                              {"metric"},
                              [op](const DynamicExpression::TensorMap& inputs,
                                   const DynamicExpression::TensorMap& outputs,
@@ -71,7 +91,10 @@ inline DynamicExpression makeUnaryReductionExpression(ExprOp op) {
                                  const std::vector<uint64_t> reductionAxes = allAxes(valueDims.size());
                                  const std::vector<uint64_t> squeezeAxes = squeezeAllButOneAxis(valueDims.size());
                                  Expression values = Expression::input("values", DataType::FP32, DataType::FP32);
-                                 Expression metric = reduce(values, op, reductionAxes, squeezeAxes);
+                                 Expression validity =
+                                     Expression::input(Thor::BATCH_VALIDITY_MASK_NAME, DataType::FP32, DataType::FP32);
+                                 Expression metric =
+                                     reduceValidValues(values, validity, op, valueDims, reductionAxes, squeezeAxes);
 
                                  ExpressionDefinition definition =
                                      ExpressionDefinition::fromOutputs(Expression::outputs({{"metric", metric}}));
@@ -86,8 +109,10 @@ inline DynamicExpression makeUnaryReductionExpression(ExprOp op) {
 }
 
 inline DynamicExpression makeWeightedMeanExpression() {
-    return DynamicExpression({"values", "weights"},
-                             {"metric"},
+    return DynamicExpression({"values", "weights", Thor::BATCH_VALIDITY_MASK_NAME},
+                             {"metric",
+                              Thor::METRIC_AGGREGATION_NUMERATOR_NAME,
+                              Thor::METRIC_AGGREGATION_DENOMINATOR_NAME},
                              [](const DynamicExpression::TensorMap& inputs,
                                 const DynamicExpression::TensorMap& outputs,
                                 Stream& stream) -> DynamicExpressionBuild {
@@ -111,13 +136,20 @@ inline DynamicExpression makeWeightedMeanExpression() {
                                  const std::vector<uint64_t> squeezeAxes = squeezeAllButOneAxis(valueDims.size());
                                  Expression values = Expression::input("values", DataType::FP32, DataType::FP32);
                                  Expression weights = Expression::input("weights", DataType::FP32, DataType::FP32);
-                                 Expression numerator = (values * weights).reduce_sum(reductionAxes, squeezeAxes, DataType::FP32);
-                                 Expression denominator = weights.reduce_sum(reductionAxes, squeezeAxes, DataType::FP32);
+                                 Expression validity =
+                                     Expression::input(Thor::BATCH_VALIDITY_MASK_NAME, DataType::FP32, DataType::FP32);
+                                 Expression effectiveWeights = weights * validity;
+                                 Expression numerator =
+                                     (values * effectiveWeights).reduce_sum(reductionAxes, squeezeAxes, DataType::FP32);
+                                 Expression denominator = effectiveWeights.reduce_sum(reductionAxes, squeezeAxes, DataType::FP32);
                                  Expression weightedMean = numerator / denominator;
                                  Expression metric = Expression::where(denominator == Expression(0.0), Expression(0.0), weightedMean);
 
-                                 ExpressionDefinition definition =
-                                     ExpressionDefinition::fromOutputs(Expression::outputs({{"metric", metric}}));
+                                 ExpressionDefinition definition = ExpressionDefinition::fromOutputs(Expression::outputs({
+                                     {"metric", metric},
+                                     {Thor::METRIC_AGGREGATION_NUMERATOR_NAME, numerator},
+                                     {Thor::METRIC_AGGREGATION_DENOMINATOR_NAME, denominator},
+                                 }));
                                  return DynamicExpressionBuild{
                                      std::make_shared<FusedEquation>(FusedEquation::compile(definition.outputs, stream.getGpuNum())),
                                      inputs,
@@ -130,8 +162,16 @@ inline DynamicExpression makeWeightedMeanExpression() {
 
 class UnaryReductionMetric : public CustomMetric {
    public:
-    UnaryReductionMetric(DynamicExpression expr, std::string displayName)
-        : CustomMetric(std::move(expr), "values", "", "metric", std::move(displayName)) {}
+    UnaryReductionMetric(DynamicExpression expr,
+                         std::string displayName,
+                         Thor::MetricAggregation aggregation)
+        : CustomMetric(std::move(expr),
+                       "values",
+                       "",
+                       "metric",
+                       std::move(displayName),
+                       aggregation,
+                       Thor::BATCH_VALIDITY_MASK_NAME) {}
 
     ~UnaryReductionMetric() override = default;
 
@@ -163,31 +203,50 @@ class UnaryReductionMetric : public CustomMetric {
 
 class Mean : public ReductionMetricDetail::UnaryReductionMetric {
    public:
-    Mean() : UnaryReductionMetric(ReductionMetricDetail::makeUnaryReductionExpression(ExprOp::REDUCE_AVG), "Mean") {}
+    Mean()
+        : UnaryReductionMetric(ReductionMetricDetail::makeUnaryReductionExpression(ExprOp::REDUCE_AVG),
+                               "Mean",
+                               Thor::MetricAggregation::MEAN_BY_EXAMPLE) {}
     std::string getType() override { return "Mean"; }
 };
 
 class Sum : public ReductionMetricDetail::UnaryReductionMetric {
    public:
-    Sum() : UnaryReductionMetric(ReductionMetricDetail::makeUnaryReductionExpression(ExprOp::REDUCE_SUM), "Sum") {}
+    Sum()
+        : UnaryReductionMetric(ReductionMetricDetail::makeUnaryReductionExpression(ExprOp::REDUCE_SUM),
+                               "Sum",
+                               Thor::MetricAggregation::SUM) {}
     std::string getType() override { return "Sum"; }
 };
 
 class Min : public ReductionMetricDetail::UnaryReductionMetric {
    public:
-    Min() : UnaryReductionMetric(ReductionMetricDetail::makeUnaryReductionExpression(ExprOp::REDUCE_MIN), "Min") {}
+    Min()
+        : UnaryReductionMetric(ReductionMetricDetail::makeUnaryReductionExpression(ExprOp::REDUCE_MIN),
+                               "Min",
+                               Thor::MetricAggregation::MIN) {}
     std::string getType() override { return "Min"; }
 };
 
 class Max : public ReductionMetricDetail::UnaryReductionMetric {
    public:
-    Max() : UnaryReductionMetric(ReductionMetricDetail::makeUnaryReductionExpression(ExprOp::REDUCE_MAX), "Max") {}
+    Max()
+        : UnaryReductionMetric(ReductionMetricDetail::makeUnaryReductionExpression(ExprOp::REDUCE_MAX),
+                               "Max",
+                               Thor::MetricAggregation::MAX) {}
     std::string getType() override { return "Max"; }
 };
 
 class WeightedMean : public CustomMetric {
    public:
-    WeightedMean() : CustomMetric(ReductionMetricDetail::makeWeightedMeanExpression(), "values", "weights", "metric", "Weighted Mean") {}
+    WeightedMean()
+        : CustomMetric(ReductionMetricDetail::makeWeightedMeanExpression(),
+                       "values",
+                       "weights",
+                       "metric",
+                       "Weighted Mean",
+                       Thor::MetricAggregation::RATIO,
+                       Thor::BATCH_VALIDITY_MASK_NAME) {}
 
     ~WeightedMean() override = default;
 

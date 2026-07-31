@@ -144,10 +144,15 @@ Batch IndexedNamedBatchSession::acquireBatch(ExampleType exampleType, uint64_t &
     }
 
     std::map<std::string, ThorImplementation::Tensor> tensors;
-    assembler->acquireBatch(tensors, batchNum);
+    IndexedReadyBatch readyBatch;
+    assembler->acquireBatch(tensors, readyBatch);
+    batchNum = readyBatch.batchNum;
     auto sourceTensors = std::make_shared<std::map<std::string, ThorImplementation::Tensor>>(
         std::move(tensors));
     Batch batch = batchFromTensorMap(*sourceTensors);
+    if (readyBatch.validExampleCount < getBatchSize()) {
+        batch.setValidExampleCount(readyBatch.validExampleCount);
+    }
 
     std::set<std::string> fieldNames;
     for (const auto &[name, tensor] : *sourceTensors) {

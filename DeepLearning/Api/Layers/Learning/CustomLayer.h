@@ -1,12 +1,15 @@
 #pragma once
 #include "DeepLearning/Implementation/ThorError.h"
 
+#include "DeepLearning/Api/BatchValidity.h"
+
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
 #include "DeepLearning/Api/Parameter/BoundParameter.h"
 #include "DeepLearning/Api/Parameter/ParameterSpecification.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 #include "Utilities/Expression/DynamicExpression.h"
 
+#include <algorithm>
 #include <memory>
 #include <optional>
 #include <set>
@@ -26,14 +29,18 @@ class CustomLayer : public TrainableLayer {
 
     CustomLayer(ThorImplementation::DynamicExpression expr,
                 const std::vector<TensorMap>& inputInterfaces,
-                std::vector<std::shared_ptr<ParameterSpecification>> parameters = {});
+                std::vector<std::shared_ptr<ParameterSpecification>> parameters = {},
+                bool usesBatchValidity = false,
+                bool requiresFullBatch = false);
 
     CustomLayer(ThorImplementation::DynamicExpression expr,
                 std::vector<std::string> inputNames,
                 std::vector<std::string> outputNames,
                 const std::vector<TensorMap>& inputInterfaces,
                 const std::vector<TensorMap>& outputInterfaces,
-                std::vector<std::shared_ptr<ParameterSpecification>> parameters = {});
+                std::vector<std::shared_ptr<ParameterSpecification>> parameters = {},
+                bool usesBatchValidity = false,
+                bool requiresFullBatch = false);
 
     const std::vector<std::string>& getInputNames() const { return inputNames; }
     const std::vector<std::string>& getOutputNames() const { return outputNames; }
@@ -42,6 +49,8 @@ class CustomLayer : public TrainableLayer {
     TensorMap getOutputInterfaceByIndex(uint32_t interfaceIndex = 0) const;
     Tensor getOutput(const std::string& outputName, uint32_t interfaceIndex = 0) const;
     const ThorImplementation::DynamicExpression& getExpression() const { return expr; }
+    bool usesBatchValidity() const { return batchValidityMaskEnabled; }
+    bool requiresFullBatch() const { return fullBatchRequired; }
     uint64_t getParameterizableId() const override { return getId(); }
 
     nlohmann::json serialize(thor_file::TarWriter& archiveWriter,
@@ -74,7 +83,9 @@ class CustomLayer : public TrainableLayer {
                 const std::vector<TensorMap>& inputInterfaces,
                 const std::vector<TensorMap>& outputInterfaces,
                 std::vector<std::shared_ptr<ParameterSpecification>> parameters,
-                SerializationContract serializationContract);
+                SerializationContract serializationContract,
+                bool usesBatchValidity = false,
+                bool requiresFullBatch = false);
 
     std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
                                                      std::shared_ptr<ThorImplementation::Layer> drivingLayer,
@@ -90,7 +101,9 @@ class CustomLayer : public TrainableLayer {
         const std::vector<std::shared_ptr<ThorImplementation::PhysicalParameter>>& physicalParameters,
         bool inferenceOnly,
         int64_t stampedId,
-        std::vector<ThorImplementation::CustomLayer::DeclaredOutputDescriptor> declaredOutputDescriptors) const;
+        std::vector<ThorImplementation::CustomLayer::DeclaredOutputDescriptor> declaredOutputDescriptors,
+        bool usesBatchValidity,
+        bool requiresFullBatch) const;
 
     void compile(std::shared_ptr<ThorImplementation::Layer> physicalLayer) override { physicalLayer->compile(); }
 
@@ -142,6 +155,8 @@ class CustomLayer : public TrainableLayer {
     uint32_t encodeOutputConnection(uint32_t interfaceIndex, uint32_t outputPortIndex) const;
 
     ThorImplementation::DynamicExpression expr;
+    bool batchValidityMaskEnabled = false;
+    bool fullBatchRequired = false;
     mutable std::shared_ptr<const ThorImplementation::ExpressionDefinition> serializableExpressionDefinition;
     mutable std::string serializationRejectionReason;
     mutable bool serializationAnalysisPerformed = false;
@@ -174,14 +189,28 @@ class CustomLayer::Builder {
         THOR_THROW_IF_FALSE(_network.has_value());
         THOR_THROW_IF_FALSE(_expr != nullptr);
         THOR_THROW_IF_FALSE(!_inputInterfaces.empty());
-        if (_inputNames.empty())
+        if (_inputNames.empty()) {
             _inputNames = _expr->getExpectedInputNames();
+            if (_usesBatchValidity) {
+                _inputNames.erase(
+                    std::remove(_inputNames.begin(), _inputNames.end(), std::string(Thor::BATCH_VALIDITY_MASK_NAME)),
+                    _inputNames.end());
+            }
+        }
         if (_outputNames.empty())
             _outputNames = _expr->getExpectedOutputNames();
         THOR_THROW_IF_FALSE(!_inputNames.empty());
         THOR_THROW_IF_FALSE(!_outputNames.empty());
 
-        CustomLayer customLayer(*_expr, _inputNames, _outputNames, _inputInterfaces, _outputInterfaces, _parameters);
+        THOR_THROW_IF_FALSE(!(_usesBatchValidity && _requiresFullBatch));
+        CustomLayer customLayer(*_expr,
+                                _inputNames,
+                                _outputNames,
+                                _inputInterfaces,
+                                _outputInterfaces,
+                                _parameters,
+                                _usesBatchValidity,
+                                _requiresFullBatch);
 
         if (_layerOptimizer != nullptr)
             customLayer.attachDefaultOptimizer(_layerOptimizer);
@@ -255,6 +284,25 @@ class CustomLayer::Builder {
         return *this;
     }
 
+    /**
+     * Declares that the expression consumes runtime batch-validity information. Thor currently exposes that information
+     * through the reserved FP32 input Thor::BATCH_VALIDITY_MASK_NAME. The mask has shape [batch, 1, ...], contains a
+     * contiguous prefix of ones followed by zeros, and broadcasts over each example's remaining dimensions.
+     */
+    virtual CustomLayer::Builder& usesBatchValidity() {
+        THOR_THROW_IF_FALSE(!_usesBatchValidity);
+        THOR_THROW_IF_FALSE(!_requiresFullBatch);
+        _usesBatchValidity = true;
+        return *this;
+    }
+
+    virtual CustomLayer::Builder& requiresFullBatch() {
+        THOR_THROW_IF_FALSE(!_requiresFullBatch);
+        THOR_THROW_IF_FALSE(!_usesBatchValidity);
+        _requiresFullBatch = true;
+        return *this;
+    }
+
    private:
     std::optional<Network*> _network;
     std::shared_ptr<ThorImplementation::DynamicExpression> _expr;
@@ -264,6 +312,8 @@ class CustomLayer::Builder {
     std::vector<TensorMap> _outputInterfaces;
     std::vector<std::shared_ptr<ParameterSpecification>> _parameters;
     std::shared_ptr<Optimizer> _layerOptimizer;
+    bool _usesBatchValidity = false;
+    bool _requiresFullBatch = false;
 };
 
 }  // namespace Thor

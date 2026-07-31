@@ -292,29 +292,39 @@ void RMSNorm::computeFeatureOut(uint32_t connectionNumber) {
 
 optional<Event> RMSNorm::computeErrorOutAccumulateWeightsGradienFused(uint32_t connectionNumber,
                                                                       bool clearWeightsGradientFirstIfFused) {
-    if (!errorInputs[connectionNumber].has_value())
+    if (!errorInputs[connectionNumber].has_value() || isInferenceOnly())
         return nullopt;
-    if (isInferenceOnly())
-        return nullopt;
+
+    THOR_THROW_IF_FALSE(featureInputs[connectionNumber].has_value());
+    THOR_THROW_IF_FALSE(connectionNumber < scratchDScale.size());
 
     auto weightsParameter = getParameter("weights");
-    THOR_THROW_IF_FALSE(weightsParameter->hasOptimizer());
+    const bool needInputGradient = errorOutputs.size() > connectionNumber && errorOutputs[connectionNumber].has_value();
+    const bool needWeightsGradient = weightsParameter->isTrainingEnabled();
+    if (!needInputGradient && !needWeightsGradient)
+        return nullopt;
 
-    shared_ptr<Optimizer> weightsOptimizer = weightsParameter->getOptimizer();
-    THOR_THROW_IF_FALSE(weightsOptimizer != nullptr);
-    THOR_THROW_IF_FALSE(weightsOptimizer->getWeightsGradient().has_value());
-
-    optional<Tensor> errorOut = nullopt;
-    if (errorOutputs.size() > connectionNumber && errorOutputs[connectionNumber].has_value()) {
-        errorOut = errorOutputs[connectionNumber];
-    } else {
-        errorOut = scratchErrorOutput;
+    optional<Tensor> weightsGradient = nullopt;
+    if (needWeightsGradient) {
+        THOR_THROW_IF_FALSE(weightsParameter->hasOptimizer());
+        shared_ptr<Optimizer> optimizer = weightsParameter->getOptimizer();
+        THOR_THROW_IF_FALSE(optimizer != nullptr);
+        weightsGradient = optimizer->getWeightsGradient();
+        THOR_THROW_IF_FALSE(weightsGradient.has_value());
     }
-    THOR_THROW_IF_FALSE(errorOut.has_value());
-    THOR_THROW_IF_FALSE(gradientUpdateStream.has_value());
-    THOR_THROW_IF_FALSE(featureInputs[connectionNumber].has_value());
 
-    Tensor dscaleOutput = clearWeightsGradientFirstIfFused ? weightsOptimizer->getWeightsGradient().value() : scratchDScale[connectionNumber];
+    optional<Tensor> errorOut = needInputGradient ? errorOutputs[connectionNumber] : scratchErrorOutput;
+    THOR_THROW_IF_FALSE(errorOut.has_value());
+
+    Tensor dscaleOutput = needWeightsGradient && clearWeightsGradientFirstIfFused
+                              ? weightsGradient.value()
+                              : scratchDScale[connectionNumber];
+
+    Stream executionStream = streams[connectionNumber];
+    if (needWeightsGradient) {
+        THOR_THROW_IF_FALSE(gradientUpdateStream.has_value());
+        executionStream = gradientUpdateStream.value();
+    }
 
     const Tensor& input = featureInputs[connectionNumber].value();
     CudnnRmsNormDescriptor descriptor;
@@ -335,16 +345,16 @@ optional<Event> RMSNorm::computeErrorOutAccumulateWeightsGradienFused(uint32_t c
     args.dx = errorOut.value();
     args.dscale = dscaleOutput;
 
-    CudnnRmsNorm::instance().backward(descriptor, args, gradientUpdateStream.value());
+    CudnnRmsNorm::instance().backward(descriptor, args, executionStream);
 
-    if (!clearWeightsGradientFirstIfFused) {
-        launchAccumulateBatchNormGradientFp32(weightsOptimizer->getWeightsGradient().value().getMemPtr<float>(),
+    if (needWeightsGradient && !clearWeightsGradientFirstIfFused) {
+        launchAccumulateBatchNormGradientFp32(weightsGradient->getMemPtr<float>(),
                                              scratchDScale[connectionNumber].getMemPtr<float>(),
                                              normalizedFeatureCount,
-                                             gradientUpdateStream.value());
+                                             executionStream);
     }
 
-    return gradientUpdateStream.value().putEvent();
+    return executionStream.putEvent();
 }
 
 void RMSNorm::accumulateWeightsGradient(uint32_t connectionNumber, bool clearGradientFirst) {

@@ -31,6 +31,7 @@ json Metric::architectureJson() const {
     j["factory"] = Layer::Factory::Metric.value();
     j["version"] = getLayerVersion();
     j["layer_type"] = to_snake_case(getLayerType());
+    j["aggregation"] = getAggregation();
 
     // Input connections
     j["predictions"] = getPredictions().architectureJson();

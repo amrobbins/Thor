@@ -2423,3 +2423,69 @@ TEST(EmbeddingSparseBackwardTest, EndToEndNesterovSgdTwoPassesMatchUniqueRowRefe
     Tensor velocity = f.optimizer->getOptimizerParameterTensor("velocity");
     expectAllClose(copyGpuFloatTensorToValues(velocity, gradientStream), expected.velocity, 3e-5f, 3e-5f, "velocity");
 }
+
+TEST(EmbeddingSparseBackwardTest, PartialBatchDuplicateTailWithZeroGradientMatchesValidPrefixUpdate) {
+    constexpr uint64_t vocabularySize = 5;
+    constexpr uint64_t embeddingDim = 3;
+    constexpr uint32_t physicalBatchCapacity = 2;
+    constexpr uint32_t validExampleCount = 1;
+    constexpr float learningRate = 0.2f;
+
+    EmbeddingNetworkFixture f = makeEmbeddingNetwork(vocabularySize,
+                                                     embeddingDim,
+                                                     /*indexDims=*/{physicalBatchCapacity, 2},
+                                                     DataType::UINT32,
+                                                     DataType::FP32,
+                                                     std::nullopt,
+                                                     learningRate,
+                                                     /*decay=*/0.0f,
+                                                     /*momentum=*/0.0f,
+                                                     /*useNesterovMomentum=*/false);
+
+    const std::vector<float> initialWeights{
+        1.0f, 2.0f, 3.0f,
+        4.0f, 5.0f, 6.0f,
+        7.0f, 8.0f, 9.0f,
+        10.0f, 11.0f, 12.0f,
+        13.0f, 14.0f, 15.0f,
+    };
+    Stream stream = f.embedding->getStreams()[0];
+    Tensor weights = f.weightsParameter->getStorage().value();
+    Tensor cpuWeights = makeCpuFloatTensor(DataType::FP32, {vocabularySize, embeddingDim}, initialWeights);
+    copyCpuToExistingGpu(weights, cpuWeights, stream);
+
+    // The invalid physical row repeats the final valid example, matching the
+    // exact-tail batch-session contract. Its upstream gradient is zero.
+    const std::vector<uint32_t> indices32{1, 2, 1, 2};
+    Tensor cpuIndices = makeCpuUint32Tensor({physicalBatchCapacity, 2}, indices32);
+    const std::vector<float> upstream{
+        1.0f, 2.0f, 3.0f,
+        4.0f, 5.0f, 6.0f,
+        0.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 0.0f,
+    };
+
+    SgdReferenceState expected;
+    expected.weights = initialWeights;
+    applyEmbeddingSgdReferencePass(expected,
+                                   toUint64(indices32),
+                                   upstream,
+                                   vocabularySize,
+                                   embeddingDim,
+                                   std::nullopt,
+                                   validExampleCount,
+                                   learningRate,
+                                   /*momentum=*/0.0f,
+                                   /*useNesterovMomentum=*/false);
+
+    runEmbeddingTrainingPass(f, cpuIndices, upstream, validExampleCount);
+
+    Stream gradientStream = f.embedding->getGradientUpdateStream().value();
+    expectAllClose(copyGpuFloatTensorToValues(weights, gradientStream), expected.weights, 2e-5f, 2e-5f, "partial batch weights");
+    ASSERT_TRUE(f.optimizer->getSparseRowGradient().has_value());
+    SparseRowGradient sparseGradient = f.optimizer->getSparseRowGradient().value();
+    EXPECT_EQ(copyGpuRowTensorToUint64Values(sparseGradient.numRows, gradientStream)[0], 2u);
+    std::vector<uint64_t> sparseRows = copyGpuRowTensorToUint64Values(sparseGradient.rows, gradientStream);
+    sparseRows.resize(2);
+    EXPECT_EQ(sparseRows, (std::vector<uint64_t>{1, 2}));
+}

@@ -820,11 +820,63 @@ void TrainingRunsStatsReporter::updateSmoothedLossState(SmoothedScalarState& los
     }
 }
 
+void TrainingRunsStatsReporter::updateSmoothedMetricState(
+    SmoothedMetricState& metricState,
+    const TrainingStatsSnapshot& stats,
+    const std::string& metricName,
+    double reportedValue) {
+    const MetricBatchStat statistic =
+        resolveMetricBatchStat(stats, metricName, reportedValue);
+
+    if (metricState.currentEpoch != stats.epoch) {
+        if (metricState.currentEpoch != 0 &&
+            metricState.currentEpochAccumulator.has_value()) {
+            metricState.previousEpochValue =
+                metricState.currentEpochAccumulator->value();
+        }
+        metricState.currentEpoch = stats.epoch;
+        metricState.currentEpochValueCount = 0;
+        metricState.currentEpochAccumulator.emplace(statistic.aggregation);
+    } else if (!metricState.currentEpochAccumulator.has_value()) {
+        metricState.currentEpochAccumulator.emplace(statistic.aggregation);
+    }
+
+    metricState.currentEpochAccumulator->add(statistic);
+    metricState.currentEpochValueCount += 1;
+    const std::optional<double> currentEpochValue =
+        metricState.currentEpochAccumulator->value();
+    if (!currentEpochValue.has_value()) {
+        return;
+    }
+
+    if (!metricState.previousEpochValue.has_value()) {
+        // The first observed epoch has no stable previous-epoch value. Report
+        // the exact running aggregate for the metric's declared contract.
+        metricState.displayedValue = currentEpochValue;
+        return;
+    }
+
+    double progress = 1.0;
+    if (stats.stepsPerEpoch > 0) {
+        const uint64_t effectiveStepInEpoch =
+            stats.stepInEpoch > 0 ? stats.stepInEpoch
+                                  : metricState.currentEpochValueCount;
+        progress = static_cast<double>(effectiveStepInEpoch) /
+                   static_cast<double>(stats.stepsPerEpoch);
+        progress = std::clamp(progress, 0.0, 1.0);
+    }
+
+    metricState.displayedValue =
+        (metricState.previousEpochValue.value() +
+         currentEpochValue.value() * progress) /
+        (1.0 + progress);
+}
+
 void TrainingRunsStatsReporter::updateSmoothedMetricStates(
-    std::unordered_map<std::string, SmoothedScalarState>& metricStates,
+    std::unordered_map<std::string, SmoothedMetricState>& metricStates,
     const TrainingStatsSnapshot& stats) {
     for (const auto& [name, value] : stats.metrics) {
-        updateSmoothedScalarState(metricStates[name], stats, value);
+        updateSmoothedMetricState(metricStates[name], stats, name, value);
     }
 }
 
@@ -833,8 +885,13 @@ std::optional<double> TrainingRunsStatsReporter::displayedValueFromState(
     return scalarState.displayedValue;
 }
 
+std::optional<double> TrainingRunsStatsReporter::displayedValueFromState(
+    const SmoothedMetricState& metricState) {
+    return metricState.displayedValue;
+}
+
 std::unordered_map<std::string, double> TrainingRunsStatsReporter::displayedMetricValues(
-    const std::unordered_map<std::string, SmoothedScalarState>& metricStates) {
+    const std::unordered_map<std::string, SmoothedMetricState>& metricStates) {
     std::unordered_map<std::string, double> values;
     values.reserve(metricStates.size());
     for (const auto& [name, state] : metricStates) {

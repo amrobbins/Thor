@@ -152,22 +152,17 @@ namespace Thor {
 
 CustomLayer::CustomLayer(DynamicExpression expr,
                          const std::vector<TensorMap>& inputInterfaces,
-                         std::vector<std::shared_ptr<ParameterSpecification>> parameters)
-    : CustomLayer(std::move(expr), {}, {}, inputInterfaces, {}, std::move(parameters)) {}
-
-CustomLayer::CustomLayer(DynamicExpression expr,
-                         std::vector<std::string> inputNames,
-                         std::vector<std::string> outputNames,
-                         const std::vector<TensorMap>& inputInterfaces,
-                         const std::vector<TensorMap>& outputInterfaces,
-                         std::vector<std::shared_ptr<ParameterSpecification>> parameters)
+                         std::vector<std::shared_ptr<ParameterSpecification>> parameters,
+                         bool usesBatchValidity,
+                         bool requiresFullBatch)
     : CustomLayer(std::move(expr),
-                  std::move(inputNames),
-                  std::move(outputNames),
+                  {},
+                  {},
                   inputInterfaces,
-                  outputInterfaces,
+                  {},
                   std::move(parameters),
-                  SerializationContract::REQUIRE_EXPRESSION_DEFINITION) {}
+                  usesBatchValidity,
+                  requiresFullBatch) {}
 
 CustomLayer::CustomLayer(DynamicExpression expr,
                          std::vector<std::string> inputNames,
@@ -175,10 +170,40 @@ CustomLayer::CustomLayer(DynamicExpression expr,
                          const std::vector<TensorMap>& inputInterfaces,
                          const std::vector<TensorMap>& outputInterfaces,
                          std::vector<std::shared_ptr<ParameterSpecification>> parameters,
-                         SerializationContract serializationContract)
-    : TrainableLayer(std::move(parameters)), expr(std::move(expr)) {
-    if (inputNames.empty())
+                         bool usesBatchValidity,
+                         bool requiresFullBatch)
+    : CustomLayer(std::move(expr),
+                  std::move(inputNames),
+                  std::move(outputNames),
+                  inputInterfaces,
+                  outputInterfaces,
+                  std::move(parameters),
+                  SerializationContract::REQUIRE_EXPRESSION_DEFINITION,
+                  usesBatchValidity,
+                  requiresFullBatch) {}
+
+CustomLayer::CustomLayer(DynamicExpression expr,
+                         std::vector<std::string> inputNames,
+                         std::vector<std::string> outputNames,
+                         const std::vector<TensorMap>& inputInterfaces,
+                         const std::vector<TensorMap>& outputInterfaces,
+                         std::vector<std::shared_ptr<ParameterSpecification>> parameters,
+                         SerializationContract serializationContract,
+                         bool usesBatchValidity,
+                         bool requiresFullBatch)
+    : TrainableLayer(std::move(parameters)),
+      expr(std::move(expr)),
+      batchValidityMaskEnabled(usesBatchValidity),
+      fullBatchRequired(requiresFullBatch) {
+    if (batchValidityMaskEnabled && fullBatchRequired)
+        throw runtime_error("CustomLayer cannot both use batch validity and require a full batch.");
+    if (inputNames.empty()) {
         inputNames = this->expr.getExpectedInputNames();
+        if (batchValidityMaskEnabled) {
+            inputNames.erase(std::remove(inputNames.begin(), inputNames.end(), std::string(Thor::BATCH_VALIDITY_MASK_NAME)),
+                             inputNames.end());
+        }
+    }
     if (outputNames.empty())
         outputNames = this->expr.getExpectedOutputNames();
 
@@ -362,6 +387,12 @@ void CustomLayer::validateExpressionCanBindFeatureAndParameterInputs() const {
             throw runtime_error("CustomLayer expression expected input names do not include feature input '" + name + "'.");
         }
     }
+    const bool expressionUsesValidityMask = expected.contains(Thor::BATCH_VALIDITY_MASK_NAME);
+    if (batchValidityMaskEnabled != expressionUsesValidityMask) {
+        throw runtime_error(batchValidityMaskEnabled
+                                ? "CustomLayer usesBatchValidity() requires the expression to consume Thor::BATCH_VALIDITY_MASK_NAME."
+                                : "CustomLayer expression consumes Thor::BATCH_VALIDITY_MASK_NAME but the layer did not declare usesBatchValidity().");
+    }
     for (const auto& parameter : parameters) {
         if (parameter == nullptr)
             throw runtime_error("CustomLayer contains a null ParameterSpecification.");
@@ -423,6 +454,15 @@ CustomLayer::SerializationProbe CustomLayer::buildExpressionForBatch(const Tenso
 
     ThorImplementation::PhysicalParameter::StorageContext fakeStorageContext(fakeFeatureInputs);
     PhysicalTensorMap fakeAllInputs = fakeFeatureInputs;
+    if (batchValidityMaskEnabled) {
+        THOR_THROW_IF_FALSE(!inputNames.empty());
+        const PhysicalTensor& reference = fakeFeatureInputs.at(inputNames.front());
+        std::vector<uint64_t> maskDimensions(reference.getDimensions().size(), 1);
+        maskDimensions.front() = batchSize;
+        fakeAllInputs.emplace(Thor::BATCH_VALIDITY_MASK_NAME,
+                              PhysicalTensor(reference.getPlacement(),
+                                             ThorImplementation::TensorDescriptor(ThorImplementation::DataType::FP32, maskDimensions)));
+    }
     for (const auto& apiParameter : parameters) {
         std::shared_ptr<ThorImplementation::PhysicalParameter> physicalParameter = apiParameter->stamp();
         physicalParameter->compileStorage(fakeStorageContext);
@@ -883,6 +923,8 @@ uint64_t CustomLayer::getFirstInstanceMemRequirementInBytes(uint32_t batchSize, 
     }
     for (const Tensor& tensor : featureOutputs)
         totalBytes += tensor.getTotalSizeInBytes();
+    if (batchValidityMaskEnabled)
+        totalBytes += sizeof(float);
     return totalBytes * std::max<uint32_t>(1, batchSize);
 }
 
@@ -922,7 +964,9 @@ std::shared_ptr<ThorImplementation::Layer> CustomLayer::stamp(ThorImplementation
                                              physicalParameters,
                                              inferenceOnly,
                                              Layer::getId(),
-                                             std::move(declaredOutputDescriptors));
+                                             std::move(declaredOutputDescriptors),
+                                             batchValidityMaskEnabled,
+                                             fullBatchRequired);
     physicalLayer->setLayerName(getLayerType());
     return physicalLayer;
 }
@@ -935,7 +979,9 @@ std::shared_ptr<ThorImplementation::CustomLayer> CustomLayer::createPhysicalLaye
     const std::vector<std::shared_ptr<ThorImplementation::PhysicalParameter>>& physicalParameters,
     bool inferenceOnly,
     int64_t stampedId,
-    std::vector<ThorImplementation::CustomLayer::DeclaredOutputDescriptor> declaredOutputDescriptors) const {
+    std::vector<ThorImplementation::CustomLayer::DeclaredOutputDescriptor> declaredOutputDescriptors,
+    bool usesBatchValidity,
+    bool requiresFullBatch) const {
     return std::make_shared<ThorImplementation::CustomLayer>(std::move(expression),
                                                               std::move(physicalInputNames),
                                                               std::move(physicalOutputNames),
@@ -943,7 +989,9 @@ std::shared_ptr<ThorImplementation::CustomLayer> CustomLayer::createPhysicalLaye
                                                               physicalParameters,
                                                               inferenceOnly,
                                                               stampedId,
-                                                              std::move(declaredOutputDescriptors));
+                                                              std::move(declaredOutputDescriptors),
+                                                              usesBatchValidity,
+                                                              requiresFullBatch);
 }
 
 json CustomLayer::architectureJson() const {
@@ -959,6 +1007,8 @@ json CustomLayer::architectureJson() const {
     j["layer_type"] = "custom_layer";
     j["input_names"] = inputNames;
     j["output_names"] = outputNames;
+    j["uses_batch_validity"] = batchValidityMaskEnabled;
+    j["requires_full_batch"] = fullBatchRequired;
     j["input_interfaces"] = json::array();
     j["output_interfaces"] = json::array();
     j["parameters"] = json::object();
@@ -997,6 +1047,10 @@ void CustomLayer::deserialize(std::shared_ptr<thor_file::TarReader>& archiveRead
 
     std::vector<std::string> inputNames = j.at("input_names").get<std::vector<std::string>>();
     std::vector<std::string> outputNames = j.at("output_names").get<std::vector<std::string>>();
+    if (j.contains("uses_batch_validity_mask"))
+        throw runtime_error("CustomLayer field uses_batch_validity_mask is no longer supported; use uses_batch_validity.");
+    const bool usesBatchValidity = j.at("uses_batch_validity").get<bool>();
+    const bool requiresFullBatch = j.at("requires_full_batch").get<bool>();
     ThorImplementation::ExpressionDefinition expressionDefinition = ThorImplementation::ExpressionDefinition::deserialize(
         j.at("expression"),
         network != nullptr && network->allowUnsafeLoadedCudaKernelSourceCompilation(),
@@ -1038,7 +1092,9 @@ void CustomLayer::deserialize(std::shared_ptr<thor_file::TarReader>& archiveRead
                             std::move(outputNames),
                             inputInterfaces,
                             outputInterfaces,
-                            std::move(parameters));
+                            std::move(parameters),
+                            usesBatchValidity,
+                            requiresFullBatch);
     customLayer.initialized = true;
     customLayer.addToNetwork(network);
 }

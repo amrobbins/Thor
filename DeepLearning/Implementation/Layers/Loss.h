@@ -1,11 +1,14 @@
 #pragma once
 
-#include <optional>
-#include <stdexcept>
-#include "DeepLearning/Implementation/ThorError.h"
-
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "DeepLearning/Implementation/Layers/LayerSubmitDiagnostics.h"
+#include "DeepLearning/Implementation/ThorError.h"
+#include "Utilities/TensorOperations/Masking/BatchValidity.h"
+
+#include <limits>
+#include <optional>
+#include <stdexcept>
+#include <string>
 
 namespace ThorImplementation {
 
@@ -135,10 +138,11 @@ class Loss : public Layer {
         Layer::initialize();
         featureInputReceived = false;
         labelsReceived = false;
-        currentBatchSize = 0;
+        currentValidExampleCount = 0;
+        batchCardinalitySet = false;
     }
 
-    void forward(std::optional<Tensor> inputTensor, bool validationPass, uint32_t batchSize = 0) override {
+    void forward(std::optional<Tensor> inputTensor, bool validationPass, uint32_t validExampleCount = 0) override {
         const bool emitDiagnostics = layerSubmitDiagnosticsActive();
         const auto totalStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
         uint64_t arrivalMicros = 0;
@@ -162,8 +166,7 @@ class Loss : public Layer {
         // that the layer is ready to perform the forward pass.
         if (inputTensor.has_value()) {
             const auto arrivalStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
-            if (batchSize != 0)
-                currentBatchSize = batchSize;
+            recordBatchCardinality(validExampleCount);
             if (inputTensor.value() == featureInput.value())
                 forwardFeatures(inputTensor.value(), validationPass);
             else if (inputTensor.value() == labelsInput.value())
@@ -179,9 +182,11 @@ class Loss : public Layer {
             THOR_THROW_IF_FALSE(labelsReceived);
             featureInputReceived = false;
             labelsReceived = false;
+            finishBatchCardinality();
 
             const auto inferStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
             infer(featureInput, featureOutput, stream);
+            maskInvalidLossTail();
             if (emitDiagnostics) {
                 inferMicros = layerSubmitDiagnosticElapsedMicros(inferStart, layerSubmitDiagnosticNow());
             }
@@ -223,7 +228,7 @@ class Loss : public Layer {
         advanceDataIfReady(validationPass);
     }
 
-    void backward(std::optional<Tensor> errorInput, uint32_t batchSize = 0) override {
+    void backward(std::optional<Tensor> errorInput, uint32_t validExampleCount = 0) override {
         const bool emitDiagnostics = layerSubmitDiagnosticsActive();
         const auto totalStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
         uint64_t backPropMicros = 0;
@@ -236,10 +241,14 @@ class Loss : public Layer {
         THOR_THROW_IF_FALSE(errorOutput.value().isInitialized());
         THOR_THROW_IF_FALSE(labelsStream.isInitialized());
         THOR_THROW_IF_FALSE(!errorInput.has_value());
+        const uint32_t effectiveValidExampleCount =
+            validExampleCount == 0 ? getValidExampleCount() : validExampleCount;
+        THOR_THROW_IF_FALSE(effectiveValidExampleCount == getValidExampleCount());
 
         if (errorOutput.has_value()) {
             const auto backPropStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
             backProp(labelsInput, featureInput, errorOutput, stream);
+            maskInvalidPredictionGradientTail();
             if (emitDiagnostics) {
                 backPropMicros = layerSubmitDiagnosticElapsedMicros(backPropStart, layerSubmitDiagnosticNow());
             }
@@ -252,10 +261,9 @@ class Loss : public Layer {
         }
 
         if (previousLayer.has_value()) {
-            const uint32_t effectiveBatchSize = batchSize != 0 ? batchSize : currentBatchSize;
             const auto upstreamStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
             // Expecting to get tail-recursion optimization of -O3 so that stack space does not build up here.
-            previousLayer.value()->backward(errorOutput, effectiveBatchSize);
+            previousLayer.value()->backward(errorOutput, effectiveValidExampleCount);
             if (emitDiagnostics) {
                 upstreamMicros = layerSubmitDiagnosticElapsedMicros(upstreamStart, layerSubmitDiagnosticNow());
             }
@@ -335,7 +343,69 @@ class Loss : public Layer {
     bool labelsReceived;
     bool trainingActive = true;
     bool trainingBackpropPathPruned = false;
-    uint32_t currentBatchSize = 0;
+    uint32_t currentValidExampleCount = 0;
+    bool batchCardinalitySet = false;
+
+    uint32_t getPhysicalBatchCapacity() const {
+        THOR_THROW_IF_FALSE(featureInput.has_value());
+        const std::vector<uint64_t> dimensions = featureInput.value().getDimensions();
+        THOR_THROW_IF_FALSE(!dimensions.empty());
+        THOR_THROW_IF_FALSE(dimensions.front() >= 1);
+        THOR_THROW_IF_FALSE(dimensions.front() <= std::numeric_limits<uint32_t>::max());
+        return static_cast<uint32_t>(dimensions.front());
+    }
+
+    uint32_t getValidExampleCount() const {
+        THOR_THROW_IF_FALSE(currentValidExampleCount != 0);
+        const uint32_t physicalBatchCapacity = getPhysicalBatchCapacity();
+        const uint32_t validExampleCount = currentValidExampleCount;
+        THOR_THROW_IF_FALSE(validExampleCount >= 1);
+        THOR_THROW_IF_FALSE(validExampleCount <= physicalBatchCapacity);
+        return validExampleCount;
+    }
+
+    void recordBatchCardinality(uint32_t validExampleCount) {
+        const uint32_t physicalBatchCapacity = getPhysicalBatchCapacity();
+        const uint32_t resolvedValidExampleCount =
+            validExampleCount == 0 ? physicalBatchCapacity : validExampleCount;
+        THOR_THROW_IF_FALSE(resolvedValidExampleCount >= 1);
+        THOR_THROW_IF_FALSE(resolvedValidExampleCount <= physicalBatchCapacity);
+        if (batchCardinalitySet) {
+            THOR_THROW_IF_FALSE(currentValidExampleCount == resolvedValidExampleCount);
+            return;
+        }
+        currentValidExampleCount = resolvedValidExampleCount;
+        batchCardinalitySet = true;
+    }
+
+    void finishBatchCardinality() {
+        THOR_THROW_IF_FALSE(batchCardinalitySet);
+        batchCardinalitySet = false;
+    }
+
+    void maskInvalidBatchTail(Tensor& tensor, const char* tensorRole) {
+        const uint32_t physicalBatchCapacity = getPhysicalBatchCapacity();
+        const uint32_t validExampleCount = getValidExampleCount();
+        if (validExampleCount == physicalBatchCapacity)
+            return;
+
+        const std::vector<uint64_t> dimensions = tensor.getDimensions();
+        if (dimensions.empty() || dimensions.front() != physicalBatchCapacity) {
+            throw std::logic_error(std::string("Partial batches require ") + tensorRole +
+                                   " to preserve the physical leading batch axis.");
+        }
+        zeroInvalidBatchTail(tensor, validExampleCount, stream);
+    }
+
+    void maskInvalidLossTail() {
+        THOR_THROW_IF_FALSE(featureOutput.has_value());
+        maskInvalidBatchTail(featureOutput.value(), "the raw loss tensor");
+    }
+
+    void maskInvalidPredictionGradientTail() {
+        if (errorOutput.has_value())
+            maskInvalidBatchTail(errorOutput.value(), "the prediction-gradient tensor");
+    }
 
     virtual void advanceDataIfReady(bool validationPass) {
         if (featureInputReceived && labelsReceived) {
@@ -347,14 +417,14 @@ class Loss : public Layer {
         }
 
         if (nextLayer.has_value())
-            nextLayer.value()->forward(featureOutput, validationPass, currentBatchSize);
+            nextLayer.value()->forward(featureOutput, validationPass, currentValidExampleCount);
 
         if (isInferenceOnly() || validationPass || !trainingActive)
             return;
 
         // Initiate back propagation
         THOR_THROW_IF_FALSE(previousLayer.has_value());
-        backward(std::nullopt, currentBatchSize);
+        backward(std::nullopt, currentValidExampleCount);
     }
 };
 

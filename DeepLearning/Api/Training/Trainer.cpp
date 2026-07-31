@@ -5,12 +5,14 @@
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Training/PhaseGraphConnector.h"
+#include "DeepLearning/Api/Training/MetricEpochAccumulator.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 
 #include <algorithm>
 #include <cmath>
 #include <exception>
 #include <iomanip>
+#include <iostream>
 #include <limits>
 #include <map>
 #include <optional>
@@ -54,6 +56,46 @@ bool trainingProgramUsesPhases(const std::shared_ptr<TrainingProgram>& program) 
         }
     }
     return false;
+}
+
+uint64_t effectiveTrainingBatchSize(const TrainingData& data) {
+    const uint64_t configuredBatchSize = data.getBatching().getBatchSize();
+    const uint64_t trainingSetSize = data.getSplits().getTrain().size();
+    if (trainingSetSize == 0) {
+        return configuredBatchSize;
+    }
+    return std::min(configuredBatchSize, trainingSetSize);
+}
+
+std::shared_ptr<const TrainingData> trainingDataForFit(
+    const std::shared_ptr<const TrainingData>& configuredTrainingData) {
+    if (configuredTrainingData == nullptr) {
+        throw std::runtime_error("Trainer::fit requires TrainingData.");
+    }
+
+    const BatchPolicy& configuredBatching = configuredTrainingData->getBatching();
+    const uint64_t requestedBatchSize = configuredBatching.getBatchSize();
+    const uint64_t effectiveBatchSize = effectiveTrainingBatchSize(*configuredTrainingData);
+    if (effectiveBatchSize == requestedBatchSize) {
+        return configuredTrainingData;
+    }
+
+    const uint64_t trainingSetSize = configuredTrainingData->getSplits().getTrain().size();
+    std::cerr << "Thor warning: Trainer requested batch size " << requestedBatchSize
+              << " for dataset '" << configuredTrainingData->getDatasetName()
+              << "', but the training split contains only " << trainingSetSize
+              << (trainingSetSize == 1 ? " example. " : " examples. ")
+              << "Using batch size " << effectiveBatchSize
+              << " for this training run.\n";
+
+    return std::make_shared<TrainingData>(
+        configuredTrainingData->getDataset(),
+        configuredTrainingData->getSplits(),
+        BatchPolicy(effectiveBatchSize,
+                    configuredBatching.getRandomizeTrain(),
+                    configuredBatching.getRandomSeed()),
+        configuredTrainingData->getAccessPolicy(),
+        configuredTrainingData->getDatasetName());
 }
 
 std::vector<std::shared_ptr<Network>> pendingOptimizerResetNetworks(
@@ -179,7 +221,7 @@ Trainer Trainer::Builder::build() const {
                                             ? datasetInputBindings_.value()
                                             : DatasetInputBindings::byExactName(*network_, *trainingData_->getDataset());
         CompiledDatasetInputBindings compiled = bindings.compile(
-            *network_, *trainingData_->getDataset(), trainingData_->getBatching().getBatchSize());
+            *network_, *trainingData_->getDataset(), effectiveTrainingBatchSize(*trainingData_));
         trainer.datasetInputBindings = std::move(compiled.trainingInputBindings);
         trainer.requiredDatasetFieldIds = std::move(compiled.requiredFieldIds);
     }
@@ -202,6 +244,76 @@ Trainer Trainer::Builder::build() const {
 }
 
 namespace {
+
+struct RunningExampleMean {
+    double weightedSum = 0.0;
+    uint64_t totalWeight = 0;
+
+    void add(double value, uint64_t weight) {
+        THOR_THROW_IF_FALSE(weight > 0);
+        weightedSum += value * static_cast<double>(weight);
+        totalWeight += weight;
+    }
+
+    [[nodiscard]] std::optional<double> mean() const {
+        if (totalWeight == 0) {
+            return std::nullopt;
+        }
+        return weightedSum / static_cast<double>(totalWeight);
+    }
+};
+
+class FinalEpochStatsAccumulator {
+   public:
+    TrainingStatsSnapshot update(const TrainingStatsSnapshot& stats) {
+        TrainingStatsSnapshot finalStats = stats;
+        THOR_THROW_IF_FALSE(stats.validExamplesInBatch > 0);
+        const uint64_t weight = stats.validExamplesInBatch;
+        if (currentEpoch != stats.epoch) {
+            currentEpoch = stats.epoch;
+            lossMean = RunningExampleMean{};
+            lossMeans.clear();
+            metricAccumulators.clear();
+        }
+
+        if (stats.loss.has_value() && std::isfinite(stats.loss.value())) {
+            lossMean.add(stats.loss.value(), weight);
+            finalStats.loss = lossMean.mean();
+        }
+
+        for (const auto& [name, value] : stats.losses) {
+            if (!std::isfinite(value)) {
+                continue;
+            }
+            RunningExampleMean& lossMeanByName = lossMeans[name];
+            lossMeanByName.add(value, weight);
+            const std::optional<double> mean = lossMeanByName.mean();
+            if (mean.has_value()) {
+                finalStats.losses[name] = mean.value();
+            }
+        }
+
+        for (const auto& [name, value] : stats.metrics) {
+            if (!std::isfinite(value)) {
+                continue;
+            }
+            metricAccumulators.add(
+                name, resolveMetricBatchStat(stats, name, value));
+        }
+        for (const auto& [name, value] : metricAccumulators.values()) {
+            finalStats.metrics[name] = value;
+        }
+        finalStats.metricBatchStats = metricAccumulators.statistics();
+
+        return finalStats;
+    }
+
+   private:
+    uint64_t currentEpoch = 0;
+    RunningExampleMean lossMean{};
+    std::unordered_map<std::string, RunningExampleMean> lossMeans{};
+    MetricEpochAccumulatorMap metricAccumulators{};
+};
 
 class ResultCapturingTrainingObserver : public TrainingObserver {
    public:
@@ -272,71 +384,6 @@ class ResultCapturingTrainingObserver : public TrainingObserver {
         }
         return static_cast<uint64_t>(value.value());
     }
-
-    struct FinalEpochStatsAccumulator {
-        struct RunningMean {
-            double sum = 0.0;
-            uint64_t count = 0;
-
-            void add(double value) {
-                sum += value;
-                count += 1;
-            }
-
-            [[nodiscard]] std::optional<double> mean() const {
-                if (count == 0) {
-                    return std::nullopt;
-                }
-                return sum / static_cast<double>(count);
-            }
-        };
-
-        uint64_t currentEpoch = 0;
-        RunningMean lossMean{};
-        std::unordered_map<std::string, RunningMean> lossMeans{};
-        std::unordered_map<std::string, RunningMean> metricMeans{};
-
-        TrainingStatsSnapshot update(const TrainingStatsSnapshot& stats) {
-            TrainingStatsSnapshot finalStats = stats;
-            if (currentEpoch != stats.epoch) {
-                currentEpoch = stats.epoch;
-                lossMean = RunningMean{};
-                lossMeans.clear();
-                metricMeans.clear();
-            }
-
-            if (stats.loss.has_value() && std::isfinite(stats.loss.value())) {
-                lossMean.add(stats.loss.value());
-                finalStats.loss = lossMean.mean();
-            }
-
-            for (const auto& [name, value] : stats.losses) {
-                if (!std::isfinite(value)) {
-                    continue;
-                }
-                RunningMean& lossMeanByName = lossMeans[name];
-                lossMeanByName.add(value);
-                std::optional<double> mean = lossMeanByName.mean();
-                if (mean.has_value()) {
-                    finalStats.losses[name] = mean.value();
-                }
-            }
-
-            for (const auto& [name, value] : stats.metrics) {
-                if (!std::isfinite(value)) {
-                    continue;
-                }
-                RunningMean& metricMean = metricMeans[name];
-                metricMean.add(value);
-                std::optional<double> mean = metricMean.mean();
-                if (mean.has_value()) {
-                    finalStats.metrics[name] = mean.value();
-                }
-            }
-
-            return finalStats;
-        }
-    };
 
     TrainingObserver& inner;
     FinalEpochStatsAccumulator trainingLoss{};
@@ -541,71 +588,6 @@ class RestartAttemptObserver : public TrainingObserver {
     std::optional<TrainingStatsSnapshot> finalTestStats{};
 
    private:
-    struct FinalEpochStatsAccumulator {
-        struct RunningMean {
-            double sum = 0.0;
-            uint64_t count = 0;
-
-            void add(double value) {
-                sum += value;
-                count += 1;
-            }
-
-            [[nodiscard]] std::optional<double> mean() const {
-                if (count == 0) {
-                    return std::nullopt;
-                }
-                return sum / static_cast<double>(count);
-            }
-        };
-
-        uint64_t currentEpoch = 0;
-        RunningMean lossMean{};
-        std::unordered_map<std::string, RunningMean> lossMeans{};
-        std::unordered_map<std::string, RunningMean> metricMeans{};
-
-        TrainingStatsSnapshot update(const TrainingStatsSnapshot& stats) {
-            TrainingStatsSnapshot finalStats = stats;
-            if (currentEpoch != stats.epoch) {
-                currentEpoch = stats.epoch;
-                lossMean = RunningMean{};
-                lossMeans.clear();
-                metricMeans.clear();
-            }
-
-            if (stats.loss.has_value() && std::isfinite(stats.loss.value())) {
-                lossMean.add(stats.loss.value());
-                finalStats.loss = lossMean.mean();
-            }
-
-            for (const auto& [name, value] : stats.losses) {
-                if (!std::isfinite(value)) {
-                    continue;
-                }
-                RunningMean& lossMeanByName = lossMeans[name];
-                lossMeanByName.add(value);
-                std::optional<double> mean = lossMeanByName.mean();
-                if (mean.has_value()) {
-                    finalStats.losses[name] = mean.value();
-                }
-            }
-
-            for (const auto& [name, value] : stats.metrics) {
-                if (!std::isfinite(value)) {
-                    continue;
-                }
-                RunningMean& metricMean = metricMeans[name];
-                metricMean.add(value);
-                std::optional<double> mean = metricMean.mean();
-                if (mean.has_value()) {
-                    finalStats.metrics[name] = mean.value();
-                }
-            }
-
-            return finalStats;
-        }
-    };
-
     struct RestartConditionAttemptState {
         const TrainingRestartCondition* condition = nullptr;
         bool checked = false;
@@ -784,14 +766,8 @@ CompiledDatasetInputBindings Trainer::resolveDatasetInputsForData(
         activeInputBindingsForStep(step, *graph.network));
 }
 
-CompiledDatasetInputBindings Trainer::resolveDatasetInputsForCurrentModel() const {
-    if (trainingData == nullptr) {
-        throw std::runtime_error("Trainer has no TrainingData.");
-    }
-    return resolveDatasetInputsForData(*trainingData, /*inferenceOnly=*/false);
-}
-
 void Trainer::fitInternal(const TrainerFitOptions& options,
+                          const std::shared_ptr<const TrainingData>& fitTrainingData,
                           TrainingObserver& observer,
                           const TrainingCancellationToken& cancellationToken,
                           const std::vector<TrainingEarlyCompletionPolicy>& additionalEarlyCompletionPolicies,
@@ -808,32 +784,33 @@ void Trainer::fitInternal(const TrainerFitOptions& options,
     }
     cancellationToken.throwIfCancellationRequested();
 
-    const CompiledDatasetInputBindings resolvedDatasetInputs = resolveDatasetInputsForCurrentModel();
+    const CompiledDatasetInputBindings resolvedDatasetInputs =
+        resolveDatasetInputsForData(*fitTrainingData, /*inferenceOnly=*/false);
     const std::vector<std::shared_ptr<Network>> optimizerResetNetworks =
         pendingOptimizerResetNetworks(network, trainingProgram);
 
     TrainingRunRequest request;
     request.network = network;
-    trainingData->requireNonEmptyPartition(ExampleType::TRAIN, "Trainer::fit");
+    fitTrainingData->requireNonEmptyPartition(ExampleType::TRAIN, "Trainer::fit");
     const uint64_t sessionMaxInFlightBatches = runtimeConfig.maxInFlightBatches;
     const std::set<DatasetFieldId> requiredDatasetFieldIds =
         resolvedDatasetInputs.requiredFieldIds;
     request.batchSessionFactory =
-        [trainingData = trainingData,
+        [fitTrainingData,
          sessionMaxInFlightBatches,
          requiredDatasetFieldIds]() {
-            return trainingData->openSession(
+            return fitTrainingData->openSession(
                 sessionMaxInFlightBatches, requiredDatasetFieldIds);
         };
     request.batchSession = request.batchSessionFactory();
-    request.defaultValidationPopulation = trainingData->getSplits().getDefaultValidationName();
-    for (const std::string& validationName : trainingData->getSplits().getValidationNames()) {
+    request.defaultValidationPopulation = fitTrainingData->getSplits().getDefaultValidationName();
+    for (const std::string& validationName : fitTrainingData->getSplits().getValidationNames()) {
         if (validationName == request.defaultValidationPopulation) {
             continue;
         }
         NamedValidationSession namedValidation;
         namedValidation.name = validationName;
-        namedValidation.batchSession = trainingData->openValidationSession(
+        namedValidation.batchSession = fitTrainingData->openValidationSession(
             validationName,
             sessionMaxInFlightBatches,
             requiredDatasetFieldIds);
@@ -850,8 +827,8 @@ void Trainer::fitInternal(const TrainerFitOptions& options,
     request.checkBestModelEveryEpochs = options.checkBestModelEveryEpochs;
     request.firstModelSelectionEpoch = options.firstModelSelectionEpoch;
     request.maxTrainingBatchesPerEpoch = options.maxTrainingBatchesPerEpoch;
-    request.trainingData = trainingData;
-    request.deviceDatasetStorageReport.requested = trainingData->getAccessPolicy().deviceStorage;
+    request.trainingData = fitTrainingData;
+    request.deviceDatasetStorageReport.requested = fitTrainingData->getAccessPolicy().deviceStorage;
     request.initialCompletedEpochs = completedTrainingEpochs;
     request.initialElapsedSeconds = completedTrainingElapsedSeconds;
     request.modelSelectionScore = modelSelectionScore;
@@ -906,6 +883,10 @@ void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
                                        const std::string& runNameForMessages,
                                        const std::set<std::string>& additionalScalarTensorsToReport,
                                        const InitialDeviceStartupSequencer& initialDeviceStartupSequencer) {
+    validateFitOptions(options);
+    const std::shared_ptr<const TrainingData> fitTrainingData =
+        trainingDataForFit(trainingData);
+
     std::vector<TrainingRestartCondition> combinedConditions = options.restartConditions;
     combinedConditions.insert(combinedConditions.end(), additionalRestartConditions.begin(), additionalRestartConditions.end());
     validateRestartConditions(combinedConditions);
@@ -927,6 +908,7 @@ void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
 
     if (combinedConditions.empty()) {
         fitInternal(options,
+                    fitTrainingData,
                     observer,
                     cancellationToken,
                     additionalEarlyCompletionPolicies,
@@ -1004,6 +986,7 @@ void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
                          : InitialDeviceStartupSequencer{};
         try {
             attemptTrainer.fitInternal(options,
+                                       fitTrainingData,
                                        attemptObserver,
                                        cancellationToken,
                                        additionalEarlyCompletionPolicies,

@@ -4,6 +4,7 @@
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Parameter/ParameterSpecification.h"
 #include "DeepLearning/Api/Parameter/Parameterizable.h"
+#include "DeepLearning/Implementation/Layers/MultiConnectionLayer.h"
 #include "DeepLearning/Implementation/Parameter/Parameterizable.h"
 #include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
 
@@ -12,8 +13,9 @@
 
 #include "DeepLearning/Api/Network/StampedNetwork.h"
 
-#include <stdexcept>
 #include <optional>
+#include <stdexcept>
+#include <vector>
 
 using namespace std;
 using json = nlohmann::json;
@@ -21,9 +23,14 @@ using json = nlohmann::json;
 namespace Thor {
 
 namespace {
-std::shared_ptr<ThorImplementation::PhysicalParameter> getImplementationParameter(ThorImplementation::StampedNetwork& stampedNetwork,
-                                                                                  uint64_t apiLayerId,
-                                                                                  const std::string& parameterName) {
+struct ImplementationBinding {
+    shared_ptr<ThorImplementation::Layer> layer;
+    shared_ptr<ThorImplementation::PhysicalParameter> parameter;
+};
+
+ImplementationBinding getImplementationBinding(ThorImplementation::StampedNetwork& stampedNetwork,
+                                                uint64_t apiLayerId,
+                                                const std::string& parameterName) {
     shared_ptr<ThorImplementation::Layer> physicalLayer = stampedNetwork.getPhysicalLayerFromApiLayer(apiLayerId);
     if (physicalLayer == nullptr) {
         throw runtime_error("BoundParameter could not find the physical layer for api layer id " + to_string(apiLayerId) + ".");
@@ -35,20 +42,66 @@ std::shared_ptr<ThorImplementation::PhysicalParameter> getImplementationParamete
         throw runtime_error("BoundParameter api layer id " + to_string(apiLayerId) + " is not parameterizable in the placed network.");
     }
 
-    return physicalParameterizable->getParameter(parameterName);
+    return ImplementationBinding{
+        .layer = physicalLayer,
+        .parameter = physicalParameterizable->getParameter(parameterName),
+    };
 }
 
-std::shared_ptr<ThorImplementation::PhysicalParameter> getImplementationParameter(PlacedNetwork* placedNetwork,
-                                                                                  uint64_t apiLayerId,
-                                                                                  const std::string& parameterName,
-                                                                                  uint64_t stampIndex) {
+ImplementationBinding getImplementationBinding(PlacedNetwork* placedNetwork,
+                                                uint64_t apiLayerId,
+                                                const std::string& parameterName,
+                                                uint64_t stampIndex) {
     if (placedNetwork == nullptr)
         throw runtime_error("BoundParameter is not associated with a placed network.");
 
     if (stampIndex >= placedNetwork->getNumStamps())
         throw runtime_error("BoundParameter stamp index out of range.");
     ThorImplementation::StampedNetwork stampedNetwork = placedNetwork->getStampedNetwork(stampIndex);
-    return getImplementationParameter(stampedNetwork, apiLayerId, parameterName);
+    return getImplementationBinding(stampedNetwork, apiLayerId, parameterName);
+}
+
+std::shared_ptr<ThorImplementation::PhysicalParameter> getImplementationParameter(ThorImplementation::StampedNetwork& stampedNetwork,
+                                                                                  uint64_t apiLayerId,
+                                                                                  const std::string& parameterName) {
+    return getImplementationBinding(stampedNetwork, apiLayerId, parameterName).parameter;
+}
+
+std::shared_ptr<ThorImplementation::PhysicalParameter> getImplementationParameter(PlacedNetwork* placedNetwork,
+                                                                                  uint64_t apiLayerId,
+                                                                                  const std::string& parameterName,
+                                                                                  uint64_t stampIndex) {
+    return getImplementationBinding(placedNetwork, apiLayerId, parameterName, stampIndex).parameter;
+}
+
+bool hasConnectedDownstreamError(const shared_ptr<ThorImplementation::Layer>& layer) {
+    shared_ptr<ThorImplementation::MultiConnectionLayer> multiConnectionLayer =
+        dynamic_pointer_cast<ThorImplementation::MultiConnectionLayer>(layer);
+    if (multiConnectionLayer == nullptr)
+        return false;
+
+    for (const optional<ThorImplementation::Tensor>& errorInput : multiConnectionLayer->getErrorInputs()) {
+        if (errorInput.has_value())
+            return true;
+    }
+    return false;
+}
+
+void validatePlacedExpressionToggle(const ImplementationBinding& binding, bool enabled) {
+    const shared_ptr<ThorImplementation::PhysicalParameter>& parameter = binding.parameter;
+    THOR_THROW_IF_FALSE(parameter != nullptr);
+
+    if (!enabled || parameter->isTrainingStateEnabled() || !parameter->isStorageInitialized() ||
+        !parameter->isExpressionBased()) {
+        return;
+    }
+
+    if (!hasConnectedDownstreamError(binding.layer)) {
+        throw runtime_error(
+            "Cannot enable placed expression-based parameter '" + parameter->getName() +
+            "' because the layer was compiled without a downstream backward edge. Re-place the network so backward topology, "
+            "optimizer storage, and stream assignment can be rebuilt.");
+    }
 }
 
 }  // namespace
@@ -88,13 +141,19 @@ void BoundParameter::setTrainingEnabled(bool enabled) {
         throw runtime_error("Only trainable parameters may toggle training enabled. Parameter '" + parameter->getName() +
                             "' is not trainable.");
     }
-    // Parameters are never serialized - their training enabled state follows the BoundParameter once bound.
-    // parameter->trainingInitiallyEnabled = enabled;
+
+    // Validate every stamp before mutating any of them so a rejected transition cannot leave replicas inconsistent.
+    vector<ImplementationBinding> bindings;
+    bindings.reserve(placedNetwork->getNumStamps());
     for (uint64_t stampIndex = 0; stampIndex < placedNetwork->getNumStamps(); ++stampIndex) {
-        const shared_ptr<ThorImplementation::PhysicalParameter>& boundParameter =
-            getImplementationParameter(placedNetwork, apiLayerId, parameter->getName(), stampIndex);
-        boundParameter->setTrainingEnabled(enabled);
+        ImplementationBinding binding = getImplementationBinding(placedNetwork, apiLayerId, parameter->getName(), stampIndex);
+        binding.parameter->validateTrainingEnabledChange(enabled);
+        validatePlacedExpressionToggle(binding, enabled);
+        bindings.emplace_back(std::move(binding));
     }
+
+    for (const ImplementationBinding& binding : bindings)
+        binding.parameter->setTrainingEnabled(enabled);
 }
 
 bool BoundParameter::hasOptimizer() const { return parameter->hasOptimizer(); }
@@ -113,6 +172,12 @@ json BoundParameter::serialize(json parameterJson,
     // It is mutated here to include the files that are written to the archive.
     shared_ptr<ThorImplementation::PhysicalParameter> physicalParameter =
         getImplementationParameter(stampedNetwork, apiLayerId, parameterSpecification->getName());
+
+    if (parameterSpecification->isTrainable()) {
+        // Persist the current requested state, not merely the architecture's initial state and not the
+        // inference-only effective state of this placement.
+        parameterJson["training_enabled"] = physicalParameter->isTrainingStateEnabled();
+    }
 
     // Serialize the initializer
     shared_ptr<Initializer> apiInitializer = parameterSpecification->getInitializer();

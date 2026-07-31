@@ -7,6 +7,7 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <map>
 #include <optional>
 #include <set>
@@ -32,12 +33,15 @@ class Batch {
 
     Batch() = default;
     Batch(const Batch& other)
-        : values_(other.values_), sourceReferences_(other.sourceReferences_) {}
+        : values_(other.values_),
+          sourceReferences_(other.sourceReferences_),
+          validExampleCount_(other.validExampleCount_) {}
     Batch& operator=(const Batch& other) {
         if (this != &other) {
             releaseAllSourceResources();
             values_ = other.values_;
             sourceReferences_ = other.sourceReferences_;
+            validExampleCount_ = other.validExampleCount_;
             ownsSourceResourceLifecycle_ = false;
             recycleToken_.reset();
         }
@@ -60,8 +64,23 @@ class Batch {
         releaseAllSourceResources();
         values_.clear();
         sourceReferences_.clear();
+        validExampleCount_.reset();
         ownsSourceResourceLifecycle_ = false;
         recycleToken_.reset();
+    }
+
+    /**
+     * Declares that only the leading validExampleCount rows of each fixed-capacity
+     * batch field are valid examples. When absent, every physical batch row is
+     * valid. The physical capacity is validated when the batch is submitted to a
+     * placed network, where all field dimensions are available.
+     */
+    void setValidExampleCount(uint32_t validExampleCount) {
+        THOR_THROW_IF_FALSE(validExampleCount >= 1);
+        validExampleCount_ = validExampleCount;
+    }
+    [[nodiscard]] std::optional<uint32_t> getValidExampleCount() const {
+        return validExampleCount_;
     }
 
     BatchValue& at(const std::string& name);
@@ -157,6 +176,7 @@ class Batch {
 
     Storage values_;
     std::map<std::string, Thor::BatchSourceReference> sourceReferences_;
+    std::optional<uint32_t> validExampleCount_;
     std::vector<OwnedSourceResource> ownedSourceResources_;
     // Set only on the original producer-owned Batch. Intentionally omitted
     // from copy construction/assignment while moving with the leased Batch.

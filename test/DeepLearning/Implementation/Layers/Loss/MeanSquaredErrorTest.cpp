@@ -2,6 +2,7 @@
 #include "test/DeepLearning/Implementation/Layers/NoOpLayer.h"
 
 #include "DeepLearning/Implementation/Layers/Loss/MeanSquaredError.h"
+#include "DeepLearning/Implementation/Layers/Loss/LossShaper.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
 
@@ -643,4 +644,124 @@ TEST(MeanSquaredError, ComputesCorrectResult_BatchLoss_FP32_FP16Labels) {
 
         LayerTestHelper::tearDownNetwork(layers);
     }
+}
+
+TEST(MeanSquaredError, PartialBatchMasksRawLossAndPredictionGradient) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    const vector<uint64_t> dimensions = {4, 2};
+    constexpr uint32_t validExampleCount = 2;
+
+    Tensor predictionsCpu(cpuPlacement, TensorDescriptor(DataType::FP32, dimensions));
+    Tensor labelsCpu(cpuPlacement, TensorDescriptor(DataType::FP32, dimensions));
+    const float predictionValues[] = {1.0f, 2.0f,
+                                      3.0f, 4.0f,
+                                      100.0f, 200.0f,
+                                      300.0f, 400.0f};
+    for (uint32_t i = 0; i < predictionsCpu.getTotalNumElements(); ++i) {
+        predictionsCpu.getMemPtr<float>()[i] = predictionValues[i];
+        labelsCpu.getMemPtr<float>()[i] = 0.0f;
+    }
+
+    vector<shared_ptr<Layer>> layers;
+    auto predictionsInput = make_shared<NetworkInput>(predictionsCpu.clone(gpuPlacement));
+    layers.push_back(predictionsInput);
+    auto noOpLayer = make_shared<NoOpLayer>();
+    layers.push_back(noOpLayer);
+    auto labelsInput = make_shared<NetworkInput>(labelsCpu.clone(gpuPlacement));
+    layers.push_back(labelsInput);
+    auto meanSquaredError = make_shared<MeanSquaredError>(DataType::FP32);
+    layers.push_back(meanSquaredError);
+    auto lossShaper = make_shared<LossShaper>(LossShaper::OutputLossType::BATCH);
+    layers.push_back(lossShaper);
+    auto batchLossOutput = make_shared<NetworkOutput>(gpuPlacement);
+    layers.push_back(batchLossOutput);
+
+    LayerTestHelper::connectTwoLayers(predictionsInput, noOpLayer);
+    LayerTestHelper::connectTwoLayers(noOpLayer, meanSquaredError, 0, (int)Loss::ConnectionType::FORWARD_BACKWARD);
+    LayerTestHelper::connectTwoLayers(labelsInput, meanSquaredError, 0, (int)Loss::ConnectionType::LABELS);
+    LayerTestHelper::connectTwoLayers(meanSquaredError, lossShaper);
+    LayerTestHelper::connectTwoLayers(lossShaper, batchLossOutput);
+    LayerTestHelper::initializeNetwork(layers);
+
+    predictionsInput->forward(predictionsCpu, false, validExampleCount);
+    labelsInput->forward(labelsCpu, false, validExampleCount);
+
+    Stream stream = predictionsInput->getStream();
+    stream.waitEvent(batchLossOutput->getOutputReadyEvent());
+    stream.synchronize();
+
+    Tensor rawLossCpu = meanSquaredError->getLossOutput().value().clone(cpuPlacement);
+    rawLossCpu.copyFromAsync(meanSquaredError->getLossOutput().value(), stream);
+    Tensor gradientCpu = meanSquaredError->getErrorOutput().value().clone(cpuPlacement);
+    gradientCpu.copyFromAsync(meanSquaredError->getErrorOutput().value(), stream);
+    Tensor batchLossCpu = batchLossOutput->getFeatureOutput().value().clone(cpuPlacement);
+    batchLossCpu.copyFromAsync(batchLossOutput->getFeatureOutput().value(), stream);
+    stream.synchronize();
+
+    const float expectedRawLoss[] = {1.0f, 4.0f,
+                                     9.0f, 16.0f,
+                                     0.0f, 0.0f,
+                                     0.0f, 0.0f};
+    const float expectedGradient[] = {2.0f, 4.0f,
+                                      6.0f, 8.0f,
+                                      0.0f, 0.0f,
+                                      0.0f, 0.0f};
+    for (uint32_t i = 0; i < rawLossCpu.getTotalNumElements(); ++i) {
+        EXPECT_FLOAT_EQ(rawLossCpu.getMemPtr<float>()[i], expectedRawLoss[i]);
+        EXPECT_FLOAT_EQ(gradientCpu.getMemPtr<float>()[i], expectedGradient[i]);
+    }
+    EXPECT_FLOAT_EQ(batchLossCpu.getMemPtr<float>()[0], 15.0f);
+
+    LayerTestHelper::tearDownNetwork(layers);
+}
+
+TEST(MeanSquaredError, FullBatchAfterPartialBatchDoesNotReusePriorCardinality) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    const vector<uint64_t> dimensions = {4, 1};
+
+    Tensor predictionsCpu(cpuPlacement, TensorDescriptor(DataType::FP32, dimensions));
+    Tensor labelsCpu(cpuPlacement, TensorDescriptor(DataType::FP32, dimensions));
+    for (uint32_t i = 0; i < predictionsCpu.getTotalNumElements(); ++i) {
+        predictionsCpu.getMemPtr<float>()[i] = static_cast<float>(i + 1);
+        labelsCpu.getMemPtr<float>()[i] = 0.0f;
+    }
+
+    vector<shared_ptr<Layer>> layers;
+    auto predictionsInput = make_shared<NetworkInput>(predictionsCpu.clone(gpuPlacement));
+    layers.push_back(predictionsInput);
+    auto noOpLayer = make_shared<NoOpLayer>();
+    layers.push_back(noOpLayer);
+    auto labelsInput = make_shared<NetworkInput>(labelsCpu.clone(gpuPlacement));
+    layers.push_back(labelsInput);
+    auto meanSquaredError = make_shared<MeanSquaredError>(DataType::FP32);
+    layers.push_back(meanSquaredError);
+    auto lossShaper = make_shared<LossShaper>(LossShaper::OutputLossType::BATCH);
+    layers.push_back(lossShaper);
+    auto batchLossOutput = make_shared<NetworkOutput>(gpuPlacement);
+    layers.push_back(batchLossOutput);
+
+    LayerTestHelper::connectTwoLayers(predictionsInput, noOpLayer);
+    LayerTestHelper::connectTwoLayers(noOpLayer, meanSquaredError, 0, (int)Loss::ConnectionType::FORWARD_BACKWARD);
+    LayerTestHelper::connectTwoLayers(labelsInput, meanSquaredError, 0, (int)Loss::ConnectionType::LABELS);
+    LayerTestHelper::connectTwoLayers(meanSquaredError, lossShaper);
+    LayerTestHelper::connectTwoLayers(lossShaper, batchLossOutput);
+    LayerTestHelper::initializeNetwork(layers);
+
+    predictionsInput->forward(predictionsCpu, true, 2);
+    labelsInput->forward(labelsCpu, true, 2);
+    batchLossOutput->getOutputReadyEvent().synchronize();
+
+    predictionsInput->forward(predictionsCpu, true);
+    labelsInput->forward(labelsCpu, true);
+    batchLossOutput->getOutputReadyEvent().synchronize();
+
+    Stream stream = predictionsInput->getStream();
+    Tensor batchLossCpu = batchLossOutput->getFeatureOutput().value().clone(cpuPlacement);
+    batchLossCpu.copyFromAsync(batchLossOutput->getFeatureOutput().value(), stream);
+    stream.synchronize();
+
+    EXPECT_FLOAT_EQ(batchLossCpu.getMemPtr<float>()[0], 7.5f);
+    LayerTestHelper::tearDownNetwork(layers);
 }

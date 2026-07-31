@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DeepLearning/Api/BatchValidity.h"
 #include "DeepLearning/Api/DataType.h"
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
 #include "DeepLearning/Api/Layers/Loss/LossShaper.h"
@@ -31,7 +32,9 @@ class CustomLoss : public Loss {
                std::string gradientName = "predictions_grad",
                std::optional<Tensor> lossTensor = std::nullopt,
                std::optional<DataType> lossDataType = std::nullopt,
-               std::optional<float> lossWeight = std::nullopt);
+               std::optional<float> lossWeight = std::nullopt,
+               bool usesBatchValidity = false,
+               bool requiresFullBatch = false);
 
     ~CustomLoss() override = default;
 
@@ -44,6 +47,8 @@ class CustomLoss : public Loss {
     const std::string& getGradientName() const { return gradientName; }
     const ThorImplementation::DynamicExpression& getLossExpression() const { return lossExpression; }
     const ThorImplementation::DynamicExpression& getGradientExpression() const { return gradientExpression; }
+    bool usesBatchValidity() const { return batchValidityMaskEnabled; }
+    bool requiresFullBatch() const { return fullBatchRequired; }
     [[nodiscard]] std::optional<std::string> getInputPortName(const Tensor& inputTensor) const override {
         if (predictionsTensor.isInitialized() && inputTensor == predictionsTensor) {
             return predictionsName;
@@ -102,6 +107,8 @@ class CustomLoss : public Loss {
     std::string labelsName = "labels";
     std::string lossName = "loss";
     std::string gradientName = "predictions_grad";
+    bool batchValidityMaskEnabled = false;
+    bool fullBatchRequired = false;
 };
 
 class CustomLoss::Builder {
@@ -120,15 +127,24 @@ class CustomLoss::Builder {
         std::string labelsName = _labelsName.value_or("labels");
         std::string lossName = _lossName.value_or("loss");
 
-        const std::vector<std::string>& expectedInputs = _lossExpression->getExpectedInputNames();
-        if (!_predictionsName.has_value() && !_labelsName.has_value() && expectedInputs.size() == 2) {
+        std::vector<std::string> publicExpectedInputs = _lossExpression->getExpectedInputNames();
+        if (_usesBatchValidity) {
+            publicExpectedInputs.erase(
+                std::remove(publicExpectedInputs.begin(),
+                            publicExpectedInputs.end(),
+                            std::string(Thor::BATCH_VALIDITY_MASK_NAME)),
+                publicExpectedInputs.end());
+        }
+        if (!_predictionsName.has_value() && !_labelsName.has_value() && publicExpectedInputs.size() == 2) {
             const bool hasPredictionsDefault =
-                std::find(expectedInputs.begin(), expectedInputs.end(), std::string("predictions")) != expectedInputs.end();
+                std::find(publicExpectedInputs.begin(), publicExpectedInputs.end(), std::string("predictions")) !=
+                publicExpectedInputs.end();
             const bool hasLabelsDefault =
-                std::find(expectedInputs.begin(), expectedInputs.end(), std::string("labels")) != expectedInputs.end();
+                std::find(publicExpectedInputs.begin(), publicExpectedInputs.end(), std::string("labels")) !=
+                publicExpectedInputs.end();
             if (!(hasPredictionsDefault && hasLabelsDefault)) {
-                predictionsName = expectedInputs[0];
-                labelsName = expectedInputs[1];
+                predictionsName = publicExpectedInputs[0];
+                labelsName = publicExpectedInputs[1];
             }
         }
 
@@ -153,7 +169,9 @@ class CustomLoss::Builder {
                               std::move(gradientName),
                               _lossTensor,
                               _lossDataType,
-                              ThorImplementation::normalizeLossWeight(_lossWeight));
+                              ThorImplementation::normalizeLossWeight(_lossWeight),
+                              _usesBatchValidity,
+                              _requiresFullBatch);
         customLoss.lossShape = lossShape;
         customLoss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         customLoss.network = _network.value();
@@ -276,6 +294,24 @@ class CustomLoss::Builder {
         return *this;
     }
 
+    /**
+     * Declares that both expressions consume runtime batch-validity information through the current reserved FP32
+     * Thor::BATCH_VALIDITY_MASK_NAME expression input.
+     */
+    virtual CustomLoss::Builder& usesBatchValidity() {
+        THOR_THROW_IF_FALSE(!_usesBatchValidity);
+        THOR_THROW_IF_FALSE(!_requiresFullBatch);
+        _usesBatchValidity = true;
+        return *this;
+    }
+
+    virtual CustomLoss::Builder& requiresFullBatch() {
+        THOR_THROW_IF_FALSE(!_requiresFullBatch);
+        THOR_THROW_IF_FALSE(!_usesBatchValidity);
+        _requiresFullBatch = true;
+        return *this;
+    }
+
    private:
     std::optional<Network*> _network;
     std::shared_ptr<ThorImplementation::DynamicExpression> _lossExpression;
@@ -290,6 +326,8 @@ class CustomLoss::Builder {
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
     std::optional<float> _lossWeight;
+    bool _usesBatchValidity = false;
+    bool _requiresFullBatch = false;
 };
 
 }  // namespace Thor

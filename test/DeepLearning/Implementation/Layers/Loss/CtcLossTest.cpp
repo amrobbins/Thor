@@ -528,3 +528,61 @@ TEST(CtcLossImplementationLayer, LossWeightScalesForwardAndBackwardNumerically) 
 
     LayerTestHelper::tearDownNetwork(network.layers);
 }
+
+TEST(CtcLossImplementationLayer, PartialBatchMatchesSingleValidSequenceAndZerosTail) {
+    constexpr uint64_t T = 4;
+    constexpr uint64_t B = 2;
+    constexpr uint64_t C = 3;
+    constexpr int blankLabel = 0;
+
+    CtcLayerNetwork network = makeTinyCtcNetwork(false);
+    const vector<float> oneSequence = {
+        0.60f, 0.30f, 0.10f,
+        0.20f, 0.70f, 0.10f,
+        0.25f, 0.65f, 0.10f,
+        0.70f, 0.20f, 0.10f,
+    };
+    vector<float> activations = oneSequence;
+    activations.insert(activations.end(), oneSequence.begin(), oneSequence.end());
+    const vector<int> paddedLabels = {1, 0, 1, 0};
+    const vector<int> packedLabels = {1, 1};
+    const vector<int> labelLengths = {1, 1};
+    const vector<int> inputLengths = {4, 4};
+    populateTinyCtcNetwork(network, activations, paddedLabels, labelLengths, inputLengths);
+
+    const vector<double> expectedLoss = cpuCtcLossForActivations(
+        activations, T, B, C, packedLabels, labelLengths, inputLengths, blankLabel);
+    const vector<double> expectedGradient = finiteDifferenceCtcLogitGradient(
+        activations, T, B, C, packedLabels, labelLengths, inputLengths, blankLabel, 1.0e-3);
+
+    LayerTestHelper::initializeNetwork(network.layers);
+    network.probabilitiesInput->forward(network.probabilitiesCpu, false, 1);
+    network.labelsInput->forward(network.labelsCpu, false, 1);
+    network.labelLengthsInput->forward(network.labelLengthsCpu, false, 1);
+    network.inputLengthsInput->forward(network.inputLengthsCpu, false, 1);
+
+    Stream syncStream = network.probabilitiesInput->getStream();
+    syncStream.waitEvent(network.lossOutput->getOutputReadyEvent());
+    syncStream.synchronize();
+
+    Tensor actualLossCpu = network.lossOutput->getFeatureOutput().value();
+    const float* actualLoss = actualLossCpu.getMemPtr<float>();
+    EXPECT_NEAR(actualLoss[0], expectedLoss[0], 1.0e-4);
+    EXPECT_EQ(actualLoss[1], 0.0f);
+
+    ASSERT_TRUE(network.ctcLoss->getErrorOutput().has_value());
+    Tensor gradientCpu = network.ctcLoss->getErrorOutput().value().clone(network.cpuPlacement);
+    gradientCpu.copyFromAsync(network.ctcLoss->getErrorOutput().value(), syncStream);
+    syncStream.synchronize();
+    const float* actualGradient = gradientCpu.getMemPtr<float>();
+    const double gradientScale = static_cast<double>(Loss::getLossScalingFactor());
+    const uint64_t elementsPerSequence = T * C;
+    for (uint64_t i = 0; i < elementsPerSequence; ++i) {
+        EXPECT_NEAR(static_cast<double>(actualGradient[i]), expectedGradient[i] * gradientScale, 8.0e-2)
+            << "valid gradient index " << i;
+    }
+    for (uint64_t i = elementsPerSequence; i < B * elementsPerSequence; ++i)
+        EXPECT_EQ(actualGradient[i], 0.0f) << "tail gradient index " << i;
+
+    LayerTestHelper::tearDownNetwork(network.layers);
+}

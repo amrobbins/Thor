@@ -30,6 +30,7 @@ class LossShaper : public Layer {
 
     std::optional<Tensor> createFeatureOutputTensor() override;
     void compileImpl() override;
+    void forward(std::optional<Tensor> inputTensor, bool validationPass, uint32_t validExampleCount = 0) override;
     void infer(std::optional<Tensor> inputTensor, std::optional<Tensor> outputTensor, Stream stream) override;
     virtual void backward(std::optional<Tensor> errorInput);
     void backProp(std::optional<Tensor> dataIn, std::optional<Tensor> errorIn, std::optional<Tensor> errorOut, Stream stream) override;
@@ -38,14 +39,13 @@ class LossShaper : public Layer {
 
     static std::vector<uint32_t> getReductionAxes(const std::vector<uint64_t>& inputDimensions,
                                                    OutputLossType outputLossType);
-    static float getReductionOutputScale(const std::vector<uint64_t>& inputDimensions,
-                                         OutputLossType outputLossType);
     static std::vector<uint64_t> getOutputDimensions(std::vector<uint64_t> inputDimensions, OutputLossType outputLossType);
 
    private:
     bool uninitialized;
 
     OutputLossType outputLossType;
+    uint32_t currentValidExampleCount = 0;
     std::shared_ptr<StampedCubReduction> reduction;
 };
 

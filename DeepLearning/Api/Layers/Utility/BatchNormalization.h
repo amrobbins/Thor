@@ -11,6 +11,13 @@
 
 namespace Thor {
 
+/**
+ * BatchNormalization trains its batch statistics and trainable parameters only
+ * on full-capacity training batches. Validation, inference, and partial-capacity
+ * training batches use the stored running statistics. Partial training batches
+ * still propagate gradients to earlier layers, but do not update this layer's
+ * scale, bias, running mean, or running variance.
+ */
 class BatchNormalization : public TrainableLayer {
    public:
     class Builder;

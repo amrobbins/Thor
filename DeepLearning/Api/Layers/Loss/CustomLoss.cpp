@@ -27,13 +27,19 @@ CustomLoss::CustomLoss(ThorImplementation::DynamicExpression lossExpression,
                        std::string gradientName,
                        std::optional<Tensor> lossTensor,
                        std::optional<DataType> requestedLossDataType,
-                       std::optional<float> lossWeight)
+                       std::optional<float> lossWeight,
+                       bool usesBatchValidity,
+                       bool requiresFullBatch)
     : lossExpression(std::move(lossExpression)),
       gradientExpression(std::move(gradientExpression)),
       predictionsName(std::move(predictionsName)),
       labelsName(std::move(labelsName)),
       lossName(std::move(lossName)),
-      gradientName(std::move(gradientName)) {
+      gradientName(std::move(gradientName)),
+      batchValidityMaskEnabled(usesBatchValidity),
+      fullBatchRequired(requiresFullBatch) {
+    if (batchValidityMaskEnabled && fullBatchRequired)
+        throw runtime_error("CustomLoss cannot both use batch validity and require a full batch.");
     this->lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
     validateName(this->predictionsName, "predictions input");
     validateName(this->labelsName, "labels input");
@@ -159,6 +165,8 @@ void CustomLoss::validateExpressionNames(const ThorImplementation::DynamicExpres
     const std::vector<std::string>& expectedInputs = expression.getExpectedInputNames();
     if (!expectedInputs.empty()) {
         std::set<std::string> expected{predictionsName, labelsName};
+        if (batchValidityMaskEnabled)
+            expected.insert(Thor::BATCH_VALIDITY_MASK_NAME);
         std::set<std::string> actual(expectedInputs.begin(), expectedInputs.end());
         if (actual != expected) {
             throw runtime_error("CustomLoss " + what + " expression input name mismatch. Expected {" + joinNames(expected) +
@@ -183,6 +191,14 @@ Tensor CustomLoss::inferExpressionTensor(const ThorImplementation::DynamicExpres
     PhysicalTensorMap fakeInputs;
     fakeInputs.emplace(predictionsName, makeFakePlacedTensor(getPredictions()));
     fakeInputs.emplace(labelsName, makeFakePlacedTensor(getLabels()));
+    if (batchValidityMaskEnabled) {
+        PhysicalTensor predictions = fakeInputs.at(predictionsName);
+        std::vector<uint64_t> maskDimensions(predictions.getDimensions().size(), 1);
+        maskDimensions.front() = predictions.getDimensions().front();
+        fakeInputs.emplace(Thor::BATCH_VALIDITY_MASK_NAME,
+                           PhysicalTensor(predictions.getPlacement(),
+                                          ThorImplementation::TensorDescriptor(ThorImplementation::DataType::FP32, maskDimensions)));
+    }
 
     Stream fakeStream(0, Stream::Priority::REGULAR);
     ThorImplementation::DynamicExpressionBuild build = expression.build(fakeInputs, {}, fakeStream);
@@ -227,26 +243,39 @@ std::shared_ptr<ThorImplementation::Layer> CustomLoss::stamp(ThorImplementation:
     THOR_THROW_IF_FALSE(connectingApiTensor == predictionsTensor || connectingApiTensor == labelsTensor);
 
     std::shared_ptr<ThorImplementation::CustomLoss> customLoss = std::make_shared<ThorImplementation::CustomLoss>(
-        lossExpression, gradientExpression, predictionsName, labelsName, lossName, gradientName, lossDataType, lossWeight);
+        lossExpression,
+        gradientExpression,
+        predictionsName,
+        labelsName,
+        lossName,
+        gradientName,
+        lossDataType,
+        lossWeight,
+        batchValidityMaskEnabled,
+        fullBatchRequired);
     customLoss->setConstructForInferenceOnly(inferenceOnly);
     return customLoss;
 }
 
 void CustomLoss::buildSupportLayersAndAddToNetwork() {
-    CustomLoss rawLoss = CustomLoss::Builder()
-                             .network(*network)
-                             .lossExpression(lossExpression)
-                             .gradientExpression(gradientExpression)
-                             .predictions(predictionsTensor)
-                             .labels(labelsTensor)
-                             .predictionsName(predictionsName)
-                             .labelsName(labelsName)
-                             .lossName(lossName)
-                             .gradientName(gradientName)
-                             .lossDataType(lossDataType)
-                             .lossWeight(lossWeight.value_or(1.0f))
-                             .reportsRawLoss()
-                             .build();
+    CustomLoss::Builder rawLossBuilder;
+    rawLossBuilder.network(*network)
+        .lossExpression(lossExpression)
+        .gradientExpression(gradientExpression)
+        .predictions(predictionsTensor)
+        .labels(labelsTensor)
+        .predictionsName(predictionsName)
+        .labelsName(labelsName)
+        .lossName(lossName)
+        .gradientName(gradientName)
+        .lossDataType(lossDataType)
+        .lossWeight(lossWeight.value_or(1.0f))
+        .reportsRawLoss();
+    if (batchValidityMaskEnabled)
+        rawLossBuilder.usesBatchValidity();
+    if (fullBatchRequired)
+        rawLossBuilder.requiresFullBatch();
+    CustomLoss rawLoss = rawLossBuilder.build();
 
     lossShaperInput = rawLoss.getLoss();
 
@@ -263,8 +292,9 @@ uint64_t CustomLoss::getFirstInstanceMemRequirementInBytes(uint32_t batchSize,
                               .getFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
     }
 
-    uint64_t standardLossBytes = Loss::getFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
-    return standardLossBytes + lossShaperBytes;
+    const uint64_t standardLossBytes = Loss::getFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
+    const uint64_t batchValidityMaskBytes = static_cast<uint64_t>(batchSize) * sizeof(float);
+    return standardLossBytes + lossShaperBytes + batchValidityMaskBytes;
 }
 
 json CustomLoss::architectureJson() const {
@@ -274,6 +304,8 @@ json CustomLoss::architectureJson() const {
     j["labels_name"] = labelsName;
     j["loss_name"] = lossName;
     j["gradient_name"] = gradientName;
+    j["uses_batch_validity"] = batchValidityMaskEnabled;
+    j["requires_full_batch"] = fullBatchRequired;
     ThorImplementation::addLossWeightToJson(j, lossWeight);
 
     auto serializedLossDefinition = lossExpression.getSerializedDefinition();
@@ -305,6 +337,10 @@ void CustomLoss::deserialize(const json& j, Network* network) {
     const std::string labelsName = j.value("labels_name", std::string("labels"));
     const std::string lossName = j.value("loss_name", std::string("loss"));
     const std::string gradientName = j.value("gradient_name", predictionsName + "_grad");
+    if (j.contains("uses_batch_validity_mask"))
+        throw runtime_error("CustomLoss field uses_batch_validity_mask is no longer supported; use uses_batch_validity.");
+    const bool usesBatchValidity = j.at("uses_batch_validity").get<bool>();
+    const bool requiresFullBatch = j.at("requires_full_batch").get<bool>();
 
     uint64_t originalTensorId = j["predictions_tensor"].at("id").get<uint64_t>();
     Tensor predictions = network->getApiTensorByOriginalId(originalTensorId);
@@ -334,7 +370,9 @@ void CustomLoss::deserialize(const json& j, Network* network) {
                           gradientName,
                           rawLossTensor,
                           j.at("loss_data_type").get<DataType>(),
-                          ThorImplementation::lossWeightFromJson(j));
+                          ThorImplementation::lossWeightFromJson(j),
+                          usesBatchValidity,
+                          requiresFullBatch);
     customLoss.lossShape = LossShape::RAW;
     customLoss.addToNetwork(network);
 }

@@ -187,6 +187,7 @@ TEST(ApiSubgraphClone, TrainingReportBoundaryIncludesAuxiliaryMetricInputs) {
     const std::vector<NetworkMetricReference> reportableMetrics = source.getReportableMetrics();
     ASSERT_EQ(reportableMetrics.size(), 1u);
     EXPECT_EQ(reportableMetrics.front().metricName, "peak_mean");
+    EXPECT_EQ(reportableMetrics.front().aggregation, MetricAggregation::RATIO);
     EXPECT_EQ(reportableMetrics.front().predictionOutputName, "prediction");
     EXPECT_FALSE(reportableMetrics.front().targetInputName.has_value());
     EXPECT_EQ(reportableMetrics.front().requiredInputNames,
@@ -214,6 +215,25 @@ TEST(ApiSubgraphClone, TrainingReportBoundaryIncludesAuxiliaryMetricInputs) {
     ApiSubgraphCloneResult cloneResult = destination.cloneSubgraphInto(source, {"peak_mean"}, remap, options);
     ASSERT_TRUE(cloneResult.outputTensorsByName.count("peak_mean"));
     EXPECT_EQ(cloneResult.outputTensorsByName.at("peak_mean").getDataType(), DataType::FP32);
+    NetworkOutput::Builder()
+        .network(destination)
+        .name("peak_mean")
+        .inputTensor(cloneResult.outputTensorsByName.at("peak_mean"))
+        .build();
+
+    const std::vector<NetworkMetricReference> clonedMetrics =
+        destination.getReportableMetrics();
+    ASSERT_EQ(clonedMetrics.size(), 1u);
+    EXPECT_EQ(clonedMetrics.front().metricName, "peak_mean");
+    EXPECT_EQ(clonedMetrics.front().aggregation, MetricAggregation::RATIO);
+    EXPECT_THROW(
+        destination.getRequiredNetworkInputNamesForOutputs(
+            {METRIC_AGGREGATION_NUMERATOR_NAME}, /*inferenceOnly=*/false),
+        std::runtime_error);
+    EXPECT_THROW(
+        destination.getRequiredNetworkInputNamesForOutputs(
+            {METRIC_AGGREGATION_DENOMINATOR_NAME}, /*inferenceOnly=*/false),
+        std::runtime_error);
 }
 
 
@@ -312,6 +332,7 @@ TEST(ApiSubgraphClone, SourceOnlyMetricDoesNotUseParameterizedMemberPathAsInputS
     const std::vector<NetworkMetricReference> reportableMetrics = source.getReportableMetrics();
     ASSERT_EQ(reportableMetrics.size(), 1u);
     EXPECT_EQ(reportableMetrics.front().metricName, "hidden_mean");
+    EXPECT_EQ(reportableMetrics.front().aggregation, MetricAggregation::MEAN_BY_EXAMPLE);
     EXPECT_TRUE(reportableMetrics.front().predictionOutputName.empty());
     EXPECT_FALSE(reportableMetrics.front().inputSourceName.has_value());
     EXPECT_EQ(reportableMetrics.front().requiredInputNames, (std::vector<std::string>{"features"}));

@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -269,6 +270,28 @@ class Concatenate : public MultiConnectionLayer {
 
     void forward(std::optional<Tensor> featureInput, bool validationPass, uint32_t batchSize = 0) override {
         THOR_THROW_IF_FALSE(featureInput.has_value());
+        const std::vector<uint64_t> inputDimensions = featureInput.value().getDescriptor().getDimensions();
+        THOR_THROW_IF_FALSE(!inputDimensions.empty());
+        THOR_THROW_IF_FALSE(inputDimensions.front() >= 1);
+        THOR_THROW_IF_FALSE(inputDimensions.front() <= std::numeric_limits<uint32_t>::max());
+        const uint32_t physicalBatchCapacity = static_cast<uint32_t>(inputDimensions.front());
+        const uint32_t resolvedValidExampleCount = batchSize == 0 ? physicalBatchCapacity : batchSize;
+        THOR_THROW_IF_FALSE(resolvedValidExampleCount >= 1);
+        THOR_THROW_IF_FALSE(resolvedValidExampleCount <= physicalBatchCapacity);
+
+        if (axis == 0) {
+            // Concatenating along the physical batch axis appends complete batches. A partial
+            // input would place padding before valid examples from a later input, violating
+            // Thor's valid-prefix batch contract. Until Concatenate compacts valid rows, only
+            // full-capacity inputs are supported on axis zero.
+            THOR_THROW_IF_FALSE(resolvedValidExampleCount == physicalBatchCapacity);
+        } else if (batchCardinalitySet) {
+            THOR_THROW_IF_FALSE(currentValidExampleCount == resolvedValidExampleCount);
+        } else {
+            currentValidExampleCount = resolvedValidExampleCount;
+            batchCardinalitySet = true;
+        }
+
         auto it = stillWaitingForFeatureInputTensors.find(featureInput.value().getTensorId());
         THOR_THROW_IF_FALSE(it != stillWaitingForFeatureInputTensors.end());
         stillWaitingForFeatureInputTensors.erase(it);
@@ -296,8 +319,19 @@ class Concatenate : public MultiConnectionLayer {
             stridePerSplitTensorDimension_d,
             streams[0]);
 
+        uint32_t outputValidExampleCount = currentValidExampleCount;
+        if (axis == 0) {
+            const std::vector<uint64_t> outputDimensions = featureOutputs[0].value().getDescriptor().getDimensions();
+            THOR_THROW_IF_FALSE(!outputDimensions.empty());
+            THOR_THROW_IF_FALSE(outputDimensions.front() >= 1);
+            THOR_THROW_IF_FALSE(outputDimensions.front() <= std::numeric_limits<uint32_t>::max());
+            outputValidExampleCount = static_cast<uint32_t>(outputDimensions.front());
+        }
+
         // Expecting to get tail-recursion optimization of -O3 so that stack space does not build up here.
-        nextLayers[0].value()->forward(featureOutputs[0], validationPass);
+        nextLayers[0].value()->forward(featureOutputs[0], validationPass, outputValidExampleCount);
+        currentValidExampleCount = 0;
+        batchCardinalitySet = false;
     }
 
     void cleanup() override {
@@ -470,6 +504,8 @@ class Concatenate : public MultiConnectionLayer {
 
     std::set<unsigned long> allFeatureInputTensorIds;
     std::set<unsigned long> stillWaitingForFeatureInputTensors;
+    uint32_t currentValidExampleCount = 0;
+    bool batchCardinalitySet = false;
 };
 
 }  // namespace ThorImplementation

@@ -28,7 +28,7 @@ inline bool isClassIndexLabelDType(DataType dtype) {
 }
 
 inline DynamicExpression makeExpression() {
-    return DynamicExpression({"predictions", "labels"},
+    return DynamicExpression({"predictions", "labels", Thor::BATCH_VALIDITY_MASK_NAME},
                              {"metric"},
                              [](const DynamicExpression::TensorMap& inputs,
                                 const DynamicExpression::TensorMap& outputs,
@@ -67,7 +67,11 @@ inline DynamicExpression makeExpression() {
                                                                   .argmax({1}, {}, DataType::FP32)
                                                             : Expression::input("labels");
                                  Expression correct = Expression::where(predictedClass == trueClass, Expression(1.0), Expression(0.0));
-                                 Expression metric = correct.reduce_mean({0, 1}, {0}, DataType::FP32);
+                                 Expression validity =
+                                     Expression::input(Thor::BATCH_VALIDITY_MASK_NAME, DataType::FP32, DataType::FP32);
+                                 Expression correctCount = (correct * validity).reduce_sum({0, 1}, {0}, DataType::FP32);
+                                 Expression validCount = validity.reduce_sum({0, 1}, {0}, DataType::FP32);
+                                 Expression metric = correctCount / validCount;
 
                                  ExpressionDefinition definition =
                                      ExpressionDefinition::fromOutputs(Expression::outputs({{"metric", metric}}));
@@ -91,7 +95,14 @@ inline DynamicExpression makeExpression() {
  */
 class CategoricalAccuracy : public CustomMetric {
    public:
-    CategoricalAccuracy() : CustomMetric(CategoricalAccuracyDetail::makeExpression(), "predictions", "labels", "metric", "Accuracy") {}
+    CategoricalAccuracy()
+        : CustomMetric(CategoricalAccuracyDetail::makeExpression(),
+                       "predictions",
+                       "labels",
+                       "metric",
+                       "Accuracy",
+                       Thor::MetricAggregation::MEAN_BY_EXAMPLE,
+                       Thor::BATCH_VALIDITY_MASK_NAME) {}
 
     ~CategoricalAccuracy() override = default;
 

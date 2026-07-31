@@ -24,6 +24,7 @@ class UnaryReductionMetric : public Metric {
         j["factory"] = Layer::Factory::Metric.value();
         j["version"] = getLayerVersion();
         j["layer_type"] = to_snake_case(getLayerType());
+        j["aggregation"] = getAggregation();
         j["values"] = getValues().architectureJson();
         j["metric"] = metricTensor.architectureJson();
         return j;
@@ -50,7 +51,7 @@ class UnaryReductionMetric : public Metric {
     }
 };
 
-#define THOR_DECLARE_UNARY_REDUCTION_METRIC(ApiName, ImplName)                                                        \
+#define THOR_DECLARE_UNARY_REDUCTION_METRIC(ApiName, ImplName, AggregationValue)                                      \
 class ApiName : public UnaryReductionMetric {                                                                         \
    public:                                                                                                            \
     class Builder;                                                                                                    \
@@ -58,6 +59,7 @@ class ApiName : public UnaryReductionMetric {                                   
     ~ApiName() override = default;                                                                                    \
     std::shared_ptr<Layer> clone() const override { return std::make_shared<ApiName>(*this); }                        \
     std::string getLayerType() const override { return #ApiName; }                                                    \
+    MetricAggregation getAggregation() const override { return AggregationValue; }                                    \
     static void deserialize(const nlohmann::json& j, Network* network);                                               \
                                                                                                                       \
    protected:                                                                                                         \
@@ -105,10 +107,10 @@ class ApiName::Builder {                                                        
     std::optional<Tensor> _values;                                                                                    \
 };
 
-THOR_DECLARE_UNARY_REDUCTION_METRIC(Mean, Mean)
-THOR_DECLARE_UNARY_REDUCTION_METRIC(Sum, Sum)
-THOR_DECLARE_UNARY_REDUCTION_METRIC(Min, Min)
-THOR_DECLARE_UNARY_REDUCTION_METRIC(Max, Max)
+THOR_DECLARE_UNARY_REDUCTION_METRIC(Mean, Mean, MetricAggregation::MEAN_BY_EXAMPLE)
+THOR_DECLARE_UNARY_REDUCTION_METRIC(Sum, Sum, MetricAggregation::SUM)
+THOR_DECLARE_UNARY_REDUCTION_METRIC(Min, Min, MetricAggregation::MIN)
+THOR_DECLARE_UNARY_REDUCTION_METRIC(Max, Max, MetricAggregation::MAX)
 
 #undef THOR_DECLARE_UNARY_REDUCTION_METRIC
 
@@ -120,6 +122,7 @@ class WeightedMean : public Metric {
 
     std::shared_ptr<Layer> clone() const override { return std::make_shared<WeightedMean>(*this); }
     std::string getLayerType() const override { return "WeightedMean"; }
+    MetricAggregation getAggregation() const override { return MetricAggregation::RATIO; }
 
     Tensor getValues() const { return getFeatureInput().value(); }
     Tensor getWeights() const { return labelsTensor; }
@@ -128,6 +131,11 @@ class WeightedMean : public Metric {
     static void deserialize(const nlohmann::json& j, Network* network);
 
    protected:
+    uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize,
+                                                   ThorImplementation::TensorPlacement tensorPlacement) const override {
+        return Metric::getFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement) + 4 * sizeof(float);
+    }
+
     std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
                                                      std::shared_ptr<ThorImplementation::Layer> drivingLayer,
                                                      std::shared_ptr<Thor::Layer> drivingApiLayer,

@@ -126,7 +126,7 @@ class DeviceResidentNamedBatchSession : public Thor::BatchSession {
     [[nodiscard]] const SplitRuntime &runtimeFor(ExampleType exampleType) const;
     [[nodiscard]] std::map<std::string, ThorImplementation::Tensor> allocateBatchTensorSet() const;
     void validateReturnedBatch(const std::map<std::string, ThorImplementation::Tensor> &tensors) const;
-    void fillRowIndexTensor(SplitRuntime &runtime);
+    void fillRowIndexTensor(SplitRuntime &runtime, uint32_t validExampleCount);
     void releaseBatchTensorSet(
         ExampleType exampleType,
         std::shared_ptr<std::map<std::string, ThorImplementation::Tensor>> tensors,

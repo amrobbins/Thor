@@ -44,15 +44,6 @@ TEST(LossShaperShapeContract, CubReductionPlansUseOriginalTensorAxes) {
     EXPECT_EQ(Impl::LossShaper::getReductionAxes(rawLossDimensions, Impl::LossShaper::OutputLossType::PER_OUTPUT),
               std::vector<uint32_t>({0}));
 
-    EXPECT_FLOAT_EQ(Impl::LossShaper::getReductionOutputScale(rawLossDimensions,
-                                                               Impl::LossShaper::OutputLossType::BATCH),
-                    0.2f);
-    EXPECT_FLOAT_EQ(Impl::LossShaper::getReductionOutputScale(rawLossDimensions,
-                                                               Impl::LossShaper::OutputLossType::PER_EXAMPLE),
-                    1.0f);
-    EXPECT_FLOAT_EQ(Impl::LossShaper::getReductionOutputScale(rawLossDimensions,
-                                                               Impl::LossShaper::OutputLossType::PER_OUTPUT),
-                    0.2f);
 }
 
 TEST(LossShaperShapeContract, SerializesOnlyCanonicalShapeNames) {

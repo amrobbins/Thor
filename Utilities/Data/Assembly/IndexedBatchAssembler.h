@@ -164,6 +164,11 @@ struct IndexedCompletedBatch {
     uint64_t batchOrdinal = 0;
 };
 
+struct IndexedReadyBatch {
+    uint64_t batchNum = 0;
+    uint32_t validExampleCount = 0;
+};
+
 struct IndexedBatchLoadWork {
     IndexedBatchState *batchState = nullptr;
     uint64_t batchOrdinal = 0;
@@ -174,6 +179,7 @@ struct IndexedBatchLoadWork {
 struct IndexedBatchState {
     uint64_t batchOrdinal = 0;
     uint64_t batchNum = 0;
+    uint32_t validExampleCount = 0;
     uint64_t expectedRecords = 0;
     uint64_t expectedLoadChunks = 0;
     std::atomic<uint64_t> completedLoadChunks{0};
@@ -221,13 +227,14 @@ class IndexedBatchAssembler {
 #ifdef THOR_GTEST
     uint64_t getReadyBatchCountForTesting() {
         throwIfWorkerFailed();
-        const int occupancy = batchNumQueue.occupancy();
+        const int occupancy = readyBatchQueue.occupancy();
         THOR_THROW_IF_FALSE(occupancy >= 0);
         return static_cast<uint64_t>(occupancy);
     }
 #endif
 
-    void acquireBatch(std::map<std::string, ThorImplementation::Tensor> &tensors, uint64_t &batchNum);
+    void acquireBatch(std::map<std::string, ThorImplementation::Tensor> &tensors,
+                      IndexedReadyBatch &readyBatch);
     void returnBuffers(const std::map<std::string, ThorImplementation::Tensor> &tensors);
 
    private:
@@ -248,7 +255,11 @@ class IndexedBatchAssembler {
     uint64_t recordSizeBytes;
     uint64_t batchesPerEpoch;
     uint64_t numDatasetExamples;
-    uint64_t nextBatchNum;
+    // Scheduling may run ahead of delivery by the prefetch depth. Keep the
+    // two cursors separate so getNextBatchNum() never has to wait for a ready
+    // batch or report the assembler's speculative scheduling position.
+    uint64_t nextBatchToSchedule;
+    uint64_t nextBatchToDeliver;
     uint64_t nextLogicalPosition;
     uint64_t nextBatchOrdinal;
     uint64_t nextPublishOrdinal;
@@ -257,7 +268,7 @@ class IndexedBatchAssembler {
 
     AsyncQueue<IndexedBatchLoadWork> loadWorkQueue;
     AsyncQueue<IndexedCompletedBatch> completedBatchQueue;
-    AsyncQueue<uint64_t> batchNumQueue;
+    AsyncQueue<IndexedReadyBatch> readyBatchQueue;
     std::vector<std::thread> loadWorkerThreads;
     std::thread assemblerThread;
 

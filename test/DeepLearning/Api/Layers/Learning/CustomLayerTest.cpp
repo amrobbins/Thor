@@ -1,3 +1,4 @@
+#include "DeepLearning/Api/BatchValidity.h"
 #include "DeepLearning/Api/Layers/Learning/CustomLayer.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
@@ -7,6 +8,7 @@
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
 #include "Utilities/Expression/Expression.h"
+#include "Utilities/ComputeTopology/MachineEvaluator.h"
 
 #include "gtest/gtest.h"
 
@@ -98,6 +100,15 @@ Impl::DynamicExpression makeSerializableAffineExpression() {
     Impl::Expression x = Impl::Expression::input("x", DataType::FP32, DataType::FP32);
     Impl::Expression y = x * 3.0f + 2.0f;
     Impl::ExpressionDefinition definition = Impl::ExpressionDefinition::fromOutputs(Impl::Expression::outputs({{"y", y}}));
+    return Impl::DynamicExpression::fromExpressionDefinition(definition);
+}
+
+Impl::DynamicExpression makeSerializableValidityMaskedExpression() {
+    Impl::Expression x = Impl::Expression::input("x", DataType::FP32, DataType::FP32);
+    Impl::Expression validity =
+        Impl::Expression::input(Api::BATCH_VALIDITY_MASK_NAME, DataType::FP32, DataType::FP32);
+    Impl::ExpressionDefinition definition =
+        Impl::ExpressionDefinition::fromOutputs(Impl::Expression::outputs({{"y", x * validity}}));
     return Impl::DynamicExpression::fromExpressionDefinition(definition);
 }
 
@@ -293,6 +304,7 @@ TEST(CustomLayerApi, SerializableExpressionDefinitionSaveLoadRoundTripPreservesE
                                            .inputNames({"x"})
                                            .outputNames({"y"})
                                            .inputInterface({{"x", input.getFeatureOutput().value()}})
+                                           .requiresFullBatch()
                                            .build();
         Api::NetworkOutput output = Api::NetworkOutput::Builder()
                                         .network(network)
@@ -306,6 +318,8 @@ TEST(CustomLayerApi, SerializableExpressionDefinitionSaveLoadRoundTripPreservesE
         EXPECT_EQ(beforeSaveJson.at("input_names").get<vector<string>>(), (vector<string>{"x"}));
         EXPECT_EQ(beforeSaveJson.at("output_names").get<vector<string>>(), (vector<string>{"y"}));
         ASSERT_FALSE(beforeSaveJson.at("expression").is_null());
+        EXPECT_TRUE(customLayer.requiresFullBatch());
+        EXPECT_TRUE(beforeSaveJson.at("requires_full_batch").get<bool>());
 
         network.save(archiveDir.string(), true);
 
@@ -325,6 +339,8 @@ TEST(CustomLayerApi, SerializableExpressionDefinitionSaveLoadRoundTripPreservesE
         EXPECT_EQ(loadedJson.at("input_names").get<vector<string>>(), (vector<string>{"x"}));
         EXPECT_EQ(loadedJson.at("output_names").get<vector<string>>(), (vector<string>{"y"}));
         ASSERT_FALSE(loadedJson.at("expression").is_null());
+        EXPECT_TRUE(loadedCustomLayer->requiresFullBatch());
+        EXPECT_TRUE(loadedJson.at("requires_full_batch").get<bool>());
 
         PlacedCustomLayerFixture fixture =
             placeSingleCustomLayerNetwork(loadedNetwork, *loadedInput, *loadedOutput, *loadedCustomLayer, batchSize, true);
@@ -459,4 +475,117 @@ TEST(CustomLayerApi, BatchLiteralShapeIsGeneralizedBeforePhaseCompositionAtRunti
             expected.push_back(values[base + i]);
     }
     expectAllClose(runForward(*fixture.physicalInput, *fixture.physicalOutput, featureInHost, batchSize), expected);
+}
+
+
+TEST(CustomLayerApi, OptionalValidityMaskIsAvailableInsideExpressionAndNotExposedAsAFeaturePort) {
+    if (MachineEvaluator::instance().getNumGpus() == 0)
+        GTEST_SKIP() << "CustomLayer validity-mask execution test requires a GPU";
+
+    constexpr uint32_t batchCapacity = 4;
+    constexpr uint32_t validExampleCount = 2;
+    Api::Network network("custom_layer_validity_mask");
+    Api::NetworkInput input = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("x")
+                                  .dimensions({2})
+                                  .dataType(DataType::FP32)
+                                  .build();
+    Api::CustomLayer customLayer = Api::CustomLayer::Builder()
+                                       .network(network)
+                                       .expression(makeSerializableValidityMaskedExpression())
+                                       .usesBatchValidity()
+                                       .inputInterface({{"x", input.getFeatureOutput().value()}})
+                                       .build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("y")
+                                    .inputTensor(customLayer.getOutput("y"))
+                                    .dataType(DataType::FP32)
+                                    .build();
+
+    EXPECT_TRUE(customLayer.usesBatchValidity());
+    EXPECT_EQ(customLayer.getInputNames(), (vector<string>{"x"}));
+    EXPECT_TRUE(customLayer.architectureJson().at("uses_batch_validity").get<bool>());
+    EXPECT_FALSE(customLayer.architectureJson().contains("uses_batch_validity_mask"));
+
+    PlacedCustomLayerFixture fixture =
+        placeSingleCustomLayerNetwork(network, input, output, customLayer, batchCapacity, /*inferenceOnly=*/true);
+    Impl::Tensor inputCpu(cpuPlacement, Impl::TensorDescriptor(DataType::FP32, {batchCapacity, 2}));
+    writeCpuTensor(inputCpu, {1.0f, 2.0f, 3.0f, 4.0f, 50.0f, 60.0f, 70.0f, 80.0f});
+
+    const vector<float> actual =
+        runForward(*fixture.physicalInput, *fixture.physicalOutput, inputCpu, validExampleCount);
+    expectAllClose(actual, {1.0f, 2.0f, 3.0f, 4.0f, 0.0f, 0.0f, 0.0f, 0.0f});
+}
+
+TEST(CustomLayerApi, BatchValidityDeclarationMustMatchExpressionContract) {
+    Api::Network network("custom_layer_validity_mask_contract");
+    Api::Tensor input(DataType::FP32, {2});
+
+    EXPECT_THROW((void)Api::CustomLayer::Builder()
+                     .network(network)
+                     .expression(makeSerializableValidityMaskedExpression())
+                     .inputInterface({{"x", input}})
+                     .build(),
+                 std::runtime_error);
+
+    EXPECT_THROW((void)Api::CustomLayer::Builder()
+                     .network(network)
+                     .expression(makeSerializableAffineExpression())
+                     .usesBatchValidity()
+                     .inputInterface({{"x", input}})
+                     .build(),
+                 std::runtime_error);
+}
+TEST(CustomLayerApi, FullBatchRequirementIsSerializedAndPropagatedToPhysicalLayer) {
+    if (MachineEvaluator::instance().getNumGpus() == 0)
+        GTEST_SKIP() << "CustomLayer placement test requires a GPU";
+
+    Api::Network network("custom_layer_full_batch_requirement");
+    Api::NetworkInput input = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("x")
+                                  .dimensions({2})
+                                  .dataType(DataType::FP32)
+                                  .build();
+    Api::CustomLayer customLayer = Api::CustomLayer::Builder()
+                                       .network(network)
+                                       .expression(makeSerializableAffineExpression())
+                                       .requiresFullBatch()
+                                       .inputInterface({{"x", input.getFeatureOutput().value()}})
+                                       .build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("y")
+                                    .inputTensor(customLayer.getOutput("y"))
+                                    .dataType(DataType::FP32)
+                                    .build();
+
+    EXPECT_TRUE(customLayer.requiresFullBatch());
+    EXPECT_TRUE(customLayer.architectureJson().at("requires_full_batch").get<bool>());
+    PlacedCustomLayerFixture fixture =
+        placeSingleCustomLayerNetwork(network, input, output, customLayer, /*batchSize=*/4, /*inferenceOnly=*/true);
+    ASSERT_NE(fixture.physicalCustomLayer, nullptr);
+    EXPECT_FALSE(fixture.physicalCustomLayer->supportsPartialBatches());
+}
+
+TEST(CustomLayerApi, BatchValidityAndFullBatchRequirementAreMutuallyExclusive) {
+    Api::Network network("custom_layer_conflicting_partial_batch_contract");
+    Api::Tensor input(DataType::FP32, {2});
+
+    EXPECT_ANY_THROW((void)Api::CustomLayer::Builder()
+                         .network(network)
+                         .expression(makeSerializableValidityMaskedExpression())
+                         .usesBatchValidity()
+                         .requiresFullBatch()
+                         .inputInterface({{"x", input}})
+                         .build());
+    EXPECT_ANY_THROW((void)Api::CustomLayer::Builder()
+                         .network(network)
+                         .expression(makeSerializableAffineExpression())
+                         .requiresFullBatch()
+                         .usesBatchValidity()
+                         .inputInterface({{"x", input}})
+                         .build());
 }

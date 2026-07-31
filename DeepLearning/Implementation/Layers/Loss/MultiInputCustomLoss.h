@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DeepLearning/Api/BatchValidity.h"
 #include "DeepLearning/Implementation/Layers/Loss.h"
 #include "Utilities/Expression/DynamicExpression.h"
 
@@ -21,7 +22,9 @@ class MultiInputCustomLoss : public Loss {
                          std::vector<std::optional<std::string>> gradientNames,
                          std::string lossName = "loss",
                          DataType lossDataType = DataType::FP32,
-                         std::optional<float> lossWeight = std::nullopt);
+                         std::optional<float> lossWeight = std::nullopt,
+                         bool usesBatchValidity = false,
+                         bool requiresFullBatch = false);
 
     ~MultiInputCustomLoss() override = default;
 
@@ -34,10 +37,11 @@ class MultiInputCustomLoss : public Loss {
     void cleanup() override;
     void initialize() override;
 
-    void forward(std::optional<Tensor> featureInput, bool validationPass, uint32_t batchSize = 0) override;
-    void backward(std::optional<Tensor> errorInput, uint32_t batchSize = 0) override;
+    void forward(std::optional<Tensor> featureInput, bool validationPass, uint32_t validExampleCount = 0) override;
+    void backward(std::optional<Tensor> errorInput, uint32_t validExampleCount = 0) override;
 
     std::string getType() override { return "MultiInputCustomLoss"; }
+    bool supportsPartialBatches() const override { return !fullBatchRequired; }
     std::optional<Tensor> getErrorOutput(uint32_t inputIndex) const;
     std::vector<std::optional<Tensor>> getErrorOutputs() const { return errorOutputs; }
     Stream getStream() override;
@@ -67,6 +71,9 @@ class MultiInputCustomLoss : public Loss {
     std::vector<std::optional<std::string>> gradientNames;
     std::string lossName;
     std::optional<float> lossWeight;
+    bool batchValidityMaskEnabled = false;
+    bool fullBatchRequired = false;
+    Tensor batchValidityMask;
 
     std::vector<std::optional<Tensor>> featureInputs;
     std::vector<std::optional<Tensor>> errorOutputs;
@@ -75,7 +82,8 @@ class MultiInputCustomLoss : public Loss {
 
     std::set<unsigned long> allForwardInputTensorIds;
     std::set<unsigned long> stillWaitingForForwardInputTensorIds;
-    uint32_t currentBatchSize = 0;
+    uint32_t currentValidExampleCount = 0;
+    bool batchCardinalitySet = false;
 
     std::shared_ptr<PreparedDynamicExpression> lossPrepared;
     std::shared_ptr<StampedExecutionPlan> lossStamped;
@@ -94,6 +102,10 @@ class MultiInputCustomLoss : public Loss {
     const Stream& computeStream() const;
     void synchronizeComputeStreamForInputs();
     void resetForwardBookkeeping();
+    uint32_t getPhysicalBatchCapacity() const;
+    uint32_t getValidExampleCount() const;
+    void recordBatchCardinality(uint32_t validExampleCount);
+    void maskInvalidBatchTail(Tensor& tensor, const char* tensorRole);
 
     void infer(std::optional<Tensor> inputTensor, std::optional<Tensor> outputTensor, Stream stream) override;
     void backProp(std::optional<Tensor> dataIn, std::optional<Tensor> errorIn, std::optional<Tensor> errorOut, Stream stream) override;

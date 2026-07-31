@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Api/Training/Observers/LineStatsReporter.h"
+#include "DeepLearning/Api/Training/MetricEpochAccumulator.h"
 #include "DeepLearning/Api/Training/Observers/TrainingStatsSink.h"
 #include "DeepLearning/Api/Training/Results/TrainingRunResult.h"
 
@@ -63,6 +64,14 @@ class TrainingRunsStatsReporter : public TrainingStatsSink {
         std::optional<double> displayedValue{};
     };
 
+    struct SmoothedMetricState {
+        uint64_t currentEpoch = 0;
+        uint64_t currentEpochValueCount = 0;
+        std::optional<MetricEpochAccumulator> currentEpochAccumulator{};
+        std::optional<double> previousEpochValue{};
+        std::optional<double> displayedValue{};
+    };
+
     struct RunState {
         std::string runName{};
         RunConfig config{};
@@ -72,12 +81,12 @@ class TrainingRunsStatsReporter : public TrainingStatsSink {
         std::optional<TrainingStatsEvent> latestTestStats{};
         SmoothedScalarState trainingLoss{};
         SmoothedScalarState validationLoss{};
-        std::unordered_map<std::string, SmoothedScalarState> trainingMetrics{};
-        std::unordered_map<std::string, SmoothedScalarState> validationMetrics{};
+        std::unordered_map<std::string, SmoothedMetricState> trainingMetrics{};
+        std::unordered_map<std::string, SmoothedMetricState> validationMetrics{};
         std::unordered_map<std::string, SmoothedScalarState> namedValidationLosses{};
         std::unordered_map<
             std::string,
-            std::unordered_map<std::string, SmoothedScalarState>> namedValidationMetrics{};
+            std::unordered_map<std::string, SmoothedMetricState>> namedValidationMetrics{};
         std::optional<TrainingRunResult> terminalResult{};
         bool validationStatsPendingEmission = false;
         bool dirty = false;
@@ -90,11 +99,16 @@ class TrainingRunsStatsReporter : public TrainingStatsSink {
                                           const TrainingStatsSnapshot& stats,
                                           double value);
     static void updateSmoothedLossState(SmoothedScalarState& lossState, const TrainingStatsSnapshot& stats);
-    static void updateSmoothedMetricStates(std::unordered_map<std::string, SmoothedScalarState>& metricStates,
+    static void updateSmoothedMetricState(SmoothedMetricState& metricState,
+                                          const TrainingStatsSnapshot& stats,
+                                          const std::string& metricName,
+                                          double reportedValue);
+    static void updateSmoothedMetricStates(std::unordered_map<std::string, SmoothedMetricState>& metricStates,
                                            const TrainingStatsSnapshot& stats);
     static std::optional<double> displayedValueFromState(const SmoothedScalarState& scalarState);
+    static std::optional<double> displayedValueFromState(const SmoothedMetricState& metricState);
     static std::unordered_map<std::string, double> displayedMetricValues(
-        const std::unordered_map<std::string, SmoothedScalarState>& metricStates);
+        const std::unordered_map<std::string, SmoothedMetricState>& metricStates);
     RunState& stateForRun(const std::string& runName);
     void maybeEmitSummary(std::chrono::steady_clock::time_point now, bool force = false);
     void emitSummaryLocked(std::chrono::steady_clock::time_point now);

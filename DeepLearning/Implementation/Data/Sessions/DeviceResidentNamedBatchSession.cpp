@@ -1,4 +1,5 @@
 #include "DeepLearning/Implementation/Data/Sessions/DeviceResidentNamedBatchSession.h"
+#include "DeepLearning/Implementation/Data/BatchCardinality.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Implementation/Data/Residency/DeviceResidentNamedGatherKernel.h"
@@ -250,24 +251,34 @@ DeviceResidentNamedBatchSession::runtimeFor(ExampleType exampleType) const {
     return *found->second;
 }
 
-void DeviceResidentNamedBatchSession::fillRowIndexTensor(SplitRuntime &runtime) {
+void DeviceResidentNamedBatchSession::fillRowIndexTensor(
+    SplitRuntime &runtime,
+    uint32_t validExampleCount) {
     THOR_THROW_IF_FALSE(runtime.numExamples() > 0);
+    THOR_THROW_IF_FALSE(validExampleCount >= 1);
+    THOR_THROW_IF_FALSE(validExampleCount <= batchSize);
     uint64_t *rowIndices = runtime.rowIndicesHost.getMemPtr<uint64_t>();
-    for (uint64_t slot = 0; slot < batchSize; ++slot) {
+    for (uint64_t slot = 0; slot < validExampleCount; ++slot) {
         uint64_t logicalPosition = 0;
         if (runtime.randomized) {
             THOR_THROW_IF_FALSE(runtime.randomizer != nullptr);
             logicalPosition = runtime.randomizer->getRandomNumber();
         } else {
             logicalPosition = runtime.nextLogicalPosition;
-            runtime.nextLogicalPosition =
-                (runtime.nextLogicalPosition + 1) % runtime.numExamples();
+            runtime.nextLogicalPosition += 1;
+            if (runtime.nextLogicalPosition == runtime.numExamples()) {
+                runtime.nextLogicalPosition = 0;
+            }
         }
         THOR_THROW_IF_FALSE(logicalPosition < runtime.numExamples());
-        const uint64_t sourceRow =
-            runtime.sourceIndices->at(logicalPosition);
+        const uint64_t sourceRow = runtime.sourceIndices->at(logicalPosition);
         THOR_THROW_IF_FALSE(sourceRow < dataset->getNumExamples());
         rowIndices[slot] = sourceRow;
+    }
+
+    const uint64_t paddingSourceRow = rowIndices[validExampleCount - 1];
+    for (uint64_t slot = validExampleCount; slot < batchSize; ++slot) {
+        rowIndices[slot] = paddingSourceRow;
     }
 }
 
@@ -314,9 +325,13 @@ Batch DeviceResidentNamedBatchSession::acquireBatch(
     }
 
     batchNum = runtime.nextBatchNum;
+    const uint32_t validExampleCount = ThorImplementation::validExamplesForBatch(
+        batchNum,
+        runtime.numExamples(),
+        batchSize);
     runtime.nextBatchNum =
         (runtime.nextBatchNum + 1) % runtime.batchesPerEpoch;
-    fillRowIndexTensor(runtime);
+    fillRowIndexTensor(runtime, validExampleCount);
     runtime.rowIndicesDevice.copyFromAsync(
         runtime.rowIndicesHost,
         runtime.gatherStream);
@@ -336,6 +351,9 @@ Batch DeviceResidentNamedBatchSession::acquireBatch(
     auto sourceTensors =
         std::make_shared<std::map<std::string, Tensor>>(std::move(tensors));
     Batch batch = batchFromTensorMap(*sourceTensors);
+    if (validExampleCount < batchSize) {
+        batch.setValidExampleCount(validExampleCount);
+    }
     std::set<std::string> fieldNames;
     for (const auto &[name, tensor] : *sourceTensors) {
         (void)tensor;

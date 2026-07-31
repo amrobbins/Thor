@@ -3,8 +3,12 @@ import thor
 
 def test_top_level_api_is_curated():
     expected = {
+        "BATCH_VALIDITY_MASK_NAME",
+        "METRIC_AGGREGATION_DENOMINATOR_NAME",
+        "METRIC_AGGREGATION_NUMERATOR_NAME",
         "DataType",
         "EnsembleModel",
+        "MetricAggregation",
         "Network",
         "Tensor",
         "__git_version__",
@@ -78,3 +82,9 @@ def test_ensembles_namespace_exports_manifest_types():
     assert "EnsembleModel" in dir(thor.ensembles)
     assert "EnsembleMemberSpec" in dir(thor.ensembles)
     assert "EnsembleAggregation" in dir(thor.ensembles)
+
+
+def test_batch_validity_mask_name_is_public_and_reserved():
+    assert thor.BATCH_VALIDITY_MASK_NAME == "__thor_batch_validity_mask"
+    assert thor.METRIC_AGGREGATION_NUMERATOR_NAME == "__thor_metric_aggregation_numerator"
+    assert thor.METRIC_AGGREGATION_DENOMINATOR_NAME == "__thor_metric_aggregation_denominator"

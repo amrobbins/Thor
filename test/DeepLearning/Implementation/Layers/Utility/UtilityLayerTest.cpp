@@ -24,8 +24,10 @@
 #include "cuda_runtime.h"
 #include "gtest/gtest.h"
 
+#include <cstdlib>
 #include <limits>
 #include <set>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -47,7 +49,6 @@ inline int randomElement(set<int> &filledSet) {
     filledSet.erase(it);
     return element;
 }
-
 
 class BackpropDescriptorSinkLayer : public ThorImplementation::Layer {
    public:
@@ -90,7 +91,6 @@ class BackpropDescriptorSinkLayer : public ThorImplementation::Layer {
         (void)stream;
     }
 };
-
 
 template <typename T>
 struct TensorFanoutSumDTypeTraits;
@@ -1060,18 +1060,11 @@ TEST(TensorFanout, CreatesFanout) {
     LayerTestHelper::tearDownNetwork(layers);
 }
 
+TEST(TensorFanout, BackwardSumsBF16Errors) { expectTensorFanoutSumsBackwardErrorsForDType<__nv_bfloat16>(); }
 
-TEST(TensorFanout, BackwardSumsBF16Errors) {
-    expectTensorFanoutSumsBackwardErrorsForDType<__nv_bfloat16>();
-}
+TEST(TensorFanout, BackwardSumsFp8E4M3Errors) { expectTensorFanoutSumsBackwardErrorsForDType<__nv_fp8_e4m3>(); }
 
-TEST(TensorFanout, BackwardSumsFp8E4M3Errors) {
-    expectTensorFanoutSumsBackwardErrorsForDType<__nv_fp8_e4m3>();
-}
-
-TEST(TensorFanout, BackwardSumsFp8E5M2Errors) {
-    expectTensorFanoutSumsBackwardErrorsForDType<__nv_fp8_e5m2>();
-}
+TEST(TensorFanout, BackwardSumsFp8E5M2Errors) { expectTensorFanoutSumsBackwardErrorsForDType<__nv_fp8_e5m2>(); }
 
 inline void computeIndex(int flatIndex, int index[], int numDimensions, long stridePerDimension[]) {
     for (int i = 0; i < numDimensions; ++i) {
@@ -1221,135 +1214,271 @@ TEST(Concatenate, Concatenates) {
 }
 
 TEST(Split, Splits) {
-    srand(time(NULL));
+    const char *seedEnvironment = std::getenv("THOR_SPLIT_TEST_SEED");
+    const unsigned int seed =
+        seedEnvironment != nullptr ? static_cast<unsigned int>(std::stoul(seedEnvironment)) : static_cast<unsigned int>(std::time(nullptr));
+
+    const char *runCountEnvironment = std::getenv("THOR_SPLIT_TEST_RUNS");
+    const int runCount = runCountEnvironment != nullptr ? std::stoi(runCountEnvironment) : 50;
+
+    srand(seed);
 
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
-    long axisElementsPerDestArray[10];
-    long stridePerSourceDimension[10];
-    long stridePerDestDimension[5 * 10];
-
-    for (int test = 0; test < 50; ++test) {
+    for (int test = 0; test < runCount; ++test) {
         vector<Tensor> partsCpu;
         vector<Tensor> partsGpu;
+        vector<Tensor> splitOutputsGpu;
+
         Tensor wholeCpu;
         Tensor wholeGpu;
 
-        int numSplitTensors = (rand() % 5) + 2;
-        int numDimensions = (rand() % 6) + 1;
+        const int numSplitTensors = (rand() % 5) + 2;
+        const int numDimensions = (rand() % 6) + 1;
+        const int axis = rand() % numDimensions;
+
+        vector<long> axisElementsPerDestArray(numSplitTensors);
+        vector<long> stridePerSourceDimension(numDimensions);
+        vector<long> stridePerDestDimension(numSplitTensors * numDimensions);
 
         vector<unsigned long> wholeDimensions;
-        int axis = rand() % numDimensions;
-        for (int d = 0; d < numDimensions; d++) {
-            if (d == axis)
+        wholeDimensions.reserve(numDimensions);
+
+        for (int dimension = 0; dimension < numDimensions; ++dimension) {
+            if (dimension == axis)
                 wholeDimensions.push_back(0);
             else
                 wholeDimensions.push_back((rand() % 10) + 1);
         }
 
-        for (int t = 0; t < numSplitTensors; ++t) {
-            vector<unsigned long> splitArrayDimensions = wholeDimensions;
-            splitArrayDimensions[axis] = (rand() % 5) + 1;
-            axisElementsPerDestArray[t] = splitArrayDimensions[axis];
-            wholeDimensions[axis] += splitArrayDimensions[axis];
+        partsCpu.reserve(numSplitTensors);
 
-            TensorDescriptor partDescriptor(DataType::FP16, splitArrayDimensions);
+        for (int output = 0; output < numSplitTensors; ++output) {
+            vector<unsigned long> splitDimensions = wholeDimensions;
+
+            splitDimensions[axis] = (rand() % 5) + 1;
+            axisElementsPerDestArray[output] = static_cast<long>(splitDimensions[axis]);
+
+            wholeDimensions[axis] += splitDimensions[axis];
+
+            TensorDescriptor partDescriptor(DataType::FP16, splitDimensions);
             partsCpu.emplace_back(cpuPlacement, partDescriptor);
         }
+
         TensorDescriptor wholeDescriptor(DataType::FP16, wholeDimensions);
+
         wholeCpu = Tensor(cpuPlacement, wholeDescriptor);
         wholeGpu = Tensor(gpuPlacement, wholeDescriptor);
 
-        long numElements = wholeCpu.getDescriptor().getTotalNumElements();
+        const long numElements = wholeCpu.getDescriptor().getTotalNumElements();
 
         vector<shared_ptr<Layer>> layers;
         layers.push_back(make_shared<NetworkInput>(wholeGpu));
+
         Stream stream = layers.front()->getStream();
 
         stridePerSourceDimension[numDimensions - 1] = 1;
-        for (int dest = 0; dest < numSplitTensors; dest++)
-            stridePerDestDimension[dest * numDimensions + numDimensions - 1] = 1;
-        for (int i = numDimensions - 2; i >= 0; --i) {
-            stridePerSourceDimension[i] = stridePerSourceDimension[i + 1] * wholeDimensions[i + 1];
-            for (int dest = 0; dest < numSplitTensors; ++dest)
-                if (i + 1 == axis)
-                    stridePerDestDimension[dest * numDimensions + i] =
-                        stridePerDestDimension[dest * numDimensions + i + 1] * axisElementsPerDestArray[dest];
-                else
-                    stridePerDestDimension[dest * numDimensions + i] =
-                        stridePerDestDimension[dest * numDimensions + i + 1] * wholeDimensions[i + 1];
+
+        for (int output = 0; output < numSplitTensors; ++output) {
+            stridePerDestDimension[output * numDimensions + numDimensions - 1] = 1;
         }
 
-        half *mem = (half *)wholeCpu.getMemPtr();
-        for (int i = 0; i < numElements; ++i) {
-            mem[i] = ((rand() % 100) / 10.0f) - 5.0f;
+        for (int dimension = numDimensions - 2; dimension >= 0; --dimension) {
+            stridePerSourceDimension[dimension] =
+                stridePerSourceDimension[dimension + 1] * static_cast<long>(wholeDimensions[dimension + 1]);
+
+            for (int output = 0; output < numSplitTensors; ++output) {
+                const long followingDimensionSize =
+                    dimension + 1 == axis ? axisElementsPerDestArray[output] : static_cast<long>(wholeDimensions[dimension + 1]);
+
+                stridePerDestDimension[output * numDimensions + dimension] =
+                    stridePerDestDimension[output * numDimensions + dimension + 1] * followingDimensionSize;
+            }
+        }
+
+        half *wholeInitialization = static_cast<half *>(wholeCpu.getMemPtr());
+
+        for (long element = 0; element < numElements; ++element) {
+            wholeInitialization[element] = ((rand() % 100) / 10.0f) - 5.0f;
         }
 
         vector<unsigned long> axisElements;
-        for (int i = 0; i < numSplitTensors; ++i)
-            axisElements.push_back(axisElementsPerDestArray[i]);
+        axisElements.reserve(numSplitTensors);
+
+        for (int output = 0; output < numSplitTensors; ++output) {
+            axisElements.push_back(static_cast<unsigned long>(axisElementsPerDestArray[output]));
+        }
+
         shared_ptr<Layer> splitLayer = make_shared<Split>(axis, axisElements);
+
         layers.back()->connectToNextLayer(splitLayer.get());
         layers.push_back(splitLayer);
+
         vector<shared_ptr<Layer>> outputLayers;
-        for (int i = 0; i < numSplitTensors; ++i) {
+        outputLayers.reserve(numSplitTensors);
+        partsGpu.reserve(numSplitTensors);
+        splitOutputsGpu.reserve(numSplitTensors);
+
+        for (int output = 0; output < numSplitTensors; ++output) {
             shared_ptr<Layer> noOpLayer = make_shared<NoOpLayer>();
+
             layers.push_back(noOpLayer);
             splitLayer->connectToNextLayer(noOpLayer.get());
 
+            // This is the tensor produced directly by Split and consumed
+            // by NoOpLayer.
+            splitOutputsGpu.push_back(noOpLayer->getFeatureInput().value());
+
             shared_ptr<Layer> networkOutputLayer = make_shared<NetworkOutput>(gpuPlacement);
+
             layers.push_back(networkOutputLayer);
             noOpLayer->connectToNextLayer(networkOutputLayer.get());
+
             partsGpu.push_back(networkOutputLayer->getFeatureOutput().value());
             outputLayers.push_back(networkOutputLayer);
         }
 
         LayerTestHelper::initializeNetwork(layers);
 
-        // Network is runnable here
         layers[0]->forward(wholeCpu, false);
 
-        for (unsigned int i = 0; i < partsGpu.size(); ++i) {
-            stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(outputLayers[i])->getOutputReadyEvent());
-            partsCpu[i].copyFromAsync(partsGpu[i], stream);
+        for (size_t output = 0; output < partsGpu.size(); ++output) {
+            stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(outputLayers[output])->getOutputReadyEvent());
+
+            partsCpu[output].copyFromAsync(partsGpu[output], stream);
         }
+
         stream.synchronize();
 
-        half *wholeMem = (half *)wholeCpu.getMemPtr();
+        half *wholeMem = static_cast<half *>(wholeCpu.getMemPtr());
+
         vector<int> destTensorAxisIndexStart;
+        destTensorAxisIndexStart.reserve(numSplitTensors);
         destTensorAxisIndexStart.push_back(0);
-        for (int i = 1; i < numSplitTensors; ++i)
-            destTensorAxisIndexStart.push_back(destTensorAxisIndexStart.back() + axisElementsPerDestArray[i - 1]);
 
-        int sourceIndex[10];
-        int destIndex[10];
-        for (int sourceFlatIndex = 0; sourceFlatIndex < numElements; ++sourceFlatIndex) {
-            computeIndex(sourceFlatIndex, sourceIndex, numDimensions, stridePerSourceDimension);
-            int dest = 0;
-            for (; sourceIndex[axis] >= destTensorAxisIndexStart[dest] + axisElementsPerDestArray[dest]; ++dest)
-                ;
-            for (int i = 0; i < numDimensions; ++i) {
-                if (i == axis)
-                    destIndex[i] = sourceIndex[i] - destTensorAxisIndexStart[dest];
-                else
-                    destIndex[i] = sourceIndex[i];
+        for (int output = 1; output < numSplitTensors; ++output) {
+            destTensorAxisIndexStart.push_back(destTensorAxisIndexStart.back() + static_cast<int>(axisElementsPerDestArray[output - 1]));
+        }
+
+        vector<int> sourceIndex(numDimensions);
+        vector<int> destIndex(numDimensions);
+
+        for (long sourceFlatIndex = 0; sourceFlatIndex < numElements; ++sourceFlatIndex) {
+            computeIndex(sourceFlatIndex, sourceIndex.data(), numDimensions, stridePerSourceDimension.data());
+
+            int destination = 0;
+
+            while (sourceIndex[axis] >= destTensorAxisIndexStart[destination] + axisElementsPerDestArray[destination]) {
+                ++destination;
             }
-            int destFlatIndex = computeFlatIndex(destIndex, stridePerDestDimension + dest * numDimensions, numDimensions);
 
-            half *partsMem = (half *)partsCpu[dest].getMemPtr();
-            // printf("sourceFlatIndex %d destFlatIndex%d %d sourceIndex[%d][%d] destIndex%d[%d][%d] source %f dest %f\n",
-            //       sourceFlatIndex,
-            //       dest,
-            //       destFlatIndex,
-            //       sourceIndex[0],
-            //       sourceIndex[1],
-            //       dest,
-            //       destIndex[0],
-            //       destIndex[1],
-            //       (float)wholeMem[sourceFlatIndex],
-            //       (float)partsMem[destFlatIndex]);
-            ASSERT_EQ((float)wholeMem[sourceFlatIndex], (float)partsMem[destFlatIndex]);
+            ASSERT_LT(destination, numSplitTensors);
+
+            for (int dimension = 0; dimension < numDimensions; ++dimension) {
+                if (dimension == axis) {
+                    destIndex[dimension] = sourceIndex[dimension] - destTensorAxisIndexStart[destination];
+                } else {
+                    destIndex[dimension] = sourceIndex[dimension];
+                }
+            }
+
+            const int destFlatIndex =
+                computeFlatIndex(destIndex.data(), stridePerDestDimension.data() + destination * numDimensions, numDimensions);
+
+            half *partsMem = static_cast<half *>(partsCpu[destination].getMemPtr());
+
+            const float expected = static_cast<float>(wholeMem[sourceFlatIndex]);
+
+            const float observedBeforeDeviceSynchronize = static_cast<float>(partsMem[destFlatIndex]);
+
+            if (expected == observedBeforeDeviceSynchronize)
+                continue;
+
+            // Wait for every CUDA stream and inspect each pipeline stage:
+            //
+            // NetworkInput output -> Split output -> NoOp/NetworkOutput.
+            //
+            // This distinguishes bad input handoff, bad Split output, and
+            // bad downstream output propagation.
+            Stream::deviceSynchronize(gpuPlacement.getDeviceNum());
+
+            Stream diagnosticStream(gpuPlacement.getDeviceNum());
+
+            Tensor networkInputFeatureGpu = layers[0]->getFeatureOutput().value();
+
+            Tensor networkInputFeatureCpu(cpuPlacement, networkInputFeatureGpu.getDescriptor());
+
+            networkInputFeatureCpu.copyFromAsync(networkInputFeatureGpu, diagnosticStream);
+
+            vector<Tensor> synchronizedSplitOutputsCpu;
+            synchronizedSplitOutputsCpu.reserve(splitOutputsGpu.size());
+
+            for (const Tensor &splitOutputGpu : splitOutputsGpu) {
+                synchronizedSplitOutputsCpu.emplace_back(cpuPlacement, splitOutputGpu.getDescriptor());
+
+                synchronizedSplitOutputsCpu.back().copyFromAsync(splitOutputGpu, diagnosticStream);
+            }
+
+            vector<Tensor> synchronizedPartsCpu;
+            synchronizedPartsCpu.reserve(partsGpu.size());
+
+            for (const Tensor &partGpu : partsGpu) {
+                synchronizedPartsCpu.emplace_back(cpuPlacement, partGpu.getDescriptor());
+
+                synchronizedPartsCpu.back().copyFromAsync(partGpu, diagnosticStream);
+            }
+
+            diagnosticStream.synchronize();
+
+            const float networkInputValue = static_cast<float>(static_cast<half *>(networkInputFeatureCpu.getMemPtr())[sourceFlatIndex]);
+
+            const float splitOutputValue =
+                static_cast<float>(static_cast<half *>(synchronizedSplitOutputsCpu[destination].getMemPtr())[destFlatIndex]);
+
+            const float observedAfterDeviceSynchronize =
+                static_cast<float>(static_cast<half *>(synchronizedPartsCpu[destination].getMemPtr())[destFlatIndex]);
+
+            std::ostringstream dimensionsText;
+            dimensionsText << "[";
+
+            for (size_t dimension = 0; dimension < wholeDimensions.size(); ++dimension) {
+                if (dimension != 0)
+                    dimensionsText << ",";
+
+                dimensionsText << wholeDimensions[dimension];
+            }
+
+            dimensionsText << "]";
+
+            std::ostringstream axisElementsText;
+            axisElementsText << "[";
+
+            for (int output = 0; output < numSplitTensors; ++output) {
+                if (output != 0)
+                    axisElementsText << ",";
+
+                axisElementsText << axisElementsPerDestArray[output];
+            }
+
+            axisElementsText << "]";
+
+            const bool changedAfterDeviceSynchronize = observedAfterDeviceSynchronize != observedBeforeDeviceSynchronize;
+
+            std::ostringstream failureMessage;
+            failureMessage << "Split mismatch. Reproduce with "
+                           << "THOR_SPLIT_TEST_SEED=" << seed << " THOR_SPLIT_TEST_RUNS=" << runCount << ". randomized_case=" << test
+                           << " rank=" << numDimensions << " dimensions=" << dimensionsText.str() << " axis=" << axis
+                           << " axis_elements=" << axisElementsText.str() << " source_flat_index=" << sourceFlatIndex
+                           << " destination=" << destination << " destination_flat_index=" << destFlatIndex << " expected=" << expected
+                           << " network_input_after_device_synchronize=" << networkInputValue
+                           << " split_output_after_device_synchronize=" << splitOutputValue
+                           << " noop_output_before_device_synchronize=" << observedBeforeDeviceSynchronize
+                           << " noop_output_after_device_synchronize=" << observedAfterDeviceSynchronize
+                           << " changed_after_device_synchronize=" << changedAfterDeviceSynchronize;
+
+            LayerTestHelper::tearDownNetwork(layers);
+            FAIL() << failureMessage.str();
         }
 
         LayerTestHelper::tearDownNetwork(layers);
@@ -1749,6 +1878,107 @@ TEST(FiniteCheck, BackwardAliasesAndReportsGpuGradient) {
         EXPECT_NE(message.find("flat_index=6"), string::npos);
         EXPECT_NE(message.find("index=[1, 2]"), string::npos);
     }
+
+    LayerTestHelper::tearDownNetwork(layers);
+}
+
+namespace {
+class BatchCardinalityCaptureLayer final : public NoOpLayer {
+   public:
+    void forward(std::optional<Tensor> featureInput, bool validationPass, uint32_t validExampleCount = 0) override {
+        observedValidExampleCounts.push_back(validExampleCount);
+        NoOpLayer::forward(featureInput, validationPass, validExampleCount);
+    }
+
+    std::vector<uint32_t> observedValidExampleCounts;
+};
+}  // namespace
+
+TEST(Concatenate, PropagatesPartialBatchCardinalityAndRejectsMismatchedInputs) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    TensorDescriptor inputDescriptor(DataType::FP32, {4, 1});
+    Tensor firstCpu(cpuPlacement, inputDescriptor);
+    Tensor secondCpu(cpuPlacement, inputDescriptor);
+
+    auto firstInput = make_shared<NetworkInput>(gpuPlacement, DataType::FP32, vector<unsigned long>{4, 1});
+    auto secondInput = make_shared<NetworkInput>(gpuPlacement, DataType::FP32, vector<unsigned long>{4, 1});
+    auto concatenate = make_shared<Concatenate>(1, 2);
+    auto capture = make_shared<BatchCardinalityCaptureLayer>();
+    auto output = make_shared<NetworkOutput>(cpuPlacement);
+    vector<shared_ptr<Layer>> layers{firstInput, secondInput, concatenate, capture, output};
+
+    firstInput->connectToNextLayer(concatenate.get(), 0, 0);
+    secondInput->connectToNextLayer(concatenate.get(), 0, 1);
+    concatenate->connectToNextLayer(capture.get());
+    capture->connectToNextLayer(output.get());
+    LayerTestHelper::initializeNetwork(layers);
+
+    firstInput->forward(firstCpu, false, 2);
+    secondInput->forward(secondCpu, false, 2);
+    ASSERT_EQ(capture->observedValidExampleCounts, (vector<uint32_t>{2}));
+
+    firstInput->forward(firstCpu, false, 2);
+    EXPECT_THROW(secondInput->forward(secondCpu, false, 3), std::logic_error);
+
+    LayerTestHelper::tearDownNetwork(layers);
+}
+
+TEST(Concatenate, BatchAxisAcceptsOnlyFullCapacityInputs) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    TensorDescriptor firstDescriptor(DataType::FP32, {2, 1});
+    TensorDescriptor secondDescriptor(DataType::FP32, {3, 1});
+    Tensor firstCpu(cpuPlacement, firstDescriptor);
+    Tensor secondCpu(cpuPlacement, secondDescriptor);
+
+    auto firstInput = make_shared<NetworkInput>(gpuPlacement, DataType::FP32, vector<unsigned long>{2, 1});
+    auto secondInput = make_shared<NetworkInput>(gpuPlacement, DataType::FP32, vector<unsigned long>{3, 1});
+    auto concatenate = make_shared<Concatenate>(0, 2);
+    auto capture = make_shared<BatchCardinalityCaptureLayer>();
+    auto output = make_shared<NetworkOutput>(cpuPlacement);
+    vector<shared_ptr<Layer>> layers{firstInput, secondInput, concatenate, capture, output};
+
+    firstInput->connectToNextLayer(concatenate.get(), 0, 0);
+    secondInput->connectToNextLayer(concatenate.get(), 0, 1);
+    concatenate->connectToNextLayer(capture.get());
+    capture->connectToNextLayer(output.get());
+    LayerTestHelper::initializeNetwork(layers);
+
+    firstInput->forward(firstCpu, false);
+    secondInput->forward(secondCpu, false);
+    ASSERT_EQ(capture->observedValidExampleCounts, (vector<uint32_t>{5}));
+
+    firstInput->forward(firstCpu, false);
+    EXPECT_THROW(secondInput->forward(secondCpu, false, 2), std::logic_error);
+
+    LayerTestHelper::tearDownNetwork(layers);
+}
+
+TEST(Split, PropagatesPartialBatchCardinalityToEveryOutput) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    TensorDescriptor inputDescriptor(DataType::FP32, {4, 2});
+    Tensor inputCpu(cpuPlacement, inputDescriptor);
+
+    auto input = make_shared<NetworkInput>(gpuPlacement, DataType::FP32, vector<unsigned long>{4, 2});
+    auto split = make_shared<Split>(1, vector<unsigned long>{1, 1});
+    auto firstCapture = make_shared<BatchCardinalityCaptureLayer>();
+    auto secondCapture = make_shared<BatchCardinalityCaptureLayer>();
+    auto firstOutput = make_shared<NetworkOutput>(cpuPlacement);
+    auto secondOutput = make_shared<NetworkOutput>(cpuPlacement);
+    vector<shared_ptr<Layer>> layers{input, split, firstCapture, secondCapture, firstOutput, secondOutput};
+
+    input->connectToNextLayer(split.get());
+    split->connectToNextLayer(firstCapture.get());
+    split->connectToNextLayer(secondCapture.get());
+    firstCapture->connectToNextLayer(firstOutput.get());
+    secondCapture->connectToNextLayer(secondOutput.get());
+    LayerTestHelper::initializeNetwork(layers);
+
+    input->forward(inputCpu, false, 2);
+    ASSERT_EQ(firstCapture->observedValidExampleCounts, (vector<uint32_t>{2}));
+    ASSERT_EQ(secondCapture->observedValidExampleCounts, (vector<uint32_t>{2}));
 
     LayerTestHelper::tearDownNetwork(layers);
 }

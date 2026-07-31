@@ -27,6 +27,13 @@ def test_unary_reduction_metric_constructs(metric_type):
     assert metric is not None
     assert isinstance(metric, metric_type)
     assert metric.values == values
+    expected = {
+        thor.metrics.Mean: thor.MetricAggregation.MEAN_BY_EXAMPLE,
+        thor.metrics.Sum: thor.MetricAggregation.SUM,
+        thor.metrics.Min: thor.MetricAggregation.MIN,
+        thor.metrics.Max: thor.MetricAggregation.MAX,
+    }[metric_type]
+    assert metric.aggregation is expected
 
 
 @pytest.mark.parametrize("dtype", SUPPORTED_REDUCTION_DTYPES)
@@ -74,6 +81,7 @@ def test_weighted_mean_constructs():
     assert isinstance(metric, thor.metrics.WeightedMean)
     assert metric.values == values
     assert metric.weights == weights
+    assert metric.aggregation is thor.MetricAggregation.RATIO
 
 
 def test_weighted_mean_rejects_wrong_arity():

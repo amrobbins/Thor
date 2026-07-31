@@ -43,6 +43,7 @@ json WeightedMean::architectureJson() const {
     j["factory"] = Layer::Factory::Metric.value();
     j["version"] = getLayerVersion();
     j["layer_type"] = "weighted_mean";
+    j["aggregation"] = getAggregation();
     j["values"] = getValues().architectureJson();
     j["weights"] = getWeights().architectureJson();
     j["metric"] = metricTensor.architectureJson();

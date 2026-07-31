@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DeepLearning/Api/BatchValidity.h"
 #include "DeepLearning/Api/DataType.h"
 #include "DeepLearning/Api/Layers/Metrics/Metric.h"
 #include "DeepLearning/Implementation/Layers/Metrics/CustomMetric.h"
@@ -24,11 +25,13 @@ class CustomMetric : public Metric {
     CustomMetric(ThorImplementation::DynamicExpression expr,
                  Tensor predictions,
                  Tensor labels,
+                 MetricAggregation aggregation,
                  std::string predictionsName = "predictions",
                  std::string labelsName = "labels",
                  std::string metricName = "metric",
                  std::optional<Tensor> metricTensor = std::nullopt,
-                 std::string displayName = "Metric");
+                 std::string displayName = "Metric",
+                 bool usesBatchValidity = false);
 
     ~CustomMetric() override = default;
 
@@ -40,6 +43,8 @@ class CustomMetric : public Metric {
     const std::string& getMetricName() const { return metricName; }
     const std::string& getDisplayName() const { return displayName; }
     const ThorImplementation::DynamicExpression& getExpression() const { return expr; }
+    MetricAggregation getAggregation() const override { return aggregation; }
+    bool usesBatchValidity() const { return batchValidityMaskUsed; }
 
     nlohmann::json architectureJson() const override;
     static void deserialize(const nlohmann::json& j, Network* network);
@@ -64,6 +69,8 @@ class CustomMetric : public Metric {
     std::string labelsName = "labels";
     std::string metricName = "metric";
     std::string displayName = "Metric";
+    MetricAggregation aggregation;
+    bool batchValidityMaskUsed = false;
 };
 
 class CustomMetric::Builder {
@@ -75,6 +82,7 @@ class CustomMetric::Builder {
         THOR_THROW_IF_FALSE(_expr != nullptr);
         THOR_THROW_IF_FALSE(_predictions.has_value());
         THOR_THROW_IF_FALSE(_labels.has_value());
+        THOR_THROW_IF_FALSE(_aggregation.has_value());
         THOR_THROW_IF_FALSE(_predictions.value() != _labels.value());
 
         std::string predictionsName = _predictionsName.value_or("predictions");
@@ -83,29 +91,50 @@ class CustomMetric::Builder {
         std::string displayName = _displayName.value_or("Metric");
 
         const std::vector<std::string>& expectedInputs = _expr->getExpectedInputNames();
-        if (!_predictionsName.has_value() && !_labelsName.has_value() && expectedInputs.size() == 2) {
+        std::vector<std::string> userInputNames;
+        userInputNames.reserve(expectedInputs.size());
+        for (const std::string& inputName : expectedInputs) {
+            if (_usesBatchValidity && inputName == Thor::BATCH_VALIDITY_MASK_NAME) {
+                continue;
+            }
+            userInputNames.push_back(inputName);
+        }
+        if (!_predictionsName.has_value() && !_labelsName.has_value() && userInputNames.size() == 2) {
             const bool hasPredictionsDefault =
-                std::find(expectedInputs.begin(), expectedInputs.end(), std::string("predictions")) != expectedInputs.end();
+                std::find(userInputNames.begin(), userInputNames.end(), std::string("predictions")) != userInputNames.end();
             const bool hasLabelsDefault =
-                std::find(expectedInputs.begin(), expectedInputs.end(), std::string("labels")) != expectedInputs.end();
+                std::find(userInputNames.begin(), userInputNames.end(), std::string("labels")) != userInputNames.end();
             if (!(hasPredictionsDefault && hasLabelsDefault)) {
-                predictionsName = expectedInputs[0];
-                labelsName = expectedInputs[1];
+                predictionsName = userInputNames[0];
+                labelsName = userInputNames[1];
             }
         }
 
         const std::vector<std::string>& expectedOutputs = _expr->getExpectedOutputNames();
-        if (!_metricName.has_value() && expectedOutputs.size() == 1)
-            metricName = expectedOutputs[0];
+        if (!_metricName.has_value()) {
+            std::vector<std::string> publicOutputNames;
+            publicOutputNames.reserve(expectedOutputs.size());
+            for (const std::string& outputName : expectedOutputs) {
+                if (outputName == Thor::METRIC_AGGREGATION_NUMERATOR_NAME ||
+                    outputName == Thor::METRIC_AGGREGATION_DENOMINATOR_NAME) {
+                    continue;
+                }
+                publicOutputNames.push_back(outputName);
+            }
+            if (publicOutputNames.size() == 1)
+                metricName = publicOutputNames.front();
+        }
 
         CustomMetric customMetric(*_expr,
                                   _predictions.value(),
                                   _labels.value(),
+                                  _aggregation.value(),
                                   std::move(predictionsName),
                                   std::move(labelsName),
                                   std::move(metricName),
                                   _metricTensor,
-                                  std::move(displayName));
+                                  std::move(displayName),
+                                  _usesBatchValidity);
         customMetric.addToNetwork(_network.value());
         return customMetric;
     }
@@ -133,6 +162,17 @@ class CustomMetric::Builder {
         THOR_THROW_IF_FALSE(!this->_labels.has_value());
         THOR_THROW_IF_FALSE(labels.isInitialized());
         this->_labels = std::move(labels);
+        return *this;
+    }
+
+    /**
+     * Declares how batch metric values combine across an epoch. A RATIO expression must also emit FP32 scalar outputs
+     * named Thor::METRIC_AGGREGATION_NUMERATOR_NAME and Thor::METRIC_AGGREGATION_DENOMINATOR_NAME. Those reserved
+     * outputs are internal sufficient statistics and do not become public API tensors or NetworkOutputs.
+     */
+    virtual CustomMetric::Builder& aggregation(MetricAggregation aggregation) {
+        THOR_THROW_IF_FALSE(!this->_aggregation.has_value());
+        this->_aggregation = aggregation;
         return *this;
     }
 
@@ -167,16 +207,28 @@ class CustomMetric::Builder {
         return *this;
     }
 
+    /**
+     * Declares that the expression consumes runtime batch-validity information through the current reserved FP32
+     * Thor::BATCH_VALIDITY_MASK_NAME expression input.
+     */
+    virtual CustomMetric::Builder& usesBatchValidity() {
+        THOR_THROW_IF_FALSE(!_usesBatchValidity);
+        _usesBatchValidity = true;
+        return *this;
+    }
+
    private:
     std::optional<Network*> _network;
     std::shared_ptr<ThorImplementation::DynamicExpression> _expr;
     std::optional<Tensor> _predictions;
     std::optional<Tensor> _labels;
+    std::optional<MetricAggregation> _aggregation;
     std::optional<Tensor> _metricTensor;
     std::optional<std::string> _predictionsName;
     std::optional<std::string> _labelsName;
     std::optional<std::string> _metricName;
     std::optional<std::string> _displayName;
+    bool _usesBatchValidity = false;
 };
 
 }  // namespace Thor

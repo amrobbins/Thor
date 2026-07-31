@@ -22,8 +22,9 @@ namespace ThorImplementation {
  *
  * Batch Normalization supports rank-2 [N,C], rank-4 [N,C,H,W], or rank-5 [N,C,D,H,W] input tensors.
  *
- * Unlike CustomLayer-based layers, batch-normalization backward stays on the cuDNN batchnorm path, so the error-output gradient and parameter
- * gradients are produced together by cuDNN.
+ * Full-capacity training batches use live batch statistics and update scale, bias, and running statistics. Validation, inference-only
+ * execution, and partial-capacity training batches use the fixed running statistics. A partial-capacity training batch still propagates dx,
+ * but it does not produce or apply BatchNormalization parameter gradients.
  */
 class BatchNormalization : public TrainableLayer {
    public:
@@ -55,6 +56,7 @@ class BatchNormalization : public TrainableLayer {
 
     std::optional<Tensor> createFeatureOutputTensor() override;
     std::optional<Tensor> createErrorOutputTensor(bool backPropagateError, uint32_t connectionNumber) override;
+    void forward(std::optional<Tensor> featureInput, bool isValidation, uint32_t validExampleCount = 0) override;
 
     uint64_t flopCountForward() override;
     uint64_t flopCountBackward() override;
@@ -69,8 +71,10 @@ class BatchNormalization : public TrainableLayer {
 
    private:
     void computeFeatureOut(uint32_t connectionNumber) override;
+    bool usesFusedBackwardImplementation() const override { return true; }
     std::optional<Event> computeErrorOutAccumulateWeightsGradienFused(uint32_t connectionNumber, bool clearWeightsGradientFirstIfFused) override;
     void accumulateWeightsGradient(uint32_t connectionNumber, bool clearGradientFirst) override;
+    bool shouldApplyParameterUpdatesForBatch(uint32_t validExampleCount) const override;
 
     void runForward(std::optional<Tensor> inputTensor,
                     std::optional<Tensor> outputTensor,
@@ -88,7 +92,6 @@ class BatchNormalization : public TrainableLayer {
    private:
     static const float ALPHA_NO_SCALE;
     static const float BETA_CLEAR;
-    static const float BETA_ACCUMULATE;
 
     unsigned int batchSize = 0;
     unsigned int numChannels = 0;
@@ -103,6 +106,9 @@ class BatchNormalization : public TrainableLayer {
 
     std::vector<Tensor> resultSaveMean;
     std::vector<Tensor> resultSaveInvVariance;
+    std::vector<bool> forwardUsedTrainingStatistics;
+    std::vector<Tensor> scratchDScale;
+    std::vector<Tensor> scratchDBias;
 
     // Since weights gradients and error gradient is a fused operation, then when back prop is pruned
     // we still need some valid chunk of memory to write values in, which we ignore.

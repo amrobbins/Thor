@@ -2,6 +2,7 @@
 
 #include "DeepLearning/Implementation/ThorError.h"
 
+#include <limits>
 #include <optional>
 
 using namespace ThorImplementation;
@@ -26,15 +27,6 @@ vector<uint32_t> LossShaper::getReductionAxes(const vector<uint64_t>& inputDimen
         return axes;
     }
     THOR_UNREACHABLE();
-}
-
-float LossShaper::getReductionOutputScale(const vector<uint64_t>& inputDimensions,
-                                          OutputLossType outputLossType) {
-    THOR_THROW_IF_FALSE(inputDimensions.size() >= 2);
-    THOR_THROW_IF_FALSE(inputDimensions.front() > 0);
-    if (outputLossType == OutputLossType::PER_EXAMPLE)
-        return 1.0f;
-    return 1.0f / static_cast<float>(inputDimensions.front());
 }
 
 LossShaper::LossShaper(OutputLossType outputLossType) {
@@ -73,11 +65,24 @@ void LossShaper::compileImpl() {
         CubReduction cubReduction(CubReductionOp::Sum,
                                   getReductionAxes(inputDimensions, outputLossType),
                                   featureOutput.value().getDataType(),
-                                  getReductionOutputScale(inputDimensions, outputLossType));
+                                  1.0f);
         reduction = cubReduction.stamp(featureInput.value(), featureOutput.value(), stream);
     }
 
     uninitialized = false;
+}
+
+void LossShaper::forward(std::optional<Tensor> inputTensor, bool validationPass, uint32_t validExampleCount) {
+    THOR_THROW_IF_FALSE(featureInput.has_value());
+    const vector<uint64_t> inputDimensions = featureInput.value().getDimensions();
+    THOR_THROW_IF_FALSE(!inputDimensions.empty());
+    THOR_THROW_IF_FALSE(inputDimensions.front() > 0);
+    THOR_THROW_IF_FALSE(inputDimensions.front() <= std::numeric_limits<uint32_t>::max());
+    const uint32_t physicalBatchCapacity = static_cast<uint32_t>(inputDimensions.front());
+    currentValidExampleCount = validExampleCount == 0 ? physicalBatchCapacity : validExampleCount;
+    THOR_THROW_IF_FALSE(currentValidExampleCount >= 1);
+    THOR_THROW_IF_FALSE(currentValidExampleCount <= physicalBatchCapacity);
+    Layer::forward(inputTensor, validationPass, currentValidExampleCount);
 }
 
 void LossShaper::infer(std::optional<Tensor> inputTensor, std::optional<Tensor> outputTensor, Stream stream) {
@@ -92,7 +97,10 @@ void LossShaper::infer(std::optional<Tensor> inputTensor, std::optional<Tensor> 
         THOR_THROW_IF_FALSE(reduction != nullptr);
         THOR_THROW_IF_FALSE(inputTensor.value() == featureInput.value());
         THOR_THROW_IF_FALSE(outputTensor.value() == featureOutput.value());
-        reduction->runOn(stream);
+        const float outputScale = outputLossType == OutputLossType::PER_EXAMPLE
+                                      ? 1.0f
+                                      : 1.0f / static_cast<float>(currentValidExampleCount);
+        reduction->runOn(stream, outputScale);
     }
 }
 

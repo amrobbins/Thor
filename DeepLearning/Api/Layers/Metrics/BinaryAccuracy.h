@@ -17,6 +17,7 @@ class BinaryAccuracy : public Metric {
     std::shared_ptr<Layer> clone() const override { return std::make_shared<BinaryAccuracy>(*this); }
 
     std::string getLayerType() const override { return "BinaryAccuracy"; }
+    MetricAggregation getAggregation() const override { return MetricAggregation::MEAN_BY_EXAMPLE; }
 
     static void deserialize(const nlohmann::json &j, Network *network);
 

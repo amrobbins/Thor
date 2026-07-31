@@ -132,6 +132,11 @@ class PlacedNetwork {
     std::vector<uint64_t> getActiveTrainingRawLossOriginalIdsForDebug(uint64_t stampIndex = 0) const;
 
     void extendOutputWritableEvents(uint64_t stampIndex, Event event, std::optional<uint32_t> outputSlotIndex = std::nullopt);
+    [[nodiscard]] std::map<std::string, ThorImplementation::MetricBatchStatisticTensors>
+    getMetricBatchStatisticTensorsForSlot(uint64_t stampIndex, uint32_t slotIndex) const;
+    void extendMetricStatisticWritableEvents(uint64_t stampIndex,
+                                             Event event,
+                                             std::optional<uint32_t> outputSlotIndex = std::nullopt);
 
     /**
      * Configures each physical NetworkInput from the effective batch-session

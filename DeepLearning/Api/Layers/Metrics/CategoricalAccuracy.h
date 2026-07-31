@@ -17,6 +17,7 @@ class CategoricalAccuracy : public Metric {
     std::shared_ptr<Layer> clone() const override { return std::make_shared<CategoricalAccuracy>(*this); }
 
     std::string getLayerType() const override { return "CategoricalAccuracy"; }
+    MetricAggregation getAggregation() const override { return MetricAggregation::MEAN_BY_EXAMPLE; }
 
     nlohmann::json architectureJson() const override;
     static void deserialize(const nlohmann::json &j, Network *network);

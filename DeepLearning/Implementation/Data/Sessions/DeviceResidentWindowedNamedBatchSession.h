@@ -120,7 +120,8 @@ class DeviceResidentWindowedNamedBatchSession : public Thor::BatchSession {
         uint64_t slotIndex) const;
     void fillRowIndexTensor(
         SplitRuntime &runtime,
-        DeviceResidentWindowedSelectionSlot &selectionSlot);
+        DeviceResidentWindowedSelectionSlot &selectionSlot,
+        uint32_t validExampleCount);
     void validateReturnedBatch(const Batch &batch) const;
     void releaseSelectionSlot(
         ExampleType exampleType,

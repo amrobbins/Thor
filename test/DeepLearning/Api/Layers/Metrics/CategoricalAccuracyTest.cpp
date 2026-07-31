@@ -44,6 +44,7 @@ TEST(CategoricalAccuracy, ClassIndexLabelBuilds) {
         CategoricalAccuracy categoricalAccuracy = categoricalAccuracyBuilder.build();
 
         ASSERT_TRUE(categoricalAccuracy.isInitialized());
+        ASSERT_EQ(categoricalAccuracy.getAggregation(), MetricAggregation::MEAN_BY_EXAMPLE);
 
         std::optional<Tensor> actualInput = categoricalAccuracy.getFeatureInput();
         ASSERT_TRUE(actualInput.has_value());
@@ -174,6 +175,7 @@ TEST(Activations, CategoricalAccuracySerializeDeserialize) {
     ASSERT_EQ(categoricalAccuracyJ["factory"], "metric");
     ASSERT_EQ(categoricalAccuracyJ["version"], "1.0.0");
     ASSERT_EQ(categoricalAccuracyJ["layer_type"], "categorical_accuracy");
+    ASSERT_EQ(categoricalAccuracyJ["aggregation"].get<MetricAggregation>(), MetricAggregation::MEAN_BY_EXAMPLE);
 
     // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
     Layer *layer = &categoricalAccuracy;

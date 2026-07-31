@@ -9,6 +9,7 @@
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
 #include "DeepLearning/Api/Training/Cancellation/TrainingCancellation.h"
 #include "DeepLearning/Api/Training/ExecutableTrainingPlan.h"
+#include "DeepLearning/Api/Training/MetricEpochAccumulator.h"
 #include "DeepLearning/Implementation/Data/Residency/DeviceDatasetStorageSelection.h"
 #include "DeepLearning/Api/Training/PhaseGraphConnector.h"
 #include "DeepLearning/Api/Training/TrainingProgram.h"
@@ -81,11 +82,14 @@ struct NativeBatchCompletionParams {
     uint64_t currentEpoch = 0;
     uint64_t epochBatchNum = 0;
     uint64_t batchesInEpoch = 0;
+    uint64_t validExampleCount = 0;
     uint64_t slotIndex = 0;
     BatchLease batchLease;
     std::map<std::string, ThorImplementation::Tensor> batchOutput;
     std::vector<ScalarStatSlot> scalarStats;
     std::vector<ScalarStatSource> scalarStatSources;
+    std::map<std::string, ThorImplementation::MetricBatchStatisticTensors> metricStatisticTensors;
+    std::unordered_map<std::string, MetricBatchStat> metricBatchStats;
 };
 
 struct QueuedBatchSlot {
@@ -94,15 +98,20 @@ struct QueuedBatchSlot {
     TrainingEventPhase phase = TrainingEventPhase::TRAIN;
     uint64_t epochBatchNum = 0;
     uint64_t batchesInEpoch = 0;
+    uint64_t validExampleCount = 0;
     uint64_t doneInEpochAtComplete = 0;
+    uint64_t validExamplesThroughBatch = 0;
     uint64_t paramsIndex = 0;
     std::chrono::high_resolution_clock::time_point completionTime{};
     std::vector<ScalarStatSlot> scalarStats;
+    std::unordered_map<std::string, MetricBatchStat> metricBatchStats;
 };
 
 struct QueuedPhaseProgress {
     uint64_t completedBatches = 0;
     uint64_t poppedBatches = 0;
+    uint64_t completedValidExamples = 0;
+    uint64_t poppedValidExamples = 0;
 };
 
 struct QueuedTrainingState {
@@ -114,6 +123,10 @@ struct QueuedTrainingState {
           slots(maxInFlightBatches),
           completionParams(maxInFlightBatches) {
         THOR_THROW_IF_FALSE(maxInFlightBatches >= 1);
+        for (size_t i = 0; i < this->scalarTensorNames.size(); ++i) {
+            THOR_THROW_IF_FALSE(
+                scalarTensorIndexByName.emplace(this->scalarTensorNames[i], i).second);
+        }
         for (QueuedBatchSlot& slot : slots) {
             slot.scalarStats.resize(this->scalarTensorNames.size());
         }
@@ -130,6 +143,7 @@ struct QueuedTrainingState {
     std::condition_variable batchPopped;
 
     std::vector<std::string> scalarTensorNames;
+    std::unordered_map<std::string, size_t> scalarTensorIndexByName;
     std::vector<std::string> aggregateLossTensorNames;
     std::array<QueuedPhaseProgress, 4> phaseProgress{};
     std::vector<QueuedBatchSlot> slots;
@@ -149,6 +163,7 @@ struct WallThroughputEmaState {
     bool initialized = false;
     double lastElapsedSeconds = 0.0;
     uint64_t lastCompletedBatches = 0;
+    uint64_t lastCompletedSamples = 0;
     double samplesPerSecond = 0.0;
     double batchesPerSecond = 0.0;
     double floatingPointOperationsPerSecond = 0.0;
@@ -160,10 +175,10 @@ constexpr double WALL_THROUGHPUT_EMA_MIN_INTERVAL_SECONDS = 0.25;
 void updateWallThroughputRates(TrainingStatsSnapshot& snapshot,
                                WallThroughputEmaState& state,
                                uint64_t completedBatches,
-                               uint64_t batchSize,
+                               uint64_t completedSamples,
                                uint64_t floatingPointOperationsPerBatch) {
     snapshot.floatingPointOperationsPerBatch = floatingPointOperationsPerBatch;
-    if (snapshot.elapsedSeconds <= 0.0 || completedBatches == 0 || batchSize == 0) {
+    if (snapshot.elapsedSeconds <= 0.0 || completedBatches == 0 || completedSamples == 0) {
         return;
     }
 
@@ -177,14 +192,15 @@ void updateWallThroughputRates(TrainingStatsSnapshot& snapshot,
 
     if (!state.initialized) {
         const double batchesPerSecond = static_cast<double>(completedBatches) / snapshot.elapsedSeconds;
-        const double samplesPerSecond = (static_cast<double>(completedBatches) * static_cast<double>(batchSize)) /
-                                        snapshot.elapsedSeconds;
+        const double samplesPerSecond =
+            static_cast<double>(completedSamples) / snapshot.elapsedSeconds;
         const double floatingPointOperationsPerSecond =
             (static_cast<double>(completedBatches) * static_cast<double>(floatingPointOperationsPerBatch)) /
             snapshot.elapsedSeconds;
         state.initialized = true;
         state.lastElapsedSeconds = snapshot.elapsedSeconds;
         state.lastCompletedBatches = completedBatches;
+        state.lastCompletedSamples = completedSamples;
         state.batchesPerSecond = batchesPerSecond;
         state.samplesPerSecond = samplesPerSecond;
         state.floatingPointOperationsPerSecond = floatingPointOperationsPerSecond;
@@ -192,7 +208,9 @@ void updateWallThroughputRates(TrainingStatsSnapshot& snapshot,
         return;
     }
 
-    if (snapshot.elapsedSeconds <= state.lastElapsedSeconds || completedBatches <= state.lastCompletedBatches) {
+    if (snapshot.elapsedSeconds <= state.lastElapsedSeconds ||
+        completedBatches <= state.lastCompletedBatches ||
+        completedSamples <= state.lastCompletedSamples) {
         assignRates(state.batchesPerSecond, state.samplesPerSecond, state.floatingPointOperationsPerSecond);
         return;
     }
@@ -208,9 +226,12 @@ void updateWallThroughputRates(TrainingStatsSnapshot& snapshot,
         return;
     }
 
-    const double intervalBatches = static_cast<double>(completedBatches - state.lastCompletedBatches);
+    const double intervalBatches =
+        static_cast<double>(completedBatches - state.lastCompletedBatches);
+    const double intervalSamples =
+        static_cast<double>(completedSamples - state.lastCompletedSamples);
     const double intervalBatchesPerSecond = intervalBatches / intervalSeconds;
-    const double intervalSamplesPerSecond = (intervalBatches * static_cast<double>(batchSize)) / intervalSeconds;
+    const double intervalSamplesPerSecond = intervalSamples / intervalSeconds;
     const double intervalFloatingPointOperationsPerSecond =
         (intervalBatches * static_cast<double>(floatingPointOperationsPerBatch)) / intervalSeconds;
 
@@ -224,6 +245,7 @@ void updateWallThroughputRates(TrainingStatsSnapshot& snapshot,
 
     state.lastElapsedSeconds = snapshot.elapsedSeconds;
     state.lastCompletedBatches = completedBatches;
+    state.lastCompletedSamples = completedSamples;
     assignRates(state.batchesPerSecond, state.samplesPerSecond, state.floatingPointOperationsPerSecond);
 }
 
@@ -853,36 +875,40 @@ class EpochLossAccumulator {
 
    private:
     struct RunningMean {
-        double sum = 0.0;
-        uint64_t count = 0;
+        double weightedSum = 0.0;
+        uint64_t totalWeight = 0;
 
-        void add(double value) {
-            sum += value;
-            count += 1;
+        void add(double value, uint64_t weight) {
+            THOR_THROW_IF_FALSE(weight > 0);
+            weightedSum += value * static_cast<double>(weight);
+            totalWeight += weight;
         }
 
         [[nodiscard]] std::optional<double> mean() const {
-            if (count == 0) {
+            if (totalWeight == 0) {
                 return std::nullopt;
             }
-            return sum / static_cast<double>(count);
+            return weightedSum / static_cast<double>(totalWeight);
         }
     };
 
     struct PhaseAccumulator {
         RunningMean lossMean{};
         std::unordered_map<std::string, RunningMean> lossMeans{};
-        std::unordered_map<std::string, RunningMean> metricMeans{};
+        MetricEpochAccumulatorMap metricAccumulators{};
 
         void update(const TrainingStatsSnapshot& snapshot) {
+            THOR_THROW_IF_FALSE(snapshot.validExamplesInBatch > 0);
+            const uint64_t weight = snapshot.validExamplesInBatch;
             if (snapshot.loss.has_value()) {
-                lossMean.add(snapshot.loss.value());
+                lossMean.add(snapshot.loss.value(), weight);
             }
             for (const auto& [name, value] : snapshot.losses) {
-                lossMeans[name].add(value);
+                lossMeans[name].add(value, weight);
             }
             for (const auto& [name, value] : snapshot.metrics) {
-                metricMeans[name].add(value);
+                metricAccumulators.add(
+                    name, resolveMetricBatchStat(snapshot, name, value));
             }
         }
 
@@ -895,12 +921,7 @@ class EpochLossAccumulator {
                     out.losses[name] = value.value();
                 }
             }
-            for (const auto& [name, mean] : metricMeans) {
-                const std::optional<double> value = mean.mean();
-                if (value.has_value()) {
-                    out.metrics[name] = value.value();
-                }
-            }
+            out.metrics = metricAccumulators.values();
             return out;
         }
     };
@@ -1591,6 +1612,10 @@ void cancelBatchSession(const std::shared_ptr<BatchSession>& batchSession) {
 
 Batch bindBatchInputs(const StepExecutable& step, const Batch& batchInput) {
     Batch bound;
+    const std::optional<uint32_t> validExampleCount = batchInput.getValidExampleCount();
+    if (validExampleCount.has_value()) {
+        bound.setValidExampleCount(validExampleCount.value());
+    }
     for (const TrainingInputBinding& binding : step.getResolvedInputBindings()) {
         if (!batchInput.contains(binding.getBatchInputName())) {
             throw std::runtime_error("Training batch is missing input '" + binding.getBatchInputName() + "' required for network input '" +
@@ -1654,6 +1679,32 @@ void CUDART_CB completeNativeQueuedBatch(void* data) {
             params->scalarStats[i].present = true;
         }
 
+        params->metricBatchStats.clear();
+        for (const auto& [metricName, tensors] : params->metricStatisticTensors) {
+            const auto scalarIndex = state->scalarTensorIndexByName.find(metricName);
+            THOR_THROW_IF_FALSE(scalarIndex != state->scalarTensorIndexByName.end());
+            THOR_THROW_IF_FALSE(params->scalarStats[scalarIndex->second].present);
+
+            MetricBatchStat statistic;
+            statistic.aggregation = tensors.aggregation;
+            statistic.value = static_cast<double>(
+                params->scalarStats[scalarIndex->second].value);
+            statistic.validExamples = params->validExampleCount;
+            if (tensors.aggregation == MetricAggregation::RATIO) {
+                THOR_THROW_IF_FALSE(tensors.numerator.has_value());
+                THOR_THROW_IF_FALSE(tensors.denominator.has_value());
+                statistic.numerator = static_cast<double>(
+                    copyCpuScalarTensor(tensors.numerator.value()));
+                statistic.denominator = static_cast<double>(
+                    copyCpuScalarTensor(tensors.denominator.value()));
+            } else {
+                THOR_THROW_IF_FALSE(!tensors.numerator.has_value());
+                THOR_THROW_IF_FALSE(!tensors.denominator.has_value());
+            }
+            THOR_THROW_IF_FALSE(
+                params->metricBatchStats.emplace(metricName, std::move(statistic)).second);
+        }
+
         // A retained device input statistic was the only reason a fully
         // source-tracked BatchLease could survive until this callback. Once
         // the statistic has been copied, release the source owner and session
@@ -1676,11 +1727,15 @@ void CUDART_CB completeNativeQueuedBatch(void* data) {
             THOR_THROW_IF_FALSE(slot.phase == phase);
             THOR_THROW_IF_FALSE(slot.epochBatchNum == epochBatchNum);
             THOR_THROW_IF_FALSE(slot.batchesInEpoch == params->batchesInEpoch);
+            THOR_THROW_IF_FALSE(slot.validExampleCount == params->validExampleCount);
+            THOR_THROW_IF_FALSE(slot.validExampleCount > 0);
             THOR_THROW_IF_FALSE(slot.scalarStats.size() == params->scalarStats.size());
             QueuedPhaseProgress& progress = phaseProgress(*state, phase);
             progress.completedBatches += 1;
+            progress.completedValidExamples += slot.validExampleCount;
             slot.doneInEpochAtComplete = progress.completedBatches;
             slot.scalarStats = params->scalarStats;
+            slot.metricBatchStats = params->metricBatchStats;
             // Timestamp the batch when the completion callback has actually observed the
             // GPU work and required output copies as complete. Throughput must be based
             // on completion times, not on when the consumer thread later pops an already
@@ -1717,6 +1772,7 @@ void CUDART_CB completeNativeQueuedBatch(void* data) {
             if (slot.occupied && slot.phase == phase && slot.epochBatchNum == epochBatchNum) {
                 QueuedPhaseProgress& progress = phaseProgress(*state, phase);
                 progress.completedBatches += 1;
+                progress.completedValidExamples += slot.validExampleCount;
                 slot.doneInEpochAtComplete = progress.completedBatches;
                 slot.completionTime = std::chrono::high_resolution_clock::now();
                 slot.ready = true;
@@ -1760,8 +1816,11 @@ struct BatchPopResult {
     uint64_t doneInEpoch = 0;
     uint64_t poppedInEpoch = 0;
     uint64_t batchesInEpoch = 0;
+    uint64_t validExampleCount = 0;
+    uint64_t validExamplesInEpoch = 0;
     std::chrono::high_resolution_clock::time_point completionTime{};
     std::vector<ScalarStatSlot> scalarStats;
+    std::unordered_map<std::string, MetricBatchStat> metricBatchStats;
 };
 
 BatchPopResult popBatchData(const std::shared_ptr<QueuedTrainingState>& state) {
@@ -1787,18 +1846,26 @@ BatchPopResult popBatchData(const std::shared_ptr<QueuedTrainingState>& state) {
     result.slotIndex = state->headSlot;
     result.doneInEpoch = slot.doneInEpochAtComplete;
     result.batchesInEpoch = slot.batchesInEpoch;
+    result.validExampleCount = slot.validExampleCount;
+    result.validExamplesInEpoch =
+        slot.validExamplesThroughBatch;
     result.completionTime = slot.completionTime;
     result.batchLease = std::move(params.batchLease);
     result.scalarStats = slot.scalarStats;
+    result.metricBatchStats = std::move(slot.metricBatchStats);
 
     params.batchOutput.clear();
+    params.metricStatisticTensors.clear();
+    params.metricBatchStats.clear();
     params.completionCallbackLaunched = false;
     params.completionCallbackFinished = false;
+    params.validExampleCount = 0;
     params.state.reset();
     for (ScalarStatSlot& scalarStat : slot.scalarStats) {
         scalarStat.present = false;
         scalarStat.value = 0.0f;
     }
+    slot.metricBatchStats.clear();
     for (ScalarStatSlot& scalarStat : params.scalarStats) {
         scalarStat.present = false;
         scalarStat.value = 0.0f;
@@ -1808,14 +1875,19 @@ BatchPopResult popBatchData(const std::shared_ptr<QueuedTrainingState>& state) {
     }
     QueuedPhaseProgress& progress = phaseProgress(*state, slot.phase);
     progress.poppedBatches += 1;
+    progress.poppedValidExamples += slot.validExampleCount;
     result.poppedInEpoch = progress.poppedBatches;
+    THOR_THROW_IF_FALSE(
+        result.validExamplesInEpoch == progress.poppedValidExamples);
 
     slot.ready = false;
     slot.occupied = false;
     slot.phase = TrainingEventPhase::TRAIN;
     slot.epochBatchNum = 0;
     slot.batchesInEpoch = 0;
+    slot.validExampleCount = 0;
     slot.doneInEpochAtComplete = 0;
+    slot.validExamplesThroughBatch = 0;
     state->headSlot = (state->headSlot + 1) % state->slots.size();
     state->inFlightBatches -= 1;
     result.inFlightAfterPop = state->inFlightBatches;
@@ -1886,6 +1958,8 @@ void releaseQueuedTrainingStateReferencesAfterAbort(const std::shared_ptr<Queued
             leasesToRelease.push_back(std::move(params.batchLease));
         }
         params.batchOutput.clear();
+        params.metricStatisticTensors.clear();
+        params.metricBatchStats.clear();
         for (ScalarStatSlot& scalarStat : params.scalarStats) {
             scalarStat.present = false;
             scalarStat.value = 0.0f;
@@ -1895,6 +1969,7 @@ void releaseQueuedTrainingStateReferencesAfterAbort(const std::shared_ptr<Queued
         }
         params.completionCallbackLaunched = false;
         params.completionCallbackFinished = false;
+        params.validExampleCount = 0;
         params.state.reset();
     }
 
@@ -1904,13 +1979,16 @@ void releaseQueuedTrainingStateReferencesAfterAbort(const std::shared_ptr<Queued
         slot.phase = TrainingEventPhase::TRAIN;
         slot.epochBatchNum = 0;
         slot.batchesInEpoch = 0;
+        slot.validExampleCount = 0;
         slot.doneInEpochAtComplete = 0;
+        slot.validExamplesThroughBatch = 0;
         slot.paramsIndex = 0;
         slot.completionTime = {};
         for (ScalarStatSlot& scalarStat : slot.scalarStats) {
             scalarStat.present = false;
             scalarStat.value = 0.0f;
         }
+        slot.metricBatchStats.clear();
     }
     state->headSlot = 0;
     state->tailSlot = 0;
@@ -1979,8 +2057,12 @@ struct QueuedEpochPhaseWork {
     ExampleType exampleType = ExampleType::TRAIN;
     TrainingEventPhase phase = TrainingEventPhase::TRAIN;
     uint64_t initialBatchNum = 0;
+    uint64_t sessionInitialBatchNum = 0;
     uint64_t batchesToRunCount = 0;
     uint64_t batchesPerEpoch = 0;
+    uint64_t initialValidExamples = 0;
+    uint64_t validExamplesPerEpoch = 0;
+    bool exactPopulation = true;
 
     [[nodiscard]] uint64_t batchesToRun() const { return batchesToRunCount; }
 };
@@ -2027,6 +2109,8 @@ class NativeQueuedEpochScheduler {
     }
 
     void operator()(uint64_t initialEpochBatchNum,
+                    uint64_t initialSessionBatchNum,
+                    uint64_t initialValidExamples,
                     uint64_t batches,
                     uint64_t batchesPerEpoch,
                     ExampleType exampleType,
@@ -2047,6 +2131,7 @@ class NativeQueuedEpochScheduler {
 #endif
         THOR_THROW_IF_FALSE(plan != nullptr);
         const std::vector<StepExecutable>& steps = plan->getSteps();
+        uint64_t validExamplesScheduled = initialValidExamples;
 
         for (uint64_t batch = 0; batch < batches; ++batch) {
             if (cancellationToken.isCancellationRequested()) {
@@ -2079,13 +2164,16 @@ class NativeQueuedEpochScheduler {
                 slot.phase = diagnosticPhase;
                 slot.epochBatchNum = epochBatchNum;
                 slot.batchesInEpoch = batchesPerEpoch;
+                slot.validExampleCount = 0;
                 slot.doneInEpochAtComplete = 0;
+                slot.validExamplesThroughBatch = 0;
                 slot.paramsIndex = slotIndex;
                 slot.completionTime = {};
                 for (ScalarStatSlot& scalarStat : slot.scalarStats) {
                     scalarStat.present = false;
                     scalarStat.value = 0.0f;
                 }
+                slot.metricBatchStats.clear();
                 state->tailSlot = (state->tailSlot + 1) % state->slots.size();
                 state->inFlightBatches += 1;
                 inFlightAfterReserve = state->inFlightBatches;
@@ -2111,9 +2199,12 @@ class NativeQueuedEpochScheduler {
             params->currentEpoch = currentEpoch;
             params->epochBatchNum = epochBatchNum;
             params->batchesInEpoch = batchesPerEpoch;
+            params->validExampleCount = 0;
             params->slotIndex = slotIndex;
             params->batchLease.reset();
             params->batchOutput.clear();
+            params->metricStatisticTensors.clear();
+            params->metricBatchStats.clear();
             for (ScalarStatSlot& scalarStat : params->scalarStats) {
                 scalarStat.present = false;
                 scalarStat.value = 0.0f;
@@ -2123,8 +2214,26 @@ class NativeQueuedEpochScheduler {
             }
 
             const auto acquireBatchStart = diagnosticNow(collectQueueDiagnostics);
-            uint64_t sessionBatchNum = epochBatchNum;
+            uint64_t sessionBatchNum =
+                initialSessionBatchNum + batch;
             params->batchLease = batchSession->leaseBatch(exampleType, sessionBatchNum);
+            params->validExampleCount =
+                params->batchLease.get().getValidExampleCount().value_or(
+                    static_cast<uint32_t>(batchSession->getBatchSize()));
+            if (params->validExampleCount == 0 ||
+                params->validExampleCount > batchSession->getBatchSize()) {
+                throw std::runtime_error(
+                    "BatchSession returned an invalid valid-example count.");
+            }
+            {
+                std::lock_guard<std::mutex> lock(state->mutex);
+                QueuedBatchSlot& slot = state->slots[slotIndex];
+                THOR_THROW_IF_FALSE(slot.occupied);
+                slot.validExampleCount = params->validExampleCount;
+                validExamplesScheduled += params->validExampleCount;
+                slot.validExamplesThroughBatch =
+                    validExamplesScheduled;
+            }
             const auto acquireBatchFinish = diagnosticNow(collectQueueDiagnostics);
             const uint64_t acquireBatchWaitMicros = collectQueueDiagnostics ? elapsedMicros(acquireBatchStart, acquireBatchFinish) : 0;
             if (collectQueueDiagnostics && shouldEmitQueueDiagnostic(batch + 1, acquireBatchWaitMicros)) {
@@ -2212,6 +2321,22 @@ class NativeQueuedEpochScheduler {
             }
             const auto submitFinish = diagnosticNow(collectQueueDiagnostics);
 
+            // Metric aggregation metadata follows the public metric output. Ratio
+            // metrics additionally expose slot-local host numerator/denominator
+            // tensors whose ready event must join this batch's completion stream.
+            const std::map<std::string, ThorImplementation::MetricBatchStatisticTensors>
+                availableMetricStatistics =
+                    placedNetwork->getMetricBatchStatisticTensorsForSlot(
+                        nextStampToProcess,
+                        static_cast<uint32_t>(slotIndex));
+            for (const auto& [metricName, tensors] : availableMetricStatistics) {
+                if (state->scalarTensorIndexByName.count(metricName) == 0) {
+                    continue;
+                }
+                THOR_THROW_IF_FALSE(
+                    params->metricStatisticTensors.emplace(metricName, tensors).second);
+            }
+
             // Every NetworkInput has now recorded the stream point after which
             // it no longer reads its session-owned source. Snapshot CPU input
             // statistics now, before those source slots are released; output
@@ -2278,6 +2403,16 @@ class NativeQueuedEpochScheduler {
                 completionStream.waitEvent(outputReadyEvent);
                 outputWaitCount += 1;
             }
+            for (const auto& [metricName, tensors] : params->metricStatisticTensors) {
+                (void)metricName;
+                if (tensors.aggregation == MetricAggregation::RATIO) {
+                    THOR_THROW_IF_FALSE(tensors.readyEvent.isInitialized());
+                    completionStream.waitEvent(tensors.readyEvent);
+                    outputWaitCount += 1;
+                } else {
+                    THOR_THROW_IF_FALSE(!tensors.readyEvent.isInitialized());
+                }
+            }
             const auto waitOutputsFinish = diagnosticNow(collectQueueDiagnostics);
 
             const auto hostFuncStart = diagnosticNow(collectQueueDiagnostics);
@@ -2311,6 +2446,10 @@ class NativeQueuedEpochScheduler {
 
             const auto extendOutputsStart = diagnosticNow(collectQueueDiagnostics);
             placedNetwork->extendOutputWritableEvents(nextStampToProcess, completionFinishedEvents[slotIndex], slotIndex);
+            placedNetwork->extendMetricStatisticWritableEvents(
+                nextStampToProcess,
+                completionFinishedEvents[slotIndex],
+                static_cast<uint32_t>(slotIndex));
             const auto extendOutputsFinish = diagnosticNow(collectQueueDiagnostics);
             const auto completionSetupFinish = extendOutputsFinish;
 
@@ -2407,6 +2546,17 @@ struct QueuedEpochWorkPlan {
     uint64_t remainingBatchesAcrossPhases = 0;
 };
 
+uint64_t validExamplesBeforeBatch(
+    uint64_t batchNum,
+    uint64_t populationSize,
+    uint64_t physicalBatchSize) {
+    THOR_THROW_IF_FALSE(physicalBatchSize > 0);
+    if (batchNum > populationSize / physicalBatchSize) {
+        return populationSize;
+    }
+    return std::min(populationSize, batchNum * physicalBatchSize);
+}
+
 QueuedEpochWorkPlan buildQueuedEpochWorkPlan(
     const TrainingRunRequest& request,
     const std::shared_ptr<BatchSession>& effectiveSession,
@@ -2440,27 +2590,43 @@ QueuedEpochWorkPlan buildQueuedEpochWorkPlan(
                 phaseName(phase) + ".");
         }
 
+        const uint64_t populationSize =
+            effectiveSession->getNumExamples(exampleType);
+        const uint64_t physicalBatchSize = effectiveSession->getBatchSize();
+        const uint64_t initialValidExamples = validExamplesBeforeBatch(
+            sessionBatchNum, populationSize, physicalBatchSize);
+
         uint64_t publicInitialBatchNum = sessionBatchNum;
         uint64_t publicBatchesPerEpoch = sessionBatchesPerEpoch;
         uint64_t batchesToRun = sessionBatchesPerEpoch - sessionBatchNum;
+        uint64_t publicInitialValidExamples = initialValidExamples;
+        uint64_t publicValidExamplesPerEpoch = populationSize;
+        bool exactPopulation = true;
         if (!evaluateOnly && phase == TrainingEventPhase::TRAIN &&
             request.maxTrainingBatchesPerEpoch.has_value() &&
             sessionBatchesPerEpoch >
                 request.maxTrainingBatchesPerEpoch.value()) {
             // A capped public training epoch is a fixed-size work quantum. It
-            // must not end early merely because the underlying full-dataset
-            // epoch boundary is reached; sessions wrap and continue streaming.
+            // may end before the population boundary and therefore deliberately
+            // does not claim exact-population epoch semantics.
             batchesToRun = request.maxTrainingBatchesPerEpoch.value();
             publicInitialBatchNum = 0;
             publicBatchesPerEpoch = batchesToRun;
+            publicInitialValidExamples = 0;
+            publicValidExamplesPerEpoch = 0;
+            exactPopulation = false;
         }
 
         workPlan.phaseWorks.push_back(QueuedEpochPhaseWork{
             exampleType,
             phase,
             publicInitialBatchNum,
+            sessionBatchNum,
             batchesToRun,
-            publicBatchesPerEpoch});
+            publicBatchesPerEpoch,
+            publicInitialValidExamples,
+            publicValidExamplesPerEpoch,
+            exactPopulation});
         workPlan.initiallyCompletedBatches += publicInitialBatchNum;
         workPlan.totalBatchesAcrossPhases += publicBatchesPerEpoch;
         workPlan.remainingBatchesAcrossPhases += batchesToRun;
@@ -2505,6 +2671,8 @@ NativeQueuedEpochExecution launchNativeQueuedEpochExecution(
             phaseProgress(*execution.state, work.phase);
         progress.completedBatches = work.initialBatchNum;
         progress.poppedBatches = work.initialBatchNum;
+        progress.completedValidExamples = work.initialValidExamples;
+        progress.poppedValidExamples = work.initialValidExamples;
     }
 
     NativeQueuedEpochScheduler scheduler(
@@ -2523,6 +2691,8 @@ NativeQueuedEpochExecution launchNativeQueuedEpochExecution(
                 for (const QueuedEpochPhaseWork& work : phaseWorks) {
                     scheduler(
                         work.initialBatchNum,
+                        work.sessionInitialBatchNum,
+                        work.initialValidExamples,
                         work.batchesToRun(),
                         work.batchesPerEpoch,
                         work.exampleType,
@@ -3080,6 +3250,33 @@ NativeQueuedStartupState startNativeQueuedTrainingWithMemoryAdmissionRetry(
     }
 }
 
+void validateExactPhaseCompletion(
+    const QueuedEpochPhaseWork& work,
+    const std::shared_ptr<QueuedTrainingState>& state,
+    const std::shared_ptr<BatchSession>& batchSession) {
+    if (!work.exactPopulation) {
+        return;
+    }
+
+    const QueuedPhaseProgress& progress =
+        phaseProgress(*state, work.phase);
+    if (progress.completedValidExamples != work.validExamplesPerEpoch ||
+        progress.poppedValidExamples != work.validExamplesPerEpoch) {
+        throw std::runtime_error(
+            "Native queued " + phaseName(work.phase) +
+            " epoch completed/popped " +
+            std::to_string(progress.completedValidExamples) + "/" +
+            std::to_string(progress.poppedValidExamples) +
+            " valid examples, but the population contains " +
+            std::to_string(work.validExamplesPerEpoch) + ".");
+    }
+    if (batchSession->getNextBatchNum(work.exampleType) != 0) {
+        throw std::runtime_error(
+            "Native queued " + phaseName(work.phase) +
+            " epoch did not finish at the population boundary.");
+    }
+}
+
 }  // namespace
 
 void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver& observer, const NativeQueuedTrainingOptions& options) {
@@ -3238,6 +3435,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         evaluateOnly ? 0.0 : std::max(0.0, request.initialElapsedSeconds);
     std::map<TrainingEventPhase, WallThroughputEmaState> throughputByPhase;
     std::array<uint64_t, 4> cappedReportedStepsByPhase{};
+    std::array<uint64_t, 4> cappedReportedSamplesByPhase{};
     auto cancelAdditionalValidationSessions = [&]() {
         for (NamedValidationSession& validation : additionalValidationSessions) {
             cancelBatchSession(validation.batchSession);
@@ -3246,7 +3444,11 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     const bool namedValidationPopulationMetadataEnabled =
         request.defaultValidationPopulation != "validate" ||
         !additionalValidationSessions.empty();
-    const bool trainingBatchCapEnabled = !evaluateOnly && request.maxTrainingBatchesPerEpoch.has_value();
+    const bool trainingBatchCapEnabled =
+        !evaluateOnly &&
+        request.maxTrainingBatchesPerEpoch.has_value() &&
+        effectiveSession->getNumBatchesPerEpoch(ExampleType::TRAIN) >
+            request.maxTrainingBatchesPerEpoch.value();
     const uint64_t totalRequestedEpochs = currentEpoch + request.epochs;
     auto elapsedSinceRunStart = [&]() {
         const auto now = std::chrono::high_resolution_clock::now();
@@ -3432,35 +3634,56 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                         makeBaseSnapshot(completedBatch.phase, cumulativeEpoch, batchSize, completedBatch.batchesInEpoch, state);
                     snapshot.inFlightBatches = completedBatch.inFlightAfterPop;
                     snapshot.stepInEpoch = completedBatch.epochBatchNum + 1;
-                    if (trainingBatchCapEnabled && completedBatch.phase == TrainingEventPhase::TRAIN) {
-                        const size_t phaseIndex = queuedPhaseIndex(completedBatch.phase);
+                    const size_t phaseIndex =
+                        queuedPhaseIndex(completedBatch.phase);
+                    if (trainingBatchCapEnabled &&
+                        completedBatch.phase == TrainingEventPhase::TRAIN) {
                         snapshot.step = cappedReportedStepsByPhase[phaseIndex] + 1;
                         cappedReportedStepsByPhase[phaseIndex] += 1;
                     } else {
-                        snapshot.step = (currentEpoch * completedBatch.batchesInEpoch) + snapshot.stepInEpoch;
+                        snapshot.step =
+                            (currentEpoch * completedBatch.batchesInEpoch) +
+                            snapshot.stepInEpoch;
                     }
-                    snapshot.samplesProcessed = snapshot.step * batchSize;
+                    snapshot.validExamplesInBatch =
+                        completedBatch.validExampleCount;
+                    snapshot.samplesProcessedInEpoch =
+                        completedBatch.validExamplesInEpoch;
+                    if (trainingBatchCapEnabled &&
+                        completedBatch.phase == TrainingEventPhase::TRAIN) {
+                        cappedReportedSamplesByPhase[phaseIndex] +=
+                            completedBatch.validExampleCount;
+                        snapshot.samplesProcessed =
+                            cappedReportedSamplesByPhase[phaseIndex];
+                    } else {
+                        const uint64_t populationSize =
+                            effectiveSession->getNumExamples(
+                                completedBatch.exampleType);
+                        snapshot.samplesProcessed =
+                            (currentEpoch * populationSize) +
+                            completedBatch.validExamplesInEpoch;
+                    }
 
-                    // Public throughput stats use wall-clock time, not the CUDA
-                    // completion-callback interval. Smooth the exact wall-clock
-                    // interval rate between same-phase stats snapshots so the visible
-                    // numbers respond to changes without reverting to active-kernel
-                    // micro-throughput. The progress basis matches snapshot.step, so
-                    // follow-up fit phases use the same cumulative timer/progress basis
-                    // as the reported elapsed time.
+                    // Samples use the exact valid-example count. Batches and
+                    // FLOPs remain physical-execution quantities because the
+                    // fixed-capacity graph still runs for the tail batch.
                     const uint64_t completedBatchesForThroughput = snapshot.step;
                     const uint64_t phaseFlopsPerBatch =
-                        (completedBatch.phase == TrainingEventPhase::TRAIN) ? trainingFlopsPerBatch : forwardFlopsPerBatch;
+                        completedBatch.phase == TrainingEventPhase::TRAIN
+                            ? trainingFlopsPerBatch
+                            : forwardFlopsPerBatch;
                     updateWallThroughputRates(snapshot,
                                               throughputByPhase[completedBatch.phase],
                                               completedBatchesForThroughput,
-                                              batchSize,
+                                              snapshot.samplesProcessed,
                                               phaseFlopsPerBatch);
 
                     assignScalarStatsToSnapshot(snapshot,
                                                 state->scalarTensorNames,
                                                 completedBatch.scalarStats,
                                                 state->aggregateLossTensorNames);
+                    snapshot.metricBatchStats =
+                        std::move(completedBatch.metricBatchStats);
                     epochLosses.update(snapshot);
                     emitTrainingEvent(observer, TrainingEvent::statsUpdated(std::move(snapshot)));
                 }
@@ -3472,6 +3695,10 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                 epochExecution.schedulingThread.join();
             }
             throwIfQueuedTrainingStateFailed(state);
+            for (const QueuedEpochPhaseWork& work : phaseWorks) {
+                validateExactPhaseCompletion(
+                    work, state, effectiveSession);
+            }
             emitReadyPhaseLifecycleEvents();
         } catch (...) {
             cancelAndJoinScheduler(std::current_exception());
@@ -3568,18 +3795,29 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                     snapshot.step =
                         (currentEpoch * completedBatch.batchesInEpoch) +
                         snapshot.stepInEpoch;
-                    snapshot.samplesProcessed = snapshot.step * batchSize;
+                    snapshot.validExamplesInBatch =
+                        completedBatch.validExampleCount;
+                    snapshot.samplesProcessedInEpoch =
+                        completedBatch.validExamplesInEpoch;
+                    const uint64_t validationPopulationSize =
+                        validation.batchSession->getNumExamples(
+                            ExampleType::VALIDATE);
+                    snapshot.samplesProcessed =
+                        (currentEpoch * validationPopulationSize) +
+                        completedBatch.validExamplesInEpoch;
                     updateWallThroughputRates(
                         snapshot,
                         validationThroughput,
                         snapshot.step,
-                        batchSize,
+                        snapshot.samplesProcessed,
                         forwardFlopsPerBatch);
                     assignScalarStatsToSnapshot(
                         snapshot,
                         validationState->scalarTensorNames,
                         completedBatch.scalarStats,
                         validationState->aggregateLossTensorNames);
+                    snapshot.metricBatchStats =
+                        std::move(completedBatch.metricBatchStats);
                     epochLosses.update(snapshot);
                     emitTrainingEvent(
                         observer,
@@ -3589,6 +3827,12 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                     validationExecution.schedulingThread.join();
                 }
                 throwIfQueuedTrainingStateFailed(validationState);
+                THOR_THROW_IF_FALSE(
+                    validationExecution.phaseWorks.size() == 1);
+                validateExactPhaseCompletion(
+                    validationExecution.phaseWorks.front(),
+                    validationState,
+                    validation.batchSession);
             } catch (...) {
                 cancelNamedValidation(std::current_exception());
                 throw;

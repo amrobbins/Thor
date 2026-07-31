@@ -5,9 +5,9 @@
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
+#include "Utilities/Expression/CudaHelpers.h"
 #include "Utilities/TensorOperations/Misc/Concatenate.h"
 #include "Utilities/TensorOperations/Misc/Split.h"
-#include "Utilities/Expression/CudaHelpers.h"
 
 namespace ThorImplementation {
 
@@ -101,9 +101,9 @@ class Split : public MultiConnectionLayer {
         for (int i = 0; i < numSplitTensors; ++i)
             splitTensorFeatureOutputMemoriesArray[i] = featureOutputs[i].value().getMemPtr();
         CUDA_CHECK(cudaMemcpy(splitTensorFeatureOutputMemoriesArray_d,
-                                splitTensorFeatureOutputMemoriesArray,
-                                numSplitTensors * sizeof(void *),
-                                cudaMemcpyHostToDevice));
+                              splitTensorFeatureOutputMemoriesArray,
+                              numSplitTensors * sizeof(void *),
+                              cudaMemcpyHostToDevice));
         delete[] splitTensorFeatureOutputMemoriesArray;
 
         if (numPresentErrorInputs > 0) {
@@ -113,9 +113,9 @@ class Split : public MultiConnectionLayer {
                 splitTensorErrorInputMemoriesArray[i] = errorInputs[i].value().getMemPtr();
             }
             CUDA_CHECK(cudaMemcpy(splitTensorErrorInputMemoriesArray_d,
-                                    splitTensorErrorInputMemoriesArray,
-                                    numSplitTensors * sizeof(void *),
-                                    cudaMemcpyHostToDevice));
+                                  splitTensorErrorInputMemoriesArray,
+                                  numSplitTensors * sizeof(void *),
+                                  cudaMemcpyHostToDevice));
             delete[] splitTensorErrorInputMemoriesArray;
         } else {
             for (uint32_t i = 0; i < errorOutputs.size(); ++i) {
@@ -129,7 +129,8 @@ class Split : public MultiConnectionLayer {
         for (int i = 0; i < numSplitTensors; ++i)
             axisElementsPerSplitTensor[i] = axisElements[i];
         CUDA_CHECK(cudaMalloc(&axisElementsPerSplitTensor_d, numSplitTensors * sizeof(long)));
-        CUDA_CHECK(cudaMemcpy(axisElementsPerSplitTensor_d, axisElementsPerSplitTensor, numSplitTensors * sizeof(long), cudaMemcpyHostToDevice));
+        CUDA_CHECK(
+            cudaMemcpy(axisElementsPerSplitTensor_d, axisElementsPerSplitTensor, numSplitTensors * sizeof(long), cudaMemcpyHostToDevice));
 
         unsigned int numDimensions = featureInputs.front().value().getDescriptor().getDimensions().size();
         long *stridePerSplitTensorDimension = new long[numDimensions * numSplitTensors];
@@ -141,9 +142,9 @@ class Split : public MultiConnectionLayer {
         }
         CUDA_CHECK(cudaMalloc(&stridePerSplitTensorDimension_d, numDimensions * numSplitTensors * sizeof(long)));
         CUDA_CHECK(cudaMemcpy(stridePerSplitTensorDimension_d,
-                                stridePerSplitTensorDimension,
-                                numDimensions * numSplitTensors * sizeof(long),
-                                cudaMemcpyHostToDevice));
+                              stridePerSplitTensorDimension,
+                              numDimensions * numSplitTensors * sizeof(long),
+                              cudaMemcpyHostToDevice));
 
         delete[] stridePerSplitTensorDimension;
         delete[] axisElementsPerSplitTensor;
@@ -154,16 +155,22 @@ class Split : public MultiConnectionLayer {
             stridePerPackedTensorDimension[i] = inputDimensions[i + 1] * stridePerPackedTensorDimension[i + 1];
         CUDA_CHECK(cudaMalloc(&stridePerPackedTensorDimension_d, inputDimensions.size() * sizeof(unsigned long)));
         CUDA_CHECK(cudaMemcpy(stridePerPackedTensorDimension_d,
-                                stridePerPackedTensorDimension,
-                                inputDimensions.size() * sizeof(unsigned long),
-                                cudaMemcpyHostToDevice));
+                              stridePerPackedTensorDimension,
+                              inputDimensions.size() * sizeof(unsigned long),
+                              cudaMemcpyHostToDevice));
         delete[] stridePerPackedTensorDimension;
     }
 
-    void infer(std::optional<Tensor> inputTensor, std::optional<Tensor> outputTensor, Stream stream, unsigned int connectionNumber) override {}
+    void infer(std::optional<Tensor> inputTensor,
+               std::optional<Tensor> outputTensor,
+               Stream stream,
+               unsigned int connectionNumber) override {}
 
-    void backProp(
-        std::optional<Tensor> dataIn, std::optional<Tensor> errorIn, std::optional<Tensor> errorOut, Stream stream, unsigned int connectionNumber) override {}
+    void backProp(std::optional<Tensor> dataIn,
+                  std::optional<Tensor> errorIn,
+                  std::optional<Tensor> errorOut,
+                  Stream stream,
+                  unsigned int connectionNumber) override {}
 
     void forward(std::optional<Tensor> featureInput, bool validationPass, uint32_t batchSize = 0) override {
         THOR_THROW_IF_FALSE(featureInput.has_value());
@@ -181,10 +188,10 @@ class Split : public MultiConnectionLayer {
                     streams[0]);
 
         Event readyEvent = streams[0].putEvent();
-        nextLayers[0].value()->forward(featureOutputs[0], validationPass);
+        nextLayers[0].value()->forward(featureOutputs[0], validationPass, batchSize);
         for (unsigned int i = 1; i < featureOutputs.size(); ++i) {
             streams[i].waitEvent(readyEvent);
-            nextLayers[i].value()->forward(featureOutputs[i], validationPass);
+            nextLayers[i].value()->forward(featureOutputs[i], validationPass, batchSize);
         }
     }
 
@@ -210,17 +217,18 @@ class Split : public MultiConnectionLayer {
         for (unsigned int i = 1; i < errorInputs.size(); ++i)
             streams[0].waitEvent(streams[i].putEvent());
 
-        launchConcatenate(errorOutputs[0].value().getMemPtr(),
-                          splitTensorErrorInputMemoriesArray_d,
-                          static_cast<std::size_t>(TensorDescriptor::getElementSizeInBytes(errorOutputs[0].value().getDescriptor().getDataType())),
-                          errorOutputs[0].value().getDescriptor().getTotalNumElements(),
-                          errorOutputs[0].value().getDescriptor().getDimensions().size(),
-                          errorInputs.size(),
-                          axis,
-                          axisElementsPerSplitTensor_d,
-                          stridePerPackedTensorDimension_d,
-                          stridePerSplitTensorDimension_d,
-                          streams[0]);
+        launchConcatenate(
+            errorOutputs[0].value().getMemPtr(),
+            splitTensorErrorInputMemoriesArray_d,
+            static_cast<std::size_t>(TensorDescriptor::getElementSizeInBytes(errorOutputs[0].value().getDescriptor().getDataType())),
+            errorOutputs[0].value().getDescriptor().getTotalNumElements(),
+            errorOutputs[0].value().getDescriptor().getDimensions().size(),
+            errorInputs.size(),
+            axis,
+            axisElementsPerSplitTensor_d,
+            stridePerPackedTensorDimension_d,
+            stridePerSplitTensorDimension_d,
+            streams[0]);
 
         // Expecting to get tail-recursion optimization of -O3 so that stack space does not build up here.
         previousLayers[0].value()->backward(errorOutputs[0], batchSize);

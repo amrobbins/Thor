@@ -112,10 +112,10 @@ class Trainer {
     void validateRestartConditions(const std::vector<TrainingRestartCondition>& conditions) const;
     void validateEarlyCompletionPolicies(const std::vector<TrainingEarlyCompletionPolicy>& policies) const;
     TrainingObserver& effectiveObserver();
-    [[nodiscard]] CompiledDatasetInputBindings resolveDatasetInputsForCurrentModel() const;
     [[nodiscard]] CompiledDatasetInputBindings resolveDatasetInputsForData(
         const TrainingData& data, bool inferenceOnly) const;
     void fitInternal(const TrainerFitOptions& options,
+                     const std::shared_ptr<const TrainingData>& fitTrainingData,
                      TrainingObserver& observer,
                      const TrainingCancellationToken& cancellationToken,
                      const std::vector<TrainingEarlyCompletionPolicy>& additionalEarlyCompletionPolicies = {},

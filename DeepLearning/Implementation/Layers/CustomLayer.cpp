@@ -211,6 +211,10 @@ std::string customLossFusedLabelsInputName(uint32_t outputFlatIndex) {
     return "__custom_loss_fused_labels_" + std::to_string(outputFlatIndex);
 }
 
+std::string customLossFusedBatchValidityMaskInputName(uint32_t outputFlatIndex) {
+    return "__custom_loss_fused_batch_validity_mask_" + std::to_string(outputFlatIndex);
+}
+
 std::string customLossFusedSeedInputName(const std::string& outputName) {
     return "__custom_loss_fused_seed_" + outputName;
 }
@@ -254,14 +258,31 @@ CustomLayer::CustomLayer(DynamicExpression expr,
                          const std::vector<std::shared_ptr<PhysicalParameter>>& parameters,
                          bool inferenceOnly,
                          int64_t stampedId,
-                         std::vector<DeclaredOutputDescriptor> declaredOutputDescriptors)
+                         std::vector<DeclaredOutputDescriptor> declaredOutputDescriptors,
+                         bool usesBatchValidity,
+                         bool requiresFullBatch)
     : TrainableLayer(placement, inferenceOnly, stampedId),
       layerDefinitionExpression(std::move(expr)),
+      batchValidityMaskEnabled(usesBatchValidity),
+      fullBatchRequired(requiresFullBatch),
       inputNames(std::move(inputNames)),
       outputNames(std::move(outputNames)),
       declaredOutputDescriptors(std::move(declaredOutputDescriptors)) {
+    if (batchValidityMaskEnabled && fullBatchRequired)
+        throw runtime_error("CustomLayer cannot both use batch validity and require a full batch.");
     validatePortNames(this->inputNames, "input");
     validatePortNames(this->outputNames, "output");
+    const std::vector<std::string>& expectedExpressionInputs = layerDefinitionExpression.getExpectedInputNames();
+    if (!expectedExpressionInputs.empty()) {
+        const bool expressionUsesValidityMask =
+            std::find(expectedExpressionInputs.begin(), expectedExpressionInputs.end(), std::string(Thor::BATCH_VALIDITY_MASK_NAME)) !=
+            expectedExpressionInputs.end();
+        if (expressionUsesValidityMask != batchValidityMaskEnabled) {
+            throw runtime_error(batchValidityMaskEnabled
+                                    ? "CustomLayer validity-mask support requires the expression to consume Thor::BATCH_VALIDITY_MASK_NAME."
+                                    : "CustomLayer expression consumes Thor::BATCH_VALIDITY_MASK_NAME without enabling validity-mask support.");
+        }
+    }
 
     if (!this->declaredOutputDescriptors.empty() && this->declaredOutputDescriptors.size() != this->outputNames.size()) {
         throw runtime_error("CustomLayer declared output descriptor count must match the number of output ports.");
@@ -469,6 +490,8 @@ void CustomLayer::clearForwardArrivalBookkeeping(uint32_t applicationIndex) {
     app.stillWaitingForForwardInputTensorIds.clear();
     app.forwardRanThisPass = false;
     app.forwardVariantThisPass.reset();
+    app.currentValidExampleCount = 0;
+    app.batchCardinalitySet = false;
 
     for (uint32_t inputPort = 0; inputPort < inputNames.size(); ++inputPort) {
         const uint32_t flat = inputFlatIndex(applicationIndex, inputPort);
@@ -665,7 +688,9 @@ bool CustomLayer::registerFusedCustomLossGradient(const Tensor& predictions,
                                                  DynamicExpression gradientExpression,
                                                  std::string predictionsName,
                                                  std::string labelsName,
-                                                 std::string gradientName) {
+                                                 std::string gradientName,
+                                                 const Tensor& batchValidityMask,
+                                                 std::string batchValidityMaskName) {
     if (isInferenceOnly()) {
         return false;
     }
@@ -689,13 +714,26 @@ bool CustomLayer::registerFusedCustomLossGradient(const Tensor& predictions,
         return false;
     }
 
+    THOR_THROW_IF_FALSE(batchValidityMask.isInitialized());
+    THOR_THROW_IF_FALSE(batchValidityMask.getDataType() == DataType::FP32);
+    THOR_THROW_IF_FALSE(batchValidityMask.getPlacement() == predictions.getPlacement());
+    const std::vector<uint64_t> maskDimensions = batchValidityMask.getDimensions();
+    const std::vector<uint64_t> predictionDimensions = predictions.getDimensions();
+    THOR_THROW_IF_FALSE(maskDimensions.size() == predictionDimensions.size());
+    THOR_THROW_IF_FALSE(maskDimensions.front() == predictionDimensions.front());
+    for (size_t axis = 1; axis < maskDimensions.size(); ++axis)
+        THOR_THROW_IF_FALSE(maskDimensions[axis] == 1);
+
     FusedCustomLossGradient fused{predictions,
                                   labels,
                                   std::move(gradientExpression),
                                   std::move(predictionsName),
                                   std::move(labelsName),
                                   std::move(gradientName),
-                                  customLossFusedLabelsInputName(matchedFlatIndex.value())};
+                                  batchValidityMask,
+                                  std::move(batchValidityMaskName),
+                                  customLossFusedLabelsInputName(matchedFlatIndex.value()),
+                                  customLossFusedBatchValidityMaskInputName(matchedFlatIndex.value())};
     fusedCustomLossGradientByOutputFlatIndex.emplace(matchedFlatIndex.value(), std::move(fused));
     return true;
 }
@@ -852,6 +890,7 @@ PhysicalOutputs CustomLayer::buildBackwardOutputsForApplication(uint32_t applica
         PreparedDynamicExpression::TensorMap gradientInputs;
         gradientInputs.emplace(fused.predictionsName, fused.predictionsTensor);
         gradientInputs.emplace(fused.labelsName, fused.labelsTensor);
+        gradientInputs.emplace(fused.batchValidityMaskName, fused.batchValidityMask);
 
         DynamicExpressionBuild gradientBuild = fused.gradientExpression.build(gradientInputs, {}, computeStream(applicationIndex));
         if (!gradientBuild.tensor_scalar_inputs.empty()) {
@@ -901,6 +940,8 @@ PhysicalOutputs CustomLayer::buildBackwardOutputsForApplication(uint32_t applica
                                                                                  clonedForwardNodes);
 
         const uint32_t labelsInputNode = appendTensorInputNode(fusedExpr, fused.fusedLabelsInputName);
+        const uint32_t batchValidityMaskInputNode =
+            appendTensorInputNode(fusedExpr, fused.fusedBatchValidityMaskInputName);
 
         const uint32_t gradientCudaKernelExpressionOffset = static_cast<uint32_t>(fusedExpr.cuda_kernel_expressions.size());
         fusedExpr.cuda_kernel_expressions.insert(fusedExpr.cuda_kernel_expressions.end(),
@@ -910,6 +951,7 @@ PhysicalOutputs CustomLayer::buildBackwardOutputsForApplication(uint32_t applica
         std::unordered_map<std::string, uint32_t> gradientInputReplacements{
             {fused.predictionsName, predictionNode},
             {fused.labelsName, labelsInputNode},
+            {fused.batchValidityMaskName, batchValidityMaskInputNode},
         };
         std::unordered_map<uint32_t, uint32_t> clonedGradientNodes;
         const uint32_t fusedSeedNode = cloneExpressionNodeWithInputReplacements(*gradientOutputs.expr,
@@ -1257,6 +1299,20 @@ PreparedDynamicExpression::TensorMap CustomLayer::buildForwardInputs(uint32_t ap
         inputs[param->getName()] = paramStorage.value();
     }
 
+    if (batchValidityMaskEnabled) {
+        const uint32_t primaryFlat = primaryInputFlatIndex(applicationIndex);
+        THOR_THROW_IF_FALSE(primaryFlat < featureInputs.size());
+        THOR_THROW_IF_FALSE(featureInputs[primaryFlat].has_value());
+        const std::vector<uint64_t> inputDimensions = featureInputs[primaryFlat].value().getDimensions();
+        THOR_THROW_IF_FALSE(!inputDimensions.empty());
+        std::vector<uint64_t> maskDimensions(inputDimensions.size(), 1);
+        maskDimensions.front() = inputDimensions.front();
+        ApplicationState& app = applications.at(applicationIndex);
+        app.batchValidityMask = Tensor(
+            featureInputs[primaryFlat].value().getPlacement(), TensorDescriptor(DataType::FP32, maskDimensions));
+        inputs[Thor::BATCH_VALIDITY_MASK_NAME] = app.batchValidityMask;
+    }
+
     return inputs;
 }
 
@@ -1297,6 +1353,7 @@ PreparedDynamicExpression::TensorMap CustomLayer::buildBackwardAdditionalInputs(
         for (const auto& [outputName, fusedLossGradient] : app.fusedCustomLossGradientsByOutput) {
             (void)outputName;
             backwardAdditionalInputs[fusedLossGradient.fusedLabelsInputName] = fusedLossGradient.labelsTensor;
+            backwardAdditionalInputs[fusedLossGradient.fusedBatchValidityMaskInputName] = fusedLossGradient.batchValidityMask;
         }
         return backwardAdditionalInputs;
     }
@@ -2067,6 +2124,21 @@ void CustomLayer::forward(std::optional<Tensor> featureInput, bool validationPas
             }
             continue;
         }
+        const std::vector<uint64_t> inputDimensions = featureInput.value().getDimensions();
+        THOR_THROW_IF_FALSE(!inputDimensions.empty());
+        THOR_THROW_IF_FALSE(inputDimensions.front() >= 1);
+        THOR_THROW_IF_FALSE(inputDimensions.front() <= std::numeric_limits<uint32_t>::max());
+        const uint32_t physicalBatchCapacity = static_cast<uint32_t>(inputDimensions.front());
+        const uint32_t resolvedValidExampleCount = batchSize == 0 ? physicalBatchCapacity : batchSize;
+        THOR_THROW_IF_FALSE(resolvedValidExampleCount >= 1);
+        THOR_THROW_IF_FALSE(resolvedValidExampleCount <= physicalBatchCapacity);
+        if (app.batchCardinalitySet) {
+            THOR_THROW_IF_FALSE(app.currentValidExampleCount == resolvedValidExampleCount);
+        } else {
+            app.currentValidExampleCount = resolvedValidExampleCount;
+            app.batchCardinalitySet = true;
+        }
+
         if (!singleApplicationSingleInputFastPath && app.stillWaitingForForwardInputTensorIds.count(tensorId) == 0) {
             if (trainingUpdateDiagnosticsEnabled()) {
                 std::fprintf(stderr,
@@ -2133,6 +2205,10 @@ void CustomLayer::forward(std::optional<Tensor> featureInput, bool validationPas
             }
         }
         const auto computeStart = emitLayerDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
+        if (batchValidityMaskEnabled) {
+            THOR_THROW_IF_FALSE(app.batchValidityMask.isInitialized());
+            writeBatchValidityMask(app.batchValidityMask, app.currentValidExampleCount, computeStream(applicationIndex));
+        }
         computeFeatureOutForPass(inputFlatIndex(applicationIndex, 0), validationPass);
         if (emitLayerDiagnostics) {
             computeMicros = layerSubmitDiagnosticElapsedMicros(computeStart, layerSubmitDiagnosticNow());
@@ -2145,7 +2221,7 @@ void CustomLayer::forward(std::optional<Tensor> featureInput, bool validationPas
             if (!nextLayers[flat].has_value())
                 continue;
             downstreamCount += 1;
-            nextLayers[flat].value()->forward(featureOutputs[flat], validationPass, batchSize);
+            nextLayers[flat].value()->forward(featureOutputs[flat], validationPass, app.currentValidExampleCount);
         }
         if (emitLayerDiagnostics) {
             downstreamMicros = layerSubmitDiagnosticElapsedMicros(downstreamStart, layerSubmitDiagnosticNow());

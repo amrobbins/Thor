@@ -2444,6 +2444,8 @@ Multiple windowed fields may reference the same persisted sequence.
     training_stats_snapshot.def_ro("step_in_epoch", &TrainingStatsSnapshot::stepInEpoch);
     training_stats_snapshot.def_ro("steps_per_epoch", &TrainingStatsSnapshot::stepsPerEpoch);
     training_stats_snapshot.def_ro("batch_size", &TrainingStatsSnapshot::batchSize);
+    training_stats_snapshot.def_ro("valid_examples_in_batch", &TrainingStatsSnapshot::validExamplesInBatch);
+    training_stats_snapshot.def_ro("samples_processed_in_epoch", &TrainingStatsSnapshot::samplesProcessedInEpoch);
     training_stats_snapshot.def_ro("samples_processed", &TrainingStatsSnapshot::samplesProcessed);
     training_stats_snapshot.def_ro("in_flight_batches", &TrainingStatsSnapshot::inFlightBatches);
     training_stats_snapshot.def_ro("elapsed_seconds", &TrainingStatsSnapshot::elapsedSeconds);

@@ -110,3 +110,48 @@ TEST(BinaryAccuracy, ComputesCorrectElementWiseResult) {
         LayerTestHelper::tearDownNetwork(layers);
     }
 }
+
+TEST(BinaryAccuracy, PartialBatchIgnoresInvalidTailRows) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    TensorDescriptor descriptor(DataType::FP32, {4, 1});
+
+    Tensor predictionsCpu(cpuPlacement, descriptor);
+    Tensor labelsCpu(cpuPlacement, descriptor);
+    Tensor predictionsGpu(gpuPlacement, descriptor);
+    Tensor labelsGpu(gpuPlacement, descriptor);
+
+    float* predictions = predictionsCpu.getMemPtr<float>();
+    float* labels = labelsCpu.getMemPtr<float>();
+    predictions[0] = 0.9f;
+    labels[0] = 1.0f;
+    predictions[1] = 0.1f;
+    labels[1] = 0.0f;
+    predictions[2] = 0.9f;
+    labels[2] = 0.0f;
+    predictions[3] = 0.1f;
+    labels[3] = 1.0f;
+
+    vector<shared_ptr<Layer>> layers;
+    auto predictionsInput = make_shared<NetworkInput>(predictionsGpu);
+    auto labelsInput = make_shared<NetworkInput>(labelsGpu);
+    auto metric = make_shared<BinaryAccuracy>();
+    auto output = make_shared<NetworkOutput>(gpuPlacement);
+    layers = {predictionsInput, labelsInput, metric, output};
+
+    LayerTestHelper::connectTwoLayers(predictionsInput, metric, 0, static_cast<int>(Metric::ConnectionType::FORWARD));
+    LayerTestHelper::connectTwoLayers(labelsInput, metric, 0, static_cast<int>(Metric::ConnectionType::LABELS));
+    LayerTestHelper::connectTwoLayers(metric, output, static_cast<int>(Metric::ConnectionType::METRIC));
+    LayerTestHelper::initializeNetwork(layers);
+
+    ASSERT_TRUE(metric->supportsPartialBatches());
+    predictionsInput->forward(predictionsCpu, false, 2);
+    labelsInput->forward(labelsCpu, false, 2);
+
+    Tensor resultCpu = output->getFeatureOutput().value().clone(cpuPlacement);
+    resultCpu.copyFromAsync(output->getFeatureOutput().value(), predictionsInput->getStream());
+    predictionsInput->getStream().synchronize();
+    EXPECT_NEAR(*resultCpu.getMemPtr<float>(), 1.0f, 1e-6f);
+
+    LayerTestHelper::tearDownNetwork(layers);
+}

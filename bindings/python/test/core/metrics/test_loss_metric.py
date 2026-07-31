@@ -20,6 +20,7 @@ def test_loss_metric_constructs_default_mse():
     assert metric.predictions == predictions
     assert metric.labels == labels
     assert metric.formula == thor.metrics.LossFormula.mean_squared_error
+    assert metric.aggregation is thor.MetricAggregation.MEAN_BY_EXAMPLE
 
 
 @pytest.mark.parametrize(

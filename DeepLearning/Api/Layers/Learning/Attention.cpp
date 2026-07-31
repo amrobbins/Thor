@@ -1053,7 +1053,11 @@ std::shared_ptr<ThorImplementation::CustomLayer> Attention::createPhysicalLayer(
     const std::vector<std::shared_ptr<ThorImplementation::PhysicalParameter>>& physicalParameters,
     bool inferenceOnly,
     int64_t stampedId,
-    std::vector<ThorImplementation::CustomLayer::DeclaredOutputDescriptor> declaredOutputDescriptors) const {
+    std::vector<ThorImplementation::CustomLayer::DeclaredOutputDescriptor> declaredOutputDescriptors,
+    bool usesBatchValidity,
+    bool requiresFullBatch) const {
+    THOR_THROW_IF_FALSE(!usesBatchValidity);
+    THOR_THROW_IF_FALSE(!requiresFullBatch);
     const std::optional<ThorImplementation::DynamicExpressionVariantId> deterministicTrainingVariant =
         dropoutProbability > 0.0f
             ? std::optional<ThorImplementation::DynamicExpressionVariantId>(kAttentionEvaluationVariant)

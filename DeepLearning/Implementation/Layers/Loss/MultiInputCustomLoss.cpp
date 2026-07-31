@@ -4,7 +4,9 @@
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "Utilities/Expression/FusedEquation.h"
+#include "Utilities/TensorOperations/Masking/BatchValidity.h"
 
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
@@ -19,14 +21,20 @@ MultiInputCustomLoss::MultiInputCustomLoss(DynamicExpression lossExpression,
                                            vector<optional<string>> gradientNames,
                                            string lossName,
                                            DataType lossDataType,
-                                           std::optional<float> lossWeight)
+                                           std::optional<float> lossWeight,
+                                           bool usesBatchValidity,
+                                           bool requiresFullBatch)
     : Loss(lossDataType),
       lossExpression(std::move(lossExpression)),
       gradientExpression(std::move(gradientExpression)),
       inputNames(std::move(inputNames)),
       gradientNames(std::move(gradientNames)),
       lossName(std::move(lossName)),
-      lossWeight(normalizeLossWeight(lossWeight)) {
+      lossWeight(normalizeLossWeight(lossWeight)),
+      batchValidityMaskEnabled(usesBatchValidity),
+      fullBatchRequired(requiresFullBatch) {
+    if (batchValidityMaskEnabled && fullBatchRequired)
+        throw invalid_argument("MultiInputCustomLoss cannot both use batch validity and require a full batch.");
     THOR_THROW_IF_FALSE(!this->inputNames.empty());
     THOR_THROW_IF_FALSE(this->inputNames.size() == this->gradientNames.size());
     THOR_THROW_IF_FALSE(!presentNames(this->gradientNames).empty());
@@ -131,6 +139,10 @@ MultiInputCustomLoss::TensorMap MultiInputCustomLoss::buildLossInputs() const {
     for (size_t i = 0; i < inputNames.size(); ++i) {
         THOR_THROW_IF_FALSE(featureInputs[i].has_value());
         inputs.emplace(inputNames[i], featureInputs[i].value());
+    }
+    if (batchValidityMaskEnabled) {
+        THOR_THROW_IF_FALSE(batchValidityMask.isInitialized());
+        inputs.emplace(Thor::BATCH_VALIDITY_MASK_NAME, batchValidityMask);
     }
     return inputs;
 }
@@ -250,6 +262,16 @@ void MultiInputCustomLoss::connectToNextLayer(Layer* nextLayer, int driverConnec
     THOR_THROW_IF_FALSE(!compiled);
     THOR_THROW_IF_FALSE(!this->nextLayer.has_value());
     this->nextLayer = nextLayer;
+
+    if (batchValidityMaskEnabled) {
+        THOR_THROW_IF_FALSE(!featureInputs.empty());
+        THOR_THROW_IF_FALSE(featureInputs.front().has_value());
+        const Tensor& reference = featureInputs.front().value();
+        std::vector<uint64_t> maskDimensions(reference.getDimensions().size(), 1);
+        maskDimensions.front() = reference.getDimensions().front();
+        batchValidityMask = Tensor(reference.getPlacement(), TensorDescriptor(DataType::FP32, maskDimensions));
+    }
+
     if (nextLayer->hasFeatureInput())
         featureOutput = createFeatureOutputTensor();
     else
@@ -285,6 +307,8 @@ void MultiInputCustomLoss::compileImpl() {
 
     set<string> inputNameSet(inputNames.begin(), inputNames.end());
     THOR_THROW_IF_FALSE(inputNameSet.size() == inputNames.size());
+    if (batchValidityMaskEnabled)
+        inputNameSet.insert(Thor::BATCH_VALIDITY_MASK_NAME);
     set<string> gradientNameSet = presentNames(gradientNames);
     THOR_THROW_IF_FALSE(!gradientNameSet.empty());
 
@@ -323,6 +347,21 @@ void MultiInputCustomLoss::compileImpl() {
         }
     }
 
+    if (batchValidityMaskEnabled) {
+        THOR_THROW_IF_FALSE(batchValidityMask.isInitialized());
+        const Tensor& reference = featureInputs.front().value();
+        THOR_THROW_IF_FALSE(batchValidityMask.getPlacement() == reference.getPlacement());
+        THOR_THROW_IF_FALSE(batchValidityMask.getDataType() == DataType::FP32);
+        const std::vector<uint64_t> maskDimensions = batchValidityMask.getDimensions();
+        const std::vector<uint64_t> referenceDimensions = reference.getDimensions();
+        THOR_THROW_IF_FALSE(maskDimensions.size() == referenceDimensions.size());
+        THOR_THROW_IF_FALSE(maskDimensions.front() == referenceDimensions.front());
+        for (size_t axis = 1; axis < maskDimensions.size(); ++axis)
+            THOR_THROW_IF_FALSE(maskDimensions[axis] == 1);
+    } else {
+        batchValidityMask.dropReference();
+    }
+
     TensorMap inputs = buildLossInputs();
     TensorMap lossOutputs = buildLossOutputs();
     lossPrepared = make_shared<PreparedDynamicExpression>(weightedLossExpression().prepare(inputs, lossOutputs, computeStream()));
@@ -348,6 +387,7 @@ void MultiInputCustomLoss::cleanup() {
     gradientStamped.reset();
     gradientPrepared.reset();
     gradientPreRunHook = nullptr;
+    batchValidityMask.dropReference();
     Layer::cleanup();
 }
 
@@ -358,12 +398,13 @@ void MultiInputCustomLoss::resetForwardBookkeeping() {
         allForwardInputTensorIds.insert(input.value().getTensorId());
     }
     stillWaitingForForwardInputTensorIds = allForwardInputTensorIds;
+    batchCardinalitySet = false;
 }
 
 void MultiInputCustomLoss::initialize() {
     Layer::initialize();
     resetForwardBookkeeping();
-    currentBatchSize = 0;
+    currentValidExampleCount = 0;
 }
 
 void MultiInputCustomLoss::pruneTrainingBackpropPathIfInactive() {
@@ -383,6 +424,51 @@ void MultiInputCustomLoss::pruneTrainingBackpropPathIfInactive() {
     trainingBackpropPathPruned = true;
 }
 
+uint32_t MultiInputCustomLoss::getPhysicalBatchCapacity() const {
+    THOR_THROW_IF_FALSE(!featureInputs.empty());
+    THOR_THROW_IF_FALSE(featureInputs.front().has_value());
+    const vector<uint64_t> dimensions = featureInputs.front().value().getDimensions();
+    THOR_THROW_IF_FALSE(!dimensions.empty());
+    THOR_THROW_IF_FALSE(dimensions.front() >= 1);
+    THOR_THROW_IF_FALSE(dimensions.front() <= numeric_limits<uint32_t>::max());
+    return static_cast<uint32_t>(dimensions.front());
+}
+
+uint32_t MultiInputCustomLoss::getValidExampleCount() const {
+    THOR_THROW_IF_FALSE(currentValidExampleCount != 0);
+    const uint32_t physicalBatchCapacity = getPhysicalBatchCapacity();
+    THOR_THROW_IF_FALSE(currentValidExampleCount >= 1);
+    THOR_THROW_IF_FALSE(currentValidExampleCount <= physicalBatchCapacity);
+    return currentValidExampleCount;
+}
+
+void MultiInputCustomLoss::recordBatchCardinality(uint32_t validExampleCount) {
+    const uint32_t physicalBatchCapacity = getPhysicalBatchCapacity();
+    const uint32_t resolvedValidExampleCount =
+        validExampleCount == 0 ? physicalBatchCapacity : validExampleCount;
+    THOR_THROW_IF_FALSE(resolvedValidExampleCount >= 1);
+    THOR_THROW_IF_FALSE(resolvedValidExampleCount <= physicalBatchCapacity);
+    if (batchCardinalitySet) {
+        THOR_THROW_IF_FALSE(currentValidExampleCount == resolvedValidExampleCount);
+        return;
+    }
+    currentValidExampleCount = resolvedValidExampleCount;
+    batchCardinalitySet = true;
+}
+
+void MultiInputCustomLoss::maskInvalidBatchTail(Tensor& tensor, const char* tensorRole) {
+    const uint32_t physicalBatchCapacity = getPhysicalBatchCapacity();
+    const uint32_t validExampleCount = getValidExampleCount();
+    if (validExampleCount == physicalBatchCapacity)
+        return;
+    const vector<uint64_t> dimensions = tensor.getDimensions();
+    if (dimensions.empty() || dimensions.front() != physicalBatchCapacity) {
+        throw logic_error(string("Partial batches require ") + tensorRole +
+                          " to preserve the physical leading batch axis.");
+    }
+    zeroInvalidBatchTail(tensor, validExampleCount, computeStream());
+}
+
 void MultiInputCustomLoss::synchronizeComputeStreamForInputs() {
     Stream& runStream = computeStream();
     for (size_t i = 0; i < inputStreams.size(); ++i) {
@@ -393,11 +479,10 @@ void MultiInputCustomLoss::synchronizeComputeStreamForInputs() {
     }
 }
 
-void MultiInputCustomLoss::forward(optional<Tensor> featureInput, bool validationPass, uint32_t batchSize) {
+void MultiInputCustomLoss::forward(optional<Tensor> featureInput, bool validationPass, uint32_t validExampleCount) {
     THOR_THROW_IF_FALSE(running);
     THOR_THROW_IF_FALSE(featureInput.has_value());
-    if (batchSize != 0)
-        currentBatchSize = batchSize;
+    recordBatchCardinality(validExampleCount);
 
     bool matched = false;
     for (const optional<Tensor>& input : featureInputs) {
@@ -415,6 +500,8 @@ void MultiInputCustomLoss::forward(optional<Tensor> featureInput, bool validatio
         return;
 
     synchronizeComputeStreamForInputs();
+    if (batchValidityMaskEnabled)
+        writeBatchValidityMask(batchValidityMask, getValidExampleCount(), computeStream());
     THOR_THROW_IF_FALSE(lossStamped != nullptr);
     if (lossPreRunHook)
         lossPreRunHook(computeStream());
@@ -427,6 +514,15 @@ void MultiInputCustomLoss::forward(optional<Tensor> featureInput, bool validatio
         gradientStamped->run();
     }
 
+    THOR_THROW_IF_FALSE(featureOutput.has_value());
+    maskInvalidBatchTail(featureOutput.value(), "the raw loss tensor");
+    if (trainingPass) {
+        for (optional<Tensor>& gradient : errorOutputs) {
+            if (gradient.has_value())
+                maskInvalidBatchTail(gradient.value(), "a prediction-gradient tensor");
+        }
+    }
+
     Event lossReady = computeStream().putEvent();
     for (size_t i = 1; i < inputStreams.size(); ++i)
         inputStreams[i].waitEvent(lossReady);
@@ -434,24 +530,26 @@ void MultiInputCustomLoss::forward(optional<Tensor> featureInput, bool validatio
     resetForwardBookkeeping();
 
     if (nextLayer.has_value())
-        nextLayer.value()->forward(featureOutput, validationPass, currentBatchSize);
+        nextLayer.value()->forward(featureOutput, validationPass, currentValidExampleCount);
 
     if (!trainingPass)
         return;
 
-    backward(nullopt, currentBatchSize);
+    backward(nullopt, currentValidExampleCount);
 }
 
-void MultiInputCustomLoss::backward(optional<Tensor> errorInput, uint32_t batchSize) {
+void MultiInputCustomLoss::backward(optional<Tensor> errorInput, uint32_t validExampleCount) {
     THOR_THROW_IF_FALSE(running);
     THOR_THROW_IF_FALSE(!errorInput.has_value());
-    (void)batchSize;
+    const uint32_t effectiveValidExampleCount =
+        validExampleCount == 0 ? getValidExampleCount() : validExampleCount;
+    THOR_THROW_IF_FALSE(effectiveValidExampleCount == getValidExampleCount());
 
     THOR_THROW_IF_FALSE(gradientStamped != nullptr);
     for (size_t i = 0; i < previousLayers.size(); ++i) {
         if (!previousLayers[i].has_value() || !errorOutputs[i].has_value())
             continue;
-        previousLayers[i].value()->backward(errorOutputs[i], currentBatchSize);
+        previousLayers[i].value()->backward(errorOutputs[i], effectiveValidExampleCount);
     }
 }
 

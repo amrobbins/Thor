@@ -20,6 +20,7 @@ def test_binary_accuracy_constructs():
 
     assert m is not None
     assert isinstance(m, thor.metrics.BinaryAccuracy)
+    assert m.aggregation is thor.MetricAggregation.MEAN_BY_EXAMPLE
 
 
 def test_binary_accuracy_rejects_wrong_arity():

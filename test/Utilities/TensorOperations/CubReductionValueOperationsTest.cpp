@@ -166,3 +166,19 @@ TEST(CubReduction, HandlesPositiveAndNegativeInfinity) {
     expectFloatVectorNear(executeFp32Output(input, CubReductionOp::L1Norm, 0, stream), {infinity});
     expectFloatVectorNear(executeFp32Output(input, CubReductionOp::L2Norm, 0, stream), {infinity});
 }
+
+TEST(CubReduction, StampedReductionAcceptsRuntimeOutputScale) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    Tensor input = makeGpuTensor({1.0f, 2.0f, 3.0f}, {3}, stream);
+    std::shared_ptr<StampedCubReduction> reduction =
+        CubReduction(CubReductionOp::Sum, 0, DataType::FP32, 1.0f).stamp(input, stream);
+
+    reduction->run(0.5f);
+    stream.synchronize();
+    expectFloatVectorNear(copyGpuTensorAsFloat(reduction->getOutputTensor(), stream), {3.0f});
+
+    reduction->runOn(stream, 2.0f);
+    stream.synchronize();
+    expectFloatVectorNear(copyGpuTensorAsFloat(reduction->getOutputTensor(), stream), {12.0f});
+}

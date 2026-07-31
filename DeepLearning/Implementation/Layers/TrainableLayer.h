@@ -88,6 +88,13 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
         explicit UnsupportedBackwardImplementation(const std::string &message) : std::logic_error(message) {}
     };
 
+    struct BackwardRequirements {
+        bool needsInputGradient = false;
+        bool needsParameterGradients = false;
+
+        [[nodiscard]] bool needsAnyWork() const { return needsInputGradient || needsParameterGradients; }
+    };
+
    public:
     void forward(std::optional<Tensor> featureInput, bool isValidation, uint32_t batchSize = 0) override {
         THOR_THROW_IF_FALSE(running);
@@ -123,6 +130,7 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
 
     void backward(std::optional<Tensor> errorInput, uint32_t batchSize = 0) override {
         THOR_THROW_IF_FALSE(running);
+        THOR_THROW_IF_FALSE(errorInput.has_value());
 
         unsigned int connectionNumber = 0;
         for (; connectionNumber < errorInputs.size(); ++connectionNumber) {
@@ -131,6 +139,8 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
         }
         THOR_THROW_IF_FALSE(connectionNumber != errorInputs.size());
 
+        const BackwardRequirements requirements = backwardRequirements(connectionNumber);
+
         bool clearGradientFirst = false;
         if (isStartOfBackward) {
             clearGradientFirst = true;
@@ -138,65 +148,66 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
         }
 
         // Record the point at which the incoming error tensor is ready on the data stream.
-        // The gradient-update stream can wait on this and then run parameter-gradient work
-        // without waiting for the later error-out backward kernel to finish.
+        // Parameter-gradient work can then run on the gradient stream without racing the
+        // downstream producer of errorInput.
         std::optional<Event> errorInputReadyEvent = std::nullopt;
-        if (errorInputs[connectionNumber].has_value()) {
-            if (gradientUpdateStream.has_value()) {
-                errorInputReadyEvent = streams[connectionNumber].putEvent();
+        if (requirements.needsAnyWork() && gradientUpdateStream.has_value()) {
+            errorInputReadyEvent = streams[connectionNumber].putEvent();
+        }
+
+        std::optional<Event> inputGradientReadyEvent = std::nullopt;
+        if (requirements.needsAnyWork()) {
+            if (backwardGradientMode == BackwardGradientMode::Unknown && usesFusedBackwardImplementation()) {
+                backwardGradientMode = BackwardGradientMode::Fused;
             }
 
             if (backwardGradientMode != BackwardGradientMode::Fused) {
-                // Compute output error gradient using current weights, on the data stream.
-                if ((!isBackPropStub() && previousLayers[connectionNumber].has_value())) {
-                    // Weights cannot be updated until all error outputs have been computed, so record the event marking that.
-                    try {
-                        std::optional<Event> errorOutHasBeenComputedEvent = computeErrorOut(connectionNumber);
-                        if (errorOutHasBeenComputedEvent.has_value())
-                            errorOutHasBeenComputedEvents.push_back(errorOutHasBeenComputedEvent.value());
+                try {
+                    if (requirements.needsInputGradient) {
+                        inputGradientReadyEvent = computeErrorOut(connectionNumber);
+                    }
 
-                        // Gradient accumulation needs error input, so gradient stream waits for this connection's
-                        // error input to be ready.
+                    if (requirements.needsParameterGradients) {
                         if (gradientUpdateStream.has_value() && errorInputReadyEvent.has_value()) {
                             gradientUpdateStream.value().waitEvent(errorInputReadyEvent.value());
                         }
-
-                        // Accumulate gradient for the weights per this connection, on the gradient stream.
                         accumulateWeightsGradient(connectionNumber, clearGradientFirst);
-                    } catch (const UnsupportedBackwardImplementation &) {
-                        backwardGradientMode = BackwardGradientMode::Fused;
                     }
+
+                    backwardGradientMode = BackwardGradientMode::Unfused;
+                } catch (const UnsupportedBackwardImplementation &) {
+                    // No upstream consumer has run yet, so a fused implementation may safely
+                    // replace the unsupported split implementation for this connection.
+                    inputGradientReadyEvent.reset();
+                    backwardGradientMode = BackwardGradientMode::Fused;
                 }
             }
 
-            // backwardGradientMode can mutate in the block above.
             if (backwardGradientMode == BackwardGradientMode::Fused) {
-                if (!isBackPropStub() && previousLayers[connectionNumber].has_value()) {
-                    try {
-                        // Gradient accumulation needs error input, so gradient stream waits for this connection's
-                        // error input to be ready.
-                        if (gradientUpdateStream.has_value() && errorInputReadyEvent.has_value()) {
-                            gradientUpdateStream.value().waitEvent(errorInputReadyEvent.value());
-                        }
-
-                        // Weights cannot be updated until all error outputs have been computed, so record the event marking that.
-                        std::optional<Event> errorOutHasBeenComputedEvent =
-                            computeErrorOutAccumulateWeightsGradienFused(connectionNumber, clearGradientFirst);
-                        if (errorOutHasBeenComputedEvent.has_value())
-                            errorOutHasBeenComputedEvents.push_back(errorOutHasBeenComputedEvent.value());
-                    } catch (const UnsupportedBackwardImplementation &) {
-                        throw std::runtime_error(
-                            getLayerType() +
-                            " must implement either:\n"
-                            "  (1) both computeErrorOut(...) and accumulateWeightsGradient(...)\n"
-                            "or\n"
-                            "  (2) computeErrorOutAccumulateWeightsGradienFused(...).\n"
-                            "With the preference, for performance, being (1) when fusing provides no benefit (e.g. separate kernels "
-                            "anyway, like matmuls).\n"
-                            "The performance preference is (2) when a single kernel can be launched to compute both (e.g. an elementwise "
-                            "or broadcast equation).\n");
+                try {
+                    if (gradientUpdateStream.has_value() && errorInputReadyEvent.has_value()) {
+                        gradientUpdateStream.value().waitEvent(errorInputReadyEvent.value());
                     }
+
+                    inputGradientReadyEvent =
+                        computeErrorOutAccumulateWeightsGradienFused(connectionNumber, clearGradientFirst);
+                } catch (const UnsupportedBackwardImplementation &) {
+                    throw std::runtime_error(
+                        getLayerType() +
+                        " must implement either:\n"
+                        "  (1) the required subset of computeErrorOut(...) and accumulateWeightsGradient(...)\n"
+                        "or\n"
+                        "  (2) computeErrorOutAccumulateWeightsGradienFused(...).\n");
                 }
+            }
+
+            if (requirements.needsInputGradient && inputGradientReadyEvent.has_value()) {
+                // A fused implementation may produce dx on the gradient-update stream.  The
+                // upstream layer consumes dx on this connection's data stream, so publish the
+                // returned readiness event to that stream before recursively submitting
+                // upstream backward work.
+                streams[connectionNumber].waitEvent(inputGradientReadyEvent.value());
+                errorOutHasBeenComputedEvents.push_back(inputGradientReadyEvent.value());
             }
         }
 
@@ -211,16 +222,13 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
         if (gradientComplete) {
             weightsAreUpToDateEvent.reset();
 
-            // Weights cannot be updated until errorOut has been computed.
-            if (gradientUpdateStream.has_value()) {
-                // Gradient update stream is present iff there is at least 1 trainable parameter
+            // Weights cannot be updated until every requested input gradient that reads the
+            // old weights has completed.
+            if (gradientUpdateStream.has_value() && shouldApplyParameterUpdatesForBatch(batchSize)) {
                 for (const Event &eOutComputedEvent : errorOutHasBeenComputedEvents) {
                     gradientUpdateStream.value().waitEvent(eOutComputedEvent);
                 }
 
-                // Update weights
-                // gradientIn is accumulated, for each weights vector, on its gradient stream.
-                // each weights vector is updated on its gradient stream
                 bool anyWeightsUpdated = false;
                 for (const auto &parameter : parameters) {
                     anyWeightsUpdated |= parameter->applyGradient(batchSize * numBackwardConnections);
@@ -233,11 +241,13 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
             isStartOfForward = true;
         }
 
-        if (!previousLayers[connectionNumber].has_value())
+        if (!requirements.needsInputGradient)
             return;
 
-        // Propagate output error gradient to the previous layer, on the data stream.
-        // Expecting to get tail-recursion optimization of -O3 so that stack space does not build up here.
+        THOR_THROW_IF_FALSE(previousLayers[connectionNumber].has_value());
+        THOR_THROW_IF_FALSE(errorOutputs[connectionNumber].has_value());
+
+        // Propagate the now-ready input gradient to the previous layer on the data stream.
         previousLayers[connectionNumber].value()->backward(errorOutputs[connectionNumber], batchSize);
     }
 
@@ -263,12 +273,47 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
         throw UnsupportedBackwardImplementation("computeErrorOutAccumulateWeightsGradienFused(...) not implemented.");
     }
 
+    virtual bool usesFusedBackwardImplementation() const { return false; }
+
+    [[nodiscard]] bool hasTrainingEnabledParameter() {
+        if (isInferenceOnly())
+            return false;
+        for (const auto &parameter : parameters) {
+            if (parameter != nullptr && parameter->isTrainingEnabled())
+                return true;
+        }
+        return false;
+    }
+
+    [[nodiscard]] BackwardRequirements backwardRequirements(uint32_t connectionNumber) {
+        THOR_THROW_IF_FALSE(connectionNumber < previousLayers.size());
+        THOR_THROW_IF_FALSE(connectionNumber < errorOutputs.size());
+        return BackwardRequirements{
+            .needsInputGradient = previousLayers[connectionNumber].has_value() && errorOutputs[connectionNumber].has_value(),
+            .needsParameterGradients = hasTrainingEnabledParameter(),
+        };
+    }
+
+   private:
+    virtual bool shouldApplyParameterUpdatesForBatch(
+        uint32_t validExampleCount) const {
+        (void)validExampleCount;
+        return true;
+    }
+
+   public:
     // Return the name of the layer type
     virtual std::string getLayerType() = 0;
     virtual uint64_t flopCountForward() = 0;
     virtual uint64_t flopCountBackward() = 0;
 
    public:
+    bool isBackPropStub() override {
+        // A trainable layer still requires a downstream error tensor when it has
+        // parameter gradients to compute, even if no input gradient is requested.
+        return !hasTrainingEnabledParameter() && MultiConnectionLayer::isBackPropStub();
+    }
+
     // Setters/Getters
     uint64_t getStampedId() const { return stampedId; }  // FIXME: Move to layer
     std::optional<Stream> getGradientUpdateStream() const { return gradientUpdateStream; }

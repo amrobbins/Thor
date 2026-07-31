@@ -93,6 +93,42 @@ TEST(Batch, StoresAndRetrievesDenseTensorValues) {
     EXPECT_EQ(batch.getTensor("labels"), labels);
 }
 
+TEST(Batch, ValidExampleCountCopiesMovesAssignsAndClears) {
+    Batch batch;
+    EXPECT_FALSE(batch.getValidExampleCount().has_value());
+
+    batch.setValidExampleCount(3);
+    ASSERT_TRUE(batch.getValidExampleCount().has_value());
+    EXPECT_EQ(batch.getValidExampleCount().value(), 3u);
+
+    Batch copied(batch);
+    ASSERT_TRUE(copied.getValidExampleCount().has_value());
+    EXPECT_EQ(copied.getValidExampleCount().value(), 3u);
+
+    Batch assigned;
+    assigned = batch;
+    ASSERT_TRUE(assigned.getValidExampleCount().has_value());
+    EXPECT_EQ(assigned.getValidExampleCount().value(), 3u);
+
+    Batch moved(std::move(copied));
+    ASSERT_TRUE(moved.getValidExampleCount().has_value());
+    EXPECT_EQ(moved.getValidExampleCount().value(), 3u);
+
+    Batch moveAssigned;
+    moveAssigned = std::move(assigned);
+    ASSERT_TRUE(moveAssigned.getValidExampleCount().has_value());
+    EXPECT_EQ(moveAssigned.getValidExampleCount().value(), 3u);
+
+    moveAssigned.clear();
+    EXPECT_FALSE(moveAssigned.getValidExampleCount().has_value());
+}
+
+TEST(Batch, RejectsZeroValidExamples) {
+    Batch batch;
+    EXPECT_THROW(batch.setValidExampleCount(0), std::logic_error);
+    EXPECT_FALSE(batch.getValidExampleCount().has_value());
+}
+
 TEST(Batch, WrapsDenseTensorMapWithoutDeepCopyingHandles) {
     Tensor examples = makeCpuTensor(DataType::FP32, {2, 8});
     Tensor labels = makeCpuTensor(DataType::INT32, {2});
@@ -159,7 +195,7 @@ TEST(Batch, StoresAndRetrievesDeviceBatchReferences) {
     EXPECT_FALSE(batch.isTensor("examples"));
     EXPECT_FALSE(batch.isRaggedTensor("examples"));
     EXPECT_TRUE(batch.isDeviceBatchReference("examples"));
-    EXPECT_EQ(batch.getDeviceBatchReference("examples").getBatchSize(), 4u);
+    EXPECT_EQ(batch.getDeviceBatchReference("examples").getBatchCapacity(), 4u);
     EXPECT_EQ(batch.getDeviceBatchReference("examples").getOutputDescriptor(), descriptor);
     EXPECT_EQ(batch.getDeviceBatchReference("examples").getOutputPlacement(), gpuPlacement);
     EXPECT_THROW(batch.getTensor("examples"), std::runtime_error);

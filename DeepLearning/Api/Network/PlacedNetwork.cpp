@@ -842,6 +842,19 @@ void PlacedNetwork::extendOutputWritableEvents(uint64_t stampIndex, Event event,
     stampedNetworks[stampIndex].extendOutputWritableEvents(event, outputSlotIndex);
 }
 
+std::map<std::string, ThorImplementation::MetricBatchStatisticTensors>
+PlacedNetwork::getMetricBatchStatisticTensorsForSlot(uint64_t stampIndex, uint32_t slotIndex) const {
+    THOR_THROW_IF_FALSE(stampIndex < stampedNetworks.size());
+    return stampedNetworks[stampIndex].getMetricBatchStatisticTensorsForSlot(slotIndex);
+}
+
+void PlacedNetwork::extendMetricStatisticWritableEvents(uint64_t stampIndex,
+                                                        Event event,
+                                                        std::optional<uint32_t> outputSlotIndex) {
+    THOR_THROW_IF_FALSE(stampIndex < stampedNetworks.size());
+    stampedNetworks[stampIndex].extendMetricStatisticWritableEvents(event, outputSlotIndex);
+}
+
 void PlacedNetwork::copyTrainingStateFrom(PlacedNetwork& source) {
     if (source.getNumStamps() != getNumStamps()) {
         throw std::runtime_error("Cannot copy placed-network training state between networks with different stamp counts.");

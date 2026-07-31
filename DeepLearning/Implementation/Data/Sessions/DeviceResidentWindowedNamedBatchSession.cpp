@@ -1,4 +1,5 @@
 #include "DeepLearning/Implementation/Data/Sessions/DeviceResidentWindowedNamedBatchSession.h"
+#include "DeepLearning/Implementation/Data/BatchCardinality.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
 
@@ -411,24 +412,34 @@ DeviceResidentWindowedNamedBatchSession::runtimeFor(ExampleType exampleType) con
 
 void DeviceResidentWindowedNamedBatchSession::fillRowIndexTensor(
     SplitRuntime &runtime,
-    DeviceResidentWindowedSelectionSlot &selectionSlot) {
+    DeviceResidentWindowedSelectionSlot &selectionSlot,
+    uint32_t validExampleCount) {
     THOR_THROW_IF_FALSE(runtime.numExamples() > 0);
     THOR_THROW_IF_FALSE(selectionSlot.state != nullptr);
+    THOR_THROW_IF_FALSE(validExampleCount >= 1);
+    THOR_THROW_IF_FALSE(validExampleCount <= batchSize);
     uint64_t *rowIndices = selectionSlot.state->rowIndicesHost.getMemPtr<uint64_t>();
-    for (uint64_t slot = 0; slot < batchSize; ++slot) {
+    for (uint64_t slot = 0; slot < validExampleCount; ++slot) {
         uint64_t logicalPosition = 0;
         if (runtime.randomized) {
             THOR_THROW_IF_FALSE(runtime.randomizer != nullptr);
             logicalPosition = runtime.randomizer->getRandomNumber();
         } else {
             logicalPosition = runtime.nextLogicalPosition;
-            runtime.nextLogicalPosition =
-                (runtime.nextLogicalPosition + 1) % runtime.numExamples();
+            runtime.nextLogicalPosition += 1;
+            if (runtime.nextLogicalPosition == runtime.numExamples()) {
+                runtime.nextLogicalPosition = 0;
+            }
         }
         THOR_THROW_IF_FALSE(logicalPosition < runtime.numExamples());
         const uint64_t sourceRow = runtime.sourceIndices->at(logicalPosition);
         THOR_THROW_IF_FALSE(sourceRow < datasetDescription.numExamples);
         rowIndices[slot] = sourceRow;
+    }
+
+    const uint64_t paddingSourceRow = rowIndices[validExampleCount - 1];
+    for (uint64_t slot = validExampleCount; slot < batchSize; ++slot) {
+        rowIndices[slot] = paddingSourceRow;
     }
 }
 
@@ -505,9 +516,13 @@ Batch DeviceResidentWindowedNamedBatchSession::acquireBatch(
     }
 
     batchNum = runtime.nextBatchNum;
+    const uint32_t validExampleCount = ThorImplementation::validExamplesForBatch(
+        batchNum,
+        runtime.numExamples(),
+        batchSize);
     runtime.nextBatchNum =
         (runtime.nextBatchNum + 1) % runtime.batchesPerEpoch;
-    fillRowIndexTensor(runtime, *selectionSlot);
+    fillRowIndexTensor(runtime, *selectionSlot, validExampleCount);
     lock.unlock();
 
     bool selectionManagedByOwner = false;
@@ -563,6 +578,10 @@ Batch DeviceResidentWindowedNamedBatchSession::acquireBatch(
                 Thor::DeviceBatchReference(
                     std::move(materializer),
                     static_cast<uint32_t>(batchSize)));
+        }
+
+        if (validExampleCount < batchSize) {
+            batch.setValidExampleCount(validExampleCount);
         }
 
         std::shared_ptr<DeviceResidentWindowedNamedBatchSession> sharedSelf =
@@ -668,7 +687,7 @@ void DeviceResidentWindowedNamedBatchSession::validateReturnedBatch(
         const Thor::DeviceBatchReference &reference =
             batch.getDeviceBatchReference(spec.name);
         if (!reference.isInitialized() ||
-            reference.getBatchSize() != batchSize ||
+            reference.getBatchCapacity() != batchSize ||
             reference.getOutputPlacement() != windowedDataset->getPlacement() ||
             reference.getOutputDescriptor() != expected) {
             throw std::runtime_error(

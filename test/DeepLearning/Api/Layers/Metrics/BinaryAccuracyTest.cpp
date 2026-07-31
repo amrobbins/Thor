@@ -50,6 +50,7 @@ TEST(BinaryAccuracy, Builds) {
         BinaryAccuracy binaryAccuracy = binaryAccuracyBuilder.build();
 
         ASSERT_TRUE(binaryAccuracy.isInitialized());
+        ASSERT_EQ(binaryAccuracy.getAggregation(), MetricAggregation::MEAN_BY_EXAMPLE);
 
         std::optional<Tensor> actualInput = binaryAccuracy.getFeatureInput();
         ASSERT_TRUE(actualInput.has_value());
@@ -168,6 +169,7 @@ TEST(Activations, BinaryAccuracySerializeDeserialize) {
     ASSERT_EQ(binaryAccuracyJ["factory"], "metric");
     ASSERT_EQ(binaryAccuracyJ["version"], "1.0.0");
     ASSERT_EQ(binaryAccuracyJ["layer_type"], "binary_accuracy");
+    ASSERT_EQ(binaryAccuracyJ["aggregation"].get<MetricAggregation>(), MetricAggregation::MEAN_BY_EXAMPLE);
 
     // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
     Layer *layer = &binaryAccuracy;

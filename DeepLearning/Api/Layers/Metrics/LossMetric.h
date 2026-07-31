@@ -2,6 +2,7 @@
 
 #include "DeepLearning/Implementation/ThorError.h"
 
+#include "DeepLearning/Api/BatchValidity.h"
 #include "DeepLearning/Api/Layers/Metrics/Metric.h"
 #include "DeepLearning/Implementation/Layers/Loss/LossExpression.h"
 #include "DeepLearning/Implementation/Layers/Metrics/CustomMetric.h"
@@ -24,6 +25,7 @@ class LossMetric : public Metric {
 
     std::shared_ptr<Layer> clone() const override { return std::make_shared<LossMetric>(*this); }
     std::string getLayerType() const override { return "LossMetric"; }
+    MetricAggregation getAggregation() const override { return MetricAggregation::MEAN_BY_EXAMPLE; }
 
     Formula getFormula() const { return formula; }
     float getEpsilon() const { return epsilon; }
@@ -59,12 +61,17 @@ class LossMetric : public Metric {
         options.labelsName = effectiveLabelsName;
         options.lossName = effectiveMetricName;
 
+        const std::string batchValidityMaskName =
+            Thor::BATCH_VALIDITY_MASK_NAME;
         return std::make_shared<ThorImplementation::CustomMetric>(
-            ThorImplementation::LossExpression::makeBatchLossMetricExpression(std::move(options)),
+            ThorImplementation::LossExpression::makeBatchLossMetricExpression(
+                std::move(options), batchValidityMaskName),
             effectivePredictionsName,
             effectiveLabelsName,
             effectiveMetricName,
-            displayName);
+            displayName,
+            Thor::MetricAggregation::MEAN_BY_EXAMPLE,
+            batchValidityMaskName);
     }
 
    private:

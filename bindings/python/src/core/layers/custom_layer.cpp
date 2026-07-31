@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
+#include "DeepLearning/Api/BatchValidity.h"
 #include "DeepLearning/Api/Layers/Learning/CustomLayer.h"
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
 #include "DeepLearning/Api/Network/Network.h"
@@ -689,7 +690,9 @@ void bind_custom_layer(nb::module_& layers) {
            nb::object parametersObj,
            std::shared_ptr<Optimizer> optimizer,
            std::shared_ptr<Activation> activation,
-           nb::object outputSpecsObj) {
+           nb::object outputSpecsObj,
+           bool usesBatchValidity,
+           bool requiresFullBatch) {
             OrderedApiTensorMap inputs = normalizeInputs(inputsObj);
             CustomLayer* self = nb::inst_ptr<CustomLayer>(pySelf.ptr());
 
@@ -719,11 +722,15 @@ void bind_custom_layer(nb::module_& layers) {
                 parameters = parametersFromPythonObject(parametersObj);
             }
             std::vector<std::string> paramNames = parameterNames(parameters);
+            std::vector<std::string> expressionFeatureInputNames = inputs.names;
+            if (usesBatchValidity) {
+                expressionFeatureInputNames.push_back(Thor::BATCH_VALIDITY_MASK_NAME);
+            }
 
             DynamicExpression expr = [&]() {
                 if (buildObj.is_none()) {
                     return makeDynamicExpressionFromSelf(pySelfObj.is_valid() ? nb::handle(pySelfObj) : pySelf,
-                                                         inputs.names,
+                                                         expressionFeatureInputNames,
                                                          outputNames,
                                                          paramNames,
                                                          activation);
@@ -738,14 +745,14 @@ void bind_custom_layer(nb::module_& layers) {
 
                     DynamicExpression dynamicExpr = pybind::castOrTypeError<DynamicExpression>(
                         buildObj, "CustomLayer build", "thor.physical.DynamicExpression", false);
-                    validateCustomLayerExpressionInputs(concatenateInputNames(inputs.names, paramNames),
+                    validateCustomLayerExpressionInputs(concatenateInputNames(expressionFeatureInputNames, paramNames),
                                                         toNameSet(dynamicExpr.getExpectedInputNames()));
                     validateCustomLayerForwardOutputs(outputNames, toNameSet(dynamicExpr.getExpectedOutputNames()));
                     return dynamicExpr;
                 }
 
                 return makeDynamicExpressionFromCallable(callableFromPythonObject(buildObj, "build"),
-                                                         inputs.names,
+                                                         expressionFeatureInputNames,
                                                          outputNames,
                                                          paramNames,
                                                          activation);
@@ -766,6 +773,12 @@ void bind_custom_layer(nb::module_& layers) {
             if (optimizer != nullptr) {
                 builder.optimizer(std::move(optimizer));
             }
+            if (usesBatchValidity) {
+                builder.usesBatchValidity();
+            }
+            if (requiresFullBatch) {
+                builder.requiresFullBatch();
+            }
 
             CustomLayer built = builder.build();
             new (self) CustomLayer(std::move(built));
@@ -779,6 +792,8 @@ void bind_custom_layer(nb::module_& layers) {
         "optimizer"_a.none() = nb::none(),
         "activation"_a.none() = nb::none(),
         "output_specs"_a.none() = nb::none(),
+        "uses_batch_validity"_a = false,
+        "requires_full_batch"_a = false,
         nb::keep_alive<2, 1>(),
         R"nbdoc(
 Python-facing CustomLayer.
@@ -803,6 +818,9 @@ Convenience forms:
 - inputs=<thor.Tensor> defaults to {"feature_input": tensor}
 - output_names omitted defaults to ["feature_output"]
 - activation=<thor.activations.Activation> stitches that activation onto each returned expression before compilation
+- uses_batch_validity=True declares runtime batch-validity use; Thor currently exposes it as
+  ``thor.BATCH_VALIDITY_MASK_NAME`` through ``context.input(...)``
+- requires_full_batch=True rejects partial-tail submissions for batch-coupled expressions that do not implement masked semantics
         )nbdoc");
 
     custom_layer.def("parameters", [](nb::handle) { return nb::list(); });
@@ -814,6 +832,8 @@ Convenience forms:
         },
         "context"_a);
 
+    custom_layer.def_prop_ro("uses_batch_validity", &CustomLayer::usesBatchValidity);
+    custom_layer.def_prop_ro("requires_full_batch", &CustomLayer::requiresFullBatch);
     custom_layer.def("get_input_interface", &CustomLayer::getInputInterface, "interface_index"_a = 0);
     custom_layer.def("get_output_interface", nb::overload_cast<const TensorMap&>(&CustomLayer::getOutputInterface, nb::const_), "inputs"_a);
     custom_layer.def("get_output_interface_by_index", &CustomLayer::getOutputInterfaceByIndex, "interface_index"_a = 0);

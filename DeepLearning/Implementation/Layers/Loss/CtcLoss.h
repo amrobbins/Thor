@@ -56,7 +56,7 @@ class CtcLoss : public Loss {
 
     void infer(std::optional<Tensor> probabilities, std::optional<Tensor> loss, Stream stream) override;
     void backProp(std::optional<Tensor> labels, std::optional<Tensor> probabilities, std::optional<Tensor> lossGradient, Stream stream) override;
-    void forward(std::optional<Tensor> inputTensor, bool validationPass, uint32_t batchSize = 0) override;
+    void forward(std::optional<Tensor> inputTensor, bool validationPass, uint32_t validExampleCount = 0) override;
     void ensureNoDeviceCrossing() override;
     std::string getType() override;
     std::vector<Event> getSynchronizeEvents() override;

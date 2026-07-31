@@ -1008,12 +1008,17 @@ StampedCubReduction::StampedCubReduction(CubReductionOp op,
     requireTempStorage(this->temp_storage, input.getPlacement(), temp_storage_bytes);
 }
 
-void StampedCubReduction::run() { runOn(stream); }
+void StampedCubReduction::run() { runOn(stream, output_scale); }
 
-void StampedCubReduction::runOn(Stream& run_stream) const {
+void StampedCubReduction::run(float runtime_output_scale) { runOn(stream, runtime_output_scale); }
+
+void StampedCubReduction::runOn(Stream& run_stream) const { runOn(run_stream, output_scale); }
+
+void StampedCubReduction::runOn(Stream& run_stream, float runtime_output_scale) const {
+    THOR_THROW_IF_FALSE(std::isfinite(runtime_output_scale));
     requireCompatibleStream(input, run_stream);
     ScopedGpu scoped_gpu(run_stream.getGpuNum());
-    launchReduction(op, temp_storage, temp_storage_bytes, input, output, geometry, output_scale, run_stream);
+    launchReduction(op, temp_storage, temp_storage_bytes, input, output, geometry, runtime_output_scale, run_stream);
 }
 
 }  // namespace ThorImplementation

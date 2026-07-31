@@ -341,7 +341,9 @@ class StampedCubArgReduction {
 class StampedCubReduction {
    public:
     void run();
+    void run(float output_scale);
     void runOn(Stream& run_stream) const;
+    void runOn(Stream& run_stream, float output_scale) const;
 
     [[nodiscard]] uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
     [[nodiscard]] Tensor getInputTensor() const { return input; }

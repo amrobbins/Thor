@@ -62,6 +62,8 @@ class TensorFanout : public MultiConnectionLayer {
                                                          std::string predictionsName,
                                                          std::string labelsName,
                                                          std::string gradientName,
+                                                         const Tensor& batchValidityMask,
+                                                         std::string batchValidityMaskName,
                                                          Loss* ownerLoss = nullptr) {
         if (isInferenceOnly())
             return false;
@@ -79,7 +81,9 @@ class TensorFanout : public MultiConnectionLayer {
                                                                                                            std::move(gradientExpression),
                                                                                                            std::move(predictionsName),
                                                                                                            std::move(labelsName),
-                                                                                                           std::move(gradientName));
+                                                                                                           std::move(gradientName),
+                                                                                                           batchValidityMask,
+                                                                                                           std::move(batchValidityMaskName));
         if (fusedCustomLossGradientRegisteredWithDrivingLayer) {
             fusedCustomLossGradientPredictions = predictions;
             fusedCustomLossGradientOwner = ownerLoss;

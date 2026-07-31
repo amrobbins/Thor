@@ -1434,8 +1434,17 @@ TEST(IndexedNamedBatchSessionTest, RangeBackedSplitDrivesBatchesWithoutMateriali
     BatchLease secondLease = session.leaseBatch(ExampleType::TRAIN, batchNum);
     EXPECT_EQ(batchNum, 1u);
     expectTensorValues(secondLease.get().getTensor("seasonality_inputs"),
-                       {80.0f, 81.0f, 0.0f, 1.0f});
+                       {80.0f, 81.0f, 80.0f, 81.0f});
+    ASSERT_TRUE(secondLease.get().getValidExampleCount().has_value());
+    EXPECT_EQ(secondLease.get().getValidExampleCount().value(), 1u);
     secondLease.reset();
+
+    BatchLease nextEpochLease = session.leaseBatch(ExampleType::TRAIN, batchNum);
+    EXPECT_EQ(batchNum, 0u);
+    EXPECT_FALSE(nextEpochLease.get().getValidExampleCount().has_value());
+    expectTensorValues(nextEpochLease.get().getTensor("seasonality_inputs"),
+                       {0.0f, 1.0f, 40.0f, 41.0f});
+    nextEpochLease.reset();
 
     std::filesystem::remove_all(datasetPath);
 }
@@ -1557,7 +1566,59 @@ TEST(IndexedNamedBatchSessionTest, DeterministicRandomizedTrainOrderForFixedSeed
     std::filesystem::remove_all(datasetPath);
 }
 
-TEST(IndexedNamedBatchSessionTest, ValidateAndTestSplitsAreSequentialAndWrap) {
+TEST(IndexedNamedBatchSessionTest, RandomizedTrainConsumesEachExampleExactlyOncePerEpoch) {
+    const std::filesystem::path datasetPath =
+        makeTempDatasetPath("randomized_exact_epoch");
+    DatasetLayout layout = testLayout();
+    writeCanonicalDataset(datasetPath, layout);
+
+    TestIndexedNamedBatchSession session(
+        datasetPath,
+        layout,
+        {0, 1, 2, 3, 4},
+        {0},
+        std::nullopt,
+        2,
+        3,
+        true,
+        12345);
+
+    for (uint64_t epoch = 0; epoch < 2; ++epoch) {
+        std::set<float> validExampleStarts;
+        uint64_t validExamplesSeen = 0;
+        for (uint64_t batchIndex = 0;
+             batchIndex < session.getNumBatchesPerEpoch(ExampleType::TRAIN);
+             ++batchIndex) {
+            uint64_t batchNum = 99;
+            BatchLease lease = session.leaseBatch(ExampleType::TRAIN, batchNum);
+            EXPECT_EQ(batchNum, batchIndex);
+            const Batch& batch = lease.get();
+            const uint32_t validExampleCount =
+                batch.getValidExampleCount().value_or(
+                    static_cast<uint32_t>(session.getBatchSize()));
+            const vector<float> values = seasonalityValues(batch);
+            for (uint32_t slot = 0; slot < validExampleCount; ++slot) {
+                validExampleStarts.insert(values.at(slot * 2));
+                validExamplesSeen += 1;
+            }
+            if (batchIndex + 1 ==
+                session.getNumBatchesPerEpoch(ExampleType::TRAIN)) {
+                ASSERT_TRUE(batch.getValidExampleCount().has_value());
+                EXPECT_EQ(batch.getValidExampleCount().value(), 1u);
+                EXPECT_EQ(values.at(2), values.at(0));
+                EXPECT_EQ(values.at(3), values.at(1));
+            }
+        }
+        EXPECT_EQ(validExamplesSeen, 5u);
+        EXPECT_EQ(validExampleStarts,
+                  (std::set<float>{0.0f, 20.0f, 40.0f, 60.0f, 80.0f}));
+        EXPECT_EQ(session.getNextBatchNum(ExampleType::TRAIN), 0u);
+    }
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(IndexedNamedBatchSessionTest, ValidateAndTestSplitsUseExactTailBatches) {
     const std::filesystem::path datasetPath = makeTempDatasetPath("sequential_validate_test");
     DatasetLayout layout = testLayout();
     writeCanonicalDataset(datasetPath, layout);
@@ -1577,7 +1638,9 @@ TEST(IndexedNamedBatchSessionTest, ValidateAndTestSplitsAreSequentialAndWrap) {
 
     const Batch& validate1 = validate1Lease.get();
     EXPECT_EQ(batchNum, 1);
-    expectTensorValues(validate1.getTensor("seasonality_inputs"), {80.0f, 81.0f, 20.0f, 21.0f});
+    expectTensorValues(validate1.getTensor("seasonality_inputs"), {80.0f, 81.0f, 80.0f, 81.0f});
+    ASSERT_TRUE(validate1.getValidExampleCount().has_value());
+    EXPECT_EQ(validate1.getValidExampleCount().value(), 1u);
     validate1Lease.reset();
 
     BatchLease test0Lease = loader.leaseBatch(ExampleType::TEST, batchNum);
@@ -1593,8 +1656,43 @@ TEST(IndexedNamedBatchSessionTest, ValidateAndTestSplitsAreSequentialAndWrap) {
 
     const Batch& test1 = test1Lease.get();
     EXPECT_EQ(batchNum, 1);
-    expectTensorValues(test1.getTensor("seasonality_inputs"), {20.0f, 21.0f, 40.0f, 41.0f});
+    expectTensorValues(test1.getTensor("seasonality_inputs"), {20.0f, 21.0f, 20.0f, 21.0f});
+    ASSERT_TRUE(test1.getValidExampleCount().has_value());
+    EXPECT_EQ(test1.getValidExampleCount().value(), 1u);
     test1Lease.reset();
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(IndexedNamedBatchSessionTest, SplitSmallerThanCapacityRepeatsOnlyItsValidExample) {
+    const std::filesystem::path datasetPath =
+        makeTempDatasetPath("split_smaller_than_capacity");
+    DatasetLayout layout = testLayout();
+    writeCanonicalDataset(datasetPath, layout);
+
+    TestIndexedNamedBatchSession session(
+        datasetPath,
+        layout,
+        {3},
+        {0},
+        std::nullopt,
+        4,
+        1,
+        false,
+        std::nullopt);
+
+    for (uint64_t epoch = 0; epoch < 2; ++epoch) {
+        uint64_t batchNum = 99;
+        BatchLease lease = session.leaseBatch(ExampleType::TRAIN, batchNum);
+        EXPECT_EQ(batchNum, 0u);
+        ASSERT_TRUE(lease.get().getValidExampleCount().has_value());
+        EXPECT_EQ(lease.get().getValidExampleCount().value(), 1u);
+        expectTensorValues(
+            lease.get().getTensor("seasonality_inputs"),
+            {60.0f, 61.0f, 60.0f, 61.0f,
+             60.0f, 61.0f, 60.0f, 61.0f});
+        EXPECT_EQ(session.getNextBatchNum(ExampleType::TRAIN), 0u);
+    }
 
     std::filesystem::remove_all(datasetPath);
 }
@@ -3176,6 +3274,29 @@ TEST(DeviceResidentWindowedNamedBatchSessionTest, ReturnsCompactDeviceWindowRefe
     sourceBatchLease.reset();
     deviceBatchLease.reset();
 
+    sourceBatchLease = sourceSession.leaseBatch(ExampleType::TRAIN, sourceBatchNum);
+    deviceBatchLease = deviceSession.leaseBatch(ExampleType::TRAIN, deviceBatchNum);
+    const Batch& sourceTail = sourceBatchLease.get();
+    const Batch& deviceTail = deviceBatchLease.get();
+    EXPECT_EQ(sourceBatchNum, 1u);
+    EXPECT_EQ(deviceBatchNum, 1u);
+    ASSERT_TRUE(sourceTail.getValidExampleCount().has_value());
+    ASSERT_TRUE(deviceTail.getValidExampleCount().has_value());
+    EXPECT_EQ(sourceTail.getValidExampleCount().value(), 1u);
+    EXPECT_EQ(deviceTail.getValidExampleCount().value(), 1u);
+    EXPECT_EQ(tensorValuesOnHost(deviceTail.getTensor("dense")),
+              tensorValues(sourceTail.getTensor("dense")));
+    Tensor materializedTailHistory = materializeDeviceBatchReference(
+        deviceTail.getDeviceBatchReference("history"));
+    Tensor materializedTailMask = materializeDeviceBatchReference(
+        deviceTail.getDeviceBatchReference("history_mask"));
+    EXPECT_EQ(tensorValuesOnHost(materializedTailHistory),
+              tensorValues(sourceTail.getTensor("history")));
+    EXPECT_EQ(uint8TensorValuesOnHost(materializedTailMask),
+              uint8TensorValuesOnHost(sourceTail.getTensor("history_mask")));
+    sourceBatchLease.reset();
+    deviceBatchLease.reset();
+
     std::filesystem::remove_all(datasetPath);
 }
 
@@ -3692,24 +3813,27 @@ TEST(DeviceResidentWindowedNamedBatchSessionTest, SelectionRingKeepsQueuedRefere
 
     EXPECT_EQ(firstBatchNum, 0u);
     EXPECT_EQ(secondBatchNum, 1u);
+    EXPECT_FALSE(firstLease.get().getValidExampleCount().has_value());
+    ASSERT_TRUE(secondLease.get().getValidExampleCount().has_value());
+    EXPECT_EQ(secondLease.get().getValidExampleCount().value(), 1u);
     EXPECT_EQ(
         tensorValuesOnHost(firstLease.get().getTensor("dense")),
         (vector<float>{5.0f, 6.0f, 1.0f, 2.0f}));
     EXPECT_EQ(
         tensorValuesOnHost(secondLease.get().getTensor("dense")),
-        (vector<float>{3.0f, 4.0f, 5.0f, 6.0f}));
+        (vector<float>{3.0f, 4.0f, 3.0f, 4.0f}));
     EXPECT_EQ(
         tensorValuesOnHost(firstHistory),
         (vector<float>{12.0f, 13.0f, 0.0f, 10.0f, 11.0f, 12.0f}));
     EXPECT_EQ(
         tensorValuesOnHost(secondHistory),
-        (vector<float>{0.0f, 0.0f, 10.0f, 12.0f, 13.0f, 0.0f}));
+        (vector<float>{0.0f, 0.0f, 10.0f, 0.0f, 0.0f, 10.0f}));
     EXPECT_EQ(
         uint8TensorValuesOnHost(firstMask),
         (vector<uint8_t>{1, 1, 0, 1, 1, 1}));
     EXPECT_EQ(
         uint8TensorValuesOnHost(secondMask),
-        (vector<uint8_t>{0, 0, 1, 1, 1, 0}));
+        (vector<uint8_t>{0, 0, 1, 0, 0, 1}));
 
     firstLease.reset();
     secondLease.reset();
@@ -3719,15 +3843,16 @@ TEST(DeviceResidentWindowedNamedBatchSessionTest, SelectionRingKeepsQueuedRefere
     Tensor reusedHistory = materializeDeviceBatchReference(
         reusedLease.get().getDeviceBatchReference("history"));
     EXPECT_EQ(reusedBatchNum, 0u);
+    EXPECT_FALSE(reusedLease.get().getValidExampleCount().has_value());
     EXPECT_EQ(
         tensorValuesOnHost(reusedHistory),
-        (vector<float>{10.0f, 11.0f, 12.0f, 0.0f, 0.0f, 10.0f}));
+        (vector<float>{12.0f, 13.0f, 0.0f, 10.0f, 11.0f, 12.0f}));
     reusedLease.reset();
 
     std::filesystem::remove_all(datasetPath);
 }
 
-TEST(DeviceResidentNamedBatchSessionTest, SequentialBatchesGatherCanonicalRowsAndWrap) {
+TEST(DeviceResidentNamedBatchSessionTest, SequentialBatchesGatherExactEpochs) {
     requireCudaDevice("CUDA device is required for device-resident named loader tests.");
     ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "pread_buffered");
 
@@ -3778,7 +3903,9 @@ TEST(DeviceResidentNamedBatchSessionTest, SequentialBatchesGatherCanonicalRowsAn
     EXPECT_EQ(batchNum, 1);
     expectTensorValuesOnHost(
         batch1.getTensor("seasonality_inputs"),
-        {0.0f, 1.0f, 80.0f, 81.0f});
+        {0.0f, 1.0f, 0.0f, 1.0f});
+    ASSERT_TRUE(batch1.getValidExampleCount().has_value());
+    EXPECT_EQ(batch1.getValidExampleCount().value(), 1u);
     EXPECT_EQ(deviceSession.getNextBatchNum(ExampleType::TRAIN), 0);
     batch1Lease.reset();
 
@@ -3789,7 +3916,8 @@ TEST(DeviceResidentNamedBatchSessionTest, SequentialBatchesGatherCanonicalRowsAn
     EXPECT_EQ(batchNum, 0);
     expectTensorValuesOnHost(
         batch2.getTensor("seasonality_inputs"),
-        {40.0f, 41.0f, 0.0f, 1.0f});
+        {80.0f, 81.0f, 40.0f, 41.0f});
+    EXPECT_FALSE(batch2.getValidExampleCount().has_value());
     batch2Lease.reset();
 
     DeviceResidentNamedBatchSessionStats stats =
@@ -3861,7 +3989,9 @@ TEST(DeviceResidentNamedBatchSessionTest, ValidateAndTestManifestsAreSequentialA
     EXPECT_EQ(batchNum, 1);
     expectTensorValuesOnHost(
         validateBatch1.getTensor("seasonality_inputs"),
-        {80.0f, 81.0f, 20.0f, 21.0f});
+        {80.0f, 81.0f, 80.0f, 81.0f});
+    ASSERT_TRUE(validateBatch1.getValidExampleCount().has_value());
+    EXPECT_EQ(validateBatch1.getValidExampleCount().value(), 1u);
     validateBatch1Lease.reset();
 
     std::filesystem::remove_all(datasetPath);
@@ -3906,6 +4036,8 @@ TEST(DeviceResidentNamedBatchSessionTest, RandomizedTrainOrderMatchesSourceSessi
 
         const Batch& deviceBatch = deviceBatchLease.get();
         EXPECT_EQ(deviceBatchNum, sourceBatchNum);
+        EXPECT_EQ(deviceBatch.getValidExampleCount(),
+                  sourceBatch.getValidExampleCount());
         EXPECT_EQ(
             tensorValuesOnHost(deviceBatch.getTensor("seasonality_inputs")),
             tensorValues(sourceBatch.getTensor("seasonality_inputs")))

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Api/Layers/Layer.h"
+#include "DeepLearning/Api/Layers/Metrics/MetricAggregation.h"
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
 #include "DeepLearning/Api/Layers/Metrics/Metric.h"
@@ -89,6 +90,7 @@ struct NetworkMetricReference {
     // used by composed evaluators; the fields above identify semantic remap points.
     std::vector<std::string> requiredInputNames{};
     std::string metricLayerType{};
+    MetricAggregation aggregation = MetricAggregation::MEAN_BY_EXAMPLE;
 };
 
 class ApiTensorRemap {

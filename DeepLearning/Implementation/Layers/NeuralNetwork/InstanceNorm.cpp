@@ -300,35 +300,53 @@ void InstanceNorm::computeFeatureOut(uint32_t connectionNumber) {
 
 optional<Event> InstanceNorm::computeErrorOutAccumulateWeightsGradienFused(uint32_t connectionNumber,
                                                                            bool clearWeightsGradientFirstIfFused) {
-    if (!errorInputs[connectionNumber].has_value())
+    if (!errorInputs[connectionNumber].has_value() || isInferenceOnly())
         return nullopt;
-    if (isInferenceOnly())
-        return nullopt;
+
+    THOR_THROW_IF_FALSE(featureInputs[connectionNumber].has_value());
+    THOR_THROW_IF_FALSE(connectionNumber < scratchDScale.size());
+    THOR_THROW_IF_FALSE(connectionNumber < scratchDBias.size());
 
     auto weightsParameter = getParameter("weights");
     auto biasesParameter = getParameter("biases");
-    THOR_THROW_IF_FALSE(weightsParameter->hasOptimizer());
-    THOR_THROW_IF_FALSE(biasesParameter->hasOptimizer());
+    const bool needInputGradient = errorOutputs.size() > connectionNumber && errorOutputs[connectionNumber].has_value();
+    const bool needWeightsGradient = weightsParameter->isTrainingEnabled();
+    const bool needBiasesGradient = biasesParameter->isTrainingEnabled();
+    if (!needInputGradient && !needWeightsGradient && !needBiasesGradient)
+        return nullopt;
 
-    shared_ptr<Optimizer> weightsOptimizer = weightsParameter->getOptimizer();
-    shared_ptr<Optimizer> biasesOptimizer = biasesParameter->getOptimizer();
-    THOR_THROW_IF_FALSE(weightsOptimizer != nullptr);
-    THOR_THROW_IF_FALSE(biasesOptimizer != nullptr);
-    THOR_THROW_IF_FALSE(weightsOptimizer->getWeightsGradient().has_value());
-    THOR_THROW_IF_FALSE(biasesOptimizer->getWeightsGradient().has_value());
-
-    optional<Tensor> errorOut = nullopt;
-    if (errorOutputs.size() > connectionNumber && errorOutputs[connectionNumber].has_value()) {
-        errorOut = errorOutputs[connectionNumber];
-    } else {
-        errorOut = scratchErrorOutput;
+    optional<Tensor> weightsGradient = nullopt;
+    optional<Tensor> biasesGradient = nullopt;
+    if (needWeightsGradient) {
+        THOR_THROW_IF_FALSE(weightsParameter->hasOptimizer());
+        shared_ptr<Optimizer> optimizer = weightsParameter->getOptimizer();
+        THOR_THROW_IF_FALSE(optimizer != nullptr);
+        weightsGradient = optimizer->getWeightsGradient();
+        THOR_THROW_IF_FALSE(weightsGradient.has_value());
     }
-    THOR_THROW_IF_FALSE(errorOut.has_value());
-    THOR_THROW_IF_FALSE(gradientUpdateStream.has_value());
-    THOR_THROW_IF_FALSE(featureInputs[connectionNumber].has_value());
+    if (needBiasesGradient) {
+        THOR_THROW_IF_FALSE(biasesParameter->hasOptimizer());
+        shared_ptr<Optimizer> optimizer = biasesParameter->getOptimizer();
+        THOR_THROW_IF_FALSE(optimizer != nullptr);
+        biasesGradient = optimizer->getWeightsGradient();
+        THOR_THROW_IF_FALSE(biasesGradient.has_value());
+    }
 
-    Tensor dscaleOutput = clearWeightsGradientFirstIfFused ? weightsOptimizer->getWeightsGradient().value() : scratchDScale[connectionNumber];
-    Tensor dbiasOutput = clearWeightsGradientFirstIfFused ? biasesOptimizer->getWeightsGradient().value() : scratchDBias[connectionNumber];
+    optional<Tensor> errorOut = needInputGradient ? errorOutputs[connectionNumber] : scratchErrorOutput;
+    THOR_THROW_IF_FALSE(errorOut.has_value());
+
+    Tensor dscaleOutput = needWeightsGradient && clearWeightsGradientFirstIfFused
+                              ? weightsGradient.value()
+                              : scratchDScale[connectionNumber];
+    Tensor dbiasOutput = needBiasesGradient && clearWeightsGradientFirstIfFused
+                             ? biasesGradient.value()
+                             : scratchDBias[connectionNumber];
+
+    Stream executionStream = streams[connectionNumber];
+    if (needWeightsGradient || needBiasesGradient) {
+        THOR_THROW_IF_FALSE(gradientUpdateStream.has_value());
+        executionStream = gradientUpdateStream.value();
+    }
 
     const Tensor& input = featureInputs[connectionNumber].value();
     CudnnInstanceNormDescriptor descriptor;
@@ -352,20 +370,22 @@ optional<Event> InstanceNorm::computeErrorOutAccumulateWeightsGradienFused(uint3
     args.dscale = dscaleOutput;
     args.dbias = dbiasOutput;
 
-    CudnnInstanceNorm::instance().backward(descriptor, args, gradientUpdateStream.value());
+    CudnnInstanceNorm::instance().backward(descriptor, args, executionStream);
 
-    if (!clearWeightsGradientFirstIfFused) {
-        launchAccumulateBatchNormGradientFp32(weightsOptimizer->getWeightsGradient().value().getMemPtr<float>(),
+    if (needWeightsGradient && !clearWeightsGradientFirstIfFused) {
+        launchAccumulateBatchNormGradientFp32(weightsGradient->getMemPtr<float>(),
                                              scratchDScale[connectionNumber].getMemPtr<float>(),
                                              channelCount,
-                                             gradientUpdateStream.value());
-        launchAccumulateBatchNormGradientFp32(biasesOptimizer->getWeightsGradient().value().getMemPtr<float>(),
+                                             executionStream);
+    }
+    if (needBiasesGradient && !clearWeightsGradientFirstIfFused) {
+        launchAccumulateBatchNormGradientFp32(biasesGradient->getMemPtr<float>(),
                                              scratchDBias[connectionNumber].getMemPtr<float>(),
                                              channelCount,
-                                             gradientUpdateStream.value());
+                                             executionStream);
     }
 
-    return gradientUpdateStream.value().putEvent();
+    return executionStream.putEvent();
 }
 
 void InstanceNorm::accumulateWeightsGradient(uint32_t connectionNumber, bool clearGradientFirst) {

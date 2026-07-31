@@ -5,7 +5,9 @@
 #include "DeepLearning/Implementation/Layers/Utility/TensorFanout.h"
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Expression/FusedEquation.h"
+#include "Utilities/TensorOperations/Masking/BatchValidity.h"
 
+#include <algorithm>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -39,6 +41,7 @@ void validateName(const std::string& name, const std::string& what) {
     if (name.length() >= 2 && name[0] == '_' && name[1] == '_')
         throw std::invalid_argument("CustomLoss " + what + " names cannot start with __ that is reserved. Name " + name + " is illegal.");
 }
+
 
 DataType findOutputDType(const std::shared_ptr<CompiledOutputs>& compiledOutputs, const std::string& outputName) {
     std::optional<DataType> outputDType;
@@ -76,6 +79,59 @@ DataType findOutputDType(const std::shared_ptr<CompiledOutputs>& compiledOutputs
     return outputDType.value();
 }
 
+DynamicExpression applyBatchValidityMaskToGradient(const DynamicExpression& expression,
+                                                   const std::string& gradientName,
+                                                   DataType gradientDataType,
+                                                   bool expressionUsesBatchValidityMask) {
+    std::vector<std::string> expectedInputs = expression.getExpectedInputNames();
+    if (!expectedInputs.empty() && !expressionUsesBatchValidityMask)
+        expectedInputs.push_back(Thor::BATCH_VALIDITY_MASK_NAME);
+
+    return DynamicExpression(
+        std::move(expectedInputs),
+        expression.getExpectedOutputNames(),
+        [expression, gradientName, gradientDataType, expressionUsesBatchValidityMask](const DynamicExpression::TensorMap& inputs,
+                                                     const DynamicExpression::TensorMap& outputs,
+                                                     Stream& stream) {
+            auto maskIt = inputs.find(Thor::BATCH_VALIDITY_MASK_NAME);
+            if (maskIt == inputs.end())
+                throw std::invalid_argument("CustomLoss masked gradient requires a batch validity mask input.");
+
+            DynamicExpression::TensorMap expressionInputs = inputs;
+            if (!expressionUsesBatchValidityMask)
+                expressionInputs.erase(Thor::BATCH_VALIDITY_MASK_NAME);
+            DynamicExpressionBuild build = expression.build(expressionInputs, {}, stream);
+            const PhysicalOutputs& rawOutputs = build.equation->physicalOutputs();
+            if (rawOutputs.isConditional() || !rawOutputs.expr) {
+                throw std::runtime_error("CustomLoss cannot apply batch validity masking to conditional or empty gradient outputs.");
+            }
+
+            std::optional<Expression> rawGradient;
+            for (const NamedOutput& output : rawOutputs.outputs) {
+                if (output.name == gradientName) {
+                    rawGradient = Expression::fromPhysicalNode(rawOutputs.expr, output.node_idx);
+                    break;
+                }
+            }
+            if (!rawGradient.has_value())
+                throw std::runtime_error("CustomLoss batch validity masking could not find gradient output '" + gradientName + "'.");
+
+            Expression mask = Expression::input(Thor::BATCH_VALIDITY_MASK_NAME, DataType::FP32, DataType::FP32);
+            Expression maskedGradient = (rawGradient.value() * mask).withOutputDType(gradientDataType);
+            PhysicalOutputs maskedOutputs = Expression::outputs({{gradientName, maskedGradient}}).physicalOutputs();
+
+            build.stamp_inputs.emplace(Thor::BATCH_VALIDITY_MASK_NAME, maskIt->second);
+            return DynamicExpressionBuild{
+                .equation = std::make_shared<FusedEquation>(FusedEquation::compile(maskedOutputs, stream.getGpuNum())),
+                .stamp_inputs = std::move(build.stamp_inputs),
+                .tensor_scalar_inputs = std::move(build.tensor_scalar_inputs),
+                .preallocated_outputs = outputs,
+                .requested_output_shapes = std::move(build.requested_output_shapes),
+                .pre_forward_hook = std::move(build.pre_forward_hook),
+            };
+        });
+}
+
 }  // namespace
 
 CustomLoss::CustomLoss(DynamicExpression lossExpression,
@@ -85,7 +141,9 @@ CustomLoss::CustomLoss(DynamicExpression lossExpression,
                        std::string lossName,
                        std::string gradientName,
                        DataType lossDataType,
-                       std::optional<float> lossWeight)
+                       std::optional<float> lossWeight,
+                       bool usesBatchValidity,
+                       bool requiresFullBatch)
     : Loss(lossDataType),
       lossExpression(std::move(lossExpression)),
       gradientExpression(std::move(gradientExpression)),
@@ -93,7 +151,11 @@ CustomLoss::CustomLoss(DynamicExpression lossExpression,
       labelsName(std::move(labelsName)),
       lossName(std::move(lossName)),
       gradientName(std::move(gradientName)),
-      lossWeight(normalizeLossWeight(lossWeight)) {
+      lossWeight(normalizeLossWeight(lossWeight)),
+      batchValidityMaskEnabled(usesBatchValidity),
+      fullBatchRequired(requiresFullBatch) {
+    if (batchValidityMaskEnabled && fullBatchRequired)
+        throw std::invalid_argument("CustomLoss cannot both use batch validity and require a full batch.");
     validateName(this->predictionsName, "predictions input");
     validateName(this->labelsName, "labels input");
     validateName(this->lossName, "loss output");
@@ -109,6 +171,10 @@ CustomLoss::TensorMap CustomLoss::buildLossInputs() const {
     TensorMap inputs;
     inputs.emplace(predictionsName, featureInput.value());
     inputs.emplace(labelsName, labelsInput.value());
+    if (batchValidityMaskEnabled) {
+        THOR_THROW_IF_FALSE(batchValidityMask.isInitialized());
+        inputs.emplace(Thor::BATCH_VALIDITY_MASK_NAME, batchValidityMask);
+    }
     return inputs;
 }
 
@@ -190,6 +256,15 @@ DynamicExpression CustomLoss::weightedGradientExpression() const {
                                               "CustomLoss gradient");
 }
 
+DynamicExpression CustomLoss::maskedWeightedGradientExpression() const {
+    THOR_THROW_IF_FALSE(featureInput.has_value());
+    return applyBatchValidityMaskToGradient(
+        weightedGradientExpression(),
+        gradientName,
+        featureInput.value().getDescriptor().getDataType(),
+        batchValidityMaskEnabled);
+}
+
 void CustomLoss::tryFuseGradientIntoDrivingLayer() {
     if (gradientFusedIntoDrivingLayer || isInferenceOnly()) {
         return;
@@ -202,10 +277,12 @@ void CustomLoss::tryFuseGradientIntoDrivingLayer() {
     if (customLayer != nullptr) {
         gradientFusedIntoDrivingLayer = customLayer->registerFusedCustomLossGradient(featureInput.value(),
                                                                                      labelsInput.value(),
-                                                                                     weightedGradientExpression(),
+                                                                                     maskedWeightedGradientExpression(),
                                                                                      predictionsName,
                                                                                      labelsName,
-                                                                                     gradientName);
+                                                                                     gradientName,
+                                                                                     batchValidityMask,
+                                                                                     Thor::BATCH_VALIDITY_MASK_NAME);
         return;
     }
 
@@ -217,10 +294,12 @@ void CustomLoss::tryFuseGradientIntoDrivingLayer() {
     if (tensorFanout != nullptr) {
         gradientFusedIntoDrivingLayer = tensorFanout->registerFusedCustomLossGradientWithDrivingLayer(featureInput.value(),
                                                                                                       labelsInput.value(),
-                                                                                                      weightedGradientExpression(),
+                                                                                                      maskedWeightedGradientExpression(),
                                                                                                       predictionsName,
                                                                                                       labelsName,
                                                                                                       gradientName,
+                                                                                                      batchValidityMask,
+                                                                                                      Thor::BATCH_VALIDITY_MASK_NAME,
                                                                                                       this);
     }
 }
@@ -236,6 +315,11 @@ std::optional<Tensor> CustomLoss::connectToPredictionsInputLayer(Layer* predicti
                                                                  Stream stream,
                                                                  bool backPropagateError) {
     std::optional<Tensor> error = Loss::connectToPredictionsInputLayer(predictionsInputLayer, featureInput, stream, backPropagateError);
+    THOR_THROW_IF_FALSE(this->featureInput.has_value());
+    std::vector<uint64_t> maskDimensions = this->featureInput.value().getDimensions();
+    for (size_t axis = 1; axis < maskDimensions.size(); ++axis)
+        maskDimensions[axis] = 1;
+    batchValidityMask = Tensor(this->featureInput.value().getPlacement(), TensorDescriptor(DataType::FP32, maskDimensions));
     tryFuseGradientIntoDrivingLayer();
     return error;
 }
@@ -261,6 +345,19 @@ void CustomLoss::compileImpl() {
     THOR_THROW_IF_FALSE(featureInput.value().getPlacement() == featureOutput.value().getPlacement());
     THOR_THROW_IF_FALSE(featureInput.value().getPlacement() == labelsInput.value().getPlacement());
     THOR_THROW_IF_FALSE(featureOutput.value().getDescriptor().getDataType() == lossDataType);
+    if (gradientFusedIntoDrivingLayer || batchValidityMaskEnabled) {
+        THOR_THROW_IF_FALSE(batchValidityMask.isInitialized());
+        THOR_THROW_IF_FALSE(batchValidityMask.getDataType() == DataType::FP32);
+        THOR_THROW_IF_FALSE(batchValidityMask.getPlacement() == featureInput.value().getPlacement());
+        const std::vector<uint64_t> maskDimensions = batchValidityMask.getDimensions();
+        const std::vector<uint64_t> predictionDimensions = featureInput.value().getDimensions();
+        THOR_THROW_IF_FALSE(maskDimensions.size() == predictionDimensions.size());
+        THOR_THROW_IF_FALSE(maskDimensions.front() == predictionDimensions.front());
+        for (size_t axis = 1; axis < maskDimensions.size(); ++axis)
+            THOR_THROW_IF_FALSE(maskDimensions[axis] == 1);
+    } else {
+        batchValidityMask.dropReference();
+    }
 
     validateExpressionOutputNames(lossExpression, lossName, "loss");
     validateExpressionOutputNames(gradientExpression, gradientName, "gradient");
@@ -282,7 +379,8 @@ void CustomLoss::compileImpl() {
         THOR_THROW_IF_FALSE(errorOutput.value().getDescriptor() == featureInput.value().getDescriptor());
 
         TensorMap gradientOutputs = buildGradientOutputs();
-        gradientPrepared = std::make_shared<PreparedDynamicExpression>(weightedGradientExpression().prepare(inputs, gradientOutputs, stream));
+        gradientPrepared =
+            std::make_shared<PreparedDynamicExpression>(weightedGradientExpression().prepare(inputs, gradientOutputs, stream));
         gradientPreRunHook = gradientPrepared->preForwardHook();
         gradientStamped = std::make_shared<StampedExecutionPlan>(gradientPrepared->stamp(gradientOutputs));
     } else {
@@ -299,6 +397,7 @@ void CustomLoss::cleanup() {
     gradientStamped.reset();
     gradientPrepared.reset();
     gradientPreRunHook = nullptr;
+    batchValidityMask.dropReference();
     Loss::cleanup();
 }
 
@@ -311,6 +410,8 @@ void CustomLoss::infer(std::optional<Tensor> predictions, std::optional<Tensor> 
     THOR_THROW_IF_FALSE(lossStamped != nullptr);
 
     runStream.waitEvent(labelsStream.putEvent());
+    if (gradientFusedIntoDrivingLayer || batchValidityMaskEnabled)
+        writeBatchValidityMask(batchValidityMask, getValidExampleCount(), runStream);
     if (lossPreRunHook)
         lossPreRunHook(this->stream);
     lossStamped->run();

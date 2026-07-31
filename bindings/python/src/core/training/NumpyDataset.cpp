@@ -21,6 +21,7 @@
 #include "bindings/python/src/core/cast.h"
 #include "bindings/python/src/core/physical/NumpyDTypeMapping.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -402,12 +403,17 @@ Batch NumpyBatchSession::acquireBatch(ExampleType exampleType, uint64_t &batchNu
     }
 
     const uint64_t firstLogicalIndex = batchNum * batchSize;
+    const uint64_t validExampleCount =
+        std::min<uint64_t>(batchSize, split.indices->size() - firstLogicalIndex);
+    THOR_THROW_IF_FALSE(validExampleCount > 0);
     const bool randomized = exampleType == ExampleType::TRAIN && randomizeTrain;
-    for (uint64_t row = 0; row < batchSize; ++row) {
+    uint64_t finalValidExampleIndex = 0;
+    for (uint64_t row = 0; row < validExampleCount; ++row) {
         const uint64_t logicalIndex = randomized
             ? split.randomizer->getRandomNumber()
-            : (firstLogicalIndex + row) % split.indices->size();
+            : firstLogicalIndex + row;
         const uint64_t exampleIndex = split.indices->at(logicalIndex);
+        finalValidExampleIndex = exampleIndex;
         for (DatasetFieldId fieldId : requiredFieldIds) {
             const NumpyFieldStorage &source = dataset->storage(fieldId);
             // This is a raw byte copy into a tensor whose logical dtype is described by the dataset field.
@@ -415,6 +421,17 @@ Batch NumpyBatchSession::acquireBatch(ExampleType exampleType, uint64_t &batchNu
             uint8_t *destination = static_cast<uint8_t *>(tensors.at(fieldId).getMemPtr<void>());
             std::memcpy(destination + row * source.bytesPerExample,
                         source.data + exampleIndex * source.bytesPerExample,
+                        source.bytesPerExample);
+        }
+    }
+    for (uint64_t row = validExampleCount; row < batchSize; ++row) {
+        for (DatasetFieldId fieldId : requiredFieldIds) {
+            const NumpyFieldStorage &source = dataset->storage(fieldId);
+            uint8_t *destination =
+                static_cast<uint8_t *>(tensors.at(fieldId).getMemPtr<void>());
+            std::memcpy(destination + row * source.bytesPerExample,
+                        source.data +
+                            finalValidExampleIndex * source.bytesPerExample,
                         source.bytesPerExample);
         }
     }
@@ -428,6 +445,10 @@ Batch NumpyBatchSession::acquireBatch(ExampleType exampleType, uint64_t &batchNu
     }
 
     Batch batch;
+    if (validExampleCount < batchSize) {
+        batch.setValidExampleCount(
+            static_cast<uint32_t>(validExampleCount));
+    }
     for (auto &[fieldId, tensor] : tensors) {
         batch.insert(dataset->getSchema().getField(fieldId).name, tensor);
     }

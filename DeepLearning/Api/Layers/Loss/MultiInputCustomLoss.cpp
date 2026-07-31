@@ -23,11 +23,17 @@ MultiInputCustomLoss::MultiInputCustomLoss(ThorImplementation::DynamicExpression
                                            string lossName,
                                            optional<Tensor> lossTensor,
                                            optional<DataType> requestedLossDataType,
-                                           std::optional<float> lossWeight)
+                                           std::optional<float> lossWeight,
+                                           bool usesBatchValidity,
+                                           bool requiresFullBatch)
     : lossExpression(std::move(lossExpression)),
       gradientExpression(std::move(gradientExpression)),
       inputs(std::move(inputs)),
-      lossName(std::move(lossName)) {
+      lossName(std::move(lossName)),
+      batchValidityMaskEnabled(usesBatchValidity),
+      fullBatchRequired(requiresFullBatch) {
+    if (batchValidityMaskEnabled && fullBatchRequired)
+        throw runtime_error("MultiInputCustomLoss cannot both use batch validity and require a full batch.");
     this->lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
     validateName(this->lossName, "loss output");
     validateInputSpecs();
@@ -188,6 +194,8 @@ void MultiInputCustomLoss::validateExpressionNames(const ThorImplementation::Dyn
         set<string> expected;
         for (const InputSpec& input : inputs)
             expected.insert(input.name);
+        if (batchValidityMaskEnabled)
+            expected.insert(Thor::BATCH_VALIDITY_MASK_NAME);
         set<string> actual(expectedInputs.begin(), expectedInputs.end());
         if (actual != expected) {
             throw runtime_error("MultiInputCustomLoss " + what + " expression input name mismatch. Expected {" + joinNames(expected) +
@@ -211,6 +219,15 @@ Tensor MultiInputCustomLoss::inferExpressionTensor(const ThorImplementation::Dyn
     PhysicalTensorMap fakeInputs;
     for (const InputSpec& input : inputs)
         fakeInputs.emplace(input.name, makeFakePlacedTensor(input.tensor));
+    if (batchValidityMaskEnabled) {
+        THOR_THROW_IF_FALSE(!inputs.empty());
+        const PhysicalTensor& reference = fakeInputs.at(inputs.front().name);
+        std::vector<uint64_t> maskDimensions(reference.getDimensions().size(), 1);
+        maskDimensions.front() = reference.getDimensions().front();
+        fakeInputs.emplace(Thor::BATCH_VALIDITY_MASK_NAME,
+                           PhysicalTensor(reference.getPlacement(),
+                                          ThorImplementation::TensorDescriptor(DataType::FP32, maskDimensions)));
+    }
 
     Stream fakeStream(0, Stream::Priority::REGULAR);
     ThorImplementation::DynamicExpressionBuild build = expression.build(fakeInputs, {}, fakeStream);
@@ -302,7 +319,15 @@ shared_ptr<ThorImplementation::Layer> MultiInputCustomLoss::stamp(ThorImplementa
     }
 
     shared_ptr<ThorImplementation::MultiInputCustomLoss> customLoss = make_shared<ThorImplementation::MultiInputCustomLoss>(
-        lossExpression, gradientExpression, inputNames, gradientNames, lossName, lossDataType, lossWeight);
+        lossExpression,
+        gradientExpression,
+        inputNames,
+        gradientNames,
+        lossName,
+        lossDataType,
+        lossWeight,
+        batchValidityMaskEnabled,
+        fullBatchRequired);
     customLoss->setConstructForInferenceOnly(inferenceOnly);
     return customLoss;
 }
@@ -316,6 +341,10 @@ void MultiInputCustomLoss::buildSupportLayersAndAddToNetwork() {
         .lossDataType(lossDataType)
         .lossWeight(lossWeight.value_or(1.0f))
         .reportsRawLoss();
+    if (batchValidityMaskEnabled)
+        builder.usesBatchValidity();
+    if (fullBatchRequired)
+        builder.requiresFullBatch();
     for (const InputSpec& input : inputs) {
         if (input.gradientName.has_value())
             builder.input(input.name, input.tensor, input.gradientName.value());
@@ -339,6 +368,8 @@ uint64_t MultiInputCustomLoss::getFirstInstanceMemRequirementInBytes(uint32_t ba
             bytes += batchSize * input.tensor.getTotalSizeInBytes();
     }
     bytes += batchSize * lossTensor.getTotalSizeInBytes();
+    if (batchValidityMaskEnabled)
+        bytes += static_cast<uint64_t>(batchSize) * sizeof(float);
     return bytes;
 }
 
@@ -353,6 +384,8 @@ json MultiInputCustomLoss::architectureJson() const {
     j["loss_shape"] = LossShape::RAW;
     j["loss_data_type"] = lossDataType;
     j["loss_name"] = lossName;
+    j["uses_batch_validity"] = batchValidityMaskEnabled;
+    j["requires_full_batch"] = fullBatchRequired;
     ThorImplementation::addLossWeightToJson(j, lossWeight);
     j["loss_shaper_input_tensor"] = lossShaperInput.architectureJson();
     j["loss_tensor"] = lossTensor.architectureJson();
@@ -404,6 +437,10 @@ void MultiInputCustomLoss::deserialize(const json& j, Network* network) {
     }
 
     Tensor rawLossTensor = Tensor::deserialize(j["loss_shaper_input_tensor"]);
+    if (j.contains("uses_batch_validity_mask"))
+        throw runtime_error("MultiInputCustomLoss field uses_batch_validity_mask is no longer supported; use uses_batch_validity.");
+    const bool usesBatchValidity = j.at("uses_batch_validity").get<bool>();
+    const bool requiresFullBatch = j.at("requires_full_batch").get<bool>();
 
     ThorImplementation::ExpressionDefinition lossDefinition = ThorImplementation::ExpressionDefinition::deserialize(
         j.at("loss_expression"),
@@ -422,7 +459,9 @@ void MultiInputCustomLoss::deserialize(const json& j, Network* network) {
                                     j.value("loss_name", string("loss")),
                                     rawLossTensor,
                                     j.at("loss_data_type").get<DataType>(),
-                                    ThorImplementation::lossWeightFromJson(j));
+                                    ThorImplementation::lossWeightFromJson(j),
+                                    usesBatchValidity,
+                                    requiresFullBatch);
     customLoss.lossShape = LossShape::RAW;
     customLoss.addToNetwork(network);
 }

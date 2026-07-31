@@ -31,27 +31,29 @@ class DeviceBatchMaterializer {
 };
 
 /**
- * Small copyable batch value used in place of a materialized tensor.
+ * Small copyable fixed-capacity batch value used in place of a materialized
+ * tensor.
  *
  * NetworkInput stores this value in its normal queue slot.  The referenced
  * materializer then writes the selected field directly into NetworkInput's
- * statically connected featureOutput tensor.
+ * statically connected featureOutput tensor. Batch carries the independent
+ * valid-example count for a particular submission.
  */
 class DeviceBatchReference {
    public:
     DeviceBatchReference() = default;
 
     DeviceBatchReference(std::shared_ptr<const DeviceBatchMaterializer> materializer,
-                         uint32_t batchSize)
-        : materializer(std::move(materializer)), batchSize(batchSize) {
+                         uint32_t batchCapacity)
+        : materializer(std::move(materializer)), batchCapacity(batchCapacity) {
         THOR_THROW_IF_FALSE(this->materializer != nullptr);
-        THOR_THROW_IF_FALSE(batchSize >= 1);
+        THOR_THROW_IF_FALSE(batchCapacity >= 1);
     }
 
     [[nodiscard]] bool isInitialized() const { return materializer != nullptr; }
-    [[nodiscard]] uint32_t getBatchSize() const {
+    [[nodiscard]] uint32_t getBatchCapacity() const {
         THOR_THROW_IF_FALSE(isInitialized());
-        return batchSize;
+        return batchCapacity;
     }
     [[nodiscard]] ThorImplementation::TensorDescriptor getOutputDescriptor() const {
         THOR_THROW_IF_FALSE(isInitialized());
@@ -70,7 +72,7 @@ class DeviceBatchReference {
 
    private:
     std::shared_ptr<const DeviceBatchMaterializer> materializer;
-    uint32_t batchSize = 0;
+    uint32_t batchCapacity = 0;
 };
 
 }  // namespace Thor

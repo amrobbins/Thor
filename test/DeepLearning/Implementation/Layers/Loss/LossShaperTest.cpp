@@ -267,3 +267,78 @@ TEST(LossShaper, NumericalPerOutputRankThreePreservesNonBatchLayout) {
 
     LayerTestHelper::tearDownNetwork(layers);
 }
+
+TEST(LossShaper, PartialBatchUsesValidExampleCountForBatchMean) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    const vector<uint64_t> inputDimensions = {4, 2};
+
+    Tensor inputCpu(cpuPlacement, TensorDescriptor(DataType::FP32, inputDimensions));
+    float* input = inputCpu.getMemPtr<float>();
+    const float values[] = {1.0f, 2.0f,
+                            3.0f, 4.0f,
+                            0.0f, 0.0f,
+                            0.0f, 0.0f};
+    for (uint32_t i = 0; i < inputCpu.getTotalNumElements(); ++i)
+        input[i] = values[i];
+
+    vector<shared_ptr<Layer>> layers;
+    auto lossInput = make_shared<NetworkInput>(gpuPlacement, DataType::FP32, inputDimensions);
+    layers.push_back(lossInput);
+    auto lossShaper = make_shared<LossShaper>(LossShaper::OutputLossType::BATCH);
+    layers.push_back(lossShaper);
+    auto lossOutput = make_shared<NetworkOutput>(gpuPlacement);
+    layers.push_back(lossOutput);
+
+    LayerTestHelper::connectTwoLayers(lossInput, lossShaper);
+    LayerTestHelper::connectTwoLayers(lossShaper, lossOutput);
+    LayerTestHelper::initializeNetwork(layers);
+
+    lossInput->forward(inputCpu, false, 2);
+    Stream stream = lossInput->getStream();
+    stream.waitEvent(lossOutput->getOutputReadyEvent());
+    Tensor outputCpu(cpuPlacement, TensorDescriptor(DataType::FP32, {1, 1}));
+    outputCpu.copyFromAsync(lossOutput->getFeatureOutput().value(), stream);
+    stream.synchronize();
+
+    EXPECT_FLOAT_EQ(outputCpu.getMemPtr<float>()[0], 5.0f);
+    LayerTestHelper::tearDownNetwork(layers);
+}
+
+TEST(LossShaper, PartialBatchUsesValidExampleCountForPerOutputMean) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    const vector<uint64_t> inputDimensions = {4, 2};
+
+    Tensor inputCpu(cpuPlacement, TensorDescriptor(DataType::FP32, inputDimensions));
+    float* input = inputCpu.getMemPtr<float>();
+    const float values[] = {1.0f, 2.0f,
+                            3.0f, 4.0f,
+                            0.0f, 0.0f,
+                            0.0f, 0.0f};
+    for (uint32_t i = 0; i < inputCpu.getTotalNumElements(); ++i)
+        input[i] = values[i];
+
+    vector<shared_ptr<Layer>> layers;
+    auto lossInput = make_shared<NetworkInput>(gpuPlacement, DataType::FP32, inputDimensions);
+    layers.push_back(lossInput);
+    auto lossShaper = make_shared<LossShaper>(LossShaper::OutputLossType::PER_OUTPUT);
+    layers.push_back(lossShaper);
+    auto lossOutput = make_shared<NetworkOutput>(gpuPlacement);
+    layers.push_back(lossOutput);
+
+    LayerTestHelper::connectTwoLayers(lossInput, lossShaper);
+    LayerTestHelper::connectTwoLayers(lossShaper, lossOutput);
+    LayerTestHelper::initializeNetwork(layers);
+
+    lossInput->forward(inputCpu, false, 2);
+    Stream stream = lossInput->getStream();
+    stream.waitEvent(lossOutput->getOutputReadyEvent());
+    Tensor outputCpu(cpuPlacement, TensorDescriptor(DataType::FP32, {1, 2}));
+    outputCpu.copyFromAsync(lossOutput->getFeatureOutput().value(), stream);
+    stream.synchronize();
+
+    EXPECT_FLOAT_EQ(outputCpu.getMemPtr<float>()[0], 2.0f);
+    EXPECT_FLOAT_EQ(outputCpu.getMemPtr<float>()[1], 3.0f);
+    LayerTestHelper::tearDownNetwork(layers);
+}

@@ -6,7 +6,15 @@ from . import _bootstrap as _bootstrap
 
 _bootstrap.configure()
 
-from ._thor import DataType, Network, Tensor
+from ._thor import (
+    BATCH_VALIDITY_MASK_NAME,
+    METRIC_AGGREGATION_DENOMINATOR_NAME,
+    METRIC_AGGREGATION_NUMERATOR_NAME,
+    DataType,
+    MetricAggregation,
+    Network,
+    Tensor,
+)
 
 
 class _NetworkLoadDescriptor:
@@ -45,7 +53,11 @@ from . import runtime as runtime
 from . import training as training
 
 __all__ = [
+    "BATCH_VALIDITY_MASK_NAME",
+    "METRIC_AGGREGATION_DENOMINATOR_NAME",
+    "METRIC_AGGREGATION_NUMERATOR_NAME",
     "DataType",
+    "MetricAggregation",
     "EnsembleModel",
     "Network",
     "Tensor",

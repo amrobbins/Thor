@@ -6,6 +6,8 @@
 
 namespace nb = nanobind;
 
+#include "DeepLearning/Api/BatchValidity.h"
+#include "DeepLearning/Api/Layers/Metrics/MetricAggregation.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 
 using DataType = ThorImplementation::DataType;
@@ -31,6 +33,9 @@ NB_MODULE(_thor, thor) {
     thor.doc() = "Thor Python bindings";
 
     bind_version(thor);
+    thor.attr("BATCH_VALIDITY_MASK_NAME") = Thor::BATCH_VALIDITY_MASK_NAME;
+    thor.attr("METRIC_AGGREGATION_NUMERATOR_NAME") = Thor::METRIC_AGGREGATION_NUMERATOR_NAME;
+    thor.attr("METRIC_AGGREGATION_DENOMINATOR_NAME") = Thor::METRIC_AGGREGATION_DENOMINATOR_NAME;
 
     auto dt = nb::enum_<DataType>(thor, "DataType")
                   .value("bool", DataType::BOOLEAN)
@@ -53,6 +58,14 @@ NB_MODULE(_thor, thor) {
                   .value("fp8_e4m3", DataType::FP8_E4M3)
                   .value("fp8_e5m2", DataType::FP8_E5M2);
     dt.attr("__module__") = "thor";
+
+    auto metricAggregation = nb::enum_<Thor::MetricAggregation>(thor, "MetricAggregation")
+                                 .value("MEAN_BY_EXAMPLE", Thor::MetricAggregation::MEAN_BY_EXAMPLE)
+                                 .value("SUM", Thor::MetricAggregation::SUM)
+                                 .value("MIN", Thor::MetricAggregation::MIN)
+                                 .value("MAX", Thor::MetricAggregation::MAX)
+                                 .value("RATIO", Thor::MetricAggregation::RATIO);
+    metricAggregation.attr("__module__") = "thor";
 
     bind_tensor(thor);
     bind_parameter(thor);

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DeepLearning/Api/BatchValidity.h"
 #include "DeepLearning/Api/DataType.h"
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
 #include "DeepLearning/Api/Layers/Loss/LossShaper.h"
@@ -34,7 +35,9 @@ class MultiInputCustomLoss : public Loss {
                          std::string lossName = "loss",
                          std::optional<Tensor> lossTensor = std::nullopt,
                          std::optional<DataType> lossDataType = std::nullopt,
-                         std::optional<float> lossWeight = std::nullopt);
+                         std::optional<float> lossWeight = std::nullopt,
+                         bool usesBatchValidity = false,
+                         bool requiresFullBatch = false);
 
     ~MultiInputCustomLoss() override = default;
 
@@ -45,6 +48,8 @@ class MultiInputCustomLoss : public Loss {
     const std::string& getLossName() const { return lossName; }
     const ThorImplementation::DynamicExpression& getLossExpression() const { return lossExpression; }
     const ThorImplementation::DynamicExpression& getGradientExpression() const { return gradientExpression; }
+    bool usesBatchValidity() const { return batchValidityMaskEnabled; }
+    bool requiresFullBatch() const { return fullBatchRequired; }
 
     std::vector<Tensor> getLossInputTensors() const override;
     Tensor getPredictions() const override;
@@ -116,6 +121,8 @@ class MultiInputCustomLoss : public Loss {
     ThorImplementation::DynamicExpression gradientExpression;
     std::vector<InputSpec> inputs;
     std::string lossName = "loss";
+    bool batchValidityMaskEnabled = false;
+    bool fullBatchRequired = false;
 };
 
 class MultiInputCustomLoss::Builder {
@@ -135,7 +142,9 @@ class MultiInputCustomLoss::Builder {
                                         _lossName.value_or("loss"),
                                         _lossTensor,
                                         _lossDataType,
-                                        ThorImplementation::normalizeLossWeight(_lossWeight));
+                                        ThorImplementation::normalizeLossWeight(_lossWeight),
+                                        _usesBatchValidity,
+                                        _requiresFullBatch);
         customLoss.lossShape = lossShape;
         customLoss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         customLoss.network = _network.value();
@@ -209,6 +218,24 @@ class MultiInputCustomLoss::Builder {
         return *this;
     }
 
+    /**
+     * Declares that both expressions consume runtime batch-validity information through the current reserved FP32
+     * Thor::BATCH_VALIDITY_MASK_NAME expression input.
+     */
+    virtual MultiInputCustomLoss::Builder& usesBatchValidity() {
+        THOR_THROW_IF_FALSE(!_usesBatchValidity);
+        THOR_THROW_IF_FALSE(!_requiresFullBatch);
+        _usesBatchValidity = true;
+        return *this;
+    }
+
+    virtual MultiInputCustomLoss::Builder& requiresFullBatch() {
+        THOR_THROW_IF_FALSE(!_requiresFullBatch);
+        THOR_THROW_IF_FALSE(!_usesBatchValidity);
+        _requiresFullBatch = true;
+        return *this;
+    }
+
     virtual MultiInputCustomLoss::Builder& reportsBatchLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
         _lossShape = LossShape::BATCH;
@@ -249,6 +276,8 @@ class MultiInputCustomLoss::Builder {
     std::optional<DataType> _lossDataType;
     std::optional<float> _lossWeight;
     std::optional<LossShape> _lossShape;
+    bool _usesBatchValidity = false;
+    bool _requiresFullBatch = false;
 };
 
 }  // namespace Thor

@@ -35,7 +35,9 @@ void bind_custom_loss(nb::module_& losses) {
            const std::string& labels_name,
            const std::string& loss_name,
            const std::string& gradient_name,
-           std::optional<float> loss_weight) {
+           std::optional<float> loss_weight,
+           bool uses_batch_validity,
+           bool requires_full_batch) {
             CustomLoss::Builder builder;
             builder.network(network)
                 .lossExpression(std::move(loss_expression))
@@ -48,6 +50,10 @@ void bind_custom_loss(nb::module_& losses) {
                 .gradientName(gradient_name)
                 .lossDataType(loss_data_type)
                 .lossWeight(loss_weight.value_or(1.0f));
+            if (uses_batch_validity)
+                builder.usesBatchValidity();
+            if (requires_full_batch)
+                builder.requiresFullBatch();
 
             switch (reported_loss_shape) {
                 case Loss::LossShape::NONE:
@@ -85,12 +91,16 @@ void bind_custom_loss(nb::module_& losses) {
         "gradient_name"_a = "predictions_grad",
         nb::kw_only(),
         "loss_weight"_a.none() = nb::none(),
+        "uses_batch_validity"_a = false,
+        "requires_full_batch"_a = false,
         R"nbdoc(Construct an expression-backed CustomLoss.)nbdoc");
 
     custom_loss.def_prop_ro("predictions_name", &CustomLoss::getPredictionsName);
     custom_loss.def_prop_ro("labels_name", &CustomLoss::getLabelsName);
     custom_loss.def_prop_ro("loss_name", &CustomLoss::getLossName);
     custom_loss.def_prop_ro("gradient_name", &CustomLoss::getGradientName);
+    custom_loss.def_prop_ro("uses_batch_validity", &CustomLoss::usesBatchValidity);
+    custom_loss.def_prop_ro("requires_full_batch", &CustomLoss::requiresFullBatch);
 
     custom_loss.attr("__doc__") = R"nbdoc(
 Expression-backed custom loss.
@@ -116,5 +126,10 @@ predictions_name : str, default "predictions"
 labels_name : str, default "labels"
 loss_name : str, default "loss"
 gradient_name : str, default "predictions_grad"
+uses_batch_validity : bool, default False
+    Declares that both expressions consume runtime batch validity. Thor currently supplies it through
+    ``thor.BATCH_VALIDITY_MASK_NAME`` as an FP32 prefix mask.
+requires_full_batch : bool, default False
+    Rejects partial-tail submissions for a batch-coupled loss that does not implement masked semantics.
 )nbdoc";
 }

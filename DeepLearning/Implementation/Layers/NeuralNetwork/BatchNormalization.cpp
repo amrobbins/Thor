@@ -1,4 +1,6 @@
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.h"
+#include "Utilities/TensorOperations/DeepLearning/BatchNormalizationInferenceBackward.h"
+#include "Utilities/TensorOperations/DeepLearning/BatchNormFrontendHelpers.h"
 #include <optional>
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Expression/CudaHelpers.h"
@@ -188,7 +190,6 @@ static double computeEffectiveRunningAverageFactor(uint64_t itemsObserved, doubl
 
 const float BatchNormalization::ALPHA_NO_SCALE = 1.0f;
 const float BatchNormalization::BETA_CLEAR = 0.0f;
-const float BatchNormalization::BETA_ACCUMULATE = 1.0f;
 
 BatchNormalization::BatchNormalization(const TensorPlacement& placement,
                                        bool inferenceOnly,
@@ -318,13 +319,20 @@ void BatchNormalization::compileImpl() {
 
     resultSaveMean.clear();
     resultSaveInvVariance.clear();
+    forwardUsedTrainingStatistics.assign(featureInputs.size(), false);
+    scratchDScale.clear();
+    scratchDBias.clear();
     scratchErrorOutput.reset();
 
     resultSaveMean.reserve(featureInputs.size());
     resultSaveInvVariance.reserve(featureInputs.size());
+    scratchDScale.reserve(featureInputs.size());
+    scratchDBias.reserve(featureInputs.size());
     for (unsigned int i = 0; i < featureInputs.size(); ++i) {
         resultSaveMean.push_back(weights.clone());
         resultSaveInvVariance.push_back(weights.clone());
+        scratchDScale.push_back(weights.clone());
+        scratchDBias.push_back(biases.clone());
         if (errorInputs.size() > i && errorInputs[i].has_value() && (errorOutputs.size() <= i || !errorOutputs[i].has_value())) {
             THOR_THROW_IF_FALSE(featureInputs[i].has_value());
             // We may need a single, right sized, chunk of scratch memory for back prop pruned paths.
@@ -336,9 +344,39 @@ void BatchNormalization::compileImpl() {
     validateRunningAverageFactor(exponentialRunningAverageFactor);
 }
 
+void BatchNormalization::forward(std::optional<Tensor> featureInput,
+                                 bool isValidation,
+                                 uint32_t validExampleCount) {
+    THOR_THROW_IF_FALSE(featureInput.has_value());
+    THOR_THROW_IF_FALSE(batchSize >= 1);
+    const uint32_t resolvedValidExampleCount =
+        validExampleCount == 0 ? batchSize : validExampleCount;
+    THOR_THROW_IF_FALSE(resolvedValidExampleCount >= 1);
+    THOR_THROW_IF_FALSE(resolvedValidExampleCount <= batchSize);
+
+    uint32_t connectionNumber = 0;
+    for (; connectionNumber < featureInputs.size(); ++connectionNumber) {
+        if (featureInputs[connectionNumber].has_value() &&
+            featureInputs[connectionNumber].value() == featureInput.value()) {
+            break;
+        }
+    }
+    THOR_THROW_IF_FALSE(connectionNumber < featureInputs.size());
+    forwardUsedTrainingStatistics.at(connectionNumber) =
+        !isInferenceOnly() && !isValidation &&
+        resolvedValidExampleCount == batchSize;
+
+    TrainableLayer::forward(featureInput,
+                            isValidation,
+                            resolvedValidExampleCount);
+}
+
 void BatchNormalization::cleanup() {
     resultSaveMean.clear();
     resultSaveInvVariance.clear();
+    forwardUsedTrainingStatistics.clear();
+    scratchDScale.clear();
+    scratchDBias.clear();
     scratchErrorOutput.reset();
 
     Layer::cleanup();
@@ -359,12 +397,18 @@ void BatchNormalization::computeFeatureOut(uint32_t connectionNumber) {
     THOR_THROW_IF_FALSE(outputTensor.has_value());
     validateBatchNormIoTensors(inputTensor.value(), outputTensor.value());
 
+    THOR_THROW_IF_FALSE(connectionNumber < forwardUsedTrainingStatistics.size());
+    const bool useTrainingStatistics =
+        forwardUsedTrainingStatistics.at(connectionNumber);
+
     double effectiveRunningAverageFactor = exponentialRunningAverageFactor;
-    if (!isInferenceOnly()) {
+    if (useTrainingStatistics) {
         if (itemsObserved != UINT64_MAX) {
             itemsObserved += 1;
         }
-        effectiveRunningAverageFactor = computeEffectiveRunningAverageFactor(itemsObserved, exponentialRunningAverageFactor);
+        effectiveRunningAverageFactor = computeEffectiveRunningAverageFactor(
+            itemsObserved,
+            exponentialRunningAverageFactor);
     }
 
     const ScopedCudnnTensorDescriptor xDesc = makePackedNchwTensorDescriptor(inputTensor.value());
@@ -372,7 +416,7 @@ void BatchNormalization::computeFeatureOut(uint32_t connectionNumber) {
     const ScopedCudnnTensorDescriptor bnDesc = makeBatchNormStatsDescriptor(numChannels, cudnnTensorRank);
 
     ScopedGpu scopedGpu(stream.getGpuNum());
-    if (!isInferenceOnly()) {
+    if (useTrainingStatistics) {
         CUDNN_CHECK(cudnnBatchNormalizationForwardTraining(stream.getCudnnHandle(),
                                                            CUDNN_BATCHNORM_SPATIAL,
                                                            &ALPHA_NO_SCALE,
@@ -413,50 +457,85 @@ std::optional<Event> BatchNormalization::computeErrorOutAccumulateWeightsGradien
                                                                                       bool clearWeightsGradientFirstIfFused) {
     if (!errorInputs[connectionNumber].has_value())
         return std::nullopt;
-    if (isInferenceOnly())
-        return std::nullopt;
+
+    THOR_THROW_IF_FALSE(featureInputs[connectionNumber].has_value());
+    THOR_THROW_IF_FALSE(connectionNumber < forwardUsedTrainingStatistics.size());
+
+    const bool needInputGradient = errorOutputs.size() > connectionNumber && errorOutputs[connectionNumber].has_value();
+
+    if (!forwardUsedTrainingStatistics.at(connectionNumber)) {
+        if (!needInputGradient)
+            return std::nullopt;
+
+        validateBatchNormIoTensors(featureInputs[connectionNumber].value(), errorOutputs[connectionNumber].value());
+        validateBatchNormIoTensors(featureInputs[connectionNumber].value(), errorInputs[connectionNumber].value());
+        launchBatchNormalizationInferenceBackward(errorInputs[connectionNumber].value(),
+                                                  errorOutputs[connectionNumber].value(),
+                                                  weights,
+                                                  resultRunningVariance,
+                                                  epsilon,
+                                                  numChannels,
+                                                  streams[connectionNumber]);
+        return streams[connectionNumber].putEvent();
+    }
+
+    THOR_THROW_IF_FALSE(connectionNumber < scratchDScale.size());
+    THOR_THROW_IF_FALSE(connectionNumber < scratchDBias.size());
 
     auto weightsParameter = getParameter("weights");
     auto biasesParameter = getParameter("biases");
-    THOR_THROW_IF_FALSE(weightsParameter->hasOptimizer());
-    THOR_THROW_IF_FALSE(biasesParameter->hasOptimizer());
+    const bool needWeightsGradient = weightsParameter->isTrainingEnabled();
+    const bool needBiasesGradient = biasesParameter->isTrainingEnabled();
+    if (!needInputGradient && !needWeightsGradient && !needBiasesGradient)
+        return std::nullopt;
 
-    shared_ptr<Optimizer> weightsOptimizer = weightsParameter->getOptimizer();
-    shared_ptr<Optimizer> biasesOptimizer = biasesParameter->getOptimizer();
-    THOR_THROW_IF_FALSE(weightsOptimizer != nullptr);
-    THOR_THROW_IF_FALSE(biasesOptimizer != nullptr);
-    THOR_THROW_IF_FALSE(weightsOptimizer->getWeightsGradient().has_value());
-    THOR_THROW_IF_FALSE(biasesOptimizer->getWeightsGradient().has_value());
-
-    std::optional<Tensor> errorOut = std::nullopt;
-    if (errorOutputs.size() > connectionNumber && errorOutputs[connectionNumber].has_value()) {
-        errorOut = errorOutputs[connectionNumber];
-    } else {
-        errorOut = scratchErrorOutput;
+    std::optional<Tensor> weightsGradient = std::nullopt;
+    std::optional<Tensor> biasesGradient = std::nullopt;
+    if (needWeightsGradient) {
+        THOR_THROW_IF_FALSE(weightsParameter->hasOptimizer());
+        shared_ptr<Optimizer> optimizer = weightsParameter->getOptimizer();
+        THOR_THROW_IF_FALSE(optimizer != nullptr);
+        weightsGradient = optimizer->getWeightsGradient();
+        THOR_THROW_IF_FALSE(weightsGradient.has_value());
     }
+    if (needBiasesGradient) {
+        THOR_THROW_IF_FALSE(biasesParameter->hasOptimizer());
+        shared_ptr<Optimizer> optimizer = biasesParameter->getOptimizer();
+        THOR_THROW_IF_FALSE(optimizer != nullptr);
+        biasesGradient = optimizer->getWeightsGradient();
+        THOR_THROW_IF_FALSE(biasesGradient.has_value());
+    }
+
+    std::optional<Tensor> errorOut = needInputGradient ? errorOutputs[connectionNumber] : scratchErrorOutput;
     THOR_THROW_IF_FALSE(errorOut.has_value());
-    THOR_THROW_IF_FALSE(gradientUpdateStream.has_value());
-    THOR_THROW_IF_FALSE(featureInputs[connectionNumber].has_value());
     validateBatchNormIoTensors(featureInputs[connectionNumber].value(), errorOut.value());
     validateBatchNormIoTensors(featureInputs[connectionNumber].value(), errorInputs[connectionNumber].value());
 
-    Tensor dscaleOutput = weightsOptimizer->getWeightsGradient().value();
-    Tensor dbiasOutput = biasesOptimizer->getWeightsGradient().value();
+    Tensor dscaleOutput = needWeightsGradient && clearWeightsGradientFirstIfFused
+                              ? weightsGradient.value()
+                              : scratchDScale[connectionNumber];
+    Tensor dbiasOutput = needBiasesGradient && clearWeightsGradientFirstIfFused
+                             ? biasesGradient.value()
+                             : scratchDBias[connectionNumber];
+
+    Stream executionStream = streams[connectionNumber];
+    if (needWeightsGradient || needBiasesGradient) {
+        THOR_THROW_IF_FALSE(gradientUpdateStream.has_value());
+        executionStream = gradientUpdateStream.value();
+    }
 
     const ScopedCudnnTensorDescriptor xDesc = makePackedNchwTensorDescriptor(featureInputs[connectionNumber].value());
     const ScopedCudnnTensorDescriptor dyDesc = makePackedNchwTensorDescriptor(errorInputs[connectionNumber].value());
     const ScopedCudnnTensorDescriptor dxDesc = makePackedNchwTensorDescriptor(errorOut.value());
     const ScopedCudnnTensorDescriptor bnDesc = makeBatchNormStatsDescriptor(numChannels, cudnnTensorRank);
 
-    const float betaParamDiff = clearWeightsGradientFirstIfFused ? BETA_CLEAR : BETA_ACCUMULATE;
-
-    ScopedGpu scopedGpu(gradientUpdateStream.value().getGpuNum());
-    CUDNN_CHECK(cudnnBatchNormalizationBackward(gradientUpdateStream.value().getCudnnHandle(),
+    ScopedGpu scopedGpu(executionStream.getGpuNum());
+    CUDNN_CHECK(cudnnBatchNormalizationBackward(executionStream.getCudnnHandle(),
                                                 CUDNN_BATCHNORM_SPATIAL,
                                                 &ALPHA_NO_SCALE,
                                                 &BETA_CLEAR,
                                                 &ALPHA_NO_SCALE,
-                                                &betaParamDiff,
+                                                &BETA_CLEAR,
                                                 xDesc.get(),
                                                 featureInputs[connectionNumber].value().getMemPtr(),
                                                 dyDesc.get(),
@@ -471,12 +550,42 @@ std::optional<Event> BatchNormalization::computeErrorOutAccumulateWeightsGradien
                                                 resultSaveMean[connectionNumber].getMemPtr(),
                                                 resultSaveInvVariance[connectionNumber].getMemPtr()));
 
-    return gradientUpdateStream.value().putEvent();
+    if (needWeightsGradient && !clearWeightsGradientFirstIfFused) {
+        launchAccumulateBatchNormGradientFp32(weightsGradient->getMemPtr<float>(),
+                                             scratchDScale[connectionNumber].getMemPtr<float>(),
+                                             numChannels,
+                                             executionStream);
+    }
+    if (needBiasesGradient && !clearWeightsGradientFirstIfFused) {
+        launchAccumulateBatchNormGradientFp32(biasesGradient->getMemPtr<float>(),
+                                             scratchDBias[connectionNumber].getMemPtr<float>(),
+                                             numChannels,
+                                             executionStream);
+    }
+
+    return executionStream.putEvent();
 }
+
 void BatchNormalization::accumulateWeightsGradient(uint32_t connectionNumber, bool clearGradientFirst) {
     (void)connectionNumber;
     (void)clearGradientFirst;
     // No-op: the cuDNN batchnorm backward call already produced dscale/dbias on the gradient stream.
+}
+
+bool BatchNormalization::shouldApplyParameterUpdatesForBatch(
+    uint32_t validExampleCount) const {
+    if (validExampleCount != batchSize) {
+        return false;
+    }
+    for (size_t connectionNumber = 0;
+         connectionNumber < errorInputs.size();
+         ++connectionNumber) {
+        if (errorInputs.at(connectionNumber).has_value() &&
+            !forwardUsedTrainingStatistics.at(connectionNumber)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 }  // namespace ThorImplementation

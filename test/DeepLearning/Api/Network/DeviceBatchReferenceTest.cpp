@@ -112,6 +112,7 @@ TEST(DeviceBatchReference, PlacedNetworkDispatchesReferenceBatchThroughNamedInpu
     auto materializer = std::make_shared<CopyTensorDeviceBatchMaterializer>(source);
     Batch batch;
     batch.insert("features", Api::DeviceBatchReference(materializer, batchSize));
+    batch.setValidExampleCount(1);
 
     std::map<std::string, Impl::Tensor> outputs;
     std::map<std::string, Event> outputReadyEvents;
@@ -133,4 +134,67 @@ TEST(DeviceBatchReference, PlacedNetworkDispatchesReferenceBatchThroughNamedInpu
     for (float value : values) {
         EXPECT_EQ(value, 7.0f);
     }
+}
+
+TEST(DeviceBatchReference, PlacedNetworkRejectsValidExampleCountAbovePhysicalCapacity) {
+    if (MachineEvaluator::instance().getNumGpus() == 0) {
+        GTEST_SKIP() << "DeviceBatchReference placed-network test requires a GPU";
+    }
+
+    constexpr uint32_t batchSize = 2;
+    Api::Network network("device_batch_reference_invalid_valid_count");
+    Api::NetworkInput input = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("features")
+                                  .dimensions({3})
+                                  .dataType(Impl::DataType::FP32)
+                                  .build();
+    Api::NetworkOutput::Builder()
+        .network(network)
+        .name("prediction")
+        .inputTensor(input.getFeatureOutput().value())
+        .dataType(Impl::DataType::FP32)
+        .build();
+
+    std::vector<Event> initializationDone;
+    std::shared_ptr<Api::PlacedNetwork> placed = network.place(
+        batchSize,
+        initializationDone,
+        /*inferenceOnly=*/true,
+        std::vector<int32_t>{0},
+        /*forcedNumStampsPerGpu=*/1);
+    ASSERT_NE(placed, nullptr);
+    synchronizeEvents(initializationDone);
+
+    const Impl::TensorPlacement gpuPlacement(Impl::TensorPlacement::MemDevices::GPU, 0);
+    placed->configureBatchInputSources({
+        {"features", Api::BatchFieldSourceDescription::deviceReference(gpuPlacement)},
+    });
+    placed->synchronize();
+
+    std::shared_ptr<Impl::NetworkInput> physicalInput =
+        placed->getStampedNetwork(0).getNamedInput("features");
+    ASSERT_NE(physicalInput, nullptr);
+    ASSERT_TRUE(physicalInput->getFeatureOutput().has_value());
+
+    Impl::Tensor source(gpuPlacement, physicalInput->getFeatureOutput().value().getDescriptor());
+    Stream setupStream(0);
+    source.fill(7.0f, setupStream);
+    setupStream.synchronize();
+
+    auto materializer = std::make_shared<CopyTensorDeviceBatchMaterializer>(source);
+    Batch batch;
+    batch.insert("features", Api::DeviceBatchReference(materializer, batchSize));
+    batch.setValidExampleCount(batchSize + 1);
+
+    std::map<std::string, Impl::Tensor> outputs;
+    std::map<std::string, Event> outputReadyEvents;
+    EXPECT_THROW(
+        placed->submitBatch(
+            0,
+            batch,
+            outputs,
+            outputReadyEvents,
+            /*isInferenceOnly=*/true),
+        std::logic_error);
 }

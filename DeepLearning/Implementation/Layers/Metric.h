@@ -1,11 +1,22 @@
 #pragma once
 
+#include <limits>
 #include <optional>
+#include <stdexcept>
+#include <string>
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
+#include "DeepLearning/Api/Layers/Metrics/MetricAggregation.h"
 
 namespace ThorImplementation {
+
+struct MetricBatchStatisticTensors {
+    Thor::MetricAggregation aggregation = Thor::MetricAggregation::MEAN_BY_EXAMPLE;
+    std::optional<Tensor> numerator;
+    std::optional<Tensor> denominator;
+    Event readyEvent;
+};
 
 /**
  * A metric layer has a predictions input, a labels input and a metric output.
@@ -99,15 +110,34 @@ class Metric : public Layer {
 
     virtual std::string toDisplayString(Tensor metric_h) = 0;
 
+    // Every declared metric exposes its aggregation contract here. Ratio
+    // metrics additionally expose hidden sufficient-statistic tensors. Those
+    // tensors are slot-local so queued submissions cannot overwrite statistics
+    // that are still owned by a completion callback.
+    virtual void preallocateMetricStatisticSlots(uint32_t numSlots) {
+        THOR_THROW_IF_FALSE(numSlots >= 1);
+    }
+    virtual void setActiveMetricStatisticSlot(uint32_t slotIndex) { (void)slotIndex; }
+    virtual std::optional<MetricBatchStatisticTensors> getMetricBatchStatisticTensorsForSlot(uint32_t slotIndex) const {
+        (void)slotIndex;
+        return std::nullopt;
+    }
+    virtual void extendMetricStatisticWritableEventForSlot(uint32_t slotIndex, Event event) {
+        (void)slotIndex;
+        (void)event;
+    }
+
     ~Metric() override {}
 
     void initialize() override {
         Layer::initialize();
         featureInputReceived = false;
         labelsReceived = !requiresLabelsInput();
+        currentValidExampleCount = 0;
+        batchCardinalitySet = false;
     }
 
-    void forward(std::optional<Tensor> inputTensor, bool validationPass, uint32_t batchSize = 0) override {
+    void forward(std::optional<Tensor> inputTensor, bool validationPass, uint32_t validExampleCount = 0) override {
         THOR_THROW_IF_FALSE(running);
 
         if (requiresLabelsInput()) {
@@ -120,6 +150,7 @@ class Metric : public Layer {
         THOR_THROW_IF_FALSE(featureInput.has_value());
         THOR_THROW_IF_FALSE(inputTensor.has_value());
 
+        recordBatchCardinality(validExampleCount);
         if (inputTensor.value() == featureInput.value())
             forwardFeatures(inputTensor.value(), validationPass);
         else if (requiresLabelsInput() && labelsInput.has_value() && inputTensor.value() == labelsInput.value())
@@ -159,7 +190,8 @@ class Metric : public Layer {
 
     virtual std::optional<Tensor> getLabelsInput() { return labelsInput; }
 
-    virtual void computeMetric(Tensor labels, Tensor predictions, Tensor metric, Stream stream) = 0;
+    virtual void computeMetric(
+        Tensor labels, Tensor predictions, Tensor metric, Stream stream, uint32_t validExampleCount) = 0;
 
     enum class ConnectionType { FORWARD = 12, LABELS, METRIC };
 
@@ -169,9 +201,36 @@ class Metric : public Layer {
 
     bool featureInputReceived;
     bool labelsReceived;
+    uint32_t currentValidExampleCount = 0;
+    bool batchCardinalitySet = false;
 
     void infer(std::optional<Tensor> inputTensor, std::optional<Tensor> outputTensor, Stream stream) override {
         // Metrics use computeMetric(...) instead, due to different parameter requirements.
+    }
+
+    uint32_t getPhysicalBatchCapacity() const {
+        THOR_THROW_IF_FALSE(featureInput.has_value());
+        const std::vector<uint64_t> dimensions = featureInput.value().getDimensions();
+        THOR_THROW_IF_FALSE(!dimensions.empty());
+        THOR_THROW_IF_FALSE(dimensions.front() >= 1);
+        THOR_THROW_IF_FALSE(dimensions.front() <= std::numeric_limits<uint32_t>::max());
+        return static_cast<uint32_t>(dimensions.front());
+    }
+
+    void recordBatchCardinality(uint32_t validExampleCount) {
+        const uint32_t physicalBatchCapacity = getPhysicalBatchCapacity();
+        const uint32_t resolvedValidExampleCount =
+            validExampleCount == 0 ? physicalBatchCapacity : validExampleCount;
+        THOR_THROW_IF_FALSE(resolvedValidExampleCount >= 1);
+        THOR_THROW_IF_FALSE(resolvedValidExampleCount <= physicalBatchCapacity);
+        if (batchCardinalitySet) {
+            if (currentValidExampleCount != resolvedValidExampleCount) {
+                throw std::logic_error("Metric inputs for one batch must carry the same valid-example count.");
+            }
+            return;
+        }
+        currentValidExampleCount = resolvedValidExampleCount;
+        batchCardinalitySet = true;
     }
 
     virtual void advanceDataIfReady(bool validationPass) {
@@ -179,20 +238,22 @@ class Metric : public Layer {
         if (!ready)
             return;
 
+        THOR_THROW_IF_FALSE(batchCardinalitySet);
         if (requiresLabelsInput()) {
             // DataStream waits for labels to arrive,
             stream.waitEvent(labelsStream.putEvent());
-            computeMetric(labelsInput.value(), featureInput.value(), featureOutput.value(), stream);
+            computeMetric(labelsInput.value(), featureInput.value(), featureOutput.value(), stream, currentValidExampleCount);
             labelsReceived = false;
         } else {
-            computeMetric(featureInput.value(), featureInput.value(), featureOutput.value(), stream);
+            computeMetric(featureInput.value(), featureInput.value(), featureOutput.value(), stream, currentValidExampleCount);
             labelsReceived = true;
         }
 
         featureInputReceived = false;
+        batchCardinalitySet = false;
 
         if (nextLayer.has_value())
-            nextLayer.value()->forward(featureOutput, validationPass);
+            nextLayer.value()->forward(featureOutput, validationPass, currentValidExampleCount);
     }
 
     void backProp(std::optional<Tensor>, std::optional<Tensor>, std::optional<Tensor>, Stream) override { THOR_UNREACHABLE(); }

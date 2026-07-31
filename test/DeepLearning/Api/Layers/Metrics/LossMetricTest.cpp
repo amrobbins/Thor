@@ -29,6 +29,7 @@ void expectLossMetricBuildsAndSerializes(LossMetric::Formula formula, const stri
     ASSERT_EQ(metric.getFormula(), formula);
     ASSERT_EQ(metric.getMetric().getDataType(), DataType::FP32);
     ASSERT_EQ(metric.getMetric().getDimensions(), vector<uint64_t>({1}));
+    ASSERT_EQ(metric.getAggregation(), MetricAggregation::MEAN_BY_EXAMPLE);
 
     shared_ptr<Layer> cloneLayer = metric.clone();
     LossMetric* clone = dynamic_cast<LossMetric*>(cloneLayer.get());
@@ -39,6 +40,7 @@ void expectLossMetricBuildsAndSerializes(LossMetric::Formula formula, const stri
     json metricJson = metric.architectureJson();
     ASSERT_EQ(metricJson.at("factory").get<string>(), Layer::Factory::Metric.value());
     ASSERT_EQ(metricJson.at("layer_type").get<string>(), string("loss_metric"));
+    ASSERT_EQ(metricJson.at("aggregation").get<MetricAggregation>(), MetricAggregation::MEAN_BY_EXAMPLE);
     ASSERT_EQ(metricJson.at("formula").get<string>(), formulaName);
     ASSERT_EQ(metricJson.at("reduction").get<string>(), string("batch"));
     ASSERT_TRUE(metricJson.contains("predictions"));
@@ -94,10 +96,11 @@ TEST(LossMetricApi, BatchLossMetricExpressionKeepsExpectedNamesWhenOptionsAreMov
     options.labelsName = "labels";
     options.lossName = "metric";
 
+    const string validityMaskName = Thor::BATCH_VALIDITY_MASK_NAME;
     ThorImplementation::DynamicExpression expression =
-        ThorImplementation::LossExpression::makeBatchLossMetricExpression(std::move(options));
+        ThorImplementation::LossExpression::makeBatchLossMetricExpression(std::move(options), validityMaskName);
 
-    ASSERT_EQ(expression.getExpectedInputNames(), vector<string>({"predictions", "labels"}));
+    ASSERT_EQ(expression.getExpectedInputNames(), vector<string>({"predictions", "labels", validityMaskName}));
     ASSERT_EQ(expression.getExpectedOutputNames(), vector<string>({"metric"}));
 }
 

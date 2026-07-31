@@ -26,6 +26,8 @@ TrainingStatsSnapshot makeStats(TrainingEventPhase phase = TrainingEventPhase::T
     stats.step = 17;
     stats.stepInEpoch = 7;
     stats.stepsPerEpoch = 100;
+    stats.batchSize = 4;
+    stats.validExamplesInBatch = 4;
     stats.loss = loss;
     stats.samplesPerSecond = 1024.0;
     stats.batchesPerSecond = 8.0;
@@ -467,6 +469,99 @@ TEST(TrainingRunsStatsReporter, RunningSummarySmoothsScalarMetricsLikePhaseLosse
                                 "validate_daily_central_loss=500.000000",
                                 "validate_seen_sku_loss=60.000000",
                                 "validate_seen_sku_daily_central_loss=600.000000"}))
+        << output;
+}
+
+
+TEST(TrainingRunsStatsReporter, RunningSummaryUsesDeclaredMetricAggregationContracts) {
+    std::FILE* out = std::tmpfile();
+    TrainingRunsStatsReporter reporter(out, LineStatsColorMode::NEVER, 0.0);
+    reporter.configureRun(
+        "fold_0",
+        TrainingRunsStatsReporter::RunConfig{
+            0.0,
+            std::string("exact_metrics"),
+            1.0,
+            {"mean", "sum", "min", "max", "ratio"}});
+
+    auto addMetric = [](TrainingStatsSnapshot& stats,
+                        const std::string& name,
+                        MetricAggregation aggregation,
+                        double value,
+                        uint64_t validExamples,
+                        std::optional<double> numerator = std::nullopt,
+                        std::optional<double> denominator = std::nullopt) {
+        stats.metrics[name] = value;
+        stats.metricBatchStats[name] = MetricBatchStat{
+            .aggregation = aggregation,
+            .value = value,
+            .validExamples = validExamples,
+            .numerator = numerator,
+            .denominator = denominator,
+        };
+    };
+
+    TrainingStatsSnapshot batch0 = makeStats(TrainingEventPhase::TRAIN, 1.0);
+    batch0.epoch = 1;
+    batch0.stepInEpoch = 1;
+    batch0.stepsPerEpoch = 2;
+    batch0.validExamplesInBatch = 4;
+    addMetric(batch0, "mean", MetricAggregation::MEAN_BY_EXAMPLE, 2.5, 4);
+    addMetric(batch0, "sum", MetricAggregation::SUM, 10.0, 4);
+    addMetric(batch0, "min", MetricAggregation::MIN, 1.0, 4);
+    addMetric(batch0, "max", MetricAggregation::MAX, 4.0, 4);
+    addMetric(batch0, "ratio", MetricAggregation::RATIO, 5.0, 4, 10.0, 2.0);
+
+    TrainingStatsSnapshot batch1 = makeStats(TrainingEventPhase::TRAIN, 1.0);
+    batch1.epoch = 1;
+    batch1.stepInEpoch = 2;
+    batch1.stepsPerEpoch = 2;
+    batch1.validExamplesInBatch = 2;
+    addMetric(batch1, "mean", MetricAggregation::MEAN_BY_EXAMPLE, 10.0, 2);
+    addMetric(batch1, "sum", MetricAggregation::SUM, 20.0, 2);
+    addMetric(batch1, "min", MetricAggregation::MIN, -3.0, 2);
+    addMetric(batch1, "max", MetricAggregation::MAX, 11.0, 2);
+    addMetric(batch1, "ratio", MetricAggregation::RATIO, 10.0, 2, 90.0, 9.0);
+
+    reporter.markRunStarting("fold_0");
+    reporter.onStatsEvent(TrainingStatsEvent::fromTrainingEvent(
+        TrainingEvent::statsUpdated(batch0), "fold_0"));
+    reporter.onStatsEvent(TrainingStatsEvent::fromTrainingEvent(
+        TrainingEvent::statsUpdated(batch1), "fold_0"));
+
+    TrainingStatsSnapshot epoch2Batch0 = makeStats(TrainingEventPhase::TRAIN, 1.0);
+    epoch2Batch0.epoch = 2;
+    epoch2Batch0.stepInEpoch = 1;
+    epoch2Batch0.stepsPerEpoch = 2;
+    epoch2Batch0.validExamplesInBatch = 4;
+    addMetric(epoch2Batch0, "mean", MetricAggregation::MEAN_BY_EXAMPLE, 20.0, 4);
+    addMetric(epoch2Batch0, "sum", MetricAggregation::SUM, 40.0, 4);
+    addMetric(epoch2Batch0, "min", MetricAggregation::MIN, 2.0, 4);
+    addMetric(epoch2Batch0, "max", MetricAggregation::MAX, 40.0, 4);
+    addMetric(epoch2Batch0, "ratio", MetricAggregation::RATIO, 15.0, 4, 30.0, 2.0);
+    reporter.onStatsEvent(TrainingStatsEvent::fromTrainingEvent(
+        TrainingEvent::statsUpdated(epoch2Batch0), "fold_0"));
+    reporter.close();
+
+    const std::string output = readAndCloseFile(out);
+    EXPECT_TRUE(hasLineWithAll(output,
+                               {"INFO runs[fold_0|exact_metrics]:",
+                                "train_mean=5.000000",
+                                "train_sum=30.000000",
+                                "train_min=-3.000000",
+                                "train_max=11.000000",
+                                "train_ratio=9.090909"}))
+        << output;
+    // Epoch-two smoothing blends the previous exact epoch aggregate with the
+    // current exact running aggregate at 50% progress. It must not blend raw
+    // batch scalars or arithmetic means of batch-level sums/extrema/ratios.
+    EXPECT_TRUE(hasLineWithAll(output,
+                               {"INFO runs[fold_0|exact_metrics]:",
+                                "train_mean=10.000000",
+                                "train_sum=33.333333",
+                                "train_min=-1.333333",
+                                "train_max=20.666667",
+                                "train_ratio=11.060606"}))
         << output;
 }
 

@@ -11,6 +11,11 @@
 #include "DeepLearning/Api/Layers/Loss/MeanAbsoluteError.h"
 #include "DeepLearning/Api/Layers/Loss/MeanSquaredError.h"
 #include "DeepLearning/Api/Layers/Loss/QuantileLoss.h"
+#include "DeepLearning/Api/Layers/Metrics/CustomMetric.h"
+#include "DeepLearning/Api/Layers/Metrics/Mean.h"
+#include "DeepLearning/Api/Layers/Metrics/Sum.h"
+#include "DeepLearning/Api/Layers/Metrics/Min.h"
+#include "DeepLearning/Api/Layers/Metrics/Max.h"
 #include "DeepLearning/Api/Layers/Metrics/WeightedMean.h"
 #include "DeepLearning/Api/Training/Events/TrainingEvent.h"
 #include "DeepLearning/Api/Training/TrainingPhase.h"
@@ -20,6 +25,7 @@
 #include "DeepLearning/Api/Training/Executors/TrainingExecutor.h"
 #include "DeepLearning/Api/Training/Observers/TrainingObserver.h"
 #include "Utilities/Expression/DynamicExpression.h"
+#include "Utilities/Expression/Expression.h"
 
 #include "gtest/gtest.h"
 
@@ -71,7 +77,7 @@ std::shared_ptr<Network> makeReluMemberNetwork(const std::string& networkName,
 
 class FakeBatchSession final : public BatchSession {
    public:
-    FakeBatchSession() { batchSize = 4; }
+    explicit FakeBatchSession(uint64_t requestedBatchSize) { batchSize = requestedBatchSize; }
 
     uint64_t getNumBatchesPerEpoch(ExampleType exampleType) override {
         return exampleType == ExampleType::TRAIN ? 1 : 0;
@@ -123,11 +129,10 @@ class FakeDataset final : public NamedDataset {
                                                    uint64_t maxInFlightBatches,
                                                    const std::set<DatasetFieldId>& requiredFieldIds) const override {
         (void)splits;
-        (void)batching;
         (void)accessPolicy;
         (void)maxInFlightBatches;
         (void)requiredFieldIds;
-        return std::make_shared<FakeBatchSession>();
+        return std::make_shared<FakeBatchSession>(batching.getBatchSize());
     }
 
    private:
@@ -156,6 +161,194 @@ std::shared_ptr<TrainingData> makeFakeTestData(bool includeTestPartition) {
         BatchPolicy(4, false),
         DatasetAccessPolicy{.deviceStorage = DeviceDatasetStorage::OFF},
         "fake_test_dataset");
+}
+
+
+class ExactMetricBatchSession final : public BatchSession {
+   public:
+    ExactMetricBatchSession(uint64_t requestedBatchSize,
+                            std::vector<float> values,
+                            std::vector<float> weights,
+                            std::vector<uint64_t> trainIndices,
+                            std::vector<uint64_t> validateIndices,
+                            std::vector<uint64_t> testIndices)
+        : values(std::move(values)),
+          weights(std::move(weights)),
+          trainIndices(std::move(trainIndices)),
+          validateIndices(std::move(validateIndices)),
+          testIndices(std::move(testIndices)) {
+        THOR_THROW_IF_FALSE(requestedBatchSize > 0);
+        THOR_THROW_IF_FALSE(this->values.size() == this->weights.size());
+        batchSize = requestedBatchSize;
+    }
+
+    uint64_t getNumBatchesPerEpoch(ExampleType exampleType) override {
+        const uint64_t examples = getNumExamples(exampleType);
+        return examples == 0 ? 0 : (examples + batchSize - 1) / batchSize;
+    }
+
+    uint64_t getNumExamples(ExampleType exampleType) override {
+        return static_cast<uint64_t>(indicesFor(exampleType).size());
+    }
+
+    uint64_t getNextBatchNum(ExampleType exampleType) override {
+        (void)exampleType;
+        return 0;
+    }
+
+   private:
+    const std::vector<uint64_t>& indicesFor(ExampleType exampleType) const {
+        switch (exampleType) {
+            case ExampleType::TRAIN:
+                return trainIndices;
+            case ExampleType::VALIDATE:
+                return validateIndices;
+            case ExampleType::TEST:
+                return testIndices;
+            default:
+                throw std::runtime_error("ExactMetricBatchSession requires a concrete example type.");
+        }
+    }
+
+    Batch acquireBatch(ExampleType exampleType, uint64_t& batchNum) override {
+        const std::vector<uint64_t>& indices = indicesFor(exampleType);
+        const uint64_t start = batchNum * batchSize;
+        if (start >= indices.size()) {
+            throw std::out_of_range("ExactMetricBatchSession batch number is outside the requested partition.");
+        }
+        const uint64_t validRows = std::min<uint64_t>(batchSize, indices.size() - start);
+
+        ThorImplementation::Tensor valueTensor =
+            makeCpuTensor(ThorImplementation::DataType::FP32, {batchSize, 1});
+        ThorImplementation::Tensor weightTensor =
+            makeCpuTensor(ThorImplementation::DataType::FP32, {batchSize, 1});
+        float* valueMemory = valueTensor.getMemPtr<float>();
+        float* weightMemory = weightTensor.getMemPtr<float>();
+        for (uint64_t row = 0; row < batchSize; ++row) {
+            if (row < validRows) {
+                const uint64_t sourceIndex = indices.at(start + row);
+                valueMemory[row] = values.at(sourceIndex);
+                weightMemory[row] = weights.at(sourceIndex);
+            } else {
+                // Deliberately hostile padding catches any path that forgets to
+                // preserve the tail batch's valid-example count.
+                valueMemory[row] = ((row - validRows) % 2 == 0) ? -1000.0f : 2000.0f;
+                weightMemory[row] = 100.0f;
+            }
+        }
+
+        Batch batch;
+        batch.insert("values", std::move(valueTensor));
+        batch.insert("weights", std::move(weightTensor));
+        if (validRows != batchSize) {
+            batch.setValidExampleCount(static_cast<uint32_t>(validRows));
+        }
+        return batch;
+    }
+
+    void recycleBatch(ExampleType exampleType, Batch&& batch) override {
+        (void)exampleType;
+        (void)batch;
+    }
+
+    std::vector<float> values;
+    std::vector<float> weights;
+    std::vector<uint64_t> trainIndices;
+    std::vector<uint64_t> validateIndices;
+    std::vector<uint64_t> testIndices;
+};
+
+class ExactMetricDataset final : public NamedDataset {
+   public:
+    ExactMetricDataset(std::string stableName,
+                       std::vector<float> values,
+                       std::vector<float> weights)
+        : id(DatasetId::fromStableMaterial(stableName)),
+          schema(std::vector<DatasetField>{
+              DatasetField{.id = 1, .name = "values", .dataType = DataType::FP32, .dimensions = {1}},
+              DatasetField{.id = 2, .name = "weights", .dataType = DataType::FP32, .dimensions = {1}},
+          }),
+          values(std::move(values)),
+          weights(std::move(weights)) {
+        THOR_THROW_IF_FALSE(!this->values.empty());
+        THOR_THROW_IF_FALSE(this->values.size() == this->weights.size());
+    }
+
+    const DatasetId& getId() const override { return id; }
+    uint64_t getNumExamples() const override { return static_cast<uint64_t>(values.size()); }
+    const DatasetSchema& getSchema() const override { return schema; }
+    const DatasetField& getField(std::string_view name) const override { return schema.getField(name); }
+
+   protected:
+    std::shared_ptr<BatchSession> openBatchSession(const DatasetSplitManifest& splits,
+                                                   const BatchPolicy& batching,
+                                                   const DatasetAccessPolicy& accessPolicy,
+                                                   uint64_t maxInFlightBatches,
+                                                   const std::set<DatasetFieldId>& requiredFieldIds) const override {
+        (void)accessPolicy;
+        (void)maxInFlightBatches;
+        (void)requiredFieldIds;
+        return std::make_shared<ExactMetricBatchSession>(
+            batching.getBatchSize(),
+            values,
+            weights,
+            splits.getTrain().materialize(),
+            splits.getValidate().materialize(),
+            splits.getTest().materialize());
+    }
+
+   private:
+    DatasetId id;
+    DatasetSchema schema;
+    std::vector<float> values;
+    std::vector<float> weights;
+};
+
+std::shared_ptr<TrainingData> makeExactMetricTrainingData(
+    const std::string& name,
+    std::vector<float> validationValues,
+    std::vector<float> validationWeights) {
+    THOR_THROW_IF_FALSE(validationValues.size() == validationWeights.size());
+    THOR_THROW_IF_FALSE(!validationValues.empty());
+
+    std::vector<float> values{0.0f};
+    values.insert(values.end(), validationValues.begin(), validationValues.end());
+    std::vector<float> weights{1.0f};
+    weights.insert(weights.end(), validationWeights.begin(), validationWeights.end());
+    auto dataset = std::make_shared<ExactMetricDataset>(name, std::move(values), std::move(weights));
+
+    std::vector<uint64_t> validationIndices;
+    validationIndices.reserve(validationValues.size());
+    for (uint64_t index = 0; index < validationValues.size(); ++index) {
+        validationIndices.push_back(index + 1);
+    }
+    return std::make_shared<TrainingData>(
+        dataset,
+        DatasetSplitManifest(*dataset, {0}, std::move(validationIndices)),
+        BatchPolicy(4, false),
+        DatasetAccessPolicy{.deviceStorage = DeviceDatasetStorage::OFF},
+        name);
+}
+
+std::shared_ptr<TrainingData> makeExactMetricTestData(
+    const std::string& name,
+    std::vector<float> testValues,
+    std::vector<float> testWeights) {
+    THOR_THROW_IF_FALSE(testValues.size() == testWeights.size());
+    THOR_THROW_IF_FALSE(!testValues.empty());
+    auto dataset = std::make_shared<ExactMetricDataset>(name, std::move(testValues), std::move(testWeights));
+
+    std::vector<uint64_t> testIndices;
+    testIndices.reserve(dataset->getNumExamples());
+    for (uint64_t index = 0; index < dataset->getNumExamples(); ++index) {
+        testIndices.push_back(index);
+    }
+    return std::make_shared<TrainingData>(
+        dataset,
+        DatasetSplitManifest(*dataset, {}, {}, std::move(testIndices)),
+        BatchPolicy(4, false),
+        DatasetAccessPolicy{.deviceStorage = DeviceDatasetStorage::OFF},
+        name);
 }
 
 class Coordinator {
@@ -217,7 +410,20 @@ class Coordinator {
 
 enum class FakeExecutorBehavior { COMPLETE_AFTER_RELEASE, FAIL_AFTER_RELEASE, WAIT_FOR_CANCEL_THEN_CANCEL, OOM_AFTER_RELEASE };
 
-TrainingStatsSnapshot makeStats(uint64_t step) {
+void setSyntheticTrainingBatchCardinality(const TrainingRunRequest& request, TrainingStatsSnapshot& stats) {
+    if (request.batchSession == nullptr) {
+        throw std::logic_error("TrainingRuns test executor requires a batch session.");
+    }
+    const uint64_t batchCapacity = request.batchSession->getBatchSize();
+    const uint64_t trainingExamples = request.batchSession->getNumExamples(ExampleType::TRAIN);
+    if (batchCapacity == 0 || trainingExamples == 0) {
+        throw std::logic_error("TrainingRuns test executor requires a non-empty training batch.");
+    }
+    stats.batchSize = batchCapacity;
+    stats.validExamplesInBatch = std::min(batchCapacity, trainingExamples);
+}
+
+TrainingStatsSnapshot makeStats(const TrainingRunRequest& request, uint64_t step) {
     TrainingStatsSnapshot stats;
     stats.phase = TrainingEventPhase::TRAIN;
     stats.epoch = 1;
@@ -225,6 +431,9 @@ TrainingStatsSnapshot makeStats(uint64_t step) {
     stats.step = step;
     stats.stepInEpoch = step;
     stats.stepsPerEpoch = 10;
+    setSyntheticTrainingBatchCardinality(request, stats);
+    stats.samplesProcessedInEpoch = stats.validExamplesInBatch;
+    stats.samplesProcessed = stats.validExamplesInBatch;
     stats.loss = 1.0 / static_cast<double>(step + 1);
     stats.elapsedSeconds = static_cast<double>(step);
     return stats;
@@ -247,7 +456,7 @@ class CoordinatedExecutor : public TrainingExecutor {
         }
 
         request.cancellationToken.throwIfCancellationRequested();
-        observer.onTrainingEvent(TrainingEvent::statsUpdated(makeStats(statsStep)));
+        observer.onTrainingEvent(TrainingEvent::statsUpdated(makeStats(request, statsStep)));
 
         if (behavior == FakeExecutorBehavior::FAIL_AFTER_RELEASE) {
             throw std::runtime_error("planned trainer failure");
@@ -302,13 +511,39 @@ class OrderedStartupExecutor : public TrainingExecutor {
             recorder->record(runIndex);
         });
         observer.onTrainingEvent(
-            TrainingEvent::statsUpdated(makeStats(runIndex + 1)));
+            TrainingEvent::statsUpdated(makeStats(request, runIndex + 1)));
     }
 
    private:
     size_t runIndex;
     std::chrono::milliseconds delay;
     std::shared_ptr<StartupOrderRecorder> recorder;
+};
+
+
+class ArchitectureSavingExecutor final : public TrainingExecutor {
+   public:
+    void fit(const TrainingRunRequest& request, TrainingObserver& observer) override {
+        THOR_THROW_IF_FALSE(request.network != nullptr);
+        THOR_THROW_IF_FALSE(request.saveModelDirectory.has_value());
+        THOR_THROW_IF_FALSE(!request.saveModelDirectory->empty());
+
+        request.cancellationToken.throwIfCancellationRequested();
+        TrainingStatsSnapshot stats = makeStats(request, 1);
+        stats.epoch = request.initialCompletedEpochs + request.epochs;
+        stats.epochs = stats.epoch;
+        observer.onTrainingEvent(TrainingEvent::statsUpdated(stats));
+
+        const std::filesystem::path artifactRoot(*request.saveModelDirectory);
+        std::filesystem::remove_all(artifactRoot);
+        request.network->save((artifactRoot / "latest").string(), /*overwrite=*/true);
+        if (request.completedTrainingEpochs != nullptr) {
+            *request.completedTrainingEpochs = stats.epoch;
+        }
+        calls += 1;
+    }
+
+    uint32_t calls = 0;
 };
 
 
@@ -342,6 +577,10 @@ class RestartProgressExecutor : public TrainingExecutor {
             stats.step = globalEpoch;
             stats.stepInEpoch = 1;
             stats.stepsPerEpoch = 1;
+            setSyntheticTrainingBatchCardinality(request, stats);
+            const uint64_t trainingExamples = request.batchSession->getNumExamples(ExampleType::TRAIN);
+            stats.samplesProcessedInEpoch = trainingExamples;
+            stats.samplesProcessed = globalEpoch * trainingExamples;
             stats.loss = losses[std::min<size_t>(epoch - 1, losses.size() - 1)];
             observer.onTrainingEvent(TrainingEvent::statsUpdated(stats));
             finalEpoch = globalEpoch;
@@ -371,6 +610,141 @@ class RestartProgressExecutor : public TrainingExecutor {
 };
 
 
+void populateLifecycleMetricStats(TrainingStatsSnapshot& stats,
+                                  bool secondBatch,
+                                  bool discardedAttempt) {
+    const double scale = discardedAttempt ? 100.0 : 1.0;
+    const uint64_t validExamples = secondBatch ? 2u : 4u;
+    stats.batchSize = 4;
+    stats.validExamplesInBatch = validExamples;
+
+    auto addMetric = [&](const std::string& name,
+                         MetricAggregation aggregation,
+                         double value,
+                         std::optional<double> numerator = std::nullopt,
+                         std::optional<double> denominator = std::nullopt) {
+        stats.metrics[name] = value;
+        stats.metricBatchStats[name] = MetricBatchStat{
+            .aggregation = aggregation,
+            .value = value,
+            .validExamples = validExamples,
+            .numerator = numerator,
+            .denominator = denominator,
+        };
+    };
+
+    if (!secondBatch) {
+        addMetric("mean", MetricAggregation::MEAN_BY_EXAMPLE, 2.5 * scale);
+        addMetric("sum", MetricAggregation::SUM, 10.0 * scale);
+        addMetric("min", MetricAggregation::MIN, 1.0 * scale);
+        addMetric("max", MetricAggregation::MAX, 4.0 * scale);
+        addMetric("ratio",
+                  MetricAggregation::RATIO,
+                  5.0 * scale,
+                  10.0 * scale,
+                  2.0);
+    } else {
+        addMetric("mean", MetricAggregation::MEAN_BY_EXAMPLE, 10.0 * scale);
+        addMetric("sum", MetricAggregation::SUM, 20.0 * scale);
+        addMetric("min", MetricAggregation::MIN, -3.0 * scale);
+        addMetric("max", MetricAggregation::MAX, 11.0 * scale);
+        addMetric("ratio",
+                  MetricAggregation::RATIO,
+                  10.0 * scale,
+                  90.0 * scale,
+                  9.0);
+    }
+}
+
+class MetricAggregationLifecycleExecutor final : public TrainingExecutor {
+   public:
+    enum class Behavior { RESTART_ONCE_THEN_COMPLETE, INTERRUPT_AFTER_EPOCH };
+
+    explicit MetricAggregationLifecycleExecutor(Behavior behavior)
+        : behavior(behavior) {}
+
+    void fit(const TrainingRunRequest& request, TrainingObserver& observer) override {
+        calls += 1;
+        const bool discardedAttempt =
+            behavior == Behavior::RESTART_ONCE_THEN_COMPLETE && calls == 1;
+        const uint32_t epochsToEmit =
+            behavior == Behavior::INTERRUPT_AFTER_EPOCH ? 1u : request.epochs;
+
+        uint64_t globalStep = 0;
+        for (uint32_t epoch = 1; epoch <= epochsToEmit; ++epoch) {
+            const uint64_t globalEpoch = request.initialCompletedEpochs + epoch;
+            for (uint64_t batch = 0; batch < 2; ++batch) {
+                TrainingStatsSnapshot stats;
+                stats.phase = TrainingEventPhase::TRAIN;
+                stats.epoch = globalEpoch;
+                stats.epochs = request.initialCompletedEpochs + request.epochs;
+                stats.step = ++globalStep;
+                stats.stepInEpoch = batch + 1;
+                stats.stepsPerEpoch = 2;
+                stats.samplesProcessedInEpoch = batch == 0 ? 4 : 6;
+                stats.samplesProcessed =
+                    (globalEpoch - 1) * 6 + stats.samplesProcessedInEpoch;
+                const bool successfulFinalEpoch =
+                    !discardedAttempt && epoch == request.epochs;
+                stats.loss = successfulFinalEpoch ? 8.0 : 10.0;
+                populateLifecycleMetricStats(stats, batch == 1, discardedAttempt);
+                observer.onTrainingEvent(TrainingEvent::statsUpdated(stats));
+            }
+        }
+
+        if (behavior == Behavior::INTERRUPT_AFTER_EPOCH) {
+            throw TrainingInterrupted("synthetic interruption after exact metric epoch");
+        }
+        if (request.completedTrainingEpochs != nullptr) {
+            *request.completedTrainingEpochs =
+                request.initialCompletedEpochs + request.epochs;
+        }
+    }
+
+    uint32_t calls = 0;
+
+   private:
+    Behavior behavior;
+};
+
+
+
+std::shared_ptr<Network> makeExactMetricAggregationNetwork(const std::string& name) {
+    auto network = std::make_shared<Network>(name);
+    NetworkInput values = NetworkInput::Builder()
+                              .network(*network)
+                              .name("values")
+                              .dimensions({1})
+                              .dataType(DataType::FP32)
+                              .build();
+    NetworkInput weights = NetworkInput::Builder()
+                               .network(*network)
+                               .name("weights")
+                               .dimensions({1})
+                               .dataType(DataType::FP32)
+                               .build();
+
+    Mean mean = Mean::Builder().network(*network).values(values.getFeatureOutput().value()).build();
+    Sum sum = Sum::Builder().network(*network).values(values.getFeatureOutput().value()).build();
+    Min min = Min::Builder().network(*network).values(values.getFeatureOutput().value()).build();
+    Max max = Max::Builder().network(*network).values(values.getFeatureOutput().value()).build();
+    WeightedMean weightedMean = WeightedMean::Builder()
+                                    .network(*network)
+                                    .values(values.getFeatureOutput().value())
+                                    .weights(weights.getFeatureOutput().value())
+                                    .build();
+
+    NetworkOutput::Builder().network(*network).name("value_mean").inputTensor(mean.getMetric()).build();
+    NetworkOutput::Builder().network(*network).name("value_sum").inputTensor(sum.getMetric()).build();
+    NetworkOutput::Builder().network(*network).name("value_min").inputTensor(min.getMetric()).build();
+    NetworkOutput::Builder().network(*network).name("value_max").inputTensor(max.getMetric()).build();
+    NetworkOutput::Builder()
+        .network(*network)
+        .name("value_weighted_mean")
+        .inputTensor(weightedMean.getMetric())
+        .build();
+    return network;
+}
 
 std::shared_ptr<Network> makeNetworkWithOutput(const std::string& name, const std::vector<uint64_t>& dimensions) {
     auto network = std::make_shared<Network>(name);
@@ -531,6 +905,39 @@ std::shared_ptr<Network> makeAuxiliaryMetricNetwork(const std::string& name, con
     return network;
 }
 
+std::shared_ptr<Network> makeCustomMetricAggregationNetwork(const std::string& name, MetricAggregation aggregation) {
+    auto network = std::make_shared<Network>(name);
+    NetworkInput features =
+        NetworkInput::Builder().network(*network).name("features").dimensions({4}).dataType(DataType::FP32).build();
+    NetworkInput actual =
+        NetworkInput::Builder().network(*network).name("actual").dimensions({4}).dataType(DataType::FP32).build();
+
+    std::shared_ptr<Activation> prediction =
+        Relu::Builder().network(*network).featureInput(features.getFeatureOutput().value()).build();
+
+    ThorImplementation::Expression predictionsExpression =
+        ThorImplementation::Expression::input("predictions", DataType::FP32, DataType::FP32);
+    ThorImplementation::Expression labelsExpression =
+        ThorImplementation::Expression::input("labels", DataType::FP32, DataType::FP32);
+    ThorImplementation::Expression difference = predictionsExpression - labelsExpression;
+    ThorImplementation::Expression metricExpression =
+        (difference * difference).reduce_mean({0, 1}, {0}, DataType::FP32);
+    ThorImplementation::ExpressionDefinition definition = ThorImplementation::ExpressionDefinition::fromOutputs(
+        ThorImplementation::Expression::outputs({{"metric", metricExpression}}));
+
+    CustomMetric metric = CustomMetric::Builder()
+                              .network(*network)
+                              .expression(ThorImplementation::DynamicExpression::fromExpressionDefinition(definition))
+                              .predictions(prediction->getFeatureOutput().value())
+                              .labels(actual.getFeatureOutput().value())
+                              .aggregation(aggregation)
+                              .build();
+
+    NetworkOutput::Builder().network(*network).name("prediction").inputTensor(prediction->getFeatureOutput().value()).build();
+    NetworkOutput::Builder().network(*network).name("custom_metric").inputTensor(metric.getMetric()).build();
+    return network;
+}
+
 std::shared_ptr<Network> makeAuxiliaryLossNetwork(const std::string& name, const std::string& selectedThresholdInputName) {
     auto network = std::make_shared<Network>(name);
     NetworkInput features =
@@ -633,6 +1040,20 @@ std::shared_ptr<Trainer> makeTrainer(std::shared_ptr<Network> network,
                                          .observer(std::make_shared<NullTrainingObserver>())
                                          .saveModelDirectory(std::move(saveModelDirectory))
                                          .saveModelOverwrite(saveModelOverwrite)
+                                         .build());
+}
+
+std::shared_ptr<Trainer> makeTrainerWithData(std::shared_ptr<Network> network,
+                                            std::shared_ptr<TrainingExecutor> executor,
+                                            std::shared_ptr<const TrainingData> data,
+                                            std::string saveModelDirectory) {
+    return std::make_shared<Trainer>(Trainer::Builder()
+                                         .network(std::move(network))
+                                         .data(std::move(data))
+                                         .executor(std::move(executor))
+                                         .observer(std::make_shared<NullTrainingObserver>())
+                                         .saveModelDirectory(std::move(saveModelDirectory))
+                                         .saveModelOverwrite(true)
                                          .build());
 }
 
@@ -969,6 +1390,143 @@ TEST(TrainingRuns, RejectsGraphMetricsWithDifferentAuxiliaryInputBoundaries) {
     EXPECT_EQ(executor1->calls, 0u);
 }
 
+TEST(TrainingRuns, AggregatesGraphMetricsExactlyAcrossTailBatchesAndSourcePopulations) {
+    const std::filesystem::path root = uniqueTempPath("training-runs-exact-metric-aggregation");
+    const std::filesystem::path member0Artifact = root / "member_0";
+    const std::filesystem::path member1Artifact = root / "member_1";
+
+    auto source0 = makeExactMetricTrainingData(
+        "exact_metric_source_0",
+        {1.0f, 2.0f, 3.0f, 4.0f},
+        {1.0f, 1.0f, 1.0f, 1.0f});
+    // The second population has a zero weight sum but a non-zero weighted
+    // numerator. Exact ratio aggregation must retain that numerator instead of
+    // reconstructing it from the displayed per-population value of zero.
+    auto source1 = makeExactMetricTrainingData(
+        "exact_metric_source_1",
+        {10.0f, 20.0f},
+        {-1.0f, 1.0f});
+    auto testData = makeExactMetricTestData(
+        "exact_metric_test",
+        {1.0f, 2.0f, 3.0f, 4.0f, 10.0f, 20.0f},
+        {1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f});
+
+    auto executor0 = std::make_shared<ArchitectureSavingExecutor>();
+    auto executor1 = std::make_shared<ArchitectureSavingExecutor>();
+    std::shared_ptr<Trainer> trainer0 = makeTrainerWithData(
+        makeExactMetricAggregationNetwork("exact_metric_member_0"),
+        executor0,
+        source0,
+        member0Artifact.string());
+    std::shared_ptr<Trainer> trainer1 = makeTrainerWithData(
+        makeExactMetricAggregationNetwork("exact_metric_member_1"),
+        executor1,
+        source1,
+        member1Artifact.string());
+
+    TrainingRuns runs(
+        {TrainingRunsSpec{"fold_0", trainer0, "metrics"},
+         TrainingRunsSpec{"fold_1", trainer1, "metrics"}},
+        TrainingRunsFailurePolicy::CANCEL_SIBLINGS,
+        2.0,
+        1u);
+    TrainingRunsSessionOptions sessionOptions;
+    sessionOptions.reports = {{"metrics",
+                               {"value_mean",
+                                "value_sum",
+                                "value_min",
+                                "value_max",
+                                "value_weighted_mean"}}};
+    sessionOptions.evaluation.testData = testData;
+
+    TrainingRunsResult result = runs.fit(TrainerFitOptions{.epochs = 1}, sessionOptions);
+    ASSERT_TRUE(result.allCompleted());
+    EXPECT_EQ(executor0->calls, 1u);
+    EXPECT_EQ(executor1->calls, 1u);
+
+    const std::map<std::string, double> expected{
+        {"value_mean", 40.0 / 6.0},
+        {"value_sum", 40.0},
+        {"value_min", 1.0},
+        {"value_max", 20.0},
+        {"value_weighted_mean", 5.0},
+    };
+    const std::map<std::string, MetricAggregation> expectedAggregations{
+        {"value_mean", MetricAggregation::MEAN_BY_EXAMPLE},
+        {"value_sum", MetricAggregation::SUM},
+        {"value_min", MetricAggregation::MIN},
+        {"value_max", MetricAggregation::MAX},
+        {"value_weighted_mean", MetricAggregation::RATIO},
+    };
+
+    const TrainingEnsembleResult& ensemble = result.ensemble("metrics");
+    ASSERT_EQ(ensemble.namedGraphMetrics.size(), expected.size());
+    for (const auto& [name, expectedValue] : expected) {
+        const auto metricIt = std::find_if(
+            ensemble.namedGraphMetrics.begin(),
+            ensemble.namedGraphMetrics.end(),
+            [&](const TrainingNamedMetricResult& metric) { return metric.name == name; });
+        ASSERT_NE(metricIt, ensemble.namedGraphMetrics.end()) << name;
+        ASSERT_TRUE(metricIt->trainValue.has_value()) << name;
+        ASSERT_TRUE(metricIt->testValue.has_value()) << name;
+        EXPECT_NEAR(metricIt->trainValue.value(), expectedValue, 1.0e-5) << name;
+        EXPECT_NEAR(metricIt->testValue.value(), expectedValue, 1.0e-5) << name;
+    }
+
+    ASSERT_EQ(ensemble.members.size(), 2u);
+    for (const TrainingEnsembleMemberResult& member : ensemble.members) {
+        ASSERT_EQ(member.finalTestMetrics.size(), expected.size());
+        for (const auto& [name, expectedValue] : expected) {
+            ASSERT_TRUE(member.finalTestMetrics.count(name) != 0) << name;
+            EXPECT_NEAR(member.finalTestMetrics.at(name), expectedValue, 1.0e-5) << name;
+        }
+    }
+
+    for (const TrainingRunResult& run : result.runs()) {
+        ASSERT_TRUE(run.finalTestStats.has_value());
+        const TrainingStatsSnapshot& stats = run.finalTestStats.value();
+        EXPECT_EQ(stats.samplesProcessed, 6u);
+        EXPECT_EQ(stats.validExamplesInBatch, 2u);
+        for (const auto& [name, expectedValue] : expected) {
+            ASSERT_TRUE(stats.metrics.count(name) != 0) << name;
+            EXPECT_NEAR(stats.metrics.at(name), expectedValue, 1.0e-5) << name;
+            const auto statisticIt = stats.metricBatchStats.find(name);
+            ASSERT_NE(statisticIt, stats.metricBatchStats.end()) << name;
+            EXPECT_EQ(statisticIt->second.aggregation, expectedAggregations.at(name)) << name;
+            EXPECT_EQ(statisticIt->second.validExamples, 6u) << name;
+            EXPECT_NEAR(statisticIt->second.value, expectedValue, 1.0e-5) << name;
+        }
+        const MetricBatchStat& weightedStat = stats.metricBatchStats.at("value_weighted_mean");
+        ASSERT_TRUE(weightedStat.numerator.has_value());
+        ASSERT_TRUE(weightedStat.denominator.has_value());
+        EXPECT_NEAR(weightedStat.numerator.value(), 20.0, 1.0e-5);
+        EXPECT_NEAR(weightedStat.denominator.value(), 4.0, 1.0e-5);
+    }
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(TrainingRuns, RejectsGraphMetricsWithDifferentAggregationContracts) {
+    auto network0 = makeCustomMetricAggregationNetwork(
+        "training-runs-custom-metric-mean", MetricAggregation::MEAN_BY_EXAMPLE);
+    auto network1 = makeCustomMetricAggregationNetwork(
+        "training-runs-custom-metric-sum", MetricAggregation::SUM);
+    auto executor0 = std::make_shared<RestartProgressExecutor>(std::vector<std::vector<double>>{{1.0}});
+    auto executor1 = std::make_shared<RestartProgressExecutor>(std::vector<std::vector<double>>{{1.0}});
+    std::shared_ptr<Trainer> trainer0 = makeTrainer(network0, executor0);
+    std::shared_ptr<Trainer> trainer1 = makeTrainer(network1, executor1);
+
+    TrainingRuns runs({TrainingRunsSpec{"fold_0", trainer0, "demand"},
+                       TrainingRunsSpec{"fold_1", trainer1, "demand"}});
+    TrainingRunsSessionOptions sessionOptions;
+    sessionOptions.reports = {{"demand", {"custom_metric"}}};
+    sessionOptions.evaluation.evaluateTrainingPopulation = false;
+
+    EXPECT_THROW((void)runs.fit(TrainerFitOptions{1}, sessionOptions), std::runtime_error);
+    EXPECT_EQ(executor0->calls, 0u);
+    EXPECT_EQ(executor1->calls, 0u);
+}
+
 TEST(TrainingRuns, RejectsGraphLossesWithDifferentAuxiliaryInputBoundaries) {
     auto network0 = makeAuxiliaryLossNetwork("training-runs-aux-loss-0", "peak_threshold");
     auto network1 = makeAuxiliaryLossNetwork("training-runs-aux-loss-1", "alternate_threshold");
@@ -1264,6 +1822,9 @@ TEST(TrainingRuns, StartsAllTrainersConcurrentlyAndReturnsCompletedResults) {
     ASSERT_TRUE((*result)["fold_1"].finalTrainingStats.has_value());
     EXPECT_EQ((*result)["fold_0"].finalTrainingStats->step, 3u);
     EXPECT_EQ((*result)["fold_1"].finalTrainingStats->step, 5u);
+    EXPECT_EQ((*result)["fold_0"].finalTrainingStats->batchSize, 1u);
+    EXPECT_EQ((*result)["fold_0"].finalTrainingStats->validExamplesInBatch, 1u);
+    EXPECT_EQ((*result)["fold_0"].finalTrainingStats->samplesProcessedInEpoch, 1u);
     EXPECT_EQ(executor0->calls, 1u);
     EXPECT_EQ(executor1->calls, 1u);
 }
@@ -1557,6 +2118,68 @@ TEST(TrainingRuns, RejectsInvalidFitOptionsBeforeLaunchingThreads) {
     EXPECT_EQ(executor->calls, 0u);
 }
 
+
+
+TEST(Trainer, RestartedAttemptFinalStatsUseExactMetricAggregationWithoutPriorAttemptLeakage) {
+    auto executor = std::make_shared<MetricAggregationLifecycleExecutor>(
+        MetricAggregationLifecycleExecutor::Behavior::RESTART_ONCE_THEN_COMPLETE);
+    std::shared_ptr<Trainer> trainer = makeTrainer(
+        makeNetworkWithOutput("trainer-restart-exact-metrics", {0, 1}), executor);
+
+    TrainerFitOptions options;
+    options.epochs = 2;
+    options.restartConditions = {
+        TrainingRestartCondition{/*progressCheckEpochs=*/2,
+                                 /*progressImprovementMinPercentage=*/5.0,
+                                 /*maxRestarts=*/1}};
+
+    TrainingRunResult result = trainer->fit(options);
+
+    ASSERT_EQ(result.status, TrainingRunStatus::COMPLETED);
+    ASSERT_EQ(executor->calls, 2u);
+    ASSERT_TRUE(result.finalTrainingStats.has_value());
+    const TrainingStatsSnapshot& stats = result.finalTrainingStats.value();
+    EXPECT_NEAR(stats.metrics.at("mean"), 5.0, 1.0e-12);
+    EXPECT_NEAR(stats.metrics.at("sum"), 30.0, 1.0e-12);
+    EXPECT_NEAR(stats.metrics.at("min"), -3.0, 1.0e-12);
+    EXPECT_NEAR(stats.metrics.at("max"), 11.0, 1.0e-12);
+    EXPECT_NEAR(stats.metrics.at("ratio"), 100.0 / 11.0, 1.0e-12);
+    const MetricBatchStat& ratio = stats.metricBatchStats.at("ratio");
+    ASSERT_TRUE(ratio.numerator.has_value());
+    ASSERT_TRUE(ratio.denominator.has_value());
+    EXPECT_DOUBLE_EQ(ratio.numerator.value(), 100.0);
+    EXPECT_DOUBLE_EQ(ratio.denominator.value(), 11.0);
+    EXPECT_EQ(ratio.validExamples, 6u);
+}
+
+TEST(TrainingRuns, InterruptedRunRetainsExactMetricAggregationForCompletedBatches) {
+    auto executor = std::make_shared<MetricAggregationLifecycleExecutor>(
+        MetricAggregationLifecycleExecutor::Behavior::INTERRUPT_AFTER_EPOCH);
+    std::shared_ptr<Trainer> trainer = makeTrainer(
+        makeNetworkWithOutput("training-runs-interrupted-exact-metrics", {0, 1}), executor);
+    TrainingRuns runs({{"fold_0", trainer}}, TrainingRunsFailurePolicy::CONTINUE, 0.0);
+    TrainingRunsEvaluationOptions evaluation;
+    evaluation.evaluateTrainingPopulation = false;
+
+    TrainingRunsResult result = runs.fit(TrainerFitOptions{.epochs = 1}, evaluation);
+
+    ASSERT_EQ(result.size(), 1u);
+    const TrainingRunResult& run = result[0];
+    EXPECT_EQ(run.status, TrainingRunStatus::INTERRUPTED);
+    ASSERT_TRUE(run.finalTrainingStats.has_value());
+    const TrainingStatsSnapshot& stats = run.finalTrainingStats.value();
+    EXPECT_NEAR(stats.metrics.at("mean"), 5.0, 1.0e-12);
+    EXPECT_NEAR(stats.metrics.at("sum"), 30.0, 1.0e-12);
+    EXPECT_NEAR(stats.metrics.at("min"), -3.0, 1.0e-12);
+    EXPECT_NEAR(stats.metrics.at("max"), 11.0, 1.0e-12);
+    EXPECT_NEAR(stats.metrics.at("ratio"), 100.0 / 11.0, 1.0e-12);
+    const MetricBatchStat& ratio = stats.metricBatchStats.at("ratio");
+    ASSERT_TRUE(ratio.numerator.has_value());
+    ASSERT_TRUE(ratio.denominator.has_value());
+    EXPECT_DOUBLE_EQ(ratio.numerator.value(), 100.0);
+    EXPECT_DOUBLE_EQ(ratio.denominator.value(), 11.0);
+    EXPECT_EQ(ratio.validExamples, 6u);
+}
 
 TEST(Trainer, RestartConditionUsesPhaseLocalEpochsAndKeepsCumulativeEpochBoundary) {
     auto network = std::make_shared<Network>("trainer-restart-phase-local-epoch");

@@ -1,9 +1,11 @@
 #pragma once
 
 #include <optional>
+#include "DeepLearning/Api/BatchValidity.h"
 #include "DeepLearning/Implementation/Layers/TrainableLayer.h"
 #include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
 #include "Utilities/Expression/DynamicExpression.h"
+#include "Utilities/TensorOperations/Masking/BatchValidity.h"
 #include "Utilities/Expression/FusedEquation.h"
 #include "Utilities/Expression/StampedEquation.h"
 
@@ -58,10 +60,13 @@ class CustomLayer : public TrainableLayer {
                 const std::vector<std::shared_ptr<PhysicalParameter>>& parameters,
                 bool inferenceOnly,
                 int64_t stampedId,
-                std::vector<DeclaredOutputDescriptor> declaredOutputDescriptors);
+                std::vector<DeclaredOutputDescriptor> declaredOutputDescriptors,
+                bool usesBatchValidity = false,
+                bool requiresFullBatch = false);
 
     // TrainableLayer
     void forward(std::optional<Tensor> featureInput, bool validationPass, uint32_t batchSize = 0) override;
+    bool supportsPartialBatches() const override { return !fullBatchRequired; }
     void backward(std::optional<Tensor> errorInput, uint32_t batchSize = 0) override;
 
     // Compute feature output on the data stream
@@ -97,7 +102,9 @@ class CustomLayer : public TrainableLayer {
                                          DynamicExpression gradientExpression,
                                          std::string predictionsName,
                                          std::string labelsName,
-                                         std::string gradientName);
+                                         std::string gradientName,
+                                         const Tensor& batchValidityMask,
+                                         std::string batchValidityMaskName);
     bool unregisterFusedCustomLossGradient(const Tensor& predictions);
     uint32_t getNumFusedCustomLossGradients() const;
 
@@ -118,7 +125,10 @@ class CustomLayer : public TrainableLayer {
         std::string predictionsName;
         std::string labelsName;
         std::string gradientName;
+        Tensor batchValidityMask;
+        std::string batchValidityMaskName;
         std::string fusedLabelsInputName;
+        std::string fusedBatchValidityMaskInputName;
     };
 
     struct FusedOptimizerRuntimeScalarBinding {
@@ -165,6 +175,9 @@ class CustomLayer : public TrainableLayer {
 
         std::unordered_map<std::string, Tensor> forwardInputsByName;
         std::unordered_map<std::string, Tensor> forwardOutputsByName;
+        Tensor batchValidityMask;
+        uint32_t currentValidExampleCount = 0;
+        bool batchCardinalitySet = false;
         std::unordered_map<std::string, Tensor> backwardAdditionalInputsByName;
         std::unordered_map<std::string, Tensor> backwardInputGradOutputsByName;
     };
@@ -243,6 +256,8 @@ class CustomLayer : public TrainableLayer {
 
    private:
     DynamicExpression layerDefinitionExpression;
+    bool batchValidityMaskEnabled = false;
+    bool fullBatchRequired = false;
     std::vector<std::string> inputNames;
     std::vector<std::string> outputNames;
     std::vector<DeclaredOutputDescriptor> declaredOutputDescriptors;

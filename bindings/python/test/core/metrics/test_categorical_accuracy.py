@@ -28,6 +28,7 @@ def test_categorical_accuracy_one_hot_constructs():
     )
     assert m is not None
     assert isinstance(m, CategoricalAccuracy)
+    assert m.aggregation is thor.MetricAggregation.MEAN_BY_EXAMPLE
 
 
 def test_categorical_accuracy_one_hot_with_num_classes_constructs():

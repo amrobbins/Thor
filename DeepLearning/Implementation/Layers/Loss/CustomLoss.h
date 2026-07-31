@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DeepLearning/Api/BatchValidity.h"
 #include "DeepLearning/Implementation/Layers/Loss.h"
 #include "Utilities/Expression/DynamicExpression.h"
 
@@ -21,7 +22,9 @@ class CustomLoss : public Loss {
                std::string lossName = "loss",
                std::string gradientName = "predictions_grad",
                DataType lossDataType = DataType::FP32,
-               std::optional<float> lossWeight = std::nullopt);
+               std::optional<float> lossWeight = std::nullopt,
+               bool usesBatchValidity = false,
+               bool requiresFullBatch = false);
 
     ~CustomLoss() override = default;
 
@@ -39,6 +42,7 @@ class CustomLoss : public Loss {
     void notifyFusedGradientUnregisteredFromDrivingLayer(const Tensor& predictions) override;
 
     std::string getType() override { return "CustomLoss"; }
+    bool supportsPartialBatches() const override { return !fullBatchRequired; }
     bool isGradientFusedIntoDrivingLayer() const { return gradientFusedIntoDrivingLayer; }
 
    protected:
@@ -63,9 +67,13 @@ class CustomLoss : public Loss {
     std::string gradientName;
     std::optional<float> lossWeight;
     bool gradientFusedIntoDrivingLayer = false;
+    bool batchValidityMaskEnabled = false;
+    bool fullBatchRequired = false;
+    Tensor batchValidityMask;
 
     ThorImplementation::DynamicExpression weightedLossExpression() const;
     ThorImplementation::DynamicExpression weightedGradientExpression() const;
+    ThorImplementation::DynamicExpression maskedWeightedGradientExpression() const;
     void tryFuseGradientIntoDrivingLayer();
 
     std::shared_ptr<PreparedDynamicExpression> lossPrepared;

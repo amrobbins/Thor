@@ -33,16 +33,25 @@ vector<float> referenceMarginRankingRawLoss(const vector<float>& input1,
     return loss;
 }
 
-float totalMarginRankingLoss(const vector<float>& input1, const vector<float>& input2, const vector<float>& target, float margin) {
+float totalMarginRankingLoss(const vector<float>& input1,
+                             const vector<float>& input2,
+                             const vector<float>& target,
+                             float margin,
+                             size_t validElementCount) {
     vector<float> raw = referenceMarginRankingRawLoss(input1, input2, target, margin);
+    THOR_THROW_IF_FALSE(validElementCount <= raw.size());
     float total = 0.0f;
-    for (float value : raw)
-        total += value;
+    for (size_t i = 0; i < validElementCount; ++i)
+        total += raw[i];
     return total;
 }
 
-vector<float> numericalMarginRankingGradient(
-    vector<float> input1, vector<float> input2, const vector<float>& target, float margin, char wrt) {
+vector<float> numericalMarginRankingGradient(vector<float> input1,
+                                             vector<float> input2,
+                                             const vector<float>& target,
+                                             float margin,
+                                             char wrt,
+                                             size_t validElementCount) {
     constexpr float epsilon = 1.0e-3f;
     vector<float>* tensor = nullptr;
     if (wrt == '1')
@@ -52,12 +61,13 @@ vector<float> numericalMarginRankingGradient(
     else
         THOR_UNREACHABLE();
 
+    THOR_THROW_IF_FALSE(validElementCount <= tensor->size());
     vector<float> gradient(tensor->size(), 0.0f);
-    for (size_t i = 0; i < tensor->size(); ++i) {
+    for (size_t i = 0; i < validElementCount; ++i) {
         (*tensor)[i] += epsilon;
-        const float lossPlus = totalMarginRankingLoss(input1, input2, target, margin);
+        const float lossPlus = totalMarginRankingLoss(input1, input2, target, margin, validElementCount);
         (*tensor)[i] -= 2.0f * epsilon;
-        const float lossMinus = totalMarginRankingLoss(input1, input2, target, margin);
+        const float lossMinus = totalMarginRankingLoss(input1, input2, target, margin, validElementCount);
         (*tensor)[i] += epsilon;
         gradient[i] = (lossPlus - lossMinus) / (2.0f * epsilon);
     }
@@ -91,12 +101,15 @@ vector<float> copyGpuTensorToVector(Impl::Tensor tensor, Stream stream) {
 MarginRankingRunResult runRawMarginRankingLossNetwork(const vector<float>& input1,
                                                       const vector<float>& input2,
                                                       const vector<float>& target,
-                                                      float margin) {
+                                                      float margin,
+                                                      uint32_t validExampleCount) {
     constexpr uint32_t batchSize = 4;
     constexpr uint32_t numScores = 3;
     THOR_THROW_IF_FALSE(input1.size() == static_cast<size_t>(batchSize * numScores));
     THOR_THROW_IF_FALSE(input2.size() == input1.size());
     THOR_THROW_IF_FALSE(target.size() == input1.size());
+    THOR_THROW_IF_FALSE(validExampleCount >= 1);
+    THOR_THROW_IF_FALSE(validExampleCount <= batchSize);
 
     Api::Network network("margin_ranking_numerical");
     Api::NetworkInput input1Layer =
@@ -160,9 +173,9 @@ MarginRankingRunResult runRawMarginRankingLossNetwork(const vector<float>& input
     std::copy(input2.begin(), input2.end(), static_cast<float*>(input2Cpu.getMemPtr()));
     std::copy(target.begin(), target.end(), static_cast<float*>(targetCpu.getMemPtr()));
 
-    physicalInput1Layer->forward(input1Cpu, false, batchSize);
-    physicalInput2Layer->forward(input2Cpu, false, batchSize);
-    physicalTargetLayer->forward(targetCpu, false, batchSize);
+    physicalInput1Layer->forward(input1Cpu, false, validExampleCount);
+    physicalInput2Layer->forward(input2Cpu, false, validExampleCount);
+    physicalTargetLayer->forward(targetCpu, false, validExampleCount);
 
     Stream outputStream = physicalTargetLayer->getStream();
     outputStream.waitEvent(physicalLossOutput->getOutputReadyEvent());
@@ -199,16 +212,61 @@ TEST(MarginRankingLossApi, NumericalRawLossAndBackwardGradientsMatchReference) {
     const vector<float> target = {1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f};
 
     vector<float> referenceLoss = referenceMarginRankingRawLoss(input1, input2, target, margin);
-    vector<float> referenceInput1Gradient = numericalMarginRankingGradient(input1, input2, target, margin, '1');
-    vector<float> referenceInput2Gradient = numericalMarginRankingGradient(input1, input2, target, margin, '2');
+    vector<float> referenceInput1Gradient =
+        numericalMarginRankingGradient(input1, input2, target, margin, '1', input1.size());
+    vector<float> referenceInput2Gradient =
+        numericalMarginRankingGradient(input1, input2, target, margin, '2', input2.size());
     for (float& value : referenceInput1Gradient)
         value *= Impl::Loss::getLossScalingFactor();
     for (float& value : referenceInput2Gradient)
         value *= Impl::Loss::getLossScalingFactor();
 
-    MarginRankingRunResult actual = runRawMarginRankingLossNetwork(input1, input2, target, margin);
+    MarginRankingRunResult actual = runRawMarginRankingLossNetwork(input1, input2, target, margin, 4);
 
     expectClose(actual.loss, referenceLoss, 2.0e-5f);
     expectClose(actual.input1Gradient, referenceInput1Gradient, ThorTest::lossScaleAwareGradientTolerance(2.0e-3f));
     expectClose(actual.input2Gradient, referenceInput2Gradient, ThorTest::lossScaleAwareGradientTolerance(2.0e-3f));
+}
+
+TEST(MarginRankingLossApi, PartialBatchMasksMultiInputRawLossAndGradients) {
+    constexpr float margin = 0.4f;
+    constexpr uint32_t validExampleCount = 2;
+    constexpr uint32_t numScores = 3;
+
+    const vector<float> input1 = {1.2f, -0.1f, 0.3f,
+                                  0.5f, 1.1f, -1.3f,
+                                  100.0f, 200.0f, 300.0f,
+                                  400.0f, 500.0f, 600.0f};
+    const vector<float> input2 = {0.4f, 0.2f, 0.8f,
+                                  0.7f, 0.1f, -0.5f,
+                                  -100.0f, -200.0f, -300.0f,
+                                  -400.0f, -500.0f, -600.0f};
+    const vector<float> target = {1.0f, -1.0f, 1.0f,
+                                  -1.0f, 1.0f, -1.0f,
+                                  1.0f, 1.0f, 1.0f,
+                                  -1.0f, -1.0f, -1.0f};
+
+    const size_t firstInvalidElement = validExampleCount * numScores;
+    vector<float> expectedLoss = referenceMarginRankingRawLoss(input1, input2, target, margin);
+    vector<float> expectedInput1Gradient =
+        numericalMarginRankingGradient(input1, input2, target, margin, '1', firstInvalidElement);
+    vector<float> expectedInput2Gradient =
+        numericalMarginRankingGradient(input1, input2, target, margin, '2', firstInvalidElement);
+    for (size_t i = firstInvalidElement; i < expectedLoss.size(); ++i)
+        expectedLoss[i] = 0.0f;
+    for (size_t i = 0; i < firstInvalidElement; ++i) {
+        expectedInput1Gradient[i] *= Impl::Loss::getLossScalingFactor();
+        expectedInput2Gradient[i] *= Impl::Loss::getLossScalingFactor();
+    }
+
+    MarginRankingRunResult actual =
+        runRawMarginRankingLossNetwork(input1, input2, target, margin, validExampleCount);
+
+    expectClose(actual.loss, expectedLoss, 2.0e-5f);
+    expectClose(actual.input1Gradient,
+                expectedInput1Gradient,
+                ThorTest::lossScaleAwareGradientTolerance(2.0e-3f));
+    expectClose(actual.input2Gradient,
+                expectedInput2Gradient,
+                ThorTest::lossScaleAwareGradientTolerance(2.0e-3f));
 }

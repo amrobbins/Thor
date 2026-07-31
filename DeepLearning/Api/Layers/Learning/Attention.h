@@ -219,7 +219,9 @@ class Attention : public CustomLayer, public TrainingDropoutControllable {
         const std::vector<std::shared_ptr<ThorImplementation::PhysicalParameter>>& physicalParameters,
         bool inferenceOnly,
         int64_t stampedId,
-        std::vector<ThorImplementation::CustomLayer::DeclaredOutputDescriptor> declaredOutputDescriptors) const override;
+        std::vector<ThorImplementation::CustomLayer::DeclaredOutputDescriptor> declaredOutputDescriptors,
+        bool usesBatchValidity,
+        bool requiresFullBatch) const override;
 
    private:
     uint32_t numHeads;

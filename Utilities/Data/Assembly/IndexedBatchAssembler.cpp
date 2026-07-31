@@ -1,4 +1,5 @@
 #include "Utilities/Data/Assembly/IndexedBatchAssembler.h"
+#include "DeepLearning/Implementation/Data/BatchCardinality.h"
 
 #include <algorithm>
 #include <chrono>
@@ -193,7 +194,8 @@ IndexedBatchAssembler::IndexedBatchAssembler(
       recordSizeBytes(this->reader == nullptr ? 0 : this->reader->getRecordSizeBytes()),
       batchesPerEpoch(batchesFor(this->indices == nullptr ? 0 : this->indices->size(), batchSize)),
       numDatasetExamples(this->reader == nullptr ? 0 : this->reader->getNumExamples()),
-      nextBatchNum(0),
+      nextBatchToSchedule(0),
+      nextBatchToDeliver(0),
       nextLogicalPosition(0),
       nextBatchOrdinal(0),
       nextPublishOrdinal(0),
@@ -284,8 +286,8 @@ void IndexedBatchAssembler::open() {
             batchTensorQueues.emplace(entry.first, std::move(queue));
         }
 
-        batchNumQueue.resize(checkedQueueDepth(batchQueueDepth, "IndexedBatchAssembler batch number"));
-        batchNumQueue.open();
+        readyBatchQueue.resize(checkedQueueDepth(batchQueueDepth, "IndexedBatchAssembler ready batch"));
+        readyBatchQueue.open();
 
         for (uint64_t i = 0; i < loadWorkerThreadCount; ++i) {
             loadWorkerThreads.emplace_back(&IndexedBatchAssembler::loadWorkerThread, this, i);
@@ -305,7 +307,7 @@ void IndexedBatchAssembler::close() {
             entry.second->close();
         }
     }
-    batchNumQueue.close();
+    readyBatchQueue.close();
 
     for (std::thread &thread : loadWorkerThreads) {
         if (thread.joinable()) {
@@ -339,7 +341,7 @@ void IndexedBatchAssembler::recordWorkerException(std::exception_ptr exception) 
             entry.second->close();
         }
     }
-    batchNumQueue.close();
+    readyBatchQueue.close();
 }
 
 void IndexedBatchAssembler::throwIfWorkerFailed() const {
@@ -436,7 +438,7 @@ IndexedBatchAssemblerStats IndexedBatchAssembler::getStatsSnapshot() {
     stats.publishCompletedBatchCalls = statsPublishCompletedBatchCalls.load(std::memory_order_relaxed);
     stats.publishCompletedBatchNanoseconds = statsPublishCompletedBatchNanoseconds.load(std::memory_order_relaxed);
     fillPendingBatchAgeStats(stats);
-    const int readyBatches = batchNumQueue.occupancy();
+    const int readyBatches = readyBatchQueue.occupancy();
     stats.currentReadyBatches = readyBatches < 0 ? 0 : static_cast<uint64_t>(readyBatches);
     stats.currentPendingBatches = pendingBatchCount();
     stats.currentCompletedRecordQueueDepth = 0;
@@ -834,7 +836,11 @@ bool IndexedBatchAssembler::startNextBatch() {
     statsStartBatchCalls.fetch_add(1, std::memory_order_relaxed);
     auto batchState = std::make_shared<IndexedBatchState>();
     batchState->batchOrdinal = nextBatchOrdinal++;
-    batchState->batchNum = nextBatchNum;
+    batchState->batchNum = nextBatchToSchedule;
+    batchState->validExampleCount = ThorImplementation::validExamplesForBatch(
+        batchState->batchNum,
+        indices->size(),
+        batchSize);
     batchState->expectedRecords = batchSize;
     batchState->expectedLoadChunks = 1;
     batchState->completedLoadChunks.store(0, std::memory_order_relaxed);
@@ -844,7 +850,7 @@ bool IndexedBatchAssembler::startNextBatch() {
     batchState->windowedMaskBasePointers.assign(reader->getWindowedTensorCount(), nullptr);
     batchState->globalExampleIndices.reserve(batchSize);
     batchState->pendingSince = SteadyClock::now();
-    nextBatchNum = (nextBatchNum + 1) % batchesPerEpoch;
+    nextBatchToSchedule = (nextBatchToSchedule + 1) % batchesPerEpoch;
 
     const SteadyClock::time_point acquireStart = diagnosticNow();
     for (uint64_t specIndex = 0; specIndex < layout.tensors().size(); ++specIndex) {
@@ -913,10 +919,17 @@ bool IndexedBatchAssembler::startNextBatch() {
     };
 
     const SteadyClock::time_point planningStart = diagnosticNow();
-    for (uint64_t slot = 0; slot < batchSize; ++slot) {
+    for (uint64_t slot = 0; slot < batchState->validExampleCount; ++slot) {
         const uint64_t logicalPosition = nextLogicalSplitPosition();
         const uint64_t globalExampleIndex = indices->at(logicalPosition);
         batchState->globalExampleIndices.push_back(globalExampleIndex);
+        localRecordsRequested += 1;
+        localLogicalRecordBytesRequested += recordSizeBytes;
+    }
+    THOR_THROW_IF_FALSE(!batchState->globalExampleIndices.empty());
+    const uint64_t paddingExampleIndex = batchState->globalExampleIndices.back();
+    for (uint64_t slot = batchState->validExampleCount; slot < batchSize; ++slot) {
+        batchState->globalExampleIndices.push_back(paddingExampleIndex);
         localRecordsRequested += 1;
         localLogicalRecordBytesRequested += recordSizeBytes;
     }
@@ -1069,7 +1082,9 @@ bool IndexedBatchAssembler::publishCompletedBatches() {
                 return publishedAny;
             }
         }
-        if (!batchNumQueue.push(batchState->batchNum)) {
+        if (!readyBatchQueue.push(IndexedReadyBatch{
+                .batchNum = batchState->batchNum,
+                .validExampleCount = batchState->validExampleCount})) {
             finishPublishTiming();
             return publishedAny;
         }
@@ -1082,7 +1097,8 @@ bool IndexedBatchAssembler::publishCompletedBatches() {
     }
 }
 
-void IndexedBatchAssembler::acquireBatch(std::map<std::string, Tensor> &tensors, uint64_t &batchNum) {
+void IndexedBatchAssembler::acquireBatch(std::map<std::string, Tensor> &tensors,
+                                         IndexedReadyBatch &readyBatch) {
     if (batchesPerEpoch == 0) {
         throw std::runtime_error("IndexedBatchAssembler cannot get a batch from an empty split.");
     }
@@ -1091,10 +1107,10 @@ void IndexedBatchAssembler::acquireBatch(std::map<std::string, Tensor> &tensors,
     throwIfWorkerFailed();
     tensors.clear();
 
-    const int readyBeforePop = batchNumQueue.occupancy();
+    const int readyBeforePop = readyBatchQueue.occupancy();
     const bool hadReadyBatch = readyBeforePop > 0;
     const SteadyClock::time_point batchWaitStart = diagnosticNow();
-    const bool batchNumQueueOpen = batchNumQueue.pop(batchNum);
+    const bool readyBatchQueueOpen = readyBatchQueue.pop(readyBatch);
     const uint64_t batchWaitNs = diagnosticElapsedNanoseconds(batchWaitStart);
     statsGetBatchCalls.fetch_add(1, std::memory_order_relaxed);
     statsGetBatchWaitNanoseconds.fetch_add(batchWaitNs, std::memory_order_relaxed);
@@ -1103,10 +1119,12 @@ void IndexedBatchAssembler::acquireBatch(std::map<std::string, Tensor> &tensors,
     } else {
         statsGetBatchImmediateCount.fetch_add(1, std::memory_order_relaxed);
     }
-    if (!batchNumQueueOpen) {
+    if (!readyBatchQueueOpen) {
         throwIfWorkerFailed();
-        THOR_THROW_IF_FALSE(batchNumQueueOpen);
+        THOR_THROW_IF_FALSE(readyBatchQueueOpen);
     }
+    THOR_THROW_IF_FALSE(readyBatch.validExampleCount >= 1);
+    THOR_THROW_IF_FALSE(readyBatch.validExampleCount <= batchSize);
 
     const SteadyClock::time_point tensorUnloadStart = diagnosticNow();
     for (const auto &entry : batchTensorQueues) {
@@ -1119,22 +1137,19 @@ void IndexedBatchAssembler::acquireBatch(std::map<std::string, Tensor> &tensors,
         tensors.emplace(entry.first, tensor);
     }
     statsGetBatchTensorUnloadWaitNanoseconds.fetch_add(diagnosticElapsedNanoseconds(tensorUnloadStart), std::memory_order_relaxed);
+    THOR_THROW_IF_FALSE(readyBatch.batchNum == nextBatchToDeliver);
+    nextBatchToDeliver = (nextBatchToDeliver + 1) % batchesPerEpoch;
+
     const uint64_t delivered = statsBatchesDelivered.fetch_add(1, std::memory_order_relaxed) + 1;
     if (shouldEmitStats(delivered)) {
-        emitStatsIfEnabled("get_batch", batchNum);
+        emitStatsIfEnabled("get_batch", readyBatch.batchNum);
     }
 }
 
 uint64_t IndexedBatchAssembler::getNextBatchNum() {
     std::lock_guard<std::mutex> deliveryGuard(batchDeliveryMutex);
     throwIfWorkerFailed();
-    uint64_t batchNum = 0;
-    const bool queueOpen = batchNumQueue.peek(batchNum);
-    if (!queueOpen) {
-        throwIfWorkerFailed();
-        THOR_THROW_IF_FALSE(queueOpen);
-    }
-    return batchNum;
+    return nextBatchToDeliver;
 }
 
 void IndexedBatchAssembler::validateReturnedTensorMapExact(const std::map<std::string, Tensor> &tensors) const {

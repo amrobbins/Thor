@@ -291,7 +291,7 @@ void CtcLoss::backProp(optional<Tensor> labels, optional<Tensor> probabilities, 
     THOR_THROW_IF_FALSE(lossGradient.value().getDescriptor().getDataType() == DataType::FP32);
 }
 
-void CtcLoss::forward(optional<Tensor> inputTensor, bool validationPass, uint32_t batchSize) {
+void CtcLoss::forward(optional<Tensor> inputTensor, bool validationPass, uint32_t validExampleCount) {
     THOR_THROW_IF_FALSE(running);
     THOR_THROW_IF_FALSE(labelsStream.isInitialized());
     THOR_THROW_IF_FALSE(labelLengthsStream.isInitialized());
@@ -307,8 +307,7 @@ void CtcLoss::forward(optional<Tensor> inputTensor, bool validationPass, uint32_
     }
 
     if (inputTensor.has_value()) {
-        if (batchSize != 0)
-            currentBatchSize = batchSize;
+        recordBatchCardinality(validExampleCount);
         if (inputTensor.value() == featureInput.value()) {
             forwardFeatures(inputTensor.value(), validationPass);
             return;
@@ -341,17 +340,19 @@ void CtcLoss::forward(optional<Tensor> inputTensor, bool validationPass, uint32_
     labelsReceived = false;
     labelLengthsReceived = false;
     inputLengthsReceived = false;
+    finishBatchCardinality();
 
     infer(featureInput, featureOutput, stream);
+    maskInvalidLossTail();
 
     if (nextLayer.has_value())
-        nextLayer.value()->forward(featureOutput, validationPass, currentBatchSize);
+        nextLayer.value()->forward(featureOutput, validationPass, currentValidExampleCount);
 
     if (isInferenceOnly() || validationPass)
         return;
 
     THOR_THROW_IF_FALSE(previousLayer.has_value());
-    backward(nullopt, currentBatchSize);
+    backward(nullopt, currentValidExampleCount);
 }
 
 void CtcLoss::advanceDataIfReady(bool validationPass) {

@@ -2,6 +2,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Layers/Layer.h"
+#include "DeepLearning/Api/Layers/Metrics/MetricAggregation.h"
 #include "DeepLearning/Implementation/Layers/Metric.h"
 
 #include <nlohmann/json.hpp>
@@ -35,6 +36,8 @@ class Metric : public Layer {
     }
     void resetGraphTraversalState() override { numInputConnectionsMade = 0; }
 
+    /** Returns the epoch-level aggregation contract for this metric. */
+    virtual MetricAggregation getAggregation() const = 0;
     virtual bool requiresLabels() const { return true; }
     virtual Tensor getPredictions() const { return getFeatureInput().value(); }
     virtual Tensor getLabels() const {
@@ -68,9 +71,10 @@ class Metric : public Layer {
     Tensor metricTensor;
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
-        // Metric
+        // Built-in metrics carry one FP32 validity value per physical batch row.
         uint64_t metricBytes = metricTensor.getTotalSizeInBytes();
-        return metricBytes;
+        uint64_t batchValidityMaskBytes = static_cast<uint64_t>(batchSize) * sizeof(float);
+        return metricBytes + batchValidityMaskBytes;
     }
 
    private:

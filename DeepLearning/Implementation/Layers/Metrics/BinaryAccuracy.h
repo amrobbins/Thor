@@ -17,7 +17,10 @@ inline DynamicExpression makeExpression() {
 
     Expression predictedLabel = Expression::where(predictions >= Expression(0.5), Expression(1.0), Expression(0.0));
     Expression correct = Expression::where(predictedLabel == labels, Expression(1.0), Expression(0.0));
-    Expression metric = correct.reduce_mean({0, 1}, {0}, DataType::FP32);
+    Expression validity = Expression::input(Thor::BATCH_VALIDITY_MASK_NAME, DataType::FP32, DataType::FP32);
+    Expression correctCount = (correct * validity).reduce_sum({0, 1}, {0}, DataType::FP32);
+    Expression validCount = validity.reduce_sum({0, 1}, {0}, DataType::FP32);
+    Expression metric = correctCount / validCount;
 
     ExpressionDefinition definition = ExpressionDefinition::fromOutputs(Expression::outputs({{"metric", metric}}));
     return DynamicExpression::fromExpressionDefinition(definition);
@@ -34,7 +37,14 @@ inline DynamicExpression makeExpression() {
  */
 class BinaryAccuracy : public CustomMetric {
    public:
-    BinaryAccuracy() : CustomMetric(BinaryAccuracyDetail::makeExpression(), "predictions", "labels", "metric", "Accuracy") {}
+    BinaryAccuracy()
+        : CustomMetric(BinaryAccuracyDetail::makeExpression(),
+                       "predictions",
+                       "labels",
+                       "metric",
+                       "Accuracy",
+                       Thor::MetricAggregation::MEAN_BY_EXAMPLE,
+                       Thor::BATCH_VALIDITY_MASK_NAME) {}
 
     ~BinaryAccuracy() override = default;
 

@@ -34,7 +34,7 @@ namespace {
 
 class FakeBatchSession final : public BatchSession {
    public:
-    FakeBatchSession() { batchSize = 1; }
+    explicit FakeBatchSession(uint64_t batchCapacity) { batchSize = batchCapacity; }
 
     uint64_t getNumBatchesPerEpoch(ExampleType exampleType) override {
         return exampleType == ExampleType::TRAIN ? 1 : 0;
@@ -81,11 +81,10 @@ class FakeDataset final : public NamedDataset {
                                                    uint64_t maxInFlightBatches,
                                                    const std::set<DatasetFieldId>& requiredFieldIds) const override {
         (void)splits;
-        (void)batching;
         (void)accessPolicy;
         (void)maxInFlightBatches;
         (void)requiredFieldIds;
-        return std::make_shared<FakeBatchSession>();
+        return std::make_shared<FakeBatchSession>(batching.getBatchSize());
     }
 
    private:
@@ -93,11 +92,12 @@ class FakeDataset final : public NamedDataset {
     DatasetSchema schema;
 };
 
-std::shared_ptr<TrainingData> makeFakeTrainingData() {
+std::shared_ptr<TrainingData> makeFakeTrainingData(
+    BatchPolicy batching = BatchPolicy(1, false)) {
     auto dataset = std::make_shared<FakeDataset>();
     return std::make_shared<TrainingData>(dataset,
                                           DatasetSplitManifest(*dataset, {0}, {}),
-                                          BatchPolicy(1, false),
+                                          std::move(batching),
                                           DatasetAccessPolicy{.deviceStorage = DeviceDatasetStorage::OFF},
                                           "fake_dataset");
 }
@@ -146,6 +146,7 @@ class CapturingExecutor : public TrainingExecutor {
         lastFirstModelSelectionEpoch = request.firstModelSelectionEpoch;
         lastMaxTrainingBatchesPerEpoch = request.maxTrainingBatchesPerEpoch;
         lastTrainingData = request.trainingData;
+        lastBatchSessionSize = request.batchSession != nullptr ? request.batchSession->getBatchSize() : 0;
         lastDeviceDatasetStorageReport = request.deviceDatasetStorageReport;
         lastInitialCompletedEpochs = request.initialCompletedEpochs;
         if (request.completedTrainingEpochs != nullptr) {
@@ -175,6 +176,7 @@ class CapturingExecutor : public TrainingExecutor {
     uint64_t lastFirstModelSelectionEpoch = 0;
     std::optional<uint64_t> lastMaxTrainingBatchesPerEpoch{};
     std::shared_ptr<const TrainingData> lastTrainingData = nullptr;
+    uint64_t lastBatchSessionSize = 0;
     DeviceDatasetStorageReport lastDeviceDatasetStorageReport{};
     uint64_t lastInitialCompletedEpochs = 0;
     bool lastModelSelectionScoreIsCustom = false;
@@ -182,6 +184,58 @@ class CapturingExecutor : public TrainingExecutor {
     size_t lastEarlyCompletionPolicyCount = 0;
     bool lastEarlyCompletionDecision = false;
     uint32_t calls = 0;
+};
+
+class MetricAggregationExecutor final : public TrainingExecutor {
+   public:
+    void fit(const TrainingRunRequest& request, TrainingObserver& observer) override {
+        auto emitBatch = [&](uint64_t step,
+                             uint64_t validExamples,
+                             double mean,
+                             double sum,
+                             double minimum,
+                             double maximum,
+                             double ratio,
+                             double numerator,
+                             double denominator) {
+            TrainingStatsSnapshot stats;
+            stats.phase = TrainingEventPhase::TRAIN;
+            stats.epoch = 1;
+            stats.step = step;
+            stats.stepInEpoch = step;
+            stats.validExamplesInBatch = validExamples;
+            stats.metrics = {
+                {"maximum", maximum},
+                {"mean", mean},
+                {"minimum", minimum},
+                {"ratio", ratio},
+                {"sum", sum},
+            };
+            stats.metricBatchStats = {
+                {"maximum", MetricBatchStat{MetricAggregation::MAX, maximum, validExamples}},
+                {"mean", MetricBatchStat{MetricAggregation::MEAN_BY_EXAMPLE, mean, validExamples}},
+                {"minimum", MetricBatchStat{MetricAggregation::MIN, minimum, validExamples}},
+                {"ratio", MetricBatchStat{MetricAggregation::RATIO,
+                                          ratio,
+                                          validExamples,
+                                          numerator,
+                                          denominator}},
+                {"sum", MetricBatchStat{MetricAggregation::SUM, sum, validExamples}},
+            };
+            observer.onTrainingEvent(TrainingEvent::statsUpdated(std::move(stats)));
+        };
+
+        emitBatch(1, 4, 2.5, 10.0, 1.0, 4.0, 5.0, 10.0, 2.0);
+        emitBatch(2, 2, 10.0, 20.0, -3.0, 11.0, 10.0, 90.0, 9.0);
+
+        TrainingStatsSnapshot finished;
+        finished.epoch = 1;
+        finished.metrics["completed_epoch"] = 1.0;
+        observer.onTrainingEvent(TrainingEvent::runFinished(std::move(finished)));
+        if (request.completedTrainingEpochs != nullptr) {
+            *request.completedTrainingEpochs = request.initialCompletedEpochs + request.epochs;
+        }
+    }
 };
 
 class FailOnceCapturingExecutor : public CapturingExecutor {
@@ -307,6 +361,32 @@ std::map<std::string, std::string> bindingMap(const std::vector<TrainingInputBin
 
 }  // namespace
 
+TEST(Trainer, FinalStatisticsUseDeclaredMetricAggregation) {
+    auto executor = std::make_shared<MetricAggregationExecutor>();
+    Trainer trainer = Trainer::Builder()
+                          .network(makeFakePhaseNetwork("metric_aggregation", "prediction"))
+                          .data(makeFakeTrainingData())
+                          .executor(executor)
+                          .build();
+
+    TrainingRunResult result = trainer.fit(1);
+    ASSERT_TRUE(result.finalTrainingStats.has_value());
+    const TrainingStatsSnapshot& finalStats = result.finalTrainingStats.value();
+    EXPECT_DOUBLE_EQ(finalStats.metrics.at("mean"), 5.0);
+    EXPECT_DOUBLE_EQ(finalStats.metrics.at("sum"), 30.0);
+    EXPECT_DOUBLE_EQ(finalStats.metrics.at("minimum"), -3.0);
+    EXPECT_DOUBLE_EQ(finalStats.metrics.at("maximum"), 11.0);
+    EXPECT_NEAR(finalStats.metrics.at("ratio"), 100.0 / 11.0, 1e-12);
+
+    ASSERT_EQ(finalStats.metricBatchStats.count("ratio"), 1u);
+    const MetricBatchStat& ratio = finalStats.metricBatchStats.at("ratio");
+    ASSERT_TRUE(ratio.numerator.has_value());
+    ASSERT_TRUE(ratio.denominator.has_value());
+    EXPECT_DOUBLE_EQ(ratio.numerator.value(), 100.0);
+    EXPECT_DOUBLE_EQ(ratio.denominator.value(), 11.0);
+    EXPECT_EQ(ratio.validExamples, 6u);
+}
+
 TEST(Trainer, TrainingDataOpensFreshSessionForEveryFit) {
     const std::filesystem::path path = uniqueTempPath("thor-trainer-training-data");
     std::shared_ptr<TrainingData> data = makeTrainingData(path);
@@ -390,8 +470,78 @@ TEST(Trainer, FitRequiresNonEmptyTrainPartition) {
                           .observer(std::make_shared<NullTrainingObserver>())
                           .build();
 
+    testing::internal::CaptureStderr();
     EXPECT_THROW((void)trainer.fit(1), std::runtime_error);
+    const std::string warning = testing::internal::GetCapturedStderr();
+    EXPECT_TRUE(warning.empty());
     EXPECT_EQ(executor->calls, 0u);
+}
+
+TEST(Trainer, CapsOversizedBatchSizeToTrainingSetSizeForOneFit) {
+    auto data = makeFakeTrainingData(BatchPolicy(8, true, 1234));
+    auto executor = std::make_shared<CapturingExecutor>();
+    auto network = std::make_shared<Network>("trainer-cap-batch-size");
+    NetworkInput::Builder()
+        .network(*network)
+        .name("features")
+        .dimensions({1, 1})
+        .dimensionsIncludeBatch(true)
+        .dataType(ThorImplementation::DataType::FP32)
+        .build();
+    Trainer trainer = Trainer::Builder()
+                          .network(network)
+                          .data(data)
+                          .executor(executor)
+                          .observer(std::make_shared<NullTrainingObserver>())
+                          .build();
+
+    testing::internal::CaptureStderr();
+    trainer.fit(1);
+    const std::string warning = testing::internal::GetCapturedStderr();
+
+    ASSERT_EQ(executor->calls, 1u);
+    ASSERT_NE(executor->lastTrainingData, nullptr);
+    EXPECT_NE(executor->lastTrainingData, data);
+    EXPECT_EQ(executor->lastTrainingData->getBatching().getBatchSize(), 1u);
+    EXPECT_TRUE(executor->lastTrainingData->getBatching().getRandomizeTrain());
+    EXPECT_EQ(executor->lastTrainingData->getBatching().getRandomSeed(), std::optional<uint64_t>(1234));
+    EXPECT_EQ(executor->lastTrainingData->getDataset(), data->getDataset());
+    EXPECT_EQ(executor->lastTrainingData->getSplits(), data->getSplits());
+    EXPECT_EQ(executor->lastTrainingData->getAccessPolicy(), data->getAccessPolicy());
+    EXPECT_EQ(executor->lastTrainingData->getDatasetName(), data->getDatasetName());
+    EXPECT_EQ(executor->lastBatchSessionSize, 1u);
+    ASSERT_EQ(executor->lastDatasetInputBindings.size(), 1u);
+    EXPECT_EQ(executor->lastDatasetInputBindings.front().getNetworkInputName(), "features");
+    EXPECT_EQ(executor->lastDatasetInputBindings.front().getBatchInputName(), "features");
+
+    EXPECT_EQ(trainer.getTrainingData(), data);
+    EXPECT_EQ(data->getBatching().getBatchSize(), 8u);
+    EXPECT_NE(warning.find("Thor warning: Trainer requested batch size 8"), std::string::npos);
+    EXPECT_NE(warning.find("training split contains only 1 example."), std::string::npos);
+    EXPECT_NE(warning.find("Using batch size 1 for this training run."), std::string::npos);
+    const size_t firstWarning = warning.find("Thor warning:");
+    ASSERT_NE(firstWarning, std::string::npos);
+    EXPECT_EQ(warning.find("Thor warning:", firstWarning + 1), std::string::npos);
+}
+
+TEST(Trainer, KeepsConfiguredBatchSizeWhenItEqualsTrainingSetSize) {
+    auto data = makeFakeTrainingData(BatchPolicy(1, false));
+    auto executor = std::make_shared<CapturingExecutor>();
+    Trainer trainer = Trainer::Builder()
+                          .network(std::make_shared<Network>("trainer-keep-batch-size"))
+                          .data(data)
+                          .executor(executor)
+                          .observer(std::make_shared<NullTrainingObserver>())
+                          .build();
+
+    testing::internal::CaptureStderr();
+    trainer.fit(1);
+    const std::string warning = testing::internal::GetCapturedStderr();
+
+    EXPECT_TRUE(warning.empty());
+    EXPECT_EQ(executor->calls, 1u);
+    EXPECT_EQ(executor->lastTrainingData, data);
+    EXPECT_EQ(executor->lastBatchSessionSize, 1u);
 }
 
 TEST(Trainer, CompilesStrictDatasetInputBindingsBeforeOpeningSession) {

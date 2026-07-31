@@ -123,6 +123,10 @@ class PhysicalParameter {
 
     [[nodiscard]] bool isTrainable() const;
     [[nodiscard]] bool isTrainingEnabled() const;
+    // Returns the requested training state without applying inference-only placement.
+    [[nodiscard]] bool isTrainingStateEnabled() const;
+    [[nodiscard]] bool isExpressionBased() const;
+    void validateTrainingEnabledChange(bool enabled) const;
     void setTrainingEnabled(bool enabled);
 
     bool isStorageInitialized() const;

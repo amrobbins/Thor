@@ -3,6 +3,7 @@
 #include "DeepLearning/Api/Network/Network.h"
 #include "Utilities/Expression/FusedEquation.h"
 
+#include <algorithm>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -37,21 +38,59 @@ std::string joinNames(const std::set<std::string>& names) {
 
 std::set<std::string> toNameSet(const std::vector<std::string>& names) { return std::set<std::string>(names.begin(), names.end()); }
 
+std::set<std::string> expectedMetricOutputNames(const std::string& metricName, MetricAggregation aggregation) {
+    std::set<std::string> names{metricName};
+    if (aggregation == MetricAggregation::RATIO) {
+        names.insert(Thor::METRIC_AGGREGATION_NUMERATOR_NAME);
+        names.insert(Thor::METRIC_AGGREGATION_DENOMINATOR_NAME);
+    }
+    return names;
+}
+
+bool isScalarShape(const std::vector<uint64_t>& dimensions) {
+    return std::all_of(dimensions.begin(), dimensions.end(), [](uint64_t dimension) { return dimension == 1; });
+}
+
+std::optional<DataType> finalOutputDType(const std::shared_ptr<CompiledOutputs>& compiledOutputs,
+                                        const std::string& outputName) {
+    for (const CompiledExecutionStage& stage : compiledOutputs->stages) {
+        for (size_t outputIndex = 0; outputIndex < stage.outputs.size(); ++outputIndex) {
+            if (stage.outputs[outputIndex].name == outputName)
+                return stage.outputDType(outputIndex);
+        }
+    }
+    for (const CompiledStageOutput& finalOutput : compiledOutputs->final_outputs) {
+        if (finalOutput.name != outputName)
+            continue;
+        for (const CompiledExecutionStage& stage : compiledOutputs->stages) {
+            for (size_t outputIdx = 0; outputIdx < stage.outputs.size(); ++outputIdx) {
+                if (stage.outputs[outputIdx].value_id == finalOutput.value_id)
+                    return stage.outputDType(outputIdx);
+            }
+        }
+    }
+    return std::nullopt;
+}
+
 }  // namespace
 
 CustomMetric::CustomMetric(ThorImplementation::DynamicExpression expr,
                            Tensor predictions,
                            Tensor labels,
+                           MetricAggregation aggregation,
                            std::string predictionsName,
                            std::string labelsName,
                            std::string metricName,
                            std::optional<Tensor> metricTensor,
-                           std::string displayName)
+                           std::string displayName,
+                           bool usesBatchValidity)
     : expr(std::move(expr)),
       predictionsName(std::move(predictionsName)),
       labelsName(std::move(labelsName)),
       metricName(std::move(metricName)),
-      displayName(std::move(displayName)) {
+      displayName(std::move(displayName)),
+      aggregation(aggregation),
+      batchValidityMaskUsed(usesBatchValidity) {
     validateName(this->predictionsName, "predictions input");
     validateName(this->labelsName, "labels input");
     validateName(this->metricName, "metric output");
@@ -64,6 +103,8 @@ CustomMetric::CustomMetric(ThorImplementation::DynamicExpression expr,
     if (!expectedInputs.empty()) {
         std::set<std::string> expected(expectedInputs.begin(), expectedInputs.end());
         std::set<std::string> actual{this->predictionsName, this->labelsName};
+        if (batchValidityMaskUsed)
+            actual.insert(Thor::BATCH_VALIDITY_MASK_NAME);
         if (expected != actual) {
             throw runtime_error("CustomMetric expression input name mismatch. Expected {" + joinNames(expected) + "}, got {" +
                                 joinNames(actual) + "}.");
@@ -72,8 +113,8 @@ CustomMetric::CustomMetric(ThorImplementation::DynamicExpression expr,
 
     const std::vector<std::string>& expectedOutputs = this->expr.getExpectedOutputNames();
     if (!expectedOutputs.empty()) {
-        std::set<std::string> expected(expectedOutputs.begin(), expectedOutputs.end());
-        std::set<std::string> actual{this->metricName};
+        const std::set<std::string> expected(expectedOutputs.begin(), expectedOutputs.end());
+        const std::set<std::string> actual = expectedMetricOutputNames(this->metricName, this->aggregation);
         if (expected != actual) {
             throw runtime_error("CustomMetric expression output name mismatch. Expected {" + joinNames(expected) + "}, got {" +
                                 joinNames(actual) + "}.");
@@ -125,12 +166,21 @@ Tensor CustomMetric::inferMetricTensor() const {
     PhysicalTensorMap fakeInputs;
     fakeInputs.emplace(predictionsName, makeFakePlacedTensor(getPredictions()));
     fakeInputs.emplace(labelsName, makeFakePlacedTensor(getLabels()));
+    if (batchValidityMaskUsed) {
+        PhysicalTensor predictions = fakeInputs.at(predictionsName);
+        std::vector<uint64_t> maskDimensions = predictions.getDimensions();
+        for (size_t axis = 1; axis < maskDimensions.size(); ++axis)
+            maskDimensions[axis] = 1;
+        fakeInputs.emplace(Thor::BATCH_VALIDITY_MASK_NAME,
+                           PhysicalTensor(predictions.getPlacement(),
+                                          ThorImplementation::TensorDescriptor(DataType::FP32, maskDimensions)));
+    }
 
     Stream fakeStream(0, Stream::Priority::REGULAR);
     ThorImplementation::DynamicExpressionBuild build = expr.build(fakeInputs, {}, fakeStream);
 
     const std::set<std::string> actualOutputNames = toNameSet(build.equation->getOutputNames());
-    const std::set<std::string> expectedOutputNames{metricName};
+    const std::set<std::string> expectedOutputNames = expectedMetricOutputNames(metricName, aggregation);
     if (actualOutputNames != expectedOutputNames) {
         throw runtime_error("CustomMetric expression output name mismatch. Expected {" + joinNames(expectedOutputNames) + "}, got {" +
                             joinNames(actualOutputNames) + "}.");
@@ -140,25 +190,29 @@ Tensor CustomMetric::inferMetricTensor() const {
         build.equation->getOutputShapes(build.stamp_inputs, build.tensor_scalar_inputs);
     std::shared_ptr<CompiledOutputs> compiledOutputs = build.equation->compileForInputs(build.stamp_inputs, {}, build.tensor_scalar_inputs);
 
-    std::optional<DataType> metricDType;
-    for (const CompiledStageOutput& finalOutput : compiledOutputs->final_outputs) {
-        if (finalOutput.name != metricName)
-            continue;
-        for (const CompiledExecutionStage& stage : compiledOutputs->stages) {
-            for (size_t outputIdx = 0; outputIdx < stage.outputs.size(); ++outputIdx) {
-                if (stage.outputs[outputIdx].value_id == finalOutput.value_id) {
-                    metricDType = stage.outputDType(outputIdx);
-                    break;
-                }
-            }
-            if (metricDType.has_value())
-                break;
+    std::optional<DataType> metricDType = finalOutputDType(compiledOutputs, metricName);
+
+    if (aggregation == MetricAggregation::RATIO) {
+        for (const char* statisticName : {Thor::METRIC_AGGREGATION_NUMERATOR_NAME,
+                                          Thor::METRIC_AGGREGATION_DENOMINATOR_NAME}) {
+            auto statisticShapeIt = fakeOutputShapes.find(statisticName);
+            if (statisticShapeIt == fakeOutputShapes.end())
+                throw runtime_error("CustomMetric failed to infer output shape for '" + std::string(statisticName) + "'.");
+            if (!isScalarShape(statisticShapeIt->second))
+                throw runtime_error("CustomMetric ratio statistic output '" + std::string(statisticName) + "' must be scalar.");
+            const std::optional<DataType> statisticDType = finalOutputDType(compiledOutputs, statisticName);
+            if (!statisticDType.has_value())
+                throw runtime_error("CustomMetric failed to infer output dtype for '" + std::string(statisticName) + "'.");
+            if (statisticDType.value() != DataType::FP32)
+                throw runtime_error("CustomMetric ratio statistic output '" + std::string(statisticName) + "' must be FP32.");
         }
     }
 
     auto shapeIt = fakeOutputShapes.find(metricName);
     if (shapeIt == fakeOutputShapes.end())
         throw runtime_error("CustomMetric failed to infer output shape for '" + metricName + "'.");
+    if (aggregation == MetricAggregation::RATIO && !isScalarShape(shapeIt->second))
+        throw runtime_error("CustomMetric ratio metric output '" + metricName + "' must be scalar.");
     if (!metricDType.has_value())
         throw runtime_error("CustomMetric failed to infer output dtype for '" + metricName + "'.");
 
@@ -177,14 +231,21 @@ std::shared_ptr<ThorImplementation::Layer> CustomMetric::stamp(ThorImplementatio
     THOR_THROW_IF_FALSE(initialized);
     THOR_THROW_IF_FALSE(connectingApiTensor == getFeatureInput().value() || connectingApiTensor == labelsTensor);
 
-    return std::make_shared<ThorImplementation::CustomMetric>(expr, predictionsName, labelsName, metricName, displayName);
+    const std::optional<std::string> validityMaskName =
+        batchValidityMaskUsed
+            ? std::optional<std::string>(Thor::BATCH_VALIDITY_MASK_NAME)
+            : std::nullopt;
+    return std::make_shared<ThorImplementation::CustomMetric>(
+        expr, predictionsName, labelsName, metricName, displayName, aggregation, validityMaskName);
 }
 
 uint64_t CustomMetric::getFirstInstanceMemRequirementInBytes(uint32_t batchSize,
                                                              ThorImplementation::TensorPlacement tensorPlacement) const {
-    (void)batchSize;
     (void)tensorPlacement;
-    return metricTensor.getTotalSizeInBytes();
+    const uint64_t validityMaskBytes =
+        batchValidityMaskUsed ? static_cast<uint64_t>(batchSize) * sizeof(float) : 0;
+    const uint64_t ratioStatisticBytes = aggregation == MetricAggregation::RATIO ? 4 * sizeof(float) : 0;
+    return metricTensor.getTotalSizeInBytes() + validityMaskBytes + ratioStatisticBytes;
 }
 
 json CustomMetric::architectureJson() const {
@@ -194,6 +255,7 @@ json CustomMetric::architectureJson() const {
     j["labels_name"] = labelsName;
     j["metric_name"] = metricName;
     j["display_name"] = displayName;
+    j["uses_batch_validity"] = batchValidityMaskUsed;
 
     auto serializedDefinition = expr.getSerializedDefinition();
     if (serializedDefinition == nullptr) {
@@ -215,6 +277,12 @@ void CustomMetric::deserialize(const json& j, Network* network) {
     const std::string labelsName = j.value("labels_name", std::string("labels"));
     const std::string metricName = j.value("metric_name", std::string("metric"));
     const std::string displayName = j.value("display_name", std::string("Metric"));
+    if (j.contains("supports_partial_batches"))
+        throw runtime_error("CustomMetric field supports_partial_batches is no longer supported; use uses_batch_validity.");
+    if (j.contains("uses_batch_validity_mask"))
+        throw runtime_error("CustomMetric field uses_batch_validity_mask is no longer supported; use uses_batch_validity.");
+    const bool usesBatchValidity = j.at("uses_batch_validity").get<bool>();
+    const MetricAggregation aggregation = j.at("aggregation").get<MetricAggregation>();
 
     const uint64_t predictionsOriginalId = j.at("predictions").at("id").get<uint64_t>();
     Tensor predictions = network->getApiTensorByOriginalId(predictionsOriginalId);
@@ -233,11 +301,13 @@ void CustomMetric::deserialize(const json& j, Network* network) {
     CustomMetric customMetric(ThorImplementation::DynamicExpression::fromExpressionDefinition(expressionDefinition),
                               predictions,
                               labels,
+                              aggregation,
                               predictionsName,
                               labelsName,
                               metricName,
                               metricTensor,
-                              displayName);
+                              displayName,
+                              usesBatchValidity);
     customMetric.addToNetwork(network);
 }
 

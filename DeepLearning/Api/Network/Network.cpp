@@ -12,6 +12,7 @@
 #include "DeepLearning/Api/Layers/Loss/CustomLoss.h"
 #include "DeepLearning/Api/Layers/Loss/MultiInputCustomLoss.h"
 #include "DeepLearning/Api/Layers/Loss/QuantileLoss.h"
+#include "DeepLearning/Api/Layers/Utility/TypeConverter.h"
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Parameter/ParameterSpecification.h"
@@ -2086,6 +2087,7 @@ std::vector<NetworkMetricReference> Network::getReportableMetrics() {
                     reference.targetInputName = labelInputName;
                     reference.inputSourceName = inputSourceName;
                     reference.metricLayerType = metric->getLayerType();
+                    reference.aggregation = metric->getAggregation();
                     references.push_back(std::move(reference));
                 }
             } else {
@@ -2094,6 +2096,7 @@ std::vector<NetworkMetricReference> Network::getReportableMetrics() {
                 reference.targetInputName = labelInputName;
                 reference.inputSourceName = inputSourceName;
                 reference.metricLayerType = metric->getLayerType();
+                reference.aggregation = metric->getAggregation();
                 references.push_back(std::move(reference));
             }
         }
@@ -2125,7 +2128,10 @@ std::vector<NetworkMetricReference> Network::getReportableMetrics() {
         if (lhs.requiredInputNames != rhs.requiredInputNames) {
             return lhs.requiredInputNames < rhs.requiredInputNames;
         }
-        return lhs.metricLayerType < rhs.metricLayerType;
+        if (lhs.metricLayerType != rhs.metricLayerType) {
+            return lhs.metricLayerType < rhs.metricLayerType;
+        }
+        return lhs.aggregation < rhs.aggregation;
     });
     return references;
 }
@@ -3427,6 +3433,39 @@ void Network::stampNetworkOutput(Tensor inputTensor,
     shared_ptr<Thor::Layer> apiDrivingLayer =
         apiTensorToApiDrivingLayer.count(inputTensor) == 0 ? nullptr : apiTensorToApiDrivingLayer[inputTensor];
 
+    // NetworkOutput may be separated from its metric by transparent API support
+    // layers such as a type converter. Follow the API tensor graph to find the
+    // unique metric whose public scalar this output exposes. If an output combines
+    // multiple metric layers, no single metric's sufficient statistics describe it.
+    std::set<Tensor> visitedMetricTensors;
+    std::map<uint64_t, shared_ptr<Thor::Metric>> drivingMetrics;
+    std::function<void(const Tensor&)> collectDrivingMetrics = [&](const Tensor& tensor) {
+        if (!visitedMetricTensors.insert(tensor).second)
+            return;
+        auto driverIt = apiTensorToApiDrivingLayer.find(tensor);
+        if (driverIt == apiTensorToApiDrivingLayer.end() || driverIt->second == nullptr)
+            return;
+        shared_ptr<Thor::Layer> driver = driverIt->second;
+        shared_ptr<Thor::Metric> metric = dynamic_pointer_cast<Thor::Metric>(driver);
+        if (metric != nullptr) {
+            drivingMetrics.emplace(metric->getId(), std::move(metric));
+            return;
+        }
+        // Only walk through support layers that preserve the metric value. A
+        // user-authored transform of a metric scalar has different sufficient
+        // statistics and must not inherit the source metric's ratio components.
+        if (dynamic_pointer_cast<Thor::TypeConverter>(driver) == nullptr)
+            return;
+        auto inputsIt = apiLayerToApiInputTensors.find(driver);
+        if (inputsIt == apiLayerToApiInputTensors.end())
+            return;
+        for (const Tensor& upstream : inputsIt->second)
+            collectDrivingMetrics(upstream);
+    };
+    collectDrivingMetrics(inputTensor);
+    const shared_ptr<Thor::Metric> apiDrivingMetric =
+        drivingMetrics.size() == 1 ? drivingMetrics.begin()->second : nullptr;
+
     // If the api tensor has multiple loads and the physical driving layer is not a fanout,
     // then replace the physical driving layer with a newly stamped fanout
     uint32_t numLoadingLayers = apiTensorToApiLoadingLayers[inputTensor].size();
@@ -3465,6 +3504,15 @@ void Network::stampNetworkOutput(Tensor inputTensor,
     stampedNetwork.outputs.push_back(implementationNetworkOutput.get());
     stampedNetwork.outputNamedShared[implementationNetworkOutput->getName()] = implementationNetworkOutput;
     stampedNetwork.outputNamed[implementationNetworkOutput->getName()] = implementationNetworkOutput.get();
+    if (apiDrivingMetric != nullptr) {
+        auto physicalMetricIt = stampedNetwork.apiLayerToPhysicalLayerShared.find(apiDrivingMetric->getId());
+        THOR_THROW_IF_FALSE(physicalMetricIt != stampedNetwork.apiLayerToPhysicalLayerShared.end());
+        std::shared_ptr<ThorImplementation::Metric> physicalMetric =
+            dynamic_pointer_cast<ThorImplementation::Metric>(physicalMetricIt->second);
+        THOR_THROW_IF_FALSE(physicalMetric != nullptr);
+        stampedNetwork.metricStatisticsByOutputNameShared[implementationNetworkOutput->getName()] =
+            std::move(physicalMetric);
+    }
     if (DEBUG_STAMP) {
         printf("stamped network output\n");
         fflush(stdout);

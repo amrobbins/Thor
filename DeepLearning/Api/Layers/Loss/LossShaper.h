@@ -93,13 +93,10 @@ class LossShaper : public Layer {
 
         const std::vector<uint32_t> axes =
             ThorImplementation::LossShaper::getReductionAxes(implementationInputLossDimensions, outputLossType);
-        const float outputScale =
-            ThorImplementation::LossShaper::getReductionOutputScale(implementationInputLossDimensions, outputLossType);
-
         const ThorImplementation::TensorDescriptor inputDescriptor(lossInput.getDataType(), implementationInputLossDimensions);
         const ThorImplementation::TensorDescriptor outputDescriptor(lossOutput.getDataType(), implementationOutputLossDimensions);
         ThorImplementation::CubReduction reduction(
-            ThorImplementation::CubReductionOp::Sum, axes, lossOutput.getDataType(), outputScale);
+            ThorImplementation::CubReductionOp::Sum, axes, lossOutput.getDataType(), 1.0f);
         Stream queryStream = Stream::getNextUploadStream(tensorPlacement.getDeviceNum());
         return outputDescriptor.getArraySizeInBytes() + reduction.queryWorkspaceSizeInBytes(inputDescriptor, queryStream);
     }

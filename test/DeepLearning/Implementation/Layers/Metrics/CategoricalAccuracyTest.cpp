@@ -15,6 +15,7 @@
 #include "cuda_runtime.h"
 #include "gtest/gtest.h"
 
+#include <algorithm>
 #include <set>
 #include <unordered_set>
 #include <vector>
@@ -233,4 +234,51 @@ TEST(CategoricalAccuracy, ComputesCorrectElementWiseResult_classIndexLabels) {
 
         LayerTestHelper::tearDownNetwork(layers);
     }
+}
+
+TEST(CategoricalAccuracy, PartialBatchIgnoresInvalidTailRows) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    TensorDescriptor predictionsDescriptor(DataType::FP32, {4, 3});
+    TensorDescriptor labelsDescriptor(DataType::UINT32, {4, 1});
+
+    Tensor predictionsCpu(cpuPlacement, predictionsDescriptor);
+    Tensor labelsCpu(cpuPlacement, labelsDescriptor);
+    Tensor predictionsGpu(gpuPlacement, predictionsDescriptor);
+    Tensor labelsGpu(gpuPlacement, labelsDescriptor);
+
+    const vector<float> predictionValues = {
+        0.1f, 0.8f, 0.1f,
+        0.7f, 0.2f, 0.1f,
+        0.1f, 0.8f, 0.1f,
+        0.7f, 0.2f, 0.1f,
+    };
+    std::copy(predictionValues.begin(), predictionValues.end(), predictionsCpu.getMemPtr<float>());
+    uint32_t* labels = labelsCpu.getMemPtr<uint32_t>();
+    labels[0] = 1;
+    labels[1] = 0;
+    labels[2] = 2;
+    labels[3] = 2;
+
+    vector<shared_ptr<Layer>> layers;
+    auto predictionsInput = make_shared<NetworkInput>(predictionsGpu);
+    auto labelsInput = make_shared<NetworkInput>(labelsGpu);
+    auto metric = make_shared<CategoricalAccuracy>();
+    auto output = make_shared<NetworkOutput>(gpuPlacement);
+    layers = {predictionsInput, labelsInput, metric, output};
+
+    LayerTestHelper::connectTwoLayers(predictionsInput, metric, 0, static_cast<int>(Metric::ConnectionType::FORWARD));
+    LayerTestHelper::connectTwoLayers(labelsInput, metric, 0, static_cast<int>(Metric::ConnectionType::LABELS));
+    LayerTestHelper::connectTwoLayers(metric, output, static_cast<int>(Metric::ConnectionType::METRIC));
+    LayerTestHelper::initializeNetwork(layers);
+
+    predictionsInput->forward(predictionsCpu, false, 2);
+    labelsInput->forward(labelsCpu, false, 2);
+
+    Tensor resultCpu = output->getFeatureOutput().value().clone(cpuPlacement);
+    resultCpu.copyFromAsync(output->getFeatureOutput().value(), predictionsInput->getStream());
+    predictionsInput->getStream().synchronize();
+    EXPECT_NEAR(*resultCpu.getMemPtr<float>(), 1.0f, 1e-6f);
+
+    LayerTestHelper::tearDownNetwork(layers);
 }

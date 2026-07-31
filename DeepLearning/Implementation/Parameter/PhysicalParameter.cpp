@@ -168,8 +168,23 @@ std::optional<Tensor> PhysicalParameter::getStorage() { return storage; }
 
 bool PhysicalParameter::isTrainable() const { return trainable; }
 bool PhysicalParameter::isTrainingEnabled() const { return isTrainable() && trainingEnabled && !inferenceOnly; }
-void PhysicalParameter::setTrainingEnabled(bool enabled) {
+bool PhysicalParameter::isTrainingStateEnabled() const { return isTrainable() && trainingEnabled; }
+bool PhysicalParameter::isExpressionBased() const { return expressionBased; }
+
+void PhysicalParameter::validateTrainingEnabledChange(bool enabled) const {
     THOR_THROW_IF_FALSE(isTrainable());
+    if (enabled == trainingEnabled)
+        return;
+
+    if (storageInitialized && !expressionBased) {
+        throw std::runtime_error(
+            "Cannot change the training-enabled state of placed legacy parameter '" + name +
+            "'. Re-place the network so backward requirements, optimizer storage, and stream assignment can be rebuilt.");
+    }
+}
+
+void PhysicalParameter::setTrainingEnabled(bool enabled) {
+    validateTrainingEnabledChange(enabled);
 
     if (enabled != trainingEnabled) {
         trainingEnabled = enabled;

@@ -444,6 +444,30 @@ TEST(SgdTest, PlainSgdSingleStepMatchesCpuReference) {
     expectMapHasValue(all, "useNesterovMomentum", 0.0f);
 }
 
+TEST(SgdTest, RuntimeBatchCardinalityControlsMaterializedGradientNormalization) {
+    Stream stream(gpuPlacement);
+
+    constexpr float initialLearningRate = 0.1f;
+    const std::vector<float> rawGradient{8.0f};
+
+    Tensor partialBatchWeights(gpuPlacement, TensorDescriptor(DataType::FP32, {1}));
+    Tensor fullBatchWeights(gpuPlacement, TensorDescriptor(DataType::FP32, {1}));
+    copyValuesToGpuFp32Tensor(partialBatchWeights, {0.0f}, stream);
+    copyValuesToGpuFp32Tensor(fullBatchWeights, {0.0f}, stream);
+
+    Sgd partialBatchSgd(31, initialLearningRate, 0.0f, 0.0f, false);
+    Sgd fullBatchSgd(32, initialLearningRate, 0.0f, 0.0f, false);
+    partialBatchSgd.compile(partialBatchWeights, stream);
+    fullBatchSgd.compile(fullBatchWeights, stream);
+    stream.synchronize();
+
+    runSgdStep(partialBatchSgd, rawGradient, /*validExampleCount=*/2, stream);
+    runSgdStep(fullBatchSgd, rawGradient, /*validExampleCount=*/4, stream);
+
+    EXPECT_NEAR(copyGpuFp32TensorToValues(partialBatchWeights, stream).front(), -0.4f, 1.0e-6f);
+    EXPECT_NEAR(copyGpuFp32TensorToValues(fullBatchWeights, stream).front(), -0.2f, 1.0e-6f);
+}
+
 TEST(SgdTest, PlainSgdTwoStepsUseUpdatedLearningRate) {
     Stream stream(gpuPlacement);
 

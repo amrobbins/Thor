@@ -253,10 +253,10 @@ class RuntimeForwardedInputCaptureLayer : public Layer {
    public:
     void forward(std::optional<Tensor> forwardedFeatureInput, bool validationPass, uint32_t batchSize = 0) override {
         (void)validationPass;
-        (void)batchSize;
         THOR_THROW_IF_FALSE(forwardedFeatureInput.has_value());
         THOR_THROW_IF_FALSE(featureInput.has_value());
 
+        forwardedBatchSizes.push_back(batchSize);
         forwardedTensorIds.push_back(forwardedFeatureInput.value().getTensorId());
         connectedTensorIds.push_back(featureInput.value().getTensorId());
         forwardedMemPtrs.push_back(forwardedFeatureInput.value().getMemPtr<void>());
@@ -298,6 +298,7 @@ class RuntimeForwardedInputCaptureLayer : public Layer {
     }
 
     uint32_t invocationCount = 0;
+    vector<uint32_t> forwardedBatchSizes;
     vector<uint64_t> forwardedTensorIds;
     vector<uint64_t> connectedTensorIds;
     vector<void *> forwardedMemPtrs;
@@ -687,6 +688,35 @@ TEST(NetworkInput, DeviceReferenceUsesReferenceRingAndMaterializesDirectlyIntoFe
     ASSERT_TRUE(input.getFeatureOutput().has_value());
     EXPECT_EQ(capture.forwardedTensorIds[0], input.getFeatureOutput().value().getTensorId());
     EXPECT_EQ(capture.forwardedMemPtrs[0], input.getFeatureOutput().value().getMemPtr<void>());
+}
+
+TEST(NetworkInput, DeviceReferenceForwardsValidExampleCountBelowPhysicalCapacity) {
+    if (MachineEvaluator::instance().getNumGpus() == 0) {
+        GTEST_SKIP() << "NetworkInput partial device-reference test requires a GPU";
+    }
+
+    constexpr uint32_t physicalBatchCapacity = 4;
+    constexpr uint32_t validExampleCount = 2;
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    TensorDescriptor descriptor(DataType::FP32, {physicalBatchCapacity, 3});
+    Stream setupStream(0);
+    Tensor source = makeFilledGpuTensor(descriptor, 5.0f, setupStream);
+    setupStream.synchronize();
+
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    RuntimeForwardedInputCaptureLayer capture;
+    input.connectToNextLayer(&capture);
+    input.configureBatchInputSource(Thor::BatchFieldSourceDescription::deviceReference(gpuPlacement));
+
+    auto materializer = std::make_shared<CopyTensorDeviceBatchMaterializer>(source);
+    Thor::DeviceBatchReference reference(materializer, physicalBatchCapacity);
+    input.forward(reference, false, validExampleCount);
+    capture.synchronize();
+
+    ASSERT_EQ(capture.forwardedBatchSizes.size(), 1u);
+    EXPECT_EQ(capture.forwardedBatchSizes.front(), validExampleCount);
+    EXPECT_ANY_THROW(input.forward(reference, false, 0));
+    EXPECT_ANY_THROW(input.forward(reference, false, physicalBatchCapacity + 1));
 }
 
 TEST(NetworkInput, DeviceReferenceConfigurationRejectsMaterializedTensorSubmission) {

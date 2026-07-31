@@ -387,18 +387,18 @@ class NetworkInput : public Layer {
     // its materializer writes directly into the statically connected featureOutput.
     virtual void forward(const Thor::DeviceBatchReference& deviceBatchReference,
                          bool validationPass,
-                         uint32_t batchSize = 0) {
+                         uint32_t validExampleCount) {
         forward(
             deviceBatchReference,
             validationPass,
-            batchSize,
+            validExampleCount,
             std::nullopt);
     }
 
     virtual void forward(
         const Thor::DeviceBatchReference& deviceBatchReference,
         bool validationPass,
-        uint32_t batchSize,
+        uint32_t validExampleCount,
         std::optional<Thor::BatchSourceReference> sourceReference) {
         THOR_THROW_IF_FALSE(isDeviceReferenceLoad());
         THOR_THROW_IF_FALSE(deviceBatchReference.isInitialized());
@@ -406,10 +406,8 @@ class NetworkInput : public Layer {
         THOR_THROW_IF_FALSE(featureOutput.has_value());
         THOR_THROW_IF_FALSE(deviceBatchReference.getOutputDescriptor() == featureOutput.value().getDescriptor());
         THOR_THROW_IF_FALSE(deviceBatchReference.getOutputPlacement() == networkPlacement);
-        if (batchSize == 0) {
-            batchSize = deviceBatchReference.getBatchSize();
-        }
-        THOR_THROW_IF_FALSE(batchSize == deviceBatchReference.getBatchSize());
+        THOR_THROW_IF_FALSE(validExampleCount >= 1);
+        THOR_THROW_IF_FALSE(validExampleCount <= deviceBatchReference.getBatchCapacity());
 
         const bool emitDiagnostics = layerSubmitDiagnosticsActive();
         const auto totalStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
@@ -444,7 +442,7 @@ class NetworkInput : public Layer {
         }
 
         const auto downstreamStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
-        nextLayer.value()->forward(featureOutput, validationPass, batchSize);
+        nextLayer.value()->forward(featureOutput, validationPass, validExampleCount);
         const uint64_t downstreamMicros =
             emitDiagnostics ? layerSubmitDiagnosticElapsedMicros(downstreamStart, layerSubmitDiagnosticNow()) : 0;
 

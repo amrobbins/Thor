@@ -9,6 +9,7 @@
 #include "DeepLearning/Api/Data/Batch.h"
 #include "DeepLearning/Api/Data/BatchSourceResource.h"
 #include "DeepLearning/Implementation/Tensor/RaggedTensorDescriptor.h"
+#include "DeepLearning/Implementation/Layers/Metric.h"
 #include "Utilities/Common/Event.h"
 #include "Utilities/Common/Stream.h"
 
@@ -143,6 +144,9 @@ class StampedNetwork {
     }
     void preallocateInputSlots(uint32_t numSlots);
     void preallocateOutputSlots(uint32_t numSlots);
+    [[nodiscard]] std::map<std::string, MetricBatchStatisticTensors> getMetricBatchStatisticTensorsForSlot(
+        uint32_t slotIndex) const;
+    void extendMetricStatisticWritableEvents(Event event, std::optional<uint32_t> outputSlotIndex = std::nullopt);
 
     uint64_t getNumTrainableLayers() { return trainableLayersShared.size(); }
     std::shared_ptr<ThorImplementation::TrainableLayer> &getTrainableLayer(uint64_t i) { return trainableLayersShared[i]; }
@@ -221,7 +225,8 @@ class StampedNetwork {
                             std::map<std::string, Tensor> &batchOutputs,
                             std::map<std::string, Event> &outputReadyEvents,
                             bool isInferenceOnly,
-                            uint32_t batchSize,
+                            uint32_t physicalBatchCapacity,
+                            uint32_t validExampleCount,
                             Event* reusableProcessingFinishedEvent = nullptr,
                             bool waitForOutputsOnProcessingStream = true,
                             BatchSubmissionTiming* submitTiming = nullptr,
@@ -244,6 +249,9 @@ class StampedNetwork {
     std::map<std::string, std::shared_ptr<ThorImplementation::NetworkInput>> inputNamedShared;
     std::map<std::string, RaggedInputBinding> raggedInputNamedShared;
     std::map<std::string, std::shared_ptr<ThorImplementation::NetworkOutput>> outputNamedShared;
+    // Internal sufficient-statistic source for each public metric output. Hidden
+    // ratio numerator/denominator tensors never enter outputNamedShared.
+    std::map<std::string, std::shared_ptr<ThorImplementation::Metric>> metricStatisticsByOutputNameShared;
 
     // std::map<uint64_t, std::shared_ptr<ThorImplementation::Parameterizable>> apiParameterizableToPhysicalParameterizable;
     // FIXME: get rid of raw pointers

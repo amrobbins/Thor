@@ -131,24 +131,30 @@ inline Expression batchLossFromRawLoss(const Expression& rawLoss, const std::vec
     return summed / Expression::constantScalar(batchSize);
 }
 
-inline DynamicExpression makeBatchLossMetricExpression(Options options) {
-    if (options.predictionsName.empty() || options.labelsName.empty() || options.lossName.empty())
+inline DynamicExpression makeBatchLossMetricExpression(Options options, std::string batchValidityMaskName) {
+    if (options.predictionsName.empty() || options.labelsName.empty() || options.lossName.empty() || batchValidityMaskName.empty())
         throw std::invalid_argument("Loss expression input and output names cannot be empty.");
-    if (options.predictionsName == options.labelsName)
-        throw std::invalid_argument("Loss expression predictions and labels names must be distinct.");
+    if (options.predictionsName == options.labelsName || options.predictionsName == batchValidityMaskName ||
+        options.labelsName == batchValidityMaskName) {
+        throw std::invalid_argument("Loss expression input names must be distinct.");
+    }
 
-    const std::vector<std::string> expectedInputNames{options.predictionsName, options.labelsName};
+    const std::vector<std::string> expectedInputNames{
+        options.predictionsName, options.labelsName, batchValidityMaskName};
     const std::vector<std::string> expectedOutputNames{options.lossName};
 
     return DynamicExpression(expectedInputNames,
                              expectedOutputNames,
-                             [options = std::move(options)](const DynamicExpression::TensorMap& inputs,
-                                                            const DynamicExpression::TensorMap& outputs,
-                                                            Stream& stream) -> DynamicExpressionBuild {
+                             [options = std::move(options), batchValidityMaskName = std::move(batchValidityMaskName)](
+                                 const DynamicExpression::TensorMap& inputs,
+                                 const DynamicExpression::TensorMap& outputs,
+                                 Stream& stream) -> DynamicExpressionBuild {
                                  auto predictionsIt = inputs.find(options.predictionsName);
                                  auto labelsIt = inputs.find(options.labelsName);
-                                 if (predictionsIt == inputs.end() || labelsIt == inputs.end())
-                                     throw std::invalid_argument("Loss metric expression requires predictions and labels inputs.");
+                                 auto validityIt = inputs.find(batchValidityMaskName);
+                                 if (predictionsIt == inputs.end() || labelsIt == inputs.end() || validityIt == inputs.end())
+                                     throw std::invalid_argument(
+                                         "Loss metric expression requires predictions, labels, and batch-validity inputs.");
 
                                  const Tensor& predictionsTensor = predictionsIt->second;
                                  const Tensor& labelsTensor = labelsIt->second;
@@ -158,7 +164,14 @@ inline DynamicExpression makeBatchLossMetricExpression(Options options) {
                                  Expression predictions = Expression::input(options.predictionsName, options.computeDataType, options.computeDataType);
                                  Expression labels = Expression::input(options.labelsName, options.computeDataType, options.computeDataType);
                                  Expression raw = rawLossExpression(options.formula, predictions, labels, options);
-                                 Expression loss = batchLossFromRawLoss(raw, predictionDims, options.computeDataType);
+                                 Expression validity =
+                                     Expression::input(batchValidityMaskName, DataType::FP32, DataType::FP32);
+                                 Expression maskedRaw = raw * validity;
+                                 Expression summed = maskedRaw.reduce_sum(
+                                     allAxes(predictionDims.size()), squeezeAllButOneAxis(predictionDims.size()), options.computeDataType);
+                                 Expression validExamples = validity.reduce_sum(
+                                     allAxes(predictionDims.size()), squeezeAllButOneAxis(predictionDims.size()), DataType::FP32);
+                                 Expression loss = summed / validExamples;
 
                                  ExpressionDefinition definition =
                                      ExpressionDefinition::fromOutputs(Expression::outputs({{options.lossName, loss}}));

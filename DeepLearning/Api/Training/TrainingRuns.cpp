@@ -10,6 +10,7 @@
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Training/Observers/TrainingRunsStatsReporter.h"
 #include "DeepLearning/Api/Training/Observers/TrainingStatsSink.h"
+#include "DeepLearning/Api/Training/MetricEpochAccumulator.h"
 #include "DeepLearning/Api/Training/PhaseGraphConnector.h"
 #include "DeepLearning/Api/Training/TrainingProgram.h"
 #include "DeepLearning/Implementation/Training/DeviceStartupCoordinator.h"
@@ -762,6 +763,7 @@ struct ResolvedEnsembleMetric {
     std::optional<std::string> inputSourceName{};
     std::vector<std::string> requiredInputNames{};
     std::string metricType{};
+    MetricAggregation aggregation = MetricAggregation::MEAN_BY_EXAMPLE;
 };
 
 bool quantilesCompatible(std::optional<double> lhs, std::optional<double> rhs) {
@@ -897,7 +899,8 @@ std::vector<ResolvedEnsembleLoss> resolveTrainingRunsReportedLosses(
 bool trainingRunsReportableMetricsCompatible(const NetworkMetricReference& lhs, const NetworkMetricReference& rhs) {
     return lhs.metricName == rhs.metricName && lhs.predictionOutputName == rhs.predictionOutputName &&
            lhs.targetInputName == rhs.targetInputName && lhs.inputSourceName == rhs.inputSourceName &&
-           lhs.requiredInputNames == rhs.requiredInputNames && lhs.metricLayerType == rhs.metricLayerType;
+           lhs.requiredInputNames == rhs.requiredInputNames && lhs.metricLayerType == rhs.metricLayerType &&
+           lhs.aggregation == rhs.aggregation;
 }
 
 std::string trainingRunsReportableMetricDescription(const NetworkMetricReference& reference) {
@@ -914,6 +917,7 @@ std::string trainingRunsReportableMetricDescription(const NetworkMetricReference
     }
     out << ", required_input_names=" << inputNameBoundaryDescription(reference.requiredInputNames);
     out << ", metric_layer_type='" << reference.metricLayerType << "'";
+    out << ", aggregation='" << metricAggregationName(reference.aggregation) << "'";
     return out.str();
 }
 
@@ -985,6 +989,7 @@ std::vector<ResolvedEnsembleMetric> resolveTrainingRunsReportedMetrics(
         metric.inputSourceName = reference.inputSourceName;
         metric.requiredInputNames = reference.requiredInputNames;
         metric.metricType = reference.metricLayerType;
+        metric.aggregation = reference.aggregation;
         resolved.push_back(std::move(metric));
     }
     return resolved;
@@ -2371,6 +2376,7 @@ void TrainingRuns::validateReportedMetrics() const {
                 reference.inputSourceName = resolved.inputSourceName;
                 reference.requiredInputNames = resolved.requiredInputNames;
                 reference.metricLayerType = resolved.metricType;
+                reference.aggregation = resolved.aggregation;
                 NetworkMetricReference memberReference;
                 memberReference.metricName = memberResolvedIt->metricName;
                 memberReference.predictionOutputName = memberResolvedIt->predictionOutputName;
@@ -2378,6 +2384,7 @@ void TrainingRuns::validateReportedMetrics() const {
                 memberReference.inputSourceName = memberResolvedIt->inputSourceName;
                 memberReference.requiredInputNames = memberResolvedIt->requiredInputNames;
                 memberReference.metricLayerType = memberResolvedIt->metricType;
+                memberReference.aggregation = memberResolvedIt->aggregation;
                 if (!trainingRunsReportableMetricsCompatible(reference, memberReference)) {
                     throw std::runtime_error(memberContext + " resolved graph metric '" + resolved.metricName +
                                              "' differently than reference run '" + referenceMember.runName + "'. Reference: " +
@@ -3498,6 +3505,7 @@ TrainingRunsComposedEvaluatorArtifacts loadTrainingRunsComposedEvaluatorArtifact
             reference.inputSourceName = referenceMetric.inputSourceName;
             reference.requiredInputNames = referenceMetric.requiredInputNames;
             reference.metricLayerType = referenceMetric.metricType;
+            reference.aggregation = referenceMetric.aggregation;
             NetworkMetricReference memberReference;
             memberReference.metricName = memberMetricIt->metricName;
             memberReference.predictionOutputName = memberMetricIt->predictionOutputName;
@@ -3505,6 +3513,7 @@ TrainingRunsComposedEvaluatorArtifacts loadTrainingRunsComposedEvaluatorArtifact
             memberReference.inputSourceName = memberMetricIt->inputSourceName;
             memberReference.requiredInputNames = memberMetricIt->requiredInputNames;
             memberReference.metricLayerType = memberMetricIt->metricType;
+            memberReference.aggregation = memberMetricIt->aggregation;
             if (!trainingRunsReportableMetricsCompatible(reference, memberReference)) {
                 throw std::runtime_error(context + " member " + std::to_string(memberIndex) +
                                          " resolved graph metric '" + referenceMetric.metricName +
@@ -3547,9 +3556,25 @@ uint64_t batchRowsForEvaluatorInputs(const Batch& batch, const std::vector<std::
         return std::get<ThorImplementation::RaggedTensor>(value).getBatchSize();
     }
     if (std::holds_alternative<DeviceBatchReference>(value)) {
-        return std::get<DeviceBatchReference>(value).getBatchSize();
+        return std::get<DeviceBatchReference>(value).getBatchCapacity();
     }
     throw std::runtime_error(context + " evaluator input '" + inputName + "' has an unsupported value type.");
+}
+
+uint64_t validBatchRowsForEvaluatorInputs(const Batch& batch,
+                                          const std::vector<std::string>& inputNames,
+                                          const std::string& context) {
+    const uint64_t batchCapacity = batchRowsForEvaluatorInputs(batch, inputNames, context);
+    const std::optional<uint32_t> declaredValidRows = batch.getValidExampleCount();
+    const uint64_t validRows = declaredValidRows.has_value()
+                                   ? static_cast<uint64_t>(declaredValidRows.value())
+                                   : batchCapacity;
+    if (validRows == 0 || validRows > batchCapacity) {
+        throw std::runtime_error(context + " has invalid valid-example count " +
+                                 std::to_string(validRows) + " for physical batch capacity " +
+                                 std::to_string(batchCapacity) + ".");
+    }
+    return validRows;
 }
 
 ThorImplementation::Tensor tensorOnCpuForLossReadback(ThorImplementation::Tensor tensor) {
@@ -3596,9 +3621,82 @@ double tensorMeanAsDouble(ThorImplementation::Tensor tensor, const std::string& 
     return sum / static_cast<double>(cpuTensor.getTotalNumElements());
 }
 
+double tensorScalarAsDoubleForMetricStatistic(const ThorImplementation::Tensor& tensor,
+                                              const std::string& context) {
+    if (tensor.getPlacement().getMemDevice() !=
+        ThorImplementation::TensorPlacement::MemDevices::CPU) {
+        throw std::runtime_error(context + " is not resident on CPU.");
+    }
+    if (tensor.getTotalNumElements() != 1) {
+        throw std::runtime_error(context + " is not scalar.");
+    }
+    const double value = tensorElementAsDoubleForLossReadback(tensor, 0, context);
+    if (!std::isfinite(value)) {
+        throw std::runtime_error(context + " produced a non-finite value.");
+    }
+    return value;
+}
+
+MetricBatchStat composedMetricBatchStat(
+    const ResolvedEnsembleMetric& metric,
+    double value,
+    uint64_t validRows,
+    std::map<std::string, ThorImplementation::MetricBatchStatisticTensors>& statisticTensors) {
+    MetricBatchStat statistic;
+    statistic.aggregation = metric.aggregation;
+    statistic.value = value;
+    statistic.validExamples = validRows;
+
+    const auto tensorIt = statisticTensors.find(metric.metricName);
+    if (tensorIt != statisticTensors.end() &&
+        tensorIt->second.aggregation != metric.aggregation) {
+        throw std::runtime_error(
+            "TrainingRuns composed ensemble evaluator metric '" + metric.metricName +
+            "' produced aggregation metadata '" +
+            std::string(metricAggregationName(tensorIt->second.aggregation)) +
+            "', expected '" + std::string(metricAggregationName(metric.aggregation)) + "'.");
+    }
+
+    if (metric.aggregation != MetricAggregation::RATIO) {
+        if (tensorIt != statisticTensors.end() &&
+            (tensorIt->second.numerator.has_value() ||
+             tensorIt->second.denominator.has_value() ||
+             tensorIt->second.readyEvent.isInitialized())) {
+            throw std::runtime_error(
+                "TrainingRuns composed ensemble evaluator non-ratio metric '" +
+                metric.metricName + "' unexpectedly exposed ratio statistics.");
+        }
+        return statistic;
+    }
+
+    if (tensorIt == statisticTensors.end()) {
+        throw std::runtime_error(
+            "TrainingRuns composed ensemble evaluator ratio metric '" + metric.metricName +
+            "' did not expose internal numerator and denominator statistics.");
+    }
+    ThorImplementation::MetricBatchStatisticTensors& tensors = tensorIt->second;
+    if (!tensors.numerator.has_value() || !tensors.denominator.has_value() ||
+        !tensors.readyEvent.isInitialized()) {
+        throw std::runtime_error(
+            "TrainingRuns composed ensemble evaluator ratio metric '" + metric.metricName +
+            "' exposed incomplete internal sufficient statistics.");
+    }
+    tensors.readyEvent.synchronize();
+    statistic.numerator = tensorScalarAsDoubleForMetricStatistic(
+        tensors.numerator.value(),
+        "TrainingRuns composed ensemble evaluator metric '" + metric.metricName +
+            "' numerator");
+    statistic.denominator = tensorScalarAsDoubleForMetricStatistic(
+        tensors.denominator.value(),
+        "TrainingRuns composed ensemble evaluator metric '" + metric.metricName +
+            "' denominator");
+    return statistic;
+}
+
 struct ComposedEnsembleEvaluationMetrics {
     std::map<std::string, std::optional<double>> lossValues{};
     std::map<std::string, std::optional<double>> metricValues{};
+    std::map<std::string, MetricBatchStat> metricStats{};
     std::optional<double> overallLoss{};
     uint64_t batches = 0;
     uint64_t rows = 0;
@@ -3633,11 +3731,14 @@ ComposedEnsembleEvaluationMetrics evaluateComposedEnsembleReportsOnSession(
         weightedLossRows[loss.lossName] = 0;
     }
 
-    std::map<std::string, double> weightedMetricSums;
-    std::map<std::string, uint64_t> weightedMetricRows;
+    MetricEpochAccumulatorMap metricAccumulators;
     for (const ResolvedEnsembleMetric& metric : artifacts.metrics) {
-        weightedMetricSums[metric.metricName] = 0.0;
-        weightedMetricRows[metric.metricName] = 0;
+        if (metricAccumulators.contains(metric.metricName)) {
+            throw std::runtime_error(
+                "TrainingRuns composed ensemble evaluator has duplicate metric report name '" +
+                metric.metricName + "'.");
+        }
+        metricAccumulators.registerMetric(metric.metricName, metric.aggregation);
     }
 
     const uint64_t batchesPerEpoch = session.getNumBatchesPerEpoch(exampleType);
@@ -3655,13 +3756,16 @@ ComposedEnsembleEvaluationMetrics evaluateComposedEnsembleReportsOnSession(
                                                               inputBindings,
                                                               batch,
                                                               "TrainingRuns composed ensemble evaluation batch");
-        const uint64_t rows = batchRowsForEvaluatorInputs(evaluatorBatch,
-                                                          artifacts.evaluator.externalInputNames,
-                                                          "TrainingRuns composed ensemble evaluation batch");
-        if (rows == 0) {
-            continue;
-        }
-        std::map<std::string, ThorImplementation::Tensor> outputs = artifacts.placedEvaluator->infer(evaluatorBatch);
+        const uint64_t rows = validBatchRowsForEvaluatorInputs(
+            evaluatorBatch,
+            artifacts.evaluator.externalInputNames,
+            "TrainingRuns composed ensemble evaluation batch");
+        std::map<std::string, ThorImplementation::Tensor> outputs =
+            artifacts.placedEvaluator->infer(evaluatorBatch);
+        std::map<std::string, ThorImplementation::MetricBatchStatisticTensors>
+            metricStatisticTensors =
+                artifacts.placedEvaluator->getMetricBatchStatisticTensorsForSlot(
+                    /*stampIndex=*/0, /*slotIndex=*/0);
         for (const ResolvedEnsembleLoss& loss : artifacts.losses) {
             auto outputIt = outputs.find(loss.lossName);
             if (outputIt == outputs.end()) {
@@ -3679,8 +3783,9 @@ ComposedEnsembleEvaluationMetrics evaluateComposedEnsembleReportsOnSession(
             }
             const double metricValue = tensorMeanAsDouble(std::move(outputIt->second),
                                                           "TrainingRuns composed ensemble evaluator reported metric '" + metric.metricName + "'");
-            weightedMetricSums[metric.metricName] += metricValue * static_cast<double>(rows);
-            weightedMetricRows[metric.metricName] += rows;
+            MetricBatchStat statistic = composedMetricBatchStat(
+                metric, metricValue, rows, metricStatisticTensors);
+            metricAccumulators.add(metric.metricName, statistic);
         }
         metrics.batches += 1;
         metrics.rows += rows;
@@ -3702,12 +3807,13 @@ ComposedEnsembleEvaluationMetrics evaluateComposedEnsembleReportsOnSession(
     metrics.overallLoss = weightedLossSumFromWeightedLossValues(namedValuesForOverall);
 
     for (const ResolvedEnsembleMetric& metric : artifacts.metrics) {
-        auto rowsIt = weightedMetricRows.find(metric.metricName);
-        if (rowsIt == weightedMetricRows.end() || rowsIt->second == 0) {
-            metrics.metricValues[metric.metricName] = std::nullopt;
-            continue;
+        metrics.metricValues[metric.metricName] =
+            metricAccumulators.value(metric.metricName);
+        const std::optional<MetricBatchStat> statistic =
+            metricAccumulators.statistic(metric.metricName);
+        if (statistic.has_value()) {
+            metrics.metricStats.emplace(metric.metricName, statistic.value());
         }
-        metrics.metricValues[metric.metricName] = weightedMetricSums.at(metric.metricName) / static_cast<double>(rowsIt->second);
     }
     return metrics;
 }
@@ -3794,6 +3900,10 @@ Batch inferenceBatchForInputBindings(const std::vector<std::string>& inputNames,
     }
 
     Batch inferenceBatch;
+    const std::optional<uint32_t> validExampleCount = sourceBatch.getValidExampleCount();
+    if (validExampleCount.has_value()) {
+        inferenceBatch.setValidExampleCount(validExampleCount.value());
+    }
     for (const std::string& inputName : inputNames) {
         const auto bindingIt = batchInputByNetworkInput.find(inputName);
         if (bindingIt == batchInputByNetworkInput.end()) {
@@ -3902,14 +4012,11 @@ void TrainingRuns::evaluateEnsembles(std::vector<TrainingRunResult>& results,
         };
 
         std::map<std::string, std::vector<std::optional<double>>> sourcePopulationLossesByName;
-        std::map<std::string, std::vector<std::optional<double>>> sourcePopulationMetricValuesByName;
+        MetricEpochAccumulatorMap sourcePopulationMetricAccumulators;
         std::vector<double> sourcePopulationRowWeights;
         sourcePopulationRowWeights.reserve(members.size());
         for (const TrainingNamedMetricResult& metric : ensembleIt->second.namedMetrics) {
             sourcePopulationLossesByName[metric.name].reserve(members.size());
-        }
-        for (const TrainingNamedMetricResult& metric : ensembleIt->second.namedGraphMetrics) {
-            sourcePopulationMetricValuesByName[metric.name].reserve(members.size());
         }
 
         for (const EnsembleMemberSpecRef& sourceMember : members) {
@@ -3918,9 +4025,6 @@ void TrainingRuns::evaluateEnsembles(std::vector<TrainingRunResult>& results,
                 sourcePopulationRowWeights.push_back(0.0);
                 for (const TrainingNamedMetricResult& metric : ensembleIt->second.namedMetrics) {
                     sourcePopulationLossesByName[metric.name].push_back(std::nullopt);
-                }
-                for (const TrainingNamedMetricResult& metric : ensembleIt->second.namedGraphMetrics) {
-                    sourcePopulationMetricValuesByName[metric.name].push_back(std::nullopt);
                 }
                 continue;
             }
@@ -3936,8 +4040,10 @@ void TrainingRuns::evaluateEnsembles(std::vector<TrainingRunResult>& results,
             ComposedEnsembleEvaluationMetrics sourceMetrics = evaluateComposedEnsembleReportsOnSession(
                 sourceArtifacts, *sourceSession, ExampleType::VALIDATE, sourceBindings.trainingInputBindings);
             // The composed evaluator has already used ensemble member weights to
-            // form predictions.  Across source validation splits, combine by
-            // evaluated rows so ensemble_train_* is the validation-union report.
+            // form predictions. Across source validation splits, losses retain
+            // their valid-row mean semantics while graph metrics combine their
+            // declared sufficient statistics so ensemble_train_* is the exact
+            // validation-union report.
             sourcePopulationRowWeights.push_back(static_cast<double>(sourceMetrics.rows));
             for (const TrainingNamedMetricResult& metric : ensembleIt->second.namedMetrics) {
                 auto valueIt = sourceMetrics.lossValues.find(metric.name);
@@ -3945,9 +4051,12 @@ void TrainingRuns::evaluateEnsembles(std::vector<TrainingRunResult>& results,
                     valueIt == sourceMetrics.lossValues.end() ? std::optional<double>{} : valueIt->second);
             }
             for (const TrainingNamedMetricResult& metric : ensembleIt->second.namedGraphMetrics) {
-                auto valueIt = sourceMetrics.metricValues.find(metric.name);
-                sourcePopulationMetricValuesByName[metric.name].push_back(
-                    valueIt == sourceMetrics.metricValues.end() ? std::optional<double>{} : valueIt->second);
+                const auto statisticIt = sourceMetrics.metricStats.find(metric.name);
+                if (statisticIt == sourceMetrics.metricStats.end()) {
+                    continue;
+                }
+                sourcePopulationMetricAccumulators.add(
+                    metric.name, statisticIt->second);
             }
         }
 
@@ -3959,7 +4068,7 @@ void TrainingRuns::evaluateEnsembles(std::vector<TrainingRunResult>& results,
         }
         ensembleIt->second.ensembleTrainingLoss = weightedLossSumFromWeightedLossValues(namedTrainValuesForOverall);
         for (TrainingNamedMetricResult& metric : ensembleIt->second.namedGraphMetrics) {
-            metric.trainValue = weightedAverage(sourcePopulationMetricValuesByName[metric.name], sourcePopulationRowWeights);
+            metric.trainValue = sourcePopulationMetricAccumulators.value(metric.name);
         }
     }
 }
@@ -3968,6 +4077,7 @@ struct MemberGraphEvaluationMetrics {
     std::optional<double> loss{};
     std::map<std::string, std::optional<double>> lossValues{};
     std::map<std::string, std::optional<double>> metricValues{};
+    std::map<std::string, MetricBatchStat> metricStats{};
     uint64_t batches = 0;
     uint64_t rows = 0;
 };
@@ -4006,6 +4116,7 @@ std::vector<MemberGraphEvaluationMetrics> evaluateMemberGraphReportsOnData(
             result.loss = metrics.overallLoss;
             result.lossValues = std::move(metrics.lossValues);
             result.metricValues = std::move(metrics.metricValues);
+            result.metricStats = std::move(metrics.metricStats);
             result.batches = metrics.batches;
             result.rows = metrics.rows;
         }
@@ -4048,6 +4159,9 @@ void applyGraphEvaluationMemberTestStats(std::vector<TrainingRunResult>& results
         testStats.stepInEpoch = metrics.batches;
         testStats.stepsPerEpoch = stepsPerEpoch;
         testStats.batchSize = batchSize;
+        testStats.validExamplesInBatch =
+            metrics.rows == 0 ? 0 : ((metrics.rows - 1) % batchSize) + 1;
+        testStats.samplesProcessedInEpoch = metrics.rows;
         testStats.samplesProcessed = metrics.rows;
         testStats.loss = metrics.loss;
         for (const auto& [name, value] : metrics.lossValues) {
@@ -4059,6 +4173,9 @@ void applyGraphEvaluationMemberTestStats(std::vector<TrainingRunResult>& results
             if (value.has_value()) {
                 testStats.metrics[name] = *value;
             }
+        }
+        for (const auto& [name, statistic] : metrics.metricStats) {
+            testStats.metricBatchStats[name] = statistic;
         }
         runResult.finalTestStats = std::move(testStats);
     }

@@ -81,6 +81,17 @@ class Layer {
 
     virtual ~Layer() {}
 
+    /**
+     * Returns whether this layer has exact semantics when only a valid prefix of
+     * the fixed physical batch capacity belongs to the submitted batch.
+     *
+     * Layers are supported by default because ordinary pointwise and
+     * per-example operations cannot allow padded tail rows to influence valid
+     * rows. Batch-coupled or user-defined operations must override this when
+     * they have not defined partial-batch semantics.
+     */
+    virtual bool supportsPartialBatches() const { return true; }
+
     virtual void setName(std::string name) {
         THOR_THROW_IF_FALSE(this->name.empty());
         this->name = name;

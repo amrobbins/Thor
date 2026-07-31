@@ -282,20 +282,20 @@ Event StampedNetwork::sendBatch(std::map<std::string, Tensor> batchInputs,
                                 bool waitForOutputsOnProcessingStream,
                                 BatchSubmissionTiming* submitTiming,
                                 std::optional<uint32_t> outputSlotIndex) {
-    std::optional<uint32_t> batchSize;
+    std::optional<uint32_t> physicalBatchCapacity;
     const auto unwrapStart = timingNow(submitTiming);
     for (const auto &[inputName, inputTensor] : batchInputs) {
         (void)inputName;
         const std::vector<uint64_t> dimensions = inputTensor.getDescriptor().getDimensions();
         THOR_THROW_IF_FALSE(!dimensions.empty());
         THOR_THROW_IF_FALSE(dimensions[0] <= std::numeric_limits<uint32_t>::max());
-        if (!batchSize.has_value()) {
-            batchSize = static_cast<uint32_t>(dimensions[0]);
+        if (!physicalBatchCapacity.has_value()) {
+            physicalBatchCapacity = static_cast<uint32_t>(dimensions[0]);
         } else {
-            THOR_THROW_IF_FALSE(batchSize.value() == dimensions[0]);
+            THOR_THROW_IF_FALSE(physicalBatchCapacity.value() == dimensions[0]);
         }
     }
-    THOR_THROW_IF_FALSE(batchSize.has_value());
+    THOR_THROW_IF_FALSE(physicalBatchCapacity.has_value());
     for (const auto& [inputName, _] : inputReadyEvents) {
         (void)_;
         THOR_THROW_IF_FALSE(batchInputs.count(inputName) == 1);
@@ -311,7 +311,8 @@ Event StampedNetwork::sendBatch(std::map<std::string, Tensor> batchInputs,
                                                        batchOutputs,
                                                        outputReadyEvents,
                                                        isInferenceOnly,
-                                                       batchSize.value(),
+                                                       physicalBatchCapacity.value(),
+                                                       physicalBatchCapacity.value(),
                                                        reusableProcessingFinishedEvent,
                                                        waitForOutputsOnProcessingStream,
                                                        submitTiming == nullptr ? nullptr : &localTiming,
@@ -332,15 +333,15 @@ Event StampedNetwork::sendBatch(const Batch& batchInputs,
                                 BatchSubmissionTiming* submitTiming,
                                 std::optional<uint32_t> outputSlotIndex) {
     std::map<std::string, PhysicalBatchInput> physicalBatchInputs;
-    std::optional<uint32_t> batchSize;
+    std::optional<uint32_t> physicalBatchCapacity;
     const auto unwrapStart = timingNow(submitTiming);
 
-    auto requireConsistentBatchSize = [&batchSize](uint64_t candidate) {
+    auto requireConsistentBatchCapacity = [&physicalBatchCapacity](uint64_t candidate) {
         THOR_THROW_IF_FALSE(candidate <= std::numeric_limits<uint32_t>::max());
-        if (!batchSize.has_value()) {
-            batchSize = static_cast<uint32_t>(candidate);
+        if (!physicalBatchCapacity.has_value()) {
+            physicalBatchCapacity = static_cast<uint32_t>(candidate);
         } else {
-            THOR_THROW_IF_FALSE(batchSize.value() == candidate);
+            THOR_THROW_IF_FALSE(physicalBatchCapacity.value() == candidate);
         }
     };
 
@@ -351,7 +352,7 @@ Event StampedNetwork::sendBatch(const Batch& batchInputs,
             Tensor inputTensor = std::get<Tensor>(value);
             const std::vector<uint64_t> dimensions = inputTensor.getDescriptor().getDimensions();
             THOR_THROW_IF_FALSE(!dimensions.empty());
-            requireConsistentBatchSize(dimensions[0]);
+            requireConsistentBatchCapacity(dimensions[0]);
             THOR_THROW_IF_FALSE(
                 physicalBatchInputs.emplace(
                     name,
@@ -362,7 +363,7 @@ Event StampedNetwork::sendBatch(const Batch& batchInputs,
             const RaggedInputBinding& binding = raggedIt->second;
             RaggedTensor raggedTensor = std::get<RaggedTensor>(value);
             THOR_THROW_IF_FALSE(raggedTensor.getDescriptor() == binding.descriptor);
-            requireConsistentBatchSize(raggedTensor.getBatchSize());
+            requireConsistentBatchCapacity(raggedTensor.getBatchSize());
             THOR_THROW_IF_FALSE(
                 physicalBatchInputs.emplace(
                     binding.valuesInputName,
@@ -373,7 +374,7 @@ Event StampedNetwork::sendBatch(const Batch& batchInputs,
                     PhysicalBatchInput{raggedTensor.getOffsets(), sourceReference}).second);
         } else if (std::holds_alternative<Thor::DeviceBatchReference>(value)) {
             Thor::DeviceBatchReference reference = std::get<Thor::DeviceBatchReference>(value);
-            requireConsistentBatchSize(reference.getBatchSize());
+            requireConsistentBatchCapacity(reference.getBatchCapacity());
             THOR_THROW_IF_FALSE(
                 physicalBatchInputs.emplace(
                     name,
@@ -383,7 +384,10 @@ Event StampedNetwork::sendBatch(const Batch& batchInputs,
         }
     }
 
-    THOR_THROW_IF_FALSE(batchSize.has_value());
+    THOR_THROW_IF_FALSE(physicalBatchCapacity.has_value());
+    const uint32_t validExampleCount =
+        batchInputs.getValidExampleCount().value_or(physicalBatchCapacity.value());
+    THOR_THROW_IF_FALSE(validExampleCount <= physicalBatchCapacity.value());
     const auto unwrapFinish = timingNow(submitTiming);
     BatchSubmissionTiming localTiming;
     static const std::map<std::string, Event> noInputReadyEvents;
@@ -392,7 +396,8 @@ Event StampedNetwork::sendBatch(const Batch& batchInputs,
                                                        batchOutputs,
                                                        outputReadyEvents,
                                                        isInferenceOnly,
-                                                       batchSize.value(),
+                                                       physicalBatchCapacity.value(),
+                                                       validExampleCount,
                                                        reusableProcessingFinishedEvent,
                                                        waitForOutputsOnProcessingStream,
                                                        submitTiming == nullptr ? nullptr : &localTiming,
@@ -409,13 +414,32 @@ Event StampedNetwork::sendPhysicalBatch(std::map<std::string, PhysicalBatchInput
                                         std::map<std::string, Tensor> &batchOutputs,
                                         std::map<std::string, Event> &outputReadyEvents,
                                         bool isInferenceOnly,
-                                        uint32_t batchSize,
+                                        uint32_t physicalBatchCapacity,
+                                        uint32_t validExampleCount,
                                         Event* reusableProcessingFinishedEvent,
                                         bool waitForOutputsOnProcessingStream,
                                         BatchSubmissionTiming* submitTiming,
                                         std::optional<uint32_t> outputSlotIndex) {
     const auto physicalStart = timingNow(submitTiming);
     THOR_THROW_IF_FALSE(batchInputs.size() == inputs.size());
+    THOR_THROW_IF_FALSE(physicalBatchCapacity >= 1);
+    THOR_THROW_IF_FALSE(validExampleCount >= 1);
+    THOR_THROW_IF_FALSE(validExampleCount <= physicalBatchCapacity);
+
+    if (validExampleCount < physicalBatchCapacity) {
+        auto requirePartialBatchSupport = [](ThorImplementation::Layer* layer) {
+            THOR_THROW_IF_FALSE(layer != nullptr);
+            if (!layer->supportsPartialBatches()) {
+                const std::string layerName = layer->getName().empty() ? std::string("<unnamed>") : layer->getName();
+                throw std::logic_error("Layer '" + layerName + "' of type " + layer->getType() +
+                                       " does not define exact partial-batch semantics.");
+            }
+        };
+        for (ThorImplementation::TrainableLayer* layer : trainableLayers)
+            requirePartialBatchSupport(layer);
+        for (ThorImplementation::Layer* layer : otherLayers)
+            requirePartialBatchSupport(layer);
+    }
 
     const uint32_t queueSlot = outputSlotIndex.value_or(0);
     const uint32_t outputSlot = queueSlot;
@@ -424,6 +448,14 @@ Event StampedNetwork::sendPhysicalBatch(std::map<std::string, PhysicalBatchInput
     }
     for (uint32_t i = 0; i < outputs.size(); ++i) {
         outputs[i]->setActiveOutputSlot(outputSlot);
+    }
+    {
+        std::set<Metric*> configuredMetrics;
+        for (const auto& [outputName, metric] : metricStatisticsByOutputNameShared) {
+            (void)outputName;
+            if (metric != nullptr && configuredMetrics.insert(metric.get()).second)
+                metric->setActiveMetricStatisticSlot(outputSlot);
+        }
     }
 
     const auto inputForwardStart = timingNow(submitTiming);
@@ -438,13 +470,13 @@ Event StampedNetwork::sendPhysicalBatch(std::map<std::string, PhysicalBatchInput
                     inputTensor,
                     isInferenceOnly,
                     readyIt->second,
-                    batchSize,
+                    validExampleCount,
                     it->second.sourceReference);
             } else {
                 inputs[i]->forward(
                     inputTensor,
                     isInferenceOnly,
-                    batchSize,
+                    validExampleCount,
                     it->second.sourceReference);
             }
         } else if (std::holds_alternative<Thor::DeviceBatchReference>(it->second.value)) {
@@ -452,7 +484,7 @@ Event StampedNetwork::sendPhysicalBatch(std::map<std::string, PhysicalBatchInput
             inputs[i]->forward(
                 std::get<Thor::DeviceBatchReference>(it->second.value),
                 isInferenceOnly,
-                batchSize,
+                validExampleCount,
                 it->second.sourceReference);
         } else {
             THOR_UNREACHABLE();
@@ -568,6 +600,7 @@ void StampedNetwork::clearImpl(bool propagateCleanupFailure) {
     inputNamedShared.clear();
     raggedInputNamedShared.clear();
     outputNamedShared.clear();
+    metricStatisticsByOutputNameShared.clear();
 
     if (propagateCleanupFailure && firstCleanupFailure != nullptr) {
         std::rethrow_exception(firstCleanupFailure);
@@ -597,6 +630,35 @@ void StampedNetwork::preallocateOutputSlots(uint32_t numSlots) {
     THOR_THROW_IF_FALSE(numSlots >= 1);
     for (NetworkOutput* output : outputs) {
         output->preallocateOutputSlots(numSlots);
+    }
+    std::set<Metric*> configuredMetrics;
+    for (const auto& [outputName, metric] : metricStatisticsByOutputNameShared) {
+        (void)outputName;
+        if (metric != nullptr && configuredMetrics.insert(metric.get()).second)
+            metric->preallocateMetricStatisticSlots(numSlots);
+    }
+}
+
+std::map<std::string, MetricBatchStatisticTensors> StampedNetwork::getMetricBatchStatisticTensorsForSlot(
+    uint32_t slotIndex) const {
+    std::map<std::string, MetricBatchStatisticTensors> statistics;
+    for (const auto& [outputName, metric] : metricStatisticsByOutputNameShared) {
+        THOR_THROW_IF_FALSE(metric != nullptr);
+        std::optional<MetricBatchStatisticTensors> metricStatistics =
+            metric->getMetricBatchStatisticTensorsForSlot(slotIndex);
+        if (metricStatistics.has_value())
+            statistics.emplace(outputName, std::move(metricStatistics.value()));
+    }
+    return statistics;
+}
+
+void StampedNetwork::extendMetricStatisticWritableEvents(Event event, std::optional<uint32_t> outputSlotIndex) {
+    const uint32_t slotIndex = outputSlotIndex.value_or(0);
+    std::set<Metric*> extendedMetrics;
+    for (const auto& [outputName, metric] : metricStatisticsByOutputNameShared) {
+        (void)outputName;
+        if (metric != nullptr && extendedMetrics.insert(metric.get()).second)
+            metric->extendMetricStatisticWritableEventForSlot(slotIndex, event);
     }
 }
 
