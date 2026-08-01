@@ -516,10 +516,13 @@ Batch DeviceResidentWindowedNamedBatchSession::acquireBatch(
     }
 
     batchNum = runtime.nextBatchNum;
-    const uint32_t validExampleCount = ThorImplementation::validExamplesForBatch(
-        batchNum,
-        runtime.numExamples(),
-        batchSize);
+    const uint32_t validExampleCount =
+        usesWrappedBatchTailForRuntime()
+            ? ThorImplementation::fullBatchValidExampleCount(batchSize)
+            : ThorImplementation::validExamplesForBatch(
+                  batchNum,
+                  runtime.numExamples(),
+                  batchSize);
     runtime.nextBatchNum =
         (runtime.nextBatchNum + 1) % runtime.batchesPerEpoch;
     fillRowIndexTensor(runtime, *selectionSlot, validExampleCount);
@@ -577,7 +580,7 @@ Batch DeviceResidentWindowedNamedBatchSession::acquireBatch(
                 spec.name,
                 Thor::DeviceBatchReference(
                     std::move(materializer),
-                    static_cast<uint32_t>(batchSize)));
+                    ThorImplementation::fullBatchValidExampleCount(batchSize)));
         }
 
         if (validExampleCount < batchSize) {
@@ -751,6 +754,19 @@ void DeviceResidentWindowedNamedBatchSession::releaseDirectSlot(
         return;
     }
     runtime.notEmpty.notify_one();
+}
+
+void DeviceResidentWindowedNamedBatchSession::setBatchTailModeForRuntimeImpl(
+    ThorImplementation::BatchTailMode mode) {
+    (void)mode;
+    for (const auto &[exampleType, runtime] : splitRuntimes) {
+        (void)exampleType;
+        THOR_THROW_IF_FALSE(runtime != nullptr);
+        std::lock_guard<std::mutex> lock(runtime->mutex);
+        THOR_THROW_IF_FALSE(runtime->nextBatchNum == 0);
+        THOR_THROW_IF_FALSE(runtime->pendingSelections.empty());
+        THOR_THROW_IF_FALSE(runtime->pendingDirectSlots.empty());
+    }
 }
 
 void DeviceResidentWindowedNamedBatchSession::recycleBatch(

@@ -69,6 +69,7 @@ class DeviceResidentWindowedNamedBatchSession : public Thor::BatchSession {
    private:
     Batch acquireBatch(ExampleType exampleType, uint64_t &batchNum) override;
     void recycleBatch(ExampleType exampleType, Batch &&batch) override;
+    void setBatchTailModeForRuntimeImpl(ThorImplementation::BatchTailMode mode) override;
 
     struct SplitRuntime {
         ExampleType exampleType = ExampleType::TRAIN;

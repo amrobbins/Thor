@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <limits>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -568,6 +569,55 @@ TEST(CustomLayerApi, FullBatchRequirementIsSerializedAndPropagatedToPhysicalLaye
         placeSingleCustomLayerNetwork(network, input, output, customLayer, /*batchSize=*/4, /*inferenceOnly=*/true);
     ASSERT_NE(fixture.physicalCustomLayer, nullptr);
     EXPECT_FALSE(fixture.physicalCustomLayer->supportsPartialBatches());
+
+    const std::vector<ThorImplementation::PartialBatchIncompatibility> incompatibilities =
+        fixture.placedNetwork->getPartialBatchIncompatibilities();
+    ASSERT_EQ(incompatibilities.size(), 1u);
+    EXPECT_EQ(incompatibilities.front().layerId, customLayer.getId());
+    EXPECT_EQ(incompatibilities.front().layerType, "CustomLayer");
+}
+
+TEST(CustomLayerApi, PartialBatchCompatibilityReportsEveryIncompatibleLayer) {
+    if (MachineEvaluator::instance().getNumGpus() == 0)
+        GTEST_SKIP() << "CustomLayer placement test requires a GPU";
+
+    Api::Network network("custom_layer_all_partial_batch_incompatibilities");
+    Api::NetworkInput input = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("x")
+                                  .dimensions({2})
+                                  .dataType(DataType::FP32)
+                                  .build();
+    Api::CustomLayer first = Api::CustomLayer::Builder()
+                                 .network(network)
+                                 .expression(makeSerializableAffineExpression())
+                                 .requiresFullBatch()
+                                 .inputInterface({{"x", input.getFeatureOutput().value()}})
+                                 .build();
+    Api::CustomLayer second = Api::CustomLayer::Builder()
+                                  .network(network)
+                                  .expression(makeSerializableAffineExpression())
+                                  .requiresFullBatch()
+                                  .inputInterface({{"x", first.getOutput("y")}})
+                                  .build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("y")
+                                    .inputTensor(second.getOutput("y"))
+                                    .dataType(DataType::FP32)
+                                    .build();
+
+    PlacedCustomLayerFixture fixture =
+        placeSingleCustomLayerNetwork(network, input, output, second, /*batchSize=*/4, /*inferenceOnly=*/true);
+    const std::vector<ThorImplementation::PartialBatchIncompatibility> incompatibilities =
+        fixture.placedNetwork->getPartialBatchIncompatibilities();
+    ASSERT_EQ(incompatibilities.size(), 2u);
+    std::set<uint64_t> incompatibleIds;
+    for (const auto& incompatibility : incompatibilities) {
+        EXPECT_EQ(incompatibility.layerType, "CustomLayer");
+        incompatibleIds.insert(incompatibility.layerId);
+    }
+    EXPECT_EQ(incompatibleIds, (std::set<uint64_t>{first.getId(), second.getId()}));
 }
 
 TEST(CustomLayerApi, BatchValidityAndFullBatchRequirementAreMutuallyExclusive) {

@@ -209,7 +209,8 @@ class IndexedBatchAssembler {
                           uint64_t batchSize,
                           uint64_t batchQueueDepth,
                           bool randomized = false,
-                          std::optional<uint64_t> seed = std::nullopt);
+                          std::optional<uint64_t> seed = std::nullopt,
+                          bool wrapTail = false);
     ~IndexedBatchAssembler();
 
     IndexedBatchAssembler(const IndexedBatchAssembler &) = delete;
@@ -264,6 +265,7 @@ class IndexedBatchAssembler {
     uint64_t nextBatchOrdinal;
     uint64_t nextPublishOrdinal;
     bool randomized;
+    bool wrapTail;
     std::unique_ptr<FullPeriodRandom> randomizer;
 
     AsyncQueue<IndexedBatchLoadWork> loadWorkQueue;

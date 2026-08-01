@@ -20,6 +20,7 @@
 #include <chrono>
 #endif
 #include <unordered_map>
+#include <tuple>
 
 using namespace std;
 using json = nlohmann::json;
@@ -456,6 +457,30 @@ void registerOptimizerStateReadRequests(thor_file::TarReader& archiveReader,
 }
 
 }  // namespace
+
+std::vector<ThorImplementation::PartialBatchIncompatibility>
+PlacedNetwork::getPartialBatchIncompatibilities() {
+    std::map<std::tuple<uint64_t, std::string, std::string>,
+             ThorImplementation::PartialBatchIncompatibility> unique;
+    for (ThorImplementation::StampedNetwork& stamp : stampedNetworks) {
+        for (const ThorImplementation::PartialBatchIncompatibility& incompatibility :
+             stamp.getPartialBatchIncompatibilities()) {
+            unique.emplace(
+                std::make_tuple(
+                    incompatibility.layerId,
+                    incompatibility.layerType,
+                    incompatibility.layerName),
+                incompatibility);
+        }
+    }
+    std::vector<ThorImplementation::PartialBatchIncompatibility> result;
+    result.reserve(unique.size());
+    for (const auto& [key, incompatibility] : unique) {
+        (void)key;
+        result.push_back(incompatibility);
+    }
+    return result;
+}
 
 PlacedNetwork::~PlacedNetwork() {
     for (uint32_t i = 0; i < stampedNetworks.size(); ++i) {

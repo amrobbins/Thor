@@ -68,9 +68,11 @@ class NumpyBatchSession final : public BatchSession {
    private:
     Batch acquireBatch(ExampleType exampleType, uint64_t &batchNum) override;
     void recycleBatch(ExampleType exampleType, Batch &&batch) override;
+    void setBatchTailModeForRuntimeImpl(ThorImplementation::BatchTailMode mode) override;
     struct SplitState {
         std::shared_ptr<const ExampleIndexSet> indices;
         uint64_t nextBatchNum = 0;
+        uint64_t nextLogicalPosition = 0;
         std::unique_ptr<FullPeriodRandom> randomizer;
         std::map<DatasetFieldId, std::unique_ptr<AsyncTensorQueue>> queues;
     };
@@ -403,15 +405,25 @@ Batch NumpyBatchSession::acquireBatch(ExampleType exampleType, uint64_t &batchNu
     }
 
     const uint64_t firstLogicalIndex = batchNum * batchSize;
-    const uint64_t validExampleCount =
-        std::min<uint64_t>(batchSize, split.indices->size() - firstLogicalIndex);
+    const bool wrapTail =
+        usesWrappedBatchTailForRuntime();
+    const uint64_t validExampleCount = wrapTail
+        ? batchSize
+        : std::min<uint64_t>(batchSize, split.indices->size() - firstLogicalIndex);
     THOR_THROW_IF_FALSE(validExampleCount > 0);
     const bool randomized = exampleType == ExampleType::TRAIN && randomizeTrain;
     uint64_t finalValidExampleIndex = 0;
     for (uint64_t row = 0; row < validExampleCount; ++row) {
-        const uint64_t logicalIndex = randomized
-            ? split.randomizer->getRandomNumber()
-            : firstLogicalIndex + row;
+        uint64_t logicalIndex = 0;
+        if (randomized) {
+            logicalIndex = split.randomizer->getRandomNumber();
+        } else if (wrapTail) {
+            logicalIndex = split.nextLogicalPosition;
+            split.nextLogicalPosition =
+                (split.nextLogicalPosition + 1) % split.indices->size();
+        } else {
+            logicalIndex = firstLogicalIndex + row;
+        }
         const uint64_t exampleIndex = split.indices->at(logicalIndex);
         finalValidExampleIndex = exampleIndex;
         for (DatasetFieldId fieldId : requiredFieldIds) {
@@ -453,6 +465,15 @@ Batch NumpyBatchSession::acquireBatch(ExampleType exampleType, uint64_t &batchNu
         batch.insert(dataset->getSchema().getField(fieldId).name, tensor);
     }
     return batch;
+}
+
+void NumpyBatchSession::setBatchTailModeForRuntimeImpl(
+    ThorImplementation::BatchTailMode mode) {
+    (void)mode;
+    for (SplitState *split : {&train, &validate, &test}) {
+        THOR_THROW_IF_FALSE(split->nextBatchNum == 0);
+        split->nextLogicalPosition = 0;
+    }
 }
 
 void NumpyBatchSession::recycleBatch(ExampleType exampleType, Batch &&batch) {

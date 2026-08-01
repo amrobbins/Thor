@@ -325,10 +325,13 @@ Batch DeviceResidentNamedBatchSession::acquireBatch(
     }
 
     batchNum = runtime.nextBatchNum;
-    const uint32_t validExampleCount = ThorImplementation::validExamplesForBatch(
-        batchNum,
-        runtime.numExamples(),
-        batchSize);
+    const uint32_t validExampleCount =
+        usesWrappedBatchTailForRuntime()
+            ? ThorImplementation::fullBatchValidExampleCount(batchSize)
+            : ThorImplementation::validExamplesForBatch(
+                  batchNum,
+                  runtime.numExamples(),
+                  batchSize);
     runtime.nextBatchNum =
         (runtime.nextBatchNum + 1) % runtime.batchesPerEpoch;
     fillRowIndexTensor(runtime, validExampleCount);
@@ -473,6 +476,19 @@ void DeviceResidentNamedBatchSession::releaseBatchTensorSet(
             event.synchronize();
         }
     } catch (...) {
+    }
+}
+
+void DeviceResidentNamedBatchSession::setBatchTailModeForRuntimeImpl(
+    ThorImplementation::BatchTailMode mode) {
+    (void)mode;
+    for (const auto &[exampleType, runtime] : splitRuntimes) {
+        (void)exampleType;
+        THOR_THROW_IF_FALSE(runtime != nullptr);
+        std::lock_guard<std::mutex> lock(runtime->mutex);
+        THOR_THROW_IF_FALSE(runtime->nextBatchNum == 0);
+        THOR_THROW_IF_FALSE(runtime->batchesGathered == 0);
+        THOR_THROW_IF_FALSE(runtime->batchesReturned == 0);
     }
 }
 

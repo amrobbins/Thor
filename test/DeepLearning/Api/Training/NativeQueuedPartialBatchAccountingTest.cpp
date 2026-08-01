@@ -1,4 +1,5 @@
 #include "DeepLearning/Api/Data/BatchSession.h"
+#include "DeepLearning/Implementation/Data/Sessions/BatchSessionRuntimeAccess.h"
 #include "DeepLearning/Api/Initializers/UniformRandom.h"
 #include "DeepLearning/Api/Layers/Learning/CustomLayer.h"
 #include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
@@ -28,6 +29,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace Thor;
@@ -87,7 +89,13 @@ class ExactPopulationBatchSession final : public BatchSession {
         }
 
         const uint64_t first = batchNum * batchSize;
-        const uint64_t valid = std::min(batchSize, examples - first);
+        const bool wrapTail =
+            usesWrappedBatchTailForRuntime();
+        const uint64_t valid =
+            wrapTail ? batchSize : std::min(batchSize, examples - first);
+        uint64_t& nextLogical = exampleType == ExampleType::TRAIN
+                                    ? nextTrainLogical
+                                    : nextValidateLogical;
         const ThorImplementation::TensorPlacement cpu(
             ThorImplementation::TensorPlacement::MemDevices::CPU);
         ThorImplementation::Tensor predictions(
@@ -107,7 +115,9 @@ class ExactPopulationBatchSession final : public BatchSession {
         float* weightValues = weights.getMemPtr<float>();
 
         for (uint64_t row = 0; row < valid; ++row) {
-            const uint64_t logicalExample = first + row;
+            const uint64_t logicalExample = wrapTail
+                ? std::exchange(nextLogical, (nextLogical + 1) % examples)
+                : first + row;
             const uint64_t tailStart = examples - 2;
             predictionValues[row] = logicalExample >= tailStart ? 3.0f : 1.0f;
             labelValues[row] = 0.0f;
@@ -133,10 +143,19 @@ class ExactPopulationBatchSession final : public BatchSession {
 
     void recycleBatch(ExampleType, Batch&&) override {}
 
+    void setBatchTailModeForRuntimeImpl(
+        ThorImplementation::BatchTailMode mode) override {
+        (void)mode;
+        nextTrainLogical = 0;
+        nextValidateLogical = 0;
+    }
+
     uint64_t trainExamples = 0;
     uint64_t validateExamples = 0;
     uint64_t nextTrainBatch = 0;
     uint64_t nextValidateBatch = 0;
+    uint64_t nextTrainLogical = 0;
+    uint64_t nextValidateLogical = 0;
 };
 
 class CapturingObserver final : public TrainingObserver {
@@ -159,7 +178,7 @@ class CapturingObserver final : public TrainingObserver {
     std::vector<TrainingEvent> events;
 };
 
-std::shared_ptr<Network> makeInputLossNetwork() {
+std::shared_ptr<Network> makeInputLossNetwork(bool requiresFullBatch = false) {
     auto network = std::make_shared<Network>("partial_batch_accounting");
     NetworkInput predictions = NetworkInput::Builder()
                                    .network(*network)
@@ -209,17 +228,20 @@ std::shared_ptr<Network> makeInputLossNetwork() {
         ThorImplementation::ExpressionDefinition::fromOutputs(
             ThorImplementation::Expression::outputs(
                 {{"combined", predictionExpression + anchorExpression}}));
-    CustomLayer combinedPrediction =
-        CustomLayer::Builder()
-            .network(*network)
-            .expression(ThorImplementation::DynamicExpression::fromExpressionDefinition(
-                combinedDefinition))
-            .inputNames({"predictions", "anchor"})
-            .outputNames({"combined"})
-            .inputInterface(
-                {{"predictions", predictions.getFeatureOutput().value()},
-                 {"anchor", trainableAnchor.getFeatureOutput().value()}})
-            .build();
+    CustomLayer::Builder combinedBuilder;
+    combinedBuilder
+        .network(*network)
+        .expression(ThorImplementation::DynamicExpression::fromExpressionDefinition(
+            combinedDefinition))
+        .inputNames({"predictions", "anchor"})
+        .outputNames({"combined"})
+        .inputInterface(
+            {{"predictions", predictions.getFeatureOutput().value()},
+             {"anchor", trainableAnchor.getFeatureOutput().value()}});
+    if (requiresFullBatch) {
+        combinedBuilder.requiresFullBatch();
+    }
+    CustomLayer combinedPrediction = combinedBuilder.build();
 
     Mean predictionMean = Mean::Builder()
                               .network(*network)
@@ -400,6 +422,75 @@ TEST(NativeQueuedPartialBatchAccounting,
 
     EXPECT_EQ(session->getNextBatchNum(ExampleType::TRAIN), 0u);
     EXPECT_EQ(session->getNextBatchNum(ExampleType::VALIDATE), 0u);
+}
+
+TEST(NativeQueuedPartialBatchAccounting,
+     FullBatchOnlyLayerFallsBackToContinuousWrappedEpochs) {
+    auto session =
+        std::make_shared<ExactPopulationBatchSession>(10, 6, 4);
+
+    TrainingRunRequest request;
+    request.network = makeInputLossNetwork(/*requiresFullBatch=*/true);
+    request.batchSession = session;
+    request.optimizer = Sgd::Builder().initialLearningRate(0.01f).build();
+    request.datasetInputBindings = {
+        TrainingInputBinding("predictions", "predictions"),
+        TrainingInputBinding("labels", "labels"),
+        TrainingInputBinding("weights", "weights")};
+    request.runtime.scalarTensorsToReport = {"loss", "prediction_mean"};
+    request.epochs = 1;
+
+    CapturingObserver observer;
+    testing::internal::CaptureStderr();
+    runNativeQueuedTraining(
+        request,
+        observer,
+        NativeQueuedTrainingOptions{
+            .maxInFlightBatches = 3,
+            .synchronizeAfterEveryBatch = false});
+    const std::string warning = testing::internal::GetCapturedStderr();
+
+    EXPECT_NE(warning.find("exact partial tail batches are not compatible"),
+              std::string::npos);
+    EXPECT_NE(warning.find("CustomLayer"), std::string::npos);
+    EXPECT_NE(warning.find("legacy wrapped full-batch epochs"),
+              std::string::npos);
+    EXPECT_EQ(ThorImplementation::BatchSessionRuntimeAccess::getTailMode(*session),
+              ThorImplementation::BatchTailMode::WRAP);
+    EXPECT_EQ(ThorImplementation::BatchSessionRuntimeAccess::examplesProcessedPerEpoch(
+                  *session, ExampleType::TRAIN),
+              12u);
+    EXPECT_EQ(ThorImplementation::BatchSessionRuntimeAccess::examplesProcessedPerEpoch(
+                  *session, ExampleType::VALIDATE),
+              8u);
+
+    const std::vector<TrainingStatsSnapshot> train =
+        observer.stats(TrainingEventPhase::TRAIN);
+    const std::vector<TrainingStatsSnapshot> validate =
+        observer.stats(TrainingEventPhase::VALIDATE);
+    ASSERT_EQ(train.size(), 3u);
+    ASSERT_EQ(validate.size(), 2u);
+    EXPECT_EQ(fieldValues(train, &TrainingStatsSnapshot::validExamplesInBatch),
+              (std::vector<uint64_t>{4, 4, 4}));
+    EXPECT_EQ(fieldValues(train, &TrainingStatsSnapshot::samplesProcessedInEpoch),
+              (std::vector<uint64_t>{4, 8, 12}));
+    EXPECT_EQ(fieldValues(train, &TrainingStatsSnapshot::samplesProcessed),
+              (std::vector<uint64_t>{4, 8, 12}));
+    EXPECT_EQ(fieldValues(validate, &TrainingStatsSnapshot::validExamplesInBatch),
+              (std::vector<uint64_t>{4, 4}));
+    EXPECT_EQ(fieldValues(validate, &TrainingStatsSnapshot::samplesProcessedInEpoch),
+              (std::vector<uint64_t>{4, 8}));
+    EXPECT_EQ(fieldValues(validate, &TrainingStatsSnapshot::samplesProcessed),
+              (std::vector<uint64_t>{4, 8}));
+
+    ASSERT_TRUE(train.back().loss.has_value());
+    ASSERT_TRUE(train.back().metrics.count("prediction_mean"));
+    EXPECT_NEAR(train.back().loss.value(), 5.0, 1e-5);
+    EXPECT_NEAR(train.back().metrics.at("prediction_mean"), 2.0, 1e-5);
+    ASSERT_TRUE(validate.back().loss.has_value());
+    ASSERT_TRUE(validate.back().metrics.count("prediction_mean"));
+    EXPECT_NEAR(validate.back().loss.value(), 5.0, 1e-5);
+    EXPECT_NEAR(validate.back().metrics.at("prediction_mean"), 2.0, 1e-5);
 }
 
 TEST(NativeQueuedPartialBatchAccounting,

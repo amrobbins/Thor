@@ -93,6 +93,7 @@ class CustomLayer : public TrainableLayer {
     uint64_t floatingPointOperationsPerExampleBackward() override;
 
     void setLayerName(const std::string& name) { customLayerName = name; }
+    std::string getType() override { return "CustomLayer"; }
     std::string getLayerType() override { return "CustomLayer<" + customLayerName + ">"; }
 
     bool isBackPropStub() override;

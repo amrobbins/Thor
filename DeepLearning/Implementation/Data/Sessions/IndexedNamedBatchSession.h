@@ -78,6 +78,7 @@ class IndexedNamedBatchSession : public Thor::BatchSession {
    private:
     Batch acquireBatch(ExampleType exampleType, uint64_t &batchNum) override;
     void recycleBatch(ExampleType exampleType, Batch &&batch) override;
+    void setBatchTailModeForRuntimeImpl(ThorImplementation::BatchTailMode mode) override;
     std::shared_ptr<const Thor::FileDataset> dataset;
     Thor::DatasetSplitManifest splitManifest;
     std::set<Thor::DatasetFieldId> requiredFieldIds;
@@ -105,13 +106,15 @@ class IndexedNamedBatchSession : public Thor::BatchSession {
     bool recyclerStopping = false;
     std::exception_ptr recyclerFailure;
 
+    void rebuildAssemblers(bool wrapTail);
     void validateIndex(uint64_t index, const char *splitName) const;
     void validateIndices(const Thor::ExampleIndexSet &indices, const char *splitName) const;
     std::unique_ptr<IndexedBatchAssembler> createAssembler(
         std::shared_ptr<const Thor::ExampleIndexSet> indices,
         const char *splitName,
         bool randomized,
-        std::optional<uint64_t> splitSeed) const;
+        std::optional<uint64_t> splitSeed,
+        bool wrapTail) const;
     IndexedBatchAssembler *assemblerFor(ExampleType exampleType);
     const IndexedBatchAssembler *assemblerFor(ExampleType exampleType) const;
     void enqueueReturnedBuffers(

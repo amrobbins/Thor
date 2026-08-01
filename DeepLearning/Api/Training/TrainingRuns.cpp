@@ -1,4 +1,5 @@
 #include "DeepLearning/Api/Training/TrainingRuns.h"
+#include "DeepLearning/Implementation/Data/Sessions/BatchSessionRuntimeAccess.h"
 
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
@@ -36,6 +37,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <iomanip>
+#include <iostream>
 #include <limits>
 #include <thread>
 #include <cctype>
@@ -3374,6 +3376,7 @@ struct TrainingRunsComposedEvaluatorArtifacts {
     std::vector<ResolvedEnsembleMetric> metrics{};
     TrainingRunsComposedEnsembleEvaluator evaluator{};
     std::shared_ptr<PlacedNetwork> placedEvaluator = nullptr;
+    mutable bool wrappedTailFallbackWarningEmitted = false;
 };
 
 TrainingRunsComposedEvaluatorArtifacts loadTrainingRunsComposedEvaluatorArtifacts(
@@ -3707,6 +3710,47 @@ Batch inferenceBatchForInputBindings(const std::vector<std::string>& inputNames,
                                      const Batch& sourceBatch,
                                      const std::string& missingInputContext);
 
+void configureComposedEvaluatorTailMode(
+    const TrainingRunsComposedEvaluatorArtifacts& artifacts,
+    BatchSession& session) {
+    THOR_THROW_IF_FALSE(artifacts.placedEvaluator != nullptr);
+    const std::vector<ThorImplementation::PartialBatchIncompatibility> incompatibilities =
+        artifacts.placedEvaluator->getPartialBatchIncompatibilities();
+    if (incompatibilities.empty()) {
+        return;
+    }
+    try {
+        ThorImplementation::BatchSessionRuntimeAccess::setTailMode(
+            session, ThorImplementation::BatchTailMode::WRAP);
+    } catch (const std::exception& e) {
+        throw std::runtime_error(
+            "TrainingRuns composed evaluator cannot fall back to legacy "
+            "wrapped-tail batching for dataset '" + session.getDatasetName() +
+            "': " + e.what());
+    }
+    if (artifacts.wrappedTailFallbackWarningEmitted) {
+        return;
+    }
+    artifacts.wrappedTailFallbackWarningEmitted = true;
+    std::cerr
+        << "Thor warning: exact partial tail batches are not compatible with a "
+        << "composed TrainingRuns evaluator.\n"
+        << "The following layers/metrics require full batches:\n";
+    for (const ThorImplementation::PartialBatchIncompatibility& incompatibility :
+         incompatibilities) {
+        std::cerr << "  - layer " << incompatibility.layerId << " '"
+                  << (incompatibility.layerName.empty()
+                          ? std::string("<unnamed>")
+                          : incompatibility.layerName)
+                  << "' (" << incompatibility.layerType << ")\n";
+    }
+    std::cerr
+        << "Thor is reverting this evaluator to legacy wrapped full-batch "
+        << "epochs; the next epoch continues after any examples consumed to fill "
+        << "the wrapped tail, and wrapped examples participate fully in reported "
+        << "losses and metrics.\n";
+}
+
 ComposedEnsembleEvaluationMetrics evaluateComposedEnsembleReportsOnSession(
     const TrainingRunsComposedEvaluatorArtifacts& artifacts,
     BatchSession& session,
@@ -3723,6 +3767,7 @@ ComposedEnsembleEvaluationMetrics evaluateComposedEnsembleReportsOnSession(
         throw std::runtime_error("TrainingRuns composed ensemble evaluation requires session batch_size=" +
                                  std::to_string(artifacts.batchSize) + ", got " + std::to_string(session.getBatchSize()) + ".");
     }
+    configureComposedEvaluatorTailMode(artifacts, session);
 
     std::map<std::string, double> weightedLossSums;
     std::map<std::string, uint64_t> weightedLossRows;

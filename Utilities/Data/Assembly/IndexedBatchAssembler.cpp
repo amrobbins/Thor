@@ -181,7 +181,8 @@ IndexedBatchAssembler::IndexedBatchAssembler(
     uint64_t batchSize,
     uint64_t batchQueueDepth,
     bool randomized,
-    std::optional<uint64_t> seed)
+    std::optional<uint64_t> seed,
+    bool wrapTail)
     : reader(std::move(reader)),
       layout(std::move(layout)),
       indices(std::move(indices)),
@@ -200,6 +201,7 @@ IndexedBatchAssembler::IndexedBatchAssembler(
       nextBatchOrdinal(0),
       nextPublishOrdinal(0),
       randomized(randomized),
+      wrapTail(wrapTail),
       resolvedIoBackend("unresolved"),
       loadWorkerThreadCount(0),
       loadWorkQueueDepth(0),
@@ -837,10 +839,12 @@ bool IndexedBatchAssembler::startNextBatch() {
     auto batchState = std::make_shared<IndexedBatchState>();
     batchState->batchOrdinal = nextBatchOrdinal++;
     batchState->batchNum = nextBatchToSchedule;
-    batchState->validExampleCount = ThorImplementation::validExamplesForBatch(
-        batchState->batchNum,
-        indices->size(),
-        batchSize);
+    batchState->validExampleCount = wrapTail
+        ? ThorImplementation::fullBatchValidExampleCount(batchSize)
+        : ThorImplementation::validExamplesForBatch(
+              batchState->batchNum,
+              indices->size(),
+              batchSize);
     batchState->expectedRecords = batchSize;
     batchState->expectedLoadChunks = 1;
     batchState->completedLoadChunks.store(0, std::memory_order_relaxed);
@@ -927,12 +931,15 @@ bool IndexedBatchAssembler::startNextBatch() {
         localLogicalRecordBytesRequested += recordSizeBytes;
     }
     THOR_THROW_IF_FALSE(!batchState->globalExampleIndices.empty());
-    const uint64_t paddingExampleIndex = batchState->globalExampleIndices.back();
-    for (uint64_t slot = batchState->validExampleCount; slot < batchSize; ++slot) {
-        batchState->globalExampleIndices.push_back(paddingExampleIndex);
-        localRecordsRequested += 1;
-        localLogicalRecordBytesRequested += recordSizeBytes;
+    if (!wrapTail) {
+        const uint64_t paddingExampleIndex = batchState->globalExampleIndices.back();
+        for (uint64_t slot = batchState->validExampleCount; slot < batchSize; ++slot) {
+            batchState->globalExampleIndices.push_back(paddingExampleIndex);
+            localRecordsRequested += 1;
+            localLogicalRecordBytesRequested += recordSizeBytes;
+        }
     }
+    THOR_THROW_IF_FALSE(batchState->globalExampleIndices.size() == batchSize);
     statsStartBatchPlanningNanoseconds.fetch_add(diagnosticElapsedNanoseconds(planningStart), std::memory_order_relaxed);
     flushLocalRequestStats();
 

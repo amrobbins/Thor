@@ -1,4 +1,5 @@
 #include "DeepLearning/Implementation/Data/Residency/DeviceDatasetStorageSelection.h"
+#include "DeepLearning/Implementation/Data/Sessions/BatchSessionRuntimeAccess.h"
 
 #include "DeepLearning/Implementation/Training/DeviceStartupCoordinator.h"
 #include "DeepLearning/Implementation/Data/FileDatasetRuntimeAccess.h"
@@ -436,6 +437,9 @@ DeviceDatasetStorageSelection selectSharedResidencySession(
                         batchQueueDepth,
                         32,
                         datasetName);
+                ThorImplementation::BatchSessionRuntimeAccess::setTailMode(
+                    *effectiveSession,
+                    ThorImplementation::BatchSessionRuntimeAccess::getTailMode(*sourceSession));
                 report.used = true;
                 report.reason = successReason;
                 report.examples = acquisition.lease->getNumExamples();
@@ -535,6 +539,9 @@ DeviceDatasetStorageSelection selectSharedResidencySession(
             session,
             batchQueueDepth,
             datasetName);
+        ThorImplementation::BatchSessionRuntimeAccess::setTailMode(
+            *effectiveSession,
+            ThorImplementation::BatchSessionRuntimeAccess::getTailMode(*sourceSession));
         report.used = true;
         report.reason.clear();
         report.examples = acquisition.lease->getNumExamples();

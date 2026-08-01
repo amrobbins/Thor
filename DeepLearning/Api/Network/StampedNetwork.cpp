@@ -1,5 +1,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Network/StampedNetwork.h"
+
+#include <tuple>
 #include "DeepLearning/Implementation/Layers/TrainableLayer.h"
 #include "DeepLearning/Implementation/Layers/Loss.h"
 #include "DeepLearning/Implementation/Layers/TrainingDropoutControllable.h"
@@ -102,6 +104,40 @@ bool StampedNetwork::isTrainingDropoutEnabled() const {
         }
     }
     return true;
+}
+
+std::vector<PartialBatchIncompatibility>
+StampedNetwork::getPartialBatchIncompatibilities() const {
+    std::vector<PartialBatchIncompatibility> incompatibilities;
+    std::set<Layer*> seen;
+    auto inspect = [&](Layer* layer) {
+        THOR_THROW_IF_FALSE(layer != nullptr);
+        if (!seen.insert(layer).second || layer->supportsPartialBatches()) {
+            return;
+        }
+        uint64_t reportedLayerId = layer->getId();
+        const auto apiLayerIt = physicalLayerToApiLayer.find(layer);
+        if (apiLayerIt != physicalLayerToApiLayer.end()) {
+            reportedLayerId = apiLayerIt->second;
+        }
+        incompatibilities.push_back(PartialBatchIncompatibility{
+            reportedLayerId, layer->getName(), layer->getType()});
+    };
+    for (TrainableLayer* layer : trainableLayers) {
+        inspect(layer);
+    }
+    for (Layer* layer : otherLayers) {
+        inspect(layer);
+    }
+    std::sort(
+        incompatibilities.begin(),
+        incompatibilities.end(),
+        [](const PartialBatchIncompatibility& lhs,
+           const PartialBatchIncompatibility& rhs) {
+            return std::tie(lhs.layerId, lhs.layerType, lhs.layerName) <
+                   std::tie(rhs.layerId, rhs.layerType, rhs.layerName);
+        });
+    return incompatibilities;
 }
 
 uint32_t StampedNetwork::getNumTrainingDropoutControllableLayers() const {

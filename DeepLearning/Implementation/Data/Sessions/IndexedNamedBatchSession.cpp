@@ -56,9 +56,7 @@ IndexedNamedBatchSession::IndexedNamedBatchSession(std::shared_ptr<const Thor::F
     numDatasetExamples = this->dataset->getNumExamples();
 
 
-    trainAssembler = createAssembler(splitManifest.getSharedTrain(), "train", randomizeTrain, seed);
-    validateAssembler = createAssembler(splitManifest.getSharedValidate(), "validate", false, std::nullopt);
-    testAssembler = createAssembler(splitManifest.getSharedTest(), "test", false, std::nullopt);
+    rebuildAssemblers(/*wrapTail=*/false);
     recyclerThread = std::thread(&IndexedNamedBatchSession::recyclerMain, this);
 }
 
@@ -87,7 +85,8 @@ std::unique_ptr<IndexedBatchAssembler> IndexedNamedBatchSession::createAssembler
     std::shared_ptr<const Thor::ExampleIndexSet> indices,
     const char *splitName,
     bool randomized,
-    std::optional<uint64_t> splitSeed) const {
+    std::optional<uint64_t> splitSeed,
+    bool wrapTail) const {
     if (indices == nullptr || indices->empty()) {
         return nullptr;
     }
@@ -104,7 +103,31 @@ std::unique_ptr<IndexedBatchAssembler> IndexedNamedBatchSession::createAssembler
         batchSize,
         batchQueueDepth,
         randomized,
-        splitSeed);
+        splitSeed,
+        wrapTail);
+}
+
+
+void IndexedNamedBatchSession::rebuildAssemblers(bool wrapTail) {
+    trainAssembler.reset();
+    validateAssembler.reset();
+    testAssembler.reset();
+    trainAssembler = createAssembler(
+        splitManifest.getSharedTrain(), "train", randomizeTrain, seed, wrapTail);
+    validateAssembler = createAssembler(
+        splitManifest.getSharedValidate(), "validate", false, std::nullopt, wrapTail);
+    testAssembler = createAssembler(
+        splitManifest.getSharedTest(), "test", false, std::nullopt, wrapTail);
+}
+
+void IndexedNamedBatchSession::setBatchTailModeForRuntimeImpl(
+    ThorImplementation::BatchTailMode mode) {
+    THOR_THROW_IF_FALSE(!cancelled.load(std::memory_order_acquire));
+    {
+        std::lock_guard<std::mutex> lock(recyclerMutex);
+        THOR_THROW_IF_FALSE(pendingReturnedBuffers.empty());
+    }
+    rebuildAssemblers(mode == ThorImplementation::BatchTailMode::WRAP);
 }
 
 IndexedBatchAssembler *IndexedNamedBatchSession::assemblerFor(ExampleType exampleType) {

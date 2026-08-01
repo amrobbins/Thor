@@ -7,6 +7,13 @@
 
 namespace ThorImplementation {
 
+/** Returns the valid-example count for a physically full batch. */
+inline uint32_t fullBatchValidExampleCount(uint64_t batchCapacity) {
+    THOR_THROW_IF_FALSE(batchCapacity >= 1);
+    THOR_THROW_IF_FALSE(batchCapacity <= std::numeric_limits<uint32_t>::max());
+    return static_cast<uint32_t>(batchCapacity);
+}
+
 /**
  * Returns the number of logical examples represented by batchNum in one
  * fixed-capacity traversal of a split. The final batch may contain a smaller

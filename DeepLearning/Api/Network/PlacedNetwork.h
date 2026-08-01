@@ -185,6 +185,8 @@ class PlacedNetwork {
     }
     virtual std::string getNetworkName() { return networkName; }
     uint32_t getNumTrainableLayers() { return network.getNumTrainableLayers(); }
+    [[nodiscard]] std::vector<ThorImplementation::PartialBatchIncompatibility>
+    getPartialBatchIncompatibilities();
     std::vector<ParameterReference> getTrainableParameterReferences(bool trainingEnabledOnly = true);
 
     BoundParameter resolveParameterReference(const ParameterReference& parameterReference);

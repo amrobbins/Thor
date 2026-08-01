@@ -35,6 +35,14 @@ struct PhysicalBatchInput {
     std::optional<Thor::BatchSourceReference> sourceReference;
 };
 
+struct PartialBatchIncompatibility {
+    uint64_t layerId = 0;
+    std::string layerName;
+    std::string layerType;
+
+    bool operator==(const PartialBatchIncompatibility&) const = default;
+};
+
 struct BatchSubmissionTiming {
     uint64_t activeObjectiveRootsMicros = 0;
     uint64_t setActiveObjectiveRootsMicros = 0;
@@ -156,6 +164,8 @@ class StampedNetwork {
     void setTrainingDropoutEnabled(bool enabled);
     [[nodiscard]] bool isTrainingDropoutEnabled() const;
     [[nodiscard]] uint32_t getNumTrainingDropoutControllableLayers() const;
+    [[nodiscard]] std::vector<PartialBatchIncompatibility>
+    getPartialBatchIncompatibilities() const;
 
     std::shared_ptr<ThorImplementation::Layer> getPhysicalLayerFromApiLayer(uint64_t apiLayerId) {
         return apiLayerToPhysicalLayerShared[apiLayerId];

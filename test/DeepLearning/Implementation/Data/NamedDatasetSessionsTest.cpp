@@ -1,4 +1,5 @@
 #include "DeepLearning/Implementation/Data/FileDatasetRuntimeAccess.h"
+#include "DeepLearning/Implementation/Data/Sessions/BatchSessionRuntimeAccess.h"
 #include "DeepLearning/Implementation/Data/Sessions/DeviceResidentNamedBatchSession.h"
 #include "DeepLearning/Api/Data/FileDataset.h"
 #include "DeepLearning/Api/Data/TrainingData.h"
@@ -1445,6 +1446,63 @@ TEST(IndexedNamedBatchSessionTest, RangeBackedSplitDrivesBatchesWithoutMateriali
     expectTensorValues(nextEpochLease.get().getTensor("seasonality_inputs"),
                        {0.0f, 1.0f, 40.0f, 41.0f});
     nextEpochLease.reset();
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(IndexedNamedBatchSessionTest, WrappedTailConsumesNextTraversalContinuously) {
+    const std::filesystem::path datasetPath =
+        makeTempDatasetPath("wrapped_tail_continuous_traversal");
+    DatasetLayout layout = testLayout();
+    writeCanonicalDataset(datasetPath, layout);
+    std::shared_ptr<Thor::FileDataset> dataset = Thor::FileDataset::open(datasetPath);
+    Thor::DatasetSplitManifest splits(
+        *dataset,
+        Thor::ExampleIndexSet::contiguous(0, 3),
+        Thor::ExampleIndexSet::contiguous(3, 1));
+    TestIndexedNamedBatchSession session(
+        dataset,
+        std::move(splits),
+        Thor::BatchPolicy(2, false),
+        1);
+
+    EXPECT_EQ(ThorImplementation::BatchSessionRuntimeAccess::getTailMode(session),
+              ThorImplementation::BatchTailMode::EXACT);
+    ThorImplementation::BatchSessionRuntimeAccess::setTailMode(
+        session, ThorImplementation::BatchTailMode::WRAP);
+    EXPECT_EQ(ThorImplementation::BatchSessionRuntimeAccess::examplesProcessedPerEpoch(
+                  session, ExampleType::TRAIN),
+              4u);
+
+    uint64_t batchNum = 99;
+    BatchLease first = session.leaseBatch(ExampleType::TRAIN, batchNum);
+    EXPECT_EQ(batchNum, 0u);
+    EXPECT_FALSE(first.get().getValidExampleCount().has_value());
+    expectTensorValues(
+        first.get().getTensor("seasonality_inputs"),
+        {0.0f, 1.0f, 20.0f, 21.0f});
+    first.reset();
+
+    BatchLease wrappedTail = session.leaseBatch(ExampleType::TRAIN, batchNum);
+    EXPECT_EQ(batchNum, 1u);
+    EXPECT_FALSE(wrappedTail.get().getValidExampleCount().has_value());
+    expectTensorValues(
+        wrappedTail.get().getTensor("seasonality_inputs"),
+        {40.0f, 41.0f, 0.0f, 1.0f});
+    wrappedTail.reset();
+
+    BatchLease nextEpoch = session.leaseBatch(ExampleType::TRAIN, batchNum);
+    EXPECT_EQ(batchNum, 0u);
+    EXPECT_FALSE(nextEpoch.get().getValidExampleCount().has_value());
+    expectTensorValues(
+        nextEpoch.get().getTensor("seasonality_inputs"),
+        {20.0f, 21.0f, 40.0f, 41.0f});
+    nextEpoch.reset();
+
+    EXPECT_THROW(
+        ThorImplementation::BatchSessionRuntimeAccess::setTailMode(
+            session, ThorImplementation::BatchTailMode::EXACT),
+        std::logic_error);
 
     std::filesystem::remove_all(datasetPath);
 }

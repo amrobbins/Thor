@@ -16,6 +16,18 @@
 #include <utility>
 #include <vector>
 
+namespace ThorImplementation {
+
+/** Internal execution policy for the final physical batch of a dataset traversal. */
+enum class BatchTailMode {
+    EXACT,
+    WRAP,
+};
+
+class BatchSessionRuntimeAccess;
+
+}  // namespace ThorImplementation
+
 namespace Thor {
 
 class BatchSession;
@@ -81,6 +93,7 @@ class BatchSession : public std::enable_shared_from_this<BatchSession> {
             throw std::runtime_error(
                 "BatchSession must be owned by std::shared_ptr before acquiring a BatchLease.");
         }
+        batchLeaseStarted = true;
         return BatchLease(std::move(owner), exampleType, acquireBatch(exampleType, batchNum));
     }
 
@@ -139,16 +152,51 @@ class BatchSession : public std::enable_shared_from_this<BatchSession> {
 
     uint64_t batchSize = 0;
 
+    /** Internal session-backend query; callers cannot select this mode. */
+    [[nodiscard]] bool usesWrappedBatchTailForRuntime() const {
+        return batchTailMode == ThorImplementation::BatchTailMode::WRAP;
+    }
+
    private:
+    void setBatchTailModeForRuntime(ThorImplementation::BatchTailMode mode) {
+        if (mode == batchTailMode) {
+            return;
+        }
+        if (batchLeaseStarted) {
+            throw std::logic_error(
+                "Batch tail mode must be selected before the first batch is leased.");
+        }
+        setBatchTailModeForRuntimeImpl(mode);
+        batchTailMode = mode;
+    }
+    [[nodiscard]] ThorImplementation::BatchTailMode getBatchTailModeForRuntime() const {
+        return batchTailMode;
+    }
+    [[nodiscard]] uint64_t getExamplesProcessedPerEpochForRuntime(ExampleType exampleType) {
+        if (batchTailMode == ThorImplementation::BatchTailMode::WRAP) {
+            return getNumBatchesPerEpoch(exampleType) * getBatchSize();
+        }
+        return getNumExamples(exampleType);
+    }
+
     virtual Batch acquireBatch(ExampleType exampleType, uint64_t &batchNum) = 0;
     virtual void recycleBatch(ExampleType exampleType, Batch &&batch) = 0;
+    virtual void setBatchTailModeForRuntimeImpl(ThorImplementation::BatchTailMode mode) {
+        if (mode != ThorImplementation::BatchTailMode::EXACT) {
+            throw std::runtime_error(
+                "BatchSession backend does not implement legacy wrapped-tail batching.");
+        }
+    }
 
     void setDatasetName(std::string name) { datasetName = std::move(name); }
 
     std::string datasetName;
+    ThorImplementation::BatchTailMode batchTailMode = ThorImplementation::BatchTailMode::EXACT;
+    bool batchLeaseStarted = false;
 
     friend class BatchLease;
     friend class TrainingData;
+    friend class ThorImplementation::BatchSessionRuntimeAccess;
 };
 
 }  // namespace Thor

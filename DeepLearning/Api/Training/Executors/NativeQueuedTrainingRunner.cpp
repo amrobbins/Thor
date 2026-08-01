@@ -1,4 +1,5 @@
 #include "DeepLearning/Api/Training/Executors/NativeQueuedTrainingRunner.h"
+#include "DeepLearning/Implementation/Data/Sessions/BatchSessionRuntimeAccess.h"
 
 #include "DeepLearning/Api/Data/Batch.h"
 #include "DeepLearning/Api/Data/BatchSession.h"
@@ -39,6 +40,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <limits>
 #include <map>
 #include <memory>
@@ -1604,6 +1606,62 @@ std::map<std::string, BatchFieldSourceDescription> resolveNetworkInputBatchSourc
     return sources;
 }
 
+void configureWrappedTailFallback(
+    const std::shared_ptr<PlacedNetwork>& placedNetwork,
+    const std::shared_ptr<BatchSession>& sourceSession,
+    std::vector<NamedValidationSession>& validationSessions,
+    bool& warningEmitted) {
+    THOR_THROW_IF_FALSE(placedNetwork != nullptr);
+    THOR_THROW_IF_FALSE(sourceSession != nullptr);
+    const std::vector<ThorImplementation::PartialBatchIncompatibility> incompatibilities =
+        placedNetwork->getPartialBatchIncompatibilities();
+    if (incompatibilities.empty()) {
+        return;
+    }
+
+    auto configure = [](const std::shared_ptr<BatchSession>& session,
+                        const std::string& context) {
+        THOR_THROW_IF_FALSE(session != nullptr);
+        try {
+            ThorImplementation::BatchSessionRuntimeAccess::setTailMode(
+                *session, ThorImplementation::BatchTailMode::WRAP);
+        } catch (const std::exception& e) {
+            throw std::runtime_error(
+                "Thor cannot fall back to legacy wrapped-tail batching for " +
+                context + ": " + e.what());
+        }
+    };
+    configure(sourceSession, "dataset '" + sourceSession->getDatasetName() + "'");
+    for (NamedValidationSession& validation : validationSessions) {
+        configure(
+            validation.batchSession,
+            "validation population '" + validation.name + "'");
+    }
+
+    if (warningEmitted) {
+        return;
+    }
+    warningEmitted = true;
+    std::cerr
+        << "Thor warning: exact partial tail batches are not compatible with this network.\n"
+        << "The following layers/metrics require full batches:\n";
+    for (const ThorImplementation::PartialBatchIncompatibility& incompatibility :
+         incompatibilities) {
+        std::cerr << "  - layer " << incompatibility.layerId << " '"
+                  << (incompatibility.layerName.empty()
+                          ? std::string("<unnamed>")
+                          : incompatibility.layerName)
+                  << "' (" << incompatibility.layerType << ")\n";
+    }
+    std::cerr
+        << "Thor is reverting this run to legacy wrapped full-batch epochs. "
+        << "The final batch may consume examples from the beginning of the next "
+        << "dataset traversal; the next epoch continues from there. Those wrapped "
+        << "examples participate fully in losses, metrics, and optimizer updates. "
+        << "Make every listed layer "
+        << "partial-batch compatible to restore exact epoch semantics.\n";
+}
+
 void cancelBatchSession(const std::shared_ptr<BatchSession>& batchSession) {
     if (batchSession != nullptr) {
         batchSession->cancel();
@@ -2062,7 +2120,7 @@ struct QueuedEpochPhaseWork {
     uint64_t batchesPerEpoch = 0;
     uint64_t initialValidExamples = 0;
     uint64_t validExamplesPerEpoch = 0;
-    bool exactPopulation = true;
+    bool requiresEpochBoundaryValidation = true;
 
     [[nodiscard]] uint64_t batchesToRun() const { return batchesToRunCount; }
 };
@@ -2593,15 +2651,23 @@ QueuedEpochWorkPlan buildQueuedEpochWorkPlan(
         const uint64_t populationSize =
             effectiveSession->getNumExamples(exampleType);
         const uint64_t physicalBatchSize = effectiveSession->getBatchSize();
-        const uint64_t initialValidExamples = validExamplesBeforeBatch(
-            sessionBatchNum, populationSize, physicalBatchSize);
+        const bool wrapsTail =
+            ThorImplementation::BatchSessionRuntimeAccess::getTailMode(*effectiveSession) ==
+            ThorImplementation::BatchTailMode::WRAP;
+        const uint64_t examplesProcessedPerEpoch =
+            ThorImplementation::BatchSessionRuntimeAccess::examplesProcessedPerEpoch(
+                *effectiveSession, exampleType);
+        const uint64_t initialValidExamples = wrapsTail
+            ? sessionBatchNum * physicalBatchSize
+            : validExamplesBeforeBatch(
+                  sessionBatchNum, populationSize, physicalBatchSize);
 
         uint64_t publicInitialBatchNum = sessionBatchNum;
         uint64_t publicBatchesPerEpoch = sessionBatchesPerEpoch;
         uint64_t batchesToRun = sessionBatchesPerEpoch - sessionBatchNum;
         uint64_t publicInitialValidExamples = initialValidExamples;
-        uint64_t publicValidExamplesPerEpoch = populationSize;
-        bool exactPopulation = true;
+        uint64_t publicValidExamplesPerEpoch = examplesProcessedPerEpoch;
+        bool requiresEpochBoundaryValidation = true;
         if (!evaluateOnly && phase == TrainingEventPhase::TRAIN &&
             request.maxTrainingBatchesPerEpoch.has_value() &&
             sessionBatchesPerEpoch >
@@ -2614,7 +2680,7 @@ QueuedEpochWorkPlan buildQueuedEpochWorkPlan(
             publicBatchesPerEpoch = batchesToRun;
             publicInitialValidExamples = 0;
             publicValidExamplesPerEpoch = 0;
-            exactPopulation = false;
+            requiresEpochBoundaryValidation = false;
         }
 
         workPlan.phaseWorks.push_back(QueuedEpochPhaseWork{
@@ -2626,7 +2692,7 @@ QueuedEpochWorkPlan buildQueuedEpochWorkPlan(
             publicBatchesPerEpoch,
             publicInitialValidExamples,
             publicValidExamplesPerEpoch,
-            exactPopulation});
+            requiresEpochBoundaryValidation});
         workPlan.initiallyCompletedBatches += publicInitialBatchNum;
         workPlan.totalBatchesAcrossPhases += publicBatchesPerEpoch;
         workPlan.remainingBatchesAcrossPhases += batchesToRun;
@@ -2957,6 +3023,7 @@ NativeQueuedStartupState startNativeQueuedTrainingWithMemoryAdmissionRetry(
     bool forceSourceSession = false;
     bool deviceDatasetFallbackAlreadyUsed = false;
     std::shared_ptr<BatchSession> nextSourceSession = request.batchSession;
+    bool wrappedTailFallbackWarningEmitted = false;
 
     for (;;) {
         request.cancellationToken.throwIfCancellationRequested();
@@ -2986,6 +3053,12 @@ NativeQueuedStartupState startNativeQueuedTrainingWithMemoryAdmissionRetry(
                 request.cancellationToken.throwIfCancellationRequested();
                 event.synchronize();
             }
+
+            configureWrappedTailFallback(
+                attempt.placedNetwork,
+                attempt.sourceSession,
+                attempt.additionalValidationSessions,
+                wrappedTailFallbackWarningEmitted);
 
             if (!evaluateOnly && request.previousPlacedNetwork != nullptr) {
                 request.cancellationToken.throwIfCancellationRequested();
@@ -3250,11 +3323,11 @@ NativeQueuedStartupState startNativeQueuedTrainingWithMemoryAdmissionRetry(
     }
 }
 
-void validateExactPhaseCompletion(
+void validateFullEpochPhaseCompletion(
     const QueuedEpochPhaseWork& work,
     const std::shared_ptr<QueuedTrainingState>& state,
     const std::shared_ptr<BatchSession>& batchSession) {
-    if (!work.exactPopulation) {
+    if (!work.requiresEpochBoundaryValidation) {
         return;
     }
 
@@ -3267,13 +3340,13 @@ void validateExactPhaseCompletion(
             " epoch completed/popped " +
             std::to_string(progress.completedValidExamples) + "/" +
             std::to_string(progress.poppedValidExamples) +
-            " valid examples, but the population contains " +
+            " valid examples, but the execution epoch expected " +
             std::to_string(work.validExamplesPerEpoch) + ".");
     }
     if (batchSession->getNextBatchNum(work.exampleType) != 0) {
         throw std::runtime_error(
             "Native queued " + phaseName(work.phase) +
-            " epoch did not finish at the population boundary.");
+            " epoch did not finish at the execution-epoch batch boundary.");
     }
 }
 
@@ -3656,11 +3729,11 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                         snapshot.samplesProcessed =
                             cappedReportedSamplesByPhase[phaseIndex];
                     } else {
-                        const uint64_t populationSize =
-                            effectiveSession->getNumExamples(
-                                completedBatch.exampleType);
+                        const uint64_t examplesProcessedPerEpoch =
+                            ThorImplementation::BatchSessionRuntimeAccess::examplesProcessedPerEpoch(
+                                *effectiveSession, completedBatch.exampleType);
                         snapshot.samplesProcessed =
-                            (currentEpoch * populationSize) +
+                            (currentEpoch * examplesProcessedPerEpoch) +
                             completedBatch.validExamplesInEpoch;
                     }
 
@@ -3696,7 +3769,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
             }
             throwIfQueuedTrainingStateFailed(state);
             for (const QueuedEpochPhaseWork& work : phaseWorks) {
-                validateExactPhaseCompletion(
+                validateFullEpochPhaseCompletion(
                     work, state, effectiveSession);
             }
             emitReadyPhaseLifecycleEvents();
@@ -3799,11 +3872,11 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                         completedBatch.validExampleCount;
                     snapshot.samplesProcessedInEpoch =
                         completedBatch.validExamplesInEpoch;
-                    const uint64_t validationPopulationSize =
-                        validation.batchSession->getNumExamples(
-                            ExampleType::VALIDATE);
+                    const uint64_t validationExamplesProcessedPerEpoch =
+                        ThorImplementation::BatchSessionRuntimeAccess::examplesProcessedPerEpoch(
+                            *validation.batchSession, ExampleType::VALIDATE);
                     snapshot.samplesProcessed =
-                        (currentEpoch * validationPopulationSize) +
+                        (currentEpoch * validationExamplesProcessedPerEpoch) +
                         completedBatch.validExamplesInEpoch;
                     updateWallThroughputRates(
                         snapshot,
@@ -3829,7 +3902,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                 throwIfQueuedTrainingStateFailed(validationState);
                 THOR_THROW_IF_FALSE(
                     validationExecution.phaseWorks.size() == 1);
-                validateExactPhaseCompletion(
+                validateFullEpochPhaseCompletion(
                     validationExecution.phaseWorks.front(),
                     validationState,
                     validation.batchSession);
