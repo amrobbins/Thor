@@ -1913,13 +1913,18 @@ struct ScopedDeviceFp8MatmulScales {
     float *dScale = nullptr;
     float *dAmax = nullptr;
 
-    ScopedDeviceFp8MatmulScales(float aScaleValue, float bScaleValue, float cScaleValue = 1.0f, float dScaleValue = 1.0f) {
-        allocateAndCopy(aScale, aScaleValue);
-        allocateAndCopy(bScale, bScaleValue);
-        allocateAndCopy(cScale, cScaleValue);
-        allocateAndCopy(dScale, dScaleValue);
+    ScopedDeviceFp8MatmulScales(Stream stream,
+                                 float aScaleValue,
+                                 float bScaleValue,
+                                 float cScaleValue = 1.0f,
+                                 float dScaleValue = 1.0f) {
+        allocateAndCopy(aScale, aScaleValue, stream);
+        allocateAndCopy(bScale, bScaleValue, stream);
+        allocateAndCopy(cScale, cScaleValue, stream);
+        allocateAndCopy(dScale, dScaleValue, stream);
         checkCudaErrors(cudaMalloc(&dAmax, sizeof(float)));
-        checkCudaErrors(cudaMemset(dAmax, 0, sizeof(float)));
+        checkCudaErrors(cudaMemsetAsync(dAmax, 0, sizeof(float), stream.getStream()));
+        stream.synchronize();
     }
 
     ~ScopedDeviceFp8MatmulScales() {
@@ -1951,9 +1956,9 @@ struct ScopedDeviceFp8MatmulScales {
     }
 
    private:
-    static void allocateAndCopy(float *&devicePointer, float value) {
+    static void allocateAndCopy(float *&devicePointer, float value, Stream stream) {
         checkCudaErrors(cudaMalloc(&devicePointer, sizeof(float)));
-        checkCudaErrors(cudaMemcpy(devicePointer, &value, sizeof(float), cudaMemcpyHostToDevice));
+        checkCudaErrors(cudaMemcpyAsync(devicePointer, &value, sizeof(float), cudaMemcpyHostToDevice, stream.getStream()));
     }
 };
 
@@ -2204,7 +2209,7 @@ TEST(CublasMatrixMultiply, ChooseOptimalGemmSupportsFp8InputsAndFp32OutputInTNLa
     D_d.copyFromAsync(D, stream);
     stream.synchronize();
 
-    ScopedDeviceFp8MatmulScales scales(aScale, bScale, cScale);
+    ScopedDeviceFp8MatmulScales scales(stream, aScale, bScale, cScale);
     const CublasMatmulDTypes dataTypes{DataType::FP8_E4M3, DataType::FP8_E5M2, DataType::FP32, DataType::FP32};
 
     try {
@@ -2856,7 +2861,7 @@ void runSupportedFp8OptimalMatmulCase(int gpuNum, float tolerance) {
     D_d.copyFromAsync(D, stream);
     stream.synchronize();
 
-    ScopedDeviceFp8MatmulScales scales(1.0f, 1.0f);
+    ScopedDeviceFp8MatmulScales scales(stream, 1.0f, 1.0f);
 
     const auto dataTypes = CublasMatrixMultiply::MatmulDataTypes{
         supportedFp8ThorDataType<TA>(), supportedFp8ThorDataType<TB>(), supportedFp8ThorDataType<TD>(), supportedFp8ThorDataType<TD>()};
@@ -2979,7 +2984,7 @@ void runSupportedFp8OptimalGemmCase(int gpuNum, float alpha, float beta, float t
     D_d.copyFromAsync(D, stream);
     stream.synchronize();
 
-    ScopedDeviceFp8MatmulScales scales(1.0f, 1.0f);
+    ScopedDeviceFp8MatmulScales scales(stream, 1.0f, 1.0f);
     const CublasMatrixMultiply::Fp8MatmulScales fp8Scales = (supportedFp8ThorDataType<TD>() == DataType::FP8_E4M3 ||
                                                              supportedFp8ThorDataType<TD>() == DataType::FP8_E5M2)
                                                                 ? scales.allScales()
@@ -3109,7 +3114,8 @@ void expectRuntimeErrorContains(const std::function<void()> &fn, const std::stri
 }
 
 void expectFp8GemmSetupRejectsShape(const PackedFp8GemmShape &shape, const std::string &expectedText) {
-    ScopedDeviceFp8MatmulScales scales(1.0f, 1.0f);
+    Stream stream(0);
+    ScopedDeviceFp8MatmulScales scales(stream, 1.0f, 1.0f);
     const CublasMatrixMultiply::MatmulDataTypes dataTypes{
         DataType::FP8_E4M3,
         DataType::FP8_E5M2,
@@ -3217,7 +3223,7 @@ void runPackedFp8ToFp32OptimalGemmLayoutCase(int gpuNum, bool transposeA, bool t
     D_d.copyFromAsync(D, stream);
     stream.synchronize();
 
-    ScopedDeviceFp8MatmulScales scales(1.0f, 1.0f, 1.0f);
+    ScopedDeviceFp8MatmulScales scales(stream, 1.0f, 1.0f, 1.0f);
     const CublasMatrixMultiply::MatmulDataTypes dataTypes{
         DataType::FP8_E4M3,
         DataType::FP8_E5M2,
@@ -3320,7 +3326,7 @@ void expectFp8HeuristicGemmRejectsTemporaryTransposeLayout(int gpuNum, bool tran
     Tensor C_d(gpuPlacement, CDescriptor);
     Tensor D_d(gpuPlacement, DDescriptor);
 
-    ScopedDeviceFp8MatmulScales scales(1.0f, 1.0f);
+    ScopedDeviceFp8MatmulScales scales(stream, 1.0f, 1.0f);
     const CublasMatrixMultiply::MatmulDataTypes dataTypes{
         DataType::FP8_E4M3,
         DataType::FP8_E5M2,

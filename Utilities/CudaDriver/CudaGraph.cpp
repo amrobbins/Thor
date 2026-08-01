@@ -46,7 +46,9 @@ DeviceUpdatableKernelNodeDeviceHandle::DeviceUpdatableKernelNodeDeviceHandle(int
     }
     ScopedGpu scopedGpu(gpuNum_);
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&deviceNode_), sizeof(cudaGraphDeviceNode_t)));
-    CUDA_CHECK(cudaMemset(deviceNode_, 0, sizeof(cudaGraphDeviceNode_t)));
+    // Intentionally leave the device slot uninitialized until upload(). A plain cudaMemset
+    // would enqueue work in the default stream, which is unordered with Thor's
+    // cudaStreamNonBlocking execution streams and can race the later upload.
 }
 
 DeviceUpdatableKernelNodeDeviceHandle::DeviceUpdatableKernelNodeDeviceHandle(DeviceUpdatableKernelNodeDeviceHandle&& other) noexcept {

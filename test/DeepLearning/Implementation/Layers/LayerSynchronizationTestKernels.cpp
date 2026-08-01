@@ -92,7 +92,8 @@ DeviceStreamGate::DeviceStreamGate(int32_t gpuNum)
     : gpuNum(gpuNum), controlStream(gpuNum, Stream::Priority::HIGH) {
     ScopedGpu scopedGpu(gpuNum);
     CUDA_CHECK(cudaMalloc(&released_d, sizeof(uint32_t)));
-    CUDA_CHECK(cudaMemset(released_d, 0, sizeof(uint32_t)));
+    CUDA_CHECK(cudaMemsetAsync(released_d, 0, sizeof(uint32_t), controlStream.getStream()));
+    controlStream.synchronize();
 }
 
 DeviceStreamGate::~DeviceStreamGate() {
